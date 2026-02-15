@@ -1,0 +1,83 @@
+#!/bin/bash
+# Usage: agent-send <target-pane> <payload>
+# Queues payload for delivery to target tmux pane when idle (10s).
+# Falls back to direct send if queue service is unavailable.
+set -euo pipefail
+
+if [ $# -ne 2 ]; then
+    echo "Usage: agent-send <target-pane> <payload>" >&2
+    exit 1
+fi
+
+target="$1"
+payload="$2"
+
+# Check if we're inside tmux
+if [ -z "${TMUX:-}" ]; then
+    echo "Error: not running inside a tmux session" >&2
+    exit 1
+fi
+
+# Check if target pane exists
+if ! tmux has-session -t "$target" 2>/dev/null; then
+    echo "Error: tmux target '$target' does not exist" >&2
+    echo "Available sessions/windows:" >&2
+    tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}  #{pane_title}' >&2
+    exit 1
+fi
+
+# Reject empty payload
+if [ -z "$payload" ]; then
+    echo "Error: payload is empty" >&2
+    exit 1
+fi
+
+# Detect sender pane from TMUX env
+if [ -n "${TMUX_PANE:-}" ]; then
+    _sess=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "unknown")
+    _win=$(tmux display-message -p '#{window_index}' 2>/dev/null || echo "0")
+    _pane=$(tmux display-message -p '#{pane_index}' 2>/dev/null || echo "0")
+    from_pane="${_sess}:${_win}.${_pane}"
+else
+    from_pane="unknown"
+fi
+
+# Build JSON payload for the queue API
+_json_payload=$(printf '%s' "$payload" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()), end="")')
+_json_from=$(printf '%s' "$from_pane" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()), end="")')
+_json_to=$(printf '%s' "$target" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()), end="")')
+_body=$(printf '{"from":%s,"to":%s,"payload":%s}' "$_json_from" "$_json_to" "$_json_payload")
+
+# Try posting to queue service (non-blocking idle delivery)
+QUEUE_URL="http://127.0.0.1:8084/api/queue"
+_response=$(curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \
+    -d "$_body" --connect-timeout 2 --max-time 5 "$QUEUE_URL" 2>/dev/null) || _response=""
+
+if echo "$_response" | python3 -c 'import sys,json; d=json.load(sys.stdin); exit(0 if d.get("ok") else 1)' 2>/dev/null; then
+    _id=$(echo "$_response" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id","?"))' 2>/dev/null)
+    _pos=$(echo "$_response" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("position","?"))' 2>/dev/null)
+    echo "Queued message #${_id} (position ${_pos}) → ${target} (will deliver when idle)"
+else
+    # Fallback: direct send if queue service is down
+    echo "Queue service unavailable, sending directly..." >&2
+
+    # Log to messages.jsonl directly
+    # __INSTALL_DIR__ is replaced by install.sh; fallback to script's own location
+    LOG_DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/logs"
+    mkdir -p "$LOG_DIR" 2>/dev/null
+    printf '{"ts":%s,"from":"%s","to":"%s","payload":%s}\n' \
+        "$(date +%s%3N)" "$from_pane" "$target" "$_json_payload" \
+        >> "$LOG_DIR/messages.jsonl" 2>/dev/null || true
+
+    # Direct tmux send
+    tmux send-keys -l -t "$target" "$payload"
+    sleep 0.2
+    tmux send-keys -t "$target" Tab
+    sleep 0.2
+    tmux send-keys -t "$target" C-m
+    sleep 0.2
+    tmux send-keys -t "$target" Enter
+    sleep 0.2
+    tmux send-keys -t "$target" Enter
+    echo "Sent directly to ${target}"
+fi
