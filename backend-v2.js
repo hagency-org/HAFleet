@@ -114,6 +114,28 @@ function ensureCursor(agentName) {
   return cursors[agentName];
 }
 
+function getUnreadInboxMessages(agentName) {
+  const cursor = ensureCursor(agentName);
+  const inboxTs = cursor.inbox || 0;
+  const unreadById = new Map();
+
+  for (const m of messages) {
+    if (m.to === agentName && m.ts > inboxTs) unreadById.set(m.id, m);
+  }
+  for (const m of messages) {
+    if (!m.group || m.ts <= inboxTs) continue;
+    if (Array.isArray(m.mentions) && m.mentions.includes(agentName)) unreadById.set(m.id, m);
+  }
+
+  const unread = [...unreadById.values()].sort((a, b) => a.ts - b.ts);
+  return { inboxTs, unread };
+}
+
+function formatSenderList(names) {
+  if (names.length <= 3) return names.join(', ');
+  return `${names.slice(0, 3).join(', ')}, +${names.length - 3} more`;
+}
+
 // ── Push notification relay ───────────────────────────────────────────
 function agentHasMcp(agentName) {
   try {
@@ -140,27 +162,55 @@ function agentHasMcp(agentName) {
   return false;
 }
 
+const mergedPushInboxCursor = new Map();
+
 async function pushNotify(agentName, msg) {
   const agent = agents[agentName];
   if (!agent?.tmux) return;
-  const isHuman = msg.type === 'human';
-  const replyTo = msg.from;
   const hasMcp = agentHasMcp(agentName);
+  const { inboxTs, unread } = getUnreadInboxMessages(agentName);
+  const unreadCount = unread.length;
+  const latestUnread = unread[unread.length - 1] || msg;
+  const replyTo = latestUnread.from || msg.from;
 
-  let replyHint;
-  if (hasMcp) {
-    const checkHint = `Use check_inbox() in agent-chat MCP for full context.`;
-    const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
-    replyHint = `${checkHint} ${sendHint}`;
+  let notification;
+  if (unreadCount > 1) {
+    if (mergedPushInboxCursor.get(agentName) === inboxTs) return;
+    mergedPushInboxCursor.set(agentName, inboxTs);
+
+    const senderNames = [...new Set(unread.map(m => m.from).filter(Boolean))];
+    const senderText = senderNames.length ? ` (from ${formatSenderList(senderNames)})` : '';
+    const humanHint = unread.some(m => m.type === 'human')
+      ? ' This includes messages from your human operator.'
+      : '';
+
+    if (hasMcp) {
+      const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply").`;
+      notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}. Use check_inbox() in agent-chat MCP to read all.${humanHint} ${sendHint}`;
+    } else {
+      const senderAgent = agents[replyTo];
+      const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
+      const replyHint = `Reply using /agent-message skill or: agent-send ${senderTmux} "<your reply>".`;
+      notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}.${humanHint} ${replyHint}`;
+    }
   } else {
-    const senderAgent = agents[replyTo];
-    const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
-    replyHint = `Reply using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
+    const isHuman = msg.type === 'human';
+    let replyHint;
+    if (hasMcp) {
+      const checkHint = `Use check_inbox() in agent-chat MCP for full context.`;
+      const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
+      replyHint = `${checkHint} ${sendHint}`;
+    } else {
+      const senderAgent = agents[replyTo];
+      const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
+      replyHint = `Reply using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
+    }
+
+    notification = isHuman
+      ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${replyHint}.`
+      : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${replyHint}.`;
   }
 
-  const notification = isHuman
-    ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${replyHint}.`
-    : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${replyHint}.`;
   try {
     await fetch(PUSH_QUEUE_URL, {
       method: 'POST',
