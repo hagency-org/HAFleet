@@ -186,12 +186,12 @@ async function pushNotify(agentName, msg) {
       : '';
 
     if (hasMcp) {
-      const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply").`;
+      const sendHint = `Reply after everything is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply").`;
       notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}. Use check_inbox() in agent-chat MCP to read all.${humanHint} ${sendHint}`;
     } else {
       const senderAgent = agents[replyTo];
       const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
-      const replyHint = `Reply using /agent-message skill or: agent-send ${senderTmux} "<your reply>".`;
+      const replyHint = `Reply after everything is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>".`;
       notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}.${humanHint} ${replyHint}`;
     }
   } else {
@@ -199,12 +199,12 @@ async function pushNotify(agentName, msg) {
     let replyHint;
     if (hasMcp) {
       const checkHint = `Use check_inbox() in agent-chat MCP for full context.`;
-      const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
+      const sendHint = `Reply after everything is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
       replyHint = `${checkHint} ${sendHint}`;
     } else {
       const senderAgent = agents[replyTo];
       const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
-      replyHint = `Reply using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
+      replyHint = `Reply after everything is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
     }
 
     notification = isHuman
