@@ -1,0 +1,192 @@
+#!/bin/bash
+# agent-up — Quick agent launcher with resume support
+#
+# Usage:
+#   agent-up <name> [path] [claude|codex] [--fresh]
+#
+# If path is omitted, reads from saved meta.json (previous agent-down).
+# If resume-id exists and --fresh is not set, auto-resumes.
+#
+# Examples:
+#   agent-up umiki-worker ~/laplace/umiki claude       # first time
+#   agent-up umiki-worker                              # resume from meta
+#   agent-up umiki-worker --fresh                      # new session, same path
+#   agent-up ddnsserer ~/cloudflare codex              # codex agent
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+DATA_DIR="$BASE_DIR/data/agents"
+BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
+
+# ── Parse args ────────────────────────────────────────────────────────
+if [ $# -lt 1 ]; then
+  echo "Usage: agent-up <name> [path] [claude|codex] [--fresh] [--attach]"
+  echo ""
+  echo "  name     tmux session name / agent name"
+  echo "  path     working directory (optional if previously saved)"
+  echo "  type     claude (default) or codex"
+  echo "  --fresh  ignore saved resume ID, start a new session"
+  echo "  --attach attach to the session after creating it"
+  exit 1
+fi
+
+NAME="$1"
+shift
+
+FRESH=false
+ATTACH=false
+AGENT_PATH=""
+TYPE=""
+
+for arg in "$@"; do
+  case "$arg" in
+    --fresh) FRESH=true ;;
+    --attach) ATTACH=true ;;
+    claude|codex) TYPE="$arg" ;;
+    *) [ -z "$AGENT_PATH" ] && AGENT_PATH="$arg" ;;
+  esac
+done
+
+# ── Load saved meta ──────────────────────────────────────────────────
+AGENT_DATA="$DATA_DIR/$NAME"
+META_FILE="$AGENT_DATA/meta.json"
+RESUME_FILE="$AGENT_DATA/resume-id"
+
+SAVED_PATH=""
+SAVED_TYPE=""
+if [ -f "$META_FILE" ]; then
+  SAVED_PATH=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('path',''))" 2>/dev/null || true)
+  SAVED_TYPE=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('type',''))" 2>/dev/null || true)
+fi
+
+# Apply defaults from meta
+[ -z "$AGENT_PATH" ] && AGENT_PATH="$SAVED_PATH"
+[ -z "$TYPE" ] && TYPE="${SAVED_TYPE:-claude}"
+
+# Validate
+if [ -z "$AGENT_PATH" ]; then
+  echo "Error: no path specified and no saved meta for '$NAME'" >&2
+  echo "Usage: agent-up <name> <path> [claude|codex]" >&2
+  exit 1
+fi
+
+AGENT_PATH="$(realpath "$AGENT_PATH" 2>/dev/null || echo "$AGENT_PATH")"
+
+if [ ! -d "$AGENT_PATH" ]; then
+  echo "Error: path '$AGENT_PATH' does not exist or is not a directory" >&2
+  exit 1
+fi
+
+if [ "$TYPE" != "claude" ] && [ "$TYPE" != "codex" ]; then
+  echo "Error: type must be 'claude' or 'codex', got '$TYPE'" >&2
+  exit 1
+fi
+
+# ── Check existing session ───────────────────────────────────────────
+if tmux has-session -t "$NAME" 2>/dev/null; then
+  if [ "$ATTACH" = true ]; then
+    exec tmux attach -t "$NAME"
+  else
+    echo "Session '$NAME' already exists. Attach with: tmux attach -t $NAME"
+    exit 0
+  fi
+fi
+
+# ── Save meta ─────────────────────────────────────────────────────────
+mkdir -p "$AGENT_DATA"
+
+NOW=$(date -Iseconds)
+if [ -f "$META_FILE" ]; then
+  # Update lastUp
+  python3 -c "
+import json
+d = json.load(open('$META_FILE'))
+d['path'] = '$AGENT_PATH'
+d['type'] = '$TYPE'
+d['lastUp'] = '$NOW'
+json.dump(d, open('$META_FILE', 'w'), indent=2)
+"
+else
+  # Create new meta
+  python3 -c "
+import json
+d = {'name': '$NAME', 'path': '$AGENT_PATH', 'type': '$TYPE', 'createdAt': '$NOW', 'lastUp': '$NOW'}
+json.dump(d, open('$META_FILE', 'w'), indent=2)
+"
+fi
+
+# ── Create tmux session ──────────────────────────────────────────────
+echo "Creating tmux session '$NAME' in $AGENT_PATH..."
+tmux new-session -d -s "$NAME" -c "$AGENT_PATH"
+
+# ── Launch AI ─────────────────────────────────────────────────────────
+if [ "$TYPE" = "claude" ]; then
+  CLAUDE_FLAGS="--dangerously-skip-permissions"
+  if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ]; then
+    RID=$(cat "$RESUME_FILE")
+    echo "Resuming claude session: $RID"
+    tmux send-keys -t "$NAME" "claude --resume $RID $CLAUDE_FLAGS" Enter
+  else
+    # Generate new session ID
+    SID=$(uuidgen)
+    echo "$SID" > "$RESUME_FILE"
+    echo "Starting new claude session: $SID"
+    tmux send-keys -t "$NAME" "claude --session-id $SID $CLAUDE_FLAGS" Enter
+  fi
+
+elif [ "$TYPE" = "codex" ]; then
+  CODEX_FLAGS="--yolo"
+  if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ]; then
+    RID=$(cat "$RESUME_FILE")
+    echo "Resuming codex session: $RID"
+    tmux send-keys -t "$NAME" "codex resume $RID $CODEX_FLAGS" Enter
+  else
+    echo "Starting new codex session..."
+    tmux send-keys -t "$NAME" "codex $CODEX_FLAGS -C $AGENT_PATH" Enter
+    # Send init prompt after codex starts to trigger session file creation
+    # Then detect session ID in background
+    (
+      sleep 5
+      tmux send-keys -t "$NAME" "Hi" Enter
+      sleep 0.1
+      tmux send-keys -t "$NAME" Enter
+      sleep 15
+      SESSIONS_DIR="$HOME/.codex/sessions"
+      if [ -d "$SESSIONS_DIR" ]; then
+        NEWEST=$(find "$SESSIONS_DIR" -name "*.jsonl" -newer "$META_FILE" -type f 2>/dev/null | sort -r | head -1)
+        if [ -n "$NEWEST" ]; then
+          UUID=$(echo "$NEWEST" | grep -oP '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}')
+          if [ -n "$UUID" ]; then
+            echo "$UUID" > "$RESUME_FILE"
+          fi
+        fi
+      fi
+    ) &
+    disown
+  fi
+fi
+
+# ── Auto-register with backend ───────────────────────────────────────
+REG_CHECK=$(curl --noproxy '*' -s "$BACKEND_URL/api/agents/$NAME" 2>/dev/null || echo '{"error":"unreachable"}')
+if echo "$REG_CHECK" | grep -q '"error"'; then
+  echo "Registering agent '$NAME' with backend..."
+  curl --noproxy '*' -s -X POST "$BACKEND_URL/api/agents" \
+    -H 'Content-Type: application/json' \
+    -d "{\"name\":\"$NAME\",\"tmux\":\"$NAME:0.0\",\"type\":\"agent\"}" \
+    >/dev/null 2>&1 || echo "  Warning: backend registration failed (backend may be down)"
+else
+  echo "Agent '$NAME' already registered."
+fi
+
+# ── Done ──────────────────────────────────────────────────────────────
+echo ""
+echo "Agent '$NAME' ($TYPE) launched in $AGENT_PATH"
+
+if [ "$ATTACH" = true ]; then
+  exec tmux attach -t "$NAME"
+else
+  echo "  Attach: tmux attach -t $NAME"
+  echo "  Meta:   $META_FILE"
+fi

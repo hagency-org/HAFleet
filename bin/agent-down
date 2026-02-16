@@ -1,0 +1,116 @@
+#!/bin/bash
+# agent-down — Gracefully stop an agent with archive + resume ID capture
+#
+# Usage:
+#   agent-down <name> [--kill]
+#
+# Flow:
+#   1. Send exit command to AI (claude: /exit, codex: Escape)
+#   2. Wait 5s for AI to exit and expose resume ID
+#   3. Archive full tmux pane scrollback (includes resume ID output)
+#   4. Parse resume ID from archive
+#   5. Kill tmux session
+#
+# With --kill: archive first, then immediately kill
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+DATA_DIR="$BASE_DIR/data/agents"
+
+if [ $# -lt 1 ]; then
+  echo "Usage: agent-down <name> [--kill]"
+  exit 1
+fi
+
+NAME="$1"
+FORCE=false
+[ "${2:-}" = "--kill" ] && FORCE=true
+
+if ! tmux has-session -t "$NAME" 2>/dev/null; then
+  echo "Session '$NAME' does not exist."
+  exit 0
+fi
+
+AGENT_DATA="$DATA_DIR/$NAME"
+mkdir -p "$AGENT_DATA"
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+ARCHIVE_FILE="$AGENT_DATA/archive-$TIMESTAMP.txt"
+RESUME_FILE="$AGENT_DATA/resume-id"
+META_FILE="$AGENT_DATA/meta.json"
+
+# Detect agent type from meta.json or fallback to process detection
+AGENT_TYPE=""
+if [ -f "$META_FILE" ]; then
+  AGENT_TYPE=$(python3 -c "import json; print(json.load(open('$META_FILE')).get('type',''))" 2>/dev/null || true)
+fi
+if [ -z "$AGENT_TYPE" ]; then
+  # Try to detect from running process
+  PANE_CMD=$(tmux list-panes -t "$NAME" -F "#{pane_current_command}" 2>/dev/null | head -1)
+  case "$PANE_CMD" in
+    *codex*) AGENT_TYPE="codex" ;;
+    *) AGENT_TYPE="claude" ;;  # default
+  esac
+fi
+
+archive_and_kill() {
+  # Archive pane scrollback
+  echo "Archiving pane scrollback..."
+  tmux capture-pane -t "$NAME" -p -S - > "$ARCHIVE_FILE" 2>/dev/null || true
+  LINES=$(wc -l < "$ARCHIVE_FILE" 2>/dev/null || echo 0)
+  echo "  Saved $LINES lines → $ARCHIVE_FILE"
+
+  # Try to parse resume ID from archive (UUID pattern)
+  FOUND_ID=$(grep -oP '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$ARCHIVE_FILE" 2>/dev/null | tail -1 || true)
+  if [ -n "$FOUND_ID" ]; then
+    echo "$FOUND_ID" > "$RESUME_FILE"
+    echo "  Resume ID: $FOUND_ID"
+  fi
+
+  # Update meta.json with lastDown
+  if [ -f "$META_FILE" ]; then
+    NOW=$(date -Iseconds)
+    python3 -c "
+import json
+d = json.load(open('$META_FILE'))
+d['lastDown'] = '$NOW'
+json.dump(d, open('$META_FILE', 'w'), indent=2)
+" 2>/dev/null || true
+  fi
+
+  # Kill tmux session
+  echo "Killing tmux session '$NAME'..."
+  tmux kill-session -t "$NAME" 2>/dev/null || true
+  echo "Done."
+}
+
+send_exit() {
+  if [ "$AGENT_TYPE" = "codex" ]; then
+    echo "Sending Ctrl+C to codex '$NAME'..."
+    tmux send-keys -t "$NAME" C-c
+  else
+    echo "Sending /exit to claude '$NAME'..."
+    tmux send-keys -t "$NAME" "/exit" Enter
+  fi
+}
+
+if [ "$FORCE" = true ]; then
+  archive_and_kill
+else
+  send_exit
+
+  # Wait 5s for AI to exit and expose resume ID
+  echo "Waiting for AI to exit..."
+  sleep 5
+
+  # Check if tmux session already ended
+  if ! tmux has-session -t "$NAME" 2>/dev/null; then
+    echo "Session already ended."
+    exit 0
+  fi
+
+  # Archive now (captures resume ID output)
+  archive_and_kill
+fi
