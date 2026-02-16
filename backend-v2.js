@@ -250,6 +250,7 @@ async function pushNotify(agentName, msg) {
 
 // ── Express app ───────────────────────────────────────────────────────
 const app = express();
+app.set('trust proxy', 'loopback');  // trust nginx on localhost, use X-Forwarded-For for real IP
 const API_TOKEN = process.env.API_TOKEN;
 app.use(express.json({ limit: '100kb' }));
 app.use('/api', (req, res, next) => {
