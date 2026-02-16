@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Chat Push Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__WORKDIR__
+Environment=NODE_ENV=production
+EnvironmentFile=__ENV_FILE__
+ExecStart=/usr/bin/env node __WORKDIR__/push-relay.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

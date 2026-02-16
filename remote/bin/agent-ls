@@ -1,0 +1,98 @@
+#!/bin/bash
+# agent-ls — List agent sessions with status
+#
+# Usage:
+#   agent-ls        List running agents (active tmux sessions)
+#   agent-ls -a     List all agents including inactive (have data but not running)
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+DATA_DIR="$(dirname "$SCRIPT_DIR")/data/agents"
+BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
+
+SHOW_ALL=false
+[ "${1:-}" = "-a" ] && SHOW_ALL=true
+
+# Get tmux sessions
+SESSIONS=$(tmux list-sessions -F "#{session_name}" 2>/dev/null || true)
+
+# Get registered agents from backend
+REG_NAMES=$(curl --noproxy '*' -s "$BACKEND_URL/api/agents" 2>/dev/null \
+  | grep -oP '"name"\s*:\s*"\K[^"]+' || true)
+
+# Build pts → session map for MCP detection
+declare -A PTS_MAP
+while IFS= read -r line; do
+  tty=$(echo "$line" | awk '{print $1}' | sed 's|/dev/||')
+  sess=$(echo "$line" | awk '{print $2}')
+  [ -n "$tty" ] && [ -n "$sess" ] && PTS_MAP["$tty"]="$sess"
+done < <(tmux list-panes -a -F "#{pane_tty} #{session_name}" 2>/dev/null || true)
+
+# Detect MCP sessions
+MCP_PIDS=$(pgrep -f "node.*mcp-server.js" 2>/dev/null || true)
+declare -A MCP_SESSIONS
+for pid in $MCP_PIDS; do
+  pts=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
+  if [ -n "$pts" ] && [ -n "${PTS_MAP[$pts]:-}" ]; then
+    MCP_SESSIONS["${PTS_MAP[$pts]}"]="yes"
+  fi
+done
+
+# Collect all agent names (active + inactive)
+declare -A ALL_AGENTS  # name → "active" or "inactive"
+
+for sess in $SESSIONS; do
+  ALL_AGENTS["$sess"]="active"
+done
+
+if [ "$SHOW_ALL" = true ] && [ -d "$DATA_DIR" ]; then
+  for agent_dir in "$DATA_DIR"/*/; do
+    [ -d "$agent_dir" ] || continue
+    name=$(basename "$agent_dir")
+    # Only add if has meta.json (managed agent)
+    [ -f "$agent_dir/meta.json" ] || continue
+    [ -z "${ALL_AGENTS[$name]:-}" ] && ALL_AGENTS["$name"]="inactive"
+  done
+fi
+
+# Print header
+printf "%-20s %-8s %-8s %-10s %-5s %-10s %s\n" "NAME" "STATUS" "TYPE" "REGISTERED" "MCP" "RESUME" "PATH"
+printf "%-20s %-8s %-8s %-10s %-5s %-10s %s\n" "----" "------" "----" "----------" "---" "------" "----"
+
+# Sort and print
+for name in $(echo "${!ALL_AGENTS[@]}" | tr ' ' '\n' | sort); do
+  status="${ALL_AGENTS[$name]}"
+
+  # Type from meta.json
+  type="-"
+  if [ -f "$DATA_DIR/$name/meta.json" ]; then
+    type=$(python3 -c "import json; print(json.load(open('$DATA_DIR/$name/meta.json')).get('type','-'))" 2>/dev/null || echo "-")
+  fi
+
+  # Registered?
+  reg="no"
+  echo "$REG_NAMES" | grep -qx "$name" && reg="yes"
+
+  # MCP? (only for active)
+  mcp="-"
+  [ "$status" = "active" ] && mcp="no"
+  [ -n "${MCP_SESSIONS[$name]:-}" ] && mcp="yes"
+
+  # Resume ID
+  resume="-"
+  if [ -f "$DATA_DIR/$name/resume-id" ]; then
+    resume=$(cat "$DATA_DIR/$name/resume-id" | cut -c1-8)
+  fi
+
+  # Path from meta.json
+  path_val="-"
+  if [ -f "$DATA_DIR/$name/meta.json" ]; then
+    path_val=$(python3 -c "import json; print(json.load(open('$DATA_DIR/$name/meta.json')).get('path','-'))" 2>/dev/null || echo "-")
+  fi
+
+  # Color: active=default, inactive=dimmed
+  if [ "$status" = "inactive" ]; then
+    printf "\033[2m%-20s %-8s %-8s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$reg" "$mcp" "$resume" "$path_val"
+  else
+    printf "%-20s %-8s %-8s %-10s %-5s %-10s %s\n" "$name" "$status" "$type" "$reg" "$mcp" "$resume" "$path_val"
+  fi
+done
