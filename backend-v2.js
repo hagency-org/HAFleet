@@ -177,6 +177,9 @@ async function pushNotify(agentName, msg) {
   const latestUnread = unread[unread.length - 1] || msg;
   const replyTo = latestUnread.from || msg.from;
 
+  // Determine if reply is expected based on message type
+  const needsReply = msg.type === 'human' || msg.type === 'request';
+
   let notification;
   if (unreadCount > 1) {
     if (!isHumanMsg && mergedPushInboxCursor.get(agentName) === inboxTs) return;
@@ -184,35 +187,54 @@ async function pushNotify(agentName, msg) {
 
     const senderNames = [...new Set(unread.map(m => m.from).filter(Boolean))];
     const senderText = senderNames.length ? ` (from ${formatSenderList(senderNames)})` : '';
-    const humanHint = unread.some(m => m.type === 'human')
-      ? ' This includes messages from your human operator.'
-      : '';
+    const hasHuman = unread.some(m => m.type === 'human');
+    const hasRequest = unread.some(m => m.type === 'request');
+    const humanHint = hasHuman ? ' This includes messages from your human operator.' : '';
+    const mergedNeedsReply = hasHuman || hasRequest;
 
     if (hasMcp) {
-      const sendHint = `Reply after everything is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply").`;
-      notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}. Use check_inbox() in agent-chat MCP to read all.${humanHint} ${sendHint}`;
+      const replyPart = mergedNeedsReply
+        ? ` Reply after everything is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply").`
+        : '';
+      notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}. Use check_inbox() in agent-chat MCP to read all.${humanHint}${replyPart}`;
     } else {
       const senderAgent = agents[replyTo];
       const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
-      const replyHint = `Reply after everything is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>".`;
-      notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}.${humanHint} ${replyHint}`;
+      const replyPart = mergedNeedsReply
+        ? ` Reply after everything is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>".`
+        : '';
+      notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}.${humanHint}${replyPart}`;
     }
   } else {
     const isHuman = msg.type === 'human';
-    let replyHint;
+    const isGroup = !!msg.group;
+
     if (hasMcp) {
       const checkHint = `Use check_inbox() in agent-chat MCP for full context.`;
-      const sendHint = `Reply after everything is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
-      replyHint = `${checkHint} ${sendHint}`;
+      let actionHint;
+      if (needsReply && isGroup) {
+        actionHint = `Reply after everything is done, using the agent-chat MCP tool: post(group="${msg.group}", summary="your reply", full="detailed reply")`;
+      } else if (needsReply) {
+        actionHint = `Reply after everything is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
+      } else {
+        actionHint = `No reply needed`;
+      }
+      notification = isHuman
+        ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${checkHint} ${actionHint}.`
+        : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${checkHint} ${actionHint}.`;
     } else {
       const senderAgent = agents[replyTo];
       const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
-      replyHint = `Reply after everything is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
+      let actionHint;
+      if (needsReply) {
+        actionHint = `Reply after everything is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
+      } else {
+        actionHint = `No reply needed`;
+      }
+      notification = isHuman
+        ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${actionHint}.`
+        : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${actionHint}.`;
     }
-
-    notification = isHuman
-      ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${replyHint}.`
-      : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${replyHint}.`;
   }
 
   try {
