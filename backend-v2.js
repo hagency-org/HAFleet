@@ -8,6 +8,7 @@ const PORT = 8090;
 const DATA_DIR = path.resolve('data');
 const PUSH_QUEUE_URL = 'http://127.0.0.1:8084/api/queue';
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const LOCAL_SERVER_ID = (process.env.AGENT_CHAT_SERVER || 'local').trim();
 const CORS_ALLOWED_ORIGIN = (process.env.FRP_API_ORIGIN || 'https://agentchat.ananthe.party').trim();
 
 mkdirSync(DATA_DIR, { recursive: true });
@@ -167,6 +168,8 @@ const mergedPushInboxCursor = new Map();
 async function pushNotify(agentName, msg) {
   const agent = agents[agentName];
   if (!agent?.tmux) return;
+  const agentServer = normalizeServer(agent.server);
+  if (agentServer && agentServer !== 'local' && agentServer !== LOCAL_SERVER_ID) return;
   const isHumanMsg = msg.type === 'human';
   const hasMcp = agentHasMcp(agentName);
   const { inboxTs, unread } = getUnreadInboxMessages(agentName);
