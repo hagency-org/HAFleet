@@ -216,24 +216,24 @@ async function pushNotify(agentName, msg) {
         actionHint = `Reply after everything is done, using the agent-chat MCP tool: post(group="${msg.group}", summary="your reply", full="detailed reply")`;
       } else if (needsReply) {
         actionHint = `Reply after everything is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
-      } else {
-        actionHint = `No reply needed`;
       }
       notification = isHuman
         ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${checkHint} ${actionHint}.`
-        : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${checkHint} ${actionHint}.`;
+        : needsReply
+          ? `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${checkHint} ${actionHint}.`
+          : `[NOTIFICATION] From ${msg.from}: "${msg.summary}".`;
     } else {
       const senderAgent = agents[replyTo];
       const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
       let actionHint;
       if (needsReply) {
         actionHint = `Reply after everything is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
-      } else {
-        actionHint = `No reply needed`;
       }
       notification = isHuman
         ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${actionHint}.`
-        : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${actionHint}.`;
+        : needsReply
+          ? `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${actionHint}.`
+          : `[NOTIFICATION] From ${msg.from}: "${msg.summary}".`;
     }
   }
 
