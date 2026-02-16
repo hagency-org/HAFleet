@@ -128,7 +128,9 @@ async function pushNotify(agentName, msg) {
 
   let replyHint;
   if (hasMcp) {
-    replyHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
+    const checkHint = `Use check_inbox() in agent-chat MCP for full context.`;
+    const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
+    replyHint = `${checkHint} ${sendHint}`;
   } else {
     const senderAgent = agents[replyTo];
     const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
@@ -137,7 +139,7 @@ async function pushNotify(agentName, msg) {
 
   const notification = isHuman
     ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${replyHint}.`
-    : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${replyHint}.${hasMcp ? ' Or use check_inbox() for full context.' : ''}`;
+    : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${replyHint}.`;
   try {
     await fetch(PUSH_QUEUE_URL, {
       method: 'POST',
@@ -151,7 +153,16 @@ async function pushNotify(agentName, msg) {
 
 // ── Express app ───────────────────────────────────────────────────────
 const app = express();
+const API_TOKEN = process.env.API_TOKEN;
 app.use(express.json({ limit: '100kb' }));
+app.use('/api', (req, res, next) => {
+  if (!API_TOKEN) return next();
+  const ip = req.ip || req.connection?.remoteAddress;
+  if (['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) return next();
+  const auth = req.headers.authorization;
+  if (auth === `Bearer ${API_TOKEN}`) return next();
+  return res.status(401).json({ error: 'unauthorized' });
+});
 
 // ── Health ────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.json({ ok: true, agents: Object.keys(agents).length, messages: messages.length }));
