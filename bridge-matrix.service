@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent Chat Matrix Bridge
+After=network.target agent-chat-v2.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=/usr/bin/node bridge-matrix.js
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
