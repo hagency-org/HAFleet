@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent Chat v2 - MCP messaging backend
+After=network.target agent-chat.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=/usr/bin/node backend-v2.js
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
