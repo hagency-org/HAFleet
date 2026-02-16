@@ -466,11 +466,17 @@ class MatrixBridge {
     } else if (groupName) {
       // Group message from human
       console.log(`Matrix group: ${humanName} → ${groupName}: ${body.slice(0, 80)}`);
+      // Ensure @ prefix on mentioned names in body (Matrix pills strip @ in plain text)
+      let summary = body;
+      for (const name of mentions) {
+        const re = new RegExp(`(?<!@)\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+        summary = summary.replace(re, '@' + name);
+      }
       await backendApi('POST', '/api/messages', {
         from: humanName,
         group: groupName,
         type: 'human',
-        summary: body,
+        summary,
         full: '',
         mentions,
         source: 'matrix',
