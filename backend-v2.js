@@ -167,6 +167,7 @@ const mergedPushInboxCursor = new Map();
 async function pushNotify(agentName, msg) {
   const agent = agents[agentName];
   if (!agent?.tmux) return;
+  const isHumanMsg = msg.type === 'human';
   const hasMcp = agentHasMcp(agentName);
   const { inboxTs, unread } = getUnreadInboxMessages(agentName);
   const unreadCount = unread.length;
@@ -175,7 +176,7 @@ async function pushNotify(agentName, msg) {
 
   let notification;
   if (unreadCount > 1) {
-    if (mergedPushInboxCursor.get(agentName) === inboxTs) return;
+    if (!isHumanMsg && mergedPushInboxCursor.get(agentName) === inboxTs) return;
     mergedPushInboxCursor.set(agentName, inboxTs);
 
     const senderNames = [...new Set(unread.map(m => m.from).filter(Boolean))];
