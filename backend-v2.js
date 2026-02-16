@@ -8,7 +8,7 @@ const PORT = 8090;
 const DATA_DIR = path.resolve('data');
 const PUSH_QUEUE_URL = 'http://127.0.0.1:8084/api/queue';
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
-const CORS_ALLOWED_ORIGIN = (process.env.FRP_API_ORIGIN || 'https://agent.ananthe.party').trim();
+const CORS_ALLOWED_ORIGIN = (process.env.FRP_API_ORIGIN || 'https://agentchat.ananthe.party').trim();
 
 mkdirSync(DATA_DIR, { recursive: true });
 
