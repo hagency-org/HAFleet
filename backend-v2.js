@@ -8,6 +8,7 @@ const PORT = 8090;
 const DATA_DIR = path.resolve('data');
 const PUSH_QUEUE_URL = 'http://127.0.0.1:8084/api/queue';
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const CORS_ALLOWED_ORIGIN = (process.env.FRP_API_ORIGIN || 'https://agent.ananthe.party').trim();
 
 mkdirSync(DATA_DIR, { recursive: true });
 
@@ -175,6 +176,17 @@ async function pushNotify(agentName, msg) {
 const app = express();
 const API_TOKEN = process.env.API_TOKEN;
 app.use(express.json({ limit: '100kb' }));
+app.use('/api', (req, res, next) => {
+  const origin = req.headers.origin;
+  if (CORS_ALLOWED_ORIGIN && origin === CORS_ALLOWED_ORIGIN) {
+    res.setHeader('Access-Control-Allow-Origin', CORS_ALLOWED_ORIGIN);
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  return next();
+});
 app.use('/api', (req, res, next) => {
   if (!API_TOKEN) return next();
   const ip = req.ip || req.connection?.remoteAddress;
