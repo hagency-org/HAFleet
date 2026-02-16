@@ -7,6 +7,7 @@ import path from 'path';
 const PORT = 8090;
 const DATA_DIR = path.resolve('data');
 const PUSH_QUEUE_URL = 'http://127.0.0.1:8084/api/queue';
+const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
 mkdirSync(DATA_DIR, { recursive: true });
 
@@ -40,12 +41,31 @@ function saveJson(name, data) {
   renameSync(tmp, target);
 }
 
+function normalizeServer(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function isLocalRequest(req) {
+  const ip = req.ip || req.connection?.remoteAddress;
+  return LOCALHOST_IPS.has(ip);
+}
+
 // ── In-memory state ───────────────────────────────────────────────────
 const agents = loadJsonSync('agents.json', {});
 const groups = loadJsonSync('groups.json', {});
 const messages = loadJsonSync('messages.json', []);
 const cursors = loadJsonSync('cursors.json', {});
 let msgCounter = loadJsonSync('.msg_counter', 0);
+
+for (const agent of Object.values(agents)) {
+  if (!Object.prototype.hasOwnProperty.call(agent, 'server')) {
+    agent.server = null;
+  } else {
+    agent.server = normalizeServer(agent.server);
+  }
+}
 
 function nextMsgId() {
   msgCounter++;
@@ -177,15 +197,18 @@ app.get('/api/stream', (req, res) => {
 
 // ── Agents CRUD ───────────────────────────────────────────────────────
 app.post('/api/agents', (req, res) => {
-  const { name, role, tmux, type: agentType, identity } = req.body;
+  const { name, role, tmux, type: agentType, identity, server } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   const existing = agents[name] || {};
+  const normalizedServer = normalizeServer(server);
+  const resolvedServer = normalizedServer ?? (isLocalRequest(req) ? 'local' : normalizeServer(existing.server));
   agents[name] = {
     name,
     role: role ?? existing.role ?? null,
     identity: identity ?? existing.identity ?? null,
     tmux: tmux ?? existing.tmux ?? null,
     type: agentType ?? existing.type ?? 'agent',
+    server: resolvedServer,
     registeredAt: existing.registeredAt || Date.now(),
   };
   saveAgents();
@@ -204,14 +227,14 @@ app.patch('/api/agents/:name', (req, res) => {
 });
 
 app.get('/api/agents', (_req, res) => {
-  res.json(Object.values(agents));
+  res.json(Object.values(agents).map(agent => ({ ...agent, server: normalizeServer(agent.server) })));
 });
 
 app.get('/api/agents/:name', (req, res) => {
   const agent = agents[req.params.name];
   if (!agent) return res.status(404).json({ error: 'agent not found' });
   const memberOf = Object.values(groups).filter(g => g.members.includes(req.params.name)).map(g => g.name);
-  res.json({ ...agent, groups: memberOf });
+  res.json({ ...agent, server: normalizeServer(agent.server), groups: memberOf });
 });
 
 app.delete('/api/agents/:name', (req, res) => {
