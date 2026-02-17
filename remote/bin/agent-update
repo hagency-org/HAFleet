@@ -39,7 +39,23 @@ if RESOLVED_REPO="$(resolve_repo_dir)"; then
 fi
 
 CHECK_ONLY=false
-[ "${1:-}" = "--check" ] && CHECK_ONLY=true
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check)
+      CHECK_ONLY=true
+      ;;
+    -h|--help)
+      echo "Usage: agent-update [--check]"
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument: $1" >&2
+      echo "Usage: agent-update [--check]" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
 
 cd "$REPO_DIR"
 
@@ -65,27 +81,16 @@ else
   exit 1
 fi
 REMOTE=$(git rev-parse "$REMOTE_REF")
-
-if [ "$LOCAL" = "$REMOTE" ]; then
-  echo "Already up to date."
-  exit 0
-fi
-
 BEHIND=$(git rev-list --count "HEAD..$REMOTE_REF" 2>/dev/null || echo "0")
 AHEAD=$(git rev-list --count "$REMOTE_REF..HEAD" 2>/dev/null || echo "0")
 
-if [ "$BEHIND" -eq 0 ] 2>/dev/null; then
-  if [ "$AHEAD" -gt 0 ] 2>/dev/null; then
-    echo "Local branch is ahead of $REMOTE_REF by $AHEAD commit(s). No update needed."
-  else
-    echo "Already up to date."
-  fi
-  exit 0
-fi
-
 echo "Updates available: $BEHIND commit(s) behind."
 if [ "$AHEAD" -gt 0 ] 2>/dev/null; then
-  echo "Note: local branch is also ahead by $AHEAD commit(s); pull --ff-only may fail."
+  echo "Note: local branch is also ahead by $AHEAD commit(s)."
+fi
+
+if [ "$BEHIND" -eq 0 ] 2>/dev/null; then
+  echo "Already up to date."
 fi
 
 if [ "$CHECK_ONLY" = true ]; then
@@ -93,15 +98,22 @@ if [ "$CHECK_ONLY" = true ]; then
   exit 0
 fi
 
-# Pull
-echo "Pulling latest..."
-git pull --ff-only origin main 2>/dev/null || git pull --ff-only origin master 2>/dev/null || {
-  echo "Error: git pull failed (local changes?). Try: cd $REPO_DIR && git stash && agent-update" >&2
-  exit 1
-}
+# Pull only when behind.
+if [ "$BEHIND" -gt 0 ] 2>/dev/null; then
+  echo "Pulling latest..."
+  BRANCH="${REMOTE_REF#origin/}"
+  git pull --ff-only origin "$BRANCH" 2>/dev/null || {
+    echo "Error: git pull failed (local changes?). Try: cd $REPO_DIR && git stash && agent-update" >&2
+    exit 1
+  }
+fi
 
 # Reinstall
 echo "Reinstalling..."
+if [ ! -f "$REPO_DIR/remote/install-remote.sh" ]; then
+  echo "Error: missing install script: $REPO_DIR/remote/install-remote.sh" >&2
+  exit 1
+fi
 cd "$REPO_DIR/remote"
 bash install-remote.sh
 

@@ -27,12 +27,15 @@ This folder is the deployable package for remote servers.
    - Do not run as root. The script uses `sudo` only for systemd.
 3. Verify relay:
    - `sudo systemctl status agent-chat-push-relay`
+   - `verify-remote`
 4. Verify MCP injection:
    - `claude mcp list`
    - `codex mcp list`
    - Both should include `agent-chat` with command `node .../mcp-server.js`
 5. Launch remote agents:
    - `agent-up <name> <path> [claude|codex]`
+6. Verify agent state after launch:
+   - `verify-remote --agent <name>`
 
 ## Notes
 
@@ -40,3 +43,20 @@ This folder is the deployable package for remote servers.
   `remote/bin` is only a fallback when root `bin/` is unavailable.
 - The script links helpers into `~/.local/bin` (no copy), so path resolution stays consistent.
 - Re-running `bash install-remote.sh` is safe and is the recommended way to refresh both service and MCP config after updates.
+- `install-remote.sh` now runs hard verification and exits non-zero on failures (service inactive, heartbeat not increasing, auth issues, or agent/server mismatch when `VERIFY_AGENT` is set).
+
+## Standard Deployment Template
+
+Use this sequence for remote rollout and acceptance:
+
+1. `agent-update`
+2. `verify-remote`
+3. `agent-up <name> <path> [claude|codex]`
+4. `verify-remote --agent <name>`
+
+Pass criteria:
+- `agent-chat-push-relay` is `active`
+- `/api/servers` shows target server `online=true` and `lastSeen` increasing across 3 samples
+- `/api/agents/<name>` shows `online=true`, `server=<AGENT_CHAT_SERVER>`, `serverOnline=true`
+
+Any failed step should stop immediately and be reported with raw command output.

@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+API_BASE="${AGENT_CHAT_API:-}"
+SERVER_ID="${AGENT_CHAT_SERVER:-}"
+AGENT_NAME="${AGENT_NAME:-}"
+API_TOKEN_VALUE="${API_TOKEN:-}"
+SERVICE_NAME="${SERVICE_NAME:-agent-chat-push-relay}"
+SAMPLES="${VERIFY_SAMPLES:-3}"
+INTERVAL="${VERIFY_INTERVAL:-15}"
+CHECK_SERVICE=true
+
+usage() {
+  cat <<'EOF'
+Usage: verify-remote [options]
+
+Options:
+  --api <url>         Backend base URL (default: $AGENT_CHAT_API)
+  --server <id>       Remote server id (default: $AGENT_CHAT_SERVER)
+  --agent <name>      Also verify /api/agents/<name>
+  --token <token>     API token (default: $API_TOKEN)
+  --samples <n>       Number of heartbeat samples (default: 3)
+  --interval <sec>    Sleep seconds between samples (default: 15)
+  --service <name>    systemd service name (default: agent-chat-push-relay)
+  --no-service        Skip systemd active check
+  -h, --help          Show this help
+EOF
+}
+
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Error: missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --api)
+      API_BASE="${2:-}"
+      shift 2
+      ;;
+    --server)
+      SERVER_ID="${2:-}"
+      shift 2
+      ;;
+    --agent)
+      AGENT_NAME="${2:-}"
+      shift 2
+      ;;
+    --token)
+      API_TOKEN_VALUE="${2:-}"
+      shift 2
+      ;;
+    --samples)
+      SAMPLES="${2:-}"
+      shift 2
+      ;;
+    --interval)
+      INTERVAL="${2:-}"
+      shift 2
+      ;;
+    --service)
+      SERVICE_NAME="${2:-}"
+      shift 2
+      ;;
+    --no-service)
+      CHECK_SERVICE=false
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ ! "$SAMPLES" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Error: --samples must be a positive integer, got '$SAMPLES'" >&2
+  exit 1
+fi
+if [[ ! "$INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Error: --interval must be a positive integer, got '$INTERVAL'" >&2
+  exit 1
+fi
+
+if [ -z "$API_BASE" ]; then
+  echo "Error: missing API base URL. Set AGENT_CHAT_API or pass --api." >&2
+  exit 1
+fi
+if [ -z "$SERVER_ID" ]; then
+  echo "Error: missing server id. Set AGENT_CHAT_SERVER or pass --server." >&2
+  exit 1
+fi
+
+API_BASE="${API_BASE%/}"
+
+need_cmd curl
+need_cmd node
+if [ "$CHECK_SERVICE" = true ]; then
+  need_cmd systemctl
+fi
+
+if [ "$CHECK_SERVICE" = true ]; then
+  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    echo "Error: systemd service '$SERVICE_NAME' is not active." >&2
+    systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,30p' || true
+    exit 1
+  fi
+  echo "Service check passed: $SERVICE_NAME is active."
+fi
+
+curl_json() {
+  local url="$1"
+  local label="$2"
+  local tmp code
+  tmp="$(mktemp)"
+  if [ -n "$API_TOKEN_VALUE" ]; then
+    code="$(curl -sS -x '' -H "Accept: application/json" -H "Authorization: Bearer $API_TOKEN_VALUE" -o "$tmp" -w "%{http_code}" "$url" || true)"
+  else
+    code="$(curl -sS -x '' -H "Accept: application/json" -o "$tmp" -w "%{http_code}" "$url" || true)"
+  fi
+
+  if [[ ! "$code" =~ ^[0-9]{3}$ ]]; then
+    echo "Error: request failed for $label ($url)." >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+    echo "Error: $label returned HTTP $code" >&2
+    sed -n '1,8p' "$tmp" >&2 || true
+    if [ "$code" = "401" ]; then
+      echo "Hint: set API_TOKEN (or pass --token) for authenticated backend access." >&2
+    fi
+    rm -f "$tmp"
+    return 1
+  fi
+
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+echo "Verifying heartbeat continuity for server '$SERVER_ID' via $API_BASE ..."
+prev_seen=""
+for i in $(seq 1 "$SAMPLES"); do
+  payload="$(curl_json "$API_BASE/api/servers" "/api/servers")" || exit 1
+  set +e
+  parsed="$(PAYLOAD="$payload" node -e '
+const serverId = process.argv[1];
+const prev = Number(process.argv[2] || 0);
+let data;
+try {
+  data = JSON.parse(process.env.PAYLOAD || "");
+} catch {
+  console.error("Invalid JSON from /api/servers");
+  process.exit(2);
+}
+if (!Array.isArray(data)) {
+  console.error("/api/servers response is not an array");
+  process.exit(3);
+}
+const row = data.find((x) => x && x.id === serverId);
+if (!row) {
+  console.error(`Server ${serverId} not found in /api/servers`);
+  process.exit(4);
+}
+if (row.online !== true) {
+  console.error(`Server ${serverId} is offline`);
+  process.exit(5);
+}
+const lastSeen = Number(row.lastSeen || 0);
+if (!Number.isFinite(lastSeen) || lastSeen <= 0) {
+  console.error(`Server ${serverId} has invalid lastSeen: ${row.lastSeen}`);
+  process.exit(6);
+}
+if (prev > 0 && !(lastSeen > prev)) {
+  console.error(`lastSeen not increasing: prev=${prev}, now=${lastSeen}`);
+  process.exit(7);
+}
+process.stdout.write(`${lastSeen}\t${row.agentCount ?? 0}\t${row.sourceIp ?? ""}`);
+' "$SERVER_ID" "$prev_seen")"
+  rc=$?
+  set -e
+  if [ $rc -ne 0 ]; then
+    echo "$parsed" >&2
+    exit 1
+  fi
+
+  current_seen="$(printf '%s' "$parsed" | cut -f1)"
+  agent_count="$(printf '%s' "$parsed" | cut -f2)"
+  source_ip="$(printf '%s' "$parsed" | cut -f3)"
+  echo "  sample $i/$SAMPLES: lastSeen=$current_seen agentCount=$agent_count sourceIp=$source_ip"
+  prev_seen="$current_seen"
+  if [ "$i" -lt "$SAMPLES" ]; then
+    sleep "$INTERVAL"
+  fi
+done
+
+if [ -n "$AGENT_NAME" ]; then
+  echo "Verifying agent state for '$AGENT_NAME' ..."
+  agent_encoded="$(node -p "encodeURIComponent(process.argv[1])" "$AGENT_NAME")"
+  payload="$(curl_json "$API_BASE/api/agents/$agent_encoded" "/api/agents/$AGENT_NAME")" || exit 1
+  set +e
+  parsed="$(PAYLOAD="$payload" node -e '
+const agentName = process.argv[1];
+const serverId = process.argv[2];
+let obj;
+try {
+  obj = JSON.parse(process.env.PAYLOAD || "");
+} catch {
+  console.error("Invalid JSON from /api/agents/<name>");
+  process.exit(2);
+}
+if (!obj || typeof obj !== "object") {
+  console.error("/api/agents/<name> response is not an object");
+  process.exit(3);
+}
+if (obj.online !== true) {
+  console.error(`Agent ${agentName} is offline (offlineReason=${obj.offlineReason || "n/a"})`);
+  process.exit(4);
+}
+if (obj.server !== serverId) {
+  console.error(`Agent ${agentName} server mismatch: expected ${serverId}, got ${obj.server}`);
+  process.exit(5);
+}
+if (obj.serverOnline !== true) {
+  console.error(`Agent ${agentName} serverOnline is not true`);
+  process.exit(6);
+}
+const lastSeen = Number(obj.serverLastSeen || 0);
+if (!Number.isFinite(lastSeen) || lastSeen <= 0) {
+  console.error(`Agent ${agentName} has invalid serverLastSeen: ${obj.serverLastSeen}`);
+  process.exit(7);
+}
+process.stdout.write(`${obj.name || agentName}\t${lastSeen}`);
+' "$AGENT_NAME" "$SERVER_ID")"
+  rc=$?
+  set -e
+  if [ $rc -ne 0 ]; then
+    echo "$parsed" >&2
+    exit 1
+  fi
+
+  agent_name_out="$(printf '%s' "$parsed" | cut -f1)"
+  agent_last_seen="$(printf '%s' "$parsed" | cut -f2)"
+  echo "  agent check passed: name=$agent_name_out server=$SERVER_ID serverLastSeen=$agent_last_seen"
+fi
+
+echo "verify-remote passed."

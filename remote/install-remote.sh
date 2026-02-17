@@ -22,30 +22,46 @@ if [ "$(id -u)" -eq 0 ]; then
   exit 1
 fi
 
-echo "[1/8] Checking prerequisites..."
+echo "[1/9] Checking prerequisites..."
 need_cmd node
 need_cmd npm
 need_cmd tmux
 need_cmd systemctl
 need_cmd sudo
 need_cmd ln
+need_cmd curl
 
-echo "[2/8] Preparing environment..."
+echo "[2/9] Preparing environment..."
 if [ ! -f "$ENV_FILE" ]; then
   cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
   echo "Created $ENV_FILE (please fill API_TOKEN and AGENT_CHAT_SERVER)."
 fi
 mkdir -p "$SCRIPT_DIR/data/agents" "$SCRIPT_DIR/logs" "$INSTALL_BIN_DIR"
 set -a
-source "$ENV_FILE" 2>/dev/null || true
+if ! source "$ENV_FILE"; then
+  set +a
+  echo "Error: failed to load $ENV_FILE. Please fix syntax and retry." >&2
+  exit 1
+fi
 set +a
 
-echo "[3/8] Installing Node dependencies..."
+MISSING_ENV=()
+[ -n "${AGENT_CHAT_API:-}" ] || MISSING_ENV+=("AGENT_CHAT_API")
+[ -n "${AGENT_CHAT_SERVER:-}" ] || MISSING_ENV+=("AGENT_CHAT_SERVER")
+if [ "${#MISSING_ENV[@]}" -gt 0 ]; then
+  echo "Error: missing required env in $ENV_FILE: ${MISSING_ENV[*]}" >&2
+  exit 1
+fi
+if [ -z "${API_TOKEN:-}" ]; then
+  echo "Warning: API_TOKEN is empty. This only works if backend allows unauthenticated requests."
+fi
+
+echo "[3/9] Installing Node dependencies..."
 cd "$SCRIPT_DIR"
 npm install --omit=dev
 
-echo "[4/8] Linking helper commands into $INSTALL_BIN_DIR..."
-required_cmds=(agent-up agent-down agent-ls agent-send agent-update)
+echo "[4/9] Linking helper commands into $INSTALL_BIN_DIR..."
+required_cmds=(agent-up agent-down agent-ls agent-send agent-update verify-remote)
 optional_cmds=(self-time-reminder agent-chat-cli)
 BIN_SOURCE_DIR="$SCRIPT_DIR/bin"
 if [ -d "$REPO_ROOT/bin" ] && [ -f "$REPO_ROOT/bin/agent-up" ]; then
@@ -71,7 +87,7 @@ for cmd in "${optional_cmds[@]}"; do
   fi
 done
 
-echo "[5/8] Installing systemd service ${SERVICE_NAME}..."
+echo "[5/9] Installing systemd service ${SERVICE_NAME}..."
 TMP_UNIT="$(mktemp)"
 sed \
   -e "s|__USER__|$SERVICE_USER|g" \
@@ -90,7 +106,7 @@ if [ -z "${API_TOKEN:-}" ]; then
   echo "  Warning: API_TOKEN is empty. Remote MCP calls to authenticated backend may fail."
 fi
 
-echo "[6/8] Configuring Claude Code MCP server..."
+echo "[6/9] Configuring Claude Code MCP server..."
 if command -v claude >/dev/null 2>&1; then
   CLAUDECODE= claude mcp remove -s user agent-chat 2>/dev/null || true
   CLAUDECODE= claude mcp remove -s local agent-chat 2>/dev/null || true
@@ -104,14 +120,15 @@ if command -v claude >/dev/null 2>&1; then
   if CLAUDECODE= "${CLAUDE_CMD[@]}"; then
     echo "  MCP server 'agent-chat' configured for Claude Code."
   else
-    echo "  Warning: failed to configure Claude MCP server 'agent-chat' (continuing)." >&2
+    echo "Error: failed to configure Claude MCP server 'agent-chat'." >&2
+    exit 1
   fi
 else
   echo "  Warning: 'claude' CLI not found, skipping MCP configuration."
   echo "  Run manually: claude mcp add -s user -e AGENT_CHAT_API=<url> -e API_TOKEN=<token> -- agent-chat node $SCRIPT_DIR/mcp-server.js"
 fi
 
-echo "[7/8] Configuring Codex MCP server..."
+echo "[7/9] Configuring Codex MCP server..."
 if command -v codex >/dev/null 2>&1; then
   codex mcp remove agent-chat 2>/dev/null || true
   CODEX_CMD=(codex mcp add agent-chat)
@@ -122,19 +139,35 @@ if command -v codex >/dev/null 2>&1; then
   if "${CODEX_CMD[@]}"; then
     echo "  MCP server 'agent-chat' configured for Codex."
   else
-    echo "  Warning: failed to configure Codex MCP server 'agent-chat' (continuing)." >&2
+    echo "Error: failed to configure Codex MCP server 'agent-chat'." >&2
+    exit 1
   fi
 else
   echo "  Warning: 'codex' CLI not found, skipping MCP configuration."
   echo "  Run manually: codex mcp add agent-chat --env AGENT_CHAT_API=<url> --env API_TOKEN=<token> -- node $SCRIPT_DIR/mcp-server.js"
 fi
 
-echo "[8/8] Done. Service status:"
+echo "[8/9] Running deployment verification..."
+VERIFY_ARGS=(
+  --api "$AGENT_CHAT_API"
+  --server "$AGENT_CHAT_SERVER"
+  --samples "${VERIFY_SAMPLES:-3}"
+  --interval "${VERIFY_INTERVAL:-15}"
+  --service "$SERVICE_NAME"
+)
+if [ -n "${API_TOKEN:-}" ]; then
+  VERIFY_ARGS+=(--token "$API_TOKEN")
+fi
+if [ -n "${VERIFY_AGENT:-}" ]; then
+  VERIFY_ARGS+=(--agent "$VERIFY_AGENT")
+fi
+"$BIN_SOURCE_DIR/verify-remote" "${VERIFY_ARGS[@]}"
+
+echo "[9/9] Done. Service status:"
 sudo systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,20p'
 
 echo
 echo "Next:"
-echo "  1) Edit $ENV_FILE and set API_TOKEN + AGENT_CHAT_SERVER"
-echo "  2) Restart relay: sudo systemctl restart $SERVICE_NAME"
-echo "  3) Verify MCP: claude mcp list && codex mcp list"
-echo "  4) Start agents: agent-up <name> <path> [claude|codex]"
+echo "  1) Verify MCP: claude mcp list && codex mcp list"
+echo "  2) Start agents: agent-up <name> <path> [claude|codex]"
+echo "  3) Verify one agent: verify-remote --agent <name>"
