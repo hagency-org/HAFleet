@@ -12,6 +12,7 @@ const LOCAL_SERVER_ID = (process.env.AGENT_CHAT_SERVER || 'local').trim();
 const CORS_ALLOWED_ORIGIN = (process.env.FRP_API_ORIGIN || 'https://agentchat.ananthe.party').trim();
 const HEARTBEAT_TTL_MS = Number.parseInt(process.env.AGENT_HEARTBEAT_TTL_MS || '90000', 10);
 const SERVER_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_SERVER_SWEEP_INTERVAL_MS || '15000', 10);
+const HUMAN_SUMMARY_LIMIT = Number.parseInt(process.env.HUMAN_SUMMARY_LIMIT || '50', 10);
 
 mkdirSync(DATA_DIR, { recursive: true });
 
@@ -55,6 +56,14 @@ function normalizeAgentName(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   return trimmed || null;
+}
+
+function makeHumanSummaryPreview(text) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  const chars = [...normalized];
+  if (chars.length <= HUMAN_SUMMARY_LIMIT) return normalized;
+  return chars.slice(0, HUMAN_SUMMARY_LIMIT).join('') + '...';
 }
 
 function inferRecordKind(record) {
@@ -799,13 +808,25 @@ app.post('/api/messages', (req, res) => {
   const { from, to, group, type, summary, full, mentions, reply_to, source, target_type } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
+  const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
+  const targetType = typeof target_type === 'string' ? target_type.trim().toLowerCase() : 'auto';
+  const rawSummary = typeof summary === 'string' ? summary : '';
+  const rawFull = typeof full === 'string' ? full : '';
+  const isHumanMessage = type === 'human';
+  const canonicalHumanFull = isHumanMessage ? (rawFull || rawSummary).trim() : '';
+  const canonicalSummary = isHumanMessage ? makeHumanSummaryPreview(canonicalHumanFull) : rawSummary;
+  const canonicalFull = isHumanMessage ? canonicalHumanFull : rawFull;
+
   if (!fromName) return res.status(400).json({ error: 'from required' });
   if (!toName && !group) return res.status(400).json({ error: 'to or group required' });
   if (toName && group) return res.status(400).json({ error: 'to and group are mutually exclusive' });
-  if (!summary) return res.status(400).json({ error: 'summary required' });
   if (!type) return res.status(400).json({ error: 'type required' });
-  const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
-  const targetType = typeof target_type === 'string' ? target_type.trim().toLowerCase() : 'auto';
+  if (isHumanMessage && !canonicalFull) {
+    return res.status(400).json({ error: 'human message requires summary or full' });
+  }
+  if (!isHumanMessage && !canonicalSummary) {
+    return res.status(400).json({ error: 'summary required' });
+  }
   if (!['auto', 'agent', 'human'].includes(targetType)) {
     return res.status(400).json({ error: 'target_type must be one of: auto, agent, human' });
   }
@@ -846,7 +867,8 @@ app.post('/api/messages', (req, res) => {
   const explicitMentions = mentions || [];
   const textMentions = new Set(explicitMentions);
   const mentionRegex = /@([a-zA-Z0-9_-]+)/g;
-  for (const text of [summary || '', full || '']) {
+  const mentionScanTexts = isHumanMessage ? [canonicalFull] : [canonicalSummary || '', canonicalFull || ''];
+  for (const text of mentionScanTexts) {
     let match;
     while ((match = mentionRegex.exec(text)) !== null) {
       const name = match[1];
@@ -861,8 +883,8 @@ app.post('/api/messages', (req, res) => {
     to: toName || null,
     group: group || null,
     type,
-    summary,
-    full: full || '',
+    summary: canonicalSummary,
+    full: canonicalFull,
     mentions: [...textMentions],
     reply_to: reply_to || null,
     source: source || 'api',
