@@ -169,11 +169,13 @@ SAVED_PATH=""
 SAVED_TYPE=""
 SAVED_MODEL=""
 SAVED_EXTRA_ARGS=""
+SAVED_SESSION_ID=""
 if [ -f "$META_FILE" ]; then
   SAVED_PATH=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('path',''))" 2>/dev/null || true)
   SAVED_TYPE=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('type',''))" 2>/dev/null || true)
   SAVED_MODEL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('model',''))" 2>/dev/null || true)
   SAVED_EXTRA_ARGS=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('extraArgs',''))" 2>/dev/null || true)
+  SAVED_SESSION_ID=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('sessionId',''))" 2>/dev/null || true)
 fi
 
 # Apply defaults from meta
@@ -213,6 +215,18 @@ is_valid_claude_session_id() {
   [ -n "$sid" ] || return 1
   d=$(claude_project_dir_for_path "$p") || return 1
   [ -f "$d/$sid.jsonl" ]
+}
+
+is_valid_uuid() {
+  local sid="$1"
+  echo "$sid" | grep -qE '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+}
+
+generate_uuid() {
+  python3 - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
 }
 
 have_cmd() {
@@ -265,32 +279,111 @@ capture_resume_id_from_claude_files() {
 }
 
 capture_resume_id_from_codex_files() {
-  local sessions_dir newest sid
+  local baseline_file="${1:-}"
+  local sessions_dir sid
   sessions_dir="$HOME/.codex/sessions"
   [ -d "$sessions_dir" ] || return 1
-  newest=$(find "$sessions_dir" -name "*.jsonl" -type f -mmin -10 2>/dev/null | sort -r | head -1)
-  [ -n "$newest" ] || return 1
-  sid=$(echo "$newest" | grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' | tail -1 || true)
+  sid=$(SESSIONS_DIR="$sessions_dir" BASELINE_FILE="$baseline_file" python3 - <<'PY' 2>/dev/null || true
+import os
+import re
+
+sessions_dir = os.environ["SESSIONS_DIR"]
+baseline_file = os.environ.get("BASELINE_FILE", "")
+uuid_re = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+
+baseline = set()
+if baseline_file and os.path.exists(baseline_file):
+    with open(baseline_file) as f:
+        baseline = {line.strip() for line in f if line.strip()}
+
+candidates = []
+for root, _, files in os.walk(sessions_dir):
+    for fn in files:
+        if not fn.endswith(".jsonl"):
+            continue
+        path = os.path.join(root, fn)
+        m = uuid_re.search(fn) or uuid_re.search(path)
+        if not m:
+            continue
+        sid = m.group(0)
+        if sid in baseline:
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        candidates.append((mtime, sid))
+
+if candidates:
+    candidates.sort(reverse=True)
+    print(candidates[0][1])
+PY
+)
   [ -n "$sid" ] || return 1
   echo "$sid" > "$RESUME_FILE"
   echo "Captured resume-id from Codex session files: $sid"
   return 0
 }
 
+snapshot_codex_session_ids() {
+  local out_file="$1"
+  local sessions_dir
+  sessions_dir="$HOME/.codex/sessions"
+  if [ ! -d "$sessions_dir" ]; then
+    : > "$out_file"
+    return 0
+  fi
+  SESSIONS_DIR="$sessions_dir" python3 - <<'PY' > "$out_file" 2>/dev/null || true
+import os
+import re
+
+sessions_dir = os.environ["SESSIONS_DIR"]
+uuid_re = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+seen = set()
+for root, _, files in os.walk(sessions_dir):
+    for fn in files:
+        if not fn.endswith(".jsonl"):
+            continue
+        path = os.path.join(root, fn)
+        m = uuid_re.search(fn) or uuid_re.search(path)
+        if m:
+            seen.add(m.group(0))
+for sid in sorted(seen):
+    print(sid)
+PY
+}
+
 capture_resume_id_background() {
   local kind="$1"
+  local baseline_file="${2:-}"
   (
     if capture_resume_id_from_pane 150; then
+      [ -n "$baseline_file" ] && rm -f "$baseline_file" || true
       exit 0
     fi
     if [ "$kind" = "claude" ]; then
       capture_resume_id_from_claude_files || true
     else
-      capture_resume_id_from_codex_files || true
+      capture_resume_id_from_codex_files "$baseline_file" || true
     fi
+    [ -n "$baseline_file" ] && rm -f "$baseline_file" || true
   ) &
   disown
 }
+
+SESSION_ID="$SAVED_SESSION_ID"
+if [ "$TYPE" = "claude" ]; then
+  if [ "$FRESH" = true ]; then
+    if ! is_valid_uuid "$SESSION_ID"; then
+      SESSION_ID=$(generate_uuid)
+    fi
+    echo "$SESSION_ID" > "$RESUME_FILE"
+  elif [ -f "$RESUME_FILE" ]; then
+    SESSION_ID=$(cat "$RESUME_FILE" 2>/dev/null || echo "$SESSION_ID")
+  elif is_valid_uuid "$SESSION_ID"; then
+    echo "$SESSION_ID" > "$RESUME_FILE"
+  fi
+fi
 
 if [ "$TYPE" = "claude" ] && [ "$FRESH" = false ]; then
   if [ ! -f "$RESUME_FILE" ]; then
@@ -302,9 +395,13 @@ if [ "$TYPE" = "claude" ] && [ "$FRESH" = false ]; then
   fi
   RID_CHECK=$(cat "$RESUME_FILE" 2>/dev/null || true)
   if ! is_valid_claude_session_id "$AGENT_PATH" "$RID_CHECK"; then
-    echo "Error: resume-id '$RID_CHECK' is not a valid local Claude session file." >&2
-    echo "Manual check required: inspect archive tail and fix $RESUME_FILE." >&2
-    exit 1
+    if is_valid_uuid "$RID_CHECK" && [ "$RID_CHECK" = "$SESSION_ID" ]; then
+      echo "Warning: local Claude session file not found yet; attempting resume with explicit session-id $RID_CHECK."
+    else
+      echo "Error: resume-id '$RID_CHECK' is not a valid local Claude session file." >&2
+      echo "Manual check required: inspect archive tail and fix $RESUME_FILE." >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -330,7 +427,7 @@ mkdir -p "$AGENT_DATA"
 NOW=$(date -Iseconds)
 if [ -f "$META_FILE" ]; then
   # Update lastUp
-  META_FILE="$META_FILE" AGENT_PATH="$AGENT_PATH" TYPE="$TYPE" MODEL="$MODEL" EXTRA_ARGS="$EXTRA_ARGS" NOW="$NOW" \
+  META_FILE="$META_FILE" AGENT_PATH="$AGENT_PATH" TYPE="$TYPE" MODEL="$MODEL" EXTRA_ARGS="$EXTRA_ARGS" SESSION_ID="$SESSION_ID" NOW="$NOW" \
     python3 - <<'PY'
 import json
 import os
@@ -342,13 +439,14 @@ data["path"] = os.environ["AGENT_PATH"]
 data["type"] = os.environ["TYPE"]
 data["model"] = os.environ["MODEL"]
 data["extraArgs"] = os.environ["EXTRA_ARGS"]
+data["sessionId"] = os.environ["SESSION_ID"]
 data["lastUp"] = os.environ["NOW"]
 with open(meta_file, "w") as f:
     json.dump(data, f, indent=2)
 PY
 else
   # Create new meta
-  META_FILE="$META_FILE" NAME="$NAME" AGENT_PATH="$AGENT_PATH" TYPE="$TYPE" MODEL="$MODEL" EXTRA_ARGS="$EXTRA_ARGS" NOW="$NOW" \
+  META_FILE="$META_FILE" NAME="$NAME" AGENT_PATH="$AGENT_PATH" TYPE="$TYPE" MODEL="$MODEL" EXTRA_ARGS="$EXTRA_ARGS" SESSION_ID="$SESSION_ID" NOW="$NOW" \
     python3 - <<'PY'
 import json
 import os
@@ -359,6 +457,7 @@ data = {
     "type": os.environ["TYPE"],
     "model": os.environ["MODEL"],
     "extraArgs": os.environ["EXTRA_ARGS"],
+    "sessionId": os.environ["SESSION_ID"],
     "createdAt": os.environ["NOW"],
     "lastUp": os.environ["NOW"],
 }
@@ -387,7 +486,7 @@ if [ "$TYPE" = "claude" ]; then
     # Write init prompt to temp file to avoid shell escaping issues
     INIT_FILE=$(mktemp)
     echo "$INIT_PROMPT" > "$INIT_FILE"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "claude $CLAUDE_FLAGS \"\$(cat $INIT_FILE)\" && rm -f $INIT_FILE" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "claude --session-id $SESSION_ID $CLAUDE_FLAGS \"\$(cat $INIT_FILE)\" && rm -f $INIT_FILE" Enter
     capture_resume_id_background "claude"
   fi
 
@@ -400,13 +499,15 @@ elif [ "$TYPE" = "codex" ]; then
     echo "Resuming codex session: $RID"
     tmux send-keys -t "$TMUX_PANE_TARGET" "codex resume $RID $CODEX_FLAGS" Enter
   else
+    CODEX_BASELINE_FILE=$(mktemp)
+    snapshot_codex_session_ids "$CODEX_BASELINE_FILE"
     echo "Starting new codex session..."
     tmux send-keys -t "$TMUX_PANE_TARGET" "codex $CODEX_FLAGS -C $AGENT_PATH" Enter
     # Send init prompt after codex starts to create a session deterministically.
     sleep 5
     tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"
     tmux send-keys -t "$TMUX_PANE_TARGET" Enter
-    capture_resume_id_background "codex"
+    capture_resume_id_background "codex" "$CODEX_BASELINE_FILE"
   fi
 fi
 
