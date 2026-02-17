@@ -932,11 +932,39 @@ class MatrixBridge {
     }
   }
 
-  async ensureDmRoom(fromName, toName) {
+  async ensureHumanDmRoom(agentName, humanName) {
+    const roomId = await this.ensureDmRoom(agentName, humanName, { forceAgentName: agentName });
+    if (!roomId) {
+      return {
+        ok: false,
+        roomId: null,
+        humanStatus: 'missing_room',
+        invite: { ok: false, error: 'dm_room_unavailable' },
+      };
+    }
+    const invite = await this._inviteHumanToDm(roomId, humanName, { agentName });
+    if (invite.ok && invite.alreadyJoined) {
+      return { ok: true, roomId, humanStatus: 'joined', invite };
+    }
+    if (invite.ok && invite.invited) {
+      return { ok: true, roomId, humanStatus: 'invited', invite };
+    }
+    return { ok: false, roomId, humanStatus: 'invite_failed', invite };
+  }
+
+  async ensureDmRoom(fromName, toName, options = {}) {
     // Determine which is the agent (for human↔agent DMs, use agent-only key so
     // multiple humans share the same DM room with an agent)
-    const fromIsAgent = this.knownAgents.has(fromName) || !!state.agentTokens[fromName];
-    const toIsAgent = this.knownAgents.has(toName) || !!state.agentTokens[toName];
+    let fromIsAgent = this.knownAgents.has(fromName) || !!state.agentTokens[fromName];
+    let toIsAgent = this.knownAgents.has(toName) || !!state.agentTokens[toName];
+    const forceAgentName = options.forceAgentName || null;
+    if (forceAgentName && forceAgentName === fromName) {
+      fromIsAgent = true;
+      toIsAgent = false;
+    } else if (forceAgentName && forceAgentName === toName) {
+      fromIsAgent = false;
+      toIsAgent = true;
+    }
 
     let key;
     if (fromIsAgent && !toIsAgent) {
@@ -953,7 +981,8 @@ class MatrixBridge {
       // If human↔agent, invite the human into existing room (idempotent)
       if (key.startsWith('dm:')) {
         const humanName = fromIsAgent ? toName : fromName;
-        await this._inviteHumanToDm(existingRoom, humanName);
+        const agentName = key.slice(3);
+        await this._inviteHumanToDm(existingRoom, humanName, { agentName });
       }
       return existingRoom;
     }
@@ -972,7 +1001,8 @@ class MatrixBridge {
         }
         if (key.startsWith('dm:')) {
           const humanName = fromIsAgent ? toName : fromName;
-          await this._inviteHumanToDm(state.dmRooms[k], humanName);
+          const agentName = key.slice(3);
+          await this._inviteHumanToDm(state.dmRooms[k], humanName, { agentName });
         }
         return state.dmRooms[k];
       }
@@ -985,7 +1015,8 @@ class MatrixBridge {
 
     // Target user ID: agent gets ac_ prefix, human uses plain name
     const otherName = agentName === fromName ? toName : fromName;
-    const toUserId = this.knownAgents.has(otherName)
+    const otherIsAgent = agentName === fromName ? toIsAgent : fromIsAgent;
+    const toUserId = otherIsAgent
       ? `@${AGENT_PREFIX}${otherName}:matrix.kusuri.ai`
       : `@${otherName}:matrix.kusuri.ai`;
 
@@ -1013,7 +1044,7 @@ class MatrixBridge {
         console.log(`Created DM room ${data.room_id} for ${key}`);
 
         // If target is agent, auto-join
-        if (state.agentTokens[otherName]) {
+        if (otherIsAgent && state.agentTokens[otherName]) {
           await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(data.room_id)}`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${state.agentTokens[otherName]}`, 'Content-Type': 'application/json' },
@@ -1030,21 +1061,60 @@ class MatrixBridge {
     return null;
   }
 
-  async _inviteHumanToDm(roomId, humanName) {
+  async _inviteHumanToDm(roomId, humanName, options = {}) {
     const humanUserId = `@${humanName}:matrix.kusuri.ai`;
+    const parseJsonSafe = async (res) => {
+      try {
+        return await res.json();
+      } catch {
+        return {};
+      }
+    };
     try {
       // Check if already joined (avoid spam invite)
       const members = await this.botClient.getJoinedRoomMembers(roomId);
-      if (members.includes(humanUserId)) return;
-      await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${this.getBotToken()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: humanUserId }),
-      });
-      console.log(`Invited ${humanName} to existing DM room ${roomId}`);
+      if (members.includes(humanUserId)) {
+        return { ok: true, alreadyJoined: true, invited: false, via: 'joined' };
+      }
     } catch (e) {
-      console.error(`Failed to invite ${humanName} to ${roomId}:`, e.message);
+      // Keep going: bot might not be joined, but agent inviter may still succeed.
+      console.warn(`Unable to inspect joined members in ${roomId}: ${e.message}`);
     }
+
+    const inviteAttempts = [];
+    const botToken = this.getBotToken();
+    if (botToken) inviteAttempts.push({ via: 'bot', token: botToken });
+    const agentName = options.agentName;
+    if (agentName && state.agentTokens[agentName]) {
+      inviteAttempts.push({ via: `agent:${agentName}`, token: state.agentTokens[agentName] });
+    }
+
+    let lastErr = null;
+    for (const attempt of inviteAttempts) {
+      try {
+        const res = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${attempt.token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: humanUserId }),
+        });
+        const data = await parseJsonSafe(res);
+        if (res.ok) {
+          console.log(`Invited ${humanName} to DM room ${roomId} via ${attempt.via}`);
+          return { ok: true, alreadyJoined: false, invited: true, via: attempt.via };
+        }
+        // Matrix may reject duplicate invites/joined users with 4xx; treat as success-ish.
+        if (data.errcode === 'M_USER_IN_ROOM' || data.errcode === 'M_ALREADY_JOINED') {
+          return { ok: true, alreadyJoined: true, invited: false, via: attempt.via };
+        }
+        lastErr = `${data.errcode || res.status}: ${data.error || 'invite failed'}`;
+      } catch (e) {
+        lastErr = e.message;
+      }
+    }
+
+    const err = lastErr || 'invite_failed';
+    console.error(`Failed to invite ${humanName} to ${roomId}: ${err}`);
+    return { ok: false, alreadyJoined: false, invited: false, error: err };
   }
 
   async sendAsAgent(token, roomId, text, html) {
