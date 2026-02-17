@@ -260,6 +260,7 @@ class MatrixBridge {
     this.botUserId = null;
     this.knownAgents = new Set(); // names of known agents
     this.dmRooms = new Map(); // "agent:human" → roomId
+    this.upgradedDmRooms = new Set(); // rooms already checked/upgraded this session
     this.recentBridgedIds = new Set(); // prevent echo loops
     this.recentlyCreatedRooms = new Set(); // rooms we just created (suppress echo)
     this.recentMatrixEvents = new Map(); // event_id -> { ts, msgId }
@@ -385,6 +386,7 @@ class MatrixBridge {
 
     // 7. Scan all joined rooms for unmapped groups
     await this.scanJoinedRooms();
+    setInterval(() => this.scanJoinedRooms(), 120_000);
 
     // 8. Periodically check agent accounts for pending invites
     this.pollAgentInvites();
@@ -550,6 +552,16 @@ class MatrixBridge {
         if (targets) {
           lines.push(`⚠️ Mention targets not found in agent registry: ${targets}.`);
         }
+        continue;
+      }
+      if (warning.code === 'mentions_not_in_group' && Array.isArray(warning.targets) && warning.targets.length > 0) {
+        const targets = warning.targets
+          .filter(t => t?.target)
+          .map(t => `@${t.target}`)
+          .join(', ');
+        if (targets) {
+          lines.push(`⚠️ Mentions not delivered because targets are not members of this group: ${targets}.`);
+        }
       }
     }
 
@@ -666,7 +678,15 @@ class MatrixBridge {
     // Handle room creation, membership changes
     if (event.type === 'm.room.name' && event.content?.name) {
       const name = event.content.name;
-      if (!groupForRoom(roomId)) {
+      // Skip DM/SPY rooms — these are not groups
+      if (name.startsWith('DM: ') || name.startsWith('SPY: ')) {
+        // Don't map as group, but update roomGroupMap if it was previously mapped wrong
+        const oldGroup = groupForRoom(roomId);
+        if (oldGroup && (oldGroup.startsWith('SPY: ') || oldGroup.startsWith('DM: '))) {
+          // Update the mapping to the new name
+          mapRoom(roomId, name);
+        }
+      } else if (!groupForRoom(roomId)) {
         // New room name set → map to group
         const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
         if (existing.error) {
@@ -680,6 +700,9 @@ class MatrixBridge {
           console.log(`Created group "${name}" from Matrix room`);
         }
         mapRoom(roomId, name);
+        await this.reconcileRoomGroupMembership(roomId, name);
+      } else {
+        await this.reconcileRoomGroupMembership(roomId, groupForRoom(roomId));
       }
     }
 
@@ -744,31 +767,78 @@ class MatrixBridge {
     try {
       const rooms = await this.botClient.getJoinedRooms();
       for (const roomId of rooms) {
-        if (groupForRoom(roomId)) continue; // already mapped
-        await this.tryMapRoom(roomId);
+        const mappedGroup = groupForRoom(roomId);
+        if (mappedGroup) {
+          await this.reconcileRoomGroupMembership(roomId, mappedGroup);
+          continue;
+        }
+        const discoveredGroup = await this.tryMapRoom(roomId);
+        if (discoveredGroup) {
+          await this.reconcileRoomGroupMembership(roomId, discoveredGroup);
+        }
       }
     } catch (e) {
       console.error('Failed to scan joined rooms:', e.message);
     }
   }
 
+  async reconcileRoomGroupMembership(roomId, groupName) {
+    if (!groupName || groupName.startsWith('DM: ') || groupName.startsWith('SPY: ')) return;
+    try {
+      const agentMembers = await this.getRoomAgentMembers(roomId);
+      const humanMembers = await this.getRoomHumanMembers(roomId);
+      const matrixMembers = [...new Set([...agentMembers, ...humanMembers].filter(Boolean))];
+      const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(groupName)}`);
+
+      if (existing.error) {
+        await backendApi('POST', '/api/groups', { name: groupName, members: matrixMembers });
+        console.log(`Reconciled by creating missing backend group "${groupName}" with ${matrixMembers.length} members`);
+        return;
+      }
+
+      const backendMembers = Array.isArray(existing.members) ? existing.members.filter(Boolean) : [];
+      const backendKeyMap = new Map(backendMembers.map(name => [String(name).toLowerCase(), name]));
+      const matrixKeyMap = new Map(matrixMembers.map(name => [String(name).toLowerCase(), name]));
+
+      const add = [];
+      for (const [key, name] of matrixKeyMap.entries()) {
+        if (!backendKeyMap.has(key)) add.push(name);
+      }
+      const remove = [];
+      for (const [key, name] of backendKeyMap.entries()) {
+        if (!matrixKeyMap.has(key)) remove.push(name);
+      }
+
+      if (add.length > 0 || remove.length > 0) {
+        await backendApi('POST', `/api/groups/${encodeURIComponent(groupName)}/members`, {
+          ...(add.length > 0 ? { add } : {}),
+          ...(remove.length > 0 ? { remove } : {}),
+        });
+        console.log(`Reconciled group "${groupName}" from room ${roomId}: +[${add.join(', ')}] -[${remove.join(', ')}]`);
+      }
+    } catch (e) {
+      console.error(`Failed to reconcile group "${groupName}" from room ${roomId}:`, e.message);
+      this.postWarning(`Failed to reconcile Matrix room ${roomId} ↔ group "${groupName}": ${e.message}`);
+    }
+  }
+
   async tryMapRoom(roomId) {
-    if (groupForRoom(roomId)) return; // already mapped
+    if (groupForRoom(roomId)) return groupForRoom(roomId); // already mapped
     // Check if this is a DM room or bot-DM (skip those)
     try {
       const members = await this.botClient.getJoinedRoomMembers(roomId);
       const nonBot = members.filter(m => m !== this.botUserId);
-      if (nonBot.length <= 2) return; // DM or bot-DM, not a group
-    } catch { return; }
+      if (nonBot.length <= 2) return null; // DM or bot-DM, not a group
+    } catch { return null; }
 
     // Get room name via state event
     try {
       const nameEvent = await this.botClient.getRoomStateEvent(roomId, 'm.room.name', '');
       const name = nameEvent?.name;
-      if (!name) return;
+      if (!name) return null;
 
       // Skip DM rooms (name format: "DM: X" or "SPY: X ↔ Y")
-      if (name.startsWith('DM: ') || name.startsWith('SPY: ')) return;
+      if (name.startsWith('DM: ') || name.startsWith('SPY: ')) return null;
 
       // Check if group exists in backend, create if not
       const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
@@ -783,8 +853,10 @@ class MatrixBridge {
       }
       mapRoom(roomId, name);
       console.log(`Mapped room ${roomId} → group "${name}"`);
+      return name;
     } catch (e) {
       // Room might not have a name — that's fine, not a group room
+      return null;
     }
   }
 
@@ -1015,12 +1087,17 @@ class MatrixBridge {
     let plain, html;
     if (hasFull) {
       const msgUrl = `${MSG_BASE_URL}/${msg.id}`;
-      plain = `${typeBadge} ${msg.summary}${mentionText}\n\n${msg.full}\n\n🔗 ${msgUrl}`;
-      const fullHtml = escHtml(msg.full).replace(/\n/g, '<br>');
-      html = `${typeBadge} <b>${escHtml(msg.summary)}</b>${htmlMentions}<br><br>${fullHtml}<br><br><a href="${msgUrl}">🔗 View formatted</a>`;
+      const normPlain = s => s.replace(/\\n/g, '\n');
+      plain = `${typeBadge} ${normPlain(msg.summary)}${mentionText}\n\n${normPlain(msg.full)}\n\n🔗 ${msgUrl}`;
+      const toHtml = s => escHtml(s).replace(/\\n/g, '<br>').replace(/\n/g, '<br>');
+      const summaryHtml = toHtml(msg.summary);
+      const fullHtml = toHtml(msg.full);
+      html = `${typeBadge} <b>${summaryHtml}</b>${htmlMentions}<br><br>${fullHtml}<br><br><a href="${msgUrl}">🔗 View formatted</a>`;
     } else {
-      plain = `${typeBadge} ${msg.summary}${mentionText}`;
-      html = `${typeBadge} ${escHtml(msg.summary)}${htmlMentions}`;
+      const normPlain = s => s.replace(/\\n/g, '\n');
+      plain = `${typeBadge} ${normPlain(msg.summary)}${mentionText}`;
+      const summaryHtml = escHtml(msg.summary).replace(/\\n/g, '<br>').replace(/\n/g, '<br>');
+      html = `${typeBadge} ${summaryHtml}${htmlMentions}`;
     }
 
     if (msg.group) {
@@ -1103,19 +1180,32 @@ class MatrixBridge {
     const altKey = `${fromName}:${toName}`;
     for (const k of [key, legacyKey, altKey]) {
       if (state.dmRooms?.[k]) {
-        this.dmRooms.set(key, state.dmRooms[k]);
+        // Guard: don't alias an agent↔agent room as a human DM room
+        if (key.startsWith('dm:') && !k.startsWith('dm:')) {
+          const parts = k.split(':');
+          if (parts.length === 2 && this.isKnownAgentName(parts[0]) && this.isKnownAgentName(parts[1])) {
+            continue; // skip — this is an agent↔agent SPY room, not for human DMs
+          }
+        }
+        const roomId = state.dmRooms[k];
+        this.dmRooms.set(key, roomId);
         // Normalize: save under new key format too
         if (k !== key) {
           if (!state.dmRooms) state.dmRooms = {};
-          state.dmRooms[key] = state.dmRooms[k];
+          state.dmRooms[key] = roomId;
           saveState();
         }
         if (key.startsWith('dm:')) {
           const humanName = fromIsAgent ? toName : fromName;
           const agentName = key.slice(3);
-          await this._inviteHumanToDm(state.dmRooms[k], humanName, { agentName });
+          // Ensure room name/members are correct (handles legacy SPY rooms) — once per session
+          if (!this.upgradedDmRooms.has(roomId)) {
+            this.upgradedDmRooms.add(roomId);
+            await this._upgradeLegacyDmRoom(roomId, agentName, humanName);
+          }
+          await this._inviteHumanToDm(roomId, humanName, { agentName });
         }
-        return state.dmRooms[k];
+        return roomId;
       }
     }
 
@@ -1228,8 +1318,88 @@ class MatrixBridge {
     return { ok: false, alreadyJoined: false, invited: false, error: err };
   }
 
-  async sendAsAgent(token, roomId, text, html, sourceMsgId = null) {
+  // Ensure a DM room has the correct name and no stale agent accounts for humans.
+  // Idempotent — skips if room is already correct.
+  async _upgradeLegacyDmRoom(roomId, agentName, humanName) {
+    const correctName = `DM: ${agentName}`;
+    const botToken = this.getBotToken();
+    if (!botToken) return;
+
+    // Check current room name — skip rename if already correct
+    let needsRename = false;
     try {
+      const nameRes = await fetch(
+        `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.name`,
+        { headers: { Authorization: `Bearer ${botToken}` } }
+      );
+      if (nameRes.ok) {
+        const data = await nameRes.json();
+        needsRename = data.name !== correctName;
+      }
+    } catch { needsRename = true; }
+
+    if (needsRename) {
+      try {
+        let renamed = false;
+        for (const token of [botToken, state.agentTokens[agentName]].filter(Boolean)) {
+          const res = await fetch(
+            `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.name`,
+            {
+              method: 'PUT',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: correctName }),
+            }
+          );
+          if (res.ok) {
+            console.log(`Upgraded room ${roomId} name to "${correctName}"`);
+            renamed = true;
+            break;
+          }
+        }
+        if (!renamed) console.warn(`Could not rename room ${roomId} to "${correctName}"`);
+      } catch (e) {
+        console.warn(`Failed to rename room ${roomId}: ${e.message}`);
+      }
+    }
+
+    // Remove stale @ac_<humanName> from the room (human shouldn't have an agent account).
+    // Can't kick users with equal power level, so login as the stale user and have them leave.
+    const staleUserId = `@${AGENT_PREFIX}${humanName}:matrix.kusuri.ai`;
+    try {
+      const members = await this.botClient.getJoinedRoomMembers(roomId);
+      if (members.includes(staleUserId)) {
+        const staleUsername = `${AGENT_PREFIX}${humanName}`;
+        const stalePassword = `agent-${humanName}-2026`;
+        try {
+          const loginData = await matrixLogin(staleUsername, stalePassword);
+          const leaveRes = await fetch(
+            `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`,
+            {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${loginData.access_token}`, 'Content-Type': 'application/json' },
+              body: '{}',
+            }
+          );
+          if (leaveRes.ok) {
+            console.log(`Removed stale ${staleUserId} from room ${roomId} (self-leave)`);
+          }
+          // Logout the temp session
+          await fetch(`${HOMESERVER}/_matrix/client/v3/logout`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${loginData.access_token}`, 'Content-Type': 'application/json' },
+            body: '{}',
+          }).catch(() => {});
+        } catch (e) {
+          console.warn(`Could not remove stale ${staleUserId}: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      console.warn(`Failed to check stale members in ${roomId}: ${e.message}`);
+    }
+  }
+
+  async sendAsAgent(token, roomId, text, html, sourceMsgId = null) {
+    const doSend = async () => {
       const txnId = `bridge_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const content = { msgtype: 'm.text', body: text };
       if (html) {
@@ -1249,7 +1419,32 @@ class MatrixBridge {
         this.rememberMatrixEvent(data.event_id, sourceMsgId);
       }
       return data?.event_id || null;
+    };
+    try {
+      return await doSend();
     } catch (e) {
+      // Auto-join and retry if the agent has left the room
+      if (e.message.includes('membership') && e.message.includes('leave')) {
+        console.log(`Agent not joined in ${roomId}, attempting auto-join…`);
+        try {
+          // Invite via bot, then join as agent
+          await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${state.botToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: await getUserId(token) }),
+          });
+          await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: '{}',
+          });
+          return await doSend();
+        } catch (retryErr) {
+          console.error(`Auto-join retry failed in ${roomId}:`, retryErr.message);
+          this.postWarning(`sendAsAgent failed in room ${roomId} (after auto-join retry): ${retryErr.message}`);
+          return null;
+        }
+      }
       console.error(`Failed to send as agent in ${roomId}:`, e.message);
       this.postWarning(`sendAsAgent failed in room ${roomId}: ${e.message}`);
       return null;

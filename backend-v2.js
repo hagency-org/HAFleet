@@ -58,6 +58,23 @@ function normalizeAgentName(value) {
   return trimmed || null;
 }
 
+function msgSeq(id) {
+  if (typeof id !== 'string') return 0;
+  const n = Number.parseInt(id.replace(/^msg_/, ''), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function compareMsgOrder(a, b) {
+  if (!a && !b) return 0;
+  if (!a) return -1;
+  if (!b) return 1;
+  if (a.ts !== b.ts) return a.ts - b.ts;
+  const aSeq = msgSeq(a.id);
+  const bSeq = msgSeq(b.id);
+  if (aSeq !== bSeq) return aSeq - bSeq;
+  return String(a.id || '').localeCompare(String(b.id || ''));
+}
+
 function makeHumanSummaryPreview(text) {
   const normalized = String(text || '').replace(/\s+/g, ' ').trim();
   if (!normalized) return '';
@@ -129,6 +146,60 @@ for (const agent of Object.values(agents)) {
 }
 if (JSON.stringify(agents) !== agentsBeforeNormalization) {
   saveJson('agents.json', agents);
+}
+
+const groupsBeforeNormalization = JSON.stringify(groups);
+for (const [groupKey, group] of Object.entries(groups)) {
+  if (!group || typeof group !== 'object') {
+    delete groups[groupKey];
+    continue;
+  }
+  const canonicalName = (typeof group.name === 'string' ? group.name.trim() : '') || groupKey;
+  group.name = canonicalName;
+  if (canonicalName !== groupKey) {
+    delete groups[groupKey];
+    if (!groups[canonicalName]) groups[canonicalName] = group;
+  }
+
+  const members = Array.isArray(group.members) ? group.members : [];
+  const normalizedMembers = [];
+  const seen = new Set();
+  for (const raw of members) {
+    const memberName = normalizeAgentName(raw);
+    if (!memberName) continue;
+    const key = memberName.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalizedMembers.push(memberName);
+  }
+  group.members = normalizedMembers;
+  if (!Number.isFinite(group.createdAt)) group.createdAt = Date.now();
+}
+if (JSON.stringify(groups) !== groupsBeforeNormalization) {
+  saveJson('groups.json', groups);
+}
+
+const cursorsBeforeNormalization = JSON.stringify(cursors);
+for (const [agentName, cursor] of Object.entries(cursors)) {
+  if (!cursor || typeof cursor !== 'object') {
+    cursors[agentName] = { inbox: 0, inboxId: null, groups: {}, groupIds: {} };
+    continue;
+  }
+  cursor.inbox = Number(cursor.inbox) || 0;
+  cursor.inboxId = typeof cursor.inboxId === 'string' ? cursor.inboxId : null;
+
+  if (!cursor.groups || typeof cursor.groups !== 'object') cursor.groups = {};
+  for (const [groupName, ts] of Object.entries(cursor.groups)) {
+    cursor.groups[groupName] = Number(ts) || 0;
+  }
+
+  if (!cursor.groupIds || typeof cursor.groupIds !== 'object') cursor.groupIds = {};
+  for (const [groupName, id] of Object.entries(cursor.groupIds)) {
+    cursor.groupIds[groupName] = typeof id === 'string' ? id : null;
+  }
+}
+if (JSON.stringify(cursors) !== cursorsBeforeNormalization) {
+  saveJson('cursors.json', cursors);
 }
 
 for (const [serverId, server] of Object.entries(servers)) {
@@ -253,25 +324,96 @@ function summarizeMsg(m) {
 }
 
 function ensureCursor(agentName) {
-  if (!cursors[agentName]) cursors[agentName] = { inbox: 0, groups: {} };
+  if (!cursors[agentName]) {
+    cursors[agentName] = { inbox: 0, inboxId: null, groups: {}, groupIds: {} };
+  }
+  if (!cursors[agentName].groups || typeof cursors[agentName].groups !== 'object') {
+    cursors[agentName].groups = {};
+  }
+  if (!cursors[agentName].groupIds || typeof cursors[agentName].groupIds !== 'object') {
+    cursors[agentName].groupIds = {};
+  }
+  if (!Object.prototype.hasOwnProperty.call(cursors[agentName], 'inbox')) cursors[agentName].inbox = 0;
+  if (!Object.prototype.hasOwnProperty.call(cursors[agentName], 'inboxId')) cursors[agentName].inboxId = null;
   return cursors[agentName];
+}
+
+function isAfterCursor(msg, ts, id) {
+  if (!msg) return false;
+  const cursorTs = Number(ts) || 0;
+  const cursorId = typeof id === 'string' ? id : null;
+  if (msg.ts > cursorTs) return true;
+  if (msg.ts < cursorTs) return false;
+  if (!cursorId) return false;
+  return compareMsgOrder(msg, { ts: cursorTs, id: cursorId }) > 0;
+}
+
+function advanceInboxCursor(cursor, unread) {
+  if (!Array.isArray(unread) || unread.length === 0) return false;
+  const last = unread[unread.length - 1];
+  cursor.inbox = last.ts;
+  cursor.inboxId = last.id;
+  return true;
+}
+
+function getGroupCursor(cursor, groupName) {
+  return {
+    ts: Number(cursor.groups?.[groupName]) || 0,
+    id: typeof cursor.groupIds?.[groupName] === 'string' ? cursor.groupIds[groupName] : null,
+  };
+}
+
+function advanceGroupCursor(cursor, groupName, unread) {
+  if (!Array.isArray(unread) || unread.length === 0) return false;
+  const last = unread[unread.length - 1];
+  if (!cursor.groups) cursor.groups = {};
+  if (!cursor.groupIds) cursor.groupIds = {};
+  cursor.groups[groupName] = last.ts;
+  cursor.groupIds[groupName] = last.id;
+  return true;
+}
+
+function getGroupMembers(groupName) {
+  return Array.isArray(groups[groupName]?.members) ? groups[groupName].members : [];
+}
+
+function findGroupMember(groupName, name) {
+  const target = normalizeAgentName(name);
+  if (!target) return null;
+  const members = getGroupMembers(groupName);
+  const exact = members.find(m => normalizeAgentName(m) === target);
+  if (exact) return exact;
+  const targetLower = target.toLowerCase();
+  return members.find(m => normalizeAgentName(m)?.toLowerCase() === targetLower) || null;
+}
+
+function isGroupMember(groupName, name) {
+  return Boolean(findGroupMember(groupName, name));
 }
 
 function getUnreadInboxMessages(agentName) {
   const cursor = ensureCursor(agentName);
   const inboxTs = cursor.inbox || 0;
+  const inboxId = cursor.inboxId || null;
   const unreadById = new Map();
 
   for (const m of messages) {
-    if (m.to === agentName && m.ts > inboxTs && !isSuppressedForAgent(m, agentName)) unreadById.set(m.id, m);
+    if (m.to !== agentName) continue;
+    if (!isAfterCursor(m, inboxTs, inboxId)) continue;
+    if (isSuppressedForAgent(m, agentName)) continue;
+    unreadById.set(m.id, m);
   }
   for (const m of messages) {
-    if (!m.group || m.ts <= inboxTs) continue;
-    if (Array.isArray(m.mentions) && m.mentions.includes(agentName) && !isSuppressedForAgent(m, agentName)) unreadById.set(m.id, m);
+    if (!m.group) continue;
+    if (!isAfterCursor(m, inboxTs, inboxId)) continue;
+    if (!isGroupMember(m.group, agentName)) continue;
+    if (Array.isArray(m.mentions) && m.mentions.includes(agentName) && !isSuppressedForAgent(m, agentName)) {
+      unreadById.set(m.id, m);
+    }
   }
 
-  const unread = [...unreadById.values()].sort((a, b) => a.ts - b.ts);
-  return { inboxTs, unread };
+  const unread = [...unreadById.values()].sort(compareMsgOrder);
+  return { inboxTs, inboxId, unread };
 }
 
 function formatSenderList(names) {
@@ -470,6 +612,15 @@ async function pushNotify(agentName, msg) {
   if (!agent?.tmux) return;
   const agentServer = normalizeServer(agent.server);
   if (agentServer && agentServer !== 'local' && agentServer !== LOCAL_SERVER_ID) return;
+  // If server is unknown (null), verify the tmux session exists locally before queueing
+  if (!agentServer) {
+    try {
+      const sess = agent.tmux.split(':')[0];
+      execSync(`tmux has-session -t ${JSON.stringify(sess)} 2>/dev/null`, { timeout: 2000 });
+    } catch {
+      return; // tmux session doesn't exist locally — likely a remote agent not yet heartbeated
+    }
+  }
   const isHumanMsg = msg.type === 'human';
   const hasMcp = agentHasMcp(agentName);
   const { inboxTs, unread } = getUnreadInboxMessages(agentName);
@@ -767,12 +918,23 @@ app.post('/api/agents/:name/offline', (req, res) => {
 // ── Groups CRUD ───────────────────────────────────────────────────────
 app.post('/api/groups', (req, res) => {
   const { name, members } = req.body;
-  if (!name) return res.status(400).json({ error: 'name required' });
-  if (groups[name]) return res.status(409).json({ error: 'group already exists' });
-  groups[name] = { name, members: members || [], createdAt: Date.now() };
+  const groupName = (typeof name === 'string' ? name.trim() : '');
+  if (!groupName) return res.status(400).json({ error: 'name required' });
+  if (groups[groupName]) return res.status(409).json({ error: 'group already exists' });
+  const normalizedMembers = [];
+  const seen = new Set();
+  for (const raw of (Array.isArray(members) ? members : [])) {
+    const memberName = normalizeAgentName(raw);
+    if (!memberName) continue;
+    const key = memberName.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalizedMembers.push(memberName);
+  }
+  groups[groupName] = { name: groupName, members: normalizedMembers, createdAt: Date.now() };
   saveGroups();
-  broadcastSSE('group_created', groups[name]);
-  res.json({ ok: true, group: groups[name] });
+  broadcastSSE('group_created', groups[groupName]);
+  res.json({ ok: true, group: groups[groupName] });
 });
 
 app.get('/api/groups', (_req, res) => {
@@ -789,10 +951,41 @@ app.post('/api/groups/:name/members', (req, res) => {
   const group = groups[req.params.name];
   if (!group) return res.status(404).json({ error: 'group not found' });
   const { add, remove } = req.body;
-  if (add) for (const m of add) { if (!group.members.includes(m)) group.members.push(m); }
-  if (remove) group.members = group.members.filter(m => !remove.includes(m));
+  const addList = [];
+  const addSeen = new Set();
+  if (Array.isArray(add)) {
+    for (const raw of add) {
+      const memberName = normalizeAgentName(raw);
+      if (!memberName) continue;
+      const key = memberName.toLowerCase();
+      if (addSeen.has(key)) continue;
+      addSeen.add(key);
+      addList.push(memberName);
+    }
+  }
+  const removeKeys = new Set();
+  if (Array.isArray(remove)) {
+    for (const raw of remove) {
+      const memberName = normalizeAgentName(raw);
+      if (!memberName) continue;
+      removeKeys.add(memberName.toLowerCase());
+    }
+  }
+
+  if (!Array.isArray(group.members)) group.members = [];
+  const existingKeys = new Set(group.members.map(m => String(m).toLowerCase()));
+  for (const memberName of addList) {
+    const key = memberName.toLowerCase();
+    if (!existingKeys.has(key)) {
+      group.members.push(memberName);
+      existingKeys.add(key);
+    }
+  }
+  if (removeKeys.size > 0) {
+    group.members = group.members.filter(m => !removeKeys.has(String(m).toLowerCase()));
+  }
   saveGroups();
-  broadcastSSE('group_members', { name: group.name, members: group.members, added: add || [], removed: remove || [] });
+  broadcastSSE('group_members', { name: group.name, members: group.members, added: addList, removed: Array.from(removeKeys) });
   res.json({ ok: true, group });
 });
 
@@ -810,8 +1003,10 @@ app.post('/api/messages', (req, res) => {
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
   const targetType = typeof target_type === 'string' ? target_type.trim().toLowerCase() : 'auto';
-  const rawSummary = typeof summary === 'string' ? summary : '';
-  const rawFull = typeof full === 'string' ? full : '';
+  // Normalize literal \n (two chars) to actual newlines — some agents double-escape them
+  const normNl = s => s.replace(/\\n/g, '\n');
+  const rawSummary = typeof summary === 'string' ? normNl(summary) : '';
+  const rawFull = typeof full === 'string' ? normNl(full) : '';
   const isHumanMessage = type === 'human';
   const canonicalHumanFull = isHumanMessage ? (rawFull || rawSummary).trim() : '';
   const canonicalSummary = isHumanMessage ? makeHumanSummaryPreview(canonicalHumanFull) : rawSummary;
@@ -862,9 +1057,17 @@ app.post('/api/messages', (req, res) => {
     }
   }
   if (group && senderIsAgent && fromName !== 'system') {
-    const members = groups[group]?.members || [];
-    if (!members.includes(fromName)) {
+    const matchedMember = findGroupMember(group, fromName);
+    if (!matchedMember) {
       return res.status(403).json({ error: `sender '${fromName}' is not a member of group '${group}'` });
+    }
+    if (matchedMember !== fromName) {
+      const members = getGroupMembers(group);
+      const idx = members.indexOf(matchedMember);
+      if (idx >= 0) {
+        members[idx] = fromName;
+        saveGroups();
+      }
     }
   }
   refreshServerLiveness();
@@ -923,10 +1126,14 @@ app.post('/api/messages', (req, res) => {
     }
   }
   if (msg.group && msg.mentions.length > 0) {
-    const groupMemberSet = new Set((groups[msg.group]?.members || []).filter(Boolean));
+    const groupMemberSet = new Set(getGroupMembers(msg.group).map(n => n.toLowerCase()));
     const mentionStates = msg.mentions
       .filter(name => name !== msg.from)
-      .map(name => ({ name, state: getAgentDeliveryState(name), isGroupMember: groupMemberSet.has(name) }));
+      .map(name => ({
+        name,
+        state: getAgentDeliveryState(name),
+        isGroupMember: groupMemberSet.has(String(name).toLowerCase()),
+      }));
 
     const offlineMentions = mentionStates
       .filter(item => item.state.exists && !item.state.online)
@@ -945,6 +1152,14 @@ app.post('/api/messages', (req, res) => {
       .map(item => ({ target: item.name, reason: 'not-found' }));
     if (unknownMentions.length) {
       warnings.push({ code: 'mentions_unknown', targets: unknownMentions });
+    }
+
+    const outOfGroupMentions = mentionStates
+      .filter(item => item.state.exists && !item.isGroupMember)
+      .map(item => ({ target: item.name, reason: 'not-in-group' }));
+    if (outOfGroupMentions.length) {
+      warnings.push({ code: 'mentions_not_in_group', targets: outOfGroupMentions });
+      for (const item of outOfGroupMentions) suppressedRecipients.add(item.target);
     }
   }
   if (suppressedRecipients.size > 0) {
@@ -1029,11 +1244,11 @@ app.get('/msg/:id', (req, res) => {
 </div>
 ${msg.mentions.length ? '<div class="mentions">Mentions: ' + msg.mentions.map(m => '@' + escape(m)).join(' ') + '</div>' : ''}
 ${msg.reply_to ? '<div class="meta">Reply to: <a href="/msg/' + escape(msg.reply_to) + '" style="color:#4dabf7">' + escape(msg.reply_to) + '</a></div>' : ''}
-<div class="summary">${escape(msg.summary)}</div>
+<div class="summary">${escape(msg.summary).replace(/\\n/g, '<br>').replace(/\n/g, '<br>')}</div>
 <h3>Full Message</h3>
 <div class="full" id="full-content"></div>
 <script>
-  const raw = ${fullJson};
+  const raw = ${fullJson}.replace(/\\\\n/g, '\\n');
   try {
     document.getElementById('full-content').innerHTML = marked.parse(raw);
   } catch(e) {
@@ -1051,18 +1266,24 @@ app.get('/api/inbox/:agent', (req, res) => {
 
   const cursor = ensureCursor(agentName);
   const inboxTs = cursor.inbox || 0;
+  const inboxId = cursor.inboxId || null;
 
-  const dm = messages
-    .filter(m => m.to === agentName && m.ts > inboxTs && !isSuppressedForAgent(m, agentName))
-    .map(summarizeMsg);
+  const dmRaw = messages
+    .filter(m => m.to === agentName && isAfterCursor(m, inboxTs, inboxId) && !isSuppressedForAgent(m, agentName))
+    .sort(compareMsgOrder);
+  const dm = dmRaw.map(summarizeMsg);
 
-  const group = messages
-    .filter(m => m.group && m.mentions.includes(agentName) && m.ts > inboxTs && !isSuppressedForAgent(m, agentName))
-    .map(summarizeMsg);
+  const groupRaw = messages
+    .filter(m => m.group && isGroupMember(m.group, agentName))
+    .filter(m => m.mentions.includes(agentName) && isAfterCursor(m, inboxTs, inboxId) && !isSuppressedForAgent(m, agentName))
+    .sort(compareMsgOrder);
+  const group = groupRaw.map(summarizeMsg);
 
-  // Advance cursor
-  cursor.inbox = Date.now();
-  saveCursors();
+  // Advance cursor only to the latest delivered message.
+  const unread = [...dmRaw, ...groupRaw].sort(compareMsgOrder);
+  if (advanceInboxCursor(cursor, unread)) {
+    saveCursors();
+  }
 
   res.json({ dm, group });
 });
@@ -1077,21 +1298,28 @@ app.get('/api/groups/:name/messages', (req, res) => {
   const resolvedAgentName = normalizeAgentName(agentName);
   if (!resolvedAgentName) return res.status(400).json({ error: 'invalid agent query param' });
   if (!isAgentRecord(agents[resolvedAgentName])) return res.status(404).json({ error: 'agent not found' });
+  if (!isGroupMember(groupName, resolvedAgentName)) {
+    return res.status(403).json({ error: `agent '${resolvedAgentName}' is not a member of group '${groupName}'` });
+  }
 
   const limit = parseInt(req.query.limit) || 10;
   const cursor = ensureCursor(resolvedAgentName);
-  const groupTs = cursor.groups?.[groupName] || 0;
+  const groupCursor = getGroupCursor(cursor, groupName);
+  const groupTs = groupCursor.ts;
+  const groupId = groupCursor.id;
 
   const groupMsgs = messages
     .filter(m => m.group === groupName)
-    .filter(m => !isSuppressedForAgent(m, resolvedAgentName));
-  const unread = groupMsgs.filter(m => m.ts > groupTs).map(summarizeMsg);
-  const read = groupMsgs.filter(m => m.ts <= groupTs).slice(-limit).map(summarizeMsg);
+    .filter(m => !isSuppressedForAgent(m, resolvedAgentName))
+    .sort(compareMsgOrder);
+  const unreadRaw = groupMsgs.filter(m => isAfterCursor(m, groupTs, groupId));
+  const unread = unreadRaw.map(summarizeMsg);
+  const read = groupMsgs.filter(m => !isAfterCursor(m, groupTs, groupId)).slice(-limit).map(summarizeMsg);
 
-  // Advance group cursor
-  if (!cursor.groups) cursor.groups = {};
-  cursor.groups[groupName] = Date.now();
-  saveCursors();
+  // Advance group cursor only to the last delivered unread message.
+  if (advanceGroupCursor(cursor, groupName, unreadRaw)) {
+    saveCursors();
+  }
 
   res.json({ group: groupName, unread, read });
 });
@@ -1104,17 +1332,19 @@ app.get('/api/agents/:name/groups', (req, res) => {
 
   const cursor = ensureCursor(agentName);
   const inboxTs = cursor.inbox || 0;
+  const inboxId = cursor.inboxId || null;
 
   const result = Object.values(groups)
-    .filter(g => g.members.includes(agentName))
+    .filter(g => isGroupMember(g.name, agentName))
     .map(g => {
       const groupMsgs = messages
         .filter(m => m.group === g.name)
-        .filter(m => !isSuppressedForAgent(m, agentName));
-      const groupTs = cursor.groups?.[g.name] || 0;
+        .filter(m => !isSuppressedForAgent(m, agentName))
+        .sort(compareMsgOrder);
+      const { ts: groupTs, id: groupId } = getGroupCursor(cursor, g.name);
 
-      const unread_messages = groupMsgs.filter(m => m.ts > groupTs).length;
-      const unread_mentions = groupMsgs.filter(m => m.mentions.includes(agentName) && m.ts > inboxTs).length;
+      const unread_messages = groupMsgs.filter(m => isAfterCursor(m, groupTs, groupId)).length;
+      const unread_mentions = groupMsgs.filter(m => m.mentions.includes(agentName) && isAfterCursor(m, inboxTs, inboxId)).length;
 
       return { name: g.name, members: g.members, unread_mentions, unread_messages };
     });
