@@ -86,7 +86,7 @@ agent-chat-remote/
 
 - agent 注册支持 `server` 字段（hostname 或标识）
 - `!agents` 命令显示 agent 所在服务器
-- `!autoregister` 只处理本机 agent
+- `!autoregister` 已移除（agent presence 由 heartbeat 自动发现）
 - 远端 push-relay 启动时自动注册本机 agent
 
 ## 依赖关系

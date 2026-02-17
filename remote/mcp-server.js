@@ -51,7 +51,7 @@ const server = new McpServer({
   version: '2.1.0',
 });
 
-// 1. whoami — returns identity, groups (with unread counts), and all registered agents
+// 1. whoami — returns identity, groups (with unread counts), and all known agents
 server.tool('whoami', 'Returns your agent identity, role, and groups', {}, async () => {
   try {
     const [me, allAgents, myGroups] = await Promise.all([

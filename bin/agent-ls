@@ -15,7 +15,7 @@ SHOW_ALL=false
 # Get tmux sessions
 SESSIONS=$(tmux list-sessions -F "#{session_name}" 2>/dev/null || true)
 
-# Get registered agents from backend
+# Get known agents from backend
 REG_NAMES=$(curl --noproxy '*' -s "$BACKEND_URL/api/agents" 2>/dev/null \
   | python3 -c '
 import json
@@ -66,7 +66,7 @@ if [ "$SHOW_ALL" = true ] && [ -d "$DATA_DIR" ]; then
 fi
 
 # Print header
-printf "%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\n" "NAME" "STATUS" "TYPE" "MODEL" "REGISTERED" "MCP" "RESUME" "PATH"
+printf "%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\n" "NAME" "STATUS" "TYPE" "MODEL" "KNOWN" "MCP" "RESUME" "PATH"
 printf "%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\n" "----" "------" "----" "-----" "----------" "---" "------" "----"
 
 # Sort and print
@@ -85,7 +85,7 @@ for name in $(echo "${!ALL_AGENTS[@]}" | tr ' ' '\n' | sort); do
     model=$(python3 -c "import json; print(json.load(open('$DATA_DIR/$name/meta.json')).get('model','-') or '-')" 2>/dev/null || echo "-")
   fi
 
-  # Registered?
+  # Known in backend?
   reg="no"
   echo "$REG_NAMES" | grep -qx "$name" && reg="yes"
 

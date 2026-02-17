@@ -228,7 +228,7 @@ class MatrixBridge {
   constructor() {
     this.botClient = null;
     this.botUserId = null;
-    this.knownAgents = new Set(); // names of registered agents
+    this.knownAgents = new Set(); // names of known agents
     this.dmRooms = new Map(); // "agent:human" → roomId
     this.recentBridgedIds = new Set(); // prevent echo loops
     this.recentlyCreatedRooms = new Set(); // rooms we just created (suppress echo)
@@ -257,6 +257,17 @@ class MatrixBridge {
   getBotToken() { return state.botToken; }
   getAgentToken(name) { return state.agentTokens[name] || null; }
 
+  postWarning(message) {
+    backendApi('POST', '/api/messages', {
+      from: 'system',
+      group: 'info',
+      type: 'inform',
+      summary: `⚠️ Bridge warning: ${message}`,
+      full: '',
+      mentions: [],
+    }).catch(e => console.error('Failed to post warning:', e.message));
+  }
+
   async start() {
     console.log('=== Agent Chat Matrix Bridge ===');
     console.log(`Homeserver: ${HOMESERVER}`);
@@ -269,7 +280,7 @@ class MatrixBridge {
     this.botUserId = await this.botClient.getUserId();
     console.log(`Bot: ${this.botUserId}`);
 
-    // 2. Ensure agent accounts for all registered agents
+    // 2. Ensure agent accounts for all known agents
     const agents = await backendApi('GET', '/api/agents');
     for (const agent of agents) {
       await ensureAgentAccount(agent.name);
@@ -408,6 +419,57 @@ class MatrixBridge {
     }
   }
 
+  async sendDeliveryNotice(roomId, text) {
+    if (!text) return;
+    try {
+      await this.botClient.sendMessage(roomId, { msgtype: 'm.text', body: text });
+    } catch (e) {
+      console.error('Failed to send delivery notice:', e.message);
+    }
+  }
+
+  async handleMessageDeliveryFeedback(roomId, result) {
+    if (!result || typeof result !== 'object') return;
+    const lines = [];
+
+    if (result.error) {
+      lines.push(`⚠️ Message not delivered: ${result.error}`);
+    }
+
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    for (const warning of warnings) {
+      if (warning.code === 'target_offline' && warning.target) {
+        const reason = warning.reason ? ` (${warning.reason})` : '';
+        lines.push(`⚠️ @${warning.target} is offline${reason}. Message archived only and was not delivered.`);
+        continue;
+      }
+      if (warning.code === 'mentions_offline' && Array.isArray(warning.targets) && warning.targets.length > 0) {
+        const targets = warning.targets
+          .filter(t => t?.target)
+          .map(t => `@${t.target}${t.reason ? ` (${t.reason})` : ''}`)
+          .join(', ');
+        if (targets) {
+          lines.push(`⚠️ Offline mentions were archived only: ${targets}.`);
+        }
+      }
+    }
+
+    if (lines.length > 0) {
+      await this.sendDeliveryNotice(roomId, lines.join('\n'));
+    }
+  }
+
+  async submitHumanMessage(roomId, payload) {
+    try {
+      const result = await backendApi('POST', '/api/messages', payload);
+      await this.handleMessageDeliveryFeedback(roomId, result);
+      return result;
+    } catch (e) {
+      await this.sendDeliveryNotice(roomId, `⚠️ Message not delivered: backend unreachable (${e.message}).`);
+      return { error: e.message };
+    }
+  }
+
   // ── Matrix → Agent-chat ───────────────────────────────────────────
   async onRoomMessage(roomId, event) {
     if (!event.content?.body) return;
@@ -454,7 +516,7 @@ class MatrixBridge {
     } else if (targetAgent) {
       // DM to agent
       console.log(`Matrix DM: ${humanName} → ${targetAgent}: ${body.slice(0, 80)}`);
-      await backendApi('POST', '/api/messages', {
+      await this.submitHumanMessage(roomId, {
         from: humanName,
         to: targetAgent,
         type: 'human',
@@ -472,7 +534,7 @@ class MatrixBridge {
         const re = new RegExp(`(?<!@)\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
         summary = summary.replace(re, '@' + name);
       }
-      await backendApi('POST', '/api/messages', {
+      await this.submitHumanMessage(roomId, {
         from: humanName,
         group: groupName,
         type: 'human',
@@ -594,8 +656,8 @@ class MatrixBridge {
       const name = nameEvent?.name;
       if (!name) return;
 
-      // Skip DM rooms (name format: "DM: X ↔ Y")
-      if (name.startsWith('DM: ') && name.includes('↔')) return;
+      // Skip DM rooms (name format: "DM: X" or "SPY: X ↔ Y")
+      if (name.startsWith('DM: ') || name.startsWith('SPY: ')) return;
 
       // Check if group exists in backend, create if not
       const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
@@ -731,6 +793,23 @@ class MatrixBridge {
 
     // Invite newly added members
     for (const m of (update.added || [])) {
+      // Check backend API to determine if member is an agent (avoids stale knownAgents race)
+      let isAgent = this.knownAgents.has(m);
+      if (!isAgent) {
+        try {
+          const info = await backendApi('GET', `/api/agents/${encodeURIComponent(m)}`);
+          if (info && !info.error && info.type === 'agent') {
+            isAgent = true;
+            this.knownAgents.add(m);
+          }
+        } catch { /* not an agent */ }
+      }
+
+      // Ensure agent has a Matrix account
+      if (isAgent && !state.agentTokens[m]) {
+        await ensureAgentAccount(m);
+      }
+
       let userId;
       if (state.agentTokens[m]) {
         userId = await getUserId(state.agentTokens[m]);
@@ -741,9 +820,14 @@ class MatrixBridge {
           headers: { Authorization: `Bearer ${state.agentTokens[m]}`, 'Content-Type': 'application/json' },
           body: '{}',
         });
+      } else if (isAgent) {
+        // Agent without token (ensureAgentAccount may have failed) — use ac_ prefix
+        userId = `@${AGENT_PREFIX}${m}:matrix.kusuri.ai`;
+        if (currentMembers.has(userId)) continue;
       } else {
+        // Human — use plain name
         userId = `@${m}:matrix.kusuri.ai`;
-        if (currentMembers.has(userId)) continue; // already in room
+        if (currentMembers.has(userId)) continue;
       }
       try {
         await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
@@ -753,7 +837,9 @@ class MatrixBridge {
         });
         console.log(`Invited ${m} (${userId}) to Matrix room for ${update.name}`);
       } catch (e) {
-        console.error(`Failed to invite ${m}:`, e.message);
+        console.error(`Failed to invite ${m} to ${update.name}:`, e.message);
+        // Report to info group
+        this.postWarning(`Failed to invite ${m} to Matrix room for group "${update.name}": ${e.message}`);
       }
     }
 
@@ -802,33 +888,28 @@ class MatrixBridge {
     }
 
     const agentToken = state.agentTokens[agentName];
-    if (!agentToken) return;
+    if (!agentToken) {
+      console.warn(`No Matrix token for agent "${agentName}", cannot bridge message ${msg.id}`);
+      this.postWarning(`No Matrix token for agent "${agentName}" — message ${msg.id} not bridged to Matrix`);
+      return;
+    }
 
-    // Check if any human is involved (DM to human, or group message mentioning a human)
-    const mentionsHuman = msg.mentions?.some(m => this.isHuman(m));
-    const dmToHuman = msg.to && this.isHuman(msg.to);
-    const showFull = (dmToHuman || mentionsHuman) && msg.full && msg.full.length > 0;
-
-    // Build Matrix message (plain text fallback + HTML formatted)
-    const hasLink = msg.full && msg.full.length > 0;
+    // Build Matrix message — always show full content when available
+    const hasFull = msg.full && msg.full.length > 0;
     const typeBadge = msg.type === 'request' ? '📋' : msg.type === 'reply' ? '↩️' : 'ℹ️';
     const mentionText = msg.mentions?.length ? ` · ${msg.mentions.map(m => '@' + m).join(' ')}` : '';
     const escHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const htmlMentions = msg.mentions?.length ? ` · ${msg.mentions.map(m => '<b>@' + escHtml(m) + '</b>').join(' ')}` : '';
 
     let plain, html;
-    if (showFull) {
-      // Human-facing: show full content directly
-      plain = `${typeBadge} ${msg.summary}${mentionText}\n\n${msg.full}`;
-      const htmlMentions = msg.mentions?.length ? ` · ${msg.mentions.map(m => '<b>@' + escHtml(m) + '</b>').join(' ')}` : '';
+    if (hasFull) {
+      const msgUrl = `${MSG_BASE_URL}/${msg.id}`;
+      plain = `${typeBadge} ${msg.summary}${mentionText}\n\n${msg.full}\n\n🔗 ${msgUrl}`;
       const fullHtml = escHtml(msg.full).replace(/\n/g, '<br>');
-      html = `${typeBadge} <b>${escHtml(msg.summary)}</b>${htmlMentions}<br><br>${fullHtml}`;
+      html = `${typeBadge} <b>${escHtml(msg.summary)}</b>${htmlMentions}<br><br>${fullHtml}<br><br><a href="${msgUrl}">🔗 View formatted</a>`;
     } else {
-      // Agent-facing: summary + compact link
-      const plainLink = hasLink ? ` [full](${MSG_BASE_URL}/${msg.id})` : '';
-      plain = `${typeBadge} ${msg.summary}${mentionText}${plainLink}`;
-      const htmlLink = hasLink ? ` · <a href="${MSG_BASE_URL}/${msg.id}">full</a>` : '';
-      const htmlMentions = msg.mentions?.length ? ` · ${msg.mentions.map(m => '<b>@' + escHtml(m) + '</b>').join(' ')}` : '';
-      html = `${typeBadge} ${escHtml(msg.summary)}${htmlMentions}${htmlLink}`;
+      plain = `${typeBadge} ${msg.summary}${mentionText}`;
+      html = `${typeBadge} ${escHtml(msg.summary)}${htmlMentions}`;
     }
 
     if (msg.group) {
@@ -836,6 +917,7 @@ class MatrixBridge {
       const roomId = roomForGroup(msg.group);
       if (!roomId) {
         console.log(`No Matrix room for group "${msg.group}", skipping`);
+        this.postWarning(`No Matrix room for group "${msg.group}" — message ${msg.id} from ${agentName} not bridged`);
         return;
       }
       await this.sendAsAgent(agentToken, roomId, plain, html);
@@ -851,31 +933,67 @@ class MatrixBridge {
   }
 
   async ensureDmRoom(fromName, toName) {
-    // Normalize key: sorted so A:B and B:A use the same room
-    const key = [fromName, toName].sort().join(':');
-    if (this.dmRooms.has(key)) return this.dmRooms.get(key);
+    // Determine which is the agent (for human↔agent DMs, use agent-only key so
+    // multiple humans share the same DM room with an agent)
+    const fromIsAgent = this.knownAgents.has(fromName) || !!state.agentTokens[fromName];
+    const toIsAgent = this.knownAgents.has(toName) || !!state.agentTokens[toName];
 
-    // Load from persisted state (check both key orders for backwards compat)
+    let key;
+    if (fromIsAgent && !toIsAgent) {
+      key = `dm:${fromName}`; // human→agent: keyed by agent
+    } else if (!fromIsAgent && toIsAgent) {
+      key = `dm:${toName}`; // agent→human: keyed by agent
+    } else {
+      key = [fromName, toName].sort().join(':'); // agent↔agent: pair key
+    }
+
+    // Check in-memory cache
+    if (this.dmRooms.has(key)) {
+      const existingRoom = this.dmRooms.get(key);
+      // If human↔agent, invite the human into existing room (idempotent)
+      if (key.startsWith('dm:')) {
+        const humanName = fromIsAgent ? toName : fromName;
+        await this._inviteHumanToDm(existingRoom, humanName);
+      }
+      return existingRoom;
+    }
+
+    // Load from persisted state (check multiple key formats for backwards compat)
+    const legacyKey = [fromName, toName].sort().join(':');
     const altKey = `${fromName}:${toName}`;
-    for (const k of [key, altKey]) {
+    for (const k of [key, legacyKey, altKey]) {
       if (state.dmRooms?.[k]) {
         this.dmRooms.set(key, state.dmRooms[k]);
+        // Normalize: save under new key format too
+        if (k !== key) {
+          if (!state.dmRooms) state.dmRooms = {};
+          state.dmRooms[key] = state.dmRooms[k];
+          saveState();
+        }
+        if (key.startsWith('dm:')) {
+          const humanName = fromIsAgent ? toName : fromName;
+          await this._inviteHumanToDm(state.dmRooms[k], humanName);
+        }
         return state.dmRooms[k];
       }
     }
 
     // Create DM room
-    const fromToken = state.agentTokens[fromName];
+    const agentName = fromIsAgent ? fromName : toName;
+    const fromToken = state.agentTokens[agentName];
     if (!fromToken) return null;
 
     // Target user ID: agent gets ac_ prefix, human uses plain name
-    const toUserId = this.knownAgents.has(toName)
-      ? `@${AGENT_PREFIX}${toName}:matrix.kusuri.ai`
-      : `@${toName}:matrix.kusuri.ai`;
+    const otherName = agentName === fromName ? toName : fromName;
+    const toUserId = this.knownAgents.has(otherName)
+      ? `@${AGENT_PREFIX}${otherName}:matrix.kusuri.ai`
+      : `@${otherName}:matrix.kusuri.ai`;
 
     const invite = [toUserId, this.botUserId];
-    // If target is an agent, also auto-join with their token later
     try {
+      const roomName = key.startsWith('dm:')
+        ? `DM: ${agentName}`
+        : `SPY: ${fromName} ↔ ${toName}`;
       const res = await fetch(`${HOMESERVER}/_matrix/client/v3/createRoom`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${fromToken}`, 'Content-Type': 'application/json' },
@@ -883,7 +1001,7 @@ class MatrixBridge {
           is_direct: true,
           invite,
           preset: 'trusted_private_chat',
-          name: `DM: ${fromName} ↔ ${toName}`,
+          name: roomName,
         }),
       });
       const data = await res.json();
@@ -895,10 +1013,10 @@ class MatrixBridge {
         console.log(`Created DM room ${data.room_id} for ${key}`);
 
         // If target is agent, auto-join
-        if (state.agentTokens[toName]) {
+        if (state.agentTokens[otherName]) {
           await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(data.room_id)}`, {
             method: 'POST',
-            headers: { Authorization: `Bearer ${state.agentTokens[toName]}`, 'Content-Type': 'application/json' },
+            headers: { Authorization: `Bearer ${state.agentTokens[otherName]}`, 'Content-Type': 'application/json' },
             body: '{}',
           });
         }
@@ -910,6 +1028,23 @@ class MatrixBridge {
       console.error(`Error creating DM room for ${key}:`, e.message);
     }
     return null;
+  }
+
+  async _inviteHumanToDm(roomId, humanName) {
+    const humanUserId = `@${humanName}:matrix.kusuri.ai`;
+    try {
+      // Check if already joined (avoid spam invite)
+      const members = await this.botClient.getJoinedRoomMembers(roomId);
+      if (members.includes(humanUserId)) return;
+      await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${this.getBotToken()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: humanUserId }),
+      });
+      console.log(`Invited ${humanName} to existing DM room ${roomId}`);
+    } catch (e) {
+      console.error(`Failed to invite ${humanName} to ${roomId}:`, e.message);
+    }
   }
 
   async sendAsAgent(token, roomId, text, html) {
@@ -926,7 +1061,8 @@ class MatrixBridge {
         body: JSON.stringify(content),
       });
     } catch (e) {
-      console.error(`Failed to send as agent:`, e.message);
+      console.error(`Failed to send as agent in ${roomId}:`, e.message);
+      this.postWarning(`sendAsAgent failed in room ${roomId}: ${e.message}`);
     }
   }
 

@@ -1,0 +1,69 @@
+#!/bin/bash
+# self-time-reminder — Schedule a future reminder to wake yourself up
+#
+# Usage:
+#   self-time-reminder <delay_seconds> <message>
+#
+# This tool schedules a delayed message that will be injected into your
+# tmux pane after the specified delay, using idle-wait delivery.
+# The message format includes timestamps so you know when you set it.
+#
+# Examples:
+#   self-time-reminder 300 "Check if the build finished"
+#   self-time-reminder 60 "Follow up on the deploy"
+#   self-time-reminder 3600 "Review PR #42"
+set -euo pipefail
+
+if [ $# -lt 2 ]; then
+  echo "Usage: self-time-reminder <delay_seconds> <message>" >&2
+  echo "" >&2
+  echo "  delay_seconds  How many seconds from now to send the reminder" >&2
+  echo "  message        The reminder message text" >&2
+  exit 1
+fi
+
+delay="$1"
+shift
+msg="$*"
+
+# Validate delay is a positive number
+if ! echo "$delay" | grep -qE '^[0-9]+$' || [ "$delay" -le 0 ] 2>/dev/null; then
+  echo "Error: delay must be a positive integer (seconds)" >&2
+  exit 1
+fi
+
+# Reject empty message
+if [ -z "$msg" ]; then
+  echo "Error: message is empty" >&2
+  exit 1
+fi
+
+# Detect self: current tmux session + pane
+if [ -z "${TMUX:-}" ]; then
+  echo "Error: not running inside a tmux session" >&2
+  exit 1
+fi
+
+_sess=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "unknown")
+_win=$(tmux display-message -p '#{window_index}' 2>/dev/null || echo "0")
+_pane=$(tmux display-message -p '#{pane_index}' 2>/dev/null || echo "0")
+target="${_sess}:${_win}.${_pane}"
+
+# Build JSON
+_json_msg=$(printf '%s' "$msg" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()), end="")')
+_json_target=$(printf '%s' "$target" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()), end="")')
+_body=$(printf '{"target":%s,"delay":%s,"msg":%s}' "$_json_target" "$delay" "$_json_msg")
+
+# Post to reminder API
+QUEUE_URL="http://127.0.0.1:8084/api/reminders"
+_response=$(curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \
+  -d "$_body" --connect-timeout 2 --max-time 5 "$QUEUE_URL" 2>/dev/null) || _response=""
+
+if echo "$_response" | python3 -c 'import sys,json; d=json.load(sys.stdin); exit(0 if d.get("ok") else 1)' 2>/dev/null; then
+  _id=$(echo "$_response" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id","?"))' 2>/dev/null)
+  _remaining=$(echo "$_response" | python3 -c 'import sys,json; r=json.load(sys.stdin).get("remainingMs",0); print(str(r//1000)+"s")' 2>/dev/null)
+  echo "Reminder #${_id} set → ${target} in ${_remaining}"
+else
+  echo "Error: failed to set reminder (server may be down)" >&2
+  exit 1
+fi

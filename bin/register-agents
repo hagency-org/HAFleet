@@ -1,23 +1,9 @@
 #!/bin/bash
-# Register known agents with Agent Chat v2 backend
-# Usage: register-agents [API_URL]
+# register-agents has been deprecated.
+# Agent presence is now discovered via heartbeat (online/inactive),
+# no manual registration step is required.
 set -euo pipefail
 
-API="${1:-http://127.0.0.1:8090}"
-
-register() {
-    local name="$1" role="$2" tmux="$3"
-    curl -s --noproxy '*' -X POST "$API/api/agents" \
-        -H 'Content-Type: application/json' \
-        -d "{\"name\":\"$name\",\"role\":\"$role\",\"tmux\":\"$tmux\"}" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(f"  {d.get(\"agent\",{}).get(\"name\",\"?\")} -> {d.get(\"agent\",{}).get(\"tmux\",\"?\")}") if d.get("ok") else print(f"  Error: {d}")' 2>/dev/null
-}
-
-echo "Registering agents with $API ..."
-
-# Add your agents here:
-# register "name" "role" "tmux_target"
-register "overseer" "human overseer" "agent:0.0"
-# register "agent-web" "frontend developer" "umiki-web:0.0"
-# register "agent-api" "backend developer" "umiki:0.0"
-
-echo "Done."
+echo "register-agents is deprecated."
+echo "Use 'agent-up' + running push-relay heartbeat to discover agents automatically."
+exit 1

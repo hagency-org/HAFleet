@@ -1,0 +1,139 @@
+#!/bin/bash
+# agent-chat-cli — Admin CLI for agent-chat backend API
+#
+# Usage:
+#   agent-chat-cli <command> [args...]
+#
+# Commands:
+#   create-group <name> [member1 member2 ...]   Create a group (optionally with members)
+#   delete-group <name>                          Delete a group
+#   add-member <group> <name1> [name2 ...]       Add members to a group
+#   rm-member <group> <name1> [name2 ...]        Remove members from a group
+#   list-groups                                  List all groups
+#   group <name>                                 Show group details
+#   list-agents                                  List all agents
+#   agent <name>                                 Show agent details
+#   identity <name> <text>                       Set agent identity/description
+set -euo pipefail
+
+API="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
+TOKEN="${API_TOKEN:-}"
+
+_curl() {
+  local extra_headers=()
+  [ -n "$TOKEN" ] && extra_headers=(-H "Authorization: Bearer $TOKEN")
+  curl --noproxy '*' -s "${extra_headers[@]}" "$@"
+}
+
+_json_str() {
+  printf '%s' "$1" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()), end="")'
+}
+
+_json_arr() {
+  python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "$@"
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  create-group)
+    name="${1:?Usage: agent-chat-cli create-group <name> [member1 ...]}"
+    shift
+    members=$(_json_arr "$@")
+    _curl -X POST "$API/api/groups" \
+      -H 'Content-Type: application/json' \
+      -d "{\"name\":$(_json_str "$name"),\"members\":$members}" | python3 -m json.tool
+    ;;
+
+  delete-group)
+    name="${1:?Usage: agent-chat-cli delete-group <name>}"
+    _curl -X DELETE "$API/api/groups/$name" | python3 -m json.tool
+    ;;
+
+  add-member)
+    group="${1:?Usage: agent-chat-cli add-member <group> <name1> [name2 ...]}"
+    shift
+    [ $# -lt 1 ] && { echo "Error: at least one member name required" >&2; exit 1; }
+    members=$(_json_arr "$@")
+    _curl -X POST "$API/api/groups/$group/members" \
+      -H 'Content-Type: application/json' \
+      -d "{\"add\":$members}" | python3 -m json.tool
+    ;;
+
+  rm-member)
+    group="${1:?Usage: agent-chat-cli rm-member <group> <name1> [name2 ...]}"
+    shift
+    [ $# -lt 1 ] && { echo "Error: at least one member name required" >&2; exit 1; }
+    members=$(_json_arr "$@")
+    _curl -X POST "$API/api/groups/$group/members" \
+      -H 'Content-Type: application/json' \
+      -d "{\"remove\":$members}" | python3 -m json.tool
+    ;;
+
+  list-groups)
+    _curl "$API/api/groups" | python3 -m json.tool
+    ;;
+
+  group)
+    name="${1:?Usage: agent-chat-cli group <name>}"
+    _curl "$API/api/groups/$name" | python3 -m json.tool
+    ;;
+
+  register|unregister)
+    echo "Error: '$cmd' has been removed. Agent presence is discovered via heartbeat (online/inactive)." >&2
+    echo "Use: list-agents / agent / identity" >&2
+    exit 1
+    ;;
+
+  list-agents)
+    _curl "$API/api/agents" | python3 -c "
+import json,sys
+agents = json.load(sys.stdin)
+for a in agents:
+    print(f\"  {a['name']:20s} type={a.get('type','?'):6s} tmux={a.get('tmux','?')}\")
+"
+    ;;
+
+  agent)
+    name="${1:?Usage: agent-chat-cli agent <name>}"
+    _curl "$API/api/agents/$name" | python3 -m json.tool
+    ;;
+
+  identity)
+    name="${1:?Usage: agent-chat-cli identity <name> <text>}"
+    shift
+    text="$*"
+    [ -z "$text" ] && { echo "Error: identity text required" >&2; exit 1; }
+    _curl -X PATCH "$API/api/agents/$name" \
+      -H 'Content-Type: application/json' \
+      -d "{\"identity\":$(_json_str "$text")}" | python3 -m json.tool
+    ;;
+
+  help|--help|-h)
+    echo "agent-chat-cli — Admin CLI for agent-chat"
+    echo ""
+    echo "Group management:"
+    echo "  create-group <name> [member1 ...]   Create group"
+    echo "  delete-group <name>                 Delete group"
+    echo "  add-member <group> <m1> [m2 ...]    Add members"
+    echo "  rm-member <group> <m1> [m2 ...]     Remove members"
+    echo "  list-groups                         List all groups"
+    echo "  group <name>                        Group details"
+    echo ""
+    echo "Agent management:"
+    echo "  list-agents                         List all agents"
+    echo "  agent <name>                        Agent details"
+    echo "  identity <name> <text>              Set agent identity"
+    echo ""
+    echo "Environment:"
+    echo "  AGENT_CHAT_API  Backend URL (default: http://127.0.0.1:8090)"
+    echo "  API_TOKEN       Auth token (optional for localhost)"
+    ;;
+
+  *)
+    echo "Unknown command: $cmd" >&2
+    echo "Run 'agent-chat-cli help' for usage" >&2
+    exit 1
+    ;;
+esac

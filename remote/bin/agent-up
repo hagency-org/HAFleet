@@ -511,23 +511,6 @@ elif [ "$TYPE" = "codex" ]; then
   fi
 fi
 
-# ── Auto-register with backend ───────────────────────────────────────
-REG_CHECK=$(api_curl "$BACKEND_URL/api/agents/$NAME" 2>/dev/null || echo '{"error":"unreachable"}')
-if echo "$REG_CHECK" | grep -q '"error"'; then
-  echo "Registering agent '$NAME' with backend..."
-  REG_BODY="{\"name\":\"$NAME\",\"tmux\":\"$NAME:0.0\",\"type\":\"agent\"}"
-  if [ -n "$SERVER_ID" ]; then
-    REG_BODY="{\"name\":\"$NAME\",\"tmux\":\"$NAME:0.0\",\"type\":\"agent\",\"server\":\"$SERVER_ID\"}"
-  fi
-  api_curl -X POST "$BACKEND_URL/api/agents" \
-    -H 'Content-Type: application/json' \
-    -d "$REG_BODY" \
-    >/dev/null 2>&1 || echo "  Warning: backend registration failed (backend may be down)"
-  post_lifecycle "Agent '$NAME' registered ($TYPE) on ${SERVER_ID:-local}"
-else
-  echo "Agent '$NAME' already registered."
-fi
-
 # Post agent-up lifecycle event
 post_lifecycle "Agent '$NAME' started ($TYPE) on ${SERVER_ID:-local}" "Agent '$NAME' ($TYPE) started in $AGENT_PATH on ${SERVER_ID:-local}"
 

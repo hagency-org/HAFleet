@@ -11,20 +11,16 @@ echo "Install dir: $INSTALL_DIR"
 echo ""
 
 # ── 1. Dependencies ──────────────────────────────────────────────────
-echo "[1/4] Installing dependencies..."
+echo "[1/3] Installing dependencies..."
 cd "$INSTALL_DIR"
 npm install --production 2>&1 | tail -1
 
 # ── 2. Create data directory ─────────────────────────────────────────
-echo "[2/4] Creating data directory..."
+echo "[2/3] Creating data directory..."
 mkdir -p "$INSTALL_DIR/data"
 
-# ── 3. Install register-agents ───────────────────────────────────────
-echo "[3/4] Making register-agents executable..."
-chmod +x "$INSTALL_DIR/bin/register-agents"
-
-# ── 4. Install systemd service ───────────────────────────────────────
-echo "[4/4] Installing systemd service..."
+# ── 3. Install systemd service ───────────────────────────────────────
+echo "[3/3] Installing systemd service..."
 
 SERVICE_FILE="/etc/systemd/system/agent-chat-v2.service"
 sed -e "s|__USER__|$USER|g" \
@@ -41,7 +37,7 @@ if systemctl is-active --quiet agent-chat-v2; then
     echo "=== Installation complete ==="
     echo "  Service:  systemctl status agent-chat-v2"
     echo "  API:      http://127.0.0.1:8090"
-    echo "  Register: bash bin/register-agents"
+    echo "  Presence: agents are discovered from heartbeat (online/inactive)"
     echo ""
     echo "  To configure MCP for an agent, add to its project .mcp.json:"
     echo "    {"

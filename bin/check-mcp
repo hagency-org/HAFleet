@@ -2,11 +2,11 @@
 # Check which tmux sessions have agent-chat MCP loaded (Claude Code + Codex)
 # Usage: check-mcp
 
-printf "%-30s %-10s %-10s %-10s\n" "SESSION" "MCP" "CLIENT" "REGISTERED"
+printf "%-30s %-10s %-10s %-10s\n" "SESSION" "MCP" "CLIENT" "KNOWN"
 printf "%-30s %-10s %-10s %-10s\n" "-------" "---" "------" "----------"
 
-# Get registered agents
-registered=$(curl -s --noproxy '*' http://127.0.0.1:8090/api/agents 2>/dev/null | python3 -c '
+# Get known agents from backend
+known=$(curl -s --noproxy '*' http://127.0.0.1:8090/api/agents 2>/dev/null | python3 -c '
 import json
 import sys
 try:
@@ -54,8 +54,8 @@ for sess in $(tmux list-sessions -F '#{session_name}' 2>/dev/null | sort); do
   client="-"
   [ "${mcp_sessions[$sess]:-}" = "1" ] && has_mcp="YES" && client="${mcp_client[$sess]:-}"
 
-  is_reg="no"
-  echo "$registered" | grep -qx "$sess" && is_reg="YES"
+  is_known="no"
+  echo "$known" | grep -qx "$sess" && is_known="YES"
 
-  printf "%-30s %-10s %-10s %-10s\n" "$sess" "$has_mcp" "$client" "$is_reg"
+  printf "%-30s %-10s %-10s %-10s\n" "$sess" "$has_mcp" "$client" "$is_known"
 done
