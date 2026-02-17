@@ -15,32 +15,32 @@ need_cmd() {
   fi
 }
 
-echo "[1/6] Checking prerequisites..."
+echo "[1/7] Checking prerequisites..."
 need_cmd node
 need_cmd npm
 need_cmd tmux
 need_cmd systemctl
 need_cmd sudo
 
-echo "[2/6] Preparing environment..."
+echo "[2/7] Preparing environment..."
 if [ ! -f "$ENV_FILE" ]; then
   cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
   echo "Created $ENV_FILE (please fill API_TOKEN and AGENT_CHAT_SERVER)."
 fi
 mkdir -p "$SCRIPT_DIR/data/agents" "$SCRIPT_DIR/logs" "$INSTALL_BIN_DIR"
 
-echo "[3/6] Installing Node dependencies..."
+echo "[3/7] Installing Node dependencies..."
 cd "$SCRIPT_DIR"
 npm install --omit=dev
 
-echo "[4/6] Installing helper commands into $INSTALL_BIN_DIR..."
+echo "[4/7] Installing helper commands into $INSTALL_BIN_DIR..."
 install -m 0755 "$SCRIPT_DIR/bin/agent-up" "$INSTALL_BIN_DIR/agent-up"
 install -m 0755 "$SCRIPT_DIR/bin/agent-down" "$INSTALL_BIN_DIR/agent-down"
 install -m 0755 "$SCRIPT_DIR/bin/agent-ls" "$INSTALL_BIN_DIR/agent-ls"
 install -m 0755 "$SCRIPT_DIR/bin/agent-send" "$INSTALL_BIN_DIR/agent-send"
 install -m 0755 "$SCRIPT_DIR/bin/agent-update" "$INSTALL_BIN_DIR/agent-update"
 
-echo "[5/6] Installing systemd service ${SERVICE_NAME}..."
+echo "[5/7] Installing systemd service ${SERVICE_NAME}..."
 TMP_UNIT="$(mktemp)"
 sed \
   -e "s|__USER__|$SERVICE_USER|g" \
@@ -52,7 +52,23 @@ rm -f "$TMP_UNIT"
 sudo systemctl daemon-reload
 sudo systemctl enable --now "$SERVICE_NAME"
 
-echo "[6/6] Done. Service status:"
+echo "[6/7] Configuring Claude Code MCP server..."
+if command -v claude >/dev/null 2>&1; then
+  # Remove old config if exists, then add fresh
+  CLAUDECODE= claude mcp remove agent-chat 2>/dev/null || true
+  # Source .env for API token and server vars
+  set -a; source "$ENV_FILE" 2>/dev/null || true; set +a
+  MCP_ENV_ARGS=""
+  [ -n "${AGENT_CHAT_API:-}" ] && MCP_ENV_ARGS="$MCP_ENV_ARGS -e AGENT_CHAT_API=$AGENT_CHAT_API"
+  [ -n "${API_TOKEN:-}" ] && MCP_ENV_ARGS="$MCP_ENV_ARGS -e API_TOKEN=$API_TOKEN"
+  CLAUDECODE= claude mcp add $MCP_ENV_ARGS agent-chat -- node "$SCRIPT_DIR/mcp-server.js"
+  echo "  MCP server 'agent-chat' configured for Claude Code."
+else
+  echo "  Warning: 'claude' CLI not found, skipping MCP configuration."
+  echo "  Run manually: claude mcp add -e AGENT_CHAT_API=<url> -e API_TOKEN=<token> agent-chat -- node $SCRIPT_DIR/mcp-server.js"
+fi
+
+echo "[7/7] Done. Service status:"
 sudo systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,20p'
 
 echo
