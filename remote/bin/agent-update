@@ -18,6 +18,26 @@ if [ "$(basename "$BASE_DIR")" = "remote" ]; then
 fi
 REPO_DIR="$(cd "$REPO_DIR" && pwd)"
 
+resolve_repo_dir() {
+  local c
+  for c in \
+    "${AGENT_CHAT_HOME:-}" \
+    "$REPO_DIR" \
+    "$HOME/laplace/agent-chat" \
+    "$HOME/agent-chat"; do
+    [ -n "${c:-}" ] || continue
+    [ -d "$c/.git" ] || continue
+    [ -f "$c/remote/install-remote.sh" ] || continue
+    cd "$c" && pwd
+    return 0
+  done
+  return 1
+}
+
+if RESOLVED_REPO="$(resolve_repo_dir)"; then
+  REPO_DIR="$RESOLVED_REPO"
+fi
+
 CHECK_ONLY=false
 [ "${1:-}" = "--check" ] && CHECK_ONLY=true
 
@@ -36,15 +56,37 @@ git fetch origin --quiet 2>/dev/null || {
 }
 
 LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse origin/main 2>/dev/null || git rev-parse origin/master 2>/dev/null)
+if git rev-parse --verify origin/main >/dev/null 2>&1; then
+  REMOTE_REF="origin/main"
+elif git rev-parse --verify origin/master >/dev/null 2>&1; then
+  REMOTE_REF="origin/master"
+else
+  echo "Error: neither origin/main nor origin/master exists" >&2
+  exit 1
+fi
+REMOTE=$(git rev-parse "$REMOTE_REF")
 
 if [ "$LOCAL" = "$REMOTE" ]; then
   echo "Already up to date."
   exit 0
 fi
 
-BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null || git rev-list --count HEAD..origin/master 2>/dev/null || echo "?")
+BEHIND=$(git rev-list --count "HEAD..$REMOTE_REF" 2>/dev/null || echo "0")
+AHEAD=$(git rev-list --count "$REMOTE_REF..HEAD" 2>/dev/null || echo "0")
+
+if [ "$BEHIND" -eq 0 ] 2>/dev/null; then
+  if [ "$AHEAD" -gt 0 ] 2>/dev/null; then
+    echo "Local branch is ahead of $REMOTE_REF by $AHEAD commit(s). No update needed."
+  else
+    echo "Already up to date."
+  fi
+  exit 0
+fi
+
 echo "Updates available: $BEHIND commit(s) behind."
+if [ "$AHEAD" -gt 0 ] 2>/dev/null; then
+  echo "Note: local branch is also ahead by $AHEAD commit(s); pull --ff-only may fail."
+fi
 
 if [ "$CHECK_ONLY" = true ]; then
   echo "Run 'agent-update' to install updates."
