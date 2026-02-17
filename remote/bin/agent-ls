@@ -17,7 +17,18 @@ SESSIONS=$(tmux list-sessions -F "#{session_name}" 2>/dev/null || true)
 
 # Get registered agents from backend
 REG_NAMES=$(curl --noproxy '*' -s "$BACKEND_URL/api/agents" 2>/dev/null \
-  | grep -oP '"name"\s*:\s*"\K[^"]+' || true)
+  | python3 -c '
+import json
+import sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = []
+if isinstance(data, list):
+    for item in data:
+        if isinstance(item, dict) and item.get("name"):
+            print(item["name"])
+' 2>/dev/null || true)
 
 # Build pts → session map for MCP detection
 declare -A PTS_MAP
