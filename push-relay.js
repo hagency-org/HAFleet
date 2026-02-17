@@ -9,6 +9,7 @@ const SERVER_ID = (process.env.AGENT_CHAT_SERVER || os.hostname()).trim();
 const SCAN_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_SCAN_INTERVAL_MS || '30000', 10);
 const RECONNECT_MS = Number.parseInt(process.env.PUSH_RELAY_RECONNECT_MS || '5000', 10);
 const HEARTBEAT_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_HEARTBEAT_INTERVAL_MS || '15000', 10);
+const INJECT_DELAY_MS = Number.parseInt(process.env.PUSH_RELAY_INJECT_DELAY_MS || '300', 10);
 
 const authHeaders = API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {};
 const localAgents = new Set();
@@ -133,13 +134,24 @@ function buildNotification(agentName, msg) {
     : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${replyHint}.`;
 }
 
+function sleepMs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function pushToTmux(target, payload) {
   try {
     execFileSync('tmux', ['send-keys', '-l', '-t', target, payload], { timeout: 5000 });
+    sleepMs(INJECT_DELAY_MS);
     execFileSync('tmux', ['send-keys', '-t', target, 'Tab'], { timeout: 5000 });
+    sleepMs(INJECT_DELAY_MS);
+    execFileSync('tmux', ['send-keys', '-t', target, 'Enter'], { timeout: 5000 });
+    sleepMs(INJECT_DELAY_MS);
+    execFileSync('tmux', ['send-keys', '-t', target, 'Enter'], { timeout: 5000 });
+    sleepMs(INJECT_DELAY_MS);
     execFileSync('tmux', ['send-keys', '-t', target, 'C-m'], { timeout: 5000 });
-    execFileSync('tmux', ['send-keys', '-t', target, 'Enter'], { timeout: 5000 });
-    execFileSync('tmux', ['send-keys', '-t', target, 'Enter'], { timeout: 5000 });
+    sleepMs(INJECT_DELAY_MS);
+    execFileSync('tmux', ['send-keys', '-t', target, 'C-m'], { timeout: 5000 });
     return true;
   } catch (e) {
     console.error(`[push-relay] tmux inject failed for ${target}: ${e.message}`);
