@@ -2,16 +2,19 @@
 # agent-up — Quick agent launcher with resume support
 #
 # Usage:
-#   agent-up <name> [path] [claude|codex] [--fresh]
+#   agent-up <name> [path] [claude|codex] [--fresh] [--attach] [--model <model>] [--extra-args "<args>"]
 #
 # If path is omitted, reads from saved meta.json (previous agent-down).
 # If resume-id exists and --fresh is not set, auto-resumes.
 #
 # Examples:
-#   agent-up umiki-worker ~/laplace/umiki claude       # first time
-#   agent-up umiki-worker                              # resume from meta
-#   agent-up umiki-worker --fresh                      # new session, same path
-#   agent-up ddnsserer ~/cloudflare codex              # codex agent
+#   agent-up umiki-worker ~/laplace/umiki claude                           # first time
+#   agent-up umiki-worker                                                   # resume from meta
+#   agent-up umiki-worker --fresh                                           # new session, same path
+#   agent-up ddnsserer ~/cloudflare codex                                   # codex agent
+#   agent-up news ~/laplace/news claude --model claude-opus-4-1             # fixed model
+#   agent-up coder ~/laplace/repo codex --model gpt-5.3-codex-spark         # codex model
+#   agent-up ops ~/laplace/ops codex --extra-args "--approval-mode never"   # custom startup args
 
 set -euo pipefail
 
@@ -23,13 +26,15 @@ SERVER_ID="${AGENT_CHAT_SERVER:-}"
 
 # ── Parse args ────────────────────────────────────────────────────────
 if [ $# -lt 1 ]; then
-  echo "Usage: agent-up <name> [path] [claude|codex] [--fresh] [--attach]"
+  echo "Usage: agent-up <name> [path] [claude|codex] [--fresh] [--attach] [--model <model>] [--extra-args \"<args>\"]"
   echo ""
   echo "  name     tmux session name / agent name"
   echo "  path     working directory (optional if previously saved)"
   echo "  type     claude (default) or codex"
   echo "  --fresh  ignore saved resume ID, start a new session"
   echo "  --attach attach to the session after creating it"
+  echo "  --model  model name passed to claude/codex at startup"
+  echo "  --extra-args additional raw startup args passed to claude/codex"
   exit 1
 fi
 
@@ -40,13 +45,48 @@ FRESH=false
 ATTACH=false
 AGENT_PATH=""
 TYPE=""
+MODEL=""
+EXTRA_ARGS=""
 
-for arg in "$@"; do
-  case "$arg" in
-    --fresh) FRESH=true ;;
-    --attach) ATTACH=true ;;
-    claude|codex) TYPE="$arg" ;;
-    *) [ -z "$AGENT_PATH" ] && AGENT_PATH="$arg" ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fresh)
+      FRESH=true
+      shift
+      ;;
+    --attach)
+      ATTACH=true
+      shift
+      ;;
+    --model)
+      if [ $# -lt 2 ]; then
+        echo "Error: --model requires a value" >&2
+        exit 1
+      fi
+      MODEL="$2"
+      shift 2
+      ;;
+    --extra-args)
+      if [ $# -lt 2 ]; then
+        echo "Error: --extra-args requires a value" >&2
+        exit 1
+      fi
+      EXTRA_ARGS="$2"
+      shift 2
+      ;;
+    claude|codex)
+      TYPE="$1"
+      shift
+      ;;
+    *)
+      if [ -z "$AGENT_PATH" ]; then
+        AGENT_PATH="$1"
+        shift
+      else
+        echo "Error: unrecognized argument '$1'" >&2
+        exit 1
+      fi
+      ;;
   esac
 done
 
@@ -57,14 +97,20 @@ RESUME_FILE="$AGENT_DATA/resume-id"
 
 SAVED_PATH=""
 SAVED_TYPE=""
+SAVED_MODEL=""
+SAVED_EXTRA_ARGS=""
 if [ -f "$META_FILE" ]; then
   SAVED_PATH=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('path',''))" 2>/dev/null || true)
   SAVED_TYPE=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('type',''))" 2>/dev/null || true)
+  SAVED_MODEL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('model',''))" 2>/dev/null || true)
+  SAVED_EXTRA_ARGS=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('extraArgs',''))" 2>/dev/null || true)
 fi
 
 # Apply defaults from meta
 [ -z "$AGENT_PATH" ] && AGENT_PATH="$SAVED_PATH"
 [ -z "$TYPE" ] && TYPE="${SAVED_TYPE:-claude}"
+[ -z "$MODEL" ] && MODEL="$SAVED_MODEL"
+[ -z "$EXTRA_ARGS" ] && EXTRA_ARGS="$SAVED_EXTRA_ARGS"
 
 # Validate
 if [ -z "$AGENT_PATH" ]; then
@@ -84,6 +130,47 @@ if [ "$TYPE" != "claude" ] && [ "$TYPE" != "codex" ]; then
   echo "Error: type must be 'claude' or 'codex', got '$TYPE'" >&2
   exit 1
 fi
+
+claude_project_dir_for_path() {
+  local p="$1"
+  [ -n "$p" ] || return 1
+  echo "$HOME/.claude/projects/${p//\//-}"
+}
+
+latest_claude_session_id() {
+  local p="$1"
+  local d candidate sid
+  d=$(claude_project_dir_for_path "$p") || return 1
+  [ -d "$d" ] || return 1
+  for candidate in $(ls -1t "$d"/*.jsonl 2>/dev/null || true); do
+    sid=$(basename "$candidate" .jsonl)
+    if rg -q "\"sessionId\":\"$sid\"" "$candidate"; then
+      echo "$sid"
+      return 0
+    fi
+  done
+  return 1
+}
+
+is_valid_claude_session_id() {
+  local p="$1" sid="$2"
+  local d
+  [ -n "$sid" ] || return 1
+  d=$(claude_project_dir_for_path "$p") || return 1
+  [ -f "$d/$sid.jsonl" ]
+}
+
+refresh_claude_resume_file_async() {
+  local p="$1" resume_file="$2"
+  (
+    sleep 6
+    sid=$(latest_claude_session_id "$p" || true)
+    if [ -n "$sid" ]; then
+      echo "$sid" > "$resume_file"
+    fi
+  ) &
+  disown
+}
 
 # ── Check existing session ───────────────────────────────────────────
 if tmux has-session -t "$NAME" 2>/dev/null; then
@@ -106,6 +193,8 @@ import json
 d = json.load(open('$META_FILE'))
 d['path'] = '$AGENT_PATH'
 d['type'] = '$TYPE'
+d['model'] = '$MODEL'
+d['extraArgs'] = '$EXTRA_ARGS'
 d['lastUp'] = '$NOW'
 json.dump(d, open('$META_FILE', 'w'), indent=2)
 "
@@ -113,7 +202,7 @@ else
   # Create new meta
   python3 -c "
 import json
-d = {'name': '$NAME', 'path': '$AGENT_PATH', 'type': '$TYPE', 'createdAt': '$NOW', 'lastUp': '$NOW'}
+d = {'name': '$NAME', 'path': '$AGENT_PATH', 'type': '$TYPE', 'model': '$MODEL', 'extraArgs': '$EXTRA_ARGS', 'createdAt': '$NOW', 'lastUp': '$NOW'}
 json.dump(d, open('$META_FILE', 'w'), indent=2)
 "
 fi
@@ -125,20 +214,24 @@ tmux new-session -d -s "$NAME" -c "$AGENT_PATH"
 # ── Launch AI ─────────────────────────────────────────────────────────
 if [ "$TYPE" = "claude" ]; then
   CLAUDE_FLAGS="--dangerously-skip-permissions"
-  if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ]; then
-    RID=$(cat "$RESUME_FILE")
+  [ -n "$MODEL" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS --model $MODEL"
+  [ -n "$EXTRA_ARGS" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
+  if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ] && RID=$(cat "$RESUME_FILE") && is_valid_claude_session_id "$AGENT_PATH" "$RID"; then
     echo "Resuming claude session: $RID"
     tmux send-keys -t "$NAME" "claude --resume $RID $CLAUDE_FLAGS" Enter
+  elif [ "$FRESH" = false ]; then
+    echo "Resuming claude session with --continue (directory history)."
+    tmux send-keys -t "$NAME" "claude --continue $CLAUDE_FLAGS" Enter
   else
-    # Generate new session ID
-    SID=$(uuidgen)
-    echo "$SID" > "$RESUME_FILE"
-    echo "Starting new claude session: $SID"
-    tmux send-keys -t "$NAME" "claude --session-id $SID $CLAUDE_FLAGS" Enter
+    echo "Starting new claude session..."
+    tmux send-keys -t "$NAME" "claude $CLAUDE_FLAGS" Enter
   fi
+  refresh_claude_resume_file_async "$AGENT_PATH" "$RESUME_FILE"
 
 elif [ "$TYPE" = "codex" ]; then
   CODEX_FLAGS="--yolo"
+  [ -n "$MODEL" ] && CODEX_FLAGS="$CODEX_FLAGS --model $MODEL"
+  [ -n "$EXTRA_ARGS" ] && CODEX_FLAGS="$CODEX_FLAGS $EXTRA_ARGS"
   if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ]; then
     RID=$(cat "$RESUME_FILE")
     echo "Resuming codex session: $RID"

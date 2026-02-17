@@ -55,8 +55,8 @@ if [ "$SHOW_ALL" = true ] && [ -d "$DATA_DIR" ]; then
 fi
 
 # Print header
-printf "%-20s %-8s %-8s %-10s %-5s %-10s %s\n" "NAME" "STATUS" "TYPE" "REGISTERED" "MCP" "RESUME" "PATH"
-printf "%-20s %-8s %-8s %-10s %-5s %-10s %s\n" "----" "------" "----" "----------" "---" "------" "----"
+printf "%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\n" "NAME" "STATUS" "TYPE" "MODEL" "REGISTERED" "MCP" "RESUME" "PATH"
+printf "%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\n" "----" "------" "----" "-----" "----------" "---" "------" "----"
 
 # Sort and print
 for name in $(echo "${!ALL_AGENTS[@]}" | tr ' ' '\n' | sort); do
@@ -66,6 +66,12 @@ for name in $(echo "${!ALL_AGENTS[@]}" | tr ' ' '\n' | sort); do
   type="-"
   if [ -f "$DATA_DIR/$name/meta.json" ]; then
     type=$(python3 -c "import json; print(json.load(open('$DATA_DIR/$name/meta.json')).get('type','-'))" 2>/dev/null || echo "-")
+  fi
+
+  # Model from meta.json
+  model="-"
+  if [ -f "$DATA_DIR/$name/meta.json" ]; then
+    model=$(python3 -c "import json; print(json.load(open('$DATA_DIR/$name/meta.json')).get('model','-') or '-')" 2>/dev/null || echo "-")
   fi
 
   # Registered?
@@ -91,8 +97,8 @@ for name in $(echo "${!ALL_AGENTS[@]}" | tr ' ' '\n' | sort); do
 
   # Color: active=default, inactive=dimmed
   if [ "$status" = "inactive" ]; then
-    printf "\033[2m%-20s %-8s %-8s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$reg" "$mcp" "$resume" "$path_val"
+    printf "\033[2m%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model" "$reg" "$mcp" "$resume" "$path_val"
   else
-    printf "%-20s %-8s %-8s %-10s %-5s %-10s %s\n" "$name" "$status" "$type" "$reg" "$mcp" "$resume" "$path_val"
+    printf "%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\n" "$name" "$status" "$type" "$model" "$reg" "$mcp" "$resume" "$path_val"
   fi
 done
