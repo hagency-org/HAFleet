@@ -2,16 +2,16 @@
 # agent-down — Gracefully stop an agent with archive + resume ID capture
 #
 # Usage:
-#   agent-down <name> [--kill]
+#   agent-down <name> [--kill] [--timeout <seconds>]
 #
-# Flow:
-#   1. Send exit command to AI (claude: /exit, codex: Escape)
-#   2. Wait 5s for AI to expose resume command
-#   3. Archive full tmux pane scrollback
-#   4. Show archive tail for manual resume-id verification
-#   5. Kill tmux session
+# Default behavior:
+#   - claude: send /exit, wait up to 30s for process to return to shell
+#   - codex:  send Ctrl+C, wait up to 8s for process to return to shell
+#   - archive pane, show tail, try to extract resume hint
+#   - claude without resume hint is treated as error (session is kept alive)
 #
-# With --kill: archive first, then immediately kill
+# --kill behavior:
+#   - archive first, then kill tmux session immediately
 
 set -euo pipefail
 
@@ -19,14 +19,74 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
 DATA_DIR="$BASE_DIR/data/agents"
 
+# Load .env if present
+ENV_FILE="$BASE_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
+
+BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
+API_TOKEN="${API_TOKEN:-}"
+SERVER_ID="${AGENT_CHAT_SERVER:-}"
+AUTH_HEADER=""
+[ -n "$API_TOKEN" ] && AUTH_HEADER="Authorization: Bearer $API_TOKEN"
+
+api_curl() {
+  if [ -n "$AUTH_HEADER" ]; then
+    curl --noproxy '*' -s -H "$AUTH_HEADER" "$@"
+  else
+    curl --noproxy '*' -s "$@"
+  fi
+}
+
+post_lifecycle() {
+  local event_summary="$1"
+  local summary_json
+  summary_json=$(EVENT_SUMMARY="$event_summary" python3 - <<'PY'
+import json
+import os
+print(json.dumps(os.environ["EVENT_SUMMARY"]))
+PY
+)
+  api_curl -X POST "$BACKEND_URL/api/messages" \
+    -H 'Content-Type: application/json' \
+    -d "{\"from\":\"system\",\"group\":\"info\",\"type\":\"inform\",\"summary\":${summary_json},\"full\":\"\",\"mentions\":[]}" \
+    >/dev/null 2>&1 || true
+}
+
 if [ $# -lt 1 ]; then
-  echo "Usage: agent-down <name> [--kill]"
+  echo "Usage: agent-down <name> [--kill] [--timeout <seconds>]"
   exit 1
 fi
 
 NAME="$1"
+shift || true
+
 FORCE=false
-[ "${2:-}" = "--kill" ] && FORCE=true
+TIMEOUT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --kill)
+      FORCE=true
+      shift
+      ;;
+    --timeout)
+      if [ $# -lt 2 ]; then
+        echo "Error: --timeout requires a value" >&2
+        exit 1
+      fi
+      TIMEOUT="$2"
+      shift 2
+      ;;
+    *)
+      echo "Error: unrecognized argument '$1'" >&2
+      echo "Usage: agent-down <name> [--kill] [--timeout <seconds>]" >&2
+      exit 1
+      ;;
+  esac
+done
 
 if ! tmux has-session -t "$NAME" 2>/dev/null; then
   echo "Session '$NAME' does not exist."
@@ -47,34 +107,22 @@ if [ -f "$META_FILE" ]; then
   AGENT_TYPE=$(python3 -c "import json; print(json.load(open('$META_FILE')).get('type',''))" 2>/dev/null || true)
 fi
 if [ -z "$AGENT_TYPE" ]; then
-  # Try to detect from running process
   PANE_CMD=$(tmux list-panes -t "$NAME" -F "#{pane_current_command}" 2>/dev/null | head -1)
   case "$PANE_CMD" in
     *codex*) AGENT_TYPE="codex" ;;
-    *) AGENT_TYPE="claude" ;;  # default
+    *) AGENT_TYPE="claude" ;;
   esac
 fi
-archive_and_kill() {
-  # Archive pane scrollback
-  echo "Archiving pane scrollback..."
-  tmux capture-pane -t "$NAME" -p -S - > "$ARCHIVE_FILE" 2>/dev/null || true
-  LINES=$(wc -l < "$ARCHIVE_FILE" 2>/dev/null || echo 0)
-  echo "  Saved $LINES lines → $ARCHIVE_FILE"
 
-  echo "  Archive tail (manual check):"
-  tail -n 10 "$ARCHIVE_FILE" | sed 's/^/    /'
-  RESUME_HINT=$(tail -n 20 "$ARCHIVE_FILE" | rg -o 'claude --resume [0-9a-f-]{36}|codex resume [0-9a-f-]{36}' | tail -1 || true)
-  if [ -n "$RESUME_HINT" ]; then
-    RESUME_ID=$(echo "$RESUME_HINT" | grep -oP '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' || true)
-    echo "  Resume hint: $RESUME_HINT"
-    if [ -n "$RESUME_ID" ]; then
-      echo "  To set manually: echo \"$RESUME_ID\" > \"$RESUME_FILE\""
-    fi
+if [ -z "$TIMEOUT" ]; then
+  if [ "$AGENT_TYPE" = "codex" ]; then
+    TIMEOUT=8
   else
-    echo "  No explicit resume command found in last 20 lines. Manual intervention required."
+    TIMEOUT=30
   fi
+fi
 
-  # Update meta.json with lastDown
+update_meta_last_down() {
   if [ -f "$META_FILE" ]; then
     NOW=$(date -Iseconds)
     python3 -c "
@@ -84,11 +132,42 @@ d['lastDown'] = '$NOW'
 json.dump(d, open('$META_FILE', 'w'), indent=2)
 " 2>/dev/null || true
   fi
+}
 
-  # Kill tmux session
+capture_archive() {
+  echo "Archiving pane scrollback..."
+  tmux capture-pane -t "$NAME" -p -S - > "$ARCHIVE_FILE" 2>/dev/null || true
+  LINES=$(wc -l < "$ARCHIVE_FILE" 2>/dev/null || echo 0)
+  echo "  Saved $LINES lines → $ARCHIVE_FILE"
+}
+
+extract_resume_hint() {
+  if [ ! -f "$ARCHIVE_FILE" ]; then
+    return 1
+  fi
+  rg -o 'claude --resume [0-9a-f-]{36}|codex resume [0-9a-f-]{36}' "$ARCHIVE_FILE" | tail -1 || true
+}
+
+show_archive_tail_and_hint() {
+  echo "  Archive tail (manual check):"
+  tail -n 10 "$ARCHIVE_FILE" | sed 's/^/    /'
+
+  RESUME_HINT=$(extract_resume_hint)
+  if [ -n "$RESUME_HINT" ]; then
+    RESUME_ID=$(echo "$RESUME_HINT" | grep -oE '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' || true)
+    echo "  Resume hint: $RESUME_HINT"
+    if [ -n "$RESUME_ID" ]; then
+      echo "$RESUME_ID" > "$RESUME_FILE"
+      echo "  Updated: $RESUME_FILE"
+    fi
+  else
+    echo "  No explicit resume command found."
+  fi
+}
+
+kill_session() {
   echo "Killing tmux session '$NAME'..."
   tmux kill-session -t "$NAME" 2>/dev/null || true
-  echo "Done."
 }
 
 send_exit() {
@@ -97,25 +176,62 @@ send_exit() {
     tmux send-keys -t "$NAME" C-c
   else
     echo "Sending /exit to claude '$NAME'..."
-    tmux send-keys -t "$NAME" "/exit" Enter
+    tmux send-keys -t "$NAME" "/exit"
+    sleep 1
+    tmux send-keys -t "$NAME" C-m
   fi
 }
 
+wait_for_exit_to_shell() {
+  local i pane_cmd
+  for ((i = 0; i < TIMEOUT; i++)); do
+    if ! tmux has-session -t "$NAME" 2>/dev/null; then
+      return 0
+    fi
+    pane_cmd=$(tmux display-message -p -t "$NAME" "#{pane_current_command}" 2>/dev/null || true)
+    case "$pane_cmd" in
+      bash|zsh|sh|fish|nu)
+        return 0
+        ;;
+    esac
+    sleep 1
+  done
+  return 1
+}
+
 if [ "$FORCE" = true ]; then
-  archive_and_kill
-else
-  send_exit
-
-  # Wait 5s for AI to exit and expose resume ID
-  echo "Waiting for AI to exit..."
-  sleep 5
-
-  # Check if tmux session already ended
-  if ! tmux has-session -t "$NAME" 2>/dev/null; then
-    echo "Session already ended."
-    exit 0
-  fi
-
-  # Archive now (captures resume ID output)
-  archive_and_kill
+  capture_archive
+  show_archive_tail_and_hint
+  update_meta_last_down
+  post_lifecycle "Agent '$NAME' stopped (--kill) on ${SERVER_ID:-local}"
+  kill_session
+  echo "Done (--kill)."
+  exit 0
 fi
+
+send_exit
+echo "Waiting for AI to exit (timeout ${TIMEOUT}s)..."
+if ! wait_for_exit_to_shell; then
+  capture_archive
+  show_archive_tail_and_hint
+  echo "Error: agent did not exit within timeout; session kept alive for manual handling." >&2
+  echo "  Attach: tmux attach -t $NAME" >&2
+  echo "  After seeing resume hint, run agent-down again." >&2
+  exit 2
+fi
+
+capture_archive
+show_archive_tail_and_hint
+
+RESUME_HINT=$(extract_resume_hint)
+if [ "$AGENT_TYPE" = "claude" ] && [ -z "$RESUME_HINT" ]; then
+  echo "Error: claude resume hint missing; refusing to kill session to avoid context loss." >&2
+  echo "  Attach: tmux attach -t $NAME" >&2
+  echo "  Verify archive tail manually, then run: agent-down $NAME --kill (if you accept risk)." >&2
+  exit 2
+fi
+
+update_meta_last_down
+post_lifecycle "Agent '$NAME' stopped on ${SERVER_ID:-local}"
+kill_session
+echo "Done."

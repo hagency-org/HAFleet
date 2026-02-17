@@ -1,0 +1,68 @@
+#!/bin/bash
+# agent-update — Pull latest code and reinstall
+#
+# Usage:
+#   agent-update [--check]
+#
+# --check: only check if updates are available, don't install
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_DIR="$(dirname "$BASE_DIR")"
+
+# If we're inside remote/, go up to repo root
+if [ "$(basename "$BASE_DIR")" = "remote" ]; then
+  REPO_DIR="$BASE_DIR/.."
+fi
+REPO_DIR="$(cd "$REPO_DIR" && pwd)"
+
+CHECK_ONLY=false
+[ "${1:-}" = "--check" ] && CHECK_ONLY=true
+
+cd "$REPO_DIR"
+
+# Ensure we're in a git repo
+if [ ! -d ".git" ]; then
+  echo "Error: $REPO_DIR is not a git repository" >&2
+  exit 1
+fi
+
+# Fetch latest
+git fetch origin --quiet 2>/dev/null || {
+  echo "Error: failed to fetch from origin" >&2
+  exit 1
+}
+
+LOCAL=$(git rev-parse HEAD)
+REMOTE=$(git rev-parse origin/main 2>/dev/null || git rev-parse origin/master 2>/dev/null)
+
+if [ "$LOCAL" = "$REMOTE" ]; then
+  echo "Already up to date."
+  exit 0
+fi
+
+BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null || git rev-list --count HEAD..origin/master 2>/dev/null || echo "?")
+echo "Updates available: $BEHIND commit(s) behind."
+
+if [ "$CHECK_ONLY" = true ]; then
+  echo "Run 'agent-update' to install updates."
+  exit 0
+fi
+
+# Pull
+echo "Pulling latest..."
+git pull --ff-only origin main 2>/dev/null || git pull --ff-only origin master 2>/dev/null || {
+  echo "Error: git pull failed (local changes?). Try: cd $REPO_DIR && git stash && agent-update" >&2
+  exit 1
+}
+
+# Reinstall
+echo "Reinstalling..."
+cd "$REPO_DIR/remote"
+bash install-remote.sh
+
+echo ""
+echo "Update complete. Push relay restarted."
+echo "Note: running agents keep old code until restarted."

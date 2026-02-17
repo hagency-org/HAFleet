@@ -21,8 +21,66 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
 DATA_DIR="$BASE_DIR/data/agents"
+
+# Load .env if present
+ENV_FILE="$BASE_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
+
 BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
 SERVER_ID="${AGENT_CHAT_SERVER:-}"
+API_TOKEN="${API_TOKEN:-}"
+
+# Auth header for API calls
+AUTH_HEADER=""
+[ -n "$API_TOKEN" ] && AUTH_HEADER="Authorization: Bearer $API_TOKEN"
+
+api_curl() {
+  if [ -n "$AUTH_HEADER" ]; then
+    curl --noproxy '*' -s -H "$AUTH_HEADER" "$@"
+  else
+    curl --noproxy '*' -s "$@"
+  fi
+}
+
+# Helper: post lifecycle event to info group
+post_lifecycle() {
+  local event_summary="$1"
+  local event_full="${2:-$1}"
+  local summary_json full_json
+  summary_json=$(EVENT_SUMMARY="$event_summary" python3 - <<'PY'
+import json, os
+print(json.dumps(os.environ["EVENT_SUMMARY"]))
+PY
+)
+  full_json=$(EVENT_FULL="$event_full" python3 - <<'PY'
+import json, os
+print(json.dumps(os.environ["EVENT_FULL"]))
+PY
+)
+  api_curl -X POST "$BACKEND_URL/api/messages" \
+    -H 'Content-Type: application/json' \
+    -d "{\"from\":\"system\",\"group\":\"info\",\"type\":\"inform\",\"summary\":${summary_json},\"full\":${full_json},\"mentions\":[]}" \
+    >/dev/null 2>&1 || true
+}
+
+# ── Check for updates ────────────────────────────────────────────────
+REPO_DIR="$(dirname "$BASE_DIR")"
+if [ -d "$REPO_DIR/.git" ]; then
+  (
+    cd "$REPO_DIR"
+    git fetch origin --quiet 2>/dev/null || true
+    LOCAL=$(git rev-parse HEAD 2>/dev/null || true)
+    REMOTE=$(git rev-parse origin/main 2>/dev/null || git rev-parse origin/master 2>/dev/null || true)
+    if [ -n "$LOCAL" ] && [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
+      BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null || git rev-list --count HEAD..origin/master 2>/dev/null || echo "?")
+      echo "⚠ Updates available ($BEHIND commits behind). Run 'agent-update' to install."
+    fi
+  )
+fi
 
 # ── Parse args ────────────────────────────────────────────────────────
 if [ $# -lt 1 ]; then
@@ -254,20 +312,24 @@ elif [ "$TYPE" = "codex" ]; then
 fi
 
 # ── Auto-register with backend ───────────────────────────────────────
-REG_CHECK=$(curl --noproxy '*' -s "$BACKEND_URL/api/agents/$NAME" 2>/dev/null || echo '{"error":"unreachable"}')
+REG_CHECK=$(api_curl "$BACKEND_URL/api/agents/$NAME" 2>/dev/null || echo '{"error":"unreachable"}')
 if echo "$REG_CHECK" | grep -q '"error"'; then
   echo "Registering agent '$NAME' with backend..."
   REG_BODY="{\"name\":\"$NAME\",\"tmux\":\"$NAME:0.0\",\"type\":\"agent\"}"
   if [ -n "$SERVER_ID" ]; then
     REG_BODY="{\"name\":\"$NAME\",\"tmux\":\"$NAME:0.0\",\"type\":\"agent\",\"server\":\"$SERVER_ID\"}"
   fi
-  curl --noproxy '*' -s -X POST "$BACKEND_URL/api/agents" \
+  api_curl -X POST "$BACKEND_URL/api/agents" \
     -H 'Content-Type: application/json' \
     -d "$REG_BODY" \
     >/dev/null 2>&1 || echo "  Warning: backend registration failed (backend may be down)"
+  post_lifecycle "Agent '$NAME' registered ($TYPE) on ${SERVER_ID:-local}"
 else
   echo "Agent '$NAME' already registered."
 fi
+
+# Post agent-up lifecycle event
+post_lifecycle "Agent '$NAME' started ($TYPE) on ${SERVER_ID:-local}" "Agent '$NAME' ($TYPE) started in $AGENT_PATH on ${SERVER_ID:-local}"
 
 # ── Done ──────────────────────────────────────────────────────────────
 echo ""

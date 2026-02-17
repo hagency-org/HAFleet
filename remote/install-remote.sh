@@ -38,6 +38,7 @@ install -m 0755 "$SCRIPT_DIR/bin/agent-up" "$INSTALL_BIN_DIR/agent-up"
 install -m 0755 "$SCRIPT_DIR/bin/agent-down" "$INSTALL_BIN_DIR/agent-down"
 install -m 0755 "$SCRIPT_DIR/bin/agent-ls" "$INSTALL_BIN_DIR/agent-ls"
 install -m 0755 "$SCRIPT_DIR/bin/agent-send" "$INSTALL_BIN_DIR/agent-send"
+install -m 0755 "$SCRIPT_DIR/bin/agent-update" "$INSTALL_BIN_DIR/agent-update"
 
 echo "[5/6] Installing systemd service ${SERVICE_NAME}..."
 TMP_UNIT="$(mktemp)"

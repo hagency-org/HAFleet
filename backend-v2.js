@@ -103,6 +103,7 @@ function summarizeMsg(m) {
     from: m.from,
     type: m.type,
     summary: m.summary,
+    full: m.full || '',
     mentions: m.mentions || [],
     time: relativeTime(m.ts),
     reply_to: m.reply_to || null,

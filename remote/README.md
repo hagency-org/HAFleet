@@ -11,6 +11,7 @@ This folder is the deployable package for remote servers.
 - `bin/agent-down`
 - `bin/agent-ls`
 - `bin/agent-send`
+- `bin/agent-update`
 - `push-relay.service`
 - `.env.example`
 - `install-remote.sh`
