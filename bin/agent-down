@@ -33,6 +33,10 @@ SERVER_ID="${AGENT_CHAT_SERVER:-}"
 AUTH_HEADER=""
 [ -n "$API_TOKEN" ] && AUTH_HEADER="Authorization: Bearer $API_TOKEN"
 
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
 api_curl() {
   if [ -n "$AUTH_HEADER" ]; then
     curl --noproxy '*' -s -H "$AUTH_HEADER" "$@"
@@ -63,6 +67,8 @@ fi
 
 NAME="$1"
 shift || true
+TMUX_TARGET="=${NAME}"
+TMUX_PANE_TARGET="=${NAME}:0.0"
 
 FORCE=false
 TIMEOUT=""
@@ -88,7 +94,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if ! tmux has-session -t "$NAME" 2>/dev/null; then
+if ! tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
   echo "Session '$NAME' does not exist."
   exit 0
 fi
@@ -107,10 +113,17 @@ if [ -f "$META_FILE" ]; then
   AGENT_TYPE=$(python3 -c "import json; print(json.load(open('$META_FILE')).get('type',''))" 2>/dev/null || true)
 fi
 if [ -z "$AGENT_TYPE" ]; then
-  PANE_CMD=$(tmux list-panes -t "$NAME" -F "#{pane_current_command}" 2>/dev/null | head -1)
+  PANE_CMD=$(tmux list-panes -t "$TMUX_PANE_TARGET" -F "#{pane_current_command}" 2>/dev/null | head -1)
   case "$PANE_CMD" in
-    *codex*) AGENT_TYPE="codex" ;;
-    *) AGENT_TYPE="claude" ;;
+    *codex*|node) AGENT_TYPE="codex" ;;
+    *claude*) AGENT_TYPE="claude" ;;
+    *)
+      if tmux capture-pane -t "$TMUX_PANE_TARGET" -p -S -120 2>/dev/null | if have_cmd rg; then rg -q 'OpenAI Codex|codex resume'; else grep -Eq 'OpenAI Codex|codex resume'; fi; then
+        AGENT_TYPE="codex"
+      else
+        AGENT_TYPE="claude"
+      fi
+      ;;
   esac
 fi
 
@@ -136,7 +149,7 @@ json.dump(d, open('$META_FILE', 'w'), indent=2)
 
 capture_archive() {
   echo "Archiving pane scrollback..."
-  tmux capture-pane -t "$NAME" -p -S - > "$ARCHIVE_FILE" 2>/dev/null || true
+  tmux capture-pane -t "$TMUX_PANE_TARGET" -p -S - > "$ARCHIVE_FILE" 2>/dev/null || true
   LINES=$(wc -l < "$ARCHIVE_FILE" 2>/dev/null || echo 0)
   echo "  Saved $LINES lines → $ARCHIVE_FILE"
 }
@@ -145,7 +158,11 @@ extract_resume_hint() {
   if [ ! -f "$ARCHIVE_FILE" ]; then
     return 1
   fi
-  rg -o 'claude --resume [0-9a-f-]{36}|codex resume [0-9a-f-]{36}' "$ARCHIVE_FILE" | tail -1 || true
+  if have_cmd rg; then
+    rg -o 'claude --resume [0-9a-f-]{36}|codex resume [0-9a-f-]{36}' "$ARCHIVE_FILE" | tail -1 || true
+  else
+    grep -Eo 'claude --resume [0-9a-f-]{36}|codex resume [0-9a-f-]{36}' "$ARCHIVE_FILE" | tail -1 || true
+  fi
 }
 
 show_archive_tail_and_hint() {
@@ -167,28 +184,43 @@ show_archive_tail_and_hint() {
 
 kill_session() {
   echo "Killing tmux session '$NAME'..."
-  tmux kill-session -t "$NAME" 2>/dev/null || true
+  tmux kill-session -t "$TMUX_TARGET" 2>/dev/null || true
 }
 
 send_exit() {
   if [ "$AGENT_TYPE" = "codex" ]; then
     echo "Sending Ctrl+C to codex '$NAME'..."
-    tmux send-keys -t "$NAME" C-c
-  else
-    echo "Sending /exit to claude '$NAME'..."
-    tmux send-keys -t "$NAME" "/exit"
+    tmux send-keys -t "$TMUX_PANE_TARGET" C-c
     sleep 1
-    tmux send-keys -t "$NAME" C-m
+    pane_cmd=$(tmux display-message -p -t "$TMUX_PANE_TARGET" "#{pane_current_command}" 2>/dev/null || true)
+    case "$pane_cmd" in
+      bash|zsh|sh|fish|nu) ;;
+      *)
+        echo "Codex still active after first Ctrl+C; sending second Ctrl+C..."
+        tmux send-keys -t "$TMUX_PANE_TARGET" C-c
+        ;;
+    esac
+  else
+    echo "Sending claude exit sequence (/exit + Enter + Ctrl+C x3) to '$NAME'..."
+    tmux send-keys -t "$TMUX_PANE_TARGET" "/exit"
+    sleep 0.1
+    tmux send-keys -t "$TMUX_PANE_TARGET" C-m
+    sleep 0.1
+    tmux send-keys -t "$TMUX_PANE_TARGET" C-c
+    sleep 0.1
+    tmux send-keys -t "$TMUX_PANE_TARGET" C-c
+    sleep 0.1
+    tmux send-keys -t "$TMUX_PANE_TARGET" C-c
   fi
 }
 
 wait_for_exit_to_shell() {
   local i pane_cmd
   for ((i = 0; i < TIMEOUT; i++)); do
-    if ! tmux has-session -t "$NAME" 2>/dev/null; then
+    if ! tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
       return 0
     fi
-    pane_cmd=$(tmux display-message -p -t "$NAME" "#{pane_current_command}" 2>/dev/null || true)
+    pane_cmd=$(tmux display-message -p -t "$TMUX_PANE_TARGET" "#{pane_current_command}" 2>/dev/null || true)
     case "$pane_cmd" in
       bash|zsh|sh|fish|nu)
         return 0
