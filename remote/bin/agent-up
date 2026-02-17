@@ -73,11 +73,15 @@ if [ -d "$REPO_DIR/.git" ]; then
   (
     cd "$REPO_DIR"
     git fetch origin --quiet 2>/dev/null || true
-    LOCAL=$(git rev-parse HEAD 2>/dev/null || true)
+    LOCAL=$(git rev-parse HEAD 2>/dev/null | tr -d '[:space:]' || true)
     REMOTE=$(git rev-parse origin/main 2>/dev/null || git rev-parse origin/master 2>/dev/null || true)
+    REMOTE=$(echo "$REMOTE" | tr -d '[:space:]')
     if [ -n "$LOCAL" ] && [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
-      BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null || git rev-list --count HEAD..origin/master 2>/dev/null || echo "?")
-      echo "⚠ Updates available ($BEHIND commits behind). Run 'agent-update' to install."
+      BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null || git rev-list --count HEAD..origin/master 2>/dev/null || echo "0")
+      BEHIND=$(echo "$BEHIND" | tr -d '[:space:]')
+      if [ "$BEHIND" -gt 0 ] 2>/dev/null; then
+        echo "Updates available ($BEHIND commits behind). Run 'agent-update' to install."
+      fi
     fi
   )
 fi
@@ -152,6 +156,11 @@ done
 AGENT_DATA="$DATA_DIR/$NAME"
 META_FILE="$AGENT_DATA/meta.json"
 RESUME_FILE="$AGENT_DATA/resume-id"
+
+# Auto-detect first-time agent: no meta = fresh start
+if [ ! -f "$META_FILE" ] && [ "$FRESH" = false ]; then
+  FRESH=true
+fi
 
 SAVED_PATH=""
 SAVED_TYPE=""
