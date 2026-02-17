@@ -159,8 +159,9 @@ AGENT_DATA="$DATA_DIR/$NAME"
 META_FILE="$AGENT_DATA/meta.json"
 RESUME_FILE="$AGENT_DATA/resume-id"
 
-# Auto-detect first-time agent: no meta = fresh start
-if [ ! -f "$META_FILE" ] && [ "$FRESH" = false ]; then
+# Auto-detect first-time agent: no meta AND no resume-id => fresh start.
+# If resume-id already exists (e.g. recovered via agent-down), keep resume path.
+if [ ! -f "$META_FILE" ] && [ "$FRESH" = false ] && [ ! -f "$RESUME_FILE" ]; then
   FRESH=true
 fi
 
@@ -214,6 +215,83 @@ is_valid_claude_session_id() {
   [ -f "$d/$sid.jsonl" ]
 }
 
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+extract_resume_hint_from_stream() {
+  if have_cmd rg; then
+    rg -o 'claude --resume [0-9a-f-]{36}|codex resume [0-9a-f-]{36}'
+  else
+    grep -Eo 'claude --resume [0-9a-f-]{36}|codex resume [0-9a-f-]{36}'
+  fi | tail -1 || true
+}
+
+extract_resume_id_from_hint() {
+  local hint="$1"
+  echo "$hint" | grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' | tail -1 || true
+}
+
+capture_resume_id_from_pane() {
+  local timeout="${1:-120}"
+  local i pane_text hint rid
+  for ((i = 0; i < timeout; i++)); do
+    pane_text=$(tmux capture-pane -t "$TMUX_PANE_TARGET" -p -S -200 2>/dev/null || true)
+    hint=$(printf '%s\n' "$pane_text" | extract_resume_hint_from_stream)
+    rid=$(extract_resume_id_from_hint "$hint")
+    if [ -n "$rid" ]; then
+      echo "$rid" > "$RESUME_FILE"
+      echo "Captured resume-id from pane output: $rid"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+capture_resume_id_from_claude_files() {
+  local proj_dir newest sid
+  proj_dir=$(claude_project_dir_for_path "$AGENT_PATH") || return 1
+  [ -d "$proj_dir" ] || return 1
+  newest=$(find "$proj_dir" -maxdepth 1 -name "*.jsonl" -type f -mmin -10 2>/dev/null | sort -r | head -1)
+  [ -n "$newest" ] || return 1
+  sid=$(basename "$newest" .jsonl)
+  if echo "$sid" | grep -qE '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'; then
+    echo "$sid" > "$RESUME_FILE"
+    echo "Captured resume-id from Claude session files: $sid"
+    return 0
+  fi
+  return 1
+}
+
+capture_resume_id_from_codex_files() {
+  local sessions_dir newest sid
+  sessions_dir="$HOME/.codex/sessions"
+  [ -d "$sessions_dir" ] || return 1
+  newest=$(find "$sessions_dir" -name "*.jsonl" -type f -mmin -10 2>/dev/null | sort -r | head -1)
+  [ -n "$newest" ] || return 1
+  sid=$(echo "$newest" | grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' | tail -1 || true)
+  [ -n "$sid" ] || return 1
+  echo "$sid" > "$RESUME_FILE"
+  echo "Captured resume-id from Codex session files: $sid"
+  return 0
+}
+
+capture_resume_id_background() {
+  local kind="$1"
+  (
+    if capture_resume_id_from_pane 150; then
+      exit 0
+    fi
+    if [ "$kind" = "claude" ]; then
+      capture_resume_id_from_claude_files || true
+    else
+      capture_resume_id_from_codex_files || true
+    fi
+  ) &
+  disown
+}
+
 if [ "$TYPE" = "claude" ] && [ "$FRESH" = false ]; then
   if [ ! -f "$RESUME_FILE" ]; then
     echo "Error: missing resume-id for claude agent '$NAME'." >&2
@@ -252,28 +330,49 @@ mkdir -p "$AGENT_DATA"
 NOW=$(date -Iseconds)
 if [ -f "$META_FILE" ]; then
   # Update lastUp
-  python3 -c "
+  META_FILE="$META_FILE" AGENT_PATH="$AGENT_PATH" TYPE="$TYPE" MODEL="$MODEL" EXTRA_ARGS="$EXTRA_ARGS" NOW="$NOW" \
+    python3 - <<'PY'
 import json
-d = json.load(open('$META_FILE'))
-d['path'] = '$AGENT_PATH'
-d['type'] = '$TYPE'
-d['model'] = '$MODEL'
-d['extraArgs'] = '$EXTRA_ARGS'
-d['lastUp'] = '$NOW'
-json.dump(d, open('$META_FILE', 'w'), indent=2)
-"
+import os
+
+meta_file = os.environ["META_FILE"]
+with open(meta_file) as f:
+    data = json.load(f)
+data["path"] = os.environ["AGENT_PATH"]
+data["type"] = os.environ["TYPE"]
+data["model"] = os.environ["MODEL"]
+data["extraArgs"] = os.environ["EXTRA_ARGS"]
+data["lastUp"] = os.environ["NOW"]
+with open(meta_file, "w") as f:
+    json.dump(data, f, indent=2)
+PY
 else
   # Create new meta
-  python3 -c "
+  META_FILE="$META_FILE" NAME="$NAME" AGENT_PATH="$AGENT_PATH" TYPE="$TYPE" MODEL="$MODEL" EXTRA_ARGS="$EXTRA_ARGS" NOW="$NOW" \
+    python3 - <<'PY'
 import json
-d = {'name': '$NAME', 'path': '$AGENT_PATH', 'type': '$TYPE', 'model': '$MODEL', 'extraArgs': '$EXTRA_ARGS', 'createdAt': '$NOW', 'lastUp': '$NOW'}
-json.dump(d, open('$META_FILE', 'w'), indent=2)
-"
+import os
+
+data = {
+    "name": os.environ["NAME"],
+    "path": os.environ["AGENT_PATH"],
+    "type": os.environ["TYPE"],
+    "model": os.environ["MODEL"],
+    "extraArgs": os.environ["EXTRA_ARGS"],
+    "createdAt": os.environ["NOW"],
+    "lastUp": os.environ["NOW"],
+}
+with open(os.environ["META_FILE"], "w") as f:
+    json.dump(data, f, indent=2)
+PY
 fi
 
 # ── Create tmux session ──────────────────────────────────────────────
 echo "Creating tmux session '$NAME' in $AGENT_PATH..."
 tmux new-session -d -s "$NAME" -c "$AGENT_PATH"
+
+# ── Build init prompt for fresh starts ────────────────────────────────
+INIT_PROMPT="Your name is ${NAME}. You have an MCP tool server called 'agent-chat' for communicating with other agents and humans. Key tools: check_inbox() to read messages, send_message(to, summary, full) to DM, post(group, summary, full, mentions) for group messages, whoami() to see your identity and available agents/groups. Check your inbox now to see if there are any messages for you."
 
 # ── Launch AI ─────────────────────────────────────────────────────────
 if [ "$TYPE" = "claude" ]; then
@@ -285,7 +384,11 @@ if [ "$TYPE" = "claude" ]; then
     tmux send-keys -t "$TMUX_PANE_TARGET" "claude --resume $RID $CLAUDE_FLAGS" Enter
   else
     echo "Starting new claude session..."
-    tmux send-keys -t "$TMUX_PANE_TARGET" "claude $CLAUDE_FLAGS" Enter
+    # Write init prompt to temp file to avoid shell escaping issues
+    INIT_FILE=$(mktemp)
+    echo "$INIT_PROMPT" > "$INIT_FILE"
+    tmux send-keys -t "$TMUX_PANE_TARGET" "claude $CLAUDE_FLAGS \"\$(cat $INIT_FILE)\" && rm -f $INIT_FILE" Enter
+    capture_resume_id_background "claude"
   fi
 
 elif [ "$TYPE" = "codex" ]; then
@@ -299,26 +402,11 @@ elif [ "$TYPE" = "codex" ]; then
   else
     echo "Starting new codex session..."
     tmux send-keys -t "$TMUX_PANE_TARGET" "codex $CODEX_FLAGS -C $AGENT_PATH" Enter
-    # Send init prompt after codex starts to trigger session file creation
-    # Then detect session ID in background
-    (
-      sleep 5
-      tmux send-keys -t "$TMUX_PANE_TARGET" "Hi" Enter
-      sleep 0.1
-      tmux send-keys -t "$TMUX_PANE_TARGET" Enter
-      sleep 15
-      SESSIONS_DIR="$HOME/.codex/sessions"
-      if [ -d "$SESSIONS_DIR" ]; then
-        NEWEST=$(find "$SESSIONS_DIR" -name "*.jsonl" -newer "$META_FILE" -type f 2>/dev/null | sort -r | head -1)
-        if [ -n "$NEWEST" ]; then
-          UUID=$(echo "$NEWEST" | grep -oP '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}')
-          if [ -n "$UUID" ]; then
-            echo "$UUID" > "$RESUME_FILE"
-          fi
-        fi
-      fi
-    ) &
-    disown
+    # Send init prompt after codex starts to create a session deterministically.
+    sleep 5
+    tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"
+    tmux send-keys -t "$TMUX_PANE_TARGET" Enter
+    capture_resume_id_background "codex"
   fi
 fi
 

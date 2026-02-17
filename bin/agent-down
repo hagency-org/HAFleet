@@ -138,12 +138,17 @@ fi
 update_meta_last_down() {
   if [ -f "$META_FILE" ]; then
     NOW=$(date -Iseconds)
-    python3 -c "
+    META_FILE="$META_FILE" NOW="$NOW" python3 - <<'PY' 2>/dev/null || true
 import json
-d = json.load(open('$META_FILE'))
-d['lastDown'] = '$NOW'
-json.dump(d, open('$META_FILE', 'w'), indent=2)
-" 2>/dev/null || true
+import os
+
+meta_file = os.environ["META_FILE"]
+with open(meta_file) as f:
+    data = json.load(f)
+data["lastDown"] = os.environ["NOW"]
+with open(meta_file, "w") as f:
+    json.dump(data, f, indent=2)
+PY
   fi
 }
 
