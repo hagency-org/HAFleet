@@ -912,9 +912,12 @@ app.post('/api/messages', (req, res) => {
     }
   }
   if (msg.group && msg.mentions.length > 0) {
-    const offlineMentions = msg.mentions
+    const groupMemberSet = new Set((groups[msg.group]?.members || []).filter(Boolean));
+    const mentionStates = msg.mentions
       .filter(name => name !== msg.from)
-      .map(name => ({ name, state: getAgentDeliveryState(name) }))
+      .map(name => ({ name, state: getAgentDeliveryState(name), isGroupMember: groupMemberSet.has(name) }));
+
+    const offlineMentions = mentionStates
       .filter(item => item.state.exists && !item.state.online)
       .map(item => ({
         target: item.name,
@@ -924,6 +927,13 @@ app.post('/api/messages', (req, res) => {
     if (offlineMentions.length) {
       warnings.push({ code: 'mentions_offline', targets: offlineMentions });
       for (const item of offlineMentions) suppressedRecipients.add(item.target);
+    }
+
+    const unknownMentions = mentionStates
+      .filter(item => !item.state.exists && !item.isGroupMember)
+      .map(item => ({ target: item.name, reason: 'not-found' }));
+    if (unknownMentions.length) {
+      warnings.push({ code: 'mentions_unknown', targets: unknownMentions });
     }
   }
   if (suppressedRecipients.size > 0) {

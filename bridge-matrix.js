@@ -540,6 +540,16 @@ class MatrixBridge {
         if (targets) {
           lines.push(`⚠️ Offline mentions were archived only: ${targets}.`);
         }
+        continue;
+      }
+      if (warning.code === 'mentions_unknown' && Array.isArray(warning.targets) && warning.targets.length > 0) {
+        const targets = warning.targets
+          .filter(t => t?.target)
+          .map(t => `@${t.target}`)
+          .join(', ');
+        if (targets) {
+          lines.push(`⚠️ Mention targets not found in agent registry: ${targets}.`);
+        }
       }
     }
 
