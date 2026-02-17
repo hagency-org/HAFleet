@@ -8,6 +8,7 @@ const API_TOKEN = (process.env.API_TOKEN || '').trim();
 const SERVER_ID = (process.env.AGENT_CHAT_SERVER || os.hostname()).trim();
 const SCAN_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_SCAN_INTERVAL_MS || '30000', 10);
 const RECONNECT_MS = Number.parseInt(process.env.PUSH_RELAY_RECONNECT_MS || '5000', 10);
+const HEARTBEAT_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_HEARTBEAT_INTERVAL_MS || '15000', 10);
 
 const authHeaders = API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {};
 const localAgents = new Set();
@@ -16,6 +17,7 @@ const delivered = new Set();
 const deliveredOrder = [];
 const DELIVERED_CAP = 10000;
 let reconnectTimer = null;
+let heartbeatTimer = null;
 
 function normalizeServer(value) {
   if (typeof value !== 'string') return null;
@@ -25,6 +27,11 @@ function normalizeServer(value) {
 
 function api(path) {
   return fetch(`${API_BASE}${path}`, { headers: authHeaders });
+}
+
+async function postJson(path, body) {
+  const headers = { 'Content-Type': 'application/json', ...authHeaders };
+  return fetch(`${API_BASE}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
 }
 
 function listLocalTmuxSessions() {
@@ -49,6 +56,31 @@ async function refreshAgentsSnapshot() {
     for (const row of rows) agentsByName.set(row.name, row);
   } catch (e) {
     console.error(`[push-relay] refresh agents failed: ${e.message}`);
+  }
+}
+
+async function sendHeartbeat() {
+  const sessions = [...localAgents];
+  try {
+    const res = await postJson('/api/servers/heartbeat', {
+      server: SERVER_ID,
+      sessions,
+      agents: sessions,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`status ${res.status} ${body}`.trim());
+    }
+  } catch (e) {
+    console.error(`[push-relay] heartbeat failed: ${e.message}`);
+  }
+}
+
+async function sendOfflineNotice(reason = 'push-relay-shutdown') {
+  try {
+    await postJson(`/api/servers/${encodeURIComponent(SERVER_ID)}/offline`, { reason });
+  } catch (e) {
+    console.error(`[push-relay] offline notice failed: ${e.message}`);
   }
 }
 
@@ -185,11 +217,27 @@ function connectSse() {
 
 async function main() {
   await refreshAgentsSnapshot();
+  await sendHeartbeat();
   setInterval(() => {
     refreshAgentsSnapshot().catch((e) => console.error(`[push-relay] refresh failed: ${e.message}`));
   }, SCAN_INTERVAL_MS);
+  heartbeatTimer = setInterval(() => {
+    refreshAgentsSnapshot()
+      .then(() => sendHeartbeat())
+      .catch((e) => console.error(`[push-relay] heartbeat loop failed: ${e.message}`));
+  }, HEARTBEAT_INTERVAL_MS);
   connectSse();
 }
+
+async function gracefulExit(signal) {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  console.log(`[push-relay] received ${signal}, marking server offline`);
+  await sendOfflineNotice(signal);
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => { gracefulExit('SIGTERM'); });
+process.on('SIGINT', () => { gracefulExit('SIGINT'); });
 
 main().catch((e) => {
   console.error(`[push-relay] fatal: ${e.message}`);

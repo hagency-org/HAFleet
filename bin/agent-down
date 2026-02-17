@@ -60,6 +60,24 @@ PY
     >/dev/null 2>&1 || true
 }
 
+mark_backend_offline() {
+  local reason="${1:-agent-down}"
+  local payload
+  payload=$(REASON="$reason" python3 - <<'PY'
+import json
+import os
+print(json.dumps({"reason": os.environ["REASON"], "clearTmux": True}))
+PY
+)
+  if api_curl -X POST "$BACKEND_URL/api/agents/$AGENT_PATH_ESCAPED/offline" \
+    -H 'Content-Type: application/json' \
+    -d "$payload" >/dev/null 2>&1; then
+    echo "Marked '$NAME' offline in backend."
+  else
+    echo "Warning: failed to mark '$NAME' offline in backend." >&2
+  fi
+}
+
 if [ $# -lt 1 ]; then
   echo "Usage: agent-down <name> [--kill] [--timeout <seconds>]"
   exit 1
@@ -69,6 +87,12 @@ NAME="$1"
 shift || true
 TMUX_TARGET="=${NAME}"
 TMUX_PANE_TARGET="=${NAME}:0.0"
+AGENT_PATH_ESCAPED=$(NAME="$NAME" python3 - <<'PY'
+import os
+import urllib.parse
+print(urllib.parse.quote(os.environ["NAME"], safe=""))
+PY
+)
 
 FORCE=false
 TIMEOUT=""
@@ -96,6 +120,7 @@ done
 
 if ! tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
   echo "Session '$NAME' does not exist."
+  mark_backend_offline "session-missing"
   exit 0
 fi
 
@@ -242,6 +267,7 @@ if [ "$FORCE" = true ]; then
   update_meta_last_down
   post_lifecycle "Agent '$NAME' stopped (--kill) on ${SERVER_ID:-local}"
   kill_session
+  mark_backend_offline "agent-down-kill"
   echo "Done (--kill)."
   exit 0
 fi
@@ -271,4 +297,5 @@ fi
 update_meta_last_down
 post_lifecycle "Agent '$NAME' stopped on ${SERVER_ID:-local}"
 kill_session
+mark_backend_offline "agent-down"
 echo "Done."

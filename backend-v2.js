@@ -10,6 +10,8 @@ const PUSH_QUEUE_URL = 'http://127.0.0.1:8084/api/queue';
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const LOCAL_SERVER_ID = (process.env.AGENT_CHAT_SERVER || 'local').trim();
 const CORS_ALLOWED_ORIGIN = (process.env.FRP_API_ORIGIN || 'https://agentchat.ananthe.party').trim();
+const HEARTBEAT_TTL_MS = Number.parseInt(process.env.AGENT_HEARTBEAT_TTL_MS || '90000', 10);
+const SERVER_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_SERVER_SWEEP_INTERVAL_MS || '15000', 10);
 
 mkdirSync(DATA_DIR, { recursive: true });
 
@@ -59,14 +61,45 @@ const agents = loadJsonSync('agents.json', {});
 const groups = loadJsonSync('groups.json', {});
 const messages = loadJsonSync('messages.json', []);
 const cursors = loadJsonSync('cursors.json', {});
+const servers = loadJsonSync('servers.json', {});
 let msgCounter = loadJsonSync('.msg_counter', 0);
 
 for (const agent of Object.values(agents)) {
+  agent.name = agent.name || null;
   if (!Object.prototype.hasOwnProperty.call(agent, 'server')) {
     agent.server = null;
   } else {
     agent.server = normalizeServer(agent.server);
   }
+  if (!Object.prototype.hasOwnProperty.call(agent, 'online')) {
+    agent.online = Boolean(agent.tmux);
+  } else {
+    agent.online = Boolean(agent.online);
+  }
+  if (!Object.prototype.hasOwnProperty.call(agent, 'lastSeen')) {
+    agent.lastSeen = agent.registeredAt || Date.now();
+  }
+  if (!Object.prototype.hasOwnProperty.call(agent, 'offlineReason')) {
+    agent.offlineReason = null;
+  } else if (typeof agent.offlineReason !== 'string' || !agent.offlineReason.trim()) {
+    agent.offlineReason = null;
+  } else {
+    agent.offlineReason = agent.offlineReason.trim();
+  }
+}
+
+for (const [serverId, server] of Object.entries(servers)) {
+  if (!server || typeof server !== 'object') {
+    servers[serverId] = { id: serverId, lastSeen: 0, online: false, updatedAt: Date.now(), sessions: [], agents: [], agentCount: 0 };
+    continue;
+  }
+  server.id = server.id || serverId;
+  server.lastSeen = Number(server.lastSeen) || 0;
+  server.online = Boolean(server.online);
+  server.updatedAt = Number(server.updatedAt) || server.lastSeen || 0;
+  if (!Array.isArray(server.sessions)) server.sessions = [];
+  if (!Array.isArray(server.agents)) server.agents = [];
+  server.agentCount = Number(server.agentCount) || server.agents.length || 0;
 }
 
 function nextMsgId() {
@@ -79,6 +112,7 @@ function saveAgents() { saveJson('agents.json', agents); }
 function saveGroups() { saveJson('groups.json', groups); }
 function saveMessages() { saveJson('messages.json', messages); }
 function saveCursors() { saveJson('cursors.json', cursors); }
+function saveServers() { saveJson('servers.json', servers); }
 
 // ── SSE: live stream of new messages ──────────────────────────────────
 const sseClients = new Set();
@@ -136,6 +170,139 @@ function getUnreadInboxMessages(agentName) {
 function formatSenderList(names) {
   if (names.length <= 3) return names.join(', ');
   return `${names.slice(0, 3).join(', ')}, +${names.length - 3} more`;
+}
+
+function ensureServerRecord(serverId) {
+  if (!serverId) return null;
+  if (!servers[serverId] || typeof servers[serverId] !== 'object') {
+    servers[serverId] = {
+      id: serverId,
+      lastSeen: 0,
+      online: false,
+      updatedAt: Date.now(),
+      sessions: [],
+      agents: [],
+      agentCount: 0,
+      sourceIp: null,
+    };
+  }
+  return servers[serverId];
+}
+
+function markAgentsOfflineForServer(serverId, reason, clearTmux = false) {
+  let changed = false;
+  for (const agent of Object.values(agents)) {
+    if (normalizeServer(agent.server) !== serverId) continue;
+    if (agent.online !== false) { agent.online = false; changed = true; }
+    if (agent.offlineReason !== reason) { agent.offlineReason = reason; changed = true; }
+    if (clearTmux && agent.tmux !== null) { agent.tmux = null; changed = true; }
+  }
+  return changed;
+}
+
+function refreshServerLiveness() {
+  const now = Date.now();
+  let serversChanged = false;
+  let agentsChanged = false;
+  for (const [serverId, server] of Object.entries(servers)) {
+    if (!server || typeof server !== 'object') continue;
+    const isOnline = server.lastSeen > 0 && (now - server.lastSeen) <= HEARTBEAT_TTL_MS;
+    if (server.online !== isOnline) {
+      server.online = isOnline;
+      server.updatedAt = now;
+      serversChanged = true;
+      if (!isOnline) {
+        if (markAgentsOfflineForServer(serverId, `server-offline:${serverId}`, true)) {
+          agentsChanged = true;
+        }
+      }
+    }
+  }
+  if (serversChanged) saveServers();
+  if (agentsChanged) saveAgents();
+}
+
+function getAgentDeliveryState(name) {
+  const agent = agents[name];
+  if (!agent) return { exists: false, online: false, server: null, serverOnline: false, lastSeen: null, offlineReason: 'not-found' };
+  const serverId = normalizeServer(agent.server);
+  let serverOnline = true;
+  let serverLastSeen = null;
+  if (serverId && serverId !== 'local') {
+    const server = servers[serverId];
+    if (server) {
+      serverOnline = Boolean(server.online);
+      serverLastSeen = server.lastSeen || null;
+    } else {
+      serverOnline = Boolean(agent.online);
+    }
+  }
+  const online = Boolean(agent.online) && serverOnline;
+  return {
+    exists: true,
+    online,
+    agentOnline: Boolean(agent.online),
+    server: serverId,
+    serverOnline,
+    lastSeen: agent.lastSeen || null,
+    serverLastSeen,
+    offlineReason: agent.offlineReason || null,
+  };
+}
+
+function serializeAgent(agent) {
+  const state = getAgentDeliveryState(agent.name);
+  return {
+    ...agent,
+    server: normalizeServer(agent.server),
+    online: state.online,
+    agentOnline: state.agentOnline,
+    serverOnline: state.serverOnline,
+    lastSeen: state.lastSeen,
+    serverLastSeen: state.serverLastSeen,
+    offlineReason: state.offlineReason,
+  };
+}
+
+function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
+  const now = Date.now();
+  const server = ensureServerRecord(serverId);
+  const sessions = Array.isArray(payload.sessions)
+    ? [...new Set(payload.sessions.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim()))]
+    : [];
+  const heartbeatAgents = Array.isArray(payload.agents) ? payload.agents : sessions;
+  const liveAgents = [...new Set(heartbeatAgents.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim()))];
+  const liveSet = new Set(liveAgents);
+
+  server.lastSeen = now;
+  server.online = true;
+  server.updatedAt = now;
+  server.sourceIp = sourceIp || null;
+  server.sessions = sessions;
+  server.agents = liveAgents;
+  server.agentCount = liveAgents.length;
+
+  let agentsChanged = false;
+  for (const name of liveSet) {
+    const agent = agents[name];
+    if (!agent) continue;
+    if (normalizeServer(agent.server) !== serverId) { agent.server = serverId; agentsChanged = true; }
+    if (agent.online !== true) { agent.online = true; agentsChanged = true; }
+    if (agent.offlineReason !== null) { agent.offlineReason = null; agentsChanged = true; }
+    if (agent.lastSeen !== now) { agent.lastSeen = now; agentsChanged = true; }
+  }
+
+  for (const agent of Object.values(agents)) {
+    if (normalizeServer(agent.server) !== serverId) continue;
+    if (liveSet.has(agent.name)) continue;
+    if (agent.online !== false) { agent.online = false; agentsChanged = true; }
+    const reason = `heartbeat-missing:${serverId}`;
+    if (agent.offlineReason !== reason) { agent.offlineReason = reason; agentsChanged = true; }
+    if (agent.tmux !== null) { agent.tmux = null; agentsChanged = true; }
+  }
+
+  saveServers();
+  if (agentsChanged) saveAgents();
 }
 
 // ── Push notification relay ───────────────────────────────────────────
@@ -275,7 +442,67 @@ app.use('/api', (req, res, next) => {
 });
 
 // ── Health ────────────────────────────────────────────────────────────
-app.get('/health', (_req, res) => res.json({ ok: true, agents: Object.keys(agents).length, messages: messages.length }));
+app.get('/health', (_req, res) => {
+  refreshServerLiveness();
+  const serverRows = Object.values(servers);
+  const onlineServers = serverRows.filter(s => s.online).length;
+  const onlineAgents = Object.keys(agents).filter(name => getAgentDeliveryState(name).online).length;
+  res.json({
+    ok: true,
+    agents: Object.keys(agents).length,
+    onlineAgents,
+    servers: serverRows.length,
+    onlineServers,
+    messages: messages.length,
+  });
+});
+
+// ── Server heartbeats ─────────────────────────────────────────────────
+app.post('/api/servers/heartbeat', (req, res) => {
+  const serverId = normalizeServer(req.body?.server);
+  if (!serverId) return res.status(400).json({ error: 'server required' });
+  applyServerHeartbeat(serverId, req.body || {}, req.ip || req.connection?.remoteAddress || null);
+  refreshServerLiveness();
+  const state = servers[serverId];
+  return res.json({
+    ok: true,
+    server: {
+      id: state.id,
+      online: Boolean(state.online),
+      lastSeen: state.lastSeen || null,
+      updatedAt: state.updatedAt || null,
+      agentCount: state.agentCount || 0,
+      sourceIp: state.sourceIp || null,
+    },
+  });
+});
+
+app.post('/api/servers/:id/offline', (req, res) => {
+  const serverId = normalizeServer(req.params.id);
+  if (!serverId) return res.status(400).json({ error: 'server required' });
+  const server = ensureServerRecord(serverId);
+  server.lastSeen = Date.now();
+  server.online = false;
+  server.updatedAt = Date.now();
+  if (markAgentsOfflineForServer(serverId, `server-offline:${serverId}`, true)) saveAgents();
+  saveServers();
+  res.json({ ok: true, server: { id: serverId, online: false, lastSeen: server.lastSeen } });
+});
+
+app.get('/api/servers', (_req, res) => {
+  refreshServerLiveness();
+  const rows = Object.values(servers)
+    .map(s => ({
+      id: s.id,
+      online: Boolean(s.online),
+      lastSeen: s.lastSeen || null,
+      updatedAt: s.updatedAt || null,
+      agentCount: Number(s.agentCount) || 0,
+      sourceIp: s.sourceIp || null,
+    }))
+    .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+  res.json(rows);
+});
 
 // ── SSE endpoint ──────────────────────────────────────────────────────
 app.get('/api/stream', (req, res) => {
@@ -289,42 +516,71 @@ app.get('/api/stream', (req, res) => {
 app.post('/api/agents', (req, res) => {
   const { name, role, tmux, type: agentType, identity, server } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
+  refreshServerLiveness();
   const existing = agents[name] || {};
   const normalizedServer = normalizeServer(server);
   const resolvedServer = normalizedServer ?? (isLocalRequest(req) ? 'local' : normalizeServer(existing.server));
+  const resolvedTmux = tmux ?? existing.tmux ?? null;
+  const resolvedOnline = resolvedTmux ? true : Boolean(existing.online);
   agents[name] = {
     name,
     role: role ?? existing.role ?? null,
     identity: identity ?? existing.identity ?? null,
-    tmux: tmux ?? existing.tmux ?? null,
+    tmux: resolvedTmux,
     type: agentType ?? existing.type ?? 'agent',
     server: resolvedServer,
+    online: resolvedOnline,
+    lastSeen: resolvedOnline ? Date.now() : (existing.lastSeen || Date.now()),
+    offlineReason: resolvedOnline ? null : (existing.offlineReason || 'offline'),
     registeredAt: existing.registeredAt || Date.now(),
   };
   saveAgents();
-  res.json({ ok: true, agent: agents[name] });
+  res.json({ ok: true, agent: serializeAgent(agents[name]) });
 });
 
 app.patch('/api/agents/:name', (req, res) => {
+  refreshServerLiveness();
   const agent = agents[req.params.name];
   if (!agent) return res.status(404).json({ error: 'agent not found' });
-  const { role, identity, tmux } = req.body;
+  const { role, identity, tmux, online, offlineReason } = req.body;
   if (role !== undefined) agent.role = role;
   if (identity !== undefined) agent.identity = identity;
-  if (tmux !== undefined) agent.tmux = tmux;
+  if (tmux !== undefined) {
+    agent.tmux = tmux;
+    if (tmux) {
+      agent.online = true;
+      agent.offlineReason = null;
+      agent.lastSeen = Date.now();
+    } else if (online === undefined) {
+      agent.online = false;
+      agent.offlineReason = agent.offlineReason || 'tmux-cleared';
+    }
+  }
+  if (online !== undefined) {
+    agent.online = Boolean(online);
+    if (agent.online) {
+      agent.lastSeen = Date.now();
+      agent.offlineReason = null;
+    }
+  }
+  if (offlineReason !== undefined) {
+    agent.offlineReason = (typeof offlineReason === 'string' && offlineReason.trim()) ? offlineReason.trim() : null;
+  }
   saveAgents();
-  res.json({ ok: true, agent });
+  res.json({ ok: true, agent: serializeAgent(agent) });
 });
 
 app.get('/api/agents', (_req, res) => {
-  res.json(Object.values(agents).map(agent => ({ ...agent, server: normalizeServer(agent.server) })));
+  refreshServerLiveness();
+  res.json(Object.values(agents).map(serializeAgent));
 });
 
 app.get('/api/agents/:name', (req, res) => {
+  refreshServerLiveness();
   const agent = agents[req.params.name];
   if (!agent) return res.status(404).json({ error: 'agent not found' });
   const memberOf = Object.values(groups).filter(g => g.members.includes(req.params.name)).map(g => g.name);
-  res.json({ ...agent, server: normalizeServer(agent.server), groups: memberOf });
+  res.json({ ...serializeAgent(agent), groups: memberOf });
 });
 
 app.delete('/api/agents/:name', (req, res) => {
@@ -332,6 +588,21 @@ app.delete('/api/agents/:name', (req, res) => {
   delete agents[req.params.name];
   saveAgents();
   res.json({ ok: true });
+});
+
+app.post('/api/agents/:name/offline', (req, res) => {
+  const agent = agents[req.params.name];
+  if (!agent) return res.status(404).json({ error: 'agent not found' });
+  const reason = (typeof req.body?.reason === 'string' && req.body.reason.trim())
+    ? req.body.reason.trim()
+    : 'manual-offline';
+  const clearTmux = req.body?.clearTmux !== false;
+  agent.online = false;
+  agent.lastSeen = Date.now();
+  agent.offlineReason = reason;
+  if (clearTmux) agent.tmux = null;
+  saveAgents();
+  res.json({ ok: true, agent: serializeAgent(agent) });
 });
 
 // ── Groups CRUD ───────────────────────────────────────────────────────
@@ -378,8 +649,29 @@ app.post('/api/messages', (req, res) => {
   const { from, to, group, type, summary, full, mentions, reply_to, source } = req.body;
   if (!from) return res.status(400).json({ error: 'from required' });
   if (!to && !group) return res.status(400).json({ error: 'to or group required' });
+  if (to && group) return res.status(400).json({ error: 'to and group are mutually exclusive' });
   if (!summary) return res.status(400).json({ error: 'summary required' });
   if (!type) return res.status(400).json({ error: 'type required' });
+  if (to && !agents[to]) return res.status(404).json({ error: `target agent not found: ${to}` });
+  if (group && !groups[group]) return res.status(404).json({ error: `group not found: ${group}` });
+  refreshServerLiveness();
+
+  // Auto-extract @mentions from text and merge with explicit mentions
+  // Build set of all known names (agents + group members including humans)
+  const knownNames = new Set(Object.keys(agents));
+  for (const g of Object.values(groups)) {
+    for (const m of g.members) knownNames.add(m);
+  }
+  const explicitMentions = mentions || [];
+  const textMentions = new Set(explicitMentions);
+  const mentionRegex = /@([a-zA-Z0-9_-]+)/g;
+  for (const text of [summary || '', full || '']) {
+    let match;
+    while ((match = mentionRegex.exec(text)) !== null) {
+      const name = match[1];
+      if (knownNames.has(name) && name !== from) textMentions.add(name);
+    }
+  }
 
   const msg = {
     id: nextMsgId(),
@@ -390,7 +682,7 @@ app.post('/api/messages', (req, res) => {
     type,
     summary,
     full: full || '',
-    mentions: mentions || [],
+    mentions: [...textMentions],
     reply_to: reply_to || null,
     source: source || 'api',
   };
@@ -401,15 +693,45 @@ app.post('/api/messages', (req, res) => {
 
   // Push notifications
   if (msg.to && msg.to !== msg.from) {
-    pushNotify(msg.to, msg);
+    const state = getAgentDeliveryState(msg.to);
+    if (state.online) pushNotify(msg.to, msg);
   }
   if (msg.group && msg.mentions.length > 0) {
     for (const agent of msg.mentions) {
-      if (agent !== msg.from) pushNotify(agent, msg);
+      if (agent === msg.from) continue;
+      const state = getAgentDeliveryState(agent);
+      if (state.online) pushNotify(agent, msg);
     }
   }
 
-  res.json({ ok: true, id: msg.id });
+  const warnings = [];
+  if (msg.to) {
+    const state = getAgentDeliveryState(msg.to);
+    if (!state.online) {
+      warnings.push({
+        code: 'target_offline',
+        target: msg.to,
+        server: state.server,
+        reason: state.offlineReason || 'offline',
+      });
+    }
+  }
+  if (msg.group && msg.mentions.length > 0) {
+    const offlineMentions = msg.mentions
+      .filter(name => name !== msg.from)
+      .map(name => ({ name, state: getAgentDeliveryState(name) }))
+      .filter(item => !item.state.online)
+      .map(item => ({
+        target: item.name,
+        server: item.state.server,
+        reason: item.state.offlineReason || 'offline',
+      }));
+    if (offlineMentions.length) {
+      warnings.push({ code: 'mentions_offline', targets: offlineMentions });
+    }
+  }
+
+  res.json({ ok: true, id: msg.id, warnings });
 });
 
 app.get('/api/messages/:id', (req, res) => {
@@ -423,9 +745,12 @@ app.get('/msg/:id', (req, res) => {
   const msg = messages.find(m => m.id === req.params.id);
   if (!msg) return res.status(404).send('<h1>Message not found</h1>');
   const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // JSON-encode full text for safe embedding in <script>
+  const fullJson = JSON.stringify(msg.full || '');
   res.type('html').send(`<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Message ${escape(msg.id)}</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"><\/script>
 <style>
   body { font-family: -apple-system, system-ui, sans-serif; max-width: 700px; margin: 2rem auto; padding: 0 1rem; background: #0a0a0f; color: #e0e0e0; }
   .meta { color: #888; font-size: 0.9rem; margin-bottom: 1rem; }
@@ -436,7 +761,21 @@ app.get('/msg/:id', (req, res) => {
   .type-reply { background: #3a3a1a; color: #ffd43b; }
   .type-human { background: #3a1a3a; color: #da77f2; }
   .summary { font-size: 1.1rem; font-weight: 500; margin: 1rem 0; padding: 0.8rem; background: #151520; border-radius: 6px; border-left: 3px solid #4dabf7; }
-  .full { white-space: pre-wrap; font-family: 'SF Mono', Monaco, monospace; font-size: 0.9rem; padding: 1rem; background: #151520; border-radius: 6px; line-height: 1.5; }
+  .full { font-size: 0.9rem; padding: 1rem; background: #151520; border-radius: 6px; line-height: 1.6; }
+  .full h1,.full h2,.full h3,.full h4 { color: #4dabf7; margin-top: 1.2em; margin-bottom: 0.5em; border-bottom: 1px solid #222; padding-bottom: 0.3em; }
+  .full h1 { font-size: 1.4em; } .full h2 { font-size: 1.2em; } .full h3 { font-size: 1.05em; }
+  .full code { background: #1a1a2e; padding: 2px 6px; border-radius: 3px; font-family: 'SF Mono', Monaco, monospace; font-size: 0.9em; color: #69db7c; }
+  .full pre { background: #0d0d1a; padding: 1rem; border-radius: 6px; overflow-x: auto; border: 1px solid #222; }
+  .full pre code { background: none; padding: 0; color: #e0e0e0; }
+  .full ul,.full ol { padding-left: 1.5em; margin: 0.5em 0; }
+  .full li { margin: 0.3em 0; }
+  .full blockquote { border-left: 3px solid #4dabf7; margin: 0.8em 0; padding: 0.5em 1em; color: #aaa; background: #0d0d1a; }
+  .full table { border-collapse: collapse; margin: 0.8em 0; width: 100%; }
+  .full th,.full td { border: 1px solid #333; padding: 6px 10px; text-align: left; }
+  .full th { background: #1a1a2e; color: #4dabf7; }
+  .full strong { color: #ffd43b; }
+  .full a { color: #4dabf7; }
+  .full p { margin: 0.5em 0; }
   .mentions { color: #da77f2; }
 </style></head><body>
 <h2>Agent Chat Message</h2>
@@ -447,10 +786,18 @@ app.get('/msg/:id', (req, res) => {
   <span>${relativeTime(msg.ts)}</span>
 </div>
 ${msg.mentions.length ? '<div class="mentions">Mentions: ' + msg.mentions.map(m => '@' + escape(m)).join(' ') + '</div>' : ''}
-${msg.reply_to ? '<div class="meta">Reply to: ' + escape(msg.reply_to) + '</div>' : ''}
+${msg.reply_to ? '<div class="meta">Reply to: <a href="/msg/' + escape(msg.reply_to) + '" style="color:#4dabf7">' + escape(msg.reply_to) + '</a></div>' : ''}
 <div class="summary">${escape(msg.summary)}</div>
 <h3>Full Message</h3>
-<div class="full">${escape(msg.full)}</div>
+<div class="full" id="full-content"></div>
+<script>
+  const raw = ${fullJson};
+  try {
+    document.getElementById('full-content').innerHTML = marked.parse(raw);
+  } catch(e) {
+    document.getElementById('full-content').textContent = raw;
+  }
+<\/script>
 </body></html>`);
 });
 
@@ -527,14 +874,20 @@ app.get('/api/agents/:name/groups', (req, res) => {
 // ── Graceful shutdown ─────────────────────────────────────────────────
 function shutdown() {
   console.log('Shutting down, saving data...');
+  refreshServerLiveness();
   saveAgents();
   saveGroups();
   saveMessages();
   saveCursors();
+  saveServers();
   process.exit(0);
 }
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+
+setInterval(() => {
+  refreshServerLiveness();
+}, SERVER_SWEEP_INTERVAL_MS);
 
 // ── Start ─────────────────────────────────────────────────────────────
 app.listen(PORT, '127.0.0.1', () => {
