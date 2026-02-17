@@ -416,6 +416,23 @@ function getUnreadInboxMessages(agentName) {
   return { inboxTs, inboxId, unread };
 }
 
+function buildUnreadInboxSnapshot(agentName) {
+  const { unread } = getUnreadInboxMessages(agentName);
+  let unreadDm = 0;
+  let unreadGroupMentions = 0;
+  for (const m of unread) {
+    if (m.to === agentName) unreadDm++;
+    else if (m.group) unreadGroupMentions++;
+  }
+  return {
+    agent: agentName,
+    unread_total: unread.length,
+    unread_dm: unreadDm,
+    unread_group_mentions: unreadGroupMentions,
+    latest: unread.length > 0 ? summarizeMsg(unread[unread.length - 1]) : null,
+  };
+}
+
 function formatSenderList(names) {
   if (names.length <= 3) return names.join(', ');
   return `${names.slice(0, 3).join(', ')}, +${names.length - 3} more`;
@@ -1259,6 +1276,14 @@ ${msg.reply_to ? '<div class="meta">Reply to: <a href="/msg/' + escape(msg.reply
 });
 
 // ── Inbox ─────────────────────────────────────────────────────────────
+app.get('/api/inbox/:agent/unread', (req, res) => {
+  const agentName = normalizeAgentName(req.params.agent);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
+  const snapshot = buildUnreadInboxSnapshot(agentName);
+  res.json(snapshot);
+});
+
 app.get('/api/inbox/:agent', (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
