@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVICE_NAME="${SERVICE_NAME:-agent-chat-push-relay}"
 ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
 INSTALL_BIN_DIR="${INSTALL_BIN_DIR:-$HOME/.local/bin}"
@@ -46,9 +47,14 @@ npm install --omit=dev
 echo "[4/8] Linking helper commands into $INSTALL_BIN_DIR..."
 required_cmds=(agent-up agent-down agent-ls agent-send agent-update)
 optional_cmds=(self-time-reminder agent-chat-cli)
+BIN_SOURCE_DIR="$SCRIPT_DIR/bin"
+if [ -d "$REPO_ROOT/bin" ] && [ -f "$REPO_ROOT/bin/agent-up" ]; then
+  BIN_SOURCE_DIR="$REPO_ROOT/bin"
+fi
+echo "  Using helper source dir: $BIN_SOURCE_DIR"
 
 for cmd in "${required_cmds[@]}"; do
-  src="$SCRIPT_DIR/bin/$cmd"
+  src="$BIN_SOURCE_DIR/$cmd"
   if [ ! -f "$src" ]; then
     echo "Missing required helper script: $src" >&2
     exit 1
@@ -57,7 +63,7 @@ for cmd in "${required_cmds[@]}"; do
 done
 
 for cmd in "${optional_cmds[@]}"; do
-  src="$SCRIPT_DIR/bin/$cmd"
+  src="$BIN_SOURCE_DIR/$cmd"
   if [ -f "$src" ]; then
     ln -sfn "$src" "$INSTALL_BIN_DIR/$cmd"
   else

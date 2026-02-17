@@ -36,6 +36,7 @@ This folder is the deployable package for remote servers.
 
 ## Notes
 
-- `install-remote.sh` now links helper commands from `~/.local/bin` to this deploy directory.
-  This keeps `.env`, `data/agents`, and `mcp-server.js` paths consistent for `agent-up/down/update`.
+- In normal `git clone` deployments, `install-remote.sh` uses repo-root `bin/` as the helper source of truth.
+  `remote/bin` is only a fallback when root `bin/` is unavailable.
+- The script links helpers into `~/.local/bin` (no copy), so path resolution stays consistent.
 - Re-running `bash install-remote.sh` is safe and is the recommended way to refresh both service and MCP config after updates.
