@@ -6,9 +6,9 @@
 #
 # Flow:
 #   1. Send exit command to AI (claude: /exit, codex: Escape)
-#   2. Wait 5s for AI to exit and expose resume ID
-#   3. Archive full tmux pane scrollback (includes resume ID output)
-#   4. Parse resume ID from archive
+#   2. Wait 5s for AI to expose resume command
+#   3. Archive full tmux pane scrollback
+#   4. Show archive tail for manual resume-id verification
 #   5. Kill tmux session
 #
 # With --kill: archive first, then immediately kill
@@ -43,10 +43,8 @@ META_FILE="$AGENT_DATA/meta.json"
 
 # Detect agent type from meta.json or fallback to process detection
 AGENT_TYPE=""
-AGENT_PATH=""
 if [ -f "$META_FILE" ]; then
   AGENT_TYPE=$(python3 -c "import json; print(json.load(open('$META_FILE')).get('type',''))" 2>/dev/null || true)
-  AGENT_PATH=$(python3 -c "import json; print(json.load(open('$META_FILE')).get('path',''))" 2>/dev/null || true)
 fi
 if [ -z "$AGENT_TYPE" ]; then
   # Try to detect from running process
@@ -56,31 +54,6 @@ if [ -z "$AGENT_TYPE" ]; then
     *) AGENT_TYPE="claude" ;;  # default
   esac
 fi
-if [ -z "$AGENT_PATH" ]; then
-  AGENT_PATH=$(tmux list-panes -t "$NAME" -F "#{pane_current_path}" 2>/dev/null | head -1 || true)
-fi
-
-claude_project_dir_for_path() {
-  local p="$1"
-  [ -n "$p" ] || return 1
-  echo "$HOME/.claude/projects/${p//\//-}"
-}
-
-latest_claude_session_id() {
-  local p="$1"
-  local d candidate sid
-  d=$(claude_project_dir_for_path "$p") || return 1
-  [ -d "$d" ] || return 1
-  for candidate in $(ls -1t "$d"/*.jsonl 2>/dev/null || true); do
-    sid=$(basename "$candidate" .jsonl)
-    if rg -q "\"sessionId\":\"$sid\"" "$candidate"; then
-      echo "$sid"
-      return 0
-    fi
-  done
-  return 1
-}
-
 archive_and_kill() {
   # Archive pane scrollback
   echo "Archiving pane scrollback..."
@@ -88,25 +61,17 @@ archive_and_kill() {
   LINES=$(wc -l < "$ARCHIVE_FILE" 2>/dev/null || echo 0)
   echo "  Saved $LINES lines → $ARCHIVE_FILE"
 
-  # Try to parse resume ID from archive (UUID pattern)
-  FOUND_ID=$(grep -oP '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$ARCHIVE_FILE" 2>/dev/null | tail -1 || true)
-  if [ "$AGENT_TYPE" = "claude" ]; then
-    CLAUDE_ID=$(latest_claude_session_id "$AGENT_PATH" || true)
-    if [ -n "$CLAUDE_ID" ]; then
-      echo "$CLAUDE_ID" > "$RESUME_FILE"
-      echo "  Resume ID (claude project): $CLAUDE_ID"
-    elif [ -n "$FOUND_ID" ]; then
-      PROJECT_DIR=$(claude_project_dir_for_path "$AGENT_PATH" || true)
-      if [ -n "$PROJECT_DIR" ] && [ -f "$PROJECT_DIR/$FOUND_ID.jsonl" ]; then
-        echo "$FOUND_ID" > "$RESUME_FILE"
-        echo "  Resume ID (archive verified): $FOUND_ID"
-      else
-        echo "  Resume ID not found (archive UUID is not a valid Claude session file)."
-      fi
+  echo "  Archive tail (manual check):"
+  tail -n 10 "$ARCHIVE_FILE" | sed 's/^/    /'
+  RESUME_HINT=$(tail -n 20 "$ARCHIVE_FILE" | rg -o 'claude --resume [0-9a-f-]{36}|codex resume [0-9a-f-]{36}' | tail -1 || true)
+  if [ -n "$RESUME_HINT" ]; then
+    RESUME_ID=$(echo "$RESUME_HINT" | grep -oP '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' || true)
+    echo "  Resume hint: $RESUME_HINT"
+    if [ -n "$RESUME_ID" ]; then
+      echo "  To set manually: echo \"$RESUME_ID\" > \"$RESUME_FILE\""
     fi
-  elif [ -n "$FOUND_ID" ]; then
-    echo "$FOUND_ID" > "$RESUME_FILE"
-    echo "  Resume ID: $FOUND_ID"
+  else
+    echo "  No explicit resume command found in last 20 lines. Manual intervention required."
   fi
 
   # Update meta.json with lastDown

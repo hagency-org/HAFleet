@@ -5,7 +5,7 @@
 #   agent-up <name> [path] [claude|codex] [--fresh] [--attach] [--model <model>] [--extra-args "<args>"]
 #
 # If path is omitted, reads from saved meta.json (previous agent-down).
-# If resume-id exists and --fresh is not set, auto-resumes.
+# If --fresh is not set, resume-id is required for strict resume (no silent fallback).
 #
 # Examples:
 #   agent-up umiki-worker ~/laplace/umiki claude                           # first time
@@ -137,21 +137,6 @@ claude_project_dir_for_path() {
   echo "$HOME/.claude/projects/${p//\//-}"
 }
 
-latest_claude_session_id() {
-  local p="$1"
-  local d candidate sid
-  d=$(claude_project_dir_for_path "$p") || return 1
-  [ -d "$d" ] || return 1
-  for candidate in $(ls -1t "$d"/*.jsonl 2>/dev/null || true); do
-    sid=$(basename "$candidate" .jsonl)
-    if rg -q "\"sessionId\":\"$sid\"" "$candidate"; then
-      echo "$sid"
-      return 0
-    fi
-  done
-  return 1
-}
-
 is_valid_claude_session_id() {
   local p="$1" sid="$2"
   local d
@@ -160,17 +145,27 @@ is_valid_claude_session_id() {
   [ -f "$d/$sid.jsonl" ]
 }
 
-refresh_claude_resume_file_async() {
-  local p="$1" resume_file="$2"
-  (
-    sleep 6
-    sid=$(latest_claude_session_id "$p" || true)
-    if [ -n "$sid" ]; then
-      echo "$sid" > "$resume_file"
-    fi
-  ) &
-  disown
-}
+if [ "$TYPE" = "claude" ] && [ "$FRESH" = false ]; then
+  if [ ! -f "$RESUME_FILE" ]; then
+    echo "Error: missing resume-id for claude agent '$NAME'." >&2
+    echo "Manual check required: inspect archive tail and set resume-id explicitly." >&2
+    echo "  tail -n 10 $AGENT_DATA/archive-*.txt" >&2
+    echo "  echo '<session-id>' > $RESUME_FILE" >&2
+    exit 1
+  fi
+  RID_CHECK=$(cat "$RESUME_FILE" 2>/dev/null || true)
+  if ! is_valid_claude_session_id "$AGENT_PATH" "$RID_CHECK"; then
+    echo "Error: resume-id '$RID_CHECK' is not a valid local Claude session file." >&2
+    echo "Manual check required: inspect archive tail and fix $RESUME_FILE." >&2
+    exit 1
+  fi
+fi
+
+if [ "$TYPE" = "codex" ] && [ "$FRESH" = false ] && [ ! -f "$RESUME_FILE" ]; then
+  echo "Error: missing resume-id for codex agent '$NAME'." >&2
+  echo "Manual check required: inspect archive tail and set $RESUME_FILE." >&2
+  exit 1
+fi
 
 # ── Check existing session ───────────────────────────────────────────
 if tmux has-session -t "$NAME" 2>/dev/null; then
@@ -216,17 +211,13 @@ if [ "$TYPE" = "claude" ]; then
   CLAUDE_FLAGS="--dangerously-skip-permissions"
   [ -n "$MODEL" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS --model $MODEL"
   [ -n "$EXTRA_ARGS" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
-  if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ] && RID=$(cat "$RESUME_FILE") && is_valid_claude_session_id "$AGENT_PATH" "$RID"; then
+  if [ "$FRESH" = false ] && RID=$(cat "$RESUME_FILE"); then
     echo "Resuming claude session: $RID"
     tmux send-keys -t "$NAME" "claude --resume $RID $CLAUDE_FLAGS" Enter
-  elif [ "$FRESH" = false ]; then
-    echo "Resuming claude session with --continue (directory history)."
-    tmux send-keys -t "$NAME" "claude --continue $CLAUDE_FLAGS" Enter
   else
     echo "Starting new claude session..."
     tmux send-keys -t "$NAME" "claude $CLAUDE_FLAGS" Enter
   fi
-  refresh_claude_resume_file_async "$AGENT_PATH" "$RESUME_FILE"
 
 elif [ "$TYPE" = "codex" ]; then
   CODEX_FLAGS="--yolo"
