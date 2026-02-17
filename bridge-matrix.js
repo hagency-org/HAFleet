@@ -183,7 +183,7 @@ function isAgentUser(userId) {
 }
 
 // ── Parse mentions from Matrix message ───────────────────────────────
-function parseMentions(content) {
+function parseMentions(content, plainBody = null) {
   const mentions = [];
 
   // 1. Parse m.mentions.user_ids (modern Matrix spec)
@@ -211,16 +211,46 @@ function parseMentions(content) {
   }
 
   // 3. Fallback: plain text @mentions in body
-  if (!mentions.length && content.body) {
+  const body = typeof plainBody === 'string' ? plainBody : content.body;
+  if (!mentions.length && body) {
     const atRegex = /@(ac_)?([a-z0-9_-]+)/gi;
     let match;
-    while ((match = atRegex.exec(content.body)) !== null) {
+    while ((match = atRegex.exec(body)) !== null) {
       if (match[1]) mentions.push(match[2]); // @ac_agentname
       else mentions.push(match[0].slice(1)); // @agentname
     }
   }
 
   return [...new Set(mentions)];
+}
+
+function stripMatrixReplyFallback(body) {
+  if (typeof body !== 'string') return '';
+  const lines = body.split('\n');
+  let idx = 0;
+  while (idx < lines.length && lines[idx].startsWith('> ')) idx++;
+  if (idx > 0 && idx < lines.length && lines[idx].trim() === '') {
+    return lines.slice(idx + 1).join('\n').trim();
+  }
+  return body.trim();
+}
+
+function parseInboundTextMessage(content) {
+  if (!content || typeof content !== 'object') {
+    return { skip: true, body: '', replyEventId: null };
+  }
+  if (content.msgtype && !['m.text', 'm.notice'].includes(content.msgtype)) {
+    return { skip: true, body: '', replyEventId: null };
+  }
+  const relates = content['m.relates_to'] || {};
+  if (relates.rel_type === 'm.replace') {
+    // Ignore edit events: they should not create a new agent-chat message.
+    return { skip: true, body: '', replyEventId: null };
+  }
+  const replyEventId = relates?.['m.in_reply_to']?.event_id || null;
+  const rawBody = typeof content.body === 'string' ? content.body : '';
+  const body = replyEventId ? stripMatrixReplyFallback(rawBody) : rawBody.trim();
+  return { skip: !body, body, replyEventId };
 }
 
 // ── Main bridge class ─────────────────────────────────────────────────
@@ -232,6 +262,7 @@ class MatrixBridge {
     this.dmRooms = new Map(); // "agent:human" → roomId
     this.recentBridgedIds = new Set(); // prevent echo loops
     this.recentlyCreatedRooms = new Set(); // rooms we just created (suppress echo)
+    this.recentMatrixEvents = new Map(); // event_id -> { ts, msgId }
     this.startupTs = Date.now();
     this.commands = null;
   }
@@ -256,6 +287,38 @@ class MatrixBridge {
 
   getBotToken() { return state.botToken; }
   getAgentToken(name) { return state.agentTokens[name] || null; }
+  isKnownAgentName(name) { return this.knownAgents.has(name); }
+
+  rememberMatrixEvent(eventId, msgId = null) {
+    if (!eventId) return;
+    const prev = this.recentMatrixEvents.get(eventId);
+    const next = { ts: Date.now(), msgId: msgId || prev?.msgId || null };
+    this.recentMatrixEvents.set(eventId, next);
+
+    if (this.recentMatrixEvents.size > 5000) {
+      const cutoff = Date.now() - (6 * 60 * 60 * 1000); // 6h
+      for (const [eid, meta] of this.recentMatrixEvents.entries()) {
+        if (!meta || meta.ts < cutoff) this.recentMatrixEvents.delete(eid);
+      }
+      if (this.recentMatrixEvents.size > 4500) {
+        // Hard cap fallback: drop oldest keys.
+        const keep = [...this.recentMatrixEvents.entries()]
+          .sort((a, b) => (b[1]?.ts || 0) - (a[1]?.ts || 0))
+          .slice(0, 3500);
+        this.recentMatrixEvents = new Map(keep);
+      }
+    }
+  }
+
+  isDuplicateMatrixEvent(eventId) {
+    if (!eventId) return false;
+    return this.recentMatrixEvents.has(eventId);
+  }
+
+  resolveReplyToMessageId(replyEventId) {
+    if (!replyEventId) return null;
+    return this.recentMatrixEvents.get(replyEventId)?.msgId || null;
+  }
 
   postWarning(message) {
     backendApi('POST', '/api/messages', {
@@ -282,9 +345,23 @@ class MatrixBridge {
 
     // 2. Ensure agent accounts for all known agents
     const agents = await backendApi('GET', '/api/agents');
+    const validAgentNames = new Set();
     for (const agent of agents) {
+      validAgentNames.add(agent.name);
       await ensureAgentAccount(agent.name);
       this.knownAgents.add(agent.name);
+    }
+    // Drop stale tokens that were created for non-agent users.
+    let cleanedTokenCount = 0;
+    for (const name of Object.keys(state.agentTokens || {})) {
+      if (!validAgentNames.has(name)) {
+        delete state.agentTokens[name];
+        cleanedTokenCount++;
+      }
+    }
+    if (cleanedTokenCount > 0) {
+      saveState();
+      console.log(`Pruned ${cleanedTokenCount} stale Matrix tokens for non-agent users`);
     }
     console.log(`Agent accounts: ${this.knownAgents.size}`);
 
@@ -324,12 +401,24 @@ class MatrixBridge {
     // Poll new agents from backend
     try {
       const agents = await backendApi('GET', '/api/agents');
+      const validAgentNames = new Set(agents.map(a => a.name));
       for (const agent of agents) {
         if (!this.knownAgents.has(agent.name)) {
           await ensureAgentAccount(agent.name);
           this.knownAgents.add(agent.name);
           console.log(`Discovered new agent: ${agent.name}`);
         }
+      }
+      let pruned = 0;
+      for (const name of Object.keys(state.agentTokens || {})) {
+        if (!validAgentNames.has(name)) {
+          delete state.agentTokens[name];
+          pruned++;
+        }
+      }
+      if (pruned > 0) {
+        saveState();
+        console.log(`Pruned ${pruned} stale Matrix tokens during registration poll`);
       }
     } catch (e) {
       console.error('Failed to poll agents:', e.message);
@@ -472,7 +561,13 @@ class MatrixBridge {
 
   // ── Matrix → Agent-chat ───────────────────────────────────────────
   async onRoomMessage(roomId, event) {
-    if (!event.content?.body) return;
+    const eventId = event?.event_id || null;
+    if (eventId && this.isDuplicateMatrixEvent(eventId)) return;
+
+    const parsed = parseInboundTextMessage(event.content);
+    if (parsed.skip) return;
+    if (eventId) this.rememberMatrixEvent(eventId);
+
     const senderId = event.sender;
 
     // Ignore messages from our agent accounts (prevent loops)
@@ -481,8 +576,9 @@ class MatrixBridge {
 
     const groupName = groupForRoom(roomId);
     const humanName = humanNameFromUserId(senderId);
-    const body = event.content.body;
-    const mentions = parseMentions(event.content);
+    const body = parsed.body;
+    const mentions = parseMentions(event.content, body);
+    const replyTo = this.resolveReplyToMessageId(parsed.replyEventId);
 
     // Check if this is a DM room (bot-DM or agent-DM)
     let targetAgent = null;
@@ -516,15 +612,18 @@ class MatrixBridge {
     } else if (targetAgent) {
       // DM to agent
       console.log(`Matrix DM: ${humanName} → ${targetAgent}: ${body.slice(0, 80)}`);
-      await this.submitHumanMessage(roomId, {
+      const result = await this.submitHumanMessage(roomId, {
         from: humanName,
         to: targetAgent,
         type: 'human',
         summary: body,
         full: '',
         mentions: [],
+        reply_to: replyTo,
         source: 'matrix',
+        target_type: 'agent',
       });
+      if (eventId && result?.id) this.rememberMatrixEvent(eventId, result.id);
     } else if (groupName) {
       // Group message from human
       console.log(`Matrix group: ${humanName} → ${groupName}: ${body.slice(0, 80)}`);
@@ -534,15 +633,17 @@ class MatrixBridge {
         const re = new RegExp(`(?<!@)\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
         summary = summary.replace(re, '@' + name);
       }
-      await this.submitHumanMessage(roomId, {
+      const result = await this.submitHumanMessage(roomId, {
         from: humanName,
         group: groupName,
         type: 'human',
         summary,
         full: '',
         mentions,
+        reply_to: replyTo,
         source: 'matrix',
       });
+      if (eventId && result?.id) this.rememberMatrixEvent(eventId, result.id);
     }
     // else: unknown room, ignore
   }
@@ -773,7 +874,7 @@ class MatrixBridge {
 
     // Ensure agent accounts exist for agent members
     for (const m of group.members) {
-      if (this.knownAgents.has(m) && !state.agentTokens[m]) {
+      if (this.isKnownAgentName(m) && !state.agentTokens[m]) {
         await ensureAgentAccount(m);
       }
     }
@@ -794,7 +895,7 @@ class MatrixBridge {
     // Invite newly added members
     for (const m of (update.added || [])) {
       // Check backend API to determine if member is an agent (avoids stale knownAgents race)
-      let isAgent = this.knownAgents.has(m);
+      let isAgent = this.isKnownAgentName(m);
       if (!isAgent) {
         try {
           const info = await backendApi('GET', `/api/agents/${encodeURIComponent(m)}`);
@@ -811,7 +912,7 @@ class MatrixBridge {
       }
 
       let userId;
-      if (state.agentTokens[m]) {
+      if (isAgent && state.agentTokens[m]) {
         userId = await getUserId(state.agentTokens[m]);
         if (currentMembers.has(userId)) continue; // already in room
         // Also auto-join with agent token
@@ -846,7 +947,7 @@ class MatrixBridge {
     // Kick removed members
     for (const m of (update.removed || [])) {
       let userId;
-      if (state.agentTokens[m]) {
+      if (this.isKnownAgentName(m) && state.agentTokens[m]) {
         userId = await getUserId(state.agentTokens[m]);
       } else {
         userId = `@${m}:matrix.kusuri.ai`;
@@ -881,7 +982,7 @@ class MatrixBridge {
     const token = state.agentTokens[agentName];
     if (!token) {
       // Unknown agent, ensure account exists
-      if (!this.knownAgents.has(agentName)) {
+      if (!this.isKnownAgentName(agentName)) {
         await ensureAgentAccount(agentName);
         this.knownAgents.add(agentName);
       }
@@ -920,13 +1021,13 @@ class MatrixBridge {
         this.postWarning(`No Matrix room for group "${msg.group}" — message ${msg.id} from ${agentName} not bridged`);
         return;
       }
-      await this.sendAsAgent(agentToken, roomId, plain, html);
+      await this.sendAsAgent(agentToken, roomId, plain, html, msg.id);
       console.log(`→ Matrix [${msg.group}] ${agentName}: ${msg.summary.slice(0, 60)}`);
     } else if (msg.to) {
       // DM - bridge to Matrix (both agent-to-agent and agent-to-human)
       const roomId = await this.ensureDmRoom(agentName, msg.to);
       if (roomId) {
-        await this.sendAsAgent(agentToken, roomId, plain, html);
+        await this.sendAsAgent(agentToken, roomId, plain, html, msg.id);
         console.log(`→ Matrix DM ${agentName} → ${msg.to}: ${msg.summary.slice(0, 60)}`);
       }
     }
@@ -955,8 +1056,8 @@ class MatrixBridge {
   async ensureDmRoom(fromName, toName, options = {}) {
     // Determine which is the agent (for human↔agent DMs, use agent-only key so
     // multiple humans share the same DM room with an agent)
-    let fromIsAgent = this.knownAgents.has(fromName) || !!state.agentTokens[fromName];
-    let toIsAgent = this.knownAgents.has(toName) || !!state.agentTokens[toName];
+    let fromIsAgent = this.isKnownAgentName(fromName);
+    let toIsAgent = this.isKnownAgentName(toName);
     const forceAgentName = options.forceAgentName || null;
     if (forceAgentName && forceAgentName === fromName) {
       fromIsAgent = true;
@@ -1117,7 +1218,7 @@ class MatrixBridge {
     return { ok: false, alreadyJoined: false, invited: false, error: err };
   }
 
-  async sendAsAgent(token, roomId, text, html) {
+  async sendAsAgent(token, roomId, text, html, sourceMsgId = null) {
     try {
       const txnId = `bridge_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const content = { msgtype: 'm.text', body: text };
@@ -1125,14 +1226,23 @@ class MatrixBridge {
         content.format = 'org.matrix.custom.html';
         content.formatted_body = html;
       }
-      await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${txnId}`, {
+      const res = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${txnId}`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(content),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      if (data?.event_id) {
+        this.rememberMatrixEvent(data.event_id, sourceMsgId);
+      }
+      return data?.event_id || null;
     } catch (e) {
       console.error(`Failed to send as agent in ${roomId}:`, e.message);
       this.postWarning(`sendAsAgent failed in room ${roomId}: ${e.message}`);
+      return null;
     }
   }
 
@@ -1140,7 +1250,7 @@ class MatrixBridge {
   async createRoomForGroup(groupName, members) {
     const invite = [];
     for (const m of members) {
-      if (state.agentTokens[m]) {
+      if (this.isKnownAgentName(m) && state.agentTokens[m]) {
         const userId = await getUserId(state.agentTokens[m]);
         invite.push(userId);
       } else {
@@ -1167,7 +1277,7 @@ class MatrixBridge {
 
       // Agent accounts need to join
       for (const m of members) {
-        const agentToken = state.agentTokens[m];
+        const agentToken = this.isKnownAgentName(m) ? state.agentTokens[m] : null;
         if (agentToken) {
           await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(data.room_id)}`, {
             method: 'POST',

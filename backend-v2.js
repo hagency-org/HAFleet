@@ -57,6 +57,22 @@ function normalizeAgentName(value) {
   return trimmed || null;
 }
 
+function inferRecordKind(record) {
+  const explicit = typeof record?.kind === 'string' ? record.kind.trim().toLowerCase() : '';
+  if (explicit === 'agent' || explicit === 'human') return explicit;
+
+  const hasRegisteredAt = Number(record?.registeredAt) > 0;
+  const hasTmux = typeof record?.tmux === 'string' && record.tmux.trim().length > 0;
+  const hasServer = Boolean(normalizeServer(record?.server));
+  const hasRole = typeof record?.role === 'string' && record.role.trim().length > 0;
+  const hasIdentity = typeof record?.identity === 'string' && record.identity.trim().length > 0;
+  return (hasRegisteredAt || hasTmux || hasServer || hasRole || hasIdentity) ? 'agent' : 'human';
+}
+
+function isAgentRecord(record) {
+  return Boolean(record) && inferRecordKind(record) === 'agent';
+}
+
 function isLocalRequest(req) {
   const ip = req.ip || req.connection?.remoteAddress;
   return LOCALHOST_IPS.has(ip);
@@ -69,6 +85,7 @@ const messages = loadJsonSync('messages.json', []);
 const cursors = loadJsonSync('cursors.json', {});
 const servers = loadJsonSync('servers.json', {});
 let msgCounter = loadJsonSync('.msg_counter', 0);
+const agentsBeforeNormalization = JSON.stringify(agents);
 
 for (const agent of Object.values(agents)) {
   agent.name = agent.name || null;
@@ -95,6 +112,14 @@ for (const agent of Object.values(agents)) {
   if (!Object.prototype.hasOwnProperty.call(agent, 'discoveredAt')) {
     agent.discoveredAt = agent.registeredAt || agent.lastSeen || Date.now();
   }
+  agent.kind = inferRecordKind(agent);
+  if (agent.kind === 'human') {
+    agent.online = false;
+    agent.offlineReason = null;
+  }
+}
+if (JSON.stringify(agents) !== agentsBeforeNormalization) {
+  saveJson('agents.json', agents);
 }
 
 for (const [serverId, server] of Object.entries(servers)) {
@@ -136,6 +161,7 @@ function ensureAgentRecord(name, defaults = {}) {
     ? defaults.offlineReason.trim()
     : (online ? null : 'inactive');
   const type = (typeof defaults.type === 'string' && defaults.type.trim()) ? defaults.type.trim() : 'agent';
+  const kind = inferRecordKind({ ...defaults, type, name: agentName });
 
   const agent = {
     name: agentName,
@@ -148,6 +174,8 @@ function ensureAgentRecord(name, defaults = {}) {
     lastSeen: now,
     offlineReason: reason,
     discoveredAt: now,
+    registeredAt: Number(defaults.registeredAt) > 0 ? Number(defaults.registeredAt) : now,
+    kind,
   };
   agents[agentName] = agent;
   return { agent, created: true };
@@ -296,7 +324,9 @@ function refreshServerLiveness() {
 
 function getAgentDeliveryState(name) {
   const agent = agents[name];
-  if (!agent) return { exists: false, online: false, server: null, serverOnline: false, lastSeen: null, offlineReason: 'not-found' };
+  if (!agent || !isAgentRecord(agent)) {
+    return { exists: false, online: false, server: null, serverOnline: false, lastSeen: null, offlineReason: 'not-agent' };
+  }
   const serverId = normalizeServer(agent.server);
   let serverOnline = true;
   let serverLastSeen = null;
@@ -366,11 +396,18 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
       tmux: `${name}:0.0`,
       online: true,
       type: 'agent',
+      kind: 'agent',
       offlineReason: null,
+      registeredAt: now,
     });
     if (!ensured) continue;
     const agent = ensured.agent;
     if (ensured.created) agentsChanged = true;
+    if (!isAgentRecord(agent)) {
+      agent.kind = 'agent';
+      if (!Number(agent.registeredAt)) agent.registeredAt = now;
+      agentsChanged = true;
+    }
     if (normalizeServer(agent.server) !== serverId) { agent.server = serverId; agentsChanged = true; }
     if (!agent.tmux) { agent.tmux = `${name}:0.0`; agentsChanged = true; }
     if (agent.online !== true) { agent.online = true; agentsChanged = true; }
@@ -532,10 +569,11 @@ app.get('/health', (_req, res) => {
   refreshServerLiveness();
   const serverRows = Object.values(servers);
   const onlineServers = serverRows.filter(s => s.online).length;
-  const onlineAgents = Object.keys(agents).filter(name => getAgentDeliveryState(name).online).length;
+  const agentNames = Object.keys(agents).filter(name => isAgentRecord(agents[name]));
+  const onlineAgents = agentNames.filter(name => getAgentDeliveryState(name).online).length;
   res.json({
     ok: true,
-    agents: Object.keys(agents).length,
+    agents: agentNames.length,
     onlineAgents,
     servers: serverRows.length,
     onlineServers,
@@ -621,10 +659,12 @@ app.post('/api/agents', (req, res) => {
     identity: identity ?? existing.identity ?? null,
     tmux: resolvedTmux,
     type: agentType ?? existing.type ?? 'agent',
+    kind: 'agent',
     server: resolvedServer,
     online: resolvedOnline,
     lastSeen: resolvedOnline ? Date.now() : (existing.lastSeen || Date.now()),
     offlineReason: resolvedOnline ? null : (existing.offlineReason || 'offline'),
+    registeredAt: existing.registeredAt || Date.now(),
     discoveredAt: existing.discoveredAt || existing.registeredAt || Date.now(),
   };
   saveAgents();
@@ -633,9 +673,10 @@ app.post('/api/agents', (req, res) => {
 
 app.patch('/api/agents/:name', (req, res) => {
   refreshServerLiveness();
-  const ensured = ensureAgentRecord(req.params.name, { online: false, type: 'agent', offlineReason: 'inactive' });
-  if (!ensured) return res.status(400).json({ error: 'invalid agent name' });
-  const agent = ensured.agent;
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
   const { role, identity, tmux, online, offlineReason } = req.body;
   if (role !== undefined) agent.role = role;
   if (identity !== undefined) agent.identity = identity;
@@ -666,23 +707,24 @@ app.patch('/api/agents/:name', (req, res) => {
 
 app.get('/api/agents', (_req, res) => {
   refreshServerLiveness();
-  res.json(Object.values(agents).map(serializeAgent));
+  res.json(Object.values(agents).filter(isAgentRecord).map(serializeAgent));
 });
 
 app.get('/api/agents/:name', (req, res) => {
   refreshServerLiveness();
-  const ensured = ensureAgentRecord(req.params.name, { online: false, type: 'agent', offlineReason: 'inactive' });
-  if (!ensured) return res.status(400).json({ error: 'invalid agent name' });
-  if (ensured.created) saveAgents();
-  const agent = ensured.agent;
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
   const memberOf = Object.values(groups).filter(g => g.members.includes(agent.name)).map(g => g.name);
   res.json({ ...serializeAgent(agent), groups: memberOf });
 });
 
 app.delete('/api/agents/:name', (req, res) => {
-  const ensured = ensureAgentRecord(req.params.name, { online: false, type: 'agent', offlineReason: 'inactive' });
-  if (!ensured) return res.status(400).json({ error: 'invalid agent name' });
-  const agent = ensured.agent;
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
   agent.online = false;
   agent.tmux = null;
   agent.lastSeen = Date.now();
@@ -697,9 +739,10 @@ app.delete('/api/agents/:name', (req, res) => {
 });
 
 app.post('/api/agents/:name/offline', (req, res) => {
-  const ensured = ensureAgentRecord(req.params.name, { online: false, type: 'agent', offlineReason: 'inactive' });
-  if (!ensured) return res.status(400).json({ error: 'invalid agent name' });
-  const agent = ensured.agent;
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
   const reason = (typeof req.body?.reason === 'string' && req.body.reason.trim())
     ? req.body.reason.trim()
     : 'manual-offline';
@@ -753,7 +796,7 @@ app.delete('/api/groups/:name', (req, res) => {
 
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   if (!fromName) return res.status(400).json({ error: 'from required' });
@@ -761,10 +804,29 @@ app.post('/api/messages', (req, res) => {
   if (toName && group) return res.status(400).json({ error: 'to and group are mutually exclusive' });
   if (!summary) return res.status(400).json({ error: 'summary required' });
   if (!type) return res.status(400).json({ error: 'type required' });
+  const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
+  const targetType = typeof target_type === 'string' ? target_type.trim().toLowerCase() : 'auto';
+  if (!['auto', 'agent', 'human'].includes(targetType)) {
+    return res.status(400).json({ error: 'target_type must be one of: auto, agent, human' });
+  }
+  let directTargetKind = null;
+  let assumedHumanTarget = false;
   if (toName) {
-    const ensuredTarget = ensureAgentRecord(toName, { online: false, type: 'agent', offlineReason: 'inactive' });
-    if (!ensuredTarget) return res.status(400).json({ error: `invalid target agent: ${toName}` });
-    if (ensuredTarget.created) saveAgents();
+    const targetRecord = agents[toName];
+    const knownAgentTarget = isAgentRecord(targetRecord);
+    if (targetType === 'agent') {
+      if (!knownAgentTarget) return res.status(404).json({ error: `target agent not found: ${toName}` });
+      directTargetKind = 'agent';
+    } else if (targetType === 'human') {
+      directTargetKind = 'human';
+    } else if (knownAgentTarget) {
+      directTargetKind = 'agent';
+    } else if (sourceType === 'matrix') {
+      return res.status(404).json({ error: `target agent not found: ${toName}` });
+    } else {
+      directTargetKind = 'human';
+      assumedHumanTarget = targetType === 'auto';
+    }
   }
   if (group && !groups[group]) {
     if (group === 'info') {
@@ -807,8 +869,15 @@ app.post('/api/messages', (req, res) => {
   };
 
   const warnings = [];
+  if (msg.to && directTargetKind === 'human' && assumedHumanTarget) {
+    warnings.push({
+      code: 'target_assumed_human',
+      target: msg.to,
+      reason: 'unknown-target-treated-as-human',
+    });
+  }
   const suppressedRecipients = new Set();
-  if (msg.to) {
+  if (msg.to && directTargetKind === 'agent') {
     const state = getAgentDeliveryState(msg.to);
     if (!state.online) {
       warnings.push({
@@ -844,7 +913,7 @@ app.post('/api/messages', (req, res) => {
   broadcastSSE('message', msg);
 
   // Push notifications
-  if (msg.to && msg.to !== msg.from && !isSuppressedForAgent(msg, msg.to)) {
+  if (msg.to && directTargetKind === 'agent' && msg.to !== msg.from && !isSuppressedForAgent(msg, msg.to)) {
     const state = getAgentDeliveryState(msg.to);
     if (state.online) pushNotify(msg.to, msg);
   }
@@ -860,7 +929,7 @@ app.post('/api/messages', (req, res) => {
     ok: true,
     id: msg.id,
     warnings,
-    delivery: { suppressed: msg.suppressedRecipients || [] },
+    delivery: { suppressed: msg.suppressedRecipients || [], targetKind: directTargetKind || null },
   });
 });
 
@@ -933,10 +1002,9 @@ ${msg.reply_to ? '<div class="meta">Reply to: <a href="/msg/' + escape(msg.reply
 
 // ── Inbox ─────────────────────────────────────────────────────────────
 app.get('/api/inbox/:agent', (req, res) => {
-  const ensured = ensureAgentRecord(req.params.agent, { online: false, type: 'agent', offlineReason: 'inactive' });
-  if (!ensured) return res.status(400).json({ error: 'invalid agent name' });
-  if (ensured.created) saveAgents();
-  const agentName = ensured.agent.name;
+  const agentName = normalizeAgentName(req.params.agent);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
 
   const cursor = ensureCursor(agentName);
   const inboxTs = cursor.inbox || 0;
@@ -963,10 +1031,9 @@ app.get('/api/groups/:name/messages', (req, res) => {
 
   const agentName = req.query.agent;
   if (!agentName) return res.status(400).json({ error: 'agent query param required' });
-  const ensured = ensureAgentRecord(agentName, { online: false, type: 'agent', offlineReason: 'inactive' });
-  if (!ensured) return res.status(400).json({ error: 'invalid agent query param' });
-  if (ensured.created) saveAgents();
-  const resolvedAgentName = ensured.agent.name;
+  const resolvedAgentName = normalizeAgentName(agentName);
+  if (!resolvedAgentName) return res.status(400).json({ error: 'invalid agent query param' });
+  if (!isAgentRecord(agents[resolvedAgentName])) return res.status(404).json({ error: 'agent not found' });
 
   const limit = parseInt(req.query.limit) || 10;
   const cursor = ensureCursor(resolvedAgentName);
@@ -988,10 +1055,9 @@ app.get('/api/groups/:name/messages', (req, res) => {
 
 // ── Agent's groups with unread counts ─────────────────────────────────
 app.get('/api/agents/:name/groups', (req, res) => {
-  const ensured = ensureAgentRecord(req.params.name, { online: false, type: 'agent', offlineReason: 'inactive' });
-  if (!ensured) return res.status(400).json({ error: 'invalid agent name' });
-  if (ensured.created) saveAgents();
-  const agentName = ensured.agent.name;
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
 
   const cursor = ensureCursor(agentName);
   const inboxTs = cursor.inbox || 0;
@@ -1034,5 +1100,6 @@ setInterval(() => {
 // ── Start ─────────────────────────────────────────────────────────────
 app.listen(PORT, '127.0.0.1', () => {
   console.log(`Agent Chat v2 backend listening on http://127.0.0.1:${PORT}`);
-  console.log(`  Agents: ${Object.keys(agents).length}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);
+  const agentCount = Object.values(agents).filter(isAgentRecord).length;
+  console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);
 });
