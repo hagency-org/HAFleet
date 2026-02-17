@@ -832,6 +832,11 @@ app.post('/api/messages', (req, res) => {
   }
   let directTargetKind = null;
   let assumedHumanTarget = false;
+  const senderRecord = agents[fromName] || null;
+  const senderIsAgent = isAgentRecord(senderRecord);
+  if (sourceType === 'api' && fromName !== 'system' && !senderIsAgent) {
+    return res.status(403).json({ error: `sender agent not registered: ${fromName}` });
+  }
   if (toName) {
     const targetRecord = agents[toName];
     const knownAgentTarget = isAgentRecord(targetRecord);
@@ -854,6 +859,12 @@ app.post('/api/messages', (req, res) => {
       ensureInfoGroup();
     } else {
       return res.status(404).json({ error: `group not found: ${group}` });
+    }
+  }
+  if (group && senderIsAgent && fromName !== 'system') {
+    const members = groups[group]?.members || [];
+    if (!members.includes(fromName)) {
+      return res.status(403).json({ error: `sender '${fromName}' is not a member of group '${group}'` });
     }
   }
   refreshServerLiveness();
