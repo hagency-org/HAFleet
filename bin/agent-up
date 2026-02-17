@@ -102,6 +102,8 @@ fi
 
 NAME="$1"
 shift
+TMUX_TARGET="=${NAME}"
+TMUX_PANE_TARGET="=${NAME}:0.0"
 
 FRESH=false
 ATTACH=false
@@ -235,9 +237,9 @@ if [ "$TYPE" = "codex" ] && [ "$FRESH" = false ] && [ ! -f "$RESUME_FILE" ]; the
 fi
 
 # ── Check existing session ───────────────────────────────────────────
-if tmux has-session -t "$NAME" 2>/dev/null; then
+if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
   if [ "$ATTACH" = true ]; then
-    exec tmux attach -t "$NAME"
+    exec tmux attach -t "$TMUX_TARGET"
   else
     echo "Session '$NAME' already exists. Attach with: tmux attach -t $NAME"
     exit 0
@@ -280,10 +282,10 @@ if [ "$TYPE" = "claude" ]; then
   [ -n "$EXTRA_ARGS" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
   if [ "$FRESH" = false ] && RID=$(cat "$RESUME_FILE"); then
     echo "Resuming claude session: $RID"
-    tmux send-keys -t "$NAME" "claude --resume $RID $CLAUDE_FLAGS" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "claude --resume $RID $CLAUDE_FLAGS" Enter
   else
     echo "Starting new claude session..."
-    tmux send-keys -t "$NAME" "claude $CLAUDE_FLAGS" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "claude $CLAUDE_FLAGS" Enter
   fi
 
 elif [ "$TYPE" = "codex" ]; then
@@ -293,17 +295,17 @@ elif [ "$TYPE" = "codex" ]; then
   if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ]; then
     RID=$(cat "$RESUME_FILE")
     echo "Resuming codex session: $RID"
-    tmux send-keys -t "$NAME" "codex resume $RID $CODEX_FLAGS" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "codex resume $RID $CODEX_FLAGS" Enter
   else
     echo "Starting new codex session..."
-    tmux send-keys -t "$NAME" "codex $CODEX_FLAGS -C $AGENT_PATH" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "codex $CODEX_FLAGS -C $AGENT_PATH" Enter
     # Send init prompt after codex starts to trigger session file creation
     # Then detect session ID in background
     (
       sleep 5
-      tmux send-keys -t "$NAME" "Hi" Enter
+      tmux send-keys -t "$TMUX_PANE_TARGET" "Hi" Enter
       sleep 0.1
-      tmux send-keys -t "$NAME" Enter
+      tmux send-keys -t "$TMUX_PANE_TARGET" Enter
       sleep 15
       SESSIONS_DIR="$HOME/.codex/sessions"
       if [ -d "$SESSIONS_DIR" ]; then
@@ -345,7 +347,7 @@ echo ""
 echo "Agent '$NAME' ($TYPE) launched in $AGENT_PATH"
 
 if [ "$ATTACH" = true ]; then
-  exec tmux attach -t "$NAME"
+  exec tmux attach -t "$TMUX_TARGET"
 else
   echo "  Attach: tmux attach -t $NAME"
   echo "  Meta:   $META_FILE"
