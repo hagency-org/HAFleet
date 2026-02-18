@@ -34,18 +34,15 @@ need_cmd() {
 launchd_bootstrap_service() {
   local plist_path="$1"
   local domains=("$LAUNCHD_DOMAIN" "gui/$(id -u)" "user/$(id -u)")
-  local uniq_domains=()
+  local tried=""
   local d out rc
 
   for d in "${domains[@]}"; do
     [ -n "$d" ] || continue
-    case " ${uniq_domains[*]} " in
-      *" $d "*) ;;
-      *) uniq_domains+=("$d") ;;
+    case ":$tried:" in
+      *":$d:"*) continue ;;
     esac
-  done
-
-  for d in "${uniq_domains[@]}"; do
+    tried="${tried}:$d"
     launchctl bootout "$d/$SERVICE_NAME" >/dev/null 2>&1 || true
     out="$(launchctl bootstrap "$d" "$plist_path" 2>&1)" && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
