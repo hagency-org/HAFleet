@@ -892,6 +892,17 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 .ai-delete-btn.confirm{
   background:rgba(255,40,40,0.15);border-color:rgba(255,60,60,0.7);color:#ff4444;
 }
+.ai-delete-btn.deleting{
+  opacity:0.5;pointer-events:none;
+}
+#delete-toast{
+  position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) scale(0.8);
+  background:rgba(255,60,60,0.15);border:1px solid rgba(255,80,80,0.5);
+  border-radius:8px;padding:12px 28px;color:#ff6666;font-size:13px;letter-spacing:2px;
+  backdrop-filter:blur(12px);opacity:0;pointer-events:none;
+  transition:opacity 0.2s, transform 0.2s;z-index:9999;
+}
+#delete-toast.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
 #agent-info .ai-label{color:rgba(0,240,255,0.2);margin-right:4px}
 #agent-info .ai-val{color:rgba(0,240,255,0.6)}
 #agent-info .ai-identity{color:rgba(255,255,255,0.35);font-style:italic}
@@ -1019,6 +1030,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     </div>
   </div>
   <div id="msglog"></div>
+  <div id="delete-toast"></div>
 </div>
 
 <script>
@@ -1280,6 +1292,12 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   };
 
   let deleteConfirmTimer = null;
+  function showDeleteToast(name) {
+    const toast = document.getElementById('delete-toast');
+    toast.textContent = 'DELETED: ' + name;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 1500);
+  }
   window.deleteAgent = function() {
     if (!monitoredAgent) return;
     const btn = document.getElementById('ai-delete-btn');
@@ -1287,11 +1305,14 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     if (btn.classList.contains('confirm')) {
       // Second click — actually delete
       clearTimeout(deleteConfirmTimer);
+      btn.classList.add('deleting');
+      btn.textContent = 'Deleting...';
       const name = monitoredAgent.name;
       fetch('/api/agents/' + encodeURIComponent(name) + '?force=true', { method: 'DELETE' })
         .then(r => r.json())
         .then(d => {
           if (d.ok) {
+            showDeleteToast(name);
             monitoredAgent = null;
             monitorPaused = true;
             monitorLabelEl.textContent = '';
@@ -1303,7 +1324,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
             agentInfoEl.innerHTML = '';
             fetchAgentStatus();
           }
-        }).catch(() => {});
+        }).catch(() => {
+          btn.classList.remove('deleting', 'confirm');
+          btn.textContent = 'Delete Agent';
+        });
     } else {
       // First click — show confirmation
       btn.classList.add('confirm');
