@@ -1090,6 +1090,15 @@ app.delete('/api/groups/:name', (req, res) => {
   res.json({ ok: true });
 });
 
+// ── DM ensure (triggers bridge to create Matrix DM room) ─────────────
+app.post('/api/dm/ensure', (req, res) => {
+  const { agent, human } = req.body;
+  if (!agent || !human) return res.status(400).json({ error: 'agent and human required' });
+  broadcastSSE('dm_ensure', { agent, human });
+  console.log(`[dm/ensure] Requested DM room: agent=${agent}, human=${human}`);
+  res.json({ ok: true, queued: true, agent, human });
+});
+
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', (req, res) => {
   const { from, to, group, type, summary, full, mentions, reply_to, source, target_type } = req.body;

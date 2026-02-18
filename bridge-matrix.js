@@ -1082,12 +1082,41 @@ class MatrixBridge {
           console.warn(`Failed to parse SSE group_members event: ${e.message}`);
         }
       });
+      es.on('dm_ensure', (data) => {
+        try {
+          const { agent, human } = JSON.parse(data);
+          console.log(`SSE: dm_ensure request — agent=${agent}, human=${human}`);
+          this.onDmEnsure(agent, human);
+        } catch (e) {
+          console.warn(`Failed to parse SSE dm_ensure event: ${e.message}`);
+        }
+      });
       es.on('error', () => {
         console.error('SSE disconnected, reconnecting in 5s...');
         setTimeout(connect, 5000);
       });
     };
     connect();
+  }
+
+  async onDmEnsure(agentName, humanName) {
+    try {
+      // Ensure agent account exists
+      if (!state.agentTokens[agentName]) {
+        await ensureAgentAccount(agentName);
+        this.knownAgents.add(agentName);
+      }
+      const result = await this.ensureHumanDmRoom(agentName, humanName);
+      if (result.ok) {
+        console.log(`DM room ensured: agent=${agentName}, human=${humanName}, room=${result.roomId}, status=${result.humanStatus}`);
+      } else {
+        console.error(`DM room ensure failed: agent=${agentName}, human=${humanName}`, result);
+        this.postWarning(`Failed to ensure DM room for ${agentName} ↔ ${humanName}: ${result.invite?.error || 'unknown'}`);
+      }
+    } catch (e) {
+      console.error(`DM ensure error: ${e.message}`);
+      this.postWarning(`DM ensure error for ${agentName} ↔ ${humanName}: ${e.message}`);
+    }
   }
 
   async onGroupCreated(group) {

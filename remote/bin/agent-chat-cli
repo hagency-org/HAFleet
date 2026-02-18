@@ -14,6 +14,7 @@
 #   list-agents                                  List all agents
 #   agent <name>                                 Show agent details
 #   identity <name> <text>                       Set agent identity/description
+#   dm <agent> <human>                           Ensure DM room exists (Matrix)
 set -euo pipefail
 
 API="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
@@ -110,6 +111,15 @@ for a in agents:
       -d "{\"identity\":$(_json_str "$text")}" | python3 -m json.tool
     ;;
 
+  dm)
+    agent="${1:?Usage: agent-chat-cli dm <agent> <human>}"
+    human="${2:?Usage: agent-chat-cli dm <agent> <human>}"
+    echo "Ensuring DM room: $agent ↔ $human ..."
+    _curl -X POST "$API/api/dm/ensure" \
+      -H 'Content-Type: application/json' \
+      -d "{\"agent\":$(_json_str "$agent"),\"human\":$(_json_str "$human")}" | python3 -m json.tool
+    ;;
+
   help|--help|-h)
     echo "agent-chat-cli — Admin CLI for agent-chat"
     echo ""
@@ -125,6 +135,9 @@ for a in agents:
     echo "  list-agents                         List all agents"
     echo "  agent <name>                        Agent details"
     echo "  identity <name> <text>              Set agent identity"
+    echo ""
+    echo "DM management:"
+    echo "  dm <agent> <human>                  Ensure DM room exists (Matrix)"
     echo ""
     echo "Environment:"
     echo "  AGENT_CHAT_API  Backend URL (default: http://127.0.0.1:8090)"
