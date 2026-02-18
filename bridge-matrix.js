@@ -793,8 +793,12 @@ class MatrixBridge {
         const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
         if (existing.error) {
           // Create group in backend
-          const members = await this.getRoomAgentMembers(roomId);
-          const humanMembers = await this.getRoomHumanMembers(roomId);
+          const joinedMembers = await this.botClient.getJoinedRoomMembers(roomId);
+          const members = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
+          const humanMembers = joinedMembers
+            .filter(m => !isAgentUser(m) && m !== this.botUserId)
+            .map(m => humanNameFromUserId(m))
+            .filter(Boolean);
           await backendApi('POST', '/api/groups', {
             name,
             members: [...members, ...humanMembers],
@@ -808,8 +812,12 @@ class MatrixBridge {
         if (mapped !== name && !name.startsWith('DM: ') && !name.startsWith('SPY: ')) {
           const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
           if (existing.error) {
-            const members = await this.getRoomAgentMembers(roomId);
-            const humanMembers = await this.getRoomHumanMembers(roomId);
+            const joinedMembers = await this.botClient.getJoinedRoomMembers(roomId);
+            const members = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
+            const humanMembers = joinedMembers
+              .filter(m => !isAgentUser(m) && m !== this.botUserId)
+              .map(m => humanNameFromUserId(m))
+              .filter(Boolean);
             await backendApi('POST', '/api/groups', {
               name,
               members: [...members, ...humanMembers],
@@ -993,22 +1001,6 @@ class MatrixBridge {
       }
       return null;
     }
-  }
-
-  async getRoomAgentMembers(roomId) {
-    try {
-      const members = await this.botClient.getJoinedRoomMembers(roomId);
-      return members.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
-    } catch { return []; }
-  }
-
-  async getRoomHumanMembers(roomId) {
-    try {
-      const members = await this.botClient.getJoinedRoomMembers(roomId);
-      return members
-        .filter(m => !isAgentUser(m) && m !== this.botUserId)
-        .map(m => humanNameFromUserId(m));
-    } catch { return []; }
   }
 
   // ── Poll agent accounts for pending invites ─────────────────────
