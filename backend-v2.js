@@ -1,6 +1,5 @@
 import express from 'express';
-import { readFile } from 'fs/promises';
-import { writeFileSync, mkdirSync, renameSync, existsSync } from 'fs';
+import { writeFileSync, mkdirSync, renameSync } from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
 
@@ -18,17 +17,6 @@ mkdirSync(DATA_DIR, { recursive: true });
 
 // ── Storage helpers ───────────────────────────────────────────────────
 function dataPath(name) { return path.join(DATA_DIR, name); }
-
-function loadJson(name, fallback) {
-  try {
-    return JSON.parse(readFileSync_safe(dataPath(name)));
-  } catch { return fallback; }
-}
-
-function readFileSync_safe(p) {
-  const { readFileSync } = await_import_fs();
-  return readFileSync(p, 'utf-8');
-}
 
 // We need sync read at startup — use a simple approach
 import { readFileSync } from 'fs';

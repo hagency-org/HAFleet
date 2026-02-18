@@ -37,7 +37,7 @@ async function postJson(path, body) {
 
 function listLocalTmuxSessions() {
   try {
-    const raw = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'], { encoding: 'utf-8', timeout: 5000 }).trim();
+    const raw = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'], { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
     return new Set(raw ? raw.split('\n').filter(Boolean) : []);
   } catch {
     return new Set();
@@ -143,18 +143,19 @@ function sleepMs(ms) {
 }
 
 function pushToTmux(target, payload) {
+  const opts = { timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] };
   try {
-    execFileSync('tmux', ['send-keys', '-l', '-t', target, payload], { timeout: 5000 });
+    execFileSync('tmux', ['send-keys', '-l', '-t', target, payload], opts);
     sleepMs(INJECT_DELAY_MS);
-    execFileSync('tmux', ['send-keys', '-t', target, 'Tab'], { timeout: 5000 });
+    execFileSync('tmux', ['send-keys', '-t', target, 'Tab'], opts);
     sleepMs(INJECT_DELAY_MS);
-    execFileSync('tmux', ['send-keys', '-t', target, 'Enter'], { timeout: 5000 });
+    execFileSync('tmux', ['send-keys', '-t', target, 'Enter'], opts);
     sleepMs(INJECT_DELAY_MS);
-    execFileSync('tmux', ['send-keys', '-t', target, 'Enter'], { timeout: 5000 });
+    execFileSync('tmux', ['send-keys', '-t', target, 'Enter'], opts);
     sleepMs(INJECT_DELAY_MS);
-    execFileSync('tmux', ['send-keys', '-t', target, 'C-m'], { timeout: 5000 });
+    execFileSync('tmux', ['send-keys', '-t', target, 'C-m'], opts);
     sleepMs(INJECT_DELAY_MS);
-    execFileSync('tmux', ['send-keys', '-t', target, 'C-m'], { timeout: 5000 });
+    execFileSync('tmux', ['send-keys', '-t', target, 'C-m'], opts);
     return true;
   } catch (e) {
     console.error(`[push-relay] tmux inject failed for ${target}: ${e.message}`);

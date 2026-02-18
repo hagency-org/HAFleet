@@ -707,7 +707,9 @@ class MatrixBridge {
         // Only humans + bot in room → bot command DM
         isBotDm = true;
       }
-    } catch { /* ignore */ }
+    } catch (e) {
+      console.warn(`Failed to inspect room members for ${roomId}: ${e.message}`);
+    }
 
     // ! commands work in any room (bot-DM, group, agent-DM)
     // Strip bot mention prefix (Matrix pills resolve to "display_name: " in plain text)
@@ -1019,7 +1021,7 @@ class MatrixBridge {
           }
         }
       } catch (e) {
-        // Silently skip — token might be expired
+        console.warn(`Invite poll failed for ${agentName}: ${e.message}`);
       }
     }
     // Re-scan for any newly joined rooms that need mapping
@@ -1038,21 +1040,27 @@ class MatrixBridge {
           const msg = JSON.parse(data);
           if (msg.source === 'matrix') return; // prevent loops
           this.onAgentMessage(msg);
-        } catch { /* ignore */ }
+        } catch (e) {
+          console.warn(`Failed to parse SSE message event: ${e.message}`);
+        }
       });
       es.on('group_created', (data) => {
         try {
           const group = JSON.parse(data);
           console.log(`SSE: group created "${group.name}" with members: ${group.members.join(', ')}`);
           this.onGroupCreated(group);
-        } catch { /* ignore */ }
+        } catch (e) {
+          console.warn(`Failed to parse SSE group_created event: ${e.message}`);
+        }
       });
       es.on('group_members', (data) => {
         try {
           const update = JSON.parse(data);
           console.log(`SSE: group "${update.name}" members updated — added: [${update.added}], removed: [${update.removed}]`);
           this.onGroupMembersChanged(update);
-        } catch { /* ignore */ }
+        } catch (e) {
+          console.warn(`Failed to parse SSE group_members event: ${e.message}`);
+        }
       });
       es.on('error', () => {
         console.error('SSE disconnected, reconnecting in 5s...');
@@ -1084,7 +1092,9 @@ class MatrixBridge {
     try {
       const members = await this.botClient.getJoinedRoomMembers(roomId);
       currentMembers = new Set(members);
-    } catch { /* ignore */ }
+    } catch (e) {
+      console.warn(`Failed to fetch current room members for ${update.name}/${roomId}: ${e.message}`);
+    }
 
     // Invite newly added members
     for (const m of (update.added || [])) {
@@ -1097,7 +1107,9 @@ class MatrixBridge {
             isAgent = true;
             this.knownAgents.add(m);
           }
-        } catch { /* not an agent */ }
+        } catch (e) {
+          console.warn(`Agent lookup failed for "${m}" while syncing group "${update.name}": ${e.message}`);
+        }
       }
 
       // Ensure agent has a Matrix account
