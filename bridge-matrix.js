@@ -1201,24 +1201,34 @@ class MatrixBridge {
     }
 
     const agentName = msg.from;
+    const senderIsSystem = agentName === 'system';
 
     // Don't bridge human messages (they come from Matrix)
     if (msg.type === 'human') return;
 
-    const token = state.agentTokens[agentName];
-    if (!token) {
-      // Unknown agent, ensure account exists
-      if (!this.isKnownAgentName(agentName)) {
-        await ensureAgentAccount(agentName);
-        this.knownAgents.add(agentName);
+    let senderToken = null;
+    if (senderIsSystem) {
+      senderToken = this.getBotToken();
+      if (!senderToken) {
+        console.warn(`No Matrix bot token, cannot bridge system message ${msg.id}`);
+        return;
       }
-    }
+    } else {
+      const token = state.agentTokens[agentName];
+      if (!token) {
+        // Unknown agent, ensure account exists
+        if (!this.isKnownAgentName(agentName)) {
+          await ensureAgentAccount(agentName);
+          this.knownAgents.add(agentName);
+        }
+      }
 
-    const agentToken = state.agentTokens[agentName];
-    if (!agentToken) {
-      console.warn(`No Matrix token for agent "${agentName}", cannot bridge message ${msg.id}`);
-      this.postWarning(`No Matrix token for agent "${agentName}" — message ${msg.id} not bridged to Matrix`);
-      return;
+      senderToken = state.agentTokens[agentName];
+      if (!senderToken) {
+        console.warn(`No Matrix token for agent "${agentName}", cannot bridge message ${msg.id}`);
+        this.postWarning(`No Matrix token for agent "${agentName}" — message ${msg.id} not bridged to Matrix`);
+        return;
+      }
     }
 
     // Build Matrix message — always show full content when available
@@ -1249,16 +1259,22 @@ class MatrixBridge {
       const roomId = roomForGroup(msg.group);
       if (!roomId) {
         console.log(`No Matrix room for group "${msg.group}", skipping`);
-        this.postWarning(`No Matrix room for group "${msg.group}" — message ${msg.id} from ${agentName} not bridged`);
+        if (msg.group !== 'info') {
+          this.postWarning(`No Matrix room for group "${msg.group}" — message ${msg.id} from ${agentName} not bridged`);
+        }
         return;
       }
-      await this.sendAsAgent(agentToken, roomId, plain, html, msg.id);
+      await this.sendAsAgent(senderToken, roomId, plain, html, msg.id);
       console.log(`→ Matrix [${msg.group}] ${agentName}: ${msg.summary.slice(0, 60)}`);
     } else if (msg.to) {
       // DM - bridge to Matrix (both agent-to-agent and agent-to-human)
+      if (senderIsSystem) {
+        console.log(`Skipping Matrix DM bridge for system message ${msg.id}`);
+        return;
+      }
       const roomId = await this.ensureDmRoom(agentName, msg.to);
       if (roomId) {
-        await this.sendAsAgent(agentToken, roomId, plain, html, msg.id);
+        await this.sendAsAgent(senderToken, roomId, plain, html, msg.id);
         console.log(`→ Matrix DM ${agentName} → ${msg.to}: ${msg.summary.slice(0, 60)}`);
       }
     }
