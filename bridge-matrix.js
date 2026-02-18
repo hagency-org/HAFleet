@@ -38,6 +38,12 @@ function saveState() {
 }
 const state = loadState();
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const AGENT_PREFIX_RE = escapeRegex(AGENT_PREFIX);
+
 if (!BOT_PASSWORD) {
   console.warn('MATRIX_BOT_PASSWORD is not set. Bridge can run with cached token, but re-login will fail if token expires.');
 }
@@ -288,21 +294,20 @@ function parseMentions(content, plainBody = null) {
 
   // 2. Fallback: parse HTML pills from formatted_body
   if (!mentions.length && content.formatted_body) {
-    const hrefRegex = /matrix\.to\/#\/@(ac_)?([a-z0-9_-]+):/gi;
+    const hrefRegex = new RegExp(`matrix\\.to/#/@(?:${AGENT_PREFIX_RE})?([a-z0-9_-]+):`, 'gi');
     let match;
     while ((match = hrefRegex.exec(content.formatted_body)) !== null) {
-      mentions.push(match[2]);
+      mentions.push(match[1]);
     }
   }
 
   // 3. Fallback: plain text @mentions in body
   const body = typeof plainBody === 'string' ? plainBody : content.body;
   if (!mentions.length && body) {
-    const atRegex = /@(ac_)?([a-z0-9_-]+)/gi;
+    const atRegex = new RegExp(`@(?:${AGENT_PREFIX_RE})?([a-z0-9_-]+)`, 'gi');
     let match;
     while ((match = atRegex.exec(body)) !== null) {
-      if (match[1]) mentions.push(match[2]); // @ac_agentname
-      else mentions.push(match[0].slice(1)); // @agentname
+      mentions.push(match[1]);
     }
   }
 

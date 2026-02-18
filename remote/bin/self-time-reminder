@@ -1,69 +1,194 @@
 #!/bin/bash
-# self-time-reminder — Schedule a future reminder to wake yourself up
+# self-time-reminder — Schedule, list, and cancel reminders
 #
 # Usage:
-#   self-time-reminder <delay_seconds> <message>
-#
-# This tool schedules a delayed message that will be injected into your
-# tmux pane after the specified delay, using idle-wait delivery.
-# The message format includes timestamps so you know when you set it.
+#   self-time-reminder <delay_seconds> <message>     Set a reminder
+#   self-time-reminder list                          List your pending reminders
+#   self-time-reminder cancel <id>                   Cancel a reminder by ID
+#   self-time-reminder --force <delay_seconds> <msg> Force-add even if one exists
 #
 # Examples:
 #   self-time-reminder 300 "Check if the build finished"
-#   self-time-reminder 60 "Follow up on the deploy"
-#   self-time-reminder 3600 "Review PR #42"
+#   self-time-reminder list
+#   self-time-reminder cancel 42
 set -euo pipefail
 
-if [ $# -lt 2 ]; then
+API_BASE="http://127.0.0.1:8084/api/reminders"
+
+# ── Detect self target ──────────────────────────
+_detect_target() {
+  if [ -z "${TMUX:-}" ]; then
+    echo "Error: not running inside a tmux session" >&2
+    exit 1
+  fi
+  local _sess _win _pane
+  _sess=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "unknown")
+  _win=$(tmux display-message -p '#{window_index}' 2>/dev/null || echo "0")
+  _pane=$(tmux display-message -p '#{pane_index}' 2>/dev/null || echo "0")
+  echo "${_sess}:${_win}.${_pane}"
+}
+
+# ── List reminders ──────────────────────────────
+_cmd_list() {
+  local target
+  target=$(_detect_target)
+  local data
+  data=$(curl -s --noproxy '*' --connect-timeout 2 --max-time 5 "$API_BASE" 2>/dev/null) || {
+    echo "Error: cannot reach reminder server" >&2; exit 1
+  }
+  # Filter to own target and display
+  printf '%s' "$data" | TARGET="$target" python3 -c "
+import sys, json
+import os
+data = json.load(sys.stdin)
+target = os.environ.get('TARGET', '')
+mine = [r for r in data if r.get('target') == target]
+if not mine:
+    print('No pending reminders for ' + target)
+    sys.exit(0)
+print(f'Pending reminders for {target}:')
+print()
+for r in mine:
+    remaining = r.get('remainingMs', 0)
+    s = remaining // 1000
+    if s < 60:
+        t = f'{s}s'
+    elif s < 3600:
+        t = f'{s//60}m {s%60}s'
+    else:
+        t = f'{s//3600}h {(s%3600)//60}m'
+    msg = r.get('msg', '')[:80]
+    print(f'  #{r[\"id\"]}  {t} remaining  \"{msg}\"')
+print()
+print('Cancel with: self-time-reminder cancel <id>')
+"
+}
+
+# ── Cancel reminder ─────────────────────────────
+_cmd_cancel() {
+  local id="$1"
+  if ! echo "$id" | grep -qE '^[0-9]+$'; then
+    echo "Error: id must be a number" >&2
+    exit 1
+  fi
+  local resp
+  resp=$(curl -s --noproxy '*' -X DELETE --connect-timeout 2 --max-time 5 \
+    "$API_BASE/$id" 2>/dev/null) || resp=""
+  if echo "$resp" | python3 -c 'import sys,json; d=json.load(sys.stdin); exit(0 if d.get("ok") else 1)' 2>/dev/null; then
+    echo "Reminder #${id} cancelled."
+  else
+    echo "Error: reminder #${id} not found or server error" >&2
+    exit 1
+  fi
+}
+
+# ── Set reminder ────────────────────────────────
+_cmd_set() {
+  local force="$1"
+  local delay="$2"
+  shift 2
+  local msg="$*"
+
+  # Validate delay
+  if ! echo "$delay" | grep -qE '^[0-9]+$' || [ "$delay" -le 0 ] 2>/dev/null; then
+    echo "Error: delay must be a positive integer (seconds)" >&2
+    exit 1
+  fi
+  # Reject empty message
+  if [ -z "$msg" ]; then
+    echo "Error: message is empty" >&2
+    exit 1
+  fi
+
+  local target
+  target=$(_detect_target)
+
+  # Check for existing reminder (unless --force)
+  if [ "$force" != "1" ]; then
+    local existing
+    existing=$(curl -s --noproxy '*' --connect-timeout 2 --max-time 5 "$API_BASE" 2>/dev/null) || existing="[]"
+    local conflict
+    conflict=$(printf '%s' "$existing" | TARGET="$target" python3 -c "
+import sys, json
+import os
+data = json.load(sys.stdin)
+target = os.environ.get('TARGET', '')
+mine = [r for r in data if r.get('target') == target]
+if mine:
+    r = mine[0]
+    remaining = r.get('remainingMs', 0)
+    s = remaining // 1000
+    if s < 60:
+        t = f'{s}s'
+    elif s < 3600:
+        t = f'{s//60}m {s%60}s'
+    else:
+        t = f'{s//3600}h {(s%3600)//60}m'
+    msg = r.get('msg', '')[:80]
+    print(f'#{r[\"id\"]}|{t}|{msg}')
+" 2>/dev/null) || conflict=""
+
+    if [ -n "$conflict" ]; then
+      local _cid _ctime _cmsg
+      _cid=$(echo "$conflict" | cut -d'|' -f1)
+      _ctime=$(echo "$conflict" | cut -d'|' -f2)
+      _cmsg=$(echo "$conflict" | cut -d'|' -f3-)
+      echo "Warning: you already have a pending reminder:" >&2
+      echo "  ${_cid}  ${_ctime} remaining  \"${_cmsg}\"" >&2
+      echo "" >&2
+      echo "This reminder was NOT added. Options:" >&2
+      echo "  self-time-reminder --force $delay $msg    # add anyway" >&2
+      echo "  self-time-reminder cancel ${_cid#\#}           # cancel existing first" >&2
+      exit 1
+    fi
+  fi
+
+  # Build JSON
+  local _json_msg _json_target _body
+  _json_msg=$(printf '%s' "$msg" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()), end="")')
+  _json_target=$(printf '%s' "$target" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()), end="")')
+  _body=$(printf '{"target":%s,"delay":%s,"msg":%s}' "$_json_target" "$delay" "$_json_msg")
+
+  # Post
+  local _response
+  _response=$(curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \
+    -d "$_body" --connect-timeout 2 --max-time 5 "$API_BASE" 2>/dev/null) || _response=""
+
+  if echo "$_response" | python3 -c 'import sys,json; d=json.load(sys.stdin); exit(0 if d.get("ok") else 1)' 2>/dev/null; then
+    local _id _remaining
+    _id=$(echo "$_response" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id","?"))' 2>/dev/null)
+    _remaining=$(echo "$_response" | python3 -c 'import sys,json; r=json.load(sys.stdin).get("remainingMs",0); print(str(r//1000)+"s")' 2>/dev/null)
+    echo "Reminder #${_id} set → ${target} in ${_remaining}"
+  else
+    echo "Error: failed to set reminder (server may be down)" >&2
+    exit 1
+  fi
+}
+
+# ── Main dispatcher ─────────────────────────────
+if [ $# -lt 1 ]; then
   echo "Usage: self-time-reminder <delay_seconds> <message>" >&2
-  echo "" >&2
-  echo "  delay_seconds  How many seconds from now to send the reminder" >&2
-  echo "  message        The reminder message text" >&2
+  echo "       self-time-reminder list" >&2
+  echo "       self-time-reminder cancel <id>" >&2
+  echo "       self-time-reminder --force <delay_seconds> <message>" >&2
   exit 1
 fi
 
-delay="$1"
-shift
-msg="$*"
-
-# Validate delay is a positive number
-if ! echo "$delay" | grep -qE '^[0-9]+$' || [ "$delay" -le 0 ] 2>/dev/null; then
-  echo "Error: delay must be a positive integer (seconds)" >&2
-  exit 1
-fi
-
-# Reject empty message
-if [ -z "$msg" ]; then
-  echo "Error: message is empty" >&2
-  exit 1
-fi
-
-# Detect self: current tmux session + pane
-if [ -z "${TMUX:-}" ]; then
-  echo "Error: not running inside a tmux session" >&2
-  exit 1
-fi
-
-_sess=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "unknown")
-_win=$(tmux display-message -p '#{window_index}' 2>/dev/null || echo "0")
-_pane=$(tmux display-message -p '#{pane_index}' 2>/dev/null || echo "0")
-target="${_sess}:${_win}.${_pane}"
-
-# Build JSON
-_json_msg=$(printf '%s' "$msg" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()), end="")')
-_json_target=$(printf '%s' "$target" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()), end="")')
-_body=$(printf '{"target":%s,"delay":%s,"msg":%s}' "$_json_target" "$delay" "$_json_msg")
-
-# Post to reminder API
-QUEUE_URL="http://127.0.0.1:8084/api/reminders"
-_response=$(curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \
-  -d "$_body" --connect-timeout 2 --max-time 5 "$QUEUE_URL" 2>/dev/null) || _response=""
-
-if echo "$_response" | python3 -c 'import sys,json; d=json.load(sys.stdin); exit(0 if d.get("ok") else 1)' 2>/dev/null; then
-  _id=$(echo "$_response" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id","?"))' 2>/dev/null)
-  _remaining=$(echo "$_response" | python3 -c 'import sys,json; r=json.load(sys.stdin).get("remainingMs",0); print(str(r//1000)+"s")' 2>/dev/null)
-  echo "Reminder #${_id} set → ${target} in ${_remaining}"
-else
-  echo "Error: failed to set reminder (server may be down)" >&2
-  exit 1
-fi
+case "$1" in
+  list)
+    _cmd_list
+    ;;
+  cancel)
+    [ $# -lt 2 ] && { echo "Usage: self-time-reminder cancel <id>" >&2; exit 1; }
+    _cmd_cancel "$2"
+    ;;
+  --force)
+    [ $# -lt 3 ] && { echo "Usage: self-time-reminder --force <delay_seconds> <message>" >&2; exit 1; }
+    shift
+    _cmd_set "1" "$@"
+    ;;
+  *)
+    [ $# -lt 2 ] && { echo "Usage: self-time-reminder <delay_seconds> <message>" >&2; exit 1; }
+    _cmd_set "0" "$@"
+    ;;
+esac
