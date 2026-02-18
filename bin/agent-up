@@ -77,6 +77,30 @@ PY
     >/dev/null 2>&1 || true
 }
 
+register_backend_agent() {
+  local payload
+  payload=$(NAME="$NAME" TYPE="$TYPE" TMUX="${NAME}:0.0" SERVER="$SERVER_ID" python3 - <<'PY'
+import json
+import os
+
+server = os.environ.get("SERVER", "").strip() or None
+print(json.dumps({
+    "name": os.environ["NAME"],
+    "type": os.environ["TYPE"],
+    "tmux": os.environ["TMUX"],
+    "server": server,
+}))
+PY
+)
+  if api_curl -X POST "$BACKEND_URL/api/agents" \
+    -H 'Content-Type: application/json' \
+    -d "$payload" >/dev/null 2>&1; then
+    echo "Registered '$NAME' online in backend."
+  else
+    echo "Warning: failed to register '$NAME' online in backend (heartbeat may backfill)." >&2
+  fi
+}
+
 # ── Check for updates ────────────────────────────────────────────────
 REPO_DIR="$(dirname "$BASE_DIR")"
 if [ -d "$REPO_DIR/.git" ]; then
@@ -480,6 +504,7 @@ fi
 # ── Create tmux session ──────────────────────────────────────────────
 echo "Creating tmux session '$NAME' in $AGENT_PATH..."
 tmux new-session -d -s "$NAME" -c "$AGENT_PATH"
+register_backend_agent
 
 # ── Build init prompt for fresh starts ────────────────────────────────
 INIT_PROMPT="Your name is ${NAME}. You have an MCP tool server called 'agent-chat' for communicating with other agents and humans. Key tools: check_inbox() to read messages, send_message(to, summary, full) to DM, post(group, summary, full, mentions) for group messages, whoami() to see your identity and available agents/groups. Check your inbox now to see if there are any messages for you."

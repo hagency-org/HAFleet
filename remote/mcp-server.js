@@ -9,9 +9,6 @@ function run(cmd) {
 }
 
 function detectAgentName() {
-  const envAgent = (process.env.AGENT_NAME || '').trim();
-  if (envAgent) return envAgent;
-
   const envPane = (process.env.TMUX_PANE || '').trim();
   if (envPane) {
     try {
@@ -42,6 +39,9 @@ function detectAgentName() {
     if (fromClient) return fromClient;
   } catch {}
 
+  const envAgent = (process.env.AGENT_NAME || '').trim();
+  if (envAgent) return envAgent;
+
   return null;
 }
 
@@ -54,6 +54,7 @@ if (!AGENT_NAME) {
 
 const API = process.env.AGENT_CHAT_API || 'http://127.0.0.1:8090';
 const API_TOKEN = (process.env.API_TOKEN || '').trim();
+const AGENT_SERVER = (process.env.AGENT_CHAT_SERVER || '').trim() || null;
 
 // ── HTTP helper ───────────────────────────────────────────────────────
 async function api(method, path, body) {
@@ -73,6 +74,27 @@ async function api(method, path, body) {
   return res.json();
 }
 
+async function ensureAgentRegistered() {
+  try {
+    await api('GET', `/api/agents/${encodeURIComponent(AGENT_NAME)}`);
+    return;
+  } catch (e) {
+    const msg = String(e?.message || '');
+    if (!/agent not found/i.test(msg)) return;
+  }
+
+  try {
+    await api('POST', '/api/agents', {
+      name: AGENT_NAME,
+      type: 'agent',
+      tmux: `${AGENT_NAME}:0.0`,
+      server: AGENT_SERVER,
+    });
+  } catch (e) {
+    process.stderr.write(`Warning: failed to auto-register agent '${AGENT_NAME}': ${e.message}\n`);
+  }
+}
+
 function text(data) {
   return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] };
 }
@@ -86,6 +108,8 @@ const server = new McpServer({
   name: `agent-chat-${AGENT_NAME}`,
   version: '2.1.0',
 });
+
+await ensureAgentRegistered();
 
 // 1. whoami — returns identity, groups (with unread counts), and all known agents
 server.tool('whoami', 'Returns your agent identity, role, and groups', {}, async () => {
