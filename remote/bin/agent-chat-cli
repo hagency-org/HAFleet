@@ -12,6 +12,7 @@
 #   list-groups                                  List all groups
 #   group <name>                                 Show group details
 #   list-agents                                  List all agents
+#   status [name]                                Show status table or one agent status
 #   agent <name>                                 Show agent details
 #   identity <name> <text>                       Set agent identity/description
 #   dm <agent> <human>                           Ensure DM room exists (Matrix)
@@ -32,6 +33,44 @@ _json_str() {
 
 _json_arr() {
   python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "$@"
+}
+
+_tmux_snapshot_json() {
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "{}"
+    return
+  fi
+  tmp_tmux="$(mktemp)"
+  tmux list-panes -a -F '#{session_name}|#{session_activity}|#{pane_current_command}' > "$tmp_tmux" 2>/dev/null || true
+  python3 - "$tmp_tmux" <<'PY'
+import json
+import sys
+
+out = {}
+with open(sys.argv[1]) as f:
+  lines = f.readlines()
+for raw in lines:
+    line = raw.rstrip('\n')
+    if not line:
+        continue
+    parts = line.split('|', 2)
+    if len(parts) < 2:
+        continue
+    session = parts[0].strip()
+    if not session:
+        continue
+    try:
+        activity = int(parts[1]) if parts[1].strip() else 0
+    except ValueError:
+        activity = 0
+    cmd = parts[2].strip() if len(parts) > 2 else ''
+    prev = out.get(session)
+    if not prev or activity >= int(prev.get('session_activity', 0)):
+        out[session] = {'session_activity': activity, 'command': cmd}
+
+print(json.dumps(out), end='')
+PY
+  rm -f "$tmp_tmux"
 }
 
 cmd="${1:-help}"
@@ -88,12 +127,202 @@ case "$cmd" in
     ;;
 
   list-agents)
-    _curl "$API/api/agents" | python3 -c "
-import json,sys
-agents = json.load(sys.stdin)
-for a in agents:
-    print(f\"  {a['name']:20s} type={a.get('type','?'):6s} tmux={a.get('tmux','?')}\")
-"
+    tmux_snapshot="$(_tmux_snapshot_json)"
+    tmp_json="$(mktemp)"
+    _curl "$API/api/agents" > "$tmp_json"
+    TMUX_SNAPSHOT="$tmux_snapshot" python3 - "$tmp_json" <<'PY'
+import json
+import os
+import sys
+import time
+
+def fmt_span(sec):
+    sec = int(max(0, sec))
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec//60}m{sec%60:02d}s"
+    if sec < 86400:
+        h, rem = divmod(sec, 3600)
+        m = rem // 60
+        return f"{h}h{m:02d}m"
+    d, rem = divmod(sec, 86400)
+    h = rem // 3600
+    return f"{d}d{h:02d}h"
+
+tmux_map = json.loads(os.environ.get('TMUX_SNAPSHOT') or '{}')
+with open(sys.argv[1]) as f:
+    agents = json.load(f)
+now_ms = int(time.time() * 1000)
+now_sec = int(time.time())
+
+print("  NAME                 STATE    IDLE     LASTSEEN  SERVER         TYPE     TMUX")
+for a in sorted(agents, key=lambda x: x.get('name', '')):
+    name = str(a.get('name', '?'))
+    typ = str(a.get('type', '?'))
+    server = str(a.get('server') or '-')
+    tmux = str(a.get('tmux') or '-')
+    online = bool(a.get('online'))
+
+    session = tmux.split(':', 1)[0] if tmux and tmux != '-' else ''
+    snap = tmux_map.get(session) if session else None
+    idle_sec = None
+    if snap and snap.get('session_activity'):
+        idle_sec = max(0, now_sec - int(snap['session_activity']))
+
+    if online and idle_sec is not None:
+        state = 'active' if idle_sec < 30 else 'idle'
+    elif online:
+        state = 'online'
+    else:
+        state = 'offline'
+
+    last_seen = a.get('lastSeen')
+    if isinstance(last_seen, (int, float)) and last_seen > 0:
+        seen_txt = fmt_span((now_ms - int(last_seen)) // 1000)
+    else:
+        seen_txt = '-'
+    idle_txt = fmt_span(idle_sec) if idle_sec is not None else '-'
+
+    print(f"  {name:20.20s} {state:8s} {idle_txt:8s} {seen_txt:9s} {server:14.14s} {typ:8.8s} {tmux}")
+PY
+    rm -f "$tmp_json"
+    ;;
+
+  status)
+    tmux_snapshot="$(_tmux_snapshot_json)"
+    if [ $# -eq 0 ]; then
+      tmp_json="$(mktemp)"
+      _curl "$API/api/agents" > "$tmp_json"
+      TMUX_SNAPSHOT="$tmux_snapshot" python3 - "$tmp_json" <<'PY'
+import json
+import os
+import sys
+import time
+
+def fmt_span(sec):
+    sec = int(max(0, sec))
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec//60}m{sec%60:02d}s"
+    if sec < 86400:
+        h, rem = divmod(sec, 3600)
+        m = rem // 60
+        return f"{h}h{m:02d}m"
+    d, rem = divmod(sec, 86400)
+    h = rem // 3600
+    return f"{d}d{h:02d}h"
+
+tmux_map = json.loads(os.environ.get('TMUX_SNAPSHOT') or '{}')
+with open(sys.argv[1]) as f:
+    agents = json.load(f)
+now_ms = int(time.time() * 1000)
+now_sec = int(time.time())
+
+print("  NAME                 STATE    IDLE     LASTSEEN  SERVER         TYPE")
+for a in sorted(agents, key=lambda x: x.get('name', '')):
+    name = str(a.get('name', '?'))
+    typ = str(a.get('type', '?'))
+    server = str(a.get('server') or '-')
+    tmux = str(a.get('tmux') or '')
+    online = bool(a.get('online'))
+
+    session = tmux.split(':', 1)[0] if tmux else ''
+    snap = tmux_map.get(session) if session else None
+    idle_sec = None
+    if snap and snap.get('session_activity'):
+        idle_sec = max(0, now_sec - int(snap['session_activity']))
+
+    if online and idle_sec is not None:
+        state = 'active' if idle_sec < 30 else 'idle'
+    elif online:
+        state = 'online'
+    else:
+        state = 'offline'
+
+    last_seen = a.get('lastSeen')
+    if isinstance(last_seen, (int, float)) and last_seen > 0:
+        seen_txt = fmt_span((now_ms - int(last_seen)) // 1000)
+    else:
+        seen_txt = '-'
+    idle_txt = fmt_span(idle_sec) if idle_sec is not None else '-'
+
+    print(f"  {name:20.20s} {state:8s} {idle_txt:8s} {seen_txt:9s} {server:14.14s} {typ:8.8s}")
+PY
+      rm -f "$tmp_json"
+    else
+      name="${1:?Usage: agent-chat-cli status [name]}"
+      tmp_json="$(mktemp)"
+      _curl "$API/api/agents/$name" > "$tmp_json"
+      TMUX_SNAPSHOT="$tmux_snapshot" python3 - "$tmp_json" <<'PY'
+import json
+import os
+import sys
+import time
+
+def fmt_span(sec):
+    sec = int(max(0, sec))
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec//60}m{sec%60:02d}s"
+    if sec < 86400:
+        h, rem = divmod(sec, 3600)
+        m = rem // 60
+        return f"{h}h{m:02d}m"
+    d, rem = divmod(sec, 86400)
+    h = rem // 3600
+    return f"{d}d{h:02d}h"
+
+tmux_map = json.loads(os.environ.get('TMUX_SNAPSHOT') or '{}')
+with open(sys.argv[1]) as f:
+    obj = json.load(f)
+if isinstance(obj, dict) and obj.get('error'):
+    print(json.dumps(obj, ensure_ascii=False, indent=2))
+    sys.exit(0)
+
+now_ms = int(time.time() * 1000)
+now_sec = int(time.time())
+
+name = str(obj.get('name', '?'))
+typ = str(obj.get('type', '?'))
+server = str(obj.get('server') or '-')
+tmux = str(obj.get('tmux') or '-')
+online = bool(obj.get('online'))
+session = tmux.split(':', 1)[0] if tmux and tmux != '-' else ''
+snap = tmux_map.get(session) if session else None
+idle_sec = None
+if snap and snap.get('session_activity'):
+    idle_sec = max(0, now_sec - int(snap['session_activity']))
+
+if online and idle_sec is not None:
+    state = 'active' if idle_sec < 30 else 'idle'
+elif online:
+    state = 'online'
+else:
+    state = 'offline'
+
+last_seen = obj.get('lastSeen')
+if isinstance(last_seen, (int, float)) and last_seen > 0:
+    seen_txt = fmt_span((now_ms - int(last_seen)) // 1000)
+else:
+    seen_txt = '-'
+idle_txt = fmt_span(idle_sec) if idle_sec is not None else '-'
+
+print(f"name:        {name}")
+print(f"state:       {state}")
+print(f"idle:        {idle_txt}")
+print(f"lastSeen:    {seen_txt} ago")
+print(f"online:      {str(online).lower()}")
+print(f"type:        {typ}")
+print(f"server:      {server}")
+print(f"tmux:        {tmux}")
+offline_reason = obj.get('offlineReason')
+print(f"offlineReason:{offline_reason if offline_reason else '-'}")
+PY
+      rm -f "$tmp_json"
+    fi
     ;;
 
   agent)
@@ -133,6 +362,7 @@ for a in agents:
     echo ""
     echo "Agent management:"
     echo "  list-agents                         List all agents"
+    echo "  status [name]                       Status table or one agent status"
     echo "  agent <name>                        Agent details"
     echo "  identity <name> <text>              Set agent identity"
     echo ""
