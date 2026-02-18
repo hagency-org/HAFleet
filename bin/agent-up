@@ -375,9 +375,7 @@ capture_resume_id_background() {
 SESSION_ID="$SAVED_SESSION_ID"
 if [ "$TYPE" = "claude" ]; then
   if [ "$FRESH" = true ]; then
-    if ! is_valid_uuid "$SESSION_ID"; then
-      SESSION_ID=$(generate_uuid)
-    fi
+    SESSION_ID=$(generate_uuid)
     mkdir -p "$AGENT_DATA"
     echo "$SESSION_ID" > "$RESUME_FILE"
   elif [ -f "$RESUME_FILE" ]; then
