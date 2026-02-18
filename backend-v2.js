@@ -21,10 +21,27 @@ function dataPath(name) { return path.join(DATA_DIR, name); }
 // We need sync read at startup — use a simple approach
 import { readFileSync } from 'fs';
 
-function loadJsonSync(name, fallback) {
+function backupUnreadableJson(filePath) {
+  const backupPath = `${filePath}.corrupt-${Date.now()}`;
   try {
-    return JSON.parse(readFileSync(dataPath(name), 'utf-8'));
-  } catch { return fallback; }
+    renameSync(filePath, backupPath);
+    console.error(`Backed up unreadable JSON file: ${filePath} -> ${backupPath}`);
+  } catch (backupErr) {
+    console.error(`Failed to backup unreadable JSON file ${filePath}: ${backupErr.message}`);
+  }
+}
+
+function loadJsonSync(name, fallback) {
+  const filePath = dataPath(name);
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch (e) {
+    if (e?.code !== 'ENOENT') {
+      console.error(`Failed to load JSON ${filePath}: ${e.message}. Using fallback value.`);
+      backupUnreadableJson(filePath);
+    }
+    return fallback;
+  }
 }
 
 function saveJson(name, data) {

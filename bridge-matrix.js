@@ -948,7 +948,10 @@ class MatrixBridge {
       const members = await this.botClient.getJoinedRoomMembers(roomId);
       const nonBot = members.filter(m => m !== this.botUserId);
       if (nonBot.length <= 2) return null; // DM or bot-DM, not a group
-    } catch { return null; }
+    } catch (e) {
+      console.warn(`Failed to inspect members while probing room ${roomId}: ${e.message}`);
+      return null;
+    }
 
     // Get room name via state event
     try {
@@ -974,7 +977,12 @@ class MatrixBridge {
       console.log(`Mapped room ${roomId} → group "${name}"`);
       return name;
     } catch (e) {
-      // Room might not have a name — that's fine, not a group room
+      const msg = String(e?.message || '');
+      const maybeUnnamedRoom = /M_NOT_FOUND|404|room\.name/i.test(msg);
+      if (!maybeUnnamedRoom) {
+        console.warn(`Failed to map room ${roomId}: ${msg}`);
+        this.postWarning(`Failed to map Matrix room ${roomId}: ${msg}`);
+      }
       return null;
     }
   }
