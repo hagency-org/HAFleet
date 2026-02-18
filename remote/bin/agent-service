@@ -167,6 +167,49 @@ mac_pause_label() {
   return 1
 }
 
+is_push_relay_service() {
+  [ "$1" = "agent-chat-push-relay" ]
+}
+
+list_user_push_relay_pids() {
+  ps -eo pid=,uid=,command= 2>/dev/null | awk -v uid="$UID_NUM" '
+    $2 == uid && $0 ~ /push-relay\.js/ { print $1 }
+  ' || true
+}
+
+kill_push_relay_orphans() {
+  local pid
+  local found=false
+  local killed_any=false
+  local pids=()
+
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    found=true
+    pids+=("$pid")
+  done < <(list_user_push_relay_pids)
+
+  if [ "$found" = false ]; then
+    return 0
+  fi
+
+  for pid in "${pids[@]}"; do
+    if kill "$pid" >/dev/null 2>&1; then
+      killed_any=true
+    fi
+  done
+  sleep 0.5
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill -9 "$pid" >/dev/null 2>&1 || true
+    fi
+  done
+
+  if [ "$killed_any" = true ]; then
+    log "agent-chat-push-relay: cleaned residual push-relay.js processes"
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     pause|resume|restart|status)
@@ -246,6 +289,9 @@ for svc in "${TARGET_SERVICES[@]}"; do
         if linux_service_exists "$svc"; then
           if linux_run_systemctl stop "$svc" >/dev/null 2>&1; then
             log "$svc: stopped"
+            if is_push_relay_service "$svc"; then
+              kill_push_relay_orphans
+            fi
           else
             echo "Error: failed to stop $svc" >&2
             failures=$((failures + 1))
@@ -288,6 +334,9 @@ for svc in "${TARGET_SERVICES[@]}"; do
       pause)
         if mac_pause_label "$svc"; then
           log "$svc: stopped"
+          if is_push_relay_service "$svc"; then
+            kill_push_relay_orphans
+          fi
         else
           log "$svc: not installed on this host"
         fi
