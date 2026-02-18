@@ -251,7 +251,7 @@ for svc in "${TARGET_SERVICES[@]}"; do
             failures=$((failures + 1))
           fi
         else
-          log "$svc: not found (skip)"
+          log "$svc: not installed on this host"
         fi
         ;;
       resume)
@@ -263,7 +263,7 @@ for svc in "${TARGET_SERVICES[@]}"; do
             failures=$((failures + 1))
           fi
         else
-          log "$svc: not found (skip)"
+          log "$svc: not installed on this host"
         fi
         ;;
       restart)
@@ -275,7 +275,7 @@ for svc in "${TARGET_SERVICES[@]}"; do
             failures=$((failures + 1))
           fi
         else
-          log "$svc: not found (skip)"
+          log "$svc: not installed on this host"
         fi
         ;;
     esac
@@ -289,7 +289,7 @@ for svc in "${TARGET_SERVICES[@]}"; do
         if mac_pause_label "$svc"; then
           log "$svc: stopped"
         else
-          log "$svc: not found (skip)"
+          log "$svc: not installed on this host"
         fi
         ;;
       resume)

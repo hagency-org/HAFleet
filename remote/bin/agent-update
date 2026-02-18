@@ -69,6 +69,7 @@ while [ $# -gt 0 ]; do
       ;;
     -h|--help)
       echo "Usage: agent-update [--check|--pause-services|--resume-services|--restart-services|--service-status]"
+      echo "  Service flags only control remote relay service: agent-chat-push-relay"
       exit 0
       ;;
     *)
@@ -94,6 +95,7 @@ if [ -n "$SERVICE_ACTION" ]; then
     echo "Error: agent-service CLI not found. Expected in $REPO_DIR/bin/agent-service" >&2
     exit 1
   fi
+  echo "Service action target: remote relay (agent-chat-push-relay)"
   "$SERVICE_CLI" "$SERVICE_ACTION" --profile remote
   exit 0
 fi
