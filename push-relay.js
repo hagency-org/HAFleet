@@ -118,20 +118,23 @@ function buildNotification(agentName, msg) {
   const hasMcp = agentHasMcp(agentName);
   const replyTo = msg.from;
   const isHuman = msg.type === 'human';
+  const needsReply = msg.type === 'human' || msg.type === 'request';
   if (hasMcp) {
     const checkHint = 'Use check_inbox() in agent-chat MCP for full context.';
     const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
+    const actionHint = needsReply ? ` ${sendHint}.` : '';
     return isHuman
-      ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${checkHint} ${sendHint}.`
-      : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${checkHint} ${sendHint}.`;
+      ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${checkHint}${actionHint}`
+      : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${checkHint}${actionHint}`;
   }
 
   const senderAgent = agentsByName.get(replyTo);
   const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
   const replyHint = `Reply using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
+  const actionHint = needsReply ? ` ${replyHint}.` : '';
   return isHuman
-    ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${replyHint}.`
-    : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${replyHint}.`;
+    ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator.${actionHint}`
+    : `[NOTIFICATION] From ${msg.from}: "${msg.summary}".${actionHint}`;
 }
 
 function sleepMs(ms) {

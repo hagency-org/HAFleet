@@ -234,6 +234,14 @@ async function backendApi(method, path, body) {
 
 // ── Room ↔ Group mapping ─────────────────────────────────────────────
 function mapRoom(roomId, groupName) {
+  const prevGroup = state.roomGroupMap[roomId];
+  if (prevGroup && prevGroup !== groupName && state.groupRoomMap[prevGroup] === roomId) {
+    delete state.groupRoomMap[prevGroup];
+  }
+  const prevRoom = state.groupRoomMap[groupName];
+  if (prevRoom && prevRoom !== roomId && state.roomGroupMap[prevRoom] === groupName) {
+    delete state.roomGroupMap[prevRoom];
+  }
   state.roomGroupMap[roomId] = groupName;
   state.groupRoomMap[groupName] = roomId;
   saveState();
@@ -608,7 +616,11 @@ class MatrixBridge {
     for (const warning of warnings) {
       if (warning.code === 'target_offline' && warning.target) {
         const reason = warning.reason ? ` (${warning.reason})` : '';
-        lines.push(`⚠️ @${warning.target} is offline${reason}. Message archived only and was not delivered.`);
+        if (warning.queued) {
+          lines.push(`⚠️ @${warning.target} is offline${reason}. Message queued; it will be delivered when the agent is online. It may be time-sensitive.`);
+        } else {
+          lines.push(`⚠️ @${warning.target} is offline${reason}. Message archived only and was not delivered.`);
+        }
         continue;
       }
       if (warning.code === 'mentions_offline' && Array.isArray(warning.targets) && warning.targets.length > 0) {
@@ -785,7 +797,24 @@ class MatrixBridge {
         mapRoom(roomId, name);
         await this.reconcileRoomGroupMembership(roomId, name);
       } else {
-        await this.reconcileRoomGroupMembership(roomId, groupForRoom(roomId));
+        const mapped = groupForRoom(roomId);
+        if (mapped !== name && !name.startsWith('DM: ') && !name.startsWith('SPY: ')) {
+          const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
+          if (existing.error) {
+            const members = await this.getRoomAgentMembers(roomId);
+            const humanMembers = await this.getRoomHumanMembers(roomId);
+            await backendApi('POST', '/api/groups', {
+              name,
+              members: [...members, ...humanMembers],
+            });
+            console.log(`Created group "${name}" from Matrix room rename`);
+          }
+          mapRoom(roomId, name);
+          console.log(`Room ${roomId} renamed mapping: "${mapped}" -> "${name}"`);
+          await this.reconcileRoomGroupMembership(roomId, name);
+        } else {
+          await this.reconcileRoomGroupMembership(roomId, mapped);
+        }
       }
     }
 

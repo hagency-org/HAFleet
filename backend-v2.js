@@ -317,6 +317,8 @@ function summarizeMsg(m) {
     summary: m.summary,
     full: m.full || '',
     mentions: m.mentions || [],
+    ts: m.ts,
+    at: new Date(m.ts).toISOString(),
     time: relativeTime(m.ts),
     reply_to: m.reply_to || null,
     group: m.group || null,
@@ -558,6 +560,7 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   }
 
   let agentsChanged = false;
+  const becameOnline = [];
   for (const name of liveSet) {
     const ensured = ensureAgentRecord(name, {
       server: serverId,
@@ -578,6 +581,8 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
     }
     if (normalizeServer(agent.server) !== serverId) { agent.server = serverId; agentsChanged = true; }
     if (!agent.tmux) { agent.tmux = `${name}:0.0`; agentsChanged = true; }
+    const wasAgentOnline = agent.online === true;
+    if (!wasAgentOnline) becameOnline.push(name);
     if (agent.online !== true) { agent.online = true; agentsChanged = true; }
     if (agent.offlineReason !== null) { agent.offlineReason = null; agentsChanged = true; }
     if (agent.lastSeen !== now) { agent.lastSeen = now; agentsChanged = true; }
@@ -594,6 +599,9 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
 
   saveServers();
   if (agentsChanged) saveAgents();
+  for (const name of becameOnline) {
+    notifyAgentCatchup(name, `online:${serverId}`);
+  }
 }
 
 // ── Push notification relay ───────────────────────────────────────────
@@ -623,6 +631,51 @@ function agentHasMcp(agentName) {
 }
 
 const mergedPushInboxCursor = new Map();
+const catchupCursor = new Map();
+
+async function notifyAgentCatchup(agentName, reason = 'online') {
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return;
+  const state = getAgentDeliveryState(agentName);
+  if (!state.online) return;
+
+  const { unread } = getUnreadInboxMessages(agentName);
+  if (!unread.length) return;
+
+  const oldest = unread[0];
+  const latest = unread[unread.length - 1];
+  const key = `${latest.id}:${unread.length}`;
+  if (catchupCursor.get(agentName) === key) return;
+  catchupCursor.set(agentName, key);
+
+  const senderNames = [...new Set(unread.map(m => m.from).filter(Boolean))];
+  const summary = `Queued while offline: ${unread.length} message(s) (${new Date(oldest.ts).toISOString()} -> ${new Date(latest.ts).toISOString()}).`;
+  const full = [
+    `You were offline (${reason}).`,
+    `Unread count: ${unread.length}`,
+    `Senders: ${senderNames.join(', ') || 'unknown'}`,
+    'These messages may be time-sensitive. Review timestamps and decide whether a reply is still needed.',
+    'Use check_inbox() in agent-chat MCP for full context.',
+  ].join('\n');
+
+  const msg = {
+    id: nextMsgId(),
+    ts: Date.now(),
+    from: 'system',
+    to: agentName,
+    group: null,
+    type: 'inform',
+    summary,
+    full,
+    mentions: [],
+    reply_to: null,
+    source: 'system',
+  };
+  messages.push(msg);
+  saveMessages();
+  broadcastSSE('message', msg);
+  await pushNotify(agentName, msg);
+}
 
 async function pushNotify(agentName, msg) {
   const agent = agents[agentName];
@@ -650,8 +703,9 @@ async function pushNotify(agentName, msg) {
 
   let notification;
   if (unreadCount > 1) {
-    if (!isHumanMsg && mergedPushInboxCursor.get(agentName) === inboxTs) return;
-    mergedPushInboxCursor.set(agentName, inboxTs);
+    const dedupeKey = `${inboxTs}:${latestUnread.id || 'none'}:${unreadCount}`;
+    if (!isHumanMsg && mergedPushInboxCursor.get(agentName) === dedupeKey) return;
+    mergedPushInboxCursor.set(agentName, dedupeKey);
 
     const senderNames = [...new Set(unread.map(m => m.from).filter(Boolean))];
     const senderText = senderNames.length ? ` (from ${formatSenderList(senderNames)})` : '';
@@ -826,6 +880,7 @@ app.post('/api/agents', (req, res) => {
   const agentName = normalizeAgentName(name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   const existing = agents[agentName] || {};
+  const existingOnline = Boolean(existing.online);
   const normalizedServer = normalizeServer(server);
   const resolvedServer = normalizedServer ?? (isLocalRequest(req) ? 'local' : normalizeServer(existing.server));
   const resolvedTmux = tmux ?? existing.tmux ?? null;
@@ -845,6 +900,11 @@ app.post('/api/agents', (req, res) => {
     discoveredAt: existing.discoveredAt || existing.registeredAt || Date.now(),
   };
   saveAgents();
+  if (!existingOnline && resolvedOnline) {
+    notifyAgentCatchup(agentName, 'agent-online-update').catch((e) => {
+      console.error(`catchup notify failed for ${agentName}:`, e.message);
+    });
+  }
   res.json({ ok: true, agent: serializeAgent(agents[agentName]) });
 });
 
@@ -854,6 +914,7 @@ app.patch('/api/agents/:name', (req, res) => {
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+  const wasOnline = Boolean(agent.online);
   const { role, identity, tmux, online, offlineReason } = req.body;
   if (role !== undefined) agent.role = role;
   if (identity !== undefined) agent.identity = identity;
@@ -879,6 +940,11 @@ app.patch('/api/agents/:name', (req, res) => {
     agent.offlineReason = (typeof offlineReason === 'string' && offlineReason.trim()) ? offlineReason.trim() : null;
   }
   saveAgents();
+  if (!wasOnline && agent.online === true) {
+    notifyAgentCatchup(agentName, 'agent-online-patch').catch((e) => {
+      console.error(`catchup notify failed for ${agentName}:`, e.message);
+    });
+  }
   res.json({ ok: true, agent: serializeAgent(agent) });
 });
 
@@ -981,11 +1047,17 @@ app.post('/api/groups/:name/members', (req, res) => {
     }
   }
   const removeKeys = new Set();
+  const removeList = [];
+  const removeSeen = new Set();
   if (Array.isArray(remove)) {
     for (const raw of remove) {
       const memberName = normalizeAgentName(raw);
       if (!memberName) continue;
-      removeKeys.add(memberName.toLowerCase());
+      const key = memberName.toLowerCase();
+      if (removeSeen.has(key)) continue;
+      removeSeen.add(key);
+      removeKeys.add(key);
+      removeList.push(memberName);
     }
   }
 
@@ -1002,7 +1074,7 @@ app.post('/api/groups/:name/members', (req, res) => {
     group.members = group.members.filter(m => !removeKeys.has(String(m).toLowerCase()));
   }
   saveGroups();
-  broadcastSSE('group_members', { name: group.name, members: group.members, added: addList, removed: Array.from(removeKeys) });
+  broadcastSSE('group_members', { name: group.name, members: group.members, added: addList, removed: removeList });
   res.json({ ok: true, group });
 });
 
@@ -1138,8 +1210,8 @@ app.post('/api/messages', (req, res) => {
         target: msg.to,
         server: state.server,
         reason: state.offlineReason || 'offline',
+        queued: true,
       });
-      suppressedRecipients.add(msg.to);
     }
   }
   if (msg.group && msg.mentions.length > 0) {
