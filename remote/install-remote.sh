@@ -113,7 +113,7 @@ cd "$SCRIPT_DIR"
 npm install --omit=dev
 
 echo "[4/9] Linking helper commands into $INSTALL_BIN_DIR..."
-required_cmds=(agent-up agent-down agent-ls agent-send agent-update verify-remote)
+required_cmds=(agent-up agent-down agent-ls agent-send agent-update agent-service verify-remote)
 optional_cmds=(self-time-reminder agent-chat-cli)
 BIN_SOURCE_DIR="$SCRIPT_DIR/bin"
 if [ -d "$REPO_ROOT/bin" ] && [ -f "$REPO_ROOT/bin/agent-up" ]; then

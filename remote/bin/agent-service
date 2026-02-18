@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OS_NAME="$(uname -s)"
+UID_NUM="$(id -u)"
+ACTION=""
+PROFILE="all"
+QUIET=false
+declare -a EXPLICIT_SERVICES=()
+declare -a TARGET_SERVICES=()
+
+usage() {
+  cat <<'EOF'
+Usage: agent-service <pause|resume|restart|status> [options]
+
+Options:
+  --profile <local|remote|all>   Service profile (default: all)
+  --service <name>               Service name/label (repeatable)
+  --quiet                        Reduce output
+  -h, --help                     Show this help
+
+Examples:
+  agent-service status
+  agent-service pause --profile local
+  agent-service resume --service agent-chat-push-relay
+EOF
+}
+
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Error: missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+log() {
+  if [ "$QUIET" = false ]; then
+    echo "$@"
+  fi
+}
+
+normalize_services() {
+  local item
+  declare -A seen=()
+  local out=()
+  for item in "$@"; do
+    [ -n "${item:-}" ] || continue
+    if [ -z "${seen[$item]+x}" ]; then
+      seen["$item"]=1
+      out+=("$item")
+    fi
+  done
+  printf '%s\n' "${out[@]}"
+}
+
+resolve_services_from_profile() {
+  case "$PROFILE" in
+    local)
+      printf '%s\n' agent-chat-v2 bridge-matrix agent-chat
+      ;;
+    remote)
+      printf '%s\n' agent-chat-push-relay
+      ;;
+    all)
+      printf '%s\n' agent-chat-v2 bridge-matrix agent-chat agent-chat-push-relay
+      ;;
+    *)
+      echo "Error: unknown profile '$PROFILE'" >&2
+      exit 1
+      ;;
+  esac
+}
+
+linux_run_systemctl() {
+  local subcmd="$1"
+  local svc="$2"
+  if [ "$UID_NUM" -eq 0 ]; then
+    systemctl "$subcmd" "$svc"
+  else
+    sudo systemctl "$subcmd" "$svc"
+  fi
+}
+
+linux_service_exists() {
+  local svc="$1"
+  local load_state
+  load_state="$(systemctl show "$svc" -p LoadState --value 2>/dev/null || true)"
+  [ "$load_state" != "not-found" ] && [ -n "$load_state" ]
+}
+
+linux_service_status() {
+  local svc="$1"
+  local active
+  active="$(systemctl is-active "$svc" 2>/dev/null || true)"
+  if linux_service_exists "$svc"; then
+    echo "${active:-inactive}"
+  else
+    echo "not-found"
+  fi
+}
+
+mac_launchd_plist() {
+  local label="$1"
+  echo "$HOME/Library/LaunchAgents/${label}.plist"
+}
+
+mac_launchd_detect_domain() {
+  local label="$1"
+  local domain
+  for domain in "gui/$UID_NUM" "user/$UID_NUM"; do
+    if launchctl print "$domain/$label" >/dev/null 2>&1; then
+      echo "$domain"
+      return 0
+    fi
+  done
+  return 1
+}
+
+mac_launchd_status() {
+  local label="$1"
+  local domain dump state
+  if domain="$(mac_launchd_detect_domain "$label")"; then
+    dump="$(launchctl print "$domain/$label" 2>/dev/null || true)"
+    state="$(printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*state = //p' | head -n 1)"
+    if [ -z "$state" ]; then
+      echo "loaded"
+    else
+      echo "$state"
+    fi
+  else
+    echo "not-found"
+  fi
+}
+
+mac_bootstrap_label() {
+  local label="$1"
+  local plist domain
+  plist="$(mac_launchd_plist "$label")"
+  if [ ! -f "$plist" ]; then
+    echo "Error: plist not found for '$label': $plist" >&2
+    return 1
+  fi
+  for domain in "gui/$UID_NUM" "user/$UID_NUM"; do
+    launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+    if launchctl bootstrap "$domain" "$plist" >/dev/null 2>&1; then
+      launchctl enable "$domain/$label" >/dev/null 2>&1 || true
+      launchctl kickstart -k "$domain/$label" >/dev/null 2>&1 || true
+      return 0
+    fi
+  done
+  launchctl unload "$plist" >/dev/null 2>&1 || true
+  launchctl load -w "$plist" >/dev/null 2>&1
+}
+
+mac_pause_label() {
+  local label="$1"
+  local plist domain
+  plist="$(mac_launchd_plist "$label")"
+  if domain="$(mac_launchd_detect_domain "$label")"; then
+    launchctl bootout "$domain/$label" >/dev/null 2>&1
+    return 0
+  fi
+  if [ -f "$plist" ]; then
+    launchctl unload "$plist" >/dev/null 2>&1 || true
+    return 0
+  fi
+  return 1
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    pause|resume|restart|status)
+      if [ -n "$ACTION" ]; then
+        echo "Error: action already set to '$ACTION'" >&2
+        exit 1
+      fi
+      ACTION="$1"
+      shift
+      ;;
+    --profile)
+      PROFILE="${2:-}"
+      shift 2
+      ;;
+    --service)
+      EXPLICIT_SERVICES+=("${2:-}")
+      shift 2
+      ;;
+    --quiet)
+      QUIET=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$ACTION" ]; then
+  echo "Error: action required" >&2
+  usage >&2
+  exit 1
+fi
+
+if [ "${#EXPLICIT_SERVICES[@]}" -gt 0 ]; then
+  while IFS= read -r svc; do
+    [ -n "$svc" ] && TARGET_SERVICES+=("$svc")
+  done < <(normalize_services "${EXPLICIT_SERVICES[@]}")
+else
+  while IFS= read -r svc; do
+    [ -n "$svc" ] && TARGET_SERVICES+=("$svc")
+  done < <(resolve_services_from_profile)
+fi
+
+if [ "${#TARGET_SERVICES[@]}" -eq 0 ]; then
+  echo "Error: no services selected" >&2
+  exit 1
+fi
+
+if [ "$OS_NAME" = "Linux" ]; then
+  need_cmd systemctl
+  if [ "$ACTION" != "status" ] && [ "$UID_NUM" -ne 0 ]; then
+    need_cmd sudo
+  fi
+elif [ "$OS_NAME" = "Darwin" ]; then
+  need_cmd launchctl
+else
+  echo "Error: unsupported OS '$OS_NAME' (expected Linux or macOS)" >&2
+  exit 1
+fi
+
+failures=0
+for svc in "${TARGET_SERVICES[@]}"; do
+  if [ "$OS_NAME" = "Linux" ]; then
+    case "$ACTION" in
+      status)
+        state="$(linux_service_status "$svc")"
+        log "$svc: $state"
+        ;;
+      pause)
+        if linux_service_exists "$svc"; then
+          if linux_run_systemctl stop "$svc" >/dev/null 2>&1; then
+            log "$svc: stopped"
+          else
+            echo "Error: failed to stop $svc" >&2
+            failures=$((failures + 1))
+          fi
+        else
+          log "$svc: not found (skip)"
+        fi
+        ;;
+      resume)
+        if linux_service_exists "$svc"; then
+          if linux_run_systemctl start "$svc" >/dev/null 2>&1; then
+            log "$svc: started"
+          else
+            echo "Error: failed to start $svc" >&2
+            failures=$((failures + 1))
+          fi
+        else
+          log "$svc: not found (skip)"
+        fi
+        ;;
+      restart)
+        if linux_service_exists "$svc"; then
+          if linux_run_systemctl restart "$svc" >/dev/null 2>&1; then
+            log "$svc: restarted"
+          else
+            echo "Error: failed to restart $svc" >&2
+            failures=$((failures + 1))
+          fi
+        else
+          log "$svc: not found (skip)"
+        fi
+        ;;
+    esac
+  else
+    case "$ACTION" in
+      status)
+        state="$(mac_launchd_status "$svc")"
+        log "$svc: $state"
+        ;;
+      pause)
+        if mac_pause_label "$svc"; then
+          log "$svc: stopped"
+        else
+          log "$svc: not found (skip)"
+        fi
+        ;;
+      resume)
+        if mac_bootstrap_label "$svc"; then
+          log "$svc: started"
+        else
+          echo "Error: failed to start $svc" >&2
+          failures=$((failures + 1))
+        fi
+        ;;
+      restart)
+        mac_pause_label "$svc" >/dev/null 2>&1 || true
+        if mac_bootstrap_label "$svc"; then
+          log "$svc: restarted"
+        else
+          echo "Error: failed to restart $svc" >&2
+          failures=$((failures + 1))
+        fi
+        ;;
+    esac
+  fi
+done
+
+if [ "$failures" -gt 0 ]; then
+  exit 1
+fi

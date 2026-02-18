@@ -2,7 +2,7 @@
 # agent-update — Pull latest code and reinstall
 #
 # Usage:
-#   agent-update [--check]
+#   agent-update [--check|--pause-services|--resume-services|--restart-services|--service-status]
 #
 # --check: only check if updates are available, don't install
 
@@ -49,18 +49,31 @@ if RESOLVED_REPO="$(resolve_repo_dir)"; then
 fi
 
 CHECK_ONLY=false
+SERVICE_ACTION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --check)
       CHECK_ONLY=true
       ;;
+    --pause-services)
+      SERVICE_ACTION="pause"
+      ;;
+    --resume-services)
+      SERVICE_ACTION="resume"
+      ;;
+    --restart-services)
+      SERVICE_ACTION="restart"
+      ;;
+    --service-status)
+      SERVICE_ACTION="status"
+      ;;
     -h|--help)
-      echo "Usage: agent-update [--check]"
+      echo "Usage: agent-update [--check|--pause-services|--resume-services|--restart-services|--service-status]"
       exit 0
       ;;
     *)
       echo "Error: unknown argument: $1" >&2
-      echo "Usage: agent-update [--check]" >&2
+      echo "Usage: agent-update [--check|--pause-services|--resume-services|--restart-services|--service-status]" >&2
       exit 1
       ;;
   esac
@@ -68,6 +81,22 @@ while [ $# -gt 0 ]; do
 done
 
 cd "$REPO_DIR"
+
+if [ -n "$SERVICE_ACTION" ]; then
+  SERVICE_CLI=""
+  for c in "$REPO_DIR/bin/agent-service" "$BASE_DIR/bin/agent-service" "$SCRIPT_DIR/agent-service"; do
+    if [ -x "$c" ]; then
+      SERVICE_CLI="$c"
+      break
+    fi
+  done
+  if [ -z "$SERVICE_CLI" ]; then
+    echo "Error: agent-service CLI not found. Expected in $REPO_DIR/bin/agent-service" >&2
+    exit 1
+  fi
+  "$SERVICE_CLI" "$SERVICE_ACTION"
+  exit 0
+fi
 
 # Ensure we're in a git repo
 if [ ! -d ".git" ]; then
