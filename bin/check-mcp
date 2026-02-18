@@ -19,32 +19,28 @@ if isinstance(data, list):
             print(item["name"])
 ' 2>/dev/null)
 
-# Build map: pts → tmux session
-declare -A pts_to_session
-while IFS=' ' read -r tty sess; do
-  pts="${tty#/dev/}"
-  pts_to_session["$pts"]="$sess"
-done < <(tmux list-panes -a -F '#{pane_tty} #{session_name}' 2>/dev/null)
+# Temp files for portable lookups (bash 3.2 compat — no declare -A)
+_TMP_FILES=""
+_mktmp() { local f; f=$(mktemp 2>/dev/null || mktemp -t check_mcp); _TMP_FILES="$_TMP_FILES $f"; echo "$f"; }
+trap 'rm -f $_TMP_FILES' EXIT
 
-# Build set of sessions with MCP and their client type
-declare -A mcp_sessions
-declare -A mcp_client
+PTS_MAP=$(_mktmp)
+MCP_MAP=$(_mktmp)
 
-# Method 1: mcp-server.js spawned by Claude Code (node process)
+# Build tty → session map
+tmux list-panes -a -F '#{pane_tty} #{session_name}' 2>/dev/null \
+  | sed 's|/dev/||' > "$PTS_MAP" || true
+
+# Detect MCP sessions and their client type
 for pid in $(pgrep -f 'node.*mcp-server.js' 2>/dev/null); do
   pts=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
-  sess="${pts_to_session[$pts]}"
+  sess=$(grep -m1 "^${pts} \|/${pts} " "$PTS_MAP" 2>/dev/null | awk '{print $2}')
   if [ -n "$sess" ]; then
-    # Check parent to determine client
     ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     pcomm=$(ps -o comm= -p "$ppid" 2>/dev/null | tr -d ' ')
-    if [ "$pcomm" = "codex" ]; then
-      mcp_sessions["$sess"]=1
-      mcp_client["$sess"]="codex"
-    else
-      mcp_sessions["$sess"]=1
-      mcp_client["$sess"]="claude"
-    fi
+    client="claude"
+    [ "$pcomm" = "codex" ] && client="codex"
+    echo "$sess $client" >> "$MCP_MAP"
   fi
 done
 
@@ -52,7 +48,11 @@ done
 for sess in $(tmux list-sessions -F '#{session_name}' 2>/dev/null | sort); do
   has_mcp="no"
   client="-"
-  [ "${mcp_sessions[$sess]:-}" = "1" ] && has_mcp="YES" && client="${mcp_client[$sess]:-}"
+  mcp_line=$(grep "^${sess} " "$MCP_MAP" 2>/dev/null | head -1)
+  if [ -n "$mcp_line" ]; then
+    has_mcp="YES"
+    client=$(echo "$mcp_line" | awk '{print $2}')
+  fi
 
   is_known="no"
   echo "$known" | grep -qx "$sess" && is_known="YES"

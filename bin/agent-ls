@@ -5,12 +5,37 @@
 #   agent-ls        List running agents (active tmux sessions)
 #   agent-ls -a     List all agents including inactive (have data but not running)
 
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# Portable script dir resolution (works on macOS bash 3.2 + Linux)
+_resolve_script_dir() {
+  local src="$0"
+  while [ -L "$src" ]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+SCRIPT_DIR="$(_resolve_script_dir)"
 DATA_DIR="$(dirname "$SCRIPT_DIR")/data/agents"
 BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
 
 SHOW_ALL=false
 [ "${1:-}" = "-a" ] && SHOW_ALL=true
+
+# Temp files for portable key-value lookups (no associative arrays — bash 3.2 compat)
+_TMP_FILES=""
+_mktmp() {
+  local f
+  f=$(mktemp 2>/dev/null || mktemp -t agent_ls) || { echo "Error: mktemp failed" >&2; exit 1; }
+  _TMP_FILES="$_TMP_FILES $f"
+  echo "$f"
+}
+trap 'rm -f $_TMP_FILES' EXIT
+
+PTS_MAP_FILE=$(_mktmp)
+MCP_SESSIONS_FILE=$(_mktmp)
+AGENTS_FILE=$(_mktmp)
 
 # Get tmux sessions
 SESSIONS=$(tmux list-sessions -F "#{session_name}" 2>/dev/null || true)
@@ -30,39 +55,40 @@ if isinstance(data, list):
             print(item["name"])
 ' 2>/dev/null || true)
 
-# Build pts → session map for MCP detection
-declare -A PTS_MAP
-while IFS= read -r line; do
-  tty=$(echo "$line" | awk '{print $1}' | sed 's|/dev/||')
-  sess=$(echo "$line" | awk '{print $2}')
-  [ -n "$tty" ] && [ -n "$sess" ] && PTS_MAP["$tty"]="$sess"
-done < <(tmux list-panes -a -F "#{pane_tty} #{session_name}" 2>/dev/null || true)
+# Build tty → session map for MCP detection
+tmux list-panes -a -F "#{pane_tty} #{session_name}" 2>/dev/null \
+  | sed 's|/dev/||' > "$PTS_MAP_FILE" || true
 
 # Detect MCP sessions
 MCP_PIDS=$(pgrep -f "node.*mcp-server.js" 2>/dev/null || true)
-declare -A MCP_SESSIONS
 for pid in $MCP_PIDS; do
   pts=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
-  if [ -n "$pts" ] && [ -n "${PTS_MAP[$pts]:-}" ]; then
-    MCP_SESSIONS["${PTS_MAP[$pts]}"]="yes"
+  if [ -n "$pts" ]; then
+    # Try exact match first, then prefix match (macOS tty format differs)
+    sess=$(grep -m1 "^${pts} \|/${pts} " "$PTS_MAP_FILE" 2>/dev/null | awk '{print $2}')
+    [ -n "$sess" ] && echo "$sess" >> "$MCP_SESSIONS_FILE"
   fi
 done
 
-# Collect all agent names (active + inactive)
-declare -A ALL_AGENTS  # name → "active" or "inactive"
-
+# Collect all agent names: "name status" per line
 for sess in $SESSIONS; do
-  ALL_AGENTS["$sess"]="active"
+  echo "$sess active" >> "$AGENTS_FILE"
 done
 
 if [ "$SHOW_ALL" = true ] && [ -d "$DATA_DIR" ]; then
   for agent_dir in "$DATA_DIR"/*/; do
     [ -d "$agent_dir" ] || continue
     name=$(basename "$agent_dir")
-    # Only add if has meta.json (managed agent)
     [ -f "$agent_dir/meta.json" ] || continue
-    [ -z "${ALL_AGENTS[$name]:-}" ] && ALL_AGENTS["$name"]="inactive"
+    if ! grep -q "^${name} " "$AGENTS_FILE" 2>/dev/null; then
+      echo "$name inactive" >> "$AGENTS_FILE"
+    fi
   done
+fi
+
+if [ ! -s "$AGENTS_FILE" ]; then
+  echo "No agents found."
+  exit 0
 fi
 
 # Print header
@@ -70,8 +96,8 @@ printf "%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\n" "NAME" "STATUS" "TYPE" "MOD
 printf "%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\n" "----" "------" "----" "-----" "----------" "---" "------" "----"
 
 # Sort and print
-for name in $(echo "${!ALL_AGENTS[@]}" | tr ' ' '\n' | sort); do
-  status="${ALL_AGENTS[$name]}"
+sort "$AGENTS_FILE" | while IFS=' ' read -r name status; do
+  [ -z "$name" ] && continue
 
   # Type from meta.json
   type="-"
@@ -92,12 +118,12 @@ for name in $(echo "${!ALL_AGENTS[@]}" | tr ' ' '\n' | sort); do
   # MCP? (only for active)
   mcp="-"
   [ "$status" = "active" ] && mcp="no"
-  [ -n "${MCP_SESSIONS[$name]:-}" ] && mcp="yes"
+  grep -qx "$name" "$MCP_SESSIONS_FILE" 2>/dev/null && mcp="yes"
 
   # Resume ID
   resume="-"
   if [ -f "$DATA_DIR/$name/resume-id" ]; then
-    resume=$(cat "$DATA_DIR/$name/resume-id" | cut -c1-8)
+    resume=$(cut -c1-8 < "$DATA_DIR/$name/resume-id" 2>/dev/null || echo "-")
   fi
 
   # Path from meta.json

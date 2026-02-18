@@ -63,7 +63,8 @@ else
 
     # Log to messages.jsonl directly
     # __INSTALL_DIR__ is replaced by install.sh; fallback to script's own location
-    LOG_DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/logs"
+    _src="$0"; while [ -L "$_src" ]; do _dir="$(cd -P "$(dirname "$_src")" && pwd)"; _src="$(readlink "$_src")"; case "$_src" in /*) ;; *) _src="$_dir/$_src" ;; esac; done
+    LOG_DIR="$(cd -P "$(dirname "$_src")/.." && pwd)/logs"
     mkdir -p "$LOG_DIR" 2>/dev/null
     printf '{"ts":%s,"from":"%s","to":"%s","payload":%s}\n' \
         "$(date +%s%3N)" "$from_pane" "$target" "$_json_payload" \
