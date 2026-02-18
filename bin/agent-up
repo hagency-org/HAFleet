@@ -482,13 +482,13 @@ if [ "$TYPE" = "claude" ]; then
   [ -n "$EXTRA_ARGS" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
   if [ "$FRESH" = false ] && RID=$(cat "$RESUME_FILE"); then
     echo "Resuming claude session: $RID"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "claude --resume $RID $CLAUDE_FLAGS" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "AGENT_NAME=$NAME claude --resume $RID $CLAUDE_FLAGS" Enter
   else
     echo "Starting new claude session..."
     # Write init prompt to temp file to avoid shell escaping issues
     INIT_FILE=$(mktemp "$TMP_RUNTIME_DIR/init.XXXXXX")
     echo "$INIT_PROMPT" > "$INIT_FILE"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "claude --session-id $SESSION_ID $CLAUDE_FLAGS \"\$(cat \"$INIT_FILE\")\" && rm -f \"$INIT_FILE\"" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "AGENT_NAME=$NAME claude --session-id $SESSION_ID $CLAUDE_FLAGS \"\$(cat \"$INIT_FILE\")\" && rm -f \"$INIT_FILE\"" Enter
     ( sleep 300; rm -f "$INIT_FILE" >/dev/null 2>&1 || true ) &
     capture_resume_id_background "claude"
   fi
@@ -500,12 +500,12 @@ elif [ "$TYPE" = "codex" ]; then
   if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ]; then
     RID=$(cat "$RESUME_FILE")
     echo "Resuming codex session: $RID"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "codex resume $RID $CODEX_FLAGS" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "AGENT_NAME=$NAME codex resume $RID $CODEX_FLAGS" Enter
   else
     CODEX_BASELINE_FILE=$(mktemp "$TMP_RUNTIME_DIR/codex-baseline.XXXXXX")
     snapshot_codex_session_ids "$CODEX_BASELINE_FILE"
     echo "Starting new codex session..."
-    tmux send-keys -t "$TMUX_PANE_TARGET" "codex $CODEX_FLAGS -C $AGENT_PATH" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "AGENT_NAME=$NAME codex $CODEX_FLAGS -C $AGENT_PATH" Enter
     # Send init prompt after codex starts to create a session deterministically.
     sleep 5
     tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"

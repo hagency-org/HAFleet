@@ -4,13 +4,49 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { execSync } from 'child_process';
 import { z } from 'zod';
 
-// Auto-detect agent name: tmux session name > env var
-let AGENT_NAME;
-try {
-  AGENT_NAME = execSync('tmux display-message -p "#{session_name}"', { encoding: 'utf-8', timeout: 3000 }).trim();
-} catch {
-  AGENT_NAME = process.env.AGENT_NAME;
+function run(cmd) {
+  return execSync(cmd, { encoding: 'utf-8', timeout: 3000 }).trim();
 }
+
+function detectAgentName() {
+  const envAgent = (process.env.AGENT_NAME || '').trim();
+  if (envAgent) return envAgent;
+
+  const envPane = (process.env.TMUX_PANE || '').trim();
+  if (envPane) {
+    try {
+      const fromPane = run(`tmux display-message -p -t ${JSON.stringify(envPane)} "#{session_name}"`);
+      if (fromPane) return fromPane;
+    } catch {}
+  }
+
+  // Fallback for clients that don't pass TMUX/TMUX_PANE to MCP subprocesses:
+  // map this process TTY back to tmux pane -> session.
+  try {
+    const tty = run(`ps -o tty= -p ${process.pid}`);
+    if (tty) {
+      const paneLines = run('tmux list-panes -a -F "#{pane_tty} #{session_name}"');
+      const expected = `/dev/${tty}`;
+      for (const line of paneLines.split('\n')) {
+        const sp = line.indexOf(' ');
+        if (sp < 0) continue;
+        const paneTty = line.slice(0, sp).trim();
+        const session = line.slice(sp + 1).trim();
+        if (paneTty === expected && session) return session;
+      }
+    }
+  } catch {}
+
+  try {
+    const fromClient = run('tmux display-message -p "#{session_name}"');
+    if (fromClient) return fromClient;
+  } catch {}
+
+  return null;
+}
+
+// Auto-detect agent name reliably.
+const AGENT_NAME = detectAgentName();
 if (!AGENT_NAME) {
   process.stderr.write('Error: Cannot determine agent name. Run inside tmux or set AGENT_NAME.\n');
   process.exit(1);
