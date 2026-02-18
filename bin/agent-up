@@ -158,6 +158,7 @@ done
 AGENT_DATA="$DATA_DIR/$NAME"
 META_FILE="$AGENT_DATA/meta.json"
 RESUME_FILE="$AGENT_DATA/resume-id"
+TMP_RUNTIME_DIR="$AGENT_DATA/tmp"
 
 # Auto-detect first-time agent: no meta AND no resume-id => fresh start.
 # If resume-id already exists (e.g. recovered via agent-down), keep resume path.
@@ -423,6 +424,7 @@ fi
 
 # ── Save meta ─────────────────────────────────────────────────────────
 mkdir -p "$AGENT_DATA"
+mkdir -p "$TMP_RUNTIME_DIR"
 
 NOW=$(date -Iseconds)
 if [ -f "$META_FILE" ]; then
@@ -484,9 +486,10 @@ if [ "$TYPE" = "claude" ]; then
   else
     echo "Starting new claude session..."
     # Write init prompt to temp file to avoid shell escaping issues
-    INIT_FILE=$(mktemp)
+    INIT_FILE=$(mktemp "$TMP_RUNTIME_DIR/init.XXXXXX")
     echo "$INIT_PROMPT" > "$INIT_FILE"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "claude --session-id $SESSION_ID $CLAUDE_FLAGS \"\$(cat $INIT_FILE)\" && rm -f $INIT_FILE" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "claude --session-id $SESSION_ID $CLAUDE_FLAGS \"\$(cat \"$INIT_FILE\")\" && rm -f \"$INIT_FILE\"" Enter
+    ( sleep 300; rm -f "$INIT_FILE" >/dev/null 2>&1 || true ) &
     capture_resume_id_background "claude"
   fi
 
@@ -499,7 +502,7 @@ elif [ "$TYPE" = "codex" ]; then
     echo "Resuming codex session: $RID"
     tmux send-keys -t "$TMUX_PANE_TARGET" "codex resume $RID $CODEX_FLAGS" Enter
   else
-    CODEX_BASELINE_FILE=$(mktemp)
+    CODEX_BASELINE_FILE=$(mktemp "$TMP_RUNTIME_DIR/codex-baseline.XXXXXX")
     snapshot_codex_session_ids "$CODEX_BASELINE_FILE"
     echo "Starting new codex session..."
     tmux send-keys -t "$TMUX_PANE_TARGET" "codex $CODEX_FLAGS -C $AGENT_PATH" Enter

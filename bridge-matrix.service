@@ -10,6 +10,7 @@ ExecStart=/usr/bin/node bridge-matrix.js
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production
+EnvironmentFile=-__INSTALL_DIR__/.env
 
 [Install]
 WantedBy=multi-user.target

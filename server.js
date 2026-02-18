@@ -78,6 +78,7 @@ app.use(express.json());
 
 // Queue: Map<target, Array<{id, from, to, payload, queuedAt}>>
 const QUEUE_FILE = path.resolve('logs/queue.json');
+const QUEUE_DROPPED_FILE = path.resolve('logs/queue-dropped.jsonl');
 const queue = new Map();
 let queueIdCounter = 0;
 let queueTickRunning = false;
@@ -104,6 +105,18 @@ async function isStaleNotificationEntry(entry) {
   } catch {
     return false;
   }
+}
+
+function archiveDroppedQueueEntries(entries, reason, target) {
+  if (!Array.isArray(entries) || entries.length === 0) return;
+  const now = Date.now();
+  const lines = entries.map((entry) => JSON.stringify({
+    ts: now,
+    reason,
+    target,
+    entry,
+  }));
+  appendFile(QUEUE_DROPPED_FILE, lines.join('\n') + '\n').catch(() => {});
 }
 
 // Persist queue to disk
@@ -187,6 +200,7 @@ app.post('/api/queue/:id/send', async (req, res) => {
       saveQueue();
       broadcastQueue();
       if (await isStaleNotificationEntry(entry)) {
+        archiveDroppedQueueEntries([entry], 'stale-notification-manual-send', target);
         return res.json({ ok: true, dropped: id, reason: 'stale-notification' });
       }
       const ok = deliverMessage(entry);
@@ -478,13 +492,23 @@ setInterval(async () => {
 
       const idleMs = getPaneIdleMs(target);
       if (idleMs < 0) {
-        // Pane not found — drop items stuck for > 5 minutes (likely remote or defunct)
+        // Pane not found — only trim stale backend notifications, keep normal payloads queued.
         const oldest = entries[0];
         if (oldest && Date.now() - oldest.queuedAt > 5 * 60 * 1000) {
-          console.log(`[queue] Dropping ${entries.length} stuck item(s) for ${target} (pane not found, age > 5m)`);
-          queue.delete(target);
-          saveQueue();
-          broadcastQueue();
+          const dropped = [];
+          const kept = [];
+          for (const entry of entries) {
+            if (isBackendNotificationEntry(entry)) dropped.push(entry);
+            else kept.push(entry);
+          }
+          if (dropped.length > 0) {
+            console.log(`[queue] Dropping ${dropped.length} stale notification(s) for ${target} (pane not found, age > 5m)`);
+            archiveDroppedQueueEntries(dropped, 'pane-missing-over-5m', target);
+            if (kept.length === 0) queue.delete(target);
+            else queue.set(target, kept);
+            saveQueue();
+            broadcastQueue();
+          }
         }
         continue;
       }
@@ -499,6 +523,7 @@ setInterval(async () => {
 
       if (await isStaleNotificationEntry(entry)) {
         console.log(`[queue] Dropped stale notification ${entry.id} for ${target} (no unread items left)`);
+        archiveDroppedQueueEntries([entry], 'stale-notification-no-unread', target);
         delivering.delete(target);
         continue;
       }

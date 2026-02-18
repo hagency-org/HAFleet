@@ -3,6 +3,7 @@ import {
   SimpleFsStorageProvider,
   AutojoinRoomsMixin,
 } from 'matrix-bot-sdk';
+import { createHash } from 'crypto';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import path from 'path';
 import EventSource from './lib/eventsource-mini.js';
@@ -10,12 +11,16 @@ import BotCommands from './lib/bot-commands.js';
 
 // ── Configuration ─────────────────────────────────────────────────────
 const HOMESERVER = process.env.MATRIX_HOMESERVER || 'https://matrix.ananthe.party';
-const REGISTRATION_TOKEN = process.env.MATRIX_REG_TOKEN || 'REDACTED_REG_TOKEN';
+const REGISTRATION_TOKEN = (process.env.MATRIX_REG_TOKEN || '').trim();
 const BACKEND_URL = process.env.AGENT_CHAT_API || 'http://127.0.0.1:8090';
 const MSG_BASE_URL = process.env.MSG_BASE_URL || 'https://agent.ananthe.party/msg';
-const BOT_USERNAME = 'agent-bridge';
-const BOT_PASSWORD = 'REDACTED_BOT_PASSWORD';
-const AGENT_PREFIX = 'ac_'; // Matrix usernames: ac_agentname
+const BOT_USERNAME = (process.env.MATRIX_BOT_USERNAME || 'agent-bridge').trim();
+const BOT_PASSWORD = (process.env.MATRIX_BOT_PASSWORD || '').trim();
+const AGENT_PREFIX = (process.env.MATRIX_AGENT_PREFIX || 'ac_').trim(); // Matrix usernames: ac_agentname
+const MATRIX_SERVER_NAME = (process.env.MATRIX_SERVER_NAME || new URL(HOMESERVER).host).trim();
+const AGENT_PASSWORD_SECRET = (process.env.MATRIX_AGENT_PASSWORD_SECRET || '').trim();
+const AGENT_PASSWORD_TEMPLATE = (process.env.MATRIX_AGENT_PASSWORD_TEMPLATE || '').trim();
+const ALLOW_LEGACY_AGENT_PASSWORD = (process.env.MATRIX_ALLOW_LEGACY_AGENT_PASSWORD || 'false').trim().toLowerCase() === 'true';
 const DATA_DIR = path.resolve('data/matrix');
 
 mkdirSync(DATA_DIR, { recursive: true });
@@ -33,8 +38,73 @@ function saveState() {
 }
 const state = loadState();
 
+if (!BOT_PASSWORD) {
+  console.warn('MATRIX_BOT_PASSWORD is not set. Bridge can run with cached token, but re-login will fail if token expires.');
+}
+if (!AGENT_PASSWORD_SECRET && !ALLOW_LEGACY_AGENT_PASSWORD) {
+  console.warn('MATRIX_AGENT_PASSWORD_SECRET is not set and legacy fallback is disabled. New agent account login/register will fail.');
+}
+if (ALLOW_LEGACY_AGENT_PASSWORD) {
+  if (!AGENT_PASSWORD_TEMPLATE) {
+    console.warn('MATRIX_ALLOW_LEGACY_AGENT_PASSWORD=true but MATRIX_AGENT_PASSWORD_TEMPLATE is empty. Legacy fallback is effectively disabled.');
+  } else {
+    console.warn('MATRIX_ALLOW_LEGACY_AGENT_PASSWORD=true enabled. This keeps compatibility but is less secure.');
+  }
+}
+
+function makeUserId(localpart) {
+  return `@${localpart}:${MATRIX_SERVER_NAME}`;
+}
+
+function agentUserId(name) {
+  return makeUserId(`${AGENT_PREFIX}${name}`);
+}
+
+function humanUserId(name) {
+  return makeUserId(name);
+}
+
+function deriveAgentPassword(agentName) {
+  if (!AGENT_PASSWORD_SECRET) return null;
+  return createHash('sha256')
+    .update(`${AGENT_PASSWORD_SECRET}:${agentName}`)
+    .digest('hex');
+}
+
+function legacyAgentPassword(agentName) {
+  if (!AGENT_PASSWORD_TEMPLATE) return null;
+  return AGENT_PASSWORD_TEMPLATE
+    .replace(/\{name\}/g, agentName)
+    .replace(/\$\{name\}/g, agentName);
+}
+
+function agentPasswordCandidates(agentName) {
+  const out = [];
+  const derived = deriveAgentPassword(agentName);
+  if (derived) out.push(derived);
+  if (ALLOW_LEGACY_AGENT_PASSWORD) out.push(legacyAgentPassword(agentName));
+  return [...new Set(out.filter(Boolean))];
+}
+
+async function tryMatrixLogin(username, passwords) {
+  let lastErr = null;
+  for (const pwd of passwords) {
+    try {
+      const data = await matrixLogin(username, pwd);
+      return { data, password: pwd };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  if (lastErr) throw lastErr;
+  throw new Error(`No usable password candidates for Matrix account '${username}'.`);
+}
+
 // ── Matrix account management ─────────────────────────────────────────
 async function matrixRegister(username, password) {
+  if (!REGISTRATION_TOKEN) {
+    throw new Error('MATRIX_REG_TOKEN is required to register Matrix accounts.');
+  }
   // Step 1: get session
   const probe = await fetch(`${HOMESERVER}/_matrix/client/v3/register`, {
     method: 'POST',
@@ -83,6 +153,9 @@ async function ensureBotAccount() {
       return state.botToken;
     } catch { /* token expired, re-login */ }
   }
+  if (!BOT_PASSWORD) {
+    throw new Error('MATRIX_BOT_PASSWORD is required to login/register bridge bot account.');
+  }
   try {
     const data = await matrixLogin(BOT_USERNAME, BOT_PASSWORD);
     state.botToken = data.access_token;
@@ -100,7 +173,6 @@ async function ensureBotAccount() {
 
 async function ensureAgentAccount(agentName) {
   const matrixUsername = `${AGENT_PREFIX}${agentName}`;
-  const password = `agent-${agentName}-2026`;
 
   if (state.agentTokens[agentName]) {
     try {
@@ -111,16 +183,21 @@ async function ensureAgentAccount(agentName) {
     } catch { /* re-login */ }
   }
 
+  const passwords = agentPasswordCandidates(agentName);
+  if (passwords.length === 0) {
+    throw new Error(`No agent password configured for '${agentName}'. Set MATRIX_AGENT_PASSWORD_SECRET (recommended), or enable MATRIX_ALLOW_LEGACY_AGENT_PASSWORD=true for migration.`);
+  }
+
   try {
-    const data = await matrixLogin(matrixUsername, password);
+    const { data } = await tryMatrixLogin(matrixUsername, passwords);
     state.agentTokens[agentName] = data.access_token;
     saveState();
     return data.access_token;
   } catch {
-    const data = await matrixRegister(matrixUsername, password);
+    const data = await matrixRegister(matrixUsername, passwords[0]);
     state.agentTokens[agentName] = data.access_token;
     saveState();
-    console.log(`Registered Matrix account for agent: ${agentName} → @${matrixUsername}:matrix.kusuri.ai`);
+    console.log(`Registered Matrix account for agent: ${agentName} → ${agentUserId(agentName)}`);
     // Set display name
     await setDisplayName(data.access_token, agentName);
     return data.access_token;
@@ -167,13 +244,13 @@ function roomForGroup(groupName) { return state.groupRoomMap[groupName] || null;
 
 // ── Extract agent name from Matrix user ID ───────────────────────────
 function agentNameFromUserId(userId) {
-  // @ac_agentname:matrix.kusuri.ai → agentname
+  // @ac_agentname:<server> → agentname
   const match = userId.match(new RegExp(`^@${AGENT_PREFIX}([^:]+):`));
   return match ? match[1] : null;
 }
 
 function humanNameFromUserId(userId) {
-  // @overseer:matrix.kusuri.ai → overseer
+  // @overseer:<server> → overseer
   const match = userId.match(/^@([^:]+):/);
   return match ? match[1] : userId;
 }
@@ -189,12 +266,12 @@ function parseMentions(content, plainBody = null) {
   // 1. Parse m.mentions.user_ids (modern Matrix spec)
   if (content['m.mentions']?.user_ids) {
     for (const userId of content['m.mentions'].user_ids) {
-      // @ac_agentname:matrix.kusuri.ai → agentname
+      // @ac_agentname:<server> → agentname
       const agentMatch = userId.match(new RegExp(`^@${AGENT_PREFIX}([^:]+):`));
       if (agentMatch) {
         mentions.push(agentMatch[1]);
       } else {
-        // @username:matrix.kusuri.ai → username (human or other)
+        // @username:<server> → username (human or other)
         const userMatch = userId.match(/^@([^:]+):/);
         if (userMatch) mentions.push(userMatch[1]);
       }
@@ -621,10 +698,16 @@ class MatrixBridge {
     } catch { /* ignore */ }
 
     // ! commands work in any room (bot-DM, group, agent-DM)
-    if (body.trim().startsWith('!')) {
+    // Strip bot mention prefix (Matrix pills resolve to "display_name: " in plain text)
+    let cmdBody = body.trim();
+    const botMentionRe = /^@?agent-bridge[^:]*:\s*/i;
+    if (botMentionRe.test(cmdBody)) {
+      cmdBody = cmdBody.replace(botMentionRe, '').trim();
+    }
+    if (cmdBody.startsWith('!')) {
       const context = { groupName, targetAgent };
-      console.log(`Bot command from ${humanName} in ${groupName || targetAgent || 'bot-DM'}: ${body.slice(0, 80)}`);
-      await this.commands.handle(roomId, senderId, body, context);
+      console.log(`Bot command from ${humanName} in ${groupName || targetAgent || 'bot-DM'}: ${cmdBody.slice(0, 80)}`);
+      await this.commands.handle(roomId, senderId, cmdBody, context);
       return;
     }
 
@@ -1005,11 +1088,11 @@ class MatrixBridge {
         });
       } else if (isAgent) {
         // Agent without token (ensureAgentAccount may have failed) — use ac_ prefix
-        userId = `@${AGENT_PREFIX}${m}:matrix.kusuri.ai`;
+        userId = agentUserId(m);
         if (currentMembers.has(userId)) continue;
       } else {
         // Human — use plain name
-        userId = `@${m}:matrix.kusuri.ai`;
+        userId = humanUserId(m);
         if (currentMembers.has(userId)) continue;
       }
       try {
@@ -1032,7 +1115,7 @@ class MatrixBridge {
       if (this.isKnownAgentName(m) && state.agentTokens[m]) {
         userId = await getUserId(state.agentTokens[m]);
       } else {
-        userId = `@${m}:matrix.kusuri.ai`;
+        userId = humanUserId(m);
       }
       try {
         await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/kick`, {
@@ -1218,8 +1301,8 @@ class MatrixBridge {
     const otherName = agentName === fromName ? toName : fromName;
     const otherIsAgent = agentName === fromName ? toIsAgent : fromIsAgent;
     const toUserId = otherIsAgent
-      ? `@${AGENT_PREFIX}${otherName}:matrix.kusuri.ai`
-      : `@${otherName}:matrix.kusuri.ai`;
+      ? agentUserId(otherName)
+      : humanUserId(otherName);
 
     const invite = [toUserId, this.botUserId];
     try {
@@ -1263,7 +1346,7 @@ class MatrixBridge {
   }
 
   async _inviteHumanToDm(roomId, humanName, options = {}) {
-    const humanUserId = `@${humanName}:matrix.kusuri.ai`;
+    const humanTargetUserId = humanUserId(humanName);
     const parseJsonSafe = async (res) => {
       try {
         return await res.json();
@@ -1274,7 +1357,7 @@ class MatrixBridge {
     try {
       // Check if already joined (avoid spam invite)
       const members = await this.botClient.getJoinedRoomMembers(roomId);
-      if (members.includes(humanUserId)) {
+      if (members.includes(humanTargetUserId)) {
         return { ok: true, alreadyJoined: true, invited: false, via: 'joined' };
       }
     } catch (e) {
@@ -1296,7 +1379,7 @@ class MatrixBridge {
         const res = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${attempt.token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: humanUserId }),
+          body: JSON.stringify({ user_id: humanTargetUserId }),
         });
         const data = await parseJsonSafe(res);
         if (res.ok) {
@@ -1364,14 +1447,18 @@ class MatrixBridge {
 
     // Remove stale @ac_<humanName> from the room (human shouldn't have an agent account).
     // Can't kick users with equal power level, so login as the stale user and have them leave.
-    const staleUserId = `@${AGENT_PREFIX}${humanName}:matrix.kusuri.ai`;
+    const staleUserId = agentUserId(humanName);
     try {
       const members = await this.botClient.getJoinedRoomMembers(roomId);
       if (members.includes(staleUserId)) {
         const staleUsername = `${AGENT_PREFIX}${humanName}`;
-        const stalePassword = `agent-${humanName}-2026`;
+        const passwords = agentPasswordCandidates(humanName);
+        if (passwords.length === 0) {
+          console.warn(`Cannot remove stale ${staleUserId}: no password candidates configured`);
+          return;
+        }
         try {
-          const loginData = await matrixLogin(staleUsername, stalePassword);
+          const { data: loginData } = await tryMatrixLogin(staleUsername, passwords);
           const leaveRes = await fetch(
             `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`,
             {
@@ -1459,7 +1546,7 @@ class MatrixBridge {
         const userId = await getUserId(state.agentTokens[m]);
         invite.push(userId);
       } else {
-        invite.push(`@${m}:matrix.kusuri.ai`);
+        invite.push(humanUserId(m));
       }
     }
 

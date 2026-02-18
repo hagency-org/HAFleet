@@ -89,6 +89,7 @@ done
 
 echo "[5/9] Installing systemd service ${SERVICE_NAME}..."
 TMP_UNIT="$(mktemp)"
+trap 'rm -f "$TMP_UNIT"' EXIT
 sed \
   -e "s|__USER__|$SERVICE_USER|g" \
   -e "s|__WORKDIR__|$SCRIPT_DIR|g" \
@@ -96,6 +97,7 @@ sed \
   "$SCRIPT_DIR/push-relay.service" > "$TMP_UNIT"
 sudo install -m 0644 "$TMP_UNIT" "$SYSTEMD_UNIT"
 rm -f "$TMP_UNIT"
+trap - EXIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now "$SERVICE_NAME"
 
