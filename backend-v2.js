@@ -662,14 +662,14 @@ async function pushNotify(agentName, msg) {
 
     if (hasMcp) {
       const replyPart = mergedNeedsReply
-        ? ` Reply after everything is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply").`
+        ? ` Reply after ALL WORK is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply").`
         : '';
       notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}. Use check_inbox() in agent-chat MCP to read all.${humanHint}${replyPart}`;
     } else {
       const senderAgent = agents[replyTo];
       const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
       const replyPart = mergedNeedsReply
-        ? ` Reply after everything is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>".`
+        ? ` Reply after ALL WORK is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>".`
         : '';
       notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}.${humanHint}${replyPart}`;
     }
@@ -681,9 +681,9 @@ async function pushNotify(agentName, msg) {
       const checkHint = `Use check_inbox() in agent-chat MCP for full context.`;
       let actionHint;
       if (needsReply && isGroup) {
-        actionHint = `Reply after everything is done, using the agent-chat MCP tool: post(group="${msg.group}", summary="your reply", full="detailed reply")`;
+        actionHint = `Reply after ALL WORK is done, using the agent-chat MCP tool: post(group="${msg.group}", summary="your reply", full="detailed reply")`;
       } else if (needsReply) {
-        actionHint = `Reply after everything is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
+        actionHint = `Reply after ALL WORK is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
       }
       notification = isHuman
         ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${checkHint} ${actionHint}.`
@@ -695,7 +695,7 @@ async function pushNotify(agentName, msg) {
       const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
       let actionHint;
       if (needsReply) {
-        actionHint = `Reply after everything is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
+        actionHint = `Reply after ALL WORK is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
       }
       notification = isHuman
         ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${actionHint}.`
