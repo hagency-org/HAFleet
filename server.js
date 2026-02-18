@@ -886,6 +886,15 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   padding:2px 6px;width:100%;outline:none;
 }
 #agent-info .ai-identity-input:focus{border-color:rgba(0,240,255,0.5)}
+.ai-delete-row{margin-top:8px;text-align:right}
+.ai-delete-btn{
+  background:none;border:1px solid rgba(255,80,80,0.25);border-radius:3px;
+  color:rgba(255,80,80,0.5);cursor:pointer;font-size:9px;padding:2px 8px;font-family:inherit;
+}
+.ai-delete-btn:hover{border-color:rgba(255,80,80,0.5);color:rgba(255,80,80,0.8)}
+.ai-delete-btn.confirm{
+  background:rgba(255,40,40,0.15);border-color:rgba(255,60,60,0.7);color:#ff4444;
+}
 #agent-info .ai-label{color:rgba(0,240,255,0.2);margin-right:4px}
 #agent-info .ai-val{color:rgba(0,240,255,0.6)}
 #agent-info .ai-identity{color:rgba(255,255,255,0.35);font-style:italic}
@@ -1236,6 +1245,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
       if (d.groups && d.groups.length) {
         parts.push('<span class="ai-label">groups</span><span class="ai-groups">' + d.groups.map(g => esc(g)).join(', ') + '</span>');
       }
+      // Delete button with two-step confirmation
+      parts.push('<div class="ai-delete-row"><button class="ai-delete-btn" id="ai-delete-btn" onclick="deleteAgent()">Delete Agent</button></div>');
       agentInfoEl.innerHTML = parts.join('');
       agentInfoEl.classList.add('visible');
     } catch {}
@@ -1269,6 +1280,42 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
       });
     } catch {}
     fetchAgentDetail(monitoredAgent.name);
+  };
+
+  let deleteConfirmTimer = null;
+  window.deleteAgent = function() {
+    if (!monitoredAgent) return;
+    const btn = document.getElementById('ai-delete-btn');
+    if (!btn) return;
+    if (btn.classList.contains('confirm')) {
+      // Second click — actually delete
+      clearTimeout(deleteConfirmTimer);
+      const name = monitoredAgent.name;
+      fetch('/api/agents/' + encodeURIComponent(name) + '?force=true', { method: 'DELETE' })
+        .then(r => r.json())
+        .then(d => {
+          if (d.ok) {
+            monitoredAgent = null;
+            monitorPaused = true;
+            monitorLabelEl.textContent = '';
+            monitorEmptyEl.style.display = '';
+            terminalWrapEl.classList.add('hidden');
+            btnPause.style.display = 'none';
+            btnScrollBottom.style.display = 'none';
+            agentInfoEl.classList.remove('visible');
+            agentInfoEl.innerHTML = '';
+            fetchAgentStatus();
+          }
+        }).catch(() => {});
+    } else {
+      // First click — show confirmation
+      btn.classList.add('confirm');
+      btn.textContent = 'Confirm Delete?';
+      deleteConfirmTimer = setTimeout(() => {
+        btn.classList.remove('confirm');
+        btn.textContent = 'Delete Agent';
+      }, 3000);
+    }
   };
 
   let terminalEtag = null;

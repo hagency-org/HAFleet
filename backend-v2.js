@@ -973,6 +973,12 @@ app.delete('/api/agents/:name', (req, res) => {
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+  if (req.query.force === 'true') {
+    delete agents[agentName];
+    saveAgents();
+    console.log(`Agent '${agentName}' permanently deleted`);
+    return res.json({ ok: true, deleted: true, name: agentName });
+  }
   agent.online = false;
   agent.tmux = null;
   agent.lastSeen = Date.now();
@@ -981,7 +987,7 @@ app.delete('/api/agents/:name', (req, res) => {
   res.json({
     ok: true,
     deprecated: true,
-    message: 'unregister is disabled; agent marked inactive',
+    message: 'unregister is disabled; agent marked inactive. Use ?force=true to permanently delete.',
     agent: serializeAgent(agent),
   });
 });
