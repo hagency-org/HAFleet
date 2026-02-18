@@ -13,6 +13,7 @@ IS_LINUX=false
 IS_MAC=false
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${SERVICE_NAME}.plist"
 LAUNCHD_RUNNER="$SCRIPT_DIR/.push-relay-launchd.sh"
+LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-gui/$(id -u)}"
 
 case "$OS_NAME" in
   Linux) IS_LINUX=true ;;
@@ -28,6 +29,41 @@ need_cmd() {
     echo "Missing required command: $1" >&2
     exit 1
   fi
+}
+
+launchd_bootstrap_service() {
+  local plist_path="$1"
+  local domains=("$LAUNCHD_DOMAIN" "gui/$(id -u)" "user/$(id -u)")
+  local uniq_domains=()
+  local d out rc
+
+  for d in "${domains[@]}"; do
+    [ -n "$d" ] || continue
+    case " ${uniq_domains[*]} " in
+      *" $d "*) ;;
+      *) uniq_domains+=("$d") ;;
+    esac
+  done
+
+  for d in "${uniq_domains[@]}"; do
+    launchctl bootout "$d/$SERVICE_NAME" >/dev/null 2>&1 || true
+    out="$(launchctl bootstrap "$d" "$plist_path" 2>&1)" && rc=0 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      launchctl enable "$d/$SERVICE_NAME" >/dev/null 2>&1 || true
+      launchctl kickstart -k "$d/$SERVICE_NAME" >/dev/null 2>&1 || true
+      LAUNCHD_DOMAIN="$d"
+      return 0
+    fi
+  done
+
+  # Older macOS fallback
+  launchctl unload "$plist_path" >/dev/null 2>&1 || true
+  if launchctl load -w "$plist_path" >/dev/null 2>&1; then
+    LAUNCHD_DOMAIN="legacy"
+    return 0
+  fi
+
+  return 1
 }
 
 if [ "$(id -u)" -eq 0 ]; then
@@ -47,6 +83,7 @@ if [ "$IS_LINUX" = true ]; then
   need_cmd sudo
 elif [ "$IS_MAC" = true ]; then
   need_cmd launchctl
+  need_cmd plutil
 fi
 
 echo "[2/9] Preparing environment..."
@@ -145,10 +182,21 @@ EOF
   rm -f "$TMP_PLIST"
   trap - EXIT
 
-  launchctl bootout "user/$(id -u)" "$LAUNCHD_PLIST" >/dev/null 2>&1 || true
-  launchctl bootstrap "user/$(id -u)" "$LAUNCHD_PLIST"
-  launchctl enable "user/$(id -u)/$SERVICE_NAME" >/dev/null 2>&1 || true
-  launchctl kickstart -k "user/$(id -u)/$SERVICE_NAME"
+  if ! plutil -lint "$LAUNCHD_PLIST" >/dev/null 2>&1; then
+    echo "Error: invalid launchd plist: $LAUNCHD_PLIST" >&2
+    plutil -lint "$LAUNCHD_PLIST" >&2 || true
+    exit 1
+  fi
+
+  if ! launchd_bootstrap_service "$LAUNCHD_PLIST"; then
+    echo "Error: failed to bootstrap launchd service '$SERVICE_NAME'." >&2
+    echo "Hint: try manual checks:" >&2
+    echo "  plutil -lint \"$LAUNCHD_PLIST\"" >&2
+    echo "  launchctl print gui/$(id -u)/$SERVICE_NAME" >&2
+    echo "  launchctl print user/$(id -u)/$SERVICE_NAME" >&2
+    exit 1
+  fi
+  echo "  launchd domain: $LAUNCHD_DOMAIN"
 fi
 
 MCP_ENV_VARS=()
@@ -219,7 +267,9 @@ echo "[9/9] Done. Service status:"
 if [ "$IS_LINUX" = true ]; then
   sudo systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,20p'
 else
-  launchctl print "user/$(id -u)/$SERVICE_NAME" | sed -n '1,25p'
+  launchctl print "gui/$(id -u)/$SERVICE_NAME" 2>/dev/null | sed -n '1,25p' \
+    || launchctl print "user/$(id -u)/$SERVICE_NAME" 2>/dev/null | sed -n '1,25p' \
+    || launchctl list | grep -F "$SERVICE_NAME" || true
 fi
 
 echo

@@ -35,6 +35,22 @@ need_cmd() {
   fi
 }
 
+launchd_print_service() {
+  local uid dump
+  uid="$(id -u)"
+  dump="$(launchctl print "gui/$uid/$SERVICE_NAME" 2>/dev/null || true)"
+  if [ -n "$dump" ]; then
+    printf '%s\n' "$dump"
+    return 0
+  fi
+  dump="$(launchctl print "user/$uid/$SERVICE_NAME" 2>/dev/null || true)"
+  if [ -n "$dump" ]; then
+    printf '%s\n' "$dump"
+    return 0
+  fi
+  return 1
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --api)
@@ -116,10 +132,9 @@ if [ "$CHECK_SERVICE" = true ]; then
       ;;
     Darwin)
       need_cmd launchctl
-      service_dump="$(launchctl print "user/$(id -u)/$SERVICE_NAME" 2>/dev/null || true)"
-      if [ -z "$service_dump" ]; then
+      if ! service_dump="$(launchd_print_service)"; then
         echo "Error: launchd service '$SERVICE_NAME' is not loaded in user domain." >&2
-        echo "Hint: launchctl bootstrap user/$(id -u) ~/Library/LaunchAgents/${SERVICE_NAME}.plist" >&2
+        echo "Hint: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/${SERVICE_NAME}.plist" >&2
         exit 1
       fi
       service_state="$(printf '%s\n' "$service_dump" | sed -n 's/^[[:space:]]*state = //p' | head -n 1)"
