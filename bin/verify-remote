@@ -9,6 +9,7 @@ SERVICE_NAME="${SERVICE_NAME:-agent-chat-push-relay}"
 SAMPLES="${VERIFY_SAMPLES:-3}"
 INTERVAL="${VERIFY_INTERVAL:-15}"
 CHECK_SERVICE=true
+OS_NAME="$(uname -s)"
 
 usage() {
   cat <<'EOF'
@@ -21,8 +22,8 @@ Options:
   --token <token>     API token (default: $API_TOKEN)
   --samples <n>       Number of heartbeat samples (default: 3)
   --interval <sec>    Sleep seconds between samples (default: 15)
-  --service <name>    systemd service name (default: agent-chat-push-relay)
-  --no-service        Skip systemd active check
+  --service <name>    Service label/name (systemd unit or launchd label)
+  --no-service        Skip service active check
   -h, --help          Show this help
 EOF
 }
@@ -103,16 +104,31 @@ API_BASE="${API_BASE%/}"
 need_cmd curl
 need_cmd node
 if [ "$CHECK_SERVICE" = true ]; then
-  need_cmd systemctl
-fi
-
-if [ "$CHECK_SERVICE" = true ]; then
-  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-    echo "Error: systemd service '$SERVICE_NAME' is not active." >&2
-    systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,30p' || true
-    exit 1
-  fi
-  echo "Service check passed: $SERVICE_NAME is active."
+  case "$OS_NAME" in
+    Linux)
+      need_cmd systemctl
+      if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+        echo "Error: systemd service '$SERVICE_NAME' is not active." >&2
+        systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,30p' || true
+        exit 1
+      fi
+      echo "Service check passed (systemd): $SERVICE_NAME is active."
+      ;;
+    Darwin)
+      need_cmd launchctl
+      service_dump="$(launchctl print "user/$(id -u)/$SERVICE_NAME" 2>/dev/null || true)"
+      if [ -z "$service_dump" ]; then
+        echo "Error: launchd service '$SERVICE_NAME' is not loaded in user domain." >&2
+        echo "Hint: launchctl bootstrap user/$(id -u) ~/Library/LaunchAgents/${SERVICE_NAME}.plist" >&2
+        exit 1
+      fi
+      service_state="$(printf '%s\n' "$service_dump" | sed -n 's/^[[:space:]]*state = //p' | head -n 1)"
+      echo "Service check passed (launchd): $SERVICE_NAME is loaded (state=${service_state:-unknown})."
+      ;;
+    *)
+      echo "Warning: unsupported OS '$OS_NAME'; skipping service manager check." >&2
+      ;;
+  esac
 fi
 
 curl_json() {

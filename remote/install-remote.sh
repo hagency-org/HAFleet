@@ -8,6 +8,20 @@ ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
 INSTALL_BIN_DIR="${INSTALL_BIN_DIR:-$HOME/.local/bin}"
 SYSTEMD_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 SERVICE_USER="${SUDO_USER:-$USER}"
+OS_NAME="$(uname -s)"
+IS_LINUX=false
+IS_MAC=false
+LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${SERVICE_NAME}.plist"
+LAUNCHD_RUNNER="$SCRIPT_DIR/.push-relay-launchd.sh"
+
+case "$OS_NAME" in
+  Linux) IS_LINUX=true ;;
+  Darwin) IS_MAC=true ;;
+  *)
+    echo "Unsupported OS: $OS_NAME (expected Linux or macOS)." >&2
+    exit 1
+    ;;
+esac
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -18,7 +32,7 @@ need_cmd() {
 
 if [ "$(id -u)" -eq 0 ]; then
   echo "Do not run this script as root." >&2
-  echo "Run as the target user and let the script use sudo only for systemd installation." >&2
+  echo "Run as the target user. Linux installs systemd with sudo; macOS installs launchd in the user domain." >&2
   exit 1
 fi
 
@@ -26,10 +40,14 @@ echo "[1/9] Checking prerequisites..."
 need_cmd node
 need_cmd npm
 need_cmd tmux
-need_cmd systemctl
-need_cmd sudo
 need_cmd ln
 need_cmd curl
+if [ "$IS_LINUX" = true ]; then
+  need_cmd systemctl
+  need_cmd sudo
+elif [ "$IS_MAC" = true ]; then
+  need_cmd launchctl
+fi
 
 echo "[2/9] Preparing environment..."
 if [ ! -f "$ENV_FILE" ]; then
@@ -87,19 +105,51 @@ for cmd in "${optional_cmds[@]}"; do
   fi
 done
 
-echo "[5/9] Installing systemd service ${SERVICE_NAME}..."
-TMP_UNIT="$(mktemp)"
-trap 'rm -f "$TMP_UNIT"' EXIT
-sed \
-  -e "s|__USER__|$SERVICE_USER|g" \
-  -e "s|__WORKDIR__|$SCRIPT_DIR|g" \
-  -e "s|__ENV_FILE__|$ENV_FILE|g" \
-  "$SCRIPT_DIR/push-relay.service" > "$TMP_UNIT"
-sudo install -m 0644 "$TMP_UNIT" "$SYSTEMD_UNIT"
-rm -f "$TMP_UNIT"
-trap - EXIT
-sudo systemctl daemon-reload
-sudo systemctl enable --now "$SERVICE_NAME"
+echo "[5/9] Installing service ${SERVICE_NAME}..."
+if [ "$IS_LINUX" = true ]; then
+  TMP_UNIT="$(mktemp)"
+  trap 'rm -f "$TMP_UNIT"' EXIT
+  sed \
+    -e "s|__USER__|$SERVICE_USER|g" \
+    -e "s|__WORKDIR__|$SCRIPT_DIR|g" \
+    -e "s|__ENV_FILE__|$ENV_FILE|g" \
+    "$SCRIPT_DIR/push-relay.service" > "$TMP_UNIT"
+  sudo install -m 0644 "$TMP_UNIT" "$SYSTEMD_UNIT"
+  rm -f "$TMP_UNIT"
+  trap - EXIT
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now "$SERVICE_NAME"
+else
+  echo "[5/9] Installing launchd service ${SERVICE_NAME}..."
+  mkdir -p "$HOME/Library/LaunchAgents" "$SCRIPT_DIR/logs"
+  cat > "$LAUNCHD_RUNNER" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+set -a
+source "$ENV_FILE"
+set +a
+cd "$SCRIPT_DIR"
+exec /usr/bin/env node "$SCRIPT_DIR/push-relay.js"
+EOF
+  chmod 0755 "$LAUNCHD_RUNNER"
+
+  TMP_PLIST="$(mktemp)"
+  trap 'rm -f "$TMP_PLIST"' EXIT
+  sed \
+    -e "s|__LABEL__|$SERVICE_NAME|g" \
+    -e "s|__WORKDIR__|$SCRIPT_DIR|g" \
+    -e "s|__RUNNER__|$LAUNCHD_RUNNER|g" \
+    -e "s|__LOG_DIR__|$SCRIPT_DIR/logs|g" \
+    "$SCRIPT_DIR/push-relay.plist" > "$TMP_PLIST"
+  install -m 0644 "$TMP_PLIST" "$LAUNCHD_PLIST"
+  rm -f "$TMP_PLIST"
+  trap - EXIT
+
+  launchctl bootout "user/$(id -u)" "$LAUNCHD_PLIST" >/dev/null 2>&1 || true
+  launchctl bootstrap "user/$(id -u)" "$LAUNCHD_PLIST"
+  launchctl enable "user/$(id -u)/$SERVICE_NAME" >/dev/null 2>&1 || true
+  launchctl kickstart -k "user/$(id -u)/$SERVICE_NAME"
+fi
 
 MCP_ENV_VARS=()
 [ -n "${AGENT_CHAT_API:-}" ] && MCP_ENV_VARS+=("AGENT_CHAT_API=$AGENT_CHAT_API")
@@ -166,7 +216,11 @@ fi
 "$BIN_SOURCE_DIR/verify-remote" "${VERIFY_ARGS[@]}"
 
 echo "[9/9] Done. Service status:"
-sudo systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,20p'
+if [ "$IS_LINUX" = true ]; then
+  sudo systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,20p'
+else
+  launchctl print "user/$(id -u)/$SERVICE_NAME" | sed -n '1,25p'
+fi
 
 echo
 echo "Next:"
