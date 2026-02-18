@@ -159,6 +159,15 @@ else
   cat > "$LAUNCHD_RUNNER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\${PATH:-}"
+if [ -z "\${TMUX_BIN:-}" ]; then
+  for _tmux in /opt/homebrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do
+    if [ -x "\$_tmux" ]; then
+      export TMUX_BIN="\$_tmux"
+      break
+    fi
+  done
+fi
 set -a
 source "$ENV_FILE"
 set +a

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync, execSync } from 'child_process';
+import { existsSync } from 'fs';
 import os from 'os';
 import EventSource from './lib/eventsource-mini.js';
 
@@ -19,6 +20,43 @@ const deliveredOrder = [];
 const DELIVERED_CAP = 10000;
 let reconnectTimer = null;
 let heartbeatTimer = null;
+let warnedMissingTmux = false;
+
+function warnMissingTmuxOnce() {
+  if (warnedMissingTmux) return;
+  warnedMissingTmux = true;
+  console.error('[push-relay] tmux binary not found. Set TMUX_BIN or fix PATH (e.g. include /opt/homebrew/bin).');
+}
+
+function detectTmuxBin() {
+  const envBin = (process.env.TMUX_BIN || '').trim();
+  const candidates = [
+    envBin || null,
+    'tmux',
+    '/opt/homebrew/bin/tmux',
+    '/usr/local/bin/tmux',
+    '/usr/bin/tmux',
+  ].filter(Boolean);
+
+  for (const bin of candidates) {
+    try {
+      if (bin.includes('/') && !existsSync(bin)) continue;
+      execFileSync(bin, ['-V'], { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'ignore'] });
+      return bin;
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return null;
+}
+
+const TMUX_BIN = detectTmuxBin();
+if (!TMUX_BIN) warnMissingTmuxOnce();
+
+function runTmux(args, options = {}) {
+  if (!TMUX_BIN) throw new Error('tmux binary not available');
+  return execFileSync(TMUX_BIN, args, options);
+}
 
 function normalizeServer(value) {
   if (typeof value !== 'string') return null;
@@ -36,8 +74,9 @@ async function postJson(path, body) {
 }
 
 function listLocalTmuxSessions() {
+  if (!TMUX_BIN) return new Set();
   try {
-    const raw = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'], { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+    const raw = runTmux(['list-sessions', '-F', '#{session_name}'], { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
     return new Set(raw ? raw.split('\n').filter(Boolean) : []);
   } catch {
     return new Set();
@@ -86,8 +125,9 @@ async function sendOfflineNotice(reason = 'push-relay-shutdown') {
 }
 
 function agentHasMcp(agentName) {
+  if (!TMUX_BIN) return false;
   try {
-    const paneOut = execSync('tmux list-panes -a -F "#{pane_tty} #{session_name}" 2>/dev/null', { timeout: 3000, encoding: 'utf-8' }).trim();
+    const paneOut = runTmux(['list-panes', '-a', '-F', '#{pane_tty} #{session_name}'], { timeout: 3000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
     const ptsMap = {};
     for (const line of paneOut.split('\n')) {
       const sp = line.indexOf(' ');
@@ -143,19 +183,20 @@ function sleepMs(ms) {
 }
 
 function pushToTmux(target, payload) {
+  if (!TMUX_BIN) return false;
   const opts = { timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] };
   try {
-    execFileSync('tmux', ['send-keys', '-l', '-t', target, payload], opts);
+    runTmux(['send-keys', '-l', '-t', target, payload], opts);
     sleepMs(INJECT_DELAY_MS);
-    execFileSync('tmux', ['send-keys', '-t', target, 'Tab'], opts);
+    runTmux(['send-keys', '-t', target, 'Tab'], opts);
     sleepMs(INJECT_DELAY_MS);
-    execFileSync('tmux', ['send-keys', '-t', target, 'Enter'], opts);
+    runTmux(['send-keys', '-t', target, 'Enter'], opts);
     sleepMs(INJECT_DELAY_MS);
-    execFileSync('tmux', ['send-keys', '-t', target, 'Enter'], opts);
+    runTmux(['send-keys', '-t', target, 'Enter'], opts);
     sleepMs(INJECT_DELAY_MS);
-    execFileSync('tmux', ['send-keys', '-t', target, 'C-m'], opts);
+    runTmux(['send-keys', '-t', target, 'C-m'], opts);
     sleepMs(INJECT_DELAY_MS);
-    execFileSync('tmux', ['send-keys', '-t', target, 'C-m'], opts);
+    runTmux(['send-keys', '-t', target, 'C-m'], opts);
     return true;
   } catch (e) {
     console.error(`[push-relay] tmux inject failed for ${target}: ${e.message}`);
