@@ -334,6 +334,20 @@ app.patch('/api/agents/:name', async (req, res) => {
   }
 });
 
+app.delete('/api/agents/:name', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  try {
+    const url = new URL(`http://127.0.0.1:8090/api/agents/${encodeURIComponent(name)}`);
+    if (req.query.force === 'true') url.searchParams.set('force', 'true');
+    const r = await fetch(url, { method: 'DELETE' });
+    const data = await r.json();
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
 // SSE for queue updates (reuse existing SSE clients, send typed events)
 function queueSnapshot() {
   const items = [];
