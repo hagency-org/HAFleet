@@ -904,8 +904,12 @@ class MatrixBridge {
   async reconcileRoomGroupMembership(roomId, groupName) {
     if (!groupName || groupName.startsWith('DM: ') || groupName.startsWith('SPY: ')) return;
     try {
-      const agentMembers = await this.getRoomAgentMembers(roomId);
-      const humanMembers = await this.getRoomHumanMembers(roomId);
+      const joinedMembers = await this.botClient.getJoinedRoomMembers(roomId);
+      const agentMembers = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
+      const humanMembers = joinedMembers
+        .filter(m => !isAgentUser(m) && m !== this.botUserId)
+        .map(m => humanNameFromUserId(m))
+        .filter(Boolean);
       const matrixMembers = [...new Set([...agentMembers, ...humanMembers].filter(Boolean))];
       const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(groupName)}`);
 
@@ -965,8 +969,12 @@ class MatrixBridge {
       // Check if group exists in backend, create if not
       const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
       if (existing.error) {
-        const agentMembers = await this.getRoomAgentMembers(roomId);
-        const humanMembers = await this.getRoomHumanMembers(roomId);
+        const joinedMembers = await this.botClient.getJoinedRoomMembers(roomId);
+        const agentMembers = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
+        const humanMembers = joinedMembers
+          .filter(m => !isAgentUser(m) && m !== this.botUserId)
+          .map(m => humanNameFromUserId(m))
+          .filter(Boolean);
         await backendApi('POST', '/api/groups', {
           name,
           members: [...agentMembers, ...humanMembers],
