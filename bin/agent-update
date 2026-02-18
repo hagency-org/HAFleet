@@ -94,7 +94,7 @@ if [ -n "$SERVICE_ACTION" ]; then
     echo "Error: agent-service CLI not found. Expected in $REPO_DIR/bin/agent-service" >&2
     exit 1
   fi
-  "$SERVICE_CLI" "$SERVICE_ACTION"
+  "$SERVICE_CLI" "$SERVICE_ACTION" --profile remote
   exit 0
 fi
 
