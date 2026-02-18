@@ -378,6 +378,7 @@ if [ "$TYPE" = "claude" ]; then
     if ! is_valid_uuid "$SESSION_ID"; then
       SESSION_ID=$(generate_uuid)
     fi
+    mkdir -p "$AGENT_DATA"
     echo "$SESSION_ID" > "$RESUME_FILE"
   elif [ -f "$RESUME_FILE" ]; then
     SESSION_ID=$(cat "$RESUME_FILE" 2>/dev/null || echo "$SESSION_ID")

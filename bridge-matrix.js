@@ -717,11 +717,18 @@ class MatrixBridge {
     }
 
     // ! commands work in any room (bot-DM, group, agent-DM)
-    // Strip bot mention prefix (Matrix pills resolve to "display_name: " in plain text)
+    // Strip Matrix mention prefix — pills resolve to "display_name: text" in plain body.
+    // Use formatted_body to detect: if HTML starts with a mention pill <a href="matrix.to/...">
+    // followed by ": !cmd", strip the prefix from plain body to extract the command.
     let cmdBody = body.trim();
-    const botMentionRe = /^@?agent-bridge[^:]*:\s*/i;
-    if (botMentionRe.test(cmdBody)) {
-      cmdBody = cmdBody.replace(botMentionRe, '').trim();
+    if (!cmdBody.startsWith('!') && event.content?.formatted_body) {
+      const fmtBody = event.content.formatted_body;
+      if (/^<a\s+href="https:\/\/matrix\.to\/#\/@[^"]+">.*?<\/a>\s*:\s*!/i.test(fmtBody)) {
+        const cmdIdx = cmdBody.indexOf('!');
+        if (cmdIdx > 0) {
+          cmdBody = cmdBody.slice(cmdIdx).trim();
+        }
+      }
     }
     if (cmdBody.startsWith('!')) {
       const context = { groupName, targetAgent };
@@ -1380,6 +1387,20 @@ class MatrixBridge {
         state.dmRooms[key] = data.room_id;
         saveState();
         console.log(`Created DM room ${data.room_id} for ${key}`);
+
+        // Explicitly join bot so it's ready for immediate use (don't rely on async AutojoinRoomsMixin)
+        const botToken = this.getBotToken();
+        if (botToken) {
+          try {
+            await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(data.room_id)}`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' },
+              body: '{}',
+            });
+          } catch (e) {
+            console.warn(`Bot auto-join to new room ${data.room_id} failed: ${e.message}`);
+          }
+        }
 
         // If target is agent, auto-join
         if (otherIsAgent && state.agentTokens[otherName]) {

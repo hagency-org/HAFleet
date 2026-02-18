@@ -228,8 +228,10 @@ app.get('/api/agents/status', async (_req, res) => {
     const result = agentList
       .filter(a => a.tmux)
       .map(a => {
+        const isRemote = a.server && a.server !== 'local';
         const idleMs = getPaneIdleMs(a.tmux);
-        return { name: a.name, tmux: a.tmux, idleMs, active: idleMs >= 0 && idleMs < 30_000, type: a.type || 'agent' };
+        const alive = isRemote ? true : idleMs >= 0; // remote agents assumed alive; local checked via tmux
+        return { name: a.name, tmux: a.tmux, idleMs, active: alive && idleMs < 30_000, alive, remote: !!isRemote, type: a.type || 'agent', server: a.server || null };
       });
     res.json(result);
   } catch (e) {
@@ -786,6 +788,11 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 .agent-btn.selected{background:rgba(0,240,255,0.12);border-color:#00f0ff;color:#00f0ff}
 .agent-btn.active-agent .dot{color:#34d399}
 .agent-btn.inactive-agent .dot{color:rgba(255,255,255,0.15)}
+.agent-btn.remote-agent{opacity:0.45}
+.agent-btn.remote-agent .dot{color:rgba(180,130,255,0.6);font-size:9px}
+.agent-btn.dead-agent{opacity:0.25;cursor:default}
+.agent-btn.dead-agent .dot{color:rgba(255,80,80,0.5);font-size:8px}
+.agent-btn.dead-agent:hover{opacity:0.4}
 .agent-btn.no-tmux{opacity:0.35;cursor:default}
 .monitor-bar{
   display:flex;align-items:center;justify-content:space-between;
@@ -1306,11 +1313,22 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
       if (a.active) agentLastActive[a.name] = now;
       else if (!agentLastActive[a.name]) agentLastActive[a.name] = 0;
     }
-    // Sort: most recently active first, then by name
-    agents.sort((a, b) => (agentLastActive[b.name] - agentLastActive[a.name]) || a.name.localeCompare(b.name));
+    // Sort: local alive → local idle → remote → dead
+    agents.sort((a, b) => {
+      const tierOf = x => {
+        if (x.alive === false) return 3;  // dead
+        if (x.remote) return 2;           // remote
+        return 0;                         // local alive/idle
+      };
+      const ta = tierOf(a), tb = tierOf(b);
+      if (ta !== tb) return ta - tb;
+      return (agentLastActive[b.name] - agentLastActive[a.name]) || a.name.localeCompare(b.name);
+    });
     const html = agents.map(a => {
-      const dot = a.active ? '&#9679;' : '&#9675;';
-      const cls = ['agent-btn', a.active ? 'active-agent' : 'inactive-agent', a.name === selectedName ? 'selected' : ''].filter(Boolean).join(' ');
+      const dead = a.alive === false;
+      const isRemote = a.remote;
+      const dot = dead ? '&#10005;' : (isRemote ? '&#9826;' : (a.active ? '&#9679;' : '&#9675;'));
+      const cls = ['agent-btn', dead ? 'dead-agent' : (isRemote ? 'remote-agent' : (a.active ? 'active-agent' : 'inactive-agent')), a.name === selectedName ? 'selected' : ''].filter(Boolean).join(' ');
       return '<button class="' + cls + '" data-name="' + esc(a.name) + '" data-tmux="' + esc(a.tmux || '') + '">'
         + '<span class="dot">' + dot + '</span>' + esc(a.name) + '</button>';
     }).join('');
