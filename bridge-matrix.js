@@ -918,6 +918,8 @@ class MatrixBridge {
 
   async reconcileRoomGroupMembership(roomId, groupName) {
     if (!groupName || groupName.startsWith('DM: ') || groupName.startsWith('SPY: ')) return;
+    // Skip recently created rooms — humans may not have accepted invites yet
+    if (this.recentlyCreatedRooms.has(roomId)) return;
     try {
       const joinedMembers = await this.botClient.getJoinedRoomMembers(roomId);
       const agentMembers = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
@@ -938,21 +940,17 @@ class MatrixBridge {
       const backendKeyMap = new Map(backendMembers.map(name => [String(name).toLowerCase(), name]));
       const matrixKeyMap = new Map(matrixMembers.map(name => [String(name).toLowerCase(), name]));
 
+      // Only add Matrix members missing from backend (Matrix→backend additions).
+      // Never remove backend members not in Matrix — they may be invited humans
+      // who haven't joined yet. Removals happen via explicit kicks (m.room.member events).
       const add = [];
       for (const [key, name] of matrixKeyMap.entries()) {
         if (!backendKeyMap.has(key)) add.push(name);
       }
-      const remove = [];
-      for (const [key, name] of backendKeyMap.entries()) {
-        if (!matrixKeyMap.has(key)) remove.push(name);
-      }
 
-      if (add.length > 0 || remove.length > 0) {
-        await backendApi('POST', `/api/groups/${encodeURIComponent(groupName)}/members`, {
-          ...(add.length > 0 ? { add } : {}),
-          ...(remove.length > 0 ? { remove } : {}),
-        });
-        console.log(`Reconciled group "${groupName}" from room ${roomId}: +[${add.join(', ')}] -[${remove.join(', ')}]`);
+      if (add.length > 0) {
+        await backendApi('POST', `/api/groups/${encodeURIComponent(groupName)}/members`, { add });
+        console.log(`Reconciled group "${groupName}" from room ${roomId}: +[${add.join(', ')}]`);
       }
     } catch (e) {
       console.error(`Failed to reconcile group "${groupName}" from room ${roomId}:`, e.message);
