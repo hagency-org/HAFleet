@@ -1187,7 +1187,11 @@ async function pushNotify(agentName, msg) {
 const app = express();
 app.set('trust proxy', 'loopback');  // trust nginx on localhost, use X-Forwarded-For for real IP
 const API_TOKEN = process.env.API_TOKEN;
-app.use(express.json({ limit: '100kb' }));
+app.use((req, res, next) => {
+  // Skip global JSON parser for avatar upload (has its own 10mb limit)
+  if (req.path.endsWith('/avatar') && req.method === 'POST') return next();
+  express.json({ limit: '100kb' })(req, res, next);
+});
 app.use('/api', (req, res, next) => {
   const origin = req.headers.origin;
   if (CORS_ALLOWED_ORIGIN && origin === CORS_ALLOWED_ORIGIN) {
