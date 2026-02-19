@@ -28,6 +28,8 @@ let warnedMissingTmux = false;
 const blockedState = new Map();
 const activityState = new Map();
 const runtimeReportDigest = new Map();
+const RELAY_INSTANCE_ID = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+const RELAY_BOOT_TS = Date.now();
 
 const BLOCK_PATTERNS = [
   { reason: 'select-mode', re: /\bselect mode\b/i },
@@ -287,11 +289,17 @@ async function sendHeartbeat() {
   try {
     const res = await postJson('/api/servers/heartbeat', {
       server: SERVER_ID,
+      instanceId: RELAY_INSTANCE_ID,
+      bootTs: RELAY_BOOT_TS,
       sessions,
       agents: sessions,
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
+      if (res.status === 409) {
+        console.error(`[push-relay] heartbeat lease rejected for server=${SERVER_ID}, instance=${RELAY_INSTANCE_ID}: ${body}`);
+        return;
+      }
       throw new Error(`status ${res.status} ${body}`.trim());
     }
   } catch (e) {
@@ -301,7 +309,11 @@ async function sendHeartbeat() {
 
 async function sendOfflineNotice(reason = 'push-relay-shutdown') {
   try {
-    await postJson(`/api/servers/${encodeURIComponent(SERVER_ID)}/offline`, { reason });
+    await postJson(`/api/servers/${encodeURIComponent(SERVER_ID)}/offline`, {
+      reason,
+      instanceId: RELAY_INSTANCE_ID,
+      bootTs: RELAY_BOOT_TS,
+    });
   } catch (e) {
     console.error(`[push-relay] offline notice failed: ${e.message}`);
   }

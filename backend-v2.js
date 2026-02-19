@@ -19,6 +19,7 @@ const RULE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_RULE_SWEEP_INTE
 const IDLE_THRESHOLD_MS = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '15000', 10);
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.floor((IDLE_THRESHOLD_MS + 999) / 1000));
 const LOCAL_ACTIVITY_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_LOCAL_ACTIVITY_SWEEP_MS || '5000', 10);
+const OFFLINE_CATCHUP_LIST_LIMIT = Number.parseInt(process.env.OFFLINE_CATCHUP_LIST_LIMIT || '50', 10);
 
 mkdirSync(DATA_DIR, { recursive: true });
 
@@ -219,12 +220,27 @@ if (JSON.stringify(cursors) !== cursorsBeforeNormalization) {
 
 for (const [serverId, server] of Object.entries(servers)) {
   if (!server || typeof server !== 'object') {
-    servers[serverId] = { id: serverId, lastSeen: 0, heartbeatAt: 0, online: false, updatedAt: Date.now(), sessions: [], agents: [], agentCount: 0 };
+    servers[serverId] = {
+      id: serverId,
+      lastSeen: 0,
+      heartbeatAt: 0,
+      relayInstanceId: null,
+      relayBootTs: 0,
+      online: false,
+      updatedAt: Date.now(),
+      sessions: [],
+      agents: [],
+      agentCount: 0,
+    };
     continue;
   }
   server.id = server.id || serverId;
   server.lastSeen = Number(server.lastSeen) || 0;
   server.heartbeatAt = Number(server.heartbeatAt) || server.lastSeen || 0;
+  server.relayInstanceId = (typeof server.relayInstanceId === 'string' && server.relayInstanceId.trim())
+    ? server.relayInstanceId.trim()
+    : null;
+  server.relayBootTs = Number(server.relayBootTs) || 0;
   server.online = Boolean(server.online);
   server.updatedAt = Number(server.updatedAt) || server.lastSeen || 0;
   if (!Array.isArray(server.sessions)) server.sessions = [];
@@ -861,6 +877,8 @@ function ensureServerRecord(serverId) {
       id: serverId,
       lastSeen: 0,
       heartbeatAt: 0,
+      relayInstanceId: null,
+      relayBootTs: 0,
       online: false,
       updatedAt: Date.now(),
       sessions: [],
@@ -890,8 +908,47 @@ function clearServerLiveState(server, now = Date.now()) {
   if (!Array.isArray(server.sessions) || server.sessions.length !== 0) { server.sessions = []; changed = true; }
   if (!Array.isArray(server.agents) || server.agents.length !== 0) { server.agents = []; changed = true; }
   if ((Number(server.agentCount) || 0) !== 0) { server.agentCount = 0; changed = true; }
+  if (server.relayInstanceId !== null) { server.relayInstanceId = null; changed = true; }
+  if ((Number(server.relayBootTs) || 0) !== 0) { server.relayBootTs = 0; changed = true; }
   if ((Number(server.updatedAt) || 0) !== now) { server.updatedAt = now; changed = true; }
   return changed;
+}
+
+function normalizeRelayInstanceId(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function normalizeRelayBootTs(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function evaluateHeartbeatLease(server, incomingInstanceId, incomingBootTs, now) {
+  const currentInstanceId = normalizeRelayInstanceId(server?.relayInstanceId);
+  const currentBootTs = normalizeRelayBootTs(server?.relayBootTs);
+  const hasActiveLease = Boolean(server?.online)
+    && Number(server?.heartbeatAt) > 0
+    && (now - Number(server.heartbeatAt)) <= HEARTBEAT_TTL_MS
+    && Boolean(currentInstanceId);
+
+  // Backward compatibility: old relays without lease metadata.
+  if (!incomingInstanceId) {
+    if (!hasActiveLease) return { accept: true, takeover: false, reason: 'no-instance-id' };
+    return { accept: false, takeover: false, reason: 'missing-instance-id-while-lease-active' };
+  }
+  if (!currentInstanceId) return { accept: true, takeover: false, reason: 'lease-empty' };
+  if (incomingInstanceId === currentInstanceId) return { accept: true, takeover: false, reason: 'same-instance' };
+  if (!hasActiveLease) return { accept: true, takeover: true, reason: 'stale-lease' };
+
+  if (incomingBootTs > 0 && currentBootTs > 0) {
+    if (incomingBootTs > currentBootTs) return { accept: true, takeover: true, reason: 'newer-boot' };
+    return { accept: false, takeover: false, reason: 'older-boot' };
+  }
+  if (incomingBootTs > 0 && currentBootTs === 0) return { accept: true, takeover: true, reason: 'boot-present-over-empty' };
+  if (incomingBootTs === 0 && currentBootTs > 0) return { accept: false, takeover: false, reason: 'missing-boot-ts' };
+  return { accept: false, takeover: false, reason: 'different-instance-active' };
 }
 
 function refreshServerLiveness() {
@@ -1063,6 +1120,12 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   const now = Date.now();
   const server = ensureServerRecord(serverId);
   const wasOnline = Boolean(server.online);
+  const incomingInstanceId = normalizeRelayInstanceId(payload.instanceId);
+  const incomingBootTs = normalizeRelayBootTs(payload.bootTs);
+  const lease = evaluateHeartbeatLease(server, incomingInstanceId, incomingBootTs, now);
+  if (!lease.accept) {
+    return { ok: false, leaseAccepted: false, leaseReason: lease.reason };
+  }
   const sessions = Array.isArray(payload.sessions)
     ? [...new Set(payload.sessions.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim()))]
     : [];
@@ -1072,6 +1135,8 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
 
   server.lastSeen = now;
   server.heartbeatAt = now;
+  server.relayInstanceId = incomingInstanceId;
+  server.relayBootTs = incomingBootTs;
   server.online = true;
   server.updatedAt = now;
   server.sourceIp = sourceIp || null;
@@ -1081,6 +1146,12 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
 
   if (!wasOnline) {
     emitSystemInfo(`Remote server '${serverId}' online`, `Server '${serverId}' heartbeat restored. Active sessions=${sessions.length}, agents=${liveAgents.length}.`);
+  }
+  if (lease.takeover) {
+    emitSystemInfo(
+      `Remote server '${serverId}' heartbeat instance switched`,
+      `Server '${serverId}' lease takeover: reason=${lease.reason}, instanceId=${incomingInstanceId || 'unknown'}, bootTs=${incomingBootTs || 0}.`
+    );
   }
 
   let agentsChanged = false;
@@ -1126,6 +1197,7 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   for (const name of becameOnline) {
     notifyAgentCatchup(name, `online:${serverId}`);
   }
+  return { ok: true, leaseAccepted: true, leaseReason: lease.reason };
 }
 
 // ── Push notification relay ───────────────────────────────────────────
@@ -1174,13 +1246,26 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
 
   const senderNames = [...new Set(unread.map(m => m.from).filter(Boolean))];
   const summary = `Queued while offline: ${unread.length} message(s) (${new Date(oldest.ts).toISOString()} -> ${new Date(latest.ts).toISOString()}).`;
+  const replayLimit = Math.max(1, OFFLINE_CATCHUP_LIST_LIMIT);
+  const replay = unread.slice(-replayLimit);
+  const omitted = Math.max(0, unread.length - replay.length);
+  const replayLines = replay.map((m, idx) => {
+    const summaryText = String(m.summary || '').replace(/\s+/g, ' ').trim() || '(no summary)';
+    const channel = m.group ? `group:${m.group}` : 'dm';
+    return `${idx + 1}. [${new Date(m.ts).toISOString()}] (${channel}/${m.type}) ${m.from}: ${summaryText}`;
+  });
   const full = [
     `You were offline (${reason}).`,
     `Unread count: ${unread.length}`,
+    `Window: ${new Date(oldest.ts).toISOString()} -> ${new Date(latest.ts).toISOString()}`,
     `Senders: ${senderNames.join(', ') || 'unknown'}`,
+    `Offline replay list (latest ${replay.length}):`,
+    ...replayLines,
+    omitted > 0 ? `... ${omitted} older message(s) omitted from replay list.` : null,
     'These messages may be time-sensitive. Review timestamps and decide whether a reply is still needed.',
+    'check_inbox() returns per-message time fields: ts / at / time.',
     'Use check_inbox() in agent-chat MCP for full context.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 
   const msg = {
     id: nextMsgId(),
@@ -1369,9 +1454,24 @@ app.get('/health', (_req, res) => {
 app.post('/api/servers/heartbeat', (req, res) => {
   const serverId = normalizeServer(req.body?.server);
   if (!serverId) return res.status(400).json({ error: 'server required' });
-  applyServerHeartbeat(serverId, req.body || {}, req.ip || req.connection?.remoteAddress || null);
+  const heartbeatResult = applyServerHeartbeat(serverId, req.body || {}, req.ip || req.connection?.remoteAddress || null);
   refreshServerLiveness();
   const state = servers[serverId];
+  if (heartbeatResult && heartbeatResult.leaseAccepted === false) {
+    return res.status(409).json({
+      ok: false,
+      error: 'heartbeat_lease_rejected',
+      reason: heartbeatResult.leaseReason || 'unknown',
+      server: {
+        id: state.id,
+        online: Boolean(state.online),
+        lastSeen: state.lastSeen || null,
+        updatedAt: state.updatedAt || null,
+        agentCount: state.agentCount || 0,
+        sourceIp: state.sourceIp || null,
+      },
+    });
+  }
   return res.json({
     ok: true,
     server: {
@@ -1389,6 +1489,17 @@ app.post('/api/servers/:id/offline', (req, res) => {
   const serverId = normalizeServer(req.params.id);
   if (!serverId) return res.status(400).json({ error: 'server required' });
   const server = ensureServerRecord(serverId);
+  const requestInstanceId = normalizeRelayInstanceId(req.body?.instanceId);
+  const activeInstanceId = normalizeRelayInstanceId(server.relayInstanceId);
+  if (requestInstanceId && activeInstanceId && requestInstanceId !== activeInstanceId && server.online) {
+    return res.status(409).json({
+      ok: false,
+      error: 'offline_lease_rejected',
+      reason: 'different-instance-active',
+      activeInstanceId,
+      requestInstanceId,
+    });
+  }
   const wasOnline = Boolean(server.online);
   const now = Date.now();
   server.heartbeatAt = 0;

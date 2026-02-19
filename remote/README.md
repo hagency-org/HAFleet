@@ -39,6 +39,7 @@ This folder is the deployable package for remote servers.
 
 ## Notes
 
+- Operations runbook (no doctor CLI): see `../OPERATIONS.md`
 - In normal `git clone` deployments, `install-remote.sh` uses repo-root `bin/` as the helper source of truth.
   `remote/bin` is only a fallback when root `bin/` is unavailable.
 - The script links helpers into `~/.local/bin` (no copy), so path resolution stays consistent.
