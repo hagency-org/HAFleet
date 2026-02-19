@@ -2,6 +2,7 @@ import express from 'express';
 import { writeFileSync, mkdirSync, renameSync } from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
+import { createHash } from 'crypto';
 
 const PORT = 8090;
 const DATA_DIR = path.resolve('data');
@@ -123,7 +124,7 @@ const cursors = loadJsonSync('cursors.json', {});
 const servers = loadJsonSync('servers.json', {});
 const agentRuntime = loadJsonSync('agent_runtime.json', {});
 let msgCounter = loadJsonSync('.msg_counter', 0);
-const localActivityState = new Map(); // agent -> { lastActivitySec, burstStartSec, burstLastSec }
+const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
 const agentsBeforeNormalization = JSON.stringify(agents);
 
 for (const agent of Object.values(agents)) {
@@ -817,16 +818,14 @@ function refreshServerLiveness() {
   if (agentsChanged) saveAgents();
 }
 
-function getLocalSessionActivitySec(sessionName) {
-  if (!sessionName) return null;
+function getLocalPaneContentHash(tmuxTarget) {
+  if (!tmuxTarget) return null;
   try {
-    const raw = execSync(`tmux display-message -p -t ${JSON.stringify(sessionName)} "#{session_activity}" 2>/dev/null`, {
+    const raw = execSync(`tmux capture-pane -p -t ${JSON.stringify(tmuxTarget)} 2>/dev/null`, {
       timeout: 3000,
       encoding: 'utf-8',
-    }).trim();
-    const v = Number.parseInt(raw, 10);
-    if (!Number.isFinite(v) || v <= 0) return null;
-    return v;
+    });
+    return createHash('md5').update(raw).digest('hex');
   } catch {
     return null;
   }
@@ -843,12 +842,11 @@ function sweepLocalActivityDurations() {
     if (!isLocalAgent) continue;
 
     const tmuxTarget = (typeof agent.tmux === 'string' && agent.tmux.trim()) ? agent.tmux.trim() : `${agent.name}:0.0`;
-    const session = tmuxTarget.split(':', 1)[0];
     const runtime = ensureAgentRuntimeRecord(agent.name);
     if (!runtime) continue;
 
-    const activitySec = getLocalSessionActivitySec(session);
-    if (!activitySec) {
+    const paneHash = getLocalPaneContentHash(tmuxTarget);
+    if (!paneHash) {
       localActivityState.delete(agent.name);
       const resetChanged = setRuntimeActivityFields(runtime, {
         activeNow: false,
@@ -866,36 +864,34 @@ function sweepLocalActivityDurations() {
     let st = localActivityState.get(agent.name);
     if (!st) {
       st = {
-        lastActivitySec: activitySec,
-        burstStartSec: activitySec,
-        burstLastSec: activitySec,
+        lastHash: paneHash,
+        lastChangeSec: nowSec,
+        burstStartSec: nowSec,
+        burstLastSec: nowSec,
       };
       localActivityState.set(agent.name, st);
-    } else if (activitySec < st.lastActivitySec) {
-      st.lastActivitySec = activitySec;
-      st.burstStartSec = activitySec;
-      st.burstLastSec = activitySec;
-    } else if (activitySec > st.lastActivitySec) {
-      const gap = activitySec - st.lastActivitySec;
+    } else if (paneHash !== st.lastHash) {
+      const gap = nowSec - st.lastChangeSec;
       if (gap > IDLE_THRESHOLD_SEC) {
-        st.burstStartSec = activitySec;
-        st.burstLastSec = activitySec;
+        st.burstStartSec = nowSec;
+        st.burstLastSec = nowSec;
       } else {
-        st.burstLastSec = activitySec;
+        st.burstLastSec = nowSec;
       }
-      st.lastActivitySec = activitySec;
+      st.lastHash = paneHash;
+      st.lastChangeSec = nowSec;
     }
 
-    const rawIdleSec = Math.max(0, nowSec - st.lastActivitySec);
+    const rawIdleSec = Math.max(0, nowSec - st.lastChangeSec);
     const activeNow = rawIdleSec < IDLE_THRESHOLD_SEC;
-    const activeDurationSec = activeNow ? Math.max(0, st.burstLastSec - st.burstStartSec) : 0;
+    const activeDurationSec = activeNow ? Math.max(0, nowSec - st.burstStartSec) : 0;
     const idleDurationSec = activeNow ? 0 : Math.max(0, rawIdleSec - IDLE_THRESHOLD_SEC);
 
     const changed = setRuntimeActivityFields(runtime, {
       activeNow,
       activeDurationSec,
       idleDurationSec,
-      lastTmuxActivitySec: st.lastActivitySec,
+      lastTmuxActivitySec: st.lastChangeSec,
     });
     if (changed) {
       runtime.updatedAt = Date.now();
