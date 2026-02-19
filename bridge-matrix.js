@@ -4,7 +4,7 @@ import {
   AutojoinRoomsMixin,
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { execFileSync } from 'child_process';
 import path from 'path';
 import EventSource from './lib/eventsource-mini.js';
@@ -23,6 +23,8 @@ const AGENT_PASSWORD_SECRET = (process.env.MATRIX_AGENT_PASSWORD_SECRET || '').t
 const AGENT_PASSWORD_TEMPLATE = (process.env.MATRIX_AGENT_PASSWORD_TEMPLATE || '').trim();
 const ALLOW_LEGACY_AGENT_PASSWORD = (process.env.MATRIX_ALLOW_LEGACY_AGENT_PASSWORD || 'false').trim().toLowerCase() === 'true';
 const DATA_DIR = path.resolve('data/matrix');
+const AGENT_META_ROOT = path.resolve('data/agents');
+const AGENT_AVATAR_STYLE_VERSION = 2;
 
 mkdirSync(DATA_DIR, { recursive: true });
 
@@ -40,6 +42,7 @@ function saveState() {
 const state = loadState();
 if (!state.agentAvatars) state.agentAvatars = {};
 if (!state.roomAvatars) state.roomAvatars = {};
+if (!state.agentAvatarMeta) state.agentAvatarMeta = {};
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -237,19 +240,151 @@ function nameToHue(name) {
   return (hash[0] + hash[1] * 256) % 360;
 }
 
-function generateAvatarPng(name) {
+function escapeXml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function safeReadJson(filePath) {
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+function loadAgentMeta(agentName) {
+  const metaPath = path.join(AGENT_META_ROOT, agentName, 'meta.json');
+  if (!existsSync(metaPath)) return null;
+  return safeReadJson(metaPath);
+}
+
+function resolveAgentProjectIcon(agentName) {
+  const meta = loadAgentMeta(agentName);
+  const rawPath = (typeof meta?.path === 'string') ? meta.path.trim() : '';
+  if (!rawPath) return { meta, iconPath: null };
+
+  const projectPath = path.isAbsolute(rawPath) ? rawPath : path.resolve(rawPath);
+  const candidates = [
+    'favicon.ico',
+    'favicon.png',
+    'favicon.svg',
+    'public/favicon.ico',
+    'public/favicon.png',
+    'public/favicon.svg',
+    'public/icon.png',
+    'public/icon.svg',
+    'app/favicon.ico',
+    'app/icon.png',
+    'app/icon.svg',
+    'src/assets/favicon.png',
+    'src/assets/favicon.svg',
+    'static/favicon.ico',
+    'static/favicon.png',
+  ];
+  for (const rel of candidates) {
+    const fp = path.join(projectPath, rel);
+    if (existsSync(fp)) return { meta, iconPath: fp };
+  }
+  return { meta, iconPath: null };
+}
+
+function normalizeBadge(text, fallback = 'AGENT') {
+  const raw = String(text || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return raw ? raw.slice(0, 8) : fallback;
+}
+
+function deriveAgentBadge(agentName, agentInfo, meta) {
+  const hint = [agentName, agentInfo?.role, agentInfo?.identity].filter(Boolean).join(' ');
+  if (/\bweb\b/i.test(hint)) return 'WEB';
+  if (/\bbacktest\b/i.test(hint)) return 'BT';
+  if (/\bworker\b/i.test(hint)) return 'WORKER';
+  if (/\bdev(eloper)?\b/i.test(hint)) return 'DEV';
+
+  const typeHint = String(meta?.type || agentInfo?.type || '').toLowerCase();
+  if (typeHint.includes('codex')) return 'CODEX';
+  if (typeHint.includes('claude')) return 'CLAUDE';
+  return 'AGENT';
+}
+
+async function fetchAgentInfo(agentName) {
+  try {
+    const info = await backendApi('GET', `/api/agents/${encodeURIComponent(agentName)}`);
+    if (info && !info.error) return info;
+  } catch {}
+  return null;
+}
+
+function renderAvatarBaseSvg(name, badge) {
   const hue = nameToHue(name);
-  const letter = (name.match(/[a-zA-Z0-9]/) || ['?'])[0].toUpperCase();
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256">
-  <rect width="256" height="256" rx="40" fill="hsl(${hue}, 65%, 45%)"/>
-  <text x="128" y="128" dy="0.36em" text-anchor="middle"
-    font-family="Arial,Helvetica,sans-serif" font-weight="bold"
-    font-size="140" fill="white">${letter}</text>
+  const hue2 = (hue + 38) % 360;
+  const letter = escapeXml((name.match(/[a-zA-Z0-9]/) || ['?'])[0].toUpperCase());
+  const badgeText = escapeXml(normalizeBadge(badge));
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="hsl(${hue}, 74%, 46%)"/>
+      <stop offset="100%" stop-color="hsl(${hue2}, 72%, 34%)"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="42" fill="url(#bg)"/>
+  <circle cx="128" cy="104" r="74" fill="rgba(255,255,255,0.20)"/>
+  <circle cx="128" cy="104" r="68" fill="rgba(255,255,255,0.94)"/>
+  <text x="128" y="104" dy="0.36em" text-anchor="middle"
+    font-family="Arial,Helvetica,sans-serif" font-weight="700"
+    font-size="88" fill="rgba(0,0,0,0.42)">${letter}</text>
+  <rect x="44" y="188" width="168" height="40" rx="20" fill="rgba(0,0,0,0.36)"/>
+  <text x="128" y="208" dy="0.36em" text-anchor="middle"
+    font-family="Arial,Helvetica,sans-serif" font-weight="700"
+    font-size="24" fill="rgba(255,255,255,0.97)">${badgeText}</text>
 </svg>`;
-  return execFileSync('convert', ['svg:-', '-resize', '256x256', 'png:-'], {
-    input: Buffer.from(svg),
-    maxBuffer: 1024 * 1024,
-  });
+}
+
+function generateAvatarPng(name, options = {}) {
+  const badge = options.badge || 'AGENT';
+  const iconPath = options.iconPath || null;
+  const baseSvg = renderAvatarBaseSvg(name, badge);
+  if (!iconPath) {
+    return execFileSync('convert', ['svg:-', '-resize', '256x256', 'png:-'], {
+      input: Buffer.from(baseSvg),
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  }
+
+  try {
+    return execFileSync(
+      'convert',
+      [
+        'svg:-',
+        '(',
+        `${iconPath}[0]`,
+        '-resize', '124x124',
+        '-background', 'none',
+        '-gravity', 'center',
+        '-extent', '124x124',
+        ')',
+        '-gravity', 'center',
+        '-geometry', '+0-22',
+        '-compose', 'over',
+        '-composite',
+        'png:-',
+      ],
+      {
+        input: Buffer.from(baseSvg),
+        maxBuffer: 8 * 1024 * 1024,
+      }
+    );
+  } catch (e) {
+    console.warn(`Icon avatar render failed for ${name} (${iconPath}): ${e.message}`);
+    return execFileSync('convert', ['svg:-', '-resize', '256x256', 'png:-'], {
+      input: Buffer.from(baseSvg),
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  }
 }
 
 async function uploadMedia(token, buffer, mimeType) {
@@ -281,16 +416,32 @@ async function setRoomAvatar(roomId, mxcUri) {
 }
 
 async function ensureAgentAvatar(agentName) {
-  if (state.agentAvatars[agentName]) return;
   const token = state.agentTokens[agentName];
   if (!token) return;
+
+  const cached = state.agentAvatarMeta[agentName];
+  const hasFreshCache = Boolean(state.agentAvatars[agentName]) && cached?.style === AGENT_AVATAR_STYLE_VERSION;
+  if (hasFreshCache) return;
+
   try {
-    const png = generateAvatarPng(agentName);
+    const [agentInfo, iconResult] = await Promise.all([
+      fetchAgentInfo(agentName),
+      Promise.resolve(resolveAgentProjectIcon(agentName)),
+    ]);
+    const badge = normalizeBadge(deriveAgentBadge(agentName, agentInfo, iconResult.meta), 'AGENT');
+    const png = generateAvatarPng(agentName, { badge, iconPath: iconResult.iconPath });
     const mxcUri = await uploadMedia(token, png, 'image/png');
     await setUserAvatar(token, mxcUri);
     state.agentAvatars[agentName] = mxcUri;
+    state.agentAvatarMeta[agentName] = {
+      style: AGENT_AVATAR_STYLE_VERSION,
+      badge,
+      source: iconResult.iconPath ? `project-icon:${path.basename(iconResult.iconPath)}` : 'fallback-letter',
+      updatedAt: Date.now(),
+    };
     saveState();
-    console.log(`Set avatar for agent ${agentName}: ${mxcUri}`);
+    const sourceLabel = state.agentAvatarMeta[agentName].source;
+    console.log(`Set avatar for agent ${agentName}: ${mxcUri} (${sourceLabel}, badge=${badge})`);
   } catch (e) {
     console.warn(`Failed to set avatar for agent ${agentName}: ${e.message}`);
   }
