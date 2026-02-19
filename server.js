@@ -950,7 +950,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 #agent-info .ai-tag-codex{background:rgba(52,211,153,0.15);color:#34d399;border:1px solid rgba(52,211,153,0.25)}
 #agent-info .ai-tag-active{background:rgba(52,211,153,0.1);color:#34d399;border:1px solid rgba(52,211,153,0.2)}
 #agent-info .ai-tag-inactive{background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.08)}
-#agent-info .ai-tag-runtime{background:rgba(0,240,255,0.06);color:rgba(0,240,255,0.6);border:1px solid rgba(0,240,255,0.18)}
 #agent-info .ai-groups{color:rgba(168,85,247,0.5)}
 
 /* Message log (bottom) */
@@ -1085,6 +1084,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     if (s < 3600) return Math.floor(s / 60) + 'm' + (s % 60) + 's';
     if (s < 86400) return Math.floor(s / 3600) + 'h' + Math.floor((s % 3600) / 60) + 'm';
     return Math.floor(s / 86400) + 'd' + Math.floor((s % 86400) / 3600) + 'h';
+  }
+  function runtimeStatusText(activeNow, activeDurationSec, idleDurationSec) {
+    if (activeNow) return 'ACTIVE ' + fmtSpanSec(activeDurationSec);
+    return 'IDLE ' + fmtSpanSec(idleDurationSec);
   }
 
   // ── Message log ─────────────────────────────
@@ -1243,15 +1246,11 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     const stateEl = document.getElementById('ai-runtime-state');
     if (stateEl) {
       const activeNow = !!snap.activeNow;
-      stateEl.textContent = activeNow ? 'ACTIVE' : 'IDLE';
-      stateEl.classList.toggle('ai-tag-active', activeNow);
-      stateEl.classList.toggle('ai-tag-inactive', !activeNow);
-    }
-    const metricsEl = document.getElementById('ai-runtime-metrics');
-    if (metricsEl) {
       const a = toNonNegInt(snap.activeDurationSec, 0);
       const i = toNonNegInt(snap.idleDurationSec, 0);
-      metricsEl.textContent = 'A ' + fmtSpanSec(a) + ' · I ' + fmtSpanSec(i);
+      stateEl.textContent = runtimeStatusText(activeNow, a, i);
+      stateEl.classList.toggle('ai-tag-active', activeNow);
+      stateEl.classList.toggle('ai-tag-inactive', !activeNow);
     }
   }
 
@@ -1326,9 +1325,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
       }
       // Active tag
       parts.push('<span class="ai-tag ' + (activeNow ? 'ai-tag-active' : 'ai-tag-inactive') + '" id="ai-runtime-state">'
-        + (activeNow ? 'ACTIVE' : 'IDLE') + '</span>');
-      parts.push('<span class="ai-tag ai-tag-runtime" id="ai-runtime-metrics">A '
-        + esc(fmtSpanSec(activeDurationSec)) + ' · I ' + esc(fmtSpanSec(idleDurationSec)) + '</span>');
+        + esc(runtimeStatusText(activeNow, activeDurationSec, idleDurationSec)) + '</span>');
       parts.push('<br>');
       // Identity (editable)
       parts.push('<div class="ai-identity-row"><span class="ai-identity" id="ai-identity-text">'
