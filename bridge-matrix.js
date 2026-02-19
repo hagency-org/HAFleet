@@ -410,12 +410,28 @@ async function setUserAvatar(token, mxcUri) {
   });
 }
 
-async function setRoomAvatar(roomId, mxcUri) {
-  await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.avatar`, {
+async function setRoomAvatar(roomId, mxcUri, token) {
+  const useToken = token || state.botToken;
+  const res = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.avatar`, {
     method: 'PUT',
-    headers: { Authorization: `Bearer ${state.botToken}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${useToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ url: mxcUri }),
   });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    // If forbidden with bot token, retry with any agent token that might have power
+    if (err.errcode === 'M_FORBIDDEN' && useToken === state.botToken) {
+      for (const agentToken of Object.values(state.agentTokens)) {
+        const retry = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.avatar`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${agentToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: mxcUri }),
+        });
+        if (retry.ok) return;
+      }
+    }
+    throw new Error(`setRoomAvatar failed: ${err.errcode || res.status}`);
+  }
 }
 
 function parseDmAgentName(roomName) {
@@ -498,7 +514,8 @@ async function ensureRoomAvatar(roomId, name) {
 
 async function syncAgentAvatarToDmRooms(agentName) {
   const mxcUri = state.agentAvatars[agentName];
-  if (!mxcUri || !state.botToken) return;
+  if (!mxcUri) return;
+  const agentToken = state.agentTokens[agentName];
   const dmRooms = state.dmRooms || {};
   for (const [key, roomId] of Object.entries(dmRooms)) {
     if (!roomId) continue;
@@ -506,7 +523,8 @@ async function syncAgentAvatarToDmRooms(agentName) {
     if (key !== `dm:${agentName}`) continue;
     if (state.roomAvatars[roomId] === mxcUri) continue;
     try {
-      await setRoomAvatar(roomId, mxcUri);
+      // Use agent token (room creator has power), fall back to bot
+      await setRoomAvatar(roomId, mxcUri, agentToken);
       state.roomAvatars[roomId] = mxcUri;
       console.log(`Synced DM room ${roomId} (${key}) avatar to agent ${agentName}`);
     } catch (e) {
