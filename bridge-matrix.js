@@ -415,6 +415,14 @@ async function setRoomAvatar(roomId, mxcUri) {
   });
 }
 
+function parseDmAgentName(roomName) {
+  if (typeof roomName !== 'string') return null;
+  const m = roomName.match(/^DM:\s*(.+)$/);
+  if (!m) return null;
+  const name = m[1].trim();
+  return name || null;
+}
+
 async function ensureAgentAvatar(agentName) {
   const token = state.agentTokens[agentName];
   if (!token) return;
@@ -448,8 +456,27 @@ async function ensureAgentAvatar(agentName) {
 }
 
 async function ensureRoomAvatar(roomId, name) {
-  if (state.roomAvatars[roomId]) return;
   if (!state.botToken) return;
+
+  const dmAgentName = parseDmAgentName(name);
+  if (dmAgentName) {
+    try {
+      await ensureAgentAvatar(dmAgentName);
+      const agentAvatar = state.agentAvatars[dmAgentName] || null;
+      if (agentAvatar) {
+        if (state.roomAvatars[roomId] === agentAvatar) return;
+        await setRoomAvatar(roomId, agentAvatar);
+        state.roomAvatars[roomId] = agentAvatar;
+        saveState();
+        console.log(`Set avatar for DM room ${roomId} from agent ${dmAgentName}: ${agentAvatar}`);
+        return;
+      }
+    } catch (e) {
+      console.warn(`Failed to sync DM room avatar from agent ${dmAgentName}: ${e.message}`);
+    }
+  }
+
+  if (state.roomAvatars[roomId]) return;
   try {
     const displayName = name.replace(/^DM:\s*/, '');
     const png = generateAvatarPng(displayName);
@@ -460,6 +487,20 @@ async function ensureRoomAvatar(roomId, name) {
     console.log(`Set avatar for room ${roomId} (${name}): ${mxcUri}`);
   } catch (e) {
     console.warn(`Failed to set avatar for room ${roomId} (${name}): ${e.message}`);
+  }
+}
+
+async function setCustomAgentAvatar(agentName, imageBuffer, mimeType) {
+  const token = state.agentTokens[agentName];
+  if (!token) { console.warn(`No token for agent ${agentName}, cannot set custom avatar`); return; }
+  try {
+    const mxcUri = await uploadMedia(token, imageBuffer, mimeType);
+    await setUserAvatar(token, mxcUri);
+    state.agentAvatars[agentName] = mxcUri;
+    saveState();
+    console.log(`Set custom avatar for agent ${agentName}: ${mxcUri}`);
+  } catch (e) {
+    console.warn(`Failed to set custom avatar for agent ${agentName}: ${e.message}`);
   }
 }
 
@@ -1342,10 +1383,15 @@ class MatrixBridge {
       });
       es.on('agent_avatar', (data) => {
         try {
-          const { name, force } = JSON.parse(data);
-          console.log(`SSE: agent_avatar request — ${name}${force ? ' (force)' : ''}`);
-          if (force) delete state.agentAvatars[name];
-          ensureAgentAvatar(name);
+          const { name, force, image, mime } = JSON.parse(data);
+          if (image) {
+            console.log(`SSE: agent_avatar custom upload — ${name} (${mime})`);
+            setCustomAgentAvatar(name, Buffer.from(image, 'base64'), mime || 'image/png');
+          } else {
+            console.log(`SSE: agent_avatar request — ${name}${force ? ' (force)' : ''}`);
+            if (force) delete state.agentAvatars[name];
+            ensureAgentAvatar(name);
+          }
         } catch (e) {
           console.warn(`Failed to parse SSE agent_avatar event: ${e.message}`);
         }

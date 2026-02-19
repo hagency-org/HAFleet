@@ -409,14 +409,26 @@ PY
     ;;
 
   avatar)
-    name="${1:?Usage: agent-chat-cli avatar <name> [--force]}"
+    name="${1:?Usage: agent-chat-cli avatar <name> [<image-file>|--force]}"
     shift
-    force="false"
-    [ "${1:-}" = "--force" ] && force="true"
-    echo "Setting avatar for: $name (force=$force) ..."
-    _curl -X POST "$API/api/agents/$name/avatar?force=$force" \
-      -H 'Content-Type: application/json' \
-      -d "{\"generate\":$force}" | python3 -m json.tool
+    arg="${1:-}"
+    if [ -n "$arg" ] && [ "$arg" != "--force" ]; then
+      # Custom image file
+      [ -f "$arg" ] || { echo "Error: file not found: $arg" >&2; exit 1; }
+      mime=$(file -b --mime-type "$arg" 2>/dev/null || echo "image/png")
+      b64=$(base64 -w0 "$arg" 2>/dev/null || base64 "$arg" 2>/dev/null)
+      echo "Uploading custom avatar for: $name ($mime, $(wc -c < "$arg") bytes) ..."
+      _curl -X POST "$API/api/agents/$name/avatar" \
+        -H 'Content-Type: application/json' \
+        -d "{\"image\":\"$b64\",\"mime\":\"$mime\"}" | python3 -m json.tool
+    else
+      force="false"
+      [ "$arg" = "--force" ] && force="true"
+      echo "Setting avatar for: $name (force=$force) ..."
+      _curl -X POST "$API/api/agents/$name/avatar?force=$force" \
+        -H 'Content-Type: application/json' \
+        -d "{\"generate\":$force}" | python3 -m json.tool
+    fi
     ;;
 
   help|--help|-h)
@@ -435,7 +447,7 @@ PY
     echo "  status [name]                       Status table or one agent status"
     echo "  agent <name>                        Agent details"
     echo "  identity <name> <text>              Set agent identity"
-    echo "  avatar <name> [--force]             Set/regenerate agent avatar"
+    echo "  avatar <name> [image|--force]       Set avatar (auto-gen or custom image)"
     echo ""
     echo "DM management:"
     echo "  dm <agent> <human>                  Ensure DM room exists (Matrix)"

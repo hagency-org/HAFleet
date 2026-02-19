@@ -1571,13 +1571,15 @@ app.post('/api/dm/ensure', (req, res) => {
   res.json({ ok: true, queued: true, agent, human });
 });
 
-app.post('/api/agents/:name/avatar', (req, res) => {
+app.post('/api/agents/:name/avatar', express.json({ limit: '10mb' }), (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid agent name' });
   const force = req.body?.generate === true || req.query.force === 'true';
-  broadcastSSE('agent_avatar', { name, force });
-  console.log(`[avatar] Requested avatar ${force ? 'regeneration' : 'ensure'} for: ${name}`);
-  res.json({ ok: true, queued: true, name, force });
+  const image = req.body?.image; // base64 encoded image
+  const mime = req.body?.mime || 'image/png';
+  broadcastSSE('agent_avatar', { name, force, image, mime });
+  console.log(`[avatar] Requested avatar ${force ? 'regeneration' : (image ? 'custom upload' : 'ensure')} for: ${name}`);
+  res.json({ ok: true, queued: true, name, force, custom: !!image });
 });
 
 // ── System info (log-only; does not enter message store) ──────────────
