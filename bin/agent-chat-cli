@@ -408,6 +408,17 @@ PY
       -d "{\"agent\":$(_json_str "$agent"),\"human\":$(_json_str "$human")}" | python3 -m json.tool
     ;;
 
+  avatar)
+    name="${1:?Usage: agent-chat-cli avatar <name> [--force]}"
+    shift
+    force="false"
+    [ "${1:-}" = "--force" ] && force="true"
+    echo "Setting avatar for: $name (force=$force) ..."
+    _curl -X POST "$API/api/agents/$name/avatar?force=$force" \
+      -H 'Content-Type: application/json' \
+      -d "{\"generate\":$force}" | python3 -m json.tool
+    ;;
+
   help|--help|-h)
     echo "agent-chat-cli — Admin CLI for agent-chat"
     echo ""
@@ -424,6 +435,7 @@ PY
     echo "  status [name]                       Status table or one agent status"
     echo "  agent <name>                        Agent details"
     echo "  identity <name> <text>              Set agent identity"
+    echo "  avatar <name> [--force]             Set/regenerate agent avatar"
     echo ""
     echo "DM management:"
     echo "  dm <agent> <human>                  Ensure DM room exists (Matrix)"

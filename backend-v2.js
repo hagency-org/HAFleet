@@ -1,5 +1,5 @@
 import express from 'express';
-import { writeFileSync, mkdirSync, renameSync } from 'fs';
+import { appendFileSync, writeFileSync, mkdirSync, renameSync } from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
 import { createHash } from 'crypto';
@@ -125,6 +125,7 @@ const servers = loadJsonSync('servers.json', {});
 const agentRuntime = loadJsonSync('agent_runtime.json', {});
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
+const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const agentsBeforeNormalization = JSON.stringify(agents);
 
 for (const agent of Object.values(agents)) {
@@ -311,22 +312,22 @@ function ensureInfoGroup() {
 
 function emitSystemInfo(summary, full = '') {
   ensureInfoGroup();
-  const msg = {
-    id: nextMsgId(),
+  const event = {
+    id: `sys_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     ts: Date.now(),
-    from: 'system',
-    to: null,
-    group: 'info',
-    type: 'inform',
     summary,
     full: full || '',
-    mentions: [],
-    reply_to: null,
     source: 'system',
+    group: 'info',
+    type: 'inform',
   };
-  messages.push(msg);
-  saveMessages();
-  broadcastSSE('message', msg);
+  try {
+    appendFileSync(SYSTEM_INFO_LOG, JSON.stringify(event) + '\n');
+  } catch (e) {
+    console.error(`Failed to append system info log: ${e.message}`);
+  }
+  broadcastSSE('system_info', event);
+  return event;
 }
 
 function isSuppressedForAgent(msg, agentName) {
@@ -1568,6 +1569,24 @@ app.post('/api/dm/ensure', (req, res) => {
   broadcastSSE('dm_ensure', { agent, human });
   console.log(`[dm/ensure] Requested DM room: agent=${agent}, human=${human}`);
   res.json({ ok: true, queued: true, agent, human });
+});
+
+app.post('/api/agents/:name/avatar', (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid agent name' });
+  const force = req.body?.generate === true || req.query.force === 'true';
+  broadcastSSE('agent_avatar', { name, force });
+  console.log(`[avatar] Requested avatar ${force ? 'regeneration' : 'ensure'} for: ${name}`);
+  res.json({ ok: true, queued: true, name, force });
+});
+
+// ── System info (log-only; does not enter message store) ──────────────
+app.post('/api/system/info', (req, res) => {
+  const summary = (typeof req.body?.summary === 'string') ? req.body.summary.trim() : '';
+  const full = (typeof req.body?.full === 'string') ? req.body.full : '';
+  if (!summary) return res.status(400).json({ error: 'summary required' });
+  const event = emitSystemInfo(summary, full);
+  res.json({ ok: true, id: event.id });
 });
 
 // ── Messages ──────────────────────────────────────────────────────────

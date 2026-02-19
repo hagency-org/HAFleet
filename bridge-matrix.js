@@ -5,6 +5,7 @@ import {
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { execFileSync } from 'child_process';
 import path from 'path';
 import EventSource from './lib/eventsource-mini.js';
 import BotCommands from './lib/bot-commands.js';
@@ -37,6 +38,8 @@ function saveState() {
   writeFileSync(path.join(DATA_DIR, 'bridge-state.json'), JSON.stringify(state, null, 2));
 }
 const state = loadState();
+if (!state.agentAvatars) state.agentAvatars = {};
+if (!state.roomAvatars) state.roomAvatars = {};
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -204,8 +207,9 @@ async function ensureAgentAccount(agentName) {
     state.agentTokens[agentName] = data.access_token;
     saveState();
     console.log(`Registered Matrix account for agent: ${agentName} → ${agentUserId(agentName)}`);
-    // Set display name
+    // Set display name + avatar
     await setDisplayName(data.access_token, agentName);
+    await ensureAgentAvatar(agentName);
     return data.access_token;
   }
 }
@@ -225,6 +229,87 @@ async function getUserId(token) {
   });
   const data = await res.json();
   return data.user_id;
+}
+
+// ── Avatar generation & upload ────────────────────────────────────────
+function nameToHue(name) {
+  const hash = createHash('md5').update(name).digest();
+  return (hash[0] + hash[1] * 256) % 360;
+}
+
+function generateAvatarPng(name) {
+  const hue = nameToHue(name);
+  const letter = (name.match(/[a-zA-Z0-9]/) || ['?'])[0].toUpperCase();
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256">
+  <rect width="256" height="256" rx="40" fill="hsl(${hue}, 65%, 45%)"/>
+  <text x="128" y="128" dy="0.36em" text-anchor="middle"
+    font-family="Arial,Helvetica,sans-serif" font-weight="bold"
+    font-size="140" fill="white">${letter}</text>
+</svg>`;
+  return execFileSync('convert', ['svg:-', '-resize', '256x256', 'png:-'], {
+    input: Buffer.from(svg),
+    maxBuffer: 1024 * 1024,
+  });
+}
+
+async function uploadMedia(token, buffer, mimeType) {
+  const res = await fetch(`${HOMESERVER}/_matrix/media/v3/upload`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': mimeType },
+    body: buffer,
+  });
+  if (!res.ok) throw new Error(`Media upload failed: ${res.status}`);
+  const data = await res.json();
+  return data.content_uri;
+}
+
+async function setUserAvatar(token, mxcUri) {
+  const userId = await getUserId(token);
+  await fetch(`${HOMESERVER}/_matrix/client/v3/profile/${encodeURIComponent(userId)}/avatar_url`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ avatar_url: mxcUri }),
+  });
+}
+
+async function setRoomAvatar(roomId, mxcUri) {
+  await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.avatar`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${state.botToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: mxcUri }),
+  });
+}
+
+async function ensureAgentAvatar(agentName) {
+  if (state.agentAvatars[agentName]) return;
+  const token = state.agentTokens[agentName];
+  if (!token) return;
+  try {
+    const png = generateAvatarPng(agentName);
+    const mxcUri = await uploadMedia(token, png, 'image/png');
+    await setUserAvatar(token, mxcUri);
+    state.agentAvatars[agentName] = mxcUri;
+    saveState();
+    console.log(`Set avatar for agent ${agentName}: ${mxcUri}`);
+  } catch (e) {
+    console.warn(`Failed to set avatar for agent ${agentName}: ${e.message}`);
+  }
+}
+
+async function ensureRoomAvatar(roomId, name) {
+  if (state.roomAvatars[roomId]) return;
+  if (!state.botToken) return;
+  try {
+    const displayName = name.replace(/^DM:\s*/, '');
+    const png = generateAvatarPng(displayName);
+    const mxcUri = await uploadMedia(state.botToken, png, 'image/png');
+    await setRoomAvatar(roomId, mxcUri);
+    state.roomAvatars[roomId] = mxcUri;
+    saveState();
+    console.log(`Set avatar for room ${roomId} (${name}): ${mxcUri}`);
+  } catch (e) {
+    console.warn(`Failed to set avatar for room ${roomId} (${name}): ${e.message}`);
+  }
 }
 
 // ── Backend API helpers ───────────────────────────────────────────────
@@ -352,6 +437,7 @@ class MatrixBridge {
     this.dmRooms = new Map(); // "agent:human" → roomId
     this.upgradedDmRooms = new Set(); // rooms already checked/upgraded this session
     this.recentBridgedIds = new Set(); // prevent echo loops
+    this.recentSystemInfoIds = new Set(); // dedupe system_info SSE events
     this.recentlyCreatedRooms = new Set(); // rooms we just created (suppress echo)
     this.recentMatrixEvents = new Map(); // event_id -> { ts, msgId }
     this.startupTs = Date.now();
@@ -412,13 +498,9 @@ class MatrixBridge {
   }
 
   postWarning(message) {
-    backendApi('POST', '/api/messages', {
-      from: 'system',
-      group: 'info',
-      type: 'inform',
+    backendApi('POST', '/api/system/info', {
       summary: `⚠️ Bridge warning: ${message}`,
       full: '',
-      mentions: [],
     }).catch(e => console.error('Failed to post warning:', e.message));
   }
 
@@ -474,8 +556,9 @@ class MatrixBridge {
     // 6. Listen to backend SSE for agent-chat → Matrix
     this.connectSSE();
 
-    // 7. Scan all joined rooms for unmapped groups
+    // 7. Scan all joined rooms for unmapped groups + backfill avatars
     await this.scanJoinedRooms();
+    await this.backfillAvatars();
     setInterval(() => this.scanJoinedRooms(), 120_000);
 
     // 8. Periodically check agent accounts for pending invites
@@ -906,15 +989,30 @@ class MatrixBridge {
         const mappedGroup = groupForRoom(roomId);
         if (mappedGroup) {
           await this.reconcileRoomGroupMembership(roomId, mappedGroup);
+          await ensureRoomAvatar(roomId, mappedGroup);
           continue;
         }
         const discoveredGroup = await this.tryMapRoom(roomId);
         if (discoveredGroup) {
           await this.reconcileRoomGroupMembership(roomId, discoveredGroup);
+          await ensureRoomAvatar(roomId, discoveredGroup);
         }
       }
     } catch (e) {
       console.error('Failed to scan joined rooms:', e.message);
+    }
+  }
+
+  async backfillAvatars() {
+    // Agent user avatars
+    for (const agentName of Object.keys(state.agentTokens)) {
+      await ensureAgentAvatar(agentName);
+    }
+    // DM room avatars
+    for (const [key, roomId] of Object.entries(state.dmRooms || {})) {
+      if (!roomId) continue;
+      const agentName = key.replace(/^dm:/, '');
+      await ensureRoomAvatar(roomId, `DM: ${agentName}`);
     }
   }
 
@@ -1091,6 +1189,16 @@ class MatrixBridge {
           console.warn(`Failed to parse SSE dm_ensure event: ${e.message}`);
         }
       });
+      es.on('agent_avatar', (data) => {
+        try {
+          const { name, force } = JSON.parse(data);
+          console.log(`SSE: agent_avatar request — ${name}${force ? ' (force)' : ''}`);
+          if (force) delete state.agentAvatars[name];
+          ensureAgentAvatar(name);
+        } catch (e) {
+          console.warn(`Failed to parse SSE agent_avatar event: ${e.message}`);
+        }
+      });
       es.on('agent_blocked', (data) => {
         try {
           const event = JSON.parse(data);
@@ -1105,6 +1213,14 @@ class MatrixBridge {
           this.onAgentRecovered(event);
         } catch (e) {
           console.warn(`Failed to parse SSE agent_recovered event: ${e.message}`);
+        }
+      });
+      es.on('system_info', (data) => {
+        try {
+          const event = JSON.parse(data);
+          this.onSystemInfo(event);
+        } catch (e) {
+          console.warn(`Failed to parse SSE system_info event: ${e.message}`);
         }
       });
       es.on('error', () => {
@@ -1169,6 +1285,34 @@ class MatrixBridge {
     const agentName = (typeof event?.agent === 'string' && event.agent.trim()) ? event.agent.trim() : '';
     if (!agentName) return;
     console.log(`SSE: agent_recovered — ${agentName}`);
+  }
+
+  async onSystemInfo(event) {
+    const eventId = (typeof event?.id === 'string' && event.id.trim()) ? event.id.trim() : null;
+    if (eventId) {
+      if (this.recentSystemInfoIds.has(eventId)) return;
+      this.recentSystemInfoIds.add(eventId);
+      if (this.recentSystemInfoIds.size > 1000) {
+        const arr = [...this.recentSystemInfoIds];
+        this.recentSystemInfoIds = new Set(arr.slice(-500));
+      }
+    }
+
+    const summary = (typeof event?.summary === 'string' && event.summary.trim()) ? event.summary.trim() : '';
+    if (!summary) return;
+    const full = (typeof event?.full === 'string') ? event.full : '';
+    const roomId = roomForGroup('info');
+    if (!roomId) {
+      console.warn(`No Matrix room for group "info"; system_info skipped: ${summary.slice(0, 80)}`);
+      return;
+    }
+    const body = full ? `ℹ️ ${summary}\n\n${full}` : `ℹ️ ${summary}`;
+    try {
+      await this.botClient.sendMessage(roomId, { msgtype: 'm.text', body });
+      console.log(`→ Matrix [info] system: ${summary.slice(0, 60)}`);
+    } catch (e) {
+      console.error(`Failed to bridge system_info to info room ${roomId}:`, e.message);
+    }
   }
 
   async onGroupCreated(group) {
@@ -1508,6 +1652,7 @@ class MatrixBridge {
           });
         }
 
+        await ensureRoomAvatar(data.room_id, `DM: ${agentName}`);
         return data.room_id;
       }
       console.error(`Failed to create DM room for ${key}:`, data);
@@ -1750,6 +1895,7 @@ class MatrixBridge {
           });
         }
       }
+      await ensureRoomAvatar(data.room_id, groupName);
       return data.room_id;
     }
     console.error(`Failed to create room for ${groupName}:`, data);
