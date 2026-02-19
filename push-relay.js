@@ -13,6 +13,8 @@ const HEARTBEAT_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_HEARTBEAT_I
 const INJECT_DELAY_MS = Number.parseInt(process.env.PUSH_RELAY_INJECT_DELAY_MS || '300', 10);
 const BLOCK_SCAN_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_BLOCK_SCAN_INTERVAL_MS || '5000', 10);
 const BLOCK_TAIL_LINES = Number.parseInt(process.env.PUSH_RELAY_BLOCK_TAIL_LINES || '40', 10);
+const IDLE_THRESHOLD_MS = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '15000', 10);
+const IDLE_THRESHOLD_SEC = Math.max(1, Math.floor((IDLE_THRESHOLD_MS + 999) / 1000));
 
 const authHeaders = API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {};
 const localAgents = new Set();
@@ -24,6 +26,8 @@ let reconnectTimer = null;
 let heartbeatTimer = null;
 let warnedMissingTmux = false;
 const blockedState = new Map();
+const activityState = new Map();
+const runtimeReportDigest = new Map();
 
 const BLOCK_PATTERNS = [
   { reason: 'select-mode', re: /\bselect mode\b/i },
@@ -135,6 +139,66 @@ function currentPaneCommand(target) {
   }
 }
 
+function currentSessionActivitySec(targetOrSession) {
+  if (!TMUX_BIN) return null;
+  const session = String(targetOrSession || '').split(':', 1)[0];
+  if (!session) return null;
+  try {
+    const raw = runTmux(['display-message', '-p', '-t', session, '#{session_activity}'], {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    }).trim();
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n;
+  } catch {
+    return null;
+  }
+}
+
+function computeActivityMetrics(agentName, target) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const activitySec = currentSessionActivitySec(target);
+  if (!activitySec) return null;
+
+  let st = activityState.get(agentName);
+  if (!st) {
+    st = {
+      lastActivitySec: activitySec,
+      burstStartSec: activitySec,
+      burstLastSec: activitySec,
+    };
+    activityState.set(agentName, st);
+  } else if (activitySec < st.lastActivitySec) {
+    // tmux/server restarted, reset baseline.
+    st.lastActivitySec = activitySec;
+    st.burstStartSec = activitySec;
+    st.burstLastSec = activitySec;
+  } else if (activitySec > st.lastActivitySec) {
+    const gap = activitySec - st.lastActivitySec;
+    if (gap > IDLE_THRESHOLD_SEC) {
+      st.burstStartSec = activitySec;
+      st.burstLastSec = activitySec;
+    } else {
+      st.burstLastSec = activitySec;
+    }
+    st.lastActivitySec = activitySec;
+  }
+
+  const rawIdleSec = Math.max(0, nowSec - st.lastActivitySec);
+  const activeNow = rawIdleSec < IDLE_THRESHOLD_SEC;
+  const activeDurationSec = activeNow ? Math.max(0, st.burstLastSec - st.burstStartSec) : 0;
+  const idleDurationSec = activeNow ? 0 : Math.max(0, rawIdleSec - IDLE_THRESHOLD_SEC);
+
+  return {
+    activeNow,
+    activeDurationSec,
+    idleDurationSec,
+    lastTmuxActivitySec: st.lastActivitySec,
+  };
+}
+
 function detectBlockedReason(tail, paneCmd = '') {
   if (!tail) return null;
   const cmd = String(paneCmd || '').toLowerCase();
@@ -169,9 +233,18 @@ async function scanBlockedStates() {
   for (const [agentName, prev] of blockedState.entries()) {
     if (live.has(agentName)) continue;
     blockedState.delete(agentName);
-    if (prev?.blocked) {
-      await reportRuntime(agentName, { blocked: false, reason: null, tail: '', command: '' });
-    }
+    activityState.delete(agentName);
+    runtimeReportDigest.delete(agentName);
+    await reportRuntime(agentName, {
+      blocked: false,
+      reason: null,
+      tail: '',
+      command: '',
+      activeNow: false,
+      activeDurationSec: 0,
+      idleDurationSec: 0,
+      lastTmuxActivitySec: null,
+    });
   }
 
   for (const agentName of live) {
@@ -182,11 +255,30 @@ async function scanBlockedStates() {
     const reason = detectBlockedReason(tail, paneCmd);
     const blocked = Boolean(reason);
     const prev = blockedState.get(agentName) || { blocked: false, reason: null };
-    const changed = prev.blocked !== blocked || prev.reason !== reason;
-    if (!changed) continue;
-
     blockedState.set(agentName, { blocked, reason });
-    await reportRuntime(agentName, { blocked, reason, tail, command: paneCmd });
+
+    const metrics = computeActivityMetrics(agentName, target);
+    const payload = {
+      blocked,
+      reason,
+      tail,
+      command: paneCmd,
+      activeNow: metrics?.activeNow ?? null,
+      activeDurationSec: metrics?.activeDurationSec ?? 0,
+      idleDurationSec: metrics?.idleDurationSec ?? 0,
+      lastTmuxActivitySec: metrics?.lastTmuxActivitySec ?? null,
+    };
+    const digest = JSON.stringify({
+      blocked: payload.blocked,
+      reason: payload.reason || null,
+      activeNow: payload.activeNow,
+      activeDurationSec: payload.activeDurationSec,
+      idleDurationSec: payload.idleDurationSec,
+      lastTmuxActivitySec: payload.lastTmuxActivitySec,
+    });
+    if (runtimeReportDigest.get(agentName) === digest) continue;
+    runtimeReportDigest.set(agentName, digest);
+    await reportRuntime(agentName, payload);
   }
 }
 

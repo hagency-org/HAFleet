@@ -157,6 +157,14 @@ def fmt_span(sec):
     h = rem // 3600
     return f"{d}d{h:02d}h"
 
+def to_int(v):
+    try:
+        if v is None:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
 tmux_map = json.loads(os.environ.get('TMUX_SNAPSHOT') or '{}')
 with open(sys.argv[1]) as f:
     agents = json.load(f)
@@ -164,21 +172,28 @@ now_ms = int(time.time() * 1000)
 now_sec = int(time.time())
 threshold_sec = max(1, int(os.environ.get('IDLE_THRESHOLD_SEC', '30')))
 
-print("  NAME                 STATE    IDLE     LASTSEEN  SERVER         TYPE     TMUX")
+print("  NAME                 STATE    ACTIVE   IDLE     LASTSEEN  SERVER         TYPE     TMUX")
 for a in sorted(agents, key=lambda x: x.get('name', '')):
     name = str(a.get('name', '?'))
     typ = str(a.get('type', '?'))
     server = str(a.get('server') or '-')
     tmux = str(a.get('tmux') or '-')
     online = bool(a.get('online'))
+    active_now = a.get('activeNow') if isinstance(a.get('activeNow'), bool) else None
 
     session = tmux.split(':', 1)[0] if tmux and tmux != '-' else ''
     snap = tmux_map.get(session) if session else None
-    idle_sec = None
+    idle_sec_snapshot = None
     if snap and snap.get('session_activity'):
-        idle_sec = max(0, now_sec - int(snap['session_activity']))
+        idle_sec_snapshot = max(0, now_sec - int(snap['session_activity']))
+    active_sec = to_int(a.get('activeDurationSec'))
+    idle_sec = to_int(a.get('idleDurationSec'))
+    if idle_sec is None:
+        idle_sec = idle_sec_snapshot
 
-    if online and idle_sec is not None:
+    if online and active_now is not None:
+        state = 'active' if active_now else 'idle'
+    elif online and idle_sec is not None:
         state = 'active' if idle_sec < threshold_sec else 'idle'
     elif online:
         state = 'online'
@@ -190,9 +205,10 @@ for a in sorted(agents, key=lambda x: x.get('name', '')):
         seen_txt = fmt_span((now_ms - int(last_seen)) // 1000)
     else:
         seen_txt = '-'
+    active_txt = fmt_span(active_sec) if active_sec is not None else '-'
     idle_txt = fmt_span(idle_sec) if idle_sec is not None else '-'
 
-    print(f"  {name:20.20s} {state:8s} {idle_txt:8s} {seen_txt:9s} {server:14.14s} {typ:8.8s} {tmux}")
+    print(f"  {name:20.20s} {state:8s} {active_txt:8s} {idle_txt:8s} {seen_txt:9s} {server:14.14s} {typ:8.8s} {tmux}")
 PY
     rm -f "$tmp_json"
     ;;
@@ -222,6 +238,14 @@ def fmt_span(sec):
     h = rem // 3600
     return f"{d}d{h:02d}h"
 
+def to_int(v):
+    try:
+        if v is None:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
 tmux_map = json.loads(os.environ.get('TMUX_SNAPSHOT') or '{}')
 with open(sys.argv[1]) as f:
     agents = json.load(f)
@@ -229,21 +253,28 @@ now_ms = int(time.time() * 1000)
 now_sec = int(time.time())
 threshold_sec = max(1, int(os.environ.get('IDLE_THRESHOLD_SEC', '30')))
 
-print("  NAME                 STATE    IDLE     LASTSEEN  SERVER         TYPE")
+print("  NAME                 STATE    ACTIVE   IDLE     LASTSEEN  SERVER         TYPE")
 for a in sorted(agents, key=lambda x: x.get('name', '')):
     name = str(a.get('name', '?'))
     typ = str(a.get('type', '?'))
     server = str(a.get('server') or '-')
     tmux = str(a.get('tmux') or '')
     online = bool(a.get('online'))
+    active_now = a.get('activeNow') if isinstance(a.get('activeNow'), bool) else None
 
     session = tmux.split(':', 1)[0] if tmux else ''
     snap = tmux_map.get(session) if session else None
-    idle_sec = None
+    idle_sec_snapshot = None
     if snap and snap.get('session_activity'):
-        idle_sec = max(0, now_sec - int(snap['session_activity']))
+        idle_sec_snapshot = max(0, now_sec - int(snap['session_activity']))
+    active_sec = to_int(a.get('activeDurationSec'))
+    idle_sec = to_int(a.get('idleDurationSec'))
+    if idle_sec is None:
+        idle_sec = idle_sec_snapshot
 
-    if online and idle_sec is not None:
+    if online and active_now is not None:
+        state = 'active' if active_now else 'idle'
+    elif online and idle_sec is not None:
         state = 'active' if idle_sec < threshold_sec else 'idle'
     elif online:
         state = 'online'
@@ -255,9 +286,10 @@ for a in sorted(agents, key=lambda x: x.get('name', '')):
         seen_txt = fmt_span((now_ms - int(last_seen)) // 1000)
     else:
         seen_txt = '-'
+    active_txt = fmt_span(active_sec) if active_sec is not None else '-'
     idle_txt = fmt_span(idle_sec) if idle_sec is not None else '-'
 
-    print(f"  {name:20.20s} {state:8s} {idle_txt:8s} {seen_txt:9s} {server:14.14s} {typ:8.8s}")
+    print(f"  {name:20.20s} {state:8s} {active_txt:8s} {idle_txt:8s} {seen_txt:9s} {server:14.14s} {typ:8.8s}")
 PY
       rm -f "$tmp_json"
     else
@@ -284,6 +316,14 @@ def fmt_span(sec):
     h = rem // 3600
     return f"{d}d{h:02d}h"
 
+def to_int(v):
+    try:
+        if v is None:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
 tmux_map = json.loads(os.environ.get('TMUX_SNAPSHOT') or '{}')
 with open(sys.argv[1]) as f:
     obj = json.load(f)
@@ -300,13 +340,20 @@ typ = str(obj.get('type', '?'))
 server = str(obj.get('server') or '-')
 tmux = str(obj.get('tmux') or '-')
 online = bool(obj.get('online'))
+active_now = obj.get('activeNow') if isinstance(obj.get('activeNow'), bool) else None
 session = tmux.split(':', 1)[0] if tmux and tmux != '-' else ''
 snap = tmux_map.get(session) if session else None
-idle_sec = None
+idle_sec_snapshot = None
 if snap and snap.get('session_activity'):
-    idle_sec = max(0, now_sec - int(snap['session_activity']))
+    idle_sec_snapshot = max(0, now_sec - int(snap['session_activity']))
+active_sec = to_int(obj.get('activeDurationSec'))
+idle_sec = to_int(obj.get('idleDurationSec'))
+if idle_sec is None:
+    idle_sec = idle_sec_snapshot
 
-if online and idle_sec is not None:
+if online and active_now is not None:
+    state = 'active' if active_now else 'idle'
+elif online and idle_sec is not None:
     state = 'active' if idle_sec < threshold_sec else 'idle'
 elif online:
     state = 'online'
@@ -318,10 +365,12 @@ if isinstance(last_seen, (int, float)) and last_seen > 0:
     seen_txt = fmt_span((now_ms - int(last_seen)) // 1000)
 else:
     seen_txt = '-'
+active_txt = fmt_span(active_sec) if active_sec is not None else '-'
 idle_txt = fmt_span(idle_sec) if idle_sec is not None else '-'
 
 print(f"name:        {name}")
 print(f"state:       {state}")
+print(f"active:      {active_txt}")
 print(f"idle:        {idle_txt}")
 print(f"lastSeen:    {seen_txt} ago")
 print(f"online:      {str(online).lower()}")

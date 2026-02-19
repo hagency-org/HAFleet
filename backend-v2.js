@@ -15,6 +15,9 @@ const HUMAN_SUMMARY_LIMIT = Number.parseInt(process.env.HUMAN_SUMMARY_LIMIT || '
 const RULE_PUSH_ACK_TIMEOUT_MS = Number.parseInt(process.env.AGENT_RULE_PUSH_ACK_TIMEOUT_MS || '90000', 10);
 const RULE_REPLY_TIMEOUT_MS = Number.parseInt(process.env.AGENT_RULE_REPLY_TIMEOUT_MS || '180000', 10);
 const RULE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_RULE_SWEEP_INTERVAL_MS || '15000', 10);
+const IDLE_THRESHOLD_MS = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '15000', 10);
+const IDLE_THRESHOLD_SEC = Math.max(1, Math.floor((IDLE_THRESHOLD_MS + 999) / 1000));
+const LOCAL_ACTIVITY_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_LOCAL_ACTIVITY_SWEEP_MS || '5000', 10);
 
 mkdirSync(DATA_DIR, { recursive: true });
 
@@ -120,6 +123,7 @@ const cursors = loadJsonSync('cursors.json', {});
 const servers = loadJsonSync('servers.json', {});
 const agentRuntime = loadJsonSync('agent_runtime.json', {});
 let msgCounter = loadJsonSync('.msg_counter', 0);
+const localActivityState = new Map(); // agent -> { lastActivitySec, burstStartSec, burstLastSec }
 const agentsBeforeNormalization = JSON.stringify(agents);
 
 for (const agent of Object.values(agents)) {
@@ -244,6 +248,10 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
   runtime.lastBlockedTail = (typeof runtime.lastBlockedTail === 'string') ? runtime.lastBlockedTail : '';
   runtime.lastBlockedCommand = (typeof runtime.lastBlockedCommand === 'string') ? runtime.lastBlockedCommand : '';
   runtime.lastBlockedServer = normalizeServer(runtime.lastBlockedServer);
+  runtime.activeNow = runtime.activeNow === true;
+  runtime.activeDurationSec = Number(runtime.activeDurationSec) || 0;
+  runtime.idleDurationSec = Number(runtime.idleDurationSec) || 0;
+  runtime.lastTmuxActivitySec = Number(runtime.lastTmuxActivitySec) || null;
   if (!runtime.rules || typeof runtime.rules !== 'object') runtime.rules = {};
 }
 
@@ -481,6 +489,10 @@ function ensureAgentRuntimeRecord(name) {
       blocked: false,
       blockedReason: null,
       blockedSince: null,
+      activeNow: false,
+      activeDurationSec: 0,
+      idleDurationSec: 0,
+      lastTmuxActivitySec: null,
       updatedAt: 0,
       lastSeen: 0,
       lastPushNotifyAt: 0,
@@ -523,6 +535,40 @@ function markAgentOutbound(agentName) {
   runtime.lastSeen = now;
   runtime.updatedAt = now;
   saveAgentRuntime();
+}
+
+function setRuntimeActivityFields(runtime, payload = {}) {
+  let changed = false;
+  if (!runtime || typeof runtime !== 'object') return false;
+
+  const hasActiveNow = payload.activeNow === true || payload.activeNow === false;
+  if (hasActiveNow && runtime.activeNow !== payload.activeNow) {
+    runtime.activeNow = payload.activeNow;
+    changed = true;
+  }
+  if (payload.activeDurationSec !== undefined && payload.activeDurationSec !== null) {
+    const activeDurationSec = Math.max(0, Number.parseInt(payload.activeDurationSec, 10) || 0);
+    if (runtime.activeDurationSec !== activeDurationSec) {
+      runtime.activeDurationSec = activeDurationSec;
+      changed = true;
+    }
+  }
+  if (payload.idleDurationSec !== undefined && payload.idleDurationSec !== null) {
+    const idleDurationSec = Math.max(0, Number.parseInt(payload.idleDurationSec, 10) || 0);
+    if (runtime.idleDurationSec !== idleDurationSec) {
+      runtime.idleDurationSec = idleDurationSec;
+      changed = true;
+    }
+  }
+  if (payload.lastTmuxActivitySec !== undefined) {
+    const v = Number.parseInt(payload.lastTmuxActivitySec, 10);
+    const normalized = Number.isFinite(v) && v > 0 ? v : null;
+    if ((runtime.lastTmuxActivitySec || null) !== normalized) {
+      runtime.lastTmuxActivitySec = normalized;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 function isHumanMessageToAgent(msg, agentName) {
@@ -587,23 +633,27 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
 
   const prevBlocked = runtime.blocked === true;
   const prevReason = runtime.blockedReason || null;
+  let changed = false;
 
-  runtime.blocked = blockedNow;
-  runtime.blockedReason = reasonNow;
-  runtime.lastSeen = now;
-  runtime.updatedAt = now;
+  if (runtime.blocked !== blockedNow) { runtime.blocked = blockedNow; changed = true; }
+  if ((runtime.blockedReason || null) !== reasonNow) { runtime.blockedReason = reasonNow; changed = true; }
+  if (runtime.lastSeen !== now) { runtime.lastSeen = now; changed = true; }
+  if (runtime.updatedAt !== now) { runtime.updatedAt = now; changed = true; }
   if (blockedNow) {
-    runtime.blockedSince = prevBlocked ? (runtime.blockedSince || now) : now;
-    runtime.lastBlockedTail = tailNow;
-    runtime.lastBlockedCommand = cmdNow;
-    runtime.lastBlockedServer = serverNow;
+    const blockedSince = prevBlocked ? (runtime.blockedSince || now) : now;
+    if (runtime.blockedSince !== blockedSince) { runtime.blockedSince = blockedSince; changed = true; }
+    if (runtime.lastBlockedTail !== tailNow) { runtime.lastBlockedTail = tailNow; changed = true; }
+    if (runtime.lastBlockedCommand !== cmdNow) { runtime.lastBlockedCommand = cmdNow; changed = true; }
+    if ((runtime.lastBlockedServer || null) !== (serverNow || null)) { runtime.lastBlockedServer = serverNow; changed = true; }
   } else {
-    runtime.blockedSince = null;
-    runtime.lastBlockedTail = '';
-    runtime.lastBlockedCommand = '';
-    runtime.lastBlockedServer = null;
+    if (runtime.blockedSince !== null) { runtime.blockedSince = null; changed = true; }
+    if (runtime.lastBlockedTail !== '') { runtime.lastBlockedTail = ''; changed = true; }
+    if (runtime.lastBlockedCommand !== '') { runtime.lastBlockedCommand = ''; changed = true; }
+    if (runtime.lastBlockedServer !== null) { runtime.lastBlockedServer = null; changed = true; }
   }
-  saveAgentRuntime();
+
+  if (setRuntimeActivityFields(runtime, payload)) changed = true;
+  if (changed) saveAgentRuntime();
 
   const becameBlocked = !prevBlocked && blockedNow;
   const reasonChanged = prevBlocked && blockedNow && reasonNow && reasonNow !== prevReason;
@@ -767,6 +817,95 @@ function refreshServerLiveness() {
   if (agentsChanged) saveAgents();
 }
 
+function getLocalSessionActivitySec(sessionName) {
+  if (!sessionName) return null;
+  try {
+    const raw = execSync(`tmux display-message -p -t ${JSON.stringify(sessionName)} "#{session_activity}" 2>/dev/null`, {
+      timeout: 3000,
+      encoding: 'utf-8',
+    }).trim();
+    const v = Number.parseInt(raw, 10);
+    if (!Number.isFinite(v) || v <= 0) return null;
+    return v;
+  } catch {
+    return null;
+  }
+}
+
+function sweepLocalActivityDurations() {
+  const nowSec = Math.floor(Date.now() / 1000);
+  let runtimeChanged = false;
+
+  for (const agent of Object.values(agents)) {
+    if (!isAgentRecord(agent)) continue;
+    const serverId = normalizeServer(agent.server);
+    const isLocalAgent = !serverId || serverId === 'local' || serverId === LOCAL_SERVER_ID;
+    if (!isLocalAgent) continue;
+
+    const tmuxTarget = (typeof agent.tmux === 'string' && agent.tmux.trim()) ? agent.tmux.trim() : `${agent.name}:0.0`;
+    const session = tmuxTarget.split(':', 1)[0];
+    const runtime = ensureAgentRuntimeRecord(agent.name);
+    if (!runtime) continue;
+
+    const activitySec = getLocalSessionActivitySec(session);
+    if (!activitySec) {
+      localActivityState.delete(agent.name);
+      const resetChanged = setRuntimeActivityFields(runtime, {
+        activeNow: false,
+        activeDurationSec: 0,
+        idleDurationSec: 0,
+        lastTmuxActivitySec: null,
+      });
+      if (resetChanged) {
+        runtime.updatedAt = Date.now();
+        runtimeChanged = true;
+      }
+      continue;
+    }
+
+    let st = localActivityState.get(agent.name);
+    if (!st) {
+      st = {
+        lastActivitySec: activitySec,
+        burstStartSec: activitySec,
+        burstLastSec: activitySec,
+      };
+      localActivityState.set(agent.name, st);
+    } else if (activitySec < st.lastActivitySec) {
+      st.lastActivitySec = activitySec;
+      st.burstStartSec = activitySec;
+      st.burstLastSec = activitySec;
+    } else if (activitySec > st.lastActivitySec) {
+      const gap = activitySec - st.lastActivitySec;
+      if (gap > IDLE_THRESHOLD_SEC) {
+        st.burstStartSec = activitySec;
+        st.burstLastSec = activitySec;
+      } else {
+        st.burstLastSec = activitySec;
+      }
+      st.lastActivitySec = activitySec;
+    }
+
+    const rawIdleSec = Math.max(0, nowSec - st.lastActivitySec);
+    const activeNow = rawIdleSec < IDLE_THRESHOLD_SEC;
+    const activeDurationSec = activeNow ? Math.max(0, st.burstLastSec - st.burstStartSec) : 0;
+    const idleDurationSec = activeNow ? 0 : Math.max(0, rawIdleSec - IDLE_THRESHOLD_SEC);
+
+    const changed = setRuntimeActivityFields(runtime, {
+      activeNow,
+      activeDurationSec,
+      idleDurationSec,
+      lastTmuxActivitySec: st.lastActivitySec,
+    });
+    if (changed) {
+      runtime.updatedAt = Date.now();
+      runtimeChanged = true;
+    }
+  }
+
+  if (runtimeChanged) saveAgentRuntime();
+}
+
 function getAgentDeliveryState(name) {
   const agent = agents[name];
   if (!agent || !isAgentRecord(agent)) {
@@ -812,6 +951,10 @@ function serializeAgent(agent) {
     blocked: runtime?.blocked === true,
     blockedReason: runtime?.blockedReason || null,
     blockedSince: runtime?.blockedSince || null,
+    activeNow: runtime?.activeNow === true,
+    activeDurationSec: Number(runtime?.activeDurationSec) || 0,
+    idleDurationSec: Number(runtime?.idleDurationSec) || 0,
+    lastTmuxActivitySec: Number(runtime?.lastTmuxActivitySec) || null,
   };
 }
 
@@ -1326,6 +1469,10 @@ app.post('/api/agents/:name/runtime', (req, res) => {
       blocked: runtime.blocked === true,
       blockedReason: runtime.blockedReason || null,
       blockedSince: runtime.blockedSince || null,
+      activeNow: runtime.activeNow === true,
+      activeDurationSec: Number(runtime.activeDurationSec) || 0,
+      idleDurationSec: Number(runtime.idleDurationSec) || 0,
+      lastTmuxActivitySec: Number(runtime.lastTmuxActivitySec) || null,
       updatedAt: runtime.updatedAt || Date.now(),
     },
   });
@@ -1803,6 +1950,7 @@ app.get('/api/agents/:name/groups', (req, res) => {
 function shutdown() {
   console.log('Shutting down, saving data...');
   refreshServerLiveness();
+  sweepLocalActivityDurations();
   sweepAgentRules();
   saveAgents();
   saveGroups();
@@ -1820,11 +1968,16 @@ setInterval(() => {
 }, SERVER_SWEEP_INTERVAL_MS);
 
 setInterval(() => {
+  sweepLocalActivityDurations();
+}, LOCAL_ACTIVITY_SWEEP_INTERVAL_MS);
+
+setInterval(() => {
   sweepAgentRules();
 }, RULE_SWEEP_INTERVAL_MS);
 
 // ── Start ─────────────────────────────────────────────────────────────
 app.listen(PORT, '127.0.0.1', () => {
+  sweepLocalActivityDurations();
   console.log(`Agent Chat v2 backend listening on http://127.0.0.1:${PORT}`);
   const agentCount = Object.values(agents).filter(isAgentRecord).length;
   console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);
