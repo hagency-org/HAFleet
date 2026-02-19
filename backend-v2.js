@@ -245,6 +245,19 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
   runtime.updatedAt = Number(runtime.updatedAt) || 0;
   runtime.lastSeen = Number(runtime.lastSeen) || 0;
   runtime.lastPushNotifyAt = Number(runtime.lastPushNotifyAt) || 0;
+  runtime.lastPushQueuedAt = Number(runtime.lastPushQueuedAt) || 0;
+  runtime.lastPushDeliveredAt = Number(runtime.lastPushDeliveredAt) || 0;
+  runtime.lastPushDeliveryDelayMs = Number(runtime.lastPushDeliveryDelayMs) || 0;
+  runtime.lastActionablePushAt = Number(runtime.lastActionablePushAt) || 0;
+  runtime.lastPushQueueEntryId = Number(runtime.lastPushQueueEntryId) || 0;
+  runtime.lastPushNeedsInboxCheck = runtime.lastPushNeedsInboxCheck === true;
+  runtime.lastPushUnreadCount = Number(runtime.lastPushUnreadCount) || 0;
+  runtime.lastPushKind = (typeof runtime.lastPushKind === 'string' && runtime.lastPushKind.trim())
+    ? runtime.lastPushKind.trim()
+    : 'unknown';
+  runtime.lastPushSourceMsgId = (typeof runtime.lastPushSourceMsgId === 'string' && runtime.lastPushSourceMsgId.trim())
+    ? runtime.lastPushSourceMsgId.trim()
+    : null;
   runtime.lastInboxCheckAt = Number(runtime.lastInboxCheckAt) || 0;
   runtime.lastAgentOutboundAt = Number(runtime.lastAgentOutboundAt) || 0;
   runtime.lastBlockedTail = (typeof runtime.lastBlockedTail === 'string') ? runtime.lastBlockedTail : '';
@@ -498,6 +511,15 @@ function ensureAgentRuntimeRecord(name) {
       updatedAt: 0,
       lastSeen: 0,
       lastPushNotifyAt: 0,
+      lastPushQueuedAt: 0,
+      lastPushDeliveredAt: 0,
+      lastPushDeliveryDelayMs: 0,
+      lastActionablePushAt: 0,
+      lastPushQueueEntryId: 0,
+      lastPushNeedsInboxCheck: false,
+      lastPushUnreadCount: 0,
+      lastPushKind: 'unknown',
+      lastPushSourceMsgId: null,
       lastInboxCheckAt: 0,
       lastAgentOutboundAt: 0,
       lastBlockedTail: '',
@@ -509,13 +531,70 @@ function ensureAgentRuntimeRecord(name) {
   return agentRuntime[agentName];
 }
 
-function markAgentPushNotified(agentName) {
+function normalizePushMeta(meta = {}) {
+  const pushMeta = (meta && typeof meta === 'object') ? meta : {};
+  const safeBool = (value) => value === true;
+  const safeInt = (value) => {
+    const n = Number.parseInt(value, 10);
+    return Number.isFinite(n) ? Math.max(0, n) : 0;
+  };
+  const safeStr = (value, fallback = null) => {
+    if (typeof value !== 'string') return fallback;
+    const trimmed = value.trim();
+    return trimmed || fallback;
+  };
+  return {
+    kind: safeStr(pushMeta.kind, 'unknown'),
+    requiresInboxCheck: safeBool(pushMeta.requiresInboxCheck),
+    sourceMsgId: safeStr(pushMeta.sourceMsgId, null),
+    unreadCount: safeInt(pushMeta.unreadCount),
+    hasHumanUnread: safeBool(pushMeta.hasHumanUnread),
+    hasRequestUnread: safeBool(pushMeta.hasRequestUnread),
+    needsReply: safeBool(pushMeta.needsReply),
+    hasMcp: safeBool(pushMeta.hasMcp),
+  };
+}
+
+function markAgentPushNotified(agentName, details = {}) {
   const runtime = ensureAgentRuntimeRecord(agentName);
   if (!runtime) return;
   const now = Date.now();
+  const queuedAt = Number(details.queuedAt) || now;
+  const queueEntryId = Number(details.queueEntryId) || 0;
+  const meta = normalizePushMeta(details);
   runtime.lastPushNotifyAt = now;
+  runtime.lastPushQueuedAt = queuedAt;
+  runtime.lastPushQueueEntryId = queueEntryId;
+  runtime.lastPushKind = meta.kind;
+  runtime.lastPushNeedsInboxCheck = meta.requiresInboxCheck;
+  runtime.lastPushUnreadCount = meta.unreadCount;
+  runtime.lastPushSourceMsgId = meta.sourceMsgId;
   runtime.lastSeen = now;
   runtime.updatedAt = now;
+  saveAgentRuntime();
+}
+
+function markAgentPushDelivered(agentName, details = {}) {
+  const runtime = ensureAgentRuntimeRecord(agentName);
+  if (!runtime) return;
+  const now = Date.now();
+  const deliveredAt = Number(details.deliveredAt) || now;
+  const queuedAt = Number(details.queuedAt) || runtime.lastPushQueuedAt || deliveredAt;
+  const meta = normalizePushMeta(details);
+  const delay = Math.max(0, deliveredAt - queuedAt);
+
+  runtime.lastPushDeliveredAt = deliveredAt;
+  runtime.lastPushQueuedAt = queuedAt;
+  runtime.lastPushDeliveryDelayMs = delay;
+  runtime.lastPushKind = meta.kind;
+  runtime.lastPushNeedsInboxCheck = meta.requiresInboxCheck;
+  runtime.lastPushUnreadCount = meta.unreadCount;
+  runtime.lastPushSourceMsgId = meta.sourceMsgId;
+  if (meta.requiresInboxCheck) {
+    runtime.lastActionablePushAt = deliveredAt;
+  }
+  runtime.lastSeen = deliveredAt;
+  runtime.updatedAt = deliveredAt;
   saveAgentRuntime();
 }
 
@@ -736,20 +815,27 @@ function sweepAgentRules() {
     }
 
     const unreadHuman = getUnreadInboxMessages(agentName).unread.filter(m => m.type === 'human');
-    const needsInboxCheck = runtime.lastPushNotifyAt > 0
-      && runtime.lastInboxCheckAt < runtime.lastPushNotifyAt
-      && (now - runtime.lastPushNotifyAt) >= RULE_PUSH_ACK_TIMEOUT_MS;
+    const actionablePushAt = Number(runtime.lastActionablePushAt) || 0;
+    const needsInboxCheck = actionablePushAt > 0
+      && runtime.lastInboxCheckAt < actionablePushAt
+      && (now - actionablePushAt) >= RULE_PUSH_ACK_TIMEOUT_MS;
     setAgentRuleState(agentName, 'no_inbox_check_after_push', needsInboxCheck, () => {
       return [
         `Agent: ${agentName}`,
         `lastPushNotifyAt: ${runtime.lastPushNotifyAt ? new Date(runtime.lastPushNotifyAt).toISOString() : 'n/a'}`,
+        `lastPushQueuedAt: ${runtime.lastPushQueuedAt ? new Date(runtime.lastPushQueuedAt).toISOString() : 'n/a'}`,
+        `lastPushDeliveredAt: ${runtime.lastPushDeliveredAt ? new Date(runtime.lastPushDeliveredAt).toISOString() : 'n/a'}`,
+        `lastActionablePushAt: ${actionablePushAt ? new Date(actionablePushAt).toISOString() : 'n/a'}`,
+        `lastPushKind: ${runtime.lastPushKind || 'unknown'}`,
+        `lastPushNeedsInboxCheck: ${runtime.lastPushNeedsInboxCheck === true ? 'yes' : 'no'}`,
+        `lastPushDeliveryDelayMs: ${Number(runtime.lastPushDeliveryDelayMs) || 0}`,
         `lastInboxCheckAt: ${runtime.lastInboxCheckAt ? new Date(runtime.lastInboxCheckAt).toISOString() : 'n/a'}`,
         `timeoutMs: ${RULE_PUSH_ACK_TIMEOUT_MS}`,
       ].join('\n');
     });
 
-    const checkedButNoReply = runtime.lastInboxCheckAt > 0
-      && runtime.lastInboxCheckAt >= runtime.lastPushNotifyAt
+    const checkedButNoReply = actionablePushAt > 0
+      && runtime.lastInboxCheckAt >= actionablePushAt
       && runtime.lastAgentOutboundAt < runtime.lastInboxCheckAt
       && unreadHuman.length > 0
       && (now - runtime.lastInboxCheckAt) >= RULE_REPLY_TIMEOUT_MS;
@@ -1119,6 +1205,10 @@ async function pushNotify(agentName, msg) {
 
   // Determine if reply is expected based on message type
   const needsReply = msg.type === 'human' || msg.type === 'request';
+  let notificationKind = 'single_inform';
+  let requiresInboxCheck = false;
+  let hasHumanUnread = false;
+  let hasRequestUnread = false;
 
   let notification;
   if (unreadCount > 1) {
@@ -1129,6 +1219,12 @@ async function pushNotify(agentName, msg) {
     const senderNames = [...new Set(unread.map(m => m.from).filter(Boolean))];
     const senderText = senderNames.length ? ` (from ${formatSenderList(senderNames)})` : '';
     const hasHuman = unread.some(m => m.type === 'human');
+    const hasRequest = unread.some(m => m.type === 'request');
+    const actionableUnread = hasHuman || hasRequest;
+    hasHumanUnread = hasHuman;
+    hasRequestUnread = hasRequest;
+    notificationKind = actionableUnread ? 'merged_unread_actionable' : 'merged_unread_inform';
+    requiresInboxCheck = hasMcp && actionableUnread;
     const humanHint = hasHuman ? ' This includes messages from your human operator.' : '';
     const processHint = hasMcp
       ? ' Read ALL messages via check_inbox() first. DO ALL JOBS before replying. After ALL WORK is done, send required replies.'
@@ -1151,6 +1247,8 @@ async function pushNotify(agentName, msg) {
       } else if (needsReply) {
         actionHint = `Reply after ALL WORK is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
       }
+      notificationKind = needsReply ? 'single_actionable' : 'single_inform';
+      requiresInboxCheck = needsReply;
       notification = isHuman
         ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${checkHint} ${actionHint}.`
         : needsReply
@@ -1163,6 +1261,8 @@ async function pushNotify(agentName, msg) {
       if (needsReply) {
         actionHint = `Reply after ALL WORK is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
       }
+      notificationKind = needsReply ? 'single_actionable' : 'single_inform';
+      requiresInboxCheck = false;
       notification = isHuman
         ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${actionHint}.`
         : needsReply
@@ -1172,12 +1272,29 @@ async function pushNotify(agentName, msg) {
   }
 
   try {
+    const notifyMeta = {
+      kind: notificationKind,
+      requiresInboxCheck,
+      sourceMsgId: latestUnread?.id || msg?.id || null,
+      unreadCount,
+      hasHumanUnread,
+      hasRequestUnread,
+      needsReply,
+      hasMcp,
+    };
     const resp = await fetch(PUSH_QUEUE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: 'agent-chat-v2', to: agent.tmux, payload: notification }),
+      body: JSON.stringify({ from: 'agent-chat-v2', to: agent.tmux, payload: notification, notifyMeta }),
     });
-    if (resp.ok) markAgentPushNotified(agentName);
+    if (resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      markAgentPushNotified(agentName, {
+        queueEntryId: body?.id,
+        queuedAt: body?.queuedAt,
+        ...notifyMeta,
+      });
+    }
   } catch (e) {
     console.error(`Push notify failed for ${agentName}:`, e.message);
   }
@@ -1470,6 +1587,29 @@ app.post('/api/agents/:name/runtime', (req, res) => {
       updatedAt: runtime.updatedAt || Date.now(),
     },
   });
+});
+
+app.post('/api/runtime/push-delivered', (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: 'local only' });
+  const agentName = normalizeAgentName(req.body?.agent);
+  if (!agentName) return res.status(400).json({ error: 'agent required' });
+  if (!isAgentRecord(agents[agentName])) {
+    return res.json({ ok: true, ignored: 'agent-not-found', agent: agentName });
+  }
+
+  const details = {
+    deliveredAt: req.body?.deliveredAt,
+    queuedAt: req.body?.queuedAt,
+    queueEntryId: req.body?.queueEntryId,
+  };
+  const notifyMeta = (req.body?.notifyMeta && typeof req.body.notifyMeta === 'object')
+    ? req.body.notifyMeta
+    : {};
+  markAgentPushDelivered(agentName, {
+    ...details,
+    ...notifyMeta,
+  });
+  res.json({ ok: true, agent: agentName });
 });
 
 // ── Groups CRUD ───────────────────────────────────────────────────────

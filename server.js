@@ -6,6 +6,7 @@ import path from 'path';
 
 const PORT = 8084;
 const LOG_FILE = path.resolve('logs/messages.jsonl');
+const PUSH_DELIVERED_URL = 'http://127.0.0.1:8090/api/runtime/push-delivered';
 const DEFAULT_IDLE_THRESHOLD_MS = 15_000;
 const envIdleThreshold = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || `${DEFAULT_IDLE_THRESHOLD_MS}`, 10);
 const IDLE_THRESHOLD = Number.isFinite(envIdleThreshold) && envIdleThreshold > 0
@@ -98,6 +99,57 @@ function targetSessionName(target) {
   return target.split(':')[0] || null;
 }
 
+function sanitizeNotifyMeta(rawMeta) {
+  if (!rawMeta || typeof rawMeta !== 'object') return null;
+  const safeBool = (value) => value === true;
+  const safeInt = (value) => {
+    const n = Number.parseInt(value, 10);
+    return Number.isFinite(n) ? Math.max(0, n) : 0;
+  };
+  const safeStr = (value, fallback = null) => {
+    if (typeof value !== 'string') return fallback;
+    const trimmed = value.trim();
+    return trimmed || fallback;
+  };
+  return {
+    kind: safeStr(rawMeta.kind, 'unknown'),
+    requiresInboxCheck: safeBool(rawMeta.requiresInboxCheck),
+    sourceMsgId: safeStr(rawMeta.sourceMsgId, null),
+    unreadCount: safeInt(rawMeta.unreadCount),
+    hasHumanUnread: safeBool(rawMeta.hasHumanUnread),
+    hasRequestUnread: safeBool(rawMeta.hasRequestUnread),
+    needsReply: safeBool(rawMeta.needsReply),
+    hasMcp: safeBool(rawMeta.hasMcp),
+  };
+}
+
+async function notifyPushDelivered(entry, deliveredAt) {
+  if (!entry || !isBackendNotificationEntry(entry)) return;
+  const agent = targetSessionName(entry.to);
+  if (!agent) return;
+  const notifyMeta = sanitizeNotifyMeta(entry.notifyMeta) || { kind: 'unknown', requiresInboxCheck: false };
+  const body = {
+    agent,
+    deliveredAt,
+    queuedAt: Number(entry.queuedAt) || deliveredAt,
+    queueEntryId: Number(entry.id) || null,
+    notifyMeta,
+  };
+  try {
+    const resp = await fetch(PUSH_DELIVERED_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      console.warn(`[push-delivered] backend rejected ${agent}: HTTP ${resp.status}${errText ? ` ${errText.slice(0, 120)}` : ''}`);
+    }
+  } catch (e) {
+    console.warn(`[push-delivered] notify failed for ${agent}: ${e.message}`);
+  }
+}
+
 async function isStaleNotificationEntry(entry) {
   if (!isBackendNotificationEntry(entry)) return false;
   const agentName = targetSessionName(entry.to);
@@ -150,6 +202,7 @@ app.post('/api/queue', (req, res) => {
   const { from, to, payload } = req.body;
   if (!to || !payload) return res.status(400).json({ error: 'missing to or payload' });
   const id = ++queueIdCounter;
+  const queuedAt = Date.now();
   // Apply redirect if target was renamed
   let actualTo = to;
   let redirectedFrom = null;
@@ -157,7 +210,9 @@ app.post('/api/queue', (req, res) => {
     actualTo = redirects.get(to);
     redirectedFrom = to;
   }
-  const entry = { id, from: from || 'unknown', to: actualTo, payload, queuedAt: Date.now() };
+  const entry = { id, from: from || 'unknown', to: actualTo, payload, queuedAt };
+  const notifyMeta = sanitizeNotifyMeta(req.body?.notifyMeta);
+  if (notifyMeta) entry.notifyMeta = notifyMeta;
   if (redirectedFrom) entry.redirectedFrom = redirectedFrom;
   if (!queue.has(actualTo)) queue.set(actualTo, []);
   const bucket = queue.get(actualTo);
@@ -170,7 +225,7 @@ app.post('/api/queue', (req, res) => {
   bucket.push(entry);
   saveQueue();
   broadcastQueue();
-  res.json({ ok: true, id, position: bucket.length, redirected: redirectedFrom || undefined });
+  res.json({ ok: true, id, queuedAt, position: bucket.length, redirected: redirectedFrom || undefined });
 });
 
 // Get current queue state
@@ -507,8 +562,12 @@ function deliverMessage(entry) {
     execFileSync('tmux', ['send-keys', '-t', entry.to, 'Enter'], { timeout: 5000 });
 
     // Log to messages.jsonl
-    const logEntry = JSON.stringify({ ts: Date.now(), from: entry.from, to: entry.to, payload: entry.payload });
+    const deliveredAt = Date.now();
+    const logData = { ts: deliveredAt, from: entry.from, to: entry.to, payload: entry.payload };
+    if (entry.notifyMeta) logData.notifyMeta = entry.notifyMeta;
+    const logEntry = JSON.stringify(logData);
     appendFile(LOG_FILE, logEntry + '\n').catch(() => {});
+    void notifyPushDelivered(entry, deliveredAt);
     return true;
   } catch (e) {
     console.error(`Failed to deliver to ${entry.to}:`, e.message);
