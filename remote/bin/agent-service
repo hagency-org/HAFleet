@@ -139,23 +139,81 @@ mac_launchd_plist() {
   echo "$HOME/Library/LaunchAgents/${label}.plist"
 }
 
+service_label_variants() {
+  local label="$1"
+  echo "$label"
+  if [ "$label" = "agent-chat-push-relay" ]; then
+    echo "com.agentchat.push-relay"
+  elif [ "$label" = "com.agentchat.push-relay" ]; then
+    echo "agent-chat-push-relay"
+  fi
+}
+
 mac_launchd_detect_domain() {
   local label="$1"
-  local domain
-  for domain in "gui/$UID_NUM" "user/$UID_NUM"; do
-    if launchctl print "$domain/$label" >/dev/null 2>&1; then
-      echo "$domain"
+  local domain probe
+  while IFS= read -r probe; do
+    [ -n "$probe" ] || continue
+    for domain in "gui/$UID_NUM" "user/$UID_NUM"; do
+      if launchctl print "$domain/$probe" >/dev/null 2>&1; then
+        echo "$domain|$probe"
+        return 0
+      fi
+    done
+  done < <(service_label_variants "$label")
+  return 1
+}
+
+mac_launchd_bootout_variants() {
+  local label="$1"
+  local domain probe
+  while IFS= read -r probe; do
+    [ -n "$probe" ] || continue
+    for domain in "gui/$UID_NUM" "user/$UID_NUM"; do
+      launchctl bootout "$domain/$probe" >/dev/null 2>&1 || true
+    done
+  done < <(service_label_variants "$label")
+}
+
+mac_launchd_unload_variant_plists() {
+  local label="$1"
+  local probe plist
+  while IFS= read -r probe; do
+    [ -n "$probe" ] || continue
+    plist="$(mac_launchd_plist "$probe")"
+    if [ -f "$plist" ]; then
+      launchctl unload "$plist" >/dev/null 2>&1 || true
+    fi
+  done < <(service_label_variants "$label")
+}
+
+mac_resolve_bootstrap_target() {
+  local label="$1"
+  local plist
+  plist="$(mac_launchd_plist "$label")"
+  if [ -f "$plist" ]; then
+    echo "$label|$plist"
+    return 0
+  fi
+  local probe probe_plist
+  while IFS= read -r probe; do
+    [ -n "$probe" ] || continue
+    probe_plist="$(mac_launchd_plist "$probe")"
+    if [ -f "$probe_plist" ]; then
+      echo "$probe|$probe_plist"
       return 0
     fi
-  done
+  done < <(service_label_variants "$label")
   return 1
 }
 
 mac_launchd_status() {
   local label="$1"
-  local domain dump state
-  if domain="$(mac_launchd_detect_domain "$label")"; then
-    dump="$(launchctl print "$domain/$label" 2>/dev/null || true)"
+  local detected domain actual_label dump state
+  if detected="$(mac_launchd_detect_domain "$label")"; then
+    domain="${detected%%|*}"
+    actual_label="${detected#*|}"
+    dump="$(launchctl print "$domain/$actual_label" 2>/dev/null || true)"
     state="$(printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*state = //p' | head -n 1)"
     if [ -z "$state" ]; then
       echo "loaded"
@@ -169,39 +227,45 @@ mac_launchd_status() {
 
 mac_bootstrap_label() {
   local label="$1"
-  local plist domain
-  plist="$(mac_launchd_plist "$label")"
-  if [ ! -f "$plist" ]; then
-    echo "Error: plist not found for '$label': $plist" >&2
+  local target plist domain target_label
+  if ! target="$(mac_resolve_bootstrap_target "$label")"; then
+    echo "Error: plist not found for '$label' (or legacy variants)." >&2
     return 1
   fi
+  target_label="${target%%|*}"
+  plist="${target#*|}"
+  mac_launchd_bootout_variants "$label"
   for domain in "gui/$UID_NUM" "user/$UID_NUM"; do
-    launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
     if launchctl bootstrap "$domain" "$plist" >/dev/null 2>&1; then
-      launchctl enable "$domain/$label" >/dev/null 2>&1 || true
-      launchctl kickstart -k "$domain/$label" >/dev/null 2>&1 || true
+      launchctl enable "$domain/$target_label" >/dev/null 2>&1 || true
+      launchctl kickstart -k "$domain/$target_label" >/dev/null 2>&1 || true
       return 0
     fi
   done
-  launchctl unload "$plist" >/dev/null 2>&1 || true
+  mac_launchd_unload_variant_plists "$label"
   launchctl load -w "$plist" >/dev/null 2>&1
 }
 
 mac_pause_label() {
   local label="$1"
-  local plist domain
+  local domain
   local stopped=0
-  plist="$(mac_launchd_plist "$label")"
-  for domain in "gui/$UID_NUM" "user/$UID_NUM"; do
-    if launchctl print "$domain/$label" >/dev/null 2>&1; then
-      launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
-      stopped=1
-    fi
-  done
-  if [ -f "$plist" ]; then
-    launchctl unload "$plist" >/dev/null 2>&1 || true
+  while IFS= read -r domain; do
+    [ -n "$domain" ] || continue
     stopped=1
-  fi
+  done < <(mac_launchd_detect_domain "$label" | cut -d'|' -f1)
+  mac_launchd_bootout_variants "$label"
+  mac_launchd_unload_variant_plists "$label"
+  # If we have any variant plist present, treat pause action as handled.
+  local probe plist
+  while IFS= read -r probe; do
+    [ -n "$probe" ] || continue
+    plist="$(mac_launchd_plist "$probe")"
+    if [ -f "$plist" ]; then
+      stopped=1
+      break
+    fi
+  done < <(service_label_variants "$label")
   if [ "$stopped" -eq 1 ]; then
     return 0
   fi

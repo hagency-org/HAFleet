@@ -16,6 +16,7 @@ IS_MAC=false
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${SERVICE_NAME}.plist"
 LAUNCHD_RUNNER="$SCRIPT_DIR/.push-relay-launchd.sh"
 LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-gui/$(id -u)}"
+LEGACY_SERVICE_NAME="com.agentchat.push-relay"
 
 case "$OS_NAME" in
   Linux) IS_LINUX=true ;;
@@ -70,6 +71,19 @@ launchd_bootstrap_service() {
   fi
 
   return 1
+}
+
+cleanup_legacy_launchd_service() {
+  local legacy_label="$1"
+  local legacy_plist="$HOME/Library/LaunchAgents/${legacy_label}.plist"
+  local d
+  for d in "gui/$(id -u)" "user/$(id -u)"; do
+    launchctl bootout "$d/$legacy_label" >/dev/null 2>&1 || true
+  done
+  launchctl unload "$legacy_plist" >/dev/null 2>&1 || true
+  if [ -f "$legacy_plist" ]; then
+    rm -f "$legacy_plist" || true
+  fi
 }
 
 if [ "$(id -u)" -eq 0 ]; then
@@ -168,6 +182,9 @@ if [ "$IS_LINUX" = true ]; then
   fi
 else
   echo "[5/9] Installing launchd service ${SERVICE_NAME}..."
+  if [ "$SERVICE_NAME" != "$LEGACY_SERVICE_NAME" ]; then
+    cleanup_legacy_launchd_service "$LEGACY_SERVICE_NAME"
+  fi
   mkdir -p "$HOME/Library/LaunchAgents" "$SCRIPT_DIR/logs"
   cat > "$LAUNCHD_RUNNER" <<EOF
 #!/usr/bin/env bash
