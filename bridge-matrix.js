@@ -454,6 +454,7 @@ async function ensureAgentAvatar(agentName) {
     saveState();
     const sourceLabel = state.agentAvatarMeta[agentName].source;
     console.log(`Set avatar for agent ${agentName}: ${mxcUri} (${sourceLabel}, badge=${badge})`);
+    await syncAgentAvatarToDmRooms(agentName);
   } catch (e) {
     console.warn(`Failed to set avatar for agent ${agentName}: ${e.message}`);
   }
@@ -495,6 +496,29 @@ async function ensureRoomAvatar(roomId, name) {
   }
 }
 
+async function syncAgentAvatarToDmRooms(agentName) {
+  const mxcUri = state.agentAvatars[agentName];
+  if (!mxcUri || !state.botToken) return;
+  const dmRooms = state.dmRooms || {};
+  for (const [key, roomId] of Object.entries(dmRooms)) {
+    if (!roomId) continue;
+    // Match dm:agentname or agentname:other or other:agentname
+    const parts = key.split(':');
+    const isDmKey = parts[0] === 'dm' && parts[1] === agentName;
+    const isAgentKey = parts.includes(agentName) && parts[0] !== 'dm';
+    if (!isDmKey && !isAgentKey) continue;
+    if (state.roomAvatars[roomId] === mxcUri) continue;
+    try {
+      await setRoomAvatar(roomId, mxcUri);
+      state.roomAvatars[roomId] = mxcUri;
+      console.log(`Synced DM room ${roomId} (${key}) avatar to agent ${agentName}`);
+    } catch (e) {
+      console.warn(`Failed to sync DM room ${roomId} avatar: ${e.message}`);
+    }
+  }
+  saveState();
+}
+
 async function setCustomAgentAvatar(agentName, imageBuffer, mimeType) {
   const token = state.agentTokens[agentName];
   if (!token) { console.warn(`No token for agent ${agentName}, cannot set custom avatar`); return; }
@@ -504,6 +528,7 @@ async function setCustomAgentAvatar(agentName, imageBuffer, mimeType) {
     state.agentAvatars[agentName] = mxcUri;
     saveState();
     console.log(`Set custom avatar for agent ${agentName}: ${mxcUri}`);
+    await syncAgentAvatarToDmRooms(agentName);
   } catch (e) {
     console.warn(`Failed to set custom avatar for agent ${agentName}: ${e.message}`);
   }
