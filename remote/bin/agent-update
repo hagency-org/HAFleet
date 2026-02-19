@@ -50,6 +50,7 @@ fi
 
 CHECK_ONLY=false
 SERVICE_ACTION=""
+UPDATE_AND_PAUSE=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --check)
@@ -69,7 +70,8 @@ while [ $# -gt 0 ]; do
       ;;
     -h|--help)
       echo "Usage: agent-update [--check|--pause-services|--resume-services|--restart-services|--service-status]"
-      echo "  Service flags only control remote relay service: agent-chat-push-relay"
+      echo "  --pause-services: pull/reinstall, then keep remote relay paused"
+      echo "  Other service flags only control remote relay service: agent-chat-push-relay"
       exit 0
       ;;
     *)
@@ -84,6 +86,17 @@ done
 cd "$REPO_DIR"
 
 if [ -n "$SERVICE_ACTION" ]; then
+  if [ "$SERVICE_ACTION" = "pause" ]; then
+    UPDATE_AND_PAUSE=true
+  fi
+fi
+
+if [ "$CHECK_ONLY" = true ] && [ -n "$SERVICE_ACTION" ]; then
+  echo "Error: --check cannot be combined with service flags" >&2
+  exit 1
+fi
+
+if [ -n "$SERVICE_ACTION" ] && [ "$UPDATE_AND_PAUSE" = false ]; then
   SERVICE_CLI=""
   for c in "$REPO_DIR/bin/agent-service" "$BASE_DIR/bin/agent-service" "$SCRIPT_DIR/agent-service"; do
     if [ -x "$c" ]; then
@@ -102,6 +115,22 @@ fi
 
 # Ensure we're in a git repo
 if [ ! -d ".git" ]; then
+  if [ "$UPDATE_AND_PAUSE" = true ]; then
+    echo "Warning: $REPO_DIR is not a git repository; falling back to pause-only." >&2
+    SERVICE_CLI=""
+    for c in "$REPO_DIR/bin/agent-service" "$BASE_DIR/bin/agent-service" "$SCRIPT_DIR/agent-service"; do
+      if [ -x "$c" ]; then
+        SERVICE_CLI="$c"
+        break
+      fi
+    done
+    if [ -z "$SERVICE_CLI" ]; then
+      echo "Error: agent-service CLI not found. Expected in $REPO_DIR/bin/agent-service" >&2
+      exit 1
+    fi
+    "$SERVICE_CLI" pause --profile remote
+    exit 0
+  fi
   echo "Error: $REPO_DIR is not a git repository" >&2
   exit 1
 fi
@@ -150,14 +179,39 @@ if [ "$BEHIND" -gt 0 ] 2>/dev/null; then
 fi
 
 # Reinstall
-echo "Reinstalling..."
+if [ "$UPDATE_AND_PAUSE" = true ]; then
+  echo "Reinstalling (maintenance mode: keep remote relay paused)..."
+else
+  echo "Reinstalling..."
+fi
 if [ ! -f "$REPO_DIR/remote/install-remote.sh" ]; then
   echo "Error: missing install script: $REPO_DIR/remote/install-remote.sh" >&2
   exit 1
 fi
 cd "$REPO_DIR/remote"
-bash install-remote.sh
+if [ "$UPDATE_AND_PAUSE" = true ]; then
+  AGENT_INSTALL_AUTOSTART=0 AGENT_INSTALL_SKIP_VERIFY=1 bash install-remote.sh
+else
+  bash install-remote.sh
+fi
 
 echo ""
-echo "Update complete. Push relay restarted."
-echo "Note: running agents keep old code until restarted."
+if [ "$UPDATE_AND_PAUSE" = true ]; then
+  SERVICE_CLI=""
+  for c in "$REPO_DIR/bin/agent-service" "$BASE_DIR/bin/agent-service" "$SCRIPT_DIR/agent-service"; do
+    if [ -x "$c" ]; then
+      SERVICE_CLI="$c"
+      break
+    fi
+  done
+  if [ -z "$SERVICE_CLI" ]; then
+    echo "Error: agent-service CLI not found after reinstall." >&2
+    exit 1
+  fi
+  "$SERVICE_CLI" pause --profile remote
+  echo "Update complete. Remote relay is paused."
+  echo "Resume with: agent-update --resume-services"
+else
+  echo "Update complete. Push relay restarted."
+  echo "Note: running agents keep old code until restarted."
+fi

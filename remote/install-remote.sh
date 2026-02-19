@@ -6,6 +6,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVICE_NAME="${SERVICE_NAME:-agent-chat-push-relay}"
 ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
 INSTALL_BIN_DIR="${INSTALL_BIN_DIR:-$HOME/.local/bin}"
+AGENT_INSTALL_AUTOSTART="${AGENT_INSTALL_AUTOSTART:-1}"
+AGENT_INSTALL_SKIP_VERIFY="${AGENT_INSTALL_SKIP_VERIFY:-0}"
 SYSTEMD_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 SERVICE_USER="${SUDO_USER:-$USER}"
 OS_NAME="$(uname -s)"
@@ -29,6 +31,13 @@ need_cmd() {
     echo "Missing required command: $1" >&2
     exit 1
   fi
+}
+
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 launchd_bootstrap_service() {
@@ -152,7 +161,11 @@ if [ "$IS_LINUX" = true ]; then
   rm -f "$TMP_UNIT"
   trap - EXIT
   sudo systemctl daemon-reload
-  sudo systemctl enable --now "$SERVICE_NAME"
+  if is_truthy "$AGENT_INSTALL_AUTOSTART"; then
+    sudo systemctl enable --now "$SERVICE_NAME"
+  else
+    echo "  Service autostart disabled for this install run (AGENT_INSTALL_AUTOSTART=$AGENT_INSTALL_AUTOSTART)."
+  fi
 else
   echo "[5/9] Installing launchd service ${SERVICE_NAME}..."
   mkdir -p "$HOME/Library/LaunchAgents" "$SCRIPT_DIR/logs"
@@ -194,15 +207,19 @@ EOF
     exit 1
   fi
 
-  if ! launchd_bootstrap_service "$LAUNCHD_PLIST"; then
-    echo "Error: failed to bootstrap launchd service '$SERVICE_NAME'." >&2
-    echo "Hint: try manual checks:" >&2
-    echo "  plutil -lint \"$LAUNCHD_PLIST\"" >&2
-    echo "  launchctl print gui/$(id -u)/$SERVICE_NAME" >&2
-    echo "  launchctl print user/$(id -u)/$SERVICE_NAME" >&2
-    exit 1
+  if is_truthy "$AGENT_INSTALL_AUTOSTART"; then
+    if ! launchd_bootstrap_service "$LAUNCHD_PLIST"; then
+      echo "Error: failed to bootstrap launchd service '$SERVICE_NAME'." >&2
+      echo "Hint: try manual checks:" >&2
+      echo "  plutil -lint \"$LAUNCHD_PLIST\"" >&2
+      echo "  launchctl print gui/$(id -u)/$SERVICE_NAME" >&2
+      echo "  launchctl print user/$(id -u)/$SERVICE_NAME" >&2
+      exit 1
+    fi
+    echo "  launchd domain: $LAUNCHD_DOMAIN"
+  else
+    echo "  Service autostart disabled for this install run (AGENT_INSTALL_AUTOSTART=$AGENT_INSTALL_AUTOSTART)."
   fi
-  echo "  launchd domain: $LAUNCHD_DOMAIN"
 fi
 
 MCP_ENV_VARS=()
@@ -254,20 +271,24 @@ else
 fi
 
 echo "[8/9] Running deployment verification..."
-VERIFY_ARGS=(
-  --api "$AGENT_CHAT_API"
-  --server "$AGENT_CHAT_SERVER"
-  --samples "${VERIFY_SAMPLES:-3}"
-  --interval "${VERIFY_INTERVAL:-15}"
-  --service "$SERVICE_NAME"
-)
-if [ -n "${API_TOKEN:-}" ]; then
-  VERIFY_ARGS+=(--token "$API_TOKEN")
+if is_truthy "$AGENT_INSTALL_SKIP_VERIFY" || ! is_truthy "$AGENT_INSTALL_AUTOSTART"; then
+  echo "  Skipping verification (AGENT_INSTALL_SKIP_VERIFY=$AGENT_INSTALL_SKIP_VERIFY, AGENT_INSTALL_AUTOSTART=$AGENT_INSTALL_AUTOSTART)."
+else
+  VERIFY_ARGS=(
+    --api "$AGENT_CHAT_API"
+    --server "$AGENT_CHAT_SERVER"
+    --samples "${VERIFY_SAMPLES:-3}"
+    --interval "${VERIFY_INTERVAL:-15}"
+    --service "$SERVICE_NAME"
+  )
+  if [ -n "${API_TOKEN:-}" ]; then
+    VERIFY_ARGS+=(--token "$API_TOKEN")
+  fi
+  if [ -n "${VERIFY_AGENT:-}" ]; then
+    VERIFY_ARGS+=(--agent "$VERIFY_AGENT")
+  fi
+  "$BIN_SOURCE_DIR/verify-remote" "${VERIFY_ARGS[@]}"
 fi
-if [ -n "${VERIFY_AGENT:-}" ]; then
-  VERIFY_ARGS+=(--agent "$VERIFY_AGENT")
-fi
-"$BIN_SOURCE_DIR/verify-remote" "${VERIFY_ARGS[@]}"
 
 echo "[9/9] Done. Service status:"
 if [ "$IS_LINUX" = true ]; then
