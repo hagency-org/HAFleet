@@ -502,11 +502,8 @@ async function syncAgentAvatarToDmRooms(agentName) {
   const dmRooms = state.dmRooms || {};
   for (const [key, roomId] of Object.entries(dmRooms)) {
     if (!roomId) continue;
-    // Match dm:agentname or agentname:other or other:agentname
-    const parts = key.split(':');
-    const isDmKey = parts[0] === 'dm' && parts[1] === agentName;
-    const isAgentKey = parts.includes(agentName) && parts[0] !== 'dm';
-    if (!isDmKey && !isAgentKey) continue;
+    // Only sync human DM rooms (dm:agentname), not agent-to-agent rooms
+    if (key !== `dm:${agentName}`) continue;
     if (state.roomAvatars[roomId] === mxcUri) continue;
     try {
       await setRoomAvatar(roomId, mxcUri);
