@@ -236,7 +236,24 @@ app.get('/api/agents/status', async (_req, res) => {
         const isRemote = a.server && a.server !== 'local';
         const idleMs = getPaneIdleMs(a.tmux);
         const alive = isRemote ? true : idleMs >= 0; // remote agents assumed alive; local checked via tmux
-        return { name: a.name, tmux: a.tmux, idleMs, active: alive && idleMs < IDLE_THRESHOLD, alive, remote: !!isRemote, type: a.type || 'agent', server: a.server || null };
+        const runtimeActiveNow = typeof a.activeNow === 'boolean' ? a.activeNow : null;
+        const runtimeActiveDurationSec = Number.isFinite(Number(a.activeDurationSec)) ? Math.max(0, Number(a.activeDurationSec)) : 0;
+        const runtimeIdleDurationSec = Number.isFinite(Number(a.idleDurationSec)) ? Math.max(0, Number(a.idleDurationSec)) : 0;
+        const computedActive = alive && idleMs >= 0 ? idleMs < IDLE_THRESHOLD : false;
+        const activeNow = runtimeActiveNow !== null ? runtimeActiveNow : computedActive;
+        return {
+          name: a.name,
+          tmux: a.tmux,
+          idleMs,
+          active: activeNow,
+          activeNow,
+          activeDurationSec: runtimeActiveDurationSec,
+          idleDurationSec: runtimeIdleDurationSec,
+          alive,
+          remote: !!isRemote,
+          type: a.type || 'agent',
+          server: a.server || null,
+        };
       });
     res.json(result);
   } catch (e) {
@@ -933,6 +950,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 #agent-info .ai-tag-codex{background:rgba(52,211,153,0.15);color:#34d399;border:1px solid rgba(52,211,153,0.25)}
 #agent-info .ai-tag-active{background:rgba(52,211,153,0.1);color:#34d399;border:1px solid rgba(52,211,153,0.2)}
 #agent-info .ai-tag-inactive{background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.08)}
+#agent-info .ai-tag-runtime{background:rgba(0,240,255,0.06);color:rgba(0,240,255,0.6);border:1px solid rgba(0,240,255,0.18)}
 #agent-info .ai-groups{color:rgba(168,85,247,0.5)}
 
 /* Message log (bottom) */
@@ -1057,6 +1075,17 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   const IDLE_THRESHOLD_MS = ${IDLE_THRESHOLD};
   const IDLE_THRESHOLD_SEC = ${IDLE_THRESHOLD_SEC};
   function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+  function toNonNegInt(v, fallback = 0) {
+    const n = Number.parseInt(v, 10);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  }
+  function fmtSpanSec(sec) {
+    const s = Math.max(0, toNonNegInt(sec, 0));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm' + (s % 60) + 's';
+    if (s < 86400) return Math.floor(s / 3600) + 'h' + Math.floor((s % 3600) / 60) + 'm';
+    return Math.floor(s / 86400) + 'd' + Math.floor((s % 86400) / 3600) + 'h';
+  }
 
   // ── Message log ─────────────────────────────
   const msglogEl = document.getElementById('msglog');
@@ -1203,6 +1232,38 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   let monitoredAgent = null;
   let monitorPaused  = false;
   let agentStatusList = [];
+  const STATUS_SYNC_INTERVAL_MS = 30000;
+  let lastStatusSyncAt = 0;
+  let statusSyncTimer = null;
+
+  function updateSelectedRuntimeBadge() {
+    if (!monitoredAgent) return;
+    const snap = agentStatusList.find(x => x.name === monitoredAgent.name);
+    if (!snap) return;
+    const stateEl = document.getElementById('ai-runtime-state');
+    if (stateEl) {
+      const activeNow = !!snap.activeNow;
+      stateEl.textContent = activeNow ? 'ACTIVE' : 'IDLE';
+      stateEl.classList.toggle('ai-tag-active', activeNow);
+      stateEl.classList.toggle('ai-tag-inactive', !activeNow);
+    }
+    const metricsEl = document.getElementById('ai-runtime-metrics');
+    if (metricsEl) {
+      const a = toNonNegInt(snap.activeDurationSec, 0);
+      const i = toNonNegInt(snap.idleDurationSec, 0);
+      metricsEl.textContent = 'A ' + fmtSpanSec(a) + ' · I ' + fmtSpanSec(i);
+    }
+  }
+
+  function scheduleStatusSyncSoon(reason = '') {
+    const now = Date.now();
+    if (now - lastStatusSyncAt < 3000) return;
+    if (statusSyncTimer) return;
+    statusSyncTimer = setTimeout(() => {
+      statusSyncTimer = null;
+      fetchAgentStatus(reason || 'switch').catch(() => {});
+    }, 400);
+  }
 
   btnPause.addEventListener('click', () => {
     monitorPaused = !monitorPaused;
@@ -1245,6 +1306,18 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
       const res = await fetch('/api/agents/detail/' + encodeURIComponent(name));
       if (!res.ok) return;
       const d = await res.json();
+      const statusSnap = agentStatusList.find(x => x.name === name) || {};
+      const activeNow = typeof statusSnap.activeNow === 'boolean'
+        ? statusSnap.activeNow
+        : (typeof d.active === 'boolean' ? d.active : false);
+      const activeDurationSec = toNonNegInt(
+        statusSnap.activeDurationSec !== undefined ? statusSnap.activeDurationSec : d.activeDurationSec,
+        0
+      );
+      const idleDurationSec = toNonNegInt(
+        statusSnap.idleDurationSec !== undefined ? statusSnap.idleDurationSec : d.idleDurationSec,
+        0
+      );
       const parts = [];
       // Type tag
       if (d.agentType) {
@@ -1252,10 +1325,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
         parts.push('<span class="ai-tag ' + cls + '">' + esc(d.agentType.toUpperCase()) + '</span>');
       }
       // Active tag
-      if (d.active !== undefined) {
-        parts.push('<span class="ai-tag ' + (d.active ? 'ai-tag-active' : 'ai-tag-inactive') + '">'
-          + (d.active ? 'ACTIVE' : 'IDLE') + '</span>');
-      }
+      parts.push('<span class="ai-tag ' + (activeNow ? 'ai-tag-active' : 'ai-tag-inactive') + '" id="ai-runtime-state">'
+        + (activeNow ? 'ACTIVE' : 'IDLE') + '</span>');
+      parts.push('<span class="ai-tag ai-tag-runtime" id="ai-runtime-metrics">A '
+        + esc(fmtSpanSec(activeDurationSec)) + ' · I ' + esc(fmtSpanSec(idleDurationSec)) + '</span>');
       parts.push('<br>');
       // Identity (editable)
       parts.push('<div class="ai-identity-row"><span class="ai-identity" id="ai-identity-text">'
@@ -1401,7 +1474,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     }
     const now = Date.now();
     for (const a of agents) {
-      if (a.active) agentLastActive[a.name] = now;
+      const isActive = typeof a.activeNow === 'boolean' ? a.activeNow : !!a.active;
+      if (isActive) agentLastActive[a.name] = now;
       else if (!agentLastActive[a.name]) agentLastActive[a.name] = 0;
     }
     // Sort: local alive → local idle → remote
@@ -1416,8 +1490,9 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     });
     const html = agents.map(a => {
       const isRemote = a.remote;
-      const dot = isRemote ? '&#9826;' : (a.active ? '&#9679;' : '&#9675;');
-      const cls = ['agent-btn', isRemote ? 'remote-agent' : (a.active ? 'active-agent' : 'inactive-agent'), a.name === selectedName ? 'selected' : ''].filter(Boolean).join(' ');
+      const isActive = typeof a.activeNow === 'boolean' ? a.activeNow : !!a.active;
+      const dot = isRemote ? '&#9826;' : (isActive ? '&#9679;' : '&#9675;');
+      const cls = ['agent-btn', isRemote ? 'remote-agent' : (isActive ? 'active-agent' : 'inactive-agent'), a.name === selectedName ? 'selected' : ''].filter(Boolean).join(' ');
       return '<button class="' + cls + '" data-name="' + esc(a.name) + '" data-tmux="' + esc(a.tmux || '') + '">'
         + '<span class="dot">' + dot + '</span>' + esc(a.name) + '</button>';
     }).join('');
@@ -1432,11 +1507,59 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     }
   }
 
-  async function fetchAgentStatus() {
+  async function fetchAgentStatus(_reason = 'poll') {
     try {
       const res = await fetch('/api/agents/status');
-      if (res.ok) renderAgentButtons(await res.json());
+      if (!res.ok) return;
+      const rows = await res.json();
+      const now = Date.now();
+      const normalized = rows.map(row => ({
+        ...row,
+        activeNow: typeof row.activeNow === 'boolean' ? row.activeNow : !!row.active,
+        activeDurationSec: toNonNegInt(row.activeDurationSec, 0),
+        idleDurationSec: toNonNegInt(row.idleDurationSec, 0),
+        _localTickAt: now,
+      }));
+      renderAgentButtons(normalized);
+      updateSelectedRuntimeBadge();
+      lastStatusSyncAt = now;
     } catch {}
+  }
+
+  function tickAgentDurationsLocal() {
+    if (!agentStatusList.length) return;
+    const now = Date.now();
+    let switched = false;
+    for (const a of agentStatusList) {
+      const last = Number(a._localTickAt) || now;
+      const deltaSec = Math.floor((now - last) / 1000);
+      if (deltaSec <= 0) continue;
+      a._localTickAt = last + deltaSec * 1000;
+
+      if (typeof a.idleMs === 'number' && a.idleMs >= 0) {
+        a.idleMs += deltaSec * 1000;
+      }
+
+      const wasActive = !!a.activeNow;
+      if (wasActive) {
+        a.activeDurationSec = toNonNegInt(a.activeDurationSec, 0) + deltaSec;
+        a.idleDurationSec = 0;
+        if (typeof a.idleMs === 'number' && a.idleMs >= IDLE_THRESHOLD_MS) {
+          a.activeNow = false;
+          a.active = false;
+          a.activeDurationSec = 0;
+          a.idleDurationSec = 0;
+          switched = true;
+        }
+      } else {
+        a.activeNow = false;
+        a.active = false;
+        a.activeDurationSec = 0;
+        a.idleDurationSec = toNonNegInt(a.idleDurationSec, 0) + deltaSec;
+      }
+    }
+    updateSelectedRuntimeBadge();
+    if (switched) scheduleStatusSyncSoon('state-switch');
   }
 
   // ── SSE ─────────────────────────────────────
@@ -1464,8 +1587,9 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     // Initial state
     try { const r = await fetch('/api/queue'); queueItems = await r.json(); renderQueuePanel(); } catch {}
     try { const r = await fetch('/api/reminders'); reminderItems = await r.json(); renderReminderPanel(); } catch {}
-    await fetchAgentStatus();
-    setInterval(fetchAgentStatus, 5000);
+    await fetchAgentStatus('init');
+    setInterval(() => fetchAgentStatus('poll'), STATUS_SYNC_INTERVAL_MS);
+    setInterval(tickAgentDurationsLocal, 1000);
     connectSSE();
   }
 
