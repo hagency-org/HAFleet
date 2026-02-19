@@ -752,6 +752,7 @@ class MatrixBridge {
         mentions: [],
         reply_to: replyTo,
         source: 'matrix',
+        source_room: roomId,
         target_type: 'agent',
       });
       if (eventId && result?.id) this.rememberMatrixEvent(eventId, result.id);
@@ -773,6 +774,7 @@ class MatrixBridge {
         mentions,
         reply_to: replyTo,
         source: 'matrix',
+        source_room: roomId,
       });
       if (eventId && result?.id) this.rememberMatrixEvent(eventId, result.id);
     }
@@ -1089,6 +1091,22 @@ class MatrixBridge {
           console.warn(`Failed to parse SSE dm_ensure event: ${e.message}`);
         }
       });
+      es.on('agent_blocked', (data) => {
+        try {
+          const event = JSON.parse(data);
+          this.onAgentBlocked(event);
+        } catch (e) {
+          console.warn(`Failed to parse SSE agent_blocked event: ${e.message}`);
+        }
+      });
+      es.on('agent_recovered', (data) => {
+        try {
+          const event = JSON.parse(data);
+          this.onAgentRecovered(event);
+        } catch (e) {
+          console.warn(`Failed to parse SSE agent_recovered event: ${e.message}`);
+        }
+      });
       es.on('error', () => {
         console.error('SSE disconnected, reconnecting in 5s...');
         setTimeout(connect, 5000);
@@ -1115,6 +1133,42 @@ class MatrixBridge {
       console.error(`DM ensure error: ${e.message}`);
       this.postWarning(`DM ensure error for ${agentName} ↔ ${humanName}: ${e.message}`);
     }
+  }
+
+  async onAgentBlocked(event) {
+    const agentName = (typeof event?.agent === 'string' && event.agent.trim()) ? event.agent.trim() : '';
+    if (!agentName) return;
+    const reason = (typeof event?.reason === 'string' && event.reason.trim()) ? event.reason.trim() : 'unknown';
+    const targets = Array.isArray(event?.targets) ? event.targets : [];
+
+    const sentRooms = new Set();
+    for (const target of targets) {
+      const human = (typeof target?.human === 'string' && target.human.trim()) ? target.human.trim() : '';
+      let roomId = (typeof target?.roomId === 'string' && target.roomId.trim()) ? target.roomId.trim() : '';
+      if (!roomId && typeof target?.group === 'string' && target.group.trim()) {
+        roomId = roomForGroup(target.group.trim()) || '';
+      }
+      if (!roomId && human) {
+        try {
+          const ensured = await this.ensureHumanDmRoom(agentName, human);
+          if (ensured?.roomId) roomId = ensured.roomId;
+        } catch (e) {
+          console.warn(`Failed to ensure DM room for blocked alert (${agentName} -> ${human}): ${e.message}`);
+        }
+      }
+      if (!roomId || sentRooms.has(roomId)) continue;
+      sentRooms.add(roomId);
+
+      const pendingHint = target?.pending ? ' There are still unread human messages pending for this agent.' : '';
+      const text = `⚠️ Agent @${agentName} appears blocked (${reason}). It may not process messages until manually handled.${pendingHint}`;
+      await this.sendDeliveryNotice(roomId, text);
+    }
+  }
+
+  async onAgentRecovered(event) {
+    const agentName = (typeof event?.agent === 'string' && event.agent.trim()) ? event.agent.trim() : '';
+    if (!agentName) return;
+    console.log(`SSE: agent_recovered — ${agentName}`);
   }
 
   async onGroupCreated(group) {

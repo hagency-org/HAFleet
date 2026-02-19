@@ -11,6 +11,8 @@ const SCAN_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_SCAN_INTERVAL_MS
 const RECONNECT_MS = Number.parseInt(process.env.PUSH_RELAY_RECONNECT_MS || '5000', 10);
 const HEARTBEAT_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_HEARTBEAT_INTERVAL_MS || '15000', 10);
 const INJECT_DELAY_MS = Number.parseInt(process.env.PUSH_RELAY_INJECT_DELAY_MS || '300', 10);
+const BLOCK_SCAN_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_BLOCK_SCAN_INTERVAL_MS || '5000', 10);
+const BLOCK_TAIL_LINES = Number.parseInt(process.env.PUSH_RELAY_BLOCK_TAIL_LINES || '40', 10);
 
 const authHeaders = API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {};
 const localAgents = new Set();
@@ -21,6 +23,15 @@ const DELIVERED_CAP = 10000;
 let reconnectTimer = null;
 let heartbeatTimer = null;
 let warnedMissingTmux = false;
+const blockedState = new Map();
+
+const BLOCK_PATTERNS = [
+  { reason: 'select-mode', re: /\bselect mode\b/i },
+  { reason: 'plan-mode', re: /\bplan mode\b/i },
+  { reason: 'approval-mode-toggle', re: /bypass permissions on \(shift\+tab to cycle\)/i },
+  { reason: 'update-required', re: /updates?\s+available:|update available.*agent-update|run ['"`]?agent-update/i },
+  { reason: 'interactive-confirm', re: /choose (an )?option|press (enter|return) to continue|confirm .*continue/i },
+];
 
 function warnMissingTmuxOnce() {
   if (warnedMissingTmux) return;
@@ -73,6 +84,21 @@ async function postJson(path, body) {
   return fetch(`${API_BASE}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
 }
 
+async function reportRuntime(agentName, payload) {
+  try {
+    const res = await postJson(`/api/agents/${encodeURIComponent(agentName)}/runtime`, {
+      server: SERVER_ID,
+      ...payload,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`status ${res.status} ${body}`.trim());
+    }
+  } catch (e) {
+    console.error(`[push-relay] runtime report failed for ${agentName}: ${e.message}`);
+  }
+}
+
 function listLocalTmuxSessions() {
   if (!TMUX_BIN) return new Set();
   try {
@@ -81,6 +107,44 @@ function listLocalTmuxSessions() {
   } catch {
     return new Set();
   }
+}
+
+function captureTail(target, lines = BLOCK_TAIL_LINES) {
+  if (!TMUX_BIN) return '';
+  try {
+    return runTmux(['capture-pane', '-t', target, '-p', '-S', `-${Math.max(10, lines)}`], {
+      encoding: 'utf-8',
+      timeout: 4000,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    }).trimEnd();
+  } catch {
+    return '';
+  }
+}
+
+function currentPaneCommand(target) {
+  if (!TMUX_BIN) return '';
+  try {
+    return runTmux(['list-panes', '-t', target, '-F', '#{pane_current_command}'], {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    }).trim().split('\n')[0] || '';
+  } catch {
+    return '';
+  }
+}
+
+function detectBlockedReason(tail, paneCmd = '') {
+  if (!tail) return null;
+  const cmd = String(paneCmd || '').toLowerCase();
+  // Only check interactive AI clients to avoid false positives from shell output.
+  if (cmd && !cmd.includes('claude') && !cmd.includes('codex')) return null;
+
+  for (const p of BLOCK_PATTERNS) {
+    if (p.re.test(tail)) return p.reason;
+  }
+  return null;
 }
 
 async function refreshAgentsSnapshot() {
@@ -96,6 +160,33 @@ async function refreshAgentsSnapshot() {
     for (const row of rows) agentsByName.set(row.name, row);
   } catch (e) {
     console.error(`[push-relay] refresh agents failed: ${e.message}`);
+  }
+}
+
+async function scanBlockedStates() {
+  const live = new Set(localAgents);
+
+  for (const [agentName, prev] of blockedState.entries()) {
+    if (live.has(agentName)) continue;
+    blockedState.delete(agentName);
+    if (prev?.blocked) {
+      await reportRuntime(agentName, { blocked: false, reason: null, tail: '', command: '' });
+    }
+  }
+
+  for (const agentName of live) {
+    if (!shouldHandleAgent(agentName)) continue;
+    const target = agentsByName.get(agentName)?.tmux || `${agentName}:0.0`;
+    const paneCmd = currentPaneCommand(target);
+    const tail = captureTail(target, BLOCK_TAIL_LINES);
+    const reason = detectBlockedReason(tail, paneCmd);
+    const blocked = Boolean(reason);
+    const prev = blockedState.get(agentName) || { blocked: false, reason: null };
+    const changed = prev.blocked !== blocked || prev.reason !== reason;
+    if (!changed) continue;
+
+    blockedState.set(agentName, { blocked, reason });
+    await reportRuntime(agentName, { blocked, reason, tail, command: paneCmd });
   }
 }
 
@@ -274,14 +365,21 @@ function connectSse() {
 async function main() {
   await refreshAgentsSnapshot();
   await sendHeartbeat();
+  await scanBlockedStates();
   setInterval(() => {
-    refreshAgentsSnapshot().catch((e) => console.error(`[push-relay] refresh failed: ${e.message}`));
+    refreshAgentsSnapshot()
+      .then(() => scanBlockedStates())
+      .catch((e) => console.error(`[push-relay] refresh failed: ${e.message}`));
   }, SCAN_INTERVAL_MS);
   heartbeatTimer = setInterval(() => {
     refreshAgentsSnapshot()
       .then(() => sendHeartbeat())
       .catch((e) => console.error(`[push-relay] heartbeat loop failed: ${e.message}`));
   }, HEARTBEAT_INTERVAL_MS);
+  setInterval(() => {
+    scanBlockedStates()
+      .catch((e) => console.error(`[push-relay] block scan failed: ${e.message}`));
+  }, BLOCK_SCAN_INTERVAL_MS);
   connectSse();
 }
 

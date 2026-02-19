@@ -12,6 +12,9 @@ const CORS_ALLOWED_ORIGIN = (process.env.FRP_API_ORIGIN || 'https://agentchat.an
 const HEARTBEAT_TTL_MS = Number.parseInt(process.env.AGENT_HEARTBEAT_TTL_MS || '90000', 10);
 const SERVER_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_SERVER_SWEEP_INTERVAL_MS || '15000', 10);
 const HUMAN_SUMMARY_LIMIT = Number.parseInt(process.env.HUMAN_SUMMARY_LIMIT || '50', 10);
+const RULE_PUSH_ACK_TIMEOUT_MS = Number.parseInt(process.env.AGENT_RULE_PUSH_ACK_TIMEOUT_MS || '90000', 10);
+const RULE_REPLY_TIMEOUT_MS = Number.parseInt(process.env.AGENT_RULE_REPLY_TIMEOUT_MS || '180000', 10);
+const RULE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_RULE_SWEEP_INTERVAL_MS || '15000', 10);
 
 mkdirSync(DATA_DIR, { recursive: true });
 
@@ -115,6 +118,7 @@ const groups = loadJsonSync('groups.json', {});
 const messages = loadJsonSync('messages.json', []);
 const cursors = loadJsonSync('cursors.json', {});
 const servers = loadJsonSync('servers.json', {});
+const agentRuntime = loadJsonSync('agent_runtime.json', {});
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const agentsBeforeNormalization = JSON.stringify(agents);
 
@@ -221,6 +225,28 @@ for (const [serverId, server] of Object.entries(servers)) {
   server.agentCount = Number(server.agentCount) || server.agents.length || 0;
 }
 
+for (const [agentName, runtime] of Object.entries(agentRuntime)) {
+  if (!runtime || typeof runtime !== 'object') {
+    delete agentRuntime[agentName];
+    continue;
+  }
+  runtime.agent = agentName;
+  runtime.blocked = runtime.blocked === true;
+  runtime.blockedReason = (typeof runtime.blockedReason === 'string' && runtime.blockedReason.trim())
+    ? runtime.blockedReason.trim()
+    : null;
+  runtime.blockedSince = Number(runtime.blockedSince) || null;
+  runtime.updatedAt = Number(runtime.updatedAt) || 0;
+  runtime.lastSeen = Number(runtime.lastSeen) || 0;
+  runtime.lastPushNotifyAt = Number(runtime.lastPushNotifyAt) || 0;
+  runtime.lastInboxCheckAt = Number(runtime.lastInboxCheckAt) || 0;
+  runtime.lastAgentOutboundAt = Number(runtime.lastAgentOutboundAt) || 0;
+  runtime.lastBlockedTail = (typeof runtime.lastBlockedTail === 'string') ? runtime.lastBlockedTail : '';
+  runtime.lastBlockedCommand = (typeof runtime.lastBlockedCommand === 'string') ? runtime.lastBlockedCommand : '';
+  runtime.lastBlockedServer = normalizeServer(runtime.lastBlockedServer);
+  if (!runtime.rules || typeof runtime.rules !== 'object') runtime.rules = {};
+}
+
 function nextMsgId() {
   msgCounter++;
   saveJson('.msg_counter', msgCounter);
@@ -232,6 +258,7 @@ function saveGroups() { saveJson('groups.json', groups); }
 function saveMessages() { saveJson('messages.json', messages); }
 function saveCursors() { saveJson('cursors.json', cursors); }
 function saveServers() { saveJson('servers.json', servers); }
+function saveAgentRuntime() { saveJson('agent_runtime.json', agentRuntime); }
 
 function ensureAgentRecord(name, defaults = {}) {
   const agentName = normalizeAgentName(name);
@@ -445,6 +472,249 @@ function formatSenderList(names) {
   return `${names.slice(0, 3).join(', ')}, +${names.length - 3} more`;
 }
 
+function ensureAgentRuntimeRecord(name) {
+  const agentName = normalizeAgentName(name);
+  if (!agentName) return null;
+  if (!agentRuntime[agentName] || typeof agentRuntime[agentName] !== 'object') {
+    agentRuntime[agentName] = {
+      agent: agentName,
+      blocked: false,
+      blockedReason: null,
+      blockedSince: null,
+      updatedAt: 0,
+      lastSeen: 0,
+      lastPushNotifyAt: 0,
+      lastInboxCheckAt: 0,
+      lastAgentOutboundAt: 0,
+      lastBlockedTail: '',
+      lastBlockedCommand: '',
+      lastBlockedServer: null,
+      rules: {},
+    };
+  }
+  return agentRuntime[agentName];
+}
+
+function markAgentPushNotified(agentName) {
+  const runtime = ensureAgentRuntimeRecord(agentName);
+  if (!runtime) return;
+  const now = Date.now();
+  runtime.lastPushNotifyAt = now;
+  runtime.lastSeen = now;
+  runtime.updatedAt = now;
+  saveAgentRuntime();
+}
+
+function markAgentInboxChecked(agentName) {
+  const runtime = ensureAgentRuntimeRecord(agentName);
+  if (!runtime) return;
+  const now = Date.now();
+  runtime.lastInboxCheckAt = now;
+  runtime.lastSeen = now;
+  runtime.updatedAt = now;
+  saveAgentRuntime();
+}
+
+function markAgentOutbound(agentName) {
+  const runtime = ensureAgentRuntimeRecord(agentName);
+  if (!runtime) return;
+  const now = Date.now();
+  runtime.lastAgentOutboundAt = now;
+  runtime.lastSeen = now;
+  runtime.updatedAt = now;
+  saveAgentRuntime();
+}
+
+function isHumanMessageToAgent(msg, agentName) {
+  if (!msg || msg.type !== 'human') return false;
+  if (msg.to === agentName) return true;
+  if (msg.group && Array.isArray(msg.mentions) && msg.mentions.includes(agentName)) return true;
+  return false;
+}
+
+function collectBlockedHumanTargets(agentName) {
+  const unreadHuman = getUnreadInboxMessages(agentName).unread
+    .filter(m => m.type === 'human' && m.from && m.from !== agentName);
+  const selected = new Map();
+  const unreadIds = new Set(unreadHuman.map(m => m.id));
+
+  for (const msg of unreadHuman) {
+    const prev = selected.get(msg.from);
+    if (!prev || compareMsgOrder(msg, prev) > 0) {
+      selected.set(msg.from, msg);
+    }
+  }
+
+  if (selected.size === 0) {
+    let latest = null;
+    for (const msg of messages) {
+      if (!isHumanMessageToAgent(msg, agentName)) continue;
+      if (msg.from === agentName) continue;
+      if (!latest || compareMsgOrder(msg, latest) > 0) latest = msg;
+    }
+    if (latest) selected.set(latest.from, latest);
+  }
+
+  const targets = [...selected.values()]
+    .sort(compareMsgOrder)
+    .map(msg => ({
+      human: msg.from,
+      roomId: (typeof msg.sourceRoom === 'string' && msg.sourceRoom.trim()) ? msg.sourceRoom.trim() : null,
+      group: msg.group || null,
+      messageId: msg.id,
+      pending: unreadIds.has(msg.id),
+      ts: msg.ts,
+    }));
+
+  return {
+    hasPendingHuman: unreadHuman.length > 0,
+    targets,
+  };
+}
+
+function applyAgentBlockedRuntime(agentName, payload = {}) {
+  const runtime = ensureAgentRuntimeRecord(agentName);
+  if (!runtime) return null;
+
+  const now = Date.now();
+  const blockedNow = payload.blocked === true;
+  const reasonNow = blockedNow && typeof payload.reason === 'string' && payload.reason.trim()
+    ? payload.reason.trim()
+    : null;
+  const tailNow = blockedNow && typeof payload.tail === 'string' ? payload.tail : '';
+  const cmdNow = blockedNow && typeof payload.command === 'string' ? payload.command : '';
+  const serverNow = blockedNow ? normalizeServer(payload.server) : null;
+
+  const prevBlocked = runtime.blocked === true;
+  const prevReason = runtime.blockedReason || null;
+
+  runtime.blocked = blockedNow;
+  runtime.blockedReason = reasonNow;
+  runtime.lastSeen = now;
+  runtime.updatedAt = now;
+  if (blockedNow) {
+    runtime.blockedSince = prevBlocked ? (runtime.blockedSince || now) : now;
+    runtime.lastBlockedTail = tailNow;
+    runtime.lastBlockedCommand = cmdNow;
+    runtime.lastBlockedServer = serverNow;
+  } else {
+    runtime.blockedSince = null;
+    runtime.lastBlockedTail = '';
+    runtime.lastBlockedCommand = '';
+    runtime.lastBlockedServer = null;
+  }
+  saveAgentRuntime();
+
+  const becameBlocked = !prevBlocked && blockedNow;
+  const reasonChanged = prevBlocked && blockedNow && reasonNow && reasonNow !== prevReason;
+  const recovered = prevBlocked && !blockedNow;
+
+  if (becameBlocked || reasonChanged) {
+    const blockedSummary = `Agent '${agentName}' entered blocked state`;
+    const { hasPendingHuman, targets } = collectBlockedHumanTargets(agentName);
+    const fullLines = [
+      `Agent: ${agentName}`,
+      `Reason: ${reasonNow || 'unknown'}`,
+      `Server: ${serverNow || 'local'}`,
+      `Pending human messages: ${hasPendingHuman ? 'yes' : 'no'}`,
+      `Target humans: ${targets.map(t => t.human).join(', ') || 'none'}`,
+    ];
+    if (tailNow) {
+      fullLines.push('');
+      fullLines.push('Tail sample:');
+      fullLines.push(tailNow);
+    }
+    emitSystemInfo(blockedSummary, fullLines.join('\n'));
+    broadcastSSE('agent_blocked', {
+      agent: agentName,
+      reason: reasonNow || 'unknown',
+      blockedSince: runtime.blockedSince || now,
+      server: serverNow || null,
+      hasPendingHuman,
+      targets,
+    });
+  } else if (recovered) {
+    emitSystemInfo(`Agent '${agentName}' recovered from blocked state`, `Agent '${agentName}' is no longer blocked.`);
+    broadcastSSE('agent_recovered', {
+      agent: agentName,
+      recoveredAt: now,
+    });
+  }
+
+  return runtime;
+}
+
+function setAgentRuleState(agentName, code, active, buildDetail) {
+  const runtime = ensureAgentRuntimeRecord(agentName);
+  if (!runtime) return;
+  if (!runtime.rules || typeof runtime.rules !== 'object') runtime.rules = {};
+  const now = Date.now();
+  const prev = runtime.rules[code] || { active: false, changedAt: 0, firedAt: 0 };
+  if (prev.active === active) return;
+
+  runtime.rules[code] = {
+    active,
+    changedAt: now,
+    firedAt: active ? now : prev.firedAt || 0,
+  };
+  runtime.updatedAt = now;
+  saveAgentRuntime();
+
+  if (active) {
+    const detail = typeof buildDetail === 'function' ? buildDetail() : '';
+    emitSystemInfo(
+      `Agent '${agentName}' rule alert: ${code}`,
+      detail || `Rule ${code} triggered for agent '${agentName}'.`
+    );
+  }
+}
+
+function sweepAgentRules() {
+  const now = Date.now();
+  for (const [agentName, agent] of Object.entries(agents)) {
+    if (!isAgentRecord(agent)) continue;
+    const state = getAgentDeliveryState(agentName);
+    const runtime = ensureAgentRuntimeRecord(agentName);
+    if (!runtime) continue;
+
+    if (!state.online || runtime.blocked === true) {
+      setAgentRuleState(agentName, 'no_inbox_check_after_push', false);
+      setAgentRuleState(agentName, 'inbox_checked_no_reply', false);
+      continue;
+    }
+
+    const unreadHuman = getUnreadInboxMessages(agentName).unread.filter(m => m.type === 'human');
+    const needsInboxCheck = runtime.lastPushNotifyAt > 0
+      && runtime.lastInboxCheckAt < runtime.lastPushNotifyAt
+      && (now - runtime.lastPushNotifyAt) >= RULE_PUSH_ACK_TIMEOUT_MS;
+    setAgentRuleState(agentName, 'no_inbox_check_after_push', needsInboxCheck, () => {
+      return [
+        `Agent: ${agentName}`,
+        `lastPushNotifyAt: ${runtime.lastPushNotifyAt ? new Date(runtime.lastPushNotifyAt).toISOString() : 'n/a'}`,
+        `lastInboxCheckAt: ${runtime.lastInboxCheckAt ? new Date(runtime.lastInboxCheckAt).toISOString() : 'n/a'}`,
+        `timeoutMs: ${RULE_PUSH_ACK_TIMEOUT_MS}`,
+      ].join('\n');
+    });
+
+    const checkedButNoReply = runtime.lastInboxCheckAt > 0
+      && runtime.lastInboxCheckAt >= runtime.lastPushNotifyAt
+      && runtime.lastAgentOutboundAt < runtime.lastInboxCheckAt
+      && unreadHuman.length > 0
+      && (now - runtime.lastInboxCheckAt) >= RULE_REPLY_TIMEOUT_MS;
+    setAgentRuleState(agentName, 'inbox_checked_no_reply', checkedButNoReply, () => {
+      const humans = [...new Set(unreadHuman.map(m => m.from).filter(Boolean))];
+      return [
+        `Agent: ${agentName}`,
+        `lastInboxCheckAt: ${new Date(runtime.lastInboxCheckAt).toISOString()}`,
+        `lastAgentOutboundAt: ${runtime.lastAgentOutboundAt ? new Date(runtime.lastAgentOutboundAt).toISOString() : 'n/a'}`,
+        `unreadHuman: ${unreadHuman.length}`,
+        `senders: ${humans.join(', ') || 'none'}`,
+        `timeoutMs: ${RULE_REPLY_TIMEOUT_MS}`,
+      ].join('\n');
+    });
+  }
+}
+
 function ensureServerRecord(serverId) {
   if (!serverId) return null;
   if (!servers[serverId] || typeof servers[serverId] !== 'object') {
@@ -529,6 +799,7 @@ function getAgentDeliveryState(name) {
 
 function serializeAgent(agent) {
   const state = getAgentDeliveryState(agent.name);
+  const runtime = ensureAgentRuntimeRecord(agent.name);
   return {
     ...agent,
     server: normalizeServer(agent.server),
@@ -538,6 +809,9 @@ function serializeAgent(agent) {
     lastSeen: state.lastSeen,
     serverLastSeen: state.serverLastSeen,
     offlineReason: state.offlineReason,
+    blocked: runtime?.blocked === true,
+    blockedReason: runtime?.blockedReason || null,
+    blockedSince: runtime?.blockedSince || null,
   };
 }
 
@@ -765,11 +1039,12 @@ async function pushNotify(agentName, msg) {
   }
 
   try {
-    await fetch(PUSH_QUEUE_URL, {
+    const resp = await fetch(PUSH_QUEUE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ from: 'agent-chat-v2', to: agent.tmux, payload: notification }),
     });
+    if (resp.ok) markAgentPushNotified(agentName);
   } catch (e) {
     console.error(`Push notify failed for ${agentName}:`, e.message);
   }
@@ -1009,6 +1284,53 @@ app.post('/api/agents/:name/offline', (req, res) => {
   res.json({ ok: true, agent: serializeAgent(agent) });
 });
 
+app.post('/api/agents/:name/runtime', (req, res) => {
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+
+  const blocked = req.body?.blocked === true;
+  const reason = (typeof req.body?.reason === 'string' && req.body.reason.trim())
+    ? req.body.reason.trim()
+    : null;
+  const tail = (typeof req.body?.tail === 'string') ? req.body.tail : '';
+  const command = (typeof req.body?.command === 'string') ? req.body.command : '';
+  const server = normalizeServer(req.body?.server);
+
+  let agent = agents[agentName];
+  if (!isAgentRecord(agent)) {
+    const ensured = ensureAgentRecord(agentName, {
+      server,
+      tmux: `${agentName}:0.0`,
+      online: true,
+      type: 'agent',
+      kind: 'agent',
+      offlineReason: null,
+    });
+    if (!ensured) return res.status(400).json({ error: 'invalid agent name' });
+    agent = ensured.agent;
+    saveAgents();
+  }
+
+  const runtime = applyAgentBlockedRuntime(agentName, {
+    blocked,
+    reason,
+    tail,
+    command,
+    server,
+  });
+  if (!runtime) return res.status(500).json({ error: 'runtime update failed' });
+  res.json({
+    ok: true,
+    runtime: {
+      agent: agentName,
+      blocked: runtime.blocked === true,
+      blockedReason: runtime.blockedReason || null,
+      blockedSince: runtime.blockedSince || null,
+      updatedAt: runtime.updatedAt || Date.now(),
+    },
+  });
+});
+
 // ── Groups CRUD ───────────────────────────────────────────────────────
 app.post('/api/groups', (req, res) => {
   const { name, members } = req.body;
@@ -1107,11 +1429,14 @@ app.post('/api/dm/ensure', (req, res) => {
 
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
   const targetType = typeof target_type === 'string' ? target_type.trim().toLowerCase() : 'auto';
+  const sourceRoom = (typeof source_room === 'string' && source_room.trim() && source_room.length <= 255)
+    ? source_room.trim()
+    : null;
   // Normalize literal \n (two chars) to actual newlines — some agents double-escape them
   const normNl = s => s.replace(/\\n/g, '\n');
   const rawSummary = typeof summary === 'string' ? normNl(summary) : '';
@@ -1211,6 +1536,7 @@ app.post('/api/messages', (req, res) => {
     mentions: [...textMentions],
     reply_to: reply_to || null,
     source: source || 'api',
+    sourceRoom,
   };
 
   const warnings = [];
@@ -1278,6 +1604,9 @@ app.post('/api/messages', (req, res) => {
   messages.push(msg);
   saveMessages();
   broadcastSSE('message', msg);
+  if (senderIsAgent) {
+    markAgentOutbound(fromName);
+  }
 
   // Push notifications
   if (msg.to && directTargetKind === 'agent' && msg.to !== msg.from && !isSuppressedForAgent(msg, msg.to)) {
@@ -1401,6 +1730,7 @@ app.get('/api/inbox/:agent', (req, res) => {
   if (advanceInboxCursor(cursor, unread)) {
     saveCursors();
   }
+  markAgentInboxChecked(agentName);
 
   res.json({ dm, group });
 });
@@ -1473,11 +1803,13 @@ app.get('/api/agents/:name/groups', (req, res) => {
 function shutdown() {
   console.log('Shutting down, saving data...');
   refreshServerLiveness();
+  sweepAgentRules();
   saveAgents();
   saveGroups();
   saveMessages();
   saveCursors();
   saveServers();
+  saveAgentRuntime();
   process.exit(0);
 }
 process.on('SIGTERM', shutdown);
@@ -1486,6 +1818,10 @@ process.on('SIGINT', shutdown);
 setInterval(() => {
   refreshServerLiveness();
 }, SERVER_SWEEP_INTERVAL_MS);
+
+setInterval(() => {
+  sweepAgentRules();
+}, RULE_SWEEP_INTERVAL_MS);
 
 // ── Start ─────────────────────────────────────────────────────────────
 app.listen(PORT, '127.0.0.1', () => {
