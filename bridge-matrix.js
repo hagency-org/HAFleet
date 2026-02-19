@@ -22,6 +22,7 @@ const MATRIX_SERVER_NAME = (process.env.MATRIX_SERVER_NAME || new URL(HOMESERVER
 const AGENT_PASSWORD_SECRET = (process.env.MATRIX_AGENT_PASSWORD_SECRET || '').trim();
 const AGENT_PASSWORD_TEMPLATE = (process.env.MATRIX_AGENT_PASSWORD_TEMPLATE || '').trim();
 const ALLOW_LEGACY_AGENT_PASSWORD = (process.env.MATRIX_ALLOW_LEGACY_AGENT_PASSWORD || 'false').trim().toLowerCase() === 'true';
+const AUTO_AVATAR_ENABLED = (process.env.MATRIX_AUTO_AVATAR || 'false').trim().toLowerCase() === 'true';
 const DATA_DIR = path.resolve('data/matrix');
 const AGENT_META_ROOT = path.resolve('data/agents');
 const AGENT_AVATAR_STYLE_VERSION = 2;
@@ -62,6 +63,9 @@ if (ALLOW_LEGACY_AGENT_PASSWORD) {
   } else {
     console.warn('MATRIX_ALLOW_LEGACY_AGENT_PASSWORD=true enabled. This keeps compatibility but is less secure.');
   }
+}
+if (!AUTO_AVATAR_ENABLED) {
+  console.warn('MATRIX_AUTO_AVATAR is disabled. Automatic avatar generation/sync is off; use agent-chat-cli avatar <name> <image-file> for manual updates.');
 }
 
 function makeUserId(localpart) {
@@ -210,9 +214,8 @@ async function ensureAgentAccount(agentName) {
     state.agentTokens[agentName] = data.access_token;
     saveState();
     console.log(`Registered Matrix account for agent: ${agentName} → ${agentUserId(agentName)}`);
-    // Set display name + avatar
+    // Set display name
     await setDisplayName(data.access_token, agentName);
-    await ensureAgentAvatar(agentName);
     return data.access_token;
   }
 }
@@ -424,6 +427,7 @@ function parseDmAgentName(roomName) {
 }
 
 async function ensureAgentAvatar(agentName) {
+  if (!AUTO_AVATAR_ENABLED) return;
   const token = state.agentTokens[agentName];
   if (!token) return;
 
@@ -456,6 +460,7 @@ async function ensureAgentAvatar(agentName) {
 }
 
 async function ensureRoomAvatar(roomId, name) {
+  if (!AUTO_AVATAR_ENABLED) return;
   if (!state.botToken) return;
 
   const dmAgentName = parseDmAgentName(name);
@@ -750,7 +755,9 @@ class MatrixBridge {
 
     // 7. Scan all joined rooms for unmapped groups + backfill avatars
     await this.scanJoinedRooms();
-    await this.backfillAvatars();
+    if (AUTO_AVATAR_ENABLED) {
+      await this.backfillAvatars();
+    }
     setInterval(() => this.scanJoinedRooms(), 120_000);
 
     // 8. Periodically check agent accounts for pending invites
@@ -1196,6 +1203,7 @@ class MatrixBridge {
   }
 
   async backfillAvatars() {
+    if (!AUTO_AVATAR_ENABLED) return;
     // Agent user avatars
     for (const agentName of Object.keys(state.agentTokens)) {
       await ensureAgentAvatar(agentName);
@@ -1389,6 +1397,10 @@ class MatrixBridge {
             setCustomAgentAvatar(name, Buffer.from(image, 'base64'), mime || 'image/png');
           } else {
             console.log(`SSE: agent_avatar request — ${name}${force ? ' (force)' : ''}`);
+            if (!AUTO_AVATAR_ENABLED) {
+              console.log(`Auto avatar disabled; skipping generated avatar request for ${name}`);
+              return;
+            }
             if (force) delete state.agentAvatars[name];
             ensureAgentAvatar(name);
           }

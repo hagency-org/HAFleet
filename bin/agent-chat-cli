@@ -424,7 +424,8 @@ PY
     else
       force="false"
       [ "$arg" = "--force" ] && force="true"
-      echo "Setting avatar for: $name (force=$force) ..."
+      echo "Requesting generated avatar for: $name (force=$force) ..."
+      echo "Note: if MATRIX_AUTO_AVATAR is disabled on bridge, this will be ignored. Use image file upload for manual avatar changes."
       _curl -X POST "$API/api/agents/$name/avatar?force=$force" \
         -H 'Content-Type: application/json' \
         -d "{\"generate\":$force}" | python3 -m json.tool
@@ -447,7 +448,7 @@ PY
     echo "  status [name]                       Status table or one agent status"
     echo "  agent <name>                        Agent details"
     echo "  identity <name> <text>              Set agent identity"
-    echo "  avatar <name> [image|--force]       Set avatar (auto-gen or custom image)"
+    echo "  avatar <name> [image|--force]       Set avatar (custom image; auto-gen may be disabled)"
     echo ""
     echo "DM management:"
     echo "  dm <agent> <human>                  Ensure DM room exists (Matrix)"
