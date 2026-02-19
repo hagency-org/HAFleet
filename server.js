@@ -6,6 +6,12 @@ import path from 'path';
 
 const PORT = 8084;
 const LOG_FILE = path.resolve('logs/messages.jsonl');
+const DEFAULT_IDLE_THRESHOLD_MS = 30_000;
+const envIdleThreshold = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || `${DEFAULT_IDLE_THRESHOLD_MS}`, 10);
+const IDLE_THRESHOLD = Number.isFinite(envIdleThreshold) && envIdleThreshold > 0
+  ? envIdleThreshold
+  : DEFAULT_IDLE_THRESHOLD_MS;
+const IDLE_THRESHOLD_SEC = Math.max(1, Math.ceil(IDLE_THRESHOLD / 1000));
 
 const app = express();
 
@@ -71,7 +77,6 @@ setInterval(async () => {
 }, 500);
 
 // ── Message Queue with Idle Detection ────────────────────────────────
-const IDLE_THRESHOLD = 30_000; // 30s idle before delivery
 const POLL_INTERVAL  = 1_000;  // check every 1s
 
 app.use(express.json());
@@ -231,7 +236,7 @@ app.get('/api/agents/status', async (_req, res) => {
         const isRemote = a.server && a.server !== 'local';
         const idleMs = getPaneIdleMs(a.tmux);
         const alive = isRemote ? true : idleMs >= 0; // remote agents assumed alive; local checked via tmux
-        return { name: a.name, tmux: a.tmux, idleMs, active: alive && idleMs < 30_000, alive, remote: !!isRemote, type: a.type || 'agent', server: a.server || null };
+        return { name: a.name, tmux: a.tmux, idleMs, active: alive && idleMs < IDLE_THRESHOLD, alive, remote: !!isRemote, type: a.type || 'agent', server: a.server || null };
       });
     res.json(result);
   } catch (e) {
@@ -302,7 +307,7 @@ app.get('/api/agents/detail/:name', async (req, res) => {
   // Idle info + detect agent type from process if missing
   if (detail.tmux) {
     detail.idleMs = getPaneIdleMs(detail.tmux);
-    detail.active = detail.idleMs >= 0 && detail.idleMs < 30_000;
+    detail.active = detail.idleMs >= 0 && detail.idleMs < IDLE_THRESHOLD;
     if (!detail.agentType) {
       try {
         const panePid = execFileSync('tmux', ['list-panes', '-t', detail.tmux, '-F', '#{pane_pid}'], { encoding: 'utf-8', timeout: 2000 }).trim();
@@ -1049,6 +1054,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 
 <script>
 (() => {
+  const IDLE_THRESHOLD_MS = ${IDLE_THRESHOLD};
+  const IDLE_THRESHOLD_SEC = ${IDLE_THRESHOLD_SEC};
   function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
   // ── Message log ─────────────────────────────
@@ -1088,13 +1095,13 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
       const idleMs = item.targetIdleMs || 0;
       let idleStr, idleClass;
       if (idleMs < 0) { idleStr = 'pane not found'; idleClass = 'qi-idle-warn'; }
-      else if (idleMs >= 30000) {
+      else if (idleMs >= IDLE_THRESHOLD_MS) {
         const s = Math.floor(idleMs / 1000);
         idleStr = 'idle ' + (s < 60 ? s + 's' : Math.floor(s/60) + 'm' + (s%60) + 's') + ' (delivering soon)';
         idleClass = 'qi-idle-ready';
       } else {
         const s = Math.floor(idleMs / 1000);
-        idleStr = 'target active (idle ' + s + 's / 30s)';
+        idleStr = 'target active (idle ' + s + 's / ' + IDLE_THRESHOLD_SEC + 's)';
         idleClass = 'qi-idle-busy';
       }
       const redir = item.redirectedFrom ? ' <span class="qi-redir">(was ' + esc(item.redirectedFrom) + ')</span>' : '';

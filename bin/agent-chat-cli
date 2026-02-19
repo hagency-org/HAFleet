@@ -20,6 +20,13 @@ set -euo pipefail
 
 API="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
 TOKEN="${API_TOKEN:-}"
+IDLE_THRESHOLD_MS_RAW="${AGENT_IDLE_THRESHOLD_MS:-30000}"
+if [[ "$IDLE_THRESHOLD_MS_RAW" =~ ^[0-9]+$ ]] && [ "$IDLE_THRESHOLD_MS_RAW" -gt 0 ]; then
+  IDLE_THRESHOLD_MS="$IDLE_THRESHOLD_MS_RAW"
+else
+  IDLE_THRESHOLD_MS="30000"
+fi
+IDLE_THRESHOLD_SEC="$(( (IDLE_THRESHOLD_MS + 999) / 1000 ))"
 
 _curl() {
   local extra_headers=()
@@ -130,7 +137,7 @@ case "$cmd" in
     tmux_snapshot="$(_tmux_snapshot_json)"
     tmp_json="$(mktemp)"
     _curl "$API/api/agents" > "$tmp_json"
-    TMUX_SNAPSHOT="$tmux_snapshot" python3 - "$tmp_json" <<'PY'
+    TMUX_SNAPSHOT="$tmux_snapshot" IDLE_THRESHOLD_SEC="$IDLE_THRESHOLD_SEC" python3 - "$tmp_json" <<'PY'
 import json
 import os
 import sys
@@ -155,6 +162,7 @@ with open(sys.argv[1]) as f:
     agents = json.load(f)
 now_ms = int(time.time() * 1000)
 now_sec = int(time.time())
+threshold_sec = max(1, int(os.environ.get('IDLE_THRESHOLD_SEC', '30')))
 
 print("  NAME                 STATE    IDLE     LASTSEEN  SERVER         TYPE     TMUX")
 for a in sorted(agents, key=lambda x: x.get('name', '')):
@@ -171,7 +179,7 @@ for a in sorted(agents, key=lambda x: x.get('name', '')):
         idle_sec = max(0, now_sec - int(snap['session_activity']))
 
     if online and idle_sec is not None:
-        state = 'active' if idle_sec < 30 else 'idle'
+        state = 'active' if idle_sec < threshold_sec else 'idle'
     elif online:
         state = 'online'
     else:
@@ -194,7 +202,7 @@ PY
     if [ $# -eq 0 ]; then
       tmp_json="$(mktemp)"
       _curl "$API/api/agents" > "$tmp_json"
-      TMUX_SNAPSHOT="$tmux_snapshot" python3 - "$tmp_json" <<'PY'
+      TMUX_SNAPSHOT="$tmux_snapshot" IDLE_THRESHOLD_SEC="$IDLE_THRESHOLD_SEC" python3 - "$tmp_json" <<'PY'
 import json
 import os
 import sys
@@ -219,6 +227,7 @@ with open(sys.argv[1]) as f:
     agents = json.load(f)
 now_ms = int(time.time() * 1000)
 now_sec = int(time.time())
+threshold_sec = max(1, int(os.environ.get('IDLE_THRESHOLD_SEC', '30')))
 
 print("  NAME                 STATE    IDLE     LASTSEEN  SERVER         TYPE")
 for a in sorted(agents, key=lambda x: x.get('name', '')):
@@ -235,7 +244,7 @@ for a in sorted(agents, key=lambda x: x.get('name', '')):
         idle_sec = max(0, now_sec - int(snap['session_activity']))
 
     if online and idle_sec is not None:
-        state = 'active' if idle_sec < 30 else 'idle'
+        state = 'active' if idle_sec < threshold_sec else 'idle'
     elif online:
         state = 'online'
     else:
@@ -255,7 +264,7 @@ PY
       name="${1:?Usage: agent-chat-cli status [name]}"
       tmp_json="$(mktemp)"
       _curl "$API/api/agents/$name" > "$tmp_json"
-      TMUX_SNAPSHOT="$tmux_snapshot" python3 - "$tmp_json" <<'PY'
+      TMUX_SNAPSHOT="$tmux_snapshot" IDLE_THRESHOLD_SEC="$IDLE_THRESHOLD_SEC" python3 - "$tmp_json" <<'PY'
 import json
 import os
 import sys
@@ -284,6 +293,7 @@ if isinstance(obj, dict) and obj.get('error'):
 
 now_ms = int(time.time() * 1000)
 now_sec = int(time.time())
+threshold_sec = max(1, int(os.environ.get('IDLE_THRESHOLD_SEC', '30')))
 
 name = str(obj.get('name', '?'))
 typ = str(obj.get('type', '?'))
@@ -297,7 +307,7 @@ if snap and snap.get('session_activity'):
     idle_sec = max(0, now_sec - int(snap['session_activity']))
 
 if online and idle_sec is not None:
-    state = 'active' if idle_sec < 30 else 'idle'
+    state = 'active' if idle_sec < threshold_sec else 'idle'
 elif online:
     state = 'online'
 else:
