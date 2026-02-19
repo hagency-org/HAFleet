@@ -6,7 +6,7 @@ import path from 'path';
 
 const PORT = 8084;
 const LOG_FILE = path.resolve('logs/messages.jsonl');
-const DEFAULT_IDLE_THRESHOLD_MS = 30_000;
+const DEFAULT_IDLE_THRESHOLD_MS = 15_000;
 const envIdleThreshold = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || `${DEFAULT_IDLE_THRESHOLD_MS}`, 10);
 const IDLE_THRESHOLD = Number.isFinite(envIdleThreshold) && envIdleThreshold > 0
   ? envIdleThreshold
