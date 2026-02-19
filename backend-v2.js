@@ -1131,8 +1131,8 @@ async function pushNotify(agentName, msg) {
     const hasHuman = unread.some(m => m.type === 'human');
     const humanHint = hasHuman ? ' This includes messages from your human operator.' : '';
     const processHint = hasMcp
-      ? ' Read full context via check_inbox() first, then execute required work; do not reply to this summary alone.'
-      : ' Read full context first, then execute required work; do not reply to this summary alone.';
+      ? ' Read ALL messages via check_inbox() first. DO ALL JOBS before replying. After ALL WORK is done, send required replies.'
+      : ' Read ALL messages first. DO ALL JOBS before replying. After ALL WORK is done, send required replies.';
 
     if (hasMcp) {
       notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}. Use check_inbox() in agent-chat MCP to read all.${humanHint}${processHint}`;
