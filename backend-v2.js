@@ -1129,22 +1129,15 @@ async function pushNotify(agentName, msg) {
     const senderNames = [...new Set(unread.map(m => m.from).filter(Boolean))];
     const senderText = senderNames.length ? ` (from ${formatSenderList(senderNames)})` : '';
     const hasHuman = unread.some(m => m.type === 'human');
-    const hasRequest = unread.some(m => m.type === 'request');
     const humanHint = hasHuman ? ' This includes messages from your human operator.' : '';
-    const mergedNeedsReply = hasHuman || hasRequest;
+    const processHint = hasMcp
+      ? ' Read full context via check_inbox() first, then execute required work; do not reply to this summary alone.'
+      : ' Read full context first, then execute required work; do not reply to this summary alone.';
 
     if (hasMcp) {
-      const replyPart = mergedNeedsReply
-        ? ` Reply after ALL WORK is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply").`
-        : '';
-      notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}. Use check_inbox() in agent-chat MCP to read all.${humanHint}${replyPart}`;
+      notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}. Use check_inbox() in agent-chat MCP to read all.${humanHint}${processHint}`;
     } else {
-      const senderAgent = agents[replyTo];
-      const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
-      const replyPart = mergedNeedsReply
-        ? ` Reply after ALL WORK is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>".`
-        : '';
-      notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}.${humanHint}${replyPart}`;
+      notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}.${humanHint}${processHint}`;
     }
   } else {
     const isHuman = msg.type === 'human';
