@@ -219,11 +219,12 @@ if (JSON.stringify(cursors) !== cursorsBeforeNormalization) {
 
 for (const [serverId, server] of Object.entries(servers)) {
   if (!server || typeof server !== 'object') {
-    servers[serverId] = { id: serverId, lastSeen: 0, online: false, updatedAt: Date.now(), sessions: [], agents: [], agentCount: 0 };
+    servers[serverId] = { id: serverId, lastSeen: 0, heartbeatAt: 0, online: false, updatedAt: Date.now(), sessions: [], agents: [], agentCount: 0 };
     continue;
   }
   server.id = server.id || serverId;
   server.lastSeen = Number(server.lastSeen) || 0;
+  server.heartbeatAt = Number(server.heartbeatAt) || server.lastSeen || 0;
   server.online = Boolean(server.online);
   server.updatedAt = Number(server.updatedAt) || server.lastSeen || 0;
   if (!Array.isArray(server.sessions)) server.sessions = [];
@@ -859,6 +860,7 @@ function ensureServerRecord(serverId) {
     servers[serverId] = {
       id: serverId,
       lastSeen: 0,
+      heartbeatAt: 0,
       online: false,
       updatedAt: Date.now(),
       sessions: [],
@@ -881,6 +883,17 @@ function markAgentsOfflineForServer(serverId, reason, clearTmux = false) {
   return changed;
 }
 
+function clearServerLiveState(server, now = Date.now()) {
+  if (!server || typeof server !== 'object') return false;
+  let changed = false;
+  if (server.online !== false) { server.online = false; changed = true; }
+  if (!Array.isArray(server.sessions) || server.sessions.length !== 0) { server.sessions = []; changed = true; }
+  if (!Array.isArray(server.agents) || server.agents.length !== 0) { server.agents = []; changed = true; }
+  if ((Number(server.agentCount) || 0) !== 0) { server.agentCount = 0; changed = true; }
+  if ((Number(server.updatedAt) || 0) !== now) { server.updatedAt = now; changed = true; }
+  return changed;
+}
+
 function refreshServerLiveness() {
   const now = Date.now();
   let serversChanged = false;
@@ -888,11 +901,16 @@ function refreshServerLiveness() {
   for (const [serverId, server] of Object.entries(servers)) {
     if (!server || typeof server !== 'object') continue;
     const wasOnline = Boolean(server.online);
-    const isOnline = server.lastSeen > 0 && (now - server.lastSeen) <= HEARTBEAT_TTL_MS;
+    const heartbeatAt = Number(server.heartbeatAt) || 0;
+    const isOnline = heartbeatAt > 0 && (now - heartbeatAt) <= HEARTBEAT_TTL_MS;
     if (server.online !== isOnline) {
-      server.online = isOnline;
-      server.updatedAt = now;
-      serversChanged = true;
+      if (!isOnline) {
+        if (clearServerLiveState(server, now)) serversChanged = true;
+      } else {
+        server.online = true;
+        server.updatedAt = now;
+        serversChanged = true;
+      }
       if (wasOnline && !isOnline) {
         if (markAgentsOfflineForServer(serverId, `server-offline:${serverId}`, true)) {
           agentsChanged = true;
@@ -1053,6 +1071,7 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   const liveSet = new Set(liveAgents);
 
   server.lastSeen = now;
+  server.heartbeatAt = now;
   server.online = true;
   server.updatedAt = now;
   server.sourceIp = sourceIp || null;
@@ -1371,9 +1390,9 @@ app.post('/api/servers/:id/offline', (req, res) => {
   if (!serverId) return res.status(400).json({ error: 'server required' });
   const server = ensureServerRecord(serverId);
   const wasOnline = Boolean(server.online);
-  server.lastSeen = Date.now();
-  server.online = false;
-  server.updatedAt = Date.now();
+  const now = Date.now();
+  server.heartbeatAt = 0;
+  clearServerLiveState(server, now);
   if (markAgentsOfflineForServer(serverId, `server-offline:${serverId}`, true)) saveAgents();
   saveServers();
   if (wasOnline) {

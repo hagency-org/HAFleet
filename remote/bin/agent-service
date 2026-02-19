@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+_resolve_script_dir() {
+  local src="$0"
+  while [ -L "$src" ]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+SCRIPT_DIR="$(_resolve_script_dir)"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
 OS_NAME="$(uname -s)"
 UID_NUM="$(id -u)"
 ACTION=""
@@ -8,6 +21,28 @@ PROFILE="all"
 QUIET=false
 declare -a EXPLICIT_SERVICES=()
 declare -a TARGET_SERVICES=()
+ENV_LOADED=false
+
+load_agent_env() {
+  if [ "$ENV_LOADED" = true ]; then
+    return
+  fi
+  local candidates=()
+  if [ -n "${AGENT_CHAT_ENV:-}" ]; then
+    candidates+=("$AGENT_CHAT_ENV")
+  fi
+  candidates+=("$BASE_DIR/remote/.env" "$BASE_DIR/.env")
+  local envf
+  for envf in "${candidates[@]}"; do
+    [ -f "$envf" ] || continue
+    set -a
+    # shellcheck disable=SC1090
+    source "$envf"
+    set +a
+    break
+  done
+  ENV_LOADED=true
+}
 
 usage() {
   cat <<'EOF'
@@ -210,6 +245,44 @@ kill_push_relay_orphans() {
   fi
 }
 
+post_push_relay_offline_notice() {
+  local reason="${1:-service-paused}"
+  load_agent_env
+  local api_base="${AGENT_CHAT_API:-}"
+  local server_id="${AGENT_CHAT_SERVER:-}"
+  if [ -z "$api_base" ] || [ -z "$server_id" ]; then
+    log "agent-chat-push-relay: skipped offline notice (missing AGENT_CHAT_API or AGENT_CHAT_SERVER)"
+    return 0
+  fi
+
+  local url="${api_base%/}/api/servers/${server_id}/offline"
+  local http_code
+  if [ -n "${API_TOKEN:-}" ]; then
+    http_code="$(curl --noproxy '*' -sS -m 5 -o /dev/null -w '%{http_code}' \
+      -X POST "$url" \
+      -H "Authorization: Bearer ${API_TOKEN}" \
+      -H 'Content-Type: application/json' \
+      -d "{\"reason\":\"$reason\"}" 2>/dev/null || true)"
+  else
+    http_code="$(curl --noproxy '*' -sS -m 5 -o /dev/null -w '%{http_code}' \
+      -X POST "$url" \
+      -H 'Content-Type: application/json' \
+      -d "{\"reason\":\"$reason\"}" 2>/dev/null || true)"
+  fi
+
+  case "$http_code" in
+    200|201|204)
+      log "agent-chat-push-relay: reported backend offline ($reason)"
+      ;;
+    "")
+      echo "Warning: failed to report backend offline ($reason): no HTTP response" >&2
+      ;;
+    *)
+      echo "Warning: failed to report backend offline ($reason): HTTP $http_code" >&2
+      ;;
+  esac
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     pause|resume|restart|status)
@@ -291,6 +364,7 @@ for svc in "${TARGET_SERVICES[@]}"; do
             log "$svc: stopped"
             if is_push_relay_service "$svc"; then
               kill_push_relay_orphans
+              post_push_relay_offline_notice "service-paused"
             fi
           else
             echo "Error: failed to stop $svc" >&2
@@ -336,6 +410,7 @@ for svc in "${TARGET_SERVICES[@]}"; do
           log "$svc: stopped"
           if is_push_relay_service "$svc"; then
             kill_push_relay_orphans
+            post_push_relay_offline_notice "service-paused"
           fi
         else
           log "$svc: not installed on this host"

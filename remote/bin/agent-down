@@ -225,6 +225,11 @@ show_archive_tail_and_hint() {
 kill_session() {
   echo "Killing tmux session '$NAME'..."
   tmux kill-session -t "$TMUX_TARGET" 2>/dev/null || true
+  sleep 0.2
+  if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
+    echo "Error: tmux session '$NAME' is still alive after kill attempt." >&2
+    return 1
+  fi
 }
 
 send_exit() {
@@ -275,8 +280,8 @@ if [ "$FORCE" = true ]; then
   capture_archive
   show_archive_tail_and_hint
   update_meta_last_down
-  post_lifecycle "Agent '$NAME' stopped (--kill) on ${SERVER_ID:-local}"
   kill_session
+  post_lifecycle "Agent '$NAME' stopped (--kill) on ${SERVER_ID:-local}"
   mark_backend_offline "agent-down-kill"
   echo "Done (--kill)."
   exit 0
@@ -305,7 +310,7 @@ if [ "$AGENT_TYPE" = "claude" ] && [ -z "$RESUME_HINT" ]; then
 fi
 
 update_meta_last_down
-post_lifecycle "Agent '$NAME' stopped on ${SERVER_ID:-local}"
 kill_session
+post_lifecycle "Agent '$NAME' stopped on ${SERVER_ID:-local}"
 mark_backend_offline "agent-down"
 echo "Done."
