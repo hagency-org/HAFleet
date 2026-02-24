@@ -661,100 +661,50 @@ function renderMarkdownToMatrixHtml(raw) {
   const codeBlocks = [];
   const withCodePlaceholders = normalized.replace(/```([a-zA-Z0-9_-]+)?\n?([\s\S]*?)```/g, (_m, lang, code) => {
     const safeCode = escapeHtml(code).replace(/\n$/, '');
-    const safeLang = lang ? ` class="language-${escapeHtmlAttr(lang)}"` : '';
-    const html = `<pre><code${safeLang}>${safeCode}</code></pre>`;
+    const langLabel = lang ? `${escapeHtml(lang)}\n` : '';
+    const html = `<code>${langLabel}${safeCode.replace(/\n/g, '<br>')}</code>`;
     const idx = codeBlocks.push(html) - 1;
     return `@@BLOCK${idx}@@`;
   });
 
   const lines = withCodePlaceholders.split('\n');
-  const html = [];
-  let paragraph = [];
-  let listType = null;
-  let listItems = [];
-  let quoteLines = [];
-
-  const flushParagraph = () => {
-    if (!paragraph.length) return;
-    const content = paragraph.map(line => renderMarkdownInline(line)).join('<br>');
-    html.push(`<p>${content}</p>`);
-    paragraph = [];
-  };
-
-  const flushList = () => {
-    if (!listType || !listItems.length) return;
-    const tag = listType === 'ol' ? 'ol' : 'ul';
-    html.push(`<${tag}>${listItems.map(item => `<li>${renderMarkdownInline(item)}</li>`).join('')}</${tag}>`);
-    listType = null;
-    listItems = [];
-  };
-
-  const flushQuote = () => {
-    if (!quoteLines.length) return;
-    const quoteHtml = renderMarkdownToMatrixHtml(quoteLines.join('\n'));
-    html.push(`<blockquote>${quoteHtml}</blockquote>`);
-    quoteLines = [];
-  };
+  const out = [];
 
   for (const line of lines) {
     const blockMatch = line.match(/^@@BLOCK(\d+)@@$/);
     if (blockMatch) {
-      flushParagraph();
-      flushList();
-      flushQuote();
-      html.push(codeBlocks[Number(blockMatch[1])] || '');
+      out.push(codeBlocks[Number(blockMatch[1])] || '');
       continue;
     }
 
     const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
-    const quoteMatch = line.match(/^>\s?(.*)$/);
     const unorderedMatch = line.match(/^\s*[-*+]\s+(.+)$/);
     const orderedMatch = line.match(/^\s*\d+\.\s+(.+)$/);
-    const blank = line.trim().length === 0;
-
-    if (quoteMatch) {
-      flushParagraph();
-      flushList();
-      quoteLines.push(quoteMatch[1]);
-      continue;
-    }
-    flushQuote();
-
-    if (blank) {
-      flushParagraph();
-      flushList();
+    const quoteMatch = line.match(/^>\s?(.*)$/);
+    if (line.trim().length === 0) {
+      out.push('');
       continue;
     }
     if (headingMatch) {
-      flushParagraph();
-      flushList();
-      const level = headingMatch[1].length;
-      html.push(`<h${level}>${renderMarkdownInline(headingMatch[2])}</h${level}>`);
+      out.push(`<strong>${renderMarkdownInline(headingMatch[2])}</strong>`);
       continue;
     }
     if (unorderedMatch) {
-      flushParagraph();
-      if (listType && listType !== 'ul') flushList();
-      listType = 'ul';
-      listItems.push(unorderedMatch[1]);
+      out.push(`• ${renderMarkdownInline(unorderedMatch[1])}`);
       continue;
     }
     if (orderedMatch) {
-      flushParagraph();
-      if (listType && listType !== 'ol') flushList();
-      listType = 'ol';
-      listItems.push(orderedMatch[1]);
+      out.push(`1. ${renderMarkdownInline(orderedMatch[1])}`);
       continue;
     }
-    paragraph.push(line);
+    if (quoteMatch) {
+      out.push(`&gt; ${renderMarkdownInline(quoteMatch[1])}`);
+      continue;
+    }
+    out.push(renderMarkdownInline(line));
   }
 
-  flushQuote();
-  flushParagraph();
-  flushList();
-
-  if (!html.length) return '<p></p>';
-  return html.join('');
+  return out.join('<br>');
 }
 
 // ── Extract agent name from Matrix user ID ───────────────────────────
