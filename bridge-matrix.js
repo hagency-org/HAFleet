@@ -642,7 +642,7 @@ function renderMarkdownInline(raw) {
   const codeTokens = [];
   text = text.replace(/`([^`\n]+)`/g, (_m, code) => {
     const idx = codeTokens.push(`<code>${code}</code>`) - 1;
-    return `\u0000INL${idx}\u0000`;
+    return `@@INL${idx}@@`;
   });
   text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label, url) => {
     const safeUrl = escapeHtmlAttr(url);
@@ -653,7 +653,7 @@ function renderMarkdownInline(raw) {
   text = text.replace(/~~([^~]+)~~/g, '<del>$1</del>');
   text = text.replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s).,!?:;])/g, '$1<em>$2</em>');
   text = text.replace(/(^|[\s(])_([^_\n]+)_(?=$|[\s).,!?:;])/g, '$1<em>$2</em>');
-  return text.replace(/\u0000INL(\d+)\u0000/g, (_m, idx) => codeTokens[Number(idx)] || '');
+  return text.replace(/@@INL(\d+)@@/g, (_m, idx) => codeTokens[Number(idx)] || '');
 }
 
 function renderMarkdownToMatrixHtml(raw) {
@@ -664,7 +664,7 @@ function renderMarkdownToMatrixHtml(raw) {
     const safeLang = lang ? ` class="language-${escapeHtmlAttr(lang)}"` : '';
     const html = `<pre><code${safeLang}>${safeCode}</code></pre>`;
     const idx = codeBlocks.push(html) - 1;
-    return `\u0000BLOCK${idx}\u0000`;
+    return `@@BLOCK${idx}@@`;
   });
 
   const lines = withCodePlaceholders.split('\n');
@@ -697,7 +697,7 @@ function renderMarkdownToMatrixHtml(raw) {
   };
 
   for (const line of lines) {
-    const blockMatch = line.match(/^\u0000BLOCK(\d+)\u0000$/);
+    const blockMatch = line.match(/^@@BLOCK(\d+)@@$/);
     if (blockMatch) {
       flushParagraph();
       flushList();
