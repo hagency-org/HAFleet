@@ -13,6 +13,8 @@ const HEARTBEAT_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_HEARTBEAT_I
 const INJECT_DELAY_MS = Number.parseInt(process.env.PUSH_RELAY_INJECT_DELAY_MS || '300', 10);
 const BLOCK_SCAN_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_BLOCK_SCAN_INTERVAL_MS || '5000', 10);
 const BLOCK_TAIL_LINES = Number.parseInt(process.env.PUSH_RELAY_BLOCK_TAIL_LINES || '40', 10);
+const BLOCK_RECENT_LINES = Number.parseInt(process.env.PUSH_RELAY_BLOCK_RECENT_LINES || '14', 10);
+const SKIP_LOG_THROTTLE_MS = Number.parseInt(process.env.PUSH_RELAY_SKIP_LOG_THROTTLE_MS || '30000', 10);
 const IDLE_THRESHOLD_MS = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '15000', 10);
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.floor((IDLE_THRESHOLD_MS + 999) / 1000));
 
@@ -28,10 +30,11 @@ let warnedMissingTmux = false;
 const blockedState = new Map();
 const activityState = new Map();
 const runtimeReportDigest = new Map();
+const skipReasonLastLog = new Map();
 
 const BLOCK_PATTERNS = [
-  { reason: 'select-mode', re: /\bselect mode\b/i },
-  { reason: 'plan-mode', re: /\bplan mode\b/i },
+  { reason: 'select-mode', re: /(?:^|\n)\s*(?:select mode|choose (?:an?\s+)?mode)\s*(?:\n|$)/i },
+  { reason: 'plan-mode', re: /(?:^|\n)\s*(?:[0-9]+[.)]\s*)?plan mode\s*(?:\n|$)/i },
   { reason: 'approval-mode-toggle', re: /bypass permissions on \(shift\+tab to cycle\)/i },
   { reason: 'update-required', re: /updates?\s+available:|update available.*agent-update|run ['"`]?agent-update/i },
   { reason: 'interactive-confirm', re: /choose (an )?option|press (enter|return) to continue|confirm .*continue/i },
@@ -157,6 +160,15 @@ function currentSessionActivitySec(targetOrSession) {
   }
 }
 
+function recentTailWindow(tail, maxLines = BLOCK_RECENT_LINES) {
+  const lines = String(tail || '')
+    .split(/\r?\n/)
+    .map(line => line.replace(/\s+$/g, ''))
+    .filter(line => line.trim().length > 0);
+  if (lines.length === 0) return '';
+  return lines.slice(-Math.max(1, maxLines)).join('\n');
+}
+
 function computeActivityMetrics(agentName, target) {
   const nowSec = Math.floor(Date.now() / 1000);
   const activitySec = currentSessionActivitySec(target);
@@ -204,9 +216,13 @@ function detectBlockedReason(tail, paneCmd = '') {
   const cmd = String(paneCmd || '').toLowerCase();
   // Only check interactive AI clients to avoid false positives from shell output.
   if (cmd && !cmd.includes('claude') && !cmd.includes('codex')) return null;
+  const window = recentTailWindow(tail, BLOCK_RECENT_LINES);
+  if (!window) return null;
+  // Common benign suggestion in Claude output; not an actual interaction block.
+  if (/tip:\s*use plan mode\b/i.test(window)) return null;
 
   for (const p of BLOCK_PATTERNS) {
-    if (p.re.test(tail)) return p.reason;
+    if (p.re.test(window)) return p.reason;
   }
   return null;
 }
@@ -368,32 +384,72 @@ function sleepMs(ms) {
 function pushToTmux(target, payload) {
   if (!TMUX_BIN) return false;
   const opts = { timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] };
+  const sendSequence = (resolvedTarget) => {
+    runTmux(['send-keys', '-l', '-t', resolvedTarget, payload], opts);
+    sleepMs(INJECT_DELAY_MS);
+    runTmux(['send-keys', '-t', resolvedTarget, 'Tab'], opts);
+    sleepMs(INJECT_DELAY_MS);
+    runTmux(['send-keys', '-t', resolvedTarget, 'Enter'], opts);
+    sleepMs(INJECT_DELAY_MS);
+    runTmux(['send-keys', '-t', resolvedTarget, 'Enter'], opts);
+    sleepMs(INJECT_DELAY_MS);
+    runTmux(['send-keys', '-t', resolvedTarget, 'C-m'], opts);
+    sleepMs(INJECT_DELAY_MS);
+    runTmux(['send-keys', '-t', resolvedTarget, 'C-m'], opts);
+  };
+  const sessionFallback = String(target || '').split(':', 1)[0];
   try {
-    runTmux(['send-keys', '-l', '-t', target, payload], opts);
-    sleepMs(INJECT_DELAY_MS);
-    runTmux(['send-keys', '-t', target, 'Tab'], opts);
-    sleepMs(INJECT_DELAY_MS);
-    runTmux(['send-keys', '-t', target, 'Enter'], opts);
-    sleepMs(INJECT_DELAY_MS);
-    runTmux(['send-keys', '-t', target, 'Enter'], opts);
-    sleepMs(INJECT_DELAY_MS);
-    runTmux(['send-keys', '-t', target, 'C-m'], opts);
-    sleepMs(INJECT_DELAY_MS);
-    runTmux(['send-keys', '-t', target, 'C-m'], opts);
+    sendSequence(target);
     return true;
   } catch (e) {
-    console.error(`[push-relay] tmux inject failed for ${target}: ${e.message}`);
+    if (sessionFallback && sessionFallback !== target) {
+      try {
+        sendSequence(sessionFallback);
+        console.warn(`[push-relay] tmux inject fallback ${target} -> ${sessionFallback}`);
+        return true;
+      } catch (fallbackErr) {
+        const preview = String(payload || '').replace(/\s+/g, ' ').slice(0, 120);
+        console.error(`[push-relay] tmux inject failed for ${target} (fallback ${sessionFallback} failed: ${fallbackErr.message}) payload="${preview}"`);
+        return false;
+      }
+    }
+    const preview = String(payload || '').replace(/\s+/g, ' ').slice(0, 120);
+    console.error(`[push-relay] tmux inject failed for ${target}: ${e.message} payload="${preview}"`);
     return false;
   }
 }
 
-function shouldHandleAgent(agentName) {
-  if (!localAgents.has(agentName)) return false;
+function logDeliverySkip(agentName, msg, reason, extra = {}) {
+  const key = `${agentName}:${reason}`;
+  const now = Date.now();
+  const prev = skipReasonLastLog.get(key) || 0;
+  if ((now - prev) < SKIP_LOG_THROTTLE_MS) return;
+  skipReasonLastLog.set(key, now);
+  const parts = [
+    `[push-relay] skip ${msg?.id || 'unknown'} -> ${agentName}`,
+    `reason=${reason}`,
+  ];
+  if (msg?.group) parts.push(`group=${msg.group}`);
+  if (msg?.from) parts.push(`from=${msg.from}`);
+  if (extra.server) parts.push(`agentServer=${extra.server}`);
+  if (extra.target) parts.push(`target=${extra.target}`);
+  if (extra.note) parts.push(extra.note);
+  console.warn(parts.join(' | '));
+}
+
+function evaluateAgentRouting(agentName) {
+  if (!localAgents.has(agentName)) return { ok: false, reason: 'local-session-missing', target: `${agentName}:0.0` };
   const registered = agentsByName.get(agentName);
+  if (!registered) {
+    return { ok: true, reason: 'unregistered-session-compat', server: null, target: `${agentName}:0.0` };
+  }
   const agentServer = normalizeServer(registered?.server);
-  if (!agentServer) return true; // compatibility for old registrations
-  if (agentServer === 'local') return SERVER_ID === 'local';
-  return agentServer === SERVER_ID;
+  const target = registered?.tmux || `${agentName}:0.0`;
+  if (!agentServer) return { ok: true, reason: 'legacy-no-server', server: null, target };
+  if (agentServer === 'local') {
+    return { ok: SERVER_ID === 'local', reason: SERVER_ID === 'local' ? 'ok' : 'server-mismatch', server: agentServer, target };
+  }
+  return { ok: agentServer === SERVER_ID, reason: agentServer === SERVER_ID ? 'ok' : 'server-mismatch', server: agentServer, target };
 }
 
 function messageRecipients(msg) {
@@ -426,15 +482,21 @@ function handleMessage(raw) {
   if (!msg || !msg.id) return;
 
   for (const agentName of messageRecipients(msg)) {
-    if (!shouldHandleAgent(agentName)) continue;
+    const route = evaluateAgentRouting(agentName);
+    if (!route.ok) {
+      logDeliverySkip(agentName, msg, route.reason, { server: route.server, target: route.target });
+      continue;
+    }
     const dedupeKey = `${msg.id}:${agentName}`;
     if (delivered.has(dedupeKey)) continue;
 
-    const target = agentsByName.get(agentName)?.tmux || `${agentName}:0.0`;
+    const target = route.target || `${agentName}:0.0`;
     const notification = buildNotification(agentName, msg);
     if (pushToTmux(target, notification)) {
       markDelivered(dedupeKey);
       console.log(`[push-relay] delivered ${msg.id} -> ${agentName}`);
+    } else {
+      logDeliverySkip(agentName, msg, 'tmux-inject-failed', { server: route.server, target });
     }
   }
 }

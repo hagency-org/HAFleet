@@ -1,18 +1,28 @@
 import express from 'express';
 import { readFile as readFileAsync, open, stat as statAsync, appendFile } from 'fs/promises';
-import { writeFileSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { execSync, execFileSync } from 'child_process';
 import path from 'path';
 
 const PORT = 8084;
 const LOG_FILE = path.resolve('logs/messages.jsonl');
 const PUSH_DELIVERED_URL = 'http://127.0.0.1:8090/api/runtime/push-delivered';
-const DEFAULT_IDLE_THRESHOLD_MS = 15_000;
+const DEFAULT_IDLE_THRESHOLD_MS = 20_000;
 const envIdleThreshold = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || `${DEFAULT_IDLE_THRESHOLD_MS}`, 10);
 const IDLE_THRESHOLD = Number.isFinite(envIdleThreshold) && envIdleThreshold > 0
   ? envIdleThreshold
   : DEFAULT_IDLE_THRESHOLD_MS;
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.ceil(IDLE_THRESHOLD / 1000));
+
+// ── Server SSH config for remote tmux capture ────────────────────────
+const SERVER_SSH_PATH = path.resolve('data/server-ssh.json');
+function loadServerSsh() {
+  try {
+    if (!existsSync(SERVER_SSH_PATH)) return {};
+    return JSON.parse(readFileSync(SERVER_SSH_PATH, 'utf-8'));
+  } catch { return {}; }
+}
+let serverSshConfig = loadServerSsh();
 
 const app = express();
 
@@ -79,6 +89,7 @@ setInterval(async () => {
 
 // ── Message Queue with Idle Detection ────────────────────────────────
 const POLL_INTERVAL  = 1_000;  // check every 1s
+const REMINDER_MERGE_PREVIEW_LIMIT = Math.max(1, Number.parseInt(process.env.REMINDER_MERGE_PREVIEW_LIMIT || '20', 10));
 
 app.use(express.json());
 
@@ -97,6 +108,41 @@ function isBackendNotificationEntry(entry) {
 function targetSessionName(target) {
   if (typeof target !== 'string' || !target) return null;
   return target.split(':')[0] || null;
+}
+
+function dropQueuedBackendNotificationsBySource(agentName, sourceMsgId = null) {
+  const normalizedAgent = typeof agentName === 'string' ? agentName.trim() : '';
+  if (!normalizedAgent) return 0;
+  const sourceId = typeof sourceMsgId === 'string' ? sourceMsgId.trim() : '';
+  let removed = 0;
+
+  for (const [target, entries] of queue) {
+    const session = targetSessionName(target);
+    if (session !== normalizedAgent) continue;
+
+    const kept = [];
+    for (const entry of entries) {
+      const isNotification = isBackendNotificationEntry(entry);
+      const entrySource = (entry?.notifyMeta && typeof entry.notifyMeta.sourceMsgId === 'string')
+        ? entry.notifyMeta.sourceMsgId.trim()
+        : '';
+      const matchesSource = sourceId ? entrySource === sourceId : true;
+      if (isNotification && matchesSource) {
+        removed++;
+        continue;
+      }
+      kept.push(entry);
+    }
+
+    if (kept.length === 0) queue.delete(target);
+    else queue.set(target, kept);
+  }
+
+  if (removed > 0) {
+    saveQueue();
+    broadcastQueue();
+  }
+  return removed;
 }
 
 function sanitizeNotifyMeta(rawMeta) {
@@ -150,18 +196,33 @@ async function notifyPushDelivered(entry, deliveredAt) {
   }
 }
 
+async function fetchUnreadSnapshot(agentName) {
+  if (!agentName) return null;
+  try {
+    const res = await fetch(`http://127.0.0.1:8090/api/inbox/${encodeURIComponent(agentName)}/unread`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+function isStaleNotificationBySnapshot(entry, snapshot) {
+  if (!isBackendNotificationEntry(entry) || !snapshot) return false;
+  const unreadTotal = Number(snapshot?.unread_total || 0);
+  if (unreadTotal === 0) return true;
+  const recordedUnread = Number(entry?.notifyMeta?.unreadCount || 0);
+  // If unread has dropped since this notification was queued, the queued count is stale.
+  // Drop and wait for a fresh notification based on current unread state.
+  if (recordedUnread > 0 && unreadTotal < recordedUnread) return true;
+  return false;
+}
+
 async function isStaleNotificationEntry(entry) {
   if (!isBackendNotificationEntry(entry)) return false;
   const agentName = targetSessionName(entry.to);
-  if (!agentName) return false;
-  try {
-    const res = await fetch(`http://127.0.0.1:8090/api/inbox/${encodeURIComponent(agentName)}/unread`);
-    if (!res.ok) return false;
-    const data = await res.json();
-    return Number(data?.unread_total || 0) === 0;
-  } catch {
-    return false;
-  }
+  const snapshot = await fetchUnreadSnapshot(agentName);
+  return isStaleNotificationBySnapshot(entry, snapshot);
 }
 
 function archiveDroppedQueueEntries(entries, reason, target) {
@@ -174,6 +235,79 @@ function archiveDroppedQueueEntries(entries, reason, target) {
     entry,
   }));
   appendFile(QUEUE_DROPPED_FILE, lines.join('\n') + '\n').catch(() => {});
+}
+
+function mergeReminderEntryItems(targetEntry, sourceEntry) {
+  const existing = normalizeReminderItems(targetEntry);
+  const incoming = normalizeReminderItems(sourceEntry);
+  const items = existing.concat(incoming);
+  targetEntry.reminderItems = items;
+  targetEntry.reminderCount = items.length;
+  targetEntry.payload = renderReminderPayload(items);
+}
+
+function compactReminderEntriesInBucket(entries) {
+  if (!Array.isArray(entries) || entries.length <= 1) return { changed: false, entries: entries || [] };
+
+  const compacted = [];
+  let changed = false;
+  let currentMergedReminder = null;
+
+  for (const entry of entries) {
+    if (entry?.isReminder === true) {
+      if (currentMergedReminder) {
+        mergeReminderEntryItems(currentMergedReminder, entry);
+        changed = true;
+      } else {
+        const normalized = { ...entry };
+        const items = normalizeReminderItems(entry);
+        normalized.reminderItems = items;
+        normalized.reminderCount = items.length;
+        normalized.payload = renderReminderPayload(items);
+        compacted.push(normalized);
+        currentMergedReminder = normalized;
+      }
+      continue;
+    }
+
+    compacted.push(entry);
+    currentMergedReminder = null;
+  }
+
+  return { changed, entries: compacted };
+}
+
+function compactReminderQueue() {
+  let changed = false;
+  let mergedEntries = 0;
+  for (const [target, entries] of queue) {
+    const before = entries.length;
+    const result = compactReminderEntriesInBucket(entries);
+    if (!result.changed) continue;
+    queue.set(target, result.entries);
+    changed = true;
+    mergedEntries += Math.max(0, before - result.entries.length);
+  }
+  return { changed, mergedEntries };
+}
+
+function normalizeReminderQueue() {
+  let changed = false;
+  for (const [, entries] of queue) {
+    for (const entry of entries) {
+      if (entry?.isReminder !== true) continue;
+      const items = normalizeReminderItems(entry);
+      const payload = renderReminderPayload(items);
+      const count = items.length;
+      if (!Array.isArray(entry.reminderItems) || entry.reminderCount !== count || entry.payload !== payload) {
+        entry.reminderItems = items;
+        entry.reminderCount = count;
+        entry.payload = payload;
+        changed = true;
+      }
+    }
+  }
+  return changed;
 }
 
 // Persist queue to disk
@@ -193,6 +327,17 @@ try {
   for (const entry of (data.items || [])) {
     if (!queue.has(entry.to)) queue.set(entry.to, []);
     queue.get(entry.to).push(entry);
+  }
+  const compacted = compactReminderQueue();
+  const normalized = normalizeReminderQueue();
+  if (compacted.changed || normalized) {
+    saveQueue();
+    if (compacted.changed) {
+      console.log(`Compacted reminder queue entries on load: merged ${compacted.mergedEntries}`);
+    }
+    if (normalized) {
+      console.log('Normalized reminder queue payloads on load');
+    }
   }
   console.log(`Restored ${data.items?.length || 0} queued messages from disk`);
 } catch { /* no queue file or parse error, start fresh */ }
@@ -264,7 +409,15 @@ app.post('/api/queue/:id/send', async (req, res) => {
         return res.json({ ok: true, dropped: id, reason: 'stale-notification' });
       }
       const ok = deliverMessage(entry);
-      return res.json({ ok, delivered: id });
+      if (!ok) {
+        // Keep behavior consistent with poll loop: failed delivery is retriable, not lost.
+        if (!queue.has(target)) queue.set(target, []);
+        queue.get(target).unshift(entry);
+        saveQueue();
+        broadcastQueue();
+        return res.status(503).json({ ok: false, delivered: id, requeued: true, reason: 'deliver-failed' });
+      }
+      return res.json({ ok: true, delivered: id });
     }
   }
   res.status(404).json({ error: 'not found' });
@@ -304,6 +457,9 @@ app.get('/api/agents/status', async (_req, res) => {
           activeNow,
           activeDurationSec: runtimeActiveDurationSec,
           idleDurationSec: runtimeIdleDurationSec,
+          lastTmuxActivitySec: Number.isFinite(Number(a.lastTmuxActivitySec))
+            ? Math.max(0, Number(a.lastTmuxActivitySec))
+            : 0,
           alive,
           remote: !!isRemote,
           type: a.type || 'agent',
@@ -317,16 +473,42 @@ app.get('/api/agents/status', async (_req, res) => {
 });
 
 // ── Tmux capture for agent monitor ───────────────────────────────────
+function trimTrailingBlankLines(text) {
+  const lines = String(text).replace(/\r\n/g, '\n').split('\n');
+  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+    lines.pop();
+  }
+  return lines.join('\n');
+}
+
 app.get('/api/tmux/capture/:session', (req, res) => {
   const session = req.params.session;
   if (!/^[\w\-:.]+$/.test(session)) {
     return res.status(400).type('text').send('invalid session name');
   }
+  const serverName = req.query.server || '';
+  const sshConf = serverName ? serverSshConfig[serverName] : null;
   try {
-    const content = execFileSync(
-      'tmux', ['capture-pane', '-t', session, '-p', '-S', '-500'],
-      { encoding: 'utf-8', timeout: 3000 }
-    );
+    let rawContent;
+    if (sshConf) {
+      // Remote capture via SSH
+      rawContent = execFileSync(
+        'ssh', [
+          '-o', 'ConnectTimeout=5',
+          '-o', 'StrictHostKeyChecking=accept-new',
+          sshConf.host,
+          `tmux capture-pane -t ${session} -p -S -500`
+        ],
+        { encoding: 'utf-8', timeout: 8000 }
+      );
+    } else {
+      // Local capture
+      rawContent = execFileSync(
+        'tmux', ['capture-pane', '-t', session, '-p', '-S', '-500'],
+        { encoding: 'utf-8', timeout: 3000 }
+      );
+    }
+    const content = trimTrailingBlankLines(rawContent);
     const etag = '"' + createHash('md5').update(content).digest('hex').slice(0, 16) + '"';
     res.set('ETag', etag);
     res.set('Cache-Control', 'no-cache');
@@ -335,7 +517,8 @@ app.get('/api/tmux/capture/:session', (req, res) => {
     }
     res.type('text').send(content);
   } catch {
-    res.status(404).type('text').send(`[session "${session}" not found]`);
+    const location = sshConf ? ` on ${serverName}` : '';
+    res.status(404).type('text').send(`[session "${session}"${location} not found]`);
   }
 });
 
@@ -393,6 +576,55 @@ app.get('/api/agents/detail/:name', async (req, res) => {
   }
 
   res.json(detail);
+});
+
+app.get('/api/agents/:name/unread-messages', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  const limitRaw = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw >= 0 ? Math.min(limitRaw, 200) : 50;
+
+  try {
+    const r = await fetch(`http://127.0.0.1:8090/api/inbox/${encodeURIComponent(name)}/unread-list?limit=${limit}`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.post('/api/agents/:name/unread-messages/:msgId/cancel', async (req, res) => {
+  const name = req.params.name;
+  const msgId = req.params.msgId;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  if (!/^msg_[0-9]+$/.test(msgId)) return res.status(400).json({ error: 'invalid message id' });
+
+  try {
+    const suppressRes = await fetch(`http://127.0.0.1:8090/api/messages/${encodeURIComponent(msgId)}/suppress`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent: name, reason: 'web-cancel' }),
+    });
+    const suppressData = await suppressRes.json().catch(() => ({ error: `backend status ${suppressRes.status}` }));
+    if (!suppressRes.ok) return res.status(suppressRes.status).json(suppressData);
+
+    const queueRemoved = dropQueuedBackendNotificationsBySource(name, msgId);
+    res.json({
+      ok: true,
+      canceled: { agent: name, message: msgId },
+      queue_removed: queueRemoved,
+      suppress: suppressData,
+    });
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.delete('/api/queue/agents/:name/notifications', (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  const removed = dropQueuedBackendNotificationsBySource(name);
+  return res.json({ ok: true, agent: name, removed });
 });
 
 app.patch('/api/agents/:name', async (req, res) => {
@@ -546,20 +778,31 @@ function sleepMs(ms) { execSync(`sleep ${ms / 1000}`); }
 
 // Deliver message to tmux pane (uses execFileSync to avoid shell injection)
 function deliverMessage(entry) {
+  const formatExecError = (e) => {
+    const stderr = (e && e.stderr) ? String(e.stderr).trim() : '';
+    const stdout = (e && e.stdout) ? String(e.stdout).trim() : '';
+    if (stderr) return stderr;
+    if (stdout) return stdout;
+    return e?.message || 'unknown error';
+  };
   try {
     let finalPayload = entry.payload;
     if (entry.redirectedFrom) {
       finalPayload += '\n[REDIRECT NOTICE] This message was originally addressed to "' + entry.redirectedFrom + '" which has been renamed to "' + entry.to + '". Please update your target for future messages.';
     }
-    execFileSync('tmux', ['send-keys', '-l', '-t', entry.to, finalPayload], { timeout: 5000 });
-    sleepMs(200);
-    execFileSync('tmux', ['send-keys', '-t', entry.to, 'Tab'], { timeout: 5000 });
-    sleepMs(200);
-    execFileSync('tmux', ['send-keys', '-t', entry.to, 'C-m'], { timeout: 5000 });
-    sleepMs(200);
-    execFileSync('tmux', ['send-keys', '-t', entry.to, 'Enter'], { timeout: 5000 });
-    sleepMs(200);
-    execFileSync('tmux', ['send-keys', '-t', entry.to, 'Enter'], { timeout: 5000 });
+    try {
+      execFileSync('tmux', ['send-keys', '-l', '-t', entry.to, finalPayload], { timeout: 5000, stdio: 'pipe' });
+    } catch (e) {
+      console.error(`Failed to deliver to ${entry.to} (payload step): ${formatExecError(e)}`);
+      return false;
+    }
+    sleepMs(150);
+    try {
+      execFileSync('tmux', ['send-keys', '-t', entry.to, 'C-m'], { timeout: 5000, stdio: 'pipe' });
+    } catch (e) {
+      console.error(`Failed to deliver to ${entry.to} (enter step): ${formatExecError(e)}`);
+      return false;
+    }
 
     // Log to messages.jsonl
     const deliveredAt = Date.now();
@@ -570,7 +813,7 @@ function deliverMessage(entry) {
     void notifyPushDelivered(entry, deliveredAt);
     return true;
   } catch (e) {
-    console.error(`Failed to deliver to ${entry.to}:`, e.message);
+    console.error(`Failed to deliver to ${entry.to} (unexpected):`, e?.message || e);
     return false;
   }
 }
@@ -583,9 +826,38 @@ setInterval(async () => {
   if (queueTickRunning) return;
   queueTickRunning = true;
   try {
-    for (const [target, entries] of queue) {
+    for (const [target, initialEntries] of queue) {
+      let entries = initialEntries;
       if (entries.length === 0) { queue.delete(target); continue; }
       if (delivering.has(target)) continue;
+
+      let unreadSnapshot = null;
+      if (entries.some(isBackendNotificationEntry)) {
+        const agentName = targetSessionName(target);
+        unreadSnapshot = await fetchUnreadSnapshot(agentName);
+        if (unreadSnapshot) {
+          const dropped = [];
+          const kept = [];
+          for (const entry of entries) {
+            if (isStaleNotificationBySnapshot(entry, unreadSnapshot)) dropped.push(entry);
+            else kept.push(entry);
+          }
+          if (dropped.length > 0) {
+            console.log(`[queue] Dropping ${dropped.length} stale notification(s) for ${target} (unread changed)`);
+            archiveDroppedQueueEntries(dropped, 'stale-notification-unread-changed', target);
+            if (kept.length === 0) {
+              queue.delete(target);
+              saveQueue();
+              broadcastQueue();
+              continue;
+            }
+            queue.set(target, kept);
+            entries = kept;
+            saveQueue();
+            broadcastQueue();
+          }
+        }
+      }
 
       const idleMs = getPaneIdleMs(target);
       if (idleMs < 0) {
@@ -618,9 +890,12 @@ setInterval(async () => {
       saveQueue();
       broadcastQueue();
 
-      if (await isStaleNotificationEntry(entry)) {
-        console.log(`[queue] Dropped stale notification ${entry.id} for ${target} (no unread items left)`);
-        archiveDroppedQueueEntries([entry], 'stale-notification-no-unread', target);
+      const stale = unreadSnapshot && isBackendNotificationEntry(entry)
+        ? isStaleNotificationBySnapshot(entry, unreadSnapshot)
+        : await isStaleNotificationEntry(entry);
+      if (stale) {
+        console.log(`[queue] Dropped stale notification ${entry.id} for ${target}`);
+        archiveDroppedQueueEntries([entry], 'stale-notification-on-deliver', target);
         delivering.delete(target);
         continue;
       }
@@ -683,15 +958,93 @@ function formatRelativeTime(ms) {
   return hr + 'h' + (min % 60) + 'm ago';
 }
 
-function fireReminder(reminder) {
+function extractReminderMessage(rawValue) {
+  const raw = String(rawValue || '').replace(/^\[Self Time Reminder\]\s*/, '').trim();
+  if (!raw) return '(empty)';
+  const match = raw.match(/\bMsg:\s*([\s\S]*)$/);
+  if (match && match[1] && match[1].trim()) return match[1].trim();
+  return raw;
+}
+
+function reminderItemFromInput(reminder, firedAt) {
+  const createdAt = Number(reminder?.createdAt) > 0 ? Number(reminder.createdAt) : firedAt;
+  const msg = extractReminderMessage(reminder?.msg);
+  return { createdAt, firedAt, msg };
+}
+
+function normalizeReminderItems(entry) {
+  if (!entry || typeof entry !== 'object') return [];
+  if (Array.isArray(entry.reminderItems) && entry.reminderItems.length > 0) {
+    return entry.reminderItems.map(item => ({
+      createdAt: Number(item?.createdAt) > 0 ? Number(item.createdAt) : Date.now(),
+      firedAt: Number(item?.firedAt) > 0 ? Number(item.firedAt) : Date.now(),
+      msg: extractReminderMessage(item?.msg),
+    }));
+  }
+  const fallbackTs = Number(entry.queuedAt) > 0 ? Number(entry.queuedAt) : Date.now();
+  return [{
+    createdAt: fallbackTs,
+    firedAt: fallbackTs,
+    msg: extractReminderMessage(entry.payload),
+  }];
+}
+
+function renderReminderPayload(items) {
+  const normalized = Array.isArray(items) ? items : [];
+  if (normalized.length <= 1) {
+    const item = normalized[0] || { createdAt: Date.now(), firedAt: Date.now(), msg: '(empty)' };
+    const elapsed = Math.max(0, item.firedAt - item.createdAt);
+    return `[Self Time Reminder] From ts:${item.createdAt} (${formatRelativeTime(elapsed)}), Now ts:${item.firedAt}, Msg: ${item.msg}`;
+  }
+
+  const preview = normalized.slice(-REMINDER_MERGE_PREVIEW_LIMIT);
+  const omitted = Math.max(0, normalized.length - preview.length);
+  const lines = preview.map((item, idx) => {
+    const elapsed = Math.max(0, item.firedAt - item.createdAt);
+    return `${idx + 1}. From ts:${item.createdAt} (${formatRelativeTime(elapsed)}), Now ts:${item.firedAt}, Msg: ${item.msg}`;
+  });
+  if (omitted > 0) lines.push(`... ${omitted} older reminder(s) omitted`);
+  return `[Self Time Reminder] ${normalized.length} reminders due (latest ${preview.length} shown):\n${lines.join('\n')}`;
+}
+
+function enqueueReminder(reminder) {
   const now = Date.now();
-  const elapsed = now - reminder.createdAt;
-  const payload = `[Self Time Reminder] From ts:${reminder.createdAt} (${formatRelativeTime(elapsed)}), Now ts:${now}, Msg: ${reminder.msg}`;
-  const entry = { id: ++queueIdCounter, from: reminder.target, to: reminder.target, payload, queuedAt: now, isReminder: true };
-  if (!queue.has(reminder.target)) queue.set(reminder.target, []);
-  queue.get(reminder.target).push(entry);
-  saveQueue();
-  broadcastQueue();
+  const target = String(reminder?.target || '').trim();
+  if (!target) return;
+  const newItem = reminderItemFromInput(reminder, now);
+
+  if (!queue.has(target)) queue.set(target, []);
+  const bucket = queue.get(target);
+  const mergedEntry = bucket[bucket.length - 1]?.isReminder === true
+    ? bucket[bucket.length - 1]
+    : null;
+
+  if (mergedEntry) {
+    const items = normalizeReminderItems(mergedEntry);
+    items.push(newItem);
+    mergedEntry.reminderItems = items;
+    mergedEntry.reminderCount = items.length;
+    mergedEntry.payload = renderReminderPayload(items);
+    return;
+  }
+
+  const items = [newItem];
+  const payload = renderReminderPayload(items);
+  const entry = {
+    id: ++queueIdCounter,
+    from: target,
+    to: target,
+    payload,
+    queuedAt: now,
+    isReminder: true,
+    reminderItems: items,
+    reminderCount: 1,
+  };
+  bucket.push(entry);
+}
+
+function fireReminder(reminder) {
+  enqueueReminder(reminder);
 }
 
 // Timer: check every second for due reminders
@@ -707,7 +1060,9 @@ setInterval(() => {
   }
   if (changed) {
     saveReminders();
+    saveQueue();
     broadcastReminders();
+    broadcastQueue();
   }
   // Periodically broadcast remaining times while reminders exist
   if (reminders.length > 0) broadcastReminders();
@@ -867,10 +1222,21 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   flex-shrink:0;
   text-shadow:0 0 8px rgba(0,240,255,0.15);
 }
+#agent-buttons-wrap{
+  position:relative;flex-shrink:0;
+  border-bottom:1px solid rgba(0,240,255,0.08);
+}
 #agent-buttons{
   padding:10px 24px;display:flex;flex-wrap:wrap;gap:8px;
-  border-bottom:1px solid rgba(0,240,255,0.08);flex-shrink:0;
+  overflow:hidden;transition:max-height .25s ease;
 }
+#agent-toggle{
+  position:absolute;right:10px;bottom:4px;
+  background:rgba(10,14,20,0.85);border:1px solid rgba(0,240,255,0.15);border-radius:4px;
+  color:rgba(0,240,255,0.5);font-size:10px;padding:1px 8px;cursor:pointer;
+  font-family:inherit;z-index:2;transition:all .2s;
+}
+#agent-toggle:hover{color:#00f0ff;border-color:rgba(0,240,255,0.3)}
 .agent-btn{
   display:inline-flex;align-items:center;gap:6px;
   padding:5px 12px;border-radius:6px;cursor:pointer;
@@ -883,8 +1249,9 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 .agent-btn.selected{background:rgba(0,240,255,0.12);border-color:#00f0ff;color:#00f0ff}
 .agent-btn.active-agent .dot{color:#34d399}
 .agent-btn.inactive-agent .dot{color:rgba(255,255,255,0.15)}
-.agent-btn.remote-agent{opacity:0.45}
-.agent-btn.remote-agent .dot{color:rgba(180,130,255,0.6);font-size:9px}
+.agent-btn.remote-agent .dot{color:#a78bfa;font-size:9px}
+.agent-btn.remote-agent.alive{opacity:1}
+.agent-btn.remote-agent:not(.alive){opacity:0.45}
 .agent-btn.no-tmux{opacity:0.35;cursor:default}
 .monitor-bar{
   display:flex;align-items:center;justify-content:space-between;
@@ -894,15 +1261,16 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 }
 .monitor-bar-name{color:#00f0ff;font-size:12px;text-shadow:0 0 6px rgba(0,240,255,0.2)}
 .monitor-bar-btns{display:flex;gap:6px}
-#btn-scroll-bottom,#btn-pause{
+#btn-scroll-bottom,#btn-pause,#btn-speed{
   padding:4px 14px;border-radius:5px;font-family:inherit;font-size:10px;
   letter-spacing:1px;cursor:pointer;
   border:1px solid rgba(0,240,255,0.25);
   background:rgba(0,240,255,0.06);color:#00f0ff;
   transition:all .2s;
 }
-#btn-scroll-bottom:hover,#btn-pause:hover{background:rgba(0,240,255,0.15)}
+#btn-scroll-bottom:hover,#btn-pause:hover,#btn-speed:hover{background:rgba(0,240,255,0.15)}
 #btn-pause.paused{border-color:rgba(251,191,36,0.4);color:#fbbf24;background:rgba(251,191,36,0.06)}
+#btn-speed.turbo{border-color:rgba(52,211,153,0.45);color:#34d399;background:rgba(52,211,153,0.08)}
 #terminal-wrap{flex:1;min-height:0;overflow:hidden;position:relative;margin:5px;border-radius:18px / 14px}
 #terminal-wrap.hidden{display:none}
 /* CRT barrel — heavy elliptical vignette */
@@ -952,6 +1320,27 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   97%{opacity:0.97}
   98%{opacity:1}
 }
+/* Low-power mode when tab is hidden */
+body.page-hidden .panel-header .dot,
+body.page-hidden .reminder-header .dot,
+body.page-hidden #terminal{
+  animation:none !important;
+}
+body.page-hidden #terminal{
+  text-shadow:none;
+  box-shadow:inset 0 0 60px rgba(0,0,0,0.5);
+}
+body.page-hidden #queue-panel.has-items,
+body.page-hidden #reminder-panel.has-items{
+  backdrop-filter:none;
+}
+@media (prefers-reduced-motion: reduce){
+  .panel-header .dot,
+  .reminder-header .dot,
+  #terminal{
+    animation:none !important;
+  }
+}
 #monitor-empty{
   display:flex;align-items:center;justify-content:center;
   flex:1;color:rgba(0,240,255,0.12);font-size:11px;letter-spacing:3px;
@@ -963,8 +1352,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   border:1px solid rgba(0,240,255,0.1);border-radius:8px;
   backdrop-filter:blur(12px);
   font-size:10px;line-height:1.7;color:rgba(0,240,255,0.35);
-  flex-shrink:0;overflow-y:auto;max-height:50%;
-  scrollbar-width:thin;scrollbar-color:rgba(0,240,255,0.1) transparent;
+  flex-shrink:0;overflow:visible;max-height:none;
 }
 #agent-info.visible{display:block}
 #agent-info .ai-identity-row{display:flex;align-items:center;gap:4px}
@@ -1010,6 +1398,22 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 #agent-info .ai-tag-active{background:rgba(52,211,153,0.1);color:#34d399;border:1px solid rgba(52,211,153,0.2)}
 #agent-info .ai-tag-inactive{background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.08)}
 #agent-info .ai-groups{color:rgba(168,85,247,0.5)}
+#agent-info .ai-unread-wrap{margin-top:8px;border-top:1px solid rgba(0,240,255,0.1);padding-top:8px}
+#agent-info .ai-unread-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+#agent-info .ai-unread-title{color:rgba(0,240,255,0.5);font-size:9px;letter-spacing:1px}
+#agent-info .ai-unread-meta{color:rgba(0,240,255,0.25);font-size:9px}
+#agent-info .ai-unread-list{display:flex;flex-direction:column;gap:6px}
+#agent-info .ai-unread-item{border:1px solid rgba(0,240,255,0.12);background:rgba(0,0,0,0.25);border-radius:4px;padding:6px}
+#agent-info .ai-unread-route{color:rgba(0,240,255,0.45);font-size:9px;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#agent-info .ai-unread-summary{color:rgba(255,255,255,0.58);font-size:10px;line-height:1.35;word-break:break-word}
+#agent-info .ai-unread-sub{color:rgba(0,240,255,0.28);font-size:9px;margin-top:4px}
+#agent-info .ai-unread-actions{margin-top:5px;text-align:right}
+#agent-info .ai-unread-cancel{
+  background:none;border:1px solid rgba(248,113,113,0.35);border-radius:3px;
+  color:#f87171;cursor:pointer;font-size:9px;padding:1px 8px;font-family:inherit;
+}
+#agent-info .ai-unread-cancel:hover{background:rgba(248,113,113,0.1);border-color:#f87171}
+#agent-info .ai-unread-empty{color:rgba(0,240,255,0.2);font-size:9px}
 
 /* Message log (bottom) */
 #msglog{
@@ -1084,7 +1488,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   .agent-btn{padding:4px 8px;font-size:10px;gap:4px}
   .monitor-bar{padding:6px 12px;margin:3px 0 0}
   .monitor-bar-name{font-size:11px}
-  #btn-scroll-bottom,#btn-pause{padding:3px 10px;font-size:9px}
+  #btn-scroll-bottom,#btn-pause,#btn-speed{padding:3px 10px;font-size:9px}
   #terminal{padding:8px 12px;font-size:11px}
   #terminal-wrap{margin:3px;border-radius:14px / 11px}
   #terminal-wrap::before{border-radius:14px / 11px}
@@ -1105,11 +1509,15 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     </div>
     <div id="monitor-panel">
       <div class="monitor-header">AGENT MONITOR</div>
-      <div id="agent-buttons"><span style="color:rgba(0,240,255,0.2);font-size:10px">loading agents...</span></div>
+      <div id="agent-buttons-wrap">
+        <div id="agent-buttons"><span style="color:rgba(0,240,255,0.2);font-size:10px">loading agents...</span></div>
+        <button id="agent-toggle" title="Show all agents">▼ more</button>
+      </div>
       <div class="monitor-bar">
         <span class="monitor-bar-name" id="monitor-label">Select an agent to monitor</span>
         <span class="monitor-bar-btns">
           <button id="btn-scroll-bottom" style="display:none">&#8615; BOTTOM</button>
+          <button id="btn-speed" style="display:none">10HZ</button>
           <button id="btn-pause" style="display:none">&#9646;&#9646; PAUSE</button>
         </span>
       </div>
@@ -1152,6 +1560,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   // ── Message log ─────────────────────────────
   const msglogEl = document.getElementById('msglog');
   function addLogEntry(msg) {
+    if (document.hidden) return;
     const ts = new Date(msg.ts).toLocaleTimeString();
     const payload = (msg.payload || '').slice(0, 120);
     const div = document.createElement('div');
@@ -1173,15 +1582,32 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   let queueItems = [];
 
   let queueActionPending = false;
+  let queueRenderLocked = false;
+  let queueRenderPending = false;
   let lastQueueHtml = '';
+  function computeQueueWaitStr(queuedAt) {
+    const wait = Math.floor((Date.now() - queuedAt) / 1000);
+    return wait < 60 ? wait + 's' : Math.floor(wait / 60) + 'm ' + (wait % 60) + 's';
+  }
+
+  function updateQueueTimersInPlace() {
+    const byId = new Map(queueItems.map(item => [String(item.id), item]));
+    for (const row of queueList.querySelectorAll('.queue-item[data-id]')) {
+      const id = row.getAttribute('data-id');
+      const item = byId.get(String(id));
+      if (!item) continue;
+      const waitEl = row.querySelector('.qi-wait');
+      if (waitEl) waitEl.textContent = 'waiting ' + computeQueueWaitStr(item.queuedAt);
+    }
+  }
+
   function renderQueuePanel() {
+    if (document.hidden) return;
     if (queueActionPending) return;
     if (queueItems.length === 0) { queuePanel.classList.remove('has-items'); queueList.innerHTML = ''; lastQueueHtml = ''; return; }
     queuePanel.classList.add('has-items');
-    const now = Date.now();
     const html = queueItems.map(item => {
-      const wait = Math.floor((now - item.queuedAt) / 1000);
-      const waitStr = wait < 60 ? wait + 's' : Math.floor(wait / 60) + 'm ' + (wait % 60) + 's';
+      const waitStr = computeQueueWaitStr(item.queuedAt);
       const payload = (item.payload || '').slice(0, 80);
       const idleMs = item.targetIdleMs || 0;
       let idleStr, idleClass;
@@ -1196,7 +1622,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
         idleClass = 'qi-idle-busy';
       }
       const redir = item.redirectedFrom ? ' <span class="qi-redir">(was ' + esc(item.redirectedFrom) + ')</span>' : '';
-      return '<div class="queue-item">'
+      return '<div class="queue-item" data-id="' + item.id + '">'
         + '<div class="qi-route"><span class="qi-from">' + esc(item.from) + '</span>'
         + '<span class="qi-arrow"> &#10145; </span>'
         + '<span class="qi-target">' + esc(item.to) + '</span>' + redir + '</div>'
@@ -1210,19 +1636,62 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     }).join('');
     if (html !== lastQueueHtml) { queueList.innerHTML = html; lastQueueHtml = html; }
   }
-  setInterval(renderQueuePanel, 1000);
+  function requestQueueRender(force = false) {
+    if (queueRenderLocked && !force) {
+      queueRenderPending = true;
+      updateQueueTimersInPlace();
+      return;
+    }
+    queueRenderPending = false;
+    renderQueuePanel();
+  }
+  setInterval(() => requestQueueRender(false), 2000);
+
+  queuePanel.addEventListener('mouseenter', () => {
+    queueRenderLocked = true;
+  });
+  queuePanel.addEventListener('mouseleave', () => {
+    queueRenderLocked = false;
+    if (queueRenderPending) requestQueueRender(true);
+  });
 
   window.queueAction = async function(id, action) {
     // Optimistic: remove immediately, restore on failure
     const removed = queueItems.find(i => i.id === id);
     queueItems = queueItems.filter(i => i.id !== id);
     queueActionPending = false;
-    renderQueuePanel();
+    requestQueueRender(true);
     try {
-      if (action === 'send') await fetch('/api/queue/' + id + '/send', { method: 'POST' });
-      else await fetch('/api/queue/' + id, { method: 'DELETE' });
+      let res;
+      if (action === 'send') {
+        res = await fetch('/api/queue/' + id + '/send', { method: 'POST' });
+      } else {
+        const sourceMsgId = (removed && removed.notifyMeta && typeof removed.notifyMeta.sourceMsgId === 'string')
+          ? removed.notifyMeta.sourceMsgId.trim()
+          : '';
+        const targetAgent = (removed && typeof removed.to === 'string')
+          ? String(removed.to).split(':', 1)[0]
+          : '';
+        const isBackendNotification = removed && removed.from === 'agent-chat-v2';
+        if (isBackendNotification && sourceMsgId && targetAgent) {
+          res = await fetch('/api/agents/' + encodeURIComponent(targetAgent) + '/unread-messages/' + encodeURIComponent(sourceMsgId) + '/cancel', {
+            method: 'POST'
+          });
+        } else {
+          res = await fetch('/api/queue/' + id, { method: 'DELETE' });
+        }
+      }
+      let body = null;
+      try { body = await res.json(); } catch {}
+      if (!res.ok || (body && body.ok === false)) {
+        throw new Error((body && body.reason) || ('HTTP ' + res.status));
+      }
+      if (action !== 'send' && monitoredAgent && removed && typeof removed.to === 'string') {
+        const targetAgent = String(removed.to).split(':', 1)[0];
+        if (targetAgent === monitoredAgent.name) fetchAgentDetail(monitoredAgent.name);
+      }
     } catch {
-      if (removed) { queueItems.push(removed); renderQueuePanel(); }
+      if (removed) { queueItems.push(removed); requestQueueRender(true); }
     }
   };
 
@@ -1244,6 +1713,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   let reminderActionPending = false;
   let lastReminderHtml = '';
   function renderReminderPanel() {
+    if (document.hidden) return;
     if (reminderActionPending) return;
     if (reminderItems.length === 0) { reminderPanel.classList.remove('has-items'); reminderList.innerHTML = ''; lastReminderHtml = ''; return; }
     reminderPanel.classList.add('has-items');
@@ -1262,7 +1732,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     }).join('');
     if (html !== lastReminderHtml) { reminderList.innerHTML = html; lastReminderHtml = html; }
   }
-  setInterval(renderReminderPanel, 1000);
+  setInterval(renderReminderPanel, 2000);
 
   window.cancelReminder = async function(id) {
     // Optimistic: remove immediately, restore on failure
@@ -1279,13 +1749,59 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 
   // ── Agent Monitor ───────────────────────────
   const agentButtonsEl = document.getElementById('agent-buttons');
+  const agentToggleEl  = document.getElementById('agent-toggle');
   const monitorLabelEl = document.getElementById('monitor-label');
   const monitorEmptyEl = document.getElementById('monitor-empty');
   const terminalWrapEl = document.getElementById('terminal-wrap');
   const terminalEl     = document.getElementById('terminal');
   const btnPause       = document.getElementById('btn-pause');
+  const btnSpeed       = document.getElementById('btn-speed');
   const btnScrollBottom = document.getElementById('btn-scroll-bottom');
   const agentInfoEl    = document.getElementById('agent-info');
+
+  // Agent list collapse/expand
+  let agentListExpanded = false;
+  function calcTwoRowHeight() {
+    const btns = agentButtonsEl.querySelectorAll('.agent-btn');
+    if (btns.length === 0) return 86;
+    // Find distinct row tops
+    const tops = new Set();
+    for (const b of btns) tops.add(Math.round(b.offsetTop));
+    const sorted = [...tops].sort((a, b) => a - b);
+    if (sorted.length <= 2) return agentButtonsEl.scrollHeight; // fits in 2 rows
+    // Height = bottom of 2nd row buttons + padding
+    const secondRowTop = sorted[1];
+    let maxBottom = 0;
+    for (const b of btns) {
+      if (Math.round(b.offsetTop) === secondRowTop) {
+        maxBottom = Math.max(maxBottom, b.offsetTop + b.offsetHeight);
+      }
+    }
+    const style = getComputedStyle(agentButtonsEl);
+    const padTop = parseFloat(style.paddingTop) || 0;
+    const padBottom = parseFloat(style.paddingBottom) || 0;
+    return maxBottom + padBottom + 2; // +2 for rounding
+  }
+  function updateAgentToggle() {
+    if (!agentToggleEl) return;
+    const twoRowH = calcTwoRowHeight();
+    if (agentButtonsEl.scrollHeight <= twoRowH + 4) {
+      agentToggleEl.style.display = 'none';
+      agentButtonsEl.style.maxHeight = '';
+    } else {
+      agentToggleEl.style.display = '';
+      if (!agentListExpanded) agentButtonsEl.style.maxHeight = twoRowH + 'px';
+      else agentButtonsEl.style.maxHeight = agentButtonsEl.scrollHeight + 'px';
+    }
+    agentToggleEl.textContent = agentListExpanded ? '▲ less' : '▼ more';
+  }
+  if (agentToggleEl) {
+    agentToggleEl.addEventListener('click', () => {
+      agentListExpanded = !agentListExpanded;
+      agentButtonsEl.classList.toggle('expanded', agentListExpanded);
+      updateAgentToggle();
+    });
+  }
 
   btnScrollBottom.addEventListener('click', () => {
     terminalEl.scrollTop = terminalEl.scrollHeight;
@@ -1293,10 +1809,26 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 
   let monitoredAgent = null;
   let monitorPaused  = false;
+  let terminalTurboMode = true; // keep per-agent monitor at 10Hz when visible, unless toggled to ECO.
   let agentStatusList = [];
   const STATUS_SYNC_INTERVAL_MS = 30000;
+  const STATUS_SYNC_INTERVAL_HIDDEN_MS = 120000;
+  const TERMINAL_POLL_TURBO_MS = 100;
+  const TERMINAL_POLL_VISIBLE_MS = 400;
+  const TERMINAL_POLL_HIDDEN_MS = 3000;
+  const DURATION_TICK_VISIBLE_MS = 1000;
+  const DURATION_TICK_HIDDEN_MS = 4000;
+  const DETAIL_REFRESH_VISIBLE_MS = 2500;
+  const DETAIL_REFRESH_HIDDEN_MS = 10000;
+  const UNREAD_PANEL_LIMIT = 40;
   let lastStatusSyncAt = 0;
   let statusSyncTimer = null;
+  let terminalPollTimer = null;
+  let durationTickTimer = null;
+  let statusPollTimer = null;
+  let detailRefreshTimer = null;
+  let agentDetailRequestSeq = 0;
+  let agentDetailAbortController = null;
 
   function updateSelectedRuntimeBadge() {
     if (!monitoredAgent) return;
@@ -1323,6 +1855,34 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     }, 400);
   }
 
+  function updateSpeedButton() {
+    if (!btnSpeed) return;
+    if (terminalTurboMode) {
+      btnSpeed.textContent = '10HZ';
+      btnSpeed.classList.add('turbo');
+    } else {
+      btnSpeed.textContent = 'ECO';
+      btnSpeed.classList.remove('turbo');
+    }
+  }
+
+  function showAgentDetailLoading(name) {
+    if (!agentInfoEl) return;
+    const safeName = esc(String(name || ''));
+    agentInfoEl.innerHTML = '<span class="ai-label">agent</span><span class="ai-val">' + safeName + '</span><br>'
+      + '<span class="ai-unread-empty">Loading detail...</span>';
+    agentInfoEl.classList.add('visible');
+  }
+
+  function scheduleDetailRefresh() {
+    if (detailRefreshTimer) clearInterval(detailRefreshTimer);
+    const interval = document.hidden ? DETAIL_REFRESH_HIDDEN_MS : DETAIL_REFRESH_VISIBLE_MS;
+    detailRefreshTimer = setInterval(() => {
+      if (!monitoredAgent) return;
+      fetchAgentDetail(monitoredAgent.name, { preserveVisible: true });
+    }, interval);
+  }
+
   btnPause.addEventListener('click', () => {
     monitorPaused = !monitorPaused;
     if (monitorPaused) {
@@ -1335,6 +1895,17 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     }
   });
 
+  if (btnSpeed) {
+    btnSpeed.addEventListener('click', () => {
+      terminalTurboMode = !terminalTurboMode;
+      updateSpeedButton();
+      scheduleTerminalPoll();
+      if (monitoredAgent && !monitorPaused && !document.hidden) {
+        fetchTerminal();
+      }
+    });
+  }
+
   function selectAgent(agent) {
     monitoredAgent = agent;
     monitorPaused = false;
@@ -1342,6 +1913,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     btnPause.innerHTML = '&#9646;&#9646; PAUSE';
     btnPause.classList.remove('paused');
     btnPause.style.display = '';
+    if (btnSpeed) {
+      btnSpeed.style.display = '';
+      updateSpeedButton();
+    }
     btnScrollBottom.style.display = '';
     monitorLabelEl.textContent = 'Monitoring: ' + agent.name;
     monitorEmptyEl.style.display = 'none';
@@ -1350,7 +1925,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     for (const btn of agentButtonsEl.querySelectorAll('.agent-btn')) {
       btn.classList.toggle('selected', btn.dataset.name === agent.name);
     }
-    fetchAgentDetail(agent.name);
+    showAgentDetailLoading(agent.name);
+    fetchAgentDetail(agent.name, { preserveVisible: true });
     fetchTerminal().then(() => {
       requestAnimationFrame(() => {
         terminalEl.scrollTop = terminalEl.scrollHeight;
@@ -1358,13 +1934,45 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     });
   }
 
-  async function fetchAgentDetail(name) {
-    agentInfoEl.classList.remove('visible');
+  async function fetchAgentDetail(name, options = {}) {
+    const targetName = String(name || '').trim();
+    if (!targetName) return;
+
+    const requestSeq = ++agentDetailRequestSeq;
+    if (agentDetailAbortController) {
+      try { agentDetailAbortController.abort(); } catch {}
+    }
+    const controller = new AbortController();
+    agentDetailAbortController = controller;
+
+    if (!options.preserveVisible) {
+      agentInfoEl.classList.remove('visible');
+    }
+
     try {
-      const res = await fetch('/api/agents/detail/' + encodeURIComponent(name));
+      const [detailRespRaw, unreadRespRaw] = await Promise.allSettled([
+        fetch('/api/agents/detail/' + encodeURIComponent(targetName), { signal: controller.signal }),
+        fetch('/api/agents/' + encodeURIComponent(targetName) + '/unread-messages?limit=' + UNREAD_PANEL_LIMIT, { signal: controller.signal }),
+      ]);
+
+      if (requestSeq !== agentDetailRequestSeq) return;
+      if (!monitoredAgent || monitoredAgent.name !== targetName) return;
+
+      if (detailRespRaw.status !== 'fulfilled') return;
+      const res = detailRespRaw.value;
       if (!res.ok) return;
       const d = await res.json();
-      const statusSnap = agentStatusList.find(x => x.name === name) || {};
+      if (requestSeq !== agentDetailRequestSeq) return;
+      if (!monitoredAgent || monitoredAgent.name !== targetName) return;
+
+      let unreadData = { unread_total: 0, unread_returned: 0, unread_omitted: 0, messages: [] };
+      try {
+        if (unreadRespRaw.status === 'fulfilled' && unreadRespRaw.value.ok) {
+          const payload = await unreadRespRaw.value.json();
+          if (payload && typeof payload === 'object') unreadData = payload;
+        }
+      } catch {}
+      const statusSnap = agentStatusList.find(x => x.name === targetName) || {};
       const activeNow = typeof statusSnap.activeNow === 'boolean'
         ? statusSnap.activeNow
         : (typeof d.active === 'boolean' ? d.active : false);
@@ -1404,12 +2012,68 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
       if (d.groups && d.groups.length) {
         parts.push('<span class="ai-label">groups</span><span class="ai-groups">' + d.groups.map(g => esc(g)).join(', ') + '</span>');
       }
+      parts.push('<div class="ai-unread-wrap">');
+      parts.push('<div class="ai-unread-head">'
+        + '<span class="ai-unread-title">UNREAD FOR DELIVERY</span>'
+        + '<span class="ai-unread-meta">' + esc(String(unreadData.unread_total || 0)) + ' total</span>'
+        + '</div>');
+      const unreadRows = Array.isArray(unreadData.messages) ? unreadData.messages : [];
+      if (unreadRows.length === 0) {
+        parts.push('<div class="ai-unread-empty">No unread messages.</div>');
+      } else {
+        parts.push('<div class="ai-unread-list">');
+        for (const msg of unreadRows) {
+          const msgId = String(msg?.id || '').trim();
+          const route = msg?.group
+            ? ('Group #' + String(msg.group) + ' · @' + String(msg.from || 'unknown'))
+            : ('DM from @' + String(msg.from || 'unknown'));
+          const previewRaw = String(msg?.summary || msg?.full || '(no summary)').replace(/\s+/g, ' ').trim();
+          const preview = previewRaw.length > 120 ? (previewRaw.slice(0, 120) + '...') : previewRaw;
+          const typeText = String(msg?.type || 'inform');
+          const atText = String(msg?.time || '');
+          const canCancel = /^msg_[0-9]+$/.test(msgId);
+          parts.push('<div class="ai-unread-item">'
+            + '<div class="ai-unread-route">' + esc(route) + '</div>'
+            + '<div class="ai-unread-summary">' + esc(preview) + '</div>'
+            + '<div class="ai-unread-sub">' + esc(typeText) + (atText ? (' · ' + esc(atText)) : '') + '</div>'
+            + '<div class="ai-unread-actions">'
+            + (canCancel
+              ? '<button class="ai-unread-cancel" data-agent="' + esc(targetName) + '" data-msg="' + esc(msgId) + '" onclick="cancelUnreadMessage(this.dataset.agent,this.dataset.msg)">CANCEL DELIVERY</button>'
+              : '')
+            + '</div></div>');
+        }
+        parts.push('</div>');
+      }
+      parts.push('</div>');
       // Delete button with two-step confirmation
       parts.push('<div class="ai-delete-row"><button class="ai-delete-btn" id="ai-delete-btn" onclick="deleteAgent()">Delete Agent</button></div>');
+      if (requestSeq !== agentDetailRequestSeq) return;
+      if (!monitoredAgent || monitoredAgent.name !== targetName) return;
       agentInfoEl.innerHTML = parts.join('');
       agentInfoEl.classList.add('visible');
-    } catch {}
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+    } finally {
+      if (requestSeq === agentDetailRequestSeq && agentDetailAbortController === controller) {
+        agentDetailAbortController = null;
+      }
+    }
   }
+
+  window.cancelUnreadMessage = async function(agentName, msgId) {
+    const agent = String(agentName || '').trim();
+    const mid = String(msgId || '').trim();
+    if (!agent || !mid) return;
+    try {
+      const res = await fetch('/api/agents/' + encodeURIComponent(agent) + '/unread-messages/' + encodeURIComponent(mid) + '/cancel', {
+        method: 'POST'
+      });
+      if (!res.ok) throw new Error('cancel failed');
+    } catch {}
+    if (monitoredAgent && monitoredAgent.name === agent) {
+      fetchAgentDetail(agent, { preserveVisible: true });
+    }
+  };
 
   window.editIdentity = function() {
     if (!monitoredAgent) return;
@@ -1438,7 +2102,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
         body: JSON.stringify({ identity: val || null })
       });
     } catch {}
-    fetchAgentDetail(monitoredAgent.name);
+    fetchAgentDetail(monitoredAgent.name, { preserveVisible: true });
   };
 
   let deleteConfirmTimer = null;
@@ -1469,6 +2133,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
             monitorEmptyEl.style.display = '';
             terminalWrapEl.classList.add('hidden');
             btnPause.style.display = 'none';
+            if (btnSpeed) btnSpeed.style.display = 'none';
             btnScrollBottom.style.display = 'none';
             agentInfoEl.classList.remove('visible');
             agentInfoEl.innerHTML = '';
@@ -1495,7 +2160,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     if (!monitoredAgent || monitorPaused || terminalFetching) return;
     terminalFetching = true;
     try {
-      const url = '/api/tmux/capture/' + encodeURIComponent(monitoredAgent.tmux);
+      let url = '/api/tmux/capture/' + encodeURIComponent(monitoredAgent.tmux);
+      if (monitoredAgent.remote && monitoredAgent.server) {
+        url += '?server=' + encodeURIComponent(monitoredAgent.server);
+      }
       const headers = {};
       if (terminalEtag) headers['If-None-Match'] = terminalEtag;
       const res = await fetch(url, { headers });
@@ -1513,12 +2181,18 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
     terminalFetching = false;
   }
 
-  // Poll terminal every 100ms (ETag ensures only changed content transfers data)
-  setInterval(() => {
-    if (monitoredAgent && !monitorPaused) fetchTerminal();
-  }, 100);
+  function scheduleTerminalPoll() {
+    if (terminalPollTimer) clearTimeout(terminalPollTimer);
+    const waitMs = document.hidden
+      ? TERMINAL_POLL_HIDDEN_MS
+      : (terminalTurboMode ? TERMINAL_POLL_TURBO_MS : TERMINAL_POLL_VISIBLE_MS);
+    terminalPollTimer = setTimeout(async () => {
+      terminalPollTimer = null;
+      if (monitoredAgent && !monitorPaused) await fetchTerminal();
+      scheduleTerminalPoll();
+    }, waitMs);
+  }
 
-  const agentLastActive = {};
   function renderAgentButtons(agents) {
     agentStatusList = agents;
     // Hide dead agents entirely
@@ -1528,13 +2202,11 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
       agentButtonsEl.innerHTML = '<span style="color:rgba(0,240,255,0.2);font-size:10px">no known agents</span>';
       return;
     }
-    const now = Date.now();
-    for (const a of agents) {
-      const isActive = typeof a.activeNow === 'boolean' ? a.activeNow : !!a.active;
-      if (isActive) agentLastActive[a.name] = now;
-      else if (!agentLastActive[a.name]) agentLastActive[a.name] = 0;
-    }
-    // Sort: local alive → local idle → remote
+    // Sort:
+    // 1) local before remote
+    // 2) active before idle
+    // 3) among idle, smaller idleDurationSec first (more recently active first)
+    // 4) tie-break with lastTmuxActivitySec desc, then name asc
     agents.sort((a, b) => {
       const tierOf = x => {
         if (x.remote) return 2;           // remote
@@ -1542,13 +2214,28 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
       };
       const ta = tierOf(a), tb = tierOf(b);
       if (ta !== tb) return ta - tb;
-      return (agentLastActive[b.name] - agentLastActive[a.name]) || a.name.localeCompare(b.name);
+
+      const aActive = typeof a.activeNow === 'boolean' ? a.activeNow : !!a.active;
+      const bActive = typeof b.activeNow === 'boolean' ? b.activeNow : !!b.active;
+      if (aActive !== bActive) return aActive ? -1 : 1;
+
+      if (!aActive && !bActive) {
+        const aIdle = toNonNegInt(a.idleDurationSec, Number.MAX_SAFE_INTEGER);
+        const bIdle = toNonNegInt(b.idleDurationSec, Number.MAX_SAFE_INTEGER);
+        if (aIdle !== bIdle) return aIdle - bIdle;
+      }
+
+      const aLast = toNonNegInt(a.lastTmuxActivitySec, 0);
+      const bLast = toNonNegInt(b.lastTmuxActivitySec, 0);
+      if (aLast !== bLast) return bLast - aLast;
+
+      return a.name.localeCompare(b.name);
     });
     const html = agents.map(a => {
       const isRemote = a.remote;
       const isActive = typeof a.activeNow === 'boolean' ? a.activeNow : !!a.active;
       const dot = isRemote ? '&#9826;' : (isActive ? '&#9679;' : '&#9675;');
-      const cls = ['agent-btn', isRemote ? 'remote-agent' : (isActive ? 'active-agent' : 'inactive-agent'), a.name === selectedName ? 'selected' : ''].filter(Boolean).join(' ');
+      const cls = ['agent-btn', isRemote ? 'remote-agent' : (isActive ? 'active-agent' : 'inactive-agent'), isRemote && a.alive ? 'alive' : '', a.name === selectedName ? 'selected' : ''].filter(Boolean).join(' ');
       return '<button class="' + cls + '" data-name="' + esc(a.name) + '" data-tmux="' + esc(a.tmux || '') + '">'
         + '<span class="dot">' + dot + '</span>' + esc(a.name) + '</button>';
     }).join('');
@@ -1561,6 +2248,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
         if (agent && agent.tmux) selectAgent(agent);
       });
     }
+    updateAgentToggle();
   }
 
   async function fetchAgentStatus(_reason = 'poll') {
@@ -1625,7 +2313,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
       try { addLogEntry(JSON.parse(e.data)); } catch {}
     };
     evtSource.addEventListener('queue', (e) => {
-      try { queueItems = JSON.parse(e.data); renderQueuePanel(); } catch {}
+      try { queueItems = JSON.parse(e.data); requestQueueRender(false); } catch {}
     });
     evtSource.addEventListener('reminders', (e) => {
       try { reminderItems = JSON.parse(e.data); renderReminderPanel(); } catch {}
@@ -1641,11 +2329,17 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
       for (const msg of msgs.slice(-50)) addLogEntry(msg);
     } catch (e) { console.error('messages load failed:', e); }
     // Initial state
-    try { const r = await fetch('/api/queue'); queueItems = await r.json(); renderQueuePanel(); } catch {}
+    try { const r = await fetch('/api/queue'); queueItems = await r.json(); requestQueueRender(true); } catch {}
     try { const r = await fetch('/api/reminders'); reminderItems = await r.json(); renderReminderPanel(); } catch {}
     await fetchAgentStatus('init');
-    setInterval(() => fetchAgentStatus('poll'), STATUS_SYNC_INTERVAL_MS);
-    setInterval(tickAgentDurationsLocal, 1000);
+    statusPollTimer = setInterval(() => {
+      if (!document.hidden) fetchAgentStatus('poll');
+    }, STATUS_SYNC_INTERVAL_MS);
+    durationTickTimer = setInterval(() => {
+      if (!document.hidden) tickAgentDurationsLocal();
+    }, DURATION_TICK_VISIBLE_MS);
+    scheduleTerminalPoll();
+    scheduleDetailRefresh();
     connectSSE();
   }
 
@@ -1677,10 +2371,37 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 
   // Update FAB dot indicators when queue/reminder have items
   function updateMobileFabs() {
+    if (document.hidden) return;
     mobileFabQueue.classList.toggle('has-count', queueItems.length > 0);
     mobileFabReminder.classList.toggle('has-count', reminderItems.length > 0);
   }
   setInterval(updateMobileFabs, 2000);
+
+  document.addEventListener('visibilitychange', () => {
+    document.body.classList.toggle('page-hidden', document.hidden);
+    if (statusPollTimer) {
+      clearInterval(statusPollTimer);
+      statusPollTimer = setInterval(() => {
+        if (!document.hidden) fetchAgentStatus('poll');
+      }, document.hidden ? STATUS_SYNC_INTERVAL_HIDDEN_MS : STATUS_SYNC_INTERVAL_MS);
+    }
+    if (durationTickTimer) {
+      clearInterval(durationTickTimer);
+      durationTickTimer = setInterval(() => {
+        if (!document.hidden) tickAgentDurationsLocal();
+      }, document.hidden ? DURATION_TICK_HIDDEN_MS : DURATION_TICK_VISIBLE_MS);
+    }
+    scheduleTerminalPoll();
+    scheduleDetailRefresh();
+    if (!document.hidden) {
+      requestQueueRender(true);
+      renderReminderPanel();
+      updateMobileFabs();
+      fetchAgentStatus('visibility').catch(() => {});
+      if (monitoredAgent) fetchAgentDetail(monitoredAgent.name, { preserveVisible: true });
+      if (monitoredAgent && !monitorPaused) fetchTerminal();
+    }
+  });
 
   init();
 })();

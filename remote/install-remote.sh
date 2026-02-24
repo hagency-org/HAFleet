@@ -176,7 +176,14 @@ if [ "$IS_LINUX" = true ]; then
   trap - EXIT
   sudo systemctl daemon-reload
   if is_truthy "$AGENT_INSTALL_AUTOSTART"; then
-    sudo systemctl enable --now "$SERVICE_NAME"
+    sudo systemctl enable "$SERVICE_NAME"
+    if sudo systemctl is-active --quiet "$SERVICE_NAME"; then
+      sudo systemctl restart "$SERVICE_NAME"
+      echo "  Restarted ${SERVICE_NAME}."
+    else
+      sudo systemctl start "$SERVICE_NAME"
+      echo "  Started ${SERVICE_NAME}."
+    fi
   else
     echo "  Service autostart disabled for this install run (AGENT_INSTALL_AUTOSTART=$AGENT_INSTALL_AUTOSTART)."
   fi

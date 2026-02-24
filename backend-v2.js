@@ -1,5 +1,5 @@
 import express from 'express';
-import { appendFileSync, writeFileSync, mkdirSync, renameSync } from 'fs';
+import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync } from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
 import { createHash } from 'crypto';
@@ -16,12 +16,23 @@ const HUMAN_SUMMARY_LIMIT = Number.parseInt(process.env.HUMAN_SUMMARY_LIMIT || '
 const RULE_PUSH_ACK_TIMEOUT_MS = Number.parseInt(process.env.AGENT_RULE_PUSH_ACK_TIMEOUT_MS || '90000', 10);
 const RULE_REPLY_TIMEOUT_MS = Number.parseInt(process.env.AGENT_RULE_REPLY_TIMEOUT_MS || '180000', 10);
 const RULE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_RULE_SWEEP_INTERVAL_MS || '15000', 10);
-const IDLE_THRESHOLD_MS = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '15000', 10);
+const IDLE_THRESHOLD_MS = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '20000', 10);
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.floor((IDLE_THRESHOLD_MS + 999) / 1000));
 const LOCAL_ACTIVITY_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_LOCAL_ACTIVITY_SWEEP_MS || '5000', 10);
 const OFFLINE_CATCHUP_LIST_LIMIT = Number.parseInt(process.env.OFFLINE_CATCHUP_LIST_LIMIT || '50', 10);
+const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_ITEMS || '8', 10);
+const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
+const MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT = (process.env.MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT || '30mb').trim() || '30mb';
 
 mkdirSync(DATA_DIR, { recursive: true });
+const MESSAGE_ATTACHMENT_DIR = path.join(DATA_DIR, 'message-attachments');
+mkdirSync(MESSAGE_ATTACHMENT_DIR, { recursive: true });
+const MATRIX_MEDIA_DIR = path.join(DATA_DIR, 'matrix', 'media');
+mkdirSync(MATRIX_MEDIA_DIR, { recursive: true });
+const MEDIA_FETCH_ALLOWED_ROOTS = [
+  path.resolve(MESSAGE_ATTACHMENT_DIR),
+  path.resolve(MATRIX_MEDIA_DIR),
+];
 
 // ── Storage helpers ───────────────────────────────────────────────────
 function dataPath(name) { return path.join(DATA_DIR, name); }
@@ -68,7 +79,14 @@ function normalizeServer(value) {
 function normalizeAgentName(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
-  return trimmed || null;
+  if (!trimmed) return null;
+  // Case-insensitive lookup: return the canonical (stored) name if it exists
+  if (agents[trimmed]) return trimmed;
+  const lower = trimmed.toLowerCase();
+  for (const key of Object.keys(agents)) {
+    if (key.toLowerCase() === lower) return key;
+  }
+  return trimmed;
 }
 
 function msgSeq(id) {
@@ -94,6 +112,118 @@ function makeHumanSummaryPreview(text) {
   const chars = [...normalized];
   if (chars.length <= HUMAN_SUMMARY_LIMIT) return normalized;
   return chars.slice(0, HUMAN_SUMMARY_LIMIT).join('') + '...';
+}
+
+function normalizeAttachmentName(value, fallback = 'file') {
+  let name = typeof value === 'string' ? value.trim() : '';
+  if (!name) name = fallback;
+  name = path.basename(name);
+  name = name.replace(/[^\w.\-()[\] ]+/g, '_');
+  if (!name) name = fallback;
+  if (name.length > 120) {
+    const ext = path.extname(name);
+    const stem = name.slice(0, Math.max(1, 120 - ext.length));
+    name = `${stem}${ext}`;
+  }
+  return name;
+}
+
+function normalizeAttachmentMime(value) {
+  if (typeof value !== 'string') return null;
+  const mime = value.trim().toLowerCase();
+  if (!mime) return null;
+  if (!/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(mime)) return null;
+  return mime;
+}
+
+function inferAttachmentKind(rawKind, mime, name) {
+  if (rawKind === 'image' || rawKind === 'file') return rawKind;
+  if (typeof mime === 'string' && mime.startsWith('image/')) return 'image';
+  const lower = String(name || '').toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|bmp|svg|avif|heic|heif|tiff?)$/.test(lower)) return 'image';
+  return 'file';
+}
+
+function normalizeAttachmentInput(raw) {
+  const item = (typeof raw === 'string') ? { path: raw } : (raw && typeof raw === 'object' ? raw : null);
+  if (!item) return { error: 'invalid attachment item' };
+
+  const pathValue = typeof item.path === 'string' ? item.path.trim() : '';
+  if (!pathValue) return { error: 'attachment.path required' };
+  if (pathValue.length > 4096) return { error: 'attachment.path too long' };
+
+  const fallbackName = path.basename(pathValue) || 'file';
+  const name = normalizeAttachmentName(item.name, fallbackName);
+  const mime = normalizeAttachmentMime(item.mime);
+  const kind = inferAttachmentKind(item.kind, mime, name);
+  const sizeRaw = Number.parseInt(item.size, 10);
+  const size = Number.isFinite(sizeRaw) && sizeRaw > 0 ? sizeRaw : null;
+  const staged = item.staged === true;
+  const sourcePath = (typeof item.source_path === 'string' && item.source_path.trim())
+    ? item.source_path.trim().slice(0, 1024)
+    : null;
+
+  return {
+    value: {
+      path: pathValue,
+      name,
+      mime,
+      kind,
+      size,
+      staged,
+      source_path: sourcePath,
+    },
+  };
+}
+
+function isPathWithinRoot(filePath, rootPath) {
+  return filePath === rootPath || filePath.startsWith(`${rootPath}${path.sep}`);
+}
+
+function resolveReadableMediaPath(rawPath) {
+  const requested = typeof rawPath === 'string' ? rawPath.trim() : '';
+  if (!requested) return { error: 'path required', status: 400 };
+  if (requested.length > 4096) return { error: 'path too long', status: 400 };
+
+  const resolved = path.resolve(requested);
+  const allowed = MEDIA_FETCH_ALLOWED_ROOTS.some(rootPath => isPathWithinRoot(resolved, rootPath));
+  if (!allowed) return { error: 'path not allowed', status: 403 };
+
+  let stat;
+  try {
+    stat = statSync(resolved);
+  } catch {
+    return { error: 'file not found', status: 404 };
+  }
+  if (!stat.isFile()) return { error: 'path is not a file', status: 400 };
+  if (stat.size <= 0) return { error: 'file is empty', status: 400 };
+  if (stat.size > MESSAGE_ATTACHMENT_MAX_BYTES) {
+    return { error: `file exceeds max bytes (${MESSAGE_ATTACHMENT_MAX_BYTES})`, status: 413 };
+  }
+  return { value: { path: resolved, size: stat.size } };
+}
+
+function guessMimeFromPath(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.png': return 'image/png';
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg';
+    case '.gif': return 'image/gif';
+    case '.webp': return 'image/webp';
+    case '.bmp': return 'image/bmp';
+    case '.svg': return 'image/svg+xml';
+    case '.avif': return 'image/avif';
+    case '.heic': return 'image/heic';
+    case '.heif': return 'image/heif';
+    case '.tif':
+    case '.tiff': return 'image/tiff';
+    case '.pdf': return 'application/pdf';
+    case '.txt': return 'text/plain; charset=utf-8';
+    case '.md': return 'text/markdown; charset=utf-8';
+    case '.json': return 'application/json; charset=utf-8';
+    default: return 'application/octet-stream';
+  }
 }
 
 function inferRecordKind(record) {
@@ -389,6 +519,7 @@ function summarizeMsg(m) {
     summary: m.summary,
     full: m.full || '',
     mentions: m.mentions || [],
+    attachments: Array.isArray(m.attachments) ? m.attachments : [],
     ts: m.ts,
     at: new Date(m.ts).toISOString(),
     time: relativeTime(m.ts),
@@ -488,6 +619,14 @@ function getUnreadInboxMessages(agentName) {
 
   const unread = [...unreadById.values()].sort(compareMsgOrder);
   return { inboxTs, inboxId, unread };
+}
+
+function messageTargetsAgent(msg, agentName) {
+  if (!msg || !agentName) return false;
+  if (msg.to === agentName) return true;
+  if (!msg.group) return false;
+  if (!isGroupMember(msg.group, agentName)) return false;
+  return Array.isArray(msg.mentions) && msg.mentions.includes(agentName);
 }
 
 function buildUnreadInboxSnapshot(agentName) {
@@ -676,6 +815,30 @@ function isHumanMessageToAgent(msg, agentName) {
   return false;
 }
 
+function didAgentAcknowledgeActionablePush(agentName, runtime, actionablePushAt, latestActionableMsg) {
+  if (!runtime || (Number(runtime.lastAgentOutboundAt) || 0) < actionablePushAt) return false;
+  if (!latestActionableMsg) return true;
+
+  const sourceId = typeof latestActionableMsg.id === 'string' ? latestActionableMsg.id : null;
+  const sourceFrom = typeof latestActionableMsg.from === 'string' ? latestActionableMsg.from : null;
+  const sourceGroup = typeof latestActionableMsg.group === 'string' ? latestActionableMsg.group : null;
+
+  let scanned = 0;
+  const maxScan = 400;
+  for (let i = messages.length - 1; i >= 0 && scanned < maxScan; i--) {
+    const msg = messages[i];
+    if (!msg || msg.from !== agentName) continue;
+    scanned++;
+
+    const ts = Number(msg.ts) || 0;
+    if (ts < actionablePushAt) break;
+    if (sourceId && msg.reply_to === sourceId) return true;
+    if (sourceGroup && msg.group === sourceGroup) return true;
+    if (!sourceGroup && sourceFrom && msg.to === sourceFrom) return true;
+  }
+  return false;
+}
+
 function collectBlockedHumanTargets(agentName) {
   const unreadHuman = getUnreadInboxMessages(agentName).unread
     .filter(m => m.type === 'human' && m.from && m.from !== agentName);
@@ -831,10 +994,24 @@ function sweepAgentRules() {
       continue;
     }
 
-    const unreadHuman = getUnreadInboxMessages(agentName).unread.filter(m => m.type === 'human');
+    const unread = getUnreadInboxMessages(agentName).unread;
+    const unreadHuman = unread.filter(m => m.type === 'human');
+    const unreadActionable = unread.filter(m => m.type === 'human' || m.type === 'request');
     const actionablePushAt = Number(runtime.lastActionablePushAt) || 0;
+    const latestActionableUnread = unreadActionable[unreadActionable.length - 1] || null;
+    const activeNow = runtime.activeNow === true;
+    const idleDurationSec = Math.max(0, Number(runtime.idleDurationSec) || 0);
+    const idleGateReady = !activeNow && idleDurationSec >= 1;
+    const outboundAcked = didAgentAcknowledgeActionablePush(
+      agentName,
+      runtime,
+      actionablePushAt,
+      latestActionableUnread
+    );
     const needsInboxCheck = actionablePushAt > 0
       && runtime.lastInboxCheckAt < actionablePushAt
+      && !outboundAcked
+      && idleGateReady
       && (now - actionablePushAt) >= RULE_PUSH_ACK_TIMEOUT_MS;
     setAgentRuleState(agentName, 'no_inbox_check_after_push', needsInboxCheck, () => {
       return [
@@ -847,6 +1024,13 @@ function sweepAgentRules() {
         `lastPushNeedsInboxCheck: ${runtime.lastPushNeedsInboxCheck === true ? 'yes' : 'no'}`,
         `lastPushDeliveryDelayMs: ${Number(runtime.lastPushDeliveryDelayMs) || 0}`,
         `lastInboxCheckAt: ${runtime.lastInboxCheckAt ? new Date(runtime.lastInboxCheckAt).toISOString() : 'n/a'}`,
+        `lastAgentOutboundAt: ${runtime.lastAgentOutboundAt ? new Date(runtime.lastAgentOutboundAt).toISOString() : 'n/a'}`,
+        `activeNow: ${activeNow ? 'yes' : 'no'}`,
+        `idleDurationSec: ${idleDurationSec}`,
+        `idleGateReady: ${idleGateReady ? 'yes' : 'no'} (requires activeNow=no and idleDurationSec>=1)`,
+        `idleThresholdMs: ${IDLE_THRESHOLD_MS}`,
+        `outboundAcked: ${outboundAcked ? 'yes' : 'no'}`,
+        `latestActionableUnreadId: ${latestActionableUnread?.id || 'n/a'}`,
         `timeoutMs: ${RULE_PUSH_ACK_TIMEOUT_MS}`,
       ].join('\n');
     });
@@ -854,15 +1038,19 @@ function sweepAgentRules() {
     const checkedButNoReply = actionablePushAt > 0
       && runtime.lastInboxCheckAt >= actionablePushAt
       && runtime.lastAgentOutboundAt < runtime.lastInboxCheckAt
-      && unreadHuman.length > 0
+      && unreadHuman.filter(m => (Number(m.ts) || 0) <= runtime.lastInboxCheckAt).length > 0
       && (now - runtime.lastInboxCheckAt) >= RULE_REPLY_TIMEOUT_MS;
     setAgentRuleState(agentName, 'inbox_checked_no_reply', checkedButNoReply, () => {
+      const unreadHumanBeforeCheck = unreadHuman.filter(m => (Number(m.ts) || 0) <= runtime.lastInboxCheckAt);
+      const unreadHumanAfterCheck = unreadHuman.filter(m => (Number(m.ts) || 0) > runtime.lastInboxCheckAt);
       const humans = [...new Set(unreadHuman.map(m => m.from).filter(Boolean))];
       return [
         `Agent: ${agentName}`,
         `lastInboxCheckAt: ${new Date(runtime.lastInboxCheckAt).toISOString()}`,
         `lastAgentOutboundAt: ${runtime.lastAgentOutboundAt ? new Date(runtime.lastAgentOutboundAt).toISOString() : 'n/a'}`,
         `unreadHuman: ${unreadHuman.length}`,
+        `unreadHumanBeforeCheck: ${unreadHumanBeforeCheck.length}`,
+        `unreadHumanAfterCheck: ${unreadHumanAfterCheck.length}`,
         `senders: ${humans.join(', ') || 'none'}`,
         `timeoutMs: ${RULE_REPLY_TIMEOUT_MS}`,
       ].join('\n');
@@ -993,9 +1181,72 @@ function getLocalPaneContentHash(tmuxTarget) {
   }
 }
 
+function localTmuxSessionExists(tmuxTarget) {
+  if (!tmuxTarget) return false;
+  const sessionName = String(tmuxTarget).split(':')[0].trim();
+  if (!sessionName) return false;
+  try {
+    execSync(`tmux has-session -t ${JSON.stringify(sessionName)} 2>/dev/null`, { timeout: 2000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isEphemeralAuditAgentName(name) {
+  return typeof name === 'string' && /-system_audit-[a-z0-9]+$/i.test(name);
+}
+
+function pruneEphemeralAgents(names = [], reason = 'ephemeral-prune') {
+  const unique = [...new Set((Array.isArray(names) ? names : []).filter(Boolean))];
+  if (unique.length === 0) return;
+
+  let agentsChanged = false;
+  let runtimeChanged = false;
+  let cursorsChanged = false;
+  let groupsChanged = false;
+  const removed = [];
+
+  for (const name of unique) {
+    const agent = agents[name];
+    if (!isAgentRecord(agent)) continue;
+    if (!isEphemeralAuditAgentName(name)) continue;
+
+    delete agents[name];
+    agentsChanged = true;
+    removed.push(name);
+
+    if (agentRuntime[name] !== undefined) {
+      delete agentRuntime[name];
+      runtimeChanged = true;
+    }
+    if (cursors[name] !== undefined) {
+      delete cursors[name];
+      cursorsChanged = true;
+    }
+    for (const group of Object.values(groups)) {
+      if (!Array.isArray(group?.members)) continue;
+      const nextMembers = group.members.filter(m => m !== name);
+      if (nextMembers.length !== group.members.length) {
+        group.members = nextMembers;
+        groupsChanged = true;
+      }
+    }
+  }
+
+  if (agentsChanged) saveAgents();
+  if (runtimeChanged) saveAgentRuntime();
+  if (cursorsChanged) saveCursors();
+  if (groupsChanged) saveGroups();
+
+  // Intentionally silent: ephemeral audit agent pruning is routine housekeeping.
+}
+
 function sweepLocalActivityDurations() {
   const nowSec = Math.floor(Date.now() / 1000);
   let runtimeChanged = false;
+  let agentsChanged = false;
+  const pruneCandidates = new Set();
 
   for (const agent of Object.values(agents)) {
     if (!isAgentRecord(agent)) continue;
@@ -1009,6 +1260,7 @@ function sweepLocalActivityDurations() {
 
     const paneHash = getLocalPaneContentHash(tmuxTarget);
     if (!paneHash) {
+      const hasSession = localTmuxSessionExists(tmuxTarget);
       localActivityState.delete(agent.name);
       const resetChanged = setRuntimeActivityFields(runtime, {
         activeNow: false,
@@ -1019,6 +1271,16 @@ function sweepLocalActivityDurations() {
       if (resetChanged) {
         runtime.updatedAt = Date.now();
         runtimeChanged = true;
+      }
+      if (!hasSession) {
+        let transitioned = false;
+        if (agent.online !== false) { agent.online = false; agentsChanged = true; transitioned = true; }
+        if (agent.tmux !== null) { agent.tmux = null; agentsChanged = true; transitioned = true; }
+        if (agent.offlineReason !== 'tmux-missing:auto') { agent.offlineReason = 'tmux-missing:auto'; agentsChanged = true; transitioned = true; }
+        if (transitioned) {
+          agent.lastSeen = Date.now();
+        }
+        if (isEphemeralAuditAgentName(agent.name)) pruneCandidates.add(agent.name);
       }
       continue;
     }
@@ -1059,9 +1321,33 @@ function sweepLocalActivityDurations() {
       runtime.updatedAt = Date.now();
       runtimeChanged = true;
     }
+
+    // Self-heal local mapping: if tmux session exists and emits pane content,
+    // keep backend routing state aligned even after stale/offline cleanup.
+    let onlineChanged = false;
+    if (!agent.tmux || !String(agent.tmux).trim()) {
+      agent.tmux = tmuxTarget;
+      onlineChanged = true;
+    }
+    if (agent.online !== true) {
+      agent.online = true;
+      onlineChanged = true;
+    }
+    if (agent.offlineReason !== null) {
+      agent.offlineReason = null;
+      onlineChanged = true;
+    }
+    if (onlineChanged) {
+      agent.lastSeen = Date.now();
+      agentsChanged = true;
+    }
   }
 
   if (runtimeChanged) saveAgentRuntime();
+  if (agentsChanged) saveAgents();
+  if (pruneCandidates.size > 0) {
+    pruneEphemeralAgents([...pruneCandidates], 'tmux-missing:auto');
+  }
 }
 
 function getAgentDeliveryState(name) {
@@ -1228,6 +1514,32 @@ function agentHasMcp(agentName) {
 
 const mergedPushInboxCursor = new Map();
 const catchupCursor = new Map();
+const pushNotifySkipLog = new Map();
+
+function logPushNotifySkip(agentName, reason, detail = '') {
+  const key = `${agentName}:${reason}`;
+  const now = Date.now();
+  const prev = pushNotifySkipLog.get(key) || 0;
+  if ((now - prev) < 30_000) return;
+  pushNotifySkipLog.set(key, now);
+  const suffix = detail ? ` ${detail}` : '';
+  console.log(`[push-notify] skip ${agentName}: ${reason}${suffix}`);
+}
+
+function clearQueuedNotificationsForAgent(agentName) {
+  if (!agentName) return;
+  fetch(`http://127.0.0.1:8084/api/queue/agents/${encodeURIComponent(agentName)}/notifications`, {
+    method: 'DELETE',
+  })
+    .then((r) => {
+      if (!r.ok) {
+        console.warn(`[push-notify] queue clear failed for ${agentName}: status ${r.status}`);
+      }
+    })
+    .catch((e) => {
+      console.warn(`[push-notify] queue clear failed for ${agentName}: ${e.message}`);
+    });
+}
 
 async function notifyAgentCatchup(agentName, reason = 'online') {
   const agent = agents[agentName];
@@ -1288,15 +1600,22 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
 
 async function pushNotify(agentName, msg) {
   const agent = agents[agentName];
-  if (!agent?.tmux) return;
+  if (!agent?.tmux) {
+    logPushNotifySkip(agentName, 'missing-tmux-target');
+    return;
+  }
   const agentServer = normalizeServer(agent.server);
-  if (agentServer && agentServer !== 'local' && agentServer !== LOCAL_SERVER_ID) return;
+  if (agentServer && agentServer !== 'local' && agentServer !== LOCAL_SERVER_ID) {
+    logPushNotifySkip(agentName, 'remote-relay-expected', `(server=${agentServer})`);
+    return;
+  }
   // If server is unknown (null), verify the tmux session exists locally before queueing
   if (!agentServer) {
     try {
       const sess = agent.tmux.split(':')[0];
       execSync(`tmux has-session -t ${JSON.stringify(sess)} 2>/dev/null`, { timeout: 2000 });
     } catch {
+      logPushNotifySkip(agentName, 'local-session-not-found', `(tmux=${agent.tmux})`);
       return; // tmux session doesn't exist locally — likely a remote agent not yet heartbeated
     }
   }
@@ -1409,8 +1728,8 @@ const app = express();
 app.set('trust proxy', 'loopback');  // trust nginx on localhost, use X-Forwarded-For for real IP
 const API_TOKEN = process.env.API_TOKEN;
 app.use((req, res, next) => {
-  // Skip global JSON parser for avatar upload (has its own 10mb limit)
-  if (req.path.endsWith('/avatar') && req.method === 'POST') return next();
+  // Skip global JSON parser for large-upload routes (they have route-specific limits).
+  if (req.method === 'POST' && (req.path.endsWith('/avatar') || req.path === '/api/media/stage')) return next();
   express.json({ limit: '100kb' })(req, res, next);
 });
 app.use('/api', (req, res, next) => {
@@ -1520,9 +1839,12 @@ app.get('/api/servers', (_req, res) => {
       id: s.id,
       online: Boolean(s.online),
       lastSeen: s.lastSeen || null,
+      heartbeatAt: Number(s.heartbeatAt) || null,
       updatedAt: s.updatedAt || null,
       agentCount: Number(s.agentCount) || 0,
       sourceIp: s.sourceIp || null,
+      relayInstanceId: normalizeRelayInstanceId(s.relayInstanceId),
+      relayBootTs: normalizeRelayBootTs(s.relayBootTs) || null,
     }))
     .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
   res.json(rows);
@@ -1858,9 +2180,82 @@ app.post('/api/system/info', (req, res) => {
   res.json({ ok: true, id: event.id });
 });
 
+// ── Media staging for agent attachments ───────────────────────────────
+app.post('/api/media/stage', express.json({ limit: MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT }), (req, res) => {
+  const fromName = normalizeAgentName(req.body?.from || '');
+  if (!fromName) return res.status(400).json({ error: 'from required' });
+  if (!isAgentRecord(agents[fromName])) return res.status(404).json({ error: `agent not found: ${fromName}` });
+
+  const contentBase64 = (typeof req.body?.content_base64 === 'string') ? req.body.content_base64.trim() : '';
+  if (!contentBase64) return res.status(400).json({ error: 'content_base64 required' });
+
+  let bytes;
+  try {
+    bytes = Buffer.from(contentBase64, 'base64');
+  } catch {
+    return res.status(400).json({ error: 'invalid base64 payload' });
+  }
+  if (!bytes || bytes.length === 0) return res.status(400).json({ error: 'empty attachment payload' });
+  if (bytes.length > MESSAGE_ATTACHMENT_MAX_BYTES) {
+    return res.status(413).json({ error: `attachment exceeds max bytes (${MESSAGE_ATTACHMENT_MAX_BYTES})` });
+  }
+
+  const sourcePath = (typeof req.body?.source_path === 'string' && req.body.source_path.trim())
+    ? req.body.source_path.trim()
+    : '';
+  const requestedName = (typeof req.body?.name === 'string' && req.body.name.trim())
+    ? req.body.name.trim()
+    : (sourcePath ? path.basename(sourcePath) : 'file.bin');
+  const name = normalizeAttachmentName(requestedName, 'file.bin');
+  const ext = path.extname(name) || '.bin';
+  const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}${ext}`;
+  const filePath = path.join(MESSAGE_ATTACHMENT_DIR, fileName);
+  writeFileSync(filePath, bytes);
+
+  const mime = normalizeAttachmentMime(req.body?.mime);
+  const kind = inferAttachmentKind(req.body?.kind, mime, name);
+  const attachment = {
+    path: filePath,
+    name,
+    mime,
+    kind,
+    size: bytes.length,
+    staged: true,
+    source_path: sourcePath || null,
+  };
+  res.json({ ok: true, attachment });
+});
+
+app.get('/api/media/fetch', (req, res) => {
+  const resolved = resolveReadableMediaPath(req.query?.path);
+  if (resolved.error) {
+    return res.status(resolved.status || 400).json({ error: resolved.error });
+  }
+
+  const filePath = resolved.value.path;
+  const fileName = normalizeAttachmentName(path.basename(filePath), 'file.bin');
+  const mime = guessMimeFromPath(filePath);
+  let bytes;
+  try {
+    bytes = readFileSync(filePath);
+  } catch (e) {
+    return res.status(500).json({ error: `failed to read file: ${e.message}` });
+  }
+  if (!bytes || bytes.length === 0) return res.status(400).json({ error: 'file is empty' });
+  if (bytes.length > MESSAGE_ATTACHMENT_MAX_BYTES) {
+    return res.status(413).json({ error: `file exceeds max bytes (${MESSAGE_ATTACHMENT_MAX_BYTES})` });
+  }
+
+  const encodedName = encodeURIComponent(fileName);
+  res.setHeader('Content-Type', mime);
+  res.setHeader('Content-Length', String(bytes.length));
+  res.setHeader('Content-Disposition', `inline; filename="${fileName}"; filename*=UTF-8''${encodedName}`);
+  return res.send(bytes);
+});
+
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -1876,6 +2271,18 @@ app.post('/api/messages', (req, res) => {
   const canonicalHumanFull = isHumanMessage ? (rawFull || rawSummary).trim() : '';
   const canonicalSummary = isHumanMessage ? makeHumanSummaryPreview(canonicalHumanFull) : rawSummary;
   const canonicalFull = isHumanMessage ? canonicalHumanFull : rawFull;
+  const rawAttachments = Array.isArray(attachments) ? attachments : [];
+  if (rawAttachments.length > MESSAGE_ATTACHMENT_MAX_ITEMS) {
+    return res.status(400).json({ error: `too many attachments (max ${MESSAGE_ATTACHMENT_MAX_ITEMS})` });
+  }
+  const normalizedAttachments = [];
+  for (let i = 0; i < rawAttachments.length; i++) {
+    const normalized = normalizeAttachmentInput(rawAttachments[i]);
+    if (normalized.error) {
+      return res.status(400).json({ error: `attachments[${i}]: ${normalized.error}` });
+    }
+    normalizedAttachments.push(normalized.value);
+  }
 
   if (!fromName) return res.status(400).json({ error: 'from required' });
   if (!toName && !group) return res.status(400).json({ error: 'to or group required' });
@@ -1937,21 +2344,40 @@ app.post('/api/messages', (req, res) => {
   }
   refreshServerLiveness();
 
-  // Auto-extract @mentions from text and merge with explicit mentions
-  // Build set of all known names (agents + group members including humans)
-  const knownNames = new Set(Object.keys(agents));
+  // Auto-extract @mentions from text and merge with explicit mentions.
+  // Resolve mentions case-insensitively to canonical stored names.
+  const knownNameMap = new Map();
+  const rememberKnownName = (raw) => {
+    if (typeof raw !== 'string') return;
+    const name = raw.trim();
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (!knownNameMap.has(key)) knownNameMap.set(key, name);
+  };
+  for (const agentName of Object.keys(agents)) rememberKnownName(agentName);
   for (const g of Object.values(groups)) {
-    for (const m of g.members) knownNames.add(m);
+    for (const m of (Array.isArray(g?.members) ? g.members : [])) rememberKnownName(m);
   }
-  const explicitMentions = mentions || [];
-  const textMentions = new Set(explicitMentions);
+  const resolveKnownName = (raw) => {
+    if (typeof raw !== 'string') return null;
+    const key = raw.trim().toLowerCase();
+    if (!key) return null;
+    return knownNameMap.get(key) || null;
+  };
+  const explicitMentions = Array.isArray(mentions) ? mentions : [];
+  const textMentions = new Set();
+  for (const explicit of explicitMentions) {
+    const canonical = resolveKnownName(explicit) || (typeof explicit === 'string' ? explicit.trim() : '');
+    if (canonical && canonical !== fromName) textMentions.add(canonical);
+  }
   const mentionRegex = /@([a-zA-Z0-9_-]+)/g;
   const mentionScanTexts = isHumanMessage ? [canonicalFull] : [canonicalSummary || '', canonicalFull || ''];
   for (const text of mentionScanTexts) {
+    mentionRegex.lastIndex = 0;
     let match;
     while ((match = mentionRegex.exec(text)) !== null) {
-      const name = match[1];
-      if (knownNames.has(name) && name !== fromName) textMentions.add(name);
+      const canonical = resolveKnownName(match[1]);
+      if (canonical && canonical !== fromName) textMentions.add(canonical);
     }
   }
 
@@ -1969,6 +2395,9 @@ app.post('/api/messages', (req, res) => {
     source: source || 'api',
     sourceRoom,
   };
+  if (normalizedAttachments.length > 0) {
+    msg.attachments = normalizedAttachments;
+  }
 
   const warnings = [];
   if (msg.to && directTargetKind === 'human' && assumedHumanTarget) {
@@ -2066,11 +2495,52 @@ app.get('/api/messages/:id', (req, res) => {
   res.json({ ...msg, ts: undefined, time: relativeTime(msg.ts) });
 });
 
+app.post('/api/messages/:id/suppress', (req, res) => {
+  const agentName = normalizeAgentName(req.body?.agent);
+  if (!agentName) return res.status(400).json({ error: 'agent required' });
+  if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
+
+  const msg = messages.find(m => m.id === req.params.id);
+  if (!msg) return res.status(404).json({ error: 'message not found' });
+  if (!messageTargetsAgent(msg, agentName)) {
+    return res.status(400).json({ error: `message ${msg.id} is not deliverable to ${agentName}` });
+  }
+
+  const before = getUnreadInboxMessages(agentName).unread.some(m => m.id === msg.id);
+  if (!Array.isArray(msg.suppressedRecipients)) msg.suppressedRecipients = [];
+  if (!msg.suppressedRecipients.includes(agentName)) {
+    msg.suppressedRecipients.push(agentName);
+    saveMessages();
+  }
+  const after = getUnreadInboxMessages(agentName).unread.some(m => m.id === msg.id);
+
+  res.json({
+    ok: true,
+    id: msg.id,
+    agent: agentName,
+    suppressed: true,
+    was_unread: before,
+    is_unread_now: after,
+    suppressedRecipients: msg.suppressedRecipients,
+  });
+});
+
 // ── Full message HTML page (for Matrix links) ────────────────────────
 app.get('/msg/:id', (req, res) => {
   const msg = messages.find(m => m.id === req.params.id);
   if (!msg) return res.status(404).send('<h1>Message not found</h1>');
   const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const attachmentsHtml = Array.isArray(msg.attachments) && msg.attachments.length > 0
+    ? '<div class="meta">Attachments:<br>' + msg.attachments
+      .map(a => {
+        const label = escape(a?.name || path.basename(String(a?.path || 'file')));
+        const meta = [a?.kind, a?.mime, a?.size ? `${a.size} bytes` : null].filter(Boolean).join(' · ');
+        const pathText = escape(String(a?.path || ''));
+        return `• <strong>${label}</strong>${meta ? ` (${escape(meta)})` : ''}<br><code>${pathText}</code>`;
+      })
+      .join('<br>')
+      + '</div>'
+    : '';
   // JSON-encode full text for safe embedding in <script>
   const fullJson = JSON.stringify(msg.full || '');
   res.type('html').send(`<!DOCTYPE html>
@@ -2113,6 +2583,7 @@ app.get('/msg/:id', (req, res) => {
 </div>
 ${msg.mentions.length ? '<div class="mentions">Mentions: ' + msg.mentions.map(m => '@' + escape(m)).join(' ') + '</div>' : ''}
 ${msg.reply_to ? '<div class="meta">Reply to: <a href="/msg/' + escape(msg.reply_to) + '" style="color:#4dabf7">' + escape(msg.reply_to) + '</a></div>' : ''}
+${attachmentsHtml}
 <div class="summary">${escape(msg.summary).replace(/\\n/g, '<br>').replace(/\n/g, '<br>')}</div>
 <h3>Full Message</h3>
 <div class="full" id="full-content"></div>
@@ -2134,6 +2605,24 @@ app.get('/api/inbox/:agent/unread', (req, res) => {
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
   const snapshot = buildUnreadInboxSnapshot(agentName);
   res.json(snapshot);
+});
+
+app.get('/api/inbox/:agent/unread-list', (req, res) => {
+  const agentName = normalizeAgentName(req.params.agent);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
+
+  const limitRaw = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw >= 0 ? Math.min(limitRaw, 500) : 50;
+  const { unread } = getUnreadInboxMessages(agentName);
+  const rows = limit === 0 ? unread : unread.slice(-limit);
+  res.json({
+    agent: agentName,
+    unread_total: unread.length,
+    unread_returned: rows.length,
+    unread_omitted: Math.max(0, unread.length - rows.length),
+    messages: rows.map(summarizeMsg),
+  });
 });
 
 app.get('/api/inbox/:agent', (req, res) => {
@@ -2162,6 +2651,8 @@ app.get('/api/inbox/:agent', (req, res) => {
     saveCursors();
   }
   markAgentInboxChecked(agentName);
+  // If the agent just consumed inbox, stale queued notifications should be removed immediately.
+  clearQueuedNotificationsForAgent(agentName);
 
   res.json({ dm, group });
 });
@@ -2180,7 +2671,24 @@ app.get('/api/groups/:name/messages', (req, res) => {
     return res.status(403).json({ error: `agent '${resolvedAgentName}' is not a member of group '${groupName}'` });
   }
 
-  const limit = parseInt(req.query.limit) || 10;
+  const limitRaw = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw >= 0 ? Math.min(limitRaw, 200) : 10;
+  const hasAdvanceParam = typeof req.query.advance === 'string';
+  const hasUnreadLimitParam = req.query.unread_limit !== undefined;
+  const advanceModeRaw = hasAdvanceParam ? req.query.advance.trim().toLowerCase() : '';
+  let advanceMode = ['all', 'delivered', 'none'].includes(advanceModeRaw) ? advanceModeRaw : null;
+  if (!advanceMode) {
+    // Backward-compatible "active read" escape hatch for old MCP schemas:
+    // check_group(..., limit=0) => consume all unread.
+    advanceMode = (!hasAdvanceParam && !hasUnreadLimitParam && limit === 0) ? 'all' : 'none';
+  }
+  const unreadLimitRaw = Number.parseInt(req.query.unread_limit, 10);
+  let unreadLimit = Number.isFinite(unreadLimitRaw) && unreadLimitRaw > 0
+    ? Math.min(unreadLimitRaw, 500)
+    : null;
+  if (unreadLimit === null && advanceMode !== 'all') {
+    unreadLimit = 10; // default preview window
+  }
   const cursor = ensureCursor(resolvedAgentName);
   const groupCursor = getGroupCursor(cursor, groupName);
   const groupTs = groupCursor.ts;
@@ -2191,15 +2699,33 @@ app.get('/api/groups/:name/messages', (req, res) => {
     .filter(m => !isSuppressedForAgent(m, resolvedAgentName))
     .sort(compareMsgOrder);
   const unreadRaw = groupMsgs.filter(m => isAfterCursor(m, groupTs, groupId));
-  const unread = unreadRaw.map(summarizeMsg);
+  const unreadTotal = unreadRaw.length;
+  const deliveredUnreadRaw = unreadLimit ? unreadRaw.slice(-unreadLimit) : unreadRaw;
+  const unread = deliveredUnreadRaw.map(summarizeMsg);
+  const unreadReturned = deliveredUnreadRaw.length;
+  const unreadOmitted = Math.max(0, unreadTotal - unreadReturned);
   const read = groupMsgs.filter(m => !isAfterCursor(m, groupTs, groupId)).slice(-limit).map(summarizeMsg);
 
-  // Advance group cursor only to the last delivered unread message.
-  if (advanceGroupCursor(cursor, groupName, unreadRaw)) {
-    saveCursors();
+  // Advance group cursor by mode:
+  // - all: consume all unread (legacy behavior)
+  // - delivered: consume only returned unread subset
+  // - none: preview only
+  if (advanceMode !== 'none') {
+    const cursorSource = advanceMode === 'all' ? unreadRaw : deliveredUnreadRaw;
+    if (advanceGroupCursor(cursor, groupName, cursorSource)) {
+      saveCursors();
+    }
   }
 
-  res.json({ group: groupName, unread, read });
+  res.json({
+    group: groupName,
+    unread,
+    read,
+    unread_total: unreadTotal,
+    unread_returned: unreadReturned,
+    unread_omitted: unreadOmitted,
+    advance: advanceMode,
+  });
 });
 
 // ── Agent's groups with unread counts ─────────────────────────────────
