@@ -41,15 +41,16 @@ const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHM
 const MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT = (process.env.MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT || '30mb').trim() || '30mb';
 const UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS = Number.parseInt(process.env.UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS || '120000', 10);
 const AGENT_COMPACT_SUMMARY_MAX = Number.parseInt(process.env.AGENT_COMPACT_SUMMARY_MAX || '180', 10);
+const AGENT_COMPACT_RUNTIME_DEDUPE_MS = Number.parseInt(process.env.AGENT_COMPACT_RUNTIME_DEDUPE_MS || '120000', 10);
 const AGENT_COMPACT_HOOK_PATTERNS = [
   /\[(?:agent[_-]?compact|compact(?:ion)?)\]/i,
   /\bagent[_-]?compact(?:ion)?\s*:/i,
   /\bcompact[_-]?hook\b/i,
 ];
 const AGENT_COMPACT_FALLBACK_PATTERNS = [
-  /\bcompact(?:ing|ed|ion)?\b[\s\S]{0,80}\b(?:context|conversation|history|thread|memory|token(?:s)?|window)\b/i,
-  /\b(?:context|conversation|history|thread|memory|token(?:s)?|window)\b[\s\S]{0,80}\b(?:compact(?:ing|ed|ion)?|summari[sz](?:e|ed|ing|ation)|truncate(?:d|s|ing)?)\b/i,
-  /\b(?:context|token)(?:\s+window)?\b[\s\S]{0,80}\b(?:full|limit|overflow|exceed(?:ed|ing)?|near(?:ing)?|almost)\b[\s\S]{0,40}\b(?:compact|summari[sz]|truncate)\b/i,
+  { marker: 'codex-context-compacted', re: /(?:^|\n)\s*(?:•\s*)?Context compacted\s*(?:\n|$)/i },
+  { marker: 'claude-conversation-compacted', re: /(?:^|\n)\s*(?:✻\s*)?Conversation compacted \(ctrl\+o for history\)\s*(?:\n|$)/i },
+  { marker: 'claude-compacted-summary', re: /(?:^|\n)\s*(?:⎿\s*)?Compacted \(ctrl\+o to see full summary\)\s*(?:\n|$)/i },
 ];
 
 mkdirSync(DATA_DIR, { recursive: true });
@@ -155,10 +156,10 @@ function detectAgentCompactSignal(summary, full) {
   if (!raw) return null;
 
   for (const re of AGENT_COMPACT_HOOK_PATTERNS) {
-    if (re.test(raw)) return { mode: 'hook' };
+    if (re.test(raw)) return { mode: 'hook', marker: 'explicit-hook' };
   }
-  for (const re of AGENT_COMPACT_FALLBACK_PATTERNS) {
-    if (re.test(raw)) return { mode: 'pattern' };
+  for (const pattern of AGENT_COMPACT_FALLBACK_PATTERNS) {
+    if (pattern.re.test(raw)) return { mode: 'pattern', marker: pattern.marker };
   }
   return null;
 }
@@ -176,7 +177,49 @@ function buildAgentCompactEvent(msg, senderIsAgent) {
     messageId: msg.id,
     agent: msg.from,
     mode: signal.mode,
+    marker: signal.marker || null,
+    source: 'message',
     summary,
+  };
+}
+
+function normalizeCompactMarker(value) {
+  const marker = (typeof value === 'string' && value.trim()) ? value.trim().toLowerCase() : '';
+  if (!marker) return 'unknown';
+  if (marker === 'explicit-hook') return marker;
+  if (AGENT_COMPACT_FALLBACK_PATTERNS.some(p => p.marker === marker)) return marker;
+  return 'unknown';
+}
+
+function pruneCompactRuntimeDedupState(now = Date.now()) {
+  if (compactRuntimeAlertAt.size < 2000) return;
+  const cutoff = now - Math.max(AGENT_COMPACT_RUNTIME_DEDUPE_MS * 4, 60_000);
+  for (const [key, ts] of compactRuntimeAlertAt.entries()) {
+    if ((Number(ts) || 0) < cutoff) compactRuntimeAlertAt.delete(key);
+  }
+}
+
+function buildRuntimeCompactEvent(agentName, payload = {}) {
+  const now = Date.now();
+  const modeRaw = (typeof payload.mode === 'string' && payload.mode.trim()) ? payload.mode.trim().toLowerCase() : 'pattern';
+  const mode = modeRaw === 'hook' ? 'hook' : 'pattern';
+  const marker = normalizeCompactMarker(payload.marker);
+  const summaryInput = (typeof payload.summary === 'string' && payload.summary.trim())
+    ? payload.summary.trim()
+    : marker.replace(/-/g, ' ');
+  const source = (typeof payload.source === 'string' && payload.source.trim())
+    ? payload.source.trim()
+    : 'runtime';
+
+  return {
+    id: `compact_runtime_${agentName}_${now}_${Math.random().toString(36).slice(2, 8)}`,
+    ts: now,
+    messageId: null,
+    agent: agentName,
+    mode,
+    marker,
+    source,
+    summary: makeCompactPreview(summaryInput, AGENT_COMPACT_SUMMARY_MAX),
   };
 }
 
@@ -324,6 +367,7 @@ let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const unexpectedOfflineAlertAt = new Map(); // key(agent:reason) -> ts
+const compactRuntimeAlertAt = new Map(); // key(agent:marker:mode) -> ts
 const swapAlertState = {
   active: false,
   lastPct: 0,
@@ -2365,6 +2409,50 @@ app.post('/api/agents/:name/runtime', (req, res) => {
       updatedAt: runtime.updatedAt || Date.now(),
     },
   });
+});
+
+app.post('/api/runtime/compact', (req, res) => {
+  const agentName = normalizeAgentName(req.body?.agent);
+  if (!agentName) return res.status(400).json({ error: 'agent required' });
+
+  const server = normalizeServer(req.body?.server);
+  let agent = agents[agentName];
+  if (!isAgentRecord(agent)) {
+    const ensured = ensureAgentRecord(agentName, {
+      server,
+      tmux: `${agentName}:0.0`,
+      online: true,
+      type: 'agent',
+      kind: 'agent',
+      offlineReason: null,
+    });
+    if (!ensured) return res.status(400).json({ error: 'invalid agent name' });
+    agent = ensured.agent;
+    saveAgents();
+  }
+
+  const marker = normalizeCompactMarker(req.body?.marker);
+  const modeRaw = (typeof req.body?.mode === 'string' && req.body.mode.trim())
+    ? req.body.mode.trim().toLowerCase()
+    : 'pattern';
+  const mode = modeRaw === 'hook' ? 'hook' : 'pattern';
+  const key = `${agentName}:${marker}:${mode}`;
+  const now = Date.now();
+  const prevTs = Number(compactRuntimeAlertAt.get(key)) || 0;
+  if ((now - prevTs) < AGENT_COMPACT_RUNTIME_DEDUPE_MS) {
+    return res.json({ ok: true, suppressed: 'dedupe', agent: agentName, marker, mode });
+  }
+  compactRuntimeAlertAt.set(key, now);
+  pruneCompactRuntimeDedupState(now);
+
+  const event = buildRuntimeCompactEvent(agentName, {
+    mode,
+    marker,
+    source: req.body?.source,
+    summary: req.body?.summary,
+  });
+  broadcastSSE('agent_compact', event);
+  res.json({ ok: true, event });
 });
 
 app.post('/api/runtime/push-delivered', (req, res) => {

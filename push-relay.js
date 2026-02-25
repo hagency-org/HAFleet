@@ -14,6 +14,7 @@ const INJECT_DELAY_MS = Number.parseInt(process.env.PUSH_RELAY_INJECT_DELAY_MS |
 const BLOCK_SCAN_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_BLOCK_SCAN_INTERVAL_MS || '5000', 10);
 const BLOCK_TAIL_LINES = Number.parseInt(process.env.PUSH_RELAY_BLOCK_TAIL_LINES || '40', 10);
 const BLOCK_RECENT_LINES = Number.parseInt(process.env.PUSH_RELAY_BLOCK_RECENT_LINES || '14', 10);
+const COMPACT_RECENT_LINES = Number.parseInt(process.env.PUSH_RELAY_COMPACT_RECENT_LINES || '30', 10);
 const SKIP_LOG_THROTTLE_MS = Number.parseInt(process.env.PUSH_RELAY_SKIP_LOG_THROTTLE_MS || '30000', 10);
 const IDLE_THRESHOLD_MS = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '15000', 10);
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.floor((IDLE_THRESHOLD_MS + 999) / 1000));
@@ -28,6 +29,7 @@ let reconnectTimer = null;
 let heartbeatTimer = null;
 let warnedMissingTmux = false;
 const blockedState = new Map();
+const compactState = new Map();
 const activityState = new Map();
 const runtimeReportDigest = new Map();
 const skipReasonLastLog = new Map();
@@ -38,6 +40,11 @@ const BLOCK_PATTERNS = [
   { reason: 'approval-mode-toggle', re: /bypass permissions on \(shift\+tab to cycle\)/i },
   { reason: 'update-required', re: /updates?\s+available:|update available.*agent-update|run ['"`]?agent-update/i },
   { reason: 'interactive-confirm', re: /choose (an )?option|press (enter|return) to continue|confirm .*continue/i },
+];
+const COMPACT_PATTERNS = [
+  { marker: 'codex-context-compacted', summary: 'Context compacted', re: /(?:^|\n)\s*(?:•\s*)?Context compacted\s*(?:\n|$)/i },
+  { marker: 'claude-conversation-compacted', summary: 'Conversation compacted (ctrl+o for history)', re: /(?:^|\n)\s*(?:✻\s*)?Conversation compacted \(ctrl\+o for history\)\s*(?:\n|$)/i },
+  { marker: 'claude-compacted-summary', summary: 'Compacted (ctrl+o to see full summary)', re: /(?:^|\n)\s*(?:⎿\s*)?Compacted \(ctrl\+o to see full summary\)\s*(?:\n|$)/i },
 ];
 
 function warnMissingTmuxOnce() {
@@ -227,6 +234,42 @@ function detectBlockedReason(tail, paneCmd = '') {
   return null;
 }
 
+function detectCompactSignal(tail, paneCmd = '') {
+  if (!tail) return null;
+  const cmd = String(paneCmd || '').toLowerCase();
+  if (cmd && !cmd.includes('claude') && !cmd.includes('codex')) return null;
+  const window = recentTailWindow(tail, COMPACT_RECENT_LINES);
+  if (!window) return null;
+  for (const pattern of COMPACT_PATTERNS) {
+    if (pattern.re.test(window)) {
+      return { mode: 'pattern', marker: pattern.marker, summary: pattern.summary };
+    }
+  }
+  return null;
+}
+
+async function reportCompact(agentName, compact, tail, paneCmd = '') {
+  if (!compact?.marker) return;
+  try {
+    const res = await postJson('/api/runtime/compact', {
+      agent: agentName,
+      server: SERVER_ID,
+      source: 'tmux-tail',
+      mode: compact.mode || 'pattern',
+      marker: compact.marker,
+      summary: compact.summary || compact.marker,
+      tail: recentTailWindow(tail, COMPACT_RECENT_LINES),
+      command: paneCmd,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`status ${res.status} ${body}`.trim());
+    }
+  } catch (e) {
+    console.error(`[push-relay] compact report failed for ${agentName}: ${e.message}`);
+  }
+}
+
 async function refreshAgentsSnapshot() {
   const sessions = listLocalTmuxSessions();
   localAgents.clear();
@@ -249,6 +292,7 @@ async function scanBlockedStates() {
   for (const [agentName, prev] of blockedState.entries()) {
     if (live.has(agentName)) continue;
     blockedState.delete(agentName);
+    compactState.delete(agentName);
     activityState.delete(agentName);
     runtimeReportDigest.delete(agentName);
     await reportRuntime(agentName, {
@@ -269,9 +313,19 @@ async function scanBlockedStates() {
     const paneCmd = currentPaneCommand(target);
     const tail = captureTail(target, BLOCK_TAIL_LINES);
     const reason = detectBlockedReason(tail, paneCmd);
+    const compact = detectCompactSignal(tail, paneCmd);
     const blocked = Boolean(reason);
     const prev = blockedState.get(agentName) || { blocked: false, reason: null };
     blockedState.set(agentName, { blocked, reason });
+    const prevCompact = compactState.get(agentName) || null;
+    if (compact) {
+      if (!prevCompact || prevCompact.marker !== compact.marker) {
+        compactState.set(agentName, { marker: compact.marker });
+        await reportCompact(agentName, compact, tail, paneCmd);
+      }
+    } else if (prevCompact) {
+      compactState.delete(agentName);
+    }
 
     const metrics = computeActivityMetrics(agentName, target);
     const payload = {
