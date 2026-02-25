@@ -1,0 +1,565 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { execSync } from 'child_process';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
+import { createHash } from 'crypto';
+import path from 'path';
+import { z } from 'zod';
+
+function run(cmd) {
+  return execSync(cmd, { encoding: 'utf-8', timeout: 3000 }).trim();
+}
+
+function detectAgentName() {
+  // Highest priority: explicit launcher injection (agent-up sets this).
+  // This avoids cross-agent identity bleed when tmux client context is ambiguous.
+  const envAgent = (process.env.AGENT_NAME || '').trim();
+  if (envAgent) return envAgent;
+
+  const envPane = (process.env.TMUX_PANE || '').trim();
+  if (envPane) {
+    try {
+      const fromPane = run(`tmux display-message -p -t ${JSON.stringify(envPane)} "#{session_name}"`);
+      if (fromPane) return fromPane;
+    } catch {}
+  }
+
+  // Fallback for clients that don't pass TMUX/TMUX_PANE to MCP subprocesses:
+  // map this process TTY back to tmux pane -> session.
+  try {
+    const tty = run(`ps -o tty= -p ${process.pid}`);
+    if (tty) {
+      const paneLines = run('tmux list-panes -a -F "#{pane_tty} #{session_name}"');
+      const expected = `/dev/${tty}`;
+      for (const line of paneLines.split('\n')) {
+        const sp = line.indexOf(' ');
+        if (sp < 0) continue;
+        const paneTty = line.slice(0, sp).trim();
+        const session = line.slice(sp + 1).trim();
+        if (paneTty === expected && session) return session;
+      }
+    }
+  } catch {}
+
+  try {
+    const fromClient = run('tmux display-message -p "#{session_name}"');
+    if (fromClient) return fromClient;
+  } catch {}
+
+  return null;
+}
+
+// Auto-detect agent name reliably.
+const AGENT_NAME = detectAgentName();
+if (!AGENT_NAME) {
+  process.stderr.write('Error: Cannot determine agent name. Run inside tmux or set AGENT_NAME.\n');
+  process.exit(1);
+}
+
+const API = process.env.AGENT_CHAT_API || 'http://127.0.0.1:8090';
+const API_TOKEN = (process.env.API_TOKEN || '').trim();
+const AGENT_SERVER = (process.env.AGENT_CHAT_SERVER || '').trim() || null;
+const ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.AGENT_CHAT_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
+const ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.AGENT_CHAT_ATTACHMENT_MAX_ITEMS || '8', 10);
+const MEDIA_FETCH_CACHE_DIR = path.resolve('data', 'mcp-media-cache', AGENT_NAME);
+mkdirSync(MEDIA_FETCH_CACHE_DIR, { recursive: true });
+
+// ── HTTP helper ───────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (API_TOKEN) {
+    opts.headers.Authorization = `Bearer ${API_TOKEN}`;
+  }
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(`${API}${path}`, opts);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || `API error ${res.status}`);
+  }
+  return res.json();
+}
+
+async function ensureAgentRegistered() {
+  try {
+    await api('GET', `/api/agents/${encodeURIComponent(AGENT_NAME)}`);
+    return;
+  } catch (e) {
+    const msg = String(e?.message || '');
+    if (!/agent not found/i.test(msg)) return;
+  }
+
+  try {
+    await api('POST', '/api/agents', {
+      name: AGENT_NAME,
+      type: 'agent',
+      tmux: `${AGENT_NAME}:0.0`,
+      server: AGENT_SERVER,
+    });
+  } catch (e) {
+    process.stderr.write(`Warning: failed to auto-register agent '${AGENT_NAME}': ${e.message}\n`);
+  }
+}
+
+function text(data) {
+  return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] };
+}
+
+function err(msg) {
+  return { content: [{ type: 'text', text: msg }], isError: true };
+}
+
+function normalizeAttachmentName(name, fallback = 'file') {
+  let out = typeof name === 'string' ? name.trim() : '';
+  if (!out) out = fallback;
+  out = path.basename(out);
+  out = out.replace(/[^\w.\-()[\] ]+/g, '_');
+  if (!out) out = fallback;
+  return out;
+}
+
+function normalizeAttachmentMime(mime) {
+  if (typeof mime !== 'string') return null;
+  const normalized = mime.trim().toLowerCase();
+  if (!normalized) return null;
+  if (!/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(normalized)) return null;
+  return normalized;
+}
+
+function normalizeAttachmentKind(kind, mime, name) {
+  if (kind === 'image' || kind === 'file') return kind;
+  if (typeof mime === 'string' && mime.startsWith('image/')) return 'image';
+  if (/\.(png|jpe?g|gif|webp|bmp|svg|avif|heic|heif|tiff?)$/i.test(String(name || ''))) return 'image';
+  return 'file';
+}
+
+function normalizeAttachmentInput(raw) {
+  const item = (typeof raw === 'string') ? { path: raw } : raw;
+  if (!item || typeof item !== 'object') throw new Error('attachment must be a string path or object');
+
+  const filePath = typeof item.path === 'string' ? item.path.trim() : '';
+  if (!filePath) throw new Error('attachment.path required');
+
+  const fallbackName = path.basename(filePath) || 'file';
+  const name = normalizeAttachmentName(item.name, fallbackName);
+  const mime = normalizeAttachmentMime(item.mime);
+  const kind = normalizeAttachmentKind(item.kind, mime, name);
+  return { path: filePath, name, mime, kind };
+}
+
+async function stageAttachmentForBackend(rawAttachment) {
+  const attachment = normalizeAttachmentInput(rawAttachment);
+  let stat;
+  try {
+    stat = statSync(attachment.path);
+  } catch (e) {
+    throw new Error(`attachment not found: ${attachment.path} (${e.message})`);
+  }
+  if (!stat.isFile()) throw new Error(`attachment is not a file: ${attachment.path}`);
+  if (stat.size <= 0) throw new Error(`attachment is empty: ${attachment.path}`);
+  if (stat.size > ATTACHMENT_MAX_BYTES) {
+    throw new Error(`attachment too large: ${attachment.path} (${stat.size} bytes > ${ATTACHMENT_MAX_BYTES})`);
+  }
+  const buf = readFileSync(attachment.path);
+  const staged = await api('POST', '/api/media/stage', {
+    from: AGENT_NAME,
+    source_path: attachment.path,
+    name: attachment.name,
+    mime: attachment.mime,
+    kind: attachment.kind,
+    content_base64: buf.toString('base64'),
+  });
+  if (!staged?.attachment?.path) throw new Error(`backend failed to stage attachment: ${attachment.path}`);
+  return staged.attachment;
+}
+
+async function stageAttachments(rawAttachments) {
+  if (!Array.isArray(rawAttachments) || rawAttachments.length === 0) return [];
+  if (rawAttachments.length > ATTACHMENT_MAX_ITEMS) {
+    throw new Error(`too many attachments (max ${ATTACHMENT_MAX_ITEMS})`);
+  }
+  const out = [];
+  for (const item of rawAttachments) {
+    out.push(await stageAttachmentForBackend(item));
+  }
+  return out;
+}
+
+function statReadableFile(filePath) {
+  if (typeof filePath !== 'string' || !filePath.trim()) return null;
+  try {
+    const stat = statSync(filePath);
+    if (!stat.isFile() || stat.size <= 0) return null;
+    return { path: filePath, size: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+function inferMimeFromName(name) {
+  const ext = path.extname(String(name || '')).toLowerCase();
+  switch (ext) {
+    case '.png': return 'image/png';
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg';
+    case '.gif': return 'image/gif';
+    case '.webp': return 'image/webp';
+    case '.bmp': return 'image/bmp';
+    case '.svg': return 'image/svg+xml';
+    case '.avif': return 'image/avif';
+    case '.heic': return 'image/heic';
+    case '.heif': return 'image/heif';
+    case '.tif':
+    case '.tiff': return 'image/tiff';
+    case '.pdf': return 'application/pdf';
+    case '.txt': return 'text/plain';
+    case '.md': return 'text/markdown';
+    case '.json': return 'application/json';
+    default: return null;
+  }
+}
+
+function inferExtFromMime(mime) {
+  const normalized = normalizeAttachmentMime(mime);
+  switch (normalized) {
+    case 'image/png': return '.png';
+    case 'image/jpeg': return '.jpg';
+    case 'image/gif': return '.gif';
+    case 'image/webp': return '.webp';
+    case 'image/bmp': return '.bmp';
+    case 'image/svg+xml': return '.svg';
+    case 'image/avif': return '.avif';
+    case 'image/heic': return '.heic';
+    case 'image/heif': return '.heif';
+    case 'image/tiff': return '.tiff';
+    case 'application/pdf': return '.pdf';
+    case 'text/plain': return '.txt';
+    case 'text/markdown': return '.md';
+    case 'application/json': return '.json';
+    default: return null;
+  }
+}
+
+function parseContentDispositionFilename(headerValue) {
+  if (typeof headerValue !== 'string' || !headerValue.trim()) return null;
+
+  const starMatch = headerValue.match(/filename\*=UTF-8''([^;]+)/i);
+  if (starMatch?.[1]) {
+    try {
+      return decodeURIComponent(starMatch[1].trim());
+    } catch {
+      return starMatch[1].trim();
+    }
+  }
+
+  const quotedMatch = headerValue.match(/filename="([^"]+)"/i);
+  if (quotedMatch?.[1]) return quotedMatch[1].trim();
+
+  const plainMatch = headerValue.match(/filename=([^;]+)/i);
+  if (plainMatch?.[1]) return plainMatch[1].trim();
+
+  return null;
+}
+
+function buildMediaCachePath(sourcePath, fallbackName, mime) {
+  const source = String(sourcePath || '').trim() || 'media';
+  const normalizedName = normalizeAttachmentName(fallbackName || path.basename(source) || 'file');
+  const sourceExt = path.extname(source);
+  const nameExt = path.extname(normalizedName);
+  const ext = nameExt || inferExtFromMime(mime) || sourceExt || '.bin';
+  const stem = normalizeAttachmentName(path.basename(normalizedName, nameExt || path.extname(normalizedName)) || 'file');
+  const hash = createHash('sha1').update(source).digest('hex').slice(0, 16);
+  return path.join(MEDIA_FETCH_CACHE_DIR, `${hash}-${stem}${ext}`);
+}
+
+async function fetchMediaPathToLocal(sourcePath, hint = {}) {
+  const source = typeof sourcePath === 'string' ? sourcePath.trim() : '';
+  if (!source) throw new Error('media source path required');
+
+  const local = statReadableFile(source);
+  if (local) {
+    const name = normalizeAttachmentName(hint.name, path.basename(source) || 'file');
+    const mime = normalizeAttachmentMime(hint.mime) || inferMimeFromName(name);
+    const kind = normalizeAttachmentKind(hint.kind, mime, name);
+    return {
+      path: source,
+      name,
+      mime,
+      kind,
+      size: local.size,
+      staged: true,
+      source_path: hint.source_path || source,
+    };
+  }
+
+  const cachedPath = buildMediaCachePath(source, hint.name, hint.mime);
+  const cached = statReadableFile(cachedPath);
+  if (cached) {
+    const name = normalizeAttachmentName(hint.name, path.basename(cachedPath) || 'file');
+    const mime = normalizeAttachmentMime(hint.mime) || inferMimeFromName(name);
+    const kind = normalizeAttachmentKind(hint.kind, mime, name);
+    return {
+      path: cachedPath,
+      name,
+      mime,
+      kind,
+      size: cached.size,
+      staged: true,
+      source_path: hint.source_path || source,
+    };
+  }
+
+  const opts = { method: 'GET', headers: {} };
+  if (API_TOKEN) opts.headers.Authorization = `Bearer ${API_TOKEN}`;
+  const query = new URLSearchParams({ path: source });
+  const res = await fetch(`${API}/api/media/fetch?${query}`, opts);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    const reason = body?.error || `HTTP ${res.status}`;
+    throw new Error(`media fetch failed (${reason})`);
+  }
+
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length <= 0) throw new Error('media fetch returned empty file');
+  if (buffer.length > ATTACHMENT_MAX_BYTES) {
+    throw new Error(`media fetch too large: ${buffer.length} bytes > ${ATTACHMENT_MAX_BYTES}`);
+  }
+
+  const headerName = parseContentDispositionFilename(res.headers.get('content-disposition'));
+  const name = normalizeAttachmentName(headerName || hint.name, path.basename(source) || 'file');
+  const mime = normalizeAttachmentMime(res.headers.get('content-type'))
+    || normalizeAttachmentMime(hint.mime)
+    || inferMimeFromName(name);
+  const kind = normalizeAttachmentKind(hint.kind, mime, name);
+  const targetPath = buildMediaCachePath(source, name, mime);
+  writeFileSync(targetPath, buffer);
+  return {
+    path: targetPath,
+    name,
+    mime,
+    kind,
+    size: buffer.length,
+    staged: true,
+    source_path: hint.source_path || source,
+  };
+}
+
+function mergeAttachmentsByPath(items) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const p = typeof item.path === 'string' ? item.path.trim() : '';
+    if (!p) continue;
+    if (seen.has(p)) continue;
+    seen.add(p);
+    out.push(item);
+  }
+  return out;
+}
+
+async function localizeTextLocalPaths(value) {
+  if (typeof value !== 'string' || !value.includes('LocalPath:')) {
+    return { text: value, attachments: [] };
+  }
+  const lines = value.split('\n');
+  const extraAttachments = [];
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/^LocalPath:\s*(.+)$/);
+    if (!match?.[1]) continue;
+    const sourcePath = match[1].trim();
+    if (!sourcePath) continue;
+    try {
+      const localized = await fetchMediaPathToLocal(sourcePath, { name: path.basename(sourcePath), source_path: sourcePath });
+      lines[i] = `LocalPath: ${localized.path}`;
+      extraAttachments.push(localized);
+    } catch (e) {
+      process.stderr.write(`[agent-chat/${AGENT_NAME}] failed to localize LocalPath ${sourcePath}: ${e.message}\n`);
+    }
+  }
+  return { text: lines.join('\n'), attachments: extraAttachments };
+}
+
+async function localizeMessageMedia(message) {
+  if (!message || typeof message !== 'object') return message;
+  const out = { ...message };
+
+  const localizedAttachments = [];
+  const sourceAttachments = Array.isArray(message.attachments) ? message.attachments : [];
+  for (const raw of sourceAttachments) {
+    if (!raw || typeof raw !== 'object') continue;
+    const sourcePath = typeof raw.path === 'string' ? raw.path.trim() : '';
+    if (!sourcePath) {
+      localizedAttachments.push(raw);
+      continue;
+    }
+    try {
+      const localized = await fetchMediaPathToLocal(sourcePath, raw);
+      localizedAttachments.push({ ...raw, ...localized });
+    } catch (e) {
+      process.stderr.write(`[agent-chat/${AGENT_NAME}] failed to localize attachment ${sourcePath}: ${e.message}\n`);
+      localizedAttachments.push(raw);
+    }
+  }
+
+  const fullRewrite = await localizeTextLocalPaths(out.full);
+  if (typeof fullRewrite.text === 'string') out.full = fullRewrite.text;
+  const summaryRewrite = await localizeTextLocalPaths(out.summary);
+  if (typeof summaryRewrite.text === 'string') out.summary = summaryRewrite.text;
+  out.attachments = mergeAttachmentsByPath([
+    ...localizedAttachments,
+    ...fullRewrite.attachments,
+    ...summaryRewrite.attachments,
+  ]);
+  return out;
+}
+
+async function localizeInboxData(data) {
+  if (!data || typeof data !== 'object') return data;
+  const out = { ...data };
+  out.dm = await Promise.all((Array.isArray(data.dm) ? data.dm : []).map(localizeMessageMedia));
+  out.group = await Promise.all((Array.isArray(data.group) ? data.group : []).map(localizeMessageMedia));
+  return out;
+}
+
+async function localizeGroupData(data) {
+  if (!data || typeof data !== 'object') return data;
+  const out = { ...data };
+  out.read = await Promise.all((Array.isArray(data.read) ? data.read : []).map(localizeMessageMedia));
+  out.unread = await Promise.all((Array.isArray(data.unread) ? data.unread : []).map(localizeMessageMedia));
+  return out;
+}
+
+// ── MCP Server ────────────────────────────────────────────────────────
+const server = new McpServer({
+  name: `agent-chat-${AGENT_NAME}`,
+  version: '2.1.0',
+});
+
+await ensureAgentRegistered();
+
+// 1. whoami — returns identity, groups (with unread counts), and all known agents
+server.tool('whoami', 'Returns your agent identity, role, and groups', {}, async () => {
+  try {
+    const [me, allAgents, myGroups] = await Promise.all([
+      api('GET', `/api/agents/${AGENT_NAME}`),
+      api('GET', '/api/agents'),
+      api('GET', `/api/agents/${AGENT_NAME}/groups`),
+    ]);
+    return text({ me, groups: myGroups, agents: allAgents });
+  } catch (e) {
+    return err(e.message);
+  }
+});
+
+// 2. send_message
+server.tool(
+  'send_message',
+  'Send a direct message to another agent. type: request (needs response), inform (FYI, no response needed), reply (answering a prior message)',
+  {
+    to: z.string().describe('Target agent name'),
+    summary: z.string().describe('Short summary of the message, less than 50 words'),
+    full: z.string().describe('Full message content with all details'),
+    attachments: z.array(z.object({
+      path: z.string().describe('Local file path on this machine'),
+      name: z.string().optional().describe('Optional display filename'),
+      mime: z.string().optional().describe('Optional MIME type override, e.g. image/png'),
+      kind: z.enum(['image', 'file']).optional().describe('Optional content kind override'),
+    })).max(ATTACHMENT_MAX_ITEMS).optional().describe('Optional attachments. Files are staged to backend and bridged to Matrix.'),
+    type: z.enum(['request', 'inform', 'reply']).default('inform').describe('Message type: request, inform, or reply'),
+    reply_to: z.string().optional().describe('Message ID this is replying to'),
+  },
+  async ({ to, summary, full, attachments, type, reply_to }) => {
+    try {
+      const stagedAttachments = await stageAttachments(attachments);
+      const data = await api('POST', '/api/messages', {
+        from: AGENT_NAME, to, type, summary, full, attachments: stagedAttachments, mentions: [], reply_to: reply_to || null,
+      });
+      return text(data);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+// 3. post
+server.tool(
+  'post',
+  'Post a message to a group. Use mentions to @notify specific agents (they get push-notified). Agents not mentioned can still see the message when they check the group.',
+  {
+    group: z.string().describe('Group name'),
+    summary: z.string().describe('Short summary of the message, less than 50 words'),
+    full: z.string().describe('Full message content with all details'),
+    attachments: z.array(z.object({
+      path: z.string().describe('Local file path on this machine'),
+      name: z.string().optional().describe('Optional display filename'),
+      mime: z.string().optional().describe('Optional MIME type override, e.g. image/png'),
+      kind: z.enum(['image', 'file']).optional().describe('Optional content kind override'),
+    })).max(ATTACHMENT_MAX_ITEMS).optional().describe('Optional attachments. Files are staged to backend and bridged to Matrix.'),
+    type: z.enum(['request', 'inform', 'reply']).default('inform').describe('Message type: request, inform, or reply'),
+    mentions: z.array(z.string()).optional().describe('Agent names to @mention and push-notify'),
+    reply_to: z.string().optional().describe('Message ID this is replying to'),
+  },
+  async ({ group, summary, full, attachments, type, mentions, reply_to }) => {
+    try {
+      const stagedAttachments = await stageAttachments(attachments);
+      const data = await api('POST', '/api/messages', {
+        from: AGENT_NAME, group, type, summary, full, attachments: stagedAttachments, mentions: mentions || [], reply_to: reply_to || null,
+      });
+      return text(data);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+// 4. check_inbox — returns full message content (no need for separate get_message)
+server.tool(
+  'check_inbox',
+  'Check your inbox for unread direct messages and @mentions from groups. Returns two arrays: dm (private messages) and group (@mentions). Reading advances your cursor — messages shown here won\'t appear again next time.',
+  {},
+  async () => {
+    try {
+      const data = await api('GET', `/api/inbox/${AGENT_NAME}`);
+      const localized = await localizeInboxData(data);
+      return text(localized);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+// 5. check_group
+server.tool(
+  'check_group',
+  'Read messages from a group. By default, returns only the latest unread slice (preview) plus recent read history without advancing cursor. Set read_all=true to consume all unread and advance cursor.',
+  {
+    group: z.string().describe('Group name'),
+    limit: z.number().default(10).describe('Number of already-read messages to include for context (default 10)'),
+    unread_limit: z.number().default(10).describe('Max unread messages to preview when read_all=false (default 10)'),
+    read_all: z.boolean().default(false).describe('When true, return all unread and advance group cursor'),
+  },
+  async ({ group, limit, unread_limit, read_all }) => {
+    try {
+      const params = new URLSearchParams({ agent: AGENT_NAME });
+      if (limit !== undefined) params.set('limit', String(limit));
+      if (read_all) {
+        params.set('advance', 'all');
+      } else {
+        if (unread_limit !== undefined) params.set('unread_limit', String(unread_limit));
+        params.set('advance', 'none');
+      }
+      const data = await api('GET', `/api/groups/${group}/messages?${params}`);
+      const localized = await localizeGroupData(data);
+      return text(localized);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+// ── Connect ───────────────────────────────────────────────────────────
+const transport = new StdioServerTransport();
+await server.connect(transport);

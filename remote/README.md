@@ -1,6 +1,10 @@
 # Agent Chat Remote Package
 
 This folder is the deployable package for remote servers.
+Most files here are managed by root-level generators/sync checks:
+- Build output: `bash scripts/build-remote-package.sh`
+- Sync managed files into `remote/`: `bash scripts/build-remote-package.sh --sync-remote`
+- Validate managed files: `bash scripts/build-remote-package.sh --check`
 
 ## Included
 
@@ -42,6 +46,9 @@ This folder is the deployable package for remote servers.
 - Operations runbook (no doctor CLI): see `../OPERATIONS.md`
 - In normal `git clone` deployments, `install-remote.sh` uses repo-root `bin/` as the helper source of truth.
   `remote/bin` is only a fallback when root `bin/` is unavailable.
+- `remote/push-relay.js` and `remote/mcp-server.js` are thin wrappers. Shared logic lives in:
+  - `lib/push-relay-core.js`
+  - `lib/mcp-server-core.js`
 - The script links helpers into `~/.local/bin` (no copy), so path resolution stays consistent.
 - Re-running `bash install-remote.sh` is safe and is the recommended way to refresh both service and MCP config after updates.
 - `install-remote.sh` now runs hard verification and exits non-zero on failures (service inactive, heartbeat not increasing, auth issues, or agent/server mismatch when `VERIFY_AGENT` is set).

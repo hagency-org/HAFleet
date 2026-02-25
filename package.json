@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
+    "build:remote": "bash scripts/build-remote-package.sh",
+    "build:remote:check": "bash scripts/build-remote-package.sh --check",
+    "build:remote:sync": "bash scripts/build-remote-package.sh --sync-remote",
     "check:remote-sync": "bash scripts/check-remote-sync.sh"
   },
   "dependencies": {
