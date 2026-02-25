@@ -911,6 +911,7 @@ class MatrixBridge {
     this.upgradedDmRooms = new Set(); // rooms already checked/upgraded this session
     this.recentBridgedIds = new Set(); // prevent echo loops
     this.recentSystemInfoIds = new Set(); // dedupe system_info SSE events
+    this.recentAgentCompactIds = new Set(); // dedupe compact SSE events
     this.recentlyCreatedRooms = new Set(); // rooms we just created (suppress echo)
     this.recentMatrixEvents = new Map(); // event_id -> { ts, msgId }
     this.startupTs = Date.now();
@@ -1873,6 +1874,14 @@ class MatrixBridge {
           console.warn(`Failed to parse SSE system_info event: ${e.message}`);
         }
       });
+      es.on('agent_compact', (data) => {
+        try {
+          const event = JSON.parse(data);
+          this.onAgentCompact(event);
+        } catch (e) {
+          console.warn(`Failed to parse SSE agent_compact event: ${e.message}`);
+        }
+      });
       es.on('error', () => {
         console.error('SSE disconnected, reconnecting in 5s...');
         setTimeout(connect, 5000);
@@ -1944,6 +1953,81 @@ class MatrixBridge {
       const text = `⚠️ Agent @${agentName} appears blocked (${reason}). It may not process messages until manually handled.${pendingHint}`;
       await this.sendDeliveryNotice(roomId, text);
     }
+  }
+
+  findExistingAgentDmRoom(agentName) {
+    const canonicalAgent = this.resolveKnownAgentName(agentName) || this.normalizeName(agentName);
+    if (!canonicalAgent) return null;
+
+    const preferredKey = `dm:${canonicalAgent}`;
+    const preferredKeyNorm = this.nameKey(preferredKey);
+    const storeFound = (roomId) => {
+      const normalizedRoom = (typeof roomId === 'string' && roomId.trim()) ? roomId.trim() : '';
+      if (!normalizedRoom) return null;
+      this.dmRooms.set(preferredKey, normalizedRoom);
+      return normalizedRoom;
+    };
+
+    for (const [key, roomId] of this.dmRooms.entries()) {
+      if (this.nameKey(key) === preferredKeyNorm) {
+        return storeFound(roomId);
+      }
+    }
+    for (const [key, roomId] of Object.entries(state.dmRooms || {})) {
+      if (this.nameKey(key) === preferredKeyNorm) {
+        return storeFound(roomId);
+      }
+    }
+
+    // Backward compatibility: detect old "agent:human" key format and reuse it.
+    for (const [key, roomId] of Object.entries(state.dmRooms || {})) {
+      const parts = String(key || '').split(':');
+      if (parts.length !== 2) continue;
+      const [left, right] = parts;
+      if (!this.sameName(left, canonicalAgent) && !this.sameName(right, canonicalAgent)) continue;
+      const other = this.sameName(left, canonicalAgent) ? right : left;
+      if (this.isKnownAgentName(other)) continue; // skip agent↔agent rooms
+      return storeFound(roomId);
+    }
+    return null;
+  }
+
+  async onAgentCompact(event) {
+    const dedupeId = (typeof event?.id === 'string' && event.id.trim())
+      ? event.id.trim()
+      : ((typeof event?.messageId === 'string' && event.messageId.trim()) ? `compact_${event.messageId.trim()}` : null);
+    if (dedupeId) {
+      if (this.recentAgentCompactIds.has(dedupeId)) return;
+      this.recentAgentCompactIds.add(dedupeId);
+      if (this.recentAgentCompactIds.size > 1000) {
+        const arr = [...this.recentAgentCompactIds];
+        this.recentAgentCompactIds = new Set(arr.slice(-500));
+      }
+    }
+
+    const agentName = (typeof event?.agent === 'string' && event.agent.trim()) ? event.agent.trim() : '';
+    if (!agentName) return;
+    const canonicalAgent = this.resolveKnownAgentName(agentName) || this.normalizeName(agentName);
+    if (!canonicalAgent) return;
+
+    const roomId = this.findExistingAgentDmRoom(canonicalAgent);
+    if (!roomId) {
+      console.log(`SSE: agent_compact skipped for ${canonicalAgent} (no existing DM room)`);
+      return;
+    }
+
+    const mode = (typeof event?.mode === 'string' && event.mode.trim().toLowerCase() === 'hook') ? 'hook' : 'pattern';
+    const summary = (typeof event?.summary === 'string')
+      ? normalizeMessageText(event.summary).replace(/\s+/g, ' ').trim()
+      : '';
+    const msgId = (typeof event?.messageId === 'string' && event.messageId.trim()) ? event.messageId.trim() : null;
+    const linkLine = msgId ? `\n🔗 ${MSG_BASE_URL}/${msgId}` : '';
+    const summaryLine = summary ? `\nSummary: ${summary}` : '';
+    const confidence = mode === 'hook' ? 'reported' : 'likely';
+    const text = `ℹ️ Agent @${canonicalAgent} ${confidence} triggered a context compact event (${mode} detection).${summaryLine}${linkLine}`;
+
+    await this.sendDeliveryNotice(roomId, text);
+    console.log(`→ Matrix DM compact notice ${canonicalAgent} (${mode}) in ${roomId}`);
   }
 
   async onAgentRecovered(event) {

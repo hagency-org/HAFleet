@@ -40,6 +40,17 @@ const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHM
 const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
 const MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT = (process.env.MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT || '30mb').trim() || '30mb';
 const UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS = Number.parseInt(process.env.UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS || '120000', 10);
+const AGENT_COMPACT_SUMMARY_MAX = Number.parseInt(process.env.AGENT_COMPACT_SUMMARY_MAX || '180', 10);
+const AGENT_COMPACT_HOOK_PATTERNS = [
+  /\[(?:agent[_-]?compact|compact(?:ion)?)\]/i,
+  /\bagent[_-]?compact(?:ion)?\s*:/i,
+  /\bcompact[_-]?hook\b/i,
+];
+const AGENT_COMPACT_FALLBACK_PATTERNS = [
+  /\bcompact(?:ing|ed|ion)?\b[\s\S]{0,80}\b(?:context|conversation|history|thread|memory|token(?:s)?|window)\b/i,
+  /\b(?:context|conversation|history|thread|memory|token(?:s)?|window)\b[\s\S]{0,80}\b(?:compact(?:ing|ed|ion)?|summari[sz](?:e|ed|ing|ation)|truncate(?:d|s|ing)?)\b/i,
+  /\b(?:context|token)(?:\s+window)?\b[\s\S]{0,80}\b(?:full|limit|overflow|exceed(?:ed|ing)?|near(?:ing)?|almost)\b[\s\S]{0,40}\b(?:compact|summari[sz]|truncate)\b/i,
+];
 
 mkdirSync(DATA_DIR, { recursive: true });
 const MESSAGE_ATTACHMENT_DIR = path.join(DATA_DIR, 'message-attachments');
@@ -129,6 +140,44 @@ function makeHumanSummaryPreview(text) {
   const chars = [...normalized];
   if (chars.length <= HUMAN_SUMMARY_LIMIT) return normalized;
   return chars.slice(0, HUMAN_SUMMARY_LIMIT).join('') + '...';
+}
+
+function makeCompactPreview(text, maxChars = AGENT_COMPACT_SUMMARY_MAX) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  const chars = [...normalized];
+  if (chars.length <= maxChars) return normalized;
+  return `${chars.slice(0, maxChars).join('')}...`;
+}
+
+function detectAgentCompactSignal(summary, full) {
+  const raw = [summary || '', full || ''].filter(Boolean).join('\n').trim();
+  if (!raw) return null;
+
+  for (const re of AGENT_COMPACT_HOOK_PATTERNS) {
+    if (re.test(raw)) return { mode: 'hook' };
+  }
+  for (const re of AGENT_COMPACT_FALLBACK_PATTERNS) {
+    if (re.test(raw)) return { mode: 'pattern' };
+  }
+  return null;
+}
+
+function buildAgentCompactEvent(msg, senderIsAgent) {
+  if (!senderIsAgent) return null;
+  if (!msg || msg.type === 'human' || msg.from === 'system') return null;
+  const signal = detectAgentCompactSignal(msg.summary, msg.full);
+  if (!signal) return null;
+
+  const summary = makeCompactPreview(msg.summary || msg.full || '', AGENT_COMPACT_SUMMARY_MAX);
+  return {
+    id: `compact_${msg.id}`,
+    ts: msg.ts || Date.now(),
+    messageId: msg.id,
+    agent: msg.from,
+    mode: signal.mode,
+    summary,
+  };
 }
 
 function normalizeAttachmentName(value, fallback = 'file') {
@@ -2740,6 +2789,10 @@ app.post('/api/messages', (req, res) => {
 
   messages.push(msg);
   saveMessages();
+  const compactEvent = buildAgentCompactEvent(msg, senderIsAgent);
+  if (compactEvent) {
+    broadcastSSE('agent_compact', compactEvent);
+  }
   broadcastSSE('message', msg);
   if (senderIsAgent) {
     markAgentOutbound(fromName);
