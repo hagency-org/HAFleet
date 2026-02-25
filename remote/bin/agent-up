@@ -43,6 +43,10 @@ fi
 BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
 SERVER_ID="${AGENT_CHAT_SERVER:-}"
 API_TOKEN="${API_TOKEN:-}"
+AGENT_SCOPE_ENABLE_RAW="${AGENT_SCOPE_ENABLE:-1}"
+AGENT_SCOPE_MEMORY_HIGH_MB_RAW="${AGENT_SCOPE_MEMORY_HIGH_MB:-0}"
+AGENT_SCOPE_MEMORY_MAX_MB_RAW="${AGENT_SCOPE_MEMORY_MAX_MB:-0}"
+AGENT_SCOPE_MEMORY_SWAP_MAX_MB_RAW="${AGENT_SCOPE_MEMORY_SWAP_MAX_MB:-0}"
 
 # Auth header for API calls
 AUTH_HEADER=""
@@ -487,6 +491,33 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+normalize_mb_value() {
+  local raw="$1"
+  if [[ "$raw" =~ ^[0-9]+$ ]] && [ "$raw" -gt 0 ]; then
+    echo "$raw"
+  else
+    echo "0"
+  fi
+}
+
+scope_unit_for_agent() {
+  local name="$1"
+  local clean
+  clean="$(printf '%s' "$name" | sed -E 's/[^A-Za-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+  [ -n "$clean" ] || clean="agent"
+  echo "agent-${clean}.scope"
+}
+
+AGENT_SCOPE_ENABLE_LC="$(printf '%s' "$AGENT_SCOPE_ENABLE_RAW" | tr '[:upper:]' '[:lower:]')"
+AGENT_SCOPE_ENABLE="0"
+if [ "$AGENT_SCOPE_ENABLE_RAW" != "0" ] && [ "$AGENT_SCOPE_ENABLE_LC" != "false" ]; then
+  AGENT_SCOPE_ENABLE="1"
+fi
+AGENT_SCOPE_MEMORY_HIGH_MB="$(normalize_mb_value "$AGENT_SCOPE_MEMORY_HIGH_MB_RAW")"
+AGENT_SCOPE_MEMORY_MAX_MB="$(normalize_mb_value "$AGENT_SCOPE_MEMORY_MAX_MB_RAW")"
+AGENT_SCOPE_MEMORY_SWAP_MAX_MB="$(normalize_mb_value "$AGENT_SCOPE_MEMORY_SWAP_MAX_MB_RAW")"
+SCOPE_UNIT=""
+
 extract_resume_hint_from_stream() {
   if have_cmd rg; then
     rg -o 'claude --resume [0-9a-f-]{36}|codex resume [0-9a-f-]{36}'
@@ -689,6 +720,31 @@ capture_resume_id_background() {
   disown
 }
 
+create_tmux_session() {
+  local scope_unit=""
+  if [ "$AGENT_SCOPE_ENABLE" = "1" ] && have_cmd systemd-run; then
+    scope_unit="$(scope_unit_for_agent "$NAME")"
+    local run_args=(--user --scope --unit "$scope_unit")
+    if [ "$AGENT_SCOPE_MEMORY_HIGH_MB" -gt 0 ]; then
+      run_args+=(--property "MemoryHigh=${AGENT_SCOPE_MEMORY_HIGH_MB}M")
+    fi
+    if [ "$AGENT_SCOPE_MEMORY_MAX_MB" -gt 0 ]; then
+      run_args+=(--property "MemoryMax=${AGENT_SCOPE_MEMORY_MAX_MB}M")
+    fi
+    if [ "$AGENT_SCOPE_MEMORY_SWAP_MAX_MB" -gt 0 ]; then
+      run_args+=(--property "MemorySwapMax=${AGENT_SCOPE_MEMORY_SWAP_MAX_MB}M")
+    fi
+    if systemd-run "${run_args[@]}" tmux new-session -d -s "$NAME" -c "$AGENT_PATH" >/dev/null 2>&1; then
+      SCOPE_UNIT="$scope_unit"
+      return 0
+    fi
+    echo "Warning: failed to launch tmux in systemd scope $scope_unit, falling back to plain tmux." >&2
+  fi
+
+  tmux new-session -d -s "$NAME" -c "$AGENT_PATH"
+  SCOPE_UNIT=""
+}
+
 capture_guard_matches() {
   [ -n "${CAPTURE_GUARD_FILE:-}" ] || return 0
   [ -n "${CAPTURE_GUARD_TOKEN:-}" ] || return 0
@@ -774,9 +830,15 @@ CAPTURE_GUARD_TOKEN="$(date +%s)-$$-$RANDOM"
 echo "$CAPTURE_GUARD_TOKEN" > "$CAPTURE_GUARD_FILE"
 
 NOW=$(python3 -c "from datetime import datetime; print(datetime.now().astimezone().isoformat())" 2>/dev/null || date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+SCOPE_UNIT_META=""
+if [ "$AGENT_SCOPE_ENABLE" = "1" ] && have_cmd systemd-run; then
+  SCOPE_UNIT_META="$(scope_unit_for_agent "$NAME")"
+fi
 if [ -f "$META_FILE" ]; then
   # Update lastUp
   META_FILE="$META_FILE" AGENT_PATH="$AGENT_PATH" TYPE="$TYPE" MODEL="$MODEL" EXTRA_ARGS="$EXTRA_ARGS" SESSION_ID="$SESSION_ID" NOW="$NOW" \
+    AGENT_SCOPE_ENABLE="$AGENT_SCOPE_ENABLE" SCOPE_UNIT_META="$SCOPE_UNIT_META" \
+    AGENT_SCOPE_MEMORY_HIGH_MB="$AGENT_SCOPE_MEMORY_HIGH_MB" AGENT_SCOPE_MEMORY_MAX_MB="$AGENT_SCOPE_MEMORY_MAX_MB" AGENT_SCOPE_MEMORY_SWAP_MAX_MB="$AGENT_SCOPE_MEMORY_SWAP_MAX_MB" \
     python3 - <<'PY'
 import json
 import os
@@ -790,12 +852,19 @@ data["model"] = os.environ["MODEL"]
 data["extraArgs"] = os.environ["EXTRA_ARGS"]
 data["sessionId"] = os.environ["SESSION_ID"]
 data["lastUp"] = os.environ["NOW"]
+data["scopeEnabled"] = os.environ.get("AGENT_SCOPE_ENABLE", "0") == "1"
+data["scopeUnit"] = os.environ.get("SCOPE_UNIT_META", "")
+data["scopeMemoryHighMB"] = int(os.environ.get("AGENT_SCOPE_MEMORY_HIGH_MB", "0") or 0)
+data["scopeMemoryMaxMB"] = int(os.environ.get("AGENT_SCOPE_MEMORY_MAX_MB", "0") or 0)
+data["scopeMemorySwapMaxMB"] = int(os.environ.get("AGENT_SCOPE_MEMORY_SWAP_MAX_MB", "0") or 0)
 with open(meta_file, "w") as f:
     json.dump(data, f, indent=2)
 PY
 else
   # Create new meta
   META_FILE="$META_FILE" NAME="$NAME" AGENT_PATH="$AGENT_PATH" TYPE="$TYPE" MODEL="$MODEL" EXTRA_ARGS="$EXTRA_ARGS" SESSION_ID="$SESSION_ID" NOW="$NOW" \
+    AGENT_SCOPE_ENABLE="$AGENT_SCOPE_ENABLE" SCOPE_UNIT_META="$SCOPE_UNIT_META" \
+    AGENT_SCOPE_MEMORY_HIGH_MB="$AGENT_SCOPE_MEMORY_HIGH_MB" AGENT_SCOPE_MEMORY_MAX_MB="$AGENT_SCOPE_MEMORY_MAX_MB" AGENT_SCOPE_MEMORY_SWAP_MAX_MB="$AGENT_SCOPE_MEMORY_SWAP_MAX_MB" \
     python3 - <<'PY'
 import json
 import os
@@ -807,6 +876,11 @@ data = {
     "model": os.environ["MODEL"],
     "extraArgs": os.environ["EXTRA_ARGS"],
     "sessionId": os.environ["SESSION_ID"],
+    "scopeEnabled": os.environ.get("AGENT_SCOPE_ENABLE", "0") == "1",
+    "scopeUnit": os.environ.get("SCOPE_UNIT_META", ""),
+    "scopeMemoryHighMB": int(os.environ.get("AGENT_SCOPE_MEMORY_HIGH_MB", "0") or 0),
+    "scopeMemoryMaxMB": int(os.environ.get("AGENT_SCOPE_MEMORY_MAX_MB", "0") or 0),
+    "scopeMemorySwapMaxMB": int(os.environ.get("AGENT_SCOPE_MEMORY_SWAP_MAX_MB", "0") or 0),
     "createdAt": os.environ["NOW"],
     "lastUp": os.environ["NOW"],
 }
@@ -817,7 +891,10 @@ fi
 
 # ── Create tmux session ──────────────────────────────────────────────
 echo "Creating tmux session '$NAME' in $AGENT_PATH..."
-tmux new-session -d -s "$NAME" -c "$AGENT_PATH"
+create_tmux_session
+if [ -n "$SCOPE_UNIT" ]; then
+  echo "  Scope:  $SCOPE_UNIT"
+fi
 register_backend_agent
 
 # ── Build init prompt for fresh starts ────────────────────────────────

@@ -28,6 +28,13 @@ const SWAP_ALERT_CLEAR_PCT_RAW = Number.parseFloat(process.env.AGENT_SWAP_ALERT_
 const SWAP_ALERT_CLEAR_PCT = Number.isFinite(SWAP_ALERT_CLEAR_PCT_RAW)
   ? Math.max(0, Math.min(SWAP_ALERT_THRESHOLD_PCT - 0.1, SWAP_ALERT_CLEAR_PCT_RAW))
   : Math.max(0, SWAP_ALERT_THRESHOLD_PCT - 5);
+const AGENT_SCOPE_MONITOR_ENABLED = (process.env.AGENT_SCOPE_MONITOR_ENABLED || 'true').trim().toLowerCase() !== 'false';
+const AGENT_SCOPE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_SCOPE_SWEEP_INTERVAL_MS || '5000', 10);
+const AGENT_SCOPE_ALERT_COOLDOWN_MS = Number.parseInt(process.env.AGENT_SCOPE_ALERT_COOLDOWN_MS || '60000', 10);
+const AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW = Number.parseFloat(process.env.AGENT_SCOPE_ALERT_CLEAR_RATIO || '0.85');
+const AGENT_SCOPE_ALERT_CLEAR_RATIO = Number.isFinite(AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW)
+  ? Math.min(0.99, Math.max(0.1, AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW))
+  : 0.85;
 const OFFLINE_CATCHUP_LIST_LIMIT = Number.parseInt(process.env.OFFLINE_CATCHUP_LIST_LIMIT || '50', 10);
 const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_ITEMS || '8', 10);
 const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
@@ -273,6 +280,7 @@ const swapAlertState = {
   lastPct: 0,
   lastAlertAt: 0,
 };
+const scopePressureState = new Map(); // agent -> { high:bool, lastAlertAt:number }
 const agentsBeforeNormalization = JSON.stringify(agents);
 
 for (const agent of Object.values(agents)) {
@@ -1469,6 +1477,128 @@ function sweepLocalSwapPressure() {
         `Clear threshold: ${SWAP_ALERT_CLEAR_PCT.toFixed(1)}%`,
       ].join('\n')
     );
+  }
+}
+
+function scopeUnitForAgent(agentName) {
+  const base = String(agentName || '').trim().replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  if (!base) return null;
+  return `agent-${base}.scope`;
+}
+
+function parseSystemdMemoryValue(raw) {
+  const text = String(raw || '').trim().toLowerCase();
+  if (!text || text === 'infinity' || text === 'max') return 0;
+  const n = Number.parseInt(text, 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function readAgentScopeMemory(agentName) {
+  const unit = scopeUnitForAgent(agentName);
+  if (!unit) return null;
+  try {
+    const out = execSync(
+      `systemctl --user show ${JSON.stringify(unit)} --property=ActiveState --property=MemoryCurrent --property=MemoryHigh --value --no-pager`,
+      { encoding: 'utf-8', timeout: 3000 }
+    );
+    const [activeStateRaw, currentRaw, highRaw] = String(out || '').split('\n');
+    const activeState = String(activeStateRaw || '').trim().toLowerCase();
+    if (activeState !== 'active') return null;
+    const memoryCurrent = parseSystemdMemoryValue(currentRaw);
+    const memoryHigh = parseSystemdMemoryValue(highRaw);
+    if (memoryCurrent <= 0 || memoryHigh <= 0) return null;
+    return { unit, memoryCurrent, memoryHigh };
+  } catch {
+    return null;
+  }
+}
+
+function pushResourceAlertToAgent(agentName, summary) {
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent) || !agent.tmux) return;
+  const state = getAgentDeliveryState(agentName);
+  if (!state.online) return;
+
+  const payload = `[RESOURCE ALERT] ${summary}\nPlease pause heavy tasks, checkpoint progress, and reduce memory usage immediately.`;
+  fetch(PUSH_QUEUE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: 'agent-chat-v2',
+      to: agent.tmux,
+      payload,
+      notifyMeta: {
+        kind: 'resource_alert',
+        requiresInboxCheck: false,
+        sourceMsgId: null,
+        unreadCount: 0,
+        hasHumanUnread: false,
+        hasRequestUnread: false,
+        needsReply: false,
+        hasMcp: false,
+      },
+    }),
+  }).catch((e) => {
+    console.warn(`[scope-alert] queue push failed for ${agentName}: ${e.message}`);
+  });
+}
+
+function formatBytesGiB(bytes) {
+  return (bytes / (1024 ** 3)).toFixed(2);
+}
+
+function sweepAgentScopePressure() {
+  if (!AGENT_SCOPE_MONITOR_ENABLED) return;
+  const now = Date.now();
+  const localAgentNames = Object.values(agents)
+    .filter(isAgentRecord)
+    .filter(agent => {
+      const serverId = normalizeServer(agent.server);
+      return !serverId || serverId === 'local' || serverId === LOCAL_SERVER_ID;
+    })
+    .map(agent => agent.name);
+
+  const activeSet = new Set(localAgentNames);
+  for (const key of [...scopePressureState.keys()]) {
+    if (!activeSet.has(key)) scopePressureState.delete(key);
+  }
+
+  for (const agentName of localAgentNames) {
+    const scope = readAgentScopeMemory(agentName);
+    const prev = scopePressureState.get(agentName) || { high: false, lastAlertAt: 0 };
+    if (!scope) {
+      if (prev.high) {
+        scopePressureState.set(agentName, { high: false, lastAlertAt: prev.lastAlertAt });
+      }
+      continue;
+    }
+
+    const ratio = scope.memoryCurrent / scope.memoryHigh;
+    const highNow = ratio >= 1;
+
+    if (highNow) {
+      const shouldAlert = !prev.high || (now - prev.lastAlertAt) >= AGENT_SCOPE_ALERT_COOLDOWN_MS;
+      if (shouldAlert) {
+        const summary = `agent=${agentName} unit=${scope.unit} memoryHigh exceeded (${formatBytesGiB(scope.memoryCurrent)}GiB / ${formatBytesGiB(scope.memoryHigh)}GiB, ${(ratio * 100).toFixed(1)}%)`;
+        emitSystemInfo(`Agent '${agentName}' memory high exceeded`, summary);
+        pushResourceAlertToAgent(agentName, summary);
+        scopePressureState.set(agentName, { high: true, lastAlertAt: now });
+      } else if (!prev.high) {
+        scopePressureState.set(agentName, { high: true, lastAlertAt: prev.lastAlertAt });
+      }
+      continue;
+    }
+
+    const clearNow = ratio <= AGENT_SCOPE_ALERT_CLEAR_RATIO;
+    if (prev.high && clearNow) {
+      emitSystemInfo(
+        `Agent '${agentName}' memory pressure recovered`,
+        `agent=${agentName} unit=${scope.unit} current=${formatBytesGiB(scope.memoryCurrent)}GiB high=${formatBytesGiB(scope.memoryHigh)}GiB (${(ratio * 100).toFixed(1)}%)`
+      );
+      scopePressureState.set(agentName, { high: false, lastAlertAt: prev.lastAlertAt });
+    } else if (prev.high) {
+      scopePressureState.set(agentName, { high: true, lastAlertAt: prev.lastAlertAt });
+    }
   }
 }
 
@@ -2936,10 +3066,15 @@ setInterval(() => {
   sweepLocalSwapPressure();
 }, SWAP_SWEEP_INTERVAL_MS);
 
+setInterval(() => {
+  sweepAgentScopePressure();
+}, AGENT_SCOPE_SWEEP_INTERVAL_MS);
+
 // ── Start ─────────────────────────────────────────────────────────────
 app.listen(PORT, '127.0.0.1', () => {
   sweepLocalActivityDurations();
   sweepLocalSwapPressure();
+  sweepAgentScopePressure();
   console.log(`Agent Chat v2 backend listening on http://127.0.0.1:${PORT}`);
   const agentCount = Object.values(agents).filter(isAgentRecord).length;
   console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);
