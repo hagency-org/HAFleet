@@ -20,18 +20,33 @@ set -euo pipefail
 
 API="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
 TOKEN="${API_TOKEN:-}"
-IDLE_THRESHOLD_MS_RAW="${AGENT_IDLE_THRESHOLD_MS:-15000}"
+IDLE_THRESHOLD_MS_RAW="${AGENT_IDLE_THRESHOLD_MS:-20000}"
+CURL_CONNECT_TIMEOUT_RAW="${AGENT_CHAT_CURL_CONNECT_TIMEOUT_SEC:-2}"
+CURL_MAX_TIME_RAW="${AGENT_CHAT_CURL_MAX_TIME_SEC:-8}"
 if [[ "$IDLE_THRESHOLD_MS_RAW" =~ ^[0-9]+$ ]] && [ "$IDLE_THRESHOLD_MS_RAW" -gt 0 ]; then
   IDLE_THRESHOLD_MS="$IDLE_THRESHOLD_MS_RAW"
 else
-  IDLE_THRESHOLD_MS="15000"
+  IDLE_THRESHOLD_MS="20000"
 fi
 IDLE_THRESHOLD_SEC="$(( (IDLE_THRESHOLD_MS + 999) / 1000 ))"
+if [[ "$CURL_CONNECT_TIMEOUT_RAW" =~ ^[0-9]+$ ]] && [ "$CURL_CONNECT_TIMEOUT_RAW" -gt 0 ]; then
+  CURL_CONNECT_TIMEOUT_SEC="$CURL_CONNECT_TIMEOUT_RAW"
+else
+  CURL_CONNECT_TIMEOUT_SEC="2"
+fi
+if [[ "$CURL_MAX_TIME_RAW" =~ ^[0-9]+$ ]] && [ "$CURL_MAX_TIME_RAW" -gt 0 ]; then
+  CURL_MAX_TIME_SEC="$CURL_MAX_TIME_RAW"
+else
+  CURL_MAX_TIME_SEC="8"
+fi
 
 _curl() {
   local extra_headers=()
   [ -n "$TOKEN" ] && extra_headers=(-H "Authorization: Bearer $TOKEN")
-  curl --noproxy '*' -s "${extra_headers[@]}" "$@"
+  curl --noproxy '*' --silent --show-error \
+    --connect-timeout "$CURL_CONNECT_TIMEOUT_SEC" \
+    --max-time "$CURL_MAX_TIME_SEC" \
+    "${extra_headers[@]}" "$@"
 }
 
 _json_str() {
@@ -379,6 +394,7 @@ print(f"server:      {server}")
 print(f"tmux:        {tmux}")
 offline_reason = obj.get('offlineReason')
 print(f"offlineReason:{offline_reason if offline_reason else '-'}")
+print(f"manualDown:  {str(bool(obj.get('manualDown'))).lower()}")
 PY
       rm -f "$tmp_json"
     fi
@@ -456,6 +472,8 @@ PY
     echo "Environment:"
     echo "  AGENT_CHAT_API  Backend URL (default: http://127.0.0.1:8090)"
     echo "  API_TOKEN       Auth token (optional for localhost)"
+    echo "  AGENT_CHAT_CURL_CONNECT_TIMEOUT_SEC  API connect timeout (default: 2)"
+    echo "  AGENT_CHAT_CURL_MAX_TIME_SEC         API request max time (default: 8)"
     ;;
 
   *)

@@ -19,10 +19,20 @@ const RULE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_RULE_SWEEP_INTE
 const IDLE_THRESHOLD_MS = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '20000', 10);
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.floor((IDLE_THRESHOLD_MS + 999) / 1000));
 const LOCAL_ACTIVITY_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_LOCAL_ACTIVITY_SWEEP_MS || '5000', 10);
+const SWAP_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_SWAP_SWEEP_INTERVAL_MS || '5000', 10);
+const SWAP_ALERT_THRESHOLD_PCT_RAW = Number.parseFloat(process.env.AGENT_SWAP_ALERT_THRESHOLD_PCT || '80');
+const SWAP_ALERT_THRESHOLD_PCT = Number.isFinite(SWAP_ALERT_THRESHOLD_PCT_RAW)
+  ? Math.min(99.9, Math.max(1, SWAP_ALERT_THRESHOLD_PCT_RAW))
+  : 80;
+const SWAP_ALERT_CLEAR_PCT_RAW = Number.parseFloat(process.env.AGENT_SWAP_ALERT_CLEAR_PCT || String(Math.max(1, SWAP_ALERT_THRESHOLD_PCT - 5)));
+const SWAP_ALERT_CLEAR_PCT = Number.isFinite(SWAP_ALERT_CLEAR_PCT_RAW)
+  ? Math.max(0, Math.min(SWAP_ALERT_THRESHOLD_PCT - 0.1, SWAP_ALERT_CLEAR_PCT_RAW))
+  : Math.max(0, SWAP_ALERT_THRESHOLD_PCT - 5);
 const OFFLINE_CATCHUP_LIST_LIMIT = Number.parseInt(process.env.OFFLINE_CATCHUP_LIST_LIMIT || '50', 10);
 const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_ITEMS || '8', 10);
 const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
 const MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT = (process.env.MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT || '30mb').trim() || '30mb';
+const UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS = Number.parseInt(process.env.UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS || '120000', 10);
 
 mkdirSync(DATA_DIR, { recursive: true });
 const MESSAGE_ATTACHMENT_DIR = path.join(DATA_DIR, 'message-attachments');
@@ -257,6 +267,12 @@ const agentRuntime = loadJsonSync('agent_runtime.json', {});
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
+const unexpectedOfflineAlertAt = new Map(); // key(agent:reason) -> ts
+const swapAlertState = {
+  active: false,
+  lastPct: 0,
+  lastAlertAt: 0,
+};
 const agentsBeforeNormalization = JSON.stringify(agents);
 
 for (const agent of Object.values(agents)) {
@@ -281,6 +297,11 @@ for (const agent of Object.values(agents)) {
   } else {
     agent.offlineReason = agent.offlineReason.trim();
   }
+  if (!Object.prototype.hasOwnProperty.call(agent, 'manualDown')) {
+    agent.manualDown = false;
+  } else {
+    agent.manualDown = agent.manualDown === true;
+  }
   if (!Object.prototype.hasOwnProperty.call(agent, 'discoveredAt')) {
     agent.discoveredAt = agent.registeredAt || agent.lastSeen || Date.now();
   }
@@ -288,6 +309,7 @@ for (const agent of Object.values(agents)) {
   if (agent.kind === 'human') {
     agent.online = false;
     agent.offlineReason = null;
+    agent.manualDown = false;
   }
 }
 if (JSON.stringify(agents) !== agentsBeforeNormalization) {
@@ -439,6 +461,7 @@ function ensureAgentRecord(name, defaults = {}) {
   const server = defaults.server !== undefined ? normalizeServer(defaults.server) : null;
   const tmux = (typeof defaults.tmux === 'string' && defaults.tmux.trim()) ? defaults.tmux.trim() : null;
   const online = defaults.online === true;
+  const manualDown = defaults.manualDown === true && !online;
   const reason = (typeof defaults.offlineReason === 'string' && defaults.offlineReason.trim())
     ? defaults.offlineReason.trim()
     : (online ? null : 'inactive');
@@ -455,12 +478,40 @@ function ensureAgentRecord(name, defaults = {}) {
     online,
     lastSeen: now,
     offlineReason: reason,
+    manualDown,
     discoveredAt: now,
     registeredAt: Number(defaults.registeredAt) > 0 ? Number(defaults.registeredAt) : now,
     kind,
   };
   agents[agentName] = agent;
   return { agent, created: true };
+}
+
+function isManualDownReason(reason) {
+  const text = (typeof reason === 'string' ? reason.trim().toLowerCase() : '');
+  if (!text) return false;
+  return text === 'manual-offline'
+    || text === 'session-missing'
+    || text.startsWith('agent-down');
+}
+
+function maybeEmitUnexpectedOfflineAlert(agentName, reason, context = {}) {
+  if (!agentName) return;
+  if (isManualDownReason(reason)) return;
+  const now = Date.now();
+  const key = `${agentName}:${reason || 'unknown'}`;
+  const prev = unexpectedOfflineAlertAt.get(key) || 0;
+  if ((now - prev) < UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS) return;
+  unexpectedOfflineAlertAt.set(key, now);
+
+  const lines = [
+    `Agent: ${agentName}`,
+    `Reason: ${reason || 'unknown'}`,
+    `Server: ${context.server || 'local'}`,
+    'This looks like an unexpected shutdown/crash. Please intervene manually.',
+  ];
+  if (context.detail) lines.push(`Detail: ${context.detail}`);
+  emitSystemInfo(`Agent '${agentName}' went offline unexpectedly`, lines.join('\n'));
 }
 
 function ensureInfoGroup() {
@@ -1083,7 +1134,12 @@ function markAgentsOfflineForServer(serverId, reason, clearTmux = false) {
   for (const agent of Object.values(agents)) {
     if (normalizeServer(agent.server) !== serverId) continue;
     if (agent.online !== false) { agent.online = false; changed = true; }
+    if (agent.manualDown === true) {
+      if (clearTmux && agent.tmux !== null) { agent.tmux = null; changed = true; }
+      continue;
+    }
     if (agent.offlineReason !== reason) { agent.offlineReason = reason; changed = true; }
+    if (agent.manualDown !== false) { agent.manualDown = false; changed = true; }
     if (clearTmux && agent.tmux !== null) { agent.tmux = null; changed = true; }
   }
   return changed;
@@ -1273,12 +1329,17 @@ function sweepLocalActivityDurations() {
         runtimeChanged = true;
       }
       if (!hasSession) {
+        const wasManualDown = agent.manualDown === true;
         let transitioned = false;
         if (agent.online !== false) { agent.online = false; agentsChanged = true; transitioned = true; }
         if (agent.tmux !== null) { agent.tmux = null; agentsChanged = true; transitioned = true; }
         if (agent.offlineReason !== 'tmux-missing:auto') { agent.offlineReason = 'tmux-missing:auto'; agentsChanged = true; transitioned = true; }
+        if (agent.manualDown !== false) { agent.manualDown = false; agentsChanged = true; transitioned = true; }
         if (transitioned) {
           agent.lastSeen = Date.now();
+          if (!wasManualDown) {
+            maybeEmitUnexpectedOfflineAlert(agent.name, 'tmux-missing:auto', { server: 'local', detail: `tmux target ${tmuxTarget} not found` });
+          }
         }
         if (isEphemeralAuditAgentName(agent.name)) pruneCandidates.add(agent.name);
       }
@@ -1337,6 +1398,10 @@ function sweepLocalActivityDurations() {
       agent.offlineReason = null;
       onlineChanged = true;
     }
+    if (agent.manualDown !== false) {
+      agent.manualDown = false;
+      onlineChanged = true;
+    }
     if (onlineChanged) {
       agent.lastSeen = Date.now();
       agentsChanged = true;
@@ -1347,6 +1412,63 @@ function sweepLocalActivityDurations() {
   if (agentsChanged) saveAgents();
   if (pruneCandidates.size > 0) {
     pruneEphemeralAgents([...pruneCandidates], 'tmux-missing:auto');
+  }
+}
+
+function readLocalSwapUsageSnapshot() {
+  try {
+    const raw = readFileSync('/proc/meminfo', 'utf-8');
+    const fields = {};
+    for (const line of raw.split('\n')) {
+      const m = line.match(/^([A-Za-z_]+):\s+(\d+)\s+kB$/);
+      if (!m) continue;
+      fields[m[1]] = Number.parseInt(m[2], 10);
+    }
+    const totalKb = Number(fields.SwapTotal) || 0;
+    const freeKb = Number(fields.SwapFree) || 0;
+    if (totalKb <= 0) return null;
+    const usedKb = Math.max(0, totalKb - freeKb);
+    const usagePct = (usedKb / totalKb) * 100;
+    return { totalKb, freeKb, usedKb, usagePct };
+  } catch {
+    return null;
+  }
+}
+
+function sweepLocalSwapPressure() {
+  const snap = readLocalSwapUsageSnapshot();
+  if (!snap) return;
+
+  swapAlertState.lastPct = snap.usagePct;
+  const usagePctText = snap.usagePct.toFixed(1);
+  const usedGb = (snap.usedKb / (1024 * 1024)).toFixed(2);
+  const totalGb = (snap.totalKb / (1024 * 1024)).toFixed(2);
+
+  if (snap.usagePct >= SWAP_ALERT_THRESHOLD_PCT) {
+    if (!swapAlertState.active) {
+      swapAlertState.active = true;
+      swapAlertState.lastAlertAt = Date.now();
+      emitSystemInfo(
+        `OOM warning: swap usage ${usagePctText}% (>= ${SWAP_ALERT_THRESHOLD_PCT}%)`,
+        [
+          `Swap used: ${usedGb} GiB / ${totalGb} GiB (${usagePctText}%)`,
+          `Threshold: ${SWAP_ALERT_THRESHOLD_PCT}%`,
+          'System memory pressure is high. Please intervene manually to avoid OOM killing agents.',
+        ].join('\n')
+      );
+    }
+    return;
+  }
+
+  if (swapAlertState.active && snap.usagePct <= SWAP_ALERT_CLEAR_PCT) {
+    swapAlertState.active = false;
+    emitSystemInfo(
+      `OOM warning cleared: swap usage back to ${usagePctText}%`,
+      [
+        `Swap used: ${usedGb} GiB / ${totalGb} GiB (${usagePctText}%)`,
+        `Clear threshold: ${SWAP_ALERT_CLEAR_PCT.toFixed(1)}%`,
+      ].join('\n')
+    );
   }
 }
 
@@ -1392,6 +1514,7 @@ function serializeAgent(agent) {
     lastSeen: state.lastSeen,
     serverLastSeen: state.serverLastSeen,
     offlineReason: state.offlineReason,
+    manualDown: agent.manualDown === true,
     blocked: runtime?.blocked === true,
     blockedReason: runtime?.blockedReason || null,
     blockedSince: runtime?.blockedSince || null,
@@ -1466,16 +1589,23 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
     if (!wasAgentOnline) becameOnline.push(name);
     if (agent.online !== true) { agent.online = true; agentsChanged = true; }
     if (agent.offlineReason !== null) { agent.offlineReason = null; agentsChanged = true; }
+    if (agent.manualDown !== false) { agent.manualDown = false; agentsChanged = true; }
     if (agent.lastSeen !== now) { agent.lastSeen = now; agentsChanged = true; }
   }
 
   for (const agent of Object.values(agents)) {
     if (normalizeServer(agent.server) !== serverId) continue;
     if (liveSet.has(agent.name)) continue;
+    const wasOnline = agent.online === true;
+    const wasManualDown = agent.manualDown === true;
     if (agent.online !== false) { agent.online = false; agentsChanged = true; }
     const reason = `heartbeat-missing:${serverId}`;
     if (agent.offlineReason !== reason) { agent.offlineReason = reason; agentsChanged = true; }
+    if (agent.manualDown !== false) { agent.manualDown = false; agentsChanged = true; }
     if (agent.tmux !== null) { agent.tmux = null; agentsChanged = true; }
+    if (wasOnline && !wasManualDown) {
+      maybeEmitUnexpectedOfflineAlert(agent.name, reason, { server: serverId, detail: 'Missing in remote heartbeat snapshot' });
+    }
   }
 
   saveServers();
@@ -1882,6 +2012,7 @@ app.post('/api/agents', (req, res) => {
     online: resolvedOnline,
     lastSeen: resolvedOnline ? Date.now() : (existing.lastSeen || Date.now()),
     offlineReason: resolvedOnline ? null : (existing.offlineReason || 'offline'),
+    manualDown: resolvedOnline ? false : (existing.manualDown === true),
     registeredAt: existing.registeredAt || Date.now(),
     discoveredAt: existing.discoveredAt || existing.registeredAt || Date.now(),
   };
@@ -1901,7 +2032,7 @@ app.patch('/api/agents/:name', (req, res) => {
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
   const wasOnline = Boolean(agent.online);
-  const { role, identity, tmux, online, offlineReason } = req.body;
+  const { role, identity, tmux, online, offlineReason, manualDown } = req.body;
   if (role !== undefined) agent.role = role;
   if (identity !== undefined) agent.identity = identity;
   if (tmux !== undefined) {
@@ -1924,6 +2055,12 @@ app.patch('/api/agents/:name', (req, res) => {
   }
   if (offlineReason !== undefined) {
     agent.offlineReason = (typeof offlineReason === 'string' && offlineReason.trim()) ? offlineReason.trim() : null;
+  }
+  if (manualDown !== undefined) {
+    agent.manualDown = manualDown === true;
+  }
+  if (agent.online === true && agent.manualDown !== false) {
+    agent.manualDown = false;
   }
   saveAgents();
   if (!wasOnline && agent.online === true) {
@@ -1964,6 +2101,7 @@ app.delete('/api/agents/:name', (req, res) => {
   agent.tmux = null;
   agent.lastSeen = Date.now();
   if (!agent.offlineReason) agent.offlineReason = 'inactive';
+  agent.manualDown = true;
   saveAgents();
   res.json({
     ok: true,
@@ -1978,15 +2116,24 @@ app.post('/api/agents/:name/offline', (req, res) => {
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+  const wasOnline = agent.online === true;
+  const wasManualDown = agent.manualDown === true;
   const reason = (typeof req.body?.reason === 'string' && req.body.reason.trim())
     ? req.body.reason.trim()
     : 'manual-offline';
   const clearTmux = req.body?.clearTmux !== false;
+  const manualDown = req.body?.manualDown === undefined
+    ? isManualDownReason(reason)
+    : req.body.manualDown === true;
   agent.online = false;
   agent.lastSeen = Date.now();
   agent.offlineReason = reason;
+  agent.manualDown = manualDown;
   if (clearTmux) agent.tmux = null;
   saveAgents();
+  if (wasOnline && !manualDown && !wasManualDown) {
+    maybeEmitUnexpectedOfflineAlert(agentName, reason, { server: normalizeServer(agent.server) || 'local', detail: 'Marked offline via API' });
+  }
   res.json({ ok: true, agent: serializeAgent(agent) });
 });
 
@@ -2785,9 +2932,14 @@ setInterval(() => {
   sweepAgentRules();
 }, RULE_SWEEP_INTERVAL_MS);
 
+setInterval(() => {
+  sweepLocalSwapPressure();
+}, SWAP_SWEEP_INTERVAL_MS);
+
 // ── Start ─────────────────────────────────────────────────────────────
 app.listen(PORT, '127.0.0.1', () => {
   sweepLocalActivityDurations();
+  sweepLocalSwapPressure();
   console.log(`Agent Chat v2 backend listening on http://127.0.0.1:${PORT}`);
   const agentCount = Object.values(agents).filter(isAgentRecord).length;
   console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);

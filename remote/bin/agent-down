@@ -5,6 +5,7 @@
 #   agent-down <name> [--kill] [--timeout <seconds>]
 #
 # Default behavior:
+#   - refuse to stop agent when backend reports it as active
 #   - claude: send /exit, wait up to 30s for process to return to shell
 #   - codex:  send Ctrl+C, wait up to 8s for process to return to shell
 #   - archive pane, show tail, try to extract resume hint
@@ -12,6 +13,7 @@
 #
 # --kill behavior:
 #   - archive first, then kill tmux session immediately
+#   - still refuses if agent is currently active
 
 set -euo pipefail
 
@@ -55,6 +57,145 @@ api_curl() {
   fi
 }
 
+url_encode() {
+  python3 - "$1" <<'PY'
+import sys
+import urllib.parse
+print(urllib.parse.quote(sys.argv[1], safe=""))
+PY
+}
+
+resolve_agent_name_backend() {
+  local raw="$1"
+  local encoded payload
+  encoded="$(url_encode "$raw")"
+  payload="$(api_curl "$BACKEND_URL/api/agents/$encoded" 2>/dev/null || true)"
+  [ -n "$payload" ] || return 0
+  RAW_NAME="$raw" PAYLOAD="$payload" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+
+raw = os.environ.get("RAW_NAME", "").strip()
+payload = os.environ.get("PAYLOAD", "")
+if not raw or not payload:
+    raise SystemExit(0)
+try:
+    obj = json.loads(payload)
+except Exception:
+    raise SystemExit(0)
+if isinstance(obj, dict) and not obj.get("error"):
+    name = str(obj.get("name") or "").strip()
+    if name and name.lower() == raw.lower():
+        print(name)
+PY
+}
+
+resolve_agent_name_tmux() {
+  local raw="$1"
+  local sessions
+  sessions="$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)"
+  [ -n "$sessions" ] || return 0
+  RAW_NAME="$raw" TMUX_SESSIONS="$sessions" python3 - <<'PY' 2>/dev/null || true
+import os
+
+raw = os.environ.get("RAW_NAME", "").strip()
+sessions = os.environ.get("TMUX_SESSIONS", "")
+if not raw or not sessions:
+    raise SystemExit(0)
+matches = []
+for line in sessions.splitlines():
+    name = line.strip()
+    if name and name.lower() == raw.lower():
+        matches.append(name)
+seen = []
+for name in matches:
+    if name not in seen:
+        seen.append(name)
+for name in seen:
+    print(name)
+PY
+}
+
+resolve_agent_name_data_dir() {
+  local raw="$1"
+  local dirs=""
+  if [ -d "$DATA_DIR" ]; then
+    local d
+    for d in "$DATA_DIR"/*; do
+      [ -d "$d" ] || continue
+      dirs="${dirs}$(basename "$d")"$'\n'
+    done
+  fi
+  [ -n "$dirs" ] || return 0
+  RAW_NAME="$raw" AGENT_DIR_NAMES="$dirs" python3 - <<'PY' 2>/dev/null || true
+import os
+
+raw = os.environ.get("RAW_NAME", "").strip()
+dirs = os.environ.get("AGENT_DIR_NAMES", "")
+if not raw or not dirs:
+    raise SystemExit(0)
+matches = []
+for line in dirs.splitlines():
+    name = line.strip()
+    if name and name.lower() == raw.lower():
+        matches.append(name)
+seen = []
+for name in matches:
+    if name not in seen:
+        seen.append(name)
+for name in seen:
+    print(name)
+PY
+}
+
+resolve_agent_name_casefold() {
+  local raw="$1"
+  local backend_name tmux_names data_names candidates resolved
+  backend_name="$(resolve_agent_name_backend "$raw")"
+  tmux_names="$(resolve_agent_name_tmux "$raw")"
+  data_names="$(resolve_agent_name_data_dir "$raw")"
+
+  candidates=""
+  [ -n "$backend_name" ] && candidates="${candidates}${backend_name}"$'\n'
+  [ -n "$tmux_names" ] && candidates="${candidates}${tmux_names}"$'\n'
+  [ -n "$data_names" ] && candidates="${candidates}${data_names}"$'\n'
+
+  resolved="$(RAW_NAME="$raw" CANDIDATES="$candidates" python3 - <<'PY'
+import os
+import sys
+
+raw = os.environ.get("RAW_NAME", "").strip()
+candidates = os.environ.get("CANDIDATES", "")
+if not raw:
+    print("")
+    raise SystemExit(0)
+
+seen = []
+for line in candidates.splitlines():
+    name = line.strip()
+    if not name:
+        continue
+    if name.lower() != raw.lower():
+        continue
+    if name not in seen:
+        seen.append(name)
+
+if len(seen) <= 1:
+    print(seen[0] if seen else raw)
+    raise SystemExit(0)
+
+print(f"conflict:{','.join(seen)}")
+raise SystemExit(3)
+PY
+)"
+  if [[ "$resolved" == conflict:* ]]; then
+    echo "Error: case-conflicting agent names detected for '$raw': ${resolved#conflict:}" >&2
+    echo "Refusing to continue. Keep only one canonical case variant." >&2
+    exit 1
+  fi
+  echo "$resolved"
+}
+
 post_lifecycle() {
   local event_summary="$1"
   local summary_json
@@ -73,10 +214,10 @@ PY
 mark_backend_offline() {
   local reason="${1:-agent-down}"
   local payload
-  payload=$(REASON="$reason" python3 - <<'PY'
+payload=$(REASON="$reason" python3 - <<'PY'
 import json
 import os
-print(json.dumps({"reason": os.environ["REASON"], "clearTmux": True}))
+print(json.dumps({"reason": os.environ["REASON"], "clearTmux": True, "manualDown": True}))
 PY
 )
   if api_curl -X POST "$BACKEND_URL/api/agents/$AGENT_PATH_ESCAPED/offline" \
@@ -88,13 +229,81 @@ PY
   fi
 }
 
+ensure_agent_not_active() {
+  local payload status
+  payload="$(api_curl "$BACKEND_URL/api/agents/$AGENT_PATH_ESCAPED" 2>/dev/null || true)"
+  if [ -z "$payload" ]; then
+    echo "Error: unable to verify active status for '$NAME' (backend unavailable)." >&2
+    echo "Refusing to stop agent to avoid interrupting active work." >&2
+    exit 1
+  fi
+
+  status="$(NAME="$NAME" PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+name = os.environ.get("NAME", "").strip()
+payload = os.environ.get("PAYLOAD", "")
+try:
+    data = json.loads(payload)
+except Exception:
+    print("error:invalid-json")
+    raise SystemExit(0)
+
+if not isinstance(data, dict):
+    print("error:invalid-payload")
+    raise SystemExit(0)
+
+if data.get("error"):
+    print(f"error:{data.get('error')}")
+    raise SystemExit(0)
+
+active = data.get("activeNow") is True
+online = data.get("online") is True
+active_dur = int(data.get("activeDurationSec") or 0)
+idle_dur = int(data.get("idleDurationSec") or 0)
+
+if active:
+    print(f"active:{name}:online={int(online)}:activeDurationSec={active_dur}:idleDurationSec={idle_dur}")
+else:
+    print(f"inactive:{name}:online={int(online)}:activeDurationSec={active_dur}:idleDurationSec={idle_dur}")
+PY
+)"
+
+  case "$status" in
+    active:*)
+      echo "Error: agent '$NAME' is currently active." >&2
+      echo "Refusing to stop active agent." >&2
+      echo "Details: ${status#active:}" >&2
+      exit 1
+      ;;
+    inactive:*)
+      echo "Verified '$NAME' is not active (${status#inactive:})."
+      ;;
+    error:*)
+      echo "Error: unable to verify active status for '$NAME' (${status#error:})." >&2
+      echo "Refusing to stop agent to avoid interrupting active work." >&2
+      exit 1
+      ;;
+    *)
+      echo "Error: unexpected active-status response for '$NAME': $status" >&2
+      echo "Refusing to stop agent to avoid interrupting active work." >&2
+      exit 1
+      ;;
+  esac
+}
+
 if [ $# -lt 1 ]; then
   echo "Usage: agent-down <name> [--kill] [--timeout <seconds>]"
   exit 1
 fi
 
-NAME="$1"
+RAW_NAME="$1"
+NAME="$(resolve_agent_name_casefold "$RAW_NAME")"
 shift || true
+if [ "$NAME" != "$RAW_NAME" ]; then
+  echo "Resolved agent name '$RAW_NAME' -> '$NAME'"
+fi
 TMUX_TARGET="=${NAME}"
 TMUX_PANE_TARGET="=${NAME}:0.0"
 AGENT_PATH_ESCAPED=$(NAME="$NAME" python3 - <<'PY'
@@ -141,6 +350,8 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 ARCHIVE_FILE="$AGENT_DATA/archive-$TIMESTAMP.txt"
 RESUME_FILE="$AGENT_DATA/resume-id"
 META_FILE="$AGENT_DATA/meta.json"
+
+ensure_agent_not_active
 
 # Detect agent type from meta.json or fallback to process detection
 AGENT_TYPE=""

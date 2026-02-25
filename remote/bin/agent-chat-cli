@@ -20,18 +20,33 @@ set -euo pipefail
 
 API="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
 TOKEN="${API_TOKEN:-}"
-IDLE_THRESHOLD_MS_RAW="${AGENT_IDLE_THRESHOLD_MS:-15000}"
+IDLE_THRESHOLD_MS_RAW="${AGENT_IDLE_THRESHOLD_MS:-20000}"
+CURL_CONNECT_TIMEOUT_RAW="${AGENT_CHAT_CURL_CONNECT_TIMEOUT_SEC:-2}"
+CURL_MAX_TIME_RAW="${AGENT_CHAT_CURL_MAX_TIME_SEC:-8}"
 if [[ "$IDLE_THRESHOLD_MS_RAW" =~ ^[0-9]+$ ]] && [ "$IDLE_THRESHOLD_MS_RAW" -gt 0 ]; then
   IDLE_THRESHOLD_MS="$IDLE_THRESHOLD_MS_RAW"
 else
-  IDLE_THRESHOLD_MS="15000"
+  IDLE_THRESHOLD_MS="20000"
 fi
 IDLE_THRESHOLD_SEC="$(( (IDLE_THRESHOLD_MS + 999) / 1000 ))"
+if [[ "$CURL_CONNECT_TIMEOUT_RAW" =~ ^[0-9]+$ ]] && [ "$CURL_CONNECT_TIMEOUT_RAW" -gt 0 ]; then
+  CURL_CONNECT_TIMEOUT_SEC="$CURL_CONNECT_TIMEOUT_RAW"
+else
+  CURL_CONNECT_TIMEOUT_SEC="2"
+fi
+if [[ "$CURL_MAX_TIME_RAW" =~ ^[0-9]+$ ]] && [ "$CURL_MAX_TIME_RAW" -gt 0 ]; then
+  CURL_MAX_TIME_SEC="$CURL_MAX_TIME_RAW"
+else
+  CURL_MAX_TIME_SEC="8"
+fi
 
 _curl() {
   local extra_headers=()
   [ -n "$TOKEN" ] && extra_headers=(-H "Authorization: Bearer $TOKEN")
-  curl --noproxy '*' -s "${extra_headers[@]}" "$@"
+  curl --noproxy '*' --silent --show-error \
+    --connect-timeout "$CURL_CONNECT_TIMEOUT_SEC" \
+    --max-time "$CURL_MAX_TIME_SEC" \
+    "${extra_headers[@]}" "$@"
 }
 
 _json_str() {
@@ -379,6 +394,7 @@ print(f"server:      {server}")
 print(f"tmux:        {tmux}")
 offline_reason = obj.get('offlineReason')
 print(f"offlineReason:{offline_reason if offline_reason else '-'}")
+print(f"manualDown:  {str(bool(obj.get('manualDown'))).lower()}")
 PY
       rm -f "$tmp_json"
     fi
@@ -408,6 +424,30 @@ PY
       -d "{\"agent\":$(_json_str "$agent"),\"human\":$(_json_str "$human")}" | python3 -m json.tool
     ;;
 
+  avatar)
+    name="${1:?Usage: agent-chat-cli avatar <name> [<image-file>|--force]}"
+    shift
+    arg="${1:-}"
+    if [ -n "$arg" ] && [ "$arg" != "--force" ]; then
+      # Custom image file
+      [ -f "$arg" ] || { echo "Error: file not found: $arg" >&2; exit 1; }
+      mime=$(file -b --mime-type "$arg" 2>/dev/null || echo "image/png")
+      b64=$(base64 -w0 "$arg" 2>/dev/null || base64 "$arg" 2>/dev/null)
+      echo "Uploading custom avatar for: $name ($mime, $(wc -c < "$arg") bytes) ..."
+      _curl -X POST "$API/api/agents/$name/avatar" \
+        -H 'Content-Type: application/json' \
+        -d "{\"image\":\"$b64\",\"mime\":\"$mime\"}" | python3 -m json.tool
+    else
+      force="false"
+      [ "$arg" = "--force" ] && force="true"
+      echo "Requesting generated avatar for: $name (force=$force) ..."
+      echo "Note: if MATRIX_AUTO_AVATAR is disabled on bridge, this will be ignored. Use image file upload for manual avatar changes."
+      _curl -X POST "$API/api/agents/$name/avatar?force=$force" \
+        -H 'Content-Type: application/json' \
+        -d "{\"generate\":$force}" | python3 -m json.tool
+    fi
+    ;;
+
   help|--help|-h)
     echo "agent-chat-cli — Admin CLI for agent-chat"
     echo ""
@@ -424,6 +464,7 @@ PY
     echo "  status [name]                       Status table or one agent status"
     echo "  agent <name>                        Agent details"
     echo "  identity <name> <text>              Set agent identity"
+    echo "  avatar <name> [image|--force]       Set avatar (custom image; auto-gen may be disabled)"
     echo ""
     echo "DM management:"
     echo "  dm <agent> <human>                  Ensure DM room exists (Matrix)"
@@ -431,6 +472,8 @@ PY
     echo "Environment:"
     echo "  AGENT_CHAT_API  Backend URL (default: http://127.0.0.1:8090)"
     echo "  API_TOKEN       Auth token (optional for localhost)"
+    echo "  AGENT_CHAT_CURL_CONNECT_TIMEOUT_SEC  API connect timeout (default: 2)"
+    echo "  AGENT_CHAT_CURL_MAX_TIME_SEC         API request max time (default: 8)"
     ;;
 
   *)

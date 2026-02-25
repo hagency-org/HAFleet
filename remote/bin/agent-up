@@ -56,6 +56,145 @@ api_curl() {
   fi
 }
 
+url_encode() {
+  python3 - "$1" <<'PY'
+import sys
+import urllib.parse
+print(urllib.parse.quote(sys.argv[1], safe=""))
+PY
+}
+
+resolve_agent_name_backend() {
+  local raw="$1"
+  local encoded payload
+  encoded="$(url_encode "$raw")"
+  payload="$(api_curl "$BACKEND_URL/api/agents/$encoded" 2>/dev/null || true)"
+  [ -n "$payload" ] || return 0
+  RAW_NAME="$raw" PAYLOAD="$payload" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+
+raw = os.environ.get("RAW_NAME", "").strip()
+payload = os.environ.get("PAYLOAD", "")
+if not raw or not payload:
+    raise SystemExit(0)
+try:
+    obj = json.loads(payload)
+except Exception:
+    raise SystemExit(0)
+if isinstance(obj, dict) and not obj.get("error"):
+    name = str(obj.get("name") or "").strip()
+    if name and name.lower() == raw.lower():
+        print(name)
+PY
+}
+
+resolve_agent_name_tmux() {
+  local raw="$1"
+  local sessions
+  sessions="$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)"
+  [ -n "$sessions" ] || return 0
+  RAW_NAME="$raw" TMUX_SESSIONS="$sessions" python3 - <<'PY' 2>/dev/null || true
+import os
+
+raw = os.environ.get("RAW_NAME", "").strip()
+sessions = os.environ.get("TMUX_SESSIONS", "")
+if not raw or not sessions:
+    raise SystemExit(0)
+matches = []
+for line in sessions.splitlines():
+    name = line.strip()
+    if name and name.lower() == raw.lower():
+        matches.append(name)
+seen = []
+for name in matches:
+    if name not in seen:
+        seen.append(name)
+for name in seen:
+    print(name)
+PY
+}
+
+resolve_agent_name_data_dir() {
+  local raw="$1"
+  local dirs=""
+  if [ -d "$DATA_DIR" ]; then
+    local d
+    for d in "$DATA_DIR"/*; do
+      [ -d "$d" ] || continue
+      dirs="${dirs}$(basename "$d")"$'\n'
+    done
+  fi
+  [ -n "$dirs" ] || return 0
+  RAW_NAME="$raw" AGENT_DIR_NAMES="$dirs" python3 - <<'PY' 2>/dev/null || true
+import os
+
+raw = os.environ.get("RAW_NAME", "").strip()
+dirs = os.environ.get("AGENT_DIR_NAMES", "")
+if not raw or not dirs:
+    raise SystemExit(0)
+matches = []
+for line in dirs.splitlines():
+    name = line.strip()
+    if name and name.lower() == raw.lower():
+        matches.append(name)
+seen = []
+for name in matches:
+    if name not in seen:
+        seen.append(name)
+for name in seen:
+    print(name)
+PY
+}
+
+resolve_agent_name_casefold() {
+  local raw="$1"
+  local backend_name tmux_names data_names candidates resolved
+  backend_name="$(resolve_agent_name_backend "$raw")"
+  tmux_names="$(resolve_agent_name_tmux "$raw")"
+  data_names="$(resolve_agent_name_data_dir "$raw")"
+
+  candidates=""
+  [ -n "$backend_name" ] && candidates="${candidates}${backend_name}"$'\n'
+  [ -n "$tmux_names" ] && candidates="${candidates}${tmux_names}"$'\n'
+  [ -n "$data_names" ] && candidates="${candidates}${data_names}"$'\n'
+
+  resolved="$(RAW_NAME="$raw" CANDIDATES="$candidates" python3 - <<'PY'
+import os
+import sys
+
+raw = os.environ.get("RAW_NAME", "").strip()
+candidates = os.environ.get("CANDIDATES", "")
+if not raw:
+    print("")
+    raise SystemExit(0)
+
+seen = []
+for line in candidates.splitlines():
+    name = line.strip()
+    if not name:
+        continue
+    if name.lower() != raw.lower():
+        continue
+    if name not in seen:
+        seen.append(name)
+
+if len(seen) <= 1:
+    print(seen[0] if seen else raw)
+    raise SystemExit(0)
+
+print(f"conflict:{','.join(seen)}")
+raise SystemExit(3)
+PY
+)"
+  if [[ "$resolved" == conflict:* ]]; then
+    echo "Error: case-conflicting agent names detected for '$raw': ${resolved#conflict:}" >&2
+    echo "Refusing to continue. Keep only one canonical case variant." >&2
+    exit 1
+  fi
+  echo "$resolved"
+}
+
 # Helper: post lifecycle event to info group
 post_lifecycle() {
   local event_summary="$1"
@@ -89,6 +228,7 @@ print(json.dumps({
     "type": os.environ["TYPE"],
     "tmux": os.environ["TMUX"],
     "server": server,
+    "manualDown": False,
 }))
 PY
 )
@@ -104,20 +244,47 @@ PY
 # ── Check for updates ────────────────────────────────────────────────
 REPO_DIR="$(dirname "$BASE_DIR")"
 if [ -d "$REPO_DIR/.git" ]; then
+  echo "Checking updates before agent-up..."
   (
-    cd "$REPO_DIR"
-    git fetch origin --quiet 2>/dev/null || true
+    cd "$REPO_DIR" || exit 0
+    if ! git fetch origin --quiet 2>/dev/null; then
+      echo "Warning: update check failed (git fetch origin). Continuing agent-up." >&2
+      exit 0
+    fi
     LOCAL=$(git rev-parse HEAD 2>/dev/null | tr -d '[:space:]' || true)
-    REMOTE=$(git rev-parse origin/main 2>/dev/null || git rev-parse origin/master 2>/dev/null || true)
+    TRACK_REF=""
+    REMOTE=$(git rev-parse origin/main 2>/dev/null || true)
+    if [ -n "$REMOTE" ]; then
+      TRACK_REF="origin/main"
+    else
+      REMOTE=$(git rev-parse origin/master 2>/dev/null || true)
+      [ -n "$REMOTE" ] && TRACK_REF="origin/master"
+    fi
     REMOTE=$(echo "$REMOTE" | tr -d '[:space:]')
-    if [ -n "$LOCAL" ] && [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
-      BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null || git rev-list --count HEAD..origin/master 2>/dev/null || echo "0")
-      BEHIND=$(echo "$BEHIND" | tr -d '[:space:]')
-      if [ "$BEHIND" -gt 0 ] 2>/dev/null; then
-        echo "Updates available ($BEHIND commits behind). Run 'agent-update' to install."
+    if [ -z "$LOCAL" ] || [ -z "$REMOTE" ] || [ -z "$TRACK_REF" ]; then
+      echo "Warning: update check could not resolve repository refs. Continuing agent-up." >&2
+      exit 0
+    fi
+    if [ "$LOCAL" = "$REMOTE" ]; then
+      echo "Update check: up to date."
+      exit 0
+    fi
+    BEHIND=$(git rev-list --count "HEAD..$TRACK_REF" 2>/dev/null || echo "0")
+    BEHIND=$(echo "$BEHIND" | tr -d '[:space:]')
+    if [ "$BEHIND" -gt 0 ] 2>/dev/null; then
+      echo "Updates available ($BEHIND commits behind). Run 'agent-update' to install."
+    else
+      AHEAD=$(git rev-list --count "$TRACK_REF..HEAD" 2>/dev/null || echo "0")
+      AHEAD=$(echo "$AHEAD" | tr -d '[:space:]')
+      if [ "$AHEAD" -gt 0 ] 2>/dev/null; then
+        echo "Update check: local branch is ahead of $TRACK_REF ($AHEAD commits)."
+      else
+        echo "Update check: local and $TRACK_REF diverged."
       fi
     fi
   )
+else
+  echo "Update check: skipped (no git repository at $REPO_DIR)."
 fi
 
 # ── Parse args ────────────────────────────────────────────────────────
@@ -134,8 +301,12 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 
-NAME="$1"
+RAW_NAME="$1"
+NAME="$(resolve_agent_name_casefold "$RAW_NAME")"
 shift
+if [ "$NAME" != "$RAW_NAME" ]; then
+  echo "Resolved agent name '$RAW_NAME' -> '$NAME'"
+fi
 TMUX_TARGET="=${NAME}"
 TMUX_PANE_TARGET="=${NAME}:0.0"
 
@@ -257,6 +428,54 @@ is_valid_uuid() {
   echo "$sid" | grep -qE '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
 }
 
+codex_session_file_for_id() {
+  local sid="$1"
+  local sessions_dir="$HOME/.codex/sessions"
+  [ -n "$sid" ] || return 1
+  [ -d "$sessions_dir" ] || return 1
+  find "$sessions_dir" -type f -name "*${sid}*.jsonl" 2>/dev/null | sort -r | head -1
+}
+
+is_valid_codex_session_id_for_path() {
+  local expected_path="$1"
+  local sid="$2"
+  local expected_name="${3:-}"
+  local session_file
+  [ -n "$expected_path" ] || return 1
+  [ -n "$sid" ] || return 1
+  session_file="$(codex_session_file_for_id "$sid")"
+  [ -n "$session_file" ] || return 1
+  EXPECTED_PATH="$expected_path" SESSION_FILE="$session_file" EXPECTED_AGENT_NAME="$expected_name" python3 - <<'PY' >/dev/null 2>&1
+import json
+import os
+import sys
+
+expected = os.path.realpath(os.environ.get("EXPECTED_PATH", ""))
+session_file = os.environ.get("SESSION_FILE", "")
+expected_agent_name = os.environ.get("EXPECTED_AGENT_NAME", "").strip()
+if not expected or not session_file:
+    raise SystemExit(1)
+try:
+    with open(session_file, "r", encoding="utf-8") as f:
+        first = f.readline().strip()
+        prefix = "".join([first] + [f.readline() for _ in range(600)])
+    obj = json.loads(first) if first else {}
+except Exception:
+    raise SystemExit(1)
+payload = obj.get("payload") if isinstance(obj, dict) else None
+cwd = str(payload.get("cwd") or "").strip() if isinstance(payload, dict) else ""
+if not cwd:
+    raise SystemExit(1)
+if os.path.realpath(cwd) != expected:
+    raise SystemExit(1)
+if expected_agent_name:
+    marker = f"Your name is {expected_agent_name}."
+    if marker not in prefix:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
 generate_uuid() {
   python3 - <<'PY'
 import uuid
@@ -289,6 +508,9 @@ capture_resume_id_from_pane() {
     hint=$(printf '%s\n' "$pane_text" | extract_resume_hint_from_stream)
     rid=$(extract_resume_id_from_hint "$hint")
     if [ -n "$rid" ]; then
+      if ! capture_guard_matches; then
+        return 1
+      fi
       echo "$rid" > "$RESUME_FILE"
       echo "Captured resume-id from pane output: $rid"
       return 0
@@ -306,6 +528,9 @@ capture_resume_id_from_claude_files() {
   [ -n "$newest" ] || return 1
   sid=$(basename "$newest" .jsonl)
   if echo "$sid" | grep -qE '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'; then
+    if ! capture_guard_matches; then
+      return 1
+    fi
     echo "$sid" > "$RESUME_FILE"
     echo "Captured resume-id from Claude session files: $sid"
     return 0
@@ -318,18 +543,58 @@ capture_resume_id_from_codex_files() {
   local sessions_dir sid
   sessions_dir="$HOME/.codex/sessions"
   [ -d "$sessions_dir" ] || return 1
-  sid=$(SESSIONS_DIR="$sessions_dir" BASELINE_FILE="$baseline_file" python3 - <<'PY' 2>/dev/null || true
+  sid=$(SESSIONS_DIR="$sessions_dir" BASELINE_FILE="$baseline_file" AGENT_PATH_EXPECTED="$AGENT_PATH" AGENT_NAME_EXPECTED="$NAME" python3 - <<'PY' 2>/dev/null || true
 import os
 import re
+import json
 
 sessions_dir = os.environ["SESSIONS_DIR"]
 baseline_file = os.environ.get("BASELINE_FILE", "")
+expected_cwd = os.environ.get("AGENT_PATH_EXPECTED", "")
+expected_agent_name = os.environ.get("AGENT_NAME_EXPECTED", "").strip()
 uuid_re = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 
 baseline = set()
 if baseline_file and os.path.exists(baseline_file):
     with open(baseline_file) as f:
         baseline = {line.strip() for line in f if line.strip()}
+
+def real(path: str) -> str:
+    try:
+        return os.path.realpath(path)
+    except Exception:
+        return path
+
+expected_real = real(expected_cwd) if expected_cwd else ""
+
+def session_matches_expected(path: str) -> bool:
+    if not expected_real:
+        return True
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            first = f.readline().strip()
+            prefix = "".join([first] + [f.readline() for _ in range(400)])
+    except Exception:
+        return False
+    if not first:
+        return False
+    try:
+        obj = json.loads(first)
+    except Exception:
+        return False
+    payload = obj.get("payload") if isinstance(obj, dict) else None
+    cwd = ""
+    if isinstance(payload, dict):
+        cwd = str(payload.get("cwd") or "").strip()
+    if not cwd:
+        return False
+    if real(cwd) != expected_real:
+        return False
+    if expected_agent_name:
+        marker = f"Your name is {expected_agent_name}."
+        if marker not in prefix:
+            return False
+    return True
 
 candidates = []
 for root, _, files in os.walk(sessions_dir):
@@ -343,6 +608,8 @@ for root, _, files in os.walk(sessions_dir):
         sid = m.group(0)
         if sid in baseline:
             continue
+        if not session_matches_expected(path):
+            continue
         try:
             mtime = os.path.getmtime(path)
         except OSError:
@@ -355,6 +622,9 @@ if candidates:
 PY
 )
   [ -n "$sid" ] || return 1
+  if ! capture_guard_matches; then
+    return 1
+  fi
   echo "$sid" > "$RESUME_FILE"
   echo "Captured resume-id from Codex session files: $sid"
   return 0
@@ -392,6 +662,19 @@ capture_resume_id_background() {
   local kind="$1"
   local baseline_file="${2:-}"
   (
+    # If launcher command already failed back to shell, do not steal another session's resume-id.
+    if [ "$kind" = "codex" ]; then
+      sleep 2
+      local pane_cmd
+      pane_cmd=$(tmux display-message -p -t "$TMUX_PANE_TARGET" "#{pane_current_command}" 2>/dev/null || true)
+      case "$pane_cmd" in
+        codex|node) ;;
+        bash|zsh|sh|fish|nu|'')
+          [ -n "$baseline_file" ] && rm -f "$baseline_file" || true
+          exit 0
+          ;;
+      esac
+    fi
     if capture_resume_id_from_pane 150; then
       [ -n "$baseline_file" ] && rm -f "$baseline_file" || true
       exit 0
@@ -404,6 +687,15 @@ capture_resume_id_background() {
     [ -n "$baseline_file" ] && rm -f "$baseline_file" || true
   ) &
   disown
+}
+
+capture_guard_matches() {
+  [ -n "${CAPTURE_GUARD_FILE:-}" ] || return 0
+  [ -n "${CAPTURE_GUARD_TOKEN:-}" ] || return 0
+  [ -f "$CAPTURE_GUARD_FILE" ] || return 1
+  local token_now
+  token_now="$(cat "$CAPTURE_GUARD_FILE" 2>/dev/null || true)"
+  [ "$token_now" = "$CAPTURE_GUARD_TOKEN" ]
 }
 
 SESSION_ID="$SAVED_SESSION_ID"
@@ -444,13 +736,32 @@ if [ "$TYPE" = "codex" ] && [ "$FRESH" = false ] && [ ! -f "$RESUME_FILE" ]; the
   echo "Manual check required: inspect archive tail and set $RESUME_FILE." >&2
   exit 1
 fi
+if [ "$TYPE" = "codex" ] && [ "$FRESH" = false ]; then
+  RID_CHECK=$(cat "$RESUME_FILE" 2>/dev/null || true)
+  if ! is_valid_uuid "$RID_CHECK"; then
+    echo "Error: resume-id '$RID_CHECK' is not a valid UUID for codex agent '$NAME'." >&2
+    echo "Manual check required: inspect archive tail and fix $RESUME_FILE." >&2
+    exit 1
+  fi
+  if ! is_valid_codex_session_id_for_path "$AGENT_PATH" "$RID_CHECK" "$NAME"; then
+    echo "Error: codex resume-id '$RID_CHECK' does not match path '$AGENT_PATH'." >&2
+    echo "Refusing resume to avoid cross-agent context bleed." >&2
+    echo "Fix options:" >&2
+    echo "  1) Update $RESUME_FILE with the correct session id for this path." >&2
+    echo "  2) Run: agent-up $NAME --fresh" >&2
+    exit 1
+  fi
+fi
 
 # ── Check existing session ───────────────────────────────────────────
 if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
+  # Keep backend online mapping fresh even when session was started outside agent-up.
+  register_backend_agent
   if [ "$ATTACH" = true ]; then
     exec tmux attach -t "$TMUX_TARGET"
   else
-    echo "Session '$NAME' already exists. Attach with: tmux attach -t $NAME"
+    echo "Session '$NAME' already exists. Refreshed backend mapping."
+    echo "Attach with: tmux attach -t $NAME"
     exit 0
   fi
 fi
@@ -458,6 +769,9 @@ fi
 # ── Save meta ─────────────────────────────────────────────────────────
 mkdir -p "$AGENT_DATA"
 mkdir -p "$TMP_RUNTIME_DIR"
+CAPTURE_GUARD_FILE="$TMP_RUNTIME_DIR/resume-capture.guard"
+CAPTURE_GUARD_TOKEN="$(date +%s)-$$-$RANDOM"
+echo "$CAPTURE_GUARD_TOKEN" > "$CAPTURE_GUARD_FILE"
 
 NOW=$(python3 -c "from datetime import datetime; print(datetime.now().astimezone().isoformat())" 2>/dev/null || date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
 if [ -f "$META_FILE" ]; then
@@ -508,9 +822,11 @@ register_backend_agent
 
 # ── Build init prompt for fresh starts ────────────────────────────────
 INIT_PROMPT="Your name is ${NAME}. You have an MCP tool server called 'agent-chat' for communicating with other agents and humans. Key tools: check_inbox() to read messages, send_message(to, summary, full) to DM, post(group, summary, full, mentions) for group messages, whoami() to see your identity and available agents/groups. Check your inbox now to see if there are any messages for you."
+CLAUDE_MODE_GUARD="Critical runtime rule: do not enter Plan mode or Select mode in this multi-agent tmux environment, because interactive mode switching cannot be completed. Stay in default mode and continue execution directly. Save this rule in memory and follow it for the whole session."
 
 # ── Launch AI ─────────────────────────────────────────────────────────
 if [ "$TYPE" = "claude" ]; then
+  INIT_PROMPT="$INIT_PROMPT $CLAUDE_MODE_GUARD"
   CLAUDE_FLAGS="--dangerously-skip-permissions"
   [ -n "$MODEL" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS --model $MODEL"
   [ -n "$EXTRA_ARGS" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
