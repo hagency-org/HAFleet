@@ -639,21 +639,15 @@ function normalizeMessageText(value) {
 
 function renderMarkdownInline(raw) {
   let text = escapeHtml(normalizeMessageText(raw));
-  const codeTokens = [];
-  text = text.replace(/`([^`\n]+)`/g, (_m, code) => {
-    const idx = codeTokens.push(`<code>${code}</code>`) - 1;
-    return `@@INL${idx}@@`;
-  });
   text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label, url) => {
     const safeUrl = escapeHtmlAttr(url);
     return `<a href="${safeUrl}">${label}</a>`;
   });
   text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   text = text.replace(/__([^_]+)__/g, '<strong>$1</strong>');
-  text = text.replace(/~~([^~]+)~~/g, '<del>$1</del>');
   text = text.replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s).,!?:;])/g, '$1<em>$2</em>');
   text = text.replace(/(^|[\s(])_([^_\n]+)_(?=$|[\s).,!?:;])/g, '$1<em>$2</em>');
-  return text.replace(/@@INL(\d+)@@/g, (_m, idx) => codeTokens[Number(idx)] || '');
+  return text;
 }
 
 function renderMarkdownToMatrixHtml(raw) {
@@ -661,8 +655,10 @@ function renderMarkdownToMatrixHtml(raw) {
   const codeBlocks = [];
   const withCodePlaceholders = normalized.replace(/```([a-zA-Z0-9_-]+)?\n?([\s\S]*?)```/g, (_m, lang, code) => {
     const safeCode = escapeHtml(code).replace(/\n$/, '');
-    const langLabel = lang ? `${escapeHtml(lang)}\n` : '';
-    const html = `<code>${langLabel}${safeCode.replace(/\n/g, '<br>')}</code>`;
+    const langLabel = lang ? `${escapeHtml(lang)}<br>` : '';
+    // Mobile Matrix clients can render <code>/<pre> with aggressive colors.
+    // Keep fenced blocks as plain escaped lines to preserve readability.
+    const html = `${langLabel}${safeCode.replace(/\n/g, '<br>')}`;
     const idx = codeBlocks.push(html) - 1;
     return `@@BLOCK${idx}@@`;
   });
