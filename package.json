@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "node server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "check:remote-sync": "bash scripts/check-remote-sync.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
