@@ -40,6 +40,7 @@ const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHM
 const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
 const MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT = (process.env.MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT || '30mb').trim() || '30mb';
 const UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS = Number.parseInt(process.env.UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS || '120000', 10);
+const AGENT_TMUX_MISSING_ALERT_GRACE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_GRACE_MS || '15000', 10);
 const AGENT_COMPACT_SUMMARY_MAX = Number.parseInt(process.env.AGENT_COMPACT_SUMMARY_MAX || '180', 10);
 const AGENT_COMPACT_RUNTIME_DEDUPE_MS = Number.parseInt(process.env.AGENT_COMPACT_RUNTIME_DEDUPE_MS || '120000', 10);
 const AGENT_COMPACT_HOOK_PATTERNS = [
@@ -365,6 +366,7 @@ const servers = loadJsonSync('servers.json', {});
 const agentRuntime = loadJsonSync('agent_runtime.json', {});
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
+const localTmuxMissingState = new Map(); // agent -> { since:number, alerted:boolean }
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const unexpectedOfflineAlertAt = new Map(); // key(agent:reason) -> ts
 const compactRuntimeAlertAt = new Map(); // key(agent:marker:mode) -> ts
@@ -1401,6 +1403,7 @@ function pruneEphemeralAgents(names = [], reason = 'ephemeral-prune') {
 
 function sweepLocalActivityDurations() {
   const nowSec = Math.floor(Date.now() / 1000);
+  const nowMs = Date.now();
   let runtimeChanged = false;
   let agentsChanged = false;
   const pruneCandidates = new Set();
@@ -1418,6 +1421,9 @@ function sweepLocalActivityDurations() {
     const paneHash = getLocalPaneContentHash(tmuxTarget);
     if (!paneHash) {
       const hasSession = localTmuxSessionExists(tmuxTarget);
+      if (hasSession) {
+        localTmuxMissingState.delete(agent.name);
+      }
       localActivityState.delete(agent.name);
       const resetChanged = setRuntimeActivityFields(runtime, {
         activeNow: false,
@@ -1430,15 +1436,28 @@ function sweepLocalActivityDurations() {
         runtimeChanged = true;
       }
       if (!hasSession) {
+        let missing = localTmuxMissingState.get(agent.name);
+        if (!missing) {
+          missing = { since: nowMs, alerted: false };
+          localTmuxMissingState.set(agent.name, missing);
+        }
+        const missingForMs = Math.max(0, nowMs - (Number(missing.since) || nowMs));
         const wasManualDown = agent.manualDown === true;
         let transitioned = false;
         if (agent.online !== false) { agent.online = false; agentsChanged = true; transitioned = true; }
         if (agent.tmux !== null) { agent.tmux = null; agentsChanged = true; transitioned = true; }
-        if (agent.offlineReason !== 'tmux-missing:auto') { agent.offlineReason = 'tmux-missing:auto'; agentsChanged = true; transitioned = true; }
-        if (agent.manualDown !== false) { agent.manualDown = false; agentsChanged = true; transitioned = true; }
+        if (!wasManualDown && agent.offlineReason !== 'tmux-missing:auto') {
+          agent.offlineReason = 'tmux-missing:auto';
+          agentsChanged = true;
+          transitioned = true;
+        }
         if (transitioned) {
-          agent.lastSeen = Date.now();
-          if (!wasManualDown) {
+          agent.lastSeen = nowMs;
+        }
+        if (!wasManualDown && !missing.alerted && missingForMs >= AGENT_TMUX_MISSING_ALERT_GRACE_MS) {
+          missing.alerted = true;
+          localTmuxMissingState.set(agent.name, missing);
+          if (agent.offlineReason === 'tmux-missing:auto') {
             maybeEmitUnexpectedOfflineAlert(agent.name, 'tmux-missing:auto', { server: 'local', detail: `tmux target ${tmuxTarget} not found` });
           }
         }
@@ -1446,6 +1465,7 @@ function sweepLocalActivityDurations() {
       }
       continue;
     }
+    localTmuxMissingState.delete(agent.name);
 
     let st = localActivityState.get(agent.name);
     if (!st) {
@@ -2415,20 +2435,9 @@ app.post('/api/runtime/compact', (req, res) => {
   const agentName = normalizeAgentName(req.body?.agent);
   if (!agentName) return res.status(400).json({ error: 'agent required' });
 
-  const server = normalizeServer(req.body?.server);
-  let agent = agents[agentName];
+  const agent = agents[agentName];
   if (!isAgentRecord(agent)) {
-    const ensured = ensureAgentRecord(agentName, {
-      server,
-      tmux: `${agentName}:0.0`,
-      online: true,
-      type: 'agent',
-      kind: 'agent',
-      offlineReason: null,
-    });
-    if (!ensured) return res.status(400).json({ error: 'invalid agent name' });
-    agent = ensured.agent;
-    saveAgents();
+    return res.json({ ok: true, ignored: 'agent-not-found', agent: agentName });
   }
 
   const marker = normalizeCompactMarker(req.body?.marker);
