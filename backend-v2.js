@@ -41,6 +41,7 @@ const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHM
 const MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT = (process.env.MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT || '30mb').trim() || '30mb';
 const UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS = Number.parseInt(process.env.UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS || '120000', 10);
 const AGENT_TMUX_MISSING_ALERT_GRACE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_GRACE_MS || '15000', 10);
+const AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS || '900000', 10);
 const AGENT_COMPACT_SUMMARY_MAX = Number.parseInt(process.env.AGENT_COMPACT_SUMMARY_MAX || '180', 10);
 const AGENT_COMPACT_RUNTIME_DEDUPE_MS = Number.parseInt(process.env.AGENT_COMPACT_RUNTIME_DEDUPE_MS || '120000', 10);
 const AGENT_COMPACT_HOOK_PATTERNS = [
@@ -1442,6 +1443,10 @@ function sweepLocalActivityDurations() {
           localTmuxMissingState.set(agent.name, missing);
         }
         const missingForMs = Math.max(0, nowMs - (Number(missing.since) || nowMs));
+        const wasOnline = agent.online === true;
+        const prevLastSeenMs = Number(agent.lastSeen) || 0;
+        const seenAgeMs = prevLastSeenMs > 0 ? Math.max(0, nowMs - prevLastSeenMs) : 0;
+        const recentEnough = prevLastSeenMs <= 0 || seenAgeMs <= AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS;
         const wasManualDown = agent.manualDown === true;
         let transitioned = false;
         if (agent.online !== false) { agent.online = false; agentsChanged = true; transitioned = true; }
@@ -1454,7 +1459,11 @@ function sweepLocalActivityDurations() {
         if (transitioned) {
           agent.lastSeen = nowMs;
         }
-        if (!wasManualDown && !missing.alerted && missingForMs >= AGENT_TMUX_MISSING_ALERT_GRACE_MS) {
+        if (!wasManualDown
+          && wasOnline
+          && recentEnough
+          && !missing.alerted
+          && missingForMs >= AGENT_TMUX_MISSING_ALERT_GRACE_MS) {
           missing.alerted = true;
           localTmuxMissingState.set(agent.name, missing);
           if (agent.offlineReason === 'tmux-missing:auto') {
