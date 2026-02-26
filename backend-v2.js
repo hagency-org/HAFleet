@@ -9,6 +9,9 @@ const DATA_DIR = path.resolve('data');
 const PUSH_QUEUE_URL = 'http://127.0.0.1:8084/api/queue';
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const LOCAL_SERVER_ID = (process.env.AGENT_CHAT_SERVER || 'local').trim();
+const USER_UID = (typeof process.getuid === 'function') ? process.getuid() : null;
+const USER_RUNTIME_DIR = Number.isFinite(USER_UID) ? `/run/user/${USER_UID}` : null;
+const USER_DBUS_SESSION_BUS = USER_RUNTIME_DIR ? `unix:path=${USER_RUNTIME_DIR}/bus` : null;
 const CORS_ALLOWED_ORIGIN = (process.env.FRP_API_ORIGIN || 'https://agentchat.ananthe.party').trim();
 const HEARTBEAT_TTL_MS = Number.parseInt(process.env.AGENT_HEARTBEAT_TTL_MS || '90000', 10);
 const SERVER_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_SERVER_SWEEP_INTERVAL_MS || '15000', 10);
@@ -225,6 +228,30 @@ function buildRuntimeCompactEvent(agentName, payload = {}) {
   };
 }
 
+function emitRuntimeCompactEvent(agentName, payload = {}) {
+  const marker = normalizeCompactMarker(payload?.marker);
+  const modeRaw = (typeof payload?.mode === 'string' && payload.mode.trim())
+    ? payload.mode.trim().toLowerCase()
+    : 'pattern';
+  const mode = modeRaw === 'hook' ? 'hook' : 'pattern';
+  const key = `${agentName}:${marker}:${mode}`;
+  const now = Date.now();
+  const prevTs = Number(compactRuntimeAlertAt.get(key)) || 0;
+  if ((now - prevTs) < AGENT_COMPACT_RUNTIME_DEDUPE_MS) {
+    return { ok: true, suppressed: 'dedupe', agent: agentName, marker, mode };
+  }
+  compactRuntimeAlertAt.set(key, now);
+  pruneCompactRuntimeDedupState(now);
+
+  const event = buildRuntimeCompactEvent(agentName, {
+    ...payload,
+    mode,
+    marker,
+  });
+  broadcastSSE('agent_compact', event);
+  return { ok: true, event };
+}
+
 function normalizeAttachmentName(value, fallback = 'file') {
   let name = typeof value === 'string' ? value.trim() : '';
   if (!name) name = fallback;
@@ -368,6 +395,7 @@ const agentRuntime = loadJsonSync('agent_runtime.json', {});
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
 const localTmuxMissingState = new Map(); // agent -> { since:number, alerted:boolean }
+const localCompactState = new Map(); // agent -> marker
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const unexpectedOfflineAlertAt = new Map(); // key(agent:reason) -> ts
 const compactRuntimeAlertAt = new Map(); // key(agent:marker:mode) -> ts
@@ -540,6 +568,10 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
   runtime.activeDurationSec = Number(runtime.activeDurationSec) || 0;
   runtime.idleDurationSec = Number(runtime.idleDurationSec) || 0;
   runtime.lastTmuxActivitySec = Number(runtime.lastTmuxActivitySec) || null;
+  runtime.mcpPresent = runtime.mcpPresent === true
+    ? true
+    : (runtime.mcpPresent === false ? false : null);
+  runtime.mcpMissingSince = Number(runtime.mcpMissingSince) || null;
   if (!runtime.rules || typeof runtime.rules !== 'object') runtime.rules = {};
 }
 
@@ -819,6 +851,8 @@ function ensureAgentRuntimeRecord(name) {
       activeDurationSec: 0,
       idleDurationSec: 0,
       lastTmuxActivitySec: null,
+      mcpPresent: null,
+      mcpMissingSince: null,
       updatedAt: 0,
       lastSeen: 0,
       lastPushNotifyAt: 0,
@@ -963,6 +997,40 @@ function setRuntimeActivityFields(runtime, payload = {}) {
   return changed;
 }
 
+function setRuntimeMcpFields(runtime, payload = {}, now = Date.now()) {
+  if (!runtime || typeof runtime !== 'object') return false;
+  if (!Object.prototype.hasOwnProperty.call(payload, 'mcpPresent')) return false;
+  if (payload.mcpPresent === undefined) return false;
+
+  let changed = false;
+  const mcpNow = payload.mcpPresent === true
+    ? true
+    : (payload.mcpPresent === false ? false : null);
+  const prevMcp = runtime.mcpPresent === true
+    ? true
+    : (runtime.mcpPresent === false ? false : null);
+
+  if (prevMcp !== mcpNow) {
+    runtime.mcpPresent = mcpNow;
+    changed = true;
+  }
+
+  if (mcpNow === false) {
+    const nextMissingSince = prevMcp === false
+      ? (Number(runtime.mcpMissingSince) || now)
+      : now;
+    if (runtime.mcpMissingSince !== nextMissingSince) {
+      runtime.mcpMissingSince = nextMissingSince;
+      changed = true;
+    }
+  } else if (runtime.mcpMissingSince !== null) {
+    runtime.mcpMissingSince = null;
+    changed = true;
+  }
+
+  return changed;
+}
+
 function isHumanMessageToAgent(msg, agentName) {
   if (!msg || msg.type !== 'human') return false;
   if (msg.to === agentName) return true;
@@ -1049,6 +1117,9 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
 
   const prevBlocked = runtime.blocked === true;
   const prevReason = runtime.blockedReason || null;
+  const prevMcpPresent = runtime.mcpPresent === true
+    ? true
+    : (runtime.mcpPresent === false ? false : null);
   let changed = false;
 
   if (runtime.blocked !== blockedNow) { runtime.blocked = blockedNow; changed = true; }
@@ -1069,7 +1140,40 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
   }
 
   if (setRuntimeActivityFields(runtime, payload)) changed = true;
+  if (setRuntimeMcpFields(runtime, payload, now)) changed = true;
   if (changed) saveAgentRuntime();
+
+  const mcpNow = runtime.mcpPresent === true
+    ? true
+    : (runtime.mcpPresent === false ? false : null);
+  const mcpBecameMissing = prevMcpPresent !== false && mcpNow === false;
+  const mcpRecovered = prevMcpPresent === false && mcpNow === true;
+
+  const agent = agents[agentName];
+  let agentChanged = false;
+  let shouldCatchup = false;
+  if (isAgentRecord(agent) && agent.kind !== 'human') {
+    const wasOnline = agent.online === true;
+    const wasManualDown = agent.manualDown === true;
+
+    if (mcpNow === false && !wasManualDown) {
+      if (!agent.tmux || !String(agent.tmux).trim()) { agent.tmux = `${agentName}:0.0`; agentChanged = true; }
+      if (agent.online !== false) { agent.online = false; agentChanged = true; }
+      if (agent.offlineReason !== 'mcp-missing:auto') { agent.offlineReason = 'mcp-missing:auto'; agentChanged = true; }
+      if (agent.manualDown !== false) { agent.manualDown = false; agentChanged = true; }
+      if (agent.lastSeen !== now) { agent.lastSeen = now; agentChanged = true; }
+    } else if (mcpNow === true) {
+      const recoverable = agent.offlineReason === 'mcp-missing:auto' || agent.online !== true;
+      if (!agent.tmux || !String(agent.tmux).trim()) { agent.tmux = `${agentName}:0.0`; agentChanged = true; }
+      if (agent.online !== true) { agent.online = true; agentChanged = true; }
+      if (agent.offlineReason === 'mcp-missing:auto') { agent.offlineReason = null; agentChanged = true; }
+      if (agent.manualDown !== false) { agent.manualDown = false; agentChanged = true; }
+      if (agent.lastSeen !== now) { agent.lastSeen = now; agentChanged = true; }
+      if (!wasOnline && !wasManualDown && recoverable) shouldCatchup = true;
+    }
+  }
+  if (agentChanged) saveAgents();
+  if (shouldCatchup) notifyAgentCatchup(agentName, 'mcp-restored');
 
   const becameBlocked = !prevBlocked && blockedNow;
   const reasonChanged = prevBlocked && blockedNow && reasonNow && reasonNow !== prevReason;
@@ -1104,6 +1208,28 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
     broadcastSSE('agent_recovered', {
       agent: agentName,
       recoveredAt: now,
+    });
+  }
+
+  if (mcpBecameMissing) {
+    const full = [
+      `Agent: ${agentName}`,
+      `Server: ${normalizeServer(payload.server) || normalizeServer(agent?.server) || 'local'}`,
+      'State: tmux session present but mcp-server.js process not detected.',
+      'Offline reason set to: mcp-missing:auto',
+    ].join('\n');
+    emitSystemInfo(`Agent '${agentName}' missing MCP process`, full);
+    broadcastSSE('agent_mcp_missing', {
+      agent: agentName,
+      missingSince: runtime.mcpMissingSince || now,
+      server: normalizeServer(payload.server) || normalizeServer(agent?.server) || null,
+    });
+  } else if (mcpRecovered) {
+    emitSystemInfo(`Agent '${agentName}' MCP process recovered`, `Agent '${agentName}' now has mcp-server.js running inside tmux.`);
+    broadcastSSE('agent_mcp_recovered', {
+      agent: agentName,
+      recoveredAt: now,
+      server: normalizeServer(payload.server) || normalizeServer(agent?.server) || null,
     });
   }
 
@@ -1328,14 +1454,17 @@ function refreshServerLiveness() {
   if (agentsChanged) saveAgents();
 }
 
-function getLocalPaneContentHash(tmuxTarget) {
+function captureLocalPaneContent(tmuxTarget) {
   if (!tmuxTarget) return null;
   try {
     const raw = execSync(`tmux capture-pane -p -t ${JSON.stringify(tmuxTarget)} 2>/dev/null`, {
       timeout: 3000,
       encoding: 'utf-8',
     });
-    return createHash('md5').update(raw).digest('hex');
+    return {
+      text: raw,
+      hash: createHash('md5').update(raw).digest('hex'),
+    };
   } catch {
     return null;
   }
@@ -1415,17 +1544,36 @@ function sweepLocalActivityDurations() {
     const isLocalAgent = !serverId || serverId === 'local' || serverId === LOCAL_SERVER_ID;
     if (!isLocalAgent) continue;
 
-    const tmuxTarget = (typeof agent.tmux === 'string' && agent.tmux.trim()) ? agent.tmux.trim() : `${agent.name}:0.0`;
+    const manualDown = agent.manualDown === true;
+    const configuredTmux = (typeof agent.tmux === 'string' && agent.tmux.trim()) ? agent.tmux.trim() : null;
+    const tmuxTarget = configuredTmux || (manualDown ? null : `${agent.name}:0.0`);
     const runtime = ensureAgentRuntimeRecord(agent.name);
     if (!runtime) continue;
+    if (!tmuxTarget) {
+      localTmuxMissingState.delete(agent.name);
+      localActivityState.delete(agent.name);
+      localCompactState.delete(agent.name);
+      const resetChanged = setRuntimeActivityFields(runtime, {
+        activeNow: false,
+        activeDurationSec: 0,
+        idleDurationSec: 0,
+        lastTmuxActivitySec: null,
+      });
+      if (resetChanged) {
+        runtime.updatedAt = Date.now();
+        runtimeChanged = true;
+      }
+      continue;
+    }
 
-    const paneHash = getLocalPaneContentHash(tmuxTarget);
-    if (!paneHash) {
+    const paneCapture = captureLocalPaneContent(tmuxTarget);
+    if (!paneCapture?.hash) {
       const hasSession = localTmuxSessionExists(tmuxTarget);
       if (hasSession) {
         localTmuxMissingState.delete(agent.name);
       }
       localActivityState.delete(agent.name);
+      localCompactState.delete(agent.name);
       const resetChanged = setRuntimeActivityFields(runtime, {
         activeNow: false,
         activeDurationSec: 0,
@@ -1447,7 +1595,7 @@ function sweepLocalActivityDurations() {
         const prevLastSeenMs = Number(agent.lastSeen) || 0;
         const seenAgeMs = prevLastSeenMs > 0 ? Math.max(0, nowMs - prevLastSeenMs) : 0;
         const recentEnough = prevLastSeenMs <= 0 || seenAgeMs <= AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS;
-        const wasManualDown = agent.manualDown === true;
+        const wasManualDown = manualDown;
         let transitioned = false;
         if (agent.online !== false) { agent.online = false; agentsChanged = true; transitioned = true; }
         if (agent.tmux !== null) { agent.tmux = null; agentsChanged = true; transitioned = true; }
@@ -1474,7 +1622,24 @@ function sweepLocalActivityDurations() {
       }
       continue;
     }
+    const paneHash = paneCapture.hash;
     localTmuxMissingState.delete(agent.name);
+    const compactSignal = detectAgentCompactSignal('', paneCapture.text);
+    if (compactSignal) {
+      const marker = normalizeCompactMarker(compactSignal.marker);
+      const prevMarker = localCompactState.get(agent.name) || null;
+      if (prevMarker !== marker) {
+        emitRuntimeCompactEvent(agent.name, {
+          mode: compactSignal.mode,
+          marker,
+          source: 'local-sweep',
+          summary: marker.replace(/-/g, ' '),
+        });
+      }
+      localCompactState.set(agent.name, marker);
+    } else {
+      localCompactState.delete(agent.name);
+    }
 
     let st = localActivityState.get(agent.name);
     if (!st) {
@@ -1516,21 +1681,38 @@ function sweepLocalActivityDurations() {
     // Self-heal local mapping: if tmux session exists and emits pane content,
     // keep backend routing state aligned even after stale/offline cleanup.
     let onlineChanged = false;
-    if (!agent.tmux || !String(agent.tmux).trim()) {
+    const mcpMissing = runtime.mcpPresent === false;
+    if ((!agent.tmux || !String(agent.tmux).trim()) && !manualDown) {
       agent.tmux = tmuxTarget;
       onlineChanged = true;
     }
-    if (agent.online !== true) {
-      agent.online = true;
-      onlineChanged = true;
-    }
-    if (agent.offlineReason !== null) {
-      agent.offlineReason = null;
-      onlineChanged = true;
-    }
-    if (agent.manualDown !== false) {
-      agent.manualDown = false;
-      onlineChanged = true;
+    if (manualDown) {
+      if (agent.online !== false) {
+        agent.online = false;
+        onlineChanged = true;
+      }
+    } else if (mcpMissing) {
+      if (agent.online !== false) {
+        agent.online = false;
+        onlineChanged = true;
+      }
+      if (agent.offlineReason !== 'mcp-missing:auto') {
+        agent.offlineReason = 'mcp-missing:auto';
+        onlineChanged = true;
+      }
+    } else {
+      if (agent.online !== true) {
+        agent.online = true;
+        onlineChanged = true;
+      }
+      if (agent.offlineReason !== null) {
+        agent.offlineReason = null;
+        onlineChanged = true;
+      }
+      if (agent.manualDown !== false) {
+        agent.manualDown = false;
+        onlineChanged = true;
+      }
     }
     if (onlineChanged) {
       agent.lastSeen = Date.now();
@@ -1608,6 +1790,55 @@ function scopeUnitForAgent(agentName) {
   return `agent-${base}.scope`;
 }
 
+function scopeUnitFromCgroupPath(cgroupPath) {
+  const text = String(cgroupPath || '').trim();
+  if (!text) return null;
+  const leaf = text.split('/').filter(Boolean).pop() || '';
+  return leaf.endsWith('.scope') ? leaf : null;
+}
+
+function scopeUnitForPid(pid) {
+  const n = Number.parseInt(pid, 10);
+  if (!Number.isFinite(n) || n <= 1) return null;
+  try {
+    const raw = readFileSync(`/proc/${n}/cgroup`, 'utf-8');
+    for (const line of String(raw || '').split('\n')) {
+      if (!line) continue;
+      const idx = line.indexOf(':');
+      const idx2 = idx >= 0 ? line.indexOf(':', idx + 1) : -1;
+      if (idx2 < 0) continue;
+      const pathPart = line.slice(idx2 + 1).trim();
+      const unit = scopeUnitFromCgroupPath(pathPart);
+      if (unit) return unit;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function buildLocalPanePidMap() {
+  const out = new Map();
+  try {
+    const raw = execSync('tmux list-panes -a -F "#{session_name} #{pane_pid}" 2>/dev/null', {
+      encoding: 'utf-8',
+      timeout: 3000,
+    }).trim();
+    if (!raw) return out;
+    for (const line of raw.split('\n')) {
+      const sp = line.indexOf(' ');
+      if (sp <= 0) continue;
+      const session = line.slice(0, sp).trim();
+      const panePid = Number.parseInt(line.slice(sp + 1).trim(), 10);
+      if (!session || !Number.isFinite(panePid) || panePid <= 1) continue;
+      if (!out.has(session)) out.set(session, panePid);
+    }
+  } catch {
+    // best effort map
+  }
+  return out;
+}
+
 function parseSystemdMemoryValue(raw) {
   const text = String(raw || '').trim().toLowerCase();
   if (!text || text === 'infinity' || text === 'max') return 0;
@@ -1615,13 +1846,22 @@ function parseSystemdMemoryValue(raw) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-function readAgentScopeMemory(agentName) {
-  const unit = scopeUnitForAgent(agentName);
+function readAgentScopeMemory(agentName, panePidMap = null) {
+  const agent = agents[agentName];
+  const tmuxTarget = (typeof agent?.tmux === 'string' && agent.tmux.trim())
+    ? agent.tmux.trim()
+    : `${agentName}:0.0`;
+  const sessionName = tmuxTarget.split(':', 1)[0].trim() || agentName;
+  const panePid = (panePidMap instanceof Map) ? panePidMap.get(sessionName) : null;
+  const unit = scopeUnitForPid(panePid) || scopeUnitForAgent(agentName);
   if (!unit) return null;
   try {
+    const env = USER_RUNTIME_DIR && USER_DBUS_SESSION_BUS
+      ? { ...process.env, XDG_RUNTIME_DIR: USER_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: USER_DBUS_SESSION_BUS }
+      : process.env;
     const out = execSync(
       `systemctl --user show ${JSON.stringify(unit)} --property=ActiveState --property=MemoryCurrent --property=MemoryHigh --value --no-pager`,
-      { encoding: 'utf-8', timeout: 3000 }
+      { encoding: 'utf-8', timeout: 3000, env }
     );
     const [activeStateRaw, currentRaw, highRaw] = String(out || '').split('\n');
     const activeState = String(activeStateRaw || '').trim().toLowerCase();
@@ -1672,6 +1912,7 @@ function formatBytesGiB(bytes) {
 function sweepAgentScopePressure() {
   if (!AGENT_SCOPE_MONITOR_ENABLED) return;
   const now = Date.now();
+  const panePidMap = buildLocalPanePidMap();
   const localAgentNames = Object.values(agents)
     .filter(isAgentRecord)
     .filter(agent => {
@@ -1686,7 +1927,7 @@ function sweepAgentScopePressure() {
   }
 
   for (const agentName of localAgentNames) {
-    const scope = readAgentScopeMemory(agentName);
+    const scope = readAgentScopeMemory(agentName, panePidMap);
     const prev = scopePressureState.get(agentName) || { high: false, lastAlertAt: 0 };
     if (!scope) {
       if (prev.high) {
@@ -1774,6 +2015,10 @@ function serializeAgent(agent) {
     activeDurationSec: Number(runtime?.activeDurationSec) || 0,
     idleDurationSec: Number(runtime?.idleDurationSec) || 0,
     lastTmuxActivitySec: Number(runtime?.lastTmuxActivitySec) || null,
+    mcpPresent: runtime?.mcpPresent === true
+      ? true
+      : (runtime?.mcpPresent === false ? false : null),
+    mcpMissingSince: Number(runtime?.mcpMissingSince) || null,
   };
 }
 
@@ -1838,10 +2083,18 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
     if (normalizeServer(agent.server) !== serverId) { agent.server = serverId; agentsChanged = true; }
     if (!agent.tmux) { agent.tmux = `${name}:0.0`; agentsChanged = true; }
     const wasAgentOnline = agent.online === true;
-    if (!wasAgentOnline) becameOnline.push(name);
-    if (agent.online !== true) { agent.online = true; agentsChanged = true; }
-    if (agent.offlineReason !== null) { agent.offlineReason = null; agentsChanged = true; }
-    if (agent.manualDown !== false) { agent.manualDown = false; agentsChanged = true; }
+    const runtime = ensureAgentRuntimeRecord(name);
+    const mcpMissing = runtime?.mcpPresent === false && agent.manualDown !== true;
+    const nextOnline = !mcpMissing;
+    if (!wasAgentOnline && nextOnline) becameOnline.push(name);
+    if (agent.online !== nextOnline) { agent.online = nextOnline; agentsChanged = true; }
+    if (nextOnline) {
+      if (agent.offlineReason !== null) { agent.offlineReason = null; agentsChanged = true; }
+      if (agent.manualDown !== false) { agent.manualDown = false; agentsChanged = true; }
+    } else if (agent.offlineReason !== 'mcp-missing:auto') {
+      agent.offlineReason = 'mcp-missing:auto';
+      agentsChanged = true;
+    }
     if (agent.lastSeen !== now) { agent.lastSeen = now; agentsChanged = true; }
   }
 
@@ -2400,6 +2653,13 @@ app.post('/api/agents/:name/runtime', (req, res) => {
   const tail = (typeof req.body?.tail === 'string') ? req.body.tail : '';
   const command = (typeof req.body?.command === 'string') ? req.body.command : '';
   const server = normalizeServer(req.body?.server);
+  const activeNow = req.body?.activeNow === true ? true : (req.body?.activeNow === false ? false : null);
+  const activeDurationSec = req.body?.activeDurationSec;
+  const idleDurationSec = req.body?.idleDurationSec;
+  const lastTmuxActivitySec = req.body?.lastTmuxActivitySec;
+  const mcpPresent = Object.prototype.hasOwnProperty.call(req.body || {}, 'mcpPresent')
+    ? (req.body.mcpPresent === true ? true : (req.body.mcpPresent === false ? false : null))
+    : undefined;
 
   let agent = agents[agentName];
   if (!isAgentRecord(agent)) {
@@ -2422,6 +2682,11 @@ app.post('/api/agents/:name/runtime', (req, res) => {
     tail,
     command,
     server,
+    activeNow,
+    activeDurationSec,
+    idleDurationSec,
+    lastTmuxActivitySec,
+    mcpPresent,
   });
   if (!runtime) return res.status(500).json({ error: 'runtime update failed' });
   res.json({
@@ -2435,6 +2700,10 @@ app.post('/api/agents/:name/runtime', (req, res) => {
       activeDurationSec: Number(runtime.activeDurationSec) || 0,
       idleDurationSec: Number(runtime.idleDurationSec) || 0,
       lastTmuxActivitySec: Number(runtime.lastTmuxActivitySec) || null,
+      mcpPresent: runtime.mcpPresent === true
+        ? true
+        : (runtime.mcpPresent === false ? false : null),
+      mcpMissingSince: Number(runtime.mcpMissingSince) || null,
       updatedAt: runtime.updatedAt || Date.now(),
     },
   });
@@ -2449,28 +2718,13 @@ app.post('/api/runtime/compact', (req, res) => {
     return res.json({ ok: true, ignored: 'agent-not-found', agent: agentName });
   }
 
-  const marker = normalizeCompactMarker(req.body?.marker);
-  const modeRaw = (typeof req.body?.mode === 'string' && req.body.mode.trim())
-    ? req.body.mode.trim().toLowerCase()
-    : 'pattern';
-  const mode = modeRaw === 'hook' ? 'hook' : 'pattern';
-  const key = `${agentName}:${marker}:${mode}`;
-  const now = Date.now();
-  const prevTs = Number(compactRuntimeAlertAt.get(key)) || 0;
-  if ((now - prevTs) < AGENT_COMPACT_RUNTIME_DEDUPE_MS) {
-    return res.json({ ok: true, suppressed: 'dedupe', agent: agentName, marker, mode });
-  }
-  compactRuntimeAlertAt.set(key, now);
-  pruneCompactRuntimeDedupState(now);
-
-  const event = buildRuntimeCompactEvent(agentName, {
-    mode,
-    marker,
+  const result = emitRuntimeCompactEvent(agentName, {
+    mode: req.body?.mode,
+    marker: req.body?.marker,
     source: req.body?.source,
     summary: req.body?.summary,
   });
-  broadcastSSE('agent_compact', event);
-  res.json({ ok: true, event });
+  res.json(result);
 });
 
 app.post('/api/runtime/push-delivered', (req, res) => {

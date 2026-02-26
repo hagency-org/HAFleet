@@ -72,15 +72,7 @@ else
 
     # Direct tmux send
     tmux send-keys -l -t "$target" "$payload"
-    sleep 0.3
-    tmux send-keys -t "$target" Tab
-    sleep 0.3
-    tmux send-keys -t "$target" Enter
-    sleep 0.3
-    tmux send-keys -t "$target" Enter
-    sleep 0.3
-    tmux send-keys -t "$target" C-m
-    sleep 0.3
+    sleep 0.15
     tmux send-keys -t "$target" C-m
     echo "Sent directly to ${target}"
 fi

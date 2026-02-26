@@ -6,6 +6,7 @@ import path from 'path';
 
 const PORT = 8084;
 const LOG_FILE = path.resolve('logs/messages.jsonl');
+const AGENT_DOWN_BIN = path.resolve('bin/agent-down');
 const PUSH_DELIVERED_URL = 'http://127.0.0.1:8090/api/runtime/push-delivered';
 const DEFAULT_IDLE_THRESHOLD_MS = 20_000;
 const envIdleThreshold = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || `${DEFAULT_IDLE_THRESHOLD_MS}`, 10);
@@ -640,6 +641,78 @@ app.patch('/api/agents/:name', async (req, res) => {
     res.json(data);
   } catch (e) {
     res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.post('/api/agents/:name/offline', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  try {
+    const r = await fetch(`http://127.0.0.1:8090/api/agents/${encodeURIComponent(name)}/offline`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json();
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.post('/api/agents/:name/down', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  if (!existsSync(AGENT_DOWN_BIN)) {
+    return res.status(500).json({ ok: false, error: 'agent-down binary missing', path: AGENT_DOWN_BIN });
+  }
+  const toTail = (text, lines) => String(text || '').trim().split('\n').slice(-lines).join('\n');
+  try {
+    const output = execFileSync(AGENT_DOWN_BIN, [name, '--kill'], {
+      encoding: 'utf-8',
+      timeout: 120000,
+      maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, NO_PROXY: '*' },
+    });
+    const outputTail = toTail(output, 20);
+    return res.json({ ok: true, action: 'agent-down-kill', outputTail });
+  } catch (e) {
+    const stdout = String(e?.stdout || '');
+    const stderr = String(e?.stderr || e?.message || '');
+    const detail = toTail(`${stdout}\n${stderr}`, 40);
+    try {
+      execFileSync('tmux', ['kill-session', '-t', name], {
+        encoding: 'utf-8',
+        timeout: 5000,
+        stdio: 'pipe',
+      });
+    } catch {
+      // Best effort fallback: proceed to mark offline even when session already missing.
+    }
+    try {
+      const r = await fetch(`http://127.0.0.1:8090/api/agents/${encodeURIComponent(name)}/offline`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reason: 'manual-down:web-kill',
+          clearTmux: true,
+          manualDown: true,
+        }),
+      });
+      const data = await r.json().catch(() => null);
+      if (!r.ok || !data?.ok) {
+        const apiErr = (data && (data.error || data.detail)) || `backend status ${r.status}`;
+        return res.status(500).json({ ok: false, error: 'agent-down failed', detail, fallbackError: String(apiErr) });
+      }
+      return res.json({ ok: true, action: 'agent-down-kill-fallback', outputTail: detail });
+    } catch (fallbackErr) {
+      return res.status(500).json({
+        ok: false,
+        error: 'agent-down failed',
+        detail,
+        fallbackError: String(fallbackErr?.message || fallbackErr),
+      });
+    }
   }
 });
 
@@ -1366,7 +1439,18 @@ body.page-hidden #reminder-panel.has-items{
   padding:2px 6px;width:100%;outline:none;
 }
 #agent-info .ai-identity-input:focus{border-color:rgba(0,240,255,0.5)}
-.ai-delete-row{margin-top:8px;text-align:right}
+.ai-action-row{margin-top:8px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.ai-down-btn{
+  background:none;border:1px solid rgba(251,191,36,0.35);border-radius:3px;
+  color:rgba(251,191,36,0.8);cursor:pointer;font-size:9px;padding:2px 8px;font-family:inherit;
+}
+.ai-down-btn:hover{border-color:rgba(251,191,36,0.65);color:#fbbf24}
+.ai-down-btn.confirm{
+  background:rgba(251,191,36,0.15);border-color:rgba(251,191,36,0.9);color:#fbbf24;
+}
+.ai-down-btn.downing{
+  opacity:0.5;pointer-events:none;
+}
 .ai-delete-btn{
   background:none;border:1px solid rgba(255,80,80,0.25);border-radius:3px;
   color:rgba(255,80,80,0.5);cursor:pointer;font-size:9px;padding:2px 8px;font-family:inherit;
@@ -2045,8 +2129,11 @@ body.page-hidden #reminder-panel.has-items{
         parts.push('</div>');
       }
       parts.push('</div>');
-      // Delete button with two-step confirmation
-      parts.push('<div class="ai-delete-row"><button class="ai-delete-btn" id="ai-delete-btn" onclick="deleteAgent()">Delete Agent</button></div>');
+      // Agent down + permanent delete actions (both with two-step confirmation)
+      parts.push('<div class="ai-action-row">'
+        + '<button class="ai-down-btn" id="ai-down-btn" onclick="downAgent()">Agent Down</button>'
+        + '<button class="ai-delete-btn" id="ai-delete-btn" onclick="deleteAgent()">Delete Agent</button>'
+        + '</div>');
       if (requestSeq !== agentDetailRequestSeq) return;
       if (!monitoredAgent || monitoredAgent.name !== targetName) return;
       agentInfoEl.innerHTML = parts.join('');
@@ -2105,16 +2192,73 @@ body.page-hidden #reminder-panel.has-items{
     fetchAgentDetail(monitoredAgent.name, { preserveVisible: true });
   };
 
+  let downConfirmTimer = null;
   let deleteConfirmTimer = null;
-  function showDeleteToast(name) {
+
+  function showActionToast(text) {
     const toast = document.getElementById('delete-toast');
-    toast.textContent = 'DELETED: ' + name;
+    toast.textContent = text;
     toast.classList.add('show');
     setTimeout(() => toast.classList.remove('show'), 1500);
   }
+
+  function clearMonitoredAgentView() {
+    monitoredAgent = null;
+    monitorPaused = true;
+    monitorLabelEl.textContent = '';
+    monitorEmptyEl.style.display = '';
+    terminalWrapEl.classList.add('hidden');
+    btnPause.style.display = 'none';
+    if (btnSpeed) btnSpeed.style.display = 'none';
+    btnScrollBottom.style.display = 'none';
+    agentInfoEl.classList.remove('visible');
+    agentInfoEl.innerHTML = '';
+    fetchAgentStatus();
+  }
+
+  window.downAgent = function() {
+    if (!monitoredAgent) return;
+    const btn = document.getElementById('ai-down-btn');
+    const deleteBtn = document.getElementById('ai-delete-btn');
+    if (!btn) return;
+    if (btn.classList.contains('confirm')) {
+      clearTimeout(downConfirmTimer);
+      btn.classList.add('downing');
+      btn.textContent = 'Marking Down...';
+      const name = monitoredAgent.name;
+      fetch('/api/agents/' + encodeURIComponent(name) + '/down', { method: 'POST' })
+        .then(async (r) => {
+          const d = await r.json().catch(() => null);
+          if (!r.ok || !d || !d.ok) throw new Error((d && (d.detail || d.error)) || 'down failed');
+          if (d && d.ok) {
+            showActionToast('AGENT DOWN: ' + name);
+            clearMonitoredAgentView();
+          } else {
+            throw new Error('down failed');
+          }
+        }).catch(() => {
+          btn.classList.remove('downing', 'confirm');
+          btn.textContent = 'Agent Down';
+        });
+    } else {
+      if (deleteBtn) {
+        clearTimeout(deleteConfirmTimer);
+        deleteBtn.classList.remove('confirm');
+        if (!deleteBtn.classList.contains('deleting')) deleteBtn.textContent = 'Delete Agent';
+      }
+      btn.classList.add('confirm');
+      btn.textContent = 'Confirm Agent Down?';
+      downConfirmTimer = setTimeout(() => {
+        btn.classList.remove('confirm');
+        btn.textContent = 'Agent Down';
+      }, 3000);
+    }
+  };
+
   window.deleteAgent = function() {
     if (!monitoredAgent) return;
     const btn = document.getElementById('ai-delete-btn');
+    const downBtn = document.getElementById('ai-down-btn');
     if (!btn) return;
     if (btn.classList.contains('confirm')) {
       // Second click — actually delete
@@ -2126,24 +2270,19 @@ body.page-hidden #reminder-panel.has-items{
         .then(r => r.json())
         .then(d => {
           if (d.ok) {
-            showDeleteToast(name);
-            monitoredAgent = null;
-            monitorPaused = true;
-            monitorLabelEl.textContent = '';
-            monitorEmptyEl.style.display = '';
-            terminalWrapEl.classList.add('hidden');
-            btnPause.style.display = 'none';
-            if (btnSpeed) btnSpeed.style.display = 'none';
-            btnScrollBottom.style.display = 'none';
-            agentInfoEl.classList.remove('visible');
-            agentInfoEl.innerHTML = '';
-            fetchAgentStatus();
+            showActionToast('DELETED: ' + name);
+            clearMonitoredAgentView();
           }
         }).catch(() => {
           btn.classList.remove('deleting', 'confirm');
           btn.textContent = 'Delete Agent';
         });
     } else {
+      if (downBtn) {
+        clearTimeout(downConfirmTimer);
+        downBtn.classList.remove('confirm');
+        if (!downBtn.classList.contains('downing')) downBtn.textContent = 'Agent Down';
+      }
       // First click — show confirmation
       btn.classList.add('confirm');
       btn.textContent = 'Confirm Delete?';
