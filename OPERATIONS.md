@@ -104,3 +104,13 @@ Preview mode:
 ```bash
 agentchat maintain --dry-run
 ```
+
+### Sync skill links (~/.codex + ~/.claude)
+```bash
+agentchat sync-skills
+```
+
+Check only:
+```bash
+agentchat sync-skills --check
+```

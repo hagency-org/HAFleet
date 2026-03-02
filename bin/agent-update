@@ -115,6 +115,17 @@ find_maintain_cli() {
   return 1
 }
 
+find_skill_sync_cli() {
+  local c
+  for c in "$REPO_DIR/bin/agentchat-sync-skills" "$BASE_DIR/bin/agentchat-sync-skills" "$SCRIPT_DIR/agentchat-sync-skills"; do
+    if [ -x "$c" ]; then
+      echo "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
 pause_remote_relay_now() {
   local service_cli="$1"
   echo "Pausing remote relay before update (reduce heartbeat noise)..."
@@ -131,6 +142,19 @@ run_post_update_maintenance() {
   echo "Running post-update maintenance (log rotation + tmp cleanup)..."
   if ! "$maintain_cli"; then
     echo "Warning: post-update maintenance failed; continuing update flow." >&2
+  fi
+}
+
+run_post_update_skill_sync() {
+  local sync_cli
+  sync_cli="$(find_skill_sync_cli || true)"
+  if [ -z "$sync_cli" ]; then
+    echo "Skill sync command not found; skipping ~/.codex and ~/.claude link sync."
+    return 0
+  fi
+  echo "Syncing skill links (~/.codex + ~/.claude)..."
+  if ! "$sync_cli"; then
+    echo "Warning: skill link sync failed; continuing update flow." >&2
   fi
 }
 
@@ -243,6 +267,7 @@ else
 fi
 cd "$REPO_DIR"
 run_post_update_maintenance
+run_post_update_skill_sync
 
 echo ""
 if [ "$UPDATE_AND_PAUSE" = true ]; then
