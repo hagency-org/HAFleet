@@ -9,6 +9,7 @@ Most files here are managed by root-level generators/sync checks:
 ## Included
 
 - `bin/agentchat`
+- `bin/agent-chat` (deprecated alias)
 - `push-relay.js`
 - `mcp-server.js`
 - `lib/eventsource-mini.js`
