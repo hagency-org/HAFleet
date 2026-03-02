@@ -52,6 +52,20 @@ AGENT_SCOPE_MEMORY_SWAP_MAX_MB_RAW="${AGENT_SCOPE_MEMORY_SWAP_MAX_MB:-0}"
 AUTH_HEADER=""
 [ -n "$API_TOKEN" ] && AUTH_HEADER="Authorization: Bearer $API_TOKEN"
 
+usage() {
+  cat <<'USAGE'
+Usage: agent-up <name> [path] [claude|codex] [--fresh] [--attach] [--model <model>] [--extra-args "<args>"]
+
+  name         tmux session name / agent name
+  path         working directory (optional if previously saved)
+  type         claude (default) or codex
+  --fresh      ignore saved resume ID, start a new session
+  --attach     attach to the session after creating it
+  --model      model name passed to claude/codex at startup
+  --extra-args additional raw startup args passed to claude/codex
+USAGE
+}
+
 api_curl() {
   if [ -n "$AUTH_HEADER" ]; then
     curl --noproxy '*' -s -H "$AUTH_HEADER" "$@"
@@ -245,63 +259,69 @@ PY
   fi
 }
 
-# ── Check for updates ────────────────────────────────────────────────
 REPO_DIR="$(dirname "$BASE_DIR")"
-if [ -d "$REPO_DIR/.git" ]; then
-  echo "Checking updates before agent-up..."
-  (
-    cd "$REPO_DIR" || exit 0
-    if ! git fetch origin --quiet 2>/dev/null; then
-      echo "Warning: update check failed (git fetch origin). Continuing agent-up." >&2
-      exit 0
-    fi
-    LOCAL=$(git rev-parse HEAD 2>/dev/null | tr -d '[:space:]' || true)
-    TRACK_REF=""
-    REMOTE=$(git rev-parse origin/main 2>/dev/null || true)
-    if [ -n "$REMOTE" ]; then
-      TRACK_REF="origin/main"
-    else
-      REMOTE=$(git rev-parse origin/master 2>/dev/null || true)
-      [ -n "$REMOTE" ] && TRACK_REF="origin/master"
-    fi
-    REMOTE=$(echo "$REMOTE" | tr -d '[:space:]')
-    if [ -z "$LOCAL" ] || [ -z "$REMOTE" ] || [ -z "$TRACK_REF" ]; then
-      echo "Warning: update check could not resolve repository refs. Continuing agent-up." >&2
-      exit 0
-    fi
-    if [ "$LOCAL" = "$REMOTE" ]; then
-      echo "Update check: up to date."
-      exit 0
-    fi
-    BEHIND=$(git rev-list --count "HEAD..$TRACK_REF" 2>/dev/null || echo "0")
-    BEHIND=$(echo "$BEHIND" | tr -d '[:space:]')
-    if [ "$BEHIND" -gt 0 ] 2>/dev/null; then
-      echo "Updates available ($BEHIND commits behind). Run 'agent-update' to install."
-    else
-      AHEAD=$(git rev-list --count "$TRACK_REF..HEAD" 2>/dev/null || echo "0")
-      AHEAD=$(echo "$AHEAD" | tr -d '[:space:]')
-      if [ "$AHEAD" -gt 0 ] 2>/dev/null; then
-        echo "Update check: local branch is ahead of $TRACK_REF ($AHEAD commits)."
-      else
-        echo "Update check: local and $TRACK_REF diverged."
+run_update_check() {
+  if [ -d "$REPO_DIR/.git" ]; then
+    echo "Checking updates before agent-up..."
+    (
+      cd "$REPO_DIR" || exit 0
+      if ! git fetch origin --quiet 2>/dev/null; then
+        echo "Warning: update check failed (git fetch origin). Continuing agent-up." >&2
+        exit 0
       fi
-    fi
-  )
-else
-  echo "Update check: skipped (no git repository at $REPO_DIR)."
-fi
+      LOCAL=$(git rev-parse HEAD 2>/dev/null | tr -d '[:space:]' || true)
+      TRACK_REF=""
+      REMOTE=$(git rev-parse origin/main 2>/dev/null || true)
+      if [ -n "$REMOTE" ]; then
+        TRACK_REF="origin/main"
+      else
+        REMOTE=$(git rev-parse origin/master 2>/dev/null || true)
+        [ -n "$REMOTE" ] && TRACK_REF="origin/master"
+      fi
+      REMOTE=$(echo "$REMOTE" | tr -d '[:space:]')
+      if [ -z "$LOCAL" ] || [ -z "$REMOTE" ] || [ -z "$TRACK_REF" ]; then
+        echo "Warning: update check could not resolve repository refs. Continuing agent-up." >&2
+        exit 0
+      fi
+      if [ "$LOCAL" = "$REMOTE" ]; then
+        echo "Update check: up to date."
+        exit 0
+      fi
+      BEHIND=$(git rev-list --count "HEAD..$TRACK_REF" 2>/dev/null || echo "0")
+      BEHIND=$(echo "$BEHIND" | tr -d '[:space:]')
+      if [ "$BEHIND" -gt 0 ] 2>/dev/null; then
+        echo "Updates available ($BEHIND commits behind). Run 'agent-update' to install."
+      else
+        AHEAD=$(git rev-list --count "$TRACK_REF..HEAD" 2>/dev/null || echo "0")
+        AHEAD=$(echo "$AHEAD" | tr -d '[:space:]')
+        if [ "$AHEAD" -gt 0 ] 2>/dev/null; then
+          echo "Update check: local branch is ahead of $TRACK_REF ($AHEAD commits)."
+        else
+          echo "Update check: local and $TRACK_REF diverged."
+        fi
+      fi
+    )
+  else
+    echo "Update check: skipped (no git repository at $REPO_DIR)."
+  fi
+}
 
 # ── Parse args ────────────────────────────────────────────────────────
+for arg in "$@"; do
+  if [ "$arg" = "-h" ] || [ "$arg" = "--help" ]; then
+    usage
+    exit 0
+  fi
+done
+
 if [ $# -lt 1 ]; then
-  echo "Usage: agent-up <name> [path] [claude|codex] [--fresh] [--attach] [--model <model>] [--extra-args \"<args>\"]"
-  echo ""
-  echo "  name     tmux session name / agent name"
-  echo "  path     working directory (optional if previously saved)"
-  echo "  type     claude (default) or codex"
-  echo "  --fresh  ignore saved resume ID, start a new session"
-  echo "  --attach attach to the session after creating it"
-  echo "  --model  model name passed to claude/codex at startup"
-  echo "  --extra-args additional raw startup args passed to claude/codex"
+  usage >&2
+  exit 1
+fi
+
+if [[ "$1" == -* ]]; then
+  echo "Error: missing agent name." >&2
+  usage >&2
   exit 1
 fi
 
@@ -412,6 +432,8 @@ if [ "$TYPE" != "claude" ] && [ "$TYPE" != "codex" ]; then
   echo "Error: type must be 'claude' or 'codex', got '$TYPE'" >&2
   exit 1
 fi
+
+run_update_check
 
 claude_project_dir_for_path() {
   local p="$1"

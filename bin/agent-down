@@ -45,6 +45,15 @@ SERVER_ID="${AGENT_CHAT_SERVER:-}"
 AUTH_HEADER=""
 [ -n "$API_TOKEN" ] && AUTH_HEADER="Authorization: Bearer $API_TOKEN"
 
+usage() {
+  cat <<'USAGE'
+Usage: agent-down <name> [--kill] [--timeout <seconds>]
+
+  --kill      archive and force-kill tmux session
+  --timeout   wait timeout before refusing graceful shutdown
+USAGE
+}
+
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -293,8 +302,21 @@ PY
   esac
 }
 
+for arg in "$@"; do
+  if [ "$arg" = "-h" ] || [ "$arg" = "--help" ]; then
+    usage
+    exit 0
+  fi
+done
+
 if [ $# -lt 1 ]; then
-  echo "Usage: agent-down <name> [--kill] [--timeout <seconds>]"
+  usage >&2
+  exit 1
+fi
+
+if [[ "$1" == -* ]]; then
+  echo "Error: missing agent name." >&2
+  usage >&2
   exit 1
 fi
 
@@ -331,7 +353,7 @@ while [ $# -gt 0 ]; do
       ;;
     *)
       echo "Error: unrecognized argument '$1'" >&2
-      echo "Usage: agent-down <name> [--kill] [--timeout <seconds>]" >&2
+      usage >&2
       exit 1
       ;;
   esac
