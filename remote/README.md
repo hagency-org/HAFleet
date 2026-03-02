@@ -10,6 +10,7 @@ Most files here are managed by root-level generators/sync checks:
 
 - `bin/agentchat`
 - `bin/agentchat-sync-skills`
+- `bin/agentchat-prune-agents`
 - `bin/agent-chat` (deprecated alias)
 - `push-relay.js`
 - `mcp-server.js`
@@ -37,6 +38,7 @@ Examples:
 - `agentchat audit`
 - `agentchat maintain`
 - `agentchat sync-skills`
+- `agentchat prune-agents --older-than-days 7 --apply`
 
 ## Quick Start
 

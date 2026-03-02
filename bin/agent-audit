@@ -118,6 +118,7 @@ run_check "Mirror consistency" bash scripts/check-remote-sync.sh
 run_check "Managed remote package snapshot" bash scripts/build-remote-package.sh --check
 run_check "Shell syntax" check_shell_syntax
 run_check "JS syntax" check_js_syntax
+run_check "Dependency isolation boundary" bash scripts/check-dep-isolation.sh
 
 if [ "$STRICT_DEPS" = true ]; then
   run_check "Dependency security gate (strict)" bash scripts/audit-deps.sh --strict

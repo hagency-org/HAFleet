@@ -30,6 +30,7 @@ Core:
 Ops:
   audit          Run one-shot audit gate
   maintain       Rotate logs and prune stale tmp files
+  prune-agents   Prune stale offline agent records from backend
   sync-skills    Sync ~/.codex and ~/.claude skill links to repo template
   reminder       Schedule/check reminders
 
@@ -67,6 +68,7 @@ case "$cmd" in
   verify-remote|verify) dispatch "verify-remote" "$@" ;;
   audit) dispatch "agent-audit" "$@" ;;
   maintain) dispatch "agent-maintain" "$@" ;;
+  prune-agents) dispatch "agentchat-prune-agents" "$@" ;;
   sync-skills) dispatch "agentchat-sync-skills" "$@" ;;
   reminder|self-time-reminder) dispatch "self-time-reminder" "$@" ;;
   cli|admin) dispatch "agent-chat-cli" "$@" ;;

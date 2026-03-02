@@ -114,3 +114,9 @@ Check only:
 ```bash
 agentchat sync-skills --check
 ```
+
+### Prune stale offline agent records
+```bash
+agentchat prune-agents --older-than-days 7
+agentchat prune-agents --older-than-days 7 --apply
+```

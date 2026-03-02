@@ -7,6 +7,7 @@ This project runs `npm audit --omit=dev` via `npm run audit:deps`.
 - Block any newly introduced advisory ID.
 - Temporarily allow only the known-unfixable advisories below.
 - Use `npm run audit:deps:strict` when validating a migration branch.
+- Enforce dependency isolation boundary with `bash scripts/check-dep-isolation.sh`.
 
 ## Temporarily allowed advisories
 
@@ -28,9 +29,11 @@ These advisories currently come from `matrix-bot-sdk@0.8.0` transitive `request`
 1. Track `matrix-bot-sdk` updates for removal of `request` chain.
 2. If no upstream timeline, scope migration of `bridge-matrix.js` to a maintained Matrix client stack.
 3. Remove allowlist entries immediately after migration or upstream fix.
+4. Keep vulnerable chain isolated to `bridge-matrix.js` only (no direct `request` usage in other runtime modules).
 
 ## Operator commands
 
 - Default gate: `npm run audit:deps`
 - Strict gate: `npm run audit:deps:strict`
 - Full report: `npm audit --omit=dev`
+- Isolation check: `bash scripts/check-dep-isolation.sh`

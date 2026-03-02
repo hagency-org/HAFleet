@@ -87,6 +87,7 @@ agentchat service <pause|resume|restart|status> [--profile local|remote|all]
 agentchat verify-remote [--agent <name>]
 agentchat audit
 agentchat maintain [--dry-run]
+agentchat prune-agents [--older-than-days <n>] [--apply]
 agentchat sync-skills [--check]
 ```
 
