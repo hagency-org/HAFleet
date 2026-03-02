@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+_resolve_script_dir() {
+  local src="$0"
+  while [ -L "$src" ]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+SCRIPT_DIR="$(_resolve_script_dir)"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+QUIET=false
+STRICT_DEPS=false
+FAILURES=0
+
+usage() {
+  cat <<'USAGE'
+Usage: agent-audit [options]
+
+One-shot local audit:
+- root/remote mirror consistency
+- managed remote package snapshot consistency
+- shell/js syntax checks
+- dependency security gate
+- maintenance preview (rotation/prune candidates)
+
+Options:
+  --strict-deps   Use strict dependency audit mode (fails on any vulnerability)
+  --quiet         Reduce output
+  -h, --help      Show help
+USAGE
+}
+
+log() {
+  if [ "$QUIET" = false ]; then
+    echo "$@"
+  fi
+}
+
+run_check() {
+  local title="$1"
+  shift
+  log ""
+  log "== $title =="
+  if "$@"; then
+    log "[PASS] $title"
+  else
+    echo "[FAIL] $title" >&2
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+check_shell_syntax() {
+  local f
+  local failed=0
+  while IFS= read -r f; do
+    if ! bash -n "$f"; then
+      echo "shell syntax error: $f" >&2
+      failed=1
+    fi
+  done < <(find "$BASE_DIR/bin" "$BASE_DIR/remote/bin" "$BASE_DIR/scripts" -type f -print | sort)
+  return $failed
+}
+
+check_js_syntax() {
+  local f
+  local failed=0
+  while IFS= read -r f; do
+    if ! node --check "$f" >/dev/null; then
+      echo "js syntax error: $f" >&2
+      failed=1
+    fi
+  done < <(find "$BASE_DIR" \
+    -path "$BASE_DIR/node_modules" -prune -o \
+    -path "$BASE_DIR/remote-dist" -prune -o \
+    -path "$BASE_DIR/.git" -prune -o \
+    -type f -name '*.js' -print | sort)
+  return $failed
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --strict-deps)
+      STRICT_DEPS=true
+      ;;
+    --quiet)
+      QUIET=true
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+cd "$BASE_DIR"
+
+run_check "Mirror consistency" bash scripts/check-remote-sync.sh
+run_check "Managed remote package snapshot" bash scripts/build-remote-package.sh --check
+run_check "Shell syntax" check_shell_syntax
+run_check "JS syntax" check_js_syntax
+
+if [ "$STRICT_DEPS" = true ]; then
+  run_check "Dependency security gate (strict)" bash scripts/audit-deps.sh --strict
+else
+  run_check "Dependency security gate" bash scripts/audit-deps.sh
+fi
+
+if [ -x "$BASE_DIR/bin/agent-maintain" ]; then
+  run_check "Maintenance preview" "$BASE_DIR/bin/agent-maintain" --dry-run
+fi
+
+log ""
+if [ "$FAILURES" -gt 0 ]; then
+  echo "Audit failed: $FAILURES check(s) failed." >&2
+  exit 1
+fi
+
+echo "Audit passed: all checks are green."

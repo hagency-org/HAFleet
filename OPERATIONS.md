@@ -78,3 +78,26 @@ After pausing/downing, verify all three:
 3. backend offline (`/api/servers` shows `online=false`)
 
 If any of the three fails, treat shutdown as incomplete.
+
+## 7) Debt Hygiene Commands
+
+### Full one-shot audit
+```bash
+agent-audit
+```
+
+Checks include:
+- root/remote mirror consistency
+- shell/js syntax
+- dependency security gate (`npm run audit:deps`)
+- maintenance dry-run preview
+
+### Rotate logs + prune stale tmp data
+```bash
+agent-maintain
+```
+
+Preview mode:
+```bash
+agent-maintain --dry-run
+```

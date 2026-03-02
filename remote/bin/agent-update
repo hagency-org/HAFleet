@@ -96,10 +96,34 @@ find_service_cli() {
   return 1
 }
 
+find_maintain_cli() {
+  local c
+  for c in "$REPO_DIR/bin/agent-maintain" "$BASE_DIR/bin/agent-maintain" "$SCRIPT_DIR/agent-maintain"; do
+    if [ -x "$c" ]; then
+      echo "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
 pause_remote_relay_now() {
   local service_cli="$1"
   echo "Pausing remote relay before update (reduce heartbeat noise)..."
   "$service_cli" pause --profile remote
+}
+
+run_post_update_maintenance() {
+  local maintain_cli
+  maintain_cli="$(find_maintain_cli || true)"
+  if [ -z "$maintain_cli" ]; then
+    echo "Maintenance command not found; skipping log/tmp cleanup."
+    return 0
+  fi
+  echo "Running post-update maintenance (log rotation + tmp cleanup)..."
+  if ! "$maintain_cli"; then
+    echo "Warning: post-update maintenance failed; continuing update flow." >&2
+  fi
 }
 
 if [ -n "$SERVICE_ACTION" ]; then
@@ -209,6 +233,8 @@ if [ "$UPDATE_AND_PAUSE" = true ]; then
 else
   bash install-remote.sh
 fi
+cd "$REPO_DIR"
+run_post_update_maintenance
 
 echo ""
 if [ "$UPDATE_AND_PAUSE" = true ]; then

@@ -5,9 +5,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 MIRROR_FILES=(
+  "bin/agent-audit"
   "bin/agent-chat-cli"
   "bin/agent-down"
   "bin/agent-ls"
+  "bin/agent-maintain"
   "bin/agent-send"
   "bin/agent-service"
   "bin/agent-up"

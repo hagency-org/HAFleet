@@ -15,6 +15,8 @@ Most files here are managed by root-level generators/sync checks:
 - `bin/agent-down`
 - `bin/agent-ls`
 - `bin/agent-send`
+- `bin/agent-maintain`
+- `bin/agent-audit`
 - `bin/agent-update`
 - `push-relay.service`
 - `.env.example`
