@@ -85,6 +85,23 @@ done
 
 cd "$REPO_DIR"
 
+find_service_cli() {
+  local c
+  for c in "$REPO_DIR/bin/agent-service" "$BASE_DIR/bin/agent-service" "$SCRIPT_DIR/agent-service"; do
+    if [ -x "$c" ]; then
+      echo "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+pause_remote_relay_now() {
+  local service_cli="$1"
+  echo "Pausing remote relay before update (reduce heartbeat noise)..."
+  "$service_cli" pause --profile remote
+}
+
 if [ -n "$SERVICE_ACTION" ]; then
   if [ "$SERVICE_ACTION" = "pause" ]; then
     UPDATE_AND_PAUSE=true
@@ -97,13 +114,7 @@ if [ "$CHECK_ONLY" = true ] && [ -n "$SERVICE_ACTION" ]; then
 fi
 
 if [ -n "$SERVICE_ACTION" ] && [ "$UPDATE_AND_PAUSE" = false ]; then
-  SERVICE_CLI=""
-  for c in "$REPO_DIR/bin/agent-service" "$BASE_DIR/bin/agent-service" "$SCRIPT_DIR/agent-service"; do
-    if [ -x "$c" ]; then
-      SERVICE_CLI="$c"
-      break
-    fi
-  done
+  SERVICE_CLI="$(find_service_cli || true)"
   if [ -z "$SERVICE_CLI" ]; then
     echo "Error: agent-service CLI not found. Expected in $REPO_DIR/bin/agent-service" >&2
     exit 1
@@ -117,13 +128,7 @@ fi
 if [ ! -d ".git" ]; then
   if [ "$UPDATE_AND_PAUSE" = true ]; then
     echo "Warning: $REPO_DIR is not a git repository; falling back to pause-only." >&2
-    SERVICE_CLI=""
-    for c in "$REPO_DIR/bin/agent-service" "$BASE_DIR/bin/agent-service" "$SCRIPT_DIR/agent-service"; do
-      if [ -x "$c" ]; then
-        SERVICE_CLI="$c"
-        break
-      fi
-    done
+    SERVICE_CLI="$(find_service_cli || true)"
     if [ -z "$SERVICE_CLI" ]; then
       echo "Error: agent-service CLI not found. Expected in $REPO_DIR/bin/agent-service" >&2
       exit 1
@@ -133,6 +138,16 @@ if [ ! -d ".git" ]; then
   fi
   echo "Error: $REPO_DIR is not a git repository" >&2
   exit 1
+fi
+
+# For pause-maintenance mode, stop relay first to avoid noisy heartbeat flips during update.
+if [ "$UPDATE_AND_PAUSE" = true ]; then
+  SERVICE_CLI="$(find_service_cli || true)"
+  if [ -z "$SERVICE_CLI" ]; then
+    echo "Error: agent-service CLI not found. Expected in $REPO_DIR/bin/agent-service" >&2
+    exit 1
+  fi
+  pause_remote_relay_now "$SERVICE_CLI"
 fi
 
 # Fetch latest
@@ -197,13 +212,7 @@ fi
 
 echo ""
 if [ "$UPDATE_AND_PAUSE" = true ]; then
-  SERVICE_CLI=""
-  for c in "$REPO_DIR/bin/agent-service" "$BASE_DIR/bin/agent-service" "$SCRIPT_DIR/agent-service"; do
-    if [ -x "$c" ]; then
-      SERVICE_CLI="$c"
-      break
-    fi
-  done
+  SERVICE_CLI="$(find_service_cli || true)"
   if [ -z "$SERVICE_CLI" ]; then
     echo "Error: agent-service CLI not found after reinstall." >&2
     exit 1
