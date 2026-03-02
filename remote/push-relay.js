@@ -15,12 +15,14 @@ const baseDir = path.dirname(fileURLToPath(import.meta.url));
 const localCore = path.join(baseDir, 'lib', 'push-relay-core.js');
 const repoCore = path.join(baseDir, '..', 'lib', 'push-relay-core.js');
 
-let corePath = repoCore;
+// Prefer repo root core first so latest local fixes are used after `agent-update`.
+// Fall back to bundled remote/lib only for standalone remote package usage.
+let corePath = localCore;
 try {
-  accessSync(localCore);
-  corePath = localCore;
-} catch {
+  accessSync(repoCore);
   corePath = repoCore;
+} catch {
+  corePath = localCore;
 }
 
 await import(pathToFileURL(path.resolve(corePath)).href);

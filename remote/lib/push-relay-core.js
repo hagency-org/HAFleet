@@ -551,6 +551,12 @@ function evaluateAgentRouting(agentName) {
   return { ok: agentServer === SERVER_ID, reason: agentServer === SERVER_ID ? 'ok' : 'server-mismatch', server: agentServer, target };
 }
 
+function shouldHandleAgent(agentName) {
+  if (!agentName || !localAgents.has(agentName)) return false;
+  const route = evaluateAgentRouting(agentName);
+  return route.ok === true;
+}
+
 function messageRecipients(msg) {
   const recipients = new Set();
   if (msg.to && msg.to !== msg.from) recipients.add(msg.to);
@@ -636,6 +642,16 @@ async function main() {
   connectSse();
 }
 
+let bootstrapRetryTimer = null;
+function scheduleBootstrapRetry(reason = 'unknown') {
+  if (bootstrapRetryTimer) return;
+  console.error(`[push-relay] bootstrap failed (${reason}); retrying in ${RECONNECT_MS}ms`);
+  bootstrapRetryTimer = setTimeout(() => {
+    bootstrapRetryTimer = null;
+    main().catch((e) => scheduleBootstrapRetry(e?.message || 'bootstrap-error'));
+  }, RECONNECT_MS);
+}
+
 async function gracefulExit(signal) {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   console.log(`[push-relay] received ${signal}, marking server offline`);
@@ -645,8 +661,11 @@ async function gracefulExit(signal) {
 
 process.on('SIGTERM', () => { gracefulExit('SIGTERM'); });
 process.on('SIGINT', () => { gracefulExit('SIGINT'); });
-
-main().catch((e) => {
-  console.error(`[push-relay] fatal: ${e.message}`);
-  process.exit(1);
+process.on('unhandledRejection', (reason) => {
+  const msg = reason && typeof reason === 'object' && 'message' in reason
+    ? reason.message
+    : String(reason);
+  console.error(`[push-relay] unhandled rejection: ${msg}`);
 });
+
+main().catch((e) => scheduleBootstrapRetry(e?.message || 'startup-error'));
