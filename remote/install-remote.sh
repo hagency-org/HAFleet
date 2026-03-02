@@ -47,6 +47,8 @@ launchd_bootstrap_service() {
   local tried=""
   local d out rc
 
+  # First clear any existing instance across all candidate domains to avoid
+  # duplicate launchd jobs (e.g. one in gui/* and one in user/*).
   for d in "${domains[@]}"; do
     [ -n "$d" ] || continue
     case ":$tried:" in
@@ -54,6 +56,15 @@ launchd_bootstrap_service() {
     esac
     tried="${tried}:$d"
     launchctl bootout "$d/$SERVICE_NAME" >/dev/null 2>&1 || true
+  done
+  tried=""
+
+  for d in "${domains[@]}"; do
+    [ -n "$d" ] || continue
+    case ":$tried:" in
+      *":$d:"*) continue ;;
+    esac
+    tried="${tried}:$d"
     out="$(launchctl bootstrap "$d" "$plist_path" 2>&1)" && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
       launchctl enable "$d/$SERVICE_NAME" >/dev/null 2>&1 || true
