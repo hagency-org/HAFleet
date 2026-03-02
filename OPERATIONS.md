@@ -3,11 +3,14 @@
 This runbook replaces `agent-doctor` style tooling.  
 Use these commands directly during incident response.
 
+Primary CLI is now `agentchat`.  
+Legacy commands (`agent-update`, `agent-audit`, `agent-up`, etc.) are deprecated wrappers and still work for compatibility.
+
 ## 1) Remote Service Lifecycle
 
 ### Update and keep relay paused (maintenance mode)
 ```bash
-agent-update --pause-services
+agentchat update --pause-services
 ```
 
 Expected:
@@ -17,12 +20,12 @@ Expected:
 
 ### Resume relay
 ```bash
-agent-update --resume-services
+agentchat update --resume-services
 ```
 
 ### Check remote relay service status
 ```bash
-agent-update --service-status
+agentchat update --service-status
 ```
 
 ## 2) Verify Backend State
@@ -73,7 +76,7 @@ When an agent comes back online, the catch-up notification now includes:
 ## 6) Shutdown Audit Checklist
 
 After pausing/downing, verify all three:
-1. service stopped (`agent-update --service-status`)
+1. service stopped (`agentchat update --service-status`)
 2. no relay process (`pgrep -af "push-relay\\.js"`)
 3. backend offline (`/api/servers` shows `online=false`)
 
@@ -83,7 +86,7 @@ If any of the three fails, treat shutdown as incomplete.
 
 ### Full one-shot audit
 ```bash
-agent-audit
+agentchat audit
 ```
 
 Checks include:
@@ -94,10 +97,10 @@ Checks include:
 
 ### Rotate logs + prune stale tmp data
 ```bash
-agent-maintain
+agentchat maintain
 ```
 
 Preview mode:
 ```bash
-agent-maintain --dry-run
+agentchat maintain --dry-run
 ```

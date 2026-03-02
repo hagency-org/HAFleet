@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+
+# Deprecated legacy entrypoint: forward to unified 'agentchat'.
+if [ "${AGENTCHAT_INTERNAL_DISPATCH:-0}" != "1" ]; then
+  _ac_legacy_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _ac_legacy_name="$(basename "$0")"
+  echo "[DEPRECATED] ${_ac_legacy_name} is deprecated. Use: agentchat audit ..." >&2
+  exec "${_ac_legacy_dir}/agentchat" "audit" "$@"
+fi
 set -euo pipefail
 
 _resolve_script_dir() {

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+_resolve_script_dir() {
+  local src="$0"
+  while [ -L "$src" ]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+SCRIPT_DIR="$(_resolve_script_dir)"
+
+usage() {
+  cat <<'USAGE'
+Usage: agentchat <command> [args]
+
+Core:
+  up             Start or resume an agent
+  down           Stop an agent
+  ls             List agents
+  send           Send message to target pane
+  update         Update/install agent-chat runtime
+  service        Control local/remote services
+  verify-remote  Verify remote relay + MCP + agent status
+
+Ops:
+  audit          Run one-shot audit gate
+  maintain       Rotate logs and prune stale tmp files
+  reminder       Schedule/check reminders
+
+Admin:
+  cli            Backend/group/admin helper CLI
+  check-mcp      Check MCP wiring
+
+Compatibility notes:
+  Legacy commands (agent-up, agent-down, agent-send, ...) are deprecated and
+  will forward to this unified entrypoint.
+USAGE
+}
+
+dispatch() {
+  local target="$1"
+  shift
+  AGENTCHAT_INTERNAL_DISPATCH=1 exec "$SCRIPT_DIR/$target" "$@"
+}
+
+if [ $# -lt 1 ]; then
+  usage
+  exit 1
+fi
+
+cmd="$1"
+shift
+
+case "$cmd" in
+  up) dispatch "agent-up" "$@" ;;
+  down) dispatch "agent-down" "$@" ;;
+  ls|list) dispatch "agent-ls" "$@" ;;
+  send) dispatch "agent-send" "$@" ;;
+  update) dispatch "agent-update" "$@" ;;
+  service) dispatch "agent-service" "$@" ;;
+  verify-remote|verify) dispatch "verify-remote" "$@" ;;
+  audit) dispatch "agent-audit" "$@" ;;
+  maintain) dispatch "agent-maintain" "$@" ;;
+  reminder|self-time-reminder) dispatch "self-time-reminder" "$@" ;;
+  cli|admin) dispatch "agent-chat-cli" "$@" ;;
+  check-mcp) dispatch "check-mcp" "$@" ;;
+  -h|--help|help) usage ;;
+  *)
+    echo "Error: unknown command '$cmd'" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

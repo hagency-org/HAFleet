@@ -62,6 +62,7 @@ MANAGED_SPECS=(
   "remote/package.json:package.json"
   "remote/push-relay.js:push-relay.js"
   "remote/mcp-server.js:mcp-server.js"
+  "bin/agentchat:bin/agentchat"
   "bin/agent-chat-cli:bin/agent-chat-cli"
   "bin/agent-audit:bin/agent-audit"
   "bin/agent-down:bin/agent-down"

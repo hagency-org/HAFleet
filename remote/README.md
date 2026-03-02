@@ -8,6 +8,7 @@ Most files here are managed by root-level generators/sync checks:
 
 ## Included
 
+- `bin/agentchat`
 - `push-relay.js`
 - `mcp-server.js`
 - `lib/eventsource-mini.js`
@@ -22,6 +23,18 @@ Most files here are managed by root-level generators/sync checks:
 - `.env.example`
 - `install-remote.sh`
 
+## CLI Migration
+
+- New unified CLI: `agentchat`
+- Legacy commands (`agent-up`, `agent-down`, `agent-send`, etc.) are deprecated wrappers that forward to `agentchat` with a warning.
+
+Examples:
+- `agentchat up <name> <path> [claude|codex]`
+- `agentchat down <name>`
+- `agentchat update --pause-services`
+- `agentchat audit`
+- `agentchat maintain`
+
 ## Quick Start
 
 1. Copy `.env.example` to `.env` and fill values:
@@ -33,15 +46,15 @@ Most files here are managed by root-level generators/sync checks:
    - Do not run as root. The script uses `sudo` only for systemd.
 3. Verify relay:
    - `sudo systemctl status agent-chat-push-relay`
-   - `verify-remote`
+   - `agentchat verify-remote`
 4. Verify MCP injection:
    - `claude mcp list`
    - `codex mcp list`
    - Both should include `agent-chat` with command `node .../mcp-server.js`
 5. Launch remote agents:
-   - `agent-up <name> <path> [claude|codex]`
+   - `agentchat up <name> <path> [claude|codex]`
 6. Verify agent state after launch:
-   - `verify-remote --agent <name>`
+   - `agentchat verify-remote --agent <name>`
 
 ## Notes
 
@@ -59,10 +72,10 @@ Most files here are managed by root-level generators/sync checks:
 
 Use this sequence for remote rollout and acceptance:
 
-1. `agent-update`
-2. `verify-remote`
-3. `agent-up <name> <path> [claude|codex]`
-4. `verify-remote --agent <name>`
+1. `agentchat update`
+2. `agentchat verify-remote`
+3. `agentchat up <name> <path> [claude|codex]`
+4. `agentchat verify-remote --agent <name>`
 
 Pass criteria:
 - `agent-chat-push-relay` is `active`
