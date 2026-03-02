@@ -116,6 +116,7 @@ elif [ "$IS_MAC" = true ]; then
   need_cmd launchctl
   need_cmd plutil
 fi
+NODE_BIN="$(command -v node || true)"
 
 echo "[2/9] Preparing environment..."
 if [ ! -f "$ENV_FILE" ]; then
@@ -208,6 +209,19 @@ else
 #!/usr/bin/env bash
 set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\${PATH:-}"
+NODE_BIN="${NODE_BIN}"
+if [ -z "\${NODE_BIN:-}" ] || [ ! -x "\$NODE_BIN" ]; then
+  for _node in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node /opt/homebrew/opt/node/bin/node; do
+    if [ -x "\$_node" ]; then
+      NODE_BIN="\$_node"
+      break
+    fi
+  done
+fi
+if [ -z "\${NODE_BIN:-}" ] || [ ! -x "\$NODE_BIN" ]; then
+  echo "node binary not found for launchd runner" >&2
+  exit 127
+fi
 if [ -z "\${TMUX_BIN:-}" ]; then
   for _tmux in /opt/homebrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do
     if [ -x "\$_tmux" ]; then
@@ -220,7 +234,7 @@ set -a
 source "$ENV_FILE"
 set +a
 cd "$SCRIPT_DIR"
-exec /usr/bin/env node "$SCRIPT_DIR/push-relay.js"
+exec "\$NODE_BIN" "$SCRIPT_DIR/push-relay.js"
 EOF
   chmod 0755 "$LAUNCHD_RUNNER"
 
