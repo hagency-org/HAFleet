@@ -9,7 +9,9 @@
     "build:remote": "bash scripts/build-remote-package.sh",
     "build:remote:check": "bash scripts/build-remote-package.sh --check",
     "build:remote:sync": "bash scripts/build-remote-package.sh --sync-remote",
-    "check:remote-sync": "bash scripts/check-remote-sync.sh"
+    "check:remote-sync": "bash scripts/check-remote-sync.sh",
+    "audit:deps": "bash scripts/audit-deps.sh",
+    "audit:deps:strict": "bash scripts/audit-deps.sh --strict"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
