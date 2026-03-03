@@ -157,3 +157,25 @@ agentchat sync-skills --check
 agentchat prune-agents --older-than-days 7
 agentchat prune-agents --older-than-days 7 --apply
 ```
+
+## 8) Supervisor Focus Audit Checks
+
+Supervisor status:
+```bash
+curl -s http://127.0.0.1:8090/api/supervisor/status | jq
+```
+
+Supervisor summary:
+```bash
+curl -s http://127.0.0.1:8090/api/supervisor/agents | jq '.agents[] | {agent,lastStatus,consecutiveNegative,lastJudgedAt,lastWarningAt}'
+```
+
+One agent audit timeline:
+```bash
+curl -s "http://127.0.0.1:8090/api/supervisor/agents/<agent>?limit=60" | jq
+```
+
+Validate role/boundary/current docs coverage:
+```bash
+npm run audit:agent-docs -- --active
+```

@@ -75,6 +75,8 @@ Central API server. All data lives here.
 - Unexpected offline alerts
 - Tmux session missing detection
 - Compaction event tracking (codex context compacted, claude conversation compacted)
+- Supervisor focus audit (LLM-based): active agents evaluated every 30s with role/boundary/current-task context
+- Consecutive negative focus ratings trigger system warning events (web + Matrix info room only; no agent intervention)
 - System info logging
 
 **API Endpoints:**
@@ -115,6 +117,9 @@ Central API server. All data lives here.
 | POST | `/api/media/stage` | Stage file attachment (base64 upload) |
 | GET | `/api/media/fetch` | Fetch staged media |
 | POST | `/api/system/info` | Log system info event |
+| GET | `/api/supervisor/status` | Supervisor runtime/config status |
+| GET | `/api/supervisor/agents` | Supervisor summary for all audited agents |
+| GET | `/api/supervisor/agents/:name` | Supervisor detail timeline for one agent |
 
 ### server.js (port 8084)
 
@@ -128,6 +133,7 @@ Dashboard and message queue server.
 - **Force Send**: Bypass idle wait for immediate delivery (`POST /api/queue/:id/send`)
 - **Redirect Rules**: Message routing redirects between agents
 - **Remote Tmux**: SSH-based tmux capture for agents on remote servers
+- **Supervisor Audit UI**: Secondary per-agent page (`/agents/<name>/audit`) for focus evaluation timeline and doc-source visibility
 
 ### bridge-matrix.js
 
@@ -230,6 +236,7 @@ agentchat prune-agents [--older-than-days <n>] [--apply]
 | `agent-service` | Systemd service control (pause/resume/restart/status) |
 | `agentchat-sync-skills` | Sync skill symlinks into `~/.codex/` and `~/.claude/` |
 | `agentchat-prune-agents` | Prune stale offline agent records |
+| `scripts/audit-agent-docs.js` | Validate each agent workspace docs (`agents.md` role/boundaries + `plan.md` current) |
 | `agentchat-autostart.sh` | Auto-start agents on boot |
 | `scripts/agentchat-stable-autodeploy.sh` | Poll `origin/stable` in live folder and auto-restart local services on update |
 | `check-mcp` | Verify MCP server is configured and working |
@@ -252,10 +259,12 @@ agentchat prune-agents [--older-than-days <n>] [--apply]
 | `system-info.jsonl` | System info event log |
 | `.msg_counter` | Message ID counter |
 | `agents/` | Per-agent metadata (meta.json, resume-id) |
+| `supervisor_state.json` | Supervisor per-agent consecutive-state snapshot |
 | `matrix/bridge-state.json` | Bridge state (tokens, room maps, avatars) |
 | `matrix/media/` | Cached media files from Matrix |
 | `message-attachments/` | Staged message attachments |
 | `mcp-media-cache/` | Per-agent media cache for MCP |
+| `logs/supervisor.jsonl` | Supervisor event timeline log (jsonl) |
 
 ## Remote Server Support
 
@@ -338,6 +347,14 @@ FRP_API_ORIGIN=https://agentchat.example.com
 
 # Server maintenance
 AGENT_SERVER_MAINTENANCE_IDS=<comma-separated server IDs to suppress flap alerts>
+
+# Supervisor (focus audit)
+SUPERVISOR_ENABLED=true
+SUPERVISOR_INTERVAL_MS=30000
+SUPERVISOR_LLM_PROVIDER=deepseek
+SUPERVISOR_LLM_MODEL=deepseek-chat
+SUPERVISOR_LLM_KEY=<deepseek api key>
+# optional: SUPERVISOR_LLM_ENDPOINT, SUPERVISOR_MATRIX_MENTIONS=kamico
 ```
 
 ## Installation
@@ -361,6 +378,7 @@ Skills are markdown instruction files symlinked into agent config directories.
 - `OPERATIONS.md` — Operations runbook (incident response, health checks)
 - `ROADMAP-remote.md` — Remote server architecture and roadmap
 - `docs/agent-roles-and-guardrails.md` — Agent role definitions and guardrails
+- `docs/agent-role-and-scope-editing.md` — Practical workflow for editing role/scope/current-task inputs
 - `docs/workspace-claude-md-template.md` — Template for agent workspace CLAUDE.md
 - `docs/laplace-analysis-and-roadmap.md` — Project analysis and roadmap
 - `docs/dependency-security-debt.md` — Dependency security audit notes

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
+    "audit:agent-docs": "node scripts/audit-agent-docs.js",
     "build:remote": "bash scripts/build-remote-package.sh",
     "build:remote:check": "bash scripts/build-remote-package.sh --check",
     "build:remote:sync": "bash scripts/build-remote-package.sh --sync-remote",
