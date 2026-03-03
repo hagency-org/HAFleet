@@ -144,17 +144,24 @@ export class SupervisorService {
       }
     }
 
+    const derivedStatus = judgment
+      ? judgment.status
+      : (skipped ? 'SKIPPED' : 'ERROR');
+    const derivedDomain = judgment
+      ? judgment.domain
+      : 'unknown';
+
     const event = {
       id: `supervisor_${now}_${agentName}_${Math.random().toString(36).slice(2, 8)}`,
       ts: now,
       agent: agentName,
       sweepAt: this.lastSweepAt || now,
-      status: judgment?.status || 'STUCK',
-      domain: judgment?.domain || 'outside',
+      status: derivedStatus,
+      domain: derivedDomain,
       reason: judgment?.reason || (skipped ? `Skipped: ${skipped}` : `Judge error: ${error || 'unknown'}`),
       pattern: judgment?.pattern || null,
       suggestion: judgment?.suggestion || null,
-      negative: judgment ? isNegative(judgment.status) : false,
+      negative: isNegative(derivedStatus),
       skipped,
       error,
       inputHash: hashInput({
