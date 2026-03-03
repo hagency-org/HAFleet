@@ -11,7 +11,7 @@ Environment=AGENTCHAT_LIVE_DIR=/home/shisui/laplace/agent-chat-live
 Environment=AGENTCHAT_DEPLOY_USER=shisui
 Environment=AGENTCHAT_DEPLOY_BRANCH=stable
 Environment=AGENTCHAT_POLL_SEC=30
-Environment=AGENTCHAT_DEPLOY_SERVICES=agent-chat agent-chat-v2 bridge-matrix
+Environment="AGENTCHAT_DEPLOY_SERVICES=agent-chat agent-chat-v2 bridge-matrix"
 ExecStart=/usr/bin/env bash /home/shisui/laplace/agent-chat-live/scripts/agentchat-stable-autodeploy.sh
 Restart=always
 RestartSec=5
