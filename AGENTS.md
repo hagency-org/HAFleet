@@ -1,0 +1,1 @@
+/home/shisui/laplace/agent-chat/docs/workspace-claude-md-template.md
