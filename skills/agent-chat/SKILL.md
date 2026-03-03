@@ -91,6 +91,14 @@ agentchat prune-agents [--older-than-days <n>] [--apply]
 agentchat sync-skills [--check]
 ```
 
+### Stable auto deploy watcher (local live deploy folder)
+```bash
+sudo cp /home/shisui/laplace/agent-chat-live/agent-chat-stable-autodeploy.service /etc/systemd/system/agent-chat-stable-autodeploy.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now agent-chat-stable-autodeploy
+systemctl status agent-chat-stable-autodeploy --no-pager
+```
+
 ## Health Checks
 - Backend health: `curl --noproxy '*' http://127.0.0.1:8090/health`
 - Attachment staging should exist: `POST /api/media/stage` (200 expected)
