@@ -3,6 +3,7 @@ import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync } from '
 import { execSync } from 'child_process';
 import path from 'path';
 import { createHash } from 'crypto';
+import { createSupervisorService } from './supervisor/index.js';
 
 const PORT = 8090;
 const DATA_DIR = path.resolve('data');
@@ -710,6 +711,13 @@ function broadcastSSE(event, data) {
   const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const c of sseClients) c.write(frame);
 }
+
+const supervisorService = createSupervisorService({
+  getAgents: () => Object.values(agents).filter(isAgentRecord).map(serializeAgent),
+  getRuntime: (agentName) => ensureAgentRuntimeRecord(agentName),
+  emitSystemInfo: (summary, full) => emitSystemInfo(summary, full),
+  broadcastSSE,
+});
 
 // ── Helpers ───────────────────────────────────────────────────────────
 function relativeTime(ts) {
@@ -2478,6 +2486,28 @@ app.get('/health', (_req, res) => {
   });
 });
 
+// ── Supervisor audit ──────────────────────────────────────────────────
+app.get('/api/supervisor/status', (_req, res) => {
+  res.json(supervisorService.getStatus());
+});
+
+app.get('/api/supervisor/agents', (_req, res) => {
+  res.json({
+    status: supervisorService.getStatus(),
+    agents: supervisorService.getAgentSummaries(),
+  });
+});
+
+app.get('/api/supervisor/agents/:name', (req, res) => {
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
+  const limitRaw = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 120;
+  const payload = supervisorService.getAgentDetail(agentName, limit);
+  return res.json(payload);
+});
+
 // ── Server heartbeats ─────────────────────────────────────────────────
 app.post('/api/servers/heartbeat', (req, res) => {
   const serverId = normalizeServer(req.body?.server);
@@ -3583,6 +3613,7 @@ app.get('/api/agents/:name/groups', (req, res) => {
 // ── Graceful shutdown ─────────────────────────────────────────────────
 function shutdown() {
   console.log('Shutting down, saving data...');
+  supervisorService.stop();
   refreshServerLiveness();
   sweepLocalActivityDurations();
   sweepAgentRules();
@@ -3622,6 +3653,7 @@ app.listen(PORT, '127.0.0.1', () => {
   sweepLocalActivityDurations();
   sweepLocalSwapPressure();
   sweepAgentScopePressure();
+  supervisorService.start();
   console.log(`Agent Chat v2 backend listening on http://127.0.0.1:${PORT}`);
   const agentCount = Object.values(agents).filter(isAgentRecord).length;
   console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);
