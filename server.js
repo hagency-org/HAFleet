@@ -8,6 +8,7 @@ const PORT = 8084;
 const LOG_FILE = path.resolve('logs/messages.jsonl');
 const AGENT_DOWN_BIN = path.resolve('bin/agent-down');
 const PUSH_DELIVERED_URL = 'http://127.0.0.1:8090/api/runtime/push-delivered';
+const BACKEND_V2_URL = 'http://127.0.0.1:8090';
 const DEFAULT_IDLE_THRESHOLD_MS = 20_000;
 const envIdleThreshold = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || `${DEFAULT_IDLE_THRESHOLD_MS}`, 10);
 const IDLE_THRESHOLD = Number.isFinite(envIdleThreshold) && envIdleThreshold > 0
@@ -730,6 +731,41 @@ app.delete('/api/agents/:name', async (req, res) => {
   }
 });
 
+// ── Supervisor audit proxy APIs ──────────────────────────────────────
+app.get('/api/supervisor/status', async (_req, res) => {
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/supervisor/status`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.get('/api/supervisor/agents', async (_req, res) => {
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/supervisor/agents`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.get('/api/supervisor/agents/:name', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  const limitRaw = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 120;
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/supervisor/agents/${encodeURIComponent(name)}?limit=${limit}`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
 // SSE for queue updates (reuse existing SSE clients, send typed events)
 function queueSnapshot() {
   const items = [];
@@ -1178,9 +1214,249 @@ app.get('/', (_req, res) => {
   res.type('html').send(HTML);
 });
 
+app.get('/agents/:name/audit', (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).type('text').send('invalid agent name');
+  res.set('Cache-Control', 'no-store');
+  res.type('html').send(renderSupervisorAuditPage(name));
+});
+
 app.listen(PORT, '127.0.0.1', () => {
   console.log(`agent-viz running on http://127.0.0.1:${PORT}`);
 });
+
+function renderSupervisorAuditPage(agentName) {
+  const safeName = String(agentName).replace(/[&<>"]/g, (ch) => (
+    ch === '&' ? '&amp;' : (ch === '<' ? '&lt;' : (ch === '>' ? '&gt;' : '&quot;'))
+  ));
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Supervisor Audit · ${safeName}</title>
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;
+  font-family:'SF Mono','Fira Code','Consolas',monospace;
+  background:radial-gradient(circle at 20% 20%,#102033 0%,#08101b 45%,#05080f 100%);
+  color:#d9f3ff;
+}
+a{color:#5fd2ff}
+.wrap{max-width:1200px;margin:0 auto;padding:20px}
+.top{
+  display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;
+  margin-bottom:16px;
+}
+.title{font-size:20px;letter-spacing:1px}
+.sub{font-size:12px;color:rgba(217,243,255,0.65)}
+.pill{
+  display:inline-block;padding:4px 10px;border-radius:999px;
+  border:1px solid rgba(95,210,255,0.35);
+  font-size:11px;
+}
+.grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+  gap:12px;
+}
+.card{
+  background:rgba(4,10,18,0.78);
+  border:1px solid rgba(95,210,255,0.2);
+  border-radius:10px;
+  padding:12px;
+}
+.card h3{
+  margin:0 0 8px 0;
+  font-size:12px;
+  letter-spacing:1px;
+  color:rgba(95,210,255,0.9);
+}
+.line{font-size:12px;line-height:1.5;color:rgba(217,243,255,0.88)}
+.muted{color:rgba(217,243,255,0.55)}
+.status{
+  display:inline-block;padding:3px 8px;border-radius:6px;border:1px solid;
+  font-weight:700;font-size:11px;letter-spacing:0.5px;
+}
+.status-focused{color:#4ade80;border-color:rgba(74,222,128,0.5);background:rgba(74,222,128,0.14)}
+.status-negative{color:#fb7185;border-color:rgba(251,113,133,0.5);background:rgba(251,113,133,0.14)}
+.status-unknown{color:#fbbf24;border-color:rgba(251,191,36,0.5);background:rgba(251,191,36,0.14)}
+pre{
+  margin:6px 0 0 0;
+  padding:10px;
+  border-radius:8px;
+  background:rgba(2,6,12,0.85);
+  border:1px solid rgba(95,210,255,0.15);
+  white-space:pre-wrap;
+  word-break:break-word;
+  font-size:11px;
+  color:#d5e7f3;
+}
+.table-wrap{
+  margin-top:12px;
+  overflow:auto;
+  border:1px solid rgba(95,210,255,0.2);
+  border-radius:10px;
+  background:rgba(4,10,18,0.75);
+}
+table{
+  width:100%;
+  border-collapse:collapse;
+  min-width:980px;
+}
+th,td{
+  text-align:left;
+  padding:8px;
+  border-bottom:1px solid rgba(95,210,255,0.12);
+  font-size:11px;
+  vertical-align:top;
+}
+th{
+  position:sticky;top:0;
+  background:rgba(7,14,24,0.98);
+  color:#8edfff;
+}
+.reason{max-width:380px}
+.mono{font-family:'SF Mono','Fira Code','Consolas',monospace}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <div class="title">Supervisor Audit · <span class="mono">${safeName}</span></div>
+        <div class="sub">Non-intrusive focus audit (web + matrix warning only)</div>
+      </div>
+      <div><a href="/">← Back to Monitor</a></div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Latest Evaluation</h3>
+        <div id="latest" class="line muted">Loading...</div>
+      </div>
+      <div class="card">
+        <h3>Supervisor Runtime</h3>
+        <div id="runtime" class="line muted">Loading...</div>
+      </div>
+      <div class="card">
+        <h3>Current Task</h3>
+        <pre id="current-task">(loading)</pre>
+      </div>
+      <div class="card">
+        <h3>Role & Boundaries Sources</h3>
+        <div id="sources" class="line muted">Loading...</div>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Status</th>
+            <th>Domain</th>
+            <th>Pattern</th>
+            <th>Reason</th>
+            <th>Consecutive</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td colspan="7" class="muted">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+<script>
+(() => {
+  const agent = ${JSON.stringify(agentName)};
+  const fmtTs = (v) => {
+    const n = Number(v) || 0;
+    if (!n) return '-';
+    return new Date(n).toLocaleString();
+  };
+  const esc = (v) => String(v || '').replace(/[&<>\\"]/g, (ch) => (
+    ch === '&' ? '&amp;' : (ch === '<' ? '&lt;' : (ch === '>' ? '&gt;' : '&quot;'))
+  ));
+  const statusClass = (s) => {
+    if (s === 'FOCUSED') return 'status-focused';
+    if (s === 'DRIFTING' || s === 'LOST' || s === 'STUCK') return 'status-negative';
+    return 'status-unknown';
+  };
+
+  async function refresh() {
+    try {
+      const [statusRes, detailRes] = await Promise.all([
+        fetch('/api/supervisor/status'),
+        fetch('/api/supervisor/agents/' + encodeURIComponent(agent) + '?limit=180'),
+      ]);
+      const statusPayload = await statusRes.json();
+      const detail = await detailRes.json();
+      if (!statusRes.ok || !detailRes.ok) throw new Error((detail && detail.error) || 'load failed');
+
+      const latest = detail.latest || null;
+      const state = detail.state || {};
+
+      const latestEl = document.getElementById('latest');
+      if (!latest) {
+        latestEl.innerHTML = '<span class="muted">No evaluations yet.</span>';
+      } else {
+        latestEl.innerHTML =
+          '<span class="status ' + statusClass(latest.status) + '">' + esc(latest.status) + '</span> '
+          + '<span class="pill">consecutive negative: ' + esc(state.consecutiveNegative || 0) + '</span>'
+          + '<div class="line" style="margin-top:6px">reason: ' + esc(latest.reason || '-') + '</div>'
+          + '<div class="line muted">pattern: ' + esc(latest.pattern || '-') + ' · domain: ' + esc(latest.domain || '-') + '</div>'
+          + '<div class="line muted">last judged: ' + esc(fmtTs(state.lastJudgedAt)) + '</div>'
+          + '<div class="line muted">last warning: ' + esc(fmtTs(state.lastWarningAt)) + '</div>';
+      }
+
+      document.getElementById('runtime').innerHTML =
+        '<div>enabled: <span class="mono">' + esc(statusPayload.enabled) + '</span></div>'
+        + '<div>interval: <span class="mono">' + esc(statusPayload.intervalMs) + ' ms</span></div>'
+        + '<div>model: <span class="mono">' + esc((statusPayload.llm || {}).provider) + ' / ' + esc((statusPayload.llm || {}).model) + '</span></div>'
+        + '<div>last sweep: <span class="mono">' + esc(fmtTs((statusPayload.runtime || {}).lastSweepAt)) + '</span></div>'
+        + '<div>evaluated(active): <span class="mono">' + esc((statusPayload.runtime || {}).lastSweepEvaluated || 0) + ' / ' + esc((statusPayload.runtime || {}).lastSweepActive || 0) + '</span></div>'
+        + '<div class="muted">error: ' + esc((statusPayload.runtime || {}).lastSweepError || '-') + '</div>';
+
+      document.getElementById('current-task').textContent = (latest && latest.docs && latest.docs.currentTask) || '(missing)';
+      document.getElementById('sources').innerHTML =
+        '<div>docsRoot: <span class="mono">' + esc((latest && latest.docs && latest.docs.docsRoot) || '-') + '</span></div>'
+        + '<div>agents.md: <span class="mono">' + esc((latest && latest.docs && latest.docs.agentsPath) || '-') + '</span></div>'
+        + '<div>plan.md: <span class="mono">' + esc((latest && latest.docs && latest.docs.planPath) || '-') + '</span></div>'
+        + '<div>has role/boundaries/current: <span class="mono">' + esc(Boolean(latest && latest.docs && latest.docs.hasRole)) + ' / ' + esc(Boolean(latest && latest.docs && latest.docs.hasBoundaries)) + ' / ' + esc(Boolean(latest && latest.docs && latest.docs.hasCurrentTask)) + '</span></div>';
+
+      const rows = Array.isArray(detail.events) ? detail.events.slice().reverse() : [];
+      const body = document.getElementById('rows');
+      if (rows.length === 0) {
+        body.innerHTML = '<tr><td colspan="7" class="muted">No events yet.</td></tr>';
+        return;
+      }
+      body.innerHTML = rows.map((ev) => {
+        const action = ev.action ? (ev.action.type + (ev.action.summary ? (' · ' + ev.action.summary) : '')) : '-';
+        return '<tr>'
+          + '<td>' + esc(fmtTs(ev.ts)) + '</td>'
+          + '<td><span class="status ' + statusClass(ev.status) + '">' + esc(ev.status) + '</span></td>'
+          + '<td>' + esc(ev.domain || '-') + '</td>'
+          + '<td>' + esc(ev.pattern || '-') + '</td>'
+          + '<td class="reason">' + esc(ev.reason || '-') + '</td>'
+          + '<td>' + esc(ev.state ? ev.state.consecutiveNegative : '-') + '</td>'
+          + '<td>' + esc(action) + '</td>'
+          + '</tr>';
+      }).join('');
+    } catch (e) {
+      document.getElementById('latest').textContent = 'Load failed: ' + e.message;
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 5000);
+})();
+</script>
+</body>
+</html>`;
+}
 
 // ── Inline HTML ──────────────────────────────────────────────────────
 const HTML = /*html*/ `<!DOCTYPE html>
@@ -1440,6 +1716,11 @@ body.page-hidden #reminder-panel.has-items{
 }
 #agent-info .ai-identity-input:focus{border-color:rgba(0,240,255,0.5)}
 .ai-action-row{margin-top:8px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.ai-audit-btn{
+  background:none;border:1px solid rgba(95,210,255,0.35);border-radius:3px;
+  color:rgba(95,210,255,0.9);cursor:pointer;font-size:9px;padding:2px 8px;font-family:inherit;
+}
+.ai-audit-btn:hover{border-color:rgba(95,210,255,0.75);color:#5fd2ff}
 .ai-down-btn{
   background:none;border:1px solid rgba(251,191,36,0.35);border-radius:3px;
   color:rgba(251,191,36,0.8);cursor:pointer;font-size:9px;padding:2px 8px;font-family:inherit;
@@ -2131,6 +2412,7 @@ body.page-hidden #reminder-panel.has-items{
       parts.push('</div>');
       // Agent down + permanent delete actions (both with two-step confirmation)
       parts.push('<div class="ai-action-row">'
+        + '<button class="ai-audit-btn" onclick="openAuditPage()">Audit Detail</button>'
         + '<button class="ai-down-btn" id="ai-down-btn" onclick="downAgent()">Agent Down</button>'
         + '<button class="ai-delete-btn" id="ai-delete-btn" onclick="deleteAgent()">Delete Agent</button>'
         + '</div>');
@@ -2190,6 +2472,12 @@ body.page-hidden #reminder-panel.has-items{
       });
     } catch {}
     fetchAgentDetail(monitoredAgent.name, { preserveVisible: true });
+  };
+
+  window.openAuditPage = function() {
+    if (!monitoredAgent || !monitoredAgent.name) return;
+    const url = '/agents/' + encodeURIComponent(monitoredAgent.name) + '/audit';
+    window.location.href = url;
   };
 
   let downConfirmTimer = null;
