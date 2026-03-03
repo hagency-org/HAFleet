@@ -14,6 +14,8 @@ log() {
 run_as_deploy_user() {
   if [ "$(id -un)" = "$DEPLOY_USER" ]; then
     "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -u "$DEPLOY_USER" -- "$@"
   else
     runuser -u "$DEPLOY_USER" -- "$@"
   fi
