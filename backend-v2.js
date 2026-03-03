@@ -47,6 +47,13 @@ const AGENT_TMUX_MISSING_ALERT_GRACE_MS = Number.parseInt(process.env.AGENT_TMUX
 const AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS || '900000', 10);
 const AGENT_COMPACT_SUMMARY_MAX = Number.parseInt(process.env.AGENT_COMPACT_SUMMARY_MAX || '180', 10);
 const AGENT_COMPACT_RUNTIME_DEDUPE_MS = Number.parseInt(process.env.AGENT_COMPACT_RUNTIME_DEDUPE_MS || '120000', 10);
+const SERVER_MAINTENANCE_IDS = new Set(
+  String(process.env.AGENT_SERVER_MAINTENANCE_IDS ?? 'kamico-MBP')
+    .split(',')
+    .map(normalizeServer)
+    .filter(Boolean)
+);
+const SERVER_MAINTENANCE_LAST_SEEN_UPDATE_MS = Number.parseInt(process.env.AGENT_SERVER_MAINTENANCE_LAST_SEEN_UPDATE_MS || '60000', 10);
 const AGENT_COMPACT_HOOK_PATTERNS = [
   /\[(?:agent[_-]?compact|compact(?:ion)?)\]/i,
   /\bagent[_-]?compact(?:ion)?\s*:/i,
@@ -100,8 +107,16 @@ function loadJsonSync(name, fallback) {
 function saveJson(name, data) {
   const target = dataPath(name);
   const tmp = target + '.tmp';
-  writeFileSync(tmp, JSON.stringify(data, null, 2));
-  renameSync(tmp, target);
+  try {
+    writeFileSync(tmp, JSON.stringify(data, null, 2));
+    renameSync(tmp, target);
+    return true;
+  } catch (e) {
+    const code = e?.code || 'unknown';
+    const msg = e?.message || 'unknown error';
+    console.error(`Failed to save JSON ${target}: [${code}] ${msg}`);
+    return false;
+  }
 }
 
 function normalizeServer(value) {
@@ -515,6 +530,7 @@ for (const [serverId, server] of Object.entries(servers)) {
       sessions: [],
       agents: [],
       agentCount: 0,
+      maintenance: SERVER_MAINTENANCE_IDS.has(serverId),
     };
     continue;
   }
@@ -527,6 +543,11 @@ for (const [serverId, server] of Object.entries(servers)) {
   server.relayBootTs = Number(server.relayBootTs) || 0;
   server.online = Boolean(server.online);
   server.updatedAt = Number(server.updatedAt) || server.lastSeen || 0;
+  if (!Object.prototype.hasOwnProperty.call(server, 'maintenance')) {
+    server.maintenance = SERVER_MAINTENANCE_IDS.has(serverId);
+  } else {
+    server.maintenance = server.maintenance === true;
+  }
   if (!Array.isArray(server.sessions)) server.sessions = [];
   if (!Array.isArray(server.agents)) server.agents = [];
   server.agentCount = Number(server.agentCount) || server.agents.length || 0;
@@ -628,7 +649,8 @@ function isManualDownReason(reason) {
   if (!text) return false;
   return text === 'manual-offline'
     || text === 'session-missing'
-    || text.startsWith('agent-down');
+    || text.startsWith('agent-down')
+    || text.startsWith('server-maintenance:');
 }
 
 function maybeEmitUnexpectedOfflineAlert(agentName, reason, context = {}) {
@@ -1354,9 +1376,18 @@ function ensureServerRecord(serverId) {
       agents: [],
       agentCount: 0,
       sourceIp: null,
+      maintenance: SERVER_MAINTENANCE_IDS.has(serverId),
     };
   }
   return servers[serverId];
+}
+
+function isServerInMaintenance(serverId, serverRecord = null) {
+  const id = normalizeServer(serverId);
+  if (!id) return false;
+  const server = (serverRecord && typeof serverRecord === 'object') ? serverRecord : servers[id];
+  if (server && typeof server.maintenance === 'boolean') return server.maintenance === true;
+  return SERVER_MAINTENANCE_IDS.has(id);
 }
 
 function markAgentsOfflineForServer(serverId, reason, clearTmux = false) {
@@ -1386,6 +1417,23 @@ function clearServerLiveState(server, now = Date.now()) {
   if ((Number(server.relayBootTs) || 0) !== 0) { server.relayBootTs = 0; changed = true; }
   if ((Number(server.updatedAt) || 0) !== now) { server.updatedAt = now; changed = true; }
   return changed;
+}
+
+function enforceServerMaintenanceOffline(serverId, server, now = Date.now()) {
+  if (!server || typeof server !== 'object') return { serverChanged: false, agentsChanged: false };
+  let serverChanged = false;
+  const shouldTouchUpdatedAt = server.online !== false
+    || !Array.isArray(server.sessions) || server.sessions.length !== 0
+    || !Array.isArray(server.agents) || server.agents.length !== 0
+    || (Number(server.agentCount) || 0) !== 0
+    || server.relayInstanceId !== null
+    || (Number(server.relayBootTs) || 0) !== 0
+    || (Number(server.heartbeatAt) || 0) !== 0;
+  const targetUpdatedAt = shouldTouchUpdatedAt ? now : (Number(server.updatedAt) || now);
+  if ((Number(server.heartbeatAt) || 0) !== 0) { server.heartbeatAt = 0; serverChanged = true; }
+  if (clearServerLiveState(server, targetUpdatedAt)) serverChanged = true;
+  const agentsChanged = markAgentsOfflineForServer(serverId, `server-maintenance:${serverId}`, true);
+  return { serverChanged, agentsChanged };
 }
 
 function normalizeRelayInstanceId(value) {
@@ -1431,6 +1479,12 @@ function refreshServerLiveness() {
   let agentsChanged = false;
   for (const [serverId, server] of Object.entries(servers)) {
     if (!server || typeof server !== 'object') continue;
+    if (isServerInMaintenance(serverId, server)) {
+      const maintenance = enforceServerMaintenanceOffline(serverId, server, now);
+      if (maintenance.serverChanged) serversChanged = true;
+      if (maintenance.agentsChanged) agentsChanged = true;
+      continue;
+    }
     const wasOnline = Boolean(server.online);
     const heartbeatAt = Number(server.heartbeatAt) || 0;
     const isOnline = heartbeatAt > 0 && (now - heartbeatAt) <= HEARTBEAT_TTL_MS;
@@ -2025,6 +2079,26 @@ function serializeAgent(agent) {
 function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   const now = Date.now();
   const server = ensureServerRecord(serverId);
+  if (isServerInMaintenance(serverId, server)) {
+    let serversChanged = false;
+    let agentsChanged = false;
+    const lastSeen = Number(server.lastSeen) || 0;
+    if (!lastSeen || (now - lastSeen) >= SERVER_MAINTENANCE_LAST_SEEN_UPDATE_MS) {
+      server.lastSeen = now;
+      serversChanged = true;
+    }
+    const nextSourceIp = sourceIp || null;
+    if (server.sourceIp !== nextSourceIp) {
+      server.sourceIp = nextSourceIp;
+      serversChanged = true;
+    }
+    const maintenance = enforceServerMaintenanceOffline(serverId, server, now);
+    if (maintenance.serverChanged) serversChanged = true;
+    if (maintenance.agentsChanged) agentsChanged = true;
+    if (serversChanged) saveServers();
+    if (agentsChanged) saveAgents();
+    return { ok: true, leaseAccepted: true, leaseReason: 'maintenance', maintenance: true, ignored: true };
+  }
   const wasOnline = Boolean(server.online);
   const incomingInstanceId = normalizeRelayInstanceId(payload.instanceId);
   const incomingBootTs = normalizeRelayBootTs(payload.bootTs);
@@ -2411,6 +2485,7 @@ app.post('/api/servers/heartbeat', (req, res) => {
   const heartbeatResult = applyServerHeartbeat(serverId, req.body || {}, req.ip || req.connection?.remoteAddress || null);
   refreshServerLiveness();
   const state = servers[serverId];
+  const maintenance = isServerInMaintenance(serverId, state);
   if (heartbeatResult && heartbeatResult.leaseAccepted === false) {
     return res.status(409).json({
       ok: false,
@@ -2423,11 +2498,14 @@ app.post('/api/servers/heartbeat', (req, res) => {
         updatedAt: state.updatedAt || null,
         agentCount: state.agentCount || 0,
         sourceIp: state.sourceIp || null,
+        maintenance,
       },
     });
   }
   return res.json({
     ok: true,
+    maintenance,
+    ignored: heartbeatResult?.ignored === true,
     server: {
       id: state.id,
       online: Boolean(state.online),
@@ -2435,6 +2513,7 @@ app.post('/api/servers/heartbeat', (req, res) => {
       updatedAt: state.updatedAt || null,
       agentCount: state.agentCount || 0,
       sourceIp: state.sourceIp || null,
+      maintenance,
     },
   });
 });
@@ -2458,13 +2537,67 @@ app.post('/api/servers/:id/offline', (req, res) => {
   const now = Date.now();
   server.heartbeatAt = 0;
   clearServerLiveState(server, now);
-  if (markAgentsOfflineForServer(serverId, `server-offline:${serverId}`, true)) saveAgents();
+  const maintenance = isServerInMaintenance(serverId, server);
+  const reason = maintenance ? `server-maintenance:${serverId}` : `server-offline:${serverId}`;
+  if (markAgentsOfflineForServer(serverId, reason, true)) saveAgents();
   saveServers();
-  if (wasOnline) {
-    const reason = (typeof req.body?.reason === 'string' && req.body.reason.trim()) ? req.body.reason.trim() : 'offline';
-    emitSystemInfo(`Remote server '${serverId}' offline`, `Server '${serverId}' reported offline (${reason}).`);
+  if (wasOnline && !maintenance) {
+    const detail = (typeof req.body?.reason === 'string' && req.body.reason.trim()) ? req.body.reason.trim() : 'offline';
+    emitSystemInfo(`Remote server '${serverId}' offline`, `Server '${serverId}' reported offline (${detail}).`);
   }
-  res.json({ ok: true, server: { id: serverId, online: false, lastSeen: server.lastSeen } });
+  res.json({
+    ok: true,
+    server: {
+      id: serverId,
+      online: false,
+      maintenance,
+      lastSeen: server.lastSeen,
+    },
+  });
+});
+
+app.post('/api/servers/:id/maintenance', (req, res) => {
+  const serverId = normalizeServer(req.params.id);
+  if (!serverId) return res.status(400).json({ error: 'server required' });
+  const enabled = req.body?.enabled;
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled boolean required' });
+  }
+
+  const server = ensureServerRecord(serverId);
+  server.maintenance = enabled;
+  let serversChanged = true;
+  let agentsChanged = false;
+  if (enabled) {
+    const maintenance = enforceServerMaintenanceOffline(serverId, server, Date.now());
+    if (maintenance.serverChanged) serversChanged = true;
+    if (maintenance.agentsChanged) agentsChanged = true;
+  } else {
+    const now = Date.now();
+    if ((Number(server.updatedAt) || 0) !== now) {
+      server.updatedAt = now;
+      serversChanged = true;
+    }
+  }
+
+  if (serversChanged) saveServers();
+  if (agentsChanged) saveAgents();
+  refreshServerLiveness();
+
+  const state = servers[serverId];
+  const maintenance = isServerInMaintenance(serverId, state);
+  return res.json({
+    ok: true,
+    server: {
+      id: state.id,
+      online: Boolean(state.online),
+      maintenance,
+      lastSeen: state.lastSeen || null,
+      updatedAt: state.updatedAt || null,
+      agentCount: state.agentCount || 0,
+      sourceIp: state.sourceIp || null,
+    },
+  });
 });
 
 app.get('/api/servers', (_req, res) => {
@@ -2473,6 +2606,7 @@ app.get('/api/servers', (_req, res) => {
     .map(s => ({
       id: s.id,
       online: Boolean(s.online),
+      maintenance: isServerInMaintenance(s.id, s),
       lastSeen: s.lastSeen || null,
       heartbeatAt: Number(s.heartbeatAt) || null,
       updatedAt: s.updatedAt || null,

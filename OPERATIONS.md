@@ -35,6 +35,20 @@ agentchat update --service-status
 curl -s http://127.0.0.1:8090/api/servers | jq '.[] | {id, online, lastSeen, agentCount, sourceIp}'
 ```
 
+### Put a noisy remote server into maintenance (force offline + mute heartbeat flaps)
+```bash
+curl -s -X POST http://127.0.0.1:8090/api/servers/<server_id>/maintenance \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true}' | jq
+```
+
+Resume normal heartbeat handling:
+```bash
+curl -s -X POST http://127.0.0.1:8090/api/servers/<server_id>/maintenance \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":false}' | jq
+```
+
 ### Single agent state
 ```bash
 curl -s http://127.0.0.1:8090/api/agents/<agent_name> | jq '{name, online, server, offlineReason, lastSeen, serverOnline}'
