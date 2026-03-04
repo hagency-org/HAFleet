@@ -1,14 +1,14 @@
 ## Current
-Close out supervisor rollout by reducing `SKIPPED` audits (missing role/boundary/current docs) across active agents so focus checks can evaluate real task alignment.
+Act as architecture lead for the LLM tmux audit program while delegating concrete implementation work to `agentchat-develop`.
 Acceptance criteria:
-- Keep supervisor running in live with verified status endpoints and audit page availability.
-- Ensure skipped/error states stay neutral (no false consecutive-negative warning escalation).
-- Produce actionable docs-coverage report for active agents using `npm run audit:agent-docs -- --active`.
+- `agentchat-develop` is online and receives explicit first-priority handoff task.
+- Architecture direction is documented for scope, workflow, and quality gates.
+- Review workflow ensures implementation changes stay non-intrusive (web+matrix notice only, no agent control).
 
 ## Queue
-1. Coordinate role/boundary/current doc backfill for active agents currently marked `missing-doc-sections`.
-2. Add optional mention-target configuration for supervisor warnings (`SUPERVISOR_MATRIX_MENTIONS`) and verify in info-room flow.
-3. Add lightweight API/CLI support to clear stale supervisor warning timestamps after logic/schema changes.
+1. Define phase roadmap for supervisor evolution (coverage, signal quality, false-positive control, observability).
+2. Establish architecture review checklist for each implementation PR/commit batch.
+3. Drive doc coverage uplift for active agents to reduce `SKIPPED` audit evaluations.
 
 ## Blocked (optional)
 None.
