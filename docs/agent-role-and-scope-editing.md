@@ -33,11 +33,13 @@ Validate all known agents:
 npm run audit:agent-docs
 ```
 
-Validate only online agents:
+Validate only supervisor-active candidates:
 
 ```bash
 npm run audit:agent-docs -- --active
 ```
+
+`--active` mirrors supervisor candidate filters when backend API is reachable: `online=true`, tmux target present, `activeNow=true`, `blocked!=true`.
 
 JSON output for automation:
 

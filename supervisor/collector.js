@@ -15,22 +15,32 @@ function trimBlock(text) {
   return String(text || '').replace(/\r\n/g, '\n').trim();
 }
 
+function escapeRegExp(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function extractHeadingSection(markdown, heading) {
   const src = String(markdown || '').replace(/\r\n/g, '\n');
   const lines = src.split('\n');
-  const headingRe = new RegExp(`^##\\s+${heading}\\s*$`, 'i');
-  const anyHeadingRe = /^##\s+/;
+  const escaped = escapeRegExp(heading);
+  const headingRe = new RegExp(`^#{1,6}\\s+${escaped}(?:\\s*$|\\s*[:()\\[\\]{}-]|\\s+[—–-])`, 'i');
   let start = -1;
+  let headingLevel = 2;
   for (let i = 0; i < lines.length; i++) {
-    if (headingRe.test(lines[i].trim())) {
+    const line = lines[i].trim().replace(/\s+#+\s*$/, '');
+    if (headingRe.test(line)) {
       start = i + 1;
+      const match = line.match(/^(#{1,6})\s+/);
+      headingLevel = match ? match[1].length : 2;
       break;
     }
   }
   if (start < 0) return '';
   const body = [];
   for (let i = start; i < lines.length; i++) {
-    if (anyHeadingRe.test(lines[i])) break;
+    const line = lines[i].trim();
+    const match = line.match(/^(#{1,6})\s+/);
+    if (match && match[1].length <= headingLevel) break;
     body.push(lines[i]);
   }
   return trimBlock(body.join('\n'));
@@ -46,6 +56,14 @@ function loadMetaWorkspace(metaRoot, agentName) {
   } catch {
     return { metaPath, workspacePath: null };
   }
+}
+
+function normalizeWorkspacePath(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 4096) return null;
+  if (!path.isAbsolute(trimmed)) return null;
+  return path.resolve(trimmed);
 }
 
 function resolveDocsPaths(config, agentName, workspacePath) {
@@ -104,8 +122,10 @@ function safeTmuxTarget(raw) {
 
 export function collectAgentContext(config, agentName, agentRecord, runtimeRecord) {
   const now = Date.now();
-  const { workspacePath, metaPath } = loadMetaWorkspace(config.metaRoot, agentName);
-  const docsPaths = resolveDocsPaths(config, agentName, workspacePath);
+  const { workspacePath: metaWorkspacePath, metaPath } = loadMetaWorkspace(config.metaRoot, agentName);
+  const runtimeWorkspacePath = normalizeWorkspacePath(runtimeRecord?.workspacePath);
+  const effectiveWorkspacePath = runtimeWorkspacePath || normalizeWorkspacePath(metaWorkspacePath);
+  const docsPaths = resolveDocsPaths(config, agentName, effectiveWorkspacePath);
 
   const agentsDocRaw = readText(docsPaths.agentsPath);
   const planDocRaw = readText(docsPaths.planPath);
@@ -147,7 +167,8 @@ export function collectAgentContext(config, agentName, agentRecord, runtimeRecor
   return {
     ts: now,
     agent: agentName,
-    workspacePath,
+    workspacePath: effectiveWorkspacePath,
+    workspacePathSource: runtimeWorkspacePath ? 'runtime' : (metaWorkspacePath ? 'meta' : 'none'),
     metaPath,
     docs: {
       docsRoot: docsPaths.docsRoot,

@@ -27,8 +27,21 @@ function readText(filePath) {
   }
 }
 
+function escapeRegExp(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeWorkspacePath(value) {
+  if (typeof value !== 'string') return null;
+  const raw = value.trim();
+  if (!raw || raw.length > 4096) return null;
+  if (!path.isAbsolute(raw)) return null;
+  return path.resolve(raw);
+}
+
 function sectionExists(markdown, heading) {
-  const re = new RegExp(`^##\\s+${heading}\\s*$`, 'im');
+  const escaped = escapeRegExp(heading);
+  const re = new RegExp(`^#{1,6}\\s+${escaped}(?:\\s*$|\\s*[:()\\[\\]{}-]|\\s+[—–-])`, 'im');
   return re.test(String(markdown || ''));
 }
 
@@ -36,30 +49,39 @@ function currentBlock(markdown) {
   const src = String(markdown || '').replace(/\r\n/g, '\n');
   const lines = src.split('\n');
   let start = -1;
+  let headingLevel = 2;
   for (let i = 0; i < lines.length; i++) {
-    if (/^##\s+Current\s*$/i.test(lines[i].trim())) {
+    const line = lines[i].trim().replace(/\s+#+\s*$/, '');
+    if (/^#{1,6}\s+Current(?:\s*$|\s*[:()\[\]{}-]|\s+[—–-])/i.test(line)) {
       start = i + 1;
+      const match = line.match(/^(#{1,6})\s+/);
+      headingLevel = match ? match[1].length : 2;
       break;
     }
   }
   if (start < 0) return '';
   const body = [];
   for (let i = start; i < lines.length; i++) {
-    if (/^##\s+/.test(lines[i])) break;
+    const line = lines[i].trim();
+    const match = line.match(/^(#{1,6})\s+/);
+    if (match && match[1].length <= headingLevel) break;
     body.push(lines[i]);
   }
   return body.join('\n').trim();
 }
 
-function loadMeta(agentName) {
+function loadMeta(agentName, apiAgent = null) {
   const metaPath = path.join(DATA_AGENTS_DIR, agentName, 'meta.json');
-  if (!existsSync(metaPath)) return { metaPath, workspacePath: null };
+  const workspaceFromApi = normalizeWorkspacePath(apiAgent?.workspacePath);
+  if (!existsSync(metaPath)) return { metaPath, workspacePath: workspaceFromApi };
   try {
     const meta = JSON.parse(readFileSync(metaPath, 'utf-8'));
-    const workspacePath = (typeof meta.path === 'string' && meta.path.trim()) ? meta.path.trim() : null;
+    const workspacePath = (typeof meta.path === 'string' && meta.path.trim())
+      ? normalizeWorkspacePath(meta.path.trim())
+      : workspaceFromApi;
     return { metaPath, workspacePath };
   } catch {
-    return { metaPath, workspacePath: null };
+    return { metaPath, workspacePath: workspaceFromApi };
   }
 }
 
@@ -84,12 +106,12 @@ function resolveDocs(agentName, workspacePath) {
   };
 }
 
-async function fetchActiveAgents() {
+async function fetchAgentsSnapshot() {
   try {
     const res = await fetch(`${BACKEND_URL}/api/agents`);
     if (!res.ok) return null;
     const rows = await res.json();
-    return Array.isArray(rows) ? rows.filter(r => r && r.online === true).map(r => r.name) : null;
+    return Array.isArray(rows) ? rows : null;
   } catch {
     return null;
   }
@@ -103,8 +125,8 @@ function collectAllAgentNames() {
     .sort((a, b) => a.localeCompare(b));
 }
 
-function auditOne(agentName) {
-  const { workspacePath, metaPath } = loadMeta(agentName);
+function auditOne(agentName, apiAgent = null) {
+  const { workspacePath, metaPath } = loadMeta(agentName, apiAgent);
   const docs = resolveDocs(agentName, workspacePath);
   const agentsMd = readText(docs.agentsPath);
   const planMd = readText(docs.planPath);
@@ -157,8 +179,23 @@ function printTable(rows) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   let names = collectAllAgentNames();
+  const apiRows = await fetchAgentsSnapshot();
+  const apiByName = new Map();
+  if (Array.isArray(apiRows)) {
+    for (const row of apiRows) {
+      if (!row || typeof row.name !== 'string') continue;
+      apiByName.set(row.name, row);
+    }
+  }
   if (args.activeOnly) {
-    const active = await fetchActiveAgents();
+    const active = Array.isArray(apiRows)
+      ? apiRows
+          .filter(r => r && r.online === true)
+          .filter(r => typeof r.tmux === 'string' && r.tmux.trim())
+          .filter(r => r.blocked !== true)
+          .filter(r => r.activeNow === true)
+          .map(r => r.name)
+      : null;
     if (Array.isArray(active) && active.length > 0) {
       const keep = new Set(active);
       names = names.filter(name => keep.has(name));
@@ -166,7 +203,7 @@ async function main() {
   }
   if (args.limit) names = names.slice(0, args.limit);
 
-  const rows = names.map(auditOne);
+  const rows = names.map(name => auditOne(name, apiByName.get(name) || null));
   const summary = {
     total: rows.length,
     pass: rows.filter(r => r.missing.length === 0).length,
