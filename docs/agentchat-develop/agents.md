@@ -21,3 +21,4 @@
 - Supervisor doc extraction should treat nested headings (`###`) as part of a `## Role/Boundaries/Current` block; stopping on any heading causes false `missing-doc-sections`.
 - `audit:agent-docs -- --active` should mirror supervisor candidate filters (`online + tmux + activeNow + not blocked`) to avoid inflated false-fail coverage reports.
 - Auto-discovered agents can lack `data/agents/{agent}/meta.json`; runtime-reported `workspacePath` provides a reliable docs resolution fallback.
+- Workspace resolution precedence for supervisor docs lookup must be stable-first: `meta workspace path` > `runtime workspace path` fallback; runtime path should not override meta when both exist.

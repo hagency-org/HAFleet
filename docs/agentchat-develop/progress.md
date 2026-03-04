@@ -25,3 +25,18 @@ Verification evidence:
   - `agentchat-worker`: `hasRole=true hasBoundaries=true hasCurrentTask=true`
   - `agentchat-develop`: `hasRole=true hasBoundaries=true hasCurrentTask=true`
   - `prts`: `hasRole=true hasBoundaries=false hasCurrentTask=true` (real missing boundary section).
+
+## [2026-03-04 17:39] DONE — patched workspacePath precedence and mismatch observability
+- Adjusted `supervisor/collector.js` precedence to `metaWorkspacePath || runtimeWorkspacePath` (runtime is fallback only).
+- Added context-level mismatch diagnostics when both paths exist but differ:
+  - `workspacePathMismatch`
+  - `workspacePathMeta`
+  - `workspacePathRuntime`
+  - `workspacePathSource` (`meta` / `runtime-fallback` / `none`)
+- Added supervisor event observability in `supervisor/index.js` under `event.workspace`:
+  - `source`, `effectivePath`, `metaPath`, `runtimePath`, `mismatch`.
+
+Verification evidence:
+- `node --check supervisor/collector.js supervisor/index.js` passed.
+- Case 1 (meta exists + runtime differs): effective path and docs root stay on meta path; mismatch=true.
+- Case 2 (meta missing + runtime present): effective path falls back to runtime; source=`runtime-fallback`.
