@@ -126,6 +126,14 @@ function normalizeServer(value) {
   return trimmed || null;
 }
 
+function normalizeWorkspacePath(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 4096) return null;
+  if (!path.isAbsolute(trimmed)) return null;
+  return path.resolve(trimmed);
+}
+
 function normalizeAgentName(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -590,6 +598,7 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
   runtime.activeDurationSec = Number(runtime.activeDurationSec) || 0;
   runtime.idleDurationSec = Number(runtime.idleDurationSec) || 0;
   runtime.lastTmuxActivitySec = Number(runtime.lastTmuxActivitySec) || null;
+  runtime.workspacePath = normalizeWorkspacePath(runtime.workspacePath);
   runtime.mcpPresent = runtime.mcpPresent === true
     ? true
     : (runtime.mcpPresent === false ? false : null);
@@ -881,6 +890,7 @@ function ensureAgentRuntimeRecord(name) {
       activeDurationSec: 0,
       idleDurationSec: 0,
       lastTmuxActivitySec: null,
+      workspacePath: null,
       mcpPresent: null,
       mcpMissingSince: null,
       updatedAt: 0,
@@ -1061,6 +1071,15 @@ function setRuntimeMcpFields(runtime, payload = {}, now = Date.now()) {
   return changed;
 }
 
+function setRuntimeWorkspacePath(runtime, payload = {}) {
+  if (!runtime || typeof runtime !== 'object') return false;
+  if (!Object.prototype.hasOwnProperty.call(payload, 'workspacePath')) return false;
+  const normalized = normalizeWorkspacePath(payload.workspacePath);
+  if ((runtime.workspacePath || null) === (normalized || null)) return false;
+  runtime.workspacePath = normalized;
+  return true;
+}
+
 function isHumanMessageToAgent(msg, agentName) {
   if (!msg || msg.type !== 'human') return false;
   if (msg.to === agentName) return true;
@@ -1170,6 +1189,7 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
   }
 
   if (setRuntimeActivityFields(runtime, payload)) changed = true;
+  if (setRuntimeWorkspacePath(runtime, payload)) changed = true;
   if (setRuntimeMcpFields(runtime, payload, now)) changed = true;
   if (changed) saveAgentRuntime();
 
@@ -2077,6 +2097,7 @@ function serializeAgent(agent) {
     activeDurationSec: Number(runtime?.activeDurationSec) || 0,
     idleDurationSec: Number(runtime?.idleDurationSec) || 0,
     lastTmuxActivitySec: Number(runtime?.lastTmuxActivitySec) || null,
+    workspacePath: runtime?.workspacePath || null,
     mcpPresent: runtime?.mcpPresent === true
       ? true
       : (runtime?.mcpPresent === false ? false : null),
@@ -2821,6 +2842,9 @@ app.post('/api/agents/:name/runtime', (req, res) => {
   const activeDurationSec = req.body?.activeDurationSec;
   const idleDurationSec = req.body?.idleDurationSec;
   const lastTmuxActivitySec = req.body?.lastTmuxActivitySec;
+  const workspacePath = Object.prototype.hasOwnProperty.call(req.body || {}, 'workspacePath')
+    ? req.body.workspacePath
+    : undefined;
   const mcpPresent = Object.prototype.hasOwnProperty.call(req.body || {}, 'mcpPresent')
     ? (req.body.mcpPresent === true ? true : (req.body.mcpPresent === false ? false : null))
     : undefined;
@@ -2850,6 +2874,7 @@ app.post('/api/agents/:name/runtime', (req, res) => {
     activeDurationSec,
     idleDurationSec,
     lastTmuxActivitySec,
+    workspacePath,
     mcpPresent,
   });
   if (!runtime) return res.status(500).json({ error: 'runtime update failed' });
@@ -2864,6 +2889,7 @@ app.post('/api/agents/:name/runtime', (req, res) => {
       activeDurationSec: Number(runtime.activeDurationSec) || 0,
       idleDurationSec: Number(runtime.idleDurationSec) || 0,
       lastTmuxActivitySec: Number(runtime.lastTmuxActivitySec) || null,
+      workspacePath: runtime.workspacePath || null,
       mcpPresent: runtime.mcpPresent === true
         ? true
         : (runtime.mcpPresent === false ? false : null),
