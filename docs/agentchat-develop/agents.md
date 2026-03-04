@@ -22,3 +22,4 @@
 - `audit:agent-docs -- --active` should mirror supervisor candidate filters (`online + tmux + activeNow + not blocked`) to avoid inflated false-fail coverage reports.
 - Auto-discovered agents can lack `data/agents/{agent}/meta.json`; runtime-reported `workspacePath` provides a reliable docs resolution fallback.
 - Workspace resolution precedence for supervisor docs lookup must be stable-first: `meta workspace path` > `runtime workspace path` fallback; runtime path should not override meta when both exist.
+- Delivery policy (operator update via `agentchat-worker`, 2026-03-04): local commits can be frequent, but `git push` should happen only after a full feature closure (`implementation + verification + docs + self-check`), except urgent production hotfixes.

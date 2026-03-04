@@ -40,3 +40,7 @@ Verification evidence:
 - `node --check supervisor/collector.js supervisor/index.js` passed.
 - Case 1 (meta exists + runtime differs): effective path and docs root stay on meta path; mismatch=true.
 - Case 2 (meta missing + runtime present): effective path falls back to runtime; source=`runtime-fallback`.
+
+## [2026-03-04 17:41] DONE — adopted new push gating workflow policy
+- Process update received from `agentchat-worker` (operator policy): push only after full feature closure (`implementation + verification + docs + self-check`), with urgent production hotfix as the explicit exception.
+- Stored as durable operational knowledge in `docs/agentchat-develop/agents.md` for future sessions.
