@@ -16,3 +16,8 @@
 - Perform destructive git resets/checkouts.
 - Make unrelated refactors while delivering current task.
 - Modify other agents' docs directories directly; use shared tooling and coordination channels instead.
+
+## Operational Knowledge
+- Supervisor doc extraction should treat nested headings (`###`) as part of a `## Role/Boundaries/Current` block; stopping on any heading causes false `missing-doc-sections`.
+- `audit:agent-docs -- --active` should mirror supervisor candidate filters (`online + tmux + activeNow + not blocked`) to avoid inflated false-fail coverage reports.
+- Auto-discovered agents can lack `data/agents/{agent}/meta.json`; runtime-reported `workspacePath` provides a reliable docs resolution fallback.
