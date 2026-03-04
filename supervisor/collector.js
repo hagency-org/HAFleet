@@ -122,9 +122,14 @@ function safeTmuxTarget(raw) {
 
 export function collectAgentContext(config, agentName, agentRecord, runtimeRecord) {
   const now = Date.now();
-  const { workspacePath: metaWorkspacePath, metaPath } = loadMetaWorkspace(config.metaRoot, agentName);
+  const { workspacePath: rawMetaWorkspacePath, metaPath } = loadMetaWorkspace(config.metaRoot, agentName);
+  const metaWorkspacePath = normalizeWorkspacePath(rawMetaWorkspacePath);
   const runtimeWorkspacePath = normalizeWorkspacePath(runtimeRecord?.workspacePath);
-  const effectiveWorkspacePath = runtimeWorkspacePath || normalizeWorkspacePath(metaWorkspacePath);
+  const effectiveWorkspacePath = metaWorkspacePath || runtimeWorkspacePath;
+  const workspacePathMismatch = Boolean(metaWorkspacePath && runtimeWorkspacePath && metaWorkspacePath !== runtimeWorkspacePath);
+  const workspacePathSource = metaWorkspacePath
+    ? 'meta'
+    : (runtimeWorkspacePath ? 'runtime-fallback' : 'none');
   const docsPaths = resolveDocsPaths(config, agentName, effectiveWorkspacePath);
 
   const agentsDocRaw = readText(docsPaths.agentsPath);
@@ -168,7 +173,10 @@ export function collectAgentContext(config, agentName, agentRecord, runtimeRecor
     ts: now,
     agent: agentName,
     workspacePath: effectiveWorkspacePath,
-    workspacePathSource: runtimeWorkspacePath ? 'runtime' : (metaWorkspacePath ? 'meta' : 'none'),
+    workspacePathSource,
+    workspacePathMeta: metaWorkspacePath,
+    workspacePathRuntime: runtimeWorkspacePath,
+    workspacePathMismatch,
     metaPath,
     docs: {
       docsRoot: docsPaths.docsRoot,

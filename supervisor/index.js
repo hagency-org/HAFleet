@@ -175,6 +175,13 @@ export class SupervisorService {
         source: context.pane.source,
         hash: context.pane.hash,
       },
+      workspace: {
+        source: context.workspacePathSource || 'none',
+        effectivePath: context.workspacePath || null,
+        metaPath: context.workspacePathMeta || null,
+        runtimePath: context.workspacePathRuntime || null,
+        mismatch: context.workspacePathMismatch === true,
+      },
       docs: {
         docsRoot: context.docs.docsRoot,
         agentsPath: context.docs.agentsPath,
