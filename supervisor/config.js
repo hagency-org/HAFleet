@@ -19,6 +19,22 @@ function parseBool(value, fallback = false) {
   return fallback;
 }
 
+function parseAgentAllowlist(value) {
+  if (value === undefined || value === null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const out = [];
+  const seen = new Set();
+  for (const part of raw.split(',')) {
+    const name = part.trim();
+    if (!name) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out.length ? out : null;
+}
+
 function normalizeEndpoint(baseOrEndpoint, defaultEndpoint) {
   const raw = String(baseOrEndpoint || '').trim();
   if (!raw) return defaultEndpoint;
@@ -85,6 +101,7 @@ export function loadSupervisorConfig(env = process.env) {
       .split(',')
       .map(s => s.trim())
       .filter(Boolean),
+    agentAllowlist: parseAgentAllowlist(env.SUPERVISOR_AGENT_ALLOWLIST),
     docsRootOverride: String(env.SUPERVISOR_DOCS_ROOT || '').trim() || null,
     metaRoot: path.resolve(env.SUPERVISOR_META_ROOT || 'data/agents'),
     serverSshPath: path.resolve(env.SUPERVISOR_SERVER_SSH_PATH || 'data/server-ssh.json'),

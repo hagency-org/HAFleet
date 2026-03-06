@@ -120,6 +120,8 @@ Central API server. All data lives here.
 | GET | `/api/supervisor/status` | Supervisor runtime/config status |
 | GET | `/api/supervisor/agents` | Supervisor summary for all audited agents |
 | GET | `/api/supervisor/agents/:name` | Supervisor detail timeline for one agent |
+| GET | `/api/supervisor/control` | Supervisor runtime control state (enabled + allowlist) |
+| POST | `/api/supervisor/control` | Update supervisor runtime control (`enabled`, `allowedAgents`) |
 
 ### server.js (port 8084)
 
@@ -190,7 +192,7 @@ Unified CLI that dispatches to subcommands. Legacy commands (`agent-up`, `agent-
 
 ```bash
 # Agent lifecycle
-agentchat up <name> <path> [claude|codex] [--fresh] [--attach] [--model <m>]
+agentchat up <name> <path> [claude|codex] [--fresh] [--attach] [--allow-shared-workspace] [--model <m>]
 agentchat down <name> [--kill] [--timeout <sec>]
 agentchat ls
 
@@ -275,7 +277,7 @@ Remote servers run a lightweight subset. See `remote/README.md` for full setup.
 git clone <repo> && cd agent-chat
 cp remote/.env.example remote/.env  # fill AGENT_CHAT_API, API_TOKEN, AGENT_CHAT_SERVER
 bash remote/install-remote.sh
-agentchat up <name> <path> [claude|codex]
+agentchat up <name> <path> [claude|codex] [--allow-shared-workspace]
 agentchat verify-remote --agent <name>
 ```
 
@@ -355,6 +357,8 @@ SUPERVISOR_LLM_PROVIDER=deepseek
 SUPERVISOR_LLM_MODEL=deepseek-chat
 SUPERVISOR_LLM_KEY=<deepseek api key>
 # optional: SUPERVISOR_LLM_ENDPOINT, SUPERVISOR_MATRIX_MENTIONS=kamico
+# optional startup allowlist: only audit these agents (comma-separated), e.g. "agentchat-worker,prts-control"
+SUPERVISOR_AGENT_ALLOWLIST=
 ```
 
 ## Installation

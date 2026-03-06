@@ -639,15 +639,21 @@ function normalizeMessageText(value) {
 
 function renderMarkdownInline(raw) {
   let text = escapeHtml(normalizeMessageText(raw));
+  const codeTokens = [];
+  text = text.replace(/`([^`\n]+)`/g, (_m, code) => {
+    const idx = codeTokens.push(`<code>${code}</code>`) - 1;
+    return `@@INL${idx}@@`;
+  });
   text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label, url) => {
     const safeUrl = escapeHtmlAttr(url);
     return `<a href="${safeUrl}">${label}</a>`;
   });
   text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   text = text.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  text = text.replace(/~~([^~]+)~~/g, '<del>$1</del>');
   text = text.replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s).,!?:;])/g, '$1<em>$2</em>');
   text = text.replace(/(^|[\s(])_([^_\n]+)_(?=$|[\s).,!?:;])/g, '$1<em>$2</em>');
-  return text;
+  return text.replace(/@@INL(\d+)@@/g, (_m, idx) => codeTokens[Number(idx)] || '');
 }
 
 function renderMarkdownToMatrixHtml(raw) {
@@ -992,6 +998,28 @@ class MatrixBridge {
   }
   isKnownAgentName(name) { return Boolean(this.resolveKnownAgentName(name)); }
 
+  async ensureAgentToken(agentName, context = 'unknown') {
+    const normalized = this.normalizeName(agentName);
+    if (!normalized) return null;
+    const canonical = this.addKnownAgent(normalized) || normalized;
+    let token = this.getAgentToken(canonical);
+    if (token) return token;
+    try {
+      await ensureAgentAccount(canonical);
+      this.addKnownAgent(canonical);
+      token = this.getAgentToken(canonical);
+      if (!token) {
+        console.warn(`Agent token still missing after ensureAgentAccount for "${canonical}" (context=${context})`);
+        return null;
+      }
+      console.log(`Backfilled Matrix token for agent "${canonical}" (context=${context})`);
+      return token;
+    } catch (e) {
+      console.warn(`Failed to ensure Matrix token for agent "${canonical}" (context=${context}): ${e.message}`);
+      return null;
+    }
+  }
+
   rememberMatrixEvent(eventId, msgId = null) {
     if (!eventId) return;
     const prev = this.recentMatrixEvents.get(eventId);
@@ -1197,9 +1225,12 @@ class MatrixBridge {
       const validAgentNames = new Set(agents.map(a => a.name));
       const validAgentKeys = new Set(agents.map(a => this.nameKey(a.name)));
       for (const agent of agents) {
-        if (!this.isKnownAgentName(agent.name)) {
-          await ensureAgentAccount(agent.name);
-          this.addKnownAgent(agent.name);
+        const wasKnown = this.isKnownAgentName(agent.name);
+        const canonicalName = this.addKnownAgent(agent.name) || this.normalizeName(agent.name);
+        if (canonicalName && !this.getAgentToken(canonicalName)) {
+          await this.ensureAgentToken(canonicalName, 'registration_poll');
+        }
+        if (!wasKnown) {
           console.log(`Discovered new agent: ${agent.name}`);
         }
       }
@@ -2199,16 +2230,7 @@ class MatrixBridge {
         return;
       }
     } else {
-      const token = this.getAgentToken(canonicalAgentName);
-      if (!token) {
-        // Unknown agent, ensure account exists
-        if (!this.isKnownAgentName(canonicalAgentName)) {
-          await ensureAgentAccount(canonicalAgentName);
-          this.addKnownAgent(canonicalAgentName);
-        }
-      }
-
-      senderToken = this.getAgentToken(canonicalAgentName);
+      senderToken = await this.ensureAgentToken(canonicalAgentName, `outbound:${msg.id}`);
       if (!senderToken) {
         console.warn(`No Matrix token for agent "${canonicalAgentName}", cannot bridge message ${msg.id}`);
         this.postWarning(`No Matrix token for agent "${canonicalAgentName}" — message ${msg.id} not bridged to Matrix`);
@@ -2231,7 +2253,7 @@ class MatrixBridge {
       html = `${typeBadge} <strong>${summaryHtml}</strong>${htmlMentions}<br><br>${fullHtml}<br><br><a href="${escapeHtmlAttr(msgUrl)}">🔗 View formatted</a>`;
     } else {
       plain = `${typeBadge} ${normalizeMessageText(msg.summary)}${mentionText}`;
-      const summaryHtml = renderMarkdownInline(msg.summary);
+      const summaryHtml = renderMarkdownToMatrixHtml(msg.summary);
       html = `${typeBadge} ${summaryHtml}${htmlMentions}`;
     }
 

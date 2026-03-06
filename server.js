@@ -766,6 +766,30 @@ app.get('/api/supervisor/agents/:name', async (req, res) => {
   }
 });
 
+app.get('/api/supervisor/control', async (_req, res) => {
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/supervisor/control`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.post('/api/supervisor/control', async (req, res) => {
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/supervisor/control`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
 // SSE for queue updates (reuse existing SSE clients, send typed events)
 function queueSnapshot() {
   const items = [];
@@ -1610,14 +1634,14 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 }
 .monitor-bar-name{color:#00f0ff;font-size:12px;text-shadow:0 0 6px rgba(0,240,255,0.2)}
 .monitor-bar-btns{display:flex;gap:6px}
-#btn-scroll-bottom,#btn-pause,#btn-speed{
+#btn-scroll-bottom,#btn-pause,#btn-speed,#btn-audit{
   padding:4px 14px;border-radius:5px;font-family:inherit;font-size:10px;
   letter-spacing:1px;cursor:pointer;
   border:1px solid rgba(0,240,255,0.25);
   background:rgba(0,240,255,0.06);color:#00f0ff;
   transition:all .2s;
 }
-#btn-scroll-bottom:hover,#btn-pause:hover,#btn-speed:hover{background:rgba(0,240,255,0.15)}
+#btn-scroll-bottom:hover,#btn-pause:hover,#btn-speed:hover,#btn-audit:hover{background:rgba(0,240,255,0.15)}
 #btn-pause.paused{border-color:rgba(251,191,36,0.4);color:#fbbf24;background:rgba(251,191,36,0.06)}
 #btn-speed.turbo{border-color:rgba(52,211,153,0.45);color:#34d399;background:rgba(52,211,153,0.08)}
 #terminal-wrap{flex:1;min-height:0;overflow:hidden;position:relative;margin:5px;border-radius:18px / 14px}
@@ -1853,7 +1877,7 @@ body.page-hidden #reminder-panel.has-items{
   .agent-btn{padding:4px 8px;font-size:10px;gap:4px}
   .monitor-bar{padding:6px 12px;margin:3px 0 0}
   .monitor-bar-name{font-size:11px}
-  #btn-scroll-bottom,#btn-pause,#btn-speed{padding:3px 10px;font-size:9px}
+  #btn-scroll-bottom,#btn-pause,#btn-speed,#btn-audit{padding:3px 10px;font-size:9px}
   #terminal{padding:8px 12px;font-size:11px}
   #terminal-wrap{margin:3px;border-radius:14px / 11px}
   #terminal-wrap::before{border-radius:14px / 11px}
@@ -1883,6 +1907,7 @@ body.page-hidden #reminder-panel.has-items{
         <span class="monitor-bar-btns">
           <button id="btn-scroll-bottom" style="display:none">&#8615; BOTTOM</button>
           <button id="btn-speed" style="display:none">10HZ</button>
+          <button id="btn-audit" style="display:none" onclick="openAuditPage()">AUDIT</button>
           <button id="btn-pause" style="display:none">&#9646;&#9646; PAUSE</button>
         </span>
       </div>
@@ -2121,6 +2146,7 @@ body.page-hidden #reminder-panel.has-items{
   const terminalEl     = document.getElementById('terminal');
   const btnPause       = document.getElementById('btn-pause');
   const btnSpeed       = document.getElementById('btn-speed');
+  const btnAudit       = document.getElementById('btn-audit');
   const btnScrollBottom = document.getElementById('btn-scroll-bottom');
   const agentInfoEl    = document.getElementById('agent-info');
 
@@ -2282,6 +2308,7 @@ body.page-hidden #reminder-panel.has-items{
       btnSpeed.style.display = '';
       updateSpeedButton();
     }
+    if (btnAudit) btnAudit.style.display = '';
     btnScrollBottom.style.display = '';
     monitorLabelEl.textContent = 'Monitoring: ' + agent.name;
     monitorEmptyEl.style.display = 'none';
@@ -2498,6 +2525,7 @@ body.page-hidden #reminder-panel.has-items{
     terminalWrapEl.classList.add('hidden');
     btnPause.style.display = 'none';
     if (btnSpeed) btnSpeed.style.display = 'none';
+    if (btnAudit) btnAudit.style.display = 'none';
     btnScrollBottom.style.display = 'none';
     agentInfoEl.classList.remove('visible');
     agentInfoEl.innerHTML = '';

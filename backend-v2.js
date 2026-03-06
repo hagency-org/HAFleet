@@ -65,6 +65,16 @@ const AGENT_COMPACT_FALLBACK_PATTERNS = [
   { marker: 'claude-conversation-compacted', re: /(?:^|\n)\s*(?:✻\s*)?Conversation compacted \(ctrl\+o for history\)\s*(?:\n|$)/i },
   { marker: 'claude-compacted-summary', re: /(?:^|\n)\s*(?:⎿\s*)?Compacted \(ctrl\+o to see full summary\)\s*(?:\n|$)/i },
 ];
+const LOCAL_BLOCK_TAIL_LINES = Number.parseInt(process.env.AGENT_LOCAL_BLOCK_TAIL_LINES || '40', 10);
+const LOCAL_BLOCK_RECENT_LINES = Number.parseInt(process.env.AGENT_LOCAL_BLOCK_RECENT_LINES || '14', 10);
+const LOCAL_MCP_SESSION_CACHE_TTL_MS = Number.parseInt(process.env.AGENT_LOCAL_MCP_SESSION_CACHE_TTL_MS || '1000', 10);
+const LOCAL_BLOCK_PATTERNS = [
+  { reason: 'select-mode', re: /(?:^|\n)\s*(?:select mode|choose (?:an?\s+)?mode)\s*(?:\n|$)/i },
+  { reason: 'plan-mode', re: /(?:^|\n)\s*(?:[0-9]+[.)]\s*)?plan mode\s*(?:\n|$)/i },
+  { reason: 'approval-mode-toggle', re: /bypass permissions on \(shift\+tab to cycle\)/i },
+  { reason: 'update-required', re: /updates?\s+available:|update available.*agent-update|run ['"`]?agent-update/i },
+  { reason: 'interactive-confirm', re: /choose (an )?option|press (enter|return) to continue|confirm .*continue/i },
+];
 
 mkdirSync(DATA_DIR, { recursive: true });
 const MESSAGE_ATTACHMENT_DIR = path.join(DATA_DIR, 'message-attachments');
@@ -189,6 +199,29 @@ function detectAgentCompactSignal(summary, full) {
   }
   for (const pattern of AGENT_COMPACT_FALLBACK_PATTERNS) {
     if (pattern.re.test(raw)) return { mode: 'pattern', marker: pattern.marker };
+  }
+  return null;
+}
+
+function recentTailWindow(tail, maxLines = LOCAL_BLOCK_RECENT_LINES) {
+  const lines = String(tail || '')
+    .split(/\r?\n/)
+    .map(line => line.replace(/\s+$/g, ''))
+    .filter(line => line.trim().length > 0);
+  if (lines.length === 0) return '';
+  return lines.slice(-Math.max(1, maxLines)).join('\n');
+}
+
+function detectLocalBlockedReason(tail, paneCmd = '') {
+  if (!tail) return null;
+  const cmd = String(paneCmd || '').toLowerCase();
+  if (cmd && !cmd.includes('claude') && !cmd.includes('codex')) return null;
+  const window = recentTailWindow(tail, LOCAL_BLOCK_RECENT_LINES);
+  if (!window) return null;
+  if (/tip:\s*use plan mode\b/i.test(window)) return null;
+
+  for (const p of LOCAL_BLOCK_PATTERNS) {
+    if (p.re.test(window)) return p.reason;
   }
   return null;
 }
@@ -420,6 +453,7 @@ let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
 const localTmuxMissingState = new Map(); // agent -> { since:number, alerted:boolean }
 const localCompactState = new Map(); // agent -> marker
+const localRuntimeSignalDigest = new Map(); // agent -> digest of blocked/mcp/workspace
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const unexpectedOfflineAlertAt = new Map(); // key(agent:reason) -> ts
 const compactRuntimeAlertAt = new Map(); // key(agent:marker:mode) -> ts
@@ -429,6 +463,8 @@ const swapAlertState = {
   lastAlertAt: 0,
 };
 const scopePressureState = new Map(); // agent -> { high:bool, lastAlertAt:number }
+let localMcpSessionCacheAt = 0;
+let localMcpSessionCache = new Set();
 const agentsBeforeNormalization = JSON.stringify(agents);
 
 for (const agent of Object.values(agents)) {
@@ -1552,6 +1588,64 @@ function captureLocalPaneContent(tmuxTarget) {
   }
 }
 
+function captureLocalPaneCommand(tmuxTarget) {
+  if (!tmuxTarget) return '';
+  try {
+    const raw = execSync(`tmux list-panes -t ${JSON.stringify(tmuxTarget)} -F "#{pane_current_command}" 2>/dev/null`, {
+      timeout: 3000,
+      encoding: 'utf-8',
+    }).trim();
+    return raw.split('\n')[0] || '';
+  } catch {
+    return '';
+  }
+}
+
+function captureLocalPanePath(tmuxTarget) {
+  if (!tmuxTarget) return null;
+  try {
+    const raw = execSync(`tmux list-panes -t ${JSON.stringify(tmuxTarget)} -F "#{pane_current_path}" 2>/dev/null`, {
+      timeout: 3000,
+      encoding: 'utf-8',
+    }).trim();
+    return normalizeWorkspacePath((raw.split('\n')[0] || '').trim());
+  } catch {
+    return null;
+  }
+}
+
+function normalizeMcpPresence(value) {
+  return value === true
+    ? true
+    : (value === false ? false : null);
+}
+
+function applyLocalRuntimeSignals(agentName, payload = {}) {
+  const blocked = payload.blocked === true;
+  const reason = blocked && typeof payload.reason === 'string' && payload.reason.trim()
+    ? payload.reason.trim()
+    : null;
+  const workspacePath = normalizeWorkspacePath(payload.workspacePath);
+  const mcpPresent = normalizeMcpPresence(payload.mcpPresent);
+  const digest = JSON.stringify({
+    blocked,
+    reason,
+    workspacePath: workspacePath || null,
+    mcpPresent,
+  });
+  if (localRuntimeSignalDigest.get(agentName) === digest) return;
+  localRuntimeSignalDigest.set(agentName, digest);
+  applyAgentBlockedRuntime(agentName, {
+    blocked,
+    reason,
+    tail: blocked && typeof payload.tail === 'string' ? payload.tail : '',
+    command: typeof payload.command === 'string' ? payload.command : '',
+    workspacePath,
+    mcpPresent,
+    server: 'local',
+  });
+}
+
 function localTmuxSessionExists(tmuxTarget) {
   if (!tmuxTarget) return false;
   const sessionName = String(tmuxTarget).split(':')[0].trim();
@@ -1619,12 +1713,15 @@ function sweepLocalActivityDurations() {
   let runtimeChanged = false;
   let agentsChanged = false;
   const pruneCandidates = new Set();
+  const localRuntimeAgents = new Set();
+  const mcpSessions = getLocalMcpSessionSet(true);
 
   for (const agent of Object.values(agents)) {
     if (!isAgentRecord(agent)) continue;
     const serverId = normalizeServer(agent.server);
     const isLocalAgent = !serverId || serverId === 'local' || serverId === LOCAL_SERVER_ID;
     if (!isLocalAgent) continue;
+    localRuntimeAgents.add(agent.name);
 
     const manualDown = agent.manualDown === true;
     const configuredTmux = (typeof agent.tmux === 'string' && agent.tmux.trim()) ? agent.tmux.trim() : null;
@@ -1635,6 +1732,14 @@ function sweepLocalActivityDurations() {
       localTmuxMissingState.delete(agent.name);
       localActivityState.delete(agent.name);
       localCompactState.delete(agent.name);
+      applyLocalRuntimeSignals(agent.name, {
+        blocked: false,
+        reason: null,
+        tail: '',
+        command: '',
+        workspacePath: null,
+        mcpPresent: null,
+      });
       const resetChanged = setRuntimeActivityFields(runtime, {
         activeNow: false,
         activeDurationSec: 0,
@@ -1651,6 +1756,17 @@ function sweepLocalActivityDurations() {
     const paneCapture = captureLocalPaneContent(tmuxTarget);
     if (!paneCapture?.hash) {
       const hasSession = localTmuxSessionExists(tmuxTarget);
+      const paneCmd = captureLocalPaneCommand(tmuxTarget);
+      const workspacePath = hasSession ? captureLocalPanePath(tmuxTarget) : null;
+      const mcpPresent = hasSession ? mcpSessions.has(agent.name) : null;
+      applyLocalRuntimeSignals(agent.name, {
+        blocked: false,
+        reason: null,
+        tail: '',
+        command: paneCmd,
+        workspacePath,
+        mcpPresent,
+      });
       if (hasSession) {
         localTmuxMissingState.delete(agent.name);
       }
@@ -1705,6 +1821,18 @@ function sweepLocalActivityDurations() {
       continue;
     }
     const paneHash = paneCapture.hash;
+    const paneCmd = captureLocalPaneCommand(tmuxTarget);
+    const workspacePath = captureLocalPanePath(tmuxTarget);
+    const blockedReason = detectLocalBlockedReason(paneCapture.text, paneCmd);
+    const blocked = Boolean(blockedReason);
+    applyLocalRuntimeSignals(agent.name, {
+      blocked,
+      reason: blockedReason,
+      tail: blocked ? recentTailWindow(paneCapture.text, LOCAL_BLOCK_TAIL_LINES) : '',
+      command: paneCmd,
+      workspacePath,
+      mcpPresent: mcpSessions.has(agent.name),
+    });
     localTmuxMissingState.delete(agent.name);
     const compactSignal = detectAgentCompactSignal('', paneCapture.text);
     if (compactSignal) {
@@ -1804,6 +1932,11 @@ function sweepLocalActivityDurations() {
 
   if (runtimeChanged) saveAgentRuntime();
   if (agentsChanged) saveAgents();
+  for (const name of [...localRuntimeSignalDigest.keys()]) {
+    if (!localRuntimeAgents.has(name)) {
+      localRuntimeSignalDigest.delete(name);
+    }
+  }
   if (pruneCandidates.size > 0) {
     pruneEphemeralAgents([...pruneCandidates], 'tmux-missing:auto');
   }
@@ -2225,9 +2358,10 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
 }
 
 // ── Push notification relay ───────────────────────────────────────────
-function agentHasMcp(agentName) {
+function collectLocalMcpSessions() {
   try {
     const paneOut = execSync('tmux list-panes -a -F "#{pane_tty} #{session_name}" 2>/dev/null', { timeout: 3000, encoding: 'utf-8' }).trim();
+    if (!paneOut) return new Set();
     const ptsMap = {};
     for (const line of paneOut.split('\n')) {
       const sp = line.indexOf(' ');
@@ -2239,15 +2373,33 @@ function agentHasMcp(agentName) {
     let pids;
     try {
       pids = execSync('pgrep -f "node.*mcp-server.js" 2>/dev/null', { timeout: 3000, encoding: 'utf-8' }).trim().split('\n').filter(Boolean);
-    } catch { return false; }
+    } catch { return new Set(); }
+    const matched = new Set();
     for (const pid of pids) {
       try {
         const pts = execSync(`ps -o tty= -p ${pid} 2>/dev/null`, { timeout: 3000, encoding: 'utf-8' }).trim();
-        if (ptsMap[pts] === agentName) return true;
+        const session = ptsMap[pts];
+        if (session) matched.add(session);
       } catch { /* pid vanished, skip */ }
     }
+    return matched;
   } catch { /* no tmux */ }
-  return false;
+  return new Set();
+}
+
+function getLocalMcpSessionSet(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && (now - localMcpSessionCacheAt) <= LOCAL_MCP_SESSION_CACHE_TTL_MS) {
+    return localMcpSessionCache;
+  }
+  localMcpSessionCache = collectLocalMcpSessions();
+  localMcpSessionCacheAt = now;
+  return localMcpSessionCache;
+}
+
+function agentHasMcp(agentName) {
+  if (!agentName) return false;
+  return getLocalMcpSessionSet(false).has(agentName);
 }
 
 const mergedPushInboxCursor = new Map();
@@ -2527,6 +2679,56 @@ app.get('/api/supervisor/agents/:name', (req, res) => {
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 120;
   const payload = supervisorService.getAgentDetail(agentName, limit);
   return res.json(payload);
+});
+
+app.get('/api/supervisor/control', (_req, res) => {
+  return res.json(supervisorService.getControl());
+});
+
+app.post('/api/supervisor/control', (req, res) => {
+  const body = req.body || {};
+  const patch = {};
+  let hasPatch = false;
+
+  if (Object.prototype.hasOwnProperty.call(body, 'enabled')) {
+    if (typeof body.enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be boolean' });
+    }
+    patch.enabled = body.enabled;
+    hasPatch = true;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, 'allowedAgents')) {
+    const raw = body.allowedAgents;
+    if (raw !== null && !Array.isArray(raw)) {
+      return res.status(400).json({ error: 'allowedAgents must be array or null' });
+    }
+    if (Array.isArray(raw)) {
+      const normalized = [];
+      const seen = new Set();
+      for (const item of raw) {
+        const name = normalizeAgentName(item);
+        if (!name) continue;
+        if (seen.has(name)) continue;
+        seen.add(name);
+        normalized.push(name);
+      }
+      patch.allowedAgents = normalized;
+    } else {
+      patch.allowedAgents = null;
+    }
+    hasPatch = true;
+  }
+
+  if (!hasPatch) {
+    return res.status(400).json({ error: 'no control fields provided' });
+  }
+
+  const result = supervisorService.updateControl(patch);
+  if (!result || result.ok !== true) {
+    return res.status(400).json({ error: result?.error || 'failed to update supervisor control' });
+  }
+  return res.json(result);
 });
 
 // ── Server heartbeats ─────────────────────────────────────────────────

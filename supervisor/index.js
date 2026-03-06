@@ -40,6 +40,21 @@ function isNegative(status) {
   return status === 'DRIFTING' || status === 'LOST' || status === 'STUCK';
 }
 
+function normalizeAgentAllowlist(input) {
+  if (input === null) return null;
+  if (!Array.isArray(input)) return null;
+  const out = [];
+  const seen = new Set();
+  for (const raw of input) {
+    const name = String(raw || '').trim();
+    if (!name) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
+
 export class SupervisorService {
   constructor(deps = {}) {
     this.config = deps.config || loadSupervisorConfig(process.env);
@@ -50,6 +65,7 @@ export class SupervisorService {
 
     this.enabled = this.config.enabled;
     this.disabledReason = this.config.disabledReason || null;
+    this.agentAllowlist = normalizeAgentAllowlist(this.config.agentAllowlist) || null;
     this.stateStore = new SupervisorStateStore(this.config.stateFile, this.config.warnAfter, this.config.warnCooldownMs);
     this.events = readJsonl(this.config.logFile, this.config.eventHistoryLimit);
     this.latestByAgent = new Map();
@@ -107,9 +123,11 @@ export class SupervisorService {
   resolveCandidates() {
     const all = (typeof this.getAgents === 'function' ? this.getAgents() : []) || [];
     const rows = [];
+    const allowSet = Array.isArray(this.agentAllowlist) ? new Set(this.agentAllowlist) : null;
     for (const agent of all) {
       if (!agent || !agent.name || !agent.tmux) continue;
       if (agent.online !== true) continue;
+      if (allowSet && !allowSet.has(agent.name)) continue;
       const runtime = typeof this.getRuntime === 'function' ? (this.getRuntime(agent.name) || {}) : {};
       if (this.config.skipBlocked && runtime.blocked === true) continue;
       if (this.config.activeOnly && runtime.activeNow !== true) continue;
@@ -268,6 +286,7 @@ export class SupervisorService {
   }
 
   getStatus() {
+    const allowlist = Array.isArray(this.agentAllowlist) ? [...this.agentAllowlist] : null;
     return {
       enabled: this.enabled,
       disabledReason: this.disabledReason,
@@ -278,6 +297,8 @@ export class SupervisorService {
       warnCooldownMs: this.config.warnCooldownMs,
       matrixInfoGroup: this.config.matrixInfoGroup,
       matrixMentions: this.config.matrixMentions,
+      allowedAgents: allowlist,
+      allowlistMode: allowlist === null ? 'all' : (allowlist.length ? 'subset' : 'none'),
       llm: {
         provider: this.config.llm.provider,
         model: this.config.llm.model,
@@ -292,6 +313,63 @@ export class SupervisorService {
         lastSweepEvaluated: this.lastSweepEvaluated,
       },
       eventCount: this.events.length,
+    };
+  }
+
+  getControl() {
+    return {
+      enabled: this.enabled,
+      disabledReason: this.disabledReason,
+      allowedAgents: Array.isArray(this.agentAllowlist) ? [...this.agentAllowlist] : null,
+      allowlistMode: Array.isArray(this.agentAllowlist)
+        ? (this.agentAllowlist.length ? 'subset' : 'none')
+        : 'all',
+    };
+  }
+
+  updateControl(patch = {}) {
+    const hasEnabled = Object.prototype.hasOwnProperty.call(patch, 'enabled');
+    const hasAllow = Object.prototype.hasOwnProperty.call(patch, 'allowedAgents');
+
+    if (!hasEnabled && !hasAllow) {
+      return { ok: false, error: 'no control fields provided' };
+    }
+
+    if (hasEnabled) {
+      if (typeof patch.enabled !== 'boolean') {
+        return { ok: false, error: 'enabled must be boolean' };
+      }
+      if (patch.enabled) {
+        if (!this.config.llm?.apiKey) {
+          return { ok: false, error: 'cannot enable supervisor without LLM API key' };
+        }
+        this.enabled = true;
+        this.disabledReason = null;
+        this.start();
+      } else {
+        this.enabled = false;
+        this.disabledReason = 'runtime-disabled';
+        this.stop();
+      }
+    }
+
+    if (hasAllow) {
+      if (patch.allowedAgents !== null && !Array.isArray(patch.allowedAgents)) {
+        return { ok: false, error: 'allowedAgents must be array or null' };
+      }
+      this.agentAllowlist = normalizeAgentAllowlist(patch.allowedAgents);
+    }
+
+    if (this.enabled) {
+      this.runSweep().catch((e) => {
+        this.lastSweepError = String(e?.message || e);
+      });
+    }
+
+    return {
+      ok: true,
+      control: this.getControl(),
+      status: this.getStatus(),
     };
   }
 

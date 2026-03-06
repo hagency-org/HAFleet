@@ -61,3 +61,19 @@ else
   echo "No resume-id found, starting fresh agentchat..."
   "$SCRIPT_DIR/agent-up" agentchat "$HOME" claude --fresh
 fi
+
+# Trigger automated reboot recovery after delay
+RECOVERY_DELAY=${RECOVERY_TRIGGER_DELAY_SEC:-25}
+(
+  sleep "$RECOVERY_DELAY"
+  if tmux has-session -t agentchat 2>/dev/null; then
+    NOTIFICATION='[NOTIFICATION] From system (auto-reboot-recovery): "Server has rebooted. Run reboot recovery skill: check backend API for manualDown states, resume all previously active local agents. Report results to kamico." Reply after ALL WORK is done, using the agent-chat MCP tool: send_message(to="kamico", summary="your reply", full="detailed reply").'
+    tmux send-keys -l -t agentchat:0.0 "$NOTIFICATION"
+    sleep 0.3
+    tmux send-keys -t agentchat:0.0 C-m
+    echo "Recovery trigger injected at $(date)"
+  else
+    echo "agentchat tmux session not found, skipping recovery trigger"
+  fi
+) &
+echo "Recovery trigger scheduled in ${RECOVERY_DELAY}s (pid=$!)"
