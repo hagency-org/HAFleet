@@ -44,3 +44,13 @@ Verification evidence:
 ## [2026-03-04 17:41] DONE — adopted new push gating workflow policy
 - Process update received from `agentchat-worker` (operator policy): push only after full feature closure (`implementation + verification + docs + self-check`), with urgent production hotfix as the explicit exception.
 - Stored as durable operational knowledge in `docs/agentchat-develop/agents.md` for future sessions.
+
+## [2026-03-06 01:36] PARTIAL — verified rollout in runtime; fresh live-sweep check blocked by supervisor switch
+Verification completed:
+- Runtime APIs are serving updated supervisor payload shape (workspace metadata present) via `curl --noproxy '*' http://127.0.0.1:8090/api/supervisor/agents` and `http://127.0.0.1:8084/api/supervisor/agents`.
+- Latest available supervisor event shows docs context resolved correctly (`hasRole=true`, `hasBoundaries=true`, `hasCurrentTask=true`) and no `missing-doc-sections` skip.
+- Active docs audit passes with current candidate filters: `npm run -s audit:agent-docs -- --active --json` => `total=1 pass=1 fail=0`.
+
+Root cause / blocker:
+- Fresh live validation on currently active agents cannot be completed because runtime supervisor is disabled (`SUPERVISOR_ENABLED=false`), so no new sweeps are produced.
+- Initial localhost API probes returned misleading `502` due proxy routing; using `--noproxy '*'` fixed the check path.

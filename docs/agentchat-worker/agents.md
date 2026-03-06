@@ -41,3 +41,6 @@
   - Use `NO_PROXY=127.0.0.1,localhost` for local curl validations
 - Doc-linking lesson:
   - For tracked `CLAUDE.md`/`AGENTS.md`, verify git tracking and backup first, then link.
+- Codex resume-id capture reliability:
+  - `agent-up` codex resume capture can fail if relying only on short early-shell checks or asynchronous background capture.
+  - Safety boundary remains strict: codex session ID must match workspace path (and name marker when present) to avoid cross-agent context bleed.
