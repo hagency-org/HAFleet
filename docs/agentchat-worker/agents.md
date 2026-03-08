@@ -204,6 +204,14 @@
   - accepted proof requires the first call after a real upstream change to inject `additionalContext` derived from upstream assistant messages and/or block deltas, then persist the advanced `lastSeenMessageId` / `lastBlockValues`;
   - a second identical `PreToolUse` call for the same session must truthfully no-op (`status=no-updates`) without advancing the durable markers again;
   - route response and `/api/subconscious/detail/:name` must converge on those same durable markers and the same `conversationId`.
+- Current subconscious event-ingest boundary is not yet trustworthy:
+  - the hook runtime can send `Authorization: Bearer <AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN>`, but `/api/subconscious/events` does not currently enforce that token or a strict local-only boundary in the handler;
+  - event rows therefore remain observational telemetry only and must not be treated as canonical policy/security state.
+- Current subconscious generic `guidance*` fields are derived compatibility fields, not canonical objects:
+  - they currently collapse manual guidance, local runtime guidance, and upstream `PreToolUse` injection into one summary vocabulary;
+  - canonical consumers should prefer object-led fields (`manualGuidance`, `runtime`, `upstream.userPrompt`, `upstream.preTool`, `upstream.stop`) instead of generic `guidancePresent/guidanceInjected/guidanceSource`.
+- Current subconscious top-level `stage` is presentation-only:
+  - it is a synthetic summary over multiple first-class objects and must not be used as the canonical policy/security state machine.
 - Architecture rule:
   - do not create display-first concepts, transition-only panels, or local substitutes that pretend to be mature system objects;
   - new fields, UI modules, and workflow concepts must map to a first-class object with a clear source of truth, or they should not ship.

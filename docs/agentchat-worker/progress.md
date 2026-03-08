@@ -1272,3 +1272,17 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `server.js`
   - `subconscious/claude-agentchat/scripts/hook-entry.mjs`
 - Acceptance boundary is now explicit: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `Stop` are all upstream-backed slices in dev; further work should move to architecture review of the event model/security boundary before widening hook scope again.
+## [2026-03-09 05:00] DONE — accepted the subconscious event/security review and cut the next batch to trust boundary + default-detail hardening
+- Reviewed [subconscious-event-security-review.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/subconscious-event-security-review.md) against the architecture contract instead of feature completeness.
+- Independent root-cause confirmation:
+  - the hook runtime can emit `Authorization: Bearer $AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN`, but `POST /api/subconscious/events` currently does not enforce that token or a strict local-only boundary in the handler;
+  - this means event rows are still observational telemetry, not a trustworthy canonical state surface.
+- Accepted the note's core findings:
+  - mirror-vs-canonical ambiguity across durable upstream files and route-written mirrors
+  - generic `guidance*` fields as synthetic compatibility summaries over incompatible paths
+  - unsafe default exposure of absolute paths and full text previews in the default detail contract
+  - top-level `stage` as a presentation helper rather than a canonical state machine
+- Narrowed the next implementation batch to:
+  - event-ingest trust boundary hardening first
+  - default operational detail vs privileged debug split second
+  - no new hook path and no UI expansion while correcting those boundaries
