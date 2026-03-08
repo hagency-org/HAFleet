@@ -1204,5 +1204,15 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - the source of truth for each object
   - forbidden display-first / transition-only patterns
   - the environment model (`live`, `dev`, `benchmark`, `ephemeral`)
-  - the next architecture priority order and agent allocation
+- the next architecture priority order and agent allocation
 - Updated the active plan so the next `UserPromptSubmit` Letta cutover is now explicitly subordinate to this object-model contract, instead of being treated as just the next feature batch.
+## [2026-03-09 04:19] BLOCKED — held the `UserPromptSubmit` cutover at architecture review due to truth-source divergence
+- `agentchat-develop` delivered a plausible `UserPromptSubmit` slice, but independent route-level proof found a first-class object consistency failure, so the batch is not accepted yet.
+- Proof session:
+  - `POST /api/subconscious/upstream/session-start/Yato` for `worker-userprompt-route-proof-1773001200` created conversation `conv-6d7978e6-1cb2-4af6-8818-6bbc9b38c406`
+  - `POST /api/subconscious/upstream/user-prompt/Yato` for the same session returned a different conversation id `conv-71feae34-6fec-48ce-8bec-3e1c9ece4493` and claimed `lastProcessedIndexAfter = 1`
+  - actual durable sync file `session-worker-userprompt-route-proof-1773001200.json` still contained the original conversation id and `lastProcessedIndex = -1`
+- Root cause class:
+  - route response, durable sync state, and detail/API state are not converging on one truth source
+  - under the architecture contract, that is a blocker even if the route looks functionally successful
+- Narrow repair request sent to `agentchat-develop`: fix truth-source convergence only; no extra UI, no new concepts, no broader scope expansion.

@@ -5,6 +5,7 @@ Acceptance criteria:
 - `agentchat-develop`, `Yato`, and `webdebug` are all re-tasked against that contract
 - the accepted Letta baselines remain stable (`SessionStart` notify returns cleanly and `Stop` remains upstream-backed with truthful observability)
 - `UserPromptSubmit` proceeds only as a first-class-object cutover, with truthful observability and no false parity claims
+- route response, durable session files, and detail/API contract converge on the same `conversationId` and `lastProcessedIndex` truth source for the proof session
 
 ## Queue
 1. Continue with `PreToolUse` only after `UserPromptSubmit` is accepted and its latency/visibility tradeoffs are understood.
