@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import path from 'path';
@@ -135,6 +135,14 @@ function defaultSubconsciousEventUrl(env = process.env) {
 function writeIfMissing(filePath, content) {
   if (existsSync(filePath)) return;
   writeFileSync(filePath, content, 'utf-8');
+}
+
+function safeReadJson(filePath, fallback = null) {
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch {
+    return fallback;
+  }
 }
 
 function workspaceTemplateMarker(version = WORKSPACE_CLAUDE_TEMPLATE_VERSION) {
@@ -334,12 +342,45 @@ Track agent-owned project material under \`../projects/\`.
   };
 }
 
-function safeReadJson(filePath, fallback = null) {
+function resolveLegacyMetaPath(homeRoot, agentName) {
+  const agentsDir = path.resolve(homeRoot, '..', 'data', 'agents');
+  const desired = path.join(agentsDir, agentName, 'meta.json');
+  if (!existsSync(agentsDir)) return desired;
   try {
-    return JSON.parse(readFileSync(filePath, 'utf-8'));
+    for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.toLowerCase() !== String(agentName || '').toLowerCase()) continue;
+      return path.join(agentsDir, entry.name, 'meta.json');
+    }
   } catch {
-    return fallback;
+    return desired;
   }
+  return desired;
+}
+
+function syncLegacyMeta(homeRoot, manifest) {
+  const metaPath = resolveLegacyMetaPath(homeRoot, manifest?.name || '');
+  const existing = safeReadJson(metaPath, {});
+  const merged = {
+    ...(existing && typeof existing === 'object' ? existing : {}),
+    name: manifest?.name || null,
+    type: manifest?.type || null,
+    path: manifest?.workdir || null,
+    agentModelVersion: manifest?.agentModelVersion || '1.0',
+    layoutVersion: Number(manifest?.layoutVersion) || 1,
+    agentId: manifest?.id || null,
+    homeDir: manifest?.homeDir || null,
+    workdir: manifest?.workdir || null,
+    stateDir: manifest?.stateDir || null,
+    agentJsonPath: manifest?.agentJsonPath || null,
+    v1HomeManaged: true,
+    subconsciousEnabled: manifest?.subconsciousEnabled === true,
+    managedProjects: Array.isArray(manifest?.managedProjects) ? manifest.managedProjects : [],
+    human: (manifest?.human && typeof manifest.human === 'object') ? manifest.human : {},
+  };
+  ensureDir(path.dirname(metaPath));
+  writeFileSync(metaPath, `${JSON.stringify(merged, null, 2)}\n`, 'utf-8');
+  return metaPath;
 }
 
 function deterministicLettaAgentId(seed) {
@@ -487,6 +528,10 @@ function main() {
   const workspaceSync = ensureDocs(paths, manifest);
 
   writeFileSync(paths.agentJsonPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
+  const legacyMetaPath = syncLegacyMeta(homeRoot, {
+    ...manifest,
+    agentJsonPath: paths.agentJsonPath,
+  });
   const lettaPath = ensureLettaState(paths, subconsciousEnabled, `${paths.agentId}:${name}`, name);
   const subconsciousRuntime = configureSubconscious(paths, manifest);
 
@@ -499,6 +544,7 @@ function main() {
     manifestPath: paths.agentJsonPath,
     subconsciousEnabled,
     workspaceSync,
+    legacyMetaPath,
     lettaPath,
     subconsciousRuntime,
     materialization,

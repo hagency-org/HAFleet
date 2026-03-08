@@ -4,46 +4,47 @@
 Template-Version: v1
 Generated-For: v1 agent home workspace
 
-This file is the maintained Claude workspace instruction set for this agent home.
-Provisioning renders it from `docs/workspace-claude-md-template.md`.
-
 ## Bootstrap
 - Read root `AGENTS.md` first on every resume or new session.
-- Then read `docs/plan.md`.
-- Then tail `docs/progress.md`.
-- Use `docs/projects.md` when project ownership or workspace contents matter.
+- Then read `docs/plan.md`, then tail `docs/progress.md`.
+- Check `docs/projects.md` to know which project you own and where its code lives.
 
-## Workspace Layout
-- `AGENTS.md`
-  - Root workspace entry file for role/boundary/bootstrap rules in this home.
-- `docs/`
-  - Support/history docs for this home.
-  - Main files: `plan.md`, `progress.md`, `projects.md`.
-  - `docs/CLAUDE.md` and `docs/AGENTS.md` are compatibility mirrors/links back to the root entry files.
-- `projects/`
-  - Agent-owned project checkouts or copied material managed through provisioning.
-- `scratch/`
-  - Throwaway local work, notes, or intermediate files.
-- `inbox/`
-  - Human/operator-provided inputs, staged requests, or artifacts to process.
-- `outputs/`
-  - Deliverables, reports, generated bundles, or handoff artifacts.
-- `data/`
-  - Runtime-created workspace-local caches or tool artifacts such as media cache.
-  - Treat as system/tool-managed support data, not the primary source of truth.
-- `../state/`
-  - System-owned runtime state for this home.
-  - Avoid manual edits unless the task explicitly requires it.
+## Where to work
 
-## Working Rules
-- Root-cause first. Do not hide failures with local placeholders or silent fallbacks.
-- Verify changes with commands, logs, API checks, or file inspection before marking work done.
-- Keep changes minimal and scoped to the active task.
+Your CWD is `workdir/`. This is your coordination root, not a codebase.
+
+**Code edits** go in the managed project under `projects/<name>/`. That directory is either a copy or a symlink of a source repo. Know which:
+- **copy**: you own this tree. Edit, commit, and test here. Changes do not propagate to the source repo.
+- **symlink**: edits here ARE edits to the source repo. Be aware of that when committing.
+
+If the operator asks you to edit the source repo directly (outside your home), do so — but never confuse your `projects/` copy with the source. Run `readlink projects/<name>` or check `docs/projects.md` to know which model applies.
+
+**Do not** create long-lived code, scripts, or project files in the workspace root, `scratch/`, or `docs/`. Those are coordination surfaces, not code trees.
+
+## Directory contract
+
+| Path | Purpose | Agent writes? |
+|------|---------|--------------|
+| `projects/` | Managed project trees (code, tests, git) | Yes — primary work area |
+| `docs/` | `plan.md`, `progress.md`, `projects.md` | Yes — coordination only |
+| `scratch/` | Throwaway probes, temp files, one-off scripts | Yes — nothing durable |
+| `inbox/` | Operator-staged inputs for processing | Read only |
+| `outputs/` | Deliverables, reports, handoff bundles | Yes — write when producing artifacts |
+| `data/` | Runtime tool caches (e.g. mcp-media-cache) | Managed by tools, not by agent |
+| `.claude/` | Claude settings, subconscious hook config | Managed by system; read for debugging |
+| `../state/` | Runtime state: subconscious events, locks, resume-id, letta | System-owned — do not edit |
+| Root `AGENTS.md` | Durable role/boundary rules | Yes — append learned rules here |
+| Root `CLAUDE.md` | This file (workspace contract) | No — provisioned by system |
+
+## Working rules
 - Record durable knowledge in root `AGENTS.md`.
-- Record task progress only in `docs/progress.md`.
+- Record task progress in `docs/progress.md`.
+- Verify changes from the path you actually edited, not from a different copy of the same file.
+- Root-cause first. Do not hide failures with local placeholders or silent fallbacks.
+- Keep changes minimal and scoped to the active task.
 
 ## Home Contract
 - Agent Name: `{{AGENT_NAME}}`
 - Agent Id: `{{AGENT_ID}}`
 - Layout Version: `{{LAYOUT_VERSION}}`
-- This workspace uses the flat v1 home docs model: `workdir/docs/`, not `docs/{agent}/`.
+- Docs model: flat v1 — `workdir/docs/`, not `docs/{agent}/`.

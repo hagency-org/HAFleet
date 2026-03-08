@@ -136,22 +136,21 @@
 - Current upstream SessionStart truthfulness shape in dev:
   - the accepted model is: upstream session lifecycle remains `started`/`established` if real `sessionId` + `conversationId` exist, even when the optional notify/send sub-step fails;
   - notify/send state now belongs under `upstream.session.notify`, not under bootstrap or the top-level session lifecycle state.
-- Current v1 workspace-template/provision mismatch:
-  - `scripts/provision-v1-agent-home.js` currently hardcodes a minimal `workdir/docs/CLAUDE.md` and does not derive it from `docs/workspace-claude-md-template.md`;
-  - the generated `CLAUDE.md` is therefore a stub, not a versioned workspace contract.
-- Current v1 Claude-workspace wiring gap:
-  - provisioning currently writes `workdir/docs/CLAUDE.md` only;
-  - repo code currently does not also create or link a root-level `workdir/CLAUDE.md`, so any expectation that Claude Code will load workspace instructions from the workdir root is not guaranteed by the current system.
-- Current v1 workspace-directory truth gap:
-  - provisioning always creates `workdir/projects`, `workdir/scratch`, `workdir/inbox`, and `workdir/outputs`;
-  - runtime can also create `workdir/data` (for example media cache);
-  - these directories are not yet fully described in the generated workspace docs/template, so agents and humans cannot infer their intended usage from the workspace itself.
-- Current project-ownership gap in dev:
-  - the v1 contract says project material belongs under `workdir/projects/`, but the system does not yet reliably teach or enforce that model for a fresh agent;
-  - current example: Yato has `managedProjects: []` and an empty `workdir/projects/`, so the control-plane/web story for project material remains incomplete.
-- Current v1 workspace repair acceptance boundary:
-  - the maintained template + provisioning contract are now the source of truth for fresh homes;
-  - existing dev homes are not migrated automatically until provisioning is rerun or a separate migration step is executed.
+- Current v1 workspace-template/provision contract:
+  - `scripts/provision-v1-agent-home.js` now renders `workdir/CLAUDE.md` from `docs/workspace-claude-md-template.md` instead of generating a hardcoded stub;
+  - the template is the maintained source of truth for workspace behavior, including project/workdir discipline and directory semantics.
+- Current v1 Claude-workspace wiring:
+  - provisioning now treats root `workdir/CLAUDE.md` and root `workdir/AGENTS.md` as the primary workspace-entry files;
+  - `workdir/docs/CLAUDE.md` and `workdir/docs/AGENTS.md` are transitional compatibility symlinks, while `docs/` is for support/history files such as `plan.md`, `progress.md`, and `projects.md`.
+- Current v1 workspace-directory contract:
+  - provisioning creates `workdir/projects`, `workdir/scratch`, `workdir/inbox`, and `workdir/outputs`, while runtime can create `workdir/data`;
+  - the maintained workspace template now explains the intended semantics of these paths and explicitly marks `../state/` and `.claude/` as system-managed.
+- Current project-ownership model in dev:
+  - managed project material for a v1 agent belongs under `workdir/projects/`, and the maintained workspace contract now teaches that the workspace root is a coordination root, not a codebase;
+  - concrete dev proof: Yato now owns a real managed `agent-chat` project at `workdir/projects/agent-chat`, and its workspace docs point code work there rather than to the main repo root.
+- Current v1 workspace migration boundary:
+  - the maintained template + provisioning contract are the source of truth for fresh homes;
+  - existing dev homes reach the same state only after explicit reprovision/migration, but rerunning provisioning is now an accepted path for that upgrade.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
@@ -182,6 +181,9 @@
   - `GET /api/agents/:name/projects` exposes the persisted v1 `managedProjects` model and the concrete `workdir/projects` root;
   - `POST /api/agents/:name/projects/import` reuses `scripts/provision-v1-agent-home.js` rather than reimplementing file operations in web code;
   - materialization remains truthful to provisioning semantics (`copy` => real directory copy, `symlink` => symlink).
+- Current legacy meta-mirror behavior for v1 homes:
+  - direct `scripts/provision-v1-agent-home.js` provision/reprovision now synchronizes `data/agents/<name>/meta.json` from the current v1 manifest;
+  - this closes the earlier divergence where `agent.json` and the detail API showed the correct `managedProjects` but the legacy compatibility mirror remained stale.
 - Dev-only agent communication rule:
   - `agent-chat-cli` / `agentchat cli` default to `AGENT_CHAT_API=http://127.0.0.1:8090` unless explicitly overridden;
   - dev-only agents such as the current Yato must be queried or messaged through the dev backend (`AGENT_CHAT_API=http://127.0.0.1:18190`) or an equivalent dev MCP alias, otherwise live/control-plane lookups will misreport them.

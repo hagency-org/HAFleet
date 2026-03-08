@@ -1177,3 +1177,23 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Sent Yato a dev-path task to revise `docs/workspace-claude-md-template.md` from lived v1-home experience rather than from abstract design alone.
 - The brief is intentionally critical: identify where the current template still fails to teach real behavior (`projects/`, `scratch/`, `inbox/`, `outputs/`, `data/`, `../state/`, and avoiding implicit work against the main repo root) and produce a short, high-density patch instead of prose commentary.
 - Existing reminder `#2051` already covers this review window, so no second reminder was added.
+## [2026-03-09 03:59] DONE — accepted the Yato legacy meta-mirror repair and closed the workspace/project discipline loop
+- Independently verified the last remaining workspace/project consistency fix from `agentchat-develop`:
+  - `/home/shisui/laplace/agent-chat-dev-runtime/data/agents/Yato/meta.json`
+  - `/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/agent.json`
+  - `http://127.0.0.1:18184/api/agents/detail/Yato`
+  now all agree on the same managed project:
+  - `name = "agent-chat"`
+  - `path = "/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/workdir/projects/agent-chat"`
+  - `source = "copy"`
+  - `originPath = "/home/shisui/laplace/agent-chat"`
+- Re-verified the reprovision side-effect repair:
+  - `state/subconscious/runtime.json` is back on the dev backend for both `eventUrl` and `invokeUrl`
+  - no residual fallback to `127.0.0.1:8090` remains in Yato's active subconscious runtime contract
+- Root cause closed:
+  - direct `scripts/provision-v1-agent-home.js` reprovision previously updated the v1 manifest without synchronizing the legacy compatibility mirror under `data/agents/<name>/meta.json`
+  - the same reprovision path could also regress subconscious runtime URLs back to `8090` unless the dev event/invoke URLs were repaired explicitly
+- Acceptance boundary:
+  - the workspace CLAUDE contract is now the maintained source of truth
+  - Yato now truthfully owns and advertises a real managed `agent-chat` project under its own `workdir/projects/`
+  - the legacy meta mirror no longer contradicts that state

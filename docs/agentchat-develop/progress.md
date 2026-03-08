@@ -1792,3 +1792,122 @@ Verification:
 Truthful boundary after the patch:
 - SessionStart lifecycle and Stop transcript/send are now real upstream-backed paths in dev.
 - UserPromptSubmit and PreToolUse still use local transitional agent-chat logic.
+
+## [2026-03-09 03:45] DONE — Tightened the workspace CLAUDE contract and closed Yato’s managed-project gap
+Rewrote `/home/shisui/laplace/agent-chat/docs/workspace-claude-md-template.md` into a shorter, denser workspace contract that explicitly teaches project/workdir discipline and the role of `projects/`, `scratch/`, `inbox/`, `outputs/`, `data/`, and `../state/`. Then closed the concrete Yato gap by materializing a real managed `agent-chat` project inside Yato’s own home and updating Yato’s workspace/project docs to point at that copied project as the expected code-work path.
+
+Changed:
+- `/home/shisui/laplace/agent-chat/docs/workspace-claude-md-template.md`
+  - now states that real code work must happen inside a managed project under `projects/<name>/`
+  - explicitly says the workspace root is not the codebase
+  - keeps the contract stable and non-task-specific
+- reprovisioned existing dev home `Yato` with a copied managed project:
+  - `node scripts/provision-v1-agent-home.js --name Yato --home /home/shisui/laplace/agent-chat-dev-runtime/homes --project /home/shisui/laplace/agent-chat --project-name agent-chat --project-mode copy --subconscious-enabled true`
+- removed stale placeholder `worker-proof` from `Yato/workdir/projects/`
+- updated Yato project doc:
+  - `/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/workdir/docs/projects.md`
+  - now points real `agent-chat` code work at `../projects/agent-chat/`
+- repaired Yato subconscious runtime wiring after reprovision:
+  - `node scripts/configure-v1-subconscious.js --agent-name Yato --agent-id agent_yato --workdir /home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/workdir --state-dir /home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/state --enabled true --event-url http://127.0.0.1:18190/api/subconscious/events`
+
+Root cause found during closure:
+- reprovisioning an existing home reruns subconscious provisioning; without `AGENT_CHAT_API` / explicit event-url context, the generated runtime contract fell back to `127.0.0.1:8090`
+- repaired immediately by rerunning `configure-v1-subconscious.js` with the explicit dev event URL
+
+Verification:
+- Yato manifest now truthfully shows one managed project:
+  - `managedProjects[0].name = "agent-chat"`
+  - `managedProjects[0].path = "/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/workdir/projects/agent-chat"`
+  - `managedProjects[0].source = "copy"`
+  - `managedProjects[0].originPath = "/home/shisui/laplace/agent-chat"`
+- Yato root `CLAUDE.md` was regenerated from the tightened template and now explicitly says:
+  - real code work happens under `projects/<name>/`
+  - the workspace root is not the codebase
+- Yato `docs/projects.md` now explicitly directs real `agent-chat` work to `../projects/agent-chat/`
+- stale `worker-proof` path is gone; `workdir/projects/` now contains only `agent-chat`
+- proof that Yato’s working repo path is its own copied project, not the main repo root:
+  - main repo realpath: `/home/shisui/laplace/agent-chat`
+  - Yato project realpath: `/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/workdir/projects/agent-chat`
+  - inode check shows distinct directories:
+    - main: `64512:7998265`
+    - Yato copy: `64512:7886661`
+  - `git -C /home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/workdir/projects/agent-chat rev-parse --show-toplevel`
+    returned `/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/workdir/projects/agent-chat`
+  - `git -C /home/shisui/laplace/agent-chat rev-parse --show-toplevel`
+    returned `/home/shisui/laplace/agent-chat`
+- Yato runtime URLs were restored to the dev backend after reprovision:
+  - `eventUrl = http://127.0.0.1:18190/api/subconscious/events`
+  - `invokeUrl = http://127.0.0.1:18190/api/subconscious/runtime/invoke`
+
+Residual blocker:
+- none for the requested closure; Yato can now truthfully be instructed to work from its own managed `projects/agent-chat/` path rather than the main repo root
+
+## [2026-03-09 03:52] DONE — Worker accepted the dev Stop-path cutover while workspace/project batch continues
+Recorded the worker acceptance for the dev Stop upstream cutover. This closes the Stop-path review item, but it does not close the separate active workspace/project batch, which remains the current focus until the worker reviews it explicitly.
+
+## [2026-03-09 03:56] DONE — Fixed Yato legacy meta mirror sync after project closure
+Root cause: direct  provision/reprovision updated the v1 manifest but did not mirror  into the legacy compatibility file at , so Yato could show the copied Usage: agentchat <command> [args]
+
+Core:
+  up             Start or resume an agent
+  up-v1          Provision + launch a new v1 agent-home runtime
+  down           Stop an agent
+  ls             List agents
+  send           Send message to target pane
+  update         Update/install agent-chat runtime
+  service        Control local/remote services
+  verify-remote  Verify remote relay + MCP + agent status
+
+Ops:
+  audit          Run one-shot audit gate
+  benchmark      Benchmark workflow foundations / trial scaffolding
+  maintain       Rotate logs and prune stale tmp files
+  prune-agents   Prune stale offline agent records from backend
+  sync-skills    Sync ~/.codex and ~/.claude skill links to repo template
+  reminder       Schedule/check reminders
+
+Admin:
+  cli            Backend/group/admin helper CLI
+  check-mcp      Check MCP wiring
+
+Compatibility notes:
+  Legacy commands (agent-up, agent-down, agent-send, ...) are deprecated and
+  will forward to this unified entrypoint. project correctly in  and  while the legacy mirror stayed stale.
+
+Changed:
+- 
+  - added legacy mirror resolution/sync so provision/reprovision now writes  from the current manifest and returns  in its result
+
+Verification:
+- 
+- reprovision proof returned 
+- Yato legacy mirror now matches the manifest and web detail:
+  - 
+  - 
+  -  returned the same  plus 
+- reprovision side effect was reproduced and repaired truthfully:
+  - reprovision reset Yato subconscious runtime URLs to 
+  - reran 
+  - verified  is back on  for both  and 
+
+## [2026-03-09 03:56] DONE — Fixed Yato legacy meta mirror sync after project closure
+Root cause: direct scripts/provision-v1-agent-home.js provision/reprovision updated the v1 manifest but did not mirror managedProjects into the legacy compatibility file at data/agents/<name>/meta.json, so Yato could show the copied agent-chat project correctly in agent.json and /api/agents/detail/Yato while the legacy mirror stayed stale.
+
+Changed:
+- scripts/provision-v1-agent-home.js
+  - added legacy mirror resolution/sync so provision/reprovision now writes data/agents/<name>/meta.json from the current manifest and returns legacyMetaPath in its result
+
+Verification:
+- node --check scripts/provision-v1-agent-home.js
+- reprovision proof returned legacyMetaPath = /home/shisui/laplace/agent-chat-dev-runtime/data/agents/Yato/meta.json
+- Yato legacy mirror now matches the manifest and web detail:
+  - data/agents/Yato/meta.json managedProjects[0].name = "agent-chat"
+  - homes/agents/agent_yato/agent.json managedProjects[0].name = "agent-chat"
+  - GET http://127.0.0.1:18184/api/agents/detail/Yato returned the same managedProjects plus metaPath = "/home/shisui/laplace/agent-chat-dev-runtime/data/agents/Yato/meta.json"
+- reprovision side effect was reproduced and repaired truthfully:
+  - reprovision reset Yato subconscious runtime URLs to 127.0.0.1:8090
+  - reran configure-v1-subconscious.js --event-url http://127.0.0.1:18190/api/subconscious/events
+  - verified state/subconscious/runtime.json is back on 18190 for both eventUrl and invokeUrl
+
+## [2026-03-09 04:00] DONE — Worker accepted the Yato legacy meta mirror sync fix and advanced scope to UserPromptSubmit
+Recorded the worker acceptance for the direct provision/reprovision legacy meta mirror repair. The stale Yato compatibility mirror issue is closed. The next scoped target is now the minimal upstream hook cutover for UserPromptSubmit, but no implementation starts from this acceptance notice alone.
