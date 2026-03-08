@@ -413,6 +413,7 @@ function main() {
         'agent_config.ts Letta bootstrap/config',
         'conversation_utils.ts durable conversation bookkeeping',
         'sync_letta_memory.ts UserPromptSubmit prompt-send source',
+        'pretool_sync.ts PreToolUse mid-workflow sync',
         'transcript_utils.ts transcript formatting/parser source',
       ],
       bootstrapStatus: 'not-run',

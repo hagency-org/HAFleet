@@ -198,6 +198,12 @@
   - `UserPromptSubmit` is now a real upstream-backed path for the dev Yato flow rather than a local-only event surface;
   - accepted truth model requires route response, `session-<session>.json`, `conversations.json`, and `/api/subconscious/detail/:name` to agree on the same `conversationId` and `lastProcessedIndex`;
   - if the helper cannot make those durable sources converge after send, the route must block instead of claiming a clean success.
+- Current upstream PreToolUse truth in dev:
+  - `PreToolUse` is now a real upstream-backed path for the dev Yato flow rather than a local-only manual-guidance/runtime fallback;
+  - for this slice, the durable per-session truth source is `session-<session>.json` fields `lastSeenMessageId` and `lastBlockValues`;
+  - accepted proof requires the first call after a real upstream change to inject `additionalContext` derived from upstream assistant messages and/or block deltas, then persist the advanced `lastSeenMessageId` / `lastBlockValues`;
+  - a second identical `PreToolUse` call for the same session must truthfully no-op (`status=no-updates`) without advancing the durable markers again;
+  - route response and `/api/subconscious/detail/:name` must converge on those same durable markers and the same `conversationId`.
 - Architecture rule:
   - do not create display-first concepts, transition-only panels, or local substitutes that pretend to be mature system objects;
   - new fields, UI modules, and workflow concepts must map to a first-class object with a clear source of truth, or they should not ship.

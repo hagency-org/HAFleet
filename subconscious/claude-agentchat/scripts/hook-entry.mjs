@@ -215,6 +215,14 @@ function resolveUserPromptUrl() {
   return eventUrl.replace(/\/api\/subconscious\/events\/?$/i, '/api/subconscious/upstream/user-prompt');
 }
 
+function resolvePreToolUrl() {
+  const explicit = normalizeText(process.env.AGENTCHAT_SUBCONSCIOUS_PRETOOL_URL, 2048);
+  if (explicit) return explicit;
+  const eventUrl = normalizeText(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_URL, 2048);
+  if (!eventUrl) return null;
+  return eventUrl.replace(/\/api\/subconscious\/events\/?$/i, '/api/subconscious/upstream/pretool');
+}
+
 async function invokeRuntimeGuidance(agentName, input) {
   const url = resolveInvokeUrl();
   if (!url) return { invoked: false, guidance: null, source: 'none' };
@@ -395,10 +403,78 @@ async function invokeUpstreamUserPrompt(agentName, input) {
   }
 }
 
-function emitAdditionalContext(hookName, agentName, guidance) {
+async function invokeUpstreamPreTool(agentName, input) {
+  if (HOOK_NAME !== 'PreToolUse') {
+    return { attempted: false, status: 'not-run', injected: false, blockedReason: null, additionalContext: null };
+  }
+  const url = resolvePreToolUrl();
+  const sessionId = normalizeText(input?.session_id, 200);
+  const toolName = normalizeText(input?.tool_name, 120);
+  const cwd = normalizeText(input?.cwd, 4096);
+  if (!url || !sessionId) {
+    return {
+      attempted: false,
+      status: 'blocked',
+      injected: false,
+      additionalContext: null,
+      blockedReason: !url ? 'missing upstream pretool url' : 'missing session_id',
+    };
+  }
+
+  const headers = { 'Content-Type': 'application/json' };
+  const token = normalizeText(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN, 512);
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  try {
+    const resp = await fetch(`${url.replace(/\/$/, '')}/${encodeURIComponent(agentName)}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        sessionId,
+        toolName,
+        cwd,
+      }),
+    });
+    const payload = await resp.json().catch(() => null);
+    if (!resp.ok || !payload) {
+      return {
+        attempted: true,
+        status: 'blocked',
+        injected: false,
+        additionalContext: null,
+        blockedReason: String(payload?.error || payload?.blocker || `http-${resp.status}`).slice(0, 400),
+      };
+    }
+    return {
+      attempted: payload?.preTool?.attempted === true,
+      status: normalizeText(payload?.preTool?.status, 64) || (payload?.blocked === true ? 'blocked' : 'not-run'),
+      injected: payload?.preTool?.injected === true,
+      additionalContext: normalizeText(payload?.preTool?.additionalContext, 12000),
+      blockedReason: normalizeText(payload?.preTool?.blockedReason, 400) || normalizeText(payload?.blocker, 400),
+      conversationId: normalizeText(payload?.preTool?.conversationId, 256),
+      syncStateFile: normalizeText(payload?.preTool?.syncStateFile, 4096),
+      scriptPath: normalizeText(payload?.preTool?.scriptPath, 4096),
+      newMessageCount: Number(payload?.preTool?.newMessageCount) || 0,
+      changedBlockCount: Number(payload?.preTool?.changedBlockCount) || 0,
+      lastSeenMessageIdBefore: normalizeText(payload?.preTool?.lastSeenMessageIdBefore, 256),
+      lastSeenMessageIdAfter: normalizeText(payload?.preTool?.lastSeenMessageIdAfter, 256),
+      blockLabelCount: Number(payload?.preTool?.blockLabelCount) || 0,
+    };
+  } catch (err) {
+    return {
+      attempted: true,
+      status: 'blocked',
+      injected: false,
+      additionalContext: null,
+      blockedReason: String(err?.message || err).slice(0, 400),
+    };
+  }
+}
+
+function emitGuidanceAdditionalContext(hookName, agentName, guidance) {
   const clean = normalizeText(guidance, 2000);
   if (!clean) return;
-  if (hookName !== 'UserPromptSubmit' && hookName !== 'PreToolUse') return;
+  if (hookName !== 'UserPromptSubmit') return;
 
   const context = `<agentchat_subconscious agent="${escapeXml(agentName)}">${escapeXml(clean)}</agentchat_subconscious>`;
   const payload = {
@@ -410,16 +486,40 @@ function emitAdditionalContext(hookName, agentName, guidance) {
   process.stdout.write(JSON.stringify(payload));
 }
 
+function emitRawAdditionalContext(hookName, additionalContext) {
+  const clean = normalizeText(additionalContext, 12000);
+  if (!clean) return;
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: hookName,
+      additionalContext: clean,
+    },
+  }));
+}
+
 async function main() {
   const input = await readHookInput();
   const agentName = resolveAgentName(input);
   const state = resolveLettaState(agentName);
   const upstreamUserPromptResult = await invokeUpstreamUserPrompt(agentName, input);
-  const runtimeResult = await invokeRuntimeGuidance(agentName, input);
+  const upstreamPreToolResult = await invokeUpstreamPreTool(agentName, input);
+  const runtimeResult = HOOK_NAME === 'PreToolUse'
+    ? { invoked: false, guidance: null, source: 'none', provider: null, model: null, latencyMs: null, disabledReason: null, error: null }
+    : await invokeRuntimeGuidance(agentName, input);
   const upstreamStopResult = await invokeUpstreamStop(agentName, input);
-  const effectiveGuidance = runtimeResult.guidance || state.guidance || null;
+  const effectiveGuidance = HOOK_NAME === 'UserPromptSubmit'
+    ? (runtimeResult.guidance || state.guidance || null)
+    : null;
   const manualGuidanceConfigured = Boolean(state.guidance);
-  const guidanceInjected = Boolean(effectiveGuidance) && (HOOK_NAME === 'UserPromptSubmit' || HOOK_NAME === 'PreToolUse');
+  const upstreamPreToolInjected = upstreamPreToolResult.injected === true && Boolean(upstreamPreToolResult.additionalContext);
+  const guidanceInjected = upstreamPreToolInjected || (Boolean(effectiveGuidance) && HOOK_NAME === 'UserPromptSubmit');
+  const guidancePresent = upstreamPreToolInjected || Boolean(effectiveGuidance);
+  const guidanceSource = upstreamPreToolInjected
+    ? 'upstream-pretool'
+    : (runtimeResult.guidance ? 'runtime-llm' : state.guidanceSource);
+  const guidancePreview = upstreamPreToolInjected
+    ? normalizeText(upstreamPreToolResult.additionalContext, 320)
+    : (effectiveGuidance ? effectiveGuidance.slice(0, 320) : null);
 
   const promptPreview = normalizeText(input?.prompt, 320);
   const event = {
@@ -438,11 +538,11 @@ async function main() {
     resolutionSource: state.source,
     backendMode: runtimeResult.invoked === true ? 'runtime-llm' : state.backendMode,
     subconsciousEnabled: state.enabled,
-    guidancePresent: Boolean(effectiveGuidance),
+    guidancePresent,
     guidanceConfigured: manualGuidanceConfigured,
     guidanceInjected,
-    guidanceSource: runtimeResult.guidance ? 'runtime-llm' : state.guidanceSource,
-    guidancePreview: effectiveGuidance ? effectiveGuidance.slice(0, 320) : null,
+    guidanceSource,
+    guidancePreview,
     runtimeInvoked: runtimeResult.invoked === true,
     runtimeProvider: runtimeResult.provider || null,
     runtimeModel: runtimeResult.model || null,
@@ -459,6 +559,24 @@ async function main() {
     upstreamUserPromptTranscriptLineCount: upstreamUserPromptResult.transcriptLineCount || null,
     upstreamUserPromptLastProcessedIndexBefore: upstreamUserPromptResult.lastProcessedIndexBefore,
     upstreamUserPromptLastProcessedIndexAfter: upstreamUserPromptResult.lastProcessedIndexAfter,
+    upstreamPreToolAttempted: upstreamPreToolResult.attempted === true,
+    upstreamPreToolStatus: upstreamPreToolResult.status || null,
+    upstreamPreToolBlockedReason: upstreamPreToolResult.blockedReason || null,
+    upstreamPreToolInjected: upstreamPreToolResult.injected === true,
+    upstreamPreToolConversationId: upstreamPreToolResult.conversationId || null,
+    upstreamPreToolSyncStateFile: upstreamPreToolResult.syncStateFile || null,
+    upstreamPreToolScriptPath: upstreamPreToolResult.scriptPath || null,
+    upstreamPreToolNewMessageCount: Number.isFinite(Number(upstreamPreToolResult.newMessageCount))
+      ? Number(upstreamPreToolResult.newMessageCount)
+      : null,
+    upstreamPreToolChangedBlockCount: Number.isFinite(Number(upstreamPreToolResult.changedBlockCount))
+      ? Number(upstreamPreToolResult.changedBlockCount)
+      : null,
+    upstreamPreToolLastSeenMessageIdBefore: upstreamPreToolResult.lastSeenMessageIdBefore || null,
+    upstreamPreToolLastSeenMessageIdAfter: upstreamPreToolResult.lastSeenMessageIdAfter || null,
+    upstreamPreToolBlockLabelCount: Number.isFinite(Number(upstreamPreToolResult.blockLabelCount))
+      ? Number(upstreamPreToolResult.blockLabelCount)
+      : null,
     upstreamStopAttempted: upstreamStopResult.attempted === true,
     upstreamStopStatus: upstreamStopResult.status || null,
     upstreamStopBlockedReason: upstreamStopResult.blockedReason || null,
@@ -473,7 +591,8 @@ async function main() {
 
   appendLog(`${HOOK_NAME} session=${event.sessionId || '-'} tool=${event.toolName || '-'} letta=${state.lettaAgentId}`);
   await postSubconsciousEvent(event);
-  emitAdditionalContext(HOOK_NAME, agentName, effectiveGuidance);
+  if (upstreamPreToolInjected) emitRawAdditionalContext(HOOK_NAME, upstreamPreToolResult.additionalContext);
+  else emitGuidanceAdditionalContext(HOOK_NAME, agentName, effectiveGuidance);
 }
 
 main().catch((err) => {

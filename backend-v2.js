@@ -10,6 +10,7 @@ import {
   bootstrapUpstreamClaudeSubconsciousAgent,
   readUpstreamClaudeSubconsciousState,
   startUpstreamClaudeSubconsciousSession,
+  syncUpstreamClaudeSubconsciousPreTool,
   syncUpstreamClaudeSubconsciousStop,
   syncUpstreamClaudeSubconsciousUserPrompt,
 } from './lib/upstream-claude-subconscious.js';
@@ -576,6 +577,22 @@ function buildSubconsciousEvent(body = {}) {
     upstreamUserPromptTranscriptLineCount: normalizeNonNegativeInt(body.upstreamUserPromptTranscriptLineCount, null),
     upstreamUserPromptLastProcessedIndexBefore: normalizeNonNegativeInt(body.upstreamUserPromptLastProcessedIndexBefore, null),
     upstreamUserPromptLastProcessedIndexAfter: normalizeNonNegativeInt(body.upstreamUserPromptLastProcessedIndexAfter, null),
+    upstreamPreToolAttempted: body.upstreamPreToolAttempted === true
+      ? true
+      : (body.upstreamPreToolAttempted === false ? false : null),
+    upstreamPreToolStatus: normalizeOptionalText(body.upstreamPreToolStatus, 64),
+    upstreamPreToolBlockedReason: normalizeOptionalText(body.upstreamPreToolBlockedReason, 600),
+    upstreamPreToolInjected: body.upstreamPreToolInjected === true
+      ? true
+      : (body.upstreamPreToolInjected === false ? false : null),
+    upstreamPreToolConversationId: normalizeOptionalText(body.upstreamPreToolConversationId, 256),
+    upstreamPreToolSyncStateFile: normalizeWorkspacePath(body.upstreamPreToolSyncStateFile),
+    upstreamPreToolScriptPath: normalizeWorkspacePath(body.upstreamPreToolScriptPath),
+    upstreamPreToolNewMessageCount: normalizeNonNegativeInt(body.upstreamPreToolNewMessageCount, null),
+    upstreamPreToolChangedBlockCount: normalizeNonNegativeInt(body.upstreamPreToolChangedBlockCount, null),
+    upstreamPreToolLastSeenMessageIdBefore: normalizeOptionalText(body.upstreamPreToolLastSeenMessageIdBefore, 256),
+    upstreamPreToolLastSeenMessageIdAfter: normalizeOptionalText(body.upstreamPreToolLastSeenMessageIdAfter, 256),
+    upstreamPreToolBlockLabelCount: normalizeNonNegativeInt(body.upstreamPreToolBlockLabelCount, null),
     upstreamStopAttempted: body.upstreamStopAttempted === true
       ? true
       : (body.upstreamStopAttempted === false ? false : null),
@@ -851,6 +868,7 @@ function mergeUpstreamDirectReuse(existing = []) {
     'conversation_utils.ts durable conversation bookkeeping',
     'conversation_utils.ts real session/conversation lifecycle',
     'sync_letta_memory.ts UserPromptSubmit prompt-send source',
+    'pretool_sync.ts PreToolUse mid-workflow sync',
     'send_messages_to_letta.ts Stop transcript/send flow',
     'transcript_utils.ts transcript formatting/parser source',
   ]) {
@@ -884,6 +902,8 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
   const lettaUpstreamSession = (lettaUpstream.session && typeof lettaUpstream.session === 'object') ? lettaUpstream.session : {};
   const runtimeUpstreamUserPrompt = (upstreamMeta.userPrompt && typeof upstreamMeta.userPrompt === 'object') ? upstreamMeta.userPrompt : {};
   const lettaUpstreamUserPrompt = (lettaUpstream.userPrompt && typeof lettaUpstream.userPrompt === 'object') ? lettaUpstream.userPrompt : {};
+  const runtimeUpstreamPreTool = (upstreamMeta.preTool && typeof upstreamMeta.preTool === 'object') ? upstreamMeta.preTool : {};
+  const lettaUpstreamPreTool = (lettaUpstream.preTool && typeof lettaUpstream.preTool === 'object') ? lettaUpstream.preTool : {};
   const runtimeUpstreamStop = (upstreamMeta.stop && typeof upstreamMeta.stop === 'object') ? upstreamMeta.stop : {};
   const lettaUpstreamStop = (lettaUpstream.stop && typeof lettaUpstream.stop === 'object') ? lettaUpstream.stop : {};
   const conversationStore = (conversationState?.store && typeof conversationState.store === 'object') ? conversationState.store : {};
@@ -960,6 +980,19 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
   const userPromptSyncStateFile = normalizeWorkspacePath(rawUserPrompt.syncStateFile) || null;
   const userPromptLastProcessedIndexBeforeRaw = Number(rawUserPrompt.lastProcessedIndexBefore);
   const userPromptLastProcessedIndexAfterRaw = Number(rawUserPrompt.lastProcessedIndexAfter);
+  const rawPreTool = (lettaUpstreamPreTool && typeof lettaUpstreamPreTool === 'object' && Object.keys(lettaUpstreamPreTool).length)
+    ? lettaUpstreamPreTool
+    : ((runtimeUpstreamPreTool && typeof runtimeUpstreamPreTool === 'object') ? runtimeUpstreamPreTool : {});
+  const preToolBlockedReason = normalizeOptionalText(rawPreTool.blockedReason, 1200);
+  const preToolAttemptedAt = normalizeOptionalText(rawPreTool.attemptedAt, 128);
+  const preToolInjectedAt = normalizeOptionalText(rawPreTool.injectedAt, 128);
+  const preToolStatus = normalizeOptionalText(rawPreTool.status, 64)
+    || (normalizeBoolean(rawPreTool.injected) === true ? 'injected' : null)
+    || (preToolBlockedReason ? 'blocked' : null)
+    || (normalizeBoolean(rawPreTool.attempted) === true ? 'attempted' : null)
+    || (preToolAttemptedAt ? 'attempted' : null)
+    || 'not-run';
+  const preToolSyncStateFile = normalizeWorkspacePath(rawPreTool.syncStateFile) || null;
   const rawStop = (lettaUpstreamStop && typeof lettaUpstreamStop === 'object' && Object.keys(lettaUpstreamStop).length)
     ? lettaUpstreamStop
     : ((runtimeUpstreamStop && typeof runtimeUpstreamStop === 'object') ? runtimeUpstreamStop : {});
@@ -1010,9 +1043,9 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
     transitionalBoundary: [
       'SessionStart lifecycle can now run through the explicit upstream Letta session/conversation entrypoint.',
       'UserPromptSubmit can now send the real user prompt into the bound upstream Letta conversation and advance the durable sync state.',
+      'PreToolUse can now read real upstream assistant-message and memory-block deltas from the bound Letta conversation/agent and inject them before tool execution.',
       'Stop transcript/send can now run through the explicit upstream Letta send_messages_to_letta.ts-style path.',
-      'PreToolUse still runs through local agent-chat logic.',
-      'Upstream Letta transcript send/checkpoint scripts are only partially live; SessionStart, UserPromptSubmit prompt send, and Stop are cut over, but the full remaining hook flow is not.',
+      'Upstream Letta transcript send/checkpoint scripts are only partially live; SessionStart, UserPromptSubmit, PreToolUse, and Stop are cut over, but the full remaining hook flow is not.',
       'Local episodic memory/conversation journals remain transitional until full upstream Letta flow is wired.',
     ],
     bootstrap: {
@@ -1114,6 +1147,25 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
       lastProcessedIndexBefore: Number.isFinite(userPromptLastProcessedIndexBeforeRaw) ? userPromptLastProcessedIndexBeforeRaw : null,
       lastProcessedIndexAfter: Number.isFinite(userPromptLastProcessedIndexAfterRaw) ? userPromptLastProcessedIndexAfterRaw : null,
       scriptPath: normalizeWorkspacePath(rawUserPrompt.scriptPath || upstreamPaths.scripts?.syncMemory) || upstreamPaths.scripts?.syncMemory || null,
+    },
+    preTool: {
+      supported: upstreamPaths.available && apiKeyConfigured && Boolean(agentId),
+      attempted: normalizeBoolean(rawPreTool.attempted) === true || preToolStatus === 'attempted' || preToolStatus === 'injected' || preToolStatus === 'blocked' || preToolStatus === 'no-updates' || preToolStatus === 'seeded-baseline',
+      status: preToolStatus,
+      blockedReason: preToolStatus === 'blocked' ? preToolBlockedReason : null,
+      checkedAt: normalizeOptionalText(rawPreTool.checkedAt, 128) || null,
+      attemptedAt: preToolAttemptedAt,
+      injected: normalizeBoolean(rawPreTool.injected) === true,
+      injectedAt: preToolInjectedAt,
+      sessionId: normalizeOptionalText(rawPreTool.sessionId, 200) || null,
+      conversationId: normalizeOptionalText(rawPreTool.conversationId, 256) || null,
+      syncStateFile: preToolSyncStateFile,
+      newMessageCount: normalizeNonNegativeInt(rawPreTool.newMessageCount, 0),
+      changedBlockCount: normalizeNonNegativeInt(rawPreTool.changedBlockCount, 0),
+      lastSeenMessageIdBefore: normalizeOptionalText(rawPreTool.lastSeenMessageIdBefore, 256) || null,
+      lastSeenMessageIdAfter: normalizeOptionalText(rawPreTool.lastSeenMessageIdAfter, 256) || null,
+      blockLabelCount: normalizeNonNegativeInt(rawPreTool.blockLabelCount, 0),
+      scriptPath: normalizeWorkspacePath(rawPreTool.scriptPath || upstreamPaths.scripts?.pretoolSync) || upstreamPaths.scripts?.pretoolSync || null,
     },
     stop: {
       supported: upstreamPaths.available && apiKeyConfigured && Boolean(agentId),
@@ -1514,17 +1566,21 @@ function resolveSubconsciousState(agentName) {
   if (!upstream.bootstrap.apiKeyConfigured) {
     missingBackendPieces.push('Direct upstream Letta bootstrap is wired but blocked by missing LETTA_API_KEY in the running process.');
   }
-  if (upstream.userPrompt?.status && upstream.userPrompt.status !== 'not-run') {
+  if (upstream.preTool?.status && upstream.preTool.status !== 'not-run') {
     missingBackendPieces.push(
-      'SessionStart lifecycle, UserPromptSubmit prompt send, and Stop transcript/send are cut over to upstream Letta; PreToolUse still uses local transitional agent-chat logic.'
+      'SessionStart lifecycle, UserPromptSubmit prompt send, PreToolUse read-and-inject, and Stop transcript/send are cut over to upstream Letta; local runtime guidance and local journals remain transitional.'
+    );
+  } else if (upstream.userPrompt?.status && upstream.userPrompt.status !== 'not-run') {
+    missingBackendPieces.push(
+      'SessionStart lifecycle, UserPromptSubmit prompt send, and Stop transcript/send are cut over to upstream Letta; PreToolUse still has not recorded an upstream-backed result yet.'
     );
   } else if (upstream.session?.established === true) {
     missingBackendPieces.push(
-      'SessionStart lifecycle and the Stop transcript/send path are cut over to upstream Letta, and an explicit UserPromptSubmit upstream send path is wired, but no prompt-send state has been recorded yet; PreToolUse still uses local transitional agent-chat logic.'
+      'SessionStart lifecycle and the Stop transcript/send path are cut over to upstream Letta, and an explicit UserPromptSubmit upstream send path is wired, but no prompt-send state has been recorded yet; PreToolUse has not been exercised through the upstream-backed path yet.'
     );
   } else {
     missingBackendPieces.push(
-      'Explicit upstream SessionStart, UserPromptSubmit, and Stop routes are wired, but the broader hook flow still uses local transitional agent-chat logic until those conversation paths are exercised and PreToolUse is cut over.'
+      'Explicit upstream SessionStart, UserPromptSubmit, PreToolUse, and Stop routes are wired, but the broader hook flow still carries local transitional runtime and journal paths.'
     );
   }
   missingBackendPieces.push(
@@ -1548,6 +1604,11 @@ function resolveSubconsciousState(agentName) {
       `Upstream UserPromptSubmit send is separately blocked by Letta: ${upstream.userPrompt.blockedReason || 'unknown constraint'}.`
     );
   }
+  if (upstream.preTool?.status === 'blocked') {
+    missingBackendPieces.push(
+      `Upstream PreToolUse read/inject is separately blocked: ${upstream.preTool.blockedReason || 'unknown constraint'}.`
+    );
+  }
 
   return {
     agentName,
@@ -1565,11 +1626,13 @@ function resolveSubconsciousState(agentName) {
     contract: {
       ok: true,
       agent: agentName,
-      stage: upstream.userPrompt?.status && upstream.userPrompt.status !== 'not-run'
+      stage: upstream.preTool?.status && upstream.preTool.status !== 'not-run'
+        ? 'upstream-pretool-lifecycle'
+        : (upstream.userPrompt?.status && upstream.userPrompt.status !== 'not-run'
         ? 'upstream-user-prompt-lifecycle'
         : (upstream.session?.established === true
           ? 'upstream-session-lifecycle'
-          : (invocationConfigured ? 'conversation-aware-runtime' : 'scaffold')),
+          : (invocationConfigured ? 'conversation-aware-runtime' : 'scaffold'))),
       writable: Boolean(stateDir),
       enabled: agent.subconsciousEnabled === true,
       manualGuidance: {
@@ -4779,6 +4842,18 @@ app.post('/api/subconscious/events', (req, res) => {
     upstreamUserPromptTranscriptLineCount: body.upstreamUserPromptTranscriptLineCount ?? body.upstream_user_prompt_transcript_line_count,
     upstreamUserPromptLastProcessedIndexBefore: body.upstreamUserPromptLastProcessedIndexBefore ?? body.upstream_user_prompt_last_processed_index_before,
     upstreamUserPromptLastProcessedIndexAfter: body.upstreamUserPromptLastProcessedIndexAfter ?? body.upstream_user_prompt_last_processed_index_after,
+    upstreamPreToolAttempted: body.upstreamPreToolAttempted ?? body.upstream_pre_tool_attempted,
+    upstreamPreToolStatus: body.upstreamPreToolStatus ?? body.upstream_pre_tool_status,
+    upstreamPreToolBlockedReason: body.upstreamPreToolBlockedReason ?? body.upstream_pre_tool_blocked_reason,
+    upstreamPreToolInjected: body.upstreamPreToolInjected ?? body.upstream_pre_tool_injected,
+    upstreamPreToolConversationId: body.upstreamPreToolConversationId ?? body.upstream_pre_tool_conversation_id,
+    upstreamPreToolSyncStateFile: body.upstreamPreToolSyncStateFile ?? body.upstream_pre_tool_sync_state_file,
+    upstreamPreToolScriptPath: body.upstreamPreToolScriptPath ?? body.upstream_pre_tool_script_path,
+    upstreamPreToolNewMessageCount: body.upstreamPreToolNewMessageCount ?? body.upstream_pre_tool_new_message_count,
+    upstreamPreToolChangedBlockCount: body.upstreamPreToolChangedBlockCount ?? body.upstream_pre_tool_changed_block_count,
+    upstreamPreToolLastSeenMessageIdBefore: body.upstreamPreToolLastSeenMessageIdBefore ?? body.upstream_pre_tool_last_seen_message_id_before,
+    upstreamPreToolLastSeenMessageIdAfter: body.upstreamPreToolLastSeenMessageIdAfter ?? body.upstream_pre_tool_last_seen_message_id_after,
+    upstreamPreToolBlockLabelCount: body.upstreamPreToolBlockLabelCount ?? body.upstream_pre_tool_block_label_count,
     upstreamStopAttempted: body.upstreamStopAttempted ?? body.upstream_stop_attempted,
     upstreamStopStatus: body.upstreamStopStatus ?? body.upstream_stop_status,
     upstreamStopBlockedReason: body.upstreamStopBlockedReason ?? body.upstream_stop_blocked_reason,
@@ -5172,6 +5247,127 @@ app.post('/api/subconscious/upstream/user-prompt/:name', async (req, res) => {
       blocker: result.blocker || null,
       logs: Array.isArray(result.logs) ? result.logs.slice(-20) : [],
       userPrompt: userPromptRecord,
+      upstream: refreshed?.contract?.upstream || buildSubconsciousUpstreamContract(state.stateDir, state.agent.workdir || null, nextRuntimeMeta, nextLetta, state.conversationState),
+    });
+  } catch (err) {
+    return res.status(502).json({ ok: false, blocked: true, blocker: err?.message || String(err) });
+  }
+});
+
+app.post('/api/subconscious/upstream/pretool/:name', async (req, res) => {
+  const agent = normalizeLooseAgentName(req.params.name);
+  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
+  const state = resolveSubconsciousState(agent);
+  if (!state) return res.status(404).json({ error: 'agent not found' });
+
+  try {
+    const payload = req.body || {};
+    const sessionId = normalizeOptionalText(payload.sessionId || payload.session_id, 200);
+    const toolName = normalizeOptionalText(payload.toolName || payload.tool_name, 120);
+    if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+
+    const now = new Date().toISOString();
+    const existingUpstream = (state.letta?.upstream && typeof state.letta.upstream === 'object') ? state.letta.upstream : {};
+    const existingRuntimeUpstream = (state.runtimeMeta?.upstream && typeof state.runtimeMeta.upstream === 'object')
+      ? state.runtimeMeta.upstream
+      : {};
+    const existingUpstreamPreTool = (existingUpstream.preTool && typeof existingUpstream.preTool === 'object')
+      ? existingUpstream.preTool
+      : {};
+    const existingRuntimeUpstreamPreTool = (existingRuntimeUpstream.preTool && typeof existingRuntimeUpstream.preTool === 'object')
+      ? existingRuntimeUpstream.preTool
+      : {};
+    const requestedAgentId = normalizeOptionalText(payload.lettaAgentId, 256);
+    const configuredAgentId = normalizeOptionalText(process.env.LETTA_AGENT_ID, 256);
+    const result = await syncUpstreamClaudeSubconsciousPreTool({
+      stateDir: state.stateDir,
+      workdir: state.agent.workdir || '',
+      cwd: normalizeWorkspacePath(payload.cwd) || state.agent.workdir || '',
+      toolName,
+      apiKey: normalizeOptionalText(process.env.LETTA_API_KEY, 4096),
+      lettaBaseUrl: normalizeOptionalText(process.env.LETTA_BASE_URL, 2048),
+      lettaAgentId: requestedAgentId
+        || configuredAgentId
+        || normalizeOptionalText(existingUpstream.agentId, 256),
+      lettaModel: normalizeOptionalText(process.env.LETTA_MODEL, 256),
+      lettaContextWindow: normalizeOptionalText(process.env.LETTA_CONTEXT_WINDOW, 64),
+      sessionId,
+    });
+    const preToolRecord = {
+      attempted: result.sendAttempted === true,
+      status: normalizeOptionalText(result.sendStatus, 64)
+        || (result.injected === true ? 'injected' : (result.blocked === true ? 'blocked' : 'not-run')),
+      blockedReason: result.blocker || null,
+      checkedAt: now,
+      attemptedAt: result.sendAttempted === true ? now : null,
+      injected: result.injected === true,
+      injectedAt: result.injected === true ? now : null,
+      sessionId: result.sessionId || sessionId,
+      conversationId: result.conversationId || null,
+      syncStateFile: normalizeWorkspacePath(result.syncStateFile) || null,
+      newMessageCount: normalizeNonNegativeInt(result.newMessageCount, 0),
+      changedBlockCount: normalizeNonNegativeInt(result.changedBlockCount, 0),
+      lastSeenMessageIdBefore: normalizeOptionalText(result.lastSeenMessageIdBefore, 256) || null,
+      lastSeenMessageIdAfter: normalizeOptionalText(result.lastSeenMessageIdAfter, 256) || null,
+      blockLabelCount: normalizeNonNegativeInt(result.blockLabelCount, 0),
+      scriptPath: normalizeWorkspacePath(result.paths?.scripts?.pretoolSync) || result.paths?.scripts?.pretoolSync || null,
+      toolName: toolName || null,
+    };
+    const nextRuntimeMeta = {
+      ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
+      upstream: {
+        ...existingRuntimeUpstream,
+        available: result.paths?.available === true,
+        root: result.paths?.root || null,
+        promptFile: result.paths?.promptFile || null,
+        scripts: result.paths?.scripts || null,
+        durableHome: result.paths?.durableHome || null,
+        durableStateDir: result.paths?.durableStateDir || null,
+        conversationsFile: result.paths?.conversationsFile || null,
+        configPath: result.paths?.configPath || null,
+        directReuse: mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse),
+        bootstrapStatus: 'configured',
+        blocker: null,
+        checkedAt: now,
+        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
+        model: normalizeOptionalText(existingUpstream.model, 256)
+          || normalizeOptionalText(existingRuntimeUpstream.model, 256)
+          || null,
+        preTool: {
+          ...existingRuntimeUpstreamPreTool,
+          ...preToolRecord,
+        },
+      },
+      updatedAt: now,
+    };
+    const nextLetta = {
+      ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
+      upstream: {
+        ...existingUpstream,
+        bootstrapStatus: 'configured',
+        blocker: null,
+        checkedAt: now,
+        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
+        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
+        preTool: {
+          ...existingUpstreamPreTool,
+          ...preToolRecord,
+        },
+      },
+      updatedAt: now,
+    };
+    safeWriteJsonFile(state.runtimeMetaPath, nextRuntimeMeta);
+    safeWriteJsonFile(state.lettaPath, nextLetta);
+    const refreshed = resolveSubconsciousState(agent);
+    return res.json({
+      ok: result.ok,
+      blocked: result.blocked === true,
+      blocker: result.blocker || null,
+      logs: Array.isArray(result.logs) ? result.logs.slice(-20) : [],
+      preTool: {
+        ...preToolRecord,
+        additionalContext: normalizeOptionalText(result.additionalContext, 12000) || null,
+      },
       upstream: refreshed?.contract?.upstream || buildSubconsciousUpstreamContract(state.stateDir, state.agent.workdir || null, nextRuntimeMeta, nextLetta, state.conversationState),
     });
   } catch (err) {

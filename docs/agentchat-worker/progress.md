@@ -1248,3 +1248,27 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - no UI expansion
   - no synthetic concepts
   - no widening beyond the first `PreToolUse` cutover
+## [2026-03-09 04:53] DONE — accepted the upstream PreToolUse slice after independent durable-state proof
+- Re-ran a fresh proof on Yato with session `worker-pretool-proof-1773003034`.
+- Verified the same `conversationId` across:
+  - `POST /api/subconscious/upstream/session-start/Yato`
+  - `POST /api/subconscious/upstream/user-prompt/Yato`
+  - `POST /api/subconscious/upstream/pretool/Yato`
+  - durable `session-worker-pretool-proof-1773003034.json`
+  - durable `conversations.json`
+  - backend and web `/api/subconscious/detail/Yato`
+- Created a real upstream Letta change by sending a direct user message into the proof conversation and waiting for a real assistant response containing token `PRETOOL-WORKER-worker-pretool-proof-1773003034`.
+- Verified first-call behavior:
+  - `PreToolUse` returned `status=injected`
+  - `additionalContext` contained the upstream token-bearing assistant message
+  - durable `lastSeenMessageId` advanced from `message-464d6ce5-da9a-4e8f-8466-2a291918b5c6` to `message-564bfdf8-651e-4217-846b-cf9d2bc5acf1`
+  - durable `lastBlockValues` existed with 6 block labels
+- Verified second-call behavior:
+  - an identical `PreToolUse` call returned `status=no-updates`
+  - durable `lastSeenMessageId` remained unchanged
+  - detail/API reflected the same no-op truth
+- Syntax checks passed for:
+  - `backend-v2.js`
+  - `server.js`
+  - `subconscious/claude-agentchat/scripts/hook-entry.mjs`
+- Acceptance boundary is now explicit: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `Stop` are all upstream-backed slices in dev; further work should move to architecture review of the event model/security boundary before widening hook scope again.

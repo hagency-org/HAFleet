@@ -1031,6 +1031,22 @@ app.post('/api/subconscious/upstream/user-prompt/:name', async (req, res) => {
   }
 });
 
+app.post('/api/subconscious/upstream/pretool/:name', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/subconscious/upstream/pretool/${encodeURIComponent(name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body || {}),
+    });
+    const payload = await r.json().catch(() => ({ ok: false, error: `backend status ${r.status}` }));
+    return res.status(r.status).json(payload);
+  } catch (e) {
+    return res.status(502).json({ ok: false, error: e.message || 'upstream pretool proxy failed' });
+  }
+});
+
 app.get('/api/agents/:name/unread-messages', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
@@ -3044,6 +3060,9 @@ th{
     const upstreamUserPrompt = (upstreamDetail.userPrompt && typeof upstreamDetail.userPrompt === 'object')
       ? upstreamDetail.userPrompt
       : {};
+    const upstreamPreTool = (upstreamDetail.preTool && typeof upstreamDetail.preTool === 'object')
+      ? upstreamDetail.preTool
+      : {};
     const blockedLikely = latestStatus === 'STUCK' || /block|approval|intervention|waiting/i.test(latestReason);
     const needsAttention = NEGATIVE_STATUSES.has(latestStatus);
     let localRuntimeState = 'off';
@@ -3115,6 +3134,7 @@ th{
       upstreamBootstrap,
       upstreamSession,
       upstreamUserPrompt,
+      upstreamPreTool,
       runtimeInvocationConfigured: runtimeContract.invocationConfigured === true,
       runtimeDesiredEnabled: runtimeContract.desiredEnabled === true,
       runtimeDisabledReason: String(runtimeContract.disabledReason || '').trim(),
@@ -3325,6 +3345,11 @@ th{
         chips.push('<span class="ev-chip">Upstream prompt sent</span>');
       } else if (ev?.upstreamUserPromptStatus === 'blocked') {
         chips.push('<span class="ev-chip chip-error">Upstream prompt blocked</span>');
+      }
+      if (ev?.upstreamPreToolInjected === true) {
+        chips.push('<span class="ev-chip">Upstream pre-tool injected</span>');
+      } else if (ev?.upstreamPreToolStatus === 'blocked') {
+        chips.push('<span class="ev-chip chip-error">Upstream pre-tool blocked</span>');
       }
       if (ev?.upstreamStopMessageSent === true) {
         chips.push('<span class="ev-chip">Upstream stop sent</span>');
@@ -3537,6 +3562,7 @@ th{
     const upstreamBootstrap = (model.upstreamBootstrap && typeof model.upstreamBootstrap === 'object') ? model.upstreamBootstrap : {};
     const upstreamSession = (model.upstreamSession && typeof model.upstreamSession === 'object') ? model.upstreamSession : {};
     const upstreamUserPrompt = (model.upstreamUserPrompt && typeof model.upstreamUserPrompt === 'object') ? model.upstreamUserPrompt : {};
+    const upstreamPreTool = (model.upstreamPreTool && typeof model.upstreamPreTool === 'object') ? model.upstreamPreTool : {};
     const upstreamNotify = (upstreamSession.notify && typeof upstreamSession.notify === 'object') ? upstreamSession.notify : {};
     const directReuse = Array.isArray(upstream.directReuse) ? upstream.directReuse : [];
 
@@ -3614,6 +3640,9 @@ th{
     bits.push('<div class="summary-note"><strong>User Prompt:</strong> ' + esc(upstreamUserPrompt.status || 'not-run')
       + (upstreamUserPrompt.sessionId ? (' · ' + esc(upstreamUserPrompt.sessionId)) : '')
       + (upstreamUserPrompt.blockedReason ? (' · ' + esc(upstreamUserPrompt.blockedReason)) : '') + '</div>');
+    bits.push('<div class="summary-note"><strong>Pre-Tool:</strong> ' + esc(upstreamPreTool.status || 'not-run')
+      + (upstreamPreTool.sessionId ? (' · ' + esc(upstreamPreTool.sessionId)) : '')
+      + (upstreamPreTool.blockedReason ? (' · ' + esc(upstreamPreTool.blockedReason)) : '') + '</div>');
     bits.push('<div class="summary-note"><strong>Send:</strong> ' + esc(upstreamNotify.status || 'not-attempted')
       + (upstreamNotify.blockedReason ? (' · ' + esc(upstreamNotify.blockedReason)) : '') + '</div>');
     bits.push('</div>');
@@ -3813,6 +3842,25 @@ th{
       ['Attempted at', upstreamUserPrompt.attemptedAt || '-'],
       ['Message sent at', upstreamUserPrompt.messageSentAt || '-'],
       ['Checked at', upstreamUserPrompt.checkedAt || '-'],
+    ]) + '</div>');
+
+    bits.push('<div class="debug-sub-section"><div class="debug-sub-label">Upstream Pre-Tool</div>' + kvGrid([
+      ['Status', upstreamPreTool.status || '-'],
+      ['Blocked reason', upstreamPreTool.blockedReason || '-'],
+      ['Attempted', upstreamPreTool.attempted ? 'yes' : 'no'],
+      ['Injected', upstreamPreTool.injected ? 'yes' : 'no'],
+      ['Session id', upstreamPreTool.sessionId || '-'],
+      ['Conversation id', upstreamPreTool.conversationId || '-'],
+      ['Sync state file', upstreamPreTool.syncStateFile || '-'],
+      ['New messages', upstreamPreTool.newMessageCount ?? '-'],
+      ['Changed blocks', upstreamPreTool.changedBlockCount ?? '-'],
+      ['Last seen before', upstreamPreTool.lastSeenMessageIdBefore || '-'],
+      ['Last seen after', upstreamPreTool.lastSeenMessageIdAfter || '-'],
+      ['Block labels', upstreamPreTool.blockLabelCount ?? '-'],
+      ['Script path', upstreamPreTool.scriptPath || '-'],
+      ['Attempted at', upstreamPreTool.attemptedAt || '-'],
+      ['Injected at', upstreamPreTool.injectedAt || '-'],
+      ['Checked at', upstreamPreTool.checkedAt || '-'],
     ]) + '</div>');
 
     // State & Invocation
