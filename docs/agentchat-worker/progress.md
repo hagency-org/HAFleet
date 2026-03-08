@@ -1197,3 +1197,12 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - the workspace CLAUDE contract is now the maintained source of truth
   - Yato now truthfully owns and advertises a real managed `agent-chat` project under its own `workdir/projects/`
   - the legacy meta mirror no longer contradicts that state
+## [2026-03-09 04:05] DONE — switched back to architecture-first steering and froze a convergence contract
+- Root cause acknowledged at the supervision layer: too much recent work was being driven by visible bugs and narrow delivery proofs, without a hard enough first-class object model to reject bad concepts before implementation.
+- Wrote `docs/agentchat-worker/system-architecture-convergence.md` as the active architecture contract for the next phase. It freezes:
+  - the first-class objects the system is allowed to talk about
+  - the source of truth for each object
+  - forbidden display-first / transition-only patterns
+  - the environment model (`live`, `dev`, `benchmark`, `ephemeral`)
+  - the next architecture priority order and agent allocation
+- Updated the active plan so the next `UserPromptSubmit` Letta cutover is now explicitly subordinate to this object-model contract, instead of being treated as just the next feature batch.

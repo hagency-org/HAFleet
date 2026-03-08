@@ -194,3 +194,6 @@
   - `Stop` is now a real upstream-backed path for the dev Yato flow rather than local-only logging;
   - `/api/subconscious/detail/:name` exposes durable `upstream.stop` fields including `attempted`, `status`, `messageSent`, `conversationId`, `transcriptPath`, `syncStateFile`, transcript counts, and `lastProcessedIndex` movement;
   - replaying the same transcript for the same session truthfully yields no new upstream messages once the upstream durable sync-state file has already advanced.
+- Architecture rule:
+  - do not create display-first concepts, transition-only panels, or local substitutes that pretend to be mature system objects;
+  - new fields, UI modules, and workflow concepts must map to a first-class object with a clear source of truth, or they should not ship.
