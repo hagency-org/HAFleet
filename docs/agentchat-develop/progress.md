@@ -1734,3 +1734,61 @@ Recorded the worker acceptance for the canonical-handle normalization change in 
 
 ## [2026-03-09 03:24] DONE — Worker accepted the SessionStart notify return-path fix
 Recorded the worker's independent verification that the current SessionStart baseline now closes cleanly over HTTP with `sendMessage:true`, persists a real Letta conversation, and no longer carries either of the old active blocker diagnoses (`GLM-5/model-unknown` or successful-send return-path hang). The queued next focus is now the next minimal upstream hook-cutover slice beyond SessionStart, but no new implementation starts until an explicit resume command.
+
+## [2026-03-09 03:45] DONE — Cut the dev Stop hook over to the upstream transcript/send path
+Implemented the next minimal upstream hook cutover for dev by wiring Stop through the real upstream transcript/send flow and persisting a dedicated `upstream.stop` snapshot in the subconscious contract. Scope stayed tight: no UI redesign, no live changes, no broader hook cutover claims.
+
+Root cause and design:
+- The accepted SessionStart path already established the upstream conversation/session lifecycle, but Stop still ended at the local hook event logger and never exercised upstream transcript/send logic.
+- The upstream `send_messages_to_letta.ts` script itself is asynchronous/detached, so to return a truthful success/failure result through agent-chat I reused the same upstream primitives directly (`transcript_utils.ts`, `conversation_utils.ts`, durable sync-state files, and the same transcript message envelope) in a synchronous helper/route path.
+
+Changed:
+- `/home/shisui/laplace/agent-chat/lib/upstream-claude-subconscious.js`
+  - added synchronous Stop sync helper that reuses upstream transcript parsing/formatting plus conversation mapping and sends the Letta transcript update directly
+- `/home/shisui/laplace/agent-chat/backend-v2.js`
+  - added `POST /api/subconscious/upstream/stop/:name`
+  - persisted truthful `upstream.stop` state in `runtime.json` / `letta.json`
+  - extended `/api/subconscious/detail/:name` and event payloads with Stop observability
+  - updated upstream transitional/missing-piece text so Stop is no longer described as local-only
+- `/home/shisui/laplace/agent-chat/subconscious/claude-agentchat/scripts/hook-entry.mjs`
+  - Stop hook now calls the new backend Stop route before posting the normal hook event
+  - Stop events now carry the upstream Stop result fields for event-level observability
+- re-synced Yato’s copied runtime via `node scripts/configure-v1-subconscious.js ... --event-url http://127.0.0.1:18190/api/subconscious/events`
+
+Verification:
+- `node --check lib/upstream-claude-subconscious.js`
+- `node --check backend-v2.js`
+- `node --check subconscious/claude-agentchat/scripts/hook-entry.mjs`
+- restarted isolated dev backend on `127.0.0.1:18190` with repo `.env` loaded
+- verified the copied Yato hook runtime now contains `resolveStopUrl()` / `invokeUpstreamStop()`
+- real sequential dev proof on Yato:
+  - created transcript `/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/workdir/scratch/stop-cutover-proof-2-1772999062.jsonl`
+  - established upstream session for the same session id on the dev backend
+  - invoked the copied Yato hook file:
+    - `/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/state/subconscious/claude-agentchat/scripts/hook-entry.mjs Stop`
+    - `hook_exit=0`
+  - `GET /api/subconscious/detail/Yato` then returned:
+    - `stage: "upstream-session-lifecycle"`
+    - `upstream.session.sessionId: "stop-cutover-proof-2-1772999062"`
+    - `upstream.stop.status: "sent"`
+    - `upstream.stop.attempted: true`
+    - `upstream.stop.messageSent: true`
+    - `upstream.stop.conversationId: "conv-533bd6e3-1487-41c1-a5a4-bb9341488eb6"`
+    - `upstream.stop.transcriptPath: "/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/workdir/scratch/stop-cutover-proof-2-1772999062.jsonl"`
+    - `upstream.stop.syncStateFile: "/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/state/subconscious/upstream-home/.letta/claude/session-stop-cutover-proof-2-1772999062.json"`
+    - `upstream.stop.scriptPath: "/home/shisui/laplace/claude-subconscious/scripts/send_messages_to_letta.ts"`
+    - `upstream.stop.transcriptMessageCount: 2`
+    - `upstream.stop.newMessageCount: 2`
+    - `upstream.stop.lastProcessedIndexBefore: -1`
+    - `upstream.stop.lastProcessedIndexAfter: 1`
+  - latest `GET /api/subconscious/events/Yato?limit=3` event also carried:
+    - `upstreamStopStatus: "sent"`
+    - `upstreamStopMessageSent: true`
+    - matching conversation/transcript/sync-state paths
+  - durable sync-state proof:
+    - `/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_yato/state/subconscious/upstream-home/.letta/claude/session-stop-cutover-proof-2-1772999062.json`
+    - contains `lastProcessedIndex: 1` and the matching conversation id
+
+Truthful boundary after the patch:
+- SessionStart lifecycle and Stop transcript/send are now real upstream-backed paths in dev.
+- UserPromptSubmit and PreToolUse still use local transitional agent-chat logic.

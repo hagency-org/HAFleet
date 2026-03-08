@@ -10,6 +10,7 @@ import {
   bootstrapUpstreamClaudeSubconsciousAgent,
   readUpstreamClaudeSubconsciousState,
   startUpstreamClaudeSubconsciousSession,
+  syncUpstreamClaudeSubconsciousStop,
 } from './lib/upstream-claude-subconscious.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -559,6 +560,20 @@ function buildSubconsciousEvent(body = {}) {
     runtimeModel: normalizeOptionalText(body.runtimeModel, 128),
     runtimeLatencyMs: normalizePositiveInt(body.runtimeLatencyMs, null),
     runtimeError: normalizeOptionalText(body.runtimeError, 600),
+    upstreamStopAttempted: body.upstreamStopAttempted === true
+      ? true
+      : (body.upstreamStopAttempted === false ? false : null),
+    upstreamStopStatus: normalizeOptionalText(body.upstreamStopStatus, 64),
+    upstreamStopBlockedReason: normalizeOptionalText(body.upstreamStopBlockedReason, 600),
+    upstreamStopMessageSent: body.upstreamStopMessageSent === true
+      ? true
+      : (body.upstreamStopMessageSent === false ? false : null),
+    upstreamStopConversationId: normalizeOptionalText(body.upstreamStopConversationId, 256),
+    upstreamStopTranscriptPath: normalizeWorkspacePath(body.upstreamStopTranscriptPath),
+    upstreamStopSyncStateFile: normalizeWorkspacePath(body.upstreamStopSyncStateFile),
+    upstreamStopScriptPath: normalizeWorkspacePath(body.upstreamStopScriptPath),
+    upstreamStopTranscriptMessageCount: normalizeNonNegativeInt(body.upstreamStopTranscriptMessageCount, null),
+    upstreamStopNewMessageCount: normalizeNonNegativeInt(body.upstreamStopNewMessageCount, null),
   };
 }
 
@@ -819,6 +834,7 @@ function mergeUpstreamDirectReuse(existing = []) {
     'agent_config.ts Letta bootstrap/config',
     'conversation_utils.ts durable conversation bookkeeping',
     'conversation_utils.ts real session/conversation lifecycle',
+    'send_messages_to_letta.ts Stop transcript/send flow',
     'transcript_utils.ts transcript formatting/parser source',
   ]) {
     const text = normalizeOptionalText(item, 160);
@@ -849,6 +865,8 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
   const lettaUpstream = (letta?.upstream && typeof letta.upstream === 'object') ? letta.upstream : {};
   const runtimeUpstreamSession = (upstreamMeta.session && typeof upstreamMeta.session === 'object') ? upstreamMeta.session : {};
   const lettaUpstreamSession = (lettaUpstream.session && typeof lettaUpstream.session === 'object') ? lettaUpstream.session : {};
+  const runtimeUpstreamStop = (upstreamMeta.stop && typeof upstreamMeta.stop === 'object') ? upstreamMeta.stop : {};
+  const lettaUpstreamStop = (lettaUpstream.stop && typeof lettaUpstream.stop === 'object') ? lettaUpstream.stop : {};
   const conversationStore = (conversationState?.store && typeof conversationState.store === 'object') ? conversationState.store : {};
   const conversationSessions = Array.isArray(conversationStore.sessions) ? conversationStore.sessions : [];
   const directReuse = mergeUpstreamDirectReuse(upstreamMeta.directReuse);
@@ -907,6 +925,22 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
     || (notifyBlockedReason ? 'blocked' : null)
     || (notifyAttemptedAt ? 'attempted' : null)
     || 'not-attempted';
+  const rawStop = (lettaUpstreamStop && typeof lettaUpstreamStop === 'object' && Object.keys(lettaUpstreamStop).length)
+    ? lettaUpstreamStop
+    : ((runtimeUpstreamStop && typeof runtimeUpstreamStop === 'object') ? runtimeUpstreamStop : {});
+  const stopBlockedReason = normalizeOptionalText(rawStop.blockedReason, 1200);
+  const stopAttemptedAt = normalizeOptionalText(rawStop.attemptedAt, 128);
+  const stopMessageSentAt = normalizeOptionalText(rawStop.messageSentAt, 128);
+  const stopStatus = normalizeOptionalText(rawStop.status, 64)
+    || (normalizeBoolean(rawStop.messageSent) === true ? 'sent' : null)
+    || (stopBlockedReason ? 'blocked' : null)
+    || (normalizeBoolean(rawStop.attempted) === true ? 'attempted' : null)
+    || (stopAttemptedAt ? 'attempted' : null)
+    || 'not-run';
+  const stopTranscriptPath = normalizeWorkspacePath(rawStop.transcriptPath) || null;
+  const stopSyncStateFile = normalizeWorkspacePath(rawStop.syncStateFile) || null;
+  const stopLastProcessedIndexBeforeRaw = Number(rawStop.lastProcessedIndexBefore);
+  const stopLastProcessedIndexAfterRaw = Number(rawStop.lastProcessedIndexAfter);
   let blocker = null;
   if (!upstreamPaths.available) blocker = `missing upstream claude-subconscious root at ${upstreamPaths.root || '-'}`;
   else if (!apiKeyConfigured) blocker = 'missing LETTA_API_KEY';
@@ -940,8 +974,9 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
     directReuse,
     transitionalBoundary: [
       'SessionStart lifecycle can now run through the explicit upstream Letta session/conversation entrypoint.',
-      'UserPromptSubmit, PreToolUse, and Stop still run through local agent-chat logic.',
-      'Upstream Letta transcript send/checkpoint scripts are not yet the live execution path.',
+      'Stop transcript/send can now run through the explicit upstream Letta send_messages_to_letta.ts-style path.',
+      'UserPromptSubmit and PreToolUse still run through local agent-chat logic.',
+      'Upstream Letta transcript send/checkpoint scripts are only partially live; Stop is cut over, but the full remaining hook flow is not.',
       'Local episodic memory/conversation journals remain transitional until full upstream Letta flow is wired.',
     ],
     bootstrap: {
@@ -1024,6 +1059,26 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
           )
           : null,
       },
+    },
+    stop: {
+      supported: upstreamPaths.available && apiKeyConfigured && Boolean(agentId),
+      attempted: normalizeBoolean(rawStop.attempted) === true || stopStatus === 'attempted' || stopStatus === 'sent' || stopStatus === 'blocked',
+      status: stopStatus,
+      blockedReason: stopStatus === 'blocked' ? stopBlockedReason : null,
+      checkedAt: normalizeOptionalText(rawStop.checkedAt, 128) || null,
+      attemptedAt: stopAttemptedAt,
+      messageSent: normalizeBoolean(rawStop.messageSent) === true,
+      messageSentAt: stopMessageSentAt,
+      sessionId: normalizeOptionalText(rawStop.sessionId, 200) || null,
+      conversationId: normalizeOptionalText(rawStop.conversationId, 256) || null,
+      transcriptPath: stopTranscriptPath,
+      transcriptExists: stopTranscriptPath ? existsSync(stopTranscriptPath) : false,
+      transcriptMessageCount: normalizeNonNegativeInt(rawStop.transcriptMessageCount, 0),
+      newMessageCount: normalizeNonNegativeInt(rawStop.newMessageCount, 0),
+      syncStateFile: stopSyncStateFile,
+      lastProcessedIndexBefore: Number.isFinite(stopLastProcessedIndexBeforeRaw) ? stopLastProcessedIndexBeforeRaw : null,
+      lastProcessedIndexAfter: Number.isFinite(stopLastProcessedIndexAfterRaw) ? stopLastProcessedIndexAfterRaw : null,
+      scriptPath: normalizeWorkspacePath(rawStop.scriptPath || upstreamPaths.scripts?.stopSend) || upstreamPaths.scripts?.stopSend || null,
     },
   };
 }
@@ -1406,11 +1461,11 @@ function resolveSubconsciousState(agentName) {
   }
   if (upstream.session?.established === true) {
     missingBackendPieces.push(
-      'Only the SessionStart lifecycle is cut over to upstream Letta so far; the remaining hooks still use local transitional agent-chat logic.'
+      'Only SessionStart lifecycle and the Stop transcript/send path are cut over to upstream Letta so far; UserPromptSubmit and PreToolUse still use local transitional agent-chat logic.'
     );
   } else {
     missingBackendPieces.push(
-      'An explicit upstream SessionStart lifecycle route is wired, but it has not been started for a session yet; the remaining hooks still use local transitional agent-chat logic.'
+      'An explicit upstream SessionStart lifecycle route is wired, and the Stop transcript/send path is available, but the broader hook flow still uses local transitional agent-chat logic.'
     );
   }
   missingBackendPieces.push(
@@ -1422,6 +1477,11 @@ function resolveSubconsciousState(agentName) {
   if (upstream.session?.notify?.status === 'blocked') {
     missingBackendPieces.push(
       `Upstream SessionStart notify/send is separately blocked by Letta: ${upstream.session.notify.blockedReason || 'unknown constraint'}.`
+    );
+  }
+  if (upstream.stop?.status === 'blocked') {
+    missingBackendPieces.push(
+      `Upstream Stop transcript/send is separately blocked by Letta: ${upstream.stop.blockedReason || 'unknown constraint'}.`
     );
   }
 
@@ -4642,6 +4702,16 @@ app.post('/api/subconscious/events', (req, res) => {
     runtimeModel: body.runtimeModel ?? body.runtime_model,
     runtimeLatencyMs: body.runtimeLatencyMs ?? body.runtime_latency_ms,
     runtimeError: body.runtimeError ?? body.runtime_error,
+    upstreamStopAttempted: body.upstreamStopAttempted ?? body.upstream_stop_attempted,
+    upstreamStopStatus: body.upstreamStopStatus ?? body.upstream_stop_status,
+    upstreamStopBlockedReason: body.upstreamStopBlockedReason ?? body.upstream_stop_blocked_reason,
+    upstreamStopMessageSent: body.upstreamStopMessageSent ?? body.upstream_stop_message_sent,
+    upstreamStopConversationId: body.upstreamStopConversationId ?? body.upstream_stop_conversation_id,
+    upstreamStopTranscriptPath: body.upstreamStopTranscriptPath ?? body.upstream_stop_transcript_path,
+    upstreamStopSyncStateFile: body.upstreamStopSyncStateFile ?? body.upstream_stop_sync_state_file,
+    upstreamStopScriptPath: body.upstreamStopScriptPath ?? body.upstream_stop_script_path,
+    upstreamStopTranscriptMessageCount: body.upstreamStopTranscriptMessageCount ?? body.upstream_stop_transcript_message_count,
+    upstreamStopNewMessageCount: body.upstreamStopNewMessageCount ?? body.upstream_stop_new_message_count,
   });
   if (!event) return res.status(400).json({ error: 'agent required' });
   appendSubconsciousEvent(event);
@@ -4903,6 +4973,126 @@ app.post('/api/subconscious/upstream/session-start/:name', async (req, res) => {
       logs: Array.isArray(result.logs) ? result.logs.slice(-20) : [],
       session: sessionRecord,
       upstream: upstreamResponse,
+    });
+  } catch (err) {
+    return res.status(502).json({ ok: false, blocked: true, blocker: err?.message || String(err) });
+  }
+});
+
+app.post('/api/subconscious/upstream/stop/:name', async (req, res) => {
+  const agent = normalizeLooseAgentName(req.params.name);
+  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
+  const state = resolveSubconsciousState(agent);
+  if (!state) return res.status(404).json({ error: 'agent not found' });
+
+  try {
+    const payload = req.body || {};
+    const sessionId = normalizeOptionalText(payload.sessionId || payload.session_id, 200);
+    const transcriptPath = normalizeWorkspacePath(payload.transcriptPath || payload.transcript_path);
+    if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+    if (!transcriptPath) return res.status(400).json({ error: 'transcriptPath required' });
+
+    const now = new Date().toISOString();
+    const existingUpstream = (state.letta?.upstream && typeof state.letta.upstream === 'object') ? state.letta.upstream : {};
+    const existingRuntimeUpstream = (state.runtimeMeta?.upstream && typeof state.runtimeMeta.upstream === 'object')
+      ? state.runtimeMeta.upstream
+      : {};
+    const existingUpstreamStop = (existingUpstream.stop && typeof existingUpstream.stop === 'object') ? existingUpstream.stop : {};
+    const existingRuntimeUpstreamStop = (existingRuntimeUpstream.stop && typeof existingRuntimeUpstream.stop === 'object')
+      ? existingRuntimeUpstream.stop
+      : {};
+    const requestedAgentId = normalizeOptionalText(payload.lettaAgentId, 256);
+    const configuredAgentId = normalizeOptionalText(process.env.LETTA_AGENT_ID, 256);
+    const result = await syncUpstreamClaudeSubconsciousStop({
+      stateDir: state.stateDir,
+      workdir: state.agent.workdir || '',
+      cwd: normalizeWorkspacePath(payload.cwd) || state.agent.workdir || '',
+      transcriptPath,
+      apiKey: normalizeOptionalText(process.env.LETTA_API_KEY, 4096),
+      lettaBaseUrl: normalizeOptionalText(process.env.LETTA_BASE_URL, 2048),
+      lettaAgentId: requestedAgentId
+        || configuredAgentId
+        || normalizeOptionalText(existingUpstream.agentId, 256),
+      lettaModel: normalizeOptionalText(process.env.LETTA_MODEL, 256),
+      lettaContextWindow: normalizeOptionalText(process.env.LETTA_CONTEXT_WINDOW, 64),
+      sessionId,
+    });
+    const stopRecord = {
+      attempted: result.sendAttempted === true,
+      status: normalizeOptionalText(result.sendStatus, 64)
+        || (result.messageSent === true ? 'sent' : (result.blocked === true ? 'blocked' : 'not-run')),
+      blockedReason: result.blocker || null,
+      checkedAt: now,
+      attemptedAt: result.sendAttempted === true ? now : null,
+      messageSent: result.messageSent === true,
+      messageSentAt: result.messageSent === true ? now : null,
+      sessionId: result.sessionId || sessionId,
+      conversationId: result.conversationId || null,
+      transcriptPath,
+      transcriptMessageCount: normalizeNonNegativeInt(result.transcriptMessageCount, 0),
+      newMessageCount: normalizeNonNegativeInt(result.newMessageCount, 0),
+      syncStateFile: normalizeWorkspacePath(result.syncStateFile) || null,
+      lastProcessedIndexBefore: Number.isFinite(Number(result.lastProcessedIndexBefore))
+        ? Number(result.lastProcessedIndexBefore)
+        : null,
+      lastProcessedIndexAfter: Number.isFinite(Number(result.lastProcessedIndexAfter))
+        ? Number(result.lastProcessedIndexAfter)
+        : null,
+      scriptPath: normalizeWorkspacePath(result.paths?.scripts?.stopSend) || result.paths?.scripts?.stopSend || null,
+    };
+    const nextRuntimeMeta = {
+      ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
+      upstream: {
+        ...existingRuntimeUpstream,
+        available: result.paths?.available === true,
+        root: result.paths?.root || null,
+        promptFile: result.paths?.promptFile || null,
+        scripts: result.paths?.scripts || null,
+        durableHome: result.paths?.durableHome || null,
+        durableStateDir: result.paths?.durableStateDir || null,
+        conversationsFile: result.paths?.conversationsFile || null,
+        configPath: result.paths?.configPath || null,
+        directReuse: mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse),
+        bootstrapStatus: 'configured',
+        blocker: null,
+        checkedAt: now,
+        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
+        model: normalizeOptionalText(existingUpstream.model, 256)
+          || normalizeOptionalText(existingRuntimeUpstream.model, 256)
+          || null,
+        stop: {
+          ...existingRuntimeUpstreamStop,
+          ...stopRecord,
+        },
+      },
+      updatedAt: now,
+    };
+    const nextLetta = {
+      ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
+      upstream: {
+        ...existingUpstream,
+        bootstrapStatus: 'configured',
+        blocker: null,
+        checkedAt: now,
+        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
+        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
+        stop: {
+          ...existingUpstreamStop,
+          ...stopRecord,
+        },
+      },
+      updatedAt: now,
+    };
+    safeWriteJsonFile(state.runtimeMetaPath, nextRuntimeMeta);
+    safeWriteJsonFile(state.lettaPath, nextLetta);
+    const refreshed = resolveSubconsciousState(agent);
+    return res.json({
+      ok: result.blocked !== true,
+      blocked: result.blocked === true,
+      blocker: result.blocker || null,
+      logs: Array.isArray(result.logs) ? result.logs.slice(-20) : [],
+      stop: stopRecord,
+      upstream: refreshed?.contract?.upstream || buildSubconsciousUpstreamContract(state.stateDir, state.agent.workdir || null, nextRuntimeMeta, nextLetta, state.conversationState),
     });
   } catch (err) {
     return res.status(502).json({ ok: false, blocked: true, blocker: err?.message || String(err) });

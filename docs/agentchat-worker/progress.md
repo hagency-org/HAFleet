@@ -1147,6 +1147,13 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - the `GLM-5` / `model-unknown` diagnosis is no longer active
   - the successful-send return-path hang is no longer active
 - Accepted `agentchat-develop`'s narrow dev-only fix and moved the active plan forward to the next upstream hook-cutover slice rather than reopening UI/workspace/project loops.
+## [2026-03-09 03:44] PARTIAL — resumed execution on the workspace-discipline gap and guarded the wait state
+- Expanded the active plan so the next work is not only the Letta hook cutover but also the still-open workspace/project discipline gap: Yato must work from a real managed project under `workdir/projects/`, and the workspace `CLAUDE.md` template must become a short high-density contract that teaches that discipline.
+- Dispatched a new narrow dev-only batch to `agentchat-develop`:
+  - rewrite `docs/workspace-claude-md-template.md` into a short, high-signal workspace contract
+  - give Yato a real managed `agent-chat` project under its own `workdir/projects/`
+  - prove the expected working path is Yato's project path rather than the main repo root
+- This also corrects the recent coordination lapse: the next execution batch is now explicit instead of leaving the queue idle after the SessionStart baseline acceptance.
 ## [2026-03-09 03:31] PARTIAL — resumed active upstream work by narrowing the next cutover slice to `Stop`
 - After the SessionStart baseline acceptance, the next execution task has now been explicitly resumed instead of leaving the queue idle.
 - Chose `Stop` as the next minimal upstream Letta cutover slice and dispatched it to `agentchat-develop`.
@@ -1154,3 +1161,15 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `Stop` is one-way transcript/send work and does not sit in the live interactive path
   - it is lower-risk than `UserPromptSubmit` or `PreToolUse`, which would immediately mix inline latency, injection semantics, and visible operator behavior
 - Scope is explicitly bounded to dev-only upstream transcript/send reuse and truthful observability, not UI churn or broad parity claims.
+## [2026-03-09 03:47] DONE — accepted the dev Stop-path upstream cutover after independent proof
+- Independently verified the accepted dev-only `Stop` cutover on Yato:
+  - `GET /api/subconscious/detail/Yato` now exposes truthful `upstream.stop`
+  - `upstream.stop.status = sent`
+  - `upstream.stop.messageSent = true`
+  - `upstream.stop.transcriptPath`, `syncStateFile`, `conversationId`, transcript counts, and `lastProcessedIndex` movement are populated
+- Independently verified event-level observability:
+  - latest `GET /api/subconscious/events/Yato?limit=2` events carry `upstreamStopStatus`, `upstreamStopMessageSent`, matching conversation id, transcript path, sync-state path, and upstream script path
+- Accepted boundary:
+  - `SessionStart` lifecycle and `Stop` transcript/send are now real upstream-backed paths in dev
+  - `UserPromptSubmit` and `PreToolUse` remain transitional/local
+- With `Stop` accepted, the active execution focus returns to the still-open workspace/project discipline gap rather than immediately expanding to the next hook path.

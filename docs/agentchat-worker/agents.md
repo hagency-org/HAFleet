@@ -188,3 +188,7 @@
 - Server-rendered client-script regex caveat:
   - when `server.js` emits browser JavaScript through template strings, regex escapes intended for the browser must often be double-escaped in server source (for example `\\s` in server source to emit `\s` in served JS);
   - otherwise the browser can receive broken regex literals such as `/s+/g`, which silently corrupts client-side text normalization and can disable interactivity if the emitted script becomes invalid.
+- Current upstream Stop-path truth in dev:
+  - `Stop` is now a real upstream-backed path for the dev Yato flow rather than local-only logging;
+  - `/api/subconscious/detail/:name` exposes durable `upstream.stop` fields including `attempted`, `status`, `messageSent`, `conversationId`, `transcriptPath`, `syncStateFile`, transcript counts, and `lastProcessedIndex` movement;
+  - replaying the same transcript for the same session truthfully yields no new upstream messages once the upstream durable sync-state file has already advanced.

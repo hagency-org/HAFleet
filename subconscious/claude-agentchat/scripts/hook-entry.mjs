@@ -199,6 +199,14 @@ function resolveInvokeUrl() {
   return normalizeText(process.env.AGENTCHAT_SUBCONSCIOUS_INVOKE_URL, 2048);
 }
 
+function resolveStopUrl() {
+  const explicit = normalizeText(process.env.AGENTCHAT_SUBCONSCIOUS_STOP_URL, 2048);
+  if (explicit) return explicit;
+  const eventUrl = normalizeText(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_URL, 2048);
+  if (!eventUrl) return null;
+  return eventUrl.replace(/\/api\/subconscious\/events\/?$/i, '/api/subconscious/upstream/stop');
+}
+
 async function invokeRuntimeGuidance(agentName, input) {
   const url = resolveInvokeUrl();
   if (!url) return { invoked: false, guidance: null, source: 'none' };
@@ -244,6 +252,70 @@ async function invokeRuntimeGuidance(agentName, input) {
   }
 }
 
+async function invokeUpstreamStop(agentName, input) {
+  if (HOOK_NAME !== 'Stop') {
+    return { attempted: false, status: 'not-run', messageSent: false, blockedReason: null };
+  }
+  const url = resolveStopUrl();
+  const sessionId = normalizeText(input?.session_id, 200);
+  const transcriptPath = normalizeText(input?.transcript_path, 4096);
+  const cwd = normalizeText(input?.cwd, 4096);
+  if (!url || !sessionId || !transcriptPath) {
+    return {
+      attempted: false,
+      status: 'blocked',
+      messageSent: false,
+      blockedReason: !url
+        ? 'missing upstream stop url'
+        : (!sessionId ? 'missing session_id' : 'missing transcript_path'),
+    };
+  }
+
+  const headers = { 'Content-Type': 'application/json' };
+  const token = normalizeText(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN, 512);
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  try {
+    const resp = await fetch(`${url.replace(/\/$/, '')}/${encodeURIComponent(agentName)}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        sessionId,
+        transcriptPath,
+        cwd,
+      }),
+    });
+    const payload = await resp.json().catch(() => null);
+    if (!resp.ok || !payload) {
+      return {
+        attempted: true,
+        status: 'blocked',
+        messageSent: false,
+        blockedReason: String(payload?.error || payload?.blocker || `http-${resp.status}`).slice(0, 400),
+      };
+    }
+    return {
+      attempted: payload?.stop?.attempted === true,
+      status: normalizeText(payload?.stop?.status, 64) || (payload?.blocked === true ? 'blocked' : 'not-run'),
+      messageSent: payload?.stop?.messageSent === true,
+      blockedReason: normalizeText(payload?.stop?.blockedReason, 400) || normalizeText(payload?.blocker, 400),
+      conversationId: normalizeText(payload?.stop?.conversationId, 256),
+      transcriptPath: normalizeText(payload?.stop?.transcriptPath, 4096),
+      syncStateFile: normalizeText(payload?.stop?.syncStateFile, 4096),
+      scriptPath: normalizeText(payload?.stop?.scriptPath, 4096),
+      transcriptMessageCount: Number(payload?.stop?.transcriptMessageCount) || 0,
+      newMessageCount: Number(payload?.stop?.newMessageCount) || 0,
+    };
+  } catch (err) {
+    return {
+      attempted: true,
+      status: 'blocked',
+      messageSent: false,
+      blockedReason: String(err?.message || err).slice(0, 400),
+    };
+  }
+}
+
 function emitAdditionalContext(hookName, agentName, guidance) {
   const clean = normalizeText(guidance, 2000);
   if (!clean) return;
@@ -264,6 +336,7 @@ async function main() {
   const agentName = resolveAgentName(input);
   const state = resolveLettaState(agentName);
   const runtimeResult = await invokeRuntimeGuidance(agentName, input);
+  const upstreamStopResult = await invokeUpstreamStop(agentName, input);
   const effectiveGuidance = runtimeResult.guidance || state.guidance || null;
   const manualGuidanceConfigured = Boolean(state.guidance);
   const guidanceInjected = Boolean(effectiveGuidance) && (HOOK_NAME === 'UserPromptSubmit' || HOOK_NAME === 'PreToolUse');
@@ -295,6 +368,16 @@ async function main() {
     runtimeModel: runtimeResult.model || null,
     runtimeLatencyMs: runtimeResult.latencyMs,
     runtimeError: runtimeResult.error || runtimeResult.disabledReason || null,
+    upstreamStopAttempted: upstreamStopResult.attempted === true,
+    upstreamStopStatus: upstreamStopResult.status || null,
+    upstreamStopBlockedReason: upstreamStopResult.blockedReason || null,
+    upstreamStopMessageSent: upstreamStopResult.messageSent === true,
+    upstreamStopConversationId: upstreamStopResult.conversationId || null,
+    upstreamStopTranscriptPath: upstreamStopResult.transcriptPath || null,
+    upstreamStopSyncStateFile: upstreamStopResult.syncStateFile || null,
+    upstreamStopScriptPath: upstreamStopResult.scriptPath || null,
+    upstreamStopTranscriptMessageCount: upstreamStopResult.transcriptMessageCount || null,
+    upstreamStopNewMessageCount: upstreamStopResult.newMessageCount || null,
   };
 
   appendLog(`${HOOK_NAME} session=${event.sessionId || '-'} tool=${event.toolName || '-'} letta=${state.lettaAgentId}`);
