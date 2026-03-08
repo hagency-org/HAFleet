@@ -1731,3 +1731,6 @@ Verification:
 
 ## [2026-03-09 03:24] DONE — Worker accepted the Letta model alias normalization fix
 Recorded the worker acceptance for the canonical-handle normalization change in upstream `agent_config.ts`. This acceptance does not change the current hold state for the later SessionStart notify return-path batch; it only closes the earlier alias-normalization review item.
+
+## [2026-03-09 03:24] DONE — Worker accepted the SessionStart notify return-path fix
+Recorded the worker's independent verification that the current SessionStart baseline now closes cleanly over HTTP with `sendMessage:true`, persists a real Letta conversation, and no longer carries either of the old active blocker diagnoses (`GLM-5/model-unknown` or successful-send return-path hang). The queued next focus is now the next minimal upstream hook-cutover slice beyond SessionStart, but no new implementation starts until an explicit resume command.
