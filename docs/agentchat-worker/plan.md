@@ -1,9 +1,9 @@
 ## Current
-Advance upstream Letta execution beyond the accepted SessionStart baseline: choose and implement the next minimal live path cut from local transitional logic into real upstream flow (`UserPromptSubmit`, `PreToolUse`, or `Stop`) without reopening settled UI/workspace/project work.
+Advance upstream Letta execution beyond the accepted SessionStart baseline by cutting over the `Stop` path in dev using the real upstream transcript/send flow, without reopening settled UI/workspace/project work.
 Acceptance criteria:
 - the SessionStart baseline remains stable (`sendMessage:true` still returns cleanly and leaves `notify.status=sent`)
-- one exact next hook-path slice is selected and bounded by root cause, not by broad parity claims
-- docs reflect that the old `GLM-5 model-unknown` blocker and the successful-send return-path bug are both closed
+- one real dev proof shows `Stop` uses the upstream path and returns a truthful success/failure result
+- any blocker is isolated exactly at the upstream `Stop` path rather than reintroducing local substitute logic
 
 ## Queue
 1. Start benchmark Batch 4 (result UI) once the next Letta hook-cutover slice is stable enough not to churn the dev control-plane.
