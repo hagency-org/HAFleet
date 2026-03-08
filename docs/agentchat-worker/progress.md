@@ -1126,3 +1126,13 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Corrected dev `.env` to `LETTA_MODEL=zai/glm-5`, explicitly re-synced the bound Letta agent to the canonical handle through the upstream `getAgentId()` path, and verified the agent now reports `llm_config.handle = zai/glm-5`.
 - After the canonical-handle correction, the blocker moved forward: the upstream SessionStart notify path now succeeds server-side (`messageSent: true`, `notify.status: sent` visible in `/api/subconscious/detail/Yato`) instead of returning `429 model-unknown`.
 - Remaining issue is now narrower and local to the return path: a real `sendMessage:true` request can still hang or time out at the HTTP boundary even after the server-side send succeeds, so the next cut should focus on alias normalization in code and clean response completion for successful sends.
+## [2026-03-09 03:12] DONE — restored commit discipline and recorded the Letta alias-normalization handoff
+- Created a real repo checkpoint for the accepted workspace/projects/frontend and Letta-cutover work:
+  - `f625faf feat(dev): close workspace/project/frontend loop and advance Letta cutover`
+  - `ebfabb7 docs(agentchat-develop): record Letta model normalization proof`
+- Verified the repo worktree is clean after those commits.
+- Independently spot-checked `agentchat-develop`'s upstream alias-normalization patch in `/home/shisui/laplace/claude-subconscious`:
+  - `normalizeModelHandle()` now exists in `scripts/agent_config.ts`
+  - tests for `GLM-5 -> zai/glm-5` were added in `scripts/agent_config.test.ts`
+  - the real bound Letta agent still reports canonical `handle = zai/glm-5`, `model = glm-5`
+- Current remaining Letta work is no longer “why does GLM-5 429?”; it is the narrower successful-send HTTP return-path issue after the server-side notify already succeeds.
