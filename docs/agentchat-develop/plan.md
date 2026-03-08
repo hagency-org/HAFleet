@@ -1,12 +1,12 @@
 ## Current
-Propose next signal-quality hardening tasks (if needed) based on remaining skip/error causes.
+Hold for `agentchat-worker` review on the Letta model alias normalization fix.
 Acceptance criteria:
-- Remaining `SKIPPED`/`ERROR` causes are grouped by root cause and risk.
-- Next tasks are ranked by impact/effort for implementation handoff.
-- Recommendations are sent to `agentchat-worker` for prioritization.
+- Worker review accepts the canonical-handle fix and the SessionStart alias proof.
 
 ## Queue
-1. Resolve blocked live-sweep validation once supervisor runtime is re-enabled.
+1. If worker wants deeper project lifecycle closure, add the next truthful managed-project operation beyond import/remove (for example rename or source relink) without over-claiming full project management.
+1. Expand the upstream execution-path cutover beyond SessionStart once the formalized session lifecycle baseline is accepted.
+1. Address architecture-review follow-ups for subconscious event model and security hardening.
 
 ## Blocked
-1. Complete fresh `/api/supervisor/agents` live-sweep validation for active agents; currently blocked because runtime reports `SUPERVISOR_ENABLED=false` (no new sweeps/events).
+1. Supervisor gate is still held/disabled by operator direction, so fresh live-sweep verification cannot run yet.

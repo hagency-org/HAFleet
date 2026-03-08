@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentchat.benchmark.trial/v1",
+  "title": "AgentChat Benchmark Trial",
+  "type": "object",
+  "required": [
+    "schema",
+    "runId",
+    "trialId",
+    "taskId",
+    "attemptIndex",
+    "agentHomePath",
+    "workdirPath",
+    "outputPath",
+    "runtimeStatus",
+    "timestamps",
+    "result",
+    "artifactPaths"
+  ],
+  "properties": {
+    "schema": { "const": "agentchat.benchmark.trial/v1" },
+    "runId": { "type": "string" },
+    "trialId": { "type": "string" },
+    "taskId": { "type": "string" },
+    "attemptIndex": { "type": "integer", "minimum": 1 },
+    "agentHomePath": { "type": "string" },
+    "workdirPath": { "type": "string" },
+    "outputPath": { "type": "string" },
+    "runtimeStatus": { "type": "string" },
+    "timestamps": { "type": "object" },
+    "result": { "type": "object" },
+    "artifactPaths": { "type": "object" },
+    "execution": { "type": "object" }
+  }
+}

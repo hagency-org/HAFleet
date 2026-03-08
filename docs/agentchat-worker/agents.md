@@ -44,3 +44,147 @@
 - Codex resume-id capture reliability:
   - `agent-up` codex resume capture can fail if relying only on short early-shell checks or asynchronous background capture.
   - Safety boundary remains strict: codex session ID must match workspace path (and name marker when present) to avoid cross-agent context bleed.
+- Agent host-model direction:
+  - Current system is still project-attached (`data/agents/{name}` + `meta.path` + docs resolved from workspace path).
+  - Planned `1.x` direction is agent-centric: each agent gets its own home, with system-owned runtime state separated from agent-writable workdir.
+- Agent config isolation direction:
+  - Global Claude/Codex configuration should be kept minimal; per-agent behavior should live in the agent's own home/workdir whenever possible.
+  - MCP, hooks, skills, and related runtime config should become agent-scoped and visible/manageable from the agent management surface rather than relying on heavy shared global config.
+- V1 web information architecture should be agent-centric, not feature-centric:
+  - the primary secondary page should be one unified `Agent Detail` entry per agent;
+  - `audit` is a module/tab inside that page, not a separate competing detail entrypoint;
+  - the page should aggregate agent overview, runtime, docs, projects, config, subconscious, and audit in one place.
+- `Supervisor audit` and `subconscious` are separate systems and must not be conflated in UI language or data sources:
+  - `Full Audit` / supervisor views are sourced from supervisor evaluation events;
+  - subconscious views are sourced from subconscious hook/event data;
+  - the management surface should expose separate enable/disable controls and separate output/insight panels for each.
+- Current `subconscious` implementation is still scaffold-level, not a real Letta/LLM reasoning backend:
+  - the Claude hook script records hook events, maintains a deterministic `lettaAgentId`, and optionally injects `guidance` from `state/letta.json`;
+  - it does not currently call a Letta server or any external LLM API itself;
+  - `state/letta.json` is currently metadata/config state, not a real memory store;
+  - if `guidance` is empty, the hook emits no additional subconscious context at all.
+- Current subconscious runtime contract in dev is now isolated from supervisor defaults by default:
+  - provider/model/endpoint/key env resolve from agent state first, then `SUBCONSCIOUS_LLM_*`, then provider defaults;
+  - successful invokes should not write resolved env/default provider-model fields back into `state/letta.json`, or config-source observability collapses incorrectly to `state`.
+- Current truthful subconscious memory semantics are first-pass local retrieval, not Letta parity:
+  - persisted memory artifact lives at `state/subconscious/memory.json`;
+  - kind is `local-episodic-journal`;
+  - retrieval strategy is `keyword-overlap-recency`;
+  - runtime invoke retrieves matches from this file before the LLM call and appends a new episode after success.
+- After the first runtime-connected subconscious batch, the above is only partially true:
+  - the hook runtime can now call a real OpenAI-compatible backend invoke endpoint and persist `lastInvocation` / `lastRuntimeGuidance`;
+  - however it is still not a full Letta-style memory backend because persistent memory-store semantics/retrieval are still missing;
+  - the current dev runtime contract may still default to supervisor-family provider/model/key envs unless explicitly separated via subconscious-specific config.
+- Code/runtime split direction:
+  - The repo directory and the mutable runtime directory are distinct concerns and should not be conflated for long-running dev/live instances.
+  - Current intended layout is:
+    - dev code repo: `~/laplace/agent-chat`
+    - dev runtime: `~/laplace/agent-chat-dev-runtime`
+    - live code repo: `~/laplace/agent-chat-live`
+    - live runtime: separate future directory after explicit cutover planning
+  - Switching process cwd alone is not a safe code/runtime split, because the codebase still contains repo-relative executable/template paths that would break under a pure runtime cwd.
+- Current split-runtime foundation moves mutable `data/` and `logs/` under `AGENT_CHAT_RUNTIME_DIR`, while env loading still defaults to repo-local `.env` unless the launch environment overrides values explicitly.
+- If `agent-up` prints `failed to apply runtime scope memory limits`, the agent may still start normally; that warning means the optional per-agent systemd user scope limits were not applied.
+- On this server, that warning correlates with shells/services that lack `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`; in that state `systemctl --user` cannot talk to the user bus, `systemd-run --user --scope` falls back, and the tmux pane stays under the parent service cgroup instead of a dedicated `agent-*.scope`.
+- Local Claude MCP environment constraint:
+  - `claude mcp add ...` can be blocked by enterprise-managed MCP configuration with the error: `enterprise MCP configuration is active and has exclusive control over MCP servers`.
+  - In that state, repo/runtime work can still validate backend/web/subconscious behavior, but a new client-side alias such as `agentchat-dev` cannot be truthfully claimed as installed unless the enterprise MCP policy changes.
+  - On this server, the effective managed Claude MCP file is `/etc/claude-code/managed-mcp.json` (root-owned). When it exists, `claude mcp list` reflects that file rather than user-level `~/.claude/settings.json` `mcpServers`.
+- `Human Metadata` in the current Agent Detail UI is not a runtime control surface:
+  - it only persists human-maintained `owner`, `projectScope`, and `notes` fields in the v1 home metadata/state path;
+  - it does not directly alter supervisor audit, subconscious runtime behavior, or agent process control.
+- Current global agent-list confusion is partly structural rather than runtime duplication:
+  - a dev agent such as `Yato` can appear both in the global agent registry/list and in the v1-home/detail surfaces;
+  - without explicit `environment / purpose / persistence` grouping (`live`, `dev`, `benchmark`, `ephemeral`), one agent can look like it exists in “two places” even when there is only one runtime instance.
+- Current `Agent Detail` truthfulness caveat:
+  - several surfaces are UI-derived summaries rather than first-class backend objects (for example `Intervention`, `healthSummary`, and some “recent/high-signal” phrasing);
+  - when refining the detail page, prefer exposing real source objects first (`supervisor events`, `subconscious events`, runtime config/state, human notes) and demote or remove synthetic summaries that overstate system maturity.
+- Dev stack env verification caveat:
+  - do not assume a key present in repo `.env` is present in the running dev tmux/backend process;
+  - verify the actual backend process environment (for example via `/proc/<pid>/environ`) before attributing provider failures to an invalid key;
+  - current verified example: dev backend had `SUBCONSCIOUS_LLM_KEY` but not `DASHSCOPE_API_KEY`, so a Qwen runtime configured with `keyEnv=DASHSCOPE_API_KEY` failed as `missing API key env ...`, not `invalid_api_key`.
+- Current dev stack launch nuance:
+  - detached tmux launches of `backend-v2.js` / `server.js` do not automatically become truthful `.env`-backed runtime proofs unless the launch command explicitly sources the repo `.env`;
+  - after explicit `.env` sourcing, the same dev backend process can simultaneously expose `SUBCONSCIOUS_LLM_KEY` and `DASHSCOPE_API_KEY`, which is required for truthful per-provider subconscious runtime verification.
+- Subconscious product direction has now been clarified by the operator:
+  - the target is direct integration of the real `claude-subconscious` model/logic/prompt and a real Letta agent, not an indefinitely extended local “Letta-like” substitute;
+  - the existing local episodic-memory / conversation-journal implementation is transitional only and should not become the long-term architecture if it diverges from original Letta parity;
+  - future subconscious work should prefer reusing upstream `claude-subconscious` conversation/sync/memory-block flows and adapting them into `agent-chat` control-plane / web observability, rather than continuing to invent parallel semantics.
+- Current direct-upstream subconscious slice status:
+  - `agent-chat` now has a real bridge file `lib/upstream-claude-subconscious.js` that directly imports upstream `/home/shisui/laplace/claude-subconscious` artifacts rather than only mirroring their ideas;
+  - currently verified direct reuse includes:
+    - `Subconscious.af`
+    - `scripts/agent_config.ts`
+    - `scripts/conversation_utils.ts`
+    - `scripts/transcript_utils.ts`
+  - the new bootstrap path is real (`POST /api/subconscious/upstream/bootstrap/:name`) and currently blocks truthfully at `missing LETTA_API_KEY`;
+  - the live hook runtime and memory execution path are still transitional/local until Letta service credentials are provided.
+- Upstream Letta bootstrap binding nuance:
+  - when a real `LETTA_AGENT_ID` is provided, bootstrap must prioritize the explicit requested/configured agent id over any previously stored upstream agent id;
+  - otherwise an earlier default imported agent can shadow the intended Letta agent binding and make the system look “configured” against the wrong remote agent.
+- Current upstream SessionStart cutover status in dev:
+  - `POST /api/subconscious/upstream/session-start/:name` is live and can create/reuse a real upstream Letta conversation mapping without a manual shell proof;
+  - verified `sendMessage:false` persists session bookkeeping under the agent's isolated upstream home and leaves detail at `stage=upstream-session-lifecycle`.
+- Current upstream notify/send blocker in dev:
+  - the original `429 {"error":"Rate limited","reasons":["model-unknown"]}` blocker was traced to a model-handle mismatch, not a generic Letta outage;
+  - Letta Cloud exposes the ZAI model as canonical handle `zai/glm-5`, while dev had `LETTA_MODEL=GLM-5`;
+  - upstream `agent_config.ts` accepts aliases such as `GLM-5` when checking availability, but if the raw alias is then written back into `llm_config.handle`, the bound agent regresses to an invalid handle and the notify/send path re-enters `model-unknown`;
+  - use the canonical Letta model handle (`zai/glm-5`) for persisted config, or normalize aliases to the canonical handle before patching the agent model.
+- Current upstream session truthfulness bug:
+  - when the notify/send sub-step blocks, detail-stage derivation falls back from `upstream-session-lifecycle` to `conversation-aware-runtime` even though the real upstream conversation/session still exists;
+  - that downgrade is misleading and should be treated as a product truthfulness bug, not as loss of the upstream SessionStart cutover itself.
+- Current upstream SessionStart truthfulness shape in dev:
+  - the accepted model is: upstream session lifecycle remains `started`/`established` if real `sessionId` + `conversationId` exist, even when the optional notify/send sub-step fails;
+  - notify/send state now belongs under `upstream.session.notify`, not under bootstrap or the top-level session lifecycle state.
+- Current v1 workspace-template/provision mismatch:
+  - `scripts/provision-v1-agent-home.js` currently hardcodes a minimal `workdir/docs/CLAUDE.md` and does not derive it from `docs/workspace-claude-md-template.md`;
+  - the generated `CLAUDE.md` is therefore a stub, not a versioned workspace contract.
+- Current v1 Claude-workspace wiring gap:
+  - provisioning currently writes `workdir/docs/CLAUDE.md` only;
+  - repo code currently does not also create or link a root-level `workdir/CLAUDE.md`, so any expectation that Claude Code will load workspace instructions from the workdir root is not guaranteed by the current system.
+- Current v1 workspace-directory truth gap:
+  - provisioning always creates `workdir/projects`, `workdir/scratch`, `workdir/inbox`, and `workdir/outputs`;
+  - runtime can also create `workdir/data` (for example media cache);
+  - these directories are not yet fully described in the generated workspace docs/template, so agents and humans cannot infer their intended usage from the workspace itself.
+- Current project-ownership gap in dev:
+  - the v1 contract says project material belongs under `workdir/projects/`, but the system does not yet reliably teach or enforce that model for a fresh agent;
+  - current example: Yato has `managedProjects: []` and an empty `workdir/projects/`, so the control-plane/web story for project material remains incomplete.
+- Current v1 workspace repair acceptance boundary:
+  - the maintained template + provisioning contract are now the source of truth for fresh homes;
+  - existing dev homes are not migrated automatically until provisioning is rerun or a separate migration step is executed.
+- Workspace entry-file direction:
+  - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
+  - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
+  - any duplicate or linked `docs/CLAUDE.md` / `docs/AGENTS.md` should be treated as transitional compatibility only, not the long-term source of truth.
+- Existing-home v1 reprovisioning caveat in dev:
+  - if reprovision is run without explicit dev backend env (`AGENT_CHAT_API` / `AGENT_CHAT_BACKEND_PORT`), `configure-v1-subconscious.js` falls back to `8090` and rewrites hook runtime URLs toward the default backend;
+  - reprovisioning an existing dev home should therefore pass the explicit dev backend env or it can silently regress the subconscious event/invoke sink to the wrong backend.
+- Agent-up migration-validation caveat:
+  - if a tmux session for the agent still exists, `bin/agent-up` can simply refresh backend mapping instead of truly relaunching the agent;
+  - a real `down -> upgrade -> up` validation must first remove the existing tmux session (for example via `agent-down`) before the subsequent `agent-up` is considered a true restart.
+- Current subconscious state-divergence failure mode after Yato migration/restart:
+  - `state/letta.json` and upstream durable conversation files can still hold the correct real Letta binding/conversation data while `GET /api/subconscious/detail/:name` collapses back to `stage=scaffold`, `upstream.bootstrap.status=not-run`, and a wrong/generated upstream agent id;
+  - when this happens, the web confusion is backed by a real backend truth gap, not just bad copy.
+- Current agent online-state inconsistency:
+  - after the Yato restart validation, dev API/tmux showed Yato alive again, but `send_message(to=\"Yato\", ...)` returned `target_offline` / `reason=agent-down`;
+  - treat agentchat delivery state and tmux/dev-api presence as separate signals until this sync inconsistency is understood.
+- Current subconscious truth model on Yato after the backend repair:
+  - upstream Letta bootstrap/session state can now be derived truthfully from durable files (`state/letta.json`, upstream conversation/session files) even if transient runtime metadata regressed;
+  - local transitional runtime can still be simultaneously degraded (`deepseek` / `SUBCONSCIOUS_LLM_KEY` missing), so UI must present local runtime vs upstream Letta as separate paths rather than one unified subconscious backend.
+- Current Yato live/dev reality:
+  - the real Yato runtime/home/meta currently exist only in dev (`agent-chat-dev-runtime`);
+  - live has no `data/agents/Yato/meta.json` and no `homes/agents/agent_yato`;
+  - live detail lookup by name can still return a null-filled shell object for `Yato`, which is misleading and can make it look like live also has that agent when it does not.
+- Current managed-project remove semantics in dev:
+  - `deleteFiles:false` means untrack only: the project is removed from `managedProjects` but the local directory under `workdir/projects` is kept; a same-name re-import will then truthfully fail until the leftover path is removed or renamed.
+  - `deleteFiles:true` means remove from `managedProjects` and delete/unlink the local path, but only when the target path is inside `workdir/projects`.
+- Current v1 projects control-plane shape:
+  - `GET /api/agents/:name/projects` exposes the persisted v1 `managedProjects` model and the concrete `workdir/projects` root;
+  - `POST /api/agents/:name/projects/import` reuses `scripts/provision-v1-agent-home.js` rather than reimplementing file operations in web code;
+  - materialization remains truthful to provisioning semantics (`copy` => real directory copy, `symlink` => symlink).
+- Dev-only agent communication rule:
+  - `agent-chat-cli` / `agentchat cli` default to `AGENT_CHAT_API=http://127.0.0.1:8090` unless explicitly overridden;
+  - dev-only agents such as the current Yato must be queried or messaged through the dev backend (`AGENT_CHAT_API=http://127.0.0.1:18190`) or an equivalent dev MCP alias, otherwise live/control-plane lookups will misreport them.
+- Server-rendered client-script regex caveat:
+  - when `server.js` emits browser JavaScript through template strings, regex escapes intended for the browser must often be double-escaped in server source (for example `\\s` in server source to emit `\s` in served JS);
+  - otherwise the browser can receive broken regex literals such as `/s+/g`, which silently corrupts client-side text normalization and can disable interactivity if the emitted script becomes invalid.

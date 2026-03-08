@@ -38,7 +38,8 @@ _resolve_script_dir() {
 }
 SCRIPT_DIR="$(_resolve_script_dir)"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
-DATA_DIR="$BASE_DIR/data/agents"
+DATA_DIR=""
+SUBCONSCIOUS_SETUP_SCRIPT="$BASE_DIR/scripts/configure-v1-subconscious.js"
 
 # Load .env if present
 ENV_FILE="$BASE_DIR/.env"
@@ -47,8 +48,20 @@ if [ -f "$ENV_FILE" ]; then
   source "$ENV_FILE"
   set +a
 fi
+RUNTIME_DIR="${AGENT_CHAT_RUNTIME_DIR:-$BASE_DIR}"
+DATA_DIR="$RUNTIME_DIR/data/agents"
 
-BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
+BACKEND_PORT_RAW="${AGENT_CHAT_BACKEND_PORT:-8090}"
+if [[ "$BACKEND_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT_RAW" -gt 0 ]; then
+  BACKEND_PORT="$BACKEND_PORT_RAW"
+else
+  BACKEND_PORT="8090"
+fi
+BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:$BACKEND_PORT}"
+MCP_SERVER_NAME="${AGENT_CHAT_MCP_SERVER_NAME:-agent-chat}"
+if [ -z "${MCP_SERVER_NAME// }" ]; then
+  MCP_SERVER_NAME="agent-chat"
+fi
 SERVER_ID="${AGENT_CHAT_SERVER:-}"
 API_TOKEN="${API_TOKEN:-}"
 AGENT_SCOPE_ENABLE_RAW="${AGENT_SCOPE_ENABLE:-1}"
@@ -245,18 +258,74 @@ PY
 
 register_backend_agent() {
   local payload
-  payload=$(NAME="$NAME" TYPE="$TYPE" TMUX="${NAME}:0.0" SERVER="$SERVER_ID" python3 - <<'PY'
+  payload=$(NAME="$NAME" TYPE="$TYPE" TMUX="${NAME}:0.0" SERVER="$SERVER_ID" \
+    AGENT_MODEL_VERSION="${SAVED_AGENT_MODEL_VERSION:-}" \
+    AGENT_LAYOUT_VERSION="${SAVED_LAYOUT_VERSION:-}" \
+    AGENT_ID="${SAVED_AGENT_ID:-}" \
+    AGENT_HOME_DIR="${SAVED_HOME_DIR:-}" \
+    AGENT_WORKDIR="${SAVED_WORKDIR:-}" \
+    AGENT_STATE_DIR="${SAVED_STATE_DIR:-}" \
+    SUBCONSCIOUS_ENABLED="${SAVED_SUBCONSCIOUS_ENABLED:-}" \
+    python3 - <<'PY'
 import json
 import os
 
 server = os.environ.get("SERVER", "").strip() or None
-print(json.dumps({
+def parse_int(text):
+    try:
+        n = int(str(text or "").strip())
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+def parse_bool(text):
+    t = str(text or "").strip().lower()
+    if t in ("1", "true", "yes", "on"):
+        return True
+    if t in ("0", "false", "no", "off"):
+        return False
+    return None
+
+def parse_abs(text):
+    value = str(text or "").strip()
+    if value and value.startswith("/"):
+        return value
+    return None
+
+payload = {
     "name": os.environ["NAME"],
     "type": os.environ["TYPE"],
     "tmux": os.environ["TMUX"],
     "server": server,
     "manualDown": False,
-}))
+}
+agent_model_version = str(os.environ.get("AGENT_MODEL_VERSION", "")).strip()
+if agent_model_version:
+    payload["agentModelVersion"] = agent_model_version
+
+layout_version = parse_int(os.environ.get("AGENT_LAYOUT_VERSION", ""))
+if layout_version is not None:
+    payload["layoutVersion"] = layout_version
+
+agent_id = str(os.environ.get("AGENT_ID", "")).strip()
+if agent_id:
+    payload["agentId"] = agent_id
+
+home_dir = parse_abs(os.environ.get("AGENT_HOME_DIR", ""))
+workdir = parse_abs(os.environ.get("AGENT_WORKDIR", ""))
+state_dir = parse_abs(os.environ.get("AGENT_STATE_DIR", ""))
+if home_dir:
+    payload["homeDir"] = home_dir
+if workdir:
+    payload["workdir"] = workdir
+if state_dir:
+    payload["stateDir"] = state_dir
+
+subconscious_enabled = parse_bool(os.environ.get("SUBCONSCIOUS_ENABLED", ""))
+if subconscious_enabled is not None:
+    payload["subconsciousEnabled"] = subconscious_enabled
+
+print(json.dumps(payload))
 PY
 )
   if api_curl -X POST "$BACKEND_URL/api/agents" \
@@ -414,12 +483,30 @@ SAVED_TYPE=""
 SAVED_MODEL=""
 SAVED_EXTRA_ARGS=""
 SAVED_SESSION_ID=""
+SAVED_AGENT_MODEL_VERSION=""
+SAVED_LAYOUT_VERSION=""
+SAVED_AGENT_ID=""
+SAVED_HOME_DIR=""
+SAVED_WORKDIR=""
+SAVED_STATE_DIR=""
+SAVED_SUBCONSCIOUS_ENABLED=""
 if [ -f "$META_FILE" ]; then
   SAVED_PATH=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('path',''))" 2>/dev/null || true)
   SAVED_TYPE=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('type',''))" 2>/dev/null || true)
   SAVED_MODEL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('model',''))" 2>/dev/null || true)
   SAVED_EXTRA_ARGS=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('extraArgs',''))" 2>/dev/null || true)
   SAVED_SESSION_ID=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('sessionId',''))" 2>/dev/null || true)
+  SAVED_AGENT_MODEL_VERSION=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('agentModelVersion',''))" 2>/dev/null || true)
+  SAVED_LAYOUT_VERSION=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('layoutVersion',''))" 2>/dev/null || true)
+  SAVED_AGENT_ID=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('agentId',''))" 2>/dev/null || true)
+  SAVED_HOME_DIR=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('homeDir',''))" 2>/dev/null || true)
+  SAVED_WORKDIR=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('workdir',''))" 2>/dev/null || true)
+  SAVED_STATE_DIR=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('stateDir',''))" 2>/dev/null || true)
+  SAVED_SUBCONSCIOUS_ENABLED=$(python3 -c "import json; d=json.load(open('$META_FILE')); print('1' if d.get('subconsciousEnabled') is True else ('0' if d.get('subconsciousEnabled') is False else ''))" 2>/dev/null || true)
+fi
+
+if [ -z "${SAVED_SUBCONSCIOUS_ENABLED:-}" ] && [ -n "${SAVED_HOME_DIR:-}" ] && [ -f "${SAVED_HOME_DIR}/agent.json" ]; then
+  SAVED_SUBCONSCIOUS_ENABLED=$(python3 -c "import json; d=json.load(open('${SAVED_HOME_DIR}/agent.json')); print('1' if d.get('subconsciousEnabled') is True else ('0' if d.get('subconsciousEnabled') is False else ''))" 2>/dev/null || true)
 fi
 
 # Apply defaults from meta
@@ -1049,8 +1136,112 @@ if [ -n "$SCOPE_UNIT" ]; then
 fi
 register_backend_agent
 
+shell_quote() {
+  printf "%q" "$1"
+}
+
+IS_V1_AGENT=0
+if [[ "${SAVED_AGENT_MODEL_VERSION:-}" == 1* ]] && [ -n "${SAVED_HOME_DIR:-}" ] && [ -n "${SAVED_WORKDIR:-}" ] && [ -n "${SAVED_STATE_DIR:-}" ]; then
+  IS_V1_AGENT=1
+fi
+
+V1_SUBCONSCIOUS_ENABLED="0"
+V1_SUBCONSCIOUS_PLUGIN_ROOT=""
+V1_SUBCONSCIOUS_SETTINGS_PATH=""
+V1_SUBCONSCIOUS_LETTA_PATH=""
+V1_SUBCONSCIOUS_LETTA_AGENT_ID=""
+V1_SUBCONSCIOUS_EVENT_URL=""
+V1_SUBCONSCIOUS_INVOKE_URL=""
+
+configure_v1_subconscious() {
+  [ "$IS_V1_AGENT" = "1" ] || return 0
+  [ "$TYPE" = "claude" ] || return 0
+  [ -f "$SUBCONSCIOUS_SETUP_SCRIPT" ] || {
+    echo "Warning: missing subconscious setup script: $SUBCONSCIOUS_SETUP_SCRIPT" >&2
+    return 0
+  }
+
+  local enabled_flag event_url setup_json
+  enabled_flag="true"
+  if [ "${SAVED_SUBCONSCIOUS_ENABLED:-}" = "0" ]; then
+    enabled_flag="false"
+  fi
+  event_url="${AGENTCHAT_SUBCONSCIOUS_EVENT_URL:-$BACKEND_URL/api/subconscious/events}"
+
+  if ! setup_json="$(
+    AGENTCHAT_SUBCONSCIOUS_EVENT_URL="$event_url" \
+      node "$SUBCONSCIOUS_SETUP_SCRIPT" \
+        --agent-name "$NAME" \
+        --agent-id "${SAVED_AGENT_ID:-$NAME}" \
+        --workdir "$SAVED_WORKDIR" \
+        --state-dir "$SAVED_STATE_DIR" \
+        --enabled "$enabled_flag" \
+        --event-url "$event_url" 2>/dev/null
+  )"; then
+    echo "Warning: subconscious setup failed for '$NAME'; continuing without hook wiring." >&2
+    return 0
+  fi
+
+  [ -n "$setup_json" ] || {
+    echo "Warning: subconscious setup returned empty response for '$NAME'." >&2
+    return 0
+  }
+
+  eval "$(
+    SETUP_JSON="$setup_json" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+import shlex
+
+raw = os.environ.get("SETUP_JSON", "")
+try:
+    data = json.loads(raw)
+except Exception:
+    raise SystemExit(0)
+
+def emit(key, value):
+    print(f"{key}={shlex.quote(str(value))}")
+
+emit("V1_SUBCONSCIOUS_ENABLED", "1" if data.get("enabled") is True else "0")
+emit("V1_SUBCONSCIOUS_PLUGIN_ROOT", data.get("pluginRoot") or "")
+emit("V1_SUBCONSCIOUS_SETTINGS_PATH", data.get("settingsPath") or "")
+emit("V1_SUBCONSCIOUS_LETTA_PATH", data.get("lettaPath") or "")
+emit("V1_SUBCONSCIOUS_LETTA_AGENT_ID", data.get("lettaAgentId") or "")
+emit("V1_SUBCONSCIOUS_EVENT_URL", data.get("eventUrl") or "")
+emit("V1_SUBCONSCIOUS_INVOKE_URL", data.get("invokeUrl") or "")
+PY
+  )"
+
+  if [ "$V1_SUBCONSCIOUS_ENABLED" = "1" ]; then
+    echo "  Subconscious hooks: enabled ($V1_SUBCONSCIOUS_SETTINGS_PATH)"
+  else
+    echo "  Subconscious hooks: disabled by metadata"
+  fi
+}
+
+configure_v1_subconscious
+
+LAUNCH_ENV_PREFIX="AGENT_NAME=$(shell_quote "$NAME")"
+if [ "$IS_V1_AGENT" = "1" ]; then
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_AGENT_MODEL_VERSION=$(shell_quote "${SAVED_AGENT_MODEL_VERSION:-1.0}")"
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_AGENT_ID=$(shell_quote "${SAVED_AGENT_ID:-}")"
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_AGENT_HOME=$(shell_quote "$SAVED_HOME_DIR")"
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_AGENT_WORKDIR=$(shell_quote "$SAVED_WORKDIR")"
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_AGENT_STATE_DIR=$(shell_quote "$SAVED_STATE_DIR")"
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_LETTA_STATE_FILE=$(shell_quote "$V1_SUBCONSCIOUS_LETTA_PATH")"
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUBCONSCIOUS_EVENT_URL=$(shell_quote "$V1_SUBCONSCIOUS_EVENT_URL")"
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUBCONSCIOUS_INVOKE_URL=$(shell_quote "$V1_SUBCONSCIOUS_INVOKE_URL")"
+  if [ "$V1_SUBCONSCIOUS_ENABLED" = "1" ]; then
+    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUBCONSCIOUS_ENABLED=1"
+    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUBCONSCIOUS_PLUGIN_ROOT=$(shell_quote "$V1_SUBCONSCIOUS_PLUGIN_ROOT")"
+    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX LETTA_AGENT_ID=$(shell_quote "$V1_SUBCONSCIOUS_LETTA_AGENT_ID")"
+  else
+    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUBCONSCIOUS_ENABLED=0"
+  fi
+fi
+
 # ── Build init prompt for fresh starts ────────────────────────────────
-INIT_PROMPT="Your name is ${NAME}. You have an MCP tool server called 'agent-chat' for communicating with other agents and humans. Key tools: check_inbox() to read messages, send_message(to, summary, full) to DM, post(group, summary, full, mentions) for group messages, whoami() to see your identity and available agents/groups. Check your inbox now to see if there are any messages for you."
+INIT_PROMPT="Your name is ${NAME}. You have an MCP tool server called '${MCP_SERVER_NAME}' for communicating with other agents and humans. Key tools: check_inbox() to read messages, send_message(to, summary, full) to DM, post(group, summary, full, mentions) for group messages, whoami() to see your identity and available agents/groups. Check your inbox now to see if there are any messages for you."
 CLAUDE_MODE_GUARD="Critical runtime rule: do not enter Plan mode or Select mode in this multi-agent tmux environment, because interactive mode switching cannot be completed. Stay in default mode and continue execution directly. Save this rule in memory and follow it for the whole session."
 
 # ── Launch AI ─────────────────────────────────────────────────────────
@@ -1061,13 +1252,13 @@ if [ "$TYPE" = "claude" ]; then
   [ -n "$EXTRA_ARGS" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
   if [ "$FRESH" = false ] && RID=$(cat "$RESUME_FILE"); then
     echo "Resuming claude session: $RID"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "AGENT_NAME=$NAME claude --resume $RID $CLAUDE_FLAGS" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "$LAUNCH_ENV_PREFIX claude --resume $RID $CLAUDE_FLAGS" Enter
   else
     echo "Starting new claude session..."
     # Write init prompt to temp file to avoid shell escaping issues
     INIT_FILE=$(mktemp "$TMP_RUNTIME_DIR/init.XXXXXX")
     echo "$INIT_PROMPT" > "$INIT_FILE"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "AGENT_NAME=$NAME claude --session-id $SESSION_ID $CLAUDE_FLAGS \"\$(cat \"$INIT_FILE\")\" && rm -f \"$INIT_FILE\"" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "$LAUNCH_ENV_PREFIX claude --session-id $SESSION_ID $CLAUDE_FLAGS \"\$(cat \"$INIT_FILE\")\" && rm -f \"$INIT_FILE\"" Enter
     ( sleep 300; rm -f "$INIT_FILE" >/dev/null 2>&1 || true ) &
     capture_resume_id_background "claude"
   fi
@@ -1079,12 +1270,12 @@ elif [ "$TYPE" = "codex" ]; then
   if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ]; then
     RID=$(cat "$RESUME_FILE")
     echo "Resuming codex session: $RID"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "AGENT_NAME=$NAME codex resume $RID $CODEX_FLAGS" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "$LAUNCH_ENV_PREFIX codex resume $RID $CODEX_FLAGS" Enter
   else
     CODEX_BASELINE_FILE=$(mktemp "$TMP_RUNTIME_DIR/codex-baseline.XXXXXX")
     snapshot_codex_session_ids "$CODEX_BASELINE_FILE"
     echo "Starting new codex session..."
-    tmux send-keys -t "$TMUX_PANE_TARGET" "AGENT_NAME=$NAME codex $CODEX_FLAGS -C $AGENT_PATH" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "$LAUNCH_ENV_PREFIX codex $CODEX_FLAGS -C $AGENT_PATH" Enter
     # Send init prompt after codex starts to create a session deterministically.
     sleep 5
     tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"

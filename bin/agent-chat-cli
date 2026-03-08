@@ -26,7 +26,13 @@ fi
 #   dm <agent> <human>                           Ensure DM room exists (Matrix)
 set -euo pipefail
 
-API="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
+BACKEND_PORT_RAW="${AGENT_CHAT_BACKEND_PORT:-8090}"
+if [[ "$BACKEND_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT_RAW" -gt 0 ]; then
+  BACKEND_PORT="$BACKEND_PORT_RAW"
+else
+  BACKEND_PORT="8090"
+fi
+API="${AGENT_CHAT_API:-http://127.0.0.1:$BACKEND_PORT}"
 TOKEN="${API_TOKEN:-}"
 IDLE_THRESHOLD_MS_RAW="${AGENT_IDLE_THRESHOLD_MS:-20000}"
 CURL_CONNECT_TIMEOUT_RAW="${AGENT_CHAT_CURL_CONNECT_TIMEOUT_SEC:-2}"
@@ -478,7 +484,7 @@ PY
     echo "  dm <agent> <human>                  Ensure DM room exists (Matrix)"
     echo ""
     echo "Environment:"
-    echo "  AGENT_CHAT_API  Backend URL (default: http://127.0.0.1:8090)"
+    echo "  AGENT_CHAT_API  Backend URL (default: http://127.0.0.1:${BACKEND_PORT})"
     echo "  API_TOKEN       Auth token (optional for localhost)"
     echo "  AGENT_CHAT_CURL_CONNECT_TIMEOUT_SEC  API connect timeout (default: 2)"
     echo "  AGENT_CHAT_CURL_MAX_TIME_SEC         API request max time (default: 8)"

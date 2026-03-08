@@ -1,13 +1,34 @@
 import express from 'express';
-import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync } from 'fs';
+import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
 import { createHash } from 'crypto';
+import { fileURLToPath } from 'url';
 import { createSupervisorService } from './supervisor/index.js';
+import {
+  buildUpstreamClaudeSubconsciousPaths,
+  bootstrapUpstreamClaudeSubconsciousAgent,
+  readUpstreamClaudeSubconsciousState,
+  startUpstreamClaudeSubconsciousSession,
+} from './lib/upstream-claude-subconscious.js';
 
-const PORT = 8090;
-const DATA_DIR = path.resolve('data');
-const PUSH_QUEUE_URL = 'http://127.0.0.1:8084/api/queue';
+const __filename = fileURLToPath(import.meta.url);
+const REPO_ROOT = path.dirname(__filename);
+const RUNTIME_ROOT = (() => {
+  const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
+  return raw ? path.resolve(raw) : REPO_ROOT;
+})();
+const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
+const PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
+  ? DEFAULT_BACKEND_PORT_RAW
+  : 8090;
+const DEFAULT_WEB_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_WEB_PORT || '8084', 10);
+const DEFAULT_WEB_PORT = Number.isFinite(DEFAULT_WEB_PORT_RAW) && DEFAULT_WEB_PORT_RAW > 0
+  ? DEFAULT_WEB_PORT_RAW
+  : 8084;
+const DATA_DIR = path.join(RUNTIME_ROOT, 'data');
+const WEB_BASE_URL = (process.env.AGENT_CHAT_WEB_URL || `http://127.0.0.1:${DEFAULT_WEB_PORT}`).trim().replace(/\/$/, '');
+const PUSH_QUEUE_URL = (process.env.AGENT_CHAT_QUEUE_URL || `${WEB_BASE_URL}/api/queue`).trim().replace(/\/$/, '');
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const LOCAL_SERVER_ID = (process.env.AGENT_CHAT_SERVER || 'local').trim();
 const USER_UID = (typeof process.getuid === 'function') ? process.getuid() : null;
@@ -48,6 +69,8 @@ const AGENT_TMUX_MISSING_ALERT_GRACE_MS = Number.parseInt(process.env.AGENT_TMUX
 const AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS || '900000', 10);
 const AGENT_COMPACT_SUMMARY_MAX = Number.parseInt(process.env.AGENT_COMPACT_SUMMARY_MAX || '180', 10);
 const AGENT_COMPACT_RUNTIME_DEDUPE_MS = Number.parseInt(process.env.AGENT_COMPACT_RUNTIME_DEDUPE_MS || '120000', 10);
+const SUBCONSCIOUS_EVENT_HISTORY_LIMIT = Number.parseInt(process.env.SUBCONSCIOUS_EVENT_HISTORY_LIMIT || '2000', 10);
+const SUBCONSCIOUS_EVENT_AGENT_LIMIT = Number.parseInt(process.env.SUBCONSCIOUS_EVENT_AGENT_LIMIT || '500', 10);
 const SERVER_MAINTENANCE_IDS = new Set(
   String(process.env.AGENT_SERVER_MAINTENANCE_IDS ?? 'kamico-MBP')
     .split(',')
@@ -89,9 +112,6 @@ const MEDIA_FETCH_ALLOWED_ROOTS = [
 // ── Storage helpers ───────────────────────────────────────────────────
 function dataPath(name) { return path.join(DATA_DIR, name); }
 
-// We need sync read at startup — use a simple approach
-import { readFileSync } from 'fs';
-
 function backupUnreadableJson(filePath) {
   const backupPath = `${filePath}.corrupt-${Date.now()}`;
   try {
@@ -130,6 +150,26 @@ function saveJson(name, data) {
   }
 }
 
+function loadJsonlTailSync(filePath, limit = 2000) {
+  try {
+    if (!existsSync(filePath)) return [];
+    const raw = readFileSync(filePath, 'utf-8');
+    if (!raw.trim()) return [];
+    const rows = raw.trim().split('\n');
+    const tail = rows.slice(-Math.max(1, limit));
+    const out = [];
+    for (const line of tail) {
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed && typeof parsed === 'object') out.push(parsed);
+      } catch {}
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 function normalizeServer(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -155,6 +195,175 @@ function normalizeAgentName(value) {
     if (key.toLowerCase() === lower) return key;
   }
   return trimmed;
+}
+
+function normalizeAgentModelVersion(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > 32) return null;
+  return trimmed;
+}
+
+function normalizeLayoutVersion(value) {
+  if (value === null || value === undefined) return null;
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+function normalizeAgentId(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(trimmed)) return null;
+  return trimmed;
+}
+
+function normalizeOptionalText(value, maxLen = 4000) {
+  if (value === null) return null;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > maxLen) return trimmed.slice(0, maxLen);
+  return trimmed;
+}
+
+function normalizeBoolean(value) {
+  if (value === true) return true;
+  if (value === false) return false;
+  if (typeof value === 'string') {
+    const trimmed = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(trimmed)) return true;
+    if (['0', 'false', 'no', 'off'].includes(trimmed)) return false;
+  }
+  return null;
+}
+
+function normalizePositiveInt(value, fallback, min = 1) {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, n);
+}
+
+function normalizeNonNegativeInt(value, fallback = 0) {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, n);
+}
+
+function normalizeProvider(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (['deepseek', 'qwen', 'openai', 'openai-compatible'].includes(raw)) return raw;
+  return 'deepseek';
+}
+
+function normalizeProviderOrNull(value) {
+  const raw = normalizeOptionalText(value, 64);
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  if (['deepseek', 'qwen', 'openai', 'openai-compatible'].includes(lower)) return lower;
+  return null;
+}
+
+function defaultCompatibleEndpoint(provider) {
+  switch (provider) {
+    case 'deepseek':
+      return 'https://api.deepseek.com/v1/chat/completions';
+    case 'qwen':
+      return 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
+    case 'openai':
+      return 'https://api.openai.com/v1/chat/completions';
+    default:
+      return 'https://api.deepseek.com/v1/chat/completions';
+  }
+}
+
+function defaultCompatibleModel(provider) {
+  switch (provider) {
+    case 'deepseek':
+      return 'deepseek-chat';
+    case 'qwen':
+      return 'qwen-plus';
+    case 'openai':
+      return 'gpt-4.1-mini';
+    default:
+      return 'deepseek-chat';
+  }
+}
+
+function normalizeCompatibleEndpoint(baseOrEndpoint, defaultEndpoint) {
+  const raw = normalizeOptionalText(baseOrEndpoint, 2048);
+  if (!raw) return defaultEndpoint;
+  if (raw.endsWith('/chat/completions')) return raw;
+  if (raw.endsWith('/')) return `${raw}chat/completions`;
+  return `${raw}/chat/completions`;
+}
+
+function normalizeCompatibleEndpointOrNull(baseOrEndpoint) {
+  const raw = normalizeOptionalText(baseOrEndpoint, 2048);
+  if (!raw) return null;
+  return normalizeCompatibleEndpoint(raw, raw);
+}
+
+function normalizeJsonText(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  if (text.startsWith('{') && text.endsWith('}')) return text;
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence && fence[1]) return fence[1].trim();
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start >= 0 && end > start) return text.slice(start, end + 1);
+  return text;
+}
+
+function normalizeManagedProjects(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const row of value) {
+    if (!row || typeof row !== 'object') continue;
+    const name = normalizeOptionalText(row.name, 128);
+    const projectPath = normalizeWorkspacePath(row.path);
+    if (!name || !projectPath) continue;
+    const source = normalizeOptionalText(row.source, 64) || 'unknown';
+    const originPath = normalizeWorkspacePath(row.originPath) || null;
+    const key = `${name}\n${projectPath}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, path: projectPath, source, originPath });
+  }
+  return out;
+}
+
+function normalizeHumanMeta(value) {
+  const raw = (value && typeof value === 'object') ? value : {};
+  return {
+    owner: normalizeOptionalText(raw.owner, 256),
+    notes: normalizeOptionalText(raw.notes, 8000) || '',
+    projectScope: normalizeOptionalText(raw.projectScope, 4000) || '',
+  };
+}
+
+function normalizeLooseAgentName(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!/^[A-Za-z0-9._-]+$/.test(trimmed)) return null;
+  return normalizeAgentName(trimmed);
+}
+
+function normalizeSubconsciousHook(value) {
+  const hook = normalizeOptionalText(value, 120);
+  if (!hook) return null;
+  return hook;
+}
+
+function normalizeEventTs(value) {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) return Date.now();
+  return n;
 }
 
 function msgSeq(id) {
@@ -309,6 +518,1140 @@ function emitRuntimeCompactEvent(agentName, payload = {}) {
   return { ok: true, event };
 }
 
+function buildSubconsciousEvent(body = {}) {
+  const agent = normalizeLooseAgentName(body.agent);
+  if (!agent) return null;
+  const ts = normalizeEventTs(body.ts);
+  return {
+    id: `subconscious_${ts}_${agent}_${Math.random().toString(36).slice(2, 8)}`,
+    ts,
+    source: normalizeOptionalText(body.source, 120) || 'claude-subconscious-v1',
+    agent,
+    hook: normalizeSubconsciousHook(body.hook),
+    hookEventName: normalizeSubconsciousHook(body.hookEventName),
+    sessionId: normalizeOptionalText(body.sessionId, 256),
+    transcriptPath: normalizeOptionalText(body.transcriptPath, 4096),
+    toolName: normalizeOptionalText(body.toolName, 128),
+    promptPreview: normalizeOptionalText(body.promptPreview, 1200),
+    summary: normalizeOptionalText(body.summary, 600),
+    lettaAgentId: normalizeOptionalText(body.lettaAgentId, 256),
+    lettaStateFile: normalizeWorkspacePath(body.lettaStateFile),
+    resolutionSource: normalizeOptionalText(body.resolutionSource, 64),
+    backendMode: normalizeOptionalText(body.backendMode, 64),
+    subconsciousEnabled: body.subconsciousEnabled === true
+      ? true
+      : (body.subconsciousEnabled === false ? false : null),
+    guidancePresent: body.guidancePresent === true
+      ? true
+      : (body.guidancePresent === false ? false : null),
+    guidanceConfigured: body.guidanceConfigured === true
+      ? true
+      : (body.guidanceConfigured === false ? false : null),
+    guidanceInjected: body.guidanceInjected === true
+      ? true
+      : (body.guidanceInjected === false ? false : null),
+    guidanceSource: normalizeOptionalText(body.guidanceSource, 64),
+    guidancePreview: normalizeOptionalText(body.guidancePreview, 320),
+    runtimeInvoked: body.runtimeInvoked === true
+      ? true
+      : (body.runtimeInvoked === false ? false : null),
+    runtimeProvider: normalizeOptionalText(body.runtimeProvider, 64),
+    runtimeModel: normalizeOptionalText(body.runtimeModel, 128),
+    runtimeLatencyMs: normalizePositiveInt(body.runtimeLatencyMs, null),
+    runtimeError: normalizeOptionalText(body.runtimeError, 600),
+  };
+}
+
+function appendSubconsciousEvent(event) {
+  const list = subconsciousEventsByAgent.get(event.agent) || [];
+  list.push(event);
+  if (list.length > SUBCONSCIOUS_EVENT_AGENT_LIMIT) {
+    subconsciousEventsByAgent.set(event.agent, list.slice(list.length - SUBCONSCIOUS_EVENT_AGENT_LIMIT));
+  } else {
+    subconsciousEventsByAgent.set(event.agent, list);
+  }
+  try {
+    appendFileSync(SUBCONSCIOUS_EVENT_LOG, JSON.stringify(event) + '\n');
+  } catch (e) {
+    console.error(`Failed to append subconscious event log: ${e.message}`);
+  }
+  broadcastSSE('subconscious_event', event);
+}
+
+function getSubconsciousEvents(agentName, limit = 120) {
+  const rows = subconsciousEventsByAgent.get(agentName) || [];
+  const n = Math.max(1, Math.min(Number(limit) || 120, SUBCONSCIOUS_EVENT_AGENT_LIMIT));
+  return rows.slice(-n);
+}
+
+const SUBCONSCIOUS_RUNTIME_HOOKS = ['UserPromptSubmit', 'PreToolUse'];
+
+function safeReadJsonFile(filePath, fallback = {}) {
+  try {
+    if (!filePath || !existsSync(filePath)) return fallback;
+    return JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function safeWriteJsonFile(filePath, payload) {
+  if (!filePath) return false;
+  try {
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function detectInstalledSubconsciousHooks(settingsPath) {
+  if (!settingsPath || !existsSync(settingsPath)) return [];
+  const settings = safeReadJsonFile(settingsPath, {});
+  const hooksRoot = (settings && typeof settings.hooks === 'object' && settings.hooks) ? settings.hooks : {};
+  const installed = [];
+  for (const hookName of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Stop']) {
+    const rows = Array.isArray(hooksRoot[hookName]) ? hooksRoot[hookName] : [];
+    const hasManagedEntry = rows.some((entry) => {
+      const hooks = Array.isArray(entry?.hooks) ? entry.hooks : [];
+      return hooks.some((row) => typeof row?.command === 'string' && row.command.includes('hook-entry.mjs'));
+    });
+    if (hasManagedEntry) installed.push(hookName);
+  }
+  return installed;
+}
+
+function defaultSubconsciousMemoryStore(agentName) {
+  return {
+    schemaVersion: 1,
+    kind: 'local-episodic-journal',
+    retrievalStrategy: 'keyword-overlap-recency',
+    agent: agentName,
+    entryLimit: 80,
+    retrievalLimit: 4,
+    episodes: [],
+    lastStoredAt: null,
+    lastStoredEpisodeId: null,
+    lastRetrievedAt: null,
+    lastRetrievedQuery: null,
+    lastRetrievedIds: [],
+    updatedAt: null,
+  };
+}
+
+function defaultSubconsciousConversationStore(agentName) {
+  return {
+    schemaVersion: 1,
+    kind: 'claude-jsonl-session-journal',
+    agent: agentName,
+    sessionLimit: 24,
+    currentSessionId: null,
+    currentTranscriptPath: null,
+    currentConversationUpdatedAt: null,
+    lastSyncedAt: null,
+    sessions: [],
+    updatedAt: null,
+  };
+}
+
+function normalizeSubconsciousMemoryEpisode(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = normalizeOptionalText(raw.id, 128);
+  const at = normalizeOptionalText(raw.at, 128);
+  const hook = normalizeOptionalText(raw.hook, 120);
+  const promptPreview = normalizeOptionalText(raw.promptPreview, 320);
+  const toolName = normalizeOptionalText(raw.toolName, 120);
+  const summary = normalizeOptionalText(raw.summary, 600);
+  const guidance = normalizeOptionalText(raw.guidance, 2000);
+  const keywords = Array.isArray(raw.keywords)
+    ? raw.keywords
+      .map((item) => normalizeOptionalText(item, 64))
+      .filter(Boolean)
+      .slice(0, 32)
+    : [];
+  if (!id || !at) return null;
+  return {
+    id,
+    at,
+    hook: hook || null,
+    promptPreview: promptPreview || '',
+    toolName: toolName || null,
+    summary: summary || '',
+    guidance: guidance || '',
+    keywords,
+  };
+}
+
+function normalizeSubconsciousConversationTurn(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const role = normalizeOptionalText(raw.role, 32);
+  const at = normalizeOptionalText(raw.at, 128);
+  const preview = normalizeOptionalText(raw.preview, 320);
+  if (!role || !preview) return null;
+  return {
+    role,
+    at: at || null,
+    preview,
+  };
+}
+
+function normalizeSubconsciousConversationSession(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const sessionId = normalizeOptionalText(raw.sessionId, 200);
+  const transcriptPath = normalizeWorkspacePath(raw.transcriptPath);
+  if (!sessionId && !transcriptPath) return null;
+  return {
+    sessionId: sessionId || null,
+    transcriptPath: transcriptPath || null,
+    transcriptExists: raw.transcriptExists === true,
+    transcriptLineCount: normalizeNonNegativeInt(raw.transcriptLineCount, 0),
+    eventCount: normalizeNonNegativeInt(raw.eventCount, 0),
+    userTurnCount: normalizeNonNegativeInt(raw.userTurnCount, 0),
+    assistantTurnCount: normalizeNonNegativeInt(raw.assistantTurnCount, 0),
+    startedAt: normalizeOptionalText(raw.startedAt, 128),
+    updatedAt: normalizeOptionalText(raw.updatedAt, 128),
+    lastEventAt: normalizeOptionalText(raw.lastEventAt, 128),
+    lastHook: normalizeOptionalText(raw.lastHook, 120),
+    lastToolName: normalizeOptionalText(raw.lastToolName, 120),
+    lastRuntimeAt: normalizeOptionalText(raw.lastRuntimeAt, 128),
+    lastRuntimeProvider: normalizeOptionalText(raw.lastRuntimeProvider, 64),
+    lastRuntimeModel: normalizeOptionalText(raw.lastRuntimeModel, 128),
+    latestUserText: normalizeOptionalText(raw.latestUserText, 320) || '',
+    latestAssistantText: normalizeOptionalText(raw.latestAssistantText, 320) || '',
+    latestGuidancePreview: normalizeOptionalText(raw.latestGuidancePreview, 320) || '',
+    latestGuidanceAt: normalizeOptionalText(raw.latestGuidanceAt, 128),
+    latestGuidanceSource: normalizeOptionalText(raw.latestGuidanceSource, 64),
+    recentTurns: Array.isArray(raw.recentTurns)
+      ? raw.recentTurns.map((row) => normalizeSubconsciousConversationTurn(row)).filter(Boolean).slice(-8)
+      : [],
+  };
+}
+
+function resolveSubconsciousMemoryState(agentName, stateDir, runtimeMeta) {
+  if (!stateDir) return { path: null, store: defaultSubconsciousMemoryStore(agentName) };
+  const configuredPath = normalizeWorkspacePath(runtimeMeta?.memoryStore?.path);
+  const memoryPath = configuredPath || path.join(stateDir, 'subconscious', 'memory.json');
+  const base = defaultSubconsciousMemoryStore(agentName);
+  const raw = safeReadJsonFile(memoryPath, {});
+  const entryLimit = normalizePositiveInt(raw?.entryLimit, base.entryLimit);
+  const retrievalLimit = normalizePositiveInt(raw?.retrievalLimit, base.retrievalLimit);
+  const episodes = Array.isArray(raw?.episodes)
+    ? raw.episodes
+      .map((row) => normalizeSubconsciousMemoryEpisode(row))
+      .filter(Boolean)
+      .slice(-entryLimit)
+    : [];
+  const store = {
+    schemaVersion: 1,
+    kind: normalizeOptionalText(raw?.kind, 128) || base.kind,
+    retrievalStrategy: normalizeOptionalText(raw?.retrievalStrategy, 128) || base.retrievalStrategy,
+    agent: normalizeOptionalText(raw?.agent, 128) || agentName,
+    entryLimit,
+    retrievalLimit,
+    episodes,
+    lastStoredAt: normalizeOptionalText(raw?.lastStoredAt, 128),
+    lastStoredEpisodeId: normalizeOptionalText(raw?.lastStoredEpisodeId, 128),
+    lastRetrievedAt: normalizeOptionalText(raw?.lastRetrievedAt, 128),
+    lastRetrievedQuery: normalizeOptionalText(raw?.lastRetrievedQuery, 600),
+    lastRetrievedIds: Array.isArray(raw?.lastRetrievedIds)
+      ? raw.lastRetrievedIds.map((item) => normalizeOptionalText(item, 128)).filter(Boolean).slice(0, retrievalLimit)
+      : [],
+    updatedAt: normalizeOptionalText(raw?.updatedAt, 128),
+  };
+  if (!existsSync(memoryPath)) safeWriteJsonFile(memoryPath, store);
+  return { path: memoryPath, store };
+}
+
+function resolveSubconsciousConversationState(agentName, stateDir, runtimeMeta) {
+  if (!stateDir) return { path: null, store: defaultSubconsciousConversationStore(agentName) };
+  const configuredPath = normalizeWorkspacePath(runtimeMeta?.conversationStore?.path);
+  const conversationPath = configuredPath || path.join(stateDir, 'subconscious', 'conversations.json');
+  const base = defaultSubconsciousConversationStore(agentName);
+  const raw = safeReadJsonFile(conversationPath, {});
+  const sessionLimit = normalizePositiveInt(raw?.sessionLimit, base.sessionLimit);
+  const sessions = Array.isArray(raw?.sessions)
+    ? raw.sessions
+      .map((row) => normalizeSubconsciousConversationSession(row))
+      .filter(Boolean)
+      .slice(-sessionLimit)
+    : [];
+  const store = {
+    schemaVersion: 1,
+    kind: normalizeOptionalText(raw?.kind, 128) || base.kind,
+    agent: normalizeOptionalText(raw?.agent, 128) || agentName,
+    sessionLimit,
+    currentSessionId: normalizeOptionalText(raw?.currentSessionId, 200)
+      || sessions[sessions.length - 1]?.sessionId
+      || null,
+    currentTranscriptPath: normalizeWorkspacePath(raw?.currentTranscriptPath)
+      || sessions[sessions.length - 1]?.transcriptPath
+      || null,
+    currentConversationUpdatedAt: normalizeOptionalText(raw?.currentConversationUpdatedAt, 128)
+      || sessions[sessions.length - 1]?.updatedAt
+      || null,
+    lastSyncedAt: normalizeOptionalText(raw?.lastSyncedAt, 128),
+    sessions,
+    updatedAt: normalizeOptionalText(raw?.updatedAt, 128),
+  };
+  if (!existsSync(conversationPath)) safeWriteJsonFile(conversationPath, store);
+  return { path: conversationPath, store };
+}
+
+function writeSubconsciousMemoryStore(memoryState) {
+  if (!memoryState?.path || !memoryState?.store) return false;
+  memoryState.store.updatedAt = new Date().toISOString();
+  return safeWriteJsonFile(memoryState.path, memoryState.store);
+}
+
+function writeSubconsciousConversationStore(conversationState) {
+  if (!conversationState?.path || !conversationState?.store) return false;
+  conversationState.store.updatedAt = new Date().toISOString();
+  return safeWriteJsonFile(conversationState.path, conversationState.store);
+}
+
+function mergeUpstreamDirectReuse(existing = []) {
+  const merged = [];
+  const seen = new Set();
+  for (const item of [
+    ...(Array.isArray(existing) ? existing : []),
+    'Subconscious.af prompt source',
+    'agent_config.ts Letta bootstrap/config',
+    'conversation_utils.ts durable conversation bookkeeping',
+    'conversation_utils.ts real session/conversation lifecycle',
+    'transcript_utils.ts transcript formatting/parser source',
+  ]) {
+    const text = normalizeOptionalText(item, 160);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    merged.push(text);
+  }
+  return merged;
+}
+
+function deriveUpstreamNotifyDecision(blocker, agentId, model) {
+  const text = normalizeOptionalText(blocker, 1200);
+  if (!text) return null;
+  if (/model-unknown/i.test(text)) {
+    const bits = [];
+    if (agentId) bits.push(`bound Letta agent ${agentId}`);
+    if (model) bits.push(`current model ${model}`);
+    const scope = bits.length ? `${bits.join(' / ')} ` : '';
+    return `Choose a Letta-served model/config for ${scope}that accepts conversation message sends; current notify step returns model-unknown.`;
+  }
+  return 'Decide the external Letta model/config required for conversation message sends to succeed on the bound agent.';
+}
+
+function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta, conversationState = null) {
+  const upstreamPaths = buildUpstreamClaudeSubconsciousPaths(stateDir);
+  const upstreamMeta = (runtimeMeta?.upstream && typeof runtimeMeta.upstream === 'object') ? runtimeMeta.upstream : {};
+  const upstreamState = readUpstreamClaudeSubconsciousState(stateDir);
+  const lettaUpstream = (letta?.upstream && typeof letta.upstream === 'object') ? letta.upstream : {};
+  const runtimeUpstreamSession = (upstreamMeta.session && typeof upstreamMeta.session === 'object') ? upstreamMeta.session : {};
+  const lettaUpstreamSession = (lettaUpstream.session && typeof lettaUpstream.session === 'object') ? lettaUpstream.session : {};
+  const conversationStore = (conversationState?.store && typeof conversationState.store === 'object') ? conversationState.store : {};
+  const conversationSessions = Array.isArray(conversationStore.sessions) ? conversationStore.sessions : [];
+  const directReuse = mergeUpstreamDirectReuse(upstreamMeta.directReuse);
+  const config = (upstreamState.config && typeof upstreamState.config === 'object') ? upstreamState.config : {};
+  const conversations = (upstreamState.conversations && typeof upstreamState.conversations === 'object') ? upstreamState.conversations : {};
+  const boundAgentId = normalizeOptionalText(
+    letta?.agentId
+      || letta?.lettaAgentId
+      || lettaUpstream.agentId
+      || upstreamMeta.agentId,
+    256,
+  );
+  const importedAgentId = normalizeOptionalText(config.agentId, 256);
+  const agentId = boundAgentId || importedAgentId;
+  const apiKeyConfigured = Boolean(normalizeOptionalText(process.env.LETTA_API_KEY, 4096));
+  const lettaBaseUrl = normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com';
+  const conversationCurrentSessionId = normalizeOptionalText(
+    conversationStore.currentSessionId
+      || conversationSessions[conversationSessions.length - 1]?.sessionId,
+    200,
+  );
+  const currentSessionId = normalizeOptionalText(
+    lettaUpstreamSession.sessionId
+      || runtimeUpstreamSession.sessionId
+      || conversationCurrentSessionId,
+    200,
+  );
+  const mappedConversation = currentSessionId ? conversations[currentSessionId] : null;
+  const mappedConversationId = typeof mappedConversation === 'string'
+    ? mappedConversation
+    : normalizeOptionalText(mappedConversation?.conversationId, 256);
+  const currentSessionStateFile = normalizeWorkspacePath(
+    lettaUpstreamSession.sessionStateFile
+      || runtimeUpstreamSession.sessionStateFile
+      || (currentSessionId && upstreamPaths.durableStateDir
+        ? path.join(upstreamPaths.durableStateDir, `session-${currentSessionId}.json`)
+        : null)
+  );
+  const currentSessionState = safeReadJsonFile(currentSessionStateFile, {});
+  const currentConversationId = normalizeOptionalText(
+    lettaUpstreamSession.conversationId
+      || runtimeUpstreamSession.conversationId
+      || currentSessionState.conversationId
+      || mappedConversationId,
+    256,
+  );
+  const sessionEstablished = Boolean(currentSessionId && currentConversationId);
+  const rawNotify = (lettaUpstreamSession.notify && typeof lettaUpstreamSession.notify === 'object')
+    ? lettaUpstreamSession.notify
+    : ((runtimeUpstreamSession.notify && typeof runtimeUpstreamSession.notify === 'object') ? runtimeUpstreamSession.notify : {});
+  const notifyAttemptedAt = normalizeOptionalText(rawNotify.attemptedAt, 128);
+  const notifyBlockedReason = normalizeOptionalText(rawNotify.blockedReason, 1200);
+  const notifyMessageSentAt = normalizeOptionalText(rawNotify.messageSentAt, 128);
+  const notifyStatus = normalizeOptionalText(rawNotify.status, 64)
+    || (normalizeBoolean(rawNotify.messageSent) === true ? 'sent' : null)
+    || (notifyBlockedReason ? 'blocked' : null)
+    || (notifyAttemptedAt ? 'attempted' : null)
+    || 'not-attempted';
+  let blocker = null;
+  if (!upstreamPaths.available) blocker = `missing upstream claude-subconscious root at ${upstreamPaths.root || '-'}`;
+  else if (!apiKeyConfigured) blocker = 'missing LETTA_API_KEY';
+  const explicitBootstrapStatus = normalizeOptionalText(lettaUpstream.bootstrapStatus, 64)
+    || normalizeOptionalText(upstreamMeta.bootstrapStatus, 64);
+  const durableUpstreamObserved = Boolean(
+    boundAgentId
+    || currentSessionId
+    || currentConversationId
+    || Object.keys(conversations).length > 0
+  );
+  const bootstrapStatus = durableUpstreamObserved
+    ? 'configured'
+    : (explicitBootstrapStatus || (agentId ? 'configured' : 'not-run'));
+  const bootstrapBlockedReason = bootstrapStatus === 'configured'
+    ? (blocker === 'missing LETTA_API_KEY' ? blocker : null)
+    : (
+      normalizeOptionalText(lettaUpstream.blocker, 240)
+      || normalizeOptionalText(upstreamMeta.blocker, 240)
+      || blocker
+    );
+  return {
+    available: upstreamPaths.available,
+    root: upstreamPaths.root,
+    promptFile: upstreamPaths.promptFile,
+    scripts: upstreamPaths.scripts,
+    durableHome: upstreamPaths.durableHome,
+    durableStateDir: upstreamPaths.durableStateDir,
+    conversationsFile: upstreamPaths.conversationsFile,
+    configPath: upstreamPaths.configPath,
+    directReuse,
+    transitionalBoundary: [
+      'SessionStart lifecycle can now run through the explicit upstream Letta session/conversation entrypoint.',
+      'UserPromptSubmit, PreToolUse, and Stop still run through local agent-chat logic.',
+      'Upstream Letta transcript send/checkpoint scripts are not yet the live execution path.',
+      'Local episodic memory/conversation journals remain transitional until full upstream Letta flow is wired.',
+    ],
+    bootstrap: {
+      supported: upstreamPaths.available,
+      status: bootstrapStatus,
+      blockedReason: bootstrapBlockedReason,
+      checkedAt: normalizeOptionalText(lettaUpstream.checkedAt, 128)
+        || normalizeOptionalText(upstreamMeta.checkedAt, 128)
+        || null,
+      apiKeyConfigured,
+      lettaBaseUrl,
+      agentId,
+      importedAt: normalizeOptionalText(config.importedAt, 128)
+        || normalizeOptionalText(lettaUpstream.importedAt, 128)
+        || normalizeOptionalText(upstreamMeta.importedAt, 128),
+      model: normalizeOptionalText(config.model, 256)
+        || normalizeOptionalText(lettaUpstream.model, 256)
+        || normalizeOptionalText(upstreamMeta.model, 256),
+      agentName: normalizeOptionalText(lettaUpstream.agentName, 256)
+        || normalizeOptionalText(upstreamMeta.agentName, 256),
+      blockCount: normalizeNonNegativeInt(lettaUpstream.blockCount ?? upstreamMeta.blockCount, 0),
+      conversationCount: Object.keys(conversations).length,
+      workdir: workdir || null,
+    },
+    session: {
+      supported: upstreamPaths.available && apiKeyConfigured && Boolean(agentId),
+      established: sessionEstablished,
+      status: sessionEstablished
+        ? 'started'
+        : (
+          normalizeOptionalText(lettaUpstreamSession.status, 64)
+          || normalizeOptionalText(runtimeUpstreamSession.status, 64)
+          || 'not-run'
+        ),
+      blockedReason: sessionEstablished
+        ? null
+        : (
+          normalizeOptionalText(lettaUpstreamSession.blocker, 240)
+          || normalizeOptionalText(runtimeUpstreamSession.blocker, 240)
+          || null
+        ),
+      sessionId: currentSessionId,
+      conversationId: currentConversationId,
+      conversationStatus: normalizeOptionalText(lettaUpstreamSession.conversationStatus, 64)
+        || normalizeOptionalText(runtimeUpstreamSession.conversationStatus, 64)
+        || (currentConversationId ? 'recorded' : null),
+      sessionStateFile: currentSessionStateFile,
+      sessionStartedAt: normalizeOptionalText(currentSessionState.startedAt, 128)
+        || normalizeOptionalText(lettaUpstreamSession.sessionStartedAt, 128)
+        || normalizeOptionalText(runtimeUpstreamSession.sessionStartedAt, 128)
+        || null,
+      messageSent: normalizeBoolean(lettaUpstreamSession.messageSent) === true
+        || normalizeBoolean(runtimeUpstreamSession.messageSent) === true,
+      messageSentAt: normalizeOptionalText(lettaUpstreamSession.messageSentAt, 128)
+        || normalizeOptionalText(runtimeUpstreamSession.messageSentAt, 128)
+        || null,
+      checkedAt: normalizeOptionalText(lettaUpstreamSession.checkedAt, 128)
+        || normalizeOptionalText(runtimeUpstreamSession.checkedAt, 128)
+        || null,
+      cwd: normalizeWorkspacePath(lettaUpstreamSession.cwd || runtimeUpstreamSession.cwd) || workdir || null,
+      notify: {
+        attempted: notifyStatus !== 'not-attempted',
+        status: notifyStatus,
+        blockedReason: notifyStatus === 'blocked' ? notifyBlockedReason : null,
+        messageSent: normalizeBoolean(rawNotify.messageSent) === true
+          || normalizeBoolean(lettaUpstreamSession.messageSent) === true
+          || normalizeBoolean(runtimeUpstreamSession.messageSent) === true,
+        attemptedAt: notifyAttemptedAt,
+        messageSentAt: notifyMessageSentAt
+          || normalizeOptionalText(lettaUpstreamSession.messageSentAt, 128)
+          || normalizeOptionalText(runtimeUpstreamSession.messageSentAt, 128)
+          || null,
+        requiredDecision: notifyStatus === 'blocked'
+          ? deriveUpstreamNotifyDecision(
+            notifyBlockedReason,
+            agentId,
+            normalizeOptionalText(config.model, 256)
+              || normalizeOptionalText(lettaUpstream.model, 256)
+              || normalizeOptionalText(upstreamMeta.model, 256)
+          )
+          : null,
+      },
+    },
+  };
+}
+
+function extractTranscriptTextParts(content, out = []) {
+  if (typeof content === 'string') {
+    const text = normalizeOptionalText(content, 4000);
+    if (text) out.push(text);
+    return out;
+  }
+  if (Array.isArray(content)) {
+    for (const item of content) extractTranscriptTextParts(item, out);
+    return out;
+  }
+  if (!content || typeof content !== 'object') return out;
+  if (content.type === 'text') {
+    const text = normalizeOptionalText(content.text, 4000);
+    if (text) out.push(text);
+    return out;
+  }
+  if (Object.prototype.hasOwnProperty.call(content, 'content')) {
+    extractTranscriptTextParts(content.content, out);
+  }
+  if (typeof content.text === 'string') {
+    const text = normalizeOptionalText(content.text, 4000);
+    if (text) out.push(text);
+  }
+  return out;
+}
+
+function extractTranscriptMessageText(row) {
+  const text = extractTranscriptTextParts(row?.message?.content || row?.content || []).join('\n');
+  return normalizeOptionalText(text.replace(/\s+/g, ' ').trim(), 4000);
+}
+
+function inferTranscriptSessionId(transcriptPath) {
+  if (!transcriptPath) return null;
+  const base = path.basename(String(transcriptPath), path.extname(String(transcriptPath)));
+  return normalizeOptionalText(base, 200);
+}
+
+function parseClaudeConversationTranscript(sessionId, transcriptPath) {
+  const resolvedPath = normalizeWorkspacePath(transcriptPath);
+  const parsedSessionId = normalizeOptionalText(sessionId, 200) || inferTranscriptSessionId(resolvedPath);
+  const base = {
+    sessionId: parsedSessionId || null,
+    transcriptPath: resolvedPath || null,
+    transcriptExists: Boolean(resolvedPath && existsSync(resolvedPath)),
+    transcriptLineCount: 0,
+    eventCount: 0,
+    userTurnCount: 0,
+    assistantTurnCount: 0,
+    startedAt: null,
+    updatedAt: null,
+    latestUserText: '',
+    latestAssistantText: '',
+    recentTurns: [],
+  };
+  if (!resolvedPath || !existsSync(resolvedPath)) return base;
+  let text = '';
+  try {
+    text = readFileSync(resolvedPath, 'utf-8');
+  } catch {
+    return base;
+  }
+  const recentTurns = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    base.transcriptLineCount += 1;
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const rowSessionId = normalizeOptionalText(row?.sessionId, 200);
+    if (parsedSessionId && rowSessionId && rowSessionId !== parsedSessionId) continue;
+    if (!base.sessionId && rowSessionId) base.sessionId = rowSessionId;
+    base.eventCount += 1;
+    const at = normalizeOptionalText(row?.timestamp, 128);
+    if (at && !base.startedAt) base.startedAt = at;
+    if (at) base.updatedAt = at;
+    if (row?.type === 'user' && row?.message?.role === 'user') {
+      const preview = extractTranscriptMessageText(row);
+      if (preview) {
+        base.userTurnCount += 1;
+        base.latestUserText = preview.slice(0, 320);
+        recentTurns.push({ role: 'user', at: at || null, preview: preview.slice(0, 320) });
+      }
+      continue;
+    }
+    if (row?.type === 'assistant' && row?.message?.role === 'assistant') {
+      const preview = extractTranscriptMessageText(row);
+      if (preview) {
+        base.assistantTurnCount += 1;
+        base.latestAssistantText = preview.slice(0, 320);
+        recentTurns.push({ role: 'assistant', at: at || null, preview: preview.slice(0, 320) });
+      }
+    }
+  }
+  base.recentTurns = recentTurns.slice(-8);
+  return base;
+}
+
+function syncSubconsciousConversationState(state, payload = {}, extra = {}) {
+  const conversationState = state?.conversationState;
+  const store = conversationState?.store;
+  if (!conversationState?.path || !store) return null;
+  const transcriptPath = normalizeWorkspacePath(payload?.transcriptPath || extra.transcriptPath);
+  const sessionId = normalizeOptionalText(payload?.sessionId || extra.sessionId, 200)
+    || inferTranscriptSessionId(transcriptPath)
+    || store.currentSessionId;
+  if (!sessionId && !transcriptPath) return null;
+  const parsed = parseClaudeConversationTranscript(sessionId, transcriptPath);
+  const key = parsed.sessionId || sessionId || transcriptPath;
+  const nowIso = new Date().toISOString();
+  const sessions = Array.isArray(store.sessions) ? [...store.sessions] : [];
+  const existingIndex = sessions.findIndex((row) => (row.sessionId && row.sessionId === key) || (row.transcriptPath && row.transcriptPath === transcriptPath));
+  const existing = existingIndex >= 0 ? sessions[existingIndex] : null;
+  const nextGuidancePreview = normalizeOptionalText(extra.guidancePreview, 320);
+  const nextGuidanceAt = nextGuidancePreview
+    ? (normalizeOptionalText(extra.guidanceAt, 128) || normalizeOptionalText(extra.at, 128) || nowIso)
+    : null;
+  const nextGuidanceSource = nextGuidancePreview
+    ? (normalizeOptionalText(extra.guidanceSource, 64) || existing?.latestGuidanceSource || null)
+    : null;
+  const nextSession = {
+    sessionId: parsed.sessionId || sessionId || existing?.sessionId || null,
+    transcriptPath: parsed.transcriptPath || transcriptPath || existing?.transcriptPath || null,
+    transcriptExists: parsed.transcriptExists === true,
+    transcriptLineCount: parsed.transcriptLineCount || existing?.transcriptLineCount || 0,
+    eventCount: parsed.eventCount || existing?.eventCount || 0,
+    userTurnCount: parsed.userTurnCount || existing?.userTurnCount || 0,
+    assistantTurnCount: parsed.assistantTurnCount || existing?.assistantTurnCount || 0,
+    startedAt: parsed.startedAt || existing?.startedAt || normalizeOptionalText(extra.at, 128) || nowIso,
+    updatedAt: parsed.updatedAt || normalizeOptionalText(extra.at, 128) || existing?.updatedAt || nowIso,
+    lastEventAt: normalizeOptionalText(extra.at, 128) || parsed.updatedAt || existing?.lastEventAt || nowIso,
+    lastHook: normalizeOptionalText(extra.hook, 120) || existing?.lastHook || null,
+    lastToolName: normalizeOptionalText(extra.toolName, 120) || existing?.lastToolName || null,
+    lastRuntimeAt: extra.runtimeInvoked === true
+      ? (normalizeOptionalText(extra.at, 128) || nowIso)
+      : (existing?.lastRuntimeAt || null),
+    lastRuntimeProvider: extra.runtimeInvoked === true
+      ? (normalizeOptionalText(extra.runtimeProvider, 64) || existing?.lastRuntimeProvider || null)
+      : (existing?.lastRuntimeProvider || null),
+    lastRuntimeModel: extra.runtimeInvoked === true
+      ? (normalizeOptionalText(extra.runtimeModel, 128) || existing?.lastRuntimeModel || null)
+      : (existing?.lastRuntimeModel || null),
+    latestUserText: parsed.latestUserText || existing?.latestUserText || '',
+    latestAssistantText: parsed.latestAssistantText || existing?.latestAssistantText || '',
+    latestGuidancePreview: nextGuidancePreview || existing?.latestGuidancePreview || '',
+    latestGuidanceAt: nextGuidanceAt || existing?.latestGuidanceAt || null,
+    latestGuidanceSource: nextGuidanceSource || existing?.latestGuidanceSource || null,
+    recentTurns: parsed.recentTurns.length ? parsed.recentTurns : (existing?.recentTurns || []),
+  };
+  if (existingIndex >= 0) sessions.splice(existingIndex, 1);
+  sessions.push(nextSession);
+  sessions.sort((a, b) => String(a.lastEventAt || a.updatedAt || '').localeCompare(String(b.lastEventAt || b.updatedAt || '')));
+  store.sessions = sessions.slice(-normalizePositiveInt(store.sessionLimit, 24));
+  store.currentSessionId = nextSession.sessionId || store.currentSessionId || null;
+  store.currentTranscriptPath = nextSession.transcriptPath || store.currentTranscriptPath || null;
+  store.currentConversationUpdatedAt = nextSession.updatedAt || store.currentConversationUpdatedAt || null;
+  store.lastSyncedAt = nowIso;
+  writeSubconsciousConversationStore(conversationState);
+  return nextSession;
+}
+
+function applyConversationSnapshotToContract(state, sessionSnapshot = null) {
+  const contract = state?.contract;
+  const conversationState = state?.conversationState;
+  const store = conversationState?.store;
+  if (!contract?.conversation || !store) return sessionSnapshot || null;
+  const sessions = Array.isArray(store.sessions) ? store.sessions : [];
+  const current = sessionSnapshot
+    || sessions.find((row) => row.sessionId && row.sessionId === store.currentSessionId)
+    || sessions.find((row) => row.transcriptPath && row.transcriptPath === store.currentTranscriptPath)
+    || sessions[sessions.length - 1]
+    || null;
+  contract.conversation.kind = store.kind || 'claude-jsonl-session-journal';
+  contract.conversation.path = conversationState?.path || null;
+  contract.conversation.sessionCount = sessions.length;
+  contract.conversation.sessionLimit = normalizePositiveInt(store.sessionLimit, 24);
+  contract.conversation.currentSessionId = store.currentSessionId || current?.sessionId || null;
+  contract.conversation.currentTranscriptPath = store.currentTranscriptPath || current?.transcriptPath || null;
+  contract.conversation.lastSyncedAt = store.lastSyncedAt || null;
+  contract.conversation.updatedAt = store.updatedAt || null;
+  contract.conversation.current = current
+    ? {
+        sessionId: current.sessionId || null,
+        transcriptPath: current.transcriptPath || null,
+        transcriptExists: current.transcriptExists === true,
+        transcriptLineCount: current.transcriptLineCount || 0,
+        eventCount: current.eventCount || 0,
+        userTurnCount: current.userTurnCount || 0,
+        assistantTurnCount: current.assistantTurnCount || 0,
+        startedAt: current.startedAt || null,
+        updatedAt: current.updatedAt || null,
+        lastEventAt: current.lastEventAt || null,
+        lastHook: current.lastHook || null,
+        lastToolName: current.lastToolName || null,
+        lastRuntimeAt: current.lastRuntimeAt || null,
+        lastRuntimeProvider: current.lastRuntimeProvider || null,
+        lastRuntimeModel: current.lastRuntimeModel || null,
+        latestUserText: current.latestUserText || '',
+        latestAssistantText: current.latestAssistantText || '',
+        latestGuidancePreview: current.latestGuidancePreview || '',
+        latestGuidanceAt: current.latestGuidanceAt || null,
+        latestGuidanceSource: current.latestGuidanceSource || null,
+        recentTurns: Array.isArray(current.recentTurns) ? current.recentTurns : [],
+      }
+    : null;
+  return current;
+}
+
+function tokenizeSubconsciousMemoryText(...parts) {
+  const seen = new Set();
+  for (const part of parts) {
+    const text = String(part || '').toLowerCase();
+    for (const token of text.match(/[a-z0-9][a-z0-9_-]{1,31}/g) || []) {
+      if (token.length < 3) continue;
+      seen.add(token);
+    }
+  }
+  return [...seen];
+}
+
+function retrieveSubconsciousMemories(memoryState, payload) {
+  const store = memoryState?.store;
+  const episodes = Array.isArray(store?.episodes) ? store.episodes : [];
+  const queryText = [
+    normalizeOptionalText(payload?.promptPreview, 320),
+    normalizeOptionalText(payload?.summary, 600),
+    normalizeOptionalText(payload?.toolName, 120),
+    normalizeOptionalText(payload?.hook, 120),
+  ].filter(Boolean).join(' | ');
+  const queryTokens = tokenizeSubconsciousMemoryText(queryText);
+  if (!queryTokens.length || !episodes.length) {
+    return { queryText, queryTokens, matches: [] };
+  }
+  const scored = episodes.map((episode, index) => {
+    const episodeKeywords = Array.isArray(episode.keywords) ? episode.keywords : [];
+    const overlap = episodeKeywords.filter((token) => queryTokens.includes(token));
+    if (!overlap.length) return null;
+    const recency = (index + 1) / episodes.length;
+    return {
+      episode,
+      overlap,
+      score: overlap.length * 10 + recency,
+    };
+  }).filter(Boolean);
+  scored.sort((a, b) => b.score - a.score || String(b.episode.at || '').localeCompare(String(a.episode.at || '')));
+  const limit = normalizePositiveInt(store?.retrievalLimit, 4);
+  return {
+    queryText,
+    queryTokens,
+    matches: scored.slice(0, limit).map((row) => ({
+      id: row.episode.id,
+      at: row.episode.at,
+      hook: row.episode.hook || null,
+      summary: row.episode.summary || '',
+      guidancePreview: row.episode.guidance || '',
+      overlapKeywords: row.overlap.slice(0, 8),
+      score: Number(row.score.toFixed(2)),
+    })),
+  };
+}
+
+function appendSubconsciousMemoryEpisode(memoryState, promptPayload, parsed) {
+  const store = memoryState?.store;
+  if (!memoryState?.path || !store) return null;
+  const nowIso = new Date().toISOString();
+  const guidance = normalizeOptionalText(parsed?.guidance, 4000) || '';
+  const summary = normalizeOptionalText(parsed?.summary, 600) || 'runtime guidance';
+  const episode = {
+    id: `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    at: nowIso,
+    hook: normalizeOptionalText(promptPayload?.hook, 120),
+    promptPreview: normalizeOptionalText(promptPayload?.promptPreview, 320) || '',
+    toolName: normalizeOptionalText(promptPayload?.toolName, 120),
+    summary,
+    guidance: guidance ? guidance.slice(0, 600) : '',
+    keywords: tokenizeSubconsciousMemoryText(
+      promptPayload?.hook,
+      promptPayload?.toolName,
+      promptPayload?.promptPreview,
+      promptPayload?.summary,
+      summary,
+      guidance
+    ).slice(0, 32),
+  };
+  const entryLimit = normalizePositiveInt(store.entryLimit, 80);
+  const nextEpisodes = Array.isArray(store.episodes) ? [...store.episodes, episode] : [episode];
+  store.episodes = nextEpisodes.slice(-entryLimit);
+  store.lastStoredAt = nowIso;
+  store.lastStoredEpisodeId = episode.id;
+  writeSubconsciousMemoryStore(memoryState);
+  return episode;
+}
+
+function resolveSubconsciousState(agentName) {
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return null;
+  const stateDir = normalizeWorkspacePath(agent.stateDir);
+  const workdir = normalizeWorkspacePath(agent.workdir);
+  const lettaPath = stateDir ? path.join(stateDir, 'letta.json') : null;
+  const runtimeMetaPath = stateDir ? path.join(stateDir, 'subconscious', 'runtime.json') : null;
+  const letta = safeReadJsonFile(lettaPath, {});
+  const runtimeMeta = safeReadJsonFile(runtimeMetaPath, {});
+  const settingsPath = normalizeWorkspacePath(runtimeMeta?.settingsPath) || (workdir ? path.join(workdir, '.claude', 'settings.json') : null);
+  const pluginRoot = normalizeWorkspacePath(runtimeMeta?.pluginRoot) || (stateDir ? path.join(stateDir, 'subconscious', 'claude-agentchat') : null);
+  const installedHooks = detectInstalledSubconsciousHooks(settingsPath);
+  const runtimeCfg = (letta?.runtime && typeof letta.runtime === 'object') ? letta.runtime : {};
+  const stateProvider = normalizeProviderOrNull(runtimeCfg.provider);
+  const envProvider = normalizeProviderOrNull(process.env.SUBCONSCIOUS_LLM_PROVIDER);
+  const provider = stateProvider || envProvider || 'deepseek';
+  const providerSource = stateProvider ? 'state' : (envProvider ? 'subconscious-env' : 'default');
+  const stateModel = normalizeOptionalText(runtimeCfg.model, 256);
+  const envModel = normalizeOptionalText(process.env.SUBCONSCIOUS_LLM_MODEL, 256);
+  const model = stateModel || envModel || defaultCompatibleModel(provider);
+  const modelSource = stateModel ? 'state' : (envModel ? 'subconscious-env' : 'default');
+  const stateEndpoint = normalizeCompatibleEndpointOrNull(runtimeCfg.endpoint);
+  const envEndpoint = normalizeCompatibleEndpointOrNull(process.env.SUBCONSCIOUS_LLM_ENDPOINT);
+  const endpoint = stateEndpoint || envEndpoint || defaultCompatibleEndpoint(provider);
+  const endpointSource = stateEndpoint ? 'state' : (envEndpoint ? 'subconscious-env' : 'default');
+  const stateKeyEnv = normalizeOptionalText(runtimeCfg.keyEnv, 128);
+  const envKeyEnv = normalizeOptionalText(process.env.SUBCONSCIOUS_LLM_KEY_ENV, 128);
+  const keyEnv = stateKeyEnv || envKeyEnv || 'SUBCONSCIOUS_LLM_KEY';
+  const keyEnvSource = stateKeyEnv ? 'state' : (envKeyEnv ? 'subconscious-env' : 'default');
+  const apiKey = normalizeOptionalText(process.env[keyEnv], 4096);
+  const timeoutMs = normalizePositiveInt(runtimeCfg.timeoutMs, 8000);
+  const maxTokens = normalizePositiveInt(runtimeCfg.maxTokens, 220);
+  const temperatureRaw = Number.parseFloat(String(runtimeCfg.temperature ?? process.env.SUBCONSCIOUS_LLM_TEMPERATURE ?? '0.2').trim());
+  const temperature = Number.isFinite(temperatureRaw) ? temperatureRaw : 0.2;
+  const desiredEnabled = normalizeBoolean(runtimeCfg.enabled);
+  const runtimeDesired = desiredEnabled !== false;
+  const invokeUrl = normalizeOptionalText(runtimeMeta?.invokeUrl, 2048)
+    || `${process.env.AGENT_CHAT_API || `http://127.0.0.1:${PORT}`}/api/subconscious/runtime/invoke`;
+  const eventUrl = normalizeOptionalText(runtimeMeta?.eventUrl, 2048)
+    || `${process.env.AGENT_CHAT_API || `http://127.0.0.1:${PORT}`}/api/subconscious/events`;
+  let disabledReason = null;
+  if (!agent.stateDir) disabledReason = 'missing agent stateDir';
+  else if (!runtimeDesired) disabledReason = 'runtime disabled in subconscious contract';
+  else if (!apiKey) disabledReason = `missing API key env ${keyEnv}`;
+
+  const invocationConfigured = disabledReason === null;
+  const generatedGuidance = (letta?.lastRuntimeGuidance && typeof letta.lastRuntimeGuidance === 'object') ? letta.lastRuntimeGuidance : null;
+  const lastInvocation = (letta?.lastInvocation && typeof letta.lastInvocation === 'object') ? letta.lastInvocation : null;
+  const manualGuidance = normalizeOptionalText(letta?.guidance, 6000) || '';
+  const memoryState = resolveSubconsciousMemoryState(agentName, stateDir, runtimeMeta);
+  const conversationState = resolveSubconsciousConversationState(agentName, stateDir, runtimeMeta);
+  const memoryStore = memoryState.store || defaultSubconsciousMemoryStore(agentName);
+  const conversationStore = conversationState.store || defaultSubconsciousConversationStore(agentName);
+  const upstream = buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta, conversationState);
+  const currentConversation = Array.isArray(conversationStore.sessions)
+    ? conversationStore.sessions.find((row) => row.sessionId && row.sessionId === conversationStore.currentSessionId)
+      || conversationStore.sessions[conversationStore.sessions.length - 1]
+      || null
+    : null;
+  const memoryInfo = {
+    kind: normalizeOptionalText(memoryStore.kind, 128) || 'local-episodic-journal',
+    path: memoryState.path,
+    retrievalStrategy: normalizeOptionalText(memoryStore.retrievalStrategy, 128) || 'keyword-overlap-recency',
+    entryCount: Array.isArray(memoryStore.episodes) ? memoryStore.episodes.length : 0,
+    entryLimit: normalizePositiveInt(memoryStore.entryLimit, 80),
+    retrievalLimit: normalizePositiveInt(memoryStore.retrievalLimit, 4),
+    lastStoredAt: normalizeOptionalText(memoryStore.lastStoredAt, 128),
+    lastStoredEpisodeId: normalizeOptionalText(memoryStore.lastStoredEpisodeId, 128),
+    lastRetrievedAt: normalizeOptionalText(memoryStore.lastRetrievedAt, 128),
+    lastRetrievedQuery: normalizeOptionalText(memoryStore.lastRetrievedQuery, 600),
+    lastRetrievedIds: Array.isArray(memoryStore.lastRetrievedIds) ? memoryStore.lastRetrievedIds.slice(0, 12) : [],
+  };
+  const missingBackendPieces = [];
+  if (!invocationConfigured) {
+    missingBackendPieces.push(disabledReason
+      ? `Runtime invocation unavailable: ${disabledReason}.`
+      : 'Runtime invocation is not configured.');
+  }
+  if (!upstream.bootstrap.apiKeyConfigured) {
+    missingBackendPieces.push('Direct upstream Letta bootstrap is wired but blocked by missing LETTA_API_KEY in the running process.');
+  }
+  if (upstream.session?.established === true) {
+    missingBackendPieces.push(
+      'Only the SessionStart lifecycle is cut over to upstream Letta so far; the remaining hooks still use local transitional agent-chat logic.'
+    );
+  } else {
+    missingBackendPieces.push(
+      'An explicit upstream SessionStart lifecycle route is wired, but it has not been started for a session yet; the remaining hooks still use local transitional agent-chat logic.'
+    );
+  }
+  missingBackendPieces.push(
+    'Full Letta-style semantic or relational memory is not implemented; current memory is a local episodic journal with keyword-overlap retrieval only.'
+  );
+  missingBackendPieces.push(
+    'Conversation bookkeeping is transcript-backed session state, not full multi-session semantic orchestration or relational memory.'
+  );
+  if (upstream.session?.notify?.status === 'blocked') {
+    missingBackendPieces.push(
+      `Upstream SessionStart notify/send is separately blocked by Letta: ${upstream.session.notify.blockedReason || 'unknown constraint'}.`
+    );
+  }
+
+  return {
+    agentName,
+    agent,
+    stateDir,
+    lettaPath,
+    runtimeMetaPath,
+    letta,
+    runtimeMeta,
+    settingsPath,
+    pluginRoot,
+    installedHooks,
+    memoryState,
+    conversationState,
+    contract: {
+      ok: true,
+      agent: agentName,
+      stage: upstream.session?.established === true
+        ? 'upstream-session-lifecycle'
+        : (invocationConfigured ? 'conversation-aware-runtime' : 'scaffold'),
+      writable: Boolean(stateDir),
+      enabled: agent.subconsciousEnabled === true,
+      manualGuidance: {
+        configured: manualGuidance.length > 0,
+        source: manualGuidance ? 'manual-state-file' : 'none',
+        text: manualGuidance,
+        preview: manualGuidance.length > 240 ? `${manualGuidance.slice(0, 240)}...` : manualGuidance,
+        updatedAt: normalizeOptionalText(letta?.updatedAt, 128),
+      },
+      runtime: {
+        desiredEnabled: runtimeDesired,
+        invocationConfigured,
+        disabledReason,
+        provider,
+        model,
+        endpoint,
+        keyEnv,
+        configFamily: 'SUBCONSCIOUS_LLM_*',
+        configSources: {
+          provider: providerSource,
+          model: modelSource,
+          endpoint: endpointSource,
+          keyEnv: keyEnvSource,
+        },
+        keyAvailable: Boolean(apiKey),
+        timeoutMs,
+        maxTokens,
+        temperature,
+        allowedHooks: Array.isArray(runtimeCfg.allowedHooks) && runtimeCfg.allowedHooks.length
+          ? runtimeCfg.allowedHooks
+          : [...SUBCONSCIOUS_RUNTIME_HOOKS],
+        hookRuntimeInstalled: Boolean(pluginRoot && existsSync(path.join(pluginRoot, 'scripts', 'hook-entry.mjs'))),
+        hookBindingsInstalled: installedHooks.length === 4,
+        installedHooks,
+        settingsPath: settingsPath || null,
+        pluginRoot: pluginRoot || null,
+        eventSinkConfigured: Boolean(eventUrl),
+        eventUrl: eventUrl || null,
+        invokeUrl,
+        runtimeMetaPath: runtimeMetaPath || null,
+        updatedAt: normalizeOptionalText(runtimeMeta?.updatedAt, 128),
+      },
+      provider: {
+        provider: normalizeOptionalText(letta?.provider, 128) || 'letta',
+        mode: normalizeOptionalText(letta?.mode, 128) || 'claude-subconscious',
+        lettaAgentId: normalizeOptionalText(letta?.agentId || letta?.lettaAgentId, 256),
+        resolutionSource: normalizeOptionalText(letta?.resolutionSource, 64),
+        lettaStateFile: lettaPath || null,
+        backendRuntimeConfigured: invocationConfigured,
+        modelConfigConfigured: Boolean(model && endpoint),
+        memoryStoreConfigured: Boolean(memoryInfo.path && memoryInfo.kind === 'local-episodic-journal'),
+        invocationConfigured,
+        upstreamBootstrapConfigured: upstream.bootstrap.status === 'configured',
+        upstreamSessionConfigured: upstream.session?.established === true,
+      },
+      upstream,
+      memory: memoryInfo,
+      conversation: {
+        kind: conversationStore.kind || 'claude-jsonl-session-journal',
+        path: conversationState.path,
+        sessionCount: Array.isArray(conversationStore.sessions) ? conversationStore.sessions.length : 0,
+        sessionLimit: normalizePositiveInt(conversationStore.sessionLimit, 24),
+        currentSessionId: conversationStore.currentSessionId || null,
+        currentTranscriptPath: conversationStore.currentTranscriptPath || null,
+        lastSyncedAt: conversationStore.lastSyncedAt || null,
+        updatedAt: conversationStore.updatedAt || null,
+        current: currentConversation
+          ? {
+              sessionId: currentConversation.sessionId || null,
+              transcriptPath: currentConversation.transcriptPath || null,
+              transcriptExists: currentConversation.transcriptExists === true,
+              transcriptLineCount: currentConversation.transcriptLineCount || 0,
+              eventCount: currentConversation.eventCount || 0,
+              userTurnCount: currentConversation.userTurnCount || 0,
+              assistantTurnCount: currentConversation.assistantTurnCount || 0,
+              startedAt: currentConversation.startedAt || null,
+              updatedAt: currentConversation.updatedAt || null,
+              lastEventAt: currentConversation.lastEventAt || null,
+              lastHook: currentConversation.lastHook || null,
+              lastToolName: currentConversation.lastToolName || null,
+              lastRuntimeAt: currentConversation.lastRuntimeAt || null,
+              lastRuntimeProvider: currentConversation.lastRuntimeProvider || null,
+              lastRuntimeModel: currentConversation.lastRuntimeModel || null,
+              latestUserText: currentConversation.latestUserText || '',
+              latestAssistantText: currentConversation.latestAssistantText || '',
+              latestGuidancePreview: currentConversation.latestGuidancePreview || '',
+              latestGuidanceAt: currentConversation.latestGuidanceAt || null,
+              latestGuidanceSource: currentConversation.latestGuidanceSource || null,
+              recentTurns: Array.isArray(currentConversation.recentTurns) ? currentConversation.recentTurns : [],
+            }
+          : null,
+      },
+      lastInvocation: lastInvocation || null,
+      lastRuntimeGuidance: generatedGuidance
+        ? {
+            ...generatedGuidance,
+            preview: normalizeOptionalText(generatedGuidance.preview, 600)
+              || (normalizeOptionalText(generatedGuidance.text, 600) || null),
+            text: normalizeOptionalText(generatedGuidance.text, 4000) || '',
+          }
+        : null,
+      missingBackendPieces,
+    },
+    runtimeConfig: {
+      provider,
+      model,
+      endpoint,
+      apiKey,
+      keyEnv,
+      timeoutMs,
+      maxTokens,
+      temperature,
+      allowedHooks: Array.isArray(runtimeCfg.allowedHooks) && runtimeCfg.allowedHooks.length
+        ? runtimeCfg.allowedHooks
+        : [...SUBCONSCIOUS_RUNTIME_HOOKS],
+      invocationConfigured,
+      disabledReason,
+    },
+  };
+}
+
+function buildSubconsciousInvokePrompt(agentName, payload, state, recentEvents, retrievedMemories = null) {
+  const recent = (Array.isArray(recentEvents) ? recentEvents.slice(-6) : []).map((ev) => ({
+    ts: ev?.ts || null,
+    hook: ev?.hook || ev?.hookEventName || null,
+    summary: ev?.summary || null,
+    guidanceSource: ev?.guidanceSource || null,
+    runtimeInvoked: ev?.runtimeInvoked === true,
+  }));
+  const memories = Array.isArray(retrievedMemories?.matches)
+    ? retrievedMemories.matches.map((row) => ({
+      id: row.id,
+      at: row.at,
+      hook: row.hook,
+      summary: row.summary,
+      guidancePreview: row.guidancePreview,
+      overlapKeywords: row.overlapKeywords,
+    }))
+    : [];
+  const conversation = state?.contract?.conversation?.current && typeof state.contract.conversation.current === 'object'
+    ? state.contract.conversation.current
+    : null;
+  return [
+    'You are the agentchat subconscious runtime for one agent.',
+    'Generate a short, concrete internal guidance snippet for the next Claude hook step.',
+    'Do not claim long-term memory or external facts you do not have.',
+    'Base your output only on the supplied hook payload, recent subconscious events, retrieved local episodic memories, and optional human manual guidance.',
+    'Return JSON only: {"guidance":"...", "summary":"..."}',
+    'If no useful guidance should be injected, return {"guidance":"","summary":"no guidance"}',
+    '',
+    `Agent: ${agentName}`,
+    `Hook: ${payload.hook || payload.hookEventName || 'Unknown'}`,
+    `Prompt preview: ${payload.promptPreview || '-'}`,
+    `Tool: ${payload.toolName || '-'}`,
+    `Manual guidance: ${state.contract.manualGuidance.text || '-'}`,
+    `Conversation session: ${conversation?.sessionId || payload?.sessionId || '-'}`,
+    `Conversation transcript: ${conversation?.transcriptPath || payload?.transcriptPath || '-'}`,
+    `Conversation turn counts: user=${conversation?.userTurnCount ?? 0} assistant=${conversation?.assistantTurnCount ?? 0}`,
+    `Recent conversation turns: ${JSON.stringify(Array.isArray(conversation?.recentTurns) ? conversation.recentTurns : [])}`,
+    `Recent events: ${JSON.stringify(recent)}`,
+    `Retrieved local episodic memories: ${JSON.stringify(memories)}`,
+  ].join('\n');
+}
+
+function parseSubconsciousInvokeResponse(raw) {
+  const cleaned = normalizeJsonText(raw);
+  const parsed = JSON.parse(cleaned);
+  return {
+    guidance: normalizeOptionalText(parsed?.guidance, 4000) || '',
+    summary: normalizeOptionalText(parsed?.summary, 600) || 'runtime guidance',
+  };
+}
+
+async function callSubconsciousRuntimeLlm(state, prompt) {
+  const body = {
+    model: state.runtimeConfig.model,
+    temperature: state.runtimeConfig.temperature,
+    max_tokens: state.runtimeConfig.maxTokens,
+    messages: [
+      { role: 'system', content: 'You are a strict JSON generator. Output only valid JSON.' },
+      { role: 'user', content: prompt },
+    ],
+  };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), state.runtimeConfig.timeoutMs);
+  try {
+    const resp = await fetch(state.runtimeConfig.endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${state.runtimeConfig.apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      throw new Error(`llm http ${resp.status}: ${errText.slice(0, 220)}`);
+    }
+    const json = await resp.json();
+    const content = json?.choices?.[0]?.message?.content;
+    if (!content) throw new Error('llm response missing choices[0].message.content');
+    return { content, usage: json?.usage || null };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function normalizeAttachmentName(value, fallback = 'file') {
   let name = typeof value === 'string' ? value.trim() : '';
   if (!name) name = fallback;
@@ -455,6 +1798,8 @@ const localTmuxMissingState = new Map(); // agent -> { since:number, alerted:boo
 const localCompactState = new Map(); // agent -> marker
 const localRuntimeSignalDigest = new Map(); // agent -> digest of blocked/mcp/workspace
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
+const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
+const subconsciousEventsByAgent = new Map(); // agent -> event[]
 const unexpectedOfflineAlertAt = new Map(); // key(agent:reason) -> ts
 const compactRuntimeAlertAt = new Map(); // key(agent:marker:mode) -> ts
 const swapAlertState = {
@@ -466,6 +1811,23 @@ const scopePressureState = new Map(); // agent -> { high:bool, lastAlertAt:numbe
 let localMcpSessionCacheAt = 0;
 let localMcpSessionCache = new Set();
 const agentsBeforeNormalization = JSON.stringify(agents);
+
+for (const ev of loadJsonlTailSync(SUBCONSCIOUS_EVENT_LOG, SUBCONSCIOUS_EVENT_HISTORY_LIMIT)) {
+  const agent = normalizeLooseAgentName(ev?.agent);
+  if (!agent) continue;
+  const row = {
+    ...ev,
+    agent,
+    ts: normalizeEventTs(ev?.ts),
+  };
+  const list = subconsciousEventsByAgent.get(agent) || [];
+  list.push(row);
+  if (list.length > SUBCONSCIOUS_EVENT_AGENT_LIMIT) {
+    subconsciousEventsByAgent.set(agent, list.slice(list.length - SUBCONSCIOUS_EVENT_AGENT_LIMIT));
+  } else {
+    subconsciousEventsByAgent.set(agent, list);
+  }
+}
 
 for (const agent of Object.values(agents)) {
   agent.name = agent.name || null;
@@ -497,6 +1859,17 @@ for (const agent of Object.values(agents)) {
   if (!Object.prototype.hasOwnProperty.call(agent, 'discoveredAt')) {
     agent.discoveredAt = agent.registeredAt || agent.lastSeen || Date.now();
   }
+  agent.agentModelVersion = normalizeAgentModelVersion(agent.agentModelVersion) || null;
+  agent.layoutVersion = normalizeLayoutVersion(agent.layoutVersion) || null;
+  agent.agentId = normalizeAgentId(agent.agentId) || null;
+  agent.homeDir = normalizeWorkspacePath(agent.homeDir) || null;
+  agent.workdir = normalizeWorkspacePath(agent.workdir) || null;
+  agent.stateDir = normalizeWorkspacePath(agent.stateDir) || null;
+  agent.subconsciousEnabled = agent.subconsciousEnabled === true
+    ? true
+    : (agent.subconsciousEnabled === false ? false : null);
+  agent.managedProjects = normalizeManagedProjects(agent.managedProjects);
+  agent.human = normalizeHumanMeta(agent.human);
   agent.kind = inferRecordKind(agent);
   if (agent.kind === 'human') {
     agent.online = false;
@@ -684,6 +2057,17 @@ function ensureAgentRecord(name, defaults = {}) {
     manualDown,
     discoveredAt: now,
     registeredAt: Number(defaults.registeredAt) > 0 ? Number(defaults.registeredAt) : now,
+    agentModelVersion: normalizeAgentModelVersion(defaults.agentModelVersion) || null,
+    layoutVersion: normalizeLayoutVersion(defaults.layoutVersion) || null,
+    agentId: normalizeAgentId(defaults.agentId) || null,
+    homeDir: normalizeWorkspacePath(defaults.homeDir) || null,
+    workdir: normalizeWorkspacePath(defaults.workdir) || null,
+    stateDir: normalizeWorkspacePath(defaults.stateDir) || null,
+    subconsciousEnabled: defaults.subconsciousEnabled === true
+      ? true
+      : (defaults.subconsciousEnabled === false ? false : null),
+    managedProjects: normalizeManagedProjects(defaults.managedProjects),
+    human: normalizeHumanMeta(defaults.human),
     kind,
   };
   agents[agentName] = agent;
@@ -2226,6 +3610,17 @@ function serializeAgent(agent) {
     blocked: runtime?.blocked === true,
     blockedReason: runtime?.blockedReason || null,
     blockedSince: runtime?.blockedSince || null,
+    agentModelVersion: normalizeAgentModelVersion(agent.agentModelVersion) || null,
+    layoutVersion: normalizeLayoutVersion(agent.layoutVersion) || null,
+    agentId: normalizeAgentId(agent.agentId) || null,
+    homeDir: normalizeWorkspacePath(agent.homeDir) || null,
+    workdir: normalizeWorkspacePath(agent.workdir) || null,
+    stateDir: normalizeWorkspacePath(agent.stateDir) || null,
+    subconsciousEnabled: agent.subconsciousEnabled === true
+      ? true
+      : (agent.subconsciousEnabled === false ? false : null),
+    managedProjects: normalizeManagedProjects(agent.managedProjects),
+    human: normalizeHumanMeta(agent.human),
     activeNow: runtime?.activeNow === true,
     activeDurationSec: Number(runtime?.activeDurationSec) || 0,
     idleDurationSec: Number(runtime?.idleDurationSec) || 0,
@@ -2418,7 +3813,7 @@ function logPushNotifySkip(agentName, reason, detail = '') {
 
 function clearQueuedNotificationsForAgent(agentName) {
   if (!agentName) return;
-  fetch(`http://127.0.0.1:8084/api/queue/agents/${encodeURIComponent(agentName)}/notifications`, {
+  fetch(`${WEB_BASE_URL}/api/queue/agents/${encodeURIComponent(agentName)}/notifications`, {
     method: 'DELETE',
   })
     .then((r) => {
@@ -2882,7 +4277,23 @@ app.get('/api/stream', (req, res) => {
 
 // ── Agents CRUD ───────────────────────────────────────────────────────
 app.post('/api/agents', (req, res) => {
-  const { name, role, tmux, type: agentType, identity, server } = req.body;
+  const {
+    name,
+    role,
+    tmux,
+    type: agentType,
+    identity,
+    server,
+    agentModelVersion,
+    layoutVersion,
+    agentId,
+    homeDir,
+    workdir,
+    stateDir,
+    subconsciousEnabled,
+    managedProjects,
+    human,
+  } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   refreshServerLiveness();
   const agentName = normalizeAgentName(name);
@@ -2907,6 +4318,29 @@ app.post('/api/agents', (req, res) => {
     manualDown: resolvedOnline ? false : (existing.manualDown === true),
     registeredAt: existing.registeredAt || Date.now(),
     discoveredAt: existing.discoveredAt || existing.registeredAt || Date.now(),
+    agentModelVersion: normalizeAgentModelVersion(agentModelVersion)
+      || normalizeAgentModelVersion(existing.agentModelVersion)
+      || null,
+    layoutVersion: normalizeLayoutVersion(layoutVersion)
+      || normalizeLayoutVersion(existing.layoutVersion)
+      || null,
+    agentId: normalizeAgentId(agentId) || normalizeAgentId(existing.agentId) || null,
+    homeDir: normalizeWorkspacePath(homeDir) || normalizeWorkspacePath(existing.homeDir) || null,
+    workdir: normalizeWorkspacePath(workdir) || normalizeWorkspacePath(existing.workdir) || null,
+    stateDir: normalizeWorkspacePath(stateDir) || normalizeWorkspacePath(existing.stateDir) || null,
+    subconsciousEnabled: subconsciousEnabled === true
+      ? true
+      : (subconsciousEnabled === false
+        ? false
+        : (existing.subconsciousEnabled === true
+          ? true
+          : (existing.subconsciousEnabled === false ? false : null))),
+    managedProjects: Array.isArray(managedProjects)
+      ? normalizeManagedProjects(managedProjects)
+      : normalizeManagedProjects(existing.managedProjects),
+    human: human !== undefined
+      ? normalizeHumanMeta(human)
+      : normalizeHumanMeta(existing.human),
   };
   saveAgents();
   if (!existingOnline && resolvedOnline) {
@@ -2924,7 +4358,23 @@ app.patch('/api/agents/:name', (req, res) => {
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
   const wasOnline = Boolean(agent.online);
-  const { role, identity, tmux, online, offlineReason, manualDown } = req.body;
+  const {
+    role,
+    identity,
+    tmux,
+    online,
+    offlineReason,
+    manualDown,
+    agentModelVersion,
+    layoutVersion,
+    agentId,
+    homeDir,
+    workdir,
+    stateDir,
+    subconsciousEnabled,
+    managedProjects,
+    human,
+  } = req.body;
   if (role !== undefined) agent.role = role;
   if (identity !== undefined) agent.identity = identity;
   if (tmux !== undefined) {
@@ -2950,6 +4400,35 @@ app.patch('/api/agents/:name', (req, res) => {
   }
   if (manualDown !== undefined) {
     agent.manualDown = manualDown === true;
+  }
+  if (agentModelVersion !== undefined) {
+    agent.agentModelVersion = normalizeAgentModelVersion(agentModelVersion) || null;
+  }
+  if (layoutVersion !== undefined) {
+    agent.layoutVersion = normalizeLayoutVersion(layoutVersion) || null;
+  }
+  if (agentId !== undefined) {
+    agent.agentId = normalizeAgentId(agentId) || null;
+  }
+  if (homeDir !== undefined) {
+    agent.homeDir = normalizeWorkspacePath(homeDir) || null;
+  }
+  if (workdir !== undefined) {
+    agent.workdir = normalizeWorkspacePath(workdir) || null;
+  }
+  if (stateDir !== undefined) {
+    agent.stateDir = normalizeWorkspacePath(stateDir) || null;
+  }
+  if (subconsciousEnabled !== undefined) {
+    agent.subconsciousEnabled = subconsciousEnabled === true
+      ? true
+      : (subconsciousEnabled === false ? false : null);
+  }
+  if (managedProjects !== undefined) {
+    agent.managedProjects = normalizeManagedProjects(managedProjects);
+  }
+  if (human !== undefined) {
+    agent.human = normalizeHumanMeta(human);
   }
   if (agent.online === true && agent.manualDown !== false) {
     agent.manualDown = false;
@@ -3140,6 +4619,476 @@ app.post('/api/runtime/push-delivered', (req, res) => {
     ...notifyMeta,
   });
   res.json({ ok: true, agent: agentName });
+});
+
+app.post('/api/subconscious/events', (req, res) => {
+  const body = req.body || {};
+  const event = buildSubconsciousEvent({
+    ...body,
+    hookEventName: body.hookEventName ?? body.hook_event_name,
+    sessionId: body.sessionId ?? body.session_id,
+    transcriptPath: body.transcriptPath ?? body.transcript_path,
+    toolName: body.toolName ?? body.tool_name,
+    promptPreview: body.promptPreview ?? body.prompt_preview,
+    lettaAgentId: body.lettaAgentId ?? body.letta_agent_id,
+    lettaStateFile: body.lettaStateFile ?? body.letta_state_file,
+    guidancePresent: body.guidancePresent ?? body.guidance_present,
+    guidanceConfigured: body.guidanceConfigured ?? body.guidance_configured,
+    guidanceInjected: body.guidanceInjected ?? body.guidance_injected,
+    guidanceSource: body.guidanceSource ?? body.guidance_source,
+    guidancePreview: body.guidancePreview ?? body.guidance_preview,
+    runtimeInvoked: body.runtimeInvoked ?? body.runtime_invoked,
+    runtimeProvider: body.runtimeProvider ?? body.runtime_provider,
+    runtimeModel: body.runtimeModel ?? body.runtime_model,
+    runtimeLatencyMs: body.runtimeLatencyMs ?? body.runtime_latency_ms,
+    runtimeError: body.runtimeError ?? body.runtime_error,
+  });
+  if (!event) return res.status(400).json({ error: 'agent required' });
+  appendSubconsciousEvent(event);
+  const state = resolveSubconsciousState(event.agent);
+  const at = new Date(event.ts || Date.now()).toISOString();
+  const conversation = state
+    ? syncSubconsciousConversationState(state, event, {
+        at,
+        hook: event.hook || event.hookEventName,
+        toolName: event.toolName,
+        runtimeInvoked: event.runtimeInvoked === true,
+        runtimeProvider: event.runtimeProvider,
+        runtimeModel: event.runtimeModel,
+        guidancePreview: event.guidancePreview,
+        guidanceAt: event.guidanceInjected === true || event.guidancePresent === true ? at : null,
+        guidanceSource: event.guidanceSource,
+      })
+    : null;
+  if (state && conversation) applyConversationSnapshotToContract(state, conversation);
+  return res.json({
+    ok: true,
+    event,
+    conversation,
+  });
+});
+
+app.get('/api/subconscious/detail/:name', (req, res) => {
+  const agent = normalizeLooseAgentName(req.params.name);
+  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
+  const state = resolveSubconsciousState(agent);
+  if (!state) return res.status(404).json({ error: 'agent not found' });
+  return res.json(state.contract);
+});
+
+app.post('/api/subconscious/upstream/bootstrap/:name', async (req, res) => {
+  const agent = normalizeLooseAgentName(req.params.name);
+  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
+  const state = resolveSubconsciousState(agent);
+  if (!state) return res.status(404).json({ error: 'agent not found' });
+
+  const now = new Date().toISOString();
+  const existingUpstream = (state.letta?.upstream && typeof state.letta.upstream === 'object') ? state.letta.upstream : {};
+  const existingRuntimeUpstream = (state.runtimeMeta?.upstream && typeof state.runtimeMeta.upstream === 'object')
+    ? state.runtimeMeta.upstream
+    : {};
+  const requestedAgentId = normalizeOptionalText(req.body?.lettaAgentId, 256);
+  const configuredAgentId = normalizeOptionalText(process.env.LETTA_AGENT_ID, 256);
+  const result = await bootstrapUpstreamClaudeSubconsciousAgent({
+    stateDir: state.stateDir,
+    workdir: state.agent.workdir || '',
+    apiKey: normalizeOptionalText(process.env.LETTA_API_KEY, 4096),
+    lettaBaseUrl: normalizeOptionalText(process.env.LETTA_BASE_URL, 2048),
+    lettaAgentId: requestedAgentId
+      || configuredAgentId
+      || normalizeOptionalText(existingUpstream.agentId, 256),
+    lettaModel: normalizeOptionalText(process.env.LETTA_MODEL, 256),
+    lettaContextWindow: normalizeOptionalText(process.env.LETTA_CONTEXT_WINDOW, 64),
+  });
+  const directReuse = mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse);
+  const nextRuntimeMeta = {
+    ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
+    upstream: {
+      ...existingRuntimeUpstream,
+      available: result.paths?.available === true,
+      root: result.paths?.root || null,
+      promptFile: result.paths?.promptFile || null,
+      scripts: result.paths?.scripts || null,
+      durableHome: result.paths?.durableHome || null,
+      durableStateDir: result.paths?.durableStateDir || null,
+      conversationsFile: result.paths?.conversationsFile || null,
+      configPath: result.paths?.configPath || null,
+      directReuse,
+      bootstrapStatus: result.ok ? 'configured' : 'blocked',
+      blocker: result.blocker || null,
+      checkedAt: now,
+      agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
+      importedAt: normalizeOptionalText(result.config?.importedAt, 128) || null,
+      model: normalizeOptionalText(result.config?.model, 256) || null,
+      agentName: normalizeOptionalText(result.agent?.name, 256) || null,
+      blockCount: Array.isArray(result.agent?.blocks) ? result.agent.blocks.length : 0,
+    },
+    updatedAt: now,
+  };
+  const nextLetta = {
+    ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
+    upstream: {
+      ...existingUpstream,
+      bootstrapStatus: result.ok ? 'configured' : 'blocked',
+      blocker: result.blocker || null,
+      checkedAt: now,
+      agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
+      importedAt: normalizeOptionalText(result.config?.importedAt, 128) || null,
+      model: normalizeOptionalText(result.config?.model, 256) || null,
+      agentName: normalizeOptionalText(result.agent?.name, 256) || null,
+      blockCount: Array.isArray(result.agent?.blocks) ? result.agent.blocks.length : 0,
+      lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
+      configPath: result.paths?.configPath || null,
+      conversationsFile: result.paths?.conversationsFile || null,
+      promptFile: result.paths?.promptFile || null,
+    },
+    updatedAt: now,
+  };
+  safeWriteJsonFile(state.runtimeMetaPath, nextRuntimeMeta);
+  safeWriteJsonFile(state.lettaPath, nextLetta);
+  const refreshed = resolveSubconsciousState(agent);
+  return res.json({
+    ok: result.ok,
+    blocked: result.blocked === true,
+    blocker: result.blocker || null,
+    logs: Array.isArray(result.logs) ? result.logs.slice(-20) : [],
+    upstream: refreshed?.contract?.upstream || buildSubconsciousUpstreamContract(state.stateDir, state.agent.workdir || null, nextRuntimeMeta, nextLetta, state.conversationState),
+  });
+});
+
+app.post('/api/subconscious/upstream/session-start/:name', async (req, res) => {
+  const agent = normalizeLooseAgentName(req.params.name);
+  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
+  const state = resolveSubconsciousState(agent);
+  if (!state) return res.status(404).json({ error: 'agent not found' });
+
+  try {
+    const payload = req.body || {};
+    const sessionId = normalizeOptionalText(payload.sessionId || payload.session_id, 200);
+    if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+
+    const now = new Date().toISOString();
+    const existingUpstream = (state.letta?.upstream && typeof state.letta.upstream === 'object') ? state.letta.upstream : {};
+    const existingRuntimeUpstream = (state.runtimeMeta?.upstream && typeof state.runtimeMeta.upstream === 'object')
+      ? state.runtimeMeta.upstream
+      : {};
+    const requestedAgentId = normalizeOptionalText(payload.lettaAgentId, 256);
+    const configuredAgentId = normalizeOptionalText(process.env.LETTA_AGENT_ID, 256);
+    const result = await startUpstreamClaudeSubconsciousSession({
+      stateDir: state.stateDir,
+      workdir: state.agent.workdir || '',
+      cwd: normalizeWorkspacePath(payload.cwd) || state.agent.workdir || '',
+      apiKey: normalizeOptionalText(process.env.LETTA_API_KEY, 4096),
+      lettaBaseUrl: normalizeOptionalText(process.env.LETTA_BASE_URL, 2048),
+      lettaAgentId: requestedAgentId
+        || configuredAgentId
+        || normalizeOptionalText(existingUpstream.agentId, 256),
+      lettaModel: normalizeOptionalText(process.env.LETTA_MODEL, 256),
+      lettaContextWindow: normalizeOptionalText(process.env.LETTA_CONTEXT_WINDOW, 64),
+      sessionId,
+      sendSessionStartMessage: normalizeBoolean(payload.sendMessage) !== false,
+    });
+    const directReuse = mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse);
+    const sendMessageRequested = normalizeBoolean(payload.sendMessage) !== false;
+    const sessionEstablished = Boolean((result.sessionId || sessionId) && result.conversationId);
+    const notifyBlockedReason = sendMessageRequested && result.blocker ? result.blocker : null;
+    const notifyRecord = {
+      attempted: sendMessageRequested,
+      status: result.messageSent === true
+        ? 'sent'
+        : (sendMessageRequested
+          ? (notifyBlockedReason ? 'blocked' : 'attempted')
+          : 'not-attempted'),
+      blockedReason: notifyBlockedReason,
+      messageSent: result.messageSent === true,
+      attemptedAt: sendMessageRequested ? now : null,
+      messageSentAt: result.messageSent === true ? now : null,
+      requiredDecision: notifyBlockedReason
+        ? deriveUpstreamNotifyDecision(
+          notifyBlockedReason,
+          result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
+          normalizeOptionalText(result.agent?.llm_config?.handle, 256)
+            || normalizeOptionalText(result.agent?.llm_config?.model, 256)
+            || normalizeOptionalText(existingUpstream.model, 256)
+            || normalizeOptionalText(existingRuntimeUpstream.model, 256)
+        )
+        : null,
+    };
+    const sessionRecord = {
+      established: sessionEstablished,
+      status: sessionEstablished ? 'started' : (result.blocked === true ? 'blocked' : 'not-run'),
+      blocker: sessionEstablished ? null : (result.blocker || null),
+      checkedAt: now,
+      sessionId: result.sessionId || sessionId,
+      conversationId: result.conversationId || null,
+      conversationStatus: result.conversationStatus || null,
+      sessionStateFile: result.sessionStateFile || null,
+      sessionStartedAt: normalizeOptionalText(result.sessionState?.startedAt, 128) || now,
+      messageSent: result.messageSent === true,
+      messageSentAt: result.messageSent === true ? now : null,
+      cwd: normalizeWorkspacePath(result.cwd) || state.agent.workdir || null,
+      notify: notifyRecord,
+    };
+    const nextRuntimeMeta = {
+      ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
+      upstream: {
+        ...existingRuntimeUpstream,
+        available: result.paths?.available === true,
+        root: result.paths?.root || null,
+        promptFile: result.paths?.promptFile || null,
+        scripts: result.paths?.scripts || null,
+        durableHome: result.paths?.durableHome || null,
+        durableStateDir: result.paths?.durableStateDir || null,
+        conversationsFile: result.paths?.conversationsFile || null,
+        configPath: result.paths?.configPath || null,
+        directReuse,
+        bootstrapStatus: 'configured',
+        blocker: null,
+        checkedAt: now,
+        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
+        agentName: normalizeOptionalText(result.agent?.name, 256) || normalizeOptionalText(existingUpstream.agentName, 256) || null,
+        blockCount: Array.isArray(result.agent?.blocks) ? result.agent.blocks.length : normalizeNonNegativeInt(existingRuntimeUpstream.blockCount, 0),
+        session: sessionRecord,
+      },
+      updatedAt: now,
+    };
+    const nextLetta = {
+      ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
+      upstream: {
+        ...existingUpstream,
+        bootstrapStatus: 'configured',
+        blocker: null,
+        checkedAt: now,
+        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
+        agentName: normalizeOptionalText(result.agent?.name, 256) || normalizeOptionalText(existingUpstream.agentName, 256) || null,
+        blockCount: Array.isArray(result.agent?.blocks) ? result.agent.blocks.length : normalizeNonNegativeInt(existingUpstream.blockCount, 0),
+        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
+        configPath: result.paths?.configPath || null,
+        conversationsFile: result.paths?.conversationsFile || null,
+        promptFile: result.paths?.promptFile || null,
+        session: sessionRecord,
+      },
+      updatedAt: now,
+    };
+    safeWriteJsonFile(state.runtimeMetaPath, nextRuntimeMeta);
+    safeWriteJsonFile(state.lettaPath, nextLetta);
+    const refreshed = resolveSubconsciousState(agent);
+    return res.json({
+      ok: sessionEstablished,
+      blocked: !sessionEstablished && result.blocked === true,
+      blocker: sessionEstablished ? null : (result.blocker || null),
+      logs: Array.isArray(result.logs) ? result.logs.slice(-20) : [],
+      session: refreshed?.contract?.upstream?.session || sessionRecord,
+      upstream: refreshed?.contract?.upstream || buildSubconsciousUpstreamContract(state.stateDir, state.agent.workdir || null, nextRuntimeMeta, nextLetta, state.conversationState),
+    });
+  } catch (err) {
+    return res.status(502).json({ ok: false, blocked: true, blocker: err?.message || String(err) });
+  }
+});
+
+app.post('/api/subconscious/runtime/invoke/:name', async (req, res) => {
+  const agent = normalizeLooseAgentName(req.params.name);
+  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
+  const state = resolveSubconsciousState(agent);
+  if (!state) return res.status(404).json({ error: 'agent not found' });
+
+  const payload = req.body || {};
+  const hook = normalizeOptionalText(payload.hook, 120) || normalizeOptionalText(payload.hookEventName, 120) || null;
+  if (!hook) return res.status(400).json({ error: 'hook required' });
+
+  const promptPayload = {
+    hook,
+    hookEventName: normalizeOptionalText(payload.hookEventName, 120) || hook,
+    sessionId: normalizeOptionalText(payload.sessionId, 200),
+    transcriptPath: normalizeWorkspacePath(payload.transcriptPath),
+    toolName: normalizeOptionalText(payload.toolName, 120),
+    promptPreview: normalizeOptionalText(payload.promptPreview, 320),
+    summary: normalizeOptionalText(payload.summary, 600),
+  };
+  const invokeStartedAt = new Date().toISOString();
+  const conversationBefore = syncSubconsciousConversationState(state, promptPayload, {
+    at: invokeStartedAt,
+    hook,
+    toolName: promptPayload.toolName,
+    runtimeInvoked: false,
+  });
+  if (conversationBefore) applyConversationSnapshotToContract(state, conversationBefore);
+
+  if (!state.runtimeConfig.invocationConfigured) {
+    return res.json({
+      ok: true,
+      invoked: false,
+      guidance: null,
+      guidanceSource: state.contract.manualGuidance.configured ? 'manual-state-file' : 'none',
+      disabledReason: state.runtimeConfig.disabledReason,
+      provider: state.runtimeConfig.provider,
+      model: state.runtimeConfig.model,
+      conversation: state.contract.conversation,
+    });
+  }
+
+  if (!state.runtimeConfig.allowedHooks.includes(hook)) {
+    return res.json({
+      ok: true,
+      invoked: false,
+      guidance: null,
+      guidanceSource: state.contract.manualGuidance.configured ? 'manual-state-file' : 'none',
+      disabledReason: `hook ${hook} is not eligible for runtime guidance`,
+      provider: state.runtimeConfig.provider,
+      model: state.runtimeConfig.model,
+      conversation: state.contract.conversation,
+    });
+  }
+  const recentEvents = getSubconsciousEvents(agent, 12);
+  const retrievedMemories = retrieveSubconsciousMemories(state.memoryState, promptPayload);
+  if (state.memoryState?.store) {
+    state.memoryState.store.lastRetrievedAt = new Date().toISOString();
+    state.memoryState.store.lastRetrievedQuery = retrievedMemories.queryText || null;
+    state.memoryState.store.lastRetrievedIds = retrievedMemories.matches.map((row) => row.id);
+    writeSubconsciousMemoryStore(state.memoryState);
+  }
+  const prompt = buildSubconsciousInvokePrompt(agent, promptPayload, state, recentEvents, retrievedMemories);
+  const started = Date.now();
+
+  try {
+    const llm = await callSubconsciousRuntimeLlm(state, prompt);
+    const parsed = parseSubconsciousInvokeResponse(llm.content);
+    const guidance = parsed.guidance || '';
+    const nowIso = new Date().toISOString();
+    const storedEpisode = appendSubconsciousMemoryEpisode(state.memoryState, promptPayload, parsed);
+    const conversationAfter = syncSubconsciousConversationState(state, promptPayload, {
+      at: nowIso,
+      hook,
+      toolName: promptPayload.toolName,
+      runtimeInvoked: true,
+      runtimeProvider: state.runtimeConfig.provider,
+      runtimeModel: state.runtimeConfig.model,
+      guidancePreview: guidance ? guidance.slice(0, 320) : '',
+      guidanceAt: guidance ? nowIso : null,
+      guidanceSource: guidance ? 'runtime-llm' : 'none',
+    });
+    const currentConversation = applyConversationSnapshotToContract(state, conversationAfter);
+    const nextLetta = {
+      ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
+      lastInvocation: {
+        ok: true,
+        hook,
+        ts: Date.now(),
+        at: nowIso,
+        provider: state.runtimeConfig.provider,
+        model: state.runtimeConfig.model,
+        latencyMs: Date.now() - started,
+        guidancePreview: guidance ? guidance.slice(0, 240) : '',
+        error: null,
+        summary: parsed.summary,
+        memoryRetrieval: {
+          query: retrievedMemories.queryText || '',
+          matchCount: retrievedMemories.matches.length,
+          matchIds: retrievedMemories.matches.map((row) => row.id),
+          storedEpisodeId: storedEpisode?.id || null,
+        },
+        conversation: {
+          sessionId: currentConversation?.sessionId || promptPayload.sessionId || null,
+          transcriptPath: currentConversation?.transcriptPath || promptPayload.transcriptPath || null,
+          userTurnCount: currentConversation?.userTurnCount ?? 0,
+          assistantTurnCount: currentConversation?.assistantTurnCount ?? 0,
+        },
+      },
+      lastRuntimeGuidance: {
+        text: guidance,
+        preview: guidance ? guidance.slice(0, 600) : '',
+        updatedAt: nowIso,
+        hook,
+        summary: parsed.summary,
+        guidanceSource: guidance ? 'runtime-llm' : 'none',
+        sessionId: currentConversation?.sessionId || promptPayload.sessionId || null,
+        transcriptPath: currentConversation?.transcriptPath || promptPayload.transcriptPath || null,
+      },
+      updatedAt: nowIso,
+    };
+    safeWriteJsonFile(state.lettaPath, nextLetta);
+    return res.json({
+      ok: true,
+      invoked: true,
+      guidance,
+      guidanceSource: guidance ? 'runtime-llm' : 'none',
+      provider: state.runtimeConfig.provider,
+      model: state.runtimeConfig.model,
+      latencyMs: Date.now() - started,
+      usage: llm.usage || null,
+      summary: parsed.summary,
+      memoryRetrieval: {
+        query: retrievedMemories.queryText || '',
+        matchCount: retrievedMemories.matches.length,
+        matches: retrievedMemories.matches,
+        storedEpisodeId: storedEpisode?.id || null,
+      },
+      conversation: state.contract.conversation,
+    });
+  } catch (e) {
+    const nowIso = new Date().toISOString();
+    const conversationAfter = syncSubconsciousConversationState(state, promptPayload, {
+      at: nowIso,
+      hook,
+      toolName: promptPayload.toolName,
+      runtimeInvoked: false,
+      runtimeProvider: state.runtimeConfig.provider,
+      runtimeModel: state.runtimeConfig.model,
+    });
+    applyConversationSnapshotToContract(state, conversationAfter);
+    const nextLetta = {
+      ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
+      lastInvocation: {
+        ok: false,
+        hook,
+        ts: Date.now(),
+        at: nowIso,
+        provider: state.runtimeConfig.provider,
+        model: state.runtimeConfig.model,
+        latencyMs: Date.now() - started,
+        guidancePreview: '',
+        error: String(e?.message || e),
+        summary: 'runtime invocation failed',
+      },
+      updatedAt: nowIso,
+    };
+    safeWriteJsonFile(state.lettaPath, nextLetta);
+    return res.status(502).json({
+      ok: false,
+      error: 'runtime invocation failed',
+      detail: String(e?.message || e),
+      provider: state.runtimeConfig.provider,
+      model: state.runtimeConfig.model,
+      conversation: state.contract.conversation,
+    });
+  }
+});
+
+app.get('/api/subconscious/events', (req, res) => {
+  const limitRaw = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0
+    ? Math.min(limitRaw, SUBCONSCIOUS_EVENT_HISTORY_LIMIT)
+    : 120;
+  const agent = normalizeLooseAgentName(req.query.agent);
+  if (agent) {
+    return res.json({ ok: true, agent, events: getSubconsciousEvents(agent, limit) });
+  }
+  const merged = [];
+  for (const rows of subconsciousEventsByAgent.values()) {
+    merged.push(...rows);
+  }
+  merged.sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
+  return res.json({ ok: true, events: merged.slice(-limit) });
+});
+
+app.get('/api/subconscious/events/:name', (req, res) => {
+  const agent = normalizeLooseAgentName(req.params.name);
+  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
+  const limitRaw = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0
+    ? Math.min(limitRaw, SUBCONSCIOUS_EVENT_HISTORY_LIMIT)
+    : 120;
+  return res.json({ ok: true, agent, events: getSubconsciousEvents(agent, limit) });
 });
 
 // ── Groups CRUD ───────────────────────────────────────────────────────

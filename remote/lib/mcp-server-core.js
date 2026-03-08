@@ -56,7 +56,11 @@ if (!AGENT_NAME) {
   process.exit(1);
 }
 
-const API = process.env.AGENT_CHAT_API || 'http://127.0.0.1:8090';
+const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
+const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
+  ? DEFAULT_BACKEND_PORT_RAW
+  : 8090;
+const API = process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`;
 const API_TOKEN = (process.env.API_TOKEN || '').trim();
 const AGENT_SERVER = (process.env.AGENT_CHAT_SERVER || '').trim() || null;
 const ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.AGENT_CHAT_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);

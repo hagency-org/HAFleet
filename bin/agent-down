@@ -37,7 +37,7 @@ _resolve_script_dir() {
 }
 SCRIPT_DIR="$(_resolve_script_dir)"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
-DATA_DIR="$BASE_DIR/data/agents"
+DATA_DIR=""
 
 # Load .env if present
 ENV_FILE="$BASE_DIR/.env"
@@ -46,8 +46,16 @@ if [ -f "$ENV_FILE" ]; then
   source "$ENV_FILE"
   set +a
 fi
+RUNTIME_DIR="${AGENT_CHAT_RUNTIME_DIR:-$BASE_DIR}"
+DATA_DIR="$RUNTIME_DIR/data/agents"
 
-BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
+BACKEND_PORT_RAW="${AGENT_CHAT_BACKEND_PORT:-8090}"
+if [[ "$BACKEND_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT_RAW" -gt 0 ]; then
+  BACKEND_PORT="$BACKEND_PORT_RAW"
+else
+  BACKEND_PORT="8090"
+fi
+BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:$BACKEND_PORT}"
 API_TOKEN="${API_TOKEN:-}"
 SERVER_ID="${AGENT_CHAT_SERVER:-}"
 AUTH_HEADER=""
@@ -373,13 +381,47 @@ if ! tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
   exit 0
 fi
 
-AGENT_DATA="$DATA_DIR/$NAME"
+AGENT_META_DIR="$DATA_DIR/$NAME"
+mkdir -p "$AGENT_META_DIR"
+META_FILE="$AGENT_META_DIR/meta.json"
+
+V1_STATE_DIR=""
+if [ -f "$META_FILE" ]; then
+  V1_STATE_DIR=$(META_FILE="$META_FILE" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+import pathlib
+
+meta_path = pathlib.Path(os.environ["META_FILE"])
+try:
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+except Exception:
+    print("")
+    raise SystemExit(0)
+ver = str(data.get("agentModelVersion") or "").strip()
+state_dir = str(data.get("stateDir") or "").strip()
+if ver.startswith("1") and state_dir.startswith("/"):
+    print(state_dir)
+else:
+    print("")
+PY
+)
+fi
+
+AGENT_DATA="$AGENT_META_DIR"
+if [ -n "$V1_STATE_DIR" ]; then
+  AGENT_DATA="$V1_STATE_DIR"
+fi
 mkdir -p "$AGENT_DATA"
 
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-ARCHIVE_FILE="$AGENT_DATA/archive-$TIMESTAMP.txt"
+ARCHIVE_DIR="$AGENT_DATA"
+if [ -n "$V1_STATE_DIR" ]; then
+  ARCHIVE_DIR="$AGENT_DATA/history"
+  mkdir -p "$ARCHIVE_DIR"
+fi
+ARCHIVE_FILE="$ARCHIVE_DIR/archive-$TIMESTAMP.txt"
 RESUME_FILE="$AGENT_DATA/resume-id"
-META_FILE="$AGENT_DATA/meta.json"
 
 ensure_agent_not_active
 

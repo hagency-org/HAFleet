@@ -1,20 +1,16 @@
 ## Current
-Implement external supervisor event ingest API (`POST /api/supervisor/events`) with authentication, source validation, schema validation, and rate limiting.
+Finish the upstream SessionStart notify/send cutover after clearing the `GLM-5` model-handle mismatch: normalize Letta model aliases to canonical handles and remove the remaining successful-send return-path hang/latency so `sendMessage:true` completes truthfully over HTTP.
 Acceptance criteria:
-- Endpoint accepts only authenticated/validated payloads.
-- Invalid or replayed payloads are rejected with explicit telemetry.
-- Accepted events are ready for reducer ingestion without bypassing supervisor state flow.
+- current closure loop stays closed (no reopened Yato/webdebug/browser regressions)
+- dev uses canonical Letta model config (`zai/glm-5`) rather than regressing the bound agent back to raw alias `GLM-5`
+- one real `sendMessage:true` proof both sends successfully and returns cleanly from `/api/subconscious/upstream/session-start/:name` without hanging or timing out
 
 ## Queue
-1. Route external subconscious events through the same supervisor reducer/state path as internal scans (no side-channel append-only writes); add dedupe/order guards.
-2. Define and implement guidance-to-event contract v1 (`status/domain/pattern/reason/suggestion/negative/source`) with strict parser + malformed payload telemetry.
-3. Add per-agent audit switches (default OFF) and global pause/resume controls to contain LLM token cost; keep notifications web+matrix only.
-4. Add pilot integration path for subconscious hooks (opt-in agent list) and persist per-agent metadata (`letta.json` / integration status).
-5. Close mixed-fleet coverage gap: document and implement behavior for Claude-hook agents, Codex agents, and no-hook fallback collector.
-6. Extend web audit secondary page to show source-specific timeline (`supervisor` vs `subconscious`) and latest triage reason per agent.
-7. Add privacy/ops guardrails: transcript redaction policy, retry/backoff budget, timeout budget, and failure isolation (subconscious outage must not degrade agent-up path).
-8. Run Phase 1 pilot on 1-2 agents with false-positive tracking and warning-threshold validation (3 consecutive negatives -> matrix warning).
-9. Prepare Phase 2 migration decision memo: quality/cost comparison against current DeepSeek judge and retirement scope for legacy judge path.
+1. Start benchmark Batch 4 (result UI) once the next Letta blocker decision is made.
+2. Decide how to handle the enterprise-managed Claude MCP constraint for a real `agentchat-dev` alias (`policy change`, `approved central config update`, or `accept using existing agent-chat alias against dev env`).
+3. Mirror the same code/runtime split design later for live (`agent-chat-live` + future `agent-chat-live-runtime`) after stable merge and explicit cutover planning.
+4. Expose the per-agent config model in the unified web management page (MCP, hooks, skills, related runtime knobs).
+5. Then implement secure external supervisor event ingest and reducer-based subconscious event flow.
 
 ## Blocked (optional)
 None.

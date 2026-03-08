@@ -7,13 +7,24 @@ import { createHash } from 'crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'fs';
 import { execFileSync } from 'child_process';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import EventSource from './lib/eventsource-mini.js';
 import BotCommands from './lib/bot-commands.js';
 
+const __filename = fileURLToPath(import.meta.url);
+const REPO_ROOT = path.dirname(__filename);
+const RUNTIME_ROOT = (() => {
+  const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
+  return raw ? path.resolve(raw) : REPO_ROOT;
+})();
 // ── Configuration ─────────────────────────────────────────────────────
 const HOMESERVER = process.env.MATRIX_HOMESERVER || 'https://matrix.ananthe.party';
 const REGISTRATION_TOKEN = (process.env.MATRIX_REG_TOKEN || '').trim();
-const BACKEND_URL = process.env.AGENT_CHAT_API || 'http://127.0.0.1:8090';
+const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
+const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
+  ? DEFAULT_BACKEND_PORT_RAW
+  : 8090;
+const BACKEND_URL = (process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
 const MSG_BASE_URL = process.env.MSG_BASE_URL || 'https://agent.ananthe.party/msg';
 const BOT_USERNAME = (process.env.MATRIX_BOT_USERNAME || 'agent-bridge').trim();
 const BOT_PASSWORD = (process.env.MATRIX_BOT_PASSWORD || '').trim();
@@ -23,9 +34,9 @@ const AGENT_PASSWORD_SECRET = (process.env.MATRIX_AGENT_PASSWORD_SECRET || '').t
 const AGENT_PASSWORD_TEMPLATE = (process.env.MATRIX_AGENT_PASSWORD_TEMPLATE || '').trim();
 const ALLOW_LEGACY_AGENT_PASSWORD = (process.env.MATRIX_ALLOW_LEGACY_AGENT_PASSWORD || 'false').trim().toLowerCase() === 'true';
 const AUTO_AVATAR_ENABLED = (process.env.MATRIX_AUTO_AVATAR || 'false').trim().toLowerCase() === 'true';
-const DATA_DIR = path.resolve('data/matrix');
+const DATA_DIR = path.join(RUNTIME_ROOT, 'data', 'matrix');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
-const AGENT_META_ROOT = path.resolve('data/agents');
+const AGENT_META_ROOT = path.join(RUNTIME_ROOT, 'data', 'agents');
 const AGENT_AVATAR_STYLE_VERSION = 2;
 
 mkdirSync(DATA_DIR, { recursive: true });
@@ -1642,14 +1653,43 @@ class MatrixBridge {
       }
     }
 
-    // Room tombstone → clean up mapping
+    // Room tombstone → clean up mapping and migrate DM rooms
     if (event.type === 'm.room.tombstone') {
+      const replacementRoom = event.content?.replacement_room;
       const groupName = groupForRoom(roomId);
       if (groupName) {
         delete state.roomGroupMap[roomId];
         delete state.groupRoomMap[groupName];
+        if (replacementRoom) {
+          state.roomGroupMap[replacementRoom] = groupName;
+          state.groupRoomMap[groupName] = replacementRoom;
+          console.log(`Room ${roomId} tombstoned, migrated group "${groupName}" → ${replacementRoom}`);
+        } else {
+          console.log(`Room ${roomId} tombstoned, unmapped group "${groupName}"`);
+        }
         saveState();
-        console.log(`Room ${roomId} tombstoned, unmapped group "${groupName}"`);
+      }
+      // Migrate DM room mappings
+      if (!state.dmRooms) state.dmRooms = {};
+      for (const [key, mappedRoomId] of Object.entries(state.dmRooms)) {
+        if (mappedRoomId === roomId) {
+          if (replacementRoom) {
+            state.dmRooms[key] = replacementRoom;
+            this.dmRooms.set(key, replacementRoom);
+            console.log(`Room ${roomId} tombstoned, migrated DM "${key}" → ${replacementRoom}`);
+          } else {
+            delete state.dmRooms[key];
+            this.dmRooms.delete(key);
+            console.log(`Room ${roomId} tombstoned, unmapped DM "${key}"`);
+          }
+          // Migrate room avatar mapping
+          if (state.roomAvatars?.[roomId]) {
+            if (replacementRoom) state.roomAvatars[replacementRoom] = state.roomAvatars[roomId];
+            delete state.roomAvatars[roomId];
+          }
+          saveState();
+          break;
+        }
       }
     }
   }

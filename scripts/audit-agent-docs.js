@@ -1,10 +1,20 @@
 #!/usr/bin/env node
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import path from 'path';
+import { resolveAgentDocsPaths, resolveV1ManifestForAgent } from '../lib/agent-home-v1.js';
 
 const ROOT = process.cwd();
-const DATA_AGENTS_DIR = path.resolve(ROOT, 'data/agents');
-const BACKEND_URL = process.env.AGENT_AUDIT_BACKEND_URL || 'http://127.0.0.1:8090';
+const RUNTIME_ROOT = (() => {
+  const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
+  return raw ? path.resolve(raw) : ROOT;
+})();
+const DATA_AGENTS_DIR = path.join(RUNTIME_ROOT, 'data', 'agents');
+const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
+const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
+  ? DEFAULT_BACKEND_PORT_RAW
+  : 8090;
+const DEFAULT_BACKEND_URL = (process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
+const BACKEND_URL = (process.env.AGENT_AUDIT_BACKEND_URL || DEFAULT_BACKEND_URL).trim().replace(/\/$/, '');
 
 function parseArgs(argv) {
   const args = { activeOnly: false, json: false, limit: null };
@@ -73,37 +83,34 @@ function currentBlock(markdown) {
 function loadMeta(agentName, apiAgent = null) {
   const metaPath = path.join(DATA_AGENTS_DIR, agentName, 'meta.json');
   const workspaceFromApi = normalizeWorkspacePath(apiAgent?.workspacePath);
-  if (!existsSync(metaPath)) return { metaPath, workspacePath: workspaceFromApi };
-  try {
-    const meta = JSON.parse(readFileSync(metaPath, 'utf-8'));
-    const workspacePath = (typeof meta.path === 'string' && meta.path.trim())
-      ? normalizeWorkspacePath(meta.path.trim())
-      : workspaceFromApi;
-    return { metaPath, workspacePath };
-  } catch {
-    return { metaPath, workspacePath: workspaceFromApi };
-  }
-}
-
-function resolveDocs(agentName, workspacePath) {
-  const candidates = [];
-  if (workspacePath) candidates.push(path.join(workspacePath, 'docs', agentName));
-  candidates.push(path.join(ROOT, 'docs', agentName));
-
-  for (const root of candidates) {
-    const agentsPath = path.join(root, 'agents.md');
-    const planPath = path.join(root, 'plan.md');
-    if (existsSync(agentsPath) || existsSync(planPath)) {
-      return { docsRoot: root, agentsPath, planPath };
+  let meta = null;
+  if (existsSync(metaPath)) {
+    try {
+      meta = JSON.parse(readFileSync(metaPath, 'utf-8'));
+    } catch {
+      meta = null;
     }
   }
-
-  const fallback = candidates[0] || path.join(ROOT, 'docs', agentName);
-  return {
-    docsRoot: fallback,
-    agentsPath: path.join(fallback, 'agents.md'),
-    planPath: path.join(fallback, 'plan.md'),
-  };
+  const v1Manifest = resolveV1ManifestForAgent(agentName, meta, process.env);
+  if (!existsSync(metaPath)) {
+    return {
+      metaPath,
+      workspacePath: (v1Manifest?.workdir && normalizeWorkspacePath(v1Manifest.workdir)) || workspaceFromApi,
+      v1Manifest,
+    };
+  }
+  try {
+    const workspacePath = (typeof meta?.path === 'string' && meta.path.trim())
+      ? normalizeWorkspacePath(meta.path.trim())
+      : ((v1Manifest?.workdir && normalizeWorkspacePath(v1Manifest.workdir)) || workspaceFromApi);
+    return { metaPath, workspacePath, v1Manifest };
+  } catch {
+    return {
+      metaPath,
+      workspacePath: (v1Manifest?.workdir && normalizeWorkspacePath(v1Manifest.workdir)) || workspaceFromApi,
+      v1Manifest,
+    };
+  }
 }
 
 async function fetchAgentsSnapshot() {
@@ -126,8 +133,8 @@ function collectAllAgentNames() {
 }
 
 function auditOne(agentName, apiAgent = null) {
-  const { workspacePath, metaPath } = loadMeta(agentName, apiAgent);
-  const docs = resolveDocs(agentName, workspacePath);
+  const { workspacePath, metaPath, v1Manifest } = loadMeta(agentName, apiAgent);
+  const docs = resolveAgentDocsPaths(agentName, workspacePath, { cwd: ROOT, v1Manifest });
   const agentsMd = readText(docs.agentsPath);
   const planMd = readText(docs.planPath);
 
@@ -145,6 +152,7 @@ function auditOne(agentName, apiAgent = null) {
     agent: agentName,
     workspacePath,
     metaPath,
+    v1ManifestPath: v1Manifest?.agentJsonPath || null,
     docsRoot: docs.docsRoot,
     agentsPath: docs.agentsPath,
     planPath: docs.planPath,

@@ -1,4 +1,14 @@
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const SUPERVISOR_DIR = path.dirname(__filename);
+const REPO_ROOT = path.resolve(SUPERVISOR_DIR, '..');
+
+function resolveRuntimeRoot(env) {
+  const raw = String(env?.AGENT_CHAT_RUNTIME_DIR || '').trim();
+  return raw ? path.resolve(raw) : REPO_ROOT;
+}
 
 function parseMs(value, fallback) {
   const n = Number.parseInt(value, 10);
@@ -70,6 +80,7 @@ function defaultModel(provider) {
 }
 
 export function loadSupervisorConfig(env = process.env) {
+  const runtimeRoot = resolveRuntimeRoot(env);
   const providerRaw = String(env.SUPERVISOR_LLM_PROVIDER || 'deepseek').trim().toLowerCase();
   const provider = ['deepseek', 'qwen', 'openai', 'openai-compatible'].includes(providerRaw)
     ? providerRaw
@@ -87,6 +98,8 @@ export function loadSupervisorConfig(env = process.env) {
   const enabled = enabledBySwitch && !!apiKey;
 
   return {
+    repoRoot: REPO_ROOT,
+    runtimeRoot,
     enabled,
     disabledReason: enabledBySwitch ? (!apiKey ? `missing API key env ${keyEnv}` : null) : 'SUPERVISOR_ENABLED=false',
     intervalMs: parseMs(env.SUPERVISOR_INTERVAL_MS || '30000', 30000),
@@ -103,11 +116,11 @@ export function loadSupervisorConfig(env = process.env) {
       .filter(Boolean),
     agentAllowlist: parseAgentAllowlist(env.SUPERVISOR_AGENT_ALLOWLIST),
     docsRootOverride: String(env.SUPERVISOR_DOCS_ROOT || '').trim() || null,
-    metaRoot: path.resolve(env.SUPERVISOR_META_ROOT || 'data/agents'),
-    serverSshPath: path.resolve(env.SUPERVISOR_SERVER_SSH_PATH || 'data/server-ssh.json'),
-    promptPath: path.resolve(env.SUPERVISOR_PROMPT_PATH || 'supervisor/prompts/focus-check.txt'),
-    logFile: path.resolve(env.SUPERVISOR_LOG_FILE || 'logs/supervisor.jsonl'),
-    stateFile: path.resolve(env.SUPERVISOR_STATE_FILE || 'data/supervisor_state.json'),
+    metaRoot: path.resolve(env.SUPERVISOR_META_ROOT || path.join(runtimeRoot, 'data', 'agents')),
+    serverSshPath: path.resolve(env.SUPERVISOR_SERVER_SSH_PATH || path.join(runtimeRoot, 'data', 'server-ssh.json')),
+    promptPath: path.resolve(env.SUPERVISOR_PROMPT_PATH || path.join(REPO_ROOT, 'supervisor', 'prompts', 'focus-check.txt')),
+    logFile: path.resolve(env.SUPERVISOR_LOG_FILE || path.join(runtimeRoot, 'logs', 'supervisor.jsonl')),
+    stateFile: path.resolve(env.SUPERVISOR_STATE_FILE || path.join(runtimeRoot, 'data', 'supervisor_state.json')),
     eventHistoryLimit: parseIntStrict(env.SUPERVISOR_EVENT_HISTORY_LIMIT || '5000', 5000, 100),
     llm: {
       provider,
