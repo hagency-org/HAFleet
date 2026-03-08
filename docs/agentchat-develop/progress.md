@@ -1689,3 +1689,21 @@ Recorded worker acceptance of the dev-only closure batch. The accepted baseline 
 
 ## [2026-03-09 01:56] DONE — Worker acceptance confirmed the untrack semantics boundary
 Recorded the worker's independent-verification note that `deleteFiles:false` is strictly an untrack operation: the local path remains under `workdir/projects`, so same-name re-import will continue to fail until that leftover directory is removed or a different project name is used. This is accepted current behavior and remains part of the truthful managed-project semantics.
+
+## [2026-03-09 03:09] DONE — Normalize Letta model aliases to canonical handles before persistence
+Fixed the upstream Letta model alias write bug in `/home/shisui/laplace/claude-subconscious/scripts/agent_config.ts` by normalizing requested aliases through the available-model metadata before `buildLlmConfig()` and `updateAgentModel()` persist `llm_config`. Root cause: `findModel()` could accept an alias such as `GLM-5`, but the env override path still compared and wrote the raw alias string back into Letta agent config, which could downgrade `llm_config.handle/model` from canonical `zai/glm-5` to invalid raw `GLM-5` and reintroduce the `model-unknown` SessionStart notify blocker.
+
+Changed:
+- added canonical `normalizeModelHandle()` helper in `claude-subconscious/scripts/agent_config.ts`
+- env override path now compares against the canonical handle, not the raw env string
+- `buildLlmConfig()` and `updateAgentModel()` now persist canonical handles even when callers pass aliases
+- extended `claude-subconscious/scripts/agent_config.test.ts` with the `GLM-5` -> `zai/glm-5` case
+
+Verification:
+- upstream `vitest` runner is not installed in the local `claude-subconscious` checkout (`npm test -- scripts/agent_config.test.ts` failed with `vitest: not found`), so runtime verification used direct imports plus the real Letta/Yato path instead
+- direct import proof with the patched helper returned `buildLlmConfig('GLM-5', models, before.llm_config).handle = "zai/glm-5"`
+- real live proof against the bound Yato Letta agent using `startUpstreamClaudeSubconsciousSession(... lettaModel: "GLM-5", sendSessionStartMessage: true)`:
+  - before handle/model: `zai/glm-5` / `glm-5`
+  - SessionStart result: `ok:true`, `blocked:false`, `messageSent:true`, conversation `conv-a27a81c8-7b1f-4dc4-ba35-4e867b84add4`
+  - after handle/model: still `zai/glm-5` / `glm-5`
+- This proves the alias no longer downgrades the bound Letta agent back to raw `GLM-5` during the notify path.
