@@ -1,7 +1,8 @@
 ## Current
-Hold for `agentchat-worker` review on the Letta model alias normalization fix.
+Hold for the next scoped worker batch.
 Acceptance criteria:
-- Worker review accepts the canonical-handle fix and the SessionStart alias proof.
+- No further code changes until the next explicit worker scope.
+- Current accepted baseline stays documented and reproducible.
 
 ## Queue
 1. If worker wants deeper project lifecycle closure, add the next truthful managed-project operation beyond import/remove (for example rename or source relink) without over-claiming full project management.

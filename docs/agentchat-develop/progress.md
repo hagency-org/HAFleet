@@ -1707,3 +1707,27 @@ Verification:
   - SessionStart result: `ok:true`, `blocked:false`, `messageSent:true`, conversation `conv-a27a81c8-7b1f-4dc4-ba35-4e867b84add4`
   - after handle/model: still `zai/glm-5` / `glm-5`
 - This proves the alias no longer downgrades the bound Letta agent back to raw `GLM-5` during the notify path.
+
+## [2026-03-09 03:22] DONE — Cut session-start notify over to the bound Letta id so success returns cleanly
+Fixed the remaining successful-send HTTP return-path bug for `POST /api/subconscious/upstream/session-start/:name` in `/home/shisui/laplace/agent-chat/lib/upstream-claude-subconscious.js` and the backend route response assembly in `/home/shisui/laplace/agent-chat/backend-v2.js`. Root cause: even after the model-alias blocker was fixed, the SessionStart notify hot path still reran `agent_config.getAgentId()` and a fresh upstream `fetchAgent()` on every request. That repeated model reconciliation and agent refresh added enough variable latency that the HTTP caller could time out at 20-25s even though the upstream message eventually succeeded and persisted state later.
+
+Changed:
+- `startUpstreamClaudeSubconsciousSession()` now reuses the already-bound `lettaAgentId` when provided by backend state/env instead of rerunning upstream bootstrap/model selection on the notify path
+- removed the redundant post-conversation `fetchAgent()` from the SessionStart helper hot path
+- the backend SessionStart route now returns the already-computed session/bootstrap snapshot directly instead of rereading full subconscious contract state before replying
+- kept scope tight: no UI work, no broader hook cutover, no change to the separate upstream bootstrap route
+
+Verification:
+- `node --check lib/upstream-claude-subconscious.js`
+- `node --check backend-v2.js`
+- restarted the isolated dev backend on `127.0.0.1:18190` with repo `.env` loaded
+- live repeated HTTP proofs on `POST /api/subconscious/upstream/session-start/Yato` with `sendMessage:true`:
+  - `post-fix-proof-1-1772997639` -> `200` in `13.104782s`
+  - `post-fix-proof-2-1772997652` -> `200` in `10.619997s`
+  - `post-fix-proof-3-1772997662` -> `200` in `10.953601s`
+- final shape proof `final-shape-1772997686` -> `200` in `15.345019s` with `ok:true`, `blocked:false`, `session.messageSent:true`, and `upstream.session.notify.status:"sent"`
+- sequential detail proof after the final request:
+  - `GET /api/subconscious/detail/Yato` returned `stage:"upstream-session-lifecycle"`, `upstream.session.status:"started"`, `sessionId:"final-shape-1772997686"`, `conversationId:"conv-d6f6f6db-8db5-4c6a-ae8a-66348b19a626"`, `notify.status:"sent"`
+
+## [2026-03-09 03:24] DONE — Worker accepted the Letta model alias normalization fix
+Recorded the worker acceptance for the canonical-handle normalization change in upstream `agent_config.ts`. This acceptance does not change the current hold state for the later SessionStart notify return-path batch; it only closes the earlier alias-normalization review item.

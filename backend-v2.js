@@ -4872,14 +4872,37 @@ app.post('/api/subconscious/upstream/session-start/:name', async (req, res) => {
     };
     safeWriteJsonFile(state.runtimeMetaPath, nextRuntimeMeta);
     safeWriteJsonFile(state.lettaPath, nextLetta);
-    const refreshed = resolveSubconsciousState(agent);
+    const upstreamResponse = {
+      bootstrap: {
+        supported: result.paths?.available === true,
+        status: 'configured',
+        blockedReason: null,
+        checkedAt: now,
+        apiKeyConfigured: Boolean(normalizeOptionalText(process.env.LETTA_API_KEY, 4096)),
+        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
+        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
+        importedAt: normalizeOptionalText(existingUpstream.importedAt, 128) || null,
+        model: normalizeOptionalText(process.env.LETTA_MODEL, 256)
+          || normalizeOptionalText(existingUpstream.model, 256)
+          || normalizeOptionalText(existingRuntimeUpstream.model, 256)
+          || null,
+        agentName: normalizeOptionalText(result.agent?.name, 256)
+          || normalizeOptionalText(existingUpstream.agentName, 256)
+          || null,
+        blockCount: Array.isArray(result.agent?.blocks)
+          ? result.agent.blocks.length
+          : normalizeNonNegativeInt(existingUpstream.blockCount, 0),
+        workdir: state.agent.workdir || null,
+      },
+      session: sessionRecord,
+    };
     return res.json({
       ok: sessionEstablished,
       blocked: !sessionEstablished && result.blocked === true,
       blocker: sessionEstablished ? null : (result.blocker || null),
       logs: Array.isArray(result.logs) ? result.logs.slice(-20) : [],
-      session: refreshed?.contract?.upstream?.session || sessionRecord,
-      upstream: refreshed?.contract?.upstream || buildSubconsciousUpstreamContract(state.stateDir, state.agent.workdir || null, nextRuntimeMeta, nextLetta, state.conversationState),
+      session: sessionRecord,
+      upstream: upstreamResponse,
     });
   } catch (err) {
     return res.status(502).json({ ok: false, blocked: true, blocker: err?.message || String(err) });

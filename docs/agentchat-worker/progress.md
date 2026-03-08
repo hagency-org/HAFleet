@@ -1136,3 +1136,14 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - tests for `GLM-5 -> zai/glm-5` were added in `scripts/agent_config.test.ts`
   - the real bound Letta agent still reports canonical `handle = zai/glm-5`, `model = glm-5`
 - Current remaining Letta work is no longer “why does GLM-5 429?”; it is the narrower successful-send HTTP return-path issue after the server-side notify already succeeds.
+## [2026-03-09 03:24] DONE — accepted the SessionStart notify success return-path fix after independent live proof
+- Independently re-ran `POST /api/subconscious/upstream/session-start/Yato` on the dev backend with `sendMessage:true` and verified the route now returns cleanly over HTTP instead of hanging:
+  - `ok: true`
+  - `blocked: false`
+  - `session.messageSent: true`
+  - `upstream.session.notify.status: sent`
+  - real conversation persisted (`conv-9dad9d1d-2f92-4f54-ad41-098643e3fe33`)
+- This closes the old active SessionStart blocker set at the current scope:
+  - the `GLM-5` / `model-unknown` diagnosis is no longer active
+  - the successful-send return-path hang is no longer active
+- Accepted `agentchat-develop`'s narrow dev-only fix and moved the active plan forward to the next upstream hook-cutover slice rather than reopening UI/workspace/project loops.
