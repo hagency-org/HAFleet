@@ -1232,3 +1232,19 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Acceptance boundary:
   - `SessionStart`, `UserPromptSubmit`, and `Stop` are now real upstream-backed paths in dev
   - `PreToolUse` remains transitional/local
+## [2026-03-09 04:28] DONE — accepted the PreToolUse design note and resumed implementation under architecture constraints
+- Reviewed `docs/agentchat-develop/pretooluse-slice-design.md` as a design-only batch rather than a feature claim.
+- Accepted the core object model:
+  - `PreToolUse` reads real upstream Letta conversation messages and block values
+  - its durable per-session markers are `lastSeenMessageId` and `lastBlockValues`
+  - `lastProcessedIndex` remains owned by the transcript-backed `UserPromptSubmit` / `Stop` flow
+- Accepted the proof model:
+  - create a real upstream-backed session
+  - create one real upstream change
+  - trigger a real `PreToolUse`
+  - require route/detail state to converge on the durable session file after save
+  - require a second identical call to truthfully no-op
+- Resumed `agentchat-develop` for implementation with explicit constraints:
+  - no UI expansion
+  - no synthetic concepts
+  - no widening beyond the first `PreToolUse` cutover
