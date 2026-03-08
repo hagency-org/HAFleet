@@ -1015,6 +1015,22 @@ app.post('/api/subconscious/upstream/session-start/:name', async (req, res) => {
   }
 });
 
+app.post('/api/subconscious/upstream/user-prompt/:name', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/subconscious/upstream/user-prompt/${encodeURIComponent(name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body || {}),
+    });
+    const payload = await r.json().catch(() => ({ ok: false, error: `backend status ${r.status}` }));
+    return res.status(r.status).json(payload);
+  } catch (e) {
+    return res.status(502).json({ ok: false, error: e.message || 'upstream user-prompt proxy failed' });
+  }
+});
+
 app.get('/api/agents/:name/unread-messages', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
@@ -3025,6 +3041,9 @@ th{
     const upstreamSession = (upstreamDetail.session && typeof upstreamDetail.session === 'object')
       ? upstreamDetail.session
       : {};
+    const upstreamUserPrompt = (upstreamDetail.userPrompt && typeof upstreamDetail.userPrompt === 'object')
+      ? upstreamDetail.userPrompt
+      : {};
     const blockedLikely = latestStatus === 'STUCK' || /block|approval|intervention|waiting/i.test(latestReason);
     const needsAttention = NEGATIVE_STATUSES.has(latestStatus);
     let localRuntimeState = 'off';
@@ -3095,6 +3114,7 @@ th{
       localRuntimeLabel,
       upstreamBootstrap,
       upstreamSession,
+      upstreamUserPrompt,
       runtimeInvocationConfigured: runtimeContract.invocationConfigured === true,
       runtimeDesiredEnabled: runtimeContract.desiredEnabled === true,
       runtimeDisabledReason: String(runtimeContract.disabledReason || '').trim(),
@@ -3301,6 +3321,16 @@ th{
         if (ev?.runtimeLatencyMs) rtLabel += ' ' + esc(String(ev.runtimeLatencyMs)) + 'ms';
         chips.push('<span class="ev-chip chip-runtime">' + rtLabel + '</span>');
       }
+      if (ev?.upstreamUserPromptMessageSent === true) {
+        chips.push('<span class="ev-chip">Upstream prompt sent</span>');
+      } else if (ev?.upstreamUserPromptStatus === 'blocked') {
+        chips.push('<span class="ev-chip chip-error">Upstream prompt blocked</span>');
+      }
+      if (ev?.upstreamStopMessageSent === true) {
+        chips.push('<span class="ev-chip">Upstream stop sent</span>');
+      } else if (ev?.upstreamStopStatus === 'blocked') {
+        chips.push('<span class="ev-chip chip-error">Upstream stop blocked</span>');
+      }
       if (ev?.runtimeError) chips.push('<span class="ev-chip chip-error">Error</span>');
       if (ev?.resolutionSource && ev.resolutionSource !== 'none') chips.push('<span class="ev-chip">' + esc(ev.resolutionSource) + '</span>');
 
@@ -3506,6 +3536,7 @@ th{
     const upstream = (model.upstreamDetail && typeof model.upstreamDetail === 'object') ? model.upstreamDetail : {};
     const upstreamBootstrap = (model.upstreamBootstrap && typeof model.upstreamBootstrap === 'object') ? model.upstreamBootstrap : {};
     const upstreamSession = (model.upstreamSession && typeof model.upstreamSession === 'object') ? model.upstreamSession : {};
+    const upstreamUserPrompt = (model.upstreamUserPrompt && typeof model.upstreamUserPrompt === 'object') ? model.upstreamUserPrompt : {};
     const upstreamNotify = (upstreamSession.notify && typeof upstreamSession.notify === 'object') ? upstreamSession.notify : {};
     const directReuse = Array.isArray(upstream.directReuse) ? upstream.directReuse : [];
 
@@ -3580,6 +3611,9 @@ th{
     if (upstreamSession.conversationId) {
       bits.push('<div class="summary-note"><strong>Conversation:</strong> ' + esc(upstreamSession.conversationId) + (upstreamSession.conversationStatus ? (' · ' + esc(upstreamSession.conversationStatus)) : '') + '</div>');
     }
+    bits.push('<div class="summary-note"><strong>User Prompt:</strong> ' + esc(upstreamUserPrompt.status || 'not-run')
+      + (upstreamUserPrompt.sessionId ? (' · ' + esc(upstreamUserPrompt.sessionId)) : '')
+      + (upstreamUserPrompt.blockedReason ? (' · ' + esc(upstreamUserPrompt.blockedReason)) : '') + '</div>');
     bits.push('<div class="summary-note"><strong>Send:</strong> ' + esc(upstreamNotify.status || 'not-attempted')
       + (upstreamNotify.blockedReason ? (' · ' + esc(upstreamNotify.blockedReason)) : '') + '</div>');
     bits.push('</div>');
@@ -3760,6 +3794,25 @@ th{
       ['Required decision', upstreamNotify.requiredDecision || '-'],
       ['Checked at', upstreamSession.checkedAt || '-'],
       ['CWD', upstreamSession.cwd || '-'],
+    ]) + '</div>');
+
+    bits.push('<div class="debug-sub-section"><div class="debug-sub-label">Upstream User Prompt</div>' + kvGrid([
+      ['Status', upstreamUserPrompt.status || '-'],
+      ['Blocked reason', upstreamUserPrompt.blockedReason || '-'],
+      ['Attempted', upstreamUserPrompt.attempted ? 'yes' : 'no'],
+      ['Message sent', upstreamUserPrompt.messageSent ? 'yes' : 'no'],
+      ['Session id', upstreamUserPrompt.sessionId || '-'],
+      ['Conversation id', upstreamUserPrompt.conversationId || '-'],
+      ['Transcript path', upstreamUserPrompt.transcriptPath || '-'],
+      ['Transcript exists', upstreamUserPrompt.transcriptExists === true ? 'yes' : 'no'],
+      ['Transcript lines', upstreamUserPrompt.transcriptLineCount ?? '-'],
+      ['Sync state file', upstreamUserPrompt.syncStateFile || '-'],
+      ['Last processed before', upstreamUserPrompt.lastProcessedIndexBefore ?? '-'],
+      ['Last processed after', upstreamUserPrompt.lastProcessedIndexAfter ?? '-'],
+      ['Script path', upstreamUserPrompt.scriptPath || '-'],
+      ['Attempted at', upstreamUserPrompt.attemptedAt || '-'],
+      ['Message sent at', upstreamUserPrompt.messageSentAt || '-'],
+      ['Checked at', upstreamUserPrompt.checkedAt || '-'],
     ]) + '</div>');
 
     // State & Invocation

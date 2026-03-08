@@ -207,6 +207,14 @@ function resolveStopUrl() {
   return eventUrl.replace(/\/api\/subconscious\/events\/?$/i, '/api/subconscious/upstream/stop');
 }
 
+function resolveUserPromptUrl() {
+  const explicit = normalizeText(process.env.AGENTCHAT_SUBCONSCIOUS_USER_PROMPT_URL, 2048);
+  if (explicit) return explicit;
+  const eventUrl = normalizeText(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_URL, 2048);
+  if (!eventUrl) return null;
+  return eventUrl.replace(/\/api\/subconscious\/events\/?$/i, '/api/subconscious/upstream/user-prompt');
+}
+
 async function invokeRuntimeGuidance(agentName, input) {
   const url = resolveInvokeUrl();
   if (!url) return { invoked: false, guidance: null, source: 'none' };
@@ -316,6 +324,77 @@ async function invokeUpstreamStop(agentName, input) {
   }
 }
 
+async function invokeUpstreamUserPrompt(agentName, input) {
+  if (HOOK_NAME !== 'UserPromptSubmit') {
+    return { attempted: false, status: 'not-run', messageSent: false, blockedReason: null };
+  }
+  const url = resolveUserPromptUrl();
+  const sessionId = normalizeText(input?.session_id, 200);
+  const prompt = normalizeText(input?.prompt, 8000);
+  const transcriptPath = normalizeText(input?.transcript_path, 4096);
+  const cwd = normalizeText(input?.cwd, 4096);
+  if (!url || !sessionId || !prompt) {
+    return {
+      attempted: false,
+      status: 'blocked',
+      messageSent: false,
+      blockedReason: !url
+        ? 'missing upstream user prompt url'
+        : (!sessionId ? 'missing session_id' : 'missing prompt'),
+    };
+  }
+
+  const headers = { 'Content-Type': 'application/json' };
+  const token = normalizeText(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN, 512);
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  try {
+    const resp = await fetch(`${url.replace(/\/$/, '')}/${encodeURIComponent(agentName)}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        sessionId,
+        prompt,
+        transcriptPath,
+        cwd,
+      }),
+    });
+    const payload = await resp.json().catch(() => null);
+    if (!resp.ok || !payload) {
+      return {
+        attempted: true,
+        status: 'blocked',
+        messageSent: false,
+        blockedReason: String(payload?.error || payload?.blocker || `http-${resp.status}`).slice(0, 400),
+      };
+    }
+    return {
+      attempted: payload?.userPrompt?.attempted === true,
+      status: normalizeText(payload?.userPrompt?.status, 64) || (payload?.blocked === true ? 'blocked' : 'not-run'),
+      messageSent: payload?.userPrompt?.messageSent === true,
+      blockedReason: normalizeText(payload?.userPrompt?.blockedReason, 400) || normalizeText(payload?.blocker, 400),
+      conversationId: normalizeText(payload?.userPrompt?.conversationId, 256),
+      transcriptPath: normalizeText(payload?.userPrompt?.transcriptPath, 4096),
+      syncStateFile: normalizeText(payload?.userPrompt?.syncStateFile, 4096),
+      scriptPath: normalizeText(payload?.userPrompt?.scriptPath, 4096),
+      transcriptLineCount: Number(payload?.userPrompt?.transcriptLineCount) || 0,
+      lastProcessedIndexBefore: Number.isFinite(Number(payload?.userPrompt?.lastProcessedIndexBefore))
+        ? Number(payload.userPrompt.lastProcessedIndexBefore)
+        : null,
+      lastProcessedIndexAfter: Number.isFinite(Number(payload?.userPrompt?.lastProcessedIndexAfter))
+        ? Number(payload.userPrompt.lastProcessedIndexAfter)
+        : null,
+    };
+  } catch (err) {
+    return {
+      attempted: true,
+      status: 'blocked',
+      messageSent: false,
+      blockedReason: String(err?.message || err).slice(0, 400),
+    };
+  }
+}
+
 function emitAdditionalContext(hookName, agentName, guidance) {
   const clean = normalizeText(guidance, 2000);
   if (!clean) return;
@@ -335,6 +414,7 @@ async function main() {
   const input = await readHookInput();
   const agentName = resolveAgentName(input);
   const state = resolveLettaState(agentName);
+  const upstreamUserPromptResult = await invokeUpstreamUserPrompt(agentName, input);
   const runtimeResult = await invokeRuntimeGuidance(agentName, input);
   const upstreamStopResult = await invokeUpstreamStop(agentName, input);
   const effectiveGuidance = runtimeResult.guidance || state.guidance || null;
@@ -368,6 +448,17 @@ async function main() {
     runtimeModel: runtimeResult.model || null,
     runtimeLatencyMs: runtimeResult.latencyMs,
     runtimeError: runtimeResult.error || runtimeResult.disabledReason || null,
+    upstreamUserPromptAttempted: upstreamUserPromptResult.attempted === true,
+    upstreamUserPromptStatus: upstreamUserPromptResult.status || null,
+    upstreamUserPromptBlockedReason: upstreamUserPromptResult.blockedReason || null,
+    upstreamUserPromptMessageSent: upstreamUserPromptResult.messageSent === true,
+    upstreamUserPromptConversationId: upstreamUserPromptResult.conversationId || null,
+    upstreamUserPromptTranscriptPath: upstreamUserPromptResult.transcriptPath || null,
+    upstreamUserPromptSyncStateFile: upstreamUserPromptResult.syncStateFile || null,
+    upstreamUserPromptScriptPath: upstreamUserPromptResult.scriptPath || null,
+    upstreamUserPromptTranscriptLineCount: upstreamUserPromptResult.transcriptLineCount || null,
+    upstreamUserPromptLastProcessedIndexBefore: upstreamUserPromptResult.lastProcessedIndexBefore,
+    upstreamUserPromptLastProcessedIndexAfter: upstreamUserPromptResult.lastProcessedIndexAfter,
     upstreamStopAttempted: upstreamStopResult.attempted === true,
     upstreamStopStatus: upstreamStopResult.status || null,
     upstreamStopBlockedReason: upstreamStopResult.blockedReason || null,

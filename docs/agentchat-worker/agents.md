@@ -194,6 +194,10 @@
   - `Stop` is now a real upstream-backed path for the dev Yato flow rather than local-only logging;
   - `/api/subconscious/detail/:name` exposes durable `upstream.stop` fields including `attempted`, `status`, `messageSent`, `conversationId`, `transcriptPath`, `syncStateFile`, transcript counts, and `lastProcessedIndex` movement;
   - replaying the same transcript for the same session truthfully yields no new upstream messages once the upstream durable sync-state file has already advanced.
+- Current upstream UserPromptSubmit truth in dev:
+  - `UserPromptSubmit` is now a real upstream-backed path for the dev Yato flow rather than a local-only event surface;
+  - accepted truth model requires route response, `session-<session>.json`, `conversations.json`, and `/api/subconscious/detail/:name` to agree on the same `conversationId` and `lastProcessedIndex`;
+  - if the helper cannot make those durable sources converge after send, the route must block instead of claiming a clean success.
 - Architecture rule:
   - do not create display-first concepts, transition-only panels, or local substitutes that pretend to be mature system objects;
   - new fields, UI modules, and workflow concepts must map to a first-class object with a clear source of truth, or they should not ship.

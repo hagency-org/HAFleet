@@ -1911,3 +1911,96 @@ Verification:
 
 ## [2026-03-09 04:00] DONE — Worker accepted the Yato legacy meta mirror sync fix and advanced scope to UserPromptSubmit
 Recorded the worker acceptance for the direct provision/reprovision legacy meta mirror repair. The stale Yato compatibility mirror issue is closed. The next scoped target is now the minimal upstream hook cutover for UserPromptSubmit, but no implementation starts from this acceptance notice alone.
+
+## [2026-03-09 04:16] DONE — Cut over the minimal upstream Letta UserPromptSubmit path in dev
+Mapped the slice to first-class objects before code:
+- Subconscious Runtime
+  - truth sources: state/subconscious/runtime.json and the hook event stream
+  - kept separate from upstream Letta; local runtime still reports its own invocation/error state
+- Upstream Letta Agent
+  - truth source: state/letta.json agent binding plus remote Letta agent id reuse
+- Upstream Letta Conversation
+  - truth sources: upstream-home/.letta/claude/conversations.json, session-<session>.json, and remote conversation message sends
+- Event / observability surfaces touched by UserPromptSubmit
+  - /api/subconscious/events
+  - /api/subconscious/detail/:name
+  - Agent Detail subconscious UI/debug sections
+
+Changed:
+- lib/upstream-claude-subconscious.js
+  - added the real upstream UserPromptSubmit helper using the upstream sync_letta_memory.ts message shape
+  - on successful send, advances session-<session>.json lastProcessedIndex so Stop does not resend the same prompt line
+- backend-v2.js
+  - added POST /api/subconscious/upstream/user-prompt/:name
+  - persisted upstream.userPrompt state into runtime.json/letta.json-backed contract data
+  - exposed truthful upstream.userPrompt detail and event fields without conflating it with the local runtime
+- subconscious/claude-agentchat/scripts/hook-entry.mjs
+  - UserPromptSubmit now calls the upstream user-prompt route and records the resulting conversation/send state in the event payload
+- server.js
+  - added web proxy for the upstream user-prompt route
+  - Agent Detail now exposes the upstream UserPrompt status in the Upstream Letta section and Debug Internals
+- scripts/configure-v1-subconscious.js
+  - recorded sync_letta_memory.ts in direct upstream reuse metadata
+
+Verification on dev Yato:
+- syntax checks passed for:
+  - lib/upstream-claude-subconscious.js
+  - backend-v2.js
+  - subconscious/claude-agentchat/scripts/hook-entry.mjs
+  - scripts/configure-v1-subconscious.js
+  - server.js
+- re-synced Yato's copied subconscious hook runtime with configure-v1-subconscious.js
+- restarted dev backend/web on 18190 / 18184
+- real proof session:
+  - sessionId = userprompt-cutover-proof-1773000868
+  - SessionStart established conversation conv-56838f83-0eed-41ac-8d93-2189b5cc6f45
+  - real copied hook runtime ran UserPromptSubmit against that session/transcript
+- detail proof:
+  - GET http://127.0.0.1:18190/api/subconscious/detail/Yato -> stage = upstream-user-prompt-lifecycle
+  - upstream.userPrompt.status = sent
+  - upstream.userPrompt.conversationId = conv-56838f83-0eed-41ac-8d93-2189b5cc6f45
+  - upstream.userPrompt.transcriptLineCount = 1
+  - upstream.userPrompt.lastProcessedIndexBefore = -1
+  - upstream.userPrompt.lastProcessedIndexAfter = 0
+  - upstream.userPrompt.scriptPath = /home/shisui/laplace/claude-subconscious/scripts/sync_letta_memory.ts
+- web proof:
+  - GET http://127.0.0.1:18184/api/subconscious/detail/Yato returned the same upstream.userPrompt state
+  - GET http://127.0.0.1:18184/agents/Yato contains User Prompt / Upstream User Prompt / Upstream prompt sent markers
+- durable conversation proof:
+  - state/subconscious/upstream-home/.letta/claude/session-userprompt-cutover-proof-1773000868.json now has lastProcessedIndex = 0 and the recorded conversation id
+  - state/subconscious/upstream-home/.letta/claude/conversations.json maps that session id to conv-56838f83-0eed-41ac-8d93-2189b5cc6f45
+- event proof:
+  - latest /api/subconscious/events/Yato event is hook = UserPromptSubmit with upstreamUserPromptStatus = sent and upstreamUserPromptMessageSent = true
+  - local runtime remained separate and truthfully reported runtimeError = missing API key env SUBCONSCIOUS_LLM_KEY during the same hook run
+
+Non-regression note:
+- the upstream session sync-state file format from conversation_utils.ts does not persist startedAt; the observed session file shape is pre-existing upstream behavior, not a regression from this UserPromptSubmit slice
+
+## [2026-03-09 04:22] DONE — Repaired UserPromptSubmit truth-source convergence
+Root cause:
+- the upstream UserPromptSubmit helper was returning conversationId and lastProcessedIndexAfter from helper-local runtime state instead of deriving the final route payload from the durable upstream truth sources after save
+- that meant a route response could over-report success even if `session-<session>.json` and `conversations.json` had not converged to the same state
+
+Changed:
+- lib/upstream-claude-subconscious.js
+  - UserPromptSubmit now re-reads the durable session file and conversation map after save
+  - route-facing result fields now come from those durable sources
+  - if the durable conversation id or lastProcessedIndex still diverges after send, the helper now returns a blocked convergence error instead of claiming a clean success
+
+Verification:
+- `node --check lib/upstream-claude-subconscious.js`
+- restarted dev backend on `18190`
+- live convergence proof session: `userprompt-convergence-proof-1773001312`
+- `POST /api/subconscious/upstream/session-start/Yato` returned conversationId `conv-e749adc2-e502-4743-938b-a85200633ee5`
+- `POST /api/subconscious/upstream/user-prompt/Yato` returned the same conversation id and `lastProcessedIndexAfter = 1`
+- durable state matched exactly:
+  - `session-userprompt-convergence-proof-1773001312.json conversationId = conv-e749adc2-e502-4743-938b-a85200633ee5`
+  - `session-userprompt-convergence-proof-1773001312.json lastProcessedIndex = 1`
+  - `conversations.json[userprompt-convergence-proof-1773001312].conversationId = conv-e749adc2-e502-4743-938b-a85200633ee5`
+- detail contract matched the same truth source:
+  - `GET /api/subconscious/detail/Yato` reported `upstream.session.conversationId = conv-e749adc2-e502-4743-938b-a85200633ee5`
+  - `GET /api/subconscious/detail/Yato` reported `upstream.userPrompt.conversationId = conv-e749adc2-e502-4743-938b-a85200633ee5`
+  - `GET /api/subconscious/detail/Yato` reported `upstream.userPrompt.lastProcessedIndexAfter = 1`
+
+## [2026-03-09 04:24] DONE — Worker accepted the UserPromptSubmit convergence repair
+Recorded the worker acceptance for the narrow truth-source repair. The accepted upstream-backed baseline is now explicit: SessionStart, UserPromptSubmit, and Stop are cut over in dev. No new implementation starts from this acceptance notice alone.

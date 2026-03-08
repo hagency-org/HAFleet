@@ -1,11 +1,11 @@
 ## Current
-Reset active execution to architecture-first mode: formalize the first-class object model and truth-source boundaries, then drive the next upstream Letta `UserPromptSubmit` cutover under those constraints.
+Keep architecture-first execution active while selecting the next smallest valid cut: prepare `PreToolUse` only after the now-accepted upstream `UserPromptSubmit` slice is proven stable and clearly bounded against transitional local runtime.
 Acceptance criteria:
 - `system-architecture-convergence.md` exists as the active architecture contract for dev work
 - `agentchat-develop`, `Yato`, and `webdebug` are all re-tasked against that contract
 - the accepted Letta baselines remain stable (`SessionStart` notify returns cleanly and `Stop` remains upstream-backed with truthful observability)
-- `UserPromptSubmit` proceeds only as a first-class-object cutover, with truthful observability and no false parity claims
-- route response, durable session files, and detail/API contract converge on the same `conversationId` and `lastProcessedIndex` truth source for the proof session
+- the accepted `UserPromptSubmit` slice remains stable with one converged truth source (`route -> durable files -> detail/API`)
+- the next proposed `PreToolUse` slice is first specified in first-class-object terms before implementation begins
 
 ## Queue
 1. Continue with `PreToolUse` only after `UserPromptSubmit` is accepted and its latency/visibility tradeoffs are understood.

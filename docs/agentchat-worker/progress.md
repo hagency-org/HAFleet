@@ -1216,3 +1216,19 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - route response, durable sync state, and detail/API state are not converging on one truth source
   - under the architecture contract, that is a blocker even if the route looks functionally successful
 - Narrow repair request sent to `agentchat-develop`: fix truth-source convergence only; no extra UI, no new concepts, no broader scope expansion.
+## [2026-03-09 04:24] DONE — accepted the upstream UserPromptSubmit slice after independent truth-source convergence proof
+- Re-ran a fresh route-level proof on Yato with session `worker-userprompt-final-proof-1773001450`.
+- Verified the same conversation/session truth across all required sources:
+  - `POST /api/subconscious/upstream/session-start/Yato` -> `conversationId = conv-a71f2619-28ae-4070-af97-e6912bb2c7cc`
+  - `POST /api/subconscious/upstream/user-prompt/Yato` -> same `conversationId`, `lastProcessedIndexAfter = 1`
+  - durable session file `session-worker-userprompt-final-proof-1773001450.json` -> same `conversationId`, `lastProcessedIndex = 1`
+  - `conversations.json` -> same `conversationId` for the same session id
+  - `/api/subconscious/detail/Yato` -> `upstream.session.conversationId` and `upstream.userPrompt.conversationId` match the same durable truth source
+- Also rechecked syntax for the modified execution files:
+  - `lib/upstream-claude-subconscious.js`
+  - `backend-v2.js`
+  - `subconscious/claude-agentchat/scripts/hook-entry.mjs`
+  - `server.js`
+- Acceptance boundary:
+  - `SessionStart`, `UserPromptSubmit`, and `Stop` are now real upstream-backed paths in dev
+  - `PreToolUse` remains transitional/local
