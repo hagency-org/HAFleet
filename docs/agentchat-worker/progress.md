@@ -1173,3 +1173,7 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `SessionStart` lifecycle and `Stop` transcript/send are now real upstream-backed paths in dev
   - `UserPromptSubmit` and `PreToolUse` remain transitional/local
 - With `Stop` accepted, the active execution focus returns to the still-open workspace/project discipline gap rather than immediately expanding to the next hook path.
+## [2026-03-09 03:54] PARTIAL — dispatched a critical, experience-based CLAUDE contract review to Yato
+- Sent Yato a dev-path task to revise `docs/workspace-claude-md-template.md` from lived v1-home experience rather than from abstract design alone.
+- The brief is intentionally critical: identify where the current template still fails to teach real behavior (`projects/`, `scratch/`, `inbox/`, `outputs/`, `data/`, `../state/`, and avoiding implicit work against the main repo root) and produce a short, high-density patch instead of prose commentary.
+- Existing reminder `#2051` already covers this review window, so no second reminder was added.
