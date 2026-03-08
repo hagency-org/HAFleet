@@ -1286,3 +1286,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - event-ingest trust boundary hardening first
   - default operational detail vs privileged debug split second
   - no new hook path and no UI expansion while correcting those boundaries
+## [2026-03-09 05:02] DONE — verified `agentchat-develop` doc sync against the accepted PreToolUse/review baseline
+- Verified `docs/agentchat-develop/plan.md` now points at the next narrow batch (`POST /api/subconscious/events` trust boundary first, then operational-vs-debug detail split).
+- Verified `docs/agentchat-develop/agents.md` now records the durable security root cause (`/api/subconscious/events` is still observational telemetry until the handler enforces token or strict local-only ingest) and demotes top-level `stage` / generic `guidance*` fields to derived compatibility summaries.
+- Verified `docs/agentchat-develop/progress.md` records the accepted upstream-backed baseline (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`) and the design-only event/security review state.
+- Non-blocking note: `agentchat-develop` docs are still dirty/uncommitted locally, and the review note appears twice in `progress.md`; this does not change the accepted next-batch boundary.
