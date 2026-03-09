@@ -349,6 +349,78 @@ function normalizeHumanMeta(value) {
   };
 }
 
+function normalizeIsoTimestamp(value) {
+  const raw = normalizeOptionalText(value, 128);
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
+}
+
+function normalizeTaskStatus(value) {
+  const raw = normalizeOptionalText(value, 32);
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  if (['active', 'waiting', 'blocked', 'done'].includes(lower)) return lower;
+  return null;
+}
+
+function normalizeAgentTask(value, fallbackOwner = null) {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object') return null;
+  const status = normalizeTaskStatus(value.status);
+  if (!status) return null;
+  const owner = normalizeAgentName(value.owner) || normalizeAgentName(fallbackOwner) || normalizeOptionalText(value.owner, 128);
+  const updatedAt = normalizeIsoTimestamp(value.updated_at);
+  const heartbeatAt = normalizeIsoTimestamp(value.heartbeat_at);
+  const waitingReason = normalizeOptionalText(value.waiting_reason, 2000);
+  const waitingUntil = normalizeIsoTimestamp(value.waiting_until);
+  const id = normalizeOptionalText(value.id, 256);
+  if (!id || !owner || !updatedAt || !heartbeatAt) return null;
+  if (status === 'waiting') {
+    if (!waitingReason || !waitingUntil) return null;
+  }
+  return {
+    id,
+    owner,
+    status,
+    updated_at: updatedAt,
+    heartbeat_at: heartbeatAt,
+    waiting_reason: status === 'waiting' ? waitingReason : null,
+    waiting_until: status === 'waiting' ? waitingUntil : null,
+  };
+}
+
+function normalizeRuntimeProfileRole(value) {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object') return null;
+  const framework = normalizeOptionalText(value.framework, 32);
+  const provider = normalizeOptionalText(value.provider, 64);
+  const model = normalizeOptionalText(value.model, 256);
+  const reasoning = normalizeOptionalText(value.reasoning, 64);
+  const extraArgs = normalizeOptionalText(value.extraArgs, 4000);
+  if (!framework && !provider && !model && !reasoning && !extraArgs) return null;
+  return {
+    framework: framework || null,
+    provider: provider || null,
+    model: model || null,
+    reasoning: reasoning || null,
+    ...(extraArgs ? { extraArgs } : {}),
+  };
+}
+
+function normalizeRuntimeProfile(value) {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object') return null;
+  const primary = normalizeRuntimeProfileRole(value.primary);
+  const supervisor = normalizeRuntimeProfileRole(value.supervisor);
+  if (!primary && !supervisor) return null;
+  return {
+    primary: primary || null,
+    supervisor: supervisor || null,
+  };
+}
+
 function normalizeLooseAgentName(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -911,6 +983,36 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
   const directReuse = mergeUpstreamDirectReuse(upstreamMeta.directReuse);
   const config = (upstreamState.config && typeof upstreamState.config === 'object') ? upstreamState.config : {};
   const conversations = (upstreamState.conversations && typeof upstreamState.conversations === 'object') ? upstreamState.conversations : {};
+  const readDurableUpstreamSession = (sessionId) => {
+    const normalizedSessionId = normalizeOptionalText(sessionId, 200);
+    const mappedConversation = normalizedSessionId ? conversations[normalizedSessionId] : null;
+    const mappedConversationId = typeof mappedConversation === 'string'
+      ? mappedConversation
+      : normalizeOptionalText(mappedConversation?.conversationId, 256);
+    const sessionStateFile = normalizeWorkspacePath(
+      normalizedSessionId && upstreamPaths.durableStateDir
+        ? path.join(upstreamPaths.durableStateDir, `session-${normalizedSessionId}.json`)
+        : null
+    );
+    const sessionState = safeReadJsonFile(sessionStateFile, {});
+    const lastProcessedIndexRaw = Number(sessionState?.lastProcessedIndex);
+    const lastSeenMessageId = normalizeOptionalText(sessionState?.lastSeenMessageId, 256);
+    const lastBlockValues = (sessionState?.lastBlockValues && typeof sessionState.lastBlockValues === 'object')
+      ? sessionState.lastBlockValues
+      : null;
+    return {
+      sessionId: normalizedSessionId,
+      sessionStateFile,
+      sessionState,
+      conversationId: normalizeOptionalText(sessionState?.conversationId, 256) || mappedConversationId || null,
+      lastProcessedIndex: Number.isFinite(lastProcessedIndexRaw) ? lastProcessedIndexRaw : null,
+      lastSeenMessageId,
+      lastBlockValues,
+      hasLastBlockValues: Boolean(lastBlockValues),
+      blockLabelCount: lastBlockValues ? Object.keys(lastBlockValues).length : null,
+      sessionStartedAt: normalizeOptionalText(sessionState?.startedAt, 128) || null,
+    };
+  };
   const boundAgentId = normalizeOptionalText(
     letta?.agentId
       || letta?.lettaAgentId
@@ -933,82 +1035,74 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
       || conversationCurrentSessionId,
     200,
   );
-  const mappedConversation = currentSessionId ? conversations[currentSessionId] : null;
-  const mappedConversationId = typeof mappedConversation === 'string'
-    ? mappedConversation
-    : normalizeOptionalText(mappedConversation?.conversationId, 256);
-  const currentSessionStateFile = normalizeWorkspacePath(
-    lettaUpstreamSession.sessionStateFile
-      || runtimeUpstreamSession.sessionStateFile
-      || (currentSessionId && upstreamPaths.durableStateDir
-        ? path.join(upstreamPaths.durableStateDir, `session-${currentSessionId}.json`)
-        : null)
-  );
-  const currentSessionState = safeReadJsonFile(currentSessionStateFile, {});
+  const currentSessionDurable = readDurableUpstreamSession(currentSessionId);
+  const currentSessionStateFile = currentSessionDurable.sessionStateFile
+    || normalizeWorkspacePath(lettaUpstreamSession.sessionStateFile)
+    || normalizeWorkspacePath(runtimeUpstreamSession.sessionStateFile)
+    || null;
+  const currentSessionState = currentSessionDurable.sessionState;
   const currentConversationId = normalizeOptionalText(
-    lettaUpstreamSession.conversationId
-      || runtimeUpstreamSession.conversationId
-      || currentSessionState.conversationId
-      || mappedConversationId,
+    currentSessionDurable.conversationId
+      || lettaUpstreamSession.conversationId
+      || runtimeUpstreamSession.conversationId,
     256,
   );
   const sessionEstablished = Boolean(currentSessionId && currentConversationId);
   const rawNotify = (lettaUpstreamSession.notify && typeof lettaUpstreamSession.notify === 'object')
     ? lettaUpstreamSession.notify
     : ((runtimeUpstreamSession.notify && typeof runtimeUpstreamSession.notify === 'object') ? runtimeUpstreamSession.notify : {});
-  const notifyAttemptedAt = normalizeOptionalText(rawNotify.attemptedAt, 128);
   const notifyBlockedReason = normalizeOptionalText(rawNotify.blockedReason, 1200);
-  const notifyMessageSentAt = normalizeOptionalText(rawNotify.messageSentAt, 128);
   const notifyStatus = normalizeOptionalText(rawNotify.status, 64)
     || (normalizeBoolean(rawNotify.messageSent) === true ? 'sent' : null)
     || (notifyBlockedReason ? 'blocked' : null)
-    || (notifyAttemptedAt ? 'attempted' : null)
+    || (normalizeBoolean(rawNotify.attempted) === true ? 'attempted' : null)
     || 'not-attempted';
   const rawUserPrompt = (lettaUpstreamUserPrompt && typeof lettaUpstreamUserPrompt === 'object' && Object.keys(lettaUpstreamUserPrompt).length)
     ? lettaUpstreamUserPrompt
     : ((runtimeUpstreamUserPrompt && typeof runtimeUpstreamUserPrompt === 'object') ? runtimeUpstreamUserPrompt : {});
+  const userPromptSessionId = normalizeOptionalText(rawUserPrompt.sessionId, 200) || currentSessionDurable.sessionId || null;
+  const userPromptDurable = readDurableUpstreamSession(userPromptSessionId);
   const userPromptBlockedReason = normalizeOptionalText(rawUserPrompt.blockedReason, 1200);
-  const userPromptAttemptedAt = normalizeOptionalText(rawUserPrompt.attemptedAt, 128);
-  const userPromptMessageSentAt = normalizeOptionalText(rawUserPrompt.messageSentAt, 128);
-  const userPromptStatus = normalizeOptionalText(rawUserPrompt.status, 64)
+  const userPromptStatus = (userPromptDurable.lastProcessedIndex !== null ? 'sent' : null)
+    || normalizeOptionalText(rawUserPrompt.status, 64)
     || (normalizeBoolean(rawUserPrompt.messageSent) === true ? 'sent' : null)
     || (userPromptBlockedReason ? 'blocked' : null)
     || (normalizeBoolean(rawUserPrompt.attempted) === true ? 'attempted' : null)
-    || (userPromptAttemptedAt ? 'attempted' : null)
     || 'not-run';
   const userPromptTranscriptPath = normalizeWorkspacePath(rawUserPrompt.transcriptPath) || null;
-  const userPromptSyncStateFile = normalizeWorkspacePath(rawUserPrompt.syncStateFile) || null;
-  const userPromptLastProcessedIndexBeforeRaw = Number(rawUserPrompt.lastProcessedIndexBefore);
-  const userPromptLastProcessedIndexAfterRaw = Number(rawUserPrompt.lastProcessedIndexAfter);
+  const userPromptSyncStateFile = userPromptDurable.sessionStateFile || normalizeWorkspacePath(rawUserPrompt.syncStateFile) || null;
+  const userPromptLastProcessedIndexAfterRaw = userPromptDurable.lastProcessedIndex !== null
+    ? userPromptDurable.lastProcessedIndex
+    : Number(rawUserPrompt.lastProcessedIndexAfter);
   const rawPreTool = (lettaUpstreamPreTool && typeof lettaUpstreamPreTool === 'object' && Object.keys(lettaUpstreamPreTool).length)
     ? lettaUpstreamPreTool
     : ((runtimeUpstreamPreTool && typeof runtimeUpstreamPreTool === 'object') ? runtimeUpstreamPreTool : {});
+  const preToolSessionId = normalizeOptionalText(rawPreTool.sessionId, 200) || currentSessionDurable.sessionId || null;
+  const preToolDurable = readDurableUpstreamSession(preToolSessionId);
   const preToolBlockedReason = normalizeOptionalText(rawPreTool.blockedReason, 1200);
-  const preToolAttemptedAt = normalizeOptionalText(rawPreTool.attemptedAt, 128);
-  const preToolInjectedAt = normalizeOptionalText(rawPreTool.injectedAt, 128);
-  const preToolStatus = normalizeOptionalText(rawPreTool.status, 64)
+  const preToolStatus = (preToolDurable.lastSeenMessageId ? 'seeded-baseline' : null)
+    || normalizeOptionalText(rawPreTool.status, 64)
     || (normalizeBoolean(rawPreTool.injected) === true ? 'injected' : null)
     || (preToolBlockedReason ? 'blocked' : null)
     || (normalizeBoolean(rawPreTool.attempted) === true ? 'attempted' : null)
-    || (preToolAttemptedAt ? 'attempted' : null)
     || 'not-run';
-  const preToolSyncStateFile = normalizeWorkspacePath(rawPreTool.syncStateFile) || null;
+  const preToolSyncStateFile = preToolDurable.sessionStateFile || normalizeWorkspacePath(rawPreTool.syncStateFile) || null;
   const rawStop = (lettaUpstreamStop && typeof lettaUpstreamStop === 'object' && Object.keys(lettaUpstreamStop).length)
     ? lettaUpstreamStop
     : ((runtimeUpstreamStop && typeof runtimeUpstreamStop === 'object') ? runtimeUpstreamStop : {});
+  const stopSessionId = normalizeOptionalText(rawStop.sessionId, 200) || currentSessionDurable.sessionId || null;
+  const stopDurable = readDurableUpstreamSession(stopSessionId);
   const stopBlockedReason = normalizeOptionalText(rawStop.blockedReason, 1200);
-  const stopAttemptedAt = normalizeOptionalText(rawStop.attemptedAt, 128);
-  const stopMessageSentAt = normalizeOptionalText(rawStop.messageSentAt, 128);
   const stopStatus = normalizeOptionalText(rawStop.status, 64)
     || (normalizeBoolean(rawStop.messageSent) === true ? 'sent' : null)
     || (stopBlockedReason ? 'blocked' : null)
     || (normalizeBoolean(rawStop.attempted) === true ? 'attempted' : null)
-    || (stopAttemptedAt ? 'attempted' : null)
     || 'not-run';
   const stopTranscriptPath = normalizeWorkspacePath(rawStop.transcriptPath) || null;
-  const stopSyncStateFile = normalizeWorkspacePath(rawStop.syncStateFile) || null;
-  const stopLastProcessedIndexBeforeRaw = Number(rawStop.lastProcessedIndexBefore);
-  const stopLastProcessedIndexAfterRaw = Number(rawStop.lastProcessedIndexAfter);
+  const stopSyncStateFile = stopDurable.sessionStateFile || normalizeWorkspacePath(rawStop.syncStateFile) || null;
+  const stopLastProcessedIndexAfterRaw = stopDurable.lastProcessedIndex !== null
+    ? stopDurable.lastProcessedIndex
+    : Number(rawStop.lastProcessedIndexAfter);
   let blocker = null;
   if (!upstreamPaths.available) blocker = `missing upstream claude-subconscious root at ${upstreamPaths.root || '-'}`;
   else if (!apiKeyConfigured) blocker = 'missing LETTA_API_KEY';
@@ -1052,9 +1146,6 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
       supported: upstreamPaths.available,
       status: bootstrapStatus,
       blockedReason: bootstrapBlockedReason,
-      checkedAt: normalizeOptionalText(lettaUpstream.checkedAt, 128)
-        || normalizeOptionalText(upstreamMeta.checkedAt, 128)
-        || null,
       apiKeyConfigured,
       lettaBaseUrl,
       agentId,
@@ -1093,18 +1184,12 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
         || normalizeOptionalText(runtimeUpstreamSession.conversationStatus, 64)
         || (currentConversationId ? 'recorded' : null),
       sessionStateFile: currentSessionStateFile,
-      sessionStartedAt: normalizeOptionalText(currentSessionState.startedAt, 128)
+      sessionStartedAt: currentSessionDurable.sessionStartedAt
         || normalizeOptionalText(lettaUpstreamSession.sessionStartedAt, 128)
         || normalizeOptionalText(runtimeUpstreamSession.sessionStartedAt, 128)
         || null,
       messageSent: normalizeBoolean(lettaUpstreamSession.messageSent) === true
         || normalizeBoolean(runtimeUpstreamSession.messageSent) === true,
-      messageSentAt: normalizeOptionalText(lettaUpstreamSession.messageSentAt, 128)
-        || normalizeOptionalText(runtimeUpstreamSession.messageSentAt, 128)
-        || null,
-      checkedAt: normalizeOptionalText(lettaUpstreamSession.checkedAt, 128)
-        || normalizeOptionalText(runtimeUpstreamSession.checkedAt, 128)
-        || null,
       cwd: normalizeWorkspacePath(lettaUpstreamSession.cwd || runtimeUpstreamSession.cwd) || workdir || null,
       notify: {
         attempted: notifyStatus !== 'not-attempted',
@@ -1113,11 +1198,6 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
         messageSent: normalizeBoolean(rawNotify.messageSent) === true
           || normalizeBoolean(lettaUpstreamSession.messageSent) === true
           || normalizeBoolean(runtimeUpstreamSession.messageSent) === true,
-        attemptedAt: notifyAttemptedAt,
-        messageSentAt: notifyMessageSentAt
-          || normalizeOptionalText(lettaUpstreamSession.messageSentAt, 128)
-          || normalizeOptionalText(runtimeUpstreamSession.messageSentAt, 128)
-          || null,
         requiredDecision: notifyStatus === 'blocked'
           ? deriveUpstreamNotifyDecision(
             notifyBlockedReason,
@@ -1134,17 +1214,14 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
       attempted: normalizeBoolean(rawUserPrompt.attempted) === true || userPromptStatus === 'attempted' || userPromptStatus === 'sent' || userPromptStatus === 'blocked',
       status: userPromptStatus,
       blockedReason: userPromptStatus === 'blocked' ? userPromptBlockedReason : null,
-      checkedAt: normalizeOptionalText(rawUserPrompt.checkedAt, 128) || null,
-      attemptedAt: userPromptAttemptedAt,
-      messageSent: normalizeBoolean(rawUserPrompt.messageSent) === true,
-      messageSentAt: userPromptMessageSentAt,
-      sessionId: normalizeOptionalText(rawUserPrompt.sessionId, 200) || null,
-      conversationId: normalizeOptionalText(rawUserPrompt.conversationId, 256) || null,
+      messageSent: normalizeBoolean(rawUserPrompt.messageSent) === true || userPromptDurable.lastProcessedIndex !== null,
+      sessionId: userPromptSessionId,
+      conversationId: userPromptDurable.conversationId
+        || normalizeOptionalText(rawUserPrompt.conversationId, 256)
+        || null,
       transcriptPath: userPromptTranscriptPath,
       transcriptExists: userPromptTranscriptPath ? existsSync(userPromptTranscriptPath) : false,
-      transcriptLineCount: normalizeNonNegativeInt(rawUserPrompt.transcriptLineCount, 0),
       syncStateFile: userPromptSyncStateFile,
-      lastProcessedIndexBefore: Number.isFinite(userPromptLastProcessedIndexBeforeRaw) ? userPromptLastProcessedIndexBeforeRaw : null,
       lastProcessedIndexAfter: Number.isFinite(userPromptLastProcessedIndexAfterRaw) ? userPromptLastProcessedIndexAfterRaw : null,
       scriptPath: normalizeWorkspacePath(rawUserPrompt.scriptPath || upstreamPaths.scripts?.syncMemory) || upstreamPaths.scripts?.syncMemory || null,
     },
@@ -1153,18 +1230,18 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
       attempted: normalizeBoolean(rawPreTool.attempted) === true || preToolStatus === 'attempted' || preToolStatus === 'injected' || preToolStatus === 'blocked' || preToolStatus === 'no-updates' || preToolStatus === 'seeded-baseline',
       status: preToolStatus,
       blockedReason: preToolStatus === 'blocked' ? preToolBlockedReason : null,
-      checkedAt: normalizeOptionalText(rawPreTool.checkedAt, 128) || null,
-      attemptedAt: preToolAttemptedAt,
       injected: normalizeBoolean(rawPreTool.injected) === true,
-      injectedAt: preToolInjectedAt,
-      sessionId: normalizeOptionalText(rawPreTool.sessionId, 200) || null,
-      conversationId: normalizeOptionalText(rawPreTool.conversationId, 256) || null,
+      sessionId: preToolSessionId,
+      conversationId: preToolDurable.conversationId
+        || normalizeOptionalText(rawPreTool.conversationId, 256)
+        || null,
       syncStateFile: preToolSyncStateFile,
-      newMessageCount: normalizeNonNegativeInt(rawPreTool.newMessageCount, 0),
-      changedBlockCount: normalizeNonNegativeInt(rawPreTool.changedBlockCount, 0),
-      lastSeenMessageIdBefore: normalizeOptionalText(rawPreTool.lastSeenMessageIdBefore, 256) || null,
-      lastSeenMessageIdAfter: normalizeOptionalText(rawPreTool.lastSeenMessageIdAfter, 256) || null,
-      blockLabelCount: normalizeNonNegativeInt(rawPreTool.blockLabelCount, 0),
+      lastSeenMessageIdAfter: preToolDurable.lastSeenMessageId
+        || normalizeOptionalText(rawPreTool.lastSeenMessageIdAfter, 256)
+        || null,
+      blockLabelCount: preToolDurable.hasLastBlockValues
+        ? preToolDurable.blockLabelCount
+        : normalizeNonNegativeInt(rawPreTool.blockLabelCount, 0),
       scriptPath: normalizeWorkspacePath(rawPreTool.scriptPath || upstreamPaths.scripts?.pretoolSync) || upstreamPaths.scripts?.pretoolSync || null,
     },
     stop: {
@@ -1172,18 +1249,14 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
       attempted: normalizeBoolean(rawStop.attempted) === true || stopStatus === 'attempted' || stopStatus === 'sent' || stopStatus === 'blocked',
       status: stopStatus,
       blockedReason: stopStatus === 'blocked' ? stopBlockedReason : null,
-      checkedAt: normalizeOptionalText(rawStop.checkedAt, 128) || null,
-      attemptedAt: stopAttemptedAt,
       messageSent: normalizeBoolean(rawStop.messageSent) === true,
-      messageSentAt: stopMessageSentAt,
-      sessionId: normalizeOptionalText(rawStop.sessionId, 200) || null,
-      conversationId: normalizeOptionalText(rawStop.conversationId, 256) || null,
+      sessionId: stopSessionId,
+      conversationId: stopDurable.conversationId
+        || normalizeOptionalText(rawStop.conversationId, 256)
+        || null,
       transcriptPath: stopTranscriptPath,
       transcriptExists: stopTranscriptPath ? existsSync(stopTranscriptPath) : false,
-      transcriptMessageCount: normalizeNonNegativeInt(rawStop.transcriptMessageCount, 0),
-      newMessageCount: normalizeNonNegativeInt(rawStop.newMessageCount, 0),
       syncStateFile: stopSyncStateFile,
-      lastProcessedIndexBefore: Number.isFinite(stopLastProcessedIndexBeforeRaw) ? stopLastProcessedIndexBeforeRaw : null,
       lastProcessedIndexAfter: Number.isFinite(stopLastProcessedIndexAfterRaw) ? stopLastProcessedIndexAfterRaw : null,
       scriptPath: normalizeWorkspacePath(rawStop.scriptPath || upstreamPaths.scripts?.stopSend) || upstreamPaths.scripts?.stopSend || null,
     },
@@ -1391,9 +1464,6 @@ function applyConversationSnapshotToContract(state, sessionSnapshot = null) {
         lastRuntimeModel: current.lastRuntimeModel || null,
         latestUserText: current.latestUserText || '',
         latestAssistantText: current.latestAssistantText || '',
-        latestGuidancePreview: current.latestGuidancePreview || '',
-        latestGuidanceAt: current.latestGuidanceAt || null,
-        latestGuidanceSource: current.latestGuidanceSource || null,
         recentTurns: Array.isArray(current.recentTurns) ? current.recentTurns : [],
       }
     : null;
@@ -1718,9 +1788,6 @@ function resolveSubconsciousState(agentName) {
               lastRuntimeModel: currentConversation.lastRuntimeModel || null,
               latestUserText: currentConversation.latestUserText || '',
               latestAssistantText: currentConversation.latestAssistantText || '',
-              latestGuidancePreview: currentConversation.latestGuidancePreview || '',
-              latestGuidanceAt: currentConversation.latestGuidanceAt || null,
-              latestGuidanceSource: currentConversation.latestGuidanceSource || null,
               recentTurns: Array.isArray(currentConversation.recentTurns) ? currentConversation.recentTurns : [],
             }
           : null,
@@ -1981,6 +2048,12 @@ function getBearerToken(req) {
   return match ? match[1].trim() : null;
 }
 
+function hasApiTokenAccess(req) {
+  const expectedToken = normalizeOptionalText(process.env.API_TOKEN, 512);
+  if (!expectedToken) return false;
+  return getBearerToken(req) === expectedToken;
+}
+
 function authorizeSubconsciousEventIngest(req) {
   if (isLocalRequest(req)) {
     return { ok: true, mode: 'local' };
@@ -2004,6 +2077,203 @@ function authorizeSubconsciousEventIngest(req) {
     error: 'invalid subconscious event token',
     mode: 'token-required',
   };
+}
+
+function canAccessPrivilegedSubconsciousDetail(req) {
+  return isLocalRequest(req) || hasApiTokenAccess(req);
+}
+
+function redactPathLikeText(value, maxLen = 1200) {
+  const text = normalizeOptionalText(value, maxLen);
+  if (!text) return null;
+  return text.replace(/(^|[\s(])((?:\/[^/\s)]+)+\/?[^)\s]*)/g, '$1[path removed]');
+}
+
+function cloneJsonValue(value) {
+  if (value === null || value === undefined) return value ?? null;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function buildPersistedUpstreamRecord(kind, record) {
+  const safe = cloneJsonValue(record);
+  if (!safe || typeof safe !== 'object') return {};
+
+  delete safe.checkedAt;
+
+  if (kind === 'session') {
+    delete safe.messageSentAt;
+    if (safe.notify && typeof safe.notify === 'object') {
+      delete safe.notify.attemptedAt;
+      delete safe.notify.messageSentAt;
+    }
+    return safe;
+  }
+
+  if (kind === 'userPrompt') {
+    delete safe.attemptedAt;
+    delete safe.messageSentAt;
+    delete safe.transcriptLineCount;
+    delete safe.lastProcessedIndexBefore;
+    return safe;
+  }
+
+  if (kind === 'preTool') {
+    delete safe.attemptedAt;
+    delete safe.injectedAt;
+    delete safe.newMessageCount;
+    delete safe.changedBlockCount;
+    delete safe.lastSeenMessageIdBefore;
+    delete safe.toolName;
+    return safe;
+  }
+
+  if (kind === 'stop') {
+    delete safe.attemptedAt;
+    delete safe.messageSentAt;
+    delete safe.transcriptMessageCount;
+    delete safe.newMessageCount;
+    delete safe.lastProcessedIndexBefore;
+    return safe;
+  }
+
+  return safe;
+}
+
+function buildPersistedUpstreamState(upstream) {
+  const safe = cloneJsonValue(upstream);
+  if (!safe || typeof safe !== 'object') return {};
+
+  delete safe.checkedAt;
+  if (safe.session && typeof safe.session === 'object') safe.session = buildPersistedUpstreamRecord('session', safe.session);
+  if (safe.userPrompt && typeof safe.userPrompt === 'object') safe.userPrompt = buildPersistedUpstreamRecord('userPrompt', safe.userPrompt);
+  if (safe.preTool && typeof safe.preTool === 'object') safe.preTool = buildPersistedUpstreamRecord('preTool', safe.preTool);
+  if (safe.stop && typeof safe.stop === 'object') safe.stop = buildPersistedUpstreamRecord('stop', safe.stop);
+  return safe;
+}
+
+function buildOperationalSubconsciousContract(contract) {
+  const safe = cloneJsonValue(contract);
+  if (!safe || typeof safe !== 'object') return safe;
+
+  if (safe.runtime && typeof safe.runtime === 'object') {
+    delete safe.runtime.settingsPath;
+    delete safe.runtime.pluginRoot;
+    delete safe.runtime.eventUrl;
+    delete safe.runtime.invokeUrl;
+    delete safe.runtime.runtimeMetaPath;
+  }
+
+  if (safe.provider && typeof safe.provider === 'object') {
+    delete safe.provider.lettaStateFile;
+  }
+
+  if (safe.upstream && typeof safe.upstream === 'object') {
+    delete safe.upstream.root;
+    delete safe.upstream.promptFile;
+    delete safe.upstream.scripts;
+    delete safe.upstream.durableHome;
+    delete safe.upstream.durableStateDir;
+    delete safe.upstream.conversationsFile;
+    delete safe.upstream.configPath;
+
+    if (safe.upstream.bootstrap && typeof safe.upstream.bootstrap === 'object') {
+      delete safe.upstream.bootstrap.workdir;
+      delete safe.upstream.bootstrap.checkedAt;
+      if (safe.upstream.bootstrap.blockedReason) {
+        safe.upstream.bootstrap.blockedReason = redactPathLikeText(safe.upstream.bootstrap.blockedReason, 1200);
+      }
+    }
+    if (safe.upstream.session && typeof safe.upstream.session === 'object') {
+      delete safe.upstream.session.sessionStateFile;
+      delete safe.upstream.session.cwd;
+      delete safe.upstream.session.checkedAt;
+      delete safe.upstream.session.messageSentAt;
+      if (safe.upstream.session.blockedReason) {
+        safe.upstream.session.blockedReason = redactPathLikeText(safe.upstream.session.blockedReason, 1200);
+      }
+      if (safe.upstream.session.notify && typeof safe.upstream.session.notify === 'object') {
+        delete safe.upstream.session.notify.attemptedAt;
+        delete safe.upstream.session.notify.messageSentAt;
+        if (safe.upstream.session.notify.blockedReason) {
+          safe.upstream.session.notify.blockedReason = redactPathLikeText(safe.upstream.session.notify.blockedReason, 1200);
+        }
+      }
+    }
+    if (safe.upstream.userPrompt && typeof safe.upstream.userPrompt === 'object') {
+      delete safe.upstream.userPrompt.transcriptPath;
+      delete safe.upstream.userPrompt.transcriptExists;
+      delete safe.upstream.userPrompt.syncStateFile;
+      delete safe.upstream.userPrompt.scriptPath;
+      delete safe.upstream.userPrompt.checkedAt;
+      delete safe.upstream.userPrompt.attemptedAt;
+      delete safe.upstream.userPrompt.messageSentAt;
+      delete safe.upstream.userPrompt.transcriptLineCount;
+      delete safe.upstream.userPrompt.lastProcessedIndexBefore;
+      if (safe.upstream.userPrompt.blockedReason) {
+        safe.upstream.userPrompt.blockedReason = redactPathLikeText(safe.upstream.userPrompt.blockedReason, 1200);
+      }
+    }
+    if (safe.upstream.preTool && typeof safe.upstream.preTool === 'object') {
+      delete safe.upstream.preTool.syncStateFile;
+      delete safe.upstream.preTool.scriptPath;
+      delete safe.upstream.preTool.checkedAt;
+      delete safe.upstream.preTool.attemptedAt;
+      delete safe.upstream.preTool.injectedAt;
+      delete safe.upstream.preTool.newMessageCount;
+      delete safe.upstream.preTool.changedBlockCount;
+      delete safe.upstream.preTool.lastSeenMessageIdBefore;
+      delete safe.upstream.preTool.toolName;
+      if (safe.upstream.preTool.blockedReason) {
+        safe.upstream.preTool.blockedReason = redactPathLikeText(safe.upstream.preTool.blockedReason, 1200);
+      }
+    }
+    if (safe.upstream.stop && typeof safe.upstream.stop === 'object') {
+      delete safe.upstream.stop.transcriptPath;
+      delete safe.upstream.stop.transcriptExists;
+      delete safe.upstream.stop.syncStateFile;
+      delete safe.upstream.stop.scriptPath;
+      delete safe.upstream.stop.checkedAt;
+      delete safe.upstream.stop.attemptedAt;
+      delete safe.upstream.stop.messageSentAt;
+      delete safe.upstream.stop.transcriptMessageCount;
+      delete safe.upstream.stop.newMessageCount;
+      delete safe.upstream.stop.lastProcessedIndexBefore;
+      if (safe.upstream.stop.blockedReason) {
+        safe.upstream.stop.blockedReason = redactPathLikeText(safe.upstream.stop.blockedReason, 1200);
+      }
+    }
+  }
+
+  if (safe.memory && typeof safe.memory === 'object') {
+    delete safe.memory.path;
+    delete safe.memory.lastRetrievedQuery;
+  }
+
+  if (safe.conversation && typeof safe.conversation === 'object') {
+    delete safe.conversation.path;
+    delete safe.conversation.currentTranscriptPath;
+    if (safe.conversation.current && typeof safe.conversation.current === 'object') {
+      delete safe.conversation.current.transcriptPath;
+      delete safe.conversation.current.transcriptExists;
+      delete safe.conversation.current.latestUserText;
+      delete safe.conversation.current.latestAssistantText;
+      delete safe.conversation.current.latestGuidancePreview;
+      delete safe.conversation.current.latestGuidanceAt;
+      delete safe.conversation.current.latestGuidanceSource;
+      delete safe.conversation.current.recentTurns;
+    }
+  }
+
+  if (safe.lastRuntimeGuidance && typeof safe.lastRuntimeGuidance === 'object') {
+    delete safe.lastRuntimeGuidance.preview;
+    delete safe.lastRuntimeGuidance.text;
+  }
+
+  if (Array.isArray(safe.missingBackendPieces)) {
+    safe.missingBackendPieces = safe.missingBackendPieces.map((item) => redactPathLikeText(item, 1200) || item);
+  }
+
+  return safe;
 }
 
 // ── In-memory state ───────────────────────────────────────────────────
@@ -2091,6 +2361,8 @@ for (const agent of Object.values(agents)) {
     : (agent.subconsciousEnabled === false ? false : null);
   agent.managedProjects = normalizeManagedProjects(agent.managedProjects);
   agent.human = normalizeHumanMeta(agent.human);
+  agent.task = normalizeAgentTask(agent.task, agent.name);
+  agent.runtimeProfile = normalizeRuntimeProfile(agent.runtimeProfile);
   agent.kind = inferRecordKind(agent);
   if (agent.kind === 'human') {
     agent.online = false;
@@ -2289,6 +2561,8 @@ function ensureAgentRecord(name, defaults = {}) {
       : (defaults.subconsciousEnabled === false ? false : null),
     managedProjects: normalizeManagedProjects(defaults.managedProjects),
     human: normalizeHumanMeta(defaults.human),
+    task: normalizeAgentTask(defaults.task, agentName),
+    runtimeProfile: normalizeRuntimeProfile(defaults.runtimeProfile),
     kind,
   };
   agents[agentName] = agent;
@@ -3842,6 +4116,8 @@ function serializeAgent(agent) {
       : (agent.subconsciousEnabled === false ? false : null),
     managedProjects: normalizeManagedProjects(agent.managedProjects),
     human: normalizeHumanMeta(agent.human),
+    task: normalizeAgentTask(agent.task, agent.name),
+    runtimeProfile: normalizeRuntimeProfile(agent.runtimeProfile),
     activeNow: runtime?.activeNow === true,
     activeDurationSec: Number(runtime?.activeDurationSec) || 0,
     idleDurationSec: Number(runtime?.idleDurationSec) || 0,
@@ -4156,11 +4432,11 @@ async function pushNotify(agentName, msg) {
     requiresInboxCheck = hasMcp && actionableUnread;
     const humanHint = hasHuman ? ' This includes messages from your human operator.' : '';
     const processHint = hasMcp
-      ? ' Read ALL messages via check_inbox() first. DO ALL JOBS before replying. After ALL WORK is done, send required replies.'
+      ? ' FIRST ACTION: call check_inbox() now. Read ALL messages there before doing anything else. DO ALL JOBS before replying. After ALL WORK is done, send required replies.'
       : ' Read ALL messages first. DO ALL JOBS before replying. After ALL WORK is done, send required replies.';
 
     if (hasMcp) {
-      notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}. Use check_inbox() in agent-chat MCP to read all.${humanHint}${processHint}`;
+      notification = `[NOTIFICATION] FIRST ACTION: call check_inbox() now. You have ${unreadCount} unread messages${senderText}.${humanHint}${processHint}`;
     } else {
       notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}.${humanHint}${processHint}`;
     }
@@ -4169,7 +4445,7 @@ async function pushNotify(agentName, msg) {
     const isGroup = !!msg.group;
 
     if (hasMcp) {
-      const checkHint = `Use check_inbox() in agent-chat MCP for full context.`;
+      const checkHint = `FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.`;
       let actionHint;
       if (needsReply && isGroup) {
         actionHint = `Reply after ALL WORK is done, using the agent-chat MCP tool: post(group="${msg.group}", summary="your reply", full="detailed reply")`;
@@ -4519,8 +4795,16 @@ app.post('/api/agents', (req, res) => {
     subconsciousEnabled,
     managedProjects,
     human,
+    task,
+    runtimeProfile,
   } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
+  if (task !== undefined && task !== null && !normalizeAgentTask(task, normalizeAgentName(name) || String(name || '').trim())) {
+    return res.status(400).json({ error: 'invalid task payload' });
+  }
+  if (runtimeProfile !== undefined && runtimeProfile !== null && !normalizeRuntimeProfile(runtimeProfile)) {
+    return res.status(400).json({ error: 'invalid runtimeProfile payload' });
+  }
   refreshServerLiveness();
   const agentName = normalizeAgentName(name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
@@ -4567,6 +4851,12 @@ app.post('/api/agents', (req, res) => {
     human: human !== undefined
       ? normalizeHumanMeta(human)
       : normalizeHumanMeta(existing.human),
+    task: task !== undefined
+      ? normalizeAgentTask(task, agentName)
+      : normalizeAgentTask(existing.task, agentName),
+    runtimeProfile: runtimeProfile !== undefined
+      ? normalizeRuntimeProfile(runtimeProfile)
+      : normalizeRuntimeProfile(existing.runtimeProfile),
   };
   saveAgents();
   if (!existingOnline && resolvedOnline) {
@@ -4600,7 +4890,15 @@ app.patch('/api/agents/:name', (req, res) => {
     subconsciousEnabled,
     managedProjects,
     human,
+    task,
+    runtimeProfile,
   } = req.body;
+  if (task !== undefined && task !== null && !normalizeAgentTask(task, agentName)) {
+    return res.status(400).json({ error: 'invalid task payload' });
+  }
+  if (runtimeProfile !== undefined && runtimeProfile !== null && !normalizeRuntimeProfile(runtimeProfile)) {
+    return res.status(400).json({ error: 'invalid runtimeProfile payload' });
+  }
   if (role !== undefined) agent.role = role;
   if (identity !== undefined) agent.identity = identity;
   if (tmux !== undefined) {
@@ -4655,6 +4953,12 @@ app.patch('/api/agents/:name', (req, res) => {
   }
   if (human !== undefined) {
     agent.human = normalizeHumanMeta(human);
+  }
+  if (task !== undefined) {
+    agent.task = normalizeAgentTask(task, agentName);
+  }
+  if (runtimeProfile !== undefined) {
+    agent.runtimeProfile = normalizeRuntimeProfile(runtimeProfile);
   }
   if (agent.online === true && agent.manualDown !== false) {
     agent.manualDown = false;
@@ -4921,9 +5225,6 @@ app.post('/api/subconscious/events', (req, res) => {
         runtimeInvoked: event.runtimeInvoked === true,
         runtimeProvider: event.runtimeProvider,
         runtimeModel: event.runtimeModel,
-        guidancePreview: event.guidancePreview,
-        guidanceAt: event.guidanceInjected === true || event.guidancePresent === true ? at : null,
-        guidanceSource: event.guidanceSource,
       })
     : null;
   if (state && conversation) applyConversationSnapshotToContract(state, conversation);
@@ -4940,7 +5241,11 @@ app.get('/api/subconscious/detail/:name', (req, res) => {
   if (!agent) return res.status(400).json({ error: 'invalid agent name' });
   const state = resolveSubconsciousState(agent);
   if (!state) return res.status(404).json({ error: 'agent not found' });
-  return res.json(state.contract);
+  const wantsDebug = normalizeBoolean(req.query?.debug) === true || normalizeBoolean(req.query?.privileged) === true;
+  if (wantsDebug && !canAccessPrivilegedSubconsciousDetail(req)) {
+    return res.status(403).json({ error: 'privileged debug access required' });
+  }
+  return res.json(wantsDebug ? state.contract : buildOperationalSubconsciousContract(state.contract));
 });
 
 app.post('/api/subconscious/upstream/bootstrap/:name', async (req, res) => {
@@ -4968,10 +5273,12 @@ app.post('/api/subconscious/upstream/bootstrap/:name', async (req, res) => {
     lettaContextWindow: normalizeOptionalText(process.env.LETTA_CONTEXT_WINDOW, 64),
   });
   const directReuse = mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse);
+  const persistedRuntimeUpstream = buildPersistedUpstreamState(existingRuntimeUpstream);
+  const persistedUpstream = buildPersistedUpstreamState(existingUpstream);
   const nextRuntimeMeta = {
     ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
     upstream: {
-      ...existingRuntimeUpstream,
+      ...persistedRuntimeUpstream,
       available: result.paths?.available === true,
       root: result.paths?.root || null,
       promptFile: result.paths?.promptFile || null,
@@ -4983,7 +5290,6 @@ app.post('/api/subconscious/upstream/bootstrap/:name', async (req, res) => {
       directReuse,
       bootstrapStatus: result.ok ? 'configured' : 'blocked',
       blocker: result.blocker || null,
-      checkedAt: now,
       agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
       importedAt: normalizeOptionalText(result.config?.importedAt, 128) || null,
       model: normalizeOptionalText(result.config?.model, 256) || null,
@@ -4995,10 +5301,9 @@ app.post('/api/subconscious/upstream/bootstrap/:name', async (req, res) => {
   const nextLetta = {
     ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
     upstream: {
-      ...existingUpstream,
+      ...persistedUpstream,
       bootstrapStatus: result.ok ? 'configured' : 'blocked',
       blocker: result.blocker || null,
-      checkedAt: now,
       agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
       importedAt: normalizeOptionalText(result.config?.importedAt, 128) || null,
       model: normalizeOptionalText(result.config?.model, 256) || null,
@@ -5056,6 +5361,8 @@ app.post('/api/subconscious/upstream/session-start/:name', async (req, res) => {
       sendSessionStartMessage: normalizeBoolean(payload.sendMessage) !== false,
     });
     const directReuse = mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse);
+    const persistedRuntimeUpstream = buildPersistedUpstreamState(existingRuntimeUpstream);
+    const persistedUpstream = buildPersistedUpstreamState(existingUpstream);
     const sendMessageRequested = normalizeBoolean(payload.sendMessage) !== false;
     const sessionEstablished = Boolean((result.sessionId || sessionId) && result.conversationId);
     const notifyBlockedReason = sendMessageRequested && result.blocker ? result.blocker : null;
@@ -5096,10 +5403,11 @@ app.post('/api/subconscious/upstream/session-start/:name', async (req, res) => {
       cwd: normalizeWorkspacePath(result.cwd) || state.agent.workdir || null,
       notify: notifyRecord,
     };
+    const persistedSessionRecord = buildPersistedUpstreamRecord('session', sessionRecord);
     const nextRuntimeMeta = {
       ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
       upstream: {
-        ...existingRuntimeUpstream,
+        ...persistedRuntimeUpstream,
         available: result.paths?.available === true,
         root: result.paths?.root || null,
         promptFile: result.paths?.promptFile || null,
@@ -5111,21 +5419,19 @@ app.post('/api/subconscious/upstream/session-start/:name', async (req, res) => {
         directReuse,
         bootstrapStatus: 'configured',
         blocker: null,
-        checkedAt: now,
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
         agentName: normalizeOptionalText(result.agent?.name, 256) || normalizeOptionalText(existingUpstream.agentName, 256) || null,
         blockCount: Array.isArray(result.agent?.blocks) ? result.agent.blocks.length : normalizeNonNegativeInt(existingRuntimeUpstream.blockCount, 0),
-        session: sessionRecord,
+        session: persistedSessionRecord,
       },
       updatedAt: now,
     };
     const nextLetta = {
       ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
       upstream: {
-        ...existingUpstream,
+        ...persistedUpstream,
         bootstrapStatus: 'configured',
         blocker: null,
-        checkedAt: now,
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
         agentName: normalizeOptionalText(result.agent?.name, 256) || normalizeOptionalText(existingUpstream.agentName, 256) || null,
         blockCount: Array.isArray(result.agent?.blocks) ? result.agent.blocks.length : normalizeNonNegativeInt(existingUpstream.blockCount, 0),
@@ -5133,7 +5439,7 @@ app.post('/api/subconscious/upstream/session-start/:name', async (req, res) => {
         configPath: result.paths?.configPath || null,
         conversationsFile: result.paths?.conversationsFile || null,
         promptFile: result.paths?.promptFile || null,
-        session: sessionRecord,
+        session: persistedSessionRecord,
       },
       updatedAt: now,
     };
@@ -5201,6 +5507,8 @@ app.post('/api/subconscious/upstream/user-prompt/:name', async (req, res) => {
     const existingRuntimeUpstreamUserPrompt = (existingRuntimeUpstream.userPrompt && typeof existingRuntimeUpstream.userPrompt === 'object')
       ? existingRuntimeUpstream.userPrompt
       : {};
+    const persistedRuntimeUpstream = buildPersistedUpstreamState(existingRuntimeUpstream);
+    const persistedUpstream = buildPersistedUpstreamState(existingUpstream);
     const requestedAgentId = normalizeOptionalText(payload.lettaAgentId, 256);
     const configuredAgentId = normalizeOptionalText(process.env.LETTA_AGENT_ID, 256);
     const result = await syncUpstreamClaudeSubconsciousUserPrompt({
@@ -5240,10 +5548,14 @@ app.post('/api/subconscious/upstream/user-prompt/:name', async (req, res) => {
         : null,
       scriptPath: normalizeWorkspacePath(result.paths?.scripts?.syncMemory) || result.paths?.scripts?.syncMemory || null,
     };
+    const persistedUserPromptRecord = buildPersistedUpstreamRecord('userPrompt', {
+      ...existingRuntimeUpstreamUserPrompt,
+      ...userPromptRecord,
+    });
     const nextRuntimeMeta = {
       ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
       upstream: {
-        ...existingRuntimeUpstream,
+        ...persistedRuntimeUpstream,
         available: result.paths?.available === true,
         root: result.paths?.root || null,
         promptFile: result.paths?.promptFile || null,
@@ -5255,31 +5567,26 @@ app.post('/api/subconscious/upstream/user-prompt/:name', async (req, res) => {
         directReuse: mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse),
         bootstrapStatus: 'configured',
         blocker: null,
-        checkedAt: now,
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
         model: normalizeOptionalText(existingUpstream.model, 256)
           || normalizeOptionalText(existingRuntimeUpstream.model, 256)
           || null,
-        userPrompt: {
-          ...existingRuntimeUpstreamUserPrompt,
-          ...userPromptRecord,
-        },
+        userPrompt: persistedUserPromptRecord,
       },
       updatedAt: now,
     };
     const nextLetta = {
       ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
       upstream: {
-        ...existingUpstream,
+        ...persistedUpstream,
         bootstrapStatus: 'configured',
         blocker: null,
-        checkedAt: now,
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
         lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
-        userPrompt: {
+        userPrompt: buildPersistedUpstreamRecord('userPrompt', {
           ...existingUpstreamUserPrompt,
           ...userPromptRecord,
-        },
+        }),
       },
       updatedAt: now,
     };
@@ -5322,6 +5629,8 @@ app.post('/api/subconscious/upstream/pretool/:name', async (req, res) => {
     const existingRuntimeUpstreamPreTool = (existingRuntimeUpstream.preTool && typeof existingRuntimeUpstream.preTool === 'object')
       ? existingRuntimeUpstream.preTool
       : {};
+    const persistedRuntimeUpstream = buildPersistedUpstreamState(existingRuntimeUpstream);
+    const persistedUpstream = buildPersistedUpstreamState(existingUpstream);
     const requestedAgentId = normalizeOptionalText(payload.lettaAgentId, 256);
     const configuredAgentId = normalizeOptionalText(process.env.LETTA_AGENT_ID, 256);
     const result = await syncUpstreamClaudeSubconsciousPreTool({
@@ -5358,10 +5667,14 @@ app.post('/api/subconscious/upstream/pretool/:name', async (req, res) => {
       scriptPath: normalizeWorkspacePath(result.paths?.scripts?.pretoolSync) || result.paths?.scripts?.pretoolSync || null,
       toolName: toolName || null,
     };
+    const persistedPreToolRecord = buildPersistedUpstreamRecord('preTool', {
+      ...existingRuntimeUpstreamPreTool,
+      ...preToolRecord,
+    });
     const nextRuntimeMeta = {
       ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
       upstream: {
-        ...existingRuntimeUpstream,
+        ...persistedRuntimeUpstream,
         available: result.paths?.available === true,
         root: result.paths?.root || null,
         promptFile: result.paths?.promptFile || null,
@@ -5373,31 +5686,26 @@ app.post('/api/subconscious/upstream/pretool/:name', async (req, res) => {
         directReuse: mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse),
         bootstrapStatus: 'configured',
         blocker: null,
-        checkedAt: now,
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
         model: normalizeOptionalText(existingUpstream.model, 256)
           || normalizeOptionalText(existingRuntimeUpstream.model, 256)
           || null,
-        preTool: {
-          ...existingRuntimeUpstreamPreTool,
-          ...preToolRecord,
-        },
+        preTool: persistedPreToolRecord,
       },
       updatedAt: now,
     };
     const nextLetta = {
       ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
       upstream: {
-        ...existingUpstream,
+        ...persistedUpstream,
         bootstrapStatus: 'configured',
         blocker: null,
-        checkedAt: now,
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
         lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
-        preTool: {
+        preTool: buildPersistedUpstreamRecord('preTool', {
           ...existingUpstreamPreTool,
           ...preToolRecord,
-        },
+        }),
       },
       updatedAt: now,
     };
@@ -5442,6 +5750,8 @@ app.post('/api/subconscious/upstream/stop/:name', async (req, res) => {
     const existingRuntimeUpstreamStop = (existingRuntimeUpstream.stop && typeof existingRuntimeUpstream.stop === 'object')
       ? existingRuntimeUpstream.stop
       : {};
+    const persistedRuntimeUpstream = buildPersistedUpstreamState(existingRuntimeUpstream);
+    const persistedUpstream = buildPersistedUpstreamState(existingUpstream);
     const requestedAgentId = normalizeOptionalText(payload.lettaAgentId, 256);
     const configuredAgentId = normalizeOptionalText(process.env.LETTA_AGENT_ID, 256);
     const result = await syncUpstreamClaudeSubconsciousStop({
@@ -5481,10 +5791,14 @@ app.post('/api/subconscious/upstream/stop/:name', async (req, res) => {
         : null,
       scriptPath: normalizeWorkspacePath(result.paths?.scripts?.stopSend) || result.paths?.scripts?.stopSend || null,
     };
+    const persistedStopRecord = buildPersistedUpstreamRecord('stop', {
+      ...existingRuntimeUpstreamStop,
+      ...stopRecord,
+    });
     const nextRuntimeMeta = {
       ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
       upstream: {
-        ...existingRuntimeUpstream,
+        ...persistedRuntimeUpstream,
         available: result.paths?.available === true,
         root: result.paths?.root || null,
         promptFile: result.paths?.promptFile || null,
@@ -5496,31 +5810,26 @@ app.post('/api/subconscious/upstream/stop/:name', async (req, res) => {
         directReuse: mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse),
         bootstrapStatus: 'configured',
         blocker: null,
-        checkedAt: now,
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
         model: normalizeOptionalText(existingUpstream.model, 256)
           || normalizeOptionalText(existingRuntimeUpstream.model, 256)
           || null,
-        stop: {
-          ...existingRuntimeUpstreamStop,
-          ...stopRecord,
-        },
+        stop: persistedStopRecord,
       },
       updatedAt: now,
     };
     const nextLetta = {
       ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
       upstream: {
-        ...existingUpstream,
+        ...persistedUpstream,
         bootstrapStatus: 'configured',
         blocker: null,
-        checkedAt: now,
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
         lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
-        stop: {
+        stop: buildPersistedUpstreamRecord('stop', {
           ...existingUpstreamStop,
           ...stopRecord,
-        },
+        }),
       },
       updatedAt: now,
     };

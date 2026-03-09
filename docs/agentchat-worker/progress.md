@@ -1489,3 +1489,12 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   all returned `200`
 - Root-cause note from proof: my first isolated rerun failed because I forgot to pass `AGENTCHAT_HOMEDIR` to the web/backend processes; that was a proof-harness mistake, not an implementation bug.
 - Advanced the active worker plan to the next narrow slice: canonical runtime-profile writer path and launch-selection closure.
+## [2026-03-09 21:07] DONE — hotfixed MCP notifications to lead with `check_inbox()` and prepared stable cherry-pick
+- Root cause: actionable MCP notifications only mentioned `check_inbox()` mid-sentence, so agents could react to the title/summary and miss inbox context entirely.
+- Applied a minimal prompt-level mitigation in [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js) and [push-relay-core.js](/home/shisui/laplace/agent-chat/lib/push-relay-core.js):
+  - actionable notifications now start with `FIRST ACTION: call check_inbox() now`
+  - merged-unread notifications now lead with the same inbox-read gate instead of burying it later in the text
+- Verified syntax with:
+  - `node --check backend-v2.js`
+  - `node --check lib/push-relay-core.js`
+- This is intentionally a fast mitigation only; the deeper fix is still a framework-enforced inbox-read boundary rather than prompt wording alone.

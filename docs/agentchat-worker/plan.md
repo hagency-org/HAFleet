@@ -1,11 +1,11 @@
 ## Current
-Design the next minimal supervisor/runtime-profile slice: explicit canonical runtime-profile writer path plus launch-selection closure, without adding a second truth source.
+Review the next `runtimeProfile` canonical writer / launch-selection design slice and keep reminder-driven execution moving without acceptance gaps.
 Acceptance criteria:
-- one canonical writer path is defined for `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`
-- the writer updates the existing shared control-plane object rather than introducing a second runtime-profile file
-- primary launch and supervisor launch both read the same canonical runtime-profile object
-- the design explains how agent and sibling `supervisor/` workspace use the same profile without diverging
-- no UI expansion, no hook expansion, no planner/task-system expansion in this slice
+- design defines one canonical writer path for `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`
+- design explains how primary launch and sibling supervisor launch both read the same canonical object
+- no second runtime-profile truth source is introduced
+- reminder chain remains active until the design is accepted or rejected
+
 
 ## Queue
 1. Rebuild the web around environment grouping and first-class objects (`live/dev/benchmark/ephemeral`, canonical vs transitional states) before adding more summary concepts.

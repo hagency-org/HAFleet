@@ -158,6 +158,9 @@
 - Current sibling supervisor workspace contract:
   - each v1 home may now include a sibling `supervisor/` workspace with `CLAUDE.md`, `AGENTS.md`, `docs/plan.md`, and `docs/progress.md`;
   - this workspace is supervisor-local only and must not contain a second canonical task or runtime-profile file.
+- Notification root-cause and hotfix boundary:
+  - actionable MCP notifications were previously advisory only and buried `check_inbox()` mid-sentence, which made it easy for agents to react to the title/summary without reading inbox context;
+  - the current hotfix moves the inbox-read gate to the first visible action (`FIRST ACTION: call check_inbox() now`) in both backend and push-relay notification builders, but this is still a prompt-level mitigation, not a framework-enforced inbox-read boundary.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
