@@ -224,6 +224,9 @@
   - minimal required objects are `Task` and `Supervisor Agent State`;
   - `waiting` must be explicitly declared by the task owner with `waiting_reason` and `waiting_until`; supervisor should not infer safe waiting from silence alone;
   - supervisor classification should stay narrow: `active`, `normal_wait`, `stalled_wait`, `suspected_eos`.
+- Current notification delivery limitation:
+  - agent-chat backend notifications are title/summary nudges only; even when they say `Use check_inbox()` and `Read ALL messages`, the framework does not currently enforce an inbox read before the agent continues;
+  - this means an agent can incorrectly react to the notification title alone, log local state, and drift/EOS without ever pulling the real unread payloads from `check_inbox()`.
 - Supervisor workspace direction:
   - the supervisor should live beside the primary agent as its own workspace directory (`supervisor/`), with its own `CLAUDE.md`, `AGENTS.md`, and local task/progress state;
   - this keeps supervisor behavior explicit and agent-shaped instead of hiding it inside ambient reviewer logic.

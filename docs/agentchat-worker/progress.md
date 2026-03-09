@@ -1347,3 +1347,22 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `server.js` has the matching proxy/fallback changes in source
 - Did not accept this as a full dev-web deployment proof because the currently running port `8084` is an older web process that does not expose `/api/subconscious/detail/:name`; this is a separate runtime/web alignment issue, not a blocker for the backend/control-plane split itself.
 - Advanced the worker plan to the next architecture batch: canonical-vs-mirror subconscious state cleanup.
+## [2026-03-09 18:04] DONE — identified a systemic notification root cause behind repeated EOS/drift after acceptance
+- Root cause: backend-delivered `[NOTIFICATION] ... Use check_inbox()` messages are only advisory prompts injected into the pane. The framework does not currently require or prove that the target agent actually called `check_inbox()` before it continues.
+- Evidence in code:
+  - backend notification text explicitly instructs `Use check_inbox()` (`backend-v2.js`)
+  - init prompt also tells agents to use `check_inbox()` (`bin/agent-up`)
+  - there are monitoring rules such as `no_inbox_check_after_push`, but they are supervisory observations, not execution gates
+- Consequence: an agent can react only to the notification title/summary, record local acceptance state, and then drift into generic work (`Explain this codebase`) without ever reading the actual unread messages.
+- This is now treated as a framework-design problem, not an agent-personality problem.
+## [2026-03-09 18:07] DONE — accepted the subconscious canonical-source cleanup design and narrowed the next implementation slice
+- Reviewed [subconscious-canonical-source-cleanup-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/subconscious-canonical-source-cleanup-design.md) against the architecture contract instead of feature breadth.
+- Accepted the object model and correction order:
+  - durable upstream files are the canonical source for upstream session/hook progress
+  - `runtimeMeta.upstream.*` and `letta.upstream.*` are cache/fallback mirrors only
+  - event rows are canonical only for the event log itself
+  - generic `guidance*` fields remain compatibility summaries and must not outrank path-specific canonical objects
+- Narrowed the next implementation slice to:
+  1. make durable upstream files outrank mirrors when building upstream state
+  2. demote generic `guidance*` from canonical state surfaces
+  3. keep hook scope and UI scope unchanged

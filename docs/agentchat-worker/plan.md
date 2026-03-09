@@ -1,8 +1,8 @@
 ## Current
-Keep architecture-first execution active by cleaning up canonical-vs-mirror subconscious state now that the operational/debug split is accepted.
+Keep architecture-first execution active by implementing the first canonical-source cleanup slice for subconscious state.
 Acceptance criteria:
-- canonical subconscious objects have one clear writer/reader path each (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`, Letta bootstrap/session)
-- generic compatibility summaries (`stage`, `guidance*`, mirror-only fields) are explicitly demoted or bounded so they cannot outrank canonical state
+- durable upstream files (`conversations.json`, `session-<session>.json`) outrank `runtimeMeta.upstream.*` and `letta.upstream.*` mirrors when building upstream state
+- generic `guidance*` compatibility fields are explicitly demoted so they cannot outrank path-specific canonical objects
 - the accepted upstream-backed dev baseline on Yato remains stable
 - no new hook path and no UI expansion are introduced while making this correction
 
