@@ -1402,3 +1402,20 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `conversation.current.latestGuidanceAt`, `latestGuidanceSource`
 - Root cause: the slice cleaned persistence first but did not finish the served truth surface; `buildSubconsciousUpstreamContract()` and conversation-derived summaries still emit synthetic timing/status mirrors as object state.
 - Decision: reject the slice until default detail stops presenting those fields as canonical state and only justified debug-only fields remain behind privileged access.
+## [2026-03-09 19:17] DONE — accepted the corrected synthetic status/timestamp cleanup slice after live route-surface proof
+- Independently accepted the correction only after re-checking the real dev backend (`18190`) rather than relying on the worker report.
+- Verified the previously rejected default-detail leaks are now gone from `GET /api/subconscious/detail/Yato`:
+  - `upstream.bootstrap.checkedAt`
+  - `upstream.session.checkedAt`
+  - `upstream.userPrompt.checkedAt`, `attemptedAt`, `messageSentAt`, `transcriptLineCount`, `lastProcessedIndexBefore`
+  - `upstream.preTool.checkedAt`, `attemptedAt`, `newMessageCount`, `changedBlockCount`, `lastSeenMessageIdBefore`
+  - `upstream.stop.checkedAt`, `attemptedAt`, `transcriptMessageCount`, `newMessageCount`
+  - `conversation.current.latestGuidanceAt`, `latestGuidanceSource`, `latestGuidancePreview`
+- Verified the accepted upstream baseline stayed stable on the same live route:
+  - `stage=upstream-pretool-lifecycle`
+  - `upstream.session.status=started`
+  - `upstream.userPrompt.status=sent`
+  - `upstream.preTool.status=seeded-baseline`
+  - `upstream.stop.status=not-run`
+- Confirmed `?debug=1` no longer reintroduces the rejected synthetic timing/counter mirrors as object state for this slice.
+- Root-cause note: the initial implementation cleaned persisted mirrors correctly, but acceptance had to be blocked until `buildOperationalSubconsciousContract()` stopped leaking the same synthetic timing/counter fields on the served default-detail surface.
