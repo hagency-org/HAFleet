@@ -1,9 +1,9 @@
 ## Current
-Drive a post-authority `stable-merge readiness delta audit` so `master -> stable` is blocked only by explicit, current structural gates.
+Drive the `v1 compatibility mirror / duplicate persistence boundary` design for stable so `master -> stable` is blocked only by explicit, current structural gates.
 Acceptance criteria:
-- accept or correct a design-only delta audit from `agentchat-develop`
-- enumerate exactly which structural blockers still remain after authority-boundary convergence
-- separate blockers from non-blockers without expanding scope into new hooks/UI
+- accept or correct a design-only mirror-boundary contract from `agentchat-develop`
+- make the canonical writer/reader set explicit against compatibility-only mirror responsibilities
+- decide whether stable should freeze the mirror as a required long-term surface or demote it to strict compatibility export only
 - keep scope architecture-first; no hook expansion, no UI expansion, no generic audit sprawl
 
 
