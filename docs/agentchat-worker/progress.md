@@ -1605,6 +1605,13 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   1. after trailing expiry with no valid waiting/done, classification flips to `suspected_eos` but `lifecycleReason` still says the supervisor is active because the primary task is active;
   2. no-task state is internally contradictory (`classification=suspected_eos` while lifecycle says `idle because there is no canonical task to supervise`), so `no task / no unresolved negative state` is not yet modeled coherently.
 - Sent narrow correction `msg_77666` to `agentchat-develop`; scope remains limited to lifecycle truthfulness and no-task semantics.
+## [2026-03-09 23:36] DONE — accepted lifecycle truthfulness correction and moved to supervisor runtime-launch design
+- Independently re-proved the two previously blocked lifecycle cases against the real `SupervisorService.deriveObservation()` path after the narrow fix in [supervisor/index.js](/home/shisui/laplace/agent-chat/supervisor/index.js).
+- Verified:
+  - trailing-expiry negative state now keeps `classification = suspected_eos`, lifecycle `active`, and a negative-state lifecycle reason
+  - no-task semantics are now coherent: `classification = null`, lifecycle `idle`, and an explicit no-task/no-negative-state lifecycle reason
+- Accepted the correction because it fixes the last lifecycle truth mismatches without widening scope into UI, hooks, or orchestration.
+- Sent `agentchat-develop` to the next design-only batch (`msg_77668`): first real supervisor runtime-launch slice using the accepted sibling workspace and canonical `runtimeProfile.supervisor`.
 ## [2026-03-09 22:12] PARTIAL — corrected develop drift and re-armed inbox-gate follow-up
 - After runtime-profile acceptance, `agentchat-develop` drifted back to a generic `Explain this codebase` prompt instead of continuing the active inbox-read gate design batch.
 - Re-sent a hard correction (`msg_77638`) that narrows scope back to design-only for the framework-enforced inbox-read boundary.

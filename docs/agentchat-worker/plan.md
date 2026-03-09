@@ -1,13 +1,11 @@
 ## Current
-Implement the agent-shaped supervisor activation/lifecycle slice so supervisor runtime truthfully follows the primary agent, bounded trailing supervision, and canonical supervisor runtime-profile selection.
+Design the first real supervisor runtime-launch slice so a sibling supervisor process can be started from canonical lifecycle state without introducing a second truth source.
 Acceptance criteria:
-- active primary task keeps supervisor runtime active
-- valid `normal_wait` idles supervisor runtime
-- primary idle enters bounded trailing supervision while remaining active
-- trailing expiry with no safe state does not silently idle the supervisor
-- done eventually idles supervisor after the bounded completion tail
-- sibling `supervisor/` workspace remains local-only and does not become a second truth source
-- canonical `runtimeProfile.supervisor` selection remains stable
+- design defines when lifecycle state causes a real sibling supervisor runtime to launch vs remain idle
+- design defines how `supervisor/` workspace is used as cwd/home without becoming canonical task/runtimeProfile state
+- design defines how canonical `runtimeProfile.supervisor` drives framework/provider/model/args for that launch
+- design maps supervisor start/stop/idle decisions onto the accepted lifecycle state machine
+- design includes the minimum implementation proof
 - no UI expansion, no hook expansion, no orchestration/planning sprawl
 
 

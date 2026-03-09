@@ -199,6 +199,9 @@
   - supervisor may become `idle` only for valid `normal_wait`, done after tail expiry, or no canonical task with no unresolved negative state;
   - sibling `supervisor/` workspace is the supervisor runtime's local workspace only and must never become a second `task` or `runtimeProfile` source;
   - runtime-profile selection for supervisor lifecycle uses canonical precedence: `runtimeProfile.supervisor` -> `runtimeProfile.primary` fallback -> launcher defaults.
+- Lifecycle truthfulness correction boundary:
+  - trailing-expiry negative states must keep lifecycle `active` for the negative-state reason, not the generic `primary task is active` reason;
+  - no-task semantics must be coherent: `classification = null`, lifecycle `idle`, and an explicit no-task/no-negative-state reason.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
