@@ -1544,6 +1544,19 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - it clearly distinguishes the existing prompt hotfix from a framework-enforced gate
 - Rejected no part of the design; it does not sprawl into UI, hooks, or a generic task system.
 - Sent implementation scope back to `agentchat-develop` as slice-1 only (`msg_77641`).
+## [2026-03-09 22:51] DONE — accepted inbox-read gate slice-1 and returned to minimal supervisor design
+- Independently re-proved the inbox-read gate slice on isolated backend `19148` with runtime root [/tmp/agentchat-inboxgate-worker-KVAGYS](/tmp/agentchat-inboxgate-worker-KVAGYS).
+- Verified outcomes:
+  - actionable delivery for `msg_0001` raised canonical `inboxGate`
+  - outbound `POST /api/messages` before inbox acknowledgement returned `409 inbox_check_required`
+  - real `GET /api/inbox/Beta` consumed `msg_0001`, cleared the gate, and wrote `inboxReadAck`
+  - the same outbound action then succeeded
+  - later non-actionable delivery left `inboxGate.requiresInboxCheck=false`
+- Accepted boundary remains narrow:
+  - canonical `inboxGate` + `inboxReadAck`
+  - runtime enforcement at outbound message boundary
+  - no UI expansion, no hook expansion, no task-system broadening
+- Sent `agentchat-develop` back to the next design-only supervisor batch (`msg_77644`): canonical waiting declarations plus trailing-heartbeat classification.
 ## [2026-03-09 22:12] PARTIAL — corrected develop drift and re-armed inbox-gate follow-up
 - After runtime-profile acceptance, `agentchat-develop` drifted back to a generic `Explain this codebase` prompt instead of continuing the active inbox-read gate design batch.
 - Re-sent a hard correction (`msg_77638`) that narrows scope back to design-only for the framework-enforced inbox-read boundary.

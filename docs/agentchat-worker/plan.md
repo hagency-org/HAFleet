@@ -1,12 +1,11 @@
 ## Current
-Implement inbox-read gate slice-1 so actionable notifications raise a canonical gate and outbound progress/reply actions cannot bypass a real `check_inbox()` read.
+Design the next minimal supervisor slice so waiting declarations and trailing-heartbeat classification can distinguish `normal_wait`, `stalled_wait`, and `suspected_eos` without creating a second task source.
 Acceptance criteria:
-- actionable notification delivery persists canonical `inboxGate`
-- outbound progress/reply before inbox acknowledgement is denied by the runtime boundary
-- successful `check_inbox()` cursor advance for the pending `sourceMsgId` clears the gate
-- the same outbound action then succeeds
-- non-actionable notifications do not raise the gate
-- no UI expansion, no hook expansion, no task-system sprawl
+- design defines canonical `waiting_reason` / `waiting_until` usage on the primary task object
+- design defines supervisor trailing-heartbeat behavior after primary agent idles
+- design explains how `normal_wait`, `stalled_wait`, and `suspected_eos` derive from canonical task state and time
+- design includes minimal implementation proof requirements
+- no UI expansion, no hook expansion, no planner/task-system sprawl
 
 
 ## Queue

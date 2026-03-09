@@ -179,6 +179,11 @@
   - canonical gate object is `inboxGate{requiresInboxCheck, sourceMsgId, raisedAt, reason}`;
   - canonical acknowledgement is a real `check_inbox()` cursor advance that consumes the pending `sourceMsgId`, not merely a tool call named `check_inbox()`;
   - enforcement belongs at the runtime boundary before outbound progress/reply actions, not in notification wording and not in backend-only delivery logic.
+- Inbox-read gate slice-1 accepted boundary:
+  - actionable delivery raises canonical `inboxGate` only after successful delivery bookkeeping (`POST /api/runtime/push-delivered`);
+  - `GET /api/inbox/:agent` clears the gate only when the pending `sourceMsgId` is actually consumed by that cursor advance;
+  - outbound agent messages (`POST /api/messages`) are blocked with `409 inbox_check_required` while the gate is pending;
+  - non-actionable deliveries must leave `inboxGate.requiresInboxCheck=false`.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
