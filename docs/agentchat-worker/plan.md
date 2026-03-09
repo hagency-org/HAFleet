@@ -1,15 +1,22 @@
 ## Current
-Define the next minimal supervisor slice: canonical Task writer paths, explicit waiting declarations, sibling `supervisor/` workspace placement, and runtime-profile schema usage after slice-1 acceptance.
+Implement the next minimal supervisor slice: explicit primary task-writer path plus sibling `supervisor/` workspace scaffolding, without introducing a second truth source.
 Acceptance criteria:
-- design note defines the minimal canonical writer paths for `Task` state:
-  - who writes `task.id`
-  - who refreshes `heartbeat_at`
-  - who sets `waiting_reason + waiting_until`
-  - who marks `done`
-- design note defines how a supervisor workspace lives beside the primary agent workspace (`supervisor/`) without inventing a second hidden state model
-- design note fixes the canonical runtime-profile schema and where launchers read it from
-- design note keeps existing supervisor route names stable
-- no implementation, no hook expansion, no UI expansion in this batch
+- one explicit primary-agent task-writer path exists for:
+  - `task.id`
+  - `heartbeat_at`
+  - `waiting_reason`
+  - `waiting_until`
+  - `done`
+- the writer updates the existing canonical control-plane state rather than creating a second `task.json`
+- sibling `supervisor/` workspace scaffold exists beside the primary workspace with:
+  - `supervisor/CLAUDE.md`
+  - `supervisor/AGENTS.md`
+  - `supervisor/docs/plan.md`
+  - `supervisor/docs/progress.md`
+- runtime-profile schema usage stays on the accepted string-based role schema:
+  - `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`
+- existing supervisor route names stay stable
+- no UI expansion and no hook expansion in this slice
 
 ## Queue
 1. Rebuild the web around environment grouping and first-class objects (`live/dev/benchmark/ephemeral`, canonical vs transitional states) before adding more summary concepts.

@@ -250,3 +250,7 @@
 - Runtime profile canonical schema in slice 1 is string-based per role:
   - `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`
   - `reasoningProfile` and array-valued `extraArgs` are not canonical accepted fields in current storage/launch wiring.
+- Minimal supervisor slice-2 design accepted boundary:
+  - the primary agent-side task writer is the only canonical writer for `task.id`, `heartbeat_at`, `waiting_reason`, `waiting_until`, and `done`;
+  - supervisor remains a reader/classifier only and must not mutate primary task state;
+  - sibling `supervisor/` workspace is allowed for supervisor-local docs/state, but it must not introduce a second canonical `Task` or `runtimeProfile` source.

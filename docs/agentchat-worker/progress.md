@@ -1450,3 +1450,13 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Root-cause note from verification:
   - earlier failed proofs were caused by proof harness mistakes (`NO_PROXY` missing, unseeded agent records, stale timestamps reused across sweeps), not by the accepted implementation itself.
 - Advanced the active worker plan to the next design batch: canonical Task writer paths, explicit waiting declarations, sibling `supervisor/` workspace placement, and runtime-profile schema usage after slice-1 acceptance.
+## [2026-03-09 20:32] DONE — accepted minimal supervisor slice-2 design and moved to implementation
+- Reviewed [task-writer-workspace-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/task-writer-workspace-design.md) against the frozen supervisor bible and the accepted slice-1 boundary.
+- Accepted the design because it stays narrow:
+  - primary agent-side task writer is the only canonical writer for `task.id`, `heartbeat_at`, `waiting_reason`, `waiting_until`, and `done`
+  - supervisor remains reader/classifier only
+  - sibling `supervisor/` workspace is explicit but does not create a second canonical `Task` or `runtimeProfile` state model
+  - runtime-profile schema remains the accepted string-based role schema
+  - existing supervisor route names remain stable
+- Rejected no part of the design; it does not drift into UI, hooks, or planner sprawl.
+- Advanced the active worker plan to implementation of the explicit primary task-writer path and sibling `supervisor/` workspace scaffolding.
