@@ -1562,3 +1562,7 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Re-sent a hard correction (`msg_77638`) that narrows scope back to design-only for the framework-enforced inbox-read boundary.
 - Replaced the stale reminder with `#2084` so the next follow-up explicitly requires: inspect inbox + tmux, review immediately if delivered, and queue the next reminder before closing the loop.
 - Root cause remains structural: the prompt-level `check_inbox()` hotfix helps, but without a framework-enforced inbox-read gate, title-only notification handling can still let an executor drift after acceptance.
+## [2026-03-09 23:07] PARTIAL — corrected develop drift after inbox-gate acceptance
+- Reminder-driven check showed `agentchat-develop` had not started the minimal supervisor waiting/trailing-heartbeat design batch and had drifted back to a generic `Explain this codebase` prompt after recording local acceptance state.
+- Re-sent a hard correction (`msg_77650`) that narrows scope back to design-only for canonical `waiting_reason` / `waiting_until` plus trailing-heartbeat classification.
+- Re-armed the next follow-up as reminder `#2095` with the explicit loop: inspect inbox + tmux, review immediately if delivered, then queue the next reminder before closing the loop.
