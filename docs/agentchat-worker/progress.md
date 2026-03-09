@@ -1337,3 +1337,13 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Committed and pushed the architecture patch as `2c28d05` (`docs(agentchat-worker): extend supervisor bible with runtime profiles`).
 - Re-sent a narrow correction to `agentchat-develop` so it returns to the active subconscious `operational-vs-debug split` batch instead of drifting into generic codebase explanation.
 - Attempted to add a fresh reminder, but the existing pending reminder `#2060` already covered the same follow-up window, so no duplicate reminder was added.
+## [2026-03-09 18:01] DONE — accepted the subconscious operational/debug detail split at the backend truth boundary
+- Independently verified the accepted boundary on the live dev backend route (`http://127.0.0.1:18190/api/subconscious/detail/Yato`):
+  - default detail no longer exposes privileged fields such as `runtime.settingsPath`, `runtime.pluginRoot`, `upstream.userPrompt.transcriptPath`, `upstream.preTool.syncStateFile`, `conversation.currentTranscriptPath`, or runtime guidance previews
+  - `?debug=1` on the backend route still truthfully exposes those fields for privileged/local inspection
+  - accepted upstream-backed status remains stable in default detail: `stage=upstream-pretool-lifecycle`, `session=started`, `userPrompt=sent`, `preTool=no-updates`, `stop=not-run`
+- Confirmed the implementation is narrow and architecture-consistent:
+  - `backend-v2.js` now serves an operational contract by default and reserves raw path/text internals for privileged debug access
+  - `server.js` has the matching proxy/fallback changes in source
+- Did not accept this as a full dev-web deployment proof because the currently running port `8084` is an older web process that does not expose `/api/subconscious/detail/:name`; this is a separate runtime/web alignment issue, not a blocker for the backend/control-plane split itself.
+- Advanced the worker plan to the next architecture batch: canonical-vs-mirror subconscious state cleanup.
