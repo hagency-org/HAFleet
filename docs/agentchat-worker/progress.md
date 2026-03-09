@@ -1625,3 +1625,7 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Reminder-driven follow-up showed `agentchat-develop` had not started the supervisor activation/lifecycle design batch and had drifted back to a generic `Explain this codebase` prompt after recording local acceptance state.
 - Re-sent a hard correction (`msg_77660`) that narrows scope back to the design-only activation/lifecycle note.
 - Re-armed the next follow-up as reminder `#2103` so the review loop stays explicit: inspect inbox + tmux, review immediately if delivered, and queue the next reminder before closing the loop.
+## [2026-03-09 23:45] PARTIAL — corrected develop drift before supervisor runtime-launch design started
+- Reminder-driven follow-up showed `agentchat-develop` had not started the supervisor runtime-launch design batch and had drifted back to a generic `Explain this codebase` prompt after recording local acceptance state.
+- Re-sent a hard correction (`msg_77669`) that narrows scope back to the design-only runtime-launch note.
+- Re-armed the next follow-up as reminder `#2111` so the review loop stays explicit: inspect inbox + tmux, review immediately if delivered, and queue the next reminder before closing the loop.
