@@ -1,9 +1,9 @@
 ## Current
-Drive the `supervisor runtime operational ownership contract` design for stable so `master -> stable` is blocked only by explicit, current structural gates.
+Drive the `supervisor runtime operational ownership` implementation slice for stable so `master -> stable` is blocked only by explicit, current structural gates.
 Acceptance criteria:
-- accept or correct a design-only supervisor runtime operational ownership note from `agentchat-develop`
-- make binary ownership, env ownership, credential/runtime-profile ownership, launch-failure reporting semantics, and supported deployment shape explicit for stable
-- keep the batch architecture-first without expanding scope into new code/UI/hook work
+- accept or correct the narrow implementation slice that makes `runtimeLaunch` failure taxonomy explicit for the supported local sibling shape
+- verify lifecycle truth stays untouched while runtime launch failures are surfaced distinctly
+- keep the batch architecture-first without expanding scope into new UI/hook/supervisor feature work
 - keep scope architecture-first; no hook expansion, no UI expansion, no generic audit sprawl
 
 
