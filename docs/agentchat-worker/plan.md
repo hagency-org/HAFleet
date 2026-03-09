@@ -1,8 +1,9 @@
 ## Current
-Keep architecture-first execution active by narrowing the second canonical-source cleanup slice after mirrors were demoted behind durable upstream files.
+Keep architecture-first execution active by implementing the synthetic status/timestamp cleanup slice for subconscious state.
 Acceptance criteria:
-- remaining route-written synthetic status/timestamp fields (`checkedAt`, `attemptedAt`, `messageSentAt`, `injectedAt`, synthetic status labels) are explicitly bounded so they cannot be mistaken for canonical upstream truth
-- `stage` remains presentation-only and is documented/treated as such
+- `checkedAt` and related stored freshness mirrors no longer present themselves as canonical object state
+- route-run timing fields and delta counters move behind privileged debug detail or response-only metadata
+- synthetic status labels remain presentation-only and are recomputed from canonical files at read time
 - the accepted upstream-backed dev baseline on Yato remains stable
 - no new hook path and no UI expansion are introduced while making this correction
 

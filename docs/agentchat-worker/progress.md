@@ -1380,3 +1380,14 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Residual truthfulness note:
   - `upstream.preTool.status` is still a synthetic summary label; in poisoned-mirror proof it falls back to `seeded-baseline`, which is acceptable as a presentation summary but not as canonical upstream truth
 - Next slice should therefore narrow to the remaining synthetic status/timestamp layer (`checkedAt`, `attemptedAt`, `messageSentAt`, `injectedAt`, synthetic status labels) rather than widening scope.
+## [2026-03-09 18:17] DONE — accepted the synthetic status/timestamp boundary design and moved to the next cleanup implementation slice
+- Reviewed [subconscious-synthetic-status-timestamp-boundary-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/subconscious-synthetic-status-timestamp-boundary-design.md) against the architecture contract.
+- Accepted the classification:
+  - presentation-only: synthetic status labels and summary booleans
+  - debug-only: route-run timing fields and delta counters
+  - remove/recompute: stored `checkedAt` and persisted synthetic timing/status mirrors
+- The design is narrow enough and keeps the right object boundary:
+  - no hook expansion
+  - no UI expansion
+  - no new synthetic concepts
+- Advanced the active worker plan to the implementation slice for this synthetic layer cleanup.
