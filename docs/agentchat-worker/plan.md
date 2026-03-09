@@ -1,10 +1,15 @@
 ## Current
-Review the next `runtimeProfile` canonical writer / launch-selection design slice and keep reminder-driven execution moving without acceptance gaps.
+Implement the next minimal runtime-profile slice: explicit v1 writer surface plus canonical launch-selection closure, without introducing a second truth source.
 Acceptance criteria:
-- design defines one canonical writer path for `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`
-- design explains how primary launch and sibling supervisor launch both read the same canonical object
-- no second runtime-profile truth source is introduced
-- reminder chain remains active until the design is accepted or rejected
+- one explicit v1 writer surface exists for `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`
+- that writer goes through the existing canonical home-metadata path rather than creating a `workdir/runtime-profile.json` or `supervisor/runtime-profile.json`
+- primary launch and supervisor launch both read the same canonical runtime-profile object
+- launch-selection precedence is explicit and verified:
+  - canonical role object
+  - legacy compatibility fields only if canonical role object is absent
+  - process defaults only if neither exists
+- existing route names stay stable
+- no UI expansion and no hook expansion in this slice
 
 
 ## Queue

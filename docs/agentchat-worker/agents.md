@@ -158,6 +158,11 @@
 - Current sibling supervisor workspace contract:
   - each v1 home may now include a sibling `supervisor/` workspace with `CLAUDE.md`, `AGENTS.md`, `docs/plan.md`, and `docs/progress.md`;
   - this workspace is supervisor-local only and must not contain a second canonical task or runtime-profile file.
+- Current runtime-profile canonical contract:
+  - `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}` is the accepted canonical object shape;
+  - live/non-v1 canonical writer paths remain `POST /api/agents` and `PATCH /api/agents/:name`;
+  - v1 canonical writer path remains `PATCH /api/agents/:name/home-metadata`, with `agent.json` as the canonical v1 file and runtime/meta mirrors only for compatibility and visibility;
+  - primary launch (`bin/agent-up`) and supervisor launch (`bin/agent-up` env export + `supervisor/config.js`) must read the same canonical object, not private launcher-owned files.
 - Notification root-cause and hotfix boundary:
   - actionable MCP notifications were previously advisory only and buried `check_inbox()` mid-sentence, which made it easy for agents to react to the title/summary without reading inbox context;
   - the current hotfix moves the inbox-read gate to the first visible action (`FIRST ACTION: call check_inbox() now`) in both backend and push-relay notification builders, but this is still a prompt-level mitigation, not a framework-enforced inbox-read boundary.

@@ -1498,3 +1498,15 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `node --check backend-v2.js`
   - `node --check lib/push-relay-core.js`
 - This is intentionally a fast mitigation only; the deeper fix is still a framework-enforced inbox-read boundary rather than prompt wording alone.
+## [2026-03-09 21:18] DONE — accepted runtime-profile writer/launch-selection design and moved to implementation
+- Reviewed [runtime-profile-writer-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/runtime-profile-writer-design.md) against the accepted supervisor/task-writer contract.
+- Accepted because it stays narrow and preserves the control-plane split:
+  - canonical object remains `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`
+  - live/non-v1 writer paths remain `POST /api/agents` and `PATCH /api/agents/:name`
+  - v1 writer path remains `PATCH /api/agents/:name/home-metadata`
+  - `agent.json` stays the canonical v1 runtime-profile file
+  - primary launch and sibling supervisor launch both read the same canonical object
+  - no `workdir/runtime-profile.json`, no `supervisor/runtime-profile.json`, no launcher-owned writeback file
+- Rejected no part of the design; it does not drift into UI, hooks, or a second config plane.
+- Root-cause note: the design acceptance is good, but `agentchat-develop` again drifted back to a generic `Explain this codebase` prompt after sending the note, so reminder-driven correction remains necessary until the supervisor path hardens that behavior structurally.
+- Advanced the active worker plan to the implementation slice for an explicit v1 runtime-profile writer surface and verified launch-selection precedence.
