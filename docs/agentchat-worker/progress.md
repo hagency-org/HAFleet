@@ -1291,3 +1291,19 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Verified `docs/agentchat-develop/agents.md` now records the durable security root cause (`/api/subconscious/events` is still observational telemetry until the handler enforces token or strict local-only ingest) and demotes top-level `stage` / generic `guidance*` fields to derived compatibility summaries.
 - Verified `docs/agentchat-develop/progress.md` records the accepted upstream-backed baseline (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`) and the design-only event/security review state.
 - Non-blocking note: `agentchat-develop` docs are still dirty/uncommitted locally, and the review note appears twice in `progress.md`; this does not change the accepted next-batch boundary.
+## [2026-03-09 17:40] DONE — accepted the subconscious event-ingest trust-boundary correction after independent isolated proof
+- Independently re-ran the event-ingest proof on an isolated backend with:
+  - `API_TOKEN=proof-api-token`
+  - `AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN=proof-event-token`
+  - random localhost proof port
+- Verified the route now enforces the intended boundary:
+  - proxied unauthenticated request -> `401 {"error":"unauthorized"}`
+  - proxied request with only `Bearer proof-api-token` -> `401 {"error":"invalid subconscious event token","ingestBoundary":"token-required"}`
+  - proxied request with only `Bearer proof-event-token` -> `200 {"ok":true,"ingestBoundary":"token"}`
+  - localhost request with no token -> `200 {"ok":true,"ingestBoundary":"local"}`
+- Verified the key compatibility fix claimed by `agentchat-develop`: when `API_TOKEN` is enabled, the global `/api` auth middleware now allows the subconscious event token through only for `POST /api/subconscious/events`, so the route-level check is reachable.
+- Acceptance boundary:
+  - event ingestion now has a real trust boundary
+  - local hook-runtime posting remains compatible on the localhost path
+  - event rows are still observational telemetry, not canonical state
+- Next active batch moves to the operational-vs-debug subconscious detail split, with no new hook path and no UI expansion.

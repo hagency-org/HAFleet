@@ -1974,6 +1974,38 @@ function isLocalRequest(req) {
   return LOCALHOST_IPS.has(ip);
 }
 
+function getBearerToken(req) {
+  const raw = typeof req?.headers?.authorization === 'string' ? req.headers.authorization.trim() : '';
+  if (!raw) return null;
+  const match = raw.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : null;
+}
+
+function authorizeSubconsciousEventIngest(req) {
+  if (isLocalRequest(req)) {
+    return { ok: true, mode: 'local' };
+  }
+  const expectedToken = normalizeOptionalText(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN, 512);
+  if (!expectedToken) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'subconscious event ingest is local-only unless AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN is configured',
+      mode: 'local-only',
+    };
+  }
+  const providedToken = getBearerToken(req);
+  if (providedToken === expectedToken) {
+    return { ok: true, mode: 'token' };
+  }
+  return {
+    ok: false,
+    status: 401,
+    error: 'invalid subconscious event token',
+    mode: 'token-required',
+  };
+}
+
 // ── In-memory state ───────────────────────────────────────────────────
 const agents = loadJsonSync('agents.json', {});
 const groups = loadJsonSync('groups.json', {});
@@ -4201,6 +4233,7 @@ async function pushNotify(agentName, msg) {
 const app = express();
 app.set('trust proxy', 'loopback');  // trust nginx on localhost, use X-Forwarded-For for real IP
 const API_TOKEN = process.env.API_TOKEN;
+const SUBCONSCIOUS_EVENT_TOKEN = normalizeOptionalText(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN, 512);
 app.use((req, res, next) => {
   // Skip global JSON parser for large-upload routes (they have route-specific limits).
   if (req.method === 'POST' && (req.path.endsWith('/avatar') || req.path === '/api/media/stage')) return next();
@@ -4222,6 +4255,10 @@ app.use('/api', (req, res, next) => {
   const ip = req.ip || req.connection?.remoteAddress;
   if (['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) return next();
   const auth = req.headers.authorization;
+  const apiPath = typeof req.path === 'string' ? req.path : '';
+  if (req.method === 'POST' && apiPath.endsWith('/subconscious/events') && SUBCONSCIOUS_EVENT_TOKEN && auth === `Bearer ${SUBCONSCIOUS_EVENT_TOKEN}`) {
+    return next();
+  }
   if (auth === `Bearer ${API_TOKEN}`) return next();
   return res.status(401).json({ error: 'unauthorized' });
 });
@@ -4811,6 +4848,13 @@ app.post('/api/runtime/push-delivered', (req, res) => {
 });
 
 app.post('/api/subconscious/events', (req, res) => {
+  const authz = authorizeSubconsciousEventIngest(req);
+  if (!authz.ok) {
+    return res.status(authz.status).json({
+      error: authz.error,
+      ingestBoundary: authz.mode,
+    });
+  }
   const body = req.body || {};
   const event = buildSubconsciousEvent({
     ...body,
@@ -4885,6 +4929,7 @@ app.post('/api/subconscious/events', (req, res) => {
   if (state && conversation) applyConversationSnapshotToContract(state, conversation);
   return res.json({
     ok: true,
+    ingestBoundary: authz.mode,
     event,
     conversation,
   });

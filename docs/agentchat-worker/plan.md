@@ -1,13 +1,13 @@
 ## Current
-Keep architecture-first execution active by landing the first correction batch from the accepted subconscious event/security review: harden event ingestion and separate default operational detail from privileged debug exposure.
+Keep architecture-first execution active by landing the second correction batch from the accepted subconscious event/security review: split default operational subconscious detail from privileged debug exposure without widening hook or UI scope.
 Acceptance criteria:
 - accepted upstream slices remain stable on Yato (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`)
-- `/api/subconscious/events` gains a real trust boundary instead of accepting unauthenticated caller-supplied telemetry wholesale
-- the default subconscious detail surface stops exposing absolute paths and full text previews that are not required for operational state
-- no new hook path or UI expansion is introduced while making these corrections
+- the default subconscious detail surface no longer exposes absolute local paths or broad text previews that are not required for operational state
+- privileged/debug-only fields are moved behind a clearly separate debug surface or response shape
+- no new hook path and no UI expansion are introduced while making this correction
 
 ## Queue
-1. Canonical-source cleanup for subconscious mirrors after the security boundary is fixed: assign one reader/writer per object and demote derived mirror fields.
+1. Canonical-source cleanup for subconscious mirrors after the operational/debug split is fixed: assign one reader/writer per object and demote derived mirror fields.
 2. Rebuild the web around environment grouping and first-class objects (`live/dev/benchmark/ephemeral`, canonical vs transitional states) before adding more summary concepts.
 3. Start benchmark Batch 4 (result UI) only after the object model is stable enough not to fork benchmark product language from core system language.
 4. Expose the per-agent config model in the unified web management page (MCP, hooks, skills, related runtime knobs) once its first-class objects and truth sources are defined.

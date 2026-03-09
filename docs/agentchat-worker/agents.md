@@ -205,8 +205,12 @@
   - a second identical `PreToolUse` call for the same session must truthfully no-op (`status=no-updates`) without advancing the durable markers again;
   - route response and `/api/subconscious/detail/:name` must converge on those same durable markers and the same `conversationId`.
 - Current subconscious event-ingest boundary is not yet trustworthy:
-  - the hook runtime can send `Authorization: Bearer <AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN>`, but `/api/subconscious/events` does not currently enforce that token or a strict local-only boundary in the handler;
-  - event rows therefore remain observational telemetry only and must not be treated as canonical policy/security state.
+  - the hook runtime can send `Authorization: Bearer <AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN>`;
+  - `/api/subconscious/events` now enforces a route-specific ingest boundary:
+    - localhost requests are accepted as `ingestBoundary=local`
+    - non-local requests require the shared event token and are marked `ingestBoundary=token`
+  - when `API_TOKEN` is enabled, the global `/api` auth middleware must explicitly allow the subconscious event token through for this route, or the route-level trust check becomes unreachable;
+  - even after this hardening, event rows remain observational telemetry rather than canonical policy/security state.
 - Current subconscious generic `guidance*` fields are derived compatibility fields, not canonical objects:
   - they currently collapse manual guidance, local runtime guidance, and upstream `PreToolUse` injection into one summary vocabulary;
   - canonical consumers should prefer object-led fields (`manualGuidance`, `runtime`, `upstream.userPrompt`, `upstream.preTool`, `upstream.stop`) instead of generic `guidancePresent/guidanceInjected/guidanceSource`.
