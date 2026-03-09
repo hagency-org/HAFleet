@@ -211,6 +211,10 @@
   - real sibling supervisor runtimes now use deterministic tmux session names `supervisor-<agent>` and persist `runtimeLaunch` through `SupervisorStateStore`, `getStatus()`, and `getAgentDetail()`;
   - keep-alive must be idempotent (no relaunch churn), `normal_wait`/clean-idle must suppress or stop launch, and negative states must keep the runtime alive;
   - tmux launch env must carry explicit `PATH`, or a pane can exist while `claude`/`codex` resolution silently fails.
+- Supervisor runtime failure-taxonomy boundary:
+  - supported explicit `runtimeLaunch.failureType` values are `unsupported-framework`, `missing-workspace`, `missing-binary`, `missing-credential-env`, and `tmux-launch-failed`;
+  - `runtimeLaunch.binaryName` and `runtimeLaunch.requiredCredentialEnv` are observational launch diagnostics only and do not change canonical task/classification/lifecycle truth;
+  - launch/runtime failures must surface through `runtimeLaunch.status=launch-failed` while classification/lifecycle remain derived from canonical task state plus supervision rules.
 - Stable subconscious authority boundary:
   - upstream Letta durable state is the single canonical stable subconscious behavior path;
   - manual guidance in `state/letta.json` is fallback/configuration only;

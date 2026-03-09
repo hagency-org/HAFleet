@@ -1,9 +1,8 @@
 ## Current
-Drive the `supervisor runtime operational ownership` implementation slice for stable so `master -> stable` is blocked only by explicit, current structural gates.
+Drive the post-convergence maturity-classification decision for stable so `master -> stable` is blocked only by explicit structural gates instead of stale transitional language.
 Acceptance criteria:
-- accept or correct the narrow implementation slice that makes `runtimeLaunch` failure taxonomy explicit for the supported local sibling shape
-- verify lifecycle truth stays untouched while runtime launch failures are surfaced distinctly
-- keep the batch architecture-first without expanding scope into new UI/hook/supervisor feature work
+- accept or correct a narrow design note that classifies what is now `stable`, `transitional`, and `debug-only` after the accepted subconscious/supervisor convergence work
+- identify the minimum remaining blockers, if any, before `master -> stable`
 - keep scope architecture-first; no hook expansion, no UI expansion, no generic audit sprawl
 
 
