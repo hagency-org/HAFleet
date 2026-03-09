@@ -1,8 +1,8 @@
 ## Current
-Keep architecture-first execution active by implementing the first canonical-source cleanup slice for subconscious state.
+Keep architecture-first execution active by narrowing the second canonical-source cleanup slice after mirrors were demoted behind durable upstream files.
 Acceptance criteria:
-- durable upstream files (`conversations.json`, `session-<session>.json`) outrank `runtimeMeta.upstream.*` and `letta.upstream.*` mirrors when building upstream state
-- generic `guidance*` compatibility fields are explicitly demoted so they cannot outrank path-specific canonical objects
+- remaining route-written synthetic status/timestamp fields (`checkedAt`, `attemptedAt`, `messageSentAt`, `injectedAt`, synthetic status labels) are explicitly bounded so they cannot be mistaken for canonical upstream truth
+- `stage` remains presentation-only and is documented/treated as such
 - the accepted upstream-backed dev baseline on Yato remains stable
 - no new hook path and no UI expansion are introduced while making this correction
 

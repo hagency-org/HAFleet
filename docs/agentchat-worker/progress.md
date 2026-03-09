@@ -1366,3 +1366,17 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   1. make durable upstream files outrank mirrors when building upstream state
   2. demote generic `guidance*` from canonical state surfaces
   3. keep hook scope and UI scope unchanged
+## [2026-03-09 18:15] DONE — accepted the first canonical-source cleanup slice after independent poisoned-mirror proof
+- Reviewed the implementation diff and independently validated the key precedence correction in a temporary runtime copy, without touching the real Yato state:
+  - poisoned `letta.json.upstream.*` and `runtime.json.upstream.*` with fake `conversationId`, `status`, `lastProcessedIndexAfter`, and `lastSeenMessageIdAfter`
+  - started an isolated backend on `19101`
+  - verified `GET /api/subconscious/detail/Yato?debug=1` still resolved upstream session/userPrompt/preTool/stop against the durable upstream files, not the poisoned mirrors
+- Verified on the live dev backend (`18190`) that:
+  - accepted baseline stayed stable (`SessionStart=started`, `UserPromptSubmit=sent`, `PreToolUse=no-updates`, `Stop=not-run`)
+  - top-level generic `guidance*` compatibility fields are no longer present in the default canonical surface
+- Accepted boundary:
+  - durable upstream files now outrank `runtimeMeta.upstream.*` / `letta.upstream.*` mirrors
+  - generic `guidance*` no longer appear as top-level canonical state
+- Residual truthfulness note:
+  - `upstream.preTool.status` is still a synthetic summary label; in poisoned-mirror proof it falls back to `seeded-baseline`, which is acceptable as a presentation summary but not as canonical upstream truth
+- Next slice should therefore narrow to the remaining synthetic status/timestamp layer (`checkedAt`, `attemptedAt`, `messageSentAt`, `injectedAt`, synthetic status labels) rather than widening scope.
