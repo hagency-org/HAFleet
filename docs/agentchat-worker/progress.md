@@ -1591,3 +1591,7 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Reminder-driven check showed `agentchat-develop` had not started the minimal supervisor waiting/trailing-heartbeat design batch and had drifted back to a generic `Explain this codebase` prompt after recording local acceptance state.
 - Re-sent a hard correction (`msg_77650`) that narrows scope back to design-only for canonical `waiting_reason` / `waiting_until` plus trailing-heartbeat classification.
 - Re-armed the next follow-up as reminder `#2095` with the explicit loop: inspect inbox + tmux, review immediately if delivered, then queue the next reminder before closing the loop.
+## [2026-03-09 23:17] PARTIAL — corrected develop drift before supervisor activation/lifecycle design started
+- Reminder-driven follow-up showed `agentchat-develop` had not started the supervisor activation/lifecycle design batch and had drifted back to a generic `Explain this codebase` prompt after recording local acceptance state.
+- Re-sent a hard correction (`msg_77660`) that narrows scope back to the design-only activation/lifecycle note.
+- Re-armed the next follow-up as reminder `#2103` so the review loop stays explicit: inspect inbox + tmux, review immediately if delivered, and queue the next reminder before closing the loop.
