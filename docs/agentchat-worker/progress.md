@@ -1391,3 +1391,14 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - no UI expansion
   - no new synthetic concepts
 - Advanced the active worker plan to the implementation slice for this synthetic layer cleanup.
+## [2026-03-09 19:13] PARTIAL — rejected the first synthetic status/timestamp cleanup implementation on served-detail truthfulness
+- Independently reviewed the implementation diff and confirmed the intended direction in `backend-v2.js`: route writers now build persisted upstream records that strip synthetic timing/counter mirrors before writing `letta.json` / `runtime.json`.
+- However, route-level verification against the live dev backend (`18190`) showed the served detail contract still exposes synthetic fields on the operational surface, including:
+  - `upstream.bootstrap.checkedAt`
+  - `upstream.session.checkedAt`
+  - `upstream.userPrompt.checkedAt`, `attemptedAt`, `messageSentAt`, `transcriptLineCount`, `lastProcessedIndexBefore`
+  - `upstream.preTool.checkedAt`, `attemptedAt`, `newMessageCount`, `changedBlockCount`, `lastSeenMessageIdBefore`
+  - `upstream.stop.transcriptMessageCount`, `newMessageCount`
+  - `conversation.current.latestGuidanceAt`, `latestGuidanceSource`
+- Root cause: the slice cleaned persistence first but did not finish the served truth surface; `buildSubconsciousUpstreamContract()` and conversation-derived summaries still emit synthetic timing/status mirrors as object state.
+- Decision: reject the slice until default detail stops presenting those fields as canonical state and only justified debug-only fields remain behind privileged access.

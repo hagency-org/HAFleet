@@ -1,8 +1,9 @@
 ## Current
-Keep architecture-first execution active by implementing the synthetic status/timestamp cleanup slice for subconscious state.
+Keep architecture-first execution active by finishing the synthetic status/timestamp cleanup slice for subconscious state after rejecting the first implementation.
 Acceptance criteria:
-- `checkedAt` and related stored freshness mirrors no longer present themselves as canonical object state
-- route-run timing fields and delta counters move behind privileged debug detail or response-only metadata
+- `GET /api/subconscious/detail/:name` default operational detail no longer exposes synthetic timing/status mirrors such as `checkedAt`, `attemptedAt`, `messageSentAt`, `injectedAt`, counter deltas, or `conversation.current.latestGuidance*`
+- privileged/debug detail only exposes fields that remain justified as debug-only state
+- route writers no longer persist the stripped synthetic timing/counter mirrors into `letta.json` / `runtime.json`
 - synthetic status labels remain presentation-only and are recomputed from canonical files at read time
 - the accepted upstream-backed dev baseline on Yato remains stable
 - no new hook path and no UI expansion are introduced while making this correction

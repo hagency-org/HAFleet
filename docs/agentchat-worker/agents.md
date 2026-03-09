@@ -216,6 +216,9 @@
   - canonical consumers should prefer object-led fields (`manualGuidance`, `runtime`, `upstream.userPrompt`, `upstream.preTool`, `upstream.stop`) instead of generic `guidancePresent/guidanceInjected/guidanceSource`.
 - Current subconscious top-level `stage` is presentation-only:
   - it is a synthetic summary over multiple first-class objects and must not be used as the canonical policy/security state machine.
+- Canonical cleanup acceptance must validate served detail contracts, not only persisted mirrors:
+  - a slice is not acceptable merely because route writers stop persisting synthetic fields into `letta.json` / `runtime.json`;
+  - `GET /api/subconscious/detail/:name` must also stop exposing synthetic timing/status mirrors such as `checkedAt`, `attemptedAt`, `messageSentAt`, `injectedAt`, counter deltas, and `conversation.current.latestGuidance*` on the operational surface unless they are explicitly privileged-debug fields.
 - Architecture rule:
   - do not create display-first concepts, transition-only panels, or local substitutes that pretend to be mature system objects;
   - new fields, UI modules, and workflow concepts must map to a first-class object with a clear source of truth, or they should not ship.
