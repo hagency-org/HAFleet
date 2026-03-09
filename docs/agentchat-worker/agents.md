@@ -224,3 +224,9 @@
   - minimal required objects are `Task` and `Supervisor Agent State`;
   - `waiting` must be explicitly declared by the task owner with `waiting_reason` and `waiting_until`; supervisor should not infer safe waiting from silence alone;
   - supervisor classification should stay narrow: `active`, `normal_wait`, `stalled_wait`, `suspected_eos`.
+- Supervisor workspace direction:
+  - the supervisor should live beside the primary agent as its own workspace directory (`supervisor/`), with its own `CLAUDE.md`, `AGENTS.md`, and local task/progress state;
+  - this keeps supervisor behavior explicit and agent-shaped instead of hiding it inside ambient reviewer logic.
+- Runtime profile direction:
+  - backend/provider/model/reasoning-budget selection must become an explicit per-agent runtime profile rather than a shared mutable default;
+  - the same model should drive both normal agent launch and supervisor launch so one agent can change backend/model without silently mutating every other agent.

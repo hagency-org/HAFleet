@@ -1321,3 +1321,10 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - supervisor must not infer safe waiting from silence alone
 - Recorded the trailing-heartbeat idea as the preferred timing model:
   - when the main agent goes idle, supervisor stays active for a short trailing window, then decides between valid wait and suspected EOS.
+## [2026-03-09 17:45] DONE — extended the supervisor bible with workspace shape and per-agent runtime-profile direction
+- Added `Agent Runtime Profile` as a first-class object in the architecture convergence document.
+- Froze the supervisor workspace shape as a sibling `supervisor/` workspace with its own `CLAUDE.md` and `AGENTS.md`.
+- Froze the runtime-profile direction:
+  - backend/provider/model/reasoning-budget selection should become explicit per-agent launch state
+  - the same profile model should be usable by both normal agents and supervisors
+- Added the runtime-profile generalization task into the worker queue so it is treated as core control-plane work rather than an ad hoc config tweak later.

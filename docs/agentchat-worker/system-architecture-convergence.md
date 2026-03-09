@@ -48,6 +48,10 @@ These are the objects the system is allowed to speak about directly in APIs, UI,
    - the narrow supervisory state machine that evaluates task heartbeat over time
    - not a generic free-form reviewer agent
 
+12. `Agent Runtime Profile`
+   - explicit backend/provider/model/reasoning-budget selection for an agent or supervisor
+   - must be agent-scoped, not an ambient global default
+
 Anything else is either:
 - derived summary
 - compatibility mirror
@@ -87,6 +91,10 @@ Each surface must point back to a single source of truth.
 8. `Workspace contract`
    - `docs/workspace-claude-md-template.md`
    - rendered into root `workdir/CLAUDE.md`
+
+9. `Agent Runtime Profile`
+   - persisted per-agent launch/runtime settings
+   - canonical source should live with the agent home/control plane, not in mutable shared defaults
 
 ## Forbidden Patterns
 
@@ -135,6 +143,8 @@ This is not display polish. It is a required part of the object model. Agent lis
 3. Finish benchmark and config control-plane only after the object model is stable enough not to fork product language again
 
 4. Rebuild supervisor around a minimal task/heartbeat model instead of one-shot LLM judging
+
+5. Generalize agent runtime profiles so `agent-up`, subconscious, and supervisor can choose backend/provider/model/reasoning budget per agent instead of inheriting mutable global defaults
 
 ## Supervisor Bible
 
@@ -211,6 +221,29 @@ Supervisor can run on an agent framework (`codex` / `claudecode`) with a cheap l
 3. emit correction signals or human warnings when required
 
 It must not drift into a second executor or a general reviewer agent.
+
+### Supervisor Workspace Shape
+
+The supervisor should live beside the primary agent as its own workspace:
+
+1. sibling directory name: `supervisor/`
+2. its own `CLAUDE.md`
+3. its own `AGENTS.md`
+4. its own task/progress state
+
+This keeps the supervisor explicit as an agent-shaped state machine with its own contract, instead of an invisible daemon or an ambient reviewer mode.
+
+### Runtime Profile Direction
+
+Agent launch/runtime choices must become explicit per-agent profiles:
+
+1. framework/runtime type
+2. backend/provider
+3. model handle
+4. reasoning budget / cost profile
+5. optional supervisor-specific overrides
+
+These settings should be selected by `agent-up` and by supervisor launch from the agent's own control-plane state, not by mutating one shared default that silently affects every agent.
 
 ## Agent Allocation
 

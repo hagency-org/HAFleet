@@ -15,6 +15,7 @@ Acceptance criteria:
 6. Mirror the same code/runtime split design later for live (`agent-chat-live` + future `agent-chat-live-runtime`) after stable merge and explicit cutover planning.
 7. Then implement secure external supervisor event ingest and reducer-based subconscious event flow.
 8. Replace one-shot supervisor judging with the minimal `Task + heartbeat + waiting` model and an agent-shaped supervisor state machine.
+9. Add explicit per-agent runtime profiles so `agent-up` and supervisor launch can choose backend/provider/model/reasoning budget without mutating global defaults.
 
 ## Blocked (optional)
 None.
