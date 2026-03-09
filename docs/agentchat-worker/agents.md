@@ -202,6 +202,11 @@
 - Lifecycle truthfulness correction boundary:
   - trailing-expiry negative states must keep lifecycle `active` for the negative-state reason, not the generic `primary task is active` reason;
   - no-task semantics must be coherent: `classification = null`, lifecycle `idle`, and an explicit no-task/no-negative-state reason.
+- Supervisor runtime-launch contract:
+  - a real sibling supervisor runtime exists only as a projection of canonical supervisor lifecycle state, not as an origin of task/runtimeProfile truth;
+  - lifecycle `active` may start or keep a single sibling runtime alive; lifecycle `idle` may suppress launch or stop it cleanly;
+  - sibling `supervisor/` workspace is the correct cwd/home for that runtime, but must not acquire `task.json`, `runtime-profile.json`, or any shadow truth;
+  - canonical supervisor launch selection remains `runtimeProfile.supervisor` -> `runtimeProfile.primary` fallback -> env/default.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;

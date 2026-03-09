@@ -1612,6 +1612,16 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - no-task semantics are now coherent: `classification = null`, lifecycle `idle`, and an explicit no-task/no-negative-state lifecycle reason
 - Accepted the correction because it fixes the last lifecycle truth mismatches without widening scope into UI, hooks, or orchestration.
 - Sent `agentchat-develop` to the next design-only batch (`msg_77668`): first real supervisor runtime-launch slice using the accepted sibling workspace and canonical `runtimeProfile.supervisor`.
+## [2026-03-09 23:54] DONE — accepted supervisor runtime-launch design and moved to implementation
+- Reviewed [supervisor-runtime-launch-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/supervisor-runtime-launch-design.md) against the accepted lifecycle, sibling-workspace, and runtime-profile contracts.
+- Accepted because it stays narrow:
+  - supervisor runtime existence is a projection of lifecycle state
+  - sibling `supervisor/` workspace is used only as runtime cwd/home
+  - canonical task/runtimeProfile truth remains outside that workspace
+  - launch selection remains `runtimeProfile.supervisor` -> `runtimeProfile.primary` fallback -> env/default
+  - launch failure does not rewrite lifecycle truth
+- Rejected no part of the design; it does not broaden into UI, hooks, or orchestration/planning.
+- Sent `agentchat-develop` into the corresponding implementation slice (`msg_77672`) with the 7 proof cases preserved as the acceptance boundary.
 ## [2026-03-09 22:12] PARTIAL — corrected develop drift and re-armed inbox-gate follow-up
 - After runtime-profile acceptance, `agentchat-develop` drifted back to a generic `Explain this codebase` prompt instead of continuing the active inbox-read gate design batch.
 - Re-sent a hard correction (`msg_77638`) that narrows scope back to design-only for the framework-enforced inbox-read boundary.
