@@ -1,8 +1,9 @@
 ## Current
-Drive the `subconscious authority-boundary convergence` design for stable so `master -> stable` is blocked only by explicit architectural gates, not by dual-path ambiguity.
+Drive the `subconscious authority-boundary convergence` implementation for stable so `master -> stable` is blocked only by explicit architectural gates, not by dual-path ambiguity.
 Acceptance criteria:
-- accept or correct the design-only `subconscious authority-boundary convergence` note from `agentchat-develop`
-- ensure `agentchat-develop` is actually executing this batch rather than drifting after acceptance
+- accept or correct the minimal implementation slice that rewrites default subconscious detail/state derivation around the upstream-authoritative path
+- verify default detail no longer presents the local transitional runtime as a peer authoritative contract
+- verify manual guidance is surfaced only as fallback/configuration in the stable-facing default surface
 - keep scope architecture-first; no hook expansion, no UI expansion, no generic audit sprawl
 
 

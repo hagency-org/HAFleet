@@ -211,6 +211,10 @@
   - real sibling supervisor runtimes now use deterministic tmux session names `supervisor-<agent>` and persist `runtimeLaunch` through `SupervisorStateStore`, `getStatus()`, and `getAgentDetail()`;
   - keep-alive must be idempotent (no relaunch churn), `normal_wait`/clean-idle must suppress or stop launch, and negative states must keep the runtime alive;
   - tmux launch env must carry explicit `PATH`, or a pane can exist while `claude`/`codex` resolution silently fails.
+- Stable subconscious authority boundary:
+  - upstream Letta durable state is the single canonical stable subconscious behavior path;
+  - manual guidance in `state/letta.json` is fallback/configuration only;
+  - the local transitional runtime is compatibility/debug only and must not be presented as a co-equal stable intent engine.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
