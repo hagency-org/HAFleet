@@ -1592,6 +1592,19 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - supervisor runtime-profile selection stays on canonical precedence (`supervisor` -> primary fallback -> defaults)
 - Rejected no part of the design; it does not broaden into UI, hooks, or orchestration/planning.
 - Sent `agentchat-develop` into the corresponding implementation slice (`msg_77662`) with the 7 proof cases preserved as the acceptance boundary.
+## [2026-03-09 23:32] PARTIAL — held supervisor activation/lifecycle implementation on lifecycle-truth mismatch
+- Independently re-proved the implementation against the real `SupervisorService.deriveObservation()` path and persisted `SupervisorStateStore`.
+- Confirmed the positive parts:
+  - valid waiting -> `normal_wait` with lifecycle `idle`
+  - expired waiting -> `stalled_wait` with lifecycle `active`
+  - malformed waiting -> `suspected_eos`
+  - bounded trailing active-to-idle bridge remains lifecycle `active`
+  - stale maintained waiting with future `waiting_until` -> `stalled_wait`
+  - lifecycle fields persist in `SupervisorStateStore`
+- Did **not** accept the slice because two truthfulness mismatches remain:
+  1. after trailing expiry with no valid waiting/done, classification flips to `suspected_eos` but `lifecycleReason` still says the supervisor is active because the primary task is active;
+  2. no-task state is internally contradictory (`classification=suspected_eos` while lifecycle says `idle because there is no canonical task to supervise`), so `no task / no unresolved negative state` is not yet modeled coherently.
+- Sent narrow correction `msg_77666` to `agentchat-develop`; scope remains limited to lifecycle truthfulness and no-task semantics.
 ## [2026-03-09 22:12] PARTIAL — corrected develop drift and re-armed inbox-gate follow-up
 - After runtime-profile acceptance, `agentchat-develop` drifted back to a generic `Explain this codebase` prompt instead of continuing the active inbox-read gate design batch.
 - Re-sent a hard correction (`msg_77638`) that narrows scope back to design-only for the framework-enforced inbox-read boundary.
