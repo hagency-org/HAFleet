@@ -1,10 +1,9 @@
 ## Current
-Run the stable-merge readiness audit for supervisor/subconscious/runtime-profile after supervisor runtime-launch acceptance, and cut the next batch only from remaining structural blockers.
+Drive the `subconscious authority-boundary convergence` design for stable so `master -> stable` is blocked only by explicit architectural gates, not by dual-path ambiguity.
 Acceptance criteria:
-- independently verify the accepted supervisor runtime-launch slice and record the exact accepted boundary
-- enumerate remaining structural blockers for merging `master` into `stable` without regressing supervisor or subconscious truthfulness
-- assign the next narrow batch to `agentchat-develop` from that blocker list
-- keep scope architecture-first; do not reopen UI/hook expansion unless the audit proves it is required
+- accept or correct the design-only `subconscious authority-boundary convergence` note from `agentchat-develop`
+- ensure `agentchat-develop` is actually executing this batch rather than drifting after acceptance
+- keep scope architecture-first; no hook expansion, no UI expansion, no generic audit sprawl
 
 
 ## Queue
