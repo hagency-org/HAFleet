@@ -207,6 +207,10 @@
   - lifecycle `active` may start or keep a single sibling runtime alive; lifecycle `idle` may suppress launch or stop it cleanly;
   - sibling `supervisor/` workspace is the correct cwd/home for that runtime, but must not acquire `task.json`, `runtime-profile.json`, or any shadow truth;
   - canonical supervisor launch selection remains `runtimeProfile.supervisor` -> `runtimeProfile.primary` fallback -> env/default.
+- Supervisor runtime-launch acceptance boundary:
+  - real sibling supervisor runtimes now use deterministic tmux session names `supervisor-<agent>` and persist `runtimeLaunch` through `SupervisorStateStore`, `getStatus()`, and `getAgentDetail()`;
+  - keep-alive must be idempotent (no relaunch churn), `normal_wait`/clean-idle must suppress or stop launch, and negative states must keep the runtime alive;
+  - tmux launch env must carry explicit `PATH`, or a pane can exist while `claude`/`codex` resolution silently fails.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;

@@ -1,13 +1,10 @@
 ## Current
-Implement the first real supervisor runtime-launch slice so lifecycle can truthfully start, keep alive, idle, and stop a sibling supervisor runtime without introducing a second truth source.
+Run the stable-merge readiness audit for supervisor/subconscious/runtime-profile after supervisor runtime-launch acceptance, and cut the next batch only from remaining structural blockers.
 Acceptance criteria:
-- lifecycle-`active` starts a real sibling supervisor runtime exactly once
-- active keep-alive is idempotent and does not relaunch-churn
-- lifecycle-`idle` suppresses launch or stops cleanly for `normal_wait` / no-task-clean-idle / done-tail-expired
-- negative states keep runtime alive
-- sibling `supervisor/` workspace remains non-canonical
-- canonical supervisor runtime-profile selection remains stable
-- no UI expansion, no hook expansion, no orchestration/planning sprawl
+- independently verify the accepted supervisor runtime-launch slice and record the exact accepted boundary
+- enumerate remaining structural blockers for merging `master` into `stable` without regressing supervisor or subconscious truthfulness
+- assign the next narrow batch to `agentchat-develop` from that blocker list
+- keep scope architecture-first; do not reopen UI/hook expansion unless the audit proves it is required
 
 
 ## Queue

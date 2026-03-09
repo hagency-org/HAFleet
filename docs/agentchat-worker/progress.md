@@ -1639,3 +1639,16 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Reminder-driven follow-up showed `agentchat-develop` had not started the supervisor runtime-launch design batch and had drifted back to a generic `Explain this codebase` prompt after recording local acceptance state.
 - Re-sent a hard correction (`msg_77669`) that narrows scope back to the design-only runtime-launch note.
 - Re-armed the next follow-up as reminder `#2111` so the review loop stays explicit: inspect inbox + tmux, review immediately if delivered, and queue the next reminder before closing the loop.
+## [2026-03-10 00:16] DONE — accepted supervisor runtime-launch slice and switched to stable-merge readiness audit
+- Independently re-proved the runtime-launch slice against the real implementation in [supervisor/index.js](/home/shisui/laplace/agent-chat/supervisor/index.js) and [supervisor/state.js](/home/shisui/laplace/agent-chat/supervisor/state.js) using the fresh-home proof root `/tmp/agentchat-supervisor-runtime-proof-SF91fo`.
+- Verified the accepted 7-case boundary:
+  - lifecycle `active` starts a real sibling supervisor runtime exactly once
+  - active keep-alive is idempotent and does not relaunch-churn
+  - valid `normal_wait` suppresses/stops launch
+  - negative states keep the runtime alive
+  - no-task clean idle does not launch
+  - sibling `supervisor/` workspace remains non-canonical
+  - canonical runtime-profile launch selection stays `runtimeProfile.supervisor -> runtimeProfile.primary fallback -> env/default`
+- Added one extra persistence proof: `runSweep()` now saves `runtimeLaunch` truth into `SupervisorStateStore`, and existing `getStatus()` / `getAgentDetail()` surfaces expose the same runtime-launch state without route renames.
+- Accepted the slice because runtime existence is now a real projection of lifecycle state rather than a display-only concept, and because launch env propagation now carries explicit `PATH`, removing the previous pane-exists-but-client-missing failure mode.
+- Next step changed from feature slicing to a stable-merge readiness audit so the remaining work is chosen from structural blockers instead of continuing to expand surface area.
