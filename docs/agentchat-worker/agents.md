@@ -193,6 +193,12 @@
   - future `waiting_until` without a fresh maintained heartbeat must degrade to `stalled_wait`, not remain `normal_wait`;
   - malformed `waiting` declarations must surface as explicit `suspected_eos` rather than collapsing into a generic no-task reason;
   - bounded active-to-idle trailing still remains `active` until the trailing window elapses.
+- Supervisor activation/lifecycle contract:
+  - supervisor lifecycle remains binary (`active` / `idle`); trailing supervision is an active sub-phase, not a third canonical lifecycle state;
+  - supervisor stays `active` for canonical `active`, `blocked`, negative classifications, bounded trailing supervision, and bounded done-tail;
+  - supervisor may become `idle` only for valid `normal_wait`, done after tail expiry, or no canonical task with no unresolved negative state;
+  - sibling `supervisor/` workspace is the supervisor runtime's local workspace only and must never become a second `task` or `runtimeProfile` source;
+  - runtime-profile selection for supervisor lifecycle uses canonical precedence: `runtimeProfile.supervisor` -> `runtimeProfile.primary` fallback -> launcher defaults.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;

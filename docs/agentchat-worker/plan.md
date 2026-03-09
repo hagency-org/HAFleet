@@ -1,11 +1,13 @@
 ## Current
-Design the agent-shaped supervisor activation/lifecycle model so supervisor activity follows the primary agent plus a bounded trailing supervision window without creating a second task source.
+Implement the agent-shaped supervisor activation/lifecycle slice so supervisor runtime truthfully follows the primary agent, bounded trailing supervision, and canonical supervisor runtime-profile selection.
 Acceptance criteria:
-- design defines when supervisor is `active` vs `idle` relative to the primary agent
-- design defines the bounded trailing supervision window after primary idle using the accepted trailing-heartbeat model
-- design explains sibling `supervisor/` workspace participation without becoming a second task source
-- design explains how canonical `runtimeProfile.supervisor` is selected for launch/lifecycle
-- design includes the minimal implementation proof
+- active primary task keeps supervisor runtime active
+- valid `normal_wait` idles supervisor runtime
+- primary idle enters bounded trailing supervision while remaining active
+- trailing expiry with no safe state does not silently idle the supervisor
+- done eventually idles supervisor after the bounded completion tail
+- sibling `supervisor/` workspace remains local-only and does not become a second truth source
+- canonical `runtimeProfile.supervisor` selection remains stable
 - no UI expansion, no hook expansion, no orchestration/planning sprawl
 
 

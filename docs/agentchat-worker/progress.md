@@ -1582,6 +1582,16 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - no planner/task-system broadening
   - no second task source
 - Sent `agentchat-develop` to the next design-only batch (`msg_77658`): agent-shaped supervisor activation/lifecycle plus canonical `runtimeProfile.supervisor` launch participation.
+## [2026-03-09 23:25] DONE — accepted supervisor activation/lifecycle design and moved to implementation
+- Reviewed [supervisor-activation-lifecycle-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/supervisor-activation-lifecycle-design.md) against the minimal agent-shaped supervisor contract.
+- Accepted because it stays narrow:
+  - lifecycle remains binary (`active` / `idle`)
+  - trailing supervision is an active sub-phase, not a third canonical lifecycle state
+  - unresolved negative states do not silently idle out
+  - sibling `supervisor/` workspace remains local-only
+  - supervisor runtime-profile selection stays on canonical precedence (`supervisor` -> primary fallback -> defaults)
+- Rejected no part of the design; it does not broaden into UI, hooks, or orchestration/planning.
+- Sent `agentchat-develop` into the corresponding implementation slice (`msg_77662`) with the 7 proof cases preserved as the acceptance boundary.
 ## [2026-03-09 22:12] PARTIAL — corrected develop drift and re-armed inbox-gate follow-up
 - After runtime-profile acceptance, `agentchat-develop` drifted back to a generic `Explain this codebase` prompt instead of continuing the active inbox-read gate design batch.
 - Re-sent a hard correction (`msg_77638`) that narrows scope back to design-only for the framework-enforced inbox-read boundary.
