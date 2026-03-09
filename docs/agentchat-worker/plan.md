@@ -1,9 +1,9 @@
 ## Current
-Drive the `v1 compatibility mirror / duplicate persistence boundary` implementation/verification slice so `master -> stable` is blocked only by explicit, current structural gates.
+Drive the `supervisor runtime operational ownership contract` design for stable so `master -> stable` is blocked only by explicit, current structural gates.
 Acceptance criteria:
-- accept or correct the narrow implementation/verification slice that constrains remaining mirror-first readers to explicit compatibility-only use
-- verify no code path lets `meta.json` outrank or silently repair `agent.json`
-- verify backend row state remains derivative for v1-owned fields
+- accept or correct a design-only supervisor runtime operational ownership note from `agentchat-develop`
+- make binary ownership, env ownership, credential/runtime-profile ownership, launch-failure reporting semantics, and supported deployment shape explicit for stable
+- keep the batch architecture-first without expanding scope into new code/UI/hook work
 - keep scope architecture-first; no hook expansion, no UI expansion, no generic audit sprawl
 
 
