@@ -215,6 +215,9 @@
   - upstream Letta durable state is the single canonical stable subconscious behavior path;
   - manual guidance in `state/letta.json` is fallback/configuration only;
   - the local transitional runtime is compatibility/debug only and must not be presented as a co-equal stable intent engine.
+- Stable subconscious default-detail boundary:
+  - default `/api/subconscious/detail/:name` now exposes local runtime, local memory, and local conversation only as transitional summary objects;
+  - full local runtime internals, journal detail, and manual guidance text/preview belong only in privileged debug or writable settings surfaces, not the stable-facing default detail.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;

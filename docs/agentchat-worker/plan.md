@@ -1,9 +1,9 @@
 ## Current
-Drive the `subconscious authority-boundary convergence` implementation for stable so `master -> stable` is blocked only by explicit architectural gates, not by dual-path ambiguity.
+Drive a post-authority `stable-merge readiness delta audit` so `master -> stable` is blocked only by explicit, current structural gates.
 Acceptance criteria:
-- accept or correct the narrow correction to the authority-boundary slice so default subconscious detail stops leaking transitional runtime/journal internals and manual guidance full text
-- verify default detail keeps one upstream-authoritative behavior path while transitional/runtime detail is demoted to summary-only on the default surface
-- verify manual guidance is surfaced only as fallback/configuration metadata in the stable-facing default surface
+- accept or correct a design-only delta audit from `agentchat-develop`
+- enumerate exactly which structural blockers still remain after authority-boundary convergence
+- separate blockers from non-blockers without expanding scope into new hooks/UI
 - keep scope architecture-first; no hook expansion, no UI expansion, no generic audit sprawl
 
 
