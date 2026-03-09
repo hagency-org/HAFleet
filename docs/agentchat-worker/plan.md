@@ -1,9 +1,9 @@
 ## Current
-Drive stable-merge execution hygiene so `master -> stable` can proceed from an accepted architecture baseline instead of ad hoc branch handling.
+Await operator go-ahead for `master -> stable` execution now that the accepted architecture baseline, maturity classification, and merge-execution hygiene plan are all in place.
 Acceptance criteria:
-- accept or correct a narrow merge-execution hygiene plan that covers final human sanity, branch choreography, and release-note/update obligations against the accepted maturity contract
-- keep scope to merge execution only; no new hook/UI/architecture slices unless a new blocker is proven
-- keep scope architecture-first; no hook expansion, no UI expansion, no generic audit sprawl
+- the accepted merge-execution hygiene plan is recorded as the final pre-merge plan
+- no unproven new blocker is reopened without route/proof-level evidence
+- once operator gives the merge go-ahead, execute the stable merge using the accepted hygiene sequence only
 
 
 ## Queue
@@ -15,4 +15,4 @@ Acceptance criteria:
 6. Secure external supervisor event ingest and reducer-based subconscious event flow.
 
 ## Blocked (optional)
-None.
+- `master -> stable` merge execution — awaiting explicit operator go-ahead now that no structural blocker remains.
