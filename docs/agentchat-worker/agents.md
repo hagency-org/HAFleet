@@ -175,6 +175,10 @@
 - Notification root-cause and hotfix boundary:
   - actionable MCP notifications were previously advisory only and buried `check_inbox()` mid-sentence, which made it easy for agents to react to the title/summary without reading inbox context;
   - the current hotfix moves the inbox-read gate to the first visible action (`FIRST ACTION: call check_inbox() now`) in both backend and push-relay notification builders, but this is still a prompt-level mitigation, not a framework-enforced inbox-read boundary.
+- External dev Basic Auth caveat:
+  - if the browser opens `https://user:pass@host/...` with credentials embedded in the URL, modern browsers block same-origin `fetch()` calls constructed from relative URLs;
+  - current Agent Detail `refresh()` then fails on `/api/...` calls and clears SSR-rendered content, making the page appear blank/Loading even though local dev and SSR HTML are fine;
+  - using the browser's native Basic Auth dialog avoids this, and a future UX hardening option is to preserve SSR content on refresh failure instead of wiping the page.
 - Minimal inbox-read gate contract:
   - canonical gate object is `inboxGate{requiresInboxCheck, sourceMsgId, raisedAt, reason}`;
   - canonical acknowledgement is a real `check_inbox()` cursor advance that consumes the pending `sourceMsgId`, not merely a tool call named `check_inbox()`;
