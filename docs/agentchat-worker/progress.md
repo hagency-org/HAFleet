@@ -1419,3 +1419,13 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `upstream.stop.status=not-run`
 - Confirmed `?debug=1` no longer reintroduces the rejected synthetic timing/counter mirrors as object state for this slice.
 - Root-cause note: the initial implementation cleaned persisted mirrors correctly, but acceptance had to be blocked until `buildOperationalSubconsciousContract()` stopped leaking the same synthetic timing/counter fields on the served default-detail surface.
+## [2026-03-09 19:18] DONE — accepted the minimal supervisor design and moved to slice-1 implementation
+- Reviewed [minimal-supervisor-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/minimal-supervisor-design.md) against the frozen supervisor bible rather than feature breadth.
+- Accepted the design because it stays narrow:
+  - canonical `Task` object only: `id`, `owner`, `status`, `updated_at`, `heartbeat_at`, `waiting_reason`, `waiting_until`
+  - derived supervisor outcomes only: `active`, `normal_wait`, `stalled_wait`, `suspected_eos`
+  - explicit trailing-heartbeat window with bounded `N`
+  - runtime-profile direction integrated into the same per-agent control-plane model
+  - existing supervisor route names and current stack-global control semantics remain untouched in slice 1
+- Rejected no part of the design; it does not drift into UI, hook, or planner sprawl.
+- Advanced the active worker plan to implementation slice 1: canonical `Task` state + trailing-heartbeat classification + runtime-profile reads with compatibility fallback.

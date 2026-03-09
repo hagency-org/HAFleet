@@ -236,3 +236,6 @@
 - Runtime profile direction:
   - backend/provider/model/reasoning-budget selection must become an explicit per-agent runtime profile rather than a shared mutable default;
   - the same model should drive both normal agent launch and supervisor launch so one agent can change backend/model without silently mutating every other agent.
+- Minimal supervisor slice boundary:
+  - keep existing supervisor route names and stack-global control semantics stable in slice 1 (`/api/supervisor/status`, `/api/supervisor/agents`, `/api/supervisor/agents/:name`, `/api/supervisor/control`);
+  - first implementation should add canonical per-agent `Task` state and runtime-profile reads without expanding UI or changing subconscious/hook paths.
