@@ -1557,6 +1557,15 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - runtime enforcement at outbound message boundary
   - no UI expansion, no hook expansion, no task-system broadening
 - Sent `agentchat-develop` back to the next design-only supervisor batch (`msg_77644`): canonical waiting declarations plus trailing-heartbeat classification.
+## [2026-03-09 23:03] DONE — accepted waiting/trailing-heartbeat design and moved to implementation
+- Reviewed [minimal-supervisor-waiting-trailing-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/minimal-supervisor-waiting-trailing-design.md) against the minimal supervisor contract.
+- Accepted because it stays narrow:
+  - safe waiting remains on the canonical primary task object only
+  - runtime idle is observational input only
+  - trailing-heartbeat is bounded and only bridges toward canonical `waiting` or `done`
+  - `normal_wait`, `stalled_wait`, and `suspected_eos` are derived from canonical task state plus time, not from a second task source
+- Rejected no part of the design; it does not broaden into planner/task orchestration, UI, or hooks.
+- Sent `agentchat-develop` into the corresponding implementation slice (`msg_77656`) with the 6 proof cases preserved as the acceptance boundary.
 ## [2026-03-09 22:12] PARTIAL — corrected develop drift and re-armed inbox-gate follow-up
 - After runtime-profile acceptance, `agentchat-develop` drifted back to a generic `Explain this codebase` prompt instead of continuing the active inbox-read gate design batch.
 - Re-sent a hard correction (`msg_77638`) that narrows scope back to design-only for the framework-enforced inbox-read boundary.

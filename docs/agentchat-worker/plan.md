@@ -1,10 +1,12 @@
 ## Current
-Design the next minimal supervisor slice so waiting declarations and trailing-heartbeat classification can distinguish `normal_wait`, `stalled_wait`, and `suspected_eos` without creating a second task source.
+Implement the minimal supervisor waiting/trailing slice so `normal_wait`, `stalled_wait`, and `suspected_eos` derive truthfully from canonical task state plus bounded trailing-heartbeat behavior.
 Acceptance criteria:
-- design defines canonical `waiting_reason` / `waiting_until` usage on the primary task object
-- design defines supervisor trailing-heartbeat behavior after primary agent idles
-- design explains how `normal_wait`, `stalled_wait`, and `suspected_eos` derive from canonical task state and time
-- design includes minimal implementation proof requirements
+- valid waiting declaration derives `normal_wait`
+- expired waiting derives `stalled_wait`
+- malformed waiting derives `suspected_eos`
+- bounded trailing active-to-idle bridge works without inventing safe state
+- active-to-wait transition inside trailing window converges to `normal_wait`
+- runtime idle alone cannot create `normal_wait`
 - no UI expansion, no hook expansion, no planner/task-system sprawl
 
 

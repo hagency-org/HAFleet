@@ -184,6 +184,10 @@
   - `GET /api/inbox/:agent` clears the gate only when the pending `sourceMsgId` is actually consumed by that cursor advance;
   - outbound agent messages (`POST /api/messages`) are blocked with `409 inbox_check_required` while the gate is pending;
   - non-actionable deliveries must leave `inboxGate.requiresInboxCheck=false`.
+- Minimal supervisor waiting/trailing contract:
+  - safe waiting exists only on the canonical primary task object via `status=waiting`, `waiting_reason`, and `waiting_until`;
+  - runtime idle/activity is observational input only and may start a bounded trailing window, but must not create or mutate safe waiting state;
+  - `normal_wait`, `stalled_wait`, and `suspected_eos` are derived from canonical task state + time, not from a second task source.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
