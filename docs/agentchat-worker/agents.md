@@ -222,6 +222,10 @@
 - Stable subconscious default-detail boundary:
   - default `/api/subconscious/detail/:name` now exposes local runtime, local memory, and local conversation only as transitional summary objects;
   - full local runtime internals, journal detail, and manual guidance text/preview belong only in privileged debug or writable settings surfaces, not the stable-facing default detail.
+- Post-convergence maturity contract:
+  - `stable` now includes canonical control-plane `task` / `runtimeProfile`, supervisor classification/lifecycle, the supported same-host tmux-backed sibling supervisor runtime shape plus explicit failure taxonomy, the upstream-authoritative subconscious default operational surface, accepted upstream-backed subconscious slices (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`), and inbox-read gate enforcement;
+  - `transitional` includes the v1 compatibility mirror `data/agents/<name>/meta.json`, backend row projection for v1-owned fields, local subconscious runtime/memory/conversation journal surfaces, and manual guidance in its fallback/configuration role;
+  - `debug-only` includes privileged subconscious detail internals, raw path/file/timing artifacts, and deep supervisor host/runtime troubleshooting detail beyond the stable runtime failure taxonomy.
 - V1 duplicate-persistence boundary:
   - `agent.json` is the canonical v1 home-owned metadata source;
   - `PATCH /api/agents/:name/home-metadata` is the canonical v1 writer;

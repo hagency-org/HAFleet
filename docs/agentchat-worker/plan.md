@@ -1,8 +1,8 @@
 ## Current
-Drive the post-convergence maturity-classification decision for stable so `master -> stable` is blocked only by explicit structural gates instead of stale transitional language.
+Drive the final merge-readiness confirmation pass for `master -> stable` so merge is based on the accepted maturity contract rather than stale blocker lists.
 Acceptance criteria:
-- accept or correct a narrow design note that classifies what is now `stable`, `transitional`, and `debug-only` after the accepted subconscious/supervisor convergence work
-- identify the minimum remaining blockers, if any, before `master -> stable`
+- accept or correct a narrow audit that checks current routes/default surfaces against the accepted `stable / transitional / debug-only` maturity contract
+- identify any remaining explicit blocker before `master -> stable`, if one still exists
 - keep scope architecture-first; no hook expansion, no UI expansion, no generic audit sprawl
 
 
