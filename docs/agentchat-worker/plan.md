@@ -1,8 +1,8 @@
 ## Current
-Drive the final merge-readiness confirmation pass for `master -> stable` so merge is based on the accepted maturity contract rather than stale blocker lists.
+Drive stable-merge execution hygiene so `master -> stable` can proceed from an accepted architecture baseline instead of ad hoc branch handling.
 Acceptance criteria:
-- accept or correct a narrow audit that checks current routes/default surfaces against the accepted `stable / transitional / debug-only` maturity contract
-- identify any remaining explicit blocker before `master -> stable`, if one still exists
+- accept or correct a narrow merge-execution hygiene plan that covers final human sanity, branch choreography, and release-note/update obligations against the accepted maturity contract
+- keep scope to merge execution only; no new hook/UI/architecture slices unless a new blocker is proven
 - keep scope architecture-first; no hook expansion, no UI expansion, no generic audit sprawl
 
 
