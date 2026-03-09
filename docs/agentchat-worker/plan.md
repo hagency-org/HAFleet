@@ -1,9 +1,9 @@
 ## Current
-Drive the `v1 compatibility mirror / duplicate persistence boundary` design for stable so `master -> stable` is blocked only by explicit, current structural gates.
+Drive the `v1 compatibility mirror / duplicate persistence boundary` implementation/verification slice so `master -> stable` is blocked only by explicit, current structural gates.
 Acceptance criteria:
-- accept or correct a design-only mirror-boundary contract from `agentchat-develop`
-- make the canonical writer/reader set explicit against compatibility-only mirror responsibilities
-- decide whether stable should freeze the mirror as a required long-term surface or demote it to strict compatibility export only
+- accept or correct the narrow implementation/verification slice that constrains remaining mirror-first readers to explicit compatibility-only use
+- verify no code path lets `meta.json` outrank or silently repair `agent.json`
+- verify backend row state remains derivative for v1-owned fields
 - keep scope architecture-first; no hook expansion, no UI expansion, no generic audit sprawl
 
 

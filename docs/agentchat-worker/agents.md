@@ -218,6 +218,11 @@
 - Stable subconscious default-detail boundary:
   - default `/api/subconscious/detail/:name` now exposes local runtime, local memory, and local conversation only as transitional summary objects;
   - full local runtime internals, journal detail, and manual guidance text/preview belong only in privileged debug or writable settings surfaces, not the stable-facing default detail.
+- V1 duplicate-persistence boundary:
+  - `agent.json` is the canonical v1 home-owned metadata source;
+  - `PATCH /api/agents/:name/home-metadata` is the canonical v1 writer;
+  - `data/agents/<name>/meta.json` is strict compatibility export only and must never outrank or repair the manifest;
+  - backend row state remains a runtime-serving derivative projection for v1-owned fields.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
