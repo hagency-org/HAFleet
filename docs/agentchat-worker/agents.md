@@ -151,6 +151,13 @@
 - Current v1 workspace migration boundary:
   - the maintained template + provisioning contract are the source of truth for fresh homes;
   - existing dev homes reach the same state only after explicit reprovision/migration, but rerunning provisioning is now an accepted path for that upgrade.
+- Current minimal supervisor slice-3 acceptance boundary:
+  - `workdir/task-writer` is now the explicit primary-agent writer path for canonical `task` updates (`start`, `heartbeat`, `wait`, `resume`, `done`);
+  - the writer goes through `PATCH /api/agents/:name/home-metadata` and updates the existing control-plane object rather than creating a second `task.json`;
+  - fresh v1 homes need backend sync fallback from `PATCH /api/agents/:name` to `POST /api/agents` on `404`, or supervisor/backend cannot see the first canonical `task` / `runtimeProfile` state.
+- Current sibling supervisor workspace contract:
+  - each v1 home may now include a sibling `supervisor/` workspace with `CLAUDE.md`, `AGENTS.md`, `docs/plan.md`, and `docs/progress.md`;
+  - this workspace is supervisor-local only and must not contain a second canonical task or runtime-profile file.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;

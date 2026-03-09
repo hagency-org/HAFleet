@@ -1,22 +1,11 @@
 ## Current
-Implement the next minimal supervisor slice: explicit primary task-writer path plus sibling `supervisor/` workspace scaffolding, without introducing a second truth source.
+Design the next minimal supervisor/runtime-profile slice: explicit canonical runtime-profile writer path plus launch-selection closure, without adding a second truth source.
 Acceptance criteria:
-- one explicit primary-agent task-writer path exists for:
-  - `task.id`
-  - `heartbeat_at`
-  - `waiting_reason`
-  - `waiting_until`
-  - `done`
-- the writer updates the existing canonical control-plane state rather than creating a second `task.json`
-- sibling `supervisor/` workspace scaffold exists beside the primary workspace with:
-  - `supervisor/CLAUDE.md`
-  - `supervisor/AGENTS.md`
-  - `supervisor/docs/plan.md`
-  - `supervisor/docs/progress.md`
-- runtime-profile schema usage stays on the accepted string-based role schema:
-  - `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`
-- existing supervisor route names stay stable
-- no UI expansion and no hook expansion in this slice
+- one canonical writer path is defined for `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`
+- the writer updates the existing shared control-plane object rather than introducing a second runtime-profile file
+- primary launch and supervisor launch both read the same canonical runtime-profile object
+- the design explains how agent and sibling `supervisor/` workspace use the same profile without diverging
+- no UI expansion, no hook expansion, no planner/task-system expansion in this slice
 
 ## Queue
 1. Rebuild the web around environment grouping and first-class objects (`live/dev/benchmark/ephemeral`, canonical vs transitional states) before adding more summary concepts.

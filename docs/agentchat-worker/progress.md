@@ -1460,3 +1460,32 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - existing supervisor route names remain stable
 - Rejected no part of the design; it does not drift into UI, hooks, or planner sprawl.
 - Advanced the active worker plan to implementation of the explicit primary task-writer path and sibling `supervisor/` workspace scaffolding.
+## [2026-03-09 21:00] DONE — accepted minimal supervisor slice-3 after fresh-home task-writer and workspace proof
+- Independently re-ran a fresh isolated proof at [/tmp/agentchat-worker-slice3-proof2-Jph6uf](/tmp/agentchat-worker-slice3-proof2-Jph6uf) instead of relying on `agentchat-develop`'s self-report.
+- Verified the explicit primary task-writer path:
+  - fresh v1 home provisions `workdir/task-writer`
+  - `start -> heartbeat -> wait -> done` updates converge across:
+    - `agent.json`
+    - legacy `runtime/data/agents/<name>/meta.json`
+    - `runtime/data/agents.json`
+- Verified sibling `supervisor/` workspace scaffold:
+  - `supervisor/CLAUDE.md`
+  - `supervisor/AGENTS.md`
+  - `supervisor/docs/plan.md`
+  - `supervisor/docs/progress.md`
+  - no `supervisor/task.json` or supervisor-local runtime-profile file exists
+- Verified fresh-home backend registration root cause and fix:
+  - without `PATCH -> POST on 404`, a fresh v1 home would keep canonical `task` / `runtimeProfile` local-only and supervisor/backend could not see them
+  - current `server.js` fallback now makes those fields visible to backend and supervisor on the first write
+- Verified reprovision preserves canonical state:
+  - `task` and `runtimeProfile` survive reprovision unchanged
+  - `workspaceSync.taskWriterStatus=unchanged`
+  - `supervisorWorkspaceSync.*=unchanged`
+- Verified supervisor route compatibility on an isolated stack:
+  - `/api/supervisor/status`
+  - `/api/supervisor/agents`
+  - `/api/supervisor/agents/:name`
+  - `/api/supervisor/control`
+  all returned `200`
+- Root-cause note from proof: my first isolated rerun failed because I forgot to pass `AGENTCHAT_HOMEDIR` to the web/backend processes; that was a proof-harness mistake, not an implementation bug.
+- Advanced the active worker plan to the next narrow slice: canonical runtime-profile writer path and launch-selection closure.
