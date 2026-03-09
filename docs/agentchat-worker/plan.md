@@ -1,13 +1,12 @@
 ## Current
-Implement the minimal supervisor waiting/trailing slice so `normal_wait`, `stalled_wait`, and `suspected_eos` derive truthfully from canonical task state plus bounded trailing-heartbeat behavior.
+Design the agent-shaped supervisor activation/lifecycle model so supervisor activity follows the primary agent plus a bounded trailing supervision window without creating a second task source.
 Acceptance criteria:
-- valid waiting declaration derives `normal_wait`
-- expired waiting derives `stalled_wait`
-- malformed waiting derives `suspected_eos`
-- bounded trailing active-to-idle bridge works without inventing safe state
-- active-to-wait transition inside trailing window converges to `normal_wait`
-- runtime idle alone cannot create `normal_wait`
-- no UI expansion, no hook expansion, no planner/task-system sprawl
+- design defines when supervisor is `active` vs `idle` relative to the primary agent
+- design defines the bounded trailing supervision window after primary idle using the accepted trailing-heartbeat model
+- design explains sibling `supervisor/` workspace participation without becoming a second task source
+- design explains how canonical `runtimeProfile.supervisor` is selected for launch/lifecycle
+- design includes the minimal implementation proof
+- no UI expansion, no hook expansion, no orchestration/planning sprawl
 
 
 ## Queue

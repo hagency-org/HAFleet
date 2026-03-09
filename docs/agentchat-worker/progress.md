@@ -1566,6 +1566,22 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `normal_wait`, `stalled_wait`, and `suspected_eos` are derived from canonical task state plus time, not from a second task source
 - Rejected no part of the design; it does not broaden into planner/task orchestration, UI, or hooks.
 - Sent `agentchat-develop` into the corresponding implementation slice (`msg_77656`) with the 6 proof cases preserved as the acceptance boundary.
+## [2026-03-09 23:07] DONE — accepted waiting/trailing implementation and moved to supervisor activation design
+- Independently re-proved the updated `SupervisorService.deriveObservation()` path against the real implementation in [supervisor/index.js](/home/shisui/laplace/agent-chat/supervisor/index.js).
+- Verified outcomes:
+  - valid waiting declaration -> `normal_wait`
+  - expired waiting declaration -> `stalled_wait`
+  - malformed waiting declaration -> `suspected_eos`
+  - bounded active-to-idle bridge remains `active`
+  - active-to-wait transition inside the trailing window converges to `normal_wait`
+  - runtime idle alone does not create `normal_wait`
+  - future `waiting_until` with stale waiting heartbeat -> `stalled_wait`
+- Accepted boundary remains narrow:
+  - no UI expansion
+  - no hook expansion
+  - no planner/task-system broadening
+  - no second task source
+- Sent `agentchat-develop` to the next design-only batch (`msg_77658`): agent-shaped supervisor activation/lifecycle plus canonical `runtimeProfile.supervisor` launch participation.
 ## [2026-03-09 22:12] PARTIAL — corrected develop drift and re-armed inbox-gate follow-up
 - After runtime-profile acceptance, `agentchat-develop` drifted back to a generic `Explain this codebase` prompt instead of continuing the active inbox-read gate design batch.
 - Re-sent a hard correction (`msg_77638`) that narrows scope back to design-only for the framework-enforced inbox-read boundary.

@@ -188,6 +188,11 @@
   - safe waiting exists only on the canonical primary task object via `status=waiting`, `waiting_reason`, and `waiting_until`;
   - runtime idle/activity is observational input only and may start a bounded trailing window, but must not create or mutate safe waiting state;
   - `normal_wait`, `stalled_wait`, and `suspected_eos` are derived from canonical task state + time, not from a second task source.
+- Waiting/trailing implementation acceptance boundary:
+  - `normal_wait` requires a valid future waiting declaration plus a fresh waiting heartbeat;
+  - future `waiting_until` without a fresh maintained heartbeat must degrade to `stalled_wait`, not remain `normal_wait`;
+  - malformed `waiting` declarations must surface as explicit `suspected_eos` rather than collapsing into a generic no-task reason;
+  - bounded active-to-idle trailing still remains `active` until the trailing window elapses.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
