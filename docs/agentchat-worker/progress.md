@@ -1510,3 +1510,28 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Rejected no part of the design; it does not drift into UI, hooks, or a second config plane.
 - Root-cause note: the design acceptance is good, but `agentchat-develop` again drifted back to a generic `Explain this codebase` prompt after sending the note, so reminder-driven correction remains necessary until the supervisor path hardens that behavior structurally.
 - Advanced the active worker plan to the implementation slice for an explicit v1 runtime-profile writer surface and verified launch-selection precedence.
+## [2026-03-09 21:32] DONE — accepted explicit v1 runtime-profile writer and launch-precedence closure
+- Independently verified [write-v1-agent-runtime-profile.js](/home/shisui/laplace/agent-chat/scripts/write-v1-agent-runtime-profile.js) rather than relying on `agentchat-develop`'s self-report.
+- Canonical writer proof:
+  - fresh isolated home `/tmp/agentchat-worker-runtimeproof-njHlUx`
+  - explicit writer calls only `PATCH /api/agents/:name/home-metadata`
+  - written `runtimeProfile` converged across:
+    - `agent.json`
+    - legacy `runtime/data/agents/<name>/meta.json`
+    - backend `runtime/data/agents.json`
+  - no `runtime-profile.json` / `runtimeProfile.json` appeared under `workdir/` or `supervisor/`
+- Primary launch precedence proof:
+  - with canonical `runtimeProfile.primary`, fake-tmux launch used:
+    - `codex --model canonical-primary-model --canonical-primary-flag`
+  - after clearing canonical primary and reseeding conflicting legacy `type/model/extraArgs`, fake-tmux launch fell back to:
+    - `claude --model legacy-fallback-model --legacy-fallback-flag`
+- Supervisor launch/config precedence proof:
+  - with canonical supervisor JSON plus conflicting env defaults, `loadSupervisorConfig()` still resolved:
+    - `provider=qwen`
+    - `model=qwen-plus`
+  - with no canonical supervisor JSON, defaults resolved back to:
+    - `provider=deepseek`
+    - `model=deepseek-chat`
+- Root-cause note from independent proof:
+  - my first fallback rerun was invalid because I cleared canonical primary through the writer and then expected stale legacy mirror fields to remain; the correct proof order is to clear canonical primary first, then reseed conflicting legacy top-level fields before launching.
+- Advanced the active worker plan to the next architectural root cause: replace the prompt-only inbox hint with a framework-enforced inbox-read boundary.

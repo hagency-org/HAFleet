@@ -163,6 +163,15 @@
   - live/non-v1 canonical writer paths remain `POST /api/agents` and `PATCH /api/agents/:name`;
   - v1 canonical writer path remains `PATCH /api/agents/:name/home-metadata`, with `agent.json` as the canonical v1 file and runtime/meta mirrors only for compatibility and visibility;
   - primary launch (`bin/agent-up`) and supervisor launch (`bin/agent-up` env export + `supervisor/config.js`) must read the same canonical object, not private launcher-owned files.
+- Current runtime-profile precedence proof boundary:
+  - primary launch precedence is now accepted as:
+    1. canonical `runtimeProfile.primary`
+    2. legacy top-level `type/model/extraArgs` only if canonical primary role is absent
+    3. launcher defaults only if neither exists;
+  - supervisor launch precedence is now accepted as:
+    1. canonical `runtimeProfile.supervisor`
+    2. compatibility env transport derived from that same role object
+    3. process defaults only if the canonical supervisor role is absent.
 - Notification root-cause and hotfix boundary:
   - actionable MCP notifications were previously advisory only and buried `check_inbox()` mid-sentence, which made it easy for agents to react to the title/summary without reading inbox context;
   - the current hotfix moves the inbox-read gate to the first visible action (`FIRST ACTION: call check_inbox() now`) in both backend and push-relay notification builders, but this is still a prompt-level mitigation, not a framework-enforced inbox-read boundary.
