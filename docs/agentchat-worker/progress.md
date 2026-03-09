@@ -1328,3 +1328,12 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - backend/provider/model/reasoning-budget selection should become explicit per-agent launch state
   - the same profile model should be usable by both normal agents and supervisors
 - Added the runtime-profile generalization task into the worker queue so it is treated as core control-plane work rather than an ad hoc config tweak later.
+## [2026-03-09 17:52] DONE — applied the deferred supervisor/runtime-profile architecture patch and pulled execution back to the active batch
+- Applied the worker-doc updates that had been described but not landed before compaction:
+  - `system-architecture-convergence.md`
+  - `agents.md`
+  - `plan.md`
+  - `progress.md`
+- Committed and pushed the architecture patch as `2c28d05` (`docs(agentchat-worker): extend supervisor bible with runtime profiles`).
+- Re-sent a narrow correction to `agentchat-develop` so it returns to the active subconscious `operational-vs-debug split` batch instead of drifting into generic codebase explanation.
+- Attempted to add a fresh reminder, but the existing pending reminder `#2060` already covered the same follow-up window, so no duplicate reminder was added.
