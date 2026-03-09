@@ -1,23 +1,15 @@
 ## Current
-Implement the first minimal supervisor slice around canonical `Task` state, trailing heartbeat classification, and per-agent runtime-profile reads.
+Define the next minimal supervisor slice: canonical Task writer paths, explicit waiting declarations, sibling `supervisor/` workspace placement, and runtime-profile schema usage after slice-1 acceptance.
 Acceptance criteria:
-- add canonical per-agent `Task` storage with exactly:
-  - `id`
-  - `owner`
-  - `status`
-  - `updated_at`
-  - `heartbeat_at`
-  - `waiting_reason`
-  - `waiting_until`
-- backend supervisor derivation reads that object and classifies only:
-  - `active`
-  - `normal_wait`
-  - `stalled_wait`
-  - `suspected_eos`
-- trailing-window behavior is explicit and bounded
-- per-agent runtime-profile reads exist for both primary launch and supervisor launch, with compatibility fallback to existing `model` / `extraArgs`
-- existing supervisor route names and stack-global control semantics stay stable
-- no hook expansion and no UI expansion in this slice
+- design note defines the minimal canonical writer paths for `Task` state:
+  - who writes `task.id`
+  - who refreshes `heartbeat_at`
+  - who sets `waiting_reason + waiting_until`
+  - who marks `done`
+- design note defines how a supervisor workspace lives beside the primary agent workspace (`supervisor/`) without inventing a second hidden state model
+- design note fixes the canonical runtime-profile schema and where launchers read it from
+- design note keeps existing supervisor route names stable
+- no implementation, no hook expansion, no UI expansion in this batch
 
 ## Queue
 1. Rebuild the web around environment grouping and first-class objects (`live/dev/benchmark/ephemeral`, canonical vs transitional states) before adding more summary concepts.

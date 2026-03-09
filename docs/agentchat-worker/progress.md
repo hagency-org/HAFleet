@@ -1429,3 +1429,24 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - existing supervisor route names and current stack-global control semantics remain untouched in slice 1
 - Rejected no part of the design; it does not drift into UI, hook, or planner sprawl.
 - Advanced the active worker plan to implementation slice 1: canonical `Task` state + trailing-heartbeat classification + runtime-profile reads with compatibility fallback.
+## [2026-03-09 20:14] DONE — accepted minimal supervisor slice-1 after independent route/writer/profile proof
+- Independently verified slice-1 instead of relying on `agentchat-develop`'s self-report.
+- Confirmed the accepted route contract stays stable:
+  - `/api/supervisor/status`
+  - `/api/supervisor/agents`
+  - `/api/supervisor/agents/:name`
+  - `/api/supervisor/control`
+- Independent classification proof on isolated backends confirmed the intended narrow state machine:
+  - fresh `active` task -> `active`
+  - declared `waiting` task -> `normal_wait`
+  - `blocked` task -> `stalled_wait`
+  - expired `active` heartbeat -> `suspected_eos`
+- Independent writer proof confirmed `task` and `runtimeProfile` now converge across:
+  - v1 `agent.json`
+  - legacy `data/agents/<name>/meta.json`
+  - detail/API surfaces
+- Independent launch/profile proof confirmed the canonical profile is now read for both launch roles, with current accepted schema:
+  - `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`
+- Root-cause note from verification:
+  - earlier failed proofs were caused by proof harness mistakes (`NO_PROXY` missing, unseeded agent records, stale timestamps reused across sweeps), not by the accepted implementation itself.
+- Advanced the active worker plan to the next design batch: canonical Task writer paths, explicit waiting declarations, sibling `supervisor/` workspace placement, and runtime-profile schema usage after slice-1 acceptance.

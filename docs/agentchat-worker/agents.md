@@ -239,3 +239,14 @@
 - Minimal supervisor slice boundary:
   - keep existing supervisor route names and stack-global control semantics stable in slice 1 (`/api/supervisor/status`, `/api/supervisor/agents`, `/api/supervisor/agents/:name`, `/api/supervisor/control`);
   - first implementation should add canonical per-agent `Task` state and runtime-profile reads without expanding UI or changing subconscious/hook paths.
+- Minimal supervisor slice-1 accepted baseline:
+  - unchanged supervisor routes now classify from canonical per-agent `Task` state and bounded trailing-heartbeat timing rather than LLM audit output;
+  - accepted route-level classification proof is:
+    - fresh `active` task -> `active`
+    - declared `waiting` with valid `waiting_reason` + `waiting_until` -> `normal_wait`
+    - `blocked` -> `stalled_wait`
+    - expired `active` heartbeat -> `suspected_eos`
+  - accepted writer proof requires `task` and `runtimeProfile` to converge across v1 `agent.json`, legacy `data/agents/<name>/meta.json`, and detail/API surfaces.
+- Runtime profile canonical schema in slice 1 is string-based per role:
+  - `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`
+  - `reasoningProfile` and array-valued `extraArgs` are not canonical accepted fields in current storage/launch wiring.
