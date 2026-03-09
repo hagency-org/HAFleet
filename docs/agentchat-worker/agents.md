@@ -219,3 +219,8 @@
 - Architecture rule:
   - do not create display-first concepts, transition-only panels, or local substitutes that pretend to be mature system objects;
   - new fields, UI modules, and workflow concepts must map to a first-class object with a clear source of truth, or they should not ship.
+- Supervisor direction:
+  - the long-term supervisor should be an `agent-shaped state machine`, not a one-shot LLM judge and not a second executor;
+  - minimal required objects are `Task` and `Supervisor Agent State`;
+  - `waiting` must be explicitly declared by the task owner with `waiting_reason` and `waiting_until`; supervisor should not infer safe waiting from silence alone;
+  - supervisor classification should stay narrow: `active`, `normal_wait`, `stalled_wait`, `suspected_eos`.

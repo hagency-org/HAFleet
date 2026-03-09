@@ -41,6 +41,13 @@ These are the objects the system is allowed to speak about directly in APIs, UI,
 9. `Benchmark Run / Trial`
    - profile version, task/run state, artifacts, result bundle
 
+10. `Task`
+   - assigned unit of work with owner, state, heartbeat, and waiting metadata
+
+11. `Supervisor Agent State`
+   - the narrow supervisory state machine that evaluates task heartbeat over time
+   - not a generic free-form reviewer agent
+
 Anything else is either:
 - derived summary
 - compatibility mirror
@@ -126,6 +133,84 @@ This is not display polish. It is a required part of the object model. Agent lis
    - not more prose or synthetic summary layers
 
 3. Finish benchmark and config control-plane only after the object model is stable enough not to fork product language again
+
+4. Rebuild supervisor around a minimal task/heartbeat model instead of one-shot LLM judging
+
+## Supervisor Bible
+
+The supervisor should be an `agent-shaped state machine`, not a free-form audit bot.
+
+### Minimal Object Model
+
+Supervisor work should only depend on two first-class objects:
+
+1. `Task`
+   - `id`
+   - `owner`
+   - `status`
+   - `updated_at`
+   - `heartbeat_at`
+   - `waiting_reason` (nullable)
+   - `waiting_until` (nullable)
+
+2. `Supervisor Agent State`
+   - the supervisor's own running/idle/active state
+   - its tracked timing relationship to the primary task owner
+
+### Minimal Task States
+
+Keep task state small:
+
+1. `active`
+2. `waiting`
+3. `blocked`
+4. `done`
+
+### Heartbeat Rule
+
+There are only two meaningful heartbeat modes:
+
+1. `active heartbeat`
+   - the owner is still pushing the task forward
+
+2. `waiting heartbeat`
+   - the owner is not stalled, but is explicitly waiting on something
+   - must include:
+     - `waiting_reason`
+     - `waiting_until`
+
+### EOS vs Waiting
+
+Supervisor must not guess the difference from silence alone.
+
+The rule is:
+
+1. If a task is `active` and heartbeat expires, mark `suspected_eos`.
+2. If a task is `waiting` and `waiting_until` has not expired, mark `normal_wait`.
+3. If a task is `waiting` and `waiting_until` expires, mark `stalled_wait`.
+4. If a task has no valid waiting metadata, do not treat silence as safe waiting.
+
+That means normal waiting is not inferred. It must be declared by the task owner.
+
+### Supervisor Runtime Behavior
+
+Supervisor should follow the primary agent with a narrow timing rule:
+
+1. When the primary agent is active, supervisor is active.
+2. When the primary agent goes idle, supervisor stays active for a short trailing window (for example 5 heartbeat periods) to decide whether the task is in valid waiting or has drifted/EOSed.
+3. If all trailing checks show no work and no valid waiting declaration, supervisor marks `suspected_eos`.
+4. If a valid waiting declaration exists, supervisor stays in `normal_wait` until timeout.
+5. After a bounded trailing window with no further action required, supervisor may go idle.
+
+### Model Strategy
+
+Supervisor can run on an agent framework (`codex` / `claudecode`) with a cheap long-context backend, but its role must stay narrow:
+
+1. maintain task heartbeat state
+2. classify `active / waiting / stalled / suspected_eos`
+3. emit correction signals or human warnings when required
+
+It must not drift into a second executor or a general reviewer agent.
 
 ## Agent Allocation
 

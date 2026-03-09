@@ -1307,3 +1307,17 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - local hook-runtime posting remains compatible on the localhost path
   - event rows are still observational telemetry, not canonical state
 - Next active batch moves to the operational-vs-debug subconscious detail split, with no new hook path and no UI expansion.
+## [2026-03-09 17:43] DONE — recorded the minimal supervisor bible as an architecture contract
+- Captured the operator-approved supervisor direction in the architecture contract:
+  - supervisor should be an `agent-shaped state machine`
+  - not a generic free-form audit bot and not a second executor
+- Reduced the design to the minimal effective model:
+  - first-class `Task`
+  - first-class `Supervisor Agent State`
+  - task states `active / waiting / blocked / done`
+  - supervisor outcomes `active / normal_wait / stalled_wait / suspected_eos`
+- Locked in the key rule for EOS detection:
+  - valid waiting must be explicitly declared with `waiting_reason` and `waiting_until`
+  - supervisor must not infer safe waiting from silence alone
+- Recorded the trailing-heartbeat idea as the preferred timing model:
+  - when the main agent goes idle, supervisor stays active for a short trailing window, then decides between valid wait and suspected EOS.
