@@ -1535,3 +1535,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Root-cause note from independent proof:
   - my first fallback rerun was invalid because I cleared canonical primary through the writer and then expected stale legacy mirror fields to remain; the correct proof order is to clear canonical primary first, then reseed conflicting legacy top-level fields before launching.
 - Advanced the active worker plan to the next architectural root cause: replace the prompt-only inbox hint with a framework-enforced inbox-read boundary.
+## [2026-03-09 22:12] PARTIAL — corrected develop drift and re-armed inbox-gate follow-up
+- After runtime-profile acceptance, `agentchat-develop` drifted back to a generic `Explain this codebase` prompt instead of continuing the active inbox-read gate design batch.
+- Re-sent a hard correction (`msg_77638`) that narrows scope back to design-only for the framework-enforced inbox-read boundary.
+- Replaced the stale reminder with `#2084` so the next follow-up explicitly requires: inspect inbox + tmux, review immediately if delivered, and queue the next reminder before closing the loop.
+- Root cause remains structural: the prompt-level `check_inbox()` hotfix helps, but without a framework-enforced inbox-read gate, title-only notification handling can still let an executor drift after acceptance.
