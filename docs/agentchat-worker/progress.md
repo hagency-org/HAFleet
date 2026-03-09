@@ -1535,6 +1535,15 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Root-cause note from independent proof:
   - my first fallback rerun was invalid because I cleared canonical primary through the writer and then expected stale legacy mirror fields to remain; the correct proof order is to clear canonical primary first, then reseed conflicting legacy top-level fields before launching.
 - Advanced the active worker plan to the next architectural root cause: replace the prompt-only inbox hint with a framework-enforced inbox-read boundary.
+## [2026-03-09 22:34] DONE — accepted inbox-read gate design and moved to slice-1 implementation
+- Reviewed [inbox-read-gate-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/inbox-read-gate-design.md) against the architecture-first boundary for actionable notifications.
+- Accepted because it stays minimal:
+  - canonical state is limited to `inboxGate{requiresInboxCheck, sourceMsgId, raisedAt, reason}`
+  - acknowledgement is tied to real `check_inbox()` cursor advance for the pending `sourceMsgId`
+  - enforcement point is the runtime boundary before outbound progress/reply actions
+  - it clearly distinguishes the existing prompt hotfix from a framework-enforced gate
+- Rejected no part of the design; it does not sprawl into UI, hooks, or a generic task system.
+- Sent implementation scope back to `agentchat-develop` as slice-1 only (`msg_77641`).
 ## [2026-03-09 22:12] PARTIAL — corrected develop drift and re-armed inbox-gate follow-up
 - After runtime-profile acceptance, `agentchat-develop` drifted back to a generic `Explain this codebase` prompt instead of continuing the active inbox-read gate design batch.
 - Re-sent a hard correction (`msg_77638`) that narrows scope back to design-only for the framework-enforced inbox-read boundary.

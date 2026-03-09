@@ -1,10 +1,12 @@
 ## Current
-Design the framework-enforced inbox-read boundary so actionable notifications cannot be satisfied by title-only reading.
+Implement inbox-read gate slice-1 so actionable notifications raise a canonical gate and outbound progress/reply actions cannot bypass a real `check_inbox()` read.
 Acceptance criteria:
-- design defines the minimal canonical state needed to mark `requiresInboxCheck` and the inbox-read acknowledgement that clears it
-- design explains where the gate lives before outbound progress/reply actions
-- design distinguishes prompt-level hotfix from framework-enforced boundary
-- no UI expansion, no hook expansion, no broad task-system sprawl in this slice
+- actionable notification delivery persists canonical `inboxGate`
+- outbound progress/reply before inbox acknowledgement is denied by the runtime boundary
+- successful `check_inbox()` cursor advance for the pending `sourceMsgId` clears the gate
+- the same outbound action then succeeds
+- non-actionable notifications do not raise the gate
+- no UI expansion, no hook expansion, no task-system sprawl
 
 
 ## Queue

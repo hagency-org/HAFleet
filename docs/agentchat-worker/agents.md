@@ -175,6 +175,10 @@
 - Notification root-cause and hotfix boundary:
   - actionable MCP notifications were previously advisory only and buried `check_inbox()` mid-sentence, which made it easy for agents to react to the title/summary without reading inbox context;
   - the current hotfix moves the inbox-read gate to the first visible action (`FIRST ACTION: call check_inbox() now`) in both backend and push-relay notification builders, but this is still a prompt-level mitigation, not a framework-enforced inbox-read boundary.
+- Minimal inbox-read gate contract:
+  - canonical gate object is `inboxGate{requiresInboxCheck, sourceMsgId, raisedAt, reason}`;
+  - canonical acknowledgement is a real `check_inbox()` cursor advance that consumes the pending `sourceMsgId`, not merely a tool call named `check_inbox()`;
+  - enforcement belongs at the runtime boundary before outbound progress/reply actions, not in notification wording and not in backend-only delivery logic.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
