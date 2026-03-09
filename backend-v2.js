@@ -2314,7 +2314,7 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
     omitted > 0 ? `... ${omitted} older message(s) omitted from replay list.` : null,
     'These messages may be time-sensitive. Review timestamps and decide whether a reply is still needed.',
     'check_inbox() returns per-message time fields: ts / at / time.',
-    'Use check_inbox() in agent-chat MCP for full context.',
+    'FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.',
   ].filter(Boolean).join('\n');
 
   const msg = {
@@ -2388,11 +2388,11 @@ async function pushNotify(agentName, msg) {
     requiresInboxCheck = hasMcp && actionableUnread;
     const humanHint = hasHuman ? ' This includes messages from your human operator.' : '';
     const processHint = hasMcp
-      ? ' Read ALL messages via check_inbox() first. DO ALL JOBS before replying. After ALL WORK is done, send required replies.'
+      ? ' FIRST ACTION: call check_inbox() now. Read ALL messages there before doing anything else. DO ALL JOBS before replying. After ALL WORK is done, send required replies.'
       : ' Read ALL messages first. DO ALL JOBS before replying. After ALL WORK is done, send required replies.';
 
     if (hasMcp) {
-      notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}. Use check_inbox() in agent-chat MCP to read all.${humanHint}${processHint}`;
+      notification = `[NOTIFICATION] FIRST ACTION: call check_inbox() now. You have ${unreadCount} unread messages${senderText}.${humanHint}${processHint}`;
     } else {
       notification = `[NOTIFICATION] You have ${unreadCount} unread messages${senderText}.${humanHint}${processHint}`;
     }
@@ -2401,7 +2401,7 @@ async function pushNotify(agentName, msg) {
     const isGroup = !!msg.group;
 
     if (hasMcp) {
-      const checkHint = `Use check_inbox() in agent-chat MCP for full context.`;
+      const checkHint = `FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.`;
       let actionHint;
       if (needsReply && isGroup) {
         actionHint = `Reply after ALL WORK is done, using the agent-chat MCP tool: post(group="${msg.group}", summary="your reply", full="detailed reply")`;
