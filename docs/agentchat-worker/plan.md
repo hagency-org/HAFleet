@@ -8,7 +8,7 @@ Run architecture-first coordination on `master`: keep all execution delegated to
 ## Queue
 1. Resume the parked `v1 manifest/backend sync divergence` line through `agentchat-develop`; keep the accepted design note as the canonical starting point and do not mix it with UI or Matrix work.
 2. Converge human-maintained agent text fields through staged design/execution: remove `Project Scope` / `Human Notes`; rename `Manual Guidance` to canonical `Guidance`; keep `Owner` first-class and `Identity` one-line and external-facing.
-3. Make Agent Detail expose canonical task visibility/editing and show `AGENTS.md`, `plan.md`, and `progress.md` tails under `Internals`, with `Yato` as the preferred executor unless explicitly replaced.
+3. Make Agent Detail expose canonical task visibility/editing and show `AGENTS.md`, `plan.md`, and `progress.md` tails under `Internals`, now reassigned to `agentchat-develop` because Yato is blocked on an interactive prompt and cannot provide reliable handoff.
 4. Rework supervisor toward the original charter after the current parked structural lines: agent-shaped monitoring state machine, bounded convergent states, repeated-state-triggered intervention through agentchat.
 5. Continue periodic `agentchat-aduit` follow-up audits and re-triage any new structural findings before assigning code work.
 6. Add a standing residual-runtime hygiene lane: periodically audit orphan/probe tmux sessions, half-started agents, stale supervisor runtimes, and other leftover runtime artifacts; route findings back into triage instead of letting them silently accumulate.
@@ -24,4 +24,4 @@ Run architecture-first coordination on `master`: keep all execution delegated to
 16. Harden external dev web auth behavior so credentials-in-URL cannot blank the page by causing relative `fetch()` to fail; either preserve SSR on refresh failure or document/replace the auth flow.
 
 ## Blocked (optional)
-1. Make Agent Detail expose canonical task editing/visibility and show AGENTS.md / plan.md / progress.md tails under Internals; prefer Yato for the frontend pass if Yato is schedulable, otherwise hand it to agentchat-develop without delaying the live Matrix residual.
+1. Make Agent Detail expose canonical task editing/visibility and show AGENTS.md / plan.md / progress.md tails under Internals; this lane is now assigned to agentchat-develop because Yato is currently blocked at an interactive prompt.
