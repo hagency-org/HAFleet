@@ -2084,12 +2084,12 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Accepted `agentchat-develop`'s `agent-detail-task-internals-takeover-design.md`. The design correctly promotes canonical `detail.task`, demotes supervisor-doc task text to an explicitly labeled snapshot, and keeps Internals truthful by showing actual `AGENTS.md` / `plan.md` / `progress.md` content instead of synthetic merged summaries.
 - Did not activate both implementation lanes at once. To keep one executor from being overloaded, `v1 sync slice-2` is now the only active implementation lane for `agentchat-develop`; the Agent Detail/UI design is accepted but parked behind it.
 ## [2026-03-11 03:41] DONE — triaged the residual runtime-hygiene baseline into execution classes
-- Accepted `agentchat-aduit's residual runtime-hygiene audit as the current canonical residue inventory.
+- Accepted `agentchat-aduit`'s residual runtime-hygiene audit as the current canonical residue inventory.
 - Execution classification is now explicit:
   - operator cleanup: `agentchat-canonical-proof-backend` and the `/tmp` proof trees/files once they are no longer needed for active verification;
   - framework fix: stale probe agents leaking into live backend object model (`prts-codex-probe3`, `codex-multiline-submit-test-2179191`) and stale `supervisor-*` proof sessions surviving past their proof scope;
   - post-merge hygiene: non-user-facing leftover proof artifacts and proof tmux sessions that do not currently leak into live status surfaces.
 - This baseline remains parked as audit/triage only until the higher-priority structural lanes finish; no cleanup execution was started in this batch.
 ## [2026-03-11 03:42] DONE — verified the audit lane is behaving correctly in periodic follow-up mode
-- Re-checked  after the periodic-follow-up reminder. Its local docs still reflect the correct parked current state, the residual-runtime hygiene findings remain intact, and its tmux lane shows it is obeying the inbox-first rule.
+- Re-checked `agentchat-aduit` after the periodic-follow-up reminder. Its local docs still reflect the correct parked current state, the residual-runtime hygiene findings remain intact, and its tmux lane shows it is obeying the inbox-first rule.
 - No new structural findings appeared in this reminder window, and there is no sign of noise generation or scope drift. The lane remains healthy and parked until either the next scheduled follow-up or a new concrete structural finding.
