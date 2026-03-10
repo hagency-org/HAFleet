@@ -2007,3 +2007,7 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Added the UI follow-on to the worker queue: make Agent Detail expose canonical task visibility/editing and show `AGENTS.md`, `plan.md`, and `progress.md` tails under `Internals`.
 - Checked current control-plane reachability before delegation: `Yato` still has a live tmux session, but the current control-plane surface does not expose a schedulable `Yato` agent object on the active backend path, so I did not block the task on a dead message route.
 - Routed the request directly to the idle `Yato` tmux pane as the least-disruptive workaround, with explicit instructions to work only in its managed `projects/agent-chat` tree and to report back after implementation so the result can be re-audited.
+
+## [2026-03-10 23:35] PARTIAL — queued the guidance/metadata convergence direction behind the live residual
+- Recorded the next control-plane/UI convergence direction: remove low-value human text fields (`Project Scope`, `Human Notes`), rename `Manual Guidance` to canonical `Guidance`, and treat it as the human-authored shared intent surface across agent/supervisor/subconscious while keeping `CLAUDE.md` as the workflow/behavior contract.
+- I did not start implementation because the live Matrix timeout residual remains the current active line; this was queued so the field-model decision does not get lost.
