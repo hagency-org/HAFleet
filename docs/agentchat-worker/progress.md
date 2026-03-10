@@ -1756,3 +1756,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - live supervisor status reports `enabled=false`, `mode=idle`, `lifecycleState=idle`
   - dev `http://127.0.0.1:18190/api/supervisor/status` reports `enabled=false`
   - dev `http://127.0.0.1:18184/api/agents/detail/Yato` reports `"subconsciousEnabled": false`.
+## [2026-03-10 15:42] PARTIAL — narrowed the live supervisor-warning issue to current-vs-history truthfulness and deployed a hotfix candidate
+- Root cause is not a running live supervisor: live `SUPERVISOR_ENABLED=false`, but default Agent Detail / root-card rendering still treated historical `supervisorDetail.latest` rows as current warning state. That made old `SKIPPED / missing-doc-sections / unknown` audit rows look like live warnings even when current supervisor state was disabled or idle.
+- Implemented a minimal `server.js` hotfix in both `master` and the live code repo that gates current warning/current health rendering on a real current supervisor classification/lifecycle issue instead of historical `latest` rows alone. The same patch also makes disabled/no-current-state cases render neutral messaging (`Supervisor disabled`, `No active supervisor warning`) while keeping history in the Supervisor tab.
+- During deployment validation I also found live web `8084` was actually down; brought it back with a dedicated tmux-backed live web process so browser validation can proceed against a healthy service.
+- Current status is `PARTIAL` because the code/runtime hotfix is deployed, but final browser-level confirmation from `webdebug` is still pending before I close the loop and commit the patch formally.

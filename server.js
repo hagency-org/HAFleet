@@ -3346,6 +3346,13 @@ th{
     return 'warn';
   }
 
+  function hasCurrentSupervisorIssue(state) {
+    const classification = String(state?.classification || '').trim().toLowerCase();
+    if (classification === 'stalled_wait' || classification === 'suspected_eos') return true;
+    const lifecycleState = String(state?.lifecycleState || '').trim().toLowerCase();
+    return lifecycleState === 'active' && classification.length > 0;
+  }
+
   function kvGrid(entries) {
     const rows = entries.filter((entry) => entry && entry[1] !== undefined && entry[1] !== null && entry[1] !== '');
     if (rows.length === 0) return '<div class="empty-state">No data available.</div>';
@@ -3354,7 +3361,7 @@ th{
     )).join('');
   }
 
-  function buildPageModel(detail, statusRow, supervisorDetail, supervisorControl, subconsciousPayload, subconsciousDetail, unreadPayload, queueItems) {
+  function buildPageModel(detail, statusRow, supervisorDetail, supervisorStatus, supervisorControl, subconsciousPayload, subconsciousDetail, unreadPayload, queueItems) {
     const latest = supervisorDetail?.latest || null;
     const state = supervisorDetail?.state || {};
     const events = Array.isArray(supervisorDetail?.events) ? supervisorDetail.events : [];
@@ -3379,6 +3386,11 @@ th{
     const queueCount = queueRows.length;
     const consecutiveNegative = toInt(state?.consecutiveNegative, 0);
     const supervisorEnabled = supervisorControl?.enabled === true;
+    const supervisorRuntimeRunning = supervisorStatus?.runtime?.running === true;
+    const supervisorClassification = String(state?.classification || '').trim().toUpperCase();
+    const supervisorLifecycleState = String(state?.lifecycleState || '').trim().toLowerCase();
+    const supervisorCurrentStatePresent = supervisorClassification.length > 0 || supervisorLifecycleState.length > 0;
+    const supervisorCurrentIssue = hasCurrentSupervisorIssue(state);
     const subconsciousEnabled = detail?.subconsciousEnabled === true;
     const subconsciousWritable = detail?.v1 === true;
     const subconsciousStage = String(subconsciousDetail?.stage || 'unknown').trim() || 'unknown';
@@ -3409,8 +3421,8 @@ th{
     const upstreamPreTool = (upstreamDetail.preTool && typeof upstreamDetail.preTool === 'object')
       ? upstreamDetail.preTool
       : {};
-    const blockedLikely = latestStatus === 'STUCK' || /block|approval|intervention|waiting/i.test(latestReason);
-    const needsAttention = NEGATIVE_STATUSES.has(latestStatus);
+    const blockedLikely = supervisorCurrentIssue && (latestStatus === 'STUCK' || /block|approval|intervention|waiting/i.test(latestReason));
+    const needsAttention = supervisorCurrentIssue && NEGATIVE_STATUSES.has(latestStatus);
     let localRuntimeState = 'off';
     let localRuntimeLabel = 'Off';
     if (runtimeContract.desiredEnabled === true && runtimeContract.invocationConfigured === true) {
@@ -3433,13 +3445,19 @@ th{
     if (needsAttention) healthParts.push('Supervisor warning present');
     const healthSummary = healthParts.join(' · ');
     let interventionTitle = 'No active supervisor warning';
-    let interventionBody = 'Latest supervisor evaluation: ' + latestStatus + '.';
-    if (blockedLikely) {
+    let interventionBody = 'Supervisor currently shows no active warning.';
+    if (!supervisorEnabled && !supervisorCurrentIssue) {
+      interventionTitle = 'No active supervisor warning';
+      interventionBody = 'Supervisor is disabled. Historical findings remain in the Supervisor tab and audit history.';
+    } else if (blockedLikely) {
       interventionTitle = latestStatus + ' (supervisor)';
       interventionBody = latestReason || 'Supervisor evaluated agent as blocked or stuck.';
     } else if (needsAttention) {
       interventionTitle = latestStatus + ' (supervisor)';
       interventionBody = latestReason || 'Supervisor flagged drift or loss of focus.';
+    } else if (!supervisorRuntimeRunning && !supervisorCurrentStatePresent) {
+      interventionTitle = 'No active supervisor warning';
+      interventionBody = 'Supervisor is not actively running. Historical findings remain in the Supervisor tab and audit history.';
     }
     const banner = needsAttention
       ? {
@@ -3523,6 +3541,10 @@ th{
       latestStatus,
       latestReason,
       currentTask,
+      supervisorRuntimeRunning,
+      supervisorCurrentStatePresent,
+      supervisorClassification,
+      supervisorLifecycleState,
       healthSummary,
       interventionTitle,
       interventionBody,
@@ -3567,17 +3589,27 @@ th{
 
   function renderCurrentWork(model) {
     const mainEl = document.getElementById('current-work-main');
-    mainEl.textContent = model.currentTask || 'No current task recorded in the latest docs snapshot.';
+    if (!model.supervisorEnabled) {
+      mainEl.textContent = 'Supervisor disabled.';
+    } else {
+      mainEl.textContent = model.currentTask || 'No current task recorded in the latest docs snapshot.';
+    }
     mainEl.style.color = '';
     const reasonEl = document.getElementById('current-work-reason');
-    reasonEl.textContent = model.currentTask
-      ? 'From the latest supervisor docs snapshot, not from runtime introspection.'
-      : 'Supervisor docs did not expose a current task in the latest snapshot.';
+    if (!model.supervisorEnabled) {
+      reasonEl.textContent = 'Current-task snapshots are unavailable while supervisor is off.';
+    } else {
+      reasonEl.textContent = model.currentTask
+        ? 'From the latest supervisor docs snapshot, not from runtime introspection.'
+        : 'Supervisor docs did not expose a current task in the latest snapshot.';
+    }
     const meta = [];
-    meta.push('<span class="meta-item">judged ' + esc(fmtTs(model.state?.lastJudgedAt)) + '</span>');
-    meta.push('<span class="meta-item">warning ' + esc(fmtTs(model.state?.lastWarningAt)) + '</span>');
-    if (model.latest?.pattern) meta.push('<span class="meta-item">pattern ' + esc(model.latest.pattern) + '</span>');
-    if (model.latest?.domain) meta.push('<span class="meta-item">domain ' + esc(model.latest.domain) + '</span>');
+    if (model.supervisorEnabled) {
+      meta.push('<span class="meta-item">judged ' + esc(fmtTs(model.state?.lastJudgedAt)) + '</span>');
+      meta.push('<span class="meta-item">warning ' + esc(fmtTs(model.state?.lastWarningAt)) + '</span>');
+      if (model.latest?.pattern) meta.push('<span class="meta-item">pattern ' + esc(model.latest.pattern) + '</span>');
+      if (model.latest?.domain) meta.push('<span class="meta-item">domain ' + esc(model.latest.domain) + '</span>');
+    }
     document.getElementById('current-work-meta').innerHTML = meta.join('');
   }
 
@@ -4634,6 +4666,7 @@ th{
         agentDetailPayload,
         statusRow,
         detail,
+        statusPayload,
         supervisorControlPayload,
         subconsciousPayload,
         subconsciousDetailPayload,
@@ -5784,10 +5817,18 @@ body.page-hidden #reminder-panel.has-items{
         }
       } catch {}
       let supervisorData = { latest: null, state: {} };
+      let supervisorStatus = { enabled: null, runtime: { running: null } };
       try {
         if (supervisorRespRaw.status === 'fulfilled' && supervisorRespRaw.value.ok) {
           const payload = await supervisorRespRaw.value.json();
           if (payload && typeof payload === 'object') supervisorData = payload;
+        }
+      } catch {}
+      try {
+        const r = await fetch('/api/supervisor/status', { signal: controller.signal });
+        if (r.ok) {
+          const payload = await r.json();
+          if (payload && typeof payload === 'object') supervisorStatus = payload;
         }
       } catch {}
       const statusSnap = agentStatusList.find(x => x.name === targetName) || {};
@@ -5819,7 +5860,9 @@ body.page-hidden #reminder-panel.has-items{
       }
       parts.push('<span class="ai-tag ' + (activeNow ? 'ai-tag-active' : 'ai-tag-inactive') + '" id="ai-runtime-state">'
         + esc(runtimeStatusText(activeNow, activeDurationSec, idleDurationSec)) + '</span>');
-      if (latestStatus) {
+      const currentSupervisorIssue = hasCurrentSupervisorIssue(supervisorData.state || {});
+      const showCurrentSupervisorWarning = latestStatus && currentSupervisorIssue;
+      if (latestStatus && showCurrentSupervisorWarning) {
         const auditCls = latestStatus === 'FOCUSED'
           ? 'ai-tag-focused'
           : ((latestStatus === 'DRIFTING' || latestStatus === 'LOST' || latestStatus === 'STUCK') ? 'ai-tag-alert' : 'ai-tag-neutral');
@@ -5830,7 +5873,9 @@ body.page-hidden #reminder-panel.has-items{
         + esc(d.subconsciousEnabled ? 'SUBCONSCIOUS ON' : 'SUBCONSCIOUS OFF') + '</span>');
       parts.push('<br>');
       parts.push('<div class="ai-identity">' + esc(d.identity || '(no identity)') + '</div>');
-      if (latestEval && latestStatus && latestStatus !== 'FOCUSED') {
+      const supervisorEnabled = supervisorStatus?.enabled === true;
+      const supervisorRunning = supervisorStatus?.runtime?.running === true;
+      if (latestEval && latestStatus && latestStatus !== 'FOCUSED' && (showCurrentSupervisorWarning || ((supervisorEnabled || supervisorRunning) && currentSupervisorIssue))) {
         const reasonText = String(latestEval.reason || '').trim() || 'Supervisor raised a non-focused state.';
         const domainText = String(latestEval.domain || '').trim();
         const patternText = String(latestEval.pattern || '').trim();

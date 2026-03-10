@@ -1,9 +1,9 @@
 ## Current
-Await operator review of the completed `master -> stable` merge, live rollout, and default-off configuration changes.
+Close the live-exposed Agent Detail truthfulness issue where historical supervisor rows are rendered like current warnings even though supervisor/default-off state is idle or disabled.
 Acceptance criteria:
-- `stable` and live stay on the merged code/runtime-split baseline without rollout regressions
-- current live/dev default-off behavior is explicit and understood
-- any requested post-merge cleanup is handled deliberately rather than mixed into the rollout
+- dev and live default Agent Detail no longer surface historical supervisor latest rows as current warnings
+- disabled/no-current-state supervisor cases render as neutral current state, with history kept in the Supervisor tab only
+- fix is verified on dev first and then on live-facing behavior with browser-level confirmation from `webdebug`
 
 
 ## Queue

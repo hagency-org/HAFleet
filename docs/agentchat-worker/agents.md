@@ -244,6 +244,9 @@
   - mutable live runtime state lives under `/home/shisui/laplace/agent-chat-live-runtime`;
   - live `data/`, `logs/`, and `.env` in the code repo are symlinked into that runtime root for compatibility with existing service files and deploy scripts;
   - live services still use `WorkingDirectory=/home/shisui/laplace/agent-chat-live`, but read `AGENT_CHAT_RUNTIME_DIR=/home/shisui/laplace/agent-chat-live-runtime` from the symlinked `.env`.
+- Supervisor history truthfulness boundary:
+  - historical `supervisorDetail.latest` rows are audit history, not current-state truth by themselves;
+  - default current-warning/current-health surfaces must only elevate supervisor warnings when there is a current classification/lifecycle issue, not merely because an old negative `latest` row still exists while supervisor is disabled or idle.
 - Existing-home v1 reprovisioning caveat in dev:
   - if reprovision is run without explicit dev backend env (`AGENT_CHAT_API` / `AGENT_CHAT_BACKEND_PORT`), `configure-v1-subconscious.js` falls back to `8090` and rewrites hook runtime URLs toward the default backend;
   - reprovisioning an existing dev home should therefore pass the explicit dev backend env or it can silently regress the subconscious event/invoke sink to the wrong backend.
