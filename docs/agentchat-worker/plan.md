@@ -2,7 +2,7 @@
 Run architecture-first coordination on `master`: keep all execution delegated to `agentchat-develop`, `agentchat-aduit`, and `Yato`, while worker owns only planning, triage, reminder chaining, acceptance, and durable documentation. Acceptance criteria:
 - worker docs define this coordination mode explicitly and track the remaining convergence work as managed queues rather than ad hoc fixes
 - `agentchat-develop` is assigned the next parked structural line (`v1 manifest/backend sync divergence`) with a narrow scope
-- `agentchat-aduit` is assigned periodic follow-up auditing with reminders and incremental handoff duties, not one-shot auditing
+- `agentchat-aduit` is assigned periodic follow-up auditing with reminders and incremental handoff duties, including explicit residual-runtime hygiene audits (orphan tmux sessions, proof/probe leftovers, control-plane/runtime drift)
 - `Yato` is assigned the queued Agent Detail/UI convergence work (task visibility + Internals tails + field-model cleanup staging)
 - at least one active reminder exists for each live coordination lane so acceptance cannot silently fall into EOS again
 
@@ -12,16 +12,17 @@ Run architecture-first coordination on `master`: keep all execution delegated to
 3. Make Agent Detail expose canonical task visibility/editing and show `AGENTS.md`, `plan.md`, and `progress.md` tails under `Internals`, with `Yato` as the preferred executor unless explicitly replaced.
 4. Rework supervisor toward the original charter after the current parked structural lines: agent-shaped monitoring state machine, bounded convergent states, repeated-state-triggered intervention through agentchat.
 5. Continue periodic `agentchat-aduit` follow-up audits and re-triage any new structural findings before assigning code work.
-6. Continue durable live backend sweep/tmux fan-out hardening only if new evidence reopens the Matrix timeout class.
-7. Perform the operator-owned follow-up for the live `bridge-matrix.service` duplicate-owner path (disable/remove it) once root-capable execution is available.
-8. If requested, clean up leftover proof/probe tmux sessions and temporary isolated backends created during supervisor/subconscious verification.
-9. Rebuild the web around environment grouping and first-class objects (`live/dev/benchmark/ephemeral`, canonical vs transitional states) before adding more summary concepts.
-10. Start benchmark Batch 4 (result UI) only after the object model is stable enough not to fork benchmark product language from core system language.
-11. Expose the per-agent config model in the unified web management page (MCP, hooks, skills, related runtime knobs) once its first-class objects and truth sources are defined.
-12. Decide how to handle the enterprise-managed Claude MCP constraint for a real `agentchat-dev` alias (`policy change`, `approved central config update`, or `accept using existing agent-chat alias against dev env`).
-13. Mirror the same code/runtime split design later for live (`agent-chat-live` + future `agent-chat-live-runtime`) after stable merge and explicit cutover planning.
-14. Secure external supervisor event ingest and reducer-based subconscious event flow.
-15. Harden external dev web auth behavior so credentials-in-URL cannot blank the page by causing relative `fetch()` to fail; either preserve SSR on refresh failure or document/replace the auth flow.
+6. Add a standing residual-runtime hygiene lane: periodically audit orphan/probe tmux sessions, half-started agents, stale supervisor runtimes, and other leftover runtime artifacts; route findings back into triage instead of letting them silently accumulate.
+7. Continue durable live backend sweep/tmux fan-out hardening only if new evidence reopens the Matrix timeout class.
+8. Perform the operator-owned follow-up for the live `bridge-matrix.service` duplicate-owner path (disable/remove it) once root-capable execution is available.
+9. If requested, clean up leftover proof/probe tmux sessions and temporary isolated backends created during supervisor/subconscious verification.
+10. Rebuild the web around environment grouping and first-class objects (`live/dev/benchmark/ephemeral`, canonical vs transitional states) before adding more summary concepts.
+11. Start benchmark Batch 4 (result UI) only after the object model is stable enough not to fork benchmark product language from core system language.
+12. Expose the per-agent config model in the unified web management page (MCP, hooks, skills, related runtime knobs) once its first-class objects and truth sources are defined.
+13. Decide how to handle the enterprise-managed Claude MCP constraint for a real `agentchat-dev` alias (`policy change`, `approved central config update`, or `accept using existing agent-chat alias against dev env`).
+14. Mirror the same code/runtime split design later for live (`agent-chat-live` + future `agent-chat-live-runtime`) after stable merge and explicit cutover planning.
+15. Secure external supervisor event ingest and reducer-based subconscious event flow.
+16. Harden external dev web auth behavior so credentials-in-URL cannot blank the page by causing relative `fetch()` to fail; either preserve SSR on refresh failure or document/replace the auth flow.
 
 ## Blocked (optional)
 1. Make Agent Detail expose canonical task editing/visibility and show AGENTS.md / plan.md / progress.md tails under Internals; prefer Yato for the frontend pass if Yato is schedulable, otherwise hand it to agentchat-develop without delaying the live Matrix residual.

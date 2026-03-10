@@ -2065,3 +2065,6 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Sent `agentchat-aduit` into periodic follow-up audit mode with instructions to set its own reminders, keep docs truthful, and report only structural or materially user-visible findings.
 - Re-dispatched `Yato` onto the parked Agent Detail/UI follow-on (`task` visibility/editing, `Internals` tails, and field-surface cleanup staging); current delivery still warns `target_offline/queued`, so that lane remains under explicit monitoring.
 - Restored worker-side reminder coverage for the three active coordination lanes: `#2231` (develop), `#2233` (Yato), and `#2234` (audit).
+## [2026-03-11 03:53] DONE — promoted residual runtime artifacts into the standing audit scope
+- Added residual runtime hygiene as an explicit queue item and acceptance condition: orphan tmux sessions (for example `supervisor-tmuxlaunchfailed`), probe leftovers, half-started agents, and control-plane/runtime drift must be periodically audited instead of silently accumulating.
+- Recorded this as durable operational knowledge so future sessions do not treat leftover runtime artifacts as harmless background noise.
