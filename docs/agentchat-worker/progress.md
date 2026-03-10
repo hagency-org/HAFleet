@@ -2090,3 +2090,6 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - framework fix: stale probe agents leaking into live backend object model (`prts-codex-probe3`, `codex-multiline-submit-test-2179191`) and stale `supervisor-*` proof sessions surviving past their proof scope;
   - post-merge hygiene: non-user-facing leftover proof artifacts and proof tmux sessions that do not currently leak into live status surfaces.
 - This baseline remains parked as audit/triage only until the higher-priority structural lanes finish; no cleanup execution was started in this batch.
+## [2026-03-11 03:42] DONE — verified the audit lane is behaving correctly in periodic follow-up mode
+- Re-checked  after the periodic-follow-up reminder. Its local docs still reflect the correct parked current state, the residual-runtime hygiene findings remain intact, and its tmux lane shows it is obeying the inbox-first rule.
+- No new structural findings appeared in this reminder window, and there is no sign of noise generation or scope drift. The lane remains healthy and parked until either the next scheduled follow-up or a new concrete structural finding.
