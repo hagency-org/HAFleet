@@ -1,13 +1,13 @@
 ## Current
-Await explicit operator go-ahead for `master -> stable` now that the default-off change has landed and the accepted structural blockers are closed.
+Await operator review of the completed `master -> stable` merge, live rollout, and default-off configuration changes.
 Acceptance criteria:
-- merge authorization is explicit rather than inferred
-- merge execution follows the accepted hygiene sequence
-- any current-runtime overrides that should remain on/off are decided deliberately before branch movement
+- `stable` and live stay on the merged code/runtime-split baseline without rollout regressions
+- current live/dev default-off behavior is explicit and understood
+- any requested post-merge cleanup is handled deliberately rather than mixed into the rollout
 
 
 ## Queue
-1. If requested before merge, flip explicit dev/runtime env so currently running dev agents also start with `supervisor=off` / `subconscious=off`, rather than only changing fresh-agent defaults.
+1. If requested, clean up leftover proof/probe tmux sessions and temporary isolated backends created during supervisor/subconscious verification.
 1. Rebuild the web around environment grouping and first-class objects (`live/dev/benchmark/ephemeral`, canonical vs transitional states) before adding more summary concepts.
 2. Start benchmark Batch 4 (result UI) only after the object model is stable enough not to fork benchmark product language from core system language.
 3. Expose the per-agent config model in the unified web management page (MCP, hooks, skills, related runtime knobs) once its first-class objects and truth sources are defined.
@@ -17,4 +17,3 @@ Acceptance criteria:
 7. Harden external dev web auth behavior so credentials-in-URL cannot blank the page by causing relative `fetch()` to fail; either preserve SSR on refresh failure or document/replace the auth flow.
 
 ## Blocked (optional)
-- `master -> stable` merge execution — awaiting explicit operator go-ahead now that no structural blocker remains.

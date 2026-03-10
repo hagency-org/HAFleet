@@ -239,6 +239,11 @@
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
   - any duplicate or linked `docs/CLAUDE.md` / `docs/AGENTS.md` should be treated as transitional compatibility only, not the long-term source of truth.
+- Live runtime split shape:
+  - `agent-chat-live` is now the live code repo on branch `stable`;
+  - mutable live runtime state lives under `/home/shisui/laplace/agent-chat-live-runtime`;
+  - live `data/`, `logs/`, and `.env` in the code repo are symlinked into that runtime root for compatibility with existing service files and deploy scripts;
+  - live services still use `WorkingDirectory=/home/shisui/laplace/agent-chat-live`, but read `AGENT_CHAT_RUNTIME_DIR=/home/shisui/laplace/agent-chat-live-runtime` from the symlinked `.env`.
 - Existing-home v1 reprovisioning caveat in dev:
   - if reprovision is run without explicit dev backend env (`AGENT_CHAT_API` / `AGENT_CHAT_BACKEND_PORT`), `configure-v1-subconscious.js` falls back to `8090` and rewrites hook runtime URLs toward the default backend;
   - reprovisioning an existing dev home should therefore pass the explicit dev backend env or it can silently regress the subconscious event/invoke sink to the wrong backend.
