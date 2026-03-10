@@ -1800,3 +1800,6 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `GET /api/inbox/agentchat-develop` returned `200`
   - `8090` socket state stayed small and stable (single listener, low single-digit `ESTAB`, mostly `TIME_WAIT`)
 - Current residual is no longer “service is unstable”; it is now limited to whether the live-only sweep throttling can be reduced or replaced by a proper code-level fix for the synchronous tmux/system sweep workload.
+## [2026-03-10 20:50] DONE — wrote a full P0 incident report for the live backend outage
+- Added [live-p0-incident-report-2026-03-10.md](/home/shisui/laplace/agent-chat/docs/agentchat-worker/live-p0-incident-report-2026-03-10.md) to capture impact, root-cause chain, mitigations, verification, residual risk, and recommended follow-up.
+- This report is intended as the durable postmortem baseline for the live outage rather than leaving the narrative fragmented across chat replies and incremental progress entries.
