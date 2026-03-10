@@ -1,10 +1,10 @@
 ## Current
-Continue narrowing the still-open live Matrix/backend timeout residual after accepting the duplicate-bridge single-owner lock, with the current target being local-activity sweep hardening slice-2 implementation after accepting the bounded-capture design.
+Continue narrowing the still-open live Matrix/backend timeout residual after accepting the duplicate-bridge single-owner lock and the first two local-activity sweep hardening slices.
 Acceptance criteria:
 - the single-owner lock implementation is committed and pushed as accepted live code
 - the quoted Matrix notice remains narrowed beyond `submitHumanMessage() -> POST /api/messages` to backend event-loop starvation caused by the local activity sweep path
-- the first local-activity sweep hardening slice is accepted with proof
-- the bounded pane-capture/cursor slice is accepted or explicitly rejected with proof
+- local-activity sweep hardening slice-1 and slice-2 are both accepted with proof
+- the remaining timeout residual is either closed or narrowed to the next exact owner with route/function-chain evidence
 - `agentchat-develop` stays scoped only to the timeout residual until the next exact fix-order decision is ready
 - v1/control-plane work remains parked while the live timeout residual is still open
 

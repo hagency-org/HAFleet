@@ -2008,6 +2008,11 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - The accepted next step is still the smallest truthful correction for the live Matrix timeout residual: add a backend-owned `localActivitySweep.selectionCursor`, add a config-backed pane-capture budget, rotate the sampled subset in `sweepLocalActivityDurations()`, and keep non-sampled agents on metadata-only fallback semantics without inventing fresh pane-derived state.
 - Missing-session detection, MCP presence, duplicate-owner work, `/api/messages`, supervisor, v1/control-plane, UI, and hook behavior all remain explicitly out of scope for this slice.
 
+## [2026-03-11 00:03] DONE — accepted local-activity sweep hardening slice-2 and updated the active timeout-residual baseline
+- Accepted `agentchat-develop`'s `local-activity sweep slice-2 only` handoff as the smallest bounded pane-capture correction for the live Matrix timeout residual.
+- The accepted boundary is: backend-owned `localActivitySweep.selectionCursor`, a config-backed pane-capture budget, rotated sampled subset selection in `sweepLocalActivityDurations()`, and metadata-only fallback semantics for non-sampled agents.
+- This does **not** mean the live Matrix timeout residual is closed; it means the second local-sweep hardening slice is in place and the next step is to prove whether the remaining timeout is still owned by local activity sweep or by some later exact function chain.
+
 ## [2026-03-10 23:58] PARTIAL — queued the Agent Detail task/Internals follow-on and routed it to Yato via tmux
 - Added the UI follow-on to the worker queue: make Agent Detail expose canonical task visibility/editing and show `AGENTS.md`, `plan.md`, and `progress.md` tails under `Internals`.
 - Checked current control-plane reachability before delegation: `Yato` still has a live tmux session, but the current control-plane surface does not expose a schedulable `Yato` agent object on the active backend path, so I did not block the task on a dead message route.
