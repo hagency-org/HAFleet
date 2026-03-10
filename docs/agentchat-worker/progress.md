@@ -1788,3 +1788,7 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - local `8090` socket pressure dropped from hundreds of `ESTAB`/`CLOSE_WAIT` sockets to a small steady state (`~6 ESTAB`, mostly `TIME_WAIT`)
   - `bridge-matrix` could start successfully and attach its SSE stream again
 - Residual status: this is a live runtime mitigation, not yet the durable code-level fix. `agentchat-develop` has been reassigned to prove and minimize the sweep/root-cause path so live no longer depends on manual env throttling.
+## [2026-03-10 20:42] DONE — confirmed live browser recovery and narrowed durable backend work to internal fetch timeout hardening
+- `webdebug` re-audit passed on live after the runtime mitigation: root page and `Yato` detail both render fully, queue/reminder/message panels populate, tabs switch, and the earlier stale supervisor warning fix still holds on live.
+- This closes the user-visible P0 symptom loop: live is currently functional again from browser, backend, inbox, and bridge perspectives.
+- `agentchat-develop` is now working on the next narrow durability slice instead of reopening UI work: adding bounded timeouts to backend-owned internal bridge/queue fetches in `backend-v2.js`, so backend fan-out toward web/queue/tmux transport cannot hang indefinitely during future local stalls.
