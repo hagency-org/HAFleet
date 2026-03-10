@@ -132,6 +132,18 @@ function collectAllAgentNames() {
     .sort((a, b) => a.localeCompare(b));
 }
 
+function collectActiveApiAgentNames(apiRows) {
+  if (!Array.isArray(apiRows)) return null;
+  return apiRows
+    .filter(r => r && r.online === true)
+    .filter(r => typeof r.tmux === 'string' && r.tmux.trim())
+    .filter(r => r.blocked !== true)
+    .filter(r => r.activeNow === true)
+    .map(r => String(r.name || '').trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+
 function auditOne(agentName, apiAgent = null) {
   const { workspacePath, metaPath, v1Manifest } = loadMeta(agentName, apiAgent);
   const docs = resolveAgentDocsPaths(agentName, workspacePath, { cwd: ROOT, v1Manifest });
@@ -196,18 +208,8 @@ async function main() {
     }
   }
   if (args.activeOnly) {
-    const active = Array.isArray(apiRows)
-      ? apiRows
-          .filter(r => r && r.online === true)
-          .filter(r => typeof r.tmux === 'string' && r.tmux.trim())
-          .filter(r => r.blocked !== true)
-          .filter(r => r.activeNow === true)
-          .map(r => r.name)
-      : null;
-    if (Array.isArray(active) && active.length > 0) {
-      const keep = new Set(active);
-      names = names.filter(name => keep.has(name));
-    }
+    const active = collectActiveApiAgentNames(apiRows);
+    if (Array.isArray(active)) names = active;
   }
   if (args.limit) names = names.slice(0, args.limit);
 

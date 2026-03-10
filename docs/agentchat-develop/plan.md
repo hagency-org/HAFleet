@@ -1,8 +1,12 @@
 ## Current
-Continue only after the next explicit worker scope.
+Design the v1 manifest/backend sync divergence correction.
 Acceptance criteria:
-- Do not start merge execution or new implementation from this hold state.
-- Keep follow-on work bounded to the next worker-scoped batch.
+- Produce one design note only.
+- Identify the exact canonical writer and reader paths involved.
+- List the remaining real divergence points after prior fixes.
+- Propose the smallest correction order.
+- Do not implement in this batch.
+- Keep the live Matrix / bridge residual separate.
 
 ## Queue
 1. Continue only after the next explicit worker scope.

@@ -85,6 +85,25 @@ function resolveStoredAgentTokenName(agentName) {
   return findCaseInsensitiveKey(state.agentTokens || {}, trimmed);
 }
 
+function isTimeoutAbortError(error) {
+  const message = String(error?.message || '');
+  return error?.name === 'TimeoutError'
+    || (error?.name === 'AbortError' && /timeout/i.test(message))
+    || /aborted due to timeout/i.test(message);
+}
+
+async function getJoinedRoomMembersWithTrace(botClient, roomId, contextLabel) {
+  const startedAt = Date.now();
+  try {
+    return await botClient.getJoinedRoomMembers(roomId);
+  } catch (error) {
+    const elapsedMs = Date.now() - startedAt;
+    const prefix = isTimeoutAbortError(error) ? '[bridge-matrix-timeout]' : '[bridge-matrix-fetch-failed]';
+    console.error(`${prefix} ${contextLabel} room=${roomId} after ${elapsedMs}ms: ${error?.message || error}`);
+    throw error;
+  }
+}
+
 function getStoredAgentToken(agentName) {
   const key = resolveStoredAgentTokenName(agentName);
   return key ? (state.agentTokens[key] || null) : null;
@@ -607,14 +626,23 @@ async function setCustomAgentAvatar(agentName, imageBuffer, mimeType) {
 }
 
 // ── Backend API helpers ───────────────────────────────────────────────
-async function backendApi(method, path, body) {
+async function backendApi(method, path, body, contextLabel = '') {
   const opts = { method, headers: {}, signal: AbortSignal.timeout(BACKEND_FETCH_TIMEOUT_MS) };
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(`${BACKEND_URL}${path}`, opts);
-  return res.json();
+  const startedAt = Date.now();
+  try {
+    const res = await fetch(`${BACKEND_URL}${path}`, opts);
+    return res.json();
+  } catch (error) {
+    const elapsedMs = Date.now() - startedAt;
+    const prefix = isTimeoutAbortError(error) ? '[bridge-backend-timeout]' : '[bridge-backend-fetch-failed]';
+    const suffix = contextLabel ? ` ${contextLabel}` : '';
+    console.error(`${prefix} ${method} ${path}${suffix} after ${elapsedMs}ms: ${error?.message || error}`);
+    throw error;
+  }
 }
 
 // ── Room ↔ Group mapping ─────────────────────────────────────────────
@@ -1738,17 +1766,31 @@ class MatrixBridge {
     // Skip recently created rooms — humans may not have accepted invites yet
     if (this.recentlyCreatedRooms.has(roomId)) return;
     try {
-      const joinedMembers = await this.botClient.getJoinedRoomMembers(roomId);
+      const joinedMembers = await getJoinedRoomMembersWithTrace(
+        this.botClient,
+        roomId,
+        `reconcile:getJoinedRoomMembers group=${JSON.stringify(groupName)}`
+      );
       const agentMembers = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
       const humanMembers = joinedMembers
         .filter(m => !isAgentUser(m) && m !== this.botUserId)
         .map(m => humanNameFromUserId(m))
         .filter(Boolean);
       const matrixMembers = [...new Set([...agentMembers, ...humanMembers].filter(Boolean))];
-      const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(groupName)}`);
+      const existing = await backendApi(
+        'GET',
+        `/api/groups/${encodeURIComponent(groupName)}`,
+        null,
+        `context=reconcile:get-group group=${JSON.stringify(groupName)} room=${roomId}`
+      );
 
       if (existing.error) {
-        await backendApi('POST', '/api/groups', { name: groupName, members: matrixMembers });
+        await backendApi(
+          'POST',
+          '/api/groups',
+          { name: groupName, members: matrixMembers },
+          `context=reconcile:create-group group=${JSON.stringify(groupName)} room=${roomId} memberCount=${matrixMembers.length}`
+        );
         console.log(`Reconciled by creating missing backend group "${groupName}" with ${matrixMembers.length} members`);
         return;
       }
@@ -1766,7 +1808,12 @@ class MatrixBridge {
       }
 
       if (add.length > 0) {
-        await backendApi('POST', `/api/groups/${encodeURIComponent(groupName)}/members`, { add });
+        await backendApi(
+          'POST',
+          `/api/groups/${encodeURIComponent(groupName)}/members`,
+          { add },
+          `context=reconcile:add-members group=${JSON.stringify(groupName)} room=${roomId} addCount=${add.length}`
+        );
         console.log(`Reconciled group "${groupName}" from room ${roomId}: +[${add.join(', ')}]`);
       }
     } catch (e) {

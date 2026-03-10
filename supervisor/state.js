@@ -24,10 +24,13 @@ export class SupervisorStateStore {
     this.filePath = filePath;
     this.warnAfter = warnAfter;
     this.warnCooldownMs = warnCooldownMs;
-    const loaded = safeReadJson(filePath, { agents: {} });
+    const loaded = safeReadJson(filePath, { agents: {}, selectionCursor: 0 });
     this.agents = loaded && typeof loaded === 'object' && loaded.agents && typeof loaded.agents === 'object'
       ? loaded.agents
       : {};
+    this.selectionCursor = loaded && typeof loaded === 'object'
+      ? Math.max(0, Number(loaded.selectionCursor) || 0)
+      : 0;
   }
 
   snapshot(agentName) {
@@ -68,6 +71,14 @@ export class SupervisorStateStore {
     }
   }
 
+  getSelectionCursor() {
+    return Math.max(0, Number(this.selectionCursor) || 0);
+  }
+
+  setSelectionCursor(value) {
+    this.selectionCursor = Math.max(0, Number(value) || 0);
+  }
+
   applyJudgment(agentName, judgment, now, eventId) {
     const prev = this.snapshot(agentName);
     const negative = isNegative(judgment.status);
@@ -104,6 +115,10 @@ export class SupervisorStateStore {
   }
 
   save() {
-    safeWriteJson(this.filePath, { agents: this.agents, updatedAt: Date.now() });
+    safeWriteJson(this.filePath, {
+      agents: this.agents,
+      selectionCursor: this.getSelectionCursor(),
+      updatedAt: Date.now(),
+    });
   }
 }

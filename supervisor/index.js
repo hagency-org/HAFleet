@@ -463,7 +463,23 @@ export class SupervisorService {
       rows.push({ agent, runtime });
     }
     rows.sort((a, b) => String(a.agent.name).localeCompare(String(b.agent.name)));
-    return rows.slice(0, this.config.maxAgentsPerSweep);
+    return rows;
+  }
+
+  resolveSweepCandidates(allRows = this.resolveCandidates()) {
+    const rows = Array.isArray(allRows) ? allRows : [];
+    const limit = Math.max(1, Number(this.config.maxAgentsPerSweep) || 1);
+    if (rows.length <= limit) {
+      this.stateStore.setSelectionCursor(0);
+      return rows;
+    }
+    const start = this.stateStore.getSelectionCursor() % rows.length;
+    const selected = [];
+    for (let offset = 0; offset < Math.min(limit, rows.length); offset++) {
+      selected.push(rows[(start + offset) % rows.length]);
+    }
+    this.stateStore.setSelectionCursor((start + selected.length) % rows.length);
+    return selected;
   }
 
   deriveObservation(candidate, now = Date.now()) {
@@ -534,7 +550,7 @@ export class SupervisorService {
           classification = 'active';
           reason = 'Task is marked done and still within the bounded supervisor trailing window.';
         } else {
-          classification = 'suspected_eos';
+          classification = 'done';
           reason = 'Task is done and the supervisor trailing window has elapsed.';
         }
       }
@@ -864,9 +880,10 @@ export class SupervisorService {
     this.lastSweepError = null;
 
     try {
-      const candidates = this.resolveCandidates();
-      this.lastSweepActive = candidates.length;
-      this.stateStore.clearMissingAgents(candidates.map(row => row.agent.name));
+      const allCandidates = this.resolveCandidates();
+      const candidates = this.resolveSweepCandidates(allCandidates);
+      this.lastSweepActive = allCandidates.length;
+      this.stateStore.clearMissingAgents(allCandidates.map(row => row.agent.name));
       let evaluated = 0;
       for (const row of candidates) {
         this.evaluateOne(row, started);
@@ -897,8 +914,6 @@ export class SupervisorService {
       enabled: this.enabled,
       disabledReason: this.disabledReason,
       intervalMs: this.config.intervalMs,
-      activeOnly: this.config.activeOnly,
-      skipBlocked: this.config.skipBlocked,
       warnAfter: this.config.warnAfter,
       warnCooldownMs: this.config.warnCooldownMs,
       heartbeatTtlMs: this.config.heartbeatTtlMs,

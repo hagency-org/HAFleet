@@ -116,6 +116,25 @@ const MEDIA_FETCH_ALLOWED_ROOTS = [
   path.resolve(MATRIX_MEDIA_DIR),
 ];
 
+function isTimeoutAbortError(error) {
+  const message = String(error?.message || '');
+  return error?.name === 'TimeoutError'
+    || (error?.name === 'AbortError' && /timeout/i.test(message))
+    || /aborted due to timeout/i.test(message);
+}
+
+async function fetchWebBridge(url, init, contextLabel) {
+  const startedAt = Date.now();
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    const elapsedMs = Date.now() - startedAt;
+    const prefix = isTimeoutAbortError(error) ? '[web-bridge-timeout]' : '[web-bridge-fetch-failed]';
+    console.warn(`${prefix} ${contextLabel} after ${elapsedMs}ms: ${error?.message || error}`);
+    throw error;
+  }
+}
+
 // ── Storage helpers ───────────────────────────────────────────────────
 function dataPath(name) { return path.join(DATA_DIR, name); }
 
@@ -4160,7 +4179,8 @@ function pushResourceAlertToAgent(agentName, summary) {
   if (!state.online) return;
 
   const payload = `[RESOURCE ALERT] ${summary}\nPlease pause heavy tasks, checkpoint progress, and reduce memory usage immediately.`;
-  fetch(PUSH_QUEUE_URL, {
+  const queuePath = new URL(PUSH_QUEUE_URL).pathname;
+  fetchWebBridge(PUSH_QUEUE_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
@@ -4179,7 +4199,7 @@ function pushResourceAlertToAgent(agentName, summary) {
         hasMcp: false,
       },
     }),
-  }).catch((e) => {
+  }, `pushResourceAlertToAgent() POST ${queuePath} agent=${agentName}`).catch((e) => {
     console.warn(`[scope-alert] queue push failed for ${agentName}: ${e.message}`);
   });
 }
@@ -4495,10 +4515,11 @@ function logPushNotifySkip(agentName, reason, detail = '') {
 
 function clearQueuedNotificationsForAgent(agentName) {
   if (!agentName) return;
-  fetch(`${WEB_BASE_URL}/api/queue/agents/${encodeURIComponent(agentName)}/notifications`, {
+  const queueClearPath = `/api/queue/agents/${encodeURIComponent(agentName)}/notifications`;
+  fetchWebBridge(`${WEB_BASE_URL}${queueClearPath}`, {
     method: 'DELETE',
     signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
-  })
+  }, `clearQueuedNotificationsForAgent() DELETE ${queueClearPath} agent=${agentName}`)
     .then((r) => {
       if (!r.ok) {
         console.warn(`[push-notify] queue clear failed for ${agentName}: status ${r.status}`);
@@ -4673,12 +4694,13 @@ async function pushNotify(agentName, msg) {
       needsReply,
       hasMcp,
     };
-    const resp = await fetch(PUSH_QUEUE_URL, {
+    const queuePath = new URL(PUSH_QUEUE_URL).pathname;
+    const resp = await fetchWebBridge(PUSH_QUEUE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
       body: JSON.stringify({ from: 'agent-chat-v2', to: agent.tmux, payload: notification, notifyMeta }),
-    });
+    }, `pushNotify() POST ${queuePath} agent=${agentName}`);
     if (resp.ok) {
       const body = await resp.json().catch(() => ({}));
       markAgentPushNotified(agentName, {

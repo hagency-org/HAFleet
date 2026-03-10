@@ -1821,3 +1821,130 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `GET /health` on `8090` -> `200`
   - repeated `GET /api/inbox/agentchat-worker` on `8090` -> `200`
   - live web and backend are both running from `/home/shisui/laplace/agent-chat-live`
+
+## [2026-03-10 21:43] PARTIAL — created live `agentchat-aduit` as a closed-loop test and uncovered four v1 launch/workspace defects
+- Created a new live v1 agent named `agentchat-aduit` with managed project `agentchat`, canonical initial task `full-agentchat-audit`, explicit audit role docs, and compatibility mirror records. The managed project now exists at `/home/shisui/.agentchat/agents/agent_agentchat-aduit/workdir/projects/agentchat`.
+- Verified canonical metadata wiring:
+  - `agent.json` and live `meta.json` both point at the same home/workdir and managed project
+  - the initial task was written through `workdir/task-writer`
+  - human metadata now states that `agentchat-aduit` must audit the full project and report findings back to `agentchat-worker`
+- The closed-loop launch did **not** complete, because the fresh Codex session stalled on the first-run workspace trust prompt. This exposed four workflow defects:
+  1. live v1 homes are still created under `~/.agentchat/agents/...` instead of the intended live runtime root
+  2. reprovision overwrote customized root `CLAUDE.md`/`AGENTS.md`
+  3. `agent-up-v1` does not handle Codex trust bootstrap, so backend metadata can claim activity while the pane is blocked
+  4. `agent-down` refuses this half-bootstrapped state as “currently active”, forcing manual tmux cleanup during validation
+- This remains `PARTIAL` until `agentchat-aduit` can complete bootstrap and successfully send a real message back to `agentchat-worker`.
+
+
+## [2026-03-10 21:42] DONE — closed a false live-backend 502 incident and resumed the `agentchat-aduit` loop
+- The apparent live `8090` full-route `502` outage was a local probe artifact, not a real backend failure. Root cause: this shell has `http_proxy`/`https_proxy`/`all_proxy` pointed at `127.0.0.1:7890`, and proxied localhost `curl` reproduced misleading `502` responses while direct probes with `curl --noproxy '*'` showed live remained healthy (`/health`, `/api/inbox/agentchat-worker`, `/api/groups`, and `8084 /` all returned `200`).
+- Recorded this as a workflow/incident lesson: live outage triage on this host must always use `--noproxy '*'` (or equivalent) for localhost verification before declaring a backend outage.
+- Re-narrowed `agentchat-develop` back to the real residual only: intermittent Matrix/bridge timeout path capture, no broader backend-outage work.
+- This clears the false incident branch and lets the worker resume the live `agentchat-aduit` creation/verification loop.
+
+
+## [2026-03-10 21:44] DONE — accepted the live 8090 full-route 502 as a local proxy artifact, not a backend outage
+- Accepted `agentchat-develop`'s narrowing: the apparent live `8090` all-route `502` state was caused by this shell's proxy environment (`http_proxy` / `https_proxy` / `all_proxy` to `127.0.0.1:7890`), not by a real backend outage.
+- Independent proof matched the conclusion: proxied localhost curls returned `502`, while `curl --noproxy '*'` directly to live `8090` returned `200` for `/health`, `/api/inbox/agentchat-worker`, and `/api/groups`.
+- This closes the false-outage branch and leaves only the real intermittent Matrix/bridge timeout residual in scope for `agentchat-develop`.
+
+
+## [2026-03-10 21:46] DONE — closed the live `agentchat-aduit` creation and messaging loop, then started the real audit
+- Completed the live closed-loop creation test for `agentchat-aduit`. The agent now exists as a live v1 agent with canonical task state, managed project copy `projects/agentchat`, root audit docs, `supervisor=off`, and `subconscious=off`.
+- Verified the live Codex bootstrap can complete after manually satisfying the first-run trust prompt; the agent reached a real online/MCP-present state and successfully sent a direct message back to `agentchat-worker` (`msg_77856`).
+- After the proof, sent the actual audit-start instruction to `agentchat-aduit`: continue the full subsystem-by-subsystem audit of `projects/agentchat`, record subsystem understanding/issues in its own docs, and report findings incrementally to `agentchat-worker`.
+- This closes the creation/messaging loop and turns the new live agent into an active audit worker rather than a half-bootstrapped placeholder.
+
+
+## [2026-03-10 21:50] PARTIAL — received the first live `agentchat-aduit` audit findings and routed them into the main execution stream
+- `agentchat-aduit` delivered the first subsystem findings from its managed `projects/agentchat` copy on live. The three concrete findings are:
+  1. supervisor sweep starvation risk from `resolveCandidates()` slicing without fairness/rotation
+  2. done-task false negatives: `suspected_eos` can continue incrementing negative streaks after the supervisor has already transitioned lifecycle to idle
+  3. upstream Letta cross-request env leakage risk from `runWithUpstreamEnv()` mutating `process.env` around async work
+- These are not cosmetic findings. They touch control-plane fairness, supervisor truthfulness, and upstream per-agent isolation.
+- Routed this into the execution stream: `agentchat-aduit` continues auditing subsystem-by-subsystem while the worker begins prioritizing and assigning the first findings instead of waiting for the full audit to complete.
+
+
+## [2026-03-10 21:51] PARTIAL — accepted four more audit findings and widened the audit triage set
+- `agentchat-aduit` delivered four additional findings from the live managed-copy audit:
+  4. supervisor exposes `SUPERVISOR_ACTIVE_ONLY` / `SUPERVISOR_SKIP_BLOCKED` in status without any enforcement path
+  5. `npm run audit:agent-docs -- --active` is copy-unsafe for managed-project auditing and can silently report zero audited agents
+  6. remote package mirror is drifted from source (`remote/bin/*`, `remote/lib/push-relay-core.js`)
+  7. dependency policy currently fails on disallowed advisories (`express-rate-limit`, `hono`, `@hono/node-server`)
+- Findings 4 and 5 are control-plane/truthfulness issues; 6 and 7 are release hygiene / deployment risk findings.
+- These were accepted into the worker's triage queue without waiting for the final audit handoff so that subsystem-severity ordering can start early.
+
+
+## [2026-03-10 21:52] DONE — accepted the completed `agentchat-aduit` subsystem audit handoff and converted it into the main triage order
+- `agentchat-aduit` completed the first full subsystem-by-subsystem audit of the live managed `projects/agentchat` copy and returned a final ordered handoff.
+- Highest-signal findings accepted into the worker triage order:
+  1. upstream Letta cross-request env leakage via process-global `process.env` mutation
+  2. supervisor sweep starvation/fairness bug
+  3. done-task false negatives / negative streak accumulation after idle
+  4. dead supervisor flags exposed without enforcement
+  5. copy-unsafe `audit:agent-docs --active` behavior
+  6. remote mirror drift
+  7. dependency policy gate failures
+- Classified 1–5 as structural/control-plane truthfulness issues of varying severity, and 6–7 as release/deploy hygiene issues.
+- This closes the audit collection loop for `agentchat-aduit` and turns the result into the main execution ordering rather than leaving it as a passive report.
+
+
+## [2026-03-10 21:55] DONE — accepted the final audit handoff and closed the first triaged structural fix (upstream env leakage)
+- Accepted `agentchat-aduit`'s final subsystem audit handoff and fixed the worker-side triage order around it: the unresolved next structural target is now supervisor sweep starvation/fairness, with done-task false negatives and dead supervisor flags following behind it.
+- Independently inspected `lib/upstream-claude-subconscious.js` and accepted `agentchat-develop`'s first structural correction for the previously triaged highest-severity issue: `runWithUpstreamEnv()` now serializes process-global env mutation across async upstream work instead of allowing overlapping per-agent Letta env windows.
+- This keeps the fix narrow: it removes the proven cross-request contamination risk without reopening the rest of the subconscious authority surface in the same slice.
+- The live Matrix/bridge timeout residual remains a separate incident line and is not being conflated with the audit triage.
+
+
+## [2026-03-10 21:58] DONE — put `agentchat-aduit` into hold and resumed `agentchat-develop` on the next structural target
+- `agentchat-aduit` confirmed its local audit-note cleanup is complete and was explicitly moved into hold on the canonical audit baseline.
+- Re-checked `agentchat-develop` after the env-leakage acceptance: it had only recorded the acceptance locally and had not yet started the next scope.
+- Issued the next explicit scope immediately: `supervisor sweep starvation / fairness` design only, still keeping the live Matrix residual separate and forbidding implementation/UI/hook expansion.
+
+
+## [2026-03-10 22:01] DONE — accepted the supervisor sweep-starvation/fairness design and advanced to implementation
+- Accepted `agentchat-develop`'s `supervisor-sweep-starvation-design.md`.
+- The design keeps the fix narrow: deterministic alphabetical base order remains, a supervisor-local persisted round-robin cursor is added, the capped candidate window rotates each sweep, and no lifecycle/classification/UI/route semantics are reopened.
+- This is the correct next structural target after the final live audit handoff because it addresses a real control-plane correctness bug without broadening into policy redesign.
+
+
+## [2026-03-10 22:04] DONE — accepted the supervisor fairness implementation and advanced the next structural target
+- Accepted `agentchat-develop`'s smallest cursor-based supervisor fairness slice. The implementation keeps alphabetical base order, adds a persisted `selectionCursor`, rotates the capped sweep window each cycle, and correctly avoids purging non-selected but still-eligible agents by clearing missing state against the full eligible set.
+- This closes the permanent starvation bug identified by the live audit without reopening lifecycle/classification/warning/UI surfaces.
+- The next unresolved structural target is now the supervisor `done`-task false-negative path (negative classification/streak buildup after lifecycle has already gone idle).
+
+
+## [2026-03-10 22:07] DONE — accepted the supervisor `done`-task false-negative design and advanced to the smallest correction slice
+- Accepted `agentchat-develop`'s `supervisor-done-false-negative-design.md`.
+- The design keeps the correction where it belongs: at supervisor classification derivation, not as a bookkeeping-only special case. Completed work inside the trailing window remains `active`, and completed work after the trailing window becomes terminal non-negative `done` while lifecycle stays `idle`.
+- This is the smallest truthful fix because it realigns classification, lifecycle, and negative-streak accounting without reopening fairness, dead-flag, UI, or subconscious work.
+
+
+## [2026-03-10 22:10] DONE — accepted the supervisor `done`-task false-negative correction and advanced to the next truthfulness target
+- Accepted `agentchat-develop`'s smallest correction for completed-task negative debt: post-trailing completed work now classifies as terminal non-negative `done`, while completed work inside the bounded trailing window remains `active`.
+- This keeps the fix at the correct layer (`deriveObservation()`), lets existing `isNegative()` semantics naturally stop negative streak accumulation, and avoids hiding the contradiction inside bookkeeping-only special cases.
+- With fairness and completed-task debt now closed, the next unresolved structural truthfulness target is the dead supervisor flags problem: `activeOnly` / `skipBlocked` are surfaced in control/status without any enforcement path.
+
+
+## [2026-03-10 22:12] DONE — accepted the dead-supervisor-flags truthfulness design and advanced to the smallest surface correction
+- Accepted `agentchat-develop`'s `supervisor-dead-flags-design.md`.
+- The design picks the right minimal path: do not enforce `activeOnly` / `skipBlocked` in this batch, because that would reopen supervisor policy semantics; instead, stop surfacing them as if they are live enforced controls.
+- This keeps the fix confined to public status/control truthfulness and avoids silently changing candidate selection or blocked-task handling.
+
+
+## [2026-03-10 22:15] DONE — accepted the dead-supervisor-flags truthfulness correction and advanced to the next auditability issue
+- Accepted `agentchat-develop`'s smallest dead-flags correction: `activeOnly` and `skipBlocked` are no longer exposed in `getStatus()` as if they were live enforced supervisor semantics.
+- Runtime behavior was correctly left unchanged; this was a pure public-surface truthfulness repair rather than a hidden policy change.
+- With dead flags closed, the next unresolved issue from the live audit handoff is the copy-unsafe behavior of `audit:agent-docs --active` in managed-copy workflows.
+
+
+## [2026-03-10 22:17] DONE — accepted the copy-safe `audit:agent-docs --active` design and advanced to implementation
+- Accepted `agentchat-develop`'s `audit-agent-docs-active-copy-safe-design.md`.
+- The design keeps the fix where it belongs: `--active` candidate identity becomes API-first, while compatibility mirror / manifest / workspace remain only per-agent docs resolution inputs. This is the smallest truthful correction because it fixes silent false-zero/undercount behavior without reopening parser rules or non-active inventory semantics.
+- This keeps the live auditability issue narrow and separate from supervisor/subconscious/Matrix lines.
+
+## [2026-03-10 22:36] DONE — accepted the smallest API-first `audit:agent-docs --active` implementation and queued the next structural issue
+- Independently verified `scripts/audit-agent-docs.js` now makes `--active` candidate identity API-first via `collectActiveApiAgentNames(apiRows)` instead of intersecting active agents with `data/agents/*`.
+- Route-level proof on live used `AGENT_AUDIT_BACKEND_URL=http://127.0.0.1:8090` and `AGENT_CHAT_RUNTIME_DIR=/home/shisui/laplace/agent-chat-live-runtime`: the active audit set now follows the live API active rows rather than a compatibility-mirror gate, while non-`--active` inventory code remains unchanged.
+- The current live proof returned `agentchat-worker`, `prts-control`, and `prts-agent-server_init-bac1`, matching the live API active set; this confirmed the implementation moved the active candidate source to the API even though `agentchat-aduit` itself was idle and therefore correctly absent from the active set.
+- With the API-first auditability issue closed, the next unresolved structural target is the v1 manifest/backend sync divergence risk around home-state registration and canonical sync, while the live Matrix timeout residual remains a separate line.
