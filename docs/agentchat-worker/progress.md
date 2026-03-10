@@ -1997,3 +1997,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Accepted `agentchat-develop`'s `local-activity-sweep-hardening-design.md`.
 - The accepted root cause remains backend event-loop starvation, with the local activity sweep path now treated as the strongest current owner after the `/api/messages` handler body itself was falsified.
 - The accepted correction order stays narrow: first unify the duplicate global `tmux list-panes -a` metadata listings into one sweep-local snapshot, while keeping per-agent `capture-pane` behavior unchanged in this slice and leaving supervisor/v1/UI/hook work parked.
+
+## [2026-03-10 23:58] PARTIAL — queued the Agent Detail task/Internals follow-on and routed it to Yato via tmux
+- Added the UI follow-on to the worker queue: make Agent Detail expose canonical task visibility/editing and show `AGENTS.md`, `plan.md`, and `progress.md` tails under `Internals`.
+- Checked current control-plane reachability before delegation: `Yato` still has a live tmux session, but the current control-plane surface does not expose a schedulable `Yato` agent object on the active backend path, so I did not block the task on a dead message route.
+- Routed the request directly to the idle `Yato` tmux pane as the least-disruptive workaround, with explicit instructions to work only in its managed `projects/agent-chat` tree and to report back after implementation so the result can be re-audited.

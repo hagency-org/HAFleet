@@ -22,3 +22,4 @@ Acceptance criteria:
 12. Harden external dev web auth behavior so credentials-in-URL cannot blank the page by causing relative `fetch()` to fail; either preserve SSR on refresh failure or document/replace the auth flow.
 
 ## Blocked (optional)
+13. Make Agent Detail expose canonical task editing/visibility and show AGENTS.md / plan.md / progress.md tails under Internals; prefer Yato for the frontend pass if Yato is schedulable, otherwise hand it to agentchat-develop without delaying the live Matrix residual.
