@@ -195,6 +195,9 @@
 - Current supervisor execution model is still primarily in-process and rule-based: `SupervisorService.evaluateOne()` emits `llm: null` and does not call an LLM API today, even though `SUPERVISOR_LLM_*` config is present in env and status surfaces.
 - Current message injection into the primary agent path is subconscious-owned (`UserPromptSubmit` / `PreToolUse` additionalContext); supervisor does not inject guidance into the primary agent path today.
 - Current live supervisor status has a truthfulness bug: the actual listening live backend process exports `SUPERVISOR_ENABLED=false`, but `/api/supervisor/status` can still report `enabled=true` with advancing sweeps; treat live enabled-state as drifted until that control/config mismatch is fixed.
+- Intended supervisor charter is narrower than the current implementation shape: supervisor is the monitoring agent for the primary agent, responsible for detecting EOS, drift, unfinished work, and violations of required workflow/guideline rules (for example missing plan/progress updates or work happening outside the managed project/workdir contract).
+- Intended supervisor reasoning model is `agent-shaped state machine`: it should classify the primary agent into a bounded convergent state set rather than emit open-ended prose, and repeated identical states are the trigger for intervention/escalation.
+- Intended supervisor intervention path is agentchat-native: the supervisor should notify or inject through normal agentchat messaging (`send_message`, later optional force path), not through a hidden second control channel.
 - Minimal supervisor waiting/trailing contract:
   - safe waiting exists only on the canonical primary task object via `status=waiting`, `waiting_reason`, and `waiting_until`;
   - runtime idle/activity is observational input only and may start a bounded trailing window, but must not create or mutate safe waiting state;

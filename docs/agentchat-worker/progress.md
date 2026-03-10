@@ -2051,3 +2051,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Verified that current subconscious injection remains the only message-injection path (`UserPromptSubmit` / `PreToolUse` additionalContext). Supervisor does not inject guidance into the primary agent path today.
 - Verified live and dev process envs on the actual listening backend PIDs (`8090` -> PID 732458, `18190` -> PID 1916785) both export `SUPERVISOR_ENABLED=false`.
 - Verified `/api/supervisor/status` still reports inconsistent live state (`enabled=true`, advancing `lastSweepAt`) despite the live backend env advertising `SUPERVISOR_ENABLED=false`; this is a supervisor truth/config drift bug and should be treated as a separate follow-up.
+## [2026-03-11 03:43] DONE — froze the original supervisor charter back into the worker contract before further implementation
+- Re-stated the intended supervisor role after drift became obvious: it is the monitoring agent for the primary agent, meant to detect EOS, drift, unfinished work, and violations of required workflow rules rather than act as a generic rule-summary engine.
+- Re-stated the intended reasoning model: supervisor should remain an `agent-shaped state machine` that emits one bounded convergent state, and repeated identical states are the trigger for intervention/escalation.
+- Re-stated the intended intervention path: supervisor should use agentchat-native messaging (`send_message`, later optional force semantics) rather than inventing a separate hidden control channel.
+- Paused further supervisor implementation conceptually until this charter correction is treated as the current architecture contract.
