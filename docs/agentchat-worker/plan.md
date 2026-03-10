@@ -1,8 +1,9 @@
 ## Current
-Continue narrowing the still-open live Matrix/backend timeout residual after accepting the duplicate-bridge single-owner lock, with the current target being the exact blocking chain inside live `POST /api/messages`.
+Continue narrowing the still-open live Matrix/backend timeout residual after accepting the duplicate-bridge single-owner lock, with the current target being the local-activity sweep hardening slice that sits ahead of live `POST /api/messages`.
 Acceptance criteria:
 - the single-owner lock implementation is committed and pushed as accepted live code
-- the quoted Matrix notice is narrowed beyond `submitHumanMessage() -> POST /api/messages` to the exact blocking function chain inside the live request path
+- the quoted Matrix notice remains narrowed beyond `submitHumanMessage() -> POST /api/messages` to backend event-loop starvation caused by the local activity sweep path
+- the first local-activity sweep hardening slice is accepted or explicitly rejected with proof
 - `agentchat-develop` stays scoped only to the timeout residual until the next exact fix-order decision is ready
 - v1/control-plane work remains parked while the live timeout residual is still open
 

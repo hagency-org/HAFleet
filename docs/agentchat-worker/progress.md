@@ -1992,3 +1992,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Accepted `agentchat-develop`'s narrowing that the exact user-facing Matrix notice `backend unreachable (The operation was aborted due to timeout)` is emitted only by `bridge-matrix.js` `submitHumanMessage()` when `backendApi('POST', '/api/messages', payload)` times out for inbound human Matrix traffic.
 - Independently confirmed the negative proof on the backend side: `backend-v2.js` `POST /api/messages` does not await `pushNotify()` for direct or mention delivery, so queue-send work is not the blocking explanation for this specific timeout notice.
 - The still-open residual is therefore narrower but not yet closed: the next required step is to attribute the blocking behavior to the exact synchronous/awaited function chain inside the live `/api/messages` request path, while keeping duplicate-owner and parked v1/control-plane work separate.
+
+## [2026-03-10 23:19] DONE — accepted the local-activity sweep hardening design and advanced to the smallest implementation slice
+- Accepted `agentchat-develop`'s `local-activity-sweep-hardening-design.md`.
+- The accepted root cause remains backend event-loop starvation, with the local activity sweep path now treated as the strongest current owner after the `/api/messages` handler body itself was falsified.
+- The accepted correction order stays narrow: first unify the duplicate global `tmux list-panes -a` metadata listings into one sweep-local snapshot, while keeping per-agent `capture-pane` behavior unchanged in this slice and leaving supervisor/v1/UI/hook work parked.
