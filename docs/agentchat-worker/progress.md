@@ -2060,3 +2060,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Recorded the operator requirement that worker should stop doing direct investigation/coding wherever delegatable and instead drive `agentchat-develop`, `agentchat-aduit`, and `Yato` through narrow scoped tasks.
 - Rewrote the active plan to make delegation, reminder chaining, and durable documentation the current unit of work rather than ad hoc feature/debug implementation.
 - Kept the active execution lanes separate: `agentchat-develop` for structural/control-plane work, `agentchat-aduit` for continuing audit follow-up, and `Yato` for task/Internals UI follow-on plus field-model convergence staging.
+## [2026-03-11 03:49] DONE — dispatched the three active child-agent lanes and restored reminder coverage
+- Sent `agentchat-develop` back to the parked `v1 manifest/backend sync divergence` line with explicit instructions not to mix Matrix, supervisor, subconscious, or UI work into that batch.
+- Sent `agentchat-aduit` into periodic follow-up audit mode with instructions to set its own reminders, keep docs truthful, and report only structural or materially user-visible findings.
+- Re-dispatched `Yato` onto the parked Agent Detail/UI follow-on (`task` visibility/editing, `Internals` tails, and field-surface cleanup staging); current delivery still warns `target_offline/queued`, so that lane remains under explicit monitoring.
+- Restored worker-side reminder coverage for the three active coordination lanes: `#2231` (develop), `#2233` (Yato), and `#2234` (audit).
