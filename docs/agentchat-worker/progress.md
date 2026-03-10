@@ -2023,6 +2023,11 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - The accepted exact residual chain is now: `sweepLocalActivityDurations()` -> `getLocalMcpSessionSet(true, paneMetadataSnapshot)` -> `collectLocalMcpSessions(paneMetadataSnapshot)` -> `pgrep -f "node.*mcp-server.js"` -> per-pid `ps -o tty=` resolution -> tty-to-session mapping through the shared pane metadata snapshot.
 - This is specific enough to move from diagnosis back into the next smallest implementation slice: batch tty resolution while preserving current MCP truth semantics.
 
+## [2026-03-11 00:17] DONE — accepted MCP-session-resolution batching and moved the live Matrix residual to post-fix closure proof
+- Accepted `agentchat-develop`'s smallest MCP-session-resolution batching slice in [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js): `collectLocalMcpSessions(paneMetadataSnapshot)` now keeps current truth semantics and cache behavior but replaces the old per-pid `ps -o tty=` loop with one batched `ps -o pid=,tty= -p <comma-separated-pids>` query.
+- Independent review confirmed the scope stayed narrow and the intended code path exists exactly where the residual had been narrowed: `pgrep -f \"node.*mcp-server.js\"` plus the new batched `ps` query inside the MCP-session-resolution helper.
+- I did not mark the live Matrix timeout residual closed yet; the next step is an explicit post-fix closure proof showing whether the user-facing timeout is actually gone on live-sized conditions or whether ownership has moved again to a later exact chain.
+
 ## [2026-03-10 23:58] PARTIAL — queued the Agent Detail task/Internals follow-on and routed it to Yato via tmux
 - Added the UI follow-on to the worker queue: make Agent Detail expose canonical task visibility/editing and show `AGENTS.md`, `plan.md`, and `progress.md` tails under `Internals`.
 - Checked current control-plane reachability before delegation: `Yato` still has a live tmux session, but the current control-plane surface does not expose a schedulable `Yato` agent object on the active backend path, so I did not block the task on a dead message route.

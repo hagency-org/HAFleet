@@ -1,11 +1,11 @@
 ## Current
-Continue narrowing the still-open live Matrix/backend timeout residual after accepting the duplicate-bridge single-owner lock, the first two local-activity sweep hardening slices, and the MCP-session-resolution narrowing.
+Continue the live Matrix/backend timeout residual until there is an explicit closure proof or a new exact owner narrowing after the accepted duplicate-owner lock, local-activity slices 1-2, and MCP-session-resolution batching.
 Acceptance criteria:
 - the single-owner lock implementation is committed and pushed as accepted live code
 - the quoted Matrix notice remains narrowed beyond `submitHumanMessage() -> POST /api/messages` to backend event-loop starvation caused by the local activity sweep path
 - local-activity sweep hardening slice-1 and slice-2 are both accepted with proof
-- the next exact owner inside the sweep is accepted as MCP session resolution (`collectLocalMcpSessions()` `pgrep` + per-pid tty resolution)
-- the smallest MCP-session-resolution implementation slice is accepted or explicitly rejected with proof
+- the MCP-session-resolution batching slice is accepted with proof
+- a post-fix closure proof explicitly shows the residual is closed, or provides the next exact owner with route/function-chain evidence
 - `agentchat-develop` stays scoped only to the timeout residual until the next exact fix-order decision is ready
 - v1/control-plane work remains parked while the live timeout residual is still open
 
