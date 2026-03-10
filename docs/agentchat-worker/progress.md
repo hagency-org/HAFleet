@@ -1998,6 +1998,11 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - The accepted root cause remains backend event-loop starvation, with the local activity sweep path now treated as the strongest current owner after the `/api/messages` handler body itself was falsified.
 - The accepted correction order stays narrow: first unify the duplicate global `tmux list-panes -a` metadata listings into one sweep-local snapshot, while keeping per-agent `capture-pane` behavior unchanged in this slice and leaving supervisor/v1/UI/hook work parked.
 
+## [2026-03-10 23:30] DONE — accepted the first local-activity sweep hardening slice and advanced to bounded capture design
+- Accepted `agentchat-develop`'s smallest implementation in [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js): the local activity sweep now uses one unified sweep-local `tmux list-panes -a` metadata snapshot to feed both MCP session presence and pane metadata, removing the duplicate global metadata listing from the hot path.
+- Independent review confirmed this slice stayed narrow: per-agent `captureLocalPaneContent()` remains unchanged, and no duplicate-owner, `/api/messages` handler-body, supervisor, v1/control-plane, UI, or hook work was reopened.
+- The next timeout-residual step is design-only for slice-2: bound the per-sweep pane-capture fan-out with a persisted cursor while keeping non-sampled-agent state truthful.
+
 ## [2026-03-10 23:58] PARTIAL — queued the Agent Detail task/Internals follow-on and routed it to Yato via tmux
 - Added the UI follow-on to the worker queue: make Agent Detail expose canonical task visibility/editing and show `AGENTS.md`, `plan.md`, and `progress.md` tails under `Internals`.
 - Checked current control-plane reachability before delegation: `Yato` still has a live tmux session, but the current control-plane surface does not expose a schedulable `Yato` agent object on the active backend path, so I did not block the task on a dead message route.
