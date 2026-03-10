@@ -25,6 +25,10 @@ const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAUL
   ? DEFAULT_BACKEND_PORT_RAW
   : 8090;
 const BACKEND_URL = (process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
+const BACKEND_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_FETCH_TIMEOUT_MS || '5000', 10);
+const BACKEND_FETCH_TIMEOUT_MS = Number.isFinite(BACKEND_FETCH_TIMEOUT_MS_RAW) && BACKEND_FETCH_TIMEOUT_MS_RAW > 0
+  ? BACKEND_FETCH_TIMEOUT_MS_RAW
+  : 5000;
 const MSG_BASE_URL = process.env.MSG_BASE_URL || 'https://agent.ananthe.party/msg';
 const BOT_USERNAME = (process.env.MATRIX_BOT_USERNAME || 'agent-bridge').trim();
 const BOT_PASSWORD = (process.env.MATRIX_BOT_PASSWORD || '').trim();
@@ -604,7 +608,7 @@ async function setCustomAgentAvatar(agentName, imageBuffer, mimeType) {
 
 // ── Backend API helpers ───────────────────────────────────────────────
 async function backendApi(method, path, body) {
-  const opts = { method, headers: {} };
+  const opts = { method, headers: {}, signal: AbortSignal.timeout(BACKEND_FETCH_TIMEOUT_MS) };
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
