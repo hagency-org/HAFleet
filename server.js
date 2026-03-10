@@ -5716,6 +5716,15 @@ body.page-hidden #reminder-panel.has-items{
     agentInfoEl.classList.add('visible');
   }
 
+  function showAgentDetailError(name, message) {
+    if (!agentInfoEl) return;
+    const safeName = esc(String(name || ''));
+    const safeMessage = esc(String(message || 'Summary unavailable.'));
+    agentInfoEl.innerHTML = '<span class="ai-label">agent</span><span class="ai-val">' + safeName + '</span><br>'
+      + '<span class="ai-unread-empty">' + safeMessage + '</span>';
+    agentInfoEl.classList.add('visible');
+  }
+
   function scheduleDetailRefresh() {
     if (detailRefreshTimer) clearInterval(detailRefreshTimer);
     const interval = document.hidden ? DETAIL_REFRESH_HIDDEN_MS : DETAIL_REFRESH_VISIBLE_MS;
@@ -5793,9 +5802,8 @@ body.page-hidden #reminder-panel.has-items{
     }
 
     try {
-      const [detailRespRaw, unreadRespRaw, supervisorRespRaw] = await Promise.allSettled([
+      const [detailRespRaw, supervisorRespRaw] = await Promise.allSettled([
         fetch('/api/agents/detail/' + encodeURIComponent(targetName), { signal: controller.signal }),
-        fetch('/api/agents/' + encodeURIComponent(targetName) + '/unread-messages?limit=' + UNREAD_PANEL_LIMIT, { signal: controller.signal }),
         fetch('/api/supervisor/agents/' + encodeURIComponent(targetName) + '?limit=1', { signal: controller.signal }),
       ]);
 
@@ -5809,13 +5817,6 @@ body.page-hidden #reminder-panel.has-items{
       if (requestSeq !== agentDetailRequestSeq) return;
       if (!monitoredAgent || monitoredAgent.name !== targetName) return;
 
-      let unreadData = { unread_total: 0, unread_returned: 0, unread_omitted: 0, messages: [] };
-      try {
-        if (unreadRespRaw.status === 'fulfilled' && unreadRespRaw.value.ok) {
-          const payload = await unreadRespRaw.value.json();
-          if (payload && typeof payload === 'object') unreadData = payload;
-        }
-      } catch {}
       let supervisorData = { latest: null, state: {} };
       let supervisorStatus = { enabled: null, runtime: { running: null } };
       try {
@@ -5847,12 +5848,6 @@ body.page-hidden #reminder-panel.has-items{
         ? supervisorData.latest
         : null;
       const latestStatus = String(latestEval?.status || '').trim();
-      const queuedForAgent = queueItems.filter((item) => {
-        const target = String(item?.to || '').split(':', 1)[0];
-        return target === targetName;
-      }).length;
-      const unreadTotal = Math.max(0, toNonNegInt(unreadData.unread_total, 0));
-      const projectCount = Array.isArray(d.managedProjects) ? d.managedProjects.length : 0;
       const parts = [];
       if (d.agentType) {
         const cls = d.agentType === 'claude' ? 'ai-tag-claude' : 'ai-tag-codex';
@@ -5899,6 +5894,10 @@ body.page-hidden #reminder-panel.has-items{
       agentInfoEl.classList.add('visible');
     } catch (e) {
       if (e && e.name === 'AbortError') return;
+      console.error('fetchAgentDetail error:', e);
+      if (requestSeq !== agentDetailRequestSeq) return;
+      if (!monitoredAgent || monitoredAgent.name !== targetName) return;
+      showAgentDetailError(targetName, 'Summary unavailable. Refresh or reopen the panel.');
     } finally {
       if (requestSeq === agentDetailRequestSeq && agentDetailAbortController === controller) {
         agentDetailAbortController = null;
