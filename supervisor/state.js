@@ -16,7 +16,7 @@ function safeWriteJson(filePath, data) {
 }
 
 function isNegative(status) {
-  return status === 'DRIFTING' || status === 'LOST' || status === 'STUCK';
+  return status === 'stalled_wait' || status === 'suspected_eos';
 }
 
 export class SupervisorStateStore {
@@ -51,6 +51,13 @@ export class SupervisorStateStore {
       lastPattern: row.lastPattern || null,
       lastSuggestion: row.lastSuggestion || null,
       lastEventId: row.lastEventId || null,
+      lastInputHash: row.lastInputHash || null,
+      task: row.task || null,
+      classification: row.classification || null,
+      trailingUntilAt: Number(row.trailingUntilAt) || 0,
+      lifecycleState: row.lifecycleState || null,
+      lifecycleReason: row.lifecycleReason || null,
+      runtimeLaunch: row.runtimeLaunch || null,
     };
   }
 
@@ -78,6 +85,13 @@ export class SupervisorStateStore {
       lastPattern: judgment.pattern || null,
       lastSuggestion: judgment.suggestion || null,
       lastEventId: eventId || null,
+      lastInputHash: judgment.inputHash || null,
+      task: judgment.task || null,
+      classification: judgment.classification || judgment.status || null,
+      trailingUntilAt: Number(judgment.trailingUntilAt) || 0,
+      lifecycleState: judgment.lifecycleState || null,
+      lifecycleReason: judgment.lifecycleReason || null,
+      runtimeLaunch: judgment.runtimeLaunch || null,
     };
     this.agents[agentName] = next;
 

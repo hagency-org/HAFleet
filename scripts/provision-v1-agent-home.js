@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import path from 'path';
@@ -16,8 +16,14 @@ const __dirname = path.dirname(__filename);
 const CONFIGURE_SUBCONSCIOUS_SCRIPT = path.join(__dirname, 'configure-v1-subconscious.js');
 const WORKSPACE_CLAUDE_TEMPLATE_PATH = path.join(__dirname, '..', 'docs', 'workspace-claude-md-template.md');
 const WORKSPACE_AGENTS_TEMPLATE_PATH = path.join(__dirname, '..', 'docs', 'workspace-agents-md-template.md');
+const SUPERVISOR_CLAUDE_TEMPLATE_PATH = path.join(__dirname, '..', 'docs', 'workspace-supervisor-claude-template.md');
+const SUPERVISOR_AGENTS_TEMPLATE_PATH = path.join(__dirname, '..', 'docs', 'workspace-supervisor-agents-template.md');
+const TASK_WRITER_SCRIPT_PATH = path.join(__dirname, 'write-v1-agent-task.js');
 const WORKSPACE_CLAUDE_TEMPLATE_VERSION = 'v1';
 const WORKSPACE_AGENTS_TEMPLATE_VERSION = 'v1';
+const SUPERVISOR_CLAUDE_TEMPLATE_VERSION = 'v1';
+const SUPERVISOR_AGENTS_TEMPLATE_VERSION = 'v1';
+const TASK_WRITER_WRAPPER_VERSION = 'v1';
 
 function parseArgs(argv) {
   const args = {
@@ -161,6 +167,30 @@ function isManagedWorkspaceAgentsContent(content) {
   return String(content || '').includes(workspaceAgentsTemplateMarker());
 }
 
+function supervisorClaudeTemplateMarker(version = SUPERVISOR_CLAUDE_TEMPLATE_VERSION) {
+  return `agentchat-supervisor-workspace-template: ${version}`;
+}
+
+function isManagedSupervisorClaudeContent(content) {
+  return String(content || '').includes(supervisorClaudeTemplateMarker());
+}
+
+function supervisorAgentsTemplateMarker(version = SUPERVISOR_AGENTS_TEMPLATE_VERSION) {
+  return `agentchat-supervisor-agents-template: ${version}`;
+}
+
+function isManagedSupervisorAgentsContent(content) {
+  return String(content || '').includes(supervisorAgentsTemplateMarker());
+}
+
+function taskWriterWrapperMarker(version = TASK_WRITER_WRAPPER_VERSION) {
+  return `agentchat-task-writer-wrapper: ${version}`;
+}
+
+function isManagedTaskWriterWrapper(content) {
+  return String(content || '').includes(taskWriterWrapperMarker());
+}
+
 function isLegacyWorkspaceClaudeStub(content) {
   const text = String(content || '');
   return text.includes('This is a v1 agent home workdir.')
@@ -197,6 +227,28 @@ function loadWorkspaceAgentsTemplate() {
   return raw;
 }
 
+function loadSupervisorClaudeTemplate() {
+  if (!existsSync(SUPERVISOR_CLAUDE_TEMPLATE_PATH)) {
+    throw new Error(`missing supervisor workspace template: ${SUPERVISOR_CLAUDE_TEMPLATE_PATH}`);
+  }
+  const raw = readFileSync(SUPERVISOR_CLAUDE_TEMPLATE_PATH, 'utf-8');
+  if (!isManagedSupervisorClaudeContent(raw)) {
+    throw new Error(`supervisor workspace template missing managed marker/version: ${SUPERVISOR_CLAUDE_TEMPLATE_PATH}`);
+  }
+  return raw;
+}
+
+function loadSupervisorAgentsTemplate() {
+  if (!existsSync(SUPERVISOR_AGENTS_TEMPLATE_PATH)) {
+    throw new Error(`missing supervisor workspace agents template: ${SUPERVISOR_AGENTS_TEMPLATE_PATH}`);
+  }
+  const raw = readFileSync(SUPERVISOR_AGENTS_TEMPLATE_PATH, 'utf-8');
+  if (!isManagedSupervisorAgentsContent(raw)) {
+    throw new Error(`supervisor workspace agents template missing managed marker/version: ${SUPERVISOR_AGENTS_TEMPLATE_PATH}`);
+  }
+  return raw;
+}
+
 function renderWorkspaceClaudeTemplate(template, manifest) {
   return template
     .replaceAll('{{AGENT_NAME}}', manifest.name)
@@ -205,6 +257,20 @@ function renderWorkspaceClaudeTemplate(template, manifest) {
 }
 
 function renderWorkspaceAgentsTemplate(template, manifest) {
+  return template
+    .replaceAll('{{AGENT_NAME}}', manifest.name)
+    .replaceAll('{{AGENT_ID}}', manifest.id)
+    .replaceAll('{{LAYOUT_VERSION}}', String(manifest.layoutVersion || 1));
+}
+
+function renderSupervisorClaudeTemplate(template, manifest) {
+  return template
+    .replaceAll('{{AGENT_NAME}}', manifest.name)
+    .replaceAll('{{AGENT_ID}}', manifest.id)
+    .replaceAll('{{LAYOUT_VERSION}}', String(manifest.layoutVersion || 1));
+}
+
+function renderSupervisorAgentsTemplate(template, manifest) {
   return template
     .replaceAll('{{AGENT_NAME}}', manifest.name)
     .replaceAll('{{AGENT_ID}}', manifest.id)
@@ -232,6 +298,56 @@ function writeManagedWorkspaceAgents(filePath, content) {
     if (current === content) return 'unchanged';
   }
   writeFileSync(filePath, content, 'utf-8');
+  return 'written';
+}
+
+function writeManagedSupervisorClaude(filePath, content) {
+  if (existsSync(filePath)) {
+    const current = readFileSync(filePath, 'utf-8');
+    if (!isManagedSupervisorClaudeContent(current)) {
+      return 'preserved-manual';
+    }
+    if (current === content) return 'unchanged';
+  }
+  writeFileSync(filePath, content, 'utf-8');
+  return 'written';
+}
+
+function writeManagedSupervisorAgents(filePath, content) {
+  if (existsSync(filePath)) {
+    const current = readFileSync(filePath, 'utf-8');
+    if (!isManagedSupervisorAgentsContent(current)) {
+      return 'preserved-manual';
+    }
+    if (current === content) return 'unchanged';
+  }
+  writeFileSync(filePath, content, 'utf-8');
+  return 'written';
+}
+
+function renderTaskWriterWrapper(repoRoot) {
+  const writerScript = path.join(repoRoot, 'scripts', 'write-v1-agent-task.js');
+  return `#!/usr/bin/env bash
+# ${taskWriterWrapperMarker()}
+set -euo pipefail
+WORKDIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+exec node "${writerScript}" --workdir "$WORKDIR" "$@"
+`;
+}
+
+function writeManagedTaskWriterWrapper(filePath, content) {
+  if (existsSync(filePath)) {
+    const current = readFileSync(filePath, 'utf-8');
+    if (!isManagedTaskWriterWrapper(current)) {
+      return 'preserved-manual';
+    }
+    if (current === content) {
+      chmodSync(filePath, 0o755);
+      return 'unchanged';
+    }
+  }
+  writeFileSync(filePath, content, 'utf-8');
+  chmodSync(filePath, 0o755);
   return 'written';
 }
 
@@ -334,11 +450,39 @@ Track agent-owned project material under \`../projects/\`.
   const agentsRootStatus = writeManagedWorkspaceAgents(path.join(paths.workdir, 'AGENTS.md'), renderedAgents);
   const docsClaudeStatus = ensureDocsClaudeCompatibilityLink(paths);
   const docsAgentsStatus = ensureDocsAgentsCompatibilityLink(paths);
+  const taskWriterStatus = writeManagedTaskWriterWrapper(paths.taskWriterPath, renderTaskWriterWrapper(path.join(__dirname, '..')));
   return {
     claudeRootStatus,
     agentsRootStatus,
     docsClaudeStatus,
     docsAgentsStatus,
+    taskWriterStatus,
+  };
+}
+
+function ensureSupervisorWorkspace(paths, manifest) {
+  ensureDir(paths.supervisorDir);
+  ensureDir(paths.supervisorDocsDir);
+  const claudeTemplate = loadSupervisorClaudeTemplate();
+  const agentsTemplate = loadSupervisorAgentsTemplate();
+  const claudeStatus = writeManagedSupervisorClaude(
+    path.join(paths.supervisorDir, 'CLAUDE.md'),
+    renderSupervisorClaudeTemplate(claudeTemplate, manifest),
+  );
+  const agentsStatus = writeManagedSupervisorAgents(
+    path.join(paths.supervisorDir, 'AGENTS.md'),
+    renderSupervisorAgentsTemplate(agentsTemplate, manifest),
+  );
+  writeIfMissing(path.join(paths.supervisorDocsDir, 'plan.md'), `## Current
+Observe canonical task state for \`${manifest.name}\` without creating a second task source.
+
+## Queue
+1. Record supervisor-local follow-up only when the supervisor scope changes.
+`);
+  writeIfMissing(path.join(paths.supervisorDocsDir, 'progress.md'), '');
+  return {
+    claudeStatus,
+    agentsStatus,
   };
 }
 
@@ -377,6 +521,8 @@ function syncLegacyMeta(homeRoot, manifest) {
     subconsciousEnabled: manifest?.subconsciousEnabled === true,
     managedProjects: Array.isArray(manifest?.managedProjects) ? manifest.managedProjects : [],
     human: (manifest?.human && typeof manifest.human === 'object') ? manifest.human : {},
+    task: manifest?.task || null,
+    runtimeProfile: manifest?.runtimeProfile || null,
   };
   ensureDir(path.dirname(metaPath));
   writeFileSync(metaPath, `${JSON.stringify(merged, null, 2)}\n`, 'utf-8');
@@ -470,6 +616,8 @@ function main() {
   ensureDir(paths.workdir);
   ensureDir(paths.docsDir);
   ensureDir(paths.projectsDir);
+  ensureDir(paths.supervisorDir);
+  ensureDir(paths.supervisorDocsDir);
   ensureDir(path.join(paths.workdir, 'scratch'));
   ensureDir(path.join(paths.workdir, 'inbox'));
   ensureDir(path.join(paths.workdir, 'outputs'));
@@ -504,7 +652,10 @@ function main() {
   }
 
   const now = new Date().toISOString();
-  const subconsciousEnabled = parseOptionalBool(args.subconsciousEnabled, type === 'claude');
+  const existingSubconsciousEnabled = existing?.subconsciousEnabled === true
+    ? true
+    : (existing?.subconsciousEnabled === false ? false : false);
+  const subconsciousEnabled = parseOptionalBool(args.subconsciousEnabled, existingSubconsciousEnabled);
   const manifest = {
     id: paths.agentId,
     name,
@@ -516,6 +667,8 @@ function main() {
     stateDir: paths.stateDir,
     subconsciousEnabled,
     managedProjects,
+    task: existing?.task || null,
+    runtimeProfile: existing?.runtimeProfile || null,
     human: {
       owner: existing?.human?.owner ?? null,
       notes: existing?.human?.notes ?? '',
@@ -526,6 +679,7 @@ function main() {
   };
 
   const workspaceSync = ensureDocs(paths, manifest);
+  const supervisorWorkspaceSync = ensureSupervisorWorkspace(paths, manifest);
 
   writeFileSync(paths.agentJsonPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
   const legacyMetaPath = syncLegacyMeta(homeRoot, {
@@ -544,6 +698,7 @@ function main() {
     manifestPath: paths.agentJsonPath,
     subconsciousEnabled,
     workspaceSync,
+    supervisorWorkspaceSync,
     legacyMetaPath,
     lettaPath,
     subconsciousRuntime,

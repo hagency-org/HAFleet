@@ -21,6 +21,12 @@ Scope: development implementation only (`no migration`, `no live runtime cutover
 ```text
 <home>/
   agent.json
+  supervisor/
+    CLAUDE.md
+    AGENTS.md
+    docs/
+      plan.md
+      progress.md
   state/
     resume-id
     letta.json
@@ -30,6 +36,7 @@ Scope: development implementation only (`no migration`, `no live runtime cutover
   workdir/
     CLAUDE.md
     AGENTS.md
+    task-writer
     docs/
       AGENTS.md -> ../AGENTS.md
       CLAUDE.md -> ../CLAUDE.md
@@ -45,9 +52,11 @@ Scope: development implementation only (`no migration`, `no live runtime cutover
 
 Ownership model:
 - `state/`: system-owned runtime state.
+- `supervisor/`: explicit supervisor-local sibling workspace; not a second canonical task/runtime-profile source.
 - `workdir/`: agent-writable workspace.
 - `workdir/CLAUDE.md`: maintained Claude workspace instructions generated from the repo template source-of-truth.
 - `workdir/AGENTS.md`: maintained agent role/boundary/bootstrap instructions generated from the repo template source-of-truth.
+- `workdir/task-writer`: maintained wrapper for canonical task-state writes through the home control-plane.
 - `workdir/docs/AGENTS.md`: compatibility link/mirror back to `../AGENTS.md`.
 - `workdir/docs/CLAUDE.md`: compatibility link/mirror back to `../CLAUDE.md`.
 
@@ -77,6 +86,31 @@ Ownership model:
     "notes": "<string>",
     "projectScope": "<string>"
   },
+  "task": {
+    "id": "<string>",
+    "owner": "<string>",
+    "status": "active|waiting|blocked|done",
+    "updated_at": "<ISO8601>",
+    "heartbeat_at": "<ISO8601>",
+    "waiting_reason": "<nullable string>",
+    "waiting_until": "<nullable ISO8601>"
+  },
+  "runtimeProfile": {
+    "primary": {
+      "framework": "<nullable string>",
+      "provider": "<nullable string>",
+      "model": "<nullable string>",
+      "reasoning": "<nullable string>",
+      "extraArgs": "<nullable string>"
+    },
+    "supervisor": {
+      "framework": "<nullable string>",
+      "provider": "<nullable string>",
+      "model": "<nullable string>",
+      "reasoning": "<nullable string>",
+      "extraArgs": "<nullable string>"
+    }
+  },
   "createdAt": "<ISO8601>",
   "updatedAt": "<ISO8601>"
 }
@@ -91,6 +125,8 @@ Ownership model:
 3. No implicit migration of existing legacy metadata.
 4. Workspace instructions are generated from `docs/workspace-claude-md-template.md` (`Template-Version: v1`), not inline hardcoded text.
 5. Provisioning writes concrete root `workdir/CLAUDE.md` and `workdir/AGENTS.md`, then maintains `workdir/docs/CLAUDE.md` and `workdir/docs/AGENTS.md` as compatibility links/mirrors.
+6. Provisioning writes a concrete `workdir/task-writer` wrapper that updates canonical task state through the existing v1 home control-plane route.
+7. Provisioning also scaffolds a sibling `supervisor/` workspace with its own `CLAUDE.md`, `AGENTS.md`, `docs/plan.md`, and `docs/progress.md`.
 
 ## Docs Resolution Rules
 
@@ -102,7 +138,7 @@ Dual-read order:
 ## Subconscious Scope (This Batch)
 
 - Claude-only runtime wiring for v1 agents:
-  - `subconsciousEnabled=true` by default for type `claude` (metadata + runtime wiring).
+  - `subconsciousEnabled=false` by default; enable it explicitly per agent when needed.
   - `agent-up-v1` provisioning and `agent-up` launch both run `scripts/configure-v1-subconscious.js`.
   - Hook runtime is installed under `<stateDir>/subconscious/claude-agentchat/`.
   - Claude hook settings are merged into `<workdir>/.claude/settings.json`.

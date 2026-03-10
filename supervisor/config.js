@@ -71,7 +71,7 @@ function defaultModel(provider) {
     case 'deepseek':
       return 'deepseek-chat';
     case 'qwen':
-      return 'qwen-plus';
+      return 'qwen3.5-plus';
     case 'openai':
       return 'gpt-4.1-mini';
     default:
@@ -79,12 +79,29 @@ function defaultModel(provider) {
   }
 }
 
+function parseRuntimeProfileJson(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export function loadSupervisorConfig(env = process.env) {
   const runtimeRoot = resolveRuntimeRoot(env);
+  const supervisorProfile = parseRuntimeProfileJson(env.AGENTCHAT_RUNTIME_PROFILE_SUPERVISOR_JSON);
+  const primaryProfile = parseRuntimeProfileJson(env.AGENTCHAT_RUNTIME_PROFILE_PRIMARY_JSON);
+  const profile = supervisorProfile || primaryProfile || null;
+  const profileProvider = String(profile?.provider || '').trim().toLowerCase();
   const providerRaw = String(env.SUPERVISOR_LLM_PROVIDER || 'deepseek').trim().toLowerCase();
-  const provider = ['deepseek', 'qwen', 'openai', 'openai-compatible'].includes(providerRaw)
-    ? providerRaw
-    : 'deepseek';
+  const provider = ['deepseek', 'qwen', 'openai', 'openai-compatible'].includes(profileProvider)
+    ? profileProvider
+    : (['deepseek', 'qwen', 'openai', 'openai-compatible'].includes(providerRaw)
+      ? providerRaw
+      : 'deepseek');
 
   const keyEnv = String(env.SUPERVISOR_LLM_KEY_ENV || 'SUPERVISOR_LLM_KEY').trim() || 'SUPERVISOR_LLM_KEY';
   const apiKey = String(env[keyEnv] || '').trim();
@@ -92,17 +109,25 @@ export function loadSupervisorConfig(env = process.env) {
     env.SUPERVISOR_LLM_ENDPOINT || env.SUPERVISOR_LLM_BASE_URL,
     defaultProviderEndpoint(provider)
   );
-  const model = String(env.SUPERVISOR_LLM_MODEL || defaultModel(provider)).trim();
+  const model = String(profile?.model || env.SUPERVISOR_LLM_MODEL || defaultModel(provider)).trim();
+  const profileSource = supervisorProfile
+    ? 'runtimeProfile.supervisor'
+    : (primaryProfile ? 'runtimeProfile.primary-fallback' : 'env/default');
 
-  const enabledBySwitch = parseBool(env.SUPERVISOR_ENABLED, true);
-  const enabled = enabledBySwitch && !!apiKey;
+  const enabledBySwitch = parseBool(env.SUPERVISOR_ENABLED, false);
+  const enabled = enabledBySwitch;
+  const heartbeatTtlMs = parseMs(env.SUPERVISOR_HEARTBEAT_TTL_MS || env.SUPERVISOR_INTERVAL_MS || '30000', 30000);
+  const trailingHeartbeatPeriods = parseIntStrict(env.SUPERVISOR_TRAILING_HEARTBEAT_PERIODS || '5', 5, 1);
 
   return {
     repoRoot: REPO_ROOT,
     runtimeRoot,
     enabled,
-    disabledReason: enabledBySwitch ? (!apiKey ? `missing API key env ${keyEnv}` : null) : 'SUPERVISOR_ENABLED=false',
+    disabledReason: enabledBySwitch ? null : 'SUPERVISOR_ENABLED=false',
     intervalMs: parseMs(env.SUPERVISOR_INTERVAL_MS || '30000', 30000),
+    heartbeatTtlMs,
+    trailingHeartbeatPeriods,
+    trailingWindowMs: heartbeatTtlMs * trailingHeartbeatPeriods,
     paneLines: parseIntStrict(env.SUPERVISOR_PANE_LINES || '120', 120, 20),
     maxAgentsPerSweep: parseIntStrict(env.SUPERVISOR_MAX_AGENTS_PER_SWEEP || '12', 12, 1),
     activeOnly: parseBool(env.SUPERVISOR_ACTIVE_ONLY, true),
@@ -125,7 +150,9 @@ export function loadSupervisorConfig(env = process.env) {
     llm: {
       provider,
       endpoint,
+      keyEnv,
       model,
+      profileSource,
       apiKey,
       timeoutMs: parseMs(env.SUPERVISOR_LLM_TIMEOUT_MS || '12000', 12000),
       maxTokens: parseIntStrict(env.SUPERVISOR_LLM_MAX_TOKENS || '220', 220, 32),

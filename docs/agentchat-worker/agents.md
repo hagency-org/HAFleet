@@ -314,12 +314,19 @@
 - Current notification delivery limitation:
   - agent-chat backend notifications are title/summary nudges only; even when they say `Use check_inbox()` and `Read ALL messages`, the framework does not currently enforce an inbox read before the agent continues;
   - this means an agent can incorrectly react to the notification title alone, log local state, and drift/EOS without ever pulling the real unread payloads from `check_inbox()`.
+- Supervisor idle/no-task event root cause:
+  - repeated `task-state` events for idle agents were caused by including volatile `idleDurationSec` in the supervisor input hash, so an unchanged `no task + idle` observation looked “changed” every sweep;
+  - neutral `task-state` rows with `status=null` should render as an idle/no-task surface, not `UNKNOWN`, or the web overstates a normal empty control-plane state as a warning.
 - Supervisor workspace direction:
   - the supervisor should live beside the primary agent as its own workspace directory (`supervisor/`), with its own `CLAUDE.md`, `AGENTS.md`, and local task/progress state;
   - this keeps supervisor behavior explicit and agent-shaped instead of hiding it inside ambient reviewer logic.
 - Runtime profile direction:
   - backend/provider/model/reasoning-budget selection must become an explicit per-agent runtime profile rather than a shared mutable default;
   - the same model should drive both normal agent launch and supervisor launch so one agent can change backend/model without silently mutating every other agent.
+- Default-enablement boundary:
+  - fresh v1 agent homes now default to `subconsciousEnabled=false`; enabling subconscious is an explicit per-agent decision, not a Claude-type default;
+  - reprovision must preserve an existing explicit `subconsciousEnabled=true` instead of resetting it to the new default;
+  - supervisor config now defaults to `SUPERVISOR_ENABLED=false` when the env var is unset, but explicit env values still win for current deployments.
 - Minimal supervisor slice boundary:
   - keep existing supervisor route names and stack-global control semantics stable in slice 1 (`/api/supervisor/status`, `/api/supervisor/agents`, `/api/supervisor/agents/:name`, `/api/supervisor/control`);
   - first implementation should add canonical per-agent `Task` state and runtime-profile reads without expanding UI or changing subconscious/hook paths.

@@ -1,12 +1,8 @@
 ## Current
-Hold for the next explicit `agentchat-worker` scope after the accepted `UserPromptSubmit` convergence repair.
+Continue only after the next explicit worker scope.
 Acceptance criteria:
-- Do not start implementation until `agentchat-worker` sends the next explicit work command.
-- Keep the accepted baseline explicit: `SessionStart`, `UserPromptSubmit`, and `Stop` are the upstream-backed slices.
+- Do not start merge execution or new implementation from this hold state.
+- Keep follow-on work bounded to the next worker-scoped batch.
 
 ## Queue
-1. When resumed, continue the next minimal upstream hook cutover without reopening unrelated UI scope.
-1. Address architecture-review follow-ups for subconscious event model and security hardening.
-
-## Blocked
-1. Supervisor gate is still held/disabled by operator direction, so fresh live-sweep verification cannot run yet.
+1. Continue only after the next explicit worker scope.

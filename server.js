@@ -626,6 +626,8 @@ function syncLocalAgentMetaFromManifest(name, metaPath, localMeta, manifest, hum
     subconsciousEnabled: manifest?.subconsciousEnabled === true,
     managedProjects: Array.isArray(manifest?.managedProjects) ? manifest.managedProjects : [],
     human: nextHuman,
+    task: normalizeTaskMeta(manifest?.task, name),
+    runtimeProfile: normalizeRuntimeProfileMeta(manifest?.runtimeProfile),
   };
   mkdirSync(path.dirname(metaPath), { recursive: true });
   writeFileSync(metaPath, `${JSON.stringify(mergedMeta, null, 2)}\n`, 'utf-8');
@@ -636,21 +638,32 @@ async function syncBackendAgentHomeState(name, manifest, human = null) {
   const nextHuman = (human && typeof human === 'object')
     ? human
     : ((manifest?.human && typeof manifest.human === 'object') ? manifest.human : {});
+  const payload = {
+    name,
+    agentModelVersion: manifest?.agentModelVersion || '1.0',
+    layoutVersion: Number(manifest?.layoutVersion) || 1,
+    agentId: manifest?.id || null,
+    homeDir: manifest?.homeDir || null,
+    workdir: manifest?.workdir || null,
+    stateDir: manifest?.stateDir || null,
+    subconsciousEnabled: manifest?.subconsciousEnabled === true,
+    managedProjects: Array.isArray(manifest?.managedProjects) ? manifest.managedProjects : [],
+    human: nextHuman,
+    task: normalizeTaskMeta(manifest?.task, manifest?.name),
+    runtimeProfile: normalizeRuntimeProfileMeta(manifest?.runtimeProfile),
+  };
   try {
-    await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`, {
+    const patchRes = await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        agentModelVersion: manifest?.agentModelVersion || '1.0',
-        layoutVersion: Number(manifest?.layoutVersion) || 1,
-        agentId: manifest?.id || null,
-        homeDir: manifest?.homeDir || null,
-        workdir: manifest?.workdir || null,
-        stateDir: manifest?.stateDir || null,
-        subconsciousEnabled: manifest?.subconsciousEnabled === true,
-        managedProjects: Array.isArray(manifest?.managedProjects) ? manifest.managedProjects : [],
-        human: nextHuman,
-      }),
+      body: JSON.stringify(payload),
+    });
+    if (patchRes.ok) return;
+    if (patchRes.status !== 404) return;
+    await fetch(`${BACKEND_V2_URL}/api/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     });
   } catch {
     // Best-effort sync only; local manifest remains source of truth.
@@ -754,6 +767,259 @@ function normalizeMetaText(value, maxLen = 4000) {
   return trimmed.length > maxLen ? trimmed.slice(0, maxLen) : trimmed;
 }
 
+function normalizeMetaIsoTimestamp(value) {
+  const raw = normalizeMetaText(value, 128);
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
+}
+
+function normalizeTaskStatus(value) {
+  const raw = normalizeMetaText(value, 32);
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  if (['active', 'waiting', 'blocked', 'done'].includes(lower)) return lower;
+  return null;
+}
+
+function normalizeTaskMeta(value, fallbackOwner = null) {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object') return null;
+  const status = normalizeTaskStatus(value.status);
+  if (!status) return null;
+  const owner = normalizeMetaText(value.owner, 128) || normalizeMetaText(fallbackOwner, 128);
+  const updatedAt = normalizeMetaIsoTimestamp(value.updated_at);
+  const heartbeatAt = normalizeMetaIsoTimestamp(value.heartbeat_at);
+  const waitingReason = normalizeMetaText(value.waiting_reason, 2000);
+  const waitingUntil = normalizeMetaIsoTimestamp(value.waiting_until);
+  const id = normalizeMetaText(value.id, 256);
+  if (!id || !owner || !updatedAt || !heartbeatAt) return null;
+  if (status === 'waiting') {
+    if (!waitingReason || !waitingUntil) return null;
+  }
+  return {
+    id,
+    owner,
+    status,
+    updated_at: updatedAt,
+    heartbeat_at: heartbeatAt,
+    waiting_reason: status === 'waiting' ? waitingReason : null,
+    waiting_until: status === 'waiting' ? waitingUntil : null,
+  };
+}
+
+function normalizeRuntimeProfileRole(value) {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object') return null;
+  const framework = normalizeMetaText(value.framework, 32);
+  const provider = normalizeMetaText(value.provider, 64);
+  const model = normalizeMetaText(value.model, 256);
+  const reasoning = normalizeMetaText(value.reasoning, 64);
+  const extraArgs = normalizeMetaText(value.extraArgs, 4000);
+  if (!framework && !provider && !model && !reasoning && !extraArgs) return null;
+  return {
+    framework: framework || null,
+    provider: provider || null,
+    model: model || null,
+    reasoning: reasoning || null,
+    ...(extraArgs ? { extraArgs } : {}),
+  };
+}
+
+function normalizeRuntimeProfileMeta(value) {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object') return null;
+  const primary = normalizeRuntimeProfileRole(value.primary);
+  const supervisor = normalizeRuntimeProfileRole(value.supervisor);
+  if (!primary && !supervisor) return null;
+  return {
+    primary: primary || null,
+    supervisor: supervisor || null,
+  };
+}
+
+function cloneMetaValue(value) {
+  if (value === null || value === undefined) return value ?? null;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function redactMetaPathLikeText(value, maxLen = 1200) {
+  const text = normalizeMetaText(value, maxLen);
+  if (!text) return null;
+  return text.replace(/(^|[\s(])((?:\/[^/\s)]+)+\/?[^)\s]*)/g, '$1[path removed]');
+}
+
+function buildOperationalSubconsciousDetail(detail) {
+  const safe = cloneMetaValue(detail);
+  if (!safe || typeof safe !== 'object') return safe;
+
+  if (safe.runtime && typeof safe.runtime === 'object') {
+    const runtimeSummary = {
+      classification: safe.runtime.classification || 'transitional',
+      desiredEnabled: safe.runtime.desiredEnabled === true,
+      invocationConfigured: safe.runtime.invocationConfigured === true,
+      disabledReason: safe.runtime.disabledReason || null,
+    };
+    delete safe.runtime.settingsPath;
+    delete safe.runtime.pluginRoot;
+    delete safe.runtime.eventUrl;
+    delete safe.runtime.invokeUrl;
+    delete safe.runtime.runtimeMetaPath;
+    safe.runtime = runtimeSummary;
+  }
+  if (safe.provider && typeof safe.provider === 'object') {
+    delete safe.provider.lettaStateFile;
+  }
+  if (safe.upstream && typeof safe.upstream === 'object') {
+    delete safe.upstream.root;
+    delete safe.upstream.promptFile;
+    delete safe.upstream.scripts;
+    delete safe.upstream.durableHome;
+    delete safe.upstream.durableStateDir;
+    delete safe.upstream.conversationsFile;
+    delete safe.upstream.configPath;
+    if (safe.upstream.bootstrap && typeof safe.upstream.bootstrap === 'object') {
+      delete safe.upstream.bootstrap.workdir;
+      if (safe.upstream.bootstrap.blockedReason) {
+        safe.upstream.bootstrap.blockedReason = redactMetaPathLikeText(safe.upstream.bootstrap.blockedReason, 1200);
+      }
+    }
+    if (safe.upstream.session && typeof safe.upstream.session === 'object') {
+      delete safe.upstream.session.sessionStateFile;
+      delete safe.upstream.session.cwd;
+      if (safe.upstream.session.blockedReason) {
+        safe.upstream.session.blockedReason = redactMetaPathLikeText(safe.upstream.session.blockedReason, 1200);
+      }
+      if (safe.upstream.session.notify && typeof safe.upstream.session.notify === 'object' && safe.upstream.session.notify.blockedReason) {
+        safe.upstream.session.notify.blockedReason = redactMetaPathLikeText(safe.upstream.session.notify.blockedReason, 1200);
+      }
+    }
+    if (safe.upstream.userPrompt && typeof safe.upstream.userPrompt === 'object') {
+      delete safe.upstream.userPrompt.transcriptPath;
+      delete safe.upstream.userPrompt.transcriptExists;
+      delete safe.upstream.userPrompt.syncStateFile;
+      delete safe.upstream.userPrompt.scriptPath;
+      if (safe.upstream.userPrompt.blockedReason) {
+        safe.upstream.userPrompt.blockedReason = redactMetaPathLikeText(safe.upstream.userPrompt.blockedReason, 1200);
+      }
+    }
+    if (safe.upstream.preTool && typeof safe.upstream.preTool === 'object') {
+      delete safe.upstream.preTool.syncStateFile;
+      delete safe.upstream.preTool.scriptPath;
+      if (safe.upstream.preTool.blockedReason) {
+        safe.upstream.preTool.blockedReason = redactMetaPathLikeText(safe.upstream.preTool.blockedReason, 1200);
+      }
+    }
+    if (safe.upstream.stop && typeof safe.upstream.stop === 'object') {
+      delete safe.upstream.stop.transcriptPath;
+      delete safe.upstream.stop.transcriptExists;
+      delete safe.upstream.stop.syncStateFile;
+      delete safe.upstream.stop.scriptPath;
+      if (safe.upstream.stop.blockedReason) {
+        safe.upstream.stop.blockedReason = redactMetaPathLikeText(safe.upstream.stop.blockedReason, 1200);
+      }
+    }
+  }
+  if (safe.memory && typeof safe.memory === 'object') {
+    safe.memory = {
+      classification: safe.memory.classification || 'transitional',
+    };
+  }
+  if (safe.conversation && typeof safe.conversation === 'object') {
+    safe.conversation = {
+      classification: safe.conversation.classification || 'transitional',
+    };
+  }
+  if (safe.manualGuidance && typeof safe.manualGuidance === 'object') {
+    delete safe.manualGuidance.text;
+    delete safe.manualGuidance.preview;
+  }
+  if (Object.prototype.hasOwnProperty.call(safe, 'lastRuntimeGuidance')) delete safe.lastRuntimeGuidance;
+  if (Object.prototype.hasOwnProperty.call(safe, 'lastInvocation')) delete safe.lastInvocation;
+  if (Array.isArray(safe.missingBackendPieces)) {
+    safe.missingBackendPieces = safe.missingBackendPieces.map((item) => redactMetaPathLikeText(item, 1200) || item);
+  }
+  return safe;
+}
+
+function buildSubconsciousAuthoritySummaryMeta(enabled, upstream, lettaAgentId = null) {
+  const bootstrap = (upstream && typeof upstream.bootstrap === 'object') ? upstream.bootstrap : {};
+  const session = (upstream && typeof upstream.session === 'object') ? upstream.session : {};
+  const userPrompt = (upstream && typeof upstream.userPrompt === 'object') ? upstream.userPrompt : {};
+  const preTool = (upstream && typeof upstream.preTool === 'object') ? upstream.preTool : {};
+  const stop = (upstream && typeof upstream.stop === 'object') ? upstream.stop : {};
+  const boundAgentId = normalizeMetaText(bootstrap.agentId || lettaAgentId, 256);
+  const bindingConfigured = Boolean(boundAgentId);
+  const sessionEstablished = session.established === true;
+  const progress = [
+    { key: 'stop', label: 'Stop', status: normalizeMetaText(stop.status, 64) || 'not-run' },
+    { key: 'preTool', label: 'PreToolUse', status: normalizeMetaText(preTool.status, 64) || 'not-run' },
+    { key: 'userPrompt', label: 'UserPromptSubmit', status: normalizeMetaText(userPrompt.status, 64) || 'not-run' },
+    { key: 'session', label: 'SessionStart', status: normalizeMetaText(session.status, 64) || 'not-run' },
+  ];
+  const latestProgress = progress.find((row) => row.status && row.status !== 'not-run') || progress[progress.length - 1];
+  let status = 'off';
+  let reason = enabled === true ? null : 'subconscious disabled';
+  if (enabled === true) {
+    if (sessionEstablished) {
+      status = 'active';
+      reason = null;
+    } else if (bindingConfigured || normalizeMetaText(bootstrap.status, 64) === 'configured') {
+      const sessionStatus = normalizeMetaText(session.status, 64);
+      status = 'degraded';
+      reason = normalizeMetaText(session.blockedReason, 1200)
+        || normalizeMetaText(bootstrap.blockedReason, 1200)
+        || ((sessionStatus === 'not-run' || sessionStatus === null)
+          ? 'authoritative upstream session not established'
+          : 'authoritative upstream path is configured but not established');
+    } else {
+      status = 'unconfigured';
+      reason = normalizeMetaText(bootstrap.blockedReason, 1200)
+        || 'authoritative upstream path is not configured';
+    }
+  }
+  return {
+    classification: 'authoritative',
+    path: 'upstream-letta',
+    status,
+    reason,
+    bindingConfigured,
+    agentId: boundAgentId || null,
+    sessionEstablished,
+    conversationEstablished: Boolean(session.conversationId),
+    latestProgress,
+  };
+}
+
+function buildSubconsciousFallbackSummaryMeta(guidanceText) {
+  const configured = typeof guidanceText === 'string' && guidanceText.trim().length > 0;
+  return {
+    classification: 'fallback',
+    status: configured ? 'configured' : 'none',
+    configured,
+    source: configured ? 'manual-state-file' : 'none',
+    note: 'Manual guidance is fallback configuration only; it is not the authoritative subconscious behavior path.',
+  };
+}
+
+function buildSubconsciousTransitionalSummaryMeta(runtime, memory = null, conversation = null) {
+  const runtimeDesired = runtime?.desiredEnabled === true;
+  let runtimeStatus = 'off';
+  if (runtimeDesired && runtime?.invocationConfigured === true) runtimeStatus = 'ready';
+  else if (runtimeDesired) runtimeStatus = 'degraded';
+  return {
+    classification: 'transitional',
+    runtimeStatus,
+    runtimeDesired,
+    runtimeInvocationConfigured: runtime?.invocationConfigured === true,
+    runtimeDisabledReason: normalizeMetaText(runtime?.disabledReason, 1200),
+    localMemoryConfigured: Number(memory?.entryCount || 0) > 0,
+    localConversationConfigured: Number(conversation?.sessionCount || 0) > 0,
+    note: 'Local runtime, memory, and conversation journals are transitional compatibility/debug surfaces only.',
+  };
+}
+
 function normalizePositiveMetaInt(value, fallback) {
   const n = Number.parseInt(String(value ?? '').trim(), 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -820,51 +1086,67 @@ function buildSubconsciousDetailPayload(name, manifest = null, detail = null) {
   const guidanceText = normalizeMetaText(letta?.guidance, 6000) || '';
   const eventUrl = normalizeMetaText(runtime?.eventUrl, 2048);
   const upstream = (runtime?.upstream && typeof runtime.upstream === 'object') ? runtime.upstream : {};
+  if (upstream && typeof upstream === 'object' && !upstream.classification) upstream.classification = 'authoritative';
   const missingBackendPieces = [
     'Direct upstream reuse may be recorded in runtime metadata, but the fallback detail path cannot execute the upstream Letta bootstrap itself.',
     'Real provider/model config path for subconscious reasoning is not implemented in this fallback path.',
     'Real memory state store semantics beyond a local state file are not implemented.',
     'No actual Letta/LLM invocation boundary is configured or executed by this fallback scaffold payload.',
   ];
+  const runtimeContract = {
+    classification: 'transitional',
+    hookRuntimeInstalled: Boolean(hookScriptPath && existsSync(hookScriptPath)),
+    hookBindingsInstalled: installedHooks.length === SUBCONSCIOUS_HOOK_NAMES.length,
+    installedHooks,
+    settingsPath: settingsPath || null,
+    pluginRoot: pluginRoot || null,
+    eventSinkConfigured: Boolean(eventUrl),
+    eventUrl: eventUrl || null,
+    runtimeMetaPath: runtimeMetaPath || null,
+    updatedAt: normalizeMetaText(runtime?.updatedAt, 128),
+  };
+  const providerContract = {
+    provider: normalizeMetaText(letta?.provider, 128) || 'letta',
+    mode: normalizeMetaText(letta?.mode, 128) || 'claude-subconscious',
+    lettaAgentId: normalizeMetaText(letta?.agentId || letta?.lettaAgentId, 256),
+    resolutionSource: normalizeMetaText(letta?.resolutionSource, 64),
+    lettaStateFile: lettaPath || null,
+    backendRuntimeConfigured: false,
+    modelConfigConfigured: false,
+    memoryStoreConfigured: false,
+    invocationConfigured: false,
+  };
+  const authority = buildSubconsciousAuthoritySummaryMeta(
+    manifest?.subconsciousEnabled === true || detail?.subconsciousEnabled === true,
+    upstream,
+    providerContract.lettaAgentId,
+  );
+  const fallback = buildSubconsciousFallbackSummaryMeta(guidanceText);
+  const transitional = buildSubconsciousTransitionalSummaryMeta(runtimeContract);
 
-  return {
+  return buildOperationalSubconsciousDetail({
     ok: true,
     agent: name,
     stage: 'scaffold',
     writable: Boolean(manifest?.stateDir),
     enabled: manifest?.subconsciousEnabled === true || detail?.subconsciousEnabled === true,
+    authority,
+    fallback,
     manualGuidance: {
+      classification: 'fallback',
       configured: guidanceText.length > 0,
       source: guidanceText ? 'manual-state-file' : 'none',
+      role: 'fallback',
       text: guidanceText,
       preview: guidanceText.length > 240 ? `${guidanceText.slice(0, 240)}...` : guidanceText,
       updatedAt: normalizeMetaText(letta?.updatedAt, 128),
     },
-    runtime: {
-      hookRuntimeInstalled: Boolean(hookScriptPath && existsSync(hookScriptPath)),
-      hookBindingsInstalled: installedHooks.length === SUBCONSCIOUS_HOOK_NAMES.length,
-      installedHooks,
-      settingsPath: settingsPath || null,
-      pluginRoot: pluginRoot || null,
-      eventSinkConfigured: Boolean(eventUrl),
-      eventUrl: eventUrl || null,
-      runtimeMetaPath: runtimeMetaPath || null,
-      updatedAt: normalizeMetaText(runtime?.updatedAt, 128),
-    },
-    provider: {
-      provider: normalizeMetaText(letta?.provider, 128) || 'letta',
-      mode: normalizeMetaText(letta?.mode, 128) || 'claude-subconscious',
-      lettaAgentId: normalizeMetaText(letta?.agentId || letta?.lettaAgentId, 256),
-      resolutionSource: normalizeMetaText(letta?.resolutionSource, 64),
-      lettaStateFile: lettaPath || null,
-      backendRuntimeConfigured: false,
-      modelConfigConfigured: false,
-      memoryStoreConfigured: false,
-      invocationConfigured: false,
-    },
+    runtime: runtimeContract,
+    transitional,
+    provider: providerContract,
     upstream,
     missingBackendPieces,
-  };
+  });
 }
 
 app.get('/api/agents/detail/:name', async (req, res) => {
@@ -893,6 +1175,8 @@ app.get('/api/agents/detail/:name', async (req, res) => {
       detail.subconsciousEnabled = agent.subconsciousEnabled === true;
       detail.managedProjects = Array.isArray(agent.managedProjects) ? agent.managedProjects : [];
       detail.human = (agent.human && typeof agent.human === 'object') ? agent.human : {};
+      detail.task = normalizeTaskMeta(agent.task, name);
+      detail.runtimeProfile = normalizeRuntimeProfileMeta(agent.runtimeProfile);
     }
   } catch {}
 
@@ -911,13 +1195,15 @@ app.get('/api/agents/detail/:name', async (req, res) => {
     detail.homeDir = detail.homeDir || localMeta.homeDir || null;
     detail.workdir = detail.workdir || localMeta.workdir || null;
     detail.stateDir = detail.stateDir || localMeta.stateDir || null;
+    detail.task = detail.task || normalizeTaskMeta(localMeta.task, name);
+    detail.runtimeProfile = detail.runtimeProfile || normalizeRuntimeProfileMeta(localMeta.runtimeProfile);
   }
 
   if (v1Manifest) {
     detail.v1 = true;
     detail.agentJsonPath = v1Manifest.agentJsonPath || path.join(v1Manifest.homeDir, 'agent.json');
-    detail.agentType = detail.agentType || v1Manifest.type || null;
-    detail.path = detail.path || v1Manifest.workdir || null;
+    detail.agentType = v1Manifest.type || detail.agentType || null;
+    detail.path = v1Manifest.workdir || detail.path || null;
     detail.agentModelVersion = v1Manifest.agentModelVersion || detail.agentModelVersion || '1.0';
     detail.layoutVersion = Number(v1Manifest.layoutVersion) || detail.layoutVersion || 1;
     detail.agentId = v1Manifest.id || detail.agentId || null;
@@ -925,10 +1211,12 @@ app.get('/api/agents/detail/:name', async (req, res) => {
     detail.workdir = v1Manifest.workdir || detail.workdir || null;
     detail.stateDir = v1Manifest.stateDir || detail.stateDir || null;
     detail.subconsciousEnabled = v1Manifest.subconsciousEnabled === true;
-    detail.managedProjects = Array.isArray(v1Manifest.managedProjects) ? v1Manifest.managedProjects : (detail.managedProjects || []);
+    detail.managedProjects = Array.isArray(v1Manifest.managedProjects) ? v1Manifest.managedProjects : [];
     detail.human = (v1Manifest.human && typeof v1Manifest.human === 'object')
       ? v1Manifest.human
       : (detail.human || {});
+    detail.task = normalizeTaskMeta(v1Manifest.task, name);
+    detail.runtimeProfile = normalizeRuntimeProfileMeta(v1Manifest.runtimeProfile);
   } else {
     detail.v1 = false;
   }
@@ -937,6 +1225,16 @@ app.get('/api/agents/detail/:name', async (req, res) => {
   detail.owner = typeof humanMeta.owner === 'string' ? humanMeta.owner : null;
   detail.humanNotes = typeof humanMeta.notes === 'string' ? humanMeta.notes : '';
   detail.projectScope = typeof humanMeta.projectScope === 'string' ? humanMeta.projectScope : '';
+  if (detail.stateDir) {
+    const lettaPath = path.join(detail.stateDir, 'letta.json');
+    const letta = existsSync(lettaPath) ? safeReadJsonSync(lettaPath) : null;
+    const guidance = normalizeMetaText(letta?.guidance, 6000) || '';
+    detail.subconsciousGuidanceText = guidance;
+    detail.subconsciousGuidancePreview = guidance.length > 240 ? `${guidance.slice(0, 240)}...` : guidance;
+  } else {
+    detail.subconsciousGuidanceText = '';
+    detail.subconsciousGuidancePreview = '';
+  }
 
   // From resume-id
   const resumeRoot = detail.v1 && detail.stateDir
@@ -969,7 +1267,11 @@ app.get('/api/subconscious/detail/:name', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/subconscious/detail/${encodeURIComponent(name)}`);
+    const backendUrl = new URL(`${BACKEND_V2_URL}/api/subconscious/detail/${encodeURIComponent(name)}`);
+    if (normalizeMetaText(String(req.query?.debug ?? ''), 8) === '1') {
+      backendUrl.searchParams.set('debug', '1');
+    }
+    const r = await fetch(backendUrl);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     if (r.ok) return res.json(data);
   } catch {}
@@ -1144,6 +1446,20 @@ app.patch('/api/agents/:name/home-metadata', async (req, res) => {
   } else if (!Array.isArray(next.managedProjects)) {
     next.managedProjects = [];
   }
+  if (Object.prototype.hasOwnProperty.call(body, 'task')) {
+    const nextTask = normalizeTaskMeta(body.task, name);
+    if (body.task !== null && !nextTask) {
+      return res.status(400).json({ error: 'invalid task payload' });
+    }
+    next.task = nextTask;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'runtimeProfile')) {
+    const nextRuntimeProfile = normalizeRuntimeProfileMeta(body.runtimeProfile);
+    if (body.runtimeProfile !== null && !nextRuntimeProfile) {
+      return res.status(400).json({ error: 'invalid runtimeProfile payload' });
+    }
+    next.runtimeProfile = nextRuntimeProfile;
+  }
   if (Object.prototype.hasOwnProperty.call(body, 'subconsciousEnabled')) {
     next.subconsciousEnabled = body.subconsciousEnabled === true;
   }
@@ -1171,6 +1487,8 @@ app.patch('/api/agents/:name/home-metadata', async (req, res) => {
       workdir: next.workdir || null,
       stateDir: next.stateDir || null,
       manifestPath: next.agentJsonPath || path.join(next.homeDir, 'agent.json'),
+      task: normalizeTaskMeta(next.task, name),
+      runtimeProfile: normalizeRuntimeProfileMeta(next.runtimeProfile),
     },
   });
 });
@@ -2795,6 +3113,20 @@ th{
     if (s === 'DRIFTING' || s === 'LOST' || s === 'STUCK') return 'status-negative';
     return 'status-unknown';
   };
+  const eventStatusText = (ev) => {
+    if (ev?.status) return String(ev.status);
+    if (ev?.domain === 'task-state') {
+      const lifecycle = String(ev?.supervisor?.lifecycleState || ev?.state?.lifecycleState || '').trim().toLowerCase();
+      if (lifecycle === 'idle') return 'IDLE';
+      return 'NO-TASK';
+    }
+    return 'UNKNOWN';
+  };
+  const eventStatusClass = (ev) => {
+    if (ev?.status) return statusClass(ev.status);
+    if (ev?.domain === 'task-state') return 'status-focused';
+    return 'status-unknown';
+  };
   const toInt = (v, fallback = 0) => {
     const n = Number.parseInt(v, 10);
     return Number.isFinite(n) ? n : fallback;
@@ -3035,7 +3367,12 @@ th{
     const activeDurationSec = toInt(statusRow?.activeDurationSec, 0);
     const idleDurationSec = toInt(statusRow?.idleDurationSec, Math.floor((Number(detail?.idleMs) || 0) / 1000));
     const runtimeText = activeNow ? ('ACTIVE ' + fmtSpanSec(activeDurationSec)) : ('IDLE ' + fmtSpanSec(idleDurationSec));
-    const latestStatus = String(latest?.status || 'UNKNOWN').trim() || 'UNKNOWN';
+    const latestLifecycle = String(latest?.supervisor?.lifecycleState || state?.lifecycleState || '').trim().toLowerCase();
+    const latestStatus = String(
+      latest?.status
+      || ((latest?.domain === 'task-state' && latestLifecycle === 'idle') ? 'IDLE' : '')
+      || ((!latest && latestLifecycle === 'idle') ? 'IDLE' : 'UNKNOWN')
+    ).trim() || 'UNKNOWN';
     const latestReason = String(latest?.reason || '').trim();
     const currentTask = String(latest?.docs?.currentTask || '').trim();
     const unreadTotal = Math.max(0, toInt(unreadPayload?.unread_total, unreadRows.length));
@@ -3045,9 +3382,18 @@ th{
     const subconsciousEnabled = detail?.subconsciousEnabled === true;
     const subconsciousWritable = detail?.v1 === true;
     const subconsciousStage = String(subconsciousDetail?.stage || 'unknown').trim() || 'unknown';
+    const authority = (subconsciousDetail?.authority && typeof subconsciousDetail.authority === 'object')
+      ? subconsciousDetail.authority
+      : buildSubconsciousAuthoritySummaryMeta(subconsciousEnabled, subconsciousDetail?.upstream || {}, subconsciousDetail?.provider?.lettaAgentId || null);
+    const fallback = (subconsciousDetail?.fallback && typeof subconsciousDetail.fallback === 'object')
+      ? subconsciousDetail.fallback
+      : buildSubconsciousFallbackSummaryMeta(String(subconsciousDetail?.manualGuidance?.text || ''));
     const runtimeContract = (subconsciousDetail?.runtime && typeof subconsciousDetail.runtime === 'object')
       ? subconsciousDetail.runtime
       : {};
+    const transitional = (subconsciousDetail?.transitional && typeof subconsciousDetail.transitional === 'object')
+      ? subconsciousDetail.transitional
+      : buildSubconsciousTransitionalSummaryMeta(runtimeContract, subconsciousDetail?.memory, subconsciousDetail?.conversation);
     const upstreamDetail = (subconsciousDetail?.upstream && typeof subconsciousDetail.upstream === 'object')
       ? subconsciousDetail.upstream
       : {};
@@ -3075,13 +3421,10 @@ th{
       localRuntimeLabel = 'Degraded';
     }
     let activeSubconsciousPath = 'Off';
-    if (upstreamSession.established === true) {
-      activeSubconsciousPath = 'Upstream Letta';
-    } else if (runtimeContract.desiredEnabled === true && runtimeContract.invocationConfigured === true) {
-      activeSubconsciousPath = 'Local Runtime';
-    } else if (subconsciousEnabled) {
-      activeSubconsciousPath = 'Scaffold only';
-    }
+    if (authority.status === 'active') activeSubconsciousPath = 'Authoritative upstream active';
+    else if (authority.status === 'degraded') activeSubconsciousPath = 'Authoritative upstream degraded';
+    else if (authority.status === 'unconfigured') activeSubconsciousPath = 'Authoritative upstream unconfigured';
+    else if (subconsciousEnabled) activeSubconsciousPath = 'Enabled without authoritative path';
     const healthParts = [
       'Runtime ' + (activeNow ? ('active ' + fmtSpanSec(activeDurationSec)) : ('idle ' + fmtSpanSec(idleDurationSec))),
       'Delivery ' + unreadTotal + ' unread / ' + queueCount + ' queued',
@@ -3128,6 +3471,9 @@ th{
       subconsciousWritable,
       subconsciousStage,
       subconsciousDetail,
+      authority,
+      fallback,
+      transitional,
       activeSubconsciousPath,
       localRuntimeState,
       localRuntimeLabel,
@@ -3163,10 +3509,10 @@ th{
       subconsciousEvents,
       latestSubEvent,
       guidanceEvents,
-      guidanceConfigured: subconsciousDetail?.manualGuidance?.configured === true || guidanceEvents.length > 0,
+      guidanceConfigured: fallback.configured === true,
       guidanceInjectedEvents,
-      manualGuidancePreview: String(subconsciousDetail?.manualGuidance?.preview || '').trim(),
-      manualGuidanceText: String(subconsciousDetail?.manualGuidance?.text || '').trim(),
+      manualGuidancePreview: String(detail?.subconsciousGuidancePreview || subconsciousDetail?.manualGuidance?.preview || '').trim(),
+      manualGuidanceText: String(detail?.subconsciousGuidanceText || subconsciousDetail?.manualGuidance?.text || '').trim(),
       topHooks,
       unreadRows,
       unreadTotal,
@@ -3262,7 +3608,7 @@ th{
       if (action) metaParts.push(action);
       return '<div class="event-item">'
         + '<div class="event-row"><div class="event-main">' + esc(ev?.reason || ev?.status || 'Event') + '</div><div class="event-time">' + esc(fmtTs(ev?.ts)) + '</div></div>'
-        + '<div class="event-meta"><span class="status ' + statusClass(ev?.status) + '">' + esc(ev?.status || 'UNKNOWN') + '</span>'
+        + '<div class="event-meta"><span class="status ' + eventStatusClass(ev) + '">' + esc(eventStatusText(ev)) + '</span>'
         + (metaParts.length ? (' · ' + esc(metaParts.join(' · '))) : '')
         + '</div></div>';
     }).join('');
@@ -3567,55 +3913,47 @@ th{
     const directReuse = Array.isArray(upstream.directReuse) ? upstream.directReuse : [];
 
 
+    const authority = (model.authority && typeof model.authority === 'object') ? model.authority : {};
+    const fallback = (model.fallback && typeof model.fallback === 'object') ? model.fallback : {};
+    const transitional = (model.transitional && typeof model.transitional === 'object') ? model.transitional : {};
     let modeDotClass = 'dot-off';
     let modeLabel = 'Subconscious Off';
-    if (upstreamSession.established === true) {
+    if (authority.status === 'active') {
       modeDotClass = 'dot-runtime';
-      modeLabel = 'Upstream Letta Active';
-    } else if (model.localRuntimeState === 'ready') {
-      modeDotClass = 'dot-runtime';
-      modeLabel = 'Local Runtime Active';
-    } else if (model.localRuntimeState === 'degraded') {
+      modeLabel = 'Authoritative Path Active';
+    } else if (authority.status === 'degraded') {
       modeDotClass = 'dot-active';
-      modeLabel = 'Local Runtime Degraded';
+      modeLabel = 'Authoritative Path Degraded';
+    } else if (authority.status === 'unconfigured') {
+      modeDotClass = 'dot-active';
+      modeLabel = 'Authoritative Path Unconfigured';
     } else if (model.subconsciousEnabled) {
       modeDotClass = 'dot-active';
-      modeLabel = 'Scaffold Only';
+      modeLabel = 'Enabled Without Authority';
     }
     document.getElementById('subconscious-mode-chip').innerHTML = '<div class="subconscious-mode-indicator"><span class="mode-dot ' + modeDotClass + '"></span>' + esc(modeLabel) + '</div>';
 
     const bits = [];
     const conversation = (model.currentConversation && typeof model.currentConversation === 'object') ? model.currentConversation : null;
     const conversationStore = (model.subconsciousConversation && typeof model.subconsciousConversation === 'object') ? model.subconsciousConversation : {};
-    const latestGuidancePreview = String(
-      conversation?.latestGuidancePreview
-      || model.lastRuntimeGuidance?.preview
-      || model.manualGuidancePreview
-      || ''
-    ).trim();
-    const latestGuidanceSource = String(
-      conversation?.latestGuidanceSource
-      || model.lastRuntimeGuidance?.guidanceSource
-      || (model.lastRuntimeGuidance?.preview ? 'runtime-llm' : (model.manualGuidancePreview ? 'manual-state-file' : 'none'))
-    ).trim();
-    const latestGuidanceAt = String(
-      conversation?.latestGuidanceAt
-      || model.lastRuntimeGuidance?.updatedAt
-      || ''
-    ).trim();
 
     // ═══════════════════════════════════════════════
     // TIER 1: Status at a glance
     // ═══════════════════════════════════════════════
-    const upstreamLettaStatus = upstreamSession.established === true ? 'Established' : (upstreamBootstrap.status || 'not-run');
-    const localRuntimeStatus = model.localRuntimeLabel;
+    const authoritativeStatus = authority.status || 'off';
+    const authoritativeSession = upstreamSession.established === true ? 'Established' : (upstreamSession.status || 'not-run');
+    const fallbackStatus = fallback.configured === true ? 'Manual fallback configured' : 'No manual fallback';
+    const localRuntimeStatus = transitional.runtimeStatus || model.localRuntimeLabel || 'off';
     bits.push('<div class="sub-section">');
     bits.push('<div class="summary-grid">'
-      + '<div class="summary-stat"><div class="summary-k">Upstream Letta</div><div class="summary-v">' + esc(upstreamLettaStatus) + '</div></div>'
-      + '<div class="summary-stat"><div class="summary-k">Local Runtime</div><div class="summary-v">' + esc(localRuntimeStatus) + '</div></div>'
+      + '<div class="summary-stat"><div class="summary-k">Authority</div><div class="summary-v">' + esc(authoritativeStatus) + '</div></div>'
+      + '<div class="summary-stat"><div class="summary-k">Session</div><div class="summary-v">' + esc(authoritativeSession) + '</div></div>'
+      + '<div class="summary-stat"><div class="summary-k">Fallback</div><div class="summary-v">' + esc(fallbackStatus) + '</div></div>'
       + '<div class="summary-stat"><div class="summary-k">Events</div><div class="summary-v">' + esc(String(model.subconsciousEvents.length)) + '</div></div>'
-      + '<div class="summary-stat"><div class="summary-k">Memory</div><div class="summary-v">' + esc(String(model.subconsciousMemory?.entryCount ?? 0)) + ' ep</div></div>'
       + '</div>');
+    if (authority.reason) {
+      bits.push('<div class="summary-note"><strong>Authority reason:</strong> ' + esc(authority.reason) + '</div>');
+    }
     if (model.subconsciousBlockers.length > 0) {
       bits.push('<div style="margin-top:6px"><span style="color:#fc8181;font-size:11px">' + esc(model.subconsciousBlockers.length + ' blocker' + (model.subconsciousBlockers.length > 1 ? 's' : '')) + '</span></div>');
     }
@@ -3625,9 +3963,10 @@ th{
     // TIER 2: Operational detail (always visible)
     // ═══════════════════════════════════════════════
 
-    // --- Upstream Letta ---
+    // --- Authoritative Path ---
     bits.push('<div class="sub-section">');
-    bits.push('<div class="sub-section-label">Upstream Letta</div>');
+    bits.push('<div class="sub-section-label">Authoritative Path</div>');
+    bits.push('<div class="summary-note"><strong>Path:</strong> upstream Letta durable state</div>');
     bits.push('<div class="summary-note"><strong>Bootstrap:</strong> ' + esc(upstreamBootstrap.status || 'not-run')
       + (upstreamBootstrap.blockedReason ? (' · ' + esc(upstreamBootstrap.blockedReason)) : '') + '</div>');
     bits.push('<div class="summary-note"><strong>Agent:</strong> ' + esc(upstreamBootstrap.agentId || model.subconsciousDetail?.provider?.lettaAgentId || '-') + '</div>');
@@ -3643,39 +3982,26 @@ th{
     bits.push('<div class="summary-note"><strong>Pre-Tool:</strong> ' + esc(upstreamPreTool.status || 'not-run')
       + (upstreamPreTool.sessionId ? (' · ' + esc(upstreamPreTool.sessionId)) : '')
       + (upstreamPreTool.blockedReason ? (' · ' + esc(upstreamPreTool.blockedReason)) : '') + '</div>');
-    bits.push('<div class="summary-note"><strong>Send:</strong> ' + esc(upstreamNotify.status || 'not-attempted')
+    bits.push('<div class="summary-note"><strong>Notify:</strong> ' + esc(upstreamNotify.status || 'not-attempted')
       + (upstreamNotify.blockedReason ? (' · ' + esc(upstreamNotify.blockedReason)) : '') + '</div>');
     bits.push('</div>');
 
-    // --- Local Runtime ---
+    // --- Fallback & Transitional ---
     bits.push('<div class="sub-section">');
-    bits.push('<div class="sub-section-label">Local Runtime</div>');
-    bits.push('<div class="summary-note"><strong>Status:</strong> ' + esc(localRuntimeStatus)
+    bits.push('<div class="sub-section-label">Fallback & Transitional</div>');
+    bits.push('<div class="summary-note"><strong>Manual fallback:</strong> ' + esc(fallback.status || 'none')
+      + (fallback.note ? (' · ' + esc(fallback.note)) : '') + '</div>');
+    bits.push('<div class="summary-note"><strong>Local runtime:</strong> ' + esc(localRuntimeStatus)
+      + ' · transitional only'
       + (model.runtimeDisabledReason ? (' · ' + esc(model.runtimeDisabledReason)) : '') + '</div>');
-    bits.push('<div class="summary-note"><strong>Config:</strong> ' + esc(model.runtimeProvider || '-') + ' / ' + esc(model.runtimeModel || '-')
-      + ' · key ' + esc(model.runtimeKeyAvailable ? 'available' : 'missing') + '</div>');
-    bits.push('</div>');
-
-    // --- Guidance & Memory ---
-    bits.push('<div class="sub-section">');
-    bits.push('<div class="sub-section-label">Guidance & Memory</div>');
-    if (latestGuidancePreview) {
-      bits.push('<div class="guidance-preview gp-runtime"><div class="guidance-label">Latest Guidance (' + esc(latestGuidanceSource) + ')</div><div class="guidance-text">' + esc(latestGuidancePreview) + '</div></div>');
-    }
     if (model.manualGuidancePreview) {
-      bits.push('<div class="guidance-preview gp-manual"><div class="guidance-label">Manual Guidance</div><div class="guidance-text">' + esc(model.manualGuidancePreview) + '</div></div>');
-    }
-    if (model.lastRuntimeInvocation) {
-      const inv = model.lastRuntimeInvocation;
-      const invParts = [inv.provider, inv.model, inv.latencyMs ? (inv.latencyMs + 'ms') : null, inv.at].filter(Boolean);
-      bits.push('<div class="summary-note"><strong>Last invocation:</strong> ' + esc(invParts.join(' · ') || '-')
-        + (inv.error ? (' · <span style="color:#fc8181">' + esc(inv.error) + '</span>') : '') + '</div>');
+      bits.push('<div class="guidance-preview gp-manual"><div class="guidance-label">Manual Fallback Guidance</div><div class="guidance-text">' + esc(model.manualGuidancePreview) + '</div></div>');
     }
     if (model.subconsciousMemory?.entryCount > 0) {
-      bits.push('<div class="summary-note"><strong>Memory:</strong> ' + esc(model.subconsciousMemory.kind || 'episodic') + ' · ' + esc(String(model.subconsciousMemory.entryCount)) + ' episodes</div>');
+      bits.push('<div class="summary-note"><strong>Local memory journal:</strong> ' + esc(model.subconsciousMemory.kind || 'episodic') + ' · ' + esc(String(model.subconsciousMemory.entryCount)) + ' episodes · transitional only</div>');
     }
-    if (!latestGuidancePreview && !model.manualGuidancePreview && !model.lastRuntimeInvocation && !(model.subconsciousMemory?.entryCount > 0)) {
-      bits.push('<div class="empty-state">No activity.</div>');
+    if (!model.manualGuidancePreview && !(model.subconsciousMemory?.entryCount > 0)) {
+      bits.push('<div class="summary-note">' + esc(transitional.note || 'No fallback or transitional detail recorded.') + '</div>');
     }
     bits.push('</div>');
 
@@ -3716,14 +4042,15 @@ th{
 
     // --- Conversation State (collapsed) ---
     bits.push('<details class="sub-detail">');
-    bits.push('<summary>Conversation State</summary>');
+    bits.push('<summary>Local Conversation Journal</summary>');
     bits.push('<div class="sub-detail-body">');
     if (conversation || conversationStore.currentSessionId) {
+      bits.push('<div class="summary-note"><strong>Role:</strong> transitional compatibility journal only</div>');
       bits.push('<div class="summary-note"><strong>Session:</strong> ' + esc(conversation?.sessionId || conversationStore.currentSessionId || '-') + '</div>');
       bits.push('<div class="summary-note"><strong>Turns:</strong> user ' + esc(String(conversation?.userTurnCount ?? 0)) + ' · assistant ' + esc(String(conversation?.assistantTurnCount ?? 0)) + '</div>');
       bits.push('<div class="summary-note"><strong>Last activity:</strong> ' + esc(conversation?.lastEventAt || conversationStore.lastSyncedAt || '-') + '</div>');
     } else {
-      bits.push('<div class="empty-state">No conversation session journaled.</div>');
+      bits.push('<div class="empty-state">No local transitional conversation journal recorded.</div>');
     }
     bits.push('</div></details>');
 
@@ -3917,7 +4244,7 @@ th{
       if (recentEval.length > 0) {
         supervisorBits.push('<ul class="list tight">' + recentEval.map((ev) => (
           '<li><span class="mono">' + esc(fmtTs(ev?.ts)) + '</span> · '
-          + esc(ev?.status || 'UNKNOWN') + ' · '
+          + esc(eventStatusText(ev)) + ' · '
           + esc(ev?.reason || 'No reason recorded.')
           + '</li>'
         )).join('') + '</ul>');
@@ -3971,7 +4298,7 @@ th{
       const action = ev?.action ? (ev.action.type + (ev.action.summary ? (' · ' + ev.action.summary) : '')) : '-';
       return '<tr>'
         + '<td>' + esc(fmtTs(ev?.ts)) + '</td>'
-        + '<td><span class="status ' + statusClass(ev?.status) + '">' + esc(ev?.status || 'UNKNOWN') + '</span></td>'
+        + '<td><span class="status ' + eventStatusClass(ev) + '">' + esc(eventStatusText(ev)) + '</span></td>'
         + '<td>' + esc(ev?.domain || '-') + '</td>'
         + '<td>' + esc(ev?.pattern || '-') + '</td>'
         + '<td>' + esc(ev?.reason || '-') + '</td>'

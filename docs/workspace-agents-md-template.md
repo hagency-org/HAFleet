@@ -7,6 +7,7 @@
 - Then read `docs/plan.md`.
 - Then tail `docs/progress.md`.
 - Use `docs/projects.md` when project ownership or workspace contents matter.
+- Use `./task-writer` when you need to mutate canonical task state for this workspace.
 
 ## Boundaries
 - Keep system-owned runtime state under `../state/`.
@@ -19,6 +20,7 @@
 - Use `inbox/` for staged human/operator inputs or artifacts to process.
 - Use `outputs/` for deliverables, reports, and handoff artifacts.
 - Treat `data/` as runtime-created tool/cache support data, not the primary source of truth.
+- Treat `../supervisor/` as a supervisor-local sibling workspace, not as a second task/runtime-profile source.
 
 ## Home Contract
 - Agent Name: `{{AGENT_NAME}}`

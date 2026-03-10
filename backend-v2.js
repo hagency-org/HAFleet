@@ -1125,6 +1125,7 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
       || blocker
     );
   return {
+    classification: 'authoritative',
     available: upstreamPaths.available,
     root: upstreamPaths.root,
     promptFile: upstreamPaths.promptFile,
@@ -1260,6 +1261,83 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
       lastProcessedIndexAfter: Number.isFinite(stopLastProcessedIndexAfterRaw) ? stopLastProcessedIndexAfterRaw : null,
       scriptPath: normalizeWorkspacePath(rawStop.scriptPath || upstreamPaths.scripts?.stopSend) || upstreamPaths.scripts?.stopSend || null,
     },
+  };
+}
+
+function buildSubconsciousAuthoritySummary({ enabled, upstream, lettaAgentId }) {
+  const bootstrap = (upstream && typeof upstream.bootstrap === 'object') ? upstream.bootstrap : {};
+  const session = (upstream && typeof upstream.session === 'object') ? upstream.session : {};
+  const userPrompt = (upstream && typeof upstream.userPrompt === 'object') ? upstream.userPrompt : {};
+  const preTool = (upstream && typeof upstream.preTool === 'object') ? upstream.preTool : {};
+  const stop = (upstream && typeof upstream.stop === 'object') ? upstream.stop : {};
+  const boundAgentId = normalizeOptionalText(bootstrap.agentId || lettaAgentId, 256);
+  const bindingConfigured = Boolean(boundAgentId);
+  const sessionEstablished = session.established === true;
+  const progress = [
+    { key: 'stop', label: 'Stop', status: normalizeOptionalText(stop.status, 64) || 'not-run' },
+    { key: 'preTool', label: 'PreToolUse', status: normalizeOptionalText(preTool.status, 64) || 'not-run' },
+    { key: 'userPrompt', label: 'UserPromptSubmit', status: normalizeOptionalText(userPrompt.status, 64) || 'not-run' },
+    { key: 'session', label: 'SessionStart', status: normalizeOptionalText(session.status, 64) || 'not-run' },
+  ];
+  const latestProgress = progress.find((row) => row.status && row.status !== 'not-run') || progress[progress.length - 1];
+  let status = 'off';
+  let reason = enabled === true ? null : 'subconscious disabled';
+  if (enabled === true) {
+    if (sessionEstablished) {
+      status = 'active';
+      reason = null;
+    } else if (bindingConfigured || normalizeOptionalText(bootstrap.status, 64) === 'configured') {
+      status = 'degraded';
+      reason = normalizeOptionalText(session.blockedReason, 1200)
+        || normalizeOptionalText(session.status, 64) === 'not-run'
+        || normalizeOptionalText(session.status, 64) === null
+          ? 'authoritative upstream session not established'
+          : normalizeOptionalText(bootstrap.blockedReason, 1200)
+            || 'authoritative upstream path is configured but not established';
+    } else {
+      status = 'unconfigured';
+      reason = normalizeOptionalText(bootstrap.blockedReason, 1200)
+        || 'authoritative upstream path is not configured';
+    }
+  }
+  return {
+    classification: 'authoritative',
+    path: 'upstream-letta',
+    status,
+    reason,
+    bindingConfigured,
+    agentId: boundAgentId || null,
+    sessionEstablished,
+    conversationEstablished: Boolean(session.conversationId),
+    latestProgress,
+  };
+}
+
+function buildSubconsciousFallbackSummary(manualGuidance) {
+  const configured = typeof manualGuidance === 'string' && manualGuidance.trim().length > 0;
+  return {
+    classification: 'fallback',
+    status: configured ? 'configured' : 'none',
+    configured,
+    source: configured ? 'manual-state-file' : 'none',
+    note: 'Manual guidance is fallback configuration only; it is not the authoritative subconscious behavior path.',
+  };
+}
+
+function buildSubconsciousTransitionalSummary(runtime, memoryInfo, conversationInfo) {
+  const runtimeDesired = runtime?.desiredEnabled === true;
+  let runtimeStatus = 'off';
+  if (runtimeDesired && runtime?.invocationConfigured === true) runtimeStatus = 'ready';
+  else if (runtimeDesired) runtimeStatus = 'degraded';
+  return {
+    classification: 'transitional',
+    runtimeStatus,
+    runtimeDesired,
+    runtimeInvocationConfigured: runtime?.invocationConfigured === true,
+    runtimeDisabledReason: normalizeOptionalText(runtime?.disabledReason, 1200),
+    localMemoryConfigured: normalizeNonNegativeInt(memoryInfo?.entryCount, 0) > 0,
+    localConversationConfigured: normalizeNonNegativeInt(conversationInfo?.sessionCount, 0) > 0,
+    note: 'Local runtime, memory, and conversation journals are transitional compatibility/debug surfaces only.',
   };
 }
 
@@ -1615,6 +1693,7 @@ function resolveSubconsciousState(agentName) {
       || null
     : null;
   const memoryInfo = {
+    classification: 'transitional',
     kind: normalizeOptionalText(memoryStore.kind, 128) || 'local-episodic-journal',
     path: memoryState.path,
     retrievalStrategy: normalizeOptionalText(memoryStore.retrievalStrategy, 128) || 'keyword-overlap-recency',
@@ -1627,6 +1706,93 @@ function resolveSubconsciousState(agentName) {
     lastRetrievedQuery: normalizeOptionalText(memoryStore.lastRetrievedQuery, 600),
     lastRetrievedIds: Array.isArray(memoryStore.lastRetrievedIds) ? memoryStore.lastRetrievedIds.slice(0, 12) : [],
   };
+  const conversationContract = {
+    classification: 'transitional',
+    kind: conversationStore.kind || 'claude-jsonl-session-journal',
+    path: conversationState.path,
+    sessionCount: Array.isArray(conversationStore.sessions) ? conversationStore.sessions.length : 0,
+    sessionLimit: normalizePositiveInt(conversationStore.sessionLimit, 24),
+    currentSessionId: conversationStore.currentSessionId || null,
+    currentTranscriptPath: conversationStore.currentTranscriptPath || null,
+    lastSyncedAt: conversationStore.lastSyncedAt || null,
+    updatedAt: conversationStore.updatedAt || null,
+    current: currentConversation
+      ? {
+          sessionId: currentConversation.sessionId || null,
+          transcriptPath: currentConversation.transcriptPath || null,
+          transcriptExists: currentConversation.transcriptExists === true,
+          transcriptLineCount: currentConversation.transcriptLineCount || 0,
+          eventCount: currentConversation.eventCount || 0,
+          userTurnCount: currentConversation.userTurnCount || 0,
+          assistantTurnCount: currentConversation.assistantTurnCount || 0,
+          startedAt: currentConversation.startedAt || null,
+          updatedAt: currentConversation.updatedAt || null,
+          lastEventAt: currentConversation.lastEventAt || null,
+          lastHook: currentConversation.lastHook || null,
+          lastToolName: currentConversation.lastToolName || null,
+          lastRuntimeAt: currentConversation.lastRuntimeAt || null,
+          lastRuntimeProvider: currentConversation.lastRuntimeProvider || null,
+          lastRuntimeModel: currentConversation.lastRuntimeModel || null,
+          latestUserText: currentConversation.latestUserText || '',
+          latestAssistantText: currentConversation.latestAssistantText || '',
+          recentTurns: Array.isArray(currentConversation.recentTurns) ? currentConversation.recentTurns : [],
+        }
+      : null,
+  };
+  const runtimeContract = {
+    classification: 'transitional',
+    desiredEnabled: runtimeDesired,
+    invocationConfigured,
+    disabledReason,
+    provider,
+    model,
+    endpoint,
+    keyEnv,
+    configFamily: 'SUBCONSCIOUS_LLM_*',
+    configSources: {
+      provider: providerSource,
+      model: modelSource,
+      endpoint: endpointSource,
+      keyEnv: keyEnvSource,
+    },
+    keyAvailable: Boolean(apiKey),
+    timeoutMs,
+    maxTokens,
+    temperature,
+    allowedHooks: Array.isArray(runtimeCfg.allowedHooks) && runtimeCfg.allowedHooks.length
+      ? runtimeCfg.allowedHooks
+      : [...SUBCONSCIOUS_RUNTIME_HOOKS],
+    hookRuntimeInstalled: Boolean(pluginRoot && existsSync(path.join(pluginRoot, 'scripts', 'hook-entry.mjs'))),
+    hookBindingsInstalled: installedHooks.length === 4,
+    installedHooks,
+    settingsPath: settingsPath || null,
+    pluginRoot: pluginRoot || null,
+    eventSinkConfigured: Boolean(eventUrl),
+    eventUrl: eventUrl || null,
+    invokeUrl,
+    runtimeMetaPath: runtimeMetaPath || null,
+    updatedAt: normalizeOptionalText(runtimeMeta?.updatedAt, 128),
+  };
+  const providerContract = {
+    provider: normalizeOptionalText(letta?.provider, 128) || 'letta',
+    mode: normalizeOptionalText(letta?.mode, 128) || 'claude-subconscious',
+    lettaAgentId: normalizeOptionalText(letta?.agentId || letta?.lettaAgentId, 256),
+    resolutionSource: normalizeOptionalText(letta?.resolutionSource, 64),
+    lettaStateFile: lettaPath || null,
+    backendRuntimeConfigured: invocationConfigured,
+    modelConfigConfigured: Boolean(model && endpoint),
+    memoryStoreConfigured: Boolean(memoryInfo.path && memoryInfo.kind === 'local-episodic-journal'),
+    invocationConfigured,
+    upstreamBootstrapConfigured: upstream.bootstrap.status === 'configured',
+    upstreamSessionConfigured: upstream.session?.established === true,
+  };
+  const authority = buildSubconsciousAuthoritySummary({
+    enabled: agent.subconsciousEnabled === true,
+    upstream,
+    lettaAgentId: providerContract.lettaAgentId,
+  });
+  const fallback = buildSubconsciousFallbackSummary(manualGuidance);
+  const transitional = buildSubconsciousTransitionalSummary(runtimeContract, memoryInfo, conversationContract);
   const missingBackendPieces = [];
   if (!invocationConfigured) {
     missingBackendPieces.push(disabledReason
@@ -1705,93 +1871,23 @@ function resolveSubconsciousState(agentName) {
           : (invocationConfigured ? 'conversation-aware-runtime' : 'scaffold'))),
       writable: Boolean(stateDir),
       enabled: agent.subconsciousEnabled === true,
+      authority,
+      fallback,
       manualGuidance: {
+        classification: 'fallback',
         configured: manualGuidance.length > 0,
         source: manualGuidance ? 'manual-state-file' : 'none',
+        role: 'fallback',
         text: manualGuidance,
         preview: manualGuidance.length > 240 ? `${manualGuidance.slice(0, 240)}...` : manualGuidance,
         updatedAt: normalizeOptionalText(letta?.updatedAt, 128),
       },
-      runtime: {
-        desiredEnabled: runtimeDesired,
-        invocationConfigured,
-        disabledReason,
-        provider,
-        model,
-        endpoint,
-        keyEnv,
-        configFamily: 'SUBCONSCIOUS_LLM_*',
-        configSources: {
-          provider: providerSource,
-          model: modelSource,
-          endpoint: endpointSource,
-          keyEnv: keyEnvSource,
-        },
-        keyAvailable: Boolean(apiKey),
-        timeoutMs,
-        maxTokens,
-        temperature,
-        allowedHooks: Array.isArray(runtimeCfg.allowedHooks) && runtimeCfg.allowedHooks.length
-          ? runtimeCfg.allowedHooks
-          : [...SUBCONSCIOUS_RUNTIME_HOOKS],
-        hookRuntimeInstalled: Boolean(pluginRoot && existsSync(path.join(pluginRoot, 'scripts', 'hook-entry.mjs'))),
-        hookBindingsInstalled: installedHooks.length === 4,
-        installedHooks,
-        settingsPath: settingsPath || null,
-        pluginRoot: pluginRoot || null,
-        eventSinkConfigured: Boolean(eventUrl),
-        eventUrl: eventUrl || null,
-        invokeUrl,
-        runtimeMetaPath: runtimeMetaPath || null,
-        updatedAt: normalizeOptionalText(runtimeMeta?.updatedAt, 128),
-      },
-      provider: {
-        provider: normalizeOptionalText(letta?.provider, 128) || 'letta',
-        mode: normalizeOptionalText(letta?.mode, 128) || 'claude-subconscious',
-        lettaAgentId: normalizeOptionalText(letta?.agentId || letta?.lettaAgentId, 256),
-        resolutionSource: normalizeOptionalText(letta?.resolutionSource, 64),
-        lettaStateFile: lettaPath || null,
-        backendRuntimeConfigured: invocationConfigured,
-        modelConfigConfigured: Boolean(model && endpoint),
-        memoryStoreConfigured: Boolean(memoryInfo.path && memoryInfo.kind === 'local-episodic-journal'),
-        invocationConfigured,
-        upstreamBootstrapConfigured: upstream.bootstrap.status === 'configured',
-        upstreamSessionConfigured: upstream.session?.established === true,
-      },
+      runtime: runtimeContract,
+      transitional,
+      provider: providerContract,
       upstream,
       memory: memoryInfo,
-      conversation: {
-        kind: conversationStore.kind || 'claude-jsonl-session-journal',
-        path: conversationState.path,
-        sessionCount: Array.isArray(conversationStore.sessions) ? conversationStore.sessions.length : 0,
-        sessionLimit: normalizePositiveInt(conversationStore.sessionLimit, 24),
-        currentSessionId: conversationStore.currentSessionId || null,
-        currentTranscriptPath: conversationStore.currentTranscriptPath || null,
-        lastSyncedAt: conversationStore.lastSyncedAt || null,
-        updatedAt: conversationStore.updatedAt || null,
-        current: currentConversation
-          ? {
-              sessionId: currentConversation.sessionId || null,
-              transcriptPath: currentConversation.transcriptPath || null,
-              transcriptExists: currentConversation.transcriptExists === true,
-              transcriptLineCount: currentConversation.transcriptLineCount || 0,
-              eventCount: currentConversation.eventCount || 0,
-              userTurnCount: currentConversation.userTurnCount || 0,
-              assistantTurnCount: currentConversation.assistantTurnCount || 0,
-              startedAt: currentConversation.startedAt || null,
-              updatedAt: currentConversation.updatedAt || null,
-              lastEventAt: currentConversation.lastEventAt || null,
-              lastHook: currentConversation.lastHook || null,
-              lastToolName: currentConversation.lastToolName || null,
-              lastRuntimeAt: currentConversation.lastRuntimeAt || null,
-              lastRuntimeProvider: currentConversation.lastRuntimeProvider || null,
-              lastRuntimeModel: currentConversation.lastRuntimeModel || null,
-              latestUserText: currentConversation.latestUserText || '',
-              latestAssistantText: currentConversation.latestAssistantText || '',
-              recentTurns: Array.isArray(currentConversation.recentTurns) ? currentConversation.recentTurns : [],
-            }
-          : null,
-      },
+      conversation: conversationContract,
       lastInvocation: lastInvocation || null,
       lastRuntimeGuidance: generatedGuidance
         ? {
@@ -2156,11 +2252,18 @@ function buildOperationalSubconsciousContract(contract) {
   if (!safe || typeof safe !== 'object') return safe;
 
   if (safe.runtime && typeof safe.runtime === 'object') {
+    const runtimeSummary = {
+      classification: safe.runtime.classification || 'transitional',
+      desiredEnabled: safe.runtime.desiredEnabled === true,
+      invocationConfigured: safe.runtime.invocationConfigured === true,
+      disabledReason: safe.runtime.disabledReason || null,
+    };
     delete safe.runtime.settingsPath;
     delete safe.runtime.pluginRoot;
     delete safe.runtime.eventUrl;
     delete safe.runtime.invokeUrl;
     delete safe.runtime.runtimeMetaPath;
+    safe.runtime = runtimeSummary;
   }
 
   if (safe.provider && typeof safe.provider === 'object') {
@@ -2245,29 +2348,24 @@ function buildOperationalSubconsciousContract(contract) {
   }
 
   if (safe.memory && typeof safe.memory === 'object') {
-    delete safe.memory.path;
-    delete safe.memory.lastRetrievedQuery;
+    safe.memory = {
+      classification: safe.memory.classification || 'transitional',
+    };
   }
 
   if (safe.conversation && typeof safe.conversation === 'object') {
-    delete safe.conversation.path;
-    delete safe.conversation.currentTranscriptPath;
-    if (safe.conversation.current && typeof safe.conversation.current === 'object') {
-      delete safe.conversation.current.transcriptPath;
-      delete safe.conversation.current.transcriptExists;
-      delete safe.conversation.current.latestUserText;
-      delete safe.conversation.current.latestAssistantText;
-      delete safe.conversation.current.latestGuidancePreview;
-      delete safe.conversation.current.latestGuidanceAt;
-      delete safe.conversation.current.latestGuidanceSource;
-      delete safe.conversation.current.recentTurns;
-    }
+    safe.conversation = {
+      classification: safe.conversation.classification || 'transitional',
+    };
   }
 
-  if (safe.lastRuntimeGuidance && typeof safe.lastRuntimeGuidance === 'object') {
-    delete safe.lastRuntimeGuidance.preview;
-    delete safe.lastRuntimeGuidance.text;
+  if (safe.manualGuidance && typeof safe.manualGuidance === 'object') {
+    delete safe.manualGuidance.text;
+    delete safe.manualGuidance.preview;
   }
+
+  if (Object.prototype.hasOwnProperty.call(safe, 'lastRuntimeGuidance')) delete safe.lastRuntimeGuidance;
+  if (Object.prototype.hasOwnProperty.call(safe, 'lastInvocation')) delete safe.lastInvocation;
 
   if (Array.isArray(safe.missingBackendPieces)) {
     safe.missingBackendPieces = safe.missingBackendPieces.map((item) => redactPathLikeText(item, 1200) || item);
@@ -2493,6 +2591,8 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
     : null;
   runtime.lastInboxCheckAt = Number(runtime.lastInboxCheckAt) || 0;
   runtime.lastAgentOutboundAt = Number(runtime.lastAgentOutboundAt) || 0;
+  runtime.inboxGate = normalizeInboxGate(runtime.inboxGate);
+  runtime.inboxReadAck = normalizeInboxReadAck(runtime.inboxReadAck);
   runtime.lastBlockedTail = (typeof runtime.lastBlockedTail === 'string') ? runtime.lastBlockedTail : '';
   runtime.lastBlockedCommand = (typeof runtime.lastBlockedCommand === 'string') ? runtime.lastBlockedCommand : '';
   runtime.lastBlockedServer = normalizeServer(runtime.lastBlockedServer);
@@ -2787,6 +2887,66 @@ function buildUnreadInboxSnapshot(agentName) {
   };
 }
 
+function normalizeInboxGateReason(value) {
+  const raw = (typeof value === 'string') ? value.trim() : '';
+  if (raw === 'actionable_notification' || raw === 'merged_actionable_unread') return raw;
+  return null;
+}
+
+function normalizeInboxGate(value) {
+  if (!value || typeof value !== 'object') {
+    return {
+      requiresInboxCheck: false,
+      sourceMsgId: null,
+      raisedAt: null,
+      reason: null,
+    };
+  }
+  const sourceMsgId = (typeof value.sourceMsgId === 'string' && value.sourceMsgId.trim())
+    ? value.sourceMsgId.trim()
+    : null;
+  const raisedAt = Number(value.raisedAt) || null;
+  return {
+    requiresInboxCheck: value.requiresInboxCheck === true,
+    sourceMsgId,
+    raisedAt,
+    reason: normalizeInboxGateReason(value.reason),
+  };
+}
+
+function normalizeInboxReadAck(value) {
+  if (!value || typeof value !== 'object') {
+    return {
+      sourceMsgId: null,
+      ackedAt: null,
+    };
+  }
+  return {
+    sourceMsgId: (typeof value.sourceMsgId === 'string' && value.sourceMsgId.trim())
+      ? value.sourceMsgId.trim()
+      : null,
+    ackedAt: Number(value.ackedAt) || null,
+  };
+}
+
+function buildInboxGateFromPushMeta(meta, deliveredAt) {
+  if (!meta?.requiresInboxCheck) return normalizeInboxGate(null);
+  const reason = meta.kind === 'merged_unread_actionable'
+    ? 'merged_actionable_unread'
+    : 'actionable_notification';
+  return normalizeInboxGate({
+    requiresInboxCheck: true,
+    sourceMsgId: meta.sourceMsgId || null,
+    raisedAt: Number(deliveredAt) || Date.now(),
+    reason,
+  });
+}
+
+function getPendingInboxGate(runtime) {
+  const gate = normalizeInboxGate(runtime?.inboxGate);
+  return gate.requiresInboxCheck ? gate : null;
+}
+
 function formatSenderList(names) {
   if (names.length <= 3) return names.join(', ');
   return `${names.slice(0, 3).join(', ')}, +${names.length - 3} more`;
@@ -2822,6 +2982,8 @@ function ensureAgentRuntimeRecord(name) {
       lastPushSourceMsgId: null,
       lastInboxCheckAt: 0,
       lastAgentOutboundAt: 0,
+      inboxGate: normalizeInboxGate(null),
+      inboxReadAck: normalizeInboxReadAck(null),
       lastBlockedTail: '',
       lastBlockedCommand: '',
       lastBlockedServer: null,
@@ -2891,6 +3053,9 @@ function markAgentPushDelivered(agentName, details = {}) {
   runtime.lastPushUnreadCount = meta.unreadCount;
   runtime.lastPushSourceMsgId = meta.sourceMsgId;
   if (meta.requiresInboxCheck) {
+    runtime.inboxGate = buildInboxGateFromPushMeta(meta, deliveredAt);
+  }
+  if (meta.requiresInboxCheck) {
     runtime.lastActionablePushAt = deliveredAt;
   }
   runtime.lastSeen = deliveredAt;
@@ -2898,11 +3063,22 @@ function markAgentPushDelivered(agentName, details = {}) {
   saveAgentRuntime();
 }
 
-function markAgentInboxChecked(agentName) {
+function markAgentInboxChecked(agentName, details = {}) {
   const runtime = ensureAgentRuntimeRecord(agentName);
   if (!runtime) return;
   const now = Date.now();
   runtime.lastInboxCheckAt = now;
+  const ackSourceMsgId = (typeof details.sourceMsgId === 'string' && details.sourceMsgId.trim())
+    ? details.sourceMsgId.trim()
+    : null;
+  const clearInboxGate = details.clearInboxGate === true;
+  if (clearInboxGate) {
+    runtime.inboxGate = normalizeInboxGate(null);
+    runtime.inboxReadAck = normalizeInboxReadAck({
+      sourceMsgId: ackSourceMsgId,
+      ackedAt: now,
+    });
+  }
   runtime.lastSeen = now;
   runtime.updatedAt = now;
   saveAgentRuntime();
@@ -3024,6 +3200,19 @@ function didAgentAcknowledgeActionablePush(agentName, runtime, actionablePushAt,
     if (!sourceGroup && sourceFrom && msg.to === sourceFrom) return true;
   }
   return false;
+}
+
+function getAgentInboxGateBlock(agentName) {
+  const runtime = ensureAgentRuntimeRecord(agentName);
+  if (!runtime) return null;
+  const gate = getPendingInboxGate(runtime);
+  if (!gate) return null;
+  return {
+    agent: agentName,
+    inboxGate: gate,
+    error: 'inbox_check_required',
+    hint: 'Call check_inbox() first to acknowledge the pending actionable notification before sending outbound progress or replies.',
+  };
 }
 
 function collectBlockedHumanTargets(agentName) {
@@ -6291,6 +6480,12 @@ app.post('/api/messages', (req, res) => {
   let assumedHumanTarget = false;
   const senderRecord = agents[fromName] || null;
   const senderIsAgent = isAgentRecord(senderRecord);
+  if (senderIsAgent) {
+    const block = getAgentInboxGateBlock(fromName);
+    if (block) {
+      return res.status(409).json(block);
+    }
+  }
   if (sourceType === 'api' && fromName !== 'system' && !senderIsAgent) {
     return res.status(403).json({ error: `sender agent not registered: ${fromName}` });
   }
@@ -6641,10 +6836,20 @@ app.get('/api/inbox/:agent', (req, res) => {
 
   // Advance cursor only to the latest delivered message.
   const unread = [...dmRaw, ...groupRaw].sort(compareMsgOrder);
+  const runtime = ensureAgentRuntimeRecord(agentName);
+  const pendingGate = getPendingInboxGate(runtime);
+  const consumedPendingSource = Boolean(
+    pendingGate
+    && pendingGate.sourceMsgId
+    && unread.some((msg) => msg?.id === pendingGate.sourceMsgId)
+  );
   if (advanceInboxCursor(cursor, unread)) {
     saveCursors();
   }
-  markAgentInboxChecked(agentName);
+  markAgentInboxChecked(agentName, {
+    clearInboxGate: consumedPendingSource,
+    sourceMsgId: consumedPendingSource ? pendingGate.sourceMsgId : null,
+  });
   // If the agent just consumed inbox, stale queued notifications should be removed immediately.
   clearQueuedNotificationsForAgent(agentName);
 

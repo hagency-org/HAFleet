@@ -8,6 +8,7 @@ Generated-For: v1 agent home workspace
 - Read root `AGENTS.md` first on every resume or new session.
 - Then read `docs/plan.md`, then tail `docs/progress.md`.
 - Check `docs/projects.md` to know which project you own and where its code lives.
+- Use `./task-writer` to write canonical task state for this workspace; do not treat docs text as the task truth source.
 
 ## Where to work
 
@@ -21,6 +22,15 @@ If the operator asks you to edit the source repo directly (outside your home), d
 
 **Do not** create long-lived code, scripts, or project files in the workspace root, `scratch/`, or `docs/`. Those are coordination surfaces, not code trees.
 
+Task state lives in the shared control-plane object, not in `docs/plan.md` alone. Use the provisioned `./task-writer` wrapper when you need to:
+- start a new batch: `./task-writer start --id <task-id>`
+- heartbeat a live batch: `./task-writer heartbeat`
+- declare safe waiting: `./task-writer wait --reason "<reason>" --until <ISO-8601>`
+- resume active work on the same task: `./task-writer resume`
+- mark the current batch done: `./task-writer done`
+
+The supervisor-local sibling workspace lives at `../supervisor/`. It keeps supervisor-local plan/progress state only; it must not become a second task or runtime-profile truth source.
+
 ## Directory contract
 
 | Path | Purpose | Agent writes? |
@@ -33,6 +43,7 @@ If the operator asks you to edit the source repo directly (outside your home), d
 | `data/` | Runtime tool caches (e.g. mcp-media-cache) | Managed by tools, not by agent |
 | `.claude/` | Claude settings, subconscious hook config | Managed by system; read for debugging |
 | `../state/` | Runtime state: subconscious events, locks, resume-id, letta | System-owned — do not edit |
+| `../supervisor/` | Supervisor-local sibling workspace | Read as needed; do not treat it as canonical task state |
 | Root `AGENTS.md` | Durable role/boundary rules | Yes — append learned rules here |
 | Root `CLAUDE.md` | This file (workspace contract) | No — provisioned by system |
 

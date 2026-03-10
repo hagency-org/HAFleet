@@ -642,7 +642,7 @@ function initProfile(args) {
   const notes = normalizeText(args.notes, 4000) || '';
   const createdBy = normalizeText(args['created-by'], 128) || process.env.USER || 'unknown';
   const agentType = normalizeAgentType(args['agent-type'] || 'claude-code');
-  const subconsciousEnabled = parseBool(args['subconscious-enabled'], true);
+  const subconsciousEnabled = parseBool(args['subconscious-enabled'], false);
   if (!profileId) throw new Error('invalid --profile-id');
   if (!version) throw new Error('invalid --version');
   if (!agentType) throw new Error('invalid --agent-type');

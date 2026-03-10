@@ -1,12 +1,13 @@
 ## Current
-Await operator go-ahead for `master -> stable` execution now that the accepted architecture baseline, maturity classification, and merge-execution hygiene plan are all in place.
+Await explicit operator go-ahead for `master -> stable` now that the default-off change has landed and the accepted structural blockers are closed.
 Acceptance criteria:
-- the accepted merge-execution hygiene plan is recorded as the final pre-merge plan
-- no unproven new blocker is reopened without route/proof-level evidence
-- once operator gives the merge go-ahead, execute the stable merge using the accepted hygiene sequence only
+- merge authorization is explicit rather than inferred
+- merge execution follows the accepted hygiene sequence
+- any current-runtime overrides that should remain on/off are decided deliberately before branch movement
 
 
 ## Queue
+1. If requested before merge, flip explicit dev/runtime env so currently running dev agents also start with `supervisor=off` / `subconscious=off`, rather than only changing fresh-agent defaults.
 1. Rebuild the web around environment grouping and first-class objects (`live/dev/benchmark/ephemeral`, canonical vs transitional states) before adding more summary concepts.
 2. Start benchmark Batch 4 (result UI) only after the object model is stable enough not to fork benchmark product language from core system language.
 3. Expose the per-agent config model in the unified web management page (MCP, hooks, skills, related runtime knobs) once its first-class objects and truth sources are defined.

@@ -1726,3 +1726,17 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Browser-level audit from `webdebug` proved the external `https://agentchat-dev.ananthe.party/agents/Yato` blank/Loading state is caused by credentials embedded in the URL (`user:pass@host`), which makes modern browsers reject relative same-origin `fetch()` calls like `/api/supervisor/status`; the SSR HTML loads, then the page-level `refresh()` fails and clears rendered content.
 - Independently confirmed local dev is healthy: all page-linked APIs on `18184/18190` return real data and the local detail page HTML contains the expected sections (`Authoritative Path`, `Fallback & Transitional`, `Local Conversation Journal`), so this is an external auth/browser behavior issue, not a backend-no-data issue.
 - Logged the auth caveat as durable knowledge and queued a later hardening task to preserve SSR content or replace the current external auth flow after the stable merge path is resolved.
+## [2026-03-10 06:34] DONE — corrected no-task supervisor idle spam and downgraded neutral task-state rendering
+- Root cause was not the web alone: `supervisor/index.js` included volatile `idleDurationSec` in the supervisor input hash, so an unchanged `no task + idle` observation looked changed every sweep and appended a fresh `domain=task-state` event every 30s.
+- Corrected the backend hash to ignore volatile idle-duration time, keeping event generation tied to stable task/classification/lifecycle changes instead of observational counters.
+- Corrected the web rendering so neutral `task-state` rows with `status=null` render as idle/no-task (`IDLE` / `NO-TASK`) rather than `UNKNOWN`.
+- Verified on dev after restarting `18190/18184`: `GET /api/supervisor/agents/Yato?limit=20` stayed at `events=[]` and `latest=null` across a 32-second interval, proving the repeated no-task idle event stream stopped.
+## [2026-03-10 13:16] DONE — changed fresh-agent defaults so supervisor and subconscious are off unless explicitly enabled
+- Changed supervisor default parsing so `SUPERVISOR_ENABLED` now defaults to `false` when unset, and updated `.env.example` to match.
+- Changed v1 provisioning so fresh homes default `subconsciousEnabled=false`, while reprovision preserves an already explicit `true` instead of silently rewriting configured agents.
+- Updated benchmark workflow defaults and v1 home contract/docs so they no longer claim subconscious is on by default for `claude`.
+- Verified:
+  - `loadSupervisorConfig({ ...env, SUPERVISOR_ENABLED: undefined })` resolves to `enabled=false`
+  - fresh `scripts/provision-v1-agent-home.js` output writes `"subconsciousEnabled": false`
+  - reprovision of a home that already had `"subconsciousEnabled": true` preserves that explicit value.
+- Important boundary: this changed system defaults only. Current explicit runtime env still wins; at the time of verification, dev `.env` still had `SUPERVISOR_ENABLED=true` while live `.env` already had `SUPERVISOR_ENABLED=false`.

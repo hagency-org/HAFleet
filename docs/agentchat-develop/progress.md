@@ -2004,3 +2004,383 @@ Verification:
 
 ## [2026-03-09 04:24] DONE — Worker accepted the UserPromptSubmit convergence repair
 Recorded the worker acceptance for the narrow truth-source repair. The accepted upstream-backed baseline is now explicit: SessionStart, UserPromptSubmit, and Stop are cut over in dev. No new implementation starts from this acceptance notice alone.
+
+## [2026-03-09 04:27] DONE — Prepared PreToolUse slice design note in object-model terms
+Produced [pretooluse-slice-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/pretooluse-slice-design.md) as the narrow worker-review deliverable for the next upstream hook cutover. The note names the first-class objects touched by PreToolUse, identifies the truth source for each touched field, separates what would become upstream-backed from what remains local/transitional, defines the minimum proof, and calls out the new convergence, latency, and duplication risks. No code or UI changes were made in this batch.
+
+## [2026-03-09 04:46] DONE — Cut over the minimal upstream PreToolUse slice and verified it live on Yato
+Implemented the upstream-backed PreToolUse read-and-inject path in the backend helper, backend route, copied Claude hook runtime, dev web proxy, and existing Agent Detail projections. Root cause fixed along the way: the prior upstream UserPromptSubmit cutover did not seed durable session baseline fields (`lastSeenMessageId`, `lastBlockValues`) in `session-<session>.json`, which meant PreToolUse had no truthful diff source. I updated UserPromptSubmit baseline seeding to match upstream `sync_letta_memory.ts` semantics, then added the PreToolUse route/helper and switched the PreToolUse hook off the old local runtime/manual-guidance fallback.
+
+Verification on dev `18190/18184` used Yato session `pretool-cutover-proof-1773002508`. After baseline seeding, a real direct Letta conversation message produced a new assistant response, Yato's copied `PreToolUse` hook emitted upstream-derived `<letta_update>` context containing the real assistant messages, `GET /api/subconscious/detail/Yato` on both backend and web reported `stage = upstream-pretool-lifecycle` with `upstream.preTool.status = injected`, and a second identical PreToolUse call truthfully returned `status = no-updates`. I also fixed a proof-found event bug where zero-valued upstream PreToolUse counters were being collapsed to `null` in the hook event payload.
+
+## [2026-03-09 04:54] DONE — Reviewed subconscious event model and security boundary in a design-only note
+Produced [subconscious-event-security-review.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/subconscious-event-security-review.md) for the next architecture-first batch. The note isolates five concrete issues in the current event/detail surfaces: mirror-vs-canonical ambiguity across durable state and mirrors, synthetic generic 	tguidance fields spanning incompatible paths, unsafe default exposure of paths and text previews, overly trusting event ingestion, and top-level  as a synthetic contract field. It also defines an exact follow-up order and a minimum acceptable correction set. No code or UI changes were made in this batch.
+
+## [2026-03-09 04:54] DONE — Reviewed subconscious event model and security boundary in a design-only note
+Produced [subconscious-event-security-review.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/subconscious-event-security-review.md) for the next architecture-first batch. The note isolates five concrete issues in the current event/detail surfaces: mirror-vs-canonical ambiguity across durable state and mirrors, synthetic generic guidance fields spanning incompatible paths, unsafe default exposure of paths and text previews, overly trusting event ingestion, and top-level `stage` as a synthetic contract field. It also defines an exact follow-up order and a minimum acceptable correction set. No code or UI changes were made in this batch.
+
+## [2026-03-09 04:56] DONE — Synced local docs to the accepted PreToolUse and review baseline
+Updated the local agent docs after the worker accepted both the narrow upstream `PreToolUse` slice and the follow-on subconscious event/security review note. The accepted upstream-backed dev slices are now recorded consistently as `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `Stop`, and the next scoped implementation batch is narrowed to the subconscious event trust boundary first, then the operational-vs-debug detail split. Added the durable root cause to `agents.md`: `POST /api/subconscious/events` is still observational telemetry until token or strict local-only enforcement exists, so event payloads and derived summaries like top-level `stage` / generic `guidance*` fields must not be treated as canonical state. No code or UI changes were made in this sync batch.
+
+## [2026-03-09 04:58] DONE — Worker accepted the event/security review state and doc sync
+Recorded the worker acceptance for the architecture-first subconscious event/security review and the follow-on doc-sync verification. The execution boundary remains unchanged: harden the `POST /api/subconscious/events` trust boundary first, then split default operational detail from privileged debug exposure, with no new hook-path cutovers and no UI expansion. The duplicate review-note entry remains in `progress.md` as a non-blocking historical artifact because this log is append-only.
+
+## [2026-03-09 17:36] DONE — Hardened the subconscious event-ingest trust boundary
+Changed [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js) only. Root cause: `POST /api/subconscious/events` had no route-specific trust check at all, so any request that reached the handler was accepted as observational telemetry. During verification I found a second compatibility bug: when `API_TOKEN` is enabled, the global `/api` auth middleware intercepts the shared `Authorization` header before the event route can evaluate `AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN`, so non-local event posts with the subconscious event token were still failing until the global middleware explicitly allowed that token on this route.
+
+Implemented:
+- route-specific ingest authorization for `POST /api/subconscious/events`
+  - localhost requests are accepted as `ingestBoundary: "local"`
+  - non-local requests now require `Bearer ${AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN}` and return a truthful `401/403` plus `ingestBoundary` when denied
+- global `/api` auth compatibility for this one route when `API_TOKEN` is enabled, so the shared event token can actually reach the route-specific trust check
+- successful responses now echo the trusted ingress mode as `ingestBoundary`
+
+Verification used isolated backends on `19090`-`19093`, with the final proof on `19093` under `API_TOKEN=proof-api-token` and `AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN=proof-event-token`:
+- `node --check backend-v2.js`
+- proxied unauthenticated `POST /api/subconscious/events` with `X-Forwarded-For: 198.51.100.10` -> `401 {"error":"unauthorized"}`
+- proxied `POST` with only `Authorization: Bearer proof-api-token` -> `401 {"error":"invalid subconscious event token","ingestBoundary":"token-required"}`
+- proxied `POST` with only `Authorization: Bearer proof-event-token` -> `200 {"ok":true,"ingestBoundary":"token"}`
+- localhost `POST` with no token -> `200 {"ok":true,"ingestBoundary":"local"}`
+
+Compatibility impact:
+- no installed hook-runtime code changes were required for the current dev pattern because the copied Claude subconscious runtime already posts directly to a localhost backend URL and therefore still succeeds on the local-only path
+- any non-local or proxied event-ingest path must now provide `AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN`; `API_TOKEN` alone is intentionally insufficient for subconscious event ingest
+
+## [2026-03-09 17:39] DONE — Worker accepted the subconscious event trust-boundary fix
+Recorded the worker acceptance for the verified `POST /api/subconscious/events` trust-boundary implementation. The active next batch remains the operational-vs-debug subconscious detail split, with the existing boundaries unchanged: no new hook-path cutovers and no UI expansion.
+
+## [2026-03-09 17:39] DONE — Split operational subconscious detail from privileged debug exposure
+Changed [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js) and [server.js](/home/shisui/laplace/agent-chat/server.js) only. Root cause: the default subconscious detail route was returning one mixed contract that combined operational state with privileged debug-only material from canonical stores, including raw file paths, transcript pointers, working directories, and transcript/guidance previews. The web proxy and fallback path were mirroring the same over-broad shape.
+
+Implemented:
+- backend default `GET /api/subconscious/detail/:name` now returns an operational-only contract
+- privileged full-detail access is preserved only on the backend route via local or `API_TOKEN`-authorized `?debug=1`
+- web proxy default remains operational-only and forwards `?debug=1` only when explicitly requested
+- fallback `buildSubconsciousDetailPayload()` is also sanitized so backend failure does not reintroduce path/text leakage
+
+Moved to privileged/debug-only exposure:
+- runtime internals: `runtime.settingsPath`, `runtime.pluginRoot`, `runtime.eventUrl`, `runtime.invokeUrl`, `runtime.runtimeMetaPath`
+- provider path: `provider.lettaStateFile`
+- upstream raw paths: `upstream.root`, `upstream.promptFile`, `upstream.scripts`, `upstream.durableHome`, `upstream.durableStateDir`, `upstream.conversationsFile`, `upstream.configPath`
+- upstream session internals: `upstream.session.sessionStateFile`, `upstream.session.cwd`
+- upstream prompt/pretool/stop file pointers: `transcriptPath`, `syncStateFile`, `scriptPath`, and transcript existence flags
+- local journal paths and previews: `memory.path`, `memory.lastRetrievedQuery`, `conversation.path`, `conversation.currentTranscriptPath`, `conversation.current.transcriptPath`, `conversation.current.transcriptExists`, `conversation.current.latestUserText`, `conversation.current.latestAssistantText`, `conversation.current.latestGuidancePreview`, `conversation.current.recentTurns`
+- generated runtime-guidance bodies: `lastRuntimeGuidance.preview`, `lastRuntimeGuidance.text`
+
+Verification on isolated backend/web `19094/19088` against the real dev runtime root `/home/shisui/laplace/agent-chat-dev-runtime`:
+- `node --check backend-v2.js`
+- `node --check server.js`
+- Yato non-regression on accepted slices from default detail:
+  - `stage = upstream-pretool-lifecycle`
+  - `upstream.session.status = started`
+  - `upstream.userPrompt.status = sent`
+  - `upstream.preTool.status = no-updates`
+  - `upstream.stop.status = not-run`
+- default backend detail no longer exposed the moved fields:
+  - no `runtime.pluginRoot`
+  - no `runtime.eventUrl`
+  - no `memory.path`
+  - no `conversation.path`
+  - no `conversation.current.transcriptPath`
+  - no `conversation.current.recentTurns`
+  - no `upstream.root`
+  - no `upstream.session.sessionStateFile`
+  - no `upstream.userPrompt.transcriptPath`
+  - no `upstream.preTool.syncStateFile`
+  - no `upstream.stop.transcriptPath`
+- privileged backend debug view still exposed them via local `GET /api/subconscious/detail/Yato?debug=1`
+- default web proxy detail also stayed sanitized:
+  - no `runtime.pluginRoot`
+  - no `memory.path`
+  - no `upstream.root`
+- `GET /agents/Yato` on `19088` returned `200` and still rendered the accepted operational sections: `Upstream Letta`, `Local Runtime`, `Guidance & Memory`, and `Debug Internals`
+
+## [2026-03-09 18:01] DONE — Worker accepted the operational-vs-debug subconscious detail split
+Recorded the worker acceptance for the verified default-vs-debug contract split. The next scoped item is now the canonical-source cleanup design; no new implementation starts from this acceptance notice alone.
+
+## [2026-03-09 18:01] DONE — Prepared the subconscious canonical-source cleanup design
+Produced [subconscious-canonical-source-cleanup-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/subconscious-canonical-source-cleanup-design.md) as the narrow design-only deliverable for the next cleanup batch. The note enumerates each first-class subconscious object, names its canonical writer and canonical reader path, lists the remaining mirror/derived fields that still risk outranking canonical state (`stage`, generic `guidance*`, duplicated `runtimeMeta.upstream.*` and `letta.upstream.*` hook mirrors, and route-written timestamps/counters), and defines the minimum correction order. No code, hook, or UI changes were made in this batch.
+
+## [2026-03-09 18:53] DONE — Implemented the first subconscious canonical-source cleanup slice
+Patched [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js) only. Root cause: `buildSubconsciousUpstreamContract` was still letting mirrored `letta.upstream.*` / `runtimeMeta.upstream.*` hook payloads outrank the durable upstream truth under `state/subconscious/upstream-home/.letta/claude/`, and generic event `guidance*` compatibility fields were still being copied into canonical `conversation.current` state. The fix added durable session-file reads and made those files outrank the mirrors for `session.conversationId`, `session.sessionStateFile`, `session.sessionStartedAt`, `userPrompt.status`, `userPrompt.conversationId`, `userPrompt.lastProcessedIndexAfter`, `userPrompt.syncStateFile`, `preTool.status`, `preTool.conversationId`, `preTool.lastSeenMessageIdAfter`, `preTool.blockLabelCount`, `preTool.syncStateFile`, `stop.conversationId`, `stop.lastProcessedIndexAfter`, and `stop.syncStateFile`. It also stopped copying generic `guidancePreview`, `guidanceAt`, and `guidanceSource` into canonical conversation/detail state. Verification: `node --check backend-v2.js` passed; on the real isolated dev backend (`19095`), Yato stayed stable with `stage=upstream-pretool-lifecycle`, `SessionStart=started`, `UserPromptSubmit=sent`, `PreToolUse=no-updates`, `Stop=not-run`, and `conversation.current` no longer exposing `latestGuidancePreview`, `latestGuidanceAt`, or `latestGuidanceSource`; on an isolated poisoned temp runtime (`19097`) with stale mirrored upstream values forced into both `state/letta.json` and `state/subconscious/runtime.json`, the durable files still won and returned `session.status=started`, `session.conversationId=conv-50de54a3-f9af-4354-ab6f-51cc1c8e518a`, `userPrompt.status=sent`, `userPrompt.lastProcessedIndexAfter=1`, `preTool.status=seeded-baseline`, `preTool.lastSeenMessageIdAfter=message-564bfdf8-651e-4217-846b-cf9d2bc5acf1`, `preTool.blockLabelCount=6`, `stop.status=not-run`, and `stop.lastProcessedIndexAfter=1`. Hook scope and UI scope were intentionally unchanged.
+
+## [2026-03-09 18:57] DONE — Worker accepted the first canonical-source cleanup slice
+Recorded the worker acceptance for the first canonical cleanup slice and advanced the queued target to the next narrow batch: synthetic status and timestamp boundary cleanup. No new implementation started from this acceptance notice alone.
+
+## [2026-03-09 18:59] DONE — Designed the synthetic status/timestamp boundary cleanup slice
+Produced [subconscious-synthetic-status-timestamp-boundary-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/subconscious-synthetic-status-timestamp-boundary-design.md) as the required design-only note for the remaining synthetic layer. The note classifies residual fields into three groups: presentation-only summaries (`status`, `attempted` / `messageSent` / `injected`, and recomputed `blockLabelCount`), debug-only route reconstruction fields (`attemptedAt`, `messageSentAt`, `injectedAt`, `*Before` baselines, `newMessageCount`, `changedBlockCount`, `transcript*Count`, `toolName`), and remove/recompute fields (`checkedAt`, persisted synthetic status labels, and persisted route-written timing/counter mirrors). It also breaks the decision down by `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `Stop`, and defines the minimum cleanup order for the later implementation slice. No code, hook, or UI changes were made in this batch.
+
+## [2026-03-09 19:09] DONE — Implemented the synthetic status/timestamp cleanup slice
+Patched [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js) only. Root cause: the upstream detail contract and persisted mirror state were still carrying route-run timestamps and delta counters (`checkedAt`, `attemptedAt`, `messageSentAt`, `injectedAt`, `transcript*Count`, `newMessageCount`, `changedBlockCount`, `*Before` baselines, `toolName`) as if they were canonical subconscious object state. The fix introduced persistence stripping helpers for upstream mirror writes, stopped emitting those fields in `buildSubconsciousUpstreamContract()`, and kept the POST route response payloads intact so hook/runtime behavior stayed unchanged. It also continues to recompute presentation status from canonical files first, with mirrored status only as a summary fallback where the durable files do not encode the full outcome. Verification: `node --check backend-v2.js` passed; on an isolated backend against a copied Yato runtime (`19102`), `GET /api/subconscious/detail/Yato` stayed on the accepted upstream path with `stage=upstream-pretool-lifecycle`, `SessionStart=started`, `UserPromptSubmit=sent`, `PreToolUse=seeded-baseline`, and `Stop=not-run`, while both default and `?debug=1` detail no longer exposed `checkedAt`, route timing fields, or the moved delta-counter fields. On the same isolated runtime, fresh `session-start`, `user-prompt`, and `pretool` route calls still returned those timing/counter fields in their direct POST responses, but the written `state/letta.json` and `state/subconscious/runtime.json` upstream mirrors no longer persisted `checkedAt`, `messageSentAt`, `attemptedAt`, `injectedAt`, `transcriptLineCount`, `newMessageCount`, `changedBlockCount`, `lastProcessedIndexBefore`, `lastSeenMessageIdBefore`, or `toolName`. Material presentation change: because route-run delta counters are no longer canonical detail state, a cold-read `PreToolUse` status now falls back to the accepted presentation-only label `seeded-baseline` instead of retaining the prior stored `no-updates` mirror.
+
+## [2026-03-09 19:16] DONE — Corrected the live synthetic-field leak on served subconscious detail
+Worker rejection was accurate for the live dev backend: even after persistence cleanup, the served operational detail on `18190` still leaked synthetic fields from the route surface (`upstream.bootstrap.checkedAt`, `upstream.session.checkedAt`, `upstream.userPrompt.checkedAt/attemptedAt/messageSentAt/transcriptLineCount/lastProcessedIndexBefore`, `upstream.preTool.checkedAt/attemptedAt/newMessageCount/changedBlockCount/lastSeenMessageIdBefore`, `upstream.stop.transcriptMessageCount/newMessageCount`, and `conversation.current.latestGuidanceAt/latestGuidanceSource`). The narrow correction patched only [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js) again by extending `buildOperationalSubconsciousContract()` to strip those fields at serve time, then restarted the real `agentchat-dev-backend` tmux session on `18190`. Route-level verification on the live backend showed every rejected field now returns `null`/absent in default detail while the accepted upstream path remained stable: `stage=upstream-pretool-lifecycle`, `SessionStart=started`, `UserPromptSubmit=sent`, `PreToolUse=seeded-baseline`, and `Stop=not-run`. Privileged `?debug=1` on `18190` also no longer exposed the previously rejected timing/counter fields or `conversation.current.latestGuidanceAt/latestGuidanceSource`, so the served contract now matches the corrected slice boundary.
+
+## [2026-03-09 19:18] DONE — Worker accepted the corrected synthetic cleanup slice
+Recorded the worker acceptance for the corrected synthetic status/timestamp cleanup. The next scoped batch is the minimal supervisor design note; no implementation starts from this acceptance notice alone.
+
+## [2026-03-09 19:32] DONE — Prepared the minimal supervisor design note
+Produced [minimal-supervisor-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/minimal-supervisor-design.md) as the design-only deliverable for the next supervisor batch. The note stays aligned with the frozen supervisor bible: it defines the first-class `Task` object (`id`, `owner`, `status`, `updated_at`, `heartbeat_at`, `waiting_reason`, `waiting_until`), keeps task states limited to `active / waiting / blocked / done`, derives only `active / normal_wait / stalled_wait / suspected_eos` from declared task state plus timing, makes the trailing-heartbeat window explicit (`N = 5` heartbeat periods), and sets the runtime-profile direction for both primary-agent launch and supervisor launch with compatibility fallback to existing `model` and `extraArgs`. It also lists the existing supervisor routes and state that can remain untouched in the first implementation slice (`/api/supervisor/status`, `/api/supervisor/agents`, `/api/supervisor/agents/:name`, `/api/supervisor/control`, current web proxies, current stack-global control semantics, and no UI expansion). No code, hook, or UI changes were made in this batch.
+
+## [2026-03-09 19:56] DONE — Implemented minimal supervisor slice 1
+Patched the minimal supervisor slice across [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js), [server.js](/home/shisui/laplace/agent-chat/server.js), [supervisor/index.js](/home/shisui/laplace/agent-chat/supervisor/index.js), [supervisor/config.js](/home/shisui/laplace/agent-chat/supervisor/config.js), [supervisor/state.js](/home/shisui/laplace/agent-chat/supervisor/state.js), [lib/agent-home-v1.js](/home/shisui/laplace/agent-chat/lib/agent-home-v1.js), and [bin/agent-up](/home/shisui/laplace/agent-chat/bin/agent-up). The canonical per-agent control-plane object now carries `task` with exactly `id`, `owner`, `status`, `updated_at`, `heartbeat_at`, `waiting_reason`, and `waiting_until`, plus `runtimeProfile.primary/supervisor`. Root cause removed: the old supervisor path was still a free-form LLM judge gated on API-key presence, so it could not satisfy the accepted state-machine contract or run as a truthful minimal supervisor when no LLM key was configured. Supervisor derivation now reads only the control-plane `Task` object and classifies only `active`, `normal_wait`, `stalled_wait`, or `suspected_eos`; `blocked` remains a task status and maps to `stalled_wait` because it requires attention but is not safe waiting. The bounded trailing-heartbeat window is explicit in config/state (`heartbeatTtlMs`, `trailingHeartbeatPeriods`, `trailingWindowMs`), and the existing `/api/supervisor/status`, `/api/supervisor/agents`, `/api/supervisor/agents/:name`, and `/api/supervisor/control` route names stayed unchanged. Canonical writer/reader boundary after this slice: for live backend agent state, [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js) `/api/agents` persists `task` and `runtimeProfile` into runtime `data/agents.json`, and the supervisor service reads them there; for v1 homes, [server.js](/home/shisui/laplace/agent-chat/server.js) `PATCH /api/agents/:name/home-metadata` persists the same objects into the v1 manifest `agent.json` and the compatibility mirror `data/agents/<name>/meta.json`, then syncs backend agent state; [bin/agent-up](/home/shisui/laplace/agent-chat/bin/agent-up) now reads `runtimeProfile.primary.framework/model/extraArgs` for primary launch and exports supervisor-launch compatibility env from `runtimeProfile.supervisor`; [supervisor/config.js](/home/shisui/laplace/agent-chat/supervisor/config.js) now reads `AGENTCHAT_RUNTIME_PROFILE_SUPERVISOR_JSON` when a supervisor process is launched in an agent-shaped environment. Verification: syntax checks passed for all touched files; an isolated backend/web proof on `19114/19115` confirmed `active -> normal_wait -> stalled_wait -> suspected_eos` transitions through the unchanged supervisor routes and persisted `task` / `runtimeProfile` through both backend control-plane state and v1 manifest/meta writer files; a real stubbed `agent-up` proof confirmed `runtimeProfile.primary` overrode legacy `type/model/extraArgs` at launch and `runtimeProfile.supervisor` exported `SUPERVISOR_LLM_PROVIDER=qwen`, `SUPERVISOR_LLM_MODEL=qwen-plus`, `AGENTCHAT_SUPERVISOR_REASONING_PROFILE=low`, `AGENTCHAT_SUPERVISOR_FRAMEWORK=codex`, `AGENTCHAT_SUPERVISOR_EXTRA_ARGS=--supervisor-profile-flag`, plus both runtime-profile JSON envs. A proof-found launcher bug was fixed in the same batch: the first implementation used a heredoc Python extraction path that left `AGENTCHAT_RUNTIME_PROFILE_PRIMARY_JSON` and `AGENTCHAT_RUNTIME_PROFILE_SUPERVISOR_JSON` empty even though other supervisor env fields were present; replacing that extraction with direct `python3 -c` JSON reads closed the gap and made the launch proof pass.
+
+## [2026-03-09 20:14] DONE — Worker accepted minimal supervisor slice 1
+Recorded the worker acceptance for the verified minimal supervisor slice 1 implementation. The next scoped batch is the Task writer/workspace design note; no new implementation starts from this acceptance notice alone.
+
+## [2026-03-09 20:31] DONE — Prepared the Task writer/workspace design note
+Produced [task-writer-workspace-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/task-writer-workspace-design.md) as the design-only deliverable for the next minimal supervisor slice. The note stays narrow: it assigns canonical ownership for `task.id`, `heartbeat_at`, `waiting_reason` + `waiting_until`, and `done` to the primary agent-side task writer; preserves the current control-plane writer split (`backend-v2.js` `/api/agents` for live runtime state and `server.js` `/api/agents/:name/home-metadata` with `agent.json` canonical plus `meta.json` compatibility mirror for v1 homes); defines the sibling `supervisor/` workspace as an explicit agent workspace with its own `CLAUDE.md`, `AGENTS.md`, `docs/plan.md`, and `docs/progress.md` while explicitly forbidding a second hidden `Task` or `runtimeProfile` truth source there; records the accepted string-based `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}` schema and the existing launcher read paths (`bin/agent-up` and `supervisor/config.js`); and keeps the current supervisor route names stable. No code, UI, or hook changes were made in this batch.
+
+## [2026-03-09 20:50] DONE — Implemented the explicit task writer and supervisor workspace scaffold
+Patched [scripts/write-v1-agent-task.js](/home/shisui/laplace/agent-chat/scripts/write-v1-agent-task.js), [scripts/provision-v1-agent-home.js](/home/shisui/laplace/agent-chat/scripts/provision-v1-agent-home.js), [server.js](/home/shisui/laplace/agent-chat/server.js), [lib/agent-home-v1.js](/home/shisui/laplace/agent-chat/lib/agent-home-v1.js), [docs/workspace-claude-md-template.md](/home/shisui/laplace/agent-chat/docs/workspace-claude-md-template.md), [docs/workspace-agents-md-template.md](/home/shisui/laplace/agent-chat/docs/workspace-agents-md-template.md), [docs/workspace-supervisor-claude-template.md](/home/shisui/laplace/agent-chat/docs/workspace-supervisor-claude-template.md), [docs/workspace-supervisor-agents-template.md](/home/shisui/laplace/agent-chat/docs/workspace-supervisor-agents-template.md), and [docs/v1-agent-home-contract.md](/home/shisui/laplace/agent-chat/docs/v1-agent-home-contract.md). The primary workspace now gets a concrete `workdir/task-writer` wrapper that drives the existing canonical v1 home writer (`PATCH /api/agents/:name/home-metadata`) for `start`, `heartbeat`, `wait`, `resume`, and `done` task transitions instead of inventing a second `task.json`. Provisioning/reprovisioning now also creates a sibling `homeDir/supervisor/` workspace with its own `CLAUDE.md`, `AGENTS.md`, `docs/plan.md`, and `docs/progress.md`, while keeping it explicitly non-canonical for `task` and `runtimeProfile`.
+
+Two root causes were closed in the same batch:
+- reprovision was rebuilding `agent.json` without preserving existing `task` or `runtimeProfile`, so a workspace-scaffold update could silently wipe the accepted supervisor control-plane state for an existing v1 home
+- `syncBackendAgentHomeState()` only tried `PATCH /api/agents/:name`; fresh v1 homes have no backend row yet, so canonical task/runtime-profile writes stayed local to `agent.json` + `meta.json` and never reached backend/supervisor state until the sync path fell back to `POST /api/agents`
+
+Verification:
+- `node --check scripts/write-v1-agent-task.js`
+- `node --check scripts/provision-v1-agent-home.js`
+- `node --check lib/agent-home-v1.js`
+- `node --check server.js`
+- isolated proof on fresh v1 codex home `/tmp/agentchat-task-writer-proof-gFSGta` with backend/web on `19134/19135`
+- fresh home materialized:
+  - `workdir/task-writer`
+  - `supervisor/CLAUDE.md`
+  - `supervisor/AGENTS.md`
+  - `supervisor/docs/plan.md`
+  - `supervisor/docs/progress.md`
+- the supervisor scaffold contained no second `task.json` or runtime-profile file
+- real `task-writer` flow proved canonical transitions for `batch-beta`:
+  - `start -> active`
+  - `heartbeat` advanced `heartbeat_at`
+  - `wait` wrote `waiting_reason` + `waiting_until`
+  - `done` wrote final canonical `done`
+- after `done`, the same `task` object matched across:
+  - [agent.json](/tmp/agentchat-task-writer-proof-gFSGta/home/agents/agent_taskwriterprobe/agent.json)
+  - [meta.json](/tmp/agentchat-task-writer-proof-gFSGta/runtime/data/agents/TaskWriterProbe/meta.json)
+  - [agents.json](/tmp/agentchat-task-writer-proof-gFSGta/runtime/data/agents.json)
+- after reprovision, the accepted string-based `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}` also still matched across those same canonical surfaces
+- `GET /api/supervisor/agents/TaskWriterProbe?limit=1` reflected the real `waiting` task snapshot and `runtimeProfile`
+- existing supervisor route names remained stable and returned `200`:
+  - `/api/supervisor/status`
+  - `/api/supervisor/agents`
+  - `/api/supervisor/agents/TaskWriterProbe?limit=1`
+  - `/api/supervisor/control`
+
+## [2026-03-09 20:52] DONE — Worker accepted the task writer and supervisor workspace scaffold slice
+Recorded the worker acceptance for the verified task-writer/workspace implementation. The next scoped batch is the runtime-profile writer design note; no new implementation starts from this acceptance notice alone.
+
+## [2026-03-09 21:03] DONE — Prepared the runtime-profile writer / launch-selection design note
+Produced [runtime-profile-writer-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/runtime-profile-writer-design.md) as the design-only deliverable for the next minimal supervisor slice. The note keeps one control-plane model for `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`: live/non-v1 writes stay on `POST/PATCH /api/agents`, v1-home writes stay on `PATCH /api/agents/:name/home-metadata`, `agent.json` remains the canonical v1 file with mirrors only for compatibility/runtime visibility, and both `bin/agent-up` primary launch plus `supervisor/config.js` supervisor launch read the same persisted object with legacy `type/model/extraArgs` only as compatibility fallback when the canonical role object is absent. The note also freezes the non-goals for the next slice: no `workdir/runtime-profile.json`, no `supervisor/runtime-profile.json`, no launcher-owned writeback file, no route renames, and no UI or hook expansion. No code changes were made in this batch.
+
+## [2026-03-09 21:27] DONE — Implemented the explicit v1 runtime-profile writer slice
+Added [write-v1-agent-runtime-profile.js](/home/shisui/laplace/agent-chat/scripts/write-v1-agent-runtime-profile.js) as the explicit v1 runtime-profile writer surface. It is repo-owned, not provisioned into `workdir/` or `supervisor/`, and it updates canonical v1 runtime-profile state only by calling `PATCH /api/agents/:name/home-metadata` with the accepted `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}` shape. The writer supports role-scoped updates plus `--clear-primary` / `--clear-supervisor`, and it loads the current v1 manifest so partial updates merge into the existing canonical object instead of creating a second file.
+
+Verification:
+- `node --check scripts/write-v1-agent-runtime-profile.js`
+- isolated proof root: `/tmp/agentchat-runtime-profile-proof-mXwFeI`
+- isolated backend/web on `19138/19139`
+- canonical writer proof on fresh v1 home `ProfileWriterProbe`:
+  - [agent.json](/tmp/agentchat-runtime-profile-proof-mXwFeI/home/agents/agent_profilewriterprobe/agent.json), [meta.json](/tmp/agentchat-runtime-profile-proof-mXwFeI/runtime/data/agents/ProfileWriterProbe/meta.json), and [agents.json](/tmp/agentchat-runtime-profile-proof-mXwFeI/runtime/data/agents.json) all matched the written canonical object
+  - no new `runtime-profile.json` / `runtimeProfile.json` appeared under `workdir/` or `supervisor/`
+- primary launch precedence proof via stubbed `agent-up --fresh` + fake `tmux` log:
+  - with conflicting legacy top-level `type=claude`, `model=legacy-primary-model`, and `extraArgs=--legacy-primary-flag`, the launch command still used the canonical primary object: `codex --model canonical-primary-model --canonical-primary-flag`
+  - after clearing `runtimeProfile.primary`, the launch command fell back to the legacy fields: `claude --model legacy-fallback-model --legacy-fallback-flag`
+- supervisor launch/config precedence proof:
+  - `loadSupervisorConfig()` with canonical supervisor JSON plus conflicting `SUPERVISOR_LLM_PROVIDER=openai` / `SUPERVISOR_LLM_MODEL=gpt-4.1-mini` still resolved `provider=qwen`, `model=qwen-plus`
+  - with no canonical supervisor JSON, defaults resolved to `provider=deepseek`, `model=deepseek-chat`
+
+No UI expansion, no hook expansion, no new route, and no new file under `workdir/` or `supervisor/` were introduced in this slice.
+
+## [2026-03-09 21:31] DONE — Switched the supervisor Qwen default model to qwen3.5-plus
+Scoped the change to the supervisor default only after the user clarified `default supervisor`; I did not change subconscious or other Qwen defaults. Patched [supervisor/config.js](/home/shisui/laplace/agent-chat/supervisor/config.js) so `defaultModel('qwen')` now returns `qwen3.5-plus` instead of `qwen-plus`. Verification: `node --check supervisor/config.js`, plus a direct `loadSupervisorConfig()` proof with `SUPERVISOR_LLM_PROVIDER=qwen` and no explicit model now resolves `llm.model = qwen3.5-plus`, while an explicit `SUPERVISOR_LLM_MODEL=custom-qwen-model` still overrides the default as expected.
+
+## [2026-03-09 21:32] DONE — Worker accepted the explicit runtime-profile writer slice
+Recorded the worker acceptance for the runtime-profile writer implementation. The next scoped batch is the inbox-read gate design note; no implementation starts from this acceptance notice alone.
+
+## [2026-03-09 21:34] DONE — Prepared the inbox-read gate design note
+Produced [inbox-read-gate-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/inbox-read-gate-design.md) as a design-only deliverable for the framework-enforced inbox-read boundary. Root cause remains structural: the current master/stable hotfix only moves `check_inbox()` to the first visible instruction in backend/push-relay notifications, but the framework still does not persist a canonical pending gate or block outbound progress/reply actions until a real inbox read occurs. The note stays narrow: it defines the minimal canonical `inboxGate` state (`requiresInboxCheck`, `sourceMsgId`, `raisedAt`, `reason`), the acknowledgement event that clears it after a successful `check_inbox()` cursor advance, the executor boundary where the gate must run before outbound commentary/reply actions, and the exact difference from the prompt-only hotfix. No code, UI, hook, or task-system changes were made in this batch.
+
+## [2026-03-09 21:39] DONE — Implemented inbox-read gate slice 1
+Patched [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js) only to turn the accepted inbox-read boundary into real framework state and enforcement. Root cause removed: the backend already tracked advisory delivery timing (`lastPushNeedsInboxCheck`, `lastInboxCheckAt`, `lastAgentOutboundAt`) for rule alerts, but there was no canonical pending gate and no enforcement on outbound agent messages, so an agent could still send progress/reply traffic after reading only the notification title. The slice stayed narrow: `agent_runtime.json` now carries canonical `inboxGate` (`requiresInboxCheck`, `sourceMsgId`, `raisedAt`, `reason`) plus `inboxReadAck`; actionable `POST /api/runtime/push-delivered` raises the gate on successful delivery, `GET /api/inbox/:agent` clears it only when the pending `sourceMsgId` is actually consumed by real cursor advance, and `POST /api/messages` returns `409 inbox_check_required` for agent-sent outbound messages while the gate is pending. No UI, hook, or task-system changes were introduced.
+
+Verification:
+- `node --check backend-v2.js`
+- isolated backend proof on `19146` with runtime root `/tmp/agentchat-inbox-gate-proof-9oPb7I/runtime`
+- actionable flow proof for `Beta`:
+  - real unread request `msg_0001` from `Alpha` to `Beta`
+  - simulated successful actionable delivery via `POST /api/runtime/push-delivered`
+  - outbound `POST /api/messages` from `Beta` before inbox read returned `409` with `error: inbox_check_required` and the live `inboxGate`
+  - `GET /api/inbox/Beta` returned the unread request and advanced the inbox cursor
+  - the same outbound reply then succeeded with `ok: true`
+  - persisted runtime now shows `inboxGate.requiresInboxCheck = false` and `inboxReadAck.sourceMsgId = msg_0001`
+- non-actionable proof:
+  - later `single_inform` delivery for `msg_0003` left `inboxGate.requiresInboxCheck = false` and `lastPushNeedsInboxCheck = false`
+
+## [2026-03-09 21:40] DONE — Worker accepted inbox-read gate slice 1
+Recorded the worker acceptance for the inbox-read gate slice-1 implementation. The next scoped area is minimal supervisor follow-on work, but no new implementation starts from this acceptance notice alone.
+
+## [2026-03-09 22:02] DONE — Prepared the minimal supervisor waiting/trailing-heartbeat design note
+Produced [minimal-supervisor-waiting-trailing-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/minimal-supervisor-waiting-trailing-design.md) as a design-only deliverable for the next minimal supervisor slice. The note stays narrow and builds on the accepted task model already implemented in `supervisor/index.js`: it defines canonical `waiting_reason` and `waiting_until` usage on the primary task object, pins runtime idle/activity to an observational role only, specifies the bounded trailing-heartbeat bridge after the primary agent goes idle, distinguishes `normal_wait`, `stalled_wait`, and `suspected_eos` from the same canonical task source, and lists the minimum proof required for the later implementation slice. No code, UI, hook, or planner/task-orchestration changes were made in this batch.
+
+## [2026-03-09 22:05] DONE — Implemented the minimal supervisor waiting/trailing slice
+Patched [supervisor/index.js](/home/shisui/laplace/agent-chat/supervisor/index.js) only to refine the existing supervisor derivation path without changing the canonical task writer model, route names, UI, or hooks. Root cause removed: the accepted waiting/trailing design required safe waiting to remain a maintained canonical task declaration, but the existing derivation still treated any future `waiting_until` as `normal_wait` even if the waiting heartbeat had gone stale, and it did not distinguish runtime idle as an observational trailing-window input in the reasoning path. The refined derivation now requires both a valid future `waiting_until` and a fresh heartbeat for `normal_wait`, degrades stale maintained waiting to `stalled_wait`, reports malformed waiting declarations as `suspected_eos` with an explicit malformed-waiting reason, and uses runtime idle only to explain the bounded active trailing-heartbeat bridge rather than creating safe waiting.
+
+Verification:
+- `node --check supervisor/index.js`
+- direct proof against the real `SupervisorService.deriveObservation()` path with fixed timing and config inputs
+- six required cases now resolve as accepted:
+  - valid waiting -> `normal_wait`
+  - expired waiting -> `stalled_wait`
+  - malformed waiting -> `suspected_eos`
+  - trailing active-to-idle bridge -> `active` with explicit trailing-window reason
+  - active-to-wait transition inside trailing window -> `normal_wait`
+  - runtime idle alone does not create `normal_wait`
+
+## [2026-03-09 22:06] DONE — Worker accepted the minimal supervisor waiting/trailing slice
+Recorded the worker acceptance for the verified waiting/trailing implementation slice. The next scoped batch is the supervisor activation-lifecycle design note; no implementation starts from this acceptance notice alone.
+
+## [2026-03-09 22:24] DONE — Prepared the supervisor activation/lifecycle design note
+Produced [supervisor-activation-lifecycle-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/supervisor-activation-lifecycle-design.md) as a design-only deliverable for the next narrow supervisor slice. The note stays within the accepted minimal-supervisor model: it defines when the supervisor runtime is active vs idle relative to the primary task, reuses the bounded trailing-heartbeat model as an active sub-phase rather than a third state, explains how the sibling `supervisor/` workspace participates without becoming a second task/runtime-profile source, freezes canonical `runtimeProfile.supervisor` selection order for activation/lifecycle, and lists the minimum proof required for the later implementation slice. No code, UI, hook, or orchestration/planning changes were made in this batch.
+
+## [2026-03-09 22:30] DONE — Implemented the narrow supervisor activation/lifecycle slice
+Patched [supervisor/index.js](/home/shisui/laplace/agent-chat/supervisor/index.js), [supervisor/config.js](/home/shisui/laplace/agent-chat/supervisor/config.js), and [supervisor/state.js](/home/shisui/laplace/agent-chat/supervisor/state.js) to make the accepted activation/lifecycle model real without changing route names, canonical task/runtime-profile writers, UI, hooks, or planner/orchestration layers. Root cause removed: the accepted waiting/trailing classification model already existed, but the supervisor still had no separate runtime lifecycle state and no stable canonical runtime-profile selection for activation decisions, so idle-vs-active behavior and launch-source reporting were still implicit instead of control-plane backed.
+
+Implementation:
+- `supervisor/index.js`
+  - derives binary lifecycle (`active` / `idle`) alongside classification from the canonical `task` object plus the bounded trailing window
+  - persists lifecycle state/reason into supervisor state and exposes it through status, summaries, and detail
+  - keeps unresolved negative classifications (`stalled_wait`, `suspected_eos`) lifecycle-active, idles only on valid `normal_wait`, no-task, or done-after-tail
+- `supervisor/config.js`
+  - reads canonical runtime-profile JSON env exported by `agent-up`
+  - resolves supervisor model selection in strict order `runtimeProfile.supervisor` -> `runtimeProfile.primary` fallback -> env/default
+  - exposes `llm.profileSource` and the bounded trailing parameters used by lifecycle derivation
+- `supervisor/state.js`
+  - persists `classification`, `task`, `lastInputHash`, `trailingUntilAt`, and lifecycle state/reason so route surfaces stay stable across sweeps
+
+Verification:
+- `node --check supervisor/index.js`
+- `node --check supervisor/config.js`
+- `node --check supervisor/state.js`
+- proof root: `/tmp/agentchat-supervisor-lifecycle-proof-yX7LpE`
+- seven accepted proof cases passed against the real derivation/config/provision paths:
+  - active primary task keeps supervisor lifecycle `active`
+  - valid `normal_wait` idles supervisor lifecycle
+  - primary idle enters bounded trailing supervision and stays lifecycle `active`
+  - trailing expiry with no valid waiting/done does not silently idle and resolves `suspected_eos` + lifecycle `active`
+  - done eventually idles supervisor after the bounded tail
+  - sibling `supervisor/` workspace scaffolds correctly without creating `task.json` / `runtime-profile.json` shadow truth
+  - runtime-profile selection is stable and explicit: `runtimeProfile.supervisor` -> `runtimeProfile.primary-fallback` -> `env/default`
+
+## [2026-03-09 22:34] DONE — Corrected supervisor lifecycle truthfulness mismatches
+Patched [supervisor/index.js](/home/shisui/laplace/agent-chat/supervisor/index.js) only to correct the two worker-reported lifecycle truthfulness mismatches without changing routes, UI, hooks, or task/runtime-profile writers. Root cause removed: lifecycle derivation was checking `task.status === active` before honoring an already-negative trailing-expiry classification, so the lifecycle reason could still claim “the primary task is active” after the classification had flipped to `suspected_eos`; separately, the default no-task path seeded `classification = suspected_eos`, which created an internally contradictory `negative classification + idle lifecycle` pair.
+
+Fix:
+- negative classifications now outrank the generic active-task lifecycle reason, so trailing-expiry negative states report a negative-state lifecycle reason instead of an active-task reason
+- no-task semantics are now coherent: `classification = null`, lifecycle `idle`, and an idle reason that explicitly states there is no canonical task and no unresolved negative supervision state to monitor
+
+Verification:
+- `node --check supervisor/index.js`
+- focused proof root: `/tmp/agentchat-supervisor-lifecycle-fix-proof-cBQR7y`
+- worker-requested follow-up proof cases passed through the real `SupervisorService.deriveObservation()` and `SupervisorStateStore` paths:
+  - trailing-expiry negative state yields `classification = suspected_eos`, lifecycle `active`, and a persisted negative-state lifecycle reason
+  - no-task semantics now persist coherently as `classification = null`, lifecycle `idle`, and a non-contradictory no-task lifecycle reason
+
+## [2026-03-09 22:36] DONE — Worker accepted the supervisor lifecycle truthfulness correction
+Recorded the worker acceptance for the focused lifecycle truthfulness fix. The next scoped batch is the supervisor runtime-launch design note; no implementation starts from this acceptance notice alone.
+
+## [2026-03-09 22:53] DONE — Prepared the supervisor runtime-launch design note
+Produced [supervisor-runtime-launch-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/supervisor-runtime-launch-design.md) as the next design-only supervisor batch. The note stays narrow and defines only: how a real sibling supervisor runtime is launched or stopped from the accepted lifecycle state, how the sibling `supervisor/` workspace is used as cwd/home without becoming a second truth source, how canonical `runtimeProfile.supervisor` (with accepted primary/env fallback order) drives framework/provider/model/args for launch, how global supervisor enable plus lifecycle map to start / keep-alive / idle / stop decisions, and the minimum proof required for the later implementation slice. No code, UI, hook, or orchestration/planning changes were made in this batch.
+
+## [2026-03-09 23:04] DONE — Implemented the narrow supervisor runtime-launch slice
+Patched [supervisor/index.js](/home/shisui/laplace/agent-chat/supervisor/index.js) and [supervisor/state.js](/home/shisui/laplace/agent-chat/supervisor/state.js) to make supervisor runtime existence a real projection of the accepted lifecycle state without changing route names, canonical task/runtimeProfile writers, UI, hooks, or planner/orchestration scope. Root cause removed: supervisor lifecycle and runtime-profile selection were already derived truthfully, but there was still no real sibling runtime manager behind them, so lifecycle `active`/`idle` had no corresponding launched/stopped supervisor process and no persisted runtime-launch truth for the existing supervisor routes to report.
+
+Implementation:
+- `supervisor/index.js`
+  - added real sibling-runtime reconciliation driven only by lifecycle state
+  - launches deterministic tmux sessions named `supervisor-<agent>` in the v1 sibling workspace `<homeDir>/supervisor`
+  - keeps running runtimes alive without relaunch churn, stops them on lifecycle `idle`, and stops all known supervisor runtimes when the global supervisor control is disabled
+  - selects launch framework/provider/model/reasoning/extraArgs in the accepted order:
+    - `runtimeProfile.supervisor`
+    - `runtimeProfile.primary` fallback
+    - env/default
+  - threads explicit launch env, including `PATH`, into tmux so the runtime actually resolves `claude` / `codex` in the launched pane
+- `supervisor/state.js`
+  - persists `runtimeLaunch` metadata so existing supervisor status/detail routes can surface runtime-launch truth without route renames
+
+Verification:
+- `node --check supervisor/index.js`
+- `node --check supervisor/state.js`
+- full proof root: `/tmp/agentchat-supervisor-runtime-proof-SF91fo`
+- seven accepted proof cases passed on fresh v1 homes with stubbed `claude` / `codex` binaries under tmux:
+  - lifecycle-`active` starts a real sibling supervisor runtime
+  - lifecycle-`active` keep-alive is idempotent and does not relaunch
+  - valid `normal_wait` stops/suppresses runtime launch
+  - negative state keeps runtime alive
+  - no-task clean idle does not launch
+  - sibling `supervisor/` workspace remains non-canonical (`CLAUDE.md`/`AGENTS.md` only; no `task.json` or runtime-profile file)
+  - canonical runtime-profile launch selection stays stable:
+    - `runtimeProfile.supervisor` -> `claude` / `qwen3.5-plus`
+    - `runtimeProfile.primary-fallback` -> `codex` / `gpt-4.1-mini`
+    - `env/default` -> `claude` / `deepseek-chat`
+
+## [2026-03-09 23:05] DONE — Worker accepted the supervisor runtime-launch slice
+Recorded the worker acceptance for the verified supervisor runtime-launch implementation. The next scoped batch is the stable-merge readiness audit; no audit or implementation work starts from this acceptance notice alone.
+
+## [2026-03-09 23:07] DONE — Prepared the stable-merge readiness audit note
+Produced [stable-merge-readiness-audit.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/stable-merge-readiness-audit.md) as the next design-only architecture audit for the supervisor/subconscious/runtime-profile stack. The note stays architecture-first and records: the exact accepted baseline that is now safe, the remaining structural blockers before merging `master` into `stable`, blocker order by merge risk rather than implementation convenience, the recommended minimal next implementation slice, and explicit non-blockers that should not delay stable. The merge recommendation is still `do not merge yet`, with the highest-risk blocker identified as the missing final subconscious authority boundary between the upstream Letta path and the local transitional runtime. No code, UI, hook, or orchestration changes were made in this batch.
+
+## [2026-03-09 23:08] DONE — Worker accepted the stable-merge readiness audit
+Recorded the worker acceptance for the stable-merge readiness audit note. The next scoped batch is the subconscious authority-boundary design note; no design or implementation work starts from this acceptance notice alone.
+
+## [2026-03-09 23:10] DONE — Prepared the subconscious authority-boundary convergence design note
+Produced [subconscious-authority-boundary-convergence-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/subconscious-authority-boundary-convergence-design.md) as the next design-only architecture note for stable. The note resolves the missing authority rule identified by the stable-merge audit: stable subconscious intent should treat the upstream Letta path as the single canonical behavior path, keep manual guidance only as fallback/configuration in `state/letta.json`, and demote the local transitional runtime to compatibility/debug-only status rather than a co-equal subconscious contract. It also classifies compatibility-only and debug-only surfaces, defines what default operational detail must stop deriving from dual-path semantics, and picks the minimal next implementation slice as default detail/state derivation convergence around the upstream-authoritative object set. No code, UI, hook, or orchestration changes were made in this batch.
+
+## [2026-03-09 23:38] DONE — Implemented the minimal subconscious authority-boundary convergence slice
+Root cause: the default served subconscious detail and Agent Detail model were still synthesizing stable behavior status from mixed sources, so local runtime readiness and event-derived `guidance*` telemetry could implicitly stand in for the upstream-authoritative path. I fixed that narrowly in [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js) and [server.js](/home/shisui/laplace/agent-chat/server.js) by adding explicit `authority`, `fallback`, and `transitional` classifications to the operational subconscious contract, making upstream Letta durable state the only authoritative behavior summary, relabeling manual guidance as fallback-only, and demoting local runtime/memory/conversation surfaces to transitional compatibility/debug status. I also removed `lastInvocation` and `lastRuntimeGuidance` from the default served operational surface so local runtime behavior summaries no longer leak into stable-facing detail. Verification passed with `node --check backend-v2.js`, `node --check server.js`, and live route probes on the standard dev ports `18190/18184`: `GET /api/subconscious/detail/Yato` and the web proxy both now return `authority.status = active`, `fallback.status = none`, `transitional.runtimeStatus = degraded`, `manualGuidance.classification = fallback`, `runtime/memory/conversation.classification = transitional`, and no `lastInvocation` or `lastRuntimeGuidance` keys. The `/agents/Yato` detail source now renders `Authoritative Path`, `Fallback & Transitional`, and `Local Conversation Journal`, with the old merged `Guidance & Memory` operational section removed.
+
+## [2026-03-09 23:40] DONE — Corrected remaining transitional-internals leak in default subconscious detail
+Root cause: the first authority-boundary slice fixed the headline authority framing but still left stable-facing `GET /api/subconscious/detail/:name` serving local transitional object detail (`runtime.provider/model/endpoint/...`, memory retrieval metadata, conversation journal fields) and full `manualGuidance.text/preview`. I corrected that narrowly in [backend-v2.js](/home/shisui/laplace/agent-chat/backend-v2.js) and [server.js](/home/shisui/laplace/agent-chat/server.js) by collapsing default `runtime` to summary-only keys (`classification`, `desiredEnabled`, `invocationConfigured`, `disabledReason`), collapsing `memory` and `conversation` to `classification` only, and removing `manualGuidance.text/preview` from the default subconscious detail while preserving writable guidance access through [server.js](/home/shisui/laplace/agent-chat/server.js) `GET /api/agents/detail/:name` as `subconsciousGuidanceText` / `subconsciousGuidancePreview`. Verification passed with `node --check backend-v2.js`, `node --check server.js`, and live route proofs on `18190/18184`: both backend and web proxy now serve `manualGuidance` keys only as `classification/configured/role/source/updatedAt`, `runtime` keys only as `classification/desiredEnabled/disabledReason/invocationConfigured`, `memory` and `conversation` as `classification` only, and still omit `lastInvocation` plus `lastRuntimeGuidance`; the writable settings/detail route still exposes `subconsciousGuidanceText` and `subconsciousGuidancePreview`.
+
+## [2026-03-09 23:44] DONE — Prepared the post-authority stable-readiness delta audit
+Produced [post-authority-stable-readiness-delta-audit.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/post-authority-stable-readiness-delta-audit.md) as the architecture-first follow-on to the earlier stable-merge audit. The note updates the merge picture now that subconscious authority convergence is accepted: it explicitly closes the old top blocker around dual-path subconscious authority, separates the remaining structural blockers from non-blockers, and narrows the new blocker set to the duplicate persistence/mirror boundary, supervisor runtime operational ownership contract, and the final post-convergence maturity-classification decision. It also recommends the next highest-value slice as making the v1 compatibility-mirror boundary explicit before any `master -> stable` merge decision. No code, UI, hook, or orchestration changes were made in this batch.
+
+## [2026-03-09 23:45] DONE — Worker accepted the post-authority stable-readiness delta audit
+Recorded the worker acceptance for the post-authority stable-readiness delta audit. The next scoped batch is the v1 compatibility-mirror boundary design note; no design or implementation work starts from this acceptance notice alone.
+
+## [2026-03-10 00:02] DONE — Prepared the v1 compatibility-mirror boundary design note
+Produced [v1-mirror-boundary-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/v1-mirror-boundary-design.md) as the next architecture-first stable-readiness note. The note makes the duplicate-persistence boundary explicit across `agent.json`, `data/agents/<name>/meta.json`, and backend row sync: it freezes `agent.json` plus `PATCH /api/agents/:name/home-metadata` as the canonical v1 writer path, treats backend row state as a runtime-serving derivative projection for v1-owned fields, and recommends demoting `meta.json` to a strict compatibility export only rather than freezing it as a required long-term peer surface. It also defines allowed mirror responsibilities, forbidden mirror responsibilities, and the minimum follow-on slice as auditing remaining mirror-first readers. No code, UI, hook, or orchestration changes were made in this batch.
+
+## [2026-03-10 00:08] DONE — Enforced manifest-first reads for the v1 compatibility mirror slice
+Patched [lib/agent-home-v1.js](/home/shisui/laplace/agent-chat/lib/agent-home-v1.js) and [server.js](/home/shisui/laplace/agent-chat/server.js) to enforce the accepted mirror boundary. Root cause: `resolveV1ManifestForAgent()` still trusted `meta.homeDir` before canonical name-based manifest discovery, and the unified detail route was leaving backend-row or `meta.json` values in place for v1-owned `task`, `runtimeProfile`, `managedProjects`, and home/workdir/state paths unless those fields were missing. The fix now resolves the v1 manifest by agent name first, allows `meta.homeDir` only as a same-agent fallback, and makes `/api/agents/detail/:name` reapply manifest-owned fields as canonical overrides whenever a v1 manifest exists. Verification: `node --check lib/agent-home-v1.js` and `node --check server.js` passed; a direct resolver proof against `/tmp/agentchat-mirror-proof-E0HhTy` showed stale `meta.homeDir`, stale mirror `task`, and stale mirror `runtimeProfile` no longer outrank the manifest; isolated backend/web proof on `19198/19199` showed `GET /api/agents/detail/ReaderProbe` serving manifest-owned `homeDir`, `workdir`, `stateDir`, `task.id=manifest-task`, `runtimeProfile.primary.model=manifest-model`, `managedProjects=[]`, and `owner=manifest-owner` despite stale backend-row and compatibility-mirror fixtures; and `GET /api/agents/ReaderProbe/projects` resolved the canonical manifest path instead of the stale mirror path. Scope stayed narrow: no UI changes, no hook changes, no generic refactor.
+
+## [2026-03-10 00:10] DONE — Worker accepted the mirror reader-enforcement slice
+Recorded the worker acceptance for the manifest-first mirror-reader enforcement slice. The next scoped batch is the supervisor runtime ownership contract design note; no implementation starts from this acceptance notice alone.
+
+## [2026-03-10 00:12] DONE — Prepared the supervisor runtime ownership contract design note
+Produced [supervisor-runtime-ownership-contract-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/supervisor-runtime-ownership-contract-design.md) as the next architecture-first stable-readiness note. The note freezes one supported stable deployment shape for sibling supervisor runtimes: same-host, tmux-backed, launched by the supervisor service into `<homeDir>/supervisor`, with framework selection coming only from canonical `runtimeProfile.supervisor` or its accepted fallback chain. It also makes ownership explicit across four boundaries: host/operator owns installed binaries, PATH prerequisites, tmux availability, and credential env; the supervisor service owns lifecycle-driven launch/stop decisions, explicit launch env construction, and observational `runtimeLaunch` state; the sibling runtime consumes that env/profile but does not become a second truth source; and canonical task/runtime-profile state remains on the shared control plane. The note further freezes launch-failure semantics so missing binary, missing workspace, missing credential env, unsupported framework, and tmux launch failures remain operational `runtimeLaunch` failures instead of mutating task/lifecycle truth. No code, UI, hook, or orchestration changes were made in this batch.
+
+## [2026-03-10 00:28] DONE — Worker accepted the supervisor runtime ownership design note
+Recorded the worker acceptance for the supervisor runtime ownership contract design note. The next scoped batch is the narrow supervisor runtime failure-taxonomy slice; no implementation starts from this acceptance notice alone.
+
+## [2026-03-10 00:52] DONE — Implemented the supervisor runtime failure-taxonomy slice
+Patched [supervisor/index.js](/home/shisui/laplace/agent-chat/supervisor/index.js) and [supervisor/config.js](/home/shisui/laplace/agent-chat/supervisor/config.js) to make the accepted supervisor runtime failure taxonomy explicit without changing lifecycle truth. Root cause: the existing launch path collapsed all operational failures into generic `launch-failed`, and a proof-found bug in `buildLaunchSelection()` silently normalized an explicit invalid `runtimeProfile.supervisor.framework` back to default `claude`, which made the `unsupported-framework` class impossible to observe. The fix keeps `runtimeLaunch.status = launch-failed` for compatibility but adds explicit `runtimeLaunch.failureType`, `binaryName`, and `requiredCredentialEnv`, preserves explicit unsupported frameworks through launch selection, and distinguishes `missing-workspace`, `unsupported-framework`, `missing-binary`, `missing-credential-env`, and `tmux-launch-failed` before/at tmux launch. Verification: `node --check supervisor/index.js` and `node --check supervisor/config.js` passed; route-level proof on isolated backend `19221` with constrained PATH showed `UnsupportedFramework -> unsupported-framework`, `MissingWorkspace -> missing-workspace`, and `MissingBinary -> missing-binary` while all three kept `classification=active` and `lifecycleState=active`; isolated backend `19222` with no `tmux` on PATH showed `TmuxLaunchFailed -> tmux-launch-failed` with `classification=active` and `lifecycleState=active`; isolated backend `19223` with `SUPERVISOR_LLM_KEY_ENV=REQUIRED_MISSING_KEY` and no such env set showed `MissingCredentialEnv -> missing-credential-env` with `requiredCredentialEnv=REQUIRED_MISSING_KEY` and unchanged `classification=active` / `lifecycleState=active`. Scope stayed narrow: no UI changes, no hook changes, no broader supervisor feature work.
+
+## [2026-03-10 00:54] DONE — Worker accepted the supervisor runtime failure taxonomy slice
+Recorded the worker acceptance for the supervisor runtime failure-taxonomy slice. The next scoped batch is the maturity-classification design note; no implementation starts from this acceptance notice alone.
+
+## [2026-03-10 00:57] DONE — Prepared the post-convergence maturity classification note
+Produced [post-convergence-maturity-classification.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/post-convergence-maturity-classification.md) as the design-only follow-on to the stable-readiness and post-authority audits. The note classifies the current accepted branch into `stable`, `transitional`, and `debug-only` surfaces across the control-plane, supervisor runtime, and subconscious stack. It treats as stable: canonical `task`/`runtimeProfile` control-plane truth, supervisor classification/lifecycle, the supported same-host tmux-backed supervisor runtime shape plus explicit failure taxonomy, the upstream-authoritative subconscious default operational surface, the accepted upstream-backed subconscious slices, and the inbox-read gate. It treats as transitional: the v1 compatibility mirror, backend row state as derivative for v1-owned fields, the local subconscious runtime/memory/journal family, and manual guidance in its fallback/config role. It treats privileged subconscious internals and deep host/runtime troubleshooting evidence as debug-only. Based on the accepted mirror-boundary enforcement, supervisor ownership/failure-taxonomy work, and subconscious authority convergence, the note concludes that no explicit structural blocker remains for `master -> stable` if stable accepts these maturity labels as the contract; the remaining order is release-hygiene only, not another mandatory architecture slice. No code, UI, or hook changes were made in this batch.
+
+## [2026-03-10 01:01] DONE — Confirmed final merge-readiness against the accepted maturity contract
+Produced [final-merge-readiness-confirmation.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/final-merge-readiness-confirmation.md) as the final design/audit pass before `master -> stable`. The confirmation checked current default routes/surfaces against the accepted `stable / transitional / debug-only` split instead of reopening architecture: `GET /api/subconscious/detail/Yato` on backend `18190` and web `18184` still show upstream-authoritative default behavior plus fallback/transitional classifications only; `GET /api/subconscious/detail/Yato?debug=1` still gates debug-only runtime/upstream path internals and manual guidance text behind privileged debug access; `GET /api/agents/detail/Yato` on `18184` still carries writable guidance text only on the explicit control-plane route; `GET /agents/Yato` still frames the page as `Authoritative Path`, `Fallback & Transitional`, and `Local Conversation Journal` rather than old dual-path headline sections; and `GET /api/supervisor/agents/Yato?limit=1` on both backend and web still keeps `runtimeLaunch` observational and subordinate to canonical lifecycle truth. Based on those route confirmations plus the earlier accepted mirror-boundary enforcement, supervisor ownership/failure-taxonomy work, and maturity classification, the note concludes that no explicit structural blocker remains before `master -> stable`; the remaining work is merge-execution hygiene only, not another mandatory architecture slice. No code, UI, or hook changes were made in this batch.
+
+## [2026-03-10 01:16] DONE — Worker accepted the final merge-readiness confirmation
+Recorded the worker acceptance for the final merge-readiness confirmation. The next scoped batch is merge-execution hygiene; no merge action starts from this acceptance notice alone.
+
+## [2026-03-10 01:33] DONE — Prepared the stable merge-execution hygiene plan
+Produced [stable-merge-execution-hygiene-plan.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/stable-merge-execution-hygiene-plan.md) as the final design/audit-only follow-on to the accepted merge-readiness confirmation. The note stays strictly within the worker scope: it defines the final human/operator sanity pass against the accepted maturity contract, the branch choreography and merge sequence for `master -> stable`, the required stable-update and release-note obligations, and the minimum cleanup that must remain explicit post-merge work rather than silently reopening merge gating. It also freezes the decision rule that only a newly proven structural mismatch should stop the merge; otherwise the remaining work is execution hygiene only. No code, UI, hook, or architecture changes were made in this batch.
+
+## [2026-03-10 01:35] DONE — Worker accepted the merge-execution hygiene plan
+Recorded the worker acceptance for the stable merge-execution hygiene plan. The branch is now explicitly parked for operator-owned merge scope; no implementation or merge action starts from this acceptance notice alone.
