@@ -2018,6 +2018,11 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Re-scoped `agentchat-develop` back to the only active line: prove whether the remaining timeout is still owned by local-activity sweep after slice-2, or provide exact route/function-chain attribution if ownership has moved.
 - Added a fresh self-time reminder (`#2222`) so this residual does not silently stall behind stale reminder wording.
 
+## [2026-03-11 00:11] DONE — accepted MCP-session-resolution as the next exact owner inside the live Matrix timeout residual
+- Read `agentchat-develop`'s formal handoff and accepted the narrowing that the remaining live Matrix timeout residual is still sweep-owned after slice-2, but no longer primarily pane-capture-owned.
+- The accepted exact residual chain is now: `sweepLocalActivityDurations()` -> `getLocalMcpSessionSet(true, paneMetadataSnapshot)` -> `collectLocalMcpSessions(paneMetadataSnapshot)` -> `pgrep -f "node.*mcp-server.js"` -> per-pid `ps -o tty=` resolution -> tty-to-session mapping through the shared pane metadata snapshot.
+- This is specific enough to move from diagnosis back into the next smallest implementation slice: batch tty resolution while preserving current MCP truth semantics.
+
 ## [2026-03-10 23:58] PARTIAL — queued the Agent Detail task/Internals follow-on and routed it to Yato via tmux
 - Added the UI follow-on to the worker queue: make Agent Detail expose canonical task visibility/editing and show `AGENTS.md`, `plan.md`, and `progress.md` tails under `Internals`.
 - Checked current control-plane reachability before delegation: `Yato` still has a live tmux session, but the current control-plane surface does not expose a schedulable `Yato` agent object on the active backend path, so I did not block the task on a dead message route.
