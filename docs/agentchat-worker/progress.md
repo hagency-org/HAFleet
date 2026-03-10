@@ -2046,3 +2046,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Turned the earlier metadata-field queue item into a durable contract: `Guidance` will be the canonical human-authored intent surface shared by agent/supervisor/subconscious, while `CLAUDE.md` remains the workflow/behavior contract.
 - `Owner` is now treated as a first-class ownership field that should be visible both to the agent and to other inspectors; `Identity` is the short one-line external-facing description of the agent for status/listing surfaces.
 - `Project Scope` and `Human Notes` remain queued for removal because they are low-signal free-text fields without stable behavioral semantics.
+## [2026-03-11 03:40] DONE — clarified current supervisor execution model and discovered live status/config mismatch
+- Verified that current supervisor classification is rule-based inside `SupervisorService.evaluateOne()` and does not make LLM API calls; emitted supervisor events still carry `llm: null`.
+- Verified that current subconscious injection remains the only message-injection path (`UserPromptSubmit` / `PreToolUse` additionalContext). Supervisor does not inject guidance into the primary agent path today.
+- Verified live and dev process envs on the actual listening backend PIDs (`8090` -> PID 732458, `18190` -> PID 1916785) both export `SUPERVISOR_ENABLED=false`.
+- Verified `/api/supervisor/status` still reports inconsistent live state (`enabled=true`, advancing `lastSweepAt`) despite the live backend env advertising `SUPERVISOR_ENABLED=false`; this is a supervisor truth/config drift bug and should be treated as a separate follow-up.
