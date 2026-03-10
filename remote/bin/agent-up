@@ -10,7 +10,7 @@ fi
 # agent-up — Quick agent launcher with resume support
 #
 # Usage:
-#   agent-up <name> [path] [claude|codex] [--fresh] [--attach] [--model <model>] [--extra-args "<args>"]
+#   agent-up <name> [path] [claude|codex] [--fresh] [--attach] [--allow-shared-workspace] [--model <model>] [--extra-args "<args>"]
 #
 # If path is omitted, reads from saved meta.json (previous agent-down).
 # If --fresh is not set, resume-id is required for strict resume (no silent fallback).
@@ -48,7 +48,17 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
-BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:8090}"
+BACKEND_PORT_RAW="${AGENT_CHAT_BACKEND_PORT:-8090}"
+if [[ "$BACKEND_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT_RAW" -gt 0 ]; then
+  BACKEND_PORT="$BACKEND_PORT_RAW"
+else
+  BACKEND_PORT="8090"
+fi
+BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:$BACKEND_PORT}"
+MCP_SERVER_NAME="${AGENT_CHAT_MCP_SERVER_NAME:-agent-chat}"
+if [ -z "${MCP_SERVER_NAME// }" ]; then
+  MCP_SERVER_NAME="agent-chat"
+fi
 SERVER_ID="${AGENT_CHAT_SERVER:-}"
 API_TOKEN="${API_TOKEN:-}"
 AGENT_SCOPE_ENABLE_RAW="${AGENT_SCOPE_ENABLE:-1}"
@@ -62,13 +72,14 @@ AUTH_HEADER=""
 
 usage() {
   cat <<'USAGE'
-Usage: agent-up <name> [path] [claude|codex] [--fresh] [--attach] [--model <model>] [--extra-args "<args>"]
+Usage: agent-up <name> [path] [claude|codex] [--fresh] [--attach] [--allow-shared-workspace] [--model <model>] [--extra-args "<args>"]
 
   name         tmux session name / agent name
   path         working directory (optional if previously saved)
   type         claude (default) or codex
   --fresh      ignore saved resume ID, start a new session
   --attach     attach to the session after creating it
+  --allow-shared-workspace allow launching when another agent already uses the same path
   --model      model name passed to claude/codex at startup
   --extra-args additional raw startup args passed to claude/codex
 USAGE
@@ -344,6 +355,7 @@ TMUX_PANE_TARGET="=${NAME}:0.0"
 
 FRESH=false
 ATTACH=false
+ALLOW_SHARED_WORKSPACE=false
 AGENT_PATH=""
 TYPE=""
 MODEL=""
@@ -357,6 +369,10 @@ while [ $# -gt 0 ]; do
       ;;
     --attach)
       ATTACH=true
+      shift
+      ;;
+    --allow-shared-workspace)
+      ALLOW_SHARED_WORKSPACE=true
       shift
       ;;
     --model)
@@ -442,6 +458,65 @@ if [ "$TYPE" != "claude" ] && [ "$TYPE" != "codex" ]; then
 fi
 
 run_update_check
+
+normalize_real_path() {
+  local p="$1"
+  python3 - "$p" <<'PY'
+import os
+import sys
+
+raw = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
+if not raw:
+    print("")
+    raise SystemExit(0)
+print(os.path.realpath(raw))
+PY
+}
+
+find_workspace_conflicts() {
+  local expected="$1"
+  local sessions s pane_path pane_real conflicts
+  conflicts=""
+  sessions="$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)"
+  [ -n "$sessions" ] || return 0
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    [ "$s" = "$NAME" ] && continue
+    pane_path="$(tmux display-message -p -t "=${s}:0.0" "#{pane_current_path}" 2>/dev/null || true)"
+    [ -n "$pane_path" ] || continue
+    pane_real="$(normalize_real_path "$pane_path")"
+    if [ "$pane_real" = "$expected" ]; then
+      conflicts="${conflicts}${s}"$'\n'
+    fi
+  done <<< "$sessions"
+  printf '%s' "$conflicts"
+}
+
+enforce_workspace_uniqueness() {
+  local expected="$1"
+  local conflicts
+  conflicts="$(find_workspace_conflicts "$expected")"
+  [ -n "$conflicts" ] || return 0
+  if [ "$ALLOW_SHARED_WORKSPACE" = true ]; then
+    echo "Warning: shared workspace allowed for '$NAME' at '$expected'." >&2
+    echo "  Existing sessions:" >&2
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      echo "    - $line" >&2
+    done <<< "$conflicts"
+    return 0
+  fi
+  echo "Error: workspace path '$expected' is already used by other tmux agent session(s)." >&2
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    echo "  - $line" >&2
+  done <<< "$conflicts"
+  echo "Refusing launch to prevent cross-agent context bleed." >&2
+  echo "Fix options:" >&2
+  echo "  1) Launch with a different path." >&2
+  echo "  2) Pass --allow-shared-workspace if sharing is intentional." >&2
+  exit 1
+}
 
 claude_project_dir_for_path() {
   local p="$1"
@@ -739,7 +814,9 @@ capture_resume_id_background() {
   local kind="$1"
   local baseline_file="${2:-}"
   (
-    # If launcher command already failed back to shell, do not steal another session's resume-id.
+    local skip_pane_capture="0"
+    # If launcher command is still at shell prompt, skip pane-text capture to avoid stealing
+    # unrelated resume hints. Fall back to strict codex session-file matching instead.
     if [ "$kind" = "codex" ]; then
       sleep 2
       local pane_cmd
@@ -747,19 +824,26 @@ capture_resume_id_background() {
       case "$pane_cmd" in
         codex|node) ;;
         bash|zsh|sh|fish|nu|'')
-          [ -n "$baseline_file" ] && rm -f "$baseline_file" || true
-          exit 0
+          skip_pane_capture="1"
           ;;
       esac
     fi
-    if capture_resume_id_from_pane 150; then
+    if [ "$skip_pane_capture" = "0" ] && capture_resume_id_from_pane 150; then
       [ -n "$baseline_file" ] && rm -f "$baseline_file" || true
       exit 0
     fi
     if [ "$kind" = "claude" ]; then
       capture_resume_id_from_claude_files || true
     else
-      capture_resume_id_from_codex_files "$baseline_file" || true
+      local i
+      for ((i = 0; i < 180; i++)); do
+        if capture_resume_id_from_codex_files "$baseline_file"; then
+          [ -n "$baseline_file" ] && rm -f "$baseline_file" || true
+          exit 0
+        fi
+        capture_guard_matches || break
+        sleep 1
+      done
     fi
     [ -n "$baseline_file" ] && rm -f "$baseline_file" || true
   ) &
@@ -898,6 +982,8 @@ if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
   fi
 fi
 
+enforce_workspace_uniqueness "$AGENT_PATH"
+
 # ── Save meta ─────────────────────────────────────────────────────────
 mkdir -p "$AGENT_DATA"
 mkdir -p "$TMP_RUNTIME_DIR"
@@ -974,7 +1060,7 @@ fi
 register_backend_agent
 
 # ── Build init prompt for fresh starts ────────────────────────────────
-INIT_PROMPT="Your name is ${NAME}. You have an MCP tool server called 'agent-chat' for communicating with other agents and humans. Key tools: check_inbox() to read messages, send_message(to, summary, full) to DM, post(group, summary, full, mentions) for group messages, whoami() to see your identity and available agents/groups. Check your inbox now to see if there are any messages for you."
+INIT_PROMPT="Your name is ${NAME}. You have an MCP tool server called '${MCP_SERVER_NAME}' for communicating with other agents and humans. Key tools: check_inbox() to read messages, send_message(to, summary, full) to DM, post(group, summary, full, mentions) for group messages, whoami() to see your identity and available agents/groups. Check your inbox now to see if there are any messages for you."
 CLAUDE_MODE_GUARD="Critical runtime rule: do not enter Plan mode or Select mode in this multi-agent tmux environment, because interactive mode switching cannot be completed. Stay in default mode and continue execution directly. Save this rule in memory and follow it for the whole session."
 
 # ── Launch AI ─────────────────────────────────────────────────────────
@@ -1013,7 +1099,17 @@ elif [ "$TYPE" = "codex" ]; then
     sleep 5
     tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"
     tmux send-keys -t "$TMUX_PANE_TARGET" Enter
-    capture_resume_id_background "codex" "$CODEX_BASELINE_FILE"
+    # Keep this in foreground for codex to avoid losing resume capture on shell exit/reboot.
+    if ! capture_resume_id_from_pane 12; then
+      i=0
+      for ((i = 0; i < 24; i++)); do
+        if capture_resume_id_from_codex_files "$CODEX_BASELINE_FILE"; then
+          break
+        fi
+        sleep 1
+      done
+    fi
+    rm -f "$CODEX_BASELINE_FILE" >/dev/null 2>&1 || true
   fi
 fi
 

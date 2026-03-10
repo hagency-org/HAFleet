@@ -120,6 +120,11 @@ Central API server. All data lives here.
 | GET | `/api/supervisor/status` | Supervisor runtime/config status |
 | GET | `/api/supervisor/agents` | Supervisor summary for all audited agents |
 | GET | `/api/supervisor/agents/:name` | Supervisor detail timeline for one agent |
+| GET | `/api/supervisor/control` | Supervisor runtime control state (enabled + allowlist) |
+| POST | `/api/supervisor/control` | Update supervisor runtime control (`enabled`, `allowedAgents`) |
+| POST | `/api/subconscious/events` | Ingest Claude subconscious hook events |
+| GET | `/api/subconscious/events` | List subconscious events (optional `agent`, `limit`) |
+| GET | `/api/subconscious/events/:name` | List subconscious events for one agent |
 
 ### server.js (port 8084)
 
@@ -190,7 +195,8 @@ Unified CLI that dispatches to subcommands. Legacy commands (`agent-up`, `agent-
 
 ```bash
 # Agent lifecycle
-agentchat up <name> <path> [claude|codex] [--fresh] [--attach] [--model <m>]
+agentchat up <name> <path> [claude|codex] [--fresh] [--attach] [--allow-shared-workspace] [--model <m>]
+agentchat up-v1 <name> [claude|codex] [--project <path>] [--project-mode copy|symlink] [--fresh] [--attach]
 agentchat down <name> [--kill] [--timeout <sec>]
 agentchat ls
 
@@ -226,6 +232,7 @@ agentchat prune-agents [--older-than-days <n>] [--apply]
 | Script | Purpose |
 |--------|---------|
 | `agent-up` | Launch agent in tmux with MCP, register with backend |
+| `agent-up-v1` | Provision v1 agent-home layout and launch via `agent-up` |
 | `agent-down` | Graceful agent shutdown (archive session, kill tmux) |
 | `agent-ls` | List agents with status from backend |
 | `agent-send` | Queue message for tmux delivery (with `--force` for immediate) |
@@ -237,6 +244,7 @@ agentchat prune-agents [--older-than-days <n>] [--apply]
 | `agentchat-sync-skills` | Sync skill symlinks into `~/.codex/` and `~/.claude/` |
 | `agentchat-prune-agents` | Prune stale offline agent records |
 | `scripts/audit-agent-docs.js` | Validate each agent workspace docs (`agents.md` role/boundaries + `plan.md` current) |
+| `scripts/configure-v1-subconscious.js` | Install/merge/remove v1 Claude subconscious hook runtime for one agent home |
 | `agentchat-autostart.sh` | Auto-start agents on boot |
 | `scripts/agentchat-stable-autodeploy.sh` | Poll `origin/stable` in live folder and auto-restart local services on update |
 | `check-mcp` | Verify MCP server is configured and working |
@@ -258,13 +266,52 @@ agentchat prune-agents [--older-than-days <n>] [--apply]
 | `server-ssh.json` | SSH config for remote tmux capture |
 | `system-info.jsonl` | System info event log |
 | `.msg_counter` | Message ID counter |
-| `agents/` | Per-agent metadata (meta.json, resume-id) |
+| `agents/` | Legacy compatibility metadata (`meta.json`, `resume-id`) |
 | `supervisor_state.json` | Supervisor per-agent consecutive-state snapshot |
 | `matrix/bridge-state.json` | Bridge state (tokens, room maps, avatars) |
 | `matrix/media/` | Cached media files from Matrix |
 | `message-attachments/` | Staged message attachments |
 | `mcp-media-cache/` | Per-agent media cache for MCP |
 | `logs/supervisor.jsonl` | Supervisor event timeline log (jsonl) |
+| `subconscious-events.jsonl` | Claude subconscious hook event timeline (jsonl) |
+
+## V1 Agent Home (Dev)
+
+New v1 agents are provisioned under `AGENTCHAT_HOMEDIR` (default: `~/.agentchat`) and are not migrated from existing `0.x` agents automatically.
+
+```text
+$AGENTCHAT_HOMEDIR/
+  agents/
+    <agent-id>/
+      agent.json
+      state/
+        resume-id
+        letta.json
+        history/
+        locks/
+        tmp/
+      workdir/
+        docs/
+          AGENTS.md
+          CLAUDE.md
+          plan.md
+          progress.md
+          projects.md
+        projects/
+        scratch/
+        inbox/
+        outputs/
+```
+
+v1 ownership split:
+- `state/` is system-owned runtime state.
+- `workdir/` is agent-writable workspace.
+- `workdir/projects/` is where project material is materialized for the agent.
+- Claude v1 subconscious wiring is active:
+  - runtime hook plugin under `<stateDir>/subconscious/claude-agentchat/`
+  - hooks merged into `<workdir>/.claude/settings.json`
+  - per-agent Letta identity persisted in `<stateDir>/letta.json`
+  - hook events posted to `/api/subconscious/events`
 
 ## Remote Server Support
 
@@ -275,7 +322,7 @@ Remote servers run a lightweight subset. See `remote/README.md` for full setup.
 git clone <repo> && cd agent-chat
 cp remote/.env.example remote/.env  # fill AGENT_CHAT_API, API_TOKEN, AGENT_CHAT_SERVER
 bash remote/install-remote.sh
-agentchat up <name> <path> [claude|codex]
+agentchat up <name> <path> [claude|codex] [--allow-shared-workspace]
 agentchat verify-remote --agent <name>
 ```
 
@@ -320,6 +367,17 @@ Behavior on new `stable` commit:
 ## Configuration (.env)
 
 ```bash
+# Runtime networking (optional; defaults keep current live ports)
+AGENT_CHAT_BACKEND_PORT=8090
+AGENT_CHAT_WEB_PORT=8084
+AGENT_CHAT_API=http://127.0.0.1:8090
+AGENT_CHAT_WEB_URL=http://127.0.0.1:8084
+AGENT_CHAT_QUEUE_URL=http://127.0.0.1:8084/api/queue
+AGENT_CHAT_MCP_SERVER_NAME=agent-chat
+AGENT_CHAT_RUNTIME_DIR=/home/shisui/laplace/agent-chat-dev-runtime
+AGENTCHAT_SUBCONSCIOUS_EVENT_URL=http://127.0.0.1:8090/api/subconscious/events
+AGENT_AUDIT_BACKEND_URL=http://127.0.0.1:8090
+
 # Authentication
 API_TOKEN=<bearer token for remote API access>
 
@@ -345,6 +403,10 @@ MATRIX_AGENT_PASSWORD_SECRET=<secret for deriving agent passwords>
 # External access
 FRP_API_ORIGIN=https://agentchat.example.com
 
+# v1 runtime home (dev)
+# default if omitted: ~/.agentchat
+AGENTCHAT_HOMEDIR=/srv/agentchat
+
 # Server maintenance
 AGENT_SERVER_MAINTENANCE_IDS=<comma-separated server IDs to suppress flap alerts>
 
@@ -355,6 +417,54 @@ SUPERVISOR_LLM_PROVIDER=deepseek
 SUPERVISOR_LLM_MODEL=deepseek-chat
 SUPERVISOR_LLM_KEY=<deepseek api key>
 # optional: SUPERVISOR_LLM_ENDPOINT, SUPERVISOR_MATRIX_MENTIONS=kamico
+# optional startup allowlist: only audit these agents (comma-separated), e.g. "agentchat-worker,prts-control"
+SUPERVISOR_AGENT_ALLOWLIST=
+```
+
+## Parallel Dev Stack (Isolated)
+
+Use split roots:
+- Dev code repo: `~/laplace/agent-chat`
+- Dev runtime root: `~/laplace/agent-chat-dev-runtime`
+- Current live code repo: `~/laplace/agent-chat-live`
+- Live runtime split is deferred to a later batch.
+
+```bash
+# in ~/laplace/agent-chat
+mkdir -p /home/shisui/laplace/agent-chat-dev-runtime/{data,logs}
+export AGENT_CHAT_RUNTIME_DIR=/home/shisui/laplace/agent-chat-dev-runtime
+export AGENT_CHAT_BACKEND_PORT=18090
+export AGENT_CHAT_WEB_PORT=18084
+export AGENT_CHAT_API="http://127.0.0.1:${AGENT_CHAT_BACKEND_PORT}"
+export AGENT_CHAT_WEB_URL="http://127.0.0.1:${AGENT_CHAT_WEB_PORT}"
+export AGENT_CHAT_QUEUE_URL="${AGENT_CHAT_WEB_URL}/api/queue"
+export AGENTCHAT_SUBCONSCIOUS_EVENT_URL="${AGENT_CHAT_API}/api/subconscious/events"
+export AGENT_CHAT_MCP_SERVER_NAME=agentchat-dev
+
+# terminal A
+node backend-v2.js
+
+# terminal B
+node server.js
+```
+
+MCP isolation model:
+- Keep existing live MCP server name `agent-chat` pointing at live backend.
+- Add a separate dev alias `agentchat-dev` pointed at dev backend.
+- Do not repoint `agent-chat` to dev.
+
+```bash
+codex mcp add agentchat-dev \
+  --env AGENT_CHAT_API="http://127.0.0.1:18090" \
+  --env AGENT_CHAT_MCP_SERVER_NAME="agentchat-dev" \
+  --env API_TOKEN="<token-if-needed>" \
+  -- node /home/shisui/laplace/agent-chat/mcp-server.js
+
+claude mcp add -s user \
+  -e AGENT_CHAT_API="http://127.0.0.1:18090" \
+  -e AGENT_CHAT_MCP_SERVER_NAME="agentchat-dev" \
+  -e API_TOKEN="<token-if-needed>" \
+  -- agentchat-dev node /home/shisui/laplace/agent-chat/mcp-server.js
 ```
 
 ## Installation

@@ -13,6 +13,14 @@ fi
 # Falls back to direct send if queue service is unavailable.
 set -euo pipefail
 
+WEB_PORT_RAW="${AGENT_CHAT_WEB_PORT:-8084}"
+if [[ "$WEB_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$WEB_PORT_RAW" -gt 0 ]; then
+    WEB_PORT="$WEB_PORT_RAW"
+else
+    WEB_PORT="8084"
+fi
+WEB_BASE_URL="${AGENT_CHAT_WEB_URL:-http://127.0.0.1:$WEB_PORT}"
+
 FORCE=false
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
@@ -67,7 +75,7 @@ _json_to=$(printf '%s' "$target" | python3 -c 'import sys,json; print(json.dumps
 _body=$(printf '{"from":%s,"to":%s,"payload":%s}' "$_json_from" "$_json_to" "$_json_payload")
 
 # Try posting to queue service
-QUEUE_URL="http://127.0.0.1:8084/api/queue"
+QUEUE_URL="${AGENT_CHAT_QUEUE_URL:-${WEB_BASE_URL%/}/api/queue}"
 _response=$(curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \
     -d "$_body" --connect-timeout 2 --max-time 5 "$QUEUE_URL" 2>/dev/null) || _response=""
 

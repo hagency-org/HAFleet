@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentchat.benchmark.run/v1",
+  "title": "AgentChat Benchmark Run",
+  "type": "object",
+  "required": [
+    "schema",
+    "runId",
+    "createdAt",
+    "createdBy",
+    "profile",
+    "agentType",
+    "taskSet",
+    "attempts",
+    "status",
+    "outputRoot",
+    "summaryMetrics"
+  ],
+  "properties": {
+    "schema": { "const": "agentchat.benchmark.run/v1" },
+    "runId": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string" },
+    "createdBy": { "type": "string" },
+    "profile": {
+      "type": "object",
+      "required": ["profileId", "version"],
+      "properties": {
+        "profileId": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "agentType": { "type": "string" },
+    "modelOverride": { "type": ["string", "null"] },
+    "subconsciousMode": { "type": "string" },
+    "taskSet": {
+      "type": "object",
+      "required": ["id", "tasks"],
+      "properties": {
+        "id": { "type": "string" },
+        "tasks": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "attempts": { "type": "integer", "minimum": 1 },
+    "status": { "type": "string" },
+    "outputRoot": { "type": "string" },
+    "summaryMetrics": { "type": "object" }
+  }
+}

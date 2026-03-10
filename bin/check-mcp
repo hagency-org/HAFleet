@@ -13,8 +13,16 @@ fi
 printf "%-30s %-10s %-10s %-10s\n" "SESSION" "MCP" "CLIENT" "KNOWN"
 printf "%-30s %-10s %-10s %-10s\n" "-------" "---" "------" "----------"
 
+BACKEND_PORT_RAW="${AGENT_CHAT_BACKEND_PORT:-8090}"
+if [[ "$BACKEND_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT_RAW" -gt 0 ]; then
+  BACKEND_PORT="$BACKEND_PORT_RAW"
+else
+  BACKEND_PORT="8090"
+fi
+BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:$BACKEND_PORT}"
+
 # Get known agents from backend
-known=$(curl -s --noproxy '*' http://127.0.0.1:8090/api/agents 2>/dev/null | python3 -c '
+known=$(curl -s --noproxy '*' "$BACKEND_URL/api/agents" 2>/dev/null | python3 -c '
 import json
 import sys
 try:

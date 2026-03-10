@@ -41,3 +41,307 @@
   - Use `NO_PROXY=127.0.0.1,localhost` for local curl validations
 - Doc-linking lesson:
   - For tracked `CLAUDE.md`/`AGENTS.md`, verify git tracking and backup first, then link.
+- Codex resume-id capture reliability:
+  - `agent-up` codex resume capture can fail if relying only on short early-shell checks or asynchronous background capture.
+  - Safety boundary remains strict: codex session ID must match workspace path (and name marker when present) to avoid cross-agent context bleed.
+- Agent host-model direction:
+  - Current system is still project-attached (`data/agents/{name}` + `meta.path` + docs resolved from workspace path).
+  - Planned `1.x` direction is agent-centric: each agent gets its own home, with system-owned runtime state separated from agent-writable workdir.
+- Agent config isolation direction:
+  - Global Claude/Codex configuration should be kept minimal; per-agent behavior should live in the agent's own home/workdir whenever possible.
+  - MCP, hooks, skills, and related runtime config should become agent-scoped and visible/manageable from the agent management surface rather than relying on heavy shared global config.
+- V1 web information architecture should be agent-centric, not feature-centric:
+  - the primary secondary page should be one unified `Agent Detail` entry per agent;
+  - `audit` is a module/tab inside that page, not a separate competing detail entrypoint;
+  - the page should aggregate agent overview, runtime, docs, projects, config, subconscious, and audit in one place.
+- `Supervisor audit` and `subconscious` are separate systems and must not be conflated in UI language or data sources:
+  - `Full Audit` / supervisor views are sourced from supervisor evaluation events;
+  - subconscious views are sourced from subconscious hook/event data;
+  - the management surface should expose separate enable/disable controls and separate output/insight panels for each.
+- Current `subconscious` implementation is still scaffold-level, not a real Letta/LLM reasoning backend:
+  - the Claude hook script records hook events, maintains a deterministic `lettaAgentId`, and optionally injects `guidance` from `state/letta.json`;
+  - it does not currently call a Letta server or any external LLM API itself;
+  - `state/letta.json` is currently metadata/config state, not a real memory store;
+  - if `guidance` is empty, the hook emits no additional subconscious context at all.
+- Current subconscious runtime contract in dev is now isolated from supervisor defaults by default:
+  - provider/model/endpoint/key env resolve from agent state first, then `SUBCONSCIOUS_LLM_*`, then provider defaults;
+  - successful invokes should not write resolved env/default provider-model fields back into `state/letta.json`, or config-source observability collapses incorrectly to `state`.
+- Current truthful subconscious memory semantics are first-pass local retrieval, not Letta parity:
+  - persisted memory artifact lives at `state/subconscious/memory.json`;
+  - kind is `local-episodic-journal`;
+  - retrieval strategy is `keyword-overlap-recency`;
+  - runtime invoke retrieves matches from this file before the LLM call and appends a new episode after success.
+- After the first runtime-connected subconscious batch, the above is only partially true:
+  - the hook runtime can now call a real OpenAI-compatible backend invoke endpoint and persist `lastInvocation` / `lastRuntimeGuidance`;
+  - however it is still not a full Letta-style memory backend because persistent memory-store semantics/retrieval are still missing;
+  - the current dev runtime contract may still default to supervisor-family provider/model/key envs unless explicitly separated via subconscious-specific config.
+- Code/runtime split direction:
+  - The repo directory and the mutable runtime directory are distinct concerns and should not be conflated for long-running dev/live instances.
+  - Current intended layout is:
+    - dev code repo: `~/laplace/agent-chat`
+    - dev runtime: `~/laplace/agent-chat-dev-runtime`
+    - live code repo: `~/laplace/agent-chat-live`
+    - live runtime: separate future directory after explicit cutover planning
+  - Switching process cwd alone is not a safe code/runtime split, because the codebase still contains repo-relative executable/template paths that would break under a pure runtime cwd.
+- Current split-runtime foundation moves mutable `data/` and `logs/` under `AGENT_CHAT_RUNTIME_DIR`, while env loading still defaults to repo-local `.env` unless the launch environment overrides values explicitly.
+- If `agent-up` prints `failed to apply runtime scope memory limits`, the agent may still start normally; that warning means the optional per-agent systemd user scope limits were not applied.
+- On this server, that warning correlates with shells/services that lack `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`; in that state `systemctl --user` cannot talk to the user bus, `systemd-run --user --scope` falls back, and the tmux pane stays under the parent service cgroup instead of a dedicated `agent-*.scope`.
+- Local Claude MCP environment constraint:
+  - `claude mcp add ...` can be blocked by enterprise-managed MCP configuration with the error: `enterprise MCP configuration is active and has exclusive control over MCP servers`.
+  - In that state, repo/runtime work can still validate backend/web/subconscious behavior, but a new client-side alias such as `agentchat-dev` cannot be truthfully claimed as installed unless the enterprise MCP policy changes.
+  - On this server, the effective managed Claude MCP file is `/etc/claude-code/managed-mcp.json` (root-owned). When it exists, `claude mcp list` reflects that file rather than user-level `~/.claude/settings.json` `mcpServers`.
+- `Human Metadata` in the current Agent Detail UI is not a runtime control surface:
+  - it only persists human-maintained `owner`, `projectScope`, and `notes` fields in the v1 home metadata/state path;
+  - it does not directly alter supervisor audit, subconscious runtime behavior, or agent process control.
+- Current global agent-list confusion is partly structural rather than runtime duplication:
+  - a dev agent such as `Yato` can appear both in the global agent registry/list and in the v1-home/detail surfaces;
+  - without explicit `environment / purpose / persistence` grouping (`live`, `dev`, `benchmark`, `ephemeral`), one agent can look like it exists in “two places” even when there is only one runtime instance.
+- Current `Agent Detail` truthfulness caveat:
+  - several surfaces are UI-derived summaries rather than first-class backend objects (for example `Intervention`, `healthSummary`, and some “recent/high-signal” phrasing);
+  - when refining the detail page, prefer exposing real source objects first (`supervisor events`, `subconscious events`, runtime config/state, human notes) and demote or remove synthetic summaries that overstate system maturity.
+- Dev stack env verification caveat:
+  - do not assume a key present in repo `.env` is present in the running dev tmux/backend process;
+  - verify the actual backend process environment (for example via `/proc/<pid>/environ`) before attributing provider failures to an invalid key;
+  - current verified example: dev backend had `SUBCONSCIOUS_LLM_KEY` but not `DASHSCOPE_API_KEY`, so a Qwen runtime configured with `keyEnv=DASHSCOPE_API_KEY` failed as `missing API key env ...`, not `invalid_api_key`.
+- Current dev stack launch nuance:
+  - detached tmux launches of `backend-v2.js` / `server.js` do not automatically become truthful `.env`-backed runtime proofs unless the launch command explicitly sources the repo `.env`;
+  - after explicit `.env` sourcing, the same dev backend process can simultaneously expose `SUBCONSCIOUS_LLM_KEY` and `DASHSCOPE_API_KEY`, which is required for truthful per-provider subconscious runtime verification.
+- Subconscious product direction has now been clarified by the operator:
+  - the target is direct integration of the real `claude-subconscious` model/logic/prompt and a real Letta agent, not an indefinitely extended local “Letta-like” substitute;
+  - the existing local episodic-memory / conversation-journal implementation is transitional only and should not become the long-term architecture if it diverges from original Letta parity;
+  - future subconscious work should prefer reusing upstream `claude-subconscious` conversation/sync/memory-block flows and adapting them into `agent-chat` control-plane / web observability, rather than continuing to invent parallel semantics.
+- Current direct-upstream subconscious slice status:
+  - `agent-chat` now has a real bridge file `lib/upstream-claude-subconscious.js` that directly imports upstream `/home/shisui/laplace/claude-subconscious` artifacts rather than only mirroring their ideas;
+  - currently verified direct reuse includes:
+    - `Subconscious.af`
+    - `scripts/agent_config.ts`
+    - `scripts/conversation_utils.ts`
+    - `scripts/transcript_utils.ts`
+  - the new bootstrap path is real (`POST /api/subconscious/upstream/bootstrap/:name`) and currently blocks truthfully at `missing LETTA_API_KEY`;
+  - the live hook runtime and memory execution path are still transitional/local until Letta service credentials are provided.
+- Upstream Letta bootstrap binding nuance:
+  - when a real `LETTA_AGENT_ID` is provided, bootstrap must prioritize the explicit requested/configured agent id over any previously stored upstream agent id;
+  - otherwise an earlier default imported agent can shadow the intended Letta agent binding and make the system look “configured” against the wrong remote agent.
+- Current upstream SessionStart cutover status in dev:
+  - `POST /api/subconscious/upstream/session-start/:name` is live and can create/reuse a real upstream Letta conversation mapping without a manual shell proof;
+  - verified `sendMessage:false` persists session bookkeeping under the agent's isolated upstream home and leaves detail at `stage=upstream-session-lifecycle`.
+- Current upstream notify/send blocker in dev:
+  - the original `429 {"error":"Rate limited","reasons":["model-unknown"]}` blocker was traced to a model-handle mismatch, not a generic Letta outage;
+  - Letta Cloud exposes the ZAI model as canonical handle `zai/glm-5`, while dev had `LETTA_MODEL=GLM-5`;
+  - upstream `agent_config.ts` accepts aliases such as `GLM-5` when checking availability, but if the raw alias is then written back into `llm_config.handle`, the bound agent regresses to an invalid handle and the notify/send path re-enters `model-unknown`;
+  - use the canonical Letta model handle (`zai/glm-5`) for persisted config, or normalize aliases to the canonical handle before patching the agent model.
+- Current upstream session truthfulness bug:
+  - when the notify/send sub-step blocks, detail-stage derivation falls back from `upstream-session-lifecycle` to `conversation-aware-runtime` even though the real upstream conversation/session still exists;
+  - that downgrade is misleading and should be treated as a product truthfulness bug, not as loss of the upstream SessionStart cutover itself.
+- Current upstream SessionStart truthfulness shape in dev:
+  - the accepted model is: upstream session lifecycle remains `started`/`established` if real `sessionId` + `conversationId` exist, even when the optional notify/send sub-step fails;
+  - notify/send state now belongs under `upstream.session.notify`, not under bootstrap or the top-level session lifecycle state.
+- Current v1 workspace-template/provision contract:
+  - `scripts/provision-v1-agent-home.js` now renders `workdir/CLAUDE.md` from `docs/workspace-claude-md-template.md` instead of generating a hardcoded stub;
+  - the template is the maintained source of truth for workspace behavior, including project/workdir discipline and directory semantics.
+- Current v1 Claude-workspace wiring:
+  - provisioning now treats root `workdir/CLAUDE.md` and root `workdir/AGENTS.md` as the primary workspace-entry files;
+  - `workdir/docs/CLAUDE.md` and `workdir/docs/AGENTS.md` are transitional compatibility symlinks, while `docs/` is for support/history files such as `plan.md`, `progress.md`, and `projects.md`.
+- Current v1 workspace-directory contract:
+  - provisioning creates `workdir/projects`, `workdir/scratch`, `workdir/inbox`, and `workdir/outputs`, while runtime can create `workdir/data`;
+  - the maintained workspace template now explains the intended semantics of these paths and explicitly marks `../state/` and `.claude/` as system-managed.
+- Current project-ownership model in dev:
+  - managed project material for a v1 agent belongs under `workdir/projects/`, and the maintained workspace contract now teaches that the workspace root is a coordination root, not a codebase;
+  - concrete dev proof: Yato now owns a real managed `agent-chat` project at `workdir/projects/agent-chat`, and its workspace docs point code work there rather than to the main repo root.
+- Current v1 workspace migration boundary:
+  - the maintained template + provisioning contract are the source of truth for fresh homes;
+  - existing dev homes reach the same state only after explicit reprovision/migration, but rerunning provisioning is now an accepted path for that upgrade.
+- Current minimal supervisor slice-3 acceptance boundary:
+  - `workdir/task-writer` is now the explicit primary-agent writer path for canonical `task` updates (`start`, `heartbeat`, `wait`, `resume`, `done`);
+  - the writer goes through `PATCH /api/agents/:name/home-metadata` and updates the existing control-plane object rather than creating a second `task.json`;
+  - fresh v1 homes need backend sync fallback from `PATCH /api/agents/:name` to `POST /api/agents` on `404`, or supervisor/backend cannot see the first canonical `task` / `runtimeProfile` state.
+- Current sibling supervisor workspace contract:
+  - each v1 home may now include a sibling `supervisor/` workspace with `CLAUDE.md`, `AGENTS.md`, `docs/plan.md`, and `docs/progress.md`;
+  - this workspace is supervisor-local only and must not contain a second canonical task or runtime-profile file.
+- Current runtime-profile canonical contract:
+  - `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}` is the accepted canonical object shape;
+  - live/non-v1 canonical writer paths remain `POST /api/agents` and `PATCH /api/agents/:name`;
+  - v1 canonical writer path remains `PATCH /api/agents/:name/home-metadata`, with `agent.json` as the canonical v1 file and runtime/meta mirrors only for compatibility and visibility;
+  - primary launch (`bin/agent-up`) and supervisor launch (`bin/agent-up` env export + `supervisor/config.js`) must read the same canonical object, not private launcher-owned files.
+- Current runtime-profile precedence proof boundary:
+  - primary launch precedence is now accepted as:
+    1. canonical `runtimeProfile.primary`
+    2. legacy top-level `type/model/extraArgs` only if canonical primary role is absent
+    3. launcher defaults only if neither exists;
+  - supervisor launch precedence is now accepted as:
+    1. canonical `runtimeProfile.supervisor`
+    2. compatibility env transport derived from that same role object
+    3. process defaults only if the canonical supervisor role is absent.
+- Notification root-cause and hotfix boundary:
+  - actionable MCP notifications were previously advisory only and buried `check_inbox()` mid-sentence, which made it easy for agents to react to the title/summary without reading inbox context;
+  - the current hotfix moves the inbox-read gate to the first visible action (`FIRST ACTION: call check_inbox() now`) in both backend and push-relay notification builders, but this is still a prompt-level mitigation, not a framework-enforced inbox-read boundary.
+- External dev Basic Auth caveat:
+  - if the browser opens `https://user:pass@host/...` with credentials embedded in the URL, modern browsers block same-origin `fetch()` calls constructed from relative URLs;
+  - current Agent Detail `refresh()` then fails on `/api/...` calls and clears SSR-rendered content, making the page appear blank/Loading even though local dev and SSR HTML are fine;
+  - using the browser's native Basic Auth dialog avoids this, and a future UX hardening option is to preserve SSR content on refresh failure instead of wiping the page.
+- Minimal inbox-read gate contract:
+  - canonical gate object is `inboxGate{requiresInboxCheck, sourceMsgId, raisedAt, reason}`;
+  - canonical acknowledgement is a real `check_inbox()` cursor advance that consumes the pending `sourceMsgId`, not merely a tool call named `check_inbox()`;
+  - enforcement belongs at the runtime boundary before outbound progress/reply actions, not in notification wording and not in backend-only delivery logic.
+- Inbox-read gate slice-1 accepted boundary:
+  - actionable delivery raises canonical `inboxGate` only after successful delivery bookkeeping (`POST /api/runtime/push-delivered`);
+  - `GET /api/inbox/:agent` clears the gate only when the pending `sourceMsgId` is actually consumed by that cursor advance;
+  - outbound agent messages (`POST /api/messages`) are blocked with `409 inbox_check_required` while the gate is pending;
+  - non-actionable deliveries must leave `inboxGate.requiresInboxCheck=false`.
+- Minimal supervisor waiting/trailing contract:
+  - safe waiting exists only on the canonical primary task object via `status=waiting`, `waiting_reason`, and `waiting_until`;
+  - runtime idle/activity is observational input only and may start a bounded trailing window, but must not create or mutate safe waiting state;
+  - `normal_wait`, `stalled_wait`, and `suspected_eos` are derived from canonical task state + time, not from a second task source.
+- Waiting/trailing implementation acceptance boundary:
+  - `normal_wait` requires a valid future waiting declaration plus a fresh waiting heartbeat;
+  - future `waiting_until` without a fresh maintained heartbeat must degrade to `stalled_wait`, not remain `normal_wait`;
+  - malformed `waiting` declarations must surface as explicit `suspected_eos` rather than collapsing into a generic no-task reason;
+  - bounded active-to-idle trailing still remains `active` until the trailing window elapses.
+- Supervisor activation/lifecycle contract:
+  - supervisor lifecycle remains binary (`active` / `idle`); trailing supervision is an active sub-phase, not a third canonical lifecycle state;
+  - supervisor stays `active` for canonical `active`, `blocked`, negative classifications, bounded trailing supervision, and bounded done-tail;
+  - supervisor may become `idle` only for valid `normal_wait`, done after tail expiry, or no canonical task with no unresolved negative state;
+  - sibling `supervisor/` workspace is the supervisor runtime's local workspace only and must never become a second `task` or `runtimeProfile` source;
+  - runtime-profile selection for supervisor lifecycle uses canonical precedence: `runtimeProfile.supervisor` -> `runtimeProfile.primary` fallback -> launcher defaults.
+- Lifecycle truthfulness correction boundary:
+  - trailing-expiry negative states must keep lifecycle `active` for the negative-state reason, not the generic `primary task is active` reason;
+  - no-task semantics must be coherent: `classification = null`, lifecycle `idle`, and an explicit no-task/no-negative-state reason.
+- Supervisor runtime-launch contract:
+  - a real sibling supervisor runtime exists only as a projection of canonical supervisor lifecycle state, not as an origin of task/runtimeProfile truth;
+  - lifecycle `active` may start or keep a single sibling runtime alive; lifecycle `idle` may suppress launch or stop it cleanly;
+  - sibling `supervisor/` workspace is the correct cwd/home for that runtime, but must not acquire `task.json`, `runtime-profile.json`, or any shadow truth;
+  - canonical supervisor launch selection remains `runtimeProfile.supervisor` -> `runtimeProfile.primary` fallback -> env/default.
+- Supervisor runtime-launch acceptance boundary:
+  - real sibling supervisor runtimes now use deterministic tmux session names `supervisor-<agent>` and persist `runtimeLaunch` through `SupervisorStateStore`, `getStatus()`, and `getAgentDetail()`;
+  - keep-alive must be idempotent (no relaunch churn), `normal_wait`/clean-idle must suppress or stop launch, and negative states must keep the runtime alive;
+  - tmux launch env must carry explicit `PATH`, or a pane can exist while `claude`/`codex` resolution silently fails.
+- Supervisor runtime failure-taxonomy boundary:
+  - supported explicit `runtimeLaunch.failureType` values are `unsupported-framework`, `missing-workspace`, `missing-binary`, `missing-credential-env`, and `tmux-launch-failed`;
+  - `runtimeLaunch.binaryName` and `runtimeLaunch.requiredCredentialEnv` are observational launch diagnostics only and do not change canonical task/classification/lifecycle truth;
+  - launch/runtime failures must surface through `runtimeLaunch.status=launch-failed` while classification/lifecycle remain derived from canonical task state plus supervision rules.
+- Stable subconscious authority boundary:
+  - upstream Letta durable state is the single canonical stable subconscious behavior path;
+  - manual guidance in `state/letta.json` is fallback/configuration only;
+  - the local transitional runtime is compatibility/debug only and must not be presented as a co-equal stable intent engine.
+- Stable subconscious default-detail boundary:
+  - default `/api/subconscious/detail/:name` now exposes local runtime, local memory, and local conversation only as transitional summary objects;
+  - full local runtime internals, journal detail, and manual guidance text/preview belong only in privileged debug or writable settings surfaces, not the stable-facing default detail.
+- Post-convergence maturity contract:
+  - `stable` now includes canonical control-plane `task` / `runtimeProfile`, supervisor classification/lifecycle, the supported same-host tmux-backed sibling supervisor runtime shape plus explicit failure taxonomy, the upstream-authoritative subconscious default operational surface, accepted upstream-backed subconscious slices (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`), and inbox-read gate enforcement;
+  - `transitional` includes the v1 compatibility mirror `data/agents/<name>/meta.json`, backend row projection for v1-owned fields, local subconscious runtime/memory/conversation journal surfaces, and manual guidance in its fallback/configuration role;
+  - `debug-only` includes privileged subconscious detail internals, raw path/file/timing artifacts, and deep supervisor host/runtime troubleshooting detail beyond the stable runtime failure taxonomy.
+- V1 duplicate-persistence boundary:
+  - `agent.json` is the canonical v1 home-owned metadata source;
+  - `PATCH /api/agents/:name/home-metadata` is the canonical v1 writer;
+  - `data/agents/<name>/meta.json` is strict compatibility export only and must never outrank or repair the manifest;
+  - backend row state remains a runtime-serving derivative projection for v1-owned fields.
+- Workspace entry-file direction:
+  - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
+  - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
+  - any duplicate or linked `docs/CLAUDE.md` / `docs/AGENTS.md` should be treated as transitional compatibility only, not the long-term source of truth.
+- Existing-home v1 reprovisioning caveat in dev:
+  - if reprovision is run without explicit dev backend env (`AGENT_CHAT_API` / `AGENT_CHAT_BACKEND_PORT`), `configure-v1-subconscious.js` falls back to `8090` and rewrites hook runtime URLs toward the default backend;
+  - reprovisioning an existing dev home should therefore pass the explicit dev backend env or it can silently regress the subconscious event/invoke sink to the wrong backend.
+- Agent-up migration-validation caveat:
+  - if a tmux session for the agent still exists, `bin/agent-up` can simply refresh backend mapping instead of truly relaunching the agent;
+  - a real `down -> upgrade -> up` validation must first remove the existing tmux session (for example via `agent-down`) before the subsequent `agent-up` is considered a true restart.
+- Current subconscious state-divergence failure mode after Yato migration/restart:
+  - `state/letta.json` and upstream durable conversation files can still hold the correct real Letta binding/conversation data while `GET /api/subconscious/detail/:name` collapses back to `stage=scaffold`, `upstream.bootstrap.status=not-run`, and a wrong/generated upstream agent id;
+  - when this happens, the web confusion is backed by a real backend truth gap, not just bad copy.
+- Current agent online-state inconsistency:
+  - after the Yato restart validation, dev API/tmux showed Yato alive again, but `send_message(to=\"Yato\", ...)` returned `target_offline` / `reason=agent-down`;
+  - treat agentchat delivery state and tmux/dev-api presence as separate signals until this sync inconsistency is understood.
+- Current subconscious truth model on Yato after the backend repair:
+  - upstream Letta bootstrap/session state can now be derived truthfully from durable files (`state/letta.json`, upstream conversation/session files) even if transient runtime metadata regressed;
+  - local transitional runtime can still be simultaneously degraded (`deepseek` / `SUBCONSCIOUS_LLM_KEY` missing), so UI must present local runtime vs upstream Letta as separate paths rather than one unified subconscious backend.
+- Current Yato live/dev reality:
+  - the real Yato runtime/home/meta currently exist only in dev (`agent-chat-dev-runtime`);
+  - live has no `data/agents/Yato/meta.json` and no `homes/agents/agent_yato`;
+  - live detail lookup by name can still return a null-filled shell object for `Yato`, which is misleading and can make it look like live also has that agent when it does not.
+- Current managed-project remove semantics in dev:
+  - `deleteFiles:false` means untrack only: the project is removed from `managedProjects` but the local directory under `workdir/projects` is kept; a same-name re-import will then truthfully fail until the leftover path is removed or renamed.
+  - `deleteFiles:true` means remove from `managedProjects` and delete/unlink the local path, but only when the target path is inside `workdir/projects`.
+- Current v1 projects control-plane shape:
+  - `GET /api/agents/:name/projects` exposes the persisted v1 `managedProjects` model and the concrete `workdir/projects` root;
+  - `POST /api/agents/:name/projects/import` reuses `scripts/provision-v1-agent-home.js` rather than reimplementing file operations in web code;
+  - materialization remains truthful to provisioning semantics (`copy` => real directory copy, `symlink` => symlink).
+- Current legacy meta-mirror behavior for v1 homes:
+  - direct `scripts/provision-v1-agent-home.js` provision/reprovision now synchronizes `data/agents/<name>/meta.json` from the current v1 manifest;
+  - this closes the earlier divergence where `agent.json` and the detail API showed the correct `managedProjects` but the legacy compatibility mirror remained stale.
+- Dev-only agent communication rule:
+  - `agent-chat-cli` / `agentchat cli` default to `AGENT_CHAT_API=http://127.0.0.1:8090` unless explicitly overridden;
+  - dev-only agents such as the current Yato must be queried or messaged through the dev backend (`AGENT_CHAT_API=http://127.0.0.1:18190`) or an equivalent dev MCP alias, otherwise live/control-plane lookups will misreport them.
+- Server-rendered client-script regex caveat:
+  - when `server.js` emits browser JavaScript through template strings, regex escapes intended for the browser must often be double-escaped in server source (for example `\\s` in server source to emit `\s` in served JS);
+  - otherwise the browser can receive broken regex literals such as `/s+/g`, which silently corrupts client-side text normalization and can disable interactivity if the emitted script becomes invalid.
+- Current upstream Stop-path truth in dev:
+  - `Stop` is now a real upstream-backed path for the dev Yato flow rather than local-only logging;
+  - `/api/subconscious/detail/:name` exposes durable `upstream.stop` fields including `attempted`, `status`, `messageSent`, `conversationId`, `transcriptPath`, `syncStateFile`, transcript counts, and `lastProcessedIndex` movement;
+  - replaying the same transcript for the same session truthfully yields no new upstream messages once the upstream durable sync-state file has already advanced.
+- Current upstream UserPromptSubmit truth in dev:
+  - `UserPromptSubmit` is now a real upstream-backed path for the dev Yato flow rather than a local-only event surface;
+  - accepted truth model requires route response, `session-<session>.json`, `conversations.json`, and `/api/subconscious/detail/:name` to agree on the same `conversationId` and `lastProcessedIndex`;
+  - if the helper cannot make those durable sources converge after send, the route must block instead of claiming a clean success.
+- Current upstream PreToolUse truth in dev:
+  - `PreToolUse` is now a real upstream-backed path for the dev Yato flow rather than a local-only manual-guidance/runtime fallback;
+  - for this slice, the durable per-session truth source is `session-<session>.json` fields `lastSeenMessageId` and `lastBlockValues`;
+  - accepted proof requires the first call after a real upstream change to inject `additionalContext` derived from upstream assistant messages and/or block deltas, then persist the advanced `lastSeenMessageId` / `lastBlockValues`;
+  - a second identical `PreToolUse` call for the same session must truthfully no-op (`status=no-updates`) without advancing the durable markers again;
+  - route response and `/api/subconscious/detail/:name` must converge on those same durable markers and the same `conversationId`.
+- Current subconscious event-ingest boundary is not yet trustworthy:
+  - the hook runtime can send `Authorization: Bearer <AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN>`;
+  - `/api/subconscious/events` now enforces a route-specific ingest boundary:
+    - localhost requests are accepted as `ingestBoundary=local`
+    - non-local requests require the shared event token and are marked `ingestBoundary=token`
+  - when `API_TOKEN` is enabled, the global `/api` auth middleware must explicitly allow the subconscious event token through for this route, or the route-level trust check becomes unreachable;
+  - even after this hardening, event rows remain observational telemetry rather than canonical policy/security state.
+- Current subconscious generic `guidance*` fields are derived compatibility fields, not canonical objects:
+  - they currently collapse manual guidance, local runtime guidance, and upstream `PreToolUse` injection into one summary vocabulary;
+  - canonical consumers should prefer object-led fields (`manualGuidance`, `runtime`, `upstream.userPrompt`, `upstream.preTool`, `upstream.stop`) instead of generic `guidancePresent/guidanceInjected/guidanceSource`.
+- Current subconscious top-level `stage` is presentation-only:
+  - it is a synthetic summary over multiple first-class objects and must not be used as the canonical policy/security state machine.
+- Canonical cleanup acceptance must validate served detail contracts, not only persisted mirrors:
+  - a slice is not acceptable merely because route writers stop persisting synthetic fields into `letta.json` / `runtime.json`;
+  - `GET /api/subconscious/detail/:name` must also stop exposing synthetic timing/status mirrors such as `checkedAt`, `attemptedAt`, `messageSentAt`, `injectedAt`, counter deltas, and `conversation.current.latestGuidance*` on the operational surface unless they are explicitly privileged-debug fields.
+- Architecture rule:
+  - do not create display-first concepts, transition-only panels, or local substitutes that pretend to be mature system objects;
+  - new fields, UI modules, and workflow concepts must map to a first-class object with a clear source of truth, or they should not ship.
+- Supervisor direction:
+  - the long-term supervisor should be an `agent-shaped state machine`, not a one-shot LLM judge and not a second executor;
+  - minimal required objects are `Task` and `Supervisor Agent State`;
+  - `waiting` must be explicitly declared by the task owner with `waiting_reason` and `waiting_until`; supervisor should not infer safe waiting from silence alone;
+  - supervisor classification should stay narrow: `active`, `normal_wait`, `stalled_wait`, `suspected_eos`.
+- Current notification delivery limitation:
+  - agent-chat backend notifications are title/summary nudges only; even when they say `Use check_inbox()` and `Read ALL messages`, the framework does not currently enforce an inbox read before the agent continues;
+  - this means an agent can incorrectly react to the notification title alone, log local state, and drift/EOS without ever pulling the real unread payloads from `check_inbox()`.
+- Supervisor idle/no-task event root cause:
+  - repeated `task-state` events for idle agents were caused by including volatile `idleDurationSec` in the supervisor input hash, so an unchanged `no task + idle` observation looked “changed” every sweep;
+  - neutral `task-state` rows with `status=null` should render as an idle/no-task surface, not `UNKNOWN`, or the web overstates a normal empty control-plane state as a warning.
+- Supervisor workspace direction:
+  - the supervisor should live beside the primary agent as its own workspace directory (`supervisor/`), with its own `CLAUDE.md`, `AGENTS.md`, and local task/progress state;
+  - this keeps supervisor behavior explicit and agent-shaped instead of hiding it inside ambient reviewer logic.
+- Runtime profile direction:
+  - backend/provider/model/reasoning-budget selection must become an explicit per-agent runtime profile rather than a shared mutable default;
+  - the same model should drive both normal agent launch and supervisor launch so one agent can change backend/model without silently mutating every other agent.
+- Default-enablement boundary:
+  - fresh v1 agent homes now default to `subconsciousEnabled=false`; enabling subconscious is an explicit per-agent decision, not a Claude-type default;
+  - reprovision must preserve an existing explicit `subconsciousEnabled=true` instead of resetting it to the new default;
+  - supervisor config now defaults to `SUPERVISOR_ENABLED=false` when the env var is unset, but explicit env values still win for current deployments.
+- Minimal supervisor slice boundary:
+  - keep existing supervisor route names and stack-global control semantics stable in slice 1 (`/api/supervisor/status`, `/api/supervisor/agents`, `/api/supervisor/agents/:name`, `/api/supervisor/control`);
+  - first implementation should add canonical per-agent `Task` state and runtime-profile reads without expanding UI or changing subconscious/hook paths.
+- Minimal supervisor slice-1 accepted baseline:
+  - unchanged supervisor routes now classify from canonical per-agent `Task` state and bounded trailing-heartbeat timing rather than LLM audit output;
+  - accepted route-level classification proof is:
+    - fresh `active` task -> `active`
+    - declared `waiting` with valid `waiting_reason` + `waiting_until` -> `normal_wait`
+    - `blocked` -> `stalled_wait`
+    - expired `active` heartbeat -> `suspected_eos`
+  - accepted writer proof requires `task` and `runtimeProfile` to converge across v1 `agent.json`, legacy `data/agents/<name>/meta.json`, and detail/API surfaces.
+- Runtime profile canonical schema in slice 1 is string-based per role:
+  - `runtimeProfile.primary|supervisor.{framework,provider,model,reasoning,extraArgs}`
+  - `reasoningProfile` and array-valued `extraArgs` are not canonical accepted fields in current storage/launch wiring.
+- Minimal supervisor slice-2 design accepted boundary:
+  - the primary agent-side task writer is the only canonical writer for `task.id`, `heartbeat_at`, `waiting_reason`, `waiting_until`, and `done`;
+  - supervisor remains a reader/classifier only and must not mutate primary task state;
+  - sibling `supervisor/` workspace is allowed for supervisor-local docs/state, but it must not introduce a second canonical `Task` or `runtimeProfile` source.

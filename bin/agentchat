@@ -20,6 +20,7 @@ Usage: agentchat <command> [args]
 
 Core:
   up             Start or resume an agent
+  up-v1          Provision + launch a new v1 agent-home runtime
   down           Stop an agent
   ls             List agents
   send           Send message to target pane
@@ -29,6 +30,7 @@ Core:
 
 Ops:
   audit          Run one-shot audit gate
+  benchmark      Benchmark workflow foundations / trial scaffolding
   maintain       Rotate logs and prune stale tmp files
   prune-agents   Prune stale offline agent records from backend
   sync-skills    Sync ~/.codex and ~/.claude skill links to repo template
@@ -60,6 +62,7 @@ shift
 
 case "$cmd" in
   up) dispatch "agent-up" "$@" ;;
+  up-v1|v1-up) dispatch "agent-up-v1" "$@" ;;
   down) dispatch "agent-down" "$@" ;;
   ls|list) dispatch "agent-ls" "$@" ;;
   send) dispatch "agent-send" "$@" ;;
@@ -67,6 +70,7 @@ case "$cmd" in
   service) dispatch "agent-service" "$@" ;;
   verify-remote|verify) dispatch "verify-remote" "$@" ;;
   audit) dispatch "agent-audit" "$@" ;;
+  benchmark) dispatch "agent-benchmark" "$@" ;;
   maintain) dispatch "agent-maintain" "$@" ;;
   prune-agents) dispatch "agentchat-prune-agents" "$@" ;;
   sync-skills) dispatch "agentchat-sync-skills" "$@" ;;

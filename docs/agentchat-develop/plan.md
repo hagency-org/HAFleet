@@ -1,9 +1,8 @@
 ## Current
-Coordinate rollout and live validation of the supervisor parser/runtime workspace-path fixes.
+Continue only after the next explicit worker scope.
 Acceptance criteria:
-- Updated code is merged/deployed in runtime environment.
-- `/api/supervisor/agents` no longer marks active agents as `missing-doc-sections` due to parser/workspace-path false negatives.
-- Verification evidence is captured and reported.
+- Do not start merge execution or new implementation from this hold state.
+- Keep follow-on work bounded to the next worker-scoped batch.
 
 ## Queue
-1. Propose next signal-quality hardening tasks (if needed) based on remaining skip/error causes.
+1. Continue only after the next explicit worker scope.

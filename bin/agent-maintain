@@ -22,8 +22,15 @@ _resolve_script_dir() {
 
 SCRIPT_DIR="$(_resolve_script_dir)"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
-LOG_DIR="$BASE_DIR/logs"
-AGENT_DATA_DIR="$BASE_DIR/data/agents"
+ENV_FILE="$BASE_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
+RUNTIME_DIR="${AGENT_CHAT_RUNTIME_DIR:-$BASE_DIR}"
+LOG_DIR="$RUNTIME_DIR/logs"
+AGENT_DATA_DIR="$RUNTIME_DIR/data/agents"
 
 DRY_RUN=false
 QUIET=false

@@ -6,16 +6,32 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-AGENT_DIR="$SCRIPT_DIR/../data/agents/agentchat"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+ENV_FILE="$BASE_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
+RUNTIME_DIR="${AGENT_CHAT_RUNTIME_DIR:-$BASE_DIR}"
+AGENT_DIR="$RUNTIME_DIR/data/agents/agentchat"
 RESUME_FILE="$AGENT_DIR/resume-id"
 META_FILE="$AGENT_DIR/meta.json"
 
 export HOME="/home/shisui"
 export PATH="$HOME/.local/bin:$HOME/.pyenv/bin:$HOME/.pyenv/shims:/usr/local/bin:/usr/bin:/bin:$SCRIPT_DIR"
 
+BACKEND_PORT_RAW="${AGENT_CHAT_BACKEND_PORT:-8090}"
+if [[ "$BACKEND_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT_RAW" -gt 0 ]; then
+  BACKEND_PORT="$BACKEND_PORT_RAW"
+else
+  BACKEND_PORT="8090"
+fi
+BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:$BACKEND_PORT}"
+
 # Wait for backend to be ready (up to 30s)
 for i in $(seq 1 30); do
-  if curl -s --noproxy '*' -o /dev/null "http://localhost:8090/api/agents" 2>/dev/null; then
+  if curl -s --noproxy '*' -o /dev/null "$BACKEND_URL/api/agents" 2>/dev/null; then
     break
   fi
   sleep 1
@@ -28,7 +44,7 @@ if tmux has-session -t agentchat 2>/dev/null; then
 fi
 
 # Respect manual-down flag: do not auto-start intentionally stopped agents.
-AGENT_JSON="$(curl -s --noproxy '*' "http://localhost:8090/api/agents/agentchat" 2>/dev/null || true)"
+AGENT_JSON="$(curl -s --noproxy '*' "$BACKEND_URL/api/agents/agentchat" 2>/dev/null || true)"
 if [ -n "$AGENT_JSON" ]; then
   IS_MANUAL_DOWN="$(AGENT_JSON="$AGENT_JSON" python3 - <<'PY' 2>/dev/null || echo "0"
 import json
@@ -61,3 +77,19 @@ else
   echo "No resume-id found, starting fresh agentchat..."
   "$SCRIPT_DIR/agent-up" agentchat "$HOME" claude --fresh
 fi
+
+# Trigger automated reboot recovery after delay
+RECOVERY_DELAY=${RECOVERY_TRIGGER_DELAY_SEC:-25}
+(
+  sleep "$RECOVERY_DELAY"
+  if tmux has-session -t agentchat 2>/dev/null; then
+    NOTIFICATION='[NOTIFICATION] From system (auto-reboot-recovery): "Server has rebooted. Run reboot recovery skill: check backend API for manualDown states, resume all previously active local agents. Report results to kamico." Reply after ALL WORK is done, using the agent-chat MCP tool: send_message(to="kamico", summary="your reply", full="detailed reply").'
+    tmux send-keys -l -t agentchat:0.0 "$NOTIFICATION"
+    sleep 0.3
+    tmux send-keys -t agentchat:0.0 C-m
+    echo "Recovery trigger injected at $(date)"
+  else
+    echo "agentchat tmux session not found, skipping recovery trigger"
+  fi
+) &
+echo "Recovery trigger scheduled in ${RECOVERY_DELAY}s (pid=$!)"

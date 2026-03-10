@@ -21,7 +21,14 @@ fi
 #   self-time-reminder cancel 42
 set -euo pipefail
 
-API_BASE="http://127.0.0.1:8084/api/reminders"
+WEB_PORT_RAW="${AGENT_CHAT_WEB_PORT:-8084}"
+if [[ "$WEB_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$WEB_PORT_RAW" -gt 0 ]; then
+  WEB_PORT="$WEB_PORT_RAW"
+else
+  WEB_PORT="8084"
+fi
+WEB_BASE_URL="${AGENT_CHAT_WEB_URL:-http://127.0.0.1:$WEB_PORT}"
+API_BASE="${AGENT_CHAT_REMINDER_URL:-${WEB_BASE_URL%/}/api/reminders}"
 
 # ── Detect self target ──────────────────────────
 _detect_target() {

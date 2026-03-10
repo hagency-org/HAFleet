@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'fs';
 import { execFileSync } from 'child_process';
 import path from 'path';
 import { createHash } from 'crypto';
+import { resolveAgentDocsPaths, resolveV1ManifestForAgent } from '../lib/agent-home-v1.js';
 
 function readText(filePath) {
   try {
@@ -48,13 +49,29 @@ function extractHeadingSection(markdown, heading) {
 
 function loadMetaWorkspace(metaRoot, agentName) {
   const metaPath = path.join(metaRoot, agentName, 'meta.json');
-  if (!existsSync(metaPath)) return { metaPath, workspacePath: null };
+  let meta = null;
+  if (existsSync(metaPath)) {
+    try {
+      meta = JSON.parse(readFileSync(metaPath, 'utf-8'));
+    } catch {
+      meta = null;
+    }
+  }
+  const v1Manifest = resolveV1ManifestForAgent(agentName, meta, process.env);
+  if (!existsSync(metaPath)) {
+    return {
+      metaPath,
+      workspacePath: v1Manifest?.workdir || null,
+      v1Manifest,
+    };
+  }
   try {
-    const raw = JSON.parse(readFileSync(metaPath, 'utf-8'));
-    const workspacePath = (typeof raw.path === 'string' && raw.path.trim()) ? raw.path.trim() : null;
-    return { metaPath, workspacePath };
+    const workspacePath = (typeof meta?.path === 'string' && meta.path.trim())
+      ? meta.path.trim()
+      : (v1Manifest?.workdir || null);
+    return { metaPath, workspacePath, v1Manifest };
   } catch {
-    return { metaPath, workspacePath: null };
+    return { metaPath, workspacePath: v1Manifest?.workdir || null, v1Manifest };
   }
 }
 
@@ -64,28 +81,6 @@ function normalizeWorkspacePath(value) {
   if (!trimmed || trimmed.length > 4096) return null;
   if (!path.isAbsolute(trimmed)) return null;
   return path.resolve(trimmed);
-}
-
-function resolveDocsPaths(config, agentName, workspacePath) {
-  const candidates = [];
-  if (config.docsRootOverride) candidates.push(path.join(config.docsRootOverride, agentName));
-  if (workspacePath) candidates.push(path.join(workspacePath, 'docs', agentName));
-  candidates.push(path.resolve('docs', agentName));
-
-  for (const root of candidates) {
-    const agentsPath = path.join(root, 'agents.md');
-    const planPath = path.join(root, 'plan.md');
-    if (existsSync(agentsPath) || existsSync(planPath)) {
-      return { docsRoot: root, agentsPath, planPath };
-    }
-  }
-
-  const fallbackRoot = candidates[0] || path.resolve('docs', agentName);
-  return {
-    docsRoot: fallbackRoot,
-    agentsPath: path.join(fallbackRoot, 'agents.md'),
-    planPath: path.join(fallbackRoot, 'plan.md'),
-  };
 }
 
 function loadServerSsh(pathValue) {
@@ -122,7 +117,7 @@ function safeTmuxTarget(raw) {
 
 export function collectAgentContext(config, agentName, agentRecord, runtimeRecord) {
   const now = Date.now();
-  const { workspacePath: rawMetaWorkspacePath, metaPath } = loadMetaWorkspace(config.metaRoot, agentName);
+  const { workspacePath: rawMetaWorkspacePath, metaPath, v1Manifest } = loadMetaWorkspace(config.metaRoot, agentName);
   const metaWorkspacePath = normalizeWorkspacePath(rawMetaWorkspacePath);
   const runtimeWorkspacePath = normalizeWorkspacePath(runtimeRecord?.workspacePath);
   const effectiveWorkspacePath = metaWorkspacePath || runtimeWorkspacePath;
@@ -130,7 +125,11 @@ export function collectAgentContext(config, agentName, agentRecord, runtimeRecor
   const workspacePathSource = metaWorkspacePath
     ? 'meta'
     : (runtimeWorkspacePath ? 'runtime-fallback' : 'none');
-  const docsPaths = resolveDocsPaths(config, agentName, effectiveWorkspacePath);
+  const docsPaths = resolveAgentDocsPaths(agentName, effectiveWorkspacePath, {
+    cwd: config.repoRoot || process.cwd(),
+    docsRootOverride: config.docsRootOverride || null,
+    v1Manifest,
+  });
 
   const agentsDocRaw = readText(docsPaths.agentsPath);
   const planDocRaw = readText(docsPaths.planPath);

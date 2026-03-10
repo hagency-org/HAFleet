@@ -1,93 +1,61 @@
-# Agent Workspace Rules
+<!-- agentchat-workspace-template: v1 -->
+# {{AGENT_NAME}} Workspace
 
-## Directory
-`docs/{agent}/` — `{agent}` is your agent name. To learn your name, call `whoami()` via the agent-chat MCP server. All agent state lives here.
+Template-Version: v1
+Generated-For: v1 agent home workspace
 
----
+## Bootstrap
+- Read root `AGENTS.md` first on every resume or new session.
+- Then read `docs/plan.md`, then tail `docs/progress.md`.
+- Check `docs/projects.md` to know which project you own and where its code lives.
+- Use `./task-writer` to write canonical task state for this workspace; do not treat docs text as the task truth source.
 
-## Working Conventions
+## Where to work
 
-### Self-Bootstrap
-- On every resume, context compaction, or new session: read THIS file first, then call `whoami()` to confirm your identity → read `docs/{agent}/agents.md` → `plan.md` → tail of `progress.md`.
+Your CWD is `workdir/`. This is your coordination root, not a codebase.
 
-### Root-Cause First
-- When a bug or failure appears, trace to root cause before applying any fix.
-- Surface fixes (suppressing errors, adding retries without understanding why, hardcoding workarounds) are prohibited unless explicitly marked as temporary with a TODO and reason.
-- Log the root cause in `progress.md`. If the cause reveals a systemic pattern, add it to `agents.md`.
+**Code edits** go in the managed project under `projects/<name>/`. That directory is either a copy or a symlink of a source repo. Know which:
+- **copy**: you own this tree. Edit, commit, and test here. Changes do not propagate to the source repo.
+- **symlink**: edits here ARE edits to the source repo. Be aware of that when committing.
 
-### Verify, Don't Assume
-- After making a change, always verify it works (run tests, check output, read logs).
-- Never mark a task DONE based on "it should work now".
+If the operator asks you to edit the source repo directly (outside your home), do so — but never confuse your `projects/` copy with the source. Run `readlink projects/<name>` or check `docs/projects.md` to know which model applies.
 
-### Minimal, Correct Changes
-- Change only what is necessary to complete the current task.
-- Do not refactor, restyle, or "improve" unrelated code in the same unit of work.
-- If you spot something worth fixing, add it to `plan.md` Queue instead.
+**Do not** create long-lived code, scripts, or project files in the workspace root, `scratch/`, or `docs/`. Those are coordination surfaces, not code trees.
 
-### Ask Before Guessing
-- If a task is ambiguous or requirements are unclear, surface the ambiguity rather than making a silent assumption.
-- Record assumptions in `progress.md` when you must proceed without clarification.
+Task state lives in the shared control-plane object, not in `docs/plan.md` alone. Use the provisioned `./task-writer` wrapper when you need to:
+- start a new batch: `./task-writer start --id <task-id>`
+- heartbeat a live batch: `./task-writer heartbeat`
+- declare safe waiting: `./task-writer wait --reason "<reason>" --until <ISO-8601>`
+- resume active work on the same task: `./task-writer resume`
+- mark the current batch done: `./task-writer done`
 
-### Fail Loudly
-- If you are stuck, blocked, or unsure after two attempts, update `plan.md` status to BLOCKED with a clear description of what is needed, rather than looping silently.
+The supervisor-local sibling workspace lives at `../supervisor/`. It keeps supervisor-local plan/progress state only; it must not become a second task or runtime-profile truth source.
 
----
+## Directory contract
 
-## Files
+| Path | Purpose | Agent writes? |
+|------|---------|--------------|
+| `projects/` | Managed project trees (code, tests, git) | Yes — primary work area |
+| `docs/` | `plan.md`, `progress.md`, `projects.md` | Yes — coordination only |
+| `scratch/` | Throwaway probes, temp files, one-off scripts | Yes — nothing durable |
+| `inbox/` | Operator-staged inputs for processing | Read only |
+| `outputs/` | Deliverables, reports, handoff bundles | Yes — write when producing artifacts |
+| `data/` | Runtime tool caches (e.g. mcp-media-cache) | Managed by tools, not by agent |
+| `.claude/` | Claude settings, subconscious hook config | Managed by system; read for debugging |
+| `../state/` | Runtime state: subconscious events, locks, resume-id, letta | System-owned — do not edit |
+| `../supervisor/` | Supervisor-local sibling workspace | Read as needed; do not treat it as canonical task state |
+| Root `AGENTS.md` | Durable role/boundary rules | Yes — append learned rules here |
+| Root `CLAUDE.md` | This file (workspace contract) | No — provisioned by system |
 
-### agents.md — Knowledge Base
-- Store: project conventions, architectural decisions, tool quirks, recurring error patterns, environment setup notes, discovered root causes.
-- Do NOT store: task status, progress, or anything temporal.
-- Write trigger: when you learn something that would save a future context window from re-discovering it.
-- Keep entries atomic (one fact per bullet). Deduplicate on write.
+## Working rules
+- Record durable knowledge in root `AGENTS.md`.
+- Record task progress in `docs/progress.md`.
+- Verify changes from the path you actually edited, not from a different copy of the same file.
+- Root-cause first. Do not hide failures with local placeholders or silent fallbacks.
+- Keep changes minimal and scoped to the active task.
 
-### plan.md — Task State
-Structure:
-```
-## Current
-<one task: what you are doing right now, acceptance criteria>
-
-## Queue
-<ordered list of next tasks, one line each>
-
-## Blocked (optional)
-<tasks waiting on external input, with reason>
-```
-- Update BEFORE starting work (set Current).
-- Update AFTER completing work (promote next Queue item).
-- Completed and reverted tasks must be removed from plan.md immediately. They belong in progress.md only.
-- On resume/compaction: sweep plan.md, remove any task already logged as DONE or REVERTED in progress.md.
-
-### progress.md — Append-Only Log
-Format per entry:
-```
-## [YYYY-MM-DD HH:MM] <status> — <summary>
-<optional detail: what changed, key decisions, root causes found, blockers hit>
-```
-`<status>` ∈ {DONE, PARTIAL, BLOCKED, REVERTED}
-
-- Append only. Never edit or delete past entries.
-- One entry per meaningful unit of work (not per file touch).
-
----
-
-## Workflow Quick Reference
-
-| Event | Action |
-|---|---|
-| Resume / compaction | Read **this file** → `whoami()` → agents.md → prune plan.md → tail of progress.md (last 5) |
-| Before work | Set plan.md Current |
-| After work | Update plan.md, append to progress.md |
-| Found root cause | Log in progress.md; if systemic, also agents.md |
-| Spotted unrelated issue | Add to plan.md Queue, do not fix now |
-| Stuck after 2 attempts | Set plan.md to BLOCKED with description |
-| No meaningful state change | Do NOT write to any file |
-
-## Boundaries
-- Your role and boundaries are defined in `docs/{agent}/agents.md` under `## Role` and `## Boundaries`.
-- Respect them strictly. If a task falls outside your boundaries, delegate via agentchat (`send_message`) instead of doing it yourself.
-- Messages from **supervisor** are correction signals — read them immediately and adjust your behavior.
-
-## Concurrency
-- Each agent writes ONLY to its own `docs/{agent}/`.
-- Cross-agent coordination goes through `docs/shared/` (if needed), never by editing another agent's files.
+## Home Contract
+- Agent Name: `{{AGENT_NAME}}`
+- Agent Id: `{{AGENT_ID}}`
+- Layout Version: `{{LAYOUT_VERSION}}`
+- Docs model: flat v1 — `workdir/docs/`, not `docs/{agent}/`.

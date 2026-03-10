@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+_resolve_script_dir() {
+  local src="$0"
+  while [ -L "$src" ]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+SCRIPT_DIR="$(_resolve_script_dir)"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+PROVISION_SCRIPT="$BASE_DIR/scripts/provision-v1-agent-home.js"
+ENV_FILE="$BASE_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
+RUNTIME_DIR="${AGENT_CHAT_RUNTIME_DIR:-$BASE_DIR}"
+COMPAT_DATA_DIR="$RUNTIME_DIR/data/agents"
+
+usage() {
+  cat <<'USAGE'
+Usage: agent-up-v1 <name> [claude|codex] [options passed to agent-up]
+
+v1 provisioning options:
+  --project <path>           Source project to materialize under workdir/projects/
+  --project-mode <mode>      copy (default) | symlink
+  --project-name <name>      Override project directory name in workdir/projects/
+  --home <path>              Override AGENTCHAT_HOMEDIR for this command
+  --agent-id <id>            Explicit internal id (default: agent_<normalized-name>)
+
+Pass-through options (handled by agent-up):
+  --fresh --attach --allow-shared-workspace --model <m> --extra-args "<args>"
+USAGE
+}
+
+if [ $# -lt 1 ]; then
+  usage >&2
+  exit 1
+fi
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+NAME="$1"
+shift
+
+if [[ -z "$NAME" || "$NAME" == -* ]]; then
+  echo "Error: invalid agent name" >&2
+  exit 1
+fi
+
+AGENT_TYPE="claude"
+PROJECT_PATH=""
+PROJECT_MODE="copy"
+PROJECT_NAME=""
+HOME_OVERRIDE=""
+AGENT_ID_OVERRIDE=""
+declare -a PASS_ARGS=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    claude|codex)
+      AGENT_TYPE="$1"
+      PASS_ARGS+=("$1")
+      shift
+      ;;
+    --project)
+      [ $# -ge 2 ] || { echo "Error: --project requires a value" >&2; exit 1; }
+      PROJECT_PATH="$2"
+      shift 2
+      ;;
+    --project-mode)
+      [ $# -ge 2 ] || { echo "Error: --project-mode requires a value" >&2; exit 1; }
+      PROJECT_MODE="$2"
+      shift 2
+      ;;
+    --project-name)
+      [ $# -ge 2 ] || { echo "Error: --project-name requires a value" >&2; exit 1; }
+      PROJECT_NAME="$2"
+      shift 2
+      ;;
+    --home)
+      [ $# -ge 2 ] || { echo "Error: --home requires a value" >&2; exit 1; }
+      HOME_OVERRIDE="$2"
+      shift 2
+      ;;
+    --agent-id)
+      [ $# -ge 2 ] || { echo "Error: --agent-id requires a value" >&2; exit 1; }
+      AGENT_ID_OVERRIDE="$2"
+      shift 2
+      ;;
+    --model|--extra-args)
+      [ $# -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 1; }
+      PASS_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --fresh|--attach|--allow-shared-workspace)
+      PASS_ARGS+=("$1")
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unsupported argument for agent-up-v1: $1" >&2
+      echo "Hint: use --project <path> instead of positional workspace path." >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ ! -f "$PROVISION_SCRIPT" ]; then
+  echo "Error: missing provision script: $PROVISION_SCRIPT" >&2
+  exit 1
+fi
+
+declare -a PROVISION_ARGS=(--name "$NAME" --type "$AGENT_TYPE" --project-mode "$PROJECT_MODE")
+[ -n "$PROJECT_PATH" ] && PROVISION_ARGS+=(--project "$PROJECT_PATH")
+[ -n "$PROJECT_NAME" ] && PROVISION_ARGS+=(--project-name "$PROJECT_NAME")
+[ -n "$HOME_OVERRIDE" ] && PROVISION_ARGS+=(--home "$HOME_OVERRIDE")
+[ -n "$AGENT_ID_OVERRIDE" ] && PROVISION_ARGS+=(--agent-id "$AGENT_ID_OVERRIDE")
+
+PROVISION_JSON="$(node "$PROVISION_SCRIPT" "${PROVISION_ARGS[@]}")"
+[ -n "$PROVISION_JSON" ] || { echo "Error: empty provision response" >&2; exit 1; }
+
+eval "$(
+  PROVISION_JSON="$PROVISION_JSON" python3 - <<'PY'
+import json
+import os
+import shlex
+import sys
+
+raw = os.environ.get("PROVISION_JSON", "")
+try:
+    data = json.loads(raw)
+except Exception as e:
+    print(f"echo {shlex.quote('Error: invalid JSON from provision script')} >&2")
+    print("exit 1")
+    raise SystemExit(0)
+
+paths = data.get("paths") or {}
+required = ["homeDir", "stateDir", "workdir", "agentId", "agentJsonPath"]
+for key in required:
+    if not isinstance(paths.get(key), str) or not paths.get(key).strip():
+        print(f"echo {shlex.quote('Error: provision output missing ' + key)} >&2")
+        print("exit 1")
+        raise SystemExit(0)
+
+env_map = {
+    "V1_HOME_DIR": paths["homeDir"],
+    "V1_STATE_DIR": paths["stateDir"],
+    "V1_WORKDIR": paths["workdir"],
+    "V1_AGENT_ID": paths["agentId"],
+    "V1_AGENT_JSON": paths["agentJsonPath"],
+}
+subconscious_enabled = data.get("subconsciousEnabled")
+if subconscious_enabled is True:
+    env_map["V1_SUBCONSCIOUS_ENABLED"] = "1"
+elif subconscious_enabled is False:
+    env_map["V1_SUBCONSCIOUS_ENABLED"] = "0"
+else:
+    env_map["V1_SUBCONSCIOUS_ENABLED"] = ""
+
+for key, value in env_map.items():
+    print(f"{key}={shlex.quote(value)}")
+PY
+)"
+
+mkdir -p "$COMPAT_DATA_DIR/$NAME"
+COMPAT_DIR="$COMPAT_DATA_DIR/$NAME"
+META_FILE="$COMPAT_DIR/meta.json"
+mkdir -p "$V1_STATE_DIR" "$V1_STATE_DIR/tmp" "$V1_STATE_DIR/history"
+
+# Safety gate: do not implicitly migrate arbitrary legacy agents.
+if [ -f "$META_FILE" ]; then
+  LEGACY_STATE="$(
+    META_FILE="$META_FILE" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+meta_file = os.environ["META_FILE"]
+try:
+    data = json.load(open(meta_file))
+except Exception:
+    print("invalid")
+    raise SystemExit(0)
+ver = str(data.get("agentModelVersion") or "").strip()
+if ver.startswith("1"):
+    print("v1")
+else:
+    print("legacy")
+PY
+)"
+  if [ "$LEGACY_STATE" = "legacy" ]; then
+    echo "Error: existing metadata for '$NAME' is legacy (0.x)." >&2
+    echo "Refusing implicit migration. Create a new v1 agent name instead." >&2
+    exit 1
+  fi
+fi
+
+META_FILE="$META_FILE" NAME="$NAME" AGENT_TYPE="$AGENT_TYPE" \
+  V1_WORKDIR="$V1_WORKDIR" V1_HOME_DIR="$V1_HOME_DIR" V1_STATE_DIR="$V1_STATE_DIR" \
+  V1_AGENT_ID="$V1_AGENT_ID" V1_AGENT_JSON="$V1_AGENT_JSON" V1_SUBCONSCIOUS_ENABLED="${V1_SUBCONSCIOUS_ENABLED:-}" NOW="$(date -Iseconds)" \
+  python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+meta_file = Path(os.environ["META_FILE"])
+meta = {}
+if meta_file.exists():
+    try:
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    except Exception:
+        meta = {}
+
+meta["name"] = os.environ["NAME"]
+meta["type"] = os.environ["AGENT_TYPE"]
+meta["path"] = os.environ["V1_WORKDIR"]
+meta["agentModelVersion"] = "1.0"
+meta["layoutVersion"] = 1
+meta["agentId"] = os.environ["V1_AGENT_ID"]
+meta["homeDir"] = os.environ["V1_HOME_DIR"]
+meta["stateDir"] = os.environ["V1_STATE_DIR"]
+meta["workdir"] = os.environ["V1_WORKDIR"]
+meta["agentJsonPath"] = os.environ["V1_AGENT_JSON"]
+meta["v1HomeManaged"] = True
+if os.environ.get("V1_SUBCONSCIOUS_ENABLED", "") == "1":
+    meta["subconsciousEnabled"] = True
+elif os.environ.get("V1_SUBCONSCIOUS_ENABLED", "") == "0":
+    meta["subconsciousEnabled"] = False
+if "createdAt" not in meta:
+    meta["createdAt"] = os.environ["NOW"]
+meta["lastUp"] = os.environ["NOW"]
+
+meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+PY
+
+if [ -f "$COMPAT_DIR/resume-id" ] && [ ! -L "$COMPAT_DIR/resume-id" ] && [ ! -f "$V1_STATE_DIR/resume-id" ]; then
+  cp "$COMPAT_DIR/resume-id" "$V1_STATE_DIR/resume-id"
+fi
+ln -sfn "$V1_STATE_DIR/resume-id" "$COMPAT_DIR/resume-id"
+ln -sfn "$V1_STATE_DIR/tmp" "$COMPAT_DIR/tmp"
+
+echo "Provisioned v1 agent home:"
+echo "  id:      $V1_AGENT_ID"
+echo "  home:    $V1_HOME_DIR"
+echo "  state:   $V1_STATE_DIR"
+echo "  workdir: $V1_WORKDIR"
+
+CMD=("$SCRIPT_DIR/agent-up" "$NAME" "$V1_WORKDIR")
+if [ "${#PASS_ARGS[@]}" -gt 0 ]; then
+  CMD+=("${PASS_ARGS[@]}")
+fi
+
+AGENTCHAT_INTERNAL_DISPATCH=1 exec "${CMD[@]}"

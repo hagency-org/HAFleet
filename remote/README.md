@@ -32,7 +32,7 @@ Most files here are managed by root-level generators/sync checks:
 - Legacy commands (`agent-up`, `agent-down`, `agent-send`, etc.) are deprecated wrappers that forward to `agentchat` with a warning.
 
 Examples:
-- `agentchat up <name> <path> [claude|codex]`
+- `agentchat up <name> <path> [claude|codex] [--allow-shared-workspace]`
 - `agentchat down <name>`
 - `agentchat update --pause-services`
 - `agentchat audit`
@@ -57,7 +57,7 @@ Examples:
    - `codex mcp list`
    - Both should include `agent-chat` with command `node .../mcp-server.js`
 5. Launch remote agents:
-   - `agentchat up <name> <path> [claude|codex]`
+   - `agentchat up <name> <path> [claude|codex] [--allow-shared-workspace]`
 6. Verify agent state after launch:
    - `agentchat verify-remote --agent <name>`
 
@@ -79,7 +79,7 @@ Use this sequence for remote rollout and acceptance:
 
 1. `agentchat update`
 2. `agentchat verify-remote`
-3. `agentchat up <name> <path> [claude|codex]`
+3. `agentchat up <name> <path> [claude|codex] [--allow-shared-workspace]`
 4. `agentchat verify-remote --agent <name>`
 
 Pass criteria:
