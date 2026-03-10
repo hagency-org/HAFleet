@@ -2056,3 +2056,7 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Re-stated the intended reasoning model: supervisor should remain an `agent-shaped state machine` that emits one bounded convergent state, and repeated identical states are the trigger for intervention/escalation.
 - Re-stated the intended intervention path: supervisor should use agentchat-native messaging (`send_message`, later optional force semantics) rather than inventing a separate hidden control channel.
 - Paused further supervisor implementation conceptually until this charter correction is treated as the current architecture contract.
+## [2026-03-11 03:47] DONE — switched worker into chief-coordinator mode and re-queued execution through the three child agents
+- Recorded the operator requirement that worker should stop doing direct investigation/coding wherever delegatable and instead drive `agentchat-develop`, `agentchat-aduit`, and `Yato` through narrow scoped tasks.
+- Rewrote the active plan to make delegation, reminder chaining, and durable documentation the current unit of work rather than ad hoc feature/debug implementation.
+- Kept the active execution lanes separate: `agentchat-develop` for structural/control-plane work, `agentchat-aduit` for continuing audit follow-up, and `Yato` for task/Internals UI follow-on plus field-model convergence staging.

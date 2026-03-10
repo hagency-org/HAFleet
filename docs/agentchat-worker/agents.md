@@ -6,7 +6,8 @@
   - Keep migration/deploy/runtime workflows stable for local and live folders.
 - Adjacent focus:
   - Touch other repos only when explicitly requested by operator and with backup-first changes.
-  - Use agent-chat MCP to coordinate and report progress.
+- Use agent-chat MCP to coordinate and report progress.
+- Current operator instruction sets worker into chief-coordinator mode: delegate investigation/coding/execution to `agentchat-develop`, `agentchat-aduit`, and `Yato` wherever possible; worker should primarily own architecture, triage, planning, reminders, acceptance, and durable documentation.
 
 ## Boundaries
 ### Must do
