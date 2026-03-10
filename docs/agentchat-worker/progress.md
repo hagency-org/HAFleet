@@ -1811,3 +1811,13 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `master`: `b7a46df` `fix(web): stop blocking selected-agent summary on unread fetch`
   - `stable`: `714868c` `fix(web): stop blocking selected-agent summary on unread fetch`
 - Browser-level PASS is still pending from `webdebug`; until that comes back, this stays `PARTIAL` rather than `DONE`.
+
+## [2026-03-10 21:19] DONE — fixed live root selected-agent fallback loop and deployed tmux-snapshot hardening
+- `webdebug`'s browser root cause was correct: the live root page called `hasCurrentSupervisorIssue()` inside `fetchAgentDetail()` but did not emit that helper into the root page's own inline script scope. That produced a repeated `ReferenceError` and forced the selected-agent panel into `Summary unavailable...` on every refresh.
+- Added the missing helper to the root page in both `master` and `stable/live`, restarted live web, and verified the live root HTML now includes both the helper definition and the call site.
+- Accepted and deployed `agentchat-develop`'s hot-path hardening in `backend-v2.js`: local activity sweeps now reuse one global tmux pane snapshot instead of repeatedly shelling out per agent for command/path/pid metadata. This narrows the live Matrix `backend unreachable` residual to localized queue/bridge timeout paths instead of whole-backend stalls on redundant tmux fan-out.
+- Post-deploy live verification:
+  - `GET /` on `8084` -> `200`
+  - `GET /health` on `8090` -> `200`
+  - repeated `GET /api/inbox/agentchat-worker` on `8090` -> `200`
+  - live web and backend are both running from `/home/shisui/laplace/agent-chat-live`

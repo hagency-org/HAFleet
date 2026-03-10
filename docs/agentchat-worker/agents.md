@@ -359,3 +359,4 @@
   - sibling `supervisor/` workspace is allowed for supervisor-local docs/state, but it must not introduce a second canonical `Task` or `runtimeProfile` source.
 
 - Root selected-agent summary panel truthfulness rule: primary panel render must not block on secondary fetches that are not actually used by the current surface. In `server.js` root-page `fetchAgentDetail()`, waiting on unread-messages before rendering left the panel stuck on `Loading summary...`; secondary fetch failures must fail loud or be non-blocking.
+- Root/detail inline-JS helper drift is a real live risk: root and detail pages each emit their own script scope, so introducing a new helper call (for example `hasCurrentSupervisorIssue`) on the root page without emitting the helper into the root-page script produces live-only render failures even though the same helper exists elsewhere in `server.js`.
