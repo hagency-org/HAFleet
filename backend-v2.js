@@ -32,6 +32,10 @@ const DEFAULT_WEB_PORT = Number.isFinite(DEFAULT_WEB_PORT_RAW) && DEFAULT_WEB_PO
 const DATA_DIR = path.join(RUNTIME_ROOT, 'data');
 const WEB_BASE_URL = (process.env.AGENT_CHAT_WEB_URL || `http://127.0.0.1:${DEFAULT_WEB_PORT}`).trim().replace(/\/$/, '');
 const PUSH_QUEUE_URL = (process.env.AGENT_CHAT_QUEUE_URL || `${WEB_BASE_URL}/api/queue`).trim().replace(/\/$/, '');
+const WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_WEB_BRIDGE_FETCH_TIMEOUT_MS || '5000', 10);
+const WEB_BRIDGE_FETCH_TIMEOUT_MS = Number.isFinite(WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW) && WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW > 0
+  ? WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW
+  : 5000;
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const LOCAL_SERVER_ID = (process.env.AGENT_CHAT_SERVER || 'local').trim();
 const USER_UID = (typeof process.getuid === 'function') ? process.getuid() : null;
@@ -4168,6 +4172,7 @@ function pushResourceAlertToAgent(agentName, summary) {
   fetch(PUSH_QUEUE_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
     body: JSON.stringify({
       from: 'agent-chat-v2',
       to: agent.tmux,
@@ -4501,6 +4506,7 @@ function clearQueuedNotificationsForAgent(agentName) {
   if (!agentName) return;
   fetch(`${WEB_BASE_URL}/api/queue/agents/${encodeURIComponent(agentName)}/notifications`, {
     method: 'DELETE',
+    signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
   })
     .then((r) => {
       if (!r.ok) {
@@ -4679,6 +4685,7 @@ async function pushNotify(agentName, msg) {
     const resp = await fetch(PUSH_QUEUE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
       body: JSON.stringify({ from: 'agent-chat-v2', to: agent.tmux, payload: notification, notifyMeta }),
     });
     if (resp.ok) {
