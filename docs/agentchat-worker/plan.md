@@ -1,13 +1,11 @@
 ## Current
-Continue the live Matrix/backend timeout residual until there is an explicit closure proof or a new exact owner narrowing after the accepted duplicate-owner lock, local-activity slices 1-2, and MCP-session-resolution batching.
+Resume control-plane/UI convergence now that the live Matrix timeout residual has a closure proof: unpark v1 manifest/backend sync divergence, converge human-maintained fields (`Guidance` / `Owner` / `Identity`), and drive the Agent Detail task/Internals follow-on through Yato.
 Acceptance criteria:
-- the single-owner lock implementation is committed and pushed as accepted live code
-- the quoted Matrix notice remains narrowed beyond `submitHumanMessage() -> POST /api/messages` to backend event-loop starvation caused by the local activity sweep path
-- local-activity sweep hardening slice-1 and slice-2 are both accepted with proof
-- the MCP-session-resolution batching slice is accepted with proof
-- a post-fix closure proof explicitly shows the residual is closed, or provides the next exact owner with route/function-chain evidence
-- `agentchat-develop` stays scoped only to the timeout residual until the next exact fix-order decision is ready
-- v1/control-plane work remains parked while the live timeout residual is still open
+- the live Matrix timeout class is treated as closed unless new evidence reopens it
+- `agentchat-develop` is re-scoped to the next parked structural line (`v1 manifest/backend sync divergence`) instead of drifting after the Matrix closure
+- the field-model convergence (`remove Project Scope/Human Notes`, `Manual Guidance -> Guidance`, first-class `Owner` / `Identity`) is tracked as an active control-plane line rather than a parked note
+- Yato either delivers the queued task/Internals UI follow-on or is replaced by another explicit executor without leaving the UI line ambiguous
+- Matrix duplicate-owner remains operator-follow-up only unless new evidence reopens it
 
 ## Queue
 1. Resume the v1 manifest/backend sync divergence line after the live Matrix duplicate-bridge incident is contained; use the accepted design note as the canonical starting point.

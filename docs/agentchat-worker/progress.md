@@ -2028,6 +2028,11 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Independent review confirmed the scope stayed narrow and the intended code path exists exactly where the residual had been narrowed: `pgrep -f \"node.*mcp-server.js\"` plus the new batched `ps` query inside the MCP-session-resolution helper.
 - I did not mark the live Matrix timeout residual closed yet; the next step is an explicit post-fix closure proof showing whether the user-facing timeout is actually gone on live-sized conditions or whether ownership has moved again to a later exact chain.
 
+## [2026-03-11 00:19] DONE — accepted closure of the live Matrix timeout class and resumed the parked control-plane/UI lines
+- Accepted `agentchat-develop`'s post-fix closure proof for the live Matrix human-message timeout class. I did not rely on the sweep-off baseline because its proof root hit `EADDRINUSE`, but the aggressive/live-like copied-runtime proofs plus direct live probes were enough: the copied-live aggressive case stayed below `1s`, the copied-live live-like case stayed below `0.03s`, and direct live `POST /api/messages` probes completed in `0.01s`, `0.01s`, and `0.02s`.
+- Treated the timeout class as closed unless new evidence reopens it. Duplicate-owner stays closed as a code line with only the operator-owned `bridge-matrix.service` cleanup left.
+- Re-scoped work away from the Matrix incident line: unparked the accepted `v1 manifest/backend sync divergence` design for `agentchat-develop`, and resumed the queued Agent Detail task/Internals UI follow-on by explicitly nudging `Yato` back onto its managed-copy implementation path.
+
 ## [2026-03-10 23:58] PARTIAL — queued the Agent Detail task/Internals follow-on and routed it to Yato via tmux
 - Added the UI follow-on to the worker queue: make Agent Detail expose canonical task visibility/editing and show `AGENTS.md`, `plan.md`, and `progress.md` tails under `Internals`.
 - Checked current control-plane reachability before delegation: `Yato` still has a live tmux session, but the current control-plane surface does not expose a schedulable `Yato` agent object on the active backend path, so I did not block the task on a dead message route.
