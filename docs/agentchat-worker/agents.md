@@ -238,6 +238,10 @@
   - `agent.json` is the canonical v1 home-owned metadata source;
   - `PATCH /api/agents/:name/home-metadata` is the canonical v1 writer;
   - `data/agents/<name>/meta.json` is strict compatibility export only and must never outrank or repair the manifest;
+- Live Matrix duplicate-reply incident root cause:
+  - the direct cause was duplicate live `bridge-matrix.js` owners against the same `AGENT_CHAT_RUNTIME_DIR` (tmux-managed bridge plus orphaned systemd-owned bridge);
+  - the code-side anti-recurrence fix is an in-process runtime-root single-owner lock at `data/matrix/bridge-owner.lock`;
+  - operator-owned follow-up still remains: disable/remove the competing `bridge-matrix.service` path when root-capable execution is available.
   - backend row state remains a runtime-serving derivative projection for v1-owned fields.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;

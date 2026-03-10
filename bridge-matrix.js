@@ -4,8 +4,9 @@ import {
   AutojoinRoomsMixin,
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { execFileSync } from 'child_process';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import EventSource from './lib/eventsource-mini.js';
@@ -42,9 +43,132 @@ const DATA_DIR = path.join(RUNTIME_ROOT, 'data', 'matrix');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
 const AGENT_META_ROOT = path.join(RUNTIME_ROOT, 'data', 'agents');
 const AGENT_AVATAR_STYLE_VERSION = 2;
+const OWNER_LOCK_PATH = path.join(DATA_DIR, 'bridge-owner.lock');
 
 mkdirSync(DATA_DIR, { recursive: true });
 mkdirSync(MEDIA_DIR, { recursive: true });
+
+function safeReadJsonFile(filePath, fallback = null) {
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function detectLauncherTag() {
+  if (String(process.env.TMUX || '').trim()) return 'tmux';
+  if (String(process.env.JOURNAL_STREAM || '').trim() || String(process.env.INVOCATION_ID || '').trim()) return 'systemd';
+  return 'unknown';
+}
+
+function readProcCmdline(pid) {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, 'utf-8').replace(/\u0000/g, ' ').trim();
+  } catch {
+    return null;
+  }
+}
+
+function readProcCwd(pid) {
+  try {
+    return path.resolve(readlinkSync(`/proc/${pid}/cwd`));
+  } catch {
+    return null;
+  }
+}
+
+function isLiveBridgeOwner(meta) {
+  const pid = Number(meta?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  const cmdline = readProcCmdline(pid);
+  if (!cmdline || !cmdline.includes('bridge-matrix.js')) return false;
+  const ownerRuntimeRoot = typeof meta?.runtimeRoot === 'string' ? path.resolve(meta.runtimeRoot) : null;
+  return !ownerRuntimeRoot || ownerRuntimeRoot === RUNTIME_ROOT;
+}
+
+function summarizeOwner(meta) {
+  if (!meta || typeof meta !== 'object') return 'unknown owner';
+  const pid = Number.isInteger(Number(meta.pid)) ? Number(meta.pid) : null;
+  const launcher = typeof meta.launcher === 'string' ? meta.launcher : 'unknown';
+  const cwd = typeof meta.cwd === 'string' ? meta.cwd : 'unknown';
+  const startedAt = typeof meta.startedAt === 'string' ? meta.startedAt : 'unknown';
+  return `pid=${pid ?? 'unknown'} launcher=${launcher} cwd=${cwd} startedAt=${startedAt}`;
+}
+
+function writeOwnerLock(fd, meta) {
+  writeFileSync(fd, `${JSON.stringify(meta, null, 2)}\n`, 'utf-8');
+}
+
+function buildOwnerLockMeta() {
+  return {
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    cwd: process.cwd(),
+    procCwd: readProcCwd(process.pid),
+    runtimeRoot: RUNTIME_ROOT,
+    hostname: os.hostname(),
+    launcher: detectLauncherTag(),
+  };
+}
+
+function acquireBridgeOwnership() {
+  const ownerMeta = buildOwnerLockMeta();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let fd = null;
+    try {
+      fd = openSync(OWNER_LOCK_PATH, 'wx');
+      writeOwnerLock(fd, ownerMeta);
+      closeSync(fd);
+      return ownerMeta;
+    } catch (error) {
+      if (fd !== null) {
+        try { closeSync(fd); } catch {}
+      }
+      if (error?.code !== 'EEXIST') throw error;
+      const existing = safeReadJsonFile(OWNER_LOCK_PATH, null);
+      if (isLiveBridgeOwner(existing)) {
+        throw new Error(`duplicate bridge owner for runtime root ${RUNTIME_ROOT}; existing ${summarizeOwner(existing)}`);
+      }
+      try {
+        unlinkSync(OWNER_LOCK_PATH);
+      } catch (unlinkError) {
+        if (unlinkError?.code !== 'ENOENT') throw unlinkError;
+      }
+      console.warn(`[bridge-owner-lock] recovered stale owner lock for runtime root ${RUNTIME_ROOT}`);
+    }
+  }
+  throw new Error(`failed to acquire bridge owner lock for runtime root ${RUNTIME_ROOT}`);
+}
+
+function releaseBridgeOwnership(expectedMeta) {
+  const existing = safeReadJsonFile(OWNER_LOCK_PATH, null);
+  if (!existing || Number(existing?.pid) !== process.pid) return;
+  if (expectedMeta && String(existing.runtimeRoot || '') !== String(expectedMeta.runtimeRoot || '')) return;
+  try {
+    unlinkSync(OWNER_LOCK_PATH);
+  } catch {}
+}
+
+let bridgeOwnerMeta = null;
+try {
+  bridgeOwnerMeta = acquireBridgeOwnership();
+} catch (error) {
+  console.error(`[bridge-owner-lock] startup rejected: ${error?.message || error}`);
+  process.exit(1);
+}
+process.on('exit', () => releaseBridgeOwnership(bridgeOwnerMeta));
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    releaseBridgeOwnership(bridgeOwnerMeta);
+    process.exit(0);
+  });
+}
 
 // ── State persistence ─────────────────────────────────────────────────
 function loadState() {

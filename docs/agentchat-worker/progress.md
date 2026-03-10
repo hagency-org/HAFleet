@@ -1948,3 +1948,47 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Route-level proof on live used `AGENT_AUDIT_BACKEND_URL=http://127.0.0.1:8090` and `AGENT_CHAT_RUNTIME_DIR=/home/shisui/laplace/agent-chat-live-runtime`: the active audit set now follows the live API active rows rather than a compatibility-mirror gate, while non-`--active` inventory code remains unchanged.
 - The current live proof returned `agentchat-worker`, `prts-control`, and `prts-agent-server_init-bac1`, matching the live API active set; this confirmed the implementation moved the active candidate source to the API even though `agentchat-aduit` itself was idle and therefore correctly absent from the active set.
 - With the API-first auditability issue closed, the next unresolved structural target is the v1 manifest/backend sync divergence risk around home-state registration and canonical sync, while the live Matrix timeout residual remains a separate line.
+
+## [2026-03-10 22:44] PARTIAL — narrowed the live Matrix duplicate-reply incident to duplicate live bridge processes
+- New live incident from operator: Matrix-side replies are appearing twice, alongside the previously separate `backend unreachable` timeout residual.
+- Process/root-cause evidence now points first to live bridge duplication, not generic backend instability: `pgrep -af 'bridge-matrix.js'` found two live `bridge-matrix.js` processes with the same cwd and same live Matrix env (`/home/shisui/laplace/agent-chat-live`, `AGENT_CHAT_RUNTIME_DIR=/home/shisui/laplace/agent-chat-live-runtime`). One is under the tmux-managed live bridge session (`PPID=2290611`), and another orphaned instance is running under `PPID=1`.
+- This is a plausible direct cause of duplicate Matrix deliveries/replies because two bridges with the same bot identity can process the same event stream.
+- Current live health remains nominal (`/health` 200, groups API 200), so the duplicate-reply symptom is not being treated as a generic backend outage.
+- The issue has been split cleanly: duplicate replies now form the active live Matrix incident branch, while the prior control-plane audit triage remains separate.
+
+## [2026-03-10 22:56] DONE — accepted the v1 manifest/backend sync divergence design and parked implementation behind the live Matrix incident
+- Accepted `agentchat-develop`'s [v1-manifest-backend-sync-divergence-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/v1-manifest-backend-sync-divergence-design.md).
+- The design correctly freezes the remaining structural divergence points: success-opaque `syncBackendAgentHomeState()`, lack of verified PATCH->POST convergence, direct provision/reprovision as an out-of-band derived-state writer, `bin/agent-up` still trusting `meta.json`, and supervisor/runtime correctness still depending on backend-row freshness.
+- I did not start implementation from this acceptance because the live Matrix duplicate-bridge incident is the active operator-facing problem. The accepted design is now the parked canonical starting point for the next control-plane slice after the live Matrix incident is contained.
+
+## [2026-03-10 22:58] PARTIAL — proved live duplicate replies came from duplicate bridge owners and restored single-owner state
+- Independently confirmed `agentchat-develop`'s duplicate-owner finding against the live host state: there had been two live `bridge-matrix.js` processes under the same cwd and same live runtime/env, one tmux-managed and one orphaned under `PPID=1`.
+- The orphaned process matched the root-owned systemd unit ownership path (`bridge-matrix.service`) described by `agentchat-develop`; current process state now shows only one remaining live bridge PID, and live backend health is still `200`, so current service is back to a single-owner bridge state.
+- This closes the immediate duplicate-reply cause as a live ownership collision, not a generic Matrix/backend instability.
+- Residual risk remains: recurrence is still possible because the systemd-owned bridge path exists independently of the tmux-owned live bridge. The next smallest slice is therefore anti-recurrence design, kept separate from the still-independent Matrix timeout residual.
+
+## [2026-03-10 23:00] DONE — accepted the duplicate-bridge anti-recurrence design and split operator vs code follow-up
+- Accepted `agentchat-develop`'s [live-matrix-duplicate-bridge-anti-recurrence-design.md](/home/shisui/laplace/agent-chat/docs/agentchat-develop/live-matrix-duplicate-bridge-anti-recurrence-design.md).
+- The accepted ownership contract is now explicit: exactly one `bridge-matrix.js` owner per `AGENT_CHAT_RUNTIME_DIR`, with the current live runtime root owned only by the tmux-managed `agentchat-live-bridge`.
+- I split the follow-up into two non-conflated branches:
+  1. operator-owned external follow-up: disable/remove the competing `bridge-matrix.service` unit when root-capable execution is available
+  2. code follow-up: add an in-process runtime-root single-owner lock in `bridge-matrix.js` so any second owner fails fast before loading bridge state or starting sync
+- This keeps the duplicate-reply incident contained while still treating timeout residuals and control-plane audit work as separate lines.
+
+## [2026-03-10 23:04] DONE — accepted the live Matrix bridge single-owner lock and returned focus to the timeout residual
+- Accepted `agentchat-develop`'s in-process `bridge-matrix.js` single-owner lock implementation.
+- Independent checks confirmed the design stayed narrow: the new `data/matrix/bridge-owner.lock` is acquired before state/sync startup, duplicate-owner startup against the same runtime root fails fast with owner diagnostics, and stale-lock recovery is explicit.
+- Live process state now still shows only one remaining bridge owner, so the duplicate-reply incident is both contained in practice and guarded in code against the same runtime-root dual-owner path.
+- Remaining follow-up is split cleanly:
+  1. operator-owned: disable/remove the external `bridge-matrix.service` when root-capable execution is available
+  2. engineering-owned: continue narrowing the still-open live Matrix/backend timeout residual, which remains separate from the duplicate-owner line and from parked v1/control-plane work
+
+## [2026-03-10 23:16] PARTIAL — locked duplicate bridge ownership and resumed timeout-residual narrowing
+- Re-verified the accepted `bridge-matrix.js` single-owner lock locally: syntax is valid, the live host now has exactly one active bridge owner (`pgrep -af 'bridge-matrix.js'` returns only the tmux-managed live bridge), and live backend health plus inbox routes remain responsive.
+- Updated the worker plan so the active line is no longer “accept the lock” but “continue narrowing the remaining `backend unreachable` residual to an exact function chain.”
+- Current live residual focus is the Matrix human-message path: `submitHumanMessage() -> backendApi('POST', '/api/messages', payload)` still times out intermittently, so the next required closure is exact backend function-chain attribution rather than more ownership work.
+
+## [2026-03-10 23:17] DONE — accepted the timeout residual narrowing to the Matrix human-message submit path
+- Accepted `agentchat-develop`'s narrowing that the exact user-facing Matrix notice `backend unreachable (The operation was aborted due to timeout)` is emitted only by `bridge-matrix.js` `submitHumanMessage()` when `backendApi('POST', '/api/messages', payload)` times out for inbound human Matrix traffic.
+- Independently confirmed the negative proof on the backend side: `backend-v2.js` `POST /api/messages` does not await `pushNotify()` for direct or mention delivery, so queue-send work is not the blocking explanation for this specific timeout notice.
+- The still-open residual is therefore narrower but not yet closed: the next required step is to attribute the blocking behavior to the exact synchronous/awaited function chain inside the live `/api/messages` request path, while keeping duplicate-owner and parked v1/control-plane work separate.
