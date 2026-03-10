@@ -1761,3 +1761,10 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Implemented a minimal `server.js` hotfix in both `master` and the live code repo that gates current warning/current health rendering on a real current supervisor classification/lifecycle issue instead of historical `latest` rows alone. The same patch also makes disabled/no-current-state cases render neutral messaging (`Supervisor disabled`, `No active supervisor warning`) while keeping history in the Supervisor tab.
 - During deployment validation I also found live web `8084` was actually down; brought it back with a dedicated tmux-backed live web process so browser validation can proceed against a healthy service.
 - Current status is `PARTIAL` because the code/runtime hotfix is deployed, but final browser-level confirmation from `webdebug` is still pending before I close the loop and commit the patch formally.
+## [2026-03-10 15:49] DONE — closed the browser-visible supervisor stale-warning issue and recorded the remaining residual risk
+- `webdebug` now reports `PASS` for the narrow dev detail re-audit: with supervisor disabled, above-fold surfaces render `Supervisor disabled.` / `No active supervisor warning`, and historical supervisor rows stay in the Supervisor tab instead of presenting as current warning state.
+- Finalized and pushed the hotfix to both branches:
+  - `master`: `7b8b2a3` `fix(web): treat supervisor history as history, not current state`
+  - `stable`: `1c0c14d` `fix(web): treat supervisor history as history, not current state`
+- Also restored live web `8084`, which had dropped out during rollout validation and would otherwise have made all browser conclusions unreliable.
+- Residual truthfulness risk remains at code-path level: some `latestStatus` / `needsAttention`-family derived paths can still become stale-warning carriers if a future negative historical `latest` survives while supervisor is off. That is now a residual architecture cleanup item, not a reproducing browser-visible incident.

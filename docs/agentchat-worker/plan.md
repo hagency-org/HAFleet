@@ -1,9 +1,9 @@
 ## Current
-Close the live-exposed Agent Detail truthfulness issue where historical supervisor rows are rendered like current warnings even though supervisor/default-off state is idle or disabled.
+Triage and close the remaining post-stable residuals exposed by live rollout, starting with the residual supervisor current-vs-history code-path risk and the flaky inbox transport seen by execution agents.
 Acceptance criteria:
-- dev and live default Agent Detail no longer surface historical supervisor latest rows as current warnings
-- disabled/no-current-state supervisor cases render as neutral current state, with history kept in the Supervisor tab only
-- fix is verified on dev first and then on live-facing behavior with browser-level confirmation from `webdebug`
+- browser-visible stale supervisor warnings remain closed on dev/live
+- any remaining current-vs-history leak is reduced to an explicit residual or removed entirely
+- inbox transport failure is root-caused enough to decide whether it is a blocker, a dev-only fault, or a post-merge cleanup item
 
 
 ## Queue
