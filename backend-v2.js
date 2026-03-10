@@ -3660,30 +3660,41 @@ function captureLocalPaneContent(tmuxTarget) {
   }
 }
 
-function captureLocalPaneCommand(tmuxTarget) {
-  if (!tmuxTarget) return '';
+function buildLocalPaneSnapshotMap() {
+  const out = new Map();
   try {
-    const raw = execSync(`tmux list-panes -t ${JSON.stringify(tmuxTarget)} -F "#{pane_current_command}" 2>/dev/null`, {
-      timeout: 3000,
+    const raw = execSync('tmux list-panes -a -F "#{session_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}" 2>/dev/null', {
       encoding: 'utf-8',
+      timeout: 3000,
     }).trim();
-    return raw.split('\n')[0] || '';
+    if (!raw) return out;
+    for (const line of raw.split('\n')) {
+      const parts = line.split('\t');
+      if (parts.length < 4) continue;
+      const session = parts[0].trim();
+      const panePid = Number.parseInt(parts[1].trim(), 10);
+      const command = parts[2].trim();
+      const workspacePath = normalizeWorkspacePath(parts.slice(3).join('\t').trim());
+      if (!session) continue;
+      if (!out.has(session)) {
+        out.set(session, {
+          panePid: Number.isFinite(panePid) && panePid > 1 ? panePid : null,
+          command: command || '',
+          workspacePath,
+        });
+      }
+    }
   } catch {
-    return '';
+    // best effort snapshot
   }
+  return out;
 }
 
-function captureLocalPanePath(tmuxTarget) {
-  if (!tmuxTarget) return null;
-  try {
-    const raw = execSync(`tmux list-panes -t ${JSON.stringify(tmuxTarget)} -F "#{pane_current_path}" 2>/dev/null`, {
-      timeout: 3000,
-      encoding: 'utf-8',
-    }).trim();
-    return normalizeWorkspacePath((raw.split('\n')[0] || '').trim());
-  } catch {
-    return null;
-  }
+function readLocalPaneSnapshot(tmuxTarget, paneSnapshotMap = null) {
+  if (!tmuxTarget || !(paneSnapshotMap instanceof Map)) return null;
+  const sessionName = String(tmuxTarget).split(':')[0].trim();
+  if (!sessionName) return null;
+  return paneSnapshotMap.get(sessionName) || null;
 }
 
 function normalizeMcpPresence(value) {
@@ -3716,18 +3727,6 @@ function applyLocalRuntimeSignals(agentName, payload = {}) {
     mcpPresent,
     server: 'local',
   });
-}
-
-function localTmuxSessionExists(tmuxTarget) {
-  if (!tmuxTarget) return false;
-  const sessionName = String(tmuxTarget).split(':')[0].trim();
-  if (!sessionName) return false;
-  try {
-    execSync(`tmux has-session -t ${JSON.stringify(sessionName)} 2>/dev/null`, { timeout: 2000 });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function isEphemeralAuditAgentName(name) {
@@ -3787,6 +3786,7 @@ function sweepLocalActivityDurations() {
   const pruneCandidates = new Set();
   const localRuntimeAgents = new Set();
   const mcpSessions = getLocalMcpSessionSet(true);
+  const paneSnapshotMap = buildLocalPaneSnapshotMap();
 
   for (const agent of Object.values(agents)) {
     if (!isAgentRecord(agent)) continue;
@@ -3827,9 +3827,10 @@ function sweepLocalActivityDurations() {
 
     const paneCapture = captureLocalPaneContent(tmuxTarget);
     if (!paneCapture?.hash) {
-      const hasSession = localTmuxSessionExists(tmuxTarget);
-      const paneCmd = captureLocalPaneCommand(tmuxTarget);
-      const workspacePath = hasSession ? captureLocalPanePath(tmuxTarget) : null;
+      const paneSnapshot = readLocalPaneSnapshot(tmuxTarget, paneSnapshotMap);
+      const hasSession = !!paneSnapshot;
+      const paneCmd = paneSnapshot?.command || '';
+      const workspacePath = paneSnapshot?.workspacePath || null;
       const mcpPresent = hasSession ? mcpSessions.has(agent.name) : null;
       applyLocalRuntimeSignals(agent.name, {
         blocked: false,
@@ -3893,8 +3894,9 @@ function sweepLocalActivityDurations() {
       continue;
     }
     const paneHash = paneCapture.hash;
-    const paneCmd = captureLocalPaneCommand(tmuxTarget);
-    const workspacePath = captureLocalPanePath(tmuxTarget);
+    const paneSnapshot = readLocalPaneSnapshot(tmuxTarget, paneSnapshotMap);
+    const paneCmd = paneSnapshot?.command || '';
+    const workspacePath = paneSnapshot?.workspacePath || null;
     const blockedReason = detectLocalBlockedReason(paneCapture.text, paneCmd);
     const blocked = Boolean(blockedReason);
     applyLocalRuntimeSignals(agent.name, {
@@ -4106,22 +4108,11 @@ function scopeUnitForPid(pid) {
 
 function buildLocalPanePidMap() {
   const out = new Map();
-  try {
-    const raw = execSync('tmux list-panes -a -F "#{session_name} #{pane_pid}" 2>/dev/null', {
-      encoding: 'utf-8',
-      timeout: 3000,
-    }).trim();
-    if (!raw) return out;
-    for (const line of raw.split('\n')) {
-      const sp = line.indexOf(' ');
-      if (sp <= 0) continue;
-      const session = line.slice(0, sp).trim();
-      const panePid = Number.parseInt(line.slice(sp + 1).trim(), 10);
-      if (!session || !Number.isFinite(panePid) || panePid <= 1) continue;
-      if (!out.has(session)) out.set(session, panePid);
-    }
-  } catch {
-    // best effort map
+  const snapshotMap = buildLocalPaneSnapshotMap();
+  for (const [session, snapshot] of snapshotMap.entries()) {
+    const panePid = Number(snapshot?.panePid || 0);
+    if (!session || !Number.isFinite(panePid) || panePid <= 1) continue;
+    if (!out.has(session)) out.set(session, panePid);
   }
   return out;
 }

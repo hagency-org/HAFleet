@@ -5725,6 +5725,13 @@ body.page-hidden #reminder-panel.has-items{
     agentInfoEl.classList.add('visible');
   }
 
+  function hasCurrentSupervisorIssue(state) {
+    const classification = String(state?.classification || '').trim().toLowerCase();
+    if (classification === 'stalled_wait' || classification === 'suspected_eos') return true;
+    const lifecycleState = String(state?.lifecycleState || '').trim().toLowerCase();
+    return lifecycleState === 'active' && classification.length > 0;
+  }
+
   function scheduleDetailRefresh() {
     if (detailRefreshTimer) clearInterval(detailRefreshTimer);
     const interval = document.hidden ? DETAIL_REFRESH_HIDDEN_MS : DETAIL_REFRESH_VISIBLE_MS;
