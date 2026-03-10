@@ -1,10 +1,9 @@
 ## Current
 Run architecture-first coordination on `master`: keep all execution delegated to `agentchat-develop`, `agentchat-aduit`, and `Yato`, while worker owns only planning, triage, reminder chaining, acceptance, and durable documentation. Acceptance criteria:
-- worker docs define this coordination mode explicitly and track the remaining convergence work as managed queues rather than ad hoc fixes
-- `agentchat-develop` is assigned the next parked structural line (`v1 manifest/backend sync divergence`) with a narrow scope
-- `agentchat-aduit` is assigned periodic follow-up auditing with reminders and incremental handoff duties, including explicit residual-runtime hygiene audits (orphan tmux sessions, proof/probe leftovers, control-plane/runtime drift)
-- `Yato` is assigned the queued Agent Detail/UI convergence work (task visibility + Internals tails + field-model cleanup staging)
-- at least one active reminder exists for each live coordination lane so acceptance cannot silently fall into EOS again
+- `agentchat-develop` slice-1 for v1 manifest/backend sync divergence is accepted and the next narrow slice is queued
+- `agentchat-aduit` periodic follow-up mode and residual-runtime hygiene baseline are accepted and parked with reminders
+- `Yato` remains assigned the Agent Detail/UI convergence work (task visibility + Internals tails + field-model cleanup staging)
+- active reminders remain in place for each live coordination lane
 
 ## Queue
 1. Resume the parked `v1 manifest/backend sync divergence` line through `agentchat-develop`; keep the accepted design note as the canonical starting point and do not mix it with UI or Matrix work.

@@ -2068,3 +2068,11 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 ## [2026-03-11 03:53] DONE — promoted residual runtime artifacts into the standing audit scope
 - Added residual runtime hygiene as an explicit queue item and acceptance condition: orphan tmux sessions (for example `supervisor-tmuxlaunchfailed`), probe leftovers, half-started agents, and control-plane/runtime drift must be periodically audited instead of silently accumulating.
 - Recorded this as durable operational knowledge so future sessions do not treat leftover runtime artifacts as harmless background noise.
+## [$NOW] DONE — accepted audit periodic-followup mode and residual-runtime hygiene baseline
+- Accepted `agentchat-aduit`'s transition into periodic follow-up audit mode; no new structural findings were reported in the transition pass, which is the expected steady-state output when the system is unchanged.
+- Accepted `agentchat-aduit`'s residual runtime hygiene handoff as the current canonical residue baseline: live still contains stale/orphan runtime artifacts including stale probe agents in the live registry, stale `supervisor-*` proof/failure sessions, one proof backend, and leftover `/tmp` proof artifacts. These are now explicitly queued as hygiene work rather than silent background noise.
+- Kept this lane parked as audit/triage only; no cleanup was assigned yet, and future new residual findings should re-enter worker triage before execution.
+## [$NOW] DONE — accepted v1 sync divergence slice-1 and queued the next narrow slice
+- Accepted `agentchat-develop`'s v1 sync slice-1: canonical v1 writer routes now surface explicit `backendSync` results (`synced|created|failed`, `stale`, method/status/detail) so local manifest writes are no longer silently conflated with backend row convergence.
+- The accepted live boundary is still partial: route-level writes now truthfully expose backend divergence, but direct CLI provision/reprovision and launcher/runtime reads can still leave or consume stale derivative backend state.
+- Re-queued the next narrow slice as design-only: canonical read/write ownership for v1 manifest vs backend row, with explicit blast-radius and no Matrix/UI/supervisor mixing.
