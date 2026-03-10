@@ -1803,3 +1803,11 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 ## [2026-03-10 20:50] DONE — wrote a full P0 incident report for the live backend outage
 - Added [live-p0-incident-report-2026-03-10.md](/home/shisui/laplace/agent-chat/docs/agentchat-worker/live-p0-incident-report-2026-03-10.md) to capture impact, root-cause chain, mitigations, verification, residual risk, and recommended follow-up.
 - This report is intended as the durable postmortem baseline for the live outage rather than leaving the narrative fragmented across chat replies and incremental progress entries.
+
+## [2026-03-10 21:12] PARTIAL — narrowed live `agentchat-worker` Loading-summary bug to blocked primary render and deployed a hotfix
+- Root cause is in the live root-page selected-agent panel, not in the backend data: `fetchAgentDetail()` waited for `/api/agents/:name/unread-messages?limit=1` to settle before rendering, even though the current panel did not use unread data at all. Combined with a silent `catch`, any slow or failing secondary leg could leave the panel permanently at `Loading summary...`.
+- Implemented the minimal fix in both repos/branches: removed the unread fetch from the blocking render path and added an explicit fallback message (`Summary unavailable...`) instead of silent indefinite loading.
+- Deployed and restarted both web processes with correct ports restored (`8084` live, `18184` dev), and pushed the code fixes:
+  - `master`: `b7a46df` `fix(web): stop blocking selected-agent summary on unread fetch`
+  - `stable`: `714868c` `fix(web): stop blocking selected-agent summary on unread fetch`
+- Browser-level PASS is still pending from `webdebug`; until that comes back, this stays `PARTIAL` rather than `DONE`.

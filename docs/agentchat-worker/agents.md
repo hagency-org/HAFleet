@@ -357,3 +357,5 @@
   - the primary agent-side task writer is the only canonical writer for `task.id`, `heartbeat_at`, `waiting_reason`, `waiting_until`, and `done`;
   - supervisor remains a reader/classifier only and must not mutate primary task state;
   - sibling `supervisor/` workspace is allowed for supervisor-local docs/state, but it must not introduce a second canonical `Task` or `runtimeProfile` source.
+
+- Root selected-agent summary panel truthfulness rule: primary panel render must not block on secondary fetches that are not actually used by the current surface. In `server.js` root-page `fetchAgentDetail()`, waiting on unread-messages before rendering left the panel stuck on `Loading summary...`; secondary fetch failures must fail loud or be non-blocking.
