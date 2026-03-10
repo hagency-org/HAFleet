@@ -1792,3 +1792,11 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - `webdebug` re-audit passed on live after the runtime mitigation: root page and `Yato` detail both render fully, queue/reminder/message panels populate, tabs switch, and the earlier stale supervisor warning fix still holds on live.
 - This closes the user-visible P0 symptom loop: live is currently functional again from browser, backend, inbox, and bridge perspectives.
 - `agentchat-develop` is now working on the next narrow durability slice instead of reopening UI work: adding bounded timeouts to backend-owned internal bridge/queue fetches in `backend-v2.js`, so backend fan-out toward web/queue/tmux transport cannot hang indefinitely during future local stalls.
+## [2026-03-10 20:47] DONE — mirrored backend-side bridge timeout hardening into live and kept the incident narrowed
+- Accepted `agentchat-develop`'s root-cause narrowing: the timeout boundary was asymmetric. `bridge-matrix.js` and `lib/bot-commands.js` already bounded backend fetches, but backend-owned calls back into the web bridge (`pushResourceAlertToAgent`, `clearQueuedNotificationsForAgent`, `pushNotify`) still had no timeout.
+- Independently verified the repo patch in `backend-v2.js`, then mirrored the same change into `/home/shisui/laplace/agent-chat-live/backend-v2.js` and restarted the live backend so the running service also carries the durable backend-side timeout guard.
+- Post-restart verification stayed healthy:
+  - `GET /health` returned `200`
+  - `GET /api/inbox/agentchat-develop` returned `200`
+  - `8090` socket state stayed small and stable (single listener, low single-digit `ESTAB`, mostly `TIME_WAIT`)
+- Current residual is no longer “service is unstable”; it is now limited to whether the live-only sweep throttling can be reduced or replaced by a proper code-level fix for the synchronous tmux/system sweep workload.
