@@ -1,14 +1,14 @@
 ## Current
 Run architecture-first coordination on `master`: keep all execution delegated to `agentchat-develop`, `agentchat-aduit`, and `Yato`, while worker owns only planning, triage, reminder chaining, acceptance, and durable documentation. Acceptance criteria:
-- `agentchat-develop` slice-1 for v1 manifest/backend sync divergence is accepted and the next narrow slice is queued
-- `agentchat-aduit` periodic follow-up mode and residual-runtime hygiene baseline are accepted and parked with reminders
-- `agentchat-develop` now also owns the Agent Detail/UI convergence work (task visibility + Internals tails + field-model cleanup staging) because Yato is blocked on an interactive prompt
+- `agentchat-develop` has delivered and worker has accepted both design-only follow-ons: `v1 manifest/backend sync divergence` slice-2 and Agent Detail task/Internals UI takeover
+- only one new implementation lane is active for `agentchat-develop`: `v1 sync slice-2`; the UI design remains parked to avoid overloading one executor
+- `agentchat-aduit` periodic follow-up mode and residual-runtime hygiene baseline remain accepted and parked with reminders
 - active reminders remain in place for each live coordination lane
 
 ## Queue
-1. Resume the parked `v1 manifest/backend sync divergence` line through `agentchat-develop`; keep the accepted design note as the canonical starting point and do not mix it with UI or Matrix work.
+1. Implement `v1 manifest/backend sync divergence` slice-2 through `agentchat-develop`; keep the accepted slice-2 design note as the canonical starting point and do not mix it with UI or Matrix work.
 2. Converge human-maintained agent text fields through staged design/execution: remove `Project Scope` / `Human Notes`; rename `Manual Guidance` to canonical `Guidance`; keep `Owner` first-class and `Identity` one-line and external-facing.
-3. Make Agent Detail expose canonical task visibility/editing and show `AGENTS.md`, `plan.md`, and `progress.md` tails under `Internals`, now reassigned to `agentchat-develop` because Yato is blocked on an interactive prompt and cannot provide reliable handoff.
+3. Keep the accepted Agent Detail task/Internals takeover design parked behind `v1 sync slice-2`; after that, implement canonical task visibility/editing plus `AGENTS.md`/`plan.md`/`progress.md` tails under `Internals`.
 4. Rework supervisor toward the original charter after the current parked structural lines: agent-shaped monitoring state machine, bounded convergent states, repeated-state-triggered intervention through agentchat.
 5. Continue periodic `agentchat-aduit` follow-up audits and re-triage any new structural findings before assigning code work.
 6. Add a standing residual-runtime hygiene lane: periodically audit orphan/probe tmux sessions, half-started agents, stale supervisor runtimes, and other leftover runtime artifacts; route findings back into triage instead of letting them silently accumulate.

@@ -2079,3 +2079,7 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 ## [2026-03-11 03:32] PARTIAL — reassigned the Agent Detail task/Internals UI lane away from Yato
 - Verified that `Yato` is still tmux-live, but the queued UI follow-on is blocked at an interactive Codex prompt (`bypass permissions on`) rather than producing a schedulable handoff. The lane is therefore not reliably executable through Yato right now.
 - Reassigned the canonical task/Internals UI follow-on to `agentchat-develop` to avoid silent drift. Yato remains a valid dev agent in principle, but this specific lane is now treated as blocked on interactive prompt handling.
+## [2026-03-11 03:38] DONE — accepted the two design-only follow-ons and sequenced them
+- Accepted 's . The accepted next correction order is still: verified backend readback on the canonical v1 writer path, then manifest-first launch reads for v1 homes, then an explicit policy for direct provision/reprovision as canonical-file-only vs later backend-converged.
+- Accepted 's . The design correctly promotes canonical , demotes supervisor-doc task text to an explicitly labeled snapshot, and keeps Internals truthful by showing actual  /  /  content instead of synthetic merged summaries.
+- Did not activate both implementation lanes at once. To keep one executor from being overloaded,  is now the only active implementation lane for ; the Agent Detail/UI design is accepted but parked behind it.
