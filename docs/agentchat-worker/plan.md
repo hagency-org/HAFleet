@@ -1,9 +1,9 @@
 ## Current
-Triage and close the remaining post-stable residuals exposed by live rollout, starting with the residual supervisor current-vs-history code-path risk and the flaky inbox transport seen by execution agents.
+Stabilize the live post-rollout P0 incident around the 8090 backend and internal transport fan-out.
 Acceptance criteria:
-- browser-visible stale supervisor warnings remain closed on dev/live
-- any remaining current-vs-history leak is reduced to an explicit residual or removed entirely
-- inbox transport failure is root-caused enough to decide whether it is a blocker, a dev-only fault, or a post-merge cleanup item
+- live backend health/inbox endpoints stay stable under the patched bridge/web callers
+- the sweep/tmux fan-out hypothesis is either proven durable or disproven with better evidence
+- the incident record captures what failed, what amplified it, what live-only mitigation was applied, and what durable fix still remains
 
 
 ## Queue

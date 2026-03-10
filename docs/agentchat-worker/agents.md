@@ -179,6 +179,10 @@
   - if the browser opens `https://user:pass@host/...` with credentials embedded in the URL, modern browsers block same-origin `fetch()` calls constructed from relative URLs;
   - current Agent Detail `refresh()` then fails on `/api/...` calls and clears SSR-rendered content, making the page appear blank/Loading even though local dev and SSR HTML are fine;
   - using the browser's native Basic Auth dialog avoids this, and a future UX hardening option is to preserve SSR content on refresh failure instead of wiping the page.
+- Live rollout transport instability pattern:
+  - if the live backend on `8090` degrades, `bridge-matrix.js` and the live web can amplify the failure by holding many unresolved internal `fetch()` calls to `AGENT_CHAT_API`;
+  - the immediate symptom is a full `8090` accept backlog with many `CLOSE_WAIT`/`ESTAB` local sockets, `mcp__agent-chat__*` tool calls failing as `fetch failed`, and `bridge-matrix` startup timing out while probing `/api/agents`;
+  - minimum mitigation is a hard timeout on internal backend helper fetches (`bridge-matrix.js`, `lib/bot-commands.js`) plus clean backend/bridge restart, but the deeper ownership issue is that live service recovery currently depends on manual tmux recovery rather than a verified managed restart path.
 - Minimal inbox-read gate contract:
   - canonical gate object is `inboxGate{requiresInboxCheck, sourceMsgId, raisedAt, reason}`;
   - canonical acknowledgement is a real `check_inbox()` cursor advance that consumes the pending `sourceMsgId`, not merely a tool call named `check_inbox()`;

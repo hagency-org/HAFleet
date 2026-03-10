@@ -1768,3 +1768,23 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `stable`: `1c0c14d` `fix(web): treat supervisor history as history, not current state`
 - Also restored live web `8084`, which had dropped out during rollout validation and would otherwise have made all browser conclusions unreliable.
 - Residual truthfulness risk remains at code-path level: some `latestStatus` / `needsAttention`-family derived paths can still become stale-warning carriers if a future negative historical `latest` survives while supervisor is off. That is now a residual architecture cleanup item, not a reproducing browser-visible incident.
+## [2026-03-10 20:32] PARTIAL — narrowed the live P0 incident to backend timeout amplification and patched bridge-side backend fetch timeouts
+- Root cause is no longer “agentchat MCP is flaky” in the abstract: during the live incident, `127.0.0.1:8090` stopped answering even `/health`, the listen backlog filled, and the process accumulated hundreds of local `CLOSE_WAIT`/`ESTAB` sockets. The dominant client pressure came from `bridge-matrix.js` (pid `900576`) plus live web (`8084`) repeatedly calling the backend.
+- `mcp__agent-chat__check_inbox()` failing as `fetch failed` correlated with this backend stall; when backend pressure briefly subsided, the same MCP tool call worked again, proving the inbox data path itself was not the primary fault.
+- Added a minimum mitigation in both dev code and live code trees: `bridge-matrix.js` and `lib/bot-commands.js` backend helper fetches now use `AbortSignal.timeout(5000)` via `AGENT_CHAT_BACKEND_FETCH_TIMEOUT_MS` instead of hanging indefinitely against a degraded backend.
+- Live backend and bridge were both forced down during triage; backend was then manually restored in a tmux-backed recovery process (`agentchat-live-backend`) and `8090` began listening again, but `bridge-matrix` still times out during startup while probing `/api/agents`, so the incident is not fully closed yet.
+## [2026-03-10 20:37] PARTIAL — restored live backend/bridge by throttling expensive local sweeps; durable fix still pending
+- Root cause narrowed further: after backend restart, `8090` was still timing out on nearly every route while staying in `LISTEN`. The most credible blocking path is the local sweep workload inside `backend-v2.js`: every 5s it runs multiple synchronous `tmux`/system probes across ~56 live agents (`sweepLocalActivityDurations`, `sweepAgentScopePressure`, related sweeps), which can monopolize the event loop and starve normal HTTP responses.
+- Live-only runtime mitigation applied in `/home/shisui/laplace/agent-chat-live-runtime/.env`:
+  - `AGENT_LOCAL_ACTIVITY_SWEEP_MS=30000`
+  - `AGENT_SCOPE_SWEEP_INTERVAL_MS=30000`
+  - `AGENT_RULE_SWEEP_INTERVAL_MS=30000`
+  - `AGENT_SERVER_SWEEP_INTERVAL_MS=30000`
+  - `AGENT_SWAP_SWEEP_INTERVAL_MS=30000`
+  - `AGENT_SCOPE_MONITOR_ENABLED=false`
+- After restarting live backend and bridge with those settings, live recovered materially:
+  - `GET /health` on `8090` returned stable `200` JSON for repeated probes
+  - `GET /api/inbox/agentchat-develop` responded normally
+  - local `8090` socket pressure dropped from hundreds of `ESTAB`/`CLOSE_WAIT` sockets to a small steady state (`~6 ESTAB`, mostly `TIME_WAIT`)
+  - `bridge-matrix` could start successfully and attach its SSE stream again
+- Residual status: this is a live runtime mitigation, not yet the durable code-level fix. `agentchat-develop` has been reassigned to prove and minimize the sweep/root-cause path so live no longer depends on manual env throttling.
