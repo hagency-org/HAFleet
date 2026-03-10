@@ -2083,3 +2083,10 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Accepted `agentchat-develop`'s `v1-manifest-backend-sync-slice2-design.md`. The accepted next correction order is still: verified backend readback on the canonical v1 writer path, then manifest-first launch reads for v1 homes, then an explicit policy for direct provision/reprovision as canonical-file-only vs later backend-converged.
 - Accepted `agentchat-develop`'s `agent-detail-task-internals-takeover-design.md`. The design correctly promotes canonical `detail.task`, demotes supervisor-doc task text to an explicitly labeled snapshot, and keeps Internals truthful by showing actual `AGENTS.md` / `plan.md` / `progress.md` content instead of synthetic merged summaries.
 - Did not activate both implementation lanes at once. To keep one executor from being overloaded, `v1 sync slice-2` is now the only active implementation lane for `agentchat-develop`; the Agent Detail/UI design is accepted but parked behind it.
+## [2026-03-11 03:41] DONE — triaged the residual runtime-hygiene baseline into execution classes
+- Accepted `agentchat-aduit's residual runtime-hygiene audit as the current canonical residue inventory.
+- Execution classification is now explicit:
+  - operator cleanup: `agentchat-canonical-proof-backend` and the `/tmp` proof trees/files once they are no longer needed for active verification;
+  - framework fix: stale probe agents leaking into live backend object model (`prts-codex-probe3`, `codex-multiline-submit-test-2179191`) and stale `supervisor-*` proof sessions surviving past their proof scope;
+  - post-merge hygiene: non-user-facing leftover proof artifacts and proof tmux sessions that do not currently leak into live status surfaces.
+- This baseline remains parked as audit/triage only until the higher-priority structural lanes finish; no cleanup execution was started in this batch.
