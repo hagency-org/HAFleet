@@ -2077,5 +2077,5 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - The accepted live boundary is still partial: route-level writes now truthfully expose backend divergence, but direct CLI provision/reprovision and launcher/runtime reads can still leave or consume stale derivative backend state.
 - Re-queued the next narrow slice as design-only: canonical read/write ownership for v1 manifest vs backend row, with explicit blast-radius and no Matrix/UI/supervisor mixing.
 ## [2026-03-11 03:32] PARTIAL — reassigned the Agent Detail task/Internals UI lane away from Yato
-- Verified that  is still tmux-live, but the queued UI follow-on is blocked at an interactive Codex prompt () rather than producing a schedulable handoff. The lane is therefore not reliably executable through Yato right now.
-- Reassigned the canonical task/Internals UI follow-on to  to avoid silent drift. Yato remains a valid dev agent in principle, but this specific lane is now treated as blocked on interactive prompt handling.
+- Verified that `Yato` is still tmux-live, but the queued UI follow-on is blocked at an interactive Codex prompt (`bypass permissions on`) rather than producing a schedulable handoff. The lane is therefore not reliably executable through Yato right now.
+- Reassigned the canonical task/Internals UI follow-on to `agentchat-develop` to avoid silent drift. Yato remains a valid dev agent in principle, but this specific lane is now treated as blocked on interactive prompt handling.

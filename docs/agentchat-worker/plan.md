@@ -2,7 +2,7 @@
 Run architecture-first coordination on `master`: keep all execution delegated to `agentchat-develop`, `agentchat-aduit`, and `Yato`, while worker owns only planning, triage, reminder chaining, acceptance, and durable documentation. Acceptance criteria:
 - `agentchat-develop` slice-1 for v1 manifest/backend sync divergence is accepted and the next narrow slice is queued
 - `agentchat-aduit` periodic follow-up mode and residual-runtime hygiene baseline are accepted and parked with reminders
-- `Yato` remains assigned the Agent Detail/UI convergence work (task visibility + Internals tails + field-model cleanup staging)
+- `agentchat-develop` now also owns the Agent Detail/UI convergence work (task visibility + Internals tails + field-model cleanup staging) because Yato is blocked on an interactive prompt
 - active reminders remain in place for each live coordination lane
 
 ## Queue
