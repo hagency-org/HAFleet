@@ -2016,3 +2016,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 ## [2026-03-10 23:35] PARTIAL — queued the guidance/metadata convergence direction behind the live residual
 - Recorded the next control-plane/UI convergence direction: remove low-value human text fields (`Project Scope`, `Human Notes`), rename `Manual Guidance` to canonical `Guidance`, and treat it as the human-authored shared intent surface across agent/supervisor/subconscious while keeping `CLAUDE.md` as the workflow/behavior contract.
 - I did not start implementation because the live Matrix timeout residual remains the current active line; this was queued so the field-model decision does not get lost.
+
+## [2026-03-11 00:00] DONE — froze the intended semantics of Guidance, Owner, and Identity for later control-plane convergence
+- Turned the earlier metadata-field queue item into a durable contract: `Guidance` will be the canonical human-authored intent surface shared by agent/supervisor/subconscious, while `CLAUDE.md` remains the workflow/behavior contract.
+- `Owner` is now treated as a first-class ownership field that should be visible both to the agent and to other inspectors; `Identity` is the short one-line external-facing description of the agent for status/listing surfaces.
+- `Project Scope` and `Human Notes` remain queued for removal because they are low-signal free-text fields without stable behavioral semantics.

@@ -230,6 +230,12 @@
 - Stable subconscious default-detail boundary:
   - default `/api/subconscious/detail/:name` now exposes local runtime, local memory, and local conversation only as transitional summary objects;
   - full local runtime internals, journal detail, and manual guidance text/preview belong only in privileged debug or writable settings surfaces, not the stable-facing default detail.
+- Human-maintained agent text-field convergence target:
+  - `Guidance` is the canonical human-authored intent surface for the agent, supervisor, and subconscious; it states what the agent is fundamentally supposed to do.
+  - `CLAUDE.md` remains the workflow/behavior contract; it states how the agent should work inside its workspace.
+  - `Owner` is a first-class visible field that states who owns or is responsible for the agent; it should be legible both to the agent and to other humans/tools inspecting the agent.
+  - `Identity` is the short external-facing description of the agent; it should answer “what is this agent for?” in one sentence for status views, scans, and listings.
+  - `Project Scope` and `Human Notes` are slated for removal because they are low-signal free-text fields without stable behavioral semantics.
 - Post-convergence maturity contract:
   - `stable` now includes canonical control-plane `task` / `runtimeProfile`, supervisor classification/lifecycle, the supported same-host tmux-backed sibling supervisor runtime shape plus explicit failure taxonomy, the upstream-authoritative subconscious default operational surface, accepted upstream-backed subconscious slices (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`), and inbox-read gate enforcement;
   - `transitional` includes the v1 compatibility mirror `data/agents/<name>/meta.json`, backend row projection for v1-owned fields, local subconscious runtime/memory/conversation journal surfaces, and manual guidance in its fallback/configuration role;
