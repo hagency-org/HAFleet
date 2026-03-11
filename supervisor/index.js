@@ -488,6 +488,11 @@ export class SupervisorService {
     this.sendMessage = deps.sendMessage;
     this.listTmuxSessions = typeof deps.listTmuxSessions === 'function' ? deps.listTmuxSessions : listTmuxSessions;
     this.killTmuxSession = typeof deps.killTmuxSession === 'function' ? deps.killTmuxSession : killTmuxSession;
+    this.tmuxSessionExists = typeof deps.tmuxSessionExists === 'function' ? deps.tmuxSessionExists : tmuxSessionExists;
+    this.tmuxPanePath = typeof deps.tmuxPanePath === 'function' ? deps.tmuxPanePath : tmuxPanePath;
+    this.startSupervisorTmuxSession = typeof deps.startSupervisorTmuxSession === 'function'
+      ? deps.startSupervisorTmuxSession
+      : startSupervisorTmuxSession;
 
     this.enabledRequested = this.config.enabled === true;
     this.disabledReason = this.config.disabledReason || null;
@@ -755,7 +760,7 @@ export class SupervisorService {
     }
     for (const entry of names) {
       const [agentName, sessionName] = entry.split('\n');
-      const existed = tmuxSessionExists(sessionName);
+      const existed = this.tmuxSessionExists(sessionName);
       if (existed) this.killTmuxSession(sessionName);
       const previous = this.stateStore.snapshot(agentName);
       this.stateStore.agents[agentName] = {
@@ -796,8 +801,8 @@ export class SupervisorService {
       failureType: null,
       error: null,
     });
-    const sessionExists = tmuxSessionExists(context.sessionName);
-    const currentPath = sessionExists ? tmuxPanePath(context.sessionName) : null;
+    const sessionExists = this.tmuxSessionExists(context.sessionName);
+    const currentPath = sessionExists ? this.tmuxPanePath(context.sessionName) : null;
     const pathMismatch = sessionExists && context.supervisorDir && currentPath && path.resolve(currentPath) !== path.resolve(context.supervisorDir);
 
     if (!this.enabledRequested || observation.lifecycle.state === 'idle') {
@@ -867,7 +872,7 @@ export class SupervisorService {
       if (sessionExists && pathMismatch) {
         this.killTmuxSession(context.sessionName);
       }
-      startSupervisorTmuxSession(context.sessionName, context.supervisorDir, command);
+      this.startSupervisorTmuxSession(context.sessionName, context.supervisorDir, command);
       return this.buildRuntimeLaunchState(base, {
         running: true,
         action: pathMismatch ? 'restarted' : 'started',
@@ -881,7 +886,7 @@ export class SupervisorService {
         base,
         'tmux-launch-failed',
         String(e?.message || e),
-        { running: tmuxSessionExists(context.sessionName) }
+        { running: this.tmuxSessionExists(context.sessionName) }
       );
     }
   }
@@ -1225,7 +1230,7 @@ export class SupervisorService {
     if (!key) return { removed: false, sessionKilled: false };
     const hadState = Object.prototype.hasOwnProperty.call(this.stateStore.agents || {}, key);
     const sessionName = this.stateStore.snapshot(key)?.runtimeLaunch?.sessionName || buildSupervisorSessionName(key);
-    const sessionExists = sessionName ? tmuxSessionExists(sessionName) : false;
+    const sessionExists = sessionName ? this.tmuxSessionExists(sessionName) : false;
     if (sessionExists) this.killTmuxSession(sessionName);
     if (hadState) delete this.stateStore.agents[key];
     this.latestByAgent.delete(key);

@@ -7833,6 +7833,13 @@ export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
 }
 
 export { app };
+export {
+  normalizeAgentName,
+  normalizeHumanMeta,
+  mergeHumanMeta,
+  normalizeAgentTask,
+  serializeAgent,
+};
 
 if (process.argv[1] === __filename) {
   startServer();
