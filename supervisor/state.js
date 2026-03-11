@@ -48,6 +48,10 @@ export class SupervisorStateStore {
       lastStatus: row.lastStatus || null,
       consecutiveNegative: Number(row.consecutiveNegative) || 0,
       lastWarningAt: Number(row.lastWarningAt) || 0,
+      lastNudgeAt: Number(row.lastNudgeAt) || 0,
+      lastNudgeCount: Number(row.lastNudgeCount) || 0,
+      lastEscalationAt: Number(row.lastEscalationAt) || 0,
+      lastEscalationCount: Number(row.lastEscalationCount) || 0,
       lastJudgedAt: Number(row.lastJudgedAt) || 0,
       lastReason: row.lastReason || null,
       lastDomain: row.lastDomain || null,
@@ -90,6 +94,10 @@ export class SupervisorStateStore {
       lastStatus: judgment.status || null,
       consecutiveNegative,
       lastWarningAt: shouldWarn ? now : prev.lastWarningAt,
+      lastNudgeAt: negative ? prev.lastNudgeAt : 0,
+      lastNudgeCount: negative ? prev.lastNudgeCount : 0,
+      lastEscalationAt: negative ? prev.lastEscalationAt : 0,
+      lastEscalationCount: negative ? prev.lastEscalationCount : 0,
       lastJudgedAt: now,
       lastReason: judgment.reason || null,
       lastDomain: judgment.domain || null,
@@ -112,6 +120,29 @@ export class SupervisorStateStore {
       shouldWarn,
       negative,
     };
+  }
+
+  markIntervention(agentName, patch = {}, now = Date.now()) {
+    const prev = this.snapshot(agentName);
+    const next = {
+      ...prev,
+      ...this.agents[agentName],
+      lastJudgedAt: now,
+    };
+    if (Object.prototype.hasOwnProperty.call(patch, 'lastNudgeAt')) {
+      next.lastNudgeAt = Number(patch.lastNudgeAt) || 0;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'lastNudgeCount')) {
+      next.lastNudgeCount = Number(patch.lastNudgeCount) || 0;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'lastEscalationAt')) {
+      next.lastEscalationAt = Number(patch.lastEscalationAt) || 0;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'lastEscalationCount')) {
+      next.lastEscalationCount = Number(patch.lastEscalationCount) || 0;
+    }
+    this.agents[agentName] = next;
+    return { ...next };
   }
 
   save() {

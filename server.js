@@ -181,6 +181,7 @@ function sanitizeNotifyMeta(rawMeta) {
   };
   return {
     kind: safeStr(rawMeta.kind, 'unknown'),
+    priority: normalizeQueuePriority(rawMeta.priority),
     requiresInboxCheck: safeBool(rawMeta.requiresInboxCheck),
     sourceMsgId: safeStr(rawMeta.sourceMsgId, null),
     unreadCount: safeInt(rawMeta.unreadCount),
@@ -189,6 +190,13 @@ function sanitizeNotifyMeta(rawMeta) {
     needsReply: safeBool(rawMeta.needsReply),
     hasMcp: safeBool(rawMeta.hasMcp),
   };
+}
+
+function normalizeQueuePriority(value) {
+  if (typeof value !== 'string') return 'normal';
+  const priority = value.trim().toLowerCase();
+  if (priority === 'high' || priority === 'urgent') return priority;
+  return 'normal';
 }
 
 async function notifyPushDelivered(entry, deliveredAt) {
@@ -370,6 +378,7 @@ app.post('/api/queue', (req, res) => {
   if (!to || !payload) return res.status(400).json({ error: 'missing to or payload' });
   const id = ++queueIdCounter;
   const queuedAt = Date.now();
+  const priority = normalizeQueuePriority(req.body?.priority);
   // Apply redirect if target was renamed
   let actualTo = to;
   let redirectedFrom = null;
@@ -377,7 +386,7 @@ app.post('/api/queue', (req, res) => {
     actualTo = redirects.get(to);
     redirectedFrom = to;
   }
-  const entry = { id, from: from || 'unknown', to: actualTo, payload, queuedAt };
+  const entry = { id, from: from || 'unknown', to: actualTo, payload, queuedAt, priority };
   const notifyMeta = sanitizeNotifyMeta(req.body?.notifyMeta);
   if (notifyMeta) entry.notifyMeta = notifyMeta;
   if (redirectedFrom) entry.redirectedFrom = redirectedFrom;
@@ -2451,6 +2460,8 @@ setInterval(async () => {
       }
 
       const idleMs = getPaneIdleMs(target);
+      const priority = normalizeQueuePriority(entries[0]?.priority || entries[0]?.notifyMeta?.priority);
+      const bypassIdleGate = priority === 'high' || priority === 'urgent';
       if (idleMs < 0) {
         // Pane not found — only trim stale backend notifications, keep normal payloads queued.
         const oldest = entries[0];
@@ -2472,7 +2483,7 @@ setInterval(async () => {
         }
         continue;
       }
-      if (idleMs < IDLE_THRESHOLD) continue; // not idle enough
+      if (!bypassIdleGate && idleMs < IDLE_THRESHOLD) continue; // not idle enough
 
       // Deliver first message
       delivering.add(target);

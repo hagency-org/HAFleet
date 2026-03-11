@@ -392,6 +392,70 @@ function buildSupervisorWarning(agentName, observation) {
   };
 }
 
+function buildSupervisorNudge(agentName, observation, consecutiveNegative) {
+  const task = observation.task || null;
+  return {
+    to: agentName,
+    summary: 'Supervisor: you appear stalled. Check your task and resume work.',
+    full: [
+      `Supervisor detected repeated negative state for ${agentName}.`,
+      `Classification: ${observation.classification}`,
+      `Reason: ${observation.reason}`,
+      `Consecutive negative checks: ${consecutiveNegative}`,
+      `Task id: ${task?.id || 'none'}`,
+      `Task status: ${task?.status || 'none'}`,
+      `Heartbeat at: ${task?.heartbeat_at || 'none'}`,
+      `Waiting reason: ${task?.waiting_reason || 'none'}`,
+      `Waiting until: ${task?.waiting_until || 'none'}`,
+      'Review the current task, refresh heartbeat or declare waiting explicitly, then resume work.',
+    ].join('\n'),
+    type: 'inform',
+    priority: 'high',
+    schema: {
+      kind: 'escalation',
+      version: 1,
+      payload: {
+        level: 'nudge',
+        reason: observation.classification,
+        count: consecutiveNegative,
+        agent: agentName,
+      },
+    },
+  };
+}
+
+function buildSupervisorEscalation(agentName, observation, consecutiveNegative) {
+  const task = observation.task || null;
+  return {
+    to: 'ac-topleader',
+    summary: `Supervisor escalation: ${agentName} appears EOS after ${consecutiveNegative} checks`,
+    full: [
+      `Supervisor escalation for ${agentName}.`,
+      `Classification: ${observation.classification}`,
+      `Reason: ${observation.reason}`,
+      `Consecutive negative checks: ${consecutiveNegative}`,
+      `Task id: ${task?.id || 'none'}`,
+      `Task status: ${task?.status || 'none'}`,
+      `Heartbeat at: ${task?.heartbeat_at || 'none'}`,
+      `Waiting reason: ${task?.waiting_reason || 'none'}`,
+      `Waiting until: ${task?.waiting_until || 'none'}`,
+      'Supervisor already issued a nudge and the negative state persisted.',
+    ].join('\n'),
+    type: 'request',
+    priority: 'urgent',
+    schema: {
+      kind: 'escalation',
+      version: 1,
+      payload: {
+        level: 'escalate',
+        reason: observation.classification,
+        count: consecutiveNegative,
+        agent: agentName,
+      },
+    },
+  };
+}
+
 export class SupervisorService {
   constructor(deps = {}) {
     this.config = deps.config || loadSupervisorConfig(process.env);
@@ -399,6 +463,7 @@ export class SupervisorService {
     this.getRuntime = deps.getRuntime;
     this.emitSystemInfo = deps.emitSystemInfo;
     this.broadcastSSE = deps.broadcastSSE;
+    this.sendMessage = deps.sendMessage;
 
     this.enabled = this.config.enabled;
     this.disabledReason = this.config.disabledReason || null;
@@ -855,6 +920,10 @@ export class SupervisorService {
     event.state = {
       consecutiveNegative: apply.current.consecutiveNegative,
       lastWarningAt: apply.current.lastWarningAt,
+      lastNudgeAt: apply.current.lastNudgeAt || 0,
+      lastNudgeCount: apply.current.lastNudgeCount || 0,
+      lastEscalationAt: apply.current.lastEscalationAt || 0,
+      lastEscalationCount: apply.current.lastEscalationCount || 0,
       lastStatus: apply.current.lastStatus,
       lifecycleState: apply.current.lifecycleState || null,
     };
@@ -866,6 +935,57 @@ export class SupervisorService {
     if (apply.shouldWarn && typeof this.emitSystemInfo === 'function') {
       const warning = buildSupervisorWarning(agentName, observation);
       this.emitSystemInfo(warning.summary, warning.full);
+    }
+
+    if (typeof this.sendMessage === 'function' && apply.negative) {
+      if (apply.current.consecutiveNegative >= 2 && apply.current.lastNudgeCount < 2) {
+        const intervention = buildSupervisorNudge(agentName, observation, apply.current.consecutiveNegative);
+        try {
+          this.sendMessage(intervention);
+          const marked = this.stateStore.markIntervention(agentName, {
+            lastNudgeAt: now,
+            lastNudgeCount: apply.current.consecutiveNegative,
+          }, now);
+          event.action = {
+            kind: 'supervisor_nudge',
+            to: intervention.to,
+            priority: intervention.priority,
+            consecutiveNegative: apply.current.consecutiveNegative,
+          };
+          event.state.lastNudgeAt = marked.lastNudgeAt || 0;
+          event.state.lastNudgeCount = marked.lastNudgeCount || 0;
+        } catch (e) {
+          event.action = {
+            kind: 'supervisor_nudge_failed',
+            error: String(e?.message || e),
+            consecutiveNegative: apply.current.consecutiveNegative,
+          };
+        }
+      }
+      if (apply.current.consecutiveNegative >= 3 && apply.current.lastEscalationCount < 3) {
+        const intervention = buildSupervisorEscalation(agentName, observation, apply.current.consecutiveNegative);
+        try {
+          this.sendMessage(intervention);
+          const marked = this.stateStore.markIntervention(agentName, {
+            lastEscalationAt: now,
+            lastEscalationCount: apply.current.consecutiveNegative,
+          }, now);
+          event.action = {
+            kind: 'supervisor_escalation',
+            to: intervention.to,
+            priority: intervention.priority,
+            consecutiveNegative: apply.current.consecutiveNegative,
+          };
+          event.state.lastEscalationAt = marked.lastEscalationAt || 0;
+          event.state.lastEscalationCount = marked.lastEscalationCount || 0;
+        } catch (e) {
+          event.action = {
+            kind: 'supervisor_escalation_failed',
+            error: String(e?.message || e),
+            consecutiveNegative: apply.current.consecutiveNegative,
+          };
+        }
+      }
     }
 
     return event;

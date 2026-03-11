@@ -2790,6 +2790,7 @@ const supervisorService = createSupervisorService({
   getAgents: () => Object.values(agents).filter(isAgentRecord).map(serializeAgent),
   getRuntime: (agentName) => ensureAgentRuntimeRecord(agentName),
   emitSystemInfo: (summary, full) => emitSystemInfo(summary, full),
+  sendMessage: (payload) => dispatchInternalDirectMessage(payload),
   broadcastSSE,
 });
 
@@ -2807,6 +2808,7 @@ function summarizeMsg(m) {
     id: m.id,
     from: m.from,
     type: m.type,
+    priority: normalizeMessagePriority(m?.priority),
     summary: m.summary,
     full: m.full || '',
     mentions: m.mentions || [],
@@ -2820,6 +2822,32 @@ function summarizeMsg(m) {
   const normalizedSchema = normalizeMessageSchema(m?.schema);
   if (normalizedSchema.value) out.schema = normalizedSchema.value;
   return out;
+}
+
+function normalizeMessagePriority(value, fallback = 'normal') {
+  if (value === undefined || value === null) return fallback;
+  const raw = normalizeOptionalText(value, 16);
+  if (!raw) return fallback;
+  const lower = raw.toLowerCase();
+  if (lower === 'normal' || lower === 'high' || lower === 'urgent') return lower;
+  return null;
+}
+
+function messagePriorityRank(value) {
+  const priority = normalizeMessagePriority(value);
+  if (priority === 'urgent') return 2;
+  if (priority === 'high') return 1;
+  return 0;
+}
+
+function highestMessagePriority(rows = []) {
+  let best = 'normal';
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (messagePriorityRank(row?.priority) > messagePriorityRank(best)) {
+      best = normalizeMessagePriority(row?.priority) || best;
+    }
+  }
+  return best;
 }
 
 function normalizeMessageSchema(value) {
@@ -2985,6 +3013,70 @@ function buildUnreadInboxSnapshot(agentName) {
     unread_group_mentions: unreadGroupMentions,
     latest: unread.length > 0 ? summarizeMsg(unread[unread.length - 1]) : null,
   };
+}
+
+function dispatchStoredMessage(msg, options = {}) {
+  const senderIsAgent = options.senderIsAgent === true;
+  const directTargetKind = options.directTargetKind || null;
+  messages.push(msg);
+  saveMessages();
+  const compactEvent = buildAgentCompactEvent(msg, senderIsAgent);
+  if (compactEvent) {
+    broadcastSSE('agent_compact', compactEvent);
+  }
+  broadcastSSE('message', msg);
+  if (senderIsAgent) {
+    markAgentOutbound(msg.from);
+  }
+
+  if (msg.to && directTargetKind === 'agent' && msg.to !== msg.from && !isSuppressedForAgent(msg, msg.to)) {
+    const state = getAgentDeliveryState(msg.to);
+    if (state.online) pushNotify(msg.to, msg);
+  }
+  if (msg.group && msg.mentions.length > 0) {
+    for (const agent of msg.mentions) {
+      if (agent === msg.from || isSuppressedForAgent(msg, agent)) continue;
+      const state = getAgentDeliveryState(agent);
+      if (state.online) pushNotify(agent, msg);
+    }
+  }
+  return msg;
+}
+
+function dispatchInternalDirectMessage(payload = {}) {
+  const fromName = normalizeAgentName(payload.from) || (typeof payload.from === 'string' ? payload.from.trim() : '') || 'system';
+  const toName = normalizeAgentName(payload.to) || (typeof payload.to === 'string' ? payload.to.trim() : '');
+  if (!toName) throw new Error('to required');
+  const type = typeof payload.type === 'string' ? payload.type.trim().toLowerCase() : 'inform';
+  if (!['inform', 'request', 'reply'].includes(type)) {
+    throw new Error('invalid type');
+  }
+  const priority = normalizeMessagePriority(payload.priority);
+  if (!priority) throw new Error('invalid priority');
+  const normalizedSchema = normalizeMessageSchema(payload.schema);
+  if (normalizedSchema.error) throw new Error(normalizedSchema.error);
+  const summary = normalizeOptionalText(payload.summary, 4000);
+  const full = typeof payload.full === 'string' ? payload.full.trim() : '';
+  if (!summary) throw new Error('summary required');
+  const msg = {
+    id: nextMsgId(),
+    ts: Date.now(),
+    from: fromName,
+    to: toName,
+    group: null,
+    type,
+    priority,
+    summary,
+    full,
+    mentions: [],
+    reply_to: null,
+    source: 'system',
+    sourceRoom: null,
+  };
+  if (normalizedSchema.value) msg.schema = normalizedSchema.value;
+  const senderIsAgent = fromName !== 'system' && isAgentRecord(agents[fromName]);
+  const directTargetKind = isAgentRecord(agents[toName]) ? 'agent' : 'human';
+  return dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
 }
 
 function normalizeInboxGateReason(value) {
@@ -4652,6 +4744,7 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
     to: agentName,
     group: null,
     type: 'inform',
+    priority: 'normal',
     summary,
     full,
     mentions: [],
@@ -4691,6 +4784,7 @@ async function pushNotify(agentName, msg) {
   const unreadCount = unread.length;
   const latestUnread = unread[unread.length - 1] || msg;
   const replyTo = latestUnread.from || msg.from;
+  const notificationPriority = unreadCount > 1 ? highestMessagePriority(unread) : normalizeMessagePriority(msg?.priority);
 
   // Determine if reply is expected based on message type
   const needsReply = msg.type === 'human' || msg.type === 'request';
@@ -4763,6 +4857,7 @@ async function pushNotify(agentName, msg) {
   try {
     const notifyMeta = {
       kind: notificationKind,
+      priority: notificationPriority || 'normal',
       requiresInboxCheck,
       sourceMsgId: latestUnread?.id || msg?.id || null,
       unreadCount,
@@ -4776,7 +4871,7 @@ async function pushNotify(agentName, msg) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
-      body: JSON.stringify({ from: 'agent-chat-v2', to: agent.tmux, payload: notification, notifyMeta }),
+      body: JSON.stringify({ from: 'agent-chat-v2', to: agent.tmux, payload: notification, priority: notificationPriority || 'normal', notifyMeta }),
     }, `pushNotify() POST ${queuePath} agent=${agentName}`);
     if (resp.ok) {
       const body = await resp.json().catch(() => ({}));
@@ -6537,7 +6632,7 @@ app.get('/api/media/fetch', (req, res) => {
 
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -6568,6 +6663,10 @@ app.post('/api/messages', (req, res) => {
   const normalizedSchema = normalizeMessageSchema(schema);
   if (normalizedSchema.error) {
     return res.status(400).json({ error: normalizedSchema.error });
+  }
+  const normalizedPriority = normalizeMessagePriority(priority);
+  if (!normalizedPriority) {
+    return res.status(400).json({ error: 'priority must be one of: normal, high, urgent' });
   }
 
   if (!fromName) return res.status(400).json({ error: 'from required' });
@@ -6680,6 +6779,7 @@ app.post('/api/messages', (req, res) => {
     to: toName || null,
     group: group || null,
     type,
+    priority: normalizedPriority,
     summary: canonicalSummary,
     full: canonicalFull,
     mentions: [...textMentions],
@@ -6756,29 +6856,7 @@ app.post('/api/messages', (req, res) => {
     msg.suppressedRecipients = [...suppressedRecipients];
   }
 
-  messages.push(msg);
-  saveMessages();
-  const compactEvent = buildAgentCompactEvent(msg, senderIsAgent);
-  if (compactEvent) {
-    broadcastSSE('agent_compact', compactEvent);
-  }
-  broadcastSSE('message', msg);
-  if (senderIsAgent) {
-    markAgentOutbound(fromName);
-  }
-
-  // Push notifications
-  if (msg.to && directTargetKind === 'agent' && msg.to !== msg.from && !isSuppressedForAgent(msg, msg.to)) {
-    const state = getAgentDeliveryState(msg.to);
-    if (state.online) pushNotify(msg.to, msg);
-  }
-  if (msg.group && msg.mentions.length > 0) {
-    for (const agent of msg.mentions) {
-      if (agent === msg.from || isSuppressedForAgent(msg, agent)) continue;
-      const state = getAgentDeliveryState(agent);
-      if (state.online) pushNotify(agent, msg);
-    }
-  }
+  dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
 
   res.json({
     ok: true,
@@ -6791,7 +6869,14 @@ app.post('/api/messages', (req, res) => {
 app.get('/api/messages/:id', (req, res) => {
   const msg = messages.find(m => m.id === req.params.id);
   if (!msg) return res.status(404).json({ error: 'message not found' });
-  res.json({ ...msg, ts: undefined, time: relativeTime(msg.ts) });
+  const normalizedSchema = normalizeMessageSchema(msg?.schema);
+  res.json({
+    ...msg,
+    priority: normalizeMessagePriority(msg?.priority),
+    schema: normalizedSchema.value || undefined,
+    ts: undefined,
+    time: relativeTime(msg.ts),
+  });
 });
 
 app.post('/api/messages/:id/suppress', (req, res) => {
