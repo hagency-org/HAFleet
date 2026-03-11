@@ -7,6 +7,7 @@ import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { promisify } from 'util';
 import { createSupervisorService } from './supervisor/index.js';
+import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import {
   buildUpstreamClaudeSubconsciousPaths,
   bootstrapUpstreamClaudeSubconsciousAgent,
@@ -110,16 +111,6 @@ const AGENT_COMPACT_FALLBACK_PATTERNS = [
 const LOCAL_BLOCK_TAIL_LINES = Number.parseInt(process.env.AGENT_LOCAL_BLOCK_TAIL_LINES || '40', 10);
 const LOCAL_BLOCK_RECENT_LINES = Number.parseInt(process.env.AGENT_LOCAL_BLOCK_RECENT_LINES || '14', 10);
 const LOCAL_MCP_SESSION_CACHE_TTL_MS = Number.parseInt(process.env.AGENT_LOCAL_MCP_SESSION_CACHE_TTL_MS || '1000', 10);
-const BLOCK_TIER_TRANSIENT = 0;
-const BLOCK_TIER_SOFT = 1;
-const BLOCK_TIER_HARD = 2;
-const LOCAL_BLOCK_PATTERNS = [
-  { reason: 'select-mode', tier: BLOCK_TIER_TRANSIENT, re: /(?:^|\n)\s*(?:select mode|choose (?:an?\s+)?mode)\s*(?:\n|$)/i },
-  { reason: 'plan-mode', tier: BLOCK_TIER_TRANSIENT, re: /(?:^|\n)\s*(?:[0-9]+[.)]\s*)?plan mode\s*(?:\n|$)/i },
-  { reason: 'approval-mode-toggle', tier: BLOCK_TIER_TRANSIENT, re: /bypass permissions on \(shift\+tab to cycle\)/i },
-  { reason: 'update-required', tier: BLOCK_TIER_HARD, re: /updates?\s+available:|update available.*agent-update|run ['"`]?agent-update/i },
-  { reason: 'interactive-confirm', tier: BLOCK_TIER_SOFT, re: /choose (an )?option|press (enter|return) to continue|confirm .*continue/i },
-];
 
 mkdirSync(DATA_DIR, { recursive: true });
 const MESSAGE_ATTACHMENT_DIR = path.join(DATA_DIR, 'message-attachments');

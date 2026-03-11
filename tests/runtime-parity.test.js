@@ -55,4 +55,16 @@ describe('runtime parity regressions', () => {
     expect(remoteHint).toBe(localHint);
     expect(localHint).toBe('FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.');
   });
+
+  test('backend and local push-relay import blocked patterns from the shared module', () => {
+    const backendSource = readFileSync(path.resolve('backend-v2.js'), 'utf-8');
+    const relaySource = readFileSync(path.resolve('lib/push-relay-core.js'), 'utf-8');
+    const sharedSource = readFileSync(path.resolve('lib/blocked-patterns.js'), 'utf-8');
+
+    expect(backendSource).toMatch(/from '\.\/lib\/blocked-patterns\.js';/);
+    expect(relaySource).toMatch(/from '\.\/blocked-patterns\.js';/);
+    expect(sharedSource).toMatch(/reason: 'approval-mode-toggle'/);
+    expect(sharedSource).toMatch(/reason: 'interactive-confirm'/);
+    expect(sharedSource).toMatch(/reason: 'update-required'/);
+  });
 });
