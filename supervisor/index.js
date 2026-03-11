@@ -17,10 +17,13 @@ function readJsonl(filePath, limit = 2000) {
     for (const line of tail) {
       try {
         parsed.push(JSON.parse(line));
-      } catch {}
+      } catch (e) {
+        console.debug(`[supervisor] jsonl parse skipped for ${filePath}: ${e.message}`);
+      }
     }
     return parsed;
-  } catch {
+  } catch (e) {
+    console.debug(`[supervisor] jsonl read skipped for ${filePath}: ${e.message}`);
     return [];
   }
 }
@@ -177,7 +180,8 @@ function tmuxSessionExists(sessionName) {
   try {
     execFileSync('tmux', ['has-session', '-t', `=${sessionName}`], { timeout: 2000, stdio: 'ignore' });
     return true;
-  } catch {
+  } catch (e) {
+    console.debug(`[supervisor] tmux session check skipped for ${sessionName}: ${e.message}`);
     return false;
   }
 }
@@ -189,7 +193,8 @@ function tmuxPanePath(sessionName) {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim() || null;
-  } catch {
+  } catch (e) {
+    console.debug(`[supervisor] tmux pane path lookup skipped for ${sessionName}: ${e.message}`);
     return null;
   }
 }
@@ -198,7 +203,8 @@ function killTmuxSession(sessionName) {
   try {
     execFileSync('tmux', ['kill-session', '-t', `=${sessionName}`], { timeout: 3000, stdio: 'ignore' });
     return true;
-  } catch {
+  } catch (e) {
+    console.debug(`[supervisor] tmux kill skipped for ${sessionName}: ${e.message}`);
     return false;
   }
 }
@@ -214,7 +220,8 @@ function listTmuxSessions() {
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean);
-  } catch {
+  } catch (e) {
+    console.debug(`[supervisor] tmux list skipped: ${e.message}`);
     return [];
   }
 }
@@ -295,7 +302,8 @@ function isExecutableFile(filePath) {
   try {
     accessSync(filePath, fsConstants.X_OK);
     return true;
-  } catch {
+  } catch (e) {
+    console.debug(`[supervisor] executable check skipped for ${filePath}: ${e.message}`);
     return false;
   }
 }

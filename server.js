@@ -349,7 +349,9 @@ function saveQueue() {
   for (const [, entries] of queue) items.push(...entries);
   try {
     writeFileSync(QUEUE_FILE, JSON.stringify({ idCounter: queueIdCounter, items }));
-  } catch {}
+  } catch (e) {
+    console.debug(`[server] queue save skipped: ${e.message}`);
+  }
 }
 
 // Load queue from disk on startup
@@ -373,7 +375,9 @@ try {
     }
   }
   console.log(`Restored ${data.items?.length || 0} queued messages from disk`);
-} catch { /* no queue file or parse error, start fresh */ }
+} catch (e) {
+  console.debug(`[server] queue load skipped: ${e.message}`);
+}
 
 // Accept queued message from agent-send
 app.post('/api/queue', (req, res) => {
@@ -585,7 +589,9 @@ function loadLocalAgentMeta(name) {
         if (existsSync(fallbackPath)) return { metaPath: fallbackPath, meta: safeReadJsonSync(fallbackPath) };
       }
     }
-  } catch {}
+  } catch (e) {
+    console.debug(`[server] local agent meta scan skipped for ${name}: ${e.message}`);
+  }
   return { metaPath, meta: null };
 }
 
@@ -1424,7 +1430,9 @@ app.get('/api/agents/detail/:name', async (req, res) => {
       detail.task = normalizeTaskMeta(agent.task, name);
       detail.runtimeProfile = normalizeRuntimeProfileMeta(agent.runtimeProfile);
     }
-  } catch {}
+  } catch (e) {
+    console.debug(`[server] backend subconscious detail fetch skipped for ${name}: ${e.message}`);
+  }
 
   // From local meta.json
   if (localMeta && typeof localMeta === 'object') {
@@ -1487,7 +1495,10 @@ app.get('/api/agents/detail/:name', async (req, res) => {
     : path.join(AGENTS_DATA_DIR, name);
   try {
     detail.resumeId = (await readFileAsync(path.join(resumeRoot, 'resume-id'), 'utf-8')).trim();
-  } catch { detail.resumeId = null; }
+  } catch (e) {
+    console.debug(`[server] resume-id read skipped for ${name}: ${e.message}`);
+    detail.resumeId = null;
+  }
 
   // Idle info + detect agent type from process if missing
   if (detail.tmux) {
@@ -1503,7 +1514,9 @@ app.get('/api/agents/detail/:name', async (req, res) => {
           if (childCmd.includes('claude')) detail.agentType = 'claude';
           else if (childCmd.includes('codex')) detail.agentType = 'codex';
         }
-      } catch {}
+      } catch (e) {
+        console.debug(`[server] agent type probe skipped for ${name}: ${e.message}`);
+      }
     }
   }
 
@@ -1524,7 +1537,9 @@ app.get('/api/subconscious/detail/:name', async (req, res) => {
     const r = await fetch(backendUrl);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     if (r.ok) return res.json(data);
-  } catch {}
+  } catch (e) {
+    console.debug(`[server] backend agent detail fetch skipped for ${name}: ${e.message}`);
+  }
 
   const { meta: localMeta } = loadLocalAgentMeta(name);
   const manifest = loadV1Manifest(name, localMeta);
@@ -1532,7 +1547,9 @@ app.get('/api/subconscious/detail/:name', async (req, res) => {
   try {
     const r = await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`);
     detail = await r.json();
-  } catch {}
+  } catch (e) {
+    console.debug(`[server] backend agent detail fetch skipped for ${name}: ${e.message}`);
+  }
   return res.json(buildSubconsciousDetailPayload(name, manifest, detail));
 });
 
@@ -2425,10 +2442,14 @@ try {
   const raw = await readFileAsync(REDIRECT_FILE, 'utf-8');
   for (const [k, v] of Object.entries(JSON.parse(raw))) redirects.set(k, v);
   console.log(`Loaded ${redirects.size} redirects`);
-} catch {}
+} catch (e) {
+  console.debug(`[server] redirects load skipped: ${e.message}`);
+}
 
 function saveRedirects() {
-  try { writeFileSync(REDIRECT_FILE, JSON.stringify(Object.fromEntries(redirects))); } catch {}
+  try { writeFileSync(REDIRECT_FILE, JSON.stringify(Object.fromEntries(redirects))); } catch (e) {
+    console.debug(`[server] redirects save skipped: ${e.message}`);
+  }
 }
 
 // API to manage redirects
@@ -2610,7 +2631,9 @@ let reminderIdCounter = 0;
 function saveReminders() {
   try {
     writeFileSync(REMINDER_FILE, JSON.stringify({ idCounter: reminderIdCounter, items: reminders }));
-  } catch {}
+  } catch (e) {
+    console.debug(`[server] reminders save skipped: ${e.message}`);
+  }
 }
 
 // Load from disk
@@ -2620,7 +2643,9 @@ try {
   reminderIdCounter = data.idCounter || 0;
   for (const r of (data.items || [])) reminders.push(r);
   console.log(`Restored ${reminders.length} reminders from disk`);
-} catch {}
+} catch (e) {
+  console.debug(`[server] reminders load skipped: ${e.message}`);
+}
 
 function reminderSnapshot() {
   const now = Date.now();
@@ -6085,7 +6110,9 @@ body.page-hidden #reminder-panel.has-items{
         }
       }
       let body = null;
-      try { body = await res.json(); } catch {}
+      try { body = await res.json(); } catch (e) {
+        console.debug('[agent-detail] queue action response parse skipped:', e.message);
+      }
       if (!res.ok || (body && body.ok === false)) {
         throw new Error((body && body.reason) || ('HTTP ' + res.status));
       }
@@ -6093,7 +6120,8 @@ body.page-hidden #reminder-panel.has-items{
         const targetAgent = String(removed.to).split(':', 1)[0];
         if (targetAgent === monitoredAgent.name) fetchAgentDetail(monitoredAgent.name);
       }
-    } catch {
+    } catch (e) {
+      console.debug('[agent-detail] queue action failed, restoring removed entry:', e.message);
       if (removed) { queueItems.push(removed); requestQueueRender(true); }
     }
   };
@@ -6361,7 +6389,9 @@ body.page-hidden #reminder-panel.has-items{
 
     const requestSeq = ++agentDetailRequestSeq;
     if (agentDetailAbortController) {
-      try { agentDetailAbortController.abort(); } catch {}
+      try { agentDetailAbortController.abort(); } catch (e) {
+        console.debug('[agent-detail] previous request abort skipped:', e.message);
+      }
     }
     const controller = new AbortController();
     agentDetailAbortController = controller;
@@ -6393,14 +6423,18 @@ body.page-hidden #reminder-panel.has-items{
           const payload = await supervisorRespRaw.value.json();
           if (payload && typeof payload === 'object') supervisorData = payload;
         }
-      } catch {}
+      } catch (e) {
+        console.debug('[agent-detail] supervisor detail fetch skipped:', e.message);
+      }
       try {
         const r = await fetch('/api/supervisor/status', { signal: controller.signal });
         if (r.ok) {
           const payload = await r.json();
           if (payload && typeof payload === 'object') supervisorStatus = payload;
         }
-      } catch {}
+      } catch (e) {
+        console.debug('[agent-detail] supervisor status fetch skipped:', e.message);
+      }
       const statusSnap = agentStatusList.find(x => x.name === targetName) || {};
       const activeNow = typeof statusSnap.activeNow === 'boolean'
         ? statusSnap.activeNow
@@ -6690,7 +6724,9 @@ body.page-hidden #reminder-panel.has-items{
       renderAgentButtons(normalized);
       updateSelectedRuntimeBadge();
       lastStatusSyncAt = now;
-    } catch {}
+    } catch (e) {
+      console.debug('[agent-status] status fetch skipped:', e.message);
+    }
   }
 
   function tickAgentDurationsLocal() {
@@ -6733,13 +6769,19 @@ body.page-hidden #reminder-panel.has-items{
   function connectSSE() {
     const evtSource = new EventSource('/api/stream');
     evtSource.onmessage = (e) => {
-      try { addLogEntry(JSON.parse(e.data)); } catch {}
+      try { addLogEntry(JSON.parse(e.data)); } catch (err) {
+        console.debug('[sse] message parse skipped:', err.message);
+      }
     };
     evtSource.addEventListener('queue', (e) => {
-      try { queueItems = JSON.parse(e.data); requestQueueRender(false); } catch {}
+      try { queueItems = JSON.parse(e.data); requestQueueRender(false); } catch (err) {
+        console.debug('[sse] queue parse skipped:', err.message);
+      }
     });
     evtSource.addEventListener('reminders', (e) => {
-      try { reminderItems = JSON.parse(e.data); renderReminderPanel(); } catch {}
+      try { reminderItems = JSON.parse(e.data); renderReminderPanel(); } catch (err) {
+        console.debug('[sse] reminders parse skipped:', err.message);
+      }
     });
   }
 
@@ -6752,8 +6794,12 @@ body.page-hidden #reminder-panel.has-items{
       for (const msg of msgs.slice(-50)) addLogEntry(msg);
     } catch (e) { console.error('messages load failed:', e); }
     // Initial state
-    try { const r = await fetch('/api/queue'); queueItems = await r.json(); requestQueueRender(true); } catch {}
-    try { const r = await fetch('/api/reminders'); reminderItems = await r.json(); renderReminderPanel(); } catch {}
+    try { const r = await fetch('/api/queue'); queueItems = await r.json(); requestQueueRender(true); } catch (e) {
+      console.debug('[init] queue load skipped:', e.message);
+    }
+    try { const r = await fetch('/api/reminders'); reminderItems = await r.json(); renderReminderPanel(); } catch (e) {
+      console.debug('[init] reminders load skipped:', e.message);
+    }
     await fetchAgentStatus('init');
     statusPollTimer = setInterval(() => {
       if (!document.hidden) fetchAgentStatus('poll');

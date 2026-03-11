@@ -11,7 +11,8 @@ let execFileAsyncImpl = execFileAsync;
 function readText(filePath) {
   try {
     return readFileSync(filePath, 'utf-8');
-  } catch {
+  } catch (e) {
+    console.debug(`[collector] text read skipped for ${filePath}: ${e.message}`);
     return '';
   }
 }
@@ -57,7 +58,8 @@ function loadMetaWorkspace(metaRoot, agentName) {
   if (existsSync(metaPath)) {
     try {
       meta = JSON.parse(readFileSync(metaPath, 'utf-8'));
-    } catch {
+    } catch (e) {
+      console.debug(`[collector] meta parse skipped for ${metaPath}: ${e.message}`);
       meta = null;
     }
   }
@@ -74,7 +76,8 @@ function loadMetaWorkspace(metaRoot, agentName) {
       ? meta.path.trim()
       : (v1Manifest?.workdir || null);
     return { metaPath, workspacePath, v1Manifest };
-  } catch {
+  } catch (e) {
+    console.debug(`[collector] workspace resolution skipped for ${metaPath}: ${e.message}`);
     return { metaPath, workspacePath: v1Manifest?.workdir || null, v1Manifest };
   }
 }
@@ -92,7 +95,8 @@ function loadServerSsh(pathValue) {
     if (!existsSync(pathValue)) return {};
     const parsed = JSON.parse(readFileSync(pathValue, 'utf-8'));
     return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
+  } catch (e) {
+    console.debug(`[collector] server ssh load skipped for ${pathValue}: ${e.message}`);
     return {};
   }
 }
