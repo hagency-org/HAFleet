@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'vitest';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { SupervisorService } from '../supervisor/index.js';
@@ -39,5 +39,10 @@ describe('runtime parity regressions', () => {
 
     const rows = service.resolveCandidates();
     expect(rows.map(row => row.agent.name)).toEqual(['alpha', 'bravo', 'charlie']);
+  });
+
+  test('remote MCP auto-registration defaults server to os.hostname()', () => {
+    const source = readFileSync(path.resolve('remote/lib/mcp-server-core.js'), 'utf-8');
+    expect(source).toMatch(/const AGENT_SERVER = \(process\.env\.AGENT_CHAT_SERVER \|\| ''\)\.trim\(\) \|\| os\.hostname\(\);/);
   });
 });
