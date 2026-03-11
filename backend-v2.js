@@ -2629,6 +2629,8 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
     ? runtime.blockedReason.trim()
     : null;
   runtime.blockedSince = Number(runtime.blockedSince) || null;
+  runtime.blockedConsecutiveScans = Math.max(0, Number(runtime.blockedConsecutiveScans) || 0);
+  runtime.blockedNotificationSent = runtime.blockedNotificationSent === true;
   runtime.updatedAt = Number(runtime.updatedAt) || 0;
   runtime.lastSeen = Number(runtime.lastSeen) || 0;
   runtime.lastPushNotifyAt = Number(runtime.lastPushNotifyAt) || 0;
@@ -3164,6 +3166,8 @@ function ensureAgentRuntimeRecord(name) {
       blocked: false,
       blockedReason: null,
       blockedSince: null,
+      blockedConsecutiveScans: 0,
+      blockedNotificationSent: false,
       activeNow: false,
       activeDurationSec: 0,
       idleDurationSec: 0,
@@ -3426,6 +3430,7 @@ function applyLocalMetadataOnlySignals(agentName, payload = {}) {
     command: runtime.blocked === true ? (runtime.lastBlockedCommand || '') : '',
     workspacePath: payload.workspacePath,
     mcpPresent: payload.mcpPresent,
+    blockedObserved: false,
   });
 }
 
@@ -3552,6 +3557,7 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
 
   const now = Date.now();
   const blockedNow = payload.blocked === true;
+  const blockedObserved = blockedNow && payload.blockedObserved !== false;
   const reasonNow = blockedNow && typeof payload.reason === 'string' && payload.reason.trim()
     ? payload.reason.trim()
     : null;
@@ -3561,6 +3567,8 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
 
   const prevBlocked = runtime.blocked === true;
   const prevReason = runtime.blockedReason || null;
+  const prevBlockedConsecutiveScans = Math.max(0, Number(runtime.blockedConsecutiveScans) || 0);
+  const prevBlockedNotificationSent = runtime.blockedNotificationSent === true;
   const prevMcpPresent = runtime.mcpPresent === true
     ? true
     : (runtime.mcpPresent === false ? false : null);
@@ -3571,6 +3579,13 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
   if (runtime.lastSeen !== now) { runtime.lastSeen = now; changed = true; }
   if (runtime.updatedAt !== now) { runtime.updatedAt = now; changed = true; }
   if (blockedNow) {
+    const blockedConsecutiveScans = blockedObserved
+      ? (prevBlocked ? (prevBlockedConsecutiveScans + 1) : 1)
+      : (prevBlocked ? prevBlockedConsecutiveScans : 0);
+    if (runtime.blockedConsecutiveScans !== blockedConsecutiveScans) {
+      runtime.blockedConsecutiveScans = blockedConsecutiveScans;
+      changed = true;
+    }
     const blockedSince = prevBlocked ? (runtime.blockedSince || now) : now;
     if (runtime.blockedSince !== blockedSince) { runtime.blockedSince = blockedSince; changed = true; }
     if (runtime.lastBlockedTail !== tailNow) { runtime.lastBlockedTail = tailNow; changed = true; }
@@ -3578,6 +3593,8 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
     if ((runtime.lastBlockedServer || null) !== (serverNow || null)) { runtime.lastBlockedServer = serverNow; changed = true; }
   } else {
     if (runtime.blockedSince !== null) { runtime.blockedSince = null; changed = true; }
+    if (runtime.blockedConsecutiveScans !== 0) { runtime.blockedConsecutiveScans = 0; changed = true; }
+    if (runtime.blockedNotificationSent !== false) { runtime.blockedNotificationSent = false; changed = true; }
     if (runtime.lastBlockedTail !== '') { runtime.lastBlockedTail = ''; changed = true; }
     if (runtime.lastBlockedCommand !== '') { runtime.lastBlockedCommand = ''; changed = true; }
     if (runtime.lastBlockedServer !== null) { runtime.lastBlockedServer = null; changed = true; }
@@ -3620,11 +3637,21 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
   if (agentChanged) saveAgents();
   if (shouldCatchup) notifyAgentCatchup(agentName, 'mcp-restored');
 
-  const becameBlocked = !prevBlocked && blockedNow;
-  const reasonChanged = prevBlocked && blockedNow && reasonNow && reasonNow !== prevReason;
-  const recovered = prevBlocked && !blockedNow;
+  const blockedNotificationReady = blockedNow
+    && blockedObserved
+    && runtime.blockedConsecutiveScans >= 2;
+  const becameBlocked = blockedNotificationReady && !prevBlockedNotificationSent;
+  const reasonChanged = prevBlockedNotificationSent
+    && blockedNotificationReady
+    && reasonNow
+    && reasonNow !== prevReason;
+  const recovered = prevBlockedNotificationSent && !blockedNow;
 
   if (becameBlocked || reasonChanged) {
+    if (runtime.blockedNotificationSent !== true) {
+      runtime.blockedNotificationSent = true;
+      saveAgentRuntime();
+    }
     const blockedSummary = `Agent '${agentName}' entered blocked state`;
     const { hasPendingHuman, targets } = collectBlockedHumanTargets(agentName);
     const fullLines = [
@@ -4014,13 +4041,14 @@ function applyLocalRuntimeSignals(agentName, payload = {}) {
     : null;
   const workspacePath = normalizeWorkspacePath(payload.workspacePath);
   const mcpPresent = normalizeMcpPresence(payload.mcpPresent);
+  const blockedObserved = payload.blockedObserved === true;
   const digest = JSON.stringify({
     blocked,
     reason,
     workspacePath: workspacePath || null,
     mcpPresent,
   });
-  if (localRuntimeSignalDigest.get(agentName) === digest) return;
+  if (localRuntimeSignalDigest.get(agentName) === digest && !(blocked && blockedObserved)) return;
   localRuntimeSignalDigest.set(agentName, digest);
   applyAgentBlockedRuntime(agentName, {
     blocked,
@@ -4029,6 +4057,7 @@ function applyLocalRuntimeSignals(agentName, payload = {}) {
     command: typeof payload.command === 'string' ? payload.command : '',
     workspacePath,
     mcpPresent,
+    blockedObserved,
     server: 'local',
   });
 }
@@ -5565,6 +5594,9 @@ app.post('/api/agents/:name/runtime', (req, res) => {
   const mcpPresent = Object.prototype.hasOwnProperty.call(req.body || {}, 'mcpPresent')
     ? (req.body.mcpPresent === true ? true : (req.body.mcpPresent === false ? false : null))
     : undefined;
+  const blockedObserved = Object.prototype.hasOwnProperty.call(req.body || {}, 'blockedObserved')
+    ? req.body.blockedObserved === true
+    : true;
 
   let agent = agents[agentName];
   if (!isAgentRecord(agent)) {
@@ -5593,6 +5625,7 @@ app.post('/api/agents/:name/runtime', (req, res) => {
     lastTmuxActivitySec,
     workspacePath,
     mcpPresent,
+    blockedObserved,
   });
   if (!runtime) return res.status(500).json({ error: 'runtime update failed' });
   res.json({
