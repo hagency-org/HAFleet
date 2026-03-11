@@ -51,6 +51,10 @@ const RULE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_RULE_SWEEP_INTE
 const IDLE_THRESHOLD_MS = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '20000', 10);
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.floor((IDLE_THRESHOLD_MS + 999) / 1000));
 const LOCAL_ACTIVITY_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_LOCAL_ACTIVITY_SWEEP_MS || '5000', 10);
+const LOCAL_ACTIVITY_CAPTURE_BUDGET_RAW = Number.parseInt(process.env.AGENT_LOCAL_ACTIVITY_CAPTURE_BUDGET || '0', 10);
+const LOCAL_ACTIVITY_CAPTURE_BUDGET = Number.isFinite(LOCAL_ACTIVITY_CAPTURE_BUDGET_RAW)
+  ? Math.max(0, LOCAL_ACTIVITY_CAPTURE_BUDGET_RAW)
+  : 0;
 const SWAP_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_SWAP_SWEEP_INTERVAL_MS || '5000', 10);
 const SWAP_ALERT_THRESHOLD_PCT_RAW = Number.parseFloat(process.env.AGENT_SWAP_ALERT_THRESHOLD_PCT || '80');
 const SWAP_ALERT_THRESHOLD_PCT = Number.isFinite(SWAP_ALERT_THRESHOLD_PCT_RAW)
@@ -390,6 +394,7 @@ function mergeHumanMeta(existingValue, nextValue) {
       ? normalizeOptionalText(raw.owner, 256)
       : existing.owner,
   };
+  return out;
 }
 
 function normalizeIsoTimestamp(value) {
@@ -2431,6 +2436,7 @@ const messages = loadJsonSync('messages.json', []);
 const cursors = loadJsonSync('cursors.json', {});
 const servers = loadJsonSync('servers.json', {});
 const agentRuntime = loadJsonSync('agent_runtime.json', {});
+const localActivitySweepState = loadJsonSync('local_activity_sweep.json', { selectionCursor: 0 });
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
 const localTmuxMissingState = new Map(); // agent -> { since:number, alerted:boolean }
@@ -2657,6 +2663,7 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
   runtime.mcpMissingSince = Number(runtime.mcpMissingSince) || null;
   if (!runtime.rules || typeof runtime.rules !== 'object') runtime.rules = {};
 }
+localActivitySweepState.selectionCursor = Math.max(0, Number(localActivitySweepState.selectionCursor) || 0);
 
 function nextMsgId() {
   msgCounter++;
@@ -2670,6 +2677,7 @@ function saveMessages() { saveJson('messages.json', messages); }
 function saveCursors() { saveJson('cursors.json', cursors); }
 function saveServers() { saveJson('servers.json', servers); }
 function saveAgentRuntime() { saveJson('agent_runtime.json', agentRuntime); }
+function saveLocalActivitySweepState() { saveJson('local_activity_sweep.json', localActivitySweepState); }
 
 function ensureAgentRecord(name, defaults = {}) {
   const agentName = normalizeAgentName(name);
@@ -2859,7 +2867,10 @@ function normalizeMessageSchema(value) {
   if (!kind) return { error: 'schema.kind required' };
   let version = 1;
   if (Object.prototype.hasOwnProperty.call(value, 'version') && value.version !== undefined && value.version !== null) {
-    const parsed = Number(value.version);
+    if (typeof value.version !== 'number') {
+      return { error: 'schema.version must be a positive integer' };
+    }
+    const parsed = value.version;
     if (!Number.isInteger(parsed) || parsed < 1) {
       return { error: 'schema.version must be a positive integer' };
     }
@@ -2998,8 +3009,8 @@ function messageTargetsAgent(msg, agentName) {
   return Array.isArray(msg.mentions) && msg.mentions.includes(agentName);
 }
 
-function buildUnreadInboxSnapshot(agentName) {
-  const { unread } = getUnreadInboxMessages(agentName);
+function buildUnreadInboxSnapshot(agentName, options = {}) {
+  const { unread } = getUnreadInboxMessages(agentName, options);
   let unreadDm = 0;
   let unreadGroupMentions = 0;
   for (const m of unread) {
@@ -3361,6 +3372,94 @@ function setRuntimeWorkspacePath(runtime, payload = {}) {
   if ((runtime.workspacePath || null) === (normalized || null)) return false;
   runtime.workspacePath = normalized;
   return true;
+}
+
+function syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown) {
+  if (!isAgentRecord(agent) || !runtime) return false;
+  let changed = false;
+  const mcpMissing = runtime.mcpPresent === false;
+  if ((!agent.tmux || !String(agent.tmux).trim()) && !manualDown) {
+    agent.tmux = tmuxTarget;
+    changed = true;
+  }
+  if (manualDown) {
+    if (agent.online !== false) {
+      agent.online = false;
+      changed = true;
+    }
+  } else if (mcpMissing) {
+    if (agent.online !== false) {
+      agent.online = false;
+      changed = true;
+    }
+    if (agent.offlineReason !== 'mcp-missing:auto') {
+      agent.offlineReason = 'mcp-missing:auto';
+      changed = true;
+    }
+  } else {
+    if (agent.online !== true) {
+      agent.online = true;
+      changed = true;
+    }
+    if (agent.offlineReason !== null) {
+      agent.offlineReason = null;
+      changed = true;
+    }
+    if (agent.manualDown !== false) {
+      agent.manualDown = false;
+      changed = true;
+    }
+  }
+  if (changed) {
+    agent.lastSeen = Date.now();
+  }
+  return changed;
+}
+
+function applyLocalMetadataOnlySignals(agentName, payload = {}) {
+  const runtime = ensureAgentRuntimeRecord(agentName);
+  if (!runtime) return;
+  applyLocalRuntimeSignals(agentName, {
+    blocked: runtime.blocked === true,
+    reason: runtime.blocked === true ? (runtime.blockedReason || null) : null,
+    tail: runtime.blocked === true ? (runtime.lastBlockedTail || '') : '',
+    command: runtime.blocked === true ? (runtime.lastBlockedCommand || '') : '',
+    workspacePath: payload.workspacePath,
+    mcpPresent: payload.mcpPresent,
+  });
+}
+
+function resolveLocalActivityCaptureSelection(agentNames = [], budget = 0) {
+  const ordered = [...new Set((Array.isArray(agentNames) ? agentNames : []).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const count = ordered.length;
+  const currentCursor = Math.max(0, Number(localActivitySweepState.selectionCursor) || 0);
+  if (count === 0) {
+    if (currentCursor !== 0) {
+      localActivitySweepState.selectionCursor = 0;
+      saveLocalActivitySweepState();
+    }
+    return { selected: new Set(), ordered, currentCursor: 0, nextCursor: 0 };
+  }
+  if (!Number.isFinite(budget) || budget <= 0 || budget >= count) {
+    const nextCursor = 0;
+    if (currentCursor !== nextCursor) {
+      localActivitySweepState.selectionCursor = nextCursor;
+      saveLocalActivitySweepState();
+    }
+    return { selected: new Set(ordered), ordered, currentCursor, nextCursor };
+  }
+
+  const normalizedCursor = currentCursor % count;
+  const selected = [];
+  for (let i = 0; i < budget; i++) {
+    selected.push(ordered[(normalizedCursor + i) % count]);
+  }
+  const nextCursor = (normalizedCursor + budget) % count;
+  if (currentCursor !== nextCursor) {
+    localActivitySweepState.selectionCursor = nextCursor;
+    saveLocalActivitySweepState();
+  }
+  return { selected: new Set(selected), ordered, currentCursor: normalizedCursor, nextCursor };
 }
 
 function isHumanMessageToAgent(msg, agentName) {
@@ -3848,24 +3947,27 @@ function captureLocalPaneContent(tmuxTarget) {
   }
 }
 
-function buildLocalPaneSnapshotMap() {
-  const out = new Map();
+function buildLocalPaneMetadataSnapshot() {
+  const sessions = new Map();
+  const ttyToSession = new Map();
   try {
-    const raw = execSync('tmux list-panes -a -F "#{session_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}" 2>/dev/null', {
+    const raw = execSync('tmux list-panes -a -F "#{pane_tty}\t#{session_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}" 2>/dev/null', {
       encoding: 'utf-8',
       timeout: 3000,
     }).trim();
-    if (!raw) return out;
+    if (!raw) return { sessions, ttyToSession };
     for (const line of raw.split('\n')) {
       const parts = line.split('\t');
-      if (parts.length < 4) continue;
-      const session = parts[0].trim();
-      const panePid = Number.parseInt(parts[1].trim(), 10);
-      const command = parts[2].trim();
-      const workspacePath = normalizeWorkspacePath(parts.slice(3).join('\t').trim());
+      if (parts.length < 5) continue;
+      const tty = parts[0].trim();
+      const session = parts[1].trim();
+      const panePid = Number.parseInt(parts[2].trim(), 10);
+      const command = parts[3].trim();
+      const workspacePath = normalizeWorkspacePath(parts.slice(4).join('\t').trim());
+      if (tty && session) ttyToSession.set(tty.replace('/dev/', ''), session);
       if (!session) continue;
-      if (!out.has(session)) {
-        out.set(session, {
+      if (!sessions.has(session)) {
+        sessions.set(session, {
           panePid: Number.isFinite(panePid) && panePid > 1 ? panePid : null,
           command: command || '',
           workspacePath,
@@ -3875,7 +3977,14 @@ function buildLocalPaneSnapshotMap() {
   } catch {
     // best effort snapshot
   }
-  return out;
+  return { sessions, ttyToSession };
+}
+
+function buildLocalPaneSnapshotMap(paneMetadataSnapshot = null) {
+  if (paneMetadataSnapshot && paneMetadataSnapshot.sessions instanceof Map) {
+    return paneMetadataSnapshot.sessions;
+  }
+  return buildLocalPaneMetadataSnapshot().sessions;
 }
 
 function sessionKeyFromTmuxTarget(tmuxTarget) {
@@ -3980,8 +4089,10 @@ function sweepLocalActivityDurations() {
   let agentsChanged = false;
   const pruneCandidates = new Set();
   const localRuntimeAgents = new Set();
-  const mcpSessions = getLocalMcpSessionSet(true);
-  const paneSnapshotMap = buildLocalPaneSnapshotMap();
+  const paneMetadataSnapshot = buildLocalPaneMetadataSnapshot();
+  const mcpSessions = getLocalMcpSessionSet(true, paneMetadataSnapshot);
+  const paneSnapshotMap = buildLocalPaneSnapshotMap(paneMetadataSnapshot);
+  const localRows = [];
 
   for (const agent of Object.values(agents)) {
     if (!isAgentRecord(agent)) continue;
@@ -3995,6 +4106,21 @@ function sweepLocalActivityDurations() {
     const tmuxTarget = configuredTmux || (manualDown ? null : `${agent.name}:0.0`);
     const runtime = ensureAgentRuntimeRecord(agent.name);
     if (!runtime) continue;
+    localRows.push({
+      agent,
+      runtime,
+      manualDown,
+      tmuxTarget,
+    });
+  }
+
+  const captureCandidates = localRows
+    .filter(row => row.tmuxTarget)
+    .map(row => row.agent.name);
+  const sampled = resolveLocalActivityCaptureSelection(captureCandidates, LOCAL_ACTIVITY_CAPTURE_BUDGET).selected;
+
+  for (const row of localRows) {
+    const { agent, runtime, manualDown, tmuxTarget } = row;
     if (!tmuxTarget) {
       localTmuxMissingState.delete(agent.name);
       localActivityState.delete(agent.name);
@@ -4020,13 +4146,13 @@ function sweepLocalActivityDurations() {
       continue;
     }
 
-    const paneCapture = captureLocalPaneContent(tmuxTarget);
-    if (!paneCapture?.hash) {
-      const paneSnapshot = readLocalPaneSnapshot(tmuxTarget, paneSnapshotMap);
-      const hasSession = !!paneSnapshot;
-      const paneCmd = paneSnapshot?.command || '';
-      const workspacePath = paneSnapshot?.workspacePath || null;
-      const mcpPresent = hasSession ? mcpSessions.has(agent.name) : null;
+    const paneSnapshot = readLocalPaneSnapshot(tmuxTarget, paneSnapshotMap);
+    const hasSession = !!paneSnapshot;
+    const paneCmd = paneSnapshot?.command || '';
+    const workspacePath = paneSnapshot?.workspacePath || null;
+    const mcpPresent = hasSession ? mcpSessions.has(agent.name) : null;
+
+    if (!hasSession) {
       applyLocalRuntimeSignals(agent.name, {
         blocked: false,
         reason: null,
@@ -4035,9 +4161,6 @@ function sweepLocalActivityDurations() {
         workspacePath,
         mcpPresent,
       });
-      if (hasSession) {
-        localTmuxMissingState.delete(agent.name);
-      }
       localActivityState.delete(agent.name);
       localCompactState.delete(agent.name);
       const resetChanged = setRuntimeActivityFields(runtime, {
@@ -4050,48 +4173,69 @@ function sweepLocalActivityDurations() {
         runtime.updatedAt = Date.now();
         runtimeChanged = true;
       }
-      if (!hasSession) {
-        let missing = localTmuxMissingState.get(agent.name);
-        if (!missing) {
-          missing = { since: nowMs, alerted: false };
-          localTmuxMissingState.set(agent.name, missing);
+      let missing = localTmuxMissingState.get(agent.name);
+      if (!missing) {
+        missing = { since: nowMs, alerted: false };
+        localTmuxMissingState.set(agent.name, missing);
+      }
+      const missingForMs = Math.max(0, nowMs - (Number(missing.since) || nowMs));
+      const wasOnline = agent.online === true;
+      const prevLastSeenMs = Number(agent.lastSeen) || 0;
+      const seenAgeMs = prevLastSeenMs > 0 ? Math.max(0, nowMs - prevLastSeenMs) : 0;
+      const recentEnough = prevLastSeenMs <= 0 || seenAgeMs <= AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS;
+      const wasManualDown = manualDown;
+      let transitioned = false;
+      if (agent.online !== false) { agent.online = false; agentsChanged = true; transitioned = true; }
+      if (agent.tmux !== null) { agent.tmux = null; agentsChanged = true; transitioned = true; }
+      if (!wasManualDown && agent.offlineReason !== 'tmux-missing:auto') {
+        agent.offlineReason = 'tmux-missing:auto';
+        agentsChanged = true;
+        transitioned = true;
+      }
+      if (transitioned) {
+        agent.lastSeen = nowMs;
+      }
+      if (!wasManualDown
+        && wasOnline
+        && recentEnough
+        && !missing.alerted
+        && missingForMs >= AGENT_TMUX_MISSING_ALERT_GRACE_MS) {
+        missing.alerted = true;
+        localTmuxMissingState.set(agent.name, missing);
+        if (agent.offlineReason === 'tmux-missing:auto') {
+          maybeEmitUnexpectedOfflineAlert(agent.name, 'tmux-missing:auto', { server: 'local', detail: `tmux target ${tmuxTarget} not found` });
         }
-        const missingForMs = Math.max(0, nowMs - (Number(missing.since) || nowMs));
-        const wasOnline = agent.online === true;
-        const prevLastSeenMs = Number(agent.lastSeen) || 0;
-        const seenAgeMs = prevLastSeenMs > 0 ? Math.max(0, nowMs - prevLastSeenMs) : 0;
-        const recentEnough = prevLastSeenMs <= 0 || seenAgeMs <= AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS;
-        const wasManualDown = manualDown;
-        let transitioned = false;
-        if (agent.online !== false) { agent.online = false; agentsChanged = true; transitioned = true; }
-        if (agent.tmux !== null) { agent.tmux = null; agentsChanged = true; transitioned = true; }
-        if (!wasManualDown && agent.offlineReason !== 'tmux-missing:auto') {
-          agent.offlineReason = 'tmux-missing:auto';
-          agentsChanged = true;
-          transitioned = true;
-        }
-        if (transitioned) {
-          agent.lastSeen = nowMs;
-        }
-        if (!wasManualDown
-          && wasOnline
-          && recentEnough
-          && !missing.alerted
-          && missingForMs >= AGENT_TMUX_MISSING_ALERT_GRACE_MS) {
-          missing.alerted = true;
-          localTmuxMissingState.set(agent.name, missing);
-          if (agent.offlineReason === 'tmux-missing:auto') {
-            maybeEmitUnexpectedOfflineAlert(agent.name, 'tmux-missing:auto', { server: 'local', detail: `tmux target ${tmuxTarget} not found` });
-          }
-        }
-        if (isEphemeralAuditAgentName(agent.name)) pruneCandidates.add(agent.name);
+      }
+      if (isEphemeralAuditAgentName(agent.name)) pruneCandidates.add(agent.name);
+      continue;
+    }
+
+    if (!sampled.has(agent.name)) {
+      applyLocalMetadataOnlySignals(agent.name, {
+        workspacePath,
+        mcpPresent,
+      });
+      localTmuxMissingState.delete(agent.name);
+      if (syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown)) {
+        agentsChanged = true;
       }
       continue;
     }
+
+    const paneCapture = captureLocalPaneContent(tmuxTarget);
+    if (!paneCapture?.hash) {
+      applyLocalMetadataOnlySignals(agent.name, {
+        workspacePath,
+        mcpPresent,
+      });
+      localTmuxMissingState.delete(agent.name);
+      if (syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown)) {
+        agentsChanged = true;
+      }
+      continue;
+    }
+
     const paneHash = paneCapture.hash;
-    const paneSnapshot = readLocalPaneSnapshot(tmuxTarget, paneSnapshotMap);
-    const paneCmd = paneSnapshot?.command || '';
-    const workspacePath = paneSnapshot?.workspacePath || null;
     const blockedReason = detectLocalBlockedReason(paneCapture.text, paneCmd);
     const blocked = Boolean(blockedReason);
     applyLocalRuntimeSignals(agent.name, {
@@ -4157,44 +4301,7 @@ function sweepLocalActivityDurations() {
       runtimeChanged = true;
     }
 
-    // Self-heal local mapping: if tmux session exists and emits pane content,
-    // keep backend routing state aligned even after stale/offline cleanup.
-    let onlineChanged = false;
-    const mcpMissing = runtime.mcpPresent === false;
-    if ((!agent.tmux || !String(agent.tmux).trim()) && !manualDown) {
-      agent.tmux = tmuxTarget;
-      onlineChanged = true;
-    }
-    if (manualDown) {
-      if (agent.online !== false) {
-        agent.online = false;
-        onlineChanged = true;
-      }
-    } else if (mcpMissing) {
-      if (agent.online !== false) {
-        agent.online = false;
-        onlineChanged = true;
-      }
-      if (agent.offlineReason !== 'mcp-missing:auto') {
-        agent.offlineReason = 'mcp-missing:auto';
-        onlineChanged = true;
-      }
-    } else {
-      if (agent.online !== true) {
-        agent.online = true;
-        onlineChanged = true;
-      }
-      if (agent.offlineReason !== null) {
-        agent.offlineReason = null;
-        onlineChanged = true;
-      }
-      if (agent.manualDown !== false) {
-        agent.manualDown = false;
-        onlineChanged = true;
-      }
-    }
-    if (onlineChanged) {
-      agent.lastSeen = Date.now();
+    if (syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown)) {
       agentsChanged = true;
     }
   }
@@ -4631,41 +4738,46 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
 }
 
 // ── Push notification relay ───────────────────────────────────────────
-function collectLocalMcpSessions() {
+function collectLocalMcpSessions(paneMetadataSnapshot = null) {
   try {
-    const paneOut = execSync('tmux list-panes -a -F "#{pane_tty} #{session_name}" 2>/dev/null', { timeout: 3000, encoding: 'utf-8' }).trim();
-    if (!paneOut) return new Set();
-    const ptsMap = {};
-    for (const line of paneOut.split('\n')) {
-      const sp = line.indexOf(' ');
-      if (sp < 0) continue;
-      const tty = line.slice(0, sp);
-      const sess = line.slice(sp + 1);
-      if (tty && sess) ptsMap[tty.replace('/dev/', '')] = sess;
-    }
+    const ptsMap = (paneMetadataSnapshot && paneMetadataSnapshot.ttyToSession instanceof Map)
+      ? paneMetadataSnapshot.ttyToSession
+      : buildLocalPaneMetadataSnapshot().ttyToSession;
+    if (!ptsMap.size) return new Set();
     let pids;
     try {
       pids = execSync('pgrep -f "node.*mcp-server.js" 2>/dev/null', { timeout: 3000, encoding: 'utf-8' }).trim().split('\n').filter(Boolean);
     } catch { return new Set(); }
+    if (!pids.length) return new Set();
     const matched = new Set();
-    for (const pid of pids) {
-      try {
-        const pts = execSync(`ps -o tty= -p ${pid} 2>/dev/null`, { timeout: 3000, encoding: 'utf-8' }).trim();
-        const session = ptsMap[pts];
+    try {
+      const psOut = execSync(`ps -o pid=,tty= -p ${pids.join(',')} 2>/dev/null`, {
+        timeout: 3000,
+        encoding: 'utf-8',
+      }).trim();
+      if (!psOut) return matched;
+      for (const line of psOut.split('\n')) {
+        const parts = line.trim().split(/\s+/, 2);
+        if (parts.length < 2) continue;
+        const pts = parts[1].trim();
+        if (!pts || pts === '?') continue;
+        const session = ptsMap.get(pts) || null;
         if (session) matched.add(session);
-      } catch { /* pid vanished, skip */ }
+      }
+    } catch {
+      return new Set();
     }
     return matched;
   } catch { /* no tmux */ }
   return new Set();
 }
 
-function getLocalMcpSessionSet(forceRefresh = false) {
+function getLocalMcpSessionSet(forceRefresh = false, paneMetadataSnapshot = null) {
   const now = Date.now();
   if (!forceRefresh && (now - localMcpSessionCacheAt) <= LOCAL_MCP_SESSION_CACHE_TTL_MS) {
     return localMcpSessionCache;
   }
-  localMcpSessionCache = collectLocalMcpSessions();
+  localMcpSessionCache = collectLocalMcpSessions(paneMetadataSnapshot);
   localMcpSessionCacheAt = now;
   return localMcpSessionCache;
 }
