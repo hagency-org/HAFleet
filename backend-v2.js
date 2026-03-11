@@ -1,5 +1,5 @@
 import express from 'express';
-import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync } from 'fs';
+import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync, unlinkSync } from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
 import { execFile } from 'child_process';
 import path from 'path';
@@ -173,12 +173,13 @@ function loadJsonSync(name, fallback) {
 
 function saveJson(name, data) {
   const target = dataPath(name);
-  const tmp = target + '.tmp';
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
   try {
     writeFileSync(tmp, JSON.stringify(data, null, 2));
     renameSync(tmp, target);
     return true;
   } catch (e) {
+    try { unlinkSync(tmp); } catch {}
     const code = e?.code || 'unknown';
     const msg = e?.message || 'unknown error';
     console.error(`Failed to save JSON ${target}: [${code}] ${msg}`);
