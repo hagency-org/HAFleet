@@ -482,7 +482,7 @@ function buildNotification(agentName, msg) {
   const isHuman = msg.type === 'human';
   const needsReply = msg.type === 'human' || msg.type === 'request';
   if (hasMcp) {
-    const checkHint = 'Use check_inbox() in agent-chat MCP for full context.';
+    const checkHint = 'FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.';
     const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
     const actionHint = needsReply ? ` ${sendHint}.` : '';
     return isHuman

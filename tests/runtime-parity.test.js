@@ -45,4 +45,14 @@ describe('runtime parity regressions', () => {
     const source = readFileSync(path.resolve('remote/lib/mcp-server-core.js'), 'utf-8');
     expect(source).toMatch(/const AGENT_SERVER = \(process\.env\.AGENT_CHAT_SERVER \|\| ''\)\.trim\(\) \|\| os\.hostname\(\);/);
   });
+
+  test('local and remote push-relay check_inbox hints stay in sync', () => {
+    const localSource = readFileSync(path.resolve('lib/push-relay-core.js'), 'utf-8');
+    const remoteSource = readFileSync(path.resolve('remote/lib/push-relay-core.js'), 'utf-8');
+    const hintPattern = /const checkHint = '([^']+)';/;
+    const localHint = localSource.match(hintPattern)?.[1] || null;
+    const remoteHint = remoteSource.match(hintPattern)?.[1] || null;
+    expect(remoteHint).toBe(localHint);
+    expect(localHint).toBe('FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.');
+  });
 });
