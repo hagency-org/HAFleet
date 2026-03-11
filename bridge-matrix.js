@@ -777,6 +777,21 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function normalizeAgentNameList(payload) {
+  if (!Array.isArray(payload)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const row of payload) {
+    const name = typeof row === 'string'
+      ? row.trim()
+      : (typeof row?.name === 'string' ? row.name.trim() : '');
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
+
 // ── Room ↔ Group mapping ─────────────────────────────────────────────
 function mapRoom(roomId, groupName) {
   const prevGroup = state.roomGroupMap[roomId];
@@ -1109,6 +1124,11 @@ export class MatrixBridge {
     return backendApi(method, routePath, body, contextLabel);
   }
 
+  async fetchKnownAgentNames() {
+    const payload = await this.callBackendApi('GET', '/api/agents?view=names');
+    return normalizeAgentNameList(payload);
+  }
+
   sleep(ms) {
     return sleep(ms);
   }
@@ -1368,14 +1388,14 @@ export class MatrixBridge {
     console.log(`Bot: ${this.botUserId}`);
 
     // 2. Ensure agent accounts for all known agents
-    const agents = await backendApi('GET', '/api/agents');
+    const agents = await this.fetchKnownAgentNames();
     const validAgentNames = new Set();
     const validAgentKeys = new Set();
-    for (const agent of agents) {
-      validAgentNames.add(agent.name);
-      validAgentKeys.add(this.nameKey(agent.name));
-      await ensureAgentAccount(agent.name);
-      this.addKnownAgent(agent.name);
+    for (const agentName of agents) {
+      validAgentNames.add(agentName);
+      validAgentKeys.add(this.nameKey(agentName));
+      await ensureAgentAccount(agentName);
+      this.addKnownAgent(agentName);
     }
     // Drop stale tokens that were created for non-agent users.
     let cleanedTokenCount = 0;
@@ -1430,17 +1450,17 @@ export class MatrixBridge {
   async pollRegistrations() {
     // Poll new agents from backend
     try {
-      const agents = await backendApi('GET', '/api/agents');
-      const validAgentNames = new Set(agents.map(a => a.name));
-      const validAgentKeys = new Set(agents.map(a => this.nameKey(a.name)));
-      for (const agent of agents) {
-        const wasKnown = this.isKnownAgentName(agent.name);
-        const canonicalName = this.addKnownAgent(agent.name) || this.normalizeName(agent.name);
+      const agents = await this.fetchKnownAgentNames();
+      const validAgentNames = new Set(agents);
+      const validAgentKeys = new Set(agents.map(name => this.nameKey(name)));
+      for (const agentName of agents) {
+        const wasKnown = this.isKnownAgentName(agentName);
+        const canonicalName = this.addKnownAgent(agentName) || this.normalizeName(agentName);
         if (canonicalName && !this.getAgentToken(canonicalName)) {
           await this.ensureAgentToken(canonicalName, 'registration_poll');
         }
         if (!wasKnown) {
-          console.log(`Discovered new agent: ${agent.name}`);
+          console.log(`Discovered new agent: ${agentName}`);
         }
       }
       let pruned = 0;

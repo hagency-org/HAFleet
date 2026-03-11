@@ -106,4 +106,20 @@ describe('bridge matrix behavior', () => {
 
     expect(bridge.submitHumanMessage).not.toHaveBeenCalled();
   });
+
+  test('pollRegistrations fetches agent names via view=names and provisions new tokens', async () => {
+    const bridge = new MatrixBridge();
+    bridge.callBackendApi = vi.fn().mockResolvedValue(['alpha', 'beta']);
+    bridge.ensureAgentToken = vi.fn().mockResolvedValue('token');
+    bridge.discoverAndGreetHumans = vi.fn().mockResolvedValue(undefined);
+
+    await bridge.pollRegistrations();
+
+    expect(bridge.callBackendApi).toHaveBeenCalledWith('GET', '/api/agents?view=names');
+    expect(bridge.ensureAgentToken).toHaveBeenCalledTimes(2);
+    expect(bridge.ensureAgentToken).toHaveBeenNthCalledWith(1, 'alpha', 'registration_poll');
+    expect(bridge.ensureAgentToken).toHaveBeenNthCalledWith(2, 'beta', 'registration_poll');
+    expect(bridge.isKnownAgentName('alpha')).toBe(true);
+    expect(bridge.isKnownAgentName('beta')).toBe(true);
+  });
 });
