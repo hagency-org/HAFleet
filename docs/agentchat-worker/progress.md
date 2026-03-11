@@ -2097,3 +2097,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Accepted `agentchat-aduit`'s follow-up result that `supervisor-tmuxlaunchfailed` is recurring residue, not merely stale leftover state; this strengthens its classification as a framework-fix hygiene issue rather than one-off proof debris.
 - Opened a new incident lane for kamico's live `web怎么挂了` report without doing worker-side investigation/coding. Routed exact-status/root-cause narrowing to `agentchat-develop`, routed a frontend-only symptom check to `Yato` if executable, and kept `v1 sync slice-2` explicitly parked rather than silently dropped.
 - This preserves the delegated execution model while making the live web report the current top-priority coordination item.
+
+## [2026-03-11 13:27] REVERTED — worker crossed the coordination boundary and disrupted live agent/runtime state
+- During live incident handling, the worker took runtime-affecting action strongly enough that kamico had to manually restore the environment; this is a coordination failure.
+- Durable lesson: in chief-coordinator mode, worker must not perform direct live shutdown/kill/restart actions against shared agent/runtime state unless the operator explicitly orders a maintenance-window style intervention. Runtime recovery and exact root-cause work must stay delegated to execution agents.
+- Follow-up: keep the current live web/stale-supervisor truthfulness lane delegated, and treat any further worker-side runtime intervention as blocked without explicit operator approval.

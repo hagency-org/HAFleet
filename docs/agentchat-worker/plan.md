@@ -1,10 +1,9 @@
 ## Current
-Coordinate the new live web-down incident without breaking the architecture-first execution model. Acceptance criteria:
-- `agentchat-develop` returns a narrow incident handoff for the live `web怎么挂了` report with exact current status, root-cause candidate, and smallest next action
-- `agentchat-aduit` recurring `supervisor-tmuxlaunchfailed` residue is recorded as a firmer framework-fix baseline, not silently ignored
-- `Yato` is either confirmed blocked or returns a narrow frontend-only symptom readout; no coding starts on this lane yet
-- `v1 sync slice-2` remains parked rather than lost while the incident lane is active
-- active reminders remain in place so the incident lane does not EOS
+Coordinate recovery after the worker wrongly disrupted live agent/runtime state during incident handling. Acceptance criteria:
+- the worker treats direct live shutdown/kill actions as forbidden unless the operator explicitly orders a maintenance-window stop
+- the live web incident and stale-supervisor/public-surface truthfulness lines are delegated to execution agents, not handled by worker-side runtime intervention
+- `v1 sync slice-2` remains parked but tracked while the live recovery/truthfulness lane is active
+- active reminders remain in place so recovery and follow-up do not EOS
 
 ## Queue
 1. Resume `v1 manifest/backend sync divergence` slice-2 implementation after the live web incident is triaged and narrowed again.
