@@ -907,6 +907,106 @@ apply_scope_limits_to_runtime_scope() {
   return 1
 }
 
+ensure_claude_project_trust() {
+  [ "$TYPE" = "claude" ] || return 0
+  [ -n "${AGENT_PATH:-}" ] || return 0
+
+  local status
+  status="$(
+    CLAUDE_JSON_PATH="$HOME/.claude.json" AGENT_PATH="$AGENT_PATH" python3 - <<'PY'
+import json
+import os
+import pathlib
+import shutil
+import tempfile
+import time
+
+claude_json_path = pathlib.Path(os.environ["CLAUDE_JSON_PATH"]).expanduser()
+agent_path = pathlib.Path(os.environ["AGENT_PATH"]).resolve()
+claude_json_path.parent.mkdir(parents=True, exist_ok=True)
+
+if claude_json_path.exists():
+    try:
+        raw = claude_json_path.read_text(encoding="utf-8")
+        data = json.loads(raw) if raw.strip() else {}
+    except Exception as exc:
+        print(f"error:failed to parse {claude_json_path}: {exc}")
+        raise SystemExit(0)
+else:
+    data = {}
+
+if not isinstance(data, dict):
+    print(f"error:{claude_json_path} root must be a JSON object")
+    raise SystemExit(0)
+
+projects = data.get("projects")
+if not isinstance(projects, dict):
+    projects = {}
+    data["projects"] = projects
+
+entry = projects.get(str(agent_path))
+if not isinstance(entry, dict):
+    entry = {}
+    projects[str(agent_path)] = entry
+
+changed = False
+defaults = {
+    "allowedTools": [],
+    "mcpContextUris": [],
+    "mcpServers": {},
+    "enabledMcpjsonServers": [],
+    "disabledMcpjsonServers": [],
+    "projectOnboardingSeenCount": 0,
+    "hasClaudeMdExternalIncludesApproved": False,
+    "hasClaudeMdExternalIncludesWarningShown": False,
+}
+for key, value in defaults.items():
+    if key not in entry:
+        entry[key] = value
+        changed = True
+
+if entry.get("hasTrustDialogAccepted") is not True:
+    entry["hasTrustDialogAccepted"] = True
+    changed = True
+
+if entry.get("hasCompletedProjectOnboarding") is not True:
+    entry["hasCompletedProjectOnboarding"] = True
+    changed = True
+
+if not changed:
+    print("already")
+    raise SystemExit(0)
+
+backup_dir = claude_json_path.parent / "backups"
+backup_dir.mkdir(parents=True, exist_ok=True)
+if claude_json_path.exists():
+    backup_path = backup_dir / f".claude.json.backup.{int(time.time() * 1000)}"
+    shutil.copy2(claude_json_path, backup_path)
+
+with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(claude_json_path.parent), delete=False) as handle:
+    json.dump(data, handle, indent=2)
+    handle.write("\n")
+    temp_name = handle.name
+
+os.replace(temp_name, claude_json_path)
+print("updated")
+PY
+  )"
+  case "$status" in
+    updated)
+      echo "Pre-accepted Claude trust for '$AGENT_PATH'."
+      ;;
+    already)
+      ;;
+    error:*)
+      echo "Warning: failed to pre-accept Claude trust for '$AGENT_PATH': ${status#error:}" >&2
+      ;;
+    *)
+      echo "Warning: unexpected Claude trust status for '$AGENT_PATH': ${status:-empty}" >&2
+      ;;
+  esac
+}
+
 capture_guard_matches() {
   [ -n "${CAPTURE_GUARD_FILE:-}" ] || return 0
   [ -n "${CAPTURE_GUARD_TOKEN:-}" ] || return 0
@@ -983,6 +1083,7 @@ if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
 fi
 
 enforce_workspace_uniqueness "$AGENT_PATH"
+ensure_claude_project_trust
 
 # ── Save meta ─────────────────────────────────────────────────────────
 mkdir -p "$AGENT_DATA"
