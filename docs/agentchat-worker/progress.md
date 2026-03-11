@@ -2113,3 +2113,10 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Relaunched `agentchat-develop` into its own v1 dev workdir (`.../agent_agentchat-develop/workdir`) instead of using `--allow-shared-workspace`. tmux is back, the old queued inbox messages have replayed through the backend inbox surface, but MCP is still not present, so the lane is only partially recovered.
 - Relaunched `agentchat-aduit` from its existing live v1 home. tmux is back and direct agentchat delivery succeeded (`msg_78182`), restoring the periodic-audit lane.
 - Re-sent the active `v1 sync slice-2` resume scope to `agentchat-develop` (`msg_78183`). That message is still queued because the agent's MCP registration has not come back yet.
+
+## [2026-03-11 15:41] DONE — refreshed reminder coverage to the current executor reality
+- Audited pending reminders and found only one stale audit reminder remained. Cancelled it and replaced it with three explicit follow-up reminders aligned to the current real lanes:
+  - `#2275` — `agentchat-develop` recovery (`MCP present`, inbox consumed, `v1 sync slice-2` handoff)
+  - `#2276` — `agentchat-aduit` periodic follow-up / residual hygiene
+  - `#2277` — `Yato` blocked-vs-reliable executor status check
+- This resets reminder coverage to the actual live execution plan instead of the outdated pre-incident lane wording.
