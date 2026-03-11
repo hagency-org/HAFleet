@@ -234,6 +234,87 @@ describe('backend runtime API', () => {
     ]);
   });
 
+  test('blocked notifications observe a per-agent cooldown across episodes', async () => {
+    context = await createBackendTestContext('agent-chat-runtime-test-', {
+      env: {
+        AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '1000',
+      },
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      groups: {},
+    });
+
+    for (let i = 0; i < 2; i += 1) {
+      const response = await request(context.app).post('/api/agents/alpha/runtime').send({
+        blocked: true,
+        reason: 'update-required',
+        tail: 'update available',
+        command: 'codex',
+      });
+      expect(response.status).toBe(200);
+    }
+
+    const runtimeAfterFirstNotification = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    const firstNotificationTs = runtimeAfterFirstNotification.alpha.lastBlockedNotificationTs;
+    expect(firstNotificationTs).toBeGreaterThan(0);
+
+    const recovery = await request(context.app)
+      .post('/api/agents/alpha/runtime')
+      .send({
+        blocked: false,
+        reason: null,
+        tail: '',
+        command: 'codex',
+      });
+    expect(recovery.status).toBe(200);
+
+    for (let i = 0; i < 2; i += 1) {
+      const response = await request(context.app).post('/api/agents/alpha/runtime').send({
+        blocked: true,
+        reason: 'update-required',
+        tail: 'update available',
+        command: 'codex',
+      });
+      expect(response.status).toBe(200);
+    }
+
+    const runtimeDuringCooldown = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtimeDuringCooldown.alpha.blocked).toBe(true);
+    expect(runtimeDuringCooldown.alpha.blockedNotificationSent).toBe(false);
+    expect(runtimeDuringCooldown.alpha.lastBlockedNotificationTs).toBe(firstNotificationTs);
+    expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
+      "Agent 'alpha' entered blocked state",
+      "Agent 'alpha' recovered from blocked state",
+    ]);
+
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    const postCooldown = await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: true,
+      reason: 'update-required',
+      tail: 'update available',
+      command: 'codex',
+    });
+    expect(postCooldown.status).toBe(200);
+
+    const runtimeAfterCooldown = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtimeAfterCooldown.alpha.blockedNotificationSent).toBe(true);
+    expect(runtimeAfterCooldown.alpha.lastBlockedNotificationTs).toBeGreaterThan(firstNotificationTs);
+    expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
+      "Agent 'alpha' entered blocked state",
+      "Agent 'alpha' recovered from blocked state",
+      "Agent 'alpha' entered blocked state",
+    ]);
+  });
+
   test('blocked system info only targets humans with unread pending messages', async () => {
     context = await createBackendTestContext('agent-chat-runtime-test-', {
       agents: {

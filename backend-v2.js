@@ -111,6 +111,10 @@ const AGENT_COMPACT_FALLBACK_PATTERNS = [
 const LOCAL_BLOCK_TAIL_LINES = Number.parseInt(process.env.AGENT_LOCAL_BLOCK_TAIL_LINES || '40', 10);
 const LOCAL_BLOCK_RECENT_LINES = Number.parseInt(process.env.AGENT_LOCAL_BLOCK_RECENT_LINES || '14', 10);
 const LOCAL_MCP_SESSION_CACHE_TTL_MS = Number.parseInt(process.env.AGENT_LOCAL_MCP_SESSION_CACHE_TTL_MS || '1000', 10);
+const BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW = Number.parseInt(process.env.AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS || '60000', 10);
+const BLOCKED_NOTIFICATION_COOLDOWN_MS = Number.isFinite(BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW)
+  ? Math.max(0, BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW)
+  : 60000;
 
 mkdirSync(DATA_DIR, { recursive: true });
 const MESSAGE_ATTACHMENT_DIR = path.join(DATA_DIR, 'message-attachments');
@@ -2702,6 +2706,7 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
   runtime.blockedSince = Number(runtime.blockedSince) || null;
   runtime.blockedConsecutiveScans = Math.max(0, Number(runtime.blockedConsecutiveScans) || 0);
   runtime.blockedNotificationSent = runtime.blockedNotificationSent === true;
+  runtime.lastBlockedNotificationTs = Math.max(0, Number(runtime.lastBlockedNotificationTs) || 0);
   runtime.updatedAt = Number(runtime.updatedAt) || 0;
   runtime.lastSeen = Number(runtime.lastSeen) || 0;
   runtime.lastPushNotifyAt = Number(runtime.lastPushNotifyAt) || 0;
@@ -3281,6 +3286,7 @@ function ensureAgentRuntimeRecord(name) {
       blockedConsecutiveScans: 0,
       blockedNotificationSent: false,
       blockedNotifiedTier: null,
+      lastBlockedNotificationTs: 0,
       activeNow: false,
       activeDurationSec: 0,
       idleDurationSec: 0,
@@ -3811,6 +3817,9 @@ function dispatchBlockedNotifications(transition) {
     && Number.isFinite(blockedDebounceThreshold)
     && runtime.blockedConsecutiveScans >= blockedDebounceThreshold;
   const becameBlocked = blockedNotificationReady && !prevBlockedNotificationSent;
+  const withinBlockedNotificationCooldown = becameBlocked
+    && BLOCKED_NOTIFICATION_COOLDOWN_MS > 0
+    && (now - Math.max(0, Number(runtime.lastBlockedNotificationTs) || 0)) < BLOCKED_NOTIFICATION_COOLDOWN_MS;
   const severityIncreased = prevBlockedNotificationSent
     && blockedNotificationReady
     && normalizeBlockedTier(tierNow, null) !== null
@@ -3818,7 +3827,7 @@ function dispatchBlockedNotifications(transition) {
     && tierNow > prevBlockedNotifiedTier;
   const recovered = prevBlockedNotificationSent && !blockedNow;
 
-  if (becameBlocked || severityIncreased) {
+  if ((becameBlocked && !withinBlockedNotificationCooldown) || severityIncreased) {
     let runtimeChanged = false;
     if (runtime.blockedNotificationSent !== true) {
       runtime.blockedNotificationSent = true;
@@ -3826,6 +3835,10 @@ function dispatchBlockedNotifications(transition) {
     }
     if (normalizeBlockedTier(runtime.blockedNotifiedTier, null) !== tierNow) {
       runtime.blockedNotifiedTier = tierNow;
+      runtimeChanged = true;
+    }
+    if ((Number(runtime.lastBlockedNotificationTs) || 0) !== now) {
+      runtime.lastBlockedNotificationTs = now;
       runtimeChanged = true;
     }
     if (runtimeChanged) saveAgentRuntime();
