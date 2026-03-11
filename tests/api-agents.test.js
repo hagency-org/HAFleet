@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import request from 'supertest';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
+
+function readJson(filePath) {
+  return JSON.parse(readFileSync(filePath, 'utf-8'));
+}
 
 describe('backend agents API', () => {
   let context;
@@ -36,7 +42,38 @@ describe('backend agents API', () => {
         },
       },
       groups: {},
+      cursors: {
+        alpha: {
+          inbox: 3,
+          inboxId: 'msg_123',
+          groups: {},
+          groupIds: {},
+        },
+      },
+      agentRuntime: {
+        alpha: {
+          agent: 'alpha',
+          blocked: true,
+          blockedReason: 'interactive-confirm',
+        },
+      },
+      supervisorState: {
+        agents: {
+          alpha: {
+            lastStatus: 'active',
+            runtimeLaunch: {
+              sessionName: 'supervisor-alpha',
+              tmuxTarget: 'supervisor-alpha:0.0',
+            },
+          },
+        },
+        selectionCursor: 0,
+      },
     });
+
+    const dataAgentDir = path.join(context.runtimeDir, 'data', 'agents', 'alpha', 'tmp');
+    mkdirSync(dataAgentDir, { recursive: true });
+    writeFileSync(path.join(dataAgentDir, 'init.txt'), 'residue');
   });
 
   afterAll(() => {
@@ -120,5 +157,30 @@ describe('backend agents API', () => {
     expect(response.body.human).toEqual({ owner: 'ops' });
     expect(Object.prototype.hasOwnProperty.call(response.body.human, 'notes')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(response.body.human, 'projectScope')).toBe(false);
+  });
+
+  test('DELETE /api/agents/:name?force=true cascades cleanup across runtime state files', async () => {
+    const response = await request(context.app).delete('/api/agents/alpha').query({ force: 'true' });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      ok: true,
+      deleted: true,
+      name: 'alpha',
+    });
+
+    const agentResponse = await request(context.app).get('/api/agents/alpha');
+    expect(agentResponse.status).toBe(404);
+
+    const dataDir = path.join(context.runtimeDir, 'data');
+    const agents = readJson(path.join(dataDir, 'agents.json'));
+    const runtime = readJson(path.join(dataDir, 'agent_runtime.json'));
+    const cursors = readJson(path.join(dataDir, 'cursors.json'));
+    const supervisorState = readJson(path.join(dataDir, 'supervisor_state.json'));
+
+    expect(Object.prototype.hasOwnProperty.call(agents, 'alpha')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(runtime, 'alpha')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(cursors, 'alpha')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(supervisorState.agents || {}, 'alpha')).toBe(false);
+    expect(existsSync(path.join(dataDir, 'agents', 'alpha'))).toBe(false);
   });
 });

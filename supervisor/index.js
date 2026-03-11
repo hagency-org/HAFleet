@@ -1219,6 +1219,19 @@ export class SupervisorService {
       events,
     };
   }
+
+  removeAgentState(agentName) {
+    const key = normalizeOptionalText(agentName, 256);
+    if (!key) return { removed: false, sessionKilled: false };
+    const hadState = Object.prototype.hasOwnProperty.call(this.stateStore.agents || {}, key);
+    const sessionName = this.stateStore.snapshot(key)?.runtimeLaunch?.sessionName || buildSupervisorSessionName(key);
+    const sessionExists = sessionName ? tmuxSessionExists(sessionName) : false;
+    if (sessionExists) this.killTmuxSession(sessionName);
+    if (hadState) delete this.stateStore.agents[key];
+    this.latestByAgent.delete(key);
+    if (hadState || sessionExists) this.stateStore.save();
+    return { removed: hadState, sessionKilled: sessionExists };
+  }
 }
 
 export function createSupervisorService(deps) {

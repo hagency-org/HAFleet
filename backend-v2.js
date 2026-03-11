@@ -1,5 +1,5 @@
 import express from 'express';
-import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync, unlinkSync } from 'fs';
+import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync, unlinkSync, rmSync } from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
 import { execFile } from 'child_process';
 import path from 'path';
@@ -151,6 +151,7 @@ async function fetchWebBridge(url, init, contextLabel) {
 
 // ── Storage helpers ───────────────────────────────────────────────────
 function dataPath(name) { return path.join(DATA_DIR, name); }
+function agentDataPath(name) { return dataPath(path.join('agents', name)); }
 
 function backupUnreadableJson(filePath) {
   const backupPath = `${filePath}.corrupt-${Date.now()}`;
@@ -3149,6 +3150,69 @@ function invalidatePendingHumanTargetsForMessage(msg) {
   invalidatePendingHumanTargets([...targets]);
 }
 
+function clearDeletedAgentState(agentName) {
+  const name = normalizeAgentName(agentName);
+  if (!name) return { removed: false };
+
+  let agentsChanged = false;
+  let runtimeChanged = false;
+  let cursorsChanged = false;
+
+  if (agents[name] !== undefined) {
+    delete agents[name];
+    agentsChanged = true;
+  }
+  if (agentRuntime[name] !== undefined) {
+    delete agentRuntime[name];
+    runtimeChanged = true;
+  }
+  if (cursors[name] !== undefined) {
+    delete cursors[name];
+    cursorsChanged = true;
+  }
+
+  invalidatePendingHumanTargets(name);
+  localActivityState.delete(name);
+  localTmuxMissingState.delete(name);
+  localCompactState.delete(name);
+  localRuntimeSignalDigest.delete(name);
+  scopePressureState.delete(name);
+  for (const key of [...unexpectedOfflineAlertAt.keys()]) {
+    if (key.startsWith(`${name}:`)) unexpectedOfflineAlertAt.delete(key);
+  }
+  for (const key of [...compactRuntimeAlertAt.keys()]) {
+    if (key.startsWith(`${name}:`)) compactRuntimeAlertAt.delete(key);
+  }
+
+  const supervisorCleanup = typeof supervisorService?.removeAgentState === 'function'
+    ? supervisorService.removeAgentState(name)
+    : { removed: false, sessionKilled: false };
+
+  let agentDataRemoved = false;
+  const agentDataDir = agentDataPath(name);
+  if (existsSync(agentDataDir)) {
+    try {
+      rmSync(agentDataDir, { recursive: true, force: true });
+      agentDataRemoved = true;
+    } catch (error) {
+      console.warn(`failed to remove agent data dir for ${name}: ${error?.message || error}`);
+    }
+  }
+
+  if (agentsChanged) saveAgents();
+  if (runtimeChanged) saveAgentRuntime();
+  if (cursorsChanged) saveCursors();
+
+  return {
+    removed: agentsChanged,
+    runtimeRemoved: runtimeChanged,
+    cursorsRemoved: cursorsChanged,
+    agentDataRemoved,
+    supervisorRemoved: supervisorCleanup?.removed === true,
+    supervisorSessionKilled: supervisorCleanup?.sessionKilled === true,
+  };
+}
+
 function messageTargetsAgent(msg, agentName) {
   if (!msg || !agentName) return false;
   if (msg.to === agentName) return true;
@@ -5805,8 +5869,7 @@ app.delete('/api/agents/:name', (req, res) => {
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
   if (req.query.force === 'true') {
-    delete agents[agentName];
-    saveAgents();
+    clearDeletedAgentState(agentName);
     console.log(`Agent '${agentName}' permanently deleted`);
     return res.json({ ok: true, deleted: true, name: agentName });
   }
