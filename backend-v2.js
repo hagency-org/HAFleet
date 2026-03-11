@@ -3878,9 +3878,16 @@ function buildLocalPaneSnapshotMap() {
   return out;
 }
 
+function sessionKeyFromTmuxTarget(tmuxTarget) {
+  if (typeof tmuxTarget !== 'string') return '';
+  const sessionName = tmuxTarget.split(':', 1)[0].trim();
+  if (!sessionName) return '';
+  return sessionName.startsWith('=') ? sessionName.slice(1) : sessionName;
+}
+
 function readLocalPaneSnapshot(tmuxTarget, paneSnapshotMap = null) {
   if (!tmuxTarget || !(paneSnapshotMap instanceof Map)) return null;
-  const sessionName = String(tmuxTarget).split(':')[0].trim();
+  const sessionName = sessionKeyFromTmuxTarget(String(tmuxTarget));
   if (!sessionName) return null;
   return paneSnapshotMap.get(sessionName) || null;
 }
@@ -4317,7 +4324,7 @@ function readAgentScopeMemory(agentName, panePidMap = null) {
   const tmuxTarget = (typeof agent?.tmux === 'string' && agent.tmux.trim())
     ? agent.tmux.trim()
     : `${agentName}:0.0`;
-  const sessionName = tmuxTarget.split(':', 1)[0].trim() || agentName;
+  const sessionName = sessionKeyFromTmuxTarget(tmuxTarget) || agentName;
   const panePid = (panePidMap instanceof Map) ? panePidMap.get(sessionName) : null;
   const unit = scopeUnitForPid(panePid) || scopeUnitForAgent(agentName);
   if (!unit) return null;
