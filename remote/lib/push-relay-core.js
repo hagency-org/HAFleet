@@ -3,6 +3,7 @@ import { existsSync } from 'fs';
 import { createHash } from 'crypto';
 import os from 'os';
 import path from 'path';
+import { BLOCK_PATTERNS } from './blocked-patterns.js';
 import EventSource from './eventsource-mini.js';
 
 const PUSH_RELAY_MODE = (process.env.PUSH_RELAY_MODE || 'local').trim().toLowerCase();
@@ -48,13 +49,6 @@ const skipReasonLastLog = new Map();
 let mcpSessionCacheAt = 0;
 let mcpSessionCache = new Set();
 
-const BLOCK_PATTERNS = [
-  { reason: 'select-mode', re: /(?:^|\n)\s*(?:select mode|choose (?:an?\s+)?mode)\s*(?:\n|$)/i },
-  { reason: 'plan-mode', re: /(?:^|\n)\s*(?:[0-9]+[.)]\s*)?plan mode\s*(?:\n|$)/i },
-  { reason: 'approval-mode-toggle', re: /bypass permissions on \(shift\+tab to cycle\)/i },
-  { reason: 'update-required', re: /updates?\s+available:|update available.*agent-update|run ['"`]?agent-update/i },
-  { reason: 'interactive-confirm', re: /choose (an )?option|press (enter|return) to continue|confirm .*continue/i },
-];
 const COMPACT_PATTERNS = [
   { marker: 'codex-context-compacted', summary: 'Context compacted', re: /(?:^|\n)\s*(?:•\s*)?Context compacted\s*(?:\n|$)/i },
   { marker: 'claude-conversation-compacted', summary: 'Conversation compacted (ctrl+o for history)', re: /(?:^|\n)\s*(?:✻\s*)?Conversation compacted \(ctrl\+o for history\)\s*(?:\n|$)/i },

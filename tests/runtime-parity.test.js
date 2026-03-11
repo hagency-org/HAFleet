@@ -60,11 +60,15 @@ describe('runtime parity regressions', () => {
     const backendSource = readFileSync(path.resolve('backend-v2.js'), 'utf-8');
     const relaySource = readFileSync(path.resolve('lib/push-relay-core.js'), 'utf-8');
     const sharedSource = readFileSync(path.resolve('lib/blocked-patterns.js'), 'utf-8');
+    const remoteRelaySource = readFileSync(path.resolve('remote/lib/push-relay-core.js'), 'utf-8');
+    const remoteSharedSource = readFileSync(path.resolve('remote/lib/blocked-patterns.js'), 'utf-8');
 
     expect(backendSource).toMatch(/from '\.\/lib\/blocked-patterns\.js';/);
     expect(relaySource).toMatch(/from '\.\/blocked-patterns\.js';/);
+    expect(remoteRelaySource).toMatch(/from '\.\/blocked-patterns\.js';/);
     expect(sharedSource).toMatch(/reason: 'approval-mode-toggle'/);
     expect(sharedSource).toMatch(/reason: 'interactive-confirm'/);
     expect(sharedSource).toMatch(/reason: 'update-required'/);
+    expect(remoteSharedSource).toBe(sharedSource);
   });
 });
