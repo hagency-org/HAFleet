@@ -7,12 +7,20 @@ import { pathToFileURL } from 'url';
 describe('bridge matrix behavior', () => {
   let runtimeDir;
   let MatrixBridge;
+  let generateAvatarPngForTest;
+  let resetBridgeMatrixTestHooks;
+  let setBridgeMatrixTestHooks;
 
   beforeAll(async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-test-'));
     process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
     const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
-    ({ MatrixBridge } = await import(`${bridgeUrl}?test=${Date.now()}-${Math.random().toString(36).slice(2, 10)}`));
+    ({
+      MatrixBridge,
+      generateAvatarPngForTest,
+      resetBridgeMatrixTestHooks,
+      setBridgeMatrixTestHooks,
+    } = await import(`${bridgeUrl}?test=${Date.now()}-${Math.random().toString(36).slice(2, 10)}`));
   });
 
   afterAll(() => {
@@ -20,6 +28,7 @@ describe('bridge matrix behavior', () => {
   });
 
   afterEach(() => {
+    resetBridgeMatrixTestHooks();
     vi.unstubAllGlobals();
   });
 
@@ -138,5 +147,24 @@ describe('bridge matrix behavior', () => {
     await expect(bridge.callBackendApi('GET', '/api/agents')).rejects.toThrow(
       'backend API GET /api/agents failed with HTTP 500 body={"error":"boom"}'
     );
+  });
+
+  test('avatar rendering falls back after a timed out icon convert', async () => {
+    const execMock = vi.fn(async (_file, args, options) => {
+      expect(options.timeout).toBe(10_000);
+      if (args.includes('/tmp/icon.png[0]')) {
+        const err = new Error('convert timed out');
+        err.code = 'ETIMEDOUT';
+        throw err;
+      }
+      return { stdout: Buffer.from('png-bytes'), stderr: Buffer.alloc(0) };
+    });
+    setBridgeMatrixTestHooks({ execFileAsync: execMock });
+
+    const png = await generateAvatarPngForTest('alpha', { badge: 'DEV', iconPath: '/tmp/icon.png' });
+
+    expect(Buffer.isBuffer(png)).toBe(true);
+    expect(png.toString()).toBe('png-bytes');
+    expect(execMock).toHaveBeenCalledTimes(2);
   });
 });

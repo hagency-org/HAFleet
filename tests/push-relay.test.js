@@ -6,6 +6,7 @@ import {
   handleMessage,
   resetRelayState,
   seedRelayState,
+  setPushRelayTestHooks,
   setPushToTmuxForTest,
 } from '../lib/push-relay-core.js';
 import {
@@ -14,6 +15,7 @@ import {
   handleMessage as handleRemoteMessage,
   resetRelayState as resetRemoteRelayState,
   seedRelayState as seedRemoteRelayState,
+  setPushRelayTestHooks as setRemotePushRelayTestHooks,
   setPushToTmuxForTest as setRemotePushToTmuxForTest,
 } from '../remote/lib/push-relay-core.js';
 
@@ -21,16 +23,18 @@ describe('push relay dispatch', () => {
   afterEach(() => {
     resetRelayState();
     resetRemoteRelayState();
+    setPushRelayTestHooks();
+    setRemotePushRelayTestHooks();
   });
 
-  test('formats MCP notifications for actionable human messages', () => {
+  test('formats MCP notifications for actionable human messages', async () => {
     seedRelayState({
       localAgentNames: ['alpha'],
       agents: [{ name: 'human-op', tmux: 'human-op:0.0' }],
       mcpSessions: ['alpha'],
     });
 
-    const text = buildNotification('alpha', {
+    const text = await buildNotification('alpha', {
       from: 'human-op',
       type: 'human',
       summary: 'Please check status',
@@ -41,7 +45,7 @@ describe('push relay dispatch', () => {
     expect(text).toContain('send_message(to="human-op"');
   });
 
-  test('routes to local panes and deduplicates repeated deliveries', () => {
+  test('routes to local panes and deduplicates repeated deliveries', async () => {
     const delivered = [];
     seedRelayState({
       localAgentNames: ['alpha'],
@@ -65,8 +69,8 @@ describe('push relay dispatch', () => {
       mentions: [],
     });
 
-    handleMessage(raw);
-    handleMessage(raw);
+    await handleMessage(raw);
+    await handleMessage(raw);
 
     expect(delivered).toHaveLength(1);
     expect(delivered[0].target).toBe('alpha:0.0');
@@ -74,7 +78,7 @@ describe('push relay dispatch', () => {
     expect(delivered[0].payload).toContain('agent-send beta:0.0');
   });
 
-  test('skips delivery when the local pane is missing', () => {
+  test('skips delivery when the local pane is missing', async () => {
     const delivered = [];
     seedRelayState({
       localAgentNames: [],
@@ -85,7 +89,7 @@ describe('push relay dispatch', () => {
       return true;
     });
 
-    handleMessage(JSON.stringify({
+    await handleMessage(JSON.stringify({
       id: 'msg_2',
       from: 'beta',
       to: 'alpha',
@@ -98,7 +102,7 @@ describe('push relay dispatch', () => {
     expect(delivered).toEqual([]);
   });
 
-  test('delivers one group message to each mentioned local recipient', () => {
+  test('delivers one group message to each mentioned local recipient', async () => {
     const delivered = [];
     seedRelayState({
       localAgentNames: ['alpha', 'bravo'],
@@ -113,7 +117,7 @@ describe('push relay dispatch', () => {
       return true;
     });
 
-    handleMessage(JSON.stringify({
+    await handleMessage(JSON.stringify({
       id: 'msg_3',
       from: 'sender',
       group: 'dev',
@@ -125,7 +129,7 @@ describe('push relay dispatch', () => {
     expect(delivered.map((row) => row.target).sort()).toEqual(['alpha:0.0', 'bravo:0.0']);
   });
 
-  test('keeps remote notification formatting and blocked detection in parity with the local relay', () => {
+  test('keeps remote notification formatting and blocked detection in parity with the local relay', async () => {
     const localDelivered = [];
     const remoteDelivered = [];
     const state = {
@@ -154,13 +158,13 @@ describe('push relay dispatch', () => {
     };
     const raw = JSON.stringify(msg);
 
-    expect(buildRemoteNotification('alpha', msg)).toBe(buildNotification('alpha', msg));
+    expect(await buildRemoteNotification('alpha', msg)).toBe(await buildNotification('alpha', msg));
     expect(detectRemoteBlockedReason('Press enter to continue', 'claude')).toBe(
       detectBlockedReason('Press enter to continue', 'claude')
     );
 
-    handleMessage(raw);
-    handleRemoteMessage(raw);
+    await handleMessage(raw);
+    await handleRemoteMessage(raw);
 
     expect(remoteDelivered).toEqual(localDelivered);
   });

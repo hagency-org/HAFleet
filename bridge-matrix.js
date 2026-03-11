@@ -5,14 +5,17 @@ import {
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync } from 'fs';
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { promisify } from 'util';
 import EventSource from './lib/eventsource-mini.js';
 import BotCommands from './lib/bot-commands.js';
 
 const __filename = fileURLToPath(import.meta.url);
+const execFileAsync = promisify(execFile);
+let execFileAsyncImpl = execFileAsync;
 const REPO_ROOT = path.dirname(__filename);
 const RUNTIME_ROOT = (() => {
   const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
@@ -541,20 +544,25 @@ function renderAvatarBaseSvg(name, badge) {
 </svg>`;
 }
 
-function generateAvatarPng(name, options = {}) {
+async function runAvatarConvert(args, input, maxBuffer) {
+  const { stdout } = await execFileAsyncImpl('convert', args, {
+    input,
+    maxBuffer,
+    timeout: 10_000,
+  });
+  return Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
+}
+
+async function generateAvatarPng(name, options = {}) {
   const badge = options.badge || 'AGENT';
   const iconPath = options.iconPath || null;
   const baseSvg = renderAvatarBaseSvg(name, badge);
   if (!iconPath) {
-    return execFileSync('convert', ['svg:-', '-resize', '256x256', 'png:-'], {
-      input: Buffer.from(baseSvg),
-      maxBuffer: 4 * 1024 * 1024,
-    });
+    return runAvatarConvert(['svg:-', '-resize', '256x256', 'png:-'], Buffer.from(baseSvg), 4 * 1024 * 1024);
   }
 
   try {
-    return execFileSync(
-      'convert',
+    return await runAvatarConvert(
       [
         'svg:-',
         '(',
@@ -570,17 +578,12 @@ function generateAvatarPng(name, options = {}) {
         '-composite',
         'png:-',
       ],
-      {
-        input: Buffer.from(baseSvg),
-        maxBuffer: 8 * 1024 * 1024,
-      }
+      Buffer.from(baseSvg),
+      8 * 1024 * 1024,
     );
   } catch (e) {
     console.warn(`Icon avatar render failed for ${name} (${iconPath}): ${e.message}`);
-    return execFileSync('convert', ['svg:-', '-resize', '256x256', 'png:-'], {
-      input: Buffer.from(baseSvg),
-      maxBuffer: 4 * 1024 * 1024,
-    });
+    return runAvatarConvert(['svg:-', '-resize', '256x256', 'png:-'], Buffer.from(baseSvg), 4 * 1024 * 1024);
   }
 }
 
@@ -652,7 +655,7 @@ async function ensureAgentAvatar(agentName) {
       Promise.resolve(resolveAgentProjectIcon(canonicalAgentName)),
     ]);
     const badge = normalizeBadge(deriveAgentBadge(canonicalAgentName, agentInfo, iconResult.meta), 'AGENT');
-    const png = generateAvatarPng(canonicalAgentName, { badge, iconPath: iconResult.iconPath });
+    const png = await generateAvatarPng(canonicalAgentName, { badge, iconPath: iconResult.iconPath });
     const mxcUri = await uploadMedia(token, png, 'image/png');
     await setUserAvatar(token, mxcUri);
     state.agentAvatars[canonicalAgentName] = mxcUri;
@@ -696,7 +699,7 @@ async function ensureRoomAvatar(roomId, name) {
   if (state.roomAvatars[roomId]) return;
   try {
     const displayName = name.replace(/^DM:\s*/, '');
-    const png = generateAvatarPng(displayName);
+    const png = await generateAvatarPng(displayName);
     const mxcUri = await uploadMedia(state.botToken, png, 'image/png');
     await setRoomAvatar(roomId, mxcUri);
     state.roomAvatars[roomId] = mxcUri;
@@ -3083,6 +3086,18 @@ export class MatrixBridge {
 export function startBridge() {
   const bridge = new MatrixBridge();
   return bridge.start();
+}
+
+export async function generateAvatarPngForTest(name, options = {}) {
+  return generateAvatarPng(name, options);
+}
+
+export function setBridgeMatrixTestHooks({ execFileAsync: overrideExecFileAsync } = {}) {
+  execFileAsyncImpl = typeof overrideExecFileAsync === 'function' ? overrideExecFileAsync : execFileAsync;
+}
+
+export function resetBridgeMatrixTestHooks() {
+  execFileAsyncImpl = execFileAsync;
 }
 
 const isMainModule = (() => {

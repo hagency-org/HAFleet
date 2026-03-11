@@ -1,8 +1,12 @@
 import { existsSync, readFileSync } from 'fs';
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import path from 'path';
 import { createHash } from 'crypto';
+import { promisify } from 'util';
 import { resolveAgentDocsPaths, resolveV1ManifestForAgent } from '../lib/agent-home-v1.js';
+
+const execFileAsync = promisify(execFile);
+let execFileAsyncImpl = execFileAsync;
 
 function readText(filePath) {
   try {
@@ -93,19 +97,21 @@ function loadServerSsh(pathValue) {
   }
 }
 
-function capturePaneLocal(tmuxTarget, lines) {
-  return execFileSync('tmux', ['capture-pane', '-t', tmuxTarget, '-p', '-S', `-${lines}`], {
+async function capturePaneLocal(tmuxTarget, lines) {
+  const { stdout } = await execFileAsyncImpl('tmux', ['capture-pane', '-t', tmuxTarget, '-p', '-S', `-${lines}`], {
     encoding: 'utf-8',
     timeout: 5000,
   });
+  return stdout;
 }
 
-function capturePaneRemote(host, tmuxTarget, lines) {
+async function capturePaneRemote(host, tmuxTarget, lines) {
   const cmd = `tmux capture-pane -t ${tmuxTarget} -p -S -${lines}`;
-  return execFileSync('ssh', ['-o', 'ConnectTimeout=5', '-o', 'StrictHostKeyChecking=accept-new', host, cmd], {
+  const { stdout } = await execFileAsyncImpl('ssh', ['-o', 'ConnectTimeout=5', '-o', 'StrictHostKeyChecking=accept-new', host, cmd], {
     encoding: 'utf-8',
     timeout: 9000,
   });
+  return stdout;
 }
 
 function safeTmuxTarget(raw) {
@@ -115,7 +121,7 @@ function safeTmuxTarget(raw) {
   return value;
 }
 
-export function collectAgentContext(config, agentName, agentRecord, runtimeRecord) {
+export async function collectAgentContext(config, agentName, agentRecord, runtimeRecord) {
   const now = Date.now();
   const { workspacePath: rawMetaWorkspacePath, metaPath, v1Manifest } = loadMetaWorkspace(config.metaRoot, agentName);
   const metaWorkspacePath = normalizeWorkspacePath(rawMetaWorkspacePath);
@@ -152,13 +158,13 @@ export function collectAgentContext(config, agentName, agentRecord, runtimeRecor
       if (server !== 'local') {
         const ssh = sshConfig[server];
         if (ssh && typeof ssh.host === 'string' && ssh.host.trim()) {
-          paneText = capturePaneRemote(ssh.host.trim(), tmuxTarget, config.paneLines);
+          paneText = await capturePaneRemote(ssh.host.trim(), tmuxTarget, config.paneLines);
           paneSource = `remote:${server}`;
         } else {
           paneError = `missing-ssh-config:${server}`;
         }
       } else {
-        paneText = capturePaneLocal(tmuxTarget, config.paneLines);
+        paneText = await capturePaneLocal(tmuxTarget, config.paneLines);
       }
     } catch (e) {
       paneError = `capture-failed:${e.message}`;
@@ -203,4 +209,8 @@ export function collectAgentContext(config, agentName, agentRecord, runtimeRecor
       error: paneError,
     },
   };
+}
+
+export function setCollectorTestHooks({ execFileAsync: overrideExecFileAsync } = {}) {
+  execFileAsyncImpl = typeof overrideExecFileAsync === 'function' ? overrideExecFileAsync : execFileAsync;
 }
