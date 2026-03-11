@@ -2,7 +2,7 @@
 Coordinate the next clean execution phase after the live incident wave. Acceptance criteria:
 - keep worker in chief-coordinator mode: no direct coding/investigation work by worker
 - explicitly track executor availability (`agentchat-develop`, `agentchat-aduit`, `Yato`) and repair lanes when they silently disappear
-- unpark `v1 sync slice-2` once a reliable executor is back online
+- keep `v1 sync slice-2` parked while the tmux-sweep pane-target regression remains the highest-priority active structural blocker
 - add and preserve the `agentchat-worker` 1.0 migration lane so the worker itself can move into a real v1 home/workdir/project model without losing docs/history
 - keep active reminders in place so execution does not EOS
 - treat the new tmux-sweep pane-target regression as a fresh structural blocker and keep it separate from parked UI/field-convergence work
@@ -37,5 +37,5 @@ Coordinate the next clean execution phase after the live incident wave. Acceptan
 
 ## Blocked (optional)
 1. Make Agent Detail expose canonical task editing/visibility and show AGENTS.md / plan.md / progress.md tails under Internals; this lane is now assigned to agentchat-develop because Yato is currently blocked at an interactive prompt.
-2. `agentchat-develop` and `agentchat-aduit` are currently offline (`tmux-missing:auto`), and `Yato` is not a reliable executor. Restore at least one healthy execution lane before unblocking the next implementation slice.
+2. `Yato` is not a reliable executor; keep the UI lane parked or reassigned until a trustworthy UI executor exists.
 3. `agentchat-develop` tmux has been restored into a v1 dev home, but MCP is still missing; treat it as partially recovered until it consumes inbox and resumes formal handoffs.

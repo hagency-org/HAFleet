@@ -388,3 +388,7 @@
 - `agent-up-v1` reprovision can overwrite customized root `workdir/CLAUDE.md` / `AGENTS.md` with the generic template; agent-specific role wiring must be re-applied or the provisioning path must become preserve-aware.
 - Fresh Codex agents can stall at the workspace trust prompt (`Do you trust the contents of this directory?`) because `agent-up-v1` does not currently satisfy or detect that prompt; backend metadata can show an agent as active while the tmux pane is still blocked on first-run trust.
 - `agent-down` can refuse a newly launched but unusable agent as “currently active” even when the Codex session never completed bootstrap; restart/validation flows may require manual tmux cleanup until activity semantics are tightened.
+- tmux target truth boundary:
+  - raw `tmuxTarget` is the canonical direct tmux command target and may legally include exact-session syntax such as `=session:0.0`;
+  - shared sweep pane snapshots are keyed by tmux-reported `session_name`, so any join against sweep-local metadata must first normalize raw `tmuxTarget` into a derived `sessionKey` by trimming, splitting at the first `:`, and stripping a leading `=`;
+  - raw `tmuxTarget` must continue to be used for direct tmux commands, while the normalized `sessionKey` must be used only for sweep-local joins and pane-pid/scope-memory attribution.
