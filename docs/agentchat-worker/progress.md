@@ -2205,3 +2205,7 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - reprovision preserves manual/custom root `CLAUDE.md` / `AGENTS.md` unless they are recognized managed/generated files or legacy stubs
   - reprovision preserves current `task`, `runtimeProfile`, and `human` metadata
   - managed project targets are not silently replaced; if an existing target differs, provisioning fails instead of overwriting it
+
+## [2026-03-11 17:06] DONE — froze the product direction to split agent creation from project attachment
+- Recorded the product-model correction that `up-v1` should create/repair the v1 home/runtime contract, while managed project add/remove remains a separate control-plane action.
+- This keeps `--project` as a supported bootstrap convenience, but not the permanent conceptual model for every agent launch.
