@@ -18,7 +18,27 @@ AGENT_DIR="$RUNTIME_DIR/data/agents/agentchat"
 RESUME_FILE="$AGENT_DIR/resume-id"
 META_FILE="$AGENT_DIR/meta.json"
 
-export HOME="/home/shisui"
+resolve_home_dir() {
+  if [ -n "${AGENTCHAT_HOME_DIR:-}" ]; then
+    printf '%s\n' "$AGENTCHAT_HOME_DIR"
+    return 0
+  fi
+  if [ -n "${HOME:-}" ]; then
+    printf '%s\n' "$HOME"
+    return 0
+  fi
+  if command -v getent >/dev/null 2>&1; then
+    local passwd_home
+    passwd_home="$(getent passwd "$(id -un)" | cut -d: -f6)"
+    if [ -n "$passwd_home" ]; then
+      printf '%s\n' "$passwd_home"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$BASE_DIR"
+}
+
+export HOME="$(resolve_home_dir)"
 export PATH="$HOME/.local/bin:$HOME/.pyenv/bin:$HOME/.pyenv/shims:/usr/local/bin:/usr/bin:/bin:$SCRIPT_DIR"
 
 BACKEND_PORT_RAW="${AGENT_CHAT_BACKEND_PORT:-8090}"

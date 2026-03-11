@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { SupervisorService } from '../supervisor/index.js';
 
 describe('runtime parity regressions', () => {
@@ -134,6 +135,28 @@ describe('runtime parity regressions', () => {
   test('remote MCP auto-registration defaults server to os.hostname()', () => {
     const source = readFileSync(path.resolve('remote/lib/mcp-server-core.js'), 'utf-8');
     expect(source).toMatch(/const AGENT_SERVER = \(process\.env\.AGENT_CHAT_SERVER \|\| ''\)\.trim\(\) \|\| os\.hostname\(\);/);
+  });
+
+  test('deployment and upstream helpers avoid machine-specific hardcoded home paths', async () => {
+    const autodeploySource = readFileSync(path.resolve('scripts/agentchat-stable-autodeploy.sh'), 'utf-8');
+    const autostartSource = readFileSync(path.resolve('bin/agentchat-autostart.sh'), 'utf-8');
+    const previousRoot = process.env.AGENT_CHAT_ROOT;
+    const previousUpstreamRoot = process.env.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT;
+    try {
+      process.env.AGENT_CHAT_ROOT = '/tmp/agent-chat-root';
+      delete process.env.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT;
+      const moduleUrl = pathToFileURL(path.resolve('lib/upstream-claude-subconscious.js')).href;
+      const upstreamModule = await import(`${moduleUrl}?test=${Date.now()}`);
+
+      expect(autodeploySource).not.toContain('/home/shisui/laplace/agent-chat-live');
+      expect(autostartSource).not.toContain('export HOME="/home/shisui"');
+      expect(upstreamModule.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT).toBe('/tmp/claude-subconscious');
+    } finally {
+      if (previousRoot === undefined) delete process.env.AGENT_CHAT_ROOT;
+      else process.env.AGENT_CHAT_ROOT = previousRoot;
+      if (previousUpstreamRoot === undefined) delete process.env.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT;
+      else process.env.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT = previousUpstreamRoot;
+    }
   });
 
   test('local and remote push-relay check_inbox hints stay in sync', () => {
