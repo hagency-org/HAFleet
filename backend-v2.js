@@ -102,12 +102,15 @@ const AGENT_COMPACT_FALLBACK_PATTERNS = [
 const LOCAL_BLOCK_TAIL_LINES = Number.parseInt(process.env.AGENT_LOCAL_BLOCK_TAIL_LINES || '40', 10);
 const LOCAL_BLOCK_RECENT_LINES = Number.parseInt(process.env.AGENT_LOCAL_BLOCK_RECENT_LINES || '14', 10);
 const LOCAL_MCP_SESSION_CACHE_TTL_MS = Number.parseInt(process.env.AGENT_LOCAL_MCP_SESSION_CACHE_TTL_MS || '1000', 10);
+const BLOCK_TIER_TRANSIENT = 0;
+const BLOCK_TIER_SOFT = 1;
+const BLOCK_TIER_HARD = 2;
 const LOCAL_BLOCK_PATTERNS = [
-  { reason: 'select-mode', re: /(?:^|\n)\s*(?:select mode|choose (?:an?\s+)?mode)\s*(?:\n|$)/i },
-  { reason: 'plan-mode', re: /(?:^|\n)\s*(?:[0-9]+[.)]\s*)?plan mode\s*(?:\n|$)/i },
-  { reason: 'approval-mode-toggle', re: /bypass permissions on \(shift\+tab to cycle\)/i },
-  { reason: 'update-required', re: /updates?\s+available:|update available.*agent-update|run ['"`]?agent-update/i },
-  { reason: 'interactive-confirm', re: /choose (an )?option|press (enter|return) to continue|confirm .*continue/i },
+  { reason: 'select-mode', tier: BLOCK_TIER_TRANSIENT, re: /(?:^|\n)\s*(?:select mode|choose (?:an?\s+)?mode)\s*(?:\n|$)/i },
+  { reason: 'plan-mode', tier: BLOCK_TIER_TRANSIENT, re: /(?:^|\n)\s*(?:[0-9]+[.)]\s*)?plan mode\s*(?:\n|$)/i },
+  { reason: 'approval-mode-toggle', tier: BLOCK_TIER_TRANSIENT, re: /bypass permissions on \(shift\+tab to cycle\)/i },
+  { reason: 'update-required', tier: BLOCK_TIER_HARD, re: /updates?\s+available:|update available.*agent-update|run ['"`]?agent-update/i },
+  { reason: 'interactive-confirm', tier: BLOCK_TIER_SOFT, re: /choose (an )?option|press (enter|return) to continue|confirm .*continue/i },
 ];
 
 mkdirSync(DATA_DIR, { recursive: true });
@@ -274,6 +277,30 @@ function normalizePositiveInt(value, fallback, min = 1) {
   const n = Number.parseInt(value, 10);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, n);
+}
+
+function normalizeBlockedTier(value, fallback = null) {
+  const n = Number.parseInt(value, 10);
+  if (n === BLOCK_TIER_TRANSIENT || n === BLOCK_TIER_SOFT || n === BLOCK_TIER_HARD) return n;
+  return fallback;
+}
+
+function blockedTierFromReason(reason) {
+  const normalizedReason = normalizeOptionalText(reason, 256);
+  if (!normalizedReason) return null;
+  const matched = LOCAL_BLOCK_PATTERNS.find((pattern) => pattern.reason === normalizedReason);
+  return normalizeBlockedTier(matched?.tier, BLOCK_TIER_HARD);
+}
+
+function blockedTierDebounceThreshold(tier) {
+  switch (normalizeBlockedTier(tier, BLOCK_TIER_HARD)) {
+    case BLOCK_TIER_TRANSIENT:
+      return Number.POSITIVE_INFINITY;
+    case BLOCK_TIER_SOFT:
+      return 6;
+    default:
+      return 2;
+  }
 }
 
 function normalizeNonNegativeInt(value, fallback = 0) {
@@ -3165,9 +3192,11 @@ function ensureAgentRuntimeRecord(name) {
       agent: agentName,
       blocked: false,
       blockedReason: null,
+      blockedTier: null,
       blockedSince: null,
       blockedConsecutiveScans: 0,
       blockedNotificationSent: false,
+      blockedNotifiedTier: null,
       activeNow: false,
       activeDurationSec: 0,
       idleDurationSec: 0,
@@ -3561,14 +3590,20 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
   const reasonNow = blockedNow && typeof payload.reason === 'string' && payload.reason.trim()
     ? payload.reason.trim()
     : null;
+  const tierNow = blockedNow ? blockedTierFromReason(reasonNow) : null;
   const tailNow = blockedNow && typeof payload.tail === 'string' ? payload.tail : '';
   const cmdNow = blockedNow && typeof payload.command === 'string' ? payload.command : '';
   const serverNow = blockedNow ? normalizeServer(payload.server) : null;
 
   const prevBlocked = runtime.blocked === true;
   const prevReason = runtime.blockedReason || null;
+  const prevBlockedTier = normalizeBlockedTier(runtime.blockedTier, prevBlocked ? blockedTierFromReason(prevReason) : null);
   const prevBlockedConsecutiveScans = Math.max(0, Number(runtime.blockedConsecutiveScans) || 0);
   const prevBlockedNotificationSent = runtime.blockedNotificationSent === true;
+  const prevBlockedNotifiedTier = normalizeBlockedTier(
+    runtime.blockedNotifiedTier,
+    prevBlockedNotificationSent ? prevBlockedTier : null,
+  );
   const prevMcpPresent = runtime.mcpPresent === true
     ? true
     : (runtime.mcpPresent === false ? false : null);
@@ -3576,12 +3611,14 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
 
   if (runtime.blocked !== blockedNow) { runtime.blocked = blockedNow; changed = true; }
   if ((runtime.blockedReason || null) !== reasonNow) { runtime.blockedReason = reasonNow; changed = true; }
+  if (normalizeBlockedTier(runtime.blockedTier, null) !== tierNow) { runtime.blockedTier = tierNow; changed = true; }
   if (runtime.lastSeen !== now) { runtime.lastSeen = now; changed = true; }
   if (runtime.updatedAt !== now) { runtime.updatedAt = now; changed = true; }
   if (blockedNow) {
+    const sameBlockedSignature = prevBlocked && prevReason === reasonNow && prevBlockedTier === tierNow;
     const blockedConsecutiveScans = blockedObserved
-      ? (prevBlocked ? (prevBlockedConsecutiveScans + 1) : 1)
-      : (prevBlocked ? prevBlockedConsecutiveScans : 0);
+      ? (sameBlockedSignature ? (prevBlockedConsecutiveScans + 1) : 1)
+      : (sameBlockedSignature ? prevBlockedConsecutiveScans : 0);
     if (runtime.blockedConsecutiveScans !== blockedConsecutiveScans) {
       runtime.blockedConsecutiveScans = blockedConsecutiveScans;
       changed = true;
@@ -3592,9 +3629,11 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
     if (runtime.lastBlockedCommand !== cmdNow) { runtime.lastBlockedCommand = cmdNow; changed = true; }
     if ((runtime.lastBlockedServer || null) !== (serverNow || null)) { runtime.lastBlockedServer = serverNow; changed = true; }
   } else {
+    if (runtime.blockedTier !== null) { runtime.blockedTier = null; changed = true; }
     if (runtime.blockedSince !== null) { runtime.blockedSince = null; changed = true; }
     if (runtime.blockedConsecutiveScans !== 0) { runtime.blockedConsecutiveScans = 0; changed = true; }
     if (runtime.blockedNotificationSent !== false) { runtime.blockedNotificationSent = false; changed = true; }
+    if (runtime.blockedNotifiedTier !== null) { runtime.blockedNotifiedTier = null; changed = true; }
     if (runtime.lastBlockedTail !== '') { runtime.lastBlockedTail = ''; changed = true; }
     if (runtime.lastBlockedCommand !== '') { runtime.lastBlockedCommand = ''; changed = true; }
     if (runtime.lastBlockedServer !== null) { runtime.lastBlockedServer = null; changed = true; }
@@ -3637,26 +3676,35 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
   if (agentChanged) saveAgents();
   if (shouldCatchup) notifyAgentCatchup(agentName, 'mcp-restored');
 
+  const blockedDebounceThreshold = blockedTierDebounceThreshold(tierNow);
   const blockedNotificationReady = blockedNow
     && blockedObserved
-    && runtime.blockedConsecutiveScans >= 2;
+    && Number.isFinite(blockedDebounceThreshold)
+    && runtime.blockedConsecutiveScans >= blockedDebounceThreshold;
   const becameBlocked = blockedNotificationReady && !prevBlockedNotificationSent;
-  const reasonChanged = prevBlockedNotificationSent
+  const severityIncreased = prevBlockedNotificationSent
     && blockedNotificationReady
-    && reasonNow
-    && reasonNow !== prevReason;
+    && normalizeBlockedTier(tierNow, null) !== null
+    && normalizeBlockedTier(prevBlockedNotifiedTier, null) !== null
+    && tierNow > prevBlockedNotifiedTier;
   const recovered = prevBlockedNotificationSent && !blockedNow;
 
-  if (becameBlocked || reasonChanged) {
+  if (becameBlocked || severityIncreased) {
     if (runtime.blockedNotificationSent !== true) {
       runtime.blockedNotificationSent = true;
-      saveAgentRuntime();
+      changed = true;
     }
+    if (normalizeBlockedTier(runtime.blockedNotifiedTier, null) !== tierNow) {
+      runtime.blockedNotifiedTier = tierNow;
+      changed = true;
+    }
+    if (changed) saveAgentRuntime();
     const blockedSummary = `Agent '${agentName}' entered blocked state`;
     const { hasPendingHuman, targets } = collectBlockedHumanTargets(agentName);
     const fullLines = [
       `Agent: ${agentName}`,
       `Reason: ${reasonNow || 'unknown'}`,
+      `Tier: ${tierNow === BLOCK_TIER_TRANSIENT ? 'transient' : (tierNow === BLOCK_TIER_SOFT ? 'soft' : 'hard')}`,
       `Server: ${serverNow || 'local'}`,
       `Pending human messages: ${hasPendingHuman ? 'yes' : 'no'}`,
       `Target humans: ${targets.map(t => t.human).join(', ') || 'none'}`,
@@ -3670,6 +3718,7 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
     broadcastSSE('agent_blocked', {
       agent: agentName,
       reason: reasonNow || 'unknown',
+      tier: tierNow,
       blockedSince: runtime.blockedSince || now,
       server: serverNow || null,
       hasPendingHuman,
@@ -4621,6 +4670,7 @@ function serializeAgent(agent) {
     manualDown: agent.manualDown === true,
     blocked: runtime?.blocked === true,
     blockedReason: runtime?.blockedReason || null,
+    blockedTier: normalizeBlockedTier(runtime?.blockedTier, null),
     blockedSince: runtime?.blockedSince || null,
     agentModelVersion: normalizeAgentModelVersion(agent.agentModelVersion) || null,
     layoutVersion: normalizeLayoutVersion(agent.layoutVersion) || null,
@@ -5634,6 +5684,7 @@ app.post('/api/agents/:name/runtime', (req, res) => {
       agent: agentName,
       blocked: runtime.blocked === true,
       blockedReason: runtime.blockedReason || null,
+      blockedTier: normalizeBlockedTier(runtime.blockedTier, null),
       blockedSince: runtime.blockedSince || null,
       activeNow: runtime.activeNow === true,
       activeDurationSec: Number(runtime.activeDurationSec) || 0,

@@ -26,7 +26,7 @@ describe('backend runtime API', () => {
     context = null;
   });
 
-  test('blocked notifications require two consecutive observed scans', async () => {
+  test('blocked notifications use tiered debounce and never notify transient blockers', async () => {
     context = await createBackendTestContext('agent-chat-runtime-test-', {
       agents: {
         alpha: {
@@ -41,36 +41,135 @@ describe('backend runtime API', () => {
       groups: {},
     });
 
-    const first = await request(context.app)
-      .post('/api/agents/alpha/runtime')
-      .send({
-        blocked: true,
-        reason: 'plan-mode',
-        tail: '1. Plan mode',
-        command: 'claude',
-      });
-    expect(first.status).toBe(200);
+    for (let i = 0; i < 4; i += 1) {
+      const response = await request(context.app)
+        .post('/api/agents/alpha/runtime')
+        .send({
+          blocked: true,
+          reason: 'plan-mode',
+          tail: '1. Plan mode',
+          command: 'claude',
+        });
+      expect(response.status).toBe(200);
+    }
 
-    const runtimeAfterFirst = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
-    expect(runtimeAfterFirst.alpha.blocked).toBe(true);
-    expect(runtimeAfterFirst.alpha.blockedConsecutiveScans).toBe(1);
-    expect(runtimeAfterFirst.alpha.blockedNotificationSent).toBe(false);
+    const runtimeAfterTransient = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtimeAfterTransient.alpha.blocked).toBe(true);
+    expect(runtimeAfterTransient.alpha.blockedTier).toBe(0);
+    expect(runtimeAfterTransient.alpha.blockedConsecutiveScans).toBe(4);
+    expect(runtimeAfterTransient.alpha.blockedNotificationSent).toBe(false);
     expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([]);
 
-    const second = await request(context.app)
+    for (let i = 0; i < 5; i += 1) {
+      const response = await request(context.app)
+        .post('/api/agents/alpha/runtime')
+        .send({
+          blocked: true,
+          reason: 'interactive-confirm',
+          tail: 'Press enter to continue',
+          command: 'claude',
+        });
+      expect(response.status).toBe(200);
+    }
+
+    const runtimeAfterSoftFive = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtimeAfterSoftFive.alpha.blockedTier).toBe(1);
+    expect(runtimeAfterSoftFive.alpha.blockedConsecutiveScans).toBe(5);
+    expect(runtimeAfterSoftFive.alpha.blockedNotificationSent).toBe(false);
+    expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([]);
+
+    const sixth = await request(context.app)
       .post('/api/agents/alpha/runtime')
       .send({
         blocked: true,
-        reason: 'plan-mode',
-        tail: '1. Plan mode',
+        reason: 'interactive-confirm',
+        tail: 'Press enter to continue',
         command: 'claude',
       });
-    expect(second.status).toBe(200);
+    expect(sixth.status).toBe(200);
 
-    const runtimeAfterSecond = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
-    expect(runtimeAfterSecond.alpha.blockedConsecutiveScans).toBe(2);
-    expect(runtimeAfterSecond.alpha.blockedNotificationSent).toBe(true);
+    const runtimeAfterSoftSix = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtimeAfterSoftSix.alpha.blockedTier).toBe(1);
+    expect(runtimeAfterSoftSix.alpha.blockedConsecutiveScans).toBe(6);
+    expect(runtimeAfterSoftSix.alpha.blockedNotificationSent).toBe(true);
+    expect(runtimeAfterSoftSix.alpha.blockedNotifiedTier).toBe(1);
     expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
+      "Agent 'alpha' entered blocked state",
+    ]);
+  });
+
+  test('severity rebroadcast only happens when blocked tier increases', async () => {
+    context = await createBackendTestContext('agent-chat-runtime-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      groups: {},
+    });
+
+    for (let i = 0; i < 6; i += 1) {
+      const response = await request(context.app).post('/api/agents/alpha/runtime').send({
+        blocked: true,
+        reason: 'interactive-confirm',
+        tail: 'choose an option',
+        command: 'codex',
+      });
+      expect(response.status).toBe(200);
+    }
+
+    expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
+      "Agent 'alpha' entered blocked state",
+    ]);
+
+    const hardFirst = await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: true,
+      reason: 'update-required',
+      tail: 'update available: run agent-update',
+      command: 'codex',
+    });
+    expect(hardFirst.status).toBe(200);
+    expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
+      "Agent 'alpha' entered blocked state",
+    ]);
+
+    const hardSecond = await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: true,
+      reason: 'update-required',
+      tail: 'update available: run agent-update',
+      command: 'codex',
+    });
+    expect(hardSecond.status).toBe(200);
+    expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
+      "Agent 'alpha' entered blocked state",
+      "Agent 'alpha' entered blocked state",
+    ]);
+
+    const sameTierFirst = await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: true,
+      reason: 'hard-custom',
+      tail: 'custom hard blocker',
+      command: 'codex',
+    });
+    expect(sameTierFirst.status).toBe(200);
+    const sameTierSecond = await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: true,
+      reason: 'hard-custom',
+      tail: 'custom hard blocker',
+      command: 'codex',
+    });
+    expect(sameTierSecond.status).toBe(200);
+
+    const runtimeAfterHard = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtimeAfterHard.alpha.blockedTier).toBe(2);
+    expect(runtimeAfterHard.alpha.blockedNotifiedTier).toBe(2);
+    expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
+      "Agent 'alpha' entered blocked state",
       "Agent 'alpha' entered blocked state",
     ]);
   });
@@ -92,14 +191,14 @@ describe('backend runtime API', () => {
 
     await request(context.app).post('/api/agents/alpha/runtime').send({
       blocked: true,
-      reason: 'approval-mode-toggle',
-      tail: 'bypass permissions on (shift+tab to cycle)',
+      reason: 'update-required',
+      tail: 'update available: run agent-update',
       command: 'codex',
     });
     await request(context.app).post('/api/agents/alpha/runtime').send({
       blocked: true,
-      reason: 'approval-mode-toggle',
-      tail: 'bypass permissions on (shift+tab to cycle)',
+      reason: 'update-required',
+      tail: 'update available: run agent-update',
       command: 'codex',
     });
 
@@ -115,8 +214,10 @@ describe('backend runtime API', () => {
 
     const runtimeAfterRecovery = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
     expect(runtimeAfterRecovery.alpha.blocked).toBe(false);
+    expect(runtimeAfterRecovery.alpha.blockedTier).toBe(null);
     expect(runtimeAfterRecovery.alpha.blockedConsecutiveScans).toBe(0);
     expect(runtimeAfterRecovery.alpha.blockedNotificationSent).toBe(false);
+    expect(runtimeAfterRecovery.alpha.blockedNotifiedTier).toBe(null);
     expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
       "Agent 'alpha' entered blocked state",
       "Agent 'alpha' recovered from blocked state",
