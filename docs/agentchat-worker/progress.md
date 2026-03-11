@@ -2155,3 +2155,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Accepted `agentchat-develop`'s `v1 manifest/backend sync divergence` slice-2. The accepted boundary is: `syncBackendAgentHomeState()` now readback-verifies canonical v1-owned fields after PATCH/POST, and `bin/agent-up` now lets resolvable v1 manifest data outrank compatibility `meta.json` for launch defaults and runtime-profile launch env.
 - This closes the currently active v1 sync divergence lane unless later rollout reveals new residuals.
 - Activated the next accepted parked lane for `agentchat-develop`: Agent Detail canonical task visibility/editing plus `AGENTS.md` / `plan.md` / `progress.md` tails under `Internals`, with Matrix/supervisor/subconscious/field-convergence lines still kept separate.
+
+## [2026-03-11 16:10] DONE — periodic audit reminder confirmed no new structural findings beyond the accepted tmux regression
+- Re-checked `agentchat-aduit` through inbox/docs instead of notification summary. There were no new unread audit handoffs and no new structural findings beyond the already-accepted tmux-sweep pane-target regression.
+- The audit lane remains healthy: periodic follow-up mode is intact, and residual runtime hygiene is still narrowed to `/tmp` proof artifacts / stray proof logs rather than live object-model pollution.
+- The recurring `supervisor-tmuxlaunchfailed` residue remains the strongest residual hygiene note on the audit side, but it did not escalate into a new structural blocker in this pass.
