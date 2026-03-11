@@ -7172,36 +7172,60 @@ function shutdown() {
   saveAgentRuntime();
   process.exit(0);
 }
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+let startupHooksInstalled = false;
+let backgroundLoopsStarted = false;
+let serverInstance = null;
 
-setInterval(() => {
-  refreshServerLiveness();
-}, SERVER_SWEEP_INTERVAL_MS);
+function installStartupHooks() {
+  if (startupHooksInstalled) return;
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+  startupHooksInstalled = true;
+}
 
-setInterval(() => {
-  sweepLocalActivityDurations();
-}, LOCAL_ACTIVITY_SWEEP_INTERVAL_MS);
+function startBackgroundLoops() {
+  if (backgroundLoopsStarted) return;
+  setInterval(() => {
+    refreshServerLiveness();
+  }, SERVER_SWEEP_INTERVAL_MS);
 
-setInterval(() => {
-  sweepAgentRules();
-}, RULE_SWEEP_INTERVAL_MS);
+  setInterval(() => {
+    sweepLocalActivityDurations();
+  }, LOCAL_ACTIVITY_SWEEP_INTERVAL_MS);
 
-setInterval(() => {
-  sweepLocalSwapPressure();
-}, SWAP_SWEEP_INTERVAL_MS);
+  setInterval(() => {
+    sweepAgentRules();
+  }, RULE_SWEEP_INTERVAL_MS);
 
-setInterval(() => {
-  sweepAgentScopePressure();
-}, AGENT_SCOPE_SWEEP_INTERVAL_MS);
+  setInterval(() => {
+    sweepLocalSwapPressure();
+  }, SWAP_SWEEP_INTERVAL_MS);
 
-// ── Start ─────────────────────────────────────────────────────────────
-app.listen(PORT, '127.0.0.1', () => {
-  sweepLocalActivityDurations();
-  sweepLocalSwapPressure();
-  sweepAgentScopePressure();
-  supervisorService.start();
-  console.log(`Agent Chat v2 backend listening on http://127.0.0.1:${PORT}`);
-  const agentCount = Object.values(agents).filter(isAgentRecord).length;
-  console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);
-});
+  setInterval(() => {
+    sweepAgentScopePressure();
+  }, AGENT_SCOPE_SWEEP_INTERVAL_MS);
+
+  backgroundLoopsStarted = true;
+}
+
+export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
+  if (serverInstance) return serverInstance;
+  installStartupHooks();
+  startBackgroundLoops();
+  serverInstance = app.listen(port, host, () => {
+    sweepLocalActivityDurations();
+    sweepLocalSwapPressure();
+    sweepAgentScopePressure();
+    supervisorService.start();
+    console.log(`Agent Chat v2 backend listening on http://${host}:${port}`);
+    const agentCount = Object.values(agents).filter(isAgentRecord).length;
+    console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);
+  });
+  return serverInstance;
+}
+
+export { app };
+
+if (process.argv[1] === __filename) {
+  startServer();
+}
