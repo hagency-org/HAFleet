@@ -111,6 +111,10 @@ const AGENT_COMPACT_FALLBACK_PATTERNS = [
 const LOCAL_BLOCK_TAIL_LINES = Number.parseInt(process.env.AGENT_LOCAL_BLOCK_TAIL_LINES || '40', 10);
 const LOCAL_BLOCK_RECENT_LINES = Number.parseInt(process.env.AGENT_LOCAL_BLOCK_RECENT_LINES || '14', 10);
 const LOCAL_MCP_SESSION_CACHE_TTL_MS = Number.parseInt(process.env.AGENT_LOCAL_MCP_SESSION_CACHE_TTL_MS || '1000', 10);
+const AGENT_SWEEP_INTERVAL_PER_AGENT_MS_RAW = Number.parseInt(process.env.AGENT_SWEEP_INTERVAL_PER_AGENT_MS || '500', 10);
+const AGENT_SWEEP_INTERVAL_PER_AGENT_MS = Number.isFinite(AGENT_SWEEP_INTERVAL_PER_AGENT_MS_RAW)
+  ? Math.max(1, AGENT_SWEEP_INTERVAL_PER_AGENT_MS_RAW)
+  : 500;
 const BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW = Number.parseInt(process.env.AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS || '60000', 10);
 const BLOCKED_NOTIFICATION_COOLDOWN_MS = Number.isFinite(BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW)
   ? Math.max(0, BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW)
@@ -4771,6 +4775,38 @@ function runAsyncSweep(label, fn, stateKey) {
     });
 }
 
+function countLocalSweepAgents() {
+  let count = 0;
+  for (const agent of Object.values(agents)) {
+    if (!isAgentRecord(agent) || agent.kind === 'human') continue;
+    const serverId = normalizeServer(agent.server);
+    const isLocalAgent = !serverId || serverId === 'local' || serverId === LOCAL_SERVER_ID;
+    if (!isLocalAgent) continue;
+    count += 1;
+  }
+  return count;
+}
+
+export function computeAdaptiveSweepIntervalMs(baseIntervalMs, agentCount = 0) {
+  const normalizedBase = Number.isFinite(Number(baseIntervalMs)) && Number(baseIntervalMs) > 0
+    ? Math.floor(Number(baseIntervalMs))
+    : 5000;
+  const normalizedAgentCount = Math.max(0, Number.parseInt(agentCount, 10) || 0);
+  return Math.max(normalizedBase, normalizedAgentCount * AGENT_SWEEP_INTERVAL_PER_AGENT_MS);
+}
+
+function scheduleAdaptiveSweepLoop(label, fn, stateKey, baseIntervalMs) {
+  const tick = () => {
+    runAsyncSweep(label, fn, stateKey);
+    const nextDelay = computeAdaptiveSweepIntervalMs(baseIntervalMs, countLocalSweepAgents());
+    const timer = setTimeout(tick, nextDelay);
+    if (typeof timer?.unref === 'function') timer.unref();
+  };
+  const initialDelay = computeAdaptiveSweepIntervalMs(baseIntervalMs, countLocalSweepAgents());
+  const timer = setTimeout(tick, initialDelay);
+  if (typeof timer?.unref === 'function') timer.unref();
+}
+
 function getAgentDeliveryState(name) {
   const agent = agents[name];
   if (!agent || !isAgentRecord(agent)) {
@@ -7561,21 +7597,15 @@ function startBackgroundLoops() {
     refreshServerLiveness();
   }, SERVER_SWEEP_INTERVAL_MS);
 
-  setInterval(() => {
-    runAsyncSweep('sweepLocalActivityDurations', sweepLocalActivityDurations, 'localActivity');
-  }, LOCAL_ACTIVITY_SWEEP_INTERVAL_MS);
+  scheduleAdaptiveSweepLoop('sweepLocalActivityDurations', sweepLocalActivityDurations, 'localActivity', LOCAL_ACTIVITY_SWEEP_INTERVAL_MS);
 
   setInterval(() => {
     sweepAgentRules();
   }, RULE_SWEEP_INTERVAL_MS);
 
-  setInterval(() => {
-    runAsyncSweep('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap');
-  }, SWAP_SWEEP_INTERVAL_MS);
+  scheduleAdaptiveSweepLoop('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap', SWAP_SWEEP_INTERVAL_MS);
 
-  setInterval(() => {
-    runAsyncSweep('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope');
-  }, AGENT_SCOPE_SWEEP_INTERVAL_MS);
+  scheduleAdaptiveSweepLoop('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope', AGENT_SCOPE_SWEEP_INTERVAL_MS);
 
   backgroundLoopsStarted = true;
 }

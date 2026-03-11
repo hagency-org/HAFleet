@@ -12,6 +12,7 @@ function writeJson(filePath, value) {
 describe('backend API smoke', () => {
   let runtimeDir;
   let app;
+  let computeAdaptiveSweepIntervalMs;
 
   beforeAll(async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-api-smoke-'));
@@ -39,7 +40,7 @@ describe('backend API smoke', () => {
     process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
 
     const backendUrl = pathToFileURL(path.resolve('backend-v2.js')).href;
-    ({ app } = await import(`${backendUrl}?test=${Date.now()}`));
+    ({ app, computeAdaptiveSweepIntervalMs } = await import(`${backendUrl}?test=${Date.now()}`));
   });
 
   afterAll(() => {
@@ -113,5 +114,12 @@ describe('backend API smoke', () => {
       });
     expect(response.status).toBe(400);
     expect(response.body).toEqual({ error: 'priority must be one of: normal, high, urgent' });
+  });
+
+  test('adaptive sweep interval scales with local agent count', () => {
+    expect(computeAdaptiveSweepIntervalMs(5000, 0)).toBe(5000);
+    expect(computeAdaptiveSweepIntervalMs(5000, 10)).toBe(5000);
+    expect(computeAdaptiveSweepIntervalMs(5000, 20)).toBe(10000);
+    expect(computeAdaptiveSweepIntervalMs(5000, 25)).toBe(12500);
   });
 });
