@@ -83,6 +83,54 @@ describe('runtime parity regressions', () => {
     expect(service.getControl().enabled).toBe(false);
   });
 
+  test('supervisor startup cleans orphan tmux sessions not present in state', () => {
+    tempDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-supervisor-orphan-test-'));
+    const killed = [];
+
+    const service = new SupervisorService({
+      config: {
+        enabled: true,
+        disabledReason: null,
+        intervalMs: 60_000,
+        heartbeatTtlMs: 30_000,
+        trailingHeartbeatPeriods: 5,
+        trailingWindowMs: 150_000,
+        matrixInfoGroup: 'info',
+        matrixMentions: [],
+        agentAllowlist: null,
+        stateFile: path.join(tempDir, 'supervisor-state.json'),
+        logFile: path.join(tempDir, 'supervisor-log.jsonl'),
+        warnAfter: 2,
+        warnCooldownMs: 1000,
+        eventHistoryLimit: 20,
+        llm: {
+          provider: 'openai',
+          model: 'gpt-4.1-mini',
+          endpoint: 'https://api.openai.com/v1/chat/completions',
+          profileSource: 'test',
+        },
+      },
+      getAgents: () => [],
+      getRuntime: () => ({}),
+      listTmuxSessions: () => ['supervisor-known', 'supervisor-orphan', 'alpha', 'supervisor-extra'],
+      killTmuxSession: (sessionName) => {
+        killed.push(sessionName);
+        return true;
+      },
+    });
+
+    service.stateStore.agents.alpha = {
+      runtimeLaunch: {
+        sessionName: 'supervisor-known',
+      },
+    };
+
+    service.start();
+    service.stop();
+
+    expect(killed).toEqual(['supervisor-orphan', 'supervisor-extra']);
+  });
+
   test('remote MCP auto-registration defaults server to os.hostname()', () => {
     const source = readFileSync(path.resolve('remote/lib/mcp-server-core.js'), 'utf-8');
     expect(source).toMatch(/const AGENT_SERVER = \(process\.env\.AGENT_CHAT_SERVER \|\| ''\)\.trim\(\) \|\| os\.hostname\(\);/);

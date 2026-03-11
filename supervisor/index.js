@@ -203,6 +203,22 @@ function killTmuxSession(sessionName) {
   }
 }
 
+function listTmuxSessions() {
+  try {
+    const output = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'], {
+      timeout: 3000,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return String(output || '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 function buildLaunchSelection(runtimeProfile, config) {
   const supervisor = runtimeProfile?.supervisor || null;
   const primary = runtimeProfile?.primary || null;
@@ -470,6 +486,8 @@ export class SupervisorService {
     this.emitSystemInfo = deps.emitSystemInfo;
     this.broadcastSSE = deps.broadcastSSE;
     this.sendMessage = deps.sendMessage;
+    this.listTmuxSessions = typeof deps.listTmuxSessions === 'function' ? deps.listTmuxSessions : listTmuxSessions;
+    this.killTmuxSession = typeof deps.killTmuxSession === 'function' ? deps.killTmuxSession : killTmuxSession;
 
     this.enabledRequested = this.config.enabled === true;
     this.disabledReason = this.config.disabledReason || null;
@@ -495,12 +513,32 @@ export class SupervisorService {
     return this.enabledRequested === true && this.timer !== null;
   }
 
+  cleanupOrphanSupervisorSessions() {
+    const knownSessions = new Set();
+    for (const row of Object.values(this.stateStore.agents || {})) {
+      const sessionName = normalizeOptionalText(row?.runtimeLaunch?.sessionName, 256);
+      if (sessionName) knownSessions.add(sessionName);
+    }
+    const listedSessions = typeof this.listTmuxSessions === 'function' ? this.listTmuxSessions() : [];
+    const tmuxSessions = Array.isArray(listedSessions) ? listedSessions : [];
+    for (const sessionName of tmuxSessions) {
+      if (!String(sessionName).startsWith('supervisor-')) continue;
+      if (knownSessions.has(sessionName)) continue;
+      if (this.killTmuxSession(sessionName)) {
+        console.log(`[supervisor] cleaned orphan tmux session ${sessionName}`);
+      } else {
+        console.warn(`[supervisor] failed to clean orphan tmux session ${sessionName}`);
+      }
+    }
+  }
+
   start() {
     if (!this.enabledRequested) {
       console.log(`[supervisor] disabled: ${this.disabledReason || 'unknown reason'}`);
       return;
     }
     if (this.timer) return;
+    this.cleanupOrphanSupervisorSessions();
     this.runSweep();
     this.timer = setInterval(() => {
       this.runSweep();
@@ -718,7 +756,7 @@ export class SupervisorService {
     for (const entry of names) {
       const [agentName, sessionName] = entry.split('\n');
       const existed = tmuxSessionExists(sessionName);
-      if (existed) killTmuxSession(sessionName);
+      if (existed) this.killTmuxSession(sessionName);
       const previous = this.stateStore.snapshot(agentName);
       this.stateStore.agents[agentName] = {
         ...this.stateStore.agents[agentName],
@@ -764,7 +802,7 @@ export class SupervisorService {
 
     if (!this.enabledRequested || observation.lifecycle.state === 'idle') {
       if (sessionExists) {
-        killTmuxSession(context.sessionName);
+        this.killTmuxSession(context.sessionName);
         return this.buildRuntimeLaunchState(base, {
           running: false,
           action: 'stopped',
@@ -827,7 +865,7 @@ export class SupervisorService {
         });
       }
       if (sessionExists && pathMismatch) {
-        killTmuxSession(context.sessionName);
+        this.killTmuxSession(context.sessionName);
       }
       startSupervisorTmuxSession(context.sessionName, context.supervisorDir, command);
       return this.buildRuntimeLaunchState(base, {
