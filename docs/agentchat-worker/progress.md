@@ -2140,3 +2140,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Reviewed the actual implementation in `agentchat-develop`'s managed copy rather than accepting from summary text. The code shape is correct and still minimal: `sessionKeyFromTmuxTarget()` exists, `readLocalPaneSnapshot()` joins through the normalized key, and `readAgentScopeMemory()` uses the same normalized key for pane-pid lookup while raw `tmuxTarget` remains the direct tmux command target.
 - I did **not** fully accept the slice yet because the formal handoff lacked the proof cases required by the accepted design. The lane stays active until `agentchat-develop` returns exact proof for exact-session joins, missing-target truth, scope-memory attribution, and no additional tmux shell-outs.
 - Replied with `msg_78192` to keep this exact lane active and block any next slice from starting before proof lands.
+
+## [2026-03-11 15:56] DONE — accepted the tmux-sweep pane-target regression fix and resumed the parked v1 sync line
+- Accepted `agentchat-develop`'s formal proof handoff for the minimal tmux join-key fix. The six required cases are now covered: exact-session joins, plain joins, missing-target truth, no false `tmux-missing:auto`, restored pane-pid-backed scope-memory attribution, and no added tmux shell-outs.
+- This closes the fresh regression introduced by the session-only metadata optimization without reopening the earlier local-activity sweep hardening work.
+- Replied with `msg_78194` and resumed the next parked active implementation lane: `v1 manifest/backend sync divergence` slice-2. The Agent Detail task/Internals UI lane remains parked behind it.

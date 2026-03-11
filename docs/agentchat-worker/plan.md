@@ -2,10 +2,10 @@
 Coordinate the next clean execution phase after the live incident wave. Acceptance criteria:
 - keep worker in chief-coordinator mode: no direct coding/investigation work by worker
 - explicitly track executor availability (`agentchat-develop`, `agentchat-aduit`, `Yato`) and repair lanes when they silently disappear
-- keep `v1 sync slice-2` parked while the tmux-sweep pane-target regression remains the highest-priority active structural blocker
+- resume `v1 sync slice-2` now that the tmux-sweep pane-target regression has been accepted and closed
 - add and preserve the `agentchat-worker` 1.0 migration lane so the worker itself can move into a real v1 home/workdir/project model without losing docs/history
 - keep active reminders in place so execution does not EOS
-- treat the new tmux-sweep pane-target regression as a fresh structural blocker and keep it separate from parked UI/field-convergence work
+- keep the accepted Agent Detail task/Internals/UI staging parked behind `v1 sync slice-2`, and keep field-convergence work queued behind both
 
 ## Queue
 1. Resume `v1 manifest/backend sync divergence` slice-2 implementation after the live web incident is triaged and narrowed again.

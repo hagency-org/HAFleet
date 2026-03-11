@@ -392,3 +392,4 @@
   - raw `tmuxTarget` is the canonical direct tmux command target and may legally include exact-session syntax such as `=session:0.0`;
   - shared sweep pane snapshots are keyed by tmux-reported `session_name`, so any join against sweep-local metadata must first normalize raw `tmuxTarget` into a derived `sessionKey` by trimming, splitting at the first `:`, and stripping a leading `=`;
   - raw `tmuxTarget` must continue to be used for direct tmux commands, while the normalized `sessionKey` must be used only for sweep-local joins and pane-pid/scope-memory attribution.
+  - accepted proof shows this normalization is sufficient to close the false `tmux-missing:auto` / weak scope-memory attribution regression for exact-session targets without adding new tmux shell-outs.
