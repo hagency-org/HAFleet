@@ -11,6 +11,10 @@ function parseArgs(argv) {
     reason: '',
     until: '',
     webUrl: '',
+    graphId: '',
+    nodeId: '',
+    result: '',
+    error: '',
   };
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
@@ -42,6 +46,22 @@ function parseArgs(argv) {
       args.webUrl = argv[++i];
       continue;
     }
+    if (token === '--graph' && argv[i + 1]) {
+      args.graphId = argv[++i];
+      continue;
+    }
+    if (token === '--node' && argv[i + 1]) {
+      args.nodeId = argv[++i];
+      continue;
+    }
+    if (token === '--result' && argv[i + 1]) {
+      args.result = argv[++i];
+      continue;
+    }
+    if (token === '--error' && argv[i + 1]) {
+      args.error = argv[++i];
+      continue;
+    }
     if (token === '-h' || token === '--help') {
       args.help = true;
       continue;
@@ -52,7 +72,7 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  console.log(`Usage: write-v1-agent-task <start|heartbeat|wait|resume|done> [options]
+  console.log(`Usage: write-v1-agent-task <start|heartbeat|wait|resume|done|fail> [options]
 
 Options:
   --workdir <path>   Agent workdir (default: cwd)
@@ -61,6 +81,10 @@ Options:
   --reason <text>    Required for wait
   --until <iso8601>  Required for wait
   --web-url <url>    Override AGENT_CHAT_WEB_URL / AGENT_CHAT_WEB_PORT resolution
+  --graph <id>       Report a task graph node result/failure instead of home metadata
+  --node <id>        Task graph node id (required with --graph)
+  --result <json>    JSON payload for graph completion
+  --error <text>     Error text for graph failure
 `);
 }
 
@@ -117,8 +141,29 @@ function parsePositiveInt(value, fallback) {
 function defaultWebBaseUrl(env = process.env) {
   const explicit = String(env.AGENT_CHAT_WEB_URL || '').trim();
   if (explicit) return explicit.replace(/\/$/, '');
+  const api = String(env.AGENT_CHAT_API || '').trim();
+  if (api) return api.replace(/\/$/, '');
   const port = parsePositiveInt(env.AGENT_CHAT_WEB_PORT, 8084);
   return `http://127.0.0.1:${port}`;
+}
+
+function defaultApiBaseUrl(env = process.env) {
+  const explicit = String(env.AGENT_CHAT_API || '').trim();
+  if (explicit) return explicit.replace(/\/$/, '');
+  const web = String(env.AGENT_CHAT_WEB_URL || '').trim();
+  if (web) return web.replace(/\/$/, '');
+  const port = parsePositiveInt(env.AGENT_CHAT_BACKEND_PORT, 8090);
+  return `http://127.0.0.1:${port}`;
+}
+
+function parseJsonArg(value, label) {
+  const raw = normalizeText(value, 20000);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`${label} must be valid JSON: ${error?.message || error}`);
+  }
 }
 
 function resolveWorkdir(raw) {
@@ -201,6 +246,37 @@ function buildNextTask(command, manifest, args) {
   throw new Error(`unsupported command: ${command}`);
 }
 
+function buildGraphPayload(command, args) {
+  const graphId = normalizeText(args.graphId, 255);
+  const nodeId = normalizeText(args.nodeId, 255);
+  if (!graphId || !nodeId) {
+    throw new Error('graph reporting requires --graph <graphId> and --node <nodeId>');
+  }
+  if (command === 'done') {
+    return {
+      graphId,
+      nodeId,
+      body: {
+        status: 'complete',
+        result: parseJsonArg(args.result, '--result'),
+      },
+    };
+  }
+  if (command === 'fail') {
+    const error = normalizeText(args.error, 4000);
+    if (!error) throw new Error('fail with --graph requires --error');
+    return {
+      graphId,
+      nodeId,
+      body: {
+        status: 'failed',
+        error,
+      },
+    };
+  }
+  throw new Error(`graph reporting only supports done/fail (received: ${command})`);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help || !args.command) {
@@ -208,7 +284,7 @@ async function main() {
     process.exit(args.help ? 0 : 1);
   }
   const command = String(args.command || '').trim().toLowerCase();
-  if (!['start', 'heartbeat', 'wait', 'resume', 'done'].includes(command)) {
+  if (!['start', 'heartbeat', 'wait', 'resume', 'done', 'fail'].includes(command)) {
     throw new Error(`unsupported command: ${command}`);
   }
   const workdir = resolveWorkdir(args.workdir);
@@ -217,13 +293,56 @@ async function main() {
   if (!manifest) {
     throw new Error(`v1 agent manifest not found: ${manifestPath}`);
   }
+  const explicitBaseUrl = String(args.webUrl || '').trim().replace(/\/$/, '');
+
+  if (normalizeText(args.graphId, 255) || normalizeText(args.nodeId, 255)) {
+    const graphUpdate = buildGraphPayload(command, args);
+    const apiBaseUrl = explicitBaseUrl || defaultApiBaseUrl(process.env);
+    const response = await fetch(
+      `${apiBaseUrl}/api/task-graphs/${encodeURIComponent(graphUpdate.graphId)}/nodes/${encodeURIComponent(graphUpdate.nodeId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(graphUpdate.body),
+      }
+    );
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data?.ok) {
+      throw new Error(`graph task write failed: ${response.status} ${JSON.stringify(data || { error: 'invalid response' })}`);
+    }
+    process.stdout.write(`${JSON.stringify({
+      ok: true,
+      command,
+      agent: manifest.name,
+      manifestPath,
+      workdir,
+      apiUrl: apiBaseUrl,
+      graphId: graphUpdate.graphId,
+      nodeId: graphUpdate.nodeId,
+      node: data?.node || null,
+      graph: data?.graph || null,
+    }, null, 2)}\n`);
+    return;
+  }
+
+  if (command === 'fail') {
+    throw new Error('fail requires --graph <graphId> --node <nodeId>');
+  }
+
   const task = buildNextTask(command, manifest, args);
   if (!task) throw new Error('failed to build task payload');
-  const webUrl = String(args.webUrl || '').trim().replace(/\/$/, '') || defaultWebBaseUrl(process.env);
-  const response = await fetch(`${webUrl}/api/agents/${encodeURIComponent(manifest.name)}/home-metadata`, {
-    method: 'PATCH',
+
+  const webUrl = explicitBaseUrl || defaultWebBaseUrl(process.env);
+  const apiUrl = explicitBaseUrl || defaultApiBaseUrl(process.env);
+  const usesDirectApi = !String(process.env.AGENT_CHAT_WEB_URL || '').trim() && Boolean(String(process.env.AGENT_CHAT_API || '').trim()) && !explicitBaseUrl;
+  const targetUrl = usesDirectApi
+    ? `${apiUrl}/api/agents/${encodeURIComponent(manifest.name)}`
+    : `${webUrl}/api/agents/${encodeURIComponent(manifest.name)}/home-metadata`;
+  const body = usesDirectApi ? { task } : { task };
+  const response = await fetch(targetUrl, {
+    method: usesDirectApi ? 'PATCH' : 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task }),
+    body: JSON.stringify(body),
   });
   const data = await response.json().catch(() => null);
   if (!response.ok || !data?.ok) {
@@ -235,12 +354,16 @@ async function main() {
     agent: manifest.name,
     manifestPath,
     workdir,
-    webUrl,
-    task: data?.metadata?.task || task,
+    webUrl: usesDirectApi ? apiUrl : webUrl,
+    task: data?.metadata?.task || data?.agent?.task || task,
   }, null, 2)}\n`);
 }
 
-main().catch((err) => {
-  console.error(err?.message || String(err));
-  process.exit(1);
-});
+main()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error(err?.message || String(err));
+    process.exit(1);
+  });

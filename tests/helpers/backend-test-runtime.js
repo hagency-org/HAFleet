@@ -35,11 +35,45 @@ export async function createBackendTestContext(prefix, seed = {}) {
   const backendUrl = pathToFileURL(path.resolve('backend-v2.js')).href;
   const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const { app } = await import(`${backendUrl}?test=${cacheBust}`);
+  const servers = new Set();
 
   return {
     app,
     runtimeDir,
+    async listen(host = '127.0.0.1') {
+      const server = await new Promise((resolve, reject) => {
+        const instance = app.listen(0, host, () => resolve(instance));
+        instance.on('error', reject);
+      });
+      if (typeof server.unref === 'function') server.unref();
+      servers.add(server);
+      const address = server.address();
+      return {
+        server,
+        baseUrl: `http://${host}:${address.port}`,
+        close() {
+          return new Promise((resolve, reject) => {
+            if (typeof server.closeAllConnections === 'function') {
+              server.closeAllConnections();
+            }
+            server.close((error) => {
+              servers.delete(server);
+              if (error) reject(error);
+              else resolve();
+            });
+          });
+        },
+      };
+    },
     cleanup() {
+      for (const server of servers) {
+        try {
+          server.close();
+        } catch {
+          // ignore close errors in test cleanup
+        }
+      }
+      servers.clear();
       rmSync(runtimeDir, { recursive: true, force: true });
     },
   };

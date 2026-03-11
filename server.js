@@ -2169,6 +2169,73 @@ app.delete('/api/agents/:name', async (req, res) => {
   }
 });
 
+app.post('/api/task-graphs', async (req, res) => {
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/task-graphs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.get('/api/task-graphs', async (req, res) => {
+  try {
+    const url = new URL(`${BACKEND_V2_URL}/api/task-graphs`);
+    if (typeof req.query.status === 'string' && req.query.status.trim()) {
+      url.searchParams.set('status', req.query.status.trim());
+    }
+    const r = await fetch(url);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.get('/api/task-graphs/:id', async (req, res) => {
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/task-graphs/${encodeURIComponent(req.params.id)}`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.delete('/api/task-graphs/:id', async (req, res) => {
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/task-graphs/${encodeURIComponent(req.params.id)}`, {
+      method: 'DELETE',
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.patch('/api/task-graphs/:id/nodes/:nodeId', async (req, res) => {
+  try {
+    const r = await fetch(
+      `${BACKEND_V2_URL}/api/task-graphs/${encodeURIComponent(req.params.id)}/nodes/${encodeURIComponent(req.params.nodeId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body || {}),
+      }
+    );
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
 // ── Supervisor audit proxy APIs ──────────────────────────────────────
 app.get('/api/supervisor/status', async (_req, res) => {
   try {
