@@ -2179,3 +2179,13 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - rename `Manual Guidance` to canonical `Guidance`
   - preserve `Owner` as first-class
   - freeze `Identity` as one-line external-facing description
+
+## [2026-03-11 16:47] DONE — prepared `agentchat-worker` 1.0 home and migrated worker docs
+- Provisioned a real v1 home for `agentchat-worker` at `/home/shisui/.agentchat/agents/agent_agentchat-worker` using the current workspace templates and a managed project link `workdir/projects/agentchat -> /home/shisui/laplace/agent-chat`.
+- Synced the canonical worker docs into the new home:
+  - root `AGENTS.md`
+  - `docs/plan.md`
+  - `docs/progress.md`
+  - rewritten `docs/projects.md`
+- Added `workdir/handoff.md` with bootstrap order, current lane ownership, and migration status, and copied the supplemental worker reports into `workdir/outputs/handoff/worker-docs/`.
+- This is filesystem/home preparation only. The worker process has not been restarted into the new home yet; operator-triggered down/up is still required for the actual cutover.
