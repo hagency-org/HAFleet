@@ -199,4 +199,165 @@ describe('task graph API', () => {
     expect(graphResponse.body.nodes.a.status).toBe('complete');
     expect(graphResponse.body.nodes.a.result).toEqual({ ok: true });
   });
+
+  test('rejects graph creation when dependencies contain a cycle', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+        beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send({
+        owner: 'orchestrator',
+        label: 'cyclic graph',
+        nodes: {
+          a: {
+            assignee: 'alpha',
+            description: 'Do A',
+            depends_on: ['b'],
+          },
+          b: {
+            assignee: 'beta',
+            description: 'Do B',
+            depends_on: ['a'],
+          },
+        },
+      });
+
+    expect(createResponse.status).toBe(400);
+    expect(createResponse.body.error).toContain('dependency cycle detected');
+  });
+
+  test('rejects oversized result payloads on direct node updates', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send({
+        owner: 'orchestrator',
+        label: 'single node graph',
+        nodes: {
+          a: {
+            assignee: 'alpha',
+            description: 'Do A',
+          },
+        },
+      });
+    const graphId = createResponse.body.graph.id;
+    const oversized = { blob: 'x'.repeat(70_000) };
+
+    const patchResponse = await request(context.app)
+      .patch(`/api/task-graphs/${graphId}/nodes/a`)
+      .send({ status: 'complete', result: oversized });
+
+    expect(patchResponse.status).toBe(400);
+    expect(patchResponse.body.error).toContain('result exceeds 65536 bytes');
+
+    const graphResponse = await request(context.app).get(`/api/task-graphs/${graphId}`);
+    expect(graphResponse.status).toBe(200);
+    expect(graphResponse.body.nodes.a.status).toBe('dispatched');
+    expect(graphResponse.body.nodes.a.result).toBe(null);
+  });
+
+  test('ignores oversized task_graph_result payloads in the message hook', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send({
+        owner: 'orchestrator',
+        label: 'single node graph',
+        nodes: {
+          a: {
+            assignee: 'alpha',
+            description: 'Do A',
+          },
+        },
+      });
+    const graphId = createResponse.body.graph.id;
+    const oversized = { blob: 'x'.repeat(70_000) };
+
+    const messageResponse = await request(context.app)
+      .post('/api/messages')
+      .send({
+        from: 'alpha',
+        to: 'orchestrator',
+        type: 'inform',
+        summary: 'node complete',
+        full: 'done',
+        schema: {
+          kind: 'task_graph_result',
+          version: 1,
+          payload: {
+            graphId,
+            nodeId: 'a',
+            result: oversized,
+          },
+        },
+      });
+
+    expect(messageResponse.status).toBe(200);
+    expect(messageResponse.body.taskGraph).toBe(null);
+
+    const graphResponse = await request(context.app).get(`/api/task-graphs/${graphId}`);
+    expect(graphResponse.status).toBe(200);
+    expect(graphResponse.body.status).toBe('active');
+    expect(graphResponse.body.nodes.a.status).toBe('dispatched');
+    expect(graphResponse.body.nodes.a.result).toBe(null);
+  });
+
+  test('blocks dangerous prototype path segments during condition evaluation', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+        beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send({
+        owner: 'orchestrator',
+        label: 'guarded condition graph',
+        nodes: {
+          a: {
+            assignee: 'alpha',
+            description: 'Do A',
+          },
+          b: {
+            assignee: 'beta',
+            description: 'Do B',
+            depends_on: ['a'],
+            condition: {
+              dep: 'a',
+              path: '__proto__.toString',
+            },
+          },
+        },
+      });
+    const graphId = createResponse.body.graph.id;
+
+    const completeA = await request(context.app)
+      .patch(`/api/task-graphs/${graphId}/nodes/a`)
+      .send({ status: 'complete', result: {} });
+
+    expect(completeA.status).toBe(200);
+    expect(completeA.body.graph.nodes.b.status).toBe('skipped');
+    expect(completeA.body.graph.status).toBe('complete');
+  });
 });
