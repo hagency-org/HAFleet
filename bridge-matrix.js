@@ -763,7 +763,13 @@ async function backendApi(method, path, body, contextLabel = '') {
   const startedAt = Date.now();
   try {
     const res = await fetch(`${BACKEND_URL}${path}`, opts);
-    return res.json();
+    const text = await res.text();
+    const parsed = text ? JSON.parse(text) : null;
+    if (!res.ok) {
+      const detail = text ? ` body=${text}` : '';
+      throw new Error(`backend API ${method} ${path} failed with HTTP ${res.status}${detail}`);
+    }
+    return parsed;
   } catch (error) {
     const elapsedMs = Date.now() - startedAt;
     const prefix = isTimeoutAbortError(error) ? '[bridge-backend-timeout]' : '[bridge-backend-fetch-failed]';

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import os from 'os';
 import path from 'path';
 import { mkdtempSync, rmSync } from 'fs';
@@ -17,6 +17,10 @@ describe('bridge matrix behavior', () => {
 
   afterAll(() => {
     rmSync(runtimeDir, { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   test('submitHumanMessage retries once on timeout before surfacing delivery failure', async () => {
@@ -121,5 +125,18 @@ describe('bridge matrix behavior', () => {
     expect(bridge.ensureAgentToken).toHaveBeenNthCalledWith(2, 'beta', 'registration_poll');
     expect(bridge.isKnownAgentName('alpha')).toBe(true);
     expect(bridge.isKnownAgentName('beta')).toBe(true);
+  });
+
+  test('callBackendApi rejects non-2xx backend responses with HTTP status details', async () => {
+    const bridge = new MatrixBridge();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: vi.fn().mockResolvedValue('{"error":"boom"}'),
+    }));
+
+    await expect(bridge.callBackendApi('GET', '/api/agents')).rejects.toThrow(
+      'backend API GET /api/agents failed with HTTP 500 body={"error":"boom"}'
+    );
   });
 });
