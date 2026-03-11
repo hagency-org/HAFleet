@@ -87,4 +87,23 @@ describe('bridge matrix behavior', () => {
       '✅ Agent @alpha recovered from blocked state.'
     );
   });
+
+  test('onRoomMessage skips forwarding messages prefixed with [AGENTIGNORE]', async () => {
+    const bridge = new MatrixBridge();
+    bridge.submitHumanMessage = vi.fn().mockResolvedValue({ ok: true });
+    bridge.botClient = {
+      getJoinedRoomMembers: vi.fn().mockResolvedValue(['@agent-bridge:matrix.example.test']),
+    };
+
+    await bridge.onRoomMessage('!room:test', {
+      event_id: '$event-1',
+      sender: '@alice:matrix.example.test',
+      content: {
+        msgtype: 'm.text',
+        body: '[AGENTIGNORE] private coordination note',
+      },
+    });
+
+    expect(bridge.submitHumanMessage).not.toHaveBeenCalled();
+  });
 });

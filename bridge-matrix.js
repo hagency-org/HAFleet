@@ -1081,6 +1081,11 @@ function parseInboundTextMessage(content) {
   return { skip: !body, body, replyEventId };
 }
 
+function shouldIgnoreAgentForward(content) {
+  const rawBody = typeof content?.body === 'string' ? content.body : '';
+  return /^\[agentignore\]/i.test(rawBody);
+}
+
 // ── Main bridge class ─────────────────────────────────────────────────
 export class MatrixBridge {
   constructor() {
@@ -1633,6 +1638,8 @@ export class MatrixBridge {
     const eventId = event?.event_id || null;
     if (eventId && this.isDuplicateMatrixEvent(eventId)) return;
     if (eventId) this.rememberMatrixEvent(eventId);
+
+    if (shouldIgnoreAgentForward(event?.content)) return;
 
     const parsed = parseInboundTextMessage(event.content);
     if (parsed.skip) return;
