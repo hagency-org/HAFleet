@@ -2160,3 +2160,12 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Re-checked `agentchat-aduit` through inbox/docs instead of notification summary. There were no new unread audit handoffs and no new structural findings beyond the already-accepted tmux-sweep pane-target regression.
 - The audit lane remains healthy: periodic follow-up mode is intact, and residual runtime hygiene is still narrowed to `/tmp` proof artifacts / stray proof logs rather than live object-model pollution.
 - The recurring `supervisor-tmuxlaunchfailed` residue remains the strongest residual hygiene note on the audit side, but it did not escalate into a new structural blocker in this pass.
+
+## [2026-03-11 16:14] PARTIAL — Agent Detail task/Internals takeover is actively in implementation on develop
+- Checked `agentchat-develop` for the accepted Agent Detail task/Internals takeover lane. There is no formal handoff yet, but tmux shows it is actively editing the correct single-surface scope rather than drifting.
+- Current in-flight scope remains aligned with the accepted design:
+  - extend the detail payload with resolved raw doc tails
+  - promote canonical task editing from `detail.task`
+  - demote supervisor task text to a clearly labeled snapshot
+  - keep Matrix/supervisor/subconscious/field-convergence work out of the slice
+- No intervention was needed in this reminder window; the correct next action is to wait for a formal handoff rather than interrupt an active implementation pass.
