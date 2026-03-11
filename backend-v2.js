@@ -3553,16 +3553,6 @@ function collectBlockedHumanTargets(agentName) {
     }
   }
 
-  if (selected.size === 0) {
-    let latest = null;
-    for (const msg of messages) {
-      if (!isHumanMessageToAgent(msg, agentName)) continue;
-      if (msg.from === agentName) continue;
-      if (!latest || compareMsgOrder(msg, latest) > 0) latest = msg;
-    }
-    if (latest) selected.set(latest.from, latest);
-  }
-
   const targets = [...selected.values()]
     .sort(compareMsgOrder)
     .map(msg => ({

@@ -18,6 +18,16 @@ function readSystemInfoSummaries(runtimeDir) {
     .map(line => JSON.parse(line).summary);
 }
 
+function readSystemInfoEvents(runtimeDir) {
+  const filePath = path.join(runtimeDir, 'data', 'system-info.jsonl');
+  if (!existsSync(filePath)) return [];
+  return readFileSync(filePath, 'utf-8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line));
+}
+
 describe('backend runtime API', () => {
   let context = null;
 
@@ -222,5 +232,57 @@ describe('backend runtime API', () => {
       "Agent 'alpha' entered blocked state",
       "Agent 'alpha' recovered from blocked state",
     ]);
+  });
+
+  test('blocked system info only targets humans with unread pending messages', async () => {
+    context = await createBackendTestContext('agent-chat-runtime-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      groups: {},
+      messages: [
+        {
+          id: 'msg_old',
+          ts: 1000,
+          from: 'human-old',
+          to: 'alpha',
+          type: 'human',
+          summary: 'Old question',
+        },
+      ],
+      cursors: {
+        alpha: {
+          inbox: 1000,
+          inboxId: 'msg_old',
+          groups: {},
+          groupIds: {},
+        },
+      },
+    });
+
+    await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: true,
+      reason: 'update-required',
+      tail: 'update available: run agent-update',
+      command: 'codex',
+    });
+    await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: true,
+      reason: 'update-required',
+      tail: 'update available: run agent-update',
+      command: 'codex',
+    });
+
+    const events = readSystemInfoEvents(context.runtimeDir);
+    expect(events).toHaveLength(1);
+    expect(events[0].full).toContain('Pending human messages: no');
+    expect(events[0].full).toContain('Target humans: none');
   });
 });
