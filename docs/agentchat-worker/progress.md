@@ -2209,3 +2209,13 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 ## [2026-03-11 17:06] DONE — froze the product direction to split agent creation from project attachment
 - Recorded the product-model correction that `up-v1` should create/repair the v1 home/runtime contract, while managed project add/remove remains a separate control-plane action.
 - This keeps `--project` as a supported bootstrap convenience, but not the permanent conceptual model for every agent launch.
+
+## [2026-03-11 17:12] DONE — prepared rename-based coordinator migration to `ac-topleader`
+- Verified that `agentchat up-v1 agentchat-worker ...` currently fails because the existing `agentchat-worker` compatibility metadata is still `0.x`, so implicit in-place migration is refused.
+- Verified that `agent-up-v1` has no `--refresh` flag; the canonical path remains launcher-based reprovision/start, not a special refresh mode.
+- Provisioned the new v1 coordinator home at `/home/shisui/.agentchat/agents/agent_ac-topleader` with:
+  - managed project `projects/agentchat` (symlink)
+  - synced worker `AGENTS.md`
+  - synced `docs/plan.md` / `docs/progress.md`
+  - rewritten `docs/projects.md`
+  - `handoff.md` that records the migration failures and the intended cutover

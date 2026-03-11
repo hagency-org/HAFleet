@@ -27,11 +27,10 @@ Coordinate the next clean execution phase after the live incident wave. Acceptan
 14. Mirror the same code/runtime split design later for live (`agent-chat-live` + future `agent-chat-live-runtime`) after stable merge and explicit cutover planning.
 15. Secure external supervisor event ingest and reducer-based subconscious event flow.
 16. Harden external dev web auth behavior so credentials-in-URL cannot blank the page by causing relative `fetch()` to fail; either preserve SSR on refresh failure or document/replace the auth flow.
-17. Migrate `agentchat-worker` itself to a 1.0 agent home:
-    - create a real v1 home/workdir/project
-    - move worker docs into that home
-    - use latest `AGENTS.md` / `CLAUDE.md`
-    - create `handoff.md`
+17. Migrate the coordinator itself to a 1.0 agent home under the new name `ac-topleader`:
+    - legacy `agentchat-worker` cannot be implicitly migrated because its compatibility metadata is still `0.x`
+    - the prepared v1 home is `/home/shisui/.agentchat/agents/agent_ac-topleader`
+    - keep docs and `handoff.md` synced there until the operator performs the launcher-based cutover
     - use launcher-based cutover (`agentchat up-v1` / `agent-up-v1`), not raw tmux
     - provide operator-ready down/up commands for the cutover
 18. Fix the tmux-sweep pane-target regression introduced by the session-only metadata optimization:

@@ -403,3 +403,6 @@
   - compatibility links under `docs/` are refreshed only when safe; manual/custom files there are preserved;
   - existing `task`, `runtimeProfile`, and `human` metadata are preserved through reprovision;
   - managed project materialization is not silently overwritten: if the target project path already exists and does not resolve to the same real path, provisioning errors instead of replacing it.
+- Coordinator migration caveat:
+  - `agentchat up-v1 agentchat-worker ...` currently refuses implicit migration because the existing `agentchat-worker` compatibility metadata is still `0.x`;
+  - until a legacy-to-v1 migration path exists, the coordinator should migrate under the new v1 name `ac-topleader` instead of trying to refresh the legacy name in place.
