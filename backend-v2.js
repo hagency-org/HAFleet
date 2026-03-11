@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { promisify } from 'util';
 import { createSupervisorService } from './supervisor/index.js';
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
+import { createTaskGraphStore } from './lib/task-graph.js';
 import {
   buildUpstreamClaudeSubconsciousPaths,
   bootstrapUpstreamClaudeSubconsciousAgent,
@@ -2512,6 +2513,7 @@ const messages = loadJsonSync('messages.json', []);
 const cursors = loadJsonSync('cursors.json', {});
 const servers = loadJsonSync('servers.json', {});
 const agentRuntime = loadJsonSync('agent_runtime.json', {});
+const taskGraphs = loadJsonSync('task_graphs.json', {});
 const localActivitySweepState = loadJsonSync('local_activity_sweep.json', { selectionCursor: 0 });
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
@@ -2801,6 +2803,7 @@ function saveMessages() {
 function saveCursors() { saveJson('cursors.json', cursors); }
 function saveServers() { saveJson('servers.json', servers); }
 function saveAgentRuntime(immediate = false) { saveJson('agent_runtime.json', agentRuntime, { immediate }); }
+function saveTaskGraphs(next = taskGraphStore.dump()) { saveJson('task_graphs.json', next); }
 function saveLocalActivitySweepState() { saveJson('local_activity_sweep.json', localActivitySweepState); }
 
 function ensureAgentRecord(name, defaults = {}) {
@@ -2924,6 +2927,10 @@ const supervisorService = createSupervisorService({
   emitSystemInfo: (summary, full) => emitSystemInfo(summary, full),
   sendMessage: (payload) => dispatchInternalDirectMessage(payload),
   broadcastSSE,
+});
+const taskGraphStore = createTaskGraphStore({
+  initialGraphs: taskGraphs,
+  save: (nextGraphs) => saveTaskGraphs(nextGraphs),
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────
