@@ -393,3 +393,7 @@
   - shared sweep pane snapshots are keyed by tmux-reported `session_name`, so any join against sweep-local metadata must first normalize raw `tmuxTarget` into a derived `sessionKey` by trimming, splitting at the first `:`, and stripping a leading `=`;
   - raw `tmuxTarget` must continue to be used for direct tmux commands, while the normalized `sessionKey` must be used only for sweep-local joins and pane-pid/scope-memory attribution.
   - accepted proof shows this normalization is sufficient to close the false `tmux-missing:auto` / weak scope-memory attribution regression for exact-session targets without adding new tmux shell-outs.
+- Worker self-migration rule:
+  - the `agentchat-worker` 1.0 cutover must use the launcher path (`agentchat up-v1` / `agent-up-v1`), not a raw `tmux new-session` invocation;
+  - raw tmux bypasses control-plane registration, compatibility metadata writeback, backend online mapping refresh, launcher env injection, and the normal v1 startup contract;
+  - direct tmux is acceptable for emergency debugging only, not for the canonical worker cutover.

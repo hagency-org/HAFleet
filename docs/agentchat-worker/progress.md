@@ -2189,3 +2189,7 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - rewritten `docs/projects.md`
 - Added `workdir/handoff.md` with bootstrap order, current lane ownership, and migration status, and copied the supplemental worker reports into `workdir/outputs/handoff/worker-docs/`.
 - This is filesystem/home preparation only. The worker process has not been restarted into the new home yet; operator-triggered down/up is still required for the actual cutover.
+
+## [2026-03-11 16:58] DONE — corrected the worker cutover method: use launcher, not raw tmux
+- Re-checked the actual launcher contracts after preparing the worker v1 home. `agent-up-v1` provisions or reprovisions the v1 home, writes compatibility metadata, preserves the backend/control-plane launch contract, and then delegates to `agent-up`; raw `tmux new-session` does not.
+- Durable correction: the `agentchat-worker` 1.0 cutover should use `agentchat up-v1` (or `agent-up-v1`) with the prepared home root, not a direct tmux launch. The previous raw-tmux suggestion is superseded.
