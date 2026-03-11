@@ -367,6 +367,89 @@ describe('backend runtime API', () => {
     expect(events[0].full).toContain('Target humans: none');
   });
 
+  test('blocked human target snapshot updates after human message delivery and inbox read', async () => {
+    context = await createBackendTestContext('agent-chat-runtime-test-', {
+      env: {
+        AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '0',
+      },
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+        humanop: {
+          name: 'humanop',
+          type: 'human',
+          kind: 'human',
+          online: true,
+          manualDown: false,
+        },
+      },
+      groups: {},
+    });
+
+    const humanMessage = await request(context.app)
+      .post('/api/messages')
+      .send({
+        from: 'humanop',
+        to: 'alpha',
+        type: 'human',
+        source: 'matrix',
+        summary: 'Need status',
+        full: 'Need status',
+      });
+    expect(humanMessage.status).toBe(200);
+
+    await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: true,
+      reason: 'update-required',
+      tail: 'update available: run agent-update',
+      command: 'codex',
+    });
+    await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: true,
+      reason: 'update-required',
+      tail: 'update available: run agent-update',
+      command: 'codex',
+    });
+
+    let events = readSystemInfoEvents(context.runtimeDir);
+    expect(events).toHaveLength(1);
+    expect(events[0].full).toContain('Pending human messages: yes');
+    expect(events[0].full).toContain('Target humans: humanop');
+
+    const inboxRead = await request(context.app).get('/api/inbox/alpha');
+    expect(inboxRead.status).toBe(200);
+
+    await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: false,
+      reason: null,
+      tail: '',
+      command: 'codex',
+    });
+    await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: true,
+      reason: 'update-required',
+      tail: 'update available: run agent-update',
+      command: 'codex',
+    });
+    await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: true,
+      reason: 'update-required',
+      tail: 'update available: run agent-update',
+      command: 'codex',
+    });
+
+    events = readSystemInfoEvents(context.runtimeDir);
+    expect(events).toHaveLength(3);
+    expect(events[2].full).toContain('Pending human messages: no');
+    expect(events[2].full).toContain('Target humans: none');
+  });
+
   test('stale remote heartbeat emits a system info disconnect alert and marks agents offline', async () => {
     const staleHeartbeatAt = Date.now() - 120_000;
     context = await createBackendTestContext('agent-chat-runtime-test-', {

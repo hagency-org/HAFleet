@@ -2526,6 +2526,7 @@ const MESSAGE_ARCHIVE_LOG = dataPath('messages-archive.jsonl');
 const subconsciousEventsByAgent = new Map(); // agent -> event[]
 const unexpectedOfflineAlertAt = new Map(); // key(agent:reason) -> ts
 const compactRuntimeAlertAt = new Map(); // key(agent:marker:mode) -> ts
+const pendingHumanTargetCache = new Map(); // agent -> { hasPendingHuman, targets }
 const swapAlertState = {
   active: false,
   lastPct: 0,
@@ -3123,6 +3124,31 @@ function getUnreadInboxMessages(agentName, options = {}) {
   return { inboxTs, inboxId, unread };
 }
 
+function invalidatePendingHumanTargets(agentNames = null) {
+  if (agentNames === null || agentNames === undefined) {
+    pendingHumanTargetCache.clear();
+    return;
+  }
+  const names = Array.isArray(agentNames) ? agentNames : [agentNames];
+  for (const raw of names) {
+    const name = normalizeAgentName(raw) || (typeof raw === 'string' ? raw.trim() : '');
+    if (!name) continue;
+    pendingHumanTargetCache.delete(name);
+  }
+}
+
+function invalidatePendingHumanTargetsForMessage(msg) {
+  if (!msg || msg.type !== 'human') return;
+  const targets = new Set();
+  const directTarget = normalizeAgentName(msg.to) || (typeof msg.to === 'string' ? msg.to.trim() : '');
+  if (directTarget) targets.add(directTarget);
+  for (const mention of Array.isArray(msg.mentions) ? msg.mentions : []) {
+    const name = normalizeAgentName(mention) || (typeof mention === 'string' ? mention.trim() : '');
+    if (name) targets.add(name);
+  }
+  invalidatePendingHumanTargets([...targets]);
+}
+
 function messageTargetsAgent(msg, agentName) {
   if (!msg || !agentName) return false;
   if (msg.to === agentName) return true;
@@ -3153,6 +3179,7 @@ function dispatchStoredMessage(msg, options = {}) {
   const directTargetKind = options.directTargetKind || null;
   messages.push(msg);
   saveMessages();
+  invalidatePendingHumanTargetsForMessage(msg);
   const compactEvent = buildAgentCompactEvent(msg, senderIsAgent);
   if (compactEvent) {
     broadcastSSE('agent_compact', compactEvent);
@@ -3635,10 +3662,12 @@ function getAgentInboxGateBlock(agentName) {
 }
 
 function collectBlockedHumanTargets(agentName) {
+  const cached = pendingHumanTargetCache.get(agentName);
+  if (cached) return cached;
+
   const unreadHuman = getUnreadInboxMessages(agentName).unread
     .filter(m => m.type === 'human' && m.from && m.from !== agentName);
   const selected = new Map();
-  const unreadIds = new Set(unreadHuman.map(m => m.id));
 
   for (const msg of unreadHuman) {
     const prev = selected.get(msg.from);
@@ -3647,21 +3676,21 @@ function collectBlockedHumanTargets(agentName) {
     }
   }
 
-  const targets = [...selected.values()]
-    .sort(compareMsgOrder)
-    .map(msg => ({
-      human: msg.from,
-      roomId: (typeof msg.sourceRoom === 'string' && msg.sourceRoom.trim()) ? msg.sourceRoom.trim() : null,
-      group: msg.group || null,
-      messageId: msg.id,
-      pending: unreadIds.has(msg.id),
-      ts: msg.ts,
-    }));
-
-  return {
+  const snapshot = {
     hasPendingHuman: unreadHuman.length > 0,
-    targets,
+    targets: [...selected.values()]
+      .sort(compareMsgOrder)
+      .map(msg => ({
+        human: msg.from,
+        roomId: (typeof msg.sourceRoom === 'string' && msg.sourceRoom.trim()) ? msg.sourceRoom.trim() : null,
+        group: msg.group || null,
+        messageId: msg.id,
+        pending: true,
+        ts: msg.ts,
+      })),
   };
+  pendingHumanTargetCache.set(agentName, snapshot);
+  return snapshot;
 }
 
 function applyAgentBlockedState(agentName, payload = {}) {
@@ -7297,6 +7326,7 @@ app.post('/api/messages/:id/suppress', (req, res) => {
   if (!msg.suppressedRecipients.includes(agentName)) {
     msg.suppressedRecipients.push(agentName);
     saveMessages();
+    invalidatePendingHumanTargets(agentName);
   }
   const after = getUnreadInboxMessages(agentName).unread.some(m => m.id === msg.id);
 
@@ -7447,6 +7477,7 @@ app.get('/api/inbox/:agent', (req, res) => {
   );
   if (!kinds && advanceInboxCursor(cursor, unread)) {
     saveCursors();
+    invalidatePendingHumanTargets(agentName);
   }
   if (!kinds) {
     markAgentInboxChecked(agentName, {
