@@ -24,6 +24,7 @@ export async function createBackendTestContext(prefix, seed = {}) {
   process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
   process.env.SUPERVISOR_ENABLED = 'false';
   process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
+  process.env.AGENT_JSON_WRITE_BATCH_MS = '0';
 
   const backendUrl = pathToFileURL(path.resolve('backend-v2.js')).href;
   const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;

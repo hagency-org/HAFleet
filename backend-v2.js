@@ -79,6 +79,10 @@ const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHM
 const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
 const MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT = (process.env.MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT || '30mb').trim() || '30mb';
 const MESSAGE_RETENTION_LIMIT = Math.max(100, Number.parseInt(process.env.AGENT_MESSAGE_RETENTION_LIMIT || '5000', 10) || 5000);
+const JSON_WRITE_BATCH_WINDOW_MS_RAW = Number.parseInt(process.env.AGENT_JSON_WRITE_BATCH_MS || '1000', 10);
+const JSON_WRITE_BATCH_WINDOW_MS = Number.isFinite(JSON_WRITE_BATCH_WINDOW_MS_RAW)
+  ? Math.max(0, JSON_WRITE_BATCH_WINDOW_MS_RAW)
+  : 1000;
 const UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS = Number.parseInt(process.env.UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS || '120000', 10);
 const AGENT_TMUX_MISSING_ALERT_GRACE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_GRACE_MS || '15000', 10);
 const AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS || '900000', 10);
@@ -172,7 +176,7 @@ function loadJsonSync(name, fallback) {
   }
 }
 
-function saveJson(name, data) {
+function writeJsonAtomic(name, data) {
   const target = dataPath(name);
   const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
   try {
@@ -185,6 +189,46 @@ function saveJson(name, data) {
     const msg = e?.message || 'unknown error';
     console.error(`Failed to save JSON ${target}: [${code}] ${msg}`);
     return false;
+  }
+}
+
+const JSON_BATCHED_FILES = new Set(['agents.json', 'agent_runtime.json']);
+const pendingJsonWrites = new Map(); // name -> { data, timer }
+
+function flushPendingJsonWrite(name) {
+  const entry = pendingJsonWrites.get(name);
+  if (!entry) return true;
+  if (entry.timer) clearTimeout(entry.timer);
+  pendingJsonWrites.delete(name);
+  return writeJsonAtomic(name, entry.data);
+}
+
+function scheduleJsonWrite(name, data) {
+  const existing = pendingJsonWrites.get(name);
+  if (existing?.timer) clearTimeout(existing.timer);
+  const entry = { data, timer: null };
+  entry.timer = setTimeout(() => {
+    flushPendingJsonWrite(name);
+  }, JSON_WRITE_BATCH_WINDOW_MS);
+  if (typeof entry.timer?.unref === 'function') entry.timer.unref();
+  pendingJsonWrites.set(name, entry);
+  return true;
+}
+
+function saveJson(name, data, options = {}) {
+  if (options?.immediate === true) {
+    flushPendingJsonWrite(name);
+    return writeJsonAtomic(name, data);
+  }
+  if (!JSON_BATCHED_FILES.has(name) || JSON_WRITE_BATCH_WINDOW_MS <= 0) {
+    return writeJsonAtomic(name, data);
+  }
+  return scheduleJsonWrite(name, data);
+}
+
+function flushAllPendingJsonWrites() {
+  for (const name of [...pendingJsonWrites.keys()]) {
+    flushPendingJsonWrite(name);
   }
 }
 
@@ -2709,7 +2753,7 @@ function nextMsgId() {
   return `msg_${String(msgCounter).padStart(4, '0')}`;
 }
 
-function saveAgents() { saveJson('agents.json', agents); }
+function saveAgents(immediate = false) { saveJson('agents.json', agents, { immediate }); }
 function saveGroups() { saveJson('groups.json', groups); }
 function collectUnreadRetainedMessageIds() {
   const keep = new Set();
@@ -2754,7 +2798,7 @@ function saveMessages() {
 }
 function saveCursors() { saveJson('cursors.json', cursors); }
 function saveServers() { saveJson('servers.json', servers); }
-function saveAgentRuntime() { saveJson('agent_runtime.json', agentRuntime); }
+function saveAgentRuntime(immediate = false) { saveJson('agent_runtime.json', agentRuntime, { immediate }); }
 function saveLocalActivitySweepState() { saveJson('local_activity_sweep.json', localActivitySweepState); }
 
 function ensureAgentRecord(name, defaults = {}) {
@@ -7450,12 +7494,13 @@ function shutdown() {
     sweepAgentScopePressure(),
   ]).finally(() => {
     sweepAgentRules();
-    saveAgents();
+    flushAllPendingJsonWrites();
+    saveAgents(true);
     saveGroups();
     saveMessages();
     saveCursors();
     saveServers();
-    saveAgentRuntime();
+    saveAgentRuntime(true);
     process.exit(0);
   });
 }
