@@ -28,6 +28,7 @@ Coordinate the next clean execution phase after the live incident wave. Acceptan
     - move worker docs into that home
     - use latest `AGENTS.md` / `CLAUDE.md`
     - create `handoff.md`
+    - use launcher-based cutover (`agentchat up-v1` / `agent-up-v1`), not raw tmux
     - provide operator-ready down/up commands for the cutover
 17. Fix the tmux-sweep pane-target regression introduced by the session-only metadata optimization:
     - preserve exact `tmuxTarget` truth

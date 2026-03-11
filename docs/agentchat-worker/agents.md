@@ -397,3 +397,9 @@
   - the `agentchat-worker` 1.0 cutover must use the launcher path (`agentchat up-v1` / `agent-up-v1`), not a raw `tmux new-session` invocation;
   - raw tmux bypasses control-plane registration, compatibility metadata writeback, backend online mapping refresh, launcher env injection, and the normal v1 startup contract;
   - direct tmux is acceptable for emergency debugging only, not for the canonical worker cutover.
+- `agent-up-v1` existing-home behavior:
+  - reprovision is preserve-aware, not blind overwrite;
+  - root `CLAUDE.md` / `AGENTS.md` are only rewritten when they are recognized managed/generated files or legacy stubs; manual/custom content is preserved as `preserved-manual`;
+  - compatibility links under `docs/` are refreshed only when safe; manual/custom files there are preserved;
+  - existing `task`, `runtimeProfile`, and `human` metadata are preserved through reprovision;
+  - managed project materialization is not silently overwritten: if the target project path already exists and does not resolve to the same real path, provisioning errors instead of replacing it.

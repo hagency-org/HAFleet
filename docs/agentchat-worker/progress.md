@@ -2193,3 +2193,15 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 ## [2026-03-11 16:58] DONE — corrected the worker cutover method: use launcher, not raw tmux
 - Re-checked the actual launcher contracts after preparing the worker v1 home. `agent-up-v1` provisions or reprovisions the v1 home, writes compatibility metadata, preserves the backend/control-plane launch contract, and then delegates to `agent-up`; raw `tmux new-session` does not.
 - Durable correction: the `agentchat-worker` 1.0 cutover should use `agentchat up-v1` (or `agent-up-v1`) with the prepared home root, not a direct tmux launch. The previous raw-tmux suggestion is superseded.
+
+## [2026-03-11 17:03] DONE — accepted field-convergence design and clarified `agent-up-v1` overwrite semantics
+- Accepted the field-convergence design lane for agent text surfaces:
+  - remove `Project Scope`
+  - remove `Human Notes`
+  - relabel `Manual Guidance` -> canonical `Guidance`
+  - keep `Owner` first-class
+  - keep `Identity` one-line and external-facing
+- Re-checked `agent-up-v1` / `provision-v1-agent-home` behavior for existing homes before the worker cutover:
+  - reprovision preserves manual/custom root `CLAUDE.md` / `AGENTS.md` unless they are recognized managed/generated files or legacy stubs
+  - reprovision preserves current `task`, `runtimeProfile`, and `human` metadata
+  - managed project targets are not silently replaced; if an existing target differs, provisioning fails instead of overwriting it
