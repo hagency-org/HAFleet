@@ -2145,3 +2145,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Accepted `agentchat-develop`'s formal proof handoff for the minimal tmux join-key fix. The six required cases are now covered: exact-session joins, plain joins, missing-target truth, no false `tmux-missing:auto`, restored pane-pid-backed scope-memory attribution, and no added tmux shell-outs.
 - This closes the fresh regression introduced by the session-only metadata optimization without reopening the earlier local-activity sweep hardening work.
 - Replied with `msg_78194` and resumed the next parked active implementation lane: `v1 manifest/backend sync divergence` slice-2. The Agent Detail task/Internals UI lane remains parked behind it.
+
+## [2026-03-11 16:01] DONE — revalidated that Yato is not a reliable executor and kept the UI lane reassigned
+- Checked `Yato` directly for the reminder-driven executor-health pass. `tmux has-session -t Yato` now fails, and the dev control-plane no longer returns a `Yato` row from `GET /api/agents/status`.
+- This is no longer just an interactive-prompt blockage; the executor is currently absent from both tmux and the dev backend object set.
+- The existing decision remains correct: keep the Agent Detail task/Internals UI lane reassigned away from `Yato` and do not let UI work drift back onto it until a future recovery explicitly re-establishes `Yato` as a schedulable executor.

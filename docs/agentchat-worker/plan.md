@@ -37,5 +37,5 @@ Coordinate the next clean execution phase after the live incident wave. Acceptan
 
 ## Blocked (optional)
 1. Make Agent Detail expose canonical task editing/visibility and show AGENTS.md / plan.md / progress.md tails under Internals; this lane is now assigned to agentchat-develop because Yato is currently blocked at an interactive prompt.
-2. `Yato` is not a reliable executor; keep the UI lane parked or reassigned until a trustworthy UI executor exists.
+2. `Yato` is currently absent from both tmux and the dev backend object set; keep the UI lane parked or reassigned until a trustworthy UI executor exists.
 3. `agentchat-develop` tmux has been restored into a v1 dev home, but MCP is still missing; treat it as partially recovered until it consumes inbox and resumes formal handoffs.
