@@ -1,29 +1,63 @@
 <!-- agentchat-workspace-agents-template: v1 -->
+# {{AGENT_NAME}} Workspace
+
+Template-Version: v1
+Generated-For: v1 agent home workspace
+
 ## Role
 - I am `{{AGENT_NAME}}` and I own work inside this v1 agent home workdir.
 
 ## Bootstrap
-- Treat root `CLAUDE.md` and root `AGENTS.md` as the workspace entry files for this home.
-- Then read `docs/plan.md`.
-- Then tail `docs/progress.md`.
-- Use `docs/projects.md` when project ownership or workspace contents matter.
-- Use `./task-writer` when you need to mutate canonical task state for this workspace.
+- Treat root `CLAUDE.md` and root `AGENTS.md` as equivalent workspace entry files for this home.
+- Start with the root entry file your framework reads, then use the sibling root entry file only as compatibility context when needed.
+- Read `docs/agent-knowledge.md`.
+- Then read `docs/plan.md`, then tail `docs/progress.md`.
+- Check `docs/projects.md` to know which project you own and where its code lives.
+- Use `./task-writer` to write canonical task state for this workspace; do not treat docs text as the task truth source.
 
-## Boundaries
-- Keep system-owned runtime state under `../state/`.
-- Keep support/history docs under `docs/`:
-  - `plan.md`
-  - `progress.md`
-  - `projects.md`
-- Keep agent-managed project material under `projects/`.
-- Use `scratch/` for throwaway local work.
-- Use `inbox/` for staged human/operator inputs or artifacts to process.
-- Use `outputs/` for deliverables, reports, and handoff artifacts.
-- Treat `data/` as runtime-created tool/cache support data, not the primary source of truth.
-- Treat `../supervisor/` as a supervisor-local sibling workspace, not as a second task/runtime-profile source.
+## Where to work
+
+Your CWD is `workdir/`. This is your coordination root, not a codebase.
+
+**Code edits** go in the managed project under `projects/<name>/`. That directory is either a copy or a symlink of a source repo. Know which:
+- **copy**: you own this tree. Edit, commit, and test here. Changes do not propagate to the source repo.
+- **symlink**: edits here ARE edits to the source repo. Be aware of that when committing.
+
+If the operator asks you to edit the source repo directly (outside your home), do so — but never confuse your `projects/` copy with the source. Run `readlink projects/<name>` or check `docs/projects.md` to know which model applies.
+
+**Do not** create long-lived code, scripts, or project files in the workspace root or `docs/`. Those are coordination surfaces, not code trees.
+
+Task state lives in the shared control-plane object, not in `docs/plan.md` alone. Use the provisioned `./task-writer` wrapper when you need to:
+- start a new batch: `./task-writer start --id <task-id>`
+- heartbeat a live batch: `./task-writer heartbeat`
+- declare safe waiting: `./task-writer wait --reason "<reason>" --until <ISO-8601>`
+- resume active work on the same task: `./task-writer resume`
+- mark the current batch done: `./task-writer done`
+
+The supervisor-local sibling workspace lives at `../supervisor/`. It keeps supervisor-local plan/progress state only; it must not become a second task or runtime-profile truth source.
+
+## Directory contract
+
+| Path | Purpose | Agent writes? |
+|------|---------|--------------|
+| `projects/` | Managed project trees (code, tests, git) | Yes — primary work area |
+| `docs/` | `plan.md`, `progress.md`, `projects.md`, `agent-knowledge.md` | Yes — coordination only |
+| `data/` | Runtime tool caches (e.g. mcp-media-cache) | Managed by tools, not by agent |
+| `.claude/` | Claude settings, subconscious hook config | Managed by system; read for debugging |
+| `../state/` | Runtime state: subconscious events, locks, resume-id, letta | System-owned — do not edit |
+| `../supervisor/` | Supervisor-local sibling workspace | Read as needed; do not treat it as canonical task state |
+| Root `AGENTS.md` | Framework entry file equivalent to `CLAUDE.md` | No — system-provisioned |
+| Root `CLAUDE.md` | Framework entry file equivalent to `AGENTS.md` | No — system-provisioned |
+
+## Working rules
+- Record durable knowledge in `docs/agent-knowledge.md`.
+- Record task progress in `docs/progress.md`.
+- Verify changes from the path you actually edited, not from a different copy of the same file.
+- Root-cause first. Do not hide failures with local placeholders or silent fallbacks.
+- Keep changes minimal and scoped to the active task.
 
 ## Home Contract
 - Agent Name: `{{AGENT_NAME}}`
 - Agent Id: `{{AGENT_ID}}`
 - Layout Version: `{{LAYOUT_VERSION}}`
-- `docs/AGENTS.md` is compatibility-only and should mirror/link back to this root `AGENTS.md`.
+- Docs model: flat v1 — `workdir/docs/`, not `docs/{agent}/`.
