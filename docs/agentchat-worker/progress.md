@@ -2093,3 +2093,7 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 ## [2026-03-11 03:42] DONE — verified the audit lane is behaving correctly in periodic follow-up mode
 - Re-checked `agentchat-aduit` after the periodic-follow-up reminder. Its local docs still reflect the correct parked current state, the residual-runtime hygiene findings remain intact, and its tmux lane shows it is obeying the inbox-first rule.
 - No new structural findings appeared in this reminder window, and there is no sign of noise generation or scope drift. The lane remains healthy and parked until either the next scheduled follow-up or a new concrete structural finding.
+## [2026-03-11 05:13] DONE — accepted recurring supervisor-tmuxlaunchfailed residue and opened a narrow live web incident lane
+- Accepted `agentchat-aduit`'s follow-up result that `supervisor-tmuxlaunchfailed` is recurring residue, not merely stale leftover state; this strengthens its classification as a framework-fix hygiene issue rather than one-off proof debris.
+- Opened a new incident lane for kamico's live `web怎么挂了` report without doing worker-side investigation/coding. Routed exact-status/root-cause narrowing to `agentchat-develop`, routed a frontend-only symptom check to `Yato` if executable, and kept `v1 sync slice-2` explicitly parked rather than silently dropped.
+- This preserves the delegated execution model while making the live web report the current top-priority coordination item.

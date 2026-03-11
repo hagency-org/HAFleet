@@ -9,6 +9,7 @@
 - Use agent-chat MCP to coordinate and report progress.
 - Current operator instruction sets worker into chief-coordinator mode: delegate investigation/coding/execution to `agentchat-develop`, `agentchat-aduit`, and `Yato` wherever possible; worker should primarily own architecture, triage, planning, reminders, acceptance, and durable documentation.
 - Runtime/probe residue is now a standing audit concern: orphan tmux sessions, stale `supervisor-*probe*` sessions, half-started agents, and other leftover runtime artifacts must be treated as first-class system-hygiene findings rather than ignored test debris.
+- `supervisor-tmuxlaunchfailed` is now confirmed as recurring residue, not just lingering stale state; treat this residue class as a framework-fix issue when triaging runtime hygiene.
 
 ## Boundaries
 ### Must do
