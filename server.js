@@ -34,6 +34,7 @@ const IDLE_THRESHOLD = Number.isFinite(envIdleThreshold) && envIdleThreshold > 0
   : DEFAULT_IDLE_THRESHOLD_MS;
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.ceil(IDLE_THRESHOLD / 1000));
 const execFileAsync = promisify(execFile);
+let execFileAsyncImpl = execFileAsync;
 mkdirSync(DATA_ROOT, { recursive: true });
 mkdirSync(LOGS_ROOT, { recursive: true });
 mkdirSync(path.join(DATA_ROOT, 'agents'), { recursive: true });
@@ -2356,7 +2357,7 @@ import { createHash } from 'crypto';
 
 async function snapshotPaneAsync(target) {
   try {
-    const { stdout } = await execFileAsync(
+    const { stdout } = await execFileAsyncImpl(
       'tmux', ['capture-pane', '-t', target, '-p'],
       { encoding: 'utf-8', timeout: 3000 }
     );
@@ -2390,11 +2391,11 @@ function getPaneIdleMs(target) {
 
 // Continuously track ALL panes every 2s (independent of queue)
 let paneSnapshotSweepRunning = false;
-setInterval(async () => {
+async function sweepPaneSnapshots() {
   if (paneSnapshotSweepRunning) return;
   paneSnapshotSweepRunning = true;
   try {
-    const { stdout } = await execFileAsync(
+    const { stdout } = await execFileAsyncImpl(
       'tmux', ['list-panes', '-a', '-F', '#{session_name}:#{window_index}.#{pane_index}'],
       { encoding: 'utf-8', timeout: 5000 }
     );
@@ -2410,6 +2411,10 @@ setInterval(async () => {
   } finally {
     paneSnapshotSweepRunning = false;
   }
+}
+
+setInterval(async () => {
+  await sweepPaneSnapshots();
 }, 2000);
 
 // ── Target redirects (e.g. renamed sessions) ────────────────────────
@@ -2468,14 +2473,14 @@ async function deliverMessage(entry) {
       finalPayload += '\n[REDIRECT NOTICE] This message was originally addressed to "' + entry.redirectedFrom + '" which has been renamed to "' + entry.to + '". Please update your target for future messages.';
     }
     try {
-      await execFileAsync('tmux', ['send-keys', '-l', '-t', entry.to, finalPayload], { timeout: 5000, stdio: 'pipe' });
+      await execFileAsyncImpl('tmux', ['send-keys', '-l', '-t', entry.to, finalPayload], { timeout: 5000, stdio: 'pipe' });
     } catch (e) {
       console.error(`Failed to deliver to ${entry.to} (payload step): ${formatExecError(e)}`);
       return false;
     }
     await new Promise((resolve) => setTimeout(resolve, 150));
     try {
-      await execFileAsync('tmux', ['send-keys', '-t', entry.to, 'C-m'], { timeout: 5000, stdio: 'pipe' });
+      await execFileAsyncImpl('tmux', ['send-keys', '-t', entry.to, 'C-m'], { timeout: 5000, stdio: 'pipe' });
     } catch (e) {
       console.error(`Failed to deliver to ${entry.to} (enter step): ${formatExecError(e)}`);
       return false;
@@ -2798,9 +2803,46 @@ app.get('/agents/:name/audit', (req, res) => {
   res.redirect(302, target);
 });
 
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`agent-viz running on http://127.0.0.1:${PORT}`);
-});
+let serverInstance = null;
+function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
+  if (serverInstance) return serverInstance;
+  serverInstance = app.listen(port, host, () => {
+    console.log(`agent-viz running on http://${host}:${port}`);
+  });
+  return serverInstance;
+}
+
+function stopServer() {
+  if (!serverInstance) return;
+  const active = serverInstance;
+  serverInstance = null;
+  active.close();
+}
+
+function setServerTestHooks({ execFileAsync: overrideExecFileAsync } = {}) {
+  execFileAsyncImpl = typeof overrideExecFileAsync === 'function' ? overrideExecFileAsync : execFileAsync;
+}
+
+function resetServerTestHooks() {
+  execFileAsyncImpl = execFileAsync;
+}
+
+export {
+  app,
+  deliverMessage,
+  getPaneIdleMs,
+  resetServerTestHooks,
+  setServerTestHooks,
+  snapshotPaneAsync,
+  startServer,
+  stopServer,
+  sweepPaneSnapshots,
+  updatePaneSnapshot,
+};
+
+if (process.argv[1] === __filename) {
+  startServer();
+}
 
 function renderAgentDetailPage(agentName) {
   const safeName = String(agentName).replace(/[&<>"]/g, (ch) => (
