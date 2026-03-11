@@ -677,9 +677,8 @@ function main() {
     task: existing?.task || null,
     runtimeProfile: existing?.runtimeProfile || null,
     human: {
+      ...((existing?.human && typeof existing.human === 'object') ? existing.human : {}),
       owner: existing?.human?.owner ?? null,
-      notes: existing?.human?.notes ?? '',
-      projectScope: existing?.human?.projectScope ?? '',
     },
     createdAt: existing?.createdAt || now,
     updatedAt: now,

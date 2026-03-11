@@ -363,12 +363,32 @@ function normalizeManagedProjects(value) {
   return out;
 }
 
-function normalizeHumanMeta(value) {
+function normalizeHumanMeta(value, options = {}) {
   const raw = (value && typeof value === 'object') ? value : {};
-  return {
+  const preserveLegacy = options && options.preserveLegacy === true;
+  const out = {
     owner: normalizeOptionalText(raw.owner, 256),
-    notes: normalizeOptionalText(raw.notes, 8000) || '',
-    projectScope: normalizeOptionalText(raw.projectScope, 4000) || '',
+  };
+  if (preserveLegacy) {
+    if (Object.prototype.hasOwnProperty.call(raw, 'notes')) {
+      out.notes = normalizeOptionalText(raw.notes, 8000) || '';
+    }
+    if (Object.prototype.hasOwnProperty.call(raw, 'projectScope')) {
+      out.projectScope = normalizeOptionalText(raw.projectScope, 4000) || '';
+    }
+  }
+  return out;
+}
+
+function mergeHumanMeta(existingValue, nextValue) {
+  const existing = normalizeHumanMeta(existingValue, { preserveLegacy: true });
+  if (nextValue === undefined) return existing;
+  const raw = (nextValue && typeof nextValue === 'object') ? nextValue : {};
+  const out = {
+    ...existing,
+    owner: Object.prototype.hasOwnProperty.call(raw, 'owner')
+      ? normalizeOptionalText(raw.owner, 256)
+      : existing.owner,
   };
 }
 
@@ -1336,14 +1356,14 @@ function buildSubconsciousAuthoritySummary({ enabled, upstream, lettaAgentId }) 
   };
 }
 
-function buildSubconsciousFallbackSummary(manualGuidance) {
-  const configured = typeof manualGuidance === 'string' && manualGuidance.trim().length > 0;
+function buildSubconsciousFallbackSummary(guidanceText) {
+  const configured = typeof guidanceText === 'string' && guidanceText.trim().length > 0;
   return {
     classification: 'fallback',
     status: configured ? 'configured' : 'none',
     configured,
     source: configured ? 'manual-state-file' : 'none',
-    note: 'Manual guidance is fallback configuration only; it is not the authoritative subconscious behavior path.',
+    note: 'Guidance is fallback configuration only; it is not the authoritative subconscious behavior path.',
   };
 }
 
@@ -1704,7 +1724,7 @@ function resolveSubconsciousState(agentName) {
   const invocationConfigured = disabledReason === null;
   const generatedGuidance = (letta?.lastRuntimeGuidance && typeof letta.lastRuntimeGuidance === 'object') ? letta.lastRuntimeGuidance : null;
   const lastInvocation = (letta?.lastInvocation && typeof letta.lastInvocation === 'object') ? letta.lastInvocation : null;
-  const manualGuidance = normalizeOptionalText(letta?.guidance, 6000) || '';
+  const guidanceText = normalizeOptionalText(letta?.guidance, 6000) || '';
   const memoryState = resolveSubconsciousMemoryState(agentName, stateDir, runtimeMeta);
   const conversationState = resolveSubconsciousConversationState(agentName, stateDir, runtimeMeta);
   const memoryStore = memoryState.store || defaultSubconsciousMemoryStore(agentName);
@@ -1814,7 +1834,7 @@ function resolveSubconsciousState(agentName) {
     upstream,
     lettaAgentId: providerContract.lettaAgentId,
   });
-  const fallback = buildSubconsciousFallbackSummary(manualGuidance);
+  const fallback = buildSubconsciousFallbackSummary(guidanceText);
   const transitional = buildSubconsciousTransitionalSummary(runtimeContract, memoryInfo, conversationContract);
   const missingBackendPieces = [];
   if (!invocationConfigured) {
@@ -1896,13 +1916,13 @@ function resolveSubconsciousState(agentName) {
       enabled: agent.subconsciousEnabled === true,
       authority,
       fallback,
-      manualGuidance: {
+      guidance: {
         classification: 'fallback',
-        configured: manualGuidance.length > 0,
-        source: manualGuidance ? 'manual-state-file' : 'none',
+        configured: guidanceText.length > 0,
+        source: guidanceText ? 'manual-state-file' : 'none',
         role: 'fallback',
-        text: manualGuidance,
-        preview: manualGuidance.length > 240 ? `${manualGuidance.slice(0, 240)}...` : manualGuidance,
+        text: guidanceText,
+        preview: guidanceText.length > 240 ? `${guidanceText.slice(0, 240)}...` : guidanceText,
         updatedAt: normalizeOptionalText(letta?.updatedAt, 128),
       },
       runtime: runtimeContract,
@@ -1938,6 +1958,8 @@ function resolveSubconsciousState(agentName) {
       disabledReason,
     },
   };
+  out.contract.manualGuidance = { ...out.contract.guidance };
+  return out;
 }
 
 function buildSubconsciousInvokePrompt(agentName, payload, state, recentEvents, retrievedMemories = null) {
@@ -1973,7 +1995,7 @@ function buildSubconsciousInvokePrompt(agentName, payload, state, recentEvents, 
     `Hook: ${payload.hook || payload.hookEventName || 'Unknown'}`,
     `Prompt preview: ${payload.promptPreview || '-'}`,
     `Tool: ${payload.toolName || '-'}`,
-    `Manual guidance: ${state.contract.manualGuidance.text || '-'}`,
+    `Guidance: ${(state.contract.guidance?.text || state.contract.manualGuidance?.text || '-')}`,
     `Conversation session: ${conversation?.sessionId || payload?.sessionId || '-'}`,
     `Conversation transcript: ${conversation?.transcriptPath || payload?.transcriptPath || '-'}`,
     `Conversation turn counts: user=${conversation?.userTurnCount ?? 0} assistant=${conversation?.assistantTurnCount ?? 0}`,
@@ -2382,9 +2404,14 @@ function buildOperationalSubconsciousContract(contract) {
     };
   }
 
+  if (safe.guidance && typeof safe.guidance === 'object') {
+    delete safe.guidance.text;
+    delete safe.guidance.preview;
+  }
   if (safe.manualGuidance && typeof safe.manualGuidance === 'object') {
     delete safe.manualGuidance.text;
     delete safe.manualGuidance.preview;
+    if (!safe.guidance) safe.guidance = { ...safe.manualGuidance };
   }
 
   if (Object.prototype.hasOwnProperty.call(safe, 'lastRuntimeGuidance')) delete safe.lastRuntimeGuidance;
@@ -2481,7 +2508,7 @@ for (const agent of Object.values(agents)) {
     ? true
     : (agent.subconsciousEnabled === false ? false : null);
   agent.managedProjects = normalizeManagedProjects(agent.managedProjects);
-  agent.human = normalizeHumanMeta(agent.human);
+  agent.human = normalizeHumanMeta(agent.human, { preserveLegacy: true });
   agent.task = normalizeAgentTask(agent.task, agent.name);
   agent.runtimeProfile = normalizeRuntimeProfile(agent.runtimeProfile);
   agent.kind = inferRecordKind(agent);
@@ -2683,7 +2710,7 @@ function ensureAgentRecord(name, defaults = {}) {
       ? true
       : (defaults.subconsciousEnabled === false ? false : null),
     managedProjects: normalizeManagedProjects(defaults.managedProjects),
-    human: normalizeHumanMeta(defaults.human),
+    human: normalizeHumanMeta(defaults.human, { preserveLegacy: true }),
     task: normalizeAgentTask(defaults.task, agentName),
     runtimeProfile: normalizeRuntimeProfile(defaults.runtimeProfile),
     kind,
@@ -5057,9 +5084,7 @@ app.post('/api/agents', (req, res) => {
     managedProjects: Array.isArray(managedProjects)
       ? normalizeManagedProjects(managedProjects)
       : normalizeManagedProjects(existing.managedProjects),
-    human: human !== undefined
-      ? normalizeHumanMeta(human)
-      : normalizeHumanMeta(existing.human),
+    human: mergeHumanMeta(existing.human, human),
     task: task !== undefined
       ? normalizeAgentTask(task, agentName)
       : normalizeAgentTask(existing.task, agentName),
@@ -5161,7 +5186,7 @@ app.patch('/api/agents/:name', (req, res) => {
     agent.managedProjects = normalizeManagedProjects(managedProjects);
   }
   if (human !== undefined) {
-    agent.human = normalizeHumanMeta(human);
+    agent.human = mergeHumanMeta(agent.human, human);
   }
   if (task !== undefined) {
     agent.task = normalizeAgentTask(task, agentName);
@@ -6099,7 +6124,7 @@ app.post('/api/subconscious/runtime/invoke/:name', async (req, res) => {
       ok: true,
       invoked: false,
       guidance: null,
-      guidanceSource: state.contract.manualGuidance.configured ? 'manual-state-file' : 'none',
+      guidanceSource: (state.contract.guidance?.configured === true || state.contract.manualGuidance?.configured === true) ? 'manual-state-file' : 'none',
       disabledReason: state.runtimeConfig.disabledReason,
       provider: state.runtimeConfig.provider,
       model: state.runtimeConfig.model,
@@ -6112,7 +6137,7 @@ app.post('/api/subconscious/runtime/invoke/:name', async (req, res) => {
       ok: true,
       invoked: false,
       guidance: null,
-      guidanceSource: state.contract.manualGuidance.configured ? 'manual-state-file' : 'none',
+      guidanceSource: (state.contract.guidance?.configured === true || state.contract.manualGuidance?.configured === true) ? 'manual-state-file' : 'none',
       disabledReason: `hook ${hook} is not eligible for runtime guidance`,
       provider: state.runtimeConfig.provider,
       model: state.runtimeConfig.model,
