@@ -78,6 +78,7 @@ const OFFLINE_CATCHUP_LIST_LIMIT = Number.parseInt(process.env.OFFLINE_CATCHUP_L
 const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_ITEMS || '8', 10);
 const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
 const MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT = (process.env.MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT || '30mb').trim() || '30mb';
+const MESSAGE_RETENTION_LIMIT = Math.max(100, Number.parseInt(process.env.AGENT_MESSAGE_RETENTION_LIMIT || '5000', 10) || 5000);
 const UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS = Number.parseInt(process.env.UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS || '120000', 10);
 const AGENT_TMUX_MISSING_ALERT_GRACE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_GRACE_MS || '15000', 10);
 const AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS || '900000', 10);
@@ -2478,6 +2479,7 @@ let localSwapSweepRunning = false;
 let agentScopeSweepRunning = false;
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
+const MESSAGE_ARCHIVE_LOG = dataPath('messages-archive.jsonl');
 const subconsciousEventsByAgent = new Map(); // agent -> event[]
 const unexpectedOfflineAlertAt = new Map(); // key(agent:reason) -> ts
 const compactRuntimeAlertAt = new Map(); // key(agent:marker:mode) -> ts
@@ -2709,7 +2711,47 @@ function nextMsgId() {
 
 function saveAgents() { saveJson('agents.json', agents); }
 function saveGroups() { saveJson('groups.json', groups); }
-function saveMessages() { saveJson('messages.json', messages); }
+function collectUnreadRetainedMessageIds() {
+  const keep = new Set();
+  for (const [agentName, agent] of Object.entries(agents)) {
+    if (!isAgentRecord(agent) || agent.kind === 'human') continue;
+    for (const msg of getUnreadInboxMessages(agentName).unread) {
+      if (typeof msg?.id === 'string' && msg.id) keep.add(msg.id);
+    }
+  }
+  return keep;
+}
+
+function pruneMessagesInMemory() {
+  if (!Array.isArray(messages) || messages.length <= MESSAGE_RETENTION_LIMIT) {
+    return { pruned: 0, archived: 0 };
+  }
+  const retainFrom = Math.max(0, messages.length - MESSAGE_RETENTION_LIMIT);
+  const unreadKeepIds = collectUnreadRetainedMessageIds();
+  const retained = [];
+  const pruned = [];
+
+  for (let i = 0; i < messages.length; i += 1) {
+    const msg = messages[i];
+    const keep = i >= retainFrom || (typeof msg?.id === 'string' && unreadKeepIds.has(msg.id));
+    if (keep) retained.push(msg);
+    else pruned.push(msg);
+  }
+
+  if (pruned.length === 0) return { pruned: 0, archived: 0 };
+  try {
+    appendFileSync(MESSAGE_ARCHIVE_LOG, `${pruned.map((msg) => JSON.stringify(msg)).join('\n')}\n`);
+  } catch (e) {
+    console.error(`Failed to archive pruned messages to ${MESSAGE_ARCHIVE_LOG}: ${e?.message || e}`);
+  }
+  messages.splice(0, messages.length, ...retained);
+  return { pruned: pruned.length, archived: pruned.length };
+}
+
+function saveMessages() {
+  pruneMessagesInMemory();
+  saveJson('messages.json', messages);
+}
 function saveCursors() { saveJson('cursors.json', cursors); }
 function saveServers() { saveJson('servers.json', servers); }
 function saveAgentRuntime() { saveJson('agent_runtime.json', agentRuntime); }

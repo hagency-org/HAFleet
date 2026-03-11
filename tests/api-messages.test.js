@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import request from 'supertest';
+import { existsSync, readFileSync } from 'fs';
+import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
 describe('backend message API', () => {
@@ -201,5 +203,67 @@ describe('backend message API', () => {
     const secondUnfilteredResponse = await request(context.app).get('/api/inbox/alpha');
     expect(secondUnfilteredResponse.status).toBe(200);
     expect(secondUnfilteredResponse.body.dm).toHaveLength(0);
+  });
+
+  test('message persistence prunes acknowledged history and archives the dropped prefix', async () => {
+    const largeContext = await createBackendTestContext('agent-chat-messages-prune-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: false,
+          manualDown: true,
+          offlineReason: 'test-offline',
+        },
+      },
+      groups: {},
+      messages: Array.from({ length: 5002 }, (_, index) => ({
+        id: `msg_${String(index + 1).padStart(4, '0')}`,
+        ts: index + 1,
+        from: 'system',
+        to: 'alpha',
+        type: 'inform',
+        summary: `seed ${index + 1}`,
+        full: `seed ${index + 1}`,
+        mentions: [],
+      })),
+      cursors: {
+        alpha: {
+          inbox: 5002,
+          inboxId: 'msg_5002',
+          groups: {},
+          groupIds: {},
+        },
+      },
+      msgCounter: 5002,
+    });
+
+    try {
+      const response = await request(largeContext.app)
+        .post('/api/messages')
+        .send({
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          summary: 'post-prune message',
+          full: 'body',
+        });
+      expect(response.status).toBe(200);
+
+      const messagesPath = path.join(largeContext.runtimeDir, 'data', 'messages.json');
+      const archivedPath = path.join(largeContext.runtimeDir, 'data', 'messages-archive.jsonl');
+      const persisted = JSON.parse(readFileSync(messagesPath, 'utf-8'));
+
+      expect(persisted).toHaveLength(5000);
+      expect(persisted[0].id).toBe('msg_0004');
+      expect(persisted[persisted.length - 1].id).toBe(response.body.id);
+      expect(existsSync(archivedPath)).toBe(true);
+
+      const archived = readFileSync(archivedPath, 'utf-8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      expect(archived.map((row) => row.id)).toEqual(['msg_0001', 'msg_0002', 'msg_0003']);
+    } finally {
+      largeContext.cleanup();
+    }
   });
 });
