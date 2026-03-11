@@ -514,7 +514,7 @@ function trimTrailingBlankLines(text) {
   return lines.join('\n');
 }
 
-app.get('/api/tmux/capture/:session', (req, res) => {
+app.get('/api/tmux/capture/:session', async (req, res) => {
   const session = req.params.session;
   if (!/^[\w\-:.]+$/.test(session)) {
     return res.status(400).type('text').send('invalid session name');
@@ -525,7 +525,7 @@ app.get('/api/tmux/capture/:session', (req, res) => {
     let rawContent;
     if (sshConf) {
       // Remote capture via SSH
-      rawContent = execFileSync(
+      const { stdout } = await execFileAsync(
         'ssh', [
           '-o', 'ConnectTimeout=5',
           '-o', 'StrictHostKeyChecking=accept-new',
@@ -534,12 +534,14 @@ app.get('/api/tmux/capture/:session', (req, res) => {
         ],
         { encoding: 'utf-8', timeout: 8000 }
       );
+      rawContent = stdout;
     } else {
       // Local capture
-      rawContent = execFileSync(
+      const { stdout } = await execFileAsync(
         'tmux', ['capture-pane', '-t', session, '-p', '-S', '-500'],
         { encoding: 'utf-8', timeout: 3000 }
       );
+      rawContent = stdout;
     }
     const content = trimTrailingBlankLines(rawContent);
     const etag = '"' + createHash('md5').update(content).digest('hex').slice(0, 16) + '"';
@@ -1492,9 +1494,11 @@ app.get('/api/agents/detail/:name', async (req, res) => {
     detail.active = detail.idleMs >= 0 && detail.idleMs < IDLE_THRESHOLD;
     if (!detail.agentType) {
       try {
-        const panePid = execFileSync('tmux', ['list-panes', '-t', detail.tmux, '-F', '#{pane_pid}'], { encoding: 'utf-8', timeout: 2000 }).trim();
+        const { stdout: panePidStdout } = await execFileAsync('tmux', ['list-panes', '-t', detail.tmux, '-F', '#{pane_pid}'], { encoding: 'utf-8', timeout: 2000 });
+        const panePid = panePidStdout.trim();
         if (panePid) {
-          const childCmd = execFileSync('ps', ['-o', 'args=', '--ppid', panePid], { encoding: 'utf-8', timeout: 2000 }).toLowerCase();
+          const { stdout: childCmdStdout } = await execFileAsync('ps', ['-o', 'args=', '--ppid', panePid], { encoding: 'utf-8', timeout: 2000 });
+          const childCmd = childCmdStdout.toLowerCase();
           if (childCmd.includes('claude')) detail.agentType = 'claude';
           else if (childCmd.includes('codex')) detail.agentType = 'codex';
         }

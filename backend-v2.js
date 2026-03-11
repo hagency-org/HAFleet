@@ -1,7 +1,7 @@
 import express from 'express';
 import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync } from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
-import { execSync, execFile } from 'child_process';
+import { execFile } from 'child_process';
 import path from 'path';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
@@ -4003,22 +4003,6 @@ function refreshServerLiveness() {
   if (agentsChanged) saveAgents();
 }
 
-function captureLocalPaneContent(tmuxTarget) {
-  if (!tmuxTarget) return null;
-  try {
-    const raw = execSync(`tmux capture-pane -p -t ${JSON.stringify(tmuxTarget)} 2>/dev/null`, {
-      timeout: 3000,
-      encoding: 'utf-8',
-    });
-    return {
-      text: raw,
-      hash: createHash('md5').update(raw).digest('hex'),
-    };
-  } catch {
-    return null;
-  }
-}
-
 async function captureLocalPaneContentAsync(tmuxTarget) {
   if (!tmuxTarget) return null;
   try {
@@ -4033,39 +4017,6 @@ async function captureLocalPaneContentAsync(tmuxTarget) {
   } catch {
     return null;
   }
-}
-
-function buildLocalPaneMetadataSnapshot() {
-  const sessions = new Map();
-  const ttyToSession = new Map();
-  try {
-    const raw = execSync('tmux list-panes -a -F "#{pane_tty}\t#{session_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}" 2>/dev/null', {
-      encoding: 'utf-8',
-      timeout: 3000,
-    }).trim();
-    if (!raw) return { sessions, ttyToSession };
-    for (const line of raw.split('\n')) {
-      const parts = line.split('\t');
-      if (parts.length < 5) continue;
-      const tty = parts[0].trim();
-      const session = parts[1].trim();
-      const panePid = Number.parseInt(parts[2].trim(), 10);
-      const command = parts[3].trim();
-      const workspacePath = normalizeWorkspacePath(parts.slice(4).join('\t').trim());
-      if (tty && session) ttyToSession.set(tty.replace('/dev/', ''), session);
-      if (!session) continue;
-      if (!sessions.has(session)) {
-        sessions.set(session, {
-          panePid: Number.isFinite(panePid) && panePid > 1 ? panePid : null,
-          command: command || '',
-          workspacePath,
-        });
-      }
-    }
-  } catch {
-    // best effort snapshot
-  }
-  return { sessions, ttyToSession };
 }
 
 async function buildLocalPaneMetadataSnapshotAsync() {
@@ -4103,11 +4054,11 @@ async function buildLocalPaneMetadataSnapshotAsync() {
   return { sessions, ttyToSession };
 }
 
-function buildLocalPaneSnapshotMap(paneMetadataSnapshot = null) {
+function buildLocalPaneSnapshotMapFromMetadata(paneMetadataSnapshot) {
   if (paneMetadataSnapshot && paneMetadataSnapshot.sessions instanceof Map) {
     return paneMetadataSnapshot.sessions;
   }
-  return buildLocalPaneMetadataSnapshot().sessions;
+  return new Map();
 }
 
 function sessionKeyFromTmuxTarget(tmuxTarget) {
@@ -4216,7 +4167,7 @@ async function sweepLocalActivityDurations() {
   const localRuntimeAgents = new Set();
   const paneMetadataSnapshot = await buildLocalPaneMetadataSnapshotAsync();
   const mcpSessions = await getLocalMcpSessionSetAsync(true, paneMetadataSnapshot);
-  const paneSnapshotMap = buildLocalPaneSnapshotMap(paneMetadataSnapshot);
+  const paneSnapshotMap = buildLocalPaneSnapshotMapFromMetadata(paneMetadataSnapshot);
   const localRows = [];
 
   for (const agent of Object.values(agents)) {
@@ -4533,9 +4484,9 @@ async function scopeUnitForPid(pid) {
   return null;
 }
 
-function buildLocalPanePidMap() {
+async function buildLocalPanePidMapAsync() {
   const out = new Map();
-  const snapshotMap = buildLocalPaneSnapshotMap();
+  const snapshotMap = buildLocalPaneSnapshotMapFromMetadata(await buildLocalPaneMetadataSnapshotAsync());
   for (const [session, snapshot] of snapshotMap.entries()) {
     const panePid = Number(snapshot?.panePid || 0);
     if (!session || !Number.isFinite(panePid) || panePid <= 1) continue;
@@ -4620,7 +4571,7 @@ function formatBytesGiB(bytes) {
 async function sweepAgentScopePressure() {
   if (!AGENT_SCOPE_MONITOR_ENABLED) return;
   const now = Date.now();
-  const panePidMap = buildLocalPanePidMap();
+  const panePidMap = await buildLocalPanePidMapAsync();
   const localAgentNames = Object.values(agents)
     .filter(isAgentRecord)
     .filter(agent => {
@@ -4886,40 +4837,6 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
 }
 
 // ── Push notification relay ───────────────────────────────────────────
-function collectLocalMcpSessions(paneMetadataSnapshot = null) {
-  try {
-    const ptsMap = (paneMetadataSnapshot && paneMetadataSnapshot.ttyToSession instanceof Map)
-      ? paneMetadataSnapshot.ttyToSession
-      : buildLocalPaneMetadataSnapshot().ttyToSession;
-    if (!ptsMap.size) return new Set();
-    let pids;
-    try {
-      pids = execSync('pgrep -f "node.*mcp-server.js" 2>/dev/null', { timeout: 3000, encoding: 'utf-8' }).trim().split('\n').filter(Boolean);
-    } catch { return new Set(); }
-    if (!pids.length) return new Set();
-    const matched = new Set();
-    try {
-      const psOut = execSync(`ps -o pid=,tty= -p ${pids.join(',')} 2>/dev/null`, {
-        timeout: 3000,
-        encoding: 'utf-8',
-      }).trim();
-      if (!psOut) return matched;
-      for (const line of psOut.split('\n')) {
-        const parts = line.trim().split(/\s+/, 2);
-        if (parts.length < 2) continue;
-        const pts = parts[1].trim();
-        if (!pts || pts === '?') continue;
-        const session = ptsMap.get(pts) || null;
-        if (session) matched.add(session);
-      }
-    } catch {
-      return new Set();
-    }
-    return matched;
-  } catch { /* no tmux */ }
-  return new Set();
-}
-
 async function collectLocalMcpSessionsAsync(paneMetadataSnapshot = null) {
   try {
     const ptsMap = (paneMetadataSnapshot && paneMetadataSnapshot.ttyToSession instanceof Map)
@@ -4959,16 +4876,6 @@ async function collectLocalMcpSessionsAsync(paneMetadataSnapshot = null) {
   }
 }
 
-function getLocalMcpSessionSet(forceRefresh = false, paneMetadataSnapshot = null) {
-  const now = Date.now();
-  if (!forceRefresh && (now - localMcpSessionCacheAt) <= LOCAL_MCP_SESSION_CACHE_TTL_MS) {
-    return localMcpSessionCache;
-  }
-  localMcpSessionCache = collectLocalMcpSessions(paneMetadataSnapshot);
-  localMcpSessionCacheAt = now;
-  return localMcpSessionCache;
-}
-
 async function getLocalMcpSessionSetAsync(forceRefresh = false, paneMetadataSnapshot = null) {
   const now = Date.now();
   if (!forceRefresh && (now - localMcpSessionCacheAt) <= LOCAL_MCP_SESSION_CACHE_TTL_MS) {
@@ -4979,9 +4886,21 @@ async function getLocalMcpSessionSetAsync(forceRefresh = false, paneMetadataSnap
   return localMcpSessionCache;
 }
 
-function agentHasMcp(agentName) {
+async function agentHasMcpAsync(agentName) {
   if (!agentName) return false;
-  return getLocalMcpSessionSet(false).has(agentName);
+  const sessions = await getLocalMcpSessionSetAsync(false);
+  return sessions.has(agentName);
+}
+
+async function localTmuxSessionExistsAsync(sessionName) {
+  const sess = String(sessionName || '').trim();
+  if (!sess) return false;
+  try {
+    await execFileAsync('tmux', ['has-session', '-t', sess], { timeout: 2000 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const mergedPushInboxCursor = new Map();
@@ -5086,16 +5005,15 @@ async function pushNotify(agentName, msg) {
   }
   // If server is unknown (null), verify the tmux session exists locally before queueing
   if (!agentServer) {
-    try {
-      const sess = agent.tmux.split(':')[0];
-      execSync(`tmux has-session -t ${JSON.stringify(sess)} 2>/dev/null`, { timeout: 2000 });
-    } catch {
+    const sess = agent.tmux.split(':')[0];
+    const hasSession = await localTmuxSessionExistsAsync(sess);
+    if (!hasSession) {
       logPushNotifySkip(agentName, 'local-session-not-found', `(tmux=${agent.tmux})`);
       return; // tmux session doesn't exist locally — likely a remote agent not yet heartbeated
     }
   }
   const isHumanMsg = msg.type === 'human';
-  const hasMcp = agentHasMcp(agentName);
+  const hasMcp = await agentHasMcpAsync(agentName);
   const { inboxTs, unread } = getUnreadInboxMessages(agentName);
   const unreadCount = unread.length;
   const latestUnread = unread[unread.length - 1] || msg;
