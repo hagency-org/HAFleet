@@ -2120,3 +2120,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - `#2276` — `agentchat-aduit` periodic follow-up / residual hygiene
   - `#2277` — `Yato` blocked-vs-reliable executor status check
 - This resets reminder coverage to the actual live execution plan instead of the outdated pre-incident lane wording.
+
+## [2026-03-11 15:42] PARTIAL — restored `agentchat-develop` to interactive Codex state and re-issued the active lane
+- Confirmed `agentchat-develop` tmux was present but blocked at the first-run Codex trust prompt; until that prompt is cleared, queued notifications fall through to the shell and the executor is not actually consuming inbox work.
+- Restored the lane by explicitly relaunching the Codex process in its existing v1 home and stepping through the trust prompt. After recovery, the live backend inbox route for `agentchat-develop` began returning queued DM payload again.
+- Re-issued the active implementation lane (`v1 manifest/backend sync divergence` slice-2) as `msg_78185`. It is still transport-queued from the MCP perspective, but the backend inbox surface now contains the message, so the next recovery check should focus on inbox consumption / formal handoff rather than tmux absence.
