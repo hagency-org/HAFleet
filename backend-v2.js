@@ -3654,7 +3654,7 @@ function collectBlockedHumanTargets(agentName) {
   };
 }
 
-function applyAgentBlockedRuntime(agentName, payload = {}) {
+function applyAgentBlockedState(agentName, payload = {}) {
   const runtime = ensureAgentRuntimeRecord(agentName);
   if (!runtime) return null;
 
@@ -3750,6 +3750,61 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
   if (agentChanged) saveAgents();
   if (shouldCatchup) notifyAgentCatchup(agentName, 'mcp-restored');
 
+  if (mcpBecameMissing) {
+    const full = [
+      `Agent: ${agentName}`,
+      `Server: ${normalizeServer(payload.server) || normalizeServer(agent?.server) || 'local'}`,
+      'State: tmux session present but mcp-server.js process not detected.',
+      'Offline reason set to: mcp-missing:auto',
+    ].join('\n');
+    emitSystemInfo(`Agent '${agentName}' missing MCP process`, full);
+    broadcastSSE('agent_mcp_missing', {
+      agent: agentName,
+      missingSince: runtime.mcpMissingSince || now,
+      server: normalizeServer(payload.server) || normalizeServer(agent?.server) || null,
+    });
+  } else if (mcpRecovered) {
+    emitSystemInfo(`Agent '${agentName}' MCP process recovered`, `Agent '${agentName}' now has mcp-server.js running inside tmux.`);
+    broadcastSSE('agent_mcp_recovered', {
+      agent: agentName,
+      recoveredAt: now,
+      server: normalizeServer(payload.server) || normalizeServer(agent?.server) || null,
+    });
+  }
+
+  return {
+    agentName,
+    runtime,
+    payload,
+    now,
+    blockedNow,
+    blockedObserved,
+    reasonNow,
+    tierNow,
+    tailNow,
+    serverNow,
+    prevBlockedNotificationSent,
+    prevBlockedNotifiedTier,
+  };
+}
+
+function dispatchBlockedNotifications(transition) {
+  if (!transition || !transition.runtime) return transition?.runtime || null;
+
+  const {
+    agentName,
+    runtime,
+    now,
+    blockedNow,
+    blockedObserved,
+    reasonNow,
+    tierNow,
+    tailNow,
+    serverNow,
+    prevBlockedNotificationSent,
+    prevBlockedNotifiedTier,
+  } = transition;
+
   const blockedDebounceThreshold = blockedTierDebounceThreshold(tierNow);
   const blockedNotificationReady = blockedNow
     && blockedObserved
@@ -3764,15 +3819,16 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
   const recovered = prevBlockedNotificationSent && !blockedNow;
 
   if (becameBlocked || severityIncreased) {
+    let runtimeChanged = false;
     if (runtime.blockedNotificationSent !== true) {
       runtime.blockedNotificationSent = true;
-      changed = true;
+      runtimeChanged = true;
     }
     if (normalizeBlockedTier(runtime.blockedNotifiedTier, null) !== tierNow) {
       runtime.blockedNotifiedTier = tierNow;
-      changed = true;
+      runtimeChanged = true;
     }
-    if (changed) saveAgentRuntime();
+    if (runtimeChanged) saveAgentRuntime();
     const blockedSummary = `Agent '${agentName}' entered blocked state`;
     const { hasPendingHuman, targets } = collectBlockedHumanTargets(agentName);
     const fullLines = [
@@ -3803,28 +3859,6 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
     broadcastSSE('agent_recovered', {
       agent: agentName,
       recoveredAt: now,
-    });
-  }
-
-  if (mcpBecameMissing) {
-    const full = [
-      `Agent: ${agentName}`,
-      `Server: ${normalizeServer(payload.server) || normalizeServer(agent?.server) || 'local'}`,
-      'State: tmux session present but mcp-server.js process not detected.',
-      'Offline reason set to: mcp-missing:auto',
-    ].join('\n');
-    emitSystemInfo(`Agent '${agentName}' missing MCP process`, full);
-    broadcastSSE('agent_mcp_missing', {
-      agent: agentName,
-      missingSince: runtime.mcpMissingSince || now,
-      server: normalizeServer(payload.server) || normalizeServer(agent?.server) || null,
-    });
-  } else if (mcpRecovered) {
-    emitSystemInfo(`Agent '${agentName}' MCP process recovered`, `Agent '${agentName}' now has mcp-server.js running inside tmux.`);
-    broadcastSSE('agent_mcp_recovered', {
-      agent: agentName,
-      recoveredAt: now,
-      server: normalizeServer(payload.server) || normalizeServer(agent?.server) || null,
     });
   }
 
@@ -4175,7 +4209,7 @@ function applyLocalRuntimeSignals(agentName, payload = {}) {
   });
   if (localRuntimeSignalDigest.get(agentName) === digest && !(blocked && blockedObserved)) return;
   localRuntimeSignalDigest.set(agentName, digest);
-  applyAgentBlockedRuntime(agentName, {
+  const transition = applyAgentBlockedState(agentName, {
     blocked,
     reason,
     tail: blocked && typeof payload.tail === 'string' ? payload.tail : '',
@@ -4185,6 +4219,7 @@ function applyLocalRuntimeSignals(agentName, payload = {}) {
     blockedObserved,
     server: 'local',
   });
+  dispatchBlockedNotifications(transition);
 }
 
 function isEphemeralAuditAgentName(name) {
@@ -5777,7 +5812,7 @@ app.post('/api/agents/:name/runtime', (req, res) => {
     saveAgents();
   }
 
-  const runtime = applyAgentBlockedRuntime(agentName, {
+  const transition = applyAgentBlockedState(agentName, {
     blocked,
     reason,
     tail,
@@ -5791,6 +5826,7 @@ app.post('/api/agents/:name/runtime', (req, res) => {
     mcpPresent,
     blockedObserved,
   });
+  const runtime = dispatchBlockedNotifications(transition);
   if (!runtime) return res.status(500).json({ error: 'runtime update failed' });
   res.json({
     ok: true,
