@@ -2803,7 +2803,7 @@ function relativeTime(ts) {
 }
 
 function summarizeMsg(m) {
-  return {
+  const out = {
     id: m.id,
     from: m.from,
     type: m.type,
@@ -2817,6 +2817,51 @@ function summarizeMsg(m) {
     reply_to: m.reply_to || null,
     group: m.group || null,
   };
+  const normalizedSchema = normalizeMessageSchema(m?.schema);
+  if (normalizedSchema.value) out.schema = normalizedSchema.value;
+  return out;
+}
+
+function normalizeMessageSchema(value) {
+  if (value === undefined) return { value: null };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { error: 'schema must be an object' };
+  }
+  const kind = normalizeOptionalText(value.kind, 128);
+  if (!kind) return { error: 'schema.kind required' };
+  let version = 1;
+  if (Object.prototype.hasOwnProperty.call(value, 'version') && value.version !== undefined && value.version !== null) {
+    const parsed = Number(value.version);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      return { error: 'schema.version must be a positive integer' };
+    }
+    version = parsed;
+  }
+  const out = { kind, version };
+  if (Object.prototype.hasOwnProperty.call(value, 'payload')) out.payload = value.payload;
+  return { value: out };
+}
+
+function parseKindsFilter(value) {
+  if (value === undefined || value === null) return [];
+  const rawItems = Array.isArray(value)
+    ? value.flatMap(item => String(item || '').split(','))
+    : String(value || '').split(',');
+  const out = [];
+  const seen = new Set();
+  for (const raw of rawItems) {
+    const kind = normalizeOptionalText(raw, 128);
+    if (!kind || seen.has(kind)) continue;
+    seen.add(kind);
+    out.push(kind);
+  }
+  return out;
+}
+
+function messageMatchesKinds(msg, kinds = null) {
+  if (!(kinds instanceof Set) || kinds.size === 0) return true;
+  const kind = normalizeOptionalText(msg?.schema?.kind, 128);
+  return Boolean(kind && kinds.has(kind));
 }
 
 function ensureCursor(agentName) {
@@ -2887,22 +2932,27 @@ function isGroupMember(groupName, name) {
   return Boolean(findGroupMember(groupName, name));
 }
 
-function getUnreadInboxMessages(agentName) {
+function getUnreadInboxMessages(agentName, options = {}) {
   const cursor = ensureCursor(agentName);
   const inboxTs = cursor.inbox || 0;
   const inboxId = cursor.inboxId || null;
+  const kinds = Array.isArray(options?.kinds) && options.kinds.length > 0
+    ? new Set(options.kinds)
+    : null;
   const unreadById = new Map();
 
   for (const m of messages) {
     if (m.to !== agentName) continue;
     if (!isAfterCursor(m, inboxTs, inboxId)) continue;
     if (isSuppressedForAgent(m, agentName)) continue;
+    if (!messageMatchesKinds(m, kinds)) continue;
     unreadById.set(m.id, m);
   }
   for (const m of messages) {
     if (!m.group) continue;
     if (!isAfterCursor(m, inboxTs, inboxId)) continue;
     if (!isGroupMember(m.group, agentName)) continue;
+    if (!messageMatchesKinds(m, kinds)) continue;
     if (Array.isArray(m.mentions) && m.mentions.includes(agentName) && !isSuppressedForAgent(m, agentName)) {
       unreadById.set(m.id, m);
     }
@@ -6487,7 +6537,7 @@ app.get('/api/media/fetch', (req, res) => {
 
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -6514,6 +6564,10 @@ app.post('/api/messages', (req, res) => {
       return res.status(400).json({ error: `attachments[${i}]: ${normalized.error}` });
     }
     normalizedAttachments.push(normalized.value);
+  }
+  const normalizedSchema = normalizeMessageSchema(schema);
+  if (normalizedSchema.error) {
+    return res.status(400).json({ error: normalizedSchema.error });
   }
 
   if (!fromName) return res.status(400).json({ error: 'from required' });
@@ -6635,6 +6689,9 @@ app.post('/api/messages', (req, res) => {
   };
   if (normalizedAttachments.length > 0) {
     msg.attachments = normalizedAttachments;
+  }
+  if (normalizedSchema.value) {
+    msg.schema = normalizedSchema.value;
   }
 
   const warnings = [];
@@ -6845,7 +6902,8 @@ app.get('/api/inbox/:agent/unread', (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
-  const snapshot = buildUnreadInboxSnapshot(agentName);
+  const kinds = parseKindsFilter(req.query.kinds);
+  const snapshot = buildUnreadInboxSnapshot(agentName, { kinds });
   res.json(snapshot);
 });
 
@@ -6856,7 +6914,8 @@ app.get('/api/inbox/:agent/unread-list', (req, res) => {
 
   const limitRaw = Number.parseInt(req.query.limit, 10);
   const limit = Number.isFinite(limitRaw) && limitRaw >= 0 ? Math.min(limitRaw, 500) : 50;
-  const { unread } = getUnreadInboxMessages(agentName);
+  const kinds = parseKindsFilter(req.query.kinds);
+  const { unread } = getUnreadInboxMessages(agentName, { kinds });
   const rows = limit === 0 ? unread : unread.slice(-limit);
   res.json({
     agent: agentName,
@@ -6871,23 +6930,26 @@ app.get('/api/inbox/:agent', (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
+  const kindsList = parseKindsFilter(req.query.kinds);
+  const kinds = kindsList.length > 0 ? new Set(kindsList) : null;
 
   const cursor = ensureCursor(agentName);
   const inboxTs = cursor.inbox || 0;
   const inboxId = cursor.inboxId || null;
 
   const dmRaw = messages
-    .filter(m => m.to === agentName && isAfterCursor(m, inboxTs, inboxId) && !isSuppressedForAgent(m, agentName))
+    .filter(m => m.to === agentName && isAfterCursor(m, inboxTs, inboxId) && !isSuppressedForAgent(m, agentName) && messageMatchesKinds(m, kinds))
     .sort(compareMsgOrder);
   const dm = dmRaw.map(summarizeMsg);
 
   const groupRaw = messages
     .filter(m => m.group && isGroupMember(m.group, agentName))
-    .filter(m => m.mentions.includes(agentName) && isAfterCursor(m, inboxTs, inboxId) && !isSuppressedForAgent(m, agentName))
+    .filter(m => m.mentions.includes(agentName) && isAfterCursor(m, inboxTs, inboxId) && !isSuppressedForAgent(m, agentName) && messageMatchesKinds(m, kinds))
     .sort(compareMsgOrder);
   const group = groupRaw.map(summarizeMsg);
 
-  // Advance cursor only to the latest delivered message.
+  // Filtered reads are preview-only: a global inbox cursor cannot safely advance over one kind
+  // without implicitly skipping unread messages of other kinds.
   const unread = [...dmRaw, ...groupRaw].sort(compareMsgOrder);
   const runtime = ensureAgentRuntimeRecord(agentName);
   const pendingGate = getPendingInboxGate(runtime);
@@ -6896,15 +6958,17 @@ app.get('/api/inbox/:agent', (req, res) => {
     && pendingGate.sourceMsgId
     && unread.some((msg) => msg?.id === pendingGate.sourceMsgId)
   );
-  if (advanceInboxCursor(cursor, unread)) {
+  if (!kinds && advanceInboxCursor(cursor, unread)) {
     saveCursors();
   }
-  markAgentInboxChecked(agentName, {
-    clearInboxGate: consumedPendingSource,
-    sourceMsgId: consumedPendingSource ? pendingGate.sourceMsgId : null,
-  });
-  // If the agent just consumed inbox, stale queued notifications should be removed immediately.
-  clearQueuedNotificationsForAgent(agentName);
+  if (!kinds) {
+    markAgentInboxChecked(agentName, {
+      clearInboxGate: consumedPendingSource,
+      sourceMsgId: consumedPendingSource ? pendingGate.sourceMsgId : null,
+    });
+    // If the agent just consumed inbox, stale queued notifications should be removed immediately.
+    clearQueuedNotificationsForAgent(agentName);
+  }
 
   res.json({ dm, group });
 });

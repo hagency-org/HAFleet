@@ -512,12 +512,17 @@ server.tool(
     })).max(ATTACHMENT_MAX_ITEMS).optional().describe('Optional attachments. Files are staged to backend and bridged to Matrix.'),
     type: z.enum(['request', 'inform', 'reply']).default('inform').describe('Message type: request, inform, or reply'),
     reply_to: z.string().optional().describe('Message ID this is replying to'),
+    schema: z.object({
+      kind: z.string().describe('Structured message kind, e.g. task_request'),
+      version: z.number().int().positive().optional().describe('Schema version; defaults to 1'),
+      payload: z.unknown().optional().describe('Structured payload for this kind'),
+    }).optional().describe('Optional structured message schema'),
   },
-  async ({ to, summary, full, attachments, type, reply_to }) => {
+  async ({ to, summary, full, attachments, type, reply_to, schema }) => {
     try {
       const stagedAttachments = await stageAttachments(attachments);
       const data = await api('POST', '/api/messages', {
-        from: AGENT_NAME, to, type, summary, full, attachments: stagedAttachments, mentions: [], reply_to: reply_to || null,
+        from: AGENT_NAME, to, type, summary, full, attachments: stagedAttachments, mentions: [], reply_to: reply_to || null, schema,
       });
       return text(data);
     } catch (e) {
@@ -543,12 +548,17 @@ server.tool(
     type: z.enum(['request', 'inform', 'reply']).default('inform').describe('Message type: request, inform, or reply'),
     mentions: z.array(z.string()).optional().describe('Agent names to @mention and push-notify'),
     reply_to: z.string().optional().describe('Message ID this is replying to'),
+    schema: z.object({
+      kind: z.string().describe('Structured message kind, e.g. task_result'),
+      version: z.number().int().positive().optional().describe('Schema version; defaults to 1'),
+      payload: z.unknown().optional().describe('Structured payload for this kind'),
+    }).optional().describe('Optional structured message schema'),
   },
-  async ({ group, summary, full, attachments, type, mentions, reply_to }) => {
+  async ({ group, summary, full, attachments, type, mentions, reply_to, schema }) => {
     try {
       const stagedAttachments = await stageAttachments(attachments);
       const data = await api('POST', '/api/messages', {
-        from: AGENT_NAME, group, type, summary, full, attachments: stagedAttachments, mentions: mentions || [], reply_to: reply_to || null,
+        from: AGENT_NAME, group, type, summary, full, attachments: stagedAttachments, mentions: mentions || [], reply_to: reply_to || null, schema,
       });
       return text(data);
     } catch (e) {
@@ -560,11 +570,16 @@ server.tool(
 // 4. check_inbox — returns full message content (no need for separate get_message)
 server.tool(
   'check_inbox',
-  'Check your inbox for unread direct messages and @mentions from groups. Returns two arrays: dm (private messages) and group (@mentions). Reading advances your cursor — messages shown here won\'t appear again next time.',
-  {},
-  async () => {
+  'Check your inbox for unread direct messages and @mentions from groups. Returns two arrays: dm (private messages) and group (@mentions). Reading advances your cursor — messages shown here won\'t appear again next time. When filtered by kinds, this becomes a non-destructive preview.',
+  {
+    kinds: z.array(z.string()).optional().describe('Optional schema.kind filter. When set, only matching unread messages are returned and the inbox cursor is not advanced.'),
+  },
+  async ({ kinds }) => {
     try {
-      const data = await api('GET', `/api/inbox/${AGENT_NAME}`);
+      const params = new URLSearchParams();
+      if (Array.isArray(kinds) && kinds.length > 0) params.set('kinds', kinds.join(','));
+      const suffix = params.size ? `?${params}` : '';
+      const data = await api('GET', `/api/inbox/${AGENT_NAME}${suffix}`);
       const localized = await localizeInboxData(data);
       return text(localized);
     } catch (e) {
