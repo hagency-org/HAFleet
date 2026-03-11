@@ -471,7 +471,7 @@ export class SupervisorService {
     this.broadcastSSE = deps.broadcastSSE;
     this.sendMessage = deps.sendMessage;
 
-    this.enabled = this.config.enabled;
+    this.enabledRequested = this.config.enabled === true;
     this.disabledReason = this.config.disabledReason || null;
     this.agentAllowlist = normalizeAgentAllowlist(this.config.agentAllowlist) || null;
     this.stateStore = new SupervisorStateStore(this.config.stateFile, this.config.warnAfter, this.config.warnCooldownMs);
@@ -491,8 +491,12 @@ export class SupervisorService {
     }
   }
 
+  isEnabled() {
+    return this.enabledRequested === true && this.timer !== null;
+  }
+
   start() {
-    if (!this.enabled) {
+    if (!this.enabledRequested) {
       console.log(`[supervisor] disabled: ${this.disabledReason || 'unknown reason'}`);
       return;
     }
@@ -758,7 +762,7 @@ export class SupervisorService {
     const currentPath = sessionExists ? tmuxPanePath(context.sessionName) : null;
     const pathMismatch = sessionExists && context.supervisorDir && currentPath && path.resolve(currentPath) !== path.resolve(context.supervisorDir);
 
-    if (!this.enabled || observation.lifecycle.state === 'idle') {
+    if (!this.enabledRequested || observation.lifecycle.state === 'idle') {
       if (sessionExists) {
         killTmuxSession(context.sessionName);
         return this.buildRuntimeLaunchState(base, {
@@ -999,7 +1003,7 @@ export class SupervisorService {
   }
 
   runSweep() {
-    if (!this.enabled) return;
+    if (!this.enabledRequested) return;
     if (this.running) return;
     this.running = true;
     const started = Date.now();
@@ -1038,7 +1042,7 @@ export class SupervisorService {
     else if (classifications.includes('stalled_wait') || classifications.includes('suspected_eos')) supervisorMode = 'attention';
     const lifecycleState = lifecycleStates.includes('active') ? 'active' : 'idle';
     return {
-      enabled: this.enabled,
+      enabled: this.isEnabled(),
       disabledReason: this.disabledReason,
       intervalMs: this.config.intervalMs,
       warnAfter: this.config.warnAfter,
@@ -1074,7 +1078,7 @@ export class SupervisorService {
 
   getControl() {
     return {
-      enabled: this.enabled,
+      enabled: this.isEnabled(),
       disabledReason: this.disabledReason,
       allowedAgents: Array.isArray(this.agentAllowlist) ? [...this.agentAllowlist] : null,
       allowlistMode: Array.isArray(this.agentAllowlist)
@@ -1096,11 +1100,11 @@ export class SupervisorService {
         return { ok: false, error: 'enabled must be boolean' };
       }
       if (patch.enabled) {
-        this.enabled = true;
+        this.enabledRequested = true;
         this.disabledReason = null;
         this.start();
       } else {
-        this.enabled = false;
+        this.enabledRequested = false;
         this.disabledReason = 'runtime-disabled';
         this.stop();
       }
@@ -1113,7 +1117,7 @@ export class SupervisorService {
       this.agentAllowlist = normalizeAgentAllowlist(patch.allowedAgents);
     }
 
-    if (this.enabled) this.runSweep();
+    if (this.enabledRequested) this.runSweep();
 
     return {
       ok: true,

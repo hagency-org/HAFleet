@@ -41,6 +41,48 @@ describe('runtime parity regressions', () => {
     expect(rows.map(row => row.agent.name)).toEqual(['alpha', 'bravo', 'charlie']);
   });
 
+  test('supervisor enabled state reflects the live running loop, not just config intent', () => {
+    tempDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-supervisor-enabled-test-'));
+
+    const service = new SupervisorService({
+      config: {
+        enabled: true,
+        disabledReason: null,
+        intervalMs: 60_000,
+        heartbeatTtlMs: 30_000,
+        trailingHeartbeatPeriods: 5,
+        trailingWindowMs: 150_000,
+        matrixInfoGroup: 'info',
+        matrixMentions: [],
+        agentAllowlist: null,
+        stateFile: path.join(tempDir, 'supervisor-state.json'),
+        logFile: path.join(tempDir, 'supervisor-log.jsonl'),
+        warnAfter: 2,
+        warnCooldownMs: 1000,
+        eventHistoryLimit: 20,
+        llm: {
+          provider: 'openai',
+          model: 'gpt-4.1-mini',
+          endpoint: 'https://api.openai.com/v1/chat/completions',
+          profileSource: 'test',
+        },
+      },
+      getAgents: () => [],
+      getRuntime: () => ({}),
+    });
+
+    expect(service.getStatus().enabled).toBe(false);
+    expect(service.getControl().enabled).toBe(false);
+
+    service.start();
+    expect(service.getStatus().enabled).toBe(true);
+    expect(service.getControl().enabled).toBe(true);
+
+    service.stop();
+    expect(service.getStatus().enabled).toBe(false);
+    expect(service.getControl().enabled).toBe(false);
+  });
+
   test('remote MCP auto-registration defaults server to os.hostname()', () => {
     const source = readFileSync(path.resolve('remote/lib/mcp-server-core.js'), 'utf-8');
     expect(source).toMatch(/const AGENT_SERVER = \(process\.env\.AGENT_CHAT_SERVER \|\| ''\)\.trim\(\) \|\| os\.hostname\(\);/);
