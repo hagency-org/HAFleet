@@ -2102,3 +2102,14 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - During live incident handling, the worker took runtime-affecting action strongly enough that kamico had to manually restore the environment; this is a coordination failure.
 - Durable lesson: in chief-coordinator mode, worker must not perform direct live shutdown/kill/restart actions against shared agent/runtime state unless the operator explicitly orders a maintenance-window style intervention. Runtime recovery and exact root-cause work must stay delegated to execution agents.
 - Follow-up: keep the current live web/stale-supervisor truthfulness lane delegated, and treat any further worker-side runtime intervention as blocked without explicit operator approval.
+
+## [2026-03-11 15:07] DONE — re-baselined executor availability and queued worker 1.0 migration
+- Re-bootstrapped from root `AGENTS.md`, worker docs, and `check_inbox()`. No unread DM/group work remained, but the real execution state had drifted from the old reminders.
+- Verified that `agentchat-develop` and `agentchat-aduit` are currently absent from tmux (their delivery path had degraded to queued/offline), while `Yato` is not available as a reliable executor lane.
+- Updated the worker plan so executor availability itself is treated as a first-class coordination concern, and added the operator-requested `agentchat-worker` 1.0 migration as a durable queued lane rather than leaving it implicit.
+
+## [2026-03-11 15:39] PARTIAL — restored `agentchat-develop` and `agentchat-aduit` execution surfaces
+- Safely backed up the legacy 0.x metadata for `agentchat-develop` to `/home/shisui/laplace/agent-chat-dev-runtime/legacy-agent-backups/agentchat-develop-20260311-133720`, confirming that the intended v1 dev home already existed under `/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_agentchat-develop`.
+- Relaunched `agentchat-develop` into its own v1 dev workdir (`.../agent_agentchat-develop/workdir`) instead of using `--allow-shared-workspace`. tmux is back, the old queued inbox messages have replayed through the backend inbox surface, but MCP is still not present, so the lane is only partially recovered.
+- Relaunched `agentchat-aduit` from its existing live v1 home. tmux is back and direct agentchat delivery succeeded (`msg_78182`), restoring the periodic-audit lane.
+- Re-sent the active `v1 sync slice-2` resume scope to `agentchat-develop` (`msg_78183`). That message is still queued because the agent's MCP registration has not come back yet.

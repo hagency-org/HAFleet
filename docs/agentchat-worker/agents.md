@@ -11,6 +11,9 @@
 - Runtime/probe residue is now a standing audit concern: orphan tmux sessions, stale `supervisor-*probe*` sessions, half-started agents, and other leftover runtime artifacts must be treated as first-class system-hygiene findings rather than ignored test debris.
 - In chief-coordinator mode, worker must not directly kill/restart shared live agent/runtime processes or perform broad shutdown actions unless the operator explicitly orders a maintenance-window intervention; live runtime manipulation is delegated work.
 - `supervisor-tmuxlaunchfailed` is now confirmed as recurring residue, not just lingering stale state; treat this residue class as a framework-fix issue when triaging runtime hygiene.
+- Executor availability itself is now a durable coordination surface: if `agentchat-develop`/`agentchat-aduit` disappear from tmux or `Yato` is stuck behind interactive prompts, worker must explicitly record the lane as degraded, reassign or restore it, and not silently pretend the old execution plan is still active.
+- `agentchat-develop` now has an existing v1 dev home at `/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_agentchat-develop`; if the legacy `data/agents/agentchat-develop` record blocks v1 launch, back it up rather than forcing shared-workspace execution.
+- The operator-requested `agentchat-worker` self-migration to a v1 home/workdir/project is a real queued project, not a casual cleanup note. It requires a real v1 home, migrated worker docs, updated templates, a `handoff.md`, and explicit stop/restart instructions for the operator.
 
 ## Boundaries
 ### Must do

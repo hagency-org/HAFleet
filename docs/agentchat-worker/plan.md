@@ -1,9 +1,10 @@
 ## Current
-Coordinate recovery after the worker wrongly disrupted live agent/runtime state during incident handling. Acceptance criteria:
-- the worker treats direct live shutdown/kill actions as forbidden unless the operator explicitly orders a maintenance-window stop
-- the live web incident and stale-supervisor/public-surface truthfulness lines are delegated to execution agents, not handled by worker-side runtime intervention
-- `v1 sync slice-2` remains parked but tracked while the live recovery/truthfulness lane is active
-- active reminders remain in place so recovery and follow-up do not EOS
+Coordinate the next clean execution phase after the live incident wave. Acceptance criteria:
+- keep worker in chief-coordinator mode: no direct coding/investigation work by worker
+- explicitly track executor availability (`agentchat-develop`, `agentchat-aduit`, `Yato`) and repair lanes when they silently disappear
+- unpark `v1 sync slice-2` once a reliable executor is back online
+- add and preserve the `agentchat-worker` 1.0 migration lane so the worker itself can move into a real v1 home/workdir/project model without losing docs/history
+- keep active reminders in place so execution does not EOS
 
 ## Queue
 1. Resume `v1 manifest/backend sync divergence` slice-2 implementation after the live web incident is triaged and narrowed again.
@@ -22,6 +23,14 @@ Coordinate recovery after the worker wrongly disrupted live agent/runtime state 
 14. Mirror the same code/runtime split design later for live (`agent-chat-live` + future `agent-chat-live-runtime`) after stable merge and explicit cutover planning.
 15. Secure external supervisor event ingest and reducer-based subconscious event flow.
 16. Harden external dev web auth behavior so credentials-in-URL cannot blank the page by causing relative `fetch()` to fail; either preserve SSR on refresh failure or document/replace the auth flow.
+17. Migrate `agentchat-worker` itself to a 1.0 agent home:
+    - create a real v1 home/workdir/project
+    - move worker docs into that home
+    - use latest `AGENTS.md` / `CLAUDE.md`
+    - create `handoff.md`
+    - provide operator-ready down/up commands for the cutover
 
 ## Blocked (optional)
 1. Make Agent Detail expose canonical task editing/visibility and show AGENTS.md / plan.md / progress.md tails under Internals; this lane is now assigned to agentchat-develop because Yato is currently blocked at an interactive prompt.
+2. `agentchat-develop` and `agentchat-aduit` are currently offline (`tmux-missing:auto`), and `Yato` is not a reliable executor. Restore at least one healthy execution lane before unblocking the next implementation slice.
+3. `agentchat-develop` tmux has been restored into a v1 dev home, but MCP is still missing; treat it as partially recovered until it consumes inbox and resumes formal handoffs.
