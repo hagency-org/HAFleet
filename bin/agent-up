@@ -1263,6 +1263,23 @@ shell_quote() {
   printf "%q" "$1"
 }
 
+append_launch_env_var() {
+  local var_name="$1"
+  local var_value="${!var_name-}"
+  if [ -n "${var_value:-}" ]; then
+    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX ${var_name}=$(shell_quote "$var_value")"
+  fi
+}
+
+append_launch_env_prefix() {
+  local prefix="$1"
+  local var_name
+  while IFS= read -r var_name; do
+    [ -n "$var_name" ] || continue
+    append_launch_env_var "$var_name"
+  done < <(env | cut -d= -f1 | LC_ALL=C sort | awk -v pfx="$prefix" 'index($0, pfx) == 1')
+}
+
 IS_V1_AGENT=0
 if [[ "${SAVED_AGENT_MODEL_VERSION:-}" == 1* ]] && [ -n "${SAVED_HOME_DIR:-}" ] && [ -n "${SAVED_WORKDIR:-}" ] && [ -n "${SAVED_STATE_DIR:-}" ]; then
   IS_V1_AGENT=1
@@ -1345,6 +1362,9 @@ PY
 configure_v1_subconscious
 
 LAUNCH_ENV_PREFIX="AGENT_NAME=$(shell_quote "$NAME")"
+append_launch_env_prefix "AGENT_CHAT_"
+append_launch_env_var "API_TOKEN"
+append_launch_env_var "AGENTCHAT_HOMEDIR"
 if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_JSON:-}" ]; then
   LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_RUNTIME_PROFILE_PRIMARY_JSON=$(shell_quote "$SAVED_RUNTIME_PROFILE_PRIMARY_JSON")"
 fi
