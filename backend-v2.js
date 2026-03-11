@@ -2935,6 +2935,22 @@ const taskGraphStore = createTaskGraphStore({
   emitEvent: (eventName, payload) => broadcastSSE(eventName, payload),
 });
 
+function taskGraphErrorStatus(error) {
+  switch (error?.code) {
+    case 'graph_not_found':
+    case 'node_not_found':
+      return 404;
+    case 'graph_exists':
+      return 409;
+    default:
+      return 400;
+  }
+}
+
+function respondTaskGraphError(res, error, fallback = 'task graph error') {
+  return res.status(taskGraphErrorStatus(error)).json({ error: error?.message || fallback });
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────
 function relativeTime(ts) {
   const d = Date.now() - ts;
@@ -6942,6 +6958,50 @@ app.get('/api/subconscious/events/:name', (req, res) => {
     ? Math.min(limitRaw, SUBCONSCIOUS_EVENT_HISTORY_LIMIT)
     : 120;
   return res.json({ ok: true, agent, events: getSubconsciousEvents(agent, limit) });
+});
+
+app.post('/api/task-graphs', (req, res) => {
+  try {
+    const created = taskGraphStore.createGraph(req.body || {});
+    const graph = taskGraphStore.advanceGraph(created.id) || created;
+    return res.json({ ok: true, graph });
+  } catch (error) {
+    return respondTaskGraphError(res, error, 'failed to create task graph');
+  }
+});
+
+app.get('/api/task-graphs', (req, res) => {
+  try {
+    const status = normalizeOptionalText(req.query?.status, 32);
+    return res.json(taskGraphStore.listGraphs(status ? { status } : {}));
+  } catch (error) {
+    return respondTaskGraphError(res, error, 'failed to list task graphs');
+  }
+});
+
+app.get('/api/task-graphs/:id', (req, res) => {
+  const graph = taskGraphStore.getGraph(req.params.id);
+  if (!graph) return res.status(404).json({ error: 'task graph not found' });
+  return res.json(graph);
+});
+
+app.delete('/api/task-graphs/:id', (req, res) => {
+  const graph = taskGraphStore.deleteGraph(req.params.id);
+  if (!graph) return res.status(404).json({ error: 'task graph not found' });
+  return res.json({ ok: true, graph });
+});
+
+app.patch('/api/task-graphs/:id/nodes/:nodeId', (req, res) => {
+  try {
+    taskGraphStore.updateNode(req.params.id, req.params.nodeId, req.body || {});
+    const graph = taskGraphStore.advanceGraph(req.params.id) || taskGraphStore.getGraph(req.params.id);
+    if (!graph) return res.status(404).json({ error: 'task graph not found' });
+    const node = taskGraphStore.getNode(req.params.id, req.params.nodeId);
+    if (!node) return res.status(404).json({ error: 'task graph node not found' });
+    return res.json({ ok: true, graph, node });
+  } catch (error) {
+    return respondTaskGraphError(res, error, 'failed to update task graph node');
+  }
 });
 
 // ── Groups CRUD ───────────────────────────────────────────────────────
