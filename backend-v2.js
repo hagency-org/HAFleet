@@ -1,9 +1,11 @@
 import express from 'express';
 import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync } from 'fs';
-import { execSync } from 'child_process';
+import { readFile as readFileAsync } from 'fs/promises';
+import { execSync, execFile } from 'child_process';
 import path from 'path';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
+import { promisify } from 'util';
 import { createSupervisorService } from './supervisor/index.js';
 import {
   buildUpstreamClaudeSubconsciousPaths,
@@ -36,6 +38,7 @@ const WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_W
 const WEB_BRIDGE_FETCH_TIMEOUT_MS = Number.isFinite(WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW) && WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW > 0
   ? WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW
   : 5000;
+const execFileAsync = promisify(execFile);
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const LOCAL_SERVER_ID = (process.env.AGENT_CHAT_SERVER || 'local').trim();
 const USER_UID = (typeof process.getuid === 'function') ? process.getuid() : null;
@@ -2469,6 +2472,9 @@ const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, bur
 const localTmuxMissingState = new Map(); // agent -> { since:number, alerted:boolean }
 const localCompactState = new Map(); // agent -> marker
 const localRuntimeSignalDigest = new Map(); // agent -> digest of blocked/mcp/workspace
+let localActivitySweepRunning = false;
+let localSwapSweepRunning = false;
+let agentScopeSweepRunning = false;
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
 const subconsciousEventsByAgent = new Map(); // agent -> event[]
@@ -4013,6 +4019,22 @@ function captureLocalPaneContent(tmuxTarget) {
   }
 }
 
+async function captureLocalPaneContentAsync(tmuxTarget) {
+  if (!tmuxTarget) return null;
+  try {
+    const { stdout } = await execFileAsync('tmux', ['capture-pane', '-p', '-t', String(tmuxTarget)], {
+      timeout: 3000,
+      encoding: 'utf-8',
+    });
+    return {
+      text: stdout,
+      hash: createHash('md5').update(stdout).digest('hex'),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function buildLocalPaneMetadataSnapshot() {
   const sessions = new Map();
   const ttyToSession = new Map();
@@ -4021,6 +4043,41 @@ function buildLocalPaneMetadataSnapshot() {
       encoding: 'utf-8',
       timeout: 3000,
     }).trim();
+    if (!raw) return { sessions, ttyToSession };
+    for (const line of raw.split('\n')) {
+      const parts = line.split('\t');
+      if (parts.length < 5) continue;
+      const tty = parts[0].trim();
+      const session = parts[1].trim();
+      const panePid = Number.parseInt(parts[2].trim(), 10);
+      const command = parts[3].trim();
+      const workspacePath = normalizeWorkspacePath(parts.slice(4).join('\t').trim());
+      if (tty && session) ttyToSession.set(tty.replace('/dev/', ''), session);
+      if (!session) continue;
+      if (!sessions.has(session)) {
+        sessions.set(session, {
+          panePid: Number.isFinite(panePid) && panePid > 1 ? panePid : null,
+          command: command || '',
+          workspacePath,
+        });
+      }
+    }
+  } catch {
+    // best effort snapshot
+  }
+  return { sessions, ttyToSession };
+}
+
+async function buildLocalPaneMetadataSnapshotAsync() {
+  const sessions = new Map();
+  const ttyToSession = new Map();
+  try {
+    const { stdout } = await execFileAsync(
+      'tmux',
+      ['list-panes', '-a', '-F', '#{pane_tty}\t#{session_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}'],
+      { encoding: 'utf-8', timeout: 3000 }
+    );
+    const raw = stdout.trim();
     if (!raw) return { sessions, ttyToSession };
     for (const line of raw.split('\n')) {
       const parts = line.split('\t');
@@ -4150,15 +4207,15 @@ function pruneEphemeralAgents(names = [], reason = 'ephemeral-prune') {
   // Intentionally silent: ephemeral audit agent pruning is routine housekeeping.
 }
 
-function sweepLocalActivityDurations() {
+async function sweepLocalActivityDurations() {
   const nowSec = Math.floor(Date.now() / 1000);
   const nowMs = Date.now();
   let runtimeChanged = false;
   let agentsChanged = false;
   const pruneCandidates = new Set();
   const localRuntimeAgents = new Set();
-  const paneMetadataSnapshot = buildLocalPaneMetadataSnapshot();
-  const mcpSessions = getLocalMcpSessionSet(true, paneMetadataSnapshot);
+  const paneMetadataSnapshot = await buildLocalPaneMetadataSnapshotAsync();
+  const mcpSessions = await getLocalMcpSessionSetAsync(true, paneMetadataSnapshot);
   const paneSnapshotMap = buildLocalPaneSnapshotMap(paneMetadataSnapshot);
   const localRows = [];
 
@@ -4290,7 +4347,7 @@ function sweepLocalActivityDurations() {
       continue;
     }
 
-    const paneCapture = captureLocalPaneContent(tmuxTarget);
+    const paneCapture = await captureLocalPaneContentAsync(tmuxTarget);
     if (!paneCapture?.hash) {
       applyLocalMetadataOnlySignals(agent.name, {
         workspacePath,
@@ -4386,9 +4443,9 @@ function sweepLocalActivityDurations() {
   }
 }
 
-function readLocalSwapUsageSnapshot() {
+async function readLocalSwapUsageSnapshot() {
   try {
-    const raw = readFileSync('/proc/meminfo', 'utf-8');
+    const raw = await readFileAsync('/proc/meminfo', 'utf-8');
     const fields = {};
     for (const line of raw.split('\n')) {
       const m = line.match(/^([A-Za-z_]+):\s+(\d+)\s+kB$/);
@@ -4406,8 +4463,8 @@ function readLocalSwapUsageSnapshot() {
   }
 }
 
-function sweepLocalSwapPressure() {
-  const snap = readLocalSwapUsageSnapshot();
+async function sweepLocalSwapPressure() {
+  const snap = await readLocalSwapUsageSnapshot();
   if (!snap) return;
 
   swapAlertState.lastPct = snap.usagePct;
@@ -4456,11 +4513,11 @@ function scopeUnitFromCgroupPath(cgroupPath) {
   return leaf.endsWith('.scope') ? leaf : null;
 }
 
-function scopeUnitForPid(pid) {
+async function scopeUnitForPid(pid) {
   const n = Number.parseInt(pid, 10);
   if (!Number.isFinite(n) || n <= 1) return null;
   try {
-    const raw = readFileSync(`/proc/${n}/cgroup`, 'utf-8');
+    const raw = await readFileAsync(`/proc/${n}/cgroup`, 'utf-8');
     for (const line of String(raw || '').split('\n')) {
       if (!line) continue;
       const idx = line.indexOf(':');
@@ -4494,21 +4551,22 @@ function parseSystemdMemoryValue(raw) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-function readAgentScopeMemory(agentName, panePidMap = null) {
+async function readAgentScopeMemory(agentName, panePidMap = null) {
   const agent = agents[agentName];
   const tmuxTarget = (typeof agent?.tmux === 'string' && agent.tmux.trim())
     ? agent.tmux.trim()
     : `${agentName}:0.0`;
   const sessionName = sessionKeyFromTmuxTarget(tmuxTarget) || agentName;
   const panePid = (panePidMap instanceof Map) ? panePidMap.get(sessionName) : null;
-  const unit = scopeUnitForPid(panePid) || scopeUnitForAgent(agentName);
+  const unit = (await scopeUnitForPid(panePid)) || scopeUnitForAgent(agentName);
   if (!unit) return null;
   try {
     const env = USER_RUNTIME_DIR && USER_DBUS_SESSION_BUS
       ? { ...process.env, XDG_RUNTIME_DIR: USER_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: USER_DBUS_SESSION_BUS }
       : process.env;
-    const out = execSync(
-      `systemctl --user show ${JSON.stringify(unit)} --property=ActiveState --property=MemoryCurrent --property=MemoryHigh --value --no-pager`,
+    const { stdout: out } = await execFileAsync(
+      'systemctl',
+      ['--user', 'show', unit, '--property=ActiveState', '--property=MemoryCurrent', '--property=MemoryHigh', '--value', '--no-pager'],
       { encoding: 'utf-8', timeout: 3000, env }
     );
     const [activeStateRaw, currentRaw, highRaw] = String(out || '').split('\n');
@@ -4559,7 +4617,7 @@ function formatBytesGiB(bytes) {
   return (bytes / (1024 ** 3)).toFixed(2);
 }
 
-function sweepAgentScopePressure() {
+async function sweepAgentScopePressure() {
   if (!AGENT_SCOPE_MONITOR_ENABLED) return;
   const now = Date.now();
   const panePidMap = buildLocalPanePidMap();
@@ -4577,7 +4635,7 @@ function sweepAgentScopePressure() {
   }
 
   for (const agentName of localAgentNames) {
-    const scope = readAgentScopeMemory(agentName, panePidMap);
+    const scope = await readAgentScopeMemory(agentName, panePidMap);
     const prev = scopePressureState.get(agentName) || { high: false, lastAlertAt: 0 };
     if (!scope) {
       if (prev.high) {
@@ -4613,6 +4671,27 @@ function sweepAgentScopePressure() {
       scopePressureState.set(agentName, { high: true, lastAlertAt: prev.lastAlertAt });
     }
   }
+}
+
+function runAsyncSweep(label, fn, stateKey) {
+  if (stateKey === 'localActivity' && localActivitySweepRunning) return;
+  if (stateKey === 'localSwap' && localSwapSweepRunning) return;
+  if (stateKey === 'agentScope' && agentScopeSweepRunning) return;
+
+  if (stateKey === 'localActivity') localActivitySweepRunning = true;
+  if (stateKey === 'localSwap') localSwapSweepRunning = true;
+  if (stateKey === 'agentScope') agentScopeSweepRunning = true;
+
+  Promise.resolve()
+    .then(fn)
+    .catch((error) => {
+      console.error(`[${label}] ${error?.message || error}`);
+    })
+    .finally(() => {
+      if (stateKey === 'localActivity') localActivitySweepRunning = false;
+      if (stateKey === 'localSwap') localSwapSweepRunning = false;
+      if (stateKey === 'agentScope') agentScopeSweepRunning = false;
+    });
 }
 
 function getAgentDeliveryState(name) {
@@ -4841,12 +4920,61 @@ function collectLocalMcpSessions(paneMetadataSnapshot = null) {
   return new Set();
 }
 
+async function collectLocalMcpSessionsAsync(paneMetadataSnapshot = null) {
+  try {
+    const ptsMap = (paneMetadataSnapshot && paneMetadataSnapshot.ttyToSession instanceof Map)
+      ? paneMetadataSnapshot.ttyToSession
+      : (await buildLocalPaneMetadataSnapshotAsync()).ttyToSession;
+    if (!ptsMap.size) return new Set();
+    let pids;
+    try {
+      const { stdout } = await execFileAsync('pgrep', ['-f', 'node.*mcp-server.js'], { timeout: 3000, encoding: 'utf-8' });
+      pids = stdout.trim().split('\n').filter(Boolean);
+    } catch {
+      return new Set();
+    }
+    if (!pids.length) return new Set();
+    const matched = new Set();
+    try {
+      const { stdout } = await execFileAsync('ps', ['-o', 'pid=,tty=', '-p', pids.join(',')], {
+        timeout: 3000,
+        encoding: 'utf-8',
+      });
+      const psOut = stdout.trim();
+      if (!psOut) return matched;
+      for (const line of psOut.split('\n')) {
+        const parts = line.trim().split(/\s+/, 2);
+        if (parts.length < 2) continue;
+        const pts = parts[1].trim();
+        if (!pts || pts === '?') continue;
+        const session = ptsMap.get(pts) || null;
+        if (session) matched.add(session);
+      }
+    } catch {
+      return new Set();
+    }
+    return matched;
+  } catch {
+    return new Set();
+  }
+}
+
 function getLocalMcpSessionSet(forceRefresh = false, paneMetadataSnapshot = null) {
   const now = Date.now();
   if (!forceRefresh && (now - localMcpSessionCacheAt) <= LOCAL_MCP_SESSION_CACHE_TTL_MS) {
     return localMcpSessionCache;
   }
   localMcpSessionCache = collectLocalMcpSessions(paneMetadataSnapshot);
+  localMcpSessionCacheAt = now;
+  return localMcpSessionCache;
+}
+
+async function getLocalMcpSessionSetAsync(forceRefresh = false, paneMetadataSnapshot = null) {
+  const now = Date.now();
+  if (!forceRefresh && (now - localMcpSessionCacheAt) <= LOCAL_MCP_SESSION_CACHE_TTL_MS) {
+    return localMcpSessionCache;
+  }
+  localMcpSessionCache = await collectLocalMcpSessionsAsync(paneMetadataSnapshot);
   localMcpSessionCacheAt = now;
   return localMcpSessionCache;
 }
@@ -7355,15 +7483,20 @@ function shutdown() {
   console.log('Shutting down, saving data...');
   supervisorService.stop();
   refreshServerLiveness();
-  sweepLocalActivityDurations();
-  sweepAgentRules();
-  saveAgents();
-  saveGroups();
-  saveMessages();
-  saveCursors();
-  saveServers();
-  saveAgentRuntime();
-  process.exit(0);
+  Promise.allSettled([
+    sweepLocalActivityDurations(),
+    sweepLocalSwapPressure(),
+    sweepAgentScopePressure(),
+  ]).finally(() => {
+    sweepAgentRules();
+    saveAgents();
+    saveGroups();
+    saveMessages();
+    saveCursors();
+    saveServers();
+    saveAgentRuntime();
+    process.exit(0);
+  });
 }
 let startupHooksInstalled = false;
 let backgroundLoopsStarted = false;
@@ -7383,7 +7516,7 @@ function startBackgroundLoops() {
   }, SERVER_SWEEP_INTERVAL_MS);
 
   setInterval(() => {
-    sweepLocalActivityDurations();
+    runAsyncSweep('sweepLocalActivityDurations', sweepLocalActivityDurations, 'localActivity');
   }, LOCAL_ACTIVITY_SWEEP_INTERVAL_MS);
 
   setInterval(() => {
@@ -7391,11 +7524,11 @@ function startBackgroundLoops() {
   }, RULE_SWEEP_INTERVAL_MS);
 
   setInterval(() => {
-    sweepLocalSwapPressure();
+    runAsyncSweep('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap');
   }, SWAP_SWEEP_INTERVAL_MS);
 
   setInterval(() => {
-    sweepAgentScopePressure();
+    runAsyncSweep('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope');
   }, AGENT_SCOPE_SWEEP_INTERVAL_MS);
 
   backgroundLoopsStarted = true;
@@ -7406,9 +7539,9 @@ export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
   installStartupHooks();
   startBackgroundLoops();
   serverInstance = app.listen(port, host, () => {
-    sweepLocalActivityDurations();
-    sweepLocalSwapPressure();
-    sweepAgentScopePressure();
+    runAsyncSweep('sweepLocalActivityDurations', sweepLocalActivityDurations, 'localActivity');
+    runAsyncSweep('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap');
+    runAsyncSweep('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope');
     supervisorService.start();
     console.log(`Agent Chat v2 backend listening on http://${host}:${port}`);
     const agentCount = Object.values(agents).filter(isAgentRecord).length;
