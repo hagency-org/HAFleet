@@ -2951,6 +2951,47 @@ function respondTaskGraphError(res, error, fallback = 'task graph error') {
   return res.status(taskGraphErrorStatus(error)).json({ error: error?.message || fallback });
 }
 
+function handleTaskGraphMessageHook(msg) {
+  const kind = normalizeOptionalText(msg?.schema?.kind, 128);
+  if (kind !== 'task_graph_result' && kind !== 'task_graph_failed') return null;
+  const payload = (msg?.schema?.payload && typeof msg.schema.payload === 'object' && !Array.isArray(msg.schema.payload))
+    ? msg.schema.payload
+    : null;
+  if (!payload) return null;
+  const graphId = normalizeOptionalText(payload.graphId ?? payload.graph_id, 255);
+  const nodeId = normalizeOptionalText(payload.nodeId ?? payload.node_id, 255);
+  if (!graphId || !nodeId) return null;
+  const graph = taskGraphStore.getGraph(graphId);
+  const node = taskGraphStore.getNode(graphId, nodeId);
+  if (!graph || !node || graph.status !== 'active') return null;
+  if (!['pending', 'dispatched', 'active'].includes(node.status)) return null;
+
+  const patch = kind === 'task_graph_result'
+    ? {
+      status: 'complete',
+      result: Object.prototype.hasOwnProperty.call(payload, 'result') ? payload.result : null,
+    }
+    : {
+      status: 'failed',
+      error: normalizeOptionalText(payload.error, 4000) || 'task graph node failed',
+    };
+
+  try {
+    taskGraphStore.updateNode(graphId, nodeId, patch);
+    const advanced = taskGraphStore.advanceGraph(graphId) || taskGraphStore.getGraph(graphId);
+    return {
+      handled: true,
+      graphId,
+      nodeId,
+      status: patch.status,
+      graphStatus: advanced?.status || graph.status,
+    };
+  } catch (error) {
+    console.warn(`task graph message hook ignored (${graphId}/${nodeId}): ${error?.message || error}`);
+    return null;
+  }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────
 function relativeTime(ts) {
   const d = Date.now() - ts;
@@ -7420,12 +7461,14 @@ app.post('/api/messages', (req, res) => {
   }
 
   dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
+  const taskGraph = handleTaskGraphMessageHook(msg);
 
   res.json({
     ok: true,
     id: msg.id,
     warnings,
     delivery: { suppressed: msg.suppressedRecipients || [], targetKind: directTargetKind || null },
+    taskGraph,
   });
 });
 
