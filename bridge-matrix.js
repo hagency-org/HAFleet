@@ -30,6 +30,10 @@ const BACKEND_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_BACK
 const BACKEND_FETCH_TIMEOUT_MS = Number.isFinite(BACKEND_FETCH_TIMEOUT_MS_RAW) && BACKEND_FETCH_TIMEOUT_MS_RAW > 0
   ? BACKEND_FETCH_TIMEOUT_MS_RAW
   : 5000;
+const BACKEND_FETCH_RETRY_DELAY_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_FETCH_RETRY_DELAY_MS || '2500', 10);
+const BACKEND_FETCH_RETRY_DELAY_MS = Number.isFinite(BACKEND_FETCH_RETRY_DELAY_MS_RAW) && BACKEND_FETCH_RETRY_DELAY_MS_RAW > 0
+  ? BACKEND_FETCH_RETRY_DELAY_MS_RAW
+  : 2500;
 const MSG_BASE_URL = process.env.MSG_BASE_URL || 'https://agent.ananthe.party/msg';
 const BOT_USERNAME = (process.env.MATRIX_BOT_USERNAME || 'agent-bridge').trim();
 const BOT_PASSWORD = (process.env.MATRIX_BOT_PASSWORD || '').trim();
@@ -769,6 +773,10 @@ async function backendApi(method, path, body, contextLabel = '') {
   }
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // ── Room ↔ Group mapping ─────────────────────────────────────────────
 function mapRoom(roomId, groupName) {
   const prevGroup = state.roomGroupMap[roomId];
@@ -1074,7 +1082,7 @@ function parseInboundTextMessage(content) {
 }
 
 // ── Main bridge class ─────────────────────────────────────────────────
-class MatrixBridge {
+export class MatrixBridge {
   constructor() {
     this.botClient = null;
     this.botUserId = null;
@@ -1089,6 +1097,14 @@ class MatrixBridge {
     this.recentMatrixEvents = new Map(); // event_id -> { ts, msgId }
     this.startupTs = Date.now();
     this.commands = null;
+  }
+
+  callBackendApi(method, routePath, body, contextLabel = '') {
+    return backendApi(method, routePath, body, contextLabel);
+  }
+
+  sleep(ms) {
+    return sleep(ms);
   }
 
   normalizeName(value) {
@@ -1566,12 +1582,28 @@ class MatrixBridge {
 
   async submitHumanMessage(roomId, payload) {
     try {
-      const result = await backendApi('POST', '/api/messages', payload);
+      const result = await this.callBackendApi('POST', '/api/messages', payload);
       await this.handleMessageDeliveryFeedback(roomId, result);
       return result;
     } catch (e) {
-      await this.sendDeliveryNotice(roomId, `⚠️ Message not delivered: backend unreachable (${e.message}).`);
-      return { error: e.message };
+      if (isTimeoutAbortError(e)) {
+        try {
+          await this.sleep(BACKEND_FETCH_RETRY_DELAY_MS);
+          const retryResult = await this.callBackendApi('POST', '/api/messages', payload, 'retry=1');
+          await this.handleMessageDeliveryFeedback(roomId, retryResult);
+          return retryResult;
+        } catch (retryError) {
+          const detail = isTimeoutAbortError(retryError)
+            ? 'timeout'
+            : String(retryError?.message || retryError);
+          const notice = `⚠️ Message delivery failed after retry (${detail}).`;
+          await this.sendDeliveryNotice(roomId, notice);
+          return { error: detail };
+        }
+      }
+      const detail = String(e?.message || e);
+      await this.sendDeliveryNotice(roomId, `⚠️ Message delivery failed (${detail}).`);
+      return { error: detail };
     }
   }
 
@@ -2989,8 +3021,19 @@ class MatrixBridge {
 // We need to create this as a separate mini module
 
 // ── Start ─────────────────────────────────────────────────────────────
-const bridge = new MatrixBridge();
-bridge.start().catch(e => {
-  console.error('Bridge failed to start:', e);
-  process.exit(1);
-});
+export function startBridge() {
+  const bridge = new MatrixBridge();
+  return bridge.start();
+}
+
+const isMainModule = (() => {
+  const entry = process.argv[1];
+  return Boolean(entry) && path.resolve(entry) === __filename;
+})();
+
+if (isMainModule) {
+  startBridge().catch(e => {
+    console.error('Bridge failed to start:', e);
+    process.exit(1);
+  });
+}
