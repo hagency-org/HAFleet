@@ -128,6 +128,12 @@ function normalizeRuntimeProfile(value) {
   };
 }
 
+function isLocalAgentServer(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  const localServerId = String(process.env.AGENT_CHAT_SERVER || 'local').trim() || 'local';
+  return !raw || raw === 'local' || raw === localServerId;
+}
+
 function isoToMs(value) {
   const ms = Date.parse(String(value || ''));
   return Number.isFinite(ms) ? ms : 0;
@@ -523,6 +529,7 @@ export class SupervisorService {
     for (const agent of all) {
       if (!agent || !agent.name) continue;
       if (agent.kind === 'human') continue;
+      if (!isLocalAgentServer(agent.server)) continue;
       if (allowSet && !allowSet.has(agent.name)) continue;
       const runtime = typeof this.getRuntime === 'function' ? (this.getRuntime(agent.name) || {}) : {};
       rows.push({ agent, runtime });
