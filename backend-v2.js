@@ -5181,9 +5181,17 @@ app.patch('/api/agents/:name', (req, res) => {
   res.json({ ok: true, agent: serializeAgent(agent) });
 });
 
-app.get('/api/agents', (_req, res) => {
+app.get('/api/agents', (req, res) => {
   refreshServerLiveness();
-  res.json(Object.values(agents).filter(isAgentRecord).map(serializeAgent));
+  const records = Object.values(agents).filter(isAgentRecord);
+  if ((String(req.query.view || '').trim().toLowerCase()) === 'names') {
+    const names = records
+      .map(agent => (typeof agent?.name === 'string' ? agent.name.trim() : ''))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+    return res.json(names);
+  }
+  res.json(records.map(serializeAgent));
 });
 
 app.get('/api/agents/:name', (req, res) => {

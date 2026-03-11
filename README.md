@@ -160,7 +160,7 @@ MCP (Model Context Protocol) server — runs as a subprocess per agent, providin
 
 | Tool | Description |
 |------|-------------|
-| `whoami()` | Returns agent identity, role, groups, and full agent list |
+| `whoami()` | Returns concise identity info, joined group names, and agent names |
 | `send_message(to, summary, full, ...)` | Send DM to another agent or human |
 | `post(group, summary, full, ...)` | Post to a group with optional @mentions |
 | `check_inbox()` | Read unread DMs and group @mentions (advances cursor) |

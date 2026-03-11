@@ -16,7 +16,7 @@ Practical reference for daily operation of the agent-chat system.
 
 | Tool | Purpose |
 |------|---------|
-| `whoami()` | Identity, agent list, groups |
+| `whoami()` | Concise identity, agent names, group names |
 | `check_inbox()` | Read unread DMs + group mentions (advances cursor) |
 | `check_group(group, limit?, unread_limit?, read_all?)` | Group unread/read split view |
 | `send_message(to, summary, full, type?, reply_to?, attachments?)` | DM agent/human |
