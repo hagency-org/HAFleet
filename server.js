@@ -1,9 +1,10 @@
 import express from 'express';
 import { readFile as readFileAsync, open, stat as statAsync, appendFile } from 'fs/promises';
 import { writeFileSync, readFileSync, existsSync, mkdirSync, lstatSync, rmSync, unlinkSync, readdirSync } from 'fs';
-import { execSync, execFileSync } from 'child_process';
+import { execFileSync, execFile } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { promisify } from 'util';
 import { defaultAgentchatHomeDir, resolveAgentDocsPaths, resolveV1ManifestForAgent } from './lib/agent-home-v1.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -32,6 +33,7 @@ const IDLE_THRESHOLD = Number.isFinite(envIdleThreshold) && envIdleThreshold > 0
   ? envIdleThreshold
   : DEFAULT_IDLE_THRESHOLD_MS;
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.ceil(IDLE_THRESHOLD / 1000));
+const execFileAsync = promisify(execFile);
 mkdirSync(DATA_ROOT, { recursive: true });
 mkdirSync(LOGS_ROOT, { recursive: true });
 mkdirSync(path.join(DATA_ROOT, 'agents'), { recursive: true });
@@ -439,7 +441,7 @@ app.post('/api/queue/:id/send', async (req, res) => {
         archiveDroppedQueueEntries([entry], 'stale-notification-manual-send', target);
         return res.json({ ok: true, dropped: id, reason: 'stale-notification' });
       }
-      const ok = deliverMessage(entry);
+      const ok = await deliverMessage(entry);
       if (!ok) {
         // Keep behavior consistent with poll loop: failed delivery is retriable, not lost.
         if (!queue.has(target)) queue.set(target, []);
@@ -2281,20 +2283,20 @@ const paneSnapshots = new Map(); // target -> { hash, changedAt }
 
 import { createHash } from 'crypto';
 
-function snapshotPane(target) {
+async function snapshotPaneAsync(target) {
   try {
-    const content = execFileSync(
+    const { stdout } = await execFileAsync(
       'tmux', ['capture-pane', '-t', target, '-p'],
       { encoding: 'utf-8', timeout: 3000 }
     );
-    return createHash('md5').update(content).digest('hex');
+    return createHash('md5').update(stdout).digest('hex');
   } catch {
     return null;
   }
 }
 
-function updatePaneSnapshot(target) {
-  const hash = snapshotPane(target);
+async function updatePaneSnapshot(target) {
+  const hash = await snapshotPaneAsync(target);
   if (hash === null) return;
   const now = Date.now();
   const prev = paneSnapshots.get(target);
@@ -2316,21 +2318,27 @@ function getPaneIdleMs(target) {
 }
 
 // Continuously track ALL panes every 2s (independent of queue)
-setInterval(() => {
+let paneSnapshotSweepRunning = false;
+setInterval(async () => {
+  if (paneSnapshotSweepRunning) return;
+  paneSnapshotSweepRunning = true;
   try {
-    const raw = execFileSync(
+    const { stdout } = await execFileAsync(
       'tmux', ['list-panes', '-a', '-F', '#{session_name}:#{window_index}.#{pane_index}'],
       { encoding: 'utf-8', timeout: 5000 }
-    ).trim();
+    );
+    const raw = stdout.trim();
     const livePanes = new Set(raw.split('\n').filter(Boolean));
-    for (const pane of livePanes) {
-      updatePaneSnapshot(pane);
-    }
+    await Promise.all([...livePanes].map((pane) => updatePaneSnapshot(pane)));
     // Clean up stale snapshots for panes that no longer exist
     for (const key of paneSnapshots.keys()) {
       if (!livePanes.has(key)) paneSnapshots.delete(key);
     }
-  } catch {}
+  } catch {
+    // Ignore transient tmux failures.
+  } finally {
+    paneSnapshotSweepRunning = false;
+  }
 }, 2000);
 
 // ── Target redirects (e.g. renamed sessions) ────────────────────────
@@ -2374,10 +2382,8 @@ app.delete('/api/redirects/:from', (req, res) => {
   res.json({ ok: true });
 });
 
-function sleepMs(ms) { execSync(`sleep ${ms / 1000}`); }
-
-// Deliver message to tmux pane (uses execFileSync to avoid shell injection)
-function deliverMessage(entry) {
+// Deliver message to tmux pane without blocking the event loop.
+async function deliverMessage(entry) {
   const formatExecError = (e) => {
     const stderr = (e && e.stderr) ? String(e.stderr).trim() : '';
     const stdout = (e && e.stdout) ? String(e.stdout).trim() : '';
@@ -2391,14 +2397,14 @@ function deliverMessage(entry) {
       finalPayload += '\n[REDIRECT NOTICE] This message was originally addressed to "' + entry.redirectedFrom + '" which has been renamed to "' + entry.to + '". Please update your target for future messages.';
     }
     try {
-      execFileSync('tmux', ['send-keys', '-l', '-t', entry.to, finalPayload], { timeout: 5000, stdio: 'pipe' });
+      await execFileAsync('tmux', ['send-keys', '-l', '-t', entry.to, finalPayload], { timeout: 5000, stdio: 'pipe' });
     } catch (e) {
       console.error(`Failed to deliver to ${entry.to} (payload step): ${formatExecError(e)}`);
       return false;
     }
-    sleepMs(150);
+    await new Promise((resolve) => setTimeout(resolve, 150));
     try {
-      execFileSync('tmux', ['send-keys', '-t', entry.to, 'C-m'], { timeout: 5000, stdio: 'pipe' });
+      await execFileAsync('tmux', ['send-keys', '-t', entry.to, 'C-m'], { timeout: 5000, stdio: 'pipe' });
     } catch (e) {
       console.error(`Failed to deliver to ${entry.to} (enter step): ${formatExecError(e)}`);
       return false;
@@ -2502,7 +2508,7 @@ setInterval(async () => {
         continue;
       }
 
-      const ok = deliverMessage(entry);
+      const ok = await deliverMessage(entry);
       if (!ok && entry) {
         // Put it back at front
         if (!queue.has(target)) queue.set(target, []);
