@@ -2931,6 +2931,8 @@ const supervisorService = createSupervisorService({
 const taskGraphStore = createTaskGraphStore({
   initialGraphs: taskGraphs,
   save: (nextGraphs) => saveTaskGraphs(nextGraphs),
+  dispatchMessage: (payload) => dispatchInternalDirectMessage(payload),
+  emitEvent: (eventName, payload) => broadcastSSE(eventName, payload),
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────
