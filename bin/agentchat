@@ -21,6 +21,8 @@ Usage: agentchat <command> [args]
 Core:
   up             Start or resume an agent
   up-v1          Provision + launch a new v1 agent-home runtime
+  project        Manage v1 agent project bindings
+  graph          Manage orchestration task graphs
   down           Stop an agent
   ls             List agents
   send           Send message to target pane
@@ -63,6 +65,8 @@ shift
 case "$cmd" in
   up) dispatch "agent-up" "$@" ;;
   up-v1|v1-up) dispatch "agent-up-v1" "$@" ;;
+  project) dispatch "agent-project" "$@" ;;
+  graph) dispatch "agent-graph" "$@" ;;
   down) dispatch "agent-down" "$@" ;;
   ls|list) dispatch "agent-ls" "$@" ;;
   send) dispatch "agent-send" "$@" ;;

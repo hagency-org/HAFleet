@@ -4,14 +4,18 @@ import {
   AutojoinRoomsMixin,
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'fs';
-import { execFileSync } from 'child_process';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { execFile } from 'child_process';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { promisify } from 'util';
 import EventSource from './lib/eventsource-mini.js';
 import BotCommands from './lib/bot-commands.js';
 
 const __filename = fileURLToPath(import.meta.url);
+const execFileAsync = promisify(execFile);
+let execFileAsyncImpl = execFileAsync;
 const REPO_ROOT = path.dirname(__filename);
 const RUNTIME_ROOT = (() => {
   const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
@@ -25,6 +29,14 @@ const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAUL
   ? DEFAULT_BACKEND_PORT_RAW
   : 8090;
 const BACKEND_URL = (process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
+const BACKEND_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_FETCH_TIMEOUT_MS || '12000', 10);
+const BACKEND_FETCH_TIMEOUT_MS = Number.isFinite(BACKEND_FETCH_TIMEOUT_MS_RAW) && BACKEND_FETCH_TIMEOUT_MS_RAW > 0
+  ? BACKEND_FETCH_TIMEOUT_MS_RAW
+  : 12000;
+const BACKEND_FETCH_RETRY_DELAY_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_FETCH_RETRY_DELAY_MS || '2500', 10);
+const BACKEND_FETCH_RETRY_DELAY_MS = Number.isFinite(BACKEND_FETCH_RETRY_DELAY_MS_RAW) && BACKEND_FETCH_RETRY_DELAY_MS_RAW > 0
+  ? BACKEND_FETCH_RETRY_DELAY_MS_RAW
+  : 2500;
 const MSG_BASE_URL = process.env.MSG_BASE_URL || 'https://agent.ananthe.party/msg';
 const BOT_USERNAME = (process.env.MATRIX_BOT_USERNAME || 'agent-bridge').trim();
 const BOT_PASSWORD = (process.env.MATRIX_BOT_PASSWORD || '').trim();
@@ -38,9 +50,132 @@ const DATA_DIR = path.join(RUNTIME_ROOT, 'data', 'matrix');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
 const AGENT_META_ROOT = path.join(RUNTIME_ROOT, 'data', 'agents');
 const AGENT_AVATAR_STYLE_VERSION = 2;
+const OWNER_LOCK_PATH = path.join(DATA_DIR, 'bridge-owner.lock');
 
 mkdirSync(DATA_DIR, { recursive: true });
 mkdirSync(MEDIA_DIR, { recursive: true });
+
+function safeReadJsonFile(filePath, fallback = null) {
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function detectLauncherTag() {
+  if (String(process.env.TMUX || '').trim()) return 'tmux';
+  if (String(process.env.JOURNAL_STREAM || '').trim() || String(process.env.INVOCATION_ID || '').trim()) return 'systemd';
+  return 'unknown';
+}
+
+function readProcCmdline(pid) {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, 'utf-8').replace(/\u0000/g, ' ').trim();
+  } catch {
+    return null;
+  }
+}
+
+function readProcCwd(pid) {
+  try {
+    return path.resolve(readlinkSync(`/proc/${pid}/cwd`));
+  } catch {
+    return null;
+  }
+}
+
+function isLiveBridgeOwner(meta) {
+  const pid = Number(meta?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  const cmdline = readProcCmdline(pid);
+  if (!cmdline || !cmdline.includes('bridge-matrix.js')) return false;
+  const ownerRuntimeRoot = typeof meta?.runtimeRoot === 'string' ? path.resolve(meta.runtimeRoot) : null;
+  return !ownerRuntimeRoot || ownerRuntimeRoot === RUNTIME_ROOT;
+}
+
+function summarizeOwner(meta) {
+  if (!meta || typeof meta !== 'object') return 'unknown owner';
+  const pid = Number.isInteger(Number(meta.pid)) ? Number(meta.pid) : null;
+  const launcher = typeof meta.launcher === 'string' ? meta.launcher : 'unknown';
+  const cwd = typeof meta.cwd === 'string' ? meta.cwd : 'unknown';
+  const startedAt = typeof meta.startedAt === 'string' ? meta.startedAt : 'unknown';
+  return `pid=${pid ?? 'unknown'} launcher=${launcher} cwd=${cwd} startedAt=${startedAt}`;
+}
+
+function writeOwnerLock(fd, meta) {
+  writeFileSync(fd, `${JSON.stringify(meta, null, 2)}\n`, 'utf-8');
+}
+
+function buildOwnerLockMeta() {
+  return {
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    cwd: process.cwd(),
+    procCwd: readProcCwd(process.pid),
+    runtimeRoot: RUNTIME_ROOT,
+    hostname: os.hostname(),
+    launcher: detectLauncherTag(),
+  };
+}
+
+function acquireBridgeOwnership() {
+  const ownerMeta = buildOwnerLockMeta();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let fd = null;
+    try {
+      fd = openSync(OWNER_LOCK_PATH, 'wx');
+      writeOwnerLock(fd, ownerMeta);
+      closeSync(fd);
+      return ownerMeta;
+    } catch (error) {
+      if (fd !== null) {
+        try { closeSync(fd); } catch {}
+      }
+      if (error?.code !== 'EEXIST') throw error;
+      const existing = safeReadJsonFile(OWNER_LOCK_PATH, null);
+      if (isLiveBridgeOwner(existing)) {
+        throw new Error(`duplicate bridge owner for runtime root ${RUNTIME_ROOT}; existing ${summarizeOwner(existing)}`);
+      }
+      try {
+        unlinkSync(OWNER_LOCK_PATH);
+      } catch (unlinkError) {
+        if (unlinkError?.code !== 'ENOENT') throw unlinkError;
+      }
+      console.warn(`[bridge-owner-lock] recovered stale owner lock for runtime root ${RUNTIME_ROOT}`);
+    }
+  }
+  throw new Error(`failed to acquire bridge owner lock for runtime root ${RUNTIME_ROOT}`);
+}
+
+function releaseBridgeOwnership(expectedMeta) {
+  const existing = safeReadJsonFile(OWNER_LOCK_PATH, null);
+  if (!existing || Number(existing?.pid) !== process.pid) return;
+  if (expectedMeta && String(existing.runtimeRoot || '') !== String(expectedMeta.runtimeRoot || '')) return;
+  try {
+    unlinkSync(OWNER_LOCK_PATH);
+  } catch {}
+}
+
+let bridgeOwnerMeta = null;
+try {
+  bridgeOwnerMeta = acquireBridgeOwnership();
+} catch (error) {
+  console.error(`[bridge-owner-lock] startup rejected: ${error?.message || error}`);
+  process.exit(1);
+}
+process.on('exit', () => releaseBridgeOwnership(bridgeOwnerMeta));
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    releaseBridgeOwnership(bridgeOwnerMeta);
+    process.exit(0);
+  });
+}
 
 // ── State persistence ─────────────────────────────────────────────────
 function loadState() {
@@ -79,6 +214,25 @@ function resolveStoredAgentTokenName(agentName) {
   if (!trimmed) return null;
   if (Object.prototype.hasOwnProperty.call(state.agentTokens, trimmed)) return trimmed;
   return findCaseInsensitiveKey(state.agentTokens || {}, trimmed);
+}
+
+function isTimeoutAbortError(error) {
+  const message = String(error?.message || '');
+  return error?.name === 'TimeoutError'
+    || (error?.name === 'AbortError' && /timeout/i.test(message))
+    || /aborted due to timeout/i.test(message);
+}
+
+async function getJoinedRoomMembersWithTrace(botClient, roomId, contextLabel) {
+  const startedAt = Date.now();
+  try {
+    return await botClient.getJoinedRoomMembers(roomId);
+  } catch (error) {
+    const elapsedMs = Date.now() - startedAt;
+    const prefix = isTimeoutAbortError(error) ? '[bridge-matrix-timeout]' : '[bridge-matrix-fetch-failed]';
+    console.error(`${prefix} ${contextLabel} room=${roomId} after ${elapsedMs}ms: ${error?.message || error}`);
+    throw error;
+  }
 }
 
 function getStoredAgentToken(agentName) {
@@ -390,20 +544,25 @@ function renderAvatarBaseSvg(name, badge) {
 </svg>`;
 }
 
-function generateAvatarPng(name, options = {}) {
+async function runAvatarConvert(args, input, maxBuffer) {
+  const { stdout } = await execFileAsyncImpl('convert', args, {
+    input,
+    maxBuffer,
+    timeout: 10_000,
+  });
+  return Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
+}
+
+async function generateAvatarPng(name, options = {}) {
   const badge = options.badge || 'AGENT';
   const iconPath = options.iconPath || null;
   const baseSvg = renderAvatarBaseSvg(name, badge);
   if (!iconPath) {
-    return execFileSync('convert', ['svg:-', '-resize', '256x256', 'png:-'], {
-      input: Buffer.from(baseSvg),
-      maxBuffer: 4 * 1024 * 1024,
-    });
+    return runAvatarConvert(['svg:-', '-resize', '256x256', 'png:-'], Buffer.from(baseSvg), 4 * 1024 * 1024);
   }
 
   try {
-    return execFileSync(
-      'convert',
+    return await runAvatarConvert(
       [
         'svg:-',
         '(',
@@ -419,17 +578,12 @@ function generateAvatarPng(name, options = {}) {
         '-composite',
         'png:-',
       ],
-      {
-        input: Buffer.from(baseSvg),
-        maxBuffer: 8 * 1024 * 1024,
-      }
+      Buffer.from(baseSvg),
+      8 * 1024 * 1024,
     );
   } catch (e) {
     console.warn(`Icon avatar render failed for ${name} (${iconPath}): ${e.message}`);
-    return execFileSync('convert', ['svg:-', '-resize', '256x256', 'png:-'], {
-      input: Buffer.from(baseSvg),
-      maxBuffer: 4 * 1024 * 1024,
-    });
+    return runAvatarConvert(['svg:-', '-resize', '256x256', 'png:-'], Buffer.from(baseSvg), 4 * 1024 * 1024);
   }
 }
 
@@ -501,7 +655,7 @@ async function ensureAgentAvatar(agentName) {
       Promise.resolve(resolveAgentProjectIcon(canonicalAgentName)),
     ]);
     const badge = normalizeBadge(deriveAgentBadge(canonicalAgentName, agentInfo, iconResult.meta), 'AGENT');
-    const png = generateAvatarPng(canonicalAgentName, { badge, iconPath: iconResult.iconPath });
+    const png = await generateAvatarPng(canonicalAgentName, { badge, iconPath: iconResult.iconPath });
     const mxcUri = await uploadMedia(token, png, 'image/png');
     await setUserAvatar(token, mxcUri);
     state.agentAvatars[canonicalAgentName] = mxcUri;
@@ -545,7 +699,7 @@ async function ensureRoomAvatar(roomId, name) {
   if (state.roomAvatars[roomId]) return;
   try {
     const displayName = name.replace(/^DM:\s*/, '');
-    const png = generateAvatarPng(displayName);
+    const png = await generateAvatarPng(displayName);
     const mxcUri = await uploadMedia(state.botToken, png, 'image/png');
     await setRoomAvatar(roomId, mxcUri);
     state.roomAvatars[roomId] = mxcUri;
@@ -603,14 +757,48 @@ async function setCustomAgentAvatar(agentName, imageBuffer, mimeType) {
 }
 
 // ── Backend API helpers ───────────────────────────────────────────────
-async function backendApi(method, path, body) {
-  const opts = { method, headers: {} };
+async function backendApi(method, path, body, contextLabel = '') {
+  const opts = { method, headers: {}, signal: AbortSignal.timeout(BACKEND_FETCH_TIMEOUT_MS) };
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(`${BACKEND_URL}${path}`, opts);
-  return res.json();
+  const startedAt = Date.now();
+  try {
+    const res = await fetch(`${BACKEND_URL}${path}`, opts);
+    const text = await res.text();
+    const parsed = text ? JSON.parse(text) : null;
+    if (!res.ok) {
+      const detail = text ? ` body=${text}` : '';
+      throw new Error(`backend API ${method} ${path} failed with HTTP ${res.status}${detail}`);
+    }
+    return parsed;
+  } catch (error) {
+    const elapsedMs = Date.now() - startedAt;
+    const prefix = isTimeoutAbortError(error) ? '[bridge-backend-timeout]' : '[bridge-backend-fetch-failed]';
+    const suffix = contextLabel ? ` ${contextLabel}` : '';
+    console.error(`${prefix} ${method} ${path}${suffix} after ${elapsedMs}ms: ${error?.message || error}`);
+    throw error;
+  }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function normalizeAgentNameList(payload) {
+  if (!Array.isArray(payload)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const row of payload) {
+    const name = typeof row === 'string'
+      ? row.trim()
+      : (typeof row?.name === 'string' ? row.name.trim() : '');
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
 }
 
 // ── Room ↔ Group mapping ─────────────────────────────────────────────
@@ -917,8 +1105,13 @@ function parseInboundTextMessage(content) {
   return { skip: !body, body, replyEventId };
 }
 
+function shouldIgnoreAgentForward(content) {
+  const rawBody = typeof content?.body === 'string' ? content.body : '';
+  return /^\[agentignore\]/i.test(rawBody);
+}
+
 // ── Main bridge class ─────────────────────────────────────────────────
-class MatrixBridge {
+export class MatrixBridge {
   constructor() {
     this.botClient = null;
     this.botUserId = null;
@@ -931,8 +1124,42 @@ class MatrixBridge {
     this.recentAgentCompactIds = new Set(); // dedupe compact SSE events
     this.recentlyCreatedRooms = new Set(); // rooms we just created (suppress echo)
     this.recentMatrixEvents = new Map(); // event_id -> { ts, msgId }
+    this.blockedAlertRooms = new Map(); // agent -> Set(roomId)
     this.startupTs = Date.now();
     this.commands = null;
+  }
+
+  callBackendApi(method, routePath, body, contextLabel = '') {
+    return backendApi(method, routePath, body, contextLabel);
+  }
+
+  async fetchKnownAgentNames() {
+    const payload = await this.callBackendApi('GET', '/api/agents?view=names');
+    return normalizeAgentNameList(payload);
+  }
+
+  sleep(ms) {
+    return sleep(ms);
+  }
+
+  rememberBlockedAlertRoom(agentName, roomId) {
+    const canonicalAgent = this.resolveKnownAgentName(agentName) || this.normalizeName(agentName);
+    const normalizedRoom = (typeof roomId === 'string' && roomId.trim()) ? roomId.trim() : '';
+    if (!canonicalAgent || !normalizedRoom) return;
+    let rooms = this.blockedAlertRooms.get(canonicalAgent);
+    if (!rooms) {
+      rooms = new Set();
+      this.blockedAlertRooms.set(canonicalAgent, rooms);
+    }
+    rooms.add(normalizedRoom);
+  }
+
+  consumeBlockedAlertRooms(agentName) {
+    const canonicalAgent = this.resolveKnownAgentName(agentName) || this.normalizeName(agentName);
+    if (!canonicalAgent) return [];
+    const rooms = this.blockedAlertRooms.get(canonicalAgent);
+    this.blockedAlertRooms.delete(canonicalAgent);
+    return rooms ? [...rooms] : [];
   }
 
   normalizeName(value) {
@@ -1170,14 +1397,14 @@ class MatrixBridge {
     console.log(`Bot: ${this.botUserId}`);
 
     // 2. Ensure agent accounts for all known agents
-    const agents = await backendApi('GET', '/api/agents');
+    const agents = await this.fetchKnownAgentNames();
     const validAgentNames = new Set();
     const validAgentKeys = new Set();
-    for (const agent of agents) {
-      validAgentNames.add(agent.name);
-      validAgentKeys.add(this.nameKey(agent.name));
-      await ensureAgentAccount(agent.name);
-      this.addKnownAgent(agent.name);
+    for (const agentName of agents) {
+      validAgentNames.add(agentName);
+      validAgentKeys.add(this.nameKey(agentName));
+      await ensureAgentAccount(agentName);
+      this.addKnownAgent(agentName);
     }
     // Drop stale tokens that were created for non-agent users.
     let cleanedTokenCount = 0;
@@ -1232,17 +1459,17 @@ class MatrixBridge {
   async pollRegistrations() {
     // Poll new agents from backend
     try {
-      const agents = await backendApi('GET', '/api/agents');
-      const validAgentNames = new Set(agents.map(a => a.name));
-      const validAgentKeys = new Set(agents.map(a => this.nameKey(a.name)));
-      for (const agent of agents) {
-        const wasKnown = this.isKnownAgentName(agent.name);
-        const canonicalName = this.addKnownAgent(agent.name) || this.normalizeName(agent.name);
+      const agents = await this.fetchKnownAgentNames();
+      const validAgentNames = new Set(agents);
+      const validAgentKeys = new Set(agents.map(name => this.nameKey(name)));
+      for (const agentName of agents) {
+        const wasKnown = this.isKnownAgentName(agentName);
+        const canonicalName = this.addKnownAgent(agentName) || this.normalizeName(agentName);
         if (canonicalName && !this.getAgentToken(canonicalName)) {
           await this.ensureAgentToken(canonicalName, 'registration_poll');
         }
         if (!wasKnown) {
-          console.log(`Discovered new agent: ${agent.name}`);
+          console.log(`Discovered new agent: ${agentName}`);
         }
       }
       let pruned = 0;
@@ -1410,12 +1637,28 @@ class MatrixBridge {
 
   async submitHumanMessage(roomId, payload) {
     try {
-      const result = await backendApi('POST', '/api/messages', payload);
+      const result = await this.callBackendApi('POST', '/api/messages', payload);
       await this.handleMessageDeliveryFeedback(roomId, result);
       return result;
     } catch (e) {
-      await this.sendDeliveryNotice(roomId, `⚠️ Message not delivered: backend unreachable (${e.message}).`);
-      return { error: e.message };
+      if (isTimeoutAbortError(e)) {
+        try {
+          await this.sleep(BACKEND_FETCH_RETRY_DELAY_MS);
+          const retryResult = await this.callBackendApi('POST', '/api/messages', payload, 'retry=1');
+          await this.handleMessageDeliveryFeedback(roomId, retryResult);
+          return retryResult;
+        } catch (retryError) {
+          const detail = isTimeoutAbortError(retryError)
+            ? 'timeout'
+            : String(retryError?.message || retryError);
+          const notice = `⚠️ Message delivery failed after retry (${detail}).`;
+          await this.sendDeliveryNotice(roomId, notice);
+          return { error: detail };
+        }
+      }
+      const detail = String(e?.message || e);
+      await this.sendDeliveryNotice(roomId, `⚠️ Message delivery failed (${detail}).`);
+      return { error: detail };
     }
   }
 
@@ -1424,6 +1667,8 @@ class MatrixBridge {
     const eventId = event?.event_id || null;
     if (eventId && this.isDuplicateMatrixEvent(eventId)) return;
     if (eventId) this.rememberMatrixEvent(eventId);
+
+    if (shouldIgnoreAgentForward(event?.content)) return;
 
     const parsed = parseInboundTextMessage(event.content);
     if (parsed.skip) return;
@@ -1734,17 +1979,31 @@ class MatrixBridge {
     // Skip recently created rooms — humans may not have accepted invites yet
     if (this.recentlyCreatedRooms.has(roomId)) return;
     try {
-      const joinedMembers = await this.botClient.getJoinedRoomMembers(roomId);
+      const joinedMembers = await getJoinedRoomMembersWithTrace(
+        this.botClient,
+        roomId,
+        `reconcile:getJoinedRoomMembers group=${JSON.stringify(groupName)}`
+      );
       const agentMembers = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
       const humanMembers = joinedMembers
         .filter(m => !isAgentUser(m) && m !== this.botUserId)
         .map(m => humanNameFromUserId(m))
         .filter(Boolean);
       const matrixMembers = [...new Set([...agentMembers, ...humanMembers].filter(Boolean))];
-      const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(groupName)}`);
+      const existing = await backendApi(
+        'GET',
+        `/api/groups/${encodeURIComponent(groupName)}`,
+        null,
+        `context=reconcile:get-group group=${JSON.stringify(groupName)} room=${roomId}`
+      );
 
       if (existing.error) {
-        await backendApi('POST', '/api/groups', { name: groupName, members: matrixMembers });
+        await backendApi(
+          'POST',
+          '/api/groups',
+          { name: groupName, members: matrixMembers },
+          `context=reconcile:create-group group=${JSON.stringify(groupName)} room=${roomId} memberCount=${matrixMembers.length}`
+        );
         console.log(`Reconciled by creating missing backend group "${groupName}" with ${matrixMembers.length} members`);
         return;
       }
@@ -1762,7 +2021,12 @@ class MatrixBridge {
       }
 
       if (add.length > 0) {
-        await backendApi('POST', `/api/groups/${encodeURIComponent(groupName)}/members`, { add });
+        await backendApi(
+          'POST',
+          `/api/groups/${encodeURIComponent(groupName)}/members`,
+          { add },
+          `context=reconcile:add-members group=${JSON.stringify(groupName)} room=${roomId} addCount=${add.length}`
+        );
         console.log(`Reconciled group "${groupName}" from room ${roomId}: +[${add.join(', ')}]`);
       }
     } catch (e) {
@@ -2023,6 +2287,7 @@ class MatrixBridge {
       const pendingHint = target?.pending ? ' There are still unread human messages pending for this agent.' : '';
       const text = `⚠️ Agent @${agentName} appears blocked (${reason}). It may not process messages until manually handled.${pendingHint}`;
       await this.sendDeliveryNotice(roomId, text);
+      this.rememberBlockedAlertRoom(agentName, roomId);
     }
   }
 
@@ -2105,6 +2370,10 @@ class MatrixBridge {
     const agentName = (typeof event?.agent === 'string' && event.agent.trim()) ? event.agent.trim() : '';
     if (!agentName) return;
     console.log(`SSE: agent_recovered — ${agentName}`);
+    const rooms = this.consumeBlockedAlertRooms(agentName);
+    for (const roomId of rooms) {
+      await this.sendDeliveryNotice(roomId, `✅ Agent @${agentName} recovered from blocked state.`);
+    }
   }
 
   async onSystemInfo(event) {
@@ -2814,8 +3083,31 @@ class MatrixBridge {
 // We need to create this as a separate mini module
 
 // ── Start ─────────────────────────────────────────────────────────────
-const bridge = new MatrixBridge();
-bridge.start().catch(e => {
-  console.error('Bridge failed to start:', e);
-  process.exit(1);
-});
+export function startBridge() {
+  const bridge = new MatrixBridge();
+  return bridge.start();
+}
+
+export async function generateAvatarPngForTest(name, options = {}) {
+  return generateAvatarPng(name, options);
+}
+
+export function setBridgeMatrixTestHooks({ execFileAsync: overrideExecFileAsync } = {}) {
+  execFileAsyncImpl = typeof overrideExecFileAsync === 'function' ? overrideExecFileAsync : execFileAsync;
+}
+
+export function resetBridgeMatrixTestHooks() {
+  execFileAsyncImpl = execFileAsync;
+}
+
+const isMainModule = (() => {
+  const entry = process.argv[1];
+  return Boolean(entry) && path.resolve(entry) === __filename;
+})();
+
+if (isMainModule) {
+  startBridge().catch(e => {
+    console.error('Bridge failed to start:', e);
+    process.exit(1);
+  });
+}

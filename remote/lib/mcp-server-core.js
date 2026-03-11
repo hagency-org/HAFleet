@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { execSync } from 'child_process';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import { createHash } from 'crypto';
+import os from 'os';
 import path from 'path';
 import { z } from 'zod';
 
@@ -62,7 +63,7 @@ const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAUL
   : 8090;
 const API = process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`;
 const API_TOKEN = (process.env.API_TOKEN || '').trim();
-const AGENT_SERVER = (process.env.AGENT_CHAT_SERVER || '').trim() || null;
+const AGENT_SERVER = (process.env.AGENT_CHAT_SERVER || '').trim() || os.hostname();
 const ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.AGENT_CHAT_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
 const ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.AGENT_CHAT_ATTACHMENT_MAX_ITEMS || '8', 10);
 const MEDIA_FETCH_CACHE_DIR = path.resolve('data', 'mcp-media-cache', AGENT_NAME);
@@ -113,6 +114,41 @@ function text(data) {
 
 function err(msg) {
   return { content: [{ type: 'text', text: msg }], isError: true };
+}
+
+function normalizeWhoamiIdentity(me) {
+  if (!me || typeof me !== 'object') return { name: AGENT_NAME };
+  const out = {};
+  for (const key of ['name', 'role', 'type', 'agentId', 'layoutVersion', 'agentModelVersion']) {
+    const value = me[key];
+    if (value === null || value === undefined) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    out[key] = value;
+  }
+  if (!out.name) out.name = AGENT_NAME;
+  return out;
+}
+
+function normalizeWhoamiGroups(me) {
+  if (!Array.isArray(me?.groups)) return [];
+  return [...new Set(
+    me.groups
+      .map(group => (typeof group === 'string' ? group.trim() : ''))
+      .filter(Boolean)
+  )].sort((a, b) => a.localeCompare(b));
+}
+
+function normalizeWhoamiAgentNames(allAgents) {
+  if (!Array.isArray(allAgents)) return [];
+  return [...new Set(
+    allAgents
+      .map((entry) => {
+        if (typeof entry === 'string') return entry.trim();
+        if (entry && typeof entry === 'object' && typeof entry.name === 'string') return entry.name.trim();
+        return '';
+      })
+      .filter(Boolean)
+  )].sort((a, b) => a.localeCompare(b));
 }
 
 function normalizeAttachmentName(name, fallback = 'file') {
@@ -444,15 +480,18 @@ const server = new McpServer({
 
 await ensureAgentRegistered();
 
-// 1. whoami — returns identity, groups (with unread counts), and all known agents
+// 1. whoami — returns concise identity, groups, and known agent names
 server.tool('whoami', 'Returns your agent identity, role, and groups', {}, async () => {
   try {
-    const [me, allAgents, myGroups] = await Promise.all([
+    const [me, allAgents] = await Promise.all([
       api('GET', `/api/agents/${AGENT_NAME}`),
-      api('GET', '/api/agents'),
-      api('GET', `/api/agents/${AGENT_NAME}/groups`),
+      api('GET', '/api/agents?view=names'),
     ]);
-    return text({ me, groups: myGroups, agents: allAgents });
+    return text({
+      me: normalizeWhoamiIdentity(me),
+      groups: normalizeWhoamiGroups(me),
+      agents: normalizeWhoamiAgentNames(allAgents),
+    });
   } catch (e) {
     return err(e.message);
   }
@@ -473,13 +512,19 @@ server.tool(
       kind: z.enum(['image', 'file']).optional().describe('Optional content kind override'),
     })).max(ATTACHMENT_MAX_ITEMS).optional().describe('Optional attachments. Files are staged to backend and bridged to Matrix.'),
     type: z.enum(['request', 'inform', 'reply']).default('inform').describe('Message type: request, inform, or reply'),
+    priority: z.enum(['normal', 'high', 'urgent']).default('normal').describe('Message priority. High and urgent notifications skip the idle delivery gate.'),
     reply_to: z.string().optional().describe('Message ID this is replying to'),
+    schema: z.object({
+      kind: z.string().describe('Structured message kind, e.g. task_request'),
+      version: z.number().int().positive().optional().describe('Schema version; defaults to 1'),
+      payload: z.unknown().optional().describe('Structured payload for this kind'),
+    }).optional().describe('Optional structured message schema'),
   },
-  async ({ to, summary, full, attachments, type, reply_to }) => {
+  async ({ to, summary, full, attachments, type, priority, reply_to, schema }) => {
     try {
       const stagedAttachments = await stageAttachments(attachments);
       const data = await api('POST', '/api/messages', {
-        from: AGENT_NAME, to, type, summary, full, attachments: stagedAttachments, mentions: [], reply_to: reply_to || null,
+        from: AGENT_NAME, to, type, priority, summary, full, attachments: stagedAttachments, mentions: [], reply_to: reply_to || null, schema,
       });
       return text(data);
     } catch (e) {
@@ -503,14 +548,20 @@ server.tool(
       kind: z.enum(['image', 'file']).optional().describe('Optional content kind override'),
     })).max(ATTACHMENT_MAX_ITEMS).optional().describe('Optional attachments. Files are staged to backend and bridged to Matrix.'),
     type: z.enum(['request', 'inform', 'reply']).default('inform').describe('Message type: request, inform, or reply'),
+    priority: z.enum(['normal', 'high', 'urgent']).default('normal').describe('Message priority. High and urgent notifications skip the idle delivery gate.'),
     mentions: z.array(z.string()).optional().describe('Agent names to @mention and push-notify'),
     reply_to: z.string().optional().describe('Message ID this is replying to'),
+    schema: z.object({
+      kind: z.string().describe('Structured message kind, e.g. task_result'),
+      version: z.number().int().positive().optional().describe('Schema version; defaults to 1'),
+      payload: z.unknown().optional().describe('Structured payload for this kind'),
+    }).optional().describe('Optional structured message schema'),
   },
-  async ({ group, summary, full, attachments, type, mentions, reply_to }) => {
+  async ({ group, summary, full, attachments, type, priority, mentions, reply_to, schema }) => {
     try {
       const stagedAttachments = await stageAttachments(attachments);
       const data = await api('POST', '/api/messages', {
-        from: AGENT_NAME, group, type, summary, full, attachments: stagedAttachments, mentions: mentions || [], reply_to: reply_to || null,
+        from: AGENT_NAME, group, type, priority, summary, full, attachments: stagedAttachments, mentions: mentions || [], reply_to: reply_to || null, schema,
       });
       return text(data);
     } catch (e) {
@@ -522,11 +573,16 @@ server.tool(
 // 4. check_inbox — returns full message content (no need for separate get_message)
 server.tool(
   'check_inbox',
-  'Check your inbox for unread direct messages and @mentions from groups. Returns two arrays: dm (private messages) and group (@mentions). Reading advances your cursor — messages shown here won\'t appear again next time.',
-  {},
-  async () => {
+  'Check your inbox for unread direct messages and @mentions from groups. Returns two arrays: dm (private messages) and group (@mentions). Reading advances your cursor — messages shown here won\'t appear again next time. When filtered by kinds, this becomes a non-destructive preview.',
+  {
+    kinds: z.array(z.string()).optional().describe('Optional schema.kind filter. When set, only matching unread messages are returned and the inbox cursor is not advanced.'),
+  },
+  async ({ kinds }) => {
     try {
-      const data = await api('GET', `/api/inbox/${AGENT_NAME}`);
+      const params = new URLSearchParams();
+      if (Array.isArray(kinds) && kinds.length > 0) params.set('kinds', kinds.join(','));
+      const suffix = params.size ? `?${params}` : '';
+      const data = await api('GET', `/api/inbox/${AGENT_NAME}${suffix}`);
       const localized = await localizeInboxData(data);
       return text(localized);
     } catch (e) {

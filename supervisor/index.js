@@ -17,10 +17,13 @@ function readJsonl(filePath, limit = 2000) {
     for (const line of tail) {
       try {
         parsed.push(JSON.parse(line));
-      } catch {}
+      } catch (e) {
+        console.debug(`[supervisor] jsonl parse skipped for ${filePath}: ${e.message}`);
+      }
     }
     return parsed;
-  } catch {
+  } catch (e) {
+    console.debug(`[supervisor] jsonl read skipped for ${filePath}: ${e.message}`);
     return [];
   }
 }
@@ -128,6 +131,12 @@ function normalizeRuntimeProfile(value) {
   };
 }
 
+function isLocalAgentServer(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  const localServerId = String(process.env.AGENT_CHAT_SERVER || 'local').trim() || 'local';
+  return !raw || raw === 'local' || raw === localServerId;
+}
+
 function isoToMs(value) {
   const ms = Date.parse(String(value || ''));
   return Number.isFinite(ms) ? ms : 0;
@@ -171,7 +180,8 @@ function tmuxSessionExists(sessionName) {
   try {
     execFileSync('tmux', ['has-session', '-t', `=${sessionName}`], { timeout: 2000, stdio: 'ignore' });
     return true;
-  } catch {
+  } catch (e) {
+    console.debug(`[supervisor] tmux session check skipped for ${sessionName}: ${e.message}`);
     return false;
   }
 }
@@ -183,7 +193,8 @@ function tmuxPanePath(sessionName) {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim() || null;
-  } catch {
+  } catch (e) {
+    console.debug(`[supervisor] tmux pane path lookup skipped for ${sessionName}: ${e.message}`);
     return null;
   }
 }
@@ -192,8 +203,26 @@ function killTmuxSession(sessionName) {
   try {
     execFileSync('tmux', ['kill-session', '-t', `=${sessionName}`], { timeout: 3000, stdio: 'ignore' });
     return true;
-  } catch {
+  } catch (e) {
+    console.debug(`[supervisor] tmux kill skipped for ${sessionName}: ${e.message}`);
     return false;
+  }
+}
+
+function listTmuxSessions() {
+  try {
+    const output = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'], {
+      timeout: 3000,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return String(output || '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch (e) {
+    console.debug(`[supervisor] tmux list skipped: ${e.message}`);
+    return [];
   }
 }
 
@@ -273,7 +302,8 @@ function isExecutableFile(filePath) {
   try {
     accessSync(filePath, fsConstants.X_OK);
     return true;
-  } catch {
+  } catch (e) {
+    console.debug(`[supervisor] executable check skipped for ${filePath}: ${e.message}`);
     return false;
   }
 }
@@ -392,6 +422,70 @@ function buildSupervisorWarning(agentName, observation) {
   };
 }
 
+function buildSupervisorNudge(agentName, observation, consecutiveNegative) {
+  const task = observation.task || null;
+  return {
+    to: agentName,
+    summary: 'Supervisor: you appear stalled. Check your task and resume work.',
+    full: [
+      `Supervisor detected repeated negative state for ${agentName}.`,
+      `Classification: ${observation.classification}`,
+      `Reason: ${observation.reason}`,
+      `Consecutive negative checks: ${consecutiveNegative}`,
+      `Task id: ${task?.id || 'none'}`,
+      `Task status: ${task?.status || 'none'}`,
+      `Heartbeat at: ${task?.heartbeat_at || 'none'}`,
+      `Waiting reason: ${task?.waiting_reason || 'none'}`,
+      `Waiting until: ${task?.waiting_until || 'none'}`,
+      'Review the current task, refresh heartbeat or declare waiting explicitly, then resume work.',
+    ].join('\n'),
+    type: 'inform',
+    priority: 'high',
+    schema: {
+      kind: 'escalation',
+      version: 1,
+      payload: {
+        level: 'nudge',
+        reason: observation.classification,
+        count: consecutiveNegative,
+        agent: agentName,
+      },
+    },
+  };
+}
+
+function buildSupervisorEscalation(agentName, observation, consecutiveNegative) {
+  const task = observation.task || null;
+  return {
+    to: 'ac-topleader',
+    summary: `Supervisor escalation: ${agentName} appears EOS after ${consecutiveNegative} checks`,
+    full: [
+      `Supervisor escalation for ${agentName}.`,
+      `Classification: ${observation.classification}`,
+      `Reason: ${observation.reason}`,
+      `Consecutive negative checks: ${consecutiveNegative}`,
+      `Task id: ${task?.id || 'none'}`,
+      `Task status: ${task?.status || 'none'}`,
+      `Heartbeat at: ${task?.heartbeat_at || 'none'}`,
+      `Waiting reason: ${task?.waiting_reason || 'none'}`,
+      `Waiting until: ${task?.waiting_until || 'none'}`,
+      'Supervisor already issued a nudge and the negative state persisted.',
+    ].join('\n'),
+    type: 'request',
+    priority: 'urgent',
+    schema: {
+      kind: 'escalation',
+      version: 1,
+      payload: {
+        level: 'escalate',
+        reason: observation.classification,
+        count: consecutiveNegative,
+        agent: agentName,
+      },
+    },
+  };
+}
+
 export class SupervisorService {
   constructor(deps = {}) {
     this.config = deps.config || loadSupervisorConfig(process.env);
@@ -399,8 +493,16 @@ export class SupervisorService {
     this.getRuntime = deps.getRuntime;
     this.emitSystemInfo = deps.emitSystemInfo;
     this.broadcastSSE = deps.broadcastSSE;
+    this.sendMessage = deps.sendMessage;
+    this.listTmuxSessions = typeof deps.listTmuxSessions === 'function' ? deps.listTmuxSessions : listTmuxSessions;
+    this.killTmuxSession = typeof deps.killTmuxSession === 'function' ? deps.killTmuxSession : killTmuxSession;
+    this.tmuxSessionExists = typeof deps.tmuxSessionExists === 'function' ? deps.tmuxSessionExists : tmuxSessionExists;
+    this.tmuxPanePath = typeof deps.tmuxPanePath === 'function' ? deps.tmuxPanePath : tmuxPanePath;
+    this.startSupervisorTmuxSession = typeof deps.startSupervisorTmuxSession === 'function'
+      ? deps.startSupervisorTmuxSession
+      : startSupervisorTmuxSession;
 
-    this.enabled = this.config.enabled;
+    this.enabledRequested = this.config.enabled === true;
     this.disabledReason = this.config.disabledReason || null;
     this.agentAllowlist = normalizeAgentAllowlist(this.config.agentAllowlist) || null;
     this.stateStore = new SupervisorStateStore(this.config.stateFile, this.config.warnAfter, this.config.warnCooldownMs);
@@ -420,12 +522,36 @@ export class SupervisorService {
     }
   }
 
+  isEnabled() {
+    return this.enabledRequested === true && this.timer !== null;
+  }
+
+  cleanupOrphanSupervisorSessions() {
+    const knownSessions = new Set();
+    for (const row of Object.values(this.stateStore.agents || {})) {
+      const sessionName = normalizeOptionalText(row?.runtimeLaunch?.sessionName, 256);
+      if (sessionName) knownSessions.add(sessionName);
+    }
+    const listedSessions = typeof this.listTmuxSessions === 'function' ? this.listTmuxSessions() : [];
+    const tmuxSessions = Array.isArray(listedSessions) ? listedSessions : [];
+    for (const sessionName of tmuxSessions) {
+      if (!String(sessionName).startsWith('supervisor-')) continue;
+      if (knownSessions.has(sessionName)) continue;
+      if (this.killTmuxSession(sessionName)) {
+        console.log(`[supervisor] cleaned orphan tmux session ${sessionName}`);
+      } else {
+        console.warn(`[supervisor] failed to clean orphan tmux session ${sessionName}`);
+      }
+    }
+  }
+
   start() {
-    if (!this.enabled) {
+    if (!this.enabledRequested) {
       console.log(`[supervisor] disabled: ${this.disabledReason || 'unknown reason'}`);
       return;
     }
     if (this.timer) return;
+    this.cleanupOrphanSupervisorSessions();
     this.runSweep();
     this.timer = setInterval(() => {
       this.runSweep();
@@ -458,12 +584,29 @@ export class SupervisorService {
     for (const agent of all) {
       if (!agent || !agent.name) continue;
       if (agent.kind === 'human') continue;
+      if (!isLocalAgentServer(agent.server)) continue;
       if (allowSet && !allowSet.has(agent.name)) continue;
       const runtime = typeof this.getRuntime === 'function' ? (this.getRuntime(agent.name) || {}) : {};
       rows.push({ agent, runtime });
     }
     rows.sort((a, b) => String(a.agent.name).localeCompare(String(b.agent.name)));
-    return rows.slice(0, this.config.maxAgentsPerSweep);
+    return rows;
+  }
+
+  resolveSweepCandidates(allRows = this.resolveCandidates()) {
+    const rows = Array.isArray(allRows) ? allRows : [];
+    const limit = Math.max(1, Number(this.config.maxAgentsPerSweep) || 1);
+    if (rows.length <= limit) {
+      this.stateStore.setSelectionCursor(0);
+      return rows;
+    }
+    const start = this.stateStore.getSelectionCursor() % rows.length;
+    const selected = [];
+    for (let offset = 0; offset < Math.min(limit, rows.length); offset++) {
+      selected.push(rows[(start + offset) % rows.length]);
+    }
+    this.stateStore.setSelectionCursor((start + selected.length) % rows.length);
+    return selected;
   }
 
   deriveObservation(candidate, now = Date.now()) {
@@ -534,7 +677,7 @@ export class SupervisorService {
           classification = 'active';
           reason = 'Task is marked done and still within the bounded supervisor trailing window.';
         } else {
-          classification = 'suspected_eos';
+          classification = 'done';
           reason = 'Task is done and the supervisor trailing window has elapsed.';
         }
       }
@@ -625,8 +768,8 @@ export class SupervisorService {
     }
     for (const entry of names) {
       const [agentName, sessionName] = entry.split('\n');
-      const existed = tmuxSessionExists(sessionName);
-      if (existed) killTmuxSession(sessionName);
+      const existed = this.tmuxSessionExists(sessionName);
+      if (existed) this.killTmuxSession(sessionName);
       const previous = this.stateStore.snapshot(agentName);
       this.stateStore.agents[agentName] = {
         ...this.stateStore.agents[agentName],
@@ -666,13 +809,13 @@ export class SupervisorService {
       failureType: null,
       error: null,
     });
-    const sessionExists = tmuxSessionExists(context.sessionName);
-    const currentPath = sessionExists ? tmuxPanePath(context.sessionName) : null;
+    const sessionExists = this.tmuxSessionExists(context.sessionName);
+    const currentPath = sessionExists ? this.tmuxPanePath(context.sessionName) : null;
     const pathMismatch = sessionExists && context.supervisorDir && currentPath && path.resolve(currentPath) !== path.resolve(context.supervisorDir);
 
-    if (!this.enabled || observation.lifecycle.state === 'idle') {
+    if (!this.enabledRequested || observation.lifecycle.state === 'idle') {
       if (sessionExists) {
-        killTmuxSession(context.sessionName);
+        this.killTmuxSession(context.sessionName);
         return this.buildRuntimeLaunchState(base, {
           running: false,
           action: 'stopped',
@@ -735,9 +878,9 @@ export class SupervisorService {
         });
       }
       if (sessionExists && pathMismatch) {
-        killTmuxSession(context.sessionName);
+        this.killTmuxSession(context.sessionName);
       }
-      startSupervisorTmuxSession(context.sessionName, context.supervisorDir, command);
+      this.startSupervisorTmuxSession(context.sessionName, context.supervisorDir, command);
       return this.buildRuntimeLaunchState(base, {
         running: true,
         action: pathMismatch ? 'restarted' : 'started',
@@ -751,7 +894,7 @@ export class SupervisorService {
         base,
         'tmux-launch-failed',
         String(e?.message || e),
-        { running: tmuxSessionExists(context.sessionName) }
+        { running: this.tmuxSessionExists(context.sessionName) }
       );
     }
   }
@@ -839,6 +982,10 @@ export class SupervisorService {
     event.state = {
       consecutiveNegative: apply.current.consecutiveNegative,
       lastWarningAt: apply.current.lastWarningAt,
+      lastNudgeAt: apply.current.lastNudgeAt || 0,
+      lastNudgeCount: apply.current.lastNudgeCount || 0,
+      lastEscalationAt: apply.current.lastEscalationAt || 0,
+      lastEscalationCount: apply.current.lastEscalationCount || 0,
       lastStatus: apply.current.lastStatus,
       lifecycleState: apply.current.lifecycleState || null,
     };
@@ -852,11 +999,62 @@ export class SupervisorService {
       this.emitSystemInfo(warning.summary, warning.full);
     }
 
+    if (typeof this.sendMessage === 'function' && apply.negative) {
+      if (apply.current.consecutiveNegative >= 2 && apply.current.lastNudgeCount < 2) {
+        const intervention = buildSupervisorNudge(agentName, observation, apply.current.consecutiveNegative);
+        try {
+          this.sendMessage(intervention);
+          const marked = this.stateStore.markIntervention(agentName, {
+            lastNudgeAt: now,
+            lastNudgeCount: apply.current.consecutiveNegative,
+          }, now);
+          event.action = {
+            kind: 'supervisor_nudge',
+            to: intervention.to,
+            priority: intervention.priority,
+            consecutiveNegative: apply.current.consecutiveNegative,
+          };
+          event.state.lastNudgeAt = marked.lastNudgeAt || 0;
+          event.state.lastNudgeCount = marked.lastNudgeCount || 0;
+        } catch (e) {
+          event.action = {
+            kind: 'supervisor_nudge_failed',
+            error: String(e?.message || e),
+            consecutiveNegative: apply.current.consecutiveNegative,
+          };
+        }
+      }
+      if (apply.current.consecutiveNegative >= 3 && apply.current.lastEscalationCount < 3) {
+        const intervention = buildSupervisorEscalation(agentName, observation, apply.current.consecutiveNegative);
+        try {
+          this.sendMessage(intervention);
+          const marked = this.stateStore.markIntervention(agentName, {
+            lastEscalationAt: now,
+            lastEscalationCount: apply.current.consecutiveNegative,
+          }, now);
+          event.action = {
+            kind: 'supervisor_escalation',
+            to: intervention.to,
+            priority: intervention.priority,
+            consecutiveNegative: apply.current.consecutiveNegative,
+          };
+          event.state.lastEscalationAt = marked.lastEscalationAt || 0;
+          event.state.lastEscalationCount = marked.lastEscalationCount || 0;
+        } catch (e) {
+          event.action = {
+            kind: 'supervisor_escalation_failed',
+            error: String(e?.message || e),
+            consecutiveNegative: apply.current.consecutiveNegative,
+          };
+        }
+      }
+    }
+
     return event;
   }
 
   runSweep() {
-    if (!this.enabled) return;
+    if (!this.enabledRequested) return;
     if (this.running) return;
     this.running = true;
     const started = Date.now();
@@ -864,9 +1062,10 @@ export class SupervisorService {
     this.lastSweepError = null;
 
     try {
-      const candidates = this.resolveCandidates();
-      this.lastSweepActive = candidates.length;
-      this.stateStore.clearMissingAgents(candidates.map(row => row.agent.name));
+      const allCandidates = this.resolveCandidates();
+      const candidates = this.resolveSweepCandidates(allCandidates);
+      this.lastSweepActive = allCandidates.length;
+      this.stateStore.clearMissingAgents(allCandidates.map(row => row.agent.name));
       let evaluated = 0;
       for (const row of candidates) {
         this.evaluateOne(row, started);
@@ -894,11 +1093,9 @@ export class SupervisorService {
     else if (classifications.includes('stalled_wait') || classifications.includes('suspected_eos')) supervisorMode = 'attention';
     const lifecycleState = lifecycleStates.includes('active') ? 'active' : 'idle';
     return {
-      enabled: this.enabled,
+      enabled: this.isEnabled(),
       disabledReason: this.disabledReason,
       intervalMs: this.config.intervalMs,
-      activeOnly: this.config.activeOnly,
-      skipBlocked: this.config.skipBlocked,
       warnAfter: this.config.warnAfter,
       warnCooldownMs: this.config.warnCooldownMs,
       heartbeatTtlMs: this.config.heartbeatTtlMs,
@@ -932,7 +1129,7 @@ export class SupervisorService {
 
   getControl() {
     return {
-      enabled: this.enabled,
+      enabled: this.isEnabled(),
       disabledReason: this.disabledReason,
       allowedAgents: Array.isArray(this.agentAllowlist) ? [...this.agentAllowlist] : null,
       allowlistMode: Array.isArray(this.agentAllowlist)
@@ -954,11 +1151,11 @@ export class SupervisorService {
         return { ok: false, error: 'enabled must be boolean' };
       }
       if (patch.enabled) {
-        this.enabled = true;
+        this.enabledRequested = true;
         this.disabledReason = null;
         this.start();
       } else {
-        this.enabled = false;
+        this.enabledRequested = false;
         this.disabledReason = 'runtime-disabled';
         this.stop();
       }
@@ -971,7 +1168,7 @@ export class SupervisorService {
       this.agentAllowlist = normalizeAgentAllowlist(patch.allowedAgents);
     }
 
-    if (this.enabled) this.runSweep();
+    if (this.enabledRequested) this.runSweep();
 
     return {
       ok: true,
@@ -1034,6 +1231,19 @@ export class SupervisorService {
       latest,
       events,
     };
+  }
+
+  removeAgentState(agentName) {
+    const key = normalizeOptionalText(agentName, 256);
+    if (!key) return { removed: false, sessionKilled: false };
+    const hadState = Object.prototype.hasOwnProperty.call(this.stateStore.agents || {}, key);
+    const sessionName = this.stateStore.snapshot(key)?.runtimeLaunch?.sessionName || buildSupervisorSessionName(key);
+    const sessionExists = sessionName ? this.tmuxSessionExists(sessionName) : false;
+    if (sessionExists) this.killTmuxSession(sessionName);
+    if (hadState) delete this.stateStore.agents[key];
+    this.latestByAgent.delete(key);
+    if (hadState || sessionExists) this.stateStore.save();
+    return { removed: hadState, sessionKilled: sessionExists };
   }
 }
 

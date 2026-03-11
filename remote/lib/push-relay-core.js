@@ -1,9 +1,16 @@
-import { execFileSync, execSync } from 'child_process';
+import { execFileSync, execFile } from 'child_process';
 import { existsSync } from 'fs';
 import { createHash } from 'crypto';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
+import { promisify } from 'util';
+import { BLOCK_PATTERNS } from './blocked-patterns.js';
 import EventSource from './eventsource-mini.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const execFileAsync = promisify(execFile);
+let execFileAsyncImpl = execFileAsync;
 
 const PUSH_RELAY_MODE = (process.env.PUSH_RELAY_MODE || 'local').trim().toLowerCase();
 const PUSH_RELAY_REMOTE_MODE = PUSH_RELAY_MODE === 'remote';
@@ -48,13 +55,6 @@ const skipReasonLastLog = new Map();
 let mcpSessionCacheAt = 0;
 let mcpSessionCache = new Set();
 
-const BLOCK_PATTERNS = [
-  { reason: 'select-mode', re: /(?:^|\n)\s*(?:select mode|choose (?:an?\s+)?mode)\s*(?:\n|$)/i },
-  { reason: 'plan-mode', re: /(?:^|\n)\s*(?:[0-9]+[.)]\s*)?plan mode\s*(?:\n|$)/i },
-  { reason: 'approval-mode-toggle', re: /bypass permissions on \(shift\+tab to cycle\)/i },
-  { reason: 'update-required', re: /updates?\s+available:|update available.*agent-update|run ['"`]?agent-update/i },
-  { reason: 'interactive-confirm', re: /choose (an )?option|press (enter|return) to continue|confirm .*continue/i },
-];
 const COMPACT_PATTERNS = [
   { marker: 'codex-context-compacted', summary: 'Context compacted', re: /(?:^|\n)\s*(?:•\s*)?Context compacted\s*(?:\n|$)/i },
   { marker: 'claude-conversation-compacted', summary: 'Conversation compacted (ctrl+o for history)', re: /(?:^|\n)\s*(?:✻\s*)?Conversation compacted \(ctrl\+o for history\)\s*(?:\n|$)/i },
@@ -319,7 +319,7 @@ async function refreshAgentsSnapshot() {
 
 async function scanBlockedStates() {
   const live = new Set(localAgents);
-  const mcpSessions = getMcpSessionSet(true);
+  const mcpSessions = await getMcpSessionSet(true);
 
   for (const [agentName, prev] of blockedState.entries()) {
     if (live.has(agentName)) continue;
@@ -429,7 +429,7 @@ async function sendOfflineNotice(reason = 'push-relay-shutdown') {
   }
 }
 
-function collectMcpSessions() {
+async function collectMcpSessions() {
   if (!TMUX_BIN) return new Set();
   try {
     const paneOut = runTmux(['list-panes', '-a', '-F', '#{pane_tty} #{session_name}'], { timeout: 3000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
@@ -444,17 +444,31 @@ function collectMcpSessions() {
     }
     let pids;
     try {
-      pids = execSync('pgrep -f "node.*mcp-server.js" 2>/dev/null', { timeout: 3000, encoding: 'utf-8' }).trim().split('\n').filter(Boolean);
-    } catch { return new Set(); }
+      const { stdout } = await execFileAsyncImpl('pgrep', ['-f', 'node.*mcp-server.js'], {
+        timeout: 3000,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      pids = stdout.trim().split('\n').filter(Boolean);
+    } catch {
+      return new Set();
+    }
     const matched = new Set();
-    for (const pid of pids) {
-      try {
-        const pts = execSync(`ps -o tty= -p ${pid} 2>/dev/null`, { timeout: 3000, encoding: 'utf-8' }).trim();
-        const session = ptsMap[pts];
+    if (!pids.length) return matched;
+    try {
+      const { stdout } = await execFileAsyncImpl('ps', ['-o', 'pid=,tty=', '-p', pids.join(',')], {
+        timeout: 3000,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      for (const line of stdout.trim().split('\n').filter(Boolean)) {
+        const match = line.trim().match(/^(\d+)\s+(.+)$/);
+        if (!match) continue;
+        const session = ptsMap[match[2].trim()];
         if (session) matched.add(session);
-      } catch {
-        // pid vanished
       }
+    } catch {
+      // pid batch vanished
     }
     return matched;
   } catch {
@@ -463,26 +477,26 @@ function collectMcpSessions() {
   }
 }
 
-function getMcpSessionSet(forceRefresh = false) {
+async function getMcpSessionSet(forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && (now - mcpSessionCacheAt) <= MCP_SESSION_CACHE_TTL_MS) return mcpSessionCache;
-  mcpSessionCache = collectMcpSessions();
+  mcpSessionCache = await collectMcpSessions();
   mcpSessionCacheAt = now;
   return mcpSessionCache;
 }
 
-function agentHasMcp(agentName) {
+async function agentHasMcp(agentName) {
   if (!agentName) return false;
-  return getMcpSessionSet(false).has(agentName);
+  return (await getMcpSessionSet(false)).has(agentName);
 }
 
-function buildNotification(agentName, msg) {
-  const hasMcp = agentHasMcp(agentName);
+async function buildNotification(agentName, msg) {
+  const hasMcp = await agentHasMcp(agentName);
   const replyTo = msg.from;
   const isHuman = msg.type === 'human';
   const needsReply = msg.type === 'human' || msg.type === 'request';
   if (hasMcp) {
-    const checkHint = 'Use check_inbox() in agent-chat MCP for full context.';
+    const checkHint = 'FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.';
     const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
     const actionHint = needsReply ? ` ${sendHint}.` : '';
     return isHuman
@@ -541,6 +555,8 @@ function pushToTmux(target, payload) {
     return false;
   }
 }
+
+let pushToTmuxImpl = pushToTmux;
 
 function logDeliverySkip(agentName, msg, reason, extra = {}) {
   const key = `${agentName}:${reason}`;
@@ -601,7 +617,7 @@ function markDelivered(key) {
   }
 }
 
-function handleMessage(raw) {
+async function handleMessage(raw) {
   let msg;
   try {
     msg = JSON.parse(raw);
@@ -620,8 +636,8 @@ function handleMessage(raw) {
     if (delivered.has(dedupeKey)) continue;
 
     const target = route.target || `${agentName}:0.0`;
-    const notification = buildNotification(agentName, msg);
-    if (pushToTmux(target, notification)) {
+    const notification = await buildNotification(agentName, msg);
+    if (pushToTmuxImpl(target, notification)) {
       markDelivered(dedupeKey);
       console.log(`[push-relay] delivered ${msg.id} -> ${agentName}`);
     } else {
@@ -634,7 +650,9 @@ function connectSse() {
   const streamUrl = `${API_BASE}/api/stream`;
   console.log(`[push-relay] connecting ${streamUrl} (server=${SERVER_ID})`);
   const es = new EventSource(streamUrl, { headers: authHeaders });
-  es.on('message', handleMessage);
+  es.on('message', (raw) => {
+    handleMessage(raw).catch((e) => console.error(`[push-relay] message handling failed: ${e.message}`));
+  });
   es.on('error', (e) => {
     console.error(`[push-relay] SSE error: ${e.message}`);
     if (reconnectTimer) return;
@@ -683,6 +701,55 @@ async function gracefulExit(signal) {
   process.exit(0);
 }
 
+function resetRelayState() {
+  localAgents.clear();
+  agentsByName.clear();
+  delivered.clear();
+  deliveredOrder.length = 0;
+  blockedState.clear();
+  compactState.clear();
+  activityState.clear();
+  runtimeReportDigest.clear();
+  skipReasonLastLog.clear();
+  mcpSessionCacheAt = 0;
+  mcpSessionCache = new Set();
+  execFileAsyncImpl = execFileAsync;
+  pushToTmuxImpl = pushToTmux;
+}
+
+function seedRelayState({ localAgentNames = [], agents = [], mcpSessions = [] } = {}) {
+  localAgents.clear();
+  for (const name of localAgentNames) localAgents.add(name);
+  agentsByName.clear();
+  for (const agent of agents) {
+    if (agent?.name) agentsByName.set(agent.name, agent);
+  }
+  mcpSessionCache = new Set(mcpSessions);
+  mcpSessionCacheAt = Date.now();
+}
+
+function setPushToTmuxForTest(fn) {
+  pushToTmuxImpl = typeof fn === 'function' ? fn : pushToTmux;
+}
+
+function setPushRelayTestHooks({ execFileAsync: overrideExecFileAsync } = {}) {
+  execFileAsyncImpl = typeof overrideExecFileAsync === 'function' ? overrideExecFileAsync : execFileAsync;
+  mcpSessionCacheAt = 0;
+}
+
+export {
+  BLOCK_PATTERNS,
+  buildNotification,
+  detectBlockedReason,
+  evaluateAgentRouting,
+  handleMessage,
+  messageRecipients,
+  resetRelayState,
+  seedRelayState,
+  setPushRelayTestHooks,
+  setPushToTmuxForTest,
+};
+
 process.on('SIGTERM', () => { gracefulExit('SIGTERM'); });
 process.on('SIGINT', () => { gracefulExit('SIGINT'); });
 process.on('unhandledRejection', (reason) => {
@@ -692,4 +759,6 @@ process.on('unhandledRejection', (reason) => {
   console.error(`[push-relay] unhandled rejection: ${msg}`);
 });
 
-main().catch((e) => scheduleBootstrapRetry(e?.message || 'startup-error'));
+if (process.argv[1] === __filename) {
+  main().catch((e) => scheduleBootstrapRetry(e?.message || 'startup-error'));
+}

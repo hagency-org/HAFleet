@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="${AGENTCHAT_LIVE_DIR:-/home/shisui/laplace/agent-chat-live}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_DIR="${AGENTCHAT_LIVE_DIR:-${AGENT_CHAT_LIVE_ROOT:-${AGENT_CHAT_ROOT:-$DEFAULT_REPO_DIR}}}"
 DEPLOY_USER="${AGENTCHAT_DEPLOY_USER:-shisui}"
 DEPLOY_BRANCH="${AGENTCHAT_DEPLOY_BRANCH:-stable}"
 POLL_SEC="${AGENTCHAT_POLL_SEC:-30}"

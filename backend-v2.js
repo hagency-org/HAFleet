@@ -1,10 +1,14 @@
 import express from 'express';
-import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync } from 'fs';
-import { execSync } from 'child_process';
+import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync, unlinkSync, rmSync } from 'fs';
+import { readFile as readFileAsync } from 'fs/promises';
+import { execFile } from 'child_process';
 import path from 'path';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
+import { promisify } from 'util';
 import { createSupervisorService } from './supervisor/index.js';
+import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
+import { createTaskGraphStore } from './lib/task-graph.js';
 import {
   buildUpstreamClaudeSubconsciousPaths,
   bootstrapUpstreamClaudeSubconsciousAgent,
@@ -32,6 +36,11 @@ const DEFAULT_WEB_PORT = Number.isFinite(DEFAULT_WEB_PORT_RAW) && DEFAULT_WEB_PO
 const DATA_DIR = path.join(RUNTIME_ROOT, 'data');
 const WEB_BASE_URL = (process.env.AGENT_CHAT_WEB_URL || `http://127.0.0.1:${DEFAULT_WEB_PORT}`).trim().replace(/\/$/, '');
 const PUSH_QUEUE_URL = (process.env.AGENT_CHAT_QUEUE_URL || `${WEB_BASE_URL}/api/queue`).trim().replace(/\/$/, '');
+const WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_WEB_BRIDGE_FETCH_TIMEOUT_MS || '5000', 10);
+const WEB_BRIDGE_FETCH_TIMEOUT_MS = Number.isFinite(WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW) && WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW > 0
+  ? WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW
+  : 5000;
+const execFileAsync = promisify(execFile);
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const LOCAL_SERVER_ID = (process.env.AGENT_CHAT_SERVER || 'local').trim();
 const USER_UID = (typeof process.getuid === 'function') ? process.getuid() : null;
@@ -47,6 +56,10 @@ const RULE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_RULE_SWEEP_INTE
 const IDLE_THRESHOLD_MS = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '20000', 10);
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.floor((IDLE_THRESHOLD_MS + 999) / 1000));
 const LOCAL_ACTIVITY_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_LOCAL_ACTIVITY_SWEEP_MS || '5000', 10);
+const LOCAL_ACTIVITY_CAPTURE_BUDGET_RAW = Number.parseInt(process.env.AGENT_LOCAL_ACTIVITY_CAPTURE_BUDGET || '0', 10);
+const LOCAL_ACTIVITY_CAPTURE_BUDGET = Number.isFinite(LOCAL_ACTIVITY_CAPTURE_BUDGET_RAW)
+  ? Math.max(0, LOCAL_ACTIVITY_CAPTURE_BUDGET_RAW)
+  : 0;
 const SWAP_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_SWAP_SWEEP_INTERVAL_MS || '5000', 10);
 const SWAP_ALERT_THRESHOLD_PCT_RAW = Number.parseFloat(process.env.AGENT_SWAP_ALERT_THRESHOLD_PCT || '80');
 const SWAP_ALERT_THRESHOLD_PCT = Number.isFinite(SWAP_ALERT_THRESHOLD_PCT_RAW)
@@ -67,6 +80,11 @@ const OFFLINE_CATCHUP_LIST_LIMIT = Number.parseInt(process.env.OFFLINE_CATCHUP_L
 const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_ITEMS || '8', 10);
 const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
 const MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT = (process.env.MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT || '30mb').trim() || '30mb';
+const MESSAGE_RETENTION_LIMIT = Math.max(100, Number.parseInt(process.env.AGENT_MESSAGE_RETENTION_LIMIT || '5000', 10) || 5000);
+const JSON_WRITE_BATCH_WINDOW_MS_RAW = Number.parseInt(process.env.AGENT_JSON_WRITE_BATCH_MS || '1000', 10);
+const JSON_WRITE_BATCH_WINDOW_MS = Number.isFinite(JSON_WRITE_BATCH_WINDOW_MS_RAW)
+  ? Math.max(0, JSON_WRITE_BATCH_WINDOW_MS_RAW)
+  : 1000;
 const UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS = Number.parseInt(process.env.UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS || '120000', 10);
 const AGENT_TMUX_MISSING_ALERT_GRACE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_GRACE_MS || '15000', 10);
 const AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS || '900000', 10);
@@ -94,13 +112,14 @@ const AGENT_COMPACT_FALLBACK_PATTERNS = [
 const LOCAL_BLOCK_TAIL_LINES = Number.parseInt(process.env.AGENT_LOCAL_BLOCK_TAIL_LINES || '40', 10);
 const LOCAL_BLOCK_RECENT_LINES = Number.parseInt(process.env.AGENT_LOCAL_BLOCK_RECENT_LINES || '14', 10);
 const LOCAL_MCP_SESSION_CACHE_TTL_MS = Number.parseInt(process.env.AGENT_LOCAL_MCP_SESSION_CACHE_TTL_MS || '1000', 10);
-const LOCAL_BLOCK_PATTERNS = [
-  { reason: 'select-mode', re: /(?:^|\n)\s*(?:select mode|choose (?:an?\s+)?mode)\s*(?:\n|$)/i },
-  { reason: 'plan-mode', re: /(?:^|\n)\s*(?:[0-9]+[.)]\s*)?plan mode\s*(?:\n|$)/i },
-  { reason: 'approval-mode-toggle', re: /bypass permissions on \(shift\+tab to cycle\)/i },
-  { reason: 'update-required', re: /updates?\s+available:|update available.*agent-update|run ['"`]?agent-update/i },
-  { reason: 'interactive-confirm', re: /choose (an )?option|press (enter|return) to continue|confirm .*continue/i },
-];
+const AGENT_SWEEP_INTERVAL_PER_AGENT_MS_RAW = Number.parseInt(process.env.AGENT_SWEEP_INTERVAL_PER_AGENT_MS || '500', 10);
+const AGENT_SWEEP_INTERVAL_PER_AGENT_MS = Number.isFinite(AGENT_SWEEP_INTERVAL_PER_AGENT_MS_RAW)
+  ? Math.max(1, AGENT_SWEEP_INTERVAL_PER_AGENT_MS_RAW)
+  : 500;
+const BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW = Number.parseInt(process.env.AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS || '60000', 10);
+const BLOCKED_NOTIFICATION_COOLDOWN_MS = Number.isFinite(BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW)
+  ? Math.max(0, BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW)
+  : 60000;
 
 mkdirSync(DATA_DIR, { recursive: true });
 const MESSAGE_ATTACHMENT_DIR = path.join(DATA_DIR, 'message-attachments');
@@ -112,8 +131,28 @@ const MEDIA_FETCH_ALLOWED_ROOTS = [
   path.resolve(MATRIX_MEDIA_DIR),
 ];
 
+function isTimeoutAbortError(error) {
+  const message = String(error?.message || '');
+  return error?.name === 'TimeoutError'
+    || (error?.name === 'AbortError' && /timeout/i.test(message))
+    || /aborted due to timeout/i.test(message);
+}
+
+async function fetchWebBridge(url, init, contextLabel) {
+  const startedAt = Date.now();
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    const elapsedMs = Date.now() - startedAt;
+    const prefix = isTimeoutAbortError(error) ? '[web-bridge-timeout]' : '[web-bridge-fetch-failed]';
+    console.warn(`${prefix} ${contextLabel} after ${elapsedMs}ms: ${error?.message || error}`);
+    throw error;
+  }
+}
+
 // ── Storage helpers ───────────────────────────────────────────────────
 function dataPath(name) { return path.join(DATA_DIR, name); }
+function agentDataPath(name) { return dataPath(path.join('agents', name)); }
 
 function backupUnreadableJson(filePath) {
   const backupPath = `${filePath}.corrupt-${Date.now()}`;
@@ -138,18 +177,59 @@ function loadJsonSync(name, fallback) {
   }
 }
 
-function saveJson(name, data) {
+function writeJsonAtomic(name, data) {
   const target = dataPath(name);
-  const tmp = target + '.tmp';
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
   try {
     writeFileSync(tmp, JSON.stringify(data, null, 2));
     renameSync(tmp, target);
     return true;
   } catch (e) {
+    try { unlinkSync(tmp); } catch {}
     const code = e?.code || 'unknown';
     const msg = e?.message || 'unknown error';
     console.error(`Failed to save JSON ${target}: [${code}] ${msg}`);
     return false;
+  }
+}
+
+const JSON_BATCHED_FILES = new Set(['agents.json', 'agent_runtime.json']);
+const pendingJsonWrites = new Map(); // name -> { data, timer }
+
+function flushPendingJsonWrite(name) {
+  const entry = pendingJsonWrites.get(name);
+  if (!entry) return true;
+  if (entry.timer) clearTimeout(entry.timer);
+  pendingJsonWrites.delete(name);
+  return writeJsonAtomic(name, entry.data);
+}
+
+function scheduleJsonWrite(name, data) {
+  const existing = pendingJsonWrites.get(name);
+  if (existing?.timer) clearTimeout(existing.timer);
+  const entry = { data, timer: null };
+  entry.timer = setTimeout(() => {
+    flushPendingJsonWrite(name);
+  }, JSON_WRITE_BATCH_WINDOW_MS);
+  if (typeof entry.timer?.unref === 'function') entry.timer.unref();
+  pendingJsonWrites.set(name, entry);
+  return true;
+}
+
+function saveJson(name, data, options = {}) {
+  if (options?.immediate === true) {
+    flushPendingJsonWrite(name);
+    return writeJsonAtomic(name, data);
+  }
+  if (!JSON_BATCHED_FILES.has(name) || JSON_WRITE_BATCH_WINDOW_MS <= 0) {
+    return writeJsonAtomic(name, data);
+  }
+  return scheduleJsonWrite(name, data);
+}
+
+function flushAllPendingJsonWrites() {
+  for (const name of [...pendingJsonWrites.keys()]) {
+    flushPendingJsonWrite(name);
   }
 }
 
@@ -249,6 +329,30 @@ function normalizePositiveInt(value, fallback, min = 1) {
   return Math.max(min, n);
 }
 
+function normalizeBlockedTier(value, fallback = null) {
+  const n = Number.parseInt(value, 10);
+  if (n === BLOCK_TIER_TRANSIENT || n === BLOCK_TIER_SOFT || n === BLOCK_TIER_HARD) return n;
+  return fallback;
+}
+
+function blockedTierFromReason(reason) {
+  const normalizedReason = normalizeOptionalText(reason, 256);
+  if (!normalizedReason) return null;
+  const matched = LOCAL_BLOCK_PATTERNS.find((pattern) => pattern.reason === normalizedReason);
+  return normalizeBlockedTier(matched?.tier, BLOCK_TIER_HARD);
+}
+
+function blockedTierDebounceThreshold(tier) {
+  switch (normalizeBlockedTier(tier, BLOCK_TIER_HARD)) {
+    case BLOCK_TIER_TRANSIENT:
+      return Number.POSITIVE_INFINITY;
+    case BLOCK_TIER_SOFT:
+      return 6;
+    default:
+      return 2;
+  }
+}
+
 function normalizeNonNegativeInt(value, fallback = 0) {
   const n = Number.parseInt(value, 10);
   if (!Number.isFinite(n)) return fallback;
@@ -340,13 +444,34 @@ function normalizeManagedProjects(value) {
   return out;
 }
 
-function normalizeHumanMeta(value) {
+function normalizeHumanMeta(value, options = {}) {
   const raw = (value && typeof value === 'object') ? value : {};
-  return {
+  const preserveLegacy = options && options.preserveLegacy === true;
+  const out = {
     owner: normalizeOptionalText(raw.owner, 256),
-    notes: normalizeOptionalText(raw.notes, 8000) || '',
-    projectScope: normalizeOptionalText(raw.projectScope, 4000) || '',
   };
+  if (preserveLegacy) {
+    if (Object.prototype.hasOwnProperty.call(raw, 'notes')) {
+      out.notes = normalizeOptionalText(raw.notes, 8000) || '';
+    }
+    if (Object.prototype.hasOwnProperty.call(raw, 'projectScope')) {
+      out.projectScope = normalizeOptionalText(raw.projectScope, 4000) || '';
+    }
+  }
+  return out;
+}
+
+function mergeHumanMeta(existingValue, nextValue) {
+  const existing = normalizeHumanMeta(existingValue, { preserveLegacy: true });
+  if (nextValue === undefined) return existing;
+  const raw = (nextValue && typeof nextValue === 'object') ? nextValue : {};
+  const out = {
+    ...existing,
+    owner: Object.prototype.hasOwnProperty.call(raw, 'owner')
+      ? normalizeOptionalText(raw.owner, 256)
+      : existing.owner,
+  };
+  return out;
 }
 
 function normalizeIsoTimestamp(value) {
@@ -1313,14 +1438,14 @@ function buildSubconsciousAuthoritySummary({ enabled, upstream, lettaAgentId }) 
   };
 }
 
-function buildSubconsciousFallbackSummary(manualGuidance) {
-  const configured = typeof manualGuidance === 'string' && manualGuidance.trim().length > 0;
+function buildSubconsciousFallbackSummary(guidanceText) {
+  const configured = typeof guidanceText === 'string' && guidanceText.trim().length > 0;
   return {
     classification: 'fallback',
     status: configured ? 'configured' : 'none',
     configured,
     source: configured ? 'manual-state-file' : 'none',
-    note: 'Manual guidance is fallback configuration only; it is not the authoritative subconscious behavior path.',
+    note: 'Guidance is fallback configuration only; it is not the authoritative subconscious behavior path.',
   };
 }
 
@@ -1681,7 +1806,7 @@ function resolveSubconsciousState(agentName) {
   const invocationConfigured = disabledReason === null;
   const generatedGuidance = (letta?.lastRuntimeGuidance && typeof letta.lastRuntimeGuidance === 'object') ? letta.lastRuntimeGuidance : null;
   const lastInvocation = (letta?.lastInvocation && typeof letta.lastInvocation === 'object') ? letta.lastInvocation : null;
-  const manualGuidance = normalizeOptionalText(letta?.guidance, 6000) || '';
+  const guidanceText = normalizeOptionalText(letta?.guidance, 6000) || '';
   const memoryState = resolveSubconsciousMemoryState(agentName, stateDir, runtimeMeta);
   const conversationState = resolveSubconsciousConversationState(agentName, stateDir, runtimeMeta);
   const memoryStore = memoryState.store || defaultSubconsciousMemoryStore(agentName);
@@ -1791,7 +1916,7 @@ function resolveSubconsciousState(agentName) {
     upstream,
     lettaAgentId: providerContract.lettaAgentId,
   });
-  const fallback = buildSubconsciousFallbackSummary(manualGuidance);
+  const fallback = buildSubconsciousFallbackSummary(guidanceText);
   const transitional = buildSubconsciousTransitionalSummary(runtimeContract, memoryInfo, conversationContract);
   const missingBackendPieces = [];
   if (!invocationConfigured) {
@@ -1873,13 +1998,13 @@ function resolveSubconsciousState(agentName) {
       enabled: agent.subconsciousEnabled === true,
       authority,
       fallback,
-      manualGuidance: {
+      guidance: {
         classification: 'fallback',
-        configured: manualGuidance.length > 0,
-        source: manualGuidance ? 'manual-state-file' : 'none',
+        configured: guidanceText.length > 0,
+        source: guidanceText ? 'manual-state-file' : 'none',
         role: 'fallback',
-        text: manualGuidance,
-        preview: manualGuidance.length > 240 ? `${manualGuidance.slice(0, 240)}...` : manualGuidance,
+        text: guidanceText,
+        preview: guidanceText.length > 240 ? `${guidanceText.slice(0, 240)}...` : guidanceText,
         updatedAt: normalizeOptionalText(letta?.updatedAt, 128),
       },
       runtime: runtimeContract,
@@ -1915,6 +2040,8 @@ function resolveSubconsciousState(agentName) {
       disabledReason,
     },
   };
+  out.contract.manualGuidance = { ...out.contract.guidance };
+  return out;
 }
 
 function buildSubconsciousInvokePrompt(agentName, payload, state, recentEvents, retrievedMemories = null) {
@@ -1950,7 +2077,7 @@ function buildSubconsciousInvokePrompt(agentName, payload, state, recentEvents, 
     `Hook: ${payload.hook || payload.hookEventName || 'Unknown'}`,
     `Prompt preview: ${payload.promptPreview || '-'}`,
     `Tool: ${payload.toolName || '-'}`,
-    `Manual guidance: ${state.contract.manualGuidance.text || '-'}`,
+    `Guidance: ${(state.contract.guidance?.text || state.contract.manualGuidance?.text || '-')}`,
     `Conversation session: ${conversation?.sessionId || payload?.sessionId || '-'}`,
     `Conversation transcript: ${conversation?.transcriptPath || payload?.transcriptPath || '-'}`,
     `Conversation turn counts: user=${conversation?.userTurnCount ?? 0} assistant=${conversation?.assistantTurnCount ?? 0}`,
@@ -2359,9 +2486,14 @@ function buildOperationalSubconsciousContract(contract) {
     };
   }
 
+  if (safe.guidance && typeof safe.guidance === 'object') {
+    delete safe.guidance.text;
+    delete safe.guidance.preview;
+  }
   if (safe.manualGuidance && typeof safe.manualGuidance === 'object') {
     delete safe.manualGuidance.text;
     delete safe.manualGuidance.preview;
+    if (!safe.guidance) safe.guidance = { ...safe.manualGuidance };
   }
 
   if (Object.prototype.hasOwnProperty.call(safe, 'lastRuntimeGuidance')) delete safe.lastRuntimeGuidance;
@@ -2381,16 +2513,23 @@ const messages = loadJsonSync('messages.json', []);
 const cursors = loadJsonSync('cursors.json', {});
 const servers = loadJsonSync('servers.json', {});
 const agentRuntime = loadJsonSync('agent_runtime.json', {});
+const taskGraphs = loadJsonSync('task_graphs.json', {});
+const localActivitySweepState = loadJsonSync('local_activity_sweep.json', { selectionCursor: 0 });
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
 const localTmuxMissingState = new Map(); // agent -> { since:number, alerted:boolean }
 const localCompactState = new Map(); // agent -> marker
 const localRuntimeSignalDigest = new Map(); // agent -> digest of blocked/mcp/workspace
+let localActivitySweepRunning = false;
+let localSwapSweepRunning = false;
+let agentScopeSweepRunning = false;
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
+const MESSAGE_ARCHIVE_LOG = dataPath('messages-archive.jsonl');
 const subconsciousEventsByAgent = new Map(); // agent -> event[]
 const unexpectedOfflineAlertAt = new Map(); // key(agent:reason) -> ts
 const compactRuntimeAlertAt = new Map(); // key(agent:marker:mode) -> ts
+const pendingHumanTargetCache = new Map(); // agent -> { hasPendingHuman, targets }
 const swapAlertState = {
   active: false,
   lastPct: 0,
@@ -2458,7 +2597,7 @@ for (const agent of Object.values(agents)) {
     ? true
     : (agent.subconsciousEnabled === false ? false : null);
   agent.managedProjects = normalizeManagedProjects(agent.managedProjects);
-  agent.human = normalizeHumanMeta(agent.human);
+  agent.human = normalizeHumanMeta(agent.human, { preserveLegacy: true });
   agent.task = normalizeAgentTask(agent.task, agent.name);
   agent.runtimeProfile = normalizeRuntimeProfile(agent.runtimeProfile);
   agent.kind = inferRecordKind(agent);
@@ -2573,6 +2712,9 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
     ? runtime.blockedReason.trim()
     : null;
   runtime.blockedSince = Number(runtime.blockedSince) || null;
+  runtime.blockedConsecutiveScans = Math.max(0, Number(runtime.blockedConsecutiveScans) || 0);
+  runtime.blockedNotificationSent = runtime.blockedNotificationSent === true;
+  runtime.lastBlockedNotificationTs = Math.max(0, Number(runtime.lastBlockedNotificationTs) || 0);
   runtime.updatedAt = Number(runtime.updatedAt) || 0;
   runtime.lastSeen = Number(runtime.lastSeen) || 0;
   runtime.lastPushNotifyAt = Number(runtime.lastPushNotifyAt) || 0;
@@ -2607,6 +2749,7 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
   runtime.mcpMissingSince = Number(runtime.mcpMissingSince) || null;
   if (!runtime.rules || typeof runtime.rules !== 'object') runtime.rules = {};
 }
+localActivitySweepState.selectionCursor = Math.max(0, Number(localActivitySweepState.selectionCursor) || 0);
 
 function nextMsgId() {
   msgCounter++;
@@ -2614,12 +2757,54 @@ function nextMsgId() {
   return `msg_${String(msgCounter).padStart(4, '0')}`;
 }
 
-function saveAgents() { saveJson('agents.json', agents); }
+function saveAgents(immediate = false) { saveJson('agents.json', agents, { immediate }); }
 function saveGroups() { saveJson('groups.json', groups); }
-function saveMessages() { saveJson('messages.json', messages); }
+function collectUnreadRetainedMessageIds() {
+  const keep = new Set();
+  for (const [agentName, agent] of Object.entries(agents)) {
+    if (!isAgentRecord(agent) || agent.kind === 'human') continue;
+    for (const msg of getUnreadInboxMessages(agentName).unread) {
+      if (typeof msg?.id === 'string' && msg.id) keep.add(msg.id);
+    }
+  }
+  return keep;
+}
+
+function pruneMessagesInMemory() {
+  if (!Array.isArray(messages) || messages.length <= MESSAGE_RETENTION_LIMIT) {
+    return { pruned: 0, archived: 0 };
+  }
+  const retainFrom = Math.max(0, messages.length - MESSAGE_RETENTION_LIMIT);
+  const unreadKeepIds = collectUnreadRetainedMessageIds();
+  const retained = [];
+  const pruned = [];
+
+  for (let i = 0; i < messages.length; i += 1) {
+    const msg = messages[i];
+    const keep = i >= retainFrom || (typeof msg?.id === 'string' && unreadKeepIds.has(msg.id));
+    if (keep) retained.push(msg);
+    else pruned.push(msg);
+  }
+
+  if (pruned.length === 0) return { pruned: 0, archived: 0 };
+  try {
+    appendFileSync(MESSAGE_ARCHIVE_LOG, `${pruned.map((msg) => JSON.stringify(msg)).join('\n')}\n`);
+  } catch (e) {
+    console.error(`Failed to archive pruned messages to ${MESSAGE_ARCHIVE_LOG}: ${e?.message || e}`);
+  }
+  messages.splice(0, messages.length, ...retained);
+  return { pruned: pruned.length, archived: pruned.length };
+}
+
+function saveMessages() {
+  pruneMessagesInMemory();
+  saveJson('messages.json', messages);
+}
 function saveCursors() { saveJson('cursors.json', cursors); }
 function saveServers() { saveJson('servers.json', servers); }
-function saveAgentRuntime() { saveJson('agent_runtime.json', agentRuntime); }
+function saveAgentRuntime(immediate = false) { saveJson('agent_runtime.json', agentRuntime, { immediate }); }
+function saveTaskGraphs(next = taskGraphStore.dump()) { saveJson('task_graphs.json', next); }
+function saveLocalActivitySweepState() { saveJson('local_activity_sweep.json', localActivitySweepState); }
 
 function ensureAgentRecord(name, defaults = {}) {
   const agentName = normalizeAgentName(name);
@@ -2660,7 +2845,7 @@ function ensureAgentRecord(name, defaults = {}) {
       ? true
       : (defaults.subconsciousEnabled === false ? false : null),
     managedProjects: normalizeManagedProjects(defaults.managedProjects),
-    human: normalizeHumanMeta(defaults.human),
+    human: normalizeHumanMeta(defaults.human, { preserveLegacy: true }),
     task: normalizeAgentTask(defaults.task, agentName),
     runtimeProfile: normalizeRuntimeProfile(defaults.runtimeProfile),
     kind,
@@ -2740,8 +2925,72 @@ const supervisorService = createSupervisorService({
   getAgents: () => Object.values(agents).filter(isAgentRecord).map(serializeAgent),
   getRuntime: (agentName) => ensureAgentRuntimeRecord(agentName),
   emitSystemInfo: (summary, full) => emitSystemInfo(summary, full),
+  sendMessage: (payload) => dispatchInternalDirectMessage(payload),
   broadcastSSE,
 });
+const taskGraphStore = createTaskGraphStore({
+  initialGraphs: taskGraphs,
+  save: (nextGraphs) => saveTaskGraphs(nextGraphs),
+  dispatchMessage: (payload) => dispatchInternalDirectMessage(payload),
+  emitEvent: (eventName, payload) => broadcastSSE(eventName, payload),
+});
+
+function taskGraphErrorStatus(error) {
+  switch (error?.code) {
+    case 'graph_not_found':
+    case 'node_not_found':
+      return 404;
+    case 'graph_exists':
+      return 409;
+    default:
+      return 400;
+  }
+}
+
+function respondTaskGraphError(res, error, fallback = 'task graph error') {
+  return res.status(taskGraphErrorStatus(error)).json({ error: error?.message || fallback });
+}
+
+function handleTaskGraphMessageHook(msg) {
+  const kind = normalizeOptionalText(msg?.schema?.kind, 128);
+  if (kind !== 'task_graph_result' && kind !== 'task_graph_failed') return null;
+  const payload = (msg?.schema?.payload && typeof msg.schema.payload === 'object' && !Array.isArray(msg.schema.payload))
+    ? msg.schema.payload
+    : null;
+  if (!payload) return null;
+  const graphId = normalizeOptionalText(payload.graphId ?? payload.graph_id, 255);
+  const nodeId = normalizeOptionalText(payload.nodeId ?? payload.node_id, 255);
+  if (!graphId || !nodeId) return null;
+  const graph = taskGraphStore.getGraph(graphId);
+  const node = taskGraphStore.getNode(graphId, nodeId);
+  if (!graph || !node || graph.status !== 'active') return null;
+  if (!['pending', 'dispatched', 'active'].includes(node.status)) return null;
+
+  const patch = kind === 'task_graph_result'
+    ? {
+      status: 'complete',
+      result: Object.prototype.hasOwnProperty.call(payload, 'result') ? payload.result : null,
+    }
+    : {
+      status: 'failed',
+      error: normalizeOptionalText(payload.error, 4000) || 'task graph node failed',
+    };
+
+  try {
+    taskGraphStore.updateNode(graphId, nodeId, patch);
+    const advanced = taskGraphStore.advanceGraph(graphId) || taskGraphStore.getGraph(graphId);
+    return {
+      handled: true,
+      graphId,
+      nodeId,
+      status: patch.status,
+      graphStatus: advanced?.status || graph.status,
+    };
+  } catch (error) {
+    console.warn(`task graph message hook ignored (${graphId}/${nodeId}): ${error?.message || error}`);
+    return null;
+  }
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────
 function relativeTime(ts) {
@@ -2753,10 +3002,11 @@ function relativeTime(ts) {
 }
 
 function summarizeMsg(m) {
-  return {
+  const out = {
     id: m.id,
     from: m.from,
     type: m.type,
+    priority: normalizeMessagePriority(m?.priority),
     summary: m.summary,
     full: m.full || '',
     mentions: m.mentions || [],
@@ -2767,6 +3017,80 @@ function summarizeMsg(m) {
     reply_to: m.reply_to || null,
     group: m.group || null,
   };
+  const normalizedSchema = normalizeMessageSchema(m?.schema);
+  if (normalizedSchema.value) out.schema = normalizedSchema.value;
+  return out;
+}
+
+function normalizeMessagePriority(value, fallback = 'normal') {
+  if (value === undefined || value === null) return fallback;
+  const raw = normalizeOptionalText(value, 16);
+  if (!raw) return fallback;
+  const lower = raw.toLowerCase();
+  if (lower === 'normal' || lower === 'high' || lower === 'urgent') return lower;
+  return null;
+}
+
+function messagePriorityRank(value) {
+  const priority = normalizeMessagePriority(value);
+  if (priority === 'urgent') return 2;
+  if (priority === 'high') return 1;
+  return 0;
+}
+
+function highestMessagePriority(rows = []) {
+  let best = 'normal';
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (messagePriorityRank(row?.priority) > messagePriorityRank(best)) {
+      best = normalizeMessagePriority(row?.priority) || best;
+    }
+  }
+  return best;
+}
+
+function normalizeMessageSchema(value) {
+  if (value === undefined) return { value: null };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { error: 'schema must be an object' };
+  }
+  const kind = normalizeOptionalText(value.kind, 128);
+  if (!kind) return { error: 'schema.kind required' };
+  let version = 1;
+  if (Object.prototype.hasOwnProperty.call(value, 'version') && value.version !== undefined && value.version !== null) {
+    if (typeof value.version !== 'number') {
+      return { error: 'schema.version must be a positive integer' };
+    }
+    const parsed = value.version;
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      return { error: 'schema.version must be a positive integer' };
+    }
+    version = parsed;
+  }
+  const out = { kind, version };
+  if (Object.prototype.hasOwnProperty.call(value, 'payload')) out.payload = value.payload;
+  return { value: out };
+}
+
+function parseKindsFilter(value) {
+  if (value === undefined || value === null) return [];
+  const rawItems = Array.isArray(value)
+    ? value.flatMap(item => String(item || '').split(','))
+    : String(value || '').split(',');
+  const out = [];
+  const seen = new Set();
+  for (const raw of rawItems) {
+    const kind = normalizeOptionalText(raw, 128);
+    if (!kind || seen.has(kind)) continue;
+    seen.add(kind);
+    out.push(kind);
+  }
+  return out;
+}
+
+function messageMatchesKinds(msg, kinds = null) {
+  if (!(kinds instanceof Set) || kinds.size === 0) return true;
+  const kind = normalizeOptionalText(msg?.schema?.kind, 128);
+  return Boolean(kind && kinds.has(kind));
 }
 
 function ensureCursor(agentName) {
@@ -2837,22 +3161,27 @@ function isGroupMember(groupName, name) {
   return Boolean(findGroupMember(groupName, name));
 }
 
-function getUnreadInboxMessages(agentName) {
+function getUnreadInboxMessages(agentName, options = {}) {
   const cursor = ensureCursor(agentName);
   const inboxTs = cursor.inbox || 0;
   const inboxId = cursor.inboxId || null;
+  const kinds = Array.isArray(options?.kinds) && options.kinds.length > 0
+    ? new Set(options.kinds)
+    : null;
   const unreadById = new Map();
 
   for (const m of messages) {
     if (m.to !== agentName) continue;
     if (!isAfterCursor(m, inboxTs, inboxId)) continue;
     if (isSuppressedForAgent(m, agentName)) continue;
+    if (!messageMatchesKinds(m, kinds)) continue;
     unreadById.set(m.id, m);
   }
   for (const m of messages) {
     if (!m.group) continue;
     if (!isAfterCursor(m, inboxTs, inboxId)) continue;
     if (!isGroupMember(m.group, agentName)) continue;
+    if (!messageMatchesKinds(m, kinds)) continue;
     if (Array.isArray(m.mentions) && m.mentions.includes(agentName) && !isSuppressedForAgent(m, agentName)) {
       unreadById.set(m.id, m);
     }
@@ -2860,6 +3189,94 @@ function getUnreadInboxMessages(agentName) {
 
   const unread = [...unreadById.values()].sort(compareMsgOrder);
   return { inboxTs, inboxId, unread };
+}
+
+function invalidatePendingHumanTargets(agentNames = null) {
+  if (agentNames === null || agentNames === undefined) {
+    pendingHumanTargetCache.clear();
+    return;
+  }
+  const names = Array.isArray(agentNames) ? agentNames : [agentNames];
+  for (const raw of names) {
+    const name = normalizeAgentName(raw) || (typeof raw === 'string' ? raw.trim() : '');
+    if (!name) continue;
+    pendingHumanTargetCache.delete(name);
+  }
+}
+
+function invalidatePendingHumanTargetsForMessage(msg) {
+  if (!msg || msg.type !== 'human') return;
+  const targets = new Set();
+  const directTarget = normalizeAgentName(msg.to) || (typeof msg.to === 'string' ? msg.to.trim() : '');
+  if (directTarget) targets.add(directTarget);
+  for (const mention of Array.isArray(msg.mentions) ? msg.mentions : []) {
+    const name = normalizeAgentName(mention) || (typeof mention === 'string' ? mention.trim() : '');
+    if (name) targets.add(name);
+  }
+  invalidatePendingHumanTargets([...targets]);
+}
+
+function clearDeletedAgentState(agentName) {
+  const name = normalizeAgentName(agentName);
+  if (!name) return { removed: false };
+
+  let agentsChanged = false;
+  let runtimeChanged = false;
+  let cursorsChanged = false;
+
+  if (agents[name] !== undefined) {
+    delete agents[name];
+    agentsChanged = true;
+  }
+  if (agentRuntime[name] !== undefined) {
+    delete agentRuntime[name];
+    runtimeChanged = true;
+  }
+  if (cursors[name] !== undefined) {
+    delete cursors[name];
+    cursorsChanged = true;
+  }
+
+  invalidatePendingHumanTargets(name);
+  localActivityState.delete(name);
+  localTmuxMissingState.delete(name);
+  localCompactState.delete(name);
+  localRuntimeSignalDigest.delete(name);
+  scopePressureState.delete(name);
+  for (const key of [...unexpectedOfflineAlertAt.keys()]) {
+    if (key.startsWith(`${name}:`)) unexpectedOfflineAlertAt.delete(key);
+  }
+  for (const key of [...compactRuntimeAlertAt.keys()]) {
+    if (key.startsWith(`${name}:`)) compactRuntimeAlertAt.delete(key);
+  }
+
+  const supervisorCleanup = typeof supervisorService?.removeAgentState === 'function'
+    ? supervisorService.removeAgentState(name)
+    : { removed: false, sessionKilled: false };
+
+  let agentDataRemoved = false;
+  const agentDataDir = agentDataPath(name);
+  if (existsSync(agentDataDir)) {
+    try {
+      rmSync(agentDataDir, { recursive: true, force: true });
+      agentDataRemoved = true;
+    } catch (error) {
+      console.warn(`failed to remove agent data dir for ${name}: ${error?.message || error}`);
+    }
+  }
+
+  if (agentsChanged) saveAgents();
+  if (runtimeChanged) saveAgentRuntime();
+  if (cursorsChanged) saveCursors();
+
+  return {
+    removed: agentsChanged,
+    runtimeRemoved: runtimeChanged,
+    cursorsRemoved: cursorsChanged,
+    agentDataRemoved,
+    supervisorRemoved: supervisorCleanup?.removed === true,
+    supervisorSessionKilled: supervisorCleanup?.sessionKilled === true,
+  };
 }
 
 function messageTargetsAgent(msg, agentName) {
@@ -2870,8 +3287,8 @@ function messageTargetsAgent(msg, agentName) {
   return Array.isArray(msg.mentions) && msg.mentions.includes(agentName);
 }
 
-function buildUnreadInboxSnapshot(agentName) {
-  const { unread } = getUnreadInboxMessages(agentName);
+function buildUnreadInboxSnapshot(agentName, options = {}) {
+  const { unread } = getUnreadInboxMessages(agentName, options);
   let unreadDm = 0;
   let unreadGroupMentions = 0;
   for (const m of unread) {
@@ -2885,6 +3302,71 @@ function buildUnreadInboxSnapshot(agentName) {
     unread_group_mentions: unreadGroupMentions,
     latest: unread.length > 0 ? summarizeMsg(unread[unread.length - 1]) : null,
   };
+}
+
+function dispatchStoredMessage(msg, options = {}) {
+  const senderIsAgent = options.senderIsAgent === true;
+  const directTargetKind = options.directTargetKind || null;
+  messages.push(msg);
+  saveMessages();
+  invalidatePendingHumanTargetsForMessage(msg);
+  const compactEvent = buildAgentCompactEvent(msg, senderIsAgent);
+  if (compactEvent) {
+    broadcastSSE('agent_compact', compactEvent);
+  }
+  broadcastSSE('message', msg);
+  if (senderIsAgent) {
+    markAgentOutbound(msg.from);
+  }
+
+  if (msg.to && directTargetKind === 'agent' && msg.to !== msg.from && !isSuppressedForAgent(msg, msg.to)) {
+    const state = getAgentDeliveryState(msg.to);
+    if (state.online) pushNotify(msg.to, msg);
+  }
+  if (msg.group && msg.mentions.length > 0) {
+    for (const agent of msg.mentions) {
+      if (agent === msg.from || isSuppressedForAgent(msg, agent)) continue;
+      const state = getAgentDeliveryState(agent);
+      if (state.online) pushNotify(agent, msg);
+    }
+  }
+  return msg;
+}
+
+function dispatchInternalDirectMessage(payload = {}) {
+  const fromName = normalizeAgentName(payload.from) || (typeof payload.from === 'string' ? payload.from.trim() : '') || 'system';
+  const toName = normalizeAgentName(payload.to) || (typeof payload.to === 'string' ? payload.to.trim() : '');
+  if (!toName) throw new Error('to required');
+  const type = typeof payload.type === 'string' ? payload.type.trim().toLowerCase() : 'inform';
+  if (!['inform', 'request', 'reply'].includes(type)) {
+    throw new Error('invalid type');
+  }
+  const priority = normalizeMessagePriority(payload.priority);
+  if (!priority) throw new Error('invalid priority');
+  const normalizedSchema = normalizeMessageSchema(payload.schema);
+  if (normalizedSchema.error) throw new Error(normalizedSchema.error);
+  const summary = normalizeOptionalText(payload.summary, 4000);
+  const full = typeof payload.full === 'string' ? payload.full.trim() : '';
+  if (!summary) throw new Error('summary required');
+  const msg = {
+    id: nextMsgId(),
+    ts: Date.now(),
+    from: fromName,
+    to: toName,
+    group: null,
+    type,
+    priority,
+    summary,
+    full,
+    mentions: [],
+    reply_to: null,
+    source: 'system',
+    sourceRoom: null,
+  };
+  if (normalizedSchema.value) msg.schema = normalizedSchema.value;
+  const senderIsAgent = fromName !== 'system' && isAgentRecord(agents[fromName]);
+  const directTargetKind = isAgentRecord(agents[toName]) ? 'agent' : 'human';
+  return dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
 }
 
 function normalizeInboxGateReason(value) {
@@ -2960,7 +3442,12 @@ function ensureAgentRuntimeRecord(name) {
       agent: agentName,
       blocked: false,
       blockedReason: null,
+      blockedTier: null,
       blockedSince: null,
+      blockedConsecutiveScans: 0,
+      blockedNotificationSent: false,
+      blockedNotifiedTier: null,
+      lastBlockedNotificationTs: 0,
       activeNow: false,
       activeDurationSec: 0,
       idleDurationSec: 0,
@@ -3171,6 +3658,95 @@ function setRuntimeWorkspacePath(runtime, payload = {}) {
   return true;
 }
 
+function syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown) {
+  if (!isAgentRecord(agent) || !runtime) return false;
+  let changed = false;
+  const mcpMissing = runtime.mcpPresent === false;
+  if ((!agent.tmux || !String(agent.tmux).trim()) && !manualDown) {
+    agent.tmux = tmuxTarget;
+    changed = true;
+  }
+  if (manualDown) {
+    if (agent.online !== false) {
+      agent.online = false;
+      changed = true;
+    }
+  } else if (mcpMissing) {
+    if (agent.online !== false) {
+      agent.online = false;
+      changed = true;
+    }
+    if (agent.offlineReason !== 'mcp-missing:auto') {
+      agent.offlineReason = 'mcp-missing:auto';
+      changed = true;
+    }
+  } else {
+    if (agent.online !== true) {
+      agent.online = true;
+      changed = true;
+    }
+    if (agent.offlineReason !== null) {
+      agent.offlineReason = null;
+      changed = true;
+    }
+    if (agent.manualDown !== false) {
+      agent.manualDown = false;
+      changed = true;
+    }
+  }
+  if (changed) {
+    agent.lastSeen = Date.now();
+  }
+  return changed;
+}
+
+function applyLocalMetadataOnlySignals(agentName, payload = {}) {
+  const runtime = ensureAgentRuntimeRecord(agentName);
+  if (!runtime) return;
+  applyLocalRuntimeSignals(agentName, {
+    blocked: runtime.blocked === true,
+    reason: runtime.blocked === true ? (runtime.blockedReason || null) : null,
+    tail: runtime.blocked === true ? (runtime.lastBlockedTail || '') : '',
+    command: runtime.blocked === true ? (runtime.lastBlockedCommand || '') : '',
+    workspacePath: payload.workspacePath,
+    mcpPresent: payload.mcpPresent,
+    blockedObserved: false,
+  });
+}
+
+function resolveLocalActivityCaptureSelection(agentNames = [], budget = 0) {
+  const ordered = [...new Set((Array.isArray(agentNames) ? agentNames : []).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const count = ordered.length;
+  const currentCursor = Math.max(0, Number(localActivitySweepState.selectionCursor) || 0);
+  if (count === 0) {
+    if (currentCursor !== 0) {
+      localActivitySweepState.selectionCursor = 0;
+      saveLocalActivitySweepState();
+    }
+    return { selected: new Set(), ordered, currentCursor: 0, nextCursor: 0 };
+  }
+  if (!Number.isFinite(budget) || budget <= 0 || budget >= count) {
+    const nextCursor = 0;
+    if (currentCursor !== nextCursor) {
+      localActivitySweepState.selectionCursor = nextCursor;
+      saveLocalActivitySweepState();
+    }
+    return { selected: new Set(ordered), ordered, currentCursor, nextCursor };
+  }
+
+  const normalizedCursor = currentCursor % count;
+  const selected = [];
+  for (let i = 0; i < budget; i++) {
+    selected.push(ordered[(normalizedCursor + i) % count]);
+  }
+  const nextCursor = (normalizedCursor + budget) % count;
+  if (currentCursor !== nextCursor) {
+    localActivitySweepState.selectionCursor = nextCursor;
+    saveLocalActivitySweepState();
+  }
+  return { selected: new Set(selected), ordered, currentCursor: normalizedCursor, nextCursor };
+}
+
 function isHumanMessageToAgent(msg, agentName) {
   if (!msg || msg.type !== 'human') return false;
   if (msg.to === agentName) return true;
@@ -3216,10 +3792,12 @@ function getAgentInboxGateBlock(agentName) {
 }
 
 function collectBlockedHumanTargets(agentName) {
+  const cached = pendingHumanTargetCache.get(agentName);
+  if (cached) return cached;
+
   const unreadHuman = getUnreadInboxMessages(agentName).unread
     .filter(m => m.type === 'human' && m.from && m.from !== agentName);
   const selected = new Map();
-  const unreadIds = new Set(unreadHuman.map(m => m.id));
 
   for (const msg of unreadHuman) {
     const prev = selected.get(msg.from);
@@ -3228,48 +3806,47 @@ function collectBlockedHumanTargets(agentName) {
     }
   }
 
-  if (selected.size === 0) {
-    let latest = null;
-    for (const msg of messages) {
-      if (!isHumanMessageToAgent(msg, agentName)) continue;
-      if (msg.from === agentName) continue;
-      if (!latest || compareMsgOrder(msg, latest) > 0) latest = msg;
-    }
-    if (latest) selected.set(latest.from, latest);
-  }
-
-  const targets = [...selected.values()]
-    .sort(compareMsgOrder)
-    .map(msg => ({
-      human: msg.from,
-      roomId: (typeof msg.sourceRoom === 'string' && msg.sourceRoom.trim()) ? msg.sourceRoom.trim() : null,
-      group: msg.group || null,
-      messageId: msg.id,
-      pending: unreadIds.has(msg.id),
-      ts: msg.ts,
-    }));
-
-  return {
+  const snapshot = {
     hasPendingHuman: unreadHuman.length > 0,
-    targets,
+    targets: [...selected.values()]
+      .sort(compareMsgOrder)
+      .map(msg => ({
+        human: msg.from,
+        roomId: (typeof msg.sourceRoom === 'string' && msg.sourceRoom.trim()) ? msg.sourceRoom.trim() : null,
+        group: msg.group || null,
+        messageId: msg.id,
+        pending: true,
+        ts: msg.ts,
+      })),
   };
+  pendingHumanTargetCache.set(agentName, snapshot);
+  return snapshot;
 }
 
-function applyAgentBlockedRuntime(agentName, payload = {}) {
+function applyAgentBlockedState(agentName, payload = {}) {
   const runtime = ensureAgentRuntimeRecord(agentName);
   if (!runtime) return null;
 
   const now = Date.now();
   const blockedNow = payload.blocked === true;
+  const blockedObserved = blockedNow && payload.blockedObserved !== false;
   const reasonNow = blockedNow && typeof payload.reason === 'string' && payload.reason.trim()
     ? payload.reason.trim()
     : null;
+  const tierNow = blockedNow ? blockedTierFromReason(reasonNow) : null;
   const tailNow = blockedNow && typeof payload.tail === 'string' ? payload.tail : '';
   const cmdNow = blockedNow && typeof payload.command === 'string' ? payload.command : '';
   const serverNow = blockedNow ? normalizeServer(payload.server) : null;
 
   const prevBlocked = runtime.blocked === true;
   const prevReason = runtime.blockedReason || null;
+  const prevBlockedTier = normalizeBlockedTier(runtime.blockedTier, prevBlocked ? blockedTierFromReason(prevReason) : null);
+  const prevBlockedConsecutiveScans = Math.max(0, Number(runtime.blockedConsecutiveScans) || 0);
+  const prevBlockedNotificationSent = runtime.blockedNotificationSent === true;
+  const prevBlockedNotifiedTier = normalizeBlockedTier(
+    runtime.blockedNotifiedTier,
+    prevBlockedNotificationSent ? prevBlockedTier : null,
+  );
   const prevMcpPresent = runtime.mcpPresent === true
     ? true
     : (runtime.mcpPresent === false ? false : null);
@@ -3277,16 +3854,29 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
 
   if (runtime.blocked !== blockedNow) { runtime.blocked = blockedNow; changed = true; }
   if ((runtime.blockedReason || null) !== reasonNow) { runtime.blockedReason = reasonNow; changed = true; }
+  if (normalizeBlockedTier(runtime.blockedTier, null) !== tierNow) { runtime.blockedTier = tierNow; changed = true; }
   if (runtime.lastSeen !== now) { runtime.lastSeen = now; changed = true; }
   if (runtime.updatedAt !== now) { runtime.updatedAt = now; changed = true; }
   if (blockedNow) {
+    const sameBlockedSignature = prevBlocked && prevReason === reasonNow && prevBlockedTier === tierNow;
+    const blockedConsecutiveScans = blockedObserved
+      ? (sameBlockedSignature ? (prevBlockedConsecutiveScans + 1) : 1)
+      : (sameBlockedSignature ? prevBlockedConsecutiveScans : 0);
+    if (runtime.blockedConsecutiveScans !== blockedConsecutiveScans) {
+      runtime.blockedConsecutiveScans = blockedConsecutiveScans;
+      changed = true;
+    }
     const blockedSince = prevBlocked ? (runtime.blockedSince || now) : now;
     if (runtime.blockedSince !== blockedSince) { runtime.blockedSince = blockedSince; changed = true; }
     if (runtime.lastBlockedTail !== tailNow) { runtime.lastBlockedTail = tailNow; changed = true; }
     if (runtime.lastBlockedCommand !== cmdNow) { runtime.lastBlockedCommand = cmdNow; changed = true; }
     if ((runtime.lastBlockedServer || null) !== (serverNow || null)) { runtime.lastBlockedServer = serverNow; changed = true; }
   } else {
+    if (runtime.blockedTier !== null) { runtime.blockedTier = null; changed = true; }
     if (runtime.blockedSince !== null) { runtime.blockedSince = null; changed = true; }
+    if (runtime.blockedConsecutiveScans !== 0) { runtime.blockedConsecutiveScans = 0; changed = true; }
+    if (runtime.blockedNotificationSent !== false) { runtime.blockedNotificationSent = false; changed = true; }
+    if (runtime.blockedNotifiedTier !== null) { runtime.blockedNotifiedTier = null; changed = true; }
     if (runtime.lastBlockedTail !== '') { runtime.lastBlockedTail = ''; changed = true; }
     if (runtime.lastBlockedCommand !== '') { runtime.lastBlockedCommand = ''; changed = true; }
     if (runtime.lastBlockedServer !== null) { runtime.lastBlockedServer = null; changed = true; }
@@ -3329,42 +3919,6 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
   if (agentChanged) saveAgents();
   if (shouldCatchup) notifyAgentCatchup(agentName, 'mcp-restored');
 
-  const becameBlocked = !prevBlocked && blockedNow;
-  const reasonChanged = prevBlocked && blockedNow && reasonNow && reasonNow !== prevReason;
-  const recovered = prevBlocked && !blockedNow;
-
-  if (becameBlocked || reasonChanged) {
-    const blockedSummary = `Agent '${agentName}' entered blocked state`;
-    const { hasPendingHuman, targets } = collectBlockedHumanTargets(agentName);
-    const fullLines = [
-      `Agent: ${agentName}`,
-      `Reason: ${reasonNow || 'unknown'}`,
-      `Server: ${serverNow || 'local'}`,
-      `Pending human messages: ${hasPendingHuman ? 'yes' : 'no'}`,
-      `Target humans: ${targets.map(t => t.human).join(', ') || 'none'}`,
-    ];
-    if (tailNow) {
-      fullLines.push('');
-      fullLines.push('Tail sample:');
-      fullLines.push(tailNow);
-    }
-    emitSystemInfo(blockedSummary, fullLines.join('\n'));
-    broadcastSSE('agent_blocked', {
-      agent: agentName,
-      reason: reasonNow || 'unknown',
-      blockedSince: runtime.blockedSince || now,
-      server: serverNow || null,
-      hasPendingHuman,
-      targets,
-    });
-  } else if (recovered) {
-    emitSystemInfo(`Agent '${agentName}' recovered from blocked state`, `Agent '${agentName}' is no longer blocked.`);
-    broadcastSSE('agent_recovered', {
-      agent: agentName,
-      recoveredAt: now,
-    });
-  }
-
   if (mcpBecameMissing) {
     const full = [
       `Agent: ${agentName}`,
@@ -3384,6 +3938,103 @@ function applyAgentBlockedRuntime(agentName, payload = {}) {
       agent: agentName,
       recoveredAt: now,
       server: normalizeServer(payload.server) || normalizeServer(agent?.server) || null,
+    });
+  }
+
+  return {
+    agentName,
+    runtime,
+    payload,
+    now,
+    blockedNow,
+    blockedObserved,
+    reasonNow,
+    tierNow,
+    tailNow,
+    serverNow,
+    prevBlockedNotificationSent,
+    prevBlockedNotifiedTier,
+  };
+}
+
+function dispatchBlockedNotifications(transition) {
+  if (!transition || !transition.runtime) return transition?.runtime || null;
+
+  const {
+    agentName,
+    runtime,
+    now,
+    blockedNow,
+    blockedObserved,
+    reasonNow,
+    tierNow,
+    tailNow,
+    serverNow,
+    prevBlockedNotificationSent,
+    prevBlockedNotifiedTier,
+  } = transition;
+
+  const blockedDebounceThreshold = blockedTierDebounceThreshold(tierNow);
+  const blockedNotificationReady = blockedNow
+    && blockedObserved
+    && Number.isFinite(blockedDebounceThreshold)
+    && runtime.blockedConsecutiveScans >= blockedDebounceThreshold;
+  const becameBlocked = blockedNotificationReady && !prevBlockedNotificationSent;
+  const withinBlockedNotificationCooldown = becameBlocked
+    && BLOCKED_NOTIFICATION_COOLDOWN_MS > 0
+    && (now - Math.max(0, Number(runtime.lastBlockedNotificationTs) || 0)) < BLOCKED_NOTIFICATION_COOLDOWN_MS;
+  const severityIncreased = prevBlockedNotificationSent
+    && blockedNotificationReady
+    && normalizeBlockedTier(tierNow, null) !== null
+    && normalizeBlockedTier(prevBlockedNotifiedTier, null) !== null
+    && tierNow > prevBlockedNotifiedTier;
+  const recovered = prevBlockedNotificationSent && !blockedNow;
+
+  if ((becameBlocked && !withinBlockedNotificationCooldown) || severityIncreased) {
+    let runtimeChanged = false;
+    if (runtime.blockedNotificationSent !== true) {
+      runtime.blockedNotificationSent = true;
+      runtimeChanged = true;
+    }
+    if (normalizeBlockedTier(runtime.blockedNotifiedTier, null) !== tierNow) {
+      runtime.blockedNotifiedTier = tierNow;
+      runtimeChanged = true;
+    }
+    if ((Number(runtime.lastBlockedNotificationTs) || 0) !== now) {
+      runtime.lastBlockedNotificationTs = now;
+      runtimeChanged = true;
+    }
+    if (runtimeChanged) saveAgentRuntime();
+    const blockedSummary = `Agent '${agentName}' entered blocked state`;
+    const { hasPendingHuman, targets } = collectBlockedHumanTargets(agentName);
+    const fullLines = [
+      `Agent: ${agentName}`,
+      `Reason: ${reasonNow || 'unknown'}`,
+      `Tier: ${tierNow === BLOCK_TIER_TRANSIENT ? 'transient' : (tierNow === BLOCK_TIER_SOFT ? 'soft' : 'hard')}`,
+      `Server: ${serverNow || 'local'}`,
+      `Pending human messages: ${hasPendingHuman ? 'yes' : 'no'}`,
+      `Target humans: ${targets.map(t => t.human).join(', ') || 'none'}`,
+    ];
+    if (tailNow) {
+      fullLines.push('');
+      fullLines.push('Tail sample:');
+      fullLines.push(tailNow);
+    }
+    emitSystemInfo(blockedSummary, fullLines.join('\n'));
+    broadcastSSE('agent_blocked', {
+      agent: agentName,
+      reason: reasonNow || 'unknown',
+      tier: tierNow,
+      blockedSince: runtime.blockedSince || now,
+      server: serverNow || null,
+      hasPendingHuman,
+      targets,
+    });
+  } else if (recovered) {
+    emitSystemInfo(`Agent '${agentName}' recovered from blocked state`, `Agent '${agentName}' is no longer blocked.`);
+    broadcastSSE('agent_recovered', {
+      agent: agentName,
+      recoveredAt: now,
     });
   }
 
@@ -3640,46 +4291,76 @@ function refreshServerLiveness() {
   if (agentsChanged) saveAgents();
 }
 
-function captureLocalPaneContent(tmuxTarget) {
+async function captureLocalPaneContentAsync(tmuxTarget) {
   if (!tmuxTarget) return null;
   try {
-    const raw = execSync(`tmux capture-pane -p -t ${JSON.stringify(tmuxTarget)} 2>/dev/null`, {
+    const { stdout } = await execFileAsync('tmux', ['capture-pane', '-p', '-t', String(tmuxTarget)], {
       timeout: 3000,
       encoding: 'utf-8',
     });
     return {
-      text: raw,
-      hash: createHash('md5').update(raw).digest('hex'),
+      text: stdout,
+      hash: createHash('md5').update(stdout).digest('hex'),
     };
   } catch {
     return null;
   }
 }
 
-function captureLocalPaneCommand(tmuxTarget) {
-  if (!tmuxTarget) return '';
+async function buildLocalPaneMetadataSnapshotAsync() {
+  const sessions = new Map();
+  const ttyToSession = new Map();
   try {
-    const raw = execSync(`tmux list-panes -t ${JSON.stringify(tmuxTarget)} -F "#{pane_current_command}" 2>/dev/null`, {
-      timeout: 3000,
-      encoding: 'utf-8',
-    }).trim();
-    return raw.split('\n')[0] || '';
+    const { stdout } = await execFileAsync(
+      'tmux',
+      ['list-panes', '-a', '-F', '#{pane_tty}\t#{session_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}'],
+      { encoding: 'utf-8', timeout: 3000 }
+    );
+    const raw = stdout.trim();
+    if (!raw) return { sessions, ttyToSession };
+    for (const line of raw.split('\n')) {
+      const parts = line.split('\t');
+      if (parts.length < 5) continue;
+      const tty = parts[0].trim();
+      const session = parts[1].trim();
+      const panePid = Number.parseInt(parts[2].trim(), 10);
+      const command = parts[3].trim();
+      const workspacePath = normalizeWorkspacePath(parts.slice(4).join('\t').trim());
+      if (tty && session) ttyToSession.set(tty.replace('/dev/', ''), session);
+      if (!session) continue;
+      if (!sessions.has(session)) {
+        sessions.set(session, {
+          panePid: Number.isFinite(panePid) && panePid > 1 ? panePid : null,
+          command: command || '',
+          workspacePath,
+        });
+      }
+    }
   } catch {
-    return '';
+    // best effort snapshot
   }
+  return { sessions, ttyToSession };
 }
 
-function captureLocalPanePath(tmuxTarget) {
-  if (!tmuxTarget) return null;
-  try {
-    const raw = execSync(`tmux list-panes -t ${JSON.stringify(tmuxTarget)} -F "#{pane_current_path}" 2>/dev/null`, {
-      timeout: 3000,
-      encoding: 'utf-8',
-    }).trim();
-    return normalizeWorkspacePath((raw.split('\n')[0] || '').trim());
-  } catch {
-    return null;
+function buildLocalPaneSnapshotMapFromMetadata(paneMetadataSnapshot) {
+  if (paneMetadataSnapshot && paneMetadataSnapshot.sessions instanceof Map) {
+    return paneMetadataSnapshot.sessions;
   }
+  return new Map();
+}
+
+function sessionKeyFromTmuxTarget(tmuxTarget) {
+  if (typeof tmuxTarget !== 'string') return '';
+  const sessionName = tmuxTarget.split(':', 1)[0].trim();
+  if (!sessionName) return '';
+  return sessionName.startsWith('=') ? sessionName.slice(1) : sessionName;
+}
+
+function readLocalPaneSnapshot(tmuxTarget, paneSnapshotMap = null) {
+  if (!tmuxTarget || !(paneSnapshotMap instanceof Map)) return null;
+  const sessionName = sessionKeyFromTmuxTarget(String(tmuxTarget));
+  if (!sessionName) return null;
+  return paneSnapshotMap.get(sessionName) || null;
 }
 
 function normalizeMcpPresence(value) {
@@ -3695,35 +4376,26 @@ function applyLocalRuntimeSignals(agentName, payload = {}) {
     : null;
   const workspacePath = normalizeWorkspacePath(payload.workspacePath);
   const mcpPresent = normalizeMcpPresence(payload.mcpPresent);
+  const blockedObserved = payload.blockedObserved === true;
   const digest = JSON.stringify({
     blocked,
     reason,
     workspacePath: workspacePath || null,
     mcpPresent,
   });
-  if (localRuntimeSignalDigest.get(agentName) === digest) return;
+  if (localRuntimeSignalDigest.get(agentName) === digest && !(blocked && blockedObserved)) return;
   localRuntimeSignalDigest.set(agentName, digest);
-  applyAgentBlockedRuntime(agentName, {
+  const transition = applyAgentBlockedState(agentName, {
     blocked,
     reason,
     tail: blocked && typeof payload.tail === 'string' ? payload.tail : '',
     command: typeof payload.command === 'string' ? payload.command : '',
     workspacePath,
     mcpPresent,
+    blockedObserved,
     server: 'local',
   });
-}
-
-function localTmuxSessionExists(tmuxTarget) {
-  if (!tmuxTarget) return false;
-  const sessionName = String(tmuxTarget).split(':')[0].trim();
-  if (!sessionName) return false;
-  try {
-    execSync(`tmux has-session -t ${JSON.stringify(sessionName)} 2>/dev/null`, { timeout: 2000 });
-    return true;
-  } catch {
-    return false;
-  }
+  dispatchBlockedNotifications(transition);
 }
 
 function isEphemeralAuditAgentName(name) {
@@ -3775,14 +4447,17 @@ function pruneEphemeralAgents(names = [], reason = 'ephemeral-prune') {
   // Intentionally silent: ephemeral audit agent pruning is routine housekeeping.
 }
 
-function sweepLocalActivityDurations() {
+async function sweepLocalActivityDurations() {
   const nowSec = Math.floor(Date.now() / 1000);
   const nowMs = Date.now();
   let runtimeChanged = false;
   let agentsChanged = false;
   const pruneCandidates = new Set();
   const localRuntimeAgents = new Set();
-  const mcpSessions = getLocalMcpSessionSet(true);
+  const paneMetadataSnapshot = await buildLocalPaneMetadataSnapshotAsync();
+  const mcpSessions = await getLocalMcpSessionSetAsync(true, paneMetadataSnapshot);
+  const paneSnapshotMap = buildLocalPaneSnapshotMapFromMetadata(paneMetadataSnapshot);
+  const localRows = [];
 
   for (const agent of Object.values(agents)) {
     if (!isAgentRecord(agent)) continue;
@@ -3796,6 +4471,21 @@ function sweepLocalActivityDurations() {
     const tmuxTarget = configuredTmux || (manualDown ? null : `${agent.name}:0.0`);
     const runtime = ensureAgentRuntimeRecord(agent.name);
     if (!runtime) continue;
+    localRows.push({
+      agent,
+      runtime,
+      manualDown,
+      tmuxTarget,
+    });
+  }
+
+  const captureCandidates = localRows
+    .filter(row => row.tmuxTarget)
+    .map(row => row.agent.name);
+  const sampled = resolveLocalActivityCaptureSelection(captureCandidates, LOCAL_ACTIVITY_CAPTURE_BUDGET).selected;
+
+  for (const row of localRows) {
+    const { agent, runtime, manualDown, tmuxTarget } = row;
     if (!tmuxTarget) {
       localTmuxMissingState.delete(agent.name);
       localActivityState.delete(agent.name);
@@ -3821,12 +4511,13 @@ function sweepLocalActivityDurations() {
       continue;
     }
 
-    const paneCapture = captureLocalPaneContent(tmuxTarget);
-    if (!paneCapture?.hash) {
-      const hasSession = localTmuxSessionExists(tmuxTarget);
-      const paneCmd = captureLocalPaneCommand(tmuxTarget);
-      const workspacePath = hasSession ? captureLocalPanePath(tmuxTarget) : null;
-      const mcpPresent = hasSession ? mcpSessions.has(agent.name) : null;
+    const paneSnapshot = readLocalPaneSnapshot(tmuxTarget, paneSnapshotMap);
+    const hasSession = !!paneSnapshot;
+    const paneCmd = paneSnapshot?.command || '';
+    const workspacePath = paneSnapshot?.workspacePath || null;
+    const mcpPresent = hasSession ? mcpSessions.has(agent.name) : null;
+
+    if (!hasSession) {
       applyLocalRuntimeSignals(agent.name, {
         blocked: false,
         reason: null,
@@ -3835,9 +4526,6 @@ function sweepLocalActivityDurations() {
         workspacePath,
         mcpPresent,
       });
-      if (hasSession) {
-        localTmuxMissingState.delete(agent.name);
-      }
       localActivityState.delete(agent.name);
       localCompactState.delete(agent.name);
       const resetChanged = setRuntimeActivityFields(runtime, {
@@ -3850,47 +4538,69 @@ function sweepLocalActivityDurations() {
         runtime.updatedAt = Date.now();
         runtimeChanged = true;
       }
-      if (!hasSession) {
-        let missing = localTmuxMissingState.get(agent.name);
-        if (!missing) {
-          missing = { since: nowMs, alerted: false };
-          localTmuxMissingState.set(agent.name, missing);
+      let missing = localTmuxMissingState.get(agent.name);
+      if (!missing) {
+        missing = { since: nowMs, alerted: false };
+        localTmuxMissingState.set(agent.name, missing);
+      }
+      const missingForMs = Math.max(0, nowMs - (Number(missing.since) || nowMs));
+      const wasOnline = agent.online === true;
+      const prevLastSeenMs = Number(agent.lastSeen) || 0;
+      const seenAgeMs = prevLastSeenMs > 0 ? Math.max(0, nowMs - prevLastSeenMs) : 0;
+      const recentEnough = prevLastSeenMs <= 0 || seenAgeMs <= AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS;
+      const wasManualDown = manualDown;
+      let transitioned = false;
+      if (agent.online !== false) { agent.online = false; agentsChanged = true; transitioned = true; }
+      if (agent.tmux !== null) { agent.tmux = null; agentsChanged = true; transitioned = true; }
+      if (!wasManualDown && agent.offlineReason !== 'tmux-missing:auto') {
+        agent.offlineReason = 'tmux-missing:auto';
+        agentsChanged = true;
+        transitioned = true;
+      }
+      if (transitioned) {
+        agent.lastSeen = nowMs;
+      }
+      if (!wasManualDown
+        && wasOnline
+        && recentEnough
+        && !missing.alerted
+        && missingForMs >= AGENT_TMUX_MISSING_ALERT_GRACE_MS) {
+        missing.alerted = true;
+        localTmuxMissingState.set(agent.name, missing);
+        if (agent.offlineReason === 'tmux-missing:auto') {
+          maybeEmitUnexpectedOfflineAlert(agent.name, 'tmux-missing:auto', { server: 'local', detail: `tmux target ${tmuxTarget} not found` });
         }
-        const missingForMs = Math.max(0, nowMs - (Number(missing.since) || nowMs));
-        const wasOnline = agent.online === true;
-        const prevLastSeenMs = Number(agent.lastSeen) || 0;
-        const seenAgeMs = prevLastSeenMs > 0 ? Math.max(0, nowMs - prevLastSeenMs) : 0;
-        const recentEnough = prevLastSeenMs <= 0 || seenAgeMs <= AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS;
-        const wasManualDown = manualDown;
-        let transitioned = false;
-        if (agent.online !== false) { agent.online = false; agentsChanged = true; transitioned = true; }
-        if (agent.tmux !== null) { agent.tmux = null; agentsChanged = true; transitioned = true; }
-        if (!wasManualDown && agent.offlineReason !== 'tmux-missing:auto') {
-          agent.offlineReason = 'tmux-missing:auto';
-          agentsChanged = true;
-          transitioned = true;
-        }
-        if (transitioned) {
-          agent.lastSeen = nowMs;
-        }
-        if (!wasManualDown
-          && wasOnline
-          && recentEnough
-          && !missing.alerted
-          && missingForMs >= AGENT_TMUX_MISSING_ALERT_GRACE_MS) {
-          missing.alerted = true;
-          localTmuxMissingState.set(agent.name, missing);
-          if (agent.offlineReason === 'tmux-missing:auto') {
-            maybeEmitUnexpectedOfflineAlert(agent.name, 'tmux-missing:auto', { server: 'local', detail: `tmux target ${tmuxTarget} not found` });
-          }
-        }
-        if (isEphemeralAuditAgentName(agent.name)) pruneCandidates.add(agent.name);
+      }
+      if (isEphemeralAuditAgentName(agent.name)) pruneCandidates.add(agent.name);
+      continue;
+    }
+
+    if (!sampled.has(agent.name)) {
+      applyLocalMetadataOnlySignals(agent.name, {
+        workspacePath,
+        mcpPresent,
+      });
+      localTmuxMissingState.delete(agent.name);
+      if (syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown)) {
+        agentsChanged = true;
       }
       continue;
     }
+
+    const paneCapture = await captureLocalPaneContentAsync(tmuxTarget);
+    if (!paneCapture?.hash) {
+      applyLocalMetadataOnlySignals(agent.name, {
+        workspacePath,
+        mcpPresent,
+      });
+      localTmuxMissingState.delete(agent.name);
+      if (syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown)) {
+        agentsChanged = true;
+      }
+      continue;
+    }
+
     const paneHash = paneCapture.hash;
-    const paneCmd = captureLocalPaneCommand(tmuxTarget);
-    const workspacePath = captureLocalPanePath(tmuxTarget);
     const blockedReason = detectLocalBlockedReason(paneCapture.text, paneCmd);
     const blocked = Boolean(blockedReason);
     applyLocalRuntimeSignals(agent.name, {
@@ -3956,44 +4666,7 @@ function sweepLocalActivityDurations() {
       runtimeChanged = true;
     }
 
-    // Self-heal local mapping: if tmux session exists and emits pane content,
-    // keep backend routing state aligned even after stale/offline cleanup.
-    let onlineChanged = false;
-    const mcpMissing = runtime.mcpPresent === false;
-    if ((!agent.tmux || !String(agent.tmux).trim()) && !manualDown) {
-      agent.tmux = tmuxTarget;
-      onlineChanged = true;
-    }
-    if (manualDown) {
-      if (agent.online !== false) {
-        agent.online = false;
-        onlineChanged = true;
-      }
-    } else if (mcpMissing) {
-      if (agent.online !== false) {
-        agent.online = false;
-        onlineChanged = true;
-      }
-      if (agent.offlineReason !== 'mcp-missing:auto') {
-        agent.offlineReason = 'mcp-missing:auto';
-        onlineChanged = true;
-      }
-    } else {
-      if (agent.online !== true) {
-        agent.online = true;
-        onlineChanged = true;
-      }
-      if (agent.offlineReason !== null) {
-        agent.offlineReason = null;
-        onlineChanged = true;
-      }
-      if (agent.manualDown !== false) {
-        agent.manualDown = false;
-        onlineChanged = true;
-      }
-    }
-    if (onlineChanged) {
-      agent.lastSeen = Date.now();
+    if (syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown)) {
       agentsChanged = true;
     }
   }
@@ -4010,9 +4683,9 @@ function sweepLocalActivityDurations() {
   }
 }
 
-function readLocalSwapUsageSnapshot() {
+async function readLocalSwapUsageSnapshot() {
   try {
-    const raw = readFileSync('/proc/meminfo', 'utf-8');
+    const raw = await readFileAsync('/proc/meminfo', 'utf-8');
     const fields = {};
     for (const line of raw.split('\n')) {
       const m = line.match(/^([A-Za-z_]+):\s+(\d+)\s+kB$/);
@@ -4030,8 +4703,8 @@ function readLocalSwapUsageSnapshot() {
   }
 }
 
-function sweepLocalSwapPressure() {
-  const snap = readLocalSwapUsageSnapshot();
+async function sweepLocalSwapPressure() {
+  const snap = await readLocalSwapUsageSnapshot();
   if (!snap) return;
 
   swapAlertState.lastPct = snap.usagePct;
@@ -4080,11 +4753,11 @@ function scopeUnitFromCgroupPath(cgroupPath) {
   return leaf.endsWith('.scope') ? leaf : null;
 }
 
-function scopeUnitForPid(pid) {
+async function scopeUnitForPid(pid) {
   const n = Number.parseInt(pid, 10);
   if (!Number.isFinite(n) || n <= 1) return null;
   try {
-    const raw = readFileSync(`/proc/${n}/cgroup`, 'utf-8');
+    const raw = await readFileAsync(`/proc/${n}/cgroup`, 'utf-8');
     for (const line of String(raw || '').split('\n')) {
       if (!line) continue;
       const idx = line.indexOf(':');
@@ -4100,24 +4773,13 @@ function scopeUnitForPid(pid) {
   return null;
 }
 
-function buildLocalPanePidMap() {
+async function buildLocalPanePidMapAsync() {
   const out = new Map();
-  try {
-    const raw = execSync('tmux list-panes -a -F "#{session_name} #{pane_pid}" 2>/dev/null', {
-      encoding: 'utf-8',
-      timeout: 3000,
-    }).trim();
-    if (!raw) return out;
-    for (const line of raw.split('\n')) {
-      const sp = line.indexOf(' ');
-      if (sp <= 0) continue;
-      const session = line.slice(0, sp).trim();
-      const panePid = Number.parseInt(line.slice(sp + 1).trim(), 10);
-      if (!session || !Number.isFinite(panePid) || panePid <= 1) continue;
-      if (!out.has(session)) out.set(session, panePid);
-    }
-  } catch {
-    // best effort map
+  const snapshotMap = buildLocalPaneSnapshotMapFromMetadata(await buildLocalPaneMetadataSnapshotAsync());
+  for (const [session, snapshot] of snapshotMap.entries()) {
+    const panePid = Number(snapshot?.panePid || 0);
+    if (!session || !Number.isFinite(panePid) || panePid <= 1) continue;
+    if (!out.has(session)) out.set(session, panePid);
   }
   return out;
 }
@@ -4129,21 +4791,22 @@ function parseSystemdMemoryValue(raw) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-function readAgentScopeMemory(agentName, panePidMap = null) {
+async function readAgentScopeMemory(agentName, panePidMap = null) {
   const agent = agents[agentName];
   const tmuxTarget = (typeof agent?.tmux === 'string' && agent.tmux.trim())
     ? agent.tmux.trim()
     : `${agentName}:0.0`;
-  const sessionName = tmuxTarget.split(':', 1)[0].trim() || agentName;
+  const sessionName = sessionKeyFromTmuxTarget(tmuxTarget) || agentName;
   const panePid = (panePidMap instanceof Map) ? panePidMap.get(sessionName) : null;
-  const unit = scopeUnitForPid(panePid) || scopeUnitForAgent(agentName);
+  const unit = (await scopeUnitForPid(panePid)) || scopeUnitForAgent(agentName);
   if (!unit) return null;
   try {
     const env = USER_RUNTIME_DIR && USER_DBUS_SESSION_BUS
       ? { ...process.env, XDG_RUNTIME_DIR: USER_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: USER_DBUS_SESSION_BUS }
       : process.env;
-    const out = execSync(
-      `systemctl --user show ${JSON.stringify(unit)} --property=ActiveState --property=MemoryCurrent --property=MemoryHigh --value --no-pager`,
+    const { stdout: out } = await execFileAsync(
+      'systemctl',
+      ['--user', 'show', unit, '--property=ActiveState', '--property=MemoryCurrent', '--property=MemoryHigh', '--value', '--no-pager'],
       { encoding: 'utf-8', timeout: 3000, env }
     );
     const [activeStateRaw, currentRaw, highRaw] = String(out || '').split('\n');
@@ -4165,9 +4828,11 @@ function pushResourceAlertToAgent(agentName, summary) {
   if (!state.online) return;
 
   const payload = `[RESOURCE ALERT] ${summary}\nPlease pause heavy tasks, checkpoint progress, and reduce memory usage immediately.`;
-  fetch(PUSH_QUEUE_URL, {
+  const queuePath = new URL(PUSH_QUEUE_URL).pathname;
+  fetchWebBridge(PUSH_QUEUE_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
     body: JSON.stringify({
       from: 'agent-chat-v2',
       to: agent.tmux,
@@ -4183,7 +4848,7 @@ function pushResourceAlertToAgent(agentName, summary) {
         hasMcp: false,
       },
     }),
-  }).catch((e) => {
+  }, `pushResourceAlertToAgent() POST ${queuePath} agent=${agentName}`).catch((e) => {
     console.warn(`[scope-alert] queue push failed for ${agentName}: ${e.message}`);
   });
 }
@@ -4192,10 +4857,10 @@ function formatBytesGiB(bytes) {
   return (bytes / (1024 ** 3)).toFixed(2);
 }
 
-function sweepAgentScopePressure() {
+async function sweepAgentScopePressure() {
   if (!AGENT_SCOPE_MONITOR_ENABLED) return;
   const now = Date.now();
-  const panePidMap = buildLocalPanePidMap();
+  const panePidMap = await buildLocalPanePidMapAsync();
   const localAgentNames = Object.values(agents)
     .filter(isAgentRecord)
     .filter(agent => {
@@ -4210,7 +4875,7 @@ function sweepAgentScopePressure() {
   }
 
   for (const agentName of localAgentNames) {
-    const scope = readAgentScopeMemory(agentName, panePidMap);
+    const scope = await readAgentScopeMemory(agentName, panePidMap);
     const prev = scopePressureState.get(agentName) || { high: false, lastAlertAt: 0 };
     if (!scope) {
       if (prev.high) {
@@ -4246,6 +4911,59 @@ function sweepAgentScopePressure() {
       scopePressureState.set(agentName, { high: true, lastAlertAt: prev.lastAlertAt });
     }
   }
+}
+
+function runAsyncSweep(label, fn, stateKey) {
+  if (stateKey === 'localActivity' && localActivitySweepRunning) return;
+  if (stateKey === 'localSwap' && localSwapSweepRunning) return;
+  if (stateKey === 'agentScope' && agentScopeSweepRunning) return;
+
+  if (stateKey === 'localActivity') localActivitySweepRunning = true;
+  if (stateKey === 'localSwap') localSwapSweepRunning = true;
+  if (stateKey === 'agentScope') agentScopeSweepRunning = true;
+
+  Promise.resolve()
+    .then(fn)
+    .catch((error) => {
+      console.error(`[${label}] ${error?.message || error}`);
+    })
+    .finally(() => {
+      if (stateKey === 'localActivity') localActivitySweepRunning = false;
+      if (stateKey === 'localSwap') localSwapSweepRunning = false;
+      if (stateKey === 'agentScope') agentScopeSweepRunning = false;
+    });
+}
+
+function countLocalSweepAgents() {
+  let count = 0;
+  for (const agent of Object.values(agents)) {
+    if (!isAgentRecord(agent) || agent.kind === 'human') continue;
+    const serverId = normalizeServer(agent.server);
+    const isLocalAgent = !serverId || serverId === 'local' || serverId === LOCAL_SERVER_ID;
+    if (!isLocalAgent) continue;
+    count += 1;
+  }
+  return count;
+}
+
+export function computeAdaptiveSweepIntervalMs(baseIntervalMs, agentCount = 0) {
+  const normalizedBase = Number.isFinite(Number(baseIntervalMs)) && Number(baseIntervalMs) > 0
+    ? Math.floor(Number(baseIntervalMs))
+    : 5000;
+  const normalizedAgentCount = Math.max(0, Number.parseInt(agentCount, 10) || 0);
+  return Math.max(normalizedBase, normalizedAgentCount * AGENT_SWEEP_INTERVAL_PER_AGENT_MS);
+}
+
+function scheduleAdaptiveSweepLoop(label, fn, stateKey, baseIntervalMs) {
+  const tick = () => {
+    runAsyncSweep(label, fn, stateKey);
+    const nextDelay = computeAdaptiveSweepIntervalMs(baseIntervalMs, countLocalSweepAgents());
+    const timer = setTimeout(tick, nextDelay);
+    if (typeof timer?.unref === 'function') timer.unref();
+  };
+  const initialDelay = computeAdaptiveSweepIntervalMs(baseIntervalMs, countLocalSweepAgents());
+  const timer = setTimeout(tick, initialDelay);
+  if (typeof timer?.unref === 'function') timer.unref();
 }
 
 function getAgentDeliveryState(name) {
@@ -4293,6 +5011,7 @@ function serializeAgent(agent) {
     manualDown: agent.manualDown === true,
     blocked: runtime?.blocked === true,
     blockedReason: runtime?.blockedReason || null,
+    blockedTier: normalizeBlockedTier(runtime?.blockedTier, null),
     blockedSince: runtime?.blockedSince || null,
     agentModelVersion: normalizeAgentModelVersion(agent.agentModelVersion) || null,
     layoutVersion: normalizeLayoutVersion(agent.layoutVersion) || null,
@@ -4439,48 +5158,70 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
 }
 
 // ── Push notification relay ───────────────────────────────────────────
-function collectLocalMcpSessions() {
+async function collectLocalMcpSessionsAsync(paneMetadataSnapshot = null) {
   try {
-    const paneOut = execSync('tmux list-panes -a -F "#{pane_tty} #{session_name}" 2>/dev/null', { timeout: 3000, encoding: 'utf-8' }).trim();
-    if (!paneOut) return new Set();
-    const ptsMap = {};
-    for (const line of paneOut.split('\n')) {
-      const sp = line.indexOf(' ');
-      if (sp < 0) continue;
-      const tty = line.slice(0, sp);
-      const sess = line.slice(sp + 1);
-      if (tty && sess) ptsMap[tty.replace('/dev/', '')] = sess;
-    }
+    const ptsMap = (paneMetadataSnapshot && paneMetadataSnapshot.ttyToSession instanceof Map)
+      ? paneMetadataSnapshot.ttyToSession
+      : (await buildLocalPaneMetadataSnapshotAsync()).ttyToSession;
+    if (!ptsMap.size) return new Set();
     let pids;
     try {
-      pids = execSync('pgrep -f "node.*mcp-server.js" 2>/dev/null', { timeout: 3000, encoding: 'utf-8' }).trim().split('\n').filter(Boolean);
-    } catch { return new Set(); }
+      const { stdout } = await execFileAsync('pgrep', ['-f', 'node.*mcp-server.js'], { timeout: 3000, encoding: 'utf-8' });
+      pids = stdout.trim().split('\n').filter(Boolean);
+    } catch {
+      return new Set();
+    }
+    if (!pids.length) return new Set();
     const matched = new Set();
-    for (const pid of pids) {
-      try {
-        const pts = execSync(`ps -o tty= -p ${pid} 2>/dev/null`, { timeout: 3000, encoding: 'utf-8' }).trim();
-        const session = ptsMap[pts];
+    try {
+      const { stdout } = await execFileAsync('ps', ['-o', 'pid=,tty=', '-p', pids.join(',')], {
+        timeout: 3000,
+        encoding: 'utf-8',
+      });
+      const psOut = stdout.trim();
+      if (!psOut) return matched;
+      for (const line of psOut.split('\n')) {
+        const parts = line.trim().split(/\s+/, 2);
+        if (parts.length < 2) continue;
+        const pts = parts[1].trim();
+        if (!pts || pts === '?') continue;
+        const session = ptsMap.get(pts) || null;
         if (session) matched.add(session);
-      } catch { /* pid vanished, skip */ }
+      }
+    } catch {
+      return new Set();
     }
     return matched;
-  } catch { /* no tmux */ }
-  return new Set();
+  } catch {
+    return new Set();
+  }
 }
 
-function getLocalMcpSessionSet(forceRefresh = false) {
+async function getLocalMcpSessionSetAsync(forceRefresh = false, paneMetadataSnapshot = null) {
   const now = Date.now();
   if (!forceRefresh && (now - localMcpSessionCacheAt) <= LOCAL_MCP_SESSION_CACHE_TTL_MS) {
     return localMcpSessionCache;
   }
-  localMcpSessionCache = collectLocalMcpSessions();
+  localMcpSessionCache = await collectLocalMcpSessionsAsync(paneMetadataSnapshot);
   localMcpSessionCacheAt = now;
   return localMcpSessionCache;
 }
 
-function agentHasMcp(agentName) {
+async function agentHasMcpAsync(agentName) {
   if (!agentName) return false;
-  return getLocalMcpSessionSet(false).has(agentName);
+  const sessions = await getLocalMcpSessionSetAsync(false);
+  return sessions.has(agentName);
+}
+
+async function localTmuxSessionExistsAsync(sessionName) {
+  const sess = String(sessionName || '').trim();
+  if (!sess) return false;
+  try {
+    await execFileAsync('tmux', ['has-session', '-t', sess], { timeout: 2000 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const mergedPushInboxCursor = new Map();
@@ -4499,9 +5240,11 @@ function logPushNotifySkip(agentName, reason, detail = '') {
 
 function clearQueuedNotificationsForAgent(agentName) {
   if (!agentName) return;
-  fetch(`${WEB_BASE_URL}/api/queue/agents/${encodeURIComponent(agentName)}/notifications`, {
+  const queueClearPath = `/api/queue/agents/${encodeURIComponent(agentName)}/notifications`;
+  fetchWebBridge(`${WEB_BASE_URL}${queueClearPath}`, {
     method: 'DELETE',
-  })
+    signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
+  }, `clearQueuedNotificationsForAgent() DELETE ${queueClearPath} agent=${agentName}`)
     .then((r) => {
       if (!r.ok) {
         console.warn(`[push-notify] queue clear failed for ${agentName}: status ${r.status}`);
@@ -4557,6 +5300,7 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
     to: agentName,
     group: null,
     type: 'inform',
+    priority: 'normal',
     summary,
     full,
     mentions: [],
@@ -4582,20 +5326,20 @@ async function pushNotify(agentName, msg) {
   }
   // If server is unknown (null), verify the tmux session exists locally before queueing
   if (!agentServer) {
-    try {
-      const sess = agent.tmux.split(':')[0];
-      execSync(`tmux has-session -t ${JSON.stringify(sess)} 2>/dev/null`, { timeout: 2000 });
-    } catch {
+    const sess = agent.tmux.split(':')[0];
+    const hasSession = await localTmuxSessionExistsAsync(sess);
+    if (!hasSession) {
       logPushNotifySkip(agentName, 'local-session-not-found', `(tmux=${agent.tmux})`);
       return; // tmux session doesn't exist locally — likely a remote agent not yet heartbeated
     }
   }
   const isHumanMsg = msg.type === 'human';
-  const hasMcp = agentHasMcp(agentName);
+  const hasMcp = await agentHasMcpAsync(agentName);
   const { inboxTs, unread } = getUnreadInboxMessages(agentName);
   const unreadCount = unread.length;
   const latestUnread = unread[unread.length - 1] || msg;
   const replyTo = latestUnread.from || msg.from;
+  const notificationPriority = unreadCount > 1 ? highestMessagePriority(unread) : normalizeMessagePriority(msg?.priority);
 
   // Determine if reply is expected based on message type
   const needsReply = msg.type === 'human' || msg.type === 'request';
@@ -4668,6 +5412,7 @@ async function pushNotify(agentName, msg) {
   try {
     const notifyMeta = {
       kind: notificationKind,
+      priority: notificationPriority || 'normal',
       requiresInboxCheck,
       sourceMsgId: latestUnread?.id || msg?.id || null,
       unreadCount,
@@ -4676,11 +5421,13 @@ async function pushNotify(agentName, msg) {
       needsReply,
       hasMcp,
     };
-    const resp = await fetch(PUSH_QUEUE_URL, {
+    const queuePath = new URL(PUSH_QUEUE_URL).pathname;
+    const resp = await fetchWebBridge(PUSH_QUEUE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: 'agent-chat-v2', to: agent.tmux, payload: notification, notifyMeta }),
-    });
+      signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
+      body: JSON.stringify({ from: 'agent-chat-v2', to: agent.tmux, payload: notification, priority: notificationPriority || 'normal', notifyMeta }),
+    }, `pushNotify() POST ${queuePath} agent=${agentName}`);
     if (resp.ok) {
       const body = await resp.json().catch(() => ({}));
       markAgentPushNotified(agentName, {
@@ -5037,9 +5784,7 @@ app.post('/api/agents', (req, res) => {
     managedProjects: Array.isArray(managedProjects)
       ? normalizeManagedProjects(managedProjects)
       : normalizeManagedProjects(existing.managedProjects),
-    human: human !== undefined
-      ? normalizeHumanMeta(human)
-      : normalizeHumanMeta(existing.human),
+    human: mergeHumanMeta(existing.human, human),
     task: task !== undefined
       ? normalizeAgentTask(task, agentName)
       : normalizeAgentTask(existing.task, agentName),
@@ -5141,7 +5886,7 @@ app.patch('/api/agents/:name', (req, res) => {
     agent.managedProjects = normalizeManagedProjects(managedProjects);
   }
   if (human !== undefined) {
-    agent.human = normalizeHumanMeta(human);
+    agent.human = mergeHumanMeta(agent.human, human);
   }
   if (task !== undefined) {
     agent.task = normalizeAgentTask(task, agentName);
@@ -5161,9 +5906,17 @@ app.patch('/api/agents/:name', (req, res) => {
   res.json({ ok: true, agent: serializeAgent(agent) });
 });
 
-app.get('/api/agents', (_req, res) => {
+app.get('/api/agents', (req, res) => {
   refreshServerLiveness();
-  res.json(Object.values(agents).filter(isAgentRecord).map(serializeAgent));
+  const records = Object.values(agents).filter(isAgentRecord);
+  if ((String(req.query.view || '').trim().toLowerCase()) === 'names') {
+    const names = records
+      .map(agent => (typeof agent?.name === 'string' ? agent.name.trim() : ''))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+    return res.json(names);
+  }
+  res.json(records.map(serializeAgent));
 });
 
 app.get('/api/agents/:name', (req, res) => {
@@ -5182,8 +5935,7 @@ app.delete('/api/agents/:name', (req, res) => {
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
   if (req.query.force === 'true') {
-    delete agents[agentName];
-    saveAgents();
+    clearDeletedAgentState(agentName);
     console.log(`Agent '${agentName}' permanently deleted`);
     return res.json({ ok: true, deleted: true, name: agentName });
   }
@@ -5248,6 +6000,9 @@ app.post('/api/agents/:name/runtime', (req, res) => {
   const mcpPresent = Object.prototype.hasOwnProperty.call(req.body || {}, 'mcpPresent')
     ? (req.body.mcpPresent === true ? true : (req.body.mcpPresent === false ? false : null))
     : undefined;
+  const blockedObserved = Object.prototype.hasOwnProperty.call(req.body || {}, 'blockedObserved')
+    ? req.body.blockedObserved === true
+    : true;
 
   let agent = agents[agentName];
   if (!isAgentRecord(agent)) {
@@ -5264,7 +6019,7 @@ app.post('/api/agents/:name/runtime', (req, res) => {
     saveAgents();
   }
 
-  const runtime = applyAgentBlockedRuntime(agentName, {
+  const transition = applyAgentBlockedState(agentName, {
     blocked,
     reason,
     tail,
@@ -5276,7 +6031,9 @@ app.post('/api/agents/:name/runtime', (req, res) => {
     lastTmuxActivitySec,
     workspacePath,
     mcpPresent,
+    blockedObserved,
   });
+  const runtime = dispatchBlockedNotifications(transition);
   if (!runtime) return res.status(500).json({ error: 'runtime update failed' });
   res.json({
     ok: true,
@@ -5284,6 +6041,7 @@ app.post('/api/agents/:name/runtime', (req, res) => {
       agent: agentName,
       blocked: runtime.blocked === true,
       blockedReason: runtime.blockedReason || null,
+      blockedTier: normalizeBlockedTier(runtime.blockedTier, null),
       blockedSince: runtime.blockedSince || null,
       activeNow: runtime.activeNow === true,
       activeDurationSec: Number(runtime.activeDurationSec) || 0,
@@ -6071,7 +6829,7 @@ app.post('/api/subconscious/runtime/invoke/:name', async (req, res) => {
       ok: true,
       invoked: false,
       guidance: null,
-      guidanceSource: state.contract.manualGuidance.configured ? 'manual-state-file' : 'none',
+      guidanceSource: (state.contract.guidance?.configured === true || state.contract.manualGuidance?.configured === true) ? 'manual-state-file' : 'none',
       disabledReason: state.runtimeConfig.disabledReason,
       provider: state.runtimeConfig.provider,
       model: state.runtimeConfig.model,
@@ -6084,7 +6842,7 @@ app.post('/api/subconscious/runtime/invoke/:name', async (req, res) => {
       ok: true,
       invoked: false,
       guidance: null,
-      guidanceSource: state.contract.manualGuidance.configured ? 'manual-state-file' : 'none',
+      guidanceSource: (state.contract.guidance?.configured === true || state.contract.manualGuidance?.configured === true) ? 'manual-state-file' : 'none',
       disabledReason: `hook ${hook} is not eligible for runtime guidance`,
       provider: state.runtimeConfig.provider,
       model: state.runtimeConfig.model,
@@ -6241,6 +6999,50 @@ app.get('/api/subconscious/events/:name', (req, res) => {
     ? Math.min(limitRaw, SUBCONSCIOUS_EVENT_HISTORY_LIMIT)
     : 120;
   return res.json({ ok: true, agent, events: getSubconsciousEvents(agent, limit) });
+});
+
+app.post('/api/task-graphs', (req, res) => {
+  try {
+    const created = taskGraphStore.createGraph(req.body || {});
+    const graph = taskGraphStore.advanceGraph(created.id) || created;
+    return res.json({ ok: true, graph });
+  } catch (error) {
+    return respondTaskGraphError(res, error, 'failed to create task graph');
+  }
+});
+
+app.get('/api/task-graphs', (req, res) => {
+  try {
+    const status = normalizeOptionalText(req.query?.status, 32);
+    return res.json(taskGraphStore.listGraphs(status ? { status } : {}));
+  } catch (error) {
+    return respondTaskGraphError(res, error, 'failed to list task graphs');
+  }
+});
+
+app.get('/api/task-graphs/:id', (req, res) => {
+  const graph = taskGraphStore.getGraph(req.params.id);
+  if (!graph) return res.status(404).json({ error: 'task graph not found' });
+  return res.json(graph);
+});
+
+app.delete('/api/task-graphs/:id', (req, res) => {
+  const graph = taskGraphStore.deleteGraph(req.params.id);
+  if (!graph) return res.status(404).json({ error: 'task graph not found' });
+  return res.json({ ok: true, graph });
+});
+
+app.patch('/api/task-graphs/:id/nodes/:nodeId', (req, res) => {
+  try {
+    taskGraphStore.updateNode(req.params.id, req.params.nodeId, req.body || {});
+    const graph = taskGraphStore.advanceGraph(req.params.id) || taskGraphStore.getGraph(req.params.id);
+    if (!graph) return res.status(404).json({ error: 'task graph not found' });
+    const node = taskGraphStore.getNode(req.params.id, req.params.nodeId);
+    if (!node) return res.status(404).json({ error: 'task graph node not found' });
+    return res.json({ ok: true, graph, node });
+  } catch (error) {
+    return respondTaskGraphError(res, error, 'failed to update task graph node');
+  }
 });
 
 // ── Groups CRUD ───────────────────────────────────────────────────────
@@ -6434,7 +7236,7 @@ app.get('/api/media/fetch', (req, res) => {
 
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -6461,6 +7263,14 @@ app.post('/api/messages', (req, res) => {
       return res.status(400).json({ error: `attachments[${i}]: ${normalized.error}` });
     }
     normalizedAttachments.push(normalized.value);
+  }
+  const normalizedSchema = normalizeMessageSchema(schema);
+  if (normalizedSchema.error) {
+    return res.status(400).json({ error: normalizedSchema.error });
+  }
+  const normalizedPriority = normalizeMessagePriority(priority);
+  if (!normalizedPriority) {
+    return res.status(400).json({ error: 'priority must be one of: normal, high, urgent' });
   }
 
   if (!fromName) return res.status(400).json({ error: 'from required' });
@@ -6573,6 +7383,7 @@ app.post('/api/messages', (req, res) => {
     to: toName || null,
     group: group || null,
     type,
+    priority: normalizedPriority,
     summary: canonicalSummary,
     full: canonicalFull,
     mentions: [...textMentions],
@@ -6582,6 +7393,9 @@ app.post('/api/messages', (req, res) => {
   };
   if (normalizedAttachments.length > 0) {
     msg.attachments = normalizedAttachments;
+  }
+  if (normalizedSchema.value) {
+    msg.schema = normalizedSchema.value;
   }
 
   const warnings = [];
@@ -6646,42 +7460,29 @@ app.post('/api/messages', (req, res) => {
     msg.suppressedRecipients = [...suppressedRecipients];
   }
 
-  messages.push(msg);
-  saveMessages();
-  const compactEvent = buildAgentCompactEvent(msg, senderIsAgent);
-  if (compactEvent) {
-    broadcastSSE('agent_compact', compactEvent);
-  }
-  broadcastSSE('message', msg);
-  if (senderIsAgent) {
-    markAgentOutbound(fromName);
-  }
-
-  // Push notifications
-  if (msg.to && directTargetKind === 'agent' && msg.to !== msg.from && !isSuppressedForAgent(msg, msg.to)) {
-    const state = getAgentDeliveryState(msg.to);
-    if (state.online) pushNotify(msg.to, msg);
-  }
-  if (msg.group && msg.mentions.length > 0) {
-    for (const agent of msg.mentions) {
-      if (agent === msg.from || isSuppressedForAgent(msg, agent)) continue;
-      const state = getAgentDeliveryState(agent);
-      if (state.online) pushNotify(agent, msg);
-    }
-  }
+  dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
+  const taskGraph = handleTaskGraphMessageHook(msg);
 
   res.json({
     ok: true,
     id: msg.id,
     warnings,
     delivery: { suppressed: msg.suppressedRecipients || [], targetKind: directTargetKind || null },
+    taskGraph,
   });
 });
 
 app.get('/api/messages/:id', (req, res) => {
   const msg = messages.find(m => m.id === req.params.id);
   if (!msg) return res.status(404).json({ error: 'message not found' });
-  res.json({ ...msg, ts: undefined, time: relativeTime(msg.ts) });
+  const normalizedSchema = normalizeMessageSchema(msg?.schema);
+  res.json({
+    ...msg,
+    priority: normalizeMessagePriority(msg?.priority),
+    schema: normalizedSchema.value || undefined,
+    ts: undefined,
+    time: relativeTime(msg.ts),
+  });
 });
 
 app.post('/api/messages/:id/suppress', (req, res) => {
@@ -6700,6 +7501,7 @@ app.post('/api/messages/:id/suppress', (req, res) => {
   if (!msg.suppressedRecipients.includes(agentName)) {
     msg.suppressedRecipients.push(agentName);
     saveMessages();
+    invalidatePendingHumanTargets(agentName);
   }
   const after = getUnreadInboxMessages(agentName).unread.some(m => m.id === msg.id);
 
@@ -6792,7 +7594,8 @@ app.get('/api/inbox/:agent/unread', (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
-  const snapshot = buildUnreadInboxSnapshot(agentName);
+  const kinds = parseKindsFilter(req.query.kinds);
+  const snapshot = buildUnreadInboxSnapshot(agentName, { kinds });
   res.json(snapshot);
 });
 
@@ -6803,7 +7606,8 @@ app.get('/api/inbox/:agent/unread-list', (req, res) => {
 
   const limitRaw = Number.parseInt(req.query.limit, 10);
   const limit = Number.isFinite(limitRaw) && limitRaw >= 0 ? Math.min(limitRaw, 500) : 50;
-  const { unread } = getUnreadInboxMessages(agentName);
+  const kinds = parseKindsFilter(req.query.kinds);
+  const { unread } = getUnreadInboxMessages(agentName, { kinds });
   const rows = limit === 0 ? unread : unread.slice(-limit);
   res.json({
     agent: agentName,
@@ -6818,23 +7622,26 @@ app.get('/api/inbox/:agent', (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
+  const kindsList = parseKindsFilter(req.query.kinds);
+  const kinds = kindsList.length > 0 ? new Set(kindsList) : null;
 
   const cursor = ensureCursor(agentName);
   const inboxTs = cursor.inbox || 0;
   const inboxId = cursor.inboxId || null;
 
   const dmRaw = messages
-    .filter(m => m.to === agentName && isAfterCursor(m, inboxTs, inboxId) && !isSuppressedForAgent(m, agentName))
+    .filter(m => m.to === agentName && isAfterCursor(m, inboxTs, inboxId) && !isSuppressedForAgent(m, agentName) && messageMatchesKinds(m, kinds))
     .sort(compareMsgOrder);
   const dm = dmRaw.map(summarizeMsg);
 
   const groupRaw = messages
     .filter(m => m.group && isGroupMember(m.group, agentName))
-    .filter(m => m.mentions.includes(agentName) && isAfterCursor(m, inboxTs, inboxId) && !isSuppressedForAgent(m, agentName))
+    .filter(m => m.mentions.includes(agentName) && isAfterCursor(m, inboxTs, inboxId) && !isSuppressedForAgent(m, agentName) && messageMatchesKinds(m, kinds))
     .sort(compareMsgOrder);
   const group = groupRaw.map(summarizeMsg);
 
-  // Advance cursor only to the latest delivered message.
+  // Filtered reads are preview-only: a global inbox cursor cannot safely advance over one kind
+  // without implicitly skipping unread messages of other kinds.
   const unread = [...dmRaw, ...groupRaw].sort(compareMsgOrder);
   const runtime = ensureAgentRuntimeRecord(agentName);
   const pendingGate = getPendingInboxGate(runtime);
@@ -6843,15 +7650,18 @@ app.get('/api/inbox/:agent', (req, res) => {
     && pendingGate.sourceMsgId
     && unread.some((msg) => msg?.id === pendingGate.sourceMsgId)
   );
-  if (advanceInboxCursor(cursor, unread)) {
+  if (!kinds && advanceInboxCursor(cursor, unread)) {
     saveCursors();
+    invalidatePendingHumanTargets(agentName);
   }
-  markAgentInboxChecked(agentName, {
-    clearInboxGate: consumedPendingSource,
-    sourceMsgId: consumedPendingSource ? pendingGate.sourceMsgId : null,
-  });
-  // If the agent just consumed inbox, stale queued notifications should be removed immediately.
-  clearQueuedNotificationsForAgent(agentName);
+  if (!kinds) {
+    markAgentInboxChecked(agentName, {
+      clearInboxGate: consumedPendingSource,
+      sourceMsgId: consumedPendingSource ? pendingGate.sourceMsgId : null,
+    });
+    // If the agent just consumed inbox, stale queued notifications should be removed immediately.
+    clearQueuedNotificationsForAgent(agentName);
+  }
 
   res.json({ dm, group });
 });
@@ -6960,46 +7770,77 @@ function shutdown() {
   console.log('Shutting down, saving data...');
   supervisorService.stop();
   refreshServerLiveness();
-  sweepLocalActivityDurations();
-  sweepAgentRules();
-  saveAgents();
-  saveGroups();
-  saveMessages();
-  saveCursors();
-  saveServers();
-  saveAgentRuntime();
-  process.exit(0);
+  Promise.allSettled([
+    sweepLocalActivityDurations(),
+    sweepLocalSwapPressure(),
+    sweepAgentScopePressure(),
+  ]).finally(() => {
+    sweepAgentRules();
+    flushAllPendingJsonWrites();
+    saveAgents(true);
+    saveGroups();
+    saveMessages();
+    saveCursors();
+    saveServers();
+    saveAgentRuntime(true);
+    process.exit(0);
+  });
 }
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+let startupHooksInstalled = false;
+let backgroundLoopsStarted = false;
+let serverInstance = null;
 
-setInterval(() => {
-  refreshServerLiveness();
-}, SERVER_SWEEP_INTERVAL_MS);
+function installStartupHooks() {
+  if (startupHooksInstalled) return;
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+  startupHooksInstalled = true;
+}
 
-setInterval(() => {
-  sweepLocalActivityDurations();
-}, LOCAL_ACTIVITY_SWEEP_INTERVAL_MS);
+function startBackgroundLoops() {
+  if (backgroundLoopsStarted) return;
+  setInterval(() => {
+    refreshServerLiveness();
+  }, SERVER_SWEEP_INTERVAL_MS);
 
-setInterval(() => {
-  sweepAgentRules();
-}, RULE_SWEEP_INTERVAL_MS);
+  scheduleAdaptiveSweepLoop('sweepLocalActivityDurations', sweepLocalActivityDurations, 'localActivity', LOCAL_ACTIVITY_SWEEP_INTERVAL_MS);
 
-setInterval(() => {
-  sweepLocalSwapPressure();
-}, SWAP_SWEEP_INTERVAL_MS);
+  setInterval(() => {
+    sweepAgentRules();
+  }, RULE_SWEEP_INTERVAL_MS);
 
-setInterval(() => {
-  sweepAgentScopePressure();
-}, AGENT_SCOPE_SWEEP_INTERVAL_MS);
+  scheduleAdaptiveSweepLoop('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap', SWAP_SWEEP_INTERVAL_MS);
 
-// ── Start ─────────────────────────────────────────────────────────────
-app.listen(PORT, '127.0.0.1', () => {
-  sweepLocalActivityDurations();
-  sweepLocalSwapPressure();
-  sweepAgentScopePressure();
-  supervisorService.start();
-  console.log(`Agent Chat v2 backend listening on http://127.0.0.1:${PORT}`);
-  const agentCount = Object.values(agents).filter(isAgentRecord).length;
-  console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);
-});
+  scheduleAdaptiveSweepLoop('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope', AGENT_SCOPE_SWEEP_INTERVAL_MS);
+
+  backgroundLoopsStarted = true;
+}
+
+export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
+  if (serverInstance) return serverInstance;
+  installStartupHooks();
+  startBackgroundLoops();
+  serverInstance = app.listen(port, host, () => {
+    runAsyncSweep('sweepLocalActivityDurations', sweepLocalActivityDurations, 'localActivity');
+    runAsyncSweep('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap');
+    runAsyncSweep('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope');
+    supervisorService.start();
+    console.log(`Agent Chat v2 backend listening on http://${host}:${port}`);
+    const agentCount = Object.values(agents).filter(isAgentRecord).length;
+    console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);
+  });
+  return serverInstance;
+}
+
+export { app };
+export {
+  normalizeAgentName,
+  normalizeHumanMeta,
+  mergeHumanMeta,
+  normalizeAgentTask,
+  serializeAgent,
+};
+
+if (process.argv[1] === __filename) {
+  startServer();
+}

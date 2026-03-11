@@ -352,6 +352,7 @@ function writeManagedTaskWriterWrapper(filePath, content) {
 }
 
 function ensureDocsClaudeCompatibilityLink(paths) {
+  // Transitional compatibility only: older tooling still looks under docs/CLAUDE.md.
   const docsClaudePath = path.join(paths.docsDir, 'CLAUDE.md');
   const relativeTarget = '../CLAUDE.md';
   if (existsSync(docsClaudePath)) {
@@ -372,6 +373,7 @@ function ensureDocsClaudeCompatibilityLink(paths) {
 }
 
 function ensureDocsAgentsCompatibilityLink(paths) {
+  // Transitional compatibility only: older tooling still looks under docs/AGENTS.md.
   const docsAgentsPath = path.join(paths.docsDir, 'AGENTS.md');
   const relativeTarget = '../AGENTS.md';
   if (existsSync(docsAgentsPath)) {
@@ -430,6 +432,13 @@ function loadExistingManifest(paths) {
 }
 
 function ensureDocs(paths, manifest) {
+  writeIfMissing(path.join(paths.docsDir, 'agent-knowledge.md'), `# Agent Knowledge
+
+Record durable, agent-accumulated knowledge here.
+
+Keep this file for reusable facts and conventions that should survive across tasks.
+Do not use it for task-local plans, progress, or system-provisioned entry-point content.
+`);
   writeIfMissing(path.join(paths.docsDir, 'plan.md'), `## Current
 Initialize this v1 agent workspace and define the first executable task.
 
@@ -452,6 +461,7 @@ Track agent-owned project material under \`../projects/\`.
   const docsAgentsStatus = ensureDocsAgentsCompatibilityLink(paths);
   const taskWriterStatus = writeManagedTaskWriterWrapper(paths.taskWriterPath, renderTaskWriterWrapper(path.join(__dirname, '..')));
   return {
+    agentKnowledgeStatus: existsSync(path.join(paths.docsDir, 'agent-knowledge.md')) ? 'present' : 'missing',
     claudeRootStatus,
     agentsRootStatus,
     docsClaudeStatus,
@@ -618,9 +628,6 @@ function main() {
   ensureDir(paths.projectsDir);
   ensureDir(paths.supervisorDir);
   ensureDir(paths.supervisorDocsDir);
-  ensureDir(path.join(paths.workdir, 'scratch'));
-  ensureDir(path.join(paths.workdir, 'inbox'));
-  ensureDir(path.join(paths.workdir, 'outputs'));
 
   const sourceProject = resolveAbsDir(args.projectPath, 'project path');
   const projectName = String(args.projectName || '').trim()
@@ -670,9 +677,8 @@ function main() {
     task: existing?.task || null,
     runtimeProfile: existing?.runtimeProfile || null,
     human: {
+      ...((existing?.human && typeof existing.human === 'object') ? existing.human : {}),
       owner: existing?.human?.owner ?? null,
-      notes: existing?.human?.notes ?? '',
-      projectScope: existing?.human?.projectScope ?? '',
     },
     createdAt: existing?.createdAt || now,
     updatedAt: now,

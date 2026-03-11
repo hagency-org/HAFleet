@@ -6,7 +6,15 @@
   - Keep migration/deploy/runtime workflows stable for local and live folders.
 - Adjacent focus:
   - Touch other repos only when explicitly requested by operator and with backup-first changes.
-  - Use agent-chat MCP to coordinate and report progress.
+- Use agent-chat MCP to coordinate and report progress.
+- Current operator instruction sets worker into chief-coordinator mode: delegate investigation/coding/execution to `agentchat-develop`, `agentchat-aduit`, and `Yato` wherever possible; worker should primarily own architecture, triage, planning, reminders, acceptance, and durable documentation.
+- Runtime/probe residue is now a standing audit concern: orphan tmux sessions, stale `supervisor-*probe*` sessions, half-started agents, and other leftover runtime artifacts must be treated as first-class system-hygiene findings rather than ignored test debris.
+- In chief-coordinator mode, worker must not directly kill/restart shared live agent/runtime processes or perform broad shutdown actions unless the operator explicitly orders a maintenance-window intervention; live runtime manipulation is delegated work.
+- `supervisor-tmuxlaunchfailed` is now confirmed as recurring residue, not just lingering stale state; treat this residue class as a framework-fix issue when triaging runtime hygiene.
+- Executor availability itself is now a durable coordination surface: if `agentchat-develop`/`agentchat-aduit` disappear from tmux or `Yato` is stuck behind interactive prompts, worker must explicitly record the lane as degraded, reassign or restore it, and not silently pretend the old execution plan is still active.
+- `agentchat-develop` now has an existing v1 dev home at `/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_agentchat-develop`; if the legacy `data/agents/agentchat-develop` record blocks v1 launch, back it up rather than forcing shared-workspace execution.
+- The recent tmux-sweep optimization introduced a new truthfulness hazard: caching pane metadata by `session_name` alone is unsafe for agents pinned to a specific pane/window. If the exact configured `tmuxTarget` disappears while the broader session survives, session-level aliasing can suppress `tmux-missing:auto` and misattribute pane pid / workspace / scope-memory state from the wrong pane.
+- The operator-requested `agentchat-worker` self-migration to a v1 home/workdir/project is a real queued project, not a casual cleanup note. It requires a real v1 home, migrated worker docs, updated templates, a `handoff.md`, and explicit stop/restart instructions for the operator.
 
 ## Boundaries
 ### Must do
@@ -179,6 +187,10 @@
   - if the browser opens `https://user:pass@host/...` with credentials embedded in the URL, modern browsers block same-origin `fetch()` calls constructed from relative URLs;
   - current Agent Detail `refresh()` then fails on `/api/...` calls and clears SSR-rendered content, making the page appear blank/Loading even though local dev and SSR HTML are fine;
   - using the browser's native Basic Auth dialog avoids this, and a future UX hardening option is to preserve SSR content on refresh failure instead of wiping the page.
+- Live rollout transport instability pattern:
+  - if the live backend on `8090` degrades, `bridge-matrix.js` and the live web can amplify the failure by holding many unresolved internal `fetch()` calls to `AGENT_CHAT_API`;
+  - the immediate symptom is a full `8090` accept backlog with many `CLOSE_WAIT`/`ESTAB` local sockets, `mcp__agent-chat__*` tool calls failing as `fetch failed`, and `bridge-matrix` startup timing out while probing `/api/agents`;
+  - minimum mitigation is a hard timeout on internal backend helper fetches (`bridge-matrix.js`, `lib/bot-commands.js`) plus clean backend/bridge restart, but the deeper ownership issue is that live service recovery currently depends on manual tmux recovery rather than a verified managed restart path.
 - Minimal inbox-read gate contract:
   - canonical gate object is `inboxGate{requiresInboxCheck, sourceMsgId, raisedAt, reason}`;
   - canonical acknowledgement is a real `check_inbox()` cursor advance that consumes the pending `sourceMsgId`, not merely a tool call named `check_inbox()`;
@@ -188,6 +200,12 @@
   - `GET /api/inbox/:agent` clears the gate only when the pending `sourceMsgId` is actually consumed by that cursor advance;
   - outbound agent messages (`POST /api/messages`) are blocked with `409 inbox_check_required` while the gate is pending;
   - non-actionable deliveries must leave `inboxGate.requiresInboxCheck=false`.
+- Current supervisor execution model is still primarily in-process and rule-based: `SupervisorService.evaluateOne()` emits `llm: null` and does not call an LLM API today, even though `SUPERVISOR_LLM_*` config is present in env and status surfaces.
+- Current message injection into the primary agent path is subconscious-owned (`UserPromptSubmit` / `PreToolUse` additionalContext); supervisor does not inject guidance into the primary agent path today.
+- Current live supervisor status has a truthfulness bug: the actual listening live backend process exports `SUPERVISOR_ENABLED=false`, but `/api/supervisor/status` can still report `enabled=true` with advancing sweeps; treat live enabled-state as drifted until that control/config mismatch is fixed.
+- Intended supervisor charter is narrower than the current implementation shape: supervisor is the monitoring agent for the primary agent, responsible for detecting EOS, drift, unfinished work, and violations of required workflow/guideline rules (for example missing plan/progress updates or work happening outside the managed project/workdir contract).
+- Intended supervisor reasoning model is `agent-shaped state machine`: it should classify the primary agent into a bounded convergent state set rather than emit open-ended prose, and repeated identical states are the trigger for intervention/escalation.
+- Intended supervisor intervention path is agentchat-native: the supervisor should notify or inject through normal agentchat messaging (`send_message`, later optional force path), not through a hidden second control channel.
 - Minimal supervisor waiting/trailing contract:
   - safe waiting exists only on the canonical primary task object via `status=waiting`, `waiting_reason`, and `waiting_until`;
   - runtime idle/activity is observational input only and may start a bounded trailing window, but must not create or mutate safe waiting state;
@@ -226,6 +244,12 @@
 - Stable subconscious default-detail boundary:
   - default `/api/subconscious/detail/:name` now exposes local runtime, local memory, and local conversation only as transitional summary objects;
   - full local runtime internals, journal detail, and manual guidance text/preview belong only in privileged debug or writable settings surfaces, not the stable-facing default detail.
+- Human-maintained agent text-field convergence target:
+  - `Guidance` is the canonical human-authored intent surface for the agent, supervisor, and subconscious; it states what the agent is fundamentally supposed to do.
+  - `CLAUDE.md` remains the workflow/behavior contract; it states how the agent should work inside its workspace.
+  - `Owner` is a first-class visible field that states who owns or is responsible for the agent; it should be legible both to the agent and to other humans/tools inspecting the agent.
+  - `Identity` is the short external-facing description of the agent; it should answer “what is this agent for?” in one sentence for status views, scans, and listings.
+  - `Project Scope` and `Human Notes` are slated for removal because they are low-signal free-text fields without stable behavioral semantics.
 - Post-convergence maturity contract:
   - `stable` now includes canonical control-plane `task` / `runtimeProfile`, supervisor classification/lifecycle, the supported same-host tmux-backed sibling supervisor runtime shape plus explicit failure taxonomy, the upstream-authoritative subconscious default operational surface, accepted upstream-backed subconscious slices (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`), and inbox-read gate enforcement;
   - `transitional` includes the v1 compatibility mirror `data/agents/<name>/meta.json`, backend row projection for v1-owned fields, local subconscious runtime/memory/conversation journal surfaces, and manual guidance in its fallback/configuration role;
@@ -234,11 +258,23 @@
   - `agent.json` is the canonical v1 home-owned metadata source;
   - `PATCH /api/agents/:name/home-metadata` is the canonical v1 writer;
   - `data/agents/<name>/meta.json` is strict compatibility export only and must never outrank or repair the manifest;
+- Live Matrix duplicate-reply incident root cause:
+  - the direct cause was duplicate live `bridge-matrix.js` owners against the same `AGENT_CHAT_RUNTIME_DIR` (tmux-managed bridge plus orphaned systemd-owned bridge);
+  - the code-side anti-recurrence fix is an in-process runtime-root single-owner lock at `data/matrix/bridge-owner.lock`;
+  - operator-owned follow-up still remains: disable/remove the competing `bridge-matrix.service` path when root-capable execution is available.
   - backend row state remains a runtime-serving derivative projection for v1-owned fields.
 - Workspace entry-file direction:
   - `CLAUDE.md` and `AGENTS.md` are workspace-entry files and should converge to the workdir root rather than remaining primarily under `docs/`;
   - `docs/` should hold task/history/supporting documents such as `plan.md`, `progress.md`, and `projects.md`;
   - any duplicate or linked `docs/CLAUDE.md` / `docs/AGENTS.md` should be treated as transitional compatibility only, not the long-term source of truth.
+- Live runtime split shape:
+  - `agent-chat-live` is now the live code repo on branch `stable`;
+  - mutable live runtime state lives under `/home/shisui/laplace/agent-chat-live-runtime`;
+  - live `data/`, `logs/`, and `.env` in the code repo are symlinked into that runtime root for compatibility with existing service files and deploy scripts;
+  - live services still use `WorkingDirectory=/home/shisui/laplace/agent-chat-live`, but read `AGENT_CHAT_RUNTIME_DIR=/home/shisui/laplace/agent-chat-live-runtime` from the symlinked `.env`.
+- Supervisor history truthfulness boundary:
+  - historical `supervisorDetail.latest` rows are audit history, not current-state truth by themselves;
+  - default current-warning/current-health surfaces must only elevate supervisor warnings when there is a current classification/lifecycle issue, not merely because an old negative `latest` row still exists while supervisor is disabled or idle.
 - Existing-home v1 reprovisioning caveat in dev:
   - if reprovision is run without explicit dev backend env (`AGENT_CHAT_API` / `AGENT_CHAT_BACKEND_PORT`), `configure-v1-subconscious.js` falls back to `8090` and rewrites hook runtime URLs toward the default backend;
   - reprovisioning an existing dev home should therefore pass the explicit dev backend env or it can silently regress the subconscious event/invoke sink to the wrong backend.
@@ -345,3 +381,28 @@
   - the primary agent-side task writer is the only canonical writer for `task.id`, `heartbeat_at`, `waiting_reason`, `waiting_until`, and `done`;
   - supervisor remains a reader/classifier only and must not mutate primary task state;
   - sibling `supervisor/` workspace is allowed for supervisor-local docs/state, but it must not introduce a second canonical `Task` or `runtimeProfile` source.
+
+- Root selected-agent summary panel truthfulness rule: primary panel render must not block on secondary fetches that are not actually used by the current surface. In `server.js` root-page `fetchAgentDetail()`, waiting on unread-messages before rendering left the panel stuck on `Loading summary...`; secondary fetch failures must fail loud or be non-blocking.
+- Root/detail inline-JS helper drift is a real live risk: root and detail pages each emit their own script scope, so introducing a new helper call (for example `hasCurrentSupervisorIssue`) on the root page without emitting the helper into the root-page script produces live-only render failures even though the same helper exists elsewhere in `server.js`.
+- Live v1 `agent-up-v1` currently provisions homes under `~/.agentchat/agents/...`, not under `/home/shisui/laplace/agent-chat-live-runtime`; this means live code/runtime split is still incomplete for v1 agent homes.
+- `agent-up-v1` reprovision can overwrite customized root `workdir/CLAUDE.md` / `AGENTS.md` with the generic template; agent-specific role wiring must be re-applied or the provisioning path must become preserve-aware.
+- Fresh Codex agents can stall at the workspace trust prompt (`Do you trust the contents of this directory?`) because `agent-up-v1` does not currently satisfy or detect that prompt; backend metadata can show an agent as active while the tmux pane is still blocked on first-run trust.
+- `agent-down` can refuse a newly launched but unusable agent as “currently active” even when the Codex session never completed bootstrap; restart/validation flows may require manual tmux cleanup until activity semantics are tightened.
+- tmux target truth boundary:
+  - raw `tmuxTarget` is the canonical direct tmux command target and may legally include exact-session syntax such as `=session:0.0`;
+  - shared sweep pane snapshots are keyed by tmux-reported `session_name`, so any join against sweep-local metadata must first normalize raw `tmuxTarget` into a derived `sessionKey` by trimming, splitting at the first `:`, and stripping a leading `=`;
+  - raw `tmuxTarget` must continue to be used for direct tmux commands, while the normalized `sessionKey` must be used only for sweep-local joins and pane-pid/scope-memory attribution.
+  - accepted proof shows this normalization is sufficient to close the false `tmux-missing:auto` / weak scope-memory attribution regression for exact-session targets without adding new tmux shell-outs.
+- Worker self-migration rule:
+  - the `agentchat-worker` 1.0 cutover must use the launcher path (`agentchat up-v1` / `agent-up-v1`), not a raw `tmux new-session` invocation;
+  - raw tmux bypasses control-plane registration, compatibility metadata writeback, backend online mapping refresh, launcher env injection, and the normal v1 startup contract;
+  - direct tmux is acceptable for emergency debugging only, not for the canonical worker cutover.
+- `agent-up-v1` existing-home behavior:
+  - reprovision is preserve-aware, not blind overwrite;
+  - root `CLAUDE.md` / `AGENTS.md` are only rewritten when they are recognized managed/generated files or legacy stubs; manual/custom content is preserved as `preserved-manual`;
+  - compatibility links under `docs/` are refreshed only when safe; manual/custom files there are preserved;
+  - existing `task`, `runtimeProfile`, and `human` metadata are preserved through reprovision;
+  - managed project materialization is not silently overwritten: if the target project path already exists and does not resolve to the same real path, provisioning errors instead of replacing it.
+- Coordinator migration caveat:
+  - `agentchat up-v1 agentchat-worker ...` currently refuses implicit migration because the existing `agentchat-worker` compatibility metadata is still `0.x`;
+  - until a legacy-to-v1 migration path exists, the coordinator should migrate under the new v1 name `ac-topleader` instead of trying to refresh the legacy name in place.

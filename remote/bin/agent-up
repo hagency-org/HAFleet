@@ -907,6 +907,106 @@ apply_scope_limits_to_runtime_scope() {
   return 1
 }
 
+ensure_claude_project_trust() {
+  [ "$TYPE" = "claude" ] || return 0
+  [ -n "${AGENT_PATH:-}" ] || return 0
+
+  local status
+  status="$(
+    CLAUDE_JSON_PATH="$HOME/.claude.json" AGENT_PATH="$AGENT_PATH" python3 - <<'PY'
+import json
+import os
+import pathlib
+import shutil
+import tempfile
+import time
+
+claude_json_path = pathlib.Path(os.environ["CLAUDE_JSON_PATH"]).expanduser()
+agent_path = pathlib.Path(os.environ["AGENT_PATH"]).resolve()
+claude_json_path.parent.mkdir(parents=True, exist_ok=True)
+
+if claude_json_path.exists():
+    try:
+        raw = claude_json_path.read_text(encoding="utf-8")
+        data = json.loads(raw) if raw.strip() else {}
+    except Exception as exc:
+        print(f"error:failed to parse {claude_json_path}: {exc}")
+        raise SystemExit(0)
+else:
+    data = {}
+
+if not isinstance(data, dict):
+    print(f"error:{claude_json_path} root must be a JSON object")
+    raise SystemExit(0)
+
+projects = data.get("projects")
+if not isinstance(projects, dict):
+    projects = {}
+    data["projects"] = projects
+
+entry = projects.get(str(agent_path))
+if not isinstance(entry, dict):
+    entry = {}
+    projects[str(agent_path)] = entry
+
+changed = False
+defaults = {
+    "allowedTools": [],
+    "mcpContextUris": [],
+    "mcpServers": {},
+    "enabledMcpjsonServers": [],
+    "disabledMcpjsonServers": [],
+    "projectOnboardingSeenCount": 0,
+    "hasClaudeMdExternalIncludesApproved": False,
+    "hasClaudeMdExternalIncludesWarningShown": False,
+}
+for key, value in defaults.items():
+    if key not in entry:
+        entry[key] = value
+        changed = True
+
+if entry.get("hasTrustDialogAccepted") is not True:
+    entry["hasTrustDialogAccepted"] = True
+    changed = True
+
+if entry.get("hasCompletedProjectOnboarding") is not True:
+    entry["hasCompletedProjectOnboarding"] = True
+    changed = True
+
+if not changed:
+    print("already")
+    raise SystemExit(0)
+
+backup_dir = claude_json_path.parent / "backups"
+backup_dir.mkdir(parents=True, exist_ok=True)
+if claude_json_path.exists():
+    backup_path = backup_dir / f".claude.json.backup.{int(time.time() * 1000)}"
+    shutil.copy2(claude_json_path, backup_path)
+
+with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(claude_json_path.parent), delete=False) as handle:
+    json.dump(data, handle, indent=2)
+    handle.write("\n")
+    temp_name = handle.name
+
+os.replace(temp_name, claude_json_path)
+print("updated")
+PY
+  )"
+  case "$status" in
+    updated)
+      echo "Pre-accepted Claude trust for '$AGENT_PATH'."
+      ;;
+    already)
+      ;;
+    error:*)
+      echo "Warning: failed to pre-accept Claude trust for '$AGENT_PATH': ${status#error:}" >&2
+      ;;
+    *)
+      echo "Warning: unexpected Claude trust status for '$AGENT_PATH': ${status:-empty}" >&2
+      ;;
+  esac
+}
+
 capture_guard_matches() {
   [ -n "${CAPTURE_GUARD_FILE:-}" ] || return 0
   [ -n "${CAPTURE_GUARD_TOKEN:-}" ] || return 0
@@ -983,6 +1083,7 @@ if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
 fi
 
 enforce_workspace_uniqueness "$AGENT_PATH"
+ensure_claude_project_trust
 
 # ── Save meta ─────────────────────────────────────────────────────────
 mkdir -p "$AGENT_DATA"
@@ -1059,9 +1160,35 @@ if [ -n "$SCOPE_UNIT" ]; then
 fi
 register_backend_agent
 
+shell_quote() {
+  printf "%q" "$1"
+}
+
+append_launch_env_var() {
+  local var_name="$1"
+  local var_value="${!var_name-}"
+  if [ -n "${var_value:-}" ]; then
+    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX ${var_name}=$(shell_quote "$var_value")"
+  fi
+}
+
+append_launch_env_prefix() {
+  local prefix="$1"
+  local var_name
+  while IFS= read -r var_name; do
+    [ -n "$var_name" ] || continue
+    append_launch_env_var "$var_name"
+  done < <(env | cut -d= -f1 | LC_ALL=C sort | awk -v pfx="$prefix" 'index($0, pfx) == 1')
+}
+
 # ── Build init prompt for fresh starts ────────────────────────────────
 INIT_PROMPT="Your name is ${NAME}. You have an MCP tool server called '${MCP_SERVER_NAME}' for communicating with other agents and humans. Key tools: check_inbox() to read messages, send_message(to, summary, full) to DM, post(group, summary, full, mentions) for group messages, whoami() to see your identity and available agents/groups. Check your inbox now to see if there are any messages for you."
 CLAUDE_MODE_GUARD="Critical runtime rule: do not enter Plan mode or Select mode in this multi-agent tmux environment, because interactive mode switching cannot be completed. Stay in default mode and continue execution directly. Save this rule in memory and follow it for the whole session."
+
+LAUNCH_ENV_PREFIX="AGENT_NAME=$(shell_quote "$NAME")"
+append_launch_env_prefix "AGENT_CHAT_"
+append_launch_env_var "API_TOKEN"
+append_launch_env_var "AGENTCHAT_HOMEDIR"
 
 # ── Launch AI ─────────────────────────────────────────────────────────
 if [ "$TYPE" = "claude" ]; then
@@ -1071,13 +1198,13 @@ if [ "$TYPE" = "claude" ]; then
   [ -n "$EXTRA_ARGS" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
   if [ "$FRESH" = false ] && RID=$(cat "$RESUME_FILE"); then
     echo "Resuming claude session: $RID"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "AGENT_NAME=$NAME claude --resume $RID $CLAUDE_FLAGS" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "$LAUNCH_ENV_PREFIX claude --resume $RID $CLAUDE_FLAGS" Enter
   else
     echo "Starting new claude session..."
     # Write init prompt to temp file to avoid shell escaping issues
     INIT_FILE=$(mktemp "$TMP_RUNTIME_DIR/init.XXXXXX")
     echo "$INIT_PROMPT" > "$INIT_FILE"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "AGENT_NAME=$NAME claude --session-id $SESSION_ID $CLAUDE_FLAGS \"\$(cat \"$INIT_FILE\")\" && rm -f \"$INIT_FILE\"" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "$LAUNCH_ENV_PREFIX claude --session-id $SESSION_ID $CLAUDE_FLAGS \"\$(cat \"$INIT_FILE\")\" && rm -f \"$INIT_FILE\"" Enter
     ( sleep 300; rm -f "$INIT_FILE" >/dev/null 2>&1 || true ) &
     capture_resume_id_background "claude"
   fi
@@ -1089,12 +1216,12 @@ elif [ "$TYPE" = "codex" ]; then
   if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ]; then
     RID=$(cat "$RESUME_FILE")
     echo "Resuming codex session: $RID"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "AGENT_NAME=$NAME codex resume $RID $CODEX_FLAGS" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "$LAUNCH_ENV_PREFIX codex resume $RID $CODEX_FLAGS" Enter
   else
     CODEX_BASELINE_FILE=$(mktemp "$TMP_RUNTIME_DIR/codex-baseline.XXXXXX")
     snapshot_codex_session_ids "$CODEX_BASELINE_FILE"
     echo "Starting new codex session..."
-    tmux send-keys -t "$TMUX_PANE_TARGET" "AGENT_NAME=$NAME codex $CODEX_FLAGS -C $AGENT_PATH" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "$LAUNCH_ENV_PREFIX codex $CODEX_FLAGS -C $AGENT_PATH" Enter
     # Send init prompt after codex starts to create a session deterministically.
     sleep 5
     tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"

@@ -1,10 +1,11 @@
 import express from 'express';
 import { readFile as readFileAsync, open, stat as statAsync, appendFile } from 'fs/promises';
 import { writeFileSync, readFileSync, existsSync, mkdirSync, lstatSync, rmSync, unlinkSync, readdirSync } from 'fs';
-import { execSync, execFileSync } from 'child_process';
+import { execFileSync, execFile } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { defaultAgentchatHomeDir, resolveV1ManifestForAgent } from './lib/agent-home-v1.js';
+import { promisify } from 'util';
+import { defaultAgentchatHomeDir, resolveAgentDocsPaths, resolveV1ManifestForAgent } from './lib/agent-home-v1.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.dirname(__filename);
@@ -32,6 +33,8 @@ const IDLE_THRESHOLD = Number.isFinite(envIdleThreshold) && envIdleThreshold > 0
   ? envIdleThreshold
   : DEFAULT_IDLE_THRESHOLD_MS;
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.ceil(IDLE_THRESHOLD / 1000));
+const execFileAsync = promisify(execFile);
+let execFileAsyncImpl = execFileAsync;
 mkdirSync(DATA_ROOT, { recursive: true });
 mkdirSync(LOGS_ROOT, { recursive: true });
 mkdirSync(path.join(DATA_ROOT, 'agents'), { recursive: true });
@@ -181,6 +184,7 @@ function sanitizeNotifyMeta(rawMeta) {
   };
   return {
     kind: safeStr(rawMeta.kind, 'unknown'),
+    priority: normalizeQueuePriority(rawMeta.priority),
     requiresInboxCheck: safeBool(rawMeta.requiresInboxCheck),
     sourceMsgId: safeStr(rawMeta.sourceMsgId, null),
     unreadCount: safeInt(rawMeta.unreadCount),
@@ -189,6 +193,13 @@ function sanitizeNotifyMeta(rawMeta) {
     needsReply: safeBool(rawMeta.needsReply),
     hasMcp: safeBool(rawMeta.hasMcp),
   };
+}
+
+function normalizeQueuePriority(value) {
+  if (typeof value !== 'string') return 'normal';
+  const priority = value.trim().toLowerCase();
+  if (priority === 'high' || priority === 'urgent') return priority;
+  return 'normal';
 }
 
 async function notifyPushDelivered(entry, deliveredAt) {
@@ -338,7 +349,9 @@ function saveQueue() {
   for (const [, entries] of queue) items.push(...entries);
   try {
     writeFileSync(QUEUE_FILE, JSON.stringify({ idCounter: queueIdCounter, items }));
-  } catch {}
+  } catch (e) {
+    console.debug(`[server] queue save skipped: ${e.message}`);
+  }
 }
 
 // Load queue from disk on startup
@@ -362,7 +375,9 @@ try {
     }
   }
   console.log(`Restored ${data.items?.length || 0} queued messages from disk`);
-} catch { /* no queue file or parse error, start fresh */ }
+} catch (e) {
+  console.debug(`[server] queue load skipped: ${e.message}`);
+}
 
 // Accept queued message from agent-send
 app.post('/api/queue', (req, res) => {
@@ -370,6 +385,7 @@ app.post('/api/queue', (req, res) => {
   if (!to || !payload) return res.status(400).json({ error: 'missing to or payload' });
   const id = ++queueIdCounter;
   const queuedAt = Date.now();
+  const priority = normalizeQueuePriority(req.body?.priority);
   // Apply redirect if target was renamed
   let actualTo = to;
   let redirectedFrom = null;
@@ -377,7 +393,7 @@ app.post('/api/queue', (req, res) => {
     actualTo = redirects.get(to);
     redirectedFrom = to;
   }
-  const entry = { id, from: from || 'unknown', to: actualTo, payload, queuedAt };
+  const entry = { id, from: from || 'unknown', to: actualTo, payload, queuedAt, priority };
   const notifyMeta = sanitizeNotifyMeta(req.body?.notifyMeta);
   if (notifyMeta) entry.notifyMeta = notifyMeta;
   if (redirectedFrom) entry.redirectedFrom = redirectedFrom;
@@ -430,7 +446,7 @@ app.post('/api/queue/:id/send', async (req, res) => {
         archiveDroppedQueueEntries([entry], 'stale-notification-manual-send', target);
         return res.json({ ok: true, dropped: id, reason: 'stale-notification' });
       }
-      const ok = deliverMessage(entry);
+      const ok = await deliverMessage(entry);
       if (!ok) {
         // Keep behavior consistent with poll loop: failed delivery is retriable, not lost.
         if (!queue.has(target)) queue.set(target, []);
@@ -503,7 +519,7 @@ function trimTrailingBlankLines(text) {
   return lines.join('\n');
 }
 
-app.get('/api/tmux/capture/:session', (req, res) => {
+app.get('/api/tmux/capture/:session', async (req, res) => {
   const session = req.params.session;
   if (!/^[\w\-:.]+$/.test(session)) {
     return res.status(400).type('text').send('invalid session name');
@@ -514,7 +530,7 @@ app.get('/api/tmux/capture/:session', (req, res) => {
     let rawContent;
     if (sshConf) {
       // Remote capture via SSH
-      rawContent = execFileSync(
+      const { stdout } = await execFileAsync(
         'ssh', [
           '-o', 'ConnectTimeout=5',
           '-o', 'StrictHostKeyChecking=accept-new',
@@ -523,12 +539,14 @@ app.get('/api/tmux/capture/:session', (req, res) => {
         ],
         { encoding: 'utf-8', timeout: 8000 }
       );
+      rawContent = stdout;
     } else {
       // Local capture
-      rawContent = execFileSync(
+      const { stdout } = await execFileAsync(
         'tmux', ['capture-pane', '-t', session, '-p', '-S', '-500'],
         { encoding: 'utf-8', timeout: 3000 }
       );
+      rawContent = stdout;
     }
     const content = trimTrailingBlankLines(rawContent);
     const etag = '"' + createHash('md5').update(content).digest('hex').slice(0, 16) + '"';
@@ -547,6 +565,7 @@ app.get('/api/tmux/capture/:session', (req, res) => {
 // ── Agent detail (metadata + backend info) ───────────────────────────
 const AGENTS_DATA_DIR = path.join(DATA_ROOT, 'agents');
 const AGENTCHAT_HOMEDIR = defaultAgentchatHomeDir(process.env);
+const PROGRESS_TAIL_LINE_LIMIT = 80;
 
 function safeReadJsonSync(filePath) {
   try {
@@ -570,7 +589,9 @@ function loadLocalAgentMeta(name) {
         if (existsSync(fallbackPath)) return { metaPath: fallbackPath, meta: safeReadJsonSync(fallbackPath) };
       }
     }
-  } catch {}
+  } catch (e) {
+    console.debug(`[server] local agent meta scan skipped for ${name}: ${e.message}`);
+  }
   return { metaPath, meta: null };
 }
 
@@ -578,6 +599,60 @@ function loadV1Manifest(name, localMeta = null) {
   const manifest = resolveV1ManifestForAgent(name, localMeta, process.env);
   if (manifest) return manifest;
   return null;
+}
+
+async function readTextFilePayload(filePath, options = {}) {
+  const tailLines = Number(options.tailLines) > 0 ? Number(options.tailLines) : 0;
+  if (!filePath) {
+    return { exists: false, text: '', readError: null };
+  }
+  try {
+    const text = await readFileAsync(filePath, 'utf-8');
+    if (tailLines > 0) {
+      const lines = text.split(/\r?\n/);
+      return {
+        exists: true,
+        text: lines.slice(-tailLines).join('\n'),
+        readError: null,
+      };
+    }
+    return { exists: true, text, readError: null };
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return { exists: false, text: '', readError: null };
+    }
+    return {
+      exists: false,
+      text: '',
+      readError: String(error?.message || error),
+    };
+  }
+}
+
+async function buildAgentDocsPayload(agentName, workspacePath, v1Manifest = null) {
+  const resolved = resolveAgentDocsPaths(agentName, workspacePath || AGENTCHAT_HOMEDIR, {
+    cwd: REPO_ROOT,
+    v1Manifest,
+    includeWorkspaceFlatDocs: v1Manifest?.workdir ? true : false,
+  });
+  const progressPath = path.join(resolved.docsRoot, 'progress.md');
+  const [agentsDoc, planDoc, progressDoc] = await Promise.all([
+    readTextFilePayload(resolved.agentsPath),
+    readTextFilePayload(resolved.planPath),
+    readTextFilePayload(progressPath, { tailLines: PROGRESS_TAIL_LINE_LIMIT }),
+  ]);
+  return {
+    docsRoot: resolved.docsRoot,
+    agentsPath: resolved.agentsPath,
+    planPath: resolved.planPath,
+    progressPath,
+    agents: agentsDoc,
+    plan: planDoc,
+    progress: {
+      ...progressDoc,
+      tailLines: PROGRESS_TAIL_LINE_LIMIT,
+    },
+  };
 }
 
 function writeV1Manifest(manifestPath, next) {
@@ -634,11 +709,17 @@ function syncLocalAgentMetaFromManifest(name, metaPath, localMeta, manifest, hum
   return mergedMeta;
 }
 
-async function syncBackendAgentHomeState(name, manifest, human = null) {
+function normalizeHumanSyncMeta(value) {
+  return {
+    owner: normalizeMetaText(value?.owner, 256),
+  };
+}
+
+function buildExpectedBackendAgentHomeState(name, manifest, human = null) {
   const nextHuman = (human && typeof human === 'object')
     ? human
-    : ((manifest?.human && typeof manifest.human === 'object') ? manifest.human : {});
-  const payload = {
+    : ((manifest?.human && typeof manifest?.human === 'object') ? manifest.human : {});
+  return {
     name,
     agentModelVersion: manifest?.agentModelVersion || '1.0',
     layoutVersion: Number(manifest?.layoutVersion) || 1,
@@ -647,10 +728,153 @@ async function syncBackendAgentHomeState(name, manifest, human = null) {
     workdir: manifest?.workdir || null,
     stateDir: manifest?.stateDir || null,
     subconsciousEnabled: manifest?.subconsciousEnabled === true,
-    managedProjects: Array.isArray(manifest?.managedProjects) ? manifest.managedProjects : [],
-    human: nextHuman,
-    task: normalizeTaskMeta(manifest?.task, manifest?.name),
+    managedProjects: Array.isArray(manifest?.managedProjects) ? sanitizeManagedProjects(manifest.managedProjects) : [],
+    human: normalizeHumanSyncMeta(nextHuman),
+    task: normalizeTaskMeta(manifest?.task, name),
     runtimeProfile: normalizeRuntimeProfileMeta(manifest?.runtimeProfile),
+  };
+}
+
+function normalizeBackendAgentHomeState(agent, fallbackName = null) {
+  if (!agent || typeof agent !== 'object') return null;
+  return {
+    name: normalizeMetaText(agent.name, 256) || normalizeMetaText(fallbackName, 256) || null,
+    agentModelVersion: agent?.agentModelVersion || '1.0',
+    layoutVersion: Number(agent?.layoutVersion) || 1,
+    agentId: agent?.agentId || null,
+    homeDir: agent?.homeDir || null,
+    workdir: agent?.workdir || null,
+    stateDir: agent?.stateDir || null,
+    subconsciousEnabled: agent?.subconsciousEnabled === true,
+    managedProjects: Array.isArray(agent?.managedProjects) ? sanitizeManagedProjects(agent.managedProjects) : [],
+    human: normalizeHumanSyncMeta(agent?.human),
+    task: normalizeTaskMeta(agent?.task, fallbackName),
+    runtimeProfile: normalizeRuntimeProfileMeta(agent?.runtimeProfile),
+  };
+}
+
+function summarizeBackendStateMismatches(expected, actual) {
+  const fields = [
+    'agentModelVersion',
+    'layoutVersion',
+    'agentId',
+    'homeDir',
+    'workdir',
+    'stateDir',
+    'subconsciousEnabled',
+    'managedProjects',
+    'human',
+    'task',
+    'runtimeProfile',
+  ];
+  const mismatches = [];
+  for (const field of fields) {
+    const expectedJson = JSON.stringify(expected?.[field] ?? null);
+    const actualJson = JSON.stringify(actual?.[field] ?? null);
+    if (expectedJson === actualJson) continue;
+    mismatches.push({
+      field,
+      expected: expected?.[field] ?? null,
+      actual: actual?.[field] ?? null,
+    });
+  }
+  return mismatches;
+}
+
+async function syncBackendAgentHomeState(name, manifest, human = null) {
+  const payload = buildExpectedBackendAgentHomeState(name, manifest, human);
+  const summarizeFailure = async (res, mode, extra = {}) => {
+    let detail = `${mode} ${res.status}`;
+    try {
+      const text = String(await res.text()).trim();
+      if (text) detail = `${detail}: ${text.slice(0, 500)}`;
+    } catch {
+      // ignore response-body read failures
+    }
+    return {
+      ok: false,
+      status: 'failed',
+      stale: true,
+      method: mode,
+      httpStatus: res.status,
+      detail,
+      ...extra,
+    };
+  };
+  const verifyReadback = async (baseResult = {}) => {
+    let readbackRes;
+    try {
+      readbackRes = await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`);
+    } catch (e) {
+      return {
+        ok: false,
+        status: 'failed',
+        stale: true,
+        method: baseResult.method || 'readback',
+        httpStatus: baseResult.httpStatus ?? null,
+        patchStatus: baseResult.patchStatus,
+        readbackStatus: null,
+        detail: `readback fetch failed: ${e?.message || 'backend readback failed'}`,
+      };
+    }
+    if (!readbackRes.ok) {
+      return await summarizeFailure(readbackRes, baseResult.method || 'readback', {
+        httpStatus: baseResult.httpStatus ?? null,
+        patchStatus: baseResult.patchStatus,
+        readbackStatus: readbackRes.status,
+      });
+    }
+    let body = null;
+    try {
+      body = await readbackRes.json();
+    } catch {
+      return {
+        ok: false,
+        status: 'failed',
+        stale: true,
+        method: baseResult.method || 'readback',
+        httpStatus: baseResult.httpStatus ?? null,
+        patchStatus: baseResult.patchStatus,
+        readbackStatus: readbackRes.status,
+        detail: 'readback returned invalid json',
+      };
+    }
+    const actual = normalizeBackendAgentHomeState(body, name);
+    if (!actual) {
+      return {
+        ok: false,
+        status: 'failed',
+        stale: true,
+        method: baseResult.method || 'readback',
+        httpStatus: baseResult.httpStatus ?? null,
+        patchStatus: baseResult.patchStatus,
+        readbackStatus: readbackRes.status,
+        detail: 'readback returned invalid agent payload',
+      };
+    }
+    const mismatches = summarizeBackendStateMismatches(payload, actual);
+    if (mismatches.length > 0) {
+      return {
+        ok: false,
+        status: 'failed',
+        stale: true,
+        method: baseResult.method || 'readback',
+        httpStatus: baseResult.httpStatus ?? null,
+        patchStatus: baseResult.patchStatus,
+        readbackStatus: readbackRes.status,
+        mismatches,
+        detail: `readback mismatch: ${mismatches.map(row => row.field).join(', ')}`,
+      };
+    }
+    return {
+      ok: true,
+      status: baseResult.status || 'synced',
+      stale: false,
+      method: baseResult.method || 'readback',
+      httpStatus: baseResult.httpStatus ?? null,
+      patchStatus: baseResult.patchStatus,
+      readbackStatus: readbackRes.status,
+    };
   };
   try {
     const patchRes = await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`, {
@@ -658,15 +882,39 @@ async function syncBackendAgentHomeState(name, manifest, human = null) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (patchRes.ok) return;
-    if (patchRes.status !== 404) return;
-    await fetch(`${BACKEND_V2_URL}/api/agents`, {
+    if (patchRes.ok) {
+      return await verifyReadback({
+        status: 'synced',
+        method: 'patch',
+        httpStatus: patchRes.status,
+      });
+    }
+    if (patchRes.status !== 404) {
+      return await summarizeFailure(patchRes, 'patch');
+    }
+    const postRes = await fetch(`${BACKEND_V2_URL}/api/agents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-  } catch {
-    // Best-effort sync only; local manifest remains source of truth.
+    if (postRes.ok) {
+      return await verifyReadback({
+        status: 'created',
+        method: 'post',
+        httpStatus: postRes.status,
+        patchStatus: patchRes.status,
+      });
+    }
+    return await summarizeFailure(postRes, 'post', { patchStatus: patchRes.status });
+  } catch (e) {
+    return {
+      ok: false,
+      status: 'failed',
+      stale: true,
+      method: 'transport',
+      httpStatus: null,
+      detail: e?.message || 'backend sync failed',
+    };
   }
 }
 
@@ -679,7 +927,6 @@ function buildProjectsControlPayload(name, manifest) {
     v1: true,
     projectRoot: manifest?.workdir ? path.join(manifest.workdir, 'projects') : null,
     manifestPath: manifest?.agentJsonPath || (manifest?.homeDir ? path.join(manifest.homeDir, 'agent.json') : null),
-    projectScope: typeof nextHuman.projectScope === 'string' ? nextHuman.projectScope : '',
     managedProjects: Array.isArray(manifest?.managedProjects) ? manifest.managedProjects : [],
   };
 }
@@ -931,9 +1178,14 @@ function buildOperationalSubconsciousDetail(detail) {
       classification: safe.conversation.classification || 'transitional',
     };
   }
+  if (safe.guidance && typeof safe.guidance === 'object') {
+    delete safe.guidance.text;
+    delete safe.guidance.preview;
+  }
   if (safe.manualGuidance && typeof safe.manualGuidance === 'object') {
     delete safe.manualGuidance.text;
     delete safe.manualGuidance.preview;
+    if (!safe.guidance) safe.guidance = { ...safe.manualGuidance };
   }
   if (Object.prototype.hasOwnProperty.call(safe, 'lastRuntimeGuidance')) delete safe.lastRuntimeGuidance;
   if (Object.prototype.hasOwnProperty.call(safe, 'lastInvocation')) delete safe.lastInvocation;
@@ -999,7 +1251,7 @@ function buildSubconsciousFallbackSummaryMeta(guidanceText) {
     status: configured ? 'configured' : 'none',
     configured,
     source: configured ? 'manual-state-file' : 'none',
-    note: 'Manual guidance is fallback configuration only; it is not the authoritative subconscious behavior path.',
+    note: 'Guidance is fallback configuration only; it is not the authoritative subconscious behavior path.',
   };
 }
 
@@ -1132,7 +1384,7 @@ function buildSubconsciousDetailPayload(name, manifest = null, detail = null) {
     enabled: manifest?.subconsciousEnabled === true || detail?.subconsciousEnabled === true,
     authority,
     fallback,
-    manualGuidance: {
+    guidance: {
       classification: 'fallback',
       configured: guidanceText.length > 0,
       source: guidanceText ? 'manual-state-file' : 'none',
@@ -1178,7 +1430,9 @@ app.get('/api/agents/detail/:name', async (req, res) => {
       detail.task = normalizeTaskMeta(agent.task, name);
       detail.runtimeProfile = normalizeRuntimeProfileMeta(agent.runtimeProfile);
     }
-  } catch {}
+  } catch (e) {
+    console.debug(`[server] backend subconscious detail fetch skipped for ${name}: ${e.message}`);
+  }
 
   // From local meta.json
   if (localMeta && typeof localMeta === 'object') {
@@ -1222,9 +1476,8 @@ app.get('/api/agents/detail/:name', async (req, res) => {
   }
 
   const humanMeta = (detail.human && typeof detail.human === 'object') ? detail.human : {};
+  detail.human = normalizeHumanSyncMeta(humanMeta);
   detail.owner = typeof humanMeta.owner === 'string' ? humanMeta.owner : null;
-  detail.humanNotes = typeof humanMeta.notes === 'string' ? humanMeta.notes : '';
-  detail.projectScope = typeof humanMeta.projectScope === 'string' ? humanMeta.projectScope : '';
   if (detail.stateDir) {
     const lettaPath = path.join(detail.stateDir, 'letta.json');
     const letta = existsSync(lettaPath) ? safeReadJsonSync(lettaPath) : null;
@@ -1242,7 +1495,10 @@ app.get('/api/agents/detail/:name', async (req, res) => {
     : path.join(AGENTS_DATA_DIR, name);
   try {
     detail.resumeId = (await readFileAsync(path.join(resumeRoot, 'resume-id'), 'utf-8')).trim();
-  } catch { detail.resumeId = null; }
+  } catch (e) {
+    console.debug(`[server] resume-id read skipped for ${name}: ${e.message}`);
+    detail.resumeId = null;
+  }
 
   // Idle info + detect agent type from process if missing
   if (detail.tmux) {
@@ -1250,15 +1506,22 @@ app.get('/api/agents/detail/:name', async (req, res) => {
     detail.active = detail.idleMs >= 0 && detail.idleMs < IDLE_THRESHOLD;
     if (!detail.agentType) {
       try {
-        const panePid = execFileSync('tmux', ['list-panes', '-t', detail.tmux, '-F', '#{pane_pid}'], { encoding: 'utf-8', timeout: 2000 }).trim();
+        const { stdout: panePidStdout } = await execFileAsync('tmux', ['list-panes', '-t', detail.tmux, '-F', '#{pane_pid}'], { encoding: 'utf-8', timeout: 2000 });
+        const panePid = panePidStdout.trim();
         if (panePid) {
-          const childCmd = execFileSync('ps', ['-o', 'args=', '--ppid', panePid], { encoding: 'utf-8', timeout: 2000 }).toLowerCase();
+          const { stdout: childCmdStdout } = await execFileAsync('ps', ['-o', 'args=', '--ppid', panePid], { encoding: 'utf-8', timeout: 2000 });
+          const childCmd = childCmdStdout.toLowerCase();
           if (childCmd.includes('claude')) detail.agentType = 'claude';
           else if (childCmd.includes('codex')) detail.agentType = 'codex';
         }
-      } catch {}
+      } catch (e) {
+        console.debug(`[server] agent type probe skipped for ${name}: ${e.message}`);
+      }
     }
   }
+
+  const docsWorkspacePath = detail.workdir || v1Manifest?.workdir || AGENTCHAT_HOMEDIR;
+  detail.docs = await buildAgentDocsPayload(name, docsWorkspacePath, v1Manifest);
 
   res.json(detail);
 });
@@ -1274,7 +1537,9 @@ app.get('/api/subconscious/detail/:name', async (req, res) => {
     const r = await fetch(backendUrl);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     if (r.ok) return res.json(data);
-  } catch {}
+  } catch (e) {
+    console.debug(`[server] backend agent detail fetch skipped for ${name}: ${e.message}`);
+  }
 
   const { meta: localMeta } = loadLocalAgentMeta(name);
   const manifest = loadV1Manifest(name, localMeta);
@@ -1282,7 +1547,9 @@ app.get('/api/subconscious/detail/:name', async (req, res) => {
   try {
     const r = await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`);
     detail = await r.json();
-  } catch {}
+  } catch (e) {
+    console.debug(`[server] backend agent detail fetch skipped for ${name}: ${e.message}`);
+  }
   return res.json(buildSubconsciousDetailPayload(name, manifest, detail));
 });
 
@@ -1427,19 +1694,12 @@ app.patch('/api/agents/:name/home-metadata', async (req, res) => {
   const body = req.body || {};
   const next = { ...manifest };
   const nextHuman = {
+    ...((manifest?.human && typeof manifest.human === 'object') ? manifest.human : {}),
     owner: normalizeMetaText(manifest?.human?.owner, 256),
-    notes: normalizeMetaText(manifest?.human?.notes, 12000) || '',
-    projectScope: normalizeMetaText(manifest?.human?.projectScope, 8000) || '',
   };
 
   if (Object.prototype.hasOwnProperty.call(body, 'owner')) {
     nextHuman.owner = normalizeMetaText(body.owner, 256);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'humanNotes')) {
-    nextHuman.notes = normalizeMetaText(body.humanNotes, 12000) || '';
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'projectScope')) {
-    nextHuman.projectScope = normalizeMetaText(body.projectScope, 8000) || '';
   }
   if (Object.prototype.hasOwnProperty.call(body, 'managedProjects')) {
     next.managedProjects = sanitizeManagedProjects(body.managedProjects);
@@ -1469,15 +1729,15 @@ app.patch('/api/agents/:name/home-metadata', async (req, res) => {
   writeV1Manifest(next.agentJsonPath || path.join(next.homeDir, 'agent.json'), next);
 
   syncLocalAgentMetaFromManifest(name, metaPath, localMeta, next, nextHuman);
-  await syncBackendAgentHomeState(name, next, nextHuman);
+  const backendSync = await syncBackendAgentHomeState(name, next, nextHuman);
 
   return res.json({
-    ok: true,
+    ok: backendSync?.ok === true,
+    localWriteOk: true,
     agent: name,
+    backendSync,
     metadata: {
       owner: nextHuman.owner,
-      humanNotes: nextHuman.notes,
-      projectScope: nextHuman.projectScope,
       subconsciousEnabled: next.subconsciousEnabled === true,
       managedProjects: Array.isArray(next.managedProjects) ? next.managedProjects : [],
       agentModelVersion: next.agentModelVersion || '1.0',
@@ -1556,13 +1816,16 @@ app.post('/api/agents/:name/projects/import', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'project import completed but manifest reload failed' });
   }
   syncLocalAgentMetaFromManifest(name, metaPath, localMeta, next);
-  await syncBackendAgentHomeState(name, next);
+  const backendSync = await syncBackendAgentHomeState(name, next);
   const importedProject = Array.isArray(next.managedProjects) && next.managedProjects.length
     ? next.managedProjects[next.managedProjects.length - 1]
     : null;
 
   return res.json({
     ...buildProjectsControlPayload(name, next),
+    ok: backendSync?.ok === true,
+    localWriteOk: true,
+    backendSync,
     importedProject,
     materialization: provisionPayload?.materialization || null,
   });
@@ -1618,10 +1881,13 @@ app.post('/api/agents/:name/projects/remove', async (req, res) => {
   };
   writeV1Manifest(next.agentJsonPath || path.join(next.homeDir, 'agent.json'), next);
   syncLocalAgentMetaFromManifest(name, metaPath, localMeta, next);
-  await syncBackendAgentHomeState(name, next);
+  const backendSync = await syncBackendAgentHomeState(name, next);
 
   return res.json({
     ...buildProjectsControlPayload(name, next),
+    ok: backendSync?.ok === true,
+    localWriteOk: true,
+    backendSync,
     removedProject: target,
     deleteFiles,
     fileAction,
@@ -1653,9 +1919,14 @@ app.post('/api/agents/:name/workspace/migrate-entry-files', async (req, res) => 
     return res.status(500).json({ ok: false, error: 'workspace migration completed but manifest reload failed' });
   }
   syncLocalAgentMetaFromManifest(name, metaPath, localMeta, next);
-  await syncBackendAgentHomeState(name, next);
+  const backendSync = await syncBackendAgentHomeState(name, next);
 
-  return res.json(buildWorkspaceEntryMigrationPayload(name, next, provisionPayload));
+  return res.json({
+    ...buildWorkspaceEntryMigrationPayload(name, next, provisionPayload),
+    ok: backendSync?.ok === true,
+    localWriteOk: true,
+    backendSync,
+  });
 });
 
 app.patch('/api/agents/:name/subconscious-guidance', async (req, res) => {
@@ -1669,7 +1940,9 @@ app.patch('/api/agents/:name/subconscious-guidance', async (req, res) => {
   }
 
   const body = req.body || {};
-  const guidance = normalizeMetaText(body.guidance, 6000) || '';
+  const guidance = normalizeMetaText(body.guidance, 6000)
+    || normalizeMetaText(body.manualGuidance, 6000)
+    || '';
   const lettaPath = path.join(manifest.stateDir, 'letta.json');
   const existing = safeReadJsonSync(lettaPath) || {};
   const now = new Date().toISOString();
@@ -1692,7 +1965,7 @@ app.patch('/api/agents/:name/subconscious-guidance', async (req, res) => {
   return res.json({
     ok: true,
     agent: name,
-    manualGuidance: {
+    guidance: {
       configured: guidance.length > 0,
       source: guidance ? 'manual-state-file' : 'none',
       text: guidance,
@@ -1914,6 +2187,73 @@ app.delete('/api/agents/:name', async (req, res) => {
   }
 });
 
+app.post('/api/task-graphs', async (req, res) => {
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/task-graphs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.get('/api/task-graphs', async (req, res) => {
+  try {
+    const url = new URL(`${BACKEND_V2_URL}/api/task-graphs`);
+    if (typeof req.query.status === 'string' && req.query.status.trim()) {
+      url.searchParams.set('status', req.query.status.trim());
+    }
+    const r = await fetch(url);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.get('/api/task-graphs/:id', async (req, res) => {
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/task-graphs/${encodeURIComponent(req.params.id)}`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.delete('/api/task-graphs/:id', async (req, res) => {
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/task-graphs/${encodeURIComponent(req.params.id)}`, {
+      method: 'DELETE',
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.patch('/api/task-graphs/:id/nodes/:nodeId', async (req, res) => {
+  try {
+    const r = await fetch(
+      `${BACKEND_V2_URL}/api/task-graphs/${encodeURIComponent(req.params.id)}/nodes/${encodeURIComponent(req.params.nodeId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body || {}),
+      }
+    );
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
 // ── Supervisor audit proxy APIs ──────────────────────────────────────
 app.get('/api/supervisor/status', async (_req, res) => {
   try {
@@ -2032,20 +2372,20 @@ const paneSnapshots = new Map(); // target -> { hash, changedAt }
 
 import { createHash } from 'crypto';
 
-function snapshotPane(target) {
+async function snapshotPaneAsync(target) {
   try {
-    const content = execFileSync(
+    const { stdout } = await execFileAsyncImpl(
       'tmux', ['capture-pane', '-t', target, '-p'],
       { encoding: 'utf-8', timeout: 3000 }
     );
-    return createHash('md5').update(content).digest('hex');
+    return createHash('md5').update(stdout).digest('hex');
   } catch {
     return null;
   }
 }
 
-function updatePaneSnapshot(target) {
-  const hash = snapshotPane(target);
+async function updatePaneSnapshot(target) {
+  const hash = await snapshotPaneAsync(target);
   if (hash === null) return;
   const now = Date.now();
   const prev = paneSnapshots.get(target);
@@ -2067,21 +2407,31 @@ function getPaneIdleMs(target) {
 }
 
 // Continuously track ALL panes every 2s (independent of queue)
-setInterval(() => {
+let paneSnapshotSweepRunning = false;
+async function sweepPaneSnapshots() {
+  if (paneSnapshotSweepRunning) return;
+  paneSnapshotSweepRunning = true;
   try {
-    const raw = execFileSync(
+    const { stdout } = await execFileAsyncImpl(
       'tmux', ['list-panes', '-a', '-F', '#{session_name}:#{window_index}.#{pane_index}'],
       { encoding: 'utf-8', timeout: 5000 }
-    ).trim();
+    );
+    const raw = stdout.trim();
     const livePanes = new Set(raw.split('\n').filter(Boolean));
-    for (const pane of livePanes) {
-      updatePaneSnapshot(pane);
-    }
+    await Promise.all([...livePanes].map((pane) => updatePaneSnapshot(pane)));
     // Clean up stale snapshots for panes that no longer exist
     for (const key of paneSnapshots.keys()) {
       if (!livePanes.has(key)) paneSnapshots.delete(key);
     }
-  } catch {}
+  } catch {
+    // Ignore transient tmux failures.
+  } finally {
+    paneSnapshotSweepRunning = false;
+  }
+}
+
+setInterval(async () => {
+  await sweepPaneSnapshots();
 }, 2000);
 
 // ── Target redirects (e.g. renamed sessions) ────────────────────────
@@ -2092,10 +2442,14 @@ try {
   const raw = await readFileAsync(REDIRECT_FILE, 'utf-8');
   for (const [k, v] of Object.entries(JSON.parse(raw))) redirects.set(k, v);
   console.log(`Loaded ${redirects.size} redirects`);
-} catch {}
+} catch (e) {
+  console.debug(`[server] redirects load skipped: ${e.message}`);
+}
 
 function saveRedirects() {
-  try { writeFileSync(REDIRECT_FILE, JSON.stringify(Object.fromEntries(redirects))); } catch {}
+  try { writeFileSync(REDIRECT_FILE, JSON.stringify(Object.fromEntries(redirects))); } catch (e) {
+    console.debug(`[server] redirects save skipped: ${e.message}`);
+  }
 }
 
 // API to manage redirects
@@ -2125,10 +2479,8 @@ app.delete('/api/redirects/:from', (req, res) => {
   res.json({ ok: true });
 });
 
-function sleepMs(ms) { execSync(`sleep ${ms / 1000}`); }
-
-// Deliver message to tmux pane (uses execFileSync to avoid shell injection)
-function deliverMessage(entry) {
+// Deliver message to tmux pane without blocking the event loop.
+async function deliverMessage(entry) {
   const formatExecError = (e) => {
     const stderr = (e && e.stderr) ? String(e.stderr).trim() : '';
     const stdout = (e && e.stdout) ? String(e.stdout).trim() : '';
@@ -2142,14 +2494,14 @@ function deliverMessage(entry) {
       finalPayload += '\n[REDIRECT NOTICE] This message was originally addressed to "' + entry.redirectedFrom + '" which has been renamed to "' + entry.to + '". Please update your target for future messages.';
     }
     try {
-      execFileSync('tmux', ['send-keys', '-l', '-t', entry.to, finalPayload], { timeout: 5000, stdio: 'pipe' });
+      await execFileAsyncImpl('tmux', ['send-keys', '-l', '-t', entry.to, finalPayload], { timeout: 5000, stdio: 'pipe' });
     } catch (e) {
       console.error(`Failed to deliver to ${entry.to} (payload step): ${formatExecError(e)}`);
       return false;
     }
-    sleepMs(150);
+    await new Promise((resolve) => setTimeout(resolve, 150));
     try {
-      execFileSync('tmux', ['send-keys', '-t', entry.to, 'C-m'], { timeout: 5000, stdio: 'pipe' });
+      await execFileAsyncImpl('tmux', ['send-keys', '-t', entry.to, 'C-m'], { timeout: 5000, stdio: 'pipe' });
     } catch (e) {
       console.error(`Failed to deliver to ${entry.to} (enter step): ${formatExecError(e)}`);
       return false;
@@ -2211,6 +2563,8 @@ setInterval(async () => {
       }
 
       const idleMs = getPaneIdleMs(target);
+      const priority = normalizeQueuePriority(entries[0]?.priority || entries[0]?.notifyMeta?.priority);
+      const bypassIdleGate = priority === 'high' || priority === 'urgent';
       if (idleMs < 0) {
         // Pane not found — only trim stale backend notifications, keep normal payloads queued.
         const oldest = entries[0];
@@ -2232,7 +2586,7 @@ setInterval(async () => {
         }
         continue;
       }
-      if (idleMs < IDLE_THRESHOLD) continue; // not idle enough
+      if (!bypassIdleGate && idleMs < IDLE_THRESHOLD) continue; // not idle enough
 
       // Deliver first message
       delivering.add(target);
@@ -2251,7 +2605,7 @@ setInterval(async () => {
         continue;
       }
 
-      const ok = deliverMessage(entry);
+      const ok = await deliverMessage(entry);
       if (!ok && entry) {
         // Put it back at front
         if (!queue.has(target)) queue.set(target, []);
@@ -2277,7 +2631,9 @@ let reminderIdCounter = 0;
 function saveReminders() {
   try {
     writeFileSync(REMINDER_FILE, JSON.stringify({ idCounter: reminderIdCounter, items: reminders }));
-  } catch {}
+  } catch (e) {
+    console.debug(`[server] reminders save skipped: ${e.message}`);
+  }
 }
 
 // Load from disk
@@ -2287,7 +2643,9 @@ try {
   reminderIdCounter = data.idCounter || 0;
   for (const r of (data.items || [])) reminders.push(r);
   console.log(`Restored ${reminders.length} reminders from disk`);
-} catch {}
+} catch (e) {
+  console.debug(`[server] reminders load skipped: ${e.message}`);
+}
 
 function reminderSnapshot() {
   const now = Date.now();
@@ -2470,9 +2828,46 @@ app.get('/agents/:name/audit', (req, res) => {
   res.redirect(302, target);
 });
 
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`agent-viz running on http://127.0.0.1:${PORT}`);
-});
+let serverInstance = null;
+function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
+  if (serverInstance) return serverInstance;
+  serverInstance = app.listen(port, host, () => {
+    console.log(`agent-viz running on http://${host}:${port}`);
+  });
+  return serverInstance;
+}
+
+function stopServer() {
+  if (!serverInstance) return;
+  const active = serverInstance;
+  serverInstance = null;
+  active.close();
+}
+
+function setServerTestHooks({ execFileAsync: overrideExecFileAsync } = {}) {
+  execFileAsyncImpl = typeof overrideExecFileAsync === 'function' ? overrideExecFileAsync : execFileAsync;
+}
+
+function resetServerTestHooks() {
+  execFileAsyncImpl = execFileAsync;
+}
+
+export {
+  app,
+  deliverMessage,
+  getPaneIdleMs,
+  resetServerTestHooks,
+  setServerTestHooks,
+  snapshotPaneAsync,
+  startServer,
+  stopServer,
+  sweepPaneSnapshots,
+  updatePaneSnapshot,
+};
+
+if (process.argv[1] === __filename) {
+  startServer();
+}
 
 function renderAgentDetailPage(agentName) {
   const safeName = String(agentName).replace(/[&<>"]/g, (ch) => (
@@ -2857,6 +3252,22 @@ a{color:var(--accent)}
 .detail-save:hover{border-color:rgba(109,193,255,0.62)}
 .detail-save:disabled{opacity:0.45;cursor:default}
 .detail-hint{font-size:11px;color:var(--muted);line-height:1.55}
+.doc-frame{
+  margin-top:10px;
+  padding:12px;
+  min-height:140px;
+  max-height:420px;
+  overflow:auto;
+  border-radius:12px;
+  border:1px solid rgba(154,182,210,0.12);
+  background:rgba(0,0,0,0.18);
+  font-family:'SF Mono','Fira Code','Consolas',monospace;
+  font-size:11px;
+  line-height:1.55;
+  color:var(--text);
+  white-space:pre-wrap;
+  word-break:break-word;
+}
 .empty-state{font-size:12px;line-height:1.55;color:var(--muted);padding:6px 0}
 .error-state{font-size:12px;line-height:1.55;padding:8px 12px;border-radius:6px;background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.25);color:rgba(248,113,113,0.85)}
 .mono{font-family:'SF Mono','Fira Code','Consolas',monospace}
@@ -2998,12 +3409,20 @@ th{
             <div id="settings-identity"></div>
           </article>
           <article class="panel">
+            <div class="panel-label">Task</div>
+            <div id="settings-task"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-label">Guidance</div>
+            <div id="settings-guidance"></div>
+          </article>
+          <article class="panel">
             <div class="panel-label">System Controls</div>
             <div id="settings-systems" class="split-grid"></div>
           </article>
           <article class="panel">
-            <div class="panel-label">Agent Notes</div>
-            <div id="settings-metadata"></div>
+            <div class="panel-label">Ownership</div>
+            <div id="settings-owner"></div>
           </article>
         </div>
       </section>
@@ -3011,7 +3430,7 @@ th{
       <section id="tab-supervisor" class="tab-panel hidden">
         <div class="split-grid">
           <article class="panel">
-            <div class="panel-label">Current Task Snapshot <span class="muted" style="font-size:9px;letter-spacing:0">(supervisor docs)</span></div>
+            <div class="panel-label">Supervisor Docs Snapshot <span class="muted" style="font-size:9px;letter-spacing:0">(latest supervisor docs only)</span></div>
             <div id="current-work-main" class="primary-text">No supervisor task snapshot loaded yet.</div>
             <div id="current-work-reason" class="secondary-text muted"></div>
             <div id="current-work-meta" class="meta-list"></div>
@@ -3072,6 +3491,27 @@ th{
             <summary>Paths & Sources</summary>
             <div class="debug-body">
               <div id="debug-paths" class="debug-grid"></div>
+            </div>
+          </details>
+          <details class="debug-detail">
+            <summary>AGENTS.md (Raw)</summary>
+            <div class="debug-body">
+              <div id="debug-doc-agents-meta" class="meta-list"></div>
+              <pre id="debug-doc-agents" class="doc-frame">Loading…</pre>
+            </div>
+          </details>
+          <details class="debug-detail">
+            <summary>plan.md (Raw)</summary>
+            <div class="debug-body">
+              <div id="debug-doc-plan-meta" class="meta-list"></div>
+              <pre id="debug-doc-plan" class="doc-frame">Loading…</pre>
+            </div>
+          </details>
+          <details class="debug-detail">
+            <summary>progress.md Tail (Raw)</summary>
+            <div class="debug-body">
+              <div id="debug-doc-progress-meta" class="meta-list"></div>
+              <pre id="debug-doc-progress" class="doc-frame">Loading…</pre>
             </div>
           </details>
           <details class="debug-detail">
@@ -3171,15 +3611,18 @@ th{
 
   function getCurrentDetailDraft() {
     const identityEl = document.getElementById('detail-identity-input');
+    const taskStatusEl = document.getElementById('detail-task-status');
+    const taskIdEl = document.getElementById('detail-task-id');
+    const taskOwnerEl = document.getElementById('detail-task-owner');
+    const taskWaitingReasonEl = document.getElementById('detail-task-waiting-reason');
+    const taskWaitingUntilEl = document.getElementById('detail-task-waiting-until');
     const ownerEl = document.getElementById('detail-owner');
-    const scopeEl = document.getElementById('detail-project-scope');
-    const notesEl = document.getElementById('detail-human-notes');
     const projectImportSourceEl = document.getElementById('detail-project-import-source');
     const projectImportNameEl = document.getElementById('detail-project-import-name');
     const projectImportModeEl = document.getElementById('detail-project-import-mode');
     const supervisorEl = document.getElementById('detail-supervisor-enabled');
     const subconsciousEl = document.getElementById('detail-subconscious-enabled');
-    const guidanceEl = document.getElementById('detail-subconscious-guidance');
+    const guidanceEl = document.getElementById('detail-guidance');
     const runtimeEnabledEl = document.getElementById('detail-subconscious-runtime-enabled');
     const runtimeProviderEl = document.getElementById('detail-subconscious-provider');
     const runtimeModelEl = document.getElementById('detail-subconscious-model');
@@ -3187,15 +3630,18 @@ th{
     const runtimeKeyEnvEl = document.getElementById('detail-subconscious-key-env');
     return {
       identity: identityEl ? String(identityEl.value || '').trim() : null,
+      taskStatus: taskStatusEl ? String(taskStatusEl.value || '').trim().toLowerCase() : null,
+      taskId: taskIdEl ? String(taskIdEl.value || '').trim() : null,
+      taskOwner: taskOwnerEl ? String(taskOwnerEl.value || '').trim() : null,
+      taskWaitingReason: taskWaitingReasonEl ? String(taskWaitingReasonEl.value || '').trim() : null,
+      taskWaitingUntil: taskWaitingUntilEl ? String(taskWaitingUntilEl.value || '').trim() : null,
       owner: ownerEl ? String(ownerEl.value || '').trim() : null,
-      projectScope: scopeEl ? String(scopeEl.value || '').trim() : null,
-      humanNotes: notesEl ? String(notesEl.value || '').trim() : null,
       projectImportSource: projectImportSourceEl ? String(projectImportSourceEl.value || '').trim() : null,
       projectImportName: projectImportNameEl ? String(projectImportNameEl.value || '').trim() : null,
       projectImportMode: projectImportModeEl ? String(projectImportModeEl.value || '').trim().toLowerCase() : null,
       supervisorEnabled: supervisorEl ? supervisorEl.checked === true : null,
       subconsciousEnabled: subconsciousEl ? subconsciousEl.checked === true : null,
-      subconsciousGuidance: guidanceEl ? String(guidanceEl.value || '').trim() : null,
+      guidance: guidanceEl ? String(guidanceEl.value || '').trim() : null,
       subconsciousRuntimeEnabled: runtimeEnabledEl ? runtimeEnabledEl.checked === true : null,
       subconsciousRuntimeProvider: runtimeProviderEl ? String(runtimeProviderEl.value || '').trim() : null,
       subconsciousRuntimeModel: runtimeModelEl ? String(runtimeModelEl.value || '').trim() : null,
@@ -3209,9 +3655,15 @@ th{
     const identityEl = document.getElementById('detail-identity-input');
     if (!identityEl) return false;
     const draft = getCurrentDetailDraft();
+    const task = (detail.task && typeof detail.task === 'object') ? detail.task : null;
     if ((draft.identity || '') !== String(detail.identity || '').trim()) return true;
+    if ((draft.taskStatus || '') !== String(task?.status || '').trim()) return true;
+    if ((draft.taskId || '') !== String(task?.id || '').trim()) return true;
+    if ((draft.taskOwner || '') !== String(task?.owner || '').trim()) return true;
+    if ((draft.taskWaitingReason || '') !== String(task?.waiting_reason || '').trim()) return true;
+    if ((draft.taskWaitingUntil || '') !== String(task?.waiting_until || '').trim()) return true;
     if (draft.supervisorEnabled !== null && draft.supervisorEnabled !== (supervisorControl?.enabled === true)) return true;
-    if (draft.subconsciousGuidance !== null && draft.subconsciousGuidance !== String(subconsciousDetail?.manualGuidance?.text || '').trim()) return true;
+    if (draft.guidance !== null && draft.guidance !== String(subconsciousDetail?.guidance?.text || subconsciousDetail?.manualGuidance?.text || '').trim()) return true;
     if (draft.subconsciousRuntimeEnabled !== null && draft.subconsciousRuntimeEnabled !== (subconsciousDetail?.runtime?.desiredEnabled === true)) return true;
     if (draft.subconsciousRuntimeProvider !== null && draft.subconsciousRuntimeProvider !== String(subconsciousDetail?.runtime?.provider || '').trim()) return true;
     if (draft.subconsciousRuntimeModel !== null && draft.subconsciousRuntimeModel !== String(subconsciousDetail?.runtime?.model || '').trim()) return true;
@@ -3219,8 +3671,6 @@ th{
     if (draft.subconsciousRuntimeKeyEnv !== null && draft.subconsciousRuntimeKeyEnv !== String(subconsciousDetail?.runtime?.keyEnv || '').trim()) return true;
     if (!detail.v1) return false;
     if ((draft.owner || '') !== String(detail.owner || '').trim()) return true;
-    if ((draft.projectScope || '') !== String(detail.projectScope || '').trim()) return true;
-    if ((draft.humanNotes || '') !== String(detail.humanNotes || '').trim()) return true;
     if ((draft.projectImportSource || '') !== '') return true;
     if ((draft.projectImportName || '') !== '') return true;
     if (draft.projectImportMode !== null && draft.projectImportMode !== 'copy') return true;
@@ -3240,15 +3690,18 @@ th{
   function bindDetailEditors() {
     const ids = [
       'detail-identity-input',
+      'detail-task-status',
+      'detail-task-id',
+      'detail-task-owner',
+      'detail-task-waiting-reason',
+      'detail-task-waiting-until',
       'detail-owner',
-      'detail-project-scope',
-      'detail-human-notes',
       'detail-project-import-source',
       'detail-project-import-name',
       'detail-project-import-mode',
       'detail-supervisor-enabled',
       'detail-subconscious-enabled',
-      'detail-subconscious-guidance',
+      'detail-guidance',
       'detail-subconscious-runtime-enabled',
       'detail-subconscious-provider',
       'detail-subconscious-model',
@@ -3346,6 +3799,13 @@ th{
     return 'warn';
   }
 
+  function hasCurrentSupervisorIssue(state) {
+    const classification = String(state?.classification || '').trim().toLowerCase();
+    if (classification === 'stalled_wait' || classification === 'suspected_eos') return true;
+    const lifecycleState = String(state?.lifecycleState || '').trim().toLowerCase();
+    return lifecycleState === 'active' && classification.length > 0;
+  }
+
   function kvGrid(entries) {
     const rows = entries.filter((entry) => entry && entry[1] !== undefined && entry[1] !== null && entry[1] !== '');
     if (rows.length === 0) return '<div class="empty-state">No data available.</div>';
@@ -3354,7 +3814,7 @@ th{
     )).join('');
   }
 
-  function buildPageModel(detail, statusRow, supervisorDetail, supervisorControl, subconsciousPayload, subconsciousDetail, unreadPayload, queueItems) {
+  function buildPageModel(detail, statusRow, supervisorDetail, supervisorStatus, supervisorControl, subconsciousPayload, subconsciousDetail, unreadPayload, queueItems) {
     const latest = supervisorDetail?.latest || null;
     const state = supervisorDetail?.state || {};
     const events = Array.isArray(supervisorDetail?.events) ? supervisorDetail.events : [];
@@ -3374,11 +3834,16 @@ th{
       || ((!latest && latestLifecycle === 'idle') ? 'IDLE' : 'UNKNOWN')
     ).trim() || 'UNKNOWN';
     const latestReason = String(latest?.reason || '').trim();
-    const currentTask = String(latest?.docs?.currentTask || '').trim();
+    const supervisorTaskSnapshot = String(latest?.docs?.currentTask || '').trim();
     const unreadTotal = Math.max(0, toInt(unreadPayload?.unread_total, unreadRows.length));
     const queueCount = queueRows.length;
     const consecutiveNegative = toInt(state?.consecutiveNegative, 0);
     const supervisorEnabled = supervisorControl?.enabled === true;
+    const supervisorRuntimeRunning = supervisorStatus?.runtime?.running === true;
+    const supervisorClassification = String(state?.classification || '').trim().toUpperCase();
+    const supervisorLifecycleState = String(state?.lifecycleState || '').trim().toLowerCase();
+    const supervisorCurrentStatePresent = supervisorClassification.length > 0 || supervisorLifecycleState.length > 0;
+    const supervisorCurrentIssue = hasCurrentSupervisorIssue(state);
     const subconsciousEnabled = detail?.subconsciousEnabled === true;
     const subconsciousWritable = detail?.v1 === true;
     const subconsciousStage = String(subconsciousDetail?.stage || 'unknown').trim() || 'unknown';
@@ -3387,7 +3852,7 @@ th{
       : buildSubconsciousAuthoritySummaryMeta(subconsciousEnabled, subconsciousDetail?.upstream || {}, subconsciousDetail?.provider?.lettaAgentId || null);
     const fallback = (subconsciousDetail?.fallback && typeof subconsciousDetail.fallback === 'object')
       ? subconsciousDetail.fallback
-      : buildSubconsciousFallbackSummaryMeta(String(subconsciousDetail?.manualGuidance?.text || ''));
+      : buildSubconsciousFallbackSummaryMeta(String(subconsciousDetail?.guidance?.text || subconsciousDetail?.manualGuidance?.text || ''));
     const runtimeContract = (subconsciousDetail?.runtime && typeof subconsciousDetail.runtime === 'object')
       ? subconsciousDetail.runtime
       : {};
@@ -3409,8 +3874,8 @@ th{
     const upstreamPreTool = (upstreamDetail.preTool && typeof upstreamDetail.preTool === 'object')
       ? upstreamDetail.preTool
       : {};
-    const blockedLikely = latestStatus === 'STUCK' || /block|approval|intervention|waiting/i.test(latestReason);
-    const needsAttention = NEGATIVE_STATUSES.has(latestStatus);
+    const blockedLikely = supervisorCurrentIssue && (latestStatus === 'STUCK' || /block|approval|intervention|waiting/i.test(latestReason));
+    const needsAttention = supervisorCurrentIssue && NEGATIVE_STATUSES.has(latestStatus);
     let localRuntimeState = 'off';
     let localRuntimeLabel = 'Off';
     if (runtimeContract.desiredEnabled === true && runtimeContract.invocationConfigured === true) {
@@ -3433,13 +3898,19 @@ th{
     if (needsAttention) healthParts.push('Supervisor warning present');
     const healthSummary = healthParts.join(' · ');
     let interventionTitle = 'No active supervisor warning';
-    let interventionBody = 'Latest supervisor evaluation: ' + latestStatus + '.';
-    if (blockedLikely) {
+    let interventionBody = 'Supervisor currently shows no active warning.';
+    if (!supervisorEnabled && !supervisorCurrentIssue) {
+      interventionTitle = 'No active supervisor warning';
+      interventionBody = 'Supervisor is disabled. Historical findings remain in the Supervisor tab and audit history.';
+    } else if (blockedLikely) {
       interventionTitle = latestStatus + ' (supervisor)';
       interventionBody = latestReason || 'Supervisor evaluated agent as blocked or stuck.';
     } else if (needsAttention) {
       interventionTitle = latestStatus + ' (supervisor)';
       interventionBody = latestReason || 'Supervisor flagged drift or loss of focus.';
+    } else if (!supervisorRuntimeRunning && !supervisorCurrentStatePresent) {
+      interventionTitle = 'No active supervisor warning';
+      interventionBody = 'Supervisor is not actively running. Historical findings remain in the Supervisor tab and audit history.';
     }
     const banner = needsAttention
       ? {
@@ -3511,8 +3982,8 @@ th{
       guidanceEvents,
       guidanceConfigured: fallback.configured === true,
       guidanceInjectedEvents,
-      manualGuidancePreview: String(detail?.subconsciousGuidancePreview || subconsciousDetail?.manualGuidance?.preview || '').trim(),
-      manualGuidanceText: String(detail?.subconsciousGuidanceText || subconsciousDetail?.manualGuidance?.text || '').trim(),
+      guidancePreview: String(detail?.subconsciousGuidancePreview || subconsciousDetail?.guidance?.preview || subconsciousDetail?.manualGuidance?.preview || '').trim(),
+      guidanceText: String(detail?.subconsciousGuidanceText || subconsciousDetail?.guidance?.text || subconsciousDetail?.manualGuidance?.text || '').trim(),
       topHooks,
       unreadRows,
       unreadTotal,
@@ -3522,7 +3993,11 @@ th{
       runtimeText,
       latestStatus,
       latestReason,
-      currentTask,
+      supervisorTaskSnapshot,
+      supervisorRuntimeRunning,
+      supervisorCurrentStatePresent,
+      supervisorClassification,
+      supervisorLifecycleState,
       healthSummary,
       interventionTitle,
       interventionBody,
@@ -3567,17 +4042,27 @@ th{
 
   function renderCurrentWork(model) {
     const mainEl = document.getElementById('current-work-main');
-    mainEl.textContent = model.currentTask || 'No current task recorded in the latest docs snapshot.';
+    if (!model.supervisorEnabled) {
+      mainEl.textContent = 'Supervisor disabled.';
+    } else {
+      mainEl.textContent = model.supervisorTaskSnapshot || 'No task text was recorded in the latest supervisor docs snapshot.';
+    }
     mainEl.style.color = '';
     const reasonEl = document.getElementById('current-work-reason');
-    reasonEl.textContent = model.currentTask
-      ? 'From the latest supervisor docs snapshot, not from runtime introspection.'
-      : 'Supervisor docs did not expose a current task in the latest snapshot.';
+    if (!model.supervisorEnabled) {
+      reasonEl.textContent = 'Supervisor doc snapshots are unavailable while supervisor is off.';
+    } else {
+      reasonEl.textContent = model.supervisorTaskSnapshot
+        ? 'Raw text from the latest supervisor docs snapshot, not the canonical task object.'
+        : 'The latest supervisor docs snapshot did not expose task text.';
+    }
     const meta = [];
-    meta.push('<span class="meta-item">judged ' + esc(fmtTs(model.state?.lastJudgedAt)) + '</span>');
-    meta.push('<span class="meta-item">warning ' + esc(fmtTs(model.state?.lastWarningAt)) + '</span>');
-    if (model.latest?.pattern) meta.push('<span class="meta-item">pattern ' + esc(model.latest.pattern) + '</span>');
-    if (model.latest?.domain) meta.push('<span class="meta-item">domain ' + esc(model.latest.domain) + '</span>');
+    if (model.supervisorEnabled) {
+      meta.push('<span class="meta-item">judged ' + esc(fmtTs(model.state?.lastJudgedAt)) + '</span>');
+      meta.push('<span class="meta-item">warning ' + esc(fmtTs(model.state?.lastWarningAt)) + '</span>');
+      if (model.latest?.pattern) meta.push('<span class="meta-item">pattern ' + esc(model.latest.pattern) + '</span>');
+      if (model.latest?.domain) meta.push('<span class="meta-item">domain ' + esc(model.latest.domain) + '</span>');
+    }
     document.getElementById('current-work-meta').innerHTML = meta.join('');
   }
 
@@ -3744,10 +4229,6 @@ th{
       + '<div class="summary-stat"><div class="summary-k">Projects</div><div class="summary-v">' + esc(String(projects.length)) + '</div></div>'
       + '<div class="summary-stat"><div class="summary-k">Home</div><div class="summary-v">' + esc(detail?.v1 ? 'V1' : 'Legacy') + '</div></div>'
       + '</div>');
-    if (detail?.projectScope) {
-      const scope = String(detail.projectScope).length > 220 ? (String(detail.projectScope).slice(0, 220) + '...') : String(detail.projectScope);
-      projectBits.push('<div class="summary-note"><strong>Scope:</strong> ' + esc(scope) + '</div>');
-    }
     if (projects.length > 0) {
       projectBits.push('<ul class="list tight">' + projects.slice(0, 4).map((p) => '<li>' + esc(p?.name || '?') + ' <span class="muted">(' + esc(p?.source || 'unknown') + ')</span></li>').join('') + '</ul>');
     } else {
@@ -3756,22 +4237,125 @@ th{
     document.getElementById('overview-projects').innerHTML = projectBits.join('');
   }
 
+  function normalizeTaskDraftTimestamp(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    const ms = Date.parse(raw);
+    if (!Number.isFinite(ms)) return null;
+    return new Date(ms).toISOString();
+  }
+
+  function buildDetailTaskPayload(detail) {
+    const statusEl = document.getElementById('detail-task-status');
+    const idEl = document.getElementById('detail-task-id');
+    const ownerEl = document.getElementById('detail-task-owner');
+    const waitingReasonEl = document.getElementById('detail-task-waiting-reason');
+    const waitingUntilEl = document.getElementById('detail-task-waiting-until');
+    if (!statusEl || !idEl || !ownerEl || !waitingReasonEl || !waitingUntilEl) {
+      return { error: 'task editor unavailable' };
+    }
+    const status = String(statusEl.value || '').trim().toLowerCase();
+    const id = String(idEl.value || '').trim();
+    const owner = String(ownerEl.value || '').trim() || String(detail?.name || '').trim();
+    const waitingReason = String(waitingReasonEl.value || '').trim();
+    const waitingUntilRaw = String(waitingUntilEl.value || '').trim();
+    if (!status) {
+      if (!id && !String(ownerEl.value || '').trim() && !waitingReason && !waitingUntilRaw) {
+        return { task: null };
+      }
+      return { error: 'Choose a task status or clear all task fields.' };
+    }
+    if (!id) return { error: 'Task id is required.' };
+    if (!owner) return { error: 'Task owner is required.' };
+    const waitingUntil = normalizeTaskDraftTimestamp(waitingUntilRaw);
+    if (status === 'waiting') {
+      if (!waitingReason) return { error: 'Waiting reason is required for waiting tasks.' };
+      if (!waitingUntil) return { error: 'Waiting until must be a valid timestamp.' };
+    } else if (waitingUntilRaw && !waitingUntil) {
+      return { error: 'Waiting until must be a valid timestamp.' };
+    }
+    const now = new Date().toISOString();
+    return {
+      task: {
+        id,
+        owner,
+        status,
+        updated_at: now,
+        heartbeat_at: now,
+        waiting_reason: status === 'waiting' ? waitingReason : null,
+        waiting_until: status === 'waiting' ? waitingUntil : null,
+      },
+    };
+  }
+
+  function renderTaskEditor(detail) {
+    const task = (detail?.task && typeof detail.task === 'object') ? detail.task : null;
+    const taskStatus = String(task?.status || '');
+    const waitingReason = String(task?.waiting_reason || '');
+    const waitingUntil = String(task?.waiting_until || '');
+    return '<div class="detail-hint">Canonical control-plane task object. The Supervisor tab keeps the separate docs snapshot.</div>'
+      + '<div class="field-label">Status</div>'
+      + '<select id="detail-task-status" class="detail-input">'
+      + '<option value=""></option>'
+      + '<option value="active"' + (taskStatus === 'active' ? ' selected' : '') + '>active</option>'
+      + '<option value="waiting"' + (taskStatus === 'waiting' ? ' selected' : '') + '>waiting</option>'
+      + '<option value="blocked"' + (taskStatus === 'blocked' ? ' selected' : '') + '>blocked</option>'
+      + '<option value="done"' + (taskStatus === 'done' ? ' selected' : '') + '>done</option>'
+      + '</select>'
+      + '<div class="field-label">Task Id</div>'
+      + '<input id="detail-task-id" class="detail-input" value="' + esc(task?.id || '').replace(/"/g, '&quot;') + '" placeholder="task-id">'
+      + '<div class="field-label">Owner</div>'
+      + '<input id="detail-task-owner" class="detail-input" value="' + esc(task?.owner || '').replace(/"/g, '&quot;') + '" placeholder="' + esc(detail?.name || 'agent').replace(/"/g, '&quot;') + '">'
+      + '<div class="field-label">Waiting Reason</div>'
+      + '<textarea id="detail-task-waiting-reason" class="detail-textarea" placeholder="Required when status=waiting">' + esc(waitingReason) + '</textarea>'
+      + '<div class="field-label">Waiting Until</div>'
+      + '<input id="detail-task-waiting-until" class="detail-input" value="' + esc(waitingUntil).replace(/"/g, '&quot;') + '" placeholder="2026-03-11T14:00:00.000Z">'
+      + '<div class="read-block"><strong>updated_at</strong><br><span class="mono">' + esc(task?.updated_at || '-') + '</span><br><br><strong>heartbeat_at</strong><br><span class="mono">' + esc(task?.heartbeat_at || '-') + '</span></div>'
+      + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailTask()">Save Task</button></div>';
+  }
+
   function renderSettings(detail, model) {
     const identityRoot = document.getElementById('settings-identity');
+    const taskRoot = document.getElementById('settings-task');
+    const guidanceRoot = document.getElementById('settings-guidance');
     const systemsRoot = document.getElementById('settings-systems');
-    const metadataRoot = document.getElementById('settings-metadata');
+    const ownerRoot = document.getElementById('settings-owner');
     if (!detail || detail.error) {
       identityRoot.innerHTML = '<div class="error-state">Agent detail unavailable.</div>';
+      taskRoot.innerHTML = '<div class="error-state">Canonical task unavailable.</div>';
+      guidanceRoot.innerHTML = '<div class="error-state">Guidance unavailable.</div>';
       systemsRoot.innerHTML = '<div class="error-state">System control state unavailable.</div>';
-      metadataRoot.innerHTML = '<div class="error-state">Agent detail unavailable.</div>';
+      ownerRoot.innerHTML = '<div class="error-state">Ownership unavailable.</div>';
       return;
     }
     identityRoot.innerHTML =
-      '<div class="field-label">Identity</div>'
-      + '<input id="detail-identity-input" class="detail-input" value="' + esc(detail.identity || '').replace(/"/g, '&quot;') + '" placeholder="Agent identity">'
+      '<div class="detail-hint">Short one-line external-facing description used in listings and summaries.</div>'
+      + '<div class="field-label">Identity</div>'
+      + '<input id="detail-identity-input" class="detail-input" value="' + esc(detail.identity || '').replace(/"/g, '&quot;') + '" placeholder="One-line external description">'
       + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailIdentity()">Save Identity</button></div>';
+    taskRoot.innerHTML = renderTaskEditor(detail);
 
     const subconsciousWritable = detail.v1 === true;
+    const guidanceText = String(model?.guidanceText || '');
+    guidanceRoot.innerHTML = subconsciousWritable
+      ? (
+        '<div class="detail-hint">Human-authored intent surface. Current storage and writer boundary remain the existing v1 guidance state path.</div>'
+        + '<textarea id="detail-guidance" class="detail-textarea" placeholder="Guidance text">' + esc(guidanceText) + '</textarea>'
+        + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailGuidance()">Save Guidance</button></div>'
+      )
+      : (
+        '<div class="empty-state">Guidance is writable only for V1 home agents in the current implementation.</div>'
+      );
+
+    const ownerHtml = detail.v1
+      ? (
+        '<div class="detail-hint">First-class ownership field for this agent home.</div>'
+        + '<div class="field-label">Owner</div>'
+        + '<input id="detail-owner" class="detail-input" value="' + esc(detail.owner || '').replace(/"/g, '&quot;') + '" placeholder="Human owner">'
+        + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailOwner()">Save Owner</button></div>'
+      )
+      : '<div class="empty-state">This agent does not expose a writable V1 owner field.</div>';
+    ownerRoot.innerHTML = ownerHtml;
     const supervisorControlHtml =
       '<div class="panel">'
       + '<div class="panel-label">Supervisor Audit</div>'
@@ -3784,16 +4368,6 @@ th{
         + '<div class="panel-label">Subconscious Control</div>'
         + '<label class="detail-toggle"><input id="detail-subconscious-enabled" type="checkbox" ' + (detail.subconsciousEnabled ? 'checked' : '') + '>Enabled</label>'
         + '<div class="detail-actions"><button class="detail-save" onclick="saveSubconsciousControl()">Save</button></div>'
-        + '</div>'
-      )
-      : '';
-    const manualGuidanceText = String(model?.manualGuidanceText || '');
-    const manualGuidanceHtml = subconsciousWritable
-      ? (
-        '<div class="panel">'
-        + '<div class="panel-label">Manual Guidance</div>'
-        + '<textarea id="detail-subconscious-guidance" class="detail-textarea" placeholder="Guidance text">' + esc(manualGuidanceText) + '</textarea>'
-        + '<div class="detail-actions"><button class="detail-save" onclick="saveSubconsciousGuidance()">Save</button></div>'
         + '</div>'
       )
       : '';
@@ -3815,13 +4389,7 @@ th{
         + '</div>'
       )
       : '';
-    systemsRoot.innerHTML = supervisorControlHtml + subconsciousControlHtml + manualGuidanceHtml + runtimeContractHtml;
-
-    if (!detail.v1) {
-      metadataRoot.innerHTML = '<div class="empty-state">This agent does not expose V1 human metadata fields.</div>';
-      bindDetailEditors();
-      return;
-    }
+    systemsRoot.innerHTML = supervisorControlHtml + subconsciousControlHtml + runtimeContractHtml;
 
     const managedProjects = Array.isArray(detail?.managedProjects) ? detail.managedProjects : [];
     const projectRows = managedProjects.length
@@ -3864,19 +4432,11 @@ th{
       + '<div class="detail-actions"><button class="detail-save" onclick="migrateWorkspaceEntryFiles()">Migrate Entry Files</button></div>'
       + '</div>';
 
-    metadataRoot.innerHTML =
-      '<div class="field-label">Owner</div>'
-      + '<input id="detail-owner" class="detail-input" value="' + esc(detail.owner || '').replace(/"/g, '&quot;') + '" placeholder="Human owner">'
-      + '<div class="field-label">Project Scope</div>'
-      + '<textarea id="detail-project-scope" class="detail-textarea" placeholder="Human-maintained project scope notes">' + esc(detail.projectScope || '') + '</textarea>'
-      + '<div class="field-label">Human Notes</div>'
-      + '<textarea id="detail-human-notes" class="detail-textarea" placeholder="Human notes">' + esc(detail.humanNotes || '') + '</textarea>'
-      + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailMetadata()">Save Metadata</button></div>'
-      + projectRows
-      + projectImportHtml
-      + workspaceMigrationHtml;
+    if (detail.v1) {
+      ownerRoot.innerHTML += projectRows + projectImportHtml + workspaceMigrationHtml;
+    }
     bindDetailEditors();
-    bindProjectLifecycleButtons();
+    if (detail.v1) bindProjectLifecycleButtons();
   }
 
   function renderUnreadPanel(unreadRows, queueRows, unreadTotal) {
@@ -3942,7 +4502,7 @@ th{
     // ═══════════════════════════════════════════════
     const authoritativeStatus = authority.status || 'off';
     const authoritativeSession = upstreamSession.established === true ? 'Established' : (upstreamSession.status || 'not-run');
-    const fallbackStatus = fallback.configured === true ? 'Manual fallback configured' : 'No manual fallback';
+    const fallbackStatus = fallback.configured === true ? 'Guidance configured' : 'No guidance';
     const localRuntimeStatus = transitional.runtimeStatus || model.localRuntimeLabel || 'off';
     bits.push('<div class="sub-section">');
     bits.push('<div class="summary-grid">'
@@ -3989,18 +4549,18 @@ th{
     // --- Fallback & Transitional ---
     bits.push('<div class="sub-section">');
     bits.push('<div class="sub-section-label">Fallback & Transitional</div>');
-    bits.push('<div class="summary-note"><strong>Manual fallback:</strong> ' + esc(fallback.status || 'none')
+    bits.push('<div class="summary-note"><strong>Guidance:</strong> ' + esc(fallback.status || 'none')
       + (fallback.note ? (' · ' + esc(fallback.note)) : '') + '</div>');
     bits.push('<div class="summary-note"><strong>Local runtime:</strong> ' + esc(localRuntimeStatus)
       + ' · transitional only'
       + (model.runtimeDisabledReason ? (' · ' + esc(model.runtimeDisabledReason)) : '') + '</div>');
-    if (model.manualGuidancePreview) {
-      bits.push('<div class="guidance-preview gp-manual"><div class="guidance-label">Manual Fallback Guidance</div><div class="guidance-text">' + esc(model.manualGuidancePreview) + '</div></div>');
+    if (model.guidancePreview) {
+      bits.push('<div class="guidance-preview gp-manual"><div class="guidance-label">Guidance</div><div class="guidance-text">' + esc(model.guidancePreview) + '</div></div>');
     }
     if (model.subconsciousMemory?.entryCount > 0) {
       bits.push('<div class="summary-note"><strong>Local memory journal:</strong> ' + esc(model.subconsciousMemory.kind || 'episodic') + ' · ' + esc(String(model.subconsciousMemory.entryCount)) + ' episodes · transitional only</div>');
     }
-    if (!model.manualGuidancePreview && !(model.subconsciousMemory?.entryCount > 0)) {
+    if (!model.guidancePreview && !(model.subconsciousMemory?.entryCount > 0)) {
       bits.push('<div class="summary-note">' + esc(transitional.note || 'No fallback or transitional detail recorded.') + '</div>');
     }
     bits.push('</div>');
@@ -4072,7 +4632,7 @@ th{
       ['Stage', model.subconsciousStage],
       ['Enabled', model.subconsciousEnabled ? 'yes' : 'no'],
       ['Writable', model.subconsciousWritable ? 'yes' : 'no'],
-      ['Manual guidance', model.guidanceConfigured ? 'configured' : 'none'],
+      ['Guidance', model.guidanceConfigured ? 'configured' : 'none'],
       ['Event count', model.subconsciousEvents.length],
       ['Injected count', model.guidanceInjectedEvents.length],
     ]) + '</div>');
@@ -4255,8 +4815,33 @@ th{
     renderSubconsciousUnified(model);
   }
 
+  function renderDocMeta(targetId, doc, filePath, suffix = '') {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+    const bits = [];
+    bits.push('<span class="meta-item mono">' + esc(filePath || '-') + '</span>');
+    if (doc?.readError) bits.push('<span class="meta-item">read error: ' + esc(doc.readError) + '</span>');
+    else bits.push('<span class="meta-item">' + esc(doc?.exists ? 'present' : 'missing') + '</span>');
+    if (suffix) bits.push('<span class="meta-item">' + esc(suffix) + '</span>');
+    el.innerHTML = bits.join('');
+  }
+
+  function renderDocFrame(targetId, doc, missingMessage) {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+    if (doc?.readError) {
+      el.textContent = 'Read failed: ' + doc.readError;
+      return;
+    }
+    if (!doc?.exists) {
+      el.textContent = missingMessage;
+      return;
+    }
+    el.textContent = String(doc?.text || '');
+  }
+
   function renderInternals(detail, supervisorStatus, model) {
-    const docs = model.latest?.docs || {};
+    const docs = (detail?.docs && typeof detail.docs === 'object') ? detail.docs : {};
     document.getElementById('debug-runtime').innerHTML = kvGrid([
       ['Enabled', supervisorStatus?.enabled],
       ['Interval (ms)', supervisorStatus?.intervalMs],
@@ -4269,11 +4854,18 @@ th{
       ['docsRoot', docs.docsRoot || '-'],
       ['agents.md', docs.agentsPath || '-'],
       ['plan.md', docs.planPath || '-'],
+      ['progress.md', docs.progressPath || '-'],
       ['homeDir', detail?.homeDir || '-'],
       ['workdir', detail?.workdir || '-'],
       ['stateDir', detail?.stateDir || '-'],
       ['manifest', detail?.agentJsonPath || '-'],
     ]);
+    renderDocMeta('debug-doc-agents-meta', docs.agents, docs.agentsPath);
+    renderDocMeta('debug-doc-plan-meta', docs.plan, docs.planPath);
+    renderDocMeta('debug-doc-progress-meta', docs.progress, docs.progressPath, (docs.progress?.tailLines ? ('tail ' + docs.progress.tailLines + ' lines') : ''));
+    renderDocFrame('debug-doc-agents', docs.agents, 'AGENTS.md not found.');
+    renderDocFrame('debug-doc-plan', docs.plan, 'plan.md not found.');
+    renderDocFrame('debug-doc-progress', docs.progress, 'progress.md not found.');
     document.getElementById('debug-raw').innerHTML = kvGrid([
       ['path', detail?.path || '-'],
       ['resumeId', detail?.resumeId || '-'],
@@ -4304,8 +4896,38 @@ th{
         + '<td>' + esc(ev?.reason || '-') + '</td>'
         + '<td>' + esc(String(ev?.state?.consecutiveNegative ?? '-')) + '</td>'
         + '<td>' + esc(action) + '</td>'
-        + '</tr>';
+      + '</tr>';
     }).join('');
+  }
+
+  async function saveDetailTask() {
+    if (detailSaveInFlight) return;
+    const payload = buildDetailTaskPayload(latestAgentDetail);
+    if (payload.error) {
+      setDetailStatus(payload.error, 'error');
+      return;
+    }
+    const targetPath = latestAgentDetail?.v1
+      ? ('/api/agents/' + encodeURIComponent(agent) + '/home-metadata')
+      : ('/api/agents/' + encodeURIComponent(agent));
+    detailSaveInFlight = true;
+    setDetailStatus('Saving canonical task...', 'warn');
+    try {
+      const res = await fetch(targetPath, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task: payload.task }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) throw new Error(data?.error || 'task save failed');
+      setDetailStatus('Canonical task saved.', 'ok');
+      detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 2000);
+      await refresh(true);
+    } catch (e) {
+      setDetailStatus('Task save failed: ' + e.message, 'error');
+    } finally {
+      detailSaveInFlight = false;
+    }
   }
 
   async function saveDetailIdentity() {
@@ -4331,30 +4953,26 @@ th{
     }
   }
 
-  async function saveDetailMetadata() {
+  async function saveDetailOwner() {
     if (detailSaveInFlight) return;
     const ownerEl = document.getElementById('detail-owner');
-    const scopeEl = document.getElementById('detail-project-scope');
-    const notesEl = document.getElementById('detail-human-notes');
-    if (!ownerEl || !scopeEl || !notesEl) return;
+    if (!ownerEl) return;
     detailSaveInFlight = true;
-    setDetailStatus('Saving metadata...', 'warn');
+    setDetailStatus('Saving owner...', 'warn');
     try {
       const res = await fetch('/api/agents/' + encodeURIComponent(agent) + '/home-metadata', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           owner: String(ownerEl.value || '').trim() || null,
-          projectScope: String(scopeEl.value || '').trim(),
-          humanNotes: String(notesEl.value || '').trim(),
         }),
       });
-      if (!res.ok) throw new Error('metadata save failed');
-      setDetailStatus('Metadata saved.', 'ok');
+      if (!res.ok) throw new Error('owner save failed');
+      setDetailStatus('Owner saved.', 'ok');
       detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 2000);
       await refresh(true);
     } catch (e) {
-      setDetailStatus('Metadata save failed: ' + e.message, 'error');
+      setDetailStatus('Owner save failed: ' + e.message, 'error');
     } finally {
       detailSaveInFlight = false;
     }
@@ -4389,16 +5007,16 @@ th{
     }
   }
 
-  async function saveSubconsciousGuidance() {
+  async function saveDetailGuidance() {
     if (detailSaveInFlight) return;
-    const guidanceEl = document.getElementById('detail-subconscious-guidance');
+    const guidanceEl = document.getElementById('detail-guidance');
     if (!guidanceEl) return;
     if (!latestAgentDetail?.v1) {
-      setDetailStatus('Manual guidance is read-only here: writable only for V1 subconscious state.', 'error');
+      setDetailStatus('Guidance is read-only here: writable only for V1 subconscious state.', 'error');
       return;
     }
     detailSaveInFlight = true;
-    setDetailStatus('Saving manual guidance...', 'warn');
+    setDetailStatus('Saving guidance...', 'warn');
     try {
       const res = await fetch('/api/agents/' + encodeURIComponent(agent) + '/subconscious-guidance', {
         method: 'PATCH',
@@ -4407,12 +5025,12 @@ th{
           guidance: String(guidanceEl.value || '').trim(),
         }),
       });
-      if (!res.ok) throw new Error('manual guidance save failed');
-      setDetailStatus('Manual guidance saved.', 'ok');
+      if (!res.ok) throw new Error('guidance save failed');
+      setDetailStatus('Guidance saved.', 'ok');
       detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 2000);
       await refresh(true);
     } catch (e) {
-      setDetailStatus('Manual guidance save failed: ' + e.message, 'error');
+      setDetailStatus('Guidance save failed: ' + e.message, 'error');
     } finally {
       detailSaveInFlight = false;
     }
@@ -4596,13 +5214,14 @@ th{
     }
   }
 
+  window.saveDetailTask = saveDetailTask;
   window.saveDetailIdentity = saveDetailIdentity;
-  window.saveDetailMetadata = saveDetailMetadata;
+  window.saveDetailOwner = saveDetailOwner;
   window.importManagedProject = importManagedProject;
   window.removeManagedProject = removeManagedProject;
   window.migrateWorkspaceEntryFiles = migrateWorkspaceEntryFiles;
   window.saveSubconsciousControl = saveSubconsciousControl;
-  window.saveSubconsciousGuidance = saveSubconsciousGuidance;
+  window.saveDetailGuidance = saveDetailGuidance;
   window.saveSupervisorAuditControl = saveSupervisorAuditControl;
 
   async function refresh(forceDetailRender = false) {
@@ -4634,6 +5253,7 @@ th{
         agentDetailPayload,
         statusRow,
         detail,
+        statusPayload,
         supervisorControlPayload,
         subconsciousPayload,
         subconsciousDetailPayload,
@@ -5490,7 +6110,9 @@ body.page-hidden #reminder-panel.has-items{
         }
       }
       let body = null;
-      try { body = await res.json(); } catch {}
+      try { body = await res.json(); } catch (e) {
+        console.debug('[agent-detail] queue action response parse skipped:', e.message);
+      }
       if (!res.ok || (body && body.ok === false)) {
         throw new Error((body && body.reason) || ('HTTP ' + res.status));
       }
@@ -5498,7 +6120,8 @@ body.page-hidden #reminder-panel.has-items{
         const targetAgent = String(removed.to).split(':', 1)[0];
         if (targetAgent === monitoredAgent.name) fetchAgentDetail(monitoredAgent.name);
       }
-    } catch {
+    } catch (e) {
+      console.debug('[agent-detail] queue action failed, restoring removed entry:', e.message);
       if (removed) { queueItems.push(removed); requestQueueRender(true); }
     }
   };
@@ -5683,6 +6306,22 @@ body.page-hidden #reminder-panel.has-items{
     agentInfoEl.classList.add('visible');
   }
 
+  function showAgentDetailError(name, message) {
+    if (!agentInfoEl) return;
+    const safeName = esc(String(name || ''));
+    const safeMessage = esc(String(message || 'Summary unavailable.'));
+    agentInfoEl.innerHTML = '<span class="ai-label">agent</span><span class="ai-val">' + safeName + '</span><br>'
+      + '<span class="ai-unread-empty">' + safeMessage + '</span>';
+    agentInfoEl.classList.add('visible');
+  }
+
+  function hasCurrentSupervisorIssue(state) {
+    const classification = String(state?.classification || '').trim().toLowerCase();
+    if (classification === 'stalled_wait' || classification === 'suspected_eos') return true;
+    const lifecycleState = String(state?.lifecycleState || '').trim().toLowerCase();
+    return lifecycleState === 'active' && classification.length > 0;
+  }
+
   function scheduleDetailRefresh() {
     if (detailRefreshTimer) clearInterval(detailRefreshTimer);
     const interval = document.hidden ? DETAIL_REFRESH_HIDDEN_MS : DETAIL_REFRESH_VISIBLE_MS;
@@ -5750,7 +6389,9 @@ body.page-hidden #reminder-panel.has-items{
 
     const requestSeq = ++agentDetailRequestSeq;
     if (agentDetailAbortController) {
-      try { agentDetailAbortController.abort(); } catch {}
+      try { agentDetailAbortController.abort(); } catch (e) {
+        console.debug('[agent-detail] previous request abort skipped:', e.message);
+      }
     }
     const controller = new AbortController();
     agentDetailAbortController = controller;
@@ -5760,9 +6401,8 @@ body.page-hidden #reminder-panel.has-items{
     }
 
     try {
-      const [detailRespRaw, unreadRespRaw, supervisorRespRaw] = await Promise.allSettled([
+      const [detailRespRaw, supervisorRespRaw] = await Promise.allSettled([
         fetch('/api/agents/detail/' + encodeURIComponent(targetName), { signal: controller.signal }),
-        fetch('/api/agents/' + encodeURIComponent(targetName) + '/unread-messages?limit=' + UNREAD_PANEL_LIMIT, { signal: controller.signal }),
         fetch('/api/supervisor/agents/' + encodeURIComponent(targetName) + '?limit=1', { signal: controller.signal }),
       ]);
 
@@ -5776,20 +6416,25 @@ body.page-hidden #reminder-panel.has-items{
       if (requestSeq !== agentDetailRequestSeq) return;
       if (!monitoredAgent || monitoredAgent.name !== targetName) return;
 
-      let unreadData = { unread_total: 0, unread_returned: 0, unread_omitted: 0, messages: [] };
-      try {
-        if (unreadRespRaw.status === 'fulfilled' && unreadRespRaw.value.ok) {
-          const payload = await unreadRespRaw.value.json();
-          if (payload && typeof payload === 'object') unreadData = payload;
-        }
-      } catch {}
       let supervisorData = { latest: null, state: {} };
+      let supervisorStatus = { enabled: null, runtime: { running: null } };
       try {
         if (supervisorRespRaw.status === 'fulfilled' && supervisorRespRaw.value.ok) {
           const payload = await supervisorRespRaw.value.json();
           if (payload && typeof payload === 'object') supervisorData = payload;
         }
-      } catch {}
+      } catch (e) {
+        console.debug('[agent-detail] supervisor detail fetch skipped:', e.message);
+      }
+      try {
+        const r = await fetch('/api/supervisor/status', { signal: controller.signal });
+        if (r.ok) {
+          const payload = await r.json();
+          if (payload && typeof payload === 'object') supervisorStatus = payload;
+        }
+      } catch (e) {
+        console.debug('[agent-detail] supervisor status fetch skipped:', e.message);
+      }
       const statusSnap = agentStatusList.find(x => x.name === targetName) || {};
       const activeNow = typeof statusSnap.activeNow === 'boolean'
         ? statusSnap.activeNow
@@ -5806,12 +6451,6 @@ body.page-hidden #reminder-panel.has-items{
         ? supervisorData.latest
         : null;
       const latestStatus = String(latestEval?.status || '').trim();
-      const queuedForAgent = queueItems.filter((item) => {
-        const target = String(item?.to || '').split(':', 1)[0];
-        return target === targetName;
-      }).length;
-      const unreadTotal = Math.max(0, toNonNegInt(unreadData.unread_total, 0));
-      const projectCount = Array.isArray(d.managedProjects) ? d.managedProjects.length : 0;
       const parts = [];
       if (d.agentType) {
         const cls = d.agentType === 'claude' ? 'ai-tag-claude' : 'ai-tag-codex';
@@ -5819,7 +6458,9 @@ body.page-hidden #reminder-panel.has-items{
       }
       parts.push('<span class="ai-tag ' + (activeNow ? 'ai-tag-active' : 'ai-tag-inactive') + '" id="ai-runtime-state">'
         + esc(runtimeStatusText(activeNow, activeDurationSec, idleDurationSec)) + '</span>');
-      if (latestStatus) {
+      const currentSupervisorIssue = hasCurrentSupervisorIssue(supervisorData.state || {});
+      const showCurrentSupervisorWarning = latestStatus && currentSupervisorIssue;
+      if (latestStatus && showCurrentSupervisorWarning) {
         const auditCls = latestStatus === 'FOCUSED'
           ? 'ai-tag-focused'
           : ((latestStatus === 'DRIFTING' || latestStatus === 'LOST' || latestStatus === 'STUCK') ? 'ai-tag-alert' : 'ai-tag-neutral');
@@ -5830,7 +6471,9 @@ body.page-hidden #reminder-panel.has-items{
         + esc(d.subconsciousEnabled ? 'SUBCONSCIOUS ON' : 'SUBCONSCIOUS OFF') + '</span>');
       parts.push('<br>');
       parts.push('<div class="ai-identity">' + esc(d.identity || '(no identity)') + '</div>');
-      if (latestEval && latestStatus && latestStatus !== 'FOCUSED') {
+      const supervisorEnabled = supervisorStatus?.enabled === true;
+      const supervisorRunning = supervisorStatus?.runtime?.running === true;
+      if (latestEval && latestStatus && latestStatus !== 'FOCUSED' && (showCurrentSupervisorWarning || ((supervisorEnabled || supervisorRunning) && currentSupervisorIssue))) {
         const reasonText = String(latestEval.reason || '').trim() || 'Supervisor raised a non-focused state.';
         const domainText = String(latestEval.domain || '').trim();
         const patternText = String(latestEval.pattern || '').trim();
@@ -5854,6 +6497,10 @@ body.page-hidden #reminder-panel.has-items{
       agentInfoEl.classList.add('visible');
     } catch (e) {
       if (e && e.name === 'AbortError') return;
+      console.error('fetchAgentDetail error:', e);
+      if (requestSeq !== agentDetailRequestSeq) return;
+      if (!monitoredAgent || monitoredAgent.name !== targetName) return;
+      showAgentDetailError(targetName, 'Summary unavailable. Refresh or reopen the panel.');
     } finally {
       if (requestSeq === agentDetailRequestSeq && agentDetailAbortController === controller) {
         agentDetailAbortController = null;
@@ -6077,7 +6724,9 @@ body.page-hidden #reminder-panel.has-items{
       renderAgentButtons(normalized);
       updateSelectedRuntimeBadge();
       lastStatusSyncAt = now;
-    } catch {}
+    } catch (e) {
+      console.debug('[agent-status] status fetch skipped:', e.message);
+    }
   }
 
   function tickAgentDurationsLocal() {
@@ -6120,13 +6769,19 @@ body.page-hidden #reminder-panel.has-items{
   function connectSSE() {
     const evtSource = new EventSource('/api/stream');
     evtSource.onmessage = (e) => {
-      try { addLogEntry(JSON.parse(e.data)); } catch {}
+      try { addLogEntry(JSON.parse(e.data)); } catch (err) {
+        console.debug('[sse] message parse skipped:', err.message);
+      }
     };
     evtSource.addEventListener('queue', (e) => {
-      try { queueItems = JSON.parse(e.data); requestQueueRender(false); } catch {}
+      try { queueItems = JSON.parse(e.data); requestQueueRender(false); } catch (err) {
+        console.debug('[sse] queue parse skipped:', err.message);
+      }
     });
     evtSource.addEventListener('reminders', (e) => {
-      try { reminderItems = JSON.parse(e.data); renderReminderPanel(); } catch {}
+      try { reminderItems = JSON.parse(e.data); renderReminderPanel(); } catch (err) {
+        console.debug('[sse] reminders parse skipped:', err.message);
+      }
     });
   }
 
@@ -6139,8 +6794,12 @@ body.page-hidden #reminder-panel.has-items{
       for (const msg of msgs.slice(-50)) addLogEntry(msg);
     } catch (e) { console.error('messages load failed:', e); }
     // Initial state
-    try { const r = await fetch('/api/queue'); queueItems = await r.json(); requestQueueRender(true); } catch {}
-    try { const r = await fetch('/api/reminders'); reminderItems = await r.json(); renderReminderPanel(); } catch {}
+    try { const r = await fetch('/api/queue'); queueItems = await r.json(); requestQueueRender(true); } catch (e) {
+      console.debug('[init] queue load skipped:', e.message);
+    }
+    try { const r = await fetch('/api/reminders'); reminderItems = await r.json(); renderReminderPanel(); } catch (e) {
+      console.debug('[init] reminders load skipped:', e.message);
+    }
     await fetchAgentStatus('init');
     statusPollTimer = setInterval(() => {
       if (!document.hidden) fetchAgentStatus('poll');
