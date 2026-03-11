@@ -285,4 +285,51 @@ describe('backend runtime API', () => {
     expect(events[0].full).toContain('Pending human messages: no');
     expect(events[0].full).toContain('Target humans: none');
   });
+
+  test('stale remote heartbeat emits a system info disconnect alert and marks agents offline', async () => {
+    const staleHeartbeatAt = Date.now() - 120_000;
+    context = await createBackendTestContext('agent-chat-runtime-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          server: 'relay-west',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      groups: {},
+      servers: {
+        'relay-west': {
+          id: 'relay-west',
+          online: true,
+          heartbeatAt: staleHeartbeatAt,
+          lastSeen: staleHeartbeatAt,
+          updatedAt: staleHeartbeatAt,
+          sessions: ['alpha'],
+          agents: ['alpha'],
+          agentCount: 1,
+        },
+      },
+    });
+
+    const response = await request(context.app).get('/health');
+    expect(response.status).toBe(200);
+
+    const serversAfter = readJson(path.join(context.runtimeDir, 'data', 'servers.json'));
+    const agentsAfter = readJson(path.join(context.runtimeDir, 'data', 'agents.json'));
+    const events = readSystemInfoEvents(context.runtimeDir);
+
+    expect(serversAfter['relay-west'].online).toBe(false);
+    expect(serversAfter['relay-west'].sessions).toEqual([]);
+    expect(serversAfter['relay-west'].agents).toEqual([]);
+    expect(serversAfter['relay-west'].agentCount).toBe(0);
+    expect(agentsAfter.alpha.online).toBe(false);
+    expect(agentsAfter.alpha.offlineReason).toBe('server-offline:relay-west');
+    expect(events.map((event) => event.summary)).toContain("Remote server 'relay-west' offline");
+    expect(events.find((event) => event.summary === "Remote server 'relay-west' offline")?.full || '')
+      .toContain('heartbeat timed out');
+  });
 });
