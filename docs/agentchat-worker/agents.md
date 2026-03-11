@@ -13,6 +13,7 @@
 - `supervisor-tmuxlaunchfailed` is now confirmed as recurring residue, not just lingering stale state; treat this residue class as a framework-fix issue when triaging runtime hygiene.
 - Executor availability itself is now a durable coordination surface: if `agentchat-develop`/`agentchat-aduit` disappear from tmux or `Yato` is stuck behind interactive prompts, worker must explicitly record the lane as degraded, reassign or restore it, and not silently pretend the old execution plan is still active.
 - `agentchat-develop` now has an existing v1 dev home at `/home/shisui/laplace/agent-chat-dev-runtime/homes/agents/agent_agentchat-develop`; if the legacy `data/agents/agentchat-develop` record blocks v1 launch, back it up rather than forcing shared-workspace execution.
+- The recent tmux-sweep optimization introduced a new truthfulness hazard: caching pane metadata by `session_name` alone is unsafe for agents pinned to a specific pane/window. If the exact configured `tmuxTarget` disappears while the broader session survives, session-level aliasing can suppress `tmux-missing:auto` and misattribute pane pid / workspace / scope-memory state from the wrong pane.
 - The operator-requested `agentchat-worker` self-migration to a v1 home/workdir/project is a real queued project, not a casual cleanup note. It requires a real v1 home, migrated worker docs, updated templates, a `handoff.md`, and explicit stop/restart instructions for the operator.
 
 ## Boundaries

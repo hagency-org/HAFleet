@@ -5,6 +5,7 @@ Coordinate the next clean execution phase after the live incident wave. Acceptan
 - unpark `v1 sync slice-2` once a reliable executor is back online
 - add and preserve the `agentchat-worker` 1.0 migration lane so the worker itself can move into a real v1 home/workdir/project model without losing docs/history
 - keep active reminders in place so execution does not EOS
+- treat the new tmux-sweep pane-target regression as a fresh structural blocker and keep it separate from parked UI/field-convergence work
 
 ## Queue
 1. Resume `v1 manifest/backend sync divergence` slice-2 implementation after the live web incident is triaged and narrowed again.
@@ -29,6 +30,10 @@ Coordinate the next clean execution phase after the live incident wave. Acceptan
     - use latest `AGENTS.md` / `CLAUDE.md`
     - create `handoff.md`
     - provide operator-ready down/up commands for the cutover
+18. Fix the tmux-sweep pane-target regression introduced by the session-only metadata optimization:
+    - preserve exact `tmuxTarget` truth
+    - keep `tmux-missing:auto` behavior correct when the configured pane disappears but the session still exists
+    - prevent session-first metadata aliasing from poisoning pane pid / workspace / scope-memory attribution
 
 ## Blocked (optional)
 1. Make Agent Detail expose canonical task editing/visibility and show AGENTS.md / plan.md / progress.md tails under Internals; this lane is now assigned to agentchat-develop because Yato is currently blocked at an interactive prompt.
