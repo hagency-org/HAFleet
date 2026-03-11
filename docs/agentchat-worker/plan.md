@@ -2,15 +2,15 @@
 Coordinate the next clean execution phase after the live incident wave. Acceptance criteria:
 - keep worker in chief-coordinator mode: no direct coding/investigation work by worker
 - explicitly track executor availability (`agentchat-develop`, `agentchat-aduit`, `Yato`) and repair lanes when they silently disappear
-- resume `v1 sync slice-2` now that the tmux-sweep pane-target regression has been accepted and closed
+- resume the accepted Agent Detail task/Internals takeover lane now that `v1 sync slice-2` has been accepted and closed
 - add and preserve the `agentchat-worker` 1.0 migration lane so the worker itself can move into a real v1 home/workdir/project model without losing docs/history
 - keep active reminders in place so execution does not EOS
 - keep the accepted Agent Detail task/Internals/UI staging parked behind `v1 sync slice-2`, and keep field-convergence work queued behind both
 
 ## Queue
-1. Resume `v1 manifest/backend sync divergence` slice-2 implementation after the live web incident is triaged and narrowed again.
+1. Implement the accepted Agent Detail task/Internals takeover: canonical task visibility/editing plus `AGENTS.md` / `plan.md` / `progress.md` tails under `Internals`.
 2. Converge human-maintained agent text fields through staged design/execution: remove `Project Scope` / `Human Notes`; rename `Manual Guidance` to canonical `Guidance`; keep `Owner` first-class and `Identity` one-line and external-facing.
-3. Keep the accepted Agent Detail task/Internals takeover design parked behind `v1 sync slice-2`; after that, implement canonical task visibility/editing plus `AGENTS.md`/`plan.md`/`progress.md` tails under `Internals`.
+3. Resume `v1 manifest/backend sync divergence` follow-up only if the accepted slice-2 reveals new residuals after rollout; otherwise keep it closed.
 4. Rework supervisor toward the original charter after the current parked structural lines: agent-shaped monitoring state machine, bounded convergent states, repeated-state-triggered intervention through agentchat.
 5. Continue periodic `agentchat-aduit` follow-up audits and re-triage any new structural findings before assigning code work.
 6. Add a standing residual-runtime hygiene lane: periodically audit orphan/probe tmux sessions, half-started agents, stale supervisor runtimes, and other leftover runtime artifacts; route findings back into triage instead of letting them silently accumulate.

@@ -2150,3 +2150,8 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
 - Checked `Yato` directly for the reminder-driven executor-health pass. `tmux has-session -t Yato` now fails, and the dev control-plane no longer returns a `Yato` row from `GET /api/agents/status`.
 - This is no longer just an interactive-prompt blockage; the executor is currently absent from both tmux and the dev backend object set.
 - The existing decision remains correct: keep the Agent Detail task/Internals UI lane reassigned away from `Yato` and do not let UI work drift back onto it until a future recovery explicitly re-establishes `Yato` as a schedulable executor.
+
+## [2026-03-11 16:07] DONE — accepted v1 sync slice-2 and moved the active lane to Agent Detail task/Internals takeover
+- Accepted `agentchat-develop`'s `v1 manifest/backend sync divergence` slice-2. The accepted boundary is: `syncBackendAgentHomeState()` now readback-verifies canonical v1-owned fields after PATCH/POST, and `bin/agent-up` now lets resolvable v1 manifest data outrank compatibility `meta.json` for launch defaults and runtime-profile launch env.
+- This closes the currently active v1 sync divergence lane unless later rollout reveals new residuals.
+- Activated the next accepted parked lane for `agentchat-develop`: Agent Detail canonical task visibility/editing plus `AGENTS.md` / `plan.md` / `progress.md` tails under `Internals`, with Matrix/supervisor/subconscious/field-convergence lines still kept separate.
