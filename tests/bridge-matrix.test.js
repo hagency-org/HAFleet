@@ -62,4 +62,29 @@ describe('bridge matrix behavior', () => {
       '⚠️ Message delivery failed after retry (timeout).'
     );
   });
+
+  test('onAgentRecovered sends an all-clear to the same rooms that received blocked alerts', async () => {
+    const bridge = new MatrixBridge();
+    bridge.sendDeliveryNotice = vi.fn().mockResolvedValue(undefined);
+
+    await bridge.onAgentBlocked({
+      agent: 'alpha',
+      reason: 'plan-mode',
+      targets: [
+        { roomId: '!room:test', human: 'alice', pending: true },
+      ],
+    });
+    await bridge.onAgentRecovered({ agent: 'alpha' });
+
+    expect(bridge.sendDeliveryNotice).toHaveBeenNthCalledWith(
+      1,
+      '!room:test',
+      '⚠️ Agent @alpha appears blocked (plan-mode). It may not process messages until manually handled. There are still unread human messages pending for this agent.'
+    );
+    expect(bridge.sendDeliveryNotice).toHaveBeenNthCalledWith(
+      2,
+      '!room:test',
+      '✅ Agent @alpha recovered from blocked state.'
+    );
+  });
 });

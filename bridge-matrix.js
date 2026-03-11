@@ -1095,6 +1095,7 @@ export class MatrixBridge {
     this.recentAgentCompactIds = new Set(); // dedupe compact SSE events
     this.recentlyCreatedRooms = new Set(); // rooms we just created (suppress echo)
     this.recentMatrixEvents = new Map(); // event_id -> { ts, msgId }
+    this.blockedAlertRooms = new Map(); // agent -> Set(roomId)
     this.startupTs = Date.now();
     this.commands = null;
   }
@@ -1105,6 +1106,26 @@ export class MatrixBridge {
 
   sleep(ms) {
     return sleep(ms);
+  }
+
+  rememberBlockedAlertRoom(agentName, roomId) {
+    const canonicalAgent = this.resolveKnownAgentName(agentName) || this.normalizeName(agentName);
+    const normalizedRoom = (typeof roomId === 'string' && roomId.trim()) ? roomId.trim() : '';
+    if (!canonicalAgent || !normalizedRoom) return;
+    let rooms = this.blockedAlertRooms.get(canonicalAgent);
+    if (!rooms) {
+      rooms = new Set();
+      this.blockedAlertRooms.set(canonicalAgent, rooms);
+    }
+    rooms.add(normalizedRoom);
+  }
+
+  consumeBlockedAlertRooms(agentName) {
+    const canonicalAgent = this.resolveKnownAgentName(agentName) || this.normalizeName(agentName);
+    if (!canonicalAgent) return [];
+    const rooms = this.blockedAlertRooms.get(canonicalAgent);
+    this.blockedAlertRooms.delete(canonicalAgent);
+    return rooms ? [...rooms] : [];
   }
 
   normalizeName(value) {
@@ -2230,6 +2251,7 @@ export class MatrixBridge {
       const pendingHint = target?.pending ? ' There are still unread human messages pending for this agent.' : '';
       const text = `⚠️ Agent @${agentName} appears blocked (${reason}). It may not process messages until manually handled.${pendingHint}`;
       await this.sendDeliveryNotice(roomId, text);
+      this.rememberBlockedAlertRoom(agentName, roomId);
     }
   }
 
@@ -2312,6 +2334,10 @@ export class MatrixBridge {
     const agentName = (typeof event?.agent === 'string' && event.agent.trim()) ? event.agent.trim() : '';
     if (!agentName) return;
     console.log(`SSE: agent_recovered — ${agentName}`);
+    const rooms = this.consumeBlockedAlertRooms(agentName);
+    for (const roomId of rooms) {
+      await this.sendDeliveryNotice(roomId, `✅ Agent @${agentName} recovered from blocked state.`);
+    }
   }
 
   async onSystemInfo(event) {
