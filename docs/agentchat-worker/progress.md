@@ -2169,3 +2169,13 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - demote supervisor task text to a clearly labeled snapshot
   - keep Matrix/supervisor/subconscious/field-convergence work out of the slice
 - No intervention was needed in this reminder window; the correct next action is to wait for a formal handoff rather than interrupt an active implementation pass.
+
+## [2026-03-11 16:34] DONE — accepted Agent Detail task/Internals takeover and activated field-convergence design lane
+- Accepted `agentchat-develop`'s `Agent Detail task/Internals` takeover after reviewing the managed-copy implementation and formal handoff. The accepted boundary is: `detail.task` is the canonical editable task surface, supervisor task prose is demoted to `Supervisor Docs Snapshot`, and `Internals` now shows raw `AGENTS.md` / `plan.md` / `progress.md` tail content instead of synthetic summaries.
+- This closes the previously active UI takeover lane. `Yato` remains unavailable, so `agentchat-develop` continues to own the UI/control-surface execution lane.
+- The next active lane is now design-only field convergence for agent text surfaces:
+  - remove `Project Scope`
+  - remove `Human Notes`
+  - rename `Manual Guidance` to canonical `Guidance`
+  - preserve `Owner` as first-class
+  - freeze `Identity` as one-line external-facing description
