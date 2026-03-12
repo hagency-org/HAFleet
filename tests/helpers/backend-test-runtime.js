@@ -26,6 +26,7 @@ export async function createBackendTestContext(prefix, seed = {}) {
   process.env.SUPERVISOR_ENABLED = 'false';
   process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
   process.env.AGENT_JSON_WRITE_BATCH_MS = '0';
+  process.env.AGENT_BLOCKED_INFO_AGGREGATE_WINDOW_MS = '0';
   if (seed.env && typeof seed.env === 'object') {
     for (const [key, value] of Object.entries(seed.env)) {
       process.env[key] = String(value);
