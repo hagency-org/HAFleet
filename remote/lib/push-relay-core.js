@@ -54,6 +54,8 @@ const runtimeReportDigest = new Map();
 const skipReasonLastLog = new Map();
 let mcpSessionCacheAt = 0;
 let mcpSessionCache = new Set();
+const mcpMissCount = new Map(); // per-agent consecutive MCP-absent scan count
+const MCP_MISS_THRESHOLD = 6;  // report mcpPresent=false after 6 consecutive misses (30s at 5s scan)
 
 const COMPACT_PATTERNS = [
   { marker: 'codex-context-compacted', summary: 'Context compacted', re: /(?:^|\n)\s*(?:•\s*)?Context compacted\s*(?:\n|$)/i },
@@ -327,6 +329,7 @@ async function scanBlockedStates() {
     compactState.delete(agentName);
     activityState.delete(agentName);
     runtimeReportDigest.delete(agentName);
+    mcpMissCount.delete(agentName);
     await reportRuntime(agentName, {
       blocked: false,
       reason: null,
@@ -361,6 +364,18 @@ async function scanBlockedStates() {
       compactState.delete(agentName);
     }
 
+    // Debounce MCP detection — only report absent after consecutive misses
+    const mcpDetected = mcpSessions.has(agentName);
+    let mcpPresent;
+    if (mcpDetected) {
+      mcpMissCount.delete(agentName);
+      mcpPresent = true;
+    } else {
+      const misses = (mcpMissCount.get(agentName) || 0) + 1;
+      mcpMissCount.set(agentName, misses);
+      mcpPresent = misses < MCP_MISS_THRESHOLD; // grace period: assume present until threshold
+    }
+
     const metrics = computeActivityMetrics(agentName, target);
     const payload = {
       blocked,
@@ -372,7 +387,7 @@ async function scanBlockedStates() {
       idleDurationSec: metrics?.idleDurationSec ?? 0,
       lastTmuxActivitySec: metrics?.lastTmuxActivitySec ?? null,
       workspacePath: panePath,
-      mcpPresent: mcpSessions.has(agentName),
+      mcpPresent,
     };
     const digest = JSON.stringify({
       blocked: payload.blocked,
@@ -716,6 +731,7 @@ function resetRelayState() {
   activityState.clear();
   runtimeReportDigest.clear();
   skipReasonLastLog.clear();
+  mcpMissCount.clear();
   mcpSessionCacheAt = 0;
   mcpSessionCache = new Set();
   execFileAsyncImpl = execFileAsync;
@@ -751,6 +767,7 @@ export {
   main,
   messageRecipients,
   resetRelayState,
+  scanBlockedStates,
   seedRelayState,
   setPushRelayTestHooks,
   setPushToTmuxForTest,
