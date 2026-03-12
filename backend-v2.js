@@ -3315,6 +3315,7 @@ function summarizeMsg(m) {
     sourceRoom: m.sourceRoom || null,
     senderMxid: m.senderMxid || null,
     trustLevel: m.trustLevel || null,
+    fromId: m.fromId || null,
   };
   const normalizedSchema = normalizeMessageSchema(m?.schema);
   if (normalizedSchema.value) out.schema = normalizedSchema.value;
@@ -4114,6 +4115,7 @@ function collectBlockedHumanTargets(agentName) {
       .sort(compareMsgOrder)
       .map(msg => ({
         human: msg.from,
+        humanId: msg.fromId || msg.senderMxid || null,
         roomId: (typeof msg.sourceRoom === 'string' && msg.sourceRoom.trim()) ? msg.sourceRoom.trim() : null,
         group: msg.group || null,
         messageId: msg.id,
@@ -7546,11 +7548,12 @@ app.delete('/api/groups/:name', requireBridgeSecret, (req, res) => {
 
 // ── DM ensure (triggers bridge to create Matrix DM room) ─────────────
 app.post('/api/dm/ensure', (req, res) => {
-  const { agent, human } = req.body;
+  const { agent, human, humanId } = req.body;
   if (!agent || !human) return res.status(400).json({ error: 'agent and human required' });
-  broadcastSSE('dm_ensure', { agent, human });
-  console.log(`[dm/ensure] Requested DM room: agent=${agent}, human=${human}`);
-  res.json({ ok: true, queued: true, agent, human });
+  const resolvedHumanId = (typeof humanId === 'string' && humanId.trim()) ? humanId.trim() : null;
+  broadcastSSE('dm_ensure', { agent, human, humanId: resolvedHumanId });
+  console.log(`[dm/ensure] Requested DM room: agent=${agent}, human=${human}${resolvedHumanId ? ` humanId=${resolvedHumanId}` : ''}`);
+  res.json({ ok: true, queued: true, agent, human, humanId: resolvedHumanId });
 });
 
 app.post('/api/agents/:name/avatar', express.json({ limit: '10mb' }), (req, res) => {
@@ -7648,7 +7651,7 @@ app.get('/api/media/fetch', (req, res) => {
 
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid, from_id } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -7811,6 +7814,8 @@ app.post('/api/messages', (req, res) => {
     sourceRoom,
     senderMxid,
     trustLevel,
+    fromId: (typeof from_id === 'string' && from_id.trim()) ? from_id.trim().slice(0, 255)
+      : (senderMxid || null),
   };
   if (normalizedAttachments.length > 0) {
     msg.attachments = normalizedAttachments;
