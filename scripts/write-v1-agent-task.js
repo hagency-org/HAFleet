@@ -141,8 +141,6 @@ function parsePositiveInt(value, fallback) {
 function defaultApiBaseUrl(env = process.env) {
   const explicit = String(env.AGENT_CHAT_API || '').trim();
   if (explicit) return explicit.replace(/\/$/, '');
-  const web = String(env.AGENT_CHAT_WEB_URL || '').trim();
-  if (web) return web.replace(/\/$/, '');
   const port = parsePositiveInt(env.AGENT_CHAT_BACKEND_PORT, 8090);
   return `http://127.0.0.1:${port}`;
 }

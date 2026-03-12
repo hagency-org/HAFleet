@@ -49,9 +49,15 @@ describe('assertRuntimeDir', () => {
     expect(() => assertRuntimeDir(tmpDir)).toThrow(/stale data marker/);
   });
 
-  test('no-op when data dir does not exist', () => {
-    // tmpDir exists but has no data/ subdirectory
+  test('no-op when data dir does not exist and no stale markers', () => {
+    // tmpDir exists but has no data/ subdirectory and no stale markers
     expect(() => assertRuntimeDir(tmpDir)).not.toThrow();
+  });
+
+  test('throws on fresh dir with stale marker but no data/ (bug 3 regression)', () => {
+    // data/ does NOT exist, but a stale marker sibling does
+    mkdirSync(path.join(tmpDir, 'data.stale-backup-20260310'), { recursive: true });
+    expect(() => assertRuntimeDir(tmpDir)).toThrow(/stale data marker/);
   });
 });
 

@@ -2746,8 +2746,8 @@ for (const agent of Object.values(agents)) {
       if (!manifest) continue;
       let changed = false;
       if (manifest.task && typeof manifest.task === 'object') {
-        const diskTs = Number(manifest.task.updatedAt) || 0;
-        const memTs = Number(agent.task?.updatedAt) || 0;
+        const diskTs = Date.parse(manifest.task.updated_at) || 0;
+        const memTs = Date.parse(agent.task?.updated_at) || 0;
         if (diskTs > memTs) {
           agent.task = normalizeAgentTask(manifest.task, agent.name);
           changed = true;
