@@ -143,10 +143,12 @@ mkdirSync(MATRIX_MEDIA_DIR, { recursive: true });
 const MATRIX_OPERATOR_MXIDS = new Set(
   (process.env.MATRIX_OPERATOR_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
-const MATRIX_BRIDGE_SECRET = (process.env.MATRIX_BRIDGE_SECRET || '').trim();
+/** Read bridge secret fresh from env on each call (tests toggle process.env between cases). */
+function getBridgeSecret() { return (process.env.MATRIX_BRIDGE_SECRET || '').trim(); }
 /** Middleware: reject if bridge secret is configured and caller doesn't match. */
 function requireBridgeSecret(req, res, next) {
-  if (MATRIX_BRIDGE_SECRET && req.headers['x-bridge-secret'] !== MATRIX_BRIDGE_SECRET) {
+  const secret = getBridgeSecret();
+  if (secret && req.headers['x-bridge-secret'] !== secret) {
     return res.status(403).json({ error: 'bridge secret required' });
   }
   next();
@@ -7655,7 +7657,8 @@ app.post('/api/messages', (req, res) => {
     ? source_room.trim()
     : null;
   // Only accept sender_mxid from authenticated bridge requests (or if no secret is configured)
-  const isBridgeAuthenticated = !MATRIX_BRIDGE_SECRET || req.headers['x-bridge-secret'] === MATRIX_BRIDGE_SECRET;
+  const bridgeSecret = getBridgeSecret();
+  const isBridgeAuthenticated = !bridgeSecret || req.headers['x-bridge-secret'] === bridgeSecret;
   const senderMxid = isBridgeAuthenticated && sourceType === 'matrix' && typeof sender_mxid === 'string' && /^@[^:]+:.+/.test(sender_mxid.trim())
     ? sender_mxid.trim().slice(0, 255) : null;
   // Derive trustLevel server-side from validated senderMxid — never trust caller-supplied value
