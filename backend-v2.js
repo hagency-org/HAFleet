@@ -3703,6 +3703,13 @@ function formatSenderList(names) {
   return `${names.slice(0, 3).join(', ')}, +${names.length - 3} more`;
 }
 
+function sanitizeForDisplay(text) {
+  if (typeof text !== 'string') return '';
+  return text
+    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]/g, '');
+}
+
 function ensureAgentRuntimeRecord(name) {
   const agentName = normalizeAgentName(name);
   if (!agentName) return null;
@@ -5691,6 +5698,7 @@ async function pushNotify(agentName, msg) {
   } else {
     const isHuman = msg.type === 'human';
     const isGroup = !!msg.group;
+    const safeSummary = sanitizeForDisplay(msg.summary);
 
     if (hasMcp) {
       const checkHint = `FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.`;
@@ -5703,10 +5711,10 @@ async function pushNotify(agentName, msg) {
       notificationKind = needsReply ? 'single_actionable' : 'single_inform';
       requiresInboxCheck = needsReply;
       notification = isHuman
-        ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${checkHint} ${actionHint}.`
+        ? `[NOTIFICATION] From ${msg.from} (human): "${safeSummary}". This is your human operator. ${checkHint} ${actionHint}.`
         : needsReply
-          ? `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${checkHint} ${actionHint}.`
-          : `[NOTIFICATION] From ${msg.from}: "${msg.summary}".`;
+          ? `[NOTIFICATION] From ${msg.from}: "${safeSummary}". ${checkHint} ${actionHint}.`
+          : `[NOTIFICATION] From ${msg.from}: "${safeSummary}".`;
     } else {
       const senderAgent = agents[replyTo];
       const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
@@ -5717,10 +5725,10 @@ async function pushNotify(agentName, msg) {
       notificationKind = needsReply ? 'single_actionable' : 'single_inform';
       requiresInboxCheck = false;
       notification = isHuman
-        ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${actionHint}.`
+        ? `[NOTIFICATION] From ${msg.from} (human): "${safeSummary}". This is your human operator. ${actionHint}.`
         : needsReply
-          ? `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${actionHint}.`
-          : `[NOTIFICATION] From ${msg.from}: "${msg.summary}".`;
+          ? `[NOTIFICATION] From ${msg.from}: "${safeSummary}". ${actionHint}.`
+          : `[NOTIFICATION] From ${msg.from}: "${safeSummary}".`;
     }
   }
 
