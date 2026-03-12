@@ -2373,6 +2373,15 @@ function canAccessPrivilegedSubconsciousDetail(req) {
   return isLocalRequest(req) || hasApiTokenAccess(req);
 }
 
+function requireBearer(req, res, next) {
+  const expectedToken = normalizeOptionalText(process.env.API_TOKEN, 512);
+  if (expectedToken && getBearerToken(req) !== expectedToken) {
+    if (isLocalRequest(req)) return next(); // localhost exempt (Phase 2 removes this)
+    return res.status(401).json({ error: 'bearer token required' });
+  }
+  next();
+}
+
 function redactPathLikeText(value, maxLen = 1200) {
   const text = normalizeOptionalText(value, maxLen);
   if (!text) return null;
@@ -5932,7 +5941,7 @@ app.get('/api/supervisor/control', (_req, res) => {
   return res.json(supervisorService.getControl());
 });
 
-app.post('/api/supervisor/control', (req, res) => {
+app.post('/api/supervisor/control', requireBearer, (req, res) => {
   const body = req.body || {};
   const patch = {};
   let hasPatch = false;
@@ -5980,7 +5989,7 @@ app.post('/api/supervisor/control', (req, res) => {
 });
 
 // ── Server heartbeats ─────────────────────────────────────────────────
-app.post('/api/servers/heartbeat', (req, res) => {
+app.post('/api/servers/heartbeat', requireBearer, (req, res) => {
   const serverId = normalizeServer(req.body?.server);
   if (!serverId) return res.status(400).json({ error: 'server required' });
   const heartbeatResult = applyServerHeartbeat(serverId, req.body || {}, req.ip || req.connection?.remoteAddress || null);
@@ -6020,7 +6029,7 @@ app.post('/api/servers/heartbeat', (req, res) => {
   });
 });
 
-app.post('/api/servers/:id/offline', (req, res) => {
+app.post('/api/servers/:id/offline', requireBearer, (req, res) => {
   const serverId = normalizeServer(req.params.id);
   if (!serverId) return res.status(400).json({ error: 'server required' });
   const server = ensureServerRecord(serverId);
@@ -6058,7 +6067,7 @@ app.post('/api/servers/:id/offline', (req, res) => {
   });
 });
 
-app.post('/api/servers/:id/maintenance', (req, res) => {
+app.post('/api/servers/:id/maintenance', requireBearer, (req, res) => {
   const serverId = normalizeServer(req.params.id);
   if (!serverId) return res.status(400).json({ error: 'server required' });
   const enabled = req.body?.enabled;
@@ -6141,6 +6150,7 @@ setInterval(() => {
 const _tokenFromBody = r => r.body?.from || r.body?.name || '';
 const _tokenFromName = r => r.params?.name || '';
 const _tokenFromAgent = r => r.body?.agent || r.params?.agent || r.query?.agent || '';
+const _tokenFromGraphOwner = r => { const g = taskGraphStore.getGraph(r.params?.id); return g?.owner || ''; };
 app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) => {
   const {
     name,
@@ -6381,7 +6391,7 @@ app.get('/api/agents/:name', (req, res) => {
   res.json({ ...serializeAgent(agent), groups: memberOf });
 });
 
-app.delete('/api/agents/:name', (req, res) => {
+app.delete('/api/agents/:name', requireBearer, (req, res) => {
   const agentName = normalizeAgentName(req.params.name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   const agent = agents[agentName];
@@ -6406,7 +6416,7 @@ app.delete('/api/agents/:name', (req, res) => {
   });
 });
 
-app.post('/api/agents/:name/undelete', (req, res) => {
+app.post('/api/agents/:name/undelete', requireBearer, (req, res) => {
   const agentName = normalizeAgentName(req.params.name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!deletedAgentTombstones[agentName]) return res.status(404).json({ error: 'no tombstone found' });
@@ -6523,7 +6533,7 @@ app.post('/api/agents/:name/runtime', requireAgentToken(_tokenFromName), (req, r
   });
 });
 
-app.post('/api/runtime/compact', (req, res) => {
+app.post('/api/runtime/compact', requireBearer, (req, res) => {
   const agentName = normalizeAgentName(req.body?.agent);
   if (!agentName) return res.status(400).json({ error: 'agent required' });
 
@@ -7467,7 +7477,7 @@ app.get('/api/subconscious/events/:name', (req, res) => {
   return res.json({ ok: true, agent, events: getSubconsciousEvents(agent, limit) });
 });
 
-app.post('/api/task-graphs', (req, res) => {
+app.post('/api/task-graphs', requireBearer, (req, res) => {
   try {
     const created = taskGraphStore.createGraph(req.body || {});
     const graph = taskGraphStore.advanceGraph(created.id) || created;
@@ -7492,13 +7502,13 @@ app.get('/api/task-graphs/:id', (req, res) => {
   return res.json(graph);
 });
 
-app.delete('/api/task-graphs/:id', (req, res) => {
+app.delete('/api/task-graphs/:id', requireBearer, (req, res) => {
   const graph = taskGraphStore.deleteGraph(req.params.id);
   if (!graph) return res.status(404).json({ error: 'task graph not found' });
   return res.json({ ok: true, graph });
 });
 
-app.patch('/api/task-graphs/:id/nodes/:nodeId', (req, res) => {
+app.patch('/api/task-graphs/:id/nodes/:nodeId', requireAgentToken(_tokenFromGraphOwner), (req, res) => {
   try {
     taskGraphStore.updateNode(req.params.id, req.params.nodeId, req.body || {});
     const graph = taskGraphStore.advanceGraph(req.params.id) || taskGraphStore.getGraph(req.params.id);
@@ -7599,7 +7609,7 @@ app.delete('/api/groups/:name', requireBridgeSecret, (req, res) => {
 });
 
 // ── DM ensure (triggers bridge to create Matrix DM room) ─────────────
-app.post('/api/dm/ensure', (req, res) => {
+app.post('/api/dm/ensure', requireBearer, (req, res) => {
   const { agent, human, humanId } = req.body;
   if (!agent || !human) return res.status(400).json({ error: 'agent and human required' });
   const resolvedHumanId = (typeof humanId === 'string' && humanId.trim()) ? humanId.trim() : null;
