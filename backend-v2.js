@@ -3284,6 +3284,9 @@ function summarizeMsg(m) {
     time: relativeTime(m.ts),
     reply_to: m.reply_to || null,
     group: m.group || null,
+    source: m.source || 'api',
+    sourceRoom: m.sourceRoom || null,
+    senderMxid: m.senderMxid || null,
   };
   const normalizedSchema = normalizeMessageSchema(m?.schema);
   if (normalizedSchema.value) out.schema = normalizedSchema.value;
@@ -7601,7 +7604,7 @@ app.get('/api/media/fetch', (req, res) => {
 
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -7609,6 +7612,7 @@ app.post('/api/messages', (req, res) => {
   const sourceRoom = (typeof source_room === 'string' && source_room.trim() && source_room.length <= 255)
     ? source_room.trim()
     : null;
+  const senderMxid = typeof sender_mxid === 'string' ? sender_mxid.trim().slice(0, 255) : null;
   // Normalize literal \n (two chars) to actual newlines — some agents double-escape them
   const normNl = s => s.replace(/\\n/g, '\n');
   const rawSummary = typeof summary === 'string' ? normNl(summary) : '';
@@ -7755,6 +7759,7 @@ app.post('/api/messages', (req, res) => {
     reply_to: reply_to || null,
     source: source || 'api',
     sourceRoom,
+    senderMxid,
   };
   if (normalizedAttachments.length > 0) {
     msg.attachments = normalizedAttachments;

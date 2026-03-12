@@ -1,0 +1,110 @@
+import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import request from 'supertest';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import os from 'os';
+import path from 'path';
+import { pathToFileURL } from 'url';
+
+function writeJson(filePath, value) {
+  writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+describe('provenance metadata (5.8.3 Layer 1)', () => {
+  let runtimeDir;
+  let app;
+
+  beforeAll(async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-provenance-'));
+    const dataDir = path.join(runtimeDir, 'data');
+    mkdirSync(dataDir, { recursive: true });
+    writeJson(path.join(dataDir, 'agents.json'), {
+      alice: { name: 'alice', type: 'agent', kind: 'agent', online: false },
+    });
+    writeJson(path.join(dataDir, 'groups.json'), {});
+    writeJson(path.join(dataDir, 'messages.json'), []);
+    writeJson(path.join(dataDir, 'cursors.json'), {});
+    writeJson(path.join(dataDir, 'servers.json'), {});
+    writeJson(path.join(dataDir, 'agent_runtime.json'), {});
+    writeJson(path.join(dataDir, 'local_activity_sweep.json'), { selectionCursor: 0 });
+
+    process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+    process.env.SUPERVISOR_ENABLED = 'false';
+    process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
+
+    const backendUrl = pathToFileURL(path.resolve('backend-v2.js')).href;
+    const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    ({ app } = await import(`${backendUrl}?provenance-test=${cacheBust}`));
+  });
+
+  afterAll(() => {
+    rmSync(runtimeDir, { recursive: true, force: true });
+  });
+
+  test('Matrix message carries senderMxid through to inbox summary', async () => {
+    // Post a message with sender_mxid (as bridge would)
+    const postRes = await request(app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alice',
+        type: 'human',
+        summary: 'hello from matrix',
+        full: 'hello from matrix',
+        source: 'matrix',
+        source_room: '!room1:matrix.test',
+        sender_mxid: '@human:matrix.test',
+      });
+    expect(postRes.status).toBe(200);
+    expect(postRes.body.ok).toBe(true);
+
+    // Read inbox and verify provenance fields
+    const inboxRes = await request(app).get('/api/inbox/alice');
+    expect(inboxRes.status).toBe(200);
+    const msg = inboxRes.body.dm.find(m => m.summary === 'hello from matrix');
+    expect(msg).toBeDefined();
+    expect(msg.source).toBe('matrix');
+    expect(msg.sourceRoom).toBe('!room1:matrix.test');
+    expect(msg.senderMxid).toBe('@human:matrix.test');
+  });
+
+  test('API-origin message has senderMxid=null', async () => {
+    const postRes = await request(app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alice',
+        type: 'inform',
+        summary: 'api origin message',
+        full: 'body',
+      });
+    expect(postRes.status).toBe(200);
+
+    const inboxRes = await request(app).get('/api/inbox/alice');
+    expect(inboxRes.status).toBe(200);
+    const msg = inboxRes.body.dm.find(m => m.summary === 'api origin message');
+    expect(msg).toBeDefined();
+    expect(msg.source).toBe('api');
+    expect(msg.sourceRoom).toBeNull();
+    expect(msg.senderMxid).toBeNull();
+  });
+
+  test('sender_mxid is truncated at 255 chars', async () => {
+    const longMxid = '@' + 'a'.repeat(300) + ':matrix.test';
+    const postRes = await request(app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alice',
+        type: 'inform',
+        summary: 'truncation test',
+        full: 'body',
+        sender_mxid: longMxid,
+      });
+    expect(postRes.status).toBe(200);
+
+    const inboxRes = await request(app).get('/api/inbox/alice');
+    const msg = inboxRes.body.dm.find(m => m.summary === 'truncation test');
+    expect(msg.senderMxid).toBeDefined();
+    expect(msg.senderMxid.length).toBeLessThanOrEqual(255);
+  });
+});

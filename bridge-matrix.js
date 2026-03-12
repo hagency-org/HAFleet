@@ -1891,6 +1891,7 @@ export class MatrixBridge {
         source: 'matrix',
         source_room: roomId,
         target_type: 'agent',
+        sender_mxid: senderId,
       });
       if (eventId && result?.id) this.rememberMatrixEvent(eventId, result.id);
     } else if (groupName) {
@@ -1912,6 +1913,7 @@ export class MatrixBridge {
         reply_to: replyTo,
         source: 'matrix',
         source_room: roomId,
+        sender_mxid: senderId,
       });
       if (eventId && result?.id) this.rememberMatrixEvent(eventId, result.id);
     }
