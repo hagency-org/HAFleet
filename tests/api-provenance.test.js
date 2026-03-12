@@ -30,6 +30,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
     process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
     process.env.SUPERVISOR_ENABLED = 'false';
     process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
+    process.env.MATRIX_OPERATOR_MXIDS = '@ops:matrix.test';
 
     const backendUrl = pathToFileURL(path.resolve('backend-v2.js')).href;
     const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -148,7 +149,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
     expect(msg.senderMxid).toBeNull();
   });
 
-  test('Matrix message from operator MXID gets trustLevel=operator', async () => {
+  test('Matrix message from operator MXID gets trustLevel=operator (derived server-side)', async () => {
     const postRes = await request(app)
       .post('/api/messages')
       .send({
@@ -159,7 +160,6 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
         full: 'operator trust test',
         source: 'matrix',
         sender_mxid: '@ops:matrix.test',
-        trust_level: 'operator',
       });
     expect(postRes.status).toBe(200);
 
@@ -169,7 +169,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
     expect(msg.trustLevel).toBe('operator');
   });
 
-  test('Matrix message from non-operator gets trustLevel=external', async () => {
+  test('Matrix message from non-operator gets trustLevel=external (derived server-side)', async () => {
     const postRes = await request(app)
       .post('/api/messages')
       .send({
@@ -180,7 +180,6 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
         full: 'external trust test',
         source: 'matrix',
         sender_mxid: '@rando:evil.test',
-        trust_level: 'external',
       });
     expect(postRes.status).toBe(200);
 
@@ -190,21 +189,62 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
     expect(msg.trustLevel).toBe('external');
   });
 
-  test('non-Matrix message has trustLevel=null', async () => {
+  test('forged trust_level=operator with non-operator MXID is overridden to external', async () => {
+    const postRes = await request(app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alice',
+        type: 'human',
+        summary: 'forged trust level',
+        full: 'forged trust level',
+        source: 'matrix',
+        sender_mxid: '@hacker:evil.test',
+        trust_level: 'operator',
+      });
+    expect(postRes.status).toBe(200);
+
+    const inboxRes = await request(app).get('/api/inbox/alice');
+    const msg = inboxRes.body.dm.find(m => m.summary === 'forged trust level');
+    expect(msg).toBeDefined();
+    expect(msg.trustLevel).toBe('external');
+  });
+
+  test('Matrix source with no senderMxid has trustLevel=null', async () => {
     const postRes = await request(app)
       .post('/api/messages')
       .send({
         from: 'system',
         to: 'alice',
         type: 'inform',
-        summary: 'api no trust level',
+        summary: 'matrix no mxid',
+        full: 'body',
+        source: 'matrix',
+        trust_level: 'operator',
+      });
+    expect(postRes.status).toBe(200);
+
+    const inboxRes = await request(app).get('/api/inbox/alice');
+    const msg = inboxRes.body.dm.find(m => m.summary === 'matrix no mxid');
+    expect(msg).toBeDefined();
+    expect(msg.trustLevel).toBeNull();
+  });
+
+  test('non-Matrix message has trustLevel=null even with forged trust_level', async () => {
+    const postRes = await request(app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alice',
+        type: 'inform',
+        summary: 'api forged trust',
         full: 'body',
         trust_level: 'operator',
       });
     expect(postRes.status).toBe(200);
 
     const inboxRes = await request(app).get('/api/inbox/alice');
-    const msg = inboxRes.body.dm.find(m => m.summary === 'api no trust level');
+    const msg = inboxRes.body.dm.find(m => m.summary === 'api forged trust');
     expect(msg).toBeDefined();
     expect(msg.trustLevel).toBeNull();
   });

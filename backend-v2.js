@@ -140,6 +140,9 @@ const MESSAGE_ATTACHMENT_DIR = path.join(DATA_DIR, 'message-attachments');
 mkdirSync(MESSAGE_ATTACHMENT_DIR, { recursive: true });
 const MATRIX_MEDIA_DIR = path.join(DATA_DIR, 'matrix', 'media');
 mkdirSync(MATRIX_MEDIA_DIR, { recursive: true });
+const MATRIX_OPERATOR_MXIDS = new Set(
+  (process.env.MATRIX_OPERATOR_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
+);
 const MEDIA_FETCH_ALLOWED_ROOTS = [
   path.resolve(MESSAGE_ATTACHMENT_DIR),
   path.resolve(MATRIX_MEDIA_DIR),
@@ -7613,7 +7616,7 @@ app.get('/api/media/fetch', (req, res) => {
 
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid, trust_level } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -7623,8 +7626,8 @@ app.post('/api/messages', (req, res) => {
     : null;
   const senderMxid = sourceType === 'matrix' && typeof sender_mxid === 'string' && /^@[^:]+:.+/.test(sender_mxid.trim())
     ? sender_mxid.trim().slice(0, 255) : null;
-  const trustLevel = sourceType === 'matrix' && (trust_level === 'operator' || trust_level === 'external')
-    ? trust_level : null;
+  // Derive trustLevel server-side from validated senderMxid — never trust caller-supplied value
+  const trustLevel = senderMxid ? (MATRIX_OPERATOR_MXIDS.has(senderMxid) ? 'operator' : 'external') : null;
   // Normalize literal \n (two chars) to actual newlines — some agents double-escape them
   const normNl = s => s.replace(/\\n/g, '\n');
   const rawSummary = typeof summary === 'string' ? normNl(summary) : '';
