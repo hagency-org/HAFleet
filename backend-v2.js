@@ -6150,7 +6150,7 @@ setInterval(() => {
 const _tokenFromBody = r => r.body?.from || r.body?.name || '';
 const _tokenFromName = r => r.params?.name || '';
 const _tokenFromAgent = r => r.body?.agent || r.params?.agent || r.query?.agent || '';
-const _tokenFromGraphOwner = r => { const g = taskGraphStore.getGraph(r.params?.id); return g?.owner || ''; };
+const _tokenFromNodeAssignee = r => { const g = taskGraphStore.getGraph(r.params?.id); return g?.nodes?.[r.params?.nodeId]?.assignee || ''; };
 app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) => {
   const {
     name,
@@ -7508,7 +7508,7 @@ app.delete('/api/task-graphs/:id', requireBearer, (req, res) => {
   return res.json({ ok: true, graph });
 });
 
-app.patch('/api/task-graphs/:id/nodes/:nodeId', requireAgentToken(_tokenFromGraphOwner), (req, res) => {
+app.patch('/api/task-graphs/:id/nodes/:nodeId', requireAgentToken(_tokenFromNodeAssignee), (req, res) => {
   try {
     taskGraphStore.updateNode(req.params.id, req.params.nodeId, req.body || {});
     const graph = taskGraphStore.advanceGraph(req.params.id) || taskGraphStore.getGraph(req.params.id);
