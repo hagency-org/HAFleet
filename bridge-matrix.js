@@ -13,6 +13,7 @@ import { promisify } from 'util';
 import EventSource from './lib/eventsource-mini.js';
 import BotCommands from './lib/bot-commands.js';
 import { assertRuntimeDir } from './lib/runtime-dir-guard.js';
+import { NotificationRouter } from './lib/notification-router.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const execFileAsync = promisify(execFile);
@@ -1137,12 +1138,34 @@ export class MatrixBridge {
     this.blockedAlertRooms = new Map(); // agent -> Set(roomId)
     this.startupTs = Date.now();
     this.commands = null;
-    // Warning storm protection
-    this._warningLastSent = new Map();    // dedupe key -> timestamp
-    this._warningCbFails = 0;             // consecutive postWarning failures
-    this._warningCbOpenUntil = 0;         // circuit breaker open until (epoch ms)
+    // Warning storm protection — delegated to NotificationRouter
     this._backendHealthy = true;          // false when backend is unresponsive
     this._reconcileSuspendLogged = false; // log suspension only once
+    this._warningRouter = new NotificationRouter({
+      warning: {
+        cooldownMs: WARNING_DEDUPE_WINDOW_MS,
+        dedupeKeyFn: (p) => p.dedupeKey || 'default',
+        circuitBreaker: { threshold: WARNING_CB_THRESHOLD, cooldownMs: WARNING_CB_COOLDOWN_MS },
+        sinks: ['backend-log'],
+      },
+    }, {
+      'backend-log': (_family, payload) => {
+        return backendApi('POST', '/api/system/info', {
+          summary: payload.summary,
+          full: payload.full || '',
+        }).then(() => {
+          if (!this._backendHealthy) {
+            this._backendHealthy = true;
+            this._reconcileSuspendLogged = false;
+            console.log('Backend reachable again — resuming reconcile polling');
+          }
+        }).catch(e => {
+          console.error('Failed to post warning:', e.message);
+          this._backendHealthy = false;
+          throw e; // re-throw so router CB tracks the failure
+        });
+      },
+    });
   }
 
   callBackendApi(method, routePath, body, contextLabel = '') {
@@ -1394,35 +1417,11 @@ export class MatrixBridge {
   }
 
   postWarning(message, { kind = 'general', scope = '' } = {}) {
-    // 1. Dedupe — same warning family at most once per window
     const dedupeKey = `${kind}:${scope}:${(message.match(/^[A-Za-z ]+/) || [''])[0].trim()}`;
-    const now = Date.now();
-    const lastSent = this._warningLastSent.get(dedupeKey) || 0;
-    if (now - lastSent < WARNING_DEDUPE_WINDOW_MS) return;
-
-    // 2. Circuit breaker — stop hammering a failing backend
-    if (now < this._warningCbOpenUntil) return;
-
-    this._warningLastSent.set(dedupeKey, now);
-    backendApi('POST', '/api/system/info', {
+    this._warningRouter.emit('warning', {
+      dedupeKey,
       summary: `⚠️ Bridge warning: ${message}`,
       full: '',
-    }).then(() => {
-      // Success — reset circuit breaker
-      this._warningCbFails = 0;
-      if (!this._backendHealthy) {
-        this._backendHealthy = true;
-        this._reconcileSuspendLogged = false;
-        console.log('Backend reachable again — resuming reconcile polling');
-      }
-    }).catch(e => {
-      console.error('Failed to post warning:', e.message);
-      this._warningCbFails++;
-      if (this._warningCbFails >= WARNING_CB_THRESHOLD) {
-        this._warningCbOpenUntil = now + WARNING_CB_COOLDOWN_MS;
-        this._backendHealthy = false;
-        console.warn(`Warning circuit breaker open — ${this._warningCbFails} consecutive failures, cooldown ${WARNING_CB_COOLDOWN_MS}ms`);
-      }
     });
   }
 
@@ -2006,7 +2005,6 @@ export class MatrixBridge {
         await backendApi('GET', '/api/agents?view=names', null, 'context=reconcile:health-probe');
         this._backendHealthy = true;
         this._reconcileSuspendLogged = false;
-        this._warningCbFails = 0;
         console.log('Backend reachable again — resuming reconcile polling');
       } catch {
         if (!this._reconcileSuspendLogged) {

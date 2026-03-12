@@ -11,6 +11,7 @@ import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOF
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
 import { assertRuntimeDir, isLocalAgentServer } from './lib/runtime-dir-guard.js';
+import { NotificationRouter } from './lib/notification-router.js';
 import { readV1AgentManifest, defaultAgentchatHomeDir } from './lib/agent-home-v1.js';
 import {
   buildUpstreamClaudeSubconsciousPaths,
@@ -128,42 +129,7 @@ const BLOCKED_INFO_AGGREGATE_WINDOW_MS_RAW = Number.parseInt(process.env.AGENT_B
 const BLOCKED_INFO_AGGREGATE_WINDOW_MS = Number.isFinite(BLOCKED_INFO_AGGREGATE_WINDOW_MS_RAW) && BLOCKED_INFO_AGGREGATE_WINDOW_MS_RAW >= 0
   ? BLOCKED_INFO_AGGREGATE_WINDOW_MS_RAW
   : 30_000;
-const blockedInfoBuffer = { blocked: new Map(), recovered: new Set() };
-let blockedInfoFlushTimer = null;
-
-function flushBlockedInfoBuffer() {
-  blockedInfoFlushTimer = null;
-  const blocked = blockedInfoBuffer.blocked;
-  const recovered = blockedInfoBuffer.recovered;
-  if (blocked.size === 0 && recovered.size === 0) return;
-  const summaryParts = [];
-  const fullParts = [];
-  if (blocked.size > 0) {
-    const entries = [...blocked.entries()].map(([name, d]) => {
-      const label = d.tier === BLOCK_TIER_TRANSIENT ? 'transient' : (d.tier === BLOCK_TIER_SOFT ? 'soft' : 'hard');
-      return `${name} (${label})`;
-    });
-    summaryParts.push(`${blocked.size} blocked: ${entries.join(', ')}`);
-    for (const [, d] of blocked) {
-      if (d.full) fullParts.push(d.full);
-    }
-  }
-  if (recovered.size > 0) {
-    summaryParts.push(`${recovered.size} recovered: ${[...recovered].join(', ')}`);
-  }
-  blocked.clear();
-  recovered.clear();
-  emitSystemInfo(`Agent state summary: ${summaryParts.join('; ')}`, fullParts.join('\n---\n'));
-}
-
-function scheduleBlockedInfoFlush() {
-  if (BLOCKED_INFO_AGGREGATE_WINDOW_MS === 0) {
-    flushBlockedInfoBuffer();
-    return;
-  }
-  if (blockedInfoFlushTimer) return;
-  blockedInfoFlushTimer = setTimeout(flushBlockedInfoBuffer, BLOCKED_INFO_AGGREGATE_WINDOW_MS);
-}
+// agent_blocked aggregation is handled by notificationRouter (initialized after emitSystemInfo)
 
 const AUTO_CLEAR_COOLDOWN_MS = Number.parseInt(process.env.AGENT_AUTO_CLEAR_COOLDOWN_MS || '300000', 10);
 const autoClearLastTs = new Map();
@@ -710,14 +676,6 @@ function normalizeCompactMarker(value) {
   return 'unknown';
 }
 
-function pruneCompactRuntimeDedupState(now = Date.now()) {
-  if (compactRuntimeAlertAt.size < 2000) return;
-  const cutoff = now - Math.max(AGENT_COMPACT_RUNTIME_DEDUPE_MS * 4, 60_000);
-  for (const [key, ts] of compactRuntimeAlertAt.entries()) {
-    if ((Number(ts) || 0) < cutoff) compactRuntimeAlertAt.delete(key);
-  }
-}
-
 function buildRuntimeCompactEvent(agentName, payload = {}) {
   const now = Date.now();
   const modeRaw = (typeof payload.mode === 'string' && payload.mode.trim()) ? payload.mode.trim().toLowerCase() : 'pattern';
@@ -748,21 +706,14 @@ function emitRuntimeCompactEvent(agentName, payload = {}) {
     ? payload.mode.trim().toLowerCase()
     : 'pattern';
   const mode = modeRaw === 'hook' ? 'hook' : 'pattern';
-  const key = `${agentName}:${marker}:${mode}`;
-  const now = Date.now();
-  const prevTs = Number(compactRuntimeAlertAt.get(key)) || 0;
-  if ((now - prevTs) < AGENT_COMPACT_RUNTIME_DEDUPE_MS) {
+
+  const event = buildRuntimeCompactEvent(agentName, { ...payload, mode, marker });
+  const result = notificationRouter.emit('agent_compact', {
+    agentName, marker, mode, sseEvent: 'agent_compact', sseData: event,
+  });
+  if (!result.accepted) {
     return { ok: true, suppressed: 'dedupe', agent: agentName, marker, mode };
   }
-  compactRuntimeAlertAt.set(key, now);
-  pruneCompactRuntimeDedupState(now);
-
-  const event = buildRuntimeCompactEvent(agentName, {
-    ...payload,
-    mode,
-    marker,
-  });
-  broadcastSSE('agent_compact', event);
   return { ok: true, event };
 }
 
@@ -2575,15 +2526,14 @@ const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
 const MESSAGE_ARCHIVE_LOG = dataPath('messages-archive.jsonl');
 const subconsciousEventsByAgent = new Map(); // agent -> event[]
-const unexpectedOfflineAlertAt = new Map(); // key(agent:reason) -> ts
-const compactRuntimeAlertAt = new Map(); // key(agent:marker:mode) -> ts
 const pendingHumanTargetCache = new Map(); // agent -> { hasPendingHuman, targets }
 const swapAlertState = {
   active: false,
   lastPct: 0,
   lastAlertAt: 0,
 };
-const scopePressureState = new Map(); // agent -> { high:bool, lastAlertAt:number }
+// scopePressureState tracks the high/low state for resource alerts (state-based, not just cooldown)
+const scopePressureState = new Map(); // agent -> { high:bool }
 let localMcpSessionCacheAt = 0;
 let localMcpSessionCache = new Set();
 const agentMachines = new Map(); // agentName -> AgentStateMachine
@@ -3094,12 +3044,6 @@ function isManualDownReason(reason) {
 function maybeEmitUnexpectedOfflineAlert(agentName, reason, context = {}) {
   if (!agentName) return;
   if (isManualDownReason(reason)) return;
-  const now = Date.now();
-  const key = `${agentName}:${reason || 'unknown'}`;
-  const prev = unexpectedOfflineAlertAt.get(key) || 0;
-  if ((now - prev) < UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS) return;
-  unexpectedOfflineAlertAt.set(key, now);
-
   const lines = [
     `Agent: ${agentName}`,
     `Reason: ${reason || 'unknown'}`,
@@ -3107,7 +3051,12 @@ function maybeEmitUnexpectedOfflineAlert(agentName, reason, context = {}) {
     'This looks like an unexpected shutdown/crash. Please intervene manually.',
   ];
   if (context.detail) lines.push(`Detail: ${context.detail}`);
-  emitSystemInfo(`Agent '${agentName}' went offline unexpectedly`, lines.join('\n'));
+  const result = notificationRouter.emit('agent_offline', {
+    agentName, reason: reason || 'unknown',
+    summary: `Agent '${agentName}' went offline unexpectedly`,
+    full: lines.join('\n'),
+  });
+  if (!result.accepted) return;
 }
 
 function ensureInfoGroup() {
@@ -3117,22 +3066,27 @@ function ensureInfoGroup() {
   }
 }
 
-function emitSystemInfo(summary, full = '') {
+function appendSystemInfoLog(event) {
+  try {
+    appendFileSync(SYSTEM_INFO_LOG, JSON.stringify(event) + '\n');
+  } catch (e) {
+    console.error(`Failed to append system info log: ${e.message}`);
+  }
+}
+
+function emitSystemInfo(summary, full = '', alertType = null) {
   ensureInfoGroup();
   const event = {
     id: `sys_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     ts: Date.now(),
     summary,
     full: full || '',
+    alertType: alertType || null,
     source: 'system',
     group: 'info',
     type: 'inform',
   };
-  try {
-    appendFileSync(SYSTEM_INFO_LOG, JSON.stringify(event) + '\n');
-  } catch (e) {
-    console.error(`Failed to append system info log: ${e.message}`);
-  }
+  appendSystemInfoLog(event);
   broadcastSSE('system_info', event);
   return event;
 }
@@ -3148,6 +3102,71 @@ function broadcastSSE(event, data) {
   const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const c of sseClients) c.write(frame);
 }
+
+// ── Notification Router ───────────────────────────────────────────────
+const notificationRouter = new NotificationRouter({
+  agent_blocked: {
+    cooldownMs: BLOCKED_NOTIFICATION_COOLDOWN_MS,
+    aggregateWindowMs: BLOCKED_INFO_AGGREGATE_WINDOW_MS,
+    dedupeKeyFn: (p) => p.agentName || 'unknown',
+    persistedCooldown: {
+      read: (key) => {
+        const rt = agentRuntime[key];
+        return Math.max(0, Number(rt?.lastBlockedNotificationTs) || 0);
+      },
+      write: (key, ts) => {
+        const rt = agentRuntime[key];
+        if (rt && (Number(rt.lastBlockedNotificationTs) || 0) !== ts) {
+          rt.lastBlockedNotificationTs = ts;
+          saveAgentRuntime();
+        }
+      },
+    },
+    aggregateFn: (buffer) => {
+      const blocked = [];
+      const recovered = [];
+      for (const [, p] of buffer) {
+        if (p.recovered) recovered.push(p.agentName);
+        else blocked.push(p);
+      }
+      const parts = [];
+      const fullParts = [];
+      if (blocked.length) {
+        const entries = blocked.map(p => {
+          const label = p.tier === BLOCK_TIER_TRANSIENT ? 'transient' : (p.tier === BLOCK_TIER_SOFT ? 'soft' : 'hard');
+          return `${p.agentName} (${label})`;
+        });
+        parts.push(`${blocked.length} blocked: ${entries.join(', ')}`);
+        for (const p of blocked) { if (p.full) fullParts.push(p.full); }
+      }
+      if (recovered.length) parts.push(`${recovered.length} recovered: ${recovered.join(', ')}`);
+      return { summary: `Agent state summary: ${parts.join('; ')}`, full: fullParts.join('\n---\n') };
+    },
+    sinks: ['log'],
+  },
+  agent_compact: {
+    cooldownMs: AGENT_COMPACT_RUNTIME_DEDUPE_MS,
+    dedupeKeyFn: (p) => `${p.agentName}:${p.marker}:${p.mode}`,
+    sinks: ['sse'],
+  },
+  agent_offline: {
+    cooldownMs: UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS,
+    dedupeKeyFn: (p) => `${p.agentName}:${p.reason || 'unknown'}`,
+    sinks: ['log'],
+  },
+  resource_alert: {
+    cooldownMs: AGENT_SCOPE_ALERT_COOLDOWN_MS,
+    dedupeKeyFn: (p) => p.agentName,
+    sinks: ['log'],
+  },
+}, {
+  log: (_family, payload) => {
+    if (payload.summary) emitSystemInfo(payload.summary, payload.full || '', _family);
+  },
+  sse: (_family, payload) => {
+    if (payload.sseEvent) broadcastSSE(payload.sseEvent, payload.sseData || payload);
+  },
+});
 
 const supervisorService = createSupervisorService({
   getAgents: () => Object.values(agents).filter(isAgentRecord).map(serializeAgent),
@@ -3473,12 +3492,7 @@ function clearDeletedAgentState(agentName) {
   localCompactState.delete(name);
   localRuntimeSignalDigest.delete(name);
   scopePressureState.delete(name);
-  for (const key of [...unexpectedOfflineAlertAt.keys()]) {
-    if (key.startsWith(`${name}:`)) unexpectedOfflineAlertAt.delete(key);
-  }
-  for (const key of [...compactRuntimeAlertAt.keys()]) {
-    if (key.startsWith(`${name}:`)) compactRuntimeAlertAt.delete(key);
-  }
+  notificationRouter.clearAgent(name);
 
   const supervisorCleanup = typeof supervisorService?.removeAgentState === 'function'
     ? supervisorService.removeAgentState(name)
@@ -4154,14 +4168,14 @@ function applyAgentBlockedState(agentName, payload = {}) {
       'State: tmux session present but mcp-server.js process not detected.',
       'Offline reason set to: mcp-missing:auto',
     ].join('\n');
-    emitSystemInfo(`Agent '${agentName}' missing MCP process`, full);
+    emitSystemInfo(`Agent '${agentName}' missing MCP process`, full, 'mcp_missing');
     broadcastSSE('agent_mcp_missing', {
       agent: agentName,
       missingSince: runtime.mcpMissingSince || now,
       server: normalizeServer(payload.server) || normalizeServer(agent?.server) || null,
     });
   } else if (mcpRecovered) {
-    emitSystemInfo(`Agent '${agentName}' MCP process recovered`, `Agent '${agentName}' now has mcp-server.js running inside tmux.`);
+    emitSystemInfo(`Agent '${agentName}' MCP process recovered`, `Agent '${agentName}' now has mcp-server.js running inside tmux.`, 'mcp_recovered');
     broadcastSSE('agent_mcp_recovered', {
       agent: agentName,
       recoveredAt: now,
@@ -4208,9 +4222,6 @@ function dispatchBlockedNotifications(transition) {
     && Number.isFinite(blockedDebounceThreshold)
     && runtime.blockedConsecutiveScans >= blockedDebounceThreshold;
   const becameBlocked = blockedNotificationReady && !prevBlockedNotificationSent;
-  const withinBlockedNotificationCooldown = becameBlocked
-    && BLOCKED_NOTIFICATION_COOLDOWN_MS > 0
-    && (now - Math.max(0, Number(runtime.lastBlockedNotificationTs) || 0)) < BLOCKED_NOTIFICATION_COOLDOWN_MS;
   const severityIncreased = prevBlockedNotificationSent
     && blockedNotificationReady
     && normalizeBlockedTier(tierNow, null) !== null
@@ -4218,22 +4229,7 @@ function dispatchBlockedNotifications(transition) {
     && tierNow > prevBlockedNotifiedTier;
   const recovered = prevBlockedNotificationSent && !blockedNow;
 
-  if ((becameBlocked && !withinBlockedNotificationCooldown) || severityIncreased) {
-    let runtimeChanged = false;
-    if (runtime.blockedNotificationSent !== true) {
-      runtime.blockedNotificationSent = true;
-      runtimeChanged = true;
-    }
-    if (normalizeBlockedTier(runtime.blockedNotifiedTier, null) !== tierNow) {
-      runtime.blockedNotifiedTier = tierNow;
-      runtimeChanged = true;
-    }
-    if ((Number(runtime.lastBlockedNotificationTs) || 0) !== now) {
-      runtime.lastBlockedNotificationTs = now;
-      runtimeChanged = true;
-    }
-    if (runtimeChanged) saveAgentRuntime();
-    const blockedSummary = `Agent '${agentName}' entered blocked state`;
+  if (becameBlocked || severityIncreased) {
     const { hasPendingHuman, targets } = collectBlockedHumanTargets(agentName);
     const fullLines = [
       `Agent: ${agentName}`,
@@ -4243,33 +4239,37 @@ function dispatchBlockedNotifications(transition) {
       `Pending human messages: ${hasPendingHuman ? 'yes' : 'no'}`,
       `Target humans: ${targets.map(t => t.human).join(', ') || 'none'}`,
     ];
-    if (tailNow) {
-      fullLines.push('');
-      fullLines.push('Tail sample:');
-      fullLines.push(tailNow);
+    if (tailNow) { fullLines.push('', 'Tail sample:', tailNow); }
+
+    const result = notificationRouter.emit('agent_blocked', {
+      agentName, tier: tierNow, full: fullLines.join('\n'),
+    }, { bypassCooldown: severityIncreased });
+    if (result.accepted) {
+      let runtimeChanged = false;
+      if (runtime.blockedNotificationSent !== true) {
+        runtime.blockedNotificationSent = true;
+        runtimeChanged = true;
+      }
+      if (normalizeBlockedTier(runtime.blockedNotifiedTier, null) !== tierNow) {
+        runtime.blockedNotifiedTier = tierNow;
+        runtimeChanged = true;
+      }
+      if (runtimeChanged) saveAgentRuntime();
+      broadcastSSE('agent_blocked', {
+        agent: agentName,
+        reason: reasonNow || 'unknown',
+        tier: tierNow,
+        blockedSince: runtime.blockedSince || now,
+        server: serverNow || null,
+        hasPendingHuman,
+        targets,
+      });
     }
-    // Buffer for aggregated summary instead of per-agent system_info flood
-    blockedInfoBuffer.blocked.set(agentName, { tier: tierNow, full: fullLines.join('\n') });
-    blockedInfoBuffer.recovered.delete(agentName);
-    scheduleBlockedInfoFlush();
-    broadcastSSE('agent_blocked', {
-      agent: agentName,
-      reason: reasonNow || 'unknown',
-      tier: tierNow,
-      blockedSince: runtime.blockedSince || now,
-      server: serverNow || null,
-      hasPendingHuman,
-      targets,
-    });
   } else if (recovered) {
-    // Buffer for aggregated summary
-    blockedInfoBuffer.recovered.add(agentName);
-    blockedInfoBuffer.blocked.delete(agentName);
-    scheduleBlockedInfoFlush();
-    broadcastSSE('agent_recovered', {
-      agent: agentName,
-      recoveredAt: now,
-    });
+    notificationRouter.emit('agent_blocked', {
+      agentName, recovered: true,
+    }, { bypassCooldown: true });
+    broadcastSSE('agent_recovered', { agent: agentName, recoveredAt: now });
   }
 
   return runtime;
@@ -4295,7 +4295,8 @@ function setAgentRuleState(agentName, code, active, buildDetail) {
     const detail = typeof buildDetail === 'function' ? buildDetail() : '';
     emitSystemInfo(
       `Agent '${agentName}' rule alert: ${code}`,
-      detail || `Rule ${code} triggered for agent '${agentName}'.`
+      detail || `Rule ${code} triggered for agent '${agentName}'.`,
+      'agent_rule'
     );
   }
 }
@@ -4521,7 +4522,7 @@ function refreshServerLiveness() {
         if (markAgentsOfflineForServer(serverId, `server-offline:${serverId}`, true)) {
           agentsChanged = true;
         }
-        emitSystemInfo(`Remote server '${serverId}' offline`, `Server '${serverId}' heartbeat timed out (> ${HEARTBEAT_TTL_MS}ms). Marked related agents offline.`);
+        emitSystemInfo(`Remote server '${serverId}' offline`, `Server '${serverId}' heartbeat timed out (> ${HEARTBEAT_TTL_MS}ms). Marked related agents offline.`, 'server_offline');
       }
     }
   }
@@ -4996,7 +4997,8 @@ async function sweepLocalSwapPressure() {
           `Swap used: ${usedGb} GiB / ${totalGb} GiB (${usagePctText}%)`,
           `Threshold: ${SWAP_ALERT_THRESHOLD_PCT}%`,
           'System memory pressure is high. Please intervene manually to avoid OOM killing agents.',
-        ].join('\n')
+        ].join('\n'),
+        'swap_high'
       );
     }
     return;
@@ -5009,7 +5011,8 @@ async function sweepLocalSwapPressure() {
       [
         `Swap used: ${usedGb} GiB / ${totalGb} GiB (${usagePctText}%)`,
         `Clear threshold: ${SWAP_ALERT_CLEAR_PCT.toFixed(1)}%`,
-      ].join('\n')
+      ].join('\n'),
+      'swap_clear'
     );
   }
 }
@@ -5150,11 +5153,9 @@ async function sweepAgentScopePressure() {
 
   for (const agentName of localAgentNames) {
     const scope = await readAgentScopeMemory(agentName, panePidMap);
-    const prev = scopePressureState.get(agentName) || { high: false, lastAlertAt: 0 };
+    const prev = scopePressureState.get(agentName) || { high: false };
     if (!scope) {
-      if (prev.high) {
-        scopePressureState.set(agentName, { high: false, lastAlertAt: prev.lastAlertAt });
-      }
+      if (prev.high) scopePressureState.set(agentName, { high: false });
       continue;
     }
 
@@ -5162,27 +5163,25 @@ async function sweepAgentScopePressure() {
     const highNow = ratio >= 1;
 
     if (highNow) {
-      const shouldAlert = !prev.high || (now - prev.lastAlertAt) >= AGENT_SCOPE_ALERT_COOLDOWN_MS;
-      if (shouldAlert) {
-        const summary = `agent=${agentName} unit=${scope.unit} memoryHigh exceeded (${formatBytesGiB(scope.memoryCurrent)}GiB / ${formatBytesGiB(scope.memoryHigh)}GiB, ${(ratio * 100).toFixed(1)}%)`;
-        emitSystemInfo(`Agent '${agentName}' memory high exceeded`, summary);
-        pushResourceAlertToAgent(agentName, summary);
-        scopePressureState.set(agentName, { high: true, lastAlertAt: now });
-      } else if (!prev.high) {
-        scopePressureState.set(agentName, { high: true, lastAlertAt: prev.lastAlertAt });
-      }
+      if (!prev.high) scopePressureState.set(agentName, { high: true });
+      const summary = `agent=${agentName} unit=${scope.unit} memoryHigh exceeded (${formatBytesGiB(scope.memoryCurrent)}GiB / ${formatBytesGiB(scope.memoryHigh)}GiB, ${(ratio * 100).toFixed(1)}%)`;
+      const result = notificationRouter.emit('resource_alert', {
+        agentName,
+        summary: `Agent '${agentName}' memory high exceeded`,
+        full: summary,
+      });
+      if (result.accepted) pushResourceAlertToAgent(agentName, summary);
       continue;
     }
 
     const clearNow = ratio <= AGENT_SCOPE_ALERT_CLEAR_RATIO;
     if (prev.high && clearNow) {
-      emitSystemInfo(
-        `Agent '${agentName}' memory pressure recovered`,
-        `agent=${agentName} unit=${scope.unit} current=${formatBytesGiB(scope.memoryCurrent)}GiB high=${formatBytesGiB(scope.memoryHigh)}GiB (${(ratio * 100).toFixed(1)}%)`
-      );
-      scopePressureState.set(agentName, { high: false, lastAlertAt: prev.lastAlertAt });
-    } else if (prev.high) {
-      scopePressureState.set(agentName, { high: true, lastAlertAt: prev.lastAlertAt });
+      scopePressureState.set(agentName, { high: false });
+      notificationRouter.emit('resource_alert', {
+        agentName,
+        summary: `Agent '${agentName}' memory pressure recovered`,
+        full: `agent=${agentName} unit=${scope.unit} current=${formatBytesGiB(scope.memoryCurrent)}GiB high=${formatBytesGiB(scope.memoryHigh)}GiB (${(ratio * 100).toFixed(1)}%)`,
+      });
     }
   }
 }
@@ -5367,12 +5366,13 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   server.agentCount = liveAgents.length;
 
   if (!wasOnline) {
-    emitSystemInfo(`Remote server '${serverId}' online`, `Server '${serverId}' heartbeat restored. Active sessions=${sessions.length}, agents=${liveAgents.length}.`);
+    emitSystemInfo(`Remote server '${serverId}' online`, `Server '${serverId}' heartbeat restored. Active sessions=${sessions.length}, agents=${liveAgents.length}.`, 'server_online');
   }
   if (lease.takeover) {
     emitSystemInfo(
       `Remote server '${serverId}' heartbeat instance switched`,
-      `Server '${serverId}' lease takeover: reason=${lease.reason}, instanceId=${incomingInstanceId || 'unknown'}, bootTs=${incomingBootTs || 0}.`
+      `Server '${serverId}' lease takeover: reason=${lease.reason}, instanceId=${incomingInstanceId || 'unknown'}, bootTs=${incomingBootTs || 0}.`,
+      'server_takeover'
     );
   }
 
@@ -5915,7 +5915,7 @@ app.post('/api/servers/:id/offline', (req, res) => {
   saveServers();
   if (wasOnline && !maintenance) {
     const detail = (typeof req.body?.reason === 'string' && req.body.reason.trim()) ? req.body.reason.trim() : 'offline';
-    emitSystemInfo(`Remote server '${serverId}' offline`, `Server '${serverId}' reported offline (${detail}).`);
+    emitSystemInfo(`Remote server '${serverId}' offline`, `Server '${serverId}' reported offline (${detail}).`, 'server_offline');
   }
   res.json({
     ok: true,
@@ -8173,7 +8173,7 @@ export {
   mergeHumanMeta,
   normalizeAgentTask,
   serializeAgent,
-  flushBlockedInfoBuffer,
+  notificationRouter,
 };
 
 if (process.argv[1] === __filename) {
