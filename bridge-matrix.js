@@ -2199,9 +2199,13 @@ export class MatrixBridge {
   connectSSE() {
     const url = `${BACKEND_URL}/api/stream`;
     console.log(`Connecting SSE: ${url}`);
+    let currentEs = null;
+    let reconnectTimer = null;
 
     const connect = () => {
+      if (currentEs) { try { currentEs.close(); } catch (_) {} currentEs = null; }
       const es = new EventSource(url);
+      currentEs = es;
       es.on('message', (data) => {
         try {
           const msg = JSON.parse(data);
@@ -2290,8 +2294,13 @@ export class MatrixBridge {
         }
       });
       es.on('error', () => {
+        if (currentEs === es) { try { es.close(); } catch (_) {} currentEs = null; }
+        if (reconnectTimer) return;
         console.error('SSE disconnected, reconnecting in 5s...');
-        setTimeout(connect, 5000);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          connect();
+        }, 5000);
       });
     };
     connect();
