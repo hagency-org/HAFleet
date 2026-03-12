@@ -120,6 +120,47 @@ const BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW = Number.parseInt(process.env.AGENT_B
 const BLOCKED_NOTIFICATION_COOLDOWN_MS = Number.isFinite(BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW)
   ? Math.max(0, BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW)
   : 60000;
+const BLOCKED_INFO_AGGREGATE_WINDOW_MS_RAW = Number.parseInt(process.env.AGENT_BLOCKED_INFO_AGGREGATE_WINDOW_MS || '30000', 10);
+const BLOCKED_INFO_AGGREGATE_WINDOW_MS = Number.isFinite(BLOCKED_INFO_AGGREGATE_WINDOW_MS_RAW) && BLOCKED_INFO_AGGREGATE_WINDOW_MS_RAW >= 0
+  ? BLOCKED_INFO_AGGREGATE_WINDOW_MS_RAW
+  : 30_000;
+const blockedInfoBuffer = { blocked: new Map(), recovered: new Set() };
+let blockedInfoFlushTimer = null;
+
+function flushBlockedInfoBuffer() {
+  blockedInfoFlushTimer = null;
+  const blocked = blockedInfoBuffer.blocked;
+  const recovered = blockedInfoBuffer.recovered;
+  if (blocked.size === 0 && recovered.size === 0) return;
+  const summaryParts = [];
+  const fullParts = [];
+  if (blocked.size > 0) {
+    const entries = [...blocked.entries()].map(([name, d]) => {
+      const label = d.tier === BLOCK_TIER_TRANSIENT ? 'transient' : (d.tier === BLOCK_TIER_SOFT ? 'soft' : 'hard');
+      return `${name} (${label})`;
+    });
+    summaryParts.push(`${blocked.size} blocked: ${entries.join(', ')}`);
+    for (const [, d] of blocked) {
+      if (d.full) fullParts.push(d.full);
+    }
+  }
+  if (recovered.size > 0) {
+    summaryParts.push(`${recovered.size} recovered: ${[...recovered].join(', ')}`);
+  }
+  blocked.clear();
+  recovered.clear();
+  emitSystemInfo(`Agent state summary: ${summaryParts.join('; ')}`, fullParts.join('\n---\n'));
+}
+
+function scheduleBlockedInfoFlush() {
+  if (BLOCKED_INFO_AGGREGATE_WINDOW_MS === 0) {
+    flushBlockedInfoBuffer();
+    return;
+  }
+  if (blockedInfoFlushTimer) return;
+  blockedInfoFlushTimer = setTimeout(flushBlockedInfoBuffer, BLOCKED_INFO_AGGREGATE_WINDOW_MS);
+}
+
 const AUTO_CLEAR_COOLDOWN_MS = Number.parseInt(process.env.AGENT_AUTO_CLEAR_COOLDOWN_MS || '300000', 10);
 const autoClearLastTs = new Map();
 const autoClearPrevReason = new Map();
@@ -4023,7 +4064,10 @@ function dispatchBlockedNotifications(transition) {
       fullLines.push('Tail sample:');
       fullLines.push(tailNow);
     }
-    emitSystemInfo(blockedSummary, fullLines.join('\n'));
+    // Buffer for aggregated summary instead of per-agent system_info flood
+    blockedInfoBuffer.blocked.set(agentName, { tier: tierNow, full: fullLines.join('\n') });
+    blockedInfoBuffer.recovered.delete(agentName);
+    scheduleBlockedInfoFlush();
     broadcastSSE('agent_blocked', {
       agent: agentName,
       reason: reasonNow || 'unknown',
@@ -4034,7 +4078,10 @@ function dispatchBlockedNotifications(transition) {
       targets,
     });
   } else if (recovered) {
-    emitSystemInfo(`Agent '${agentName}' recovered from blocked state`, `Agent '${agentName}' is no longer blocked.`);
+    // Buffer for aggregated summary
+    blockedInfoBuffer.recovered.add(agentName);
+    blockedInfoBuffer.blocked.delete(agentName);
+    scheduleBlockedInfoFlush();
     broadcastSSE('agent_recovered', {
       agent: agentName,
       recoveredAt: now,
@@ -7908,6 +7955,7 @@ export {
   mergeHumanMeta,
   normalizeAgentTask,
   serializeAgent,
+  flushBlockedInfoBuffer,
 };
 
 if (process.argv[1] === __filename) {

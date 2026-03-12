@@ -104,7 +104,7 @@ describe('backend runtime API', () => {
     expect(runtimeAfterSoftSix.alpha.blockedNotificationSent).toBe(true);
     expect(runtimeAfterSoftSix.alpha.blockedNotifiedTier).toBe(1);
     expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
-      "Agent 'alpha' entered blocked state",
+      "Agent state summary: 1 blocked: alpha (soft)",
     ]);
   });
 
@@ -134,7 +134,7 @@ describe('backend runtime API', () => {
     }
 
     expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
-      "Agent 'alpha' entered blocked state",
+      "Agent state summary: 1 blocked: alpha (soft)",
     ]);
 
     const hardFirst = await request(context.app).post('/api/agents/alpha/runtime').send({
@@ -145,7 +145,7 @@ describe('backend runtime API', () => {
     });
     expect(hardFirst.status).toBe(200);
     expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
-      "Agent 'alpha' entered blocked state",
+      "Agent state summary: 1 blocked: alpha (soft)",
     ]);
 
     const hardSecond = await request(context.app).post('/api/agents/alpha/runtime').send({
@@ -156,8 +156,8 @@ describe('backend runtime API', () => {
     });
     expect(hardSecond.status).toBe(200);
     expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
-      "Agent 'alpha' entered blocked state",
-      "Agent 'alpha' entered blocked state",
+      "Agent state summary: 1 blocked: alpha (soft)",
+      "Agent state summary: 1 blocked: alpha (hard)",
     ]);
 
     const sameTierFirst = await request(context.app).post('/api/agents/alpha/runtime').send({
@@ -179,8 +179,8 @@ describe('backend runtime API', () => {
     expect(runtimeAfterHard.alpha.blockedTier).toBe(2);
     expect(runtimeAfterHard.alpha.blockedNotifiedTier).toBe(2);
     expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
-      "Agent 'alpha' entered blocked state",
-      "Agent 'alpha' entered blocked state",
+      "Agent state summary: 1 blocked: alpha (soft)",
+      "Agent state summary: 1 blocked: alpha (hard)",
     ]);
   });
 
@@ -229,8 +229,8 @@ describe('backend runtime API', () => {
     expect(runtimeAfterRecovery.alpha.blockedNotificationSent).toBe(false);
     expect(runtimeAfterRecovery.alpha.blockedNotifiedTier).toBe(null);
     expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
-      "Agent 'alpha' entered blocked state",
-      "Agent 'alpha' recovered from blocked state",
+      "Agent state summary: 1 blocked: alpha (hard)",
+      "Agent state summary: 1 recovered: alpha",
     ]);
   });
 
@@ -291,8 +291,8 @@ describe('backend runtime API', () => {
     expect(runtimeDuringCooldown.alpha.blockedNotificationSent).toBe(false);
     expect(runtimeDuringCooldown.alpha.lastBlockedNotificationTs).toBe(firstNotificationTs);
     expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
-      "Agent 'alpha' entered blocked state",
-      "Agent 'alpha' recovered from blocked state",
+      "Agent state summary: 1 blocked: alpha (hard)",
+      "Agent state summary: 1 recovered: alpha",
     ]);
 
     await new Promise((resolve) => setTimeout(resolve, 1100));
@@ -309,9 +309,9 @@ describe('backend runtime API', () => {
     expect(runtimeAfterCooldown.alpha.blockedNotificationSent).toBe(true);
     expect(runtimeAfterCooldown.alpha.lastBlockedNotificationTs).toBeGreaterThan(firstNotificationTs);
     expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
-      "Agent 'alpha' entered blocked state",
-      "Agent 'alpha' recovered from blocked state",
-      "Agent 'alpha' entered blocked state",
+      "Agent state summary: 1 blocked: alpha (hard)",
+      "Agent state summary: 1 recovered: alpha",
+      "Agent state summary: 1 blocked: alpha (hard)",
     ]);
   });
 
