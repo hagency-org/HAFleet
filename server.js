@@ -2426,17 +2426,51 @@ function getPaneIdleMs(target) {
 
 // Continuously track ALL panes every 2s (independent of queue)
 let paneSnapshotSweepRunning = false;
+
+// Cache offline agent session names to skip useless tmux captures
+let offlineAgentSessions = new Set();
+let offlineAgentCacheTs = 0;
+const OFFLINE_CACHE_TTL_MS = 30_000; // refresh every 30s
+
+async function refreshOfflineAgentCache() {
+  try {
+    const r = await fetch(`${BACKEND_V2_URL}/api/agents`);
+    const agentList = await r.json();
+    const sessions = new Set();
+    for (const a of agentList) {
+      if (a.tmux && a.online === false && isLocalAgentServer(a.server)) {
+        // Extract session name from tmux target (e.g. "agent:0.0" → "agent")
+        const sessionName = String(a.tmux).split(':')[0];
+        if (sessionName) sessions.add(sessionName);
+      }
+    }
+    offlineAgentSessions = sessions;
+    offlineAgentCacheTs = Date.now();
+  } catch {
+    // Keep stale cache on fetch failure
+  }
+}
+
 async function sweepPaneSnapshots() {
   if (paneSnapshotSweepRunning) return;
   paneSnapshotSweepRunning = true;
   try {
+    // Refresh offline cache if stale
+    if (Date.now() - offlineAgentCacheTs > OFFLINE_CACHE_TTL_MS) {
+      await refreshOfflineAgentCache();
+    }
     const { stdout } = await execFileAsyncImpl(
       'tmux', ['list-panes', '-a', '-F', '#{session_name}:#{window_index}.#{pane_index}'],
       { encoding: 'utf-8', timeout: 5000 }
     );
     const raw = stdout.trim();
     const livePanes = new Set(raw.split('\n').filter(Boolean));
-    await Promise.all([...livePanes].map((pane) => updatePaneSnapshot(pane)));
+    // Skip panes belonging to offline agents
+    const activePanes = [...livePanes].filter(pane => {
+      const sessionName = pane.split(':')[0];
+      return !offlineAgentSessions.has(sessionName);
+    });
+    await Promise.all(activePanes.map((pane) => updatePaneSnapshot(pane)));
     // Clean up stale snapshots for panes that no longer exist
     for (const key of paneSnapshots.keys()) {
       if (!livePanes.has(key)) paneSnapshots.delete(key);
