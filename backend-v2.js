@@ -7863,15 +7863,41 @@ export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
   if (serverInstance) return serverInstance;
   installStartupHooks();
   startBackgroundLoops();
-  serverInstance = app.listen(port, host, () => {
-    runAsyncSweep('sweepLocalActivityDurations', sweepLocalActivityDurations, 'localActivity');
-    runAsyncSweep('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap');
-    runAsyncSweep('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope');
-    supervisorService.start();
-    console.log(`Agent Chat v2 backend listening on http://${host}:${port}`);
-    const agentCount = Object.values(agents).filter(isAgentRecord).length;
-    console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);
-  });
+
+  const MAX_LISTEN_RETRIES = 10;
+  let listenAttempt = 0;
+
+  function tryListen() {
+    const server = app.listen(port, host);
+    server.on('listening', () => {
+      serverInstance = server;
+      runAsyncSweep('sweepLocalActivityDurations', sweepLocalActivityDurations, 'localActivity');
+      runAsyncSweep('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap');
+      runAsyncSweep('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope');
+      supervisorService.start();
+      console.log(`Agent Chat v2 backend listening on http://${host}:${port}`);
+      const agentCount = Object.values(agents).filter(isAgentRecord).length;
+      console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);
+    });
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        listenAttempt++;
+        if (listenAttempt >= MAX_LISTEN_RETRIES) {
+          console.error(`[FATAL] Port ${port} still in use after ${MAX_LISTEN_RETRIES} retries — exiting`);
+          process.exit(1);
+        }
+        const delay = Math.min(30_000, 1000 * Math.pow(2, listenAttempt - 1));
+        console.warn(`[EADDRINUSE] Port ${port} in use — retry ${listenAttempt}/${MAX_LISTEN_RETRIES} in ${delay}ms`);
+        setTimeout(tryListen, delay);
+      } else {
+        console.error(`[FATAL] Server listen error: ${err.message}`);
+        process.exit(1);
+      }
+    });
+    return server;
+  }
+
+  serverInstance = tryListen();
   return serverInstance;
 }
 
