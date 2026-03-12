@@ -7869,7 +7869,7 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
     sourceRoom,
     senderMxid,
     trustLevel,
-    fromId: (typeof from_id === 'string' && from_id.trim()) ? from_id.trim().slice(0, 255)
+    fromId: isBridgeAuthenticated && (typeof from_id === 'string' && from_id.trim()) ? from_id.trim().slice(0, 255)
       : (senderMxid || null),
   };
   if (normalizedAttachments.length > 0) {

@@ -225,12 +225,19 @@ if (!state.trustedManagedRooms) {
       state.trustedManagedRooms[roomId] = { dm: true, addedAt: Date.now() };
     }
   }
+  saveState();
+}
+// Always seed botDmRooms into trustedManagedRooms (handles upgrades where
+// trustedManagedRooms already existed before botDmRoom seeding was added)
+{
+  let seeded = false;
   for (const [human, roomId] of Object.entries(state.botDmRooms || {})) {
     if (roomId && !state.trustedManagedRooms[roomId]) {
       state.trustedManagedRooms[roomId] = { botDm: true, human, addedAt: Date.now() };
+      seeded = true;
     }
   }
-  saveState();
+  if (seeded) saveState();
 }
 
 function normalizeNameKey(value) {
@@ -2890,7 +2897,7 @@ export class MatrixBridge {
       // If human↔agent, invite the human into existing room (idempotent)
       if (key.startsWith('dm:')) {
         const humanName = fromIsAgent ? resolvedToName : resolvedFromName;
-        const agentName = key.slice(3);
+        const agentName = key.split(':')[1];
         const ensured = await this._ensureHumanInviteOrFail(existingRoom, humanName, agentName);
         if (!ensured.ok) return null;
       }
@@ -2919,7 +2926,7 @@ export class MatrixBridge {
         }
         if (key.startsWith('dm:')) {
           const humanName = fromIsAgent ? resolvedToName : resolvedFromName;
-          const agentName = key.slice(3);
+          const agentName = key.split(':')[1];
           // Ensure room name/members are correct (handles legacy SPY rooms) — once per session
           if (!this.upgradedDmRooms.has(roomId)) {
             this.upgradedDmRooms.add(roomId);
