@@ -349,12 +349,16 @@ run_update_check() {
       fi
       LOCAL=$(git rev-parse HEAD 2>/dev/null | tr -d '[:space:]' || true)
       TRACK_REF=""
-      REMOTE=$(git rev-parse origin/main 2>/dev/null || true)
-      if [ -n "$REMOTE" ]; then
-        TRACK_REF="origin/main"
-      else
-        REMOTE=$(git rev-parse origin/master 2>/dev/null || true)
-        [ -n "$REMOTE" ] && TRACK_REF="origin/master"
+      _deploy_branch="${AGENTCHAT_DEPLOY_BRANCH:-}"
+      if [ -n "$_deploy_branch" ]; then
+        REMOTE=$(git rev-parse "origin/$_deploy_branch" 2>/dev/null || true)
+        [ -n "$REMOTE" ] && TRACK_REF="origin/$_deploy_branch"
+      fi
+      if [ -z "$TRACK_REF" ]; then
+        for _b in stable main master; do
+          REMOTE=$(git rev-parse "origin/$_b" 2>/dev/null || true)
+          if [ -n "$REMOTE" ]; then TRACK_REF="origin/$_b"; break; fi
+        done
       fi
       REMOTE=$(echo "$REMOTE" | tr -d '[:space:]')
       if [ -z "$LOCAL" ] || [ -z "$REMOTE" ] || [ -z "$TRACK_REF" ]; then

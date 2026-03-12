@@ -62,7 +62,12 @@ const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAUL
   : 8090;
 const API = process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`;
 const API_TOKEN = (process.env.API_TOKEN || '').trim();
-const AGENT_SERVER = (process.env.AGENT_CHAT_SERVER || '').trim() || os.hostname();
+const AGENT_SERVER = (process.env.AGENT_CHAT_SERVER || '').trim() || 'local';
+const AGENT_TOKEN = (() => {
+  const stateDir = (process.env.AGENTCHAT_AGENT_STATE_DIR || '').trim();
+  if (!stateDir) return '';
+  try { return readFileSync(path.join(stateDir, 'agent-token'), 'utf-8').trim(); } catch { return ''; }
+})();
 const ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.AGENT_CHAT_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
 const ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.AGENT_CHAT_ATTACHMENT_MAX_ITEMS || '8', 10);
 const MEDIA_FETCH_CACHE_DIR = path.resolve('data', 'mcp-media-cache', AGENT_NAME);
@@ -73,6 +78,9 @@ async function api(method, path, body) {
   const opts = { method, headers: {} };
   if (API_TOKEN) {
     opts.headers.Authorization = `Bearer ${API_TOKEN}`;
+  }
+  if (AGENT_TOKEN) {
+    opts.headers['X-Agent-Token'] = AGENT_TOKEN;
   }
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
@@ -396,6 +404,7 @@ async function fetchMediaPathToLocal(sourcePath, hint = {}) {
 
   const opts = { method: 'GET', headers: {} };
   if (API_TOKEN) opts.headers.Authorization = `Bearer ${API_TOKEN}`;
+  if (AGENT_TOKEN) opts.headers['X-Agent-Token'] = AGENT_TOKEN;
   const query = new URLSearchParams({ path: source });
   const res = await fetch(`${API}/api/media/fetch?${query}`, opts);
   if (!res.ok) {

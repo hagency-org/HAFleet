@@ -1,7 +1,7 @@
 import express from 'express';
 import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync, readdirSync, unlinkSync, rmSync } from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
-import { execFile } from 'child_process';
+import { execFile, execSync } from 'child_process';
 import path from 'path';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
@@ -48,6 +48,7 @@ const WEB_BRIDGE_FETCH_TIMEOUT_MS = Number.isFinite(WEB_BRIDGE_FETCH_TIMEOUT_MS_
 const execFileAsync = promisify(execFile);
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const LOCAL_SERVER_ID = (process.env.AGENT_CHAT_SERVER || 'local').trim();
+const LOCAL_GIT_VERSION = (() => { try { return execSync('git rev-parse --short HEAD', { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { return null; } })();
 const USER_UID = (typeof process.getuid === 'function') ? process.getuid() : null;
 const USER_RUNTIME_DIR = Number.isFinite(USER_UID) ? `/run/user/${USER_UID}` : null;
 const USER_DBUS_SESSION_BUS = USER_RUNTIME_DIR ? `unix:path=${USER_RUNTIME_DIR}/bus` : null;
@@ -5489,6 +5490,16 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   server.updatedAt = now;
   server.sourceIp = sourceIp || null;
   server.version = typeof payload.version === 'string' && payload.version.trim() ? payload.version.trim() : (server.version || null);
+  // Version-mismatch detection
+  if (LOCAL_GIT_VERSION && server.version && server.version !== LOCAL_GIT_VERSION) {
+    if (!server.versionMismatchSince) { server.versionMismatchSince = now; }
+    const mismatchAge = now - server.versionMismatchSince;
+    if (mismatchAge > 300_000) { // >5 minutes
+      console.warn(`[version] server '${serverId}' version mismatch: remote=${server.version} local=${LOCAL_GIT_VERSION} (${Math.round(mismatchAge / 60_000)}m)`);
+    }
+  } else {
+    if (server.versionMismatchSince) { server.versionMismatchSince = null; }
+  }
   server.sessions = sessions;
   server.agents = liveAgents;
   server.agentCount = liveAgents.length;
