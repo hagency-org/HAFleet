@@ -143,6 +143,14 @@ mkdirSync(MATRIX_MEDIA_DIR, { recursive: true });
 const MATRIX_OPERATOR_MXIDS = new Set(
   (process.env.MATRIX_OPERATOR_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
+const MATRIX_BRIDGE_SECRET = (process.env.MATRIX_BRIDGE_SECRET || '').trim();
+/** Middleware: reject if bridge secret is configured and caller doesn't match. */
+function requireBridgeSecret(req, res, next) {
+  if (MATRIX_BRIDGE_SECRET && req.headers['x-bridge-secret'] !== MATRIX_BRIDGE_SECRET) {
+    return res.status(403).json({ error: 'bridge secret required' });
+  }
+  next();
+}
 const MEDIA_FETCH_ALLOWED_ROOTS = [
   path.resolve(MESSAGE_ATTACHMENT_DIR),
   path.resolve(MATRIX_MEDIA_DIR),
@@ -7426,7 +7434,7 @@ app.patch('/api/task-graphs/:id/nodes/:nodeId', (req, res) => {
 });
 
 // ── Groups CRUD ───────────────────────────────────────────────────────
-app.post('/api/groups', (req, res) => {
+app.post('/api/groups', requireBridgeSecret, (req, res) => {
   const { name, members } = req.body;
   const groupName = (typeof name === 'string' ? name.trim() : '');
   if (!groupName) return res.status(400).json({ error: 'name required' });
@@ -7457,7 +7465,7 @@ app.get('/api/groups/:name', (req, res) => {
   res.json(group);
 });
 
-app.post('/api/groups/:name/members', (req, res) => {
+app.post('/api/groups/:name/members', requireBridgeSecret, (req, res) => {
   const group = groups[req.params.name];
   if (!group) return res.status(404).json({ error: 'group not found' });
   const { add, remove } = req.body;
@@ -7505,7 +7513,7 @@ app.post('/api/groups/:name/members', (req, res) => {
   res.json({ ok: true, group });
 });
 
-app.delete('/api/groups/:name', (req, res) => {
+app.delete('/api/groups/:name', requireBridgeSecret, (req, res) => {
   if (!groups[req.params.name]) return res.status(404).json({ error: 'group not found' });
   delete groups[req.params.name];
   saveGroups();
@@ -7533,7 +7541,7 @@ app.post('/api/agents/:name/avatar', express.json({ limit: '10mb' }), (req, res)
 });
 
 // ── System info (log-only; does not enter message store) ──────────────
-app.post('/api/system/info', (req, res) => {
+app.post('/api/system/info', requireBridgeSecret, (req, res) => {
   const summary = (typeof req.body?.summary === 'string') ? req.body.summary.trim() : '';
   const full = (typeof req.body?.full === 'string') ? req.body.full : '';
   if (!summary) return res.status(400).json({ error: 'summary required' });
@@ -7625,9 +7633,7 @@ app.post('/api/messages', (req, res) => {
     ? source_room.trim()
     : null;
   // Only accept sender_mxid from authenticated bridge requests (or if no secret is configured)
-  const bridgeSecret = (process.env.MATRIX_BRIDGE_SECRET || '').trim();
-  const callerSecret = req.headers['x-bridge-secret'] || '';
-  const isBridgeAuthenticated = !bridgeSecret || callerSecret === bridgeSecret;
+  const isBridgeAuthenticated = !MATRIX_BRIDGE_SECRET || req.headers['x-bridge-secret'] === MATRIX_BRIDGE_SECRET;
   const senderMxid = isBridgeAuthenticated && sourceType === 'matrix' && typeof sender_mxid === 'string' && /^@[^:]+:.+/.test(sender_mxid.trim())
     ? sender_mxid.trim().slice(0, 255) : null;
   // Derive trustLevel server-side from validated senderMxid — never trust caller-supplied value
