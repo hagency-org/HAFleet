@@ -110,4 +110,41 @@ describe('audit logging', () => {
     expect(entry.summary.server).toBe('relay-test');
     expect(entry.summary.agents).toBe(1);
   });
+
+  test('heartbeat audit uses effective agent count from sessions fallback', async () => {
+    await request(context.app)
+      .post('/api/servers/heartbeat')
+      .send({ server: 'relay-sessions', sessions: ['alpha', 'newbot2'] })
+      .expect(200);
+    const entries = readAuditLog(context.runtimeDir);
+    const entry = entries.reverse().find(e => e.route === '/api/servers/heartbeat' && e.summary.server === 'relay-sessions');
+    expect(entry).toBeDefined();
+    expect(entry.summary.agents).toBe(2);
+  });
+
+  test('runtime audit logs normalized mcpPresent for non-MCP agent', async () => {
+    // Register a codex agent (doesn't expect MCP)
+    await request(context.app)
+      .post('/api/agents')
+      .send({ name: 'codexbot', type: 'codex' })
+      .expect(200);
+    await request(context.app)
+      .post('/api/agents/codexbot/runtime')
+      .send({ blocked: false, reason: null, tail: '', command: 'codex', mcpPresent: false })
+      .expect(200);
+    const entries = readAuditLog(context.runtimeDir);
+    const entry = entries.reverse().find(e => e.route.includes('/codexbot/runtime'));
+    expect(entry).toBeDefined();
+    expect(entry.summary.mcpPresent).toBeNull();
+  });
+
+  test('non-force DELETE creates unregister audit entry', async () => {
+    await request(context.app)
+      .delete('/api/agents/codexbot')
+      .expect(200);
+    const entries = readAuditLog(context.runtimeDir);
+    const entry = entries.reverse().find(e => e.method === 'DELETE' && e.agent === 'codexbot');
+    expect(entry).toBeDefined();
+    expect(entry.summary.action).toBe('unregister');
+  });
 });

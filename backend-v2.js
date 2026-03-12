@@ -4421,6 +4421,7 @@ function ensureServerRecord(serverId) {
       agents: [],
       agentCount: 0,
       sourceIp: null,
+      version: null,
       maintenance: SERVER_MAINTENANCE_IDS.has(serverId),
     };
   }
@@ -5388,6 +5389,7 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   server.online = true;
   server.updatedAt = now;
   server.sourceIp = sourceIp || null;
+  server.version = typeof payload.version === 'string' && payload.version.trim() ? payload.version.trim() : (server.version || null);
   server.sessions = sessions;
   server.agents = liveAgents;
   server.agentCount = liveAgents.length;
@@ -5884,8 +5886,8 @@ app.post('/api/servers/heartbeat', (req, res) => {
   if (!serverId) return res.status(400).json({ error: 'server required' });
   const heartbeatResult = applyServerHeartbeat(serverId, req.body || {}, req.ip || req.connection?.remoteAddress || null);
   refreshServerLiveness();
-  auditLog(req, { summary: { server: serverId, agents: req.body?.agents?.length || 0 } });
   const state = servers[serverId];
+  auditLog(req, { summary: { server: serverId, agents: state?.agentCount || 0 } });
   const maintenance = isServerInMaintenance(serverId, state);
   if (heartbeatResult && heartbeatResult.leaseAccepted === false) {
     return res.status(409).json({
@@ -6388,7 +6390,7 @@ app.post('/api/agents/:name/runtime', (req, res) => {
   });
   const runtime = dispatchBlockedNotifications(transition);
   if (!runtime) return res.status(500).json({ error: 'runtime update failed' });
-  auditLog(req, { agent: agentName, summary: { blocked, reason, mcpPresent, server } });
+  auditLog(req, { agent: agentName, summary: { blocked, reason, mcpPresent: runtime.mcpPresent ?? null, server } });
   res.json({
     ok: true,
     runtime: {
