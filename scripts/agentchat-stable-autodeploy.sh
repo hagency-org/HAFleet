@@ -34,17 +34,53 @@ service_list() {
   done
 }
 
+BACKEND_SERVICE="${AGENTCHAT_BACKEND_SERVICE:-agent-chat-v2}"
+BACKEND_HEALTH_URL="${AGENTCHAT_BACKEND_HEALTH_URL:-http://127.0.0.1:8090/api/agents}"
+BACKEND_HEALTH_TIMEOUT="${AGENTCHAT_BACKEND_HEALTH_TIMEOUT:-30}"
+
+wait_for_backend() {
+  local i
+  log "Waiting up to ${BACKEND_HEALTH_TIMEOUT}s for backend health..."
+  for i in $(seq "$BACKEND_HEALTH_TIMEOUT"); do
+    if curl -sf "$BACKEND_HEALTH_URL" >/dev/null 2>&1; then
+      log "Backend healthy after ${i}s"
+      return 0
+    fi
+    sleep 1
+  done
+  log "ERROR: backend not healthy after ${BACKEND_HEALTH_TIMEOUT}s"
+  return 1
+}
+
 restart_services() {
-  local s
   local failed=0
+
+  # 1. Restart backend first
+  log "Restarting backend ($BACKEND_SERVICE)..."
+  if ! systemctl restart "$BACKEND_SERVICE"; then
+    log "ERROR: failed to restart backend '$BACKEND_SERVICE'"
+    return 1
+  fi
+
+  # 2. Wait for backend to be healthy before restarting dependents
+  if ! wait_for_backend; then
+    log "ERROR: backend health gate failed; skipping dependent restarts"
+    return 1
+  fi
+
+  # 3. Restart remaining services sequentially (skip backend)
+  local s
   while IFS= read -r s; do
     [ -n "$s" ] || continue
+    [ "$s" = "$BACKEND_SERVICE" ] && continue
+    log "Restarting $s..."
     if ! systemctl restart "$s"; then
       log "ERROR: failed to restart service '$s'"
       failed=1
     fi
   done < <(service_list)
 
+  # 4. Verify all services are active
   while IFS= read -r s; do
     [ -n "$s" ] || continue
     if ! systemctl is-active --quiet "$s"; then
