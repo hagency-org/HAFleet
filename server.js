@@ -503,7 +503,7 @@ app.get('/api/agents/status', async (_req, res) => {
             activeDurationSec: Number.isFinite(Number(a.activeDurationSec)) ? Math.max(0, Number(a.activeDurationSec)) : 0,
             idleDurationSec: Number.isFinite(Number(a.idleDurationSec)) ? Math.max(0, Number(a.idleDurationSec)) : 0,
             lastTmuxActivitySec: Number.isFinite(Number(a.lastTmuxActivitySec)) ? Math.max(0, Number(a.lastTmuxActivitySec)) : 0,
-            alive: true, remote: true, type: a.type || 'agent', server: a.server || null,
+            alive: true, remote: true, type: a.type || 'agent', server: a.server || null, environment: a.environment || 'live',
           };
         }
         const idleMs = getPaneIdleMs(a.tmux);
@@ -528,6 +528,7 @@ app.get('/api/agents/status', async (_req, res) => {
           remote: false,
           type: a.type || 'agent',
           server: a.server || null,
+          environment: a.environment || 'live',
         };
       });
     res.json(result);
