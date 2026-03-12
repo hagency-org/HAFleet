@@ -6017,6 +6017,7 @@ app.get('/api/servers', (_req, res) => {
       sourceIp: s.sourceIp || null,
       relayInstanceId: normalizeRelayInstanceId(s.relayInstanceId),
       relayBootTs: normalizeRelayBootTs(s.relayBootTs) || null,
+      version: s.version || null,
     }))
     .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
   res.json(rows);
