@@ -70,6 +70,9 @@ const MATRIX_TRUSTED_ROOM_IDS = new Set(
 const MATRIX_TRUSTED_INVITER_MXIDS = new Set(
   (process.env.MATRIX_TRUSTED_INVITER_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
+const MATRIX_OPERATOR_MXIDS = new Set(
+  (process.env.MATRIX_OPERATOR_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
+);
 
 mkdirSync(DATA_DIR, { recursive: true });
 mkdirSync(MEDIA_DIR, { recursive: true });
@@ -789,8 +792,11 @@ async function setCustomAgentAvatar(agentName, imageBuffer, mimeType) {
 }
 
 // ── Backend API helpers ───────────────────────────────────────────────
+const MATRIX_BRIDGE_SECRET = (process.env.MATRIX_BRIDGE_SECRET || '').trim();
+
 async function backendApi(method, path, body, contextLabel = '') {
   const opts = { method, headers: {}, signal: AbortSignal.timeout(BACKEND_FETCH_TIMEOUT_MS) };
+  if (MATRIX_BRIDGE_SECRET) opts.headers['X-Bridge-Secret'] = MATRIX_BRIDGE_SECRET;
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
@@ -1891,6 +1897,8 @@ export class MatrixBridge {
         source: 'matrix',
         source_room: roomId,
         target_type: 'agent',
+        sender_mxid: senderId,
+        trust_level: MATRIX_OPERATOR_MXIDS.has(senderId) ? 'operator' : 'external',
       });
       if (eventId && result?.id) this.rememberMatrixEvent(eventId, result.id);
     } else if (groupName) {
@@ -1912,6 +1920,8 @@ export class MatrixBridge {
         reply_to: replyTo,
         source: 'matrix',
         source_room: roomId,
+        sender_mxid: senderId,
+        trust_level: MATRIX_OPERATOR_MXIDS.has(senderId) ? 'operator' : 'external',
       });
       if (eventId && result?.id) this.rememberMatrixEvent(eventId, result.id);
     }

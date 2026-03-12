@@ -140,6 +140,9 @@ const MESSAGE_ATTACHMENT_DIR = path.join(DATA_DIR, 'message-attachments');
 mkdirSync(MESSAGE_ATTACHMENT_DIR, { recursive: true });
 const MATRIX_MEDIA_DIR = path.join(DATA_DIR, 'matrix', 'media');
 mkdirSync(MATRIX_MEDIA_DIR, { recursive: true });
+const MATRIX_OPERATOR_MXIDS = new Set(
+  (process.env.MATRIX_OPERATOR_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
+);
 const MEDIA_FETCH_ALLOWED_ROOTS = [
   path.resolve(MESSAGE_ATTACHMENT_DIR),
   path.resolve(MATRIX_MEDIA_DIR),
@@ -3284,6 +3287,10 @@ function summarizeMsg(m) {
     time: relativeTime(m.ts),
     reply_to: m.reply_to || null,
     group: m.group || null,
+    source: m.source || 'api',
+    sourceRoom: m.sourceRoom || null,
+    senderMxid: m.senderMxid || null,
+    trustLevel: m.trustLevel || null,
   };
   const normalizedSchema = normalizeMessageSchema(m?.schema);
   if (normalizedSchema.value) out.schema = normalizedSchema.value;
@@ -5685,7 +5692,11 @@ async function pushNotify(agentName, msg) {
     hasRequestUnread = hasRequest;
     notificationKind = actionableUnread ? 'merged_unread_actionable' : 'merged_unread_inform';
     requiresInboxCheck = hasMcp && actionableUnread;
-    const humanHint = hasHuman ? ' This includes messages from your human operator.' : '';
+    const hasOperatorHuman = unread.some(m => m.type === 'human' && m.trustLevel === 'operator');
+    const hasNonMatrixHuman = unread.some(m => m.type === 'human' && m.source !== 'matrix');
+    const humanHint = hasHuman
+      ? (hasOperatorHuman || hasNonMatrixHuman ? ' This includes messages from your human operator.' : ' This includes human messages (via Matrix).')
+      : '';
     const processHint = hasMcp
       ? ' FIRST ACTION: call check_inbox() now. Read ALL messages there before doing anything else. DO ALL JOBS before replying. After ALL WORK is done, send required replies.'
       : ' Read ALL messages first. DO ALL JOBS before replying. After ALL WORK is done, send required replies.';
@@ -5699,6 +5710,10 @@ async function pushNotify(agentName, msg) {
     const isHuman = msg.type === 'human';
     const isGroup = !!msg.group;
     const safeSummary = sanitizeForDisplay(msg.summary);
+    const isMatrix = msg.source === 'matrix';
+    const isOperator = msg.trustLevel === 'operator';
+    const humanTag = isHuman ? (isMatrix && !isOperator ? ' (via Matrix)' : ' (human)') : '';
+    const operatorHint = isHuman && (isOperator || !isMatrix) ? ' This is your human operator.' : '';
 
     if (hasMcp) {
       const checkHint = `FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.`;
@@ -5711,7 +5726,7 @@ async function pushNotify(agentName, msg) {
       notificationKind = needsReply ? 'single_actionable' : 'single_inform';
       requiresInboxCheck = needsReply;
       notification = isHuman
-        ? `[NOTIFICATION] From ${msg.from} (human): "${safeSummary}". This is your human operator. ${checkHint} ${actionHint}.`
+        ? `[NOTIFICATION] From ${msg.from}${humanTag}: "${safeSummary}".${operatorHint} ${checkHint} ${actionHint}.`
         : needsReply
           ? `[NOTIFICATION] From ${msg.from}: "${safeSummary}". ${checkHint} ${actionHint}.`
           : `[NOTIFICATION] From ${msg.from}: "${safeSummary}".`;
@@ -5725,7 +5740,7 @@ async function pushNotify(agentName, msg) {
       notificationKind = needsReply ? 'single_actionable' : 'single_inform';
       requiresInboxCheck = false;
       notification = isHuman
-        ? `[NOTIFICATION] From ${msg.from} (human): "${safeSummary}". This is your human operator. ${actionHint}.`
+        ? `[NOTIFICATION] From ${msg.from}${humanTag}: "${safeSummary}".${operatorHint} ${actionHint}.`
         : needsReply
           ? `[NOTIFICATION] From ${msg.from}: "${safeSummary}". ${actionHint}.`
           : `[NOTIFICATION] From ${msg.from}: "${safeSummary}".`;
@@ -7601,7 +7616,7 @@ app.get('/api/media/fetch', (req, res) => {
 
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -7609,6 +7624,14 @@ app.post('/api/messages', (req, res) => {
   const sourceRoom = (typeof source_room === 'string' && source_room.trim() && source_room.length <= 255)
     ? source_room.trim()
     : null;
+  // Only accept sender_mxid from authenticated bridge requests (or if no secret is configured)
+  const bridgeSecret = (process.env.MATRIX_BRIDGE_SECRET || '').trim();
+  const callerSecret = req.headers['x-bridge-secret'] || '';
+  const isBridgeAuthenticated = !bridgeSecret || callerSecret === bridgeSecret;
+  const senderMxid = isBridgeAuthenticated && sourceType === 'matrix' && typeof sender_mxid === 'string' && /^@[^:]+:.+/.test(sender_mxid.trim())
+    ? sender_mxid.trim().slice(0, 255) : null;
+  // Derive trustLevel server-side from validated senderMxid — never trust caller-supplied value
+  const trustLevel = senderMxid ? (MATRIX_OPERATOR_MXIDS.has(senderMxid) ? 'operator' : 'external') : null;
   // Normalize literal \n (two chars) to actual newlines — some agents double-escape them
   const normNl = s => s.replace(/\\n/g, '\n');
   const rawSummary = typeof summary === 'string' ? normNl(summary) : '';
@@ -7755,6 +7778,8 @@ app.post('/api/messages', (req, res) => {
     reply_to: reply_to || null,
     source: source || 'api',
     sourceRoom,
+    senderMxid,
+    trustLevel,
   };
   if (normalizedAttachments.length > 0) {
     msg.attachments = normalizedAttachments;

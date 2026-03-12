@@ -47,6 +47,64 @@ describe('push relay dispatch', () => {
     expect(text).toContain('send_message(to="human-op"');
   });
 
+  test('Matrix external human message uses "(via Matrix)" without operator claim', async () => {
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'human-op', tmux: 'human-op:0.0' }],
+      mcpSessions: ['alpha'],
+    });
+
+    const text = await buildNotification('alpha', {
+      from: 'human-op',
+      type: 'human',
+      summary: 'hello from matrix',
+      source: 'matrix',
+      trustLevel: 'external',
+    });
+
+    expect(text).toContain('(via Matrix)');
+    expect(text).not.toContain('human operator');
+    expect(text).not.toContain('(human)');
+  });
+
+  test('Matrix operator human message uses "(human)" with operator claim', async () => {
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'human-op', tmux: 'human-op:0.0' }],
+      mcpSessions: ['alpha'],
+    });
+
+    const text = await buildNotification('alpha', {
+      from: 'human-op',
+      type: 'human',
+      summary: 'hello from operator',
+      source: 'matrix',
+      trustLevel: 'operator',
+    });
+
+    expect(text).toContain('(human)');
+    expect(text).toContain('human operator');
+    expect(text).not.toContain('(via Matrix)');
+  });
+
+  test('API human message retains operator claim', async () => {
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'human-op', tmux: 'human-op:0.0' }],
+      mcpSessions: [],
+    });
+
+    const text = await buildNotification('alpha', {
+      from: 'human-op',
+      type: 'human',
+      summary: 'hello from api',
+    });
+
+    expect(text).toContain('(human)');
+    expect(text).toContain('human operator');
+    expect(text).not.toContain('(via Matrix)');
+  });
+
   test('routes to local panes and deduplicates repeated deliveries', async () => {
     const delivered = [];
     seedRelayState({
