@@ -2219,3 +2219,18 @@ Captured current operating model (dev/live split, stable auto deploy watcher), s
   - synced `docs/plan.md` / `docs/progress.md`
   - rewritten `docs/projects.md`
   - `handoff.md` that records the migration failures and the intended cutover
+
+## [2026-03-12 10:31] DONE — accepted field-convergence implementation and re-synced coordinator 1.0 docs
+- Accepted `agentchat-develop`'s smallest field-convergence slice after checking the served dev page and implementation surface:
+  - `Project Scope` removed from the editable surface
+  - `Human Notes` removed from the editable surface
+  - `Manual Guidance` relabeled to canonical `Guidance`
+  - `Owner` preserved as first-class ownership metadata
+  - `Identity` kept as a one-line external-facing description
+- Kept the accepted boundary narrow:
+  - no Matrix work
+  - no supervisor runtime work
+  - no subconscious runtime/injection change
+  - no broad page redesign
+- Re-synced the latest worker docs into the prepared `/home/shisui/.agentchat/agents/agent_ac-topleader/workdir/` home so the future launcher-based cutover does not boot from stale coordination files.
+- The next structural execution lane is no longer field convergence; it moves to recurring `supervisor-tmuxlaunchfailed` residue triage while the worker migration lane remains prepared but uncut over.
