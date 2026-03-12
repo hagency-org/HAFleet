@@ -646,15 +646,20 @@ async function handleMessage(raw) {
   }
 }
 
+let currentEs = null;
 function connectSse() {
+  // Clean up previous connection (timers, socket)
+  if (currentEs) { try { currentEs.close(); } catch (_) {} currentEs = null; }
   const streamUrl = `${API_BASE}/api/stream`;
   console.log(`[push-relay] connecting ${streamUrl} (server=${SERVER_ID})`);
   const es = new EventSource(streamUrl, { headers: authHeaders });
+  currentEs = es;
   es.on('message', (raw) => {
     handleMessage(raw).catch((e) => console.error(`[push-relay] message handling failed: ${e.message}`));
   });
   es.on('error', (e) => {
     console.error(`[push-relay] SSE error: ${e.message}`);
+    if (currentEs === es) { try { es.close(); } catch (_) {} currentEs = null; }
     if (reconnectTimer) return;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
@@ -743,6 +748,7 @@ export {
   detectBlockedReason,
   evaluateAgentRouting,
   handleMessage,
+  main,
   messageRecipients,
   resetRelayState,
   seedRelayState,

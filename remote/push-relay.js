@@ -25,4 +25,10 @@ try {
   corePath = localCore;
 }
 
-await import(pathToFileURL(path.resolve(corePath)).href);
+const core = await import(pathToFileURL(path.resolve(corePath)).href);
+if (typeof core.main === 'function') {
+  core.main().catch((e) => {
+    console.error(`[push-relay] startup error: ${e?.message || e}`);
+    process.exit(1);
+  });
+}

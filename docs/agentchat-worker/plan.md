@@ -2,13 +2,13 @@
 Coordinate the next clean execution phase after the live incident wave. Acceptance criteria:
 - keep worker in chief-coordinator mode: no direct coding/investigation work by worker
 - explicitly track executor availability (`agentchat-develop`, `agentchat-aduit`, `Yato`) and repair lanes when they silently disappear
-- resume the accepted field-convergence lane now that Agent Detail task/Internals takeover has been accepted and closed
+- close the accepted field-convergence lane and treat its semantics as the new baseline for agent text surfaces
 - add and preserve the `agentchat-worker` 1.0 migration lane so the worker itself can move into a real v1 home/workdir/project model without losing docs/history
 - keep active reminders in place so execution does not EOS
-- keep the accepted field-convergence implementation narrow: no Matrix, supervisor, subconscious, or broad page redesign work mixed in
+- keep worker-side migration prep in sync with the latest docs until the operator performs the launcher-based cutover to `ac-topleader`
 
 ## Queue
-1. Implement the accepted field-convergence slice: remove `Project Scope` / `Human Notes`; rename `Manual Guidance` to canonical `Guidance`; keep `Owner` first-class and `Identity` one-line and external-facing.
+1. Triage the recurring `supervisor-tmuxlaunchfailed` residue into the smallest truthful framework fix, separate from operator cleanup and post-merge hygiene.
 2. Split agent provisioning from project attachment in the product model:
    - `up-v1` should create/repair the v1 home/runtime contract
    - managed project add/remove should remain a separate control-plane action
