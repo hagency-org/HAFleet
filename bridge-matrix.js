@@ -225,6 +225,11 @@ if (!state.trustedManagedRooms) {
       state.trustedManagedRooms[roomId] = { dm: true, addedAt: Date.now() };
     }
   }
+  for (const [human, roomId] of Object.entries(state.botDmRooms || {})) {
+    if (roomId && !state.trustedManagedRooms[roomId]) {
+      state.trustedManagedRooms[roomId] = { botDm: true, human, addedAt: Date.now() };
+    }
+  }
   saveState();
 }
 
