@@ -3287,6 +3287,7 @@ function summarizeMsg(m) {
     source: m.source || 'api',
     sourceRoom: m.sourceRoom || null,
     senderMxid: m.senderMxid || null,
+    trustLevel: m.trustLevel || null,
   };
   const normalizedSchema = normalizeMessageSchema(m?.schema);
   if (normalizedSchema.value) out.schema = normalizedSchema.value;
@@ -5688,9 +5689,10 @@ async function pushNotify(agentName, msg) {
     hasRequestUnread = hasRequest;
     notificationKind = actionableUnread ? 'merged_unread_actionable' : 'merged_unread_inform';
     requiresInboxCheck = hasMcp && actionableUnread;
+    const hasOperatorHuman = unread.some(m => m.type === 'human' && m.trustLevel === 'operator');
     const hasNonMatrixHuman = unread.some(m => m.type === 'human' && m.source !== 'matrix');
     const humanHint = hasHuman
-      ? (hasNonMatrixHuman ? ' This includes messages from your human operator.' : ' This includes human messages (via Matrix).')
+      ? (hasOperatorHuman || hasNonMatrixHuman ? ' This includes messages from your human operator.' : ' This includes human messages (via Matrix).')
       : '';
     const processHint = hasMcp
       ? ' FIRST ACTION: call check_inbox() now. Read ALL messages there before doing anything else. DO ALL JOBS before replying. After ALL WORK is done, send required replies.'
@@ -5706,8 +5708,9 @@ async function pushNotify(agentName, msg) {
     const isGroup = !!msg.group;
     const safeSummary = sanitizeForDisplay(msg.summary);
     const isMatrix = msg.source === 'matrix';
-    const humanTag = isHuman ? (isMatrix ? ' (via Matrix)' : ' (human)') : '';
-    const operatorHint = isHuman && !isMatrix ? ' This is your human operator.' : '';
+    const isOperator = msg.trustLevel === 'operator';
+    const humanTag = isHuman ? (isMatrix && !isOperator ? ' (via Matrix)' : ' (human)') : '';
+    const operatorHint = isHuman && (isOperator || !isMatrix) ? ' This is your human operator.' : '';
 
     if (hasMcp) {
       const checkHint = `FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.`;
@@ -7610,7 +7613,7 @@ app.get('/api/media/fetch', (req, res) => {
 
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid, trust_level } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -7620,6 +7623,8 @@ app.post('/api/messages', (req, res) => {
     : null;
   const senderMxid = sourceType === 'matrix' && typeof sender_mxid === 'string' && /^@[^:]+:.+/.test(sender_mxid.trim())
     ? sender_mxid.trim().slice(0, 255) : null;
+  const trustLevel = sourceType === 'matrix' && (trust_level === 'operator' || trust_level === 'external')
+    ? trust_level : null;
   // Normalize literal \n (two chars) to actual newlines — some agents double-escape them
   const normNl = s => s.replace(/\\n/g, '\n');
   const rawSummary = typeof summary === 'string' ? normNl(summary) : '';
@@ -7767,6 +7772,7 @@ app.post('/api/messages', (req, res) => {
     source: source || 'api',
     sourceRoom,
     senderMxid,
+    trustLevel,
   };
   if (normalizedAttachments.length > 0) {
     msg.attachments = normalizedAttachments;

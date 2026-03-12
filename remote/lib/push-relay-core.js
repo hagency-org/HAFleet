@@ -511,8 +511,9 @@ async function buildNotification(agentName, msg) {
   const isHuman = msg.type === 'human';
   const needsReply = msg.type === 'human' || msg.type === 'request';
   const isMatrix = msg.source === 'matrix';
-  const humanTag = isHuman ? (isMatrix ? ' (via Matrix)' : ' (human)') : '';
-  const operatorHint = isHuman && !isMatrix ? ' This is your human operator.' : '';
+  const isOperator = msg.trustLevel === 'operator';
+  const humanTag = isHuman ? (isMatrix && !isOperator ? ' (via Matrix)' : ' (human)') : '';
+  const operatorHint = isHuman && (isOperator || !isMatrix) ? ' This is your human operator.' : '';
   if (hasMcp) {
     const checkHint = 'FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.';
     const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
@@ -536,11 +537,19 @@ function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+function sanitizeForDisplay(text) {
+  if (typeof text !== 'string') return '';
+  return text
+    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]/g, '');
+}
+
 function pushToTmux(target, payload) {
   if (!TMUX_BIN) return false;
+  const safePayload = sanitizeForDisplay(payload);
   const opts = { timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] };
   const sendSequence = (resolvedTarget) => {
-    runTmux(['send-keys', '-l', '-t', resolvedTarget, payload], opts);
+    runTmux(['send-keys', '-l', '-t', resolvedTarget, safePayload], opts);
     sleepMs(INJECT_DELAY_MS);
     runTmux(['send-keys', '-t', resolvedTarget, 'Tab'], opts);
     sleepMs(INJECT_DELAY_MS);
@@ -563,12 +572,12 @@ function pushToTmux(target, payload) {
         console.warn(`[push-relay] tmux inject fallback ${target} -> ${sessionFallback}`);
         return true;
       } catch (fallbackErr) {
-        const preview = String(payload || '').replace(/\s+/g, ' ').slice(0, 120);
+        const preview = String(safePayload || '').replace(/\s+/g, ' ').slice(0, 120);
         console.error(`[push-relay] tmux inject failed for ${target} (fallback ${sessionFallback} failed: ${fallbackErr.message}) payload="${preview}"`);
         return false;
       }
     }
-    const preview = String(payload || '').replace(/\s+/g, ' ').slice(0, 120);
+    const preview = String(safePayload || '').replace(/\s+/g, ' ').slice(0, 120);
     console.error(`[push-relay] tmux inject failed for ${target}: ${e.message} payload="${preview}"`);
     return false;
   }

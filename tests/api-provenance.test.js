@@ -147,4 +147,65 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
     expect(msg).toBeDefined();
     expect(msg.senderMxid).toBeNull();
   });
+
+  test('Matrix message from operator MXID gets trustLevel=operator', async () => {
+    const postRes = await request(app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alice',
+        type: 'human',
+        summary: 'operator trust test',
+        full: 'operator trust test',
+        source: 'matrix',
+        sender_mxid: '@ops:matrix.test',
+        trust_level: 'operator',
+      });
+    expect(postRes.status).toBe(200);
+
+    const inboxRes = await request(app).get('/api/inbox/alice');
+    const msg = inboxRes.body.dm.find(m => m.summary === 'operator trust test');
+    expect(msg).toBeDefined();
+    expect(msg.trustLevel).toBe('operator');
+  });
+
+  test('Matrix message from non-operator gets trustLevel=external', async () => {
+    const postRes = await request(app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alice',
+        type: 'human',
+        summary: 'external trust test',
+        full: 'external trust test',
+        source: 'matrix',
+        sender_mxid: '@rando:evil.test',
+        trust_level: 'external',
+      });
+    expect(postRes.status).toBe(200);
+
+    const inboxRes = await request(app).get('/api/inbox/alice');
+    const msg = inboxRes.body.dm.find(m => m.summary === 'external trust test');
+    expect(msg).toBeDefined();
+    expect(msg.trustLevel).toBe('external');
+  });
+
+  test('non-Matrix message has trustLevel=null', async () => {
+    const postRes = await request(app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alice',
+        type: 'inform',
+        summary: 'api no trust level',
+        full: 'body',
+        trust_level: 'operator',
+      });
+    expect(postRes.status).toBe(200);
+
+    const inboxRes = await request(app).get('/api/inbox/alice');
+    const msg = inboxRes.body.dm.find(m => m.summary === 'api no trust level');
+    expect(msg).toBeDefined();
+    expect(msg.trustLevel).toBeNull();
+  });
 });
