@@ -4959,6 +4959,7 @@ async function sweepLocalActivityDurations() {
         }
       }
       if (isEphemeralAuditAgentName(agent.name)) pruneCandidates.add(agent.name);
+      autoClearPrevReason.delete(agent.name);
       continue;
     }
 
@@ -4971,6 +4972,7 @@ async function sweepLocalActivityDurations() {
       if (syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown)) {
         agentsChanged = true;
       }
+      autoClearPrevReason.delete(agent.name);
       continue;
     }
 
@@ -4984,6 +4986,7 @@ async function sweepLocalActivityDurations() {
       if (syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown)) {
         agentsChanged = true;
       }
+      autoClearPrevReason.delete(agent.name);
       continue;
     }
 
