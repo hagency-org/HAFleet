@@ -88,7 +88,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
     expect(msg.senderMxid).toBeNull();
   });
 
-  test('sender_mxid is truncated at 255 chars', async () => {
+  test('sender_mxid is truncated at 255 chars for matrix source', async () => {
     const longMxid = '@' + 'a'.repeat(300) + ':matrix.test';
     const postRes = await request(app)
       .post('/api/messages')
@@ -98,6 +98,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
         type: 'inform',
         summary: 'truncation test',
         full: 'body',
+        source: 'matrix',
         sender_mxid: longMxid,
       });
     expect(postRes.status).toBe(200);
@@ -106,5 +107,44 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
     const msg = inboxRes.body.dm.find(m => m.summary === 'truncation test');
     expect(msg.senderMxid).toBeDefined();
     expect(msg.senderMxid.length).toBeLessThanOrEqual(255);
+  });
+
+  test('API-origin message with forged sender_mxid is stored as null', async () => {
+    const postRes = await request(app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alice',
+        type: 'inform',
+        summary: 'forged mxid attempt',
+        full: 'body',
+        sender_mxid: '@operator:matrix.test',
+      });
+    expect(postRes.status).toBe(200);
+
+    const inboxRes = await request(app).get('/api/inbox/alice');
+    const msg = inboxRes.body.dm.find(m => m.summary === 'forged mxid attempt');
+    expect(msg).toBeDefined();
+    expect(msg.senderMxid).toBeNull();
+  });
+
+  test('invalid MXID format is rejected even from matrix source', async () => {
+    const postRes = await request(app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alice',
+        type: 'inform',
+        summary: 'bad mxid format',
+        full: 'body',
+        source: 'matrix',
+        sender_mxid: 'not-a-valid-mxid',
+      });
+    expect(postRes.status).toBe(200);
+
+    const inboxRes = await request(app).get('/api/inbox/alice');
+    const msg = inboxRes.body.dm.find(m => m.summary === 'bad mxid format');
+    expect(msg).toBeDefined();
+    expect(msg.senderMxid).toBeNull();
   });
 });

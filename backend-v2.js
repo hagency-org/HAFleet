@@ -7618,7 +7618,8 @@ app.post('/api/messages', (req, res) => {
   const sourceRoom = (typeof source_room === 'string' && source_room.trim() && source_room.length <= 255)
     ? source_room.trim()
     : null;
-  const senderMxid = typeof sender_mxid === 'string' ? sender_mxid.trim().slice(0, 255) : null;
+  const senderMxid = sourceType === 'matrix' && typeof sender_mxid === 'string' && /^@[^:]+:.+/.test(sender_mxid.trim())
+    ? sender_mxid.trim().slice(0, 255) : null;
   // Normalize literal \n (two chars) to actual newlines — some agents double-escape them
   const normNl = s => s.replace(/\\n/g, '\n');
   const rawSummary = typeof summary === 'string' ? normNl(summary) : '';
