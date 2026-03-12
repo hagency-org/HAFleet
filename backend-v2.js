@@ -5688,7 +5688,10 @@ async function pushNotify(agentName, msg) {
     hasRequestUnread = hasRequest;
     notificationKind = actionableUnread ? 'merged_unread_actionable' : 'merged_unread_inform';
     requiresInboxCheck = hasMcp && actionableUnread;
-    const humanHint = hasHuman ? ' This includes messages from your human operator.' : '';
+    const hasNonMatrixHuman = unread.some(m => m.type === 'human' && m.source !== 'matrix');
+    const humanHint = hasHuman
+      ? (hasNonMatrixHuman ? ' This includes messages from your human operator.' : ' This includes human messages (via Matrix).')
+      : '';
     const processHint = hasMcp
       ? ' FIRST ACTION: call check_inbox() now. Read ALL messages there before doing anything else. DO ALL JOBS before replying. After ALL WORK is done, send required replies.'
       : ' Read ALL messages first. DO ALL JOBS before replying. After ALL WORK is done, send required replies.';
@@ -5702,6 +5705,9 @@ async function pushNotify(agentName, msg) {
     const isHuman = msg.type === 'human';
     const isGroup = !!msg.group;
     const safeSummary = sanitizeForDisplay(msg.summary);
+    const isMatrix = msg.source === 'matrix';
+    const humanTag = isHuman ? (isMatrix ? ' (via Matrix)' : ' (human)') : '';
+    const operatorHint = isHuman && !isMatrix ? ' This is your human operator.' : '';
 
     if (hasMcp) {
       const checkHint = `FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.`;
@@ -5714,7 +5720,7 @@ async function pushNotify(agentName, msg) {
       notificationKind = needsReply ? 'single_actionable' : 'single_inform';
       requiresInboxCheck = needsReply;
       notification = isHuman
-        ? `[NOTIFICATION] From ${msg.from} (human): "${safeSummary}". This is your human operator. ${checkHint} ${actionHint}.`
+        ? `[NOTIFICATION] From ${msg.from}${humanTag}: "${safeSummary}".${operatorHint} ${checkHint} ${actionHint}.`
         : needsReply
           ? `[NOTIFICATION] From ${msg.from}: "${safeSummary}". ${checkHint} ${actionHint}.`
           : `[NOTIFICATION] From ${msg.from}: "${safeSummary}".`;
@@ -5728,7 +5734,7 @@ async function pushNotify(agentName, msg) {
       notificationKind = needsReply ? 'single_actionable' : 'single_inform';
       requiresInboxCheck = false;
       notification = isHuman
-        ? `[NOTIFICATION] From ${msg.from} (human): "${safeSummary}". This is your human operator. ${actionHint}.`
+        ? `[NOTIFICATION] From ${msg.from}${humanTag}: "${safeSummary}".${operatorHint} ${actionHint}.`
         : needsReply
           ? `[NOTIFICATION] From ${msg.from}: "${safeSummary}". ${actionHint}.`
           : `[NOTIFICATION] From ${msg.from}: "${safeSummary}".`;

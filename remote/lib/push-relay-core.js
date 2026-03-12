@@ -510,12 +510,15 @@ async function buildNotification(agentName, msg) {
   const replyTo = msg.from;
   const isHuman = msg.type === 'human';
   const needsReply = msg.type === 'human' || msg.type === 'request';
+  const isMatrix = msg.source === 'matrix';
+  const humanTag = isHuman ? (isMatrix ? ' (via Matrix)' : ' (human)') : '';
+  const operatorHint = isHuman && !isMatrix ? ' This is your human operator.' : '';
   if (hasMcp) {
     const checkHint = 'FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.';
     const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
     const actionHint = needsReply ? ` ${sendHint}.` : '';
     return isHuman
-      ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${checkHint}${actionHint}`
+      ? `[NOTIFICATION] From ${msg.from}${humanTag}: "${msg.summary}".${operatorHint} ${checkHint}${actionHint}`
       : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${checkHint}${actionHint}`;
   }
 
@@ -524,7 +527,7 @@ async function buildNotification(agentName, msg) {
   const replyHint = `Reply using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
   const actionHint = needsReply ? ` ${replyHint}.` : '';
   return isHuman
-    ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator.${actionHint}`
+    ? `[NOTIFICATION] From ${msg.from}${humanTag}: "${msg.summary}".${operatorHint}${actionHint}`
     : `[NOTIFICATION] From ${msg.from}: "${msg.summary}".${actionHint}`;
 }
 
