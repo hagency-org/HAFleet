@@ -25,7 +25,6 @@ describe('room trust classifier (5.8.1)', () => {
     process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
     process.env.MATRIX_TRUST_MODE = 'audit';
     process.env.MATRIX_TRUSTED_ROOM_IDS = '!allow1:matrix.test,!allow2:matrix.test';
-    process.env.MATRIX_TRUSTED_SPACE_IDS = '!space1:matrix.test';
     process.env.MATRIX_TRUSTED_INVITER_MXIDS = '@admin:matrix.test';
 
     const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
@@ -55,11 +54,6 @@ describe('room trust classifier (5.8.1)', () => {
   test('room with trusted inviter MXID is trusted', () => {
     const result = getRoomTrust('!unknown:matrix.test', { inviterMxid: '@admin:matrix.test' });
     expect(result).toEqual({ trusted: true, reason: 'trusted_inviter' });
-  });
-
-  test('room with trusted parent space is trusted', () => {
-    const result = getRoomTrust('!unknown:matrix.test', { parentSpaceIds: ['!space1:matrix.test'] });
-    expect(result).toEqual({ trusted: true, reason: 'trusted_space' });
   });
 
   test('unknown room without any trust signal is untrusted', () => {

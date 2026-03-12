@@ -67,9 +67,6 @@ const MATRIX_TRUST_MODE = (process.env.MATRIX_TRUST_MODE || 'audit').trim().toLo
 const MATRIX_TRUSTED_ROOM_IDS = new Set(
   (process.env.MATRIX_TRUSTED_ROOM_IDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
-const MATRIX_TRUSTED_SPACE_IDS = new Set(
-  (process.env.MATRIX_TRUSTED_SPACE_IDS || '').split(',').map(s => s.trim()).filter(Boolean)
-);
 const MATRIX_TRUSTED_INVITER_MXIDS = new Set(
   (process.env.MATRIX_TRUSTED_INVITER_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
@@ -856,15 +853,10 @@ function groupForRoom(roomId) { return state.roomGroupMap[roomId] || null; }
 function roomForGroup(groupName) { return state.groupRoomMap[groupName] || null; }
 
 // ── Room trust classifier (5.8.1) ───────────────────────────────────
-function getRoomTrust(roomId, { inviterMxid = null, parentSpaceIds = null } = {}) {
+function getRoomTrust(roomId, { inviterMxid = null } = {}) {
   if (MATRIX_TRUSTED_ROOM_IDS.has(roomId)) return { trusted: true, reason: 'allowlist' };
   if (state.trustedManagedRooms?.[roomId]) return { trusted: true, reason: 'managed' };
   if (inviterMxid && MATRIX_TRUSTED_INVITER_MXIDS.has(inviterMxid)) return { trusted: true, reason: 'trusted_inviter' };
-  if (parentSpaceIds) {
-    for (const spaceId of parentSpaceIds) {
-      if (MATRIX_TRUSTED_SPACE_IDS.has(spaceId)) return { trusted: true, reason: 'trusted_space' };
-    }
-  }
   return { trusted: false, reason: 'unknown_room' };
 }
 
@@ -1930,6 +1922,13 @@ export class MatrixBridge {
     // Ignore historical events from before bridge startup
     // But always process m.room.name (needed for mapping rooms bot joins after creation)
     if (event.type !== 'm.room.name' && event.origin_server_ts && event.origin_server_ts < this.startupTs) return;
+
+    // Room trust gate (5.8.1)
+    const eventTrust = getRoomTrust(roomId);
+    if (!eventTrust.trusted) {
+      roomTrustLog('room-event', roomId, eventTrust, `type=${event.type}`);
+      if (MATRIX_TRUST_MODE === 'enforce') return;
+    }
 
     // Handle room creation, membership changes
     if (event.type === 'm.room.name' && event.content?.name) {
