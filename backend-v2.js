@@ -179,13 +179,10 @@ function loadAgentTokens() {
 function checkAgentToken(agentName, req) {
   if (!agentName) return { ok: true };
   const expected = agentTokens.get(agentName);
+  // No token configured → sender is not a managed agent (system, human, bridge);
+  // allow through in all modes — token auth only applies to managed agents.
+  if (!expected) return { ok: true };
   const provided = (req.headers['x-agent-token'] || '').trim();
-  if (!expected) {
-    if (AGENT_TOKEN_MODE === 'hard' && !provided) {
-      return { ok: false, reason: 'no token configured and none provided' };
-    }
-    return { ok: true };
-  }
   if (!provided) return { ok: false, reason: 'token required but not provided' };
   if (provided !== expected) return { ok: false, reason: 'token mismatch' };
   return { ok: true };
