@@ -132,9 +132,9 @@ describe('runtime parity regressions', () => {
     expect(killed).toEqual(['supervisor-orphan', 'supervisor-extra']);
   });
 
-  test('remote MCP auto-registration defaults server to os.hostname()', () => {
+  test('remote MCP auto-registration defaults server to local', () => {
     const source = readFileSync(path.resolve('remote/lib/mcp-server-core.js'), 'utf-8');
-    expect(source).toMatch(/const AGENT_SERVER = \(process\.env\.AGENT_CHAT_SERVER \|\| ''\)\.trim\(\) \|\| os\.hostname\(\);/);
+    expect(source).toMatch(/const AGENT_SERVER = \(process\.env\.AGENT_CHAT_SERVER \|\| ''\)\.trim\(\) \|\| 'local';/);
   });
 
   test('deployment and upstream helpers avoid machine-specific hardcoded home paths', async () => {

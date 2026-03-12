@@ -186,6 +186,32 @@ if [ "$IS_LINUX" = true ]; then
   sudo install -m 0644 "$TMP_UNIT" "$SYSTEMD_UNIT"
   rm -f "$TMP_UNIT"
   trap - EXIT
+
+  # Install remote autodeploy service
+  AUTODEPLOY_SERVICE="agent-chat-remote-autodeploy"
+  AUTODEPLOY_UNIT="/etc/systemd/system/${AUTODEPLOY_SERVICE}.service"
+  if [ -f "$SCRIPT_DIR/push-relay-autodeploy.service" ]; then
+    TMP_AD="$(mktemp)"
+    trap 'rm -f "$TMP_AD"' EXIT
+    sed \
+      -e "s|__USER__|$SERVICE_USER|g" \
+      -e "s|__REPODIR__|$REPO_ROOT|g" \
+      -e "s|__ENV_FILE__|$ENV_FILE|g" \
+      "$SCRIPT_DIR/push-relay-autodeploy.service" > "$TMP_AD"
+    sudo install -m 0644 "$TMP_AD" "$AUTODEPLOY_UNIT"
+    rm -f "$TMP_AD"
+    trap - EXIT
+    echo "  Installed ${AUTODEPLOY_SERVICE} service."
+
+    # Provision sudoers rule so autodeploy (running as agent user) can restart the relay
+    SUDOERS_FILE="/etc/sudoers.d/agentchat-autodeploy"
+    SYSTEMCTL_BIN="$(command -v systemctl)"
+    echo "$SERVICE_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN restart $SERVICE_NAME" \
+      | sudo tee "$SUDOERS_FILE" >/dev/null
+    sudo chmod 0440 "$SUDOERS_FILE"
+    echo "  Provisioned sudoers rule: ${SUDOERS_FILE}"
+  fi
+
   sudo systemctl daemon-reload
   if is_truthy "$AGENT_INSTALL_AUTOSTART"; then
     sudo systemctl enable "$SERVICE_NAME"
@@ -195,6 +221,12 @@ if [ "$IS_LINUX" = true ]; then
     else
       sudo systemctl start "$SERVICE_NAME"
       echo "  Started ${SERVICE_NAME}."
+    fi
+    # Enable + start autodeploy service
+    if [ -f "$AUTODEPLOY_UNIT" ]; then
+      sudo systemctl enable "$AUTODEPLOY_SERVICE"
+      sudo systemctl restart "$AUTODEPLOY_SERVICE"
+      echo "  Started ${AUTODEPLOY_SERVICE}."
     fi
   else
     echo "  Service autostart disabled for this install run (AGENT_INSTALL_AUTOSTART=$AGENT_INSTALL_AUTOSTART)."

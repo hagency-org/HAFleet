@@ -1,0 +1,16 @@
+[Unit]
+Description=Agent Chat Remote Autodeploy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPODIR__
+EnvironmentFile=__ENV_FILE__
+ExecStart=/usr/bin/env bash __REPODIR__/scripts/agentchat-remote-autodeploy.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

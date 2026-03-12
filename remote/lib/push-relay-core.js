@@ -37,6 +37,10 @@ const IDLE_THRESHOLD_SEC = Math.max(1, Math.floor((IDLE_THRESHOLD_MS + 999) / 10
 const MCP_SESSION_CACHE_TTL_MS = Number.parseInt(process.env.PUSH_RELAY_MCP_SESSION_CACHE_TTL_MS || '1000', 10);
 const RELAY_INSTANCE_ID = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 const RELAY_BOOT_TS = Date.now();
+const RELAY_VERSION = (() => {
+  try { return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: path.dirname(__filename), timeout: 3000 }).toString().trim(); }
+  catch { return null; }
+})();
 
 const authHeaders = API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {};
 const localAgents = new Set();
@@ -52,6 +56,8 @@ const compactState = new Map();
 const activityState = new Map();
 const runtimeReportDigest = new Map();
 const skipReasonLastLog = new Map();
+const autoClearLastTs = new Map();
+const AUTO_CLEAR_COOLDOWN_MS = parseInt(process.env.AGENT_AUTO_CLEAR_COOLDOWN_MS || '300000', 10);
 let mcpSessionCacheAt = 0;
 let mcpSessionCache = new Set();
 const mcpMissCount = new Map(); // per-agent consecutive MCP-absent scan count
@@ -319,6 +325,25 @@ async function refreshAgentsSnapshot() {
   }
 }
 
+function injectSlashClear(target) {
+  if (!TMUX_BIN) return false;
+  const opts = { timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] };
+  try {
+    // Escape any partial input first, then send /clear
+    runTmux(['send-keys', '-t', target, 'C-c'], opts);
+    sleepMs(INJECT_DELAY_MS);
+    runTmux(['send-keys', '-t', target, 'C-u'], opts);
+    sleepMs(INJECT_DELAY_MS);
+    runTmux(['send-keys', '-l', '-t', target, '/clear'], opts);
+    sleepMs(INJECT_DELAY_MS);
+    runTmux(['send-keys', '-t', target, 'Enter'], opts);
+    return true;
+  } catch (e) {
+    console.error(`[push-relay] auto-clear inject failed for ${target}: ${e.message}`);
+    return false;
+  }
+}
+
 async function scanBlockedStates() {
   const live = new Set(localAgents);
   const mcpSessions = await getMcpSessionSet(true);
@@ -354,6 +379,21 @@ async function scanBlockedStates() {
     const blocked = Boolean(reason);
     const prev = blockedState.get(agentName) || { blocked: false, reason: null };
     blockedState.set(agentName, { blocked, reason });
+
+    // Auto-clear: when api-image-error is newly detected, inject /clear to recover
+    if (reason === 'api-image-error' && prev.reason !== 'api-image-error') {
+      const now = Date.now();
+      const lastClear = autoClearLastTs.get(agentName) || 0;
+      if ((now - lastClear) > AUTO_CLEAR_COOLDOWN_MS) {
+        console.warn(`[push-relay] auto-clear: agent ${agentName} stuck on api-image-error, injecting /clear`);
+        if (injectSlashClear(target)) {
+          autoClearLastTs.set(agentName, now);
+        }
+      } else {
+        console.warn(`[push-relay] auto-clear: agent ${agentName} still stuck on api-image-error (cooldown active, last clear ${Math.round((now - lastClear) / 1000)}s ago)`);
+      }
+    }
+
     const prevCompact = compactState.get(agentName) || null;
     if (compact) {
       if (!prevCompact || prevCompact.marker !== compact.marker || prevCompact.signature !== compact.signature) {
@@ -416,6 +456,7 @@ async function sendHeartbeat() {
     body.instanceId = RELAY_INSTANCE_ID;
     body.bootTs = RELAY_BOOT_TS;
   }
+  if (RELAY_VERSION) body.version = RELAY_VERSION;
   try {
     const res = await postJson('/api/servers/heartbeat', body);
     if (!res.ok) {
@@ -505,11 +546,19 @@ async function agentHasMcp(agentName) {
   return (await getMcpSessionSet(false)).has(agentName);
 }
 
+function sanitizeForDisplay(text) {
+  if (typeof text !== 'string') return '';
+  return text
+    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]/g, '');
+}
+
 async function buildNotification(agentName, msg) {
   const hasMcp = await agentHasMcp(agentName);
   const replyTo = msg.from;
   const isHuman = msg.type === 'human';
   const needsReply = msg.type === 'human' || msg.type === 'request';
+  const safeSummary = sanitizeForDisplay(msg.summary);
   const isMatrix = msg.source === 'matrix';
   const isOperator = msg.trustLevel === 'operator';
   const humanTag = isHuman ? (isMatrix && !isOperator ? ' (via Matrix)' : ' (human)') : '';
@@ -519,8 +568,8 @@ async function buildNotification(agentName, msg) {
     const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
     const actionHint = needsReply ? ` ${sendHint}.` : '';
     return isHuman
-      ? `[NOTIFICATION] From ${msg.from}${humanTag}: "${msg.summary}".${operatorHint} ${checkHint}${actionHint}`
-      : `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${checkHint}${actionHint}`;
+      ? `[NOTIFICATION] From ${msg.from}${humanTag}: "${safeSummary}".${operatorHint} ${checkHint}${actionHint}`
+      : `[NOTIFICATION] From ${msg.from}: "${safeSummary}". ${checkHint}${actionHint}`;
   }
 
   const senderAgent = agentsByName.get(replyTo);
@@ -528,20 +577,13 @@ async function buildNotification(agentName, msg) {
   const replyHint = `Reply using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
   const actionHint = needsReply ? ` ${replyHint}.` : '';
   return isHuman
-    ? `[NOTIFICATION] From ${msg.from}${humanTag}: "${msg.summary}".${operatorHint}${actionHint}`
-    : `[NOTIFICATION] From ${msg.from}: "${msg.summary}".${actionHint}`;
+    ? `[NOTIFICATION] From ${msg.from}${humanTag}: "${safeSummary}".${operatorHint}${actionHint}`
+    : `[NOTIFICATION] From ${msg.from}: "${safeSummary}".${actionHint}`;
 }
 
 function sleepMs(ms) {
   if (!Number.isFinite(ms) || ms <= 0) return;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-function sanitizeForDisplay(text) {
-  if (typeof text !== 'string') return '';
-  return text
-    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]/g, '');
 }
 
 function pushToTmux(target, payload) {
@@ -743,6 +785,7 @@ function resetRelayState() {
   activityState.clear();
   runtimeReportDigest.clear();
   skipReasonLastLog.clear();
+  autoClearLastTs.clear();
   mcpMissCount.clear();
   mcpSessionCacheAt = 0;
   mcpSessionCache = new Set();

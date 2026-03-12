@@ -25,7 +25,15 @@ _resolve_script_dir() {
   cd -P "$(dirname "$src")" && pwd
 }
 SCRIPT_DIR="$(_resolve_script_dir)"
-DATA_DIR="$(dirname "$SCRIPT_DIR")/data/agents"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+ENV_FILE="$BASE_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
+RUNTIME_DIR="${AGENT_CHAT_RUNTIME_DIR:-$BASE_DIR}"
+DATA_DIR="$RUNTIME_DIR/data/agents"
 BACKEND_PORT_RAW="${AGENT_CHAT_BACKEND_PORT:-8090}"
 if [[ "$BACKEND_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT_RAW" -gt 0 ]; then
   BACKEND_PORT="$BACKEND_PORT_RAW"
@@ -33,6 +41,8 @@ else
   BACKEND_PORT="8090"
 fi
 BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:$BACKEND_PORT}"
+AGENTCHAT_HOMEDIR="${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}"
+V1_AGENTS_DIR="$AGENTCHAT_HOMEDIR/agents"
 
 SHOW_ALL=false
 [ "${1:-}" = "-a" ] && SHOW_ALL=true
@@ -50,6 +60,36 @@ trap 'rm -f $_TMP_FILES' EXIT
 PTS_MAP_FILE=$(_mktmp)
 MCP_SESSIONS_FILE=$(_mktmp)
 AGENTS_FILE=$(_mktmp)
+V1_INFO_FILE=$(_mktmp)
+
+HOME_DIR="$AGENTCHAT_HOMEDIR" V1_AGENTS_DIR="$V1_AGENTS_DIR" python3 - <<'PY' > "$V1_INFO_FILE" 2>/dev/null || true
+import json
+import os
+from pathlib import Path
+
+agents_dir = Path(os.environ.get("V1_AGENTS_DIR", ""))
+if not agents_dir.exists():
+    raise SystemExit(0)
+
+for entry in sorted(agents_dir.iterdir()):
+    if not entry.is_dir():
+        continue
+    manifest = entry / "agent.json"
+    if not manifest.exists():
+        continue
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    name = str(data.get("name") or "").strip()
+    if not name:
+        continue
+    a_type = str(data.get("type") or "-").strip() or "-"
+    workdir = str(data.get("workdir") or "-").strip() or "-"
+    state_dir = str(data.get("stateDir") or "-").strip() or "-"
+    model_ver = str(data.get("agentModelVersion") or "-").strip() or "-"
+    print("|".join([name, a_type, workdir, state_dir, model_ver]))
+PY
 
 # Get tmux sessions
 SESSIONS=$(tmux list-sessions -F "#{session_name}" 2>/dev/null || true)
@@ -89,15 +129,25 @@ for sess in $SESSIONS; do
   echo "$sess active" >> "$AGENTS_FILE"
 done
 
-if [ "$SHOW_ALL" = true ] && [ -d "$DATA_DIR" ]; then
-  for agent_dir in "$DATA_DIR"/*/; do
-    [ -d "$agent_dir" ] || continue
-    name=$(basename "$agent_dir")
-    [ -f "$agent_dir/meta.json" ] || continue
-    if ! grep -q "^${name} " "$AGENTS_FILE" 2>/dev/null; then
-      echo "$name inactive" >> "$AGENTS_FILE"
-    fi
-  done
+if [ "$SHOW_ALL" = true ]; then
+  if [ -d "$DATA_DIR" ]; then
+    for agent_dir in "$DATA_DIR"/*/; do
+      [ -d "$agent_dir" ] || continue
+      name=$(basename "$agent_dir")
+      [ -f "$agent_dir/meta.json" ] || continue
+      if ! grep -q "^${name} " "$AGENTS_FILE" 2>/dev/null; then
+        echo "$name inactive" >> "$AGENTS_FILE"
+      fi
+    done
+  fi
+  if [ -s "$V1_INFO_FILE" ]; then
+    while IFS='|' read -r v1_name _; do
+      [ -n "$v1_name" ] || continue
+      if ! grep -q "^${v1_name} " "$AGENTS_FILE" 2>/dev/null; then
+        echo "$v1_name inactive" >> "$AGENTS_FILE"
+      fi
+    done < "$V1_INFO_FILE"
+  fi
 fi
 
 if [ ! -s "$AGENTS_FILE" ]; then
@@ -106,23 +156,45 @@ if [ ! -s "$AGENTS_FILE" ]; then
 fi
 
 # Print header
-printf "%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\n" "NAME" "STATUS" "TYPE" "MODEL" "KNOWN" "MCP" "RESUME" "PATH"
-printf "%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\n" "----" "------" "----" "-----" "----------" "---" "------" "----"
+printf "%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\n" "NAME" "STATUS" "TYPE" "VER" "MODEL" "KNOWN" "MCP" "RESUME" "PATH"
+printf "%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\n" "----" "------" "----" "---" "-----" "----------" "---" "------" "----"
 
 # Sort and print
 sort "$AGENTS_FILE" | while IFS=' ' read -r name status; do
   [ -z "$name" ] && continue
 
+  v1_type="-"
+  v1_workdir="-"
+  v1_state="-"
+  v1_ver="-"
+  if [ -s "$V1_INFO_FILE" ]; then
+    IFS='|' read -r v1_type v1_workdir v1_state v1_ver <<EOFV1
+$(awk -F'|' -v n="$name" '$1==n {print $2 "|" $3 "|" $4 "|" $5; exit}' "$V1_INFO_FILE" 2>/dev/null || true)
+EOFV1
+    [ -n "$v1_type" ] || v1_type="-"
+    [ -n "$v1_workdir" ] || v1_workdir="-"
+    [ -n "$v1_state" ] || v1_state="-"
+    [ -n "$v1_ver" ] || v1_ver="-"
+  fi
+
   # Type from meta.json
   type="-"
   if [ -f "$DATA_DIR/$name/meta.json" ]; then
     type=$(python3 -c "import json; print(json.load(open('$DATA_DIR/$name/meta.json')).get('type','-'))" 2>/dev/null || echo "-")
+  elif [ "$v1_type" != "-" ]; then
+    type="$v1_type"
   fi
 
   # Model from meta.json
   model="-"
   if [ -f "$DATA_DIR/$name/meta.json" ]; then
     model=$(python3 -c "import json; print(json.load(open('$DATA_DIR/$name/meta.json')).get('model','-') or '-')" 2>/dev/null || echo "-")
+  fi
+  model_ver="-"
+  if [ -f "$DATA_DIR/$name/meta.json" ]; then
+    model_ver=$(python3 -c "import json; d=json.load(open('$DATA_DIR/$name/meta.json')); print(d.get('agentModelVersion','-') or '-')" 2>/dev/null || echo "-")
+  elif [ "$v1_ver" != "-" ]; then
+    model_ver="$v1_ver"
   fi
 
   # Known in backend?
@@ -138,18 +210,22 @@ sort "$AGENTS_FILE" | while IFS=' ' read -r name status; do
   resume="-"
   if [ -f "$DATA_DIR/$name/resume-id" ]; then
     resume=$(cut -c1-8 < "$DATA_DIR/$name/resume-id" 2>/dev/null || echo "-")
+  elif [ "$v1_state" != "-" ] && [ -f "$v1_state/resume-id" ]; then
+    resume=$(cut -c1-8 < "$v1_state/resume-id" 2>/dev/null || echo "-")
   fi
 
   # Path from meta.json
   path_val="-"
   if [ -f "$DATA_DIR/$name/meta.json" ]; then
     path_val=$(python3 -c "import json; print(json.load(open('$DATA_DIR/$name/meta.json')).get('path','-'))" 2>/dev/null || echo "-")
+  elif [ "$v1_workdir" != "-" ]; then
+    path_val="$v1_workdir"
   fi
 
   # Color: active=default, inactive=dimmed
   if [ "$status" = "inactive" ]; then
-    printf "\033[2m%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model" "$reg" "$mcp" "$resume" "$path_val"
+    printf "\033[2m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   else
-    printf "%-20s %-8s %-8s %-20s %-10s %-5s %-10s %s\n" "$name" "$status" "$type" "$model" "$reg" "$mcp" "$resume" "$path_val"
+    printf "%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   fi
 done

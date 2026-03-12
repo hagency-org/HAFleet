@@ -360,4 +360,46 @@ describe('task graph API', () => {
     expect(completeA.body.graph.nodes.b.status).toBe('skipped');
     expect(completeA.body.graph.status).toBe('complete');
   });
+
+  test('node PATCH authenticates against node assignee token, not graph owner', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import('fs');
+    const os = await import('os');
+    const homeDir = mkdtempSync(path.join(os.tmpdir(), 'task-graph-token-test-'));
+    // Create token for assignee (alpha), NOT for graph owner (orchestrator)
+    const alphaStateDir = path.join(homeDir, 'agents', 'agent_alpha', 'state');
+    mkdirSync(alphaStateDir, { recursive: true });
+    writeFileSync(path.join(alphaStateDir, 'agent-token'), 'alpha-secret\n');
+
+    context = await createBackendTestContext('agent-chat-task-graphs-token-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false },
+        orchestrator: { name: 'orchestrator', type: 'agent', kind: 'agent', online: false },
+      },
+      groups: {},
+      env: {
+        AGENTCHAT_AGENT_TOKEN_MODE: 'hard',
+        AGENTCHAT_HOMEDIR: homeDir,
+      },
+    });
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send({
+        owner: 'orchestrator',
+        label: 'token test graph',
+        nodes: { a: { assignee: 'alpha', description: 'Do A' } },
+      });
+    expect(createResponse.status).toBe(200);
+    const graphId = createResponse.body.graph.id;
+
+    // alpha's token should succeed (node assignee)
+    const ok = await request(context.app)
+      .patch(`/api/task-graphs/${graphId}/nodes/a`)
+      .set('X-Agent-Token', 'alpha-secret')
+      .send({ status: 'complete', result: {} });
+    expect(ok.status).toBe(200);
+
+    const { rmSync } = await import('fs');
+    rmSync(homeDir, { recursive: true, force: true });
+  });
 });

@@ -212,15 +212,20 @@ git fetch origin --quiet 2>/dev/null || {
   exit 1
 }
 
+resolve_deploy_branch() {
+  local branch="${AGENTCHAT_DEPLOY_BRANCH:-}"
+  if [ -n "$branch" ]; then echo "origin/$branch"; return 0; fi
+  for b in stable main master; do
+    if git rev-parse --verify "origin/$b" >/dev/null 2>&1; then echo "origin/$b"; return 0; fi
+  done
+  return 1
+}
+
 LOCAL=$(git rev-parse HEAD)
-if git rev-parse --verify origin/main >/dev/null 2>&1; then
-  REMOTE_REF="origin/main"
-elif git rev-parse --verify origin/master >/dev/null 2>&1; then
-  REMOTE_REF="origin/master"
-else
-  echo "Error: neither origin/main nor origin/master exists" >&2
+REMOTE_REF=$(resolve_deploy_branch) || {
+  echo "Error: no deploy branch found (set AGENTCHAT_DEPLOY_BRANCH or ensure origin/stable, origin/main, or origin/master exists)" >&2
   exit 1
-fi
+}
 REMOTE=$(git rev-parse "$REMOTE_REF")
 BEHIND=$(git rev-list --count "HEAD..$REMOTE_REF" 2>/dev/null || echo "0")
 AHEAD=$(git rev-list --count "$REMOTE_REF..HEAD" 2>/dev/null || echo "0")
