@@ -1,7 +1,6 @@
 import {
   MatrixClient,
   SimpleFsStorageProvider,
-  AutojoinRoomsMixin,
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync } from 'fs';
@@ -62,6 +61,15 @@ const WARNING_DEDUPE_WINDOW_MS = Number.isFinite(WARNING_DEDUPE_WINDOW_MS_RAW) &
 const WARNING_CB_THRESHOLD = 3;     // consecutive failures before circuit opens
 const WARNING_CB_COOLDOWN_MS = 60_000; // 1 minute cooldown when circuit is open
 const OWNER_LOCK_PATH = path.join(DATA_DIR, 'bridge-owner.lock');
+
+// ── Room trust boundary (5.8.1) ─────────────────────────────────────
+const MATRIX_TRUST_MODE = (process.env.MATRIX_TRUST_MODE || 'audit').trim().toLowerCase();
+const MATRIX_TRUSTED_ROOM_IDS = new Set(
+  (process.env.MATRIX_TRUSTED_ROOM_IDS || '').split(',').map(s => s.trim()).filter(Boolean)
+);
+const MATRIX_TRUSTED_INVITER_MXIDS = new Set(
+  (process.env.MATRIX_TRUSTED_INVITER_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
+);
 
 mkdirSync(DATA_DIR, { recursive: true });
 mkdirSync(MEDIA_DIR, { recursive: true });
@@ -203,6 +211,19 @@ const state = loadState();
 if (!state.agentAvatars) state.agentAvatars = {};
 if (!state.roomAvatars) state.roomAvatars = {};
 if (!state.agentAvatarMeta) state.agentAvatarMeta = {};
+// Seed trustedManagedRooms from existing bridge-created rooms
+if (!state.trustedManagedRooms) {
+  state.trustedManagedRooms = {};
+  for (const [roomId, group] of Object.entries(state.roomGroupMap || {})) {
+    state.trustedManagedRooms[roomId] = { group, addedAt: Date.now() };
+  }
+  for (const [, roomId] of Object.entries(state.dmRooms || {})) {
+    if (roomId && !state.trustedManagedRooms[roomId]) {
+      state.trustedManagedRooms[roomId] = { dm: true, addedAt: Date.now() };
+    }
+  }
+  saveState();
+}
 
 function normalizeNameKey(value) {
   if (typeof value !== 'string') return '';
@@ -824,11 +845,34 @@ function mapRoom(roomId, groupName) {
   }
   state.roomGroupMap[roomId] = groupName;
   state.groupRoomMap[groupName] = roomId;
+  markRoomTrusted(roomId, { group: groupName });
   saveState();
 }
 
 function groupForRoom(roomId) { return state.roomGroupMap[roomId] || null; }
 function roomForGroup(groupName) { return state.groupRoomMap[groupName] || null; }
+
+// ── Room trust classifier (5.8.1) ───────────────────────────────────
+function getRoomTrust(roomId, { inviterMxid = null } = {}) {
+  if (MATRIX_TRUSTED_ROOM_IDS.has(roomId)) return { trusted: true, reason: 'allowlist' };
+  if (state.trustedManagedRooms?.[roomId]) return { trusted: true, reason: 'managed' };
+  if (inviterMxid && MATRIX_TRUSTED_INVITER_MXIDS.has(inviterMxid)) return { trusted: true, reason: 'trusted_inviter' };
+  return { trusted: false, reason: 'unknown_room' };
+}
+
+function markRoomTrusted(roomId, meta = {}) {
+  if (!state.trustedManagedRooms) state.trustedManagedRooms = {};
+  if (!state.trustedManagedRooms[roomId]) {
+    state.trustedManagedRooms[roomId] = { ...meta, addedAt: Date.now() };
+    saveState();
+  }
+}
+
+function roomTrustLog(action, roomId, trust, extra = '') {
+  const tag = trust.trusted ? 'TRUSTED' : 'UNTRUSTED';
+  const detail = extra ? ` ${extra}` : '';
+  console.log(`[trust:${MATRIX_TRUST_MODE}] ${action} room=${roomId} ${tag} reason=${trust.reason}${detail}`);
+}
 
 function escapeHtml(value) {
   return String(value)
@@ -1451,7 +1495,23 @@ export class MatrixBridge {
     // 1. Ensure bot account
     const botToken = await ensureBotAccount();
     this.botClient = new MatrixClient(HOMESERVER, botToken, new SimpleFsStorageProvider(path.join(DATA_DIR, 'bot-store.json')));
-    AutojoinRoomsMixin.setupOnClient(this.botClient);
+    // Trust-checked invite handler replaces AutojoinRoomsMixin (5.8.1)
+    this.botClient.on('room.invite', async (roomId, inviteEvent) => {
+      const inviter = inviteEvent?.sender || null;
+      const trust = getRoomTrust(roomId, { inviterMxid: inviter });
+      roomTrustLog('bot-invite', roomId, trust, `inviter=${inviter}`);
+      if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') {
+        console.log(`[trust:enforce] Rejecting bot invite to untrusted room ${roomId}`);
+        try { await this.botClient.leaveRoom(roomId); } catch {}
+        return;
+      }
+      try {
+        await this.botClient.joinRoom(roomId);
+        if (trust.trusted) markRoomTrusted(roomId, { inviter });
+      } catch (e) {
+        console.warn(`Failed to join room ${roomId}: ${e.message}`);
+      }
+    });
     this.botUserId = await this.botClient.getUserId();
     console.log(`Bot: ${this.botUserId}`);
 
@@ -1738,6 +1798,13 @@ export class MatrixBridge {
     if (isAgentUser(senderId)) return;
     if (senderId === this.botUserId) return;
 
+    // Room trust gate (5.8.1)
+    const msgTrust = getRoomTrust(roomId);
+    if (!msgTrust.trusted) {
+      roomTrustLog('message-ingress', roomId, msgTrust, `sender=${senderId}`);
+      if (MATRIX_TRUST_MODE === 'enforce') return;
+    }
+
     const groupName = groupForRoom(roomId);
     const humanName = humanNameFromUserId(senderId);
     let body = parsed.body;
@@ -1855,6 +1922,13 @@ export class MatrixBridge {
     // Ignore historical events from before bridge startup
     // But always process m.room.name (needed for mapping rooms bot joins after creation)
     if (event.type !== 'm.room.name' && event.origin_server_ts && event.origin_server_ts < this.startupTs) return;
+
+    // Room trust gate (5.8.1)
+    const eventTrust = getRoomTrust(roomId);
+    if (!eventTrust.trusted) {
+      roomTrustLog('room-event', roomId, eventTrust, `type=${event.type}`);
+      if (MATRIX_TRUST_MODE === 'enforce') return;
+    }
 
     // Handle room creation, membership changes
     if (event.type === 'm.room.name' && event.content?.name) {
@@ -2017,6 +2091,14 @@ export class MatrixBridge {
     try {
       const rooms = await this.botClient.getJoinedRooms();
       for (const roomId of rooms) {
+        const trust = getRoomTrust(roomId);
+        if (!trust.trusted) {
+          roomTrustLog('scan-joined', roomId, trust);
+          if (MATRIX_TRUST_MODE === 'enforce') {
+            try { await this.botClient.leaveRoom(roomId); } catch {}
+            continue;
+          }
+        }
         const mappedGroup = groupForRoom(roomId);
         if (mappedGroup) {
           await this.reconcileRoomGroupMembership(roomId, mappedGroup);
@@ -2188,6 +2270,12 @@ export class MatrixBridge {
         const data = await res.json();
         const invited = data?.rooms?.invite || {};
         for (const roomId of Object.keys(invited)) {
+          // Trust check before agent join (5.8.1)
+          const inviteState = invited[roomId]?.invite_state?.events || [];
+          const inviter = inviteState.find(e => e.type === 'm.room.member' && e.state_key === `@${AGENT_PREFIX}${agentName}:${MATRIX_SERVER_NAME}`)?.sender || null;
+          const trust = getRoomTrust(roomId, { inviterMxid: inviter });
+          roomTrustLog('agent-invite', roomId, trust, `agent=${agentName} inviter=${inviter}`);
+          if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') continue;
           // Auto-join
           const joinRes = await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
             method: 'POST',
@@ -2196,6 +2284,7 @@ export class MatrixBridge {
           });
           if ((await joinRes.json()).room_id) {
             console.log(`Agent ${agentName} joined room ${roomId}`);
+            if (trust.trusted) markRoomTrusted(roomId, { agent: agentName, inviter });
             // Invite bot so it can monitor messages
             await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
               method: 'POST',
@@ -2833,6 +2922,7 @@ export class MatrixBridge {
         this.dmRooms.set(key, data.room_id);
         if (!state.dmRooms) state.dmRooms = {};
         state.dmRooms[key] = data.room_id;
+        markRoomTrusted(data.room_id, { dm: key });
         saveState();
         console.log(`Created DM room ${data.room_id} for ${key}`);
 
@@ -3198,6 +3288,9 @@ export function setBridgeMatrixTestHooks({ execFileAsync: overrideExecFileAsync 
 export function resetBridgeMatrixTestHooks() {
   execFileAsyncImpl = execFileAsync;
 }
+
+// Test exports for 5.8.1 room trust
+export { getRoomTrust, markRoomTrusted, MATRIX_TRUST_MODE };
 
 const isMainModule = (() => {
   const entry = process.argv[1];

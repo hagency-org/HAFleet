@@ -496,4 +496,40 @@ describe('backend runtime API', () => {
     expect(events.find((event) => event.summary === "Remote server 'relay-west' offline")?.full || '')
       .toContain('heartbeat timed out');
   });
+
+  test('codex agent reports mcpPresent=null and does not trigger mcp_missing', async () => {
+    context = await createBackendTestContext('agent-chat-mcp-type-test-', {
+      agents: {
+        codexbot: {
+          name: 'codexbot',
+          type: 'codex',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'codexbot:0.0',
+        },
+      },
+    });
+
+    // Report mcpPresent=false from push-relay (codex has no MCP process)
+    for (let i = 0; i < 8; i++) {
+      await request(context.app).post('/api/agents/codexbot/runtime').send({
+        blocked: false,
+        reason: null,
+        tail: '',
+        command: 'codex',
+        mcpPresent: false,
+      });
+    }
+
+    const runtime = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtime.codexbot.mcpPresent).toBeNull();
+
+    const agent = (await request(context.app).get('/api/agents/codexbot').expect(200)).body;
+    expect(agent.offlineReason).not.toBe('mcp-missing:auto');
+
+    const events = readSystemInfoSummaries(context.runtimeDir);
+    const mcpMissing = events.filter(s => s.includes('missing MCP'));
+    expect(mcpMissing).toHaveLength(0);
+  });
 });

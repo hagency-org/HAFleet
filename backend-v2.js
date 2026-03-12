@@ -2524,6 +2524,7 @@ let localActivitySweepRunning = false;
 let localSwapSweepRunning = false;
 let agentScopeSweepRunning = false;
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
+const AUDIT_LOG = dataPath('audit.jsonl');
 const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
 const MESSAGE_ARCHIVE_LOG = dataPath('messages-archive.jsonl');
 const subconsciousEventsByAgent = new Map(); // agent -> event[]
@@ -3067,6 +3068,22 @@ function ensureInfoGroup() {
   if (!groups.info) {
     groups.info = { name: 'info', members: [], createdAt: Date.now() };
     saveGroups();
+  }
+}
+
+function auditLog(req, { agent = null, summary = null, status = 200 } = {}) {
+  try {
+    appendFileSync(AUDIT_LOG, JSON.stringify({
+      ts: new Date().toISOString(),
+      ip: req.ip || req.connection?.remoteAddress || null,
+      method: req.method,
+      route: req.originalUrl || req.url,
+      agent,
+      summary,
+      status,
+    }) + '\n');
+  } catch (e) {
+    console.error(`Failed to append audit log: ${e.message}`);
   }
 }
 
@@ -3686,6 +3703,13 @@ function formatSenderList(names) {
   return `${names.slice(0, 3).join(', ')}, +${names.length - 3} more`;
 }
 
+function sanitizeForDisplay(text) {
+  if (typeof text !== 'string') return '';
+  return text
+    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]/g, '');
+}
+
 function ensureAgentRuntimeRecord(name) {
   const agentName = normalizeAgentName(name);
   if (!agentName) return null;
@@ -4131,6 +4155,8 @@ function applyAgentBlockedState(agentName, payload = {}) {
 
   if (setRuntimeActivityFields(runtime, payload)) changed = true;
   if (setRuntimeWorkspacePath(runtime, payload)) changed = true;
+  const agentForMcp = agents[agentName];
+  if (agentForMcp && !agentExpectsMcp(agentForMcp) && payload.mcpPresent !== undefined) payload = { ...payload, mcpPresent: null };
   if (setRuntimeMcpFields(runtime, payload, now)) changed = true;
   if (changed) saveAgentRuntime();
 
@@ -4402,6 +4428,7 @@ function ensureServerRecord(serverId) {
       agents: [],
       agentCount: 0,
       sourceIp: null,
+      version: null,
       maintenance: SERVER_MAINTENANCE_IDS.has(serverId),
     };
   }
@@ -5369,6 +5396,7 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   server.online = true;
   server.updatedAt = now;
   server.sourceIp = sourceIp || null;
+  server.version = typeof payload.version === 'string' && payload.version.trim() ? payload.version.trim() : (server.version || null);
   server.sessions = sessions;
   server.agents = liveAgents;
   server.agentCount = liveAgents.length;
@@ -5670,6 +5698,7 @@ async function pushNotify(agentName, msg) {
   } else {
     const isHuman = msg.type === 'human';
     const isGroup = !!msg.group;
+    const safeSummary = sanitizeForDisplay(msg.summary);
 
     if (hasMcp) {
       const checkHint = `FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.`;
@@ -5682,10 +5711,10 @@ async function pushNotify(agentName, msg) {
       notificationKind = needsReply ? 'single_actionable' : 'single_inform';
       requiresInboxCheck = needsReply;
       notification = isHuman
-        ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${checkHint} ${actionHint}.`
+        ? `[NOTIFICATION] From ${msg.from} (human): "${safeSummary}". This is your human operator. ${checkHint} ${actionHint}.`
         : needsReply
-          ? `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${checkHint} ${actionHint}.`
-          : `[NOTIFICATION] From ${msg.from}: "${msg.summary}".`;
+          ? `[NOTIFICATION] From ${msg.from}: "${safeSummary}". ${checkHint} ${actionHint}.`
+          : `[NOTIFICATION] From ${msg.from}: "${safeSummary}".`;
     } else {
       const senderAgent = agents[replyTo];
       const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
@@ -5696,10 +5725,10 @@ async function pushNotify(agentName, msg) {
       notificationKind = needsReply ? 'single_actionable' : 'single_inform';
       requiresInboxCheck = false;
       notification = isHuman
-        ? `[NOTIFICATION] From ${msg.from} (human): "${msg.summary}". This is your human operator. ${actionHint}.`
+        ? `[NOTIFICATION] From ${msg.from} (human): "${safeSummary}". This is your human operator. ${actionHint}.`
         : needsReply
-          ? `[NOTIFICATION] From ${msg.from}: "${msg.summary}". ${actionHint}.`
-          : `[NOTIFICATION] From ${msg.from}: "${msg.summary}".`;
+          ? `[NOTIFICATION] From ${msg.from}: "${safeSummary}". ${actionHint}.`
+          : `[NOTIFICATION] From ${msg.from}: "${safeSummary}".`;
     }
   }
 
@@ -5855,6 +5884,7 @@ app.post('/api/supervisor/control', (req, res) => {
   if (!result || result.ok !== true) {
     return res.status(400).json({ error: result?.error || 'failed to update supervisor control' });
   }
+  auditLog(req, { summary: patch });
   return res.json(result);
 });
 
@@ -5865,6 +5895,7 @@ app.post('/api/servers/heartbeat', (req, res) => {
   const heartbeatResult = applyServerHeartbeat(serverId, req.body || {}, req.ip || req.connection?.remoteAddress || null);
   refreshServerLiveness();
   const state = servers[serverId];
+  auditLog(req, { summary: { server: serverId, agents: state?.agentCount || 0 } });
   const maintenance = isServerInMaintenance(serverId, state);
   if (heartbeatResult && heartbeatResult.leaseAccepted === false) {
     return res.status(409).json({
@@ -5994,6 +6025,7 @@ app.get('/api/servers', (_req, res) => {
       sourceIp: s.sourceIp || null,
       relayInstanceId: normalizeRelayInstanceId(s.relayInstanceId),
       relayBootTs: normalizeRelayBootTs(s.relayBootTs) || null,
+      version: s.version || null,
     }))
     .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
   res.json(rows);
@@ -6111,6 +6143,7 @@ app.post('/api/agents', (req, res) => {
       console.error(`catchup notify failed for ${agentName}:`, e.message);
     });
   }
+  auditLog(req, { agent: agentName, summary: { type: agentType, server: resolvedServer, online: resolvedOnline } });
   res.json({ ok: true, agent: serializeAgent(agents[agentName]) });
 });
 
@@ -6220,6 +6253,7 @@ app.patch('/api/agents/:name', (req, res) => {
       console.error(`catchup notify failed for ${agentName}:`, e.message);
     });
   }
+  auditLog(req, { agent: agentName, summary: { fields: Object.keys(req.body) } });
   res.json({ ok: true, agent: serializeAgent(agent) });
 });
 
@@ -6254,12 +6288,14 @@ app.delete('/api/agents/:name', (req, res) => {
   if (req.query.force === 'true') {
     clearDeletedAgentState(agentName);
     console.log(`Agent '${agentName}' permanently deleted`);
+    auditLog(req, { agent: agentName, summary: { action: 'force-delete' } });
     return res.json({ ok: true, deleted: true, name: agentName });
   }
   agent.tmux = null;
   agent.lastSeen = Date.now();
   if (!agent.offlineReason) agent.offlineReason = 'inactive';
   transitionAgent(agentName, 'api_unregister');
+  auditLog(req, { agent: agentName, summary: { action: 'unregister' } });
   saveAgents();
   res.json({
     ok: true,
@@ -6275,6 +6311,7 @@ app.post('/api/agents/:name/undelete', (req, res) => {
   if (!deletedAgentTombstones[agentName]) return res.status(404).json({ error: 'no tombstone found' });
   delete deletedAgentTombstones[agentName];
   saveJson('deleted_agents.json', deletedAgentTombstones, { immediate: true });
+  auditLog(req, { agent: agentName, summary: { action: 'undelete' } });
   console.log(`Agent '${agentName}' tombstone removed — re-registration allowed`);
   res.json({ ok: true, undeleted: true, name: agentName });
 });
@@ -6362,6 +6399,7 @@ app.post('/api/agents/:name/runtime', (req, res) => {
   });
   const runtime = dispatchBlockedNotifications(transition);
   if (!runtime) return res.status(500).json({ error: 'runtime update failed' });
+  auditLog(req, { agent: agentName, summary: { blocked, reason, mcpPresent: runtime.mcpPresent ?? null, server } });
   res.json({
     ok: true,
     runtime: {
