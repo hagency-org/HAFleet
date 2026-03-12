@@ -1429,6 +1429,24 @@ export class MatrixBridge {
     console.log(`Homeserver: ${HOMESERVER}`);
     console.log(`Backend: ${BACKEND_URL}`);
 
+    // 0. Wait for backend to be ready
+    const STARTUP_MAX_RETRIES = 5;
+    const STARTUP_RETRY_DELAY_MS = 2000;
+    for (let attempt = 1; attempt <= STARTUP_MAX_RETRIES; attempt++) {
+      try {
+        await backendApi('GET', '/health', null, 'context=bridge:startup-health-check');
+        console.log('Backend health check passed');
+        break;
+      } catch (e) {
+        if (attempt === STARTUP_MAX_RETRIES) {
+          console.error(`[FATAL] Backend not reachable after ${STARTUP_MAX_RETRIES} attempts — exiting`);
+          process.exit(1);
+        }
+        console.warn(`Backend not ready (attempt ${attempt}/${STARTUP_MAX_RETRIES}): ${e.message} — retrying in ${STARTUP_RETRY_DELAY_MS}ms`);
+        await sleep(STARTUP_RETRY_DELAY_MS);
+      }
+    }
+
     // 1. Ensure bot account
     const botToken = await ensureBotAccount();
     this.botClient = new MatrixClient(HOMESERVER, botToken, new SimpleFsStorageProvider(path.join(DATA_DIR, 'bot-store.json')));
