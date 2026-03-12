@@ -4131,6 +4131,8 @@ function applyAgentBlockedState(agentName, payload = {}) {
 
   if (setRuntimeActivityFields(runtime, payload)) changed = true;
   if (setRuntimeWorkspacePath(runtime, payload)) changed = true;
+  const agentForMcp = agents[agentName];
+  if (agentForMcp && !agentExpectsMcp(agentForMcp) && payload.mcpPresent !== undefined) payload = { ...payload, mcpPresent: null };
   if (setRuntimeMcpFields(runtime, payload, now)) changed = true;
   if (changed) saveAgentRuntime();
 
