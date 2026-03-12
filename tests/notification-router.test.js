@@ -155,6 +155,59 @@ describe('NotificationRouter', () => {
     router.destroy();
   });
 
+  test('bypassCooldown: skips check but still writes persistedCooldown timestamp', () => {
+    vi.useFakeTimers();
+    const store = {};
+    const dispatched = [];
+    const router = new NotificationRouter({
+      blocked: {
+        cooldownMs: 60000,
+        persistedCooldown: {
+          read: (k) => store[k] || 0,
+          write: (k, ts) => { store[k] = ts; },
+        },
+        sinks: ['out'],
+      },
+    }, { out: (_f, p) => dispatched.push(p) });
+    // Initial emit — accepted, writes timestamp
+    const r1 = router.emit('blocked', { level: 'soft' }, { dedupeKey: 'agentX' });
+    expect(r1.accepted).toBe(true);
+    const firstTs = store.agentX;
+    expect(firstTs).toBeGreaterThan(0);
+    // Normal emit within cooldown — rejected
+    expect(router.emit('blocked', { level: 'soft' }, { dedupeKey: 'agentX' }).accepted).toBe(false);
+    // Advance 10s, then escalation with bypassCooldown — accepted AND writes new timestamp
+    vi.advanceTimersByTime(10000);
+    const r2 = router.emit('blocked', { level: 'hard' }, { dedupeKey: 'agentX', bypassCooldown: true });
+    expect(r2.accepted).toBe(true);
+    expect(store.agentX).toBeGreaterThan(firstTs);
+    // Normal emit right after escalation — rejected (cooldown anchor refreshed)
+    expect(router.emit('blocked', { level: 'soft' }, { dedupeKey: 'agentX' }).accepted).toBe(false);
+    expect(dispatched).toHaveLength(2);
+    router.destroy();
+  });
+
+  test('bypassCooldown: recovery event not suppressed within cooldown window', () => {
+    vi.useFakeTimers();
+    const dispatched = [];
+    const router = new NotificationRouter({
+      resource: {
+        cooldownMs: 60000,
+        dedupeKeyFn: (p) => p.agentName,
+        sinks: ['out'],
+      },
+    }, { out: (_f, p) => dispatched.push(p) });
+    // High alert — accepted
+    const r1 = router.emit('resource', { agentName: 'bot1', type: 'high' });
+    expect(r1.accepted).toBe(true);
+    // Recovery within 60s with bypassCooldown — must NOT be suppressed
+    vi.advanceTimersByTime(5000);
+    const r2 = router.emit('resource', { agentName: 'bot1', type: 'recovery' }, { bypassCooldown: true });
+    expect(r2.accepted).toBe(true);
+    expect(dispatched).toHaveLength(2);
+    router.destroy();
+  });
+
   test('destroy flushes pending aggregation', () => {
     vi.useFakeTimers();
     const flushed = [];

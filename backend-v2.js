@@ -4268,7 +4268,7 @@ function dispatchBlockedNotifications(transition) {
   } else if (recovered) {
     notificationRouter.emit('agent_blocked', {
       agentName, recovered: true,
-    }, { bypassCooldown: true });
+    }, { bypassCooldown: true, skipPersistedWrite: true });
     broadcastSSE('agent_recovered', { agent: agentName, recoveredAt: now });
   }
 
@@ -5181,7 +5181,7 @@ async function sweepAgentScopePressure() {
         agentName,
         summary: `Agent '${agentName}' memory pressure recovered`,
         full: `agent=${agentName} unit=${scope.unit} current=${formatBytesGiB(scope.memoryCurrent)}GiB high=${formatBytesGiB(scope.memoryHigh)}GiB (${(ratio * 100).toFixed(1)}%)`,
-      });
+      }, { bypassCooldown: true });
     }
   }
 }
