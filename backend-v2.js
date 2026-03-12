@@ -7624,7 +7624,11 @@ app.post('/api/messages', (req, res) => {
   const sourceRoom = (typeof source_room === 'string' && source_room.trim() && source_room.length <= 255)
     ? source_room.trim()
     : null;
-  const senderMxid = sourceType === 'matrix' && typeof sender_mxid === 'string' && /^@[^:]+:.+/.test(sender_mxid.trim())
+  // Only accept sender_mxid from authenticated bridge requests (or if no secret is configured)
+  const bridgeSecret = (process.env.MATRIX_BRIDGE_SECRET || '').trim();
+  const callerSecret = req.headers['x-bridge-secret'] || '';
+  const isBridgeAuthenticated = !bridgeSecret || callerSecret === bridgeSecret;
+  const senderMxid = isBridgeAuthenticated && sourceType === 'matrix' && typeof sender_mxid === 'string' && /^@[^:]+:.+/.test(sender_mxid.trim())
     ? sender_mxid.trim().slice(0, 255) : null;
   // Derive trustLevel server-side from validated senderMxid — never trust caller-supplied value
   const trustLevel = senderMxid ? (MATRIX_OPERATOR_MXIDS.has(senderMxid) ? 'operator' : 'external') : null;

@@ -248,4 +248,84 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
     expect(msg).toBeDefined();
     expect(msg.trustLevel).toBeNull();
   });
+
+  test('correct bridge secret allows senderMxid + trustLevel', async () => {
+    process.env.MATRIX_BRIDGE_SECRET = 'test-secret-abc';
+    try {
+      const postRes = await request(app)
+        .post('/api/messages')
+        .set('X-Bridge-Secret', 'test-secret-abc')
+        .send({
+          from: 'system',
+          to: 'alice',
+          type: 'human',
+          summary: 'bridge secret ok',
+          full: 'bridge secret ok',
+          source: 'matrix',
+          sender_mxid: '@ops:matrix.test',
+        });
+      expect(postRes.status).toBe(200);
+
+      const inboxRes = await request(app).get('/api/inbox/alice');
+      const msg = inboxRes.body.dm.find(m => m.summary === 'bridge secret ok');
+      expect(msg).toBeDefined();
+      expect(msg.senderMxid).toBe('@ops:matrix.test');
+      expect(msg.trustLevel).toBe('operator');
+    } finally {
+      delete process.env.MATRIX_BRIDGE_SECRET;
+    }
+  });
+
+  test('wrong bridge secret rejects senderMxid + trustLevel', async () => {
+    process.env.MATRIX_BRIDGE_SECRET = 'test-secret-abc';
+    try {
+      const postRes = await request(app)
+        .post('/api/messages')
+        .set('X-Bridge-Secret', 'wrong-secret')
+        .send({
+          from: 'system',
+          to: 'alice',
+          type: 'human',
+          summary: 'bridge secret bad',
+          full: 'bridge secret bad',
+          source: 'matrix',
+          sender_mxid: '@ops:matrix.test',
+        });
+      expect(postRes.status).toBe(200);
+
+      const inboxRes = await request(app).get('/api/inbox/alice');
+      const msg = inboxRes.body.dm.find(m => m.summary === 'bridge secret bad');
+      expect(msg).toBeDefined();
+      expect(msg.senderMxid).toBeNull();
+      expect(msg.trustLevel).toBeNull();
+    } finally {
+      delete process.env.MATRIX_BRIDGE_SECRET;
+    }
+  });
+
+  test('missing bridge secret header rejects when MATRIX_BRIDGE_SECRET is set', async () => {
+    process.env.MATRIX_BRIDGE_SECRET = 'test-secret-abc';
+    try {
+      const postRes = await request(app)
+        .post('/api/messages')
+        .send({
+          from: 'system',
+          to: 'alice',
+          type: 'human',
+          summary: 'bridge secret missing',
+          full: 'bridge secret missing',
+          source: 'matrix',
+          sender_mxid: '@ops:matrix.test',
+        });
+      expect(postRes.status).toBe(200);
+
+      const inboxRes = await request(app).get('/api/inbox/alice');
+      const msg = inboxRes.body.dm.find(m => m.summary === 'bridge secret missing');
+      expect(msg).toBeDefined();
+      expect(msg.senderMxid).toBeNull();
+      expect(msg.trustLevel).toBeNull();
+    } finally {
+      delete process.env.MATRIX_BRIDGE_SECRET;
+    }
+  });
 });
