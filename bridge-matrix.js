@@ -50,6 +50,14 @@ const DATA_DIR = path.join(RUNTIME_ROOT, 'data', 'matrix');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
 const AGENT_META_ROOT = path.join(RUNTIME_ROOT, 'data', 'agents');
 const AGENT_AVATAR_STYLE_VERSION = 2;
+
+// ── Warning storm protection ─────────────────────────────────────────
+const WARNING_DEDUPE_WINDOW_MS_RAW = Number.parseInt(process.env.BRIDGE_WARNING_DEDUPE_WINDOW_MS || '300000', 10);
+const WARNING_DEDUPE_WINDOW_MS = Number.isFinite(WARNING_DEDUPE_WINDOW_MS_RAW) && WARNING_DEDUPE_WINDOW_MS_RAW > 0
+  ? WARNING_DEDUPE_WINDOW_MS_RAW
+  : 300_000; // 5 minutes default
+const WARNING_CB_THRESHOLD = 3;     // consecutive failures before circuit opens
+const WARNING_CB_COOLDOWN_MS = 60_000; // 1 minute cooldown when circuit is open
 const OWNER_LOCK_PATH = path.join(DATA_DIR, 'bridge-owner.lock');
 
 mkdirSync(DATA_DIR, { recursive: true });
@@ -1127,6 +1135,12 @@ export class MatrixBridge {
     this.blockedAlertRooms = new Map(); // agent -> Set(roomId)
     this.startupTs = Date.now();
     this.commands = null;
+    // Warning storm protection
+    this._warningLastSent = new Map();    // dedupe key -> timestamp
+    this._warningCbFails = 0;             // consecutive postWarning failures
+    this._warningCbOpenUntil = 0;         // circuit breaker open until (epoch ms)
+    this._backendHealthy = true;          // false when backend is unresponsive
+    this._reconcileSuspendLogged = false; // log suspension only once
   }
 
   callBackendApi(method, routePath, body, contextLabel = '') {
@@ -1377,11 +1391,37 @@ export class MatrixBridge {
     return null;
   }
 
-  postWarning(message) {
+  postWarning(message, { kind = 'general', scope = '' } = {}) {
+    // 1. Dedupe — same warning family at most once per window
+    const dedupeKey = `${kind}:${scope}:${(message.match(/^[A-Za-z ]+/) || [''])[0].trim()}`;
+    const now = Date.now();
+    const lastSent = this._warningLastSent.get(dedupeKey) || 0;
+    if (now - lastSent < WARNING_DEDUPE_WINDOW_MS) return;
+
+    // 2. Circuit breaker — stop hammering a failing backend
+    if (now < this._warningCbOpenUntil) return;
+
+    this._warningLastSent.set(dedupeKey, now);
     backendApi('POST', '/api/system/info', {
       summary: `⚠️ Bridge warning: ${message}`,
       full: '',
-    }).catch(e => console.error('Failed to post warning:', e.message));
+    }).then(() => {
+      // Success — reset circuit breaker
+      this._warningCbFails = 0;
+      if (!this._backendHealthy) {
+        this._backendHealthy = true;
+        this._reconcileSuspendLogged = false;
+        console.log('Backend reachable again — resuming reconcile polling');
+      }
+    }).catch(e => {
+      console.error('Failed to post warning:', e.message);
+      this._warningCbFails++;
+      if (this._warningCbFails >= WARNING_CB_THRESHOLD) {
+        this._warningCbOpenUntil = now + WARNING_CB_COOLDOWN_MS;
+        this._backendHealthy = false;
+        console.warn(`Warning circuit breaker open — ${this._warningCbFails} consecutive failures, cooldown ${WARNING_CB_COOLDOWN_MS}ms`);
+      }
+    });
   }
 
   async start() {
@@ -1940,6 +1980,22 @@ export class MatrixBridge {
   }
 
   async scanJoinedRooms() {
+    // If backend was marked unhealthy, probe it before running a full scan
+    if (!this._backendHealthy) {
+      try {
+        await backendApi('GET', '/api/agents?view=names', null, 'context=reconcile:health-probe');
+        this._backendHealthy = true;
+        this._reconcileSuspendLogged = false;
+        this._warningCbFails = 0;
+        console.log('Backend reachable again — resuming reconcile polling');
+      } catch {
+        if (!this._reconcileSuspendLogged) {
+          console.warn('Reconcile suspended — backend is unresponsive');
+          this._reconcileSuspendLogged = true;
+        }
+        return;
+      }
+    }
     try {
       const rooms = await this.botClient.getJoinedRooms();
       for (const roomId of rooms) {
@@ -1978,6 +2034,14 @@ export class MatrixBridge {
     if (!groupName || groupName.startsWith('DM: ') || groupName.startsWith('SPY: ')) return;
     // Skip recently created rooms — humans may not have accepted invites yet
     if (this.recentlyCreatedRooms.has(roomId)) return;
+    // Suspend reconcile during backend failure
+    if (!this._backendHealthy) {
+      if (!this._reconcileSuspendLogged) {
+        console.warn('Reconcile suspended — backend is unresponsive');
+        this._reconcileSuspendLogged = true;
+      }
+      return;
+    }
     try {
       const joinedMembers = await getJoinedRoomMembersWithTrace(
         this.botClient,
@@ -2031,7 +2095,15 @@ export class MatrixBridge {
       }
     } catch (e) {
       console.error(`Failed to reconcile group "${groupName}" from room ${roomId}:`, e.message);
-      this.postWarning(`Failed to reconcile Matrix room ${roomId} ↔ group "${groupName}": ${e.message}`);
+      // Mark backend unhealthy on fetch/timeout errors to suspend further reconcile cycles
+      const msg = String(e?.message || '');
+      if (/fetch|timeout|ECONNREFUSED|ECONNRESET|abort/i.test(msg)) {
+        this._backendHealthy = false;
+      }
+      this.postWarning(
+        `Failed to reconcile Matrix room ${roomId} ↔ group "${groupName}": ${e.message}`,
+        { kind: 'reconcile', scope: `${roomId}:${groupName}` }
+      );
     }
   }
 

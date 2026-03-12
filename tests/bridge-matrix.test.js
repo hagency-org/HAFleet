@@ -149,6 +149,81 @@ describe('bridge matrix behavior', () => {
     );
   });
 
+  test('postWarning deduplicates the same warning family within the window', async () => {
+    const bridge = new MatrixBridge();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockResolvedValue('null'),
+    }));
+
+    bridge.postWarning('Failed to reconcile room !a:test ↔ group "g1": timeout', { kind: 'reconcile', scope: '!a:test:g1' });
+    bridge.postWarning('Failed to reconcile room !a:test ↔ group "g1": timeout', { kind: 'reconcile', scope: '!a:test:g1' });
+    bridge.postWarning('Failed to reconcile room !a:test ↔ group "g1": timeout', { kind: 'reconcile', scope: '!a:test:g1' });
+
+    // Only the first call should go through — same dedupe key
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('postWarning allows different warning families through', async () => {
+    const bridge = new MatrixBridge();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockResolvedValue('null'),
+    }));
+
+    bridge.postWarning('Failed for room A', { kind: 'reconcile', scope: '!a:test' });
+    bridge.postWarning('Failed for room B', { kind: 'reconcile', scope: '!b:test' });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  test('postWarning circuit breaker stops calls after consecutive failures', async () => {
+    const bridge = new MatrixBridge();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('ECONNREFUSED')));
+
+    // Trigger 3 failures (each with unique scope to bypass dedupe)
+    bridge.postWarning('err1', { kind: 'a', scope: '1' });
+    bridge.postWarning('err2', { kind: 'a', scope: '2' });
+    bridge.postWarning('err3', { kind: 'a', scope: '3' });
+
+    // Wait for async rejections to settle
+    await new Promise(r => setTimeout(r, 50));
+
+    // Circuit should be open — 4th call should be suppressed
+    bridge.postWarning('err4', { kind: 'a', scope: '4' });
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  test('reconcileRoomGroupMembership skips when backend is unhealthy', async () => {
+    const bridge = new MatrixBridge();
+    bridge._backendHealthy = false;
+    bridge.callBackendApi = vi.fn();
+
+    await bridge.reconcileRoomGroupMembership('!room:test', 'test-group');
+
+    expect(bridge.callBackendApi).not.toHaveBeenCalled();
+  });
+
+  test('reconcileRoomGroupMembership proceeds when backend is healthy', async () => {
+    const bridge = new MatrixBridge();
+    bridge._backendHealthy = true;
+    bridge.botClient = {
+      getJoinedRoomMembers: vi.fn().mockResolvedValue([]),
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockResolvedValue('{"members":[]}'),
+    }));
+
+    await bridge.reconcileRoomGroupMembership('!room:test', 'test-group');
+
+    // Should have called backend to get group info
+    expect(fetch).toHaveBeenCalled();
+  });
+
   test('avatar rendering falls back after a timed out icon convert', async () => {
     const execMock = vi.fn(async (_file, args, options) => {
       expect(options.timeout).toBe(10_000);
