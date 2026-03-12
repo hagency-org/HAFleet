@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import { readFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import os from 'os';
 import path from 'path';
 import request from 'supertest';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
@@ -82,5 +83,52 @@ describe('deletion tombstone', () => {
     await request(context.app)
       .post('/api/agents/nonexistent/undelete')
       .expect(404);
+  });
+});
+
+describe('tombstoned agent with retained home manifest', () => {
+  let context;
+  let fakeHome;
+  const AGENT_NAME = 'ghost';
+
+  beforeAll(async () => {
+    // Create a fake agentchat home with agent manifest on disk
+    fakeHome = mkdtempSync(path.join(os.tmpdir(), 'tombstone-orphan-'));
+    const agentDir = path.join(fakeHome, 'agents', `agent_${AGENT_NAME}`);
+    const workdir = path.join(agentDir, 'workdir');
+    const stateDir = path.join(agentDir, 'state');
+    mkdirSync(workdir, { recursive: true });
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(path.join(agentDir, 'agent.json'), JSON.stringify({
+      name: AGENT_NAME,
+      id: `agent_${AGENT_NAME}`,
+      homeDir: agentDir,
+      stateDir,
+      workdir,
+      type: 'claude',
+      agentModelVersion: '1.0',
+      layoutVersion: 1,
+    }, null, 2));
+
+    // Boot backend with tombstone pre-seeded + orphan home on disk
+    context = await createBackendTestContext('tombstone-orphan-', {
+      agents: {},
+      deletedAgents: {
+        [AGENT_NAME]: { deletedAt: Date.now(), reason: 'force-delete' },
+      },
+      env: { AGENTCHAT_HOMEDIR: fakeHome },
+    });
+  });
+
+  afterAll(() => {
+    if (context) context.cleanup();
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  test('orphan scan skips tombstoned agent without crashing', async () => {
+    // Backend booted without crash — that alone proves the fix
+    const res = await request(context.app).get('/api/agents').expect(200);
+    const agentNames = res.body.map((a) => a.name);
+    expect(agentNames).not.toContain(AGENT_NAME);
   });
 });

@@ -2731,7 +2731,7 @@ for (const agent of Object.values(agents)) {
         const manifest = readV1AgentManifest(manifestPath);
         if (!manifest || !manifest.name) continue;
         if (agents[manifest.name]) continue;
-        const { agent: created } = ensureAgentRecord(manifest.name, {
+        const result = ensureAgentRecord(manifest.name, {
           type: manifest.type || 'agent',
           homeDir: manifest.homeDir,
           workdir: manifest.workdir,
@@ -2746,6 +2746,8 @@ for (const agent of Object.values(agents)) {
           identity: manifest.identity || null,
           role: manifest.role || null,
         });
+        if (!result) continue; // tombstoned — skip
+        const { agent: created } = result;
         if (created) {
           const m = getAgentMachine(manifest.name);
           created.state = m.state;
