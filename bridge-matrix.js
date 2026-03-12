@@ -2704,7 +2704,7 @@ export class MatrixBridge {
     if (invite?.ok) return { ok: true, invite };
     const reason = invite?.error || 'invite_failed';
     console.error(`DM invite failed: room=${roomId}, agent=${agentName}, human=${humanName}, reason=${reason}`);
-    this.postWarning(`DM invite failed for ${agentName} -> ${humanName} in ${roomId}: ${reason}`);
+    // Warning emitted by outer caller (_doOnDmEnsure / ensureHumanDmRoom) — no duplicate here
     return { ok: false, invite: invite || { ok: false, error: reason } };
   }
 
