@@ -143,6 +143,46 @@ describe('AgentStateMachine', () => {
     m.destroy();
   });
 
+  test('MANUAL_DOWN → api_unregister → OFFLINE', () => {
+    const m = new AgentStateMachine('manual_down');
+    expect(m.transition('api_unregister')).toBe('offline');
+    m.destroy();
+  });
+
+  test('MANUAL_DOWN → api_register_with_tmux → STARTING', () => {
+    const m = new AgentStateMachine('manual_down');
+    expect(m.transition('api_register_with_tmux')).toBe('starting');
+    m.destroy();
+  });
+
+  // --- api_unregister from all states ---
+  test('api_unregister → OFFLINE from every state', () => {
+    for (const initial of ['offline', 'starting', 'online', 'degraded', 'manual_down']) {
+      const m = new AgentStateMachine(initial);
+      expect(m.transition('api_unregister')).toBe('offline');
+      m.destroy();
+    }
+  });
+
+  // --- api_register_with_tmux ---
+  test('api_register_with_tmux from OFFLINE → STARTING', () => {
+    const m = new AgentStateMachine('offline');
+    expect(m.transition('api_register_with_tmux')).toBe('starting');
+    m.destroy();
+  });
+
+  test('api_register_with_tmux from ONLINE stays ONLINE', () => {
+    const m = new AgentStateMachine('online');
+    expect(m.transition('api_register_with_tmux')).toBe('online');
+    m.destroy();
+  });
+
+  test('api_register_with_tmux from DEGRADED stays DEGRADED', () => {
+    const m = new AgentStateMachine('degraded');
+    expect(m.transition('api_register_with_tmux')).toBe('degraded');
+    m.destroy();
+  });
+
   // --- Invalid / no-op transitions ---
   test('invalid transitions return current state', () => {
     const m = new AgentStateMachine('offline');
