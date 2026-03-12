@@ -153,6 +153,56 @@ function requireBridgeSecret(req, res, next) {
   }
   next();
 }
+// ── Per-agent token authentication (5.8.6) ───────────────────────────
+const AGENT_TOKEN_MODE = (() => {
+  const m = (process.env.AGENTCHAT_AGENT_TOKEN_MODE || 'audit').trim().toLowerCase();
+  return m === 'hard' ? 'hard' : m === 'soft' ? 'soft' : 'audit';
+})();
+const agentTokens = new Map(); // agentName → token string
+function loadAgentTokens() {
+  const homeDir = defaultAgentchatHomeDir();
+  const agentsDir = path.join(homeDir, 'agents');
+  let loaded = 0;
+  try {
+    for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('agent_')) continue;
+      const name = entry.name.slice('agent_'.length);
+      const tokenPath = path.join(agentsDir, entry.name, 'state', 'agent-token');
+      try {
+        const token = readFileSync(tokenPath, 'utf-8').trim();
+        if (token) { agentTokens.set(name, token); loaded++; }
+      } catch { /* missing token file — expected for un-provisioned agents */ }
+    }
+  } catch { /* missing agents dir */ }
+  if (loaded > 0) console.log(`[auth] loaded ${loaded} agent token(s), mode=${AGENT_TOKEN_MODE}`);
+}
+function checkAgentToken(agentName, req) {
+  if (!agentName) return { ok: true };
+  const expected = agentTokens.get(agentName);
+  const provided = (req.headers['x-agent-token'] || '').trim();
+  if (!expected) {
+    if (AGENT_TOKEN_MODE === 'hard' && !provided) {
+      return { ok: false, reason: 'no token configured and none provided' };
+    }
+    return { ok: true };
+  }
+  if (!provided) return { ok: false, reason: 'token required but not provided' };
+  if (provided !== expected) return { ok: false, reason: 'token mismatch' };
+  return { ok: true };
+}
+function requireAgentToken(extractAgent) {
+  return (req, res, next) => {
+    const agentName = extractAgent(req);
+    const result = checkAgentToken(agentName, req);
+    if (!result.ok) {
+      const msg = `[auth] agent-token ${result.reason}: agent=${agentName} mode=${AGENT_TOKEN_MODE}`;
+      if (AGENT_TOKEN_MODE === 'audit') { console.warn(msg); return next(); }
+      console.warn(msg);
+      return res.status(403).json({ error: `agent token ${result.reason}` });
+    }
+    next();
+  };
+}
 const VALID_ENVIRONMENTS = new Set(['live', 'dev', 'benchmark', 'ephemeral']);
 function classifyEnvironment(name) {
   const n = String(name).toLowerCase();
@@ -2534,6 +2584,7 @@ const agents = loadJsonSync('agents.json', {});
   }
   if (migrated > 0) { saveJson('agents.json', agents, { immediate: true }); console.log(`[startup] migrated environment for ${migrated} agent(s)`); }
 }
+loadAgentTokens();
 const deletedAgentTombstones = loadJsonSync('deleted_agents.json', {});
 const groups = loadJsonSync('groups.json', {});
 const messages = loadJsonSync('messages.json', []);
@@ -6089,7 +6140,10 @@ setInterval(() => {
 }, 30000);
 
 // ── Agents CRUD ───────────────────────────────────────────────────────
-app.post('/api/agents', (req, res) => {
+const _tokenFromBody = r => r.body?.from || r.body?.name || '';
+const _tokenFromName = r => r.params?.name || '';
+const _tokenFromAgent = r => r.body?.agent || r.params?.agent || r.query?.agent || '';
+app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) => {
   const {
     name,
     role,
@@ -6192,7 +6246,7 @@ app.post('/api/agents', (req, res) => {
   res.json({ ok: true, agent: serializeAgent(agents[agentName]) });
 });
 
-app.patch('/api/agents/:name', (req, res) => {
+app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => {
   refreshServerLiveness();
   const agentName = normalizeAgentName(req.params.name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
@@ -6365,7 +6419,7 @@ app.post('/api/agents/:name/undelete', (req, res) => {
   res.json({ ok: true, undeleted: true, name: agentName });
 });
 
-app.post('/api/agents/:name/offline', (req, res) => {
+app.post('/api/agents/:name/offline', requireAgentToken(_tokenFromName), (req, res) => {
   const agentName = normalizeAgentName(req.params.name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   const agent = agents[agentName];
@@ -6392,7 +6446,7 @@ app.post('/api/agents/:name/offline', (req, res) => {
   res.json({ ok: true, agent: serializeAgent(agent) });
 });
 
-app.post('/api/agents/:name/runtime', (req, res) => {
+app.post('/api/agents/:name/runtime', requireAgentToken(_tokenFromName), (req, res) => {
   const agentName = normalizeAgentName(req.params.name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
 
@@ -7556,7 +7610,7 @@ app.post('/api/dm/ensure', (req, res) => {
   res.json({ ok: true, queued: true, agent, human, humanId: resolvedHumanId });
 });
 
-app.post('/api/agents/:name/avatar', express.json({ limit: '10mb' }), (req, res) => {
+app.post('/api/agents/:name/avatar', express.json({ limit: '10mb' }), requireAgentToken(_tokenFromName), (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid agent name' });
   const force = req.body?.generate === true || req.query.force === 'true';
@@ -7577,7 +7631,7 @@ app.post('/api/system/info', requireBridgeSecret, (req, res) => {
 });
 
 // ── Media staging for agent attachments ───────────────────────────────
-app.post('/api/media/stage', express.json({ limit: MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT }), (req, res) => {
+app.post('/api/media/stage', express.json({ limit: MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT }), requireAgentToken(_tokenFromBody), (req, res) => {
   const fromName = normalizeAgentName(req.body?.from || '');
   if (!fromName) return res.status(400).json({ error: 'from required' });
   if (!isAgentRecord(agents[fromName])) return res.status(404).json({ error: `agent not found: ${fromName}` });
@@ -7650,7 +7704,7 @@ app.get('/api/media/fetch', (req, res) => {
 });
 
 // ── Messages ──────────────────────────────────────────────────────────
-app.post('/api/messages', (req, res) => {
+app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
   const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid, from_id } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
@@ -7911,7 +7965,7 @@ app.get('/api/messages/:id', (req, res) => {
   });
 });
 
-app.post('/api/messages/:id/suppress', (req, res) => {
+app.post('/api/messages/:id/suppress', requireAgentToken(_tokenFromAgent), (req, res) => {
   const agentName = normalizeAgentName(req.body?.agent);
   if (!agentName) return res.status(400).json({ error: 'agent required' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
@@ -8016,7 +8070,7 @@ ${attachmentsHtml}
 });
 
 // ── Inbox ─────────────────────────────────────────────────────────────
-app.get('/api/inbox/:agent/unread', (req, res) => {
+app.get('/api/inbox/:agent/unread', requireAgentToken(_tokenFromAgent), (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
@@ -8025,7 +8079,7 @@ app.get('/api/inbox/:agent/unread', (req, res) => {
   res.json(snapshot);
 });
 
-app.get('/api/inbox/:agent/unread-list', (req, res) => {
+app.get('/api/inbox/:agent/unread-list', requireAgentToken(_tokenFromAgent), (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
@@ -8044,7 +8098,7 @@ app.get('/api/inbox/:agent/unread-list', (req, res) => {
   });
 });
 
-app.get('/api/inbox/:agent', (req, res) => {
+app.get('/api/inbox/:agent', requireAgentToken(_tokenFromAgent), (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });

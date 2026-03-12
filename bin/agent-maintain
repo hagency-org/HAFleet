@@ -46,6 +46,7 @@ Usage: agent-maintain [options]
        agent-maintain patch-templates [--dry-run]
 
 Subcommands:
+  gen-agent-tokens             Generate per-agent auth tokens for agents missing one (idempotent)
   patch-templates              Patch existing agent workspace templates with missing sections
 
 Options:
@@ -236,6 +237,51 @@ run_patch_templates() {
   done
   log "[DONE] scanned $count agent home(s)"
 }
+
+## --- gen-agent-tokens subcommand -------------------------------------------
+
+run_gen_agent_tokens() {
+  local home_dir="${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}"
+  local agents_dir="$home_dir/agents"
+  if [ ! -d "$agents_dir" ]; then
+    echo "No agents directory at $agents_dir" >&2
+    exit 1
+  fi
+  local generated=0 existing=0
+  for agent_dir in "$agents_dir"/agent_*/; do
+    [ -d "$agent_dir" ] || continue
+    local state_dir="$agent_dir/state"
+    [ -d "$state_dir" ] || mkdir -p "$state_dir"
+    local token_path="$state_dir/agent-token"
+    if [ -f "$token_path" ]; then
+      existing=$((existing + 1))
+      log "[OK] token exists: $token_path"
+      continue
+    fi
+    if [ "$DRY_RUN" = true ]; then
+      log "[DRY-RUN] would generate: $token_path"
+    else
+      openssl rand -hex 32 > "$token_path"
+      chmod 600 "$token_path"
+      log "[GEN] generated: $token_path"
+    fi
+    generated=$((generated + 1))
+  done
+  log "[DONE] $generated generated, $existing already existed"
+}
+
+if [ "${1:-}" = "gen-agent-tokens" ]; then
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) DRY_RUN=true ;;
+      *) echo "Error: unknown gen-agent-tokens option '$1'" >&2; exit 1 ;;
+    esac
+    shift
+  done
+  run_gen_agent_tokens
+  exit 0
+fi
 
 if [ "${1:-}" = "patch-templates" ]; then
   shift
