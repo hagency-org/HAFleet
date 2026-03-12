@@ -512,7 +512,7 @@ export class SupervisorService {
     this.latestByAgent = new Map();
 
     this._llmJudge = null; // lazy-init on first suspected_eos
-    this._lastPaneHash = new Map(); // agent -> pane hash (dedup LLM calls)
+    this._lastPaneResult = new Map(); // agent -> { hash, verdict } (dedup + cache LLM calls)
 
     this.running = false;
     this.timer = null;
@@ -932,15 +932,21 @@ export class SupervisorService {
     if (observation.classification === 'suspected_eos') {
       try {
         const context = await collectAgentContext(this.config, agentName, candidate.agent, candidate.runtime);
-        const prevHash = this._lastPaneHash.get(agentName);
-        if (context.pane.hash !== prevHash) {
-          this._lastPaneHash.set(agentName, context.pane.hash);
+        const cached = this._lastPaneResult.get(agentName);
+        if (cached && context.pane.hash === cached.hash) {
+          // Reuse cached verdict — pane unchanged since last LLM call
+          if (!cached.negative) {
+            observation.classification = 'active';
+            observation.reason = `LLM judge cached override: ${cached.status} — ${cached.reason || 'on track'}`;
+          }
+        } else {
           if (!this._llmJudge) {
             this._llmJudge = new LLMJudge(this.config);
           }
           const llmResult = await this._llmJudge.evaluate(context);
           observation._llm = llmResult;
           const llmNeg = llmResult.status === 'DRIFTING' || llmResult.status === 'LOST' || llmResult.status === 'STUCK';
+          this._lastPaneResult.set(agentName, { hash: context.pane.hash, negative: llmNeg, status: llmResult.status, reason: llmResult.reason });
           if (!llmNeg) {
             observation.classification = 'active';
             observation.reason = `LLM judge override: ${llmResult.status} — ${llmResult.reason || 'on track'}`;

@@ -206,7 +206,8 @@ function requireAgentToken(extractAgent) {
 const VALID_ENVIRONMENTS = new Set(['live', 'dev', 'benchmark', 'ephemeral']);
 function classifyEnvironment(name) {
   const n = String(name).toLowerCase();
-  if (/(?:^|[-_])(?:test|bench|tmp|scratch|smoke|e2e)(?:[-_]|$)/.test(n)) return 'ephemeral';
+  if (/(?:^|[-_])(?:test|tmp|scratch|smoke|e2e)(?:[-_]|$)/.test(n)) return 'ephemeral';
+  if (/(?:^|[-_])(?:bench|benchmark)(?:[-_]|$)/.test(n)) return 'benchmark';
   if (/(?:^|[-_])(?:dev|debug)(?:[-_]|$)/.test(n)) return 'dev';
   return 'live';
 }

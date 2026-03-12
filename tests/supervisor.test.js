@@ -72,7 +72,7 @@ describe('supervisor observation loop', () => {
     tempDir = null;
   });
 
-  test('stalled wait classification sends a nudge after the threshold', () => {
+  test('stalled wait classification sends a nudge after the threshold', async () => {
     tempDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-supervisor-loop-test-'));
     const agent = {
       name: 'alpha',
@@ -93,8 +93,8 @@ describe('supervisor observation loop', () => {
       getRuntime: () => ({ activeNow: false, idleDurationSec: 5 }),
     });
 
-    service.runSweep();
-    service.runSweep();
+    await service.runSweep();
+    await service.runSweep();
 
     expect(service.getAgentDetail('alpha').latest.status).toBe('stalled_wait');
     expect(sent).toHaveLength(1);
@@ -110,7 +110,7 @@ describe('supervisor observation loop', () => {
     expect(infos[0].summary).toContain('Supervisor warning: alpha stalled_wait');
   });
 
-  test('blocked agents escalate after the third consecutive negative observation', () => {
+  test('blocked agents escalate after the third consecutive negative observation', async () => {
     tempDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-supervisor-loop-test-'));
     const agent = {
       name: 'alpha',
@@ -131,9 +131,9 @@ describe('supervisor observation loop', () => {
       getRuntime: () => ({ blocked: true, blockedReason: 'interactive-confirm', activeNow: false }),
     });
 
-    service.runSweep();
-    service.runSweep();
-    service.runSweep();
+    await service.runSweep();
+    await service.runSweep();
+    await service.runSweep();
 
     expect(sent).toHaveLength(2);
     expect(sent[0]).toMatchObject({
@@ -148,7 +148,7 @@ describe('supervisor observation loop', () => {
     });
   });
 
-  test('runSweep excludes remote agents from observation and intervention', () => {
+  test('runSweep excludes remote agents from observation and intervention', async () => {
     tempDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-supervisor-loop-test-'));
     process.env.AGENT_CHAT_SERVER = 'devbox';
     const localAgent = {
@@ -184,8 +184,8 @@ describe('supervisor observation loop', () => {
       getRuntime: () => ({ blocked: true, activeNow: false }),
     });
 
-    service.runSweep();
-    service.runSweep();
+    await service.runSweep();
+    await service.runSweep();
 
     const summaries = service.getAgentSummaries();
     expect(summaries.map((row) => row.agent)).toEqual(['alpha']);
