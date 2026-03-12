@@ -7,7 +7,8 @@ REPO_DIR="${AGENTCHAT_LIVE_DIR:-${AGENT_CHAT_LIVE_ROOT:-${AGENT_CHAT_ROOT:-$DEFA
 DEPLOY_USER="${AGENTCHAT_DEPLOY_USER:-shisui}"
 DEPLOY_BRANCH="${AGENTCHAT_DEPLOY_BRANCH:-stable}"
 POLL_SEC="${AGENTCHAT_POLL_SEC:-30}"
-DEPLOY_SERVICES="${AGENTCHAT_DEPLOY_SERVICES:-agent-chat agent-chat-v2 bridge-matrix}"
+BACKEND_SERVICE="${AGENTCHAT_BACKEND_SERVICE:-agent-chat-v2}"
+DEPLOY_SERVICES="${AGENTCHAT_DEPLOY_SERVICES:-agent-chat ${BACKEND_SERVICE} bridge-matrix}"
 
 log() {
   printf '[stable-autodeploy] %s\n' "$*"
@@ -34,17 +35,52 @@ service_list() {
   done
 }
 
+BACKEND_HEALTH_URL="${AGENTCHAT_BACKEND_HEALTH_URL:-http://127.0.0.1:8090/api/agents}"
+BACKEND_HEALTH_TIMEOUT="${AGENTCHAT_BACKEND_HEALTH_TIMEOUT:-30}"
+
+wait_for_backend() {
+  local i
+  log "Waiting up to ${BACKEND_HEALTH_TIMEOUT}s for backend health..."
+  for i in $(seq "$BACKEND_HEALTH_TIMEOUT"); do
+    if curl -sf "$BACKEND_HEALTH_URL" >/dev/null 2>&1; then
+      log "Backend healthy after ${i}s"
+      return 0
+    fi
+    sleep 1
+  done
+  log "ERROR: backend not healthy after ${BACKEND_HEALTH_TIMEOUT}s"
+  return 1
+}
+
 restart_services() {
-  local s
   local failed=0
+
+  # 1. Restart backend first
+  log "Restarting backend ($BACKEND_SERVICE)..."
+  if ! systemctl restart "$BACKEND_SERVICE"; then
+    log "ERROR: failed to restart backend '$BACKEND_SERVICE'"
+    return 1
+  fi
+
+  # 2. Wait for backend to be healthy before restarting dependents
+  if ! wait_for_backend; then
+    log "ERROR: backend health gate failed; skipping dependent restarts"
+    return 1
+  fi
+
+  # 3. Restart remaining services sequentially (skip backend)
+  local s
   while IFS= read -r s; do
     [ -n "$s" ] || continue
+    [ "$s" = "$BACKEND_SERVICE" ] && continue
+    log "Restarting $s..."
     if ! systemctl restart "$s"; then
       log "ERROR: failed to restart service '$s'"
       failed=1
     fi
   done < <(service_list)
 
+  # 4. Verify all services are active
   while IFS= read -r s; do
     [ -n "$s" ] || continue
     if ! systemctl is-active --quiet "$s"; then
@@ -91,6 +127,8 @@ validate_startup() {
 validate_startup
 log "Watching '$REPO_DIR' branch '$DEPLOY_BRANCH' every ${POLL_SEC}s"
 
+deploy_pending=false
+
 while true; do
   if ! run_git fetch origin "$DEPLOY_BRANCH" --quiet; then
     log "WARN: git fetch failed; retry on next poll"
@@ -111,7 +149,7 @@ while true; do
     sleep "$POLL_SEC"
     continue
   fi
-  if [ "$local_ref" = "$remote_ref" ]; then
+  if [ "$local_ref" = "$remote_ref" ] && [ "$deploy_pending" = false ]; then
     sleep "$POLL_SEC"
     continue
   fi
@@ -123,7 +161,11 @@ while true; do
     continue
   fi
 
-  log "Update detected: $local_ref -> $remote_ref"
+  if [ "$deploy_pending" = true ] && [ "$local_ref" = "$remote_ref" ]; then
+    log "Retrying failed deploy at $local_ref"
+  else
+    log "Update detected: $local_ref -> $remote_ref"
+  fi
   if ! run_git pull --ff-only origin "$DEPLOY_BRANCH"; then
     log "ERROR: git pull failed; skip this round"
     sleep "$POLL_SEC"
@@ -138,8 +180,10 @@ while true; do
 
   if restart_services; then
     log "Deploy succeeded at commit $new_ref"
+    deploy_pending=false
   else
-    log "ERROR: service restart/health check failed at commit $new_ref"
+    log "ERROR: service restart/health check failed at commit $new_ref — will retry next poll"
+    deploy_pending=true
   fi
 
   sleep "$POLL_SEC"
