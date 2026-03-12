@@ -80,7 +80,7 @@ Options:
   --owner <name>     Override task owner (default: manifest/current owner)
   --reason <text>    Required for wait
   --until <iso8601>  Required for wait
-  --web-url <url>    Override AGENT_CHAT_WEB_URL / AGENT_CHAT_WEB_PORT resolution
+  --web-url <url>    Override backend API base URL (default: AGENT_CHAT_API or http://127.0.0.1:8090)
   --graph <id>       Report a task graph node result/failure instead of home metadata
   --node <id>        Task graph node id (required with --graph)
   --result <json>    JSON payload for graph completion
@@ -138,20 +138,9 @@ function parsePositiveInt(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-function defaultWebBaseUrl(env = process.env) {
-  const explicit = String(env.AGENT_CHAT_WEB_URL || '').trim();
-  if (explicit) return explicit.replace(/\/$/, '');
-  const api = String(env.AGENT_CHAT_API || '').trim();
-  if (api) return api.replace(/\/$/, '');
-  const port = parsePositiveInt(env.AGENT_CHAT_WEB_PORT, 8084);
-  return `http://127.0.0.1:${port}`;
-}
-
 function defaultApiBaseUrl(env = process.env) {
   const explicit = String(env.AGENT_CHAT_API || '').trim();
   if (explicit) return explicit.replace(/\/$/, '');
-  const web = String(env.AGENT_CHAT_WEB_URL || '').trim();
-  if (web) return web.replace(/\/$/, '');
   const port = parsePositiveInt(env.AGENT_CHAT_BACKEND_PORT, 8090);
   return `http://127.0.0.1:${port}`;
 }
@@ -332,21 +321,16 @@ async function main() {
   const task = buildNextTask(command, manifest, args);
   if (!task) throw new Error('failed to build task payload');
 
-  const webUrl = explicitBaseUrl || defaultWebBaseUrl(process.env);
   const apiUrl = explicitBaseUrl || defaultApiBaseUrl(process.env);
-  const usesDirectApi = !String(process.env.AGENT_CHAT_WEB_URL || '').trim() && Boolean(String(process.env.AGENT_CHAT_API || '').trim()) && !explicitBaseUrl;
-  const targetUrl = usesDirectApi
-    ? `${apiUrl}/api/agents/${encodeURIComponent(manifest.name)}`
-    : `${webUrl}/api/agents/${encodeURIComponent(manifest.name)}/home-metadata`;
-  const body = usesDirectApi ? { task } : { task };
+  const targetUrl = `${apiUrl}/api/agents/${encodeURIComponent(manifest.name)}`;
   const response = await fetch(targetUrl, {
-    method: usesDirectApi ? 'PATCH' : 'PATCH',
+    method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ task }),
   });
   const data = await response.json().catch(() => null);
   if (!response.ok || !data?.ok) {
-    throw new Error(`task write failed: ${response.status} ${JSON.stringify(data || { error: 'invalid response' })}`);
+    throw new Error(`task write failed (${apiUrl}): ${response.status} ${JSON.stringify(data || { error: 'invalid response' })} — is the backend reachable?`);
   }
   process.stdout.write(`${JSON.stringify({
     ok: true,
@@ -354,8 +338,8 @@ async function main() {
     agent: manifest.name,
     manifestPath,
     workdir,
-    webUrl: usesDirectApi ? apiUrl : webUrl,
-    task: data?.metadata?.task || data?.agent?.task || task,
+    apiUrl,
+    task: data?.agent?.task || task,
   }, null, 2)}\n`);
 }
 

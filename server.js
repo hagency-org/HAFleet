@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { promisify } from 'util';
 import { defaultAgentchatHomeDir, resolveAgentDocsPaths, resolveV1ManifestForAgent } from './lib/agent-home-v1.js';
+import { assertRuntimeDir } from './lib/runtime-dir-guard.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.dirname(__filename);
@@ -13,6 +14,7 @@ const RUNTIME_ROOT = (() => {
   const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
   return raw ? path.resolve(raw) : REPO_ROOT;
 })();
+assertRuntimeDir(RUNTIME_ROOT);
 const LOGS_ROOT = path.join(RUNTIME_ROOT, 'logs');
 const DATA_ROOT = path.join(RUNTIME_ROOT, 'data');
 const DEFAULT_WEB_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_WEB_PORT || '8084', 10);

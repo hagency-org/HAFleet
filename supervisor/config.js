@@ -1,5 +1,6 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { assertRuntimeDir } from '../lib/runtime-dir-guard.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const SUPERVISOR_DIR = path.dirname(__filename);
@@ -92,6 +93,7 @@ function parseRuntimeProfileJson(value) {
 
 export function loadSupervisorConfig(env = process.env) {
   const runtimeRoot = resolveRuntimeRoot(env);
+  assertRuntimeDir(runtimeRoot);
   const supervisorProfile = parseRuntimeProfileJson(env.AGENTCHAT_RUNTIME_PROFILE_SUPERVISOR_JSON);
   const primaryProfile = parseRuntimeProfileJson(env.AGENTCHAT_RUNTIME_PROFILE_PRIMARY_JSON);
   const profile = supervisorProfile || primaryProfile || null;

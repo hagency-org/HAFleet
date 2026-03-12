@@ -1,5 +1,5 @@
 import express from 'express';
-import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync, unlinkSync, rmSync } from 'fs';
+import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync, readdirSync, unlinkSync, rmSync } from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
 import { execFile } from 'child_process';
 import path from 'path';
@@ -10,6 +10,8 @@ import { createSupervisorService } from './supervisor/index.js';
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
+import { assertRuntimeDir, isLocalAgentServer } from './lib/runtime-dir-guard.js';
+import { readV1AgentManifest, defaultAgentchatHomeDir } from './lib/agent-home-v1.js';
 import {
   buildUpstreamClaudeSubconsciousPaths,
   bootstrapUpstreamClaudeSubconsciousAgent,
@@ -26,6 +28,7 @@ const RUNTIME_ROOT = (() => {
   const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
   return raw ? path.resolve(raw) : REPO_ROOT;
 })();
+assertRuntimeDir(RUNTIME_ROOT);
 const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
 const PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
   ? DEFAULT_BACKEND_PORT_RAW
@@ -2731,6 +2734,83 @@ for (const agent of Object.values(agents)) {
   agent.state = m.state;
 }
 
+// ── Startup reconciliation: agent home manifests ──────────────────────
+{
+  let reconciled = 0;
+  for (const agent of Object.values(agents)) {
+    if (!agent.name || !agent.homeDir) continue;
+    if (!isLocalAgentServer(normalizeServer(agent.server), LOCAL_SERVER_ID)) continue;
+    const manifestPath = path.join(agent.homeDir, 'agent.json');
+    try {
+      const manifest = readV1AgentManifest(manifestPath);
+      if (!manifest) continue;
+      let changed = false;
+      if (manifest.task && typeof manifest.task === 'object') {
+        const diskTs = Date.parse(manifest.task.updated_at) || 0;
+        const memTs = Date.parse(agent.task?.updated_at) || 0;
+        if (diskTs > memTs) {
+          agent.task = normalizeAgentTask(manifest.task, agent.name);
+          changed = true;
+        }
+      }
+      if (manifest.runtimeProfile && !agent.runtimeProfile) {
+        agent.runtimeProfile = normalizeRuntimeProfile(manifest.runtimeProfile);
+        if (agent.runtimeProfile) changed = true;
+      }
+      if (changed) reconciled++;
+    } catch { /* skip unreadable manifests */ }
+  }
+  if (reconciled > 0) {
+    saveJson('agents.json', agents);
+    console.log(`[startup] reconciled ${reconciled} agent(s) from home manifests`);
+  }
+}
+
+// ── Startup reconciliation: orphaned agent homes ──────────────────────
+{
+  let orphans = 0;
+  try {
+    const homeRoot = defaultAgentchatHomeDir();
+    const agentsDir = path.join(homeRoot, 'agents');
+    if (existsSync(agentsDir)) {
+      const entries = readdirSync(agentsDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const manifestPath = path.join(agentsDir, entry.name, 'agent.json');
+        const manifest = readV1AgentManifest(manifestPath);
+        if (!manifest || !manifest.name) continue;
+        if (agents[manifest.name]) continue;
+        const { agent: created } = ensureAgentRecord(manifest.name, {
+          type: manifest.type || 'agent',
+          homeDir: manifest.homeDir,
+          workdir: manifest.workdir,
+          stateDir: manifest.stateDir,
+          agentModelVersion: manifest.agentModelVersion,
+          layoutVersion: manifest.layoutVersion,
+          agentId: manifest.id,
+          online: false,
+          offlineReason: 'orphan-discovered',
+          task: manifest.task,
+          runtimeProfile: manifest.runtimeProfile,
+          identity: manifest.identity || null,
+          role: manifest.role || null,
+        });
+        if (created) {
+          const m = getAgentMachine(manifest.name);
+          created.state = m.state;
+          orphans++;
+        }
+      }
+      if (orphans > 0) {
+        saveJson('agents.json', agents);
+        console.log(`[startup] discovered ${orphans} orphaned agent home(s)`);
+      }
+    }
+  } catch (e) {
+    console.error(`[startup] orphan scan failed: ${e.message}`);
+  }
+}
+
 const groupsBeforeNormalization = JSON.stringify(groups);
 for (const [groupKey, group] of Object.entries(groups)) {
   if (!group || typeof group !== 'object') {
@@ -2878,6 +2958,34 @@ function nextMsgId() {
 }
 
 function saveAgents(immediate = false) { saveJson('agents.json', agents, { immediate }); }
+
+function writeThruAgentHome(agentName) {
+  const agent = agents[agentName];
+  if (!agent || !agent.homeDir) return;
+  const serverId = normalizeServer(agent.server);
+  if (!isLocalAgentServer(serverId, LOCAL_SERVER_ID)) return;
+  const agentJsonPath = path.join(agent.homeDir, 'agent.json');
+  try {
+    if (!existsSync(agent.homeDir)) return;
+    let disk = {};
+    try { disk = JSON.parse(readFileSync(agentJsonPath, 'utf-8')); } catch { /* new file */ }
+    let changed = false;
+    for (const field of ['task', 'runtimeProfile', 'identity', 'role']) {
+      const next = agent[field] ?? null;
+      const prev = disk[field] ?? null;
+      if (JSON.stringify(next) !== JSON.stringify(prev)) {
+        disk[field] = next;
+        changed = true;
+      }
+    }
+    if (changed) {
+      writeFileSync(agentJsonPath, `${JSON.stringify(disk, null, 2)}\n`, 'utf-8');
+    }
+  } catch (e) {
+    console.error(`writeThruAgentHome(${agentName}): ${e.message}`);
+  }
+}
+
 function saveGroups() { saveJson('groups.json', groups); }
 function collectUnreadRetainedMessageIds() {
   const keep = new Set();
@@ -5978,6 +6086,7 @@ app.post('/api/agents', (req, res) => {
       : normalizeRuntimeProfile(existing.runtimeProfile),
   };
   saveAgents();
+  writeThruAgentHome(agentName);
   if (resolvedOnline) {
     const isLocal = resolvedServer === 'local' || resolvedServer === LOCAL_SERVER_ID;
     if (isLocal && resolvedTmux) {
@@ -6096,6 +6205,7 @@ app.patch('/api/agents/:name', (req, res) => {
     agent.manualDown = false;
   }
   saveAgents();
+  writeThruAgentHome(agentName);
   if (!wasOnline && agent.online === true) {
     notifyAgentCatchup(agentName, 'agent-online-patch').catch((e) => {
       console.error(`catchup notify failed for ${agentName}:`, e.message);

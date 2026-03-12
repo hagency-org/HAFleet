@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 import { promisify } from 'util';
 import EventSource from './lib/eventsource-mini.js';
 import BotCommands from './lib/bot-commands.js';
+import { assertRuntimeDir } from './lib/runtime-dir-guard.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const execFileAsync = promisify(execFile);
@@ -21,6 +22,7 @@ const RUNTIME_ROOT = (() => {
   const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
   return raw ? path.resolve(raw) : REPO_ROOT;
 })();
+assertRuntimeDir(RUNTIME_ROOT);
 // ── Configuration ─────────────────────────────────────────────────────
 const HOMESERVER = process.env.MATRIX_HOMESERVER || 'https://matrix.ananthe.party';
 const REGISTRATION_TOKEN = (process.env.MATRIX_REG_TOKEN || '').trim();
