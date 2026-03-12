@@ -29,6 +29,12 @@ const LOG_FILE = path.join(LOGS_ROOT, 'messages.jsonl');
 const AGENT_DOWN_BIN = path.join(REPO_ROOT, 'bin', 'agent-down');
 const BACKEND_V2_URL = (process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
 const PUSH_DELIVERED_URL = `${BACKEND_V2_URL}/api/runtime/push-delivered`;
+const BACKEND_API_TOKEN = (process.env.API_TOKEN || '').trim();
+function backendFetch(url, opts = {}) {
+  const headers = { ...opts.headers };
+  if (BACKEND_API_TOKEN) headers['Authorization'] = `Bearer ${BACKEND_API_TOKEN}`;
+  return fetch(url, { ...opts, headers });
+}
 const DEFAULT_IDLE_THRESHOLD_MS = 20_000;
 const envIdleThreshold = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || `${DEFAULT_IDLE_THRESHOLD_MS}`, 10);
 const IDLE_THRESHOLD = Number.isFinite(envIdleThreshold) && envIdleThreshold > 0
@@ -224,7 +230,7 @@ async function notifyPushDelivered(entry, deliveredAt) {
     notifyMeta,
   };
   try {
-    const resp = await fetch(PUSH_DELIVERED_URL, {
+    const resp = await backendFetch(PUSH_DELIVERED_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -241,7 +247,7 @@ async function notifyPushDelivered(entry, deliveredAt) {
 async function fetchUnreadSnapshot(agentName) {
   if (!agentName) return null;
   try {
-    const res = await fetch(`${BACKEND_V2_URL}/api/inbox/${encodeURIComponent(agentName)}/unread`);
+    const res = await backendFetch(`${BACKEND_V2_URL}/api/inbox/${encodeURIComponent(agentName)}/unread`);
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -483,7 +489,7 @@ app.get('/api/idle', (_req, res) => {
 // ── Agent status (for dashboard monitor) ─────────────────────────────
 app.get('/api/agents/status', async (_req, res) => {
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/agents`);
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents`);
     const agentList = await r.json();
     const result = agentList
       .filter(a => a.tmux)
@@ -824,7 +830,7 @@ async function syncBackendAgentHomeState(name, manifest, human = null) {
   const verifyReadback = async (baseResult = {}) => {
     let readbackRes;
     try {
-      readbackRes = await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`);
+      readbackRes = await backendFetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`);
     } catch (e) {
       return {
         ok: false,
@@ -897,7 +903,7 @@ async function syncBackendAgentHomeState(name, manifest, human = null) {
     };
   };
   try {
-    const patchRes = await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`, {
+    const patchRes = await backendFetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -912,7 +918,7 @@ async function syncBackendAgentHomeState(name, manifest, human = null) {
     if (patchRes.status !== 404) {
       return await summarizeFailure(patchRes, 'patch');
     }
-    const postRes = await fetch(`${BACKEND_V2_URL}/api/agents`, {
+    const postRes = await backendFetch(`${BACKEND_V2_URL}/api/agents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1431,7 +1437,7 @@ app.get('/api/agents/detail/:name', async (req, res) => {
 
   // From backend-v2
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`);
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`);
     const agent = await r.json();
     if (!agent.error) {
       detail.identity = agent.identity || null;
@@ -1554,7 +1560,7 @@ app.get('/api/subconscious/detail/:name', async (req, res) => {
     if (normalizeMetaText(String(req.query?.debug ?? ''), 8) === '1') {
       backendUrl.searchParams.set('debug', '1');
     }
-    const r = await fetch(backendUrl);
+    const r = await backendFetch(backendUrl);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     if (r.ok) return res.json(data);
   } catch (e) {
@@ -1565,7 +1571,7 @@ app.get('/api/subconscious/detail/:name', async (req, res) => {
   const manifest = loadV1Manifest(name, localMeta);
   let detail = null;
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`);
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`);
     detail = await r.json();
   } catch (e) {
     console.debug(`[server] backend agent detail fetch skipped for ${name}: ${e.message}`);
@@ -1577,7 +1583,7 @@ app.post('/api/subconscious/upstream/bootstrap/:name', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/subconscious/upstream/bootstrap/${encodeURIComponent(name)}`, {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/subconscious/upstream/bootstrap/${encodeURIComponent(name)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -1592,7 +1598,7 @@ app.post('/api/subconscious/upstream/session-start/:name', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/subconscious/upstream/session-start/${encodeURIComponent(name)}`, {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/subconscious/upstream/session-start/${encodeURIComponent(name)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body || {}),
@@ -1608,7 +1614,7 @@ app.post('/api/subconscious/upstream/user-prompt/:name', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/subconscious/upstream/user-prompt/${encodeURIComponent(name)}`, {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/subconscious/upstream/user-prompt/${encodeURIComponent(name)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body || {}),
@@ -1624,7 +1630,7 @@ app.post('/api/subconscious/upstream/pretool/:name', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/subconscious/upstream/pretool/${encodeURIComponent(name)}`, {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/subconscious/upstream/pretool/${encodeURIComponent(name)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body || {}),
@@ -1643,7 +1649,7 @@ app.get('/api/agents/:name/unread-messages', async (req, res) => {
   const limit = Number.isFinite(limitRaw) && limitRaw >= 0 ? Math.min(limitRaw, 200) : 50;
 
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/inbox/${encodeURIComponent(name)}/unread-list?limit=${limit}`);
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/inbox/${encodeURIComponent(name)}/unread-list?limit=${limit}`);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     res.status(r.status).json(data);
   } catch (e) {
@@ -1658,7 +1664,7 @@ app.post('/api/agents/:name/unread-messages/:msgId/cancel', async (req, res) => 
   if (!/^msg_[0-9]+$/.test(msgId)) return res.status(400).json({ error: 'invalid message id' });
 
   try {
-    const suppressRes = await fetch(`${BACKEND_V2_URL}/api/messages/${encodeURIComponent(msgId)}/suppress`, {
+    const suppressRes = await backendFetch(`${BACKEND_V2_URL}/api/messages/${encodeURIComponent(msgId)}/suppress`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agent: name, reason: 'web-cancel' }),
@@ -1689,7 +1695,7 @@ app.patch('/api/agents/:name', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`, {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body),
@@ -2125,7 +2131,7 @@ app.post('/api/agents/:name/offline', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}/offline`, {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}/offline`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body || {}),
@@ -2167,7 +2173,7 @@ app.post('/api/agents/:name/down', async (req, res) => {
       // Best effort fallback: proceed to mark offline even when session already missing.
     }
     try {
-      const r = await fetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}/offline`, {
+      const r = await backendFetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}/offline`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2199,7 +2205,7 @@ app.delete('/api/agents/:name', async (req, res) => {
   try {
     const url = new URL(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`);
     if (req.query.force === 'true') url.searchParams.set('force', 'true');
-    const r = await fetch(url, { method: 'DELETE' });
+    const r = await backendFetch(url, { method: 'DELETE' });
     const data = await r.json();
     res.status(r.status).json(data);
   } catch (e) {
@@ -2209,7 +2215,7 @@ app.delete('/api/agents/:name', async (req, res) => {
 
 app.post('/api/task-graphs', async (req, res) => {
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/task-graphs`, {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/task-graphs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body || {}),
@@ -2227,7 +2233,7 @@ app.get('/api/task-graphs', async (req, res) => {
     if (typeof req.query.status === 'string' && req.query.status.trim()) {
       url.searchParams.set('status', req.query.status.trim());
     }
-    const r = await fetch(url);
+    const r = await backendFetch(url);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     res.status(r.status).json(data);
   } catch (e) {
@@ -2237,7 +2243,7 @@ app.get('/api/task-graphs', async (req, res) => {
 
 app.get('/api/task-graphs/:id', async (req, res) => {
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/task-graphs/${encodeURIComponent(req.params.id)}`);
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/task-graphs/${encodeURIComponent(req.params.id)}`);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     res.status(r.status).json(data);
   } catch (e) {
@@ -2247,7 +2253,7 @@ app.get('/api/task-graphs/:id', async (req, res) => {
 
 app.delete('/api/task-graphs/:id', async (req, res) => {
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/task-graphs/${encodeURIComponent(req.params.id)}`, {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/task-graphs/${encodeURIComponent(req.params.id)}`, {
       method: 'DELETE',
     });
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
@@ -2259,7 +2265,7 @@ app.delete('/api/task-graphs/:id', async (req, res) => {
 
 app.patch('/api/task-graphs/:id/nodes/:nodeId', async (req, res) => {
   try {
-    const r = await fetch(
+    const r = await backendFetch(
       `${BACKEND_V2_URL}/api/task-graphs/${encodeURIComponent(req.params.id)}/nodes/${encodeURIComponent(req.params.nodeId)}`,
       {
         method: 'PATCH',
@@ -2277,7 +2283,7 @@ app.patch('/api/task-graphs/:id/nodes/:nodeId', async (req, res) => {
 // ── Supervisor audit proxy APIs ──────────────────────────────────────
 app.get('/api/supervisor/status', async (_req, res) => {
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/supervisor/status`);
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/supervisor/status`);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     res.status(r.status).json(data);
   } catch (e) {
@@ -2287,7 +2293,7 @@ app.get('/api/supervisor/status', async (_req, res) => {
 
 app.get('/api/supervisor/agents', async (_req, res) => {
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/supervisor/agents`);
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/supervisor/agents`);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     res.status(r.status).json(data);
   } catch (e) {
@@ -2301,7 +2307,7 @@ app.get('/api/supervisor/agents/:name', async (req, res) => {
   const limitRaw = Number.parseInt(req.query.limit, 10);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 120;
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/supervisor/agents/${encodeURIComponent(name)}?limit=${limit}`);
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/supervisor/agents/${encodeURIComponent(name)}?limit=${limit}`);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     res.status(r.status).json(data);
   } catch (e) {
@@ -2311,7 +2317,7 @@ app.get('/api/supervisor/agents/:name', async (req, res) => {
 
 app.get('/api/supervisor/control', async (_req, res) => {
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/supervisor/control`);
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/supervisor/control`);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     res.status(r.status).json(data);
   } catch (e) {
@@ -2321,7 +2327,7 @@ app.get('/api/supervisor/control', async (_req, res) => {
 
 app.post('/api/supervisor/control', async (req, res) => {
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/supervisor/control`, {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/supervisor/control`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body || {}),
@@ -2343,7 +2349,7 @@ app.get('/api/subconscious/events', async (req, res) => {
     if (Number.isFinite(limitRaw) && limitRaw > 0) {
       url.searchParams.set('limit', String(Math.min(limitRaw, 500)));
     }
-    const r = await fetch(url);
+    const r = await backendFetch(url);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     res.status(r.status).json(data);
   } catch (e) {
@@ -2360,7 +2366,7 @@ app.get('/api/subconscious/events/:name', async (req, res) => {
     if (Number.isFinite(limitRaw) && limitRaw > 0) {
       url.searchParams.set('limit', String(Math.min(limitRaw, 500)));
     }
-    const r = await fetch(url);
+    const r = await backendFetch(url);
     const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
     res.status(r.status).json(data);
   } catch (e) {
@@ -2436,7 +2442,7 @@ const OFFLINE_CACHE_TTL_MS = 30_000; // refresh every 30s
 
 async function refreshOfflineAgentCache() {
   try {
-    const r = await fetch(`${BACKEND_V2_URL}/api/agents`);
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents`);
     const agentList = await r.json();
     const sessions = new Set();
     for (const a of agentList) {
