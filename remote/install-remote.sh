@@ -202,6 +202,14 @@ if [ "$IS_LINUX" = true ]; then
     rm -f "$TMP_AD"
     trap - EXIT
     echo "  Installed ${AUTODEPLOY_SERVICE} service."
+
+    # Provision sudoers rule so autodeploy (running as agent user) can restart the relay
+    SUDOERS_FILE="/etc/sudoers.d/agentchat-autodeploy"
+    SYSTEMCTL_BIN="$(command -v systemctl)"
+    echo "$SERVICE_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN restart $SERVICE_NAME" \
+      | sudo tee "$SUDOERS_FILE" >/dev/null
+    sudo chmod 0440 "$SUDOERS_FILE"
+    echo "  Provisioned sudoers rule: ${SUDOERS_FILE}"
   fi
 
   sudo systemctl daemon-reload
