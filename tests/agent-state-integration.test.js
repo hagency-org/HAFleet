@@ -108,4 +108,27 @@ describe('AgentStateMachine backend integration', () => {
     expect(res.body.agent.state).toBe('offline');
     expect(res.body.agent.manualDown).toBe(false);
   });
+
+  test('PATCH online:true does NOT make agent deliverable without real liveness', async () => {
+    // localagent is offline after earlier registration moved it to starting;
+    // force it back to offline via DELETE then re-seed as offline
+    await request(context.app)
+      .patch('/api/agents/localagent')
+      .send({ manualDown: true })
+      .expect(200);
+    const before = await request(context.app).get('/api/agents/localagent').expect(200);
+    expect(before.body.manualDown).toBe(true);
+    expect(before.body.online).toBe(false);
+
+    // PATCH online:true should only clear manualDown, not synthesize deliverable
+    const res = await request(context.app)
+      .patch('/api/agents/localagent')
+      .send({ online: true })
+      .expect(200);
+    const agent = res.body.agent;
+    expect(agent.state).toBe('offline');
+    expect(agent.online).toBe(false); // NOT deliverable — no real liveness proof
+    expect(agent.healthy).toBe(false);
+    expect(agent.manualDown).toBe(false); // manualDown cleared
+  });
 });

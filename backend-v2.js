@@ -6043,11 +6043,10 @@ app.patch('/api/agents/:name', (req, res) => {
     }
   }
   if (online !== undefined) {
-    // Route through machine
+    // online:true only clears manualDown — real liveness comes from sweep/heartbeat
     if (Boolean(online)) {
-      syncAgentMachine(agentName, { heartbeatPresent: true });
+      syncAgentMachine(agentName, { manualDown: false });
       agent.lastSeen = Date.now();
-      agent.offlineReason = null;
     } else {
       syncAgentMachine(agentName, { tmuxMissing: true });
     }
