@@ -62,7 +62,7 @@ const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAUL
   : 8090;
 const API = process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`;
 const API_TOKEN = (process.env.API_TOKEN || '').trim();
-const AGENT_SERVER = (process.env.AGENT_CHAT_SERVER || '').trim() || null;
+const AGENT_SERVER = (process.env.AGENT_CHAT_SERVER || '').trim() || os.hostname();
 const ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.AGENT_CHAT_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
 const ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.AGENT_CHAT_ATTACHMENT_MAX_ITEMS || '8', 10);
 const MEDIA_FETCH_CACHE_DIR = path.resolve('data', 'mcp-media-cache', AGENT_NAME);
