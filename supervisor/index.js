@@ -4,6 +4,8 @@ import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import { loadSupervisorConfig } from './config.js';
 import { SupervisorStateStore } from './state.js';
+import { collectAgentContext } from './collector.js';
+import { LLMJudge } from './judge.js';
 import { resolveV1ManifestForAgent } from '../lib/agent-home-v1.js';
 
 function readJsonl(filePath, limit = 2000) {
@@ -509,6 +511,9 @@ export class SupervisorService {
     this.events = readJsonl(this.config.logFile, this.config.eventHistoryLimit);
     this.latestByAgent = new Map();
 
+    this._llmJudge = null; // lazy-init on first suspected_eos
+    this._lastPaneResult = new Map(); // agent -> { hash, verdict } (dedup + cache LLM calls)
+
     this.running = false;
     this.timer = null;
     this.lastSweepAt = 0;
@@ -551,10 +556,21 @@ export class SupervisorService {
       return;
     }
     if (this.timer) return;
+    // Reset accumulated state from disabled periods to prevent stale false positives
+    for (const [name, row] of Object.entries(this.stateStore.agents || {})) {
+      if (row && row.consecutiveNegative > 0) {
+        row.consecutiveNegative = 0;
+        row.lastNudgeAt = 0;
+        row.lastNudgeCount = 0;
+        row.lastEscalationAt = 0;
+        row.lastEscalationCount = 0;
+      }
+    }
+    this.stateStore.save();
     this.cleanupOrphanSupervisorSessions();
-    this.runSweep();
+    this.runSweep().catch(() => {});
     this.timer = setInterval(() => {
-      this.runSweep();
+      this.runSweep().catch(() => {});
     }, this.config.intervalMs);
     console.log(`[supervisor] started interval=${this.config.intervalMs}ms heartbeatTtl=${this.config.heartbeatTtlMs}ms trailing=${this.config.trailingWindowMs}ms`);
   }
@@ -899,9 +915,49 @@ export class SupervisorService {
     }
   }
 
-  evaluateOne(candidate, now = Date.now()) {
+  async evaluateOne(candidate, now = Date.now()) {
     const agentName = candidate.agent.name;
     const observation = this.deriveObservation(candidate, now);
+
+    // Fix 2: If suspected_eos, check if agent's tmux session actually exists
+    if (observation.classification === 'suspected_eos' && candidate.agent.tmux) {
+      const agentSession = String(candidate.agent.tmux).split(':')[0];
+      if (agentSession && !this.tmuxSessionExists(agentSession)) {
+        observation.classification = 'abandoned';
+        observation.reason = 'Agent tmux session no longer exists.';
+      }
+    }
+
+    // Fix 3: Wire LLM judge behind suspected_eos — only escalate if LLM concurs
+    if (observation.classification === 'suspected_eos') {
+      try {
+        const context = await collectAgentContext(this.config, agentName, candidate.agent, candidate.runtime);
+        const cached = this._lastPaneResult.get(agentName);
+        if (cached && context.pane.hash === cached.hash) {
+          // Reuse cached verdict — pane unchanged since last LLM call
+          if (!cached.negative) {
+            observation.classification = 'active';
+            observation.reason = `LLM judge cached override: ${cached.status} — ${cached.reason || 'on track'}`;
+          }
+        } else {
+          if (!this._llmJudge) {
+            this._llmJudge = new LLMJudge(this.config);
+          }
+          const llmResult = await this._llmJudge.evaluate(context);
+          observation._llm = llmResult;
+          const llmNeg = llmResult.status === 'DRIFTING' || llmResult.status === 'LOST' || llmResult.status === 'STUCK';
+          this._lastPaneResult.set(agentName, { hash: context.pane.hash, negative: llmNeg, status: llmResult.status, reason: llmResult.reason });
+          if (!llmNeg) {
+            observation.classification = 'active';
+            observation.reason = `LLM judge override: ${llmResult.status} — ${llmResult.reason || 'on track'}`;
+          }
+        }
+      } catch (e) {
+        console.warn(`[supervisor] LLM judge failed for ${agentName}: ${e.message}`);
+        // Proceed with suspected_eos classification on judge failure
+      }
+    }
+
     const runtimeLaunch = this.reconcileSupervisorRuntime(candidate, observation, now);
     const eventInputHash = hashInput({
       task: observation.task,
@@ -955,7 +1011,7 @@ export class SupervisorService {
         runtimeIdleObserved: observation.runtimeIdleObserved,
         runtimeLaunch,
       },
-      llm: null,
+      llm: observation._llm || null,
       action: null,
     };
 
@@ -1053,7 +1109,7 @@ export class SupervisorService {
     return event;
   }
 
-  runSweep() {
+  async runSweep() {
     if (!this.enabledRequested) return;
     if (this.running) return;
     this.running = true;
@@ -1068,7 +1124,7 @@ export class SupervisorService {
       this.stateStore.clearMissingAgents(allCandidates.map(row => row.agent.name));
       let evaluated = 0;
       for (const row of candidates) {
-        this.evaluateOne(row, started);
+        await this.evaluateOne(row, started);
         evaluated++;
       }
       this.lastSweepEvaluated = evaluated;
@@ -1168,7 +1224,7 @@ export class SupervisorService {
       this.agentAllowlist = normalizeAgentAllowlist(patch.allowedAgents);
     }
 
-    if (this.enabledRequested) this.runSweep();
+    if (this.enabledRequested) this.runSweep().catch(() => {});
 
     return {
       ok: true,

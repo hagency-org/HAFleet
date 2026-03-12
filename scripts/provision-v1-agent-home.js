@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
 import { execFileSync } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
@@ -623,6 +623,11 @@ function main() {
   ensureDir(path.join(paths.stateDir, 'locks'));
   ensureDir(path.join(paths.stateDir, 'history'));
   ensureDir(path.join(paths.stateDir, 'tmp'));
+  // Generate per-agent auth token if missing
+  const agentTokenPath = path.join(paths.stateDir, 'agent-token');
+  if (!existsSync(agentTokenPath)) {
+    writeFileSync(agentTokenPath, randomBytes(32).toString('hex') + '\n', { mode: 0o600 });
+  }
   ensureDir(paths.workdir);
   ensureDir(paths.docsDir);
   ensureDir(paths.projectsDir);

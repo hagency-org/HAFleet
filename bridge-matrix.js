@@ -227,6 +227,18 @@ if (!state.trustedManagedRooms) {
   }
   saveState();
 }
+// Always seed botDmRooms into trustedManagedRooms (handles upgrades where
+// trustedManagedRooms already existed before botDmRoom seeding was added)
+{
+  let seeded = false;
+  for (const [human, roomId] of Object.entries(state.botDmRooms || {})) {
+    if (roomId && !state.trustedManagedRooms[roomId]) {
+      state.trustedManagedRooms[roomId] = { botDm: true, human, addedAt: Date.now() };
+      seeded = true;
+    }
+  }
+  if (seeded) saveState();
+}
 
 function normalizeNameKey(value) {
   if (typeof value !== 'string') return '';
@@ -307,7 +319,19 @@ function agentUserId(name) {
 }
 
 function humanUserId(name) {
+  // Accept full MXID (federated users) or localpart (legacy)
+  if (typeof name === 'string' && name.startsWith('@') && name.includes(':')) return name;
   return makeUserId(name);
+}
+
+/** DM key: federated users key by full MXID, local users by localpart. */
+function humanDmKey(name) {
+  if (typeof name === 'string' && name.startsWith('@') && name.includes(':')) {
+    const homeserver = name.slice(name.indexOf(':') + 1);
+    if (homeserver !== MATRIX_SERVER_NAME) return name; // federated → full MXID
+    return name.slice(1, name.indexOf(':')); // local → localpart
+  }
+  return name;
 }
 
 function deriveAgentPassword(agentName) {
@@ -1191,6 +1215,7 @@ export class MatrixBridge {
     // Warning storm protection — delegated to NotificationRouter
     this._backendHealthy = true;          // false when backend is unresponsive
     this._reconcileSuspendLogged = false; // log suspension only once
+    this._loggedUntrustedRooms = new Set(); // dedup scan-joined trust logs
     this._warningRouter = new NotificationRouter({
       warning: {
         cooldownMs: WARNING_DEDUPE_WINDOW_MS,
@@ -1638,7 +1663,7 @@ export class MatrixBridge {
         if (name.startsWith(AGENT_PREFIX)) continue;
         if (name.startsWith('_')) continue;
         if (SKIP_USERS.has(name)) continue;
-        if (state.greetedHumans.includes(name)) continue;
+        if (state.greetedHumans.includes(humanDmKey(name))) continue;
 
         // This is an ungreeted human — create DM and greet
         await this.greetHuman(name, user.user_id);
@@ -1650,7 +1675,8 @@ export class MatrixBridge {
 
   async ensureBotDmRoom(humanName, matrixUserId) {
     if (!state.botDmRooms) state.botDmRooms = {};
-    if (state.botDmRooms[humanName]) return state.botDmRooms[humanName];
+    const dmKey = humanDmKey(humanName);
+    if (state.botDmRooms[dmKey]) return state.botDmRooms[dmKey];
 
     try {
       const res = await fetch(`${HOMESERVER}/_matrix/client/v3/createRoom`, {
@@ -1664,7 +1690,7 @@ export class MatrixBridge {
       });
       const data = await res.json();
       if (data.room_id) {
-        state.botDmRooms[humanName] = data.room_id;
+        state.botDmRooms[dmKey] = data.room_id;
         saveState();
         return data.room_id;
       }
@@ -1688,7 +1714,7 @@ export class MatrixBridge {
       });
 
       if (!state.greetedHumans) state.greetedHumans = [];
-      state.greetedHumans.push(humanName);
+      state.greetedHumans.push(humanDmKey(humanName));
       saveState();
       console.log(`Greeted human: ${humanName}`);
     } catch (e) {
@@ -2100,14 +2126,23 @@ export class MatrixBridge {
     }
     try {
       const rooms = await this.botClient.getJoinedRooms();
+      let trusted = 0, untrusted = 0, newlyDetected = 0;
       for (const roomId of rooms) {
         const trust = getRoomTrust(roomId);
         if (!trust.trusted) {
-          roomTrustLog('scan-joined', roomId, trust);
+          untrusted++;
+          if (!this._loggedUntrustedRooms.has(roomId)) {
+            this._loggedUntrustedRooms.add(roomId);
+            newlyDetected++;
+            roomTrustLog('scan-joined', roomId, trust);
+          }
           if (MATRIX_TRUST_MODE === 'enforce') {
             try { await this.botClient.leaveRoom(roomId); } catch {}
             continue;
           }
+        } else {
+          trusted++;
+          this._loggedUntrustedRooms.delete(roomId);
         }
         const mappedGroup = groupForRoom(roomId);
         if (mappedGroup) {
@@ -2121,6 +2156,7 @@ export class MatrixBridge {
           await ensureRoomAvatar(roomId, discoveredGroup);
         }
       }
+      if (untrusted > 0) console.log(`[trust] scan summary: ${trusted} trusted, ${untrusted} untrusted (${newlyDetected} newly detected)`);
     } catch (e) {
       console.error('Failed to scan joined rooms:', e.message);
     }
@@ -2352,9 +2388,9 @@ export class MatrixBridge {
       });
       es.on('dm_ensure', (data) => {
         try {
-          const { agent, human } = JSON.parse(data);
-          console.log(`SSE: dm_ensure request — agent=${agent}, human=${human}`);
-          this.onDmEnsure(agent, human);
+          const { agent, human, humanId } = JSON.parse(data);
+          console.log(`SSE: dm_ensure request — agent=${agent}, human=${human}${humanId ? ` humanId=${humanId}` : ''}`);
+          this.onDmEnsure(agent, human, humanId || null);
         } catch (e) {
           console.warn(`Failed to parse SSE dm_ensure event: ${e.message}`);
         }
@@ -2423,15 +2459,17 @@ export class MatrixBridge {
     connect();
   }
 
-  async onDmEnsure(agentName, humanName) {
+  async onDmEnsure(agentName, humanName, humanId) {
+    // Use humanId (full MXID) when available for federated identity
+    const effectiveHuman = humanId || humanName;
     // Dedup lock: prevent concurrent DM creation for the same agent+human pair
-    const lockKey = `dm:${agentName}:${humanName}`;
+    const lockKey = `dm:${agentName}:${humanDmKey(effectiveHuman)}`;
     if (!this._dmEnsureLocks) this._dmEnsureLocks = new Map();
     if (this._dmEnsureLocks.has(lockKey)) {
       console.log(`SSE: dm_ensure skipped (already in progress): ${lockKey}`);
       return this._dmEnsureLocks.get(lockKey);
     }
-    const promise = this._doOnDmEnsure(agentName, humanName);
+    const promise = this._doOnDmEnsure(agentName, effectiveHuman);
     this._dmEnsureLocks.set(lockKey, promise);
     try { await promise; } finally { this._dmEnsureLocks.delete(lockKey); }
   }
@@ -2467,13 +2505,14 @@ export class MatrixBridge {
     const sentRooms = new Set();
     for (const target of targets) {
       const human = (typeof target?.human === 'string' && target.human.trim()) ? target.human.trim() : '';
+      const humanId = (typeof target?.humanId === 'string' && target.humanId.trim()) ? target.humanId.trim() : '';
       let roomId = (typeof target?.roomId === 'string' && target.roomId.trim()) ? target.roomId.trim() : '';
       if (!roomId && typeof target?.group === 'string' && target.group.trim()) {
         roomId = roomForGroup(target.group.trim()) || '';
       }
-      if (!roomId && human) {
+      if (!roomId && (humanId || human)) {
         try {
-          const ensured = await this.ensureHumanDmRoom(agentName, human);
+          const ensured = await this.ensureHumanDmRoom(agentName, humanId || human);
           if (ensured?.roomId) roomId = ensured.roomId;
         } catch (e) {
           console.warn(`Failed to ensure DM room for blocked alert (${agentName} -> ${human}): ${e.message}`);
@@ -2845,9 +2884,9 @@ export class MatrixBridge {
 
     let key;
     if (fromIsAgent && !toIsAgent) {
-      key = `dm:${resolvedFromName}`; // human→agent: keyed by agent
+      key = `dm:${resolvedFromName}:${humanDmKey(resolvedToName)}`; // human→agent: keyed by agent+human
     } else if (!fromIsAgent && toIsAgent) {
-      key = `dm:${resolvedToName}`; // agent→human: keyed by agent
+      key = `dm:${resolvedToName}:${humanDmKey(resolvedFromName)}`; // agent→human: keyed by agent+human
     } else {
       key = [resolvedFromName, resolvedToName].sort().join(':'); // agent↔agent: pair key
     }
@@ -2858,7 +2897,7 @@ export class MatrixBridge {
       // If human↔agent, invite the human into existing room (idempotent)
       if (key.startsWith('dm:')) {
         const humanName = fromIsAgent ? resolvedToName : resolvedFromName;
-        const agentName = key.slice(3);
+        const agentName = key.split(':')[1];
         const ensured = await this._ensureHumanInviteOrFail(existingRoom, humanName, agentName);
         if (!ensured.ok) return null;
       }
@@ -2887,7 +2926,7 @@ export class MatrixBridge {
         }
         if (key.startsWith('dm:')) {
           const humanName = fromIsAgent ? resolvedToName : resolvedFromName;
-          const agentName = key.slice(3);
+          const agentName = key.split(':')[1];
           // Ensure room name/members are correct (handles legacy SPY rooms) — once per session
           if (!this.upgradedDmRooms.has(roomId)) {
             this.upgradedDmRooms.add(roomId);

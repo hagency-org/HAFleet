@@ -714,6 +714,62 @@ describe('server heartbeat api', () => {
     expect(agent.body.online).toBe(true);
   });
 
+  test('stores version from heartbeat payload in server record', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed());
+
+    await postHeartbeat(context.app, {
+      server: 's1',
+      instanceId: 'i1',
+      bootTs: 1,
+      agents: [],
+      sessions: [],
+      version: 'abc1234',
+    });
+    const servers = readJson(serversPath(context.runtimeDir));
+
+    expect(servers.s1.version).toBe('abc1234');
+  });
+
+  test('exposes version via GET /api/servers response', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed());
+
+    await postHeartbeat(context.app, {
+      server: 's1',
+      instanceId: 'i1',
+      bootTs: 1,
+      agents: [],
+      sessions: [],
+      version: 'def5678',
+    });
+    const response = await request(context.app).get('/api/servers');
+
+    expect(response.status).toBe(200);
+    expect(response.body[0].version).toBe('def5678');
+  });
+
+  test('preserves last known version when heartbeat omits it', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed());
+
+    await postHeartbeat(context.app, {
+      server: 's1',
+      instanceId: 'i1',
+      bootTs: 1,
+      agents: [],
+      sessions: [],
+      version: 'abc1234',
+    });
+    await postHeartbeat(context.app, {
+      server: 's1',
+      instanceId: 'i1',
+      bootTs: 1,
+      agents: [],
+      sessions: [],
+    });
+    const servers = readJson(serversPath(context.runtimeDir));
+
+    expect(servers.s1.version).toBe('abc1234');
+  });
+
   test('returns an empty server list before any heartbeat is received', async () => {
     context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed());
 

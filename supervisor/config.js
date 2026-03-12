@@ -118,7 +118,7 @@ export function loadSupervisorConfig(env = process.env) {
 
   const enabledBySwitch = parseBool(env.SUPERVISOR_ENABLED, false);
   const enabled = enabledBySwitch;
-  const heartbeatTtlMs = parseMs(env.SUPERVISOR_HEARTBEAT_TTL_MS || env.SUPERVISOR_INTERVAL_MS || '30000', 30000);
+  const heartbeatTtlMs = parseMs(env.SUPERVISOR_HEARTBEAT_TTL_MS || '120000', 120000);
   const trailingHeartbeatPeriods = parseIntStrict(env.SUPERVISOR_TRAILING_HEARTBEAT_PERIODS || '5', 5, 1);
 
   return {

@@ -143,6 +143,71 @@ mkdirSync(MATRIX_MEDIA_DIR, { recursive: true });
 const MATRIX_OPERATOR_MXIDS = new Set(
   (process.env.MATRIX_OPERATOR_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
+/** Read bridge secret fresh from env on each call (tests toggle process.env between cases). */
+function getBridgeSecret() { return (process.env.MATRIX_BRIDGE_SECRET || '').trim(); }
+/** Middleware: reject if bridge secret is configured and caller doesn't match. */
+function requireBridgeSecret(req, res, next) {
+  const secret = getBridgeSecret();
+  if (secret && req.headers['x-bridge-secret'] !== secret) {
+    return res.status(403).json({ error: 'bridge secret required' });
+  }
+  next();
+}
+// ── Per-agent token authentication (5.8.6) ───────────────────────────
+const AGENT_TOKEN_MODE = (() => {
+  const m = (process.env.AGENTCHAT_AGENT_TOKEN_MODE || 'audit').trim().toLowerCase();
+  return m === 'hard' ? 'hard' : m === 'soft' ? 'soft' : 'audit';
+})();
+const agentTokens = new Map(); // agentName → token string
+function loadAgentTokens() {
+  const homeDir = defaultAgentchatHomeDir();
+  const agentsDir = path.join(homeDir, 'agents');
+  let loaded = 0;
+  try {
+    for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('agent_')) continue;
+      const name = entry.name.slice('agent_'.length);
+      const tokenPath = path.join(agentsDir, entry.name, 'state', 'agent-token');
+      try {
+        const token = readFileSync(tokenPath, 'utf-8').trim();
+        if (token) { agentTokens.set(name, token); loaded++; }
+      } catch { /* missing token file — expected for un-provisioned agents */ }
+    }
+  } catch { /* missing agents dir */ }
+  if (loaded > 0) console.log(`[auth] loaded ${loaded} agent token(s), mode=${AGENT_TOKEN_MODE}`);
+}
+function checkAgentToken(agentName, req) {
+  if (!agentName) return { ok: true };
+  const expected = agentTokens.get(agentName);
+  // No token configured → sender is not a managed agent (system, human, bridge);
+  // allow through in all modes — token auth only applies to managed agents.
+  if (!expected) return { ok: true };
+  const provided = (req.headers['x-agent-token'] || '').trim();
+  if (!provided) return { ok: false, reason: 'token required but not provided' };
+  if (provided !== expected) return { ok: false, reason: 'token mismatch' };
+  return { ok: true };
+}
+function requireAgentToken(extractAgent) {
+  return (req, res, next) => {
+    const agentName = extractAgent(req);
+    const result = checkAgentToken(agentName, req);
+    if (!result.ok) {
+      const msg = `[auth] agent-token ${result.reason}: agent=${agentName} mode=${AGENT_TOKEN_MODE}`;
+      if (AGENT_TOKEN_MODE === 'audit') { console.warn(msg); return next(); }
+      console.warn(msg);
+      return res.status(403).json({ error: `agent token ${result.reason}` });
+    }
+    next();
+  };
+}
+const VALID_ENVIRONMENTS = new Set(['live', 'dev', 'benchmark', 'ephemeral']);
+function classifyEnvironment(name) {
+  const n = String(name).toLowerCase();
+  if (/(?:^|[-_])(?:test|tmp|scratch|smoke|e2e)(?:[-_]|$)/.test(n)) return 'ephemeral';
+  if (/(?:^|[-_])(?:bench|benchmark)(?:[-_]|$)/.test(n)) return 'benchmark';
+  if (/(?:^|[-_])(?:dev|debug)(?:[-_]|$)/.test(n)) return 'dev';
+  return 'live';
+}
 const MEDIA_FETCH_ALLOWED_ROOTS = [
   path.resolve(MESSAGE_ATTACHMENT_DIR),
   path.resolve(MATRIX_MEDIA_DIR),
@@ -2510,6 +2575,14 @@ function buildOperationalSubconsciousContract(contract) {
 
 // ── In-memory state ───────────────────────────────────────────────────
 const agents = loadJsonSync('agents.json', {});
+// Migrate agents missing environment field
+{ let migrated = 0;
+  for (const a of Object.values(agents)) {
+    if (a && typeof a === 'object' && !a.environment) { a.environment = classifyEnvironment(a.name); migrated++; }
+  }
+  if (migrated > 0) { saveJson('agents.json', agents, { immediate: true }); console.log(`[startup] migrated environment for ${migrated} agent(s)`); }
+}
+loadAgentTokens();
 const deletedAgentTombstones = loadJsonSync('deleted_agents.json', {});
 const groups = loadJsonSync('groups.json', {});
 const messages = loadJsonSync('messages.json', []);
@@ -3291,6 +3364,7 @@ function summarizeMsg(m) {
     sourceRoom: m.sourceRoom || null,
     senderMxid: m.senderMxid || null,
     trustLevel: m.trustLevel || null,
+    fromId: m.fromId || null,
   };
   const normalizedSchema = normalizeMessageSchema(m?.schema);
   if (normalizedSchema.value) out.schema = normalizedSchema.value;
@@ -4090,6 +4164,7 @@ function collectBlockedHumanTargets(agentName) {
       .sort(compareMsgOrder)
       .map(msg => ({
         human: msg.from,
+        humanId: msg.fromId || msg.senderMxid || null,
         roomId: (typeof msg.sourceRoom === 'string' && msg.sourceRoom.trim()) ? msg.sourceRoom.trim() : null,
         group: msg.group || null,
         messageId: msg.id,
@@ -5347,6 +5422,7 @@ function serializeAgent(agent) {
     human: normalizeHumanMeta(agent.human),
     task: normalizeAgentTask(agent.task, agent.name),
     runtimeProfile: normalizeRuntimeProfile(agent.runtimeProfile),
+    environment: VALID_ENVIRONMENTS.has(agent.environment) ? agent.environment : classifyEnvironment(agent.name),
     activeNow: runtime?.activeNow === true,
     activeDurationSec: Number(runtime?.activeDurationSec) || 0,
     idleDurationSec: Number(runtime?.idleDurationSec) || 0,
@@ -6062,7 +6138,10 @@ setInterval(() => {
 }, 30000);
 
 // ── Agents CRUD ───────────────────────────────────────────────────────
-app.post('/api/agents', (req, res) => {
+const _tokenFromBody = r => r.body?.from || r.body?.name || '';
+const _tokenFromName = r => r.params?.name || '';
+const _tokenFromAgent = r => r.body?.agent || r.params?.agent || r.query?.agent || '';
+app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) => {
   const {
     name,
     role,
@@ -6081,6 +6160,7 @@ app.post('/api/agents', (req, res) => {
     human,
     task,
     runtimeProfile,
+    environment,
   } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   if (task !== undefined && task !== null && !normalizeAgentTask(task, normalizeAgentName(name) || String(name || '').trim())) {
@@ -6140,6 +6220,8 @@ app.post('/api/agents', (req, res) => {
     runtimeProfile: runtimeProfile !== undefined
       ? normalizeRuntimeProfile(runtimeProfile)
       : normalizeRuntimeProfile(existing.runtimeProfile),
+    environment: (VALID_ENVIRONMENTS.has(environment) ? environment : null)
+      || existing.environment || classifyEnvironment(agentName),
   };
   saveAgents();
   writeThruAgentHome(agentName);
@@ -6162,7 +6244,7 @@ app.post('/api/agents', (req, res) => {
   res.json({ ok: true, agent: serializeAgent(agents[agentName]) });
 });
 
-app.patch('/api/agents/:name', (req, res) => {
+app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => {
   refreshServerLiveness();
   const agentName = normalizeAgentName(req.params.name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
@@ -6187,6 +6269,7 @@ app.patch('/api/agents/:name', (req, res) => {
     human,
     task,
     runtimeProfile,
+    environment,
   } = req.body;
   if (task !== undefined && task !== null && !normalizeAgentTask(task, agentName)) {
     return res.status(400).json({ error: 'invalid task payload' });
@@ -6257,6 +6340,9 @@ app.patch('/api/agents/:name', (req, res) => {
   }
   if (runtimeProfile !== undefined) {
     agent.runtimeProfile = normalizeRuntimeProfile(runtimeProfile);
+  }
+  if (environment !== undefined && VALID_ENVIRONMENTS.has(environment)) {
+    agent.environment = environment;
   }
   if (agent.online === true && agent.manualDown !== false) {
     agent.manualDown = false;
@@ -6331,7 +6417,7 @@ app.post('/api/agents/:name/undelete', (req, res) => {
   res.json({ ok: true, undeleted: true, name: agentName });
 });
 
-app.post('/api/agents/:name/offline', (req, res) => {
+app.post('/api/agents/:name/offline', requireAgentToken(_tokenFromName), (req, res) => {
   const agentName = normalizeAgentName(req.params.name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   const agent = agents[agentName];
@@ -6358,7 +6444,7 @@ app.post('/api/agents/:name/offline', (req, res) => {
   res.json({ ok: true, agent: serializeAgent(agent) });
 });
 
-app.post('/api/agents/:name/runtime', (req, res) => {
+app.post('/api/agents/:name/runtime', requireAgentToken(_tokenFromName), (req, res) => {
   const agentName = normalizeAgentName(req.params.name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
 
@@ -7426,7 +7512,7 @@ app.patch('/api/task-graphs/:id/nodes/:nodeId', (req, res) => {
 });
 
 // ── Groups CRUD ───────────────────────────────────────────────────────
-app.post('/api/groups', (req, res) => {
+app.post('/api/groups', requireBridgeSecret, (req, res) => {
   const { name, members } = req.body;
   const groupName = (typeof name === 'string' ? name.trim() : '');
   if (!groupName) return res.status(400).json({ error: 'name required' });
@@ -7457,7 +7543,7 @@ app.get('/api/groups/:name', (req, res) => {
   res.json(group);
 });
 
-app.post('/api/groups/:name/members', (req, res) => {
+app.post('/api/groups/:name/members', requireBridgeSecret, (req, res) => {
   const group = groups[req.params.name];
   if (!group) return res.status(404).json({ error: 'group not found' });
   const { add, remove } = req.body;
@@ -7505,7 +7591,7 @@ app.post('/api/groups/:name/members', (req, res) => {
   res.json({ ok: true, group });
 });
 
-app.delete('/api/groups/:name', (req, res) => {
+app.delete('/api/groups/:name', requireBridgeSecret, (req, res) => {
   if (!groups[req.params.name]) return res.status(404).json({ error: 'group not found' });
   delete groups[req.params.name];
   saveGroups();
@@ -7514,14 +7600,15 @@ app.delete('/api/groups/:name', (req, res) => {
 
 // ── DM ensure (triggers bridge to create Matrix DM room) ─────────────
 app.post('/api/dm/ensure', (req, res) => {
-  const { agent, human } = req.body;
+  const { agent, human, humanId } = req.body;
   if (!agent || !human) return res.status(400).json({ error: 'agent and human required' });
-  broadcastSSE('dm_ensure', { agent, human });
-  console.log(`[dm/ensure] Requested DM room: agent=${agent}, human=${human}`);
-  res.json({ ok: true, queued: true, agent, human });
+  const resolvedHumanId = (typeof humanId === 'string' && humanId.trim()) ? humanId.trim() : null;
+  broadcastSSE('dm_ensure', { agent, human, humanId: resolvedHumanId });
+  console.log(`[dm/ensure] Requested DM room: agent=${agent}, human=${human}${resolvedHumanId ? ` humanId=${resolvedHumanId}` : ''}`);
+  res.json({ ok: true, queued: true, agent, human, humanId: resolvedHumanId });
 });
 
-app.post('/api/agents/:name/avatar', express.json({ limit: '10mb' }), (req, res) => {
+app.post('/api/agents/:name/avatar', express.json({ limit: '10mb' }), requireAgentToken(_tokenFromName), (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid agent name' });
   const force = req.body?.generate === true || req.query.force === 'true';
@@ -7533,7 +7620,7 @@ app.post('/api/agents/:name/avatar', express.json({ limit: '10mb' }), (req, res)
 });
 
 // ── System info (log-only; does not enter message store) ──────────────
-app.post('/api/system/info', (req, res) => {
+app.post('/api/system/info', requireBridgeSecret, (req, res) => {
   const summary = (typeof req.body?.summary === 'string') ? req.body.summary.trim() : '';
   const full = (typeof req.body?.full === 'string') ? req.body.full : '';
   if (!summary) return res.status(400).json({ error: 'summary required' });
@@ -7542,7 +7629,7 @@ app.post('/api/system/info', (req, res) => {
 });
 
 // ── Media staging for agent attachments ───────────────────────────────
-app.post('/api/media/stage', express.json({ limit: MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT }), (req, res) => {
+app.post('/api/media/stage', express.json({ limit: MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT }), requireAgentToken(_tokenFromBody), (req, res) => {
   const fromName = normalizeAgentName(req.body?.from || '');
   if (!fromName) return res.status(400).json({ error: 'from required' });
   if (!isAgentRecord(agents[fromName])) return res.status(404).json({ error: `agent not found: ${fromName}` });
@@ -7615,8 +7702,8 @@ app.get('/api/media/fetch', (req, res) => {
 });
 
 // ── Messages ──────────────────────────────────────────────────────────
-app.post('/api/messages', (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid } = req.body;
+app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid, from_id } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -7625,9 +7712,8 @@ app.post('/api/messages', (req, res) => {
     ? source_room.trim()
     : null;
   // Only accept sender_mxid from authenticated bridge requests (or if no secret is configured)
-  const bridgeSecret = (process.env.MATRIX_BRIDGE_SECRET || '').trim();
-  const callerSecret = req.headers['x-bridge-secret'] || '';
-  const isBridgeAuthenticated = !bridgeSecret || callerSecret === bridgeSecret;
+  const bridgeSecret = getBridgeSecret();
+  const isBridgeAuthenticated = !bridgeSecret || req.headers['x-bridge-secret'] === bridgeSecret;
   const senderMxid = isBridgeAuthenticated && sourceType === 'matrix' && typeof sender_mxid === 'string' && /^@[^:]+:.+/.test(sender_mxid.trim())
     ? sender_mxid.trim().slice(0, 255) : null;
   // Derive trustLevel server-side from validated senderMxid — never trust caller-supplied value
@@ -7780,6 +7866,8 @@ app.post('/api/messages', (req, res) => {
     sourceRoom,
     senderMxid,
     trustLevel,
+    fromId: isBridgeAuthenticated && (typeof from_id === 'string' && from_id.trim()) ? from_id.trim().slice(0, 255)
+      : (senderMxid || null),
   };
   if (normalizedAttachments.length > 0) {
     msg.attachments = normalizedAttachments;
@@ -7875,7 +7963,7 @@ app.get('/api/messages/:id', (req, res) => {
   });
 });
 
-app.post('/api/messages/:id/suppress', (req, res) => {
+app.post('/api/messages/:id/suppress', requireAgentToken(_tokenFromAgent), (req, res) => {
   const agentName = normalizeAgentName(req.body?.agent);
   if (!agentName) return res.status(400).json({ error: 'agent required' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
@@ -7980,7 +8068,7 @@ ${attachmentsHtml}
 });
 
 // ── Inbox ─────────────────────────────────────────────────────────────
-app.get('/api/inbox/:agent/unread', (req, res) => {
+app.get('/api/inbox/:agent/unread', requireAgentToken(_tokenFromAgent), (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
@@ -7989,7 +8077,7 @@ app.get('/api/inbox/:agent/unread', (req, res) => {
   res.json(snapshot);
 });
 
-app.get('/api/inbox/:agent/unread-list', (req, res) => {
+app.get('/api/inbox/:agent/unread-list', requireAgentToken(_tokenFromAgent), (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
@@ -8008,7 +8096,7 @@ app.get('/api/inbox/:agent/unread-list', (req, res) => {
   });
 });
 
-app.get('/api/inbox/:agent', (req, res) => {
+app.get('/api/inbox/:agent', requireAgentToken(_tokenFromAgent), (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
