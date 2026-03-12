@@ -1,0 +1,87 @@
+import { describe, expect, test, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import path from 'path';
+import os from 'os';
+
+import { assertRuntimeDir, isLocalAgentServer } from '../lib/runtime-dir-guard.js';
+
+describe('assertRuntimeDir', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(path.join(os.tmpdir(), 'rtguard-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test('no-op when path does not exist', () => {
+    expect(() => assertRuntimeDir('/nonexistent/path/abc123')).not.toThrow();
+  });
+
+  test('no-op when path is falsy', () => {
+    expect(() => assertRuntimeDir(null)).not.toThrow();
+    expect(() => assertRuntimeDir('')).not.toThrow();
+    expect(() => assertRuntimeDir(undefined)).not.toThrow();
+  });
+
+  test('no-op for clean runtime dir', () => {
+    mkdirSync(path.join(tmpDir, 'data'), { recursive: true });
+    expect(() => assertRuntimeDir(tmpDir)).not.toThrow();
+  });
+
+  test('throws when runtime root basename contains stale-backup', () => {
+    const staleDir = path.join(tmpDir, 'data-stale-backup');
+    mkdirSync(staleDir, { recursive: true });
+    expect(() => assertRuntimeDir(staleDir)).toThrow(/stale backup directory/);
+  });
+
+  test('throws when data dir has stale sibling', () => {
+    mkdirSync(path.join(tmpDir, 'data'), { recursive: true });
+    mkdirSync(path.join(tmpDir, 'data-stale-old'), { recursive: true });
+    expect(() => assertRuntimeDir(tmpDir)).toThrow(/stale data marker/);
+  });
+
+  test('throws when data dir has data_stale sibling (underscore)', () => {
+    mkdirSync(path.join(tmpDir, 'data'), { recursive: true });
+    mkdirSync(path.join(tmpDir, 'data_stale_bak'), { recursive: true });
+    expect(() => assertRuntimeDir(tmpDir)).toThrow(/stale data marker/);
+  });
+
+  test('no-op when data dir does not exist', () => {
+    // tmpDir exists but has no data/ subdirectory
+    expect(() => assertRuntimeDir(tmpDir)).not.toThrow();
+  });
+});
+
+describe('isLocalAgentServer', () => {
+  test('empty string is local', () => {
+    expect(isLocalAgentServer('')).toBe(true);
+  });
+
+  test('null/undefined is local', () => {
+    expect(isLocalAgentServer(null)).toBe(true);
+    expect(isLocalAgentServer(undefined)).toBe(true);
+  });
+
+  test('"local" is local', () => {
+    expect(isLocalAgentServer('local')).toBe(true);
+  });
+
+  test('custom local server id matches', () => {
+    expect(isLocalAgentServer('my-server', 'my-server')).toBe(true);
+  });
+
+  test('whitespace-only is local', () => {
+    expect(isLocalAgentServer('  ')).toBe(true);
+  });
+
+  test('remote server id is not local', () => {
+    expect(isLocalAgentServer('remote-abc')).toBe(false);
+  });
+
+  test('remote server id with custom local id', () => {
+    expect(isLocalAgentServer('remote-abc', 'my-server')).toBe(false);
+  });
+});
