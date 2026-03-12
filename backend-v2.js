@@ -9,6 +9,7 @@ import { promisify } from 'util';
 import { createSupervisorService } from './supervisor/index.js';
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
+import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
 import {
   buildUpstreamClaudeSubconsciousPaths,
   bootstrapUpstreamClaudeSubconsciousAgent,
@@ -2582,6 +2583,76 @@ const swapAlertState = {
 const scopePressureState = new Map(); // agent -> { high:bool, lastAlertAt:number }
 let localMcpSessionCacheAt = 0;
 let localMcpSessionCache = new Set();
+const agentMachines = new Map(); // agentName -> AgentStateMachine
+
+function getAgentMachine(agentName) {
+  let m = agentMachines.get(agentName);
+  if (m) return m;
+  const agent = agents[agentName];
+  const runtime = agentRuntime[agentName] || null;
+  const initial = deriveStateFromLegacy(agent || null, runtime);
+  m = new AgentStateMachine(initial);
+  m.onGraceExpired(() => {
+    const a = agents[agentName];
+    if (a) { a.state = m.state; saveAgents(); }
+  });
+  agentMachines.set(agentName, m);
+  return m;
+}
+
+function transitionAgent(agentName, event) {
+  const m = getAgentMachine(agentName);
+  const newState = m.transition(event);
+  const agent = agents[agentName];
+  if (agent) {
+    agent.state = newState;
+    agent.online = m.online;
+    agent.manualDown = m.manualDown;
+  }
+  return newState;
+}
+
+function syncAgentMachine(agentName, signals) {
+  if (!agentName) return;
+  const m = getAgentMachine(agentName);
+
+  if (signals.manualDown === true) {
+    transitionAgent(agentName, 'manual_down');
+    return;
+  }
+  if (signals.manualDown === false && m.state === 'manual_down') {
+    transitionAgent(agentName, 'manual_up');
+  }
+
+  if (signals.serverOffline) {
+    transitionAgent(agentName, 'server_offline');
+    return;
+  }
+  if (signals.tmuxMissing) {
+    transitionAgent(agentName, 'tmux_missing');
+    return;
+  }
+  if (signals.heartbeatMissing) {
+    transitionAgent(agentName, 'heartbeat_missing');
+    return;
+  }
+
+  if (signals.heartbeatPresent) {
+    transitionAgent(agentName, 'heartbeat_present');
+  } else if (signals.tmuxPresent && m.state === 'offline') {
+    transitionAgent(agentName, 'tmux_detected');
+  }
+
+  const agent = agents[agentName];
+  if (signals.mcpPresent === true) {
+    transitionAgent(agentName, 'mcp_confirmed');
+  } else if (signals.mcpPresent === false) {
+    if (m.state !== 'starting') transitionAgent(agentName, 'mcp_missing_debounced');
+  } else if (agent && !agentExpectsMcp(agent)) {
+    transitionAgent(agentName, 'mcp_not_applicable');
+  }
+}
+
 const agentsBeforeNormalization = JSON.stringify(agents);
 
 for (const ev of loadJsonlTailSync(SUBCONSCIOUS_EVENT_LOG, SUBCONSCIOUS_EVENT_HISTORY_LIMIT)) {
@@ -2653,6 +2724,11 @@ for (const agent of Object.values(agents)) {
 }
 if (JSON.stringify(agents) !== agentsBeforeNormalization) {
   saveJson('agents.json', agents);
+}
+for (const agent of Object.values(agents)) {
+  if (!agent.name) continue;
+  const m = getAgentMachine(agent.name);
+  agent.state = m.state;
 }
 
 const groupsBeforeNormalization = JSON.stringify(groups);
@@ -3281,6 +3357,8 @@ function clearDeletedAgentState(agentName) {
     cursorsChanged = true;
   }
 
+  const machine = agentMachines.get(name);
+  if (machine) { machine.destroy(); agentMachines.delete(name); }
   invalidatePendingHumanTargets(name);
   localActivityState.delete(name);
   localTmuxMissingState.delete(name);
@@ -3710,31 +3788,26 @@ function syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown) {
     agent.tmux = tmuxTarget;
     changed = true;
   }
+  // Drive online/manualDown through machine (transitionAgent syncs agent.online/manualDown)
+  const prevOnline = agent.online;
+  const prevManualDown = agent.manualDown;
+  syncAgentMachine(agent.name, {
+    manualDown,
+    tmuxPresent: true,
+    mcpPresent: runtime.mcpPresent === true ? true : (runtime.mcpPresent === false ? false : undefined),
+  });
+  if (agent.online !== prevOnline || agent.manualDown !== prevManualDown) changed = true;
+  // offlineReason is not machine-managed
   if (manualDown) {
-    if (agent.online !== false) {
-      agent.online = false;
-      changed = true;
-    }
-  } else if (mcpMissing) {
-    if (agent.online !== false) {
-      agent.online = false;
-      changed = true;
-    }
+    // offlineReason stays as-is for manual down
+  } else if (mcpMissing && (agent.state === 'degraded' || agent.state === 'offline')) {
     if (agent.offlineReason !== 'mcp-missing:auto') {
       agent.offlineReason = 'mcp-missing:auto';
       changed = true;
     }
-  } else {
-    if (agent.online !== true) {
-      agent.online = true;
-      changed = true;
-    }
+  } else if (!manualDown && !mcpMissing) {
     if (agent.offlineReason !== null) {
       agent.offlineReason = null;
-      changed = true;
-    }
-    if (agent.manualDown !== false) {
-      agent.manualDown = false;
       changed = true;
     }
   }
@@ -3946,21 +4019,24 @@ function applyAgentBlockedState(agentName, payload = {}) {
 
     if (mcpNow === false && !wasManualDown) {
       if (!agent.tmux || !String(agent.tmux).trim()) { agent.tmux = `${agentName}:0.0`; agentChanged = true; }
-      if (agent.online !== false) { agent.online = false; agentChanged = true; }
+      // online/manualDown driven by machine below
       if (agent.offlineReason !== 'mcp-missing:auto') { agent.offlineReason = 'mcp-missing:auto'; agentChanged = true; }
-      if (agent.manualDown !== false) { agent.manualDown = false; agentChanged = true; }
       if (agent.lastSeen !== now) { agent.lastSeen = now; agentChanged = true; }
     } else if (mcpNow === true) {
-      const recoverable = agent.offlineReason === 'mcp-missing:auto' || agent.online !== true;
+      const recoverable = agent.offlineReason === 'mcp-missing:auto' || !wasOnline;
       if (!agent.tmux || !String(agent.tmux).trim()) { agent.tmux = `${agentName}:0.0`; agentChanged = true; }
-      if (agent.online !== true) { agent.online = true; agentChanged = true; }
+      // online/manualDown driven by machine below
       if (agent.offlineReason === 'mcp-missing:auto') { agent.offlineReason = null; agentChanged = true; }
-      if (agent.manualDown !== false) { agent.manualDown = false; agentChanged = true; }
       if (agent.lastSeen !== now) { agent.lastSeen = now; agentChanged = true; }
       if (!wasOnline && !wasManualDown && recoverable) shouldCatchup = true;
     }
+    // Drive online/manualDown through machine
+    const prevOnline = agent.online;
+    syncAgentMachine(agent.name, {
+      mcpPresent: mcpNow === true ? true : (mcpNow === false ? false : undefined),
+    });
+    if (agent.online !== prevOnline) agentChanged = true;
   }
-  if (agentChanged) saveAgents();
   if (shouldCatchup) notifyAgentCatchup(agentName, 'mcp-restored');
 
   if (mcpBecameMissing) {
@@ -4227,14 +4303,18 @@ function markAgentsOfflineForServer(serverId, reason, clearTmux = false) {
   let changed = false;
   for (const agent of Object.values(agents)) {
     if (normalizeServer(agent.server) !== serverId) continue;
-    if (agent.online !== false) { agent.online = false; changed = true; }
-    if (agent.manualDown === true) {
+    const prevOnline = agent.online;
+    const prevManualDown = agent.manualDown;
+    if (prevManualDown) {
       if (clearTmux && agent.tmux !== null) { agent.tmux = null; changed = true; }
+      syncAgentMachine(agent.name, { serverOffline: true });
+      if (agent.online !== prevOnline) changed = true;
       continue;
     }
     if (agent.offlineReason !== reason) { agent.offlineReason = reason; changed = true; }
-    if (agent.manualDown !== false) { agent.manualDown = false; changed = true; }
     if (clearTmux && agent.tmux !== null) { agent.tmux = null; changed = true; }
+    syncAgentMachine(agent.name, { serverOffline: true });
+    if (agent.online !== prevOnline || agent.manualDown !== prevManualDown) changed = true;
   }
   return changed;
 }
@@ -4618,13 +4698,16 @@ async function sweepLocalActivityDurations() {
       const recentEnough = prevLastSeenMs <= 0 || seenAgeMs <= AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS;
       const wasManualDown = manualDown;
       let transitioned = false;
-      if (agent.online !== false) { agent.online = false; agentsChanged = true; transitioned = true; }
+      // online driven by machine via syncAgentMachine below
+      const prevOnline = agent.online;
       if (agent.tmux !== null) { agent.tmux = null; agentsChanged = true; transitioned = true; }
       if (!wasManualDown && agent.offlineReason !== 'tmux-missing:auto') {
         agent.offlineReason = 'tmux-missing:auto';
         agentsChanged = true;
         transitioned = true;
       }
+      syncAgentMachine(agent.name, { tmuxMissing: true });
+      if (agent.online !== prevOnline) { agentsChanged = true; transitioned = true; }
       if (transitioned) {
         agent.lastSeen = nowMs;
       }
@@ -5052,8 +5135,10 @@ function scheduleAdaptiveSweepLoop(label, fn, stateKey, baseIntervalMs) {
 function getAgentDeliveryState(name) {
   const agent = agents[name];
   if (!agent || !isAgentRecord(agent)) {
-    return { exists: false, online: false, server: null, serverOnline: false, lastSeen: null, offlineReason: 'not-agent' };
+    return { exists: false, online: false, healthy: false, server: null, serverOnline: false, lastSeen: null, offlineReason: 'not-agent' };
   }
+  const machine = getAgentMachine(name);
+  const agentOnline = machine.online;
   const serverId = normalizeServer(agent.server);
   let serverOnline = true;
   let serverLastSeen = null;
@@ -5063,14 +5148,15 @@ function getAgentDeliveryState(name) {
       serverOnline = Boolean(server.online);
       serverLastSeen = server.lastSeen || null;
     } else {
-      serverOnline = Boolean(agent.online);
+      serverOnline = agentOnline;
     }
   }
-  const online = Boolean(agent.online) && serverOnline;
+  const online = agentOnline && serverOnline;
   return {
     exists: true,
     online,
-    agentOnline: Boolean(agent.online),
+    healthy: machine.healthy && serverOnline,
+    agentOnline,
     server: serverId,
     serverOnline,
     lastSeen: agent.lastSeen || null,
@@ -5080,17 +5166,20 @@ function getAgentDeliveryState(name) {
 }
 
 function serializeAgent(agent) {
-  const state = getAgentDeliveryState(agent.name);
+  const deliveryState = getAgentDeliveryState(agent.name);
   const runtime = ensureAgentRuntimeRecord(agent.name);
+  const machine = getAgentMachine(agent.name);
   return {
     ...agent,
     server: normalizeServer(agent.server),
-    online: state.online,
-    agentOnline: state.agentOnline,
-    serverOnline: state.serverOnline,
-    lastSeen: state.lastSeen,
-    serverLastSeen: state.serverLastSeen,
-    offlineReason: state.offlineReason,
+    state: machine.state,
+    healthy: machine.healthy,
+    online: deliveryState.online,
+    agentOnline: deliveryState.agentOnline,
+    serverOnline: deliveryState.serverOnline,
+    lastSeen: deliveryState.lastSeen,
+    serverLastSeen: deliveryState.serverLastSeen,
+    offlineReason: deliveryState.offlineReason,
     manualDown: agent.manualDown === true,
     blocked: runtime?.blocked === true,
     blockedReason: runtime?.blockedReason || null,
@@ -5203,13 +5292,18 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
     if (!agent.tmux) { agent.tmux = `${name}:0.0`; agentsChanged = true; }
     const wasAgentOnline = agent.online === true;
     const runtime = ensureAgentRuntimeRecord(name);
-    const mcpMissing = runtime?.mcpPresent === false && agent.manualDown !== true;
-    const nextOnline = !mcpMissing;
-    if (!wasAgentOnline && nextOnline) becameOnline.push(name);
-    if (agent.online !== nextOnline) { agent.online = nextOnline; agentsChanged = true; }
-    if (nextOnline) {
+    // Drive online/manualDown through machine
+    syncAgentMachine(name, {
+      heartbeatPresent: true,
+      manualDown: false,
+      mcpPresent: runtime?.mcpPresent === true ? true : (runtime?.mcpPresent === false ? false : undefined),
+    });
+    if (!wasAgentOnline && agent.online) becameOnline.push(name);
+    if (agent.online !== wasAgentOnline) agentsChanged = true;
+    // offlineReason (non-machine field)
+    const mcpMissing = runtime?.mcpPresent === false;
+    if (!mcpMissing) {
       if (agent.offlineReason !== null) { agent.offlineReason = null; agentsChanged = true; }
-      if (agent.manualDown !== false) { agent.manualDown = false; agentsChanged = true; }
     } else if (agent.offlineReason !== 'mcp-missing:auto') {
       agent.offlineReason = 'mcp-missing:auto';
       agentsChanged = true;
@@ -5222,11 +5316,12 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
     if (liveSet.has(agent.name)) continue;
     const wasOnline = agent.online === true;
     const wasManualDown = agent.manualDown === true;
-    if (agent.online !== false) { agent.online = false; agentsChanged = true; }
     const reason = `heartbeat-missing:${serverId}`;
     if (agent.offlineReason !== reason) { agent.offlineReason = reason; agentsChanged = true; }
-    if (agent.manualDown !== false) { agent.manualDown = false; agentsChanged = true; }
     if (agent.tmux !== null) { agent.tmux = null; agentsChanged = true; }
+    // online/manualDown driven by machine
+    syncAgentMachine(agent.name, { heartbeatMissing: true });
+    if (agent.online !== wasOnline || agent.manualDown !== wasManualDown) agentsChanged = true;
     if (wasOnline && !wasManualDown) {
       maybeEmitUnexpectedOfflineAlert(agent.name, reason, { server: serverId, detail: 'Missing in remote heartbeat snapshot' });
     }
@@ -5883,6 +5978,16 @@ app.post('/api/agents', (req, res) => {
       : normalizeRuntimeProfile(existing.runtimeProfile),
   };
   saveAgents();
+  if (resolvedOnline) {
+    const isLocal = resolvedServer === 'local' || resolvedServer === LOCAL_SERVER_ID;
+    if (isLocal && resolvedTmux) {
+      // Local registration with tmux → STARTING (grace timer for MCP)
+      transitionAgent(agentName, 'api_register_with_tmux');
+    } else {
+      // Remote or non-tmux → direct ONLINE
+      syncAgentMachine(agentName, { heartbeatPresent: true, manualDown: false });
+    }
+  }
   if (!existingOnline && resolvedOnline) {
     notifyAgentCatchup(agentName, 'agent-online-update').catch((e) => {
       console.error(`catchup notify failed for ${agentName}:`, e.message);
@@ -5928,26 +6033,29 @@ app.patch('/api/agents/:name', (req, res) => {
   if (tmux !== undefined) {
     agent.tmux = tmux;
     if (tmux) {
-      agent.online = true;
+      // online driven by machine
+      syncAgentMachine(agentName, { tmuxPresent: true });
       agent.offlineReason = null;
       agent.lastSeen = Date.now();
     } else if (online === undefined) {
-      agent.online = false;
+      syncAgentMachine(agentName, { tmuxMissing: true });
       agent.offlineReason = agent.offlineReason || 'tmux-cleared';
     }
   }
   if (online !== undefined) {
-    agent.online = Boolean(online);
-    if (agent.online) {
+    // online:true only clears manualDown — real liveness comes from sweep/heartbeat
+    if (Boolean(online)) {
+      syncAgentMachine(agentName, { manualDown: false });
       agent.lastSeen = Date.now();
-      agent.offlineReason = null;
+    } else {
+      syncAgentMachine(agentName, { tmuxMissing: true });
     }
   }
   if (offlineReason !== undefined) {
     agent.offlineReason = (typeof offlineReason === 'string' && offlineReason.trim()) ? offlineReason.trim() : null;
   }
   if (manualDown !== undefined) {
-    agent.manualDown = manualDown === true;
+    syncAgentMachine(agentName, { manualDown: manualDown === true });
   }
   if (agentModelVersion !== undefined) {
     agent.agentModelVersion = normalizeAgentModelVersion(agentModelVersion) || null;
@@ -6029,11 +6137,10 @@ app.delete('/api/agents/:name', (req, res) => {
     console.log(`Agent '${agentName}' permanently deleted`);
     return res.json({ ok: true, deleted: true, name: agentName });
   }
-  agent.online = false;
   agent.tmux = null;
   agent.lastSeen = Date.now();
   if (!agent.offlineReason) agent.offlineReason = 'inactive';
-  agent.manualDown = true;
+  transitionAgent(agentName, 'api_unregister');
   saveAgents();
   res.json({
     ok: true,
@@ -6057,11 +6164,12 @@ app.post('/api/agents/:name/offline', (req, res) => {
   const manualDown = req.body?.manualDown === undefined
     ? isManualDownReason(reason)
     : req.body.manualDown === true;
-  agent.online = false;
+  // online/manualDown driven by machine
   agent.lastSeen = Date.now();
   agent.offlineReason = reason;
-  agent.manualDown = manualDown;
   if (clearTmux) agent.tmux = null;
+  if (manualDown) syncAgentMachine(agentName, { manualDown: true });
+  else syncAgentMachine(agentName, { tmuxMissing: true });
   saveAgents();
   if (wasOnline && !manualDown && !wasManualDown) {
     maybeEmitUnexpectedOfflineAlert(agentName, reason, { server: normalizeServer(agent.server) || 'local', detail: 'Marked offline via API' });
