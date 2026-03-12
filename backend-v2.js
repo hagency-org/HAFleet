@@ -120,6 +120,9 @@ const BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW = Number.parseInt(process.env.AGENT_B
 const BLOCKED_NOTIFICATION_COOLDOWN_MS = Number.isFinite(BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW)
   ? Math.max(0, BLOCKED_NOTIFICATION_COOLDOWN_MS_RAW)
   : 60000;
+const AUTO_CLEAR_COOLDOWN_MS = Number.parseInt(process.env.AGENT_AUTO_CLEAR_COOLDOWN_MS || '300000', 10);
+const autoClearLastTs = new Map();
+const autoClearPrevReason = new Map();
 
 mkdirSync(DATA_DIR, { recursive: true });
 const MESSAGE_ATTACHMENT_DIR = path.join(DATA_DIR, 'message-attachments');
@@ -4291,6 +4294,24 @@ function refreshServerLiveness() {
   if (agentsChanged) saveAgents();
 }
 
+async function injectSlashClear(tmuxTarget) {
+  if (!tmuxTarget) return false;
+  try {
+    const opts = { timeout: 5000 };
+    await execFileAsync('tmux', ['send-keys', '-t', String(tmuxTarget), 'C-c'], opts);
+    await new Promise(r => setTimeout(r, 300));
+    await execFileAsync('tmux', ['send-keys', '-t', String(tmuxTarget), 'C-u'], opts);
+    await new Promise(r => setTimeout(r, 300));
+    await execFileAsync('tmux', ['send-keys', '-l', '-t', String(tmuxTarget), '/clear'], opts);
+    await new Promise(r => setTimeout(r, 300));
+    await execFileAsync('tmux', ['send-keys', '-t', String(tmuxTarget), 'Enter'], opts);
+    return true;
+  } catch (e) {
+    console.error(`[backend] auto-clear inject failed for ${tmuxTarget}: ${e.message}`);
+    return false;
+  }
+}
+
 async function captureLocalPaneContentAsync(tmuxTarget) {
   if (!tmuxTarget) return null;
   try {
@@ -4611,6 +4632,21 @@ async function sweepLocalActivityDurations() {
       workspacePath,
       mcpPresent: mcpSessions.has(agent.name),
     });
+
+    // Auto-clear: when api-image-error is newly detected, inject /clear to recover
+    const prevBlockedReason = autoClearPrevReason.get(agent.name) || null;
+    autoClearPrevReason.set(agent.name, blockedReason);
+    if (blockedReason === 'api-image-error' && prevBlockedReason !== 'api-image-error') {
+      const now = Date.now();
+      const lastClear = autoClearLastTs.get(agent.name) || 0;
+      if ((now - lastClear) > AUTO_CLEAR_COOLDOWN_MS) {
+        console.warn(`[backend] auto-clear: agent ${agent.name} stuck on api-image-error, injecting /clear to ${tmuxTarget}`);
+        injectSlashClear(tmuxTarget).then(ok => {
+          if (ok) autoClearLastTs.set(agent.name, Date.now());
+        });
+      }
+    }
+
     localTmuxMissingState.delete(agent.name);
     const compactSignal = detectAgentCompactSignal('', paneCapture.text);
     if (compactSignal) {
@@ -5712,6 +5748,13 @@ app.get('/api/stream', (req, res) => {
   sseClients.add(res);
   req.on('close', () => sseClients.delete(res));
 });
+
+// SSE keepalive: send comment pings every 30s to prevent proxy idle timeout
+setInterval(() => {
+  for (const c of sseClients) {
+    try { c.write(':\n\n'); } catch (_) { sseClients.delete(c); }
+  }
+}, 30000);
 
 // ── Agents CRUD ───────────────────────────────────────────────────────
 app.post('/api/agents', (req, res) => {
