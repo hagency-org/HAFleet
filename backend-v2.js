@@ -2524,6 +2524,7 @@ let localActivitySweepRunning = false;
 let localSwapSweepRunning = false;
 let agentScopeSweepRunning = false;
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
+const AUDIT_LOG = dataPath('audit.jsonl');
 const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
 const MESSAGE_ARCHIVE_LOG = dataPath('messages-archive.jsonl');
 const subconsciousEventsByAgent = new Map(); // agent -> event[]
@@ -3067,6 +3068,22 @@ function ensureInfoGroup() {
   if (!groups.info) {
     groups.info = { name: 'info', members: [], createdAt: Date.now() };
     saveGroups();
+  }
+}
+
+function auditLog(req, { agent = null, summary = null, status = 200 } = {}) {
+  try {
+    appendFileSync(AUDIT_LOG, JSON.stringify({
+      ts: new Date().toISOString(),
+      ip: req.ip || req.connection?.remoteAddress || null,
+      method: req.method,
+      route: req.originalUrl || req.url,
+      agent,
+      summary,
+      status,
+    }) + '\n');
+  } catch (e) {
+    console.error(`Failed to append audit log: ${e.message}`);
   }
 }
 
@@ -5857,6 +5874,7 @@ app.post('/api/supervisor/control', (req, res) => {
   if (!result || result.ok !== true) {
     return res.status(400).json({ error: result?.error || 'failed to update supervisor control' });
   }
+  auditLog(req, { summary: patch });
   return res.json(result);
 });
 
@@ -5866,6 +5884,7 @@ app.post('/api/servers/heartbeat', (req, res) => {
   if (!serverId) return res.status(400).json({ error: 'server required' });
   const heartbeatResult = applyServerHeartbeat(serverId, req.body || {}, req.ip || req.connection?.remoteAddress || null);
   refreshServerLiveness();
+  auditLog(req, { summary: { server: serverId, agents: req.body?.agents?.length || 0 } });
   const state = servers[serverId];
   const maintenance = isServerInMaintenance(serverId, state);
   if (heartbeatResult && heartbeatResult.leaseAccepted === false) {
@@ -6113,6 +6132,7 @@ app.post('/api/agents', (req, res) => {
       console.error(`catchup notify failed for ${agentName}:`, e.message);
     });
   }
+  auditLog(req, { agent: agentName, summary: { type: agentType, server: resolvedServer, online: resolvedOnline } });
   res.json({ ok: true, agent: serializeAgent(agents[agentName]) });
 });
 
@@ -6222,6 +6242,7 @@ app.patch('/api/agents/:name', (req, res) => {
       console.error(`catchup notify failed for ${agentName}:`, e.message);
     });
   }
+  auditLog(req, { agent: agentName, summary: { fields: Object.keys(req.body) } });
   res.json({ ok: true, agent: serializeAgent(agent) });
 });
 
@@ -6256,12 +6277,14 @@ app.delete('/api/agents/:name', (req, res) => {
   if (req.query.force === 'true') {
     clearDeletedAgentState(agentName);
     console.log(`Agent '${agentName}' permanently deleted`);
+    auditLog(req, { agent: agentName, summary: { action: 'force-delete' } });
     return res.json({ ok: true, deleted: true, name: agentName });
   }
   agent.tmux = null;
   agent.lastSeen = Date.now();
   if (!agent.offlineReason) agent.offlineReason = 'inactive';
   transitionAgent(agentName, 'api_unregister');
+  auditLog(req, { agent: agentName, summary: { action: 'unregister' } });
   saveAgents();
   res.json({
     ok: true,
@@ -6277,6 +6300,7 @@ app.post('/api/agents/:name/undelete', (req, res) => {
   if (!deletedAgentTombstones[agentName]) return res.status(404).json({ error: 'no tombstone found' });
   delete deletedAgentTombstones[agentName];
   saveJson('deleted_agents.json', deletedAgentTombstones, { immediate: true });
+  auditLog(req, { agent: agentName, summary: { action: 'undelete' } });
   console.log(`Agent '${agentName}' tombstone removed — re-registration allowed`);
   res.json({ ok: true, undeleted: true, name: agentName });
 });
@@ -6364,6 +6388,7 @@ app.post('/api/agents/:name/runtime', (req, res) => {
   });
   const runtime = dispatchBlockedNotifications(transition);
   if (!runtime) return res.status(500).json({ error: 'runtime update failed' });
+  auditLog(req, { agent: agentName, summary: { blocked, reason, mcpPresent, server } });
   res.json({
     ok: true,
     runtime: {
