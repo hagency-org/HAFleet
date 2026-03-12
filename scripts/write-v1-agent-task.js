@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import path from 'path';
+import { readFileSync } from 'fs';
 import { readV1AgentManifest } from '../lib/agent-home-v1.js';
 
 function parseArgs(argv) {
@@ -283,6 +284,11 @@ async function main() {
     throw new Error(`v1 agent manifest not found: ${manifestPath}`);
   }
   const explicitBaseUrl = String(args.webUrl || '').trim().replace(/\/$/, '');
+  const agentTokenPath = path.join(workdir, '..', 'state', 'agent-token');
+  let agentToken = '';
+  try { agentToken = readFileSync(agentTokenPath, 'utf-8').trim(); } catch {}
+  const authHeaders = { 'Content-Type': 'application/json' };
+  if (agentToken) authHeaders['X-Agent-Token'] = agentToken;
 
   if (normalizeText(args.graphId, 255) || normalizeText(args.nodeId, 255)) {
     const graphUpdate = buildGraphPayload(command, args);
@@ -291,7 +297,7 @@ async function main() {
       `${apiBaseUrl}/api/task-graphs/${encodeURIComponent(graphUpdate.graphId)}/nodes/${encodeURIComponent(graphUpdate.nodeId)}`,
       {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify(graphUpdate.body),
       }
     );
@@ -325,7 +331,7 @@ async function main() {
   const targetUrl = `${apiUrl}/api/agents/${encodeURIComponent(manifest.name)}`;
   const response = await fetch(targetUrl, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders,
     body: JSON.stringify({ task }),
   });
   const data = await response.json().catch(() => null);
