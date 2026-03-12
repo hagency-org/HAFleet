@@ -151,6 +151,13 @@ function requireBridgeSecret(req, res, next) {
   }
   next();
 }
+const VALID_ENVIRONMENTS = new Set(['live', 'dev', 'benchmark', 'ephemeral']);
+function classifyEnvironment(name) {
+  const n = String(name).toLowerCase();
+  if (/(?:^|[-_])(?:test|bench|tmp|scratch|smoke|e2e)(?:[-_]|$)/.test(n)) return 'ephemeral';
+  if (/(?:^|[-_])(?:dev|debug)(?:[-_]|$)/.test(n)) return 'dev';
+  return 'live';
+}
 const MEDIA_FETCH_ALLOWED_ROOTS = [
   path.resolve(MESSAGE_ATTACHMENT_DIR),
   path.resolve(MATRIX_MEDIA_DIR),
@@ -2518,6 +2525,13 @@ function buildOperationalSubconsciousContract(contract) {
 
 // ── In-memory state ───────────────────────────────────────────────────
 const agents = loadJsonSync('agents.json', {});
+// Migrate agents missing environment field
+{ let migrated = 0;
+  for (const a of Object.values(agents)) {
+    if (a && typeof a === 'object' && !a.environment) { a.environment = classifyEnvironment(a.name); migrated++; }
+  }
+  if (migrated > 0) { saveJson('agents.json', agents, { immediate: true }); console.log(`[startup] migrated environment for ${migrated} agent(s)`); }
+}
 const deletedAgentTombstones = loadJsonSync('deleted_agents.json', {});
 const groups = loadJsonSync('groups.json', {});
 const messages = loadJsonSync('messages.json', []);
@@ -5355,6 +5369,7 @@ function serializeAgent(agent) {
     human: normalizeHumanMeta(agent.human),
     task: normalizeAgentTask(agent.task, agent.name),
     runtimeProfile: normalizeRuntimeProfile(agent.runtimeProfile),
+    environment: VALID_ENVIRONMENTS.has(agent.environment) ? agent.environment : classifyEnvironment(agent.name),
     activeNow: runtime?.activeNow === true,
     activeDurationSec: Number(runtime?.activeDurationSec) || 0,
     idleDurationSec: Number(runtime?.idleDurationSec) || 0,
@@ -6089,6 +6104,7 @@ app.post('/api/agents', (req, res) => {
     human,
     task,
     runtimeProfile,
+    environment,
   } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   if (task !== undefined && task !== null && !normalizeAgentTask(task, normalizeAgentName(name) || String(name || '').trim())) {
@@ -6148,6 +6164,8 @@ app.post('/api/agents', (req, res) => {
     runtimeProfile: runtimeProfile !== undefined
       ? normalizeRuntimeProfile(runtimeProfile)
       : normalizeRuntimeProfile(existing.runtimeProfile),
+    environment: (VALID_ENVIRONMENTS.has(environment) ? environment : null)
+      || existing.environment || classifyEnvironment(agentName),
   };
   saveAgents();
   writeThruAgentHome(agentName);
@@ -6195,6 +6213,7 @@ app.patch('/api/agents/:name', (req, res) => {
     human,
     task,
     runtimeProfile,
+    environment,
   } = req.body;
   if (task !== undefined && task !== null && !normalizeAgentTask(task, agentName)) {
     return res.status(400).json({ error: 'invalid task payload' });
@@ -6265,6 +6284,9 @@ app.patch('/api/agents/:name', (req, res) => {
   }
   if (runtimeProfile !== undefined) {
     agent.runtimeProfile = normalizeRuntimeProfile(runtimeProfile);
+  }
+  if (environment !== undefined && VALID_ENVIRONMENTS.has(environment)) {
+    agent.environment = environment;
   }
   if (agent.online === true && agent.manualDown !== false) {
     agent.manualDown = false;

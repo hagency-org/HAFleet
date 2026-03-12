@@ -6735,8 +6735,10 @@ body.page-hidden #reminder-panel.has-items{
 
       return a.name.localeCompare(b.name);
     });
-    const localAgents = agents.filter(a => !a.remote);
-    const remoteAgents = agents.filter(a => a.remote);
+    const envOrder = ['live', 'dev', 'benchmark', 'ephemeral'];
+    const envLabels = { live: 'Live', dev: 'Dev', benchmark: 'Benchmark', ephemeral: 'Ephemeral' };
+    const envGroups = {};
+    for (const a of agents) { const e = a.environment || 'live'; (envGroups[e] || (envGroups[e] = [])).push(a); }
     function agentBtnHtml(a) {
       const isRemote = a.remote;
       const isActive = typeof a.activeNow === 'boolean' ? a.activeNow : !!a.active;
@@ -6746,15 +6748,12 @@ body.page-hidden #reminder-panel.has-items{
         + '<span class="dot">' + dot + '</span>' + esc(a.name) + '</button>';
     }
     let html = '';
-    if (localAgents.length > 0) {
-      const activeCount = localAgents.filter(a => typeof a.activeNow === 'boolean' ? a.activeNow : !!a.active).length;
-      html += '<div class="agent-group-label">Local<span class="agent-group-count">' + activeCount + ' active / ' + localAgents.length + '</span></div>';
-      html += localAgents.map(agentBtnHtml).join('');
-    }
-    if (remoteAgents.length > 0) {
-      const aliveCount = remoteAgents.filter(a => a.alive).length;
-      html += '<div class="agent-group-label">Remote<span class="agent-group-count">' + aliveCount + ' alive / ' + remoteAgents.length + '</span></div>';
-      html += remoteAgents.map(agentBtnHtml).join('');
+    for (const env of envOrder) {
+      const group = envGroups[env];
+      if (!group || group.length === 0) continue;
+      const activeCount = group.filter(a => a.remote ? a.alive : (typeof a.activeNow === 'boolean' ? a.activeNow : !!a.active)).length;
+      html += '<div class="agent-group-label">' + esc(envLabels[env]) + '<span class="agent-group-count">' + activeCount + ' active / ' + group.length + '</span></div>';
+      html += group.map(agentBtnHtml).join('');
     }
     if (agentButtonsEl._lastHtml === html) return;
     agentButtonsEl._lastHtml = html;
