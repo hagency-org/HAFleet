@@ -2907,7 +2907,8 @@ export class MatrixBridge {
     // Load from persisted state (check multiple key formats for backwards compat)
     const legacyKey = [resolvedFromName, resolvedToName].sort().join(':');
     const altKey = `${resolvedFromName}:${resolvedToName}`;
-    for (const k of [key, legacyKey, altKey]) {
+    const oldDmKey = key.startsWith('dm:') ? `dm:${key.split(':')[1]}` : null; // pre-5.8.4: dm:agentName
+    for (const k of [key, oldDmKey, legacyKey, altKey].filter(Boolean)) {
       if (state.dmRooms?.[k]) {
         // Guard: don't alias an agent↔agent room as a human DM room
         if (key.startsWith('dm:') && !k.startsWith('dm:')) {
