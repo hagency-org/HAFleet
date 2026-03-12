@@ -135,7 +135,7 @@ function collectAllAgentNames() {
 function collectActiveApiAgentNames(apiRows) {
   if (!Array.isArray(apiRows)) return null;
   return apiRows
-    .filter(r => r && r.online === true)
+    .filter(r => r && (r.healthy === true || r.online === true))
     .filter(r => typeof r.tmux === 'string' && r.tmux.trim())
     .filter(r => r.blocked !== true)
     .filter(r => r.activeNow === true)

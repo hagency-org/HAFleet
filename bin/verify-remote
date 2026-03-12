@@ -259,8 +259,8 @@ if (!obj || typeof obj !== "object") {
   console.error("/api/agents/<name> response is not an object");
   process.exit(3);
 }
-if (obj.online !== true) {
-  console.error(`Agent ${agentName} is offline (offlineReason=${obj.offlineReason || "n/a"})`);
+if (obj.healthy !== true && obj.online !== true) {
+  console.error(`Agent ${agentName} is offline (state=${obj.state || "n/a"}, offlineReason=${obj.offlineReason || "n/a"})`);
   process.exit(4);
 }
 if (obj.server !== serverId) {
