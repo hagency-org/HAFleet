@@ -1191,6 +1191,7 @@ export class MatrixBridge {
     // Warning storm protection — delegated to NotificationRouter
     this._backendHealthy = true;          // false when backend is unresponsive
     this._reconcileSuspendLogged = false; // log suspension only once
+    this._loggedUntrustedRooms = new Set(); // dedup scan-joined trust logs
     this._warningRouter = new NotificationRouter({
       warning: {
         cooldownMs: WARNING_DEDUPE_WINDOW_MS,
@@ -2100,14 +2101,23 @@ export class MatrixBridge {
     }
     try {
       const rooms = await this.botClient.getJoinedRooms();
+      let trusted = 0, untrusted = 0, newlyDetected = 0;
       for (const roomId of rooms) {
         const trust = getRoomTrust(roomId);
         if (!trust.trusted) {
-          roomTrustLog('scan-joined', roomId, trust);
+          untrusted++;
+          if (!this._loggedUntrustedRooms.has(roomId)) {
+            this._loggedUntrustedRooms.add(roomId);
+            newlyDetected++;
+            roomTrustLog('scan-joined', roomId, trust);
+          }
           if (MATRIX_TRUST_MODE === 'enforce') {
             try { await this.botClient.leaveRoom(roomId); } catch {}
             continue;
           }
+        } else {
+          trusted++;
+          this._loggedUntrustedRooms.delete(roomId);
         }
         const mappedGroup = groupForRoom(roomId);
         if (mappedGroup) {
@@ -2121,6 +2131,7 @@ export class MatrixBridge {
           await ensureRoomAvatar(roomId, discoveredGroup);
         }
       }
+      if (untrusted > 0) console.log(`[trust] scan summary: ${trusted} trusted, ${untrusted} untrusted (${newlyDetected} newly detected)`);
     } catch (e) {
       console.error('Failed to scan joined rooms:', e.message);
     }

@@ -1522,7 +1522,7 @@ app.get('/api/agents/detail/:name', async (req, res) => {
   try {
     detail.resumeId = (await readFileAsync(path.join(resumeRoot, 'resume-id'), 'utf-8')).trim();
   } catch (e) {
-    console.debug(`[server] resume-id read skipped for ${name}: ${e.message}`);
+    if (e.code !== 'ENOENT') console.debug(`[server] resume-id read failed for ${name}: ${e.message}`);
     detail.resumeId = null;
   }
 
