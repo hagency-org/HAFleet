@@ -2507,6 +2507,7 @@ function buildOperationalSubconsciousContract(contract) {
 
 // ── In-memory state ───────────────────────────────────────────────────
 const agents = loadJsonSync('agents.json', {});
+const deletedAgentTombstones = loadJsonSync('deleted_agents.json', {});
 const groups = loadJsonSync('groups.json', {});
 const messages = loadJsonSync('messages.json', []);
 const cursors = loadJsonSync('cursors.json', {});
@@ -2730,7 +2731,7 @@ for (const agent of Object.values(agents)) {
         const manifest = readV1AgentManifest(manifestPath);
         if (!manifest || !manifest.name) continue;
         if (agents[manifest.name]) continue;
-        const { agent: created } = ensureAgentRecord(manifest.name, {
+        const result = ensureAgentRecord(manifest.name, {
           type: manifest.type || 'agent',
           homeDir: manifest.homeDir,
           workdir: manifest.workdir,
@@ -2745,6 +2746,8 @@ for (const agent of Object.values(agents)) {
           identity: manifest.identity || null,
           role: manifest.role || null,
         });
+        if (!result) continue; // tombstoned — skip
+        const { agent: created } = result;
         if (created) {
           const m = getAgentMachine(manifest.name);
           created.state = m.state;
@@ -2987,6 +2990,7 @@ function saveLocalActivitySweepState() { saveJson('local_activity_sweep.json', l
 function ensureAgentRecord(name, defaults = {}) {
   const agentName = normalizeAgentName(name);
   if (!agentName) return null;
+  if (deletedAgentTombstones[agentName]) return null;
   if (agents[agentName]) return { agent: agents[agentName], created: false };
 
   const now = Date.now();
@@ -3509,7 +3513,11 @@ function clearDeletedAgentState(agentName) {
     }
   }
 
-  if (agentsChanged) saveAgents();
+  // Tombstone prevents re-registration
+  deletedAgentTombstones[name] = { deletedAt: Date.now(), reason: 'force-delete' };
+  saveJson('deleted_agents.json', deletedAgentTombstones, { immediate: true });
+
+  if (agentsChanged) saveAgents(true);
   if (runtimeChanged) saveAgentRuntime();
   if (cursorsChanged) saveCursors();
 
@@ -6037,6 +6045,7 @@ app.post('/api/agents', (req, res) => {
   refreshServerLiveness();
   const agentName = normalizeAgentName(name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  if (deletedAgentTombstones[agentName]) return res.status(410).json({ error: 'agent permanently deleted', tombstone: deletedAgentTombstones[agentName] });
   const existing = agents[agentName] || {};
   const existingOnline = Boolean(existing.online);
   const normalizedServer = normalizeServer(server);
@@ -6258,6 +6267,16 @@ app.delete('/api/agents/:name', (req, res) => {
     message: 'unregister is disabled; agent marked inactive. Use ?force=true to permanently delete.',
     agent: serializeAgent(agent),
   });
+});
+
+app.post('/api/agents/:name/undelete', (req, res) => {
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  if (!deletedAgentTombstones[agentName]) return res.status(404).json({ error: 'no tombstone found' });
+  delete deletedAgentTombstones[agentName];
+  saveJson('deleted_agents.json', deletedAgentTombstones, { immediate: true });
+  console.log(`Agent '${agentName}' tombstone removed — re-registration allowed`);
+  res.json({ ok: true, undeleted: true, name: agentName });
 });
 
 app.post('/api/agents/:name/offline', (req, res) => {

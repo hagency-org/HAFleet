@@ -20,6 +20,7 @@ export async function createBackendTestContext(prefix, seed = {}) {
   writeJson(path.join(dataDir, 'agent_runtime.json'), seed.agentRuntime || {});
   writeJson(path.join(dataDir, 'supervisor_state.json'), seed.supervisorState || { agents: {}, selectionCursor: 0 });
   writeJson(path.join(dataDir, 'local_activity_sweep.json'), { selectionCursor: 0 });
+  if (seed.deletedAgents) writeJson(path.join(dataDir, 'deleted_agents.json'), seed.deletedAgents);
   writeJson(path.join(dataDir, '.msg_counter'), seed.msgCounter || 0);
 
   process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
