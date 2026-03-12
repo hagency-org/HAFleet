@@ -39,6 +39,13 @@ mkdirSync(DATA_ROOT, { recursive: true });
 mkdirSync(LOGS_ROOT, { recursive: true });
 mkdirSync(path.join(DATA_ROOT, 'agents'), { recursive: true });
 
+// ── Local server identity (mirrors supervisor/index.js isLocalAgentServer) ───
+function isLocalAgentServer(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  const localServerId = String(process.env.AGENT_CHAT_SERVER || 'local').trim() || 'local';
+  return !raw || raw === 'local' || raw === localServerId;
+}
+
 // ── Server SSH config for remote tmux capture ────────────────────────
 const SERVER_SSH_PATH = path.join(DATA_ROOT, 'server-ssh.json');
 function loadServerSsh() {
@@ -479,9 +486,20 @@ app.get('/api/agents/status', async (_req, res) => {
     const result = agentList
       .filter(a => a.tmux)
       .map(a => {
-        const isRemote = a.server && a.server !== 'local';
+        const isRemote = !isLocalAgentServer(a.server);
+        if (isRemote) {
+          // Skip pane probing for remote agents — they have no local tmux panes
+          return {
+            name: a.name, tmux: a.tmux, idleMs: -1, active: false,
+            activeNow: typeof a.activeNow === 'boolean' ? a.activeNow : false,
+            activeDurationSec: Number.isFinite(Number(a.activeDurationSec)) ? Math.max(0, Number(a.activeDurationSec)) : 0,
+            idleDurationSec: Number.isFinite(Number(a.idleDurationSec)) ? Math.max(0, Number(a.idleDurationSec)) : 0,
+            lastTmuxActivitySec: Number.isFinite(Number(a.lastTmuxActivitySec)) ? Math.max(0, Number(a.lastTmuxActivitySec)) : 0,
+            alive: true, remote: true, type: a.type || 'agent', server: a.server || null,
+          };
+        }
         const idleMs = getPaneIdleMs(a.tmux);
-        const alive = isRemote ? true : idleMs >= 0; // remote agents assumed alive; local checked via tmux
+        const alive = idleMs >= 0;
         const runtimeActiveNow = typeof a.activeNow === 'boolean' ? a.activeNow : null;
         const runtimeActiveDurationSec = Number.isFinite(Number(a.activeDurationSec)) ? Math.max(0, Number(a.activeDurationSec)) : 0;
         const runtimeIdleDurationSec = Number.isFinite(Number(a.idleDurationSec)) ? Math.max(0, Number(a.idleDurationSec)) : 0;
@@ -499,7 +517,7 @@ app.get('/api/agents/status', async (_req, res) => {
             ? Math.max(0, Number(a.lastTmuxActivitySec))
             : 0,
           alive,
-          remote: !!isRemote,
+          remote: false,
           type: a.type || 'agent',
           server: a.server || null,
         };
@@ -1501,7 +1519,7 @@ app.get('/api/agents/detail/:name', async (req, res) => {
   }
 
   // Idle info + detect agent type from process if missing
-  if (detail.tmux) {
+  if (detail.tmux && isLocalAgentServer(detail.server)) {
     detail.idleMs = getPaneIdleMs(detail.tmux);
     detail.active = detail.idleMs >= 0 && detail.idleMs < IDLE_THRESHOLD;
     if (!detail.agentType) {
