@@ -47,7 +47,7 @@ mkdirSync(DATA_ROOT, { recursive: true });
 mkdirSync(LOGS_ROOT, { recursive: true });
 mkdirSync(path.join(DATA_ROOT, 'agents'), { recursive: true });
 
-// ── Local server identity (mirrors supervisor/index.js isLocalAgentServer) ───
+// ── Local server identity ───
 function isLocalAgentServer(value) {
   const raw = typeof value === 'string' ? value.trim() : '';
   const localServerId = String(process.env.AGENT_CHAT_SERVER || 'local').trim() || 'local';

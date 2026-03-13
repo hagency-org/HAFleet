@@ -6,7 +6,7 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { promisify } from 'util';
-import { createSupervisorService } from './supervisor/index.js';
+
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
@@ -3291,13 +3291,7 @@ const notificationRouter = new NotificationRouter({
   },
 });
 
-const supervisorService = createSupervisorService({
-  getAgents: () => Object.values(agents).filter(isAgentRecord).map(serializeAgent),
-  getRuntime: (agentName) => ensureAgentRuntimeRecord(agentName),
-  emitSystemInfo: (summary, full) => emitSystemInfo(summary, full),
-  sendMessage: (payload) => dispatchInternalDirectMessage(payload),
-  broadcastSSE,
-});
+
 const taskGraphStore = createTaskGraphStore({
   initialGraphs: taskGraphs,
   save: (nextGraphs) => saveTaskGraphs(nextGraphs),
@@ -3622,10 +3616,6 @@ function clearDeletedAgentState(agentName) {
   scopePressureState.delete(name);
   notificationRouter.clearAgent(name);
 
-  const supervisorCleanup = typeof supervisorService?.removeAgentState === 'function'
-    ? supervisorService.removeAgentState(name)
-    : { removed: false, sessionKilled: false };
-
   let agentDataRemoved = false;
   const agentDataDir = agentDataPath(name);
   if (existsSync(agentDataDir)) {
@@ -3650,8 +3640,6 @@ function clearDeletedAgentState(agentName) {
     runtimeRemoved: runtimeChanged,
     cursorsRemoved: cursorsChanged,
     agentDataRemoved,
-    supervisorRemoved: supervisorCleanup?.removed === true,
-    supervisorSessionKilled: supervisorCleanup?.sessionKilled === true,
   };
 }
 
@@ -8484,7 +8472,6 @@ app.get('/api/agents/:name/groups', (req, res) => {
 // ── Graceful shutdown ─────────────────────────────────────────────────
 function shutdown() {
   console.log('Shutting down, saving data...');
-  supervisorService.stop();
   refreshServerLiveness();
   Promise.allSettled([
     sweepLocalActivityDurations(),
@@ -8552,7 +8539,6 @@ export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
       runAsyncSweep('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap');
       runAsyncSweep('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope');
       runAsyncSweep('sweepSupervisorLifecycle', () => supervisorLifecycleManager.sweepAll(), 'supervisorLifecycle');
-      supervisorService.start();
       console.log(`Agent Chat v2 backend listening on http://${host}:${port}`);
       const agentCount = Object.values(agents).filter(isAgentRecord).length;
       console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);

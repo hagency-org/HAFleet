@@ -175,12 +175,10 @@ describe('backend agents API', () => {
     const agents = readJson(path.join(dataDir, 'agents.json'));
     const runtime = readJson(path.join(dataDir, 'agent_runtime.json'));
     const cursors = readJson(path.join(dataDir, 'cursors.json'));
-    const supervisorState = readJson(path.join(dataDir, 'supervisor_state.json'));
 
     expect(Object.prototype.hasOwnProperty.call(agents, 'alpha')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(runtime, 'alpha')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(cursors, 'alpha')).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(supervisorState.agents || {}, 'alpha')).toBe(false);
     expect(existsSync(path.join(dataDir, 'agents', 'alpha'))).toBe(false);
   });
 });
