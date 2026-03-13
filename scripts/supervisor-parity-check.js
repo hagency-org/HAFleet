@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 // Supervisor parity validation — automated checks that all supervisor APIs work correctly.
-// Usage: node scripts/supervisor-parity-check.js [--web-url http://127.0.0.1:8090] [--target ac-topleader] [--token <supervisor-token>]
+// Usage: node scripts/supervisor-parity-check.js [--web-url http://127.0.0.1:8090] [--target ac-topleader] [--token <supervisor-token>] [--bearer <api-token>]
 
 function parseArgs(argv) {
-  const args = { webUrl: '', target: 'ac-topleader', token: '' };
+  const args = { webUrl: '', target: 'ac-topleader', token: '', bearer: '' };
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i];
     if (t === '--web-url' && argv[i + 1]) { args.webUrl = argv[++i]; continue; }
     if (t === '--target' && argv[i + 1]) { args.target = argv[++i]; continue; }
     if (t === '--token' && argv[i + 1]) { args.token = argv[++i]; continue; }
+    if (t === '--bearer' && argv[i + 1]) { args.bearer = argv[++i]; continue; }
     if (t === '-h' || t === '--help') { args.help = true; continue; }
   }
+  // Auto-read Bearer token from env if not provided
+  if (!args.bearer) args.bearer = (process.env.API_TOKEN || '').trim();
   return args;
 }
 
@@ -25,13 +28,14 @@ const PASS = '\x1b[32mPASS\x1b[0m';
 const FAIL = '\x1b[31mFAIL\x1b[0m';
 const SKIP = '\x1b[33mSKIP\x1b[0m';
 
-export async function runParityChecks(apiBase, target, token) {
+export async function runParityChecks(apiBase, target, token, bearer = '') {
   const results = [];
 
   async function apiFetch(method, urlPath, body) {
     const url = `${apiBase}${urlPath}`;
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['X-Agent-Token'] = token;
+    if (bearer) headers['Authorization'] = `Bearer ${bearer}`;
     const opts = { method, headers };
     if (body) opts.body = JSON.stringify(body);
     const res = await fetch(url, opts);
@@ -192,14 +196,14 @@ export async function runParityChecks(apiBase, target, token) {
 // CLI entry point
 const args = parseArgs(process.argv.slice(2));
 if (args.help) {
-  console.log('Usage: supervisor-parity-check [--web-url URL] [--target AGENT] [--token TOKEN]');
+  console.log('Usage: supervisor-parity-check [--web-url URL] [--target AGENT] [--token TOKEN] [--bearer API_TOKEN]');
   process.exit(0);
 }
 
 // Only run CLI if invoked directly (not imported)
 if (process.argv[1] && process.argv[1].endsWith('supervisor-parity-check.js')) {
   const apiBase = args.webUrl || defaultApiBaseUrl();
-  runParityChecks(apiBase, args.target, args.token).then(({ failed }) => {
+  runParityChecks(apiBase, args.target, args.token, args.bearer).then(({ failed }) => {
     process.exit(failed > 0 ? 1 : 0);
   }).catch(err => {
     console.error(`Fatal: ${err.message}`);
