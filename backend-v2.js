@@ -2382,7 +2382,6 @@ function canAccessPrivilegedSubconsciousDetail(req) {
 function requireBearer(req, res, next) {
   const expectedToken = normalizeOptionalText(process.env.API_TOKEN, 512);
   if (expectedToken && getBearerToken(req) !== expectedToken) {
-    if (isLocalRequest(req)) return next(); // localhost exempt (Phase 2 removes this)
     return res.status(401).json({ error: 'bearer token required' });
   }
   next();
