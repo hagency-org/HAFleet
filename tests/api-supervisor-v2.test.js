@@ -227,6 +227,39 @@ describe('supervisor v2 API', () => {
     expect(detail.body.latest.reason).toBe('assessment 4');
   });
 
+  test('force-delete clears supervisor state for the deleted agent', async () => {
+    await setup();
+    // Post assessment
+    await patchState('ac-topleader', { state: 'focused', confidence: 0.85, reason: 'active work', suggested_action: 'none', domain: 'core' });
+
+    // Verify state exists via agents list
+    const list1 = await request(context.app).get('/api/supervisor/agents');
+    const leader1 = list1.body.agents.find(a => a.name === 'ac-topleader');
+    expect(leader1.state.lastStatus).toBe('focused');
+
+    // Verify events exist
+    const detail1 = await request(context.app).get('/api/supervisor/agents/ac-topleader');
+    expect(detail1.body.events.length).toBeGreaterThan(0);
+
+    // Force-delete the agent
+    const del = await request(context.app).delete('/api/agents/ac-topleader').query({ force: 'true' });
+    expect(del.status).toBe(200);
+
+    // Agent is gone from registry — detail endpoint returns 404
+    const detail2 = await request(context.app).get('/api/supervisor/agents/ac-topleader');
+    expect(detail2.status).toBe(404);
+
+    // Agents list should no longer include ac-topleader
+    const list2 = await request(context.app).get('/api/supervisor/agents');
+    const leader2 = list2.body.agents.find(a => a.name === 'ac-topleader');
+    expect(leader2).toBeUndefined();
+
+    // Status runtime should reflect removal
+    const status = await request(context.app).get('/api/supervisor/status');
+    expect(status.body.runtime.lastSweepActive).toBe(0);
+    expect(status.body.eventCount).toBe(0);
+  });
+
   test('classification mapping matches spec', async () => {
     await setup();
 

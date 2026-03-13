@@ -12,7 +12,7 @@ import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
 import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
-import { createSupervisorLifecycleManager } from './lib/supervisor-lifecycle-manager.js';
+import { createSupervisorLifecycleManager, killTmuxSession as killSupervisorTmux } from './lib/supervisor-lifecycle-manager.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
 import { assertRuntimeDir, isLocalAgentServer } from './lib/runtime-dir-guard.js';
 import { NotificationRouter } from './lib/notification-router.js';
@@ -3615,6 +3615,10 @@ function clearDeletedAgentState(agentName) {
   localRuntimeSignalDigest.delete(name);
   scopePressureState.delete(name);
   notificationRouter.clearAgent(name);
+
+  // Clean up supervisor state for the deleted agent
+  supervisorSnapshotStore.removeTarget(name);
+  try { killSupervisorTmux(`supervisor-${name}`); } catch { /* tmux not available */ }
 
   let agentDataRemoved = false;
   const agentDataDir = agentDataPath(name);
@@ -8539,6 +8543,7 @@ export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
       runAsyncSweep('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap');
       runAsyncSweep('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope');
       runAsyncSweep('sweepSupervisorLifecycle', () => supervisorLifecycleManager.sweepAll(), 'supervisorLifecycle');
+      try { const orphans = supervisorLifecycleManager.cleanOrphanSessions(); if (orphans.length) console.log(`  Cleaned ${orphans.length} orphan supervisor session(s): ${orphans.join(', ')}`); } catch { /* tmux not available */ }
       console.log(`Agent Chat v2 backend listening on http://${host}:${port}`);
       const agentCount = Object.values(agents).filter(isAgentRecord).length;
       console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);

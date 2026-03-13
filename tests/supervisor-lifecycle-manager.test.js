@@ -246,4 +246,23 @@ describe('SupervisorLifecycleManager', () => {
     const supervisorResult = results.find(r => r.target === 'supervisor-ac-topleader');
     expect(supervisorResult).toBeUndefined();
   });
+
+  test('cleanOrphanSessions kills supervisor tmux sessions with no registered agent', () => {
+    // Mock list-sessions to return orphan + known supervisor sessions
+    execFileSync.mockImplementation((cmd, args) => {
+      if (cmd !== 'tmux') return '';
+      if (args[0] === 'list-sessions') return 'supervisor-ac-topleader\nsupervisor-orphan\nalpha\nsupervisor-unknown\n';
+      // kill-session — succeed silently
+      return '';
+    });
+    const manager = createManager();
+    const killed = manager.cleanOrphanSessions();
+    // supervisor-ac-topleader has both target + supervisor registered → kept
+    // supervisor-orphan and supervisor-unknown have no registered target/supervisor → killed
+    // alpha is not a supervisor- session → ignored
+    expect(killed.sort()).toEqual(['supervisor-orphan', 'supervisor-unknown']);
+    // Verify kill-session was called for each orphan
+    const killCalls = execFileSync.mock.calls.filter(c => c[0] === 'tmux' && c[1][0] === 'kill-session');
+    expect(killCalls).toHaveLength(2);
+  });
 });
