@@ -5590,7 +5590,7 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   server.online = true;
   server.updatedAt = now;
   server.sourceIp = sourceIp || null;
-  server.version = typeof payload.version === 'string' && payload.version.trim() ? payload.version.trim() : (server.version || null);
+  server.version = typeof payload.version === 'string' && payload.version.trim() ? payload.version.trim() : (server.version || 'unknown-legacy');
   // Version-mismatch detection
   if (LOCAL_GIT_VERSION && server.version && server.version !== LOCAL_GIT_VERSION) {
     if (!server.versionMismatchSince) { server.versionMismatchSince = now; }
