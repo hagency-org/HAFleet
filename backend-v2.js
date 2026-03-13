@@ -12,6 +12,7 @@ import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
 import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
+import { createSupervisorLifecycleManager } from './lib/supervisor-lifecycle-manager.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
 import { assertRuntimeDir, isLocalAgentServer } from './lib/runtime-dir-guard.js';
 import { NotificationRouter } from './lib/notification-router.js';
@@ -80,6 +81,7 @@ const SWAP_ALERT_CLEAR_PCT = Number.isFinite(SWAP_ALERT_CLEAR_PCT_RAW)
   : Math.max(0, SWAP_ALERT_THRESHOLD_PCT - 5);
 const AGENT_SCOPE_MONITOR_ENABLED = (process.env.AGENT_SCOPE_MONITOR_ENABLED || 'true').trim().toLowerCase() !== 'false';
 const AGENT_SCOPE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_SCOPE_SWEEP_INTERVAL_MS || '5000', 10);
+const SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS || '60000', 10);
 const AGENT_SCOPE_ALERT_COOLDOWN_MS = Number.parseInt(process.env.AGENT_SCOPE_ALERT_COOLDOWN_MS || '60000', 10);
 const AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW = Number.parseFloat(process.env.AGENT_SCOPE_ALERT_CLEAR_RATIO || '0.85');
 const AGENT_SCOPE_ALERT_CLEAR_RATIO = Number.isFinite(AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW)
@@ -2622,6 +2624,7 @@ const localRuntimeSignalDigest = new Map(); // agent -> digest of blocked/mcp/wo
 let localActivitySweepRunning = false;
 let localSwapSweepRunning = false;
 let agentScopeSweepRunning = false;
+let supervisorLifecycleSweepRunning = false;
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const AUDIT_LOG = dataPath('audit.jsonl');
 const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
@@ -3745,6 +3748,14 @@ function dispatchInternalDirectMessage(payload = {}) {
 const supervisorActionEngine = createSupervisorActionEngine({
   snapshotStore: supervisorSnapshotStore,
   sendMessage: (payload) => dispatchInternalDirectMessage(payload),
+  broadcastSSE,
+});
+
+const supervisorLifecycleManager = createSupervisorLifecycleManager({
+  getAgents: () => agents,
+  getRuntime: (name) => ensureAgentRuntimeRecord(name),
+  snapshotStore: supervisorSnapshotStore,
+  isAgentRecord,
   broadcastSSE,
 });
 
@@ -5339,10 +5350,12 @@ function runAsyncSweep(label, fn, stateKey) {
   if (stateKey === 'localActivity' && localActivitySweepRunning) return;
   if (stateKey === 'localSwap' && localSwapSweepRunning) return;
   if (stateKey === 'agentScope' && agentScopeSweepRunning) return;
+  if (stateKey === 'supervisorLifecycle' && supervisorLifecycleSweepRunning) return;
 
   if (stateKey === 'localActivity') localActivitySweepRunning = true;
   if (stateKey === 'localSwap') localSwapSweepRunning = true;
   if (stateKey === 'agentScope') agentScopeSweepRunning = true;
+  if (stateKey === 'supervisorLifecycle') supervisorLifecycleSweepRunning = true;
 
   Promise.resolve()
     .then(fn)
@@ -5353,6 +5366,7 @@ function runAsyncSweep(label, fn, stateKey) {
       if (stateKey === 'localActivity') localActivitySweepRunning = false;
       if (stateKey === 'localSwap') localSwapSweepRunning = false;
       if (stateKey === 'agentScope') agentScopeSweepRunning = false;
+      if (stateKey === 'supervisorLifecycle') supervisorLifecycleSweepRunning = false;
     });
 }
 
@@ -8515,6 +8529,10 @@ function startBackgroundLoops() {
 
   scheduleAdaptiveSweepLoop('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope', AGENT_SCOPE_SWEEP_INTERVAL_MS);
 
+  // Supervisor lifecycle sweep — manages per-agent supervisor tmux sessions
+  const supervisorLifecycleSweepFn = () => supervisorLifecycleManager.sweepAll();
+  scheduleAdaptiveSweepLoop('sweepSupervisorLifecycle', supervisorLifecycleSweepFn, 'supervisorLifecycle', SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS);
+
   backgroundLoopsStarted = true;
 }
 
@@ -8533,6 +8551,7 @@ export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
       runAsyncSweep('sweepLocalActivityDurations', sweepLocalActivityDurations, 'localActivity');
       runAsyncSweep('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap');
       runAsyncSweep('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope');
+      runAsyncSweep('sweepSupervisorLifecycle', () => supervisorLifecycleManager.sweepAll(), 'supervisorLifecycle');
       supervisorService.start();
       console.log(`Agent Chat v2 backend listening on http://${host}:${port}`);
       const agentCount = Object.values(agents).filter(isAgentRecord).length;
