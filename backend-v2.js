@@ -604,6 +604,8 @@ function normalizeAgentTask(value, fallbackOwner = null) {
   };
 }
 
+const SHELL_METACHAR_RE = /[;&|`$(){}!\\<>]/;
+
 function normalizeRuntimeProfileRole(value) {
   if (value === null) return null;
   if (!value || typeof value !== 'object') return null;
@@ -611,7 +613,8 @@ function normalizeRuntimeProfileRole(value) {
   const provider = normalizeOptionalText(value.provider, 64);
   const model = normalizeOptionalText(value.model, 256);
   const reasoning = normalizeOptionalText(value.reasoning, 64);
-  const extraArgs = normalizeOptionalText(value.extraArgs, 4000);
+  const rawExtraArgs = normalizeOptionalText(value.extraArgs, 4000);
+  const extraArgs = rawExtraArgs && SHELL_METACHAR_RE.test(rawExtraArgs) ? null : rawExtraArgs;
   if (!framework && !provider && !model && !reasoning && !extraArgs) return null;
   return {
     framework: framework || null,

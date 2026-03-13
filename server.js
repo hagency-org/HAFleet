@@ -1956,6 +1956,33 @@ app.post('/api/agents/:name/workspace/migrate-entry-files', async (req, res) => 
   });
 });
 
+app.get('/api/agents/:name/hooks', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  const { meta: localMeta } = loadLocalAgentMeta(name);
+  const manifest = loadV1Manifest(name, localMeta);
+  const stateDir = manifest?.stateDir || localMeta?.stateDir || null;
+  if (!stateDir) return res.json({ hooks: null });
+  const hooksPath = path.join(stateDir, 'subconscious', 'claude-agentchat', 'hooks', 'hooks.json');
+  try {
+    const hooks = JSON.parse(readFileSync(hooksPath, 'utf8'));
+    return res.json({ hooks });
+  } catch {
+    return res.json({ hooks: null });
+  }
+});
+
+app.get('/api/config/mcp', (_req, res) => {
+  const homedir = process.env.HOME || process.env.USERPROFILE || '/root';
+  const settingsPath = path.join(homedir, '.claude', 'settings.json');
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    return res.json({ mcpServers: settings.mcpServers || {} });
+  } catch {
+    return res.json({ mcpServers: {} });
+  }
+});
+
 app.patch('/api/agents/:name/subconscious-guidance', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
@@ -3478,6 +3505,10 @@ th{
             <div id="settings-guidance"></div>
           </article>
           <article class="panel">
+            <div class="panel-label">Configuration</div>
+            <div id="settings-configuration"></div>
+          </article>
+          <article class="panel">
             <div class="panel-label">System Controls</div>
             <div id="settings-systems" class="split-grid"></div>
           </article>
@@ -3670,6 +3701,11 @@ th{
     el.textContent = message || '';
   }
 
+  function getElVal(id) {
+    const el = document.getElementById(id);
+    return el ? String(el.value || '').trim() : null;
+  }
+
   function getCurrentDetailDraft() {
     const identityEl = document.getElementById('detail-identity-input');
     const taskStatusEl = document.getElementById('detail-task-status');
@@ -3708,6 +3744,17 @@ th{
       subconsciousRuntimeModel: runtimeModelEl ? String(runtimeModelEl.value || '').trim() : null,
       subconsciousRuntimeEndpoint: runtimeEndpointEl ? String(runtimeEndpointEl.value || '').trim() : null,
       subconsciousRuntimeKeyEnv: runtimeKeyEnvEl ? String(runtimeKeyEnvEl.value || '').trim() : null,
+      cfgPrimaryFramework: getElVal('cfg-primary-framework'),
+      cfgPrimaryProvider: getElVal('cfg-primary-provider'),
+      cfgPrimaryModel: getElVal('cfg-primary-model'),
+      cfgPrimaryReasoning: getElVal('cfg-primary-reasoning'),
+      cfgPrimaryExtraArgs: getElVal('cfg-primary-extraArgs'),
+      cfgSupervisorFramework: getElVal('cfg-supervisor-framework'),
+      cfgSupervisorProvider: getElVal('cfg-supervisor-provider'),
+      cfgSupervisorModel: getElVal('cfg-supervisor-model'),
+      cfgSupervisorReasoning: getElVal('cfg-supervisor-reasoning'),
+      cfgSupervisorExtraArgs: getElVal('cfg-supervisor-extraArgs'),
+      cfgRole: getElVal('cfg-role'),
     };
   }
 
@@ -3730,6 +3777,20 @@ th{
     if (draft.subconsciousRuntimeModel !== null && draft.subconsciousRuntimeModel !== String(subconsciousDetail?.runtime?.model || '').trim()) return true;
     if (draft.subconsciousRuntimeEndpoint !== null && draft.subconsciousRuntimeEndpoint !== String(subconsciousDetail?.runtime?.endpoint || '').trim()) return true;
     if (draft.subconsciousRuntimeKeyEnv !== null && draft.subconsciousRuntimeKeyEnv !== String(subconsciousDetail?.runtime?.keyEnv || '').trim()) return true;
+    const rp = detail.runtimeProfile || {};
+    const pri = rp.primary || {};
+    const sup = rp.supervisor || {};
+    if (draft.cfgPrimaryFramework !== null && draft.cfgPrimaryFramework !== String(pri.framework || '').trim()) return true;
+    if (draft.cfgPrimaryProvider !== null && draft.cfgPrimaryProvider !== String(pri.provider || '').trim()) return true;
+    if (draft.cfgPrimaryModel !== null && draft.cfgPrimaryModel !== String(pri.model || '').trim()) return true;
+    if (draft.cfgPrimaryReasoning !== null && draft.cfgPrimaryReasoning !== String(pri.reasoning || '').trim()) return true;
+    if (draft.cfgPrimaryExtraArgs !== null && draft.cfgPrimaryExtraArgs !== String(pri.extraArgs || '').trim()) return true;
+    if (draft.cfgSupervisorFramework !== null && draft.cfgSupervisorFramework !== String(sup.framework || '').trim()) return true;
+    if (draft.cfgSupervisorProvider !== null && draft.cfgSupervisorProvider !== String(sup.provider || '').trim()) return true;
+    if (draft.cfgSupervisorModel !== null && draft.cfgSupervisorModel !== String(sup.model || '').trim()) return true;
+    if (draft.cfgSupervisorReasoning !== null && draft.cfgSupervisorReasoning !== String(sup.reasoning || '').trim()) return true;
+    if (draft.cfgSupervisorExtraArgs !== null && draft.cfgSupervisorExtraArgs !== String(sup.extraArgs || '').trim()) return true;
+    if (draft.cfgRole !== null && draft.cfgRole !== String(detail.role || '').trim()) return true;
     if (!detail.v1) return false;
     if ((draft.owner || '') !== String(detail.owner || '').trim()) return true;
     if ((draft.projectImportSource || '') !== '') return true;
@@ -3768,6 +3829,17 @@ th{
       'detail-subconscious-model',
       'detail-subconscious-endpoint',
       'detail-subconscious-key-env',
+      'cfg-primary-framework',
+      'cfg-primary-provider',
+      'cfg-primary-model',
+      'cfg-primary-reasoning',
+      'cfg-primary-extraArgs',
+      'cfg-supervisor-framework',
+      'cfg-supervisor-provider',
+      'cfg-supervisor-model',
+      'cfg-supervisor-reasoning',
+      'cfg-supervisor-extraArgs',
+      'cfg-role',
     ];
     ids.forEach((id) => {
       const el = document.getElementById(id);
@@ -4385,6 +4457,8 @@ th{
       identityRoot.innerHTML = '<div class="error-state">Agent detail unavailable.</div>';
       taskRoot.innerHTML = '<div class="error-state">Canonical task unavailable.</div>';
       guidanceRoot.innerHTML = '<div class="error-state">Guidance unavailable.</div>';
+      const cfgRoot = document.getElementById('settings-configuration');
+      if (cfgRoot) cfgRoot.innerHTML = '<div class="error-state">Configuration unavailable.</div>';
       systemsRoot.innerHTML = '<div class="error-state">System control state unavailable.</div>';
       ownerRoot.innerHTML = '<div class="error-state">Ownership unavailable.</div>';
       return;
@@ -4407,6 +4481,37 @@ th{
       : (
         '<div class="empty-state">Guidance is writable only for V1 home agents in the current implementation.</div>'
       );
+
+    const configRoot = document.getElementById('settings-configuration');
+    const rp = detail.runtimeProfile || {};
+    const pri = rp.primary || {};
+    const sup = rp.supervisor || {};
+    const fwOpts = function(sel) {
+      return '<option value="">(not set)</option>'
+        + '<option value="claude"' + (sel === 'claude' ? ' selected' : '') + '>claude</option>'
+        + '<option value="codex"' + (sel === 'codex' ? ' selected' : '') + '>codex</option>';
+    };
+    const rpFields = function(prefix, role) {
+      return '<div class="field-label">Framework</div>'
+        + '<select id="cfg-' + prefix + '-framework" class="detail-input">' + fwOpts(role.framework || '') + '</select>'
+        + '<div class="field-label">Provider</div>'
+        + '<input id="cfg-' + prefix + '-provider" class="detail-input" value="' + esc(role.provider || '').replace(/"/g, '&quot;') + '" placeholder="e.g. anthropic">'
+        + '<div class="field-label">Model</div>'
+        + '<input id="cfg-' + prefix + '-model" class="detail-input" value="' + esc(role.model || '').replace(/"/g, '&quot;') + '" placeholder="e.g. claude-sonnet-4-20250514">'
+        + '<div class="field-label">Reasoning</div>'
+        + '<input id="cfg-' + prefix + '-reasoning" class="detail-input" value="' + esc(role.reasoning || '').replace(/"/g, '&quot;') + '" placeholder="e.g. extended">'
+        + '<div class="field-label">Extra Args</div>'
+        + '<input id="cfg-' + prefix + '-extraArgs" class="detail-input" value="' + esc(role.extraArgs || '').replace(/"/g, '&quot;') + '" placeholder="e.g. --verbose --max-tokens 4096">'
+        + '<div class="detail-hint" style="margin-top:2px;font-size:10px">Only CLI flags allowed. Shell operators are rejected.</div>';
+    };
+    configRoot.innerHTML =
+      '<div class="detail-hint">Per-agent runtime profile and role. Runtime profile changes take effect after agent restart.</div>'
+      + '<div id="cfg-restart-banner" class="error-state" style="display:none;margin-bottom:8px;background:rgba(234,179,8,0.12);color:rgba(234,179,8,0.95);border-left:3px solid rgba(234,179,8,0.5);padding:6px 10px">Runtime profile changes take effect after agent restart. The running agent continues using its current configuration until restarted.</div>'
+      + '<div class="panel"><div class="panel-label">Primary Role</div>' + rpFields('primary', pri) + '</div>'
+      + '<div class="panel"><div class="panel-label">Supervisor Role</div>' + rpFields('supervisor', sup) + '</div>'
+      + '<div class="field-label">Agent Role</div>'
+      + '<input id="cfg-role" class="detail-input" value="' + esc(detail.role || '').replace(/"/g, '&quot;') + '" placeholder="Agent role description">'
+      + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailConfiguration()">Save Configuration</button></div>';
 
     const ownerHtml = detail.v1
       ? (
@@ -5275,6 +5380,81 @@ th{
     }
   }
 
+  const CFG_VALID_FRAMEWORKS = ['claude', 'codex'];
+  const CFG_SHELL_METACHAR_RE = /[;&|\x60$(){}!\\\\<>]/;
+
+  function sanitizeExtraArgs(raw) {
+    if (!raw) return null;
+    const cleaned = String(raw).trim();
+    if (!cleaned) return null;
+    if (CFG_SHELL_METACHAR_RE.test(cleaned)) return '__REJECTED__';
+    return cleaned;
+  }
+
+  async function saveDetailConfiguration() {
+    if (detailSaveInFlight) return;
+    const primaryFrameworkEl = document.getElementById('cfg-primary-framework');
+    const supervisorFrameworkEl = document.getElementById('cfg-supervisor-framework');
+    if (!primaryFrameworkEl) return;
+
+    const primaryFramework = primaryFrameworkEl.value || null;
+    const supervisorFramework = supervisorFrameworkEl ? (supervisorFrameworkEl.value || null) : null;
+    if (primaryFramework && !CFG_VALID_FRAMEWORKS.includes(primaryFramework)) {
+      setDetailStatus('Invalid primary framework — must be claude or codex.', 'error');
+      return;
+    }
+    if (supervisorFramework && !CFG_VALID_FRAMEWORKS.includes(supervisorFramework)) {
+      setDetailStatus('Invalid supervisor framework — must be claude or codex.', 'error');
+      return;
+    }
+
+    const primaryExtraArgs = sanitizeExtraArgs((document.getElementById('cfg-primary-extraArgs') || {}).value);
+    const supervisorExtraArgs = sanitizeExtraArgs((document.getElementById('cfg-supervisor-extraArgs') || {}).value);
+    if (primaryExtraArgs === '__REJECTED__' || supervisorExtraArgs === '__REJECTED__') {
+      setDetailStatus('extraArgs contains disallowed shell characters. Only CLI flags are allowed.', 'error');
+      return;
+    }
+
+    const runtimeProfile = {
+      primary: {
+        framework: primaryFramework,
+        provider: ((document.getElementById('cfg-primary-provider') || {}).value || '').trim() || null,
+        model: ((document.getElementById('cfg-primary-model') || {}).value || '').trim() || null,
+        reasoning: ((document.getElementById('cfg-primary-reasoning') || {}).value || '').trim() || null,
+        extraArgs: primaryExtraArgs,
+      },
+      supervisor: {
+        framework: supervisorFramework,
+        provider: ((document.getElementById('cfg-supervisor-provider') || {}).value || '').trim() || null,
+        model: ((document.getElementById('cfg-supervisor-model') || {}).value || '').trim() || null,
+        reasoning: ((document.getElementById('cfg-supervisor-reasoning') || {}).value || '').trim() || null,
+        extraArgs: supervisorExtraArgs,
+      },
+    };
+    const role = ((document.getElementById('cfg-role') || {}).value || '').trim() || null;
+
+    detailSaveInFlight = true;
+    setDetailStatus('Saving configuration...', 'warn');
+    try {
+      const res = await fetch('/api/agents/' + encodeURIComponent(agent), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runtimeProfile, role }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) throw new Error(data?.error || 'configuration save failed');
+      setDetailStatus('Configuration saved.', 'ok');
+      detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 3000);
+      const banner = document.getElementById('cfg-restart-banner');
+      if (banner) banner.style.display = '';
+      await refresh(true);
+    } catch (e) {
+      setDetailStatus('Configuration save failed: ' + e.message, 'error');
+    } finally {
+      detailSaveInFlight = false;
+    }
+  }
+
   window.saveDetailTask = saveDetailTask;
   window.saveDetailIdentity = saveDetailIdentity;
   window.saveDetailOwner = saveDetailOwner;
@@ -5284,6 +5464,8 @@ th{
   window.saveSubconsciousControl = saveSubconsciousControl;
   window.saveDetailGuidance = saveDetailGuidance;
   window.saveSupervisorAuditControl = saveSupervisorAuditControl;
+  window.saveDetailConfiguration = saveDetailConfiguration;
+  window.saveSubconsciousRuntime = saveSubconsciousRuntime;
 
   async function refresh(forceDetailRender = false) {
     try {
