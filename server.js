@@ -1456,6 +1456,7 @@ app.get('/api/agents/detail/:name', async (req, res) => {
       detail.human = (agent.human && typeof agent.human === 'object') ? agent.human : {};
       detail.task = normalizeTaskMeta(agent.task, name);
       detail.runtimeProfile = normalizeRuntimeProfileMeta(agent.runtimeProfile);
+      detail.role = agent.role || null;
     }
   } catch (e) {
     console.debug(`[server] backend subconscious detail fetch skipped for ${name}: ${e.message}`);
@@ -1977,7 +1978,12 @@ app.get('/api/config/mcp', (_req, res) => {
   const settingsPath = path.join(homedir, '.claude', 'settings.json');
   try {
     const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
-    return res.json({ mcpServers: settings.mcpServers || {} });
+    const raw = settings.mcpServers || {};
+    const safe = {};
+    for (const [name, cfg] of Object.entries(raw)) {
+      safe[name] = { command: cfg?.command || null, type: cfg?.type || null };
+    }
+    return res.json({ mcpServers: safe });
   } catch {
     return res.json({ mcpServers: {} });
   }
@@ -5415,31 +5421,30 @@ th{
       return;
     }
 
-    const runtimeProfile = {
-      primary: {
-        framework: primaryFramework,
-        provider: ((document.getElementById('cfg-primary-provider') || {}).value || '').trim() || null,
-        model: ((document.getElementById('cfg-primary-model') || {}).value || '').trim() || null,
-        reasoning: ((document.getElementById('cfg-primary-reasoning') || {}).value || '').trim() || null,
-        extraArgs: primaryExtraArgs,
-      },
-      supervisor: {
-        framework: supervisorFramework,
-        provider: ((document.getElementById('cfg-supervisor-provider') || {}).value || '').trim() || null,
-        model: ((document.getElementById('cfg-supervisor-model') || {}).value || '').trim() || null,
-        reasoning: ((document.getElementById('cfg-supervisor-reasoning') || {}).value || '').trim() || null,
-        extraArgs: supervisorExtraArgs,
-      },
-    };
+    const primaryProvider = ((document.getElementById('cfg-primary-provider') || {}).value || '').trim() || null;
+    const primaryModel = ((document.getElementById('cfg-primary-model') || {}).value || '').trim() || null;
+    const primaryReasoning = ((document.getElementById('cfg-primary-reasoning') || {}).value || '').trim() || null;
+    const supervisorProvider = ((document.getElementById('cfg-supervisor-provider') || {}).value || '').trim() || null;
+    const supervisorModel = ((document.getElementById('cfg-supervisor-model') || {}).value || '').trim() || null;
+    const supervisorReasoning = ((document.getElementById('cfg-supervisor-reasoning') || {}).value || '').trim() || null;
+    const primaryHasValue = primaryFramework || primaryProvider || primaryModel || primaryReasoning || primaryExtraArgs;
+    const supervisorHasValue = supervisorFramework || supervisorProvider || supervisorModel || supervisorReasoning || supervisorExtraArgs;
+    const runtimeProfile = (primaryHasValue || supervisorHasValue) ? {
+      primary: primaryHasValue ? { framework: primaryFramework, provider: primaryProvider, model: primaryModel, reasoning: primaryReasoning, extraArgs: primaryExtraArgs } : null,
+      supervisor: supervisorHasValue ? { framework: supervisorFramework, provider: supervisorProvider, model: supervisorModel, reasoning: supervisorReasoning, extraArgs: supervisorExtraArgs } : null,
+    } : null;
     const role = ((document.getElementById('cfg-role') || {}).value || '').trim() || null;
 
     detailSaveInFlight = true;
     setDetailStatus('Saving configuration...', 'warn');
     try {
+      const body = {};
+      if (role !== undefined) body.role = role;
+      body.runtimeProfile = runtimeProfile;
       const res = await fetch('/api/agents/' + encodeURIComponent(agent), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ runtimeProfile, role }),
+        body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.error) throw new Error(data?.error || 'configuration save failed');

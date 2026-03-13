@@ -793,7 +793,11 @@ async function syncAgentAvatarToDmRooms(agentName) {
       state.roomAvatars[roomId] = mxcUri;
       console.log(`Synced DM room ${roomId} (${key}) avatar to agent ${canonicalAgentName}`);
     } catch (e) {
-      console.warn(`Failed to sync DM room ${roomId} avatar: ${e.message}`);
+      if (e.message && e.message.includes('M_FORBIDDEN')) {
+        console.debug(`[avatar-sync] Skipping DM room ${roomId} avatar sync — no permission: ${e.message}`);
+      } else {
+        console.warn(`Failed to sync DM room ${roomId} avatar: ${e.message}`);
+      }
     }
   }
   saveState();
@@ -3165,7 +3169,11 @@ export class MatrixBridge {
         }
       }
     } catch (e) {
-      console.warn(`Failed to check stale members in ${roomId}: ${e.message}`);
+      if (e.message && (e.message.includes('M_FORBIDDEN') || e.message.includes('403'))) {
+        console.debug(`[stale-member] Skipping stale member check in ${roomId} — bot not in room`);
+      } else {
+        console.warn(`Failed to check stale members in ${roomId}: ${e.message}`);
+      }
     }
   }
 
