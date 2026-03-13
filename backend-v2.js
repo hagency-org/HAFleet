@@ -5606,7 +5606,7 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   server.agentCount = liveAgents.length;
 
   if (!wasOnline) {
-    emitSystemInfo(`Remote server '${serverId}' online`, `Server '${serverId}' heartbeat restored. Active sessions=${sessions.length}, agents=${liveAgents.length}.`, 'server_online', { dedupeKey: `server_online:${serverId}` });
+    emitSystemInfo(`Remote server '${serverId}' online`, `Server '${serverId}' heartbeat restored. Active sessions=${sessions.length}, agents=${liveAgents.length}.`, 'server_online', { dedupeKey: `server_online:${serverId}`, sourceAgent: serverId });
   }
   if (lease.takeover) {
     emitSystemInfo(
@@ -7838,7 +7838,26 @@ app.get('/api/alerts/:id', requireBearer, (req, res) => {
   return res.json(alert);
 });
 
-app.post('/api/alerts/:id/transition', requireBearer, (req, res) => {
+// Accept Bearer OR agent-token (agent can only transition alerts assigned to them)
+const _alertTransitionAuth = (req, res, next) => {
+  const expectedBearer = normalizeOptionalText(process.env.API_TOKEN, 512);
+  // No API_TOKEN configured — pass through (matches requireBearer behavior)
+  if (!expectedBearer) return next();
+  // Bearer token matches — pass through
+  if (getBearerToken(req) === expectedBearer) return next();
+  // Fall back to agent-token auth: agent can transition their assigned alerts
+  const alert = alertStore.getAlert(req.params.id);
+  if (!alert) return res.status(404).json({ error: 'alert not found' });
+  const assignee = alert.assignee;
+  if (!assignee) return res.status(403).json({ error: 'alert has no assignee — bearer token required' });
+  const tokenResult = checkAgentToken(assignee, req);
+  if (!tokenResult.ok) {
+    if (AGENT_TOKEN_MODE === 'audit') { console.warn(`[auth] alert-transition agent-token ${tokenResult.reason}: agent=${assignee}`); return next(); }
+    return res.status(403).json({ error: `agent token ${tokenResult.reason}` });
+  }
+  next();
+};
+app.post('/api/alerts/:id/transition', _alertTransitionAuth, (req, res) => {
   try {
     const status = (typeof req.body?.status === 'string') ? req.body.status.trim() : '';
     if (!status) return res.status(400).json({ error: 'status is required' });
