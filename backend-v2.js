@@ -5959,6 +5959,10 @@ app.patch('/api/supervisor-state/:target', requireAgentToken(_tokenFromSuperviso
   if (!isAgentRecord(agents[supervisorName])) {
     return res.status(403).json({ error: `supervisor agent '${supervisorName}' is not registered` });
   }
+  // Fail closed: require token to be provisioned (not just registered)
+  if (!agentTokens.get(supervisorName)) {
+    return res.status(403).json({ error: `supervisor agent '${supervisorName}' has no token provisioned` });
+  }
 
   try {
     // Renew lease BEFORE assessment so lifecycleState is accurate
@@ -5979,6 +5983,9 @@ app.post('/api/supervisor-state/:target/heartbeat', requireAgentToken(_tokenFrom
   const supervisorName = `supervisor-${target}`;
   if (!isAgentRecord(agents[supervisorName])) {
     return res.status(403).json({ error: `supervisor agent '${supervisorName}' is not registered` });
+  }
+  if (!agentTokens.get(supervisorName)) {
+    return res.status(403).json({ error: `supervisor agent '${supervisorName}' has no token provisioned` });
   }
   supervisorSnapshotStore.renewLease(target, supervisorName);
   return res.json({ ok: true, target, leaseRenewed: true });

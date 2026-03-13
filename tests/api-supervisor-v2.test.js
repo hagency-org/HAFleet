@@ -1,16 +1,30 @@
 import { afterEach, describe, expect, test } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
+import os from 'os';
+import path from 'path';
 import request from 'supertest';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
+const SUPERVISOR_TOKEN = 'test-supervisor-token';
+
 describe('supervisor v2 API', () => {
   let context = null;
+  let homeDir = null;
 
   afterEach(() => {
     context?.cleanup();
     context = null;
   });
 
+  function provisionSupervisorToken(home, agentName, token) {
+    const stateDir = path.join(home, 'agents', `agent_${agentName}`, 'state');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(path.join(stateDir, 'agent-token'), token + '\n');
+  }
+
   async function setup(opts = {}) {
+    homeDir = mkdtempSync(path.join(os.tmpdir(), 'supervisor-v2-test-home-'));
+    provisionSupervisorToken(homeDir, 'supervisor-ac-topleader', SUPERVISOR_TOKEN);
     context = await createBackendTestContext('agent-chat-supervisor-v2-test-', {
       agents: {
         'ac-topleader': { name: 'ac-topleader', type: 'agent', kind: 'agent', online: true },
@@ -19,22 +33,29 @@ describe('supervisor v2 API', () => {
         ...opts.agents,
       },
       groups: {},
+      env: { AGENTCHAT_HOMEDIR: homeDir, ...opts.env },
       ...opts,
     });
     return context;
   }
 
+  /** Helper: PATCH supervisor-state with auth token */
+  function patchState(target, body) {
+    return request(context.app)
+      .patch(`/api/supervisor-state/${target}`)
+      .set('X-Agent-Token', SUPERVISOR_TOKEN)
+      .send(body);
+  }
+
   test('posts a supervisor assessment and retrieves it', async () => {
     await setup();
-    const patch = await request(context.app)
-      .patch('/api/supervisor-state/ac-topleader')
-      .send({
-        state: 'focused',
-        confidence: 0.92,
-        reason: 'Agent is working on assigned task',
-        suggested_action: 'none',
-        domain: 'core',
-      });
+    const patch = await patchState('ac-topleader', {
+      state: 'focused',
+      confidence: 0.92,
+      reason: 'Agent is working on assigned task',
+      suggested_action: 'none',
+      domain: 'core',
+    });
     expect(patch.status).toBe(200);
     expect(patch.body.ok).toBe(true);
     expect(patch.body.snapshot.state).toBe('focused');
@@ -52,24 +73,18 @@ describe('supervisor v2 API', () => {
 
   test('tracks consecutive negative assessments', async () => {
     await setup();
-    await request(context.app)
-      .patch('/api/supervisor-state/ac-topleader')
-      .send({ state: 'stuck', confidence: 0.8, reason: 'looping', suggested_action: 'nudge' });
+    await patchState('ac-topleader', { state: 'stuck', confidence: 0.8, reason: 'looping', suggested_action: 'nudge' });
 
     const res1 = await request(context.app).get('/api/supervisor/agents/ac-topleader');
     expect(res1.body.state.consecutiveNegative).toBe(1);
 
-    await request(context.app)
-      .patch('/api/supervisor-state/ac-topleader')
-      .send({ state: 'drifting', confidence: 0.75, reason: 'off-task', suggested_action: 'nudge' });
+    await patchState('ac-topleader', { state: 'drifting', confidence: 0.75, reason: 'off-task', suggested_action: 'nudge' });
 
     const res2 = await request(context.app).get('/api/supervisor/agents/ac-topleader');
     expect(res2.body.state.consecutiveNegative).toBe(2);
 
     // Positive resets counter
-    await request(context.app)
-      .patch('/api/supervisor-state/ac-topleader')
-      .send({ state: 'focused', confidence: 0.9, reason: 'back on track', suggested_action: 'none' });
+    await patchState('ac-topleader', { state: 'focused', confidence: 0.9, reason: 'back on track', suggested_action: 'none' });
 
     const res3 = await request(context.app).get('/api/supervisor/agents/ac-topleader');
     expect(res3.body.state.consecutiveNegative).toBe(0);
@@ -77,11 +92,45 @@ describe('supervisor v2 API', () => {
 
   test('rejects invalid state values', async () => {
     await setup();
-    const res = await request(context.app)
-      .patch('/api/supervisor-state/ac-topleader')
-      .send({ state: 'invalid_state', confidence: 0.5, reason: 'test' });
+    const res = await patchState('ac-topleader', { state: 'invalid_state', confidence: 0.5, reason: 'test' });
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('invalid state');
+  });
+
+  test('rejects PATCH when supervisor agent has no token provisioned', async () => {
+    homeDir = mkdtempSync(path.join(os.tmpdir(), 'supervisor-v2-test-home-'));
+    // Register supervisor agent but do NOT provision a token file
+    context = await createBackendTestContext('agent-chat-supervisor-v2-test-', {
+      agents: {
+        'ac-topleader': { name: 'ac-topleader', type: 'agent', kind: 'agent', online: true },
+        'supervisor-ac-topleader': { name: 'supervisor-ac-topleader', type: 'agent', kind: 'agent', online: true },
+      },
+      groups: {},
+      env: { AGENTCHAT_HOMEDIR: homeDir },
+    });
+    const res = await request(context.app)
+      .patch('/api/supervisor-state/ac-topleader')
+      .send({ state: 'focused', confidence: 0.9, reason: 'test', suggested_action: 'none' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('no token provisioned');
+  });
+
+  test('rejects PATCH with wrong token in enforce mode', async () => {
+    homeDir = mkdtempSync(path.join(os.tmpdir(), 'supervisor-v2-test-home-'));
+    provisionSupervisorToken(homeDir, 'supervisor-ac-topleader', SUPERVISOR_TOKEN);
+    context = await createBackendTestContext('agent-chat-supervisor-v2-test-', {
+      agents: {
+        'ac-topleader': { name: 'ac-topleader', type: 'agent', kind: 'agent', online: true },
+        'supervisor-ac-topleader': { name: 'supervisor-ac-topleader', type: 'agent', kind: 'agent', online: true },
+      },
+      groups: {},
+      env: { AGENTCHAT_HOMEDIR: homeDir, AGENTCHAT_AGENT_TOKEN_MODE: 'hard' },
+    });
+    const res = await request(context.app)
+      .patch('/api/supervisor-state/ac-topleader')
+      .set('X-Agent-Token', 'wrong-token')
+      .send({ state: 'focused', confidence: 0.9, reason: 'test', suggested_action: 'none' });
+    expect(res.status).toBe(403);
   });
 
   test('global status returns aggregate', async () => {
@@ -97,9 +146,7 @@ describe('supervisor v2 API', () => {
 
   test('agents list enriches with snapshot data', async () => {
     await setup();
-    await request(context.app)
-      .patch('/api/supervisor-state/ac-topleader')
-      .send({ state: 'focused', confidence: 0.9, reason: 'on task', suggested_action: 'none' });
+    await patchState('ac-topleader', { state: 'focused', confidence: 0.9, reason: 'on task', suggested_action: 'none' });
 
     const res = await request(context.app).get('/api/supervisor/agents');
     expect(res.status).toBe(200);
@@ -157,9 +204,7 @@ describe('supervisor v2 API', () => {
     expect(create.body.task.health).toBe(null);
 
     // Post supervisor assessment for ac-topleader
-    await request(context.app)
-      .patch('/api/supervisor-state/ac-topleader')
-      .send({ state: 'focused', confidence: 0.88, reason: 'Working on task', suggested_action: 'none', domain: 'core' });
+    await patchState('ac-topleader', { state: 'focused', confidence: 0.88, reason: 'Working on task', suggested_action: 'none', domain: 'core' });
 
     // Fetch task — health should be enriched
     const task = await request(context.app).get(`/api/tasks/${taskId}`);
@@ -174,9 +219,7 @@ describe('supervisor v2 API', () => {
     await setup();
     // Post multiple assessments
     for (let i = 0; i < 5; i++) {
-      await request(context.app)
-        .patch('/api/supervisor-state/ac-topleader')
-        .send({ state: 'focused', confidence: 0.9, reason: `assessment ${i}`, suggested_action: 'none' });
+      await patchState('ac-topleader', { state: 'focused', confidence: 0.9, reason: `assessment ${i}`, suggested_action: 'none' });
     }
 
     const detail = await request(context.app).get('/api/supervisor/agents/ac-topleader');
@@ -197,9 +240,7 @@ describe('supervisor v2 API', () => {
     ];
 
     for (const c of cases) {
-      const res = await request(context.app)
-        .patch('/api/supervisor-state/ac-topleader')
-        .send({ state: c.state, confidence: 0.9, reason: `testing ${c.state}`, suggested_action: 'none' });
+      const res = await patchState('ac-topleader', { state: c.state, confidence: 0.9, reason: `testing ${c.state}`, suggested_action: 'none' });
       expect(res.body.snapshot.classification).toBe(c.classification);
       expect(res.body.snapshot.negative).toBe(c.negative);
     }
