@@ -1231,10 +1231,10 @@ export class MatrixBridge {
       },
     }, {
       'backend-log': (_family, payload) => {
-        return backendApi('POST', '/api/system/info', {
-          summary: payload.summary,
-          full: payload.full || '',
-        }).then(() => {
+        const body = { summary: payload.summary, full: payload.full || '' };
+        if (payload.alertType) body.alertType = payload.alertType;
+        if (payload.dedupeKey) body.dedupeKey = payload.dedupeKey;
+        return backendApi('POST', '/api/system/info', body).then(() => {
           if (!this._backendHealthy) {
             this._backendHealthy = true;
             this._reconcileSuspendLogged = false;
@@ -1498,11 +1498,13 @@ export class MatrixBridge {
   }
 
   postWarning(message, { kind = 'general', scope = '' } = {}) {
-    const dedupeKey = `${kind}:${scope}:${(message.match(/^[A-Za-z ]+/) || [''])[0].trim()}`;
+    const prefix = (message.match(/^[A-Za-z ]+/) || [''])[0].trim();
+    const dedupeKey = `bridge_warning:${kind}:${scope}:${prefix}`;
     this._warningRouter.emit('warning', {
       dedupeKey,
       summary: `⚠️ Bridge warning: ${message}`,
       full: '',
+      alertType: 'bridge_warning',
     });
   }
 

@@ -12,6 +12,7 @@ import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
 import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
+import { createAlertStore, RECOVERY_MAP as ALERT_RECOVERY_MAP } from './lib/alert-store.js';
 import { createSupervisorLifecycleManager, killTmuxSession as killSupervisorTmux } from './lib/supervisor-lifecycle-manager.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
 import { assertRuntimeDir, isLocalAgentServer } from './lib/runtime-dir-guard.js';
@@ -2617,6 +2618,12 @@ const supervisorSnapshotStore = createSupervisorSnapshotStore({
   initialData: supervisorSnapshotData,
   save: (data) => saveJson('supervisor_snapshots.json', data),
 });
+const alertStoreData = loadJsonSync('alerts.json', []);
+const alertStore = createAlertStore({
+  initialData: alertStoreData,
+  save: (data) => saveJson('alerts.json', data),
+  emitEvent: (eventName, alert) => broadcastSSE(eventName, alert),
+});
 const localActivitySweepState = loadJsonSync('local_activity_sweep.json', { selectionCursor: 0 });
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
@@ -3199,7 +3206,16 @@ function appendSystemInfoLog(event) {
   }
 }
 
-function emitSystemInfo(summary, full = '', alertType = null) {
+// Severity classification for alert types
+const ALERT_SEVERITY_MAP = {
+  swap_high: 'critical', server_offline: 'critical',
+  agent_blocked: 'warning', mcp_missing: 'warning', agent_offline: 'warning',
+  resource_alert: 'warning', agent_rule: 'warning', bridge_warning: 'warning',
+  mcp_recovered: 'info', server_online: 'info', swap_clear: 'info',
+  server_takeover: 'info', supervisor_nudge: 'info', supervisor_escalation: 'warning',
+};
+
+function emitSystemInfo(summary, full = '', alertType = null, opts = {}) {
   ensureInfoGroup();
   const event = {
     id: `sys_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -3213,6 +3229,34 @@ function emitSystemInfo(summary, full = '', alertType = null) {
   };
   appendSystemInfoLog(event);
   broadcastSSE('system_info', event);
+
+  // Hook A: alert ingestion
+  if (alertType) {
+    const recoveryTarget = ALERT_RECOVERY_MAP[alertType];
+    if (recoveryTarget) {
+      // Recovery event — auto-resolve matching alerts
+      if (opts.sourceAgent) {
+        alertStore.autoResolve(`${recoveryTarget}:${opts.sourceAgent}`);
+      } else {
+        alertStore.autoResolveByPrefix(recoveryTarget);
+      }
+    } else {
+      // Non-recovery event — ingest as alert
+      const dedupeKey = opts.dedupeKey || alertType;
+      try {
+        alertStore.ingest({
+          alertType,
+          dedupeKey,
+          severity: ALERT_SEVERITY_MAP[alertType] || 'info',
+          source: opts.source || 'backend',
+          sourceAgent: opts.sourceAgent || null,
+          summary,
+          detail: full || null,
+        });
+      } catch { /* ingest validation failure — non-fatal */ }
+    }
+  }
+
   return event;
 }
 
@@ -3254,6 +3298,23 @@ const notificationRouter = new NotificationRouter({
         if (p.recovered) recovered.push(p.agentName);
         else blocked.push(p);
       }
+      // Per-agent alert ingestion (spec §11.4)
+      for (const p of blocked) {
+        try {
+          alertStore.ingest({
+            alertType: 'agent_blocked',
+            dedupeKey: `agent_blocked:${p.agentName}`,
+            severity: 'warning',
+            source: 'backend',
+            sourceAgent: p.agentName,
+            summary: `Agent '${p.agentName}' blocked (${p.tier === BLOCK_TIER_TRANSIENT ? 'transient' : (p.tier === BLOCK_TIER_SOFT ? 'soft' : 'hard')})`,
+            detail: p.full || null,
+          });
+        } catch { /* non-fatal */ }
+      }
+      for (const agentName of recovered) {
+        alertStore.autoResolve(`agent_blocked:${agentName}`);
+      }
       const parts = [];
       const fullParts = [];
       if (blocked.length) {
@@ -3286,7 +3347,13 @@ const notificationRouter = new NotificationRouter({
   },
 }, {
   log: (_family, payload) => {
-    if (payload.summary) emitSystemInfo(payload.summary, payload.full || '', _family);
+    if (!payload.summary) return;
+    const opts = {};
+    if (payload.agentName) {
+      opts.sourceAgent = payload.agentName;
+      opts.dedupeKey = `${_family}:${payload.agentName}:${payload.reason || ''}`.replace(/:$/, '');
+    }
+    emitSystemInfo(payload.summary, payload.full || '', _family, opts);
   },
   sse: (_family, payload) => {
     if (payload.sseEvent) broadcastSSE(payload.sseEvent, payload.sseData || payload);
@@ -3743,6 +3810,7 @@ const supervisorActionEngine = createSupervisorActionEngine({
   snapshotStore: supervisorSnapshotStore,
   sendMessage: (payload) => dispatchInternalDirectMessage(payload),
   broadcastSSE,
+  alertStore,
 });
 
 const supervisorLifecycleManager = createSupervisorLifecycleManager({
@@ -4318,14 +4386,14 @@ function applyAgentBlockedState(agentName, payload = {}) {
       'State: tmux session present but mcp-server.js process not detected.',
       'Offline reason set to: mcp-missing:auto',
     ].join('\n');
-    emitSystemInfo(`Agent '${agentName}' missing MCP process`, full, 'mcp_missing');
+    emitSystemInfo(`Agent '${agentName}' missing MCP process`, full, 'mcp_missing', { sourceAgent: agentName, dedupeKey: `mcp_missing:${agentName}` });
     broadcastSSE('agent_mcp_missing', {
       agent: agentName,
       missingSince: runtime.mcpMissingSince || now,
       server: normalizeServer(payload.server) || normalizeServer(agent?.server) || null,
     });
   } else if (mcpRecovered) {
-    emitSystemInfo(`Agent '${agentName}' MCP process recovered`, `Agent '${agentName}' now has mcp-server.js running inside tmux.`, 'mcp_recovered');
+    emitSystemInfo(`Agent '${agentName}' MCP process recovered`, `Agent '${agentName}' now has mcp-server.js running inside tmux.`, 'mcp_recovered', { sourceAgent: agentName });
     broadcastSSE('agent_mcp_recovered', {
       agent: agentName,
       recoveredAt: now,
@@ -4446,7 +4514,8 @@ function setAgentRuleState(agentName, code, active, buildDetail) {
     emitSystemInfo(
       `Agent '${agentName}' rule alert: ${code}`,
       detail || `Rule ${code} triggered for agent '${agentName}'.`,
-      'agent_rule'
+      'agent_rule',
+      { sourceAgent: agentName, dedupeKey: `agent_rule:${agentName}:${code}` }
     );
   }
 }
@@ -4673,7 +4742,7 @@ function refreshServerLiveness() {
         if (markAgentsOfflineForServer(serverId, `server-offline:${serverId}`, true)) {
           agentsChanged = true;
         }
-        emitSystemInfo(`Remote server '${serverId}' offline`, `Server '${serverId}' heartbeat timed out (> ${HEARTBEAT_TTL_MS}ms). Marked related agents offline.`, 'server_offline');
+        emitSystemInfo(`Remote server '${serverId}' offline`, `Server '${serverId}' heartbeat timed out (> ${HEARTBEAT_TTL_MS}ms). Marked related agents offline.`, 'server_offline', { dedupeKey: `server_offline:${serverId}` });
       }
     }
   }
@@ -5152,7 +5221,8 @@ async function sweepLocalSwapPressure() {
           `Threshold: ${SWAP_ALERT_THRESHOLD_PCT}%`,
           'System memory pressure is high. Please intervene manually to avoid OOM killing agents.',
         ].join('\n'),
-        'swap_high'
+        'swap_high',
+        { dedupeKey: 'swap_high' }
       );
     }
     return;
@@ -5166,7 +5236,8 @@ async function sweepLocalSwapPressure() {
         `Swap used: ${usedGb} GiB / ${totalGb} GiB (${usagePctText}%)`,
         `Clear threshold: ${SWAP_ALERT_CLEAR_PCT.toFixed(1)}%`,
       ].join('\n'),
-      'swap_clear'
+      'swap_clear',
+      { dedupeKey: 'swap_clear' }
     );
   }
 }
@@ -5535,13 +5606,14 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   server.agentCount = liveAgents.length;
 
   if (!wasOnline) {
-    emitSystemInfo(`Remote server '${serverId}' online`, `Server '${serverId}' heartbeat restored. Active sessions=${sessions.length}, agents=${liveAgents.length}.`, 'server_online');
+    emitSystemInfo(`Remote server '${serverId}' online`, `Server '${serverId}' heartbeat restored. Active sessions=${sessions.length}, agents=${liveAgents.length}.`, 'server_online', { dedupeKey: `server_online:${serverId}` });
   }
   if (lease.takeover) {
     emitSystemInfo(
       `Remote server '${serverId}' heartbeat instance switched`,
       `Server '${serverId}' lease takeover: reason=${lease.reason}, instanceId=${incomingInstanceId || 'unknown'}, bootTs=${incomingBootTs || 0}.`,
-      'server_takeover'
+      'server_takeover',
+      { dedupeKey: `server_takeover:${serverId}` }
     );
   }
 
@@ -6156,7 +6228,7 @@ app.post('/api/servers/:id/offline', requireBearer, (req, res) => {
   saveServers();
   if (wasOnline && !maintenance) {
     const detail = (typeof req.body?.reason === 'string' && req.body.reason.trim()) ? req.body.reason.trim() : 'offline';
-    emitSystemInfo(`Remote server '${serverId}' offline`, `Server '${serverId}' reported offline (${detail}).`, 'server_offline');
+    emitSystemInfo(`Remote server '${serverId}' offline`, `Server '${serverId}' reported offline (${detail}).`, 'server_offline', { dedupeKey: `server_offline:${serverId}` });
   }
   res.json({
     ok: true,
@@ -7743,6 +7815,78 @@ app.patch('/api/task-graphs/:id/nodes/:nodeId', requireAgentToken(_tokenFromNode
   }
 });
 
+// ── Alerts CRUD ───────────────────────────────────────────────────────
+app.get('/api/alerts', requireBearer, (req, res) => {
+  const filters = {};
+  if (req.query.status) filters.status = req.query.status;
+  if (req.query.severity) filters.severity = req.query.severity;
+  if (req.query.sourceAgent) filters.sourceAgent = req.query.sourceAgent;
+  if (req.query.alertType) filters.alertType = req.query.alertType;
+  if (req.query.assignee) filters.assignee = req.query.assignee;
+  if (req.query.limit) filters.limit = req.query.limit;
+  if (req.query.offset) filters.offset = req.query.offset;
+  return res.json(alertStore.listAlerts(filters));
+});
+
+app.get('/api/alerts/stats', requireBearer, (_req, res) => {
+  return res.json(alertStore.getStats());
+});
+
+app.get('/api/alerts/:id', requireBearer, (req, res) => {
+  const alert = alertStore.getAlert(req.params.id);
+  if (!alert) return res.status(404).json({ error: 'alert not found' });
+  return res.json(alert);
+});
+
+app.post('/api/alerts/:id/transition', requireBearer, (req, res) => {
+  try {
+    const status = (typeof req.body?.status === 'string') ? req.body.status.trim() : '';
+    if (!status) return res.status(400).json({ error: 'status is required' });
+    const alert = alertStore.transition(req.params.id, status, {
+      actor: req.body.actor || 'operator',
+      assignee: req.body.assignee || null,
+      suppressUntil: req.body.suppressUntil ? Number(req.body.suppressUntil) : undefined,
+    });
+    return res.json({ ok: true, alert });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code === 'bad_transition') return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to transition alert' });
+  }
+});
+
+app.post('/api/alerts/:id/notes', requireBearer, (req, res) => {
+  try {
+    const alert = alertStore.addNote(req.params.id, {
+      author: req.body?.author || 'operator',
+      text: req.body?.text || '',
+    });
+    return res.json({ ok: true, alert });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to add note' });
+  }
+});
+
+app.patch('/api/alerts/:id', requireBearer, (req, res) => {
+  try {
+    const alert = alertStore.updateAlert(req.params.id, req.body || {});
+    return res.json({ ok: true, alert });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to update alert' });
+  }
+});
+
+app.delete('/api/alerts/:id', requireBearer, (req, res) => {
+  const alert = alertStore.deleteAlert(req.params.id);
+  if (!alert) return res.status(404).json({ error: 'alert not found' });
+  broadcastSSE('alert_deleted', alert);
+  return res.json({ ok: true, alert });
+});
+
 // ── Groups CRUD ───────────────────────────────────────────────────────
 app.post('/api/groups', requireBridgeSecret, (req, res) => {
   const { name, members } = req.body;
@@ -7856,7 +8000,14 @@ app.post('/api/system/info', requireBridgeSecret, (req, res) => {
   const summary = (typeof req.body?.summary === 'string') ? req.body.summary.trim() : '';
   const full = (typeof req.body?.full === 'string') ? req.body.full : '';
   if (!summary) return res.status(400).json({ error: 'summary required' });
-  const event = emitSystemInfo(summary, full);
+  const alertType = (typeof req.body?.alertType === 'string') ? req.body.alertType.trim() : null;
+  const dedupeKey = (typeof req.body?.dedupeKey === 'string') ? req.body.dedupeKey.trim() : undefined;
+  const sourceAgent = (typeof req.body?.sourceAgent === 'string') ? req.body.sourceAgent.trim() : undefined;
+  const opts = {};
+  if (dedupeKey) opts.dedupeKey = dedupeKey;
+  if (sourceAgent) opts.sourceAgent = sourceAgent;
+  opts.source = 'bridge';
+  const event = emitSystemInfo(summary, full, alertType || null, Object.keys(opts).length > 1 ? opts : { source: 'bridge' });
   res.json({ ok: true, id: event.id });
 });
 
@@ -8525,6 +8676,9 @@ function startBackgroundLoops() {
   // Supervisor lifecycle sweep — manages per-agent supervisor tmux sessions
   const supervisorLifecycleSweepFn = () => supervisorLifecycleManager.sweepAll();
   scheduleAdaptiveSweepLoop('sweepSupervisorLifecycle', supervisorLifecycleSweepFn, 'supervisorLifecycle', SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS);
+
+  // Prune resolved alerts every hour
+  setInterval(() => { alertStore.pruneResolved(); }, 3600_000);
 
   backgroundLoopsStarted = true;
 }
