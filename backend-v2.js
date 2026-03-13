@@ -10,6 +10,8 @@ import { createSupervisorService } from './supervisor/index.js';
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
+import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
+import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
 import { assertRuntimeDir, isLocalAgentServer } from './lib/runtime-dir-guard.js';
 import { NotificationRouter } from './lib/notification-router.js';
@@ -2606,6 +2608,11 @@ const taskStore = createTaskStore({
   initialData: taskStoreData,
   save: (data) => saveJson('tasks.json', data),
 });
+const supervisorSnapshotData = loadJsonSync('supervisor_snapshots.json', {});
+const supervisorSnapshotStore = createSupervisorSnapshotStore({
+  initialData: supervisorSnapshotData,
+  save: (data) => saveJson('supervisor_snapshots.json', data),
+});
 const localActivitySweepState = loadJsonSync('local_activity_sweep.json', { selectionCursor: 0 });
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
@@ -3734,6 +3741,12 @@ function dispatchInternalDirectMessage(payload = {}) {
   const directTargetKind = isAgentRecord(agents[toName]) ? 'agent' : 'human';
   return dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
 }
+
+const supervisorActionEngine = createSupervisorActionEngine({
+  snapshotStore: supervisorSnapshotStore,
+  sendMessage: (payload) => dispatchInternalDirectMessage(payload),
+  broadcastSSE,
+});
 
 function normalizeInboxGateReason(value) {
   const raw = (typeof value === 'string') ? value.trim() : '';
@@ -5935,15 +5948,53 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// ── Supervisor audit ──────────────────────────────────────────────────
+// ── Supervisor audit (v2 — per-agent supervisor snapshot store) ───────
+const _tokenFromSupervisorTarget = r => `supervisor-${r.params?.target || ''}`;
+
+app.patch('/api/supervisor-state/:target', requireAgentToken(_tokenFromSupervisorTarget), (req, res) => {
+  const target = normalizeAgentName(req.params.target);
+  if (!target) return res.status(400).json({ error: 'invalid target agent name' });
+  const supervisorName = `supervisor-${target}`;
+
+  try {
+    const { snapshot, event } = supervisorSnapshotStore.updateAssessment(target, supervisorName, req.body || {});
+    supervisorSnapshotStore.renewLease(target, supervisorName);
+    broadcastSSE('supervisor_audit', event);
+    // Trigger action engine
+    supervisorActionEngine.evaluateAction(target, snapshot);
+    return res.json({ ok: true, snapshot });
+  } catch (error) {
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to update supervisor state' });
+  }
+});
+
 app.get('/api/supervisor/status', (_req, res) => {
-  res.json(supervisorService.getStatus());
+  res.json(supervisorSnapshotStore.getStatus(agents));
 });
 
 app.get('/api/supervisor/agents', (_req, res) => {
+  // Iterate live candidate set, enrich with snapshot store
+  const agentList = Object.values(agents).filter(isAgentRecord);
+  const summaries = agentList.map(a => {
+    const snapshot = supervisorSnapshotStore.getTarget(a.name);
+    return {
+      name: a.name,
+      online: a.online,
+      task: a.task || null,
+      state: snapshot ? {
+        lastStatus: snapshot.state,
+        classification: snapshot.classification,
+        consecutiveNegative: snapshot.consecutiveNegative,
+        lastReason: snapshot.reason,
+        lastJudgedAt: snapshot.assessed_at_ms || null,
+        lifecycleState: snapshot.lifecycleState,
+      } : null,
+    };
+  });
   res.json({
-    status: supervisorService.getStatus(),
-    agents: supervisorService.getAgentSummaries(),
+    status: supervisorSnapshotStore.getStatus(agents),
+    agents: summaries,
   });
 });
 
@@ -5953,59 +6004,60 @@ app.get('/api/supervisor/agents/:name', (req, res) => {
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
   const limitRaw = Number.parseInt(req.query.limit, 10);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 120;
-  const payload = supervisorService.getAgentDetail(agentName, limit);
-  return res.json(payload);
+  const snapshot = supervisorSnapshotStore.getTarget(agentName);
+  const agentEvents = supervisorSnapshotStore.getEvents(agentName, limit);
+  const agent = agents[agentName];
+  return res.json({
+    name: agentName,
+    task: agent.task || null,
+    state: snapshot ? {
+      lastStatus: snapshot.state,
+      classification: snapshot.classification,
+      consecutiveNegative: snapshot.consecutiveNegative,
+      lastReason: snapshot.reason,
+      lastDomain: snapshot.domain,
+      lastPattern: snapshot.pattern,
+      lastSuggestion: snapshot.suggested_action,
+      lastJudgedAt: snapshot.assessed_at_ms || null,
+      lastWarningAt: snapshot.lastWarningAt,
+      lastNudgeAt: snapshot.lastNudgeAt,
+      lastNudgeCount: snapshot.lastNudgeCount,
+      lastEscalationAt: snapshot.lastEscalationAt,
+      lastEscalationCount: snapshot.lastEscalationCount,
+      lastEventId: snapshot.lastEventId,
+      lifecycleState: snapshot.lifecycleState,
+    } : null,
+    latest: agentEvents.length ? agentEvents[agentEvents.length - 1] : null,
+    events: agentEvents,
+  });
 });
 
 app.get('/api/supervisor/control', (_req, res) => {
-  return res.json(supervisorService.getControl());
+  return res.json(supervisorSnapshotStore.getControl(agents));
 });
 
 app.post('/api/supervisor/control', requireBearer, (req, res) => {
   const body = req.body || {};
-  const patch = {};
-  let hasPatch = false;
-
-  if (Object.prototype.hasOwnProperty.call(body, 'enabled')) {
-    if (typeof body.enabled !== 'boolean') {
-      return res.status(400).json({ error: 'enabled must be boolean' });
-    }
-    patch.enabled = body.enabled;
-    hasPatch = true;
-  }
 
   if (Object.prototype.hasOwnProperty.call(body, 'allowedAgents')) {
-    const raw = body.allowedAgents;
-    if (raw !== null && !Array.isArray(raw)) {
-      return res.status(400).json({ error: 'allowedAgents must be array or null' });
-    }
-    if (Array.isArray(raw)) {
-      const normalized = [];
-      const seen = new Set();
-      for (const item of raw) {
-        const name = normalizeAgentName(item);
-        if (!name) continue;
-        if (seen.has(name)) continue;
-        seen.add(name);
-        normalized.push(name);
-      }
-      patch.allowedAgents = normalized;
-    } else {
-      patch.allowedAgents = null;
-    }
-    hasPatch = true;
+    return res.status(400).json({
+      error: 'allowedAgents is read-only in per-agent supervisor model — provision/deprovision supervisor agents to change membership',
+    });
   }
 
-  if (!hasPatch) {
+  if (!Object.prototype.hasOwnProperty.call(body, 'enabled')) {
     return res.status(400).json({ error: 'no control fields provided' });
   }
 
-  const result = supervisorService.updateControl(patch);
-  if (!result || result.ok !== true) {
-    return res.status(400).json({ error: result?.error || 'failed to update supervisor control' });
+  if (typeof body.enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled must be boolean' });
   }
-  auditLog(req, { summary: patch });
-  return res.json(result);
+
+  supervisorSnapshotStore.setEnabled(body.enabled);
+  const control = supervisorSnapshotStore.getControl(agents);
+  const status = supervisorSnapshotStore.getStatus(agents);
+  auditLog(req, { summary: { enabled: body.enabled } });
+  return res.json({ ok: true, control, status });
 });
 
 // ── Server heartbeats ─────────────────────────────────────────────────
@@ -7523,7 +7575,24 @@ app.get('/api/tasks', (req, res) => {
 app.get('/api/tasks/:id', (req, res) => {
   const task = taskStore.getTask(req.params.id);
   if (!task) return res.status(404).json({ error: 'task not found' });
-  return res.json(task);
+  // Read-through: enrich health from supervisor snapshot store
+  const enriched = { ...task };
+  if (task.assignee) {
+    const snapshot = supervisorSnapshotStore.getTarget(task.assignee);
+    if (snapshot) {
+      enriched.health = {
+        state: snapshot.state,
+        confidence: snapshot.confidence,
+        reason: snapshot.reason,
+        suggested_action: snapshot.suggested_action,
+        domain: snapshot.domain,
+        pattern: snapshot.pattern,
+        assessed_at: snapshot.assessed_at,
+        assessed_by: snapshot.supervisor,
+      };
+    }
+  }
+  return res.json(enriched);
 });
 
 app.patch('/api/tasks/:id', requireBearer, (req, res) => {
