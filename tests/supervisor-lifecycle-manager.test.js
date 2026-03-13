@@ -99,13 +99,19 @@ describe('SupervisorLifecycleManager', () => {
     expect(result.reason).toBe('no-supervisor-registered');
   });
 
-  test('stops supervisor when kill switch is disabled', () => {
+  test('stops supervisor and clears lease when kill switch is disabled', () => {
+    // First establish a lease
+    snapshotStore.renewLease('ac-topleader', 'supervisor-ac-topleader');
+    expect(snapshotStore.isLeaseActive('ac-topleader')).toBe(true);
+
     snapshotStore.setEnabled(false);
     mockTmuxExists(new Set(['supervisor-ac-topleader']));
     const manager = createManager();
     const result = manager.reconcile('ac-topleader');
     expect(result.action).toBe('stopped');
     expect(result.reason).toBe('kill-switch-disabled');
+    // Lease must be cleared
+    expect(snapshotStore.isLeaseActive('ac-topleader')).toBe(false);
   });
 
   test('returns idle when kill switch is disabled and no session exists', () => {

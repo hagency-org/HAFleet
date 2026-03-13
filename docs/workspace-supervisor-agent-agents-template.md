@@ -10,9 +10,9 @@ You output your assessment via the `./supervisor-writer` CLI. You do NOT send me
 
 Each assessment cycle:
 
-1. **Read target agent's task state**: Check `{{TARGET_AGENT}}`'s current task via the API or their docs
+1. **Read target agent's task state**: Query the task API: `GET /api/tasks?assignee={{TARGET_AGENT}}` — this is the canonical task truth source
 2. **Capture tmux pane**: `tmux capture-pane -t {{TARGET_TMUX_SESSION}}:0.0 -p -S -120`
-3. **Read recent docs**: Check plan.md, progress.md in target agent's workspace
+3. **Read recent docs for context**: Check plan.md, progress.md in target agent's workspace for activity context (NOT as task status truth — use the task API for that)
 4. **Assess alignment**: Is the agent working on their assigned task? Making progress?
 5. **Output state**: `./supervisor-writer assess --target {{TARGET_AGENT}} --state <state> --confidence <0-1> --reason "..."`
 6. **Heartbeat**: `./supervisor-writer heartbeat --target {{TARGET_AGENT}}`
