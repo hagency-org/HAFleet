@@ -72,6 +72,33 @@ describe('supervisor provisioning', () => {
     expect(secondToken).toBe(firstToken);
   });
 
+  test('re-provision preserves existing manifest fields', async () => {
+    const { provisionSupervisorAgent } = await import('../lib/supervisor-provisioning.js');
+    const first = provisionSupervisorAgent('ac-topleader');
+
+    // Simulate runtime adding fields to manifest
+    const manifestPath = first.paths.agentJsonPath;
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    manifest.runtimeProfile = { primary: { framework: 'claude', model: 'opus' } };
+    manifest.task = { id: 'task-123', title: 'Test task' };
+    manifest.subconsciousEnabled = true;
+    const { writeFileSync: writeFs } = await import('fs');
+    writeFs(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
+
+    // Re-provision
+    provisionSupervisorAgent('ac-topleader');
+    const updated = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    // Provisioning-owned fields updated
+    expect(updated.supervisorFor).toBe('ac-topleader');
+    expect(updated.name).toBe('supervisor-ac-topleader');
+    // Existing fields preserved
+    expect(updated.runtimeProfile).toEqual({ primary: { framework: 'claude', model: 'opus' } });
+    expect(updated.task).toEqual({ id: 'task-123', title: 'Test task' });
+    expect(updated.subconsciousEnabled).toBe(true);
+    // createdAt preserved from original
+    expect(updated.createdAt).toBe(manifest.createdAt);
+  });
+
   test('readSupervisorToken returns generated token', async () => {
     const { provisionSupervisorAgent, readSupervisorToken } = await import('../lib/supervisor-provisioning.js');
     provisionSupervisorAgent('ac-topleader');
@@ -88,5 +115,6 @@ describe('supervisor provisioning', () => {
     expect(record.role).toContain('ac-topleader');
     expect(record.homeDir).toBeTruthy();
     expect(record.workdir).toBeTruthy();
+    expect(record.supervisorFor).toBe('ac-topleader');
   });
 });
