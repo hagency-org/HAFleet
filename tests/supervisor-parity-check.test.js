@@ -34,10 +34,11 @@ describe('supervisor parity check', () => {
     const { baseUrl } = await context.listen();
     const result = await runParityChecks(baseUrl, 'ac-topleader', SUPERVISOR_TOKEN);
     expect(result.failed).toBe(0);
-    expect(result.passed).toBeGreaterThanOrEqual(8);
+    expect(result.skipped).toBe(0);
+    expect(result.passed).toBe(8);
   });
 
-  test('parity checks work without token (read-only checks pass)', async () => {
+  test('read-only mode: no failures, write checks skipped', async () => {
     const homeDir = mkdtempSync(path.join(os.tmpdir(), 'parity-check-home-'));
     context = await createBackendTestContext('supervisor-parity-check-test-', {
       agents: {
@@ -49,12 +50,15 @@ describe('supervisor parity check', () => {
     });
 
     const { baseUrl } = await context.listen();
-    // Without token, write checks are skipped but should not crash
     const result = await runParityChecks(baseUrl, 'ac-topleader', '');
-    // Read-only checks should pass (status, agents, control, tasks)
-    expect(result.total).toBeGreaterThanOrEqual(8);
-    // At least the GET endpoints pass
+    // Zero failures — skipped checks must NOT count as failures
+    expect(result.failed).toBe(0);
+    // Write checks are skipped
+    expect(result.skipped).toBe(4);
+    // Read-only checks pass
+    expect(result.passed).toBe(4);
+    // All GET checks pass (not skipped)
     const getChecks = result.results.filter(r => r.name.startsWith('GET'));
-    expect(getChecks.every(r => r.ok)).toBe(true);
+    expect(getChecks.every(r => r.ok && !r.skipped)).toBe(true);
   });
 });

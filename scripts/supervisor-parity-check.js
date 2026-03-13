@@ -2,9 +2,6 @@
 // Supervisor parity validation — automated checks that all supervisor APIs work correctly.
 // Usage: node scripts/supervisor-parity-check.js [--web-url http://127.0.0.1:8090] [--target ac-topleader] [--token <supervisor-token>]
 
-import { readFileSync } from 'fs';
-import path from 'path';
-
 function parseArgs(argv) {
   const args = { webUrl: '', target: 'ac-topleader', token: '' };
   for (let i = 0; i < argv.length; i++) {
@@ -26,6 +23,7 @@ function defaultApiBaseUrl() {
 
 const PASS = '\x1b[32mPASS\x1b[0m';
 const FAIL = '\x1b[31mFAIL\x1b[0m';
+const SKIP = '\x1b[33mSKIP\x1b[0m';
 
 export async function runParityChecks(apiBase, target, token) {
   const results = [];
@@ -42,24 +40,50 @@ export async function runParityChecks(apiBase, target, token) {
   }
 
   function check(name, ok, detail = '') {
-    results.push({ name, ok, detail });
+    results.push({ name, ok, skipped: false, detail });
     console.log(`  ${ok ? PASS : FAIL} ${name}${detail ? ` — ${detail}` : ''}`);
+  }
+
+  function skip(name, detail = '') {
+    results.push({ name, ok: true, skipped: true, detail });
+    console.log(`  ${SKIP} ${name}${detail ? ` — ${detail}` : ''}`);
   }
 
   console.log(`\nSupervisor parity checks against ${apiBase}\n`);
 
-  // 1. GET /api/supervisor/status
+  // 1. GET /api/supervisor/status — full shape validation
   try {
     const r = await apiFetch('GET', '/api/supervisor/status');
+    const b = r.body || {};
     const ok = r.status === 200
-      && typeof r.body?.enabled === 'boolean'
-      && r.body?.runtime && typeof r.body.runtime === 'object'
-      && r.body?.llm && typeof r.body.llm === 'object'
-      && Array.isArray(r.body?.allowedAgents)
-      && r.body?.allowlistMode === 'subset'
-      && typeof r.body?.intervalMs === 'number'
-      && typeof r.body?.eventCount === 'number';
-    check('GET /api/supervisor/status — valid shape', ok, `enabled=${r.body?.enabled}, eventCount=${r.body?.eventCount}`);
+      && typeof b.enabled === 'boolean'
+      && (b.disabledReason === null || typeof b.disabledReason === 'string')
+      && typeof b.intervalMs === 'number'
+      && typeof b.warnAfter === 'number'
+      && typeof b.warnCooldownMs === 'number'
+      && typeof b.heartbeatTtlMs === 'number'
+      && typeof b.trailingHeartbeatPeriods === 'number'
+      && typeof b.trailingWindowMs === 'number'
+      && (b.matrixInfoGroup === null || typeof b.matrixInfoGroup === 'string')
+      && typeof b.matrixMentions === 'boolean'
+      && Array.isArray(b.allowedAgents)
+      && b.allowlistMode === 'subset'
+      && typeof b.llm === 'object' && b.llm !== null
+      && typeof b.llm.provider === 'string'
+      && typeof b.llm.model === 'string'
+      && typeof b.llm.profileSource === 'string'
+      && typeof b.runtime === 'object' && b.runtime !== null
+      && typeof b.runtime.running === 'boolean'
+      && (b.runtime.lastSweepAt === null || typeof b.runtime.lastSweepAt === 'string')
+      && typeof b.runtime.lastSweepDurationMs === 'number'
+      && (b.runtime.lastSweepError === null || typeof b.runtime.lastSweepError === 'string')
+      && typeof b.runtime.lastSweepActive === 'number'
+      && typeof b.runtime.lastSweepEvaluated === 'number'
+      && typeof b.supervisorState === 'object' && b.supervisorState !== null
+      && typeof b.supervisorState.mode === 'string'
+      && typeof b.supervisorState.lifecycleState === 'string'
+      && typeof b.eventCount === 'number';
+    check('GET /api/supervisor/status — full shape', ok, `enabled=${b.enabled}, events=${b.eventCount}, fields=${Object.keys(b).length}`);
   } catch (e) { check('GET /api/supervisor/status', false, e.message); }
 
   // 2. GET /api/supervisor/agents
@@ -112,30 +136,56 @@ export async function runParityChecks(apiBase, target, token) {
         && r.body?.leaseRenewed === true;
       check('POST /api/supervisor-state/heartbeat — lease renewed', ok);
     } catch (e) { check('POST /api/supervisor-state/heartbeat', false, e.message); }
+
+    // 7. Round-trip: verify the specific assessment persisted
+    try {
+      const r = await apiFetch('GET', `/api/supervisor/agents/${target}`);
+      const s = r.body?.state;
+      const latest = r.body?.latest;
+      const ok = r.status === 200
+        && s?.lastStatus === 'focused'
+        && s?.lastReason === 'parity-check assessment'
+        && s?.lastDomain === 'core'
+        && s?.lastSuggestion === 'none'
+        && latest?.reason === 'parity-check assessment'
+        && latest?.domain === 'core';
+      check('Round-trip — specific assessment persisted', ok, `reason=${s?.lastReason}, domain=${s?.lastDomain}`);
+    } catch (e) { check('Round-trip — assessment persisted', false, e.message); }
+
+    // 8. Task health enrichment end-to-end
+    try {
+      // Create test task
+      const createRes = await apiFetch('POST', '/api/tasks', { title: 'parity-check-task', assignee: target });
+      const taskId = createRes.body?.task?.id;
+      if (!taskId) {
+        check('Task health enrichment — create task', false, 'failed to create task');
+      } else {
+        // Fetch task — health should be enriched from the assessment posted above
+        const taskRes = await apiFetch('GET', `/api/tasks/${taskId}`);
+        const h = taskRes.body?.health;
+        const ok = taskRes.status === 200
+          && h?.state === 'focused'
+          && h?.confidence === 0.85
+          && h?.assessed_by === `supervisor-${target}`;
+        check('Task health enrichment — snapshot read-through', ok, `state=${h?.state}, confidence=${h?.confidence}, assessed_by=${h?.assessed_by}`);
+
+        // Clean up: delete test task
+        await apiFetch('DELETE', `/api/tasks/${taskId}`);
+      }
+    } catch (e) { check('Task health enrichment', false, e.message); }
   } else {
-    check('PATCH /api/supervisor-state — assessment', false, 'skipped: no token provided');
-    check('POST /api/supervisor-state/heartbeat', false, 'skipped: no token provided');
+    skip('PATCH /api/supervisor-state — assessment', 'no token provided');
+    skip('POST /api/supervisor-state/heartbeat', 'no token provided');
+    skip('Round-trip — assessment persisted', 'no token provided');
+    skip('Task health enrichment', 'no token provided');
   }
 
-  // 7. GET /api/supervisor/agents/:name — verify assessment persisted
-  try {
-    const r = await apiFetch('GET', `/api/supervisor/agents/${target}`);
-    const hasState = r.body?.state && r.body.state.lastStatus === 'focused';
-    check('GET /api/supervisor/agents/:name — assessment persisted', hasState || !token, token ? `lastStatus=${r.body?.state?.lastStatus}` : 'skipped: no token');
-  } catch (e) { check('GET /api/supervisor/agents/:name — persisted', false, e.message); }
-
-  // 8. Task health enrichment
-  try {
-    const r = await apiFetch('GET', '/api/tasks');
-    const ok = r.status === 200 && Array.isArray(r.body);
-    check('GET /api/tasks — returns array', ok, `count=${r.body?.length}`);
-  } catch (e) { check('GET /api/tasks', false, e.message); }
-
   // Summary
-  const passed = results.filter(r => r.ok).length;
+  const passed = results.filter(r => r.ok && !r.skipped).length;
   const failed = results.filter(r => !r.ok).length;
-  console.log(`\n  ${passed} passed, ${failed} failed out of ${results.length} checks\n`);
-  return { results, passed, failed, total: results.length };
+  const skipped = results.filter(r => r.skipped).length;
+  console.log(`\n  ${passed} passed, ${failed} failed, ${skipped} skipped out of ${results.length} checks\n`);
+  return { results, passed, failed, skipped, total: results.length };
 }
 
 // CLI entry point
