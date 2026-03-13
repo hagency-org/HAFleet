@@ -71,6 +71,7 @@ export async function runParityChecks(apiBase, target, token) {
       && typeof b.llm === 'object' && b.llm !== null
       && typeof b.llm.provider === 'string'
       && typeof b.llm.model === 'string'
+      && (b.llm.endpoint === null || typeof b.llm.endpoint === 'string')
       && typeof b.llm.profileSource === 'string'
       && typeof b.runtime === 'object' && b.runtime !== null
       && typeof b.runtime.running === 'boolean'
