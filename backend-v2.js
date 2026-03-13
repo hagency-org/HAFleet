@@ -5955,18 +5955,33 @@ app.patch('/api/supervisor-state/:target', requireAgentToken(_tokenFromSuperviso
   const target = normalizeAgentName(req.params.target);
   if (!target) return res.status(400).json({ error: 'invalid target agent name' });
   const supervisorName = `supervisor-${target}`;
+  // Require supervisor agent to be registered
+  if (!isAgentRecord(agents[supervisorName])) {
+    return res.status(403).json({ error: `supervisor agent '${supervisorName}' is not registered` });
+  }
 
   try {
-    const { snapshot, event } = supervisorSnapshotStore.updateAssessment(target, supervisorName, req.body || {});
+    // Renew lease BEFORE assessment so lifecycleState is accurate
     supervisorSnapshotStore.renewLease(target, supervisorName);
+    const { snapshot, event } = supervisorSnapshotStore.updateAssessment(target, supervisorName, req.body || {});
     broadcastSSE('supervisor_audit', event);
-    // Trigger action engine
     supervisorActionEngine.evaluateAction(target, snapshot);
     return res.json({ ok: true, snapshot });
   } catch (error) {
     if (error.code) return res.status(400).json({ error: error.message });
     return res.status(500).json({ error: 'failed to update supervisor state' });
   }
+});
+
+app.post('/api/supervisor-state/:target/heartbeat', requireAgentToken(_tokenFromSupervisorTarget), (req, res) => {
+  const target = normalizeAgentName(req.params.target);
+  if (!target) return res.status(400).json({ error: 'invalid target agent name' });
+  const supervisorName = `supervisor-${target}`;
+  if (!isAgentRecord(agents[supervisorName])) {
+    return res.status(403).json({ error: `supervisor agent '${supervisorName}' is not registered` });
+  }
+  supervisorSnapshotStore.renewLease(target, supervisorName);
+  return res.json({ ok: true, target, leaseRenewed: true });
 });
 
 app.get('/api/supervisor/status', (_req, res) => {
@@ -7569,7 +7584,13 @@ app.get('/api/tasks', (req, res) => {
   if (req.query.status) filters.status = req.query.status;
   if (req.query.priority) filters.priority = req.query.priority;
   if (req.query.label) filters.label = req.query.label;
-  return res.json(taskStore.listTasks(filters));
+  const tasks = taskStore.listTasks(filters).map(task => {
+    if (!task.assignee) return task;
+    const snapshot = supervisorSnapshotStore.getTarget(task.assignee);
+    if (!snapshot) return task;
+    return { ...task, health: { state: snapshot.state, confidence: snapshot.confidence, reason: snapshot.reason, suggested_action: snapshot.suggested_action, domain: snapshot.domain, pattern: snapshot.pattern, assessed_at: snapshot.assessed_at, assessed_by: snapshot.supervisor } };
+  });
+  return res.json(tasks);
 });
 
 app.get('/api/tasks/:id', (req, res) => {
@@ -7655,7 +7676,12 @@ app.post('/api/tasks/:id/transition', requireAgentToken(_tokenFromTaskAssignee),
 app.get('/api/agents/:name/tasks', (req, res) => {
   const name = normalizeAgentName(req.params.name);
   if (!name) return res.status(400).json({ error: 'invalid agent name' });
-  return res.json(taskStore.listTasks({ assignee: name }));
+  const snapshot = supervisorSnapshotStore.getTarget(name);
+  const tasks = taskStore.listTasks({ assignee: name }).map(task => {
+    if (!snapshot) return task;
+    return { ...task, health: { state: snapshot.state, confidence: snapshot.confidence, reason: snapshot.reason, suggested_action: snapshot.suggested_action, domain: snapshot.domain, pattern: snapshot.pattern, assessed_at: snapshot.assessed_at, assessed_by: snapshot.supervisor } };
+  });
+  return res.json(tasks);
 });
 
 app.post('/api/task-graphs', requireBearer, (req, res) => {

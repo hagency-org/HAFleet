@@ -130,12 +130,7 @@ async function main() {
 
     case 'heartbeat': {
       const hbTarget = target || agentName.replace(/^supervisor-/, '');
-      const result = await apiFetch('PATCH', `/api/supervisor-state/${hbTarget}`, {
-        state: 'focused',
-        confidence: 0.5,
-        reason: 'heartbeat',
-        suggested_action: 'none',
-      });
+      const result = await apiFetch('POST', `/api/supervisor-state/${hbTarget}/heartbeat`, {});
       console.log(`Heartbeat sent for ${hbTarget}`);
       break;
     }
