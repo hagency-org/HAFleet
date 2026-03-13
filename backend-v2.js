@@ -9,6 +9,7 @@ import { promisify } from 'util';
 import { createSupervisorService } from './supervisor/index.js';
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
+import { createTaskStore } from './lib/task-store.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
 import { assertRuntimeDir, isLocalAgentServer } from './lib/runtime-dir-guard.js';
 import { NotificationRouter } from './lib/notification-router.js';
@@ -2600,6 +2601,11 @@ const cursors = loadJsonSync('cursors.json', {});
 const servers = loadJsonSync('servers.json', {});
 const agentRuntime = loadJsonSync('agent_runtime.json', {});
 const taskGraphs = loadJsonSync('task_graphs.json', {});
+const taskStoreData = loadJsonSync('tasks.json', []);
+const taskStore = createTaskStore({
+  initialData: taskStoreData,
+  save: (data) => saveJson('tasks.json', data),
+});
 const localActivitySweepState = loadJsonSync('local_activity_sweep.json', { selectionCursor: 0 });
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
@@ -7489,6 +7495,86 @@ app.get('/api/subconscious/events/:name', (req, res) => {
     ? Math.min(limitRaw, SUBCONSCIOUS_EVENT_HISTORY_LIMIT)
     : 120;
   return res.json({ ok: true, agent, events: getSubconsciousEvents(agent, limit) });
+});
+
+// ── Tasks CRUD ───────────────────────────────────────────────────────
+const _tokenFromTaskAssignee = r => { const t = taskStore.getTask(r.params?.id); return t?.assignee || ''; };
+
+app.post('/api/tasks', requireBearer, (req, res) => {
+  try {
+    const task = taskStore.createTask(req.body || {});
+    broadcastSSE('task_created', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to create task' });
+  }
+});
+
+app.get('/api/tasks', (req, res) => {
+  const filters = {};
+  if (req.query.assignee) filters.assignee = req.query.assignee;
+  if (req.query.status) filters.status = req.query.status;
+  if (req.query.priority) filters.priority = req.query.priority;
+  if (req.query.label) filters.label = req.query.label;
+  return res.json(taskStore.listTasks(filters));
+});
+
+app.get('/api/tasks/:id', (req, res) => {
+  const task = taskStore.getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: 'task not found' });
+  return res.json(task);
+});
+
+app.patch('/api/tasks/:id', requireAgentToken(_tokenFromTaskAssignee), (req, res) => {
+  try {
+    const task = taskStore.updateTask(req.params.id, req.body || {});
+    broadcastSSE('task_updated', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to update task' });
+  }
+});
+
+app.delete('/api/tasks/:id', requireBearer, (req, res) => {
+  const task = taskStore.deleteTask(req.params.id);
+  if (!task) return res.status(404).json({ error: 'task not found' });
+  broadcastSSE('task_deleted', task);
+  return res.json({ ok: true, task });
+});
+
+app.post('/api/tasks/:id/accept', requireAgentToken(_tokenFromTaskAssignee), (req, res) => {
+  try {
+    const task = taskStore.transitionTask(req.params.id, 'accepted');
+    broadcastSSE('task_updated', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to accept task' });
+  }
+});
+
+app.post('/api/tasks/:id/transition', requireAgentToken(_tokenFromTaskAssignee), (req, res) => {
+  try {
+    const status = (typeof req.body?.status === 'string') ? req.body.status.trim() : '';
+    if (!status) return res.status(400).json({ error: 'status is required' });
+    const task = taskStore.transitionTask(req.params.id, status, req.body);
+    broadcastSSE('task_updated', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to transition task' });
+  }
+});
+
+app.get('/api/agents/:name/tasks', (req, res) => {
+  const name = normalizeAgentName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'invalid agent name' });
+  return res.json(taskStore.listTasks({ assignee: name }));
 });
 
 app.post('/api/task-graphs', requireBearer, (req, res) => {
