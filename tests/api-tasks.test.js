@@ -58,7 +58,7 @@ describe('task system API', () => {
     expect(byPriority.body[0].title).toBe('A');
   });
 
-  test('updates a task via PATCH', async () => {
+  test('operator PATCH updates all fields', async () => {
     await setup();
     const create = await request(context.app).post('/api/tasks').send({ title: 'Original', assignee: 'alpha' });
     const id = create.body.task.id;
@@ -67,6 +67,21 @@ describe('task system API', () => {
     expect(patch.status).toBe(200);
     expect(patch.body.task.title).toBe('Updated');
     expect(patch.body.task.priority).toBe('p0');
+  });
+
+  test('agent execution PATCH only updates heartbeat and waiting metadata', async () => {
+    await setup();
+    const create = await request(context.app).post('/api/tasks').send({ title: 'Exec test', assignee: 'alpha' });
+    const id = create.body.task.id;
+
+    const patch = await request(context.app)
+      .patch(`/api/tasks/${id}/execution`)
+      .send({ heartbeat_at: true, waiting_reason: 'waiting for CI' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.task.heartbeat_at).not.toBe(null);
+    expect(patch.body.task.waiting_reason).toBe('waiting for CI');
+    // Title should remain unchanged
+    expect(patch.body.task.title).toBe('Exec test');
   });
 
   test('deletes a task', async () => {
@@ -99,7 +114,7 @@ describe('task system API', () => {
     expect(start.status).toBe(200);
     expect(start.body.task.status).toBe('in_progress');
 
-    // in_progress → blocked
+    // in_progress → blocked (with required metadata)
     const block = await request(context.app).post(`/api/tasks/${id}/transition`).send({
       status: 'blocked',
       waiting_reason: 'waiting for deploy',
@@ -136,6 +151,41 @@ describe('task system API', () => {
     const bad2 = await request(context.app).post(`/api/tasks/${id}/transition`).send({ status: 'blocked' });
     expect(bad2.status).toBe(400);
     expect(bad2.body.error).toContain('cannot transition');
+
+    // created → done (must go through accepted→in_progress)
+    const bad3 = await request(context.app).post(`/api/tasks/${id}/transition`).send({ status: 'done' });
+    expect(bad3.status).toBe(400);
+    expect(bad3.body.error).toContain('cannot transition');
+  });
+
+  test('rejects blocked transition without waiting metadata', async () => {
+    await setup();
+    const create = await request(context.app).post('/api/tasks').send({ title: 'Block test' });
+    const id = create.body.task.id;
+
+    // Move to in_progress
+    await request(context.app).post(`/api/tasks/${id}/accept`);
+    await request(context.app).post(`/api/tasks/${id}/transition`).send({ status: 'in_progress' });
+
+    // blocked without waiting_reason
+    const noReason = await request(context.app).post(`/api/tasks/${id}/transition`).send({
+      status: 'blocked',
+      waiting_until: '2026-03-15T00:00:00Z',
+    });
+    expect(noReason.status).toBe(400);
+    expect(noReason.body.error).toContain('waiting_reason');
+
+    // blocked without waiting_until
+    const noUntil = await request(context.app).post(`/api/tasks/${id}/transition`).send({
+      status: 'blocked',
+      waiting_reason: 'waiting for deploy',
+    });
+    expect(noUntil.status).toBe(400);
+    expect(noUntil.body.error).toContain('waiting_until');
+
+    // Verify task is still in_progress
+    const get = await request(context.app).get(`/api/tasks/${id}`);
+    expect(get.body.status).toBe('in_progress');
   });
 
   test('rejects task creation without title', async () => {
@@ -162,13 +212,21 @@ describe('task system API', () => {
     expect(get.status).toBe(404);
   });
 
-  test('done transition from created is allowed (skip accepted/in_progress)', async () => {
+  test('blocked→done is not allowed (must resume to in_progress first)', async () => {
     await setup();
-    const create = await request(context.app).post('/api/tasks').send({ title: 'Quick done' });
+    const create = await request(context.app).post('/api/tasks').send({ title: 'Blocked done test' });
     const id = create.body.task.id;
 
-    const done = await request(context.app).post(`/api/tasks/${id}/transition`).send({ status: 'done' });
-    expect(done.status).toBe(200);
-    expect(done.body.task.status).toBe('done');
+    await request(context.app).post(`/api/tasks/${id}/accept`);
+    await request(context.app).post(`/api/tasks/${id}/transition`).send({ status: 'in_progress' });
+    await request(context.app).post(`/api/tasks/${id}/transition`).send({
+      status: 'blocked',
+      waiting_reason: 'waiting',
+      waiting_until: '2026-03-20T00:00:00Z',
+    });
+
+    const bad = await request(context.app).post(`/api/tasks/${id}/transition`).send({ status: 'done' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toContain('cannot transition');
   });
 });

@@ -7526,7 +7526,7 @@ app.get('/api/tasks/:id', (req, res) => {
   return res.json(task);
 });
 
-app.patch('/api/tasks/:id', requireAgentToken(_tokenFromTaskAssignee), (req, res) => {
+app.patch('/api/tasks/:id', requireBearer, (req, res) => {
   try {
     const task = taskStore.updateTask(req.params.id, req.body || {});
     broadcastSSE('task_updated', task);
@@ -7535,6 +7535,18 @@ app.patch('/api/tasks/:id', requireAgentToken(_tokenFromTaskAssignee), (req, res
     if (error.code === 'not_found') return res.status(404).json({ error: error.message });
     if (error.code) return res.status(400).json({ error: error.message });
     return res.status(500).json({ error: 'failed to update task' });
+  }
+});
+
+app.patch('/api/tasks/:id/execution', requireAgentToken(_tokenFromTaskAssignee), (req, res) => {
+  try {
+    const task = taskStore.updateTaskExecution(req.params.id, req.body || {});
+    broadcastSSE('task_updated', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to update task execution' });
   }
 });
 
