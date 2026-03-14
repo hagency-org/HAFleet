@@ -17,7 +17,7 @@ import { createSupervisorLifecycleManager, killTmuxSession as killSupervisorTmux
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
 import { assertRuntimeDir, isLocalAgentServer } from './lib/runtime-dir-guard.js';
 import { NotificationRouter } from './lib/notification-router.js';
-import { readV1AgentManifest, defaultAgentchatHomeDir } from './lib/agent-home-v1.js';
+import { readV1AgentManifest, defaultAgentchatHomeDir, allAgentHomeRoots } from './lib/agent-home-v1.js';
 import {
   buildUpstreamClaudeSubconsciousPaths,
   bootstrapUpstreamClaudeSubconsciousAgent,
@@ -167,20 +167,22 @@ const AGENT_TOKEN_MODE = (() => {
 })();
 const agentTokens = new Map(); // agentName → token string
 function loadAgentTokens() {
-  const homeDir = defaultAgentchatHomeDir();
-  const agentsDir = path.join(homeDir, 'agents');
   let loaded = 0;
-  try {
-    for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !entry.name.startsWith('agent_')) continue;
-      const name = entry.name.slice('agent_'.length);
-      const tokenPath = path.join(agentsDir, entry.name, 'state', 'agent-token');
-      try {
-        const token = readFileSync(tokenPath, 'utf-8').trim();
-        if (token) { agentTokens.set(name, token); loaded++; }
-      } catch { /* missing token file — expected for un-provisioned agents */ }
-    }
-  } catch { /* missing agents dir */ }
+  for (const homeRoot of allAgentHomeRoots()) {
+    const agentsDir = path.join(homeRoot, 'agents');
+    try {
+      for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !entry.name.startsWith('agent_')) continue;
+        const name = entry.name.slice('agent_'.length);
+        if (agentTokens.has(name)) continue; // first root wins
+        const tokenPath = path.join(agentsDir, entry.name, 'state', 'agent-token');
+        try {
+          const token = readFileSync(tokenPath, 'utf-8').trim();
+          if (token) { agentTokens.set(name, token); loaded++; }
+        } catch { /* missing token file — expected for un-provisioned agents */ }
+      }
+    } catch { /* missing agents dir */ }
+  }
   if (loaded > 0) console.log(`[auth] loaded ${loaded} agent token(s), mode=${AGENT_TOKEN_MODE}`);
 }
 function checkAgentToken(agentName, req) {
@@ -2833,9 +2835,9 @@ for (const agent of Object.values(agents)) {
 {
   let orphans = 0;
   try {
-    const homeRoot = defaultAgentchatHomeDir();
-    const agentsDir = path.join(homeRoot, 'agents');
-    if (existsSync(agentsDir)) {
+    for (const homeRoot of allAgentHomeRoots()) {
+      const agentsDir = path.join(homeRoot, 'agents');
+      if (!existsSync(agentsDir)) continue;
       const entries = readdirSync(agentsDir, { withFileTypes: true });
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
@@ -2866,10 +2868,10 @@ for (const agent of Object.values(agents)) {
           orphans++;
         }
       }
-      if (orphans > 0) {
-        saveJson('agents.json', agents);
-        console.log(`[startup] discovered ${orphans} orphaned agent home(s)`);
-      }
+    }
+    if (orphans > 0) {
+      saveJson('agents.json', agents);
+      console.log(`[startup] discovered ${orphans} orphaned agent home(s)`);
     }
   } catch (e) {
     console.error(`[startup] orphan scan failed: ${e.message}`);
