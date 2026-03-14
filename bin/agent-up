@@ -480,6 +480,10 @@ TMP_RUNTIME_DIR="$AGENT_DATA/tmp"
 # If resume-id already exists (e.g. recovered via agent-down), keep resume path.
 if [ ! -f "$META_FILE" ] && [ "$FRESH" = false ] && [ ! -f "$RESUME_FILE" ]; then
   FRESH=true
+# v1 agent: up-v1 pre-creates meta.json + dangling resume-id symlink before first launch.
+# Detect this case: symlink exists but target is missing → treat as fresh.
+elif [ "$FRESH" = false ] && [ ! -f "$RESUME_FILE" ] && [ -L "$RESUME_FILE" ]; then
+  FRESH=true
 fi
 
 SAVED_PATH=""
