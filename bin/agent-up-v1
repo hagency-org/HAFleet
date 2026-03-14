@@ -226,7 +226,7 @@ if meta_file.exists():
 meta["name"] = os.environ["NAME"]
 meta["type"] = os.environ["AGENT_TYPE"]
 meta["path"] = os.environ["V1_WORKDIR"]
-meta["agentModelVersion"] = "1.0"
+meta["agentModelVersion"] = "1.1"
 meta["layoutVersion"] = 1
 meta["agentId"] = os.environ["V1_AGENT_ID"]
 meta["homeDir"] = os.environ["V1_HOME_DIR"]
