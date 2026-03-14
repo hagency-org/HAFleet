@@ -1707,12 +1707,13 @@ app.post('/api/agents/:name/dm-send', async (req, res) => {
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
   const text = String(req.body?.text || '').trim();
   if (!text) return res.status(400).json({ error: 'text required' });
+  const fromName = String(req.body?.from || '').trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'operator';
   try {
     const r = await backendFetch(`${BACKEND_V2_URL}/api/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        from: 'operator',
+        from: fromName,
         to: name,
         type: 'human',
         full: text,
@@ -3579,6 +3580,8 @@ th{
 .dm-input-row{display:flex;gap:8px;padding:10px 12px;border-top:1px solid rgba(154,182,210,0.12)}
 .dm-input{flex:1;background:rgba(154,182,210,0.06);border:1px solid rgba(154,182,210,0.18);border-radius:8px;color:var(--text);padding:8px 12px;font:inherit;font-size:13px;resize:none;min-height:38px;max-height:120px}
 .dm-input:focus{outline:none;border-color:var(--accent)}
+.dm-name-input{width:100px;background:rgba(154,182,210,0.06);border:1px solid rgba(154,182,210,0.18);border-radius:8px;color:var(--text);padding:8px 10px;font:inherit;font-size:12px;flex-shrink:0}
+.dm-name-input:focus{outline:none;border-color:var(--accent)}
 .dm-send-btn{background:rgba(109,193,255,0.15);border:1px solid rgba(109,193,255,0.30);color:var(--accent);border-radius:8px;padding:8px 16px;cursor:pointer;font:inherit;font-size:13px;white-space:nowrap}
 .dm-send-btn:hover{background:rgba(109,193,255,0.25)}
 .dm-send-btn:disabled{opacity:0.4;cursor:not-allowed}
@@ -3669,6 +3672,7 @@ th{
           <div class="dm-container">
             <div class="dm-messages" id="dm-messages"><div class="dm-empty">No messages yet. Send one below.</div></div>
             <div class="dm-input-row">
+              <input class="dm-name-input" id="dm-operator-name" type="text" placeholder="Your name" spellcheck="false" />
               <textarea class="dm-input" id="dm-input" placeholder="Type a message…" rows="1"></textarea>
               <button class="dm-send-btn" id="dm-send-btn" onclick="sendDm()">Send</button>
             </div>
@@ -4050,7 +4054,21 @@ th{
   }
 
   // ── DM tab logic ──────────────────────────────
-  const DM_OPERATOR_NAME = 'operator';
+  const DM_LS_KEY = 'dm_operator_name';
+  function getDmOperatorName() {
+    return (localStorage.getItem(DM_LS_KEY) || '').trim() || 'operator';
+  }
+  {
+    const nameInput = document.getElementById('dm-operator-name');
+    if (nameInput) {
+      nameInput.value = getDmOperatorName();
+      nameInput.addEventListener('input', () => {
+        const v = nameInput.value.replace(/[^a-zA-Z0-9_-]/g, '').trim();
+        nameInput.value = v;
+        localStorage.setItem(DM_LS_KEY, v);
+      });
+    }
+  }
   let dmLoaded = false;
   let dmMessages = [];
   let dmSending = false;
@@ -4066,7 +4084,7 @@ th{
     // Check if user is at bottom before re-render (threshold 40px)
     const wasAtBottom = dmScrollSnap || (container.scrollTop + container.clientHeight >= container.scrollHeight - 40);
     container.innerHTML = dmMessages.map((m) => {
-      const isOutgoing = m.from === DM_OPERATOR_NAME;
+      const isOutgoing = m.from === getDmOperatorName();
       const cls = isOutgoing ? 'outgoing' : 'incoming';
       const text = esc(m.full || m.summary || '');
       const fromLabel = esc(m.from || 'unknown');
@@ -4106,7 +4124,7 @@ th{
       const r = await fetch('/api/agents/' + encodeURIComponent(agent) + '/dm-send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, from: getDmOperatorName() }),
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
