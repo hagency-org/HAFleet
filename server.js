@@ -4055,8 +4055,11 @@ th{
 
   // ── DM tab logic ──────────────────────────────
   const DM_LS_KEY = 'dm_operator_name';
+  function sanitizeOperatorName(raw) {
+    return (raw || '').trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'operator';
+  }
   function getDmOperatorName() {
-    return (localStorage.getItem(DM_LS_KEY) || '').trim() || 'operator';
+    return sanitizeOperatorName(localStorage.getItem(DM_LS_KEY));
   }
   {
     const nameInput = document.getElementById('dm-operator-name');
