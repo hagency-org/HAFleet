@@ -4050,9 +4050,11 @@ th{
   }
 
   // ── DM tab logic ──────────────────────────────
+  const DM_OPERATOR_NAME = 'operator';
   let dmLoaded = false;
   let dmMessages = [];
   let dmSending = false;
+  let dmScrollSnap = true; // true on first load and after sending
 
   function renderDmMessages() {
     const container = document.getElementById('dm-messages');
@@ -4061,8 +4063,10 @@ th{
       container.innerHTML = '<div class="dm-empty">No messages yet. Send one below.</div>';
       return;
     }
+    // Check if user is at bottom before re-render (threshold 40px)
+    const wasAtBottom = dmScrollSnap || (container.scrollTop + container.clientHeight >= container.scrollHeight - 40);
     container.innerHTML = dmMessages.map((m) => {
-      const isOutgoing = m.type === 'human' || m.from === 'operator';
+      const isOutgoing = m.from === DM_OPERATOR_NAME;
       const cls = isOutgoing ? 'outgoing' : 'incoming';
       const text = esc(m.full || m.summary || '');
       const fromLabel = esc(m.from || 'unknown');
@@ -4073,7 +4077,8 @@ th{
         + '<div class="dm-msg-meta">' + esc(time) + '</div>'
         + '</div>';
     }).join('');
-    container.scrollTop = container.scrollHeight;
+    if (wasAtBottom) container.scrollTop = container.scrollHeight;
+    dmScrollSnap = false;
   }
 
   async function loadDmHistory() {
@@ -4110,6 +4115,7 @@ th{
       }
       input.value = '';
       input.style.height = '';
+      dmScrollSnap = true;
       await loadDmHistory();
     } catch (e) {
       console.warn('[dm] send error:', e);
