@@ -3571,7 +3571,7 @@ th{
 .dm-container{display:flex;flex-direction:column;height:min(600px,70vh)}
 .dm-messages{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:6px}
 .dm-empty{color:var(--muted);text-align:center;padding:40px 0;font-size:13px}
-.dm-msg{max-width:80%;padding:8px 12px;border-radius:10px;font-size:13px;line-height:1.5;word-break:break-word;white-space:pre-wrap}
+.dm-msg{max-width:80%;width:fit-content;padding:8px 12px;border-radius:10px;font-size:13px;line-height:1.5;word-break:break-word;white-space:pre-wrap}
 .dm-msg.outgoing{align-self:flex-end;background:rgba(109,193,255,0.15);border:1px solid rgba(109,193,255,0.25);color:var(--text)}
 .dm-msg.incoming{align-self:flex-start;background:rgba(154,182,210,0.08);border:1px solid rgba(154,182,210,0.15);color:var(--text)}
 .dm-msg-meta{font-size:10px;color:var(--muted);margin-top:3px}
