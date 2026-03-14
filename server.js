@@ -1686,6 +1686,47 @@ app.post('/api/agents/:name/unread-messages/:msgId/cancel', async (req, res) => 
   }
 });
 
+// ── DM tab proxies ────────────────────────────────────────────────────
+app.get('/api/agents/:name/dm-history', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  const limitRaw = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+  const qs = `limit=${limit}`;
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/dm/${encodeURIComponent(name)}/history?${qs}`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.post('/api/agents/:name/dm-send', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  const text = String(req.body?.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'text required' });
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'operator',
+        to: name,
+        type: 'human',
+        full: text,
+        source: 'web',
+        target_type: 'agent',
+      }),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
 app.delete('/api/queue/agents/:name/notifications', (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
@@ -2563,7 +2604,7 @@ app.patch('/api/alerts/:id', alertProxyMutate('/:id', 'PATCH'));
 app.delete('/api/alerts/:id', alertProxyMutate('/:id', 'DELETE'));
 
 // Backend SSE consumer — forward alert events to dashboard clients
-const ALERT_SSE_EVENTS = new Set(['alert_created', 'alert_updated', 'alert_resolved', 'alert_deleted']);
+const ALERT_SSE_EVENTS = new Set(['alert_created', 'alert_updated', 'alert_resolved', 'alert_deleted', 'message']);
 let backendSSEAbort = null;
 async function connectBackendSSE() {
   if (backendSSEAbort) { try { backendSSEAbort.abort(); } catch {} }
@@ -3526,6 +3567,21 @@ th{
 .modal-title{font-size:18px;color:var(--text)}
 .modal-copy{margin-top:10px;font-size:13px;line-height:1.6;color:var(--muted)}
 .modal-actions{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;margin-top:18px}
+.dm-container{display:flex;flex-direction:column;height:min(600px,70vh)}
+.dm-messages{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:6px}
+.dm-empty{color:var(--muted);text-align:center;padding:40px 0;font-size:13px}
+.dm-msg{max-width:80%;padding:8px 12px;border-radius:10px;font-size:13px;line-height:1.5;word-break:break-word;white-space:pre-wrap}
+.dm-msg.outgoing{align-self:flex-end;background:rgba(109,193,255,0.15);border:1px solid rgba(109,193,255,0.25);color:var(--text)}
+.dm-msg.incoming{align-self:flex-start;background:rgba(154,182,210,0.08);border:1px solid rgba(154,182,210,0.15);color:var(--text)}
+.dm-msg-meta{font-size:10px;color:var(--muted);margin-top:3px}
+.dm-msg-from{font-weight:600;font-size:11px;margin-bottom:2px;color:var(--accent)}
+.dm-msg.outgoing .dm-msg-from{color:rgba(109,193,255,0.7)}
+.dm-input-row{display:flex;gap:8px;padding:10px 12px;border-top:1px solid rgba(154,182,210,0.12)}
+.dm-input{flex:1;background:rgba(154,182,210,0.06);border:1px solid rgba(154,182,210,0.18);border-radius:8px;color:var(--text);padding:8px 12px;font:inherit;font-size:13px;resize:none;min-height:38px;max-height:120px}
+.dm-input:focus{outline:none;border-color:var(--accent)}
+.dm-send-btn{background:rgba(109,193,255,0.15);border:1px solid rgba(109,193,255,0.30);color:var(--accent);border-radius:8px;padding:8px 16px;cursor:pointer;font:inherit;font-size:13px;white-space:nowrap}
+.dm-send-btn:hover{background:rgba(109,193,255,0.25)}
+.dm-send-btn:disabled{opacity:0.4;cursor:not-allowed}
 @media (max-width:920px){
   .page{padding:14px 14px 32px}
   .hero{position:static}
@@ -3572,6 +3628,7 @@ th{
     <div class="tab-shell">
       <div class="tabs">
         <button class="tab-btn active" data-tab="settings" onclick="setActiveTab('settings')">Settings</button>
+        <button class="tab-btn" data-tab="dm" onclick="setActiveTab('dm')">DM</button>
         <button class="tab-btn" data-tab="supervisor" onclick="setActiveTab('supervisor')">Supervisor</button>
         <button class="tab-btn" data-tab="subconscious" onclick="setActiveTab('subconscious')">Subconscious</button>
         <button class="tab-btn" data-tab="internals" onclick="setActiveTab('internals')">Internals</button>
@@ -3604,6 +3661,19 @@ th{
             <div id="settings-owner"></div>
           </article>
         </div>
+      </section>
+
+      <section id="tab-dm" class="tab-panel hidden">
+        <article class="panel">
+          <div class="panel-label">Direct Messages</div>
+          <div class="dm-container">
+            <div class="dm-messages" id="dm-messages"><div class="dm-empty">No messages yet. Send one below.</div></div>
+            <div class="dm-input-row">
+              <textarea class="dm-input" id="dm-input" placeholder="Type a message…" rows="1"></textarea>
+              <button class="dm-send-btn" id="dm-send-btn" onclick="sendDm()">Send</button>
+            </div>
+          </div>
+        </article>
       </section>
 
       <section id="tab-supervisor" class="tab-panel hidden">
@@ -3718,7 +3788,7 @@ th{
 (() => {
   const agent = ${JSON.stringify(agentName)};
   const NEGATIVE_STATUSES = new Set(['DRIFTING', 'LOST', 'STUCK']);
-  const TABS = new Set(['settings', 'supervisor', 'subconscious', 'internals']);
+  const TABS = new Set(['settings', 'dm', 'supervisor', 'subconscious', 'internals']);
   const fmtTs = (v) => {
     const n = Number(v) || 0;
     if (!n) return '-';
@@ -3974,6 +4044,94 @@ th{
     if (options.focusAudit) {
       requestAnimationFrame(() => {
         document.getElementById('supervisor-audit-history')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    }
+    if (next === 'dm' && !dmLoaded) loadDmHistory();
+  }
+
+  // ── DM tab logic ──────────────────────────────
+  let dmLoaded = false;
+  let dmMessages = [];
+  let dmSending = false;
+
+  function renderDmMessages() {
+    const container = document.getElementById('dm-messages');
+    if (!container) return;
+    if (dmMessages.length === 0) {
+      container.innerHTML = '<div class="dm-empty">No messages yet. Send one below.</div>';
+      return;
+    }
+    container.innerHTML = dmMessages.map((m) => {
+      const isOutgoing = m.type === 'human' || m.from === 'operator';
+      const cls = isOutgoing ? 'outgoing' : 'incoming';
+      const text = esc(m.full || m.summary || '');
+      const fromLabel = esc(m.from || 'unknown');
+      const time = m.at ? new Date(m.at).toLocaleString() : '';
+      return '<div class="dm-msg ' + cls + '">'
+        + '<div class="dm-msg-from">' + fromLabel + '</div>'
+        + text
+        + '<div class="dm-msg-meta">' + esc(time) + '</div>'
+        + '</div>';
+    }).join('');
+    container.scrollTop = container.scrollHeight;
+  }
+
+  async function loadDmHistory() {
+    try {
+      const r = await fetch('/api/agents/' + encodeURIComponent(agent) + '/dm-history?limit=200');
+      if (!r.ok) { console.warn('[dm] load failed:', r.status); return; }
+      const data = await r.json();
+      dmMessages = Array.isArray(data.messages) ? data.messages : [];
+      dmLoaded = true;
+      renderDmMessages();
+    } catch (e) {
+      console.warn('[dm] load error:', e);
+    }
+  }
+
+  async function sendDm() {
+    if (dmSending) return;
+    const input = document.getElementById('dm-input');
+    const text = (input?.value || '').trim();
+    if (!text) return;
+    const btn = document.getElementById('dm-send-btn');
+    dmSending = true;
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('/api/agents/' + encodeURIComponent(agent) + '/dm-send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        console.warn('[dm] send failed:', err);
+        return;
+      }
+      input.value = '';
+      input.style.height = '';
+      await loadDmHistory();
+    } catch (e) {
+      console.warn('[dm] send error:', e);
+    } finally {
+      dmSending = false;
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // Auto-resize textarea and send on Enter (Shift+Enter for newline)
+  {
+    const input = document.getElementById('dm-input');
+    if (input) {
+      input.addEventListener('input', () => {
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendDm();
+        }
       });
     }
   }
@@ -5609,6 +5767,7 @@ th{
       if (!shouldPreserveDirty) renderSettings(agentDetailPayload, model);
       else setDetailStatus('Unsaved changes in Agent Detail.', 'warn');
       syncStickyOffsets();
+      if (activeTab === 'dm' && dmLoaded) loadDmHistory();
     } catch (e) {
       const healthEl = document.getElementById('health-summary');
       healthEl.textContent = 'Load failed: ' + e.message;
@@ -5672,6 +5831,7 @@ th{
   window.requestDangerAction = requestDangerAction;
   window.closeDangerModal = closeDangerModal;
   window.confirmDangerAction = confirmDangerAction;
+  window.sendDm = sendDm;
 
   window.addEventListener('hashchange', () => {
     const next = hashToTab(window.location.hash);

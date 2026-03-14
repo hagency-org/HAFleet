@@ -8354,6 +8354,27 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
   });
 });
 
+// ── DM history (bearer-authenticated, for web UI) ─────────────────────
+app.get('/api/dm/:agent/history', requireBearer, (req, res) => {
+  const agentName = normalizeAgentName(req.params.agent);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const limitRaw = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+  const beforeRaw = Number.parseInt(req.query.before, 10);
+  const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : Infinity;
+  // Return DMs involving this agent (sent to or from, excluding group messages)
+  const dms = messages
+    .filter(m => !m.group && (m.to === agentName || m.from === agentName) && m.ts < before)
+    .sort((a, b) => a.ts - b.ts);
+  const rows = dms.slice(-limit);
+  res.json({
+    agent: agentName,
+    total: dms.length,
+    returned: rows.length,
+    messages: rows.map(summarizeMsg),
+  });
+});
+
 app.get('/api/messages/:id', (req, res) => {
   const msg = messages.find(m => m.id === req.params.id);
   if (!msg) return res.status(404).json({ error: 'message not found' });
