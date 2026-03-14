@@ -3580,7 +3580,9 @@ th{
 .dm-input-row{display:flex;gap:8px;padding:10px 12px;border-top:1px solid rgba(154,182,210,0.12)}
 .dm-input{flex:1;background:rgba(154,182,210,0.06);border:1px solid rgba(154,182,210,0.18);border-radius:8px;color:var(--text);padding:8px 12px;font:inherit;font-size:13px;resize:none;min-height:38px;max-height:120px}
 .dm-input:focus{outline:none;border-color:var(--accent)}
-.dm-name-input{width:100px;background:rgba(154,182,210,0.06);border:1px solid rgba(154,182,210,0.18);border-radius:8px;color:var(--text);padding:8px 10px;font:inherit;font-size:12px;flex-shrink:0}
+.dm-name-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(154,182,210,0.12)}
+.dm-name-label{font-size:11px;color:var(--muted);white-space:nowrap}
+.dm-name-input{width:120px;background:rgba(154,182,210,0.06);border:1px solid rgba(154,182,210,0.18);border-radius:6px;color:var(--text);padding:5px 8px;font:inherit;font-size:12px}
 .dm-name-input:focus{outline:none;border-color:var(--accent)}
 .dm-send-btn{background:rgba(109,193,255,0.15);border:1px solid rgba(109,193,255,0.30);color:var(--accent);border-radius:8px;padding:8px 16px;cursor:pointer;font:inherit;font-size:13px;white-space:nowrap}
 .dm-send-btn:hover{background:rgba(109,193,255,0.25)}
@@ -3670,9 +3672,9 @@ th{
         <article class="panel">
           <div class="panel-label">Direct Messages</div>
           <div class="dm-container">
+            <div class="dm-name-bar"><label class="dm-name-label">Your name:</label><input class="dm-name-input" id="dm-operator-name" type="text" placeholder="operator" spellcheck="false" /></div>
             <div class="dm-messages" id="dm-messages"><div class="dm-empty">No messages yet. Send one below.</div></div>
             <div class="dm-input-row">
-              <input class="dm-name-input" id="dm-operator-name" type="text" placeholder="Your name" spellcheck="false" />
               <textarea class="dm-input" id="dm-input" placeholder="Type a message…" rows="1"></textarea>
               <button class="dm-send-btn" id="dm-send-btn" onclick="sendDm()">Send</button>
             </div>
