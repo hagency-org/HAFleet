@@ -1114,6 +1114,63 @@ PY
   esac
 }
 
+ensure_codex_project_trust() {
+  [ "$TYPE" = "codex" ] || return 0
+  [ -n "${AGENT_PATH:-}" ] || return 0
+
+  local status
+  status="$(
+    CODEX_CONFIG="$HOME/.codex/config.toml" AGENT_PATH="$AGENT_PATH" python3 - <<'PY'
+import os
+import pathlib
+
+config_path = pathlib.Path(os.environ["CODEX_CONFIG"]).expanduser()
+agent_path = str(pathlib.Path(os.environ["AGENT_PATH"]).resolve())
+config_path.parent.mkdir(parents=True, exist_ok=True)
+
+section_header = f'[projects."{agent_path}"]'
+trust_line = 'trust_level = "trusted"'
+
+if config_path.exists():
+    content = config_path.read_text(encoding="utf-8")
+    if section_header in content:
+        lines = content.splitlines()
+        in_section = False
+        for line in lines:
+            if line.strip() == section_header:
+                in_section = True
+                continue
+            if in_section:
+                if line.strip().startswith("["):
+                    break
+                if "trust_level" in line and '"trusted"' in line:
+                    print("already")
+                    raise SystemExit(0)
+else:
+    content = ""
+
+if not content.endswith("\n") and content:
+    content += "\n"
+content += f"\n{section_header}\n{trust_line}\n"
+config_path.write_text(content, encoding="utf-8")
+print("updated")
+PY
+  )"
+  case "$status" in
+    updated)
+      echo "Pre-accepted Codex trust for '$AGENT_PATH'."
+      ;;
+    already)
+      ;;
+    error:*)
+      echo "Warning: failed to pre-accept Codex trust for '$AGENT_PATH': ${status#error:}" >&2
+      ;;
+    *)
+      echo "Warning: unexpected Codex trust status for '$AGENT_PATH': ${status:-empty}" >&2
+      ;;
+  esac
+}
+
 capture_guard_matches() {
   [ -n "${CAPTURE_GUARD_FILE:-}" ] || return 0
   [ -n "${CAPTURE_GUARD_TOKEN:-}" ] || return 0
@@ -1191,6 +1248,7 @@ fi
 
 enforce_workspace_uniqueness "$AGENT_PATH"
 ensure_claude_project_trust
+ensure_codex_project_trust
 
 # ── Save meta ─────────────────────────────────────────────────────────
 mkdir -p "$AGENT_DATA"
