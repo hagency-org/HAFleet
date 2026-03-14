@@ -1133,7 +1133,9 @@ config_path = pathlib.Path(os.environ["CODEX_CONFIG"]).expanduser()
 agent_path = str(pathlib.Path(os.environ["AGENT_PATH"]).resolve())
 config_path.parent.mkdir(parents=True, exist_ok=True)
 
-section_header = f'[projects."{agent_path}"]'
+# Escape backslashes and double quotes for TOML basic string key
+escaped_path = agent_path.replace("\\", "\\\\").replace('"', '\\"')
+section_header = f'[projects."{escaped_path}"]'
 trust_line = 'trust_level = "trusted"'
 
 if config_path.exists():
