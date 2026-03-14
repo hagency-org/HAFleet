@@ -4089,7 +4089,7 @@ th{
     // Check if user is at bottom before re-render (threshold 40px)
     const wasAtBottom = dmScrollSnap || (container.scrollTop + container.clientHeight >= container.scrollHeight - 40);
     container.innerHTML = dmMessages.map((m) => {
-      const isOutgoing = m.from === getDmOperatorName();
+      const isOutgoing = m.from === getDmOperatorName() || (m.source === 'web' && m.type === 'human');
       const cls = isOutgoing ? 'outgoing' : 'incoming';
       const text = esc(m.full || m.summary || '');
       const fromLabel = esc(m.from || 'unknown');
