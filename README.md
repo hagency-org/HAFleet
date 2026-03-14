@@ -62,7 +62,8 @@ Central API server. All data lives here.
 - Message suppression
 
 **Tasks & Task Graphs:**
-- Task store: create, assign, transition (`pending` → `accepted` → `in_progress` → `completed`/`failed`/`cancelled`)
+- Task store: create, assign, transition (`created` → `accepted` → `in_progress` → `done`; `in_progress` ↔ `blocked`)
+- Priorities: `p0`, `p1`, `p2`, `p3`; Granularities: `epic`, `task`, `subtask`
 - Task graph orchestration: DAG-based multi-task workflows with node dependencies
 - Agent-token auth for task acceptance and execution updates
 
@@ -118,47 +119,47 @@ Central API server. All data lives here.
 | GET | `/api/stream` | — | SSE event stream |
 | GET | `/msg/:id` | — | Full message HTML page (Matrix link previews) |
 | **Servers** ||||
-| POST | `/api/servers/heartbeat` | — | Server heartbeat (relay registration) |
-| POST | `/api/servers/:id/offline` | — | Mark server offline |
-| POST | `/api/servers/:id/maintenance` | — | Toggle server maintenance mode |
+| POST | `/api/servers/heartbeat` | bearer | Server heartbeat (relay registration) |
+| POST | `/api/servers/:id/offline` | bearer | Mark server offline |
+| POST | `/api/servers/:id/maintenance` | bearer | Toggle server maintenance mode |
 | GET | `/api/servers` | — | List all servers |
 | **Agents** ||||
-| POST | `/api/agents` | — | Register/update agent (online) |
+| POST | `/api/agents` | agent-token | Register/update agent (online) |
 | GET | `/api/agents` | — | List all agents |
 | GET | `/api/agents/:name` | — | Get single agent |
-| PATCH | `/api/agents/:name` | — | Update agent fields (role, identity, manualDown) |
+| PATCH | `/api/agents/:name` | agent-token | Update agent fields (role, identity, manualDown) |
 | DELETE | `/api/agents/:name` | bearer | Delete agent record (tombstone) |
 | POST | `/api/agents/:name/undelete` | bearer | Undelete agent from tombstone |
-| POST | `/api/agents/:name/offline` | — | Mark agent offline (sets manualDown) |
+| POST | `/api/agents/:name/offline` | agent-token | Mark agent offline (sets manualDown) |
 | POST | `/api/agents/:name/runtime` | agent-token | Report agent runtime state |
-| POST | `/api/agents/:name/avatar` | — | Set agent avatar (base64 PNG) |
+| POST | `/api/agents/:name/avatar` | agent-token | Set agent avatar (base64 PNG) |
 | GET | `/api/agents/:name/groups` | — | List agent's groups with unread counts |
 | GET | `/api/agents/:name/tasks` | — | Get agent tasks |
 | **Runtime** ||||
-| POST | `/api/runtime/compact` | — | Report compaction event |
+| POST | `/api/runtime/compact` | bearer | Report compaction event |
 | POST | `/api/runtime/push-delivered` | — | Report push delivery confirmation |
 | **Groups** ||||
-| POST | `/api/groups` | — | Create group |
+| POST | `/api/groups` | bridge-secret | Create group |
 | GET | `/api/groups` | — | List all groups |
 | GET | `/api/groups/:name` | — | Get group details |
-| POST | `/api/groups/:name/members` | — | Add/remove group members |
-| DELETE | `/api/groups/:name` | — | Delete group |
+| POST | `/api/groups/:name/members` | bridge-secret | Add/remove group members |
+| DELETE | `/api/groups/:name` | bridge-secret | Delete group |
 | GET | `/api/groups/:name/messages` | — | Get group messages (unread/read split) |
 | **DM** ||||
-| POST | `/api/dm/ensure` | — | Ensure DM channel exists (triggers bridge) |
+| POST | `/api/dm/ensure` | bearer | Ensure DM channel exists (triggers bridge) |
 | **Messages** ||||
-| POST | `/api/messages` | — | Send a message |
+| POST | `/api/messages` | agent-token | Send a message |
 | GET | `/api/messages/:id` | — | Get single message |
-| POST | `/api/messages/:id/suppress` | — | Suppress message for specific agents |
+| POST | `/api/messages/:id/suppress` | agent-token | Suppress message for specific agents |
 | **Inbox** ||||
-| GET | `/api/inbox/:agent` | — | Get inbox (DM + group mentions, advances cursor) |
-| GET | `/api/inbox/:agent/unread` | — | Unread count |
-| GET | `/api/inbox/:agent/unread-list` | — | Unread message list (doesn't advance cursor) |
+| GET | `/api/inbox/:agent` | agent-token | Get inbox (DM + group mentions, advances cursor) |
+| GET | `/api/inbox/:agent/unread` | agent-token | Unread count |
+| GET | `/api/inbox/:agent/unread-list` | agent-token | Unread message list (doesn't advance cursor) |
 | **Media** ||||
-| POST | `/api/media/stage` | — | Stage file attachment (base64 upload) |
+| POST | `/api/media/stage` | agent-token | Stage file attachment (base64 upload) |
 | GET | `/api/media/fetch` | — | Fetch staged media |
 | **System** ||||
-| POST | `/api/system/info` | — | Log system info event (with optional alertType/dedupeKey/sourceAgent) |
+| POST | `/api/system/info` | bridge-secret | Log system info event (with optional alertType/dedupeKey/sourceAgent) |
 | **Tasks** ||||
 | POST | `/api/tasks` | bearer | Create task |
 | GET | `/api/tasks` | — | List tasks |
@@ -663,7 +664,7 @@ bash remote/install-remote.sh
 Skills are markdown instruction files symlinked into agent config directories.
 
 - `skills/agent-chat/SKILL.md` — Agent Chat operations handbook (auto-linked to all agents via `agentchat sync-skills`)
-- `skills/self-time-reminder/SKILL.md` — Self-reminder scheduling skill
+- `bin/self-time-reminder` — Self-reminder CLI (standalone binary, skill installed at `~/.claude/skills/self-time-reminder/` and `~/.codex/skills/self-time-reminder/`)
 
 ## Documentation
 
