@@ -5842,6 +5842,20 @@ th{
     if (e.key === 'Escape') closeDangerModal();
   });
 
+  // ── SSE for real-time DM sync across tabs/devices ────
+  {
+    const es = new EventSource('/api/stream');
+    es.addEventListener('message', (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        // Only refresh DM if the message involves this agent
+        if (dmLoaded && (msg.to === agent || msg.from === agent) && !msg.group) {
+          loadDmHistory();
+        }
+      } catch {}
+    });
+  }
+
   setActiveTab(hashToTab(window.location.hash), {
     updateHash: false,
     focusAudit: window.location.hash === '#audit',
