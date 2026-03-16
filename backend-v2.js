@@ -653,6 +653,16 @@ function normalizeRuntimeProfile(value) {
   };
 }
 
+function mergeRuntimeProfileApiKeys(newProfile, existingProfile) {
+  if (!newProfile) return newProfile;
+  for (const role of ['primary', 'supervisor']) {
+    if (newProfile[role] && !newProfile[role].apiKey && existingProfile && existingProfile[role] && existingProfile[role].apiKey) {
+      newProfile[role] = { ...newProfile[role], apiKey: existingProfile[role].apiKey };
+    }
+  }
+  return newProfile;
+}
+
 function normalizeLooseAgentName(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -6421,7 +6431,7 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
       ? normalizeAgentTask(task, agentName)
       : normalizeAgentTask(existing.task, agentName),
     runtimeProfile: runtimeProfile !== undefined
-      ? normalizeRuntimeProfile(runtimeProfile)
+      ? mergeRuntimeProfileApiKeys(normalizeRuntimeProfile(runtimeProfile), normalizeRuntimeProfile(existing.runtimeProfile))
       : normalizeRuntimeProfile(existing.runtimeProfile),
     environment: (VALID_ENVIRONMENTS.has(environment) ? environment : null)
       || existing.environment || classifyEnvironment(agentName),
@@ -6542,7 +6552,7 @@ app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => 
     agent.task = normalizeAgentTask(task, agentName);
   }
   if (runtimeProfile !== undefined) {
-    agent.runtimeProfile = normalizeRuntimeProfile(runtimeProfile);
+    agent.runtimeProfile = mergeRuntimeProfileApiKeys(normalizeRuntimeProfile(runtimeProfile), normalizeRuntimeProfile(agent.runtimeProfile));
   }
   if (environment !== undefined && VALID_ENVIRONMENTS.has(environment)) {
     agent.environment = environment;
@@ -7804,7 +7814,10 @@ app.get('/api/agents/:name/tasks', (req, res) => {
 
 // ── Framework Presets CRUD ─────────────────────────────────────────────
 app.get('/api/framework-presets', requireBearer, (_req, res) => {
-  return res.json(frameworkPresets);
+  return res.json(frameworkPresets.map(p => ({
+    ...p,
+    apiKey: p.apiKey ? true : null,
+  })));
 });
 
 app.post('/api/framework-presets', requireBearer, (req, res) => {
@@ -7843,7 +7856,7 @@ app.post('/api/framework-presets', requireBearer, (req, res) => {
   };
   frameworkPresets.push(preset);
   saveFrameworkPresets();
-  return res.json({ ok: true, preset });
+  return res.json({ ok: true, preset: { ...preset, apiKey: preset.apiKey ? true : null } });
 });
 
 app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
@@ -7875,10 +7888,10 @@ app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
     reasoning: normalizeOptionalText(b.reasoning, 64) || null,
     extraArgs,
     apiBaseUrl,
-    apiKey: normalizeOptionalText(b.apiKey, 256) || null,
+    apiKey: normalizeOptionalText(b.apiKey, 256) || frameworkPresets[idx].apiKey || null,
   };
   saveFrameworkPresets();
-  return res.json({ ok: true, preset: frameworkPresets[idx] });
+  return res.json({ ok: true, preset: { ...frameworkPresets[idx], apiKey: frameworkPresets[idx].apiKey ? true : null } });
 });
 
 app.delete('/api/framework-presets/:id', requireBearer, (req, res) => {

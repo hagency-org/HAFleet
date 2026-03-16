@@ -5859,7 +5859,7 @@ th{
     const presetId = presetSel ? presetSel.value : '';
     if (presetId && presetId !== '__custom__') {
       const p = _presetCache.find(pp => pp.id === presetId);
-      if (p) return { framework: p.framework, provider: p.provider, model: p.model, reasoning: p.reasoning, extraArgs: p.extraArgs || null, apiBaseUrl: p.apiBaseUrl || null, apiKey: p.apiKey || null };
+      if (p) return { framework: p.framework, provider: p.provider, model: p.model, reasoning: p.reasoning, extraArgs: p.extraArgs || null, apiBaseUrl: p.apiBaseUrl || null };
     }
     const framework = ((document.getElementById('cfg-' + prefix + '-framework') || {}).value || '').trim() || null;
     const provider = ((document.getElementById('cfg-' + prefix + '-provider') || {}).value || '').trim() || null;
@@ -8157,7 +8157,7 @@ select option{background:#0d1723;color:#e2eaf3}
         + '<td>' + esc(p.framework || '-') + '</td>'
         + '<td>' + esc(p.model || '-') + '</td>'
         + '<td>' + esc(p.apiBaseUrl || '-') + '</td>'
-        + '<td>' + (p.apiKey ? '••••••••' : '-') + '</td>'
+        + '<td>' + (p.apiKey ? 'Configured' : '-') + '</td>'
         + '<td><button class="btn btn-danger" onclick="deletePreset(\\'' + esc(p.id) + '\\')">Delete</button></td>'
         + '</tr>';
     }
