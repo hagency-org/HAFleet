@@ -4675,7 +4675,7 @@ th{
     const waitingReason = String(waitingReasonEl.value || '').trim();
     const waitingUntilRaw = String(waitingUntilEl.value || '').trim();
     if (!status) {
-      if (!id && !String(ownerEl.value || '').trim() && !waitingReason && !waitingUntilRaw) {
+      if (!id) {
         return { task: null };
       }
       return { error: 'Choose a task status or clear all task fields.' };
@@ -4731,7 +4731,9 @@ th{
       + '<input id="detail-task-owner" class="detail-input" value="' + esc(task?.owner || '').replace(/"/g, '&quot;') + '" placeholder="' + esc(detail?.name || 'agent').replace(/"/g, '&quot;') + '">'
       + '<div class="read-block"><strong>updated_at</strong><br><span class="mono">' + esc(task?.updated_at || '-') + '</span><br><br><strong>heartbeat_at</strong><br><span class="mono">' + esc(task?.heartbeat_at || '-') + '</span></div>'
       + '</details>'
-      + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailTask()">Save Task</button></div>';
+      + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailTask()">Save Task</button>'
+      + (task ? '<button class="detail-save" style="background:rgba(255,100,100,0.1);border-color:rgba(255,100,100,0.3);color:rgba(255,140,140,0.9)" onclick="clearDetailTask()">Clear</button>' : '')
+      + '</div>';
   }
 
   function renderSettings(detail, model) {
@@ -5746,7 +5748,33 @@ th{
     const sel = document.getElementById('detail-task-status');
     if (el && sel) el.style.display = sel.value === 'waiting' ? '' : 'none';
   }
+  async function clearDetailTask() {
+    if (detailSaveInFlight) return;
+    const agent = latestAgentDetail?.name || window.location.hash.slice(1);
+    const targetPath = latestAgentDetail?.v1
+      ? ('/api/agents/' + encodeURIComponent(agent) + '/home-metadata')
+      : ('/api/agents/' + encodeURIComponent(agent));
+    detailSaveInFlight = true;
+    setDetailStatus('Clearing task...', 'warn');
+    try {
+      const res = await fetch(targetPath, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task: null }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) throw new Error(data?.error || 'task clear failed');
+      setDetailStatus('Task cleared.', 'ok');
+      detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 2000);
+      await refresh(true);
+    } catch (e) {
+      setDetailStatus('Clear failed: ' + e.message, 'error');
+    } finally {
+      detailSaveInFlight = false;
+    }
+  }
   window.toggleTaskWaiting = toggleTaskWaiting;
+  window.clearDetailTask = clearDetailTask;
   window.saveDetailTask = saveDetailTask;
   window.saveDetailIdentity = saveDetailIdentity;
   window.saveDetailOwner = saveDetailOwner;
