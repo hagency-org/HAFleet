@@ -6961,6 +6961,7 @@ window.submitNewAgent = async function() {
     name: name,
     type: fw,
     identity: identity,
+    role: guidance,
     runtimeProfile: { primary: { framework: fw } },
   };
   document.getElementById('na-status').textContent = 'Creating...';
@@ -6971,12 +6972,7 @@ window.submitNewAgent = async function() {
     });
     var data = await r.json().catch(function() { return {}; });
     if (!r.ok) throw new Error(data.error || 'creation failed (HTTP ' + r.status + ')');
-    if (guidance) {
-      await fetch('/api/agents/' + encodeURIComponent(name) + '/subconscious-guidance', {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ guidance: guidance }),
-      });
-    }
+
     document.getElementById('na-status').textContent = 'Agent "' + name + '" created. Launch via: agentchat up-v1 ' + name;
     document.getElementById('na-status').style.color = '#34d399';
     setTimeout(function() { closeNewAgentModal(); }, 2500);
