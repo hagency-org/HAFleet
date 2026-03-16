@@ -618,13 +618,17 @@ function normalizeRuntimeProfileRole(value) {
   const reasoning = normalizeOptionalText(value.reasoning, 64);
   const rawExtraArgs = normalizeOptionalText(value.extraArgs, 4000);
   const extraArgs = rawExtraArgs && SHELL_METACHAR_RE.test(rawExtraArgs) ? null : rawExtraArgs;
-  if (!framework && !provider && !model && !reasoning && !extraArgs) return null;
+  const apiBaseUrl = normalizeOptionalText(value.apiBaseUrl, 512);
+  const apiKeyEnv = normalizeOptionalText(value.apiKeyEnv, 128);
+  if (!framework && !provider && !model && !reasoning && !extraArgs && !apiBaseUrl && !apiKeyEnv) return null;
   return {
     framework: framework || null,
     provider: provider || null,
     model: model || null,
     reasoning: reasoning || null,
     ...(extraArgs ? { extraArgs } : {}),
+    ...(apiBaseUrl ? { apiBaseUrl } : {}),
+    ...(apiKeyEnv ? { apiKeyEnv } : {}),
   };
 }
 
@@ -7803,6 +7807,14 @@ app.post('/api/framework-presets', requireBearer, (req, res) => {
     id = 'preset_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
   }
   if (frameworkPresets.some(p => p.id === id)) return res.status(500).json({ error: 'failed to generate unique preset id' });
+  const extraArgs = normalizeOptionalText(b.extraArgs, 4000) || null;
+  if (extraArgs && SHELL_METACHAR_RE.test(extraArgs)) {
+    return res.status(400).json({ error: 'extraArgs contains disallowed shell characters' });
+  }
+  const apiBaseUrl = normalizeOptionalText(b.apiBaseUrl, 512) || null;
+  if (apiBaseUrl && !/^https?:\/\//.test(apiBaseUrl)) {
+    return res.status(400).json({ error: 'apiBaseUrl must be an HTTP(S) URL' });
+  }
   const preset = {
     id,
     name,
@@ -7810,11 +7822,10 @@ app.post('/api/framework-presets', requireBearer, (req, res) => {
     provider: normalizeOptionalText(b.provider, 64) || null,
     model: normalizeOptionalText(b.model, 256) || null,
     reasoning: normalizeOptionalText(b.reasoning, 64) || null,
-    extraArgs: normalizeOptionalText(b.extraArgs, 4000) || null,
+    extraArgs,
+    apiBaseUrl,
+    apiKeyEnv: normalizeOptionalText(b.apiKeyEnv, 128) || null,
   };
-  if (preset.extraArgs && SHELL_METACHAR_RE.test(preset.extraArgs)) {
-    return res.status(400).json({ error: 'extraArgs contains disallowed shell characters' });
-  }
   frameworkPresets.push(preset);
   saveFrameworkPresets();
   return res.json({ ok: true, preset });
@@ -7830,6 +7841,10 @@ app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
   if (extraArgs && SHELL_METACHAR_RE.test(extraArgs)) {
     return res.status(400).json({ error: 'extraArgs contains disallowed shell characters' });
   }
+  const apiBaseUrl = normalizeOptionalText(b.apiBaseUrl, 512) || null;
+  if (apiBaseUrl && !/^https?:\/\//.test(apiBaseUrl)) {
+    return res.status(400).json({ error: 'apiBaseUrl must be an HTTP(S) URL' });
+  }
   frameworkPresets[idx] = {
     ...frameworkPresets[idx],
     name,
@@ -7838,6 +7853,8 @@ app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
     model: normalizeOptionalText(b.model, 256) || null,
     reasoning: normalizeOptionalText(b.reasoning, 64) || null,
     extraArgs,
+    apiBaseUrl,
+    apiKeyEnv: normalizeOptionalText(b.apiKeyEnv, 128) || null,
   };
   saveFrameworkPresets();
   return res.json({ ok: true, preset: frameworkPresets[idx] });
