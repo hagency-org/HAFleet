@@ -1517,39 +1517,47 @@ app.get('/api/agents/detail/:name', async (req, res) => {
     detail.subconsciousGuidancePreview = '';
   }
 
-  // From resume-id
-  const resumeRoot = detail.v1 && detail.stateDir
-    ? detail.stateDir
-    : path.join(AGENTS_DATA_DIR, name);
-  try {
-    detail.resumeId = (await readFileAsync(path.join(resumeRoot, 'resume-id'), 'utf-8')).trim();
-  } catch (e) {
-    if (e.code !== 'ENOENT') console.debug(`[server] resume-id read failed for ${name}: ${e.message}`);
-    detail.resumeId = null;
-  }
-
-  // Idle info + detect agent type from process if missing
+  // Idle info (sync — reads from in-memory snapshot cache)
   if (detail.tmux && isLocalAgentServer(detail.server)) {
     detail.idleMs = getPaneIdleMs(detail.tmux);
     detail.active = detail.idleMs >= 0 && detail.idleMs < IDLE_THRESHOLD;
-    if (!detail.agentType) {
-      try {
-        const { stdout: panePidStdout } = await execFileAsync('tmux', ['list-panes', '-t', detail.tmux, '-F', '#{pane_pid}'], { encoding: 'utf-8', timeout: 2000 });
-        const panePid = panePidStdout.trim();
-        if (panePid) {
-          const { stdout: childCmdStdout } = await execFileAsync('ps', ['-o', 'args=', '--ppid', panePid], { encoding: 'utf-8', timeout: 2000 });
-          const childCmd = childCmdStdout.toLowerCase();
-          if (childCmd.includes('claude')) detail.agentType = 'claude';
-          else if (childCmd.includes('codex')) detail.agentType = 'codex';
-        }
-      } catch (e) {
-        console.debug(`[server] agent type probe skipped for ${name}: ${e.message}`);
-      }
-    }
   }
 
+  // Parallel: resume-id, agent type probe, docs payload
+  const resumeRoot = detail.v1 && detail.stateDir
+    ? detail.stateDir
+    : path.join(AGENTS_DATA_DIR, name);
   const docsWorkspacePath = detail.workdir || v1Manifest?.workdir || AGENTCHAT_HOMEDIR;
-  detail.docs = await buildAgentDocsPayload(name, docsWorkspacePath, v1Manifest);
+  const needsTypeProbe = detail.tmux && isLocalAgentServer(detail.server) && !detail.agentType;
+
+  const [resumeResult, typeResult, docsResult] = await Promise.allSettled([
+    readFileAsync(path.join(resumeRoot, 'resume-id'), 'utf-8').then(s => s.trim()).catch(e => {
+      if (e.code !== 'ENOENT') console.debug(`[server] resume-id read failed for ${name}: ${e.message}`);
+      return null;
+    }),
+    needsTypeProbe
+      ? execFileAsync('tmux', ['list-panes', '-t', detail.tmux, '-F', '#{pane_pid}'], { encoding: 'utf-8', timeout: 2000 })
+          .then(({ stdout }) => {
+            const panePid = stdout.trim();
+            if (!panePid) return null;
+            return execFileAsync('ps', ['-o', 'args=', '--ppid', panePid], { encoding: 'utf-8', timeout: 2000 })
+              .then(({ stdout: childCmdStdout }) => {
+                const childCmd = childCmdStdout.toLowerCase();
+                if (childCmd.includes('claude')) return 'claude';
+                if (childCmd.includes('codex')) return 'codex';
+                return null;
+              });
+          })
+          .catch(e => { console.debug(`[server] agent type probe skipped for ${name}: ${e.message}`); return null; })
+      : Promise.resolve(null),
+    buildAgentDocsPayload(name, docsWorkspacePath, v1Manifest),
+  ]);
+
+  detail.resumeId = resumeResult.status === 'fulfilled' ? resumeResult.value : null;
+  if (needsTypeProbe && typeResult.status === 'fulfilled' && typeResult.value) {
+    detail.agentType = typeResult.value;
+  }
+  detail.docs = docsResult.status === 'fulfilled' ? docsResult.value : {};
 
   res.json(detail);
 });
@@ -3129,6 +3137,11 @@ app.delete('/api/reminders/:id', (req, res) => {
 app.get('/alerts', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   res.type('html').send(renderAlertsPage());
+});
+
+app.get('/config', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.type('html').send(renderConfigPage());
 });
 
 // ── Frontend ─────────────────────────────────────────────────────────
@@ -6825,7 +6838,7 @@ body.page-hidden #reminder-panel.has-items{
       <div id="queue-list"></div>
     </div>
     <div id="monitor-panel">
-      <div class="monitor-header" style="display:flex;align-items:center;gap:12px">AGENT MONITOR<a href="/alerts" id="alert-badge" style="font-size:10px;color:rgba(255,107,107,0.7);text-decoration:none;display:none"></a></div>
+      <div class="monitor-header" style="display:flex;align-items:center;gap:12px">AGENT MONITOR<a href="/alerts" id="alert-badge" style="font-size:10px;color:rgba(255,107,107,0.7);text-decoration:none;display:none"></a><a href="/config" style="font-size:10px;color:rgba(0,240,255,0.4);text-decoration:none;letter-spacing:1px">CONFIG</a></div>
       <div id="agent-buttons-wrap">
         <div id="agent-buttons"><span style="color:rgba(0,240,255,0.2);font-size:10px">loading agents...</span></div>
         <button id="agent-toggle" title="Show all agents">▼ more</button>
@@ -7301,9 +7314,10 @@ body.page-hidden #reminder-panel.has-items{
     }
 
     try {
-      const [detailRespRaw, supervisorRespRaw] = await Promise.allSettled([
+      const [detailRespRaw, supervisorRespRaw, supervisorStatusRaw] = await Promise.allSettled([
         fetch('/api/agents/detail/' + encodeURIComponent(targetName), { signal: controller.signal }),
         fetch('/api/supervisor/agents/' + encodeURIComponent(targetName) + '?limit=1', { signal: controller.signal }),
+        fetch('/api/supervisor/status', { signal: controller.signal }),
       ]);
 
       if (requestSeq !== agentDetailRequestSeq) return;
@@ -7327,9 +7341,8 @@ body.page-hidden #reminder-panel.has-items{
         console.debug('[agent-detail] supervisor detail fetch skipped:', e.message);
       }
       try {
-        const r = await fetch('/api/supervisor/status', { signal: controller.signal });
-        if (r.ok) {
-          const payload = await r.json();
+        if (supervisorStatusRaw.status === 'fulfilled' && supervisorStatusRaw.value.ok) {
+          const payload = await supervisorStatusRaw.value.json();
           if (payload && typeof payload === 'object') supervisorStatus = payload;
         }
       } catch (e) {
@@ -8015,6 +8028,182 @@ a:hover{text-decoration:underline}
   }catch{}
 
   fetchAlerts();
+})();
+</script>
+</body>
+</html>`;
+}
+
+function renderConfigPage() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Config</title>
+<style>
+:root{--bg:#0a0e14;--surface:#111922;--border:rgba(154,182,210,0.12);--text:#c8d6e5;--muted:rgba(200,214,229,0.45);--accent:#6dc1ff;--red:#ff6b6b;--yellow:#ffd93d;--green:#6bff9e}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'SF Mono','Fira Code',monospace;font-size:12px;background:var(--bg);color:var(--text);min-height:100vh}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+select{cursor:pointer}
+select option{background:#0d1723;color:#e2eaf3}
+.page{max-width:900px;margin:0 auto;padding:16px 20px}
+.header{display:flex;align-items:center;gap:16px;margin-bottom:20px}
+.header h1{font-size:16px;color:var(--accent);font-weight:600;letter-spacing:1px}
+.header a{font-size:11px;color:var(--muted)}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px}
+.panel-label{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:12px}
+.hint{font-size:11px;color:var(--muted);margin-bottom:12px}
+.preset-table{width:100%;border-collapse:collapse;font-size:11px}
+.preset-table th{text-align:left;padding:6px 8px;color:var(--muted);font-size:10px;letter-spacing:1px;text-transform:uppercase;border-bottom:1px solid var(--border)}
+.preset-table td{padding:6px 8px;border-bottom:1px solid rgba(154,182,210,0.06)}
+.preset-table tr:hover{background:rgba(109,193,255,0.04)}
+.empty-state{text-align:center;padding:24px;color:var(--muted);font-size:11px}
+.field-label{font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);margin-top:10px;margin-bottom:4px}
+.cfg-input{width:100%;margin-top:2px;background:rgba(255,255,255,0.03);border:1px solid rgba(109,193,255,0.24);border-radius:8px;color:var(--text);padding:8px 10px;outline:none;font-size:12px;font-family:inherit}
+.cfg-input:focus{border-color:rgba(109,193,255,0.5)}
+.btn{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px 14px;border-radius:6px;font-size:11px;font-family:inherit;cursor:pointer;letter-spacing:0.5px}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn-accent{border-color:rgba(109,193,255,0.4);color:var(--accent)}
+.btn-danger{border-color:rgba(255,107,107,0.3);color:var(--red)}
+.btn-danger:hover{border-color:var(--red);background:rgba(255,107,107,0.08)}
+.actions-row{display:flex;gap:8px;margin-top:12px}
+.status-msg{font-size:11px;margin-top:8px;min-height:16px}
+.status-ok{color:var(--green)}
+.status-error{color:var(--red)}
+.add-form{display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)}
+.add-form.visible{display:block}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <h1>GLOBAL CONFIG</h1>
+    <a href="/">&larr; Monitor</a>
+    <a href="/alerts">Alerts</a>
+  </div>
+
+  <div class="panel">
+    <div class="panel-label">Framework Presets</div>
+    <div class="hint">Named bundles of framework / provider / model settings. These presets appear in each agent's Configuration dropdowns.</div>
+    <div id="preset-list"></div>
+    <div style="margin-top:12px;display:flex;gap:8px">
+      <button class="btn btn-accent" onclick="toggleAddForm()">+ Add Preset</button>
+    </div>
+    <div id="add-form" class="add-form">
+      <div class="field-label">Name</div>
+      <input id="p-name" class="cfg-input" placeholder="e.g. Claude Opus">
+      <div class="field-label">Framework</div>
+      <select id="p-framework" class="cfg-input"><option value="">—</option><option value="claude">claude</option><option value="codex">codex</option></select>
+      <div class="field-label">Provider</div>
+      <input id="p-provider" class="cfg-input" placeholder="e.g. anthropic">
+      <div class="field-label">Model</div>
+      <input id="p-model" class="cfg-input" placeholder="e.g. claude-sonnet-4-20250514">
+      <div class="field-label">Reasoning</div>
+      <input id="p-reasoning" class="cfg-input" placeholder="e.g. extended">
+      <div class="field-label">Extra Args</div>
+      <input id="p-extraArgs" class="cfg-input" placeholder="e.g. --verbose">
+      <div class="actions-row">
+        <button class="btn btn-accent" onclick="submitPreset()">Create Preset</button>
+        <button class="btn" onclick="toggleAddForm()">Cancel</button>
+      </div>
+    </div>
+    <div id="status-msg" class="status-msg"></div>
+  </div>
+</div>
+<script>
+(function(){
+  const listEl = document.getElementById('preset-list');
+  const formEl = document.getElementById('add-form');
+  const statusEl = document.getElementById('status-msg');
+  let presets = [];
+
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function showStatus(msg, cls) {
+    statusEl.textContent = msg;
+    statusEl.className = 'status-msg ' + (cls || '');
+    if (msg) setTimeout(function() { if (statusEl.textContent === msg) { statusEl.textContent = ''; statusEl.className = 'status-msg'; } }, 3000);
+  }
+
+  function render() {
+    if (presets.length === 0) {
+      listEl.innerHTML = '<div class="empty-state">No presets defined yet.</div>';
+      return;
+    }
+    var h = '<table class="preset-table"><thead><tr><th>Name</th><th>Framework</th><th>Provider</th><th>Model</th><th>Reasoning</th><th>Extra Args</th><th></th></tr></thead><tbody>';
+    for (var i = 0; i < presets.length; i++) {
+      var p = presets[i];
+      h += '<tr>'
+        + '<td><strong>' + esc(p.name) + '</strong></td>'
+        + '<td>' + esc(p.framework || '-') + '</td>'
+        + '<td>' + esc(p.provider || '-') + '</td>'
+        + '<td>' + esc(p.model || '-') + '</td>'
+        + '<td>' + esc(p.reasoning || '-') + '</td>'
+        + '<td>' + esc(p.extraArgs || '-') + '</td>'
+        + '<td><button class="btn btn-danger" onclick="deletePreset(\\'' + esc(p.id) + '\\')">Delete</button></td>'
+        + '</tr>';
+    }
+    h += '</tbody></table>';
+    listEl.innerHTML = h;
+  }
+
+  async function fetchPresets() {
+    try {
+      var r = await fetch('/api/framework-presets');
+      if (r.ok) presets = await r.json();
+    } catch (e) { console.error('fetch presets:', e); }
+    render();
+  }
+
+  window.toggleAddForm = function() {
+    formEl.classList.toggle('visible');
+  };
+
+  window.submitPreset = async function() {
+    var name = (document.getElementById('p-name').value || '').trim();
+    if (!name) { showStatus('Name is required.', 'status-error'); return; }
+    var body = {
+      name: name,
+      framework: (document.getElementById('p-framework').value || '').trim() || null,
+      provider: (document.getElementById('p-provider').value || '').trim() || null,
+      model: (document.getElementById('p-model').value || '').trim() || null,
+      reasoning: (document.getElementById('p-reasoning').value || '').trim() || null,
+      extraArgs: (document.getElementById('p-extraArgs').value || '').trim() || null,
+    };
+    try {
+      var r = await fetch('/api/framework-presets', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      var data = await r.json().catch(function() { return {}; });
+      if (!r.ok) throw new Error(data.error || 'create failed');
+      showStatus('Preset created: ' + (data.preset ? data.preset.name : name), 'status-ok');
+      document.getElementById('p-name').value = '';
+      document.getElementById('p-provider').value = '';
+      document.getElementById('p-model').value = '';
+      document.getElementById('p-reasoning').value = '';
+      document.getElementById('p-extraArgs').value = '';
+      formEl.classList.remove('visible');
+      await fetchPresets();
+    } catch (e) { showStatus('Create failed: ' + e.message, 'status-error'); }
+  };
+
+  window.deletePreset = async function(id) {
+    if (!confirm('Delete this preset?')) return;
+    try {
+      var r = await fetch('/api/framework-presets/' + encodeURIComponent(id), { method: 'DELETE' });
+      var data = await r.json().catch(function() { return {}; });
+      if (!r.ok) throw new Error(data.error || 'delete failed');
+      showStatus('Preset deleted.', 'status-ok');
+      await fetchPresets();
+    } catch (e) { showStatus('Delete failed: ' + e.message, 'status-error'); }
+  };
+
+  fetchPresets();
 })();
 </script>
 </body>
