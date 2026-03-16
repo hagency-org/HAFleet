@@ -7788,7 +7788,7 @@ app.get('/api/agents/:name/tasks', (req, res) => {
 });
 
 // ── Framework Presets CRUD ─────────────────────────────────────────────
-app.get('/api/framework-presets', (_req, res) => {
+app.get('/api/framework-presets', requireBearer, (_req, res) => {
   return res.json(frameworkPresets);
 });
 
@@ -7796,7 +7796,11 @@ app.post('/api/framework-presets', requireBearer, (req, res) => {
   const b = req.body || {};
   const name = normalizeOptionalText(b.name, 128);
   if (!name) return res.status(400).json({ error: 'name is required' });
-  const id = 'preset_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+  let id = 'preset_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+  for (let i = 0; i < 10 && frameworkPresets.some(p => p.id === id); i++) {
+    id = 'preset_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+  }
+  if (frameworkPresets.some(p => p.id === id)) return res.status(500).json({ error: 'failed to generate unique preset id' });
   const preset = {
     id,
     name,
