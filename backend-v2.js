@@ -4525,6 +4525,8 @@ function setAgentRuleState(agentName, code, active, buildDetail) {
       'agent_rule',
       { sourceAgent: agentName, dedupeKey: `agent_rule:${agentName}:${code}` }
     );
+  } else {
+    alertStore.autoResolve(`agent_rule:${agentName}:${code}`);
   }
 }
 
