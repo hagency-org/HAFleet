@@ -4390,7 +4390,7 @@ th{
     )).join('');
   }
 
-  function buildPageModel(detail, statusRow, supervisorDetail, supervisorStatus, supervisorControl, subconsciousPayload, subconsciousDetail, unreadPayload, queueItems) {
+  function buildPageModel(detail, statusRow, supervisorDetail, supervisorStatus, supervisorControl, subconsciousPayload, subconsciousDetail, unreadPayload, queueItems, allStatusRows) {
     const latest = supervisorDetail?.latest || null;
     const state = supervisorDetail?.state || {};
     const events = Array.isArray(supervisorDetail?.events) ? supervisorDetail.events : [];
@@ -4416,6 +4416,11 @@ th{
     const consecutiveNegative = toInt(state?.consecutiveNegative, 0);
     const supervisorEnabled = supervisorControl?.enabled === true;
     const supervisorRuntimeRunning = supervisorStatus?.runtime?.running === true;
+    // Per-agent supervisor: check if supervisor-<agentName> is registered and alive
+    const supervisorAgentName = 'supervisor-' + agent;
+    const supervisorAgentRow = Array.isArray(allStatusRows) ? allStatusRows.find(r => r && r.name === supervisorAgentName) : null;
+    const supervisorAgentExists = !!supervisorAgentRow;
+    const supervisorAgentAlive = supervisorAgentRow?.alive === true;
     const supervisorClassification = String(state?.classification || '').trim().toUpperCase();
     const supervisorLifecycleState = String(state?.lifecycleState || '').trim().toLowerCase();
     const supervisorCurrentStatePresent = supervisorClassification.length > 0 || supervisorLifecycleState.length > 0;
@@ -4571,6 +4576,8 @@ th{
       latestReason,
       supervisorTaskSnapshot,
       supervisorRuntimeRunning,
+      supervisorAgentExists,
+      supervisorAgentAlive,
       supervisorCurrentStatePresent,
       supervisorClassification,
       supervisorLifecycleState,
@@ -4593,10 +4600,12 @@ th{
     document.getElementById('hero-runtime').textContent = runtimeBits.length ? runtimeBits.join(' · ') : 'Runtime details unavailable';
     const chips = [];
     chips.push('<span class="chip ' + (model.activeNow ? 'ok' : 'neutral') + '">' + esc(model.runtimeText) + '</span>');
-    if (model.supervisorEnabled && !model.supervisorRuntimeRunning) {
+    if (!model.supervisorAgentExists) {
+      chips.push('<span class="chip neutral">NO SUPERVISOR</span>');
+    } else if (!model.supervisorAgentAlive) {
       chips.push('<span class="chip warn">SUPERVISOR NOT RUNNING</span>');
     } else {
-      chips.push('<span class="chip ' + (model.supervisorEnabled ? 'ok' : 'danger') + '">SUPERVISOR ' + esc(model.supervisorEnabled ? 'ON' : 'OFF') + '</span>');
+      chips.push('<span class="chip ok">SUPERVISOR ON</span>');
     }
     chips.push('<span class="chip ' + (model.subconsciousEnabled ? 'ok' : 'neutral') + '">SUBCONSCIOUS ' + esc(model.subconsciousEnabled ? 'ON' : 'OFF') + '</span>');
     chips.push('<span class="chip neutral">UNREAD ' + esc(String(model.unreadTotal)) + '</span>');
@@ -6159,7 +6168,8 @@ th{
         subconsciousPayload,
         subconsciousDetailPayload,
         unreadPayload,
-        Array.isArray(queuePayload) ? queuePayload : []
+        Array.isArray(queuePayload) ? queuePayload : [],
+        statusRows
       );
       const shouldPreserveDirty = !forceDetailRender && hasUnsavedDetailChanges(agentDetailPayload, supervisorControlPayload, subconsciousDetailPayload);
       latestAgentDetail = agentDetailPayload;

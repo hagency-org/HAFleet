@@ -191,10 +191,6 @@ function checkAgentToken(agentName, req) {
   // No token configured → sender is not a managed agent (system, human, bridge);
   // allow through in all modes — token auth only applies to managed agents.
   if (!expected) return { ok: true };
-  // Accept Bearer token (web-tier proxy) as alternative to per-agent token
-  const bearerToken = getBearerToken(req);
-  const expectedBearer = normalizeOptionalText(process.env.API_TOKEN, 512);
-  if (expectedBearer && bearerToken === expectedBearer) return { ok: true };
   const provided = (req.headers['x-agent-token'] || '').trim();
   if (!provided) return { ok: false, reason: 'token required but not provided' };
   if (provided !== expected) return { ok: false, reason: 'token mismatch' };
@@ -8584,7 +8580,13 @@ app.get('/api/inbox/:agent/unread', requireAgentToken(_tokenFromAgent), (req, re
   res.json(snapshot);
 });
 
-app.get('/api/inbox/:agent/unread-list', requireAgentToken(_tokenFromAgent), (req, res) => {
+app.get('/api/inbox/:agent/unread-list', (req, res, next) => {
+  // Accept Bearer token (web-tier proxy) OR per-agent token
+  const bearerToken = getBearerToken(req);
+  const expectedBearer = normalizeOptionalText(process.env.API_TOKEN, 512);
+  if (expectedBearer && bearerToken === expectedBearer) return next();
+  return requireAgentToken(_tokenFromAgent)(req, res, next);
+}, (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
