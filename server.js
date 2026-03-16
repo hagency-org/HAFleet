@@ -5859,7 +5859,7 @@ th{
     const presetId = presetSel ? presetSel.value : '';
     if (presetId && presetId !== '__custom__') {
       const p = _presetCache.find(pp => pp.id === presetId);
-      if (p) return { framework: p.framework, provider: p.provider, model: p.model, reasoning: p.reasoning, extraArgs: p.extraArgs || null, apiBaseUrl: p.apiBaseUrl || null, apiKeyEnv: p.apiKeyEnv || null };
+      if (p) return { framework: p.framework, provider: p.provider, model: p.model, reasoning: p.reasoning, extraArgs: p.extraArgs || null, apiBaseUrl: p.apiBaseUrl || null, apiKey: p.apiKey || null };
     }
     const framework = ((document.getElementById('cfg-' + prefix + '-framework') || {}).value || '').trim() || null;
     const provider = ((document.getElementById('cfg-' + prefix + '-provider') || {}).value || '').trim() || null;
@@ -8117,8 +8117,8 @@ select option{background:#0d1723;color:#e2eaf3}
       <input id="p-extraArgs" class="cfg-input" placeholder="e.g. --verbose">
       <div class="field-label">API Base URL</div>
       <input id="p-apiBaseUrl" class="cfg-input" placeholder="e.g. https://dashscope.aliyuncs.com/compatible-mode/v1">
-      <div class="field-label">API Key Env Var</div>
-      <input id="p-apiKeyEnv" class="cfg-input" placeholder="e.g. DASHSCOPE_API_KEY">
+      <div class="field-label">API Key</div>
+      <input id="p-apiKey" type="password" class="cfg-input" placeholder="API key for custom provider">
       <div class="actions-row">
         <button class="btn btn-accent" onclick="submitPreset()">Create Preset</button>
         <button class="btn" onclick="toggleAddForm()">Cancel</button>
@@ -8149,7 +8149,7 @@ select option{background:#0d1723;color:#e2eaf3}
       listEl.innerHTML = '<div class="empty-state">No presets defined yet.</div>';
       return;
     }
-    var h = '<table class="preset-table"><thead><tr><th>Name</th><th>Framework</th><th>Model</th><th>API Base URL</th><th>API Key Env</th><th></th></tr></thead><tbody>';
+    var h = '<table class="preset-table"><thead><tr><th>Name</th><th>Framework</th><th>Model</th><th>API Base URL</th><th>API Key</th><th></th></tr></thead><tbody>';
     for (var i = 0; i < presets.length; i++) {
       var p = presets[i];
       h += '<tr>'
@@ -8157,7 +8157,7 @@ select option{background:#0d1723;color:#e2eaf3}
         + '<td>' + esc(p.framework || '-') + '</td>'
         + '<td>' + esc(p.model || '-') + '</td>'
         + '<td>' + esc(p.apiBaseUrl || '-') + '</td>'
-        + '<td>' + esc(p.apiKeyEnv || '-') + '</td>'
+        + '<td>' + (p.apiKey ? '••••••••' : '-') + '</td>'
         + '<td><button class="btn btn-danger" onclick="deletePreset(\\'' + esc(p.id) + '\\')">Delete</button></td>'
         + '</tr>';
     }
@@ -8188,7 +8188,7 @@ select option{background:#0d1723;color:#e2eaf3}
       reasoning: (document.getElementById('p-reasoning').value || '').trim() || null,
       extraArgs: (document.getElementById('p-extraArgs').value || '').trim() || null,
       apiBaseUrl: (document.getElementById('p-apiBaseUrl').value || '').trim() || null,
-      apiKeyEnv: (document.getElementById('p-apiKeyEnv').value || '').trim() || null,
+      apiKey: (document.getElementById('p-apiKey').value || '').trim() || null,
     };
     try {
       var r = await fetch('/api/framework-presets', {
@@ -8202,7 +8202,7 @@ select option{background:#0d1723;color:#e2eaf3}
       document.getElementById('p-reasoning').value = '';
       document.getElementById('p-extraArgs').value = '';
       document.getElementById('p-apiBaseUrl').value = '';
-      document.getElementById('p-apiKeyEnv').value = '';
+      document.getElementById('p-apiKey').value = '';
       formEl.classList.remove('visible');
       await fetchPresets();
     } catch (e) { showStatus('Create failed: ' + e.message, 'status-error'); }

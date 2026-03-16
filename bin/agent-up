@@ -533,7 +533,7 @@ if [ -f "$META_FILE" ]; then
   SAVED_RUNTIME_PROFILE_PRIMARY_MODEL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('model')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_PRIMARY_EXTRA_ARGS=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('extraArgs')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('apiBaseUrl')) or '')" 2>/dev/null || true)
-  SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY_ENV=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('apiKeyEnv')) or '')" 2>/dev/null || true)
+  SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('apiKey')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_SUPERVISOR_PROVIDER=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('supervisor') or {}).get('provider')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_SUPERVISOR_MODEL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('supervisor') or {}).get('model')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_SUPERVISOR_REASONING=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('supervisor') or {}).get('reasoning')) or '')" 2>/dev/null || true)
@@ -1569,11 +1569,8 @@ fi
 if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL:-}" ]; then
   LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX ANTHROPIC_BASE_URL=$(shell_quote "$SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL")"
 fi
-if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY_ENV:-}" ]; then
-  _resolved_api_key="${!SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY_ENV-}"
-  if [ -n "${_resolved_api_key:-}" ]; then
-    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX ANTHROPIC_API_KEY=$(shell_quote "$_resolved_api_key")"
-  fi
+if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY:-}" ]; then
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX ANTHROPIC_API_KEY=$(shell_quote "$SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY")"
 fi
 if [ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_JSON:-}" ]; then
   LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_RUNTIME_PROFILE_SUPERVISOR_JSON=$(shell_quote "$SAVED_RUNTIME_PROFILE_SUPERVISOR_JSON")"

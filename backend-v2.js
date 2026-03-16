@@ -628,9 +628,8 @@ function normalizeRuntimeProfileRole(value) {
       apiBaseUrl = rawApiBaseUrl;
     } catch { apiBaseUrl = null; }
   }
-  const rawApiKeyEnv = normalizeOptionalText(value.apiKeyEnv, 128);
-  const apiKeyEnv = rawApiKeyEnv && /^[A-Za-z_][A-Za-z0-9_]*$/.test(rawApiKeyEnv) ? rawApiKeyEnv : null;
-  if (!framework && !provider && !model && !reasoning && !extraArgs && !apiBaseUrl && !apiKeyEnv) return null;
+  const apiKey = normalizeOptionalText(value.apiKey, 256);
+  if (!framework && !provider && !model && !reasoning && !extraArgs && !apiBaseUrl && !apiKey) return null;
   return {
     framework: framework || null,
     provider: provider || null,
@@ -638,7 +637,7 @@ function normalizeRuntimeProfileRole(value) {
     reasoning: reasoning || null,
     ...(extraArgs ? { extraArgs } : {}),
     ...(apiBaseUrl ? { apiBaseUrl } : {}),
-    ...(apiKeyEnv ? { apiKeyEnv } : {}),
+    ...(apiKey ? { apiKey } : {}),
   };
 }
 
@@ -7831,10 +7830,6 @@ app.post('/api/framework-presets', requireBearer, (req, res) => {
       return res.status(400).json({ error: 'apiBaseUrl must be a valid HTTP(S) URL without embedded credentials' });
     }
   }
-  const apiKeyEnv = normalizeOptionalText(b.apiKeyEnv, 128) || null;
-  if (apiKeyEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) {
-    return res.status(400).json({ error: 'apiKeyEnv must be a valid environment variable name' });
-  }
   const preset = {
     id,
     name,
@@ -7844,7 +7839,7 @@ app.post('/api/framework-presets', requireBearer, (req, res) => {
     reasoning: normalizeOptionalText(b.reasoning, 64) || null,
     extraArgs,
     apiBaseUrl,
-    apiKeyEnv,
+    apiKey: normalizeOptionalText(b.apiKey, 256) || null,
   };
   frameworkPresets.push(preset);
   saveFrameworkPresets();
@@ -7871,10 +7866,6 @@ app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
       return res.status(400).json({ error: 'apiBaseUrl must be a valid HTTP(S) URL without embedded credentials' });
     }
   }
-  const apiKeyEnv = normalizeOptionalText(b.apiKeyEnv, 128) || null;
-  if (apiKeyEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) {
-    return res.status(400).json({ error: 'apiKeyEnv must be a valid environment variable name' });
-  }
   frameworkPresets[idx] = {
     ...frameworkPresets[idx],
     name,
@@ -7884,7 +7875,7 @@ app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
     reasoning: normalizeOptionalText(b.reasoning, 64) || null,
     extraArgs,
     apiBaseUrl,
-    apiKeyEnv,
+    apiKey: normalizeOptionalText(b.apiKey, 256) || null,
   };
   saveFrameworkPresets();
   return res.json({ ok: true, preset: frameworkPresets[idx] });
