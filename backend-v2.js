@@ -618,8 +618,18 @@ function normalizeRuntimeProfileRole(value) {
   const reasoning = normalizeOptionalText(value.reasoning, 64);
   const rawExtraArgs = normalizeOptionalText(value.extraArgs, 4000);
   const extraArgs = rawExtraArgs && SHELL_METACHAR_RE.test(rawExtraArgs) ? null : rawExtraArgs;
-  const apiBaseUrl = normalizeOptionalText(value.apiBaseUrl, 512);
-  const apiKeyEnv = normalizeOptionalText(value.apiKeyEnv, 128);
+  const rawApiBaseUrl = normalizeOptionalText(value.apiBaseUrl, 512);
+  let apiBaseUrl = null;
+  if (rawApiBaseUrl) {
+    try {
+      const parsed = new URL(rawApiBaseUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('not http(s)');
+      if (parsed.username || parsed.password) throw new Error('credentials in URL');
+      apiBaseUrl = rawApiBaseUrl;
+    } catch { apiBaseUrl = null; }
+  }
+  const rawApiKeyEnv = normalizeOptionalText(value.apiKeyEnv, 128);
+  const apiKeyEnv = rawApiKeyEnv && /^[A-Za-z_][A-Za-z0-9_]*$/.test(rawApiKeyEnv) ? rawApiKeyEnv : null;
   if (!framework && !provider && !model && !reasoning && !extraArgs && !apiBaseUrl && !apiKeyEnv) return null;
   return {
     framework: framework || null,
@@ -7812,8 +7822,18 @@ app.post('/api/framework-presets', requireBearer, (req, res) => {
     return res.status(400).json({ error: 'extraArgs contains disallowed shell characters' });
   }
   const apiBaseUrl = normalizeOptionalText(b.apiBaseUrl, 512) || null;
-  if (apiBaseUrl && !/^https?:\/\//.test(apiBaseUrl)) {
-    return res.status(400).json({ error: 'apiBaseUrl must be an HTTP(S) URL' });
+  if (apiBaseUrl) {
+    try {
+      const parsed = new URL(apiBaseUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('not http(s)');
+      if (parsed.username || parsed.password) throw new Error('credentials in URL');
+    } catch {
+      return res.status(400).json({ error: 'apiBaseUrl must be a valid HTTP(S) URL without embedded credentials' });
+    }
+  }
+  const apiKeyEnv = normalizeOptionalText(b.apiKeyEnv, 128) || null;
+  if (apiKeyEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) {
+    return res.status(400).json({ error: 'apiKeyEnv must be a valid environment variable name' });
   }
   const preset = {
     id,
@@ -7824,7 +7844,7 @@ app.post('/api/framework-presets', requireBearer, (req, res) => {
     reasoning: normalizeOptionalText(b.reasoning, 64) || null,
     extraArgs,
     apiBaseUrl,
-    apiKeyEnv: normalizeOptionalText(b.apiKeyEnv, 128) || null,
+    apiKeyEnv,
   };
   frameworkPresets.push(preset);
   saveFrameworkPresets();
@@ -7842,8 +7862,18 @@ app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
     return res.status(400).json({ error: 'extraArgs contains disallowed shell characters' });
   }
   const apiBaseUrl = normalizeOptionalText(b.apiBaseUrl, 512) || null;
-  if (apiBaseUrl && !/^https?:\/\//.test(apiBaseUrl)) {
-    return res.status(400).json({ error: 'apiBaseUrl must be an HTTP(S) URL' });
+  if (apiBaseUrl) {
+    try {
+      const parsed = new URL(apiBaseUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('not http(s)');
+      if (parsed.username || parsed.password) throw new Error('credentials in URL');
+    } catch {
+      return res.status(400).json({ error: 'apiBaseUrl must be a valid HTTP(S) URL without embedded credentials' });
+    }
+  }
+  const apiKeyEnv = normalizeOptionalText(b.apiKeyEnv, 128) || null;
+  if (apiKeyEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) {
+    return res.status(400).json({ error: 'apiKeyEnv must be a valid environment variable name' });
   }
   frameworkPresets[idx] = {
     ...frameworkPresets[idx],
@@ -7854,7 +7884,7 @@ app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
     reasoning: normalizeOptionalText(b.reasoning, 64) || null,
     extraArgs,
     apiBaseUrl,
-    apiKeyEnv: normalizeOptionalText(b.apiKeyEnv, 128) || null,
+    apiKeyEnv,
   };
   saveFrameworkPresets();
   return res.json({ ok: true, preset: frameworkPresets[idx] });
