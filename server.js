@@ -4890,8 +4890,7 @@ th{
       return '<div id="cfg-' + prefix + '-custom"' + hidden + '>'
         + '<div class="field-label">Framework</div>'
         + '<select id="cfg-' + prefix + '-framework" class="detail-input">' + fwOpts(role.framework || '') + '</select>'
-        + '<div class="field-label">Provider</div>'
-        + '<input id="cfg-' + prefix + '-provider" class="detail-input" value="' + esc(role.provider || '').replace(/"/g, '&quot;') + '" placeholder="e.g. anthropic">'
+        + '<input id="cfg-' + prefix + '-provider" type="hidden" value="anthropic">'
         + '<div class="field-label">Model</div>'
         + '<input id="cfg-' + prefix + '-model" class="detail-input" value="' + esc(role.model || '').replace(/"/g, '&quot;') + '" placeholder="e.g. claude-sonnet-4-20250514">'
         + '<div class="field-label">Reasoning</div>'
@@ -4980,7 +4979,6 @@ th{
       ph += '<details class="task-advanced" style="margin-top:10px"><summary class="task-advanced-toggle">Add Preset</summary>'
         + '<div class="field-label">Name</div><input id="preset-name" class="detail-input" placeholder="e.g. Claude Opus">'
         + '<div class="field-label">Framework</div><select id="preset-framework" class="detail-input"><option value="">—</option><option value="claude">claude</option><option value="codex">codex</option></select>'
-        + '<div class="field-label">Provider</div><input id="preset-provider" class="detail-input" placeholder="e.g. anthropic">'
         + '<div class="field-label">Model</div><input id="preset-model" class="detail-input" placeholder="e.g. claude-sonnet-4-20250514">'
         + '<div class="field-label">Reasoning</div><input id="preset-reasoning" class="detail-input" placeholder="e.g. extended">'
         + '<div class="field-label">Extra Args</div><input id="preset-extraArgs" class="detail-input" placeholder="e.g. --verbose">'
@@ -5824,7 +5822,7 @@ th{
     const body = {
       name,
       framework: ((document.getElementById('preset-framework') || {}).value || '').trim() || null,
-      provider: ((document.getElementById('preset-provider') || {}).value || '').trim() || null,
+      provider: 'anthropic',
       model: ((document.getElementById('preset-model') || {}).value || '').trim() || null,
       reasoning: ((document.getElementById('preset-reasoning') || {}).value || '').trim() || null,
       extraArgs: ((document.getElementById('preset-extraArgs') || {}).value || '').trim() || null,
@@ -8111,8 +8109,6 @@ select option{background:#0d1723;color:#e2eaf3}
       <input id="p-name" class="cfg-input" placeholder="e.g. Claude Opus">
       <div class="field-label">Framework</div>
       <select id="p-framework" class="cfg-input"><option value="">—</option><option value="claude">claude</option><option value="codex">codex</option></select>
-      <div class="field-label">Provider</div>
-      <input id="p-provider" class="cfg-input" placeholder="e.g. anthropic">
       <div class="field-label">Model</div>
       <input id="p-model" class="cfg-input" placeholder="e.g. claude-sonnet-4-20250514">
       <div class="field-label">Reasoning</div>
@@ -8149,13 +8145,12 @@ select option{background:#0d1723;color:#e2eaf3}
       listEl.innerHTML = '<div class="empty-state">No presets defined yet.</div>';
       return;
     }
-    var h = '<table class="preset-table"><thead><tr><th>Name</th><th>Framework</th><th>Provider</th><th>Model</th><th>Reasoning</th><th>Extra Args</th><th></th></tr></thead><tbody>';
+    var h = '<table class="preset-table"><thead><tr><th>Name</th><th>Framework</th><th>Model</th><th>Reasoning</th><th>Extra Args</th><th></th></tr></thead><tbody>';
     for (var i = 0; i < presets.length; i++) {
       var p = presets[i];
       h += '<tr>'
         + '<td><strong>' + esc(p.name) + '</strong></td>'
         + '<td>' + esc(p.framework || '-') + '</td>'
-        + '<td>' + esc(p.provider || '-') + '</td>'
         + '<td>' + esc(p.model || '-') + '</td>'
         + '<td>' + esc(p.reasoning || '-') + '</td>'
         + '<td>' + esc(p.extraArgs || '-') + '</td>'
@@ -8184,7 +8179,7 @@ select option{background:#0d1723;color:#e2eaf3}
     var body = {
       name: name,
       framework: (document.getElementById('p-framework').value || '').trim() || null,
-      provider: (document.getElementById('p-provider').value || '').trim() || null,
+      provider: 'anthropic',
       model: (document.getElementById('p-model').value || '').trim() || null,
       reasoning: (document.getElementById('p-reasoning').value || '').trim() || null,
       extraArgs: (document.getElementById('p-extraArgs').value || '').trim() || null,
@@ -8197,7 +8192,6 @@ select option{background:#0d1723;color:#e2eaf3}
       if (!r.ok) throw new Error(data.error || 'create failed');
       showStatus('Preset created: ' + (data.preset ? data.preset.name : name), 'status-ok');
       document.getElementById('p-name').value = '';
-      document.getElementById('p-provider').value = '';
       document.getElementById('p-model').value = '';
       document.getElementById('p-reasoning').value = '';
       document.getElementById('p-extraArgs').value = '';
