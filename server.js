@@ -1759,6 +1759,23 @@ app.patch('/api/agents/:name', async (req, res) => {
   }
 });
 
+app.post('/api/agents/create', async (req, res) => {
+  const body = req.body || {};
+  if (!body.name || !/^[\w\-]+$/.test(body.name)) return res.status(400).json({ error: 'invalid agent name' });
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json(data);
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
 app.patch('/api/agents/:name/home-metadata', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
@@ -6850,7 +6867,7 @@ body.page-hidden #reminder-panel.has-items{
       <div id="queue-list"></div>
     </div>
     <div id="monitor-panel">
-      <div class="monitor-header" style="display:flex;align-items:center;gap:12px">AGENT MONITOR<a href="/alerts" id="alert-badge" style="font-size:10px;color:rgba(255,107,107,0.7);text-decoration:none;display:none"></a><a href="/config" style="font-size:10px;color:rgba(0,240,255,0.4);text-decoration:none;letter-spacing:1px">CONFIG</a></div>
+      <div class="monitor-header" style="display:flex;align-items:center;gap:12px">AGENT MONITOR<a href="/alerts" id="alert-badge" style="font-size:10px;color:rgba(255,107,107,0.7);text-decoration:none;display:none"></a><button id="btn-new-agent" onclick="openNewAgentModal()" style="margin-left:auto;font-size:10px;color:rgba(0,240,255,0.4);background:none;border:1px solid rgba(0,240,255,0.15);padding:2px 8px;cursor:pointer;letter-spacing:1px;font-family:inherit">+ NEW</button><a href="/config" style="font-size:10px;color:rgba(0,240,255,0.4);text-decoration:none;letter-spacing:1px">CONFIG</a></div>
       <div id="agent-buttons-wrap">
         <div id="agent-buttons"><span style="color:rgba(0,240,255,0.2);font-size:10px">loading agents...</span></div>
         <button id="agent-toggle" title="Show all agents">▼ more</button>
@@ -6889,7 +6906,84 @@ body.page-hidden #reminder-panel.has-items{
   </div>
 </div>
 
+<div id="new-agent-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.7);align-items:center;justify-content:center">
+  <div style="background:#0d1926;border:1px solid rgba(0,240,255,0.15);padding:24px;width:400px;max-width:90vw">
+    <div style="font-size:12px;letter-spacing:2px;color:rgba(0,240,255,0.6);margin-bottom:16px">NEW AGENT</div>
+    <div style="margin-bottom:10px">
+      <label style="font-size:10px;color:rgba(255,255,255,0.5);letter-spacing:1px">NAME *</label>
+      <input id="na-name" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.3);border:1px solid rgba(0,240,255,0.15);color:#e0e0e0;font-family:inherit;font-size:12px" placeholder="my-agent">
+    </div>
+    <div style="margin-bottom:10px">
+      <label style="font-size:10px;color:rgba(255,255,255,0.5);letter-spacing:1px">FRAMEWORK *</label>
+      <select id="na-type" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.3);border:1px solid rgba(0,240,255,0.15);color:#e0e0e0;font-family:inherit;font-size:12px;cursor:pointer">
+        <option value="claude">claude</option>
+        <option value="codex">codex</option>
+      </select>
+    </div>
+    <div style="margin-bottom:10px">
+      <label style="font-size:10px;color:rgba(255,255,255,0.5);letter-spacing:1px">IDENTITY</label>
+      <input id="na-identity" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.3);border:1px solid rgba(0,240,255,0.15);color:#e0e0e0;font-family:inherit;font-size:12px" placeholder="One-line description">
+    </div>
+    <div style="margin-bottom:16px">
+      <label style="font-size:10px;color:rgba(255,255,255,0.5);letter-spacing:1px">GUIDANCE</label>
+      <textarea id="na-guidance" rows="3" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.3);border:1px solid rgba(0,240,255,0.15);color:#e0e0e0;font-family:inherit;font-size:12px;resize:vertical" placeholder="Human-authored intent / instructions"></textarea>
+    </div>
+    <div id="na-status" style="font-size:11px;margin-bottom:10px;min-height:16px"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button onclick="closeNewAgentModal()" style="padding:6px 14px;background:none;border:1px solid rgba(255,255,255,0.15);color:rgba(255,255,255,0.5);cursor:pointer;font-family:inherit;font-size:11px">Cancel</button>
+      <button onclick="submitNewAgent()" style="padding:6px 14px;background:rgba(0,240,255,0.1);border:1px solid rgba(0,240,255,0.3);color:#00f0ff;cursor:pointer;font-family:inherit;font-size:11px">Create</button>
+    </div>
+  </div>
+</div>
+
 <script>
+window.openNewAgentModal = function() {
+  var m = document.getElementById('new-agent-modal');
+  m.style.display = 'flex';
+  document.getElementById('na-name').value = '';
+  document.getElementById('na-type').value = 'claude';
+  document.getElementById('na-identity').value = '';
+  document.getElementById('na-guidance').value = '';
+  document.getElementById('na-status').textContent = '';
+  document.getElementById('na-name').focus();
+};
+window.closeNewAgentModal = function() {
+  document.getElementById('new-agent-modal').style.display = 'none';
+};
+window.submitNewAgent = async function() {
+  var name = (document.getElementById('na-name').value || '').trim();
+  if (!name) { document.getElementById('na-status').textContent = 'Name is required.'; document.getElementById('na-status').style.color = '#ff6b6b'; return; }
+  if (!/^[\\w\\-]+$/.test(name)) { document.getElementById('na-status').textContent = 'Invalid name — use letters, digits, hyphens, underscores.'; document.getElementById('na-status').style.color = '#ff6b6b'; return; }
+  var fw = document.getElementById('na-type').value;
+  var identity = (document.getElementById('na-identity').value || '').trim() || null;
+  var guidance = (document.getElementById('na-guidance').value || '').trim() || null;
+  var body = {
+    name: name,
+    type: fw,
+    identity: identity,
+    role: guidance,
+    runtimeProfile: { primary: { framework: fw } },
+  };
+  document.getElementById('na-status').textContent = 'Creating...';
+  document.getElementById('na-status').style.color = 'rgba(0,240,255,0.6)';
+  try {
+    var r = await fetch('/api/agents/create', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    var data = await r.json().catch(function() { return {}; });
+    if (!r.ok) throw new Error(data.error || 'creation failed (HTTP ' + r.status + ')');
+    document.getElementById('na-status').textContent = 'Agent "' + name + '" created. Launch via: agentchat up-v1 ' + name;
+    document.getElementById('na-status').style.color = '#34d399';
+    setTimeout(function() { closeNewAgentModal(); }, 2500);
+  } catch (e) {
+    document.getElementById('na-status').textContent = 'Failed: ' + e.message;
+    document.getElementById('na-status').style.color = '#ff6b6b';
+  }
+};
+document.getElementById('new-agent-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeNewAgentModal();
+});
+
 (() => {
   const IDLE_THRESHOLD_MS = ${IDLE_THRESHOLD};
   const IDLE_THRESHOLD_SEC = ${IDLE_THRESHOLD_SEC};
