@@ -3551,6 +3551,7 @@ a{color:var(--accent)}
   outline:none;
   font-size:12px;
 }
+select{cursor:pointer}
 select option{
   background:#0d1723;
   color:#e2eaf3;
@@ -6307,14 +6308,14 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   0%,100%{opacity:0.4;box-shadow:none}
   50%{opacity:1;box-shadow:0 0 8px #a855f7}
 }
-.queue-item{padding:10px 14px;border-bottom:1px solid rgba(168,85,247,0.06);transition:background 0.2s}
+.queue-item{padding:10px 14px;border-bottom:1px solid rgba(168,85,247,0.06);transition:background 0.2s;overflow:hidden;min-width:0}
 .queue-item:hover{background:rgba(168,85,247,0.05)}
 .queue-item:last-child{border-bottom:none}
 .qi-route{font-size:11px;margin-bottom:3px}
 .qi-from{color:rgba(0,240,255,0.6)}
 .qi-arrow{color:rgba(168,85,247,0.3);margin:0 4px}
 .qi-target{color:#a855f7}
-.qi-payload{font-size:10px;color:rgba(255,255,255,0.2);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:250px}
+.qi-payload{font-size:10px;color:rgba(255,255,255,0.2);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .qi-wait{font-size:10px;color:rgba(168,85,247,0.3);margin-top:3px}
 .qi-idle{font-size:10px;margin-top:2px}
 .qi-idle-busy{color:rgba(251,191,36,0.5)}
@@ -6351,11 +6352,11 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 }
 .reminder-header .dot{width:6px;height:6px;border-radius:50%;background:#fbbf24;animation:pulse-dot-r 2s infinite}
 @keyframes pulse-dot-r{0%,100%{opacity:0.4;box-shadow:none}50%{opacity:1;box-shadow:0 0 8px #fbbf24}}
-.reminder-item{padding:10px 14px;border-bottom:1px solid rgba(251,191,36,0.06);transition:background 0.2s}
+.reminder-item{padding:10px 14px;border-bottom:1px solid rgba(251,191,36,0.06);transition:background 0.2s;overflow:hidden;min-width:0}
 .reminder-item:hover{background:rgba(251,191,36,0.05)}
 .reminder-item:last-child{border-bottom:none}
 .ri-target{font-size:11px;color:#fbbf24}
-.ri-msg{font-size:10px;color:rgba(255,255,255,0.25);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:250px}
+.ri-msg{font-size:10px;color:rgba(255,255,255,0.25);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .ri-countdown{font-size:12px;color:rgba(251,191,36,0.7);margin-top:4px;font-weight:bold}
 .ri-created{font-size:9px;color:rgba(251,191,36,0.25);margin-top:2px}
 .ri-actions{margin-top:6px}
@@ -6744,7 +6745,7 @@ body.page-hidden #reminder-panel.has-items{
 .log-entry .from{color:#00f0ff}
 .log-entry .to{color:#a855f7}
 .log-entry .arrow{color:rgba(0,240,255,0.3)}
-.log-entry .payload{color:rgba(255,255,255,0.3);overflow:hidden;text-overflow:ellipsis}
+.log-entry .payload{color:rgba(255,255,255,0.3);overflow:hidden;text-overflow:ellipsis;max-width:100%}
 
 /* Mobile FABs (hidden on desktop) */
 .mobile-fab{display:none}
