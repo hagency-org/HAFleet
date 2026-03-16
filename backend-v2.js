@@ -663,6 +663,17 @@ function mergeRuntimeProfileApiKeys(newProfile, existingProfile) {
   return newProfile;
 }
 
+function redactRuntimeProfileSecrets(profile) {
+  if (!profile) return profile;
+  const redacted = { ...profile };
+  for (const role of ['primary', 'supervisor']) {
+    if (redacted[role] && redacted[role].apiKey) {
+      redacted[role] = { ...redacted[role], apiKey: true };
+    }
+  }
+  return redacted;
+}
+
 function normalizeLooseAgentName(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -5561,7 +5572,7 @@ function serializeAgent(agent) {
     managedProjects: normalizeManagedProjects(agent.managedProjects),
     human: normalizeHumanMeta(agent.human),
     task: normalizeAgentTask(agent.task, agent.name),
-    runtimeProfile: normalizeRuntimeProfile(agent.runtimeProfile),
+    runtimeProfile: redactRuntimeProfileSecrets(normalizeRuntimeProfile(agent.runtimeProfile)),
     environment: VALID_ENVIRONMENTS.has(agent.environment) ? agent.environment : classifyEnvironment(agent.name),
     activeNow: runtime?.activeNow === true,
     activeDurationSec: Number(runtime?.activeDurationSec) || 0,
@@ -7899,7 +7910,7 @@ app.delete('/api/framework-presets/:id', requireBearer, (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'preset not found' });
   const removed = frameworkPresets.splice(idx, 1)[0];
   saveFrameworkPresets();
-  return res.json({ ok: true, preset: removed });
+  return res.json({ ok: true, preset: { ...removed, apiKey: removed.apiKey ? true : null } });
 });
 
 app.post('/api/task-graphs', requireBearer, (req, res) => {
