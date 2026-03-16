@@ -1257,11 +1257,14 @@ with open(mcp_json, "w") as f:
 PY
   echo "  MCP config: $mcp_json"
 
-  # Also write mcp-env.json to a well-known path so the MCP server can
+  # Also write mcp-env.json to the agent's state dir so the MCP server can
   # load env vars even when the spawner (Codex) strips them.
-  local mcp_env_dir="$HOME/.agentchat/mcp-env"
-  mkdir -p "$mcp_env_dir"
-  local mcp_env_file="$mcp_env_dir/${NAME}.json"
+  # Scoped to state dir (not global) to avoid cross-runtime bleed (dev vs live).
+  if [ -z "$state_dir" ]; then
+    echo "  MCP env: skipped (no state dir)"
+    return
+  fi
+  local mcp_env_file="$state_dir/mcp-env.json"
   MCP_ENV_FILE="$mcp_env_file" AGENT_NAME_VAL="$NAME" BACKEND_URL="$BACKEND_URL" \
     BACKEND_PORT="$BACKEND_PORT" SERVER_ID="$SERVER_ID" STATE_DIR="$state_dir" \
     RUNTIME_DIR_VAL="$RUNTIME_DIR" MCP_SERVER_NAME="$MCP_SERVER_NAME" \
