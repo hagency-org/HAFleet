@@ -51,6 +51,14 @@ fi
 RUNTIME_DIR="${AGENT_CHAT_RUNTIME_DIR:-$BASE_DIR}"
 DATA_DIR="$RUNTIME_DIR/data/agents"
 
+# If runtime dir differs from base dir, also load runtime's .env
+# (overrides base — runtime has the correct port for its deployment).
+if [ "$RUNTIME_DIR" != "$BASE_DIR" ] && [ -f "$RUNTIME_DIR/.env" ]; then
+  set -a
+  source "$RUNTIME_DIR/.env"
+  set +a
+fi
+
 BACKEND_PORT_RAW="${AGENT_CHAT_BACKEND_PORT:-8090}"
 if [[ "$BACKEND_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT_RAW" -gt 0 ]; then
   BACKEND_PORT="$BACKEND_PORT_RAW"
