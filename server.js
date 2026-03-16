@@ -3469,6 +3469,10 @@ a{color:var(--accent)}
 .detail-save:hover{border-color:rgba(109,193,255,0.62)}
 .detail-save:disabled{opacity:0.45;cursor:default}
 .detail-hint{font-size:11px;color:var(--muted);line-height:1.55}
+.task-advanced{margin-top:10px}
+.task-advanced-toggle{font-size:11px;color:var(--muted);cursor:pointer;letter-spacing:0.5px}
+.task-advanced-toggle:hover{color:var(--text)}
+.task-advanced[open] .task-advanced-toggle{color:var(--text)}
 .doc-frame{
   margin-top:10px;
   padding:12px;
@@ -3633,6 +3637,7 @@ th{
     <div class="tab-shell">
       <div class="tabs">
         <button class="tab-btn active" data-tab="settings" onclick="setActiveTab('settings')">Settings</button>
+        <button class="tab-btn" data-tab="tasks" onclick="setActiveTab('tasks')">Tasks</button>
         <button class="tab-btn" data-tab="dm" onclick="setActiveTab('dm')">DM</button>
         <button class="tab-btn" data-tab="supervisor" onclick="setActiveTab('supervisor')">Supervisor</button>
         <button class="tab-btn" data-tab="subconscious" onclick="setActiveTab('subconscious')">Subconscious</button>
@@ -3644,10 +3649,6 @@ th{
           <article class="panel">
             <div class="panel-label">Identity</div>
             <div id="settings-identity"></div>
-          </article>
-          <article class="panel">
-            <div class="panel-label">Task</div>
-            <div id="settings-task"></div>
           </article>
           <article class="panel">
             <div class="panel-label">Guidance</div>
@@ -3666,6 +3667,13 @@ th{
             <div id="settings-owner"></div>
           </article>
         </div>
+      </section>
+
+      <section id="tab-tasks" class="tab-panel hidden">
+        <article class="panel">
+          <div class="panel-label">Task</div>
+          <div id="task-current"></div>
+        </article>
       </section>
 
       <section id="tab-dm" class="tab-panel hidden">
@@ -3794,7 +3802,7 @@ th{
 (() => {
   const agent = ${JSON.stringify(agentName)};
   const NEGATIVE_STATUSES = new Set(['DRIFTING', 'LOST', 'STUCK']);
-  const TABS = new Set(['settings', 'dm', 'supervisor', 'subconscious', 'internals']);
+  const TABS = new Set(['settings', 'tasks', 'dm', 'supervisor', 'subconscious', 'internals']);
   const fmtTs = (v) => {
     const n = Number(v) || 0;
     if (!n) return '-';
@@ -4700,36 +4708,41 @@ th{
     const taskStatus = String(task?.status || '');
     const waitingReason = String(task?.waiting_reason || '');
     const waitingUntil = String(task?.waiting_until || '');
-    return '<div class="detail-hint">Canonical control-plane task object. The Supervisor tab keeps the separate docs snapshot.</div>'
+    const hasAdvanced = waitingReason || waitingUntil;
+    return '<div class="field-label">Task Id</div>'
+      + '<input id="detail-task-id" class="detail-input" value="' + esc(task?.id || '').replace(/"/g, '&quot;') + '" placeholder="e.g. implement-auth">'
       + '<div class="field-label">Status</div>'
-      + '<select id="detail-task-status" class="detail-input">'
-      + '<option value=""></option>'
+      + '<select id="detail-task-status" class="detail-input" onchange="toggleTaskWaiting()">'
+      + '<option value="">—</option>'
       + '<option value="active"' + (taskStatus === 'active' ? ' selected' : '') + '>active</option>'
       + '<option value="waiting"' + (taskStatus === 'waiting' ? ' selected' : '') + '>waiting</option>'
       + '<option value="blocked"' + (taskStatus === 'blocked' ? ' selected' : '') + '>blocked</option>'
       + '<option value="done"' + (taskStatus === 'done' ? ' selected' : '') + '>done</option>'
       + '</select>'
-      + '<div class="field-label">Task Id</div>'
-      + '<input id="detail-task-id" class="detail-input" value="' + esc(task?.id || '').replace(/"/g, '&quot;') + '" placeholder="task-id">'
-      + '<div class="field-label">Owner</div>'
-      + '<input id="detail-task-owner" class="detail-input" value="' + esc(task?.owner || '').replace(/"/g, '&quot;') + '" placeholder="' + esc(detail?.name || 'agent').replace(/"/g, '&quot;') + '">'
+      + '<div id="task-waiting-fields" style="' + (taskStatus === 'waiting' ? '' : 'display:none') + '">'
       + '<div class="field-label">Waiting Reason</div>'
-      + '<textarea id="detail-task-waiting-reason" class="detail-textarea" placeholder="Required when status=waiting">' + esc(waitingReason) + '</textarea>'
+      + '<textarea id="detail-task-waiting-reason" class="detail-textarea" style="min-height:60px" placeholder="Why is this task waiting?">' + esc(waitingReason) + '</textarea>'
       + '<div class="field-label">Waiting Until</div>'
       + '<input id="detail-task-waiting-until" class="detail-input" value="' + esc(waitingUntil).replace(/"/g, '&quot;') + '" placeholder="2026-03-11T14:00:00.000Z">'
+      + '</div>'
+      + '<details class="task-advanced"' + (hasAdvanced ? '' : '') + '>'
+      + '<summary class="task-advanced-toggle">Advanced</summary>'
+      + '<div class="field-label">Owner</div>'
+      + '<input id="detail-task-owner" class="detail-input" value="' + esc(task?.owner || '').replace(/"/g, '&quot;') + '" placeholder="' + esc(detail?.name || 'agent').replace(/"/g, '&quot;') + '">'
       + '<div class="read-block"><strong>updated_at</strong><br><span class="mono">' + esc(task?.updated_at || '-') + '</span><br><br><strong>heartbeat_at</strong><br><span class="mono">' + esc(task?.heartbeat_at || '-') + '</span></div>'
+      + '</details>'
       + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailTask()">Save Task</button></div>';
   }
 
   function renderSettings(detail, model) {
     const identityRoot = document.getElementById('settings-identity');
-    const taskRoot = document.getElementById('settings-task');
+    const taskRoot = document.getElementById('task-current');
     const guidanceRoot = document.getElementById('settings-guidance');
     const systemsRoot = document.getElementById('settings-systems');
     const ownerRoot = document.getElementById('settings-owner');
     if (!detail || detail.error) {
       identityRoot.innerHTML = '<div class="error-state">Agent detail unavailable.</div>';
-      taskRoot.innerHTML = '<div class="error-state">Canonical task unavailable.</div>';
+      if (taskRoot) taskRoot.innerHTML = '<div class="error-state">Task unavailable.</div>';
       guidanceRoot.innerHTML = '<div class="error-state">Guidance unavailable.</div>';
       const cfgRoot = document.getElementById('settings-configuration');
       if (cfgRoot) cfgRoot.innerHTML = '<div class="error-state">Configuration unavailable.</div>';
@@ -5728,6 +5741,12 @@ th{
     }
   }
 
+  function toggleTaskWaiting() {
+    const el = document.getElementById('task-waiting-fields');
+    const sel = document.getElementById('detail-task-status');
+    if (el && sel) el.style.display = sel.value === 'waiting' ? '' : 'none';
+  }
+  window.toggleTaskWaiting = toggleTaskWaiting;
   window.saveDetailTask = saveDetailTask;
   window.saveDetailIdentity = saveDetailIdentity;
   window.saveDetailOwner = saveDetailOwner;
