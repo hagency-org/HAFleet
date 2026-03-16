@@ -2674,7 +2674,7 @@ app.patch('/api/alerts/:id', alertProxyMutate('/:id', 'PATCH'));
 app.delete('/api/alerts/:id', alertProxyMutate('/:id', 'DELETE'));
 
 // Backend SSE consumer — forward alert events to dashboard clients
-const ALERT_SSE_EVENTS = new Set(['alert_created', 'alert_updated', 'alert_resolved', 'alert_deleted', 'message']);
+const ALERT_SSE_EVENTS = new Set(['alert_created', 'alert_updated', 'alert_resolved', 'alert_deleted', 'message', 'task_created', 'task_updated', 'task_deleted']);
 let backendSSEAbort = null;
 async function connectBackendSSE() {
   if (backendSSEAbort) { try { backendSSEAbort.abort(); } catch {} }
@@ -7693,6 +7693,11 @@ body.page-hidden #reminder-panel.has-items{
         console.debug('[sse] reminders parse skipped:', err.message);
       }
     });
+    for (const evt of ['task_created', 'task_updated', 'task_deleted']) {
+      evtSource.addEventListener(evt, () => {
+        if (activeTab === 'tasks') taskListRefresh();
+      });
+    }
   }
 
   // ── Init ────────────────────────────────────
