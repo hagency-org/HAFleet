@@ -1515,10 +1515,16 @@ elif [ "$TYPE" = "codex" ]; then
   [ -n "$EXTRA_ARGS" ] && CODEX_FLAGS="$CODEX_FLAGS $EXTRA_ARGS"
   # Inject MCP env vars via -c flags so Codex passes them to the MCP subprocess.
   # Codex strips env vars from MCP subprocesses but honors -c config overrides.
+  toml_quote() {
+    local v="$1"
+    v="${v//\\/\\\\}"    # escape backslashes
+    v="${v//\"/\\\"}"    # escape double quotes
+    printf '"%s"' "$v"
+  }
   codex_mcp_env() {
     local key="$1" val="$2"
     [ -z "$val" ] && return
-    CODEX_FLAGS="$CODEX_FLAGS -c mcp_servers.${MCP_SERVER_NAME}.env.${key}=$(shell_quote "$val")"
+    CODEX_FLAGS="$CODEX_FLAGS -c mcp_servers.${MCP_SERVER_NAME}.env.${key}=$(toml_quote "$val")"
   }
   codex_mcp_env AGENT_NAME "$NAME"
   codex_mcp_env AGENT_CHAT_API "$BACKEND_URL"
