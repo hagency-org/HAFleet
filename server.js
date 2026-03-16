@@ -3244,7 +3244,7 @@ a{color:var(--accent)}
 .page{max-width:1240px;margin:0 auto;padding:20px 20px 40px}
 .hero{
   position:sticky;top:0;z-index:20;
-  background:linear-gradient(180deg,rgba(8,16,26,0.96) 0%,rgba(8,16,26,0.90) 100%);
+  background:linear-gradient(180deg,rgba(8,16,26,1) 0%,rgba(8,16,26,1) 100%);
   backdrop-filter:blur(16px);
   border:1px solid var(--border);
   border-radius:18px;
@@ -3481,7 +3481,7 @@ a{color:var(--accent)}
   display:flex;gap:8px;flex-wrap:wrap;
   position:sticky;top:var(--detail-tabs-top);z-index:21;
   margin-bottom:14px;padding:8px;
-  background:rgba(8,16,26,0.9);
+  background:rgba(8,16,26,1);
   backdrop-filter:blur(14px);
   border:1px solid var(--border);
   border-radius:14px;
@@ -4593,7 +4593,11 @@ th{
     document.getElementById('hero-runtime').textContent = runtimeBits.length ? runtimeBits.join(' · ') : 'Runtime details unavailable';
     const chips = [];
     chips.push('<span class="chip ' + (model.activeNow ? 'ok' : 'neutral') + '">' + esc(model.runtimeText) + '</span>');
-    chips.push('<span class="chip ' + (model.supervisorEnabled ? 'ok' : 'danger') + '">SUPERVISOR ' + esc(model.supervisorEnabled ? 'ON' : 'OFF') + '</span>');
+    if (model.supervisorEnabled && !model.supervisorRuntimeRunning) {
+      chips.push('<span class="chip warn">SUPERVISOR NOT RUNNING</span>');
+    } else {
+      chips.push('<span class="chip ' + (model.supervisorEnabled ? 'ok' : 'danger') + '">SUPERVISOR ' + esc(model.supervisorEnabled ? 'ON' : 'OFF') + '</span>');
+    }
     chips.push('<span class="chip ' + (model.subconsciousEnabled ? 'ok' : 'neutral') + '">SUBCONSCIOUS ' + esc(model.subconsciousEnabled ? 'ON' : 'OFF') + '</span>');
     chips.push('<span class="chip neutral">UNREAD ' + esc(String(model.unreadTotal)) + '</span>');
     chips.push('<span class="chip neutral">QUEUE ' + esc(String(model.queueCount)) + '</span>');

@@ -191,6 +191,10 @@ function checkAgentToken(agentName, req) {
   // No token configured → sender is not a managed agent (system, human, bridge);
   // allow through in all modes — token auth only applies to managed agents.
   if (!expected) return { ok: true };
+  // Accept Bearer token (web-tier proxy) as alternative to per-agent token
+  const bearerToken = getBearerToken(req);
+  const expectedBearer = normalizeOptionalText(process.env.API_TOKEN, 512);
+  if (expectedBearer && bearerToken === expectedBearer) return { ok: true };
   const provided = (req.headers['x-agent-token'] || '').trim();
   if (!provided) return { ok: false, reason: 'token required but not provided' };
   if (provided !== expected) return { ok: false, reason: 'token mismatch' };
