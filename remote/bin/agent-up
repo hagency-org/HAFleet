@@ -1521,12 +1521,13 @@ elif [ "$TYPE" = "codex" ]; then
   codex_mcp_env() {
     local key="$1" val="$2"
     [ -z "$val" ] && return
-    # TOML needs string values in double quotes. Single-quote the entire -c
-    # argument so the TOML quotes survive the pane's shell parsing.
-    local toml_val
-    toml_val="${val//\\/\\\\}"    # escape backslashes for TOML
-    toml_val="${toml_val//\"/\\\"}"    # escape double quotes for TOML
-    CODEX_FLAGS="$CODEX_FLAGS -c 'mcp_servers.${CODEX_MCP_NAME}.env.${key}=\"${toml_val}\"'"
+    # TOML-encode the value (escape \ and ")
+    val="${val//\\/\\\\}"
+    val="${val//\"/\\\"}"
+    # Build full TOML assignment: key="value"
+    local arg="mcp_servers.${CODEX_MCP_NAME}.env.${key}=\"${val}\""
+    # Shell-escape the entire argument so it survives tmux/pane execution
+    CODEX_FLAGS="$CODEX_FLAGS -c $(printf '%q' "$arg")"
   }
   codex_mcp_env AGENT_NAME "$NAME"
   codex_mcp_env AGENT_CHAT_API "$BACKEND_URL"
