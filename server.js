@@ -3514,6 +3514,22 @@ a{color:var(--accent)}
   outline:none;
   font-size:12px;
 }
+select.detail-input,
+select.task-status-select{
+  appearance:none;
+  -webkit-appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%239ab6d2'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;
+  background-position:right 10px center;
+  padding-right:28px;
+  cursor:pointer;
+}
+select.detail-input option,
+select.task-status-select option,
+select option{
+  background:#0d1723;
+  color:#e2eaf3;
+}
 .detail-input:focus,
 .detail-textarea:focus{border-color:rgba(109,193,255,0.62)}
 .detail-textarea{resize:vertical;min-height:110px;line-height:1.5}
