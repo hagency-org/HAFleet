@@ -4046,11 +4046,6 @@ th{
 
   function getCurrentDetailDraft() {
     const identityEl = document.getElementById('detail-identity-input');
-    const taskStatusEl = document.getElementById('detail-task-status');
-    const taskIdEl = document.getElementById('detail-task-id');
-    const taskOwnerEl = document.getElementById('detail-task-owner');
-    const taskWaitingReasonEl = document.getElementById('detail-task-waiting-reason');
-    const taskWaitingUntilEl = document.getElementById('detail-task-waiting-until');
     const ownerEl = document.getElementById('detail-owner');
     const projectImportSourceEl = document.getElementById('detail-project-import-source');
     const projectImportNameEl = document.getElementById('detail-project-import-name');
@@ -4065,11 +4060,6 @@ th{
     const runtimeKeyEnvEl = document.getElementById('detail-subconscious-key-env');
     return {
       identity: identityEl ? String(identityEl.value || '').trim() : null,
-      taskStatus: taskStatusEl ? String(taskStatusEl.value || '').trim().toLowerCase() : null,
-      taskId: taskIdEl ? String(taskIdEl.value || '').trim() : null,
-      taskOwner: taskOwnerEl ? String(taskOwnerEl.value || '').trim() : null,
-      taskWaitingReason: taskWaitingReasonEl ? String(taskWaitingReasonEl.value || '').trim() : null,
-      taskWaitingUntil: taskWaitingUntilEl ? String(taskWaitingUntilEl.value || '').trim() : null,
       owner: ownerEl ? String(ownerEl.value || '').trim() : null,
       projectImportSource: projectImportSourceEl ? String(projectImportSourceEl.value || '').trim() : null,
       projectImportName: projectImportNameEl ? String(projectImportNameEl.value || '').trim() : null,
@@ -4101,13 +4091,7 @@ th{
     const identityEl = document.getElementById('detail-identity-input');
     if (!identityEl) return false;
     const draft = getCurrentDetailDraft();
-    const task = (detail.task && typeof detail.task === 'object') ? detail.task : null;
     if ((draft.identity || '') !== String(detail.identity || '').trim()) return true;
-    if ((draft.taskStatus || '') !== String(task?.status || '').trim()) return true;
-    if ((draft.taskId || '') !== String(task?.id || '').trim()) return true;
-    if ((draft.taskOwner || '') !== String(task?.owner || '').trim()) return true;
-    if ((draft.taskWaitingReason || '') !== String(task?.waiting_reason || '').trim()) return true;
-    if ((draft.taskWaitingUntil || '') !== String(task?.waiting_until || '').trim()) return true;
     if (draft.supervisorEnabled !== null && draft.supervisorEnabled !== (supervisorControl?.enabled === true)) return true;
     if (draft.guidance !== null && draft.guidance !== String(subconsciousDetail?.guidance?.text || subconsciousDetail?.manualGuidance?.text || '').trim()) return true;
     if (draft.subconsciousRuntimeEnabled !== null && draft.subconsciousRuntimeEnabled !== (subconsciousDetail?.runtime?.desiredEnabled === true)) return true;
@@ -4150,11 +4134,6 @@ th{
   function bindDetailEditors() {
     const ids = [
       'detail-identity-input',
-      'detail-task-status',
-      'detail-task-id',
-      'detail-task-owner',
-      'detail-task-waiting-reason',
-      'detail-task-waiting-until',
       'detail-owner',
       'detail-project-import-source',
       'detail-project-import-name',
