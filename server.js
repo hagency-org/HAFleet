@@ -1763,6 +1763,15 @@ app.post('/api/agents/create', async (req, res) => {
   const body = req.body || {};
   if (!body.name || !/^[\w\-]+$/.test(body.name)) return res.status(400).json({ error: 'invalid agent name' });
   try {
+    const check = await backendFetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(body.name)}`);
+    if (check.ok) {
+      const existing = await check.json();
+      if (existing && existing.name) {
+        return res.status(409).json({ error: 'agent already exists' });
+      }
+    }
+  } catch {}
+  try {
     const r = await backendFetch(`${BACKEND_V2_URL}/api/agents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -6973,7 +6982,7 @@ window.submitNewAgent = async function() {
     var data = await r.json().catch(function() { return {}; });
     if (!r.ok) throw new Error(data.error || 'creation failed (HTTP ' + r.status + ')');
 
-    document.getElementById('na-status').textContent = 'Agent "' + name + '" created. Launch via: agentchat up-v1 ' + name;
+    document.getElementById('na-status').textContent = 'Agent "' + name + '" created. Launch via: agentchat up-v1 ' + name + ' ' + fw;
     document.getElementById('na-status').style.color = '#34d399';
     setTimeout(function() { closeNewAgentModal(); }, 2500);
   } catch (e) {
