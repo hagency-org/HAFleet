@@ -5969,7 +5969,7 @@ th{
       + '</tr></thead><tbody>';
     for (const t of sorted) {
       const cc = Array.isArray(t.comments) ? t.comments.length : 0;
-      html += '<tr onclick="taskShowDetail(\'' + esc(t.id) + '\')">'
+      html += '<tr onclick="taskShowDetail(\\'' + esc(t.id) + '\\')">'
         + '<td><span class="task-status-badge task-status-' + esc(t.status) + '">' + esc(t.status) + '</span></td>'
         + '<td><span class="task-priority-badge task-priority-' + esc(t.priority) + '">' + esc(t.priority || 'p2').toUpperCase() + '</span></td>'
         + '<td>' + esc(t.title || '-') + '</td>'
@@ -5998,7 +5998,7 @@ th{
       + '<strong>Created:</strong> ' + esc(fmtTaskTime(task.created_at))
       + '</div>'
       + '<div class="task-detail-meta">'
-      + '<strong>Status:</strong> <select class="task-status-select" id="task-detail-status" onchange="taskChangeStatus(\'' + esc(task.id) + '\')">';
+      + '<strong>Status:</strong> <select class="task-status-select" id="task-detail-status" onchange="taskChangeStatus(\\'' + esc(task.id) + '\\')">';
     for (const s of statusOptions) {
       html += '<option value="' + s + '"' + (task.status === s ? ' selected' : '') + '>' + s + '</option>';
     }
@@ -6026,11 +6026,11 @@ th{
     }
     html += '<div class="task-comment-form">'
       + '<textarea id="task-comment-input" class="detail-textarea" placeholder="Add a comment..."></textarea>'
-      + '<button class="detail-save" onclick="taskAddComment(\'' + esc(task.id) + '\')">Post</button>'
+      + '<button class="detail-save" onclick="taskAddComment(\\'' + esc(task.id) + '\\')">Post</button>'
       + '</div></div>';
     // Delete button
     html += '<div class="detail-actions" style="margin-top:14px">'
-      + '<button class="detail-save" style="background:rgba(255,100,100,0.1);border-color:rgba(255,100,100,0.3);color:rgba(255,140,140,0.9)" onclick="taskDelete(\'' + esc(task.id) + '\')">Delete Task</button>'
+      + '<button class="detail-save" style="background:rgba(255,100,100,0.1);border-color:rgba(255,100,100,0.3);color:rgba(255,140,140,0.9)" onclick="taskDelete(\\'' + esc(task.id) + '\\')">Delete Task</button>'
       + '</div>';
     root.innerHTML = html;
   }
@@ -6760,7 +6760,7 @@ body.page-hidden #reminder-panel.has-items{
 .log-entry .from{color:#00f0ff}
 .log-entry .to{color:#a855f7}
 .log-entry .arrow{color:rgba(0,240,255,0.3)}
-.log-entry .payload{color:rgba(255,255,255,0.3)}
+.log-entry .payload{color:rgba(255,255,255,0.3);overflow:hidden;text-overflow:ellipsis}
 
 /* Mobile FABs (hidden on desktop) */
 .mobile-fab{display:none}
