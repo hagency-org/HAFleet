@@ -1188,6 +1188,77 @@ fi
 enforce_workspace_uniqueness "$AGENT_PATH"
 ensure_claude_project_trust
 
+# ── Generate per-agent .mcp.json ──────────────────────────────────────
+# Codex sandboxes MCP subprocess env (strips AGENT_CHAT_* vars).
+# Bake all required env vars into .mcp.json so the MCP server works
+# regardless of which framework spawns it.
+ensure_agent_mcp_config() {
+  local mcp_json="$AGENT_PATH/.mcp.json"
+  local mcp_server_js="$BASE_DIR/mcp-server.js"
+  if [ ! -f "$mcp_server_js" ]; then
+    echo "Warning: mcp-server.js not found at $mcp_server_js, skipping .mcp.json generation" >&2
+    return
+  fi
+  local state_dir="${SAVED_STATE_DIR:-}"
+  MCP_JSON="$mcp_json" MCP_SERVER_JS="$mcp_server_js" MCP_SERVER_NAME="$MCP_SERVER_NAME" \
+    AGENT_NAME_VAL="$NAME" BACKEND_URL="$BACKEND_URL" BACKEND_PORT="$BACKEND_PORT" \
+    SERVER_ID="$SERVER_ID" STATE_DIR="$state_dir" \
+    RUNTIME_DIR_VAL="$RUNTIME_DIR" \
+    python3 - <<'PY'
+import json
+import os
+
+mcp_json = os.environ["MCP_JSON"]
+mcp_server_js = os.environ["MCP_SERVER_JS"]
+server_name = os.environ.get("MCP_SERVER_NAME", "") or "agent-chat"
+
+env = {}
+env["AGENT_NAME"] = os.environ.get("AGENT_NAME_VAL", "")
+env["AGENT_CHAT_API"] = os.environ.get("BACKEND_URL", "")
+env["AGENT_CHAT_BACKEND_PORT"] = os.environ.get("BACKEND_PORT", "")
+env["AGENT_CHAT_MCP_SERVER_NAME"] = server_name
+server_id = os.environ.get("SERVER_ID", "")
+if server_id:
+    env["AGENT_CHAT_SERVER"] = server_id
+state_dir = os.environ.get("STATE_DIR", "")
+if state_dir:
+    env["AGENTCHAT_AGENT_STATE_DIR"] = state_dir
+runtime_dir = os.environ.get("RUNTIME_DIR_VAL", "")
+if runtime_dir:
+    env["AGENT_CHAT_RUNTIME_DIR"] = runtime_dir
+
+# Remove empty values
+env = {k: v for k, v in env.items() if v}
+
+config = {
+    "mcpServers": {
+        server_name: {
+            "command": "node",
+            "args": [mcp_server_js],
+            "env": env,
+        }
+    }
+}
+
+# Merge with existing .mcp.json if present (preserve other servers)
+if os.path.exists(mcp_json):
+    try:
+        with open(mcp_json) as f:
+            existing = json.load(f)
+        if isinstance(existing.get("mcpServers"), dict):
+            existing["mcpServers"][server_name] = config["mcpServers"][server_name]
+            config = existing
+    except (json.JSONDecodeError, OSError):
+        pass
+
+with open(mcp_json, "w") as f:
+    json.dump(config, f, indent=2)
+    f.write("\n")
+PY
+  echo "  MCP config: $mcp_json"
+}
+ensure_agent_mcp_config
+
 # ── Save meta ─────────────────────────────────────────────────────────
 mkdir -p "$AGENT_DATA"
 mkdir -p "$TMP_RUNTIME_DIR"

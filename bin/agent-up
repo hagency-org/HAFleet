@@ -1316,7 +1316,7 @@ ensure_agent_mcp_config() {
   local state_dir="${SAVED_STATE_DIR:-}"
   MCP_JSON="$mcp_json" MCP_SERVER_JS="$mcp_server_js" MCP_SERVER_NAME="$MCP_SERVER_NAME" \
     AGENT_NAME_VAL="$NAME" BACKEND_URL="$BACKEND_URL" BACKEND_PORT="$BACKEND_PORT" \
-    API_TOKEN_VAL="$API_TOKEN" SERVER_ID="$SERVER_ID" STATE_DIR="$state_dir" \
+    SERVER_ID="$SERVER_ID" STATE_DIR="$state_dir" \
     RUNTIME_DIR_VAL="$RUNTIME_DIR" \
     python3 - <<'PY'
 import json
@@ -1331,9 +1331,6 @@ env["AGENT_NAME"] = os.environ.get("AGENT_NAME_VAL", "")
 env["AGENT_CHAT_API"] = os.environ.get("BACKEND_URL", "")
 env["AGENT_CHAT_BACKEND_PORT"] = os.environ.get("BACKEND_PORT", "")
 env["AGENT_CHAT_MCP_SERVER_NAME"] = server_name
-api_token = os.environ.get("API_TOKEN_VAL", "")
-if api_token:
-    env["API_TOKEN"] = api_token
 server_id = os.environ.get("SERVER_ID", "")
 if server_id:
     env["AGENT_CHAT_SERVER"] = server_id
