@@ -1256,6 +1256,37 @@ with open(mcp_json, "w") as f:
     f.write("\n")
 PY
   echo "  MCP config: $mcp_json"
+
+  # Also write mcp-env.json to a well-known path so the MCP server can
+  # load env vars even when the spawner (Codex) strips them.
+  local mcp_env_dir="$HOME/.agentchat/mcp-env"
+  mkdir -p "$mcp_env_dir"
+  local mcp_env_file="$mcp_env_dir/${NAME}.json"
+  MCP_ENV_FILE="$mcp_env_file" AGENT_NAME_VAL="$NAME" BACKEND_URL="$BACKEND_URL" \
+    BACKEND_PORT="$BACKEND_PORT" SERVER_ID="$SERVER_ID" STATE_DIR="$state_dir" \
+    RUNTIME_DIR_VAL="$RUNTIME_DIR" MCP_SERVER_NAME="$MCP_SERVER_NAME" \
+    python3 - <<'PY'
+import json, os
+env = {}
+env["AGENT_NAME"] = os.environ.get("AGENT_NAME_VAL", "")
+env["AGENT_CHAT_API"] = os.environ.get("BACKEND_URL", "")
+env["AGENT_CHAT_BACKEND_PORT"] = os.environ.get("BACKEND_PORT", "")
+env["AGENT_CHAT_MCP_SERVER_NAME"] = os.environ.get("MCP_SERVER_NAME", "") or "agent-chat"
+sid = os.environ.get("SERVER_ID", "")
+if sid:
+    env["AGENT_CHAT_SERVER"] = sid
+sd = os.environ.get("STATE_DIR", "")
+if sd:
+    env["AGENTCHAT_AGENT_STATE_DIR"] = sd
+rd = os.environ.get("RUNTIME_DIR_VAL", "")
+if rd:
+    env["AGENT_CHAT_RUNTIME_DIR"] = rd
+env = {k: v for k, v in env.items() if v}
+with open(os.environ["MCP_ENV_FILE"], "w") as f:
+    json.dump(env, f, indent=2)
+    f.write("\n")
+PY
+  echo "  MCP env: $mcp_env_file"
 }
 ensure_agent_mcp_config
 
