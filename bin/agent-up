@@ -1628,17 +1628,19 @@ elif [ "$TYPE" = "codex" ]; then
   [ -n "$MODEL" ] && CODEX_FLAGS="$CODEX_FLAGS --model $MODEL"
   [ -n "$EXTRA_ARGS" ] && CODEX_FLAGS="$CODEX_FLAGS $EXTRA_ARGS"
   # Inject MCP env vars via -c flags so Codex passes them to the MCP subprocess.
-  # Codex strips env vars from MCP subprocesses but honors -c config overrides.
-  toml_quote() {
-    local v="$1"
-    v="${v//\\/\\\\}"    # escape backslashes
-    v="${v//\"/\\\"}"    # escape double quotes
-    printf '"%s"' "$v"
-  }
+  # Codex strips env vars but honors -c config overrides parsed as TOML.
+  # Must target the managed-mcp.json server name (agent-chat), not $MCP_SERVER_NAME
+  # which may differ (e.g. agentchat-dev in dev .env).
+  CODEX_MCP_NAME="agent-chat"
   codex_mcp_env() {
     local key="$1" val="$2"
     [ -z "$val" ] && return
-    CODEX_FLAGS="$CODEX_FLAGS -c mcp_servers.${MCP_SERVER_NAME}.env.${key}=$(toml_quote "$val")"
+    # TOML needs string values in double quotes. Single-quote the entire -c
+    # argument so the TOML quotes survive the pane's shell parsing.
+    local toml_val
+    toml_val="${val//\\/\\\\}"    # escape backslashes for TOML
+    toml_val="${toml_val//\"/\\\"}"    # escape double quotes for TOML
+    CODEX_FLAGS="$CODEX_FLAGS -c 'mcp_servers.${CODEX_MCP_NAME}.env.${key}=\"${toml_val}\"'"
   }
   codex_mcp_env AGENT_NAME "$NAME"
   codex_mcp_env AGENT_CHAT_API "$BACKEND_URL"
