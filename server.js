@@ -3808,10 +3808,6 @@ th{
             <div id="settings-systems" class="split-grid"></div>
           </article>
           <article class="panel">
-            <div class="panel-label">Canonical Task</div>
-            <div id="task-current"></div>
-          </article>
-          <article class="panel">
             <div class="panel-label">Ownership</div>
             <div id="settings-owner"></div>
           </article>
@@ -4824,99 +4820,13 @@ th{
     document.getElementById('overview-projects').innerHTML = projectBits.join('');
   }
 
-  function normalizeTaskDraftTimestamp(value) {
-    const raw = String(value || '').trim();
-    if (!raw) return null;
-    const ms = Date.parse(raw);
-    if (!Number.isFinite(ms)) return null;
-    return new Date(ms).toISOString();
-  }
-
-  function buildDetailTaskPayload(detail) {
-    const statusEl = document.getElementById('detail-task-status');
-    const idEl = document.getElementById('detail-task-id');
-    const ownerEl = document.getElementById('detail-task-owner');
-    const waitingReasonEl = document.getElementById('detail-task-waiting-reason');
-    const waitingUntilEl = document.getElementById('detail-task-waiting-until');
-    if (!statusEl || !idEl || !ownerEl || !waitingReasonEl || !waitingUntilEl) {
-      return { error: 'task editor unavailable' };
-    }
-    const status = String(statusEl.value || '').trim().toLowerCase();
-    const id = String(idEl.value || '').trim();
-    const owner = String(ownerEl.value || '').trim() || String(detail?.name || '').trim();
-    const waitingReason = String(waitingReasonEl.value || '').trim();
-    const waitingUntilRaw = String(waitingUntilEl.value || '').trim();
-    if (!status) {
-      if (!id) {
-        return { task: null };
-      }
-      return { error: 'Choose a task status or clear all task fields.' };
-    }
-    if (!id) return { error: 'Task id is required.' };
-    if (!owner) return { error: 'Task owner is required.' };
-    const waitingUntil = normalizeTaskDraftTimestamp(waitingUntilRaw);
-    if (status === 'waiting') {
-      if (!waitingReason) return { error: 'Waiting reason is required for waiting tasks.' };
-      if (!waitingUntil) return { error: 'Waiting until must be a valid timestamp.' };
-    } else if (waitingUntilRaw && !waitingUntil) {
-      return { error: 'Waiting until must be a valid timestamp.' };
-    }
-    const now = new Date().toISOString();
-    return {
-      task: {
-        id,
-        owner,
-        status,
-        updated_at: now,
-        heartbeat_at: now,
-        waiting_reason: status === 'waiting' ? waitingReason : null,
-        waiting_until: status === 'waiting' ? waitingUntil : null,
-      },
-    };
-  }
-
-  function renderTaskEditor(detail) {
-    const task = (detail?.task && typeof detail.task === 'object') ? detail.task : null;
-    const taskStatus = String(task?.status || '');
-    const waitingReason = String(task?.waiting_reason || '');
-    const waitingUntil = String(task?.waiting_until || '');
-    const hasAdvanced = waitingReason || waitingUntil;
-    return '<div class="field-label">Task Id</div>'
-      + '<input id="detail-task-id" class="detail-input" value="' + esc(task?.id || '').replace(/"/g, '&quot;') + '" placeholder="e.g. implement-auth">'
-      + '<div class="field-label">Status</div>'
-      + '<select id="detail-task-status" class="detail-input" onchange="toggleTaskWaiting()">'
-      + '<option value="">—</option>'
-      + '<option value="active"' + (taskStatus === 'active' ? ' selected' : '') + '>active</option>'
-      + '<option value="waiting"' + (taskStatus === 'waiting' ? ' selected' : '') + '>waiting</option>'
-      + '<option value="blocked"' + (taskStatus === 'blocked' ? ' selected' : '') + '>blocked</option>'
-      + '<option value="done"' + (taskStatus === 'done' ? ' selected' : '') + '>done</option>'
-      + '</select>'
-      + '<div id="task-waiting-fields" style="' + (taskStatus === 'waiting' ? '' : 'display:none') + '">'
-      + '<div class="field-label">Waiting Reason</div>'
-      + '<textarea id="detail-task-waiting-reason" class="detail-textarea" style="min-height:60px" placeholder="Why is this task waiting?">' + esc(waitingReason) + '</textarea>'
-      + '<div class="field-label">Waiting Until</div>'
-      + '<input id="detail-task-waiting-until" class="detail-input" value="' + esc(waitingUntil).replace(/"/g, '&quot;') + '" placeholder="2026-03-11T14:00:00.000Z">'
-      + '</div>'
-      + '<details class="task-advanced"' + (hasAdvanced ? '' : '') + '>'
-      + '<summary class="task-advanced-toggle">Advanced</summary>'
-      + '<div class="field-label">Owner</div>'
-      + '<input id="detail-task-owner" class="detail-input" value="' + esc(task?.owner || '').replace(/"/g, '&quot;') + '" placeholder="' + esc(detail?.name || 'agent').replace(/"/g, '&quot;') + '">'
-      + '<div class="read-block"><strong>updated_at</strong><br><span class="mono">' + esc(task?.updated_at || '-') + '</span><br><br><strong>heartbeat_at</strong><br><span class="mono">' + esc(task?.heartbeat_at || '-') + '</span></div>'
-      + '</details>'
-      + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailTask()">Save Task</button>'
-      + (task ? '<button class="detail-save" style="background:rgba(255,100,100,0.1);border-color:rgba(255,100,100,0.3);color:rgba(255,140,140,0.9)" onclick="clearDetailTask()">Clear</button>' : '')
-      + '</div>';
-  }
-
   function renderSettings(detail, model) {
     const identityRoot = document.getElementById('settings-identity');
-    const taskRoot = document.getElementById('task-current');
     const guidanceRoot = document.getElementById('settings-guidance');
     const systemsRoot = document.getElementById('settings-systems');
     const ownerRoot = document.getElementById('settings-owner');
     if (!detail || detail.error) {
       identityRoot.innerHTML = '<div class="error-state">Agent detail unavailable.</div>';
-      if (taskRoot) taskRoot.innerHTML = '<div class="error-state">Task unavailable.</div>';
       guidanceRoot.innerHTML = '<div class="error-state">Guidance unavailable.</div>';
       const cfgRoot = document.getElementById('settings-configuration');
       if (cfgRoot) cfgRoot.innerHTML = '<div class="error-state">Configuration unavailable.</div>';
@@ -4929,7 +4839,6 @@ th{
       + '<div class="field-label">Identity</div>'
       + '<input id="detail-identity-input" class="detail-input" value="' + esc(detail.identity || '').replace(/"/g, '&quot;') + '" placeholder="One-line external description">'
       + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailIdentity()">Save Identity</button></div>';
-    taskRoot.innerHTML = renderTaskEditor(detail);
 
     const subconsciousWritable = detail.v1 === true;
     const guidanceText = String(model?.guidanceText || '');
@@ -5583,36 +5492,6 @@ th{
     }).join('');
   }
 
-  async function saveDetailTask() {
-    if (detailSaveInFlight) return;
-    const payload = buildDetailTaskPayload(latestAgentDetail);
-    if (payload.error) {
-      setDetailStatus(payload.error, 'error');
-      return;
-    }
-    const targetPath = latestAgentDetail?.v1
-      ? ('/api/agents/' + encodeURIComponent(agent) + '/home-metadata')
-      : ('/api/agents/' + encodeURIComponent(agent));
-    detailSaveInFlight = true;
-    setDetailStatus('Saving canonical task...', 'warn');
-    try {
-      const res = await fetch(targetPath, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task: payload.task }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.error) throw new Error(data?.error || 'task save failed');
-      setDetailStatus('Canonical task saved.', 'ok');
-      detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 2000);
-      await refresh(true);
-    } catch (e) {
-      setDetailStatus('Task save failed: ' + e.message, 'error');
-    } finally {
-      detailSaveInFlight = false;
-    }
-  }
-
   async function saveDetailIdentity() {
     if (detailSaveInFlight) return;
     const input = document.getElementById('detail-identity-input');
@@ -6029,39 +5908,6 @@ th{
     }
   }
 
-  function toggleTaskWaiting() {
-    const el = document.getElementById('task-waiting-fields');
-    const sel = document.getElementById('detail-task-status');
-    if (el && sel) el.style.display = sel.value === 'waiting' ? '' : 'none';
-  }
-  async function clearDetailTask() {
-    if (detailSaveInFlight) return;
-    const agent = latestAgentDetail?.name || window.location.hash.slice(1);
-    const targetPath = latestAgentDetail?.v1
-      ? ('/api/agents/' + encodeURIComponent(agent) + '/home-metadata')
-      : ('/api/agents/' + encodeURIComponent(agent));
-    detailSaveInFlight = true;
-    setDetailStatus('Clearing task...', 'warn');
-    try {
-      const res = await fetch(targetPath, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task: null }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.error) throw new Error(data?.error || 'task clear failed');
-      setDetailStatus('Task cleared.', 'ok');
-      detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 2000);
-      await refresh(true);
-    } catch (e) {
-      setDetailStatus('Clear failed: ' + e.message, 'error');
-    } finally {
-      detailSaveInFlight = false;
-    }
-  }
-  window.toggleTaskWaiting = toggleTaskWaiting;
-  window.clearDetailTask = clearDetailTask;
-  window.saveDetailTask = saveDetailTask;
   window.saveDetailIdentity = saveDetailIdentity;
   window.saveDetailOwner = saveDetailOwner;
   window.importManagedProject = importManagedProject;
