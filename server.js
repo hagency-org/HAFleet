@@ -2289,6 +2289,43 @@ app.delete('/api/agents/:name', async (req, res) => {
   }
 });
 
+// ── Framework Presets proxy APIs ─────────────────────────────────────
+app.get('/api/framework-presets', async (_req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/framework-presets`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.post('/api/framework-presets', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/framework-presets`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.put('/api/framework-presets/:id', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/framework-presets/${encodeURIComponent(req.params.id)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.delete('/api/framework-presets/:id', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/framework-presets/${encodeURIComponent(req.params.id)}`, { method: 'DELETE' });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
 // ── Task CRUD proxy APIs ─────────────────────────────────────────────
 app.get('/api/tasks', async (req, res) => {
   try {
@@ -3763,6 +3800,10 @@ th{
             <div id="settings-configuration"></div>
           </article>
           <article class="panel">
+            <div class="panel-label">Framework Presets</div>
+            <div id="settings-presets"></div>
+          </article>
+          <article class="panel">
             <div class="panel-label">System Controls</div>
             <div id="settings-systems" class="split-grid"></div>
           </article>
@@ -3987,6 +4028,7 @@ th{
   let detailSaveInFlight = false;
   let activeTab = 'overview';
   let dangerMode = null;
+  let _presetCache = [];
 
   function setDetailStatus(message, kind = 'muted') {
     const el = document.getElementById('detail-status');
@@ -4905,13 +4947,33 @@ th{
     const rp = detail.runtimeProfile || {};
     const pri = rp.primary || {};
     const sup = rp.supervisor || {};
+    function matchPreset(role) {
+      if (!role || !role.framework) return '';
+      for (const p of _presetCache) {
+        if (p.framework === role.framework && p.provider === (role.provider || null) && p.model === (role.model || null)
+            && p.reasoning === (role.reasoning || null) && (p.extraArgs || null) === (role.extraArgs || null)) return p.id;
+      }
+      return '';
+    }
+    const priPreset = matchPreset(pri);
+    const supPreset = matchPreset(sup);
+    function presetOpts(selectedId) {
+      let h = '<option value="">(none)</option>';
+      for (const p of _presetCache) {
+        h += '<option value="' + esc(p.id) + '"' + (p.id === selectedId ? ' selected' : '') + '>' + esc(p.name) + '</option>';
+      }
+      h += '<option value="__custom__">Custom...</option>';
+      return h;
+    }
     const fwOpts = function(sel) {
       return '<option value="">(not set)</option>'
         + '<option value="claude"' + (sel === 'claude' ? ' selected' : '') + '>claude</option>'
         + '<option value="codex"' + (sel === 'codex' ? ' selected' : '') + '>codex</option>';
     };
-    const rpFields = function(prefix, role) {
-      return '<div class="field-label">Framework</div>'
+    const rpCustomFields = function(prefix, role, presetId) {
+      const hidden = presetId && presetId !== '__custom__' ? ' style="display:none"' : '';
+      return '<div id="cfg-' + prefix + '-custom"' + hidden + '>'
+        + '<div class="field-label">Framework</div>'
         + '<select id="cfg-' + prefix + '-framework" class="detail-input">' + fwOpts(role.framework || '') + '</select>'
         + '<div class="field-label">Provider</div>'
         + '<input id="cfg-' + prefix + '-provider" class="detail-input" value="' + esc(role.provider || '').replace(/"/g, '&quot;') + '" placeholder="e.g. anthropic">'
@@ -4921,13 +4983,20 @@ th{
         + '<input id="cfg-' + prefix + '-reasoning" class="detail-input" value="' + esc(role.reasoning || '').replace(/"/g, '&quot;') + '" placeholder="e.g. extended">'
         + '<div class="field-label">Extra Args</div>'
         + '<input id="cfg-' + prefix + '-extraArgs" class="detail-input" value="' + esc(role.extraArgs || '').replace(/"/g, '&quot;') + '" placeholder="e.g. --verbose --max-tokens 4096">'
-        + '<div class="detail-hint" style="margin-top:2px;font-size:10px">Only CLI flags allowed. Shell operators are rejected.</div>';
+        + '<div class="detail-hint" style="margin-top:2px;font-size:10px">Only CLI flags allowed. Shell operators are rejected.</div>'
+        + '</div>';
     };
     configRoot.innerHTML =
-      '<div class="detail-hint">Per-agent runtime profile and role. Runtime profile changes take effect after agent restart.</div>'
+      '<div class="detail-hint">Per-agent runtime profile and role. Select a preset or choose Custom for raw fields. Changes take effect after restart.</div>'
       + '<div id="cfg-restart-banner" class="error-state" style="display:none;margin-bottom:8px;background:rgba(234,179,8,0.12);color:rgba(234,179,8,0.95);border-left:3px solid rgba(234,179,8,0.5);padding:6px 10px">Runtime profile changes take effect after agent restart. The running agent continues using its current configuration until restarted.</div>'
-      + '<div class="panel"><div class="panel-label">Primary Role</div>' + rpFields('primary', pri) + '</div>'
-      + '<div class="panel"><div class="panel-label">Supervisor Role</div>' + rpFields('supervisor', sup) + '</div>'
+      + '<div class="panel"><div class="panel-label">Primary Role</div>'
+      + '<div class="field-label">Preset</div>'
+      + '<select id="cfg-primary-preset" class="detail-input" onchange="onPresetChange(\\'primary\\')">' + presetOpts(priPreset || (pri.framework ? '__custom__' : '')) + '</select>'
+      + rpCustomFields('primary', pri, priPreset) + '</div>'
+      + '<div class="panel"><div class="panel-label">Supervisor Role</div>'
+      + '<div class="field-label">Preset</div>'
+      + '<select id="cfg-supervisor-preset" class="detail-input" onchange="onPresetChange(\\'supervisor\\')">' + presetOpts(supPreset || (sup.framework ? '__custom__' : '')) + '</select>'
+      + rpCustomFields('supervisor', sup, supPreset) + '</div>'
       + '<div class="field-label">Agent Role</div>'
       + '<input id="cfg-role" class="detail-input" value="' + esc(detail.role || '').replace(/"/g, '&quot;') + '" placeholder="Agent role description">'
       + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailConfiguration()">Save Configuration</button></div>';
@@ -4959,7 +5028,7 @@ th{
     const runtimeContractHtml = subconsciousWritable
       ? (
         '<div class="panel">'
-        + '<div class="panel-label">Local Runtime</div>'
+        + '<div class="panel-label">Subconscious LLM</div>'
         + (model?.runtimeDisabledReason ? '<div class="error-state" style="margin-bottom:8px">' + esc(model.runtimeDisabledReason) + '</div>' : '')
         + '<label class="detail-toggle"><input id="detail-subconscious-runtime-enabled" type="checkbox" ' + (model?.runtimeDesiredEnabled ? 'checked' : '') + '>Enabled</label>'
         + '<div class="field-label">Provider</div>'
@@ -4975,6 +5044,35 @@ th{
       )
       : '';
     systemsRoot.innerHTML = supervisorControlHtml + subconsciousControlHtml + runtimeContractHtml;
+
+    const presetsRoot = document.getElementById('settings-presets');
+    if (presetsRoot) {
+      let ph = '<div class="detail-hint">Named bundles of framework/provider/model settings. Used in Configuration above.</div>';
+      if (_presetCache.length === 0) {
+        ph += '<div class="task-empty-state">No presets defined yet.</div>';
+      } else {
+        ph += '<table class="task-list-table"><thead><tr><th>Name</th><th>Framework</th><th>Model</th><th></th></tr></thead><tbody>';
+        for (const p of _presetCache) {
+          ph += '<tr>'
+            + '<td><strong>' + esc(p.name) + '</strong></td>'
+            + '<td>' + esc(p.framework || '-') + '</td>'
+            + '<td>' + esc(p.model || '-') + '</td>'
+            + '<td><button class="detail-save" style="font-size:10px;padding:2px 8px" onclick="deletePreset(\\'' + esc(p.id) + '\\')">Del</button></td>'
+            + '</tr>';
+        }
+        ph += '</tbody></table>';
+      }
+      ph += '<details class="task-advanced" style="margin-top:10px"><summary class="task-advanced-toggle">Add Preset</summary>'
+        + '<div class="field-label">Name</div><input id="preset-name" class="detail-input" placeholder="e.g. Claude Opus">'
+        + '<div class="field-label">Framework</div><select id="preset-framework" class="detail-input"><option value="">—</option><option value="claude">claude</option><option value="codex">codex</option></select>'
+        + '<div class="field-label">Provider</div><input id="preset-provider" class="detail-input" placeholder="e.g. anthropic">'
+        + '<div class="field-label">Model</div><input id="preset-model" class="detail-input" placeholder="e.g. claude-sonnet-4-20250514">'
+        + '<div class="field-label">Reasoning</div><input id="preset-reasoning" class="detail-input" placeholder="e.g. extended">'
+        + '<div class="field-label">Extra Args</div><input id="preset-extraArgs" class="detail-input" placeholder="e.g. --verbose">'
+        + '<div class="detail-actions"><button class="detail-save" onclick="createPreset()">Create Preset</button></div>'
+        + '</details>';
+      presetsRoot.innerHTML = ph;
+    }
 
     const managedProjects = Array.isArray(detail?.managedProjects) ? detail.managedProjects : [];
     const projectRows = managedProjects.length
@@ -5810,42 +5908,100 @@ th{
     return cleaned;
   }
 
+  function onPresetChange(prefix) {
+    const sel = document.getElementById('cfg-' + prefix + '-preset');
+    const custom = document.getElementById('cfg-' + prefix + '-custom');
+    if (!sel || !custom) return;
+    if (sel.value === '__custom__' || sel.value === '') {
+      custom.style.display = '';
+    } else {
+      custom.style.display = 'none';
+      const p = _presetCache.find(pp => pp.id === sel.value);
+      if (p) {
+        const fw = document.getElementById('cfg-' + prefix + '-framework');
+        const pv = document.getElementById('cfg-' + prefix + '-provider');
+        const md = document.getElementById('cfg-' + prefix + '-model');
+        const rs = document.getElementById('cfg-' + prefix + '-reasoning');
+        const ea = document.getElementById('cfg-' + prefix + '-extraArgs');
+        if (fw) fw.value = p.framework || '';
+        if (pv) pv.value = p.provider || '';
+        if (md) md.value = p.model || '';
+        if (rs) rs.value = p.reasoning || '';
+        if (ea) ea.value = p.extraArgs || '';
+      }
+    }
+  }
+  window.onPresetChange = onPresetChange;
+
+  async function createPreset() {
+    const name = ((document.getElementById('preset-name') || {}).value || '').trim();
+    if (!name) { setDetailStatus('Preset name is required.', 'error'); return; }
+    const body = {
+      name,
+      framework: ((document.getElementById('preset-framework') || {}).value || '').trim() || null,
+      provider: ((document.getElementById('preset-provider') || {}).value || '').trim() || null,
+      model: ((document.getElementById('preset-model') || {}).value || '').trim() || null,
+      reasoning: ((document.getElementById('preset-reasoning') || {}).value || '').trim() || null,
+      extraArgs: ((document.getElementById('preset-extraArgs') || {}).value || '').trim() || null,
+    };
+    try {
+      const r = await fetch('/api/framework-presets', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'create failed');
+      setDetailStatus('Preset created: ' + (data.preset?.name || ''), 'ok');
+      detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 2000);
+      await refresh(true);
+    } catch (e) { setDetailStatus('Preset create failed: ' + e.message, 'error'); }
+  }
+
+  async function deletePreset(id) {
+    if (!confirm('Delete this preset?')) return;
+    try {
+      const r = await fetch('/api/framework-presets/' + encodeURIComponent(id), { method: 'DELETE' });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'delete failed');
+      setDetailStatus('Preset deleted.', 'ok');
+      detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 2000);
+      await refresh(true);
+    } catch (e) { setDetailStatus('Preset delete failed: ' + e.message, 'error'); }
+  }
+
+  window.createPreset = createPreset;
+  window.deletePreset = deletePreset;
+
+  function resolveRoleFromUI(prefix) {
+    const presetSel = document.getElementById('cfg-' + prefix + '-preset');
+    const presetId = presetSel ? presetSel.value : '';
+    if (presetId && presetId !== '__custom__') {
+      const p = _presetCache.find(pp => pp.id === presetId);
+      if (p) return { framework: p.framework, provider: p.provider, model: p.model, reasoning: p.reasoning, extraArgs: p.extraArgs || null };
+    }
+    const framework = ((document.getElementById('cfg-' + prefix + '-framework') || {}).value || '').trim() || null;
+    const provider = ((document.getElementById('cfg-' + prefix + '-provider') || {}).value || '').trim() || null;
+    const model = ((document.getElementById('cfg-' + prefix + '-model') || {}).value || '').trim() || null;
+    const reasoning = ((document.getElementById('cfg-' + prefix + '-reasoning') || {}).value || '').trim() || null;
+    const extraArgs = sanitizeExtraArgs(((document.getElementById('cfg-' + prefix + '-extraArgs') || {}).value));
+    if (extraArgs === '__REJECTED__') return '__REJECTED__';
+    if (!framework && !provider && !model && !reasoning && !extraArgs) return null;
+    if (framework && !CFG_VALID_FRAMEWORKS.includes(framework)) return '__INVALID_FW__';
+    return { framework, provider, model, reasoning, extraArgs };
+  }
+
   async function saveDetailConfiguration() {
     if (detailSaveInFlight) return;
-    const primaryFrameworkEl = document.getElementById('cfg-primary-framework');
-    const supervisorFrameworkEl = document.getElementById('cfg-supervisor-framework');
-    if (!primaryFrameworkEl) return;
 
-    const primaryFramework = primaryFrameworkEl.value || null;
-    const supervisorFramework = supervisorFrameworkEl ? (supervisorFrameworkEl.value || null) : null;
-    if (primaryFramework && !CFG_VALID_FRAMEWORKS.includes(primaryFramework)) {
-      setDetailStatus('Invalid primary framework — must be claude or codex.', 'error');
-      return;
-    }
-    if (supervisorFramework && !CFG_VALID_FRAMEWORKS.includes(supervisorFramework)) {
-      setDetailStatus('Invalid supervisor framework — must be claude or codex.', 'error');
-      return;
-    }
-
-    const primaryExtraArgs = sanitizeExtraArgs((document.getElementById('cfg-primary-extraArgs') || {}).value);
-    const supervisorExtraArgs = sanitizeExtraArgs((document.getElementById('cfg-supervisor-extraArgs') || {}).value);
-    if (primaryExtraArgs === '__REJECTED__' || supervisorExtraArgs === '__REJECTED__') {
+    const primary = resolveRoleFromUI('primary');
+    const supervisor = resolveRoleFromUI('supervisor');
+    if (primary === '__REJECTED__' || supervisor === '__REJECTED__') {
       setDetailStatus('extraArgs contains disallowed shell characters. Only CLI flags are allowed.', 'error');
       return;
     }
+    if (primary === '__INVALID_FW__') { setDetailStatus('Invalid primary framework — must be claude or codex.', 'error'); return; }
+    if (supervisor === '__INVALID_FW__') { setDetailStatus('Invalid supervisor framework — must be claude or codex.', 'error'); return; }
 
-    const primaryProvider = ((document.getElementById('cfg-primary-provider') || {}).value || '').trim() || null;
-    const primaryModel = ((document.getElementById('cfg-primary-model') || {}).value || '').trim() || null;
-    const primaryReasoning = ((document.getElementById('cfg-primary-reasoning') || {}).value || '').trim() || null;
-    const supervisorProvider = ((document.getElementById('cfg-supervisor-provider') || {}).value || '').trim() || null;
-    const supervisorModel = ((document.getElementById('cfg-supervisor-model') || {}).value || '').trim() || null;
-    const supervisorReasoning = ((document.getElementById('cfg-supervisor-reasoning') || {}).value || '').trim() || null;
-    const primaryHasValue = primaryFramework || primaryProvider || primaryModel || primaryReasoning || primaryExtraArgs;
-    const supervisorHasValue = supervisorFramework || supervisorProvider || supervisorModel || supervisorReasoning || supervisorExtraArgs;
-    const runtimeProfile = (primaryHasValue || supervisorHasValue) ? {
-      primary: primaryHasValue ? { framework: primaryFramework, provider: primaryProvider, model: primaryModel, reasoning: primaryReasoning, extraArgs: primaryExtraArgs } : null,
-      supervisor: supervisorHasValue ? { framework: supervisorFramework, provider: supervisorProvider, model: supervisorModel, reasoning: supervisorReasoning, extraArgs: supervisorExtraArgs } : null,
-    } : null;
+    const runtimeProfile = (primary || supervisor) ? { primary: primary || null, supervisor: supervisor || null } : null;
     const role = ((document.getElementById('cfg-role') || {}).value || '').trim() || null;
 
     detailSaveInFlight = true;
@@ -6125,7 +6281,7 @@ th{
 
   async function refresh(forceDetailRender = false) {
     try {
-      const [statusRes, detailRes, controlRes, subconsciousRes, subconsciousDetailRes, agentDetailRes, agentStatusRes, unreadRes, queueRes] = await Promise.all([
+      const [statusRes, detailRes, controlRes, subconsciousRes, subconsciousDetailRes, agentDetailRes, agentStatusRes, unreadRes, queueRes, presetsRes] = await Promise.all([
         fetch('/api/supervisor/status'),
         fetch('/api/supervisor/agents/' + encodeURIComponent(agent) + '?limit=180'),
         fetch('/api/supervisor/control'),
@@ -6135,6 +6291,7 @@ th{
         fetch('/api/agents/status'),
         fetch('/api/agents/' + encodeURIComponent(agent) + '/unread-messages?limit=40'),
         fetch('/api/queue'),
+        fetch('/api/framework-presets'),
       ]);
       const statusPayload = await statusRes.json();
       const detail = await detailRes.json();
@@ -6145,6 +6302,8 @@ th{
       const agentStatusPayload = await agentStatusRes.json().catch(() => []);
       const unreadPayload = await unreadRes.json().catch(() => ({ unread_total: 0, messages: [] }));
       const queuePayload = await queueRes.json().catch(() => []);
+      const presetsPayload = await presetsRes.json().catch(() => []);
+      _presetCache = Array.isArray(presetsPayload) ? presetsPayload : [];
       if (!statusRes.ok || !detailRes.ok) throw new Error((detail && detail.error) || 'load failed');
       const statusRows = Array.isArray(agentStatusPayload) ? agentStatusPayload : [];
       const statusRow = statusRows.find((row) => row && row.name === agent) || null;

@@ -2610,6 +2610,8 @@ const cursors = loadJsonSync('cursors.json', {});
 const servers = loadJsonSync('servers.json', {});
 const agentRuntime = loadJsonSync('agent_runtime.json', {});
 const taskGraphs = loadJsonSync('task_graphs.json', {});
+const frameworkPresets = loadJsonSync('framework-presets.json', []);
+function saveFrameworkPresets() { saveJson('framework-presets.json', frameworkPresets); }
 const taskStoreData = loadJsonSync('tasks.json', []);
 const taskStore = createTaskStore({
   initialData: taskStoreData,
@@ -7783,6 +7785,64 @@ app.get('/api/agents/:name/tasks', (req, res) => {
     return { ...task, health: { state: snapshot.state, confidence: snapshot.confidence, reason: snapshot.reason, suggested_action: snapshot.suggested_action, domain: snapshot.domain, pattern: snapshot.pattern, assessed_at: snapshot.assessed_at, assessed_by: snapshot.supervisor } };
   });
   return res.json(tasks);
+});
+
+// ── Framework Presets CRUD ─────────────────────────────────────────────
+app.get('/api/framework-presets', (_req, res) => {
+  return res.json(frameworkPresets);
+});
+
+app.post('/api/framework-presets', requireBearer, (req, res) => {
+  const b = req.body || {};
+  const name = normalizeOptionalText(b.name, 128);
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const id = 'preset_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+  const preset = {
+    id,
+    name,
+    framework: normalizeOptionalText(b.framework, 32) || null,
+    provider: normalizeOptionalText(b.provider, 64) || null,
+    model: normalizeOptionalText(b.model, 256) || null,
+    reasoning: normalizeOptionalText(b.reasoning, 64) || null,
+    extraArgs: normalizeOptionalText(b.extraArgs, 4000) || null,
+  };
+  if (preset.extraArgs && SHELL_METACHAR_RE.test(preset.extraArgs)) {
+    return res.status(400).json({ error: 'extraArgs contains disallowed shell characters' });
+  }
+  frameworkPresets.push(preset);
+  saveFrameworkPresets();
+  return res.json({ ok: true, preset });
+});
+
+app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
+  const idx = frameworkPresets.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'preset not found' });
+  const b = req.body || {};
+  const name = normalizeOptionalText(b.name, 128);
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const extraArgs = normalizeOptionalText(b.extraArgs, 4000) || null;
+  if (extraArgs && SHELL_METACHAR_RE.test(extraArgs)) {
+    return res.status(400).json({ error: 'extraArgs contains disallowed shell characters' });
+  }
+  frameworkPresets[idx] = {
+    ...frameworkPresets[idx],
+    name,
+    framework: normalizeOptionalText(b.framework, 32) || null,
+    provider: normalizeOptionalText(b.provider, 64) || null,
+    model: normalizeOptionalText(b.model, 256) || null,
+    reasoning: normalizeOptionalText(b.reasoning, 64) || null,
+    extraArgs,
+  };
+  saveFrameworkPresets();
+  return res.json({ ok: true, preset: frameworkPresets[idx] });
+});
+
+app.delete('/api/framework-presets/:id', requireBearer, (req, res) => {
+  const idx = frameworkPresets.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'preset not found' });
+  const removed = frameworkPresets.splice(idx, 1)[0];
+  saveFrameworkPresets();
+  return res.json({ ok: true, preset: removed });
 });
 
 app.post('/api/task-graphs', requireBearer, (req, res) => {
