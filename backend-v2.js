@@ -7762,6 +7762,18 @@ app.post('/api/tasks/:id/transition', requireAgentToken(_tokenFromTaskAssignee),
   }
 });
 
+app.post('/api/tasks/:id/comments', requireBearer, (req, res) => {
+  try {
+    const task = taskStore.addComment(req.params.id, req.body || {});
+    broadcastSSE('task_updated', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to add comment' });
+  }
+});
+
 app.get('/api/agents/:name/tasks', (req, res) => {
   const name = normalizeAgentName(req.params.name);
   if (!name) return res.status(400).json({ error: 'invalid agent name' });

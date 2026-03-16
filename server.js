@@ -2289,6 +2289,75 @@ app.delete('/api/agents/:name', async (req, res) => {
   }
 });
 
+// ── Task CRUD proxy APIs ─────────────────────────────────────────────
+app.get('/api/tasks', async (req, res) => {
+  try {
+    const url = new URL(`${BACKEND_V2_URL}/api/tasks`);
+    for (const key of ['assignee', 'status', 'priority', 'label']) {
+      if (typeof req.query[key] === 'string' && req.query[key].trim()) url.searchParams.set(key, req.query[key].trim());
+    }
+    const r = await backendFetch(url);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.post('/api/tasks', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/tasks`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.get('/api/tasks/:id', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/tasks/${encodeURIComponent(req.params.id)}`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.patch('/api/tasks/:id', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/tasks/${encodeURIComponent(req.params.id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.delete('/api/tasks/:id', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/tasks/${encodeURIComponent(req.params.id)}`, { method: 'DELETE' });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.post('/api/tasks/:id/transition', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/tasks/${encodeURIComponent(req.params.id)}/transition`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.post('/api/tasks/:id/comments', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/tasks/${encodeURIComponent(req.params.id)}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
 app.post('/api/task-graphs', async (req, res) => {
   try {
     const r = await backendFetch(`${BACKEND_V2_URL}/api/task-graphs`, {
@@ -3473,6 +3542,37 @@ a{color:var(--accent)}
 .task-advanced-toggle{font-size:11px;color:var(--muted);cursor:pointer;letter-spacing:0.5px}
 .task-advanced-toggle:hover{color:var(--text)}
 .task-advanced[open] .task-advanced-toggle{color:var(--text)}
+.task-list-table{width:100%;border-collapse:collapse;font-size:12px}
+.task-list-table th{text-align:left;padding:6px 8px;border-bottom:1px solid rgba(154,182,210,0.2);color:var(--muted);font-weight:500;font-size:11px;letter-spacing:0.5px}
+.task-list-table td{padding:5px 8px;border-bottom:1px solid rgba(154,182,210,0.08);vertical-align:top}
+.task-list-table tr:hover{background:rgba(109,193,255,0.04);cursor:pointer}
+.task-status-badge{display:inline-block;padding:2px 7px;border-radius:8px;font-size:10px;font-weight:600;letter-spacing:0.4px}
+.task-status-created{background:rgba(154,182,210,0.15);color:rgba(154,182,210,0.9)}
+.task-status-accepted{background:rgba(109,193,255,0.15);color:rgba(109,193,255,0.9)}
+.task-status-in_progress{background:rgba(100,220,160,0.15);color:rgba(100,220,160,0.9)}
+.task-status-blocked{background:rgba(255,160,80,0.15);color:rgba(255,160,80,0.9)}
+.task-status-done{background:rgba(120,120,140,0.15);color:rgba(120,120,140,0.9)}
+.task-priority-badge{font-size:10px;font-weight:600;letter-spacing:0.3px}
+.task-priority-p0{color:rgba(255,80,80,0.9)}
+.task-priority-p1{color:rgba(255,160,80,0.9)}
+.task-priority-p2{color:var(--muted)}
+.task-priority-p3{color:rgba(120,120,140,0.7)}
+.task-create-form{display:flex;flex-direction:column;gap:8px}
+.task-create-form textarea{min-height:60px;resize:vertical}
+.task-create-row{display:flex;gap:8px;align-items:center}
+.task-detail-back{font-size:11px;color:var(--accent);cursor:pointer;margin-bottom:8px;display:inline-block}
+.task-detail-back:hover{text-decoration:underline}
+.task-detail-title{font-size:15px;font-weight:600;margin-bottom:6px}
+.task-detail-meta{font-size:11px;color:var(--muted);margin-bottom:10px}
+.task-detail-desc{font-size:12px;line-height:1.6;margin-bottom:14px;white-space:pre-wrap}
+.task-comments{margin-top:10px}
+.task-comment{padding:8px 10px;border-left:2px solid rgba(109,193,255,0.3);margin-bottom:8px;background:rgba(0,0,0,0.12);border-radius:0 6px 6px 0}
+.task-comment-meta{font-size:10px;color:var(--muted);margin-bottom:3px}
+.task-comment-text{font-size:12px;line-height:1.5;white-space:pre-wrap}
+.task-comment-form{display:flex;gap:8px;align-items:flex-end;margin-top:8px}
+.task-comment-form textarea{flex:1;min-height:40px;resize:vertical}
+.task-empty-state{text-align:center;color:var(--muted);padding:24px 0;font-size:12px}
+.task-status-select{font-size:11px;padding:2px 4px;background:rgba(0,0,0,0.2);border:1px solid rgba(154,182,210,0.15);color:var(--text);border-radius:4px}
 .doc-frame{
   margin-top:10px;
   padding:12px;
@@ -3663,6 +3763,10 @@ th{
             <div id="settings-systems" class="split-grid"></div>
           </article>
           <article class="panel">
+            <div class="panel-label">Canonical Task</div>
+            <div id="task-current"></div>
+          </article>
+          <article class="panel">
             <div class="panel-label">Ownership</div>
             <div id="settings-owner"></div>
           </article>
@@ -3671,8 +3775,29 @@ th{
 
       <section id="tab-tasks" class="tab-panel hidden">
         <article class="panel">
-          <div class="panel-label">Task</div>
-          <div id="task-current"></div>
+          <div class="panel-label">Create Task</div>
+          <div class="task-create-form">
+            <textarea id="task-create-title" class="detail-textarea" placeholder="Task title / description" style="min-height:50px"></textarea>
+            <div class="task-create-row">
+              <select id="task-create-priority" class="detail-input" style="width:80px">
+                <option value="p0">P0</option>
+                <option value="p1">P1</option>
+                <option value="p2" selected>P2</option>
+                <option value="p3">P3</option>
+              </select>
+              <input id="task-create-assignee" class="detail-input" placeholder="Assignee (optional)" style="flex:1">
+              <button class="detail-save" onclick="taskCreateSubmit()">Create</button>
+            </div>
+            <div id="task-create-status" class="detail-status muted" style="font-size:11px"></div>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="panel-label">Tasks</div>
+          <div id="task-list-root"></div>
+        </article>
+        <article class="panel hidden" id="task-detail-panel">
+          <div class="panel-label">Task Detail</div>
+          <div id="task-detail-root"></div>
         </article>
       </section>
 
@@ -4061,6 +4186,7 @@ th{
       });
     }
     if (next === 'dm' && !dmLoaded) loadDmHistory();
+    if (next === 'tasks') taskListRefresh();
   }
 
   // ── DM tab logic ──────────────────────────────
@@ -5786,6 +5912,212 @@ th{
   window.saveSupervisorAuditControl = saveSupervisorAuditControl;
   window.saveDetailConfiguration = saveDetailConfiguration;
   window.saveSubconsciousRuntime = saveSubconsciousRuntime;
+
+  // ── Task list (minimal Jira) ──────────────────────────────────────
+  let taskListCache = [];
+  let taskDetailViewId = null;
+
+  function fmtTaskTime(iso) {
+    if (!iso) return '-';
+    try { return new Date(iso).toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }); }
+    catch { return iso; }
+  }
+
+  async function taskListRefresh() {
+    const root = document.getElementById('task-list-root');
+    if (!root) return;
+    try {
+      const r = await fetch('/api/tasks');
+      if (!r.ok) throw new Error('status ' + r.status);
+      taskListCache = await r.json();
+    } catch (e) {
+      root.innerHTML = '<div class="error-state">Failed to load tasks: ' + esc(e.message) + '</div>';
+      return;
+    }
+    if (taskDetailViewId) {
+      const found = taskListCache.find(t => t.id === taskDetailViewId);
+      if (found) { renderTaskDetail(found); return; }
+      taskDetailViewId = null;
+    }
+    renderTaskList();
+  }
+
+  function renderTaskList() {
+    const root = document.getElementById('task-list-root');
+    const detailPanel = document.getElementById('task-detail-panel');
+    if (detailPanel) detailPanel.classList.add('hidden');
+    if (!root) return;
+    if (!taskListCache.length) {
+      root.innerHTML = '<div class="task-empty-state">No tasks yet. Create one above.</div>';
+      return;
+    }
+    const sorted = [...taskListCache].sort((a, b) => {
+      const po = { p0:0, p1:1, p2:2, p3:3 };
+      const so = { in_progress:0, accepted:1, blocked:2, created:3, done:4 };
+      const sd = (so[a.status] ?? 5) - (so[b.status] ?? 5);
+      if (sd !== 0) return sd;
+      const pd = (po[a.priority] ?? 2) - (po[b.priority] ?? 2);
+      if (pd !== 0) return pd;
+      return (b.created_at || '').localeCompare(a.created_at || '');
+    });
+    let html = '<table class="task-list-table"><thead><tr>'
+      + '<th>Status</th><th>Pri</th><th>Title</th><th>Assignee</th><th>Comments</th><th>Created</th>'
+      + '</tr></thead><tbody>';
+    for (const t of sorted) {
+      const cc = Array.isArray(t.comments) ? t.comments.length : 0;
+      html += '<tr onclick="taskShowDetail(\'' + esc(t.id) + '\')">'
+        + '<td><span class="task-status-badge task-status-' + esc(t.status) + '">' + esc(t.status) + '</span></td>'
+        + '<td><span class="task-priority-badge task-priority-' + esc(t.priority) + '">' + esc(t.priority || 'p2').toUpperCase() + '</span></td>'
+        + '<td>' + esc(t.title || '-') + '</td>'
+        + '<td>' + esc(t.assignee || '-') + '</td>'
+        + '<td>' + (cc > 0 ? cc : '-') + '</td>'
+        + '<td>' + esc(fmtTaskTime(t.created_at)) + '</td>'
+        + '</tr>';
+    }
+    html += '</tbody></table>';
+    root.innerHTML = html;
+  }
+
+  function renderTaskDetail(task) {
+    const detailPanel = document.getElementById('task-detail-panel');
+    const root = document.getElementById('task-detail-root');
+    if (!detailPanel || !root) return;
+    detailPanel.classList.remove('hidden');
+    taskDetailViewId = task.id;
+    const statusOptions = ['created','accepted','in_progress','blocked','done'];
+    let html = '<span class="task-detail-back" onclick="taskBackToList()">&#8592; Back to list</span>'
+      + '<div class="task-detail-title">' + esc(task.title || 'Untitled') + '</div>'
+      + '<div class="task-detail-meta">'
+      + '<strong>ID:</strong> ' + esc(task.id) + ' &middot; '
+      + '<strong>Priority:</strong> <span class="task-priority-badge task-priority-' + esc(task.priority) + '">' + esc((task.priority || 'p2').toUpperCase()) + '</span> &middot; '
+      + '<strong>Assignee:</strong> ' + esc(task.assignee || 'unassigned') + ' &middot; '
+      + '<strong>Created:</strong> ' + esc(fmtTaskTime(task.created_at))
+      + '</div>'
+      + '<div class="task-detail-meta">'
+      + '<strong>Status:</strong> <select class="task-status-select" id="task-detail-status" onchange="taskChangeStatus(\'' + esc(task.id) + '\')">';
+    for (const s of statusOptions) {
+      html += '<option value="' + s + '"' + (task.status === s ? ' selected' : '') + '>' + s + '</option>';
+    }
+    html += '</select></div>';
+    if (task.description) {
+      html += '<div class="task-detail-desc">' + esc(task.description) + '</div>';
+    }
+    if (task.waiting_reason) {
+      html += '<div class="task-detail-meta"><strong>Waiting:</strong> ' + esc(task.waiting_reason)
+        + (task.waiting_until ? ' (until ' + esc(task.waiting_until) + ')' : '') + '</div>';
+    }
+    // Comments section
+    const comments = Array.isArray(task.comments) ? task.comments : [];
+    html += '<div class="task-comments">'
+      + '<div class="field-label">Comments (' + comments.length + ')</div>';
+    if (comments.length === 0) {
+      html += '<div class="task-empty-state" style="padding:8px 0">No comments yet.</div>';
+    } else {
+      for (const c of comments) {
+        html += '<div class="task-comment">'
+          + '<div class="task-comment-meta">' + esc(c.author || 'anonymous') + ' &middot; ' + esc(fmtTaskTime(c.ts)) + '</div>'
+          + '<div class="task-comment-text">' + esc(c.text) + '</div>'
+          + '</div>';
+      }
+    }
+    html += '<div class="task-comment-form">'
+      + '<textarea id="task-comment-input" class="detail-textarea" placeholder="Add a comment..."></textarea>'
+      + '<button class="detail-save" onclick="taskAddComment(\'' + esc(task.id) + '\')">Post</button>'
+      + '</div></div>';
+    // Delete button
+    html += '<div class="detail-actions" style="margin-top:14px">'
+      + '<button class="detail-save" style="background:rgba(255,100,100,0.1);border-color:rgba(255,100,100,0.3);color:rgba(255,140,140,0.9)" onclick="taskDelete(\'' + esc(task.id) + '\')">Delete Task</button>'
+      + '</div>';
+    root.innerHTML = html;
+  }
+
+  function taskBackToList() {
+    taskDetailViewId = null;
+    renderTaskList();
+  }
+
+  function taskShowDetail(id) {
+    const task = taskListCache.find(t => t.id === id);
+    if (task) renderTaskDetail(task);
+  }
+
+  async function taskCreateSubmit() {
+    const titleEl = document.getElementById('task-create-title');
+    const prioEl = document.getElementById('task-create-priority');
+    const assigneeEl = document.getElementById('task-create-assignee');
+    const statusEl = document.getElementById('task-create-status');
+    if (!titleEl || !prioEl) return;
+    const title = titleEl.value.trim();
+    if (!title) { if (statusEl) statusEl.textContent = 'Title is required.'; return; }
+    try {
+      const body = { title, priority: prioEl.value };
+      const assignee = (assigneeEl?.value || '').trim();
+      if (assignee) body.assignee = assignee;
+      const r = await fetch('/api/tasks', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'create failed');
+      titleEl.value = '';
+      if (assigneeEl) assigneeEl.value = '';
+      if (statusEl) { statusEl.textContent = 'Created: ' + (data.task?.id || ''); setTimeout(() => statusEl.textContent = '', 3000); }
+      taskListRefresh();
+    } catch (e) {
+      if (statusEl) statusEl.textContent = 'Error: ' + e.message;
+    }
+  }
+
+  async function taskChangeStatus(id) {
+    const sel = document.getElementById('task-detail-status');
+    if (!sel) return;
+    try {
+      const r = await fetch('/api/tasks/' + encodeURIComponent(id) + '/transition', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: sel.value }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'transition failed');
+      taskListRefresh();
+    } catch (e) {
+      alert('Status change failed: ' + e.message);
+    }
+  }
+
+  async function taskAddComment(id) {
+    const input = document.getElementById('task-comment-input');
+    if (!input) return;
+    const text = input.value.trim();
+    if (!text) return;
+    try {
+      const r = await fetch('/api/tasks/' + encodeURIComponent(id) + '/comments', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, author: 'operator' }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'comment failed');
+      taskListRefresh();
+    } catch (e) {
+      alert('Comment failed: ' + e.message);
+    }
+  }
+
+  async function taskDelete(id) {
+    if (!confirm('Delete task ' + id + '?')) return;
+    try {
+      const r = await fetch('/api/tasks/' + encodeURIComponent(id), { method: 'DELETE' });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'delete failed');
+      taskDetailViewId = null;
+      taskListRefresh();
+    } catch (e) {
+      alert('Delete failed: ' + e.message);
+    }
+  }
+
+  window.taskCreateSubmit = taskCreateSubmit;
+  window.taskShowDetail = taskShowDetail;
+  window.taskBackToList = taskBackToList;
+  window.taskChangeStatus = taskChangeStatus;
+  window.taskAddComment = taskAddComment;
+  window.taskDelete = taskDelete;
 
   async function refresh(forceDetailRender = false) {
     try {

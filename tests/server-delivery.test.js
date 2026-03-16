@@ -136,7 +136,10 @@ describe('server delivery path', () => {
     expect(patch.status).toBe(200);
     expect(remove.status).toBe(200);
 
-    expect(seen.map((row) => ({ url: row.url.replace(/^https?:\/\/127\.0\.0\.1:\d+/, ''), method: row.method }))).toEqual([
+    const taskGraphRequests = seen
+      .map((row) => ({ url: row.url.replace(/^https?:\/\/127\.0\.0\.1:\d+/, ''), method: row.method }))
+      .filter((row) => row.url.startsWith('/api/task-graph'));
+    expect(taskGraphRequests).toEqual([
       { url: '/api/task-graphs', method: 'POST' },
       { url: '/api/task-graphs?status=active', method: 'GET' },
       { url: '/api/task-graphs/graph_1', method: 'GET' },
