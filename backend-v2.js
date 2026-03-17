@@ -1,7 +1,7 @@
 import express from 'express';
 import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync, readdirSync, unlinkSync, rmSync } from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
-import { execFile, execSync } from 'child_process';
+import { execFile, execSync, spawn } from 'child_process';
 import path from 'path';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
@@ -6659,6 +6659,31 @@ app.post('/api/agents/:name/undelete', requireBearer, (req, res) => {
   auditLog(req, { agent: agentName, summary: { action: 'undelete' } });
   console.log(`Agent '${agentName}' tombstone removed — re-registration allowed`);
   res.json({ ok: true, undeleted: true, name: agentName });
+});
+
+app.post('/api/agents/:name/start', requireBearer, (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: 'local-only endpoint' });
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+  if (agent.online) return res.status(409).json({ error: 'agent already online' });
+  const framework = agent.type || 'claude';
+  const agentchatBin = path.join(REPO_ROOT, 'bin', 'agentchat');
+  try {
+    const child = spawn(agentchatBin, ['up-v1', agentName, framework], {
+      cwd: REPO_ROOT,
+      stdio: 'ignore',
+      detached: true,
+    });
+    child.unref();
+    auditLog(req, { agent: agentName, summary: { action: 'start', framework, pid: child.pid } });
+    console.log(`[start] launched agentchat up-v1 ${agentName} ${framework} (pid=${child.pid})`);
+    res.json({ ok: true, name: agentName, framework, pid: child.pid });
+  } catch (e) {
+    console.error(`[start] failed to launch ${agentName}:`, e.message);
+    res.status(500).json({ error: 'launch failed', detail: e.message });
+  }
 });
 
 app.post('/api/agents/:name/offline', requireAgentToken(_tokenFromName), (req, res) => {

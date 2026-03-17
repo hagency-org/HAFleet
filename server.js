@@ -486,6 +486,17 @@ app.get('/api/idle', (_req, res) => {
   res.json(result);
 });
 
+// ── All agents (for config page agent management) ───────────────────
+app.get('/api/agents/all', async (_req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents`);
+    const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
 // ── Agent status (for dashboard monitor) ─────────────────────────────
 app.get('/api/agents/status', async (_req, res) => {
   try {
@@ -1778,6 +1789,23 @@ app.post('/api/agents/create', async (req, res) => {
       body: JSON.stringify(body),
     });
     const data = await r.json();
+    if (!r.ok) return res.status(r.status).json(data);
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.post('/api/agents/:name/start', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await r.json().catch(() => ({}));
     if (!r.ok) return res.status(r.status).json(data);
     res.json(data);
   } catch (e) {
@@ -7002,9 +7030,23 @@ window.submitNewAgent = async function() {
     var data = await r.json().catch(function() { return {}; });
     if (!r.ok) throw new Error(data.error || 'creation failed (HTTP ' + r.status + ')');
 
-    document.getElementById('na-status').textContent = 'Agent "' + name + '" created. Launch via: agentchat up-v1 ' + name + ' ' + fw;
-    document.getElementById('na-status').style.color = '#34d399';
-    setTimeout(function() { closeNewAgentModal(); }, 2500);
+    document.getElementById('na-status').textContent = 'Created. Starting agent...';
+    document.getElementById('na-status').style.color = 'rgba(0,240,255,0.6)';
+    try {
+      var sr = await fetch('/api/agents/' + encodeURIComponent(name) + '/start', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      var sd = await sr.json().catch(function() { return {}; });
+      if (sr.ok) {
+        document.getElementById('na-status').textContent = 'Agent "' + name + '" starting — will appear in queue shortly.';
+        document.getElementById('na-status').style.color = '#34d399';
+      } else {
+        document.getElementById('na-status').textContent = 'Created but start failed: ' + (sd.error || 'unknown');
+        document.getElementById('na-status').style.color = '#ffd93d';
+      }
+    } catch (startErr) {
+      document.getElementById('na-status').textContent = 'Created but start failed: ' + startErr.message;
+      document.getElementById('na-status').style.color = '#ffd93d';
+    }
+    setTimeout(function() { closeNewAgentModal(); }, 3000);
   } catch (e) {
     document.getElementById('na-status').textContent = 'Failed: ' + e.message;
     document.getElementById('na-status').style.color = '#ff6b6b';
@@ -8251,6 +8293,13 @@ select option{background:#0d1723;color:#e2eaf3}
     </div>
     <div id="status-msg" class="status-msg"></div>
   </div>
+
+  <div class="panel">
+    <div class="panel-label">All Agents</div>
+    <div class="hint">All registered agents across all servers. Offline local agents can be started from here.</div>
+    <div id="agent-list"></div>
+    <div id="agent-status-msg" class="status-msg"></div>
+  </div>
 </div>
 <script>
 (function(){
@@ -8345,6 +8394,88 @@ select option{background:#0d1723;color:#e2eaf3}
   };
 
   fetchPresets();
+})();
+
+(function(){
+  var agentListEl = document.getElementById('agent-list');
+  var agentStatusEl = document.getElementById('agent-status-msg');
+  var allAgents = [];
+
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function agentStatus(a) {
+    if (a.online) return '<span style="color:var(--green)">online</span>';
+    if (a.manualDown) return '<span style="color:var(--muted)">stopped</span>';
+    return '<span style="color:var(--red)">offline</span>';
+  }
+
+  function renderAgents() {
+    if (allAgents.length === 0) {
+      agentListEl.innerHTML = '<div class="empty-state">No agents registered.</div>';
+      return;
+    }
+    var h = '<table class="preset-table"><thead><tr>'
+      + '<th>Name</th><th>Framework</th><th>Version</th><th>Status</th><th>Server</th><th>Env</th><th></th>'
+      + '</tr></thead><tbody>';
+    for (var i = 0; i < allAgents.length; i++) {
+      var a = allAgents[i];
+      var ver = a.layoutVersion ? 'v' + a.layoutVersion : (a.agentModelVersion || '-');
+      var srv = a.server || '-';
+      var env = a.environment || '-';
+      var isLocal = !a.server || a.server === 'local' || /^local/i.test(a.server);
+      var canStart = !a.online && isLocal;
+      var actionBtn = canStart
+        ? '<button class="btn btn-accent" onclick="startAgent(\\'' + esc(a.name) + '\\')">Start</button>'
+        : '';
+      h += '<tr>'
+        + '<td><strong>' + esc(a.name) + '</strong></td>'
+        + '<td>' + esc(a.type || '-') + '</td>'
+        + '<td>' + esc(ver) + '</td>'
+        + '<td>' + agentStatus(a) + '</td>'
+        + '<td>' + esc(srv) + '</td>'
+        + '<td>' + esc(env) + '</td>'
+        + '<td>' + actionBtn + '</td>'
+        + '</tr>';
+    }
+    h += '</tbody></table>';
+    agentListEl.innerHTML = h;
+  }
+
+  function showAgentStatus(msg, cls) {
+    agentStatusEl.textContent = msg;
+    agentStatusEl.className = 'status-msg ' + (cls || '');
+    if (msg) setTimeout(function() { if (agentStatusEl.textContent === msg) { agentStatusEl.textContent = ''; agentStatusEl.className = 'status-msg'; } }, 4000);
+  }
+
+  async function fetchAgents() {
+    try {
+      var r = await fetch('/api/agents/all');
+      if (r.ok) allAgents = await r.json();
+    } catch (e) { console.error('fetch agents:', e); }
+    allAgents.sort(function(a, b) {
+      if (a.online && !b.online) return -1;
+      if (!a.online && b.online) return 1;
+      return (a.name || '').localeCompare(b.name || '');
+    });
+    renderAgents();
+  }
+
+  window.startAgent = async function(name) {
+    showAgentStatus('Starting ' + name + '...', '');
+    try {
+      var r = await fetch('/api/agents/' + encodeURIComponent(name) + '/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+      });
+      var data = await r.json().catch(function() { return {}; });
+      if (!r.ok) throw new Error(data.error || 'start failed');
+      showAgentStatus(name + ' starting (pid ' + (data.pid || '?') + ')', 'status-ok');
+      setTimeout(fetchAgents, 5000);
+    } catch (e) { showAgentStatus('Start failed: ' + e.message, 'status-error'); }
+  };
+
+  fetchAgents();
 })();
 </script>
 </body>
