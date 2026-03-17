@@ -51,6 +51,14 @@ fi
 RUNTIME_DIR="${AGENT_CHAT_RUNTIME_DIR:-$BASE_DIR}"
 DATA_DIR="$RUNTIME_DIR/data/agents"
 
+# If runtime dir differs from base dir, also load runtime's .env
+# (overrides base — runtime has the correct port for its deployment).
+if [ "$RUNTIME_DIR" != "$BASE_DIR" ] && [ -f "$RUNTIME_DIR/.env" ]; then
+  set -a
+  source "$RUNTIME_DIR/.env"
+  set +a
+fi
+
 BACKEND_PORT_RAW="${AGENT_CHAT_BACKEND_PORT:-8090}"
 if [[ "$BACKEND_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT_RAW" -gt 0 ]; then
   BACKEND_PORT="$BACKEND_PORT_RAW"
@@ -349,12 +357,16 @@ run_update_check() {
       fi
       LOCAL=$(git rev-parse HEAD 2>/dev/null | tr -d '[:space:]' || true)
       TRACK_REF=""
-      REMOTE=$(git rev-parse origin/main 2>/dev/null || true)
-      if [ -n "$REMOTE" ]; then
-        TRACK_REF="origin/main"
-      else
-        REMOTE=$(git rev-parse origin/master 2>/dev/null || true)
-        [ -n "$REMOTE" ] && TRACK_REF="origin/master"
+      _deploy_branch="${AGENTCHAT_DEPLOY_BRANCH:-}"
+      if [ -n "$_deploy_branch" ]; then
+        REMOTE=$(git rev-parse "origin/$_deploy_branch" 2>/dev/null || true)
+        [ -n "$REMOTE" ] && TRACK_REF="origin/$_deploy_branch"
+      fi
+      if [ -z "$TRACK_REF" ]; then
+        for _b in stable main master; do
+          REMOTE=$(git rev-parse "origin/$_b" 2>/dev/null || true)
+          if [ -n "$REMOTE" ]; then TRACK_REF="origin/$_b"; break; fi
+        done
       fi
       REMOTE=$(echo "$REMOTE" | tr -d '[:space:]')
       if [ -z "$LOCAL" ] || [ -z "$REMOTE" ] || [ -z "$TRACK_REF" ]; then
@@ -476,6 +488,10 @@ TMP_RUNTIME_DIR="$AGENT_DATA/tmp"
 # If resume-id already exists (e.g. recovered via agent-down), keep resume path.
 if [ ! -f "$META_FILE" ] && [ "$FRESH" = false ] && [ ! -f "$RESUME_FILE" ]; then
   FRESH=true
+# v1 agent: up-v1 pre-creates meta.json + dangling resume-id symlink before first launch.
+# Detect this case: symlink exists but target is missing → treat as fresh.
+elif [ "$FRESH" = false ] && [ ! -f "$RESUME_FILE" ] && [ -L "$RESUME_FILE" ]; then
+  FRESH=true
 fi
 
 SAVED_PATH=""
@@ -516,6 +532,8 @@ if [ -f "$META_FILE" ]; then
   SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('framework')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_PRIMARY_MODEL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('model')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_PRIMARY_EXTRA_ARGS=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('extraArgs')) or '')" 2>/dev/null || true)
+  SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('apiBaseUrl')) or '')" 2>/dev/null || true)
+  SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('apiKey')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_SUPERVISOR_PROVIDER=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('supervisor') or {}).get('provider')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_SUPERVISOR_MODEL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('supervisor') or {}).get('model')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_SUPERVISOR_REASONING=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('supervisor') or {}).get('reasoning')) or '')" 2>/dev/null || true)
@@ -1106,6 +1124,115 @@ PY
   esac
 }
 
+ensure_codex_project_trust() {
+  [ "$TYPE" = "codex" ] || return 0
+  [ -n "${AGENT_PATH:-}" ] || return 0
+
+  local status
+  status="$(
+    CODEX_CONFIG="$HOME/.codex/config.toml" AGENT_PATH="$AGENT_PATH" python3 - <<'PY'
+import os
+import pathlib
+import re
+import shutil
+import tempfile
+import time
+import tomllib
+
+config_path = pathlib.Path(os.environ["CODEX_CONFIG"]).expanduser()
+agent_path = str(pathlib.Path(os.environ["AGENT_PATH"]).resolve())
+config_path.parent.mkdir(parents=True, exist_ok=True)
+
+# Escape backslashes and double quotes for TOML basic string key
+escaped_path = agent_path.replace("\\", "\\\\").replace('"', '\\"')
+section_header = f'[projects."{escaped_path}"]'
+trust_line = 'trust_level = "trusted"'
+
+if config_path.exists():
+    raw = config_path.read_text(encoding="utf-8")
+    # Validate TOML before modifying
+    try:
+        data = tomllib.loads(raw)
+    except Exception as exc:
+        print(f"error:config.toml is malformed TOML: {exc}")
+        raise SystemExit(0)
+
+    # Check if already trusted via parsed data
+    projects = data.get("projects", {})
+    entry = projects.get(agent_path)
+    if isinstance(entry, dict) and entry.get("trust_level") == "trusted":
+        print("already")
+        raise SystemExit(0)
+
+    # Section exists but trust_level differs — update in-place
+    if isinstance(entry, dict):
+        lines = raw.splitlines(keepends=True)
+        out = []
+        in_section = False
+        replaced = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped == section_header:
+                in_section = True
+                out.append(line)
+                continue
+            if in_section and stripped.startswith("["):
+                in_section = False
+            if in_section and not stripped.startswith("#") and re.match(r'^trust_level\s*=', stripped):
+                out.append(f'{trust_line}\n')
+                replaced = True
+                in_section = False
+            else:
+                out.append(line)
+        if not replaced:
+            # trust_level key missing from section — add it after header
+            out2 = []
+            found = False
+            for line in out:
+                out2.append(line)
+                if not found and line.strip() == section_header:
+                    out2.append(f'{trust_line}\n')
+                    found = True
+            out = out2
+        content = "".join(out)
+    else:
+        # No section — append
+        content = raw
+        if not content.endswith("\n") and content:
+            content += "\n"
+        content += f"\n{section_header}\n{trust_line}\n"
+else:
+    content = f"{section_header}\n{trust_line}\n"
+
+# Backup and atomic write
+backup_dir = config_path.parent / "backups"
+backup_dir.mkdir(parents=True, exist_ok=True)
+if config_path.exists():
+    backup_path = backup_dir / f"config.toml.backup.{int(time.time() * 1000)}"
+    shutil.copy2(config_path, backup_path)
+
+with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(config_path.parent), delete=False) as handle:
+    handle.write(content)
+    temp_name = handle.name
+os.replace(temp_name, config_path)
+print("updated")
+PY
+  )"
+  case "$status" in
+    updated)
+      echo "Pre-accepted Codex trust for '$AGENT_PATH'."
+      ;;
+    already)
+      ;;
+    error:*)
+      echo "Warning: failed to pre-accept Codex trust for '$AGENT_PATH': ${status#error:}" >&2
+      ;;
+    *)
+      echo "Warning: unexpected Codex trust status for '$AGENT_PATH': ${status:-empty}" >&2
+      ;;
+  esac
+}
+
 capture_guard_matches() {
   [ -n "${CAPTURE_GUARD_FILE:-}" ] || return 0
   [ -n "${CAPTURE_GUARD_TOKEN:-}" ] || return 0
@@ -1183,6 +1310,77 @@ fi
 
 enforce_workspace_uniqueness "$AGENT_PATH"
 ensure_claude_project_trust
+ensure_codex_project_trust
+
+# ── Generate per-agent .mcp.json ──────────────────────────────────────
+# Bake all required env vars into .mcp.json for Claude Code agents.
+# (Codex agents use -c flags instead — see Codex launch section below.)
+ensure_agent_mcp_config() {
+  local mcp_json="$AGENT_PATH/.mcp.json"
+  local mcp_server_js="$BASE_DIR/mcp-server.js"
+  if [ ! -f "$mcp_server_js" ]; then
+    echo "Warning: mcp-server.js not found at $mcp_server_js, skipping .mcp.json generation" >&2
+    return
+  fi
+  local state_dir="${SAVED_STATE_DIR:-}"
+  MCP_JSON="$mcp_json" MCP_SERVER_JS="$mcp_server_js" MCP_SERVER_NAME="$MCP_SERVER_NAME" \
+    AGENT_NAME_VAL="$NAME" BACKEND_URL="$BACKEND_URL" BACKEND_PORT="$BACKEND_PORT" \
+    SERVER_ID="$SERVER_ID" STATE_DIR="$state_dir" \
+    RUNTIME_DIR_VAL="$RUNTIME_DIR" \
+    python3 - <<'PY'
+import json
+import os
+
+mcp_json = os.environ["MCP_JSON"]
+mcp_server_js = os.environ["MCP_SERVER_JS"]
+server_name = os.environ.get("MCP_SERVER_NAME", "") or "agent-chat"
+
+env = {}
+env["AGENT_NAME"] = os.environ.get("AGENT_NAME_VAL", "")
+env["AGENT_CHAT_API"] = os.environ.get("BACKEND_URL", "")
+env["AGENT_CHAT_BACKEND_PORT"] = os.environ.get("BACKEND_PORT", "")
+env["AGENT_CHAT_MCP_SERVER_NAME"] = server_name
+server_id = os.environ.get("SERVER_ID", "")
+if server_id:
+    env["AGENT_CHAT_SERVER"] = server_id
+state_dir = os.environ.get("STATE_DIR", "")
+if state_dir:
+    env["AGENTCHAT_AGENT_STATE_DIR"] = state_dir
+runtime_dir = os.environ.get("RUNTIME_DIR_VAL", "")
+if runtime_dir:
+    env["AGENT_CHAT_RUNTIME_DIR"] = runtime_dir
+
+# Remove empty values
+env = {k: v for k, v in env.items() if v}
+
+config = {
+    "mcpServers": {
+        server_name: {
+            "command": "node",
+            "args": [mcp_server_js],
+            "env": env,
+        }
+    }
+}
+
+# Merge with existing .mcp.json if present (preserve other servers)
+if os.path.exists(mcp_json):
+    try:
+        with open(mcp_json) as f:
+            existing = json.load(f)
+        if isinstance(existing.get("mcpServers"), dict):
+            existing["mcpServers"][server_name] = config["mcpServers"][server_name]
+            config = existing
+    except (json.JSONDecodeError, OSError):
+        pass
+
+with open(mcp_json, "w") as f:
+    json.dump(config, f, indent=2)
+    f.write("\n")
+PY
+  echo "  MCP config: $mcp_json"
+}
+ensure_agent_mcp_config
 
 # ── Save meta ─────────────────────────────────────────────────────────
 mkdir -p "$AGENT_DATA"
@@ -1368,6 +1566,12 @@ append_launch_env_var "AGENTCHAT_HOMEDIR"
 if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_JSON:-}" ]; then
   LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_RUNTIME_PROFILE_PRIMARY_JSON=$(shell_quote "$SAVED_RUNTIME_PROFILE_PRIMARY_JSON")"
 fi
+if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL:-}" ]; then
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX ANTHROPIC_BASE_URL=$(shell_quote "$SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL")"
+fi
+if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY:-}" ]; then
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX ANTHROPIC_API_KEY=$(shell_quote "$SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY")"
+fi
 if [ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_JSON:-}" ]; then
   LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_RUNTIME_PROFILE_SUPERVISOR_JSON=$(shell_quote "$SAVED_RUNTIME_PROFILE_SUPERVISOR_JSON")"
 fi
@@ -1431,6 +1635,29 @@ elif [ "$TYPE" = "codex" ]; then
   CODEX_FLAGS="--yolo"
   [ -n "$MODEL" ] && CODEX_FLAGS="$CODEX_FLAGS --model $(shell_quote "$MODEL")"
   [ -n "$EXTRA_ARGS" ] && CODEX_FLAGS="$CODEX_FLAGS $EXTRA_ARGS"
+  # Inject MCP env vars via -c flags so Codex passes them to the MCP subprocess.
+  # Codex strips env vars but honors -c config overrides parsed as TOML.
+  # Must target the managed-mcp.json server name (agent-chat), not $MCP_SERVER_NAME
+  # which may differ (e.g. agentchat-dev in dev .env).
+  CODEX_MCP_NAME="agent-chat"
+  codex_mcp_env() {
+    local key="$1" val="$2"
+    [ -z "$val" ] && return
+    # TOML-encode the value (escape \ and ")
+    val="${val//\\/\\\\}"
+    val="${val//\"/\\\"}"
+    # Build full TOML assignment: key="value"
+    local arg="mcp_servers.${CODEX_MCP_NAME}.env.${key}=\"${val}\""
+    # Shell-escape the entire argument so it survives tmux/pane execution
+    CODEX_FLAGS="$CODEX_FLAGS -c $(printf '%q' "$arg")"
+  }
+  codex_mcp_env AGENT_NAME "$NAME"
+  codex_mcp_env AGENT_CHAT_API "$BACKEND_URL"
+  codex_mcp_env AGENT_CHAT_BACKEND_PORT "$BACKEND_PORT"
+  codex_mcp_env AGENT_CHAT_MCP_SERVER_NAME "$MCP_SERVER_NAME"
+  [ -n "$SERVER_ID" ] && codex_mcp_env AGENT_CHAT_SERVER "$SERVER_ID"
+  [ -n "${SAVED_STATE_DIR:-}" ] && codex_mcp_env AGENTCHAT_AGENT_STATE_DIR "$SAVED_STATE_DIR"
+  [ -n "$RUNTIME_DIR" ] && codex_mcp_env AGENT_CHAT_RUNTIME_DIR "$RUNTIME_DIR"
   if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ]; then
     RID=$(cat "$RESUME_FILE")
     echo "Resuming codex session: $RID"

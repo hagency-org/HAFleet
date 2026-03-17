@@ -488,6 +488,10 @@ TMP_RUNTIME_DIR="$AGENT_DATA/tmp"
 # If resume-id already exists (e.g. recovered via agent-down), keep resume path.
 if [ ! -f "$META_FILE" ] && [ "$FRESH" = false ] && [ ! -f "$RESUME_FILE" ]; then
   FRESH=true
+# v1 agent: up-v1 pre-creates meta.json + dangling resume-id symlink before first launch.
+# Detect this case: symlink exists but target is missing → treat as fresh.
+elif [ "$FRESH" = false ] && [ ! -f "$RESUME_FILE" ] && [ -L "$RESUME_FILE" ]; then
+  FRESH=true
 fi
 
 SAVED_PATH=""
@@ -528,6 +532,8 @@ if [ -f "$META_FILE" ]; then
   SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('framework')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_PRIMARY_MODEL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('model')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_PRIMARY_EXTRA_ARGS=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('extraArgs')) or '')" 2>/dev/null || true)
+  SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('apiBaseUrl')) or '')" 2>/dev/null || true)
+  SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('apiKey')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_SUPERVISOR_PROVIDER=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('supervisor') or {}).get('provider')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_SUPERVISOR_MODEL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('supervisor') or {}).get('model')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_SUPERVISOR_REASONING=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('supervisor') or {}).get('reasoning')) or '')" 2>/dev/null || true)
@@ -1118,6 +1124,115 @@ PY
   esac
 }
 
+ensure_codex_project_trust() {
+  [ "$TYPE" = "codex" ] || return 0
+  [ -n "${AGENT_PATH:-}" ] || return 0
+
+  local status
+  status="$(
+    CODEX_CONFIG="$HOME/.codex/config.toml" AGENT_PATH="$AGENT_PATH" python3 - <<'PY'
+import os
+import pathlib
+import re
+import shutil
+import tempfile
+import time
+import tomllib
+
+config_path = pathlib.Path(os.environ["CODEX_CONFIG"]).expanduser()
+agent_path = str(pathlib.Path(os.environ["AGENT_PATH"]).resolve())
+config_path.parent.mkdir(parents=True, exist_ok=True)
+
+# Escape backslashes and double quotes for TOML basic string key
+escaped_path = agent_path.replace("\\", "\\\\").replace('"', '\\"')
+section_header = f'[projects."{escaped_path}"]'
+trust_line = 'trust_level = "trusted"'
+
+if config_path.exists():
+    raw = config_path.read_text(encoding="utf-8")
+    # Validate TOML before modifying
+    try:
+        data = tomllib.loads(raw)
+    except Exception as exc:
+        print(f"error:config.toml is malformed TOML: {exc}")
+        raise SystemExit(0)
+
+    # Check if already trusted via parsed data
+    projects = data.get("projects", {})
+    entry = projects.get(agent_path)
+    if isinstance(entry, dict) and entry.get("trust_level") == "trusted":
+        print("already")
+        raise SystemExit(0)
+
+    # Section exists but trust_level differs — update in-place
+    if isinstance(entry, dict):
+        lines = raw.splitlines(keepends=True)
+        out = []
+        in_section = False
+        replaced = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped == section_header:
+                in_section = True
+                out.append(line)
+                continue
+            if in_section and stripped.startswith("["):
+                in_section = False
+            if in_section and not stripped.startswith("#") and re.match(r'^trust_level\s*=', stripped):
+                out.append(f'{trust_line}\n')
+                replaced = True
+                in_section = False
+            else:
+                out.append(line)
+        if not replaced:
+            # trust_level key missing from section — add it after header
+            out2 = []
+            found = False
+            for line in out:
+                out2.append(line)
+                if not found and line.strip() == section_header:
+                    out2.append(f'{trust_line}\n')
+                    found = True
+            out = out2
+        content = "".join(out)
+    else:
+        # No section — append
+        content = raw
+        if not content.endswith("\n") and content:
+            content += "\n"
+        content += f"\n{section_header}\n{trust_line}\n"
+else:
+    content = f"{section_header}\n{trust_line}\n"
+
+# Backup and atomic write
+backup_dir = config_path.parent / "backups"
+backup_dir.mkdir(parents=True, exist_ok=True)
+if config_path.exists():
+    backup_path = backup_dir / f"config.toml.backup.{int(time.time() * 1000)}"
+    shutil.copy2(config_path, backup_path)
+
+with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(config_path.parent), delete=False) as handle:
+    handle.write(content)
+    temp_name = handle.name
+os.replace(temp_name, config_path)
+print("updated")
+PY
+  )"
+  case "$status" in
+    updated)
+      echo "Pre-accepted Codex trust for '$AGENT_PATH'."
+      ;;
+    already)
+      ;;
+    error:*)
+      echo "Warning: failed to pre-accept Codex trust for '$AGENT_PATH': ${status#error:}" >&2
+      ;;
+    *)
+      echo "Warning: unexpected Codex trust status for '$AGENT_PATH': ${status:-empty}" >&2
+      ;;
+  esac
+}
+
 capture_guard_matches() {
   [ -n "${CAPTURE_GUARD_FILE:-}" ] || return 0
   [ -n "${CAPTURE_GUARD_TOKEN:-}" ] || return 0
@@ -1195,6 +1310,7 @@ fi
 
 enforce_workspace_uniqueness "$AGENT_PATH"
 ensure_claude_project_trust
+ensure_codex_project_trust
 
 # ── Generate per-agent .mcp.json ──────────────────────────────────────
 # Bake all required env vars into .mcp.json for Claude Code agents.
@@ -1449,6 +1565,12 @@ append_launch_env_var "API_TOKEN"
 append_launch_env_var "AGENTCHAT_HOMEDIR"
 if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_JSON:-}" ]; then
   LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_RUNTIME_PROFILE_PRIMARY_JSON=$(shell_quote "$SAVED_RUNTIME_PROFILE_PRIMARY_JSON")"
+fi
+if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL:-}" ]; then
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX ANTHROPIC_BASE_URL=$(shell_quote "$SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL")"
+fi
+if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY:-}" ]; then
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX ANTHROPIC_API_KEY=$(shell_quote "$SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY")"
 fi
 if [ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_JSON:-}" ]; then
   LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_RUNTIME_PROFILE_SUPERVISOR_JSON=$(shell_quote "$SAVED_RUNTIME_PROFILE_SUPERVISOR_JSON")"

@@ -54,6 +54,13 @@ else
   CURL_MAX_TIME_SEC="8"
 fi
 
+_require_token() {
+  if [ -z "$TOKEN" ]; then
+    echo "Error: API_TOKEN env var required for mutation commands" >&2
+    exit 1
+  fi
+}
+
 _curl() {
   local extra_headers=()
   [ -n "$TOKEN" ] && extra_headers=(-H "Authorization: Bearer $TOKEN")
@@ -430,6 +437,7 @@ PY
     ;;
 
   dm)
+    _require_token
     agent="${1:?Usage: agent-chat-cli dm <agent> <human>}"
     human="${2:?Usage: agent-chat-cli dm <agent> <human>}"
     echo "Ensuring DM room: $agent ↔ $human ..."
