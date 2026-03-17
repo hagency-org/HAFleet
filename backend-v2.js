@@ -6661,7 +6661,7 @@ app.post('/api/agents/:name/undelete', requireBearer, (req, res) => {
   res.json({ ok: true, undeleted: true, name: agentName });
 });
 
-app.get('/api/agents/:name/launch-env', (req, res) => {
+app.get('/api/agents/:name/launch-env', requireBearer, (req, res) => {
   if (!isLocalRequest(req)) return res.status(403).json({ error: 'local-only endpoint' });
   const agentName = normalizeAgentName(req.params.name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
