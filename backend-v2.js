@@ -6406,28 +6406,29 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   const resolvedOnline = resolvedTmux ? true : Boolean(existing.online);
   // Resolve preset into runtimeProfile if presetId is provided
   let resolvedRuntimeProfile = runtimeProfile;
+  let presetFramework = null;
   if (presetId && typeof presetId === 'string') {
     const preset = frameworkPresets.find(p => p.id === presetId);
-    if (preset) {
-      resolvedRuntimeProfile = {
-        primary: {
-          framework: preset.framework || null,
-          provider: preset.provider || null,
-          model: preset.model || null,
-          reasoning: preset.reasoning || null,
-          ...(preset.extraArgs ? { extraArgs: preset.extraArgs } : {}),
-          ...(preset.apiBaseUrl ? { apiBaseUrl: preset.apiBaseUrl } : {}),
-          ...(preset.apiKey ? { apiKey: preset.apiKey } : {}),
-        },
-      };
-    }
+    if (!preset) return res.status(400).json({ error: `unknown preset: ${presetId}` });
+    presetFramework = preset.framework || null;
+    resolvedRuntimeProfile = {
+      primary: {
+        framework: preset.framework || null,
+        provider: preset.provider || null,
+        model: preset.model || null,
+        reasoning: preset.reasoning || null,
+        ...(preset.extraArgs ? { extraArgs: preset.extraArgs } : {}),
+        ...(preset.apiBaseUrl ? { apiBaseUrl: preset.apiBaseUrl } : {}),
+        ...(preset.apiKey ? { apiKey: preset.apiKey } : {}),
+      },
+    };
   }
   agents[agentName] = {
     name: agentName,
     role: role ?? existing.role ?? null,
     identity: identity ?? existing.identity ?? null,
     tmux: resolvedTmux,
-    type: agentType ?? existing.type ?? 'agent',
+    type: presetFramework ?? agentType ?? existing.type ?? 'agent',
     kind: 'agent',
     server: resolvedServer,
     online: resolvedOnline,

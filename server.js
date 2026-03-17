@@ -6955,6 +6955,7 @@ window.openNewAgentModal = async function() {
   document.getElementById('na-status').textContent = '';
   var sel = document.getElementById('na-preset');
   sel.innerHTML = '<option value="">Loading...</option>';
+  _naPresets = [];
   try {
     var r = await fetch('/api/framework-presets');
     if (r.ok) _naPresets = await r.json();
