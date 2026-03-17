@@ -6863,6 +6863,8 @@ body.page-hidden #reminder-panel.has-items{
   #terminal-wrap::after{border-radius:16px / 13px}
   #terminal{border-radius:14px / 11px}
 }
+select{cursor:pointer}
+select option{background:#0d1723;color:#e2eaf3}
 </style>
 </head>
 <body>
@@ -8003,6 +8005,7 @@ a:hover{text-decoration:underline}
 .note-form button{background:var(--surface);border:1px solid var(--border);color:var(--accent);padding:4px 12px;border-radius:4px;font-size:11px;font-family:inherit;cursor:pointer}
 .empty{text-align:center;padding:40px;color:var(--muted);font-size:13px}
 .occ{background:rgba(255,217,61,0.15);color:var(--yellow);padding:1px 6px;border-radius:8px;font-size:9px;margin-left:4px}
+select option{background:#0d1723;color:#e2eaf3}
 </style>
 </head>
 <body>
