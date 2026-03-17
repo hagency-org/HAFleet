@@ -6661,6 +6661,16 @@ app.post('/api/agents/:name/undelete', requireBearer, (req, res) => {
   res.json({ ok: true, undeleted: true, name: agentName });
 });
 
+app.get('/api/agents/:name/launch-env', (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: 'local-only endpoint' });
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+  const rp = normalizeRuntimeProfile(agent.runtimeProfile);
+  res.json({ runtimeProfile: rp || null });
+});
+
 app.post('/api/agents/:name/start', requireBearer, (req, res) => {
   if (!isLocalRequest(req)) return res.status(403).json({ error: 'local-only endpoint' });
   const agentName = normalizeAgentName(req.params.name);
@@ -6674,9 +6684,16 @@ app.post('/api/agents/:name/start', requireBearer, (req, res) => {
     return res.status(400).json({ error: `agent has no valid framework (type='${agent.type || 'null'}'). Update agent type to claude or codex first.` });
   }
   const agentchatBin = path.join(REPO_ROOT, 'bin', 'agentchat');
+  const launchEnv = { ...process.env };
+  const rp = agent.runtimeProfile?.primary;
+  if (rp?.apiBaseUrl) launchEnv.ANTHROPIC_BASE_URL = rp.apiBaseUrl;
+  if (rp?.apiKey) launchEnv.ANTHROPIC_API_KEY = rp.apiKey;
+  if (rp?.model) launchEnv.AGENTCHAT_LAUNCH_MODEL = rp.model;
+  if (rp?.extraArgs) launchEnv.AGENTCHAT_LAUNCH_EXTRA_ARGS = rp.extraArgs;
   try {
     const child = spawn(agentchatBin, ['up-v1', agentName, framework], {
       cwd: REPO_ROOT,
+      env: launchEnv,
       stdio: 'ignore',
       detached: true,
     });

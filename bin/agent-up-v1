@@ -245,6 +245,31 @@ meta["lastUp"] = os.environ["NOW"]
 meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 PY
 
+# Fetch runtimeProfile from backend (localhost-only) and merge into meta.json
+BACKEND_PORT_V1="${AGENT_CHAT_BACKEND_PORT:-8090}"
+LAUNCH_ENV_URL="http://127.0.0.1:${BACKEND_PORT_V1}/api/agents/$(python3 -c "import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=''))" "$NAME")/launch-env"
+LAUNCH_ENV_JSON="$(curl --noproxy '*' -sf "$LAUNCH_ENV_URL" 2>/dev/null || true)"
+if [ -n "$LAUNCH_ENV_JSON" ]; then
+  META_FILE="$META_FILE" LAUNCH_ENV_JSON="$LAUNCH_ENV_JSON" python3 - <<'PY'
+import json, os
+from pathlib import Path
+meta_file = Path(os.environ["META_FILE"])
+try:
+    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+except Exception:
+    meta = {}
+try:
+    env_data = json.loads(os.environ["LAUNCH_ENV_JSON"])
+    rp = env_data.get("runtimeProfile")
+    if rp and isinstance(rp, dict):
+        meta["runtimeProfile"] = rp
+        meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+except Exception:
+    pass
+PY
+  echo "  runtime profile merged from backend"
+fi
+
 if [ -f "$COMPAT_DIR/resume-id" ] && [ ! -L "$COMPAT_DIR/resume-id" ] && [ ! -f "$V1_STATE_DIR/resume-id" ]; then
   cp "$COMPAT_DIR/resume-id" "$V1_STATE_DIR/resume-id"
 fi
