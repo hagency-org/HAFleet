@@ -286,6 +286,22 @@ except Exception as e:
 PY
 fi
 
+# Verify: if meta.json has custom provider config, launch-env must have succeeded
+_has_custom_provider=$(python3 -c "
+import json
+try:
+    d = json.load(open('$META_FILE'))
+    rp = (d.get('runtimeProfile') or {}).get('primary') or {}
+    if rp.get('apiBaseUrl') or rp.get('apiKey'):
+        print('yes')
+except:
+    pass
+" 2>/dev/null)
+if [ "$_has_custom_provider" = "yes" ] && [ -z "$LAUNCH_ENV_JSON" ]; then
+  echo "FATAL: Agent has custom provider config but launch-env fetch failed. Cannot launch without runtimeProfile." >&2
+  exit 1
+fi
+
 if [ -f "$COMPAT_DIR/resume-id" ] && [ ! -L "$COMPAT_DIR/resume-id" ] && [ ! -f "$V1_STATE_DIR/resume-id" ]; then
   cp "$COMPAT_DIR/resume-id" "$V1_STATE_DIR/resume-id"
 fi
