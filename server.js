@@ -8483,7 +8483,7 @@ select option{background:#0d1723;color:#e2eaf3}
     if (!confirm('Delete agent \\'' + name + '\\'? This cannot be undone.')) return;
     showAgentStatus('Deleting ' + name + '...', '');
     try {
-      var r = await fetch('/api/agents/' + encodeURIComponent(name), { method: 'DELETE' });
+      var r = await fetch('/api/agents/' + encodeURIComponent(name) + '?force=true', { method: 'DELETE' });
       var data = await r.json().catch(function() { return {}; });
       if (!r.ok) throw new Error(data.error || 'delete failed');
       showAgentStatus(name + ' deleted.', 'status-ok');
