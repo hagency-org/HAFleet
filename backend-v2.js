@@ -6379,6 +6379,7 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     homeDir,
     workdir,
     stateDir,
+    presetId,
     subconsciousEnabled,
     managedProjects,
     human,
@@ -6403,6 +6404,24 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   const resolvedServer = normalizedServer ?? (isLocalRequest(req) ? 'local' : normalizeServer(existing.server));
   const resolvedTmux = tmux ?? existing.tmux ?? null;
   const resolvedOnline = resolvedTmux ? true : Boolean(existing.online);
+  // Resolve preset into runtimeProfile if presetId is provided
+  let resolvedRuntimeProfile = runtimeProfile;
+  if (presetId && typeof presetId === 'string') {
+    const preset = frameworkPresets.find(p => p.id === presetId);
+    if (preset) {
+      resolvedRuntimeProfile = {
+        primary: {
+          framework: preset.framework || null,
+          provider: preset.provider || null,
+          model: preset.model || null,
+          reasoning: preset.reasoning || null,
+          ...(preset.extraArgs ? { extraArgs: preset.extraArgs } : {}),
+          ...(preset.apiBaseUrl ? { apiBaseUrl: preset.apiBaseUrl } : {}),
+          ...(preset.apiKey ? { apiKey: preset.apiKey } : {}),
+        },
+      };
+    }
+  }
   agents[agentName] = {
     name: agentName,
     role: role ?? existing.role ?? null,
@@ -6441,8 +6460,8 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     task: task !== undefined
       ? normalizeAgentTask(task, agentName)
       : normalizeAgentTask(existing.task, agentName),
-    runtimeProfile: runtimeProfile !== undefined
-      ? mergeRuntimeProfileApiKeys(normalizeRuntimeProfile(runtimeProfile), normalizeRuntimeProfile(existing.runtimeProfile))
+    runtimeProfile: resolvedRuntimeProfile !== undefined
+      ? mergeRuntimeProfileApiKeys(normalizeRuntimeProfile(resolvedRuntimeProfile), normalizeRuntimeProfile(existing.runtimeProfile))
       : normalizeRuntimeProfile(existing.runtimeProfile),
     environment: (VALID_ENVIRONMENTS.has(environment) ? environment : null)
       || existing.environment || classifyEnvironment(agentName),

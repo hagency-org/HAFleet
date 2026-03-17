@@ -6923,10 +6923,9 @@ body.page-hidden #reminder-panel.has-items{
       <input id="na-name" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.3);border:1px solid rgba(0,240,255,0.15);color:#e0e0e0;font-family:inherit;font-size:12px" placeholder="my-agent">
     </div>
     <div style="margin-bottom:10px">
-      <label style="font-size:10px;color:rgba(255,255,255,0.5);letter-spacing:1px">FRAMEWORK *</label>
-      <select id="na-type" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.3);border:1px solid rgba(0,240,255,0.15);color:#e0e0e0;font-family:inherit;font-size:12px;cursor:pointer">
-        <option value="claude">claude</option>
-        <option value="codex">codex</option>
+      <label style="font-size:10px;color:rgba(255,255,255,0.5);letter-spacing:1px">PRESET *</label>
+      <select id="na-preset" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.3);border:1px solid rgba(0,240,255,0.15);color:#e0e0e0;font-family:inherit;font-size:12px;cursor:pointer">
+        <option value="">Loading presets...</option>
       </select>
     </div>
     <div style="margin-bottom:10px">
@@ -6946,14 +6945,29 @@ body.page-hidden #reminder-panel.has-items{
 </div>
 
 <script>
-window.openNewAgentModal = function() {
+var _naPresets = [];
+window.openNewAgentModal = async function() {
   var m = document.getElementById('new-agent-modal');
   m.style.display = 'flex';
   document.getElementById('na-name').value = '';
-  document.getElementById('na-type').value = 'claude';
   document.getElementById('na-identity').value = '';
   document.getElementById('na-guidance').value = '';
   document.getElementById('na-status').textContent = '';
+  var sel = document.getElementById('na-preset');
+  sel.innerHTML = '<option value="">Loading...</option>';
+  try {
+    var r = await fetch('/api/framework-presets');
+    if (r.ok) _naPresets = await r.json();
+  } catch {}
+  sel.innerHTML = '';
+  for (var i = 0; i < _naPresets.length; i++) {
+    var p = _naPresets[i];
+    var opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name + ' (' + (p.framework || '?') + ')';
+    sel.appendChild(opt);
+  }
+  if (_naPresets.length === 0) sel.innerHTML = '<option value="">No presets available</option>';
   document.getElementById('na-name').focus();
 };
 window.closeNewAgentModal = function() {
@@ -6963,7 +6977,10 @@ window.submitNewAgent = async function() {
   var name = (document.getElementById('na-name').value || '').trim();
   if (!name) { document.getElementById('na-status').textContent = 'Name is required.'; document.getElementById('na-status').style.color = '#ff6b6b'; return; }
   if (!/^[\\w\\-]+$/.test(name)) { document.getElementById('na-status').textContent = 'Invalid name — use letters, digits, hyphens, underscores.'; document.getElementById('na-status').style.color = '#ff6b6b'; return; }
-  var fw = document.getElementById('na-type').value;
+  var presetId = document.getElementById('na-preset').value;
+  if (!presetId) { document.getElementById('na-status').textContent = 'Preset is required.'; document.getElementById('na-status').style.color = '#ff6b6b'; return; }
+  var preset = _naPresets.find(function(p) { return p.id === presetId; });
+  var fw = preset ? (preset.framework || 'claude') : 'claude';
   var identity = (document.getElementById('na-identity').value || '').trim() || null;
   var guidance = (document.getElementById('na-guidance').value || '').trim() || null;
   var body = {
@@ -6971,7 +6988,7 @@ window.submitNewAgent = async function() {
     type: fw,
     identity: identity,
     role: guidance,
-    runtimeProfile: { primary: { framework: fw } },
+    presetId: presetId,
   };
   document.getElementById('na-status').textContent = 'Creating...';
   document.getElementById('na-status').style.color = 'rgba(0,240,255,0.6)';
