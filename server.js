@@ -8290,7 +8290,7 @@ select option{background:#0d1723;color:#e2eaf3}
       <div class="field-label">Extra Args</div>
       <input id="p-extraArgs" class="cfg-input" placeholder="e.g. --verbose">
       <div class="field-label">API Base URL</div>
-      <input id="p-apiBaseUrl" class="cfg-input" placeholder="e.g. https://dashscope.aliyuncs.com/compatible-mode/v1">
+      <input id="p-apiBaseUrl" class="cfg-input" placeholder="e.g. https://dashscope.aliyuncs.com/apps/anthropic">
       <div class="field-label">API Key</div>
       <input id="p-apiKey" type="password" class="cfg-input" placeholder="API key for custom provider">
       <div class="actions-row">
