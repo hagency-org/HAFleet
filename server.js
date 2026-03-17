@@ -8265,6 +8265,13 @@ select option{background:#0d1723;color:#e2eaf3}
   </div>
 
   <div class="panel">
+    <div class="panel-label">All Agents</div>
+    <div class="hint">All registered agents across all servers. Offline local agents can be started from here.</div>
+    <div id="agent-list"></div>
+    <div id="agent-status-msg" class="status-msg"></div>
+  </div>
+
+  <div class="panel">
     <div class="panel-label">Framework Presets</div>
     <div class="hint">Named bundles of framework / provider / model settings. These presets appear in each agent's Configuration dropdowns.</div>
     <div id="preset-list"></div>
@@ -8292,13 +8299,6 @@ select option{background:#0d1723;color:#e2eaf3}
       </div>
     </div>
     <div id="status-msg" class="status-msg"></div>
-  </div>
-
-  <div class="panel">
-    <div class="panel-label">All Agents</div>
-    <div class="hint">All registered agents across all servers. Offline local agents can be started from here.</div>
-    <div id="agent-list"></div>
-    <div id="agent-status-msg" class="status-msg"></div>
   </div>
 </div>
 <script>
@@ -8407,8 +8407,8 @@ select option{background:#0d1723;color:#e2eaf3}
 
   function agentStatus(a) {
     if (a.online) return '<span style="color:var(--green)">online</span>';
-    if (a.manualDown) return '<span style="color:var(--muted)">stopped</span>';
-    return '<span style="color:var(--red)">offline</span>';
+    if (a.blocked) return '<span style="color:var(--yellow)">blocked</span>';
+    return '<span style="color:var(--muted)">offline</span>';
   }
 
   function renderAgents() {
@@ -8427,9 +8427,12 @@ select option{background:#0d1723;color:#e2eaf3}
       var isLocal = !a.server || a.server === 'local' || /^local/i.test(a.server);
       var validFw = a.type === 'claude' || a.type === 'codex';
       var canStart = !a.online && isLocal && validFw;
-      var actionBtn = canStart
-        ? '<button class="btn btn-accent" onclick="startAgent(\\'' + esc(a.name) + '\\')">Start</button>'
-        : (!a.online && isLocal && !validFw ? '<span style="color:var(--muted);font-size:10px">no framework</span>' : '');
+      var startBtn = canStart
+        ? '<button class="btn btn-accent" onclick="startAgent(\\'' + esc(a.name) + '\\')">Start</button> '
+        : (!a.online && isLocal && !validFw ? '<span style="color:var(--muted);font-size:10px">no framework</span> ' : '');
+      var deleteBtn = !a.online
+        ? '<button class="btn btn-danger" onclick="deleteAgent(\\'' + esc(a.name) + '\\')">Delete</button>'
+        : '';
       h += '<tr>'
         + '<td><strong>' + esc(a.name) + '</strong></td>'
         + '<td>' + esc(a.type || '-') + '</td>'
@@ -8437,7 +8440,7 @@ select option{background:#0d1723;color:#e2eaf3}
         + '<td>' + agentStatus(a) + '</td>'
         + '<td>' + esc(srv) + '</td>'
         + '<td>' + esc(env) + '</td>'
-        + '<td>' + actionBtn + '</td>'
+        + '<td>' + startBtn + deleteBtn + '</td>'
         + '</tr>';
     }
     h += '</tbody></table>';
@@ -8474,6 +8477,18 @@ select option{background:#0d1723;color:#e2eaf3}
       showAgentStatus(name + ' starting (pid ' + (data.pid || '?') + ')', 'status-ok');
       setTimeout(fetchAgents, 5000);
     } catch (e) { showAgentStatus('Start failed: ' + e.message, 'status-error'); }
+  };
+
+  window.deleteAgent = async function(name) {
+    if (!confirm('Delete agent \\'' + name + '\\'? This cannot be undone.')) return;
+    showAgentStatus('Deleting ' + name + '...', '');
+    try {
+      var r = await fetch('/api/agents/' + encodeURIComponent(name), { method: 'DELETE' });
+      var data = await r.json().catch(function() { return {}; });
+      if (!r.ok) throw new Error(data.error || 'delete failed');
+      showAgentStatus(name + ' deleted.', 'status-ok');
+      await fetchAgents();
+    } catch (e) { showAgentStatus('Delete failed: ' + e.message, 'status-error'); }
   };
 
   fetchAgents();
