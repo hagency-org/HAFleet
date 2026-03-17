@@ -38,6 +38,18 @@ restart_relay() {
   fi
 }
 
+force_clean_workdir() {
+  local dirty
+  dirty="$(git -C "$REPO_DIR" status --porcelain 2>/dev/null || true)"
+  if [ -n "$dirty" ]; then
+    log "WARN: dirty working tree detected (deploy dir should be clean):"
+    printf '%s\n' "$dirty" | head -20 | while IFS= read -r line; do log "  $line"; done
+    log "Cleaning: git reset --hard + git clean -fd"
+    git -C "$REPO_DIR" reset --hard HEAD >/dev/null 2>&1 || true
+    git -C "$REPO_DIR" clean -fd >/dev/null 2>&1 || true
+  fi
+}
+
 # Validate startup
 if [ ! -d "$REPO_DIR/.git" ]; then
   log "FATAL: '$REPO_DIR' is not a git repository"
@@ -75,25 +87,23 @@ while true; do
     continue
   fi
 
-  dirty="$(git -C "$REPO_DIR" status --porcelain)"
-  if [ -n "$dirty" ]; then
-    log "WARN: working tree is dirty; skip deploy this round"
-    sleep "$POLL_SEC"
-    continue
-  fi
-
   if [ "$deploy_pending" = true ] && [ "$local_ref" = "$remote_ref" ]; then
     log "Retrying failed deploy at $local_ref"
   else
     log "Update detected: $local_ref -> $remote_ref"
   fi
-  if ! git -C "$REPO_DIR" pull --ff-only origin "$DEPLOY_BRANCH" 2>/dev/null; then
-    log "ERROR: git pull failed; skip this round"
+
+  force_clean_workdir
+
+  if ! git -C "$REPO_DIR" reset --hard "origin/$DEPLOY_BRANCH" >/dev/null 2>&1; then
+    log "ERROR: git reset --hard failed; retry on next poll"
     sleep "$POLL_SEC"
     continue
   fi
 
   new_ref="$(git -C "$REPO_DIR" rev-parse HEAD)"
+  log "Reset to $new_ref"
+
   if ! maybe_install_deps "$local_ref" "$new_ref"; then
     deploy_pending=true
     sleep "$POLL_SEC"
