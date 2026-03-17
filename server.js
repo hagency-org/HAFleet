@@ -3901,7 +3901,7 @@ th{
           </div>
         </article>
         <article class="panel">
-          <div class="panel-label">Tasks</div>
+          <div class="panel-label" style="display:flex;align-items:center;justify-content:space-between">Tasks<select id="task-filter-assignee" class="detail-input" style="width:auto;min-width:140px;font-size:11px;padding:2px 6px;margin-left:12px" onchange="taskListRefresh()"><option value="">All Agents</option></select></div>
           <div id="task-list-root"></div>
         </article>
         <article class="panel hidden" id="task-detail-panel">
@@ -4940,7 +4940,7 @@ th{
         + '<option value="codex"' + (sel === 'codex' ? ' selected' : '') + '>codex</option>';
     };
     const rpCustomFields = function(prefix, role, presetId) {
-      const hidden = presetId && presetId !== '__custom__' ? ' style="display:none"' : '';
+      const hidden = presetId !== '__custom__' ? ' style="display:none"' : '';
       return '<div id="cfg-' + prefix + '-custom"' + hidden + '>'
         + '<div class="field-label">Framework</div>'
         + '<select id="cfg-' + prefix + '-framework" class="detail-input">' + fwOpts(role.framework || '') + '</select>'
@@ -4954,19 +4954,32 @@ th{
         + '<div class="detail-hint" style="margin-top:2px;font-size:10px">Only CLI flags allowed. Shell operators are rejected.</div>'
         + '</div>';
     };
+    function currentPresetLabel(presetId, role) {
+      if (presetId) {
+        const p = _presetCache.find(pp => pp.id === presetId);
+        return p ? esc(p.name) : '(unknown preset)';
+      }
+      if (role && role.framework) return 'Custom (' + esc(role.framework) + (role.model ? ' / ' + esc(role.model) : '') + ')';
+      return '(none)';
+    }
+    const priCurrentLabel = currentPresetLabel(priPreset, pri);
+    const supCurrentLabel = currentPresetLabel(supPreset, sup);
     configRoot.innerHTML =
       '<div class="detail-hint">Per-agent runtime profile and role. Select a preset or choose Custom for raw fields. Changes take effect after restart.</div>'
       + '<div id="cfg-restart-banner" class="error-state" style="display:none;margin-bottom:8px;background:rgba(234,179,8,0.12);color:rgba(234,179,8,0.95);border-left:3px solid rgba(234,179,8,0.5);padding:6px 10px">Runtime profile changes take effect after agent restart. The running agent continues using its current configuration until restarted.</div>'
       + '<div class="panel"><div class="panel-label">Primary Role</div>'
       + '<div class="field-label">Preset</div>'
       + '<select id="cfg-primary-preset" class="detail-input" onchange="onPresetChange(\\'primary\\')">' + presetOpts(priPreset || (pri.framework ? '__custom__' : '')) + '</select>'
+      + '<div class="detail-hint" style="margin-top:2px;font-size:10px;color:rgba(136,192,208,0.7)">Currently running: <strong>' + priCurrentLabel + '</strong></div>'
       + rpCustomFields('primary', pri, priPreset) + '</div>'
       + '<div class="panel"><div class="panel-label">Supervisor Role</div>'
       + '<div class="field-label">Preset</div>'
       + '<select id="cfg-supervisor-preset" class="detail-input" onchange="onPresetChange(\\'supervisor\\')">' + presetOpts(supPreset || (sup.framework ? '__custom__' : '')) + '</select>'
+      + '<div class="detail-hint" style="margin-top:2px;font-size:10px;color:rgba(136,192,208,0.7)">Currently running: <strong>' + supCurrentLabel + '</strong></div>'
       + rpCustomFields('supervisor', sup, supPreset) + '</div>'
-      + '<div class="field-label">Agent Role</div>'
-      + '<input id="cfg-role" class="detail-input" value="' + esc(detail.role || '').replace(/"/g, '&quot;') + '" placeholder="Agent role description">'
+      + '<div class="field-label">Agent Description</div>'
+      + '<div class="detail-hint" style="margin-top:0;margin-bottom:4px;font-size:10px">Free-text purpose or role description for this agent. Shown in summaries and used by supervisors.</div>'
+      + '<input id="cfg-role" class="detail-input" value="' + esc(detail.role || '').replace(/"/g, '&quot;') + '" placeholder="e.g. Handles CI/CD pipeline tasks">'
       + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailConfiguration()">Save Configuration</button></div>';
 
     const ownerHtml = detail.v1
@@ -5849,7 +5862,7 @@ th{
     const sel = document.getElementById('cfg-' + prefix + '-preset');
     const custom = document.getElementById('cfg-' + prefix + '-custom');
     if (!sel || !custom) return;
-    if (sel.value === '__custom__' || sel.value === '') {
+    if (sel.value === '__custom__') {
       custom.style.display = '';
     } else {
       custom.style.display = 'none';
@@ -5990,13 +6003,37 @@ th{
   async function taskListRefresh() {
     const root = document.getElementById('task-list-root');
     if (!root) return;
+    const filterEl = document.getElementById('task-filter-assignee');
+    const filterVal = filterEl ? filterEl.value : '';
     try {
-      const r = await fetch('/api/tasks');
+      const url = filterVal ? '/api/tasks?assignee=' + encodeURIComponent(filterVal) : '/api/tasks';
+      const r = await fetch(url);
       if (!r.ok) throw new Error('status ' + r.status);
       taskListCache = await r.json();
     } catch (e) {
       root.innerHTML = '<div class="error-state">Failed to load tasks: ' + esc(e.message) + '</div>';
       return;
+    }
+    // Populate agent filter dropdown from task assignees + agents list
+    if (filterEl && !filterEl._populated) {
+      filterEl._populated = true;
+      try {
+        const ar = await fetch('/api/agents/all');
+        if (ar.ok) {
+          const agents = await ar.json();
+          const names = new Set();
+          for (const a of (Array.isArray(agents) ? agents : [])) { if (a.name) names.add(a.name); }
+          for (const t of taskListCache) { if (t.assignee) names.add(t.assignee); }
+          const sorted = [...names].sort();
+          for (const n of sorted) {
+            const opt = document.createElement('option');
+            opt.value = n;
+            opt.textContent = n;
+            if (n === filterVal) opt.selected = true;
+            filterEl.appendChild(opt);
+          }
+        }
+      } catch (_) { /* non-critical */ }
     }
     if (taskDetailViewId) {
       const found = taskListCache.find(t => t.id === taskDetailViewId);
@@ -6176,6 +6213,7 @@ th{
     }
   }
 
+  window.taskListRefresh = taskListRefresh;
   window.taskCreateSubmit = taskCreateSubmit;
   window.taskShowDetail = taskShowDetail;
   window.taskBackToList = taskBackToList;
