@@ -6668,7 +6668,11 @@ app.post('/api/agents/:name/start', requireBearer, (req, res) => {
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
   if (agent.online) return res.status(409).json({ error: 'agent already online' });
-  const framework = agent.type || 'claude';
+  const VALID_FRAMEWORKS = new Set(['claude', 'codex']);
+  const framework = agent.type;
+  if (!framework || !VALID_FRAMEWORKS.has(framework)) {
+    return res.status(400).json({ error: `agent has no valid framework (type='${agent.type || 'null'}'). Update agent type to claude or codex first.` });
+  }
   const agentchatBin = path.join(REPO_ROOT, 'bin', 'agentchat');
   try {
     const child = spawn(agentchatBin, ['up-v1', agentName, framework], {

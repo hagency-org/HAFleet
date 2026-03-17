@@ -8425,10 +8425,11 @@ select option{background:#0d1723;color:#e2eaf3}
       var srv = a.server || '-';
       var env = a.environment || '-';
       var isLocal = !a.server || a.server === 'local' || /^local/i.test(a.server);
-      var canStart = !a.online && isLocal;
+      var validFw = a.type === 'claude' || a.type === 'codex';
+      var canStart = !a.online && isLocal && validFw;
       var actionBtn = canStart
         ? '<button class="btn btn-accent" onclick="startAgent(\\'' + esc(a.name) + '\\')">Start</button>'
-        : '';
+        : (!a.online && isLocal && !validFw ? '<span style="color:var(--muted);font-size:10px">no framework</span>' : '');
       h += '<tr>'
         + '<td><strong>' + esc(a.name) + '</strong></td>'
         + '<td>' + esc(a.type || '-') + '</td>'
