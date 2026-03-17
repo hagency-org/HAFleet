@@ -5866,6 +5866,18 @@ th{
       custom.style.display = '';
     } else {
       custom.style.display = 'none';
+      if (!sel.value) {
+        const fw = document.getElementById('cfg-' + prefix + '-framework');
+        const pv = document.getElementById('cfg-' + prefix + '-provider');
+        const md = document.getElementById('cfg-' + prefix + '-model');
+        const rs = document.getElementById('cfg-' + prefix + '-reasoning');
+        const ea = document.getElementById('cfg-' + prefix + '-extraArgs');
+        if (fw) fw.value = '';
+        if (pv) pv.value = '';
+        if (md) md.value = '';
+        if (rs) rs.value = '';
+        if (ea) ea.value = '';
+      }
       const p = _presetCache.find(pp => pp.id === sel.value);
       if (p) {
         const fw = document.getElementById('cfg-' + prefix + '-framework');
@@ -5924,7 +5936,8 @@ th{
   function resolveRoleFromUI(prefix) {
     const presetSel = document.getElementById('cfg-' + prefix + '-preset');
     const presetId = presetSel ? presetSel.value : '';
-    if (presetId && presetId !== '__custom__') {
+    if (!presetId) return null;
+    if (presetId !== '__custom__') {
       const p = _presetCache.find(pp => pp.id === presetId);
       if (p) return { framework: p.framework, provider: p.provider, model: p.model, reasoning: p.reasoning, extraArgs: p.extraArgs || null, apiBaseUrl: p.apiBaseUrl || null };
     }
