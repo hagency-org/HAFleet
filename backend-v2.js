@@ -8937,12 +8937,7 @@ function startBackgroundLoops() {
   scheduleAdaptiveSweepLoop('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope', AGENT_SCOPE_SWEEP_INTERVAL_MS);
 
   // Supervisor lifecycle sweep — manages per-agent supervisor tmux sessions
-  const supervisorLifecycleSweepFn = () => {
-    const results = supervisorLifecycleManager.sweepAll();
-    if (results && results.length > 0) console.log('[supervisor-lifecycle] sweep:', JSON.stringify(results));
-    return results;
-  };
-  scheduleAdaptiveSweepLoop('sweepSupervisorLifecycle', supervisorLifecycleSweepFn, 'supervisorLifecycle', SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS);
+  scheduleAdaptiveSweepLoop('sweepSupervisorLifecycle', () => supervisorLifecycleManager.sweepAll(), 'supervisorLifecycle', SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS);
 
   // Prune resolved alerts every hour
   setInterval(() => { alertStore.pruneResolved(); }, 3600_000);
