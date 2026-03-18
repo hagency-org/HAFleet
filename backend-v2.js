@@ -178,7 +178,16 @@ function loadAgentTokens() {
         const tokenPath = path.join(agentsDir, entry.name, 'state', 'agent-token');
         try {
           const token = readFileSync(tokenPath, 'utf-8').trim();
-          if (token) { agentTokens.set(name, token); loaded++; }
+          if (token) {
+            agentTokens.set(name, token);
+            // Also store under canonical agents.json name if case differs (agentId is lowercase, agent name may be mixed-case)
+            for (const key of Object.keys(agents)) {
+              if (key !== name && key.toLowerCase() === name.toLowerCase()) {
+                agentTokens.set(key, token);
+              }
+            }
+            loaded++;
+          }
         } catch { /* missing token file — expected for un-provisioned agents */ }
       }
     } catch { /* missing agents dir */ }
