@@ -961,10 +961,12 @@ function renderMarkdownToMatrixHtml(raw) {
 
   const lines = withCodePlaceholders.split('\n');
   const out = [];
+  let olCounter = 0;
 
   for (const line of lines) {
     const blockMatch = line.match(/^@@BLOCK(\d+)@@$/);
     if (blockMatch) {
+      olCounter = 0;
       out.push(codeBlocks[Number(blockMatch[1])] || '');
       continue;
     }
@@ -974,25 +976,31 @@ function renderMarkdownToMatrixHtml(raw) {
     const orderedMatch = line.match(/^\s*\d+\.\s+(.+)$/);
     const quoteMatch = line.match(/^>\s?(.*)$/);
     if (line.trim().length === 0) {
+      olCounter = 0;
       out.push('');
       continue;
     }
     if (headingMatch) {
+      olCounter = 0;
       out.push(`<strong>${renderMarkdownInline(headingMatch[2])}</strong>`);
       continue;
     }
     if (unorderedMatch) {
+      olCounter = 0;
       out.push(`• ${renderMarkdownInline(unorderedMatch[1])}`);
       continue;
     }
     if (orderedMatch) {
-      out.push(`1. ${renderMarkdownInline(orderedMatch[1])}`);
+      olCounter++;
+      out.push(`${olCounter}. ${renderMarkdownInline(orderedMatch[1])}`);
       continue;
     }
     if (quoteMatch) {
+      olCounter = 0;
       out.push(`&gt; ${renderMarkdownInline(quoteMatch[1])}`);
       continue;
     }
+    olCounter = 0;
     out.push(renderMarkdownInline(line));
   }
 
