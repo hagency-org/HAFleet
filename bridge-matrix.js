@@ -1893,8 +1893,8 @@ export class MatrixBridge {
       if (agentMembers.length === 1 && humanMembers.length >= 1 && !isAgentUser(senderId)) {
         // 1 agent + 1-2 humans + bot → agent DM
         targetAgent = agentNameFromUserId(agentMembers[0]);
-      } else if (agentMembers.length === 0 && humanMembers.length >= 1) {
-        // Only humans + bot in room → bot command DM
+      } else if (agentMembers.length === 0 && humanMembers.length === 1) {
+        // Exactly 1 human + bot in room → bot command DM
         isBotDm = true;
       }
     } catch (e) {
