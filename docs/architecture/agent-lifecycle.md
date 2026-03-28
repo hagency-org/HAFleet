@@ -158,7 +158,7 @@ Source: `scripts/provision-v1-agent-home.js:208-278`, `docs/workspace-claude-md-
 
 A 64-character hex token is generated at provisioning time and written to `state/agent-token`. This token authenticates the agent's MCP requests to the backend via `X-Agent-Token` header.
 
-Source: `scripts/provision-v1-agent-home.js` (token generation), `lib/token-store.js` (token validation).
+Source: `scripts/provision-v1-agent-home.js` (token generation), `backend-v2.js:197-212` (`checkAgentToken()`/`requireAgentToken()` — token validation).
 
 ---
 
