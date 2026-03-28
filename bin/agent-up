@@ -1641,6 +1641,8 @@ fi
 if [ "$TYPE" = "claude" ]; then
   INIT_PROMPT="$INIT_PROMPT $CLAUDE_MODE_GUARD"
   CLAUDE_FLAGS="--dangerously-skip-permissions"
+  # Attach the per-agent MCP config so Claude discovers the agentchat MCP server
+  CLAUDE_FLAGS="$CLAUDE_FLAGS --mcp-config $(shell_quote "$AGENT_PATH/.mcp.json")"
   [ -n "$MODEL" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS --model $(shell_quote "$MODEL")"
   [ -n "$EXTRA_ARGS" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
   if [ "$FRESH" = false ] && RID=$(cat "$RESUME_FILE"); then
