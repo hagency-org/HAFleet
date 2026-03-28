@@ -61,7 +61,7 @@ POST /api/dm/ensure { agent: "alice" }
 | Created by | `ensureDmRoom()` with spy parameters |
 | Triggered by | `!spy` bot command from operator |
 
-SPY rooms use the same `ensureDmRoom()` code path but with a different key format (`spy:from↔to`) and naming convention (`SPY: from ↔ to`). Only the operator is invited — the observed agents are not aware of the SPY room.
+SPY rooms use the same `ensureDmRoom()` code path but with a different key format (`spy:from↔to`) and naming convention (`SPY: from ↔ to`). The `!spy` command invites the operator into the existing agent-agent DM room — the observed agents are active participants and can see the operator when invited.
 
 ### 1.3 Group Rooms
 
