@@ -192,14 +192,14 @@ All stores are JSON-file-backed with in-memory caching and periodic flush:
 
 | Store | File | Module | Purpose |
 |-------|------|--------|---------|
-| Agent Registry | `data/agents.json` | `lib/agent-registry.js` | Agent records (name, framework, status, groups, runtime info) |
-| Message Store | `data/messages.json` | `lib/message-store.js` | All inter-agent messages |
-| Group Store | `data/groups.json` | `lib/group-store.js` | Group definitions and membership |
+| Agent Registry | `data/agents.json` | inline in `backend-v2.js` (`loadJson`/`saveJson` block, lines 2640-2673) | Agent records (name, framework, status, groups, runtime info) |
+| Message Store | `data/messages.json` | inline in `backend-v2.js` | All inter-agent messages |
+| Group Store | `data/groups.json` | inline in `backend-v2.js` | Group definitions and membership |
 | Task Store | `data/tasks.json` | `lib/task-store.js` | Task records with lifecycle state |
 | Alert Store | `data/alerts.json` | `lib/alert-store.js` | Alert tickets (open→acknowledged→assigned→resolved→suppressed) |
-| Token Store | `data/tokens.json` | `lib/token-store.js` | Per-agent auth tokens |
-| Cursor Store | `data/cursors.json` | inline in backend-v2 | Per-agent cursor positions for inbox tracking |
-| Attachment Store | `data/attachments/` | `lib/attachment-store.js` | File attachments (metadata JSON + binary blobs) |
+| Token Store | `data/tokens.json` | inline in `backend-v2.js` (per-agent token loader, lines 163-195) | Per-agent auth tokens |
+| Cursor Store | `data/cursors.json` | inline in `backend-v2.js` | Per-agent cursor positions for inbox tracking |
+| Attachment Store | `data/attachments/` | inline in `backend-v2.js` (media staging handler, lines 8250-8293) | File attachments (metadata JSON + binary blobs) |
 | Supervisor Snapshot Store | `data/supervisor-snapshots.json` | `lib/supervisor-snapshot-store.js` | Time-series supervisor assessments per agent |
 
 Source: `backend-v2.js:87-151` (store initialization).
@@ -383,14 +383,11 @@ All library modules live in `lib/` and are imported by the core services.
 
 | Module | Lines | Used By | Purpose |
 |--------|-------|---------|---------|
-| `agent-registry.js` | ~180 | backend-v2 | Agent CRUD, field validation, JSON persistence |
-| `message-store.js` | ~250 | backend-v2 | Message storage, query with filters (agent, group, since, limit), acknowledgment |
-| `group-store.js` | ~150 | backend-v2 | Group CRUD, membership management |
 | `task-store.js` | ~200 | backend-v2 | Task lifecycle (active/waiting/done), heartbeat, timeout detection |
 | `alert-store.js` | 353 | backend-v2 | Alert ticket lifecycle: open→acknowledged→assigned→resolved→suppressed |
-| `token-store.js` | ~120 | backend-v2 | Per-agent token generation, validation, enforcement modes (hard/soft/audit) |
-| `attachment-store.js` | ~180 | backend-v2 | Attachment metadata + blob storage in `data/attachments/` |
 | `supervisor-snapshot-store.js` | 322 | backend-v2 | Time-series supervisor assessments, query by agent/time range |
+
+> **Note**: Agent registry, message store, group store, token store, attachment store, and cursor store do not have separate lib/ modules. They are managed inline in `backend-v2.js` using `loadJson`/`saveJson` helpers (lines 2640-2673).
 
 ### 3.2 Supervisor Modules
 
@@ -417,8 +414,6 @@ Source: `lib/supervisor-lifecycle-manager.js:45-80` (state machine).
 | Module | Lines | Purpose |
 |--------|-------|---------|
 | `eventsource-mini.js` | 95 | Minimal SSE client with 45s activity timeout, exponential backoff, custom headers |
-| `messaging.js` | ~100 | Message construction helpers, recipient resolution |
-| `group-manager.js` | ~120 | Higher-level group operations (create-with-members, DM pair resolution) |
 | `mcp-server-core.js` | 711 | Per-agent MCP server (see §2.4) |
 | `push-relay-core.js` | 822 | Per-agent push relay (see §2.5) |
 
@@ -718,15 +713,14 @@ agent-up
   └─► Launch agent in tmux session (claude or codex binary)
 ```
 
-**Workspace Templates** (5 files in `workspace-templates/`):
+**Workspace Templates** (sourced from `docs/workspace-*.md`, see `scripts/provision-v1-agent-home.js:17-20`):
 
-| Template | Purpose | Key Variables |
-|----------|---------|---------------|
-| `workspace-claude-md.mustache` | Agent CLAUDE.md | `{{agentName}}`, `{{agentId}}`, `{{layoutVersion}}` |
-| `workspace-agents-md.mustache` | Agent AGENTS.md | `{{role}}`, `{{task}}`, `{{groups}}` |
-| `workspace-plan-md.mustache` | Initial plan.md | `{{task}}`, `{{context}}` |
-| `workspace-progress-md.mustache` | Initial progress.md | `{{agentName}}` |
-| `workspace-projects-md.mustache` | Project mapping | `{{projectName}}`, `{{projectPath}}`, `{{linkMode}}` |
+| Template | Purpose |
+|----------|---------|
+| `docs/workspace-claude-md-template.md` | Agent workspace CLAUDE.md |
+| `docs/workspace-agents-md-template.md` | Agent workspace AGENTS.md |
+| `docs/workspace-supervisor-claude-template.md` | Supervisor workspace CLAUDE.md |
+| `docs/workspace-supervisor-agents-template.md` | Supervisor workspace AGENTS.md |
 
 Source: `scripts/provision-v1-agent-home.js:1-726`, `scripts/configure-v1-subconscious.js:1-455`.
 

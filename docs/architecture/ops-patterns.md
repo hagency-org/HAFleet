@@ -65,9 +65,10 @@ Three git-poll-based autodeploy scripts manage continuous deployment across envi
 **Service restart** (lines 27-47):
 ```
 restart_services():
-  systemctl --user restart agentchat-backend-v2
-  systemctl --user restart agentchat-bridge-matrix
-  systemctl --user restart agentchat-server
+  systemctl restart agent-chat-v2
+  wait_for_backend (30s health gate)
+  systemctl restart agent-chat
+  systemctl restart bridge-matrix
 ```
 
 **Deploy cycle** (lines 96-146):
@@ -100,10 +101,9 @@ wait_for_backend():
 ```
 
 **Service restart order** (lines 55-93):
-1. Restart `agentchat-backend-v2`
+1. Restart `agent-chat-v2` (backend)
 2. `wait_for_backend` (30s timeout)
-3. Restart `agentchat-bridge-matrix`
-4. Restart `agentchat-server`
+3. Restart remaining services (`agent-chat`, `bridge-matrix`)
 
 **Systemd unit**: `agent-chat-stable-autodeploy.service`
 - Runs as root
@@ -383,11 +383,12 @@ Agent ──(every ~60s)──► POST /api/heartbeat ──► backend stores t
 
 | Service | Log Method | Location |
 |---------|-----------|----------|
-| backend-v2 | systemd journal | `journalctl --user -u agentchat-backend-v2` (dev) |
-| backend-v2 (stable) | systemd journal + file | `agent-chat-live/logs/` |
-| bridge-matrix | systemd journal | `journalctl --user -u agentchat-bridge-matrix` |
-| server | systemd journal | `journalctl --user -u agentchat-server` |
-| push-relay | systemd journal | `journalctl --user -u agentchat-push-relay` |
+| backend-v2 (dev) | systemd journal | `journalctl --user -u agent-chat-dev-backend` |
+| backend-v2 (stable) | systemd journal + file | `journalctl -u agent-chat-v2`, `agent-chat-live/logs/` |
+| bridge-matrix | systemd journal | `journalctl -u bridge-matrix` |
+| server (dev) | systemd journal | `journalctl --user -u agent-chat-dev-web` |
+| server (stable) | systemd journal | `journalctl -u agent-chat` |
+| push-relay | systemd journal | `journalctl -u push-relay` |
 | push-relay (remote) | systemd journal | `journalctl -u push-relay-autodeploy` on remote host |
 | autodeploy (dev) | systemd journal | `journalctl --user -u agentchat-dev-autodeploy` |
 | autodeploy (stable) | file | `agent-chat-live/logs/autodeploy.log` |
@@ -633,7 +634,7 @@ Remote agents run on separate servers and communicate with the central backend v
 │        Remote Server           │◄─────────────────────│   Central Backend    │
 │                                │                      │   (backend-v2 :8090) │
 │  ┌──────────┐  ┌────────────┐  │   SSE subscribe      │                      │
-│  │  Agent   │  │ Push-Relay │──┼──────────────────────►│   /api/events/stream │
+│  │  Agent   │  │ Push-Relay │──┼──────────────────────►│   /api/stream │
 │  │  (tmux)  │◄─┤            │  │                      │                      │
 │  └──────────┘  │  heartbeat │──┼──POST /api/heartbeat─►│                      │
 │                │  messages   │──┼──POST /api/messages──►│                      │
@@ -656,7 +657,7 @@ The push-relay is the core communication component for remote agents.
 #### Connection
 
 **SSE subscription** (`push-relay-core.js:697-717`):
-- Connects to `GET /api/events/stream` on the central backend
+- Connects to `GET /api/stream` on the central backend
 - Sends `Authorization: Bearer <API_TOKEN>` header
 - Receives server-sent events for messages, heartbeats, agent status
 
@@ -741,7 +742,7 @@ The push-relay is the core communication component for remote agents.
 | Direction | Protocol | Port | Purpose |
 |-----------|----------|------|---------|
 | Remote → Central | HTTPS | 8090 | API calls (heartbeat, messages) |
-| Remote → Central | HTTPS | 8090 | SSE subscription (`/api/events/stream`) |
+| Remote → Central | HTTPS | 8090 | SSE subscription (`/api/stream`) |
 | Central → Remote | None | — | No inbound connections required |
 
 **Key point**: The push-relay initiates all connections. The remote server needs outbound HTTPS access to the central backend only. No inbound ports need to be opened on the remote server.
@@ -767,9 +768,8 @@ journalctl --user -u agentchat-dev-autodeploy --since "1 hour ago"
 cd ~/laplace/agent-chat
 git pull --ff-only origin master
 npm install
-systemctl --user restart agentchat-backend-v2
-systemctl --user restart agentchat-bridge-matrix
-systemctl --user restart agentchat-server
+systemctl --user restart agent-chat-dev-backend
+systemctl --user restart agent-chat-dev-web
 ```
 
 #### Stable Deploy (automatic, health-gated)
@@ -785,14 +785,14 @@ tail -f ~/laplace/agent-chat-live/logs/autodeploy.log
 cd ~/laplace/agent-chat-live
 git pull --ff-only origin stable
 npm install
-systemctl restart agentchat-backend-v2
+systemctl restart agent-chat-v2
 # Wait for backend health
 for i in $(seq 1 30); do
   curl -sf http://localhost:8090/api/agents && break
   sleep 1
 done
-systemctl restart agentchat-bridge-matrix
-systemctl restart agentchat-server
+systemctl restart bridge-matrix
+systemctl restart agent-chat
 ```
 
 ### 5.2 Agent Restart
@@ -910,9 +910,9 @@ curl -sf http://localhost:8090/api/agents
 export AGENTCHAT_AGENT_TOKEN_MODE=hard   # or: audit, off
 
 # 2. Restart backend to pick up new mode
-systemctl --user restart agentchat-backend-v2   # dev
+systemctl --user restart agent-chat-dev-backend   # dev
 # or
-systemctl restart agentchat-backend-v2          # stable
+systemctl restart agent-chat-v2                   # stable
 
 # 3. Verify mode is active
 curl -s http://localhost:8090/api/health | grep tokenMode
@@ -920,7 +920,7 @@ curl -s http://localhost:8090/api/health | grep tokenMode
 
 **Caution**: Switching from `off` → `hard` will immediately reject any agent without a valid token. Ensure all agents have tokens provisioned before flipping to `hard`. Use `audit` mode first to identify agents that would fail.
 
-**Token provisioning**: Tokens are generated per-agent at registration time and stored in `lib/token-store.js`. Agents receive their token during provisioning and include it as `X-Agent-Token` header on API calls.
+**Token provisioning**: Tokens are generated per-agent at registration time and stored in `data/tokens.json` (managed inline in `backend-v2.js`). Agents receive their token during provisioning and include it as `X-Agent-Token` header on API calls.
 
 ### 5.5 Orphan Room Cleanup
 
@@ -973,19 +973,17 @@ curl -X DELETE -H "Authorization: Bearer <admin_token>" \
 
 ```bash
 # ─── Dev environment (systemctl --user) ───
-systemctl --user status agentchat-backend-v2
-systemctl --user status agentchat-bridge-matrix
-systemctl --user status agentchat-server
+systemctl --user status agent-chat-dev-backend
+systemctl --user status agent-chat-dev-web
 systemctl --user status agentchat-dev-autodeploy
 
-systemctl --user restart agentchat-backend-v2
-systemctl --user restart agentchat-bridge-matrix
-systemctl --user restart agentchat-server
+systemctl --user restart agent-chat-dev-backend
+systemctl --user restart agent-chat-dev-web
 
 # ─── Stable environment (systemctl as root) ───
-systemctl status agentchat-backend-v2
-systemctl status agentchat-bridge-matrix
-systemctl status agentchat-server
+systemctl status agent-chat-v2
+systemctl status bridge-matrix
+systemctl status agent-chat
 systemctl status agent-chat-stable-autodeploy
 
 # ─── Health checks ───
@@ -994,7 +992,7 @@ curl -s http://localhost:8090/api/health          # Health summary
 curl -s http://localhost:8084/                     # Dashboard
 
 # ─── Logs ───
-journalctl --user -u agentchat-backend-v2 -f     # Dev backend logs
-journalctl --user -u agentchat-bridge-matrix -f   # Dev bridge logs
+journalctl --user -u agent-chat-dev-backend -f    # Dev backend logs
+journalctl --user -u agent-chat-dev-web -f         # Dev web/dashboard logs
 tail -f ~/laplace/agent-chat-live/logs/*.log       # Stable logs
 ```
