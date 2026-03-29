@@ -4275,7 +4275,18 @@ th{
       });
     }
     if (next === 'dm' && !dmLoaded) loadDmHistory();
-    if (next === 'tasks') taskListRefresh();
+    if (next === 'tasks') {
+      // Auto-set assignee filter to monitored agent if one is selected
+      const filterEl = document.getElementById('task-filter-assignee');
+      if (filterEl && monitoredAgent && !filterEl._userOverride) {
+        filterEl.value = monitoredAgent.name;
+        sessionStorage.setItem('task_filter_assignee', monitoredAgent.name);
+        const u = new URL(window.location);
+        u.searchParams.set('assignee', monitoredAgent.name);
+        history.replaceState(null, '', u);
+      }
+      taskListRefresh();
+    }
   }
 
   // ── DM tab logic ──────────────────────────────
@@ -6017,6 +6028,21 @@ th{
     const root = document.getElementById('task-list-root');
     if (!root) return;
     const filterEl = document.getElementById('task-filter-assignee');
+    // Restore persisted filter on first load
+    if (filterEl && !filterEl._initialized) {
+      filterEl._initialized = true;
+      const urlAssignee = new URL(window.location).searchParams.get('assignee');
+      const saved = urlAssignee || sessionStorage.getItem('task_filter_assignee');
+      if (saved) filterEl.value = saved;
+      filterEl.addEventListener('change', () => {
+        filterEl._userOverride = true;
+        sessionStorage.setItem('task_filter_assignee', filterEl.value);
+        const u = new URL(window.location);
+        if (filterEl.value) u.searchParams.set('assignee', filterEl.value);
+        else u.searchParams.delete('assignee');
+        history.replaceState(null, '', u);
+      });
+    }
     const filterVal = filterEl ? filterEl.value : '';
     try {
       const url = filterVal ? '/api/tasks?assignee=' + encodeURIComponent(filterVal) : '/api/tasks';
@@ -7824,10 +7850,14 @@ document.getElementById('new-agent-modal').addEventListener('click', function(e)
     function agentBtnHtml(a) {
       const isRemote = a.remote;
       const isActive = typeof a.activeNow === 'boolean' ? a.activeNow : !!a.active;
+      const isSupervisor = a.name.startsWith('supervisor-');
       const dot = isRemote ? '&#9826;' : (isActive ? '&#9679;' : '&#9675;');
       const cls = ['agent-btn', isRemote ? 'remote-agent' : (isActive ? 'active-agent' : 'inactive-agent'), isRemote && a.alive ? 'alive' : '', a.name === selectedName ? 'selected' : ''].filter(Boolean).join(' ');
-      return '<button class="' + cls + '" data-name="' + esc(a.name) + '" data-tmux="' + esc(a.tmux || '') + '">'
-        + '<span class="dot">' + dot + '</span>' + esc(a.name) + '</button>';
+      const supBadge = isSupervisor ? '<span style="font-size:8px;opacity:0.6;margin-left:4px;vertical-align:middle">SUP</span>' : '';
+      const targetName = isSupervisor ? a.name.replace(/^supervisor-/, '') : '';
+      return '<button class="' + cls + '" data-name="' + esc(a.name) + '" data-tmux="' + esc(a.tmux || '') + '"'
+        + (targetName ? ' data-sup-target="' + esc(targetName) + '"' : '') + '>'
+        + '<span class="dot">' + dot + '</span>' + esc(a.name) + supBadge + '</button>';
     }
     let html = '';
     for (const env of envOrder) {
@@ -7842,6 +7872,11 @@ document.getElementById('new-agent-modal').addEventListener('click', function(e)
     agentButtonsEl.innerHTML = html;
     for (const btn of agentButtonsEl.querySelectorAll('.agent-btn')) {
       btn.addEventListener('click', () => {
+        const supTarget = btn.dataset.supTarget;
+        if (supTarget) {
+          const target = agentStatusList.find(x => x.name === supTarget);
+          if (target && target.tmux) { selectAgent(target); return; }
+        }
         const agent = agentStatusList.find(x => x.name === btn.dataset.name);
         if (agent && agent.tmux) selectAgent(agent);
       });
