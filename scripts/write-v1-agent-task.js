@@ -293,8 +293,10 @@ async function main() {
   if (normalizeText(args.graphId, 255) || normalizeText(args.nodeId, 255)) {
     const graphUpdate = buildGraphPayload(command, args);
     const apiBaseUrl = explicitBaseUrl || defaultApiBaseUrl(process.env);
+    const graphUrl = `${apiBaseUrl}/api/task-graphs/${encodeURIComponent(graphUpdate.graphId)}/nodes/${encodeURIComponent(graphUpdate.nodeId)}`;
+    console.error(`[task-writer] PATCH ${graphUrl}`);
     const response = await fetch(
-      `${apiBaseUrl}/api/task-graphs/${encodeURIComponent(graphUpdate.graphId)}/nodes/${encodeURIComponent(graphUpdate.nodeId)}`,
+      graphUrl,
       {
         method: 'PATCH',
         headers: authHeaders,
@@ -329,6 +331,7 @@ async function main() {
 
   const apiUrl = explicitBaseUrl || defaultApiBaseUrl(process.env);
   const targetUrl = `${apiUrl}/api/agents/${encodeURIComponent(manifest.name)}`;
+  console.error(`[task-writer] PATCH ${targetUrl}`);
   const response = await fetch(targetUrl, {
     method: 'PATCH',
     headers: authHeaders,
