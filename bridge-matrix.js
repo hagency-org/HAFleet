@@ -2285,8 +2285,13 @@ export class MatrixBridge {
       if (name.startsWith('DM: ') || name.startsWith('SPY: ')) return null;
 
       // Check if group exists in backend, create if not
-      const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
-      if (existing.error) {
+      let existing = null;
+      try {
+        existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
+      } catch {
+        // 404 or other error means group doesn't exist yet — we'll create it below
+      }
+      if (!existing || existing.error) {
         const joinedMembers = await this.botClient.getJoinedRoomMembers(roomId);
         const agentMembers = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
         const humanMembers = joinedMembers
