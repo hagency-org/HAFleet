@@ -18,10 +18,17 @@ describe('SupervisorLifecycleManager', () => {
   let agents;
   let runtimes;
   let broadcastEvents;
+  let originalPath;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    originalPath = process.env.PATH;
     tmpDir = mkdtempSync(path.join(os.tmpdir(), 'supervisor-lifecycle-test-'));
+    // Create a dummy `claude` binary so binaryExistsOnPath() succeeds in CI
+    const binDir = path.join(tmpDir, 'bin');
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(path.join(binDir, 'claude'), '#!/bin/sh\nexit 0', { mode: 0o755 });
+    process.env.PATH = `${binDir}:${process.env.PATH}`;
     broadcastEvents = [];
     agents = {
       'ac-topleader': { name: 'ac-topleader', kind: 'agent', online: true },
@@ -57,6 +64,7 @@ describe('SupervisorLifecycleManager', () => {
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
+    process.env.PATH = originalPath;
     delete process.env.AGENTCHAT_HOMEDIR;
     delete process.env.SUPERVISOR_TRAILING_HEARTBEAT_PERIODS;
     delete process.env.SUPERVISOR_HEARTBEAT_TTL_MS;
