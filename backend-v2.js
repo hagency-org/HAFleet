@@ -3181,7 +3181,16 @@ function appendSystemInfoLog(event) {
   }
 }
 
-function emitSystemInfo(summary, full = '', alertType = null) {
+// Severity classification for alert types
+const ALERT_SEVERITY_MAP = {
+  swap_high: 'critical', server_offline: 'critical',
+  agent_blocked: 'warning', mcp_missing: 'warning', agent_offline: 'warning',
+  resource_alert: 'warning', agent_rule: 'warning', bridge_warning: 'warning',
+  mcp_recovered: 'info', swap_clear: 'info',
+  server_takeover: 'info', supervisor_nudge: 'info', supervisor_escalation: 'warning',
+};
+
+function emitSystemInfo(summary, full = '', alertType = null, opts = {}) {
   ensureInfoGroup();
   const event = {
     id: `sys_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -4663,7 +4672,6 @@ function refreshServerLiveness() {
         if (markAgentsOfflineForServer(serverId, `server-offline:${serverId}`, true)) {
           agentsChanged = true;
         }
-        emitSystemInfo(`Remote server '${serverId}' offline`, `Server '${serverId}' heartbeat timed out (> ${HEARTBEAT_TTL_MS}ms). Marked related agents offline.`, 'server_offline');
       }
     }
   }
@@ -5522,7 +5530,7 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   server.agentCount = liveAgents.length;
 
   if (!wasOnline) {
-    emitSystemInfo(`Remote server '${serverId}' online`, `Server '${serverId}' heartbeat restored. Active sessions=${sessions.length}, agents=${liveAgents.length}.`, 'server_online');
+    // Server online/offline info notifications removed (lid-close spam — 5.43)
   }
   if (lease.takeover) {
     emitSystemInfo(
@@ -6081,8 +6089,7 @@ app.post('/api/servers/:id/offline', requireBearer, (req, res) => {
   if (markAgentsOfflineForServer(serverId, reason, true)) saveAgents();
   saveServers();
   if (wasOnline && !maintenance) {
-    const detail = (typeof req.body?.reason === 'string' && req.body.reason.trim()) ? req.body.reason.trim() : 'offline';
-    emitSystemInfo(`Remote server '${serverId}' offline`, `Server '${serverId}' reported offline (${detail}).`, 'server_offline');
+    // Server offline info notification removed (lid-close spam — 5.43)
   }
   res.json({
     ok: true,
