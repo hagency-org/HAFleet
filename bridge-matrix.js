@@ -1230,6 +1230,7 @@ export class MatrixBridge {
     this._backendHealthy = true;          // false when backend is unresponsive
     this._reconcileSuspendLogged = false; // log suspension only once
     this._loggedUntrustedRooms = new Set(); // dedup scan-joined trust logs
+    this._bridgeCreatedGroups = new Set(); // groups we POST'd — skip SSE echo
     this._warningRouter = new NotificationRouter({
       warning: {
         cooldownMs: WARNING_DEDUPE_WINDOW_MS,
@@ -2004,6 +2005,7 @@ export class MatrixBridge {
             .filter(m => !isAgentUser(m) && m !== this.botUserId)
             .map(m => humanNameFromUserId(m))
             .filter(Boolean);
+          this._bridgeCreatedGroups.add(name);
           await backendApi('POST', '/api/groups', {
             name,
             members: [...members, ...humanMembers],
@@ -2023,6 +2025,7 @@ export class MatrixBridge {
               .filter(m => !isAgentUser(m) && m !== this.botUserId)
               .map(m => humanNameFromUserId(m))
               .filter(Boolean);
+            this._bridgeCreatedGroups.add(name);
             await backendApi('POST', '/api/groups', {
               name,
               members: [...members, ...humanMembers],
@@ -2304,6 +2307,7 @@ export class MatrixBridge {
           .filter(m => !isAgentUser(m) && m !== this.botUserId)
           .map(m => humanNameFromUserId(m))
           .filter(Boolean);
+        this._bridgeCreatedGroups.add(name);
         await backendApi('POST', '/api/groups', {
           name,
           members: [...agentMembers, ...humanMembers],
@@ -2663,6 +2667,9 @@ export class MatrixBridge {
   }
 
   async onGroupCreated(group) {
+    // Skip SSE echo — bridge itself created this group
+    if (this._bridgeCreatedGroups.delete(group.name)) return;
+
     // Skip if room already exists for this group (e.g. created from Matrix)
     if (roomForGroup(group.name)) return;
 
