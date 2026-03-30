@@ -63,6 +63,12 @@ let mcpSessionCache = new Set();
 const mcpMissCount = new Map(); // per-agent consecutive MCP-absent scan count
 const MCP_MISS_THRESHOLD = 6;  // report mcpPresent=false after 6 consecutive misses (30s at 5s scan)
 
+// Idle-gate relay queue: holds messages for agents that are currently active (not idle enough)
+const RELAY_QUEUE_DRAIN_INTERVAL_MS = Number.parseInt(process.env.RELAY_QUEUE_DRAIN_INTERVAL_MS || '3000', 10);
+const RELAY_QUEUE_MAX_AGE_MS = Number.parseInt(process.env.RELAY_QUEUE_MAX_AGE_MS || '300000', 10);
+const relayQueue = new Map(); // Map<agentName, Array<{msg, notification, target, dedupeKey, queuedAt}>>
+let relayQueueDrainTimer = null;
+
 const COMPACT_PATTERNS = [
   { marker: 'codex-context-compacted', summary: 'Context compacted', re: /(?:^|\n)\s*(?:•\s*)?Context compacted\s*(?:\n|$)/i },
   { marker: 'claude-conversation-compacted', summary: 'Conversation compacted (ctrl+o for history)', re: /(?:^|\n)\s*(?:✻\s*)?Conversation compacted \(ctrl\+o for history\)\s*(?:\n|$)/i },
@@ -665,6 +671,14 @@ function markDelivered(key) {
   }
 }
 
+function normalizeRelayPriority(msg) {
+  const val = msg?.priority;
+  if (typeof val !== 'string') return 'normal';
+  const p = val.trim().toLowerCase();
+  if (p === 'high' || p === 'urgent') return p;
+  return 'normal';
+}
+
 async function handleMessage(raw) {
   let msg;
   try {
@@ -684,6 +698,22 @@ async function handleMessage(raw) {
     if (delivered.has(dedupeKey)) continue;
 
     const target = route.target || `${agentName}:0.0`;
+
+    // Idle gate: hold message if agent is actively working (not idle enough)
+    const priority = normalizeRelayPriority(msg);
+    const bypassIdleGate = priority === 'high' || priority === 'urgent';
+    if (!bypassIdleGate) {
+      const metrics = computeActivityMetrics(agentName, target);
+      if (metrics && metrics.activeNow) {
+        // Agent is active — queue for later delivery
+        const notification = await buildNotification(agentName, msg);
+        if (!relayQueue.has(agentName)) relayQueue.set(agentName, []);
+        relayQueue.get(agentName).push({ msg, notification, target, dedupeKey, queuedAt: Date.now() });
+        console.log(`[push-relay] queued ${msg.id} -> ${agentName} (agent active, priority=${priority})`);
+        continue;
+      }
+    }
+
     const notification = await buildNotification(agentName, msg);
     if (pushToTmuxImpl(target, notification)) {
       markDelivered(dedupeKey);
@@ -691,6 +721,36 @@ async function handleMessage(raw) {
     } else {
       logDeliverySkip(agentName, msg, 'tmux-inject-failed', { server: route.server, target });
     }
+  }
+}
+
+function drainRelayQueue() {
+  const now = Date.now();
+  for (const [agentName, entries] of relayQueue) {
+    // Drop stale entries first
+    while (entries.length > 0 && (now - entries[0].queuedAt) > RELAY_QUEUE_MAX_AGE_MS) {
+      const stale = entries.shift();
+      console.log(`[push-relay] dropped stale queued ${stale.msg.id} -> ${agentName} (age=${now - stale.queuedAt}ms)`);
+    }
+    if (entries.length === 0) { relayQueue.delete(agentName); continue; }
+
+    // Check if agent is now idle enough
+    const { target } = entries[0];
+    const metrics = computeActivityMetrics(agentName, target);
+    if (metrics && metrics.activeNow) continue; // still active, keep holding
+
+    // Agent is idle (or metrics unavailable) — deliver all queued messages
+    while (entries.length > 0) {
+      const entry = entries.shift();
+      if (delivered.has(entry.dedupeKey)) continue;
+      if (pushToTmuxImpl(entry.target, entry.notification)) {
+        markDelivered(entry.dedupeKey);
+        console.log(`[push-relay] delivered queued ${entry.msg.id} -> ${agentName} (held ${now - entry.queuedAt}ms)`);
+      } else {
+        console.log(`[push-relay] queued delivery failed ${entry.msg.id} -> ${agentName}`);
+      }
+    }
+    relayQueue.delete(agentName);
   }
 }
 
@@ -734,6 +794,9 @@ async function main() {
     scanBlockedStates()
       .catch((e) => console.error(`[push-relay] block scan failed: ${e.message}`));
   }, BLOCK_SCAN_INTERVAL_MS);
+  relayQueueDrainTimer = setInterval(() => {
+    try { drainRelayQueue(); } catch (e) { console.error(`[push-relay] queue drain failed: ${e.message}`); }
+  }, RELAY_QUEUE_DRAIN_INTERVAL_MS);
   connectSse();
 }
 
@@ -748,6 +811,7 @@ function scheduleBootstrapRetry(reason = 'unknown') {
 }
 
 async function gracefulExit(signal) {
+  if (relayQueueDrainTimer) clearInterval(relayQueueDrainTimer);
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   console.log(`[push-relay] received ${signal}, marking server offline`);
   await sendOfflineNotice(signal);
@@ -768,6 +832,7 @@ function resetRelayState() {
   mcpMissCount.clear();
   mcpSessionCacheAt = 0;
   mcpSessionCache = new Set();
+  relayQueue.clear();
   execFileAsyncImpl = execFileAsync;
   pushToTmuxImpl = pushToTmux;
 }
@@ -796,10 +861,13 @@ export {
   BLOCK_PATTERNS,
   buildNotification,
   detectBlockedReason,
+  drainRelayQueue,
   evaluateAgentRouting,
   handleMessage,
   main,
   messageRecipients,
+  normalizeRelayPriority,
+  relayQueue,
   resetRelayState,
   scanBlockedStates,
   seedRelayState,
