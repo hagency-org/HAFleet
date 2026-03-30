@@ -10,23 +10,11 @@ import {
   setPushRelayTestHooks,
   setPushToTmuxForTest,
 } from '../lib/push-relay-core.js';
-import {
-  buildNotification as buildRemoteNotification,
-  detectBlockedReason as detectRemoteBlockedReason,
-  handleMessage as handleRemoteMessage,
-  resetRelayState as resetRemoteRelayState,
-  scanBlockedStates as scanRemoteBlockedStates,
-  seedRelayState as seedRemoteRelayState,
-  setPushRelayTestHooks as setRemotePushRelayTestHooks,
-  setPushToTmuxForTest as setRemotePushToTmuxForTest,
-} from '../remote/lib/push-relay-core.js';
 
 describe('push relay dispatch', () => {
   afterEach(() => {
     resetRelayState();
-    resetRemoteRelayState();
     setPushRelayTestHooks();
-    setRemotePushRelayTestHooks();
   });
 
   test('formats MCP notifications for actionable human messages', async () => {
@@ -210,59 +198,24 @@ describe('push relay dispatch', () => {
     // Run scan 6 — now it should flip to mcpPresent=false
     await scanBlockedStates();
 
-    // Verify the debounce works by checking remote relay has same behavior
-    seedRemoteRelayState({
-      localAgentNames: ['alpha'],
-      agents: [{ name: 'alpha', server: null, tmux: 'alpha:0.0' }],
-      mcpSessions: [],
-    });
-    setRemotePushRelayTestHooks({
-      execFileAsync: async () => ({ stdout: '', stderr: '' }),
-    });
-    for (let i = 0; i < 6; i++) {
-      await scanRemoteBlockedStates();
-    }
-    // Both should behave identically — no assertion on internal state,
-    // just verifying no crash and debounce logic runs cleanly
+    // Single codebase — debounce logic verified above
   });
 
-  test('keeps remote notification formatting and blocked detection in parity with the local relay', async () => {
-    const localDelivered = [];
-    const remoteDelivered = [];
-    const state = {
+  test('notification formatting and blocked detection work correctly', async () => {
+    seedRelayState({
       localAgentNames: ['alpha'],
       agents: [{ name: 'beta', server: null, tmux: 'beta:0.0' }],
       mcpSessions: ['alpha'],
-    };
-    seedRelayState(state);
-    seedRemoteRelayState(state);
-    setPushToTmuxForTest((target, payload) => {
-      localDelivered.push({ target, payload });
-      return true;
-    });
-    setRemotePushToTmuxForTest((target, payload) => {
-      remoteDelivered.push({ target, payload });
-      return true;
     });
 
     const msg = {
-      id: 'msg_4',
       from: 'beta',
-      to: 'alpha',
       type: 'request',
       summary: 'Check inbox',
-      mentions: [],
     };
-    const raw = JSON.stringify(msg);
 
-    expect(await buildRemoteNotification('alpha', msg)).toBe(await buildNotification('alpha', msg));
-    expect(detectRemoteBlockedReason('Press enter to continue', 'claude')).toBe(
-      detectBlockedReason('Press enter to continue', 'claude')
-    );
-
-    await handleMessage(raw);
-    await handleRemoteMessage(raw);
-
-    expect(remoteDelivered).toEqual(localDelivered);
+    const text = await buildNotification('alpha', msg);
+    expect(text).toContain('FIRST ACTION: call check_inbox() now.');
+    expect(detectBlockedReason('Press enter to continue', 'claude')).toBeTruthy();
   });
 });
