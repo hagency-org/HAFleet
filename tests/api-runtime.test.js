@@ -450,7 +450,7 @@ describe('backend runtime API', () => {
     expect(events[2].full).toContain('Target humans: none');
   });
 
-  test('stale remote heartbeat emits a system info disconnect alert and marks agents offline', async () => {
+  test('stale remote heartbeat marks server and agents offline', async () => {
     const staleHeartbeatAt = Date.now() - 120_000;
     context = await createBackendTestContext('agent-chat-runtime-test-', {
       agents: {
@@ -492,9 +492,7 @@ describe('backend runtime API', () => {
     expect(serversAfter['relay-west'].agentCount).toBe(0);
     expect(agentsAfter.alpha.online).toBe(false);
     expect(agentsAfter.alpha.offlineReason).toBe('server-offline:relay-west');
-    expect(events.map((event) => event.summary)).toContain("Remote server 'relay-west' offline");
-    expect(events.find((event) => event.summary === "Remote server 'relay-west' offline")?.full || '')
-      .toContain('heartbeat timed out');
+    // emitSystemInfo for server_offline removed in 5.43 (lid-close spam)
   });
 
   test('codex agent reports mcpPresent=null and does not trigger mcp_missing', async () => {
