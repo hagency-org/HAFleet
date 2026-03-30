@@ -12,20 +12,17 @@ if (!process.env.PUSH_RELAY_INCLUDE_LEASE_FIELDS) {
 }
 
 const baseDir = path.dirname(fileURLToPath(import.meta.url));
-const localCore = path.join(baseDir, 'lib', 'push-relay-core.js');
 const repoCore = path.join(baseDir, '..', 'lib', 'push-relay-core.js');
 
-// Prefer repo root core first so latest local fixes are used after `agent-update`.
-// Fall back to bundled remote/lib only for standalone remote package usage.
-let corePath = localCore;
+// Use only the repo root copy — fail loudly rather than silently using a stale bundled copy.
 try {
   accessSync(repoCore);
-  corePath = repoCore;
 } catch {
-  corePath = localCore;
+  console.error(`[push-relay] FATAL: repo-root core not found at ${repoCore}`);
+  process.exit(1);
 }
 
-const core = await import(pathToFileURL(path.resolve(corePath)).href);
+const core = await import(pathToFileURL(path.resolve(repoCore)).href);
 if (typeof core.main === 'function') {
   core.main().catch((e) => {
     console.error(`[push-relay] startup error: ${e?.message || e}`);

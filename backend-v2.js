@@ -4091,9 +4091,12 @@ function setRuntimeActivityFields(runtime, payload = {}) {
   let changed = false;
   if (!runtime || typeof runtime !== 'object') return false;
 
-  const hasActiveNow = payload.activeNow === true || payload.activeNow === false;
-  if (hasActiveNow && runtime.activeNow !== payload.activeNow) {
-    runtime.activeNow = payload.activeNow;
+  // When activeNow is null (tmux unavailable on remote), treat as inactive to prevent stale true
+  const rawActiveNow = payload.activeNow;
+  const hasActiveNow = rawActiveNow === true || rawActiveNow === false || rawActiveNow === null;
+  const effectiveActiveNow = rawActiveNow === true ? true : false;  // null → false
+  if (hasActiveNow && runtime.activeNow !== effectiveActiveNow) {
+    runtime.activeNow = effectiveActiveNow;
     changed = true;
   }
   if (payload.activeDurationSec !== undefined && payload.activeDurationSec !== null) {
@@ -4687,12 +4690,23 @@ function markAgentsOfflineForServer(serverId, reason, clearTmux = false) {
       if (clearTmux && agent.tmux !== null) { agent.tmux = null; changed = true; }
       syncAgentMachine(agent.name, { serverOffline: true });
       if (agent.online !== prevOnline) changed = true;
-      continue;
+    } else {
+      if (agent.offlineReason !== reason) { agent.offlineReason = reason; changed = true; }
+      if (clearTmux && agent.tmux !== null) { agent.tmux = null; changed = true; }
+      syncAgentMachine(agent.name, { serverOffline: true });
+      if (agent.online !== prevOnline || agent.manualDown !== prevManualDown) changed = true;
     }
-    if (agent.offlineReason !== reason) { agent.offlineReason = reason; changed = true; }
-    if (clearTmux && agent.tmux !== null) { agent.tmux = null; changed = true; }
-    syncAgentMachine(agent.name, { serverOffline: true });
-    if (agent.online !== prevOnline || agent.manualDown !== prevManualDown) changed = true;
+    // Reset activity fields so remote agents don't retain stale activeNow: true
+    const runtime = ensureAgentRuntimeRecord(agent.name);
+    if (runtime) {
+      const actReset = setRuntimeActivityFields(runtime, {
+        activeNow: false,
+        activeDurationSec: 0,
+        idleDurationSec: 0,
+        lastTmuxActivitySec: null,
+      });
+      if (actReset) { runtime.updatedAt = Date.now(); changed = true; }
+    }
   }
   return changed;
 }
