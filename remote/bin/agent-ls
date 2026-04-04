@@ -60,6 +60,7 @@ trap 'rm -f $_TMP_FILES' EXIT
 PTS_MAP_FILE=$(_mktmp)
 MCP_SESSIONS_FILE=$(_mktmp)
 AGENTS_FILE=$(_mktmp)
+ACTIVE_MAP_FILE=$(_mktmp)
 V1_INFO_FILE=$(_mktmp)
 
 HOME_DIR="$AGENTCHAT_HOMEDIR" V1_AGENTS_DIR="$V1_AGENTS_DIR" python3 - <<'PY' > "$V1_INFO_FILE" 2>/dev/null || true
@@ -95,18 +96,26 @@ PY
 SESSIONS=$(tmux list-sessions -F "#{session_name}" 2>/dev/null || true)
 
 # Get known agents from backend
-REG_NAMES=$(curl --noproxy '*' -s "$BACKEND_URL/api/agents" 2>/dev/null \
-  | python3 -c '
+REG_NAMES=$(ACTIVE_MAP_FILE="$ACTIVE_MAP_FILE" curl --noproxy '*' -s "$BACKEND_URL/api/agents" 2>/dev/null \
+  | ACTIVE_MAP_FILE="$ACTIVE_MAP_FILE" python3 -c '
 import json
 import sys
+import os
 try:
     data = json.load(sys.stdin)
 except Exception:
     data = []
+active_map = os.environ.get("ACTIVE_MAP_FILE", "")
+lines = []
 if isinstance(data, list):
     for item in data:
         if isinstance(item, dict) and item.get("name"):
             print(item["name"])
+            active = "1" if item.get("activeNow") else "0"
+            lines.append(item["name"] + "|" + active)
+if active_map and lines:
+    with open(active_map, "w") as f:
+        f.write("\n".join(lines) + "\n")
 ' 2>/dev/null || true)
 
 # Build tty → session map for MCP detection
@@ -125,8 +134,14 @@ for pid in $MCP_PIDS; do
 done
 
 # Collect all agent names: "name status" per line
+# Use activeNow from backend to distinguish active vs idle tmux sessions
 for sess in $SESSIONS; do
-  echo "$sess active" >> "$AGENTS_FILE"
+  active_now=$(awk -F'|' -v n="$sess" '$1==n {print $2; exit}' "$ACTIVE_MAP_FILE" 2>/dev/null)
+  if [ "$active_now" = "1" ]; then
+    echo "$sess active" >> "$AGENTS_FILE"
+  else
+    echo "$sess idle" >> "$AGENTS_FILE"
+  fi
 done
 
 if [ "$SHOW_ALL" = true ]; then
@@ -201,9 +216,9 @@ EOFV1
   reg="no"
   echo "$REG_NAMES" | grep -qx "$name" && reg="yes"
 
-  # MCP? (only for active)
+  # MCP? (for active and idle — both have tmux sessions)
   mcp="-"
-  [ "$status" = "active" ] && mcp="no"
+  [ "$status" != "inactive" ] && mcp="no"
   grep -qx "$name" "$MCP_SESSIONS_FILE" 2>/dev/null && mcp="yes"
 
   # Resume ID
@@ -222,9 +237,11 @@ EOFV1
     path_val="$v1_workdir"
   fi
 
-  # Color: active=default, inactive=dimmed
+  # Color: active=default, idle=yellow, inactive=dimmed
   if [ "$status" = "inactive" ]; then
     printf "\033[2m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
+  elif [ "$status" = "idle" ]; then
+    printf "\033[33m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   else
     printf "%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   fi
