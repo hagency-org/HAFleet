@@ -90,7 +90,8 @@ for entry in sorted(agents_dir.iterdir()):
     workdir = str(data.get("workdir") or "-").strip() or "-"
     state_dir = str(data.get("stateDir") or "-").strip() or "-"
     model_ver = str(data.get("agentModelVersion") or "-").strip() or "-"
-    print("|".join([name, a_type, workdir, state_dir, model_ver]))
+    sup_for = str(data.get("supervisorFor") or "-").strip() or "-"
+    print("|".join([name, a_type, workdir, state_dir, model_ver, sup_for]))
 PY
 
 # Get tmux sessions
@@ -152,15 +153,24 @@ if [ "$SHOW_ALL" = true ]; then
       name=$(basename "$agent_dir")
       [ -f "$agent_dir/meta.json" ] || continue
       if ! grep -q "^${name} " "$AGENTS_FILE" 2>/dev/null; then
-        echo "$name down" >> "$AGENTS_FILE"
+        sup=$(python3 -c "import json; print(json.load(open('${agent_dir}meta.json')).get('supervisorFor','') or '')" 2>/dev/null || true)
+        if [ -n "$sup" ]; then
+          echo "$name standby" >> "$AGENTS_FILE"
+        else
+          echo "$name down" >> "$AGENTS_FILE"
+        fi
       fi
     done
   fi
   if [ -s "$V1_INFO_FILE" ]; then
-    while IFS='|' read -r v1_name _; do
+    while IFS='|' read -r v1_name _ _ _ _ v1_sup; do
       [ -n "$v1_name" ] || continue
       if ! grep -q "^${v1_name} " "$AGENTS_FILE" 2>/dev/null; then
-        echo "$v1_name down" >> "$AGENTS_FILE"
+        if [ -n "$v1_sup" ] && [ "$v1_sup" != "-" ]; then
+          echo "$v1_name standby" >> "$AGENTS_FILE"
+        else
+          echo "$v1_name down" >> "$AGENTS_FILE"
+        fi
       fi
     done < "$V1_INFO_FILE"
   fi
@@ -168,7 +178,17 @@ if [ "$SHOW_ALL" = true ]; then
   for reg_name in $REG_NAMES; do
     [ -n "$reg_name" ] || continue
     if ! grep -q "^${reg_name} " "$AGENTS_FILE" 2>/dev/null; then
-      echo "$reg_name down" >> "$AGENTS_FILE"
+      _reg_sup=""
+      if [ -f "$DATA_DIR/$reg_name/meta.json" ]; then
+        _reg_sup=$(python3 -c "import json; print(json.load(open('$DATA_DIR/$reg_name/meta.json')).get('supervisorFor','') or '')" 2>/dev/null || true)
+      elif [ -s "$V1_INFO_FILE" ]; then
+        _reg_sup=$(awk -F'|' -v n="$reg_name" '$1==n && $6!="-" {print $6; exit}' "$V1_INFO_FILE" 2>/dev/null || true)
+      fi
+      if [ -n "$_reg_sup" ]; then
+        echo "$reg_name standby" >> "$AGENTS_FILE"
+      else
+        echo "$reg_name down" >> "$AGENTS_FILE"
+      fi
     fi
   done
 fi
@@ -191,8 +211,8 @@ sort "$AGENTS_FILE" | while IFS=' ' read -r name status; do
   v1_state="-"
   v1_ver="-"
   if [ -s "$V1_INFO_FILE" ]; then
-    IFS='|' read -r v1_type v1_workdir v1_state v1_ver <<EOFV1
-$(awk -F'|' -v n="$name" '$1==n {print $2 "|" $3 "|" $4 "|" $5; exit}' "$V1_INFO_FILE" 2>/dev/null || true)
+    IFS='|' read -r v1_type v1_workdir v1_state v1_ver v1_sup <<EOFV1
+$(awk -F'|' -v n="$name" '$1==n {print $2 "|" $3 "|" $4 "|" $5 "|" $6; exit}' "$V1_INFO_FILE" 2>/dev/null || true)
 EOFV1
     [ -n "$v1_type" ] || v1_type="-"
     [ -n "$v1_workdir" ] || v1_workdir="-"
@@ -226,7 +246,7 @@ EOFV1
 
   # MCP? (for active and idle — both have tmux sessions)
   mcp="-"
-  [ "$status" != "down" ] && mcp="no"
+  [ "$status" != "down" ] && [ "$status" != "standby" ] && mcp="no"
   grep -qx "$name" "$MCP_SESSIONS_FILE" 2>/dev/null && mcp="yes"
 
   # Resume ID
@@ -245,9 +265,11 @@ EOFV1
     path_val="$v1_workdir"
   fi
 
-  # Color: active=default, idle=yellow, inactive=dimmed
+  # Color: active=default, idle=yellow, standby=cyan, down=dimmed
   if [ "$status" = "down" ]; then
     printf "\033[2m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
+  elif [ "$status" = "standby" ]; then
+    printf "\033[36m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   elif [ "$status" = "idle" ]; then
     printf "\033[33m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   else
