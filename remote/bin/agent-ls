@@ -11,7 +11,8 @@ fi
 #
 # Usage:
 #   agent-ls        List running agents (active tmux sessions)
-#   agent-ls -a     List all agents including inactive (have data but not running)
+#   agent-ls -a     List all agents including down (have data but not running)
+#   agent-ls --all  Same as -a
 
 # Portable script dir resolution (works on macOS bash 3.2 + Linux)
 _resolve_script_dir() {
@@ -45,7 +46,7 @@ AGENTCHAT_HOMEDIR="${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}"
 V1_AGENTS_DIR="$AGENTCHAT_HOMEDIR/agents"
 
 SHOW_ALL=false
-[ "${1:-}" = "-a" ] && SHOW_ALL=true
+{ [ "${1:-}" = "-a" ] || [ "${1:-}" = "--all" ]; } && SHOW_ALL=true
 
 # Temp files for portable key-value lookups (no associative arrays — bash 3.2 compat)
 _TMP_FILES=""
@@ -151,7 +152,7 @@ if [ "$SHOW_ALL" = true ]; then
       name=$(basename "$agent_dir")
       [ -f "$agent_dir/meta.json" ] || continue
       if ! grep -q "^${name} " "$AGENTS_FILE" 2>/dev/null; then
-        echo "$name inactive" >> "$AGENTS_FILE"
+        echo "$name down" >> "$AGENTS_FILE"
       fi
     done
   fi
@@ -159,10 +160,17 @@ if [ "$SHOW_ALL" = true ]; then
     while IFS='|' read -r v1_name _; do
       [ -n "$v1_name" ] || continue
       if ! grep -q "^${v1_name} " "$AGENTS_FILE" 2>/dev/null; then
-        echo "$v1_name inactive" >> "$AGENTS_FILE"
+        echo "$v1_name down" >> "$AGENTS_FILE"
       fi
     done < "$V1_INFO_FILE"
   fi
+  # Include backend-registered agents with no tmux session
+  for reg_name in $REG_NAMES; do
+    [ -n "$reg_name" ] || continue
+    if ! grep -q "^${reg_name} " "$AGENTS_FILE" 2>/dev/null; then
+      echo "$reg_name down" >> "$AGENTS_FILE"
+    fi
+  done
 fi
 
 if [ ! -s "$AGENTS_FILE" ]; then
@@ -218,7 +226,7 @@ EOFV1
 
   # MCP? (for active and idle — both have tmux sessions)
   mcp="-"
-  [ "$status" != "inactive" ] && mcp="no"
+  [ "$status" != "down" ] && mcp="no"
   grep -qx "$name" "$MCP_SESSIONS_FILE" 2>/dev/null && mcp="yes"
 
   # Resume ID
@@ -238,7 +246,7 @@ EOFV1
   fi
 
   # Color: active=default, idle=yellow, inactive=dimmed
-  if [ "$status" = "inactive" ]; then
+  if [ "$status" = "down" ]; then
     printf "\033[2m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   elif [ "$status" = "idle" ]; then
     printf "\033[33m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
