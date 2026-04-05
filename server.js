@@ -4658,6 +4658,7 @@ th{
       needsAttention,
       consecutiveNegative,
       banner,
+      agentRegistered: !!statusRow,
     };
   }
 
@@ -5007,12 +5008,15 @@ th{
       )
       : '<div class="empty-state">This agent does not expose a writable V1 owner field.</div>';
     ownerRoot.innerHTML = ownerHtml;
-    const supervisorControlHtml =
-      '<div class="panel">'
-      + '<div class="panel-label">Supervisor Audit</div>'
-      + '<label class="detail-toggle"><input id="detail-supervisor-enabled" type="checkbox" ' + (model?.supervisorEnabled ? 'checked' : '') + '>Enabled</label>'
-      + '<div class="detail-actions"><button class="detail-save" onclick="saveSupervisorAuditControl()">Save</button></div>'
-      + '</div>';
+    const supervisorControlHtml = model?.agentRegistered
+      ? (
+        '<div class="panel">'
+        + '<div class="panel-label">Supervisor Audit</div>'
+        + '<label class="detail-toggle"><input id="detail-supervisor-enabled" type="checkbox" ' + (model?.supervisorEnabled ? 'checked' : '') + '>Enabled</label>'
+        + '<div class="detail-actions"><button class="detail-save" onclick="saveSupervisorAuditControl()">Save</button></div>'
+        + '</div>'
+      )
+      : '<div class="panel"><div class="panel-label">Supervisor Audit</div><div class="empty-state">Agent must be registered to enable supervisor.</div></div>';
     const subconsciousControlHtml = subconsciousWritable
       ? (
         '<div class="panel">'

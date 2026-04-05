@@ -14,6 +14,7 @@ import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.j
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
 import { createAlertStore, RECOVERY_MAP as ALERT_RECOVERY_MAP } from './lib/alert-store.js';
 import { createSupervisorLifecycleManager, killTmuxSession as killSupervisorTmux } from './lib/supervisor-lifecycle-manager.js';
+import { provisionSupervisorAgent, buildSupervisorAgentRecord } from './lib/supervisor-provisioning.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
 import { assertRuntimeDir, isLocalAgentServer } from './lib/runtime-dir-guard.js';
 import { NotificationRouter } from './lib/notification-router.js';
@@ -6218,6 +6219,9 @@ app.post('/api/supervisor/control', requireBearer, (req, res) => {
   }
 
   supervisorSnapshotStore.setEnabled(body.enabled);
+  if (body.enabled) {
+    supervisorLifecycleManager.sweepAll().catch(() => {});
+  }
   const control = supervisorSnapshotStore.getControl(agents);
   const status = supervisorSnapshotStore.getStatus(agents);
   auditLog(req, { summary: { enabled: body.enabled } });
@@ -6680,6 +6684,31 @@ app.post('/api/agents/:name/undelete', requireBearer, (req, res) => {
   auditLog(req, { agent: agentName, summary: { action: 'undelete' } });
   console.log(`Agent '${agentName}' tombstone removed — re-registration allowed`);
   res.json({ ok: true, undeleted: true, name: agentName });
+});
+
+app.post('/api/agents/:name/supervisor', requireBearer, (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: 'local-only endpoint' });
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+  const supervisorName = `supervisor_${agentName}`;
+  if (agents[supervisorName] && isAgentRecord(agents[supervisorName])) {
+    return res.json({ ok: true, alreadyExists: true, supervisor: supervisorName });
+  }
+  try {
+    provisionSupervisorAgent(agentName, { runtimeDir: RUNTIME_DIR, agentchatHomeDir: defaultAgentchatHomeDir() });
+  } catch (e) {
+    console.error(`[supervisor-provision] failed for ${agentName}:`, e.message);
+    return res.status(500).json({ error: 'provisioning failed', detail: e.message });
+  }
+  const record = buildSupervisorAgentRecord(supervisorName, agentName);
+  agents[supervisorName] = record;
+  saveAgents();
+  supervisorLifecycleManager.sweepAll().catch(() => {});
+  auditLog(req, { agent: agentName, summary: { action: 'provision-supervisor', supervisor: supervisorName } });
+  console.log(`[supervisor-provision] provisioned ${supervisorName} for ${agentName}`);
+  res.json({ ok: true, supervisor: supervisorName });
 });
 
 app.get('/api/agents/:name/launch-env', requireBearer, (req, res) => {
