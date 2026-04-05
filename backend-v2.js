@@ -6692,7 +6692,7 @@ app.post('/api/agents/:name/supervisor', requireBearer, (req, res) => {
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
-  const supervisorName = `supervisor_${agentName}`;
+  const supervisorName = `supervisor-${agentName}`;
   if (agents[supervisorName] && isAgentRecord(agents[supervisorName])) {
     return res.json({ ok: true, alreadyExists: true, supervisor: supervisorName });
   }
