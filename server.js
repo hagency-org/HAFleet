@@ -3899,7 +3899,7 @@ th{
                 <option value="p2" selected>P2</option>
                 <option value="p3">P3</option>
               </select>
-              <input id="task-create-assignee" class="detail-input" placeholder="Assignee (optional)" style="flex:1" value="${esc(agentName)}">
+              <input id="task-create-assignee" class="detail-input" placeholder="Assignee (optional)" style="flex:1" value="${safeName}">
               <button class="detail-save" onclick="taskCreateSubmit()">Create</button>
             </div>
             <div id="task-create-status" class="detail-status muted" style="font-size:11px"></div>
