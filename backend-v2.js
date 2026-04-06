@@ -624,7 +624,8 @@ function normalizeRuntimeProfileRole(value) {
   if (!value || typeof value !== 'object') return null;
   const framework = normalizeOptionalText(value.framework, 32);
   const provider = normalizeOptionalText(value.provider, 64);
-  const model = normalizeOptionalText(value.model, 256);
+  const rawModel = normalizeOptionalText(value.model, 256);
+  const model = rawModel && SHELL_METACHAR_RE.test(rawModel) ? null : rawModel;
   const reasoning = normalizeOptionalText(value.reasoning, 64);
   const rawExtraArgs = normalizeOptionalText(value.extraArgs, 4000);
   const extraArgs = rawExtraArgs && SHELL_METACHAR_RE.test(rawExtraArgs) ? null : rawExtraArgs;
@@ -5655,7 +5656,7 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   server.sourceIp = sourceIp || null;
   server.version = typeof payload.version === 'string' && payload.version.trim() ? payload.version.trim() : (server.version || 'unknown-legacy');
   // Version-mismatch detection
-  if (LOCAL_GIT_VERSION && server.version && server.version !== LOCAL_GIT_VERSION) {
+  if (LOCAL_GIT_VERSION && server.version && server.version !== 'unknown-legacy' && server.version !== LOCAL_GIT_VERSION) {
     if (!server.versionMismatchSince) { server.versionMismatchSince = now; }
     const mismatchAge = now - server.versionMismatchSince;
     if (mismatchAge > 300_000) { // >5 minutes

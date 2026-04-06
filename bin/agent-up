@@ -1617,7 +1617,7 @@ CLAUDE_MODE_GUARD="Critical runtime rule: do not enter Plan mode or Select mode 
 # ── Pre-approve custom API key in Claude Code settings ───────────────
 if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY:-}" ]; then
   _key_fingerprint="${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY: -20}"
-  python3 -c "
+  AGENTCHAT_KEY_FP="$_key_fingerprint" python3 -c "
 import json, os
 p = os.path.expanduser('~/.claude.json')
 try:
@@ -1627,7 +1627,7 @@ except:
 r = d.setdefault('customApiKeyResponses', {'approved': [], 'rejected': []})
 if not isinstance(r.get('approved'), list):
     r['approved'] = []
-fp = '${_key_fingerprint}'
+fp = os.environ['AGENTCHAT_KEY_FP']
 if fp not in r['approved']:
     r['approved'].append(fp)
     json.dump(d, open(p, 'w'), indent=2)
