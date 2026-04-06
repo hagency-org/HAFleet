@@ -34,6 +34,11 @@ function defaultApiBaseUrl(env = process.env) {
   return `http://127.0.0.1:${port}`;
 }
 
+function authHeaders() {
+  const token = (process.env.API_TOKEN || '').trim();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function fetchJson(url, init = {}) {
   const response = await fetch(url, init);
   const data = await response.json().catch(() => null);
@@ -80,7 +85,7 @@ async function commandCreate(argv) {
   const apiBase = defaultApiBaseUrl(process.env);
   const data = await fetchJson(`${apiBase}/api/task-graphs`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
   });
   console.log(`Created graph ${data.graph.id}`);
@@ -130,6 +135,7 @@ async function commandCancel(argv) {
   const apiBase = defaultApiBaseUrl(process.env);
   const data = await fetchJson(`${apiBase}/api/task-graphs/${encodeURIComponent(graphId)}`, {
     method: 'DELETE',
+    headers: { ...authHeaders() },
   });
   console.log(`Cancelled graph ${data.graph.id}`);
   console.log(`${data.graph.status}\t${data.graph.owner}\t${data.graph.label}`);

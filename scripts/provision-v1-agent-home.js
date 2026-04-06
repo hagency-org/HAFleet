@@ -672,7 +672,7 @@ function main() {
     id: paths.agentId,
     name,
     type,
-    agentModelVersion: '1.0',
+    agentModelVersion: '1.1',
     layoutVersion: 1,
     homeDir: paths.homeDir,
     workdir: paths.workdir,

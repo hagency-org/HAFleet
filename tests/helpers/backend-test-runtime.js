@@ -23,11 +23,13 @@ export async function createBackendTestContext(prefix, seed = {}) {
   if (seed.deletedAgents) writeJson(path.join(dataDir, 'deleted_agents.json'), seed.deletedAgents);
   writeJson(path.join(dataDir, '.msg_counter'), seed.msgCounter || 0);
 
+  const savedApiToken = process.env.API_TOKEN;
   process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
   process.env.SUPERVISOR_ENABLED = 'false';
   process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
   process.env.AGENT_JSON_WRITE_BATCH_MS = '0';
   process.env.AGENT_BLOCKED_INFO_AGGREGATE_WINDOW_MS = '0';
+  delete process.env.API_TOKEN; // tests run without Bearer auth unless explicitly configured
   if (seed.env && typeof seed.env === 'object') {
     for (const [key, value] of Object.entries(seed.env)) {
       process.env[key] = String(value);
@@ -77,6 +79,8 @@ export async function createBackendTestContext(prefix, seed = {}) {
       }
       servers.clear();
       rmSync(runtimeDir, { recursive: true, force: true });
+      if (savedApiToken !== undefined) process.env.API_TOKEN = savedApiToken;
+      else delete process.env.API_TOKEN;
     },
   };
 }

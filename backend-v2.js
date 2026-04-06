@@ -1,18 +1,24 @@
 import express from 'express';
 import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync, readdirSync, unlinkSync, rmSync } from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
-import { execFile, execSync } from 'child_process';
+import { execFile, execSync, spawn } from 'child_process';
 import path from 'path';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { promisify } from 'util';
-import { createSupervisorService } from './supervisor/index.js';
+
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
+import { createTaskStore } from './lib/task-store.js';
+import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
+import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
+import { createAlertStore, RECOVERY_MAP as ALERT_RECOVERY_MAP } from './lib/alert-store.js';
+import { createSupervisorLifecycleManager, killTmuxSession as killSupervisorTmux } from './lib/supervisor-lifecycle-manager.js';
+import { provisionSupervisorAgent, buildSupervisorAgentRecord } from './lib/supervisor-provisioning.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
 import { assertRuntimeDir, isLocalAgentServer } from './lib/runtime-dir-guard.js';
 import { NotificationRouter } from './lib/notification-router.js';
-import { readV1AgentManifest, defaultAgentchatHomeDir } from './lib/agent-home-v1.js';
+import { readV1AgentManifest, defaultAgentchatHomeDir, allAgentHomeRoots } from './lib/agent-home-v1.js';
 import {
   buildUpstreamClaudeSubconsciousPaths,
   bootstrapUpstreamClaudeSubconsciousAgent,
@@ -77,6 +83,7 @@ const SWAP_ALERT_CLEAR_PCT = Number.isFinite(SWAP_ALERT_CLEAR_PCT_RAW)
   : Math.max(0, SWAP_ALERT_THRESHOLD_PCT - 5);
 const AGENT_SCOPE_MONITOR_ENABLED = (process.env.AGENT_SCOPE_MONITOR_ENABLED || 'true').trim().toLowerCase() !== 'false';
 const AGENT_SCOPE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_SCOPE_SWEEP_INTERVAL_MS || '5000', 10);
+const SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS || '60000', 10);
 const AGENT_SCOPE_ALERT_COOLDOWN_MS = Number.parseInt(process.env.AGENT_SCOPE_ALERT_COOLDOWN_MS || '60000', 10);
 const AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW = Number.parseFloat(process.env.AGENT_SCOPE_ALERT_CLEAR_RATIO || '0.85');
 const AGENT_SCOPE_ALERT_CLEAR_RATIO = Number.isFinite(AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW)
@@ -161,20 +168,31 @@ const AGENT_TOKEN_MODE = (() => {
 })();
 const agentTokens = new Map(); // agentName → token string
 function loadAgentTokens() {
-  const homeDir = defaultAgentchatHomeDir();
-  const agentsDir = path.join(homeDir, 'agents');
   let loaded = 0;
-  try {
-    for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !entry.name.startsWith('agent_')) continue;
-      const name = entry.name.slice('agent_'.length);
-      const tokenPath = path.join(agentsDir, entry.name, 'state', 'agent-token');
-      try {
-        const token = readFileSync(tokenPath, 'utf-8').trim();
-        if (token) { agentTokens.set(name, token); loaded++; }
-      } catch { /* missing token file — expected for un-provisioned agents */ }
-    }
-  } catch { /* missing agents dir */ }
+  for (const homeRoot of allAgentHomeRoots()) {
+    const agentsDir = path.join(homeRoot, 'agents');
+    try {
+      for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !entry.name.startsWith('agent_')) continue;
+        const name = entry.name.slice('agent_'.length);
+        if (agentTokens.has(name)) continue; // first root wins
+        const tokenPath = path.join(agentsDir, entry.name, 'state', 'agent-token');
+        try {
+          const token = readFileSync(tokenPath, 'utf-8').trim();
+          if (token) {
+            agentTokens.set(name, token);
+            // Also store under canonical agents.json name if case differs (agentId is lowercase, agent name may be mixed-case)
+            for (const key of Object.keys(agents)) {
+              if (key !== name && key.toLowerCase() === name.toLowerCase()) {
+                agentTokens.set(key, token);
+              }
+            }
+            loaded++;
+          }
+        } catch { /* missing token file — expected for un-provisioned agents */ }
+      }
+    } catch { /* missing agents dir */ }
+  }
   if (loaded > 0) console.log(`[auth] loaded ${loaded} agent token(s), mode=${AGENT_TOKEN_MODE}`);
 }
 function checkAgentToken(agentName, req) {
@@ -599,21 +617,38 @@ function normalizeAgentTask(value, fallbackOwner = null) {
   };
 }
 
+const SHELL_METACHAR_RE = /[;&|`$(){}!\\<>]/;
+
 function normalizeRuntimeProfileRole(value) {
   if (value === null) return null;
   if (!value || typeof value !== 'object') return null;
   const framework = normalizeOptionalText(value.framework, 32);
   const provider = normalizeOptionalText(value.provider, 64);
-  const model = normalizeOptionalText(value.model, 256);
+  const rawModel = normalizeOptionalText(value.model, 256);
+  const model = rawModel && SHELL_METACHAR_RE.test(rawModel) ? null : rawModel;
   const reasoning = normalizeOptionalText(value.reasoning, 64);
-  const extraArgs = normalizeOptionalText(value.extraArgs, 4000);
-  if (!framework && !provider && !model && !reasoning && !extraArgs) return null;
+  const rawExtraArgs = normalizeOptionalText(value.extraArgs, 4000);
+  const extraArgs = rawExtraArgs && SHELL_METACHAR_RE.test(rawExtraArgs) ? null : rawExtraArgs;
+  const rawApiBaseUrl = normalizeOptionalText(value.apiBaseUrl, 512);
+  let apiBaseUrl = null;
+  if (rawApiBaseUrl) {
+    try {
+      const parsed = new URL(rawApiBaseUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('not http(s)');
+      if (parsed.username || parsed.password) throw new Error('credentials in URL');
+      apiBaseUrl = rawApiBaseUrl;
+    } catch { apiBaseUrl = null; }
+  }
+  const apiKey = normalizeOptionalText(value.apiKey, 256);
+  if (!framework && !provider && !model && !reasoning && !extraArgs && !apiBaseUrl && !apiKey) return null;
   return {
     framework: framework || null,
     provider: provider || null,
     model: model || null,
     reasoning: reasoning || null,
     ...(extraArgs ? { extraArgs } : {}),
+    ...(apiBaseUrl ? { apiBaseUrl } : {}),
+    ...(apiKey ? { apiKey } : {}),
   };
 }
 
@@ -627,6 +662,27 @@ function normalizeRuntimeProfile(value) {
     primary: primary || null,
     supervisor: supervisor || null,
   };
+}
+
+function mergeRuntimeProfileApiKeys(newProfile, existingProfile) {
+  if (!newProfile) return newProfile;
+  for (const role of ['primary', 'supervisor']) {
+    if (newProfile[role] && !newProfile[role].apiKey && existingProfile && existingProfile[role] && existingProfile[role].apiKey) {
+      newProfile[role] = { ...newProfile[role], apiKey: existingProfile[role].apiKey };
+    }
+  }
+  return newProfile;
+}
+
+function redactRuntimeProfileSecrets(profile) {
+  if (!profile) return profile;
+  const redacted = { ...profile };
+  for (const role of ['primary', 'supervisor']) {
+    if (redacted[role] && redacted[role].apiKey) {
+      redacted[role] = { ...redacted[role], apiKey: true };
+    }
+  }
+  return redacted;
 }
 
 function normalizeLooseAgentName(value) {
@@ -2377,7 +2433,6 @@ function canAccessPrivilegedSubconsciousDetail(req) {
 function requireBearer(req, res, next) {
   const expectedToken = normalizeOptionalText(process.env.API_TOKEN, 512);
   if (expectedToken && getBearerToken(req) !== expectedToken) {
-    if (isLocalRequest(req)) return next(); // localhost exempt (Phase 2 removes this)
     return res.status(401).json({ error: 'bearer token required' });
   }
   next();
@@ -2600,6 +2655,24 @@ const cursors = loadJsonSync('cursors.json', {});
 const servers = loadJsonSync('servers.json', {});
 const agentRuntime = loadJsonSync('agent_runtime.json', {});
 const taskGraphs = loadJsonSync('task_graphs.json', {});
+const frameworkPresets = loadJsonSync('framework-presets.json', []);
+function saveFrameworkPresets() { saveJson('framework-presets.json', frameworkPresets); }
+const taskStoreData = loadJsonSync('tasks.json', []);
+const taskStore = createTaskStore({
+  initialData: taskStoreData,
+  save: (data) => saveJson('tasks.json', data),
+});
+const supervisorSnapshotData = loadJsonSync('supervisor_snapshots.json', {});
+const supervisorSnapshotStore = createSupervisorSnapshotStore({
+  initialData: supervisorSnapshotData,
+  save: (data) => saveJson('supervisor_snapshots.json', data),
+});
+const alertStoreData = loadJsonSync('alerts.json', []);
+const alertStore = createAlertStore({
+  initialData: alertStoreData,
+  save: (data) => saveJson('alerts.json', data),
+  emitEvent: (eventName, alert) => broadcastSSE(eventName, alert),
+});
 const localActivitySweepState = loadJsonSync('local_activity_sweep.json', { selectionCursor: 0 });
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
@@ -2609,6 +2682,7 @@ const localRuntimeSignalDigest = new Map(); // agent -> digest of blocked/mcp/wo
 let localActivitySweepRunning = false;
 let localSwapSweepRunning = false;
 let agentScopeSweepRunning = false;
+let supervisorLifecycleSweepRunning = false;
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const AUDIT_LOG = dataPath('audit.jsonl');
 const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
@@ -2808,9 +2882,9 @@ for (const agent of Object.values(agents)) {
 {
   let orphans = 0;
   try {
-    const homeRoot = defaultAgentchatHomeDir();
-    const agentsDir = path.join(homeRoot, 'agents');
-    if (existsSync(agentsDir)) {
+    for (const homeRoot of allAgentHomeRoots()) {
+      const agentsDir = path.join(homeRoot, 'agents');
+      if (!existsSync(agentsDir)) continue;
       const entries = readdirSync(agentsDir, { withFileTypes: true });
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
@@ -2841,10 +2915,10 @@ for (const agent of Object.values(agents)) {
           orphans++;
         }
       }
-      if (orphans > 0) {
-        saveJson('agents.json', agents);
-        console.log(`[startup] discovered ${orphans} orphaned agent home(s)`);
-      }
+    }
+    if (orphans > 0) {
+      saveJson('agents.json', agents);
+      console.log(`[startup] discovered ${orphans} orphaned agent home(s)`);
     }
   } catch (e) {
     console.error(`[startup] orphan scan failed: ${e.message}`);
@@ -3204,6 +3278,34 @@ function emitSystemInfo(summary, full = '', alertType = null, opts = {}) {
   };
   appendSystemInfoLog(event);
   broadcastSSE('system_info', event);
+
+  // Hook A: alert ingestion
+  if (alertType) {
+    const recoveryTarget = ALERT_RECOVERY_MAP[alertType];
+    if (recoveryTarget) {
+      // Recovery event — auto-resolve matching alerts
+      if (opts.sourceAgent) {
+        alertStore.autoResolve(`${recoveryTarget}:${opts.sourceAgent}`);
+      } else {
+        alertStore.autoResolveByPrefix(recoveryTarget);
+      }
+    } else {
+      // Non-recovery event — ingest as alert
+      const dedupeKey = opts.dedupeKey || alertType;
+      try {
+        alertStore.ingest({
+          alertType,
+          dedupeKey,
+          severity: ALERT_SEVERITY_MAP[alertType] || 'info',
+          source: opts.source || 'backend',
+          sourceAgent: opts.sourceAgent || null,
+          summary,
+          detail: full || null,
+        });
+      } catch { /* ingest validation failure — non-fatal */ }
+    }
+  }
+
   return event;
 }
 
@@ -3245,6 +3347,23 @@ const notificationRouter = new NotificationRouter({
         if (p.recovered) recovered.push(p.agentName);
         else blocked.push(p);
       }
+      // Per-agent alert ingestion (spec §11.4)
+      for (const p of blocked) {
+        try {
+          alertStore.ingest({
+            alertType: 'agent_blocked',
+            dedupeKey: `agent_blocked:${p.agentName}`,
+            severity: 'warning',
+            source: 'backend',
+            sourceAgent: p.agentName,
+            summary: `Agent '${p.agentName}' blocked (${p.tier === BLOCK_TIER_TRANSIENT ? 'transient' : (p.tier === BLOCK_TIER_SOFT ? 'soft' : 'hard')})`,
+            detail: p.full || null,
+          });
+        } catch { /* non-fatal */ }
+      }
+      for (const agentName of recovered) {
+        alertStore.autoResolve(`agent_blocked:${agentName}`);
+      }
       const parts = [];
       const fullParts = [];
       if (blocked.length) {
@@ -3277,20 +3396,20 @@ const notificationRouter = new NotificationRouter({
   },
 }, {
   log: (_family, payload) => {
-    if (payload.summary) emitSystemInfo(payload.summary, payload.full || '', _family);
+    if (!payload.summary) return;
+    const opts = {};
+    if (payload.agentName) {
+      opts.sourceAgent = payload.agentName;
+      opts.dedupeKey = `${_family}:${payload.agentName}:${payload.reason || ''}`.replace(/:$/, '');
+    }
+    emitSystemInfo(payload.summary, payload.full || '', _family, opts);
   },
   sse: (_family, payload) => {
     if (payload.sseEvent) broadcastSSE(payload.sseEvent, payload.sseData || payload);
   },
 });
 
-const supervisorService = createSupervisorService({
-  getAgents: () => Object.values(agents).filter(isAgentRecord).map(serializeAgent),
-  getRuntime: (agentName) => ensureAgentRuntimeRecord(agentName),
-  emitSystemInfo: (summary, full) => emitSystemInfo(summary, full),
-  sendMessage: (payload) => dispatchInternalDirectMessage(payload),
-  broadcastSSE,
-});
+
 const taskGraphStore = createTaskGraphStore({
   initialGraphs: taskGraphs,
   save: (nextGraphs) => saveTaskGraphs(nextGraphs),
@@ -3615,9 +3734,9 @@ function clearDeletedAgentState(agentName) {
   scopePressureState.delete(name);
   notificationRouter.clearAgent(name);
 
-  const supervisorCleanup = typeof supervisorService?.removeAgentState === 'function'
-    ? supervisorService.removeAgentState(name)
-    : { removed: false, sessionKilled: false };
+  // Clean up supervisor state for the deleted agent
+  supervisorSnapshotStore.removeTarget(name);
+  try { killSupervisorTmux(`supervisor-${name}`); } catch { /* tmux not available */ }
 
   let agentDataRemoved = false;
   const agentDataDir = agentDataPath(name);
@@ -3643,8 +3762,6 @@ function clearDeletedAgentState(agentName) {
     runtimeRemoved: runtimeChanged,
     cursorsRemoved: cursorsChanged,
     agentDataRemoved,
-    supervisorRemoved: supervisorCleanup?.removed === true,
-    supervisorSessionKilled: supervisorCleanup?.sessionKilled === true,
   };
 }
 
@@ -3737,6 +3854,21 @@ function dispatchInternalDirectMessage(payload = {}) {
   const directTargetKind = isAgentRecord(agents[toName]) ? 'agent' : 'human';
   return dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
 }
+
+const supervisorActionEngine = createSupervisorActionEngine({
+  snapshotStore: supervisorSnapshotStore,
+  sendMessage: (payload) => dispatchInternalDirectMessage(payload),
+  broadcastSSE,
+  alertStore,
+});
+
+const supervisorLifecycleManager = createSupervisorLifecycleManager({
+  getAgents: () => agents,
+  getRuntime: (name) => ensureAgentRuntimeRecord(name),
+  snapshotStore: supervisorSnapshotStore,
+  isAgentRecord,
+  broadcastSSE,
+});
 
 function normalizeInboxGateReason(value) {
   const raw = (typeof value === 'string') ? value.trim() : '';
@@ -4306,14 +4438,14 @@ function applyAgentBlockedState(agentName, payload = {}) {
       'State: tmux session present but mcp-server.js process not detected.',
       'Offline reason set to: mcp-missing:auto',
     ].join('\n');
-    emitSystemInfo(`Agent '${agentName}' missing MCP process`, full, 'mcp_missing');
+    emitSystemInfo(`Agent '${agentName}' missing MCP process`, full, 'mcp_missing', { sourceAgent: agentName, dedupeKey: `mcp_missing:${agentName}` });
     broadcastSSE('agent_mcp_missing', {
       agent: agentName,
       missingSince: runtime.mcpMissingSince || now,
       server: normalizeServer(payload.server) || normalizeServer(agent?.server) || null,
     });
   } else if (mcpRecovered) {
-    emitSystemInfo(`Agent '${agentName}' MCP process recovered`, `Agent '${agentName}' now has mcp-server.js running inside tmux.`, 'mcp_recovered');
+    emitSystemInfo(`Agent '${agentName}' MCP process recovered`, `Agent '${agentName}' now has mcp-server.js running inside tmux.`, 'mcp_recovered', { sourceAgent: agentName });
     broadcastSSE('agent_mcp_recovered', {
       agent: agentName,
       recoveredAt: now,
@@ -4434,8 +4566,11 @@ function setAgentRuleState(agentName, code, active, buildDetail) {
     emitSystemInfo(
       `Agent '${agentName}' rule alert: ${code}`,
       detail || `Rule ${code} triggered for agent '${agentName}'.`,
-      'agent_rule'
+      'agent_rule',
+      { sourceAgent: agentName, dedupeKey: `agent_rule:${agentName}:${code}` }
     );
+  } else {
+    alertStore.autoResolve(`agent_rule:${agentName}:${code}`);
   }
 }
 
@@ -5150,7 +5285,8 @@ async function sweepLocalSwapPressure() {
           `Threshold: ${SWAP_ALERT_THRESHOLD_PCT}%`,
           'System memory pressure is high. Please intervene manually to avoid OOM killing agents.',
         ].join('\n'),
-        'swap_high'
+        'swap_high',
+        { dedupeKey: 'swap_high' }
       );
     }
     return;
@@ -5164,7 +5300,8 @@ async function sweepLocalSwapPressure() {
         `Swap used: ${usedGb} GiB / ${totalGb} GiB (${usagePctText}%)`,
         `Clear threshold: ${SWAP_ALERT_CLEAR_PCT.toFixed(1)}%`,
       ].join('\n'),
-      'swap_clear'
+      'swap_clear',
+      { dedupeKey: 'swap_clear' }
     );
   }
 }
@@ -5342,10 +5479,12 @@ function runAsyncSweep(label, fn, stateKey) {
   if (stateKey === 'localActivity' && localActivitySweepRunning) return;
   if (stateKey === 'localSwap' && localSwapSweepRunning) return;
   if (stateKey === 'agentScope' && agentScopeSweepRunning) return;
+  if (stateKey === 'supervisorLifecycle' && supervisorLifecycleSweepRunning) return;
 
   if (stateKey === 'localActivity') localActivitySweepRunning = true;
   if (stateKey === 'localSwap') localSwapSweepRunning = true;
   if (stateKey === 'agentScope') agentScopeSweepRunning = true;
+  if (stateKey === 'supervisorLifecycle') supervisorLifecycleSweepRunning = true;
 
   Promise.resolve()
     .then(fn)
@@ -5356,6 +5495,7 @@ function runAsyncSweep(label, fn, stateKey) {
       if (stateKey === 'localActivity') localActivitySweepRunning = false;
       if (stateKey === 'localSwap') localSwapSweepRunning = false;
       if (stateKey === 'agentScope') agentScopeSweepRunning = false;
+      if (stateKey === 'supervisorLifecycle') supervisorLifecycleSweepRunning = false;
     });
 }
 
@@ -5456,7 +5596,7 @@ function serializeAgent(agent) {
     managedProjects: normalizeManagedProjects(agent.managedProjects),
     human: normalizeHumanMeta(agent.human),
     task: normalizeAgentTask(agent.task, agent.name),
-    runtimeProfile: normalizeRuntimeProfile(agent.runtimeProfile),
+    runtimeProfile: redactRuntimeProfileSecrets(normalizeRuntimeProfile(agent.runtimeProfile)),
     environment: VALID_ENVIRONMENTS.has(agent.environment) ? agent.environment : classifyEnvironment(agent.name),
     activeNow: runtime?.activeNow === true,
     activeDurationSec: Number(runtime?.activeDurationSec) || 0,
@@ -5514,9 +5654,9 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   server.online = true;
   server.updatedAt = now;
   server.sourceIp = sourceIp || null;
-  server.version = typeof payload.version === 'string' && payload.version.trim() ? payload.version.trim() : (server.version || null);
+  server.version = typeof payload.version === 'string' && payload.version.trim() ? payload.version.trim() : (server.version || 'unknown-legacy');
   // Version-mismatch detection
-  if (LOCAL_GIT_VERSION && server.version && server.version !== LOCAL_GIT_VERSION) {
+  if (LOCAL_GIT_VERSION && server.version && server.version !== 'unknown-legacy' && server.version !== LOCAL_GIT_VERSION) {
     if (!server.versionMismatchSince) { server.versionMismatchSince = now; }
     const mismatchAge = now - server.versionMismatchSince;
     if (mismatchAge > 300_000) { // >5 minutes
@@ -5536,7 +5676,8 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
     emitSystemInfo(
       `Remote server '${serverId}' heartbeat instance switched`,
       `Server '${serverId}' lease takeover: reason=${lease.reason}, instanceId=${incomingInstanceId || 'unknown'}, bootTs=${incomingBootTs || 0}.`,
-      'server_takeover'
+      'server_takeover',
+      { dedupeKey: `server_takeover:${serverId}` }
     );
   }
 
@@ -5951,15 +6092,75 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// ── Supervisor audit ──────────────────────────────────────────────────
+// ── Supervisor audit (v2 — per-agent supervisor snapshot store) ───────
+const _tokenFromSupervisorTarget = r => `supervisor-${r.params?.target || ''}`;
+
+app.patch('/api/supervisor-state/:target', requireAgentToken(_tokenFromSupervisorTarget), (req, res) => {
+  const target = normalizeAgentName(req.params.target);
+  if (!target) return res.status(400).json({ error: 'invalid target agent name' });
+  const supervisorName = `supervisor-${target}`;
+  // Require supervisor agent to be registered
+  if (!isAgentRecord(agents[supervisorName])) {
+    return res.status(403).json({ error: `supervisor agent '${supervisorName}' is not registered` });
+  }
+  // Fail closed: require token to be provisioned (not just registered)
+  if (!agentTokens.get(supervisorName)) {
+    return res.status(403).json({ error: `supervisor agent '${supervisorName}' has no token provisioned` });
+  }
+
+  try {
+    // Renew lease BEFORE assessment so lifecycleState is accurate
+    supervisorSnapshotStore.renewLease(target, supervisorName);
+    const { snapshot, event } = supervisorSnapshotStore.updateAssessment(target, supervisorName, req.body || {});
+    broadcastSSE('supervisor_audit', event);
+    supervisorActionEngine.evaluateAction(target, snapshot);
+    return res.json({ ok: true, snapshot });
+  } catch (error) {
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to update supervisor state' });
+  }
+});
+
+app.post('/api/supervisor-state/:target/heartbeat', requireAgentToken(_tokenFromSupervisorTarget), (req, res) => {
+  const target = normalizeAgentName(req.params.target);
+  if (!target) return res.status(400).json({ error: 'invalid target agent name' });
+  const supervisorName = `supervisor-${target}`;
+  if (!isAgentRecord(agents[supervisorName])) {
+    return res.status(403).json({ error: `supervisor agent '${supervisorName}' is not registered` });
+  }
+  if (!agentTokens.get(supervisorName)) {
+    return res.status(403).json({ error: `supervisor agent '${supervisorName}' has no token provisioned` });
+  }
+  supervisorSnapshotStore.renewLease(target, supervisorName);
+  return res.json({ ok: true, target, leaseRenewed: true });
+});
+
 app.get('/api/supervisor/status', (_req, res) => {
-  res.json(supervisorService.getStatus());
+  res.json(supervisorSnapshotStore.getStatus(agents));
 });
 
 app.get('/api/supervisor/agents', (_req, res) => {
+  // Iterate live candidate set, enrich with snapshot store
+  const agentList = Object.values(agents).filter(isAgentRecord);
+  const summaries = agentList.map(a => {
+    const snapshot = supervisorSnapshotStore.getTarget(a.name);
+    return {
+      name: a.name,
+      online: a.online,
+      task: a.task || null,
+      state: snapshot ? {
+        lastStatus: snapshot.state,
+        classification: snapshot.classification,
+        consecutiveNegative: snapshot.consecutiveNegative,
+        lastReason: snapshot.reason,
+        lastJudgedAt: snapshot.assessed_at_ms || null,
+        lifecycleState: snapshot.lifecycleState,
+      } : null,
+    };
+  });
   res.json({
-    status: supervisorService.getStatus(),
-    agents: supervisorService.getAgentSummaries(),
+    status: supervisorSnapshotStore.getStatus(agents),
+    agents: summaries,
   });
 });
 
@@ -5969,59 +6170,63 @@ app.get('/api/supervisor/agents/:name', (req, res) => {
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
   const limitRaw = Number.parseInt(req.query.limit, 10);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 120;
-  const payload = supervisorService.getAgentDetail(agentName, limit);
-  return res.json(payload);
+  const snapshot = supervisorSnapshotStore.getTarget(agentName);
+  const agentEvents = supervisorSnapshotStore.getEvents(agentName, limit);
+  const agent = agents[agentName];
+  return res.json({
+    name: agentName,
+    task: agent.task || null,
+    state: snapshot ? {
+      lastStatus: snapshot.state,
+      classification: snapshot.classification,
+      consecutiveNegative: snapshot.consecutiveNegative,
+      lastReason: snapshot.reason,
+      lastDomain: snapshot.domain,
+      lastPattern: snapshot.pattern,
+      lastSuggestion: snapshot.suggested_action,
+      lastJudgedAt: snapshot.assessed_at_ms || null,
+      lastWarningAt: snapshot.lastWarningAt,
+      lastNudgeAt: snapshot.lastNudgeAt,
+      lastNudgeCount: snapshot.lastNudgeCount,
+      lastEscalationAt: snapshot.lastEscalationAt,
+      lastEscalationCount: snapshot.lastEscalationCount,
+      lastEventId: snapshot.lastEventId,
+      lifecycleState: snapshot.lifecycleState,
+    } : null,
+    latest: agentEvents.length ? agentEvents[agentEvents.length - 1] : null,
+    events: agentEvents,
+  });
 });
 
 app.get('/api/supervisor/control', (_req, res) => {
-  return res.json(supervisorService.getControl());
+  return res.json(supervisorSnapshotStore.getControl(agents));
 });
 
 app.post('/api/supervisor/control', requireBearer, (req, res) => {
   const body = req.body || {};
-  const patch = {};
-  let hasPatch = false;
-
-  if (Object.prototype.hasOwnProperty.call(body, 'enabled')) {
-    if (typeof body.enabled !== 'boolean') {
-      return res.status(400).json({ error: 'enabled must be boolean' });
-    }
-    patch.enabled = body.enabled;
-    hasPatch = true;
-  }
 
   if (Object.prototype.hasOwnProperty.call(body, 'allowedAgents')) {
-    const raw = body.allowedAgents;
-    if (raw !== null && !Array.isArray(raw)) {
-      return res.status(400).json({ error: 'allowedAgents must be array or null' });
-    }
-    if (Array.isArray(raw)) {
-      const normalized = [];
-      const seen = new Set();
-      for (const item of raw) {
-        const name = normalizeAgentName(item);
-        if (!name) continue;
-        if (seen.has(name)) continue;
-        seen.add(name);
-        normalized.push(name);
-      }
-      patch.allowedAgents = normalized;
-    } else {
-      patch.allowedAgents = null;
-    }
-    hasPatch = true;
+    return res.status(400).json({
+      error: 'allowedAgents is read-only in per-agent supervisor model — provision/deprovision supervisor agents to change membership',
+    });
   }
 
-  if (!hasPatch) {
+  if (!Object.prototype.hasOwnProperty.call(body, 'enabled')) {
     return res.status(400).json({ error: 'no control fields provided' });
   }
 
-  const result = supervisorService.updateControl(patch);
-  if (!result || result.ok !== true) {
-    return res.status(400).json({ error: result?.error || 'failed to update supervisor control' });
+  if (typeof body.enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled must be boolean' });
   }
-  auditLog(req, { summary: patch });
-  return res.json(result);
+
+  supervisorSnapshotStore.setEnabled(body.enabled);
+  if (body.enabled) {
+    try { supervisorLifecycleManager.sweepAll(); } catch (_) { /* best-effort */ }
+  }
+  const control = supervisorSnapshotStore.getControl(agents);
+  const status = supervisorSnapshotStore.getStatus(agents);
+  auditLog(req, { summary: { enabled: body.enabled } });
+  return res.json({ ok: true, control, status });
 });
 
 // ── Server heartbeats ─────────────────────────────────────────────────
@@ -6200,6 +6405,7 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     homeDir,
     workdir,
     stateDir,
+    presetId,
     subconsciousEnabled,
     managedProjects,
     human,
@@ -6224,12 +6430,31 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   const resolvedServer = normalizedServer ?? (isLocalRequest(req) ? 'local' : normalizeServer(existing.server));
   const resolvedTmux = tmux ?? existing.tmux ?? null;
   const resolvedOnline = resolvedTmux ? true : Boolean(existing.online);
+  // Resolve preset into runtimeProfile if presetId is provided
+  let resolvedRuntimeProfile = runtimeProfile;
+  let presetFramework = null;
+  if (presetId && typeof presetId === 'string') {
+    const preset = frameworkPresets.find(p => p.id === presetId);
+    if (!preset) return res.status(400).json({ error: `unknown preset: ${presetId}` });
+    presetFramework = preset.framework || null;
+    resolvedRuntimeProfile = {
+      primary: {
+        framework: preset.framework || null,
+        provider: preset.provider || null,
+        model: preset.model || null,
+        reasoning: preset.reasoning || null,
+        ...(preset.extraArgs ? { extraArgs: preset.extraArgs } : {}),
+        ...(preset.apiBaseUrl ? { apiBaseUrl: preset.apiBaseUrl } : {}),
+        ...(preset.apiKey ? { apiKey: preset.apiKey } : {}),
+      },
+    };
+  }
   agents[agentName] = {
     name: agentName,
     role: role ?? existing.role ?? null,
     identity: identity ?? existing.identity ?? null,
     tmux: resolvedTmux,
-    type: agentType ?? existing.type ?? 'agent',
+    type: presetFramework ?? agentType ?? existing.type ?? 'agent',
     kind: 'agent',
     server: resolvedServer,
     online: resolvedOnline,
@@ -6262,8 +6487,8 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     task: task !== undefined
       ? normalizeAgentTask(task, agentName)
       : normalizeAgentTask(existing.task, agentName),
-    runtimeProfile: runtimeProfile !== undefined
-      ? normalizeRuntimeProfile(runtimeProfile)
+    runtimeProfile: resolvedRuntimeProfile !== undefined
+      ? mergeRuntimeProfileApiKeys(normalizeRuntimeProfile(resolvedRuntimeProfile), normalizeRuntimeProfile(existing.runtimeProfile))
       : normalizeRuntimeProfile(existing.runtimeProfile),
     environment: (VALID_ENVIRONMENTS.has(environment) ? environment : null)
       || existing.environment || classifyEnvironment(agentName),
@@ -6384,7 +6609,7 @@ app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => 
     agent.task = normalizeAgentTask(task, agentName);
   }
   if (runtimeProfile !== undefined) {
-    agent.runtimeProfile = normalizeRuntimeProfile(runtimeProfile);
+    agent.runtimeProfile = mergeRuntimeProfileApiKeys(normalizeRuntimeProfile(runtimeProfile), normalizeRuntimeProfile(agent.runtimeProfile));
   }
   if (environment !== undefined && VALID_ENVIRONMENTS.has(environment)) {
     agent.environment = environment;
@@ -6460,6 +6685,77 @@ app.post('/api/agents/:name/undelete', requireBearer, (req, res) => {
   auditLog(req, { agent: agentName, summary: { action: 'undelete' } });
   console.log(`Agent '${agentName}' tombstone removed — re-registration allowed`);
   res.json({ ok: true, undeleted: true, name: agentName });
+});
+
+app.post('/api/agents/:name/supervisor', requireBearer, (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: 'local-only endpoint' });
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+  const supervisorName = `supervisor-${agentName}`;
+  if (agents[supervisorName] && isAgentRecord(agents[supervisorName])) {
+    return res.json({ ok: true, alreadyExists: true, supervisor: supervisorName });
+  }
+  try {
+    provisionSupervisorAgent(agentName, { runtimeDir: RUNTIME_DIR, agentchatHomeDir: defaultAgentchatHomeDir() });
+  } catch (e) {
+    console.error(`[supervisor-provision] failed for ${agentName}:`, e.message);
+    return res.status(500).json({ error: 'provisioning failed', detail: e.message });
+  }
+  const record = buildSupervisorAgentRecord(supervisorName, agentName);
+  agents[supervisorName] = record;
+  saveAgents();
+  try { supervisorLifecycleManager.sweepAll(); } catch (_) { /* best-effort */ }
+  auditLog(req, { agent: agentName, summary: { action: 'provision-supervisor', supervisor: supervisorName } });
+  console.log(`[supervisor-provision] provisioned ${supervisorName} for ${agentName}`);
+  res.json({ ok: true, supervisor: supervisorName });
+});
+
+app.get('/api/agents/:name/launch-env', requireBearer, (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: 'local-only endpoint' });
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+  const rp = normalizeRuntimeProfile(agent.runtimeProfile);
+  res.json({ runtimeProfile: rp || null });
+});
+
+app.post('/api/agents/:name/start', requireBearer, (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: 'local-only endpoint' });
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+  if (agent.online) return res.status(409).json({ error: 'agent already online' });
+  const VALID_FRAMEWORKS = new Set(['claude', 'codex']);
+  const framework = agent.type;
+  if (!framework || !VALID_FRAMEWORKS.has(framework)) {
+    return res.status(400).json({ error: `agent has no valid framework (type='${agent.type || 'null'}'). Update agent type to claude or codex first.` });
+  }
+  const agentchatBin = path.join(REPO_ROOT, 'bin', 'agentchat');
+  const launchEnv = { ...process.env };
+  const rp = agent.runtimeProfile?.primary;
+  if (rp?.apiBaseUrl) launchEnv.ANTHROPIC_BASE_URL = rp.apiBaseUrl;
+  if (rp?.apiKey) launchEnv.ANTHROPIC_API_KEY = rp.apiKey;
+  if (rp?.model) launchEnv.AGENTCHAT_LAUNCH_MODEL = rp.model;
+  if (rp?.extraArgs) launchEnv.AGENTCHAT_LAUNCH_EXTRA_ARGS = rp.extraArgs;
+  try {
+    const child = spawn(agentchatBin, ['up-v1', agentName, framework], {
+      cwd: REPO_ROOT,
+      env: launchEnv,
+      stdio: 'ignore',
+      detached: true,
+    });
+    child.unref();
+    auditLog(req, { agent: agentName, summary: { action: 'start', framework, pid: child.pid } });
+    console.log(`[start] launched agentchat up-v1 ${agentName} ${framework} (pid=${child.pid})`);
+    res.json({ ok: true, name: agentName, framework, pid: child.pid });
+  } catch (e) {
+    console.error(`[start] failed to launch ${agentName}:`, e.message);
+    res.status(500).json({ error: 'launch failed', detail: e.message });
+  }
 });
 
 app.post('/api/agents/:name/offline', requireAgentToken(_tokenFromName), (req, res) => {
@@ -7512,6 +7808,228 @@ app.get('/api/subconscious/events/:name', (req, res) => {
   return res.json({ ok: true, agent, events: getSubconsciousEvents(agent, limit) });
 });
 
+// ── Tasks CRUD ───────────────────────────────────────────────────────
+const _tokenFromTaskAssignee = r => { const t = taskStore.getTask(r.params?.id); return t?.assignee || ''; };
+
+app.post('/api/tasks', requireBearer, (req, res) => {
+  try {
+    const task = taskStore.createTask(req.body || {});
+    broadcastSSE('task_created', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to create task' });
+  }
+});
+
+app.get('/api/tasks', (req, res) => {
+  const filters = {};
+  if (req.query.assignee) filters.assignee = req.query.assignee;
+  if (req.query.status) filters.status = req.query.status;
+  if (req.query.priority) filters.priority = req.query.priority;
+  if (req.query.label) filters.label = req.query.label;
+  const tasks = taskStore.listTasks(filters).map(task => {
+    if (!task.assignee) return task;
+    const snapshot = supervisorSnapshotStore.getTarget(task.assignee);
+    if (!snapshot) return task;
+    return { ...task, health: { state: snapshot.state, confidence: snapshot.confidence, reason: snapshot.reason, suggested_action: snapshot.suggested_action, domain: snapshot.domain, pattern: snapshot.pattern, assessed_at: snapshot.assessed_at, assessed_by: snapshot.supervisor } };
+  });
+  return res.json(tasks);
+});
+
+app.get('/api/tasks/:id', (req, res) => {
+  const task = taskStore.getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: 'task not found' });
+  // Read-through: enrich health from supervisor snapshot store
+  const enriched = { ...task };
+  if (task.assignee) {
+    const snapshot = supervisorSnapshotStore.getTarget(task.assignee);
+    if (snapshot) {
+      enriched.health = {
+        state: snapshot.state,
+        confidence: snapshot.confidence,
+        reason: snapshot.reason,
+        suggested_action: snapshot.suggested_action,
+        domain: snapshot.domain,
+        pattern: snapshot.pattern,
+        assessed_at: snapshot.assessed_at,
+        assessed_by: snapshot.supervisor,
+      };
+    }
+  }
+  return res.json(enriched);
+});
+
+app.patch('/api/tasks/:id', requireBearer, (req, res) => {
+  try {
+    const task = taskStore.updateTask(req.params.id, req.body || {});
+    broadcastSSE('task_updated', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to update task' });
+  }
+});
+
+app.patch('/api/tasks/:id/execution', requireAgentToken(_tokenFromTaskAssignee), (req, res) => {
+  try {
+    const task = taskStore.updateTaskExecution(req.params.id, req.body || {});
+    broadcastSSE('task_updated', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to update task execution' });
+  }
+});
+
+app.delete('/api/tasks/:id', requireBearer, (req, res) => {
+  const task = taskStore.deleteTask(req.params.id);
+  if (!task) return res.status(404).json({ error: 'task not found' });
+  broadcastSSE('task_deleted', task);
+  return res.json({ ok: true, task });
+});
+
+app.post('/api/tasks/:id/accept', requireAgentToken(_tokenFromTaskAssignee), (req, res) => {
+  try {
+    const task = taskStore.transitionTask(req.params.id, 'accepted');
+    broadcastSSE('task_updated', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to accept task' });
+  }
+});
+
+app.post('/api/tasks/:id/transition', requireAgentToken(_tokenFromTaskAssignee), (req, res) => {
+  try {
+    const status = (typeof req.body?.status === 'string') ? req.body.status.trim() : '';
+    if (!status) return res.status(400).json({ error: 'status is required' });
+    const task = taskStore.transitionTask(req.params.id, status, req.body);
+    broadcastSSE('task_updated', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to transition task' });
+  }
+});
+
+app.post('/api/tasks/:id/comments', requireBearer, (req, res) => {
+  try {
+    const task = taskStore.addComment(req.params.id, req.body || {});
+    broadcastSSE('task_updated', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to add comment' });
+  }
+});
+
+app.get('/api/agents/:name/tasks', (req, res) => {
+  const name = normalizeAgentName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'invalid agent name' });
+  const snapshot = supervisorSnapshotStore.getTarget(name);
+  const tasks = taskStore.listTasks({ assignee: name }).map(task => {
+    if (!snapshot) return task;
+    return { ...task, health: { state: snapshot.state, confidence: snapshot.confidence, reason: snapshot.reason, suggested_action: snapshot.suggested_action, domain: snapshot.domain, pattern: snapshot.pattern, assessed_at: snapshot.assessed_at, assessed_by: snapshot.supervisor } };
+  });
+  return res.json(tasks);
+});
+
+// ── Framework Presets CRUD ─────────────────────────────────────────────
+app.get('/api/framework-presets', requireBearer, (_req, res) => {
+  return res.json(frameworkPresets.map(p => ({
+    ...p,
+    apiKey: p.apiKey ? true : null,
+  })));
+});
+
+app.post('/api/framework-presets', requireBearer, (req, res) => {
+  const b = req.body || {};
+  const name = normalizeOptionalText(b.name, 128);
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  let id = 'preset_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+  for (let i = 0; i < 10 && frameworkPresets.some(p => p.id === id); i++) {
+    id = 'preset_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+  }
+  if (frameworkPresets.some(p => p.id === id)) return res.status(500).json({ error: 'failed to generate unique preset id' });
+  const extraArgs = normalizeOptionalText(b.extraArgs, 4000) || null;
+  if (extraArgs && SHELL_METACHAR_RE.test(extraArgs)) {
+    return res.status(400).json({ error: 'extraArgs contains disallowed shell characters' });
+  }
+  const apiBaseUrl = normalizeOptionalText(b.apiBaseUrl, 512) || null;
+  if (apiBaseUrl) {
+    try {
+      const parsed = new URL(apiBaseUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('not http(s)');
+      if (parsed.username || parsed.password) throw new Error('credentials in URL');
+    } catch {
+      return res.status(400).json({ error: 'apiBaseUrl must be a valid HTTP(S) URL without embedded credentials' });
+    }
+  }
+  const preset = {
+    id,
+    name,
+    framework: normalizeOptionalText(b.framework, 32) || null,
+    provider: normalizeOptionalText(b.provider, 64) || null,
+    model: normalizeOptionalText(b.model, 256) || null,
+    reasoning: normalizeOptionalText(b.reasoning, 64) || null,
+    extraArgs,
+    apiBaseUrl,
+    apiKey: normalizeOptionalText(b.apiKey, 256) || null,
+  };
+  frameworkPresets.push(preset);
+  saveFrameworkPresets();
+  return res.json({ ok: true, preset: { ...preset, apiKey: preset.apiKey ? true : null } });
+});
+
+app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
+  const idx = frameworkPresets.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'preset not found' });
+  const b = req.body || {};
+  const name = normalizeOptionalText(b.name, 128);
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const extraArgs = normalizeOptionalText(b.extraArgs, 4000) || null;
+  if (extraArgs && SHELL_METACHAR_RE.test(extraArgs)) {
+    return res.status(400).json({ error: 'extraArgs contains disallowed shell characters' });
+  }
+  const apiBaseUrl = normalizeOptionalText(b.apiBaseUrl, 512) || null;
+  if (apiBaseUrl) {
+    try {
+      const parsed = new URL(apiBaseUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('not http(s)');
+      if (parsed.username || parsed.password) throw new Error('credentials in URL');
+    } catch {
+      return res.status(400).json({ error: 'apiBaseUrl must be a valid HTTP(S) URL without embedded credentials' });
+    }
+  }
+  frameworkPresets[idx] = {
+    ...frameworkPresets[idx],
+    name,
+    framework: normalizeOptionalText(b.framework, 32) || null,
+    provider: normalizeOptionalText(b.provider, 64) || null,
+    model: normalizeOptionalText(b.model, 256) || null,
+    reasoning: normalizeOptionalText(b.reasoning, 64) || null,
+    extraArgs,
+    apiBaseUrl,
+    apiKey: normalizeOptionalText(b.apiKey, 256) || frameworkPresets[idx].apiKey || null,
+  };
+  saveFrameworkPresets();
+  return res.json({ ok: true, preset: { ...frameworkPresets[idx], apiKey: frameworkPresets[idx].apiKey ? true : null } });
+});
+
+app.delete('/api/framework-presets/:id', requireBearer, (req, res) => {
+  const idx = frameworkPresets.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'preset not found' });
+  const removed = frameworkPresets.splice(idx, 1)[0];
+  saveFrameworkPresets();
+  return res.json({ ok: true, preset: { ...removed, apiKey: removed.apiKey ? true : null } });
+});
+
 app.post('/api/task-graphs', requireBearer, (req, res) => {
   try {
     const created = taskGraphStore.createGraph(req.body || {});
@@ -7554,6 +8072,97 @@ app.patch('/api/task-graphs/:id/nodes/:nodeId', requireAgentToken(_tokenFromNode
   } catch (error) {
     return respondTaskGraphError(res, error, 'failed to update task graph node');
   }
+});
+
+// ── Alerts CRUD ───────────────────────────────────────────────────────
+app.get('/api/alerts', requireBearer, (req, res) => {
+  const filters = {};
+  if (req.query.status) filters.status = req.query.status;
+  if (req.query.severity) filters.severity = req.query.severity;
+  if (req.query.sourceAgent) filters.sourceAgent = req.query.sourceAgent;
+  if (req.query.alertType) filters.alertType = req.query.alertType;
+  if (req.query.assignee) filters.assignee = req.query.assignee;
+  if (req.query.limit) filters.limit = req.query.limit;
+  if (req.query.offset) filters.offset = req.query.offset;
+  return res.json(alertStore.listAlerts(filters));
+});
+
+app.get('/api/alerts/stats', requireBearer, (_req, res) => {
+  return res.json(alertStore.getStats());
+});
+
+app.get('/api/alerts/:id', requireBearer, (req, res) => {
+  const alert = alertStore.getAlert(req.params.id);
+  if (!alert) return res.status(404).json({ error: 'alert not found' });
+  return res.json(alert);
+});
+
+// Accept Bearer OR agent-token (agent can only transition alerts assigned to them)
+const _alertTransitionAuth = (req, res, next) => {
+  const expectedBearer = normalizeOptionalText(process.env.API_TOKEN, 512);
+  // No API_TOKEN configured — pass through (matches requireBearer behavior)
+  if (!expectedBearer) return next();
+  // Bearer token matches — pass through
+  if (getBearerToken(req) === expectedBearer) return next();
+  // Fall back to agent-token auth: agent can transition their assigned alerts
+  const alert = alertStore.getAlert(req.params.id);
+  if (!alert) return res.status(404).json({ error: 'alert not found' });
+  const assignee = alert.assignee;
+  if (!assignee) return res.status(403).json({ error: 'alert has no assignee — bearer token required' });
+  const tokenResult = checkAgentToken(assignee, req);
+  if (!tokenResult.ok) {
+    if (AGENT_TOKEN_MODE === 'audit') { console.warn(`[auth] alert-transition agent-token ${tokenResult.reason}: agent=${assignee}`); return next(); }
+    return res.status(403).json({ error: `agent token ${tokenResult.reason}` });
+  }
+  next();
+};
+app.post('/api/alerts/:id/transition', _alertTransitionAuth, (req, res) => {
+  try {
+    const status = (typeof req.body?.status === 'string') ? req.body.status.trim() : '';
+    if (!status) return res.status(400).json({ error: 'status is required' });
+    const alert = alertStore.transition(req.params.id, status, {
+      actor: req.body.actor || 'operator',
+      assignee: req.body.assignee || null,
+      suppressUntil: req.body.suppressUntil ? Number(req.body.suppressUntil) : undefined,
+    });
+    return res.json({ ok: true, alert });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code === 'bad_transition') return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to transition alert' });
+  }
+});
+
+app.post('/api/alerts/:id/notes', requireBearer, (req, res) => {
+  try {
+    const alert = alertStore.addNote(req.params.id, {
+      author: req.body?.author || 'operator',
+      text: req.body?.text || '',
+    });
+    return res.json({ ok: true, alert });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to add note' });
+  }
+});
+
+app.patch('/api/alerts/:id', requireBearer, (req, res) => {
+  try {
+    const alert = alertStore.updateAlert(req.params.id, req.body || {});
+    return res.json({ ok: true, alert });
+  } catch (error) {
+    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+    if (error.code) return res.status(400).json({ error: error.message });
+    return res.status(500).json({ error: 'failed to update alert' });
+  }
+});
+
+app.delete('/api/alerts/:id', requireBearer, (req, res) => {
+  const alert = alertStore.deleteAlert(req.params.id);
+  if (!alert) return res.status(404).json({ error: 'alert not found' });
+  broadcastSSE('alert_deleted', alert);
+  return res.json({ ok: true, alert });
 });
 
 // ── Groups CRUD ───────────────────────────────────────────────────────
@@ -7669,7 +8278,14 @@ app.post('/api/system/info', requireBridgeSecret, (req, res) => {
   const summary = (typeof req.body?.summary === 'string') ? req.body.summary.trim() : '';
   const full = (typeof req.body?.full === 'string') ? req.body.full : '';
   if (!summary) return res.status(400).json({ error: 'summary required' });
-  const event = emitSystemInfo(summary, full);
+  const alertType = (typeof req.body?.alertType === 'string') ? req.body.alertType.trim() : null;
+  const dedupeKey = (typeof req.body?.dedupeKey === 'string') ? req.body.dedupeKey.trim() : undefined;
+  const sourceAgent = (typeof req.body?.sourceAgent === 'string') ? req.body.sourceAgent.trim() : undefined;
+  const opts = {};
+  if (dedupeKey) opts.dedupeKey = dedupeKey;
+  if (sourceAgent) opts.sourceAgent = sourceAgent;
+  opts.source = 'bridge';
+  const event = emitSystemInfo(summary, full, alertType || null, Object.keys(opts).length > 1 ? opts : { source: 'bridge' });
   res.json({ ok: true, id: event.id });
 });
 
@@ -7995,6 +8611,27 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
   });
 });
 
+// ── DM history (bearer-authenticated, for web UI) ─────────────────────
+app.get('/api/dm/:agent/history', requireBearer, (req, res) => {
+  const agentName = normalizeAgentName(req.params.agent);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const limitRaw = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+  const beforeRaw = Number.parseInt(req.query.before, 10);
+  const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : Infinity;
+  // Return DMs involving this agent (sent to or from, excluding group messages)
+  const dms = messages
+    .filter(m => !m.group && (m.to === agentName || m.from === agentName) && m.ts < before)
+    .sort((a, b) => a.ts - b.ts);
+  const rows = dms.slice(-limit);
+  res.json({
+    agent: agentName,
+    total: dms.length,
+    returned: rows.length,
+    messages: rows.map(summarizeMsg),
+  });
+});
+
 app.get('/api/messages/:id', (req, res) => {
   const msg = messages.find(m => m.id === req.params.id);
   if (!msg) return res.status(404).json({ error: 'message not found' });
@@ -8122,7 +8759,13 @@ app.get('/api/inbox/:agent/unread', requireAgentToken(_tokenFromAgent), (req, re
   res.json(snapshot);
 });
 
-app.get('/api/inbox/:agent/unread-list', requireAgentToken(_tokenFromAgent), (req, res) => {
+app.get('/api/inbox/:agent/unread-list', (req, res, next) => {
+  // Accept Bearer token (web-tier proxy) OR per-agent token
+  const bearerToken = getBearerToken(req);
+  const expectedBearer = normalizeOptionalText(process.env.API_TOKEN, 512);
+  if (expectedBearer && bearerToken === expectedBearer) return next();
+  return requireAgentToken(_tokenFromAgent)(req, res, next);
+}, (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
@@ -8291,7 +8934,6 @@ app.get('/api/agents/:name/groups', (req, res) => {
 // ── Graceful shutdown ─────────────────────────────────────────────────
 function shutdown() {
   console.log('Shutting down, saving data...');
-  supervisorService.stop();
   refreshServerLiveness();
   Promise.allSettled([
     sweepLocalActivityDurations(),
@@ -8336,6 +8978,12 @@ function startBackgroundLoops() {
 
   scheduleAdaptiveSweepLoop('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope', AGENT_SCOPE_SWEEP_INTERVAL_MS);
 
+  // Supervisor lifecycle sweep — manages per-agent supervisor tmux sessions
+  scheduleAdaptiveSweepLoop('sweepSupervisorLifecycle', () => supervisorLifecycleManager.sweepAll(), 'supervisorLifecycle', SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS);
+
+  // Prune resolved alerts every hour
+  setInterval(() => { alertStore.pruneResolved(); }, 3600_000);
+
   backgroundLoopsStarted = true;
 }
 
@@ -8354,7 +9002,8 @@ export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
       runAsyncSweep('sweepLocalActivityDurations', sweepLocalActivityDurations, 'localActivity');
       runAsyncSweep('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap');
       runAsyncSweep('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope');
-      supervisorService.start();
+      runAsyncSweep('sweepSupervisorLifecycle', () => supervisorLifecycleManager.sweepAll(), 'supervisorLifecycle');
+      try { const orphans = supervisorLifecycleManager.cleanOrphanSessions(); if (orphans.length) console.log(`  Cleaned ${orphans.length} orphan supervisor session(s): ${orphans.join(', ')}`); } catch { /* tmux not available */ }
       console.log(`Agent Chat v2 backend listening on http://${host}:${port}`);
       const agentCount = Object.values(agents).filter(isAgentRecord).length;
       console.log(`  Agents: ${agentCount}, Messages: ${messages.length}, Groups: ${Object.keys(groups).length}`);

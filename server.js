@@ -47,7 +47,7 @@ mkdirSync(DATA_ROOT, { recursive: true });
 mkdirSync(LOGS_ROOT, { recursive: true });
 mkdirSync(path.join(DATA_ROOT, 'agents'), { recursive: true });
 
-// ── Local server identity (mirrors supervisor/index.js isLocalAgentServer) ───
+// ── Local server identity ───
 function isLocalAgentServer(value) {
   const raw = typeof value === 'string' ? value.trim() : '';
   const localServerId = String(process.env.AGENT_CHAT_SERVER || 'local').trim() || 'local';
@@ -484,6 +484,17 @@ app.get('/api/idle', (_req, res) => {
     result[target] = { idleMs: now - snap.changedAt, idleSec: Math.floor((now - snap.changedAt) / 1000), hash: snap.hash.slice(0, 8) };
   }
   res.json(result);
+});
+
+// ── All agents (for config page agent management) ───────────────────
+app.get('/api/agents/all', async (_req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents`);
+    const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
 });
 
 // ── Agent status (for dashboard monitor) ─────────────────────────────
@@ -1456,6 +1467,7 @@ app.get('/api/agents/detail/:name', async (req, res) => {
       detail.human = (agent.human && typeof agent.human === 'object') ? agent.human : {};
       detail.task = normalizeTaskMeta(agent.task, name);
       detail.runtimeProfile = normalizeRuntimeProfileMeta(agent.runtimeProfile);
+      detail.role = agent.role || null;
     }
   } catch (e) {
     console.debug(`[server] backend subconscious detail fetch skipped for ${name}: ${e.message}`);
@@ -1516,39 +1528,47 @@ app.get('/api/agents/detail/:name', async (req, res) => {
     detail.subconsciousGuidancePreview = '';
   }
 
-  // From resume-id
-  const resumeRoot = detail.v1 && detail.stateDir
-    ? detail.stateDir
-    : path.join(AGENTS_DATA_DIR, name);
-  try {
-    detail.resumeId = (await readFileAsync(path.join(resumeRoot, 'resume-id'), 'utf-8')).trim();
-  } catch (e) {
-    if (e.code !== 'ENOENT') console.debug(`[server] resume-id read failed for ${name}: ${e.message}`);
-    detail.resumeId = null;
-  }
-
-  // Idle info + detect agent type from process if missing
+  // Idle info (sync — reads from in-memory snapshot cache)
   if (detail.tmux && isLocalAgentServer(detail.server)) {
     detail.idleMs = getPaneIdleMs(detail.tmux);
     detail.active = detail.idleMs >= 0 && detail.idleMs < IDLE_THRESHOLD;
-    if (!detail.agentType) {
-      try {
-        const { stdout: panePidStdout } = await execFileAsync('tmux', ['list-panes', '-t', detail.tmux, '-F', '#{pane_pid}'], { encoding: 'utf-8', timeout: 2000 });
-        const panePid = panePidStdout.trim();
-        if (panePid) {
-          const { stdout: childCmdStdout } = await execFileAsync('ps', ['-o', 'args=', '--ppid', panePid], { encoding: 'utf-8', timeout: 2000 });
-          const childCmd = childCmdStdout.toLowerCase();
-          if (childCmd.includes('claude')) detail.agentType = 'claude';
-          else if (childCmd.includes('codex')) detail.agentType = 'codex';
-        }
-      } catch (e) {
-        console.debug(`[server] agent type probe skipped for ${name}: ${e.message}`);
-      }
-    }
   }
 
+  // Parallel: resume-id, agent type probe, docs payload
+  const resumeRoot = detail.v1 && detail.stateDir
+    ? detail.stateDir
+    : path.join(AGENTS_DATA_DIR, name);
   const docsWorkspacePath = detail.workdir || v1Manifest?.workdir || AGENTCHAT_HOMEDIR;
-  detail.docs = await buildAgentDocsPayload(name, docsWorkspacePath, v1Manifest);
+  const needsTypeProbe = detail.tmux && isLocalAgentServer(detail.server) && !detail.agentType;
+
+  const [resumeResult, typeResult, docsResult] = await Promise.allSettled([
+    readFileAsync(path.join(resumeRoot, 'resume-id'), 'utf-8').then(s => s.trim()).catch(e => {
+      if (e.code !== 'ENOENT') console.debug(`[server] resume-id read failed for ${name}: ${e.message}`);
+      return null;
+    }),
+    needsTypeProbe
+      ? execFileAsync('tmux', ['list-panes', '-t', detail.tmux, '-F', '#{pane_pid}'], { encoding: 'utf-8', timeout: 2000 })
+          .then(({ stdout }) => {
+            const panePid = stdout.trim();
+            if (!panePid) return null;
+            return execFileAsync('ps', ['-o', 'args=', '--ppid', panePid], { encoding: 'utf-8', timeout: 2000 })
+              .then(({ stdout: childCmdStdout }) => {
+                const childCmd = childCmdStdout.toLowerCase();
+                if (childCmd.includes('claude')) return 'claude';
+                if (childCmd.includes('codex')) return 'codex';
+                return null;
+              });
+          })
+          .catch(e => { console.debug(`[server] agent type probe skipped for ${name}: ${e.message}`); return null; })
+      : Promise.resolve(null),
+    buildAgentDocsPayload(name, docsWorkspacePath, v1Manifest),
+  ]);
+
+  detail.resumeId = resumeResult.status === 'fulfilled' ? resumeResult.value : null;
+  if (needsTypeProbe && typeResult.status === 'fulfilled' && typeResult.value) {
+    detail.agentType = typeResult.value;
+  }
+  detail.docs = docsResult.status === 'fulfilled' ? docsResult.value : {};
 
   res.json(detail);
 });
@@ -1685,6 +1705,48 @@ app.post('/api/agents/:name/unread-messages/:msgId/cancel', async (req, res) => 
   }
 });
 
+// ── DM tab proxies ────────────────────────────────────────────────────
+app.get('/api/agents/:name/dm-history', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  const limitRaw = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+  const qs = `limit=${limit}`;
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/dm/${encodeURIComponent(name)}/history?${qs}`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.post('/api/agents/:name/dm-send', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  const text = String(req.body?.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const fromName = String(req.body?.from || '').trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'operator';
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: fromName,
+        to: name,
+        type: 'human',
+        full: text,
+        source: 'web',
+        target_type: 'agent',
+      }),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
 app.delete('/api/queue/agents/:name/notifications', (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
@@ -1702,6 +1764,49 @@ app.patch('/api/agents/:name', async (req, res) => {
       body: JSON.stringify(req.body),
     });
     const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.post('/api/agents/create', async (req, res) => {
+  const body = req.body || {};
+  if (!body.name || !/^[\w\-]+$/.test(body.name)) return res.status(400).json({ error: 'invalid agent name' });
+  try {
+    const check = await backendFetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(body.name)}`);
+    if (check.ok) {
+      const existing = await check.json();
+      if (existing && existing.name) {
+        return res.status(409).json({ error: 'agent already exists' });
+      }
+    }
+  } catch {}
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json(data);
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'backend unreachable', detail: e.message });
+  }
+});
+
+app.post('/api/agents/:name/start', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(r.status).json(data);
     res.json(data);
   } catch (e) {
     res.status(502).json({ error: 'backend unreachable', detail: e.message });
@@ -1954,6 +2059,38 @@ app.post('/api/agents/:name/workspace/migrate-entry-files', async (req, res) => 
     localWriteOk: true,
     backendSync,
   });
+});
+
+app.get('/api/agents/:name/hooks', async (req, res) => {
+  const name = req.params.name;
+  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
+  const { meta: localMeta } = loadLocalAgentMeta(name);
+  const manifest = loadV1Manifest(name, localMeta);
+  const stateDir = manifest?.stateDir || localMeta?.stateDir || null;
+  if (!stateDir) return res.json({ hooks: null });
+  const hooksPath = path.join(stateDir, 'subconscious', 'claude-agentchat', 'hooks', 'hooks.json');
+  try {
+    const hooks = JSON.parse(readFileSync(hooksPath, 'utf8'));
+    return res.json({ hooks });
+  } catch {
+    return res.json({ hooks: null });
+  }
+});
+
+app.get('/api/config/mcp', (_req, res) => {
+  const homedir = process.env.HOME || process.env.USERPROFILE || '/root';
+  const settingsPath = path.join(homedir, '.claude', 'settings.json');
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    const raw = settings.mcpServers || {};
+    const safe = {};
+    for (const [name, cfg] of Object.entries(raw)) {
+      safe[name] = { command: cfg?.command || null, type: cfg?.type || null };
+    }
+    return res.json({ mcpServers: safe });
+  } catch {
+    return res.json({ mcpServers: {} });
+  }
 });
 
 app.patch('/api/agents/:name/subconscious-guidance', async (req, res) => {
@@ -2212,6 +2349,112 @@ app.delete('/api/agents/:name', async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: 'backend unreachable', detail: e.message });
   }
+});
+
+// ── Framework Presets proxy APIs ─────────────────────────────────────
+app.get('/api/framework-presets', async (_req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/framework-presets`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.post('/api/framework-presets', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/framework-presets`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.put('/api/framework-presets/:id', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/framework-presets/${encodeURIComponent(req.params.id)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.delete('/api/framework-presets/:id', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/framework-presets/${encodeURIComponent(req.params.id)}`, { method: 'DELETE' });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+// ── Task CRUD proxy APIs ─────────────────────────────────────────────
+app.get('/api/tasks', async (req, res) => {
+  try {
+    const url = new URL(`${BACKEND_V2_URL}/api/tasks`);
+    for (const key of ['assignee', 'status', 'priority', 'label']) {
+      if (typeof req.query[key] === 'string' && req.query[key].trim()) url.searchParams.set(key, req.query[key].trim());
+    }
+    const r = await backendFetch(url);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.post('/api/tasks', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/tasks`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.get('/api/tasks/:id', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/tasks/${encodeURIComponent(req.params.id)}`);
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.patch('/api/tasks/:id', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/tasks/${encodeURIComponent(req.params.id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.delete('/api/tasks/:id', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/tasks/${encodeURIComponent(req.params.id)}`, { method: 'DELETE' });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.post('/api/tasks/:id/transition', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/tasks/${encodeURIComponent(req.params.id)}/transition`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+});
+
+app.post('/api/tasks/:id/comments', async (req, res) => {
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/tasks/${encodeURIComponent(req.params.id)}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body || {}),
+    });
+    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+    res.status(r.status).json(data);
+  } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
 });
 
 app.post('/api/task-graphs', async (req, res) => {
@@ -2494,6 +2737,81 @@ async function sweepPaneSnapshots() {
 setInterval(async () => {
   await sweepPaneSnapshots();
 }, 2000);
+
+// ── Alert proxy APIs ─────────────────────────────────────────────────
+function alertProxyGet(routeSuffix) {
+  return async (req, res) => {
+    try {
+      const url = new URL(`${BACKEND_V2_URL}/api/alerts${routeSuffix.replace(':id', encodeURIComponent(req.params.id || ''))}`);
+      for (const [k, v] of Object.entries(req.query)) url.searchParams.set(k, v);
+      const r = await backendFetch(url);
+      const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+      res.status(r.status).json(data);
+    } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+  };
+}
+function alertProxyMutate(routeSuffix, method) {
+  return async (req, res) => {
+    try {
+      const path = routeSuffix.replace(':id', encodeURIComponent(req.params.id || ''));
+      const r = await backendFetch(`${BACKEND_V2_URL}/api/alerts${path}`, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: method === 'DELETE' ? undefined : JSON.stringify(req.body || {}),
+      });
+      const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
+      res.status(r.status).json(data);
+    } catch (e) { res.status(502).json({ error: 'backend unreachable', detail: e.message }); }
+  };
+}
+app.get('/api/alerts', alertProxyGet(''));
+app.get('/api/alerts/stats', alertProxyGet('/stats'));
+app.get('/api/alerts/:id', alertProxyGet('/:id'));
+app.post('/api/alerts/:id/transition', alertProxyMutate('/:id/transition', 'POST'));
+app.post('/api/alerts/:id/notes', alertProxyMutate('/:id/notes', 'POST'));
+app.patch('/api/alerts/:id', alertProxyMutate('/:id', 'PATCH'));
+app.delete('/api/alerts/:id', alertProxyMutate('/:id', 'DELETE'));
+
+// Backend SSE consumer — forward alert events to dashboard clients
+const ALERT_SSE_EVENTS = new Set(['alert_created', 'alert_updated', 'alert_resolved', 'alert_deleted', 'message', 'task_created', 'task_updated', 'task_deleted']);
+let backendSSEAbort = null;
+async function connectBackendSSE() {
+  if (backendSSEAbort) { try { backendSSEAbort.abort(); } catch {} }
+  const ac = new AbortController();
+  backendSSEAbort = ac;
+  try {
+    const r = await backendFetch(`${BACKEND_V2_URL}/api/stream`, { signal: ac.signal });
+    if (!r.ok || !r.body) throw new Error(`backend SSE status ${r.status}`);
+    let buf = '';
+    let currentEvent = '';
+    let currentData = '';
+    const decoder = new TextDecoder();
+    for await (const chunk of r.body) {
+      buf += decoder.decode(chunk, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      for (const line of lines) {
+        if (line.startsWith('event: ')) { currentEvent = line.slice(7).trim(); }
+        else if (line.startsWith('data: ')) { currentData = line.slice(6); }
+        else if (line === '') {
+          if (ALERT_SSE_EVENTS.has(currentEvent) && currentData) {
+            const frame = `event: ${currentEvent}\ndata: ${currentData}\n\n`;
+            for (const c of sseClients) { try { c.write(frame); } catch {} }
+          }
+          currentEvent = '';
+          currentData = '';
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      console.debug(`[alert-sse] backend SSE disconnected: ${e.message}`);
+    }
+  }
+  backendSSEAbort = null;
+  setTimeout(connectBackendSSE, 5000);
+}
+connectBackendSSE();
 
 // ── Target redirects (e.g. renamed sessions) ────────────────────────
 const REDIRECT_FILE = path.join(LOGS_ROOT, 'redirects.json');
@@ -2869,6 +3187,17 @@ app.delete('/api/reminders/:id', (req, res) => {
   res.json({ ok: true, deleted: id });
 });
 
+// ── Alerts page ──────────────────────────────────────────────────────
+app.get('/alerts', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.type('html').send(renderAlertsPage());
+});
+
+app.get('/config', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.type('html').send(renderConfigPage());
+});
+
 // ── Frontend ─────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
   res.set('Cache-Control', 'no-store');
@@ -2887,6 +3216,11 @@ app.get('/agents/:name/audit', (req, res) => {
   if (!/^[\w\-]+$/.test(name)) return res.status(400).type('text').send('invalid agent name');
   const target = `/agents/${encodeURIComponent(name)}#audit`;
   res.redirect(302, target);
+});
+
+app.get('/tasks', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.type('html').send(renderTasksPage());
 });
 
 let serverInstance = null;
@@ -2969,7 +3303,7 @@ a{color:var(--accent)}
 .page{max-width:1240px;margin:0 auto;padding:20px 20px 40px}
 .hero{
   position:sticky;top:0;z-index:20;
-  background:linear-gradient(180deg,rgba(8,16,26,0.96) 0%,rgba(8,16,26,0.90) 100%);
+  background:linear-gradient(180deg,rgba(8,16,26,1) 0%,rgba(8,16,26,1) 100%);
   backdrop-filter:blur(16px);
   border:1px solid var(--border);
   border-radius:18px;
@@ -3206,7 +3540,7 @@ a{color:var(--accent)}
   display:flex;gap:8px;flex-wrap:wrap;
   position:sticky;top:var(--detail-tabs-top);z-index:21;
   margin-bottom:14px;padding:8px;
-  background:rgba(8,16,26,0.9);
+  background:rgba(8,16,26,1);
   backdrop-filter:blur(14px);
   border:1px solid var(--border);
   border-radius:14px;
@@ -3289,6 +3623,11 @@ a{color:var(--accent)}
   outline:none;
   font-size:12px;
 }
+select{cursor:pointer}
+select option{
+  background:#0d1723;
+  color:#e2eaf3;
+}
 .detail-input:focus,
 .detail-textarea:focus{border-color:rgba(109,193,255,0.62)}
 .detail-textarea{resize:vertical;min-height:110px;line-height:1.5}
@@ -3313,6 +3652,41 @@ a{color:var(--accent)}
 .detail-save:hover{border-color:rgba(109,193,255,0.62)}
 .detail-save:disabled{opacity:0.45;cursor:default}
 .detail-hint{font-size:11px;color:var(--muted);line-height:1.55}
+.task-advanced{margin-top:10px}
+.task-advanced-toggle{font-size:11px;color:var(--muted);cursor:pointer;letter-spacing:0.5px}
+.task-advanced-toggle:hover{color:var(--text)}
+.task-advanced[open] .task-advanced-toggle{color:var(--text)}
+.task-list-table{width:100%;border-collapse:collapse;font-size:12px}
+.task-list-table th{text-align:left;padding:6px 8px;border-bottom:1px solid rgba(154,182,210,0.2);color:var(--muted);font-weight:500;font-size:11px;letter-spacing:0.5px}
+.task-list-table td{padding:5px 8px;border-bottom:1px solid rgba(154,182,210,0.08);vertical-align:top}
+.task-list-table tr:hover{background:rgba(109,193,255,0.04);cursor:pointer}
+.task-status-badge{display:inline-block;padding:2px 7px;border-radius:8px;font-size:10px;font-weight:600;letter-spacing:0.4px}
+.task-status-created{background:rgba(154,182,210,0.15);color:rgba(154,182,210,0.9)}
+.task-status-accepted{background:rgba(109,193,255,0.15);color:rgba(109,193,255,0.9)}
+.task-status-in_progress{background:rgba(100,220,160,0.15);color:rgba(100,220,160,0.9)}
+.task-status-blocked{background:rgba(255,160,80,0.15);color:rgba(255,160,80,0.9)}
+.task-status-done{background:rgba(120,120,140,0.15);color:rgba(120,120,140,0.9)}
+.task-priority-badge{font-size:10px;font-weight:600;letter-spacing:0.3px}
+.task-priority-p0{color:rgba(255,80,80,0.9)}
+.task-priority-p1{color:rgba(255,160,80,0.9)}
+.task-priority-p2{color:var(--muted)}
+.task-priority-p3{color:rgba(120,120,140,0.7)}
+.task-create-form{display:flex;flex-direction:column;gap:8px}
+.task-create-form textarea{min-height:60px;resize:vertical}
+.task-create-row{display:flex;gap:8px;align-items:center}
+.task-detail-back{font-size:11px;color:var(--accent);cursor:pointer;margin-bottom:8px;display:inline-block}
+.task-detail-back:hover{text-decoration:underline}
+.task-detail-title{font-size:15px;font-weight:600;margin-bottom:6px}
+.task-detail-meta{font-size:11px;color:var(--muted);margin-bottom:10px}
+.task-detail-desc{font-size:12px;line-height:1.6;margin-bottom:14px;white-space:pre-wrap}
+.task-comments{margin-top:10px}
+.task-comment{padding:8px 10px;border-left:2px solid rgba(109,193,255,0.3);margin-bottom:8px;background:rgba(0,0,0,0.12);border-radius:0 6px 6px 0}
+.task-comment-meta{font-size:10px;color:var(--muted);margin-bottom:3px}
+.task-comment-text{font-size:12px;line-height:1.5;white-space:pre-wrap}
+.task-comment-form{display:flex;gap:8px;align-items:flex-end;margin-top:8px}
+.task-comment-form textarea{flex:1;min-height:40px;resize:vertical}
+.task-empty-state{text-align:center;color:var(--muted);padding:24px 0;font-size:12px}
+.task-status-select{font-size:11px;padding:2px 4px;background:rgba(0,0,0,0.2);border:1px solid rgba(154,182,210,0.15);color:var(--text);border-radius:4px}
 .doc-frame{
   margin-top:10px;
   padding:12px;
@@ -3412,6 +3786,25 @@ th{
 .modal-title{font-size:18px;color:var(--text)}
 .modal-copy{margin-top:10px;font-size:13px;line-height:1.6;color:var(--muted)}
 .modal-actions{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;margin-top:18px}
+.dm-container{display:flex;flex-direction:column;height:min(600px,70vh)}
+.dm-messages{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:6px}
+.dm-empty{color:var(--muted);text-align:center;padding:40px 0;font-size:13px}
+.dm-msg{max-width:80%;width:fit-content;padding:8px 12px;border-radius:10px;font-size:13px;line-height:1.5;word-break:break-word;white-space:pre-wrap}
+.dm-msg.outgoing{align-self:flex-end;background:rgba(109,193,255,0.15);border:1px solid rgba(109,193,255,0.25);color:var(--text)}
+.dm-msg.incoming{align-self:flex-start;background:rgba(154,182,210,0.08);border:1px solid rgba(154,182,210,0.15);color:var(--text)}
+.dm-msg-meta{font-size:10px;color:var(--muted);margin-top:3px}
+.dm-msg-from{font-weight:600;font-size:11px;margin-bottom:2px;color:var(--accent)}
+.dm-msg.outgoing .dm-msg-from{color:rgba(109,193,255,0.7)}
+.dm-input-row{display:flex;gap:8px;padding:10px 12px;border-top:1px solid rgba(154,182,210,0.12)}
+.dm-input{flex:1;background:rgba(154,182,210,0.06);border:1px solid rgba(154,182,210,0.18);border-radius:8px;color:var(--text);padding:8px 12px;font:inherit;font-size:13px;resize:none;min-height:38px;max-height:120px}
+.dm-input:focus{outline:none;border-color:var(--accent)}
+.dm-name-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(154,182,210,0.12)}
+.dm-name-label{font-size:11px;color:var(--muted);white-space:nowrap}
+.dm-name-input{width:120px;background:rgba(154,182,210,0.06);border:1px solid rgba(154,182,210,0.18);border-radius:6px;color:var(--text);padding:5px 8px;font:inherit;font-size:12px}
+.dm-name-input:focus{outline:none;border-color:var(--accent)}
+.dm-send-btn{background:rgba(109,193,255,0.15);border:1px solid rgba(109,193,255,0.30);color:var(--accent);border-radius:8px;padding:8px 16px;cursor:pointer;font:inherit;font-size:13px;white-space:nowrap}
+.dm-send-btn:hover{background:rgba(109,193,255,0.25)}
+.dm-send-btn:disabled{opacity:0.4;cursor:not-allowed}
 @media (max-width:920px){
   .page{padding:14px 14px 32px}
   .hero{position:static}
@@ -3458,6 +3851,8 @@ th{
     <div class="tab-shell">
       <div class="tabs">
         <button class="tab-btn active" data-tab="settings" onclick="setActiveTab('settings')">Settings</button>
+        <button class="tab-btn" data-tab="tasks" onclick="setActiveTab('tasks')">Tasks</button>
+        <button class="tab-btn" data-tab="dm" onclick="setActiveTab('dm')">DM</button>
         <button class="tab-btn" data-tab="supervisor" onclick="setActiveTab('supervisor')">Supervisor</button>
         <button class="tab-btn" data-tab="subconscious" onclick="setActiveTab('subconscious')">Subconscious</button>
         <button class="tab-btn" data-tab="internals" onclick="setActiveTab('internals')">Internals</button>
@@ -3470,12 +3865,16 @@ th{
             <div id="settings-identity"></div>
           </article>
           <article class="panel">
-            <div class="panel-label">Task</div>
-            <div id="settings-task"></div>
-          </article>
-          <article class="panel">
             <div class="panel-label">Guidance</div>
             <div id="settings-guidance"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-label">Configuration</div>
+            <div id="settings-configuration"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-label">Framework Presets</div>
+            <div id="settings-presets"></div>
           </article>
           <article class="panel">
             <div class="panel-label">System Controls</div>
@@ -3486,6 +3885,48 @@ th{
             <div id="settings-owner"></div>
           </article>
         </div>
+      </section>
+
+      <section id="tab-tasks" class="tab-panel hidden">
+        <article class="panel">
+          <div class="panel-label">Create Task</div>
+          <div class="task-create-form">
+            <textarea id="task-create-title" class="detail-textarea" placeholder="Task title / description" style="min-height:50px"></textarea>
+            <div class="task-create-row">
+              <select id="task-create-priority" class="detail-input" style="width:80px">
+                <option value="p0">P0</option>
+                <option value="p1">P1</option>
+                <option value="p2" selected>P2</option>
+                <option value="p3">P3</option>
+              </select>
+              <input id="task-create-assignee" class="detail-input" placeholder="Assignee (optional)" style="flex:1" value="${safeName}">
+              <button class="detail-save" onclick="taskCreateSubmit()">Create</button>
+            </div>
+            <div id="task-create-status" class="detail-status muted" style="font-size:11px"></div>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="panel-label" style="display:flex;align-items:center;justify-content:space-between">Tasks<select id="task-filter-assignee" class="detail-input" style="width:auto;min-width:140px;font-size:11px;padding:2px 6px;margin-left:12px" onchange="taskListRefresh()"><option value="">All Agents</option></select></div>
+          <div id="task-list-root"></div>
+        </article>
+        <article class="panel hidden" id="task-detail-panel">
+          <div class="panel-label">Task Detail</div>
+          <div id="task-detail-root"></div>
+        </article>
+      </section>
+
+      <section id="tab-dm" class="tab-panel hidden">
+        <article class="panel">
+          <div class="panel-label">Direct Messages</div>
+          <div class="dm-container">
+            <div class="dm-name-bar"><label class="dm-name-label">Your name:</label><input class="dm-name-input" id="dm-operator-name" type="text" placeholder="operator" spellcheck="false" /></div>
+            <div class="dm-messages" id="dm-messages"><div class="dm-empty">No messages yet. Send one below.</div></div>
+            <div class="dm-input-row">
+              <textarea class="dm-input" id="dm-input" placeholder="Type a message…" rows="1"></textarea>
+              <button class="dm-send-btn" id="dm-send-btn" onclick="sendDm()">Send</button>
+            </div>
+          </div>
+        </article>
       </section>
 
       <section id="tab-supervisor" class="tab-panel hidden">
@@ -3600,7 +4041,7 @@ th{
 (() => {
   const agent = ${JSON.stringify(agentName)};
   const NEGATIVE_STATUSES = new Set(['DRIFTING', 'LOST', 'STUCK']);
-  const TABS = new Set(['settings', 'supervisor', 'subconscious', 'internals']);
+  const TABS = new Set(['settings', 'tasks', 'dm', 'supervisor', 'subconscious', 'internals']);
   const fmtTs = (v) => {
     const n = Number(v) || 0;
     if (!n) return '-';
@@ -3656,6 +4097,7 @@ th{
   let detailSaveInFlight = false;
   let activeTab = 'overview';
   let dangerMode = null;
+  let _presetCache = [];
 
   function setDetailStatus(message, kind = 'muted') {
     const el = document.getElementById('detail-status');
@@ -3670,13 +4112,13 @@ th{
     el.textContent = message || '';
   }
 
+  function getElVal(id) {
+    const el = document.getElementById(id);
+    return el ? String(el.value || '').trim() : null;
+  }
+
   function getCurrentDetailDraft() {
     const identityEl = document.getElementById('detail-identity-input');
-    const taskStatusEl = document.getElementById('detail-task-status');
-    const taskIdEl = document.getElementById('detail-task-id');
-    const taskOwnerEl = document.getElementById('detail-task-owner');
-    const taskWaitingReasonEl = document.getElementById('detail-task-waiting-reason');
-    const taskWaitingUntilEl = document.getElementById('detail-task-waiting-until');
     const ownerEl = document.getElementById('detail-owner');
     const projectImportSourceEl = document.getElementById('detail-project-import-source');
     const projectImportNameEl = document.getElementById('detail-project-import-name');
@@ -3691,11 +4133,6 @@ th{
     const runtimeKeyEnvEl = document.getElementById('detail-subconscious-key-env');
     return {
       identity: identityEl ? String(identityEl.value || '').trim() : null,
-      taskStatus: taskStatusEl ? String(taskStatusEl.value || '').trim().toLowerCase() : null,
-      taskId: taskIdEl ? String(taskIdEl.value || '').trim() : null,
-      taskOwner: taskOwnerEl ? String(taskOwnerEl.value || '').trim() : null,
-      taskWaitingReason: taskWaitingReasonEl ? String(taskWaitingReasonEl.value || '').trim() : null,
-      taskWaitingUntil: taskWaitingUntilEl ? String(taskWaitingUntilEl.value || '').trim() : null,
       owner: ownerEl ? String(ownerEl.value || '').trim() : null,
       projectImportSource: projectImportSourceEl ? String(projectImportSourceEl.value || '').trim() : null,
       projectImportName: projectImportNameEl ? String(projectImportNameEl.value || '').trim() : null,
@@ -3708,6 +4145,17 @@ th{
       subconsciousRuntimeModel: runtimeModelEl ? String(runtimeModelEl.value || '').trim() : null,
       subconsciousRuntimeEndpoint: runtimeEndpointEl ? String(runtimeEndpointEl.value || '').trim() : null,
       subconsciousRuntimeKeyEnv: runtimeKeyEnvEl ? String(runtimeKeyEnvEl.value || '').trim() : null,
+      cfgPrimaryFramework: getElVal('cfg-primary-framework'),
+      cfgPrimaryProvider: getElVal('cfg-primary-provider'),
+      cfgPrimaryModel: getElVal('cfg-primary-model'),
+      cfgPrimaryReasoning: getElVal('cfg-primary-reasoning'),
+      cfgPrimaryExtraArgs: getElVal('cfg-primary-extraArgs'),
+      cfgSupervisorFramework: getElVal('cfg-supervisor-framework'),
+      cfgSupervisorProvider: getElVal('cfg-supervisor-provider'),
+      cfgSupervisorModel: getElVal('cfg-supervisor-model'),
+      cfgSupervisorReasoning: getElVal('cfg-supervisor-reasoning'),
+      cfgSupervisorExtraArgs: getElVal('cfg-supervisor-extraArgs'),
+      cfgRole: getElVal('cfg-role'),
     };
   }
 
@@ -3716,13 +4164,7 @@ th{
     const identityEl = document.getElementById('detail-identity-input');
     if (!identityEl) return false;
     const draft = getCurrentDetailDraft();
-    const task = (detail.task && typeof detail.task === 'object') ? detail.task : null;
     if ((draft.identity || '') !== String(detail.identity || '').trim()) return true;
-    if ((draft.taskStatus || '') !== String(task?.status || '').trim()) return true;
-    if ((draft.taskId || '') !== String(task?.id || '').trim()) return true;
-    if ((draft.taskOwner || '') !== String(task?.owner || '').trim()) return true;
-    if ((draft.taskWaitingReason || '') !== String(task?.waiting_reason || '').trim()) return true;
-    if ((draft.taskWaitingUntil || '') !== String(task?.waiting_until || '').trim()) return true;
     if (draft.supervisorEnabled !== null && draft.supervisorEnabled !== (supervisorControl?.enabled === true)) return true;
     if (draft.guidance !== null && draft.guidance !== String(subconsciousDetail?.guidance?.text || subconsciousDetail?.manualGuidance?.text || '').trim()) return true;
     if (draft.subconsciousRuntimeEnabled !== null && draft.subconsciousRuntimeEnabled !== (subconsciousDetail?.runtime?.desiredEnabled === true)) return true;
@@ -3730,6 +4172,20 @@ th{
     if (draft.subconsciousRuntimeModel !== null && draft.subconsciousRuntimeModel !== String(subconsciousDetail?.runtime?.model || '').trim()) return true;
     if (draft.subconsciousRuntimeEndpoint !== null && draft.subconsciousRuntimeEndpoint !== String(subconsciousDetail?.runtime?.endpoint || '').trim()) return true;
     if (draft.subconsciousRuntimeKeyEnv !== null && draft.subconsciousRuntimeKeyEnv !== String(subconsciousDetail?.runtime?.keyEnv || '').trim()) return true;
+    const rp = detail.runtimeProfile || {};
+    const pri = rp.primary || {};
+    const sup = rp.supervisor || {};
+    if (draft.cfgPrimaryFramework !== null && draft.cfgPrimaryFramework !== String(pri.framework || '').trim()) return true;
+    if (draft.cfgPrimaryProvider !== null && draft.cfgPrimaryProvider !== String(pri.provider || '').trim()) return true;
+    if (draft.cfgPrimaryModel !== null && draft.cfgPrimaryModel !== String(pri.model || '').trim()) return true;
+    if (draft.cfgPrimaryReasoning !== null && draft.cfgPrimaryReasoning !== String(pri.reasoning || '').trim()) return true;
+    if (draft.cfgPrimaryExtraArgs !== null && draft.cfgPrimaryExtraArgs !== String(pri.extraArgs || '').trim()) return true;
+    if (draft.cfgSupervisorFramework !== null && draft.cfgSupervisorFramework !== String(sup.framework || '').trim()) return true;
+    if (draft.cfgSupervisorProvider !== null && draft.cfgSupervisorProvider !== String(sup.provider || '').trim()) return true;
+    if (draft.cfgSupervisorModel !== null && draft.cfgSupervisorModel !== String(sup.model || '').trim()) return true;
+    if (draft.cfgSupervisorReasoning !== null && draft.cfgSupervisorReasoning !== String(sup.reasoning || '').trim()) return true;
+    if (draft.cfgSupervisorExtraArgs !== null && draft.cfgSupervisorExtraArgs !== String(sup.extraArgs || '').trim()) return true;
+    if (draft.cfgRole !== null && draft.cfgRole !== String(detail.role || '').trim()) return true;
     if (!detail.v1) return false;
     if ((draft.owner || '') !== String(detail.owner || '').trim()) return true;
     if ((draft.projectImportSource || '') !== '') return true;
@@ -3751,11 +4207,6 @@ th{
   function bindDetailEditors() {
     const ids = [
       'detail-identity-input',
-      'detail-task-status',
-      'detail-task-id',
-      'detail-task-owner',
-      'detail-task-waiting-reason',
-      'detail-task-waiting-until',
       'detail-owner',
       'detail-project-import-source',
       'detail-project-import-name',
@@ -3768,6 +4219,17 @@ th{
       'detail-subconscious-model',
       'detail-subconscious-endpoint',
       'detail-subconscious-key-env',
+      'cfg-primary-framework',
+      'cfg-primary-provider',
+      'cfg-primary-model',
+      'cfg-primary-reasoning',
+      'cfg-primary-extraArgs',
+      'cfg-supervisor-framework',
+      'cfg-supervisor-provider',
+      'cfg-supervisor-model',
+      'cfg-supervisor-reasoning',
+      'cfg-supervisor-extraArgs',
+      'cfg-role',
     ];
     ids.forEach((id) => {
       const el = document.getElementById(id);
@@ -3815,6 +4277,129 @@ th{
     if (options.focusAudit) {
       requestAnimationFrame(() => {
         document.getElementById('supervisor-audit-history')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    }
+    if (next === 'dm' && !dmLoaded) loadDmHistory();
+    if (next === 'tasks') {
+      // Auto-set assignee filter to monitored agent if one is selected
+      const filterEl = document.getElementById('task-filter-assignee');
+      if (filterEl && monitoredAgent && !filterEl._userOverride) {
+        filterEl.value = monitoredAgent.name;
+        sessionStorage.setItem('task_filter_assignee', monitoredAgent.name);
+        const u = new URL(window.location);
+        u.searchParams.set('assignee', monitoredAgent.name);
+        history.replaceState(null, '', u);
+      }
+      taskListRefresh();
+    }
+  }
+
+  // ── DM tab logic ──────────────────────────────
+  const DM_LS_KEY = 'dm_operator_name';
+  function sanitizeOperatorName(raw) {
+    return (raw || '').trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'operator';
+  }
+  function getDmOperatorName() {
+    return sanitizeOperatorName(localStorage.getItem(DM_LS_KEY));
+  }
+  {
+    const nameInput = document.getElementById('dm-operator-name');
+    if (nameInput) {
+      nameInput.value = getDmOperatorName();
+      nameInput.addEventListener('input', () => {
+        const v = nameInput.value.replace(/[^a-zA-Z0-9_-]/g, '').trim();
+        nameInput.value = v;
+        localStorage.setItem(DM_LS_KEY, v);
+      });
+    }
+  }
+  let dmLoaded = false;
+  let dmMessages = [];
+  let dmSending = false;
+  let dmScrollSnap = true; // true on first load and after sending
+
+  function renderDmMessages() {
+    const container = document.getElementById('dm-messages');
+    if (!container) return;
+    if (dmMessages.length === 0) {
+      container.innerHTML = '<div class="dm-empty">No messages yet. Send one below.</div>';
+      return;
+    }
+    // Check if user is at bottom before re-render (threshold 40px)
+    const wasAtBottom = dmScrollSnap || (container.scrollTop + container.clientHeight >= container.scrollHeight - 40);
+    container.innerHTML = dmMessages.map((m) => {
+      const isOutgoing = m.from === getDmOperatorName() || (m.source === 'web' && m.type === 'human');
+      const cls = isOutgoing ? 'outgoing' : 'incoming';
+      const text = esc(m.full || m.summary || '');
+      const fromLabel = esc(m.from || 'unknown');
+      const time = m.at ? new Date(m.at).toLocaleString() : '';
+      return '<div class="dm-msg ' + cls + '">'
+        + '<div class="dm-msg-from">' + fromLabel + '</div>'
+        + text
+        + '<div class="dm-msg-meta">' + esc(time) + '</div>'
+        + '</div>';
+    }).join('');
+    if (wasAtBottom) container.scrollTop = container.scrollHeight;
+    dmScrollSnap = false;
+  }
+
+  async function loadDmHistory() {
+    try {
+      const r = await fetch('/api/agents/' + encodeURIComponent(agent) + '/dm-history?limit=200');
+      if (!r.ok) { console.warn('[dm] load failed:', r.status); return; }
+      const data = await r.json();
+      dmMessages = Array.isArray(data.messages) ? data.messages : [];
+      dmLoaded = true;
+      renderDmMessages();
+    } catch (e) {
+      console.warn('[dm] load error:', e);
+    }
+  }
+
+  async function sendDm() {
+    if (dmSending) return;
+    const input = document.getElementById('dm-input');
+    const text = (input?.value || '').trim();
+    if (!text) return;
+    const btn = document.getElementById('dm-send-btn');
+    dmSending = true;
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('/api/agents/' + encodeURIComponent(agent) + '/dm-send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, from: getDmOperatorName() }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        console.warn('[dm] send failed:', err);
+        return;
+      }
+      input.value = '';
+      input.style.height = '';
+      dmScrollSnap = true;
+      await loadDmHistory();
+    } catch (e) {
+      console.warn('[dm] send error:', e);
+    } finally {
+      dmSending = false;
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // Auto-resize textarea and send on Enter (Shift+Enter for newline)
+  {
+    const input = document.getElementById('dm-input');
+    if (input) {
+      input.addEventListener('input', () => {
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendDm();
+        }
       });
     }
   }
@@ -3875,7 +4460,7 @@ th{
     )).join('');
   }
 
-  function buildPageModel(detail, statusRow, supervisorDetail, supervisorStatus, supervisorControl, subconsciousPayload, subconsciousDetail, unreadPayload, queueItems) {
+  function buildPageModel(detail, statusRow, supervisorDetail, supervisorStatus, supervisorControl, subconsciousPayload, subconsciousDetail, unreadPayload, queueItems, allStatusRows) {
     const latest = supervisorDetail?.latest || null;
     const state = supervisorDetail?.state || {};
     const events = Array.isArray(supervisorDetail?.events) ? supervisorDetail.events : [];
@@ -3901,6 +4486,11 @@ th{
     const consecutiveNegative = toInt(state?.consecutiveNegative, 0);
     const supervisorEnabled = supervisorControl?.enabled === true;
     const supervisorRuntimeRunning = supervisorStatus?.runtime?.running === true;
+    // Per-agent supervisor: check if supervisor-<agentName> is registered and alive
+    const supervisorAgentName = 'supervisor-' + agent;
+    const supervisorAgentRow = Array.isArray(allStatusRows) ? allStatusRows.find(r => r && r.name === supervisorAgentName) : null;
+    const supervisorAgentExists = !!supervisorAgentRow;
+    const supervisorAgentAlive = supervisorAgentRow?.alive === true;
     const supervisorClassification = String(state?.classification || '').trim().toUpperCase();
     const supervisorLifecycleState = String(state?.lifecycleState || '').trim().toLowerCase();
     const supervisorCurrentStatePresent = supervisorClassification.length > 0 || supervisorLifecycleState.length > 0;
@@ -4056,6 +4646,8 @@ th{
       latestReason,
       supervisorTaskSnapshot,
       supervisorRuntimeRunning,
+      supervisorAgentExists,
+      supervisorAgentAlive,
       supervisorCurrentStatePresent,
       supervisorClassification,
       supervisorLifecycleState,
@@ -4066,6 +4658,7 @@ th{
       needsAttention,
       consecutiveNegative,
       banner,
+      agentRegistered: !!statusRow,
     };
   }
 
@@ -4078,7 +4671,13 @@ th{
     document.getElementById('hero-runtime').textContent = runtimeBits.length ? runtimeBits.join(' · ') : 'Runtime details unavailable';
     const chips = [];
     chips.push('<span class="chip ' + (model.activeNow ? 'ok' : 'neutral') + '">' + esc(model.runtimeText) + '</span>');
-    chips.push('<span class="chip ' + (model.supervisorEnabled ? 'ok' : 'danger') + '">SUPERVISOR ' + esc(model.supervisorEnabled ? 'ON' : 'OFF') + '</span>');
+    if (!model.supervisorAgentExists) {
+      chips.push('<span class="chip neutral">NO SUPERVISOR</span>');
+    } else if (!model.supervisorAgentAlive) {
+      chips.push('<span class="chip warn">SUPERVISOR NOT RUNNING</span>');
+    } else {
+      chips.push('<span class="chip ok">SUPERVISOR ON</span>');
+    }
     chips.push('<span class="chip ' + (model.subconsciousEnabled ? 'ok' : 'neutral') + '">SUBCONSCIOUS ' + esc(model.subconsciousEnabled ? 'ON' : 'OFF') + '</span>');
     chips.push('<span class="chip neutral">UNREAD ' + esc(String(model.unreadTotal)) + '</span>');
     chips.push('<span class="chip neutral">QUEUE ' + esc(String(model.queueCount)) + '</span>');
@@ -4298,93 +4897,16 @@ th{
     document.getElementById('overview-projects').innerHTML = projectBits.join('');
   }
 
-  function normalizeTaskDraftTimestamp(value) {
-    const raw = String(value || '').trim();
-    if (!raw) return null;
-    const ms = Date.parse(raw);
-    if (!Number.isFinite(ms)) return null;
-    return new Date(ms).toISOString();
-  }
-
-  function buildDetailTaskPayload(detail) {
-    const statusEl = document.getElementById('detail-task-status');
-    const idEl = document.getElementById('detail-task-id');
-    const ownerEl = document.getElementById('detail-task-owner');
-    const waitingReasonEl = document.getElementById('detail-task-waiting-reason');
-    const waitingUntilEl = document.getElementById('detail-task-waiting-until');
-    if (!statusEl || !idEl || !ownerEl || !waitingReasonEl || !waitingUntilEl) {
-      return { error: 'task editor unavailable' };
-    }
-    const status = String(statusEl.value || '').trim().toLowerCase();
-    const id = String(idEl.value || '').trim();
-    const owner = String(ownerEl.value || '').trim() || String(detail?.name || '').trim();
-    const waitingReason = String(waitingReasonEl.value || '').trim();
-    const waitingUntilRaw = String(waitingUntilEl.value || '').trim();
-    if (!status) {
-      if (!id && !String(ownerEl.value || '').trim() && !waitingReason && !waitingUntilRaw) {
-        return { task: null };
-      }
-      return { error: 'Choose a task status or clear all task fields.' };
-    }
-    if (!id) return { error: 'Task id is required.' };
-    if (!owner) return { error: 'Task owner is required.' };
-    const waitingUntil = normalizeTaskDraftTimestamp(waitingUntilRaw);
-    if (status === 'waiting') {
-      if (!waitingReason) return { error: 'Waiting reason is required for waiting tasks.' };
-      if (!waitingUntil) return { error: 'Waiting until must be a valid timestamp.' };
-    } else if (waitingUntilRaw && !waitingUntil) {
-      return { error: 'Waiting until must be a valid timestamp.' };
-    }
-    const now = new Date().toISOString();
-    return {
-      task: {
-        id,
-        owner,
-        status,
-        updated_at: now,
-        heartbeat_at: now,
-        waiting_reason: status === 'waiting' ? waitingReason : null,
-        waiting_until: status === 'waiting' ? waitingUntil : null,
-      },
-    };
-  }
-
-  function renderTaskEditor(detail) {
-    const task = (detail?.task && typeof detail.task === 'object') ? detail.task : null;
-    const taskStatus = String(task?.status || '');
-    const waitingReason = String(task?.waiting_reason || '');
-    const waitingUntil = String(task?.waiting_until || '');
-    return '<div class="detail-hint">Canonical control-plane task object. The Supervisor tab keeps the separate docs snapshot.</div>'
-      + '<div class="field-label">Status</div>'
-      + '<select id="detail-task-status" class="detail-input">'
-      + '<option value=""></option>'
-      + '<option value="active"' + (taskStatus === 'active' ? ' selected' : '') + '>active</option>'
-      + '<option value="waiting"' + (taskStatus === 'waiting' ? ' selected' : '') + '>waiting</option>'
-      + '<option value="blocked"' + (taskStatus === 'blocked' ? ' selected' : '') + '>blocked</option>'
-      + '<option value="done"' + (taskStatus === 'done' ? ' selected' : '') + '>done</option>'
-      + '</select>'
-      + '<div class="field-label">Task Id</div>'
-      + '<input id="detail-task-id" class="detail-input" value="' + esc(task?.id || '').replace(/"/g, '&quot;') + '" placeholder="task-id">'
-      + '<div class="field-label">Owner</div>'
-      + '<input id="detail-task-owner" class="detail-input" value="' + esc(task?.owner || '').replace(/"/g, '&quot;') + '" placeholder="' + esc(detail?.name || 'agent').replace(/"/g, '&quot;') + '">'
-      + '<div class="field-label">Waiting Reason</div>'
-      + '<textarea id="detail-task-waiting-reason" class="detail-textarea" placeholder="Required when status=waiting">' + esc(waitingReason) + '</textarea>'
-      + '<div class="field-label">Waiting Until</div>'
-      + '<input id="detail-task-waiting-until" class="detail-input" value="' + esc(waitingUntil).replace(/"/g, '&quot;') + '" placeholder="2026-03-11T14:00:00.000Z">'
-      + '<div class="read-block"><strong>updated_at</strong><br><span class="mono">' + esc(task?.updated_at || '-') + '</span><br><br><strong>heartbeat_at</strong><br><span class="mono">' + esc(task?.heartbeat_at || '-') + '</span></div>'
-      + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailTask()">Save Task</button></div>';
-  }
-
   function renderSettings(detail, model) {
     const identityRoot = document.getElementById('settings-identity');
-    const taskRoot = document.getElementById('settings-task');
     const guidanceRoot = document.getElementById('settings-guidance');
     const systemsRoot = document.getElementById('settings-systems');
     const ownerRoot = document.getElementById('settings-owner');
     if (!detail || detail.error) {
       identityRoot.innerHTML = '<div class="error-state">Agent detail unavailable.</div>';
-      taskRoot.innerHTML = '<div class="error-state">Canonical task unavailable.</div>';
       guidanceRoot.innerHTML = '<div class="error-state">Guidance unavailable.</div>';
+      const cfgRoot = document.getElementById('settings-configuration');
+      if (cfgRoot) cfgRoot.innerHTML = '<div class="error-state">Configuration unavailable.</div>';
       systemsRoot.innerHTML = '<div class="error-state">System control state unavailable.</div>';
       ownerRoot.innerHTML = '<div class="error-state">Ownership unavailable.</div>';
       return;
@@ -4394,7 +4916,6 @@ th{
       + '<div class="field-label">Identity</div>'
       + '<input id="detail-identity-input" class="detail-input" value="' + esc(detail.identity || '').replace(/"/g, '&quot;') + '" placeholder="One-line external description">'
       + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailIdentity()">Save Identity</button></div>';
-    taskRoot.innerHTML = renderTaskEditor(detail);
 
     const subconsciousWritable = detail.v1 === true;
     const guidanceText = String(model?.guidanceText || '');
@@ -4408,6 +4929,76 @@ th{
         '<div class="empty-state">Guidance is writable only for V1 home agents in the current implementation.</div>'
       );
 
+    const configRoot = document.getElementById('settings-configuration');
+    const rp = detail.runtimeProfile || {};
+    const pri = rp.primary || {};
+    const sup = rp.supervisor || {};
+    function matchPreset(role) {
+      if (!role || !role.framework) return '';
+      for (const p of _presetCache) {
+        if (p.framework === role.framework && p.provider === (role.provider || null) && p.model === (role.model || null)
+            && p.reasoning === (role.reasoning || null) && (p.extraArgs || null) === (role.extraArgs || null)) return p.id;
+      }
+      return '';
+    }
+    const priPreset = matchPreset(pri);
+    const supPreset = matchPreset(sup);
+    function presetOpts(selectedId) {
+      let h = '<option value="">(none)</option>';
+      for (const p of _presetCache) {
+        h += '<option value="' + esc(p.id) + '"' + (p.id === selectedId ? ' selected' : '') + '>' + esc(p.name) + '</option>';
+      }
+      h += '<option value="__custom__">Custom...</option>';
+      return h;
+    }
+    const fwOpts = function(sel) {
+      return '<option value="">(not set)</option>'
+        + '<option value="claude"' + (sel === 'claude' ? ' selected' : '') + '>claude</option>'
+        + '<option value="codex"' + (sel === 'codex' ? ' selected' : '') + '>codex</option>';
+    };
+    const rpCustomFields = function(prefix, role, presetId) {
+      const hidden = presetId !== '__custom__' ? ' style="display:none"' : '';
+      return '<div id="cfg-' + prefix + '-custom"' + hidden + '>'
+        + '<div class="field-label">Framework</div>'
+        + '<select id="cfg-' + prefix + '-framework" class="detail-input">' + fwOpts(role.framework || '') + '</select>'
+        + '<input id="cfg-' + prefix + '-provider" type="hidden" value="anthropic">'
+        + '<div class="field-label">Model</div>'
+        + '<input id="cfg-' + prefix + '-model" class="detail-input" value="' + esc(role.model || '').replace(/"/g, '&quot;') + '" placeholder="e.g. claude-sonnet-4-20250514">'
+        + '<div class="field-label">Reasoning</div>'
+        + '<input id="cfg-' + prefix + '-reasoning" class="detail-input" value="' + esc(role.reasoning || '').replace(/"/g, '&quot;') + '" placeholder="e.g. extended">'
+        + '<div class="field-label">Extra Args</div>'
+        + '<input id="cfg-' + prefix + '-extraArgs" class="detail-input" value="' + esc(role.extraArgs || '').replace(/"/g, '&quot;') + '" placeholder="e.g. --verbose --max-tokens 4096">'
+        + '<div class="detail-hint" style="margin-top:2px;font-size:10px">Only CLI flags allowed. Shell operators are rejected.</div>'
+        + '</div>';
+    };
+    function currentPresetLabel(presetId, role) {
+      if (presetId) {
+        const p = _presetCache.find(pp => pp.id === presetId);
+        return p ? esc(p.name) : '(unknown preset)';
+      }
+      if (role && role.framework) return 'Custom (' + esc(role.framework) + (role.model ? ' / ' + esc(role.model) : '') + ')';
+      return '(none)';
+    }
+    const priCurrentLabel = currentPresetLabel(priPreset, pri);
+    const supCurrentLabel = currentPresetLabel(supPreset, sup);
+    configRoot.innerHTML =
+      '<div class="detail-hint">Per-agent runtime profile and role. Select a preset or choose Custom for raw fields. Changes take effect after restart.</div>'
+      + '<div id="cfg-restart-banner" class="error-state" style="display:none;margin-bottom:8px;background:rgba(234,179,8,0.12);color:rgba(234,179,8,0.95);border-left:3px solid rgba(234,179,8,0.5);padding:6px 10px">Runtime profile changes take effect after agent restart. The running agent continues using its current configuration until restarted.</div>'
+      + '<div class="panel"><div class="panel-label">Primary Role</div>'
+      + '<div class="field-label">Preset</div>'
+      + '<select id="cfg-primary-preset" class="detail-input" onchange="onPresetChange(\\'primary\\')">' + presetOpts(priPreset || (pri.framework ? '__custom__' : '')) + '</select>'
+      + '<div class="detail-hint" style="margin-top:2px;font-size:10px;color:rgba(136,192,208,0.7)">Currently running: <strong>' + priCurrentLabel + '</strong></div>'
+      + rpCustomFields('primary', pri, priPreset) + '</div>'
+      + '<div class="panel"><div class="panel-label">Supervisor Role</div>'
+      + '<div class="field-label">Preset</div>'
+      + '<select id="cfg-supervisor-preset" class="detail-input" onchange="onPresetChange(\\'supervisor\\')">' + presetOpts(supPreset || (sup.framework ? '__custom__' : '')) + '</select>'
+      + '<div class="detail-hint" style="margin-top:2px;font-size:10px;color:rgba(136,192,208,0.7)">Currently running: <strong>' + supCurrentLabel + '</strong></div>'
+      + rpCustomFields('supervisor', sup, supPreset) + '</div>'
+      + '<div class="field-label">Agent Description</div>'
+      + '<div class="detail-hint" style="margin-top:0;margin-bottom:4px;font-size:10px">Free-text purpose or role description for this agent. Shown in summaries and used by supervisors.</div>'
+      + '<input id="cfg-role" class="detail-input" value="' + esc(detail.role || '').replace(/"/g, '&quot;') + '" placeholder="e.g. Handles CI/CD pipeline tasks">'
+      + '<div class="detail-actions"><button class="detail-save" onclick="saveDetailConfiguration()">Save Configuration</button></div>';
+
     const ownerHtml = detail.v1
       ? (
         '<div class="detail-hint">First-class ownership field for this agent home.</div>'
@@ -4417,12 +5008,15 @@ th{
       )
       : '<div class="empty-state">This agent does not expose a writable V1 owner field.</div>';
     ownerRoot.innerHTML = ownerHtml;
-    const supervisorControlHtml =
-      '<div class="panel">'
-      + '<div class="panel-label">Supervisor Audit</div>'
-      + '<label class="detail-toggle"><input id="detail-supervisor-enabled" type="checkbox" ' + (model?.supervisorEnabled ? 'checked' : '') + '>Enabled</label>'
-      + '<div class="detail-actions"><button class="detail-save" onclick="saveSupervisorAuditControl()">Save</button></div>'
-      + '</div>';
+    const supervisorControlHtml = model?.agentRegistered
+      ? (
+        '<div class="panel">'
+        + '<div class="panel-label">Supervisor Audit</div>'
+        + '<label class="detail-toggle"><input id="detail-supervisor-enabled" type="checkbox" ' + (model?.supervisorEnabled ? 'checked' : '') + '>Enabled</label>'
+        + '<div class="detail-actions"><button class="detail-save" onclick="saveSupervisorAuditControl()">Save</button></div>'
+        + '</div>'
+      )
+      : '<div class="panel"><div class="panel-label">Supervisor Audit</div><div class="empty-state">Agent must be registered to enable supervisor.</div></div>';
     const subconsciousControlHtml = subconsciousWritable
       ? (
         '<div class="panel">'
@@ -4435,7 +5029,7 @@ th{
     const runtimeContractHtml = subconsciousWritable
       ? (
         '<div class="panel">'
-        + '<div class="panel-label">Local Runtime</div>'
+        + '<div class="panel-label">Subconscious LLM</div>'
         + (model?.runtimeDisabledReason ? '<div class="error-state" style="margin-bottom:8px">' + esc(model.runtimeDisabledReason) + '</div>' : '')
         + '<label class="detail-toggle"><input id="detail-subconscious-runtime-enabled" type="checkbox" ' + (model?.runtimeDesiredEnabled ? 'checked' : '') + '>Enabled</label>'
         + '<div class="field-label">Provider</div>'
@@ -4451,6 +5045,34 @@ th{
       )
       : '';
     systemsRoot.innerHTML = supervisorControlHtml + subconsciousControlHtml + runtimeContractHtml;
+
+    const presetsRoot = document.getElementById('settings-presets');
+    if (presetsRoot) {
+      let ph = '<div class="detail-hint">Named bundles of framework/provider/model settings. Used in Configuration above.</div>';
+      if (_presetCache.length === 0) {
+        ph += '<div class="task-empty-state">No presets defined yet.</div>';
+      } else {
+        ph += '<table class="task-list-table"><thead><tr><th>Name</th><th>Framework</th><th>Model</th><th></th></tr></thead><tbody>';
+        for (const p of _presetCache) {
+          ph += '<tr>'
+            + '<td><strong>' + esc(p.name) + '</strong></td>'
+            + '<td>' + esc(p.framework || '-') + '</td>'
+            + '<td>' + esc(p.model || '-') + '</td>'
+            + '<td><button class="detail-save" style="font-size:10px;padding:2px 8px" onclick="deletePreset(\\'' + esc(p.id) + '\\')">Del</button></td>'
+            + '</tr>';
+        }
+        ph += '</tbody></table>';
+      }
+      ph += '<details class="task-advanced" style="margin-top:10px"><summary class="task-advanced-toggle">Add Preset</summary>'
+        + '<div class="field-label">Name</div><input id="preset-name" class="detail-input" placeholder="e.g. Claude Opus">'
+        + '<div class="field-label">Framework</div><select id="preset-framework" class="detail-input"><option value="">—</option><option value="claude">claude</option><option value="codex">codex</option></select>'
+        + '<div class="field-label">Model</div><input id="preset-model" class="detail-input" placeholder="e.g. claude-sonnet-4-20250514">'
+        + '<div class="field-label">Reasoning</div><input id="preset-reasoning" class="detail-input" placeholder="e.g. extended">'
+        + '<div class="field-label">Extra Args</div><input id="preset-extraArgs" class="detail-input" placeholder="e.g. --verbose">'
+        + '<div class="detail-actions"><button class="detail-save" onclick="createPreset()">Create Preset</button></div>'
+        + '</details>';
+      presetsRoot.innerHTML = ph;
+    }
 
     const managedProjects = Array.isArray(detail?.managedProjects) ? detail.managedProjects : [];
     const projectRows = managedProjects.length
@@ -4961,36 +5583,6 @@ th{
     }).join('');
   }
 
-  async function saveDetailTask() {
-    if (detailSaveInFlight) return;
-    const payload = buildDetailTaskPayload(latestAgentDetail);
-    if (payload.error) {
-      setDetailStatus(payload.error, 'error');
-      return;
-    }
-    const targetPath = latestAgentDetail?.v1
-      ? ('/api/agents/' + encodeURIComponent(agent) + '/home-metadata')
-      : ('/api/agents/' + encodeURIComponent(agent));
-    detailSaveInFlight = true;
-    setDetailStatus('Saving canonical task...', 'warn');
-    try {
-      const res = await fetch(targetPath, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task: payload.task }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.error) throw new Error(data?.error || 'task save failed');
-      setDetailStatus('Canonical task saved.', 'ok');
-      detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 2000);
-      await refresh(true);
-    } catch (e) {
-      setDetailStatus('Task save failed: ' + e.message, 'error');
-    } finally {
-      detailSaveInFlight = false;
-    }
-  }
-
   async function saveDetailIdentity() {
     if (detailSaveInFlight) return;
     const input = document.getElementById('detail-identity-input');
@@ -5275,7 +5867,151 @@ th{
     }
   }
 
-  window.saveDetailTask = saveDetailTask;
+  const CFG_VALID_FRAMEWORKS = ['claude', 'codex'];
+  const CFG_SHELL_METACHAR_RE = /[;&|\x60$(){}!\\\\<>]/;
+
+  function sanitizeExtraArgs(raw) {
+    if (!raw) return null;
+    const cleaned = String(raw).trim();
+    if (!cleaned) return null;
+    if (CFG_SHELL_METACHAR_RE.test(cleaned)) return '__REJECTED__';
+    return cleaned;
+  }
+
+  function onPresetChange(prefix) {
+    const sel = document.getElementById('cfg-' + prefix + '-preset');
+    const custom = document.getElementById('cfg-' + prefix + '-custom');
+    if (!sel || !custom) return;
+    if (sel.value === '__custom__') {
+      custom.style.display = '';
+    } else {
+      custom.style.display = 'none';
+      if (!sel.value) {
+        const fw = document.getElementById('cfg-' + prefix + '-framework');
+        const pv = document.getElementById('cfg-' + prefix + '-provider');
+        const md = document.getElementById('cfg-' + prefix + '-model');
+        const rs = document.getElementById('cfg-' + prefix + '-reasoning');
+        const ea = document.getElementById('cfg-' + prefix + '-extraArgs');
+        if (fw) fw.value = '';
+        if (pv) pv.value = '';
+        if (md) md.value = '';
+        if (rs) rs.value = '';
+        if (ea) ea.value = '';
+      }
+      const p = _presetCache.find(pp => pp.id === sel.value);
+      if (p) {
+        const fw = document.getElementById('cfg-' + prefix + '-framework');
+        const pv = document.getElementById('cfg-' + prefix + '-provider');
+        const md = document.getElementById('cfg-' + prefix + '-model');
+        const rs = document.getElementById('cfg-' + prefix + '-reasoning');
+        const ea = document.getElementById('cfg-' + prefix + '-extraArgs');
+        if (fw) fw.value = p.framework || '';
+        if (pv) pv.value = p.provider || '';
+        if (md) md.value = p.model || '';
+        if (rs) rs.value = p.reasoning || '';
+        if (ea) ea.value = p.extraArgs || '';
+      }
+    }
+  }
+  window.onPresetChange = onPresetChange;
+
+  async function createPreset() {
+    const name = ((document.getElementById('preset-name') || {}).value || '').trim();
+    if (!name) { setDetailStatus('Preset name is required.', 'error'); return; }
+    const body = {
+      name,
+      framework: ((document.getElementById('preset-framework') || {}).value || '').trim() || null,
+      provider: 'anthropic',
+      model: ((document.getElementById('preset-model') || {}).value || '').trim() || null,
+      reasoning: ((document.getElementById('preset-reasoning') || {}).value || '').trim() || null,
+      extraArgs: ((document.getElementById('preset-extraArgs') || {}).value || '').trim() || null,
+    };
+    try {
+      const r = await fetch('/api/framework-presets', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'create failed');
+      setDetailStatus('Preset created: ' + (data.preset?.name || ''), 'ok');
+      detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 2000);
+      await refresh(true);
+    } catch (e) { setDetailStatus('Preset create failed: ' + e.message, 'error'); }
+  }
+
+  async function deletePreset(id) {
+    if (!confirm('Delete this preset?')) return;
+    try {
+      const r = await fetch('/api/framework-presets/' + encodeURIComponent(id), { method: 'DELETE' });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'delete failed');
+      setDetailStatus('Preset deleted.', 'ok');
+      detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 2000);
+      await refresh(true);
+    } catch (e) { setDetailStatus('Preset delete failed: ' + e.message, 'error'); }
+  }
+
+  window.createPreset = createPreset;
+  window.deletePreset = deletePreset;
+
+  function resolveRoleFromUI(prefix) {
+    const presetSel = document.getElementById('cfg-' + prefix + '-preset');
+    const presetId = presetSel ? presetSel.value : '';
+    if (!presetId) return null;
+    if (presetId !== '__custom__') {
+      const p = _presetCache.find(pp => pp.id === presetId);
+      if (p) return { framework: p.framework, provider: p.provider, model: p.model, reasoning: p.reasoning, extraArgs: p.extraArgs || null, apiBaseUrl: p.apiBaseUrl || null };
+    }
+    const framework = ((document.getElementById('cfg-' + prefix + '-framework') || {}).value || '').trim() || null;
+    const provider = ((document.getElementById('cfg-' + prefix + '-provider') || {}).value || '').trim() || null;
+    const model = ((document.getElementById('cfg-' + prefix + '-model') || {}).value || '').trim() || null;
+    const reasoning = ((document.getElementById('cfg-' + prefix + '-reasoning') || {}).value || '').trim() || null;
+    const extraArgs = sanitizeExtraArgs(((document.getElementById('cfg-' + prefix + '-extraArgs') || {}).value));
+    if (extraArgs === '__REJECTED__') return '__REJECTED__';
+    if (!framework && !provider && !model && !reasoning && !extraArgs) return null;
+    if (framework && !CFG_VALID_FRAMEWORKS.includes(framework)) return '__INVALID_FW__';
+    return { framework, provider, model, reasoning, extraArgs };
+  }
+
+  async function saveDetailConfiguration() {
+    if (detailSaveInFlight) return;
+
+    const primary = resolveRoleFromUI('primary');
+    const supervisor = resolveRoleFromUI('supervisor');
+    if (primary === '__REJECTED__' || supervisor === '__REJECTED__') {
+      setDetailStatus('extraArgs contains disallowed shell characters. Only CLI flags are allowed.', 'error');
+      return;
+    }
+    if (primary === '__INVALID_FW__') { setDetailStatus('Invalid primary framework — must be claude or codex.', 'error'); return; }
+    if (supervisor === '__INVALID_FW__') { setDetailStatus('Invalid supervisor framework — must be claude or codex.', 'error'); return; }
+
+    const runtimeProfile = (primary || supervisor) ? { primary: primary || null, supervisor: supervisor || null } : null;
+    const role = ((document.getElementById('cfg-role') || {}).value || '').trim() || null;
+
+    detailSaveInFlight = true;
+    setDetailStatus('Saving configuration...', 'warn');
+    try {
+      const body = {};
+      if (role !== undefined) body.role = role;
+      body.runtimeProfile = runtimeProfile;
+      const res = await fetch('/api/agents/' + encodeURIComponent(agent), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) throw new Error(data?.error || 'configuration save failed');
+      setDetailStatus('Configuration saved.', 'ok');
+      detailStatusTimer = setTimeout(() => setDetailStatus('', 'muted'), 3000);
+      const banner = document.getElementById('cfg-restart-banner');
+      if (banner) banner.style.display = '';
+      await refresh(true);
+    } catch (e) {
+      setDetailStatus('Configuration save failed: ' + e.message, 'error');
+    } finally {
+      detailSaveInFlight = false;
+    }
+  }
+
   window.saveDetailIdentity = saveDetailIdentity;
   window.saveDetailOwner = saveDetailOwner;
   window.importManagedProject = importManagedProject;
@@ -5284,10 +6020,266 @@ th{
   window.saveSubconsciousControl = saveSubconsciousControl;
   window.saveDetailGuidance = saveDetailGuidance;
   window.saveSupervisorAuditControl = saveSupervisorAuditControl;
+  window.saveDetailConfiguration = saveDetailConfiguration;
+  window.saveSubconsciousRuntime = saveSubconsciousRuntime;
+
+  // ── Task list (minimal Jira) ──────────────────────────────────────
+  let taskListCache = [];
+  let taskDetailViewId = null;
+
+  function fmtTaskTime(iso) {
+    if (!iso) return '-';
+    try { return new Date(iso).toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }); }
+    catch { return iso; }
+  }
+
+  async function taskListRefresh() {
+    const root = document.getElementById('task-list-root');
+    if (!root) return;
+    const filterEl = document.getElementById('task-filter-assignee');
+    // Restore persisted filter on first load
+    if (filterEl && !filterEl._initialized) {
+      filterEl._initialized = true;
+      const urlAssignee = new URL(window.location).searchParams.get('assignee');
+      const saved = urlAssignee || sessionStorage.getItem('task_filter_assignee');
+      if (saved) filterEl.value = saved;
+      filterEl.addEventListener('change', () => {
+        filterEl._userOverride = true;
+        sessionStorage.setItem('task_filter_assignee', filterEl.value);
+        const u = new URL(window.location);
+        if (filterEl.value) u.searchParams.set('assignee', filterEl.value);
+        else u.searchParams.delete('assignee');
+        history.replaceState(null, '', u);
+      });
+    }
+    // Fall back to URL param / sessionStorage when dropdown value is empty
+    // (options not yet populated on first load — race condition)
+    let filterVal = filterEl ? filterEl.value : '';
+    if (!filterVal && filterEl) {
+      const urlAssignee = new URL(window.location).searchParams.get('assignee');
+      const saved = urlAssignee || sessionStorage.getItem('task_filter_assignee') || '';
+      if (saved) filterVal = saved;
+    }
+    try {
+      const url = filterVal ? '/api/tasks?assignee=' + encodeURIComponent(filterVal) : '/api/tasks';
+      const r = await fetch(url);
+      if (!r.ok) throw new Error('status ' + r.status);
+      taskListCache = await r.json();
+    } catch (e) {
+      root.innerHTML = '<div class="error-state">Failed to load tasks: ' + esc(e.message) + '</div>';
+      return;
+    }
+    // Populate agent filter dropdown from task assignees + agents list
+    if (filterEl && !filterEl._populated) {
+      filterEl._populated = true;
+      try {
+        const ar = await fetch('/api/agents/all');
+        if (ar.ok) {
+          const agents = await ar.json();
+          const names = new Set();
+          for (const a of (Array.isArray(agents) ? agents : [])) { if (a.name) names.add(a.name); }
+          for (const t of taskListCache) { if (t.assignee) names.add(t.assignee); }
+          const sorted = [...names].sort();
+          for (const n of sorted) {
+            const opt = document.createElement('option');
+            opt.value = n;
+            opt.textContent = n;
+            filterEl.appendChild(opt);
+          }
+          // Re-apply saved filter now that options exist
+          if (filterVal) filterEl.value = filterVal;
+        }
+      } catch (_) { /* non-critical */ }
+    }
+    if (taskDetailViewId) {
+      const found = taskListCache.find(t => t.id === taskDetailViewId);
+      if (found) { renderTaskDetail(found); return; }
+      taskDetailViewId = null;
+    }
+    renderTaskList();
+  }
+
+  function renderTaskList() {
+    const root = document.getElementById('task-list-root');
+    const detailPanel = document.getElementById('task-detail-panel');
+    if (detailPanel) detailPanel.classList.add('hidden');
+    if (!root) return;
+    if (!taskListCache.length) {
+      root.innerHTML = '<div class="task-empty-state">No tasks yet. Create one above.</div>';
+      return;
+    }
+    const sorted = [...taskListCache].sort((a, b) => {
+      const po = { p0:0, p1:1, p2:2, p3:3 };
+      const so = { in_progress:0, accepted:1, blocked:2, created:3, done:4 };
+      const sd = (so[a.status] ?? 5) - (so[b.status] ?? 5);
+      if (sd !== 0) return sd;
+      const pd = (po[a.priority] ?? 2) - (po[b.priority] ?? 2);
+      if (pd !== 0) return pd;
+      return (b.created_at || '').localeCompare(a.created_at || '');
+    });
+    let html = '<table class="task-list-table"><thead><tr>'
+      + '<th>Status</th><th>Pri</th><th>Title</th><th>Assignee</th><th>Comments</th><th>Created</th>'
+      + '</tr></thead><tbody>';
+    for (const t of sorted) {
+      const cc = Array.isArray(t.comments) ? t.comments.length : 0;
+      html += '<tr onclick="taskShowDetail(\\'' + esc(t.id) + '\\')">'
+        + '<td><span class="task-status-badge task-status-' + esc(t.status) + '">' + esc(t.status) + '</span></td>'
+        + '<td><span class="task-priority-badge task-priority-' + esc(t.priority) + '">' + esc(t.priority || 'p2').toUpperCase() + '</span></td>'
+        + '<td>' + esc(t.title || '-') + '</td>'
+        + '<td>' + esc(t.assignee || '-') + '</td>'
+        + '<td>' + (cc > 0 ? cc : '-') + '</td>'
+        + '<td>' + esc(fmtTaskTime(t.created_at)) + '</td>'
+        + '</tr>';
+    }
+    html += '</tbody></table>';
+    root.innerHTML = html;
+  }
+
+  function renderTaskDetail(task) {
+    const detailPanel = document.getElementById('task-detail-panel');
+    const root = document.getElementById('task-detail-root');
+    if (!detailPanel || !root) return;
+    detailPanel.classList.remove('hidden');
+    taskDetailViewId = task.id;
+    const statusOptions = ['created','accepted','in_progress','blocked','done'];
+    let html = '<span class="task-detail-back" onclick="taskBackToList()">&#8592; Back to list</span>'
+      + '<div class="task-detail-title">' + esc(task.title || 'Untitled') + '</div>'
+      + '<div class="task-detail-meta">'
+      + '<strong>ID:</strong> ' + esc(task.id) + ' &middot; '
+      + '<strong>Priority:</strong> <span class="task-priority-badge task-priority-' + esc(task.priority) + '">' + esc((task.priority || 'p2').toUpperCase()) + '</span> &middot; '
+      + '<strong>Assignee:</strong> ' + esc(task.assignee || 'unassigned') + ' &middot; '
+      + '<strong>Created:</strong> ' + esc(fmtTaskTime(task.created_at))
+      + '</div>'
+      + '<div class="task-detail-meta">'
+      + '<strong>Status:</strong> <select class="task-status-select" id="task-detail-status" onchange="taskChangeStatus(\\'' + esc(task.id) + '\\')">';
+    for (const s of statusOptions) {
+      html += '<option value="' + s + '"' + (task.status === s ? ' selected' : '') + '>' + s + '</option>';
+    }
+    html += '</select></div>';
+    if (task.description) {
+      html += '<div class="task-detail-desc">' + esc(task.description) + '</div>';
+    }
+    if (task.waiting_reason) {
+      html += '<div class="task-detail-meta"><strong>Waiting:</strong> ' + esc(task.waiting_reason)
+        + (task.waiting_until ? ' (until ' + esc(task.waiting_until) + ')' : '') + '</div>';
+    }
+    // Comments section
+    const comments = Array.isArray(task.comments) ? task.comments : [];
+    html += '<div class="task-comments">'
+      + '<div class="field-label">Comments (' + comments.length + ')</div>';
+    if (comments.length === 0) {
+      html += '<div class="task-empty-state" style="padding:8px 0">No comments yet.</div>';
+    } else {
+      for (const c of comments) {
+        html += '<div class="task-comment">'
+          + '<div class="task-comment-meta">' + esc(c.author || 'anonymous') + ' &middot; ' + esc(fmtTaskTime(c.ts)) + '</div>'
+          + '<div class="task-comment-text">' + esc(c.text) + '</div>'
+          + '</div>';
+      }
+    }
+    html += '<div class="task-comment-form">'
+      + '<textarea id="task-comment-input" class="detail-textarea" placeholder="Add a comment..."></textarea>'
+      + '<button class="detail-save" onclick="taskAddComment(\\'' + esc(task.id) + '\\')">Post</button>'
+      + '</div></div>';
+    // Delete button
+    html += '<div class="detail-actions" style="margin-top:14px">'
+      + '<button class="detail-save" style="background:rgba(255,100,100,0.1);border-color:rgba(255,100,100,0.3);color:rgba(255,140,140,0.9)" onclick="taskDelete(\\'' + esc(task.id) + '\\')">Delete Task</button>'
+      + '</div>';
+    root.innerHTML = html;
+  }
+
+  function taskBackToList() {
+    taskDetailViewId = null;
+    renderTaskList();
+  }
+
+  function taskShowDetail(id) {
+    const task = taskListCache.find(t => t.id === id);
+    if (task) renderTaskDetail(task);
+  }
+
+  async function taskCreateSubmit() {
+    const titleEl = document.getElementById('task-create-title');
+    const prioEl = document.getElementById('task-create-priority');
+    const assigneeEl = document.getElementById('task-create-assignee');
+    const statusEl = document.getElementById('task-create-status');
+    if (!titleEl || !prioEl) return;
+    const title = titleEl.value.trim();
+    if (!title) { if (statusEl) statusEl.textContent = 'Title is required.'; return; }
+    try {
+      const body = { title, priority: prioEl.value };
+      const assignee = (assigneeEl?.value || '').trim();
+      if (assignee) body.assignee = assignee;
+      const r = await fetch('/api/tasks', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'create failed');
+      titleEl.value = '';
+      if (assigneeEl) assigneeEl.value = agent;
+      if (statusEl) { statusEl.textContent = 'Created: ' + (data.task?.id || ''); setTimeout(() => statusEl.textContent = '', 3000); }
+      taskListRefresh();
+    } catch (e) {
+      if (statusEl) statusEl.textContent = 'Error: ' + e.message;
+    }
+  }
+
+  async function taskChangeStatus(id) {
+    const sel = document.getElementById('task-detail-status');
+    if (!sel) return;
+    try {
+      const r = await fetch('/api/tasks/' + encodeURIComponent(id) + '/transition', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: sel.value }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'transition failed');
+      taskListRefresh();
+    } catch (e) {
+      alert('Status change failed: ' + e.message);
+    }
+  }
+
+  async function taskAddComment(id) {
+    const input = document.getElementById('task-comment-input');
+    if (!input) return;
+    const text = input.value.trim();
+    if (!text) return;
+    try {
+      const r = await fetch('/api/tasks/' + encodeURIComponent(id) + '/comments', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, author: 'operator' }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'comment failed');
+      taskListRefresh();
+    } catch (e) {
+      alert('Comment failed: ' + e.message);
+    }
+  }
+
+  async function taskDelete(id) {
+    if (!confirm('Delete task ' + id + '?')) return;
+    try {
+      const r = await fetch('/api/tasks/' + encodeURIComponent(id), { method: 'DELETE' });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'delete failed');
+      taskDetailViewId = null;
+      taskListRefresh();
+    } catch (e) {
+      alert('Delete failed: ' + e.message);
+    }
+  }
+
+  window.taskListRefresh = taskListRefresh;
+  window.taskCreateSubmit = taskCreateSubmit;
+  window.taskShowDetail = taskShowDetail;
+  window.taskBackToList = taskBackToList;
+  window.taskChangeStatus = taskChangeStatus;
+  window.taskAddComment = taskAddComment;
+  window.taskDelete = taskDelete;
 
   async function refresh(forceDetailRender = false) {
     try {
-      const [statusRes, detailRes, controlRes, subconsciousRes, subconsciousDetailRes, agentDetailRes, agentStatusRes, unreadRes, queueRes] = await Promise.all([
+      const [statusRes, detailRes, controlRes, subconsciousRes, subconsciousDetailRes, agentDetailRes, agentStatusRes, unreadRes, queueRes, presetsRes] = await Promise.all([
         fetch('/api/supervisor/status'),
         fetch('/api/supervisor/agents/' + encodeURIComponent(agent) + '?limit=180'),
         fetch('/api/supervisor/control'),
@@ -5297,6 +6289,7 @@ th{
         fetch('/api/agents/status'),
         fetch('/api/agents/' + encodeURIComponent(agent) + '/unread-messages?limit=40'),
         fetch('/api/queue'),
+        fetch('/api/framework-presets'),
       ]);
       const statusPayload = await statusRes.json();
       const detail = await detailRes.json();
@@ -5307,6 +6300,8 @@ th{
       const agentStatusPayload = await agentStatusRes.json().catch(() => []);
       const unreadPayload = await unreadRes.json().catch(() => ({ unread_total: 0, messages: [] }));
       const queuePayload = await queueRes.json().catch(() => []);
+      const presetsPayload = await presetsRes.json().catch(() => []);
+      _presetCache = Array.isArray(presetsPayload) ? presetsPayload : [];
       if (!statusRes.ok || !detailRes.ok) throw new Error((detail && detail.error) || 'load failed');
       const statusRows = Array.isArray(agentStatusPayload) ? agentStatusPayload : [];
       const statusRow = statusRows.find((row) => row && row.name === agent) || null;
@@ -5319,7 +6314,8 @@ th{
         subconsciousPayload,
         subconsciousDetailPayload,
         unreadPayload,
-        Array.isArray(queuePayload) ? queuePayload : []
+        Array.isArray(queuePayload) ? queuePayload : [],
+        statusRows
       );
       const shouldPreserveDirty = !forceDetailRender && hasUnsavedDetailChanges(agentDetailPayload, supervisorControlPayload, subconsciousDetailPayload);
       latestAgentDetail = agentDetailPayload;
@@ -5341,6 +6337,7 @@ th{
       if (!shouldPreserveDirty) renderSettings(agentDetailPayload, model);
       else setDetailStatus('Unsaved changes in Agent Detail.', 'warn');
       syncStickyOffsets();
+      if (activeTab === 'dm' && dmLoaded) loadDmHistory();
     } catch (e) {
       const healthEl = document.getElementById('health-summary');
       healthEl.textContent = 'Load failed: ' + e.message;
@@ -5404,6 +6401,7 @@ th{
   window.requestDangerAction = requestDangerAction;
   window.closeDangerModal = closeDangerModal;
   window.confirmDangerAction = confirmDangerAction;
+  window.sendDm = sendDm;
 
   window.addEventListener('hashchange', () => {
     const next = hashToTab(window.location.hash);
@@ -5413,6 +6411,20 @@ th{
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeDangerModal();
   });
+
+  // ── SSE for real-time DM sync across tabs/devices ────
+  {
+    const es = new EventSource('/api/stream');
+    es.addEventListener('message', (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        // Only refresh DM if the message involves this agent
+        if (dmLoaded && (msg.to === agent || msg.from === agent) && !msg.group) {
+          loadDmHistory();
+        }
+      } catch {}
+    });
+  }
 
   setActiveTab(hashToTab(window.location.hash), {
     updateHash: false,
@@ -5469,14 +6481,14 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
   0%,100%{opacity:0.4;box-shadow:none}
   50%{opacity:1;box-shadow:0 0 8px #a855f7}
 }
-.queue-item{padding:10px 14px;border-bottom:1px solid rgba(168,85,247,0.06);transition:background 0.2s}
+.queue-item{padding:10px 14px;border-bottom:1px solid rgba(168,85,247,0.06);transition:background 0.2s;overflow:hidden;min-width:0}
 .queue-item:hover{background:rgba(168,85,247,0.05)}
 .queue-item:last-child{border-bottom:none}
 .qi-route{font-size:11px;margin-bottom:3px}
 .qi-from{color:rgba(0,240,255,0.6)}
 .qi-arrow{color:rgba(168,85,247,0.3);margin:0 4px}
 .qi-target{color:#a855f7}
-.qi-payload{font-size:10px;color:rgba(255,255,255,0.2);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:250px}
+.qi-payload{font-size:10px;color:rgba(255,255,255,0.2);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .qi-wait{font-size:10px;color:rgba(168,85,247,0.3);margin-top:3px}
 .qi-idle{font-size:10px;margin-top:2px}
 .qi-idle-busy{color:rgba(251,191,36,0.5)}
@@ -5513,11 +6525,11 @@ html,body{width:100%;height:100%;overflow:hidden;background:#060a12;font-family:
 }
 .reminder-header .dot{width:6px;height:6px;border-radius:50%;background:#fbbf24;animation:pulse-dot-r 2s infinite}
 @keyframes pulse-dot-r{0%,100%{opacity:0.4;box-shadow:none}50%{opacity:1;box-shadow:0 0 8px #fbbf24}}
-.reminder-item{padding:10px 14px;border-bottom:1px solid rgba(251,191,36,0.06);transition:background 0.2s}
+.reminder-item{padding:10px 14px;border-bottom:1px solid rgba(251,191,36,0.06);transition:background 0.2s;overflow:hidden;min-width:0}
 .reminder-item:hover{background:rgba(251,191,36,0.05)}
 .reminder-item:last-child{border-bottom:none}
 .ri-target{font-size:11px;color:#fbbf24}
-.ri-msg{font-size:10px;color:rgba(255,255,255,0.25);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:250px}
+.ri-msg{font-size:10px;color:rgba(255,255,255,0.25);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .ri-countdown{font-size:12px;color:rgba(251,191,36,0.7);margin-top:4px;font-weight:bold}
 .ri-created{font-size:9px;color:rgba(251,191,36,0.25);margin-top:2px}
 .ri-actions{margin-top:6px}
@@ -5906,7 +6918,7 @@ body.page-hidden #reminder-panel.has-items{
 .log-entry .from{color:#00f0ff}
 .log-entry .to{color:#a855f7}
 .log-entry .arrow{color:rgba(0,240,255,0.3)}
-.log-entry .payload{color:rgba(255,255,255,0.3)}
+.log-entry .payload{color:rgba(255,255,255,0.3);overflow:hidden;text-overflow:ellipsis;max-width:100%}
 
 /* Mobile FABs (hidden on desktop) */
 .mobile-fab{display:none}
@@ -5973,6 +6985,8 @@ body.page-hidden #reminder-panel.has-items{
   #terminal-wrap::after{border-radius:16px / 13px}
   #terminal{border-radius:14px / 11px}
 }
+select{cursor:pointer}
+select option{background:#0d1723;color:#e2eaf3}
 </style>
 </head>
 <body>
@@ -5986,7 +7000,7 @@ body.page-hidden #reminder-panel.has-items{
       <div id="queue-list"></div>
     </div>
     <div id="monitor-panel">
-      <div class="monitor-header">AGENT MONITOR</div>
+      <div class="monitor-header" style="display:flex;align-items:center;gap:12px">AGENT MONITOR<a href="/alerts" id="alert-badge" style="font-size:10px;color:rgba(255,107,107,0.7);text-decoration:none;display:none"></a><button id="btn-new-agent" onclick="openNewAgentModal()" style="margin-left:auto;font-size:10px;color:rgba(0,240,255,0.4);background:none;border:1px solid rgba(0,240,255,0.15);padding:2px 8px;cursor:pointer;letter-spacing:1px;font-family:inherit">+ NEW</button><a href="/tasks" style="font-size:10px;color:rgba(0,240,255,0.4);text-decoration:none;letter-spacing:1px">TASKS</a><a href="/config" style="font-size:10px;color:rgba(0,240,255,0.4);text-decoration:none;letter-spacing:1px">CONFIG</a></div>
       <div id="agent-buttons-wrap">
         <div id="agent-buttons"><span style="color:rgba(0,240,255,0.2);font-size:10px">loading agents...</span></div>
         <button id="agent-toggle" title="Show all agents">▼ more</button>
@@ -6025,7 +7039,117 @@ body.page-hidden #reminder-panel.has-items{
   </div>
 </div>
 
+<div id="new-agent-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.7);align-items:center;justify-content:center">
+  <div style="background:#0d1926;border:1px solid rgba(0,240,255,0.15);padding:24px;width:400px;max-width:90vw">
+    <div style="font-size:12px;letter-spacing:2px;color:rgba(0,240,255,0.6);margin-bottom:16px">NEW AGENT</div>
+    <div style="margin-bottom:10px">
+      <label style="font-size:10px;color:rgba(255,255,255,0.5);letter-spacing:1px">NAME *</label>
+      <input id="na-name" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.3);border:1px solid rgba(0,240,255,0.15);color:#e0e0e0;font-family:inherit;font-size:12px" placeholder="my-agent">
+    </div>
+    <div style="margin-bottom:10px">
+      <label style="font-size:10px;color:rgba(255,255,255,0.5);letter-spacing:1px">PRESET *</label>
+      <select id="na-preset" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.3);border:1px solid rgba(0,240,255,0.15);color:#e0e0e0;font-family:inherit;font-size:12px;cursor:pointer">
+        <option value="">Loading presets...</option>
+      </select>
+    </div>
+    <div style="margin-bottom:10px">
+      <label style="font-size:10px;color:rgba(255,255,255,0.5);letter-spacing:1px">IDENTITY</label>
+      <input id="na-identity" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.3);border:1px solid rgba(0,240,255,0.15);color:#e0e0e0;font-family:inherit;font-size:12px" placeholder="One-line description">
+    </div>
+    <div style="margin-bottom:16px">
+      <label style="font-size:10px;color:rgba(255,255,255,0.5);letter-spacing:1px">GUIDANCE</label>
+      <textarea id="na-guidance" rows="3" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.3);border:1px solid rgba(0,240,255,0.15);color:#e0e0e0;font-family:inherit;font-size:12px;resize:vertical" placeholder="Human-authored intent / instructions"></textarea>
+    </div>
+    <div id="na-status" style="font-size:11px;margin-bottom:10px;min-height:16px"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button onclick="closeNewAgentModal()" style="padding:6px 14px;background:none;border:1px solid rgba(255,255,255,0.15);color:rgba(255,255,255,0.5);cursor:pointer;font-family:inherit;font-size:11px">Cancel</button>
+      <button onclick="submitNewAgent()" style="padding:6px 14px;background:rgba(0,240,255,0.1);border:1px solid rgba(0,240,255,0.3);color:#00f0ff;cursor:pointer;font-family:inherit;font-size:11px">Create</button>
+    </div>
+  </div>
+</div>
+
 <script>
+var _naPresets = [];
+window.openNewAgentModal = async function() {
+  var m = document.getElementById('new-agent-modal');
+  m.style.display = 'flex';
+  document.getElementById('na-name').value = '';
+  document.getElementById('na-identity').value = '';
+  document.getElementById('na-guidance').value = '';
+  document.getElementById('na-status').textContent = '';
+  var sel = document.getElementById('na-preset');
+  sel.innerHTML = '<option value="">Loading...</option>';
+  _naPresets = [];
+  try {
+    var r = await fetch('/api/framework-presets');
+    if (r.ok) _naPresets = await r.json();
+  } catch {}
+  sel.innerHTML = '';
+  for (var i = 0; i < _naPresets.length; i++) {
+    var p = _naPresets[i];
+    var opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name + ' (' + (p.framework || '?') + ')';
+    sel.appendChild(opt);
+  }
+  if (_naPresets.length === 0) sel.innerHTML = '<option value="">No presets available</option>';
+  document.getElementById('na-name').focus();
+};
+window.closeNewAgentModal = function() {
+  document.getElementById('new-agent-modal').style.display = 'none';
+};
+window.submitNewAgent = async function() {
+  var name = (document.getElementById('na-name').value || '').trim();
+  if (!name) { document.getElementById('na-status').textContent = 'Name is required.'; document.getElementById('na-status').style.color = '#ff6b6b'; return; }
+  if (!/^[\\w\\-]+$/.test(name)) { document.getElementById('na-status').textContent = 'Invalid name — use letters, digits, hyphens, underscores.'; document.getElementById('na-status').style.color = '#ff6b6b'; return; }
+  var presetId = document.getElementById('na-preset').value;
+  if (!presetId) { document.getElementById('na-status').textContent = 'Preset is required.'; document.getElementById('na-status').style.color = '#ff6b6b'; return; }
+  var preset = _naPresets.find(function(p) { return p.id === presetId; });
+  var fw = preset ? (preset.framework || 'claude') : 'claude';
+  var identity = (document.getElementById('na-identity').value || '').trim() || null;
+  var guidance = (document.getElementById('na-guidance').value || '').trim() || null;
+  var body = {
+    name: name,
+    type: fw,
+    identity: identity,
+    role: guidance,
+    presetId: presetId,
+  };
+  document.getElementById('na-status').textContent = 'Creating...';
+  document.getElementById('na-status').style.color = 'rgba(0,240,255,0.6)';
+  try {
+    var r = await fetch('/api/agents/create', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    var data = await r.json().catch(function() { return {}; });
+    if (!r.ok) throw new Error(data.error || 'creation failed (HTTP ' + r.status + ')');
+
+    document.getElementById('na-status').textContent = 'Created. Starting agent...';
+    document.getElementById('na-status').style.color = 'rgba(0,240,255,0.6)';
+    try {
+      var sr = await fetch('/api/agents/' + encodeURIComponent(name) + '/start', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      var sd = await sr.json().catch(function() { return {}; });
+      if (sr.ok) {
+        document.getElementById('na-status').textContent = 'Agent "' + name + '" starting — will appear in queue shortly.';
+        document.getElementById('na-status').style.color = '#34d399';
+      } else {
+        document.getElementById('na-status').textContent = 'Created but start failed: ' + (sd.error || 'unknown');
+        document.getElementById('na-status').style.color = '#ffd93d';
+      }
+    } catch (startErr) {
+      document.getElementById('na-status').textContent = 'Created but start failed: ' + startErr.message;
+      document.getElementById('na-status').style.color = '#ffd93d';
+    }
+    setTimeout(function() { closeNewAgentModal(); }, 3000);
+  } catch (e) {
+    document.getElementById('na-status').textContent = 'Failed: ' + e.message;
+    document.getElementById('na-status').style.color = '#ff6b6b';
+  }
+};
+document.getElementById('new-agent-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeNewAgentModal();
+});
+
 (() => {
   const IDLE_THRESHOLD_MS = ${IDLE_THRESHOLD};
   const IDLE_THRESHOLD_SEC = ${IDLE_THRESHOLD_SEC};
@@ -6462,9 +7586,10 @@ body.page-hidden #reminder-panel.has-items{
     }
 
     try {
-      const [detailRespRaw, supervisorRespRaw] = await Promise.allSettled([
+      const [detailRespRaw, supervisorRespRaw, supervisorStatusRaw] = await Promise.allSettled([
         fetch('/api/agents/detail/' + encodeURIComponent(targetName), { signal: controller.signal }),
         fetch('/api/supervisor/agents/' + encodeURIComponent(targetName) + '?limit=1', { signal: controller.signal }),
+        fetch('/api/supervisor/status', { signal: controller.signal }),
       ]);
 
       if (requestSeq !== agentDetailRequestSeq) return;
@@ -6488,9 +7613,8 @@ body.page-hidden #reminder-panel.has-items{
         console.debug('[agent-detail] supervisor detail fetch skipped:', e.message);
       }
       try {
-        const r = await fetch('/api/supervisor/status', { signal: controller.signal });
-        if (r.ok) {
-          const payload = await r.json();
+        if (supervisorStatusRaw.status === 'fulfilled' && supervisorStatusRaw.value.ok) {
+          const payload = await supervisorStatusRaw.value.json();
           if (payload && typeof payload === 'object') supervisorStatus = payload;
         }
       } catch (e) {
@@ -6743,10 +7867,14 @@ body.page-hidden #reminder-panel.has-items{
     function agentBtnHtml(a) {
       const isRemote = a.remote;
       const isActive = typeof a.activeNow === 'boolean' ? a.activeNow : !!a.active;
+      const isSupervisor = a.name.startsWith('supervisor-');
       const dot = isRemote ? '&#9826;' : (isActive ? '&#9679;' : '&#9675;');
       const cls = ['agent-btn', isRemote ? 'remote-agent' : (isActive ? 'active-agent' : 'inactive-agent'), isRemote && a.alive ? 'alive' : '', a.name === selectedName ? 'selected' : ''].filter(Boolean).join(' ');
-      return '<button class="' + cls + '" data-name="' + esc(a.name) + '" data-tmux="' + esc(a.tmux || '') + '">'
-        + '<span class="dot">' + dot + '</span>' + esc(a.name) + '</button>';
+      const supBadge = isSupervisor ? '<span style="font-size:8px;opacity:0.6;margin-left:4px;vertical-align:middle">SUP</span>' : '';
+      const targetName = isSupervisor ? a.name.replace(/^supervisor-/, '') : '';
+      return '<button class="' + cls + '" data-name="' + esc(a.name) + '" data-tmux="' + esc(a.tmux || '') + '"'
+        + (targetName ? ' data-sup-target="' + esc(targetName) + '"' : '') + '>'
+        + '<span class="dot">' + dot + '</span>' + esc(a.name) + supBadge + '</button>';
     }
     let html = '';
     for (const env of envOrder) {
@@ -6761,6 +7889,11 @@ body.page-hidden #reminder-panel.has-items{
     agentButtonsEl.innerHTML = html;
     for (const btn of agentButtonsEl.querySelectorAll('.agent-btn')) {
       btn.addEventListener('click', () => {
+        const supTarget = btn.dataset.supTarget;
+        if (supTarget) {
+          const target = agentStatusList.find(x => x.name === supTarget);
+          if (target && target.tmux) { selectAgent(target); return; }
+        }
         const agent = agentStatusList.find(x => x.name === btn.dataset.name);
         if (agent && agent.tmux) selectAgent(agent);
       });
@@ -6843,6 +7976,11 @@ body.page-hidden #reminder-panel.has-items{
         console.debug('[sse] reminders parse skipped:', err.message);
       }
     });
+    for (const evt of ['task_created', 'task_updated', 'task_deleted']) {
+      evtSource.addEventListener(evt, () => {
+        if (activeTab === 'tasks') taskListRefresh();
+      });
+    }
   }
 
   // ── Init ────────────────────────────────────
@@ -6870,6 +8008,23 @@ body.page-hidden #reminder-panel.has-items{
     scheduleTerminalPoll();
     scheduleDetailRefresh();
     connectSSE();
+    // Alert badge
+    async function refreshAlertBadge(){
+      try{
+        const r=await fetch('/api/alerts/stats');
+        if(!r.ok)return;
+        const s=await r.json();
+        const open=(s.byStatus.open||0)+(s.byStatus.acknowledged||0)+(s.byStatus.assigned||0);
+        const crit=s.bySeverity.critical||0;
+        const badge=document.getElementById('alert-badge');
+        if(badge){
+          if(open>0){badge.style.display='inline';badge.textContent='\\u26a0 '+open+' alert'+(open>1?'s':'')+(crit?' ('+crit+' crit)':'');}
+          else{badge.style.display='none'}
+        }
+      }catch{}
+    }
+    refreshAlertBadge();
+    setInterval(refreshAlertBadge,30000);
   }
 
   // ── Mobile panel toggle ─────────────────────
@@ -6937,3 +8092,781 @@ body.page-hidden #reminder-panel.has-items{
 </script>
 </body>
 </html>`;
+
+function renderAlertsPage() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Alerts</title>
+<style>
+:root{--bg:#0a0e14;--surface:#111922;--border:rgba(154,182,210,0.12);--text:#c8d6e5;--muted:rgba(200,214,229,0.45);--accent:#6dc1ff;--red:#ff6b6b;--yellow:#ffd93d;--green:#6bff9e}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'SF Mono','Fira Code',monospace;font-size:12px;background:var(--bg);color:var(--text);min-height:100vh}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.page{max-width:1200px;margin:0 auto;padding:16px 20px}
+.header{display:flex;align-items:center;gap:16px;margin-bottom:16px}
+.header h1{font-size:16px;color:var(--accent);font-weight:600;letter-spacing:1px}
+.header a{font-size:11px;color:var(--muted)}
+.stats-bar{display:flex;gap:12px;margin-bottom:12px;font-size:11px;color:var(--muted);flex-wrap:wrap}
+.stats-bar .stat{padding:4px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px}
+.stats-bar .stat.critical{border-color:rgba(255,107,107,0.4);color:var(--red)}
+.stats-bar .stat.warning{border-color:rgba(255,217,61,0.4);color:var(--yellow)}
+.filters{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.filters select,.filters input{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:11px;font-family:inherit}
+.alert-list{display:flex;flex-direction:column;gap:2px}
+.alert-row{display:grid;grid-template-columns:24px 80px 1fr 90px 80px 70px;gap:8px;align-items:center;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;cursor:pointer;transition:border-color 0.15s}
+.alert-row:hover{border-color:rgba(109,193,255,0.3)}
+.alert-row.selected{border-color:var(--accent);background:rgba(109,193,255,0.05)}
+.sev-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.sev-dot.critical{background:var(--red)}
+.sev-dot.warning{background:var(--yellow)}
+.sev-dot.info{background:rgba(109,193,255,0.5)}
+.alert-type{font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.alert-summary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.alert-agent{font-size:10px;color:var(--accent)}
+.alert-status{font-size:10px;text-transform:uppercase;letter-spacing:0.5px}
+.alert-status.open{color:var(--red)}
+.alert-status.acknowledged{color:var(--yellow)}
+.alert-status.assigned{color:var(--accent)}
+.alert-status.resolved{color:var(--green)}
+.alert-status.suppressed{color:var(--muted)}
+.alert-time{font-size:10px;color:var(--muted);text-align:right}
+.detail-panel{margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;display:none}
+.detail-panel.visible{display:block}
+.detail-panel h2{font-size:13px;color:var(--accent);margin-bottom:12px}
+.detail-grid{display:grid;grid-template-columns:120px 1fr;gap:6px 12px;font-size:11px;margin-bottom:12px}
+.detail-grid .label{color:var(--muted)}
+.detail-actions{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.detail-actions button{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 12px;border-radius:4px;font-size:11px;font-family:inherit;cursor:pointer}
+.detail-actions button:hover{border-color:var(--accent);color:var(--accent)}
+.notes-section{margin-top:12px}
+.note{padding:6px 0;border-bottom:1px solid var(--border);font-size:11px}
+.note .note-meta{color:var(--muted);font-size:10px;margin-bottom:2px}
+.note-form{display:flex;gap:8px;margin-top:8px}
+.note-form input{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:11px;font-family:inherit}
+.note-form button{background:var(--surface);border:1px solid var(--border);color:var(--accent);padding:4px 12px;border-radius:4px;font-size:11px;font-family:inherit;cursor:pointer}
+.empty{text-align:center;padding:40px;color:var(--muted);font-size:13px}
+.occ{background:rgba(255,217,61,0.15);color:var(--yellow);padding:1px 6px;border-radius:8px;font-size:9px;margin-left:4px}
+select option{background:#0d1723;color:#e2eaf3}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <h1>ALERTS</h1>
+    <a href="/">&#8592; Dashboard</a>
+    <a href="/tasks">Tasks</a>
+  </div>
+  <div class="stats-bar" id="stats-bar"></div>
+  <div class="filters">
+    <select id="filter-status" onchange="window._applyFilters()">
+      <option value="">All statuses</option>
+      <option value="open" selected>Open</option>
+      <option value="acknowledged">Acknowledged</option>
+      <option value="assigned">Assigned</option>
+      <option value="suppressed">Suppressed</option>
+      <option value="resolved">Resolved</option>
+    </select>
+    <select id="filter-severity" onchange="window._applyFilters()">
+      <option value="">All severities</option>
+      <option value="critical">Critical</option>
+      <option value="warning">Warning</option>
+      <option value="info">Info</option>
+    </select>
+    <input id="filter-agent" type="text" placeholder="Filter by agent..." oninput="window._applyFilters()"/>
+  </div>
+  <div class="alert-list" id="alert-list"><div class="empty">Loading alerts...</div></div>
+  <div class="detail-panel" id="detail-panel"></div>
+</div>
+<script>
+(() => {
+  function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+  function relTime(ts){const d=Date.now()-ts;if(d<60000)return Math.floor(d/1000)+'s ago';if(d<3600000)return Math.floor(d/60000)+'m ago';if(d<86400000)return Math.floor(d/3600000)+'h ago';return Math.floor(d/86400000)+'d ago'}
+
+  let alerts=[];
+  let selectedId=null;
+  const listEl=document.getElementById('alert-list');
+  const detailEl=document.getElementById('detail-panel');
+  const statsEl=document.getElementById('stats-bar');
+
+  const urlParams=new URLSearchParams(window.location.search);
+  const preAgent=urlParams.get('sourceAgent')||'';
+  if(preAgent)document.getElementById('filter-agent').value=preAgent;
+
+  async function fetchAlerts(){
+    const status=document.getElementById('filter-status').value;
+    const severity=document.getElementById('filter-severity').value;
+    const agent=document.getElementById('filter-agent').value.trim();
+    const p=new URLSearchParams();
+    if(status)p.set('status',status);
+    if(severity)p.set('severity',severity);
+    if(agent)p.set('sourceAgent',agent);
+    p.set('limit','200');
+    try{const r=await fetch('/api/alerts?'+p);if(r.ok)alerts=await r.json()}catch{}
+    renderList();
+    if(selectedId)renderDetail();
+    fetchStats();
+  }
+
+  async function fetchStats(){
+    try{
+      const r=await fetch('/api/alerts/stats');
+      if(!r.ok)return;
+      const s=await r.json();
+      const open=(s.byStatus.open||0)+(s.byStatus.acknowledged||0)+(s.byStatus.assigned||0);
+      const crit=s.bySeverity.critical||0;
+      const warn=s.bySeverity.warning||0;
+      statsEl.innerHTML=[
+        '<span class="stat'+(crit?' critical':'')+'">Open: '+open+(crit?' ('+crit+' crit)':'')+'</span>',
+        '<span class="stat">Assigned: '+(s.byStatus.assigned||0)+'</span>',
+        '<span class="stat">Suppressed: '+(s.byStatus.suppressed||0)+'</span>',
+        crit?'<span class="stat critical">Critical: '+crit+'</span>':'',
+        warn?'<span class="stat warning">Warning: '+warn+'</span>':'',
+        '<span class="stat">Info: '+(s.bySeverity.info||0)+'</span>',
+        '<span class="stat">Total: '+s.total+'</span>',
+      ].filter(Boolean).join('');
+    }catch{}
+  }
+
+  function renderList(){
+    if(!alerts.length){listEl.innerHTML='<div class="empty">No alerts found</div>';return}
+    const html=[];
+    for(const a of alerts){
+      const sel=a.id===selectedId?' selected':'';
+      const occ=a.occurrences>1?' <span class="occ">x'+a.occurrences+'</span>':'';
+      html.push('<div class="alert-row'+sel+'" onclick="window._sel(this.dataset.id)" data-id="'+esc(a.id)+'">'
+        +'<span class="sev-dot '+esc(a.severity)+'"></span>'
+        +'<span class="alert-type">'+esc(a.alertType||'')+'</span>'
+        +'<span class="alert-summary">'+esc(a.summary||'')+occ+'</span>'
+        +'<span class="alert-agent">'+esc(a.sourceAgent||'-')+'</span>'
+        +'<span class="alert-status '+esc(a.status)+'">'+esc(a.status)+'</span>'
+        +'<span class="alert-time">'+relTime(a.lastSeenAt)+'</span>'
+        +'</div>');
+    }
+    listEl.innerHTML=html.join('');
+  }
+
+  window._sel=function(id){selectedId=id;renderList();renderDetail()};
+
+  function renderDetail(){
+    const a=alerts.find(x=>x.id===selectedId);
+    if(!a){detailEl.classList.remove('visible');return}
+    detailEl.classList.add('visible');
+    const rows=[
+      ['ID',esc(a.id)],['Type',esc(a.alertType||'')],
+      ['Severity','<span class="sev-dot '+esc(a.severity)+'" style="vertical-align:middle"></span> '+esc(a.severity)],
+      ['Source',esc(a.source||'')],
+      ['Agent',a.sourceAgent?'<a href="/agents/'+encodeURIComponent(a.sourceAgent)+'">'+esc(a.sourceAgent)+'</a>':'-'],
+      ['Status','<span class="alert-status '+esc(a.status)+'">'+esc(a.status)+'</span>'+(a.assignee?' &rarr; '+esc(a.assignee):'')],
+      ['Occurrences',String(a.occurrences||1)],
+      ['First Seen',new Date(a.firstSeenAt).toISOString()],
+      ['Last Seen',new Date(a.lastSeenAt).toISOString()],
+      ['Linked Task',a.linkedTaskId?esc(a.linkedTaskId):'-'],
+      ['Tags',(a.tags||[]).map(t=>'<span style="background:rgba(109,193,255,0.1);padding:1px 6px;border-radius:4px;margin-right:4px;font-size:10px">'+esc(t)+'</span>').join('')||'-'],
+    ];
+    const grid=rows.map(([l,v])=>'<div class="label">'+l+'</div><div>'+v+'</div>').join('');
+    const acts=[];
+    const trans={"open":["acknowledged","assigned","resolved","suppressed"],"acknowledged":["assigned","resolved"],"assigned":["resolved"],"suppressed":["open","assigned"]};
+    const labels={"acknowledged":"Acknowledge","assigned":"Assign","resolved":"Resolve","suppressed":"Suppress","open":"Reopen"};
+    for(const t of(trans[a.status]||[])){
+      acts.push('<button onclick="window._tr(\\x27'+t+'\\x27)">'+labels[t]+'</button>');
+    }
+    acts.push('<button onclick="window._del()" style="color:var(--red)">Delete</button>');
+    const notes=(a.notes||[]).map(n=>'<div class="note"><div class="note-meta">'+esc(n.author||'?')+' &middot; '+new Date(n.ts).toLocaleString()+'</div><div>'+esc(n.text)+'</div></div>').join('');
+    detailEl.innerHTML='<h2>'+esc(a.summary||a.alertType)+'</h2>'
+      +'<div class="detail-grid">'+grid+'</div>'
+      +'<div class="detail-actions">'+acts.join('')+'</div>'
+      +(a.detail?'<div style="margin-bottom:12px;padding:8px;background:var(--bg);border-radius:4px;font-size:11px;white-space:pre-wrap;max-height:200px;overflow:auto">'+esc(typeof a.detail==='string'?a.detail:JSON.stringify(a.detail,null,2))+'</div>':'')
+      +'<div class="notes-section"><strong style="font-size:11px;color:var(--muted)">Notes</strong>'+notes
+      +'<div class="note-form"><input id="note-text" placeholder="Add a note..."/><button onclick="window._addNote()">Post</button></div></div>';
+  }
+
+  window._tr=async function(status){
+    if(!selectedId)return;
+    const body={status};
+    if(status==='assigned'){const a=prompt('Assign to:');if(!a)return;body.assignee=a}
+    try{await fetch('/api/alerts/'+encodeURIComponent(selectedId)+'/transition',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});fetchAlerts()}catch{}
+  };
+  window._addNote=async function(){
+    if(!selectedId)return;
+    const t=(document.getElementById('note-text')||{}).value||'';
+    if(!t.trim())return;
+    try{await fetch('/api/alerts/'+encodeURIComponent(selectedId)+'/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t.trim(),author:'operator'})});fetchAlerts()}catch{}
+  };
+  window._del=async function(){
+    if(!selectedId||!confirm('Delete this alert?'))return;
+    try{await fetch('/api/alerts/'+encodeURIComponent(selectedId),{method:'DELETE'});selectedId=null;fetchAlerts()}catch{}
+  };
+  window._applyFilters=function(){fetchAlerts()};
+
+  // SSE real-time updates
+  try{
+    const es=new EventSource('/api/stream');
+    ['alert_created','alert_updated','alert_resolved','alert_deleted'].forEach(e=>{
+      es.addEventListener(e,()=>{fetchAlerts()});
+    });
+  }catch{}
+
+  fetchAlerts();
+})();
+</script>
+</body>
+</html>`;
+}
+
+function renderTasksPage() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Tasks</title>
+<style>
+:root{--bg:#0a0e14;--surface:#111922;--border:rgba(154,182,210,0.12);--text:#c8d6e5;--muted:rgba(200,214,229,0.45);--accent:#6dc1ff;--red:#ff6b6b;--yellow:#ffd93d;--green:#6bff9e}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'SF Mono','Fira Code',monospace;font-size:12px;background:var(--bg);color:var(--text);min-height:100vh}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.page{max-width:1200px;margin:0 auto;padding:16px 20px}
+.header{display:flex;align-items:center;gap:16px;margin-bottom:16px}
+.header h1{font-size:16px;color:var(--accent);font-weight:600;letter-spacing:1px}
+.header a{font-size:11px;color:var(--muted)}
+select option{background:#0d1723;color:#e2eaf3}
+.filters{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
+.filters select,.filters input{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:11px;font-family:inherit}
+.task-list-table{width:100%;border-collapse:collapse;font-size:12px}
+.task-list-table th{text-align:left;padding:6px 8px;border-bottom:1px solid rgba(154,182,210,0.2);color:var(--muted);font-weight:500;font-size:11px;letter-spacing:0.5px}
+.task-list-table td{padding:5px 8px;border-bottom:1px solid rgba(154,182,210,0.08);vertical-align:top}
+.task-list-table tr:hover{background:rgba(109,193,255,0.04);cursor:pointer}
+.task-status-badge{display:inline-block;padding:2px 7px;border-radius:8px;font-size:10px;font-weight:600;letter-spacing:0.4px}
+.task-status-created{background:rgba(154,182,210,0.15);color:rgba(154,182,210,0.9)}
+.task-status-accepted{background:rgba(109,193,255,0.15);color:rgba(109,193,255,0.9)}
+.task-status-in_progress{background:rgba(100,220,160,0.15);color:rgba(100,220,160,0.9)}
+.task-status-blocked{background:rgba(255,160,80,0.15);color:rgba(255,160,80,0.9)}
+.task-status-done{background:rgba(120,120,140,0.15);color:rgba(120,120,140,0.9)}
+.task-priority-badge{font-size:10px;font-weight:600;letter-spacing:0.3px}
+.task-priority-p0{color:rgba(255,80,80,0.9)}
+.task-priority-p1{color:rgba(255,160,80,0.9)}
+.task-priority-p2{color:var(--muted)}
+.task-priority-p3{color:rgba(120,120,140,0.7)}
+.task-create-form{display:flex;flex-direction:column;gap:8px;margin-bottom:16px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px}
+.task-create-form textarea{min-height:60px;resize:vertical;background:rgba(0,0,0,0.2);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:11px;font-family:inherit}
+.task-create-form input,.task-create-form select{background:rgba(0,0,0,0.2);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:11px;font-family:inherit}
+.task-create-row{display:flex;gap:8px;align-items:center}
+.task-create-row button{background:var(--accent);color:var(--bg);border:none;padding:4px 12px;border-radius:4px;font-size:11px;font-family:inherit;cursor:pointer;font-weight:600}
+.task-detail-back{font-size:11px;color:var(--accent);cursor:pointer;margin-bottom:8px;display:inline-block}
+.task-detail-back:hover{text-decoration:underline}
+.task-detail-title{font-size:15px;font-weight:600;margin-bottom:6px}
+.task-detail-meta{font-size:11px;color:var(--muted);margin-bottom:10px}
+.task-detail-desc{font-size:12px;line-height:1.6;margin-bottom:14px;white-space:pre-wrap}
+.task-comments{margin-top:10px}
+.task-comment{padding:8px 10px;border-left:2px solid rgba(109,193,255,0.3);margin-bottom:8px;background:rgba(0,0,0,0.12);border-radius:0 6px 6px 0}
+.task-comment-meta{font-size:10px;color:var(--muted);margin-bottom:3px}
+.task-comment-text{font-size:12px;line-height:1.5;white-space:pre-wrap}
+.task-comment-form{display:flex;gap:8px;align-items:flex-end;margin-top:8px}
+.task-comment-form textarea{flex:1;min-height:40px;resize:vertical;background:rgba(0,0,0,0.2);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:11px;font-family:inherit}
+.task-comment-form button{background:var(--accent);color:var(--bg);border:none;padding:4px 12px;border-radius:4px;font-size:11px;font-family:inherit;cursor:pointer;font-weight:600}
+.task-empty-state{text-align:center;color:var(--muted);padding:24px 0;font-size:12px}
+.task-status-select{font-size:11px;padding:2px 4px;background:rgba(0,0,0,0.2);border:1px solid rgba(154,182,210,0.15);color:var(--text);border-radius:4px}
+.task-delete-btn{font-size:10px;color:var(--red);background:none;border:1px solid rgba(255,107,107,0.25);padding:3px 10px;border-radius:4px;cursor:pointer;font-family:inherit;margin-top:12px}
+.hidden{display:none}
+.toggle-form{font-size:11px;color:var(--accent);cursor:pointer;background:none;border:1px solid rgba(109,193,255,0.2);padding:3px 10px;border-radius:4px;font-family:inherit}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <h1>TASKS</h1>
+    <a href="/">&#8592; Dashboard</a>
+    <a href="/alerts">Alerts</a>
+    <a href="/config">Config</a>
+  </div>
+  <div class="filters">
+    <select id="filter-assignee" onchange="applyFilter()"><option value="">All Agents</option></select>
+    <select id="filter-status" onchange="applyFilter()"><option value="">All Statuses</option></select>
+    <button class="toggle-form" onclick="toggleCreate()">+ New Task</button>
+  </div>
+  <div id="create-form" class="task-create-form hidden">
+    <input id="create-title" placeholder="Title" />
+    <textarea id="create-desc" placeholder="Description (optional)"></textarea>
+    <div class="task-create-row">
+      <input id="create-assignee" placeholder="Assignee" />
+      <select id="create-priority"><option value="p0">P0</option><option value="p1">P1</option><option value="p2" selected>P2</option><option value="p3">P3</option></select>
+      <button onclick="createTask()">Create</button>
+    </div>
+  </div>
+  <div id="task-list-root"></div>
+  <div id="task-detail-panel" class="hidden"><div id="task-detail-root"></div></div>
+</div>
+<script>
+(function(){
+  function esc(s){if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+  function fmtTaskTime(iso){if(!iso)return'-';try{const d=new Date(iso);return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' '+d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})}catch{return iso}}
+
+  let taskCache=[];
+  let detailId=null;
+
+  window.toggleCreate=function(){
+    document.getElementById('create-form').classList.toggle('hidden');
+  };
+
+  window.applyFilter=function(){
+    const a=document.getElementById('filter-assignee').value;
+    const s=document.getElementById('filter-status').value;
+    const url=new URL(window.location);
+    if(a){url.searchParams.set('assignee',a)}else{url.searchParams.delete('assignee')}
+    if(s){url.searchParams.set('status',s)}else{url.searchParams.delete('status')}
+    history.replaceState(null,'',url);
+    renderList();
+  };
+
+  function getFilters(){
+    const a=document.getElementById('filter-assignee');
+    const s=document.getElementById('filter-status');
+    return{assignee:a?a.value:'',status:s?s.value:''};
+  }
+
+  async function refresh(){
+    try{
+      const r=await fetch('/api/tasks');
+      if(!r.ok)return;
+      taskCache=await r.json();
+    }catch{return}
+    // populate assignee dropdown
+    const fEl=document.getElementById('filter-assignee');
+    if(fEl){
+      const cur=fEl.value;
+      const names=[...new Set(taskCache.map(t=>t.assignee).filter(Boolean))].sort();
+      const opts='<option value="">All Agents</option>'+names.map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join('');
+      fEl.innerHTML=opts;
+      // restore from URL param or previous selection
+      const urlAssignee=new URL(window.location).searchParams.get('assignee')||'';
+      fEl.value=urlAssignee||cur||'';
+    }
+    // populate status dropdown
+    const sEl=document.getElementById('filter-status');
+    if(sEl){
+      const cur=sEl.value;
+      const urlStatus=new URL(window.location).searchParams.get('status')||'';
+      sEl.value=urlStatus||cur||'';
+    }
+    renderList();
+    if(detailId){
+      const t=taskCache.find(x=>x.id===detailId);
+      if(t)renderDetail(t);
+    }
+  }
+
+  function renderList(){
+    const root=document.getElementById('task-list-root');
+    const dp=document.getElementById('task-detail-panel');
+    if(dp)dp.classList.add('hidden');
+    if(!root)return;
+    const f=getFilters();
+    let items=taskCache;
+    if(f.assignee)items=items.filter(t=>t.assignee===f.assignee);
+    if(f.status)items=items.filter(t=>t.status===f.status);
+    if(!items.length){root.innerHTML='<div class="task-empty-state">No tasks found.</div>';return}
+    const sorted=[...items].sort((a,b)=>{
+      const so={in_progress:0,accepted:1,blocked:2,created:3,done:4};
+      const po={p0:0,p1:1,p2:2,p3:3};
+      const sd=(so[a.status]??5)-(so[b.status]??5);
+      if(sd!==0)return sd;
+      const pd=(po[a.priority]??2)-(po[b.priority]??2);
+      if(pd!==0)return pd;
+      return(b.created_at||'').localeCompare(a.created_at||'');
+    });
+    let html='<table class="task-list-table"><thead><tr><th>Status</th><th>Pri</th><th>Title</th><th>Assignee</th><th>Comments</th><th>Created</th></tr></thead><tbody>';
+    for(const t of sorted){
+      const cc=Array.isArray(t.comments)?t.comments.length:0;
+      html+='<tr onclick="showDetail(\\''+esc(t.id)+'\\')"><td><span class="task-status-badge task-status-'+esc(t.status)+'">'+esc(t.status)+'</span></td><td><span class="task-priority-badge task-priority-'+esc(t.priority)+'">'+esc((t.priority||'p2').toUpperCase())+'</span></td><td>'+esc(t.title||'-')+'</td><td>'+esc(t.assignee||'-')+'</td><td>'+(cc>0?cc:'-')+'</td><td>'+esc(fmtTaskTime(t.created_at))+'</td></tr>';
+    }
+    html+='</tbody></table>';
+    root.innerHTML=html;
+  }
+
+  function renderDetail(task){
+    const dp=document.getElementById('task-detail-panel');
+    const root=document.getElementById('task-detail-root');
+    if(!dp||!root)return;
+    dp.classList.remove('hidden');
+    detailId=task.id;
+    const statusOpts=['created','accepted','in_progress','blocked','done'];
+    let html='<span class="task-detail-back" onclick="backToList()">&#8592; Back to list</span>'
+      +'<div class="task-detail-title">'+esc(task.title||'Untitled')+'</div>'
+      +'<div class="task-detail-meta"><strong>ID:</strong> '+esc(task.id)+' &middot; <strong>Priority:</strong> <span class="task-priority-badge task-priority-'+esc(task.priority)+'">'+esc((task.priority||'p2').toUpperCase())+'</span> &middot; <strong>Assignee:</strong> '+esc(task.assignee||'unassigned')+' &middot; <strong>Created:</strong> '+esc(fmtTaskTime(task.created_at))+'</div>'
+      +'<div class="task-detail-meta"><strong>Status:</strong> <select class="task-status-select" id="task-detail-status" onchange="changeStatus(\\''+esc(task.id)+'\\')"><option></option>';
+    for(const s of statusOpts){html+='<option value="'+s+'"'+(task.status===s?' selected':'')+'>'+s+'</option>';}
+    html+='</select></div>';
+    if(task.description){html+='<div class="task-detail-desc">'+esc(task.description)+'</div>';}
+    if(task.waiting_reason){html+='<div class="task-detail-meta"><strong>Waiting:</strong> '+esc(task.waiting_reason)+'</div>';}
+    // comments
+    html+='<div class="task-comments"><strong style="font-size:11px;color:var(--muted)">Comments</strong>';
+    if(Array.isArray(task.comments)){
+      for(const c of task.comments){
+        html+='<div class="task-comment"><div class="task-comment-meta">'+esc(c.author||'?')+' &middot; '+esc(fmtTaskTime(c.ts||c.created_at))+'</div><div class="task-comment-text">'+esc(c.text)+'</div></div>';
+      }
+    }
+    html+='<div class="task-comment-form"><textarea id="task-comment-input" placeholder="Add a comment..."></textarea><button onclick="addComment(\\''+esc(task.id)+'\\')">Post</button></div></div>';
+    html+='<button class="task-delete-btn" onclick="deleteTask(\\''+esc(task.id)+'\\')">Delete Task</button>';
+    root.innerHTML=html;
+  }
+
+  window.showDetail=function(id){
+    const t=taskCache.find(x=>x.id===id);
+    if(t)renderDetail(t);
+  };
+  window.backToList=function(){
+    detailId=null;
+    document.getElementById('task-detail-panel').classList.add('hidden');
+  };
+  window.createTask=async function(){
+    const title=(document.getElementById('create-title')||{}).value||'';
+    if(!title.trim()){alert('Title is required');return}
+    const desc=(document.getElementById('create-desc')||{}).value||'';
+    const assignee=(document.getElementById('create-assignee')||{}).value||'';
+    const priority=(document.getElementById('create-priority')||{}).value||'p2';
+    try{
+      const r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:title.trim(),description:desc.trim(),assignee:assignee.trim()||undefined,priority})});
+      if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.error||'create failed')}
+      document.getElementById('create-title').value='';
+      document.getElementById('create-desc').value='';
+      document.getElementById('create-assignee').value='';
+      document.getElementById('create-form').classList.add('hidden');
+      refresh();
+    }catch(e){alert('Create failed: '+e.message)}
+  };
+  window.changeStatus=async function(id){
+    const sel=document.getElementById('task-detail-status');
+    if(!sel)return;
+    try{
+      const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/transition',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:sel.value})});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.error||'transition failed');
+      refresh();
+    }catch(e){alert('Status change failed: '+e.message)}
+  };
+  window.addComment=async function(id){
+    const input=document.getElementById('task-comment-input');
+    if(!input)return;
+    const text=input.value.trim();
+    if(!text)return;
+    try{
+      const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/comments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,author:'operator'})});
+      if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.error||'comment failed')}
+      refresh();
+    }catch(e){alert('Comment failed: '+e.message)}
+  };
+  window.deleteTask=async function(id){
+    if(!confirm('Delete task '+id+'?'))return;
+    try{
+      const r=await fetch('/api/tasks/'+encodeURIComponent(id),{method:'DELETE'});
+      if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.error||'delete failed')}
+      detailId=null;
+      refresh();
+    }catch(e){alert('Delete failed: '+e.message)}
+  };
+
+  // SSE real-time updates
+  try{
+    const es=new EventSource('/api/stream');
+    ['task_created','task_updated','task_deleted'].forEach(e=>{
+      es.addEventListener(e,()=>{refresh()});
+    });
+  }catch{}
+
+  refresh();
+})();
+</script>
+</body>
+</html>`;
+}
+
+function renderConfigPage() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Config</title>
+<style>
+:root{--bg:#0a0e14;--surface:#111922;--border:rgba(154,182,210,0.12);--text:#c8d6e5;--muted:rgba(200,214,229,0.45);--accent:#6dc1ff;--red:#ff6b6b;--yellow:#ffd93d;--green:#6bff9e}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'SF Mono','Fira Code',monospace;font-size:12px;background:var(--bg);color:var(--text);min-height:100vh}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+select{cursor:pointer}
+select option{background:#0d1723;color:#e2eaf3}
+.page{max-width:900px;margin:0 auto;padding:16px 20px}
+.header{display:flex;align-items:center;gap:16px;margin-bottom:20px}
+.header h1{font-size:16px;color:var(--accent);font-weight:600;letter-spacing:1px}
+.header a{font-size:11px;color:var(--muted)}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px}
+.panel-label{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:12px}
+.hint{font-size:11px;color:var(--muted);margin-bottom:12px}
+.preset-table{width:100%;border-collapse:collapse;font-size:11px}
+.preset-table th{text-align:left;padding:6px 8px;color:var(--muted);font-size:10px;letter-spacing:1px;text-transform:uppercase;border-bottom:1px solid var(--border)}
+.preset-table td{padding:6px 8px;border-bottom:1px solid rgba(154,182,210,0.06)}
+.preset-table tr:hover{background:rgba(109,193,255,0.04)}
+.empty-state{text-align:center;padding:24px;color:var(--muted);font-size:11px}
+.field-label{font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);margin-top:10px;margin-bottom:4px}
+.cfg-input{width:100%;margin-top:2px;background:rgba(255,255,255,0.03);border:1px solid rgba(109,193,255,0.24);border-radius:8px;color:var(--text);padding:8px 10px;outline:none;font-size:12px;font-family:inherit}
+.cfg-input:focus{border-color:rgba(109,193,255,0.5)}
+.btn{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px 14px;border-radius:6px;font-size:11px;font-family:inherit;cursor:pointer;letter-spacing:0.5px}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn-accent{border-color:rgba(109,193,255,0.4);color:var(--accent)}
+.btn-danger{border-color:rgba(255,107,107,0.3);color:var(--red)}
+.btn-danger:hover{border-color:var(--red);background:rgba(255,107,107,0.08)}
+.actions-row{display:flex;gap:8px;margin-top:12px}
+.status-msg{font-size:11px;margin-top:8px;min-height:16px}
+.status-ok{color:var(--green)}
+.status-error{color:var(--red)}
+.add-form{display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)}
+.add-form.visible{display:block}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <h1>GLOBAL CONFIG</h1>
+    <a href="/">&larr; Monitor</a>
+    <a href="/alerts">Alerts</a>
+    <a href="/tasks">Tasks</a>
+  </div>
+
+  <div class="panel">
+    <div class="panel-label">All Agents</div>
+    <div class="hint">All registered agents across all servers. Offline local agents can be started from here.</div>
+    <div id="agent-list"></div>
+    <div id="agent-status-msg" class="status-msg"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-label">Framework Presets</div>
+    <div class="hint">Named bundles of framework / provider / model settings. These presets appear in each agent's Configuration dropdowns.</div>
+    <div id="preset-list"></div>
+    <div style="margin-top:12px;display:flex;gap:8px">
+      <button class="btn btn-accent" onclick="toggleAddForm()">+ Add Preset</button>
+    </div>
+    <div id="add-form" class="add-form">
+      <div class="field-label">Name</div>
+      <input id="p-name" class="cfg-input" placeholder="e.g. Claude Opus">
+      <div class="field-label">Framework</div>
+      <select id="p-framework" class="cfg-input"><option value="">—</option><option value="claude">claude</option><option value="codex">codex</option></select>
+      <div class="field-label">Model</div>
+      <input id="p-model" class="cfg-input" placeholder="e.g. claude-sonnet-4-20250514">
+      <div class="field-label">Reasoning</div>
+      <input id="p-reasoning" class="cfg-input" placeholder="e.g. extended">
+      <div class="field-label">Extra Args</div>
+      <input id="p-extraArgs" class="cfg-input" placeholder="e.g. --verbose">
+      <div class="field-label">API Base URL</div>
+      <input id="p-apiBaseUrl" class="cfg-input" placeholder="e.g. https://dashscope.aliyuncs.com/apps/anthropic">
+      <div class="field-label">API Key</div>
+      <input id="p-apiKey" type="password" class="cfg-input" placeholder="API key for custom provider">
+      <div class="actions-row">
+        <button class="btn btn-accent" onclick="submitPreset()">Create Preset</button>
+        <button class="btn" onclick="toggleAddForm()">Cancel</button>
+      </div>
+    </div>
+    <div id="status-msg" class="status-msg"></div>
+  </div>
+</div>
+<script>
+(function(){
+  const listEl = document.getElementById('preset-list');
+  const formEl = document.getElementById('add-form');
+  const statusEl = document.getElementById('status-msg');
+  let presets = [];
+
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function showStatus(msg, cls) {
+    statusEl.textContent = msg;
+    statusEl.className = 'status-msg ' + (cls || '');
+    if (msg) setTimeout(function() { if (statusEl.textContent === msg) { statusEl.textContent = ''; statusEl.className = 'status-msg'; } }, 3000);
+  }
+
+  function render() {
+    if (presets.length === 0) {
+      listEl.innerHTML = '<div class="empty-state">No presets defined yet.</div>';
+      return;
+    }
+    var h = '<table class="preset-table"><thead><tr><th>Name</th><th>Framework</th><th>Model</th><th>API Base URL</th><th>API Key</th><th></th></tr></thead><tbody>';
+    for (var i = 0; i < presets.length; i++) {
+      var p = presets[i];
+      h += '<tr>'
+        + '<td><strong>' + esc(p.name) + '</strong></td>'
+        + '<td>' + esc(p.framework || '-') + '</td>'
+        + '<td>' + esc(p.model || '-') + '</td>'
+        + '<td>' + esc(p.apiBaseUrl || '-') + '</td>'
+        + '<td>' + (p.apiKey ? 'Configured' : '-') + '</td>'
+        + '<td><button class="btn btn-danger" onclick="deletePreset(\\'' + esc(p.id) + '\\')">Delete</button></td>'
+        + '</tr>';
+    }
+    h += '</tbody></table>';
+    listEl.innerHTML = h;
+  }
+
+  async function fetchPresets() {
+    try {
+      var r = await fetch('/api/framework-presets');
+      if (r.ok) presets = await r.json();
+    } catch (e) { console.error('fetch presets:', e); }
+    render();
+  }
+
+  window.toggleAddForm = function() {
+    formEl.classList.toggle('visible');
+  };
+
+  window.submitPreset = async function() {
+    var name = (document.getElementById('p-name').value || '').trim();
+    if (!name) { showStatus('Name is required.', 'status-error'); return; }
+    var body = {
+      name: name,
+      framework: (document.getElementById('p-framework').value || '').trim() || null,
+      provider: 'anthropic',
+      model: (document.getElementById('p-model').value || '').trim() || null,
+      reasoning: (document.getElementById('p-reasoning').value || '').trim() || null,
+      extraArgs: (document.getElementById('p-extraArgs').value || '').trim() || null,
+      apiBaseUrl: (document.getElementById('p-apiBaseUrl').value || '').trim() || null,
+      apiKey: (document.getElementById('p-apiKey').value || '').trim() || null,
+    };
+    try {
+      var r = await fetch('/api/framework-presets', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      var data = await r.json().catch(function() { return {}; });
+      if (!r.ok) throw new Error(data.error || 'create failed');
+      showStatus('Preset created: ' + (data.preset ? data.preset.name : name), 'status-ok');
+      document.getElementById('p-name').value = '';
+      document.getElementById('p-model').value = '';
+      document.getElementById('p-reasoning').value = '';
+      document.getElementById('p-extraArgs').value = '';
+      document.getElementById('p-apiBaseUrl').value = '';
+      document.getElementById('p-apiKey').value = '';
+      formEl.classList.remove('visible');
+      await fetchPresets();
+    } catch (e) { showStatus('Create failed: ' + e.message, 'status-error'); }
+  };
+
+  window.deletePreset = async function(id) {
+    if (!confirm('Delete this preset?')) return;
+    try {
+      var r = await fetch('/api/framework-presets/' + encodeURIComponent(id), { method: 'DELETE' });
+      var data = await r.json().catch(function() { return {}; });
+      if (!r.ok) throw new Error(data.error || 'delete failed');
+      showStatus('Preset deleted.', 'status-ok');
+      await fetchPresets();
+    } catch (e) { showStatus('Delete failed: ' + e.message, 'status-error'); }
+  };
+
+  fetchPresets();
+})();
+
+(function(){
+  var agentListEl = document.getElementById('agent-list');
+  var agentStatusEl = document.getElementById('agent-status-msg');
+  var allAgents = [];
+
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function agentStatus(a) {
+    if (a.online) return '<span style="color:var(--green)">online</span>';
+    if (a.blocked) return '<span style="color:var(--yellow)">blocked</span>';
+    return '<span style="color:var(--muted)">offline</span>';
+  }
+
+  function renderAgents() {
+    if (allAgents.length === 0) {
+      agentListEl.innerHTML = '<div class="empty-state">No agents registered.</div>';
+      return;
+    }
+    var h = '<table class="preset-table"><thead><tr>'
+      + '<th>Name</th><th>Framework</th><th>Version</th><th>Status</th><th>Server</th><th>Env</th><th></th>'
+      + '</tr></thead><tbody>';
+    for (var i = 0; i < allAgents.length; i++) {
+      var a = allAgents[i];
+      var ver = a.layoutVersion ? 'v' + a.layoutVersion : (a.agentModelVersion || '-');
+      var srv = a.server || '-';
+      var env = a.environment || '-';
+      var isLocal = !a.server || a.server === 'local' || /^local/i.test(a.server);
+      var validFw = a.type === 'claude' || a.type === 'codex';
+      var canStart = !a.online && isLocal && validFw;
+      var startBtn = canStart
+        ? '<button class="btn btn-accent" onclick="startAgent(\\'' + esc(a.name) + '\\')">Start</button> '
+        : (!a.online && isLocal && !validFw ? '<span style="color:var(--muted);font-size:10px">no framework</span> ' : '');
+      var deleteBtn = !a.online
+        ? '<button class="btn btn-danger" onclick="deleteAgent(\\'' + esc(a.name) + '\\')">Delete</button>'
+        : '';
+      h += '<tr>'
+        + '<td><strong>' + esc(a.name) + '</strong></td>'
+        + '<td>' + esc(a.type || '-') + '</td>'
+        + '<td>' + esc(ver) + '</td>'
+        + '<td>' + agentStatus(a) + '</td>'
+        + '<td>' + esc(srv) + '</td>'
+        + '<td>' + esc(env) + '</td>'
+        + '<td>' + startBtn + deleteBtn + '</td>'
+        + '</tr>';
+    }
+    h += '</tbody></table>';
+    agentListEl.innerHTML = h;
+  }
+
+  function showAgentStatus(msg, cls) {
+    agentStatusEl.textContent = msg;
+    agentStatusEl.className = 'status-msg ' + (cls || '');
+    if (msg) setTimeout(function() { if (agentStatusEl.textContent === msg) { agentStatusEl.textContent = ''; agentStatusEl.className = 'status-msg'; } }, 4000);
+  }
+
+  async function fetchAgents() {
+    try {
+      var r = await fetch('/api/agents/all');
+      if (r.ok) allAgents = await r.json();
+    } catch (e) { console.error('fetch agents:', e); }
+    allAgents.sort(function(a, b) {
+      if (a.online && !b.online) return -1;
+      if (!a.online && b.online) return 1;
+      return (a.name || '').localeCompare(b.name || '');
+    });
+    renderAgents();
+  }
+
+  window.startAgent = async function(name) {
+    showAgentStatus('Starting ' + name + '...', '');
+    try {
+      var r = await fetch('/api/agents/' + encodeURIComponent(name) + '/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+      });
+      var data = await r.json().catch(function() { return {}; });
+      if (!r.ok) throw new Error(data.error || 'start failed');
+      showAgentStatus(name + ' starting (pid ' + (data.pid || '?') + ')', 'status-ok');
+      setTimeout(fetchAgents, 5000);
+    } catch (e) { showAgentStatus('Start failed: ' + e.message, 'status-error'); }
+  };
+
+  window.deleteAgent = async function(name) {
+    if (!confirm('Delete agent \\'' + name + '\\'? This cannot be undone.')) return;
+    showAgentStatus('Deleting ' + name + '...', '');
+    try {
+      var r = await fetch('/api/agents/' + encodeURIComponent(name) + '?force=true', { method: 'DELETE' });
+      var data = await r.json().catch(function() { return {}; });
+      if (!r.ok) throw new Error(data.error || 'delete failed');
+      showAgentStatus(name + ' deleted.', 'status-ok');
+      await fetchAgents();
+    } catch (e) { showAgentStatus('Delete failed: ' + e.message, 'status-error'); }
+  };
+
+  fetchAgents();
+})();
+</script>
+</body>
+</html>`;
+}

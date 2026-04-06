@@ -109,6 +109,18 @@ maybe_install_deps() {
   return 0
 }
 
+force_clean_workdir() {
+  local dirty
+  dirty="$(run_git status --porcelain 2>/dev/null || true)"
+  if [ -n "$dirty" ]; then
+    log "WARN: dirty working tree detected (deploy dir should be clean):"
+    printf '%s\n' "$dirty" | head -20 | while IFS= read -r line; do log "  $line"; done
+    log "Cleaning: git reset --hard + git clean -fd"
+    run_git reset --hard HEAD >/dev/null 2>&1 || true
+    run_git clean -fd >/dev/null 2>&1 || true
+  fi
+}
+
 validate_startup() {
   if [ ! -d "$REPO_DIR/.git" ]; then
     log "FATAL: '$REPO_DIR' is not a git repository"
@@ -136,12 +148,6 @@ while true; do
     continue
   fi
 
-  if ! run_git checkout -q "$DEPLOY_BRANCH"; then
-    log "WARN: cannot checkout '$DEPLOY_BRANCH'; retry on next poll"
-    sleep "$POLL_SEC"
-    continue
-  fi
-
   local_ref="$(run_git rev-parse HEAD 2>/dev/null || true)"
   remote_ref="$(run_git rev-parse "origin/$DEPLOY_BRANCH" 2>/dev/null || true)"
   if [ -z "$local_ref" ] || [ -z "$remote_ref" ]; then
@@ -154,26 +160,25 @@ while true; do
     continue
   fi
 
-  dirty="$(run_git status --porcelain)"
-  if [ -n "$dirty" ]; then
-    log "WARN: working tree is dirty; skip deploy this round"
-    sleep "$POLL_SEC"
-    continue
-  fi
-
   if [ "$deploy_pending" = true ] && [ "$local_ref" = "$remote_ref" ]; then
     log "Retrying failed deploy at $local_ref"
   else
     log "Update detected: $local_ref -> $remote_ref"
   fi
-  if ! run_git pull --ff-only origin "$DEPLOY_BRANCH"; then
-    log "ERROR: git pull failed; skip this round"
+
+  force_clean_workdir
+
+  if ! run_git reset --hard "origin/$DEPLOY_BRANCH" >/dev/null 2>&1; then
+    log "ERROR: git reset --hard failed; retry on next poll"
     sleep "$POLL_SEC"
     continue
   fi
 
   new_ref="$(run_git rev-parse HEAD)"
+  log "Reset to $new_ref"
+
   if ! maybe_install_deps "$local_ref" "$new_ref"; then
+    deploy_pending=true
     sleep "$POLL_SEC"
     continue
   fi

@@ -793,7 +793,11 @@ async function syncAgentAvatarToDmRooms(agentName) {
       state.roomAvatars[roomId] = mxcUri;
       console.log(`Synced DM room ${roomId} (${key}) avatar to agent ${canonicalAgentName}`);
     } catch (e) {
-      console.warn(`Failed to sync DM room ${roomId} avatar: ${e.message}`);
+      if (e.message && e.message.includes('M_FORBIDDEN')) {
+        console.debug(`[avatar-sync] Skipping DM room ${roomId} avatar sync — no permission: ${e.message}`);
+      } else {
+        console.warn(`Failed to sync DM room ${roomId} avatar: ${e.message}`);
+      }
     }
   }
   saveState();
@@ -1226,6 +1230,7 @@ export class MatrixBridge {
     this._backendHealthy = true;          // false when backend is unresponsive
     this._reconcileSuspendLogged = false; // log suspension only once
     this._loggedUntrustedRooms = new Set(); // dedup scan-joined trust logs
+    this._bridgeCreatedGroups = new Set(); // groups we POST'd — skip SSE echo
     this._warningRouter = new NotificationRouter({
       warning: {
         cooldownMs: WARNING_DEDUPE_WINDOW_MS,
@@ -1235,10 +1240,10 @@ export class MatrixBridge {
       },
     }, {
       'backend-log': (_family, payload) => {
-        return backendApi('POST', '/api/system/info', {
-          summary: payload.summary,
-          full: payload.full || '',
-        }).then(() => {
+        const body = { summary: payload.summary, full: payload.full || '' };
+        if (payload.alertType) body.alertType = payload.alertType;
+        if (payload.dedupeKey) body.dedupeKey = payload.dedupeKey;
+        return backendApi('POST', '/api/system/info', body).then(() => {
           if (!this._backendHealthy) {
             this._backendHealthy = true;
             this._reconcileSuspendLogged = false;
@@ -1502,11 +1507,13 @@ export class MatrixBridge {
   }
 
   postWarning(message, { kind = 'general', scope = '' } = {}) {
-    const dedupeKey = `${kind}:${scope}:${(message.match(/^[A-Za-z ]+/) || [''])[0].trim()}`;
+    const prefix = (message.match(/^[A-Za-z ]+/) || [''])[0].trim();
+    const dedupeKey = `bridge_warning:${kind}:${scope}:${prefix}`;
     this._warningRouter.emit('warning', {
       dedupeKey,
       summary: `⚠️ Bridge warning: ${message}`,
       full: '',
+      alertType: 'bridge_warning',
     });
   }
 
@@ -1998,6 +2005,7 @@ export class MatrixBridge {
             .filter(m => !isAgentUser(m) && m !== this.botUserId)
             .map(m => humanNameFromUserId(m))
             .filter(Boolean);
+          this._bridgeCreatedGroups.add(name);
           await backendApi('POST', '/api/groups', {
             name,
             members: [...members, ...humanMembers],
@@ -2017,6 +2025,7 @@ export class MatrixBridge {
               .filter(m => !isAgentUser(m) && m !== this.botUserId)
               .map(m => humanNameFromUserId(m))
               .filter(Boolean);
+            this._bridgeCreatedGroups.add(name);
             await backendApi('POST', '/api/groups', {
               name,
               members: [...members, ...humanMembers],
@@ -2298,6 +2307,7 @@ export class MatrixBridge {
           .filter(m => !isAgentUser(m) && m !== this.botUserId)
           .map(m => humanNameFromUserId(m))
           .filter(Boolean);
+        this._bridgeCreatedGroups.add(name);
         await backendApi('POST', '/api/groups', {
           name,
           members: [...agentMembers, ...humanMembers],
@@ -2657,6 +2667,9 @@ export class MatrixBridge {
   }
 
   async onGroupCreated(group) {
+    // Skip SSE echo — bridge itself created this group
+    if (this._bridgeCreatedGroups.delete(group.name)) return;
+
     // Skip if room already exists for this group (e.g. created from Matrix)
     if (roomForGroup(group.name)) return;
 
@@ -3178,7 +3191,11 @@ export class MatrixBridge {
         }
       }
     } catch (e) {
-      console.warn(`Failed to check stale members in ${roomId}: ${e.message}`);
+      if (e.message && (e.message.includes('M_FORBIDDEN') || e.message.includes('403'))) {
+        console.debug(`[stale-member] Skipping stale member check in ${roomId} — bot not in room`);
+      } else {
+        console.warn(`Failed to check stale members in ${roomId}: ${e.message}`);
+      }
     }
   }
 

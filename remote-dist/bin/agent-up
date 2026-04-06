@@ -552,10 +552,8 @@ fi
 [ -z "$TYPE" ] && TYPE="${SAVED_TYPE:-claude}"
 [ -z "$TYPE" ] && TYPE="claude"
 [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK:-}" ] && [[ "$SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK" == "claude" || "$SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK" == "codex" ]] && TYPE="$SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK"
-[ -z "$MODEL" ] && MODEL="${AGENTCHAT_LAUNCH_MODEL:-${SAVED_RUNTIME_PROFILE_PRIMARY_MODEL:-$SAVED_MODEL}}"
-[ -z "$EXTRA_ARGS" ] && EXTRA_ARGS="${AGENTCHAT_LAUNCH_EXTRA_ARGS:-${SAVED_RUNTIME_PROFILE_PRIMARY_EXTRA_ARGS:-$SAVED_EXTRA_ARGS}}"
-# Strip context-length suffix (e.g. [1m], [200k]) — agentchat metadata, not API model name
-MODEL="${MODEL%%\[*\]}"
+[ -z "$MODEL" ] && MODEL="${SAVED_RUNTIME_PROFILE_PRIMARY_MODEL:-$SAVED_MODEL}"
+[ -z "$EXTRA_ARGS" ] && EXTRA_ARGS="${SAVED_RUNTIME_PROFILE_PRIMARY_EXTRA_ARGS:-$SAVED_EXTRA_ARGS}"
 
 # Validate
 if [ -z "$AGENT_PATH" ]; then
@@ -1614,29 +1612,6 @@ fi
 INIT_PROMPT="Your name is ${NAME}. You have an MCP tool server called '${MCP_SERVER_NAME}' for communicating with other agents and humans. Key tools: check_inbox() to read messages, send_message(to, summary, full) to DM, post(group, summary, full, mentions) for group messages, whoami() to see your identity and available agents/groups. Check your inbox now to see if there are any messages for you."
 CLAUDE_MODE_GUARD="Critical runtime rule: do not enter Plan mode or Select mode in this multi-agent tmux environment, because interactive mode switching cannot be completed. Stay in default mode and continue execution directly. Save this rule in memory and follow it for the whole session."
 
-# ── Pre-approve custom API key in Claude Code settings ───────────────
-if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY:-}" ]; then
-  _key_fingerprint="${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY: -20}"
-  python3 -c "
-import json, os
-p = os.path.expanduser('~/.claude.json')
-try:
-    d = json.load(open(p))
-except:
-    d = {}
-r = d.setdefault('customApiKeyResponses', {'approved': [], 'rejected': []})
-if not isinstance(r.get('approved'), list):
-    r['approved'] = []
-fp = '${_key_fingerprint}'
-if fp not in r['approved']:
-    r['approved'].append(fp)
-    json.dump(d, open(p, 'w'), indent=2)
-    print(f'Pre-approved API key fingerprint: ...{fp[-8:]}')
-else:
-    print(f'API key fingerprint already approved: ...{fp[-8:]}')
-" 2>/dev/null || true
-fi
-
 # ── Launch AI ─────────────────────────────────────────────────────────
 if [ "$TYPE" = "claude" ]; then
   INIT_PROMPT="$INIT_PROMPT $CLAUDE_MODE_GUARD"
@@ -1709,24 +1684,6 @@ elif [ "$TYPE" = "codex" ]; then
       done
     fi
     rm -f "$CODEX_BASELINE_FILE" >/dev/null 2>&1 || true
-  fi
-fi
-
-# Post-launch health check for custom API provider agents
-if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY:-}" ]; then
-  sleep 8
-  _pane_content=$(tmux capture-pane -t "$TMUX_PANE_TARGET" -p -S -20 2>/dev/null || true)
-  if echo "$_pane_content" | grep -q "Do you want to use this API key"; then
-    echo "WARNING: Stuck at API key prompt — sending auto-accept..."
-    tmux send-keys -t "$TMUX_PANE_TARGET" Up Enter
-    sleep 3
-    _pane_content=$(tmux capture-pane -t "$TMUX_PANE_TARGET" -p -S -10 2>/dev/null || true)
-  fi
-  if echo "$_pane_content" | grep -q "issue with the selected model"; then
-    echo "ERROR: Model validation failed — check model name and API provider compatibility"
-  fi
-  if echo "$_pane_content" | grep -qP "^❯ $"; then
-    echo "Agent started successfully (idle prompt visible)"
   fi
 fi
 

@@ -11,7 +11,8 @@ fi
 #
 # Usage:
 #   agent-ls        List running agents (active tmux sessions)
-#   agent-ls -a     List all agents including inactive (have data but not running)
+#   agent-ls -a     List all agents including down (have data but not running)
+#   agent-ls --all  Same as -a
 
 # Portable script dir resolution (works on macOS bash 3.2 + Linux)
 _resolve_script_dir() {
@@ -45,7 +46,7 @@ AGENTCHAT_HOMEDIR="${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}"
 V1_AGENTS_DIR="$AGENTCHAT_HOMEDIR/agents"
 
 SHOW_ALL=false
-[ "${1:-}" = "-a" ] && SHOW_ALL=true
+{ [ "${1:-}" = "-a" ] || [ "${1:-}" = "--all" ]; } && SHOW_ALL=true
 
 # Temp files for portable key-value lookups (no associative arrays — bash 3.2 compat)
 _TMP_FILES=""
@@ -60,6 +61,7 @@ trap 'rm -f $_TMP_FILES' EXIT
 PTS_MAP_FILE=$(_mktmp)
 MCP_SESSIONS_FILE=$(_mktmp)
 AGENTS_FILE=$(_mktmp)
+ACTIVE_MAP_FILE=$(_mktmp)
 V1_INFO_FILE=$(_mktmp)
 
 HOME_DIR="$AGENTCHAT_HOMEDIR" V1_AGENTS_DIR="$V1_AGENTS_DIR" python3 - <<'PY' > "$V1_INFO_FILE" 2>/dev/null || true
@@ -88,25 +90,36 @@ for entry in sorted(agents_dir.iterdir()):
     workdir = str(data.get("workdir") or "-").strip() or "-"
     state_dir = str(data.get("stateDir") or "-").strip() or "-"
     model_ver = str(data.get("agentModelVersion") or "-").strip() or "-"
-    print("|".join([name, a_type, workdir, state_dir, model_ver]))
+    sup_for = str(data.get("supervisorFor") or "-").strip() or "-"
+    print("|".join([name, a_type, workdir, state_dir, model_ver, sup_for]))
 PY
 
 # Get tmux sessions
 SESSIONS=$(tmux list-sessions -F "#{session_name}" 2>/dev/null || true)
 
 # Get known agents from backend
-REG_NAMES=$(curl --noproxy '*' -s "$BACKEND_URL/api/agents" 2>/dev/null \
-  | python3 -c '
+_LS_AUTH_HEADER=""
+[ -n "${API_TOKEN:-}" ] && _LS_AUTH_HEADER="Authorization: Bearer $API_TOKEN"
+REG_NAMES=$(ACTIVE_MAP_FILE="$ACTIVE_MAP_FILE" curl --noproxy '*' -s ${_LS_AUTH_HEADER:+-H "$_LS_AUTH_HEADER"} "$BACKEND_URL/api/agents" 2>/dev/null \
+  | ACTIVE_MAP_FILE="$ACTIVE_MAP_FILE" python3 -c '
 import json
 import sys
+import os
 try:
     data = json.load(sys.stdin)
 except Exception:
     data = []
+active_map = os.environ.get("ACTIVE_MAP_FILE", "")
+lines = []
 if isinstance(data, list):
     for item in data:
         if isinstance(item, dict) and item.get("name"):
             print(item["name"])
+            active = "1" if item.get("activeNow") else "0"
+            lines.append(item["name"] + "|" + active)
+if active_map and lines:
+    with open(active_map, "w") as f:
+        f.write("\n".join(lines) + "\n")
 ' 2>/dev/null || true)
 
 # Build tty → session map for MCP detection
@@ -125,8 +138,14 @@ for pid in $MCP_PIDS; do
 done
 
 # Collect all agent names: "name status" per line
+# Use activeNow from backend to distinguish active vs idle tmux sessions
 for sess in $SESSIONS; do
-  echo "$sess active" >> "$AGENTS_FILE"
+  active_now=$(awk -F'|' -v n="$sess" '$1==n {print $2; exit}' "$ACTIVE_MAP_FILE" 2>/dev/null)
+  if [ "$active_now" = "1" ]; then
+    echo "$sess active" >> "$AGENTS_FILE"
+  else
+    echo "$sess idle" >> "$AGENTS_FILE"
+  fi
 done
 
 if [ "$SHOW_ALL" = true ]; then
@@ -136,18 +155,44 @@ if [ "$SHOW_ALL" = true ]; then
       name=$(basename "$agent_dir")
       [ -f "$agent_dir/meta.json" ] || continue
       if ! grep -q "^${name} " "$AGENTS_FILE" 2>/dev/null; then
-        echo "$name inactive" >> "$AGENTS_FILE"
+        sup=$(python3 -c "import json; print(json.load(open('${agent_dir}meta.json')).get('supervisorFor','') or '')" 2>/dev/null || true)
+        if [ -n "$sup" ]; then
+          echo "$name standby" >> "$AGENTS_FILE"
+        else
+          echo "$name down" >> "$AGENTS_FILE"
+        fi
       fi
     done
   fi
   if [ -s "$V1_INFO_FILE" ]; then
-    while IFS='|' read -r v1_name _; do
+    while IFS='|' read -r v1_name _ _ _ _ v1_sup; do
       [ -n "$v1_name" ] || continue
       if ! grep -q "^${v1_name} " "$AGENTS_FILE" 2>/dev/null; then
-        echo "$v1_name inactive" >> "$AGENTS_FILE"
+        if [ -n "$v1_sup" ] && [ "$v1_sup" != "-" ]; then
+          echo "$v1_name standby" >> "$AGENTS_FILE"
+        else
+          echo "$v1_name down" >> "$AGENTS_FILE"
+        fi
       fi
     done < "$V1_INFO_FILE"
   fi
+  # Include backend-registered agents with no tmux session
+  for reg_name in $REG_NAMES; do
+    [ -n "$reg_name" ] || continue
+    if ! grep -q "^${reg_name} " "$AGENTS_FILE" 2>/dev/null; then
+      _reg_sup=""
+      if [ -f "$DATA_DIR/$reg_name/meta.json" ]; then
+        _reg_sup=$(python3 -c "import json; print(json.load(open('$DATA_DIR/$reg_name/meta.json')).get('supervisorFor','') or '')" 2>/dev/null || true)
+      elif [ -s "$V1_INFO_FILE" ]; then
+        _reg_sup=$(awk -F'|' -v n="$reg_name" '$1==n && $6!="-" {print $6; exit}' "$V1_INFO_FILE" 2>/dev/null || true)
+      fi
+      if [ -n "$_reg_sup" ]; then
+        echo "$reg_name standby" >> "$AGENTS_FILE"
+      else
+        echo "$reg_name down" >> "$AGENTS_FILE"
+      fi
+    fi
+  done
 fi
 
 if [ ! -s "$AGENTS_FILE" ]; then
@@ -168,8 +213,8 @@ sort "$AGENTS_FILE" | while IFS=' ' read -r name status; do
   v1_state="-"
   v1_ver="-"
   if [ -s "$V1_INFO_FILE" ]; then
-    IFS='|' read -r v1_type v1_workdir v1_state v1_ver <<EOFV1
-$(awk -F'|' -v n="$name" '$1==n {print $2 "|" $3 "|" $4 "|" $5; exit}' "$V1_INFO_FILE" 2>/dev/null || true)
+    IFS='|' read -r v1_type v1_workdir v1_state v1_ver v1_sup <<EOFV1
+$(awk -F'|' -v n="$name" '$1==n {print $2 "|" $3 "|" $4 "|" $5 "|" $6; exit}' "$V1_INFO_FILE" 2>/dev/null || true)
 EOFV1
     [ -n "$v1_type" ] || v1_type="-"
     [ -n "$v1_workdir" ] || v1_workdir="-"
@@ -201,9 +246,9 @@ EOFV1
   reg="no"
   echo "$REG_NAMES" | grep -qx "$name" && reg="yes"
 
-  # MCP? (only for active)
+  # MCP? (for active and idle — both have tmux sessions)
   mcp="-"
-  [ "$status" = "active" ] && mcp="no"
+  [ "$status" != "down" ] && [ "$status" != "standby" ] && mcp="no"
   grep -qx "$name" "$MCP_SESSIONS_FILE" 2>/dev/null && mcp="yes"
 
   # Resume ID
@@ -222,9 +267,13 @@ EOFV1
     path_val="$v1_workdir"
   fi
 
-  # Color: active=default, inactive=dimmed
-  if [ "$status" = "inactive" ]; then
+  # Color: active=default, idle=yellow, standby=cyan, down=dimmed
+  if [ "$status" = "down" ]; then
     printf "\033[2m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
+  elif [ "$status" = "standby" ]; then
+    printf "\033[36m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
+  elif [ "$status" = "idle" ]; then
+    printf "\033[33m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   else
     printf "%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   fi

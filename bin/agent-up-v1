@@ -226,7 +226,7 @@ if meta_file.exists():
 meta["name"] = os.environ["NAME"]
 meta["type"] = os.environ["AGENT_TYPE"]
 meta["path"] = os.environ["V1_WORKDIR"]
-meta["agentModelVersion"] = "1.0"
+meta["agentModelVersion"] = "1.1"
 meta["layoutVersion"] = 1
 meta["agentId"] = os.environ["V1_AGENT_ID"]
 meta["homeDir"] = os.environ["V1_HOME_DIR"]
@@ -244,6 +244,63 @@ meta["lastUp"] = os.environ["NOW"]
 
 meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 PY
+
+# Fetch runtimeProfile from backend (localhost-only, authenticated) and merge into meta.json
+BACKEND_PORT_V1="${AGENT_CHAT_BACKEND_PORT:-8090}"
+LAUNCH_ENV_URL="http://127.0.0.1:${BACKEND_PORT_V1}/api/agents/$(python3 -c "import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=''))" "$NAME")/launch-env"
+_launch_env_auth_args=()
+if [ -n "${API_TOKEN:-}" ]; then
+  _launch_env_auth_args=(-H "Authorization: Bearer $API_TOKEN")
+fi
+LAUNCH_ENV_JSON="$(curl --noproxy '*' -sf "${_launch_env_auth_args[@]}" "$LAUNCH_ENV_URL" 2>/dev/null || true)"
+if [ -z "$LAUNCH_ENV_JSON" ] && [ -n "${AGENTCHAT_LAUNCH_MODEL:-}" ]; then
+  echo "FATAL: Failed to fetch launch-env from backend. Cannot launch custom provider agent without runtimeProfile." >&2
+  exit 1
+fi
+if [ -n "$LAUNCH_ENV_JSON" ]; then
+  META_FILE="$META_FILE" LAUNCH_ENV_JSON="$LAUNCH_ENV_JSON" AGENTCHAT_LAUNCH_MODEL="${AGENTCHAT_LAUNCH_MODEL:-}" python3 - <<'PY'
+import json, os, sys
+from pathlib import Path
+meta_file = Path(os.environ["META_FILE"])
+try:
+    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+except Exception:
+    meta = {}
+try:
+    env_data = json.loads(os.environ["LAUNCH_ENV_JSON"])
+    rp = env_data.get("runtimeProfile")
+    if rp and isinstance(rp, dict):
+        meta["runtimeProfile"] = rp
+        meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        print("  runtime profile merged from backend")
+    else:
+        print("WARNING: launch-env response has no runtimeProfile", file=sys.stderr)
+        if os.environ.get("AGENTCHAT_LAUNCH_MODEL"):
+            print("FATAL: Custom provider requires runtime profile. Aborting.", file=sys.stderr)
+            sys.exit(1)
+except Exception as e:
+    print(f"WARNING: Failed to merge runtime profile: {e}", file=sys.stderr)
+    if os.environ.get("AGENTCHAT_LAUNCH_MODEL"):
+        print("FATAL: Custom provider requires runtime profile. Aborting.", file=sys.stderr)
+        sys.exit(1)
+PY
+fi
+
+# Verify: if meta.json has custom provider config, launch-env must have succeeded
+_has_custom_provider=$(python3 -c "
+import json
+try:
+    d = json.load(open('$META_FILE'))
+    rp = (d.get('runtimeProfile') or {}).get('primary') or {}
+    if rp.get('apiBaseUrl') or rp.get('apiKey'):
+        print('yes')
+except:
+    pass
+" 2>/dev/null)
+if [ "$_has_custom_provider" = "yes" ] && [ -z "$LAUNCH_ENV_JSON" ]; then
+  echo "FATAL: Agent has custom provider config but launch-env fetch failed. Cannot launch without runtimeProfile." >&2
+  exit 1
+fi
 
 if [ -f "$COMPAT_DIR/resume-id" ] && [ ! -L "$COMPAT_DIR/resume-id" ] && [ ! -f "$V1_STATE_DIR/resume-id" ]; then
   cp "$COMPAT_DIR/resume-id" "$V1_STATE_DIR/resume-id"
