@@ -6220,7 +6220,7 @@ app.post('/api/supervisor/control', requireBearer, (req, res) => {
 
   supervisorSnapshotStore.setEnabled(body.enabled);
   if (body.enabled) {
-    supervisorLifecycleManager.sweepAll().catch(() => {});
+    try { supervisorLifecycleManager.sweepAll(); } catch (_) { /* best-effort */ }
   }
   const control = supervisorSnapshotStore.getControl(agents);
   const status = supervisorSnapshotStore.getStatus(agents);
@@ -6705,7 +6705,7 @@ app.post('/api/agents/:name/supervisor', requireBearer, (req, res) => {
   const record = buildSupervisorAgentRecord(supervisorName, agentName);
   agents[supervisorName] = record;
   saveAgents();
-  supervisorLifecycleManager.sweepAll().catch(() => {});
+  try { supervisorLifecycleManager.sweepAll(); } catch (_) { /* best-effort */ }
   auditLog(req, { agent: agentName, summary: { action: 'provision-supervisor', supervisor: supervisorName } });
   console.log(`[supervisor-provision] provisioned ${supervisorName} for ${agentName}`);
   res.json({ ok: true, supervisor: supervisorName });
