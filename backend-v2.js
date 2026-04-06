@@ -6698,7 +6698,7 @@ app.post('/api/agents/:name/supervisor', requireBearer, (req, res) => {
     return res.json({ ok: true, alreadyExists: true, supervisor: supervisorName });
   }
   try {
-    provisionSupervisorAgent(agentName, { runtimeDir: RUNTIME_DIR, agentchatHomeDir: defaultAgentchatHomeDir() });
+    provisionSupervisorAgent(agentName);
   } catch (e) {
     console.error(`[supervisor-provision] failed for ${agentName}:`, e.message);
     return res.status(500).json({ error: 'provisioning failed', detail: e.message });
