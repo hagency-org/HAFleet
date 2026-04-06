@@ -163,7 +163,7 @@ function requireBridgeSecret(req, res, next) {
 }
 // ── Per-agent token authentication (5.8.6) ───────────────────────────
 const AGENT_TOKEN_MODE = (() => {
-  const m = (process.env.AGENTCHAT_AGENT_TOKEN_MODE || 'hard').trim().toLowerCase();
+  const m = (process.env.AGENTCHAT_AGENT_TOKEN_MODE || 'audit').trim().toLowerCase();
   return m === 'hard' ? 'hard' : m === 'soft' ? 'soft' : 'audit';
 })();
 const agentTokens = new Map(); // agentName → token string

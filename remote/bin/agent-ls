@@ -98,7 +98,9 @@ PY
 SESSIONS=$(tmux list-sessions -F "#{session_name}" 2>/dev/null || true)
 
 # Get known agents from backend
-REG_NAMES=$(ACTIVE_MAP_FILE="$ACTIVE_MAP_FILE" curl --noproxy '*' -s "$BACKEND_URL/api/agents" 2>/dev/null \
+_LS_AUTH_HEADER=""
+[ -n "${API_TOKEN:-}" ] && _LS_AUTH_HEADER="Authorization: Bearer $API_TOKEN"
+REG_NAMES=$(ACTIVE_MAP_FILE="$ACTIVE_MAP_FILE" curl --noproxy '*' -s ${_LS_AUTH_HEADER:+-H "$_LS_AUTH_HEADER"} "$BACKEND_URL/api/agents" 2>/dev/null \
   | ACTIVE_MAP_FILE="$ACTIVE_MAP_FILE" python3 -c '
 import json
 import sys
