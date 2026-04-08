@@ -557,6 +557,30 @@ fi
 # Strip context-length suffix (e.g. [1m], [200k]) — agentchat metadata, not API model name
 MODEL="${MODEL%%\[*\]}"
 
+# ── Auto-resolve path when meta is missing ──────────────────────────
+# Try additional sources: v1 agent home manifest, then backend API.
+if [ -z "$AGENT_PATH" ]; then
+  _v1_home="${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}/agents/agent_${NAME}"
+  if [ -f "$_v1_home/agent.json" ]; then
+    AGENT_PATH=$(_V1_MANIFEST="$_v1_home/agent.json" python3 -c "
+import json, os
+d = json.load(open(os.environ['_V1_MANIFEST']))
+print(d.get('workdir') or '')
+" 2>/dev/null || true)
+  fi
+fi
+if [ -z "$AGENT_PATH" ]; then
+  _enc_name=$(url_encode "$NAME")
+  _api_detail=$(api_curl "$BACKEND_URL/api/agents/$_enc_name" 2>/dev/null || true)
+  if [ -n "$_api_detail" ]; then
+    AGENT_PATH=$(printf '%s' "$_api_detail" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('workdir') or d.get('homeDir') or d.get('path') or '')
+" 2>/dev/null || true)
+  fi
+fi
+
 # Validate
 if [ -z "$AGENT_PATH" ]; then
   echo "Error: no path specified and no saved meta for '$NAME'" >&2
