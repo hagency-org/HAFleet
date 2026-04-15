@@ -637,12 +637,21 @@ find_workspace_conflicts() {
 
 enforce_workspace_uniqueness() {
   local expected="$1"
+  local strict="${2:-true}"
   local conflicts
   conflicts="$(find_workspace_conflicts "$expected")"
   [ -n "$conflicts" ] || return 0
   if [ "$ALLOW_SHARED_WORKSPACE" = true ]; then
     echo "Warning: shared workspace allowed for '$NAME' at '$expected'." >&2
     echo "  Existing sessions:" >&2
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      echo "    - $line" >&2
+    done <<< "$conflicts"
+    return 0
+  fi
+  if [ "$strict" != true ]; then
+    echo "Warning: workspace path '$expected' is already used by other tmux agent session(s) (resume; continuing)." >&2
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       echo "    - $line" >&2
@@ -1334,7 +1343,7 @@ if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
   fi
 fi
 
-enforce_workspace_uniqueness "$AGENT_PATH"
+enforce_workspace_uniqueness "$AGENT_PATH" "$FRESH"
 ensure_claude_project_trust
 ensure_codex_project_trust
 
