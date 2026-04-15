@@ -637,12 +637,21 @@ find_workspace_conflicts() {
 
 enforce_workspace_uniqueness() {
   local expected="$1"
+  local strict="${2:-true}"
   local conflicts
   conflicts="$(find_workspace_conflicts "$expected")"
   [ -n "$conflicts" ] || return 0
   if [ "$ALLOW_SHARED_WORKSPACE" = true ]; then
     echo "Warning: shared workspace allowed for '$NAME' at '$expected'." >&2
     echo "  Existing sessions:" >&2
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      echo "    - $line" >&2
+    done <<< "$conflicts"
+    return 0
+  fi
+  if [ "$strict" != true ]; then
+    echo "Warning: workspace path '$expected' is already used by other tmux agent session(s) (resume; continuing)." >&2
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       echo "    - $line" >&2
@@ -1334,7 +1343,7 @@ if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
   fi
 fi
 
-enforce_workspace_uniqueness "$AGENT_PATH"
+enforce_workspace_uniqueness "$AGENT_PATH" "$FRESH"
 ensure_claude_project_trust
 ensure_codex_project_trust
 
@@ -1665,8 +1674,16 @@ fi
 if [ "$TYPE" = "claude" ]; then
   INIT_PROMPT="$INIT_PROMPT $CLAUDE_MODE_GUARD"
   CLAUDE_FLAGS="--dangerously-skip-permissions"
-  # Attach the per-agent MCP config so Claude discovers the agentchat MCP server
-  CLAUDE_FLAGS="$CLAUDE_FLAGS --mcp-config $(shell_quote "$AGENT_PATH/.mcp.json")"
+  # Attach the per-agent MCP config so Claude discovers the agentchat MCP server.
+  # Skip when an enterprise managed MCP config is present — recent Claude CLI
+  # refuses dynamic --mcp-config in that case. The managed config provides the
+  # agent-chat MCP server globally, and AGENT_NAME / runtime env vars set via
+  # LAUNCH_ENV_PREFIX are inherited by the MCP subprocess.
+  # Use --mcp-config=<path> (equals form) so commander's variadic parser does
+  # NOT absorb the trailing positional prompt as an additional config path.
+  if [ ! -f /etc/claude-code/managed-mcp.json ]; then
+    CLAUDE_FLAGS="$CLAUDE_FLAGS --mcp-config=$(shell_quote "$AGENT_PATH/.mcp.json")"
+  fi
   [ -n "$MODEL" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS --model $(shell_quote "$MODEL")"
   [ -n "$EXTRA_ARGS" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
   if [ "$FRESH" = false ] && RID=$(cat "$RESUME_FILE"); then
