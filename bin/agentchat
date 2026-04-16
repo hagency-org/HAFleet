@@ -25,6 +25,7 @@ Core:
   graph          Manage orchestration task graphs
   down           Stop an agent
   ls             List agents
+  resume-id      View/set/clear an agent's resume-id
   send           Send message to target pane
   update         Update/install agent-chat runtime
   service        Control local/remote services
@@ -69,6 +70,7 @@ case "$cmd" in
   graph) dispatch "agent-graph" "$@" ;;
   down) dispatch "agent-down" "$@" ;;
   ls|list) dispatch "agent-ls" "$@" ;;
+  resume-id) dispatch "agent-resume-id" "$@" ;;
   send) dispatch "agent-send" "$@" ;;
   update) dispatch "agent-update" "$@" ;;
   service) dispatch "agent-service" "$@" ;;
