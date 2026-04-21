@@ -1496,21 +1496,17 @@ shell_quote() {
   printf "%q" "$1"
 }
 
-append_launch_env_var() {
-  local var_name="$1"
-  local var_value="${!var_name-}"
-  if [ -n "${var_value:-}" ]; then
-    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX ${var_name}=$(shell_quote "$var_value")"
-  fi
+# ── Launch env file helpers ──────────────────────────────────────────
+# Write launch env vars to a sourced file instead of an inline command
+# prefix.  Keeps the tmux launch command short and debuggable.
+write_launch_env() {
+  printf 'export %s=%q\n' "$1" "$2" >> "$LAUNCH_ENV_FILE"
 }
 
-append_launch_env_prefix() {
-  local prefix="$1"
-  local var_name
-  while IFS= read -r var_name; do
-    [ -n "$var_name" ] || continue
-    append_launch_env_var "$var_name"
-  done < <(env | cut -d= -f1 | LC_ALL=C sort | awk -v pfx="$prefix" 'index($0, pfx) == 1')
+write_launch_env_from_env() {
+  local var_name="$1"
+  local var_value="${!var_name-}"
+  [ -n "${var_value:-}" ] && write_launch_env "$var_name" "$var_value"
 }
 
 IS_V1_AGENT=0
@@ -1594,52 +1590,51 @@ PY
 
 configure_v1_subconscious
 
-LAUNCH_ENV_PREFIX="AGENT_NAME=$(shell_quote "$NAME")"
-append_launch_env_prefix "AGENT_CHAT_"
-append_launch_env_var "API_TOKEN"
-append_launch_env_var "AGENTCHAT_HOMEDIR"
-if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_JSON:-}" ]; then
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_RUNTIME_PROFILE_PRIMARY_JSON=$(shell_quote "$SAVED_RUNTIME_PROFILE_PRIMARY_JSON")"
-fi
-if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL:-}" ]; then
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX ANTHROPIC_BASE_URL=$(shell_quote "$SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL")"
-fi
-if [ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY:-}" ]; then
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX ANTHROPIC_API_KEY=$(shell_quote "$SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY")"
-fi
-if [ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_JSON:-}" ]; then
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_RUNTIME_PROFILE_SUPERVISOR_JSON=$(shell_quote "$SAVED_RUNTIME_PROFILE_SUPERVISOR_JSON")"
-fi
-if [ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_PROVIDER:-}" ]; then
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX SUPERVISOR_LLM_PROVIDER=$(shell_quote "$SAVED_RUNTIME_PROFILE_SUPERVISOR_PROVIDER")"
-fi
-if [ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_MODEL:-}" ]; then
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX SUPERVISOR_LLM_MODEL=$(shell_quote "$SAVED_RUNTIME_PROFILE_SUPERVISOR_MODEL")"
-fi
-if [ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_REASONING:-}" ]; then
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUPERVISOR_REASONING_PROFILE=$(shell_quote "$SAVED_RUNTIME_PROFILE_SUPERVISOR_REASONING")"
-fi
-if [ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_FRAMEWORK:-}" ]; then
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUPERVISOR_FRAMEWORK=$(shell_quote "$SAVED_RUNTIME_PROFILE_SUPERVISOR_FRAMEWORK")"
-fi
-if [ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_EXTRA_ARGS:-}" ]; then
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUPERVISOR_EXTRA_ARGS=$(shell_quote "$SAVED_RUNTIME_PROFILE_SUPERVISOR_EXTRA_ARGS")"
-fi
+LAUNCH_ENV_FILE="$AGENT_DATA/launch-env.sh"
+: > "$LAUNCH_ENV_FILE"
+chmod 600 "$LAUNCH_ENV_FILE"
+
+write_launch_env "AGENT_NAME" "$NAME"
+# Bulk-export all AGENT_CHAT_* vars from current environment
+while IFS= read -r _var_name; do
+  [ -n "$_var_name" ] || continue
+  write_launch_env_from_env "$_var_name"
+done < <(env | cut -d= -f1 | LC_ALL=C sort | awk 'index($0, "AGENT_CHAT_") == 1')
+write_launch_env_from_env "API_TOKEN"
+write_launch_env_from_env "AGENTCHAT_HOMEDIR"
+[ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_JSON:-}" ] && \
+  write_launch_env "AGENTCHAT_RUNTIME_PROFILE_PRIMARY_JSON" "$SAVED_RUNTIME_PROFILE_PRIMARY_JSON"
+[ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL:-}" ] && \
+  write_launch_env "ANTHROPIC_BASE_URL" "$SAVED_RUNTIME_PROFILE_PRIMARY_API_BASE_URL"
+[ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY:-}" ] && \
+  write_launch_env "ANTHROPIC_API_KEY" "$SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY"
+[ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_JSON:-}" ] && \
+  write_launch_env "AGENTCHAT_RUNTIME_PROFILE_SUPERVISOR_JSON" "$SAVED_RUNTIME_PROFILE_SUPERVISOR_JSON"
+[ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_PROVIDER:-}" ] && \
+  write_launch_env "SUPERVISOR_LLM_PROVIDER" "$SAVED_RUNTIME_PROFILE_SUPERVISOR_PROVIDER"
+[ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_MODEL:-}" ] && \
+  write_launch_env "SUPERVISOR_LLM_MODEL" "$SAVED_RUNTIME_PROFILE_SUPERVISOR_MODEL"
+[ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_REASONING:-}" ] && \
+  write_launch_env "AGENTCHAT_SUPERVISOR_REASONING_PROFILE" "$SAVED_RUNTIME_PROFILE_SUPERVISOR_REASONING"
+[ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_FRAMEWORK:-}" ] && \
+  write_launch_env "AGENTCHAT_SUPERVISOR_FRAMEWORK" "$SAVED_RUNTIME_PROFILE_SUPERVISOR_FRAMEWORK"
+[ -n "${SAVED_RUNTIME_PROFILE_SUPERVISOR_EXTRA_ARGS:-}" ] && \
+  write_launch_env "AGENTCHAT_SUPERVISOR_EXTRA_ARGS" "$SAVED_RUNTIME_PROFILE_SUPERVISOR_EXTRA_ARGS"
 if [ "$IS_V1_AGENT" = "1" ]; then
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_AGENT_MODEL_VERSION=$(shell_quote "${SAVED_AGENT_MODEL_VERSION:-1.0}")"
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_AGENT_ID=$(shell_quote "${SAVED_AGENT_ID:-}")"
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_AGENT_HOME=$(shell_quote "$SAVED_HOME_DIR")"
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_AGENT_WORKDIR=$(shell_quote "$SAVED_WORKDIR")"
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_AGENT_STATE_DIR=$(shell_quote "$SAVED_STATE_DIR")"
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_LETTA_STATE_FILE=$(shell_quote "$V1_SUBCONSCIOUS_LETTA_PATH")"
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUBCONSCIOUS_EVENT_URL=$(shell_quote "$V1_SUBCONSCIOUS_EVENT_URL")"
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUBCONSCIOUS_INVOKE_URL=$(shell_quote "$V1_SUBCONSCIOUS_INVOKE_URL")"
+  write_launch_env "AGENTCHAT_AGENT_MODEL_VERSION" "${SAVED_AGENT_MODEL_VERSION:-1.0}"
+  write_launch_env "AGENTCHAT_AGENT_ID" "${SAVED_AGENT_ID:-}"
+  write_launch_env "AGENTCHAT_AGENT_HOME" "$SAVED_HOME_DIR"
+  write_launch_env "AGENTCHAT_AGENT_WORKDIR" "$SAVED_WORKDIR"
+  write_launch_env "AGENTCHAT_AGENT_STATE_DIR" "$SAVED_STATE_DIR"
+  write_launch_env "AGENTCHAT_LETTA_STATE_FILE" "$V1_SUBCONSCIOUS_LETTA_PATH"
+  write_launch_env "AGENTCHAT_SUBCONSCIOUS_EVENT_URL" "$V1_SUBCONSCIOUS_EVENT_URL"
+  write_launch_env "AGENTCHAT_SUBCONSCIOUS_INVOKE_URL" "$V1_SUBCONSCIOUS_INVOKE_URL"
   if [ "$V1_SUBCONSCIOUS_ENABLED" = "1" ]; then
-    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUBCONSCIOUS_ENABLED=1"
-    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUBCONSCIOUS_PLUGIN_ROOT=$(shell_quote "$V1_SUBCONSCIOUS_PLUGIN_ROOT")"
-    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX LETTA_AGENT_ID=$(shell_quote "$V1_SUBCONSCIOUS_LETTA_AGENT_ID")"
+    write_launch_env "AGENTCHAT_SUBCONSCIOUS_ENABLED" "1"
+    write_launch_env "AGENTCHAT_SUBCONSCIOUS_PLUGIN_ROOT" "$V1_SUBCONSCIOUS_PLUGIN_ROOT"
+    write_launch_env "LETTA_AGENT_ID" "$V1_SUBCONSCIOUS_LETTA_AGENT_ID"
   else
-    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX AGENTCHAT_SUBCONSCIOUS_ENABLED=0"
+    write_launch_env "AGENTCHAT_SUBCONSCIOUS_ENABLED" "0"
   fi
 fi
 
@@ -1674,19 +1669,22 @@ fi
 if [ "$TYPE" = "claude" ]; then
   INIT_PROMPT="$INIT_PROMPT $CLAUDE_MODE_GUARD"
   CLAUDE_FLAGS="--dangerously-skip-permissions"
-  # Attach the per-agent MCP config so Claude discovers the agentchat MCP server
-  CLAUDE_FLAGS="$CLAUDE_FLAGS --mcp-config $(shell_quote "$AGENT_PATH/.mcp.json")"
+  # Attach the per-agent MCP config so Claude discovers the agentchat MCP server.
+  # Use --mcp-config=<path> (equals form) so commander's variadic parser does
+  # NOT absorb the trailing positional prompt as an additional config path.
+  CLAUDE_FLAGS="$CLAUDE_FLAGS --mcp-config=$(shell_quote "$AGENT_PATH/.mcp.json")"
   [ -n "$MODEL" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS --model $(shell_quote "$MODEL")"
   [ -n "$EXTRA_ARGS" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
   if [ "$FRESH" = false ] && RID=$(cat "$RESUME_FILE"); then
     echo "Resuming claude session: $RID"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "$LAUNCH_ENV_PREFIX claude --resume $RID $CLAUDE_FLAGS" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "source \"$LAUNCH_ENV_FILE\" && claude --resume $RID $CLAUDE_FLAGS" Enter
   else
     echo "Starting new claude session..."
-    # Write init prompt to temp file to avoid shell escaping issues
+    # Write init prompt to temp file to avoid shell escaping issues.
+    # Pass prompt after '--' so variadic flags (--mcp-config) don't absorb it.
     INIT_FILE=$(mktemp "$TMP_RUNTIME_DIR/init.XXXXXX")
     echo "$INIT_PROMPT" > "$INIT_FILE"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "$LAUNCH_ENV_PREFIX claude --session-id $SESSION_ID $CLAUDE_FLAGS \"\$(cat \"$INIT_FILE\")\" && rm -f \"$INIT_FILE\"" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "source \"$LAUNCH_ENV_FILE\" && claude --session-id $SESSION_ID $CLAUDE_FLAGS -- \"\$(cat \"$INIT_FILE\")\" && rm -f \"$INIT_FILE\"" Enter
     ( sleep 300; rm -f "$INIT_FILE" >/dev/null 2>&1 || true ) &
     capture_resume_id_background "claude"
   fi
@@ -1721,12 +1719,12 @@ elif [ "$TYPE" = "codex" ]; then
   if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ]; then
     RID=$(cat "$RESUME_FILE")
     echo "Resuming codex session: $RID"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "$LAUNCH_ENV_PREFIX codex resume $RID $CODEX_FLAGS" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "source \"$LAUNCH_ENV_FILE\" && codex resume $RID $CODEX_FLAGS" Enter
   else
     CODEX_BASELINE_FILE=$(mktemp "$TMP_RUNTIME_DIR/codex-baseline.XXXXXX")
     snapshot_codex_session_ids "$CODEX_BASELINE_FILE"
     echo "Starting new codex session..."
-    tmux send-keys -t "$TMUX_PANE_TARGET" "$LAUNCH_ENV_PREFIX codex $CODEX_FLAGS -C $AGENT_PATH" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "source \"$LAUNCH_ENV_FILE\" && codex $CODEX_FLAGS -C $AGENT_PATH" Enter
     # Send init prompt after codex starts to create a session deterministically.
     sleep 5
     tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"
