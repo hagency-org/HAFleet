@@ -568,7 +568,7 @@ The agent manifest at `<agent_home>/agent.json` is the single source of truth fo
   "managedProjects": [
     {
       "name": "agentchat",
-      "source": "/home/shisui/laplace/agent-chat",
+      "source": "/path/to/agent-chat",
       "mode": "symlink"
     }
   ],

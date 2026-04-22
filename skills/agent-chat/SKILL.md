@@ -51,7 +51,7 @@ Use `attachments` in `send_message` or `post`:
 Example:
 ```python
 send_message(
-  to="kamico",
+  to="operator",
   summary="design files",
   full="please review",
   attachments=[
@@ -133,7 +133,7 @@ self-time-reminder <delay_seconds> "<message>"
 
 ### Stable auto deploy watcher (local live deploy folder)
 ```bash
-sudo cp /home/shisui/laplace/agent-chat-live/agent-chat-stable-autodeploy.service /etc/systemd/system/agent-chat-stable-autodeploy.service
+sudo cp /path/to/agent-chat/agent-chat-stable-autodeploy.service /etc/systemd/system/agent-chat-stable-autodeploy.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now agent-chat-stable-autodeploy
 systemctl status agent-chat-stable-autodeploy --no-pager

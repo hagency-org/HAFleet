@@ -43,7 +43,7 @@ Examples:
 ## Quick Start
 
 1. Copy `.env.example` to `.env` and fill values:
-   - `AGENT_CHAT_API=https://agentchat.ananthe.party`
+   - `AGENT_CHAT_API=https://agentchat.example.com`
    - `API_TOKEN=<backend token>`
    - `AGENT_CHAT_SERVER=<this server id>`
 2. Run install:

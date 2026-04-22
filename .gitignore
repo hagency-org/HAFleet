@@ -1,5 +1,10 @@
 node_modules/
 logs/
 data/
+data.stale*/
+data.stale-backup*/
 .env
+.mcp.json
 remote/package-lock.json
+docs/agentchat-worker/
+docs/agentchat-develop/

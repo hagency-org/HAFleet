@@ -31,7 +31,7 @@ agentchat update --service-status
 ## 1.1) Stable Branch Auto Deploy (Live)
 
 This watcher runs on the local host and polls `origin/stable` every 30s from:
-- `/home/shisui/laplace/agent-chat-live`
+- `/path/to/agent-chat`
 
 When a new commit appears, it will:
 1. `git pull --ff-only origin stable`
@@ -40,7 +40,7 @@ When a new commit appears, it will:
 
 Install/update the service:
 ```bash
-sudo cp /home/shisui/laplace/agent-chat-live/agent-chat-stable-autodeploy.service /etc/systemd/system/agent-chat-stable-autodeploy.service
+sudo cp /path/to/agent-chat/agent-chat-stable-autodeploy.service /etc/systemd/system/agent-chat-stable-autodeploy.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now agent-chat-stable-autodeploy
 ```
@@ -48,7 +48,7 @@ sudo systemctl enable --now agent-chat-stable-autodeploy
 Check status/logs:
 ```bash
 systemctl status agent-chat-stable-autodeploy --no-pager
-tail -f /home/shisui/laplace/agent-chat-live/logs/stable-autodeploy.out.log
+tail -f /path/to/agent-chat/logs/stable-autodeploy.out.log
 ```
 
 ## 2) Verify Backend State

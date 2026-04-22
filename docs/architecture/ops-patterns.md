@@ -107,7 +107,7 @@ wait_for_backend():
 
 **Systemd unit**: `agent-chat-stable-autodeploy.service`
 - Runs as root
-- Logs to `/home/shisui/laplace/agent-chat-live/logs/`
+- Logs to `/path/to/agent-chat-live/logs/`
 
 ### Remote Autodeploy
 

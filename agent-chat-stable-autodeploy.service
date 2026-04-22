@@ -7,16 +7,16 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
-Environment=AGENTCHAT_LIVE_DIR=/home/shisui/laplace/agent-chat-live
-Environment=AGENTCHAT_DEPLOY_USER=shisui
+Environment=AGENTCHAT_LIVE_DIR=__INSTALL_DIR__
+Environment=AGENTCHAT_DEPLOY_USER=__USER__
 Environment=AGENTCHAT_DEPLOY_BRANCH=stable
 Environment=AGENTCHAT_POLL_SEC=30
 Environment="AGENTCHAT_DEPLOY_SERVICES=agent-chat agent-chat-v2 bridge-matrix"
-ExecStart=/usr/bin/env bash /home/shisui/laplace/agent-chat-live/scripts/agentchat-stable-autodeploy.sh
+ExecStart=/usr/bin/env bash __INSTALL_DIR__/scripts/agentchat-stable-autodeploy.sh
 Restart=always
 RestartSec=5
-StandardOutput=append:/home/shisui/laplace/agent-chat-live/logs/stable-autodeploy.out.log
-StandardError=append:/home/shisui/laplace/agent-chat-live/logs/stable-autodeploy.err.log
+StandardOutput=append:__INSTALL_DIR__/logs/stable-autodeploy.out.log
+StandardError=append:__INSTALL_DIR__/logs/stable-autodeploy.err.log
 
 [Install]
 WantedBy=multi-user.target

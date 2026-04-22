@@ -319,7 +319,7 @@ agentchat:
   api_url: http://127.0.0.1:8090
   api_token_env: API_TOKEN
 
-docs_root: /Users/kamico/work/laplace/docs  # 读 plan.md 和 agents.md 的根路径
+docs_root: /path/to/workspace/docs  # 读 plan.md 和 agents.md 的根路径
 
 log_file: logs/supervisor.jsonl
 ```
