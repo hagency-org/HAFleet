@@ -24,7 +24,7 @@ const RUNTIME_ROOT = (() => {
 })();
 assertRuntimeDir(RUNTIME_ROOT);
 // ── Configuration ─────────────────────────────────────────────────────
-const HOMESERVER = process.env.MATRIX_HOMESERVER || 'https://matrix.ananthe.party';
+const HOMESERVER = process.env.MATRIX_HOMESERVER || 'https://matrix.example.com';
 const REGISTRATION_TOKEN = (process.env.MATRIX_REG_TOKEN || '').trim();
 const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
 const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
@@ -39,7 +39,7 @@ const BACKEND_FETCH_RETRY_DELAY_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_
 const BACKEND_FETCH_RETRY_DELAY_MS = Number.isFinite(BACKEND_FETCH_RETRY_DELAY_MS_RAW) && BACKEND_FETCH_RETRY_DELAY_MS_RAW > 0
   ? BACKEND_FETCH_RETRY_DELAY_MS_RAW
   : 2500;
-const MSG_BASE_URL = process.env.MSG_BASE_URL || 'https://agent.ananthe.party/msg';
+const MSG_BASE_URL = process.env.MSG_BASE_URL || 'https://agent.example.com/msg';
 const BOT_USERNAME = (process.env.MATRIX_BOT_USERNAME || 'agent-bridge').trim();
 const BOT_PASSWORD = (process.env.MATRIX_BOT_PASSWORD || '').trim();
 const AGENT_PREFIX = (process.env.MATRIX_AGENT_PREFIX || 'ac_').trim(); // Matrix usernames: ac_agentname

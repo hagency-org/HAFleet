@@ -26,7 +26,7 @@ echo "[3/5] Installing agent-send to ~/.local/bin..."
 mkdir -p "$HOME_DIR/.local/bin"
 
 # Make agent-send portable: replace hardcoded paths
-sed "s|/home/shisui/laplace/agent-chat|$INSTALL_DIR|g" \
+sed "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
     "$INSTALL_DIR/bin/agent-send" > "$HOME_DIR/.local/bin/agent-send"
 chmod +x "$HOME_DIR/.local/bin/agent-send"
 

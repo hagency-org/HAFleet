@@ -525,7 +525,7 @@ Deployment model:
 Install watcher service:
 
 ```bash
-sudo cp /home/shisui/laplace/agent-chat-live/agent-chat-stable-autodeploy.service /etc/systemd/system/agent-chat-stable-autodeploy.service
+sudo cp /path/to/agent-chat/agent-chat-stable-autodeploy.service /etc/systemd/system/agent-chat-stable-autodeploy.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now agent-chat-stable-autodeploy
 ```
@@ -545,7 +545,7 @@ AGENT_CHAT_API=http://127.0.0.1:8090
 AGENT_CHAT_WEB_URL=http://127.0.0.1:8084
 AGENT_CHAT_QUEUE_URL=http://127.0.0.1:8084/api/queue
 AGENT_CHAT_MCP_SERVER_NAME=agent-chat
-AGENT_CHAT_RUNTIME_DIR=/home/shisui/laplace/agent-chat-dev-runtime
+AGENT_CHAT_RUNTIME_DIR=/path/to/agent-chat-dev-runtime
 AGENTCHAT_SUBCONSCIOUS_EVENT_URL=http://127.0.0.1:8090/api/subconscious/events
 AGENT_AUDIT_BACKEND_URL=http://127.0.0.1:8090
 
@@ -594,7 +594,7 @@ SUPERVISOR_LLM_KEY=<deepseek api key>
 SUPERVISOR_WARN_AFTER=2                # consecutive negatives before nudge
 SUPERVISOR_ESCALATE_AFTER=3            # consecutive negatives before escalation
 SUPERVISOR_WARN_COOLDOWN_MS=300000     # 5 min cooldown between actions
-# optional: SUPERVISOR_LLM_ENDPOINT, SUPERVISOR_MATRIX_MENTIONS=kamico
+# optional: SUPERVISOR_LLM_ENDPOINT, SUPERVISOR_MATRIX_MENTIONS=operator
 # optional startup allowlist: only audit these agents (comma-separated)
 SUPERVISOR_AGENT_ALLOWLIST=
 
@@ -613,8 +613,8 @@ Use split roots:
 
 ```bash
 # in ~/laplace/agent-chat
-mkdir -p /home/shisui/laplace/agent-chat-dev-runtime/{data,logs}
-export AGENT_CHAT_RUNTIME_DIR=/home/shisui/laplace/agent-chat-dev-runtime
+mkdir -p /path/to/agent-chat-dev-runtime/{data,logs}
+export AGENT_CHAT_RUNTIME_DIR=/path/to/agent-chat-dev-runtime
 export AGENT_CHAT_BACKEND_PORT=18090
 export AGENT_CHAT_WEB_PORT=18084
 export AGENT_CHAT_API="http://127.0.0.1:${AGENT_CHAT_BACKEND_PORT}"
@@ -640,13 +640,13 @@ codex mcp add agentchat-dev \
   --env AGENT_CHAT_API="http://127.0.0.1:18090" \
   --env AGENT_CHAT_MCP_SERVER_NAME="agentchat-dev" \
   --env API_TOKEN="<token-if-needed>" \
-  -- node /home/shisui/laplace/agent-chat/mcp-server.js
+  -- node /path/to/agent-chat/mcp-server.js
 
 claude mcp add -s user \
   -e AGENT_CHAT_API="http://127.0.0.1:18090" \
   -e AGENT_CHAT_MCP_SERVER_NAME="agentchat-dev" \
   -e API_TOKEN="<token-if-needed>" \
-  -- agentchat-dev node /home/shisui/laplace/agent-chat/mcp-server.js
+  -- agentchat-dev node /path/to/agent-chat/mcp-server.js
 ```
 
 ## Installation

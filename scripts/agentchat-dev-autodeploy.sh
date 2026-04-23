@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="${AGENTCHAT_DEPLOY_DIR:-/home/shisui/laplace/agent-chat-dev}"
+REPO_DIR="${AGENTCHAT_DEPLOY_DIR:?AGENTCHAT_DEPLOY_DIR must be set}"
 DEPLOY_BRANCH="${AGENTCHAT_DEPLOY_BRANCH:-master}"
 POLL_SEC="${AGENTCHAT_POLL_SEC:-30}"
 DEPLOY_SERVICES="${AGENTCHAT_DEPLOY_SERVICES:-agent-chat-dev-backend.service agent-chat-dev-web.service}"

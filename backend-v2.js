@@ -6,6 +6,7 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { promisify } from 'util';
+import os from 'os';
 
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
@@ -58,7 +59,7 @@ const LOCAL_GIT_VERSION = (() => { try { return execSync('git rev-parse --short 
 const USER_UID = (typeof process.getuid === 'function') ? process.getuid() : null;
 const USER_RUNTIME_DIR = Number.isFinite(USER_UID) ? `/run/user/${USER_UID}` : null;
 const USER_DBUS_SESSION_BUS = USER_RUNTIME_DIR ? `unix:path=${USER_RUNTIME_DIR}/bus` : null;
-const CORS_ALLOWED_ORIGIN = (process.env.FRP_API_ORIGIN || 'https://agentchat.ananthe.party').trim();
+const CORS_ALLOWED_ORIGIN = (process.env.FRP_API_ORIGIN || 'https://agentchat.example.com').trim();
 const HEARTBEAT_TTL_MS = Number.parseInt(process.env.AGENT_HEARTBEAT_TTL_MS || '90000', 10);
 const SERVER_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_SERVER_SWEEP_INTERVAL_MS || '15000', 10);
 const HUMAN_SUMMARY_LIMIT = Number.parseInt(process.env.HUMAN_SUMMARY_LIMIT || '50', 10);
@@ -106,7 +107,7 @@ const AGENT_COMPACT_RUNTIME_DEDUPE_MS = Number.parseInt(process.env.AGENT_COMPAC
 const SUBCONSCIOUS_EVENT_HISTORY_LIMIT = Number.parseInt(process.env.SUBCONSCIOUS_EVENT_HISTORY_LIMIT || '2000', 10);
 const SUBCONSCIOUS_EVENT_AGENT_LIMIT = Number.parseInt(process.env.SUBCONSCIOUS_EVENT_AGENT_LIMIT || '500', 10);
 const SERVER_MAINTENANCE_IDS = new Set(
-  String(process.env.AGENT_SERVER_MAINTENANCE_IDS ?? 'kamico-MBP')
+  String(process.env.AGENT_SERVER_MAINTENANCE_IDS ?? os.hostname())
     .split(',')
     .map(normalizeServer)
     .filter(Boolean)

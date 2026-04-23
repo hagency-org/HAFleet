@@ -20,8 +20,8 @@ describe('runtime parity regressions', () => {
       const moduleUrl = pathToFileURL(path.resolve('lib/upstream-claude-subconscious.js')).href;
       const upstreamModule = await import(`${moduleUrl}?test=${Date.now()}`);
 
-      expect(autodeploySource).not.toContain('/home/shisui/laplace/agent-chat-live');
-      expect(autostartSource).not.toContain('export HOME="/home/shisui"');
+      expect(autodeploySource).not.toMatch(/\/home\/[a-z_][a-z0-9_-]*\/.*agent-chat/);
+      expect(autostartSource).not.toMatch(/export HOME="\/home\/[a-z_][a-z0-9_-]*"/);
       expect(upstreamModule.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT).toBe('/tmp/claude-subconscious');
     } finally {
       if (previousRoot === undefined) delete process.env.AGENT_CHAT_ROOT;
