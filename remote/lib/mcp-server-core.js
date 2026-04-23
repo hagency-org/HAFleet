@@ -73,8 +73,46 @@ const ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.AGENT_CHAT_ATTACHMENT_M
 const MEDIA_FETCH_CACHE_DIR = path.resolve('data', 'mcp-media-cache', AGENT_NAME);
 mkdirSync(MEDIA_FETCH_CACHE_DIR, { recursive: true });
 
+// ── Fetch timeout + retry ─────────────────────────────────────────────
+const MCP_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.MCP_FETCH_TIMEOUT_MS || '10000', 10);
+const MCP_FETCH_TIMEOUT_MS = Number.isFinite(MCP_FETCH_TIMEOUT_MS_RAW) && MCP_FETCH_TIMEOUT_MS_RAW > 0
+  ? MCP_FETCH_TIMEOUT_MS_RAW
+  : 10000;
+const MCP_FETCH_RETRIES = 3;
+const MCP_FETCH_BACKOFF = [500, 1500];
+
+async function fetchWithRetry(url, opts, { timeoutMs, label } = {}) {
+  const attempts = MCP_FETCH_RETRIES;
+  for (let i = 0; i < attempts; i++) {
+    let res;
+    try {
+      const fetchOpts = { ...opts };
+      if (timeoutMs) fetchOpts.signal = AbortSignal.timeout(timeoutMs);
+      res = await fetch(url, fetchOpts);
+    } catch (err) {
+      const isTimeout = err.name === 'TimeoutError' || err.code === 'UND_ERR_CONNECT_TIMEOUT';
+      const tag = isTimeout ? 'timeout' : 'network-error';
+      if (i < attempts - 1) {
+        const delay = MCP_FETCH_BACKOFF[Math.min(i, MCP_FETCH_BACKOFF.length - 1)];
+        process.stderr.write(`[mcp] ${label || url} ${tag} (attempt ${i + 1}/${attempts}), retrying in ${delay}ms\n`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw new Error(`${label || url} failed after ${attempts} attempts (last: ${tag} — ${err.message})`);
+    }
+    // Retry on 5xx server errors (not 4xx client errors)
+    if (res.status >= 500 && i < attempts - 1) {
+      const delay = MCP_FETCH_BACKOFF[Math.min(i, MCP_FETCH_BACKOFF.length - 1)];
+      process.stderr.write(`[mcp] ${label || url} HTTP ${res.status} (attempt ${i + 1}/${attempts}), retrying in ${delay}ms\n`);
+      await new Promise(r => setTimeout(r, delay));
+      continue;
+    }
+    return res;
+  }
+}
+
 // ── HTTP helper ───────────────────────────────────────────────────────
-async function api(method, path, body) {
+async function api(method, apiPath, body) {
   const opts = { method, headers: {} };
   if (API_TOKEN) {
     opts.headers.Authorization = `Bearer ${API_TOKEN}`;
@@ -86,7 +124,8 @@ async function api(method, path, body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(`${API}${path}`, opts);
+  const url = `${API}${apiPath}`;
+  const res = await fetchWithRetry(url, opts, { timeoutMs: MCP_FETCH_TIMEOUT_MS, label: `API ${method} ${apiPath}` });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || `API error ${res.status}`);
