@@ -83,17 +83,32 @@ log() {
 }
 
 normalize_services() {
-  local item
-  declare -A seen=()
+  local item existing duplicate
   local out=()
+  local out_count=0
+
   for item in "$@"; do
     [ -n "${item:-}" ] || continue
-    if [ -z "${seen[$item]+x}" ]; then
-      seen["$item"]=1
+
+    duplicate=false
+    if [ "$out_count" -gt 0 ]; then
+      for existing in "${out[@]}"; do
+        if [ "$existing" = "$item" ]; then
+          duplicate=true
+          break
+        fi
+      done
+    fi
+
+    if [ "$duplicate" = false ]; then
       out+=("$item")
+      out_count=$((out_count + 1))
     fi
   done
-  printf '%s\n' "${out[@]}"
+
+  if [ "$out_count" -gt 0 ]; then
+    printf '%s\n' "${out[@]}"
+  fi
 }
 
 resolve_services_from_profile() {

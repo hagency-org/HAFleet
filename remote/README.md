@@ -9,19 +9,24 @@ Most files here are managed by root-level generators/sync checks:
 ## Included
 
 - `bin/agentchat`
+- `bin/agent-up`
+- `bin/agent-down`
+- `bin/agent-ls`
+- `bin/agent-send`
+- `bin/agent-service`
+- `bin/agent-update`
+- `bin/verify-remote`
+- `bin/agent-maintain`
+- `bin/agent-audit`
 - `bin/agentchat-sync-skills`
 - `bin/agentchat-prune-agents`
 - `bin/agent-chat` (deprecated alias)
 - `push-relay.js`
 - `mcp-server.js`
+- `lib/push-relay-core.js`
+- `lib/mcp-server-core.js`
+- `lib/blocked-patterns.js`
 - `lib/eventsource-mini.js`
-- `bin/agent-up`
-- `bin/agent-down`
-- `bin/agent-ls`
-- `bin/agent-send`
-- `bin/agent-maintain`
-- `bin/agent-audit`
-- `bin/agent-update`
 - `push-relay.service`
 - `.env.example`
 - `install-remote.sh`
@@ -30,6 +35,7 @@ Most files here are managed by root-level generators/sync checks:
 
 - New unified CLI: `agentchat`
 - Legacy commands (`agent-up`, `agent-down`, `agent-send`, etc.) are deprecated wrappers that forward to `agentchat` with a warning.
+- Remote `agentchat` only advertises commands included in this package. Central checkout commands such as `up-v1`, `project`, `graph`, `resume-id`, `benchmark`, and `check-mcp` are intentionally not packaged here.
 
 Examples:
 - `agentchat up <name> <path> [claude|codex] [--allow-shared-workspace]`
@@ -66,6 +72,8 @@ Examples:
 - Operations runbook (no doctor CLI): see `../OPERATIONS.md`
 - In normal `git clone` deployments, `install-remote.sh` uses repo-root `bin/` as the helper source of truth.
   `remote/bin` is only a fallback when root `bin/` is unavailable.
+- `remote/bin/agentchat` is profile-specific, not a byte-for-byte mirror of root `bin/agentchat`.
+- `remote/bin/agent-up` is temporarily profile-specific while launch work is active; do not manually sync it to root `bin/agent-up` until that work is approved.
 - `remote/push-relay.js` and `remote/mcp-server.js` are thin wrappers. Shared logic lives in:
   - `lib/push-relay-core.js`
   - `lib/mcp-server-core.js`

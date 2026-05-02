@@ -78,6 +78,10 @@ const MCP_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.MCP_FETCH_TIMEOUT_M
 const MCP_FETCH_TIMEOUT_MS = Number.isFinite(MCP_FETCH_TIMEOUT_MS_RAW) && MCP_FETCH_TIMEOUT_MS_RAW > 0
   ? MCP_FETCH_TIMEOUT_MS_RAW
   : 10000;
+const MCP_MEDIA_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.MCP_MEDIA_FETCH_TIMEOUT_MS || '15000', 10);
+const MCP_MEDIA_FETCH_TIMEOUT_MS = Number.isFinite(MCP_MEDIA_FETCH_TIMEOUT_MS_RAW) && MCP_MEDIA_FETCH_TIMEOUT_MS_RAW > 0
+  ? MCP_MEDIA_FETCH_TIMEOUT_MS_RAW
+  : 15000;
 const MCP_FETCH_RETRIES = 3;
 const MCP_FETCH_BACKOFF = [500, 1500];
 
@@ -445,7 +449,8 @@ async function fetchMediaPathToLocal(sourcePath, hint = {}) {
   if (API_TOKEN) opts.headers.Authorization = `Bearer ${API_TOKEN}`;
   if (AGENT_TOKEN) opts.headers['X-Agent-Token'] = AGENT_TOKEN;
   const query = new URLSearchParams({ path: source });
-  const res = await fetch(`${API}/api/media/fetch?${query}`, opts);
+  const mediaUrl = `${API}/api/media/fetch?${query}`;
+  const res = await fetchWithRetry(mediaUrl, opts, { timeoutMs: MCP_MEDIA_FETCH_TIMEOUT_MS, label: `media-fetch ${source}` });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     const reason = body?.error || `HTTP ${res.status}`;

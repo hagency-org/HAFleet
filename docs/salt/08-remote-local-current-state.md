@@ -14,6 +14,16 @@ The local/remote split is not one clean deployment distinction. It currently mix
 
 Remote is closer to the target architecture than local in one important way: remote mostly behaves like an edge relay that talks to the central backend. Local still has legacy compatibility paths where backend, dashboard, and optional push relay can all participate in runtime observation or delivery.
 
+## Term Freeze
+
+For the current repair work, local and remote are deployment profiles. They are not architecture boundaries and should not imply separate implementations.
+
+- `kernel` means the central backend durable truth owner.
+- `runtime host` means any machine that owns tmux sessions and can report or inject runtime events.
+- `central-local` means the central machine acting as a runtime host, not the kernel itself.
+- `remote-relay` means a runtime-host deployment profile without backend, dashboard, or Matrix.
+- `package shape` means root checkout, `remote/`, or generated package layout; it is not the source of truth for system boundaries.
+
 ## Current Topology
 
 ### Central Kernel

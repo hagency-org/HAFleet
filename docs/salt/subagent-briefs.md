@@ -114,11 +114,11 @@ Key conclusions:
 - The old `docs/{agent}` model conflicts with the current flat v1 workspace model. `docs/agent-role-and-scope-editing.md`, `docs/agent-roles-and-guardrails.md`, and `docs/Hibiki/agents.md` still describe old per-agent folders.
 - `docs/architecture/system-components.md` has stale route names and API tables, including an outdated `/api/sse` path where current code exposes `/api/stream`.
 - `ROADMAP-remote.md` reads as an implementation roadmap even though remote support is now a documented feature.
-- Recommended `docs/salt` structure: principles, kernel, edges, agent-home-v1, message/trust, operations map, archive index.
+- Recommended `docs/salt` structure: principles, kernel, edges, agent-home-v1, message/trust, operations map, stale-doc index.
 
 Accepted actions for consolidation:
 
-- Add an archive/stale-doc section to the repair table.
+- Add a stale-doc section to the repair table.
 - Make `docs/salt` the current-system audit set, not another long-lived `docs/{agent}` model.
 - Use the phrase "agentchat is a stateful-individual chat kernel" as the documentation anchor, with Task/Supervisor/Matrix/Dashboard/Remote relay as replaceable edges.
 
@@ -192,5 +192,30 @@ Accepted conclusions:
 
 - Docs mostly state the right high-level model, but command semantics are not profile-aware.
 - `agentchat update`, `agentchat service`, `agent-up`, `agent-down`, `agent-ls`, and `check-mcp` are the most confusing operator surfaces.
-- `ROADMAP-remote.md` is stale as a roadmap and should become archive or a current deployment document.
+- `ROADMAP-remote.md` is stale as a roadmap and should become a current deployment document or be marked superseded after review.
 - The formal docs spine should split kernel invariants, deployment profiles, CLI semantics, install guides, and operations runbooks.
+
+## Phase 0/1 remote/local implementation round
+
+### Jason: Phase 0 docs and terms
+
+Status: complete, read-only.
+
+Accepted conclusions:
+
+- Keep Phase 0 authority under `docs/salt/`; do not create root `docs/concepts`, `docs/deployment`, `docs/cli`, or archive directories yet.
+- Freeze terms for kernel, runtime host, deployment profile, host adapter, package shape, operator surface, `serverId`, and `API_TOKEN`.
+- Treat local/remote as deployment profiles, not implementation boundaries.
+- Do not move, rename, or archive old docs until operator review.
+
+### Ampere: Phase 1 remote CLI and package checks
+
+Status: complete, read-only.
+
+Accepted conclusions:
+
+- Do not add central-only commands to the remote package just to satisfy CLI help.
+- Make `remote/bin/agentchat` advertise only packaged commands.
+- Add explicit dispatch-target checks so missing remote commands fail during package validation instead of at operator runtime.
+- Treat `bin/agentchat` and `remote/bin/agentchat` as profile-specific, not byte-for-byte mirrors.
+- Keep `remote/bin/agent-up` drift outside this batch; launch work remains deferred.

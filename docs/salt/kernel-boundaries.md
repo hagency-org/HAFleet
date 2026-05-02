@@ -22,7 +22,7 @@ Core files and concepts:
 | Message store and cursors | `backend-v2.js`, `lib/mcp-server-core.js` | Main product loop: send, receive, preview, mark read, suppress. |
 | Group membership | `backend-v2.js`, `bridge-matrix.js` as a caller | Group membership affects addressability and inbox semantics. |
 | Agent-facing MCP tools | `lib/mcp-server-core.js` | The API surface agents actually use. |
-| Push delivery contract | `lib/push-relay-core.js` | Delivery mechanism for local tmux agents; should remain a transport, not source of truth. |
+| Push delivery contract | `lib/push-relay-core.js` | Runtime-host adapter for tmux delivery and observation; should remain a transport, not source of truth. |
 | Runtime data root | `backend-v2.js`, `lib/runtime-dir-guard.js` | Defines where persistent kernel facts live. |
 
 ## Adjacent Support Systems
@@ -33,6 +33,7 @@ Core files and concepts:
 | Alerts and monitoring | `lib/alert-store.js`, runtime routes in `backend-v2.js` | Operational layer; should observe kernel state and emit tickets. |
 | Dashboard and queue | `server.js` | Operator/UI layer; should not become a second message or delivery truth. |
 | Launch/provisioning | `bin/agent-up`, `bin/agent-up-v1`, `scripts/provision-v1-agent-home.js` | Creates runtime homes and sessions; must preserve one identity mapping. |
+| Runtime host profile | local tmux sweep, push relay heartbeat, MCP pid reports | Adjacent contract for availability and delivery; backend inbox remains recovery truth. |
 
 ## Edge / Optional Systems
 
@@ -41,7 +42,7 @@ Core files and concepts:
 | Matrix | `bridge-matrix.js`, `lib/bot-commands.js` | Optional external transport and operator surface. |
 | Supervisor | `lib/supervisor-*`, supervisor routes/scripts | Optional attention audit layer. |
 | Subconscious hooks | `lib/upstream-claude-subconscious.js`, `subconscious/*` | Optional Claude-specific memory/event integration. |
-| Remote package | `remote/*`, `remote-dist/*` | Deployment mirror; should be generated or checked against core. |
+| Remote package | `remote/*`, `remote-dist/*` | Deployment artifact; generated or checked against core/shared adapters, but not itself a kernel implementation. |
 
 ## Initial Boundary Risks To Verify
 

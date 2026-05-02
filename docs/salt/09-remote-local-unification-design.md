@@ -193,18 +193,23 @@ Every operator command should document scope:
 
 ## Documentation Architecture
 
-Recommended authority split:
+Phase 0 documentation stays under `docs/salt/` until operator approval moves it into root docs.
+
+Current staged authority:
+
+- `08-remote-local-current-state.md`: current topology and drift evidence.
+- `09-remote-local-unification-design.md`: target runtime-host design.
+- `10-remote-local-roadmap.md`: dependency order and approval gates.
+- `11-remote-local-phase0-terms.md`: frozen terminology, profile matrix, and command scope.
+
+Later root-doc targets, after operator approval:
 
 - `README.md`: product model, kernel invariant, profile index.
-- `docs/concepts/kernel-invariants.md`: durable truth and agent identity.
-- `docs/deployment/profiles.md`: central-live, remote-relay, dev profiles.
-- `docs/cli/command-semantics.md`: command scope by profile.
-- `docs/install/central.md`: central services and backend/dashboard/bridge.
-- `docs/install/remote.md`: relay/MCP/helper install and verification.
-- `docs/operations/service-lifecycle.md`: incident runbooks by profile.
-- `docs/archive/README.md`: stale docs and replacement paths.
+- `OPERATIONS.md`: incident runbooks by profile and command scope.
+- `remote/README.md`: remote install shape and packaged command surface.
+- `ROADMAP-remote.md`: rewrite as current remote status or clearly mark as superseded.
 
-`ROADMAP-remote.md` should either become historical archive or be rewritten as current remote deployment design. It should not remain as a roadmap that contradicts the implemented model.
+Do not move or archive old docs in Phase 0/1. For now, old docs are conflict evidence and later rewrite targets.
 
 ## Compatibility Rules
 

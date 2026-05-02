@@ -4,7 +4,10 @@ data/
 data.stale*/
 data.stale-backup*/
 .env
+.DS_Store
 .mcp.json
+remote-dist/
+remote/.push-relay-launchd.sh
 remote/package-lock.json
 docs/agentchat-worker/
 docs/agentchat-develop/

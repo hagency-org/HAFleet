@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 MIRROR_FILES=(
-  "bin/agentchat"
   "bin/agentchat-prune-agents"
   "bin/agentchat-sync-skills"
   "bin/agent-chat"
@@ -16,11 +15,18 @@ MIRROR_FILES=(
   "bin/agent-maintain"
   "bin/agent-send"
   "bin/agent-service"
-  "bin/agent-up"
   "bin/agent-update"
   "bin/self-time-reminder"
   "bin/verify-remote"
+  "lib/blocked-patterns.js"
   "lib/eventsource-mini.js"
+  "lib/push-relay-core.js"
+  "lib/mcp-server-core.js"
+)
+
+PROFILE_SPECIFIC_FILES=(
+  "bin/agentchat:remote profile-specific command surface"
+  "bin/agent-up:remote launch work is frozen pending Phase 5"
 )
 
 failures=0
@@ -49,6 +55,58 @@ check_mirror_file() {
   fi
 }
 
+check_profile_specific_file() {
+  local spec="$1"
+  local rel="${spec%%:*}"
+  local reason="${spec#*:}"
+  local left="$ROOT_DIR/$rel"
+  local right="$ROOT_DIR/remote/$rel"
+
+  if [ ! -f "$left" ]; then
+    echo "[FAIL] Missing root file for profile-specific check: $rel"
+    failures=$((failures + 1))
+    return
+  fi
+  if [ ! -f "$right" ]; then
+    echo "[FAIL] Missing remote profile file: remote/$rel"
+    failures=$((failures + 1))
+    return
+  fi
+
+  echo "[OK] Profile-specific remote file: remote/$rel ($reason)"
+}
+
+check_agentchat_dispatch_targets() {
+  local file="$1"
+  local label="$2"
+  local bin_dir target target_path targets
+  bin_dir="$(dirname "$file")"
+
+  if [ ! -f "$file" ]; then
+    echo "[FAIL] Missing agentchat CLI for dispatch check: $file"
+    failures=$((failures + 1))
+    return
+  fi
+
+  targets="$(sed -n 's/.*dispatch "\([^"]*\)".*/\1/p' "$file" | sort -u)"
+  if [ -z "$targets" ]; then
+    echo "[FAIL] No dispatch targets found in $file"
+    failures=$((failures + 1))
+    return
+  fi
+
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    target_path="$bin_dir/$target"
+    if [ -x "$target_path" ]; then
+      echo "[OK] Dispatch target ($label): $target"
+    else
+      echo "[FAIL] Missing or non-executable dispatch target ($label): $target_path"
+      failures=$((failures + 1))
+    fi
+  done <<< "$targets"
+}
+
 check_wrapper_contract() {
   local file="$1"
   local needle="$2"
@@ -64,6 +122,15 @@ echo "Checking mirrored root/remote files..."
 for rel in "${MIRROR_FILES[@]}"; do
   check_mirror_file "$rel"
 done
+
+echo "Checking profile-specific remote files..."
+for spec in "${PROFILE_SPECIFIC_FILES[@]}"; do
+  check_profile_specific_file "$spec"
+done
+
+echo "Checking agentchat dispatch targets..."
+check_agentchat_dispatch_targets "bin/agentchat" "root"
+check_agentchat_dispatch_targets "remote/bin/agentchat" "remote"
 
 echo "Checking wrapper contracts..."
 check_wrapper_contract "push-relay.js" "./lib/push-relay-core.js"

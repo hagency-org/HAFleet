@@ -22,3 +22,7 @@
 - Started four read-only subagents for runtime topology, packaging/sync, config/auth/identity, and operator workflow/docs.
 - Added remote/local design documentation covering current state, unified runtime-host design, and a dependency-ordered roadmap.
 - Verified docs diff with `git diff --check`; read-only remote sync probes still fail as expected and are recorded as design evidence.
+- Received ac-topleader approval for Phase 0 docs/terms and Phase 1 package honesty only; Phase 2-7 remain operator decision items.
+- Started two read-only subagents for Phase 0 terminology and Phase 1 remote CLI/package checks.
+- Implemented Phase 0 term staging in `docs/salt/11-remote-local-phase0-terms.md` and adjusted salt docs to avoid root-doc rewrites or archival.
+- Implemented Phase 1 package honesty: remote CLI advertises only packaged commands, root/remote dispatch targets are checked, remote shared libs are mirrored, `remote-dist/` is ignored instead of committed as a partial artifact, and `remote/bin/agent-up` remains explicitly profile-specific pending launch approval.

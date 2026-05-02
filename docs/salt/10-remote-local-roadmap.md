@@ -3,6 +3,8 @@
 Date: 2026-05-02
 Status: design roadmap. Implementation requires ac-topleader approval per phase.
 
+Phase 0/1 approval note: ac-topleader approved Phase 0 docs/terms and Phase 1 package honesty only. Phase 2-7 require operator architecture decisions.
+
 ## Goal
 
 Eliminate local/remote architectural split by making runtime host, deployment profile, package shape, and operator command scope explicit.
@@ -16,7 +18,7 @@ Type: docs and tests only.
 Objectives:
 
 - Define kernel invariants and runtime host contract.
-- Mark `ROADMAP-remote.md` as historical or replace it with current deployment docs.
+- Mark `ROADMAP-remote.md` as superseded or replace it with current deployment docs after operator review.
 - Add a profile matrix for central-live, central-dev, and remote-relay.
 - Add command semantics by profile.
 
@@ -27,11 +29,12 @@ Exit criteria:
 
 Suggested files:
 
-- `README.md`
-- `OPERATIONS.md`
-- `remote/README.md`
-- `skills/agent-chat/SKILL.md`
-- new `docs/concepts/*`, `docs/deployment/*`, `docs/cli/*`
+- `docs/salt/08-remote-local-current-state.md`
+- `docs/salt/09-remote-local-unification-design.md`
+- `docs/salt/10-remote-local-roadmap.md`
+- `docs/salt/11-remote-local-phase0-terms.md`
+
+Root docs such as `README.md`, `OPERATIONS.md`, `remote/README.md`, and `skills/agent-chat/SKILL.md` are later synchronization targets, not Phase 0 edit targets.
 
 ## Phase 1: Make Package Shape Honest
 
@@ -58,10 +61,8 @@ Exit criteria:
 
 Known current blockers:
 
-- `remote/bin/agent-up` drift is under active launch work.
-- `remote/bin/agent-service` drift includes the Bash 3.2 fix from Batch 3.
-- `remote/lib/mcp-server-core.js` drift means MCP behavior differs.
-- `remote/lib/push-relay-core.js` is missing while generated wrappers expect shared core.
+- `remote/bin/agent-up` drift is under active launch work and is explicitly deferred.
+- Remote package checks must still prove every advertised command dispatches to an included executable.
 
 ## Phase 2: Converge Runtime Observation
 
@@ -226,14 +227,16 @@ Phase 3 and Phase 4 can partly run in parallel after Phase 2 starts, but Phase 5
 2. Should local central delivery move to push relay as the default host adapter?
 3. What is the server credential model: shared bearer first, then per-server token, or immediate split?
 4. Should dashboard remain trusted-local only or gain explicit web auth?
-5. Which old docs should be archived before README/OPERATIONS are rewritten?
+5. Which old docs should be reviewed before README/OPERATIONS are rewritten?
 
-## Near-Term Non-Code Next Step
+## Near-Term Staging Step
 
-Before code repair, write formal docs outside `docs/salt`:
+Keep formal remote/local terms in `docs/salt/11-remote-local-phase0-terms.md` until operator approval decides which root docs should become canonical.
 
-- `docs/concepts/kernel-invariants.md`
-- `docs/deployment/profiles.md`
-- `docs/cli/command-semantics.md`
+The current architecture decisions staged for operator confirmation are:
 
-These should become the approval target for future remote/local repair batches.
+1. Remote uses git checkout install as primary and standalone package as secondary.
+2. Local central delivery does not need push relay as the default path in this phase.
+3. Server credentials remain shared bearer until Phase 3.
+4. Dashboard remains trusted-local only until a separate auth decision.
+5. Old docs are not archived or moved until reviewed.

@@ -137,7 +137,7 @@ Repairs:
 - R-026: `.env.example` truth cleanup.
 - R-027: read-only/check-data mode.
 - R-028: test helper cleanup.
-- R-030: old docs archive/rewrite.
+- R-030: old docs review/rewrite.
 
 Likely files:
 

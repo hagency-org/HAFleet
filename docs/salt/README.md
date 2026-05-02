@@ -24,12 +24,13 @@ The first phase is documentation and audit only. Code repairs start after the re
 | `02-runtime-and-transports.md` | MCP, push relay, CLI, remote, and Matrix transport map. |
 | `03-edge-systems.md` | Dashboard, tasks, alerts, Supervisor, subconscious, and remote boundaries. |
 | `04-data-config-tests.md` | Data schema, environment, CI, and test harness audit. |
-| `05-docs-archive-index.md` | Old documentation trust/cleanup index. |
+| `05-docs-archive-index.md` | Stale documentation trust/cleanup index. |
 | `06-implementation-plan.md` | Approval-gated repair batch plan. |
 | `07-task-truth-design.md` | R-006 design-only canonical task model. |
 | `08-remote-local-current-state.md` | Current remote/local topology, split inventory, and drift evidence. |
 | `09-remote-local-unification-design.md` | Unified runtime-host, identity, config, and package design. |
 | `10-remote-local-roadmap.md` | Dependency-ordered roadmap for future remote/local repair batches. |
+| `11-remote-local-phase0-terms.md` | Approved Phase 0 terminology, profile matrix, and command-scope staging rules. |
 | `system-map.md` | Repository map, runtime components, major flows, and source-of-truth boundaries. |
 | `kernel-boundaries.md` | Core/adjacent/edge classification and ownership rules. |
 | `audit-findings.md` | Consolidated structural and code audit findings with evidence. |
@@ -44,3 +45,4 @@ The first phase is documentation and audit only. Code repairs start after the re
 - Batch 1 and Batch 2 repairs are implemented and pushed.
 - Batch 3 approved scope R-009/R-015 is implemented.
 - Remote/local split audit is documented as design-only in `08` through `10`; no runtime code repair started for this topic.
+- Phase 0 terminology is staged in `11`; this folder is the temporary authority for remote/local terms until root docs are approved for rewrite.

@@ -62,7 +62,7 @@ MANAGED_SPECS=(
   "remote/package.json:package.json"
   "remote/push-relay.js:push-relay.js"
   "remote/mcp-server.js:mcp-server.js"
-  "bin/agentchat:bin/agentchat"
+  "remote/bin/agentchat:bin/agentchat"
   "bin/agentchat-prune-agents:bin/agentchat-prune-agents"
   "bin/agentchat-sync-skills:bin/agentchat-sync-skills"
   "bin/agent-chat:bin/agent-chat"
@@ -73,10 +73,11 @@ MANAGED_SPECS=(
   "bin/agent-maintain:bin/agent-maintain"
   "bin/agent-send:bin/agent-send"
   "bin/agent-service:bin/agent-service"
-  "bin/agent-up:bin/agent-up"
+  "remote/bin/agent-up:bin/agent-up"
   "bin/agent-update:bin/agent-update"
   "bin/self-time-reminder:bin/self-time-reminder"
   "bin/verify-remote:bin/verify-remote"
+  "lib/blocked-patterns.js:lib/blocked-patterns.js"
   "lib/eventsource-mini.js:lib/eventsource-mini.js"
   "lib/push-relay-core.js:lib/push-relay-core.js"
   "lib/mcp-server-core.js:lib/mcp-server-core.js"
@@ -142,6 +143,42 @@ compare_managed_against_remote() {
   return 0
 }
 
+check_dispatch_targets() {
+  local build_root="$1"
+  local cli="$build_root/bin/agentchat"
+  local bin_dir="$build_root/bin"
+  local targets target target_path
+  local failures=0
+
+  if [ ! -f "$cli" ]; then
+    echo "[FAIL] generated bin/agentchat missing"
+    return 1
+  fi
+
+  targets="$(sed -n 's/.*dispatch "\([^"]*\)".*/\1/p' "$cli" | sort -u)"
+  if [ -z "$targets" ]; then
+    echo "[FAIL] generated bin/agentchat has no dispatch targets"
+    return 1
+  fi
+
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    target_path="$bin_dir/$target"
+    if [ -x "$target_path" ]; then
+      echo "[OK] dispatch target: bin/$target"
+    else
+      echo "[FAIL] dispatch target missing or not executable: bin/$target"
+      failures=$((failures + 1))
+    fi
+  done <<< "$targets"
+
+  if [ "$failures" -ne 0 ]; then
+    echo "Remote dispatch target check failed: $failures target(s)." >&2
+    return 1
+  fi
+  return 0
+}
+
 sync_remote_from_build() {
   local build_root="$1"
   local spec dst_rel generated remote_path mode
@@ -168,6 +205,7 @@ copy_manifest "$BUILD_DIR"
 
 if [ "$DO_CHECK" -eq 1 ]; then
   compare_managed_against_remote "$BUILD_DIR"
+  check_dispatch_targets "$BUILD_DIR"
   echo "Managed remote package check passed."
   exit 0
 fi
