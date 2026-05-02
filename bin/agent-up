@@ -1687,6 +1687,23 @@ else:
 " 2>/dev/null || true
 fi
 
+# ── Wait for shell ready in tmux pane ─────────────────────────────────
+# On macOS, zsh startup can be slow (plugins, etc.).  If we send keys
+# before the shell is ready, they can get lost.  Wait until a prompt
+# character is visible in the pane (up to 10 seconds).
+_pane_ready=false
+for _i in $(seq 1 20); do
+  _pane_out=$(tmux capture-pane -t "$TMUX_PANE_TARGET" -p 2>/dev/null || true)
+  if printf '%s' "$_pane_out" | grep -qE '[\$#%>] *$'; then
+    _pane_ready=true
+    break
+  fi
+  sleep 0.5
+done
+if [ "$_pane_ready" != true ]; then
+  echo "Warning: shell prompt not detected in pane after 10s; sending launch command anyway." >&2
+fi
+
 # ── Launch AI ─────────────────────────────────────────────────────────
 if [ "$TYPE" = "claude" ]; then
   INIT_PROMPT="$INIT_PROMPT $CLAUDE_MODE_GUARD"
