@@ -102,3 +102,15 @@ These remain future gates:
 - dependency vulnerability remediation and a future blocking `audit:deps` gate.
 
 Those require operator/CD environment details and should be added after the current gate is stable.
+
+## CD Preflight Coverage
+
+`npm run verify:cd-preflight` is now covered by deterministic script tests in `tests/verify-cd-preflight.test.js`.
+
+Those tests intentionally use `--skip-ci` so they validate the CD preflight wrapper without recursively invoking the full CI gate. They cover:
+
+- deploy target metadata and expected-version command generation;
+- API URL normalization, server/agent arguments, and token redaction;
+- branch mismatch rejection;
+- dirty worktree rejection unless `--allow-dirty` is explicit;
+- unknown argument failure and usage output.

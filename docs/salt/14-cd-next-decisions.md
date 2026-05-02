@@ -11,8 +11,9 @@ Implemented gates:
 
 1. `npm run verify:ci` validates syntax, CLI contracts, remote package shape, remote/local drift, dependency isolation, and kernel/CLI smoke tests.
 2. `npm run verify:cd-preflight` validates a candidate checkout, requires a clean tree by default, runs `verify:ci`, and prints the expected post-deploy version check.
-3. `agentchat verify-remote --expect-version <short-sha>` can verify heartbeat continuity and loaded remote relay commit after deployment.
-4. Remote package smoke now checks both push-relay and MCP wrapper resolution, plus the Linux remote autodeploy service template.
+3. `tests/verify-cd-preflight.test.js` locks the preflight wrapper contract without touching deploy watchers.
+4. `agentchat verify-remote --expect-version <short-sha>` can verify heartbeat continuity and loaded remote relay commit after deployment.
+5. Remote package smoke now checks both push-relay and MCP wrapper resolution, plus the Linux remote autodeploy service template.
 
 Not implemented yet:
 
