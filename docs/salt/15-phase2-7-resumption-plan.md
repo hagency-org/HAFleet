@@ -32,7 +32,7 @@ Keep these boundaries unless ac-topleader explicitly changes them:
 | --- | --- | --- | --- |
 | Phase 2 runtime observation | Remote relay reports heartbeat/runtime; central-local still has backend tmux sweeps and local-only idle probes. | Start with observation provenance and local-host server record work, not default behavior flips. | Required |
 | Phase 3 credentials/trust | Shared `API_TOKEN` remains overloaded; agent token hard mode is not production default; dashboard proxy and Matrix trust remain compatibility surfaces. | Split into token-readiness, dashboard local-only/auth, Matrix trust, and server credential batches. | Required |
-| Phase 4 paths | Runtime dir guard exists; MCP media cache still resolves under current project cwd. | Move MCP media cache under agent state/runtime data and add mirror tests. | Required |
+| Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A. | Continue with v1 home/runtime resolver hardening after approval. | Required |
 | Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
 | Phase 6 CLI/ops profile | Remote command honesty is enforced; some command help/scope semantics remain implicit. | Tighten help/docs/profile metadata without changing launch internals. | Required |
 | Phase 7 CI/release gates | `verify:ci` and remote package gates are enforced; `audit:deps` is intentionally separate and red; CD-A is still pending. | Add missing focused gates after each repair; handle dependency audit as a dedicated security batch. | Required |
@@ -154,7 +154,7 @@ Current evidence:
 - `lib/mcp-server-core.js` currently sets `MEDIA_FETCH_CACHE_DIR` with `path.resolve('data', 'mcp-media-cache', AGENT_NAME)`, so MCP media cache can land under the caller's current project directory.
 - `remote/lib/mcp-server-core.js` mirrors this behavior and must stay synchronized when fixed.
 
-Recommended batch RLP4-A: MCP media cache relocation.
+Completed batch RLP4-A: MCP media cache relocation.
 
 Scope:
 
@@ -181,6 +181,14 @@ Verification:
 Risk:
 
 Existing message attachment outputs can contain `LocalPath:` values under the old cache root. Moving the cache can leave stale old cached files, but it should not change durable message truth.
+
+Recommended next Phase 4 batch RLP4-B: v1 home/runtime resolver tests.
+
+Scope:
+
+1. add tests for `lib/agent-home-v1.js` env precedence and absolute normalization;
+2. preserve legacy `~/.agentchat` fallback behavior;
+3. do not change launch files or provisioning behavior in the same batch.
 
 ## Phase 5: Launch Decomposition
 
@@ -262,7 +270,7 @@ Scope:
 
 ## Recommended Implementation Order
 
-1. RLP4-A MCP media cache relocation. Small, high-confidence, no launch dependency, directly fixes R-012.
+1. RLP4-A MCP media cache relocation. Completed after ac-topleader approval.
 2. RLP2-A runtime observation provenance. Adds source clarity before changing observation ownership.
 3. RLP6-A profile-scoped help/docs. Makes operator behavior clearer before deeper CLI behavior changes.
 4. RLP3-A auth readiness diagnostics. Prepares Phase 3 without flipping fail-closed production behavior.
