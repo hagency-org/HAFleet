@@ -14,6 +14,7 @@ let execFileAsyncImpl = execFileAsync;
 let readFileSyncImpl = readFileSync;
 let execFileSyncImpl = execFileSync;
 let killProcessImpl = (pid, signal) => process.kill(pid, signal);
+let fetchImpl = (...args) => fetch(...args);
 
 const PUSH_RELAY_MODE = (process.env.PUSH_RELAY_MODE || 'local').trim().toLowerCase();
 const PUSH_RELAY_REMOTE_MODE = PUSH_RELAY_MODE === 'remote';
@@ -128,12 +129,12 @@ function normalizeServer(value) {
 }
 
 function api(path) {
-  return fetch(`${API_BASE}${path}`, { headers: authHeaders });
+  return fetchImpl(`${API_BASE}${path}`, { headers: authHeaders });
 }
 
 async function postJson(path, body) {
   const headers = { 'Content-Type': 'application/json', ...authHeaders };
-  return fetch(`${API_BASE}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
+  return fetchImpl(`${API_BASE}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
 }
 
 async function reportRuntime(agentName, payload) {
@@ -901,6 +902,7 @@ function resetRelayState() {
   readFileSyncImpl = readFileSync;
   execFileSyncImpl = execFileSync;
   killProcessImpl = (pid, signal) => process.kill(pid, signal);
+  fetchImpl = (...args) => fetch(...args);
   pushToTmuxImpl = pushToTmux;
 }
 
@@ -924,6 +926,7 @@ function setPushRelayTestHooks({
   readFileSync: overrideReadFileSync,
   execFileSync: overrideExecFileSync,
   killProcess: overrideKillProcess,
+  fetch: overrideFetch,
 } = {}) {
   execFileAsyncImpl = typeof overrideExecFileAsync === 'function' ? overrideExecFileAsync : execFileAsync;
   readFileSyncImpl = typeof overrideReadFileSync === 'function' ? overrideReadFileSync : readFileSync;
@@ -931,6 +934,7 @@ function setPushRelayTestHooks({
   killProcessImpl = typeof overrideKillProcess === 'function'
     ? overrideKillProcess
     : ((pid, signal) => process.kill(pid, signal));
+  fetchImpl = typeof overrideFetch === 'function' ? overrideFetch : ((...args) => fetch(...args));
   mcpSessionCacheAt = 0;
 }
 

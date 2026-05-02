@@ -13,6 +13,7 @@
     "check:cli-contract": "node scripts/check-cli-contract.js",
     "check:remote-package-smoke": "bash scripts/check-remote-package-smoke.sh",
     "check:dep-isolation": "bash scripts/check-dep-isolation.sh",
+    "report:ci-env": "node scripts/report-ci-env.js",
     "verify:ci": "bash scripts/verify-ci.sh",
     "audit:agent-docs": "node scripts/audit-agent-docs.js",
     "build:remote": "bash scripts/build-remote-package.sh",

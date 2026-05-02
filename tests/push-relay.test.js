@@ -178,15 +178,27 @@ describe('push relay dispatch', () => {
   });
 
   test('MCP debounce suppresses false negatives during grace period', async () => {
+    const runtimeReports = [];
     // Seed with agent that has MCP, then simulate scans without MCP
     seedRelayState({
       localAgentNames: ['alpha'],
       agents: [{ name: 'alpha', server: null, tmux: 'alpha:0.0' }],
       mcpSessions: [], // MCP not present from the start
     });
-    // Mock tmux commands to avoid real shell calls
+    // Mock tmux/backend calls so debounce behavior is independent of the host environment.
     setPushRelayTestHooks({
       execFileAsync: async () => ({ stdout: '', stderr: '' }),
+      execFileSync: () => '',
+      readFileSync: () => {
+        throw Object.assign(new Error('missing pid file'), { code: 'ENOENT' });
+      },
+      fetch: async (url, options = {}) => {
+        runtimeReports.push({
+          url: String(url),
+          body: JSON.parse(String(options.body || '{}')),
+        });
+        return { ok: true, text: async () => '' };
+      },
     });
 
     // Run 5 scans — should still report mcpPresent=true (under threshold of 6)
@@ -198,7 +210,7 @@ describe('push relay dispatch', () => {
     // Run scan 6 — now it should flip to mcpPresent=false
     await scanBlockedStates();
 
-    // Single codebase — debounce logic verified above
+    expect(runtimeReports.map((report) => report.body.mcpPresent)).toEqual([true, false]);
   });
 
   test('detects MCP session from Linux proc cmdline', async () => {

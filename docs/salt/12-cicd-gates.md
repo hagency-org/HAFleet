@@ -22,13 +22,14 @@ The immediate priority is not more runtime architecture repair. It is repeatable
 
 It runs:
 
-1. `npm run check:syntax`
-2. `npm run check:cli-contract`
-3. `npm run build:remote:check`
-4. `npm run check:remote-sync`
-5. `npm run check:remote-package-smoke`
-6. `npm run check:dep-isolation`
-7. `npm run test:kernel`
+1. `npm run report:ci-env`
+2. `npm run check:syntax`
+3. `npm run check:cli-contract`
+4. `npm run build:remote:check`
+5. `npm run check:remote-sync`
+6. `npm run check:remote-package-smoke`
+7. `npm run check:dep-isolation`
+8. `npm run test:kernel`
 
 GitHub Actions now runs this as an added step in the existing `lint` job, then runs the existing full `npm test` job separately.
 
@@ -45,11 +46,13 @@ Each candidate commit should report:
 - git commit and branch;
 - OS, architecture, Node, and npm versions;
 - install mode (`npm ci` vs `npm ci --ignore-scripts`);
-- whether Matrix native optional dependencies are present;
+- whether Matrix native optional dependencies are present and loadable;
 - results for `npm run verify:ci`;
 - results for remote package smoke and sync checks.
 
 The current gate is single-node executable. The next CD layer should run the same gate on both local and remote checkouts, then compare the environment metadata and command results. A difference is allowed only when the profile explicitly owns it, such as remote command surface limits or optional Matrix native dependencies.
+
+`npm run report:ci-env` is the first piece of this layer. It prints the environment metadata at the start of `verify:ci` without failing the run on expected local/remote differences. CD scripts can set `AGENTCHAT_INSTALL_MODE` when the install mode is known but no longer visible to the later `npm run` process.
 
 ## CLI Contract
 
