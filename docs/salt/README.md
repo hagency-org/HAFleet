@@ -32,6 +32,8 @@ The first phase is documentation and audit only. Code repairs start after the re
 | `10-remote-local-roadmap.md` | Dependency-ordered roadmap for future remote/local repair batches. |
 | `11-remote-local-phase0-terms.md` | Approved Phase 0 terminology, profile matrix, and command-scope staging rules. |
 | `12-cicd-gates.md` | First executable CI/CD gate design and remaining release-gate gaps. |
+| `13-cd-flow-and-gaps.md` | CD audit findings, current gaps, and proposed deploy-gate model. |
+| `14-cd-next-decisions.md` | Decision pack for the next CD batches after the first CI/preflight gate. |
 | `system-map.md` | Repository map, runtime components, major flows, and source-of-truth boundaries. |
 | `kernel-boundaries.md` | Core/adjacent/edge classification and ownership rules. |
 | `audit-findings.md` | Consolidated structural and code audit findings with evidence. |
@@ -48,3 +50,4 @@ The first phase is documentation and audit only. Code repairs start after the re
 - Remote/local split audit is documented as design-only in `08` through `10`; no runtime code repair started for this topic.
 - Phase 0 terminology is staged in `11`; this folder is the temporary authority for remote/local terms until root docs are approved for rewrite.
 - CI/CD first gate is implemented in `12` and exposed through `npm run verify:ci`.
+- CD preflight and post-deploy version checks are implemented; remaining CD work is decision-gated in `14`.
