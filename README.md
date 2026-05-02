@@ -79,6 +79,7 @@ Central API server. All data lives here.
 
 **Multi-Server:**
 - Server heartbeat registration and liveness tracking
+- Optional local runtime-host server row (`AGENT_CHAT_RECORD_LOCAL_SERVER=1`) for central-local observability without changing local delivery
 - Server maintenance mode (suppresses flap alerts)
 - Lease-based relay instance tracking
 - Agents tagged with `server` field to identify origin
@@ -546,6 +547,7 @@ AGENT_CHAT_WEB_PORT=8084
 AGENT_CHAT_API=http://127.0.0.1:8090
 AGENT_CHAT_WEB_URL=http://127.0.0.1:8084
 AGENT_CHAT_QUEUE_URL=http://127.0.0.1:8084/api/queue
+AGENT_CHAT_RECORD_LOCAL_SERVER=0
 AGENT_CHAT_MCP_SERVER_NAME=agent-chat
 AGENT_CHAT_RUNTIME_DIR=/path/to/agent-chat-dev-runtime
 AGENTCHAT_SUBCONSCIOUS_EVENT_URL=http://127.0.0.1:8090/api/subconscious/events

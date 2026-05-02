@@ -30,7 +30,7 @@ Keep these boundaries unless ac-topleader explicitly changes them:
 
 | Phase | Current state | Safe next step | Approval |
 | --- | --- | --- | --- |
-| Phase 2 runtime observation | Runtime writes now carry backend-derived observation provenance; central-local still has backend tmux sweeps and local-only idle probes. | Continue with local-host server record design after approval, not default behavior flips. | Required |
+| Phase 2 runtime observation | Runtime writes now carry backend-derived observation provenance; RLP2-B fixed custom local server ID delivery/liveness and added an opt-in local server record. Central-local still uses backend tmux sweeps and local-only idle probes. | Continue with richer local-host adapter design only after approval, not default behavior flips. | Required |
 | Phase 3 credentials/trust | RLP3-A added diagnostics-only agent-token readiness; RLP3-A2 documented and tested the server credential compatibility boundary. Shared `API_TOKEN`, dashboard proxy, actual server credential enforcement, and Matrix trust remain compatibility surfaces. | Continue with server credential enforcement migration or dashboard boundary after approval; do not flip fail-closed until tokens are provisioned and relay/server credentials are rolled out. | Required |
 | Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A. | Continue with v1 home/runtime resolver hardening after approval. | Required |
 | Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
@@ -74,7 +74,7 @@ Do not do in RLP2-A:
 - do not require local central delivery to use push relay;
 - do not change launch/provisioning.
 
-Recommended later batch RLP2-B: local-host server record.
+Completed batch RLP2-B: custom local server ID and opt-in local server record.
 
 Goal:
 
@@ -82,14 +82,15 @@ Make the central-local runtime host visible through the same `servers.json` live
 
 Implementation shape:
 
-1. start behind an explicit flag such as `AGENT_LOCAL_SERVER_HEARTBEAT=1`;
-2. call an internal helper around `applyServerHeartbeat(LOCAL_SERVER_ID, ...)`, not an HTTP self-call;
-3. use only confirmed local tmux sessions for the heartbeat payload;
-4. do not disable local sweep or change delivery in the same batch.
+1. fixed custom local server delivery by using the shared `isLocalAgentServer()` classifier instead of checking only literal `local`;
+2. prevented stale local server rows from running remote-offline cascade against local agents;
+3. added opt-in `AGENT_CHAT_RECORD_LOCAL_SERVER=1` to record a central-local server row;
+4. kept the local row path separate from `applyServerHeartbeat()`;
+5. did not disable local sweep or change default behavior.
 
 Decision needed:
 
-Whether local host liveness should be produced by backend self-observation or by a local host adapter process. The roadmap already says local delivery does not need push relay by default in this phase, so backend self-observation is the smaller compatibility path.
+Whether richer local host liveness should eventually be produced by backend self-observation or by a local host adapter process. The roadmap already says local delivery does not need push relay by default in this phase, so backend self-observation remains the smaller compatibility path.
 
 ## Phase 3: Credentials And Trust
 

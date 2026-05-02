@@ -795,6 +795,112 @@ describe('server heartbeat api', () => {
     expect(agent.body.online).toBe(true);
   });
 
+  test('custom local server rows do not make live local agents undeliverable', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
+      agents: {
+        'local-a': makeAgent('local-a', { server: 'my-local', online: true, tmux: 'local-a:0.0' }),
+      },
+      servers: {
+        'my-local': {
+          id: 'my-local',
+          online: false,
+          lastSeen: Date.now() - 60_000,
+          heartbeatAt: 0,
+          updatedAt: Date.now() - 60_000,
+          sessions: [],
+          agents: [],
+          agentCount: 0,
+          sourceIp: 'local',
+        },
+      },
+      env: {
+        AGENT_CHAT_SERVER: 'my-local',
+      },
+    }));
+
+    const agent = await request(context.app).get('/api/agents/local-a');
+    const message = await request(context.app)
+      .post('/api/messages')
+      .send({
+        from: 'local-a',
+        to: 'local-a',
+        target_type: 'agent',
+        type: 'inform',
+        summary: 'hello local',
+        full: 'hello local',
+      });
+
+    expect(agent.status).toBe(200);
+    expect(agent.body.online).toBe(true);
+    expect(agent.body.serverOnline).toBe(true);
+    expect(message.status).toBe(200);
+    expect(message.body.warnings.some((warning) => warning.code === 'target_offline')).toBe(false);
+  });
+
+  test('stale custom local server rows do not cascade remote-offline state to local agents', async () => {
+    const staleTs = Date.now() - 10_000;
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
+      agents: {
+        'local-a': makeAgent('local-a', { server: 'my-local', online: true, tmux: 'local-a:0.0' }),
+      },
+      servers: {
+        'my-local': {
+          id: 'my-local',
+          online: true,
+          lastSeen: staleTs,
+          heartbeatAt: staleTs,
+          updatedAt: staleTs,
+          sessions: ['local-a:0.0'],
+          agents: ['local-a'],
+          agentCount: 1,
+          sourceIp: 'local',
+        },
+      },
+      env: {
+        AGENT_CHAT_SERVER: 'my-local',
+        AGENT_HEARTBEAT_TTL_MS: '100',
+      },
+    }));
+
+    const servers = await request(context.app).get('/api/servers');
+    const agents = readJson(agentsPath(context.runtimeDir));
+
+    expect(servers.status).toBe(200);
+    expect(servers.body[0]).toMatchObject({ id: 'my-local', online: false });
+    expect(agents['local-a'].online).toBe(true);
+    expect(agents['local-a'].tmux).toBe('local-a:0.0');
+    expect(agents['local-a'].offlineReason).toBeNull();
+  });
+
+  test('records the local runtime host only when the local server record flag is enabled', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
+      agents: {
+        'local-a': makeAgent('local-a', { server: 'my-local', online: true, tmux: 'local-a:0.0' }),
+        'remote-a': makeAgent('remote-a', { server: 'remote-host-1', online: true, tmux: 'remote-a:0.0' }),
+      },
+      env: {
+        AGENT_CHAT_SERVER: 'my-local',
+        AGENT_CHAT_RECORD_LOCAL_SERVER: '1',
+      },
+    }));
+
+    const response = await request(context.app).get('/api/servers');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toHaveLength(1);
+    expect(response.body[0]).toMatchObject({
+      id: 'my-local',
+      online: true,
+      agentCount: 1,
+      sourceIp: 'local',
+    });
+    const servers = readJson(serversPath(context.runtimeDir));
+    expect(servers['my-local'].agents).toEqual(['local-a']);
+    expect(servers['my-local'].sessions).toEqual(['local-a:0.0']);
+    expect(servers['my-local'].relayInstanceId).toBeNull();
+    expect(servers['my-local'].relayBootTs).toBe(0);
+  });
+
   test('tracks multiple interleaved remote servers and sorts them by lastSeen', async () => {
     context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
       agents: {},

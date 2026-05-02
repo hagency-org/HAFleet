@@ -54,7 +54,8 @@ const WEB_BRIDGE_FETCH_TIMEOUT_MS = Number.isFinite(WEB_BRIDGE_FETCH_TIMEOUT_MS_
   : 5000;
 const execFileAsync = promisify(execFile);
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
-const LOCAL_SERVER_ID = (process.env.AGENT_CHAT_SERVER || 'local').trim();
+const LOCAL_SERVER_ID = (process.env.AGENT_CHAT_SERVER || 'local').trim() || 'local';
+const RECORD_LOCAL_SERVER = normalizeBoolean(process.env.AGENT_CHAT_RECORD_LOCAL_SERVER) === true;
 const LOCAL_GIT_VERSION = (() => { try { return execSync('git rev-parse --short HEAD', { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { return null; } })();
 const USER_UID = (typeof process.getuid === 'function') ? process.getuid() : null;
 const USER_RUNTIME_DIR = Number.isFinite(USER_UID) ? `/run/user/${USER_UID}` : null;
@@ -4837,6 +4838,49 @@ function ensureServerRecord(serverId) {
   return servers[serverId];
 }
 
+function stringArrayEquals(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right)) return false;
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
+function recordLocalServerObservation(now = Date.now()) {
+  if (!RECORD_LOCAL_SERVER) return false;
+  const serverId = normalizeServer(LOCAL_SERVER_ID) || 'local';
+  const server = ensureServerRecord(serverId);
+  if (!server) return false;
+
+  const localAgentRows = Object.values(agents)
+    .filter(agent => isAgentRecord(agent))
+    .filter(agent => isLocalAgentServer(normalizeServer(agent.server), LOCAL_SERVER_ID))
+    .filter(agent => agent.manualDown !== true)
+    .filter(agent => typeof agent.tmux === 'string' && agent.tmux.trim())
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+  const localAgentNames = localAgentRows.map(agent => agent.name);
+  const sessions = [...new Set(localAgentRows.map(agent => agent.tmux.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
+  let changed = false;
+  if (server.lastSeen !== now) { server.lastSeen = now; changed = true; }
+  if (server.heartbeatAt !== now) { server.heartbeatAt = now; changed = true; }
+  if (server.online !== true) { server.online = true; changed = true; }
+  if (server.updatedAt !== now) { server.updatedAt = now; changed = true; }
+  if (!stringArrayEquals(server.sessions, sessions)) { server.sessions = sessions; changed = true; }
+  if (!stringArrayEquals(server.agents, localAgentNames)) { server.agents = localAgentNames; changed = true; }
+  if ((Number(server.agentCount) || 0) !== localAgentNames.length) { server.agentCount = localAgentNames.length; changed = true; }
+  if (server.sourceIp !== 'local') { server.sourceIp = 'local'; changed = true; }
+  if (server.relayInstanceId !== null) { server.relayInstanceId = null; changed = true; }
+  if ((Number(server.relayBootTs) || 0) !== 0) { server.relayBootTs = 0; changed = true; }
+  if (LOCAL_GIT_VERSION && server.version !== LOCAL_GIT_VERSION) { server.version = LOCAL_GIT_VERSION; changed = true; }
+  if (!Object.prototype.hasOwnProperty.call(server, 'maintenance')) {
+    server.maintenance = SERVER_MAINTENANCE_IDS.has(serverId);
+    changed = true;
+  }
+  return changed;
+}
+
 function isServerInMaintenance(serverId, serverRecord = null) {
   const id = normalizeServer(serverId);
   if (!id) return false;
@@ -4945,7 +4989,7 @@ function evaluateHeartbeatLease(server, incomingInstanceId, incomingBootTs, now)
 
 function refreshServerLiveness() {
   const now = Date.now();
-  let serversChanged = false;
+  let serversChanged = recordLocalServerObservation(now);
   let agentsChanged = false;
   for (const [serverId, server] of Object.entries(servers)) {
     if (!server || typeof server !== 'object') continue;
@@ -4956,6 +5000,7 @@ function refreshServerLiveness() {
       continue;
     }
     const wasOnline = Boolean(server.online);
+    const isLocalServer = isLocalAgentServer(serverId, LOCAL_SERVER_ID);
     const heartbeatAt = Number(server.heartbeatAt) || 0;
     const isOnline = heartbeatAt > 0 && (now - heartbeatAt) <= HEARTBEAT_TTL_MS;
     if (server.online !== isOnline) {
@@ -4966,7 +5011,7 @@ function refreshServerLiveness() {
         server.updatedAt = now;
         serversChanged = true;
       }
-      if (wasOnline && !isOnline) {
+      if (wasOnline && !isOnline && !isLocalServer) {
         if (markAgentsOfflineForServer(serverId, `server-offline:${serverId}`, true)) {
           agentsChanged = true;
         }
@@ -5168,8 +5213,7 @@ async function sweepLocalActivityDurations() {
   for (const agent of Object.values(agents)) {
     if (!isAgentRecord(agent)) continue;
     const serverId = normalizeServer(agent.server);
-    const isLocalAgent = !serverId || serverId === 'local' || serverId === LOCAL_SERVER_ID;
-    if (!isLocalAgent) continue;
+    if (!isLocalAgentServer(serverId, LOCAL_SERVER_ID)) continue;
     localRuntimeAgents.add(agent.name);
 
     const manualDown = agent.manualDown === true;
@@ -5669,8 +5713,7 @@ function countLocalSweepAgents() {
   for (const agent of Object.values(agents)) {
     if (!isAgentRecord(agent) || agent.kind === 'human') continue;
     const serverId = normalizeServer(agent.server);
-    const isLocalAgent = !serverId || serverId === 'local' || serverId === LOCAL_SERVER_ID;
-    if (!isLocalAgent) continue;
+    if (!isLocalAgentServer(serverId, LOCAL_SERVER_ID)) continue;
     count += 1;
   }
   return count;
@@ -5706,7 +5749,7 @@ function getAgentDeliveryState(name) {
   const serverId = normalizeServer(agent.server);
   let serverOnline = true;
   let serverLastSeen = null;
-  if (serverId && serverId !== 'local') {
+  if (serverId && !isLocalAgentServer(serverId, LOCAL_SERVER_ID)) {
     const server = servers[serverId];
     if (server) {
       serverOnline = Boolean(server.online);
