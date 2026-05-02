@@ -11,3 +11,4 @@
 - Received ac-topleader guidance: stay on `master`, do not modify `stable`, keep this phase to docs/audit only, and do not edit `bin/agent-up` or `remote/bin/agent-up` because separate launch work is active there.
 - Integrated all five subagent reports into the draft audit findings and repair table.
 - Added multi-file system documentation: principles, kernel, runtime/transports, edge systems, data/config/tests, and stale-doc archive index.
+- Added approval-gated implementation plan split into kernel, inbox/task, runtime, edge, and data/config/CI batches.

@@ -25,6 +25,7 @@ The first phase is documentation and audit only. Code repairs start after the re
 | `03-edge-systems.md` | Dashboard, tasks, alerts, Supervisor, subconscious, and remote boundaries. |
 | `04-data-config-tests.md` | Data schema, environment, CI, and test harness audit. |
 | `05-docs-archive-index.md` | Old documentation trust/cleanup index. |
+| `06-implementation-plan.md` | Approval-gated repair batch plan. |
 | `system-map.md` | Repository map, runtime components, major flows, and source-of-truth boundaries. |
 | `kernel-boundaries.md` | Core/adjacent/edge classification and ownership rules. |
 | `audit-findings.md` | Consolidated structural and code audit findings with evidence. |
