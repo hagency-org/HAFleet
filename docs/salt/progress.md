@@ -35,3 +35,4 @@
 - Received ac-topleader approval for f24cb17 and confirmation it was merged to `stable`.
 - Started CD audit after CI gate completion. Added `13-cd-flow-and-gaps.md` with CD findings, decision points, and a next-batch repair table covering post-deploy verification, remote dependency install scope, loaded commit checks, MCP wrapper smoke, macOS remote autodeploy policy, and CLI diagnostic fallback drift.
 - Integrated the delayed CD deployment-script subagent report. Added release-gate, dependency retry, remote autodeploy service packaging, and operations runbook drift findings to the CD design and repair table.
+- Implemented the first safe CD preflight slice: `verify-remote --expect-version`, generated MCP wrapper smoke, and generated-package coverage for `push-relay-autodeploy.service`. Verified expected-version pass/fail against the current remote heartbeat, plus CLI contract, syntax, remote package smoke, and remote sync checks.

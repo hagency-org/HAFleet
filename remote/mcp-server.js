@@ -16,4 +16,9 @@ try {
   corePath = repoCore;
 }
 
+if (process.env.AGENTCHAT_WRAPPER_SMOKE === '1') {
+  accessSync(corePath);
+  process.exit(0);
+}
+
 await import(pathToFileURL(path.resolve(corePath)).href);

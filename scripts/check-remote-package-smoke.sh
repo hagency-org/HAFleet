@@ -20,6 +20,7 @@ for required in \
   "bin/agentchat" \
   "bin/agent-up" \
   "push-relay.js" \
+  "push-relay-autodeploy.service" \
   "mcp-server.js" \
   "lib/push-relay-core.js" \
   "lib/mcp-server-core.js" \
@@ -76,5 +77,9 @@ if ! AGENTCHAT_WRAPPER_SMOKE=1 node "$PKG_DIR/push-relay.js"; then
   fail "generated push-relay wrapper failed to resolve its core module"
 fi
 echo "[OK] Generated push-relay wrapper resolves package-local core"
+if ! AGENTCHAT_WRAPPER_SMOKE=1 node "$PKG_DIR/mcp-server.js"; then
+  fail "generated MCP wrapper failed to resolve its core module"
+fi
+echo "[OK] Generated MCP wrapper resolves package-local core"
 
 echo "Generated remote package smoke passed."

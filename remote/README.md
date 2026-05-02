@@ -28,6 +28,7 @@ Most files here are managed by root-level generators/sync checks:
 - `lib/blocked-patterns.js`
 - `lib/eventsource-mini.js`
 - `push-relay.service`
+- `push-relay-autodeploy.service`
 - `.env.example`
 - `install-remote.sh`
 

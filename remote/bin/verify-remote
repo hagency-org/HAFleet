@@ -14,6 +14,7 @@ SERVER_ID="${AGENT_CHAT_SERVER:-}"
 AGENT_NAME="${AGENT_NAME:-}"
 API_TOKEN_VALUE="${API_TOKEN:-}"
 SERVICE_NAME="${SERVICE_NAME:-agent-chat-push-relay}"
+EXPECT_VERSION="${EXPECT_VERSION:-}"
 SAMPLES="${VERIFY_SAMPLES:-3}"
 INTERVAL="${VERIFY_INTERVAL:-15}"
 CHECK_SERVICE=true
@@ -31,6 +32,7 @@ Options:
   --samples <n>       Number of heartbeat samples (default: 3)
   --interval <sec>    Sleep seconds between samples (default: 15)
   --service <name>    Service label/name (systemd unit or launchd label)
+  --expect-version <v> Require /api/servers version to match this value
   --no-service        Skip service active check
   -h, --help          Show this help
 EOF
@@ -87,6 +89,10 @@ while [ $# -gt 0 ]; do
       ;;
     --service)
       SERVICE_NAME="${2:-}"
+      shift 2
+      ;;
+    --expect-version)
+      EXPECT_VERSION="${2:-}"
       shift 2
       ;;
     --no-service)
@@ -192,6 +198,7 @@ for i in $(seq 1 "$SAMPLES"); do
   parsed="$(PAYLOAD="$payload" node -e '
 const serverId = process.argv[1];
 const prev = Number(process.argv[2] || 0);
+const expectedVersion = String(process.argv[3] || "").trim();
 let data;
 try {
   data = JSON.parse(process.env.PAYLOAD || "");
@@ -221,8 +228,13 @@ if (prev > 0 && !(lastSeen > prev)) {
   console.error(`lastSeen not increasing: prev=${prev}, now=${lastSeen}`);
   process.exit(7);
 }
-process.stdout.write(`${lastSeen}\t${row.agentCount ?? 0}\t${row.sourceIp ?? ""}`);
-' "$SERVER_ID" "$prev_seen")"
+const version = row.version == null ? "" : String(row.version);
+if (expectedVersion && version !== expectedVersion) {
+  console.error(`Server ${serverId} version mismatch: expected=${expectedVersion}, got=${version || "n/a"}`);
+  process.exit(8);
+}
+process.stdout.write(`${lastSeen}\t${row.agentCount ?? 0}\t${row.sourceIp ?? ""}\t${version}`);
+' "$SERVER_ID" "$prev_seen" "$EXPECT_VERSION")"
   rc=$?
   set -e
   if [ $rc -ne 0 ]; then
@@ -233,7 +245,10 @@ process.stdout.write(`${lastSeen}\t${row.agentCount ?? 0}\t${row.sourceIp ?? ""}
   current_seen="$(printf '%s' "$parsed" | cut -f1)"
   agent_count="$(printf '%s' "$parsed" | cut -f2)"
   source_ip="$(printf '%s' "$parsed" | cut -f3)"
-  echo "  sample $i/$SAMPLES: lastSeen=$current_seen agentCount=$agent_count sourceIp=$source_ip"
+  version_seen="$(printf '%s' "$parsed" | cut -f4)"
+  version_suffix=""
+  [ -n "$version_seen" ] && version_suffix=" version=$version_seen"
+  echo "  sample $i/$SAMPLES: lastSeen=$current_seen agentCount=$agent_count sourceIp=$source_ip${version_suffix}"
   prev_seen="$current_seen"
   if [ "$i" -lt "$SAMPLES" ]; then
     sleep "$INTERVAL"

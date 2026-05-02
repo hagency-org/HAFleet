@@ -281,7 +281,7 @@ This is the missing CD layer that would have made the idle/relay deployment stat
 
 ## Immediate Next Batch
 
-If approved, the smallest high-confidence implementation batch is:
+The first safe preflight slice is now implemented for items 1, 2, and 4:
 
 1. Add `verify-remote --expect-version`.
 2. Extend generated remote package smoke to include MCP wrapper resolution.
@@ -289,4 +289,4 @@ If approved, the smallest high-confidence implementation batch is:
 4. Include `push-relay-autodeploy.service` in remote package smoke.
 5. Update remote autodeploy design to call post-deploy verification, but only implement restart-loop behavior after operator approves exact remote failure policy.
 
-The release-gate and dependency-retry repairs should be the next P0 batch after ac-topleader confirms whether deploy hosts should use GitHub status checks or a staging worktree preflight.
+Remaining items from this list are `verify-cd-preflight` and the remote autodeploy post-deploy integration. The release-gate and dependency-retry repairs should be the next P0 batch after ac-topleader confirms whether deploy hosts should use GitHub status checks or a staging worktree preflight.

@@ -58,6 +58,7 @@ MANAGED_SPECS=(
   "remote/README.md:README.md"
   "remote/install-remote.sh:install-remote.sh"
   "remote/push-relay.service:push-relay.service"
+  "remote/push-relay-autodeploy.service:push-relay-autodeploy.service"
   "remote/push-relay.plist:push-relay.plist"
   "remote/package.json:package.json"
   "remote/push-relay.js:push-relay.js"
