@@ -12,3 +12,4 @@
 - Integrated all five subagent reports into the draft audit findings and repair table.
 - Added multi-file system documentation: principles, kernel, runtime/transports, edge systems, data/config/tests, and stale-doc archive index.
 - Added approval-gated implementation plan split into kernel, inbox/task, runtime, edge, and data/config/CI batches.
+- ac-topleader approved Batch 1 R-001/R-002 and deferred R-003. Implemented group/message read access controls with regression tests.

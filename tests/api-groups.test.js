@@ -4,6 +4,10 @@ import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
+const API_TOKEN = 'groups-test-api-token';
+const ALPHA_TOKEN = 'alpha-agent-token';
+const BETA_TOKEN = 'beta-agent-token';
+
 function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, 'utf-8'));
 }
@@ -47,6 +51,7 @@ function baseSeed(overrides = {}) {
     cursors: overrides.cursors || {},
     servers: overrides.servers || {},
     agentRuntime: overrides.agentRuntime || {},
+    agentTokens: overrides.agentTokens || {},
     env: overrides.env || {},
   };
 }
@@ -530,6 +535,48 @@ describe('groups api', () => {
 
     expect(first.body.unread).toHaveLength(3);
     expect(second.body.unread).toHaveLength(0);
+  });
+
+  test('requires bearer or target agent token before advancing a group cursor when auth is configured', async () => {
+    context = await createBackendTestContext('api-groups-test-', baseSeed({
+      groups: {
+        dev: { name: 'dev', members: ['alpha', 'beta'], createdAt: 1000 },
+      },
+      messages: [
+        { id: 'msg_1', ts: 1000, from: 'beta', group: 'dev', type: 'inform', priority: 'normal', summary: 'm1', full: 'm1', mentions: [], reply_to: null },
+        { id: 'msg_2', ts: 2000, from: 'beta', group: 'dev', type: 'inform', priority: 'normal', summary: 'm2', full: 'm2', mentions: [], reply_to: null },
+      ],
+      agentTokens: { alpha: ALPHA_TOKEN, beta: BETA_TOKEN },
+      env: { API_TOKEN },
+    }));
+
+    const anonymousPreview = await request(context.app).get('/api/groups/dev/messages?agent=alpha&advance=none');
+    expect(anonymousPreview.status).toBe(401);
+    expect(anonymousPreview.body).toEqual({ error: 'agent token required' });
+
+    const anonymousAdvance = await request(context.app).get('/api/groups/dev/messages?agent=alpha&advance=all');
+    expect(anonymousAdvance.status).toBe(401);
+    expect(anonymousAdvance.body).toEqual({ error: 'agent token required' });
+    expect(readJson(cursorsPath(context.runtimeDir)).alpha || null).toBe(null);
+
+    const wrongAgentAdvance = await request(context.app)
+      .get('/api/groups/dev/messages?agent=alpha&advance=all')
+      .set('X-Agent-Token', BETA_TOKEN);
+    expect(wrongAgentAdvance.status).toBe(403);
+    expect(readJson(cursorsPath(context.runtimeDir)).alpha || null).toBe(null);
+
+    const bearerPreview = await request(context.app)
+      .get('/api/groups/dev/messages?agent=alpha&advance=none')
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(bearerPreview.status).toBe(200);
+    expect(bearerPreview.body.unread.map((row) => row.id)).toEqual(['msg_1', 'msg_2']);
+
+    const agentAdvance = await request(context.app)
+      .get('/api/groups/dev/messages?agent=alpha&advance=all')
+      .set('X-Agent-Token', ALPHA_TOKEN);
+    expect(agentAdvance.status).toBe(200);
+    expect(agentAdvance.body.unread).toHaveLength(2);
+    expect(readJson(cursorsPath(context.runtimeDir)).alpha.groups.dev).toBe(2000);
   });
 
   test('supports advance=delivered by consuming only the returned unread subset', async () => {

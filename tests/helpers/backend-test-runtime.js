@@ -7,6 +7,16 @@ function writeJson(filePath, value) {
   writeFileSync(filePath, JSON.stringify(value, null, 2));
 }
 
+function v1AgentIdFromName(name) {
+  const normalized = String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+/, '')
+    .replace(/_+$/, '');
+  return normalized ? `agent_${normalized}` : null;
+}
+
 export async function createBackendTestContext(prefix, seed = {}) {
   const runtimeDir = mkdtempSync(path.join(os.tmpdir(), prefix));
   const dataDir = path.join(runtimeDir, 'data');
@@ -22,6 +32,15 @@ export async function createBackendTestContext(prefix, seed = {}) {
   writeJson(path.join(dataDir, 'local_activity_sweep.json'), { selectionCursor: 0 });
   if (seed.deletedAgents) writeJson(path.join(dataDir, 'deleted_agents.json'), seed.deletedAgents);
   writeJson(path.join(dataDir, '.msg_counter'), seed.msgCounter || 0);
+  if (seed.agentTokens && typeof seed.agentTokens === 'object') {
+    for (const [name, token] of Object.entries(seed.agentTokens)) {
+      const agentId = v1AgentIdFromName(name);
+      if (!agentId) continue;
+      const stateDir = path.join(runtimeDir, 'homes', 'agents', agentId, 'state');
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(path.join(stateDir, 'agent-token'), String(token));
+    }
+  }
 
   const savedApiToken = process.env.API_TOKEN;
   process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;

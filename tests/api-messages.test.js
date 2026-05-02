@@ -4,6 +4,10 @@ import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
+const API_TOKEN = 'messages-test-api-token';
+const ALPHA_TOKEN = 'alpha-agent-token';
+const BETA_TOKEN = 'beta-agent-token';
+
 describe('backend message API', () => {
   let context;
 
@@ -18,8 +22,18 @@ describe('backend message API', () => {
           manualDown: true,
           offlineReason: 'test-offline',
         },
+        beta: {
+          name: 'beta',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+        },
       },
-      groups: {},
+      groups: {
+        dev: { name: 'dev', members: ['alpha', 'beta'], createdAt: 1000 },
+      },
+      agentTokens: { alpha: ALPHA_TOKEN, beta: BETA_TOKEN },
+      env: { API_TOKEN },
     });
   });
 
@@ -44,7 +58,9 @@ describe('backend message API', () => {
       });
     expect(createResponse.status).toBe(200);
 
-    const readResponse = await request(context.app).get(`/api/messages/${createResponse.body.id}`);
+    const readResponse = await request(context.app)
+      .get(`/api/messages/${createResponse.body.id}`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
     expect(readResponse.status).toBe(200);
     expect(readResponse.body.schema).toEqual({
       kind: 'task_request',
@@ -100,7 +116,9 @@ describe('backend message API', () => {
       });
     expect(createResponse.status).toBe(200);
 
-    const readResponse = await request(context.app).get(`/api/messages/${createResponse.body.id}`);
+    const readResponse = await request(context.app)
+      .get(`/api/messages/${createResponse.body.id}`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
     expect(readResponse.status).toBe(200);
     expect(readResponse.body.priority).toBe('high');
   });
@@ -118,9 +136,89 @@ describe('backend message API', () => {
       });
     expect(createResponse.status).toBe(200);
 
-    const readResponse = await request(context.app).get(`/api/messages/${createResponse.body.id}`);
+    const readResponse = await request(context.app)
+      .get(`/api/messages/${createResponse.body.id}`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
     expect(readResponse.status).toBe(200);
     expect(readResponse.body.priority).toBe('urgent');
+  });
+
+  test('GET message detail requires bearer or visible agent identity', async () => {
+    const createResponse = await request(context.app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alpha',
+        type: 'inform',
+        summary: 'private detail',
+        full: 'private body',
+      });
+    expect(createResponse.status).toBe(200);
+
+    const anonymous = await request(context.app).get(`/api/messages/${createResponse.body.id}`);
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.body).toEqual({ error: 'agent identity required' });
+
+    const wrongAgent = await request(context.app)
+      .get(`/api/messages/${createResponse.body.id}`)
+      .query({ agent: 'beta' })
+      .set('X-Agent-Token', BETA_TOKEN);
+    expect(wrongAgent.status).toBe(403);
+
+    const recipient = await request(context.app)
+      .get(`/api/messages/${createResponse.body.id}`)
+      .query({ agent: 'alpha' })
+      .set('X-Agent-Token', ALPHA_TOKEN);
+    expect(recipient.status).toBe(200);
+    expect(recipient.body.full).toBe('private body');
+
+    const bearer = await request(context.app)
+      .get(`/api/messages/${createResponse.body.id}`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(bearer.status).toBe(200);
+  });
+
+  test('GET message detail allows group members with agent token', async () => {
+    const createResponse = await request(context.app)
+      .post('/api/messages')
+      .send({
+        from: 'alpha',
+        group: 'dev',
+        type: 'inform',
+        summary: 'group detail',
+        full: 'group body',
+      });
+    expect(createResponse.status).toBe(200);
+
+    const member = await request(context.app)
+      .get(`/api/messages/${createResponse.body.id}`)
+      .query({ agent: 'beta' })
+      .set('X-Agent-Token', BETA_TOKEN);
+    expect(member.status).toBe(200);
+    expect(member.body.full).toBe('group body');
+  });
+
+  test('GET HTML message detail requires the same message access', async () => {
+    const createResponse = await request(context.app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alpha',
+        type: 'inform',
+        summary: 'html detail',
+        full: 'html body',
+      });
+    expect(createResponse.status).toBe(200);
+
+    const anonymous = await request(context.app).get(`/msg/${createResponse.body.id}`);
+    expect(anonymous.status).toBe(401);
+
+    const recipient = await request(context.app)
+      .get(`/msg/${createResponse.body.id}`)
+      .query({ agent: 'alpha' })
+      .set('X-Agent-Token', ALPHA_TOKEN);
+    expect(recipient.status).toBe(200);
+    expect(recipient.text).toContain('html detail');
   });
 
   test('POST message with priority=invalid returns 400', async () => {

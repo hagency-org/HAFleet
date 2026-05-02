@@ -2402,6 +2402,36 @@ function hasApiTokenAccess(req) {
   return getBearerToken(req) === expectedToken;
 }
 
+function getRequestAgentName(req) {
+  return normalizeAgentName(
+    req?.query?.agent
+    || req?.headers?.['x-agent-name']
+    || req?.headers?.['x-agent']
+    || ''
+  );
+}
+
+function authorizeAgentCredential(req, agentName) {
+  const normalized = normalizeAgentName(agentName);
+  if (!normalized) return { ok: false, status: 400, error: 'agent identity required' };
+  if (hasApiTokenAccess(req)) return { ok: true, mode: 'bearer' };
+
+  const expectedAgentToken = agentTokens.get(normalized);
+  const providedAgentToken = (req?.headers?.['x-agent-token'] || '').trim();
+  if (expectedAgentToken) {
+    if (providedAgentToken === expectedAgentToken) return { ok: true, mode: 'agent-token' };
+    return { ok: false, status: providedAgentToken ? 403 : 401, error: 'agent token required' };
+  }
+
+  const expectedBearer = normalizeOptionalText(process.env.API_TOKEN, 512);
+  if (expectedBearer) {
+    return { ok: false, status: 401, error: 'bearer token or agent token required' };
+  }
+
+  // Development/test compatibility when no auth material is configured.
+  return { ok: true, mode: 'agent-identity-unverified' };
+}
+
 function authorizeSubconsciousEventIngest(req) {
   if (isLocalRequest(req)) {
     return { ok: true, mode: 'local' };
@@ -3772,6 +3802,26 @@ function messageTargetsAgent(msg, agentName) {
   if (!msg.group) return false;
   if (!isGroupMember(msg.group, agentName)) return false;
   return Array.isArray(msg.mentions) && msg.mentions.includes(agentName);
+}
+
+function messageVisibleToAgent(msg, agentName) {
+  const normalized = normalizeAgentName(agentName);
+  if (!msg || !normalized) return false;
+  if (msg.from === normalized || msg.to === normalized) return true;
+  if (msg.group && isGroupMember(msg.group, normalized)) return true;
+  return false;
+}
+
+function authorizeMessageDetailAccess(req, msg) {
+  if (hasApiTokenAccess(req)) return { ok: true, mode: 'bearer' };
+
+  const agentName = getRequestAgentName(req);
+  if (!agentName) return { ok: false, status: 401, error: 'agent identity required' };
+  if (!isAgentRecord(agents[agentName])) return { ok: false, status: 404, error: 'agent not found' };
+  if (!messageVisibleToAgent(msg, agentName)) {
+    return { ok: false, status: 403, error: `agent '${agentName}' cannot access message ${msg?.id || ''}`.trim() };
+  }
+  return authorizeAgentCredential(req, agentName);
 }
 
 function buildUnreadInboxSnapshot(agentName, options = {}) {
@@ -8636,6 +8686,8 @@ app.get('/api/dm/:agent/history', requireBearer, (req, res) => {
 app.get('/api/messages/:id', (req, res) => {
   const msg = messages.find(m => m.id === req.params.id);
   if (!msg) return res.status(404).json({ error: 'message not found' });
+  const auth = authorizeMessageDetailAccess(req, msg);
+  if (!auth.ok) return res.status(auth.status || 403).json({ error: auth.error || 'message access denied' });
   const normalizedSchema = normalizeMessageSchema(msg?.schema);
   res.json({
     ...msg,
@@ -8681,7 +8733,12 @@ app.post('/api/messages/:id/suppress', requireAgentToken(_tokenFromAgent), (req,
 app.get('/msg/:id', (req, res) => {
   const msg = messages.find(m => m.id === req.params.id);
   if (!msg) return res.status(404).send('<h1>Message not found</h1>');
+  const auth = authorizeMessageDetailAccess(req, msg);
+  if (!auth.ok) {
+    return res.status(auth.status || 403).type('html').send(`<h1>${auth.status || 403}</h1><p>${String(auth.error || 'message access denied').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`);
+  }
   const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const agentLinkParam = getRequestAgentName(req) ? `?agent=${encodeURIComponent(getRequestAgentName(req))}` : '';
   const attachmentsHtml = Array.isArray(msg.attachments) && msg.attachments.length > 0
     ? '<div class="meta">Attachments:<br>' + msg.attachments
       .map(a => {
@@ -8734,7 +8791,7 @@ app.get('/msg/:id', (req, res) => {
   <span>${relativeTime(msg.ts)}</span>
 </div>
 ${msg.mentions.length ? '<div class="mentions">Mentions: ' + msg.mentions.map(m => '@' + escape(m)).join(' ') + '</div>' : ''}
-${msg.reply_to ? '<div class="meta">Reply to: <a href="/msg/' + escape(msg.reply_to) + '" style="color:#4dabf7">' + escape(msg.reply_to) + '</a></div>' : ''}
+${msg.reply_to ? '<div class="meta">Reply to: <a href="/msg/' + escape(msg.reply_to) + agentLinkParam + '" style="color:#4dabf7">' + escape(msg.reply_to) + '</a></div>' : ''}
 ${attachmentsHtml}
 <div class="summary">${escape(msg.summary).replace(/\\n/g, '<br>').replace(/\n/g, '<br>')}</div>
 <h3>Full Message</h3>
@@ -8846,6 +8903,8 @@ app.get('/api/groups/:name/messages', (req, res) => {
   if (!isGroupMember(groupName, resolvedAgentName)) {
     return res.status(403).json({ error: `agent '${resolvedAgentName}' is not a member of group '${groupName}'` });
   }
+  const auth = authorizeAgentCredential(req, resolvedAgentName);
+  if (!auth.ok) return res.status(auth.status || 403).json({ error: auth.error || 'agent credential required for group messages' });
 
   const limitRaw = Number.parseInt(req.query.limit, 10);
   const limit = Number.isFinite(limitRaw) && limitRaw >= 0 ? Math.min(limitRaw, 200) : 10;
