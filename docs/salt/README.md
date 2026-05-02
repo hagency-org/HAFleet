@@ -35,6 +35,7 @@ The first phase is documentation and audit only. Code repairs start after the re
 | `13-cd-flow-and-gaps.md` | CD audit findings, current gaps, and proposed deploy-gate model. |
 | `14-cd-next-decisions.md` | Decision pack for the next CD batches after the first CI/preflight gate. |
 | `15-phase2-7-resumption-plan.md` | Updated Phase 2-7 implementation order using the new CI/CD gates. |
+| `16-cd-b0-remote-install-profile.md` | Remote install/profile/reproducibility decision-support contract and static gate. |
 | `system-map.md` | Repository map, runtime components, major flows, and source-of-truth boundaries. |
 | `kernel-boundaries.md` | Core/adjacent/edge classification and ownership rules. |
 | `audit-findings.md` | Consolidated structural and code audit findings with evidence. |
@@ -51,5 +52,5 @@ The first phase is documentation and audit only. Code repairs start after the re
 - Remote/local split audit is documented as design-only in `08` through `10`; no runtime code repair started for this topic.
 - Phase 0 terminology is staged in `11`; this folder is the temporary authority for remote/local terms until root docs are approved for rewrite.
 - CI/CD first gate is implemented in `12` and exposed through `npm run verify:ci`.
-- CD preflight and post-deploy version checks are implemented; remaining CD work is decision-gated in `14`.
+- CD preflight and post-deploy version checks are implemented; remaining CD work is decision-gated in `14` and remote install/profile facts are locked in `16`.
 - Phase 2-7 resumption is staged in `15`; RLP4-A MCP media cache relocation, RLP4-B v1 home/runtime resolver hardening, RLP2-A runtime observation provenance, RLP2-B custom local server ID/local server record, CLI unknown-activity observability, RLP6-A profile-scoped help/docs, RLP6-B `agent-ls` resolver consistency, RLP3-A auth readiness diagnostics, RLP3-A2 server credential boundary diagnostics, and RLP3-B1 dashboard mutation boundary are implemented. RLP7-B dependency audit findings are documented for approval. CD decision docs now include full-clone remote profile, dependency lock, standalone version, and install-reconciliation decisions; deploy-behavior batches remain operator-gated.
