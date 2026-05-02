@@ -27,6 +27,9 @@ The first phase is documentation and audit only. Code repairs start after the re
 | `05-docs-archive-index.md` | Old documentation trust/cleanup index. |
 | `06-implementation-plan.md` | Approval-gated repair batch plan. |
 | `07-task-truth-design.md` | R-006 design-only canonical task model. |
+| `08-remote-local-current-state.md` | Current remote/local topology, split inventory, and drift evidence. |
+| `09-remote-local-unification-design.md` | Unified runtime-host, identity, config, and package design. |
+| `10-remote-local-roadmap.md` | Dependency-ordered roadmap for future remote/local repair batches. |
 | `system-map.md` | Repository map, runtime components, major flows, and source-of-truth boundaries. |
 | `kernel-boundaries.md` | Core/adjacent/edge classification and ownership rules. |
 | `audit-findings.md` | Consolidated structural and code audit findings with evidence. |
@@ -40,3 +43,4 @@ The first phase is documentation and audit only. Code repairs start after the re
 - Five subagents completed read-only audits for kernel, MCP/CLI/push, persistence/config/tests, edge systems, and old docs.
 - Batch 1 and Batch 2 repairs are implemented and pushed.
 - Batch 3 approved scope R-009/R-015 is implemented.
+- Remote/local split audit is documented as design-only in `08` through `10`; no runtime code repair started for this topic.

@@ -18,3 +18,7 @@
 - Verified Batch 3 with syntax checks, `tests/push-relay.test.js`, the Batch 1/2 API regression set, and read-only `/bin/bash bin/agent-service status` smoke checks.
 - Fixed a `server-delivery` test isolation issue found during full-suite verification; `tests/server-delivery.test.js` now passes independently.
 - Full `npm test` is still blocked only by missing Matrix native optional package `@matrix-org/matrix-sdk-crypto-nodejs-darwin-arm64` in the local `npm ci --ignore-scripts` install; non-Matrix suites report 347 passing tests and 21 skipped Matrix tests before import failure.
+- Received ac-topleader approval for remote/local deep audit as read-only plus docs-only design work.
+- Started four read-only subagents for runtime topology, packaging/sync, config/auth/identity, and operator workflow/docs.
+- Added remote/local design documentation covering current state, unified runtime-host design, and a dependency-ordered roadmap.
+- Verified docs diff with `git diff --check`; read-only remote sync probes still fail as expected and are recorded as design evidence.

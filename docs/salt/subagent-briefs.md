@@ -145,3 +145,52 @@ Accepted recommendations:
 - Replace `declare -A` in `normalize_services()` with a Bash 3.2-compatible ordered array scan.
 - Preserve first-seen order and empty service filtering.
 - Verify with `/bin/bash -n` and read-only `status --service` invocations; do not run pause/resume/restart during validation.
+
+## Remote/local focused audit round
+
+### Wegener: runtime topology
+
+Status: complete, read-only.
+
+Accepted conclusions:
+
+- `backend-v2.js` is the kernel and durable truth owner.
+- Remote relay is closer to the target edge-adapter model than local.
+- Local still has backend tmux sweep, dashboard queue delivery, and optional push relay compatibility paths.
+- Runtime host should become first-class; local and remote should both report heartbeat/runtime through the same host adapter contract.
+- `agent.server` and `agent.tmux` currently mix routing, target, and online evidence.
+
+### Faraday: packaging and remote mirror
+
+Status: complete, read-only.
+
+Accepted conclusions:
+
+- Root `bin/*` and `lib/*` are the source for most remote mirrored files.
+- `remote/` mixes authored remote package files and managed mirrors.
+- `remote-dist/` is stale/incomplete.
+- `check-remote-sync` and `build-remote-package.sh --check` fail because remote files drifted and generated package dependencies are incomplete.
+- Remote `agentchat` advertises commands not included in the remote package.
+- Future packaging should be manifest-driven and profile-aware, not hand-maintained mirrors.
+
+### Linnaeus: config/auth/identity
+
+Status: complete, read-only.
+
+Accepted conclusions:
+
+- `API_TOKEN` currently conflates operator/admin bearer, relay credential, and dashboard backend proxy credential.
+- `AGENT_CHAT_SERVER` currently conflates backend local id, relay id, MCP auto-register id, and dashboard locality checks.
+- Agent identity is repeated across backend record, v1 manifest, tmux session, `AGENT_NAME`, and heartbeat sessions.
+- Runtime paths should be derived from a common v1 home/state resolver instead of being hand-assembled by relay/MCP/launch scripts.
+
+### Godel: operator workflow and docs
+
+Status: complete, read-only.
+
+Accepted conclusions:
+
+- Docs mostly state the right high-level model, but command semantics are not profile-aware.
+- `agentchat update`, `agentchat service`, `agent-up`, `agent-down`, `agent-ls`, and `check-mcp` are the most confusing operator surfaces.
+- `ROADMAP-remote.md` is stale as a roadmap and should become archive or a current deployment document.
+- The formal docs spine should split kernel invariants, deployment profiles, CLI semantics, install guides, and operations runbooks.
