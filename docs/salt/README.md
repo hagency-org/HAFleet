@@ -34,6 +34,7 @@ The first phase is documentation and audit only. Code repairs start after the re
 | `12-cicd-gates.md` | First executable CI/CD gate design and remaining release-gate gaps. |
 | `13-cd-flow-and-gaps.md` | CD audit findings, current gaps, and proposed deploy-gate model. |
 | `14-cd-next-decisions.md` | Decision pack for the next CD batches after the first CI/preflight gate. |
+| `15-phase2-7-resumption-plan.md` | Updated Phase 2-7 implementation order using the new CI/CD gates. |
 | `system-map.md` | Repository map, runtime components, major flows, and source-of-truth boundaries. |
 | `kernel-boundaries.md` | Core/adjacent/edge classification and ownership rules. |
 | `audit-findings.md` | Consolidated structural and code audit findings with evidence. |
@@ -51,3 +52,4 @@ The first phase is documentation and audit only. Code repairs start after the re
 - Phase 0 terminology is staged in `11`; this folder is the temporary authority for remote/local terms until root docs are approved for rewrite.
 - CI/CD first gate is implemented in `12` and exposed through `npm run verify:ci`.
 - CD preflight and post-deploy version checks are implemented; remaining CD work is decision-gated in `14`.
+- Phase 2-7 resumption is staged in `15`; first recommended safe code batch is MCP media cache relocation.

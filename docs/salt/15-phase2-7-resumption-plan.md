@@ -1,0 +1,285 @@
+# 15 Phase 2-7 Resumption Plan
+
+Date: 2026-05-03
+Status: resumption plan; approval required before behavior changes.
+
+## Baseline
+
+Phase 0 and Phase 1 are complete enough to resume the deferred remote/local roadmap:
+
+1. terms and profile scope are staged in `11-remote-local-phase0-terms.md`;
+2. remote package honesty is enforced by `check:cli-contract`, `build:remote:check`, `check:remote-sync`, and `check:remote-package-smoke`;
+3. source/package CI is exposed as `npm run verify:ci`;
+4. deploy-candidate preflight is exposed as `npm run verify:cd-preflight`;
+5. remote loaded-version verification is exposed as `agentchat verify-remote --expect-version <short-sha>`.
+
+The remaining Phase 2-7 work should now use those gates as a required part of each batch, rather than relying on manual confidence.
+
+## Guardrails
+
+Keep these boundaries unless ac-topleader explicitly changes them:
+
+1. work on `master`, never directly on `stable`;
+2. do not edit `bin/agent-up` or `remote/bin/agent-up` until Phase 5 is approved;
+3. do not change actual deploy/autodeploy behavior unless the specific CD batch is approved;
+4. commit and push each completed batch;
+5. run `npm run verify:ci` before every push;
+6. for deploy-relevant batches, run `npm run verify:cd-preflight` on a clean commit and use `verify-remote --expect-version <short-sha>` after stable deployment.
+
+## Current Phase State
+
+| Phase | Current state | Safe next step | Approval |
+| --- | --- | --- | --- |
+| Phase 2 runtime observation | Remote relay reports heartbeat/runtime; central-local still has backend tmux sweeps and local-only idle probes. | Start with observation provenance and local-host server record work, not default behavior flips. | Required |
+| Phase 3 credentials/trust | Shared `API_TOKEN` remains overloaded; agent token hard mode is not production default; dashboard proxy and Matrix trust remain compatibility surfaces. | Split into token-readiness, dashboard local-only/auth, Matrix trust, and server credential batches. | Required |
+| Phase 4 paths | Runtime dir guard exists; MCP media cache still resolves under current project cwd. | Move MCP media cache under agent state/runtime data and add mirror tests. | Required |
+| Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
+| Phase 6 CLI/ops profile | Remote command honesty is enforced; some command help/scope semantics remain implicit. | Tighten help/docs/profile metadata without changing launch internals. | Required |
+| Phase 7 CI/release gates | `verify:ci` and remote package gates are enforced; `audit:deps` is intentionally separate and red; CD-A is still pending. | Add missing focused gates after each repair; handle dependency audit as a dedicated security batch. | Required |
+
+## Phase 2: Runtime Observation
+
+Current evidence:
+
+- `backend-v2.js` owns `/api/servers/heartbeat`, `servers.json`, and `agent_runtime.json`.
+- `lib/push-relay-core.js` already reports runtime and heartbeat from remote hosts.
+- `server.js` still performs local tmux pane snapshot sweeps for dashboard idle/queue behavior.
+- `agent_runtime.json` records activity and MCP state, but it does not clearly encode the observation owner/source for each update.
+
+Recommended batch RLP2-A: runtime observation provenance.
+
+Scope:
+
+1. add normalized runtime observation fields such as `runtime.observerServer`, `runtime.observerSource`, and `runtime.observedAt`;
+2. set them on `/api/agents/:name/runtime` updates from relay/backend payloads;
+3. expose them in the runtime API response and agent detail where useful;
+4. add tests proving local and remote runtime reports do not silently overwrite ownership context.
+
+Files likely touched:
+
+- `backend-v2.js`
+- `tests/api-runtime.test.js`
+- possibly `tests/api-server-heartbeat.test.js`
+
+Verification:
+
+- targeted `vitest run tests/api-runtime.test.js tests/api-server-heartbeat.test.js`
+- targeted `vitest run tests/push-relay.test.js` if relay report payloads change
+- `npm run verify:ci`
+- clean `npm run verify:cd-preflight`
+
+Do not do in RLP2-A:
+
+- do not disable backend local sweep by default;
+- do not require local central delivery to use push relay;
+- do not change launch/provisioning.
+
+Recommended later batch RLP2-B: local-host server record.
+
+Goal:
+
+Make the central-local runtime host visible through the same `servers.json` liveness model without changing delivery. This can be done by recording a local server row for `AGENT_CHAT_SERVER` and associating local agents with it.
+
+Implementation shape:
+
+1. start behind an explicit flag such as `AGENT_LOCAL_SERVER_HEARTBEAT=1`;
+2. call an internal helper around `applyServerHeartbeat(LOCAL_SERVER_ID, ...)`, not an HTTP self-call;
+3. use only confirmed local tmux sessions for the heartbeat payload;
+4. do not disable local sweep or change delivery in the same batch.
+
+Decision needed:
+
+Whether local host liveness should be produced by backend self-observation or by a local host adapter process. The roadmap already says local delivery does not need push relay by default in this phase, so backend self-observation is the smaller compatibility path.
+
+## Phase 3: Credentials And Trust
+
+Current evidence:
+
+- `API_TOKEN` is still used as backend/operator bearer by web proxy, MCP, relay, and CLI tools.
+- `/api/servers/heartbeat` requires bearer but not a server-specific credential.
+- `/api/agents/:name/runtime` has per-agent token support through `requireAgentToken`, but production fail-closed remains blocked by provisioning/token readiness.
+- `server.js` dashboard routes proxy many privileged backend APIs using backend bearer credentials.
+- `bridge-matrix.js` defaults `MATRIX_TRUST_MODE` to `audit`.
+
+Recommended batch RLP3-A: auth readiness and diagnostics.
+
+Scope:
+
+1. document and test the exact `AGENTCHAT_AGENT_TOKEN_MODE` behavior;
+2. add a startup/provisioning readiness check that reports missing managed agent tokens without flipping production to hard mode;
+3. add tests that hard mode rejects registered agents without provisioned tokens once the operator chooses fail-closed semantics;
+4. keep R-003 fail-closed deferred until tokens are provisioned for existing agents.
+
+Recommended batch RLP3-A2: server credential split.
+
+Scope:
+
+1. introduce a server/relay credential such as `AGENTCHAT_SERVER_TOKEN` or a per-server token store;
+2. add `requireServerCredential(serverId)` for `/api/servers/*` and host-owned runtime report paths;
+3. keep `API_TOKEN` accepted only behind an explicit compatibility flag during migration;
+4. update relay clients to prefer server credential for heartbeat/runtime/offline after the credential model is approved.
+
+Recommended batch RLP3-B: dashboard boundary.
+
+Scope:
+
+1. add local-only or explicit-auth gate for mutating dashboard proxy routes;
+2. protect queue mutation and tmux injection surfaces first;
+3. keep read-only local dashboard behavior compatible until operator chooses web auth model.
+
+Recommended batch RLP3-C: Matrix trust default decision.
+
+Scope:
+
+1. decide whether `MATRIX_TRUST_MODE` should default to `enforce` for mutating commands;
+2. add tests for empty allowlists and untrusted rooms;
+3. preserve audit mode only as explicit compatibility config.
+
+Known test gap:
+
+Local Matrix trust tests can be blocked by the optional native Matrix crypto package on macOS. Keep Matrix dependency behavior under Phase 7/R-029/R-024 rather than hiding it.
+
+Verification:
+
+- targeted API auth tests for the changed surface;
+- Matrix tests when Matrix bridge behavior changes;
+- `npm run verify:ci`;
+- `npm run verify:cd-preflight`.
+
+## Phase 4: Path Normalization
+
+Current evidence:
+
+- `lib/runtime-dir-guard.js` already guards stale runtime roots.
+- `lib/mcp-server-core.js` currently sets `MEDIA_FETCH_CACHE_DIR` with `path.resolve('data', 'mcp-media-cache', AGENT_NAME)`, so MCP media cache can land under the caller's current project directory.
+- `remote/lib/mcp-server-core.js` mirrors this behavior and must stay synchronized when fixed.
+
+Recommended batch RLP4-A: MCP media cache relocation.
+
+Scope:
+
+1. compute MCP media cache under `AGENTCHAT_AGENT_STATE_DIR` when available;
+2. otherwise use a stable runtime data dir derived from `AGENT_CHAT_RUNTIME_DIR` or the agentchat home;
+3. keep root and remote `lib/mcp-server-core.js` mirrored;
+4. add tests that prove media cache no longer writes into arbitrary cwd.
+
+Files likely touched:
+
+- `lib/mcp-server-core.js`
+- `remote/lib/mcp-server-core.js`
+- `tests` for MCP media/cache path behavior
+- possibly `scripts/check-remote-sync.sh` only if mirror rules need an explicit assertion
+
+Verification:
+
+- targeted MCP cache test;
+- `npm run check:remote-sync`;
+- `npm run check:remote-package-smoke`;
+- `npm run verify:ci`;
+- `npm run verify:cd-preflight`.
+
+Risk:
+
+Existing message attachment outputs can contain `LocalPath:` values under the old cache root. Moving the cache can leave stale old cached files, but it should not change durable message truth.
+
+## Phase 5: Launch Decomposition
+
+Status:
+
+Frozen until ac-topleader explicitly clears launch work.
+
+Do not edit:
+
+- `bin/agent-up`
+- `remote/bin/agent-up`
+
+Allowed before approval:
+
+1. read-only launch decomposition notes;
+2. test design for quoting/env injection;
+3. inventory of shared launcher functions that could be extracted later.
+
+This phase should not block Phase 4 cache cleanup or Phase 6 CLI help/profile cleanup, as long as those batches avoid launch internals.
+
+## Phase 6: CLI And Ops Profile Cleanup
+
+Current evidence:
+
+- Phase 1 made root and remote `agentchat` command surfaces honest.
+- `scripts/cli-command-manifest.json` is now the command contract source for root/remote dispatch checks.
+- Some commands still need clearer host/backend/profile wording in help and operations docs.
+
+Recommended batch RLP6-A: profile-scoped help and docs.
+
+Scope:
+
+1. make `agentchat service`, `agentchat update`, `agent-ls`, and `agent-down` help text explicit about host-local vs backend scope;
+2. keep remote command set aligned with `scripts/cli-command-manifest.json`;
+3. update `OPERATIONS.md` command scope where needed;
+4. avoid changing command behavior until help/tests prove the intended contract.
+
+Verification:
+
+- `npm run check:cli-contract`;
+- `npm run check:remote-sync`;
+- `npm run check:remote-package-smoke`;
+- `npm run verify:ci`.
+
+Recommended later batch RLP6-B: shell resolver consistency.
+
+Scope:
+
+1. align `agent-ls` home/runtime defaults with `lib/agent-home-v1.js` semantics without touching launch;
+2. add shell-level tests with fake `tmux`/`curl` for `agent-down` name resolution and backend-unavailable refusal;
+3. avoid changing shutdown behavior in this batch.
+
+## Phase 7: CI And Release Gates
+
+Current state:
+
+- GitHub Actions runs `npm run verify:ci` on `master` and `stable`.
+- `verify:ci` includes syntax, CLI contract, remote sync, generated remote package smoke, dependency isolation, and kernel/CLI smoke.
+- `npm run audit:deps` remains separate because the current advisory baseline is not fixed.
+- CD-A remains pending for stable/live release gate and dependency retry state.
+
+Recommended batch RLP7-A: keep gates attached to each repair.
+
+Policy:
+
+1. every Phase 2-6 code batch must add or update a targeted test;
+2. every batch must pass `npm run verify:ci`;
+3. every deploy-relevant batch must pass clean `npm run verify:cd-preflight`;
+4. after stable deployment, verify the remote side with `agentchat verify-remote --expect-version <short-sha>`;
+5. do not make `audit:deps` blocking until R-024 dependency remediation is complete.
+
+Recommended batch RLP7-B: dependency audit repair.
+
+Scope:
+
+1. inspect current `npm run audit:deps` output;
+2. decide upgrade vs documented temporary allowlist;
+3. add the chosen dependency policy to `verify:ci` only when it is green.
+
+## Recommended Implementation Order
+
+1. RLP4-A MCP media cache relocation. Small, high-confidence, no launch dependency, directly fixes R-012.
+2. RLP2-A runtime observation provenance. Adds source clarity before changing observation ownership.
+3. RLP6-A profile-scoped help/docs. Makes operator behavior clearer before deeper CLI behavior changes.
+4. RLP3-A auth readiness diagnostics. Prepares Phase 3 without flipping fail-closed production behavior.
+5. CD-A stable release gate and dependency retry, once ac-topleader approves `14-cd-next-decisions.md`.
+6. RLP3-B dashboard local-only/auth gate.
+7. RLP3-C Matrix trust default.
+8. RLP2-B local-host server record.
+9. RLP7-B dependency audit remediation.
+10. Phase 5 launch decomposition only after the launch freeze is lifted.
+
+## Approval Request
+
+The first recommended code batch is RLP4-A:
+
+- fix MCP media cache location in root and remote MCP core;
+- add focused tests;
+- run `check:remote-sync`, `check:remote-package-smoke`, `verify:ci`, and clean `verify:cd-preflight`;
+- commit and push to `master`.
+
+This does not touch launch, stable, deploy scripts, dashboard auth, Matrix, or runtime observation behavior.
