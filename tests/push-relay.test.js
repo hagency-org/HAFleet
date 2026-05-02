@@ -1,9 +1,11 @@
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   buildNotification,
   detectBlockedReason,
+  drainRelayQueue,
   evaluateAgentRouting,
   handleMessage,
+  relayQueue,
   resetRelayState,
   scanBlockedStates,
   seedRelayState,
@@ -13,6 +15,7 @@ import {
 
 describe('push relay dispatch', () => {
   afterEach(() => {
+    vi.useRealTimers();
     resetRelayState();
     setPushRelayTestHooks();
   });
@@ -113,6 +116,7 @@ describe('push relay dispatch', () => {
       from: 'beta',
       to: 'alpha',
       type: 'request',
+      priority: 'high',
       summary: 'Need help',
       mentions: [],
     });
@@ -170,11 +174,107 @@ describe('push relay dispatch', () => {
       from: 'sender',
       group: 'dev',
       type: 'inform',
+      priority: 'high',
       summary: '@alpha @bravo heads up',
       mentions: ['alpha', 'bravo', 'alpha'],
     }));
 
     expect(delivered.map((row) => row.target).sort()).toEqual(['alpha:0.0', 'bravo:0.0']);
+  });
+
+  test('holds normal-priority messages until pane content is idle', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    const delivered = [];
+    let paneText = 'thinking about next step';
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'alpha', server: null, tmux: 'alpha:0.0' }],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      tmuxBin: 'tmux',
+      execFileSync: (_cmd, args) => {
+        if (args[0] === 'capture-pane') return paneText;
+        if (args[0] === 'list-panes' && args.includes('#{pane_current_command}')) return 'codex\n';
+        if (args[0] === 'list-panes' && args.includes('#{pane_current_path}')) return '/tmp\n';
+        throw new Error(`unexpected exec ${args.join(' ')}`);
+      },
+      readFileSync: () => {
+        throw Object.assign(new Error('missing pid file'), { code: 'ENOENT' });
+      },
+      fetch: async () => ({ ok: true, text: async () => '' }),
+    });
+    setPushToTmuxForTest((target, payload) => {
+      delivered.push({ target, payload });
+      return true;
+    });
+
+    await scanBlockedStates();
+    await handleMessage(JSON.stringify({
+      id: 'msg_idle_1',
+      from: 'beta',
+      to: 'alpha',
+      type: 'request',
+      summary: 'Need help after idle',
+      mentions: [],
+    }));
+
+    expect(delivered).toEqual([]);
+    expect(relayQueue.get('alpha')).toHaveLength(1);
+
+    vi.setSystemTime(new Date('2026-01-01T00:00:21Z'));
+    drainRelayQueue();
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].target).toBe('alpha:0.0');
+    expect(delivered[0].payload).toContain('Need help after idle');
+
+    paneText = 'new output appeared';
+    await handleMessage(JSON.stringify({
+      id: 'msg_idle_2',
+      from: 'beta',
+      to: 'alpha',
+      type: 'inform',
+      summary: 'Hold while active again',
+      mentions: [],
+    }));
+    expect(delivered).toHaveLength(1);
+    expect(relayQueue.get('alpha')).toHaveLength(1);
+  });
+
+  test('queues normal-priority messages when idle metrics are unavailable', async () => {
+    const delivered = [];
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'alpha', server: null, tmux: 'alpha:0.0' }],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      tmuxBin: 'tmux',
+      execFileSync: () => {
+        throw new Error('tmux unavailable');
+      },
+      readFileSync: () => {
+        throw Object.assign(new Error('missing pid file'), { code: 'ENOENT' });
+      },
+    });
+    setPushToTmuxForTest((target, payload) => {
+      delivered.push({ target, payload });
+      return true;
+    });
+
+    await handleMessage(JSON.stringify({
+      id: 'msg_unknown_idle',
+      from: 'beta',
+      to: 'alpha',
+      type: 'inform',
+      summary: 'Do not interrupt on unknown idle',
+      mentions: [],
+    }));
+
+    expect(delivered).toEqual([]);
+    expect(relayQueue.get('alpha')).toHaveLength(1);
   });
 
   test('MCP debounce suppresses false negatives during grace period', async () => {

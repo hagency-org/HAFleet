@@ -15,6 +15,7 @@ let readFileSyncImpl = readFileSync;
 let execFileSyncImpl = execFileSync;
 let killProcessImpl = (pid, signal) => process.kill(pid, signal);
 let fetchImpl = (...args) => fetch(...args);
+let tmuxBinOverride = null;
 
 const PUSH_RELAY_MODE = (process.env.PUSH_RELAY_MODE || 'local').trim().toLowerCase();
 const PUSH_RELAY_REMOTE_MODE = PUSH_RELAY_MODE === 'remote';
@@ -117,9 +118,14 @@ function detectTmuxBin() {
 const TMUX_BIN = detectTmuxBin();
 if (!TMUX_BIN) warnMissingTmuxOnce();
 
+function currentTmuxBin() {
+  return tmuxBinOverride || TMUX_BIN;
+}
+
 function runTmux(args, options = {}) {
-  if (!TMUX_BIN) throw new Error('tmux binary not available');
-  return execFileSync(TMUX_BIN, args, options);
+  const bin = currentTmuxBin();
+  if (!bin) throw new Error('tmux binary not available');
+  return execFileSyncImpl(bin, args, options);
 }
 
 function normalizeServer(value) {
@@ -153,7 +159,7 @@ async function reportRuntime(agentName, payload) {
 }
 
 function listLocalTmuxSessions() {
-  if (!TMUX_BIN) return new Set();
+  if (!currentTmuxBin()) return new Set();
   try {
     const raw = runTmux(['list-sessions', '-F', '#{session_name}'], { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
     return new Set(raw ? raw.split('\n').filter(Boolean) : []);
@@ -163,7 +169,7 @@ function listLocalTmuxSessions() {
 }
 
 function captureTail(target, lines = BLOCK_TAIL_LINES) {
-  if (!TMUX_BIN) return '';
+  if (!currentTmuxBin()) return '';
   try {
     return runTmux(['capture-pane', '-t', target, '-p', '-S', `-${Math.max(10, lines)}`], {
       encoding: 'utf-8',
@@ -176,7 +182,7 @@ function captureTail(target, lines = BLOCK_TAIL_LINES) {
 }
 
 function currentPaneCommand(target) {
-  if (!TMUX_BIN) return '';
+  if (!currentTmuxBin()) return '';
   try {
     return runTmux(['list-panes', '-t', target, '-F', '#{pane_current_command}'], {
       encoding: 'utf-8',
@@ -189,7 +195,7 @@ function currentPaneCommand(target) {
 }
 
 function currentPanePath(target) {
-  if (!TMUX_BIN) return null;
+  if (!currentTmuxBin()) return null;
   try {
     const raw = runTmux(['list-panes', '-t', target, '-F', '#{pane_current_path}'], {
       encoding: 'utf-8',
@@ -204,19 +210,15 @@ function currentPanePath(target) {
   }
 }
 
-function currentSessionActivitySec(targetOrSession) {
-  if (!TMUX_BIN) return null;
-  const session = String(targetOrSession || '').split(':', 1)[0];
-  if (!session) return null;
+function currentPaneContentHash(target) {
+  if (!currentTmuxBin()) return null;
   try {
-    const raw = runTmux(['display-message', '-p', '-t', session, '#{session_activity}'], {
+    const raw = runTmux(['capture-pane', '-t', target, '-p'], {
       encoding: 'utf-8',
       timeout: 3000,
       stdio: ['pipe', 'pipe', 'ignore'],
-    }).trim();
-    const n = Number.parseInt(raw, 10);
-    if (!Number.isFinite(n) || n <= 0) return null;
-    return n;
+    });
+    return createHash('md5').update(String(raw || '')).digest('hex');
   } catch {
     return null;
   }
@@ -232,44 +234,48 @@ function recentTailWindow(tail, maxLines = BLOCK_RECENT_LINES) {
 }
 
 function computeActivityMetrics(agentName, target) {
-  const nowSec = Math.floor(Date.now() / 1000);
-  const activitySec = currentSessionActivitySec(target);
-  if (!activitySec) return null;
+  const nowMs = Date.now();
+  const contentHash = currentPaneContentHash(target);
+  if (!contentHash) return null;
 
   let st = activityState.get(agentName);
   if (!st) {
     st = {
-      lastActivitySec: activitySec,
-      burstStartSec: activitySec,
-      burstLastSec: activitySec,
+      target,
+      hash: contentHash,
+      changedAtMs: nowMs,
+      burstStartMs: nowMs,
+      burstLastMs: nowMs,
     };
     activityState.set(agentName, st);
-  } else if (activitySec < st.lastActivitySec) {
-    // tmux/server restarted, reset baseline.
-    st.lastActivitySec = activitySec;
-    st.burstStartSec = activitySec;
-    st.burstLastSec = activitySec;
-  } else if (activitySec > st.lastActivitySec) {
-    const gap = activitySec - st.lastActivitySec;
-    if (gap > IDLE_THRESHOLD_SEC) {
-      st.burstStartSec = activitySec;
-      st.burstLastSec = activitySec;
+  } else if (st.target !== target) {
+    st.target = target;
+    st.hash = contentHash;
+    st.changedAtMs = nowMs;
+    st.burstStartMs = nowMs;
+    st.burstLastMs = nowMs;
+  } else if (contentHash !== st.hash) {
+    const gapSec = Math.max(0, Math.floor((nowMs - st.changedAtMs) / 1000));
+    if (gapSec > IDLE_THRESHOLD_SEC) {
+      st.burstStartMs = nowMs;
+      st.burstLastMs = nowMs;
     } else {
-      st.burstLastSec = activitySec;
+      st.burstLastMs = nowMs;
     }
-    st.lastActivitySec = activitySec;
+    st.hash = contentHash;
+    st.changedAtMs = nowMs;
   }
 
-  const rawIdleSec = Math.max(0, nowSec - st.lastActivitySec);
+  const rawIdleSec = Math.max(0, Math.floor((nowMs - st.changedAtMs) / 1000));
   const activeNow = rawIdleSec < IDLE_THRESHOLD_SEC;
-  const activeDurationSec = activeNow ? Math.max(0, st.burstLastSec - st.burstStartSec) : 0;
+  const activeDurationSec = activeNow ? Math.max(0, Math.floor((st.burstLastMs - st.burstStartMs) / 1000)) : 0;
   const idleDurationSec = activeNow ? 0 : Math.max(0, rawIdleSec - IDLE_THRESHOLD_SEC);
 
   return {
     activeNow,
     activeDurationSec,
     idleDurationSec,
-    lastTmuxActivitySec: st.lastActivitySec,
+    lastTmuxActivitySec: Math.floor(st.changedAtMs / 1000),
   };
 }
 
@@ -343,7 +349,7 @@ async function refreshAgentsSnapshot() {
 }
 
 function injectSlashClear(target) {
-  if (!TMUX_BIN) return false;
+  if (!currentTmuxBin()) return false;
   const opts = { timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] };
   try {
     // Escape any partial input first, then send /clear
@@ -629,7 +635,7 @@ function sleepMs(ms) {
 }
 
 function pushToTmux(target, payload) {
-  if (!TMUX_BIN) return false;
+  if (!currentTmuxBin()) return false;
   const safePayload = sanitizeForDisplay(payload);
   const opts = { timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] };
   const sendSequence = (resolvedTarget) => {
@@ -761,13 +767,11 @@ async function handleMessage(raw) {
     // metrics now return null (tmux glitch, session restart), also queue —
     // better to briefly delay than interrupt.  Max hold
     // (RELAY_QUEUE_MAX_HOLD_MS, default 60s) prevents indefinite queuing.
-    // If we never had activity data (activityState empty), the gate can't
-    // function — deliver immediately rather than holding forever.
     const priority = normalizeRelayPriority(msg);
     const bypassIdleGate = priority === 'high' || priority === 'urgent';
     if (!bypassIdleGate) {
       const metrics = computeActivityMetrics(agentName, target);
-      if (metrics?.activeNow || (metrics === null && activityState.has(agentName))) {
+      if (metrics === null || metrics.activeNow) {
         const notification = await buildNotification(agentName, msg);
         if (!relayQueue.has(agentName)) relayQueue.set(agentName, []);
         relayQueue.get(agentName).push({ msg, notification, target, dedupeKey, queuedAt: Date.now() });
@@ -903,6 +907,7 @@ function resetRelayState() {
   execFileSyncImpl = execFileSync;
   killProcessImpl = (pid, signal) => process.kill(pid, signal);
   fetchImpl = (...args) => fetch(...args);
+  tmuxBinOverride = null;
   pushToTmuxImpl = pushToTmux;
 }
 
@@ -927,6 +932,7 @@ function setPushRelayTestHooks({
   execFileSync: overrideExecFileSync,
   killProcess: overrideKillProcess,
   fetch: overrideFetch,
+  tmuxBin: overrideTmuxBin,
 } = {}) {
   execFileAsyncImpl = typeof overrideExecFileAsync === 'function' ? overrideExecFileAsync : execFileAsync;
   readFileSyncImpl = typeof overrideReadFileSync === 'function' ? overrideReadFileSync : readFileSync;
@@ -935,6 +941,9 @@ function setPushRelayTestHooks({
     ? overrideKillProcess
     : ((pid, signal) => process.kill(pid, signal));
   fetchImpl = typeof overrideFetch === 'function' ? overrideFetch : ((...args) => fetch(...args));
+  tmuxBinOverride = typeof overrideTmuxBin === 'string' && overrideTmuxBin.trim()
+    ? overrideTmuxBin.trim()
+    : null;
   mcpSessionCacheAt = 0;
 }
 
