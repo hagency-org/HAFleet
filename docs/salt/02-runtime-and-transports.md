@@ -30,7 +30,7 @@ Known structural issue: the media cache currently resolves under the process cur
 - Subscribes to backend `/api/stream`.
 - Tracks local tmux sessions and activity.
 - Applies idle gate for normal messages.
-- Bypasses idle gate for high/urgent messages.
+- Bypasses idle gate only for urgent messages.
 - Injects notifications into tmux panes.
 - Reports runtime, blocked state, compaction, push delivery, and MCP presence.
 

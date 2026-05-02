@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { promisify } from 'util';
 import { defaultAgentchatHomeDir, resolveAgentDocsPaths, resolveV1ManifestForAgent } from './lib/agent-home-v1.js';
+import { detectPaneBusyState } from './lib/pane-activity.js';
 import { assertRuntimeDir } from './lib/runtime-dir-guard.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2689,25 +2690,36 @@ const paneSnapshots = new Map(); // target -> { hash, changedAt }
 
 import { createHash } from 'crypto';
 
-async function snapshotPaneAsync(target) {
+async function snapshotPaneActivityAsync(target) {
   try {
     const { stdout } = await execFileAsyncImpl(
       'tmux', ['capture-pane', '-t', target, '-p'],
       { encoding: 'utf-8', timeout: 3000 }
     );
-    return createHash('md5').update(stdout).digest('hex');
+    const text = String(stdout || '');
+    return {
+      hash: createHash('md5').update(text).digest('hex'),
+      busy: detectPaneBusyState(text).busy,
+    };
   } catch {
     return null;
   }
 }
 
+async function snapshotPaneAsync(target) {
+  const snapshot = await snapshotPaneActivityAsync(target);
+  return snapshot?.hash || null;
+}
+
 async function updatePaneSnapshot(target) {
-  const hash = await snapshotPaneAsync(target);
-  if (hash === null) return;
+  const snapshot = await snapshotPaneActivityAsync(target);
+  if (snapshot === null) return;
   const now = Date.now();
   const prev = paneSnapshots.get(target);
-  if (!prev || prev.hash !== hash) {
-    paneSnapshots.set(target, { hash, changedAt: now });
+  if (!prev || prev.hash !== snapshot.hash) {
+    paneSnapshots.set(target, { hash: snapshot.hash, changedAt: now, busy: snapshot.busy });
+  } else {
+    prev.busy = snapshot.busy;
   }
 }
 
@@ -2720,6 +2732,7 @@ function getPaneIdleMs(target) {
     }
   }
   if (!prev) return -1; // not tracked
+  if (prev.busy) return 0;
   return Date.now() - prev.changedAt;
 }
 
@@ -2990,7 +3003,7 @@ setInterval(async () => {
 
       const idleMs = getPaneIdleMs(target);
       const priority = normalizeQueuePriority(entries[0]?.priority || entries[0]?.notifyMeta?.priority);
-      const bypassIdleGate = priority === 'high' || priority === 'urgent';
+      const bypassIdleGate = priority === 'urgent';
       if (idleMs < 0) {
         // Pane not found — only trim stale backend notifications, keep normal payloads queued.
         const oldest = entries[0];

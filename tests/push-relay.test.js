@@ -116,7 +116,7 @@ describe('push relay dispatch', () => {
       from: 'beta',
       to: 'alpha',
       type: 'request',
-      priority: 'high',
+      priority: 'urgent',
       summary: 'Need help',
       mentions: [],
     });
@@ -174,7 +174,7 @@ describe('push relay dispatch', () => {
       from: 'sender',
       group: 'dev',
       type: 'inform',
-      priority: 'high',
+      priority: 'urgent',
       summary: '@alpha @bravo heads up',
       mentions: ['alpha', 'bravo', 'alpha'],
     }));
@@ -243,7 +243,7 @@ describe('push relay dispatch', () => {
     expect(relayQueue.get('alpha')).toHaveLength(1);
   });
 
-  test('high-priority messages bypass the idle gate by current policy', async () => {
+  test('high-priority messages wait for idle when pane is active', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
     const delivered = [];
@@ -281,16 +281,62 @@ describe('push relay dispatch', () => {
       mentions: [],
     }));
 
+    expect(delivered).toEqual([]);
+    expect(relayQueue.get('alpha')).toHaveLength(1);
+  });
+
+  test('urgent-priority messages bypass the idle gate by explicit policy', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    const delivered = [];
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'alpha', server: null, tmux: 'alpha:0.0' }],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      tmuxBin: 'tmux',
+      execFileSync: (_cmd, args) => {
+        if (args[0] === 'capture-pane') return 'active pane output';
+        if (args[0] === 'list-panes' && args.includes('#{pane_current_command}')) return 'codex\n';
+        if (args[0] === 'list-panes' && args.includes('#{pane_current_path}')) return '/tmp\n';
+        throw new Error(`unexpected exec ${args.join(' ')}`);
+      },
+      readFileSync: () => {
+        throw Object.assign(new Error('missing pid file'), { code: 'ENOENT' });
+      },
+      fetch: async () => ({ ok: true, text: async () => '' }),
+    });
+    setPushToTmuxForTest((target, payload) => {
+      delivered.push({ target, payload });
+      return true;
+    });
+
+    await scanBlockedStates();
+    await handleMessage(JSON.stringify({
+      id: 'msg_urgent_bypass',
+      from: 'beta',
+      to: 'alpha',
+      type: 'request',
+      priority: 'urgent',
+      summary: 'Explicit emergency interrupt',
+      mentions: [],
+    }));
+
     expect(delivered).toHaveLength(1);
     expect(delivered[0].target).toBe('alpha:0.0');
     expect(relayQueue.get('alpha')).toBeUndefined();
   });
 
-  test('queued normal-priority messages force-deliver after max hold by current policy', async () => {
+  test('queued normal-priority messages stay held while pane shows active work beyond max age', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
     const delivered = [];
-    let paneText = 'active pane output';
+    let paneText = [
+      '› Run /review on my current changes',
+      '',
+      '• Working (12m 04s • esc to interrupt)',
+    ].join('\n');
     seedRelayState({
       localAgentNames: ['alpha'],
       agents: [{ name: 'alpha', server: null, tmux: 'alpha:0.0' }],
@@ -327,11 +373,91 @@ describe('push relay dispatch', () => {
     expect(relayQueue.get('alpha')).toHaveLength(1);
 
     vi.setSystemTime(new Date('2026-01-01T00:05:01Z'));
-    paneText = 'active pane output changed';
+    drainRelayQueue();
+
+    expect(delivered).toEqual([]);
+    expect(relayQueue.get('alpha')).toHaveLength(1);
+
+    paneText = '› ready for the next task';
+    drainRelayQueue();
+    expect(delivered).toEqual([]);
+
+    vi.setSystemTime(new Date('2026-01-01T00:05:22Z'));
     drainRelayQueue();
 
     expect(delivered).toHaveLength(1);
     expect(delivered[0].payload).toContain('Eventually force delivered');
+    expect(relayQueue.get('alpha')).toBeUndefined();
+  });
+
+  test('relay queue delivers only one message per idle sample', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    const delivered = [];
+    let paneText = 'active pane output';
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'alpha', server: null, tmux: 'alpha:0.0' }],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      tmuxBin: 'tmux',
+      execFileSync: (_cmd, args) => {
+        if (args[0] === 'capture-pane') return paneText;
+        if (args[0] === 'list-panes' && args.includes('#{pane_current_command}')) return 'codex\n';
+        if (args[0] === 'list-panes' && args.includes('#{pane_current_path}')) return '/tmp\n';
+        throw new Error(`unexpected exec ${args.join(' ')}`);
+      },
+      readFileSync: () => {
+        throw Object.assign(new Error('missing pid file'), { code: 'ENOENT' });
+      },
+      fetch: async () => ({ ok: true, text: async () => '' }),
+    });
+    setPushToTmuxForTest((target, payload) => {
+      delivered.push({ target, payload });
+      paneText += `\n${payload}`;
+      return true;
+    });
+
+    await scanBlockedStates();
+    await handleMessage(JSON.stringify({
+      id: 'msg_batch_1',
+      from: 'beta',
+      to: 'alpha',
+      type: 'inform',
+      summary: 'First queued message',
+      mentions: [],
+    }));
+    await handleMessage(JSON.stringify({
+      id: 'msg_batch_2',
+      from: 'beta',
+      to: 'alpha',
+      type: 'inform',
+      summary: 'Second queued message',
+      mentions: [],
+    }));
+    expect(relayQueue.get('alpha')).toHaveLength(2);
+
+    paneText = '› ready for the next task';
+    vi.setSystemTime(new Date('2026-01-01T00:00:21Z'));
+    drainRelayQueue();
+    expect(delivered).toEqual([]);
+
+    vi.setSystemTime(new Date('2026-01-01T00:00:42Z'));
+    drainRelayQueue();
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].payload).toContain('First queued message');
+    expect(relayQueue.get('alpha')).toHaveLength(1);
+
+    drainRelayQueue();
+    expect(delivered).toHaveLength(1);
+
+    vi.setSystemTime(new Date('2026-01-01T00:01:03Z'));
+    drainRelayQueue();
+
+    expect(delivered).toHaveLength(2);
+    expect(delivered[1].payload).toContain('Second queued message');
     expect(relayQueue.get('alpha')).toBeUndefined();
   });
 

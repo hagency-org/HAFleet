@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { promisify } from 'util';
 import { BLOCK_PATTERNS } from './blocked-patterns.js';
 import EventSource from './eventsource-mini.js';
+import { detectPaneBusyState } from './pane-activity.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const execFileAsync = promisify(execFile);
@@ -76,8 +77,6 @@ const MCP_MISS_THRESHOLD = 6;  // report mcpPresent=false after 6 consecutive mi
 
 // Idle-gate relay queue: holds messages for agents that are currently active (not idle enough)
 const RELAY_QUEUE_DRAIN_INTERVAL_MS = Number.parseInt(process.env.RELAY_QUEUE_DRAIN_INTERVAL_MS || '3000', 10);
-const RELAY_QUEUE_MAX_AGE_MS = Number.parseInt(process.env.RELAY_QUEUE_MAX_AGE_MS || '300000', 10);
-const RELAY_QUEUE_MAX_HOLD_MS = Number.parseInt(process.env.RELAY_QUEUE_MAX_HOLD_MS || '60000', 10);
 const relayQueue = new Map(); // Map<agentName, Array<{msg, notification, target, dedupeKey, queuedAt}>>
 let relayQueueDrainTimer = null;
 
@@ -210,7 +209,7 @@ function currentPanePath(target) {
   }
 }
 
-function currentPaneContentHash(target) {
+function currentPaneSnapshot(target) {
   if (!currentTmuxBin()) return null;
   try {
     const raw = runTmux(['capture-pane', '-t', target, '-p'], {
@@ -218,7 +217,11 @@ function currentPaneContentHash(target) {
       timeout: 3000,
       stdio: ['pipe', 'pipe', 'ignore'],
     });
-    return createHash('md5').update(String(raw || '')).digest('hex');
+    const text = String(raw || '');
+    return {
+      hash: createHash('md5').update(text).digest('hex'),
+      busy: detectPaneBusyState(text).busy,
+    };
   } catch {
     return null;
   }
@@ -235,8 +238,9 @@ function recentTailWindow(tail, maxLines = BLOCK_RECENT_LINES) {
 
 function computeActivityMetrics(agentName, target) {
   const nowMs = Date.now();
-  const contentHash = currentPaneContentHash(target);
-  if (!contentHash) return null;
+  const paneSnapshot = currentPaneSnapshot(target);
+  if (!paneSnapshot?.hash) return null;
+  const { hash: contentHash, busy: paneBusy } = paneSnapshot;
 
   let st = activityState.get(agentName);
   if (!st) {
@@ -265,9 +269,10 @@ function computeActivityMetrics(agentName, target) {
     st.hash = contentHash;
     st.changedAtMs = nowMs;
   }
+  if (paneBusy) st.burstLastMs = nowMs;
 
   const rawIdleSec = Math.max(0, Math.floor((nowMs - st.changedAtMs) / 1000));
-  const activeNow = rawIdleSec < IDLE_THRESHOLD_SEC;
+  const activeNow = paneBusy || rawIdleSec < IDLE_THRESHOLD_SEC;
   const activeDurationSec = activeNow ? Math.max(0, Math.floor((st.burstLastMs - st.burstStartMs) / 1000)) : 0;
   const idleDurationSec = activeNow ? 0 : Math.max(0, rawIdleSec - IDLE_THRESHOLD_SEC);
 
@@ -765,10 +770,9 @@ async function handleMessage(raw) {
     // Idle gate: hold message if agent is actively working (not idle enough).
     // When activity monitoring was previously working for this agent but
     // metrics now return null (tmux glitch, session restart), also queue —
-    // better to briefly delay than interrupt.  Max hold
-    // (RELAY_QUEUE_MAX_HOLD_MS, default 60s) prevents indefinite queuing.
+    // better to delay than interrupt. Urgent messages are the explicit bypass.
     const priority = normalizeRelayPriority(msg);
-    const bypassIdleGate = priority === 'high' || priority === 'urgent';
+    const bypassIdleGate = priority === 'urgent';
     if (!bypassIdleGate) {
       const metrics = computeActivityMetrics(agentName, target);
       if (metrics === null || metrics.activeNow) {
@@ -799,16 +803,13 @@ function drainRelayQueue() {
     const { target } = entries[0];
     const metrics = computeActivityMetrics(agentName, target);
     const agentIdle = metrics !== null && !metrics.activeNow;
-    const oldestAge = now - entries[0].queuedAt;
-    // Shorter max-hold when metrics are unavailable (can't detect idle);
-    // full max-age when metrics work but agent is still active.
-    const maxHoldMs = metrics === null ? RELAY_QUEUE_MAX_HOLD_MS : RELAY_QUEUE_MAX_AGE_MS;
-    const forceDeliver = oldestAge >= maxHoldMs;
 
-    if (!agentIdle && !forceDeliver) continue; // keep holding
+    if (!agentIdle) continue; // keep holding
 
-    // Deliver all queued messages (agent idle or max hold exceeded)
-    const drainReason = forceDeliver ? (metrics === null ? 'max-hold-no-metrics' : 'max-hold') : 'agent-idle';
+    // Deliver one queued message for this idle sample. The injection itself can
+    // make the pane active again, so the next message must wait for a fresh
+    // idle check instead of flushing the whole backlog at once.
+    const drainReason = 'agent-idle';
     while (entries.length > 0) {
       const entry = entries.shift();
       if (delivered.has(entry.dedupeKey)) continue;
@@ -818,8 +819,13 @@ function drainRelayQueue() {
       } else {
         console.log(`[push-relay] queued delivery failed ${entry.msg.id} -> ${agentName}`);
       }
+      break;
     }
-    relayQueue.delete(agentName);
+    if (entries.length > 0) {
+      relayQueue.set(agentName, entries);
+    } else {
+      relayQueue.delete(agentName);
+    }
   }
 }
 

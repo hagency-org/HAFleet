@@ -185,7 +185,7 @@ Normal deployed observation uses backend runtime fields and is currently correct
 
 Status:
 
-Implemented for the current backend/CLI contract. Backend runtime now preserves `activeNow=null`, `agentchat cli status` displays unknown instead of idle for that state, and tests document the current high/urgent bypass plus max-hold force-delivery policy. The legacy `session_activity` fallback remains only for older backends that omit the activity field entirely.
+Implemented for the current backend/CLI contract. Backend runtime now preserves `activeNow=null`, and `agentchat cli status` displays unknown instead of idle for that state. RLP idle repair now keeps normal/high push notifications queued while the pane shows interactive busy markers and removes max-hold force delivery for active panes; urgent remains the explicit bypass. The legacy `session_activity` fallback remains only for older backends that omit the activity field entirely.
 
 ### CD-007 Operations Runbook Does Not Match Destructive Deploy Behavior
 

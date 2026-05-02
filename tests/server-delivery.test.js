@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -23,6 +23,7 @@ describe('server delivery path', () => {
   let serverModule = null;
 
   afterEach(() => {
+    vi.useRealTimers();
     if (serverModule?.resetServerTestHooks) serverModule.resetServerTestHooks();
     if (serverModule?.stopServer) serverModule.stopServer();
     serverModule = null;
@@ -102,6 +103,47 @@ describe('server delivery path', () => {
     await serverModule.sweepPaneSnapshots();
     expect(serverModule.getPaneIdleMs('alpha')).toBeGreaterThanOrEqual(0);
     expect(serverModule.getPaneIdleMs('beta:0.0')).toBe(-1);
+  });
+
+  test('pane snapshot sweep keeps Codex working panes non-idle even when content is stable', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    let paneText = [
+      '› Run /review on my current changes',
+      '',
+      '• Working (12m 04s • esc to interrupt)',
+    ].join('\n');
+    serverModule.setServerTestHooks({
+      execFileAsync: async (_cmd, args) => {
+        if (args[0] === 'list-panes') return { stdout: 'alpha:0.0\n' };
+        if (args[0] === 'capture-pane' && args[2] === 'alpha:0.0') return { stdout: paneText };
+        throw new Error(`unexpected exec: ${args.join(' ')}`);
+      },
+      backendFetch: async () => ({
+        ok: true,
+        json: async () => [],
+      }),
+    });
+
+    await serverModule.sweepPaneSnapshots();
+    expect(serverModule.getPaneIdleMs('alpha:0.0')).toBe(0);
+
+    vi.setSystemTime(new Date('2026-01-01T00:02:00Z'));
+    await serverModule.sweepPaneSnapshots();
+    expect(serverModule.getPaneIdleMs('alpha:0.0')).toBe(0);
+
+    paneText = '› ready for the next task';
+    await serverModule.sweepPaneSnapshots();
+    expect(serverModule.getPaneIdleMs('alpha:0.0')).toBe(0);
+
+    vi.setSystemTime(new Date('2026-01-01T00:02:25Z'));
+    await serverModule.sweepPaneSnapshots();
+    expect(serverModule.getPaneIdleMs('alpha:0.0')).toBeGreaterThanOrEqual(20_000);
   });
 
   test('task graph proxy routes forward to the backend correctly', async () => {

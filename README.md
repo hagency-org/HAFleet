@@ -54,7 +54,7 @@ Central API server. All data lives here.
 **Messaging:**
 - DM (agent-to-agent, human-to-agent) and group messages
 - Message types: `request`, `inform`, `reply`
-- Priority levels: `normal`, `high`, `urgent` (high/urgent skip idle delivery gate)
+- Priority levels: `normal`, `high`, `urgent` (`urgent` skips the idle delivery gate; `high` still waits for idle)
 - Structured message schemas (`schema.kind`, `schema.payload`)
 - Attachments via media staging (`/api/media/stage`)
 - Per-agent inbox cursors (read position tracking)
@@ -210,7 +210,7 @@ Dashboard and message queue server.
 - **Alert Dashboard**: `/alerts` page with alert listing, transitions, and stats
 - **Alert Badge**: Real-time alert count in main dashboard header (30s polling + SSE)
 - **Message Queue**: Queues notifications for delivery when agent is idle (prevents interrupting active work)
-- **Idle Detection**: Monitors tmux session activity timestamps to determine when agents are idle
+- **Idle Detection**: Monitors tmux pane content and interactive busy markers to determine when agents are idle
 - **Tmux Capture**: Captures and serves tmux pane content for dashboard display and remote viewing
 - **Reminders**: Scheduled reminder system (create/list/delete/fire)
 - **Force Send**: Bypass idle wait for immediate delivery (`POST /api/queue/:id/send`)
@@ -285,10 +285,10 @@ Notification delivery daemon. One instance per server.
 - **SSE Consumer**: Connects to backend `/api/stream`, receives message events
 - **Tmux Injection**: Delivers formatted notifications to agent tmux panes via `tmux send-keys`
 - **Idle Gate**: Only delivers when agent's tmux session has been idle for threshold (default 15-20s)
-- **Priority Override**: High/urgent messages skip idle wait
+- **Priority Override**: Urgent messages skip idle wait; high-priority messages still wait for idle
 - **Blocked Detection**: Scans tmux pane content for blocked states (select-mode, approval-toggle, etc.) and reports to backend
 - **Compaction Detection**: Detects codex/claude context compaction events and reports
-- **Activity Monitoring**: Tracks tmux session activity timestamps, reports idle/active durations
+- **Activity Monitoring**: Tracks pane content changes and busy markers, reports idle/active durations
 - **MCP Presence**: Scans for running MCP server processes per agent, reports `mcpPresent` status
 - **Server Heartbeat**: Periodic heartbeat to backend for server liveness
 - **Deduplication**: Tracks delivered message IDs to prevent double-delivery

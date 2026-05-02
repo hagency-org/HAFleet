@@ -654,7 +654,7 @@ server.tool(
       kind: z.enum(['image', 'file']).optional().describe('Optional content kind override'),
     })).max(ATTACHMENT_MAX_ITEMS).optional().describe('Optional attachments. Files are staged to backend and bridged to Matrix.'),
     type: z.enum(['request', 'inform', 'reply']).default('inform').describe('Message type: request, inform, or reply'),
-    priority: z.enum(['normal', 'high', 'urgent']).default('normal').describe('Message priority. High and urgent notifications skip the idle delivery gate.'),
+    priority: z.enum(['normal', 'high', 'urgent']).default('normal').describe('Message priority. Urgent notifications skip the idle delivery gate; high priority still waits for idle.'),
     reply_to: z.string().optional().describe('Message ID this is replying to'),
     schema: z.object({
       kind: z.string().describe('Structured message kind, e.g. task_request'),
@@ -690,7 +690,7 @@ server.tool(
       kind: z.enum(['image', 'file']).optional().describe('Optional content kind override'),
     })).max(ATTACHMENT_MAX_ITEMS).optional().describe('Optional attachments. Files are staged to backend and bridged to Matrix.'),
     type: z.enum(['request', 'inform', 'reply']).default('inform').describe('Message type: request, inform, or reply'),
-    priority: z.enum(['normal', 'high', 'urgent']).default('normal').describe('Message priority. High and urgent notifications skip the idle delivery gate.'),
+    priority: z.enum(['normal', 'high', 'urgent']).default('normal').describe('Message priority. Urgent notifications skip the idle delivery gate; high priority still waits for idle.'),
     mentions: z.array(z.string()).optional().describe('Agent names to @mention and push-notify'),
     reply_to: z.string().optional().describe('Message ID this is replying to'),
     schema: z.object({

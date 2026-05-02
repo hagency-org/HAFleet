@@ -20,6 +20,7 @@ MIRROR_FILES=(
   "bin/verify-remote"
   "lib/blocked-patterns.js"
   "lib/eventsource-mini.js"
+  "lib/pane-activity.js"
   "lib/push-relay-core.js"
   "lib/mcp-server-core.js"
 )

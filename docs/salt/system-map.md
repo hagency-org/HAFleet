@@ -80,7 +80,7 @@ Agent CLI / Claude / Codex
 
 1. Push relay connects to backend `/api/stream`.
 2. Relay tracks local tmux sessions and activity.
-3. Normal-priority notifications wait for idle state; high/urgent bypass the idle gate.
+3. Normal/high-priority notifications wait for idle state; urgent bypasses the idle gate.
 4. Relay injects notifications into tmux and reports runtime/push state back to backend.
 
 ### Optional Matrix Delivery
