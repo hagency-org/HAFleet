@@ -107,15 +107,50 @@ check_agentchat_dispatch_targets() {
   done <<< "$targets"
 }
 
-check_wrapper_contract() {
+check_file_contains() {
   local file="$1"
   local needle="$2"
   if rg -n --fixed-strings "$needle" "$file" >/dev/null 2>&1; then
-    echo "[OK] Wrapper contract: $file"
-  else
-    echo "[FAIL] Wrapper contract missing in $file: $needle"
-    failures=$((failures + 1))
+    return 0
   fi
+  return 1
+}
+
+check_wrapper_contract() {
+  local file="$1"
+  local mode="$2"
+  local core="$3"
+
+  if [ ! -f "$file" ]; then
+    echo "[FAIL] Wrapper contract missing file: $file"
+    failures=$((failures + 1))
+    return
+  fi
+
+  case "$mode" in
+    root)
+      if check_file_contains "$file" "import('./lib/$core')"; then
+        echo "[OK] Wrapper contract: $file"
+      else
+        echo "[FAIL] Wrapper contract missing in $file: package-local import ./lib/$core"
+        failures=$((failures + 1))
+      fi
+      ;;
+    remote)
+      if check_file_contains "$file" "path.join(baseDir, 'lib', '$core')" \
+        && check_file_contains "$file" "path.join(baseDir, '..', 'lib', '$core')" \
+        && check_file_contains "$file" "pathToFileURL(path.resolve(corePath)).href"; then
+        echo "[OK] Wrapper contract: $file"
+      else
+        echo "[FAIL] Wrapper contract missing in $file: package-local/repo-root dynamic core resolution for $core"
+        failures=$((failures + 1))
+      fi
+      ;;
+    *)
+      echo "[FAIL] Unknown wrapper contract mode '$mode' for $file"
+      failures=$((failures + 1))
+      ;;
+  esac
 }
 
 echo "Checking mirrored root/remote files..."
@@ -133,10 +168,10 @@ check_agentchat_dispatch_targets "bin/agentchat" "root"
 check_agentchat_dispatch_targets "remote/bin/agentchat" "remote"
 
 echo "Checking wrapper contracts..."
-check_wrapper_contract "push-relay.js" "./lib/push-relay-core.js"
-check_wrapper_contract "mcp-server.js" "./lib/mcp-server-core.js"
-check_wrapper_contract "remote/push-relay.js" "push-relay-core.js"
-check_wrapper_contract "remote/mcp-server.js" "mcp-server-core.js"
+check_wrapper_contract "push-relay.js" "root" "push-relay-core.js"
+check_wrapper_contract "mcp-server.js" "root" "mcp-server-core.js"
+check_wrapper_contract "remote/push-relay.js" "remote" "push-relay-core.js"
+check_wrapper_contract "remote/mcp-server.js" "remote" "mcp-server-core.js"
 
 if [ -x "scripts/build-remote-package.sh" ]; then
   echo "Checking generated remote package snapshot..."

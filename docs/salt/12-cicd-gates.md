@@ -30,11 +30,26 @@ It runs:
 6. `npm run check:dep-isolation`
 7. `npm run test:kernel`
 
-GitHub Actions now runs this in the `contracts` job, then runs the full `npm test` suite separately.
+GitHub Actions now runs this as an added step in the existing `lint` job, then runs the existing full `npm test` job separately.
 
 `npm run audit:deps` is intentionally not part of the first blocking CD gate. It is currently red because R-024 dependency remediation is still pending. Keep it as a separate security repair track instead of making every deploy fail on known historical advisories.
 
 `npm test` also uses serialized file execution. The current backend/runtime tests create many temporary HTTP servers and timers; parallel file execution can produce timeout noise that hides real product failures.
+
+## Two Environment Drift
+
+The practical CD topology has at least two useful verification nodes: the operator/local checkout and the remote checkout. They are intentionally not identical, and that difference should be used as a test surface instead of hidden.
+
+Each candidate commit should report:
+
+- git commit and branch;
+- OS, architecture, Node, and npm versions;
+- install mode (`npm ci` vs `npm ci --ignore-scripts`);
+- whether Matrix native optional dependencies are present;
+- results for `npm run verify:ci`;
+- results for remote package smoke and sync checks.
+
+The current gate is single-node executable. The next CD layer should run the same gate on both local and remote checkouts, then compare the environment metadata and command results. A difference is allowed only when the profile explicitly owns it, such as remote command surface limits or optional Matrix native dependencies.
 
 ## CLI Contract
 
