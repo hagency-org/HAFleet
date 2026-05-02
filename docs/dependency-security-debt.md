@@ -31,6 +31,19 @@ These advisories currently come from `matrix-bot-sdk@0.8.0` transitive `request`
 3. Remove allowlist entries immediately after migration or upstream fix.
 4. Keep vulnerable chain isolated to `bridge-matrix.js` only (no direct `request` usage in other runtime modules).
 
+## RLP7-B audit observation
+
+As of 2026-05-03, `npm run audit:deps` reports 24 advisory ids and fails on 20 disallowed ids. The disallowed set has two different remediation classes:
+
+- Fixable transitive locks under current root semver ranges: MCP SDK / Hono / @hono/node-server / express-rate-limit, Express `path-to-regexp`, `lodash`, and `postcss`.
+- Matrix `request` chain debt: `uuid` is now reported through the same `matrix-bot-sdk -> request/request-promise` path, but is not yet in the allowlist.
+
+Decision options:
+
+1. approve a root lock refresh for the fixable transitive advisories, with no direct `package.json` semver changes;
+2. approve adding `GHSA-w5hq-g745-h8pq` (`uuid`) to the temporary Matrix allowlist, or require Matrix migration before default audit can pass;
+3. keep `audit:deps` out of blocking `verify:ci`/release verification until the selected policy is green and approved.
+
 ## Operator commands
 
 - Default gate: `npm run audit:deps`

@@ -88,7 +88,7 @@ Status: complete, read-only.
 
 Accepted findings for consolidation:
 
-- Dependency audit fails, and CI does not run dependency or remote sync checks.
+- Historical finding: dependency audit failed, and CI did not run dependency or remote sync checks. Phase 1 added remote/package gates; RLP7-B later documented the current dependency audit split between fixable transitive locks and Matrix `request`-chain debt.
 - Remote mirror drift is independently confirmed by `check-remote-sync` and `build-remote-package.sh --check`.
 - Local test dependencies are incomplete in the current checkout: `vitest` and `supertest` are missing, so `npm test` cannot run without `npm ci`.
 - `.env.example` documents misleading or unsupported runtime configuration, including token mode `off` and supervisor switches.

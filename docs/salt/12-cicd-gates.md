@@ -33,7 +33,7 @@ It runs:
 
 GitHub Actions now runs this as an added step in the existing `lint` job, then runs the existing full `npm test` job separately.
 
-`npm run audit:deps` is intentionally not part of the first blocking CD gate. It is currently red because R-024 dependency remediation is still pending. Keep it as a separate security repair track instead of making every deploy fail on known historical advisories.
+`npm run audit:deps` is intentionally not part of the first blocking CD gate. RLP7-B read-only audit found that the current baseline is still red: fixable transitive locks can likely be refreshed under existing semver ranges, while Matrix `request`-chain debt still needs allowlist or migration approval. Keep dependency audit as a separate security repair track until ac-topleader approves a green policy and adding it to release verification.
 
 `npm test` also uses serialized file execution. The current backend/runtime tests create many temporary HTTP servers and timers; parallel file execution can produce timeout noise that hides real product failures.
 

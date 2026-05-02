@@ -130,10 +130,10 @@ This file will hold consolidated findings after subagent reports return. Each ac
   Evidence: Event ingest has token/local checks, but upstream bootstrap/pretool/stop/runtime invoke paths do not consistently require the same per-agent hook token.
   Fix: Reuse `AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN` or `requireAgentToken(name)` across all kernel-facing subconscious writes.
 
-- [High] [scripts/audit-deps.sh](/Users/kamico/agent-chat/scripts/audit-deps.sh:34) Dependency audit currently fails and is not enforced by CI.
-  Impact: Known vulnerable dependencies can enter or remain in the project without CI blocking them.
-  Evidence: `npm run audit:deps` fails, while CI runs only install, syntax checks, and tests.
-  Fix: Upgrade/replace vulnerable dependency chains or document temporary allowlist risk; add dependency and remote audits to CI.
+- [High] [scripts/audit-deps.sh](/Users/kamico/agent-chat/scripts/audit-deps.sh:34) Dependency audit currently fails and is not enforced by CI/CD.
+  Impact: Known vulnerable dependencies can enter or remain in the project without CI/CD blocking them.
+  Evidence: RLP7-B read-only audit shows `npm run audit:deps` reports 24 advisory ids with 20 disallowed. Fixable findings are concentrated in transitive locks under current root semver ranges; Matrix `request`-chain debt remains unfixable upstream and now also reports `uuid`.
+  Fix: Approve a lock refresh for fixable transitive advisories, decide whether to temporarily allowlist `uuid` in the Matrix chain or migrate Matrix first, then decide whether `audit:deps` becomes a blocking release gate.
 
 - [High] [.github/workflows/ci.yml](/Users/kamico/agent-chat/.github/workflows/ci.yml:19) CI does not check remote sync.
   Impact: Remote package drift can ship undetected.

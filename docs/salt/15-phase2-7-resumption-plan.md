@@ -35,7 +35,7 @@ Keep these boundaries unless ac-topleader explicitly changes them:
 | Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A; RLP4-B added v1 home/runtime resolver contract tests and rejects relative env/manifest paths before normalization. | Continue with broader path unification only after approval. | Required |
 | Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
 | Phase 6 CLI/ops profile | Remote command honesty is enforced; RLP6-A made `service`, `update`, `ls`, and `down` help/docs profile-scoped; CLI status/list now report unknown runtime activity without treating it as idle; RLP6-B aligned `agent-ls --all` v1 home discovery with the shared resolver. | Continue with `agent-down` resolver tests only after separate approval; do not change shutdown safety behavior implicitly. | Required |
-| Phase 7 CI/release gates | `verify:ci` and remote package gates are enforced; `audit:deps` is intentionally separate and red; CD-A is still pending. | Add missing focused gates after each repair; handle dependency audit as a dedicated security batch. | Required |
+| Phase 7 CI/release gates | `verify:ci` and remote package gates are enforced; `audit:deps` is intentionally separate and currently red; CD-A is still pending. | Add missing focused gates after each repair; handle dependency audit as a dedicated security batch after policy approval. | Required |
 
 ## Phase 2: Runtime Observation
 
@@ -291,15 +291,22 @@ Policy:
 2. every batch must pass `npm run verify:ci`;
 3. every deploy-relevant batch must pass clean `npm run verify:cd-preflight`;
 4. after stable deployment, verify the remote side with `agentchat verify-remote --expect-version <short-sha>`;
-5. do not make `audit:deps` blocking until R-024 dependency remediation is complete.
+5. do not make `audit:deps` blocking until R-024 dependency remediation and policy approval are complete.
 
-Recommended batch RLP7-B: dependency audit repair.
+Recommended batch RLP7-B: dependency audit decision and repair.
 
 Scope:
 
 1. inspect current `npm run audit:deps` output;
 2. decide upgrade vs documented temporary allowlist;
 3. add the chosen dependency policy to `verify:ci` only when it is green.
+
+Read-only audit result:
+
+1. current `npm run audit:deps` reports 24 advisory ids and fails on 20 disallowed ids;
+2. fixable advisories are concentrated in transitive locks under current root semver ranges: MCP SDK/Hono/@hono/node-server/express-rate-limit, Express `path-to-regexp`, `lodash`, and `postcss`;
+3. the Matrix `matrix-bot-sdk -> request/request-promise` chain remains unfixable through upstream semver, and now also reports `uuid`;
+4. `audit:deps` should stay outside blocking `verify:ci` and CD gates until ac-topleader approves either a lock refresh plus updated allowlist, or a Matrix migration path.
 
 ## Recommended Implementation Order
 
@@ -311,7 +318,7 @@ Scope:
 6. RLP3-B dashboard local-only/auth gate. Completed as RLP3-B1 after ac-topleader approval.
 7. RLP3-C Matrix trust default.
 8. RLP2-B local-host server record.
-9. RLP7-B dependency audit remediation.
+9. RLP7-B dependency audit remediation. Read-only audit complete; repair requires approval.
 10. Phase 5 launch decomposition only after the launch freeze is lifted.
 
 ## Next Approval Requests
@@ -319,7 +326,7 @@ Scope:
 The next candidates are:
 
 1. RLP3-C Matrix trust default, pending operator decision;
-2. RLP7-B dependency audit remediation as a separate security batch;
+2. RLP7-B dependency audit repair: lock refresh, Matrix allowlist update, or Matrix migration decision;
 3. RLP6 `agent-down` resolver/backend-unavailable tests, pending shutdown-safety approval;
 4. CD-A/CD-B deploy behavior, pending operator decisions in `14-cd-next-decisions.md`.
 
