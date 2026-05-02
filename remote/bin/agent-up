@@ -1172,7 +1172,13 @@ import re
 import shutil
 import tempfile
 import time
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        tomllib = None
 
 config_path = pathlib.Path(os.environ["CODEX_CONFIG"]).expanduser()
 agent_path = str(pathlib.Path(os.environ["AGENT_PATH"]).resolve())
@@ -1186,11 +1192,14 @@ trust_line = 'trust_level = "trusted"'
 if config_path.exists():
     raw = config_path.read_text(encoding="utf-8")
     # Validate TOML before modifying
-    try:
-        data = tomllib.loads(raw)
-    except Exception as exc:
-        print(f"error:config.toml is malformed TOML: {exc}")
-        raise SystemExit(0)
+    if tomllib is not None:
+        try:
+            data = tomllib.loads(raw)
+        except Exception as exc:
+            print(f"error:config.toml is malformed TOML: {exc}")
+            raise SystemExit(0)
+    else:
+        data = {}
 
     # Check if already trusted via parsed data
     projects = data.get("projects", {})
