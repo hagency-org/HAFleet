@@ -1515,7 +1515,10 @@ write_launch_env() {
 write_launch_env_from_env() {
   local var_name="$1"
   local var_value="${!var_name-}"
-  [ -n "${var_value:-}" ] && write_launch_env "$var_name" "$var_value"
+  # Use if/then (not [ ] && cmd) to avoid set -e false-positive on bash 3.2 (macOS)
+  if [ -n "${var_value:-}" ]; then
+    write_launch_env "$var_name" "$var_value"
+  fi
 }
 
 IS_V1_AGENT=0
@@ -1692,8 +1695,12 @@ if [ "$TYPE" = "claude" ]; then
   # Use --mcp-config=<path> (equals form) so commander's variadic parser does
   # NOT absorb the trailing positional prompt as an additional config path.
   CLAUDE_FLAGS="$CLAUDE_FLAGS --mcp-config=$(shell_quote "$AGENT_PATH/.mcp.json")"
-  [ -n "$MODEL" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS --model $(shell_quote "$MODEL")"
-  [ -n "$EXTRA_ARGS" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
+  if [ -n "$MODEL" ]; then
+    CLAUDE_FLAGS="$CLAUDE_FLAGS --model $(shell_quote "$MODEL")"
+  fi
+  if [ -n "$EXTRA_ARGS" ]; then
+    CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
+  fi
   if [ "$FRESH" = false ] && RID=$(cat "$RESUME_FILE"); then
     echo "Resuming claude session: $RID"
     tmux send-keys -t "$TMUX_PANE_TARGET" "source \"$LAUNCH_ENV_FILE\" && claude --resume $RID $CLAUDE_FLAGS" Enter
@@ -1710,8 +1717,12 @@ if [ "$TYPE" = "claude" ]; then
 
 elif [ "$TYPE" = "codex" ]; then
   CODEX_FLAGS="--yolo"
-  [ -n "$MODEL" ] && CODEX_FLAGS="$CODEX_FLAGS --model $(shell_quote "$MODEL")"
-  [ -n "$EXTRA_ARGS" ] && CODEX_FLAGS="$CODEX_FLAGS $EXTRA_ARGS"
+  if [ -n "$MODEL" ]; then
+    CODEX_FLAGS="$CODEX_FLAGS --model $(shell_quote "$MODEL")"
+  fi
+  if [ -n "$EXTRA_ARGS" ]; then
+    CODEX_FLAGS="$CODEX_FLAGS $EXTRA_ARGS"
+  fi
   # Inject MCP env vars via -c flags so Codex passes them to the MCP subprocess.
   # Codex strips env vars but honors -c config overrides parsed as TOML.
   # Must target the managed-mcp.json server name (agent-chat), not $MCP_SERVER_NAME
@@ -1719,7 +1730,7 @@ elif [ "$TYPE" = "codex" ]; then
   CODEX_MCP_NAME="agent-chat"
   codex_mcp_env() {
     local key="$1" val="$2"
-    [ -z "$val" ] && return
+    if [ -z "$val" ]; then return 0; fi
     # TOML-encode the value (escape \ and ")
     val="${val//\\/\\\\}"
     val="${val//\"/\\\"}"
@@ -1732,9 +1743,15 @@ elif [ "$TYPE" = "codex" ]; then
   codex_mcp_env AGENT_CHAT_API "$BACKEND_URL"
   codex_mcp_env AGENT_CHAT_BACKEND_PORT "$BACKEND_PORT"
   codex_mcp_env AGENT_CHAT_MCP_SERVER_NAME "$MCP_SERVER_NAME"
-  [ -n "$SERVER_ID" ] && codex_mcp_env AGENT_CHAT_SERVER "$SERVER_ID"
-  [ -n "${SAVED_STATE_DIR:-}" ] && codex_mcp_env AGENTCHAT_AGENT_STATE_DIR "$SAVED_STATE_DIR"
-  [ -n "$RUNTIME_DIR" ] && codex_mcp_env AGENT_CHAT_RUNTIME_DIR "$RUNTIME_DIR"
+  if [ -n "$SERVER_ID" ]; then
+    codex_mcp_env AGENT_CHAT_SERVER "$SERVER_ID"
+  fi
+  if [ -n "${SAVED_STATE_DIR:-}" ]; then
+    codex_mcp_env AGENTCHAT_AGENT_STATE_DIR "$SAVED_STATE_DIR"
+  fi
+  if [ -n "$RUNTIME_DIR" ]; then
+    codex_mcp_env AGENT_CHAT_RUNTIME_DIR "$RUNTIME_DIR"
+  fi
   if [ "$FRESH" = false ] && [ -f "$RESUME_FILE" ]; then
     RID=$(cat "$RESUME_FILE")
     echo "Resuming codex session: $RID"
