@@ -89,6 +89,10 @@ describe('server delivery path', () => {
         }
         throw new Error(`unexpected exec: ${cmd} ${args.join(' ')}`);
       },
+      backendFetch: async () => ({
+        ok: true,
+        json: async () => [],
+      }),
     });
 
     await serverModule.sweepPaneSnapshots();
