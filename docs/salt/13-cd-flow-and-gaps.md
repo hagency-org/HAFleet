@@ -191,7 +191,7 @@ Replace the diagnostic fallback with pane-content snapshot semantics or label it
 
 Evidence:
 
-- `OPERATIONS.md:37` says stable deploy uses `git pull --ff-only origin stable`.
+- Before R-040, `OPERATIONS.md` said stable deploy used `git pull --ff-only origin stable`.
 - `scripts/agentchat-stable-autodeploy.sh:112` runs a dirty-worktree cleaner.
 - `scripts/agentchat-stable-autodeploy.sh:171` resets the live checkout to `origin/stable`.
 
@@ -199,9 +199,9 @@ Impact:
 
 Operators may assume live deploy is non-destructive and preserve local changes, while the actual watcher can discard dirty and untracked files in the deploy checkout.
 
-Fix direction:
+Status:
 
-Update the runbook after the CD policy is approved. The deploy checkout should be explicitly documented as disposable and never used for local edits.
+Implemented in R-040. The runbook now documents the deploy checkout as disposable, the reset/clean flow, stable preflight, restart order, and post-deploy `verify-remote --expect-version`.
 
 ## Proposed CD Gate Model
 
@@ -278,7 +278,7 @@ This is the missing CD layer that would have made the idle/relay deployment stat
 | CD-005 | P1 | macOS CD | Decide and implement launchd autodeploy watcher or document manual-only policy. | macOS launchctl status and `agentchat service status --profile remote`. |
 | CD-005A | P1 | Remote package | Include and smoke-check `push-relay-autodeploy.service` in the generated remote package. | `npm run build:remote:check` and `npm run check:remote-package-smoke`. |
 | CD-006 | P2 | CLI diagnostics | Remove or label `session_activity` fallback in `agent-chat-cli`. | CLI status tests with missing backend runtime metrics. |
-| CD-007 | P2 | Ops docs | Update operations runbook to describe destructive deploy checkout behavior. | Docs review against autodeploy scripts. |
+| CD-007 | P2 | Ops docs | Update operations runbook to describe destructive deploy checkout behavior. | Implemented; docs reviewed against autodeploy scripts. |
 
 ## Immediate Next Batch
 

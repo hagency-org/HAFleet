@@ -30,13 +30,30 @@ agentchat update --service-status
 
 ## 1.1) Stable Branch Auto Deploy (Live)
 
-This watcher runs on the local host and polls `origin/stable` every 30s from:
+This watcher runs on the local host and polls `origin/stable` every 30s from the live deploy checkout:
 - `/path/to/agent-chat`
 
+The live deploy checkout is disposable. Do not use it for local edits, scratch files, or manual debugging changes that need to survive deployment. The watcher can discard both tracked and untracked changes in that checkout.
+
+Before merging or pushing a deploy candidate, run the non-destructive CD preflight from the candidate checkout:
+```bash
+npm run verify:cd-preflight
+```
+
+For an explicit stable-branch candidate checkout:
+```bash
+npm run verify:cd-preflight -- --branch stable
+```
+
 When a new commit appears, it will:
-1. `git pull --ff-only origin stable`
-2. run `npm install --production` only if `package.json` or `package-lock.json` changed
-3. restart local services: `agent-chat`, `agent-chat-v2`, `bridge-matrix`
+1. fetch `origin/stable`
+2. compare the current `HEAD` with `origin/stable`
+3. if the deploy checkout is dirty, log the first dirty paths and clean it with `git reset --hard HEAD` plus `git clean -fd`
+4. reset the deploy checkout to `origin/stable` with `git reset --hard origin/stable`
+5. run `npm install --production` only if `package.json` or `package-lock.json` changed
+6. restart `agent-chat-v2` first and wait for `/api/agents` health
+7. restart the remaining services from `AGENTCHAT_DEPLOY_SERVICES` (defaults: `agent-chat`, `agent-chat-v2`, `bridge-matrix`)
+8. verify all listed services are active
 
 Install/update the service:
 ```bash
@@ -49,6 +66,11 @@ Check status/logs:
 ```bash
 systemctl status agent-chat-stable-autodeploy --no-pager
 tail -f /path/to/agent-chat/logs/stable-autodeploy.out.log
+```
+
+After deployment, verify the loaded remote relay version when the deployed commit is expected to reach remote hosts:
+```bash
+agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
 ```
 
 ## 2) Verify Backend State
