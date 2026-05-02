@@ -156,14 +156,96 @@ Decision needed:
 
 Pick one policy. The system should not leave macOS remote CD behavior implicit.
 
+## Decision 6: Full Clone Remote Command Surface
+
+Problem:
+
+`remote/install-remote.sh` can run from a full source clone. In that case it currently prefers the root `bin/` directory when root `bin/agent-up` exists, so the installed `agentchat` helper can expose the root command surface instead of the remote-scoped `remote/bin/agentchat` surface. The generated remote package smoke validates the remote-scoped command surface, not this full-clone install path.
+
+Options:
+
+1. Remote profile always links `remote/bin/agentchat`, even from a full clone.
+2. Full clone remotes intentionally expose the root command surface and docs/tests say so.
+3. Add an explicit install flag, such as `AGENTCHAT_REMOTE_BIN_PROFILE=root|remote`, and require operators to choose.
+
+Recommendation:
+
+Prefer remote-scoped helpers by default for remote installs. Root command exposure should be an explicit operator choice because it includes commands that are not packaged or meaningful on a remote relay host.
+
+Decision needed:
+
+Decide whether full clone remote installs are remote-profile installs or root-profile installs.
+
+## Decision 7: Remote Dependency Reproducibility
+
+Problem:
+
+`remote/package-lock.json` can exist locally but is ignored by `.gitignore` and excluded from generated packages. That means remote dependency resolution is not pinned by the repository even though a local lock file can make the tree look reproducible.
+
+Options:
+
+1. Track `remote/package-lock.json` and use `npm ci --omit=dev` for remote installs.
+2. Keep remote packages lockless, delete stale ignored locks, and document that remote dependency resolution is semver-based.
+3. Generate a lock only in release packaging and include it in the generated artifact.
+
+Recommendation:
+
+Prefer a tracked remote lock if remote hosts are production CD targets. If remote packages are intentionally lightweight/developer-oriented, remove stale ignored locks and document lockless installs explicitly.
+
+Decision needed:
+
+Choose whether remote runtime dependencies are pinned by git or intentionally floating within semver ranges.
+
+## Decision 8: Standalone Remote Package Version
+
+Problem:
+
+`verify-remote --expect-version` depends on the relay heartbeat `version`, which currently comes from `git rev-parse --short HEAD`. A generated standalone remote package without `.git` reports no version, so the loaded-commit gate cannot verify standalone deployments.
+
+Options:
+
+1. Treat full git clones as the only supported CD target for `--expect-version`.
+2. Inject a build version file or env value into generated remote packages.
+3. Accept versionless standalone packages and skip expected-version checks for them.
+
+Recommendation:
+
+If standalone `remote-dist` is a first-class deployment artifact, inject a build version into the package and make relay heartbeat prefer it when `.git` is unavailable. Otherwise document that expected-version verification requires a git checkout.
+
+Decision needed:
+
+Decide whether standalone remote packages are production CD artifacts or only installation/bootstrap artifacts.
+
+## Decision 9: Remote Autodeploy Install Scope Beyond Dependencies
+
+Problem:
+
+Remote autodeploy only resets code, optionally installs dependencies, and restarts relay. It does not rerun `remote/install-remote.sh`, so service unit changes, helper symlink changes, sudoers changes, and MCP config changes can remain unapplied until an operator runs manual update/install.
+
+Options:
+
+1. Autodeploy reruns a safe noninteractive install/update step after code changes.
+2. Autodeploy remains code/dependency/restart only, and service/helper changes require explicit operator update.
+3. Split install into independently testable subcommands, then allow autodeploy to run only approved idempotent subcommands.
+
+Recommendation:
+
+Keep autodeploy code/dependency/restart only until install side effects are decomposed and tested. Document manual operator steps for service/helper changes in the meantime.
+
+Decision needed:
+
+Decide whether remote CD owns service/helper reconciliation, or only application code plus dependency restart.
+
 ## Test Strategy
 
 All next-batch code changes should be tested without touching live deployment:
 
 1. Fake git repository tests for release-gate and dependency-retry logic.
 2. Script-level dry-run hooks for service restart and `verify-remote` invocation.
-3. Generated package smoke for any new remote service/plist files.
-4. A manual two-sided acceptance run after stable merge:
+3. Install-path tests for full-clone remote helper profile selection.
+4. Dependency reproducibility tests for whichever remote lock policy is selected.
+5. Generated package smoke for any new remote service/plist files.
+6. A manual two-sided acceptance run after stable merge:
    - local/stable side: run the approved preflight and observe autodeploy logs;
    - remote side: run `agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>` and spot-check `agentchat cli status`.
 
@@ -171,6 +253,7 @@ Suggested future test files:
 
 - `tests/stable-autodeploy.test.js`
 - `tests/cd-remote-autodeploy.test.js`
+- `tests/remote-install-profile.test.js`
 
 Suggested CD-A harness knobs for `scripts/agentchat-stable-autodeploy.sh`:
 
@@ -190,9 +273,10 @@ Suggested CD-A tests:
 ## Recommended Approval Order
 
 1. Batch CD-A: stable release gate and dependency retry state for `scripts/agentchat-stable-autodeploy.sh` only, with fake-repo tests.
-2. Batch CD-B: remote post-deploy `verify-remote` integration and remote dependency install scope, with script-level dry-run tests.
-3. Batch CD-C: macOS remote CD policy implementation or manual-update documentation.
-4. Batch CD-D: optional GitHub check-runs gate if staging worktree is not enough or if deploy-host GitHub credentials are approved.
+2. Batch CD-B0: remote install/profile/reproducibility tests and docs, without changing autodeploy behavior.
+3. Batch CD-B: remote post-deploy `verify-remote` integration and remote dependency install scope, with script-level dry-run tests.
+4. Batch CD-C: macOS remote CD policy implementation or manual-update documentation.
+5. Batch CD-D: optional GitHub check-runs gate if staging worktree is not enough or if deploy-host GitHub credentials are approved.
 
 The next code batch should not start until CD-A decisions are approved.
 
