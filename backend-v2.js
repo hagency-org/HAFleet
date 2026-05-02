@@ -231,6 +231,32 @@ function buildAgentTokenReadiness() {
     failClosedReady: missingManagedAgentNames.length === 0,
   };
 }
+
+function buildServerCredentialReadiness() {
+  const operatorBearerConfigured = Boolean(normalizeOptionalText(process.env.API_TOKEN, 512));
+  const serverTokenConfigured = Boolean(normalizeOptionalText(process.env.AGENTCHAT_SERVER_TOKEN, 512));
+  return {
+    boundary: 'compat-api-token',
+    behavior: operatorBearerConfigured ? 'server-routes-require-api-token' : 'server-routes-open',
+    operatorBearerConfigured,
+    serverTokenConfigured,
+    serverTokenAccepted: false,
+    serverTokenEnforced: false,
+    serverOwnedRoutes: [
+      'POST /api/servers/heartbeat',
+      'POST /api/servers/:id/offline',
+      'POST /api/agents/:name/runtime',
+      'POST /api/runtime/compact',
+    ],
+    operatorOwnedRoutes: [
+      'POST /api/servers/:id/maintenance',
+    ],
+    relayReadRoutes: [
+      'GET /api/stream',
+    ],
+    futureCredential: 'AGENTCHAT_SERVER_TOKEN',
+  };
+}
 function requireAgentToken(extractAgent) {
   return (req, res, next) => {
     const agentName = extractAgent(req);
@@ -6231,6 +6257,7 @@ app.get('/health', (_req, res) => {
     messages: messages.length,
     auth: {
       agentTokens: buildAgentTokenReadiness(),
+      serverCredential: buildServerCredentialReadiness(),
     },
   });
 });

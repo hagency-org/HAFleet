@@ -488,6 +488,107 @@ describe('server heartbeat api', () => {
     });
   });
 
+  test('health reports the server credential compatibility boundary', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
+      env: {
+        API_TOKEN: 'operator-token',
+        AGENTCHAT_SERVER_TOKEN: 'server-token',
+      },
+    }));
+
+    const health = await request(context.app).get('/health');
+
+    expect(health.status).toBe(200);
+    expect(health.body.auth.serverCredential).toMatchObject({
+      boundary: 'compat-api-token',
+      behavior: 'server-routes-require-api-token',
+      operatorBearerConfigured: true,
+      serverTokenConfigured: true,
+      serverTokenAccepted: false,
+      serverTokenEnforced: false,
+      futureCredential: 'AGENTCHAT_SERVER_TOKEN',
+    });
+    expect(health.body.auth.serverCredential.serverOwnedRoutes).toEqual([
+      'POST /api/servers/heartbeat',
+      'POST /api/servers/:id/offline',
+      'POST /api/agents/:name/runtime',
+      'POST /api/runtime/compact',
+    ]);
+    expect(health.body.auth.serverCredential.operatorOwnedRoutes).toEqual([
+      'POST /api/servers/:id/maintenance',
+    ]);
+    expect(health.body.auth.serverCredential.relayReadRoutes).toEqual([
+      'GET /api/stream',
+    ]);
+  });
+
+  test('server routes keep API_TOKEN compatibility and do not accept server token yet', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
+      env: {
+        API_TOKEN: 'operator-token',
+        AGENTCHAT_SERVER_TOKEN: 'server-token',
+      },
+    }));
+
+    const heartbeatPayload = {
+      server: 's1',
+      instanceId: 'inst-1',
+      bootTs: 1000,
+      agents: [],
+      sessions: [],
+    };
+
+    const missingHeartbeatAuth = await request(context.app)
+      .post('/api/servers/heartbeat')
+      .send(heartbeatPayload);
+    const serverTokenHeartbeat = await request(context.app)
+      .post('/api/servers/heartbeat')
+      .set('Authorization', 'Bearer server-token')
+      .send(heartbeatPayload);
+    const operatorHeartbeat = await request(context.app)
+      .post('/api/servers/heartbeat')
+      .set('Authorization', 'Bearer operator-token')
+      .send(heartbeatPayload);
+
+    expect(missingHeartbeatAuth.status).toBe(401);
+    expect(serverTokenHeartbeat.status).toBe(401);
+    expect(operatorHeartbeat.status).toBe(200);
+
+    const serverTokenOffline = await request(context.app)
+      .post('/api/servers/s1/offline')
+      .set('Authorization', 'Bearer server-token')
+      .send({ instanceId: 'inst-1' });
+    const operatorOffline = await request(context.app)
+      .post('/api/servers/s1/offline')
+      .set('Authorization', 'Bearer operator-token')
+      .send({ instanceId: 'inst-1' });
+
+    expect(serverTokenOffline.status).toBe(401);
+    expect(operatorOffline.status).toBe(200);
+  });
+
+  test('server token does not grant operator maintenance access in compatibility mode', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
+      env: {
+        API_TOKEN: 'operator-token',
+        AGENTCHAT_SERVER_TOKEN: 'server-token',
+      },
+    }));
+
+    const serverTokenMaintenance = await request(context.app)
+      .post('/api/servers/s1/maintenance')
+      .set('Authorization', 'Bearer server-token')
+      .send({ enabled: true });
+    const operatorMaintenance = await request(context.app)
+      .post('/api/servers/s1/maintenance')
+      .set('Authorization', 'Bearer operator-token')
+      .send({ enabled: true });
+
+    expect(serverTokenMaintenance.status).toBe(401);
+    expect(operatorMaintenance.status).toBe(200);
+    expect(operatorMaintenance.body.server.maintenance).toBe(true);
+  });
+
   test('supports explicit offline reports from the active instance', async () => {
     context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
       agents: {

@@ -31,7 +31,7 @@ Keep these boundaries unless ac-topleader explicitly changes them:
 | Phase | Current state | Safe next step | Approval |
 | --- | --- | --- | --- |
 | Phase 2 runtime observation | Runtime writes now carry backend-derived observation provenance; central-local still has backend tmux sweeps and local-only idle probes. | Continue with local-host server record design after approval, not default behavior flips. | Required |
-| Phase 3 credentials/trust | RLP3-A added diagnostics-only agent-token readiness; shared `API_TOKEN`, dashboard proxy, server credential split, and Matrix trust remain compatibility surfaces. | Continue with server credential split or dashboard boundary after approval; do not flip fail-closed until tokens are provisioned. | Required |
+| Phase 3 credentials/trust | RLP3-A added diagnostics-only agent-token readiness; RLP3-A2 documented and tested the server credential compatibility boundary. Shared `API_TOKEN`, dashboard proxy, actual server credential enforcement, and Matrix trust remain compatibility surfaces. | Continue with server credential enforcement migration or dashboard boundary after approval; do not flip fail-closed until tokens are provisioned and relay/server credentials are rolled out. | Required |
 | Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A. | Continue with v1 home/runtime resolver hardening after approval. | Required |
 | Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
 | Phase 6 CLI/ops profile | Remote command honesty is enforced; RLP6-A made `service`, `update`, `ls`, and `down` help/docs profile-scoped. | Continue with shell resolver consistency after approval. | Required |
@@ -110,7 +110,16 @@ Scope:
 3. keep current fail-open compatibility for registered agents without loaded token files;
 4. keep R-003 fail-closed deferred until tokens are provisioned for existing agents.
 
-Recommended batch RLP3-A2: server credential split.
+Completed batch RLP3-A2: server credential boundary diagnostics.
+
+Scope:
+
+1. expose diagnostics-only server credential boundary under `/health.auth.serverCredential`;
+2. document that heartbeat/offline/runtime report currently use `API_TOKEN` compatibility bearer and `AGENTCHAT_SERVER_TOKEN` is not accepted or enforced yet;
+3. test that heartbeat/offline/runtime report and operator maintenance still require `API_TOKEN` when configured;
+4. keep `API_TOKEN` behavior unchanged and defer relay/server credential migration.
+
+Recommended later batch RLP3-A3: server credential enforcement migration.
 
 Scope:
 

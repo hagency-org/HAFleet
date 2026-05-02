@@ -95,6 +95,52 @@ describe('backend runtime API', () => {
     expect(agent.body.runtimeObservation).toEqual(response.body.runtime.observation);
   });
 
+  test('remote runtime reports keep API_TOKEN compatibility and do not accept server token yet', async () => {
+    context = await createBackendTestContext('agent-chat-runtime-auth-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      groups: {},
+      env: {
+        API_TOKEN: 'operator-token',
+        AGENTCHAT_SERVER_TOKEN: 'server-token',
+      },
+    });
+
+    const payload = {
+      blocked: false,
+      command: 'codex',
+      server: 'relay-west',
+    };
+
+    const missingBearer = await request(context.app)
+      .post('/api/agents/alpha/runtime')
+      .set('X-Forwarded-For', '203.0.113.10')
+      .send(payload);
+    const serverBearer = await request(context.app)
+      .post('/api/agents/alpha/runtime')
+      .set('X-Forwarded-For', '203.0.113.10')
+      .set('Authorization', 'Bearer server-token')
+      .send(payload);
+    const operatorBearer = await request(context.app)
+      .post('/api/agents/alpha/runtime')
+      .set('X-Forwarded-For', '203.0.113.10')
+      .set('Authorization', 'Bearer operator-token')
+      .send(payload);
+
+    expect(missingBearer.status).toBe(401);
+    expect(missingBearer.body).toEqual({ error: 'unauthorized' });
+    expect(serverBearer.status).toBe(401);
+    expect(operatorBearer.status).toBe(200);
+  });
+
   test('blocked notifications use tiered debounce and never notify transient blockers', async () => {
     context = await createBackendTestContext('agent-chat-runtime-test-', {
       agents: {

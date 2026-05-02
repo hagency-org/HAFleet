@@ -106,9 +106,10 @@ Central API server. All data lives here.
 
 **Authentication:**
 - Bearer token auth (`API_TOKEN`) for admin/operator routes
+- Server heartbeat/offline and remote runtime report routes currently use the same `API_TOKEN` compatibility bearer; `AGENTCHAT_SERVER_TOKEN` is a documented future split and is not accepted or enforced yet
 - Agent-token auth (`X-Agent-Token` header) for agent-specific routes (runtime, task transitions, alert transitions for assigned alerts)
 - Agent-token mode: `hard` and `soft` enforce loaded agent tokens; `audit` logs and allows; other values currently normalize to `audit`
-- `/health` reports agent-token readiness, including managed agents that do not yet have loaded token files
+- `/health` reports agent-token readiness and the current server credential compatibility boundary
 - Bridge secret (`MATRIX_BRIDGE_SECRET`) for bridge-specific routes
 - Subconscious event token for hook ingestion
 
@@ -120,9 +121,9 @@ Central API server. All data lives here.
 | GET | `/api/stream` | — | SSE event stream |
 | GET | `/msg/:id` | — | Full message HTML page (Matrix link previews) |
 | **Servers** ||||
-| POST | `/api/servers/heartbeat` | bearer | Server heartbeat (relay registration) |
-| POST | `/api/servers/:id/offline` | bearer | Mark server offline |
-| POST | `/api/servers/:id/maintenance` | bearer | Toggle server maintenance mode |
+| POST | `/api/servers/heartbeat` | bearer (`API_TOKEN`) | Server heartbeat (relay registration) |
+| POST | `/api/servers/:id/offline` | bearer (`API_TOKEN`) | Mark server offline |
+| POST | `/api/servers/:id/maintenance` | bearer (`API_TOKEN`) | Toggle operator-owned server maintenance mode |
 | GET | `/api/servers` | — | List all servers |
 | **Agents** ||||
 | POST | `/api/agents` | agent-token | Register/update agent (online) |
@@ -552,6 +553,7 @@ AGENT_AUDIT_BACKEND_URL=http://127.0.0.1:8090
 
 # Authentication
 API_TOKEN=<bearer token for remote API access>
+AGENTCHAT_SERVER_TOKEN=<future server credential; diagnostic only, not accepted yet>
 AGENTCHAT_AGENT_TOKEN_MODE=hard        # hard/soft enforce loaded tokens; audit logs only; other values normalize to audit
 AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN=<token for subconscious event ingestion>
 
