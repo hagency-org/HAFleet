@@ -118,7 +118,7 @@ console.log(JSON.stringify({ totals, entries }));
 NODE
 )"
 
-if printf '%s' "$REPORT_JSON" | rg -q '"error"'; then
+if printf '%s' "$REPORT_JSON" | grep -q '"error"'; then
   echo "Error: failed to parse npm audit report" >&2
   printf '%s\n' "$REPORT_JSON" >&2
   exit 1

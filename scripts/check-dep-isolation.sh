@@ -19,9 +19,17 @@ CODE_PATHS=(
   scripts
 )
 
+grep_code_paths() {
+  local pattern="$1"
+  find "${CODE_PATHS[@]}" -type f ! -path "scripts/check-dep-isolation.sh" -print0 2>/dev/null \
+    | while IFS= read -r -d '' file; do
+        grep -HnE -I -- "$pattern" "$file" 2>/dev/null || true
+      done
+}
+
 echo "Checking dependency isolation boundary..."
 
-imports="$(rg -n "from 'matrix-bot-sdk'|require\(['\"]matrix-bot-sdk['\"]\)" "${CODE_PATHS[@]}" --glob '!scripts/check-dep-isolation.sh' 2>/dev/null || true)"
+imports="$(grep_code_paths "from 'matrix-bot-sdk'|require\(['\"]matrix-bot-sdk['\"]\)")"
 if [ -z "$imports" ]; then
   echo "[FAIL] no matrix-bot-sdk import found in runtime code"
   failures=$((failures + 1))
@@ -31,7 +39,7 @@ else
     echo "[FAIL] matrix-bot-sdk import appears $import_count times (expected 1)"
     printf '%s\n' "$imports"
     failures=$((failures + 1))
-  elif ! printf '%s\n' "$imports" | rg -q '^bridge-matrix\.js:'; then
+  elif ! printf '%s\n' "$imports" | grep -qE '^bridge-matrix\.js:'; then
     echo "[FAIL] matrix-bot-sdk import must be isolated to bridge-matrix.js"
     printf '%s\n' "$imports"
     failures=$((failures + 1))
@@ -40,7 +48,7 @@ else
   fi
 fi
 
-request_refs="$(rg -n "from ['\"]request['\"]|require\(['\"]request['\"]\)|from ['\"]request-promise['\"]|require\(['\"]request-promise['\"]\)" "${CODE_PATHS[@]}" 2>/dev/null || true)"
+request_refs="$(grep_code_paths "from ['\"]request['\"]|require\(['\"]request['\"]\)|from ['\"]request-promise['\"]|require\(['\"]request-promise['\"]\)")"
 if [ -n "$request_refs" ]; then
   echo "[FAIL] direct request/request-promise usage found in project code"
   printf '%s\n' "$request_refs"
@@ -49,7 +57,7 @@ else
   echo "[OK] no direct request/request-promise imports in project code"
 fi
 
-sdk_refs="$(rg -n "matrix-bot-sdk" package.json package-lock.json 2>/dev/null || true)"
+sdk_refs="$(grep -HnE "matrix-bot-sdk" package.json package-lock.json 2>/dev/null || true)"
 if [ -z "$sdk_refs" ]; then
   echo "[FAIL] matrix-bot-sdk package reference missing; dependency baseline changed unexpectedly"
   failures=$((failures + 1))
