@@ -534,9 +534,18 @@ sudo systemctl enable --now agent-chat-stable-autodeploy
 ```
 
 Behavior on new `stable` commit:
-1. `git pull --ff-only origin stable`
-2. run `npm install --production` only when dependency manifests changed
-3. restart `agent-chat`, `agent-chat-v2`, `bridge-matrix`
+1. fetch `origin/stable`
+2. discard dirty tracked and untracked files in the live checkout with `git reset --hard HEAD` plus `git clean -fd`
+3. reset the live checkout to `origin/stable` with `git reset --hard origin/stable`
+4. run `npm install --production` only when dependency manifests changed
+5. restart `agent-chat-v2` first and wait for backend health
+6. restart `agent-chat` and `bridge-matrix`
+
+Treat the live checkout as disposable. Run `npm run verify:cd-preflight` before merging or pushing a deploy candidate, and verify the loaded remote relay after deployment with:
+
+```bash
+agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
+```
 
 ## Configuration (.env)
 

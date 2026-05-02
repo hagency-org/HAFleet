@@ -51,4 +51,23 @@ describe('runtime parity regressions', () => {
     expect(sharedSource).toMatch(/reason: 'update-required'/);
     expect(remoteSharedSource).toBe(sharedSource);
   });
+
+  test('trusted ops docs describe reset-based stable deploy behavior', () => {
+    const readmeSource = readFileSync(path.resolve('README.md'), 'utf-8');
+    const operationsSource = readFileSync(path.resolve('OPERATIONS.md'), 'utf-8');
+    const stableDeployPattern = /Stable Branch Auto Deploy \(Live\)[\s\S]*?## Configuration/;
+    const readmeStableDeploy = readmeSource.match(stableDeployPattern)?.[0] || '';
+
+    expect(readmeStableDeploy).not.toMatch(/git pull --ff-only origin stable/);
+    expect(readmeStableDeploy).toContain('git reset --hard HEAD');
+    expect(readmeStableDeploy).toContain('git clean -fd');
+    expect(readmeStableDeploy).toContain('git reset --hard origin/stable');
+    expect(readmeStableDeploy).toContain('npm run verify:cd-preflight');
+    expect(readmeStableDeploy).toContain('agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>');
+
+    expect(operationsSource).toContain('The live deploy checkout is disposable.');
+    expect(operationsSource).toContain('git reset --hard HEAD');
+    expect(operationsSource).toContain('git clean -fd');
+    expect(operationsSource).toContain('git reset --hard origin/stable');
+  });
 });
