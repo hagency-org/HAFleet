@@ -20,6 +20,10 @@ else
     WEB_PORT="8084"
 fi
 WEB_BASE_URL="${AGENT_CHAT_WEB_URL:-http://127.0.0.1:$WEB_PORT}"
+CURL_DASHBOARD_AUTH_ARGS=()
+if [ -n "${AGENT_CHAT_DASHBOARD_TOKEN:-}" ]; then
+    CURL_DASHBOARD_AUTH_ARGS=(-H "Authorization: Bearer ${AGENT_CHAT_DASHBOARD_TOKEN}")
+fi
 
 FORCE=false
 while [[ "${1:-}" == --* ]]; do
@@ -77,6 +81,7 @@ _body=$(printf '{"from":%s,"to":%s,"payload":%s}' "$_json_from" "$_json_to" "$_j
 # Try posting to queue service
 QUEUE_URL="${AGENT_CHAT_QUEUE_URL:-${WEB_BASE_URL%/}/api/queue}"
 _response=$(curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \
+    "${CURL_DASHBOARD_AUTH_ARGS[@]}" \
     -d "$_body" --connect-timeout 2 --max-time 5 "$QUEUE_URL" 2>/dev/null) || _response=""
 
 if echo "$_response" | python3 -c 'import sys,json; d=json.load(sys.stdin); exit(0 if d.get("ok") else 1)' 2>/dev/null; then
@@ -86,6 +91,7 @@ if echo "$_response" | python3 -c 'import sys,json; d=json.load(sys.stdin); exit
     if [ "$FORCE" = true ]; then
         # Immediately force-send via queue API
         _send_resp=$(curl -s --noproxy '*' -X POST --connect-timeout 2 --max-time 5 \
+            "${CURL_DASHBOARD_AUTH_ARGS[@]}" \
             "${QUEUE_URL}/${_id}/send" 2>/dev/null) || _send_resp=""
         if echo "$_send_resp" | python3 -c 'import sys,json; d=json.load(sys.stdin); exit(0 if d.get("ok") else 1)' 2>/dev/null; then
             echo "Force-delivered message #${_id} → ${target}"

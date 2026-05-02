@@ -98,7 +98,7 @@ Objectives:
 - Introduce a server/relay credential for heartbeat/runtime report.
 - Require per-agent tokens for agent memory reads/writes in production.
 - Keep Matrix bridge secret separate from operator/admin and server credentials.
-- Add dashboard web auth or local-only enforcement for privileged proxy routes.
+- RLP3-B1 added local-only/token enforcement for privileged dashboard proxy routes; full dashboard web auth remains a separate operator decision.
 
 Exit criteria:
 

@@ -95,10 +95,10 @@ This file will hold consolidated findings after subagent reports return. Each ac
   Evidence: The same key sequence is used for all agent CLIs.
   Fix: Prefer paste-buffer plus single submit and adapter-specific behavior by current command.
 
-- [High] [server.js](/Users/kamico/agent-chat/server.js:32) Dashboard is an unauthenticated privileged proxy.
-  Impact: If exposed beyond a single trusted localhost user, browser clients can mutate backend state or inject tmux input through the dashboard surface.
-  Evidence: Dashboard backend calls carry `API_TOKEN`, while web-layer mutating APIs and queue delivery paths lack an independent auth gate.
-  Fix: Add dashboard auth/local-only gates, split read-only pages from mutating APIs, and require signed backend/agent authorization for queue injection.
+- [High] [server.js](/Users/kamico/agent-chat/server.js:32) Dashboard must remain a local/operator surface, not a public privileged proxy.
+  Impact: If exposed through a proxy that makes remote browsers appear local, clients can still mutate backend state or inject tmux input through the dashboard surface.
+  Evidence: RLP3-B1 added a local-only or `AGENT_CHAT_DASHBOARD_TOKEN` gate for mutating APIs, but dashboard browser login/session policy is still not defined.
+  Fix: Keep mutating APIs local-only or tokened; add full browser web auth before intentionally exposing the dashboard beyond a trusted local operator path.
 
 - [High] [bridge-matrix.js](/Users/kamico/agent-chat/bridge-matrix.js:66) Matrix trust and command ACL defaults are fail-open.
   Impact: Untrusted Matrix rooms or empty ACL config can reach command paths that control tmux or write into the kernel message plane.

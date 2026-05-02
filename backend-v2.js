@@ -48,6 +48,7 @@ const DEFAULT_WEB_PORT = Number.isFinite(DEFAULT_WEB_PORT_RAW) && DEFAULT_WEB_PO
 const DATA_DIR = path.join(RUNTIME_ROOT, 'data');
 const WEB_BASE_URL = (process.env.AGENT_CHAT_WEB_URL || `http://127.0.0.1:${DEFAULT_WEB_PORT}`).trim().replace(/\/$/, '');
 const PUSH_QUEUE_URL = (process.env.AGENT_CHAT_QUEUE_URL || `${WEB_BASE_URL}/api/queue`).trim().replace(/\/$/, '');
+const WEB_BRIDGE_DASHBOARD_TOKEN = (process.env.AGENT_CHAT_DASHBOARD_TOKEN || '').trim();
 const WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_WEB_BRIDGE_FETCH_TIMEOUT_MS || '5000', 10);
 const WEB_BRIDGE_FETCH_TIMEOUT_MS = Number.isFinite(WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW) && WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW > 0
   ? WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW
@@ -294,7 +295,15 @@ function isTimeoutAbortError(error) {
 async function fetchWebBridge(url, init, contextLabel) {
   const startedAt = Date.now();
   try {
-    return await fetch(url, init);
+    const nextInit = init ? { ...init } : {};
+    if (WEB_BRIDGE_DASHBOARD_TOKEN) {
+      const headers = { ...(nextInit.headers || {}) };
+      if (!Object.keys(headers).some((key) => key.toLowerCase() === 'authorization')) {
+        headers.Authorization = `Bearer ${WEB_BRIDGE_DASHBOARD_TOKEN}`;
+      }
+      nextInit.headers = headers;
+    }
+    return await fetch(url, nextInit);
   } catch (error) {
     const elapsedMs = Date.now() - startedAt;
     const prefix = isTimeoutAbortError(error) ? '[web-bridge-timeout]' : '[web-bridge-fetch-failed]';

@@ -69,7 +69,7 @@ Boundary conclusion:
 
 Accepted findings for consolidation:
 
-- Dashboard `server.js` acts as an unauthenticated privileged proxy that can call backend with `API_TOKEN` and write into tmux through queue/delivery APIs.
+- Historical finding: dashboard `server.js` acted as an unauthenticated privileged proxy that could call backend with `API_TOKEN` and write into tmux through queue/delivery APIs. RLP3-B1 now gates mutating dashboard APIs to loopback or `AGENT_CHAT_DASHBOARD_TOKEN`; full browser web auth remains separate.
 - Matrix trust and bot command ACL defaults are fail-open: audit mode continues processing, and empty operator/admin ACLs can allow command execution paths.
 - Supervisor lifecycle is imported and initialized by backend and can kill/restart supervisor tmux sessions as a backend side effect.
 - `write-supervisor-state start` claims to register/begin lease but only patches existing supervisor state.

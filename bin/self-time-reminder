@@ -29,6 +29,10 @@ else
 fi
 WEB_BASE_URL="${AGENT_CHAT_WEB_URL:-http://127.0.0.1:$WEB_PORT}"
 API_BASE="${AGENT_CHAT_REMINDER_URL:-${WEB_BASE_URL%/}/api/reminders}"
+CURL_DASHBOARD_AUTH_ARGS=()
+if [ -n "${AGENT_CHAT_DASHBOARD_TOKEN:-}" ]; then
+  CURL_DASHBOARD_AUTH_ARGS=(-H "Authorization: Bearer ${AGENT_CHAT_DASHBOARD_TOKEN}")
+fi
 
 # ── Detect self target ──────────────────────────
 _detect_target() {
@@ -48,7 +52,7 @@ _cmd_list() {
   local target
   target=$(_detect_target)
   local data
-  data=$(curl -s --noproxy '*' --connect-timeout 2 --max-time 5 "$API_BASE" 2>/dev/null) || {
+  data=$(curl -s --noproxy '*' "${CURL_DASHBOARD_AUTH_ARGS[@]}" --connect-timeout 2 --max-time 5 "$API_BASE" 2>/dev/null) || {
     echo "Error: cannot reach reminder server" >&2; exit 1
   }
   # Filter to own target and display
@@ -88,6 +92,7 @@ _cmd_cancel() {
   fi
   local resp
   resp=$(curl -s --noproxy '*' -X DELETE --connect-timeout 2 --max-time 5 \
+    "${CURL_DASHBOARD_AUTH_ARGS[@]}" \
     "$API_BASE/$id" 2>/dev/null) || resp=""
   if echo "$resp" | python3 -c 'import sys,json; d=json.load(sys.stdin); exit(0 if d.get("ok") else 1)' 2>/dev/null; then
     echo "Reminder #${id} cancelled."
@@ -121,7 +126,7 @@ _cmd_set() {
   # Check for existing reminder (unless --force)
   if [ "$force" != "1" ]; then
     local existing
-    existing=$(curl -s --noproxy '*' --connect-timeout 2 --max-time 5 "$API_BASE" 2>/dev/null) || existing="[]"
+    existing=$(curl -s --noproxy '*' "${CURL_DASHBOARD_AUTH_ARGS[@]}" --connect-timeout 2 --max-time 5 "$API_BASE" 2>/dev/null) || existing="[]"
     local conflict
     conflict=$(printf '%s' "$existing" | TARGET="$target" python3 -c "
 import sys, json
@@ -167,6 +172,7 @@ if mine:
   # Post
   local _response
   _response=$(curl -s --noproxy '*' -X POST -H 'Content-Type: application/json' \
+    "${CURL_DASHBOARD_AUTH_ARGS[@]}" \
     -d "$_body" --connect-timeout 2 --max-time 5 "$API_BASE" 2>/dev/null) || _response=""
 
   if echo "$_response" | python3 -c 'import sys,json; d=json.load(sys.stdin); exit(0 if d.get("ok") else 1)' 2>/dev/null; then

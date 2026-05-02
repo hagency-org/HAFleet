@@ -31,7 +31,7 @@ Keep these boundaries unless ac-topleader explicitly changes them:
 | Phase | Current state | Safe next step | Approval |
 | --- | --- | --- | --- |
 | Phase 2 runtime observation | Runtime writes now carry backend-derived observation provenance; RLP2-B fixed custom local server ID delivery/liveness and added an opt-in local server record; unknown activity is preserved as `activeNow=null` instead of being shown as idle. Central-local still uses backend tmux sweeps and local-only idle probes. | Continue with richer local-host adapter design only after approval, not default behavior flips. | Required |
-| Phase 3 credentials/trust | RLP3-A added diagnostics-only agent-token readiness; RLP3-A2 documented and tested the server credential compatibility boundary. Shared `API_TOKEN`, dashboard proxy, actual server credential enforcement, and Matrix trust remain compatibility surfaces. | Continue with server credential enforcement migration or dashboard boundary after approval; do not flip fail-closed until tokens are provisioned and relay/server credentials are rolled out. | Required |
+| Phase 3 credentials/trust | RLP3-A added diagnostics-only agent-token readiness; RLP3-A2 documented and tested the server credential compatibility boundary; RLP3-B1 added a local-only or explicit-token boundary for mutating dashboard APIs. Shared `API_TOKEN`, actual server credential enforcement, full dashboard web auth, and Matrix trust remain compatibility surfaces. | Continue with server credential enforcement migration, dashboard web-auth decisions, or Matrix trust only after approval; do not flip fail-closed until tokens are provisioned and relay/server credentials are rolled out. | Required |
 | Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A; RLP4-B added v1 home/runtime resolver contract tests and rejects relative env/manifest paths before normalization. | Continue with broader path unification only after approval. | Required |
 | Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
 | Phase 6 CLI/ops profile | Remote command honesty is enforced; RLP6-A made `service`, `update`, `ls`, and `down` help/docs profile-scoped; CLI status/list now report unknown runtime activity without treating it as idle; RLP6-B aligned `agent-ls --all` v1 home discovery with the shared resolver. | Continue with `agent-down` resolver tests only after separate approval; do not change shutdown safety behavior implicitly. | Required |
@@ -129,13 +129,21 @@ Scope:
 3. keep `API_TOKEN` accepted only behind an explicit compatibility flag during migration;
 4. update relay clients to prefer server credential for heartbeat/runtime/offline after the credential model is approved.
 
-Recommended batch RLP3-B: dashboard boundary.
+Completed batch RLP3-B1: dashboard mutation boundary.
 
 Scope:
 
 1. add local-only or explicit-auth gate for mutating dashboard proxy routes;
 2. protect queue mutation and tmux injection surfaces first;
 3. keep read-only local dashboard behavior compatible until operator chooses web auth model.
+
+Implemented:
+
+1. `server.js` now gates `/api` mutating methods after body parsing and before dashboard queue/proxy routes;
+2. local loopback callers remain compatible without a token;
+3. non-local callers must send `Authorization: Bearer $AGENT_CHAT_DASHBOARD_TOKEN`;
+4. backend web-bridge calls and queue/reminder CLI helpers pass the optional dashboard token when configured;
+5. full browser login/session/OIDC/basic-auth and safe public dashboard exposure remain operator decisions.
 
 Recommended batch RLP3-C: Matrix trust default decision.
 
@@ -300,7 +308,7 @@ Scope:
 3. RLP6-A profile-scoped help/docs. Completed after ac-topleader approval.
 4. RLP3-A auth readiness diagnostics. Completed after ac-topleader approval.
 5. CD-A stable release gate and dependency retry, once ac-topleader approves `14-cd-next-decisions.md`.
-6. RLP3-B dashboard local-only/auth gate.
+6. RLP3-B dashboard local-only/auth gate. Completed as RLP3-B1 after ac-topleader approval.
 7. RLP3-C Matrix trust default.
 8. RLP2-B local-host server record.
 9. RLP7-B dependency audit remediation.
@@ -308,11 +316,11 @@ Scope:
 
 ## Next Approval Requests
 
-The next low-risk candidates are:
+The next candidates are:
 
-1. RLP2-B local-host server record design;
-2. RLP4-B v1 home/runtime resolver contract tests;
-3. RLP3-A2 server credential split design/tests;
-4. CD-A stable release gate and dependency retry state, once deploy behavior changes are approved.
+1. RLP3-C Matrix trust default, pending operator decision;
+2. RLP7-B dependency audit remediation as a separate security batch;
+3. RLP6 `agent-down` resolver/backend-unavailable tests, pending shutdown-safety approval;
+4. CD-A/CD-B deploy behavior, pending operator decisions in `14-cd-next-decisions.md`.
 
-These should keep avoiding launch, stable, deploy scripts, dashboard auth, Matrix, and default observation behavior unless ac-topleader explicitly approves that narrower batch.
+These should keep avoiding launch, stable, deploy scripts, full dashboard web auth, Matrix default flips, and default observation behavior unless ac-topleader explicitly approves that narrower batch.
