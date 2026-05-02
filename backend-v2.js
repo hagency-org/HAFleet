@@ -414,6 +414,54 @@ function normalizeOptionalText(value, maxLen = 4000) {
   return trimmed;
 }
 
+function normalizeRuntimeObservation(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const observerSource = normalizeOptionalText(value.observerSource, 64);
+  if (!observerSource) return null;
+  const observerServer = normalizeServer(value.observerServer);
+  const observedAt = Math.max(0, Number(value.observedAt) || 0);
+  if (!observedAt) return null;
+  return {
+    observerSource,
+    observerServer,
+    observedAt,
+  };
+}
+
+function buildRuntimeObservation({ observerSource, observerServer, observedAt } = {}) {
+  const source = normalizeOptionalText(observerSource, 64);
+  if (!source) return null;
+  return {
+    observerSource: source,
+    observerServer: normalizeServer(observerServer),
+    observedAt: Math.max(0, Number(observedAt) || Date.now()),
+  };
+}
+
+function serializeRuntimeObservation(runtime) {
+  return normalizeRuntimeObservation(runtime?.observation);
+}
+
+function runtimeObservationEquals(left, right) {
+  const a = normalizeRuntimeObservation(left);
+  const b = normalizeRuntimeObservation(right);
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return a.observerSource === b.observerSource
+    && (a.observerServer || null) === (b.observerServer || null)
+    && a.observedAt === b.observedAt;
+}
+
+function setRuntimeObservation(runtime, details = {}) {
+  if (!runtime || typeof runtime !== 'object') return false;
+  const next = buildRuntimeObservation(details);
+  if (!next) return false;
+  const prev = normalizeRuntimeObservation(runtime.observation);
+  if (runtimeObservationEquals(prev, next)) return false;
+  runtime.observation = next;
+  return true;
+}
+
 function normalizeBoolean(value) {
   if (value === true) return true;
   if (value === false) return false;
@@ -3088,6 +3136,7 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
   runtime.idleDurationSec = Number(runtime.idleDurationSec) || 0;
   runtime.lastTmuxActivitySec = Number(runtime.lastTmuxActivitySec) || null;
   runtime.workspacePath = normalizeWorkspacePath(runtime.workspacePath);
+  runtime.observation = normalizeRuntimeObservation(runtime.observation);
   runtime.mcpPresent = runtime.mcpPresent === true
     ? true
     : (runtime.mcpPresent === false ? false : null);
@@ -4030,6 +4079,7 @@ function ensureAgentRuntimeRecord(name) {
       lastPushSourceMsgId: null,
       lastInboxCheckAt: 0,
       lastAgentOutboundAt: 0,
+      observation: null,
       inboxGate: normalizeInboxGate(null),
       inboxReadAck: normalizeInboxReadAck(null),
       lastBlockedTail: '',
@@ -4444,6 +4494,16 @@ function applyAgentBlockedState(agentName, payload = {}) {
 
   if (setRuntimeActivityFields(runtime, payload)) changed = true;
   if (setRuntimeWorkspacePath(runtime, payload)) changed = true;
+  if (Object.prototype.hasOwnProperty.call(payload, 'observerSource')) {
+    const observerServer = Object.prototype.hasOwnProperty.call(payload, 'observerServer')
+      ? payload.observerServer
+      : payload.server;
+    if (setRuntimeObservation(runtime, {
+      observerSource: payload.observerSource,
+      observerServer,
+      observedAt: now,
+    })) changed = true;
+  }
   const agentForMcp = agents[agentName];
   if (agentForMcp && !agentExpectsMcp(agentForMcp) && payload.mcpPresent !== undefined) payload = { ...payload, mcpPresent: null };
   if (setRuntimeMcpFields(runtime, payload, now)) changed = true;
@@ -4988,6 +5048,8 @@ function applyLocalRuntimeSignals(agentName, payload = {}) {
     mcpPresent,
     blockedObserved,
     server: 'local',
+    observerSource: 'local-sweep',
+    observerServer: 'local',
   });
   dispatchBlockedNotifications(transition);
 }
@@ -5656,6 +5718,7 @@ function serializeAgent(agent) {
     idleDurationSec: Number(runtime?.idleDurationSec) || 0,
     lastTmuxActivitySec: Number(runtime?.lastTmuxActivitySec) || null,
     workspacePath: runtime?.workspacePath || null,
+    runtimeObservation: serializeRuntimeObservation(runtime),
     mcpPresent: runtime?.mcpPresent === true
       ? true
       : (runtime?.mcpPresent === false ? false : null),
@@ -6891,10 +6954,21 @@ app.post('/api/agents/:name/runtime', requireAgentToken(_tokenFromName), (req, r
     workspacePath,
     mcpPresent,
     blockedObserved,
+    observerSource: 'runtime-api',
+    observerServer: server,
   });
   const runtime = dispatchBlockedNotifications(transition);
   if (!runtime) return res.status(500).json({ error: 'runtime update failed' });
-  auditLog(req, { agent: agentName, summary: { blocked, reason, mcpPresent: runtime.mcpPresent ?? null, server } });
+  auditLog(req, {
+    agent: agentName,
+    summary: {
+      blocked,
+      reason,
+      mcpPresent: runtime.mcpPresent ?? null,
+      server,
+      observerSource: runtime.observation?.observerSource || null,
+    },
+  });
   res.json({
     ok: true,
     runtime: {
@@ -6908,6 +6982,7 @@ app.post('/api/agents/:name/runtime', requireAgentToken(_tokenFromName), (req, r
       idleDurationSec: Number(runtime.idleDurationSec) || 0,
       lastTmuxActivitySec: Number(runtime.lastTmuxActivitySec) || null,
       workspacePath: runtime.workspacePath || null,
+      observation: serializeRuntimeObservation(runtime),
       mcpPresent: runtime.mcpPresent === true
         ? true
         : (runtime.mcpPresent === false ? false : null),

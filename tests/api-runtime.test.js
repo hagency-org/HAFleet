@@ -36,6 +36,65 @@ describe('backend runtime API', () => {
     context = null;
   });
 
+  test('runtime reports persist backend-derived observation provenance', async () => {
+    context = await createBackendTestContext('agent-chat-runtime-provenance-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      agentRuntime: {
+        alpha: {
+          observation: {
+            observerSource: 'legacy-source',
+            observerServer: 'legacy-host',
+            observedAt: 'not-a-number',
+          },
+        },
+      },
+      groups: {},
+    });
+
+    const before = Date.now();
+    const response = await request(context.app)
+      .post('/api/agents/alpha/runtime')
+      .send({
+        blocked: false,
+        reason: null,
+        tail: '',
+        command: 'codex',
+        server: ' relay-west ',
+        activeNow: true,
+        observation: {
+          observerSource: 'client-forged',
+          observerServer: 'evil-host',
+          observedAt: 1,
+        },
+        observerSource: 'client-forged-top-level',
+        observerServer: 'evil-host',
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.runtime.observation).toMatchObject({
+      observerSource: 'runtime-api',
+      observerServer: 'relay-west',
+    });
+    expect(response.body.runtime.observation.observedAt).toBeGreaterThanOrEqual(before);
+
+    const runtime = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtime.alpha.observation).toEqual(response.body.runtime.observation);
+    expect(runtime.alpha.observation.observerSource).not.toBe('client-forged');
+    expect(runtime.alpha.observation.observerServer).not.toBe('evil-host');
+
+    const agent = await request(context.app).get('/api/agents/alpha').expect(200);
+    expect(agent.body.runtimeObservation).toEqual(response.body.runtime.observation);
+  });
+
   test('blocked notifications use tiered debounce and never notify transient blockers', async () => {
     context = await createBackendTestContext('agent-chat-runtime-test-', {
       agents: {

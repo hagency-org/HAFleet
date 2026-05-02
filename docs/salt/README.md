@@ -52,4 +52,4 @@ The first phase is documentation and audit only. Code repairs start after the re
 - Phase 0 terminology is staged in `11`; this folder is the temporary authority for remote/local terms until root docs are approved for rewrite.
 - CI/CD first gate is implemented in `12` and exposed through `npm run verify:ci`.
 - CD preflight and post-deploy version checks are implemented; remaining CD work is decision-gated in `14`.
-- Phase 2-7 resumption is staged in `15`; RLP4-A MCP media cache relocation is implemented and the next safe batches are approval-gated.
+- Phase 2-7 resumption is staged in `15`; RLP4-A MCP media cache relocation and RLP2-A runtime observation provenance are implemented, with the next safe batches still approval-gated.

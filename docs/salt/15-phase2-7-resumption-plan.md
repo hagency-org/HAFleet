@@ -1,7 +1,7 @@
 # 15 Phase 2-7 Resumption Plan
 
 Date: 2026-05-03
-Status: resumption plan; approval required before behavior changes.
+Status: active resumption plan; completed batches remain review-gated before merge to stable.
 
 ## Baseline
 
@@ -30,7 +30,7 @@ Keep these boundaries unless ac-topleader explicitly changes them:
 
 | Phase | Current state | Safe next step | Approval |
 | --- | --- | --- | --- |
-| Phase 2 runtime observation | Remote relay reports heartbeat/runtime; central-local still has backend tmux sweeps and local-only idle probes. | Start with observation provenance and local-host server record work, not default behavior flips. | Required |
+| Phase 2 runtime observation | Runtime writes now carry backend-derived observation provenance; central-local still has backend tmux sweeps and local-only idle probes. | Continue with local-host server record design after approval, not default behavior flips. | Required |
 | Phase 3 credentials/trust | Shared `API_TOKEN` remains overloaded; agent token hard mode is not production default; dashboard proxy and Matrix trust remain compatibility surfaces. | Split into token-readiness, dashboard local-only/auth, Matrix trust, and server credential batches. | Required |
 | Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A. | Continue with v1 home/runtime resolver hardening after approval. | Required |
 | Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
@@ -44,16 +44,16 @@ Current evidence:
 - `backend-v2.js` owns `/api/servers/heartbeat`, `servers.json`, and `agent_runtime.json`.
 - `lib/push-relay-core.js` already reports runtime and heartbeat from remote hosts.
 - `server.js` still performs local tmux pane snapshot sweeps for dashboard idle/queue behavior.
-- `agent_runtime.json` records activity and MCP state, but it does not clearly encode the observation owner/source for each update.
+- `agent_runtime.json` records activity, MCP state, and the last backend-derived observation write path.
 
-Recommended batch RLP2-A: runtime observation provenance.
+Completed batch RLP2-A: runtime observation provenance.
 
 Scope:
 
-1. add normalized runtime observation fields such as `runtime.observerServer`, `runtime.observerSource`, and `runtime.observedAt`;
-2. set them on `/api/agents/:name/runtime` updates from relay/backend payloads;
-3. expose them in the runtime API response and agent detail where useful;
-4. add tests proving local and remote runtime reports do not silently overwrite ownership context.
+1. add normalized `runtime.observation` fields: `observerSource`, `observerServer`, and `observedAt`;
+2. derive the source from backend write paths rather than trusting client-supplied provenance;
+3. expose observation provenance in the runtime API response and agent detail;
+4. add tests proving runtime reports ignore forged provenance and server heartbeat liveness does not overwrite runtime observation ownership.
 
 Files likely touched:
 
@@ -63,7 +63,7 @@ Files likely touched:
 
 Verification:
 
-- targeted `vitest run tests/api-runtime.test.js tests/api-server-heartbeat.test.js`
+- targeted `vitest run tests/api-runtime.test.js tests/api-server-heartbeat.test.js tests/api-provenance.test.js`
 - targeted `vitest run tests/push-relay.test.js` if relay report payloads change
 - `npm run verify:ci`
 - clean `npm run verify:cd-preflight`
@@ -271,7 +271,7 @@ Scope:
 ## Recommended Implementation Order
 
 1. RLP4-A MCP media cache relocation. Completed after ac-topleader approval.
-2. RLP2-A runtime observation provenance. Adds source clarity before changing observation ownership.
+2. RLP2-A runtime observation provenance. Completed after ac-topleader approval.
 3. RLP6-A profile-scoped help/docs. Makes operator behavior clearer before deeper CLI behavior changes.
 4. RLP3-A auth readiness diagnostics. Prepares Phase 3 without flipping fail-closed production behavior.
 5. CD-A stable release gate and dependency retry, once ac-topleader approves `14-cd-next-decisions.md`.
@@ -281,13 +281,13 @@ Scope:
 9. RLP7-B dependency audit remediation.
 10. Phase 5 launch decomposition only after the launch freeze is lifted.
 
-## Approval Request
+## Next Approval Requests
 
-The first recommended code batch is RLP4-A:
+The next low-risk candidates are:
 
-- fix MCP media cache location in root and remote MCP core;
-- add focused tests;
-- run `check:remote-sync`, `check:remote-package-smoke`, `verify:ci`, and clean `verify:cd-preflight`;
-- commit and push to `master`.
+1. RLP6-A profile-scoped CLI help/docs;
+2. RLP3-A auth readiness diagnostics;
+3. RLP2-B local-host server record design;
+4. CD-A stable release gate and dependency retry state, once deploy behavior changes are approved.
 
-This does not touch launch, stable, deploy scripts, dashboard auth, Matrix, or runtime observation behavior.
+These should keep avoiding launch, stable, deploy scripts, dashboard auth, Matrix, and default observation behavior unless ac-topleader explicitly approves that narrower batch.

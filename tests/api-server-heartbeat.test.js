@@ -20,6 +20,10 @@ function agentsPath(runtimeDir) {
   return path.join(runtimeDir, 'data', 'agents.json');
 }
 
+function agentRuntimePath(runtimeDir) {
+  return path.join(runtimeDir, 'data', 'agent_runtime.json');
+}
+
 function systemInfoPath(runtimeDir) {
   return path.join(runtimeDir, 'data', 'system-info.jsonl');
 }
@@ -104,6 +108,44 @@ describe('server heartbeat api', () => {
     });
     expect(Number(servers['remote-host-1'].heartbeatAt)).toBeGreaterThan(0);
     expect(Number(servers['remote-host-1'].lastSeen)).toBeGreaterThan(0);
+  });
+
+  test('heartbeat does not overwrite runtime observation provenance', async () => {
+    const observation = {
+      observerSource: 'runtime-api',
+      observerServer: 'remote-host-1',
+      observedAt: 12345,
+    };
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
+      agents: {
+        'remote-agent': makeAgent('remote-agent', {
+          online: true,
+          server: 'remote-host-1',
+          tmux: 'remote-agent:0.0',
+        }),
+      },
+      agentRuntime: {
+        'remote-agent': {
+          blocked: false,
+          activeNow: true,
+          observation,
+        },
+      },
+    }));
+
+    const response = await postHeartbeat(context.app, {
+      server: 'remote-host-1',
+      sessions: ['remote-agent:0.0'],
+      agents: ['remote-agent'],
+      instanceId: 'inst-abc',
+      bootTs: 1000,
+    });
+
+    expect(response.status).toBe(200);
+    const runtime = readJson(agentRuntimePath(context.runtimeDir));
+    expect(runtime['remote-agent'].observation).toEqual(observation);
+    const agent = await request(context.app).get('/api/agents/remote-agent').expect(200);
+    expect(agent.body.runtimeObservation).toEqual(observation);
   });
 
   test('marks heartbeat agents online and assigns their server', async () => {

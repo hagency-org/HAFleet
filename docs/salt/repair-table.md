@@ -47,6 +47,7 @@ Status: draft pending audit consolidation and ac-topleader review.
 | R-039 | P1 | Remote package | Generated remote package gate does not include or validate `push-relay-autodeploy.service`. | Add the service template to managed package specs and smoke-check its placeholders/ExecStart target. | `npm run build:remote:check`, `npm run check:remote-package-smoke`. | Implemented |
 | R-040 | P2 | Ops docs | Operations runbook still described stable deploy as `git pull --ff-only`, but autodeploy uses destructive reset/clean. | Update runbook after CD policy approval; document deploy checkout as disposable. | Docs review against autodeploy scripts. | Implemented |
 | R-041 | P1 | CD preflight | Operators need a single non-destructive command that validates a candidate checkout and prints the expected post-deploy version check. | Add `npm run verify:cd-preflight`, requiring a clean worktree, running `verify:ci`, and printing `verify-remote --expect-version`. | `npm run verify:cd-preflight`. | Implemented |
+| R-042 | P1 | Remote/local runtime | Runtime activity, MCP, and block updates did not record which observer path last wrote `agent_runtime.json`, making local sweep vs remote relay drift hard to audit. | Add normalized runtime observation provenance derived by the backend write path; expose it in runtime responses and agent detail; keep heartbeat liveness separate. | `tests/api-runtime.test.js`, `tests/api-server-heartbeat.test.js`, `tests/api-provenance.test.js`, `verify:ci`. | Implemented in RLP2-A |
 
 ## Approval Gate
 
