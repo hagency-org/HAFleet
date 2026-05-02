@@ -9,6 +9,16 @@ DEPLOY_BRANCH="${AGENTCHAT_DEPLOY_BRANCH:-stable}"
 POLL_SEC="${AGENTCHAT_POLL_SEC:-30}"
 BACKEND_SERVICE="${AGENTCHAT_BACKEND_SERVICE:-agent-chat-v2}"
 DEPLOY_SERVICES="${AGENTCHAT_DEPLOY_SERVICES:-agent-chat ${BACKEND_SERVICE} bridge-matrix}"
+RELEASE_GATE="${AGENTCHAT_RELEASE_GATE:-none}"
+RELEASE_GATE_ARGS="${AGENTCHAT_RELEASE_GATE_ARGS:-}"
+ONCE="${AGENTCHAT_ONCE:-false}"
+SYSTEMCTL_BIN="${AGENTCHAT_SYSTEMCTL_BIN:-systemctl}"
+CURL_BIN="${AGENTCHAT_CURL_BIN:-curl}"
+SLEEP_BIN="${AGENTCHAT_SLEEP_BIN:-sleep}"
+NPM_BIN="${AGENTCHAT_NPM_BIN:-npm}"
+DEPLOY_STATE_DIR="${AGENTCHAT_DEPLOY_STATE_DIR:-}"
+LAST_SUCCESSFUL_REF_FILE=""
+INSTALL_NEEDED_FILE=""
 
 log() {
   printf '[stable-autodeploy] %s\n' "$*"
@@ -28,6 +38,28 @@ run_git() {
   run_as_deploy_user git -C "$REPO_DIR" "$@"
 }
 
+run_systemctl() {
+  "$SYSTEMCTL_BIN" "$@"
+}
+
+run_sleep() {
+  "$SLEEP_BIN" "$@"
+}
+
+is_true() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+sleep_or_exit_once() {
+  if is_true "$ONCE"; then
+    exit 0
+  fi
+  run_sleep "$POLL_SEC"
+}
+
 service_list() {
   local s
   for s in $DEPLOY_SERVICES; do
@@ -42,11 +74,11 @@ wait_for_backend() {
   local i
   log "Waiting up to ${BACKEND_HEALTH_TIMEOUT}s for backend health..."
   for i in $(seq "$BACKEND_HEALTH_TIMEOUT"); do
-    if curl -sf "$BACKEND_HEALTH_URL" >/dev/null 2>&1; then
+    if "$CURL_BIN" -sf "$BACKEND_HEALTH_URL" >/dev/null 2>&1; then
       log "Backend healthy after ${i}s"
       return 0
     fi
-    sleep 1
+    run_sleep 1
   done
   log "ERROR: backend not healthy after ${BACKEND_HEALTH_TIMEOUT}s"
   return 1
@@ -57,7 +89,7 @@ restart_services() {
 
   # 1. Restart backend first
   log "Restarting backend ($BACKEND_SERVICE)..."
-  if ! systemctl restart "$BACKEND_SERVICE"; then
+  if ! run_systemctl restart "$BACKEND_SERVICE"; then
     log "ERROR: failed to restart backend '$BACKEND_SERVICE'"
     return 1
   fi
@@ -74,7 +106,7 @@ restart_services() {
     [ -n "$s" ] || continue
     [ "$s" = "$BACKEND_SERVICE" ] && continue
     log "Restarting $s..."
-    if ! systemctl restart "$s"; then
+    if ! run_systemctl restart "$s"; then
       log "ERROR: failed to restart service '$s'"
       failed=1
     fi
@@ -83,7 +115,7 @@ restart_services() {
   # 4. Verify all services are active
   while IFS= read -r s; do
     [ -n "$s" ] || continue
-    if ! systemctl is-active --quiet "$s"; then
+    if ! run_systemctl is-active --quiet "$s"; then
       log "ERROR: service '$s' is not active after restart"
       failed=1
     fi
@@ -92,20 +124,84 @@ restart_services() {
   return "$failed"
 }
 
+init_deploy_state() {
+  if [ -z "$DEPLOY_STATE_DIR" ]; then
+    DEPLOY_STATE_DIR="$(run_git rev-parse --absolute-git-dir)/agentchat-autodeploy"
+  fi
+  LAST_SUCCESSFUL_REF_FILE="$DEPLOY_STATE_DIR/last-successful-ref"
+  INSTALL_NEEDED_FILE="$DEPLOY_STATE_DIR/install-needed"
+}
+
+ensure_deploy_state_dir() {
+  run_as_deploy_user mkdir -p "$DEPLOY_STATE_DIR"
+}
+
+write_state_file() {
+  local file="$1"
+  local value="$2"
+  ensure_deploy_state_dir
+  run_as_deploy_user bash -c 'printf "%s\n" "$1" > "$2"' _ "$value" "$file"
+}
+
+touch_state_file() {
+  local file="$1"
+  ensure_deploy_state_dir
+  run_as_deploy_user touch "$file"
+}
+
+remove_state_file() {
+  local file="$1"
+  run_as_deploy_user rm -f "$file"
+}
+
+read_last_successful_ref() {
+  if [ -s "$LAST_SUCCESSFUL_REF_FILE" ]; then
+    head -n 1 "$LAST_SUCCESSFUL_REF_FILE"
+  fi
+}
+
+initialize_success_state() {
+  local baseline_ref="$1"
+  if [ -n "$baseline_ref" ] && [ ! -s "$LAST_SUCCESSFUL_REF_FILE" ]; then
+    write_state_file "$LAST_SUCCESSFUL_REF_FILE" "$baseline_ref"
+  fi
+}
+
+mark_deploy_success() {
+  local successful_ref="$1"
+  write_state_file "$LAST_SUCCESSFUL_REF_FILE" "$successful_ref"
+  remove_state_file "$INSTALL_NEEDED_FILE"
+}
+
+has_install_needed() {
+  [ -f "$INSTALL_NEEDED_FILE" ]
+}
+
+run_npm_install() {
+  run_as_deploy_user env npm_config_loglevel=error "$NPM_BIN" --prefix "$REPO_DIR" install --production
+}
+
 maybe_install_deps() {
   local old_ref="$1"
   local new_ref="$2"
+  local force_install="${3:-false}"
   local changed
   changed="$(run_git diff --name-only "$old_ref" "$new_ref" -- package.json package-lock.json 2>/dev/null || true)"
-  if [ -z "$changed" ]; then
+  if [ -z "$changed" ] && [ "$force_install" != true ]; then
     return 0
   fi
 
-  log "Dependency manifest changed; running npm install --production"
-  if ! run_as_deploy_user env npm_config_loglevel=error bash -lc "cd \"$REPO_DIR\" && npm install --production"; then
+  if [ "$force_install" = true ] && [ -z "$changed" ]; then
+    log "Dependency install retry marker present; running npm install --production"
+  else
+    log "Dependency manifest changed; running npm install --production"
+  fi
+  touch_state_file "$INSTALL_NEEDED_FILE"
+  if ! run_npm_install; then
     log "ERROR: npm install failed; skipping service restart for this update"
     return 1
   fi
+  remove_state_file "$INSTALL_NEEDED_FILE"
   return 0
 }
 
@@ -121,6 +217,45 @@ force_clean_workdir() {
   fi
 }
 
+run_release_gate() {
+  local target_ref="$1"
+  local gate_worktree
+
+  case "$RELEASE_GATE" in
+    none|"")
+      return 0
+      ;;
+    worktree)
+      ensure_deploy_state_dir
+      gate_worktree="$DEPLOY_STATE_DIR/release-gate-worktree"
+      log "Running worktree release gate for $target_ref"
+      run_git worktree remove --force "$gate_worktree" >/dev/null 2>&1 || run_as_deploy_user rm -rf "$gate_worktree"
+      run_git worktree prune >/dev/null 2>&1 || true
+      if ! run_git worktree add --detach --force "$gate_worktree" "$target_ref" >/dev/null 2>&1; then
+        log "ERROR: failed to prepare release gate worktree"
+        return 1
+      fi
+      if [ -n "$RELEASE_GATE_ARGS" ]; then
+        if run_as_deploy_user env npm_config_loglevel=error "$NPM_BIN" --prefix "$gate_worktree" run verify:cd-preflight -- $RELEASE_GATE_ARGS; then
+          log "Release gate passed for $target_ref"
+          return 0
+        fi
+      else
+        if run_as_deploy_user env npm_config_loglevel=error "$NPM_BIN" --prefix "$gate_worktree" run verify:cd-preflight; then
+          log "Release gate passed for $target_ref"
+          return 0
+        fi
+      fi
+      log "ERROR: release gate failed for $target_ref; live checkout was not reset"
+      return 1
+      ;;
+    *)
+      log "FATAL: unsupported AGENTCHAT_RELEASE_GATE='$RELEASE_GATE'"
+      exit 1
+      ;;
+  esac
+}
+
 validate_startup() {
   if [ ! -d "$REPO_DIR/.git" ]; then
     log "FATAL: '$REPO_DIR' is not a git repository"
@@ -134,17 +269,29 @@ validate_startup() {
     log "FATAL: invalid AGENTCHAT_POLL_SEC='$POLL_SEC' (must be >= 5)"
     exit 1
   fi
+  case "$RELEASE_GATE" in
+    none|worktree|"") ;;
+    *)
+      log "FATAL: invalid AGENTCHAT_RELEASE_GATE='$RELEASE_GATE' (expected none or worktree)"
+      exit 1
+      ;;
+  esac
 }
 
 validate_startup
+init_deploy_state
 log "Watching '$REPO_DIR' branch '$DEPLOY_BRANCH' every ${POLL_SEC}s"
+log "Deploy state dir: $DEPLOY_STATE_DIR"
+if [ "$RELEASE_GATE" != none ] && [ -n "$RELEASE_GATE" ]; then
+  log "Release gate: $RELEASE_GATE"
+fi
 
 deploy_pending=false
 
 while true; do
   if ! run_git fetch origin "$DEPLOY_BRANCH" --quiet; then
     log "WARN: git fetch failed; retry on next poll"
-    sleep "$POLL_SEC"
+    sleep_or_exit_once
     continue
   fi
 
@@ -152,44 +299,74 @@ while true; do
   remote_ref="$(run_git rev-parse "origin/$DEPLOY_BRANCH" 2>/dev/null || true)"
   if [ -z "$local_ref" ] || [ -z "$remote_ref" ]; then
     log "WARN: cannot resolve refs (local='$local_ref', remote='$remote_ref')"
-    sleep "$POLL_SEC"
-    continue
-  fi
-  if [ "$local_ref" = "$remote_ref" ] && [ "$deploy_pending" = false ]; then
-    sleep "$POLL_SEC"
+    sleep_or_exit_once
     continue
   fi
 
-  if [ "$deploy_pending" = true ] && [ "$local_ref" = "$remote_ref" ]; then
+  last_successful_ref="$(read_last_successful_ref || true)"
+  install_needed=false
+  deploy_incomplete=false
+  if has_install_needed; then
+    install_needed=true
+  fi
+  if [ -n "$last_successful_ref" ] && [ "$last_successful_ref" != "$remote_ref" ] && [ "$local_ref" = "$remote_ref" ]; then
+    deploy_incomplete=true
+  fi
+
+  if [ "$local_ref" = "$remote_ref" ] && [ "$deploy_pending" = false ] && [ "$install_needed" = false ] && [ "$deploy_incomplete" = false ]; then
+    sleep_or_exit_once
+    continue
+  fi
+
+  if [ "$install_needed" = true ] && [ "$local_ref" = "$remote_ref" ]; then
+    log "Retrying failed dependency install at $local_ref"
+  elif [ "$deploy_incomplete" = true ]; then
+    log "Retrying incomplete deploy at $local_ref (last successful $last_successful_ref)"
+  elif [ "$deploy_pending" = true ] && [ "$local_ref" = "$remote_ref" ]; then
     log "Retrying failed deploy at $local_ref"
   else
     log "Update detected: $local_ref -> $remote_ref"
   fi
 
+  if ! run_release_gate "$remote_ref"; then
+    sleep_or_exit_once
+    continue
+  fi
+
+  initialize_success_state "$local_ref"
   force_clean_workdir
 
   if ! run_git reset --hard "origin/$DEPLOY_BRANCH" >/dev/null 2>&1; then
     log "ERROR: git reset --hard failed; retry on next poll"
-    sleep "$POLL_SEC"
+    sleep_or_exit_once
     continue
   fi
 
   new_ref="$(run_git rev-parse HEAD)"
   log "Reset to $new_ref"
 
-  if ! maybe_install_deps "$local_ref" "$new_ref"; then
+  install_base_ref="$local_ref"
+  force_install=false
+  if has_install_needed; then
+    install_base_ref="$(read_last_successful_ref || true)"
+    [ -n "$install_base_ref" ] || install_base_ref="$local_ref"
+    force_install=true
+  fi
+
+  if ! maybe_install_deps "$install_base_ref" "$new_ref" "$force_install"; then
     deploy_pending=true
-    sleep "$POLL_SEC"
+    sleep_or_exit_once
     continue
   fi
 
   if restart_services; then
     log "Deploy succeeded at commit $new_ref"
+    mark_deploy_success "$new_ref"
     deploy_pending=false
   else
     log "ERROR: service restart/health check failed at commit $new_ref — will retry next poll"
     deploy_pending=true
   fi
 
-  sleep "$POLL_SEC"
+  sleep_or_exit_once
 done

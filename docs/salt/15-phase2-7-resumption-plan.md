@@ -35,7 +35,7 @@ Keep these boundaries unless ac-topleader explicitly changes them:
 | Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A; RLP4-B added v1 home/runtime resolver contract tests and rejects relative env/manifest paths before normalization. | Continue with broader path unification only after approval. | Required |
 | Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
 | Phase 6 CLI/ops profile | Remote command honesty is enforced; RLP6-A made `service`, `update`, `ls`, and `down` help/docs profile-scoped; CLI status/list now report unknown runtime activity without treating it as idle; RLP6-B aligned `agent-ls --all` v1 home discovery with the shared resolver. | Continue with `agent-down` resolver tests only after separate approval; do not change shutdown safety behavior implicitly. | Required |
-| Phase 7 CI/release gates | `verify:ci` and remote package gates are enforced; `audit:deps` is intentionally separate and currently red; CD-A is still pending. | Add missing focused gates after each repair; handle dependency audit as a dedicated security batch after policy approval. | Required |
+| Phase 7 CI/release gates | `verify:ci` and remote package gates are enforced; `audit:deps` is intentionally separate and currently red; CD-A stable watcher tests and state handling are implemented. | Add missing focused gates after each repair; handle dependency audit as a dedicated security batch after policy approval; continue remote CD only after remote policy decisions. | Required |
 
 ## Phase 2: Runtime Observation
 
@@ -281,7 +281,8 @@ Current state:
 - GitHub Actions runs `npm run verify:ci` on `master` and `stable`.
 - `verify:ci` includes syntax, CLI contract, remote sync, generated remote package smoke, dependency isolation, and kernel/CLI smoke.
 - `npm run audit:deps` remains separate because the current advisory baseline is not fixed.
-- CD-A remains pending for stable/live release gate and dependency retry state.
+- CD-A stable/live release gate support and dependency retry state are implemented with fake-repo tests.
+- Live release gate enforcement still requires deploy-host configuration: `AGENTCHAT_RELEASE_GATE=worktree`.
 
 Recommended batch RLP7-A: keep gates attached to each repair.
 
@@ -314,7 +315,7 @@ Read-only audit result:
 2. RLP2-A runtime observation provenance. Completed after ac-topleader approval.
 3. RLP6-A profile-scoped help/docs. Completed after ac-topleader approval.
 4. RLP3-A auth readiness diagnostics. Completed after ac-topleader approval.
-5. CD-A stable release gate and dependency retry, once ac-topleader approves `14-cd-next-decisions.md`.
+5. CD-A stable release gate and dependency retry. Implemented after operator resumed CD work; pending ac-topleader acceptance and deploy-host opt-in for `AGENTCHAT_RELEASE_GATE=worktree`.
 6. RLP3-B dashboard local-only/auth gate. Completed as RLP3-B1 after ac-topleader approval.
 7. RLP3-C Matrix trust default.
 8. RLP2-B local-host server record.
@@ -328,6 +329,6 @@ The next candidates are:
 1. RLP3-C Matrix trust default, pending operator decision;
 2. RLP7-B dependency audit repair: lock refresh, Matrix allowlist update, or Matrix migration decision;
 3. RLP6 `agent-down` resolver/backend-unavailable tests, pending shutdown-safety approval;
-4. CD-A/CD-B deploy behavior, pending operator decisions in `14-cd-next-decisions.md`.
+4. CD-B remote deploy behavior, pending operator decisions in `14-cd-next-decisions.md`.
 
 These should keep avoiding launch, stable, deploy scripts, full dashboard web auth, Matrix default flips, and default observation behavior unless ac-topleader explicitly approves that narrower batch.

@@ -1,7 +1,7 @@
 # 14 CD Next Decisions
 
 Date: 2026-05-03
-Status: decision pack; docs/analysis only.
+Status: CD-A stable watcher implementation added; remaining remote/macOS decisions still pending.
 
 ## Current CD Baseline
 
@@ -17,8 +17,8 @@ Implemented gates:
 
 Not implemented yet:
 
-1. stable/live autodeploy does not wait for a green release gate before resetting the deploy checkout.
-2. stable/live and remote autodeploy can skip dependency installation on retry after a failed install.
+1. stable/live release gate support exists but must be enabled explicitly with `AGENTCHAT_RELEASE_GATE=worktree` on the deploy host.
+2. remote autodeploy can still skip dependency installation on retry after a failed install.
 3. remote autodeploy restarts the relay but does not call `verify-remote` afterward.
 4. remote autodeploy watches root dependency manifests, while remote provisioning installs dependencies inside `remote/`.
 5. macOS remote hosts install launchd for push-relay but no launchd remote autodeploy watcher.
@@ -51,21 +51,21 @@ Recommendation:
 
 Prefer the staging worktree gate first. It uses the project's own gate without requiring a GitHub token on the deploy host, can be tested locally with a fake repository, and keeps stable deploy behavior deterministic. GitHub checks can be added later as an optimization when deploy-host credentials and required check names are settled.
 
-Implementation shape for CD-A:
+Implemented in CD-A:
 
-1. add an opt-in `AGENTCHAT_RELEASE_GATE=none|worktree` setting, defaulting to current behavior until approved for enforcement;
-2. before `force_clean_workdir` and the live `git reset --hard`, create or reuse a staging worktree outside the live checkout, preferably below `.git/agentchat-autodeploy/gate-worktree`;
-3. checkout the target `remote_ref` in that staging worktree;
-4. run the preflight there before mutating the live checkout;
-5. if preflight fails, log and retry the next poll without cleaning or resetting the live checkout.
+1. `AGENTCHAT_RELEASE_GATE=none|worktree` now exists, defaulting to `none` until the live deploy service opts in;
+2. before `force_clean_workdir` and the live `git reset --hard`, `worktree` mode creates a detached staging worktree outside the live checkout under the deploy state dir;
+3. the staging worktree checks out the target `remote_ref`;
+4. it runs `npm run verify:cd-preflight` from that staged checkout before mutating the live checkout;
+5. if preflight fails, the watcher logs and retries the next poll without cleaning or resetting the live checkout.
 
 Important branch detail:
 
 The staging worktree should normally check out the target commit detached. The live deploy checkout may already occupy the `stable` branch, and Git worktrees cannot safely check out the same branch in two places. Therefore the script should verify that the target ref came from `origin/$DEPLOY_BRANCH`, then run `npm run verify:cd-preflight` in the detached gate worktree without `--branch stable`. The `--branch stable` form remains useful for a human candidate checkout that is actually on the `stable` branch.
 
-Decision needed:
+Operational decision still needed:
 
-Approve one release-gate source. Without this decision, any pushed stable commit can still deploy before CI finishes.
+After this batch reaches stable, ac-topleader should decide when to set `AGENTCHAT_RELEASE_GATE=worktree` in the live stable autodeploy environment. Until that is configured, the code path exists and is tested but the live watcher keeps current behavior.
 
 ## Decision 2: Dependency Retry State
 
@@ -73,7 +73,7 @@ Problem:
 
 Both autodeploy scripts reset to the target commit before dependency installation. If install fails, the retry sees `HEAD` already equal to the target commit and can compute no manifest diff.
 
-Affected files:
+Affected files before CD-A:
 
 - `scripts/agentchat-stable-autodeploy.sh`
 - `scripts/agentchat-remote-autodeploy.sh`
@@ -88,17 +88,17 @@ Recommendation:
 
 Use last-successful commit as the primary model, with an install-needed marker as a fallback for interrupted runs. This makes retries correct without forcing every restart path to reinstall.
 
-Implementation shape for CD-A:
+Implemented for stable/live in CD-A:
 
-1. introduce `AGENTCHAT_DEPLOY_STATE_DIR`, defaulting under `.git/agentchat-autodeploy` so `git clean -fd` in the live checkout does not delete deploy state;
-2. persist `last-successful-ref` only after dependency installation, service restart, backend health, and service-active checks pass;
-3. compute dependency manifest changes from `last-successful-ref` to `new_ref`, not from the current live `HEAD`;
-4. if no state file exists, initialize the baseline from the live `HEAD` before the first reset;
-5. preserve an install-needed marker when dependency installation fails, so a process restart cannot lose the retry requirement.
+1. `AGENTCHAT_DEPLOY_STATE_DIR` defaults under the absolute git dir at `.git/agentchat-autodeploy`, so `git clean -fd` in the live checkout does not delete deploy state;
+2. `last-successful-ref` is written only after dependency installation, backend restart, backend health, dependent restarts, and service-active checks pass;
+3. the first deploy initializes `last-successful-ref` from the pre-reset live `HEAD`;
+4. failed dependency installation leaves an `install-needed` marker;
+5. a retry at the already-reset target commit uses the last successful baseline and reruns dependency installation before restarting services.
 
-Decision needed:
+Remaining decision:
 
-Approve whether deploy scripts may create a small state file under their existing logs/data area to track last successful deploy and install-needed status.
+Apply the same state model to remote autodeploy only after the remote dependency scope is decided.
 
 ## Decision 3: Remote Dependency Install Scope
 
@@ -273,23 +273,22 @@ Suggested CD-A tests:
 
 ## Recommended Approval Order
 
-1. Batch CD-A: stable release gate and dependency retry state for `scripts/agentchat-stable-autodeploy.sh` only, with fake-repo tests.
-2. Batch CD-B0: remote install/profile/reproducibility tests and docs, without changing autodeploy behavior.
-3. Batch CD-B: remote post-deploy `verify-remote` integration and remote dependency install scope, with script-level dry-run tests.
-4. Batch CD-C: macOS remote CD policy implementation or manual-update documentation.
-5. Batch CD-D: optional GitHub check-runs gate if staging worktree is not enough or if deploy-host GitHub credentials are approved.
+1. Batch CD-A: stable release gate and dependency retry state for `scripts/agentchat-stable-autodeploy.sh` only, with fake-repo tests. Implemented.
+2. Batch CD-B: remote post-deploy `verify-remote` integration and remote dependency install scope, with script-level dry-run tests.
+3. Batch CD-C: macOS remote CD policy implementation or manual-update documentation.
+4. Batch CD-D: optional GitHub check-runs gate if staging worktree is not enough or if deploy-host GitHub credentials are approved.
 
-The next code batch should not start until CD-A decisions are approved.
+The next code batch should not start until ac-topleader accepts CD-A and chooses the next remote CD decision.
 
-## CD-A Proposed Scope
+## CD-A Implemented Scope
 
-CD-A should intentionally avoid remote/macOS work. Its purpose is to make the stable/live deploy watcher safe enough before copying the same pattern to remote CD.
+CD-A intentionally avoided remote/macOS work. Its purpose was to make the stable/live deploy watcher testable and safe enough before copying the same pattern to remote CD.
 
-Edit only:
+Edited only:
 
 1. `scripts/agentchat-stable-autodeploy.sh`
 2. `tests/stable-autodeploy.test.js`
-3. optionally `package.json` if a focused `test:cd` script is useful
+3. `package.json` to include `tests/stable-autodeploy.test.js` in `test:kernel`
 
 Do not edit in CD-A:
 
