@@ -32,7 +32,7 @@ Keep these boundaries unless ac-topleader explicitly changes them:
 | --- | --- | --- | --- |
 | Phase 2 runtime observation | Runtime writes now carry backend-derived observation provenance; RLP2-B fixed custom local server ID delivery/liveness and added an opt-in local server record; unknown activity is preserved as `activeNow=null` instead of being shown as idle. Central-local still uses backend tmux sweeps and local-only idle probes. | Continue with richer local-host adapter design only after approval, not default behavior flips. | Required |
 | Phase 3 credentials/trust | RLP3-A added diagnostics-only agent-token readiness; RLP3-A2 documented and tested the server credential compatibility boundary. Shared `API_TOKEN`, dashboard proxy, actual server credential enforcement, and Matrix trust remain compatibility surfaces. | Continue with server credential enforcement migration or dashboard boundary after approval; do not flip fail-closed until tokens are provisioned and relay/server credentials are rolled out. | Required |
-| Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A. | Continue with v1 home/runtime resolver hardening after approval. | Required |
+| Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A; RLP4-B added v1 home/runtime resolver contract tests and rejects relative env/manifest paths before normalization. | Continue with broader path unification only after approval. | Required |
 | Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
 | Phase 6 CLI/ops profile | Remote command honesty is enforced; RLP6-A made `service`, `update`, `ls`, and `down` help/docs profile-scoped; CLI status/list now report unknown runtime activity without treating it as idle. | Continue with shell resolver consistency after approval. | Required |
 | Phase 7 CI/release gates | `verify:ci` and remote package gates are enforced; `audit:deps` is intentionally separate and red; CD-A is still pending. | Add missing focused gates after each repair; handle dependency audit as a dedicated security batch. | Required |
@@ -192,13 +192,21 @@ Risk:
 
 Existing message attachment outputs can contain `LocalPath:` values under the old cache root. Moving the cache can leave stale old cached files, but it should not change durable message truth.
 
-Recommended next Phase 4 batch RLP4-B: v1 home/runtime resolver tests.
+Completed batch RLP4-B: v1 home/runtime resolver tests.
 
 Scope:
 
 1. add tests for `lib/agent-home-v1.js` env precedence and absolute normalization;
 2. preserve legacy `~/.agentchat` fallback behavior;
 3. do not change launch files or provisioning behavior in the same batch.
+
+Implementation:
+
+1. `AGENTCHAT_HOMEDIR` wins only when it is an absolute path;
+2. `AGENT_CHAT_RUNTIME_DIR` contributes `<runtime>/homes` only when it is absolute;
+3. relative manifest `homeDir`/`stateDir`/`workdir` values are rejected instead of being resolved under the caller cwd;
+4. legacy `~/.agentchat` remains the fallback lookup root;
+5. launch files remain untouched.
 
 ## Phase 5: Launch Decomposition
 
