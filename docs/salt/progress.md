@@ -13,3 +13,4 @@
 - Added multi-file system documentation: principles, kernel, runtime/transports, edge systems, data/config/tests, and stale-doc archive index.
 - Added approval-gated implementation plan split into kernel, inbox/task, runtime, edge, and data/config/CI batches.
 - ac-topleader approved Batch 1 R-001/R-002 and deferred R-003. Implemented group/message read access controls with regression tests.
+- Completed Batch 2. Implemented R-004 offline mention inbox visibility, R-005 task graph assignee plus dispatch reply validation, and added R-006 task-truth design doc.

@@ -3478,6 +3478,8 @@ function handleTaskGraphMessageHook(msg) {
   const node = taskGraphStore.getNode(graphId, nodeId);
   if (!graph || !node || graph.status !== 'active') return null;
   if (!['pending', 'dispatched', 'active'].includes(node.status)) return null;
+  if (String(msg?.from || '').trim().toLowerCase() !== String(node.assignee || '').trim().toLowerCase()) return null;
+  if (node.message_id && normalizeOptionalText(msg?.reply_to, 255) !== node.message_id) return null;
 
   const patch = kind === 'task_graph_result'
     ? {
@@ -8628,7 +8630,6 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
       }));
     if (offlineMentions.length) {
       warnings.push({ code: 'mentions_offline', targets: offlineMentions });
-      for (const item of offlineMentions) suppressedRecipients.add(item.target);
     }
 
     const unknownMentions = mentionStates

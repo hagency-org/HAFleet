@@ -165,6 +165,8 @@ describe('task graph API', () => {
         },
       });
     const graphId = createResponse.body.graph.id;
+    const dispatchMessageId = createResponse.body.graph.nodes.a.message_id;
+    expect(dispatchMessageId).toBeTruthy();
 
     const messageResponse = await request(context.app)
       .post('/api/messages')
@@ -174,6 +176,7 @@ describe('task graph API', () => {
         type: 'inform',
         summary: 'node complete',
         full: 'done',
+        reply_to: dispatchMessageId,
         schema: {
           kind: 'task_graph_result',
           version: 1,
@@ -198,6 +201,186 @@ describe('task graph API', () => {
     expect(graphResponse.body.status).toBe('complete');
     expect(graphResponse.body.nodes.a.status).toBe('complete');
     expect(graphResponse.body.nodes.a.result).toEqual({ ok: true });
+  });
+
+  test('task_graph_result messages from non-assignees are ignored by the message hook', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+        beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send({
+        owner: 'orchestrator',
+        label: 'single node graph',
+        nodes: {
+          a: {
+            assignee: 'alpha',
+            description: 'Do A',
+          },
+        },
+      });
+    const graphId = createResponse.body.graph.id;
+    const dispatchMessageId = createResponse.body.graph.nodes.a.message_id;
+    expect(dispatchMessageId).toBeTruthy();
+
+    const spoofResponse = await request(context.app)
+      .post('/api/messages')
+      .send({
+        from: 'beta',
+        to: 'orchestrator',
+        type: 'inform',
+        summary: 'spoof complete',
+        full: 'spoofed',
+        reply_to: dispatchMessageId,
+        schema: {
+          kind: 'task_graph_result',
+          version: 1,
+          payload: {
+            graphId,
+            nodeId: 'a',
+            result: { ok: false },
+          },
+        },
+      });
+    expect(spoofResponse.status).toBe(200);
+    expect(spoofResponse.body.taskGraph).toBe(null);
+
+    const graphResponse = await request(context.app).get(`/api/task-graphs/${graphId}`);
+    expect(graphResponse.status).toBe(200);
+    expect(graphResponse.body.status).toBe('active');
+    expect(graphResponse.body.nodes.a.status).toBe('dispatched');
+    expect(graphResponse.body.nodes.a.result).toBe(null);
+  });
+
+  test('task_graph_result messages without dispatch reply binding are ignored', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send({
+        owner: 'orchestrator',
+        label: 'single node graph',
+        nodes: {
+          a: {
+            assignee: 'alpha',
+            description: 'Do A',
+          },
+        },
+      });
+    const graphId = createResponse.body.graph.id;
+
+    const missingReply = await request(context.app)
+      .post('/api/messages')
+      .send({
+        from: 'alpha',
+        to: 'orchestrator',
+        type: 'inform',
+        summary: 'node complete',
+        full: 'done',
+        schema: {
+          kind: 'task_graph_result',
+          version: 1,
+          payload: {
+            graphId,
+            nodeId: 'a',
+            result: { ok: true },
+          },
+        },
+      });
+    expect(missingReply.status).toBe(200);
+    expect(missingReply.body.taskGraph).toBe(null);
+
+    const wrongReply = await request(context.app)
+      .post('/api/messages')
+      .send({
+        from: 'alpha',
+        to: 'orchestrator',
+        type: 'inform',
+        summary: 'node complete',
+        full: 'done',
+        reply_to: 'msg_wrong',
+        schema: {
+          kind: 'task_graph_result',
+          version: 1,
+          payload: {
+            graphId,
+            nodeId: 'a',
+            result: { ok: true },
+          },
+        },
+      });
+    expect(wrongReply.status).toBe(200);
+    expect(wrongReply.body.taskGraph).toBe(null);
+
+    const graphResponse = await request(context.app).get(`/api/task-graphs/${graphId}`);
+    expect(graphResponse.status).toBe(200);
+    expect(graphResponse.body.status).toBe('active');
+    expect(graphResponse.body.nodes.a.status).toBe('dispatched');
+    expect(graphResponse.body.nodes.a.result).toBe(null);
+  });
+
+  test('task_graph_failed messages from non-assignees are ignored by the message hook', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+        mallory: { name: 'mallory', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send({
+        owner: 'orchestrator',
+        label: 'single node graph',
+        nodes: {
+          a: {
+            assignee: 'alpha',
+            description: 'Do A',
+          },
+        },
+      });
+    const graphId = createResponse.body.graph.id;
+    const dispatchMessageId = createResponse.body.graph.nodes.a.message_id;
+    expect(dispatchMessageId).toBeTruthy();
+
+    const spoofResponse = await request(context.app)
+      .post('/api/messages')
+      .send({
+        from: 'mallory',
+        to: 'orchestrator',
+        type: 'inform',
+        summary: 'spoof failed',
+        full: 'spoofed',
+        reply_to: dispatchMessageId,
+        schema: {
+          kind: 'task_graph_failed',
+          version: 1,
+          payload: {
+            graphId,
+            nodeId: 'a',
+            error: 'spoofed failure',
+          },
+        },
+      });
+    expect(spoofResponse.status).toBe(200);
+    expect(spoofResponse.body.taskGraph).toBe(null);
+
+    const graphResponse = await request(context.app).get(`/api/task-graphs/${graphId}`);
+    expect(graphResponse.status).toBe(200);
+    expect(graphResponse.body.status).toBe('active');
+    expect(graphResponse.body.nodes.a.status).toBe('dispatched');
+    expect(graphResponse.body.nodes.a.error).toBe(null);
   });
 
   test('rejects graph creation when dependencies contain a cycle', async () => {
@@ -289,6 +472,8 @@ describe('task graph API', () => {
         },
       });
     const graphId = createResponse.body.graph.id;
+    const dispatchMessageId = createResponse.body.graph.nodes.a.message_id;
+    expect(dispatchMessageId).toBeTruthy();
     const oversized = { blob: 'x'.repeat(70_000) };
 
     const messageResponse = await request(context.app)
@@ -299,6 +484,7 @@ describe('task graph API', () => {
         type: 'inform',
         summary: 'node complete',
         full: 'done',
+        reply_to: dispatchMessageId,
         schema: {
           kind: 'task_graph_result',
           version: 1,

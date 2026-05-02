@@ -379,7 +379,7 @@ describe('groups api', () => {
     expect(response.body.delivery.suppressed).toEqual([]);
   });
 
-  test('warns and suppresses offline mentions in group messages', async () => {
+  test('warns but does not suppress offline mentions in group messages', async () => {
     context = await createBackendTestContext('api-groups-test-', baseSeed({
       groups: {
         dev: { name: 'dev', members: ['alpha', 'gamma'], createdAt: 1000 },
@@ -397,9 +397,13 @@ describe('groups api', () => {
         targets: [{ target: 'gamma', server: null, reason: 'idle' }],
       },
     ]);
-    expect(response.body.delivery.suppressed).toEqual(['gamma']);
+    expect(response.body.delivery.suppressed).toEqual([]);
     const stored = readJson(messagesPath(context.runtimeDir));
-    expect(stored[0].suppressedRecipients).toEqual(['gamma']);
+    expect(stored[0].suppressedRecipients || []).toEqual([]);
+
+    const inbox = await request(context.app).get('/api/inbox/gamma');
+    expect(inbox.status).toBe(200);
+    expect(inbox.body.group.map((row) => row.id)).toEqual([stored[0].id]);
   });
 
   test('warns and suppresses mentions for agents outside the group', async () => {
