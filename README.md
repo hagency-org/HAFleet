@@ -107,7 +107,8 @@ Central API server. All data lives here.
 **Authentication:**
 - Bearer token auth (`API_TOKEN`) for admin/operator routes
 - Agent-token auth (`X-Agent-Token` header) for agent-specific routes (runtime, task transitions, alert transitions for assigned alerts)
-- Agent-token mode: `hard` (enforce), `audit` (log only), `off` (disabled)
+- Agent-token mode: `hard` and `soft` enforce loaded agent tokens; `audit` logs and allows; other values currently normalize to `audit`
+- `/health` reports agent-token readiness, including managed agents that do not yet have loaded token files
 - Bridge secret (`MATRIX_BRIDGE_SECRET`) for bridge-specific routes
 - Subconscious event token for hook ingestion
 
@@ -551,7 +552,7 @@ AGENT_AUDIT_BACKEND_URL=http://127.0.0.1:8090
 
 # Authentication
 API_TOKEN=<bearer token for remote API access>
-AGENTCHAT_AGENT_TOKEN_MODE=hard        # hard (enforce), audit (log only), off (disabled)
+AGENTCHAT_AGENT_TOKEN_MODE=hard        # hard/soft enforce loaded tokens; audit logs only; other values normalize to audit
 AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN=<token for subconscious event ingestion>
 
 # Agent idle detection

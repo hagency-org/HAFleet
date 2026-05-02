@@ -167,6 +167,7 @@ const AGENT_TOKEN_MODE = (() => {
   const m = (process.env.AGENTCHAT_AGENT_TOKEN_MODE || 'audit').trim().toLowerCase();
   return m === 'hard' ? 'hard' : m === 'soft' ? 'soft' : 'audit';
 })();
+const AGENT_TOKEN_CONFIGURED_MODE = (process.env.AGENTCHAT_AGENT_TOKEN_MODE || 'audit').trim().toLowerCase() || 'audit';
 const agentTokens = new Map(); // agentName → token string
 function loadAgentTokens() {
   let loaded = 0;
@@ -206,6 +207,29 @@ function checkAgentToken(agentName, req) {
   if (!provided) return { ok: false, reason: 'token required but not provided' };
   if (provided !== expected) return { ok: false, reason: 'token mismatch' };
   return { ok: true };
+}
+function agentTokenModeBehavior(mode = AGENT_TOKEN_MODE) {
+  if (mode === 'audit') return 'log-only';
+  return 'enforce-loaded-tokens';
+}
+function buildAgentTokenReadiness() {
+  const managedAgentNames = Object.keys(agents)
+    .filter(name => isAgentRecord(agents[name]))
+    .sort((a, b) => a.localeCompare(b));
+  const loadedManagedAgentNames = managedAgentNames.filter(name => agentTokens.has(name));
+  const missingManagedAgentNames = managedAgentNames.filter(name => !agentTokens.has(name));
+  const maxNames = 50;
+  return {
+    mode: AGENT_TOKEN_MODE,
+    configuredMode: AGENT_TOKEN_CONFIGURED_MODE,
+    behavior: agentTokenModeBehavior(),
+    managedAgentCount: managedAgentNames.length,
+    loadedManagedAgentTokenCount: loadedManagedAgentNames.length,
+    missingManagedAgentTokenCount: missingManagedAgentNames.length,
+    missingManagedAgentNames: missingManagedAgentNames.slice(0, maxNames),
+    missingManagedAgentNamesTruncated: missingManagedAgentNames.length > maxNames,
+    failClosedReady: missingManagedAgentNames.length === 0,
+  };
 }
 function requireAgentToken(extractAgent) {
   return (req, res, next) => {
@@ -6205,6 +6229,9 @@ app.get('/health', (_req, res) => {
     servers: serverRows.length,
     onlineServers,
     messages: messages.length,
+    auth: {
+      agentTokens: buildAgentTokenReadiness(),
+    },
   });
 });
 

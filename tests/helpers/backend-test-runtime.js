@@ -42,7 +42,24 @@ export async function createBackendTestContext(prefix, seed = {}) {
     }
   }
 
-  const savedApiToken = process.env.API_TOKEN;
+  const savedEnv = new Map();
+  const rememberEnv = (key) => {
+    if (!savedEnv.has(key)) savedEnv.set(key, process.env[key]);
+  };
+  for (const key of [
+    'AGENT_CHAT_RUNTIME_DIR',
+    'SUPERVISOR_ENABLED',
+    'AGENT_SCOPE_MONITOR_ENABLED',
+    'AGENT_JSON_WRITE_BATCH_MS',
+    'AGENT_BLOCKED_INFO_AGGREGATE_WINDOW_MS',
+    'API_TOKEN',
+  ]) {
+    rememberEnv(key);
+  }
+  if (seed.env && typeof seed.env === 'object') {
+    for (const key of Object.keys(seed.env)) rememberEnv(key);
+  }
+
   process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
   process.env.SUPERVISOR_ENABLED = 'false';
   process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
@@ -98,8 +115,10 @@ export async function createBackendTestContext(prefix, seed = {}) {
       }
       servers.clear();
       rmSync(runtimeDir, { recursive: true, force: true });
-      if (savedApiToken !== undefined) process.env.API_TOKEN = savedApiToken;
-      else delete process.env.API_TOKEN;
+      for (const [key, value] of savedEnv.entries()) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     },
   };
 }

@@ -31,7 +31,7 @@ Keep these boundaries unless ac-topleader explicitly changes them:
 | Phase | Current state | Safe next step | Approval |
 | --- | --- | --- | --- |
 | Phase 2 runtime observation | Runtime writes now carry backend-derived observation provenance; central-local still has backend tmux sweeps and local-only idle probes. | Continue with local-host server record design after approval, not default behavior flips. | Required |
-| Phase 3 credentials/trust | Shared `API_TOKEN` remains overloaded; agent token hard mode is not production default; dashboard proxy and Matrix trust remain compatibility surfaces. | Split into token-readiness, dashboard local-only/auth, Matrix trust, and server credential batches. | Required |
+| Phase 3 credentials/trust | RLP3-A added diagnostics-only agent-token readiness; shared `API_TOKEN`, dashboard proxy, server credential split, and Matrix trust remain compatibility surfaces. | Continue with server credential split or dashboard boundary after approval; do not flip fail-closed until tokens are provisioned. | Required |
 | Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A. | Continue with v1 home/runtime resolver hardening after approval. | Required |
 | Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
 | Phase 6 CLI/ops profile | Remote command honesty is enforced; RLP6-A made `service`, `update`, `ls`, and `down` help/docs profile-scoped. | Continue with shell resolver consistency after approval. | Required |
@@ -101,13 +101,13 @@ Current evidence:
 - `server.js` dashboard routes proxy many privileged backend APIs using backend bearer credentials.
 - `bridge-matrix.js` defaults `MATRIX_TRUST_MODE` to `audit`.
 
-Recommended batch RLP3-A: auth readiness and diagnostics.
+Completed batch RLP3-A: auth readiness and diagnostics.
 
 Scope:
 
 1. document and test the exact `AGENTCHAT_AGENT_TOKEN_MODE` behavior;
-2. add a startup/provisioning readiness check that reports missing managed agent tokens without flipping production to hard mode;
-3. add tests that hard mode rejects registered agents without provisioned tokens once the operator chooses fail-closed semantics;
+2. add a diagnostics-only `/health` readiness check that reports missing managed agent tokens without flipping production to hard mode;
+3. keep current fail-open compatibility for registered agents without loaded token files;
 4. keep R-003 fail-closed deferred until tokens are provisioned for existing agents.
 
 Recommended batch RLP3-A2: server credential split.
@@ -273,7 +273,7 @@ Scope:
 1. RLP4-A MCP media cache relocation. Completed after ac-topleader approval.
 2. RLP2-A runtime observation provenance. Completed after ac-topleader approval.
 3. RLP6-A profile-scoped help/docs. Completed after ac-topleader approval.
-4. RLP3-A auth readiness diagnostics. Prepares Phase 3 without flipping fail-closed production behavior.
+4. RLP3-A auth readiness diagnostics. Completed after ac-topleader approval.
 5. CD-A stable release gate and dependency retry, once ac-topleader approves `14-cd-next-decisions.md`.
 6. RLP3-B dashboard local-only/auth gate.
 7. RLP3-C Matrix trust default.
@@ -285,9 +285,9 @@ Scope:
 
 The next low-risk candidates are:
 
-1. RLP3-A auth readiness diagnostics;
-2. RLP2-B local-host server record design;
-3. RLP4-B v1 home/runtime resolver contract tests;
+1. RLP2-B local-host server record design;
+2. RLP4-B v1 home/runtime resolver contract tests;
+3. RLP3-A2 server credential split design/tests;
 4. CD-A stable release gate and dependency retry state, once deploy behavior changes are approved.
 
 These should keep avoiding launch, stable, deploy scripts, dashboard auth, Matrix, and default observation behavior unless ac-topleader explicitly approves that narrower batch.
