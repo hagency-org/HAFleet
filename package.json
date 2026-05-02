@@ -15,6 +15,7 @@
     "check:dep-isolation": "bash scripts/check-dep-isolation.sh",
     "report:ci-env": "node scripts/report-ci-env.js",
     "verify:ci": "bash scripts/verify-ci.sh",
+    "verify:cd-preflight": "bash scripts/verify-cd-preflight.sh",
     "audit:agent-docs": "node scripts/audit-agent-docs.js",
     "build:remote": "bash scripts/build-remote-package.sh",
     "build:remote:check": "bash scripts/build-remote-package.sh --check",

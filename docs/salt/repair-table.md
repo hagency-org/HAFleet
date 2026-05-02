@@ -46,6 +46,7 @@ Status: draft pending audit consolidation and ac-topleader review.
 | R-038 | P0 | CD deps | After dependency install failure, retry can skip dependency installation because `HEAD` already equals the failed target commit. | Compare dependency manifests against the last successfully deployed commit or persist an install-needed marker across retry. | Fake deploy repo test where first install fails and retry must install before restart. | Design in `13-cd-flow-and-gaps.md`; pending approval |
 | R-039 | P1 | Remote package | Generated remote package gate does not include or validate `push-relay-autodeploy.service`. | Add the service template to managed package specs and smoke-check its placeholders/ExecStart target. | `npm run build:remote:check`, `npm run check:remote-package-smoke`. | Implemented |
 | R-040 | P2 | Ops docs | Operations runbook still describes stable deploy as `git pull --ff-only`, but autodeploy uses destructive reset/clean. | Update runbook after CD policy approval; document deploy checkout as disposable. | Docs review against autodeploy scripts. | Pending |
+| R-041 | P1 | CD preflight | Operators need a single non-destructive command that validates a candidate checkout and prints the expected post-deploy version check. | Add `npm run verify:cd-preflight`, requiring a clean worktree, running `verify:ci`, and printing `verify-remote --expect-version`. | `npm run verify:cd-preflight`. | Implemented |
 
 ## Approval Gate
 

@@ -210,6 +210,7 @@ Update the runbook after the CD policy is approved. The deploy checkout should b
 Runs before merge or before a deploy watcher accepts a commit:
 
 - `npm run verify:ci`;
+- `npm run verify:cd-preflight` on the candidate deploy checkout;
 - `npm run audit:deps` once R-024 dependency debt is fixed;
 - generated package smoke for both push-relay and MCP wrappers.
 
@@ -289,4 +290,4 @@ The first safe preflight slice is now implemented for items 1, 2, and 4:
 4. Include `push-relay-autodeploy.service` in remote package smoke.
 5. Update remote autodeploy design to call post-deploy verification, but only implement restart-loop behavior after operator approves exact remote failure policy.
 
-Remaining items from this list are `verify-cd-preflight` and the remote autodeploy post-deploy integration. The release-gate and dependency-retry repairs should be the next P0 batch after ac-topleader confirms whether deploy hosts should use GitHub status checks or a staging worktree preflight.
+Remaining item from this list is the remote autodeploy post-deploy integration. The release-gate and dependency-retry repairs should be the next P0 batch after ac-topleader confirms whether deploy hosts should use GitHub status checks or a staging worktree preflight.
