@@ -110,7 +110,7 @@ check_agentchat_dispatch_targets() {
 check_file_contains() {
   local file="$1"
   local needle="$2"
-  if rg -n --fixed-strings "$needle" "$file" >/dev/null 2>&1; then
+  if grep -n -F -- "$needle" "$file" >/dev/null 2>&1; then
     return 0
   fi
   return 1
