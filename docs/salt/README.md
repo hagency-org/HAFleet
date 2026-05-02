@@ -38,4 +38,5 @@ The first phase is documentation and audit only. Code repairs start after the re
 
 - Initial repo orientation is complete.
 - Five subagents completed read-only audits for kernel, MCP/CLI/push, persistence/config/tests, edge systems, and old docs.
-- No code repair has started.
+- Batch 1 and Batch 2 repairs are implemented and pushed.
+- Batch 3 approved scope R-009/R-015 is implemented.

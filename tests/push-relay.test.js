@@ -201,6 +201,123 @@ describe('push relay dispatch', () => {
     // Single codebase — debounce logic verified above
   });
 
+  test('detects MCP session from Linux proc cmdline', async () => {
+    const killCalls = [];
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'sender', server: null, tmux: 'sender:0.0' }],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      readFileSync: (file) => {
+        const path = String(file);
+        if (path.endsWith('/agent_alpha/state/mcp-server.pid')) return '123\n';
+        if (path === '/proc/123/cmdline') return 'node\0/repo/mcp-server.js\0';
+        throw Object.assign(new Error(`unexpected read ${path}`), { code: 'ENOENT' });
+      },
+      killProcess: (pid, signal) => {
+        killCalls.push({ pid, signal });
+      },
+    });
+
+    const text = await buildNotification('alpha', {
+      from: 'sender',
+      type: 'request',
+      summary: 'Need inbox',
+    });
+
+    expect(text).toContain('check_inbox()');
+    expect(killCalls).toEqual([{ pid: 123, signal: 0 }]);
+  });
+
+  test('detects MCP session with ps fallback when proc is unavailable', async () => {
+    const psCalls = [];
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'sender', server: null, tmux: 'sender:0.0' }],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      readFileSync: (file) => {
+        const path = String(file);
+        if (path.endsWith('/agent_alpha/state/mcp-server.pid')) return '456\n';
+        if (path === '/proc/456/cmdline') {
+          throw Object.assign(new Error('no proc'), { code: 'ENOENT' });
+        }
+        throw Object.assign(new Error(`unexpected read ${path}`), { code: 'ENOENT' });
+      },
+      execFileSync: (cmd, args) => {
+        psCalls.push({ cmd, args });
+        return 'node /repo/mcp-server.js\n';
+      },
+      killProcess: () => {},
+    });
+
+    const text = await buildNotification('alpha', {
+      from: 'sender',
+      type: 'request',
+      summary: 'Need inbox',
+    });
+
+    expect(text).toContain('check_inbox()');
+    expect(psCalls).toEqual([{ cmd: 'ps', args: ['-p', '456', '-o', 'command='] }]);
+  });
+
+  test('rejects live pid file when process command is not MCP', async () => {
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'sender', server: null, tmux: 'sender:0.0' }],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      readFileSync: (file) => {
+        const path = String(file);
+        if (path.endsWith('/agent_alpha/state/mcp-server.pid')) return '789\n';
+        if (path === '/proc/789/cmdline') return 'node\0/repo/backend-v2.js\0';
+        throw Object.assign(new Error(`unexpected read ${path}`), { code: 'ENOENT' });
+      },
+      killProcess: () => {},
+    });
+
+    const text = await buildNotification('alpha', {
+      from: 'sender',
+      type: 'request',
+      summary: 'Need inbox',
+    });
+
+    expect(text).not.toContain('check_inbox()');
+    expect(text).toContain('agent-send sender:0.0');
+  });
+
+  test('rejects missing process from MCP pid file', async () => {
+    let readProc = false;
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'sender', server: null, tmux: 'sender:0.0' }],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      readFileSync: (file) => {
+        const path = String(file);
+        if (path.endsWith('/agent_alpha/state/mcp-server.pid')) return '321\n';
+        readProc = true;
+        throw Object.assign(new Error(`unexpected read ${path}`), { code: 'ENOENT' });
+      },
+      killProcess: () => {
+        throw Object.assign(new Error('missing'), { code: 'ESRCH' });
+      },
+    });
+
+    const text = await buildNotification('alpha', {
+      from: 'sender',
+      type: 'request',
+      summary: 'Need inbox',
+    });
+
+    expect(text).not.toContain('check_inbox()');
+    expect(readProc).toBe(false);
+  });
+
   test('notification formatting and blocked detection work correctly', async () => {
     seedRelayState({
       localAgentNames: ['alpha'],

@@ -20,17 +20,12 @@ async function importServer(runtimeDir) {
 
 describe('server delivery path', () => {
   let runtimeDir = null;
-  let originalFetch = null;
   let serverModule = null;
 
   afterEach(() => {
     if (serverModule?.resetServerTestHooks) serverModule.resetServerTestHooks();
     if (serverModule?.stopServer) serverModule.stopServer();
     serverModule = null;
-    if (originalFetch) {
-      global.fetch = originalFetch;
-      originalFetch = null;
-    }
     if (runtimeDir) rmSync(runtimeDir, { recursive: true, force: true });
     runtimeDir = null;
   });
@@ -47,9 +42,8 @@ describe('server delivery path', () => {
         execCalls.push([cmd, ...args]);
         return { stdout: '' };
       },
+      backendFetch: async () => ({ ok: true, text: async () => '' }),
     });
-    originalFetch = global.fetch;
-    global.fetch = async () => ({ ok: true, text: async () => '' });
 
     const ok = await serverModule.deliverMessage({
       id: 1,
@@ -113,16 +107,17 @@ describe('server delivery path', () => {
     serverModule = await importServer(runtimeDir);
 
     const seen = [];
-    originalFetch = global.fetch;
-    global.fetch = async (url, init = {}) => {
-      seen.push({ url: String(url), method: init.method || 'GET', body: init.body || null });
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true, graph: { id: 'graph_1' }, node: { id: 'a' } }),
-        text: async () => '',
-      };
-    };
+    serverModule.setServerTestHooks({
+      backendFetch: async (url, init = {}) => {
+        seen.push({ url: String(url), method: init.method || 'GET', body: init.body || null });
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, graph: { id: 'graph_1' }, node: { id: 'a' } }),
+          text: async () => '',
+        };
+      },
+    });
 
     const create = await request(serverModule.app).post('/api/task-graphs').send({ owner: 'orchestrator' });
     const list = await request(serverModule.app).get('/api/task-graphs?status=active');
@@ -137,7 +132,7 @@ describe('server delivery path', () => {
     expect(remove.status).toBe(200);
 
     const taskGraphRequests = seen
-      .map((row) => ({ url: row.url.replace(/^https?:\/\/127\.0\.0\.1:\d+/, ''), method: row.method }))
+      .map((row) => ({ url: row.url.replace(/^https?:\/\/[^/]+/, ''), method: row.method }))
       .filter((row) => row.url.startsWith('/api/task-graph'));
     expect(taskGraphRequests).toEqual([
       { url: '/api/task-graphs', method: 'POST' },

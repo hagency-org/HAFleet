@@ -121,3 +121,27 @@ Accepted actions for consolidation:
 - Add an archive/stale-doc section to the repair table.
 - Make `docs/salt` the current-system audit set, not another long-lived `docs/{agent}` model.
 - Use the phrase "agentchat is a stateful-individual chat kernel" as the documentation anchor, with Task/Supervisor/Matrix/Dashboard/Remote relay as replaceable edges.
+
+## Batch 3 focused repair probes
+
+### Avicenna: R-009 push relay MCP pid detection
+
+Status: complete, read-only.
+
+Accepted recommendations:
+
+- Keep the repair scoped to `lib/push-relay-core.js`.
+- Continue checking pid existence with signal 0, but do not trust pid alone.
+- Read `/proc/<pid>/cmdline` when available and fall back to `ps -p <pid> -o command=` on macOS.
+- Require the command line to identify `mcp-server.js` or `mcp-server-core.js` to reduce PID reuse false positives.
+- Add test hooks instead of exporting internal detection functions as production API.
+
+### Descartes: R-015 agent-service Bash compatibility
+
+Status: complete, read-only.
+
+Accepted recommendations:
+
+- Replace `declare -A` in `normalize_services()` with a Bash 3.2-compatible ordered array scan.
+- Preserve first-seen order and empty service filtering.
+- Verify with `/bin/bash -n` and read-only `status --service` invocations; do not run pause/resume/restart during validation.

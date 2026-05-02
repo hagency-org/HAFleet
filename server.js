@@ -30,10 +30,12 @@ const AGENT_DOWN_BIN = path.join(REPO_ROOT, 'bin', 'agent-down');
 const BACKEND_V2_URL = (process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
 const PUSH_DELIVERED_URL = `${BACKEND_V2_URL}/api/runtime/push-delivered`;
 const BACKEND_API_TOKEN = (process.env.API_TOKEN || '').trim();
+const defaultBackendFetchTransport = (url, opts) => fetch(url, opts);
+let backendFetchTransport = defaultBackendFetchTransport;
 function backendFetch(url, opts = {}) {
   const headers = { ...opts.headers };
   if (BACKEND_API_TOKEN) headers['Authorization'] = `Bearer ${BACKEND_API_TOKEN}`;
-  return fetch(url, { ...opts, headers });
+  return backendFetchTransport(url, { ...opts, headers });
 }
 const DEFAULT_IDLE_THRESHOLD_MS = 20_000;
 const envIdleThreshold = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || `${DEFAULT_IDLE_THRESHOLD_MS}`, 10);
@@ -3239,12 +3241,19 @@ function stopServer() {
   active.close();
 }
 
-function setServerTestHooks({ execFileAsync: overrideExecFileAsync } = {}) {
+function setServerTestHooks({
+  execFileAsync: overrideExecFileAsync,
+  backendFetch: overrideBackendFetch,
+} = {}) {
   execFileAsyncImpl = typeof overrideExecFileAsync === 'function' ? overrideExecFileAsync : execFileAsync;
+  backendFetchTransport = typeof overrideBackendFetch === 'function'
+    ? overrideBackendFetch
+    : defaultBackendFetchTransport;
 }
 
 function resetServerTestHooks() {
   execFileAsyncImpl = execFileAsync;
+  backendFetchTransport = defaultBackendFetchTransport;
 }
 
 export {

@@ -1,7 +1,7 @@
 # 06 Implementation Plan
 
 Date: 2026-05-02
-Status: draft, waiting for ac-topleader approval before code changes.
+Status: approved incrementally by ac-topleader; Batch 1 and Batch 2 complete, Batch 3 narrowed to R-009/R-015.
 
 ## Approval Gate
 
@@ -73,9 +73,12 @@ Risk:
 Repairs:
 
 - R-009: cross-platform MCP presence detection.
+- R-015: make `agent-service` compatible with macOS bash 3.2.
+
+Deferred for this pass:
+
 - R-012: move MCP media cache out of project CWD.
 - R-013: allow emergency local `agent-down --kill` during backend outage.
-- R-015: make `agent-service` compatible with macOS bash 3.2.
 
 Likely files:
 
