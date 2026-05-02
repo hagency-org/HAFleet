@@ -31,6 +31,7 @@ The first phase is documentation and audit only. Code repairs start after the re
 | `09-remote-local-unification-design.md` | Unified runtime-host, identity, config, and package design. |
 | `10-remote-local-roadmap.md` | Dependency-ordered roadmap for future remote/local repair batches. |
 | `11-remote-local-phase0-terms.md` | Approved Phase 0 terminology, profile matrix, and command-scope staging rules. |
+| `12-cicd-gates.md` | First executable CI/CD gate design and remaining release-gate gaps. |
 | `system-map.md` | Repository map, runtime components, major flows, and source-of-truth boundaries. |
 | `kernel-boundaries.md` | Core/adjacent/edge classification and ownership rules. |
 | `audit-findings.md` | Consolidated structural and code audit findings with evidence. |
@@ -46,3 +47,4 @@ The first phase is documentation and audit only. Code repairs start after the re
 - Batch 3 approved scope R-009/R-015 is implemented.
 - Remote/local split audit is documented as design-only in `08` through `10`; no runtime code repair started for this topic.
 - Phase 0 terminology is staged in `11`; this folder is the temporary authority for remote/local terms until root docs are approved for rewrite.
+- CI/CD first gate is implemented in `12` and exposed through `npm run verify:ci`.

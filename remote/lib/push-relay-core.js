@@ -41,7 +41,13 @@ const MCP_SESSION_CACHE_TTL_MS = Number.parseInt(process.env.PUSH_RELAY_MCP_SESS
 const RELAY_INSTANCE_ID = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 const RELAY_BOOT_TS = Date.now();
 const RELAY_VERSION = (() => {
-  try { return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: path.dirname(__filename), timeout: 3000 }).toString().trim(); }
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+      cwd: path.dirname(__filename),
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).toString().trim();
+  }
   catch { return null; }
 })();
 

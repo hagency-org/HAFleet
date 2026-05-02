@@ -26,3 +26,8 @@
 - Started two read-only subagents for Phase 0 terminology and Phase 1 remote CLI/package checks.
 - Implemented Phase 0 term staging in `docs/salt/11-remote-local-phase0-terms.md` and adjusted salt docs to avoid root-doc rewrites or archival.
 - Implemented Phase 1 package honesty: remote CLI advertises only packaged commands, root/remote dispatch targets are checked, remote shared libs are mirrored, `remote-dist/` is ignored instead of committed as a partial artifact, and `remote/bin/agent-up` remains explicitly profile-specific pending launch approval.
+- Operator made CI/CD the top priority because remote CD exists but lacks sufficient tests and remote/local drift coverage.
+- Started three read-only subagents for CI/CD entrypoints, CLI contract, and remote/local drift package smoke.
+- Implemented first CI/CD gate: `npm run verify:ci`, CLI manifest contract checks, full JS/shell syntax checks, standalone remote package smoke, remote/local drift checks, dependency isolation check, and serialized kernel/CLI smoke tests.
+- Fixed a standalone remote `push-relay.js` wrapper resolution bug caught by the new package smoke gate.
+- Confirmed `npm run verify:ci` passes locally. `npm run audit:deps` remains red with known/unfixed advisories and stays under R-024 instead of blocking deploys in this batch.

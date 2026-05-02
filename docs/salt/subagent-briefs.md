@@ -219,3 +219,36 @@ Accepted conclusions:
 - Add explicit dispatch-target checks so missing remote commands fail during package validation instead of at operator runtime.
 - Treat `bin/agentchat` and `remote/bin/agentchat` as profile-specific, not byte-for-byte mirrors.
 - Keep `remote/bin/agent-up` drift outside this batch; launch work remains deferred.
+
+## CI/CD focused audit round
+
+### Meitner: CI/CD entrypoints
+
+Status: complete, read-only.
+
+Accepted conclusions:
+
+- Existing GitHub Actions only ran minimal syntax checks and `npm test`.
+- `build:remote:check`, `check:remote-sync`, dependency isolation, broad syntax checks, and a unified local verify command were missing from CI.
+- Do not run `build:remote:sync`, autodeploy scripts, or supervisor parity write checks in default CI.
+- Add `stable` push coverage because stable is consumed by deploy automation.
+
+### Peirce: CLI contract
+
+Status: complete, read-only.
+
+Accepted conclusions:
+
+- Root and remote command surfaces differ intentionally; encode them in a manifest.
+- CI can safely check top-level help, unsupported command failures, dispatch target existence, and profile-specific command absence.
+- Do not run mutating commands such as `up`, `down`, `send`, `update`, `service restart`, `sync-skills`, or `prune-agents --apply` against a real host in CI.
+
+### Franklin: remote/local drift and standalone package smoke
+
+Status: complete, read-only.
+
+Accepted conclusions:
+
+- Existing drift checks were green but did not catch standalone wrapper startup path drift.
+- Generated remote package smoke should build to a temporary directory, check required files, exclude runtime artifacts, parse JS/shell, verify remote help, and run a wrapper resolution smoke.
+- The new smoke caught `remote/push-relay.js` resolving only repo-root `../lib/push-relay-core.js`; fix wrapper to prefer package-local `./lib` and fall back to repo-root.
