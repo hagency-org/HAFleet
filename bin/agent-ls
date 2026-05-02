@@ -139,7 +139,12 @@ if isinstance(data, list):
     for item in data:
         if isinstance(item, dict) and item.get("name"):
             print(item["name"])
-            active = "1" if item.get("activeNow") else "0"
+            if item.get("activeNow") is True:
+                active = "1"
+            elif item.get("activeNow") is False:
+                active = "0"
+            else:
+                active = "unknown"
             lines.append(item["name"] + "|" + active)
 if active_map and lines:
     with open(active_map, "w") as f:
@@ -167,8 +172,10 @@ for sess in $SESSIONS; do
   active_now=$(awk -F'|' -v n="$sess" '$1==n {print $2; exit}' "$ACTIVE_MAP_FILE" 2>/dev/null)
   if [ "$active_now" = "1" ]; then
     echo "$sess active" >> "$AGENTS_FILE"
-  else
+  elif [ "$active_now" = "0" ]; then
     echo "$sess idle" >> "$AGENTS_FILE"
+  else
+    echo "$sess unknown" >> "$AGENTS_FILE"
   fi
 done
 

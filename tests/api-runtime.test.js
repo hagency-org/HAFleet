@@ -141,6 +141,47 @@ describe('backend runtime API', () => {
     expect(operatorBearer.status).toBe(200);
   });
 
+  test('runtime reports preserve unknown activity instead of reporting idle', async () => {
+    context = await createBackendTestContext('agent-chat-runtime-unknown-activity-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      groups: {},
+    });
+
+    const response = await request(context.app)
+      .post('/api/agents/alpha/runtime')
+      .send({
+        blocked: false,
+        reason: null,
+        tail: '',
+        command: 'codex',
+        server: 'relay-west',
+        activeNow: null,
+        activeDurationSec: 0,
+        idleDurationSec: 0,
+        lastTmuxActivitySec: null,
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.runtime.activeNow).toBeNull();
+    expect(response.body.runtime.activeDurationSec).toBe(0);
+    expect(response.body.runtime.idleDurationSec).toBe(0);
+
+    const runtime = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtime.alpha.activeNow).toBeNull();
+
+    const agent = await request(context.app).get('/api/agents/alpha').expect(200);
+    expect(agent.body.activeNow).toBeNull();
+  });
+
   test('blocked notifications use tiered debounce and never notify transient blockers', async () => {
     context = await createBackendTestContext('agent-chat-runtime-test-', {
       agents: {

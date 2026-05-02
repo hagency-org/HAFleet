@@ -62,12 +62,17 @@ _require_token() {
 }
 
 _curl() {
-  local extra_headers=()
-  [ -n "$TOKEN" ] && extra_headers=(-H "Authorization: Bearer $TOKEN")
-  curl --noproxy '*' --silent --show-error \
-    --connect-timeout "$CURL_CONNECT_TIMEOUT_SEC" \
-    --max-time "$CURL_MAX_TIME_SEC" \
-    "${extra_headers[@]}" "$@"
+  if [ -n "$TOKEN" ]; then
+    curl --noproxy '*' --silent --show-error \
+      --connect-timeout "$CURL_CONNECT_TIMEOUT_SEC" \
+      --max-time "$CURL_MAX_TIME_SEC" \
+      -H "Authorization: Bearer $TOKEN" "$@"
+  else
+    curl --noproxy '*' --silent --show-error \
+      --connect-timeout "$CURL_CONNECT_TIMEOUT_SEC" \
+      --max-time "$CURL_MAX_TIME_SEC" \
+      "$@"
+  fi
 }
 
 _json_str() {
@@ -215,7 +220,9 @@ for a in sorted(agents, key=lambda x: x.get('name', '')):
     server = str(a.get('server') or '-')
     tmux = str(a.get('tmux') or '-')
     online = bool(a.get('online'))
-    active_now = a.get('activeNow') if isinstance(a.get('activeNow'), bool) else None
+    active_raw = a.get('activeNow') if 'activeNow' in a else None
+    active_unknown = online and 'activeNow' in a and active_raw is None
+    active_now = active_raw if isinstance(active_raw, bool) else None
 
     session = tmux.split(':', 1)[0] if tmux and tmux != '-' else ''
     snap = tmux_map.get(session) if session else None
@@ -224,10 +231,15 @@ for a in sorted(agents, key=lambda x: x.get('name', '')):
         idle_sec_snapshot = max(0, now_sec - int(snap['session_activity']))
     active_sec = to_int(a.get('activeDurationSec'))
     idle_sec = to_int(a.get('idleDurationSec'))
-    if idle_sec is None:
+    if active_unknown:
+        active_sec = None
+        idle_sec = None
+    elif idle_sec is None:
         idle_sec = idle_sec_snapshot
 
-    if online and active_now is not None:
+    if active_unknown:
+        state = 'unknown'
+    elif online and active_now is not None:
         state = 'active' if active_now else 'idle'
     elif online and idle_sec is not None:
         state = 'active' if idle_sec < threshold_sec else 'idle'
@@ -296,7 +308,9 @@ for a in sorted(agents, key=lambda x: x.get('name', '')):
     server = str(a.get('server') or '-')
     tmux = str(a.get('tmux') or '')
     online = bool(a.get('online'))
-    active_now = a.get('activeNow') if isinstance(a.get('activeNow'), bool) else None
+    active_raw = a.get('activeNow') if 'activeNow' in a else None
+    active_unknown = online and 'activeNow' in a and active_raw is None
+    active_now = active_raw if isinstance(active_raw, bool) else None
 
     session = tmux.split(':', 1)[0] if tmux else ''
     snap = tmux_map.get(session) if session else None
@@ -305,10 +319,15 @@ for a in sorted(agents, key=lambda x: x.get('name', '')):
         idle_sec_snapshot = max(0, now_sec - int(snap['session_activity']))
     active_sec = to_int(a.get('activeDurationSec'))
     idle_sec = to_int(a.get('idleDurationSec'))
-    if idle_sec is None:
+    if active_unknown:
+        active_sec = None
+        idle_sec = None
+    elif idle_sec is None:
         idle_sec = idle_sec_snapshot
 
-    if online and active_now is not None:
+    if active_unknown:
+        state = 'unknown'
+    elif online and active_now is not None:
         state = 'active' if active_now else 'idle'
     elif online and idle_sec is not None:
         state = 'active' if idle_sec < threshold_sec else 'idle'
@@ -376,7 +395,9 @@ typ = str(obj.get('type', '?'))
 server = str(obj.get('server') or '-')
 tmux = str(obj.get('tmux') or '-')
 online = bool(obj.get('online'))
-active_now = obj.get('activeNow') if isinstance(obj.get('activeNow'), bool) else None
+active_raw = obj.get('activeNow') if 'activeNow' in obj else None
+active_unknown = online and 'activeNow' in obj and active_raw is None
+active_now = active_raw if isinstance(active_raw, bool) else None
 session = tmux.split(':', 1)[0] if tmux and tmux != '-' else ''
 snap = tmux_map.get(session) if session else None
 idle_sec_snapshot = None
@@ -384,10 +405,15 @@ if snap and snap.get('session_activity'):
     idle_sec_snapshot = max(0, now_sec - int(snap['session_activity']))
 active_sec = to_int(obj.get('activeDurationSec'))
 idle_sec = to_int(obj.get('idleDurationSec'))
-if idle_sec is None:
+if active_unknown:
+    active_sec = None
+    idle_sec = None
+elif idle_sec is None:
     idle_sec = idle_sec_snapshot
 
-if online and active_now is not None:
+if active_unknown:
+    state = 'unknown'
+elif online and active_now is not None:
     state = 'active' if active_now else 'idle'
 elif online and idle_sec is not None:
     state = 'active' if idle_sec < threshold_sec else 'idle'

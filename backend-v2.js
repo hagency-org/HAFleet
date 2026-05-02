@@ -420,6 +420,12 @@ function normalizeWorkspacePath(value) {
   return path.resolve(trimmed);
 }
 
+function normalizeRuntimeActiveNow(value) {
+  if (value === true) return true;
+  if (value === false) return false;
+  return null;
+}
+
 function normalizeAgentName(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -3182,7 +3188,7 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
   runtime.lastBlockedTail = (typeof runtime.lastBlockedTail === 'string') ? runtime.lastBlockedTail : '';
   runtime.lastBlockedCommand = (typeof runtime.lastBlockedCommand === 'string') ? runtime.lastBlockedCommand : '';
   runtime.lastBlockedServer = normalizeServer(runtime.lastBlockedServer);
-  runtime.activeNow = runtime.activeNow === true;
+  runtime.activeNow = normalizeRuntimeActiveNow(runtime.activeNow);
   runtime.activeDurationSec = Number(runtime.activeDurationSec) || 0;
   runtime.idleDurationSec = Number(runtime.idleDurationSec) || 0;
   runtime.lastTmuxActivitySec = Number(runtime.lastTmuxActivitySec) || null;
@@ -4109,7 +4115,7 @@ function ensureAgentRuntimeRecord(name) {
       blockedNotificationSent: false,
       blockedNotifiedTier: null,
       lastBlockedNotificationTs: 0,
-      activeNow: false,
+      activeNow: null,
       activeDurationSec: 0,
       idleDurationSec: 0,
       lastTmuxActivitySec: null,
@@ -4247,10 +4253,10 @@ function setRuntimeActivityFields(runtime, payload = {}) {
   let changed = false;
   if (!runtime || typeof runtime !== 'object') return false;
 
-  // When activeNow is null (tmux unavailable on remote), treat as inactive to prevent stale true
   const rawActiveNow = payload.activeNow;
-  const hasActiveNow = rawActiveNow === true || rawActiveNow === false || rawActiveNow === null;
-  const effectiveActiveNow = rawActiveNow === true ? true : false;  // null → false
+  const hasActiveNow = Object.prototype.hasOwnProperty.call(payload, 'activeNow')
+    && (rawActiveNow === true || rawActiveNow === false || rawActiveNow === null);
+  const effectiveActiveNow = normalizeRuntimeActiveNow(rawActiveNow);
   if (hasActiveNow && runtime.activeNow !== effectiveActiveNow) {
     runtime.activeNow = effectiveActiveNow;
     changed = true;
@@ -4757,9 +4763,10 @@ function sweepAgentRules() {
     const unreadActionable = unread.filter(m => m.type === 'human' || m.type === 'request');
     const actionablePushAt = Number(runtime.lastActionablePushAt) || 0;
     const latestActionableUnread = unreadActionable[unreadActionable.length - 1] || null;
+    const activeKnown = runtime.activeNow === true || runtime.activeNow === false;
     const activeNow = runtime.activeNow === true;
     const idleDurationSec = Math.max(0, Number(runtime.idleDurationSec) || 0);
-    const idleGateReady = !activeNow && idleDurationSec >= 1;
+    const idleGateReady = activeKnown && !activeNow && idleDurationSec >= 1;
     const outboundAcked = didAgentAcknowledgeActionablePush(
       agentName,
       runtime,
@@ -4783,7 +4790,7 @@ function sweepAgentRules() {
         `lastPushDeliveryDelayMs: ${Number(runtime.lastPushDeliveryDelayMs) || 0}`,
         `lastInboxCheckAt: ${runtime.lastInboxCheckAt ? new Date(runtime.lastInboxCheckAt).toISOString() : 'n/a'}`,
         `lastAgentOutboundAt: ${runtime.lastAgentOutboundAt ? new Date(runtime.lastAgentOutboundAt).toISOString() : 'n/a'}`,
-        `activeNow: ${activeNow ? 'yes' : 'no'}`,
+        `activeNow: ${activeKnown ? (activeNow ? 'yes' : 'no') : 'unknown'}`,
         `idleDurationSec: ${idleDurationSec}`,
         `idleGateReady: ${idleGateReady ? 'yes' : 'no'} (requires activeNow=no and idleDurationSec>=1)`,
         `idleThresholdMs: ${IDLE_THRESHOLD_MS}`,
@@ -5806,7 +5813,7 @@ function serializeAgent(agent) {
     task: normalizeAgentTask(agent.task, agent.name),
     runtimeProfile: redactRuntimeProfileSecrets(normalizeRuntimeProfile(agent.runtimeProfile)),
     environment: VALID_ENVIRONMENTS.has(agent.environment) ? agent.environment : classifyEnvironment(agent.name),
-    activeNow: runtime?.activeNow === true,
+    activeNow: normalizeRuntimeActiveNow(runtime?.activeNow),
     activeDurationSec: Number(runtime?.activeDurationSec) || 0,
     idleDurationSec: Number(runtime?.idleDurationSec) || 0,
     lastTmuxActivitySec: Number(runtime?.lastTmuxActivitySec) || null,
@@ -7009,7 +7016,9 @@ app.post('/api/agents/:name/runtime', requireAgentToken(_tokenFromName), (req, r
   const tail = (typeof req.body?.tail === 'string') ? req.body.tail : '';
   const command = (typeof req.body?.command === 'string') ? req.body.command : '';
   const server = normalizeServer(req.body?.server);
-  const activeNow = req.body?.activeNow === true ? true : (req.body?.activeNow === false ? false : null);
+  const activeNow = Object.prototype.hasOwnProperty.call(req.body || {}, 'activeNow')
+    ? (req.body.activeNow === true ? true : (req.body.activeNow === false ? false : null))
+    : undefined;
   const activeDurationSec = req.body?.activeDurationSec;
   const idleDurationSec = req.body?.idleDurationSec;
   const lastTmuxActivitySec = req.body?.lastTmuxActivitySec;
@@ -7074,7 +7083,7 @@ app.post('/api/agents/:name/runtime', requireAgentToken(_tokenFromName), (req, r
       blockedReason: runtime.blockedReason || null,
       blockedTier: normalizeBlockedTier(runtime.blockedTier, null),
       blockedSince: runtime.blockedSince || null,
-      activeNow: runtime.activeNow === true,
+      activeNow: normalizeRuntimeActiveNow(runtime.activeNow),
       activeDurationSec: Number(runtime.activeDurationSec) || 0,
       idleDurationSec: Number(runtime.idleDurationSec) || 0,
       lastTmuxActivitySec: Number(runtime.lastTmuxActivitySec) || null,

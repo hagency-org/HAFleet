@@ -243,6 +243,98 @@ describe('push relay dispatch', () => {
     expect(relayQueue.get('alpha')).toHaveLength(1);
   });
 
+  test('high-priority messages bypass the idle gate by current policy', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    const delivered = [];
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'alpha', server: null, tmux: 'alpha:0.0' }],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      tmuxBin: 'tmux',
+      execFileSync: (_cmd, args) => {
+        if (args[0] === 'capture-pane') return 'active pane output';
+        if (args[0] === 'list-panes' && args.includes('#{pane_current_command}')) return 'codex\n';
+        if (args[0] === 'list-panes' && args.includes('#{pane_current_path}')) return '/tmp\n';
+        throw new Error(`unexpected exec ${args.join(' ')}`);
+      },
+      readFileSync: () => {
+        throw Object.assign(new Error('missing pid file'), { code: 'ENOENT' });
+      },
+      fetch: async () => ({ ok: true, text: async () => '' }),
+    });
+    setPushToTmuxForTest((target, payload) => {
+      delivered.push({ target, payload });
+      return true;
+    });
+
+    await scanBlockedStates();
+    await handleMessage(JSON.stringify({
+      id: 'msg_high_bypass',
+      from: 'beta',
+      to: 'alpha',
+      type: 'request',
+      priority: 'high',
+      summary: 'Urgent operator interrupt',
+      mentions: [],
+    }));
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].target).toBe('alpha:0.0');
+    expect(relayQueue.get('alpha')).toBeUndefined();
+  });
+
+  test('queued normal-priority messages force-deliver after max hold by current policy', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    const delivered = [];
+    let paneText = 'active pane output';
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'alpha', server: null, tmux: 'alpha:0.0' }],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      tmuxBin: 'tmux',
+      execFileSync: (_cmd, args) => {
+        if (args[0] === 'capture-pane') return paneText;
+        if (args[0] === 'list-panes' && args.includes('#{pane_current_command}')) return 'codex\n';
+        if (args[0] === 'list-panes' && args.includes('#{pane_current_path}')) return '/tmp\n';
+        throw new Error(`unexpected exec ${args.join(' ')}`);
+      },
+      readFileSync: () => {
+        throw Object.assign(new Error('missing pid file'), { code: 'ENOENT' });
+      },
+      fetch: async () => ({ ok: true, text: async () => '' }),
+    });
+    setPushToTmuxForTest((target, payload) => {
+      delivered.push({ target, payload });
+      return true;
+    });
+
+    await scanBlockedStates();
+    await handleMessage(JSON.stringify({
+      id: 'msg_normal_max_hold',
+      from: 'beta',
+      to: 'alpha',
+      type: 'inform',
+      summary: 'Eventually force delivered',
+      mentions: [],
+    }));
+    expect(delivered).toEqual([]);
+    expect(relayQueue.get('alpha')).toHaveLength(1);
+
+    vi.setSystemTime(new Date('2026-01-01T00:05:01Z'));
+    paneText = 'active pane output changed';
+    drainRelayQueue();
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].payload).toContain('Eventually force delivered');
+    expect(relayQueue.get('alpha')).toBeUndefined();
+  });
+
   test('queues normal-priority messages when idle metrics are unavailable', async () => {
     const delivered = [];
     seedRelayState({

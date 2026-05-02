@@ -172,7 +172,7 @@ Fix direction:
 
 Include `remote/push-relay-autodeploy.service` in generated package management and smoke-check its placeholders and `ExecStart` target.
 
-### CD-006 CLI Status Still Has A session_activity Diagnostic Fallback
+### CD-006 CLI Status Still Had A Misleading Unknown-Idle Path
 
 Evidence:
 
@@ -181,11 +181,11 @@ Evidence:
 
 Impact:
 
-Normal deployed observation uses backend runtime fields and is currently correct. If runtime metrics are missing, CLI diagnostics can fall back to the old session-wide idle signal and show misleading active/idle state.
+Normal deployed observation uses backend runtime fields and is currently correct. Before the idle observability repair, remote relay reports with unavailable metrics could be normalized to `activeNow=false`, making CLI diagnostics show idle when the real state was unknown.
 
-Fix direction:
+Status:
 
-Replace the diagnostic fallback with pane-content snapshot semantics or label it as a weak fallback. This is lower priority than CD-001 through CD-004.
+Implemented for the current backend/CLI contract. Backend runtime now preserves `activeNow=null`, `agentchat cli status` displays unknown instead of idle for that state, and tests document the current high/urgent bypass plus max-hold force-delivery policy. The legacy `session_activity` fallback remains only for older backends that omit the activity field entirely.
 
 ### CD-007 Operations Runbook Does Not Match Destructive Deploy Behavior
 
@@ -277,7 +277,7 @@ This is the missing CD layer that would have made the idle/relay deployment stat
 | CD-004 | P1 | Package smoke | Add MCP wrapper resolution smoke. | `npm run check:remote-package-smoke`. |
 | CD-005 | P1 | macOS CD | Decide and implement launchd autodeploy watcher or document manual-only policy. | macOS launchctl status and `agentchat service status --profile remote`. |
 | CD-005A | P1 | Remote package | Include and smoke-check `push-relay-autodeploy.service` in the generated remote package. | `npm run build:remote:check` and `npm run check:remote-package-smoke`. |
-| CD-006 | P2 | CLI diagnostics | Remove or label `session_activity` fallback in `agent-chat-cli`. | CLI status tests with missing backend runtime metrics. |
+| CD-006 | P2 | CLI diagnostics | Preserve unknown runtime activity instead of displaying idle; keep legacy `session_activity` fallback only for older backends without an activity field. | Implemented with API/CLI/push-relay tests. |
 | CD-007 | P2 | Ops docs | Update operations runbook to describe destructive deploy checkout behavior. | Implemented; docs reviewed against autodeploy scripts. |
 
 ## Immediate Next Batch
