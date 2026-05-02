@@ -31,3 +31,6 @@
 - Implemented first CI/CD gate: `npm run verify:ci`, CLI manifest contract checks, full JS/shell syntax checks, standalone remote package smoke, remote/local drift checks, dependency isolation check, and serialized kernel/CLI smoke tests.
 - Fixed a standalone remote `push-relay.js` wrapper resolution bug caught by the new package smoke gate.
 - Confirmed `npm run verify:ci` passes locally. `npm run audit:deps` remains red with known/unfixed advisories and stays under R-024 instead of blocking deploys in this batch.
+- Fixed push-relay idle gating after user reported remote injection ignored agent idle state. Replaced session-wide `tmux session_activity` with per-pane content-hash idle detection, queued normal-priority messages when metrics are unavailable, added regression tests, restarted local remote relay, and verified runtime status with `agentchat cli status`, raw `/api/agents`, and `verify-remote`.
+- Received ac-topleader approval for f24cb17 and confirmation it was merged to `stable`.
+- Started CD audit after CI gate completion. Added `13-cd-flow-and-gaps.md` with CD findings, decision points, and a next-batch repair table covering post-deploy verification, remote dependency install scope, loaded commit checks, MCP wrapper smoke, macOS remote autodeploy policy, and CLI diagnostic fallback drift.
