@@ -45,8 +45,32 @@ BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:$BACKEND_PORT}"
 AGENTCHAT_HOMEDIR="${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}"
 V1_AGENTS_DIR="$AGENTCHAT_HOMEDIR/agents"
 
+usage() {
+  cat <<'EOF'
+Usage: agent-ls [--all|-a]
+
+Scope:
+  Lists tmux sessions on the current runtime host.
+  --all also includes backend-registered agents and v1 manifests visible to this host.
+
+Options:
+  -a, --all   Include down/standby agents known from local data, v1 homes, or backend registry.
+  -h, --help  Show this help.
+EOF
+}
+
 SHOW_ALL=false
-{ [ "${1:-}" = "-a" ] || [ "${1:-}" = "--all" ]; } && SHOW_ALL=true
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  -a|--all)
+    SHOW_ALL=true
+    ;;
+  *)
+    ;;
+esac
 
 # Temp files for portable key-value lookups (no associative arrays — bash 3.2 compat)
 _TMP_FILES=""

@@ -8,6 +8,11 @@ Legacy commands (`agent-update`, `agent-audit`, `agent-up`, etc.) are deprecated
 
 ## 1) Remote Service Lifecycle
 
+These commands target the remote relay service on the current host:
+- `agent-chat-push-relay`
+
+They do not stop local agent tmux sessions.
+
 ### Update and keep relay paused (maintenance mode)
 ```bash
 agentchat update --pause-services
@@ -134,12 +139,23 @@ When an agent comes back online, the catch-up notification now includes:
 
 ## 6) Shutdown Audit Checklist
 
-After pausing/downing, verify all three:
-1. service stopped (`agentchat update --service-status`)
-2. no relay process (`pgrep -af "push-relay\\.js"`)
-3. backend offline (`/api/servers` shows `online=false`)
+### Remote relay pause/resume
 
-If any of the three fails, treat shutdown as incomplete.
+After pausing the remote relay, verify all three:
+1. relay service stopped (`agentchat update --service-status`)
+2. no relay process (`pgrep -af "push-relay\\.js"`)
+3. backend server row offline (`/api/servers` shows `online=false` for that remote host)
+
+If any of the three fails, treat relay shutdown as incomplete.
+
+### Host-local agent shutdown
+
+`agentchat down <agent>` acts on the tmux session for that agent on the current runtime host. The backend is used for name resolution, active-work guard, and offline marking; it is not a global remote shutdown command.
+
+After downing a host-local agent, verify:
+1. no tmux session for the agent (`tmux has-session -t <agent>` fails)
+2. backend agent detail shows the expected offline/manual-down state
+3. archived pane output and resume hint were captured when the agent type requires it
 
 ## 7) Debt Hygiene Commands
 

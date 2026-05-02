@@ -78,8 +78,13 @@ while [ $# -gt 0 ]; do
       ;;
     -h|--help)
       echo "Usage: agent-update [--check|--pause-services|--resume-services|--restart-services|--service-status]"
+      echo "Scope:"
+      echo "  Updates the current checkout or remote package on this host."
+      echo "  Service flags only control the remote relay service: agent-chat-push-relay."
+      echo "Options:"
+      echo "  --check: check whether updates are available; do not install"
       echo "  --pause-services: pull/reinstall, then keep remote relay paused"
-      echo "  Other service flags only control remote relay service: agent-chat-push-relay"
+      echo "  --resume-services|--restart-services|--service-status: relay service actions only"
       exit 0
       ;;
     *)

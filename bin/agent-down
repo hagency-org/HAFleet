@@ -65,7 +65,12 @@ usage() {
   cat <<'USAGE'
 Usage: agent-down <name> [--kill] [--timeout <seconds>]
 
-  --kill      archive and force-kill tmux session
+Scope:
+  Stops a tmux session on the current runtime host only.
+  The backend is used for name resolution, active-work guard, and offline marking.
+
+Options:
+  --kill      archive and force-kill the local tmux session
   --timeout   wait timeout before refusing graceful shutdown
 USAGE
 }

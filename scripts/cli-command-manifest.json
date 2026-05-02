@@ -23,7 +23,25 @@
         { "command": "cli", "target": "agent-chat-cli", "aliases": ["admin"] },
         { "command": "check-mcp", "target": "check-mcp" }
       ],
-      "unsupportedSmoke": ["definitely-not-a-command"]
+      "unsupportedSmoke": ["definitely-not-a-command"],
+      "helpAssertions": [
+        {
+          "command": "service",
+          "mustContain": ["Controls services on the current host only.", "remote relay service agent-chat-push-relay"]
+        },
+        {
+          "command": "update",
+          "mustContain": ["Updates the current checkout or remote package on this host.", "Service flags only control the remote relay service: agent-chat-push-relay."]
+        },
+        {
+          "command": "ls",
+          "mustContain": ["Lists tmux sessions on the current runtime host.", "backend-registered agents and v1 manifests visible to this host"]
+        },
+        {
+          "command": "down",
+          "mustContain": ["Stops a tmux session on the current runtime host only.", "backend is used for name resolution"]
+        }
+      ]
     },
     "remote": {
       "cli": "remote/bin/agentchat",
@@ -49,6 +67,24 @@
         "resume-id",
         "benchmark",
         "check-mcp"
+      ],
+      "helpAssertions": [
+        {
+          "command": "service",
+          "mustContain": ["Controls services on the current host only.", "remote relay service agent-chat-push-relay"]
+        },
+        {
+          "command": "update",
+          "mustContain": ["Updates the current checkout or remote package on this host.", "Service flags only control the remote relay service: agent-chat-push-relay."]
+        },
+        {
+          "command": "ls",
+          "mustContain": ["Lists tmux sessions on the current runtime host.", "backend-registered agents and v1 manifests visible to this host"]
+        },
+        {
+          "command": "down",
+          "mustContain": ["Stops a tmux session on the current runtime host only.", "backend is used for name resolution"]
+        }
       ]
     }
   }

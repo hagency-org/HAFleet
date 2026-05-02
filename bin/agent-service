@@ -56,6 +56,12 @@ usage() {
   cat <<'EOF'
 Usage: agent-service <pause|resume|restart|status> [options]
 
+Scope:
+  Controls services on the current host only.
+  local:  central backend/web/bridge services in a full checkout.
+  remote: remote relay service agent-chat-push-relay.
+  all:    local + remote service labels known on this host.
+
 Options:
   --profile <local|remote|all>   Service profile (default: all)
   --service <name>               Service name/label (repeatable)

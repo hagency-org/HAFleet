@@ -34,7 +34,7 @@ Keep these boundaries unless ac-topleader explicitly changes them:
 | Phase 3 credentials/trust | Shared `API_TOKEN` remains overloaded; agent token hard mode is not production default; dashboard proxy and Matrix trust remain compatibility surfaces. | Split into token-readiness, dashboard local-only/auth, Matrix trust, and server credential batches. | Required |
 | Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A. | Continue with v1 home/runtime resolver hardening after approval. | Required |
 | Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
-| Phase 6 CLI/ops profile | Remote command honesty is enforced; some command help/scope semantics remain implicit. | Tighten help/docs/profile metadata without changing launch internals. | Required |
+| Phase 6 CLI/ops profile | Remote command honesty is enforced; RLP6-A made `service`, `update`, `ls`, and `down` help/docs profile-scoped. | Continue with shell resolver consistency after approval. | Required |
 | Phase 7 CI/release gates | `verify:ci` and remote package gates are enforced; `audit:deps` is intentionally separate and red; CD-A is still pending. | Add missing focused gates after each repair; handle dependency audit as a dedicated security batch. | Required |
 
 ## Phase 2: Runtime Observation
@@ -217,14 +217,14 @@ Current evidence:
 - `scripts/cli-command-manifest.json` is now the command contract source for root/remote dispatch checks.
 - Some commands still need clearer host/backend/profile wording in help and operations docs.
 
-Recommended batch RLP6-A: profile-scoped help and docs.
+Completed batch RLP6-A: profile-scoped help and docs.
 
 Scope:
 
-1. make `agentchat service`, `agentchat update`, `agent-ls`, and `agent-down` help text explicit about host-local vs backend scope;
+1. make `agentchat service`, `agentchat update`, `agent-ls`, and `agent-down` help text explicit about current-host services, remote relay, backend registry context, and local tmux shutdown scope;
 2. keep remote command set aligned with `scripts/cli-command-manifest.json`;
 3. update `OPERATIONS.md` command scope where needed;
-4. avoid changing command behavior until help/tests prove the intended contract.
+4. add help-scope assertions to `check:cli-contract` and `check:remote-package-smoke`.
 
 Verification:
 
@@ -272,7 +272,7 @@ Scope:
 
 1. RLP4-A MCP media cache relocation. Completed after ac-topleader approval.
 2. RLP2-A runtime observation provenance. Completed after ac-topleader approval.
-3. RLP6-A profile-scoped help/docs. Makes operator behavior clearer before deeper CLI behavior changes.
+3. RLP6-A profile-scoped help/docs. Completed after ac-topleader approval.
 4. RLP3-A auth readiness diagnostics. Prepares Phase 3 without flipping fail-closed production behavior.
 5. CD-A stable release gate and dependency retry, once ac-topleader approves `14-cd-next-decisions.md`.
 6. RLP3-B dashboard local-only/auth gate.
@@ -285,9 +285,9 @@ Scope:
 
 The next low-risk candidates are:
 
-1. RLP6-A profile-scoped CLI help/docs;
-2. RLP3-A auth readiness diagnostics;
-3. RLP2-B local-host server record design;
+1. RLP3-A auth readiness diagnostics;
+2. RLP2-B local-host server record design;
+3. RLP4-B v1 home/runtime resolver contract tests;
 4. CD-A stable release gate and dependency retry state, once deploy behavior changes are approved.
 
 These should keep avoiding launch, stable, deploy scripts, dashboard auth, Matrix, and default observation behavior unless ac-topleader explicitly approves that narrower batch.

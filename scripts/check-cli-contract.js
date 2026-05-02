@@ -79,6 +79,34 @@ function runCliExpectFailure(cliPath, args) {
   }
 }
 
+function checkHelpAssertions(cliPath, profileName, assertions = []) {
+  for (const assertion of assertions) {
+    const command = assertion.command;
+    if (!command) {
+      fail(`${profileName} help assertion is missing a command`);
+      continue;
+    }
+    let output = '';
+    try {
+      output = runCli(cliPath, [command, '--help']);
+    } catch (error) {
+      fail(`${profileName} ${command} --help failed: ${error.stderr?.toString() || error.message}`);
+      continue;
+    }
+    for (const expected of assertion.mustContain || []) {
+      if (!output.includes(expected)) {
+        fail(`${profileName} ${command} --help missing expected text: ${expected}`);
+      }
+    }
+    for (const forbidden of assertion.mustNotContain || []) {
+      if (output.includes(forbidden)) {
+        fail(`${profileName} ${command} --help includes forbidden text: ${forbidden}`);
+      }
+    }
+  }
+  if (assertions.length > 0) ok(`${profileName} scoped help checked (${assertions.length} command(s))`);
+}
+
 for (const [profileName, profile] of Object.entries(manifest.profiles || {})) {
   const cliPath = path.join(rootDir, profile.cli);
   const cliRel = path.relative(rootDir, cliPath);
@@ -122,6 +150,8 @@ for (const [profileName, profile] of Object.entries(manifest.profiles || {})) {
     }
     runCliExpectFailure(cliPath, [command]);
   }
+
+  checkHelpAssertions(cliPath, profileName, profile.helpAssertions || []);
 
   const actualTargets = collectDispatchTargets(source);
   for (const target of expectedTargets) {

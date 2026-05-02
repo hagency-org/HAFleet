@@ -15,6 +15,13 @@ fail() {
   exit 1
 }
 
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local label="$3"
+  printf '%s\n' "$haystack" | grep -Fq "$needle" || fail "$label missing expected text: $needle"
+}
+
 echo "Checking generated remote package shape..."
 for required in \
   "bin/agentchat" \
@@ -71,6 +78,21 @@ if ! grep -qi 'unknown or unsupported remote command' "$GRAPH_ERR"; then
   fail "generated remote unsupported command did not fail clearly"
 fi
 echo "[OK] Generated remote unsupported command fails clearly"
+
+echo "Checking generated remote scoped help..."
+service_help="$("$PKG_DIR/bin/agentchat" service --help)"
+assert_contains "$service_help" "Controls services on the current host only." "generated remote service help"
+assert_contains "$service_help" "remote relay service agent-chat-push-relay" "generated remote service help"
+update_help="$("$PKG_DIR/bin/agentchat" update --help)"
+assert_contains "$update_help" "Updates the current checkout or remote package on this host." "generated remote update help"
+assert_contains "$update_help" "Service flags only control the remote relay service: agent-chat-push-relay." "generated remote update help"
+ls_help="$("$PKG_DIR/bin/agentchat" ls --help)"
+assert_contains "$ls_help" "Lists tmux sessions on the current runtime host." "generated remote ls help"
+assert_contains "$ls_help" "backend-registered agents and v1 manifests visible to this host" "generated remote ls help"
+down_help="$("$PKG_DIR/bin/agentchat" down --help)"
+assert_contains "$down_help" "Stops a tmux session on the current runtime host only." "generated remote down help"
+assert_contains "$down_help" "The backend is used for name resolution" "generated remote down help"
+echo "[OK] Generated remote scoped help is explicit"
 
 echo "Checking generated remote wrapper resolution..."
 if ! AGENTCHAT_WRAPPER_SMOKE=1 node "$PKG_DIR/push-relay.js"; then
