@@ -42,8 +42,27 @@ else
   BACKEND_PORT="8090"
 fi
 BACKEND_URL="${AGENT_CHAT_API:-http://127.0.0.1:$BACKEND_PORT}"
-AGENTCHAT_HOMEDIR="${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}"
-V1_AGENTS_DIR="$AGENTCHAT_HOMEDIR/agents"
+
+_is_abs_path() {
+  case "${1:-}" in
+    /*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_resolve_v1_home_roots() {
+  local legacy primary
+  legacy="$HOME/.agentchat"
+  primary="$legacy"
+  if [ -n "${AGENTCHAT_HOMEDIR:-}" ] && _is_abs_path "$AGENTCHAT_HOMEDIR"; then
+    primary="$AGENTCHAT_HOMEDIR"
+  elif [ -n "${AGENT_CHAT_RUNTIME_DIR:-}" ] && _is_abs_path "$AGENT_CHAT_RUNTIME_DIR"; then
+    primary="$AGENT_CHAT_RUNTIME_DIR/homes"
+  fi
+  printf '%s\n' "$primary"
+  [ "$legacy" != "$primary" ] && printf '%s\n' "$legacy"
+}
+V1_HOME_ROOTS="$(_resolve_v1_home_roots)"
 
 usage() {
   cat <<'EOF'
@@ -88,34 +107,41 @@ AGENTS_FILE=$(_mktmp)
 ACTIVE_MAP_FILE=$(_mktmp)
 V1_INFO_FILE=$(_mktmp)
 
-HOME_DIR="$AGENTCHAT_HOMEDIR" V1_AGENTS_DIR="$V1_AGENTS_DIR" python3 - <<'PY' > "$V1_INFO_FILE" 2>/dev/null || true
+V1_HOME_ROOTS="$V1_HOME_ROOTS" python3 - <<'PY' > "$V1_INFO_FILE" 2>/dev/null || true
 import json
 import os
 from pathlib import Path
 
-agents_dir = Path(os.environ.get("V1_AGENTS_DIR", ""))
-if not agents_dir.exists():
-    raise SystemExit(0)
+roots = [Path(p) for p in os.environ.get("V1_HOME_ROOTS", "").splitlines() if p.strip()]
+seen = set()
 
-for entry in sorted(agents_dir.iterdir()):
-    if not entry.is_dir():
+for root in roots:
+    agents_dir = root / "agents"
+    if not agents_dir.exists():
         continue
-    manifest = entry / "agent.json"
-    if not manifest.exists():
-        continue
-    try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-    except Exception:
-        continue
-    name = str(data.get("name") or "").strip()
-    if not name:
-        continue
-    a_type = str(data.get("type") or "-").strip() or "-"
-    workdir = str(data.get("workdir") or "-").strip() or "-"
-    state_dir = str(data.get("stateDir") or "-").strip() or "-"
-    model_ver = str(data.get("agentModelVersion") or "-").strip() or "-"
-    sup_for = str(data.get("supervisorFor") or "-").strip() or "-"
-    print("|".join([name, a_type, workdir, state_dir, model_ver, sup_for]))
+    for entry in sorted(agents_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        manifest = entry / "agent.json"
+        if not manifest.exists():
+            continue
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        name = str(data.get("name") or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        a_type = str(data.get("type") or "-").strip() or "-"
+        workdir = str(data.get("workdir") or "-").strip() or "-"
+        state_dir = str(data.get("stateDir") or "-").strip() or "-"
+        model_ver = str(data.get("agentModelVersion") or "-").strip() or "-"
+        sup_for = str(data.get("supervisorFor") or "-").strip() or "-"
+        print("|".join([name, a_type, workdir, state_dir, model_ver, sup_for]))
 PY
 
 # Get tmux sessions

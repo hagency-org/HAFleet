@@ -34,7 +34,7 @@ Keep these boundaries unless ac-topleader explicitly changes them:
 | Phase 3 credentials/trust | RLP3-A added diagnostics-only agent-token readiness; RLP3-A2 documented and tested the server credential compatibility boundary. Shared `API_TOKEN`, dashboard proxy, actual server credential enforcement, and Matrix trust remain compatibility surfaces. | Continue with server credential enforcement migration or dashboard boundary after approval; do not flip fail-closed until tokens are provisioned and relay/server credentials are rolled out. | Required |
 | Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A; RLP4-B added v1 home/runtime resolver contract tests and rejects relative env/manifest paths before normalization. | Continue with broader path unification only after approval. | Required |
 | Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
-| Phase 6 CLI/ops profile | Remote command honesty is enforced; RLP6-A made `service`, `update`, `ls`, and `down` help/docs profile-scoped; CLI status/list now report unknown runtime activity without treating it as idle. | Continue with shell resolver consistency after approval. | Required |
+| Phase 6 CLI/ops profile | Remote command honesty is enforced; RLP6-A made `service`, `update`, `ls`, and `down` help/docs profile-scoped; CLI status/list now report unknown runtime activity without treating it as idle; RLP6-B aligned `agent-ls --all` v1 home discovery with the shared resolver. | Continue with `agent-down` resolver tests only after separate approval; do not change shutdown safety behavior implicitly. | Required |
 | Phase 7 CI/release gates | `verify:ci` and remote package gates are enforced; `audit:deps` is intentionally separate and red; CD-A is still pending. | Add missing focused gates after each repair; handle dependency audit as a dedicated security batch. | Required |
 
 ## Phase 2: Runtime Observation
@@ -251,13 +251,20 @@ Verification:
 - `npm run check:remote-package-smoke`;
 - `npm run verify:ci`.
 
-Recommended later batch RLP6-B: shell resolver consistency.
+Partial batch RLP6-B: shell resolver consistency.
 
 Scope:
 
 1. align `agent-ls` home/runtime defaults with `lib/agent-home-v1.js` semantics without touching launch;
-2. add shell-level tests with fake `tmux`/`curl` for `agent-down` name resolution and backend-unavailable refusal;
-3. avoid changing shutdown behavior in this batch.
+2. add shell-level fake `tmux`/`curl` tests for `agent-ls --all`;
+3. keep `agent-down` shutdown behavior unchanged.
+
+Implemented:
+
+1. `agent-ls --all` now searches absolute `AGENTCHAT_HOMEDIR`, absolute `AGENT_CHAT_RUNTIME_DIR/homes`, and legacy `~/.agentchat` fallback;
+2. relative `AGENTCHAT_HOMEDIR` is ignored for v1 discovery, matching `lib/agent-home-v1.js`;
+3. root and remote mirrored `agent-ls` stay synchronized;
+4. `agent-down` resolver/backend-unavailable behavior remains a future test/design item because changing local shutdown safety requires explicit approval.
 
 ## Phase 7: CI And Release Gates
 
