@@ -550,6 +550,91 @@ describe('server heartbeat api', () => {
       onlineServers: 2,
       agents: 2,
       onlineAgents: 2,
+      health: {
+        status: 'healthy',
+        components: {
+          servers: expect.objectContaining({ status: 'healthy', total: 2, online: 2 }),
+          agents: expect.objectContaining({ status: 'healthy', total: 2, online: 2 }),
+          alerts: expect.objectContaining({
+            status: 'healthy',
+            actionable: expect.objectContaining({ total: 0, critical: 0, warning: 0 }),
+          }),
+        },
+      },
+    });
+    expect(Number.isFinite(health.body.health.generatedAt)).toBe(true);
+  });
+
+  test('reports unknown flow health for an empty install', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', {
+      agents: {},
+      groups: {},
+      messages: [],
+      cursors: {},
+      servers: {},
+      agentRuntime: {},
+      env: {
+        AGENT_HEARTBEAT_TTL_MS: '5000',
+        AGENT_SERVER_SWEEP_INTERVAL_MS: '60000',
+        AGENT_SERVER_MAINTENANCE_IDS: '',
+      },
+    });
+
+    const health = await request(context.app).get('/health');
+
+    expect(health.status).toBe(200);
+    expect(health.body.ok).toBe(true);
+    expect(health.body.health).toMatchObject({
+      status: 'unknown',
+      components: {
+        servers: expect.objectContaining({ status: 'unknown', total: 0 }),
+        agents: expect.objectContaining({ status: 'unknown', total: 0 }),
+      },
+    });
+  });
+
+  test('summarizes actionable alert backlog without changing top-level ok', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed());
+
+    await request(context.app).post('/api/system/info')
+      .send({ summary: 'MCP missing', full: 'warn detail', alertType: 'mcp_missing', dedupeKey: 'mcp_missing:alpha', sourceAgent: 'alpha' });
+    let health = await request(context.app).get('/health');
+    expect(health.status).toBe(200);
+    expect(health.body.ok).toBe(true);
+    expect(health.body.health).toMatchObject({
+      status: 'degraded',
+      components: {
+        alerts: expect.objectContaining({
+          status: 'degraded',
+          actionable: expect.objectContaining({ total: 1, critical: 0, warning: 1 }),
+        }),
+      },
+    });
+
+    await request(context.app).post('/api/system/info')
+      .send({ summary: 'Server offline', full: 'critical detail', alertType: 'server_offline', dedupeKey: 'server_offline:s1', sourceAgent: 's1' });
+    health = await request(context.app).get('/health');
+    expect(health.body.health).toMatchObject({
+      status: 'unhealthy',
+      components: {
+        alerts: expect.objectContaining({
+          status: 'unhealthy',
+          actionable: expect.objectContaining({ total: 2, critical: 1, warning: 1 }),
+        }),
+      },
+    });
+
+    const critical = (await request(context.app).get('/api/alerts?alertType=server_offline')).body[0];
+    await request(context.app).post(`/api/alerts/${critical.id}/transition`).send({ status: 'suppressed' });
+    health = await request(context.app).get('/health');
+    expect(health.body.health).toMatchObject({
+      status: 'degraded',
+      components: {
+        alerts: expect.objectContaining({
+          status: 'degraded',
+          actionable: expect.objectContaining({ total: 1, critical: 0, warning: 1 }),
+        }),
+      },
     });
   });
 

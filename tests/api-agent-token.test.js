@@ -83,6 +83,15 @@ describe('per-agent token authentication', () => {
       missingManagedAgentNamesTruncated: false,
       failClosedReady: false,
     });
+    expect(health.body.health).toMatchObject({
+      status: 'degraded',
+      components: {
+        auth: expect.objectContaining({
+          status: 'degraded',
+          missingManagedAgentTokenCount: 1,
+        }),
+      },
+    });
 
     const betaMsg = await request(context.app)
       .post('/api/messages')

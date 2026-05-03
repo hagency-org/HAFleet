@@ -794,6 +794,19 @@ describe('backend runtime API', () => {
         severity: 'critical',
       }),
     ]);
+    expect(response.body.health).toMatchObject({
+      status: 'unhealthy',
+      components: {
+        servers: expect.objectContaining({
+          status: 'unhealthy',
+          offline: 1,
+        }),
+        alerts: expect.objectContaining({
+          status: 'unhealthy',
+          actionable: expect.objectContaining({ critical: 1 }),
+        }),
+      },
+    });
   });
 
   test('codex agent reports mcpPresent=null and does not trigger mcp_missing', async () => {
