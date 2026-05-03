@@ -83,6 +83,7 @@ const MCP_MISS_THRESHOLD = 6;  // report mcpPresent=false after 6 consecutive mi
 // Idle-gate relay queue: holds messages for agents that are currently active (not idle enough)
 const RELAY_QUEUE_DRAIN_INTERVAL_MS = Number.parseInt(process.env.RELAY_QUEUE_DRAIN_INTERVAL_MS || '3000', 10);
 const relayQueue = new Map(); // Map<agentName, Array<{msg, notification, target, dedupeKey, queuedAt}>>
+const unreadBackfillCursor = new Map();
 let relayQueueDrainTimer = null;
 let currentEs = null;
 let runtimeStarted = false;
@@ -535,14 +536,16 @@ async function sendHeartbeat() {
     const res = await postJson('/api/servers/heartbeat', body);
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      if (PUSH_RELAY_INCLUDE_LEASE_FIELDS && res.status === 409) {
+      if (res.status === 409) {
         console.error(`[push-relay] heartbeat lease rejected for server=${SERVER_ID}, instance=${RELAY_INSTANCE_ID}: ${body}`);
-        return;
+        return { ok: false, leaseRejected: true };
       }
       throw new Error(`status ${res.status} ${body}`.trim());
     }
+    return { ok: true, leaseRejected: false };
   } catch (e) {
     console.error(`[push-relay] heartbeat failed: ${e.message}`);
+    return { ok: false, leaseRejected: false };
   }
 }
 
@@ -662,6 +665,13 @@ async function buildNotification(agentName, msg) {
   const isOperator = msg.trustLevel === 'operator';
   const humanTag = isHuman ? (isMatrix && !isOperator ? ' (via Matrix)' : ' (human)') : '';
   const operatorHint = isHuman && (isOperator || !isMatrix) ? ' This is your human operator.' : '';
+  if (msg.source === 'push-relay' && msg.kind === 'unread_backfill') {
+    const unreadCountRaw = Number(msg.unreadCount);
+    const unreadCount = Number.isFinite(unreadCountRaw) && unreadCountRaw > 0
+      ? Math.floor(unreadCountRaw)
+      : 1;
+    return `[NOTIFICATION] FIRST ACTION: call check_inbox() now. You have ${unreadCount} unread inbox message(s) pending after push relay reconnect. Read all inbox messages before replying.`;
+  }
   if (hasMcp) {
     const checkHint = 'FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.';
     const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
@@ -1052,10 +1062,101 @@ function connectSse() {
     if (reconnectTimer || runtimeStopping || !runtimeStarted) return;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      if (!runtimeStopping && runtimeStarted) connectSse();
+      if (!runtimeStopping && runtimeStarted) {
+        const es = connectSse();
+        if (es) {
+          void backfillUnreadInboxNotifications('sse-reconnect')
+            .catch((error) => console.error(`[push-relay] unread backfill failed after reconnect: ${error.message}`));
+        }
+      }
     }, RECONNECT_MS);
   });
   return es;
+}
+
+function unreadBackfillKey(snapshot) {
+  return [
+    snapshot.unreadTotal,
+    snapshot.latestId || 'none',
+    snapshot.latestTs || 'none',
+  ].join(':');
+}
+
+function normalizeUnreadBackfillSnapshot(agentName, raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const messages = Array.isArray(raw.messages)
+    ? raw.messages.filter((item) => item && typeof item === 'object')
+    : [];
+  const unreadTotalRaw = Number(raw.unread_total ?? raw.unreadTotal ?? messages.length);
+  const unreadTotal = Number.isFinite(unreadTotalRaw) && unreadTotalRaw > 0
+    ? Math.floor(unreadTotalRaw)
+    : 0;
+  if (unreadTotal <= 0) return null;
+  const latest = messages[messages.length - 1] || null;
+  return {
+    agentName,
+    unreadTotal,
+    unreadReturned: messages.length,
+    unreadOmitted: Math.max(0, unreadTotal - messages.length),
+    latestId: typeof latest?.id === 'string' && latest.id.trim() ? latest.id.trim() : null,
+    latestTs: latest?.ts ?? latest?.at ?? latest?.time ?? null,
+  };
+}
+
+function buildUnreadBackfillMessage(agentName, snapshot, reason) {
+  const digest = createHash('sha1')
+    .update(`${agentName}\0${snapshot.latestId || ''}\0${snapshot.latestTs || ''}\0${snapshot.unreadTotal}`)
+    .digest('hex')
+    .slice(0, 12);
+  return {
+    id: `relay_unread_${digest}`,
+    ts: Date.now(),
+    from: 'agent-chat',
+    to: agentName,
+    group: null,
+    type: 'inform',
+    priority: 'normal',
+    summary: `Unread inbox pending: ${snapshot.unreadTotal} message(s)`,
+    full: `Relay ${SERVER_ID} reconnected (${reason}) and found ${snapshot.unreadTotal} unread inbox message(s). Call check_inbox() before replying.`,
+    mentions: [],
+    source: 'push-relay',
+    kind: 'unread_backfill',
+    unreadCount: snapshot.unreadTotal,
+  };
+}
+
+async function backfillUnreadInboxNotifications(reason = 'startup') {
+  for (const agentName of [...localAgents]) {
+    if (!shouldHandleAgent(agentName)) continue;
+    let snapshot;
+    try {
+      const res = await api(`/api/inbox/${encodeURIComponent(agentName)}/unread-list?limit=1`);
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`status ${res.status} ${body}`.trim());
+      }
+      snapshot = normalizeUnreadBackfillSnapshot(agentName, await res.json());
+    } catch (error) {
+      console.error(`[push-relay] unread backfill failed for ${agentName}: ${error.message}`);
+      continue;
+    }
+    if (!snapshot) continue;
+    const key = unreadBackfillKey(snapshot);
+    if (unreadBackfillCursor.get(agentName) === key) continue;
+    unreadBackfillCursor.set(agentName, key);
+    const msg = buildUnreadBackfillMessage(agentName, snapshot, reason);
+    try {
+      await handleMessage(JSON.stringify(msg));
+    } catch (error) {
+      console.error(`[push-relay] unread backfill delivery failed for ${agentName}: ${error.message}`);
+    }
+  }
+}
+
+function enterLeaseRejectedStandby() {
+  stopPushRelayRuntimeSync();
+  runtimeStopping = false;
+  scheduleBootstrapRetry('heartbeat-lease-rejected');
 }
 
 async function startPushRelayRuntime() {
@@ -1066,7 +1167,11 @@ async function startPushRelayRuntime() {
   runtimeStartPromise = (async () => {
     try {
       await refreshAgentsSnapshot();
-      await sendHeartbeat();
+      const heartbeat = await sendHeartbeat();
+      if (heartbeat?.leaseRejected) {
+        enterLeaseRejectedStandby();
+        return { ok: false, reason: 'heartbeat-lease-rejected' };
+      }
       await scanBlockedStates();
       if (runtimeStopping || generation !== runtimeGeneration) return null;
       runtimeStarted = true;
@@ -1078,6 +1183,9 @@ async function startPushRelayRuntime() {
       heartbeatTimer = setInterval(() => {
         refreshAgentsSnapshot()
           .then(() => sendHeartbeat())
+          .then((heartbeat) => {
+            if (heartbeat?.leaseRejected) enterLeaseRejectedStandby();
+          })
           .catch((e) => console.error(`[push-relay] heartbeat loop failed: ${e.message}`));
       }, HEARTBEAT_INTERVAL_MS);
       blockScanTimer = setInterval(() => {
@@ -1088,6 +1196,7 @@ async function startPushRelayRuntime() {
         try { drainRelayQueue(); } catch (e) { console.error(`[push-relay] queue drain failed: ${e.message}`); }
       }, RELAY_QUEUE_DRAIN_INTERVAL_MS);
       connectSse();
+      await backfillUnreadInboxNotifications('startup');
       return { ok: true };
     } catch (error) {
       runtimeStarted = false;
@@ -1216,6 +1325,7 @@ function resetRelayState() {
   mcpSessionCacheAt = 0;
   mcpSessionCache = new Set();
   relayQueue.clear();
+  unreadBackfillCursor.clear();
   execFileAsyncImpl = execFileAsync;
   readFileSyncImpl = readFileSync;
   execFileSyncImpl = execFileSync;

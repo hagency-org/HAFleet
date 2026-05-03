@@ -5,9 +5,12 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { promisify } from 'util';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
+  drainRelayQueue,
   main,
   resetRelayState,
+  seedRelayState,
   setPushRelayTestHooks,
+  setPushToTmuxForTest,
   stopPushRelayRuntime,
 } from '../lib/push-relay-core.js';
 
@@ -118,6 +121,119 @@ describe('push relay lifecycle', () => {
 
     await vi.advanceTimersByTimeAsync(10000);
     expect(instances).toHaveLength(1);
+  });
+
+  test('heartbeat lease rejection keeps stale relays off SSE', async () => {
+    vi.useFakeTimers();
+    const posts = [];
+    const { FakeEventSource, instances } = createFakeEventSource();
+    setPushRelayTestHooks({
+      EventSource: FakeEventSource,
+      execFileSync: fakeTmux,
+      fetch: async (url, options = {}) => {
+        const parsed = new URL(String(url));
+        if (parsed.pathname === '/api/agents') {
+          return responseJson([{ name: 'alpha', server: 'alpha-host', tmux: 'alpha:0.0' }]);
+        }
+        if (parsed.pathname === '/api/servers/heartbeat') {
+          posts.push(JSON.parse(String(options.body || '{}')));
+          return {
+            ok: false,
+            status: 409,
+            json: async () => ({ error: 'lease rejected' }),
+            text: async () => 'lease rejected',
+          };
+        }
+        return responseJson({ ok: true });
+      },
+      tmuxBin: 'tmux',
+    });
+
+    const result = await main();
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      reason: 'heartbeat-lease-rejected',
+    }));
+    expect(posts).toHaveLength(1);
+    expect(instances).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(posts.length).toBeGreaterThanOrEqual(2);
+    expect(instances).toHaveLength(0);
+  });
+
+  test('startup and reconnect backfill unread inbox notices without replaying message bodies', async () => {
+    vi.useFakeTimers();
+    const { FakeEventSource, instances } = createFakeEventSource();
+    const deliveries = [];
+    const unreadSnapshots = [
+      {
+        agent: 'alpha',
+        unread_total: 1,
+        unread_returned: 1,
+        unread_omitted: 0,
+        messages: [{ id: 'msg_1', ts: 1000, from: 'human-op', summary: 'secret body' }],
+      },
+      {
+        agent: 'alpha',
+        unread_total: 2,
+        unread_returned: 1,
+        unread_omitted: 1,
+        messages: [{ id: 'msg_2', ts: 2000, from: 'salt', summary: 'another secret' }],
+      },
+    ];
+    setPushRelayTestHooks({
+      EventSource: FakeEventSource,
+      execFileSync: fakeTmux,
+      fetch: async (url, options = {}) => {
+        const parsed = new URL(String(url));
+        if ((options.method || 'GET').toUpperCase() === 'POST') return responseJson({ ok: true });
+        if (parsed.pathname === '/api/agents') {
+          return responseJson([{ name: 'alpha', server: null, tmux: 'alpha:0.0' }]);
+        }
+        if (parsed.pathname === '/api/inbox/alpha/unread-list') {
+          return responseJson(unreadSnapshots.shift() || {
+            agent: 'alpha',
+            unread_total: 2,
+            unread_returned: 1,
+            unread_omitted: 1,
+            messages: [{ id: 'msg_2', ts: 2000, from: 'salt', summary: 'another secret' }],
+          });
+        }
+        return responseJson({ ok: true });
+      },
+      tmuxBin: 'tmux',
+    });
+    seedRelayState({ mcpSessions: ['alpha'] });
+    setPushToTmuxForTest((target, payload) => {
+      deliveries.push({ target, payload });
+      return true;
+    });
+
+    await main();
+
+    expect(instances).toHaveLength(1);
+    expect(deliveries).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(25000);
+    drainRelayQueue();
+
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].target).toBe('alpha:0.0');
+    expect(deliveries[0].payload).toContain('You have 1 unread inbox message(s)');
+    expect(deliveries[0].payload).toContain('FIRST ACTION: call check_inbox() now.');
+    expect(deliveries[0].payload).not.toContain('secret body');
+
+    instances[0].emitError();
+    await vi.advanceTimersByTimeAsync(5000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(instances).toHaveLength(2);
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries[1].payload).toContain('You have 2 unread inbox message(s)');
+    expect(deliveries[1].payload).not.toContain('another secret');
   });
 
   test('stop clears pending reconnect timers and sends the offline notice when requested', async () => {
