@@ -73,7 +73,7 @@ Standalone package note: `agentchat update` does not self-update generated packa
 
 ## Notes
 
-- Operations runbook (no doctor CLI): see `../OPERATIONS.md`
+- The central checkout operations runbook lives outside standalone remote packages. For generated packages, use the Standard Deployment Template below.
 - In normal `git clone` deployments, `install-remote.sh` uses repo-root `bin/` as the helper source of truth.
   `remote/bin` is only a fallback when root `bin/` is unavailable.
 - `remote/bin/agentchat` is profile-specific, not a byte-for-byte mirror of root `bin/agentchat`.

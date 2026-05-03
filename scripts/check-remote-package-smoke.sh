@@ -22,6 +22,71 @@ assert_contains() {
   printf '%s\n' "$haystack" | grep -Fq "$needle" || fail "$label missing expected text: $needle"
 }
 
+check_markdown_refs() {
+  node --input-type=module - "$PKG_DIR" <<'NODE'
+import fs from 'fs';
+import path from 'path';
+
+const packageRoot = path.resolve(process.argv[2]);
+const failures = [];
+
+function walk(dir) {
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...walk(fullPath));
+    else if (entry.isFile() && entry.name.endsWith('.md')) files.push(fullPath);
+  }
+  return files;
+}
+
+function isExternalRef(ref) {
+  return (
+    ref.startsWith('#') ||
+    ref.startsWith('http://') ||
+    ref.startsWith('https://') ||
+    ref.startsWith('mailto:')
+  );
+}
+
+function targetFor(file, rawRef) {
+  const ref = rawRef.trim().replace(/^<|>$/g, '').split('#')[0];
+  if (!ref || isExternalRef(ref) || !/\.md$/i.test(ref)) return null;
+  return {
+    ref,
+    target: path.resolve(path.dirname(file), ref),
+  };
+}
+
+for (const file of walk(packageRoot)) {
+  const source = fs.readFileSync(file, 'utf8');
+  const relativeFile = path.relative(packageRoot, file);
+  const refs = [];
+
+  for (const match of source.matchAll(/\[[^\]\n]+\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g)) {
+    refs.push(match[1]);
+  }
+  for (const match of source.matchAll(/`([^`\n]*?\.md(?:#[^`\s]+)?[^`]*)`/g)) {
+    refs.push(match[1]);
+  }
+
+  for (const rawRef of refs) {
+    const resolved = targetFor(file, rawRef);
+    if (!resolved) continue;
+    if (!resolved.target.startsWith(`${packageRoot}${path.sep}`) || !fs.existsSync(resolved.target)) {
+      failures.push(`${relativeFile}: unresolved generated package markdown reference: ${resolved.ref}`);
+    }
+  }
+}
+
+if (failures.length) {
+  console.error(failures.join('\n'));
+  process.exit(1);
+}
+NODE
+}
+
 echo "Checking generated remote package shape..."
 for required in \
   "bin/agentchat" \
@@ -58,6 +123,19 @@ while IFS= read -r file; do
   bash -n "$file"
 done < <(find "$PKG_DIR/bin" -type f -print | sort; printf '%s\n' "$PKG_DIR/install-remote.sh")
 echo "[OK] Generated package shell syntax"
+
+echo "Checking generated remote documentation references..."
+if ! check_markdown_refs; then
+  fail "generated remote package has broken markdown references"
+fi
+echo "[OK] Generated remote markdown references resolve inside the package"
+
+autodeploy_service="$(cat "$PKG_DIR/push-relay-autodeploy.service")"
+assert_contains "$autodeploy_service" "User=__USER__" "generated remote autodeploy service"
+assert_contains "$autodeploy_service" "WorkingDirectory=__REPODIR__" "generated remote autodeploy service"
+assert_contains "$autodeploy_service" "EnvironmentFile=__ENV_FILE__" "generated remote autodeploy service"
+assert_contains "$autodeploy_service" "ExecStart=/usr/bin/env bash __REPODIR__/scripts/agentchat-remote-autodeploy.sh" "generated remote autodeploy service"
+echo "[OK] Generated remote autodeploy service contract is stable"
 
 help_output="$("$PKG_DIR/bin/agentchat" --help)"
 printf '%s' "$help_output" | grep -q 'Usage: agentchat <command> \[args\]' || fail "generated agentchat help missing usage"

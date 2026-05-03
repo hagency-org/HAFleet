@@ -21,9 +21,11 @@ Use these as the starting point, but verify details against code:
 | `docs/agent-role-and-scope-editing.md` | Describes old `docs/{agent}/agents.md` and `docs/{agent}/plan.md` model. | Rewrite for flat v1 workspace and task control-plane. |
 | `docs/agent-roles-and-guardrails.md` | Still references `docs/{agent}` model in Supervisor context. | Rewrite while preserving attention-boundary ideas. |
 | `docs/Hibiki/supervisor-fusion-design.md` | Proposes a direction that diverges from current backend Supervisor implementation. | Keep as stale design evidence until operator decides archival policy. |
-| `docs/architecture/system-components.md` | Route tables and line counts are stale. | Rewrite from current code and this audit. |
+| `docs/architecture/ops-patterns.md` | Historical operational patterns include stale deploy commands and service/log names. | Keep archived with a top-level redirect to `README.md` and `OPERATIONS.md`. |
+| `docs/architecture/system-components.md` | Route tables and line counts are stale. | Keep archived with a top-level redirect to `README.md` and `OPERATIONS.md` unless a future rewrite is approved. |
 | `docs/architecture/agent-lifecycle.md` | Claims root AGENTS may be agent-writable; current template says system-provisioned. | Update to flat v1 ownership. |
-| `ROADMAP-remote.md` | Reads like future roadmap although remote support exists. | Rewrite as current remote status or mark superseded after operator review. |
+| `docs/salt/README.md` | Audit index described the salt folder as temporary authority for remote/local terms. | Keep archived with a top-level redirect to root trusted docs and current code. |
+| `ROADMAP-remote.md` | Reads like future roadmap although remote support exists. | Keep archived/superseded with a top-level redirect to `remote/README.md` and `OPERATIONS.md`. |
 
 ## Rewrite Direction
 

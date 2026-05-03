@@ -1,5 +1,7 @@
 # Remote Server Support — Roadmap
 
+Archive notice: This roadmap is superseded historical planning material, not the current remote deploy or operator runbook. Current remote setup lives in `remote/README.md`; current operator procedures live in `OPERATIONS.md`; verify behavior against code before using details here.
+
 ## Architecture
 
 ```

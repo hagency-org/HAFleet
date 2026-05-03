@@ -70,4 +70,35 @@ describe('runtime parity regressions', () => {
     expect(operationsSource).toContain('git clean -fd');
     expect(operationsSource).toContain('git reset --hard origin/stable');
   });
+
+  test('stale deploy docs are archived and redirect to trusted runbooks', () => {
+    const staleDocPaths = [
+      'docs/architecture/ops-patterns.md',
+      'docs/architecture/system-components.md',
+      'docs/salt/README.md',
+    ];
+
+    for (const docPath of staleDocPaths) {
+      const source = readFileSync(path.resolve(docPath), 'utf-8');
+      expect(source).toContain('Archive notice:');
+      expect(source).toContain('Current operator procedures live in root `README.md` and `OPERATIONS.md`');
+    }
+
+    const saltReadme = readFileSync(path.resolve('docs/salt/README.md'), 'utf-8');
+    expect(saltReadme).not.toMatch(/temporary authority/);
+
+    const remoteRoadmap = readFileSync(path.resolve('ROADMAP-remote.md'), 'utf-8');
+    expect(remoteRoadmap).toContain('Archive notice:');
+    expect(remoteRoadmap).toContain('superseded historical planning material');
+    expect(remoteRoadmap).toContain('remote/README.md');
+    expect(remoteRoadmap).toContain('OPERATIONS.md');
+
+    const readmeSource = readFileSync(path.resolve('README.md'), 'utf-8');
+    expect(readmeSource).toContain('`ROADMAP-remote.md` — Superseded remote planning archive');
+
+    const staleIndex = readFileSync(path.resolve('docs/salt/05-docs-archive-index.md'), 'utf-8');
+    expect(staleIndex).toContain('`docs/architecture/system-components.md` | Route tables and line counts are stale. | Keep archived with a top-level redirect');
+    expect(staleIndex).toContain('`ROADMAP-remote.md` | Reads like future roadmap although remote support exists. | Keep archived/superseded with a top-level redirect');
+    expect(staleIndex).not.toMatch(/ROADMAP-remote\.md`\s*\|[^\n]*operator review/);
+  });
 });

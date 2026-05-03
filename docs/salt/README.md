@@ -1,5 +1,7 @@
 # salt agent-chat system audit
 
+Archive notice: This folder is historical audit material, not the current deploy or incident runbook. Current operator procedures live in root `README.md` and `OPERATIONS.md`; verify behavior against code before using details here.
+
 Date: 2026-05-02
 Owner: salt
 Branch: master
@@ -52,7 +54,7 @@ The first phase is documentation and audit only. Code repairs start after the re
 - Batch 1 and Batch 2 repairs are implemented and pushed.
 - Batch 3 approved scope R-009/R-015 is implemented.
 - Remote/local split audit is documented as design-only in `08` through `10`; no runtime code repair started for this topic.
-- Phase 0 terminology is staged in `11`; this folder is the temporary authority for remote/local terms until root docs are approved for rewrite.
+- Phase 0 terminology is staged in `11`; root docs and current code are the authority for active remote/local runtime terms.
 - CI/CD first gate is implemented in `12` and exposed through `npm run verify:ci`.
 - CD preflight and post-deploy version checks are implemented; remaining CD work is decision-gated in `14` and remote install/profile facts are locked in `16`.
 - Phase 2-7 resumption is staged in `15`; RLP4-A MCP media cache relocation, RLP4-B v1 home/runtime resolver hardening, RLP2-A runtime observation provenance, RLP2-B custom local server ID/local server record, CLI unknown-activity observability, RLP6-A profile-scoped help/docs, RLP6-B `agent-ls` resolver consistency, RLP3-A auth readiness diagnostics, RLP3-A2 server credential boundary diagnostics, and RLP3-B1 dashboard mutation boundary are implemented. RLP7-B dependency audit findings are documented for approval. CD decision docs now include full-clone remote profile, dependency lock, standalone version, and install-reconciliation decisions; deploy-behavior batches remain operator-gated.

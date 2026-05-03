@@ -686,7 +686,7 @@ Skills are markdown instruction files symlinked into agent config directories.
 ## Documentation
 
 - `OPERATIONS.md` — Operations runbook (incident response, health checks)
-- `ROADMAP-remote.md` — Remote server architecture and roadmap
+- `ROADMAP-remote.md` — Superseded remote planning archive; use `remote/README.md` and `OPERATIONS.md` for current procedures
 - `docs/v1-agent-home-contract.md` — V1 agent home layout contract
 - `docs/agent-roles-and-guardrails.md` — Agent role definitions and guardrails
 - `docs/agent-role-and-scope-editing.md` — Practical workflow for editing role/scope/current-task inputs

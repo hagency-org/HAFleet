@@ -1,5 +1,7 @@
 # System Components Overview
 
+Archive notice: This is historical architecture/audit material, not the current deploy or incident runbook. Current operator procedures live in root `README.md` and `OPERATIONS.md`; verify behavior against code before using details here.
+
 Date: 2026-03-28
 Scope: All agentchat services, data flows, subsystems, external dependencies, and configuration model
 Author: ac-researcher (task 5.38)
