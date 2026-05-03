@@ -136,6 +136,27 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).toContain('const IDLE_THRESHOLD_SEC = 45;');
   });
 
+  test('agent detail tasks tab uses the detail agent instead of monitor state', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/agents/alpha');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain("sessionStorage.setItem('task_filter_assignee', agent);");
+    expect(response.text).not.toContain('monitoredAgent.name');
+  });
+
+  test('monitor task SSE handlers do not require task-page globals', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain("typeof activeTab !== 'undefined'");
+    expect(response.text).toContain("typeof taskListRefresh === 'function'");
+    expect(response.text).not.toContain("if (activeTab === 'tasks') taskListRefresh();");
+  });
+
   test('redirects agent audit page to the detail audit hash', async () => {
     const mod = await setup();
 
