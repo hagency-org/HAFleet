@@ -169,6 +169,143 @@ describe('server delivery path', () => {
     expect(enterAttempts).toBe(1);
   });
 
+  test('queue snapshot reports untracked target observation before pane sweep', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    serverModule.setServerTestHooks({
+      backendFetch: async () => ({ ok: true, text: async () => '', json: async () => [] }),
+    });
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'operator',
+      to: 'alpha:0.0',
+      payload: 'wait for observation',
+    });
+
+    expect(queued.status).toBe(200);
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toHaveLength(1);
+    expect(queue.body[0]).toMatchObject({
+      id: queued.body.id,
+      targetIdleMs: -1,
+      targetObservation: {
+        state: 'untracked',
+        target: 'alpha:0.0',
+      },
+    });
+  });
+
+  test('queue tick does not drop backend notifications when pane capture fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const execCalls = [];
+    serverModule.setServerTestHooks({
+      execFileAsync: async (cmd, args) => {
+        execCalls.push([cmd, ...args]);
+        if (args[0] === 'list-panes') return { stdout: 'alpha:0.0\n' };
+        if (args[0] === 'capture-pane' && args[2] === 'alpha:0.0') {
+          throw new Error('capture failed');
+        }
+        throw new Error(`unexpected exec: ${cmd} ${args.join(' ')}`);
+      },
+      backendFetch: async (url) => {
+        if (String(url).includes('/api/agents')) return { ok: true, json: async () => [] };
+        if (String(url).includes('/api/inbox/alpha/unread')) return { ok: false, json: async () => ({}) };
+        return { ok: true, text: async () => '', json: async () => ({ ok: true }) };
+      },
+    });
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'agent-chat-v2',
+      to: 'alpha:0.0',
+      payload: '[NOTIFICATION] unread message',
+      notifyMeta: {
+        kind: 'single_actionable',
+        requiresInboxCheck: true,
+        sourceMsgId: 'msg_capture_failed',
+        unreadCount: 1,
+      },
+    });
+
+    expect(queued.status).toBe(200);
+    await serverModule.sweepPaneSnapshots();
+
+    vi.setSystemTime(new Date('2026-01-01T00:06:00Z'));
+    await serverModule.processQueueTickForTest();
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toHaveLength(1);
+    expect(queue.body[0]).toMatchObject({
+      id: queued.body.id,
+      targetIdleMs: -1,
+      targetObservation: {
+        state: 'capture-failed',
+        target: 'alpha:0.0',
+      },
+    });
+    expect(execCalls.some((call) => call.includes('send-keys'))).toBe(false);
+  });
+
+  test('queue tick drops old backend notifications only after pane is confirmed missing', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const execCalls = [];
+    let sweepCount = 0;
+    serverModule.setServerTestHooks({
+      execFileAsync: async (cmd, args) => {
+        execCalls.push([cmd, ...args]);
+        if (args[0] === 'list-panes') {
+          sweepCount += 1;
+          return { stdout: sweepCount === 1 ? 'alpha:0.0\n' : '' };
+        }
+        if (args[0] === 'capture-pane' && args[2] === 'alpha:0.0') return { stdout: 'ready' };
+        throw new Error(`unexpected exec: ${cmd} ${args.join(' ')}`);
+      },
+      backendFetch: async (url) => {
+        if (String(url).includes('/api/agents')) return { ok: true, json: async () => [] };
+        if (String(url).includes('/api/inbox/alpha/unread')) return { ok: false, json: async () => ({}) };
+        return { ok: true, text: async () => '', json: async () => ({ ok: true }) };
+      },
+    });
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'agent-chat-v2',
+      to: 'alpha:0.0',
+      payload: '[NOTIFICATION] unread message',
+      notifyMeta: {
+        kind: 'single_actionable',
+        requiresInboxCheck: true,
+        sourceMsgId: 'msg_pane_missing',
+        unreadCount: 1,
+      },
+    });
+
+    expect(queued.status).toBe(200);
+    await serverModule.sweepPaneSnapshots();
+    await serverModule.sweepPaneSnapshots();
+
+    vi.setSystemTime(new Date('2026-01-01T00:06:00Z'));
+    await serverModule.processQueueTickForTest();
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toEqual([]);
+    expect(execCalls.some((call) => call.includes('send-keys'))).toBe(false);
+  });
+
   test('pane snapshot sweep tracks live panes and removes stale panes', async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });

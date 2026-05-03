@@ -571,10 +571,9 @@ app.post('/api/queue/:id/send', async (req, res) => {
 
 // Debug: expose idle state for all tracked panes
 app.get('/api/idle', (_req, res) => {
-  const now = Date.now();
   const result = {};
   for (const [target, snap] of paneSnapshots) {
-    result[target] = { idleMs: now - snap.changedAt, idleSec: Math.floor((now - snap.changedAt) / 1000), hash: snap.hash.slice(0, 8) };
+    result[target] = getPaneSnapshotDebug(target, snap);
   }
   res.json(result);
 });
@@ -2717,10 +2716,14 @@ function queueSnapshot() {
   for (const [, entries] of queue) items.push(...entries);
   items.sort((a, b) => a.queuedAt - b.queuedAt);
   // Attach live idle info per item
-  for (const item of items) {
-    item.targetIdleMs = getPaneIdleMs(item.to);
-  }
-  return items;
+  return items.map((item) => {
+    const observation = getTargetObservation(item.to);
+    return {
+      ...item,
+      targetIdleMs: observation.idleMs ?? -1,
+      targetObservation: observation,
+    };
+  });
 }
 
 function broadcastQueue() {
@@ -2729,13 +2732,29 @@ function broadcastQueue() {
   for (const c of sseClients) c.write(frame);
 }
 
-// Content-based idle detection: compare pane snapshots
-// window_activity is unreliable (status bar / cursor refreshes count as activity)
-const paneSnapshots = new Map(); // target -> { hash, changedAt }
+// Content-based idle detection: compare pane snapshots.
+// window_activity is unreliable (status bar / cursor refreshes count as activity).
+// Observation states are explicit so unknown/capture-failed targets are not
+// treated as confirmed missing panes.
+const paneSnapshots = new Map(); // target -> observation record
+let lastPaneListObservation = {
+  ok: false,
+  at: 0,
+  livePanes: new Set(),
+  reason: 'not-swept',
+};
 
 import { createHash } from 'crypto';
 
-async function snapshotPaneActivityAsync(target) {
+function formatPaneObservationError(e) {
+  const stderr = (e && e.stderr) ? String(e.stderr).trim() : '';
+  const stdout = (e && e.stdout) ? String(e.stdout).trim() : '';
+  if (stderr) return stderr;
+  if (stdout) return stdout;
+  return e?.message || 'unknown error';
+}
+
+async function capturePaneActivityAsync(target) {
   try {
     const { stdout } = await execFileAsyncImpl(
       'tmux', ['capture-pane', '-t', target, '-p'],
@@ -2746,9 +2765,18 @@ async function snapshotPaneActivityAsync(target) {
       hash: createHash('md5').update(text).digest('hex'),
       busy: detectPaneBusyState(text).busy,
     };
-  } catch {
-    return null;
+  } catch (e) {
+    return {
+      ok: false,
+      reason: formatPaneObservationError(e),
+    };
   }
+}
+
+async function snapshotPaneActivityAsync(target) {
+  const snapshot = await capturePaneActivityAsync(target);
+  if (snapshot?.ok === false) return null;
+  return snapshot;
 }
 
 async function snapshotPaneAsync(target) {
@@ -2757,28 +2785,196 @@ async function snapshotPaneAsync(target) {
 }
 
 async function updatePaneSnapshot(target) {
-  const snapshot = await snapshotPaneActivityAsync(target);
-  if (snapshot === null) return;
+  const snapshot = await capturePaneActivityAsync(target);
   const now = Date.now();
-  const prev = paneSnapshots.get(target);
-  if (!prev || prev.hash !== snapshot.hash) {
-    paneSnapshots.set(target, { hash: snapshot.hash, changedAt: now, busy: snapshot.busy });
-  } else {
-    prev.busy = snapshot.busy;
+  if (snapshot?.ok === false) {
+    paneSnapshots.set(target, {
+      state: 'capture-failed',
+      target,
+      hash: null,
+      changedAt: null,
+      observedAt: now,
+      busy: null,
+      reason: snapshot.reason || 'capture-failed',
+    });
+    return;
   }
+  const prev = paneSnapshots.get(target);
+  const changedAt = (!prev || prev.state !== 'observed' || prev.hash !== snapshot.hash)
+    ? now
+    : prev.changedAt;
+  paneSnapshots.set(target, {
+    state: 'observed',
+    target,
+    hash: snapshot.hash,
+    changedAt,
+    observedAt: now,
+    busy: snapshot.busy,
+    reason: null,
+  });
+}
+
+function findPaneObservation(target) {
+  let prev = paneSnapshots.get(target);
+  let observedTarget = target;
+  if (!prev) {
+    for (const [key, snap] of paneSnapshots) {
+      if (key.startsWith(target + ':')) {
+        prev = snap;
+        observedTarget = key;
+        break;
+      }
+    }
+  }
+  return { observation: prev || null, observedTarget };
+}
+
+function livePanesContainTarget(target) {
+  const livePanes = lastPaneListObservation.livePanes;
+  if (!livePanes || livePanes.size === 0) return false;
+  if (livePanes.has(target)) return true;
+  for (const key of livePanes) {
+    if (key.startsWith(target + ':')) return true;
+  }
+  return false;
+}
+
+function buildTargetObservation(target) {
+  const now = Date.now();
+  const { observation, observedTarget } = findPaneObservation(target);
+  if (observation?.state === 'observed') {
+    const idleMs = observation.busy ? 0 : Math.max(0, now - Number(observation.changedAt || now));
+    const active = observation.busy || idleMs < IDLE_THRESHOLD;
+    return {
+      target,
+      observedTarget,
+      state: active ? 'active' : 'idle',
+      idleMs,
+      idleSec: Math.floor(idleMs / 1000),
+      observedAt: Number(observation.observedAt || 0) || null,
+      busy: observation.busy === true,
+      reason: null,
+    };
+  }
+  if (observation?.state === 'capture-failed') {
+    return {
+      target,
+      observedTarget,
+      state: 'capture-failed',
+      idleMs: null,
+      idleSec: null,
+      observedAt: Number(observation.observedAt || 0) || null,
+      busy: null,
+      reason: observation.reason || 'capture-failed',
+    };
+  }
+  if (observation?.state === 'pane-missing') {
+    return {
+      target,
+      observedTarget,
+      state: 'pane-missing',
+      idleMs: null,
+      idleSec: null,
+      observedAt: Number(observation.observedAt || 0) || null,
+      busy: null,
+      reason: observation.reason || 'pane-missing',
+    };
+  }
+  if (lastPaneListObservation.ok) {
+    if (livePanesContainTarget(target)) {
+      return {
+        target,
+        observedTarget: target,
+        state: 'untracked',
+        idleMs: null,
+        idleSec: null,
+        observedAt: lastPaneListObservation.at || null,
+        busy: null,
+        reason: 'not-captured',
+      };
+    }
+    return {
+      target,
+      observedTarget: target,
+      state: 'pane-missing',
+      idleMs: null,
+      idleSec: null,
+      observedAt: lastPaneListObservation.at || null,
+      busy: null,
+      reason: 'list-panes-missing',
+    };
+  }
+  if (lastPaneListObservation.at > 0) {
+    return {
+      target,
+      observedTarget: target,
+      state: 'list-failed',
+      idleMs: null,
+      idleSec: null,
+      observedAt: lastPaneListObservation.at,
+      busy: null,
+      reason: lastPaneListObservation.reason || 'list-panes-failed',
+    };
+  }
+  return {
+    target,
+    observedTarget: target,
+    state: 'untracked',
+    idleMs: null,
+    idleSec: null,
+    observedAt: null,
+    busy: null,
+    reason: 'not-swept',
+  };
+}
+
+function getTargetObservation(target) {
+  if (typeof target !== 'string' || !target) {
+    return {
+      target,
+      observedTarget: target,
+      state: 'untracked',
+      idleMs: null,
+      idleSec: null,
+      observedAt: null,
+      busy: null,
+      reason: 'invalid-target',
+    };
+  }
+  return buildTargetObservation(target);
 }
 
 function getPaneIdleMs(target) {
-  // Exact match first, then prefix match (e.g. "umiki-web" → "umiki-web:0.0")
-  let prev = paneSnapshots.get(target);
-  if (!prev) {
-    for (const [key, snap] of paneSnapshots) {
-      if (key.startsWith(target + ':')) { prev = snap; break; }
-    }
+  const observation = getTargetObservation(target);
+  if (observation.state === 'active' || observation.state === 'idle') {
+    return Number(observation.idleMs) || 0;
   }
-  if (!prev) return -1; // not tracked
-  if (prev.busy) return 0;
-  return Date.now() - prev.changedAt;
+  return -1;
+}
+
+function markPaneMissing(target, observedAt) {
+  paneSnapshots.set(target, {
+    state: 'pane-missing',
+    target,
+    hash: null,
+    changedAt: null,
+    observedAt,
+    busy: null,
+    reason: 'list-panes-missing',
+  });
+}
+
+function getPaneSnapshotDebug(target, snap) {
+  const observation = getTargetObservation(target);
+  const row = {
+    state: observation.state,
+    idleMs: observation.idleMs ?? -1,
+    idleSec: observation.idleSec ?? -1,
+    observedAt: observation.observedAt,
+    reason: observation.reason,
+  };
+  if (snap?.hash) row.hash = snap.hash.slice(0, 8);
+  return row;
 }
 
 // Continuously track ALL panes every 2s (independent of queue)
@@ -2822,18 +3018,30 @@ async function sweepPaneSnapshots() {
     );
     const raw = stdout.trim();
     const livePanes = new Set(raw.split('\n').filter(Boolean));
+    const sweepAt = Date.now();
+    lastPaneListObservation = {
+      ok: true,
+      at: sweepAt,
+      livePanes,
+      reason: null,
+    };
     // Skip panes belonging to offline agents
     const activePanes = [...livePanes].filter(pane => {
       const sessionName = pane.split(':')[0];
       return !offlineAgentSessions.has(sessionName);
     });
     await Promise.all(activePanes.map((pane) => updatePaneSnapshot(pane)));
-    // Clean up stale snapshots for panes that no longer exist
+    // Mark stale snapshots as confirmed missing only after list-panes succeeds.
     for (const key of paneSnapshots.keys()) {
-      if (!livePanes.has(key)) paneSnapshots.delete(key);
+      if (!livePanes.has(key)) markPaneMissing(key, sweepAt);
     }
-  } catch {
-    // Ignore transient tmux failures.
+  } catch (e) {
+    lastPaneListObservation = {
+      ok: false,
+      at: Date.now(),
+      livePanes: lastPaneListObservation.livePanes || new Set(),
+      reason: formatPaneObservationError(e),
+    };
   } finally {
     paneSnapshotSweepRunning = false;
   }
@@ -3009,7 +3217,7 @@ async function deliverMessage(entry) {
 const delivering = new Set();
 
 // Poll loop
-setInterval(async () => {
+async function processQueueTick() {
   if (queueTickRunning) return;
   queueTickRunning = true;
   try {
@@ -3046,11 +3254,13 @@ setInterval(async () => {
         }
       }
 
-      const idleMs = getPaneIdleMs(target);
+      const targetObservation = getTargetObservation(target);
+      const idleMs = targetObservation.idleMs ?? -1;
       const priority = normalizeQueuePriority(entries[0]?.priority || entries[0]?.notifyMeta?.priority);
       const bypassIdleGate = priority === 'urgent';
-      if (idleMs < 0) {
-        // Pane not found — only trim stale backend notifications, keep normal payloads queued.
+      if (targetObservation.state !== 'active' && targetObservation.state !== 'idle') {
+        // Only confirmed pane-missing can trim stale backend notifications.
+        if (targetObservation.state !== 'pane-missing') continue;
         const oldest = entries[0];
         if (oldest && Date.now() - oldest.queuedAt > 5 * 60 * 1000) {
           const dropped = [];
@@ -3110,6 +3320,10 @@ setInterval(async () => {
   } finally {
     queueTickRunning = false;
   }
+}
+
+setInterval(() => {
+  void processQueueTick();
 }, POLL_INTERVAL);
 
 // ── Delayed Reminders ────────────────────────────────────────────────
@@ -3373,6 +3587,8 @@ export {
   app,
   deliverMessage,
   getPaneIdleMs,
+  getTargetObservation,
+  processQueueTick as processQueueTickForTest,
   resetServerTestHooks,
   setServerTestHooks,
   snapshotPaneAsync,
@@ -7344,9 +7560,24 @@ document.getElementById('new-agent-modal').addEventListener('click', function(e)
     const html = queueItems.map(item => {
       const waitStr = computeQueueWaitStr(item.queuedAt);
       const payload = (item.payload || '').slice(0, 80);
-      const idleMs = item.targetIdleMs || 0;
+      const observation = item.targetObservation || {};
+      const observationState = typeof observation.state === 'string' ? observation.state : '';
+      const idleRaw = Number(item.targetIdleMs);
+      const idleMs = Number.isFinite(idleRaw) ? idleRaw : -1;
       let idleStr, idleClass;
-      if (idleMs < 0) { idleStr = 'pane not found'; idleClass = 'qi-idle-warn'; }
+      if (observationState === 'pane-missing' || (!observationState && idleMs < 0)) {
+        idleStr = 'pane not found';
+        idleClass = 'qi-idle-warn';
+      } else if (observationState === 'capture-failed') {
+        idleStr = 'capture failed';
+        idleClass = 'qi-idle-warn';
+      } else if (observationState === 'list-failed') {
+        idleStr = 'observation unavailable';
+        idleClass = 'qi-idle-warn';
+      } else if (observationState === 'untracked') {
+        idleStr = 'not observed yet';
+        idleClass = 'qi-idle-warn';
+      }
       else if (idleMs >= IDLE_THRESHOLD_MS) {
         const s = Math.floor(idleMs / 1000);
         idleStr = 'idle ' + (s < 60 ? s + 's' : Math.floor(s/60) + 'm' + (s%60) + 's') + ' (delivering soon)';
