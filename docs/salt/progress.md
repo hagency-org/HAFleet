@@ -59,3 +59,10 @@
 - Aligned README stable deploy behavior with `OPERATIONS.md` and the actual reset/clean watcher. Added a runtime-parity static test so trusted operator docs no longer drift back to the old `git pull --ff-only` description.
 - Added CD-B0 remote install/profile decision-support docs and static tests. `tests/remote-install-profile.test.js` now locks current facts for full-clone helper profile, remote dependency lock policy, standalone package version limits, and remote autodeploy install-scope gaps without changing installer or autodeploy behavior.
 - Implemented CD-A for the stable/live watcher after operator resumed CD work. `scripts/agentchat-stable-autodeploy.sh` now has a one-cycle test harness, injectable command paths, an opt-in `AGENTCHAT_RELEASE_GATE=worktree` staging preflight before live reset, and persistent deploy state for dependency install retry after reset. Added `tests/stable-autodeploy.test.js` fake-repo coverage and kept remote/macOS autodeploy behavior unchanged.
+
+## 2026-05-03
+
+- Expanded local systems skills with deeper internet-sourced references for reliability/operability, delivery/idempotency, CI/CD release gates, CLI/operator contracts, architecture maintainability, and systems refactoring. The skill assets live under `~/.codex/skills/` and are not committed to this repo.
+- Used four read-only subagents to scan agent-chat with the expanded skill lenses: delivery/replay/direct injection, CLI/CD, reliability/operability, and architecture/maintainability.
+- Added `17-systems-skill-scan.md` with consolidated findings and proposed SYS-A through SYS-D repair batches.
+- Updated the repair table with new direct-injection idempotency, health, alert, delivery-event, CLI-contract, dashboard-truth, supervisor-staleness, and architecture-fitness rows. Existing CD decision rows R-032/R-033/R-037/R-038/R-047/R-048/R-049/R-050 were reconfirmed by the scan.
