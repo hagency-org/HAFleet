@@ -2779,6 +2779,13 @@ loadAgentTokens();
 const deletedAgentTombstones = loadJsonSync('deleted_agents.json', {});
 const groups = loadJsonSync('groups.json', {});
 const messages = loadJsonSync('messages.json', []);
+let unreadMessageIndexVersion = 0;
+const unreadMessageIndex = {
+  version: -1,
+  directByAgent: new Map(),
+  groupByName: new Map(),
+  groupMentionsByAgent: new Map(),
+};
 const cursors = loadJsonSync('cursors.json', {});
 const servers = loadJsonSync('servers.json', {});
 const agentRuntime = loadJsonSync('agent_runtime.json', {});
@@ -3231,6 +3238,49 @@ function writeThruAgentHome(agentName) {
 }
 
 function saveGroups() { saveJson('groups.json', groups); }
+
+function invalidateUnreadMessageIndex() {
+  unreadMessageIndexVersion += 1;
+  unreadMessageIndex.version = -1;
+}
+
+function addIndexedMessage(map, key, msg) {
+  if (typeof key !== 'string' || !key) return;
+  let rows = map.get(key);
+  if (!rows) {
+    rows = [];
+    map.set(key, rows);
+  }
+  rows.push(msg);
+}
+
+function getUnreadMessageIndex() {
+  if (unreadMessageIndex.version === unreadMessageIndexVersion) return unreadMessageIndex;
+  const directByAgent = new Map();
+  const groupByName = new Map();
+  const groupMentionsByAgent = new Map();
+  for (const msg of messages) {
+    if (!msg || typeof msg !== 'object') continue;
+    addIndexedMessage(directByAgent, msg.to, msg);
+    addIndexedMessage(groupByName, msg.group, msg);
+    if (!msg.group || !Array.isArray(msg.mentions)) continue;
+    const seenMentions = new Set();
+    for (const mention of msg.mentions) {
+      if (typeof mention !== 'string' || !mention || seenMentions.has(mention)) continue;
+      seenMentions.add(mention);
+      addIndexedMessage(groupMentionsByAgent, mention, msg);
+    }
+  }
+  for (const rows of [...directByAgent.values(), ...groupByName.values(), ...groupMentionsByAgent.values()]) {
+    rows.sort(compareMsgOrder);
+  }
+  unreadMessageIndex.directByAgent = directByAgent;
+  unreadMessageIndex.groupByName = groupByName;
+  unreadMessageIndex.groupMentionsByAgent = groupMentionsByAgent;
+  unreadMessageIndex.version = unreadMessageIndexVersion;
+  return unreadMessageIndex;
+}
+
 function collectUnreadRetainedMessageIds() {
   const keep = new Set();
   for (const [agentName, agent] of Object.entries(agents)) {
@@ -3269,7 +3319,9 @@ function pruneMessagesInMemory() {
 }
 
 function saveMessages() {
+  invalidateUnreadMessageIndex();
   pruneMessagesInMemory();
+  invalidateUnreadMessageIndex();
   saveJson('messages.json', messages);
 }
 function saveCursors() { saveJson('cursors.json', cursors); }
@@ -3830,6 +3882,24 @@ function isAfterCursor(msg, ts, id) {
   return compareMsgOrder(msg, { ts: cursorTs, id: cursorId }) > 0;
 }
 
+function firstMessageAfterCursorIndex(rows, ts, id) {
+  const list = Array.isArray(rows) ? rows : [];
+  const cursorTs = Number(ts) || 0;
+  const cursorId = typeof id === 'string' ? id : null;
+  let low = 0;
+  let high = list.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    const msg = list[mid];
+    const after = cursorId
+      ? compareMsgOrder(msg, { ts: cursorTs, id: cursorId }) > 0
+      : (Number(msg?.ts) || 0) > cursorTs;
+    if (after) high = mid;
+    else low = mid + 1;
+  }
+  return low;
+}
+
 function advanceInboxCursor(cursor, unread) {
   if (!Array.isArray(unread) || unread.length === 0) return false;
   const last = unread[unread.length - 1];
@@ -3880,23 +3950,21 @@ function getUnreadInboxMessages(agentName, options = {}) {
   const kinds = Array.isArray(options?.kinds) && options.kinds.length > 0
     ? new Set(options.kinds)
     : null;
+  const index = getUnreadMessageIndex();
   const unreadById = new Map();
 
-  for (const m of messages) {
-    if (m.to !== agentName) continue;
-    if (!isAfterCursor(m, inboxTs, inboxId)) continue;
+  const directRows = index.directByAgent.get(agentName) || [];
+  for (const m of directRows.slice(firstMessageAfterCursorIndex(directRows, inboxTs, inboxId))) {
     if (isSuppressedForAgent(m, agentName)) continue;
     if (!messageMatchesKinds(m, kinds)) continue;
     unreadById.set(m.id, m);
   }
-  for (const m of messages) {
-    if (!m.group) continue;
-    if (!isAfterCursor(m, inboxTs, inboxId)) continue;
+  const mentionRows = index.groupMentionsByAgent.get(agentName) || [];
+  for (const m of mentionRows.slice(firstMessageAfterCursorIndex(mentionRows, inboxTs, inboxId))) {
     if (!isGroupMember(m.group, agentName)) continue;
     if (!messageMatchesKinds(m, kinds)) continue;
-    if (Array.isArray(m.mentions) && m.mentions.includes(agentName) && !isSuppressedForAgent(m, agentName)) {
-      unreadById.set(m.id, m);
-    }
+    if (isSuppressedForAgent(m, agentName)) continue;
+    unreadById.set(m.id, m);
   }
 
   const unread = [...unreadById.values()].sort(compareMsgOrder);
@@ -9467,23 +9535,15 @@ app.get('/api/inbox/:agent', requireAgentToken(_tokenFromAgent), (req, res) => {
   const kinds = kindsList.length > 0 ? new Set(kindsList) : null;
 
   const cursor = ensureCursor(agentName);
-  const inboxTs = cursor.inbox || 0;
-  const inboxId = cursor.inboxId || null;
-
-  const dmRaw = messages
-    .filter(m => m.to === agentName && isAfterCursor(m, inboxTs, inboxId) && !isSuppressedForAgent(m, agentName) && messageMatchesKinds(m, kinds))
-    .sort(compareMsgOrder);
+  const { unread } = getUnreadInboxMessages(agentName, { kinds: kindsList });
+  const dmRaw = unread.filter(m => m.to === agentName);
   const dm = dmRaw.map(summarizeMsg);
 
-  const groupRaw = messages
-    .filter(m => m.group && isGroupMember(m.group, agentName))
-    .filter(m => m.mentions.includes(agentName) && isAfterCursor(m, inboxTs, inboxId) && !isSuppressedForAgent(m, agentName) && messageMatchesKinds(m, kinds))
-    .sort(compareMsgOrder);
+  const groupRaw = unread.filter(m => m.group && m.to !== agentName);
   const group = groupRaw.map(summarizeMsg);
 
   // Filtered reads are preview-only: a global inbox cursor cannot safely advance over one kind
   // without implicitly skipping unread messages of other kinds.
-  const unread = [...dmRaw, ...groupRaw].sort(compareMsgOrder);
   const runtime = ensureAgentRuntimeRecord(agentName);
   const pendingGate = getPendingInboxGate(runtime);
   const consumedPendingSource = Boolean(
@@ -9561,17 +9621,17 @@ app.get('/api/groups/:name/messages', (req, res) => {
   const groupTs = groupCursor.ts;
   const groupId = groupCursor.id;
 
-  const groupMsgs = messages
-    .filter(m => m.group === groupName)
+  const groupMsgs = (getUnreadMessageIndex().groupByName.get(groupName) || [])
     .filter(m => !isSuppressedForAgent(m, resolvedAgentName))
     .sort(compareMsgOrder);
-  const unreadRaw = groupMsgs.filter(m => isAfterCursor(m, groupTs, groupId));
+  const unreadStart = firstMessageAfterCursorIndex(groupMsgs, groupTs, groupId);
+  const unreadRaw = groupMsgs.slice(unreadStart);
   const unreadTotal = unreadRaw.length;
   const deliveredUnreadRaw = unreadLimit ? unreadRaw.slice(-unreadLimit) : unreadRaw;
   const unread = deliveredUnreadRaw.map(summarizeMsg);
   const unreadReturned = deliveredUnreadRaw.length;
   const unreadOmitted = Math.max(0, unreadTotal - unreadReturned);
-  const read = groupMsgs.filter(m => !isAfterCursor(m, groupTs, groupId)).slice(-limit).map(summarizeMsg);
+  const read = groupMsgs.slice(0, unreadStart).slice(-limit).map(summarizeMsg);
 
   // Advance group cursor by mode:
   // - all: consume all unread (legacy behavior)
@@ -9630,18 +9690,21 @@ app.get('/api/agents/:name/groups', (req, res) => {
   const cursor = ensureCursor(agentName);
   const inboxTs = cursor.inbox || 0;
   const inboxId = cursor.inboxId || null;
+  const messageIndex = getUnreadMessageIndex();
 
   const result = Object.values(groups)
     .filter(g => isGroupMember(g.name, agentName))
     .map(g => {
-      const groupMsgs = messages
-        .filter(m => m.group === g.name)
+      const groupMsgs = (messageIndex.groupByName.get(g.name) || [])
         .filter(m => !isSuppressedForAgent(m, agentName))
         .sort(compareMsgOrder);
       const { ts: groupTs, id: groupId } = getGroupCursor(cursor, g.name);
 
-      const unread_messages = groupMsgs.filter(m => isAfterCursor(m, groupTs, groupId)).length;
-      const unread_mentions = groupMsgs.filter(m => m.mentions.includes(agentName) && isAfterCursor(m, inboxTs, inboxId)).length;
+      const unread_messages = groupMsgs.length - firstMessageAfterCursorIndex(groupMsgs, groupTs, groupId);
+      const mentionMsgs = (messageIndex.groupMentionsByAgent.get(agentName) || [])
+        .filter(m => m.group === g.name && !isSuppressedForAgent(m, agentName))
+        .sort(compareMsgOrder);
+      const unread_mentions = mentionMsgs.length - firstMessageAfterCursorIndex(mentionMsgs, inboxTs, inboxId);
 
       return { name: g.name, members: g.members, unread_mentions, unread_messages };
     });

@@ -200,6 +200,131 @@ describe('backend message API', () => {
     }
   });
 
+  test('unread inbox lookups use fresh indexed direct and group mention rows', async () => {
+    const indexedContext = await createBackendTestContext('agent-chat-messages-unread-index-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+        },
+        beta: {
+          name: 'beta',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+        },
+      },
+      groups: {
+        dev: { name: 'dev', members: ['alpha', 'beta'], createdAt: 1000 },
+      },
+      messages: [
+        {
+          id: 'msg_direct_seed',
+          ts: 1001,
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          summary: 'seed direct',
+          full: 'seed direct',
+          mentions: [],
+        },
+        {
+          id: 'msg_group_seed',
+          ts: 1002,
+          from: 'beta',
+          group: 'dev',
+          type: 'inform',
+          summary: 'seed group',
+          full: 'seed group',
+          mentions: ['alpha'],
+        },
+      ],
+      agentTokens: { alpha: ALPHA_TOKEN, beta: BETA_TOKEN },
+    });
+
+    try {
+      const firstSnapshot = await request(indexedContext.app)
+        .get('/api/inbox/alpha/unread')
+        .set('X-Agent-Token', ALPHA_TOKEN);
+      expect(firstSnapshot.status).toBe(200);
+      expect(firstSnapshot.body.unread_ids).toEqual(['msg_direct_seed', 'msg_group_seed']);
+
+      const suppressResponse = await request(indexedContext.app)
+        .post('/api/messages/msg_direct_seed/suppress')
+        .set('X-Agent-Token', ALPHA_TOKEN)
+        .send({ agent: 'alpha', reason: 'index-regression' });
+      expect(suppressResponse.status).toBe(200);
+
+      const createResponse = await request(indexedContext.app)
+        .post('/api/messages')
+        .send({
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          summary: 'fresh direct',
+          full: 'fresh direct',
+        });
+      expect(createResponse.status).toBe(200);
+
+      const secondSnapshot = await request(indexedContext.app)
+        .get('/api/inbox/alpha/unread-list?limit=0')
+        .set('X-Agent-Token', ALPHA_TOKEN);
+      expect(secondSnapshot.status).toBe(200);
+      expect(secondSnapshot.body.messages.map((row) => row.id)).toEqual([
+        'msg_group_seed',
+        createResponse.body.id,
+      ]);
+    } finally {
+      indexedContext.cleanup();
+    }
+  });
+
+  test('unread inbox indexing preserves equal timestamp cursor ordering', async () => {
+    const indexedContext = await createBackendTestContext('agent-chat-messages-unread-order-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+        },
+      },
+      groups: {},
+      messages: ['msg_0001', 'msg_0002', 'msg_0003'].map((id) => ({
+        id,
+        ts: 2000,
+        from: 'system',
+        to: 'alpha',
+        type: 'inform',
+        summary: id,
+        full: id,
+        mentions: [],
+      })),
+      cursors: {
+        alpha: {
+          inbox: 2000,
+          inboxId: 'msg_0001',
+          groups: {},
+          groupIds: {},
+        },
+      },
+      agentTokens: { alpha: ALPHA_TOKEN },
+    });
+
+    try {
+      const response = await request(indexedContext.app)
+        .get('/api/inbox/alpha/unread-list?limit=0')
+        .set('X-Agent-Token', ALPHA_TOKEN);
+
+      expect(response.status).toBe(200);
+      expect(response.body.messages.map((row) => row.id)).toEqual(['msg_0002', 'msg_0003']);
+    } finally {
+      indexedContext.cleanup();
+    }
+  });
+
   test('offline catchup messages append source delivery events', async () => {
     const catchupContext = await createBackendTestContext('agent-chat-messages-catchup-test-', {
       agents: {
