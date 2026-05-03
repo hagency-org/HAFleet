@@ -130,6 +130,41 @@ describe('push relay dispatch', () => {
     expect(delivered[0].payload).toContain('agent-send beta:0.0');
   });
 
+  test('deduplicates concurrent duplicate direct deliveries', async () => {
+    const delivered = [];
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [
+        { name: 'alpha', server: null, tmux: 'alpha:0.0' },
+        { name: 'beta', server: null, tmux: 'beta:0.0' },
+      ],
+      mcpSessions: [],
+    });
+    setPushToTmuxForTest((target, payload) => {
+      delivered.push({ target, payload });
+      return true;
+    });
+
+    const raw = JSON.stringify({
+      id: 'msg_concurrent_dup',
+      from: 'beta',
+      to: 'alpha',
+      type: 'request',
+      priority: 'urgent',
+      summary: 'Only inject once',
+      mentions: [],
+    });
+
+    await Promise.all([
+      handleMessage(raw),
+      handleMessage(raw),
+    ]);
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].target).toBe('alpha:0.0');
+    expect(delivered[0].payload).toContain('Only inject once');
+  });
+
   test('skips delivery when the local pane is missing', async () => {
     const delivered = [];
     seedRelayState({

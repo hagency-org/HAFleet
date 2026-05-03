@@ -307,11 +307,46 @@ function isStaleNotificationBySnapshot(entry, snapshot) {
   if (!isBackendNotificationEntry(entry) || !snapshot) return false;
   const unreadTotal = Number(snapshot?.unread_total || 0);
   if (unreadTotal === 0) return true;
+  const sourceMsgId = typeof entry?.notifyMeta?.sourceMsgId === 'string'
+    ? entry.notifyMeta.sourceMsgId.trim()
+    : '';
+  if (sourceMsgId) {
+    const unreadIds = new Set();
+    const addId = (value) => {
+      const id = typeof value === 'string' ? value.trim() : '';
+      if (id) unreadIds.add(id);
+    };
+    const addMsg = (msg) => {
+      if (msg && typeof msg === 'object') addId(msg.id);
+    };
+    if (Array.isArray(snapshot.unread_ids)) {
+      for (const id of snapshot.unread_ids) addId(id);
+    }
+    if (Array.isArray(snapshot.messages)) {
+      for (const msg of snapshot.messages) addMsg(msg);
+    }
+    if (Array.isArray(snapshot.unread)) {
+      for (const msg of snapshot.unread) addMsg(msg);
+    }
+    if (unreadIds.size > 0) return !unreadIds.has(sourceMsgId);
+    if (unreadTotal === 1 && snapshot.latest && typeof snapshot.latest === 'object') {
+      const latestId = typeof snapshot.latest.id === 'string' ? snapshot.latest.id.trim() : '';
+      if (latestId) return latestId !== sourceMsgId;
+    }
+  }
   const recordedUnread = Number(entry?.notifyMeta?.unreadCount || 0);
   // If unread has dropped since this notification was queued, the queued count is stale.
   // Drop and wait for a fresh notification based on current unread state.
   if (recordedUnread > 0 && unreadTotal < recordedUnread) return true;
   return false;
+}
+
+function deliveryResultOk(result) {
+  return result === true || result?.ok === true;
+}
+
+function deliveryResultPartial(result) {
+  return result?.ok === false && result.partial === true;
 }
 
 async function isStaleNotificationEntry(entry) {
@@ -509,8 +544,18 @@ app.post('/api/queue/:id/send', async (req, res) => {
         archiveDroppedQueueEntries([entry], 'stale-notification-manual-send', target);
         return res.json({ ok: true, dropped: id, reason: 'stale-notification' });
       }
-      const ok = await deliverMessage(entry);
-      if (!ok) {
+      const result = await deliverMessage(entry);
+      if (!deliveryResultOk(result)) {
+        if (deliveryResultPartial(result)) {
+          archiveDroppedQueueEntries([entry], 'partial-delivery-manual-send', target);
+          return res.status(409).json({
+            ok: false,
+            delivered: id,
+            requeued: false,
+            reason: 'partial-delivery',
+            stage: result.stage || 'unknown',
+          });
+        }
         // Keep behavior consistent with poll loop: failed delivery is retriable, not lost.
         if (!queue.has(target)) queue.set(target, []);
         queue.get(target).unshift(entry);
@@ -2936,14 +2981,14 @@ async function deliverMessage(entry) {
       await execFileAsyncImpl('tmux', ['send-keys', '-l', '-t', entry.to, finalPayload], { timeout: 5000, stdio: 'pipe' });
     } catch (e) {
       console.error(`Failed to deliver to ${entry.to} (payload step): ${formatExecError(e)}`);
-      return false;
+      return { ok: false, stage: 'payload', partial: false };
     }
     await new Promise((resolve) => setTimeout(resolve, 150));
     try {
       await execFileAsyncImpl('tmux', ['send-keys', '-t', entry.to, 'C-m'], { timeout: 5000, stdio: 'pipe' });
     } catch (e) {
       console.error(`Failed to deliver to ${entry.to} (enter step): ${formatExecError(e)}`);
-      return false;
+      return { ok: false, stage: 'enter', partial: true };
     }
 
     // Log to messages.jsonl
@@ -2953,10 +2998,10 @@ async function deliverMessage(entry) {
     const logEntry = JSON.stringify(logData);
     appendFile(LOG_FILE, logEntry + '\n').catch(() => {});
     void notifyPushDelivered(entry, deliveredAt);
-    return true;
+    return { ok: true, deliveredAt };
   } catch (e) {
     console.error(`Failed to deliver to ${entry.to} (unexpected):`, e?.message || e);
-    return false;
+    return { ok: false, stage: 'unexpected', partial: false };
   }
 }
 
@@ -3044,8 +3089,13 @@ setInterval(async () => {
         continue;
       }
 
-      const ok = await deliverMessage(entry);
-      if (!ok && entry) {
+      const result = await deliverMessage(entry);
+      if (!deliveryResultOk(result) && entry) {
+        if (deliveryResultPartial(result)) {
+          archiveDroppedQueueEntries([entry], `partial-delivery-${result.stage || 'unknown'}`, target);
+          setTimeout(() => delivering.delete(target), IDLE_THRESHOLD + 2000);
+          continue;
+        }
         // Put it back at front
         if (!queue.has(target)) queue.set(target, []);
         queue.get(target).unshift(entry);

@@ -46,14 +46,14 @@ describe('server delivery path', () => {
       backendFetch: async () => ({ ok: true, text: async () => '' }),
     });
 
-    const ok = await serverModule.deliverMessage({
+    const result = await serverModule.deliverMessage({
       id: 1,
       from: 'system',
       to: 'alpha:0.0',
       payload: 'hello world',
     });
 
-    expect(ok).toBe(true);
+    expect(result.ok).toBe(true);
     expect(execCalls).toEqual([
       ['tmux', 'send-keys', '-l', '-t', 'alpha:0.0', 'hello world'],
       ['tmux', 'send-keys', '-t', 'alpha:0.0', 'C-m'],
@@ -64,6 +64,109 @@ describe('server delivery path', () => {
     const rows = readFileSync(logPath, 'utf-8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ from: 'system', to: 'alpha:0.0', payload: 'hello world' });
+  });
+
+  test('manual send drops backend notifications whose source message is no longer unread', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const execCalls = [];
+    serverModule.setServerTestHooks({
+      execFileAsync: async (cmd, args) => {
+        execCalls.push([cmd, ...args]);
+        return { stdout: '' };
+      },
+      backendFetch: async (url) => {
+        if (String(url).includes('/api/inbox/alpha/unread')) {
+          return {
+            ok: true,
+            json: async () => ({
+              agent: 'alpha',
+              unread_total: 1,
+              latest: { id: 'msg_0002' },
+              messages: [{ id: 'msg_0002' }],
+            }),
+          };
+        }
+        return { ok: true, text: async () => '', json: async () => ({ ok: true }) };
+      },
+    });
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'agent-chat-v2',
+      to: 'alpha:0.0',
+      payload: '[NOTIFICATION] unread message',
+      notifyMeta: {
+        kind: 'single_actionable',
+        requiresInboxCheck: true,
+        sourceMsgId: 'msg_0001',
+        unreadCount: 1,
+      },
+    });
+
+    const sent = await request(serverModule.app).post(`/api/queue/${queued.body.id}/send`);
+
+    expect(sent.status).toBe(200);
+    expect(sent.body).toMatchObject({
+      ok: true,
+      dropped: queued.body.id,
+      reason: 'stale-notification',
+    });
+    expect(execCalls).toEqual([]);
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toEqual([]);
+  });
+
+  test('manual send does not re-paste payload after tmux enter fails', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const payloadCalls = [];
+    let enterAttempts = 0;
+    serverModule.setServerTestHooks({
+      execFileAsync: async (_cmd, args) => {
+        if (args[0] === 'send-keys' && args[1] === '-l') {
+          payloadCalls.push(args[args.length - 1]);
+          return { stdout: '' };
+        }
+        if (args[0] === 'send-keys' && args[args.length - 1] === 'C-m') {
+          enterAttempts += 1;
+          const error = new Error('enter failed');
+          error.stderr = 'tmux enter failed';
+          throw error;
+        }
+        throw new Error(`unexpected tmux args ${args.join(' ')}`);
+      },
+      backendFetch: async () => ({ ok: true, text: async () => '', json: async () => ({ ok: true }) }),
+    });
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'operator',
+      to: 'alpha:0.0',
+      payload: 'do not paste twice',
+    });
+
+    const first = await request(serverModule.app).post(`/api/queue/${queued.body.id}/send`);
+    expect(first.status).toBe(409);
+    expect(first.body).toMatchObject({
+      ok: false,
+      delivered: queued.body.id,
+      requeued: false,
+      reason: 'partial-delivery',
+      stage: 'enter',
+    });
+    expect(payloadCalls).toEqual(['do not paste twice']);
+    expect(enterAttempts).toBe(1);
+
+    const second = await request(serverModule.app).post(`/api/queue/${queued.body.id}/send`);
+    expect(second.status).toBe(404);
+    expect(payloadCalls).toEqual(['do not paste twice']);
+    expect(enterAttempts).toBe(1);
   });
 
   test('pane snapshot sweep tracks live panes and removes stale panes', async () => {

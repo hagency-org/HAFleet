@@ -182,6 +182,78 @@ describe('backend runtime API', () => {
     expect(agent.body.activeNow).toBeNull();
   });
 
+  test('push-delivered ignores stale queue acknowledgements', async () => {
+    context = await createBackendTestContext('agent-chat-runtime-push-delivered-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      agentRuntime: {
+        alpha: {
+          lastPushNotifyAt: 2000,
+          lastPushQueuedAt: 1900,
+          lastPushQueueEntryId: 9,
+          lastPushDeliveredAt: 2000,
+          lastPushDeliveryDelayMs: 100,
+          lastActionablePushAt: 2000,
+          lastPushKind: 'single_actionable',
+          lastPushNeedsInboxCheck: true,
+          lastPushUnreadCount: 1,
+          lastPushSourceMsgId: 'msg_new',
+          inboxGate: {
+            requiresInboxCheck: true,
+            sourceMsgId: 'msg_new',
+            raisedAt: 2000,
+            reason: 'actionable_notification',
+          },
+          lastSeen: 2000,
+          updatedAt: 2000,
+        },
+      },
+      groups: {},
+    });
+
+    const response = await request(context.app)
+      .post('/api/runtime/push-delivered')
+      .send({
+        agent: 'alpha',
+        deliveredAt: 1000,
+        queuedAt: 900,
+        queueEntryId: 8,
+        notifyMeta: {
+          kind: 'single_actionable',
+          requiresInboxCheck: true,
+          sourceMsgId: 'msg_old',
+          unreadCount: 1,
+        },
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      agent: 'alpha',
+      ignored: 'stale-push-delivered',
+    });
+
+    const runtime = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtime.alpha.lastPushQueueEntryId).toBe(9);
+    expect(runtime.alpha.lastPushDeliveredAt).toBe(2000);
+    expect(runtime.alpha.lastPushSourceMsgId).toBe('msg_new');
+    expect(runtime.alpha.lastActionablePushAt).toBe(2000);
+    expect(runtime.alpha.inboxGate).toMatchObject({
+      requiresInboxCheck: true,
+      sourceMsgId: 'msg_new',
+      raisedAt: 2000,
+      reason: 'actionable_notification',
+    });
+  });
+
   test('blocked notifications use tiered debounce and never notify transient blockers', async () => {
     context = await createBackendTestContext('agent-chat-runtime-test-', {
       agents: {

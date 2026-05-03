@@ -3954,6 +3954,7 @@ function buildUnreadInboxSnapshot(agentName, options = {}) {
     unread_total: unread.length,
     unread_dm: unreadDm,
     unread_group_mentions: unreadGroupMentions,
+    unread_ids: unread.map((m) => m?.id).filter(Boolean),
     latest: unread.length > 0 ? summarizeMsg(unread[unread.length - 1]) : null,
   };
 }
@@ -4202,15 +4203,35 @@ function markAgentPushNotified(agentName, details = {}) {
 
 function markAgentPushDelivered(agentName, details = {}) {
   const runtime = ensureAgentRuntimeRecord(agentName);
-  if (!runtime) return;
+  if (!runtime) return { ok: false, ignored: 'agent-not-found' };
   const now = Date.now();
   const deliveredAt = Number(details.deliveredAt) || now;
   const queuedAt = Number(details.queuedAt) || runtime.lastPushQueuedAt || deliveredAt;
+  const queueEntryId = Number(details.queueEntryId) || 0;
   const meta = normalizePushMeta(details);
+  const currentQueueEntryId = Number(runtime.lastPushQueueEntryId) || 0;
+  const currentDeliveredAt = Number(runtime.lastPushDeliveredAt) || 0;
+  const currentSourceMsgId = typeof runtime.lastPushSourceMsgId === 'string'
+    ? runtime.lastPushSourceMsgId.trim()
+    : '';
+  const incomingSourceMsgId = typeof meta.sourceMsgId === 'string'
+    ? meta.sourceMsgId.trim()
+    : '';
+  const staleQueueEntry = queueEntryId > 0
+    && currentQueueEntryId > 0
+    && queueEntryId !== currentQueueEntryId;
+  const staleDeliveredAt = currentDeliveredAt > 0 && deliveredAt < currentDeliveredAt;
+  const staleSource = incomingSourceMsgId
+    && currentSourceMsgId
+    && incomingSourceMsgId !== currentSourceMsgId;
+  if (staleQueueEntry || staleDeliveredAt || staleSource) {
+    return { ok: true, ignored: 'stale-push-delivered' };
+  }
   const delay = Math.max(0, deliveredAt - queuedAt);
 
   runtime.lastPushDeliveredAt = deliveredAt;
   runtime.lastPushQueuedAt = queuedAt;
+  if (queueEntryId > 0) runtime.lastPushQueueEntryId = queueEntryId;
   runtime.lastPushDeliveryDelayMs = delay;
   runtime.lastPushKind = meta.kind;
   runtime.lastPushNeedsInboxCheck = meta.requiresInboxCheck;
@@ -4225,6 +4246,7 @@ function markAgentPushDelivered(agentName, details = {}) {
   runtime.lastSeen = deliveredAt;
   runtime.updatedAt = deliveredAt;
   saveAgentRuntime();
+  return { ok: true };
 }
 
 function markAgentInboxChecked(agentName, details = {}) {
@@ -7141,10 +7163,13 @@ app.post('/api/runtime/push-delivered', (req, res) => {
   const notifyMeta = (req.body?.notifyMeta && typeof req.body.notifyMeta === 'object')
     ? req.body.notifyMeta
     : {};
-  markAgentPushDelivered(agentName, {
+  const result = markAgentPushDelivered(agentName, {
     ...details,
     ...notifyMeta,
   });
+  if (result?.ignored) {
+    return res.json({ ok: true, agent: agentName, ignored: result.ignored });
+  }
   res.json({ ok: true, agent: agentName });
 });
 

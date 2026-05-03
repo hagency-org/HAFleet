@@ -67,3 +67,5 @@
 - Added `17-systems-skill-scan.md` with consolidated findings and proposed SYS-A through SYS-D repair batches.
 - Updated the repair table with new direct-injection idempotency, health, alert, delivery-event, CLI-contract, dashboard-truth, supervisor-staleness, and architecture-fitness rows. Existing CD decision rows R-032/R-033/R-037/R-038/R-047/R-048/R-049/R-050 were reconfirmed by the scan.
 - Integrated two additional agent-chat inbox audit reports: dashboard lifecycle/queue/alert reliability gaps and a remote/local mirror check that found current sync gates green with two low-priority `agent-up` profile differences.
+- Implemented SYS-A direct injection idempotency fixes: source-bound stale notification drops, partial tmux delivery no-requeue behavior, relay in-flight duplicate claims, and stale push-delivered ack rejection.
+- Restored rhodes1/Karin after the remote standalone package could not run `agentchat update`; rhodes1 now runs a `stable` git checkout at `bd5872b`, the relay reports that version, and Karin is back online with MCP present.
