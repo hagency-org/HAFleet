@@ -140,6 +140,7 @@ start_shard "contracts and cli" \
   tests/cli-agent-status.test.js \
   tests/cli-fleet.test.js \
   tests/cli-resume-id.test.js \
+  tests/supervisor-writer-cli.test.js \
   tests/verify-remote-cli.test.js \
   tests/verify-cd-preflight.test.js \
   tests/verify-ci-timeout.test.js \

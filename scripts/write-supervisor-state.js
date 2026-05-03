@@ -27,7 +27,7 @@ function usage() {
   console.log(`Usage: write-supervisor-state <start|assess|heartbeat|done> [options]
 
 Commands:
-  start       Register supervisor, begin lease
+  start       Post initial idle assessment
   assess      Post a state assessment
   heartbeat   Renew lease
   done        End supervision session
