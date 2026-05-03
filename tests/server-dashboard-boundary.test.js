@@ -184,7 +184,7 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).toContain('function scheduleFetchAlerts(delay=0)');
     expect(response.text).toContain('if(alertsInFlight){alertsRefreshQueued=true;return}');
     expect(response.text).toContain('window._applyFilters=function(){scheduleFetchAlerts(150)}');
-    expect(response.text).toContain('Array.isArray(next)?next:[]');
+    expect(response.text).toContain('alerts=normalizeAlertsPayload(next);');
     expect(response.text).not.toContain('new Date(a.firstSeenAt).toISOString()');
     expect(response.text).not.toContain('new Date(a.lastSeenAt).toISOString()');
   });
@@ -196,10 +196,12 @@ describe('server dashboard mutation boundary', () => {
 
     expect(response.status).toBe(200);
     expect(response.text).toContain('function normalizeArrayPayload(payload)');
-    expect(response.text).toContain('queueItems = normalizeArrayPayload(JSON.parse(e.data));');
-    expect(response.text).toContain('reminderItems = normalizeArrayPayload(JSON.parse(e.data));');
-    expect(response.text).toContain('queueItems = normalizeArrayPayload(await r.json());');
-    expect(response.text).toContain('reminderItems = normalizeArrayPayload(await r.json());');
+    expect(response.text).toContain('function normalizeQueuePayload(payload)');
+    expect(response.text).toContain('function normalizeReminderPayload(payload)');
+    expect(response.text).toContain('queueItems = normalizeQueuePayload(JSON.parse(e.data));');
+    expect(response.text).toContain('reminderItems = normalizeReminderPayload(JSON.parse(e.data));');
+    expect(response.text).toContain('queueItems = normalizeQueuePayload(await r.json());');
+    expect(response.text).toContain('reminderItems = normalizeReminderPayload(await r.json());');
   });
 
   test('monitor agent status polling is single-flight and array-normalized', async () => {
@@ -211,7 +213,8 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).toContain('let agentStatusInFlight = false;');
     expect(response.text).toContain('let agentStatusRefreshQueued = false;');
     expect(response.text).toContain('if (agentStatusInFlight) { agentStatusRefreshQueued = true; return; }');
-    expect(response.text).toContain('const rows = Array.isArray(payload) ? payload : [];');
+    expect(response.text).toContain('function normalizeAgentStatusPayload(payload)');
+    expect(response.text).toContain('const normalized = normalizeAgentStatusPayload(payload);');
     expect(response.text).toContain('agentStatusInFlight = false;');
     expect(response.text).not.toContain('const rows = await res.json();');
   });
@@ -236,10 +239,53 @@ describe('server dashboard mutation boundary', () => {
     const response = await request(mod.app).get('/config');
 
     expect(response.status).toBe(200);
-    expect(response.text).toContain('presets = Array.isArray(next) ? next : [];');
-    expect(response.text).toContain('allAgents = Array.isArray(next) ? next : [];');
+    expect(response.text).toContain('function normalizePresetPayload(payload)');
+    expect(response.text).toContain('function normalizeAgentPayload(payload)');
+    expect(response.text).toContain('presets = normalizePresetPayload(next);');
+    expect(response.text).toContain('allAgents = normalizeAgentPayload(next);');
     expect(response.text).not.toContain('presets = await r.json();');
     expect(response.text).not.toContain('allAgents = await r.json();');
+  });
+
+  test('dashboard render paths filter malformed array elements before rendering', async () => {
+    const mod = await setup();
+
+    const [monitor, tasks, alerts, detail] = await Promise.all([
+      request(mod.app).get('/'),
+      request(mod.app).get('/tasks'),
+      request(mod.app).get('/alerts'),
+      request(mod.app).get('/agents/alpha'),
+    ]);
+
+    expect(monitor.status).toBe(200);
+    expect(tasks.status).toBe(200);
+    expect(alerts.status).toBe(200);
+    expect(detail.status).toBe(200);
+    expect(monitor.text).toContain("payload.filter(function(item) { return item && typeof item === 'object'; })");
+    expect(monitor.text).toContain('function normalizeNewAgentPresetPayload(payload)');
+    expect(tasks.text).toContain("if(!item||typeof item!=='object')return null;");
+    expect(alerts.text).toContain('function normalizeAlertsPayload(payload)');
+    expect(detail.text).toContain('function normalizeObjectArray(payload)');
+    expect(detail.text).toContain('function normalizeDmMessagesPayload(payload)');
+  });
+
+  test('monitor alert badge and detail DM history coalesce overlapping refreshes', async () => {
+    const mod = await setup();
+
+    const [monitor, detail] = await Promise.all([
+      request(mod.app).get('/'),
+      request(mod.app).get('/agents/alpha'),
+    ]);
+
+    expect(monitor.status).toBe(200);
+    expect(detail.status).toBe(200);
+    expect(monitor.text).toContain('let alertBadgeInFlight=false;');
+    expect(monitor.text).toContain('let alertBadgeQueued=false;');
+    expect(monitor.text).toContain('if(alertBadgeInFlight){alertBadgeQueued=true;return}');
+    expect(detail.text).toContain('let dmHistoryInFlight = false;');
+    expect(detail.text).toContain('let dmHistoryQueued = false;');
+    expect(detail.text).toContain('if (dmHistoryInFlight) { dmHistoryQueued = true; return false; }');
+    expect(detail.text).toContain('dmMessages = normalizeDmMessagesPayload(data);');
   });
 
   test('task dashboards bound and coalesce task list refreshes', async () => {
