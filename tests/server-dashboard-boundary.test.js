@@ -323,8 +323,10 @@ describe('server dashboard mutation boundary', () => {
     expect(response.status).toBe(200);
     expect(response.text).toContain('function isoTime(ts)');
     expect(response.text).toContain('function scheduleFetchAlerts(delay=0)');
+    expect(response.text).toContain('function alertFilterKey(filters)');
     expect(response.text).toContain('if(alertsInFlight){alertsRefreshQueued=true;return}');
     expect(response.text).toContain('window._applyFilters=function(){scheduleFetchAlerts(150)}');
+    expect(response.text).toContain('if(requestFilterKey!==alertFilterKey(currentAlertFilters())){alertsRefreshQueued=true;return}');
     expect(response.text).toContain('alerts=normalizeAlertsPayload(next);');
     expect(response.text).not.toContain('new Date(a.firstSeenAt).toISOString()');
     expect(response.text).not.toContain('new Date(a.lastSeenAt).toISOString()');
@@ -529,14 +531,20 @@ describe('server dashboard mutation boundary', () => {
     expect(detail.status).toBe(200);
     expect(tasks.text).toContain('const TASK_LIST_LIMIT=200;');
     expect(tasks.text).toContain('function taskListUrl(filters)');
+    expect(tasks.text).toContain('function taskFilterKey(filters)');
     expect(tasks.text).toContain("p.set('limit',String(TASK_LIST_LIMIT));");
     expect(tasks.text).toContain('if(refreshInFlight){refreshQueued=true;return}');
-    expect(tasks.text).toContain('taskCache=normalizeTaskPayload(await r.json());');
+    expect(tasks.text).toContain('if(requestFilterKey!==taskFilterKey(getFilters())){refreshQueued=true;return}');
+    expect(tasks.text).toContain('const nextTasks=normalizeTaskPayload(await r.json());');
+    expect(tasks.text).toContain('taskCache=nextTasks;');
     expect(detail.text).toContain('const TASK_LIST_LIMIT = 200;');
     expect(detail.text).toContain('function taskListUrl(filterVal)');
+    expect(detail.text).toContain('function currentTaskListFilterValue()');
+    expect(detail.text).toContain('if (requestFilterKey !== taskListFilterKey(currentTaskListFilterValue()))');
     expect(detail.text).toContain("p.set('limit', String(TASK_LIST_LIMIT));");
     expect(detail.text).toContain('if (taskListInFlight) { taskListRefreshQueued = true; return; }');
-    expect(detail.text).toContain('taskListCache = normalizeTaskPayload(await r.json());');
+    expect(detail.text).toContain('const nextTasks = normalizeTaskPayload(await r.json());');
+    expect(detail.text).toContain('taskListCache = nextTasks;');
     expect(detail.text).not.toContain("filterVal ? '/api/tasks?assignee=' + encodeURIComponent(filterVal) : '/api/tasks'");
   });
 
