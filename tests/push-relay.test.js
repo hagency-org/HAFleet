@@ -182,6 +182,61 @@ describe('push relay dispatch', () => {
     expect(delivered[0].payload).toContain('Only inject once');
   });
 
+  test('does not fallback or retry after partial tmux payload injection', async () => {
+    const sendCalls = [];
+    const eventPosts = [];
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [
+        { name: 'alpha', server: null, tmux: 'alpha:0.0' },
+        { name: 'beta', server: null, tmux: 'beta:0.0' },
+      ],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      tmuxBin: 'tmux',
+      execFileSync: (_cmd, args) => {
+        if (args[0] !== 'send-keys') throw new Error(`unexpected tmux ${args.join(' ')}`);
+        sendCalls.push([...args]);
+        if (args.includes('-l')) return '';
+        throw new Error('post-payload key failed');
+      },
+      fetch: async (url, options = {}) => {
+        if (String(url).endsWith('/api/delivery-events')) {
+          eventPosts.push(JSON.parse(options.body));
+        }
+        return { ok: true, text: async () => '' };
+      },
+    });
+
+    const raw = JSON.stringify({
+      id: 'msg_partial_tmux',
+      from: 'beta',
+      to: 'alpha',
+      type: 'request',
+      priority: 'urgent',
+      summary: 'Inject once even on partial tmux failure',
+      mentions: [],
+    });
+
+    await handleMessage(raw);
+    await handleMessage(raw);
+
+    expect(sendCalls).toHaveLength(2);
+    expect(sendCalls.map((args) => args[args.indexOf('-t') + 1])).toEqual(['alpha:0.0', 'alpha:0.0']);
+    expect(sendCalls[0]).toContain('-l');
+    expect(sendCalls[1]).toContain('Tab');
+    expect(eventPosts).toEqual([
+      expect.objectContaining({
+        type: 'relay.delivery_partial',
+        messageId: 'msg_partial_tmux',
+        agent: 'alpha',
+        target: 'alpha:0.0',
+        reason: 'tmux-inject-partial',
+      }),
+    ]);
+  });
+
   test('skips delivery when the local pane is missing', async () => {
     const delivered = [];
     seedRelayState({

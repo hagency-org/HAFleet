@@ -676,45 +676,94 @@ function sleepMs(ms) {
 }
 
 function pushToTmux(target, payload) {
-  if (!currentTmuxBin()) return false;
+  if (!currentTmuxBin()) return { ok: false, partial: false, stage: 'tmux-bin' };
   const safePayload = sanitizeForDisplay(payload);
   const opts = { timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'] };
   const sendSequence = (resolvedTarget) => {
-    runTmux(['send-keys', '-l', '-t', resolvedTarget, safePayload], opts);
-    sleepMs(INJECT_DELAY_MS);
-    runTmux(['send-keys', '-t', resolvedTarget, 'Tab'], opts);
-    sleepMs(INJECT_DELAY_MS);
-    runTmux(['send-keys', '-t', resolvedTarget, 'Enter'], opts);
-    sleepMs(INJECT_DELAY_MS);
-    runTmux(['send-keys', '-t', resolvedTarget, 'Enter'], opts);
-    sleepMs(INJECT_DELAY_MS);
-    runTmux(['send-keys', '-t', resolvedTarget, 'C-m'], opts);
-    sleepMs(INJECT_DELAY_MS);
-    runTmux(['send-keys', '-t', resolvedTarget, 'C-m'], opts);
+    let payloadSent = false;
+    const sendStep = (stage, args, waitAfter = true) => {
+      try {
+        runTmux(args, opts);
+        if (stage === 'payload') payloadSent = true;
+        if (waitAfter) sleepMs(INJECT_DELAY_MS);
+      } catch (error) {
+        error.deliveryStage = stage;
+        error.deliveryPartial = payloadSent;
+        throw error;
+      }
+    };
+    sendStep('payload', ['send-keys', '-l', '-t', resolvedTarget, safePayload]);
+    sendStep('tab', ['send-keys', '-t', resolvedTarget, 'Tab']);
+    sendStep('enter-1', ['send-keys', '-t', resolvedTarget, 'Enter']);
+    sendStep('enter-2', ['send-keys', '-t', resolvedTarget, 'Enter']);
+    sendStep('submit-1', ['send-keys', '-t', resolvedTarget, 'C-m']);
+    sendStep('submit-2', ['send-keys', '-t', resolvedTarget, 'C-m'], false);
   };
   const sessionFallback = String(target || '').split(':', 1)[0];
   try {
     sendSequence(target);
-    return true;
+    return { ok: true, partial: false, stage: 'complete' };
   } catch (e) {
+    if (e?.deliveryPartial) {
+      const preview = String(safePayload || '').replace(/\s+/g, ' ').slice(0, 120);
+      console.error(`[push-relay] tmux inject partial for ${target} at ${e.deliveryStage}: ${e.message} payload="${preview}"`);
+      return { ok: false, partial: true, stage: e.deliveryStage || 'unknown' };
+    }
     if (sessionFallback && sessionFallback !== target) {
       try {
         sendSequence(sessionFallback);
         console.warn(`[push-relay] tmux inject fallback ${target} -> ${sessionFallback}`);
-        return true;
+        return { ok: true, partial: false, stage: 'complete', fallbackTarget: sessionFallback };
       } catch (fallbackErr) {
         const preview = String(safePayload || '').replace(/\s+/g, ' ').slice(0, 120);
+        if (fallbackErr?.deliveryPartial) {
+          console.error(`[push-relay] tmux inject partial for fallback ${sessionFallback} at ${fallbackErr.deliveryStage}: ${fallbackErr.message} payload="${preview}"`);
+          return { ok: false, partial: true, stage: fallbackErr.deliveryStage || 'unknown', fallbackTarget: sessionFallback };
+        }
         console.error(`[push-relay] tmux inject failed for ${target} (fallback ${sessionFallback} failed: ${fallbackErr.message}) payload="${preview}"`);
-        return false;
+        return { ok: false, partial: false, stage: fallbackErr?.deliveryStage || e?.deliveryStage || 'unknown' };
       }
     }
     const preview = String(safePayload || '').replace(/\s+/g, ' ').slice(0, 120);
     console.error(`[push-relay] tmux inject failed for ${target}: ${e.message} payload="${preview}"`);
-    return false;
+    return { ok: false, partial: false, stage: e?.deliveryStage || 'unknown' };
   }
 }
 
 let pushToTmuxImpl = pushToTmux;
+
+function normalizeDeliveryResult(result) {
+  if (result && typeof result === 'object') {
+    return {
+      ok: result.ok === true,
+      partial: result.partial === true,
+      stage: typeof result.stage === 'string' ? result.stage : null,
+      fallbackTarget: typeof result.fallbackTarget === 'string' ? result.fallbackTarget : null,
+    };
+  }
+  return {
+    ok: result === true,
+    partial: false,
+    stage: result === true ? 'complete' : null,
+    fallbackTarget: null,
+  };
+}
+
+function attemptTmuxDelivery(target, payload) {
+  try {
+    return normalizeDeliveryResult(pushToTmuxImpl(target, payload));
+  } catch (error) {
+    if (error?.deliveryPartial) {
+      return {
+        ok: false,
+        partial: true,
+        stage: error.deliveryStage || 'unknown',
+        fallbackTarget: null,
+      };
+    }
+    throw error;
+  }
+}
 
 function logDeliverySkip(agentName, msg, reason, extra = {}) {
   const key = `${agentName}:${reason}`;
@@ -850,16 +899,30 @@ async function handleMessage(raw) {
       }
 
       const notification = await buildNotification(agentName, msg);
-      if (pushToTmuxImpl(target, notification)) {
+      const delivery = attemptTmuxDelivery(target, notification);
+      if (delivery.ok) {
         markDelivered(dedupeKey);
         void recordDeliveryEvent({
           type: 'relay.delivered',
           ...messageEventFields(agentName, msg, target, {
             deliveredAt: Date.now(),
             path: 'direct',
+            ...(delivery.fallbackTarget ? { context: { fallbackTarget: delivery.fallbackTarget } } : {}),
           }),
         });
         console.log(`[push-relay] delivered ${msg.id} -> ${agentName}`);
+      } else if (delivery.partial) {
+        markDelivered(dedupeKey);
+        void recordDeliveryEvent({
+          type: 'relay.delivery_partial',
+          ...messageEventFields(agentName, msg, target, {
+            deliveredAt: Date.now(),
+            reason: 'tmux-inject-partial',
+            path: 'direct',
+            context: { stage: delivery.stage },
+          }),
+        });
+        logDeliverySkip(agentName, msg, 'tmux-inject-partial', { server: route.server, target, note: `stage=${delivery.stage || 'unknown'}` });
       } else {
         releaseDeliveryClaim(dedupeKey);
         void recordDeliveryEvent({
@@ -899,7 +962,8 @@ function drainRelayQueue() {
         releaseDeliveryClaim(entry.dedupeKey);
         continue;
       }
-      if (pushToTmuxImpl(entry.target, entry.notification)) {
+      const delivery = attemptTmuxDelivery(entry.target, entry.notification);
+      if (delivery.ok) {
         markDelivered(entry.dedupeKey);
         void recordDeliveryEvent({
           type: 'relay.delivered',
@@ -907,10 +971,29 @@ function drainRelayQueue() {
             deliveredAt: now,
             queuedAt: entry.queuedAt,
             path: 'held',
-            context: { heldMs: now - entry.queuedAt },
+            context: {
+              heldMs: now - entry.queuedAt,
+              ...(delivery.fallbackTarget ? { fallbackTarget: delivery.fallbackTarget } : {}),
+            },
           }),
         });
         console.log(`[push-relay] delivered queued ${entry.msg.id} -> ${agentName} (${drainReason}, held ${now - entry.queuedAt}ms)`);
+      } else if (delivery.partial) {
+        markDelivered(entry.dedupeKey);
+        void recordDeliveryEvent({
+          type: 'relay.delivery_partial',
+          ...messageEventFields(agentName, entry.msg, entry.target, {
+            deliveredAt: now,
+            queuedAt: entry.queuedAt,
+            reason: 'tmux-inject-partial',
+            path: 'held',
+            context: {
+              heldMs: now - entry.queuedAt,
+              stage: delivery.stage,
+            },
+          }),
+        });
+        console.log(`[push-relay] queued delivery partial ${entry.msg.id} -> ${agentName} at ${delivery.stage || 'unknown'}`);
       } else {
         releaseDeliveryClaim(entry.dedupeKey);
         void recordDeliveryEvent({
