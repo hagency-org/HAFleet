@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -99,6 +99,33 @@ describe('server delivery path', () => {
         target: 'alpha:0.0',
       }),
     ]));
+  });
+
+  test('message log API supports bounded tail pagination', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    const logPath = path.join(runtimeDir, 'logs', 'messages.jsonl');
+    writeFileSync(logPath, [
+      { id: 'msg_1', ts: 1000, from: 'system', to: 'alpha', payload: 'one' },
+      { id: 'msg_2', ts: 2000, from: 'system', to: 'alpha', payload: 'two' },
+      { id: 'msg_3', ts: 3000, from: 'system', to: 'alpha', payload: 'three' },
+      { id: 'msg_4', ts: 4000, from: 'system', to: 'alpha', payload: 'four' },
+      { id: 'msg_5', ts: 5000, from: 'system', to: 'alpha', payload: 'five' },
+    ].map((row) => JSON.stringify(row)).join('\n') + '\n');
+    serverModule = await importServer(runtimeDir);
+
+    const latest = await request(serverModule.app).get('/api/messages?limit=2');
+    expect(latest.status).toBe(200);
+    expect(latest.body.map((row) => row.id)).toEqual(['msg_4', 'msg_5']);
+
+    const previousPage = await request(serverModule.app).get('/api/messages?before=4000&limit=2');
+    expect(previousPage.status).toBe(200);
+    expect(previousPage.body.map((row) => row.id)).toEqual(['msg_2', 'msg_3']);
+
+    const sincePage = await request(serverModule.app).get('/api/messages?since=2000&limit=2');
+    expect(sincePage.status).toBe(200);
+    expect(sincePage.body.map((row) => row.id)).toEqual(['msg_4', 'msg_5']);
   });
 
   test('manual send drops backend notifications whose source message is no longer unread', async () => {

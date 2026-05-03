@@ -87,15 +87,86 @@ let serverSshConfig = loadServerSsh();
 
 const app = express();
 
-// ── API: fetch all messages (optionally filtered by since=timestamp) ─
-app.get('/api/messages', async (req, res) => {
-  const since = Number(req.query.since) || 0;
+const MESSAGE_LIST_LIMIT_MAX = 500;
+const MESSAGE_LIST_TAIL_CHUNK_BYTES = 64 * 1024;
+
+function parseMessageLogRow(line) {
+  try { return JSON.parse(line); } catch { return null; }
+}
+
+function parseMessageListPositiveInt(value, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.min(parsed, max);
+}
+
+function parseMessageListTimestamp(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function messageInListWindow(msg, since, before) {
+  const ts = Number(msg?.ts);
+  if (since > 0 && !(ts > since)) return false;
+  if (Number.isFinite(before) && !(ts < before)) return false;
+  return true;
+}
+
+async function readAllMessagesFromLog(since, before) {
+  const raw = await readFileAsync(LOG_FILE, 'utf-8');
+  return raw.trim().split('\n')
+    .filter(Boolean)
+    .map(parseMessageLogRow)
+    .filter((msg) => msg && messageInListWindow(msg, since, before));
+}
+
+async function readMessageLogPage(since, before, limit) {
+  const fh = await open(LOG_FILE, 'r');
   try {
-    const raw = await readFileAsync(LOG_FILE, 'utf-8');
-    const msgs = raw.trim().split('\n').filter(Boolean).map((line) => {
-      try { return JSON.parse(line); } catch { return null; }
-    }).filter(Boolean);
-    res.json(since ? msgs.filter((m) => m.ts > since) : msgs);
+    const fileStat = await fh.stat();
+    let position = fileStat.size;
+    let carry = '';
+    const rows = [];
+
+    while (position > 0 && rows.length < limit) {
+      const readSize = Math.min(MESSAGE_LIST_TAIL_CHUNK_BYTES, position);
+      position -= readSize;
+      const buffer = Buffer.alloc(readSize);
+      await fh.read(buffer, 0, readSize, position);
+
+      const chunk = buffer.toString('utf-8') + carry;
+      const lines = chunk.split('\n');
+      carry = lines.shift() || '';
+
+      for (let i = lines.length - 1; i >= 0 && rows.length < limit; i--) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const msg = parseMessageLogRow(line);
+        if (msg && messageInListWindow(msg, since, before)) rows.push(msg);
+      }
+    }
+
+    if (position === 0 && carry.trim() && rows.length < limit) {
+      const msg = parseMessageLogRow(carry.trim());
+      if (msg && messageInListWindow(msg, since, before)) rows.push(msg);
+    }
+
+    return rows.reverse();
+  } finally {
+    await fh.close();
+  }
+}
+
+// ── API: fetch messages (optionally filtered by since/before/limit) ─
+app.get('/api/messages', async (req, res) => {
+  const since = parseMessageListTimestamp(req.query.since, 0);
+  const before = parseMessageListTimestamp(req.query.before, Infinity);
+  const limit = parseMessageListPositiveInt(req.query.limit, MESSAGE_LIST_LIMIT_MAX);
+  try {
+    const msgs = limit
+      ? await readMessageLogPage(since, before, limit)
+      : await readAllMessagesFromLog(since, before);
+    res.json(msgs);
   } catch {
     res.json([]);
   }

@@ -157,6 +157,17 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).not.toContain("if (activeTab === 'tasks') taskListRefresh();");
   });
 
+  test('monitor initial message load requests a bounded page', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain("fetch('/api/messages?limit=50')");
+    expect(response.text).not.toContain("fetch('/api/messages')");
+    expect(response.text).not.toContain('msgs.slice(-50)');
+  });
+
   test('redirects agent audit page to the detail audit hash', async () => {
     const mod = await setup();
 
