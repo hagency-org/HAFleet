@@ -3560,8 +3560,15 @@ function processDueReminders() {
       return;
     }
     if (!saveReminders()) {
+      restoreQueueState(queueRollback);
       restoreReminderState(reminderRollback);
+      if (!saveQueue()) {
+        appendQueuePersistFailedEvent(null, 'due-reminder-queue-rollback-save-failed', { path: 'reminder-tick', dueCount: due.length });
+      }
       appendQueuePersistFailedEvent(null, 'due-reminder-reminder-save-failed', { path: 'reminder-tick', dueCount: due.length });
+      broadcastReminders();
+      broadcastQueue();
+      return;
     }
     broadcastReminders();
     broadcastQueue();

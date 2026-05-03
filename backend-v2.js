@@ -3303,7 +3303,7 @@ function writeThruAgentHome(agentName) {
   }
 }
 
-function saveGroups() { saveJson('groups.json', groups); }
+function saveGroups() { return saveJson('groups.json', groups); }
 
 function invalidateUnreadMessageIndex() {
   unreadMessageIndexVersion += 1;
@@ -3498,10 +3498,11 @@ function maybeEmitUnexpectedOfflineAlert(agentName, reason, context = {}) {
 }
 
 function ensureInfoGroup() {
-  if (!groups.info) {
-    groups.info = { name: 'info', members: [], createdAt: Date.now() };
-    saveGroups();
-  }
+  if (groups.info) return true;
+  groups.info = { name: 'info', members: [], createdAt: Date.now() };
+  if (saveGroups()) return true;
+  delete groups.info;
+  return false;
 }
 
 function auditLog(req, { agent = null, summary = null, status = 200 } = {}) {
@@ -9172,10 +9173,14 @@ app.post('/api/groups', requireBridgeSecret, (req, res) => {
     seen.add(key);
     normalizedMembers.push(memberName);
   }
-  groups[groupName] = { name: groupName, members: normalizedMembers, createdAt: Date.now() };
-  saveGroups();
-  broadcastSSE('group_created', groups[groupName]);
-  res.json({ ok: true, group: groups[groupName] });
+  const groupRecord = { name: groupName, members: normalizedMembers, createdAt: Date.now() };
+  groups[groupName] = groupRecord;
+  if (!saveGroups()) {
+    delete groups[groupName];
+    return res.status(503).json({ error: 'group persistence failed' });
+  }
+  broadcastSSE('group_created', groupRecord);
+  res.json({ ok: true, group: groupRecord });
 });
 
 app.get('/api/groups', (_req, res) => {
@@ -9219,27 +9224,38 @@ app.post('/api/groups/:name/members', requireBridgeSecret, (req, res) => {
     }
   }
 
-  if (!Array.isArray(group.members)) group.members = [];
-  const existingKeys = new Set(group.members.map(m => String(m).toLowerCase()));
+  const nextMembers = Array.isArray(group.members) ? [...group.members] : [];
+  const existingKeys = new Set(nextMembers.map(m => String(m).toLowerCase()));
   for (const memberName of addList) {
     const key = memberName.toLowerCase();
     if (!existingKeys.has(key)) {
-      group.members.push(memberName);
+      nextMembers.push(memberName);
       existingKeys.add(key);
     }
   }
   if (removeKeys.size > 0) {
-    group.members = group.members.filter(m => !removeKeys.has(String(m).toLowerCase()));
+    for (let i = nextMembers.length - 1; i >= 0; i--) {
+      if (removeKeys.has(String(nextMembers[i]).toLowerCase())) nextMembers.splice(i, 1);
+    }
   }
-  saveGroups();
-  broadcastSSE('group_members', { name: group.name, members: group.members, added: addList, removed: removeList });
-  res.json({ ok: true, group });
+  const nextGroup = { ...group, members: nextMembers };
+  groups[req.params.name] = nextGroup;
+  if (!saveGroups()) {
+    groups[req.params.name] = group;
+    return res.status(503).json({ error: 'group persistence failed' });
+  }
+  broadcastSSE('group_members', { name: nextGroup.name, members: nextGroup.members, added: addList, removed: removeList });
+  res.json({ ok: true, group: nextGroup });
 });
 
 app.delete('/api/groups/:name', requireBridgeSecret, (req, res) => {
-  if (!groups[req.params.name]) return res.status(404).json({ error: 'group not found' });
+  const previousGroup = groups[req.params.name];
+  if (!previousGroup) return res.status(404).json({ error: 'group not found' });
   delete groups[req.params.name];
-  saveGroups();
+  if (!saveGroups()) {
+    groups[req.params.name] = previousGroup;
+    return res.status(503).json({ error: 'group persistence failed' });
+  }
   res.json({ ok: true });
 });
 
@@ -9454,7 +9470,7 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
   }
   if (group && !groups[group]) {
     if (group === 'info') {
-      ensureInfoGroup();
+      if (!ensureInfoGroup()) return res.status(503).json({ error: 'group persistence failed' });
     } else {
       return res.status(404).json({ error: `group not found: ${group}` });
     }

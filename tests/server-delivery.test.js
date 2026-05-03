@@ -374,6 +374,39 @@ describe('server delivery path', () => {
     expect(events.some((event) => event.type === 'tmux.delivered')).toBe(false);
   });
 
+  test('queue delete rolls back when queue persistence fails', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'operator',
+      to: 'alpha:0.0',
+      payload: 'keep me queued',
+    });
+    expect(queued.status).toBe(200);
+
+    replacePathWithDirectory(path.join(runtimeDir, 'logs', 'queue.json'));
+
+    const deleted = await request(serverModule.app).delete(`/api/queue/${queued.body.id}`);
+    expect(deleted.status).toBe(500);
+    expect(deleted.body).toMatchObject({ ok: false, error: 'queue persistence failed' });
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toHaveLength(1);
+    expect(queue.body[0]).toMatchObject({ id: queued.body.id, payload: 'keep me queued' });
+
+    const events = readJsonl(path.join(runtimeDir, 'logs', 'delivery-events.jsonl'));
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'queue.persist_failed',
+        reason: 'queue-delete-save-failed',
+      }),
+    ]));
+    expect(events.some((event) => event.type === 'queue.canceled')).toBe(false);
+  });
+
   test('reminder create rolls back when reminder persistence fails', async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
@@ -399,6 +432,38 @@ describe('server delivery path', () => {
       expect.objectContaining({
         type: 'queue.persist_failed',
         reason: 'reminder-create-save-failed',
+      }),
+    ]));
+  });
+
+  test('reminder delete rolls back when reminder persistence fails', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const reminder = await request(serverModule.app).post('/api/reminders').send({
+      target: 'alpha:0.0',
+      delay: 30,
+      msg: 'keep me scheduled',
+    });
+    expect(reminder.status).toBe(200);
+
+    replacePathWithDirectory(path.join(runtimeDir, 'logs', 'reminders.json'));
+
+    const deleted = await request(serverModule.app).delete(`/api/reminders/${reminder.body.id}`);
+    expect(deleted.status).toBe(500);
+    expect(deleted.body).toMatchObject({ ok: false, error: 'reminder persistence failed' });
+
+    const reminders = await request(serverModule.app).get('/api/reminders');
+    expect(reminders.body).toHaveLength(1);
+    expect(reminders.body[0]).toMatchObject({ id: reminder.body.id, msg: 'keep me scheduled' });
+
+    const events = readJsonl(path.join(runtimeDir, 'logs', 'delivery-events.jsonl'));
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'queue.persist_failed',
+        reason: 'reminder-delete-save-failed',
       }),
     ]));
   });
@@ -434,6 +499,45 @@ describe('server delivery path', () => {
       expect.objectContaining({
         type: 'queue.persist_failed',
         reason: 'due-reminder-queue-save-failed',
+      }),
+    ]));
+  });
+
+  test('due reminders do not enqueue when reminder persistence fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const reminder = await request(serverModule.app).post('/api/reminders').send({
+      target: 'alpha:0.0',
+      delay: 1,
+      msg: 'do not duplicate',
+    });
+    expect(reminder.status).toBe(200);
+
+    replacePathWithDirectory(path.join(runtimeDir, 'logs', 'reminders.json'));
+    vi.setSystemTime(new Date('2026-01-01T00:00:02Z'));
+
+    serverModule.processDueRemindersForTest();
+    serverModule.processDueRemindersForTest();
+
+    const reminders = await request(serverModule.app).get('/api/reminders');
+    expect(reminders.body).toHaveLength(1);
+    expect(reminders.body[0]).toMatchObject({ id: reminder.body.id, msg: 'do not duplicate' });
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toEqual([]);
+    const queueFile = JSON.parse(readFileSync(path.join(runtimeDir, 'logs', 'queue.json'), 'utf-8'));
+    expect(queueFile.items).toEqual([]);
+
+    const events = readJsonl(path.join(runtimeDir, 'logs', 'delivery-events.jsonl'));
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'queue.persist_failed',
+        reason: 'due-reminder-reminder-save-failed',
       }),
     ]));
   });

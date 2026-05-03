@@ -1,12 +1,43 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
+import { createServer } from 'http';
 import os from 'os';
 import path from 'path';
 import request from 'supertest';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
 const REPO_ROOT = path.resolve('.');
+
+function execFileAsync(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+function listenAsync(server) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+}
+
+function closeAsync(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
 
 describe('5.6.3 reconciliation: disk task with newer updated_at wins', () => {
   let context;
@@ -126,29 +157,53 @@ describe('5.6.3 task-writer: defaultApiBaseUrl ignores AGENT_CHAT_WEB_URL', () =
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  test('with only AGENT_CHAT_WEB_URL set, uses default backend port not web URL', () => {
+  test('uses backend port not AGENT_CHAT_WEB_URL for task writes', async () => {
     const script = path.join(REPO_ROOT, 'scripts', 'write-v1-agent-task.js');
     const workdir = path.join(tmpDir, 'agent_urltest', 'workdir');
-    let error;
+    const requests = [];
+    const server = createServer((req, res) => {
+      const chunks = [];
+      req.on('data', (chunk) => chunks.push(chunk));
+      req.on('end', () => {
+        const bodyText = Buffer.concat(chunks).toString('utf-8');
+        const body = bodyText ? JSON.parse(bodyText) : null;
+        requests.push({ method: req.method, url: req.url, body });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, agent: { task: body?.task || null } }));
+      });
+    });
+    await listenAsync(server);
+    const address = server.address();
+    const backendPort = address && typeof address === 'object' ? String(address.port) : '';
     try {
-      execFileSync(process.execPath, [script, 'heartbeat', '--workdir', workdir], {
+      const result = await execFileAsync(process.execPath, [script, 'heartbeat', '--workdir', workdir], {
         cwd: REPO_ROOT,
         encoding: 'utf-8',
         env: {
           ...process.env,
           AGENT_CHAT_WEB_URL: 'http://web-should-not-be-used.example.com:9999',
           AGENT_CHAT_API: '',
-          AGENT_CHAT_BACKEND_PORT: '',
+          AGENT_CHAT_BACKEND_PORT: backendPort,
         },
         timeout: 5000,
       });
-    } catch (e) {
-      error = e;
+      expect(result.stderr).toContain(`127.0.0.1:${backendPort}`);
+      expect(result.stderr).not.toContain('web-should-not-be-used');
+    } finally {
+      await closeAsync(server);
     }
-    // Should fail trying to connect to 127.0.0.1:8090 (default backend), NOT web URL
-    expect(error).toBeDefined();
-    const output = (error.stderr || '') + (error.stdout || '');
-    expect(output).toContain('127.0.0.1:8090');
-    expect(output).not.toContain('web-should-not-be-used');
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: 'PATCH',
+      url: '/api/agents/urltest',
+      body: {
+        task: {
+          id: 'existing-task',
+          owner: 'urltest',
+          status: 'active',
+        },
+      },
+    });
   });
 });

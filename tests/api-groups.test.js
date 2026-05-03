@@ -91,6 +91,21 @@ describe('groups api', () => {
     expect(stored['dev-team'].members).toEqual(['alpha', 'beta']);
   });
 
+  test('group creation returns 503 and leaves no visible group when groups persistence fails', async () => {
+    context = await createBackendTestContext('api-groups-test-', baseSeed());
+    context.internals.setJsonSaveFailureForTest('groups.json', true);
+
+    const response = await request(context.app)
+      .post('/api/groups')
+      .send({ name: 'dev-team', members: ['alpha', 'beta'] });
+    const list = await request(context.app).get('/api/groups');
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: 'group persistence failed' });
+    expect(list.body).toEqual([]);
+    expect(readJson(groupsPath(context.runtimeDir))).toEqual({});
+  });
+
   test('rejects group creation without a name', async () => {
     context = await createBackendTestContext('api-groups-test-', baseSeed());
 
@@ -190,6 +205,24 @@ describe('groups api', () => {
     expect(readJson(groupsPath(context.runtimeDir))).toEqual({});
   });
 
+  test('group delete returns 503 and keeps group visible when groups persistence fails', async () => {
+    context = await createBackendTestContext('api-groups-test-', baseSeed({
+      groups: {
+        temp: { name: 'temp', members: ['alpha'], createdAt: 1000 },
+      },
+    }));
+    context.internals.setJsonSaveFailureForTest('groups.json', true);
+
+    const response = await request(context.app).delete('/api/groups/temp');
+    const group = await request(context.app).get('/api/groups/temp');
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: 'group persistence failed' });
+    expect(group.status).toBe(200);
+    expect(group.body).toEqual({ name: 'temp', members: ['alpha'], createdAt: 1000 });
+    expect(readJson(groupsPath(context.runtimeDir)).temp).toEqual({ name: 'temp', members: ['alpha'], createdAt: 1000 });
+  });
+
   test('adds members to an existing group', async () => {
     context = await createBackendTestContext('api-groups-test-', baseSeed({
       groups: {
@@ -204,6 +237,25 @@ describe('groups api', () => {
     expect(response.status).toBe(200);
     expect(response.body.group.members).toEqual(['alpha', 'beta', 'gamma']);
     expect(readJson(groupsPath(context.runtimeDir)).team.members).toEqual(['alpha', 'beta', 'gamma']);
+  });
+
+  test('member update returns 503 and keeps visible and persisted membership unchanged', async () => {
+    context = await createBackendTestContext('api-groups-test-', baseSeed({
+      groups: {
+        team: { name: 'team', members: ['alpha', 'beta'], createdAt: 1000 },
+      },
+    }));
+    context.internals.setJsonSaveFailureForTest('groups.json', true);
+
+    const response = await request(context.app)
+      .post('/api/groups/team/members')
+      .send({ add: ['gamma'], remove: ['alpha'] });
+    const group = await request(context.app).get('/api/groups/team');
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: 'group persistence failed' });
+    expect(group.body.members).toEqual(['alpha', 'beta']);
+    expect(readJson(groupsPath(context.runtimeDir)).team.members).toEqual(['alpha', 'beta']);
   });
 
   test('removes members from an existing group', async () => {
@@ -369,6 +421,22 @@ describe('groups api', () => {
     expect(response.status).toBe(200);
     const storedGroups = readJson(groupsPath(context.runtimeDir));
     expect(storedGroups.info).toBeDefined();
+  });
+
+  test('system info posts return 503 without message side effects when info group persistence fails', async () => {
+    context = await createBackendTestContext('api-groups-test-', baseSeed());
+    context.internals.setJsonSaveFailureForTest('groups.json', true);
+
+    const response = await request(context.app)
+      .post('/api/messages')
+      .send({ from: 'system', group: 'info', type: 'inform', summary: 'sys msg', full: 'sys msg' });
+    const groups = await request(context.app).get('/api/groups');
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: 'group persistence failed' });
+    expect(groups.body).toEqual([]);
+    expect(readJson(groupsPath(context.runtimeDir))).toEqual({});
+    expect(readJson(messagesPath(context.runtimeDir))).toEqual([]);
   });
 
   test('captures online group mentions without warnings', async () => {

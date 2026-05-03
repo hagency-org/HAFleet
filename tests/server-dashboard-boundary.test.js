@@ -426,10 +426,13 @@ describe('server dashboard mutation boundary', () => {
     expect(response.status).toBe(200);
     expect(response.text).toContain('const pendingQueueActionIds = new Set();');
     expect(response.text).toContain('const tombstonedQueueActionIds = new Set();');
+    expect(response.text).toContain('function queueTombstoneKey(item)');
+    expect(response.text).toContain('function queueRenderedTombstoneKey(id)');
+    expect(response.text).toContain('data-tombstone-key="');
     expect(response.text).toContain('if (pendingQueueActionIds.has(pendingId)) return;');
     expect(response.text).toContain('pendingQueueActionIds.add(pendingId);');
     expect(response.text).toContain('pendingQueueActionIds.delete(pendingId);');
-    expect(response.text).toContain('!tombstonedQueueActionIds.has(id)');
+    expect(response.text).toContain('!tombstonedQueueActionIds.has(queueTombstoneKey(item))');
     expect(response.text).toContain('function isSuccessfulDeleteResponse(res, body)');
     expect(response.text).toContain('if (body && body.queue_remove_failed === true) return false;');
     expect(response.text).toContain('if (res.status === 404) return true;');
@@ -437,13 +440,17 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).toContain("if (action !== 'send') return isSuccessfulDeleteResponse(res, body);");
     expect(response.text).toContain('if (body && body.requeued === true) return false;');
     expect(response.text).toContain('if (body && body.requeued === false) return true;');
-    expect(response.text).toContain('tombstonedQueueActionIds.add(pendingId);');
+    expect(response.text).toContain('const removedTombstoneKey = removed ? queueTombstoneKey(removed) : queueRenderedTombstoneKey(pendingId);');
+    expect(response.text).toContain('if (removedTombstoneKey) tombstonedQueueActionIds.add(removedTombstoneKey);');
     expect(response.text).toContain('const pendingReminderCancelIds = new Set();');
     expect(response.text).toContain('const tombstonedReminderCancelIds = new Set();');
+    expect(response.text).toContain('function reminderTombstoneKey(item)');
+    expect(response.text).toContain('function reminderRenderedTombstoneKey(id)');
     expect(response.text).toContain('if (pendingReminderCancelIds.has(pendingId)) return;');
     expect(response.text).toContain('pendingReminderCancelIds.add(pendingId);');
-    expect(response.text).toContain('!tombstonedReminderCancelIds.has(id)');
-    expect(response.text).toContain('tombstonedReminderCancelIds.add(pendingId);');
+    expect(response.text).toContain('!tombstonedReminderCancelIds.has(reminderTombstoneKey(item))');
+    expect(response.text).toContain('const removedTombstoneKey = removed ? reminderTombstoneKey(removed) : reminderRenderedTombstoneKey(pendingId);');
+    expect(response.text).toContain('if (removedTombstoneKey) tombstonedReminderCancelIds.add(removedTombstoneKey);');
     expect(response.text).toContain('pendingReminderCancelIds.delete(pendingId);');
     expect(response.text).not.toContain("if (!res.ok) throw new Error('HTTP ' + res.status);");
     expect(response.text).not.toContain('queueActionPending = false;');
@@ -608,6 +615,42 @@ describe('server dashboard mutation boundary', () => {
     expect(detail.text).toContain('const nextTasks = normalizeTaskPayload(await r.json());');
     expect(detail.text).toContain('taskListCache = nextTasks;');
     expect(detail.text).not.toContain("filterVal ? '/api/tasks?assignee=' + encodeURIComponent(filterVal) : '/api/tasks'");
+  });
+
+  test('task dashboards preserve drafts and guard in-flight task actions', async () => {
+    const mod = await setup();
+
+    const tasks = await request(mod.app).get('/tasks');
+    const detail = await request(mod.app).get('/agents/alpha');
+
+    expect(tasks.status).toBe(200);
+    expect(detail.status).toBe(200);
+    expect(tasks.text).toContain('const taskActionInFlight=new Set();');
+    expect(tasks.text).toContain("function taskActionKey(id,action){return String(id)+'::'+action}");
+    expect(tasks.text).toContain('const pendingTaskStatusById=new Map();');
+    expect(tasks.text).toContain('function currentTaskCommentDraft(id)');
+    expect(tasks.text).toContain('const commentDraft=currentTaskCommentDraft(task.id);');
+    expect(tasks.text).toContain('const selectedStatus=pendingTaskStatusById.get(task.id)||task.status;');
+    expect(tasks.text).toContain('if(nextInput)nextInput.value=commentDraft;');
+    expect(tasks.text).toContain("if(detailId===id&&liveInput)liveInput.value='';");
+    expect(tasks.text).toContain("isTaskActionInFlight(task.id,'comment')?' disabled':''");
+    expect(tasks.text).toContain("if(isTaskActionInFlight(id,action))return;");
+    expect(tasks.text).toContain('setTaskActionInFlight(id,action,true);');
+    expect(tasks.text).toContain('setTaskActionInFlight(id,action,false);');
+    expect(tasks.text).toContain('await refresh();');
+    expect(detail.text).toContain('const taskActionInFlight = new Set();');
+    expect(detail.text).toContain("function taskActionKey(id, action) { return String(id) + '::' + action; }");
+    expect(detail.text).toContain('const pendingTaskStatusById = new Map();');
+    expect(detail.text).toContain('function currentTaskCommentDraft(id)');
+    expect(detail.text).toContain('const commentDraft = currentTaskCommentDraft(task.id);');
+    expect(detail.text).toContain('const selectedStatus = pendingTaskStatusById.get(task.id) || task.status;');
+    expect(detail.text).toContain('if (nextInput) nextInput.value = commentDraft;');
+    expect(detail.text).toContain("if (taskDetailViewId === id && liveInput) liveInput.value = '';");
+    expect(detail.text).toContain("isTaskActionInFlight(task.id, 'comment') ? ' disabled' : ''");
+    expect(detail.text).toContain('if (isTaskActionInFlight(id, action)) return;');
+    expect(detail.text).toContain('setTaskActionInFlight(id, action, true);');
+    expect(detail.text).toContain('setTaskActionInFlight(id, action, false);');
+    expect(detail.text).toContain('await taskListRefresh();');
   });
 
   test('agent detail save refresh preserves newer dirty edits', async () => {
