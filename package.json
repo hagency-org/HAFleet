@@ -13,6 +13,7 @@
     "check:cli-contract": "node scripts/check-cli-contract.js",
     "check:remote-package-smoke": "bash scripts/check-remote-package-smoke.sh",
     "check:dep-isolation": "bash scripts/check-dep-isolation.sh",
+    "check:architecture-boundaries": "node scripts/check-architecture-boundaries.js",
     "report:ci-env": "node scripts/report-ci-env.js",
     "verify:ci": "bash scripts/verify-ci.sh",
     "verify:cd-preflight": "bash scripts/verify-cd-preflight.sh",

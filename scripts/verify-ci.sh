@@ -21,6 +21,9 @@ npm run check:remote-package-smoke
 echo "== dependency boundary =="
 npm run check:dep-isolation
 
+echo "== architecture boundaries =="
+npm run check:architecture-boundaries
+
 echo "== kernel and cli smoke tests =="
 npm run test:kernel
 

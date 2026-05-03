@@ -1,0 +1,103 @@
+{
+  "importBoundaries": [
+    {
+      "name": "kernel libraries do not import backend, dashboard, or optional edge owners",
+      "include": [
+        "lib/agent-home-v1.js",
+        "lib/agent-state.js",
+        "lib/mcp-server-core.js",
+        "lib/push-relay-core.js",
+        "lib/runtime-dir-guard.js"
+      ],
+      "forbiddenResolvedPrefixes": [
+        "backend-v2.js",
+        "server.js",
+        "bridge-matrix.js",
+        "lib/alert-store.js",
+        "lib/supervisor-",
+        "lib/task-",
+        "lib/upstream-claude-subconscious.js",
+        "remote/"
+      ]
+    },
+    {
+      "name": "dashboard modules do not import backend or remote runtime owners",
+      "include": [
+        "lib/dashboard/"
+      ],
+      "allowMissing": true,
+      "forbiddenResolvedPrefixes": [
+        "backend-v2.js",
+        "server.js",
+        "bridge-matrix.js",
+        "lib/mcp-server-core.js",
+        "lib/push-relay-core.js",
+        "remote/"
+      ]
+    },
+    {
+      "name": "remote package stays self-contained",
+      "include": [
+        "remote/"
+      ],
+      "forbiddenSpecifierPatterns": [
+        "^\\.\\./\\.\\./",
+        "^\\.\\./lib/"
+      ],
+      "forbiddenResolvedPrefixes": [
+        "backend-v2.js",
+        "server.js",
+        "bridge-matrix.js",
+        "lib/"
+      ]
+    }
+  ],
+  "routeOwnership": {
+    "server.js": {
+      "mutationRoutes": [
+        { "method": "POST", "path": "/api/queue", "owner": "dashboard.queue" },
+        { "method": "DELETE", "path": "/api/queue/:id", "owner": "dashboard.queue" },
+        { "method": "POST", "path": "/api/queue/:id/send", "owner": "dashboard.queue" },
+        { "method": "POST", "path": "/api/subconscious/upstream/bootstrap/:name", "owner": "backend.proxy.subconscious" },
+        { "method": "POST", "path": "/api/subconscious/upstream/session-start/:name", "owner": "backend.proxy.subconscious" },
+        { "method": "POST", "path": "/api/subconscious/upstream/user-prompt/:name", "owner": "backend.proxy.subconscious" },
+        { "method": "POST", "path": "/api/subconscious/upstream/pretool/:name", "owner": "backend.proxy.subconscious" },
+        { "method": "POST", "path": "/api/agents/:name/unread-messages/:msgId/cancel", "owner": "backend.proxy.messages" },
+        { "method": "POST", "path": "/api/agents/:name/dm-send", "owner": "backend.proxy.messages" },
+        { "method": "DELETE", "path": "/api/queue/agents/:name/notifications", "owner": "dashboard.queue" },
+        { "method": "PATCH", "path": "/api/agents/:name", "owner": "backend.proxy.agents" },
+        { "method": "POST", "path": "/api/agents/create", "owner": "backend.proxy.agents" },
+        { "method": "POST", "path": "/api/agents/:name/start", "owner": "backend.proxy.agents" },
+        { "method": "PATCH", "path": "/api/agents/:name/home-metadata", "owner": "backend.proxy.agents" },
+        { "method": "POST", "path": "/api/agents/:name/projects/import", "owner": "backend.proxy.agent-projects" },
+        { "method": "POST", "path": "/api/agents/:name/projects/remove", "owner": "backend.proxy.agent-projects" },
+        { "method": "POST", "path": "/api/agents/:name/workspace/migrate-entry-files", "owner": "backend.proxy.agent-projects" },
+        { "method": "PATCH", "path": "/api/agents/:name/subconscious-guidance", "owner": "backend.proxy.subconscious" },
+        { "method": "PATCH", "path": "/api/agents/:name/subconscious-runtime", "owner": "backend.proxy.subconscious" },
+        { "method": "POST", "path": "/api/agents/:name/offline", "owner": "backend.proxy.agents" },
+        { "method": "POST", "path": "/api/agents/:name/down", "owner": "dashboard.agent-control" },
+        { "method": "DELETE", "path": "/api/agents/:name", "owner": "backend.proxy.agents" },
+        { "method": "POST", "path": "/api/framework-presets", "owner": "backend.proxy.framework-presets" },
+        { "method": "PUT", "path": "/api/framework-presets/:id", "owner": "backend.proxy.framework-presets" },
+        { "method": "DELETE", "path": "/api/framework-presets/:id", "owner": "backend.proxy.framework-presets" },
+        { "method": "POST", "path": "/api/tasks", "owner": "backend.proxy.tasks" },
+        { "method": "PATCH", "path": "/api/tasks/:id", "owner": "backend.proxy.tasks" },
+        { "method": "DELETE", "path": "/api/tasks/:id", "owner": "backend.proxy.tasks" },
+        { "method": "POST", "path": "/api/tasks/:id/transition", "owner": "backend.proxy.tasks" },
+        { "method": "POST", "path": "/api/tasks/:id/comments", "owner": "backend.proxy.tasks" },
+        { "method": "POST", "path": "/api/task-graphs", "owner": "backend.proxy.task-graphs" },
+        { "method": "DELETE", "path": "/api/task-graphs/:id", "owner": "backend.proxy.task-graphs" },
+        { "method": "PATCH", "path": "/api/task-graphs/:id/nodes/:nodeId", "owner": "backend.proxy.task-graphs" },
+        { "method": "POST", "path": "/api/supervisor/control", "owner": "backend.proxy.supervisor" },
+        { "method": "POST", "path": "/api/alerts/:id/transition", "owner": "backend.proxy.alerts" },
+        { "method": "POST", "path": "/api/alerts/:id/notes", "owner": "backend.proxy.alerts" },
+        { "method": "PATCH", "path": "/api/alerts/:id", "owner": "backend.proxy.alerts" },
+        { "method": "DELETE", "path": "/api/alerts/:id", "owner": "backend.proxy.alerts" },
+        { "method": "POST", "path": "/api/redirects", "owner": "dashboard.redirects" },
+        { "method": "DELETE", "path": "/api/redirects/:from", "owner": "dashboard.redirects" },
+        { "method": "POST", "path": "/api/reminders", "owner": "dashboard.reminders" },
+        { "method": "DELETE", "path": "/api/reminders/:id", "owner": "dashboard.reminders" }
+      ]
+    }
+  }
+}
