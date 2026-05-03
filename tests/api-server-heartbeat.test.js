@@ -426,6 +426,16 @@ describe('server heartbeat api', () => {
         severity: 'critical',
         sourceAgent: 's1',
         summary: "Remote server 's1' is offline",
+        actionable: true,
+        owner: 'remote-runtime',
+        runbook: 'docs/runbooks/remote-server-offline.md',
+        impact: 'remote agents on this server are marked offline and direct push delivery is unavailable until the relay recovers',
+        recoveryCondition: 'the next accepted heartbeat from this server auto-resolves this alert',
+        correlation: expect.objectContaining({
+          dedupeKey: 'server_offline:s1',
+          serverId: 's1',
+          affectedAgents: ['agent-a'],
+        }),
       }),
     ]);
     expect(alerts.body[0].detail).toContain('Affected agents: agent-a');
@@ -609,6 +619,14 @@ describe('server heartbeat api', () => {
           actionable: expect.objectContaining({ total: 1, critical: 0, warning: 1 }),
         }),
       },
+    });
+
+    await request(context.app).post('/api/system/info')
+      .send({ summary: 'Swap high diagnostic', full: 'missing action fields', alertType: 'swap_high', dedupeKey: 'swap_high:diagnostic' });
+    health = await request(context.app).get('/health');
+    expect(health.body.health.components.alerts).toMatchObject({
+      status: 'degraded',
+      actionable: expect.objectContaining({ total: 1, critical: 0, warning: 1 }),
     });
 
     await request(context.app).post('/api/system/info')

@@ -792,6 +792,15 @@ describe('backend runtime API', () => {
         dedupeKey: 'server_offline:relay-west',
         sourceAgent: 'relay-west',
         severity: 'critical',
+        actionable: true,
+        owner: 'remote-runtime',
+        runbook: 'docs/runbooks/remote-server-offline.md',
+        recoveryCondition: 'the next accepted heartbeat from this server auto-resolves this alert',
+        correlation: expect.objectContaining({
+          dedupeKey: 'server_offline:relay-west',
+          serverId: 'relay-west',
+          affectedAgents: ['alpha'],
+        }),
       }),
     ]);
     expect(response.body.health).toMatchObject({

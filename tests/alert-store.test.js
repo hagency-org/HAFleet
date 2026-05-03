@@ -162,6 +162,157 @@ describe('alert system', () => {
     expect(stats.body.byStatus.open).toBe(2);
   });
 
+  test('downgrades incomplete paging alerts to diagnostic info', async () => {
+    await setup();
+    const { app } = context;
+
+    await request(app).post('/api/system/info')
+      .send({
+        summary: 'Swap high',
+        full: 'swap pressure',
+        alertType: 'swap_high',
+        dedupeKey: 'swap_high:test',
+      });
+
+    const list = await request(app).get('/api/alerts');
+    expect(list.body).toEqual([
+      expect.objectContaining({
+        alertType: 'swap_high',
+        dedupeKey: 'swap_high:test',
+        severity: 'info',
+        originalSeverity: 'critical',
+        actionable: false,
+        missingActionableFields: expect.arrayContaining(['owner', 'runbook', 'impact', 'recoveryCondition']),
+        summary: 'Swap high',
+        detail: 'swap pressure',
+        status: 'open',
+      }),
+    ]);
+    expect(list.body[0].correlation).toMatchObject({ dedupeKey: 'swap_high:test' });
+  });
+
+  test('keeps complete paging alerts actionable and preserves structured fields', async () => {
+    await setup();
+    const { app } = context;
+
+    await request(app).post('/api/system/info')
+      .send({
+        summary: 'Bridge warning',
+        full: 'bridge warning detail',
+        alertType: 'bridge_warning',
+        dedupeKey: 'bridge_warning:matrix',
+        sourceAgent: 'matrix-bridge',
+        owner: 'bridge-runtime',
+        runbook: 'docs/runbooks/bridge-warning.md',
+        impact: 'Matrix bridge warning can delay operator messages.',
+        recoveryCondition: 'Bridge warning source reports recovered or no new warning appears.',
+        correlation: { bridge: 'matrix', room: '!ops:example.test' },
+      });
+
+    const list = await request(app).get('/api/alerts');
+    expect(list.body).toEqual([
+      expect.objectContaining({
+        alertType: 'bridge_warning',
+        dedupeKey: 'bridge_warning:matrix',
+        severity: 'warning',
+        originalSeverity: null,
+        actionable: true,
+        missingActionableFields: [],
+        owner: 'bridge-runtime',
+        runbook: 'docs/runbooks/bridge-warning.md',
+        impact: 'Matrix bridge warning can delay operator messages.',
+        recoveryCondition: 'Bridge warning source reports recovered or no new warning appears.',
+        correlation: expect.objectContaining({
+          bridge: 'matrix',
+          room: '!ops:example.test',
+          dedupeKey: 'bridge_warning:matrix',
+          sourceAgent: 'matrix-bridge',
+        }),
+      }),
+    ]);
+  });
+
+  test('deduped alerts do not erase actionable metadata', async () => {
+    await setup();
+    const { app } = context;
+
+    const payload = {
+      summary: 'Bridge warning',
+      full: 'first detail',
+      alertType: 'bridge_warning',
+      dedupeKey: 'bridge_warning:dedupe',
+      sourceAgent: 'matrix-bridge',
+      owner: 'bridge-runtime',
+      runbook: 'docs/runbooks/bridge-warning.md',
+      impact: 'Matrix bridge warning can delay operator messages.',
+      recoveryCondition: 'Bridge warning source reports recovered or no new warning appears.',
+      correlation: { bridge: 'matrix' },
+    };
+    await request(app).post('/api/system/info').send(payload);
+    await request(app).post('/api/system/info')
+      .send({
+        summary: 'Bridge warning again',
+        full: 'second detail',
+        alertType: 'bridge_warning',
+        dedupeKey: 'bridge_warning:dedupe',
+      });
+
+    const list = await request(app).get('/api/alerts');
+    expect(list.body).toEqual([
+      expect.objectContaining({
+        severity: 'warning',
+        actionable: true,
+        owner: 'bridge-runtime',
+        runbook: 'docs/runbooks/bridge-warning.md',
+        occurrences: 2,
+        summary: 'Bridge warning again',
+      }),
+    ]);
+  });
+
+  test('patch updates actionable metadata and can restore original severity', async () => {
+    await setup();
+    const { app } = context;
+
+    await request(app).post('/api/system/info')
+      .send({
+        summary: 'Swap high',
+        full: 'swap pressure',
+        alertType: 'swap_high',
+        dedupeKey: 'swap_high:patch',
+      });
+    const list = await request(app).get('/api/alerts');
+    const id = list.body[0].id;
+    expect(list.body[0].severity).toBe('info');
+
+    const patch = await request(app).patch(`/api/alerts/${id}`)
+      .send({
+        owner: 'host-runtime',
+        runbook: 'docs/runbooks/swap-high.md',
+        impact: 'High swap can stall or kill local agent processes.',
+        recoveryCondition: 'Swap usage remains below the clear threshold.',
+        correlation: { host: 'local' },
+        tags: ['host-runtime'],
+        linkedTaskId: 'task_123',
+      });
+
+    expect(patch.status).toBe(200);
+    expect(patch.body.alert).toMatchObject({
+      severity: 'critical',
+      originalSeverity: null,
+      actionable: true,
+      missingActionableFields: [],
+      owner: 'host-runtime',
+      runbook: 'docs/runbooks/swap-high.md',
+      linkedTaskId: 'task_123',
+      tags: ['host-runtime'],
+      correlation: expect.objectContaining({
+        host: 'local',
+        dedupeKey: 'swap_high:patch',
+      }),
+    });
+  });
+
   test('deduplicates alerts by dedupeKey', async () => {
     await setup();
     const { app } = context;

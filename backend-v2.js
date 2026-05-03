@@ -3537,6 +3537,97 @@ const ALERT_SEVERITY_MAP = {
   server_takeover: 'info', supervisor_nudge: 'info', supervisor_escalation: 'warning',
 };
 
+const ALERT_ACTION_FIELD_KEYS = ['owner', 'assignee', 'runbook', 'impact', 'recoveryCondition', 'exitCondition', 'correlation'];
+
+function mergeAlertCorrelation(base = null, override = null) {
+  const result = {};
+  if (base && typeof base === 'object' && !Array.isArray(base)) Object.assign(result, base);
+  if (override && typeof override === 'object' && !Array.isArray(override)) Object.assign(result, override);
+  return Object.keys(result).length ? result : null;
+}
+
+function defaultAlertActionFields(alertType, opts = {}) {
+  const sourceAgent = normalizeOptionalText(opts.sourceAgent, 128);
+  const dedupeKey = normalizeOptionalText(opts.dedupeKey, 255) || alertType;
+  if (alertType === 'server_offline') {
+    const serverId = sourceAgent || String(dedupeKey || '').replace(/^server_offline:/, '') || null;
+    return {
+      owner: 'remote-runtime',
+      runbook: 'docs/runbooks/remote-server-offline.md',
+      impact: 'remote agents on this server are marked offline and direct push delivery is unavailable until the relay recovers',
+      recoveryCondition: 'the next accepted heartbeat from this server auto-resolves this alert',
+      correlation: {
+        dedupeKey,
+        serverId,
+      },
+    };
+  }
+  if (alertType === 'mcp_missing') {
+    return {
+      owner: 'agent-runtime',
+      runbook: 'docs/runbooks/mcp-missing.md',
+      impact: 'the agent cannot receive MCP tool calls until its MCP process is restored',
+      recoveryCondition: 'mcp_recovered for this agent auto-resolves this alert',
+      correlation: {
+        dedupeKey,
+        agent: sourceAgent || null,
+      },
+    };
+  }
+  if (alertType === 'agent_blocked') {
+    return {
+      owner: 'agent-runtime',
+      runbook: 'docs/runbooks/agent-blocked.md',
+      impact: 'the agent may be unable to process pending human or operator messages until the blocked state clears',
+      recoveryCondition: 'agent_recovered for this agent auto-resolves this alert',
+      correlation: {
+        dedupeKey,
+        agent: sourceAgent || null,
+      },
+    };
+  }
+  if (alertType === 'agent_rule') {
+    const parts = String(dedupeKey || '').split(':');
+    return {
+      owner: 'agent-runtime',
+      runbook: 'docs/runbooks/agent-rule.md',
+      impact: 'the agent may be violating an operator-facing response or inbox contract until the rule clears',
+      recoveryCondition: 'the rule condition becomes false and auto-resolves this alert',
+      correlation: {
+        dedupeKey,
+        agent: sourceAgent || parts[1] || null,
+        rule: parts[2] || null,
+      },
+    };
+  }
+  if (alertType === 'resource_alert') {
+    return {
+      owner: 'host-runtime',
+      runbook: 'docs/runbooks/resource-alert.md',
+      impact: 'the agent process is above its resource budget and may stall or be killed',
+      recoveryCondition: 'resource usage falls below the configured clear threshold',
+      correlation: {
+        dedupeKey,
+        agent: sourceAgent || null,
+      },
+    };
+  }
+  return {};
+}
+
+function buildAlertActionFields(alertType, opts = {}) {
+  const defaults = defaultAlertActionFields(alertType, opts);
+  const provided = {};
+  for (const key of ALERT_ACTION_FIELD_KEYS) {
+    if (opts[key] !== undefined) provided[key] = opts[key];
+  }
+  return {
+    ...defaults,
+    ...provided,
+    correlation: mergeAlertCorrelation(defaults.correlation, provided.correlation),
+  };
+}
+
 function emitSystemInfo(summary, full = '', alertType = null, opts = {}) {
   ensureInfoGroup();
   const event = {
@@ -3574,6 +3665,7 @@ function emitSystemInfo(summary, full = '', alertType = null, opts = {}) {
           sourceAgent: opts.sourceAgent || null,
           summary,
           detail: full || null,
+          ...buildAlertActionFields(alertType, { ...opts, dedupeKey }),
         });
       } catch { /* ingest validation failure — non-fatal */ }
     }
@@ -3631,6 +3723,15 @@ const notificationRouter = new NotificationRouter({
             sourceAgent: p.agentName,
             summary: `Agent '${p.agentName}' blocked (${p.tier === BLOCK_TIER_TRANSIENT ? 'transient' : (p.tier === BLOCK_TIER_SOFT ? 'soft' : 'hard')})`,
             detail: p.full || null,
+            owner: 'agent-runtime',
+            runbook: 'docs/runbooks/agent-blocked.md',
+            impact: 'the agent may be unable to process pending human or operator messages until the blocked state clears',
+            recoveryCondition: 'agent_recovered for this agent auto-resolves this alert',
+            correlation: {
+              dedupeKey: `agent_blocked:${p.agentName}`,
+              agent: p.agentName,
+              tier: p.tier === BLOCK_TIER_TRANSIENT ? 'transient' : (p.tier === BLOCK_TIER_SOFT ? 'soft' : 'hard'),
+            },
           });
         } catch { /* non-fatal */ }
       }
@@ -5143,6 +5244,16 @@ function emitServerOfflineAlert(serverId, reason, serverRecord = null, affectedA
       sourceAgent: normalizedServerId,
       summary: `Remote server '${normalizedServerId}' is offline`,
       detail: buildServerOfflineAlertDetail(normalizedServerId, reason, serverRecord, affected),
+      owner: 'remote-runtime',
+      runbook: 'docs/runbooks/remote-server-offline.md',
+      impact: 'remote agents on this server are marked offline and direct push delivery is unavailable until the relay recovers',
+      recoveryCondition: 'the next accepted heartbeat from this server auto-resolves this alert',
+      correlation: {
+        dedupeKey: `server_offline:${normalizedServerId}`,
+        serverId: normalizedServerId,
+        reason: reason || 'server-offline',
+        affectedAgents: affected,
+      },
       tags: [
         'server-outage',
         `server:${normalizedServerId}`,
@@ -5916,7 +6027,19 @@ async function sweepLocalSwapPressure() {
           'System memory pressure is high. Please intervene manually to avoid OOM killing agents.',
         ].join('\n'),
         'swap_high',
-        { dedupeKey: 'swap_high' }
+        {
+          dedupeKey: 'swap_high',
+          owner: 'host-runtime',
+          runbook: 'docs/runbooks/swap-high.md',
+          impact: 'high swap usage can stall or kill local agent processes',
+          recoveryCondition: `swap usage falls to or below ${SWAP_ALERT_CLEAR_PCT.toFixed(1)}% and swap_clear auto-resolves this alert`,
+          correlation: {
+            dedupeKey: 'swap_high',
+            host: 'local',
+            thresholdPct: SWAP_ALERT_THRESHOLD_PCT,
+            clearPct: SWAP_ALERT_CLEAR_PCT,
+          },
+        }
       );
     }
     return;
@@ -9049,8 +9172,18 @@ app.post('/api/system/info', requireBridgeSecret, (req, res) => {
   const opts = {};
   if (dedupeKey) opts.dedupeKey = dedupeKey;
   if (sourceAgent) opts.sourceAgent = sourceAgent;
+  for (const key of ALERT_ACTION_FIELD_KEYS) {
+    if (key === 'correlation') {
+      if (req.body?.correlation && typeof req.body.correlation === 'object' && !Array.isArray(req.body.correlation)) {
+        opts.correlation = req.body.correlation;
+      }
+      continue;
+    }
+    const value = normalizeOptionalText(req.body?.[key], key === 'runbook' ? 512 : 1024);
+    if (value) opts[key] = value;
+  }
   opts.source = 'bridge';
-  const event = emitSystemInfo(summary, full, alertType || null, Object.keys(opts).length > 1 ? opts : { source: 'bridge' });
+  const event = emitSystemInfo(summary, full, alertType || null, opts);
   res.json({ ok: true, id: event.id });
 });
 
