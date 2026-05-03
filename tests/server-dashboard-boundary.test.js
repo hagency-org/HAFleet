@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import request from 'supertest';
+import { shouldPreserveDetailSettings } from '../lib/dashboard/render/agent-detail-page.js';
 
 const SERVER_ENV_KEYS = [
   'AGENT_CHAT_RUNTIME_DIR',
@@ -49,6 +50,41 @@ async function importServer(runtimeDir, extraEnv = {}) {
   const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   return import(`${serverUrl}?dashboard-boundary-test=${cacheBust}`);
 }
+
+describe('agent detail dirty refresh policy', () => {
+  test('preserves settings only when a refresh can overwrite dirty edits', () => {
+    expect(shouldPreserveDetailSettings({
+      forceDetailRender: false,
+      hasUnsavedChanges: false,
+      saveEditVersion: null,
+      currentEditVersion: 0,
+    })).toBe(false);
+    expect(shouldPreserveDetailSettings({
+      forceDetailRender: false,
+      hasUnsavedChanges: true,
+      saveEditVersion: null,
+      currentEditVersion: 1,
+    })).toBe(true);
+    expect(shouldPreserveDetailSettings({
+      forceDetailRender: true,
+      hasUnsavedChanges: true,
+      saveEditVersion: null,
+      currentEditVersion: 2,
+    })).toBe(true);
+    expect(shouldPreserveDetailSettings({
+      forceDetailRender: true,
+      hasUnsavedChanges: true,
+      saveEditVersion: 3,
+      currentEditVersion: 3,
+    })).toBe(false);
+    expect(shouldPreserveDetailSettings({
+      forceDetailRender: true,
+      hasUnsavedChanges: true,
+      saveEditVersion: 3,
+      currentEditVersion: 4,
+    })).toBe(true);
+  });
+});
 
 describe('server dashboard mutation boundary', () => {
   let runtimeDir = null;
@@ -546,6 +582,26 @@ describe('server dashboard mutation boundary', () => {
     expect(detail.text).toContain('const nextTasks = normalizeTaskPayload(await r.json());');
     expect(detail.text).toContain('taskListCache = nextTasks;');
     expect(detail.text).not.toContain("filterVal ? '/api/tasks?assignee=' + encodeURIComponent(filterVal) : '/api/tasks'");
+  });
+
+  test('agent detail save refresh preserves newer dirty edits', async () => {
+    const mod = await setup();
+
+    const detail = await request(mod.app).get('/agents/alpha');
+
+    expect(detail.status).toBe(200);
+    expect(detail.text).toContain('let detailEditVersion = 0;');
+    expect(detail.text).toContain('function markDetailEdited()');
+    expect(detail.text).toContain('el.addEventListener(evt, markDetailEdited);');
+    expect(detail.text).toContain('function beginDetailSave()');
+    expect(detail.text).toContain('function refreshAfterDetailSave(saveEditVersion)');
+    expect(detail.text).toContain('return refresh({ forceDetailRender: true, saveEditVersion });');
+    expect(detail.text).toContain('function shouldPreserveDetailSettings(');
+    expect(detail.text).toContain('const shouldPreserveDirty = shouldPreserveDetailSettings({');
+    expect(detail.text).toContain('currentEditVersion: detailEditVersion');
+    expect(detail.text).toContain('await refreshAfterDetailSave(saveEditVersion);');
+    expect(detail.text).not.toContain('const saveEditVersion = beginDetailSave();\n    return detailEditVersion;');
+    expect(detail.text).not.toContain('await refresh(true);');
   });
 
   test.each([
