@@ -202,6 +202,46 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).toContain('reminderItems = normalizeArrayPayload(await r.json());');
   });
 
+  test('monitor agent status polling is single-flight and array-normalized', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('let agentStatusInFlight = false;');
+    expect(response.text).toContain('let agentStatusRefreshQueued = false;');
+    expect(response.text).toContain('if (agentStatusInFlight) { agentStatusRefreshQueued = true; return; }');
+    expect(response.text).toContain('const rows = Array.isArray(payload) ? payload : [];');
+    expect(response.text).toContain('agentStatusInFlight = false;');
+    expect(response.text).not.toContain('const rows = await res.json();');
+  });
+
+  test('alert stats payloads are normalized on alerts and monitor pages', async () => {
+    const mod = await setup();
+
+    const alerts = await request(mod.app).get('/alerts');
+    const monitor = await request(mod.app).get('/');
+
+    expect(alerts.status).toBe(200);
+    expect(monitor.status).toBe(200);
+    expect(alerts.text).toContain('function normalizeAlertStats(payload)');
+    expect(monitor.text).toContain('function normalizeAlertStats(payload)');
+    expect(alerts.text).toContain('const s=normalizeAlertStats(await r.json());');
+    expect(monitor.text).toContain('const s=normalizeAlertStats(await r.json());');
+  });
+
+  test('config page normalizes presets and agents payloads', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/config');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('presets = Array.isArray(next) ? next : [];');
+    expect(response.text).toContain('allAgents = Array.isArray(next) ? next : [];');
+    expect(response.text).not.toContain('presets = await r.json();');
+    expect(response.text).not.toContain('allAgents = await r.json();');
+  });
+
   test.each([
     '/',
     '/agents/alpha',
