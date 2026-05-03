@@ -53,10 +53,8 @@
         { "command": "update", "target": "agent-update" },
         { "command": "service", "target": "agent-service" },
         { "command": "verify-remote", "target": "verify-remote", "aliases": ["verify"] },
-        { "command": "audit", "target": "agent-audit" },
         { "command": "maintain", "target": "agent-maintain" },
         { "command": "prune-agents", "target": "agentchat-prune-agents" },
-        { "command": "sync-skills", "target": "agentchat-sync-skills" },
         { "command": "reminder", "target": "self-time-reminder", "aliases": ["self-time-reminder"] },
         { "command": "cli", "target": "agent-chat-cli", "aliases": ["admin"] }
       ],
@@ -66,6 +64,8 @@
         "graph",
         "resume-id",
         "benchmark",
+        "audit",
+        "sync-skills",
         "check-mcp"
       ],
       "helpAssertions": [

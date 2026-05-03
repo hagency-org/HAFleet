@@ -74,4 +74,28 @@ describe('remote install profile decision contracts', () => {
     expect(installSource).toContain('AUTODEPLOY_INSTALLED=true');
     expect(installSource).toContain('if [ "$AUTODEPLOY_INSTALLED" = true ]; then');
   });
+
+  test('standalone package omits git-checkout-only audit and skill sync commands', () => {
+    const buildSource = read('scripts/build-remote-package.sh');
+    const syncSource = read('scripts/check-remote-sync.sh');
+    const manifestSource = read('scripts/cli-command-manifest.json');
+    const remoteCli = read('remote/bin/agentchat');
+    const installSource = read('remote/install-remote.sh');
+    const remoteReadme = read('remote/README.md');
+
+    expect(buildSource).not.toContain('bin/agent-audit:bin/agent-audit');
+    expect(buildSource).not.toContain('bin/agentchat-sync-skills:bin/agentchat-sync-skills');
+    expect(syncSource).not.toContain('"bin/agent-audit"');
+    expect(syncSource).not.toContain('"bin/agentchat-sync-skills"');
+    expect(manifestSource).toContain('"audit"');
+    expect(manifestSource).toContain('"sync-skills"');
+    expect(remoteCli).not.toMatch(/^\s*audit\)/m);
+    expect(remoteCli).not.toMatch(/^\s*sync-skills\)/m);
+    expect(installSource).not.toContain('agent-audit');
+    expect(installSource).not.toContain('agentchat-sync-skills');
+    expect(remoteReadme).not.toContain('bin/agent-audit');
+    expect(remoteReadme).not.toContain('bin/agentchat-sync-skills');
+    expect(remoteReadme).not.toContain('agentchat audit');
+    expect(remoteReadme).not.toContain('agentchat sync-skills');
+  });
 });

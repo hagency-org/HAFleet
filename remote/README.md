@@ -17,8 +17,6 @@ Most files here are managed by root-level generators/sync checks:
 - `bin/agent-update`
 - `bin/verify-remote`
 - `bin/agent-maintain`
-- `bin/agent-audit`
-- `bin/agentchat-sync-skills`
 - `bin/agentchat-prune-agents`
 - `bin/agent-chat` (deprecated alias)
 - `push-relay.js`
@@ -36,16 +34,14 @@ Most files here are managed by root-level generators/sync checks:
 
 - New unified CLI: `agentchat`
 - Legacy commands (`agent-up`, `agent-down`, `agent-send`, etc.) are deprecated wrappers that forward to `agentchat` with a warning.
-- Remote `agentchat` only advertises commands included in this package. Central checkout commands such as `up-v1`, `project`, `graph`, `resume-id`, `benchmark`, and `check-mcp` are intentionally not packaged here.
+- Remote `agentchat` only advertises commands included in this package. Central checkout commands such as `up-v1`, `project`, `graph`, `resume-id`, `benchmark`, `audit`, `sync-skills`, and `check-mcp` are intentionally not packaged here.
 
 Examples:
 - `agentchat up <name> <path> [claude|codex] [--allow-shared-workspace]`
 - `agentchat down <name>`
 - `agentchat update --pause-services` (git-checkout installs only)
 - `agentchat cli fleet --expect-version <short-sha> [--json]`
-- `agentchat audit`
 - `agentchat maintain`
-- `agentchat sync-skills`
 - `agentchat prune-agents --older-than-days 7 --apply`
 
 ## Quick Start

@@ -6,9 +6,7 @@ cd "$ROOT_DIR"
 
 MIRROR_FILES=(
   "bin/agentchat-prune-agents"
-  "bin/agentchat-sync-skills"
   "bin/agent-chat"
-  "bin/agent-audit"
   "bin/agent-chat-cli"
   "bin/agent-down"
   "bin/agent-ls"

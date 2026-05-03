@@ -139,7 +139,7 @@ echo "[OK] Generated remote autodeploy service contract is stable"
 
 help_output="$("$PKG_DIR/bin/agentchat" --help)"
 printf '%s' "$help_output" | grep -q 'Usage: agentchat <command> \[args\]' || fail "generated agentchat help missing usage"
-for unsupported in up-v1 project graph resume-id benchmark check-mcp; do
+for unsupported in up-v1 project graph resume-id benchmark audit sync-skills check-mcp; do
   if printf '%s\n' "$help_output" | grep -Eq "^[[:space:]]*$unsupported([[:space:]]|$)"; then
     fail "generated remote help advertises unsupported command: $unsupported"
   fi
@@ -156,6 +156,35 @@ if ! grep -qi 'unknown or unsupported remote command' "$GRAPH_ERR"; then
   fail "generated remote unsupported command did not fail clearly"
 fi
 echo "[OK] Generated remote unsupported command fails clearly"
+
+AUDIT_OUT="$TMP_DIR/agentchat-remote-audit.out"
+AUDIT_ERR="$TMP_DIR/agentchat-remote-audit.err"
+if "$PKG_DIR/bin/agentchat" audit --quiet >"$AUDIT_OUT" 2>"$AUDIT_ERR"; then
+  fail "generated remote agentchat audit --quiet unexpectedly succeeded"
+fi
+if ! grep -qi 'unknown or unsupported remote command' "$AUDIT_ERR"; then
+  cat "$AUDIT_ERR" >&2
+  fail "generated remote audit command did not fail clearly"
+fi
+if grep -Eqi 'No such file|not found' "$AUDIT_ERR"; then
+  cat "$AUDIT_ERR" >&2
+  fail "generated remote audit command leaked missing-file details"
+fi
+
+SYNC_SKILLS_OUT="$TMP_DIR/agentchat-remote-sync-skills.out"
+SYNC_SKILLS_ERR="$TMP_DIR/agentchat-remote-sync-skills.err"
+if "$PKG_DIR/bin/agentchat" sync-skills --check >"$SYNC_SKILLS_OUT" 2>"$SYNC_SKILLS_ERR"; then
+  fail "generated remote agentchat sync-skills --check unexpectedly succeeded"
+fi
+if ! grep -qi 'unknown or unsupported remote command' "$SYNC_SKILLS_ERR"; then
+  cat "$SYNC_SKILLS_ERR" >&2
+  fail "generated remote sync-skills command did not fail clearly"
+fi
+if grep -Eqi 'No such file|not found|SKILL.md' "$SYNC_SKILLS_ERR"; then
+  cat "$SYNC_SKILLS_ERR" >&2
+  fail "generated remote sync-skills command leaked missing-file details"
+fi
+echo "[OK] Generated remote git-checkout-only commands fail clearly"
 
 echo "Checking generated remote scoped help..."
 service_help="$("$PKG_DIR/bin/agentchat" service --help)"
