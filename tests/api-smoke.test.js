@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import { restoreEnv, snapshotEnv } from './helpers/env.js';
 
 function writeJson(filePath, value) {
   writeFileSync(filePath, JSON.stringify(value, null, 2));
@@ -13,7 +14,7 @@ describe('backend API smoke', () => {
   let runtimeDir;
   let app;
   let computeAdaptiveSweepIntervalMs;
-  let savedApiToken;
+  let envSnapshot;
 
   beforeAll(async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-api-smoke-'));
@@ -36,7 +37,12 @@ describe('backend API smoke', () => {
     writeJson(path.join(dataDir, 'agent_runtime.json'), {});
     writeJson(path.join(dataDir, 'local_activity_sweep.json'), { selectionCursor: 0 });
 
-    savedApiToken = process.env.API_TOKEN;
+    envSnapshot = snapshotEnv([
+      'AGENT_CHAT_RUNTIME_DIR',
+      'API_TOKEN',
+      'SUPERVISOR_ENABLED',
+      'AGENT_SCOPE_MONITOR_ENABLED',
+    ]);
     process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
     process.env.API_TOKEN = 'api-smoke-test-token';
     process.env.SUPERVISOR_ENABLED = 'false';
@@ -48,8 +54,7 @@ describe('backend API smoke', () => {
 
   afterAll(() => {
     rmSync(runtimeDir, { recursive: true, force: true });
-    if (savedApiToken !== undefined) process.env.API_TOKEN = savedApiToken;
-    else delete process.env.API_TOKEN;
+    restoreEnv(envSnapshot);
   });
 
   test('GET /api/agents returns 200 and an array', async () => {

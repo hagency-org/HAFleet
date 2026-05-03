@@ -1,12 +1,18 @@
-import { describe, expect, test, vi } from 'vitest';
+import { afterAll, describe, expect, test, vi } from 'vitest';
+import { restoreEnv, snapshotEnv } from './helpers/env.js';
 
 // Set ACL env vars before importing the module
+const envSnapshot = snapshotEnv(['MATRIX_OPERATOR_MXIDS', 'MATRIX_ADMIN_MXIDS']);
 process.env.MATRIX_OPERATOR_MXIDS = '@ops:matrix.test,@dev:matrix.test';
 process.env.MATRIX_ADMIN_MXIDS = '@root:matrix.test';
 
 const { default: BotCommands, classifyCommand, authorizeCommand, COMMAND_TIERS } = await import('../lib/bot-commands.js');
 
 describe('command ACL (5.8.2)', () => {
+  afterAll(() => {
+    restoreEnv(envSnapshot);
+  });
+
   describe('classifyCommand', () => {
     test('!help is tier 0 (public)', () => {
       expect(classifyCommand('!help')).toBe(0);

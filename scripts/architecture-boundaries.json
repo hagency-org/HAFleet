@@ -184,6 +184,7 @@
         { "method": "GET", "path": "/api/dm/:agent/history", "owner": "messages.operator-dm-history", "auth": "bearer" },
         { "method": "GET", "path": "/api/messages/:id", "owner": "messages.detail-access", "auth": "message-detail-access" },
         { "method": "GET", "path": "/api/messages/:id/delivery", "owner": "delivery.message-detail-access", "auth": "message-detail-access" },
+        { "method": "GET", "path": "/api/stream", "owner": "events.backend-sse-stream", "auth": "global-api-auth-only" },
         { "method": "GET", "path": "/api/agents/:name/delivery-events", "owner": "delivery.agent-events", "auth": "agent-token" },
         { "method": "GET", "path": "/api/inbox/:agent/unread", "owner": "inbox.agent-unread", "auth": "agent-token" },
         { "method": "GET", "path": "/api/inbox/:agent/unread-list", "owner": "inbox.agent-or-dashboard-unread", "auth": "bearer-or-agent-token-inline" },

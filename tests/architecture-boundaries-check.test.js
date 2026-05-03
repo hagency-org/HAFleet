@@ -139,4 +139,25 @@ describe('architecture boundary checker stateful GET routes', () => {
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain('stateful GET route lacks owner entry: GET /api/subconscious/detail/:name');
   });
+
+  test('recognizes explicit installRoute registrations for expected sensitive routes', async () => {
+    const result = await runChecker({
+      source: `
+        const app = {};
+        app.use('/api', createApiAuthMiddleware({}));
+        sseAdapter.installRoute(app, '/api/stream');
+      `,
+      manifest: manifestFor({
+        mutationRoutes: [],
+        statefulGetMarkers: [],
+        statefulGetRoutes: [],
+        sensitiveRoutes: [
+          { method: 'GET', path: '/api/stream', owner: 'fixture.stream', auth: 'global-api-auth-only' },
+        ],
+      }),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain('1 sensitive route(s)');
+  });
 });

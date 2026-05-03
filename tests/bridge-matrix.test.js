@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { mkdtempSync, rmSync } from 'fs';
 import { pathToFileURL } from 'url';
+import { restoreEnv, snapshotEnv } from './helpers/env.js';
 
 describe('bridge matrix behavior', () => {
   let runtimeDir;
@@ -10,9 +11,11 @@ describe('bridge matrix behavior', () => {
   let generateAvatarPngForTest;
   let resetBridgeMatrixTestHooks;
   let setBridgeMatrixTestHooks;
+  let envSnapshot;
 
   beforeAll(async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-test-'));
+    envSnapshot = snapshotEnv(['AGENT_CHAT_RUNTIME_DIR']);
     process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
     const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
     ({
@@ -25,6 +28,7 @@ describe('bridge matrix behavior', () => {
 
   afterAll(() => {
     rmSync(runtimeDir, { recursive: true, force: true });
+    restoreEnv(envSnapshot);
   });
 
   afterEach(() => {

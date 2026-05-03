@@ -54,7 +54,6 @@ function runVerifyRemote(args, options = {}) {
       API_TOKEN: '',
       AGENT_CHAT_API: '',
       AGENT_CHAT_SERVER: '',
-      AGENT_NAME: '',
       ...options.env,
     },
   });
@@ -180,8 +179,6 @@ describe('verify-remote cli', () => {
   });
 
   test('does not inherit ambient AGENT_NAME when --agent is omitted', async () => {
-    const previousAgentName = process.env.AGENT_NAME;
-    process.env.AGENT_NAME = 'agentchat-develop';
     let agentRequests = 0;
     const api = await startFakeBackend((req) => {
       if (req.url === serversPath) {
@@ -196,22 +193,17 @@ describe('verify-remote cli', () => {
       return { status: 404, body: { error: 'not found' } };
     });
 
-    try {
-      const { stdout } = await runVerifyRemote([
-        '--no-service',
-        '--api', api,
-        '--server', 'remote-a',
-        '--samples', '1',
-        '--interval', '1',
-      ]);
+    const { stdout } = await runVerifyRemote([
+      '--no-service',
+      '--api', api,
+      '--server', 'remote-a',
+      '--samples', '1',
+      '--interval', '1',
+    ], { env: { AGENT_NAME: 'agentchat-develop' } });
 
-      expect(stdout).not.toContain('Verifying agent state');
-      expect(stdout).toContain('verify-remote passed.');
-      expect(agentRequests).toBe(0);
-    } finally {
-      if (previousAgentName === undefined) delete process.env.AGENT_NAME;
-      else process.env.AGENT_NAME = previousAgentName;
-    }
+    expect(stdout).not.toContain('Verifying agent state');
+    expect(stdout).toContain('verify-remote passed.');
+    expect(agentRequests).toBe(0);
   });
 
   test('fails agent check when the agent belongs to a different server', async () => {

@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import { restoreEnv, snapshotEnv } from './helpers/env.js';
 import {
   BLOCK_PATTERNS,
   BLOCK_TIER_HARD,
@@ -19,6 +20,8 @@ function writeJson(filePath, value) {
   writeFileSync(filePath, JSON.stringify(value, null, 2));
 }
 
+let normalizationEnvSnapshot = null;
+
 async function importBackend(seed = {}) {
   const runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-normalization-test-'));
   const dataDir = path.join(runtimeDir, 'data');
@@ -33,6 +36,12 @@ async function importBackend(seed = {}) {
   writeJson(path.join(dataDir, 'local_activity_sweep.json'), { selectionCursor: 0 });
   writeJson(path.join(dataDir, '.msg_counter'), 0);
 
+  normalizationEnvSnapshot = snapshotEnv([
+    'AGENT_CHAT_RUNTIME_DIR',
+    'SUPERVISOR_ENABLED',
+    'AGENT_SCOPE_MONITOR_ENABLED',
+    'AGENT_JSON_WRITE_BATCH_MS',
+  ]);
   process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
   process.env.SUPERVISOR_ENABLED = 'false';
   process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
@@ -50,6 +59,8 @@ describe('normalization helpers', () => {
   afterEach(() => {
     if (runtimeDir) rmSync(runtimeDir, { recursive: true, force: true });
     runtimeDir = null;
+    restoreEnv(normalizationEnvSnapshot);
+    normalizationEnvSnapshot = null;
   });
 
   test('normalizeAgentName uses canonical stored casing and trims whitespace', async () => {

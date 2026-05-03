@@ -3,12 +3,14 @@ import os from 'os';
 import path from 'path';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs';
 import { pathToFileURL } from 'url';
+import { restoreEnv, snapshotEnv } from './helpers/env.js';
 
 describe('room trust classifier (5.8.1)', () => {
   let runtimeDir;
   let getRoomTrust;
   let markRoomTrusted;
   let MATRIX_TRUST_MODE;
+  let envSnapshot;
 
   beforeAll(async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'room-trust-test-'));
@@ -22,6 +24,12 @@ describe('room trust classifier (5.8.1)', () => {
       groupRoomMap: { 'ops-chat': '!existing:matrix.test' },
       dmRooms: { 'dm:testbot': '!dm-existing:matrix.test' },
     }, null, 2));
+    envSnapshot = snapshotEnv([
+      'AGENT_CHAT_RUNTIME_DIR',
+      'MATRIX_TRUST_MODE',
+      'MATRIX_TRUSTED_ROOM_IDS',
+      'MATRIX_TRUSTED_INVITER_MXIDS',
+    ]);
     process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
     process.env.MATRIX_TRUST_MODE = 'audit';
     process.env.MATRIX_TRUSTED_ROOM_IDS = '!allow1:matrix.test,!allow2:matrix.test';
@@ -34,6 +42,7 @@ describe('room trust classifier (5.8.1)', () => {
 
   afterAll(() => {
     rmSync(runtimeDir, { recursive: true, force: true });
+    restoreEnv(envSnapshot);
   });
 
   test('room in allowlist is trusted', () => {

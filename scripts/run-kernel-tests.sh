@@ -42,7 +42,8 @@ start_shard "api messaging" \
 
 start_shard "api runtime" \
   tests/api-task-graphs.test.js \
-  tests/api-server-heartbeat.test.js
+  tests/api-server-heartbeat.test.js \
+  tests/api-runtime.test.js
 
 start_shard "delivery and dashboard" \
   tests/push-relay.test.js \

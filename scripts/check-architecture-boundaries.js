@@ -198,6 +198,16 @@ function extractExpressRoutes(source) {
       line: source.slice(0, match.index).split('\n').length,
     });
   }
+  const installRoutePattern = /\b[A-Za-z_$][\w$]*\.installRoute\(\s*app\s*,\s*(['"`])([^'"`]+)\1/g;
+  while ((match = installRoutePattern.exec(source)) !== null) {
+    routes.push({
+      method: 'GET',
+      path: match[2],
+      index: match.index,
+      line: source.slice(0, match.index).split('\n').length,
+    });
+  }
+  routes.sort((a, b) => a.index - b.index);
   for (let i = 0; i < routes.length; i++) {
     const next = routes[i + 1]?.index ?? source.length;
     const end = findRouteCallEnd(source, routes[i].index);
