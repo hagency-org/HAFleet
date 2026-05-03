@@ -13,6 +13,19 @@ fi
 # Falls back to direct send if queue service is unavailable.
 set -euo pipefail
 
+usage() {
+    cat <<'USAGE'
+Usage: agent-send [--force] <target-pane> <payload>
+
+Queues payload for delivery to target tmux pane when idle.
+Falls back to direct tmux send if the queue service is unavailable.
+
+Options:
+  -f, --force  Deliver immediately, skip idle wait
+  -h, --help   Show this help
+USAGE
+}
+
 WEB_PORT_RAW="${AGENT_CHAT_WEB_PORT:-8084}"
 if [[ "$WEB_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$WEB_PORT_RAW" -gt 0 ]; then
     WEB_PORT="$WEB_PORT_RAW"
@@ -26,16 +39,17 @@ if [ -n "${AGENT_CHAT_DASHBOARD_TOKEN:-}" ]; then
 fi
 
 FORCE=false
-while [[ "${1:-}" == --* ]]; do
+while [[ "${1:-}" == -* ]]; do
     case "$1" in
+        -h|--help) usage; exit 0 ;;
         --force|-f) FORCE=true; shift ;;
+        --) shift; break ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
 
 if [ $# -ne 2 ]; then
-    echo "Usage: agent-send [--force] <target-pane> <payload>" >&2
-    echo "  --force, -f  Deliver immediately, skip idle wait" >&2
+    usage >&2
     exit 1
 fi
 

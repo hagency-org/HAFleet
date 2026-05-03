@@ -21,6 +21,21 @@ fi
 #   self-time-reminder cancel 42
 set -euo pipefail
 
+_usage() {
+  cat <<'USAGE'
+Usage: self-time-reminder <delay_seconds> <message>
+       self-time-reminder list
+       self-time-reminder cancel <id>
+       self-time-reminder --force <delay_seconds> <message>
+
+Schedule, list, and cancel reminders for the current tmux pane.
+
+Options:
+  --force      Add a reminder even if one already exists
+  -h, --help   Show this help
+USAGE
+}
+
 WEB_PORT_RAW="${AGENT_CHAT_WEB_PORT:-8084}"
 if [[ "$WEB_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$WEB_PORT_RAW" -gt 0 ]; then
   WEB_PORT="$WEB_PORT_RAW"
@@ -188,14 +203,14 @@ if mine:
 
 # ── Main dispatcher ─────────────────────────────
 if [ $# -lt 1 ]; then
-  echo "Usage: self-time-reminder <delay_seconds> <message>" >&2
-  echo "       self-time-reminder list" >&2
-  echo "       self-time-reminder cancel <id>" >&2
-  echo "       self-time-reminder --force <delay_seconds> <message>" >&2
+  _usage >&2
   exit 1
 fi
 
 case "$1" in
+  -h|--help|help)
+    _usage
+    ;;
   list)
     _cmd_list
     ;;

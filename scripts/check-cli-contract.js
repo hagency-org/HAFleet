@@ -79,32 +79,52 @@ function runCliExpectFailure(cliPath, args) {
   }
 }
 
-function checkHelpAssertions(cliPath, profileName, assertions = []) {
+function checkScopedHelp(cliPath, profileName, commands = [], assertions = []) {
+  const assertionByCommand = new Map();
   for (const assertion of assertions) {
     const command = assertion.command;
     if (!command) {
       fail(`${profileName} help assertion is missing a command`);
       continue;
     }
-    let output = '';
-    try {
-      output = runCli(cliPath, [command, '--help']);
-    } catch (error) {
-      fail(`${profileName} ${command} --help failed: ${error.stderr?.toString() || error.message}`);
-      continue;
+    assertionByCommand.set(command, assertion);
+  }
+
+  let checked = 0;
+  const commandNames = new Set(commands.map((entry) => entry.command));
+  for (const assertion of assertionByCommand.values()) {
+    if (!commandNames.has(assertion.command)) {
+      fail(`${profileName} help assertion references unmanifested command: ${assertion.command}`);
     }
-    for (const expected of assertion.mustContain || []) {
-      if (!output.includes(expected)) {
-        fail(`${profileName} ${command} --help missing expected text: ${expected}`);
+  }
+
+  for (const entry of commands) {
+    if (entry.showInHelp === false) continue;
+    const scopedCommands = [entry.command, ...(entry.aliases || [])];
+    for (const command of scopedCommands) {
+      let output = '';
+      try {
+        output = runCli(cliPath, [command, '--help']);
+      } catch (error) {
+        fail(`${profileName} ${command} --help failed: ${error.stderr?.toString() || error.message}`);
+        continue;
       }
-    }
-    for (const forbidden of assertion.mustNotContain || []) {
-      if (output.includes(forbidden)) {
-        fail(`${profileName} ${command} --help includes forbidden text: ${forbidden}`);
+      checked += 1;
+      const assertion = assertionByCommand.get(command);
+      if (!assertion) continue;
+      for (const expected of assertion.mustContain || []) {
+        if (!output.includes(expected)) {
+          fail(`${profileName} ${command} --help missing expected text: ${expected}`);
+        }
+      }
+      for (const forbidden of assertion.mustNotContain || []) {
+        if (output.includes(forbidden)) {
+          fail(`${profileName} ${command} --help includes forbidden text: ${forbidden}`);
+        }
       }
     }
   }
-  if (assertions.length > 0) ok(`${profileName} scoped help checked (${assertions.length} command(s))`);
+  ok(`${profileName} scoped help checked (${checked} command/alias entry(s))`);
 }
 
 for (const [profileName, profile] of Object.entries(manifest.profiles || {})) {
@@ -151,7 +171,7 @@ for (const [profileName, profile] of Object.entries(manifest.profiles || {})) {
     runCliExpectFailure(cliPath, [command]);
   }
 
-  checkHelpAssertions(cliPath, profileName, profile.helpAssertions || []);
+  checkScopedHelp(cliPath, profileName, commands, profile.helpAssertions || []);
 
   const actualTargets = collectDispatchTargets(source);
   for (const target of expectedTargets) {
