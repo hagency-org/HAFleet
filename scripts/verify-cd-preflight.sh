@@ -61,6 +61,20 @@ need_cmd() {
 need_cmd git
 need_cmd npm
 
+shell_join() {
+  local out=""
+  local quoted=""
+  local arg=""
+  for arg in "$@"; do
+    printf -v quoted '%q' "$arg"
+    if [ -n "$out" ]; then
+      out="$out "
+    fi
+    out="$out$quoted"
+  done
+  printf '%s\n' "$out"
+}
+
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "Error: not inside a git worktree" >&2
   exit 1
@@ -98,17 +112,17 @@ else
 fi
 
 echo "== post-deploy verification hint =="
-verify_cmd="agentchat verify-remote --samples 2 --interval 16 --expect-version $short_commit"
+verify_cmd=(agentchat verify-remote --samples 2 --interval 16 --expect-version "$short_commit")
 if [ -n "${AGENT_CHAT_API:-}" ]; then
-  verify_cmd="$verify_cmd --api ${AGENT_CHAT_API%/}"
+  verify_cmd+=(--api "${AGENT_CHAT_API%/}")
 fi
 if [ -n "${AGENT_CHAT_SERVER:-}" ]; then
-  verify_cmd="$verify_cmd --server $AGENT_CHAT_SERVER"
+  verify_cmd+=(--server "$AGENT_CHAT_SERVER")
 fi
 if [ -n "${VERIFY_AGENT:-}" ]; then
-  verify_cmd="$verify_cmd --agent $VERIFY_AGENT"
+  verify_cmd+=(--agent "$VERIFY_AGENT")
 fi
-echo "$verify_cmd"
+shell_join "${verify_cmd[@]}"
 if [ -n "${API_TOKEN:-}" ]; then
   echo "API_TOKEN: set (not printed)"
 fi

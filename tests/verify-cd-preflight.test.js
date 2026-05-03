@@ -56,6 +56,20 @@ describe('verify-cd-preflight script', () => {
     expect(stdout).not.toContain('secret-token');
   });
 
+  test('shell-quotes post-deploy command arguments with special characters', async () => {
+    const shortCommit = await git(['rev-parse', '--short', 'HEAD']);
+
+    const { stdout } = await runPreflight(['--skip-ci', '--allow-dirty'], {
+      AGENT_CHAT_API: 'https://agentchat.example.test/path?q=one&two=2',
+      AGENT_CHAT_SERVER: 'remote a',
+      VERIFY_AGENT: 'salt;rm -rf /',
+    });
+
+    expect(stdout).toContain(
+      `agentchat verify-remote --samples 2 --interval 16 --expect-version ${shortCommit} --api https://agentchat.example.test/path\\?q=one\\&two=2 --server remote\\ a --agent salt\\;rm\\ -rf\\ /`,
+    );
+  });
+
   test('rejects a mismatched required branch before running the gate', async () => {
     await expect(runPreflight([
       '--skip-ci',
