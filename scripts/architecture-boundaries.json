@@ -104,6 +104,22 @@
       ]
     },
     "backend-v2.js": {
+      "statefulGetMarkers": [
+        "refreshServerLiveness()",
+        "saveCursors()",
+        "markAgentInboxChecked(",
+        "advanceGroupCursor(",
+        "clearQueuedNotificationsForAgent(",
+        "appendDeliveryEvent("
+      ],
+      "statefulGetRoutes": [
+        { "method": "GET", "path": "/health", "owner": "server-runtime.health-liveness" },
+        { "method": "GET", "path": "/api/servers", "owner": "server-runtime.liveness-read", "auth": "global-api-auth-only" },
+        { "method": "GET", "path": "/api/agents", "owner": "agent-runtime.liveness-read", "auth": "global-api-auth-only" },
+        { "method": "GET", "path": "/api/agents/:name", "owner": "agent-runtime.liveness-read", "auth": "global-api-auth-only" },
+        { "method": "GET", "path": "/api/inbox/:agent", "owner": "inbox.agent-read-ack", "auth": "agent-token" },
+        { "method": "GET", "path": "/api/groups/:name/messages", "owner": "groups.member-read-ack", "auth": "agent-credential" }
+      ],
       "mutationRoutes": [
         { "method": "POST", "path": "/api/delivery-events", "owner": "observability.delivery-ingest", "auth": "global-api-auth-only" },
         { "method": "PATCH", "path": "/api/supervisor-state/:target", "owner": "supervisor.snapshot-writer", "auth": "agent-token" },

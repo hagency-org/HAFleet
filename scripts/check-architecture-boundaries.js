@@ -123,6 +123,65 @@ function routeKey(route) {
   return `${route.method.toUpperCase()} ${route.path}`;
 }
 
+function findRouteCallEnd(source, startIndex) {
+  const openIndex = source.indexOf('(', startIndex);
+  if (openIndex < 0) return null;
+  let depth = 0;
+  let quote = null;
+  let lineComment = false;
+  let blockComment = false;
+  for (let i = openIndex; i < source.length; i++) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (lineComment) {
+      if (ch === '\n') lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (ch === '*' && next === '/') {
+        blockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (ch === '\\') {
+        i += 1;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      lineComment = true;
+      i += 1;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      blockComment = true;
+      i += 1;
+      continue;
+    }
+    if (ch === '\'' || ch === '"' || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '(') {
+      depth += 1;
+      continue;
+    }
+    if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        let end = i + 1;
+        while (end < source.length && /[\s;]/.test(source[end])) end += 1;
+        return end;
+      }
+    }
+  }
+  return null;
+}
+
 function extractExpressRoutes(source) {
   const routes = [];
   const pattern = /\bapp\.(get|post|put|patch|delete)\(\s*(['"`])([^'"`]+)\2/g;
@@ -137,7 +196,8 @@ function extractExpressRoutes(source) {
   }
   for (let i = 0; i < routes.length; i++) {
     const next = routes[i + 1]?.index ?? source.length;
-    routes[i].source = source.slice(routes[i].index, next);
+    const end = findRouteCallEnd(source, routes[i].index);
+    routes[i].source = source.slice(routes[i].index, end || next);
   }
   return routes;
 }
@@ -227,6 +287,11 @@ function validateExpectedRoutes(fileName, source, actualRoutesByKey, expectedRou
   }
 }
 
+function statefulGetMarker(route, markers) {
+  if (route.method !== 'GET') return null;
+  return (markers || []).find(marker => route.source.includes(marker)) || null;
+}
+
 function checkRouteOwnership(manifest) {
   const failures = [];
   for (const [fileName, config] of Object.entries(manifest.routeOwnership || {})) {
@@ -240,11 +305,17 @@ function checkRouteOwnership(manifest) {
     const actualRoutes = extractExpressRoutes(source);
     const actualMutationRoutes = actualRoutes
       .filter(route => !['GET', 'HEAD', 'OPTIONS'].includes(route.method));
+    const statefulGetMarkers = config.statefulGetMarkers || [];
+    const actualStatefulGetRoutes = actualRoutes
+      .map(route => ({ route, marker: statefulGetMarker(route, statefulGetMarkers) }))
+      .filter(item => item.marker);
     const actualKeys = new Map(actualMutationRoutes.map(route => [routeKey(route), route]));
     const actualRoutesByKey = new Map(actualRoutes.map(route => [routeKey(route), route]));
     const expectedRoutes = config.mutationRoutes || [];
     const sensitiveRoutes = config.sensitiveRoutes || [];
+    const statefulGetRoutes = config.statefulGetRoutes || [];
     const expectedKeys = collectExpectedRoutes(fileName, expectedRoutes, 'mutation', failures);
+    const expectedStatefulGetKeys = collectExpectedRoutes(fileName, statefulGetRoutes, 'stateful GET', failures);
     collectExpectedRoutes(fileName, sensitiveRoutes, 'sensitive', failures);
 
     for (const route of actualMutationRoutes) {
@@ -253,11 +324,18 @@ function checkRouteOwnership(manifest) {
         failures.push(`[route ownership] ${fileName} mutation route lacks owner entry: ${key}`);
       }
     }
+    for (const { route, marker } of actualStatefulGetRoutes) {
+      const key = routeKey(route);
+      if (!expectedStatefulGetKeys.has(key)) {
+        failures.push(`[route ownership] ${fileName} stateful GET route lacks owner entry: ${key} (matched ${JSON.stringify(marker)})`);
+      }
+    }
 
     validateExpectedRoutes(fileName, source, actualKeys, expectedRoutes, 'mutation', failures);
     validateExpectedRoutes(fileName, source, actualRoutesByKey, sensitiveRoutes, 'sensitive', failures);
+    validateExpectedRoutes(fileName, source, actualRoutesByKey, statefulGetRoutes, 'stateful GET', failures);
 
-    console.log(`[OK] route ownership ${fileName}: ${actualMutationRoutes.length} mutation route(s), ${sensitiveRoutes.length} sensitive route(s) checked`);
+    console.log(`[OK] route ownership ${fileName}: ${actualMutationRoutes.length} mutation route(s), ${sensitiveRoutes.length} sensitive route(s), ${statefulGetRoutes.length} stateful GET route(s) checked`);
   }
 
   return failures;
