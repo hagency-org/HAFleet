@@ -1,7 +1,7 @@
 # 14 CD Next Decisions
 
-Date: 2026-05-03
-Status: CD-A stable watcher implementation added; remaining remote/macOS decisions still pending.
+Date: 2026-05-04
+Status: stable watcher and remote dependency scope implemented; remaining verification/macOS decisions still pending.
 
 ## Current CD Baseline
 
@@ -18,10 +18,8 @@ Implemented gates:
 Not implemented yet:
 
 1. stable/live release gate support exists but must be enabled explicitly with `AGENTCHAT_RELEASE_GATE=worktree` on the deploy host.
-2. remote autodeploy can still skip dependency installation on retry after a failed install.
-3. remote autodeploy restarts the relay but does not call `verify-remote` afterward.
-4. remote autodeploy watches root dependency manifests, while remote provisioning installs dependencies inside `remote/`.
-5. macOS remote hosts install launchd for push-relay but no launchd remote autodeploy watcher.
+2. remote autodeploy restarts the relay but does not call `verify-remote` afterward.
+3. macOS remote hosts install launchd for push-relay but no launchd remote autodeploy watcher.
 
 ## Environment Split
 
@@ -96,15 +94,19 @@ Implemented for stable/live in CD-A:
 4. failed dependency installation leaves an `install-needed` marker;
 5. a retry at the already-reset target commit uses the last successful baseline and reruns dependency installation before restarting services.
 
-Remaining decision:
+Remote status:
 
-Apply the same state model to remote autodeploy only after the remote dependency scope is decided.
+Remote autodeploy now preserves the dependency-install-needed retry marker and installs the remote runtime dependency tree. Broader remote deploy state, such as restart/verification failure across watcher restarts, remains a separate RAU-D/R-075 decision.
 
 ## Decision 3: Remote Dependency Install Scope
 
 Problem:
 
-`remote/install-remote.sh` installs dependencies from `remote/`, but `scripts/agentchat-remote-autodeploy.sh` only watches root `package*.json` and runs `npm install --omit=dev` from the repository root.
+`remote/install-remote.sh` installs dependencies from `remote/`; remote autodeploy must keep using the dependency tree that push-relay and MCP wrappers actually run.
+
+Status:
+
+Resolved for the current remote profile. `scripts/agentchat-remote-autodeploy.sh` watches `remote/package.json` and `remote/package-lock.json`, then runs `npm install --omit=dev` inside `remote/`. Root `package*.json` changes still deploy and restart the relay, but they do not trigger a root dependency install.
 
 Options:
 
@@ -116,9 +118,9 @@ Recommendation:
 
 Use root plus remote install only if remote hosts actually run root scripts after deploy. For the current remote profile, remote-only install is the safer default because push-relay and MCP wrappers execute the remote runtime tree packaged by `remote/install-remote.sh`.
 
-Decision needed:
+Remaining boundary:
 
-Decide whether remote hosts are supported as root-service hosts. If not, remote autodeploy should only install the remote runtime dependency tree.
+If remote hosts become root-service hosts later, that should be a separate profile decision. The current remote profile is remote-runtime only.
 
 ## Decision 4: Remote Post-Deploy Verification
 
@@ -274,11 +276,11 @@ Suggested CD-A tests:
 ## Recommended Approval Order
 
 1. Batch CD-A: stable release gate and dependency retry state for `scripts/agentchat-stable-autodeploy.sh` only, with fake-repo tests. Implemented.
-2. Batch CD-B: remote post-deploy `verify-remote` integration and remote dependency install scope, with script-level dry-run tests.
+2. Batch CD-B: remote dependency install scope is implemented; remote post-deploy `verify-remote` integration still needs the failure-policy decision.
 3. Batch CD-C: macOS remote CD policy implementation or manual-update documentation.
 4. Batch CD-D: optional GitHub check-runs gate if staging worktree is not enough or if deploy-host GitHub credentials are approved.
 
-The next code batch should not start until ac-topleader accepts CD-A and chooses the next remote CD decision.
+The next remote verification code batch should wait for ac-topleader to choose the `verify-remote` failure behavior.
 
 ## CD-A Implemented Scope
 

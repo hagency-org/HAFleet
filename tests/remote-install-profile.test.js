@@ -48,18 +48,19 @@ describe('remote install profile decision contracts', () => {
     expect(cdB0Doc).toContain('Standalone `remote-dist` packages currently have no packaged version file.');
   });
 
-  test('remote autodeploy install-scope gap remains documented before behavior changes', () => {
+  test('remote autodeploy installs remote runtime dependencies from the remote tree', () => {
     const installSource = read('remote/install-remote.sh');
     const autodeploySource = read('scripts/agentchat-remote-autodeploy.sh');
     const decisionDoc = read('docs/salt/14-cd-next-decisions.md');
     const cdB0Doc = read('docs/salt/16-cd-b0-remote-install-profile.md');
 
     expect(installSource).toMatch(/cd "\$SCRIPT_DIR"[\s\S]*npm install --omit=dev/);
-    expect(autodeploySource).toContain('diff --name-only "$old_ref" "$new_ref" -- package.json package-lock.json');
-    expect(autodeploySource).toContain('(cd "$REPO_DIR" && npm install --omit=dev)');
+    expect(autodeploySource).toContain('diff --name-only "$old_ref" "$new_ref" -- remote/package.json remote/package-lock.json');
+    expect(autodeploySource).toContain('local remote_dir="$REPO_DIR/remote"');
+    expect(autodeploySource).toContain('(cd "$remote_dir" && npm install --omit=dev)');
     expect(decisionDoc).toContain('Decision 9: Remote Autodeploy Install Scope Beyond Dependencies');
     expect(cdB0Doc).toContain('R-050');
-    expect(cdB0Doc).toContain('Remote autodeploy remains code/dependency/restart only and does not rerun `remote/install-remote.sh`.');
+    expect(cdB0Doc).toContain('Remote autodeploy remains code/remote-dependency/restart only and does not rerun `remote/install-remote.sh`.');
   });
 
   test('standalone package does not install broken git-only autodeploy', () => {

@@ -74,22 +74,22 @@ Add a post-deploy verification step for remote autodeploy:
 - support an expected commit/version check;
 - keep `deploy_pending=true` when verification fails.
 
-### CD-002 Remote Autodeploy Installs Dependencies In The Wrong Tree
+### CD-002 Remote Autodeploy Installs Remote Dependencies In The Remote Tree
+
+Status:
+
+Implemented for the current remote profile.
 
 Evidence:
 
-- `scripts/agentchat-remote-autodeploy.sh:83` only watches root `package.json` and `package-lock.json`.
-- `scripts/agentchat-remote-autodeploy.sh:72` runs `npm install --omit=dev` in `$REPO_DIR`.
+- `scripts/agentchat-remote-autodeploy.sh:72` sets the dependency install target to `$REPO_DIR/remote`.
+- `scripts/agentchat-remote-autodeploy.sh:87` watches `remote/package.json` and `remote/package-lock.json`.
 - `remote/install-remote.sh:146` installs dependencies after changing into `remote/`.
 - `remote/package.json:10` owns the remote runtime dependencies used by `remote/mcp-server.js`.
 
-Impact:
+Boundary:
 
-If the remote package dependencies change without a root dependency change, autodeploy can restart a relay/MCP checkout with stale `remote/node_modules`. The install path used by autodeploy does not match the install path used by first-time remote provisioning.
-
-Fix direction:
-
-Remote autodeploy should watch both root and `remote/` dependency manifests, but install remote runtime dependencies in `remote/`. Root install should only happen if the chosen deploy model explicitly runs root services on that host.
+Root `package*.json` changes still deploy and restart the relay, but they no longer trigger root dependency installation from remote autodeploy. Root-service hosts remain out of scope for the remote profile.
 
 ### CD-002A Failed Dependency Install Retry State
 
@@ -265,7 +265,6 @@ This is the missing CD layer that would have made the idle/relay deployment stat
 | Stable release gate policy | default-off, default-on, or host config enforcement | Require an explicit deploy-host decision; default-off is still a policy gap even though the worktree gate exists. |
 | macOS remote CD | manual update only, or launchd autodeploy watcher | Decide explicitly. If macOS is a first-class remote host, add launchd watcher. |
 | Known-agent postdeploy check | no agent, configured optional `VERIFY_AGENT`, or mandatory canary agent | Optional `VERIFY_AGENT` first; later promote a canary agent. |
-| Dependency install scope | root only, remote only, or both by changed manifests | Remote autodeploy should install `remote/` deps for relay/MCP. Stable/live deploy should install root deps. |
 | Autodeploy failure behavior | log-only, retry pending, or rollback | Keep retry pending first. Rollback needs a separate operator decision. |
 
 ## Proposed Repair Table
@@ -274,7 +273,7 @@ This is the missing CD layer that would have made the idle/relay deployment stat
 | --- | --- | --- | --- | --- |
 | CD-000 | P0 | Stable CD | Decide and enforce stable release-gate policy; the worktree pre-reset gate exists but defaults to `none`. | Deploy-host config check or simulated target commit gate. |
 | CD-001 | P0 | Remote CD | Run post-deploy `verify-remote` from remote autodeploy and keep `deploy_pending=true` on failure. | Simulated autodeploy script test plus manual remote run. |
-| CD-002 | P0 | Remote deps | Install dependencies in `remote/` when `remote/package*.json` changes. | Script unit/smoke with fake git refs and generated temp repo. |
+| CD-002 | Done | Remote deps | Remote autodeploy installs dependencies in `remote/` when `remote/package*.json` changes. | Implemented with fake-repo remote autodeploy tests. |
 | CD-002A | Done | CD deps | Dependency-install-needed state persists across retry after failed install. | Implemented with stable/dev/remote autodeploy tests. |
 | CD-003 | P1 | macOS CD | Decide and implement launchd autodeploy watcher or document manual-only policy. | macOS launchctl status and `agentchat service status --profile remote`. |
 | CD-004 | Done | Loaded commit | `verify-remote --expect-version <sha>` fails on version mismatch; remote autodeploy integration remains under CD-001. | Implemented with `verify-remote` tests and manual remote smoke. |
@@ -290,6 +289,5 @@ The safe preflight slice is implemented: `verify-remote --expect-version`, gener
 The remaining P0/P1 work is:
 
 1. Integrate remote autodeploy post-deploy verification with `verify-remote --expect-version`, and decide whether verification failure keeps retry pending, rolls back, or only alerts.
-2. Fix remote dependency install scope so `remote/package*.json` changes install dependencies in `remote/`, not only the checkout root.
-3. Decide stable release gate policy: require the existing worktree gate on deploy hosts, query GitHub checks, or explicitly accept default-off risk.
-4. Decide macOS remote CD policy: manual update only or add a launchd autodeploy watcher.
+2. Decide stable release gate policy: require the existing worktree gate on deploy hosts, query GitHub checks, or explicitly accept default-off risk.
+3. Decide macOS remote CD policy: manual update only or add a launchd autodeploy watcher.

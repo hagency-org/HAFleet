@@ -98,9 +98,9 @@ The unit points at `<repo>/scripts/agentchat-remote-autodeploy.sh`; standalone p
 
 It fetches, force-cleans, resets to `origin/stable`, installs dependencies conditionally, and restarts. On dependency or restart failure it keeps an in-memory `deploy_pending=true`, but does not roll back or persist enough state across process restart.
 
-5. Dependency scope is wrong for remote runtime.
+5. Dependency scope is now aligned for remote runtime.
 
-Installer runs `npm install --omit=dev` under `remote/`; remote autodeploy watches root `package*.json` and installs at repo root. A remote dependency change can deploy code while `remote/node_modules` stays stale.
+Installer runs `npm install --omit=dev` under `remote/`; remote autodeploy now watches `remote/package*.json` and installs under `remote/`. Root package changes still deploy and restart the relay without root dependency installation.
 
 6. Post-restart verification is missing from remote autodeploy.
 
@@ -253,16 +253,16 @@ Goal:
 
 Shape:
 
-- Watch `remote/package*.json`.
-- Install under `remote/`.
+- Implemented: watch `remote/package*.json`.
+- Implemented: install under `remote/`.
 - Keep lockfile policy decision explicit:
   - tracked lock plus `npm ci --omit=dev`, or
   - intentionally lockless `npm install --omit=dev`.
 
 Tests:
 
-- Fake repo changes `remote/package.json` and asserts install cwd is `remote/`.
-- Root-only package changes do not trigger remote dependency install unless root runtime is intentionally part of the profile.
+- Implemented fake repo coverage changes `remote/package.json` and `remote/package-lock.json` and asserts install cwd is `remote/`.
+- Implemented root-only package and lock changes do not trigger remote dependency install unless root runtime is intentionally part of a future profile.
 
 ### RAU-F: Post-Restart Verification
 

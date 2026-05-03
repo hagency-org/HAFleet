@@ -70,25 +70,30 @@ has_install_needed() {
 }
 
 run_npm_install() {
+  local remote_dir="$REPO_DIR/remote"
+  if [ ! -d "$remote_dir" ]; then
+    log "ERROR: missing remote runtime directory: $remote_dir"
+    return 1
+  fi
   if [ "$NPM_BIN" = npm ]; then
-    (cd "$REPO_DIR" && npm install --omit=dev)
+    (cd "$remote_dir" && npm install --omit=dev)
   else
-    (cd "$REPO_DIR" && env npm_config_loglevel=error "$NPM_BIN" install --omit=dev)
+    (cd "$remote_dir" && env npm_config_loglevel=error "$NPM_BIN" install --omit=dev)
   fi
 }
 
 maybe_install_deps() {
   local old_ref="$1" new_ref="$2" force_install="${3:-false}"
   local changed
-  changed="$(run_git diff --name-only "$old_ref" "$new_ref" -- package.json package-lock.json 2>/dev/null || true)"
+  changed="$(run_git diff --name-only "$old_ref" "$new_ref" -- remote/package.json remote/package-lock.json 2>/dev/null || true)"
   if [ -z "$changed" ] && [ "$force_install" != true ]; then
     return 0
   fi
 
   if [ "$force_install" = true ] && [ -z "$changed" ]; then
-    log "Dependency install retry marker present; running npm install --omit=dev"
+    log "Remote dependency install retry marker present; running npm install --omit=dev in remote/"
   else
-    log "Dependency manifest changed; running npm install --omit=dev"
+    log "Remote dependency manifest changed; running npm install --omit=dev in remote/"
   fi
   touch_state_file "$INSTALL_NEEDED_FILE"
   if ! run_npm_install; then

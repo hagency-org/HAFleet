@@ -91,6 +91,8 @@ async function setupRepo() {
   await git(ctx.seed, ['config', 'user.name', 'AgentChat Test']);
   await git(ctx.seed, ['config', 'user.email', 'agentchat@example.test']);
   await fs.writeFile(path.join(ctx.seed, 'package.json'), `${JSON.stringify({ dependencies: {} }, null, 2)}\n`);
+  await fs.mkdir(path.join(ctx.seed, 'remote'));
+  await fs.writeFile(path.join(ctx.seed, 'remote', 'package.json'), `${JSON.stringify({ dependencies: {} }, null, 2)}\n`);
   await fs.writeFile(path.join(ctx.seed, 'README.md'), 'initial\n');
   await git(ctx.seed, ['add', '.']);
   await git(ctx.seed, ['commit', '-m', 'initial stable']);
@@ -168,8 +170,8 @@ describe('remote autodeploy dependency retry', () => {
 
   test('dependency install failure after reset retries on unchanged refs before restart', async () => {
     const ctx = await setupRepo();
-    const nextPackage = `${JSON.stringify({ dependencies: { leftpad: '1.0.0' } }, null, 2)}\n`;
-    const nextRef = await commitAndPush(ctx, { 'package.json': nextPackage }, 'change dependencies');
+    const nextPackage = `${JSON.stringify({ dependencies: { zod: '4.3.6' } }, null, 2)}\n`;
+    const nextRef = await commitAndPush(ctx, { 'remote/package.json': nextPackage }, 'change remote dependencies');
     const failOnce = path.join(ctx.tmp, 'fail-install-once');
     await fs.writeFile(failOnce, 'fail\n');
 
@@ -181,7 +183,7 @@ describe('remote autodeploy dependency retry', () => {
     await expect(git(ctx.live, ['rev-parse', 'HEAD'])).resolves.toBe(nextRef);
     await expect(pathExists(path.join(ctx.state, 'install-needed'))).resolves.toBe(true);
     let commandLog = await readIfExists(ctx.log);
-    expect(commandLog).toContain('npm:');
+    expect(commandLog).toContain(`npm:${path.join(ctx.live, 'remote')}:`);
     expect(commandLog).toContain('install --omit=dev');
     expect(commandLog).not.toContain('sudo:');
     expect(commandLog).not.toContain('restart agent-chat-push-relay');
@@ -190,13 +192,55 @@ describe('remote autodeploy dependency retry', () => {
     const secondRun = await runAutodeploy(ctx);
 
     expect(secondRun.stdout).toContain(`Retrying failed dependency install at ${nextRef}`);
-    expect(secondRun.stdout).toContain('Dependency install retry marker present; running npm install --omit=dev');
+    expect(secondRun.stdout).toContain('Remote dependency install retry marker present; running npm install --omit=dev in remote/');
     await expect(pathExists(path.join(ctx.state, 'install-needed'))).resolves.toBe(false);
     commandLog = await readIfExists(ctx.log);
-    expect(commandLog).toContain('npm:');
+    expect(commandLog).toContain(`npm:${path.join(ctx.live, 'remote')}:`);
     expect(commandLog).toContain('install --omit=dev');
     expect(commandLog).toContain('systemctl:list-units --type=service --all');
     expect(commandLog).toContain('sudo:');
+    expect(commandLog).toContain('restart agent-chat-push-relay');
+  });
+
+  test('root package changes restart without installing remote dependencies', async () => {
+    const ctx = await setupRepo();
+    const nextPackage = `${JSON.stringify({ dependencies: { express: '4.21.0' } }, null, 2)}\n`;
+    const nextLock = `${JSON.stringify({ name: 'root-lock', lockfileVersion: 3 }, null, 2)}\n`;
+    const nextRef = await commitAndPush(
+      ctx,
+      {
+        'package.json': nextPackage,
+        'package-lock.json': nextLock,
+      },
+      'change root dependencies only',
+    );
+
+    const runResult = await runAutodeploy(ctx);
+
+    expect(runResult.stdout).toContain('Update detected:');
+    expect(runResult.stdout).toContain(`Reset to ${nextRef}`);
+    expect(runResult.stdout).toContain('Deploy succeeded');
+    await expect(pathExists(path.join(ctx.state, 'install-needed'))).resolves.toBe(false);
+    const commandLog = await readIfExists(ctx.log);
+    expect(commandLog).not.toContain('npm:');
+    expect(commandLog).toContain('systemctl:list-units --type=service --all');
+    expect(commandLog).toContain('restart agent-chat-push-relay');
+  });
+
+  test('remote package lock changes install from the remote tree', async () => {
+    const ctx = await setupRepo();
+    const nextLock = `${JSON.stringify({ name: 'remote-lock', lockfileVersion: 3 }, null, 2)}\n`;
+    const nextRef = await commitAndPush(ctx, { 'remote/package-lock.json': nextLock }, 'change remote lock');
+
+    const runResult = await runAutodeploy(ctx);
+
+    expect(runResult.stdout).toContain('Update detected:');
+    expect(runResult.stdout).toContain(`Reset to ${nextRef}`);
+    expect(runResult.stdout).toContain('Remote dependency manifest changed; running npm install --omit=dev in remote/');
+    await expect(pathExists(path.join(ctx.state, 'install-needed'))).resolves.toBe(false);
+    const commandLog = await readIfExists(ctx.log);
+    expect(commandLog).toContain(`npm:${path.join(ctx.live, 'remote')}:`);
+    expect(commandLog).toContain('install --omit=dev');
     expect(commandLog).toContain('restart agent-chat-push-relay');
   });
 
