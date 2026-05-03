@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -28,6 +28,7 @@ describe('server dashboard mutation boundary', () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-dashboard-boundary-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    if (typeof extraEnv.beforeImport === 'function') extraEnv.beforeImport(runtimeDir);
     serverModule = await importServer(runtimeDir, extraEnv);
     return serverModule;
   }
@@ -55,6 +56,23 @@ describe('server dashboard mutation boundary', () => {
     expect(list.status).toBe(200);
     expect(list.body).toHaveLength(1);
     expect(list.body[0]).toMatchObject({ from: 'operator', to: 'alpha:0.0', payload: 'hello' });
+  });
+
+  test('backs up unreadable queue files on startup', async () => {
+    const mod = await setup({
+      beforeImport(dir) {
+        writeFileSync(path.join(dir, 'logs', 'queue.json'), '{not-json', 'utf-8');
+      },
+    });
+
+    const queuePath = path.join(runtimeDir, 'logs', 'queue.json');
+    const backups = readdirSync(path.dirname(queuePath)).filter(name => name.startsWith('queue.json.corrupt-'));
+    expect(existsSync(queuePath)).toBe(false);
+    expect(backups).toHaveLength(1);
+
+    const list = await request(mod.app).get('/api/queue');
+    expect(list.status).toBe(200);
+    expect(list.body).toEqual([]);
   });
 
   test('blocks non-local queue mutation', async () => {
@@ -136,12 +154,15 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).toContain('const IDLE_THRESHOLD_SEC = 45;');
   });
 
-  test('agent detail tasks tab uses the detail agent instead of monitor state', async () => {
+  test('agent detail tasks tab uses the detail agent without overwriting explicit URL state', async () => {
     const mod = await setup();
 
     const response = await request(mod.app).get('/agents/alpha');
 
     expect(response.status).toBe(200);
+    expect(response.text).toContain("const savedAssignee = storageGet(taskFilterStorage, 'task_filter_assignee');");
+    expect(response.text).toContain("!u.searchParams.has('assignee')");
+    expect(response.text).toContain('!savedAssignee');
     expect(response.text).toContain("storageSet(taskFilterStorage, 'task_filter_assignee', agent);");
     expect(response.text).not.toContain('monitoredAgent.name');
   });
@@ -167,6 +188,10 @@ describe('server dashboard mutation boundary', () => {
 
     expect(response.status).toBe(200);
     expect(response.text).toContain('let refreshInFlight = false;');
+    expect(response.text).toContain('async function fetchOptionalJson(url, fallback)');
+    expect(response.text).toContain("fetchOptionalJson('/api/agents/status', [])");
+    expect(response.text).toContain("fetchOptionalJson('/api/queue', [])");
+    expect(response.text).not.toContain("fetch('/api/queue'),");
     expect(response.text).toContain('function scheduleAgentDetailRefresh(delayMs)');
     expect(response.text).toContain('setTimeout(runAgentDetailRefreshLoop, nextDelay)');
     expect(response.text).toContain('document.hidden ? AGENT_DETAIL_REFRESH_HIDDEN_MS : AGENT_DETAIL_REFRESH_VISIBLE_MS');
@@ -217,6 +242,22 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).toContain('const normalized = normalizeAgentStatusPayload(payload);');
     expect(response.text).toContain('agentStatusInFlight = false;');
     expect(response.text).not.toContain('const rows = await res.json();');
+  });
+
+  test('agent status endpoint normalizes malformed backend agent payloads', async () => {
+    const mod = await setup();
+    mod.setServerTestHooks({
+      backendFetch: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ agents: null }),
+      }),
+    });
+
+    const response = await request(mod.app).get('/api/agents/status');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual([]);
   });
 
   test('alert stats payloads are normalized on alerts and monitor pages', async () => {

@@ -1,5 +1,19 @@
 import express from 'express';
-import { appendFileSync, writeFileSync, mkdirSync, statSync, existsSync, readFileSync, readdirSync, rmSync } from 'fs';
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
 import { execFile, execSync, spawn } from 'child_process';
 import path from 'path';
@@ -927,11 +941,15 @@ function safeReadJsonFile(filePath, fallback = {}) {
 
 function safeWriteJsonFile(filePath, payload) {
   if (!filePath) return false;
+  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     mkdirSync(path.dirname(filePath), { recursive: true });
-    writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+    writeFileSync(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+    renameSync(tmpPath, filePath);
     return true;
-  } catch {
+  } catch (error) {
+    try { unlinkSync(tmpPath); } catch {}
+    console.warn(`Failed to write JSON ${filePath}: ${error?.message || error}`);
     return false;
   }
 }
@@ -2474,48 +2492,87 @@ function appendDeliveryEvent(raw = {}) {
   }
 }
 
+const DELIVERY_EVENT_READ_CHUNK_BYTES = 64 * 1024;
+
+function deliveryEventMatches(row, { normalizedMessageId, normalizedAgent }) {
+  if (normalizedMessageId) {
+    const ids = new Set();
+    if (typeof row.messageId === 'string') ids.add(row.messageId);
+    if (Array.isArray(row.messageIds)) {
+      for (const id of row.messageIds) {
+        if (typeof id === 'string') ids.add(id);
+      }
+    }
+    if (!ids.has(normalizedMessageId)) return false;
+  }
+  if (normalizedAgent) {
+    const agentsForRow = new Set();
+    if (typeof row.agent === 'string') agentsForRow.add(row.agent);
+    if (Array.isArray(row.targetAgents)) {
+      for (const name of row.targetAgents) {
+        if (typeof name === 'string') agentsForRow.add(name);
+      }
+    }
+    if (!agentsForRow.has(normalizedAgent)) return false;
+  }
+  return true;
+}
+
+function parseDeliveryEventLine(line, filters) {
+  if (!line.trim()) return null;
+  try {
+    const row = JSON.parse(line);
+    if (!row || typeof row !== 'object') return null;
+    return deliveryEventMatches(row, filters) ? row : null;
+  } catch {
+    return null;
+  }
+}
+
 function readDeliveryEvents({ messageId = null, agent = null, limit = 100 } = {}) {
   if (!existsSync(DELIVERY_EVENT_LOG)) return [];
   const normalizedMessageId = normalizeOptionalText(messageId, 255);
   const normalizedAgent = normalizeAgentName(agent) || normalizeOptionalText(agent, 255);
   const boundedLimit = Math.min(1000, Math.max(1, Number.parseInt(limit, 10) || 100));
-  const rows = [];
+  const filters = { normalizedMessageId, normalizedAgent };
+  const matches = [];
+  let fd = null;
   try {
-    const raw = readFileSync(DELIVERY_EVENT_LOG, 'utf-8');
-    for (const line of raw.split('\n')) {
-      if (!line.trim()) continue;
-      let row;
-      try {
-        row = JSON.parse(line);
-      } catch {
-        continue;
+    fd = openSync(DELIVERY_EVENT_LOG, 'r');
+    const { size } = statSync(DELIVERY_EVENT_LOG);
+    let offset = size;
+    let carry = Buffer.alloc(0);
+    while (offset > 0 && matches.length < boundedLimit) {
+      const bytesToRead = Math.min(DELIVERY_EVENT_READ_CHUNK_BYTES, offset);
+      offset -= bytesToRead;
+      const buffer = Buffer.allocUnsafe(bytesToRead);
+      const bytesRead = readSync(fd, buffer, 0, bytesToRead, offset);
+      const chunk = Buffer.concat([buffer.subarray(0, bytesRead), carry]);
+      const lineBuffers = [];
+      let lineStart = 0;
+      for (let i = 0; i < chunk.length; i += 1) {
+        if (chunk[i] !== 0x0a) continue;
+        lineBuffers.push(chunk.subarray(lineStart, i));
+        lineStart = i + 1;
       }
-      if (normalizedMessageId) {
-        const ids = new Set();
-        if (typeof row.messageId === 'string') ids.add(row.messageId);
-        if (Array.isArray(row.messageIds)) {
-          for (const id of row.messageIds) {
-            if (typeof id === 'string') ids.add(id);
-          }
-        }
-        if (!ids.has(normalizedMessageId)) continue;
+      carry = chunk.subarray(lineStart);
+      for (let i = lineBuffers.length - 1; i >= 0 && matches.length < boundedLimit; i -= 1) {
+        const row = parseDeliveryEventLine(lineBuffers[i].toString('utf-8'), filters);
+        if (row) matches.push(row);
       }
-      if (normalizedAgent) {
-        const agentsForRow = new Set();
-        if (typeof row.agent === 'string') agentsForRow.add(row.agent);
-        if (Array.isArray(row.targetAgents)) {
-          for (const name of row.targetAgents) {
-            if (typeof name === 'string') agentsForRow.add(name);
-          }
-        }
-        if (!agentsForRow.has(normalizedAgent)) continue;
-      }
-      rows.push(row);
+    }
+    if (matches.length < boundedLimit && carry.length > 0) {
+      const row = parseDeliveryEventLine(carry.toString('utf-8'), filters);
+      if (row) matches.push(row);
     }
   } catch {
     return [];
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch {}
+    }
   }
-  return rows.slice(-boundedLimit);
+  return matches.reverse();
 }
 
 function buildPersistedUpstreamRecord(kind, record) {
@@ -9769,6 +9826,9 @@ export {
   normalizeAgentTask,
   serializeAgent,
   notificationRouter,
+};
+export const __backendV2TestInternals = {
+  safeWriteJsonFile,
 };
 
 if (process.argv[1] === __filename) {

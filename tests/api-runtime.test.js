@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from 'vitest';
 import request from 'supertest';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
 function readJson(filePath) {
@@ -44,6 +45,25 @@ describe('backend runtime API', () => {
   afterEach(() => {
     context?.cleanup();
     context = null;
+  });
+
+  test('safe JSON writes clean up temp files and preserve the target on rename failure', async () => {
+    context = await createBackendTestContext('agent-chat-runtime-safe-write-test-', {
+      agents: {},
+      groups: {},
+    });
+    const backendUrl = pathToFileURL(path.resolve('backend-v2.js')).href;
+    const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const { __backendV2TestInternals } = await import(`${backendUrl}?safe-write-test=${cacheBust}`);
+
+    const targetPath = path.join(context.runtimeDir, 'safe-write-target');
+    mkdirSync(targetPath);
+
+    const ok = __backendV2TestInternals.safeWriteJsonFile(targetPath, { ok: true });
+
+    expect(ok).toBe(false);
+    expect(statSync(targetPath).isDirectory()).toBe(true);
+    expect(readdirSync(context.runtimeDir).filter((name) => name.startsWith('safe-write-target.tmp-'))).toEqual([]);
   });
 
   test('runtime reports persist backend-derived observation provenance', async () => {

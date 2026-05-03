@@ -1,6 +1,6 @@
 import express from 'express';
 import { readFile as readFileAsync, open, stat as statAsync, appendFile } from 'fs/promises';
-import { appendFileSync, writeFileSync, readFileSync, existsSync, mkdirSync, lstatSync, rmSync, unlinkSync, readdirSync } from 'fs';
+import { appendFileSync, writeFileSync, readFileSync, existsSync, mkdirSync, lstatSync, rmSync, unlinkSync, readdirSync, renameSync } from 'fs';
 import { execFileSync, execFile } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -613,13 +613,34 @@ function normalizeReminderQueue() {
 }
 
 // Persist queue to disk
+function writeQueueFileAtomic(payload) {
+  const tmp = `${QUEUE_FILE}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    mkdirSync(path.dirname(QUEUE_FILE), { recursive: true });
+    writeFileSync(tmp, JSON.stringify(payload), 'utf-8');
+    renameSync(tmp, QUEUE_FILE);
+    return true;
+  } catch (e) {
+    try { unlinkSync(tmp); } catch {}
+    console.debug(`[server] queue save skipped: ${e.message}`);
+    return false;
+  }
+}
+
 function saveQueue() {
   const items = [];
   for (const [, entries] of queue) items.push(...entries);
+  writeQueueFileAtomic({ idCounter: queueIdCounter, items });
+}
+
+function backupUnreadableQueueFile(error) {
+  if (!existsSync(QUEUE_FILE)) return;
+  const backupPath = `${QUEUE_FILE}.corrupt-${Date.now()}`;
   try {
-    writeFileSync(QUEUE_FILE, JSON.stringify({ idCounter: queueIdCounter, items }));
-  } catch (e) {
-    console.debug(`[server] queue save skipped: ${e.message}`);
+    renameSync(QUEUE_FILE, backupPath);
+    console.warn(`[server] backed up unreadable queue file: ${backupPath}`);
+  } catch (backupError) {
+    console.warn(`[server] failed to back up unreadable queue file after ${error?.message || 'load error'}: ${backupError.message}`);
   }
 }
 
@@ -627,8 +648,12 @@ function saveQueue() {
 try {
   const raw = await readFileAsync(QUEUE_FILE, 'utf-8');
   const data = JSON.parse(raw);
-  queueIdCounter = data.idCounter || 0;
-  for (const entry of (data.items || [])) {
+  if (!data || typeof data !== 'object' || !Array.isArray(data.items)) {
+    throw new Error('invalid queue file shape');
+  }
+  queueIdCounter = Number.isFinite(Number(data.idCounter)) ? Number(data.idCounter) : 0;
+  for (const entry of data.items) {
+    if (!entry || typeof entry !== 'object' || !entry.to) continue;
     if (!queue.has(entry.to)) queue.set(entry.to, []);
     queue.get(entry.to).push(entry);
   }
@@ -645,6 +670,7 @@ try {
   }
   console.log(`Restored ${data.items?.length || 0} queued messages from disk`);
 } catch (e) {
+  if (e?.code !== 'ENOENT') backupUnreadableQueueFile(e);
   console.debug(`[server] queue load skipped: ${e.message}`);
 }
 
@@ -794,7 +820,11 @@ app.get('/api/agents/all', async (_req, res) => {
 app.get('/api/agents/status', async (_req, res) => {
   try {
     const r = await backendFetch(`${BACKEND_V2_URL}/api/agents`);
-    const agentList = await r.json();
+    if (!r.ok) throw new Error(`backend status ${r.status}`);
+    const agentPayload = await r.json().catch(() => []);
+    const agentList = Array.isArray(agentPayload)
+      ? agentPayload.filter(a => a && typeof a === 'object')
+      : [];
     const result = agentList
       .filter(a => a.tmux)
       .map(a => {

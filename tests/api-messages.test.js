@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import request from 'supertest';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
@@ -137,6 +137,67 @@ describe('backend message API', () => {
         reason: 'test-suppress',
       }),
     ]));
+  });
+
+  test('delivery event APIs return matching tail entries with the requested limit from a large log', async () => {
+    const largeContext = await createBackendTestContext('agent-chat-messages-delivery-tail-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+        },
+      },
+      groups: {},
+      messages: [
+        {
+          id: 'msg_tail',
+          ts: 100,
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          summary: 'tail delivery source',
+          full: 'tail delivery source',
+          mentions: [],
+        },
+      ],
+      agentTokens: { alpha: ALPHA_TOKEN },
+      env: { API_TOKEN },
+    });
+
+    try {
+      const deliveryLogPath = path.join(largeContext.runtimeDir, 'data', 'message-delivery-events.jsonl');
+      const rows = Array.from({ length: 5000 }, (_, index) => ({
+        id: `devt_old_${index}`,
+        ts: index + 1,
+        type: 'message.accepted',
+        source: 'test',
+        messageId: `msg_other_${index}`,
+        agent: 'beta',
+      }));
+      rows.push(
+        { id: 'devt_tail_1', ts: 5001, type: 'message.tail_1', source: 'test', messageId: 'msg_tail', agent: 'alpha' },
+        { id: 'devt_gap', ts: 5002, type: 'message.gap', source: 'test', messageId: 'msg_other_tail', agent: 'alpha' },
+        { id: 'devt_tail_2', ts: 5003, type: 'message.tail_2', source: 'test', messageIds: ['msg_tail'], targetAgents: ['alpha'] },
+        { id: 'devt_tail_3', ts: 5004, type: 'message.tail_3', source: 'test', messageId: 'msg_tail', agent: 'alpha' },
+      );
+      writeFileSync(deliveryLogPath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`);
+
+      const messageDelivery = await request(largeContext.app)
+        .get('/api/messages/msg_tail/delivery?agent=alpha&limit=2')
+        .set('Authorization', `Bearer ${API_TOKEN}`);
+      expect(messageDelivery.status).toBe(200);
+      expect(messageDelivery.body.events.map((row) => row.type)).toEqual(['message.tail_2', 'message.tail_3']);
+
+      const agentDelivery = await request(largeContext.app)
+        .get('/api/agents/alpha/delivery-events?limit=2')
+        .set('X-Agent-Token', ALPHA_TOKEN);
+      expect(agentDelivery.status).toBe(200);
+      expect(agentDelivery.body.events.map((row) => row.type)).toEqual(['message.tail_2', 'message.tail_3']);
+    } finally {
+      largeContext.cleanup();
+    }
   });
 
   test('offline catchup messages append source delivery events', async () => {

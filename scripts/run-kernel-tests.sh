@@ -68,6 +68,7 @@ start_shard "contracts and cli" \
   tests/verify-cd-preflight.test.js \
   tests/verify-ci-timeout.test.js \
   tests/remote-install-profile.test.js \
+  tests/remote-autodeploy.test.js \
   tests/dev-autodeploy.test.js \
   tests/stable-autodeploy.test.js
 
