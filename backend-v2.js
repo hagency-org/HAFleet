@@ -6346,11 +6346,45 @@ async function localTmuxSessionExistsAsync(sessionName) {
 
 const mergedPushInboxCursor = new Map();
 const catchupCursor = new Map();
+const catchupPushCursor = new Map();
 const pushNotifySkipLog = new Map();
 const SYSTEM_CATCHUP_SCHEMA_KIND = 'system_catchup';
 
 function isSystemCatchupMessage(msg) {
   return normalizeOptionalText(msg?.schema?.kind, 128) === SYSTEM_CATCHUP_SCHEMA_KIND;
+}
+
+function catchupKeyFromMessage(msg) {
+  if (!isSystemCatchupMessage(msg)) return null;
+  const latestId = normalizeOptionalText(msg?.schema?.payload?.latestId, 256);
+  const sourceUnreadCount = Number(msg?.schema?.payload?.sourceUnreadCount || 0);
+  if (!latestId || !Number.isFinite(sourceUnreadCount) || sourceUnreadCount <= 0) return null;
+  return `${latestId}:${sourceUnreadCount}`;
+}
+
+function findCatchupMessageForKey(agentName, key) {
+  const normalizedAgent = normalizeAgentName(agentName);
+  if (!normalizedAgent || !key) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg?.to !== normalizedAgent) continue;
+    if (catchupKeyFromMessage(msg) === key) return msg;
+  }
+  return null;
+}
+
+function pushNotifyStatus({ queued = false, terminal = false, deduped = false, reason = null } = {}) {
+  return {
+    ok: queued || terminal || deduped,
+    queued,
+    terminal,
+    deduped,
+    reason,
+  };
+}
+
+function isCatchupNotificationComplete(result) {
+  return result?.queued === true || result?.terminal === true || result?.deduped === true;
 }
 
 function logPushNotifySkip(agentName, reason, detail = '') {
@@ -6393,8 +6427,18 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
   const oldest = unread[0];
   const latest = unread[unread.length - 1];
   const key = `${latest.id}:${unread.length}`;
-  if (catchupCursor.get(agentName) === key) return;
-  catchupCursor.set(agentName, key);
+  if (catchupCursor.get(agentName) === key && catchupPushCursor.get(agentName) === key) return;
+  const existingCatchup = findCatchupMessageForKey(agentName, key);
+  if (existingCatchup) {
+    catchupCursor.set(agentName, key);
+    const result = await pushNotify(agentName, existingCatchup);
+    if (isCatchupNotificationComplete(result)) catchupPushCursor.set(agentName, key);
+    return;
+  }
+  if (catchupCursor.get(agentName) === key) {
+    catchupCursor.delete(agentName);
+    catchupPushCursor.delete(agentName);
+  }
 
   const senderNames = [...new Set(unread.map(m => m.from).filter(Boolean))];
   const summary = `Queued while offline: ${unread.length} message(s) (${new Date(oldest.ts).toISOString()} -> ${new Date(latest.ts).toISOString()}).`;
@@ -6462,7 +6506,9 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
     },
   });
   broadcastSSE('message', msg);
-  await pushNotify(agentName, msg);
+  catchupCursor.set(agentName, key);
+  const result = await pushNotify(agentName, msg);
+  if (isCatchupNotificationComplete(result)) catchupPushCursor.set(agentName, key);
 }
 
 async function pushNotify(agentName, msg) {
@@ -6477,7 +6523,7 @@ async function pushNotify(agentName, msg) {
       agent: agentName,
       reason: 'missing-tmux-target',
     });
-    return;
+    return pushNotifyStatus({ reason: 'missing-tmux-target' });
   }
   const agentServer = normalizeServer(agent.server);
   if (agentServer && agentServer !== 'local' && agentServer !== LOCAL_SERVER_ID) {
@@ -6492,7 +6538,7 @@ async function pushNotify(agentName, msg) {
       reason: 'remote-relay-expected',
       context: { server: agentServer },
     });
-    return;
+    return pushNotifyStatus({ terminal: true, reason: 'remote-relay-expected' });
   }
   // If server is unknown (null), verify the tmux session exists locally before queueing
   if (!agentServer) {
@@ -6509,12 +6555,16 @@ async function pushNotify(agentName, msg) {
         target: agent.tmux,
         reason: 'local-session-not-found',
       });
-      return; // tmux session doesn't exist locally — likely a remote agent not yet heartbeated
+      // The tmux session may belong to a remote agent before heartbeat attribution catches up.
+      return pushNotifyStatus({ reason: 'local-session-not-found' });
     }
   }
   const isHumanMsg = msg.type === 'human';
   const hasMcp = await agentHasMcpAsync(agentName);
-  const { inboxTs, unread } = getUnreadInboxMessages(agentName);
+  const { inboxTs, unread: rawUnread } = getUnreadInboxMessages(agentName);
+  const unread = isSystemCatchupMessage(msg)
+    ? rawUnread.filter((item) => !isSystemCatchupMessage(item))
+    : rawUnread;
   const unreadCount = unread.length;
   const latestUnread = unread[unread.length - 1] || msg;
   const unreadMessageIds = unread.map((item) => item?.id).filter(Boolean);
@@ -6531,10 +6581,13 @@ async function pushNotify(agentName, msg) {
   let hasRequestUnread = false;
 
   let notification;
+  let mergedDedupeKeyToCommit = null;
   if (unreadCount > 1) {
     const dedupeKey = `${inboxTs}:${latestUnread.id || 'none'}:${unreadCount}`;
-    if (!isHumanMsg && mergedPushInboxCursor.get(agentName) === dedupeKey) return;
-    mergedPushInboxCursor.set(agentName, dedupeKey);
+    if (!isHumanMsg && mergedPushInboxCursor.get(agentName) === dedupeKey) {
+      return pushNotifyStatus({ deduped: true, reason: 'merged-unread-deduped' });
+    }
+    mergedDedupeKeyToCommit = dedupeKey;
 
     const senderNames = [...new Set(unread.map(m => m.from).filter(Boolean))];
     const senderText = senderNames.length ? ` (from ${formatSenderList(senderNames)})` : '';
@@ -6639,6 +6692,8 @@ async function pushNotify(agentName, msg) {
         queuedAt: body?.queuedAt,
         ...notifyMeta,
       });
+      if (mergedDedupeKeyToCommit) mergedPushInboxCursor.set(agentName, mergedDedupeKeyToCommit);
+      return pushNotifyStatus({ queued: true });
     } else {
       appendDeliveryEvent({
         type: 'push.queue_failed',
@@ -6652,6 +6707,7 @@ async function pushNotify(agentName, msg) {
         status: resp.status,
         notifyMeta,
       });
+      return pushNotifyStatus({ reason: `status-${resp.status}` });
     }
   } catch (e) {
     appendDeliveryEvent({
@@ -6665,6 +6721,7 @@ async function pushNotify(agentName, msg) {
       reason: e?.message || 'queue request failed',
     });
     console.error(`Push notify failed for ${agentName}:`, e.message);
+    return pushNotifyStatus({ reason: e?.message || 'queue request failed' });
   }
 }
 
@@ -9908,6 +9965,8 @@ export {
   notificationRouter,
 };
 export const __backendV2TestInternals = {
+  notifyAgentCatchupForTest: notifyAgentCatchup,
+  pushNotifyForTest: pushNotify,
   safeWriteJsonFile,
 };
 

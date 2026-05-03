@@ -78,11 +78,14 @@ export async function createBackendTestContext(prefix, seed = {}) {
 
   const backendUrl = pathToFileURL(path.resolve('backend-v2.js')).href;
   const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  const { app } = await import(`${backendUrl}?test=${cacheBust}`);
+  const backendModule = await import(`${backendUrl}?test=${cacheBust}`);
+  const { app } = backendModule;
   const servers = new Set();
 
   return {
     app,
+    backendModule,
+    internals: backendModule.__backendV2TestInternals || {},
     runtimeDir,
     async listen(host = '127.0.0.1') {
       const server = await new Promise((resolve, reject) => {

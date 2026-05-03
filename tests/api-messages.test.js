@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import request from 'supertest';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { createServer } from 'http';
 import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
@@ -22,6 +23,40 @@ function readPersistedMessages(runtimeDir) {
   const filePath = path.join(runtimeDir, 'data', 'messages.json');
   if (!existsSync(filePath)) return [];
   return JSON.parse(readFileSync(filePath, 'utf-8'));
+}
+
+async function createQueueStub(handler) {
+  const requests = [];
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+    });
+    req.on('end', async () => {
+      const parsed = raw ? JSON.parse(raw) : null;
+      const requestRow = { method: req.method, url: req.url, body: parsed };
+      requests.push(requestRow);
+      const response = await handler(requestRow, requests.length);
+      res.statusCode = response?.status || 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(response?.body || { ok: true, id: requests.length, queuedAt: Date.now() }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.listen(0, '127.0.0.1', resolve);
+    server.on('error', reject);
+  });
+  if (typeof server.unref === 'function') server.unref();
+  const address = server.address();
+  return {
+    requests,
+    url: `http://127.0.0.1:${address.port}/api/queue`,
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    },
+  };
 }
 
 describe('backend message API', () => {
@@ -402,6 +437,270 @@ describe('backend message API', () => {
       expect(secondMessages.filter((msg) => msg?.schema?.kind === 'system_catchup')).toHaveLength(1);
     } finally {
       catchupContext.cleanup();
+    }
+  });
+
+  test('merged unread push retries after queue failure instead of committing dedupe early', async () => {
+    const queueStub = await createQueueStub((_req, count) => (
+      count === 1
+        ? { status: 503, body: { ok: false, error: 'queue down' } }
+        : { status: 200, body: { ok: true, id: count, queuedAt: 3000 + count } }
+    ));
+    const retryContext = await createBackendTestContext('agent-chat-merged-push-retry-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          tmux: 'alpha:0.0',
+          server: 'local',
+        },
+      },
+      groups: {},
+      messages: [
+        {
+          id: 'msg_merged_1',
+          ts: 1000,
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          summary: 'one',
+          full: 'one',
+          mentions: [],
+        },
+        {
+          id: 'msg_merged_2',
+          ts: 2000,
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          summary: 'two',
+          full: 'two',
+          mentions: [],
+        },
+      ],
+      env: { AGENT_CHAT_QUEUE_URL: queueStub.url },
+    });
+
+    try {
+      const first = await retryContext.internals.pushNotifyForTest('alpha', {
+        id: 'msg_merged_2',
+        ts: 2000,
+        from: 'system',
+        to: 'alpha',
+        type: 'inform',
+        priority: 'normal',
+        summary: 'two',
+      });
+      const second = await retryContext.internals.pushNotifyForTest('alpha', {
+        id: 'msg_merged_2',
+        ts: 2000,
+        from: 'system',
+        to: 'alpha',
+        type: 'inform',
+        priority: 'normal',
+        summary: 'two',
+      });
+
+      expect(first).toMatchObject({ queued: false, reason: 'status-503' });
+      expect(second).toMatchObject({ queued: true });
+      expect(queueStub.requests).toHaveLength(2);
+
+      const events = readDeliveryEvents(retryContext.runtimeDir);
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: 'push.queue_failed',
+          messageIds: ['msg_merged_1', 'msg_merged_2'],
+          reason: 'status-503',
+        }),
+        expect.objectContaining({
+          type: 'push.queued',
+          messageIds: ['msg_merged_1', 'msg_merged_2'],
+          queueEntryId: 2,
+        }),
+      ]));
+    } finally {
+      retryContext.cleanup();
+      await queueStub.close();
+    }
+  });
+
+  test('offline catchup retries queue failure without duplicating persisted catchup', async () => {
+    const queueStub = await createQueueStub((_req, count) => (
+      count === 1
+        ? { status: 503, body: { ok: false, error: 'queue down' } }
+        : { status: 200, body: { ok: true, id: count, queuedAt: 4000 + count } }
+    ));
+    const retryContext = await createBackendTestContext('agent-chat-catchup-retry-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          tmux: 'alpha:0.0',
+          server: 'local',
+        },
+      },
+      groups: {},
+      messages: [
+        {
+          id: 'msg_catchup_1',
+          ts: 1000,
+          from: 'operator',
+          to: 'alpha',
+          type: 'human',
+          summary: 'one',
+          full: 'one',
+          mentions: [],
+          trustLevel: 'operator',
+        },
+        {
+          id: 'msg_catchup_2',
+          ts: 2000,
+          from: 'beta',
+          to: 'alpha',
+          type: 'request',
+          summary: 'two',
+          full: 'two',
+          mentions: [],
+        },
+      ],
+      env: { AGENT_CHAT_QUEUE_URL: queueStub.url },
+    });
+
+    try {
+      await retryContext.internals.notifyAgentCatchupForTest('alpha', 'retry-test');
+      expect(queueStub.requests).toHaveLength(1);
+
+      let persisted = readPersistedMessages(retryContext.runtimeDir);
+      let catchups = persisted.filter((msg) => msg?.schema?.kind === 'system_catchup');
+      expect(catchups).toHaveLength(1);
+      expect(queueStub.requests[0].body.notifyMeta).toMatchObject({
+        kind: 'merged_unread_actionable',
+        unreadCount: 2,
+        messageIds: ['msg_catchup_1', 'msg_catchup_2'],
+      });
+
+      await retryContext.internals.notifyAgentCatchupForTest('alpha', 'retry-test');
+      expect(queueStub.requests).toHaveLength(2);
+
+      persisted = readPersistedMessages(retryContext.runtimeDir);
+      catchups = persisted.filter((msg) => msg?.schema?.kind === 'system_catchup');
+      expect(catchups).toHaveLength(1);
+      expect(queueStub.requests[1].body.notifyMeta).toMatchObject({
+        kind: 'merged_unread_actionable',
+        unreadCount: 2,
+        messageIds: ['msg_catchup_1', 'msg_catchup_2'],
+      });
+      expect(queueStub.requests[1].body.notifyMeta.messageIds).not.toContain(catchups[0].id);
+
+      const events = readDeliveryEvents(retryContext.runtimeDir);
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: 'push.queue_failed',
+          messageIds: ['msg_catchup_1', 'msg_catchup_2'],
+          reason: 'status-503',
+        }),
+        expect.objectContaining({
+          type: 'push.queued',
+          messageIds: ['msg_catchup_1', 'msg_catchup_2'],
+          queueEntryId: 2,
+        }),
+      ]));
+    } finally {
+      retryContext.cleanup();
+      await queueStub.close();
+    }
+  });
+
+  test('offline catchup reuses an existing persisted catchup after cursor reset', async () => {
+    const queueStub = await createQueueStub((_req, count) => ({
+      status: 200,
+      body: { ok: true, id: count, queuedAt: 5000 + count },
+    }));
+    const existingCatchup = {
+      id: 'msg_existing_catchup',
+      ts: 3000,
+      from: 'system',
+      to: 'alpha',
+      group: null,
+      type: 'inform',
+      priority: 'normal',
+      summary: 'Queued while offline: 2 message(s).',
+      full: 'existing catchup',
+      mentions: [],
+      reply_to: null,
+      source: 'system',
+      schema: {
+        kind: 'system_catchup',
+        version: 1,
+        payload: {
+          reason: 'previous-process',
+          sourceUnreadCount: 2,
+          sourceUnreadIds: ['msg_existing_1', 'msg_existing_2'],
+          oldestId: 'msg_existing_1',
+          latestId: 'msg_existing_2',
+        },
+      },
+    };
+    const retryContext = await createBackendTestContext('agent-chat-catchup-existing-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          tmux: 'alpha:0.0',
+          server: 'local',
+        },
+      },
+      groups: {},
+      messages: [
+        {
+          id: 'msg_existing_1',
+          ts: 1000,
+          from: 'operator',
+          to: 'alpha',
+          type: 'human',
+          summary: 'one',
+          full: 'one',
+          mentions: [],
+          trustLevel: 'operator',
+        },
+        {
+          id: 'msg_existing_2',
+          ts: 2000,
+          from: 'beta',
+          to: 'alpha',
+          type: 'request',
+          summary: 'two',
+          full: 'two',
+          mentions: [],
+        },
+        existingCatchup,
+      ],
+      env: { AGENT_CHAT_QUEUE_URL: queueStub.url },
+    });
+
+    try {
+      await retryContext.internals.notifyAgentCatchupForTest('alpha', 'after-restart');
+
+      const persisted = readPersistedMessages(retryContext.runtimeDir);
+      const catchups = persisted.filter((msg) => msg?.schema?.kind === 'system_catchup');
+      expect(catchups).toHaveLength(1);
+      expect(catchups[0].id).toBe('msg_existing_catchup');
+      expect(queueStub.requests).toHaveLength(1);
+      expect(queueStub.requests[0].body.notifyMeta).toMatchObject({
+        kind: 'merged_unread_actionable',
+        unreadCount: 2,
+        messageIds: ['msg_existing_1', 'msg_existing_2'],
+      });
+      expect(queueStub.requests[0].body.notifyMeta.messageIds).not.toContain('msg_existing_catchup');
+    } finally {
+      retryContext.cleanup();
+      await queueStub.close();
     }
   });
 
