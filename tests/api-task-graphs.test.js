@@ -65,6 +65,7 @@ describe('task graph API', () => {
       kind: 'task_graph_dispatch',
       version: 1,
       payload: {
+        dispatchKey: `task_graph_dispatch:${graphId}:a`,
         graphId,
         nodeId: 'a',
         description: 'Do A',
@@ -92,6 +93,233 @@ describe('task graph API', () => {
     expect(completeC.status).toBe(200);
     expect(completeC.body.graph.status).toBe('complete');
     expect(completeC.body.node.status).toBe('complete');
+  });
+
+  test('graph creation fails closed without dispatch when graph persistence fails', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+    context.internals.setJsonSaveFailureForTest('task_graphs.json', true);
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send({
+        owner: 'orchestrator',
+        label: 'single node graph',
+        nodes: {
+          a: {
+            assignee: 'alpha',
+            description: 'Do A',
+          },
+        },
+      });
+
+    expect(createResponse.status).toBe(503);
+    expect(createResponse.body.error).toContain('task graph persistence failed');
+    const listResponse = await request(context.app).get('/api/task-graphs');
+    expect(listResponse.status).toBe(200);
+    expect(listResponse.body).toEqual([]);
+    expect(readJson(path.join(context.runtimeDir, 'data', 'messages.json'))).toEqual([]);
+  });
+
+  test('dispatch persistence failure leaves created graph pending instead of failed', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+    context.internals.setJsonSaveFailureForTest('.msg_counter', true);
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send({
+        owner: 'orchestrator',
+        label: 'single node graph',
+        nodes: {
+          a: {
+            assignee: 'alpha',
+            description: 'Do A',
+          },
+        },
+      });
+
+    expect(createResponse.status).toBe(503);
+    expect(createResponse.body.error).toContain('task graph dispatch failed');
+    const listResponse = await request(context.app).get('/api/task-graphs');
+    expect(listResponse.status).toBe(200);
+    expect(listResponse.body).toHaveLength(1);
+    expect(listResponse.body[0].status).toBe('active');
+    expect(listResponse.body[0].nodes.a.status).toBe('pending');
+    expect(readJson(path.join(context.runtimeDir, 'data', 'messages.json'))).toEqual([]);
+  });
+
+  test('node update persistence failure leaves graph state unchanged', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+        beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+        gamma: { name: 'gamma', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send(buildChainGraph());
+    expect(createResponse.status).toBe(200);
+    const graphId = createResponse.body.graph.id;
+    context.internals.setJsonSaveFailureForTest('task_graphs.json', true);
+
+    const patchResponse = await request(context.app)
+      .patch(`/api/task-graphs/${graphId}/nodes/a`)
+      .send({ status: 'complete', result: { finished: 'A' } });
+
+    expect(patchResponse.status).toBe(503);
+    expect(patchResponse.body.error).toContain('task graph persistence failed');
+    const graphResponse = await request(context.app).get(`/api/task-graphs/${graphId}`);
+    expect(graphResponse.status).toBe(200);
+    expect(graphResponse.body.status).toBe('active');
+    expect(graphResponse.body.nodes.a.status).toBe('dispatched');
+    expect(graphResponse.body.nodes.a.result).toBe(null);
+    expect(graphResponse.body.nodes.b.status).toBe('pending');
+    expect(readJson(path.join(context.runtimeDir, 'data', 'messages.json'))).toHaveLength(1);
+  });
+
+  test('downstream dispatch graph save failure reuses the durable dispatch on retry', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+        beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+        gamma: { name: 'gamma', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send(buildChainGraph());
+    expect(createResponse.status).toBe(200);
+    const graphId = createResponse.body.graph.id;
+    context.internals.setJsonSaveFailureForTest('task_graphs.json', { after: 1, count: 1 });
+
+    const firstPatch = await request(context.app)
+      .patch(`/api/task-graphs/${graphId}/nodes/a`)
+      .send({ status: 'complete', result: { finished: 'A' } });
+    expect(firstPatch.status).toBe(503);
+    expect(firstPatch.body.error).toContain('task graph persistence failed');
+    const messagesAfterFailure = readJson(path.join(context.runtimeDir, 'data', 'messages.json'));
+    expect(messagesAfterFailure).toHaveLength(2);
+    const betaDispatchId = messagesAfterFailure[1].id;
+    expect(messagesAfterFailure[1].schema.payload).toMatchObject({
+      dispatchKey: `task_graph_dispatch:${graphId}:b`,
+      graphId,
+      nodeId: 'b',
+    });
+
+    const graphAfterFailure = await request(context.app).get(`/api/task-graphs/${graphId}`);
+    expect(graphAfterFailure.status).toBe(200);
+    expect(graphAfterFailure.body.nodes.a.status).toBe('complete');
+    expect(graphAfterFailure.body.nodes.b.status).toBe('pending');
+
+    const retryPatch = await request(context.app)
+      .patch(`/api/task-graphs/${graphId}/nodes/a`)
+      .send({ status: 'complete', result: { finished: 'A' } });
+    expect(retryPatch.status).toBe(200);
+    expect(retryPatch.body.graph.nodes.b.status).toBe('dispatched');
+    expect(retryPatch.body.graph.nodes.b.message_id).toBe(betaDispatchId);
+    const messagesAfterRetry = readJson(path.join(context.runtimeDir, 'data', 'messages.json'));
+    expect(messagesAfterRetry).toHaveLength(2);
+    expect(messagesAfterRetry[1].id).toBe(betaDispatchId);
+  });
+
+  test('task graph result hook persistence failure returns 503 and leaves graph unchanged', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send({
+        owner: 'orchestrator',
+        label: 'single node graph',
+        nodes: {
+          a: {
+            assignee: 'alpha',
+            description: 'Do A',
+          },
+        },
+      });
+    expect(createResponse.status).toBe(200);
+    const graphId = createResponse.body.graph.id;
+    const dispatchMessageId = createResponse.body.graph.nodes.a.message_id;
+    context.internals.setJsonSaveFailureForTest('task_graphs.json', true);
+
+    const messageResponse = await request(context.app)
+      .post('/api/messages')
+      .send({
+        from: 'alpha',
+        to: 'orchestrator',
+        type: 'inform',
+        summary: 'node complete',
+        full: 'done',
+        reply_to: dispatchMessageId,
+        schema: {
+          kind: 'task_graph_result',
+          version: 1,
+          payload: {
+            graphId,
+            nodeId: 'a',
+            result: { ok: true },
+          },
+        },
+      });
+
+    expect(messageResponse.status).toBe(503);
+    expect(messageResponse.body).toMatchObject({
+      messageAccepted: true,
+      taskGraph: null,
+    });
+    expect(messageResponse.body.id).toMatch(/^msg_/);
+    const graphResponse = await request(context.app).get(`/api/task-graphs/${graphId}`);
+    expect(graphResponse.status).toBe(200);
+    expect(graphResponse.body.status).toBe('active');
+    expect(graphResponse.body.nodes.a.status).toBe('dispatched');
+    expect(graphResponse.body.nodes.a.result).toBe(null);
+    expect(readJson(path.join(context.runtimeDir, 'data', 'messages.json'))).toHaveLength(2);
+  });
+
+  test('delete persistence failure returns 503 and leaves active graph intact', async () => {
+    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+        beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+        gamma: { name: 'gamma', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
+      },
+      groups: {},
+    });
+
+    const createResponse = await request(context.app)
+      .post('/api/task-graphs')
+      .send(buildChainGraph());
+    expect(createResponse.status).toBe(200);
+    const graphId = createResponse.body.graph.id;
+    context.internals.setJsonSaveFailureForTest('task_graphs.json', true);
+
+    const deleteResponse = await request(context.app).delete(`/api/task-graphs/${graphId}`);
+    expect(deleteResponse.status).toBe(503);
+    expect(deleteResponse.body.error).toContain('task graph persistence failed');
+    const graphResponse = await request(context.app).get(`/api/task-graphs/${graphId}`);
+    expect(graphResponse.status).toBe(200);
+    expect(graphResponse.body.status).toBe('active');
+    expect(graphResponse.body.nodes.a.status).toBe('dispatched');
+    expect(graphResponse.body.nodes.b.status).toBe('pending');
   });
 
   test('failed dependency cascades failure through remaining pending nodes', async () => {

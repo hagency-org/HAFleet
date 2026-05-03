@@ -274,20 +274,42 @@ const {
   flushAllPendingJsonWrites,
   loadJsonlTailSync,
 } = jsonStorage;
-const forcedJsonSaveFailures = new Set();
+const forcedJsonSaveFailures = new Map();
 
 function saveJson(name, data, options = {}) {
-  if (forcedJsonSaveFailures.has(name)) {
-    console.error(`Forced JSON save failure for ${dataPath(name)}`);
-    return false;
+  const forcedFailure = forcedJsonSaveFailures.get(name);
+  if (forcedFailure) {
+    if (forcedFailure && typeof forcedFailure === 'object' && !Array.isArray(forcedFailure)) {
+      const after = Math.max(0, Number(forcedFailure.after) || 0);
+      if (after > 0) {
+        forcedJsonSaveFailures.set(name, { ...forcedFailure, after: after - 1 });
+      } else {
+        const count = Math.max(1, Number(forcedFailure.count) || 1);
+        if (count <= 1) forcedJsonSaveFailures.delete(name);
+        else forcedJsonSaveFailures.set(name, { ...forcedFailure, count: count - 1 });
+        console.error(`Forced JSON save failure for ${dataPath(name)}`);
+        return false;
+      }
+    } else {
+      console.error(`Forced JSON save failure for ${dataPath(name)}`);
+      return false;
+    }
   }
   return storageSaveJson(name, data, options);
 }
 
 function setJsonSaveFailureForTest(name, enabled = true) {
   if (typeof name !== 'string' || !name.trim()) return;
-  if (enabled) forcedJsonSaveFailures.add(name);
-  else forcedJsonSaveFailures.delete(name);
+  if (enabled === false) {
+    forcedJsonSaveFailures.delete(name);
+  } else if (enabled && typeof enabled === 'object' && !Array.isArray(enabled)) {
+    forcedJsonSaveFailures.set(name, {
+      after: Math.max(0, Number(enabled.after) || 0),
+      count: Math.max(1, Number(enabled.count) || 1),
+    });
+  } else {
+    forcedJsonSaveFailures.set(name, true);
+  }
 }
 
 function normalizeServer(value) {
@@ -3396,7 +3418,7 @@ function saveMessages() {
 function saveCursors() { return saveJson('cursors.json', cursors); }
 function saveServers() { saveJson('servers.json', servers); }
 function saveAgentRuntime(immediate = false) { saveJson('agent_runtime.json', agentRuntime, { immediate }); }
-function saveTaskGraphs(next = taskGraphStore.dump()) { saveJson('task_graphs.json', next); }
+function saveTaskGraphs(next = taskGraphStore.dump()) { return saveJson('task_graphs.json', next); }
 function saveLocalActivitySweepState() { saveJson('local_activity_sweep.json', localActivitySweepState); }
 
 function ensureAgentRecord(name, defaults = {}) {
@@ -3757,9 +3779,66 @@ const notificationRouter = new NotificationRouter({
 const taskGraphStore = createTaskGraphStore({
   initialGraphs: taskGraphs,
   save: (nextGraphs) => saveTaskGraphs(nextGraphs),
-  dispatchMessage: (payload) => dispatchInternalDirectMessage(payload),
+  dispatchMessage: (payload) => dispatchTaskGraphMessage(payload),
   emitEvent: (eventName, payload) => broadcastSSE(eventName, payload),
 });
+
+function buildTaskGraphDispatchKey(graphId, nodeId) {
+  const graphPart = normalizeOptionalText(graphId, 255);
+  const nodePart = normalizeOptionalText(nodeId, 255);
+  return graphPart && nodePart ? `task_graph_dispatch:${graphPart}:${nodePart}` : null;
+}
+
+function findTaskGraphDispatchMessage(graphId, nodeId, dispatchKey = null) {
+  const normalizedGraphId = normalizeOptionalText(graphId, 255);
+  const normalizedNodeId = normalizeOptionalText(nodeId, 255);
+  const normalizedDispatchKey = normalizeOptionalText(dispatchKey, 512)
+    || buildTaskGraphDispatchKey(normalizedGraphId, normalizedNodeId);
+  if (!normalizedGraphId || !normalizedNodeId) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    const schema = msg?.schema;
+    if (schema?.kind !== 'task_graph_dispatch') continue;
+    const payload = schema?.payload && typeof schema.payload === 'object' && !Array.isArray(schema.payload)
+      ? schema.payload
+      : {};
+    const payloadDispatchKey = normalizeOptionalText(payload.dispatchKey ?? payload.dispatch_key, 512);
+    const payloadGraphId = normalizeOptionalText(payload.graphId ?? payload.graph_id, 255);
+    const payloadNodeId = normalizeOptionalText(payload.nodeId ?? payload.node_id, 255);
+    if (normalizedDispatchKey && payloadDispatchKey === normalizedDispatchKey) return msg;
+    if (payloadGraphId === normalizedGraphId && payloadNodeId === normalizedNodeId) return msg;
+  }
+  return null;
+}
+
+function dispatchTaskGraphMessage(payload = {}) {
+  const schema = payload?.schema && typeof payload.schema === 'object' && !Array.isArray(payload.schema)
+    ? payload.schema
+    : {};
+  const schemaPayload = schema.payload && typeof schema.payload === 'object' && !Array.isArray(schema.payload)
+    ? schema.payload
+    : {};
+  const graphId = normalizeOptionalText(schemaPayload.graphId ?? schemaPayload.graph_id, 255);
+  const nodeId = normalizeOptionalText(schemaPayload.nodeId ?? schemaPayload.node_id, 255);
+  const dispatchKey = normalizeOptionalText(schemaPayload.dispatchKey ?? schemaPayload.dispatch_key, 512)
+    || buildTaskGraphDispatchKey(graphId, nodeId);
+  const existing = findTaskGraphDispatchMessage(graphId, nodeId, dispatchKey);
+  if (existing) return existing;
+  return dispatchInternalDirectMessage({
+    ...payload,
+    schema: {
+      ...schema,
+      kind: 'task_graph_dispatch',
+      version: Number(schema.version) || 1,
+      payload: {
+        ...schemaPayload,
+        dispatchKey,
+        graphId,
+        nodeId,
+      },
+    },
+  });
+}
 
 function taskGraphErrorStatus(error) {
   switch (error?.code) {
@@ -3768,6 +3847,9 @@ function taskGraphErrorStatus(error) {
       return 404;
     case 'graph_exists':
       return 409;
+    case 'graph_persistence_failed':
+    case 'graph_dispatch_failed':
+      return 503;
     default:
       return 400;
   }
@@ -3775,6 +3857,10 @@ function taskGraphErrorStatus(error) {
 
 function respondTaskGraphError(res, error, fallback = 'task graph error') {
   return res.status(taskGraphErrorStatus(error)).json({ error: error?.message || fallback });
+}
+
+function isTaskGraphDurabilityError(error) {
+  return error?.code === 'graph_persistence_failed' || error?.code === 'graph_dispatch_failed';
 }
 
 function handleTaskGraphMessageHook(msg) {
@@ -3815,6 +3901,7 @@ function handleTaskGraphMessageHook(msg) {
       graphStatus: advanced?.status || graph.status,
     };
   } catch (error) {
+    if (isTaskGraphDurabilityError(error)) throw error;
     console.warn(`task graph message hook ignored (${graphId}/${nodeId}): ${error?.message || error}`);
     return null;
   }
@@ -8929,9 +9016,13 @@ app.get('/api/task-graphs/:id', (req, res) => {
 });
 
 app.delete('/api/task-graphs/:id', requireBearer, (req, res) => {
-  const graph = taskGraphStore.deleteGraph(req.params.id);
-  if (!graph) return res.status(404).json({ error: 'task graph not found' });
-  return res.json({ ok: true, graph });
+  try {
+    const graph = taskGraphStore.deleteGraph(req.params.id);
+    if (!graph) return res.status(404).json({ error: 'task graph not found' });
+    return res.json({ ok: true, graph });
+  } catch (error) {
+    return respondTaskGraphError(res, error, 'failed to delete task graph');
+  }
 });
 
 app.patch('/api/task-graphs/:id/nodes/:nodeId', requireAgentToken(_tokenFromNodeAssignee), (req, res) => {
@@ -9490,7 +9581,19 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
   if (!dispatchResult.ok) {
     return res.status(dispatchResult.status || 503).json({ error: dispatchResult.error || 'message persistence failed' });
   }
-  const taskGraph = handleTaskGraphMessageHook(msg);
+  let taskGraph = null;
+  try {
+    taskGraph = handleTaskGraphMessageHook(msg);
+  } catch (error) {
+    return res.status(taskGraphErrorStatus(error)).json({
+      error: error?.message || 'task graph hook failed',
+      id: msg.id,
+      messageAccepted: true,
+      warnings,
+      delivery: { suppressed: msg.suppressedRecipients || [], targetKind: directTargetKind || null },
+      taskGraph: null,
+    });
+  }
 
   res.json({
     ok: true,
