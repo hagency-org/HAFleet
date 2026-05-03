@@ -5,8 +5,12 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(__filename);
-const REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
-const MANIFEST_PATH = path.join(SCRIPT_DIR, 'architecture-boundaries.json');
+const REPO_ROOT = process.env.AGENTCHAT_ARCH_BOUNDARY_ROOT
+  ? path.resolve(process.env.AGENTCHAT_ARCH_BOUNDARY_ROOT)
+  : path.resolve(SCRIPT_DIR, '..');
+const MANIFEST_PATH = process.env.AGENTCHAT_ARCH_BOUNDARY_MANIFEST
+  ? path.resolve(process.env.AGENTCHAT_ARCH_BOUNDARY_MANIFEST)
+  : path.join(SCRIPT_DIR, 'architecture-boundaries.json');
 
 function repoPath(filePath) {
   return path.relative(REPO_ROOT, filePath).split(path.sep).join('/');

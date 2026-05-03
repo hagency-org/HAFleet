@@ -106,6 +106,7 @@
     "backend-v2.js": {
       "statefulGetMarkers": [
         "refreshServerLiveness()",
+        "resolveSubconsciousState(",
         "saveCursors()",
         "markAgentInboxChecked(",
         "advanceGroupCursor(",
@@ -117,6 +118,7 @@
         { "method": "GET", "path": "/api/servers", "owner": "server-runtime.liveness-read", "auth": "global-api-auth-only" },
         { "method": "GET", "path": "/api/agents", "owner": "agent-runtime.liveness-read", "auth": "global-api-auth-only" },
         { "method": "GET", "path": "/api/agents/:name", "owner": "agent-runtime.liveness-read", "auth": "global-api-auth-only" },
+        { "method": "GET", "path": "/api/subconscious/detail/:name", "owner": "subconscious.read-through-state", "auth": "global-api-auth-only" },
         { "method": "GET", "path": "/api/inbox/:agent", "owner": "inbox.agent-read-ack", "auth": "agent-token" },
         { "method": "GET", "path": "/api/groups/:name/messages", "owner": "groups.member-read-ack", "auth": "agent-credential" }
       ],
