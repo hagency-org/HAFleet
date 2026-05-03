@@ -137,7 +137,11 @@ Goal:
 
 Shape:
 
-- Add a CLI/API read path that lists servers with:
+- Implemented read paths:
+  - `GET /api/servers/fleet?expectVersion=<short-sha>`
+  - `agentchat cli fleet --expect-version <short-sha>`
+  - `agentchat cli fleet --expect-version <short-sha> --json`
+- The inventory lists servers with:
   - `id`
   - `online`
   - `maintenance`
@@ -147,6 +151,7 @@ Shape:
   - `version`
   - `versionStatus` relative to an expected version
   - `versionStale` or equivalent when a version is only last-known
+- The inventory is a pure projection. It does not call `refreshServerLiveness()` and does not mutate `servers.json` or agent state.
 
 Tests:
 

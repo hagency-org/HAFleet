@@ -85,6 +85,13 @@ agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
 curl -s http://127.0.0.1:8090/api/servers | jq '.[] | {id, online, lastSeen, agentCount, sourceIp}'
 ```
 
+Fleet version inventory:
+```bash
+agentchat cli fleet --expect-version <short-sha>
+agentchat cli fleet --expect-version <short-sha> --json
+curl -s 'http://127.0.0.1:8090/api/servers/fleet?expectVersion=<short-sha>' | jq
+```
+
 ### Put a noisy remote server into maintenance (force offline + mute heartbeat flaps)
 ```bash
 curl -s -X POST http://127.0.0.1:8090/api/servers/<server_id>/maintenance \

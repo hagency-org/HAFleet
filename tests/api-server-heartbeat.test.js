@@ -1232,4 +1232,45 @@ describe('server heartbeat api', () => {
     expect(Number.isFinite(Number(servers.s1.lastSeen))).toBe(true);
     expect(Number.isFinite(Number(servers.s1.updatedAt))).toBe(true);
   });
+
+  test('classifies fleet inventory without mutating stale server rows', async () => {
+    const now = Date.now();
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
+      servers: {
+        current: { id: 'current', online: true, heartbeatAt: now - 1000, lastSeen: now - 1000, version: 'cur1234', agents: ['a1'], agentCount: 1, relayInstanceId: 'i-current', relayBootTs: 1 },
+        outdated: { id: 'outdated', online: true, heartbeatAt: now - 1000, lastSeen: now - 1000, version: 'old9999', agents: ['a2'], agentCount: 1 },
+        unknown: { id: 'unknown', online: true, heartbeatAt: now - 1000, lastSeen: now - 1000, version: 'unknown-legacy', agents: [], agentCount: 0 },
+        offline: { id: 'offline', online: false, heartbeatAt: 0, lastSeen: now - 1000, version: 'cur1234', agents: ['a3'], agentCount: 1 },
+        stale: { id: 'stale', online: true, heartbeatAt: now - 10_000, lastSeen: now - 10_000, version: 'old9999', agents: ['a4'], agentCount: 1 },
+        maintenance: { id: 'maintenance', online: false, heartbeatAt: 0, lastSeen: now - 1000, version: 'old9999', maintenance: true, agents: ['a5'], agentCount: 1 },
+      },
+    }));
+
+    const response = await request(context.app).get('/api/servers/fleet?expectVersion=cur1234');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      expectedVersion: 'cur1234',
+      summary: {
+        total: 6,
+        current: 1,
+        outdated: 1,
+        unknown: 1,
+        offline: 2,
+        maintenance: 1,
+      },
+    });
+    const byId = Object.fromEntries(response.body.servers.map((row) => [row.id, row]));
+    expect(byId.current).toMatchObject({ versionStatus: 'current', versionStale: false, online: true, agentCount: 1, relayInstanceId: 'i-current', relayBootTs: 1 });
+    expect(byId.outdated).toMatchObject({ versionStatus: 'outdated', versionStale: true, online: true, version: 'old9999' });
+    expect(byId.unknown).toMatchObject({ versionStatus: 'unknown', versionStale: false, online: true, version: 'unknown-legacy' });
+    expect(byId.offline).toMatchObject({ versionStatus: 'offline', versionStale: false, online: false, version: 'cur1234' });
+    expect(byId.stale).toMatchObject({ versionStatus: 'offline', versionStale: true, online: true, version: 'old9999' });
+    expect(byId.maintenance).toMatchObject({ versionStatus: 'maintenance', maintenance: true, online: false, version: 'old9999' });
+
+    const persisted = readJson(serversPath(context.runtimeDir));
+    expect(persisted.stale.online).toBe(true);
+    expect(persisted.stale.heartbeatAt).toBe(now - 10_000);
+  });
 });

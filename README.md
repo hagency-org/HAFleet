@@ -126,6 +126,7 @@ Central API server. All data lives here.
 | POST | `/api/servers/:id/offline` | bearer (`API_TOKEN`) | Mark server offline |
 | POST | `/api/servers/:id/maintenance` | bearer (`API_TOKEN`) | Toggle operator-owned server maintenance mode |
 | GET | `/api/servers` | — | List all servers |
+| GET | `/api/servers/fleet?expectVersion=<sha>` | — | Read-only fleet version inventory (`current/outdated/unknown/offline/maintenance`) |
 | **Agents** ||||
 | POST | `/api/agents` | agent-token | Register/update agent (online) |
 | GET | `/api/agents` | — | List all agents |
@@ -384,7 +385,7 @@ agentchat check-mcp
 | `agent-down` | Graceful agent shutdown (archive session, kill tmux) |
 | `agent-ls` | List agents with status from backend |
 | `agent-send` | Queue message for tmux delivery (with `--force` for immediate) |
-| `agent-chat-cli` | Admin CLI for agents, groups, avatars, identity |
+| `agent-chat-cli` | Admin CLI for agents, groups, avatars, identity, and fleet inventory |
 | `agent-audit` | Full audit: mirror consistency, syntax, deps, maintenance |
 | `agent-benchmark` | Benchmark workflow foundations |
 | `agent-maintain` | Log rotation, stale data pruning |

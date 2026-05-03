@@ -21,6 +21,7 @@ fi
 #   group <name>                                 Show group details
 #   list-agents                                  List all agents
 #   status [name]                                Show status table or one agent status
+#   fleet [--expect-version <sha>] [--json]      Show remote fleet version inventory
 #   agent <name>                                 Show agent details
 #   identity <name> <text>                       Set agent identity/description
 #   dm <agent> <human>                           Ensure DM room exists (Matrix)
@@ -81,6 +82,10 @@ _json_str() {
 
 _json_arr() {
   python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "$@"
+}
+
+_urlencode() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""), end="")' "$1"
 }
 
 _tmux_snapshot_json() {
@@ -452,6 +457,79 @@ PY
     _curl "$API/api/agents/$name" | python3 -m json.tool
     ;;
 
+  fleet)
+    fleet_json="false"
+    expected_version=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --json)
+          fleet_json="true"
+          shift
+          ;;
+        --expect-version|--expected-version|-e)
+          expected_version="${2:?Usage: agent-chat-cli fleet [--expect-version <sha>] [--json]}"
+          shift 2
+          ;;
+        --api)
+          API="${2:?Usage: agent-chat-cli fleet [--api <url>] [--expect-version <sha>] [--json]}"
+          shift 2
+          ;;
+        --token)
+          TOKEN="${2:?Usage: agent-chat-cli fleet [--token <token>] [--expect-version <sha>] [--json]}"
+          shift 2
+          ;;
+        *)
+          echo "Unknown fleet option: $1" >&2
+          echo "Usage: agent-chat-cli fleet [--expect-version <sha>] [--json]" >&2
+          exit 1
+          ;;
+      esac
+    done
+    fleet_url="$API/api/servers/fleet"
+    if [ -n "$expected_version" ]; then
+      fleet_url="${fleet_url}?expectVersion=$(_urlencode "$expected_version")"
+    fi
+    tmp_json="$(mktemp)"
+    _curl "$fleet_url" > "$tmp_json"
+    if [ "$fleet_json" = "true" ]; then
+      python3 -m json.tool "$tmp_json"
+    else
+      python3 - "$tmp_json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+if isinstance(data, dict) and data.get('error'):
+    print(json.dumps(data, indent=2))
+    sys.exit(0)
+
+summary = data.get('summary') or {}
+expected = data.get('expectedVersion') or '-'
+print(f"FLEET expected={expected} generatedAt={data.get('generatedAt') or '-'}")
+print(
+    "SUMMARY "
+    f"total={summary.get('total', 0)} "
+    f"current={summary.get('current', 0)} "
+    f"outdated={summary.get('outdated', 0)} "
+    f"unknown={summary.get('unknown', 0)} "
+    f"offline={summary.get('offline', 0)} "
+    f"maintenance={summary.get('maintenance', 0)}"
+)
+print("  SERVER               STATUS       ONLINE  AGENTS VERSION       LASTSEEN")
+for row in data.get('servers') or []:
+    server = str(row.get('id') or '-')
+    status = str(row.get('versionStatus') or 'unknown')
+    online = 'yes' if row.get('online') else 'no'
+    agents = str(row.get('agentCount') or 0)
+    version = str(row.get('version') or '-')
+    last_seen = str(row.get('lastSeen') or '-')
+    print(f"  {server:20.20s} {status:12.12s} {online:6s} {agents:6s} {version:13.13s} {last_seen}")
+PY
+    fi
+    rm -f "$tmp_json"
+    ;;
+
   identity)
     name="${1:?Usage: agent-chat-cli identity <name> <text>}"
     shift
@@ -510,6 +588,7 @@ PY
     echo "Agent management:"
     echo "  list-agents                         List all agents"
     echo "  status [name]                       Status table or one agent status"
+    echo "  fleet [--expect-version <sha>] [--json]  Remote fleet version inventory"
     echo "  agent <name>                        Agent details"
     echo "  identity <name> <text>              Set agent identity"
     echo "  avatar <name> [image|--force]       Set avatar (custom image; auto-gen may be disabled)"

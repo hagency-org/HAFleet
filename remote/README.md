@@ -42,6 +42,7 @@ Examples:
 - `agentchat up <name> <path> [claude|codex] [--allow-shared-workspace]`
 - `agentchat down <name>`
 - `agentchat update --pause-services`
+- `agentchat cli fleet --expect-version <short-sha> [--json]`
 - `agentchat audit`
 - `agentchat maintain`
 - `agentchat sync-skills`

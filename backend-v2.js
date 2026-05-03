@@ -5418,6 +5418,85 @@ function buildFlowHealth({ serverRows, agentNames, agentTokenReadiness, serverCr
   };
 }
 
+function normalizeServerVersion(value) {
+  return normalizeOptionalText(value, 128);
+}
+
+function isUnknownServerVersion(version) {
+  const normalized = normalizeServerVersion(version);
+  return !normalized || normalized === 'unknown-legacy';
+}
+
+function buildFleetServerRow(server, expectedVersion = null, now = Date.now()) {
+  const id = normalizeServer(server?.id) || normalizeOptionalText(server?.id, 128) || 'unknown';
+  const maintenance = isServerInMaintenance(id, server);
+  const heartbeatAt = Number(server?.heartbeatAt) || 0;
+  const lastSeen = Number(server?.lastSeen) || 0;
+  const online = server?.online === true;
+  const version = normalizeServerVersion(server?.version);
+  const expected = normalizeServerVersion(expectedVersion);
+  const heartbeatAgeMs = heartbeatAt > 0 ? Math.max(0, now - heartbeatAt) : null;
+  const stale = !maintenance && heartbeatAt > 0 && heartbeatAgeMs !== null && heartbeatAgeMs > HEARTBEAT_TTL_MS;
+  let versionStatus;
+  if (maintenance) versionStatus = 'maintenance';
+  else if (!online || heartbeatAt <= 0 || stale) versionStatus = 'offline';
+  else if (!expected || isUnknownServerVersion(version)) versionStatus = 'unknown';
+  else if (version === expected) versionStatus = 'current';
+  else versionStatus = 'outdated';
+  const knownVersion = !isUnknownServerVersion(version);
+  const versionStale = Boolean(expected && knownVersion && version !== expected && versionStatus !== 'unknown');
+
+  return {
+    id,
+    online,
+    maintenance,
+    lastSeen: lastSeen || null,
+    heartbeatAt: heartbeatAt || null,
+    heartbeatAgeMs,
+    updatedAt: Number(server?.updatedAt) || null,
+    agentCount: Number(server?.agentCount) || 0,
+    agents: Array.isArray(server?.agents) ? server.agents.filter(name => typeof name === 'string') : [],
+    sessions: Array.isArray(server?.sessions) ? server.sessions.filter(name => typeof name === 'string') : [],
+    sourceIp: server?.sourceIp || null,
+    relayInstanceId: normalizeRelayInstanceId(server?.relayInstanceId),
+    relayBootTs: normalizeRelayBootTs(server?.relayBootTs) || null,
+    version: version || null,
+    versionStatus,
+    versionStale,
+  };
+}
+
+function buildFleetInventory({ expectedVersion = null, now = Date.now() } = {}) {
+  const expected = normalizeServerVersion(expectedVersion) || normalizeServerVersion(LOCAL_GIT_VERSION);
+  const summary = {
+    total: 0,
+    current: 0,
+    outdated: 0,
+    unknown: 0,
+    offline: 0,
+    maintenance: 0,
+  };
+  const statusOrder = { current: 0, outdated: 1, unknown: 2, offline: 3, maintenance: 4 };
+  const rows = Object.values(servers)
+    .map(server => buildFleetServerRow(server, expected, now))
+    .sort((a, b) => {
+      const statusDelta = (statusOrder[a.versionStatus] ?? 99) - (statusOrder[b.versionStatus] ?? 99);
+      if (statusDelta) return statusDelta;
+      return a.id.localeCompare(b.id);
+    });
+  for (const row of rows) {
+    summary.total += 1;
+    summary[row.versionStatus] = (summary[row.versionStatus] || 0) + 1;
+  }
+  return {
+    ok: true,
+    expectedVersion: expected || null,
+    generatedAt: new Date(now).toISOString(),
+    summary,
+    servers: rows,
+  };
+}
+
 function markAgentsOfflineForServer(serverId, reason, clearTmux = false) {
   let changed = false;
   for (const agent of Object.values(agents)) {
@@ -7227,6 +7306,12 @@ app.get('/api/servers', (_req, res) => {
     }))
     .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
   res.json(rows);
+});
+
+app.get('/api/servers/fleet', (req, res) => {
+  const expectedVersion = normalizeOptionalText(req.query.expectVersion, 128)
+    || normalizeOptionalText(req.query.expectedVersion, 128);
+  res.json(buildFleetInventory({ expectedVersion }));
 });
 
 // ── SSE endpoint ──────────────────────────────────────────────────────
