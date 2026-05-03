@@ -339,10 +339,65 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).toContain('function normalizeArrayPayload(payload)');
     expect(response.text).toContain('function normalizeQueuePayload(payload)');
     expect(response.text).toContain('function normalizeReminderPayload(payload)');
-    expect(response.text).toContain('queueItems = normalizeQueuePayload(JSON.parse(e.data));');
-    expect(response.text).toContain('reminderItems = normalizeReminderPayload(JSON.parse(e.data));');
-    expect(response.text).toContain('queueItems = normalizeQueuePayload(await r.json());');
-    expect(response.text).toContain('reminderItems = normalizeReminderPayload(await r.json());');
+    expect(response.text).toContain('function applyQueuePayload(payload, force = false)');
+    expect(response.text).toContain('function applyReminderPayload(payload, force = false)');
+    expect(response.text).toContain('applyQueuePayload(JSON.parse(e.data), false);');
+    expect(response.text).toContain('applyReminderPayload(JSON.parse(e.data), false);');
+    expect(response.text).toContain('applyQueuePayload(await r.json(), true);');
+    expect(response.text).toContain('applyReminderPayload(await r.json(), true);');
+  });
+
+  test('monitor normalizes message rows before rendering logs', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('function normalizeMessageLogRow(row)');
+    expect(response.text).toContain('function normalizeMessageLogPayload(payload)');
+    expect(response.text).toContain("if (!row || typeof row !== 'object' || Array.isArray(row)) return null;");
+    expect(response.text).toContain("payload: typeof payload === 'string' ? payload : (payload == null ? '' : String(payload))");
+    expect(response.text).toContain('addLogEntry(normalizeMessageLogRow(JSON.parse(e.data)));');
+    expect(response.text).toContain('const msgs = normalizeMessageLogPayload(await res.json());');
+  });
+
+  test('monitor queue and reminder actions guard in-flight rows', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('const pendingQueueActionIds = new Set();');
+    expect(response.text).toContain('if (pendingQueueActionIds.has(pendingId)) return;');
+    expect(response.text).toContain('pendingQueueActionIds.add(pendingId);');
+    expect(response.text).toContain('pendingQueueActionIds.delete(pendingId);');
+    expect(response.text).toContain('normalizeQueuePayload(payload).filter(item => !pendingQueueActionIds.has(String(item.id)))');
+    expect(response.text).toContain('const pendingReminderCancelIds = new Set();');
+    expect(response.text).toContain('if (pendingReminderCancelIds.has(pendingId)) return;');
+    expect(response.text).toContain('pendingReminderCancelIds.add(pendingId);');
+    expect(response.text).toContain("if (!res.ok) throw new Error('HTTP ' + res.status);");
+    expect(response.text).toContain('pendingReminderCancelIds.delete(pendingId);');
+    expect(response.text).toContain('normalizeReminderPayload(payload).filter(item => !pendingReminderCancelIds.has(String(item.id)))');
+    expect(response.text).not.toContain('queueActionPending = false;');
+    expect(response.text).not.toContain('reminderActionPending = false;');
+  });
+
+  test('monitor timer-only updates avoid rebuilding queue and reminder rows', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('function updateQueueTimersInPlace()');
+    expect(response.text).toContain("waitEl.textContent = 'waiting ' + computeQueueWaitStr(item.queuedAt);");
+    expect(response.text).toContain("idleEl.className = 'qi-idle ' + info.className;");
+    expect(response.text).toContain("'<div class=\"qi-wait\"></div>'");
+    expect(response.text).toContain("'<div class=\"qi-idle ' + idleInfo.className + '\"></div>'");
+    expect(response.text).toContain('updateQueueTimersInPlace();');
+    expect(response.text).toContain('function updateReminderTimersInPlace()');
+    expect(response.text).toContain("countdownEl.textContent = '\\u23f0 ' + fmtCountdown(item.remainingMs || 0);");
+    expect(response.text).toContain("'<div class=\"ri-countdown\"></div>'");
+    expect(response.text).toContain('updateReminderTimersInPlace();');
   });
 
   test('monitor agent status polling is single-flight and array-normalized', async () => {
