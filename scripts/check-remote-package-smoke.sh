@@ -103,6 +103,13 @@ do
 done
 echo "[OK] Required generated package files exist"
 
+if [ -d "$ROOT_DIR/remote-dist" ]; then
+  if ! diff -qr "$PKG_DIR" "$ROOT_DIR/remote-dist" >/dev/null; then
+    fail "existing remote-dist/ is stale; run npm run build:remote to refresh the ignored generated package"
+  fi
+  echo "[OK] Existing remote-dist matches generated package"
+fi
+
 bad_paths="$(find "$PKG_DIR" \( -name '.DS_Store' -o -name '.env' -o -name 'package-lock.json' -o -path '*/node_modules/*' -o -path '*/logs/*' \) -print)"
 if [ -n "$bad_paths" ]; then
   echo "$bad_paths" >&2

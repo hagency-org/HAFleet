@@ -330,6 +330,25 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).not.toContain('new Date(a.lastSeenAt).toISOString()');
   });
 
+  test('alerts page checks action responses before refreshing or clearing selection', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/alerts');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('let alertActionInFlight=false;');
+    expect(response.text).toContain('async function assertAlertActionOk(r,label)');
+    expect(response.text).toContain('if(!r.ok||(payload&&payload.ok===false))');
+    expect(response.text).toContain('if(!selectedId||alertActionInFlight)return;');
+    expect(response.text).toContain("await assertAlertActionOk(r,'alert transition');");
+    expect(response.text).toContain("await assertAlertActionOk(r,'alert note');");
+    expect(response.text).toContain("await assertAlertActionOk(r,'alert delete');");
+    expect(response.text).toContain("reportAlertActionError('alert transition',e)");
+    expect(response.text).toContain("reportAlertActionError('alert note',e)");
+    expect(response.text).toContain("reportAlertActionError('alert delete',e)");
+    expect(response.text).toContain('selectedId=null;');
+  });
+
   test('monitor normalizes queue and reminder payload arrays', async () => {
     const mod = await setup();
 
@@ -590,6 +609,35 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).toContain('if (!monitoredAgent || agentDetailAbortController) return false;');
     expect(response.text).toContain('refreshAgentDetailIfIdle();');
     expect(response.text).not.toContain("if (monitoredAgent) fetchAgentDetail(monitoredAgent.name, { preserveVisible: true });");
+  });
+
+  test('monitor terminal capture ignores stale agent responses while allowing new selection fetches', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('let terminalFetchSeq = 0;');
+    expect(response.text).toContain('const terminalFetchInFlight = new Set();');
+    expect(response.text).toContain('const targetAgent = monitoredAgent;');
+    expect(response.text).toContain('if (terminalFetchInFlight.has(targetName)) return;');
+    expect(response.text).toContain('const requestSeq = ++terminalFetchSeq;');
+    expect(response.text).toContain('const isCurrentRequest = () => monitoredAgent && monitoredAgent.name === targetName && requestSeq === terminalFetchSeq;');
+    expect(response.text).toContain('if (!isCurrentRequest()) return;');
+    expect(response.text).toContain('terminalFetchInFlight.delete(targetName);');
+    expect(response.text).not.toContain('terminalFetching');
+  });
+
+  test('monitor detail fetch failures render an explicit sidebar error', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain("showAgentDetailError(targetName, 'Summary unavailable: ' + (detailRespRaw.reason?.message || 'request failed'));");
+    expect(response.text).toContain("showAgentDetailError(targetName, 'Summary unavailable (HTTP ' + res.status + ').');");
+    expect(response.text).toContain("showAgentDetailError(targetName, 'Summary unavailable: invalid response.');");
+    expect(response.text).not.toContain('const res = detailRespRaw.value;\n      if (!res.ok) return;');
   });
 
   test('redirects agent audit page to the detail audit hash', async () => {

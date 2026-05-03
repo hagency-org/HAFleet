@@ -115,6 +115,64 @@ describe('NotificationRouter', () => {
     router.destroy();
   });
 
+  test('aggregation writes persisted cooldown only after a successful flush', () => {
+    vi.useFakeTimers();
+    const store = {};
+    const flushed = [];
+    const router = new NotificationRouter({
+      agg: {
+        cooldownMs: 5000,
+        aggregateWindowMs: 500,
+        persistedCooldown: {
+          read: (k) => store[k] || 0,
+          write: (k, ts) => { store[k] = ts; },
+        },
+        aggregateFn: (buf) => ({ items: [...buf.values()] }),
+        sinks: ['out'],
+      },
+    }, {
+      out: (_f, p) => flushed.push(p),
+    });
+
+    expect(router.emit('agg', { n: 1 }, { dedupeKey: 'agent1' })).toMatchObject({ accepted: true, reason: 'buffered' });
+    expect(store.agent1).toBeUndefined();
+    expect(router.emit('agg', { n: 2 }, { dedupeKey: 'agent1' })).toMatchObject({ accepted: true, reason: 'buffered' });
+
+    vi.advanceTimersByTime(501);
+
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0].items).toEqual([{ n: 2 }]);
+    expect(store.agent1).toBeGreaterThan(0);
+    expect(router.emit('agg', { n: 3 }, { dedupeKey: 'agent1' })).toMatchObject({ accepted: false, reason: 'persisted_cooldown' });
+    router.destroy();
+  });
+
+  test('aggregation does not commit cooldown when every sink throws', () => {
+    vi.useFakeTimers();
+    const store = {};
+    const router = new NotificationRouter({
+      agg: {
+        cooldownMs: 5000,
+        aggregateWindowMs: 500,
+        persistedCooldown: {
+          read: (k) => store[k] || 0,
+          write: (k, ts) => { store[k] = ts; },
+        },
+        aggregateFn: (buf) => ({ items: [...buf.values()] }),
+        sinks: ['out'],
+      },
+    }, {
+      out: () => { throw new Error('sink down'); },
+    });
+
+    expect(router.emit('agg', { n: 1 }, { dedupeKey: 'agent1' })).toMatchObject({ accepted: true, reason: 'buffered' });
+    vi.advanceTimersByTime(501);
+
+    expect(store.agent1).toBeUndefined();
+    expect(router.emit('agg', { n: 2 }, { dedupeKey: 'agent1' })).toMatchObject({ accepted: true, reason: 'buffered' });
+    router.destroy();
+  });
+
   test('clearAgent: removes state for the specified agent', () => {
     const router = new NotificationRouter({
       test: { cooldownMs: 60000, sinks: ['out'] },

@@ -59,6 +59,7 @@ start_shard "contracts and cli" \
   tests/agent-home-v1.test.js \
   tests/mcp-media-cache.test.js \
   tests/architecture-boundaries-check.test.js \
+  tests/bot-command-acl.test.js \
   tests/source-of-truth.test.js \
   tests/cli-agent-project.test.js \
   tests/cli-agent-graph.test.js \

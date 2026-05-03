@@ -21,7 +21,7 @@ while IFS= read -r file; do
   [ -f "$file" ] || continue
   bash -n "$file"
   shell_count=$((shell_count + 1))
-done < <(git ls-files 'bin/*' 'remote/bin/*' 'scripts/*.sh' 'remote/install-remote.sh' 'remote/*.sh' | sort -u)
+done < <(git ls-files 'bin/*' 'remote/bin/*' 'scripts/*.sh' 'remote/install-remote.sh' 'remote/*.sh' '*.sh' | sort -u)
 echo "[OK] Shell syntax: $shell_count file(s)"
 
 echo "Syntax check passed."
