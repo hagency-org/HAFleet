@@ -5925,14 +5925,13 @@ export function computeAdaptiveSweepIntervalMs(baseIntervalMs, agentCount = 0) {
 
 function scheduleAdaptiveSweepLoop(label, fn, stateKey, baseIntervalMs) {
   const tick = () => {
+    if (!backgroundLoopsStarted) return;
     runAsyncSweep(label, fn, stateKey);
     const nextDelay = computeAdaptiveSweepIntervalMs(baseIntervalMs, countLocalSweepAgents());
-    const timer = setTimeout(tick, nextDelay);
-    if (typeof timer?.unref === 'function') timer.unref();
+    trackLifecycleTimeout(tick, nextDelay, { unref: true });
   };
   const initialDelay = computeAdaptiveSweepIntervalMs(baseIntervalMs, countLocalSweepAgents());
-  const timer = setTimeout(tick, initialDelay);
-  if (typeof timer?.unref === 'function') timer.unref();
+  trackLifecycleTimeout(tick, initialDelay, { unref: true });
 }
 
 function getAgentDeliveryState(name) {
@@ -6903,9 +6902,6 @@ app.get('/api/servers/fleet', (req, res) => {
 
 // ── SSE endpoint ──────────────────────────────────────────────────────
 sseAdapter.installRoute(app, '/api/stream');
-
-// SSE keepalive: send comment pings every 30s to prevent proxy idle timeout
-sseAdapter.startKeepalive();
 
 // ── Agents CRUD ───────────────────────────────────────────────────────
 const _tokenFromBody = r => r.body?.from || r.body?.name || '';
@@ -9604,6 +9600,38 @@ function shutdown() {
 let startupHooksInstalled = false;
 let backgroundLoopsStarted = false;
 let serverInstance = null;
+const lifecycleIntervals = new Set();
+const lifecycleTimeouts = new Set();
+
+function trackLifecycleInterval(fn, delay) {
+  const timer = setInterval(fn, delay);
+  lifecycleIntervals.add(timer);
+  return timer;
+}
+
+function trackLifecycleTimeout(fn, delay, { unref = false } = {}) {
+  const timer = setTimeout(() => {
+    lifecycleTimeouts.delete(timer);
+    fn();
+  }, delay);
+  lifecycleTimeouts.add(timer);
+  if (unref && typeof timer?.unref === 'function') timer.unref();
+  return timer;
+}
+
+function clearLifecycleHandles() {
+  for (const timer of lifecycleIntervals) clearInterval(timer);
+  lifecycleIntervals.clear();
+  for (const timer of lifecycleTimeouts) clearTimeout(timer);
+  lifecycleTimeouts.clear();
+}
+
+function endSseClients() {
+  for (const client of [...sseAdapter.clients]) {
+    try { client.end(); } catch (_) { /* ignore close errors */ }
+  }
+  sseAdapter.clients.clear();
+}
 
 function installStartupHooks() {
   if (startupHooksInstalled) return;
@@ -9612,15 +9640,27 @@ function installStartupHooks() {
   startupHooksInstalled = true;
 }
 
+function removeStartupHooks() {
+  if (!startupHooksInstalled) return;
+  process.off('SIGTERM', shutdown);
+  process.off('SIGINT', shutdown);
+  startupHooksInstalled = false;
+}
+
 function startBackgroundLoops() {
   if (backgroundLoopsStarted) return;
-  setInterval(() => {
+  backgroundLoopsStarted = true;
+
+  // SSE keepalive: send comment pings every 30s to prevent proxy idle timeout.
+  sseAdapter.startKeepalive(trackLifecycleInterval);
+
+  trackLifecycleInterval(() => {
     refreshServerLiveness();
   }, SERVER_SWEEP_INTERVAL_MS);
 
   scheduleAdaptiveSweepLoop('sweepLocalActivityDurations', sweepLocalActivityDurations, 'localActivity', LOCAL_ACTIVITY_SWEEP_INTERVAL_MS);
 
-  setInterval(() => {
+  trackLifecycleInterval(() => {
     sweepAgentRules();
   }, RULE_SWEEP_INTERVAL_MS);
 
@@ -9632,9 +9672,13 @@ function startBackgroundLoops() {
   scheduleAdaptiveSweepLoop('sweepSupervisorLifecycle', () => supervisorLifecycleManager.sweepAll(), 'supervisorLifecycle', SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS);
 
   // Prune resolved alerts every hour
-  setInterval(() => { alertStore.pruneResolved(); }, 3600_000);
+  trackLifecycleInterval(() => { alertStore.pruneResolved(); }, 3600_000);
+}
 
-  backgroundLoopsStarted = true;
+function stopBackgroundLoops() {
+  backgroundLoopsStarted = false;
+  clearLifecycleHandles();
+  endSseClients();
 }
 
 export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
@@ -9667,7 +9711,7 @@ export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
         }
         const delay = Math.min(30_000, 1000 * Math.pow(2, listenAttempt - 1));
         console.warn(`[EADDRINUSE] Port ${port} in use — retry ${listenAttempt}/${MAX_LISTEN_RETRIES} in ${delay}ms`);
-        setTimeout(tryListen, delay);
+        trackLifecycleTimeout(tryListen, delay);
       } else {
         console.error(`[FATAL] Server listen error: ${err.message}`);
         process.exit(1);
@@ -9678,6 +9722,28 @@ export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
 
   serverInstance = tryListen();
   return serverInstance;
+}
+
+export async function stopServer() {
+  stopBackgroundLoops();
+  removeStartupHooks();
+  flushAllPendingJsonWrites();
+
+  const server = serverInstance;
+  serverInstance = null;
+  if (!server) return;
+  if (typeof server.closeAllConnections === 'function') {
+    try { server.closeAllConnections(); } catch (_) { /* ignore close errors */ }
+  }
+  await new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (!error || error.code === 'ERR_SERVER_NOT_RUNNING') {
+        resolve();
+      } else {
+        reject(error);
+      }
+    });
+  });
 }
 
 export { app };
