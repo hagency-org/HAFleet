@@ -8,6 +8,7 @@ import { promisify } from 'util';
 import { defaultAgentchatHomeDir, resolveAgentDocsPaths, resolveV1ManifestForAgent } from './lib/agent-home-v1.js';
 import { detectPaneBusyState } from './lib/pane-activity.js';
 import { assertRuntimeDir } from './lib/runtime-dir-guard.js';
+import { createDashboardMutationBoundary } from './lib/dashboard/request-boundary.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.dirname(__filename);
@@ -49,8 +50,12 @@ const IDLE_THRESHOLD_SEC = Math.max(1, Math.ceil(IDLE_THRESHOLD / 1000));
 const execFileAsync = promisify(execFile);
 let execFileAsyncImpl = execFileAsync;
 const DASHBOARD_API_TOKEN = (process.env.AGENT_CHAT_DASHBOARD_TOKEN || '').trim();
-const DASHBOARD_READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 let dashboardRequestLocalOverride = null;
+const dashboardMutationBoundary = createDashboardMutationBoundary({
+  dashboardApiToken: DASHBOARD_API_TOKEN,
+  getLocalOverride: () => dashboardRequestLocalOverride,
+});
+const { requireDashboardMutationBoundary } = dashboardMutationBoundary;
 mkdirSync(DATA_ROOT, { recursive: true });
 mkdirSync(LOGS_ROOT, { recursive: true });
 mkdirSync(path.join(DATA_ROOT, 'agents'), { recursive: true });
@@ -60,47 +65,6 @@ function isLocalAgentServer(value) {
   const raw = typeof value === 'string' ? value.trim() : '';
   const localServerId = String(process.env.AGENT_CHAT_SERVER || 'local').trim() || 'local';
   return !raw || raw === 'local' || raw === localServerId;
-}
-
-function isLoopbackAddress(value) {
-  const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  if (!raw) return false;
-  if (raw === 'localhost' || raw === '::1' || raw === '127.0.0.1') return true;
-  if (raw.startsWith('::ffff:')) return raw.slice('::ffff:'.length) === '127.0.0.1';
-  return raw.startsWith('127.');
-}
-
-function isDashboardLocalRequest(req) {
-  if (typeof dashboardRequestLocalOverride === 'function') {
-    return dashboardRequestLocalOverride(req) === true;
-  }
-  const candidates = [
-    req?.socket?.remoteAddress,
-    req?.connection?.remoteAddress,
-    req?.ip,
-  ];
-  return candidates.some(isLoopbackAddress);
-}
-
-function dashboardBearerToken(req) {
-  const raw = String(req?.headers?.authorization || '').trim();
-  const match = raw.match(/^Bearer\s+(.+)$/i);
-  return match ? match[1].trim() : '';
-}
-
-function hasDashboardMutationAccess(req) {
-  if (isDashboardLocalRequest(req)) return true;
-  if (!DASHBOARD_API_TOKEN) return false;
-  return dashboardBearerToken(req) === DASHBOARD_API_TOKEN;
-}
-
-function requireDashboardMutationBoundary(req, res, next) {
-  if (DASHBOARD_READ_METHODS.has(req.method)) return next();
-  if (hasDashboardMutationAccess(req)) return next();
-  return res.status(403).json({
-    ok: false,
-    error: 'dashboard mutation requires a local client or dashboard bearer token',
-  });
 }
 
 // ── Server SSH config for remote tmux capture ────────────────────────
