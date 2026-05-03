@@ -155,6 +155,22 @@
         { "method": "POST", "path": "/api/media/stage", "owner": "media.agent-staging", "auth": "agent-token" },
         { "method": "POST", "path": "/api/messages", "owner": "messages.ingress.mixed", "auth": "agent-token" },
         { "method": "POST", "path": "/api/messages/:id/suppress", "owner": "messages.recipient-suppression", "auth": "agent-token" }
+      ],
+      "sensitiveRoutes": [
+        { "method": "GET", "path": "/api/agents/:name/launch-env", "owner": "operator.local-agent-launch-secret", "auth": "bearer-and-local" },
+        { "method": "GET", "path": "/api/framework-presets", "owner": "operator.runtime-config", "auth": "bearer" },
+        { "method": "GET", "path": "/api/alerts", "owner": "alerts.operator", "auth": "bearer" },
+        { "method": "GET", "path": "/api/alerts/stats", "owner": "alerts.operator", "auth": "bearer" },
+        { "method": "GET", "path": "/api/alerts/:id", "owner": "alerts.operator", "auth": "bearer" },
+        { "method": "GET", "path": "/api/media/fetch", "owner": "media.read", "auth": "global-api-auth-only" },
+        { "method": "GET", "path": "/api/dm/:agent/history", "owner": "messages.operator-dm-history", "auth": "bearer" },
+        { "method": "GET", "path": "/api/messages/:id", "owner": "messages.detail-access", "auth": "message-detail-access" },
+        { "method": "GET", "path": "/api/messages/:id/delivery", "owner": "delivery.message-detail-access", "auth": "message-detail-access" },
+        { "method": "GET", "path": "/api/agents/:name/delivery-events", "owner": "delivery.agent-events", "auth": "agent-token" },
+        { "method": "GET", "path": "/api/inbox/:agent/unread", "owner": "inbox.agent-unread", "auth": "agent-token" },
+        { "method": "GET", "path": "/api/inbox/:agent/unread-list", "owner": "inbox.agent-or-dashboard-unread", "auth": "bearer-or-agent-token-inline" },
+        { "method": "GET", "path": "/api/inbox/:agent", "owner": "inbox.agent-read", "auth": "agent-token" },
+        { "method": "GET", "path": "/api/groups/:name/messages", "owner": "groups.member-read", "auth": "agent-credential" }
       ]
     }
   }

@@ -151,6 +151,8 @@ function validateRouteAuth(fileName, source, route, expectedAuth) {
     'requireBridgeSecret',
     '_alertTransitionAuth',
     'authorizeSubconsciousEventIngest(req)',
+    'authorizeMessageDetailAccess(req',
+    'authorizeAgentCredential(req',
     'isLocalRequest(req)',
   ];
 
@@ -163,8 +165,8 @@ function validateRouteAuth(fileName, source, route, expectedAuth) {
         .filter(item => !['GET', 'HEAD', 'OPTIONS'].includes(item.method) && item.path.startsWith('/api/'))
         .sort((a, b) => a.index - b.index)[0];
       const globalAuthIndex = source.indexOf("app.use('/api', createApiAuthMiddleware");
-      if (globalAuthIndex < 0 || (firstApiMutation && globalAuthIndex > firstApiMutation.index)) {
-        return `${fileName}:${route.line} ${routeKey(route)} expected global /api auth before mutation routes`;
+      if (globalAuthIndex < 0 || globalAuthIndex > route.index || (firstApiMutation && globalAuthIndex > firstApiMutation.index)) {
+        return `${fileName}:${route.line} ${routeKey(route)} expected global /api auth before route`;
       }
       const found = forbiddenRouteLocalAuth.find(needle => has(needle));
       if (found) return `${fileName}:${route.line} ${routeKey(route)} expected global-api-auth-only but found ${found}`;
@@ -181,12 +183,47 @@ function validateRouteAuth(fileName, source, route, expectedAuth) {
       return has('requireBridgeSecret') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireBridgeSecret`;
     case 'bearer-or-agent-token':
       return has('_alertTransitionAuth') ? null : `${fileName}:${route.line} ${routeKey(route)} expected _alertTransitionAuth`;
+    case 'bearer-or-agent-token-inline':
+      if (!has('getBearerToken(req)')) return `${fileName}:${route.line} ${routeKey(route)} expected getBearerToken(req) bearer branch`;
+      return has('requireAgentToken') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireAgentToken fallback`;
     case 'local-only':
       return has('isLocalRequest(req)') ? null : `${fileName}:${route.line} ${routeKey(route)} expected isLocalRequest(req) local-only guard`;
     case 'subconscious-event-token-or-local':
       return has('authorizeSubconsciousEventIngest(req)') ? null : `${fileName}:${route.line} ${routeKey(route)} expected authorizeSubconsciousEventIngest(req)`;
+    case 'message-detail-access':
+      return has('authorizeMessageDetailAccess(req') ? null : `${fileName}:${route.line} ${routeKey(route)} expected authorizeMessageDetailAccess(req)`;
+    case 'agent-credential':
+      return has('authorizeAgentCredential(req') ? null : `${fileName}:${route.line} ${routeKey(route)} expected authorizeAgentCredential(req)`;
     default:
       return `${fileName}:${route.line} ${routeKey(route)} has unknown auth policy ${expectedAuth}`;
+  }
+}
+
+function collectExpectedRoutes(fileName, routes, label, failures) {
+  const expected = new Map();
+  for (const route of routes || []) {
+    if (!route.method || !route.path || !route.owner) {
+      failures.push(`[route ownership] ${fileName} has an incomplete ${label} route entry: ${JSON.stringify(route)}`);
+      continue;
+    }
+    expected.set(routeKey(route), route.owner);
+  }
+  return expected;
+}
+
+function validateExpectedRoutes(fileName, source, actualRoutesByKey, expectedRoutes, label, failures) {
+  for (const route of expectedRoutes || []) {
+    if (!route.method || !route.path || !route.owner) continue;
+    const key = routeKey(route);
+    const actual = actualRoutesByKey.get(key);
+    if (!actual) {
+      failures.push(`[route ownership] ${fileName} ${label} owner entry no longer matches a route: ${key}`);
+      continue;
+    }
+    const authFailure = validateRouteAuth(fileName, source, actual, route.auth);
+    if (authFailure) {
+      failures.push(`[route ownership] ${authFailure}`);
+    }
   }
 }
 
@@ -200,19 +237,15 @@ function checkRouteOwnership(manifest) {
     }
 
     const source = readFileSync(abs, 'utf-8');
-    const actualMutationRoutes = extractExpressRoutes(source)
+    const actualRoutes = extractExpressRoutes(source);
+    const actualMutationRoutes = actualRoutes
       .filter(route => !['GET', 'HEAD', 'OPTIONS'].includes(route.method));
     const actualKeys = new Map(actualMutationRoutes.map(route => [routeKey(route), route]));
+    const actualRoutesByKey = new Map(actualRoutes.map(route => [routeKey(route), route]));
     const expectedRoutes = config.mutationRoutes || [];
-    const expectedKeys = new Map();
-
-    for (const route of expectedRoutes) {
-      if (!route.method || !route.path || !route.owner) {
-        failures.push(`[route ownership] ${fileName} has an incomplete mutation route entry: ${JSON.stringify(route)}`);
-        continue;
-      }
-      expectedKeys.set(routeKey(route), route.owner);
-    }
+    const sensitiveRoutes = config.sensitiveRoutes || [];
+    const expectedKeys = collectExpectedRoutes(fileName, expectedRoutes, 'mutation', failures);
+    collectExpectedRoutes(fileName, sensitiveRoutes, 'sensitive', failures);
 
     for (const route of actualMutationRoutes) {
       const key = routeKey(route);
@@ -221,20 +254,10 @@ function checkRouteOwnership(manifest) {
       }
     }
 
-    for (const route of expectedRoutes) {
-      const key = routeKey(route);
-      const actual = actualKeys.get(key);
-      if (!actual) {
-        failures.push(`[route ownership] ${fileName} owner entry no longer matches a route: ${key}`);
-        continue;
-      }
-      const authFailure = validateRouteAuth(fileName, source, actual, route.auth);
-      if (authFailure) {
-        failures.push(`[route ownership] ${authFailure}`);
-      }
-    }
+    validateExpectedRoutes(fileName, source, actualKeys, expectedRoutes, 'mutation', failures);
+    validateExpectedRoutes(fileName, source, actualRoutesByKey, sensitiveRoutes, 'sensitive', failures);
 
-    console.log(`[OK] route ownership ${fileName}: ${actualMutationRoutes.length} mutation route(s) checked`);
+    console.log(`[OK] route ownership ${fileName}: ${actualMutationRoutes.length} mutation route(s), ${sensitiveRoutes.length} sensitive route(s) checked`);
   }
 
   return failures;
