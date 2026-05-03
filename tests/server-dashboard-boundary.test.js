@@ -168,6 +168,18 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).not.toContain('msgs.slice(-50)');
   });
 
+  test('monitor periodic detail refresh skips while a detail request is in flight', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('function refreshAgentDetailIfIdle()');
+    expect(response.text).toContain('if (!monitoredAgent || agentDetailAbortController) return false;');
+    expect(response.text).toContain('refreshAgentDetailIfIdle();');
+    expect(response.text).not.toContain("if (monitoredAgent) fetchAgentDetail(monitoredAgent.name, { preserveVisible: true });");
+  });
+
   test('redirects agent audit page to the detail audit hash', async () => {
     const mod = await setup();
 
