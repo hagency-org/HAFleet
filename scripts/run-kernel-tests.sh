@@ -20,6 +20,23 @@ declare -a shard_names=()
 declare -a shard_pids=()
 declare -a shard_logs=()
 
+cleanup_shards() {
+  local pid
+  for pid in "${shard_pids[@]}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
+  done
+  local log_file
+  for log_file in "${shard_logs[@]}"; do
+    rm -f "$log_file"
+  done
+}
+trap cleanup_shards EXIT
+trap 'cleanup_shards; exit 129' HUP
+trap 'cleanup_shards; exit 130' INT
+trap 'cleanup_shards; exit 143' TERM
+
 start_shard() {
   local name="$1"
   shift
@@ -44,6 +61,13 @@ start_shard "api runtime" \
   tests/api-task-graphs.test.js \
   tests/api-server-heartbeat.test.js \
   tests/api-runtime.test.js
+
+start_shard "backend api" \
+  tests/api-tasks.test.js \
+  tests/api-agents.test.js \
+  tests/api-audit.test.js \
+  tests/api-provenance.test.js \
+  tests/api-tombstone.test.js
 
 start_shard "delivery and dashboard" \
   tests/push-relay.test.js \

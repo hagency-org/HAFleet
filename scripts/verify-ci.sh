@@ -41,6 +41,23 @@ declare -a step_names=()
 declare -a step_pids=()
 declare -a step_logs=()
 
+cleanup_steps() {
+  local pid
+  for pid in "${step_pids[@]}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
+  done
+  local log_file
+  for log_file in "${step_logs[@]}"; do
+    rm -f "$log_file"
+  done
+}
+trap cleanup_steps EXIT
+trap 'cleanup_steps; exit 129' HUP
+trap 'cleanup_steps; exit 130' INT
+trap 'cleanup_steps; exit 143' TERM
+
 start_step() {
   local name="$1"
   shift
@@ -55,6 +72,7 @@ start_step() {
   step_pids+=("$!")
 }
 
+start_step "patch hygiene" git diff --check
 start_step "syntax" npm run check:syntax
 start_step "cli contract" npm run check:cli-contract
 start_step "remote package" bash -c 'npm run build:remote:check && npm run check:remote-sync && npm run check:remote-package-smoke'
