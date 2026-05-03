@@ -14,6 +14,9 @@ import { createTaskStore } from './lib/task-store.js';
 import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
 import { createAlertStore, RECOVERY_MAP as ALERT_RECOVERY_MAP } from './lib/alert-store.js';
+import { buildFlowHealth } from './lib/backend/flow-health.js';
+import { buildFleetInventory } from './lib/backend/fleet-classifier.js';
+import { createSseAdapter } from './lib/backend/sse-adapter.js';
 import { createSupervisorLifecycleManager, killTmuxSession as killSupervisorTmux } from './lib/supervisor-lifecycle-manager.js';
 import { provisionSupervisorAgent, buildSupervisorAgentRecord } from './lib/supervisor-provisioning.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
@@ -2910,6 +2913,8 @@ function buildOperationalSubconsciousContract(contract) {
 }
 
 // ── In-memory state ───────────────────────────────────────────────────
+const sseAdapter = createSseAdapter();
+const broadcastSSE = sseAdapter.broadcast;
 const agents = loadJsonSync('agents.json', {});
 // Migrate agents missing environment field
 { let migrated = 0;
@@ -3676,14 +3681,6 @@ function emitSystemInfo(summary, full = '', alertType = null, opts = {}) {
 
 function isSuppressedForAgent(msg, agentName) {
   return Array.isArray(msg?.suppressedRecipients) && msg.suppressedRecipients.includes(agentName);
-}
-
-// ── SSE: live stream of new messages ──────────────────────────────────
-const sseClients = new Set();
-
-function broadcastSSE(event, data) {
-  const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const c of sseClients) c.write(frame);
 }
 
 // ── Notification Router ───────────────────────────────────────────────
@@ -5278,225 +5275,6 @@ function resolveServerOfflineAlert(serverId) {
   }
 }
 
-const FLOW_HEALTH_ACTIONABLE_ALERT_STATUSES = new Set(['open', 'acknowledged', 'assigned']);
-const FLOW_HEALTH_ACTIONABLE_ALERT_SEVERITIES = new Set(['critical', 'warning']);
-
-function alertBacklogHealth() {
-  const actionable = {
-    total: 0,
-    critical: 0,
-    warning: 0,
-    byStatus: { open: 0, acknowledged: 0, assigned: 0 },
-  };
-  for (const alert of alertStore.dump()) {
-    if (!FLOW_HEALTH_ACTIONABLE_ALERT_STATUSES.has(alert?.status)) continue;
-    if (!FLOW_HEALTH_ACTIONABLE_ALERT_SEVERITIES.has(alert?.severity)) continue;
-    actionable.total += 1;
-    actionable[alert.severity] += 1;
-    actionable.byStatus[alert.status] = (actionable.byStatus[alert.status] || 0) + 1;
-  }
-  return {
-    status: actionable.critical > 0 ? 'unhealthy' : (actionable.warning > 0 ? 'degraded' : 'healthy'),
-    actionable,
-  };
-}
-
-function serverFlowHealth(serverRows, now = Date.now()) {
-  const total = serverRows.length;
-  let online = 0;
-  let maintenance = 0;
-  let offline = 0;
-  let stale = 0;
-  for (const server of serverRows) {
-    const inMaintenance = isServerInMaintenance(server?.id, server);
-    if (inMaintenance) maintenance += 1;
-    if (server?.online === true) online += 1;
-    else if (!inMaintenance) offline += 1;
-    const heartbeatAt = Number(server?.heartbeatAt) || 0;
-    if (!inMaintenance && heartbeatAt > 0 && (now - heartbeatAt) > HEARTBEAT_TTL_MS) stale += 1;
-  }
-  const status = total === 0
-    ? 'unknown'
-    : ((offline > 0 || stale > 0) ? 'unhealthy' : (maintenance > 0 || online < total ? 'degraded' : 'healthy'));
-  return { status, total, online, offline, maintenance, stale };
-}
-
-function agentFlowHealth(agentNames) {
-  const total = agentNames.length;
-  let online = 0;
-  let offline = 0;
-  let blocked = 0;
-  for (const name of agentNames) {
-    const deliveryState = getAgentDeliveryState(name);
-    if (deliveryState.online) online += 1;
-    else offline += 1;
-    if (agentRuntime[name]?.blocked === true) blocked += 1;
-  }
-  const status = total === 0
-    ? 'unknown'
-    : (online === 0 ? 'unhealthy' : ((offline > 0 || blocked > 0) ? 'degraded' : 'healthy'));
-  return { status, total, online, offline, blocked };
-}
-
-function runtimeFlowHealth() {
-  const rows = Object.values(agentRuntime).filter(row => row && typeof row === 'object');
-  let blocked = 0;
-  let stale = 0;
-  const staleAfterMs = Math.max(HEARTBEAT_TTL_MS * 2, 120000);
-  const now = Date.now();
-  for (const runtime of rows) {
-    if (runtime.blocked === true) blocked += 1;
-    const updatedAt = Number(runtime.updatedAt) || 0;
-    if (updatedAt > 0 && (now - updatedAt) > staleAfterMs) stale += 1;
-  }
-  const status = rows.length === 0
-    ? 'unknown'
-    : ((blocked > 0 || stale > 0) ? 'degraded' : 'healthy');
-  return { status, total: rows.length, blocked, stale, staleAfterMs };
-}
-
-function authFlowHealth(agentTokenReadiness, serverCredentialReadiness) {
-  const agentTokensDegraded = agentTokenReadiness?.behavior === 'enforce-loaded-tokens'
-    && agentTokenReadiness.failClosedReady === false;
-  return {
-    status: agentTokensDegraded ? 'degraded' : 'healthy',
-    agentTokenMode: agentTokenReadiness?.mode || null,
-    missingManagedAgentTokenCount: Number(agentTokenReadiness?.missingManagedAgentTokenCount) || 0,
-    serverCredentialBoundary: serverCredentialReadiness?.boundary || null,
-  };
-}
-
-function deliveryEventFlowHealth() {
-  const events = readDeliveryEvents({ limit: 1000 });
-  let lastEventAt = 0;
-  const recentTypes = {};
-  for (const event of events) {
-    const ts = Number(event?.ts) || 0;
-    if (ts > lastEventAt) lastEventAt = ts;
-    if (event?.type) recentTypes[event.type] = (recentTypes[event.type] || 0) + 1;
-  }
-  return {
-    status: events.length > 0 ? 'healthy' : 'unknown',
-    enabled: true,
-    recentCount: events.length,
-    lastEventAt: lastEventAt || null,
-    recentTypes,
-  };
-}
-
-function aggregateFlowHealthStatus(components, hasPrimarySignals) {
-  const statuses = Object.values(components).map(component => component?.status).filter(Boolean);
-  if (statuses.includes('unhealthy')) return 'unhealthy';
-  if (statuses.includes('degraded')) return 'degraded';
-  if (!hasPrimarySignals) return 'unknown';
-  return 'healthy';
-}
-
-function buildFlowHealth({ serverRows, agentNames, agentTokenReadiness, serverCredentialReadiness }) {
-  const components = {
-    servers: serverFlowHealth(serverRows),
-    agents: agentFlowHealth(agentNames),
-    runtime: runtimeFlowHealth(),
-    alerts: alertBacklogHealth(),
-    auth: authFlowHealth(agentTokenReadiness, serverCredentialReadiness),
-    deliveryEvents: deliveryEventFlowHealth(),
-  };
-  const hasPrimarySignals = serverRows.length > 0
-    || agentNames.length > 0
-    || messages.length > 0
-    || alertStore.dump().length > 0;
-  const status = aggregateFlowHealthStatus(components, hasPrimarySignals);
-  const reasons = Object.entries(components)
-    .filter(([, component]) => component?.status === 'unhealthy' || component?.status === 'degraded')
-    .map(([name, component]) => `${name}:${component.status}`);
-  if (status === 'unknown' && reasons.length === 0) reasons.push('no-health-signals');
-  return {
-    status,
-    generatedAt: Date.now(),
-    components,
-    reasons,
-  };
-}
-
-function normalizeServerVersion(value) {
-  return normalizeOptionalText(value, 128);
-}
-
-function isUnknownServerVersion(version) {
-  const normalized = normalizeServerVersion(version);
-  return !normalized || normalized === 'unknown-legacy';
-}
-
-function buildFleetServerRow(server, expectedVersion = null, now = Date.now()) {
-  const id = normalizeServer(server?.id) || normalizeOptionalText(server?.id, 128) || 'unknown';
-  const maintenance = isServerInMaintenance(id, server);
-  const heartbeatAt = Number(server?.heartbeatAt) || 0;
-  const lastSeen = Number(server?.lastSeen) || 0;
-  const online = server?.online === true;
-  const version = normalizeServerVersion(server?.version);
-  const expected = normalizeServerVersion(expectedVersion);
-  const heartbeatAgeMs = heartbeatAt > 0 ? Math.max(0, now - heartbeatAt) : null;
-  const stale = !maintenance && heartbeatAt > 0 && heartbeatAgeMs !== null && heartbeatAgeMs > HEARTBEAT_TTL_MS;
-  let versionStatus;
-  if (maintenance) versionStatus = 'maintenance';
-  else if (!online || heartbeatAt <= 0 || stale) versionStatus = 'offline';
-  else if (!expected || isUnknownServerVersion(version)) versionStatus = 'unknown';
-  else if (version === expected) versionStatus = 'current';
-  else versionStatus = 'outdated';
-  const knownVersion = !isUnknownServerVersion(version);
-  const versionStale = Boolean(expected && knownVersion && version !== expected && versionStatus !== 'unknown');
-
-  return {
-    id,
-    online,
-    maintenance,
-    lastSeen: lastSeen || null,
-    heartbeatAt: heartbeatAt || null,
-    heartbeatAgeMs,
-    updatedAt: Number(server?.updatedAt) || null,
-    agentCount: Number(server?.agentCount) || 0,
-    agents: Array.isArray(server?.agents) ? server.agents.filter(name => typeof name === 'string') : [],
-    sessions: Array.isArray(server?.sessions) ? server.sessions.filter(name => typeof name === 'string') : [],
-    sourceIp: server?.sourceIp || null,
-    relayInstanceId: normalizeRelayInstanceId(server?.relayInstanceId),
-    relayBootTs: normalizeRelayBootTs(server?.relayBootTs) || null,
-    version: version || null,
-    versionStatus,
-    versionStale,
-  };
-}
-
-function buildFleetInventory({ expectedVersion = null, now = Date.now() } = {}) {
-  const expected = normalizeServerVersion(expectedVersion) || normalizeServerVersion(LOCAL_GIT_VERSION);
-  const summary = {
-    total: 0,
-    current: 0,
-    outdated: 0,
-    unknown: 0,
-    offline: 0,
-    maintenance: 0,
-  };
-  const statusOrder = { current: 0, outdated: 1, unknown: 2, offline: 3, maintenance: 4 };
-  const rows = Object.values(servers)
-    .map(server => buildFleetServerRow(server, expected, now))
-    .sort((a, b) => {
-      const statusDelta = (statusOrder[a.versionStatus] ?? 99) - (statusOrder[b.versionStatus] ?? 99);
-      if (statusDelta) return statusDelta;
-      return a.id.localeCompare(b.id);
-    });
-  for (const row of rows) {
-    summary.total += 1;
-    summary[row.versionStatus] = (summary[row.versionStatus] || 0) + 1;
-  }
-  return {
-    ok: true,
-    expectedVersion: expected || null,
-    generatedAt: new Date(now).toISOString(),
-    summary,
-    servers: rows,
-  };
-}
-
 function markAgentsOfflineForServer(serverId, reason, clearTmux = false) {
   let changed = false;
   for (const agent of Object.values(agents)) {
@@ -7017,7 +6795,20 @@ app.get('/health', (_req, res) => {
       agentTokens: agentTokenReadiness,
       serverCredential: serverCredentialReadiness,
     },
-    health: buildFlowHealth({ serverRows, agentNames, agentTokenReadiness, serverCredentialReadiness }),
+    health: buildFlowHealth({
+      serverRows,
+      agentNames,
+      agentTokenReadiness,
+      serverCredentialReadiness,
+      heartbeatTtlMs: HEARTBEAT_TTL_MS,
+      isServerInMaintenance,
+      getAgentDeliveryState,
+      getAgentRuntime: (name) => agentRuntime[name],
+      getAgentRuntimeRows: () => Object.values(agentRuntime).filter(row => row && typeof row === 'object'),
+      listAlerts: () => alertStore.dump(),
+      readDeliveryEvents,
+      messageCount: messages.length,
+    }),
   });
 });
 
@@ -7311,23 +7102,22 @@ app.get('/api/servers', (_req, res) => {
 app.get('/api/servers/fleet', (req, res) => {
   const expectedVersion = normalizeOptionalText(req.query.expectVersion, 128)
     || normalizeOptionalText(req.query.expectedVersion, 128);
-  res.json(buildFleetInventory({ expectedVersion }));
+  res.json(buildFleetInventory({
+    servers: Object.values(servers),
+    expectedVersion,
+    localGitVersion: LOCAL_GIT_VERSION,
+    heartbeatTtlMs: HEARTBEAT_TTL_MS,
+    isServerInMaintenance,
+    normalizeRelayInstanceId,
+    normalizeRelayBootTs,
+  }));
 });
 
 // ── SSE endpoint ──────────────────────────────────────────────────────
-app.get('/api/stream', (req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-  res.write(':\n\n');
-  sseClients.add(res);
-  req.on('close', () => sseClients.delete(res));
-});
+sseAdapter.installRoute(app, '/api/stream');
 
 // SSE keepalive: send comment pings every 30s to prevent proxy idle timeout
-setInterval(() => {
-  for (const c of sseClients) {
-    try { c.write(':\n\n'); } catch (_) { sseClients.delete(c); }
-  }
-}, 30000);
+sseAdapter.startKeepalive();
 
 // ── Agents CRUD ───────────────────────────────────────────────────────
 const _tokenFromBody = r => r.body?.from || r.body?.name || '';
