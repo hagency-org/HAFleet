@@ -416,6 +416,71 @@ describe('server heartbeat api', () => {
     expect(servers.body[0].online).toBe(false);
     expect(agents['agent-a'].online).toBe(false);
     expect(agents['agent-a'].offlineReason).toBe('server-offline:s1');
+
+    const alerts = await request(context.app).get('/api/alerts?status=open&alertType=server_offline');
+    expect(alerts.status).toBe(200);
+    expect(alerts.body).toEqual([
+      expect.objectContaining({
+        alertType: 'server_offline',
+        dedupeKey: 'server_offline:s1',
+        severity: 'critical',
+        sourceAgent: 's1',
+        summary: "Remote server 's1' is offline",
+      }),
+    ]);
+    expect(alerts.body[0].detail).toContain('Affected agents: agent-a');
+    expect(alerts.body[0].detail).toContain('Runbook:');
+    expect(alerts.body[0].detail).toContain('Recovery condition:');
+  });
+
+  test('heartbeat recovery resolves only the matching server outage alert', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
+      agents: {
+        'agent-a': makeAgent('agent-a', { online: false, server: 's1' }),
+        'agent-b': makeAgent('agent-b', { online: false, server: 's2' }),
+      },
+      env: {
+        AGENT_HEARTBEAT_TTL_MS: '100',
+      },
+    }));
+
+    await postHeartbeat(context.app, {
+      server: 's1',
+      instanceId: 'inst-1',
+      bootTs: 1000,
+      agents: ['agent-a'],
+      sessions: ['agent-a:0.0'],
+    });
+    await postHeartbeat(context.app, {
+      server: 's2',
+      instanceId: 'inst-2',
+      bootTs: 1000,
+      agents: ['agent-b'],
+      sessions: ['agent-b:0.0'],
+    });
+    await sleep(200);
+    await request(context.app).get('/api/servers');
+
+    const openBefore = await request(context.app).get('/api/alerts?status=open&alertType=server_offline');
+    expect(openBefore.body.map((alert) => alert.dedupeKey).sort()).toEqual(['server_offline:s1', 'server_offline:s2']);
+
+    await postHeartbeat(context.app, {
+      server: 's1',
+      instanceId: 'inst-3',
+      bootTs: 3000,
+      agents: ['agent-a'],
+      sessions: ['agent-a:0.0'],
+    });
+
+    const openAfter = await request(context.app).get('/api/alerts?status=open&alertType=server_offline');
+    expect(openAfter.body.map((alert) => alert.dedupeKey)).toEqual(['server_offline:s2']);
+    const resolved = await request(context.app).get('/api/alerts?status=resolved&alertType=server_offline');
+    expect(resolved.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        dedupeKey: 'server_offline:s1',
+        resolvedBy: 'system',
+      }),
+    ]));
   });
 
   test('keeps a server online when heartbeats renew before ttl expiry', async () => {
@@ -674,6 +739,15 @@ describe('server heartbeat api', () => {
     expect(agents.a1.online).toBe(false);
     expect(agents.a2.online).toBe(false);
     expect(agents.a3.online).toBe(true);
+
+    const alerts = await request(context.app).get('/api/alerts?status=open&alertType=server_offline');
+    expect(alerts.body).toEqual([
+      expect.objectContaining({
+        dedupeKey: 'server_offline:s1',
+        sourceAgent: 's1',
+      }),
+    ]);
+    expect(alerts.body[0].detail).toContain('Affected agents: a1, a2');
   });
 
   test('enables maintenance mode and forces the server offline', async () => {
@@ -698,6 +772,9 @@ describe('server heartbeat api', () => {
     expect(maintenance.body.server.maintenance).toBe(true);
     expect(maintenance.body.server.online).toBe(false);
     expect(readJson(agentsPath(context.runtimeDir))['agent-a'].online).toBe(false);
+
+    const alerts = await request(context.app).get('/api/alerts?status=open&alertType=server_offline');
+    expect(alerts.body).toEqual([]);
   });
 
   test('ignores heartbeats during maintenance while still updating lastSeen', async () => {

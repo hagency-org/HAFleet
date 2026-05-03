@@ -784,7 +784,16 @@ describe('backend runtime API', () => {
     expect(serversAfter['relay-west'].agentCount).toBe(0);
     expect(agentsAfter.alpha.online).toBe(false);
     expect(agentsAfter.alpha.offlineReason).toBe('server-offline:relay-west');
-    // emitSystemInfo for server_offline removed in 5.43 (lid-close spam)
+    expect(events).toEqual([]);
+
+    const alerts = await request(context.app).get('/api/alerts?status=open&alertType=server_offline');
+    expect(alerts.body).toEqual([
+      expect.objectContaining({
+        dedupeKey: 'server_offline:relay-west',
+        sourceAgent: 'relay-west',
+        severity: 'critical',
+      }),
+    ]);
   });
 
   test('codex agent reports mcpPresent=null and does not trigger mcp_missing', async () => {

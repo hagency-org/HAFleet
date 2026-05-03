@@ -5093,6 +5093,80 @@ function isServerInMaintenance(serverId, serverRecord = null) {
   return SERVER_MAINTENANCE_IDS.has(id);
 }
 
+function collectServerAffectedAgents(serverId, serverRecord = null) {
+  const affected = new Set();
+  if (serverRecord && Array.isArray(serverRecord.agents)) {
+    for (const name of serverRecord.agents) {
+      if (typeof name === 'string' && name.trim()) affected.add(name.trim());
+    }
+  }
+  for (const agent of Object.values(agents)) {
+    if (!isAgentRecord(agent)) continue;
+    if (normalizeServer(agent.server) !== serverId) continue;
+    if (agent.online === true && agent.manualDown !== true) affected.add(agent.name);
+  }
+  return [...affected].sort((a, b) => a.localeCompare(b));
+}
+
+function buildServerOfflineAlertDetail(serverId, reason, serverRecord = null, affectedAgents = []) {
+  const now = Date.now();
+  const heartbeatAt = Number(serverRecord?.heartbeatAt) || 0;
+  const lastSeen = Number(serverRecord?.lastSeen) || 0;
+  const heartbeatAgeMs = heartbeatAt > 0 ? Math.max(0, now - heartbeatAt) : null;
+  return [
+    `Server: ${serverId}`,
+    `Reason: ${reason || 'server-offline'}`,
+    `Last heartbeat: ${heartbeatAt ? new Date(heartbeatAt).toISOString() : 'unknown'}`,
+    `Last seen: ${lastSeen ? new Date(lastSeen).toISOString() : 'unknown'}`,
+    heartbeatAgeMs !== null ? `Heartbeat age ms: ${heartbeatAgeMs}` : null,
+    `Affected agents: ${affectedAgents.length ? affectedAgents.join(', ') : 'none'}`,
+    'Impact: remote agents on this server are marked offline and direct push delivery is unavailable until the relay recovers.',
+    'Runbook: verify the remote host, relay service, network path, and deployed version; restart the relay or put the server into maintenance if the outage is expected.',
+    'Recovery condition: the next accepted heartbeat from this server auto-resolves this alert.',
+  ].filter(Boolean).join('\n');
+}
+
+function emitServerOfflineAlert(serverId, reason, serverRecord = null, affectedAgents = null) {
+  const normalizedServerId = normalizeServer(serverId);
+  if (!normalizedServerId) return null;
+  if (isLocalAgentServer(normalizedServerId, LOCAL_SERVER_ID)) return null;
+  if (isServerInMaintenance(normalizedServerId, serverRecord)) return null;
+  const affected = Array.isArray(affectedAgents)
+    ? [...new Set(affectedAgents.filter((name) => typeof name === 'string' && name.trim()).map((name) => name.trim()))].sort((a, b) => a.localeCompare(b))
+    : collectServerAffectedAgents(normalizedServerId, serverRecord);
+  try {
+    const result = alertStore.ingest({
+      alertType: 'server_offline',
+      dedupeKey: `server_offline:${normalizedServerId}`,
+      severity: 'critical',
+      source: 'backend',
+      sourceAgent: normalizedServerId,
+      summary: `Remote server '${normalizedServerId}' is offline`,
+      detail: buildServerOfflineAlertDetail(normalizedServerId, reason, serverRecord, affected),
+      tags: [
+        'server-outage',
+        `server:${normalizedServerId}`,
+        ...affected.slice(0, 18).map((name) => `agent:${name}`),
+      ],
+    });
+    return result.alert;
+  } catch (error) {
+    console.warn(`[server-alert] failed to ingest server_offline:${normalizedServerId}: ${error?.message || error}`);
+    return null;
+  }
+}
+
+function resolveServerOfflineAlert(serverId) {
+  const normalizedServerId = normalizeServer(serverId);
+  if (!normalizedServerId) return null;
+  try {
+    return alertStore.autoResolve(`server_offline:${normalizedServerId}`);
+  } catch (error) {
+    console.warn(`[server-alert] failed to resolve server_offline:${normalizedServerId}: ${error?.message || error}`);
+    return null;
+  }
+}
+
 function markAgentsOfflineForServer(serverId, reason, clearTmux = false) {
   let changed = false;
   for (const agent of Object.values(agents)) {
@@ -5208,7 +5282,9 @@ function refreshServerLiveness() {
     const heartbeatAt = Number(server.heartbeatAt) || 0;
     const isOnline = heartbeatAt > 0 && (now - heartbeatAt) <= HEARTBEAT_TTL_MS;
     if (server.online !== isOnline) {
+      let affectedAgents = [];
       if (!isOnline) {
+        affectedAgents = collectServerAffectedAgents(serverId, server);
         if (clearServerLiveState(server, now)) serversChanged = true;
       } else {
         server.online = true;
@@ -5219,6 +5295,7 @@ function refreshServerLiveness() {
         if (markAgentsOfflineForServer(serverId, `server-offline:${serverId}`, true)) {
           agentsChanged = true;
         }
+        emitServerOfflineAlert(serverId, 'heartbeat-expired', server, affectedAgents);
       }
     }
   }
@@ -6083,7 +6160,7 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   server.agentCount = liveAgents.length;
 
   if (!wasOnline) {
-    // Server online/offline info notifications removed (lid-close spam — 5.43)
+    resolveServerOfflineAlert(serverId);
   }
   if (lease.takeover) {
     emitSystemInfo(
@@ -6793,6 +6870,9 @@ app.post('/api/servers/:id/offline', requireBearer, (req, res) => {
     });
   }
   const wasOnline = Boolean(server.online);
+  const affectedAgents = collectServerAffectedAgents(serverId, server);
+  const previousHeartbeatAt = Number(server.heartbeatAt) || 0;
+  const previousLastSeen = Number(server.lastSeen) || 0;
   const now = Date.now();
   server.heartbeatAt = 0;
   clearServerLiveState(server, now);
@@ -6801,7 +6881,12 @@ app.post('/api/servers/:id/offline', requireBearer, (req, res) => {
   if (markAgentsOfflineForServer(serverId, reason, true)) saveAgents();
   saveServers();
   if (wasOnline && !maintenance) {
-    // Server offline info notification removed (lid-close spam — 5.43)
+    emitServerOfflineAlert(
+      serverId,
+      'explicit-offline',
+      { ...server, heartbeatAt: previousHeartbeatAt, lastSeen: previousLastSeen },
+      affectedAgents
+    );
   }
   res.json({
     ok: true,
