@@ -180,6 +180,14 @@ async function pathExists(file) {
   }
 }
 
+function expectGateInstallBeforePreflight(commandLog) {
+  const npmLines = commandLog.split('\n').filter((line) => line.startsWith('npm:'));
+  const ciIndex = npmLines.findIndex((line) => line.includes(' ci'));
+  const preflightIndex = npmLines.findIndex((line) => line.includes(' run verify:cd-preflight'));
+  expect(ciIndex).toBeGreaterThanOrEqual(0);
+  expect(preflightIndex).toBeGreaterThan(ciIndex);
+}
+
 describe('stable autodeploy CD gate', () => {
   afterEach(async () => {
     await Promise.all(tmpRoots.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
@@ -196,6 +204,7 @@ describe('stable autodeploy CD gate', () => {
     expect(stdout).toContain('release gate failed');
     const commandLog = await readIfExists(ctx.log);
     expect(commandLog).toContain('npm:');
+    expectGateInstallBeforePreflight(commandLog);
     expect(commandLog).not.toContain('systemctl:');
     await expect(readIfExists(path.join(ctx.state, 'last-successful-ref'))).resolves.toBe('');
   });
@@ -213,6 +222,7 @@ describe('stable autodeploy CD gate', () => {
     await expect(readIfExists(path.join(ctx.state, 'last-successful-ref'))).resolves.toBe(`${nextRef}\n`);
     const commandLog = await readIfExists(ctx.log);
     expect(commandLog).toContain('npm:');
+    expectGateInstallBeforePreflight(commandLog);
     expect(commandLog).toContain('run verify:cd-preflight');
     expect(commandLog).not.toContain('install --production');
     expect(commandLog).toContain('systemctl:restart agent-chat-v2');

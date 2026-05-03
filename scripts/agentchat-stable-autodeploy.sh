@@ -235,6 +235,10 @@ run_release_gate() {
         log "ERROR: failed to prepare release gate worktree"
         return 1
       fi
+      if ! run_as_deploy_user env npm_config_loglevel=error "$NPM_BIN" --prefix "$gate_worktree" ci; then
+        log "ERROR: release gate dependency install failed for $target_ref; live checkout was not reset"
+        return 1
+      fi
       if [ -n "$RELEASE_GATE_ARGS" ]; then
         if run_as_deploy_user env npm_config_loglevel=error "$NPM_BIN" --prefix "$gate_worktree" run verify:cd-preflight -- $RELEASE_GATE_ARGS; then
           log "Release gate passed for $target_ref"
