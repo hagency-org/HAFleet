@@ -107,11 +107,14 @@ start_shard "api messaging" \
   tests/api-agent-token.test.js
 
 start_shard "api runtime" \
+  tests/agent-state.test.js \
+  tests/agent-state-integration.test.js \
   tests/api-task-graphs.test.js \
   tests/api-server-heartbeat.test.js \
   tests/api-runtime.test.js
 
 start_shard "backend api" \
+  tests/api-framework-presets.test.js \
   tests/api-tasks.test.js \
   tests/alert-store.test.js \
   tests/supervisor-snapshot-store.test.js \

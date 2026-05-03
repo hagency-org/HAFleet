@@ -2828,7 +2828,7 @@ const servers = loadJsonSync('servers.json', {});
 const agentRuntime = loadJsonSync('agent_runtime.json', {});
 const taskGraphs = loadJsonSync('task_graphs.json', {});
 const frameworkPresets = loadJsonSync('framework-presets.json', []);
-function saveFrameworkPresets() { saveJson('framework-presets.json', frameworkPresets); }
+function saveFrameworkPresets() { return saveJson('framework-presets.json', frameworkPresets); }
 const taskStoreData = loadJsonSync('tasks.json', []);
 const taskStore = createTaskStore({
   initialData: taskStoreData,
@@ -2899,19 +2899,54 @@ function maxPersistedMessageCounter(rows = messages) {
 let localMcpSessionCache = new Set();
 const agentMachines = new Map(); // agentName -> AgentStateMachine
 
+function createAgentMachine(agentName, initialState, snapshot = null) {
+  const m = new AgentStateMachine(initialState);
+  m.onGraceExpired(() => {
+    const a = agents[agentName];
+    if (a) { a.state = m.state; saveAgents(); }
+  });
+  if (snapshot) m.restore(snapshot);
+  agentMachines.set(agentName, m);
+  return m;
+}
+
+function resetAgentMachine(agentName, snapshot = null) {
+  const existing = agentMachines.get(agentName);
+  if (existing) existing.destroy();
+  agentMachines.delete(agentName);
+  if (snapshot) createAgentMachine(agentName, snapshot.state, snapshot);
+}
+
+function snapshotAgentPersistenceState(agentName) {
+  const hadAgent = Object.prototype.hasOwnProperty.call(agents, agentName);
+  const machine = agentMachines.get(agentName);
+  return {
+    hadAgent,
+    agent: hadAgent ? cloneJsonValue(agents[agentName]) : null,
+    hadMachine: Boolean(machine),
+    machineSnapshot: machine?.snapshot() || null,
+  };
+}
+
+function restoreAgentPersistenceState(agentName, snapshot) {
+  if (snapshot?.hadAgent) agents[agentName] = cloneJsonValue(snapshot.agent);
+  else delete agents[agentName];
+  resetAgentMachine(agentName, snapshot?.hadMachine ? snapshot.machineSnapshot : null);
+}
+
+function saveAgentsOrRollback(agentName, snapshot) {
+  if (saveAgents(true)) return true;
+  restoreAgentPersistenceState(agentName, snapshot);
+  return false;
+}
+
 function getAgentMachine(agentName) {
   let m = agentMachines.get(agentName);
   if (m) return m;
   const agent = agents[agentName];
   const runtime = agentRuntime[agentName] || null;
   const initial = deriveStateFromLegacy(agent || null, runtime);
-  m = new AgentStateMachine(initial);
-  m.onGraceExpired(() => {
-    const a = agents[agentName];
-    if (a) { a.state = m.state; saveAgents(); }
-  });
-  agentMachines.set(agentName, m);
-  return m;
+  return createAgentMachine(agentName, initial);
 }
 
 function transitionAgent(agentName, event) {
@@ -3274,7 +3309,7 @@ function reserveNextMsgId() {
   return { ok: true, id: `msg_${String(msgCounter).padStart(4, '0')}` };
 }
 
-function saveAgents(immediate = false) { saveJson('agents.json', agents, { immediate }); }
+function saveAgents(immediate = false) { return saveJson('agents.json', agents, { immediate }); }
 
 function writeThruAgentHome(agentName) {
   const agent = agents[agentName];
@@ -7360,6 +7395,7 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   const resolvedServer = normalizedServer ?? (isLocalRequest(req) ? 'local' : normalizeServer(existing.server));
   const resolvedTmux = tmux ?? existing.tmux ?? null;
   const resolvedOnline = resolvedTmux ? true : Boolean(existing.online);
+  const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
   // Resolve preset into runtimeProfile if presetId is provided
   let resolvedRuntimeProfile = runtimeProfile;
   let presetFramework = null;
@@ -7423,8 +7459,6 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     environment: (VALID_ENVIRONMENTS.has(environment) ? environment : null)
       || existing.environment || classifyEnvironment(agentName),
   };
-  saveAgents();
-  writeThruAgentHome(agentName);
   if (resolvedOnline) {
     const isLocal = resolvedServer === 'local' || resolvedServer === LOCAL_SERVER_ID;
     if (isLocal && resolvedTmux) {
@@ -7435,6 +7469,10 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
       syncAgentMachine(agentName, { heartbeatPresent: true, manualDown: false });
     }
   }
+  if (!saveAgentsOrRollback(agentName, persistenceSnapshot)) {
+    return res.status(503).json({ error: 'agents persistence failed' });
+  }
+  writeThruAgentHome(agentName);
   if (!existingOnline && resolvedOnline) {
     notifyAgentCatchup(agentName, 'agent-online-update').catch((e) => {
       console.error(`catchup notify failed for ${agentName}:`, e.message);
@@ -7477,6 +7515,7 @@ app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => 
   if (runtimeProfile !== undefined && runtimeProfile !== null && !normalizeRuntimeProfile(runtimeProfile)) {
     return res.status(400).json({ error: 'invalid runtimeProfile payload' });
   }
+  const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
   if (role !== undefined) agent.role = role;
   if (identity !== undefined) agent.identity = identity;
   if (tmux !== undefined) {
@@ -7547,7 +7586,9 @@ app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => 
   if (agent.online === true && agent.manualDown !== false) {
     agent.manualDown = false;
   }
-  saveAgents();
+  if (!saveAgentsOrRollback(agentName, persistenceSnapshot)) {
+    return res.status(503).json({ error: 'agents persistence failed' });
+  }
   writeThruAgentHome(agentName);
   if (!wasOnline && agent.online === true) {
     notifyAgentCatchup(agentName, 'agent-online-patch').catch((e) => {
@@ -7592,12 +7633,15 @@ app.delete('/api/agents/:name', requireBearer, (req, res) => {
     auditLog(req, { agent: agentName, summary: { action: 'force-delete' } });
     return res.json({ ok: true, deleted: true, name: agentName });
   }
+  const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
   agent.tmux = null;
   agent.lastSeen = Date.now();
   if (!agent.offlineReason) agent.offlineReason = 'inactive';
   transitionAgent(agentName, 'api_unregister');
+  if (!saveAgentsOrRollback(agentName, persistenceSnapshot)) {
+    return res.status(503).json({ error: 'agents persistence failed' });
+  }
   auditLog(req, { agent: agentName, summary: { action: 'unregister' } });
-  saveAgents();
   res.json({
     ok: true,
     deprecated: true,
@@ -7707,13 +7751,16 @@ app.post('/api/agents/:name/offline', requireAgentToken(_tokenFromName), (req, r
   const manualDown = req.body?.manualDown === undefined
     ? isManualDownReason(reason)
     : req.body.manualDown === true;
+  const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
   // online/manualDown driven by machine
   agent.lastSeen = Date.now();
   agent.offlineReason = reason;
   if (clearTmux) agent.tmux = null;
   if (manualDown) syncAgentMachine(agentName, { manualDown: true });
   else syncAgentMachine(agentName, { tmuxMissing: true });
-  saveAgents();
+  if (!saveAgentsOrRollback(agentName, persistenceSnapshot)) {
+    return res.status(503).json({ error: 'agents persistence failed' });
+  }
   if (wasOnline && !manualDown && !wasManualDown) {
     maybeEmitUnexpectedOfflineAlert(agentName, reason, { server: normalizeServer(agent.server) || 'local', detail: 'Marked offline via API' });
   }
@@ -8963,7 +9010,10 @@ app.post('/api/framework-presets', requireBearer, (req, res) => {
     apiKey: normalizeOptionalText(b.apiKey, 256) || null,
   };
   frameworkPresets.push(preset);
-  saveFrameworkPresets();
+  if (!saveFrameworkPresets()) {
+    frameworkPresets.pop();
+    return res.status(503).json({ error: 'framework preset persistence failed' });
+  }
   return res.json({ ok: true, preset: { ...preset, apiKey: preset.apiKey ? true : null } });
 });
 
@@ -8987,8 +9037,9 @@ app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
       return res.status(400).json({ error: 'apiBaseUrl must be a valid HTTP(S) URL without embedded credentials' });
     }
   }
-  frameworkPresets[idx] = {
-    ...frameworkPresets[idx],
+  const previousPreset = frameworkPresets[idx];
+  const nextPreset = {
+    ...previousPreset,
     name,
     framework: normalizeOptionalText(b.framework, 32) || null,
     provider: normalizeOptionalText(b.provider, 64) || null,
@@ -8996,9 +9047,13 @@ app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
     reasoning: normalizeOptionalText(b.reasoning, 64) || null,
     extraArgs,
     apiBaseUrl,
-    apiKey: normalizeOptionalText(b.apiKey, 256) || frameworkPresets[idx].apiKey || null,
+    apiKey: normalizeOptionalText(b.apiKey, 256) || previousPreset.apiKey || null,
   };
-  saveFrameworkPresets();
+  frameworkPresets[idx] = nextPreset;
+  if (!saveFrameworkPresets()) {
+    frameworkPresets[idx] = previousPreset;
+    return res.status(503).json({ error: 'framework preset persistence failed' });
+  }
   return res.json({ ok: true, preset: { ...frameworkPresets[idx], apiKey: frameworkPresets[idx].apiKey ? true : null } });
 });
 
@@ -9006,7 +9061,10 @@ app.delete('/api/framework-presets/:id', requireBearer, (req, res) => {
   const idx = frameworkPresets.findIndex(p => p.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'preset not found' });
   const removed = frameworkPresets.splice(idx, 1)[0];
-  saveFrameworkPresets();
+  if (!saveFrameworkPresets()) {
+    frameworkPresets.splice(idx, 0, removed);
+    return res.status(503).json({ error: 'framework preset persistence failed' });
+  }
   return res.json({ ok: true, preset: { ...removed, apiKey: removed.apiKey ? true : null } });
 });
 

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import request from 'supertest';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
@@ -16,6 +16,10 @@ vi.mock('child_process', async () => {
 
 function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, 'utf-8'));
+}
+
+function agentsPath(runtimeDir) {
+  return path.join(runtimeDir, 'data', 'agents.json');
 }
 
 describe('backend agents API', () => {
@@ -228,5 +232,178 @@ describe('backend agents API', () => {
       offlineReason: null,
       state: 'starting',
     });
+  });
+});
+
+describe('backend agents API persistence failures', () => {
+  let context = null;
+
+  afterEach(() => {
+    context?.cleanup();
+    context = null;
+  });
+
+  function seedAgent(overrides = {}) {
+    return {
+      name: 'alpha',
+      type: 'agent',
+      kind: 'agent',
+      server: null,
+      tmux: null,
+      online: false,
+      manualDown: false,
+      offlineReason: 'offline',
+      lastSeen: 1700000000000,
+      registeredAt: 1700000000000,
+      discoveredAt: 1700000000000,
+      ...overrides,
+    };
+  }
+
+  test('POST /api/agents returns 503 and leaves no visible agent when agents persistence fails', async () => {
+    context = await createBackendTestContext('agent-chat-agents-persist-test-', {
+      agents: {},
+      groups: {},
+    });
+    const before = readJson(agentsPath(context.runtimeDir));
+    context.internals.setJsonSaveFailureForTest('agents.json', true);
+
+    const response = await request(context.app)
+      .post('/api/agents')
+      .send({ name: 'volatile', role: 'worker' });
+    const get = await request(context.app).get('/api/agents/volatile');
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: 'agents persistence failed' });
+    expect(get.status).toBe(404);
+    const after = readJson(agentsPath(context.runtimeDir));
+    expect(after.volatile).toBeUndefined();
+    expect(after).toEqual(before);
+  });
+
+  test('POST /api/agents with tmux persists the transitioned agent state', async () => {
+    context = await createBackendTestContext('agent-chat-agents-persist-test-', {
+      agents: {},
+      groups: {},
+    });
+
+    const response = await request(context.app)
+      .post('/api/agents')
+      .send({ name: 'starter', type: 'claude', tmux: 'starter:0.0' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.agent).toMatchObject({
+      name: 'starter',
+      online: true,
+      manualDown: false,
+      tmux: 'starter:0.0',
+    });
+    const stored = readJson(agentsPath(context.runtimeDir)).starter;
+    expect(stored).toMatchObject({
+      online: true,
+      manualDown: false,
+      tmux: 'starter:0.0',
+      offlineReason: null,
+    });
+    expect(stored.state).toBe(response.body.agent.state);
+  });
+
+  test('PATCH /api/agents/:name returns 503 and restores fields and state when agents persistence fails', async () => {
+    const original = seedAgent({
+      name: 'patchy',
+      role: 'worker',
+    });
+    context = await createBackendTestContext('agent-chat-agents-persist-test-', {
+      agents: { patchy: original },
+      groups: {},
+    });
+    const before = readJson(agentsPath(context.runtimeDir));
+    context.internals.setJsonSaveFailureForTest('agents.json', true);
+
+    const response = await request(context.app)
+      .patch('/api/agents/patchy')
+      .send({ role: 'reviewer', tmux: 'patchy:0.0' });
+    const get = await request(context.app).get('/api/agents/patchy');
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: 'agents persistence failed' });
+    expect(get.status).toBe(200);
+    expect(get.body).toMatchObject({
+      name: 'patchy',
+      role: 'worker',
+      online: false,
+      state: 'offline',
+      tmux: null,
+      offlineReason: 'offline',
+    });
+    expect(readJson(agentsPath(context.runtimeDir)).patchy).toEqual(before.patchy);
+  });
+
+  test('POST /api/agents/:name/offline returns 503, restores online state, and emits no alert on persistence failure', async () => {
+    const original = seedAgent({
+      name: 'online-agent',
+      tmux: 'online-agent:0.0',
+      online: true,
+      manualDown: false,
+      offlineReason: null,
+      state: 'online',
+    });
+    context = await createBackendTestContext('agent-chat-agents-persist-test-', {
+      agents: { 'online-agent': original },
+      groups: {},
+    });
+    const before = readJson(agentsPath(context.runtimeDir));
+    context.internals.setJsonSaveFailureForTest('agents.json', true);
+
+    const response = await request(context.app)
+      .post('/api/agents/online-agent/offline')
+      .send({ reason: 'lost-tmux', manualDown: false });
+    const get = await request(context.app).get('/api/agents/online-agent');
+    const alerts = await request(context.app).get('/api/alerts');
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: 'agents persistence failed' });
+    expect(get.body).toMatchObject({
+      name: 'online-agent',
+      online: true,
+      state: 'online',
+      tmux: 'online-agent:0.0',
+      offlineReason: null,
+    });
+    expect(alerts.status).toBe(200);
+    expect(alerts.body).toEqual([]);
+    expect(readJson(agentsPath(context.runtimeDir))['online-agent']).toEqual(before['online-agent']);
+  });
+
+  test('DELETE /api/agents/:name returns 503 and keeps the agent registered on persistence failure', async () => {
+    const original = seedAgent({
+      name: 'registered',
+      tmux: 'registered:0.0',
+      online: true,
+      manualDown: false,
+      offlineReason: null,
+      state: 'online',
+    });
+    context = await createBackendTestContext('agent-chat-agents-persist-test-', {
+      agents: { registered: original },
+      groups: {},
+    });
+    const before = readJson(agentsPath(context.runtimeDir));
+    context.internals.setJsonSaveFailureForTest('agents.json', true);
+
+    const response = await request(context.app).delete('/api/agents/registered');
+    const get = await request(context.app).get('/api/agents/registered');
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: 'agents persistence failed' });
+    expect(get.status).toBe(200);
+    expect(get.body).toMatchObject({
+      name: 'registered',
+      online: true,
+      state: 'online',
+      tmux: 'registered:0.0',
+      offlineReason: null,
+    });
+    expect(readJson(agentsPath(context.runtimeDir)).registered).toEqual(before.registered);
   });
 });

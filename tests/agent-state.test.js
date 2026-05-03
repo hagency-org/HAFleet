@@ -276,6 +276,32 @@ describe('AgentStateMachine', () => {
     expect(callback).not.toHaveBeenCalled();
   });
 
+  test('snapshot and restore preserve remaining STARTING grace time', () => {
+    vi.useFakeTimers();
+    const m = new AgentStateMachine('offline');
+    const callback = vi.fn();
+    m.onGraceExpired(callback);
+
+    m.transition('tmux_detected');
+    vi.advanceTimersByTime(10_000);
+    const snapshot = m.snapshot();
+
+    m.transition('mcp_confirmed');
+    expect(m.state).toBe('online');
+
+    m.restore(snapshot);
+    expect(m.state).toBe('starting');
+
+    vi.advanceTimersByTime(19_999);
+    expect(m.state).toBe('starting');
+    expect(callback).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect(m.state).toBe('degraded');
+    expect(callback).toHaveBeenCalledTimes(1);
+    m.destroy();
+  });
+
   // --- Constructor ---
   test('constructor defaults to offline for invalid state', () => {
     const m = new AgentStateMachine('invalid');
