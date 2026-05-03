@@ -28,6 +28,11 @@ function parseSseFrameData(frame) {
   return JSON.parse(dataLine.slice('data: '.length));
 }
 
+function replacePathWithDirectory(filePath) {
+  rmSync(filePath, { recursive: true, force: true });
+  mkdirSync(filePath, { recursive: true });
+}
+
 function execFileAsync(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     execFile(command, args, options, (error, stdout, stderr) => {
@@ -291,7 +296,37 @@ describe('server delivery path', () => {
     expect(frames.some((frame) => String(frame).startsWith('event: reminders\n'))).toBe(true);
   });
 
-  test('manual send drops backend notifications whose source message is no longer unread', async () => {
+  test('queue accept rolls back when queue persistence fails', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    replacePathWithDirectory(path.join(runtimeDir, 'logs', 'queue.json'));
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'operator',
+      to: 'alpha:0.0',
+      payload: 'persist me first',
+    });
+
+    expect(queued.status).toBe(500);
+    expect(queued.body).toMatchObject({ ok: false, error: 'queue persistence failed' });
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toEqual([]);
+
+    const events = readJsonl(path.join(runtimeDir, 'logs', 'delivery-events.jsonl'));
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'queue.persist_failed',
+        reason: 'queue-accept-save-failed',
+      }),
+    ]));
+    expect(events.some((event) => event.type === 'queue.accepted')).toBe(false);
+  });
+
+  test('manual send does not deliver when queue dequeue persistence fails', async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
@@ -303,8 +338,123 @@ describe('server delivery path', () => {
         execCalls.push([cmd, ...args]);
         return { stdout: '' };
       },
+      backendFetch: async () => ({ ok: true, text: async () => '', json: async () => ({ ok: true }) }),
+    });
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'operator',
+      to: 'alpha:0.0',
+      payload: 'do not deliver without durable dequeue',
+    });
+    expect(queued.status).toBe(200);
+
+    replacePathWithDirectory(path.join(runtimeDir, 'logs', 'queue.json'));
+
+    const sent = await request(serverModule.app).post(`/api/queue/${queued.body.id}/send`);
+    expect(sent.status).toBe(503);
+    expect(sent.body).toMatchObject({
+      ok: false,
+      delivered: queued.body.id,
+      requeued: true,
+      reason: 'queue-persist-failed',
+    });
+    expect(execCalls.some((call) => call.includes('send-keys'))).toBe(false);
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toHaveLength(1);
+    expect(queue.body[0]).toMatchObject({ id: queued.body.id });
+
+    const events = readJsonl(path.join(runtimeDir, 'logs', 'delivery-events.jsonl'));
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'queue.persist_failed',
+        reason: 'queue-dequeue-save-failed',
+      }),
+    ]));
+    expect(events.some((event) => event.type === 'tmux.delivered')).toBe(false);
+  });
+
+  test('reminder create rolls back when reminder persistence fails', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    replacePathWithDirectory(path.join(runtimeDir, 'logs', 'reminders.json'));
+
+    const reminder = await request(serverModule.app).post('/api/reminders').send({
+      target: 'alpha:0.0',
+      delay: 30,
+      msg: 'durable first',
+    });
+
+    expect(reminder.status).toBe(500);
+    expect(reminder.body).toMatchObject({ ok: false, error: 'reminder persistence failed' });
+
+    const reminders = await request(serverModule.app).get('/api/reminders');
+    expect(reminders.body).toEqual([]);
+
+    const events = readJsonl(path.join(runtimeDir, 'logs', 'delivery-events.jsonl'));
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'queue.persist_failed',
+        reason: 'reminder-create-save-failed',
+      }),
+    ]));
+  });
+
+  test('due reminders remain scheduled when queue persistence fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const reminder = await request(serverModule.app).post('/api/reminders').send({
+      target: 'alpha:0.0',
+      delay: 1,
+      msg: 'stay scheduled',
+    });
+    expect(reminder.status).toBe(200);
+
+    replacePathWithDirectory(path.join(runtimeDir, 'logs', 'queue.json'));
+    vi.setSystemTime(new Date('2026-01-01T00:00:02Z'));
+    serverModule.processDueRemindersForTest();
+
+    const reminders = await request(serverModule.app).get('/api/reminders');
+    expect(reminders.body).toHaveLength(1);
+    expect(reminders.body[0]).toMatchObject({ id: reminder.body.id, msg: 'stay scheduled' });
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toEqual([]);
+
+    const events = readJsonl(path.join(runtimeDir, 'logs', 'delivery-events.jsonl'));
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'queue.persist_failed',
+        reason: 'due-reminder-queue-save-failed',
+      }),
+    ]));
+  });
+
+  test('manual send drops backend notifications whose source message is no longer unread', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const execCalls = [];
+    const unreadSnapshotUrls = [];
+    serverModule.setServerTestHooks({
+      execFileAsync: async (cmd, args) => {
+        execCalls.push([cmd, ...args]);
+        return { stdout: '' };
+      },
       backendFetch: async (url) => {
-        if (String(url).includes('/api/inbox/alpha/unread')) {
+        const urlText = String(url);
+        if (urlText.includes('/api/inbox/alpha/unread-list')) {
+          unreadSnapshotUrls.push(urlText);
           return {
             ok: true,
             json: async () => ({
@@ -315,6 +465,7 @@ describe('server delivery path', () => {
             }),
           };
         }
+        if (urlText.includes('/api/inbox/alpha/unread')) throw new Error('legacy unread endpoint used');
         return { ok: true, text: async () => '', json: async () => ({ ok: true }) };
       },
     });
@@ -340,6 +491,8 @@ describe('server delivery path', () => {
       reason: 'stale-notification',
     });
     expect(execCalls).toEqual([]);
+    expect(unreadSnapshotUrls).toHaveLength(1);
+    expect(unreadSnapshotUrls[0]).toContain('limit=0');
 
     const queue = await request(serverModule.app).get('/api/queue');
     expect(queue.body).toEqual([]);
@@ -487,7 +640,7 @@ describe('server delivery path', () => {
       },
       backendFetch: async (url) => {
         if (String(url).includes('/api/agents')) return { ok: true, json: async () => [] };
-        if (String(url).includes('/api/inbox/alpha/unread')) return { ok: false, json: async () => ({}) };
+        if (String(url).includes('/api/inbox/alpha/unread-list')) return { ok: false, json: async () => ({}) };
         return { ok: true, text: async () => '', json: async () => ({ ok: true }) };
       },
     });
@@ -545,7 +698,7 @@ describe('server delivery path', () => {
       },
       backendFetch: async (url) => {
         if (String(url).includes('/api/agents')) return { ok: true, json: async () => [] };
-        if (String(url).includes('/api/inbox/alpha/unread')) return { ok: false, json: async () => ({}) };
+        if (String(url).includes('/api/inbox/alpha/unread-list')) return { ok: false, json: async () => ({}) };
         return { ok: true, text: async () => '', json: async () => ({ ok: true }) };
       },
     });

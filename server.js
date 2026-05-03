@@ -282,6 +282,29 @@ const queue = new Map();
 let queueIdCounter = 0;
 let queueTickRunning = false;
 
+function cloneJsonPlain(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function snapshotQueueState() {
+  return {
+    idCounter: queueIdCounter,
+    buckets: new Map([...queue.entries()].map(([target, entries]) => [
+      target,
+      entries.map((entry) => cloneJsonPlain(entry)),
+    ])),
+  };
+}
+
+function restoreQueueState(snapshot) {
+  if (!snapshot) return;
+  queueIdCounter = snapshot.idCounter;
+  queue.clear();
+  for (const [target, entries] of snapshot.buckets.entries()) {
+    queue.set(target, entries.map((entry) => cloneJsonPlain(entry)));
+  }
+}
+
 function isBackendNotificationEntry(entry) {
   if (!entry || entry.from !== 'agent-chat-v2') return false;
   return typeof entry.payload === 'string' && entry.payload.startsWith('[NOTIFICATION]');
@@ -294,8 +317,10 @@ function targetSessionName(target) {
 
 function dropQueuedBackendNotificationsBySource(agentName, sourceMsgId = null, reason = 'backend-notification-cleared') {
   const normalizedAgent = typeof agentName === 'string' ? agentName.trim() : '';
-  if (!normalizedAgent) return 0;
+  if (!normalizedAgent) return { removed: 0, persistFailed: false };
   const sourceId = typeof sourceMsgId === 'string' ? sourceMsgId.trim() : '';
+  const rollback = snapshotQueueState();
+  const dropped = [];
   let removed = 0;
 
   for (const [target, entries] of queue) {
@@ -314,16 +339,7 @@ function dropQueuedBackendNotificationsBySource(agentName, sourceMsgId = null, r
       const matchesSource = sourceId ? (entrySource === sourceId || entryMessageIds.includes(sourceId)) : true;
       if (isNotification && matchesSource) {
         removed++;
-        appendDeliveryEvent({
-          type: 'queue.dropped',
-          ...queueEntryDeliveryEventFields(entry),
-          target,
-          reason,
-          context: {
-            requestedAgent: normalizedAgent,
-            sourceMsgId: sourceId || null,
-          },
-        });
+        dropped.push({ entry, target });
         continue;
       }
       kept.push(entry);
@@ -334,10 +350,31 @@ function dropQueuedBackendNotificationsBySource(agentName, sourceMsgId = null, r
   }
 
   if (removed > 0) {
-    saveQueue();
+    if (!saveQueue()) {
+      restoreQueueState(rollback);
+      appendQueuePersistFailedEvent(dropped[0]?.entry || null, 'queue-source-drop-save-failed', {
+        path: 'api',
+        requestedAgent: normalizedAgent,
+        sourceMsgId: sourceId || null,
+      });
+      broadcastQueue();
+      return { removed: 0, persistFailed: true };
+    }
+    for (const { entry, target } of dropped) {
+      appendDeliveryEvent({
+        type: 'queue.dropped',
+        ...queueEntryDeliveryEventFields(entry),
+        target,
+        reason,
+        context: {
+          requestedAgent: normalizedAgent,
+          sourceMsgId: sourceId || null,
+        },
+      });
+    }
     broadcastQueue();
   }
-  return removed;
+  return { removed, persistFailed: false };
 }
 
 function sanitizeNotifyMeta(rawMeta) {
@@ -481,7 +518,7 @@ async function notifyPushDelivered(entry, deliveredAt) {
 async function fetchUnreadSnapshot(agentName) {
   if (!agentName) return null;
   try {
-    const res = await backendFetch(`${BACKEND_V2_URL}/api/inbox/${encodeURIComponent(agentName)}/unread`);
+    const res = await backendFetch(`${BACKEND_V2_URL}/api/inbox/${encodeURIComponent(agentName)}/unread-list?limit=0`);
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -653,7 +690,16 @@ function writeQueueFileAtomic(payload) {
 function saveQueue() {
   const items = [];
   for (const [, entries] of queue) items.push(...entries);
-  writeQueueFileAtomic({ idCounter: queueIdCounter, items });
+  return writeQueueFileAtomic({ idCounter: queueIdCounter, items });
+}
+
+function appendQueuePersistFailedEvent(entry, reason, context = {}) {
+  appendDeliveryEvent({
+    type: 'queue.persist_failed',
+    ...queueEntryDeliveryEventFields(entry || {}),
+    reason,
+    context,
+  });
 }
 
 function backupUnreadableQueueFile(error) {
@@ -701,6 +747,7 @@ try {
 app.post('/api/queue', (req, res) => {
   const { from, to, payload } = req.body;
   if (!to || !payload) return res.status(400).json({ error: 'missing to or payload' });
+  const rollback = snapshotQueueState();
   const id = ++queueIdCounter;
   const queuedAt = Date.now();
   const priority = normalizeQueuePriority(req.body?.priority);
@@ -725,7 +772,11 @@ app.post('/api/queue', (req, res) => {
     }
   }
   bucket.push(entry);
-  saveQueue();
+  if (!saveQueue()) {
+    restoreQueueState(rollback);
+    appendQueuePersistFailedEvent(entry, 'queue-accept-save-failed', { path: 'api' });
+    return res.status(500).json({ ok: false, error: 'queue persistence failed' });
+  }
   broadcastQueue();
   appendDeliveryEvent({
     type: 'queue.accepted',
@@ -759,15 +810,20 @@ app.delete('/api/queue/:id', (req, res) => {
   for (const [target, entries] of queue) {
     const idx = entries.findIndex(e => e.id === id);
     if (idx !== -1) {
+      const rollback = snapshotQueueState();
       const [entry] = entries.splice(idx, 1);
+      if (entries.length === 0) queue.delete(target);
+      if (!saveQueue()) {
+        restoreQueueState(rollback);
+        appendQueuePersistFailedEvent(entry, 'queue-delete-save-failed', { path: 'api', target });
+        return res.status(500).json({ ok: false, error: 'queue persistence failed' });
+      }
       appendDeliveryEvent({
         type: 'queue.canceled',
         ...queueEntryDeliveryEventFields(entry),
         target,
         reason: 'operator-delete',
       });
-      if (entries.length === 0) queue.delete(target);
-      saveQueue();
       broadcastQueue();
       return res.json({ ok: true, deleted: id });
     }
@@ -781,9 +837,15 @@ app.post('/api/queue/:id/send', async (req, res) => {
   for (const [target, entries] of queue) {
     const idx = entries.findIndex(e => e.id === id);
     if (idx !== -1) {
+      const rollback = snapshotQueueState();
       const entry = entries.splice(idx, 1)[0];
       if (entries.length === 0) queue.delete(target);
-      saveQueue();
+      if (!saveQueue()) {
+        restoreQueueState(rollback);
+        appendQueuePersistFailedEvent(entry, 'queue-dequeue-save-failed', { path: 'manual', target });
+        broadcastQueue();
+        return res.status(503).json({ ok: false, delivered: id, requeued: true, reason: 'queue-persist-failed' });
+      }
       broadcastQueue();
       appendDeliveryEvent({
         type: 'queue.dequeued',
@@ -809,7 +871,9 @@ app.post('/api/queue/:id/send', async (req, res) => {
         // Keep behavior consistent with poll loop: failed delivery is retriable, not lost.
         if (!queue.has(target)) queue.set(target, []);
         queue.get(target).unshift(entry);
-        saveQueue();
+        if (!saveQueue()) {
+          appendQueuePersistFailedEvent(entry, 'queue-requeue-save-failed', { path: 'manual', target });
+        }
         broadcastQueue();
         return res.status(503).json({ ok: false, delivered: id, requeued: true, reason: 'deliver-failed' });
       }
@@ -1978,11 +2042,12 @@ app.post('/api/agents/:name/unread-messages/:msgId/cancel', async (req, res) => 
     const suppressData = await suppressRes.json().catch(() => ({ error: `backend status ${suppressRes.status}` }));
     if (!suppressRes.ok) return res.status(suppressRes.status).json(suppressData);
 
-    const queueRemoved = dropQueuedBackendNotificationsBySource(name, msgId, 'message-canceled');
+    const queueDrop = dropQueuedBackendNotificationsBySource(name, msgId, 'message-canceled');
     res.json({
       ok: true,
       canceled: { agent: name, message: msgId },
-      queue_removed: queueRemoved,
+      queue_removed: queueDrop.removed,
+      queue_remove_failed: queueDrop.persistFailed,
       suppress: suppressData,
     });
   } catch (e) {
@@ -2035,8 +2100,11 @@ app.post('/api/agents/:name/dm-send', async (req, res) => {
 app.delete('/api/queue/agents/:name/notifications', (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
-  const removed = dropQueuedBackendNotificationsBySource(name, null, 'agent-notifications-cleared');
-  return res.json({ ok: true, agent: name, removed });
+  const result = dropQueuedBackendNotificationsBySource(name, null, 'agent-notifications-cleared');
+  if (result.persistFailed) {
+    return res.status(503).json({ ok: false, agent: name, removed: 0, error: 'queue persistence failed' });
+  }
+  return res.json({ ok: true, agent: name, removed: result.removed });
 });
 
 app.patch('/api/agents/:name', async (req, res) => {
@@ -3187,16 +3255,26 @@ async function processQueueTick() {
           }
           if (dropped.length > 0) {
             console.log(`[queue] Dropping ${dropped.length} stale notification(s) for ${target} (unread changed)`);
-            archiveDroppedQueueEntries(dropped, 'stale-notification-unread-changed', target);
+            const rollback = snapshotQueueState();
             if (kept.length === 0) {
               queue.delete(target);
-              saveQueue();
+              if (!saveQueue()) {
+                restoreQueueState(rollback);
+                appendQueuePersistFailedEvent(dropped[0], 'queue-stale-drop-save-failed', { path: 'poll', target });
+                continue;
+              }
+              archiveDroppedQueueEntries(dropped, 'stale-notification-unread-changed', target);
               broadcastQueue();
               continue;
             }
             queue.set(target, kept);
             entries = kept;
-            saveQueue();
+            if (!saveQueue()) {
+              restoreQueueState(rollback);
+              appendQueuePersistFailedEvent(dropped[0], 'queue-stale-drop-save-failed', { path: 'poll', target });
+              continue;
+            }
+            archiveDroppedQueueEntries(dropped, 'stale-notification-unread-changed', target);
             broadcastQueue();
           }
         }
@@ -3219,10 +3297,15 @@ async function processQueueTick() {
           }
           if (dropped.length > 0) {
             console.log(`[queue] Dropping ${dropped.length} stale notification(s) for ${target} (pane not found, age > 5m)`);
-            archiveDroppedQueueEntries(dropped, 'pane-missing-over-5m', target);
+            const rollback = snapshotQueueState();
             if (kept.length === 0) queue.delete(target);
             else queue.set(target, kept);
-            saveQueue();
+            if (!saveQueue()) {
+              restoreQueueState(rollback);
+              appendQueuePersistFailedEvent(dropped[0], 'queue-pane-missing-drop-save-failed', { path: 'poll', target });
+              continue;
+            }
+            archiveDroppedQueueEntries(dropped, 'pane-missing-over-5m', target);
             broadcastQueue();
           }
         }
@@ -3232,9 +3315,22 @@ async function processQueueTick() {
 
       // Deliver first message
       delivering.add(target);
+      const rollback = snapshotQueueState();
       const entry = entries.shift();
       if (entries.length === 0) queue.delete(target);
-      saveQueue();
+      if (!saveQueue()) {
+        restoreQueueState(rollback);
+        appendQueuePersistFailedEvent(entry, 'queue-dequeue-save-failed', {
+          path: 'poll',
+          target,
+          targetObservation,
+          idleMs,
+          bypassIdleGate,
+        });
+        broadcastQueue();
+        delivering.delete(target);
+        continue;
+      }
       broadcastQueue();
       appendDeliveryEvent({
         type: 'queue.dequeued',
@@ -3267,7 +3363,9 @@ async function processQueueTick() {
         // Put it back at front
         if (!queue.has(target)) queue.set(target, []);
         queue.get(target).unshift(entry);
-        saveQueue();
+        if (!saveQueue()) {
+          appendQueuePersistFailedEvent(entry, 'queue-requeue-save-failed', { path: 'poll', target });
+        }
         broadcastQueue();
       }
       // Wait a bit before allowing next delivery to same target
@@ -3285,12 +3383,35 @@ const REMINDER_FILE = path.join(LOGS_ROOT, 'reminders.json');
 const reminders = []; // Array<{id, target, msg, createdAt, fireAt}>
 let reminderIdCounter = 0;
 
-function saveReminders() {
+function snapshotReminderState() {
+  return {
+    idCounter: reminderIdCounter,
+    items: reminders.map((item) => cloneJsonPlain(item)),
+  };
+}
+
+function restoreReminderState(snapshot) {
+  if (!snapshot) return;
+  reminderIdCounter = snapshot.idCounter;
+  reminders.splice(0, reminders.length, ...snapshot.items.map((item) => cloneJsonPlain(item)));
+}
+
+function writeReminderFileAtomic(payload) {
+  const tmp = `${REMINDER_FILE}.tmp-${process.pid}-${Date.now()}`;
   try {
-    writeFileSync(REMINDER_FILE, JSON.stringify({ idCounter: reminderIdCounter, items: reminders }));
+    mkdirSync(path.dirname(REMINDER_FILE), { recursive: true });
+    writeFileSync(tmp, JSON.stringify(payload), 'utf-8');
+    renameSync(tmp, REMINDER_FILE);
+    return true;
   } catch (e) {
+    try { unlinkSync(tmp); } catch {}
     console.debug(`[server] reminders save skipped: ${e.message}`);
+    return false;
   }
+}
+
+function saveReminders() {
+  return writeReminderFileAtomic({ idCounter: reminderIdCounter, items: reminders });
 }
 
 // Load from disk
@@ -3416,16 +3537,30 @@ function fireReminder(reminder) {
 function processDueReminders() {
   const now = Date.now();
   let changed = false;
+  const reminderRollback = snapshotReminderState();
+  const queueRollback = snapshotQueueState();
+  const due = [];
   for (let i = reminders.length - 1; i >= 0; i--) {
     if (reminders[i].fireAt <= now) {
+      due.push(cloneJsonPlain(reminders[i]));
       fireReminder(reminders[i]);
       reminders.splice(i, 1);
       changed = true;
     }
   }
   if (changed) {
-    saveReminders();
-    saveQueue();
+    if (!saveQueue()) {
+      restoreQueueState(queueRollback);
+      restoreReminderState(reminderRollback);
+      appendQueuePersistFailedEvent(null, 'due-reminder-queue-save-failed', { path: 'reminder-tick', dueCount: due.length });
+      broadcastReminders();
+      broadcastQueue();
+      return;
+    }
+    if (!saveReminders()) {
+      restoreReminderState(reminderRollback);
+      appendQueuePersistFailedEvent(null, 'due-reminder-reminder-save-failed', { path: 'reminder-tick', dueCount: due.length });
+    }
     broadcastReminders();
     broadcastQueue();
   }
@@ -3439,11 +3574,16 @@ app.post('/api/reminders', (req, res) => {
   if (!target || !delay || !msg) return res.status(400).json({ error: 'missing target, delay, or msg' });
   const delaySec = Number(delay);
   if (isNaN(delaySec) || delaySec <= 0) return res.status(400).json({ error: 'delay must be positive number (seconds)' });
+  const rollback = snapshotReminderState();
   const now = Date.now();
   const id = ++reminderIdCounter;
   const reminder = { id, target, msg, createdAt: now, fireAt: now + delaySec * 1000 };
   reminders.push(reminder);
-  saveReminders();
+  if (!saveReminders()) {
+    restoreReminderState(rollback);
+    appendQueuePersistFailedEvent(null, 'reminder-create-save-failed', { path: 'api', reminderId: id, target });
+    return res.status(500).json({ ok: false, error: 'reminder persistence failed' });
+  }
   broadcastReminders();
   res.json({ ok: true, id, fireAt: reminder.fireAt, remainingMs: delaySec * 1000 });
 });
@@ -3458,8 +3598,13 @@ app.delete('/api/reminders/:id', (req, res) => {
   const id = Number(req.params.id);
   const idx = reminders.findIndex(r => r.id === id);
   if (idx === -1) return res.status(404).json({ error: 'not found' });
+  const rollback = snapshotReminderState();
   reminders.splice(idx, 1);
-  saveReminders();
+  if (!saveReminders()) {
+    restoreReminderState(rollback);
+    appendQueuePersistFailedEvent(null, 'reminder-delete-save-failed', { path: 'api', reminderId: id });
+    return res.status(500).json({ ok: false, error: 'reminder persistence failed' });
+  }
   broadcastReminders();
   res.json({ ok: true, deleted: id });
 });
@@ -3546,6 +3691,7 @@ export {
   getPaneIdleMs,
   getTargetObservation,
   pollMessageLogTail as pollMessageLogTailForTest,
+  processDueReminders as processDueRemindersForTest,
   processQueueTick as processQueueTickForTest,
   resetServerTestHooks,
   setServerTestHooks,
