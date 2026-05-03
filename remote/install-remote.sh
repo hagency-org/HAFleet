@@ -190,7 +190,13 @@ if [ "$IS_LINUX" = true ]; then
   # Install remote autodeploy service
   AUTODEPLOY_SERVICE="agent-chat-remote-autodeploy"
   AUTODEPLOY_UNIT="/etc/systemd/system/${AUTODEPLOY_SERVICE}.service"
-  if [ -f "$SCRIPT_DIR/push-relay-autodeploy.service" ]; then
+  AUTODEPLOY_SCRIPT="$REPO_ROOT/scripts/agentchat-remote-autodeploy.sh"
+  AUTODEPLOY_INSTALLED=false
+  if [ ! -d "$REPO_ROOT/.git" ]; then
+    echo "  Skipping ${AUTODEPLOY_SERVICE}: standalone package has no git checkout for autodeploy."
+  elif [ ! -x "$AUTODEPLOY_SCRIPT" ]; then
+    echo "  Skipping ${AUTODEPLOY_SERVICE}: missing git-checkout updater script: $AUTODEPLOY_SCRIPT"
+  elif [ -f "$SCRIPT_DIR/push-relay-autodeploy.service" ]; then
     TMP_AD="$(mktemp)"
     trap 'rm -f "$TMP_AD"' EXIT
     sed \
@@ -210,6 +216,7 @@ if [ "$IS_LINUX" = true ]; then
       | sudo tee "$SUDOERS_FILE" >/dev/null
     sudo chmod 0440 "$SUDOERS_FILE"
     echo "  Provisioned sudoers rule: ${SUDOERS_FILE}"
+    AUTODEPLOY_INSTALLED=true
   fi
 
   sudo systemctl daemon-reload
@@ -223,7 +230,7 @@ if [ "$IS_LINUX" = true ]; then
       echo "  Started ${SERVICE_NAME}."
     fi
     # Enable + start autodeploy service
-    if [ -f "$AUTODEPLOY_UNIT" ]; then
+    if [ "$AUTODEPLOY_INSTALLED" = true ]; then
       sudo systemctl enable "$AUTODEPLOY_SERVICE"
       sudo systemctl restart "$AUTODEPLOY_SERVICE"
       echo "  Started ${AUTODEPLOY_SERVICE}."

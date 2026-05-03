@@ -374,6 +374,8 @@ agentchat prune-agents [--older-than-days <n>] [--apply]
 agentchat check-mcp
 ```
 
+`agentchat update` requires a git checkout. Standalone remote packages do not self-update; migrate to or install from a checkout with `bash remote/install-remote.sh`.
+
 ### Additional CLI Tools (bin/)
 
 | Script | Purpose |

@@ -84,7 +84,8 @@ service_help="$("$PKG_DIR/bin/agentchat" service --help)"
 assert_contains "$service_help" "Controls services on the current host only." "generated remote service help"
 assert_contains "$service_help" "remote relay service agent-chat-push-relay" "generated remote service help"
 update_help="$("$PKG_DIR/bin/agentchat" update --help)"
-assert_contains "$update_help" "Updates the current checkout or remote package on this host." "generated remote update help"
+assert_contains "$update_help" "Updates git-checkout installs on this host." "generated remote update help"
+assert_contains "$update_help" "Standalone remote packages cannot self-update" "generated remote update help"
 assert_contains "$update_help" "Service flags only control the remote relay service: agent-chat-push-relay." "generated remote update help"
 ls_help="$("$PKG_DIR/bin/agentchat" ls --help)"
 assert_contains "$ls_help" "Lists tmux sessions on the current runtime host." "generated remote ls help"
@@ -93,6 +94,20 @@ down_help="$("$PKG_DIR/bin/agentchat" down --help)"
 assert_contains "$down_help" "Stops a tmux session on the current runtime host only." "generated remote down help"
 assert_contains "$down_help" "The backend is used for name resolution" "generated remote down help"
 echo "[OK] Generated remote scoped help is explicit"
+
+UPDATE_OUT="$TMP_DIR/agentchat-update-check.out"
+UPDATE_ERR="$TMP_DIR/agentchat-update-check.err"
+if HOME="$TMP_DIR/home" AGENT_CHAT_HOME= AGENT_CHAT_ROOT= "$PKG_DIR/bin/agentchat" update --check >"$UPDATE_OUT" 2>"$UPDATE_ERR"; then
+  fail "generated standalone agentchat update --check unexpectedly succeeded"
+fi
+assert_contains "$(cat "$UPDATE_ERR")" "standalone remote package cannot self-update" "generated standalone update guard"
+assert_contains "$(cat "$UPDATE_ERR")" ".git checkout" "generated standalone update guard"
+assert_contains "$(cat "$UPDATE_ERR")" "remote/install-remote.sh" "generated standalone update guard"
+if grep -Fq "$TMP_DIR is not a git repository" "$UPDATE_ERR"; then
+  cat "$UPDATE_ERR" >&2
+  fail "generated standalone update guard returned misleading parent git error"
+fi
+echo "[OK] Generated standalone update guard fails clearly"
 
 echo "Checking generated remote wrapper resolution..."
 if ! AGENTCHAT_WRAPPER_SMOKE=1 node "$PKG_DIR/push-relay.js"; then

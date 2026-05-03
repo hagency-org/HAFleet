@@ -61,4 +61,17 @@ describe('remote install profile decision contracts', () => {
     expect(cdB0Doc).toContain('R-050');
     expect(cdB0Doc).toContain('Remote autodeploy remains code/dependency/restart only and does not rerun `remote/install-remote.sh`.');
   });
+
+  test('standalone package does not install broken git-only autodeploy', () => {
+    const buildSource = read('scripts/build-remote-package.sh');
+    const installSource = read('remote/install-remote.sh');
+
+    expect(buildSource).not.toContain('scripts/agentchat-remote-autodeploy.sh:');
+    expect(installSource).toContain('AUTODEPLOY_SCRIPT="$REPO_ROOT/scripts/agentchat-remote-autodeploy.sh"');
+    expect(installSource).toContain('[ ! -d "$REPO_ROOT/.git" ]');
+    expect(installSource).toContain('standalone package has no git checkout for autodeploy');
+    expect(installSource).toContain('[ ! -x "$AUTODEPLOY_SCRIPT" ]');
+    expect(installSource).toContain('AUTODEPLOY_INSTALLED=true');
+    expect(installSource).toContain('if [ "$AUTODEPLOY_INSTALLED" = true ]; then');
+  });
 });

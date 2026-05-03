@@ -84,15 +84,15 @@ If a package is installed at `/home/shu/agent-chat`, `bin/agent-update` computes
 - `BASE_DIR=/home/shu/agent-chat`
 - `REPO_DIR=/home/shu`
 
-When no candidate git checkout is found, it exits with `/home/shu is not a git repository`.
+Before RAU-B, when no candidate git checkout was found, it exited with `/home/shu is not a git repository`.
 
 2. Standalone package advertises update but cannot self-update.
 
-The help says `agentchat update` updates the current checkout or remote package, but there is no package source URL, version file, atomic unpack, rollback directory, or expected-version heartbeat.
+Before RAU-B, the help said `agentchat update` updated the current checkout or remote package, but there was no package source URL, version file, atomic unpack, rollback directory, or expected-version heartbeat. RAU-B changes the help and generated-package behavior to make standalone self-update unsupported explicitly.
 
 3. Linux standalone install can create a broken autodeploy unit.
 
-The unit points at `<repo>/scripts/agentchat-remote-autodeploy.sh`; standalone packages do not ship `scripts/`. That makes autodeploy look installed while not being executable in that profile.
+The unit points at `<repo>/scripts/agentchat-remote-autodeploy.sh`; standalone packages do not ship `scripts/`. RAU-B keeps the template available for git-checkout installs but skips installing the autodeploy service when the checkout/script contract is missing.
 
 4. Remote autodeploy can strand a host on a bad reset.
 
@@ -172,19 +172,19 @@ Goal:
 
 Shape:
 
-- Detect standalone package layout with no `.git`.
-- Print a clear message:
+- Implemented standalone package layout detection with no `.git`.
+- `agentchat update` now prints a clear message:
   - standalone package self-update is not supported yet;
   - migrate to git checkout for auto-update;
   - preserve `.env`, `data`, and `logs`;
   - run `bash remote/install-remote.sh`;
-  - verify with `agentchat verify-remote --expect-version <sha>`.
-- Prevent standalone install from enabling a broken autodeploy unit unless the required script/profile exists.
+  - service-only operations remain available through `agentchat service`.
+- `remote/install-remote.sh` now skips the remote autodeploy service unless the install is a git checkout and `scripts/agentchat-remote-autodeploy.sh` exists.
 
 Tests:
 
-- Fake standalone layout invoking `bin/agent-update --check`.
-- Generated package smoke for autodeploy service/package contract.
+- Generated standalone package invokes `agentchat update --check` and fails with migration guidance instead of a parent-directory git error.
+- Static install-profile contract proves standalone packages do not install the broken git-only autodeploy service.
 
 Verification:
 

@@ -35,11 +35,36 @@ if [ "$(basename "$BASE_DIR")" = "remote" ]; then
   REPO_DIR="$BASE_DIR/.."
 fi
 REPO_DIR="$(cd "$REPO_DIR" && pwd)"
+INITIAL_REPO_DIR="$REPO_DIR"
+STANDALONE_REMOTE_PACKAGE=false
+if [ -f "$BASE_DIR/install-remote.sh" ] \
+  && [ -f "$BASE_DIR/push-relay.js" ] \
+  && [ -f "$BASE_DIR/package.json" ] \
+  && [ ! -d "$INITIAL_REPO_DIR/.git" ]; then
+  STANDALONE_REMOTE_PACKAGE=true
+fi
+
+is_standalone_remote_package() {
+  [ "$STANDALONE_REMOTE_PACKAGE" = true ]
+}
+
+print_standalone_update_error() {
+  cat >&2 <<'EOF'
+Error: standalone remote package cannot self-update with agentchat update.
+This package has no .git checkout, so it cannot fetch, pull, or reinstall itself safely.
+Preserve this package's .env, data, and logs before migrating.
+Install or switch to a git checkout, then run:
+  cd <agent-chat checkout> && bash remote/install-remote.sh
+Service-only operations are still available with:
+  agentchat service --help
+EOF
+}
 
 resolve_repo_dir() {
   local c
   for c in \
     "${AGENT_CHAT_HOME:-}" \
+    "$BASE_DIR" \
     "$REPO_DIR" \
     "$HOME/laplace/agent-chat" \
     "$HOME/agent-chat"; do
@@ -79,7 +104,8 @@ while [ $# -gt 0 ]; do
     -h|--help)
       echo "Usage: agent-update [--check|--pause-services|--resume-services|--restart-services|--service-status]"
       echo "Scope:"
-      echo "  Updates the current checkout or remote package on this host."
+      echo "  Updates git-checkout installs on this host."
+      echo "  Standalone remote packages cannot self-update; install/update from a git checkout."
       echo "  Service flags only control the remote relay service: agent-chat-push-relay."
       echo "Options:"
       echo "  --check: check whether updates are available; do not install"
@@ -183,6 +209,11 @@ if [ -n "$SERVICE_ACTION" ] && [ "$UPDATE_AND_PAUSE" = false ]; then
   echo "Service action target: remote relay (agent-chat-push-relay)"
   "$SERVICE_CLI" "$SERVICE_ACTION" --profile remote
   exit 0
+fi
+
+if is_standalone_remote_package; then
+  print_standalone_update_error
+  exit 2
 fi
 
 # Ensure we're in a git repo

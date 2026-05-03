@@ -28,7 +28,7 @@ Most files here are managed by root-level generators/sync checks:
 - `lib/blocked-patterns.js`
 - `lib/eventsource-mini.js`
 - `push-relay.service`
-- `push-relay-autodeploy.service`
+- `push-relay-autodeploy.service` (installed only from git-checkout deployments)
 - `.env.example`
 - `install-remote.sh`
 
@@ -41,7 +41,7 @@ Most files here are managed by root-level generators/sync checks:
 Examples:
 - `agentchat up <name> <path> [claude|codex] [--allow-shared-workspace]`
 - `agentchat down <name>`
-- `agentchat update --pause-services`
+- `agentchat update --pause-services` (git-checkout installs only)
 - `agentchat cli fleet --expect-version <short-sha> [--json]`
 - `agentchat audit`
 - `agentchat maintain`
@@ -68,6 +68,8 @@ Examples:
    - `agentchat up <name> <path> [claude|codex] [--allow-shared-workspace]`
 6. Verify agent state after launch:
    - `agentchat verify-remote --agent <name>`
+
+Standalone package note: `agentchat update` does not self-update generated packages because they have no `.git` checkout. Preserve `.env`, `data`, and `logs`, then install from a git checkout with `bash remote/install-remote.sh`.
 
 ## Notes
 

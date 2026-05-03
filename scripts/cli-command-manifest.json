@@ -31,7 +31,7 @@
         },
         {
           "command": "update",
-          "mustContain": ["Updates the current checkout or remote package on this host.", "Service flags only control the remote relay service: agent-chat-push-relay."]
+          "mustContain": ["Updates git-checkout installs on this host.", "Standalone remote packages cannot self-update", "Service flags only control the remote relay service: agent-chat-push-relay."]
         },
         {
           "command": "ls",
@@ -75,7 +75,7 @@
         },
         {
           "command": "update",
-          "mustContain": ["Updates the current checkout or remote package on this host.", "Service flags only control the remote relay service: agent-chat-push-relay."]
+          "mustContain": ["Updates git-checkout installs on this host.", "Standalone remote packages cannot self-update", "Service flags only control the remote relay service: agent-chat-push-relay."]
         },
         {
           "command": "ls",
