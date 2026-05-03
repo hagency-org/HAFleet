@@ -36,7 +36,28 @@ function execFileAsync(command, args, options = {}) {
   });
 }
 
+const SERVER_ENV_KEYS = [
+  'AGENT_CHAT_RUNTIME_DIR',
+  'AGENT_CHAT_WEB_PORT',
+  'AGENT_CHAT_BACKEND_PORT',
+];
+
+function snapshotEnv(keys) {
+  return new Map(keys.map((key) => [key, process.env[key]]));
+}
+
+function restoreEnv(snapshot) {
+  if (!snapshot) return;
+  for (const [key, value] of snapshot.entries()) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
+let serverImportEnvSnapshot = null;
+
 async function importServer(runtimeDir) {
+  if (!serverImportEnvSnapshot) serverImportEnvSnapshot = snapshotEnv(SERVER_ENV_KEYS);
   process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
   process.env.AGENT_CHAT_WEB_PORT = '18084';
   process.env.AGENT_CHAT_BACKEND_PORT = '18090';
@@ -56,6 +77,8 @@ describe('server delivery path', () => {
     serverModule = null;
     if (runtimeDir) rmSync(runtimeDir, { recursive: true, force: true });
     runtimeDir = null;
+    restoreEnv(serverImportEnvSnapshot);
+    serverImportEnvSnapshot = null;
   });
 
   test('server import and stop do not leave runtime handles active', async () => {

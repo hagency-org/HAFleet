@@ -5,6 +5,36 @@ import path from 'path';
 import { pathToFileURL } from 'url';
 import request from 'supertest';
 
+const SERVER_ENV_KEYS = [
+  'AGENT_CHAT_RUNTIME_DIR',
+  'AGENT_CHAT_WEB_PORT',
+  'AGENT_CHAT_BACKEND_PORT',
+  'AGENT_CHAT_DASHBOARD_TOKEN',
+  'AGENT_IDLE_THRESHOLD_MS',
+];
+
+function snapshotEnv(keys) {
+  return new Map(keys.map((key) => [key, process.env[key]]));
+}
+
+function restoreEnv(snapshot) {
+  if (!snapshot) return;
+  for (const [key, value] of snapshot.entries()) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
+function waitFor(promise, timeoutMs = 1000) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 async function importServer(runtimeDir, extraEnv = {}) {
   process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
   process.env.AGENT_CHAT_WEB_PORT = '18084';
@@ -23,8 +53,10 @@ async function importServer(runtimeDir, extraEnv = {}) {
 describe('server dashboard mutation boundary', () => {
   let runtimeDir = null;
   let serverModule = null;
+  let envSnapshot = null;
 
   async function setup(extraEnv = {}) {
+    envSnapshot = snapshotEnv(SERVER_ENV_KEYS);
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-dashboard-boundary-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
@@ -39,8 +71,8 @@ describe('server dashboard mutation boundary', () => {
     serverModule = null;
     if (runtimeDir) rmSync(runtimeDir, { recursive: true, force: true });
     runtimeDir = null;
-    delete process.env.AGENT_CHAT_DASHBOARD_TOKEN;
-    delete process.env.AGENT_IDLE_THRESHOLD_MS;
+    restoreEnv(envSnapshot);
+    envSnapshot = null;
   });
 
   test('keeps local queue mutation compatible', async () => {
@@ -124,6 +156,90 @@ describe('server dashboard mutation boundary', () => {
       .send({ owner: 'operator' });
     expect(create.status).toBe(403);
     expect(seen).toEqual([]);
+  });
+
+  test('agent down command runs asynchronously without blocking other dashboard requests', async () => {
+    const mod = await setup();
+    let releaseAgentDown;
+    let startedAgentDown;
+    const agentDownStarted = new Promise((resolve) => {
+      startedAgentDown = resolve;
+    });
+
+    mod.setServerTestHooks({
+      execFileAsync: async (cmd, args) => {
+        if (String(cmd).endsWith('/bin/agent-down')) {
+          startedAgentDown();
+          return new Promise((resolve) => {
+            releaseAgentDown = () => resolve({ stdout: 'agent stopped\n' });
+          });
+        }
+        throw new Error(`unexpected exec ${cmd} ${args.join(' ')}`);
+      },
+    });
+
+    const downRequest = request(mod.app).post('/api/agents/alpha/down').send({}).then((res) => res);
+    await waitFor(agentDownStarted);
+
+    const queueResponse = await request(mod.app).get('/api/queue');
+    expect(queueResponse.status).toBe(200);
+    expect(queueResponse.body).toEqual([]);
+
+    releaseAgentDown();
+    const downResponse = await downRequest;
+    expect(downResponse.status).toBe(200);
+    expect(downResponse.body).toMatchObject({
+      ok: true,
+      action: 'agent-down-kill',
+      outputTail: 'agent stopped',
+    });
+  });
+
+  test('agent down fallback uses asynchronous tmux cleanup before marking offline', async () => {
+    const mod = await setup();
+    const execCalls = [];
+    const backendCalls = [];
+
+    mod.setServerTestHooks({
+      execFileAsync: async (cmd, args) => {
+        execCalls.push([cmd, ...args]);
+        if (String(cmd).endsWith('/bin/agent-down')) {
+          const error = new Error('agent-down failed');
+          error.stdout = 'partial stdout\n';
+          error.stderr = 'partial stderr\n';
+          throw error;
+        }
+        if (cmd === 'tmux') return { stdout: '' };
+        throw new Error(`unexpected exec ${cmd}`);
+      },
+      backendFetch: async (url, init = {}) => {
+        backendCalls.push({ url: String(url), method: init.method || 'GET', body: init.body || null });
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      },
+    });
+
+    const response = await request(mod.app).post('/api/agents/alpha/down').send({});
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      action: 'agent-down-kill-fallback',
+    });
+    expect(response.body.outputTail).toContain('partial stdout');
+    expect(response.body.outputTail).toContain('partial stderr');
+    expect(execCalls).toContainEqual(['tmux', 'kill-session', '-t', 'alpha']);
+    expect(backendCalls).toHaveLength(1);
+    expect(backendCalls[0]).toMatchObject({ method: 'POST' });
+    expect(JSON.parse(backendCalls[0].body)).toMatchObject({
+      reason: 'manual-down:web-kill',
+      clearTmux: true,
+      manualDown: true,
+    });
+  });
+
+  test('dashboard server avoids synchronous child process execution', () => {
+    const source = readFileSync(path.resolve('server.js'), 'utf-8');
+    expect(source).not.toContain('execFileSync');
   });
 
   test.each([

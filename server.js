@@ -1,7 +1,7 @@
 import express from 'express';
 import { readFile as readFileAsync, open, stat as statAsync, appendFile } from 'fs/promises';
 import { appendFileSync, writeFileSync, readFileSync, existsSync, mkdirSync, lstatSync, rmSync, unlinkSync, readdirSync, renameSync } from 'fs';
-import { execFileSync, execFile } from 'child_process';
+import { execFile } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { promisify } from 'util';
@@ -1322,9 +1322,9 @@ function buildProvisionArgsForManifest(manifest, localMeta = null, options = {})
   return { args, homeRoot };
 }
 
-function runProvisionForManifest(manifest, localMeta = null, options = {}) {
+async function runProvisionForManifest(manifest, localMeta = null, options = {}) {
   const { args, homeRoot } = buildProvisionArgsForManifest(manifest, localMeta, options);
-  const stdout = execFileSync(process.execPath, args, {
+  const { stdout = '' } = await execFileAsyncImpl(process.execPath, args, {
     cwd: REPO_ROOT,
     encoding: 'utf-8',
     env: {
@@ -2192,7 +2192,7 @@ app.post('/api/agents/:name/projects/import', async (req, res) => {
   const projectName = normalizeMetaText(body.projectName ?? body.name, 256);
   let provisionPayload = null;
   try {
-    provisionPayload = runProvisionForManifest(manifest, localMeta, {
+    provisionPayload = await runProvisionForManifest(manifest, localMeta, {
       projectPath: sourcePath,
       projectMode,
       projectName,
@@ -2300,7 +2300,7 @@ app.post('/api/agents/:name/workspace/migrate-entry-files', async (req, res) => 
 
   let provisionPayload = null;
   try {
-    provisionPayload = runProvisionForManifest(manifest, localMeta);
+    provisionPayload = await runProvisionForManifest(manifest, localMeta);
   } catch (e) {
     const stderr = String(e?.stderr || '').trim();
     const stdout = String(e?.stdout || '').trim();
@@ -2551,20 +2551,20 @@ app.post('/api/agents/:name/down', async (req, res) => {
   }
   const toTail = (text, lines) => String(text || '').trim().split('\n').slice(-lines).join('\n');
   try {
-    const output = execFileSync(AGENT_DOWN_BIN, [name, '--kill'], {
+    const { stdout = '' } = await execFileAsyncImpl(AGENT_DOWN_BIN, [name, '--kill'], {
       encoding: 'utf-8',
       timeout: 120000,
       maxBuffer: 4 * 1024 * 1024,
       env: { ...process.env, NO_PROXY: '*' },
     });
-    const outputTail = toTail(output, 20);
+    const outputTail = toTail(stdout, 20);
     return res.json({ ok: true, action: 'agent-down-kill', outputTail });
   } catch (e) {
     const stdout = String(e?.stdout || '');
     const stderr = String(e?.stderr || e?.message || '');
     const detail = toTail(`${stdout}\n${stderr}`, 40);
     try {
-      execFileSync('tmux', ['kill-session', '-t', name], {
+      await execFileAsyncImpl('tmux', ['kill-session', '-t', name], {
         encoding: 'utf-8',
         timeout: 5000,
         stdio: 'pipe',
