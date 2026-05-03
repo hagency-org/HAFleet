@@ -236,6 +236,59 @@ describe('push relay lifecycle', () => {
     expect(deliveries[1].payload).not.toContain('another secret');
   });
 
+  test('failed unread backfill delivery is retried on reconnect', async () => {
+    vi.useFakeTimers();
+    const { FakeEventSource, instances } = createFakeEventSource();
+    const deliveries = [];
+    let deliveryOk = false;
+    setPushRelayTestHooks({
+      EventSource: FakeEventSource,
+      execFileSync: fakeTmux,
+      fetch: async (url, options = {}) => {
+        const parsed = new URL(String(url));
+        if ((options.method || 'GET').toUpperCase() === 'POST') return responseJson({ ok: true });
+        if (parsed.pathname === '/api/agents') {
+          return responseJson([{ name: 'alpha', server: null, tmux: 'alpha:0.0' }]);
+        }
+        if (parsed.pathname === '/api/inbox/alpha/unread-list') {
+          return responseJson({
+            agent: 'alpha',
+            unread_total: 1,
+            unread_returned: 1,
+            unread_omitted: 0,
+            messages: [{ id: 'msg_retry', ts: 1000, from: 'human-op', summary: 'do not replay me' }],
+          });
+        }
+        return responseJson({ ok: true });
+      },
+      tmuxBin: 'tmux',
+    });
+    seedRelayState({ mcpSessions: ['alpha'] });
+    setPushToTmuxForTest((target, payload) => {
+      deliveries.push({ target, payload });
+      return deliveryOk;
+    });
+
+    await main();
+    expect(deliveries).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(25000);
+    drainRelayQueue();
+    expect(deliveries).toHaveLength(1);
+
+    deliveryOk = true;
+    instances[0].emitError();
+    await vi.advanceTimersByTimeAsync(5000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(instances).toHaveLength(2);
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries[1].target).toBe('alpha:0.0');
+    expect(deliveries[1].payload).toContain('You have 1 unread inbox message(s)');
+    expect(deliveries[1].payload).not.toContain('do not replay me');
+  });
+
   test('stop clears pending reconnect timers and sends the offline notice when requested', async () => {
     vi.useFakeTimers();
     const posts = [];

@@ -48,6 +48,7 @@ start_shard "api runtime" \
 start_shard "delivery and dashboard" \
   tests/push-relay.test.js \
   tests/push-relay-lifecycle.test.js \
+  tests/sse-adapter.test.js \
   tests/backend-lifecycle.test.js \
   tests/server-delivery.test.js \
   tests/server-dashboard-boundary.test.js

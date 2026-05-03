@@ -22,6 +22,12 @@ function readJsonl(filePath) {
   }
 }
 
+function parseSseFrameData(frame) {
+  const dataLine = String(frame || '').split('\n').find((line) => line.startsWith('data: '));
+  if (!dataLine) return null;
+  return JSON.parse(dataLine.slice('data: '.length));
+}
+
 function execFileAsync(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     execFile(command, args, options, (error, stdout, stderr) => {
@@ -221,6 +227,68 @@ describe('server delivery path', () => {
     const sincePage = await request(serverModule.app).get('/api/messages?since=2000&limit=2');
     expect(sincePage.status).toBe(200);
     expect(sincePage.body.map((row) => row.id)).toEqual(['msg_4', 'msg_5']);
+  });
+
+  test('message log tail keeps partial JSONL records until newline', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    const logPath = path.join(runtimeDir, 'logs', 'messages.jsonl');
+    serverModule = await importServer(runtimeDir);
+
+    const frames = [];
+    serverModule.addSseClientForTest({ write: (frame) => frames.push(frame) });
+
+    const firstRow = JSON.stringify({ id: 'msg_tail_1', ts: 1000, from: 'system', to: 'alpha', payload: 'one' });
+    const partial = firstRow.slice(0, Math.floor(firstRow.length / 2));
+    writeFileSync(logPath, partial);
+
+    await serverModule.pollMessageLogTailForTest();
+    expect(frames).toHaveLength(0);
+
+    writeFileSync(logPath, `${firstRow}\n`);
+    await serverModule.pollMessageLogTailForTest();
+    expect(frames).toHaveLength(1);
+    expect(parseSseFrameData(frames[0])).toMatchObject({ id: 'msg_tail_1', payload: 'one' });
+
+    const secondRow = JSON.stringify({ id: 'msg_tail_2', ts: 2000, from: 'system', to: 'alpha', payload: 'two' });
+    writeFileSync(logPath, `${firstRow}\nnot-json\n${secondRow}\n`);
+    await serverModule.pollMessageLogTailForTest();
+
+    expect(frames).toHaveLength(2);
+    expect(parseSseFrameData(frames[1])).toMatchObject({ id: 'msg_tail_2', payload: 'two' });
+  });
+
+  test('SSE write failures do not fail queue or reminder mutations', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const frames = [];
+    const goodClient = { write: (frame) => frames.push(frame) };
+    serverModule.addSseClientForTest({ write: () => { throw new Error('closed'); } });
+    serverModule.addSseClientForTest(goodClient);
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'system',
+      to: 'alpha:0.0',
+      payload: 'hello',
+    });
+    expect(queued.status).toBe(200);
+    expect(serverModule.getSseClientCountForTest()).toBe(1);
+    expect(frames.some((frame) => String(frame).startsWith('event: queue\n'))).toBe(true);
+
+    serverModule.addSseClientForTest({ write: () => { throw new Error('closed again'); } });
+    const reminder = await request(serverModule.app).post('/api/reminders').send({
+      target: 'alpha:0.0',
+      delay: 60,
+      msg: 'stand up',
+    });
+
+    expect(reminder.status).toBe(200);
+    expect(serverModule.getSseClientCountForTest()).toBe(1);
+    expect(frames.some((frame) => String(frame).startsWith('event: reminders\n'))).toBe(true);
   });
 
   test('manual send drops backend notifications whose source message is no longer unread', async () => {

@@ -1143,10 +1143,11 @@ async function backfillUnreadInboxNotifications(reason = 'startup') {
     if (!snapshot) continue;
     const key = unreadBackfillKey(snapshot);
     if (unreadBackfillCursor.get(agentName) === key) continue;
-    unreadBackfillCursor.set(agentName, key);
     const msg = buildUnreadBackfillMessage(agentName, snapshot, reason);
+    const dedupeKey = `${msg.id}:${agentName}`;
     try {
       await handleMessage(JSON.stringify(msg));
+      if (delivered.has(dedupeKey)) unreadBackfillCursor.set(agentName, key);
     } catch (error) {
       console.error(`[push-relay] unread backfill delivery failed for ${agentName}: ${error.message}`);
     }

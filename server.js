@@ -214,11 +214,26 @@ app.get('/api/stream', (req, res) => {
 
 function broadcast(msg) {
   const frame = `data: ${JSON.stringify(msg)}\n\n`;
-  for (const c of sseClients) c.write(frame);
+  broadcastSseFrame(frame);
+}
+
+function writeSseFrame(client, frame) {
+  try {
+    client.write(frame);
+    return true;
+  } catch {
+    sseClients.delete(client);
+    return false;
+  }
+}
+
+function broadcastSseFrame(frame) {
+  for (const client of sseClients) writeSseFrame(client, frame);
 }
 
 // ── Tail log file for new entries ────────────────────────────────────
 let fileOffset = 0;
+let messageLogTailCarry = '';
 try {
   const raw = await readFileAsync(LOG_FILE, 'utf-8').catch(() => '');
   fileOffset = Buffer.byteLength(raw, 'utf-8');
@@ -229,15 +244,23 @@ async function pollMessageLogTail() {
     const fh = await open(LOG_FILE, 'r');
     try {
       const fstat = await fh.stat();
-      if (fstat.size < fileOffset) fileOffset = 0; // truncated
+      if (fstat.size < fileOffset) {
+        fileOffset = 0; // truncated
+        messageLogTailCarry = '';
+      }
       if (fstat.size <= fileOffset) return;
       const buf = Buffer.alloc(fstat.size - fileOffset);
-      await fh.read(buf, 0, buf.length, fileOffset);
-      fileOffset = fstat.size;
+      const { bytesRead } = await fh.read(buf, 0, buf.length, fileOffset);
+      if (bytesRead <= 0) return;
+      fileOffset += bytesRead;
 
-      const lines = buf.toString('utf-8').trim().split('\n').filter(Boolean);
+      const chunk = messageLogTailCarry + buf.subarray(0, bytesRead).toString('utf-8');
+      const lines = chunk.split('\n');
+      messageLogTailCarry = lines.pop() || '';
       for (const line of lines) {
-        try { broadcast(JSON.parse(line)); } catch { /* skip */ }
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try { broadcast(JSON.parse(trimmed)); } catch { /* skip */ }
       }
     } finally {
       await fh.close();
@@ -2673,7 +2696,7 @@ function queueSnapshot() {
 function broadcastQueue() {
   const items = queueSnapshot();
   const frame = `event: queue\ndata: ${JSON.stringify(items)}\n\n`;
-  for (const c of sseClients) c.write(frame);
+  broadcastSseFrame(frame);
 }
 
 // Content-based idle detection: compare pane snapshots.
@@ -3018,7 +3041,7 @@ async function connectBackendSSE() {
         else if (line === '') {
           if (ALERT_SSE_EVENTS.has(currentEvent) && currentData) {
             const frame = `event: ${currentEvent}\ndata: ${currentData}\n\n`;
-            for (const c of sseClients) { try { c.write(frame); } catch {} }
+            broadcastSseFrame(frame);
           }
           currentEvent = '';
           currentData = '';
@@ -3289,7 +3312,7 @@ function reminderSnapshot() {
 function broadcastReminders() {
   const items = reminderSnapshot();
   const frame = `event: reminders\ndata: ${JSON.stringify(items)}\n\n`;
-  for (const c of sseClients) c.write(frame);
+  broadcastSseFrame(frame);
 }
 
 function formatRelativeTime(ms) {
@@ -3506,11 +3529,23 @@ function resetServerTestHooks() {
   dashboardRequestLocalOverride = null;
 }
 
+function addSseClientForTest(client) {
+  sseClients.add(client);
+  return () => sseClients.delete(client);
+}
+
+function getSseClientCountForTest() {
+  return sseClients.size;
+}
+
 export {
+  addSseClientForTest,
   app,
   deliverMessage,
+  getSseClientCountForTest,
   getPaneIdleMs,
   getTargetObservation,
+  pollMessageLogTail as pollMessageLogTailForTest,
   processQueueTick as processQueueTickForTest,
   resetServerTestHooks,
   setServerTestHooks,
