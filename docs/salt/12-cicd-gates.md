@@ -1,7 +1,7 @@
 # 12 CICD Gates
 
-Date: 2026-05-03
-Status: first executable CI/CD gate plan.
+Date: 2026-05-04
+Status: executable CI/CD gate truth.
 
 ## Goal
 
@@ -14,7 +14,8 @@ The immediate priority is not more runtime architecture repair. It is repeatable
 - remote/local mirror drift;
 - standalone remote package shape;
 - shell and JavaScript syntax across tracked entrypoints;
-- high-value kernel and CLI smoke behavior.
+- architecture boundary drift;
+- high-value kernel, backend API, CLI, preflight, and autodeploy smoke behavior.
 
 ## First Gate
 
@@ -23,13 +24,15 @@ The immediate priority is not more runtime architecture repair. It is repeatable
 It runs:
 
 1. `npm run report:ci-env`
-2. `npm run check:syntax`
-3. `npm run check:cli-contract`
-4. `npm run build:remote:check`
-5. `npm run check:remote-sync`
-6. `npm run check:remote-package-smoke`
-7. `npm run check:dep-isolation`
-8. `npm run test:kernel`
+2. `git diff --check`
+3. `npm run check:syntax`
+4. `npm run check:cli-contract`
+5. `npm run build:remote:check`
+6. `npm run check:remote-sync`
+7. `npm run check:remote-package-smoke`
+8. `npm run check:dep-isolation`
+9. `npm run check:architecture-boundaries`
+10. `npm run test:kernel`
 
 GitHub Actions now runs this as an added step in the existing `lint` job, then runs the existing full `npm test` job separately.
 
@@ -69,14 +72,12 @@ The remote profile is expected to expose only packaged remote commands:
 - `update`
 - `service`
 - `verify-remote`
-- `audit`
 - `maintain`
 - `prune-agents`
-- `sync-skills`
 - `reminder`
 - `cli`
 
-Remote unsupported commands such as `graph`, `project`, `up-v1`, `resume-id`, `benchmark`, and `check-mcp` must fail clearly instead of dispatching to missing files.
+Remote unsupported commands such as `graph`, `project`, `up-v1`, `resume-id`, `benchmark`, `audit`, `sync-skills`, and `check-mcp` must fail clearly instead of dispatching to missing files.
 
 ## Remote Package Smoke
 
@@ -86,7 +87,9 @@ Remote unsupported commands such as `graph`, `project`, `up-v1`, `resume-id`, `b
 - runtime artifacts are excluded;
 - generated JavaScript and shell entrypoints parse;
 - remote help stays profile-scoped;
-- unsupported remote commands fail with a clear remote command error.
+- unsupported remote commands fail with a clear remote command error;
+- generated push-relay and MCP wrappers resolve package-local core files;
+- the generated remote autodeploy service template is present and points at the git-checkout autodeploy script path it is designed to run.
 
 This covers the gap where `remote/` and generated package behavior can drift even if root tests pass.
 
