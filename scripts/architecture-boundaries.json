@@ -58,10 +58,6 @@
         { "method": "POST", "path": "/api/queue", "owner": "dashboard.queue" },
         { "method": "DELETE", "path": "/api/queue/:id", "owner": "dashboard.queue" },
         { "method": "POST", "path": "/api/queue/:id/send", "owner": "dashboard.queue" },
-        { "method": "POST", "path": "/api/subconscious/upstream/bootstrap/:name", "owner": "backend.proxy.subconscious" },
-        { "method": "POST", "path": "/api/subconscious/upstream/session-start/:name", "owner": "backend.proxy.subconscious" },
-        { "method": "POST", "path": "/api/subconscious/upstream/user-prompt/:name", "owner": "backend.proxy.subconscious" },
-        { "method": "POST", "path": "/api/subconscious/upstream/pretool/:name", "owner": "backend.proxy.subconscious" },
         { "method": "POST", "path": "/api/agents/:name/unread-messages/:msgId/cancel", "owner": "backend.proxy.messages" },
         { "method": "POST", "path": "/api/agents/:name/dm-send", "owner": "backend.proxy.messages" },
         { "method": "DELETE", "path": "/api/queue/agents/:name/notifications", "owner": "dashboard.queue" },
@@ -80,6 +76,18 @@
         { "method": "POST", "path": "/api/framework-presets", "owner": "backend.proxy.framework-presets" },
         { "method": "PUT", "path": "/api/framework-presets/:id", "owner": "backend.proxy.framework-presets" },
         { "method": "DELETE", "path": "/api/framework-presets/:id", "owner": "backend.proxy.framework-presets" },
+        { "method": "POST", "path": "/api/redirects", "owner": "dashboard.redirects" },
+        { "method": "DELETE", "path": "/api/redirects/:from", "owner": "dashboard.redirects" },
+        { "method": "POST", "path": "/api/reminders", "owner": "dashboard.reminders" },
+        { "method": "DELETE", "path": "/api/reminders/:id", "owner": "dashboard.reminders" }
+      ]
+    },
+    "lib/dashboard/proxy-routes.js": {
+      "mutationRoutes": [
+        { "method": "POST", "path": "/api/subconscious/upstream/bootstrap/:name", "owner": "backend.proxy.subconscious" },
+        { "method": "POST", "path": "/api/subconscious/upstream/session-start/:name", "owner": "backend.proxy.subconscious" },
+        { "method": "POST", "path": "/api/subconscious/upstream/user-prompt/:name", "owner": "backend.proxy.subconscious" },
+        { "method": "POST", "path": "/api/subconscious/upstream/pretool/:name", "owner": "backend.proxy.subconscious" },
         { "method": "POST", "path": "/api/tasks", "owner": "backend.proxy.tasks" },
         { "method": "PATCH", "path": "/api/tasks/:id", "owner": "backend.proxy.tasks" },
         { "method": "DELETE", "path": "/api/tasks/:id", "owner": "backend.proxy.tasks" },
@@ -92,11 +100,7 @@
         { "method": "POST", "path": "/api/alerts/:id/transition", "owner": "backend.proxy.alerts" },
         { "method": "POST", "path": "/api/alerts/:id/notes", "owner": "backend.proxy.alerts" },
         { "method": "PATCH", "path": "/api/alerts/:id", "owner": "backend.proxy.alerts" },
-        { "method": "DELETE", "path": "/api/alerts/:id", "owner": "backend.proxy.alerts" },
-        { "method": "POST", "path": "/api/redirects", "owner": "dashboard.redirects" },
-        { "method": "DELETE", "path": "/api/redirects/:from", "owner": "dashboard.redirects" },
-        { "method": "POST", "path": "/api/reminders", "owner": "dashboard.reminders" },
-        { "method": "DELETE", "path": "/api/reminders/:id", "owner": "dashboard.reminders" }
+        { "method": "DELETE", "path": "/api/alerts/:id", "owner": "backend.proxy.alerts" }
       ]
     }
   }

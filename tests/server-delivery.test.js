@@ -506,4 +506,59 @@ describe('server delivery path', () => {
       { url: '/api/task-graphs/graph_1', method: 'DELETE' },
     ]);
   });
+
+  test('dashboard backend proxy route clusters forward to the backend correctly', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const seen = [];
+    serverModule.setServerTestHooks({
+      backendFetch: async (url, init = {}) => {
+        seen.push({ url: String(url), method: init.method || 'GET', body: init.body || null });
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true }),
+          text: async () => '',
+        };
+      },
+    });
+
+    const taskCreate = await request(serverModule.app).post('/api/tasks').send({ title: 'ship it' });
+    const taskList = await request(serverModule.app).get('/api/tasks?assignee=alpha&status=open');
+    const supervisorAgent = await request(serverModule.app).get('/api/supervisor/agents/alpha?limit=7');
+    const subconsciousPrompt = await request(serverModule.app)
+      .post('/api/subconscious/upstream/user-prompt/alpha')
+      .send({ prompt: 'hello' });
+    const subconsciousEvents = await request(serverModule.app).get('/api/subconscious/events/alpha?limit=5');
+    const alertTransition = await request(serverModule.app)
+      .post('/api/alerts/alert_1/transition')
+      .send({ status: 'resolved' });
+
+    expect(taskCreate.status).toBe(200);
+    expect(taskList.status).toBe(200);
+    expect(supervisorAgent.status).toBe(200);
+    expect(subconsciousPrompt.status).toBe(200);
+    expect(subconsciousEvents.status).toBe(200);
+    expect(alertTransition.status).toBe(200);
+
+    const proxyRequests = seen
+      .map((row) => ({ url: row.url.replace(/^https?:\/\/[^/]+/, ''), method: row.method }))
+      .filter((row) => (
+        row.url.startsWith('/api/tasks')
+        || row.url.startsWith('/api/supervisor')
+        || row.url.startsWith('/api/subconscious')
+        || row.url.startsWith('/api/alerts')
+      ));
+    expect(proxyRequests).toEqual([
+      { url: '/api/tasks', method: 'POST' },
+      { url: '/api/tasks?assignee=alpha&status=open', method: 'GET' },
+      { url: '/api/supervisor/agents/alpha?limit=7', method: 'GET' },
+      { url: '/api/subconscious/upstream/user-prompt/alpha', method: 'POST' },
+      { url: '/api/subconscious/events/alpha?limit=5', method: 'GET' },
+      { url: '/api/alerts/alert_1/transition', method: 'POST' },
+    ]);
+  });
 });
