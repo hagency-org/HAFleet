@@ -12,6 +12,16 @@ function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, 'utf-8'));
 }
 
+function readDeliveryEvents(runtimeDir) {
+  const filePath = path.join(runtimeDir, 'data', 'message-delivery-events.jsonl');
+  if (!existsSync(filePath)) return [];
+  return readFileSync(filePath, 'utf-8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
 function groupsPath(runtimeDir) {
   return path.join(runtimeDir, 'data', 'groups.json');
 }
@@ -600,6 +610,18 @@ describe('groups api', () => {
 
     expect(first.body.unread_returned).toBe(2);
     expect(first.body.unread_omitted).toBe(1);
+    expect(readDeliveryEvents(context.runtimeDir)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'group.read_ack',
+        agent: 'alpha',
+        messageId: 'msg_3',
+        messageIds: ['msg_1', 'msg_2', 'msg_3'],
+        reason: 'group-read-delivered',
+        context: expect.objectContaining({
+          returnedMessageIds: ['msg_2', 'msg_3'],
+        }),
+      }),
+    ]));
     expect(second.body.unread_total).toBe(0);
     expect(second.body.unread).toEqual([]);
     expect(second.body.read.map((row) => row.id)).toEqual(['msg_1', 'msg_2', 'msg_3']);

@@ -2594,6 +2594,132 @@ function cloneJsonValue(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function normalizeDeliveryEvent(raw = {}) {
+  const input = (raw && typeof raw === 'object') ? raw : {};
+  const now = Date.now();
+  const type = normalizeOptionalText(input.type, 128);
+  if (!type) return { error: 'type required' };
+  const notifyMeta = (input.notifyMeta && typeof input.notifyMeta === 'object' && !Array.isArray(input.notifyMeta))
+    ? cloneJsonValue(input.notifyMeta)
+    : null;
+  const messageId = normalizeOptionalText(
+    input.messageId ?? input.message_id ?? input.sourceMsgId ?? notifyMeta?.sourceMsgId,
+    255
+  );
+  const agent = normalizeAgentName(input.agent) || normalizeOptionalText(input.agent, 255);
+  const target = normalizeOptionalText(input.target, 255);
+  const queueEntryIdRaw = Number(input.queueEntryId ?? input.queue_entry_id);
+  const queueEntryId = Number.isFinite(queueEntryIdRaw) && queueEntryIdRaw > 0 ? queueEntryIdRaw : null;
+  const queuedAtRaw = Number(input.queuedAt ?? input.queued_at);
+  const queuedAt = Number.isFinite(queuedAtRaw) && queuedAtRaw > 0 ? queuedAtRaw : null;
+  const tsRaw = Number(input.ts);
+  const ts = Number.isFinite(tsRaw) && tsRaw > 0 ? tsRaw : now;
+  const attemptId = normalizeOptionalText(input.attemptId ?? input.attempt_id, 512)
+    || [messageId || 'unknown-message', agent || target || 'unknown-target', queueEntryId || queuedAt || ts].join(':');
+  const rawMessageIds = Array.isArray(input.messageIds)
+    ? input.messageIds
+    : (Array.isArray(notifyMeta?.messageIds) ? notifyMeta.messageIds : []);
+  const messageIds = rawMessageIds.map((id) => normalizeOptionalText(id, 255)).filter(Boolean);
+  const targetAgents = Array.isArray(input.targetAgents)
+    ? input.targetAgents.map((name) => normalizeAgentName(name) || normalizeOptionalText(name, 255)).filter(Boolean)
+    : [];
+  const row = {
+    id: `devt_${now.toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+    ts,
+    type,
+    source: normalizeOptionalText(input.source, 128) || 'backend',
+  };
+  if (messageId) row.messageId = messageId;
+  if (messageIds.length) row.messageIds = messageIds;
+  if (agent) row.agent = agent;
+  if (targetAgents.length) row.targetAgents = targetAgents;
+  if (target) row.target = target;
+  if (queueEntryId !== null) row.queueEntryId = queueEntryId;
+  if (queuedAt !== null) row.queuedAt = queuedAt;
+  const deliveredAtRaw = Number(input.deliveredAt ?? input.delivered_at);
+  if (Number.isFinite(deliveredAtRaw) && deliveredAtRaw > 0) row.deliveredAt = deliveredAtRaw;
+  const ackedAtRaw = Number(input.ackedAt ?? input.acked_at);
+  if (Number.isFinite(ackedAtRaw) && ackedAtRaw > 0) row.ackedAt = ackedAtRaw;
+  row.attemptId = attemptId;
+  const priority = normalizeMessagePriority(input.priority, null);
+  if (priority) row.priority = priority;
+  const reason = normalizeOptionalText(input.reason, 512);
+  if (reason) row.reason = reason;
+  const result = normalizeOptionalText(input.result, 128);
+  if (result) row.result = result;
+  const pathLabel = normalizeOptionalText(input.path, 128);
+  if (pathLabel) row.path = pathLabel;
+  const stage = normalizeOptionalText(input.stage, 128);
+  if (stage) row.stage = stage;
+  const statusRaw = Number(input.status);
+  if (Number.isFinite(statusRaw) && statusRaw > 0) row.status = statusRaw;
+  if (notifyMeta) row.notifyMeta = notifyMeta;
+  if (input.cursor && typeof input.cursor === 'object' && !Array.isArray(input.cursor)) {
+    row.cursor = cloneJsonValue(input.cursor);
+  }
+  if (input.context && typeof input.context === 'object' && !Array.isArray(input.context)) {
+    row.context = cloneJsonValue(input.context);
+  }
+  return { row };
+}
+
+function appendDeliveryEvent(raw = {}) {
+  const normalized = normalizeDeliveryEvent(raw);
+  if (normalized.error) return { ok: false, error: normalized.error };
+  const row = normalized.row;
+  try {
+    appendFileSync(DELIVERY_EVENT_LOG, `${JSON.stringify(row)}\n`);
+    return { ok: true, event: row };
+  } catch (error) {
+    console.warn(`Failed to append delivery event: ${error?.message || error}`);
+    return { ok: false, error: error?.message || 'append failed' };
+  }
+}
+
+function readDeliveryEvents({ messageId = null, agent = null, limit = 100 } = {}) {
+  if (!existsSync(DELIVERY_EVENT_LOG)) return [];
+  const normalizedMessageId = normalizeOptionalText(messageId, 255);
+  const normalizedAgent = normalizeAgentName(agent) || normalizeOptionalText(agent, 255);
+  const boundedLimit = Math.min(1000, Math.max(1, Number.parseInt(limit, 10) || 100));
+  const rows = [];
+  try {
+    const raw = readFileSync(DELIVERY_EVENT_LOG, 'utf-8');
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      let row;
+      try {
+        row = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (normalizedMessageId) {
+        const ids = new Set();
+        if (typeof row.messageId === 'string') ids.add(row.messageId);
+        if (Array.isArray(row.messageIds)) {
+          for (const id of row.messageIds) {
+            if (typeof id === 'string') ids.add(id);
+          }
+        }
+        if (!ids.has(normalizedMessageId)) continue;
+      }
+      if (normalizedAgent) {
+        const agentsForRow = new Set();
+        if (typeof row.agent === 'string') agentsForRow.add(row.agent);
+        if (Array.isArray(row.targetAgents)) {
+          for (const name of row.targetAgents) {
+            if (typeof name === 'string') agentsForRow.add(name);
+          }
+        }
+        if (!agentsForRow.has(normalizedAgent)) continue;
+      }
+      rows.push(row);
+    }
+  } catch {
+    return [];
+  }
+  return rows.slice(-boundedLimit);
+}
+
 function buildPersistedUpstreamRecord(kind, record) {
   const safe = cloneJsonValue(record);
   if (!safe || typeof safe !== 'object') return {};
@@ -2832,6 +2958,7 @@ const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const AUDIT_LOG = dataPath('audit.jsonl');
 const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
 const MESSAGE_ARCHIVE_LOG = dataPath('messages-archive.jsonl');
+const DELIVERY_EVENT_LOG = dataPath('message-delivery-events.jsonl');
 const subconsciousEventsByAgent = new Map(); // agent -> event[]
 const pendingHumanTargetCache = new Map(); // agent -> { hasPendingHuman, targets }
 const swapAlertState = {
@@ -3929,6 +4056,20 @@ function messageVisibleToAgent(msg, agentName) {
   return false;
 }
 
+function deliveryTargetAgentsForMessage(msg, directTargetKind = null) {
+  const targets = new Set();
+  if (msg?.to && directTargetKind === 'agent' && !isSuppressedForAgent(msg, msg.to)) {
+    targets.add(msg.to);
+  }
+  if (msg?.group && Array.isArray(msg.mentions)) {
+    for (const name of msg.mentions) {
+      if (!name || name === msg.from || isSuppressedForAgent(msg, name)) continue;
+      if (isAgentRecord(agents[name])) targets.add(name);
+    }
+  }
+  return [...targets];
+}
+
 function authorizeMessageDetailAccess(req, msg) {
   if (hasApiTokenAccess(req)) return { ok: true, mode: 'bearer' };
 
@@ -3964,6 +4105,31 @@ function dispatchStoredMessage(msg, options = {}) {
   const directTargetKind = options.directTargetKind || null;
   messages.push(msg);
   saveMessages();
+  const targetAgents = deliveryTargetAgentsForMessage(msg, directTargetKind);
+  appendDeliveryEvent({
+    type: 'message.accepted',
+    source: 'backend',
+    messageId: msg.id,
+    agent: targetAgents.length === 1 ? targetAgents[0] : null,
+    targetAgents,
+    priority: msg.priority,
+    context: {
+      from: msg.from,
+      to: msg.to || null,
+      group: msg.group || null,
+      type: msg.type,
+      targetKind: directTargetKind,
+    },
+  });
+  if (Array.isArray(msg.suppressedRecipients) && msg.suppressedRecipients.length > 0) {
+    appendDeliveryEvent({
+      type: 'message.suppressed',
+      source: 'backend',
+      messageId: msg.id,
+      targetAgents: msg.suppressedRecipients,
+      reason: 'suppressed-recipient',
+    });
+  }
   invalidatePendingHumanTargetsForMessage(msg);
   const compactEvent = buildAgentCompactEvent(msg, senderIsAgent);
   if (compactEvent) {
@@ -6147,6 +6313,21 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
   };
   messages.push(msg);
   saveMessages();
+  appendDeliveryEvent({
+    type: 'message.accepted',
+    source: 'backend',
+    messageId: msg.id,
+    agent: agentName,
+    targetAgents: [agentName],
+    priority: msg.priority,
+    context: {
+      from: msg.from,
+      to: msg.to,
+      type: msg.type,
+      reason,
+      catchupUnreadCount: unread.length,
+    },
+  });
   broadcastSSE('message', msg);
   await pushNotify(agentName, msg);
 }
@@ -6155,11 +6336,29 @@ async function pushNotify(agentName, msg) {
   const agent = agents[agentName];
   if (!agent?.tmux) {
     logPushNotifySkip(agentName, 'missing-tmux-target');
+    appendDeliveryEvent({
+      type: 'push.not_queued',
+      source: 'backend',
+      messageId: msg?.id,
+      messageIds: msg?.id ? [msg.id] : [],
+      agent: agentName,
+      reason: 'missing-tmux-target',
+    });
     return;
   }
   const agentServer = normalizeServer(agent.server);
   if (agentServer && agentServer !== 'local' && agentServer !== LOCAL_SERVER_ID) {
     logPushNotifySkip(agentName, 'remote-relay-expected', `(server=${agentServer})`);
+    appendDeliveryEvent({
+      type: 'push.not_queued',
+      source: 'backend',
+      messageId: msg?.id,
+      messageIds: msg?.id ? [msg.id] : [],
+      agent: agentName,
+      target: agent.tmux,
+      reason: 'remote-relay-expected',
+      context: { server: agentServer },
+    });
     return;
   }
   // If server is unknown (null), verify the tmux session exists locally before queueing
@@ -6168,6 +6367,15 @@ async function pushNotify(agentName, msg) {
     const hasSession = await localTmuxSessionExistsAsync(sess);
     if (!hasSession) {
       logPushNotifySkip(agentName, 'local-session-not-found', `(tmux=${agent.tmux})`);
+      appendDeliveryEvent({
+        type: 'push.not_queued',
+        source: 'backend',
+        messageId: msg?.id,
+        messageIds: msg?.id ? [msg.id] : [],
+        agent: agentName,
+        target: agent.tmux,
+        reason: 'local-session-not-found',
+      });
       return; // tmux session doesn't exist locally — likely a remote agent not yet heartbeated
     }
   }
@@ -6176,6 +6384,9 @@ async function pushNotify(agentName, msg) {
   const { inboxTs, unread } = getUnreadInboxMessages(agentName);
   const unreadCount = unread.length;
   const latestUnread = unread[unread.length - 1] || msg;
+  const unreadMessageIds = unread.map((item) => item?.id).filter(Boolean);
+  const pushSourceMsgId = latestUnread?.id || msg?.id || null;
+  const pushMessageIds = unreadMessageIds.length ? unreadMessageIds : (msg?.id ? [msg.id] : []);
   const replyTo = latestUnread.from || msg.from;
   const notificationPriority = unreadCount > 1 ? highestMessagePriority(unread) : normalizeMessagePriority(msg?.priority);
 
@@ -6261,7 +6472,8 @@ async function pushNotify(agentName, msg) {
       kind: notificationKind,
       priority: notificationPriority || 'normal',
       requiresInboxCheck,
-      sourceMsgId: latestUnread?.id || msg?.id || null,
+      sourceMsgId: pushSourceMsgId,
+      messageIds: pushMessageIds,
       unreadCount,
       hasHumanUnread,
       hasRequestUnread,
@@ -6277,13 +6489,48 @@ async function pushNotify(agentName, msg) {
     }, `pushNotify() POST ${queuePath} agent=${agentName}`);
     if (resp.ok) {
       const body = await resp.json().catch(() => ({}));
+      appendDeliveryEvent({
+        type: 'push.queued',
+        source: 'backend',
+        messageId: notifyMeta.sourceMsgId,
+        messageIds: notifyMeta.messageIds,
+        agent: agentName,
+        target: agent.tmux,
+        queueEntryId: body?.id,
+        queuedAt: body?.queuedAt,
+        priority: notificationPriority || 'normal',
+        notifyMeta,
+      });
       markAgentPushNotified(agentName, {
         queueEntryId: body?.id,
         queuedAt: body?.queuedAt,
         ...notifyMeta,
       });
+    } else {
+      appendDeliveryEvent({
+        type: 'push.queue_failed',
+        source: 'backend',
+        messageId: notifyMeta.sourceMsgId,
+        messageIds: notifyMeta.messageIds,
+        agent: agentName,
+        target: agent.tmux,
+        priority: notificationPriority || 'normal',
+        reason: `status-${resp.status}`,
+        status: resp.status,
+        notifyMeta,
+      });
     }
   } catch (e) {
+    appendDeliveryEvent({
+      type: 'push.queue_failed',
+      source: 'backend',
+      messageId: pushSourceMsgId,
+      messageIds: pushMessageIds,
+      agent: agentName,
+      target: agent.tmux,
+      priority: notificationPriority || 'normal',
+      reason: e?.message || 'queue request failed',
+    });
     console.error(`Push notify failed for ${agentName}:`, e.message);
   }
 }
@@ -6320,6 +6567,15 @@ app.use('/api', (req, res, next) => {
   }
   if (auth === `Bearer ${API_TOKEN}`) return next();
   return res.status(401).json({ error: 'unauthorized' });
+});
+
+app.post('/api/delivery-events', (req, res) => {
+  const result = appendDeliveryEvent({
+    ...(req.body || {}),
+    source: normalizeOptionalText(req.body?.source, 128) || 'external',
+  });
+  if (!result.ok) return res.status(400).json({ error: result.error || 'invalid delivery event' });
+  res.json({ ok: true, event: result.event });
 });
 
 // ── Health ────────────────────────────────────────────────────────────
@@ -7166,6 +7422,19 @@ app.post('/api/runtime/push-delivered', (req, res) => {
   const result = markAgentPushDelivered(agentName, {
     ...details,
     ...notifyMeta,
+  });
+  appendDeliveryEvent({
+    type: 'push.delivered_ack',
+    source: 'backend',
+    messageId: notifyMeta.sourceMsgId,
+    messageIds: notifyMeta.messageIds,
+    agent: agentName,
+    queueEntryId: details.queueEntryId,
+    queuedAt: details.queuedAt,
+    deliveredAt: details.deliveredAt,
+    notifyMeta,
+    result: result?.ignored ? 'ignored' : 'accepted',
+    reason: result?.ignored || null,
   });
   if (result?.ignored) {
     return res.json({ ok: true, agent: agentName, ignored: result.ignored });
@@ -8914,6 +9183,35 @@ app.get('/api/messages/:id', (req, res) => {
   });
 });
 
+app.get('/api/messages/:id/delivery', (req, res) => {
+  const msg = messages.find(m => m.id === req.params.id);
+  if (!msg) return res.status(404).json({ error: 'message not found' });
+  const auth = authorizeMessageDetailAccess(req, msg);
+  if (!auth.ok) return res.status(auth.status || 403).json({ error: auth.error || 'message access denied' });
+  const agent = normalizeAgentName(req.query.agent) || null;
+  const limit = Number.parseInt(req.query.limit, 10);
+  const events = readDeliveryEvents({
+    messageId: msg.id,
+    agent,
+    limit: Number.isFinite(limit) ? limit : 100,
+  });
+  res.json({ messageId: msg.id, agent, events });
+});
+
+app.get('/api/agents/:name/delivery-events', requireAgentToken(_tokenFromName), (req, res) => {
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
+  const limit = Number.parseInt(req.query.limit, 10);
+  res.json({
+    agent: agentName,
+    events: readDeliveryEvents({
+      agent: agentName,
+      limit: Number.isFinite(limit) ? limit : 100,
+    }),
+  });
+});
+
 app.post('/api/messages/:id/suppress', requireAgentToken(_tokenFromAgent), (req, res) => {
   const agentName = normalizeAgentName(req.body?.agent);
   if (!agentName) return res.status(400).json({ error: 'agent required' });
@@ -8931,6 +9229,17 @@ app.post('/api/messages/:id/suppress', requireAgentToken(_tokenFromAgent), (req,
     msg.suppressedRecipients.push(agentName);
     saveMessages();
     invalidatePendingHumanTargets(agentName);
+    appendDeliveryEvent({
+      type: 'message.suppressed',
+      source: 'backend',
+      messageId: msg.id,
+      agent: agentName,
+      targetAgents: [agentName],
+      reason: normalizeOptionalText(req.body?.reason, 128) || 'explicit-suppress',
+      context: {
+        wasUnread: before,
+      },
+    });
   }
   const after = getUnreadInboxMessages(agentName).unread.some(m => m.id === msg.id);
 
@@ -9099,6 +9408,21 @@ app.get('/api/inbox/:agent', requireAgentToken(_tokenFromAgent), (req, res) => {
       clearInboxGate: consumedPendingSource,
       sourceMsgId: consumedPendingSource ? pendingGate.sourceMsgId : null,
     });
+    if (unread.length > 0) {
+      appendDeliveryEvent({
+        type: 'inbox.read_ack',
+        source: 'backend',
+        agent: agentName,
+        messageIds: unread.map((msg) => msg.id).filter(Boolean),
+        messageId: consumedPendingSource ? pendingGate.sourceMsgId : null,
+        ackedAt: Date.now(),
+        cursor: {
+          inboxTs: cursor.inbox || 0,
+          inboxId: cursor.inboxId || null,
+        },
+        reason: consumedPendingSource ? 'inbox-gate-consumed' : 'inbox-read',
+      });
+    }
     // If the agent just consumed inbox, stale queued notifications should be removed immediately.
     clearQueuedNotificationsForAgent(agentName);
   }
@@ -9165,6 +9489,32 @@ app.get('/api/groups/:name/messages', (req, res) => {
     const cursorSource = advanceMode === 'all' ? unreadRaw : deliveredUnreadRaw;
     if (advanceGroupCursor(cursor, groupName, cursorSource)) {
       saveCursors();
+      const advancedCursor = getGroupCursor(cursor, groupName);
+      const advancedIds = unreadRaw
+        .filter((msg) => !isAfterCursor(msg, advancedCursor.ts, advancedCursor.id))
+        .map((msg) => msg?.id)
+        .filter(Boolean);
+      const returnedIds = cursorSource.map((msg) => msg?.id).filter(Boolean);
+      appendDeliveryEvent({
+        type: 'group.read_ack',
+        source: 'backend',
+        agent: resolvedAgentName,
+        messageId: advancedIds[advancedIds.length - 1] || null,
+        messageIds: advancedIds,
+        ackedAt: Date.now(),
+        cursor: {
+          group: groupName,
+          groupTs: advancedCursor.ts,
+          groupId: advancedCursor.id,
+        },
+        reason: `group-read-${advanceMode}`,
+        context: {
+          group: groupName,
+          unreadTotal,
+          unreadReturned,
+          returnedMessageIds: returnedIds,
+        },
+      });
     }
   }
 

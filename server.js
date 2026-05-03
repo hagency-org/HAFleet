@@ -1,6 +1,6 @@
 import express from 'express';
 import { readFile as readFileAsync, open, stat as statAsync, appendFile } from 'fs/promises';
-import { writeFileSync, readFileSync, existsSync, mkdirSync, lstatSync, rmSync, unlinkSync, readdirSync } from 'fs';
+import { appendFileSync, writeFileSync, readFileSync, existsSync, mkdirSync, lstatSync, rmSync, unlinkSync, readdirSync } from 'fs';
 import { execFileSync, execFile } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -27,9 +27,11 @@ const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAUL
   ? DEFAULT_BACKEND_PORT_RAW
   : 8090;
 const LOG_FILE = path.join(LOGS_ROOT, 'messages.jsonl');
+const DELIVERY_EVENT_FILE = path.join(LOGS_ROOT, 'delivery-events.jsonl');
 const AGENT_DOWN_BIN = path.join(REPO_ROOT, 'bin', 'agent-down');
 const BACKEND_V2_URL = (process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
 const PUSH_DELIVERED_URL = `${BACKEND_V2_URL}/api/runtime/push-delivered`;
+const DELIVERY_EVENTS_URL = `${BACKEND_V2_URL}/api/delivery-events`;
 const BACKEND_API_TOKEN = (process.env.API_TOKEN || '').trim();
 const defaultBackendFetchTransport = (url, opts) => fetch(url, opts);
 let backendFetchTransport = defaultBackendFetchTransport;
@@ -198,7 +200,7 @@ function targetSessionName(target) {
   return target.split(':')[0] || null;
 }
 
-function dropQueuedBackendNotificationsBySource(agentName, sourceMsgId = null) {
+function dropQueuedBackendNotificationsBySource(agentName, sourceMsgId = null, reason = 'backend-notification-cleared') {
   const normalizedAgent = typeof agentName === 'string' ? agentName.trim() : '';
   if (!normalizedAgent) return 0;
   const sourceId = typeof sourceMsgId === 'string' ? sourceMsgId.trim() : '';
@@ -214,9 +216,22 @@ function dropQueuedBackendNotificationsBySource(agentName, sourceMsgId = null) {
       const entrySource = (entry?.notifyMeta && typeof entry.notifyMeta.sourceMsgId === 'string')
         ? entry.notifyMeta.sourceMsgId.trim()
         : '';
-      const matchesSource = sourceId ? entrySource === sourceId : true;
+      const entryMessageIds = Array.isArray(entry?.notifyMeta?.messageIds)
+        ? entry.notifyMeta.messageIds.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim())
+        : [];
+      const matchesSource = sourceId ? (entrySource === sourceId || entryMessageIds.includes(sourceId)) : true;
       if (isNotification && matchesSource) {
         removed++;
+        appendDeliveryEvent({
+          type: 'queue.dropped',
+          ...queueEntryDeliveryEventFields(entry),
+          target,
+          reason,
+          context: {
+            requestedAgent: normalizedAgent,
+            sourceMsgId: sourceId || null,
+          },
+        });
         continue;
       }
       kept.push(entry);
@@ -250,6 +265,9 @@ function sanitizeNotifyMeta(rawMeta) {
     priority: normalizeQueuePriority(rawMeta.priority),
     requiresInboxCheck: safeBool(rawMeta.requiresInboxCheck),
     sourceMsgId: safeStr(rawMeta.sourceMsgId, null),
+    messageIds: Array.isArray(rawMeta.messageIds)
+      ? rawMeta.messageIds.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim())
+      : [],
     unreadCount: safeInt(rawMeta.unreadCount),
     hasHumanUnread: safeBool(rawMeta.hasHumanUnread),
     hasRequestUnread: safeBool(rawMeta.hasRequestUnread),
@@ -265,6 +283,57 @@ function normalizeQueuePriority(value) {
   return 'normal';
 }
 
+function deliveryMessageId(entry) {
+  const source = typeof entry?.notifyMeta?.sourceMsgId === 'string' ? entry.notifyMeta.sourceMsgId.trim() : '';
+  return source || null;
+}
+
+function queueEntryDeliveryEventFields(entry = {}) {
+  const queueEntryId = Number(entry.id) || null;
+  const queuedAt = Number(entry.queuedAt) || null;
+  const agent = targetSessionName(entry.to);
+  const notifyMeta = sanitizeNotifyMeta(entry.notifyMeta);
+  const messageIds = Array.isArray(notifyMeta?.messageIds)
+    ? notifyMeta.messageIds.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim())
+    : [];
+  return {
+    messageId: deliveryMessageId(entry),
+    messageIds,
+    agent,
+    target: entry.to || null,
+    queueEntryId,
+    queuedAt,
+    priority: normalizeQueuePriority(entry.priority || notifyMeta?.priority),
+    notifyMeta,
+    attemptId: [deliveryMessageId(entry) || 'unknown-message', agent || entry.to || 'unknown-target', queueEntryId || queuedAt || Date.now()].join(':'),
+  };
+}
+
+function appendDeliveryEvent(raw = {}) {
+  const now = Date.now();
+  const row = {
+    id: `sdevt_${now.toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+    ts: Number(raw.ts) > 0 ? Number(raw.ts) : now,
+    ...raw,
+    source: raw.source || 'dashboard-queue',
+  };
+  try {
+    appendFileSync(DELIVERY_EVENT_FILE, `${JSON.stringify(row)}\n`);
+  } catch (error) {
+    console.debug(`[server] delivery event append skipped: ${error.message}`);
+  }
+  try {
+    void backendFetch(DELIVERY_EVENTS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(row),
+    }).catch(() => {});
+  } catch {
+    // Best-effort diagnostics only.
+  }
+  return row;
+}
+
 async function notifyPushDelivered(entry, deliveredAt) {
   if (!entry || !isBackendNotificationEntry(entry)) return;
   const agent = targetSessionName(entry.to);
@@ -278,6 +347,11 @@ async function notifyPushDelivered(entry, deliveredAt) {
     notifyMeta,
   };
   try {
+    appendDeliveryEvent({
+      type: 'push.delivered_ack_send',
+      ...queueEntryDeliveryEventFields(entry),
+      deliveredAt,
+    });
     const resp = await backendFetch(PUSH_DELIVERED_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -285,9 +359,29 @@ async function notifyPushDelivered(entry, deliveredAt) {
     });
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
+      appendDeliveryEvent({
+        type: 'push.delivered_ack_failed',
+        ...queueEntryDeliveryEventFields(entry),
+        deliveredAt,
+        status: resp.status,
+        reason: errText.slice(0, 200) || `status-${resp.status}`,
+      });
       console.warn(`[push-delivered] backend rejected ${agent}: HTTP ${resp.status}${errText ? ` ${errText.slice(0, 120)}` : ''}`);
+    } else {
+      appendDeliveryEvent({
+        type: 'push.delivered_ack_accepted',
+        ...queueEntryDeliveryEventFields(entry),
+        deliveredAt,
+        status: resp.status,
+      });
     }
   } catch (e) {
+    appendDeliveryEvent({
+      type: 'push.delivered_ack_failed',
+      ...queueEntryDeliveryEventFields(entry),
+      deliveredAt,
+      reason: e.message,
+    });
     console.warn(`[push-delivered] notify failed for ${agent}: ${e.message}`);
   }
 }
@@ -366,6 +460,14 @@ function archiveDroppedQueueEntries(entries, reason, target) {
     entry,
   }));
   appendFile(QUEUE_DROPPED_FILE, lines.join('\n') + '\n').catch(() => {});
+  for (const entry of entries) {
+    appendDeliveryEvent({
+      type: 'queue.dropped',
+      ...queueEntryDeliveryEventFields(entry),
+      target,
+      reason,
+    });
+  }
 }
 
 function mergeReminderEntryItems(targetEntry, sourceEntry) {
@@ -497,15 +599,34 @@ app.post('/api/queue', (req, res) => {
   if (redirectedFrom) entry.redirectedFrom = redirectedFrom;
   if (!queue.has(actualTo)) queue.set(actualTo, []);
   const bucket = queue.get(actualTo);
+  const superseded = [];
   if (isBackendNotificationEntry(entry)) {
     // Keep only the latest backend notification per target to avoid stale prompts.
     for (let i = bucket.length - 1; i >= 0; i--) {
-      if (isBackendNotificationEntry(bucket[i])) bucket.splice(i, 1);
+      if (isBackendNotificationEntry(bucket[i])) superseded.push(...bucket.splice(i, 1));
     }
   }
   bucket.push(entry);
   saveQueue();
   broadcastQueue();
+  appendDeliveryEvent({
+    type: 'queue.accepted',
+    ...queueEntryDeliveryEventFields(entry),
+    path: 'api',
+    context: {
+      from: entry.from,
+      position: bucket.length,
+      redirectedFrom: redirectedFrom || null,
+    },
+  });
+  for (const oldEntry of superseded) {
+    appendDeliveryEvent({
+      type: 'queue.superseded',
+      ...queueEntryDeliveryEventFields(oldEntry),
+      reason: 'superseded-backend-notification',
+      context: { supersededByQueueEntryId: id },
+    });
+  }
   res.json({ ok: true, id, queuedAt, position: bucket.length, redirected: redirectedFrom || undefined });
 });
 
@@ -520,7 +641,13 @@ app.delete('/api/queue/:id', (req, res) => {
   for (const [target, entries] of queue) {
     const idx = entries.findIndex(e => e.id === id);
     if (idx !== -1) {
-      entries.splice(idx, 1);
+      const [entry] = entries.splice(idx, 1);
+      appendDeliveryEvent({
+        type: 'queue.canceled',
+        ...queueEntryDeliveryEventFields(entry),
+        target,
+        reason: 'operator-delete',
+      });
       if (entries.length === 0) queue.delete(target);
       saveQueue();
       broadcastQueue();
@@ -540,6 +667,11 @@ app.post('/api/queue/:id/send', async (req, res) => {
       if (entries.length === 0) queue.delete(target);
       saveQueue();
       broadcastQueue();
+      appendDeliveryEvent({
+        type: 'queue.dequeued',
+        ...queueEntryDeliveryEventFields(entry),
+        path: 'manual',
+      });
       if (await isStaleNotificationEntry(entry)) {
         archiveDroppedQueueEntries([entry], 'stale-notification-manual-send', target);
         return res.json({ ok: true, dropped: id, reason: 'stale-notification' });
@@ -1785,7 +1917,7 @@ app.post('/api/agents/:name/unread-messages/:msgId/cancel', async (req, res) => 
     const suppressData = await suppressRes.json().catch(() => ({ error: `backend status ${suppressRes.status}` }));
     if (!suppressRes.ok) return res.status(suppressRes.status).json(suppressData);
 
-    const queueRemoved = dropQueuedBackendNotificationsBySource(name, msgId);
+    const queueRemoved = dropQueuedBackendNotificationsBySource(name, msgId, 'message-canceled');
     res.json({
       ok: true,
       canceled: { agent: name, message: msgId },
@@ -1842,7 +1974,7 @@ app.post('/api/agents/:name/dm-send', async (req, res) => {
 app.delete('/api/queue/agents/:name/notifications', (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
-  const removed = dropQueuedBackendNotificationsBySource(name);
+  const removed = dropQueuedBackendNotificationsBySource(name, null, 'agent-notifications-cleared');
   return res.json({ ok: true, agent: name, removed });
 });
 
@@ -3188,6 +3320,12 @@ async function deliverMessage(entry) {
     try {
       await execFileAsyncImpl('tmux', ['send-keys', '-l', '-t', entry.to, finalPayload], { timeout: 5000, stdio: 'pipe' });
     } catch (e) {
+      appendDeliveryEvent({
+        type: 'tmux.delivery_failed',
+        ...queueEntryDeliveryEventFields(entry),
+        stage: 'payload',
+        reason: formatExecError(e),
+      });
       console.error(`Failed to deliver to ${entry.to} (payload step): ${formatExecError(e)}`);
       return { ok: false, stage: 'payload', partial: false };
     }
@@ -3195,6 +3333,12 @@ async function deliverMessage(entry) {
     try {
       await execFileAsyncImpl('tmux', ['send-keys', '-t', entry.to, 'C-m'], { timeout: 5000, stdio: 'pipe' });
     } catch (e) {
+      appendDeliveryEvent({
+        type: 'tmux.delivery_partial',
+        ...queueEntryDeliveryEventFields(entry),
+        stage: 'enter',
+        reason: formatExecError(e),
+      });
       console.error(`Failed to deliver to ${entry.to} (enter step): ${formatExecError(e)}`);
       return { ok: false, stage: 'enter', partial: true };
     }
@@ -3205,6 +3349,11 @@ async function deliverMessage(entry) {
     if (entry.notifyMeta) logData.notifyMeta = entry.notifyMeta;
     const logEntry = JSON.stringify(logData);
     appendFile(LOG_FILE, logEntry + '\n').catch(() => {});
+    appendDeliveryEvent({
+      type: 'tmux.delivered',
+      ...queueEntryDeliveryEventFields(entry),
+      deliveredAt,
+    });
     void notifyPushDelivered(entry, deliveredAt);
     return { ok: true, deliveredAt };
   } catch (e) {
@@ -3288,6 +3437,16 @@ async function processQueueTick() {
       if (entries.length === 0) queue.delete(target);
       saveQueue();
       broadcastQueue();
+      appendDeliveryEvent({
+        type: 'queue.dequeued',
+        ...queueEntryDeliveryEventFields(entry),
+        path: 'poll',
+        context: {
+          targetObservation,
+          idleMs,
+          bypassIdleGate,
+        },
+      });
 
       const stale = unreadSnapshot && isBackendNotificationEntry(entry)
         ? isStaleNotificationBySnapshot(entry, unreadSnapshot)

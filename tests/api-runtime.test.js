@@ -28,6 +28,16 @@ function readSystemInfoEvents(runtimeDir) {
     .map(line => JSON.parse(line));
 }
 
+function readDeliveryEvents(runtimeDir) {
+  const filePath = path.join(runtimeDir, 'data', 'message-delivery-events.jsonl');
+  if (!existsSync(filePath)) return [];
+  return readFileSync(filePath, 'utf-8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line));
+}
+
 describe('backend runtime API', () => {
   let context = null;
 
@@ -194,6 +204,34 @@ describe('backend runtime API', () => {
           tmux: 'alpha:0.0',
         },
       },
+      messages: [
+        {
+          id: 'msg_older',
+          ts: 800,
+          from: 'system',
+          to: 'alpha',
+          group: null,
+          type: 'inform',
+          summary: 'older notification source',
+          full: 'older notification source',
+          mentions: [],
+          reply_to: null,
+          source: 'system',
+        },
+        {
+          id: 'msg_old',
+          ts: 900,
+          from: 'system',
+          to: 'alpha',
+          group: null,
+          type: 'inform',
+          summary: 'old notification source',
+          full: 'old notification source',
+          mentions: [],
+          reply_to: null,
+          source: 'system',
+        },
+      ],
       agentRuntime: {
         alpha: {
           lastPushNotifyAt: 2000,
@@ -230,6 +268,7 @@ describe('backend runtime API', () => {
           kind: 'single_actionable',
           requiresInboxCheck: true,
           sourceMsgId: 'msg_old',
+          messageIds: ['msg_older', 'msg_old'],
           unreadCount: 1,
         },
       });
@@ -252,6 +291,41 @@ describe('backend runtime API', () => {
       raisedAt: 2000,
       reason: 'actionable_notification',
     });
+
+    const rows = readDeliveryEvents(context.runtimeDir);
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'push.delivered_ack',
+        agent: 'alpha',
+        messageId: 'msg_old',
+        messageIds: ['msg_older', 'msg_old'],
+        queueEntryId: 8,
+        result: 'ignored',
+        reason: 'stale-push-delivered',
+      }),
+    ]));
+
+    const query = await request(context.app)
+      .get('/api/messages/msg_old/delivery?agent=alpha')
+      .expect(200);
+    expect(query.body.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'push.delivered_ack',
+        messageId: 'msg_old',
+        agent: 'alpha',
+      }),
+    ]));
+
+    const olderQuery = await request(context.app)
+      .get('/api/messages/msg_older/delivery?agent=alpha')
+      .expect(200);
+    expect(olderQuery.body.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'push.delivered_ack',
+        messageIds: ['msg_older', 'msg_old'],
+        agent: 'alpha',
+      }),
+    ]));
   });
 
   test('blocked notifications use tiered debounce and never notify transient blockers', async () => {

@@ -143,6 +143,41 @@ async function postJson(path, body) {
   return fetchImpl(`${API_BASE}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
 }
 
+function messageEventFields(agentName, msg, target = null, extra = {}) {
+  return {
+    messageId: msg?.id || null,
+    agent: agentName,
+    target,
+    priority: normalizeRelayPriority(msg),
+    attemptId: [msg?.id || 'unknown-message', agentName || target || 'unknown-target', extra.queuedAt || Date.now()].join(':'),
+    context: {
+      from: msg?.from || null,
+      to: msg?.to || null,
+      group: msg?.group || null,
+      relayInstanceId: RELAY_INSTANCE_ID,
+      server: SERVER_ID,
+      mode: PUSH_RELAY_REMOTE_MODE ? 'remote' : 'local',
+      ...extra.context,
+    },
+    ...extra,
+  };
+}
+
+async function recordDeliveryEvent(event) {
+  try {
+    const res = await postJson('/api/delivery-events', {
+      source: 'push-relay',
+      ...event,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.warn(`[push-relay] delivery event rejected: status ${res.status}${body ? ` ${body.slice(0, 120)}` : ''}`);
+    }
+  } catch (error) {
+    console.warn(`[push-relay] delivery event failed: ${error?.message || error}`);
+  }
+}
+
 async function reportRuntime(agentName, payload) {
   try {
     const res = await postJson(`/api/agents/${encodeURIComponent(agentName)}/runtime`, {
@@ -772,6 +807,13 @@ async function handleMessage(raw) {
   for (const agentName of messageRecipients(msg)) {
     const route = evaluateAgentRouting(agentName);
     if (!route.ok) {
+      void recordDeliveryEvent({
+        type: 'relay.not_routed',
+        ...messageEventFields(agentName, msg, route.target, {
+          reason: route.reason,
+          context: { server: route.server },
+        }),
+      });
       logDeliverySkip(agentName, msg, route.reason, { server: route.server, target: route.target });
       continue;
     }
@@ -792,8 +834,16 @@ async function handleMessage(raw) {
         if (metrics === null || metrics.activeNow) {
           const notification = await buildNotification(agentName, msg);
           if (!relayQueue.has(agentName)) relayQueue.set(agentName, []);
-          relayQueue.get(agentName).push({ msg, notification, target, dedupeKey, queuedAt: Date.now() });
+          const queuedAt = Date.now();
+          relayQueue.get(agentName).push({ msg, notification, target, dedupeKey, queuedAt });
           const reason = metrics === null ? 'metrics-unavailable' : 'agent-active';
+          void recordDeliveryEvent({
+            type: 'relay.held',
+            ...messageEventFields(agentName, msg, target, {
+              reason,
+              queuedAt,
+            }),
+          });
           console.log(`[push-relay] queued ${msg.id} -> ${agentName} (${reason}, priority=${priority})`);
           continue;
         }
@@ -802,9 +852,23 @@ async function handleMessage(raw) {
       const notification = await buildNotification(agentName, msg);
       if (pushToTmuxImpl(target, notification)) {
         markDelivered(dedupeKey);
+        void recordDeliveryEvent({
+          type: 'relay.delivered',
+          ...messageEventFields(agentName, msg, target, {
+            deliveredAt: Date.now(),
+            path: 'direct',
+          }),
+        });
         console.log(`[push-relay] delivered ${msg.id} -> ${agentName}`);
       } else {
         releaseDeliveryClaim(dedupeKey);
+        void recordDeliveryEvent({
+          type: 'relay.delivery_failed',
+          ...messageEventFields(agentName, msg, target, {
+            reason: 'tmux-inject-failed',
+            path: 'direct',
+          }),
+        });
         logDeliverySkip(agentName, msg, 'tmux-inject-failed', { server: route.server, target });
       }
     } catch (e) {
@@ -837,9 +901,26 @@ function drainRelayQueue() {
       }
       if (pushToTmuxImpl(entry.target, entry.notification)) {
         markDelivered(entry.dedupeKey);
+        void recordDeliveryEvent({
+          type: 'relay.delivered',
+          ...messageEventFields(agentName, entry.msg, entry.target, {
+            deliveredAt: now,
+            queuedAt: entry.queuedAt,
+            path: 'held',
+            context: { heldMs: now - entry.queuedAt },
+          }),
+        });
         console.log(`[push-relay] delivered queued ${entry.msg.id} -> ${agentName} (${drainReason}, held ${now - entry.queuedAt}ms)`);
       } else {
         releaseDeliveryClaim(entry.dedupeKey);
+        void recordDeliveryEvent({
+          type: 'relay.delivery_failed',
+          ...messageEventFields(agentName, entry.msg, entry.target, {
+            queuedAt: entry.queuedAt,
+            reason: 'tmux-inject-failed',
+            path: 'held',
+          }),
+        });
         console.log(`[push-relay] queued delivery failed ${entry.msg.id} -> ${agentName}`);
       }
       break;

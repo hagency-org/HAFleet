@@ -9,6 +9,18 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function readJsonl(filePath) {
+  try {
+    return readFileSync(filePath, 'utf-8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
 async function importServer(runtimeDir) {
   process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
   process.env.AGENT_CHAT_WEB_PORT = '18084';
@@ -38,12 +50,18 @@ describe('server delivery path', () => {
     serverModule = await importServer(runtimeDir);
 
     const execCalls = [];
+    const backendEvents = [];
     serverModule.setServerTestHooks({
       execFileAsync: async (cmd, args) => {
         execCalls.push([cmd, ...args]);
         return { stdout: '' };
       },
-      backendFetch: async () => ({ ok: true, text: async () => '' }),
+      backendFetch: async (url, init = {}) => {
+        if (String(url).includes('/api/delivery-events')) {
+          backendEvents.push(JSON.parse(init.body));
+        }
+        return { ok: true, text: async () => '', json: async () => ({ ok: true }) };
+      },
     });
 
     const result = await serverModule.deliverMessage({
@@ -61,9 +79,26 @@ describe('server delivery path', () => {
 
     await sleep(25);
     const logPath = path.join(runtimeDir, 'logs', 'messages.jsonl');
-    const rows = readFileSync(logPath, 'utf-8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    const rows = readJsonl(logPath);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ from: 'system', to: 'alpha:0.0', payload: 'hello world' });
+
+    const eventPath = path.join(runtimeDir, 'logs', 'delivery-events.jsonl');
+    const events = readJsonl(eventPath);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'tmux.delivered',
+        queueEntryId: 1,
+        target: 'alpha:0.0',
+      }),
+    ]));
+    expect(backendEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'tmux.delivered',
+        queueEntryId: 1,
+        target: 'alpha:0.0',
+      }),
+    ]));
   });
 
   test('manual send drops backend notifications whose source message is no longer unread', async () => {
@@ -118,6 +153,49 @@ describe('server delivery path', () => {
 
     const queue = await request(serverModule.app).get('/api/queue');
     expect(queue.body).toEqual([]);
+  });
+
+  test('canceling one merged unread message drops correlated queue notifications', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    serverModule.setServerTestHooks({
+      backendFetch: async () => ({ ok: true, text: async () => '', json: async () => ({ ok: true }) }),
+    });
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'agent-chat-v2',
+      to: 'alpha:0.0',
+      payload: '[NOTIFICATION] unread messages',
+      notifyMeta: {
+        kind: 'merged_unread_actionable',
+        requiresInboxCheck: true,
+        sourceMsgId: 'msg_0002',
+        messageIds: ['msg_0001', 'msg_0002'],
+        unreadCount: 2,
+      },
+    });
+    expect(queued.status).toBe(200);
+
+    const canceled = await request(serverModule.app)
+      .post('/api/agents/alpha/unread-messages/msg_0001/cancel');
+
+    expect(canceled.status).toBe(200);
+    expect(canceled.body.queue_removed).toBe(1);
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toEqual([]);
+
+    const events = readJsonl(path.join(runtimeDir, 'logs', 'delivery-events.jsonl'));
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'queue.dropped',
+        reason: 'message-canceled',
+        messageIds: ['msg_0001', 'msg_0002'],
+        queueEntryId: queued.body.id,
+      }),
+    ]));
   });
 
   test('manual send does not re-paste payload after tmux enter fails', async () => {

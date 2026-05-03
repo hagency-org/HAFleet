@@ -98,6 +98,7 @@ describe('push relay dispatch', () => {
 
   test('routes to local panes and deduplicates repeated deliveries', async () => {
     const delivered = [];
+    const eventPosts = [];
     seedRelayState({
       localAgentNames: ['alpha'],
       agents: [
@@ -105,6 +106,14 @@ describe('push relay dispatch', () => {
         { name: 'beta', server: null, tmux: 'beta:0.0' },
       ],
       mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      fetch: async (url, options = {}) => {
+        if (String(url).endsWith('/api/delivery-events')) {
+          eventPosts.push(JSON.parse(options.body));
+        }
+        return { ok: true, text: async () => '' };
+      },
     });
     setPushToTmuxForTest((target, payload) => {
       delivered.push({ target, payload });
@@ -128,6 +137,14 @@ describe('push relay dispatch', () => {
     expect(delivered[0].target).toBe('alpha:0.0');
     expect(delivered[0].payload).toContain('Need help');
     expect(delivered[0].payload).toContain('agent-send beta:0.0');
+    expect(eventPosts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'relay.delivered',
+        messageId: 'msg_1',
+        agent: 'alpha',
+        target: 'alpha:0.0',
+      }),
+    ]));
   });
 
   test('deduplicates concurrent duplicate direct deliveries', async () => {

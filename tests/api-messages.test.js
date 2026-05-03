@@ -8,6 +8,16 @@ const API_TOKEN = 'messages-test-api-token';
 const ALPHA_TOKEN = 'alpha-agent-token';
 const BETA_TOKEN = 'beta-agent-token';
 
+function readDeliveryEvents(runtimeDir) {
+  const filePath = path.join(runtimeDir, 'data', 'message-delivery-events.jsonl');
+  if (!existsSync(filePath)) return [];
+  return readFileSync(filePath, 'utf-8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
 describe('backend message API', () => {
   let context;
 
@@ -67,6 +77,18 @@ describe('backend message API', () => {
       version: 1,
       payload: { taskId: 'T-1' },
     });
+
+    const deliveryResponse = await request(context.app)
+      .get(`/api/messages/${createResponse.body.id}/delivery?agent=alpha`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(deliveryResponse.status).toBe(200);
+    expect(deliveryResponse.body.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'message.accepted',
+        messageId: createResponse.body.id,
+        targetAgents: ['alpha'],
+      }),
+    ]));
   });
 
   test('POST message with schema missing kind returns 400', async () => {
@@ -82,6 +104,89 @@ describe('backend message API', () => {
       });
     expect(response.status).toBe(400);
     expect(response.body).toEqual({ error: 'schema.kind required' });
+  });
+
+  test('message suppression appends a delivery event', async () => {
+    const createResponse = await request(context.app)
+      .post('/api/messages')
+      .send({
+        from: 'system',
+        to: 'alpha',
+        type: 'inform',
+        summary: 'suppress me',
+        full: 'suppress me',
+      });
+    expect(createResponse.status).toBe(200);
+
+    const suppressResponse = await request(context.app)
+      .post(`/api/messages/${createResponse.body.id}/suppress`)
+      .set('X-Agent-Token', ALPHA_TOKEN)
+      .send({ agent: 'alpha', reason: 'test-suppress' });
+    expect(suppressResponse.status).toBe(200);
+    expect(suppressResponse.body.suppressed).toBe(true);
+
+    const deliveryResponse = await request(context.app)
+      .get(`/api/messages/${createResponse.body.id}/delivery?agent=alpha`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(deliveryResponse.status).toBe(200);
+    expect(deliveryResponse.body.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'message.suppressed',
+        messageId: createResponse.body.id,
+        agent: 'alpha',
+        reason: 'test-suppress',
+      }),
+    ]));
+  });
+
+  test('offline catchup messages append source delivery events', async () => {
+    const catchupContext = await createBackendTestContext('agent-chat-messages-catchup-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: false,
+          manualDown: false,
+          offlineReason: 'test-offline',
+        },
+      },
+      groups: {},
+      messages: [
+        {
+          id: 'msg_1',
+          ts: Date.now() - 1000,
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          summary: 'missed while offline',
+          full: 'missed while offline',
+          mentions: [],
+          reply_to: null,
+        },
+      ],
+    });
+
+    try {
+      const response = await request(catchupContext.app)
+        .post('/api/agents')
+        .send({ name: 'alpha', type: 'agent', tmux: 'alpha:0.0', server: 'remote-1' });
+      expect(response.status).toBe(200);
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(readDeliveryEvents(catchupContext.runtimeDir)).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: 'message.accepted',
+          agent: 'alpha',
+          targetAgents: ['alpha'],
+          context: expect.objectContaining({
+            reason: 'agent-online-update',
+          }),
+        }),
+      ]));
+    } finally {
+      catchupContext.cleanup();
+    }
   });
 
   test('POST message with schema.version as string returns 400', async () => {
