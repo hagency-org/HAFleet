@@ -2,7 +2,7 @@
 
 Date: 2026-05-03
 Owner: salt
-Status: design-only; implementation requires ac-topleader/operator approval
+Status: partial implementation landed; remaining mutation policy requires ac-topleader/operator approval
 
 ## Trigger
 
@@ -355,9 +355,6 @@ Recommended: manual-update-only until launchd autodeploy has a separate test pla
 
 ## Immediate Next Recommendation
 
-Ask ac-topleader/operator to approve RAU-A and RAU-B first:
+RAU-A, RAU-B, RAU-E scope, and RAU-F post-restart verification have landed.
 
-- RAU-A is read/diagnostic only and gives operators fleet visibility.
-- RAU-B prevents more misleading update failures and keeps unsupported standalone self-update from pretending to work.
-
-Do not start RAU-D through RAU-H until RAU-A makes fleet state visible and the operator confirms git checkout as the auto-update profile.
+Do not start RAU-D, RAU-G, or RAU-H until the operator confirms durable remote deploy state, rollback behavior, and whether remote CD owns service/helper/MCP reconciliation.

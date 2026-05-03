@@ -3452,7 +3452,7 @@ function saveMessages() {
 }
 function saveCursors() { return saveJson('cursors.json', cursors); }
 function saveServers() { saveJson('servers.json', servers); }
-function saveAgentRuntime(immediate = false) { saveJson('agent_runtime.json', agentRuntime, { immediate }); }
+function saveAgentRuntime(immediate = false) { return saveJson('agent_runtime.json', agentRuntime, { immediate }); }
 function saveTaskGraphs(next = taskGraphStore.dump()) { return saveJson('task_graphs.json', next); }
 function saveLocalActivitySweepState() { saveJson('local_activity_sweep.json', localActivitySweepState); }
 
@@ -4201,26 +4201,85 @@ function invalidatePendingHumanTargetsForMessage(msg) {
   invalidatePendingHumanTargets([...targets]);
 }
 
-function clearDeletedAgentState(agentName) {
-  const name = normalizeAgentName(agentName);
-  if (!name) return { removed: false };
+function snapshotForceDeletePersistenceState(name) {
+  return {
+    hadAgent: Object.prototype.hasOwnProperty.call(agents, name),
+    agent: Object.prototype.hasOwnProperty.call(agents, name) ? cloneJsonValue(agents[name]) : null,
+    hadRuntime: Object.prototype.hasOwnProperty.call(agentRuntime, name),
+    runtime: Object.prototype.hasOwnProperty.call(agentRuntime, name) ? cloneJsonValue(agentRuntime[name]) : null,
+    hadCursor: Object.prototype.hasOwnProperty.call(cursors, name),
+    cursor: Object.prototype.hasOwnProperty.call(cursors, name) ? cloneJsonValue(cursors[name]) : null,
+    hadTombstone: Object.prototype.hasOwnProperty.call(deletedAgentTombstones, name),
+    tombstone: Object.prototype.hasOwnProperty.call(deletedAgentTombstones, name)
+      ? cloneJsonValue(deletedAgentTombstones[name])
+      : null,
+  };
+}
 
-  let agentsChanged = false;
-  let runtimeChanged = false;
-  let cursorsChanged = false;
+function restoreForceDeletePersistenceState(name, snapshot) {
+  if (snapshot.hadAgent) agents[name] = cloneJsonValue(snapshot.agent);
+  else delete agents[name];
+  if (snapshot.hadRuntime) agentRuntime[name] = cloneJsonValue(snapshot.runtime);
+  else delete agentRuntime[name];
+  if (snapshot.hadCursor) cursors[name] = cloneJsonValue(snapshot.cursor);
+  else delete cursors[name];
+  if (snapshot.hadTombstone) deletedAgentTombstones[name] = cloneJsonValue(snapshot.tombstone);
+  else delete deletedAgentTombstones[name];
+}
 
-  if (agents[name] !== undefined) {
-    delete agents[name];
-    agentsChanged = true;
+function rollbackForceDeletePersistenceState(name, snapshot, changed) {
+  restoreForceDeletePersistenceState(name, snapshot);
+  let rollbackOk = true;
+  if (changed.tombstone && !saveJson('deleted_agents.json', deletedAgentTombstones, { immediate: true })) rollbackOk = false;
+  if (changed.agents && !saveAgents(true)) rollbackOk = false;
+  if (changed.runtime && !saveAgentRuntime(true)) rollbackOk = false;
+  if (changed.cursors && !saveCursors()) rollbackOk = false;
+  if (!rollbackOk) {
+    console.error(`[force-delete] failed to fully roll back persistence state for ${name}`);
   }
-  if (agentRuntime[name] !== undefined) {
-    delete agentRuntime[name];
-    runtimeChanged = true;
+}
+
+function persistForceDeletedAgentState(name) {
+  const snapshot = snapshotForceDeletePersistenceState(name);
+  const changed = {
+    agents: agents[name] !== undefined,
+    runtime: agentRuntime[name] !== undefined,
+    cursors: cursors[name] !== undefined,
+    tombstone: true,
+  };
+
+  if (changed.agents) delete agents[name];
+  if (changed.runtime) delete agentRuntime[name];
+  if (changed.cursors) delete cursors[name];
+  deletedAgentTombstones[name] = { deletedAt: Date.now(), reason: 'force-delete' };
+
+  if (!saveJson('deleted_agents.json', deletedAgentTombstones, { immediate: true })) {
+    restoreForceDeletePersistenceState(name, snapshot);
+    return { ok: false, error: 'agent force-delete persistence failed' };
   }
-  if (cursors[name] !== undefined) {
-    delete cursors[name];
-    cursorsChanged = true;
+  if (changed.agents && !saveAgents(true)) {
+    rollbackForceDeletePersistenceState(name, snapshot, changed);
+    return { ok: false, error: 'agent force-delete persistence failed' };
   }
+  if (changed.runtime && !saveAgentRuntime(true)) {
+    rollbackForceDeletePersistenceState(name, snapshot, changed);
+    return { ok: false, error: 'agent force-delete persistence failed' };
+  }
+  if (changed.cursors && !saveCursors()) {
+    rollbackForceDeletePersistenceState(name, snapshot, changed);
+    return { ok: false, error: 'agent force-delete persistence failed' };
+  }
+
+  return {
+    ok: true,
+    removed: changed.agents,
+    runtimeRemoved: changed.runtime,
+    cursorsRemoved: changed.cursors,
+  };
+}
+
+function cleanupDeletedAgentRuntimeState(name) {
+  let agentDataRemoved = false;
 
   const machine = agentMachines.get(name);
   if (machine) { machine.destroy(); agentMachines.delete(name); }
@@ -4232,7 +4291,7 @@ function clearDeletedAgentState(agentName) {
   scopePressureState.delete(name);
   notificationRouter.clearAgent(name);
 
-  // Clean up supervisor state for the deleted agent
+  // Clean up supervisor state for the deleted agent after the tombstone is durable.
   try {
     supervisorSnapshotStore.removeTarget(name);
   } catch (error) {
@@ -4240,7 +4299,6 @@ function clearDeletedAgentState(agentName) {
   }
   try { killSupervisorTmux(`supervisor-${name}`); } catch { /* tmux not available */ }
 
-  let agentDataRemoved = false;
   const agentDataDir = agentDataPath(name);
   if (existsSync(agentDataDir)) {
     try {
@@ -4251,20 +4309,16 @@ function clearDeletedAgentState(agentName) {
     }
   }
 
-  // Tombstone prevents re-registration
-  deletedAgentTombstones[name] = { deletedAt: Date.now(), reason: 'force-delete' };
-  saveJson('deleted_agents.json', deletedAgentTombstones, { immediate: true });
+  return { agentDataRemoved };
+}
 
-  if (agentsChanged) saveAgents(true);
-  if (runtimeChanged) saveAgentRuntime();
-  if (cursorsChanged) saveCursors();
-
-  return {
-    removed: agentsChanged,
-    runtimeRemoved: runtimeChanged,
-    cursorsRemoved: cursorsChanged,
-    agentDataRemoved,
-  };
+function clearDeletedAgentState(agentName) {
+  const name = normalizeAgentName(agentName);
+  if (!name) return { ok: false, error: 'invalid agent name' };
+  const persisted = persistForceDeletedAgentState(name);
+  if (!persisted.ok) return persisted;
+  const cleanup = cleanupDeletedAgentRuntimeState(name);
+  return { ...persisted, ...cleanup };
 }
 
 function messageTargetsAgent(msg, agentName) {
@@ -7628,7 +7682,8 @@ app.delete('/api/agents/:name', requireBearer, (req, res) => {
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
   if (req.query.force === 'true') {
-    clearDeletedAgentState(agentName);
+    const deletion = clearDeletedAgentState(agentName);
+    if (!deletion.ok) return res.status(503).json({ error: deletion.error || 'agent force-delete persistence failed' });
     console.log(`Agent '${agentName}' permanently deleted`);
     auditLog(req, { agent: agentName, summary: { action: 'force-delete' } });
     return res.json({ ok: true, deleted: true, name: agentName });

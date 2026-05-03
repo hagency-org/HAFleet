@@ -286,8 +286,11 @@ Remote autodeploy now enforces this layer for git-checkout remote deployments. M
 
 The safe preflight slice is implemented: `verify-remote --expect-version`, generated MCP wrapper smoke, non-destructive `verify:cd-preflight`, remote autodeploy service package smoke, and dependency-install retry markers are all present.
 
-The remaining P0/P1 work is:
+The remaining P0/P1 work is decision-gated:
 
 1. Decide stable release gate policy: require the existing worktree gate on deploy hosts, query GitHub checks, or explicitly accept default-off risk.
 2. Decide macOS remote CD policy: manual update only or add a launchd autodeploy watcher.
 3. Decide durable remote deploy state and rollback policy for failures that survive watcher restarts.
+4. Decide full-clone remote helper profile: root helpers, remote-scoped helpers, or an explicit install flag.
+5. Decide remote dependency reproducibility: tracked `remote/package-lock.json` plus `npm ci`, lockless installs, or generated release lock.
+6. Decide remote CD install scope: code/deps/restart only or service/helper/MCP reconciliation after installer decomposition.

@@ -22,6 +22,18 @@ function agentsPath(runtimeDir) {
   return path.join(runtimeDir, 'data', 'agents.json');
 }
 
+function runtimePath(runtimeDir) {
+  return path.join(runtimeDir, 'data', 'agent_runtime.json');
+}
+
+function cursorsPath(runtimeDir) {
+  return path.join(runtimeDir, 'data', 'cursors.json');
+}
+
+function tombstonesPath(runtimeDir) {
+  return path.join(runtimeDir, 'data', 'deleted_agents.json');
+}
+
 describe('backend agents API', () => {
   let context;
 
@@ -260,6 +272,47 @@ describe('backend agents API persistence failures', () => {
     };
   }
 
+  async function setupForceDeleteContext() {
+    const original = seedAgent({
+      name: 'forcey',
+      tmux: 'forcey:0.0',
+      online: true,
+      manualDown: false,
+      offlineReason: null,
+      state: 'online',
+    });
+    context = await createBackendTestContext('agent-chat-agents-force-delete-test-', {
+      agents: { forcey: original },
+      groups: {},
+      agentRuntime: {
+        forcey: {
+          agent: 'forcey',
+          blocked: true,
+          blockedReason: 'needs-input',
+        },
+      },
+      cursors: {
+        forcey: {
+          inbox: 3,
+          inboxId: 'msg_003',
+          groups: {},
+          groupIds: {},
+        },
+      },
+      deletedAgents: {},
+    });
+    const agentDataDir = path.join(context.runtimeDir, 'data', 'agents', 'forcey', 'tmp');
+    mkdirSync(agentDataDir, { recursive: true });
+    writeFileSync(path.join(agentDataDir, 'residue.txt'), 'residue');
+    return {
+      agentDataDir,
+      agentsBefore: readJson(agentsPath(context.runtimeDir)),
+      runtimeBefore: readJson(runtimePath(context.runtimeDir)),
+      cursorsBefore: readJson(cursorsPath(context.runtimeDir)),
+      tombstonesBefore: readJson(tombstonesPath(context.runtimeDir)),
+    };
+  }
+
   test('POST /api/agents returns 503 and leaves no visible agent when agents persistence fails', async () => {
     context = await createBackendTestContext('agent-chat-agents-persist-test-', {
       agents: {},
@@ -405,5 +458,39 @@ describe('backend agents API persistence failures', () => {
       offlineReason: null,
     });
     expect(readJson(agentsPath(context.runtimeDir)).registered).toEqual(before.registered);
+  });
+
+  test('DELETE /api/agents/:name?force=true returns 503 before cleanup when tombstone persistence fails', async () => {
+    const before = await setupForceDeleteContext();
+    context.internals.setJsonSaveFailureForTest('deleted_agents.json', true);
+
+    const response = await request(context.app).delete('/api/agents/forcey?force=true');
+    const get = await request(context.app).get('/api/agents/forcey');
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: 'agent force-delete persistence failed' });
+    expect(get.status).toBe(200);
+    expect(readJson(agentsPath(context.runtimeDir)).forcey).toEqual(before.agentsBefore.forcey);
+    expect(readJson(runtimePath(context.runtimeDir)).forcey).toMatchObject(before.runtimeBefore.forcey);
+    expect(readJson(cursorsPath(context.runtimeDir)).forcey).toEqual(before.cursorsBefore.forcey);
+    expect(readJson(tombstonesPath(context.runtimeDir))).toEqual(before.tombstonesBefore);
+    expect(existsSync(before.agentDataDir)).toBe(true);
+  });
+
+  test('DELETE /api/agents/:name?force=true rolls back tombstone when agents persistence fails', async () => {
+    const before = await setupForceDeleteContext();
+    context.internals.setJsonSaveFailureForTest('agents.json', { count: 1 });
+
+    const response = await request(context.app).delete('/api/agents/forcey?force=true');
+    const get = await request(context.app).get('/api/agents/forcey');
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: 'agent force-delete persistence failed' });
+    expect(get.status).toBe(200);
+    expect(readJson(agentsPath(context.runtimeDir)).forcey).toEqual(before.agentsBefore.forcey);
+    expect(readJson(runtimePath(context.runtimeDir)).forcey).toMatchObject(before.runtimeBefore.forcey);
+    expect(readJson(cursorsPath(context.runtimeDir)).forcey).toEqual(before.cursorsBefore.forcey);
+    expect(readJson(tombstonesPath(context.runtimeDir))).toEqual(before.tombstonesBefore);
+    expect(existsSync(before.agentDataDir)).toBe(true);
   });
 });

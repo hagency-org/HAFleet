@@ -253,11 +253,11 @@ All next-batch code changes should be tested without touching live deployment:
    - local/stable side: run the approved preflight and observe autodeploy logs;
    - remote side: run `agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>` and spot-check `agentchat cli status`.
 
-Suggested future test files:
+Implemented test files:
 
 - `tests/stable-autodeploy.test.js`
-- `tests/cd-remote-autodeploy.test.js`
 - `tests/remote-install-profile.test.js`
+- `tests/remote-autodeploy.test.js`
 
 Suggested CD-A harness knobs for `scripts/agentchat-stable-autodeploy.sh`:
 
