@@ -131,9 +131,63 @@ function extractExpressRoutes(source) {
     routes.push({
       method: match[1].toUpperCase(),
       path: match[3],
+      index: match.index,
+      line: source.slice(0, match.index).split('\n').length,
     });
   }
+  for (let i = 0; i < routes.length; i++) {
+    const next = routes[i + 1]?.index ?? source.length;
+    routes[i].source = source.slice(routes[i].index, next);
+  }
   return routes;
+}
+
+function validateRouteAuth(fileName, source, route, expectedAuth) {
+  const routeSource = route?.source || '';
+  const has = (needle) => routeSource.includes(needle);
+  const forbiddenRouteLocalAuth = [
+    'requireBearer',
+    'requireAgentToken',
+    'requireBridgeSecret',
+    '_alertTransitionAuth',
+    'authorizeSubconsciousEventIngest(req)',
+    'isLocalRequest(req)',
+  ];
+
+  switch (expectedAuth) {
+    case undefined:
+    case null:
+      return null;
+    case 'global-api-auth-only': {
+      const firstApiMutation = extractExpressRoutes(source)
+        .filter(item => !['GET', 'HEAD', 'OPTIONS'].includes(item.method) && item.path.startsWith('/api/'))
+        .sort((a, b) => a.index - b.index)[0];
+      const globalAuthIndex = source.indexOf("app.use('/api', createApiAuthMiddleware");
+      if (globalAuthIndex < 0 || (firstApiMutation && globalAuthIndex > firstApiMutation.index)) {
+        return `${fileName}:${route.line} ${routeKey(route)} expected global /api auth before mutation routes`;
+      }
+      const found = forbiddenRouteLocalAuth.find(needle => has(needle));
+      if (found) return `${fileName}:${route.line} ${routeKey(route)} expected global-api-auth-only but found ${found}`;
+      return null;
+    }
+    case 'bearer':
+      return has('requireBearer') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireBearer`;
+    case 'bearer-and-local':
+      if (!has('requireBearer')) return `${fileName}:${route.line} ${routeKey(route)} expected requireBearer`;
+      return has('isLocalRequest(req)') ? null : `${fileName}:${route.line} ${routeKey(route)} expected isLocalRequest(req) local-only guard`;
+    case 'agent-token':
+      return has('requireAgentToken') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireAgentToken`;
+    case 'bridge-secret':
+      return has('requireBridgeSecret') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireBridgeSecret`;
+    case 'bearer-or-agent-token':
+      return has('_alertTransitionAuth') ? null : `${fileName}:${route.line} ${routeKey(route)} expected _alertTransitionAuth`;
+    case 'local-only':
+      return has('isLocalRequest(req)') ? null : `${fileName}:${route.line} ${routeKey(route)} expected isLocalRequest(req) local-only guard`;
+    case 'subconscious-event-token-or-local':
+      return has('authorizeSubconsciousEventIngest(req)') ? null : `${fileName}:${route.line} ${routeKey(route)} expected authorizeSubconsciousEventIngest(req)`;
+    default:
+      return `${fileName}:${route.line} ${routeKey(route)} has unknown auth policy ${expectedAuth}`;
+  }
 }
 
 function checkRouteOwnership(manifest) {
@@ -148,7 +202,7 @@ function checkRouteOwnership(manifest) {
     const source = readFileSync(abs, 'utf-8');
     const actualMutationRoutes = extractExpressRoutes(source)
       .filter(route => !['GET', 'HEAD', 'OPTIONS'].includes(route.method));
-    const actualKeys = new Set(actualMutationRoutes.map(routeKey));
+    const actualKeys = new Map(actualMutationRoutes.map(route => [routeKey(route), route]));
     const expectedRoutes = config.mutationRoutes || [];
     const expectedKeys = new Map();
 
@@ -167,9 +221,16 @@ function checkRouteOwnership(manifest) {
       }
     }
 
-    for (const key of expectedKeys.keys()) {
-      if (!actualKeys.has(key)) {
+    for (const route of expectedRoutes) {
+      const key = routeKey(route);
+      const actual = actualKeys.get(key);
+      if (!actual) {
         failures.push(`[route ownership] ${fileName} owner entry no longer matches a route: ${key}`);
+        continue;
+      }
+      const authFailure = validateRouteAuth(fileName, source, actual, route.auth);
+      if (authFailure) {
+        failures.push(`[route ownership] ${authFailure}`);
       }
     }
 
