@@ -102,9 +102,9 @@ It fetches, force-cleans, resets to `origin/stable`, installs dependencies condi
 
 Installer runs `npm install --omit=dev` under `remote/`; remote autodeploy now watches `remote/package*.json` and installs under `remote/`. Root package changes still deploy and restart the relay without root dependency installation.
 
-6. Post-restart verification is missing from remote autodeploy.
+6. Post-restart verification is implemented for git-checkout remote autodeploy.
 
-Stable/live autodeploy now has preflight gates. Remote autodeploy still declares success after service restart, without checking heartbeat progression, loaded version, server id, or known agent state.
+Remote autodeploy now calls `verify-remote --samples 2 --interval 16 --expect-version <short-sha>` after relay restart, passes API/server/token values from the remote environment, supports optional `VERIFY_AGENT`, and keeps the deploy pending when verification fails. Durable verification-failure state across watcher restarts remains RAU-D/R-075, and rollback remains RAU-G/R-078.
 
 7. `install-remote.sh` is too side-effectful for blind automation.
 
@@ -272,15 +272,16 @@ Goal:
 
 Shape:
 
-- After restart, run:
+- Implemented. After restart, run:
   - `agentchat verify-remote --samples 2 --interval 16 --expect-version "$(git rev-parse --short HEAD)"`
 - Include `--agent <name>` only when configured.
 - Keep deploy pending on verification failure.
 
 Tests:
 
-- Fake `verify-remote` success clears pending.
-- Fake `verify-remote` failure keeps pending and records reason.
+- Implemented fake `verify-remote` success/failure tests.
+- Implemented next-poll retry test after verification failure.
+- Implemented remote `.env` loading test for API/server/token, sample/interval, and optional agent.
 
 ### RAU-G: Rollback
 

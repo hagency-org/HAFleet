@@ -4,6 +4,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="${AGENT_CHAT_HOME:-${AGENT_CHAT_ROOT:-$DEFAULT_REPO_DIR}}"
+ENV_FILE="${ENV_FILE:-$REPO_DIR/remote/.env}"
+
+load_remote_env() {
+  if [ -f "$ENV_FILE" ]; then
+    set -a
+    source "$ENV_FILE"
+    set +a
+  fi
+}
+
+load_remote_env
+REPO_DIR="${AGENT_CHAT_HOME:-${AGENT_CHAT_ROOT:-$REPO_DIR}}"
 DEPLOY_BRANCH="${AGENTCHAT_DEPLOY_BRANCH:-stable}"
 POLL_SEC="${AGENTCHAT_POLL_SEC:-60}"
 RELAY_SERVICE="${AGENTCHAT_RELAY_SERVICE:-agent-chat-push-relay}"
@@ -14,6 +26,7 @@ SYSTEMCTL_BIN="${AGENTCHAT_SYSTEMCTL_BIN:-systemctl}"
 LAUNCHCTL_BIN="${AGENTCHAT_LAUNCHCTL_BIN:-launchctl}"
 SUDO_BIN="${AGENTCHAT_SUDO_BIN:-sudo}"
 SLEEP_BIN="${AGENTCHAT_SLEEP_BIN:-sleep}"
+VERIFY_REMOTE_BIN="${AGENTCHAT_VERIFY_REMOTE_BIN:-$REPO_DIR/bin/verify-remote}"
 DEPLOY_STATE_DIR="${AGENTCHAT_DEPLOY_STATE_DIR:-}"
 INSTALL_NEEDED_FILE=""
 
@@ -118,6 +131,43 @@ restart_relay() {
   fi
 }
 
+verify_remote_deploy() {
+  local expected_version="$1"
+  local samples="${VERIFY_SAMPLES:-2}"
+  local interval="${VERIFY_INTERVAL:-16}"
+  local args=(
+    --api "${AGENT_CHAT_API:-}"
+    --server "${AGENT_CHAT_SERVER:-}"
+    --samples "$samples"
+    --interval "$interval"
+    --service "$RELAY_SERVICE"
+    --expect-version "$expected_version"
+  )
+
+  if [ ! -x "$VERIFY_REMOTE_BIN" ]; then
+    log "ERROR: missing verify-remote command: $VERIFY_REMOTE_BIN"
+    return 1
+  fi
+  if [ -z "${AGENT_CHAT_API:-}" ]; then
+    log "ERROR: missing AGENT_CHAT_API; cannot verify remote deploy"
+    return 1
+  fi
+  if [ -z "${AGENT_CHAT_SERVER:-}" ]; then
+    log "ERROR: missing AGENT_CHAT_SERVER; cannot verify remote deploy"
+    return 1
+  fi
+
+  if [ -n "${API_TOKEN:-}" ]; then
+    args+=(--token "$API_TOKEN")
+  fi
+  if [ -n "${VERIFY_AGENT:-}" ]; then
+    args+=(--agent "$VERIFY_AGENT")
+  fi
+
+  log "Verifying remote deploy at version $expected_version..."
+  "$VERIFY_REMOTE_BIN" "${args[@]}"
+}
+
 force_clean_workdir() {
   local dirty
   dirty="$(run_git status --porcelain 2>/dev/null || true)"
@@ -192,6 +242,7 @@ while true; do
   fi
 
   new_ref="$(run_git rev-parse HEAD)"
+  expected_version="$(run_git rev-parse --short HEAD)"
   log "Reset to $new_ref"
 
   force_install=false
@@ -205,11 +256,14 @@ while true; do
     continue
   fi
 
-  if restart_relay; then
+  if ! restart_relay; then
+    log "ERROR: relay restart failed at commit $new_ref - will retry next poll"
+    deploy_pending=true
+  elif verify_remote_deploy "$expected_version"; then
     log "Deploy succeeded at commit $new_ref"
     deploy_pending=false
   else
-    log "ERROR: relay restart failed at commit $new_ref — will retry next poll"
+    log "ERROR: remote post-deploy verification failed at commit $new_ref - will retry next poll"
     deploy_pending=true
   fi
 

@@ -30,7 +30,7 @@ Local CLI observation after the push-relay idle fix showed the useful CD signals
 - `agentchat cli status aoi`, `agentchat cli status nazuna`, and `agentchat cli status yamori` agreed with raw `/api/agents/<name>` runtime fields: inactive panes reported `activeNow=false`.
 - `agentchat cli status salt` stayed active while tools were running, which is correct because the active Codex pane content is changing.
 
-This proves the deployed relay can expose a loaded commit through the backend, but the current CD scripts do not enforce that check.
+This proves the deployed relay can expose a loaded commit through the backend. Remote autodeploy now consumes that check after restart; stable gate policy and macOS remote CD policy remain separate decisions.
 
 ## Findings
 
@@ -54,25 +54,28 @@ Decide and enforce the release gate policy:
 - make the worktree gate default-on for deploy hosts or require it in host configuration;
 - or query GitHub commit status/check-runs for the target commit and require green.
 
-### CD-001 Remote Autodeploy Has No Post-Deploy Verification
+### CD-001 Remote Autodeploy Runs Post-Deploy Verification
+
+Status:
+
+Implemented for git-checkout remote autodeploy.
 
 Evidence:
 
-- `scripts/agentchat-remote-autodeploy.sh:102` defines `restart_relay`, and `scripts/agentchat-remote-autodeploy.sh:203` treats that restart success as deploy success.
-- `remote/install-remote.sh:361` runs `verify-remote`, but that hard verification is only part of install/update, not the polling autodeploy loop.
-- `bin/verify-remote:193` verifies heartbeat continuity and `bin/verify-remote:258` can verify one agent, but `agentchat-remote-autodeploy.sh` never calls it.
+- `scripts/agentchat-remote-autodeploy.sh:134` defines `verify_remote_deploy`.
+- `scripts/agentchat-remote-autodeploy.sh:138` passes `--api`, `--server`, deploy-safe `--samples`, `--interval`, `--service`, and `--expect-version`.
+- `scripts/agentchat-remote-autodeploy.sh:160` passes `--token` when `API_TOKEN` is configured, and `scripts/agentchat-remote-autodeploy.sh:163` passes optional `VERIFY_AGENT`.
+- `scripts/agentchat-remote-autodeploy.sh:262` calls verification only after relay restart succeeds.
+- `scripts/agentchat-remote-autodeploy.sh:265` keeps `deploy_pending=true` when verification fails, so the next poll retries instead of declaring success.
+- `remote/.env.example` documents `VERIFY_SAMPLES=2`, `VERIFY_INTERVAL=16`, and optional `VERIFY_AGENT`.
 
 Impact:
 
-The remote watcher can report a successful deploy when launchd/systemd accepted a restart but the relay did not reconnect, did not heartbeat, loaded old code, or connected with the wrong server id.
+The previous gap is closed for the in-process remote watcher loop: restart success alone no longer counts as deploy success. Remaining remote CD risks are durable deploy state across watcher restart (R-075) and rollback to last known good (R-078).
 
-Fix direction:
+Verification:
 
-Add a post-deploy verification step for remote autodeploy:
-
-- run `verify-remote` after restart with deploy-safe samples and interval;
-- support an expected commit/version check;
-- keep `deploy_pending=true` when verification fails.
+- `tests/remote-autodeploy.test.js` covers success, verification failure, retry on the next poll, default sample/interval values, `VERIFY_AGENT`, expected-version arguments, token propagation, and remote `.env` loading.
 
 ### CD-002 Remote Autodeploy Installs Remote Dependencies In The Remote Tree
 
@@ -122,11 +125,11 @@ Operator decision required:
 - either declare macOS remote hosts manual-update only;
 - or add a launchd plist/runner for `agentchat-remote-autodeploy.sh`.
 
-### CD-004 Expected Version Check Is Implemented But Not Used By Remote Autodeploy
+### CD-004 Expected Version Check Is Used By Remote Autodeploy
 
 Status:
 
-Partially implemented. `verify-remote` can enforce the loaded server version, but `agentchat-remote-autodeploy.sh` still does not call it after restart.
+Implemented for git-checkout remote autodeploy.
 
 Evidence:
 
@@ -134,15 +137,12 @@ Evidence:
 - `lib/push-relay-core.js:482` sends `version` in heartbeat when available.
 - `bin/verify-remote:35` exposes `--expect-version <v>`.
 - `bin/verify-remote:231` fails when `/api/servers[].version` does not match the expected version.
-- `scripts/agentchat-remote-autodeploy.sh:203` still treats relay restart success as deploy success without running `verify-remote`.
+- `scripts/agentchat-remote-autodeploy.sh:245` computes the expected short commit after reset.
+- `scripts/agentchat-remote-autodeploy.sh:262` passes that expected version to post-restart verification.
 
 Impact:
 
-Operators can manually prove the loaded relay commit, but the remote polling CD loop can still report success when the restarted process fails to heartbeat the expected commit.
-
-Fix direction:
-
-Fold `verify-remote --expect-version <short-sha>` into CD-001 post-deploy verification.
+Operators can manually and automatically prove the loaded relay commit for git-checkout remote deployments. Standalone generated packages without `.git` still cannot prove a git-derived version and remain decision-gated under R-049.
 
 ### CD-005 Generated Package Smoke Covers Push Relay And MCP Wrappers
 
@@ -255,7 +255,7 @@ Runs after service restart:
 - when a known agent is configured, run `agentchat verify-remote --agent <name>`;
 - run `agentchat cli status <agent>` or `agentchat cli status` as a human-readable diagnostic smoke.
 
-This is the missing CD layer that would have made the idle/relay deployment state immediately visible.
+Remote autodeploy now enforces this layer for git-checkout remote deployments. Manual status and CLI checks remain useful acceptance diagnostics after stable rollout.
 
 ## Decisions Needed
 
@@ -265,18 +265,18 @@ This is the missing CD layer that would have made the idle/relay deployment stat
 | Stable release gate policy | default-off, default-on, or host config enforcement | Require an explicit deploy-host decision; default-off is still a policy gap even though the worktree gate exists. |
 | macOS remote CD | manual update only, or launchd autodeploy watcher | Decide explicitly. If macOS is a first-class remote host, add launchd watcher. |
 | Known-agent postdeploy check | no agent, configured optional `VERIFY_AGENT`, or mandatory canary agent | Optional `VERIFY_AGENT` first; later promote a canary agent. |
-| Autodeploy failure behavior | log-only, retry pending, or rollback | Keep retry pending first. Rollback needs a separate operator decision. |
+| Autodeploy rollback behavior | retry pending, or rollback to last known good | Retry pending is implemented for verification failures. Rollback needs a separate operator decision. |
 
 ## Proposed Repair Table
 
 | ID | Priority | Scope | Repair | Verification |
 | --- | --- | --- | --- | --- |
 | CD-000 | P0 | Stable CD | Decide and enforce stable release-gate policy; the worktree pre-reset gate exists but defaults to `none`. | Deploy-host config check or simulated target commit gate. |
-| CD-001 | P0 | Remote CD | Run post-deploy `verify-remote` from remote autodeploy and keep `deploy_pending=true` on failure. | Simulated autodeploy script test plus manual remote run. |
+| CD-001 | Done | Remote CD | Remote autodeploy runs post-deploy `verify-remote --expect-version <short-sha>` after restart and keeps `deploy_pending=true` on failure. | Implemented with fake-repo remote autodeploy tests; manual remote smoke still required after stable merge. |
 | CD-002 | Done | Remote deps | Remote autodeploy installs dependencies in `remote/` when `remote/package*.json` changes. | Implemented with fake-repo remote autodeploy tests. |
 | CD-002A | Done | CD deps | Dependency-install-needed state persists across retry after failed install. | Implemented with stable/dev/remote autodeploy tests. |
 | CD-003 | P1 | macOS CD | Decide and implement launchd autodeploy watcher or document manual-only policy. | macOS launchctl status and `agentchat service status --profile remote`. |
-| CD-004 | Done | Loaded commit | `verify-remote --expect-version <sha>` fails on version mismatch; remote autodeploy integration remains under CD-001. | Implemented with `verify-remote` tests and manual remote smoke. |
+| CD-004 | Done | Loaded commit | `verify-remote --expect-version <sha>` fails on version mismatch and remote autodeploy invokes it after restart. | Implemented with `verify-remote` and remote autodeploy tests. |
 | CD-005 | Done | Package smoke | Generated package smoke checks MCP wrapper resolution. | `npm run check:remote-package-smoke`. |
 | CD-005A | Done | Remote package | Generated package includes and smoke-checks `push-relay-autodeploy.service`. | `npm run build:remote:check` and `npm run check:remote-package-smoke`. |
 | CD-006 | Done | CLI diagnostics | Preserve unknown runtime activity instead of displaying idle; keep legacy `session_activity` fallback only for older backends without an activity field. | Implemented with API/CLI/push-relay tests. |
@@ -288,6 +288,6 @@ The safe preflight slice is implemented: `verify-remote --expect-version`, gener
 
 The remaining P0/P1 work is:
 
-1. Integrate remote autodeploy post-deploy verification with `verify-remote --expect-version`, and decide whether verification failure keeps retry pending, rolls back, or only alerts.
-2. Decide stable release gate policy: require the existing worktree gate on deploy hosts, query GitHub checks, or explicitly accept default-off risk.
-3. Decide macOS remote CD policy: manual update only or add a launchd autodeploy watcher.
+1. Decide stable release gate policy: require the existing worktree gate on deploy hosts, query GitHub checks, or explicitly accept default-off risk.
+2. Decide macOS remote CD policy: manual update only or add a launchd autodeploy watcher.
+3. Decide durable remote deploy state and rollback policy for failures that survive watcher restarts.

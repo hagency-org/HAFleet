@@ -67,6 +67,8 @@ Examples:
 
 Standalone package note: `agentchat update` does not self-update generated packages because they have no `.git` checkout. Preserve `.env`, `data`, and `logs`, then install from a git checkout with `bash remote/install-remote.sh`.
 
+Git-checkout autodeploy note: after `agent-chat-push-relay` restarts, `agentchat-remote-autodeploy.sh` runs `verify-remote --expect-version <short-sha>` with `VERIFY_SAMPLES=2` and `VERIFY_INTERVAL=16` by default. Configure `AGENT_CHAT_API`, `AGENT_CHAT_SERVER`, `API_TOKEN`, and optional `VERIFY_AGENT` in `.env`; verification failure keeps the deploy pending for the next poll.
+
 ## Notes
 
 - The central checkout operations runbook lives outside standalone remote packages. For generated packages, use the Standard Deployment Template below.
@@ -80,13 +82,14 @@ Standalone package note: `agentchat update` does not self-update generated packa
 - The script links helpers into `~/.local/bin` (no copy), so path resolution stays consistent.
 - Re-running `bash install-remote.sh` is safe and is the recommended way to refresh both service and MCP config after updates.
 - `install-remote.sh` now runs hard verification and exits non-zero on failures (service inactive, heartbeat not increasing, auth issues, or agent/server mismatch when `VERIFY_AGENT` is set).
+- Git-checkout remote autodeploy verifies the loaded commit after restart and does not report deploy success when verification fails.
 
 ## Standard Deployment Template
 
 Use this sequence for remote rollout and acceptance:
 
 1. `agentchat update`
-2. `agentchat verify-remote`
+2. `agentchat verify-remote --expect-version <short-sha>`
 3. `agentchat up <name> <path> [claude|codex] [--allow-shared-workspace]`
 4. `agentchat verify-remote --agent <name>`
 

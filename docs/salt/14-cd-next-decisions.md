@@ -1,7 +1,7 @@
 # 14 CD Next Decisions
 
 Date: 2026-05-04
-Status: stable watcher and remote dependency scope implemented; remaining verification/macOS decisions still pending.
+Status: stable watcher, remote dependency scope, and remote post-deploy verification implemented; remaining stable policy, macOS, and remote state decisions still pending.
 
 ## Current CD Baseline
 
@@ -14,11 +14,12 @@ Implemented gates:
 3. `tests/verify-cd-preflight.test.js` locks the preflight wrapper contract without touching deploy watchers.
 4. `agentchat verify-remote --expect-version <short-sha>` can verify heartbeat continuity and loaded remote relay commit after deployment.
 5. Remote package smoke now checks both push-relay and MCP wrapper resolution, plus the Linux remote autodeploy service template.
+6. Remote autodeploy calls `verify-remote --expect-version <short-sha>` after relay restart, using deploy-safe samples and optional `VERIFY_AGENT`.
 
 Not implemented yet:
 
 1. stable/live release gate support exists but must be enabled explicitly with `AGENTCHAT_RELEASE_GATE=worktree` on the deploy host.
-2. remote autodeploy restarts the relay but does not call `verify-remote` afterward.
+2. remote deploy failure state is still mostly in memory; durable state and rollback remain separate decisions.
 3. macOS remote hosts install launchd for push-relay but no launchd remote autodeploy watcher.
 
 ## Environment Split
@@ -126,19 +127,19 @@ If remote hosts become root-service hosts later, that should be a separate profi
 
 Problem:
 
-`scripts/agentchat-remote-autodeploy.sh` treats service-manager restart success as deploy success. It does not verify backend heartbeat, loaded commit, or a known agent state.
+Resolved for the current git-checkout remote profile. `scripts/agentchat-remote-autodeploy.sh` no longer treats service-manager restart success alone as deploy success.
 
-Recommended behavior:
+Implemented behavior:
 
 1. After `restart_relay`, run `verify-remote` with `--expect-version "$(git rev-parse --short HEAD)"`.
 2. Use deploy-safe defaults: `--samples 2 --interval 16`.
 3. Pass `--api`, `--server`, and token from the existing remote `.env` values.
 4. Pass `--agent "$VERIFY_AGENT"` only when configured.
-5. Keep `deploy_pending=true` when verification fails.
+5. Keep `deploy_pending=true` when verification fails, then retry on the next poll.
 
-Decision needed:
+Remaining boundary:
 
-Approve failure behavior. The conservative first step is retry-pending only; rollback should remain a separate explicit operator decision.
+Rollback to the last known good ref and durable restart/verification failure state remain separate operator decisions under RAU-D/R-075 and RAU-G/R-078.
 
 ## Decision 5: macOS Remote CD Policy
 
@@ -276,11 +277,11 @@ Suggested CD-A tests:
 ## Recommended Approval Order
 
 1. Batch CD-A: stable release gate and dependency retry state for `scripts/agentchat-stable-autodeploy.sh` only, with fake-repo tests. Implemented.
-2. Batch CD-B: remote dependency install scope is implemented; remote post-deploy `verify-remote` integration still needs the failure-policy decision.
+2. Batch CD-B: remote dependency install scope and remote post-deploy `verify-remote` integration are implemented with retry-pending failure behavior.
 3. Batch CD-C: macOS remote CD policy implementation or manual-update documentation.
 4. Batch CD-D: optional GitHub check-runs gate if staging worktree is not enough or if deploy-host GitHub credentials are approved.
 
-The next remote verification code batch should wait for ac-topleader to choose the `verify-remote` failure behavior.
+The next remote CD code batch should wait for ac-topleader to choose durable remote deploy state, rollback, or macOS policy.
 
 ## CD-A Implemented Scope
 

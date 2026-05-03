@@ -28,8 +28,8 @@ gaps:
 
 - direct tmux injection still lacks a durable sink-side exactly-once boundary
 - stale queued notifications are checked by unread counts, not by source message
-- remote autodeploy can still call a restart successful without post-deploy
-  version/heartbeat proof
+- remote autodeploy now verifies post-restart version/heartbeat proof; durable
+  remote deploy state and rollback remain open
 - stable autodeploy has a release gate in the script, but the live service
   template still does not enable it by default
 - `/health` does not model delivery, queue, heartbeat, runtime, or alert flows
@@ -41,7 +41,7 @@ gaps:
 | Boundary | Result |
 | --- | --- |
 | Delivery/replay/direct injection | Found five state-machine issues around stale queue entries, partial tmux injection, concurrent SSE delivery, stale push-delivered acks, and implicit inbox ack. |
-| CLI/CD | Found stable release gate default, remote post-deploy verification, remote dependency retry/install tree, standalone package versioning, and `agentchat send --help` contract gaps. |
+| CLI/CD | Found stable release gate default, remote post-deploy verification, remote dependency retry/install tree, standalone package versioning, and `agentchat send --help` contract gaps; the remote verification/dependency items are now implemented, with durable state and rollback still open. |
 | Operability | Found missing flow-level health, missing server-offline alerting, weak actionable alert fields, unknown-vs-pane-missing collapse, missing durable delivery event correlation, and stale supervisor snapshots. |
 | Architecture | Found backend and dashboard hub/source-of-truth risks; current remote sync/package/CLI/dependency isolation gates are green, but profile and architecture decisions remain open. |
 | External reliability report | Added dashboard-specific evidence that offline/unknown/degraded agents can be hidden or collapsed into active/idle, queue drop history is not product-visible, and alert updates are not consumed by the root dashboard in real time. |
@@ -57,7 +57,7 @@ gaps:
 | SYS-004 | P1 | Push-delivered ack | [backend-v2.js](/Users/kamico/agent-chat/backend-v2.js:7128), [backend-v2.js](/Users/kamico/agent-chat/backend-v2.js:4203) | Late or stale local acks can overwrite current inbox gate/runtime timestamps. | Validate `queueEntryId`, `sourceMsgId`, and monotonic `deliveredAt`; make duplicate acks idempotent no-ops. |
 | SYS-005 | P2 | Inbox cursor ack | [backend-v2.js](/Users/kamico/agent-chat/backend-v2.js:9036), [backend-v2.js](/Users/kamico/agent-chat/backend-v2.js:9068) | Reading inbox also advances cursor and clears queued notifications; a lost response can acknowledge unseen messages. | Split preview/read from explicit ack, or add compatibility `advance=1` semantics before a larger contract change. |
 | SYS-006 | P0 | Stable CD gate | [agent-chat-stable-autodeploy.service](/Users/kamico/agent-chat/agent-chat-stable-autodeploy.service:10), [scripts/agentchat-stable-autodeploy.sh](/Users/kamico/agent-chat/scripts/agentchat-stable-autodeploy.sh:12) | The script has a worktree release gate, but the service default can still deploy pushed `stable` before CI completes. | Enable `AGENTCHAT_RELEASE_GATE=worktree` in the live service template or add a stronger GitHub check-run gate. |
-| SYS-007 | P0 | Remote CD proof | [scripts/agentchat-remote-autodeploy.sh](/Users/kamico/agent-chat/scripts/agentchat-remote-autodeploy.sh:113), [bin/verify-remote](/Users/kamico/agent-chat/bin/verify-remote:193) | Remote restart success can be reported as deploy success without proving heartbeat, version, API token, or server id. | Call `verify-remote --expect-version <sha>` after restart and keep `deploy_pending=true` on failure. |
+| SYS-007 | P0 | Remote CD proof | [scripts/agentchat-remote-autodeploy.sh](/Users/kamico/agent-chat/scripts/agentchat-remote-autodeploy.sh:113), [bin/verify-remote](/Users/kamico/agent-chat/bin/verify-remote:193) | Implemented: remote restart success is followed by `verify-remote --expect-version`; failure keeps deploy pending. Durable failure state and rollback remain separate gaps. | Keep real remote smoke after stable merge; pursue durable deploy state under R-075 and rollback under R-078 if approved. |
 | SYS-008 | P0 | Remote dependency retry | [scripts/agentchat-remote-autodeploy.sh](/Users/kamico/agent-chat/scripts/agentchat-remote-autodeploy.sh:18), [scripts/agentchat-remote-autodeploy.sh](/Users/kamico/agent-chat/scripts/agentchat-remote-autodeploy.sh:98), [remote/install-remote.sh](/Users/kamico/agent-chat/remote/install-remote.sh:146) | Remote autodeploy checks root dependency manifests and can skip install after a failed install because `HEAD` already moved. | Watch `remote/package*.json`, install under `remote/`, and persist install-needed state from last successful deploy. |
 | SYS-009 | P0 | Flow-level health | [backend-v2.js](/Users/kamico/agent-chat/backend-v2.js:6304) | `/health` can remain `ok:true` while delivery, queue, runtime reports, or remote heartbeat are unhealthy. | Add health flows with `healthy/degraded/unhealthy/unknown`, TTLs, and decision rules. |
 | SYS-010 | P0 | Server outage alerting | [backend-v2.js](/Users/kamico/agent-chat/backend-v2.js:3404), [backend-v2.js](/Users/kamico/agent-chat/backend-v2.js:5006), [backend-v2.js](/Users/kamico/agent-chat/backend-v2.js:6525) | Server heartbeat expiry can collapse into agent offline state without a root server outage alert. | Emit actionable `server_offline:<server>` alerts with maintenance suppression, affected agents, runbook, and recovery condition. |
@@ -79,8 +79,8 @@ gaps:
 
 The scan also reinforced these existing repair-table rows:
 
-- R-032: remote autodeploy needs post-deploy `verify-remote`.
-- R-033: remote autodeploy must install dependencies in the runtime tree it executes.
+- R-032: remote autodeploy post-deploy `verify-remote` is implemented; real remote smoke still follows stable merge.
+- R-033: remote autodeploy dependency install scope is implemented for the runtime tree it executes.
 - R-037: stable deploy must be gated before live reset/restart.
 - R-038: dependency install retry state must survive failed deploy attempts.
 - R-047: full-clone remote install profile remains decision-gated.
@@ -110,7 +110,7 @@ Verification:
 Scope:
 
 - SYS-006 stable service release gate
-- SYS-007 remote post-deploy verification
+- SYS-007 remote post-deploy verification is implemented; remaining remote CD proof work is durable state/rollback
 - SYS-008 remote dependency retry/install tree
 
 Verification:
