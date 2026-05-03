@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import request from 'supertest';
+import { execFile } from 'child_process';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -19,6 +20,20 @@ function readJsonl(filePath) {
   } catch {
     return [];
   }
+}
+
+function execFileAsync(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
 }
 
 async function importServer(runtimeDir) {
@@ -41,6 +56,63 @@ describe('server delivery path', () => {
     serverModule = null;
     if (runtimeDir) rmSync(runtimeDir, { recursive: true, force: true });
     runtimeDir = null;
+  });
+
+  test('server import and stop do not leave runtime handles active', async () => {
+    const probeRuntimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-lifecycle-probe-'));
+    mkdirSync(path.join(probeRuntimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(probeRuntimeDir, 'data', 'agents'), { recursive: true });
+    const serverUrl = pathToFileURL(path.resolve('server.js')).href;
+    const probe = `
+      const mod = await import(${JSON.stringify(`${serverUrl}?lifecycle-probe=${Date.now()}`)});
+      await mod.stopServer();
+      console.log('stopped');
+    `;
+
+    try {
+      const result = await execFileAsync(process.execPath, ['--input-type=module', '-e', probe], {
+        cwd: path.resolve('.'),
+        env: {
+          ...process.env,
+          AGENT_CHAT_RUNTIME_DIR: probeRuntimeDir,
+          AGENT_CHAT_WEB_PORT: '18084',
+          AGENT_CHAT_BACKEND_PORT: '18090',
+        },
+        timeout: 3000,
+      });
+      expect(result.stdout).toContain('stopped');
+    } finally {
+      rmSync(probeRuntimeDir, { recursive: true, force: true });
+    }
+  });
+
+  test('stopServer cancels backend SSE reconnect timers', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+    vi.useFakeTimers();
+
+    let streamFetches = 0;
+    serverModule.setServerTestHooks({
+      backendFetch: async (url) => {
+        if (String(url).includes('/api/stream')) {
+          streamFetches++;
+          throw new Error('stream down');
+        }
+        return { ok: true, status: 200, text: async () => '', json: async () => [] };
+      },
+    });
+
+    serverModule.startServer({ port: 0 });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(streamFetches).toBe(1);
+
+    serverModule.stopServer();
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(streamFetches).toBe(1);
   });
 
   test('deliverMessage uses the async tmux path and appends to the message log', async () => {

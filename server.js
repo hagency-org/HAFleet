@@ -64,6 +64,32 @@ const dashboardMutationBoundary = createDashboardMutationBoundary({
   getLocalOverride: () => dashboardRequestLocalOverride,
 });
 const { requireDashboardMutationBoundary } = dashboardMutationBoundary;
+const runtimeIntervals = new Set();
+const runtimeTimeouts = new Set();
+let runtimeLoopsStarted = false;
+
+function trackRuntimeInterval(callback, ms) {
+  const handle = setInterval(callback, ms);
+  runtimeIntervals.add(handle);
+  return handle;
+}
+
+function trackRuntimeTimeout(callback, ms) {
+  const handle = setTimeout(() => {
+    runtimeTimeouts.delete(handle);
+    callback();
+  }, ms);
+  runtimeTimeouts.add(handle);
+  return handle;
+}
+
+function clearRuntimeHandles() {
+  for (const handle of runtimeIntervals) clearInterval(handle);
+  for (const handle of runtimeTimeouts) clearTimeout(handle);
+  runtimeIntervals.clear();
+  runtimeTimeouts.clear();
+}
+
 mkdirSync(DATA_ROOT, { recursive: true });
 mkdirSync(LOGS_ROOT, { recursive: true });
 mkdirSync(path.join(DATA_ROOT, 'agents'), { recursive: true });
@@ -198,7 +224,7 @@ try {
   fileOffset = Buffer.byteLength(raw, 'utf-8');
 } catch { /* file may not exist yet */ }
 
-setInterval(async () => {
+async function pollMessageLogTail() {
   try {
     const fh = await open(LOG_FILE, 'r');
     try {
@@ -217,7 +243,7 @@ setInterval(async () => {
       await fh.close();
     }
   } catch { /* ignore - file may not exist */ }
-}, 500);
+}
 
 // ── Message Queue with Idle Detection ────────────────────────────────
 const POLL_INTERVAL  = 1_000;  // check every 1s
@@ -2935,16 +2961,13 @@ async function sweepPaneSnapshots() {
   }
 }
 
-setInterval(async () => {
-  await sweepPaneSnapshots();
-}, 2000);
-
 installAlertProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
 
 // Backend SSE consumer — forward alert events to dashboard clients
 const ALERT_SSE_EVENTS = new Set(['alert_created', 'alert_updated', 'alert_resolved', 'alert_deleted', 'message', 'task_created', 'task_updated', 'task_deleted']);
 let backendSSEAbort = null;
 async function connectBackendSSE() {
+  if (!runtimeLoopsStarted) return;
   if (backendSSEAbort) { try { backendSSEAbort.abort(); } catch {} }
   const ac = new AbortController();
   backendSSEAbort = ac;
@@ -2977,10 +3000,9 @@ async function connectBackendSSE() {
       console.debug(`[alert-sse] backend SSE disconnected: ${e.message}`);
     }
   }
-  backendSSEAbort = null;
-  setTimeout(connectBackendSSE, 5000);
+  if (backendSSEAbort === ac) backendSSEAbort = null;
+  if (runtimeLoopsStarted) trackRuntimeTimeout(connectBackendSSE, 5000);
 }
-connectBackendSSE();
 
 // ── Target redirects (e.g. renamed sessions) ────────────────────────
 const REDIRECT_FILE = path.join(LOGS_ROOT, 'redirects.json');
@@ -3186,7 +3208,7 @@ async function processQueueTick() {
       if (!deliveryResultOk(result) && entry) {
         if (deliveryResultPartial(result)) {
           archiveDroppedQueueEntries([entry], `partial-delivery-${result.stage || 'unknown'}`, target);
-          setTimeout(() => delivering.delete(target), IDLE_THRESHOLD + 2000);
+          trackRuntimeTimeout(() => delivering.delete(target), IDLE_THRESHOLD + 2000);
           continue;
         }
         // Put it back at front
@@ -3196,7 +3218,7 @@ async function processQueueTick() {
         broadcastQueue();
       }
       // Wait a bit before allowing next delivery to same target
-      setTimeout(() => delivering.delete(target), IDLE_THRESHOLD + 2000);
+      trackRuntimeTimeout(() => delivering.delete(target), IDLE_THRESHOLD + 2000);
     }
     // Broadcast updated idle times to frontend while queue is non-empty
     if (queue.size > 0) broadcastQueue();
@@ -3204,10 +3226,6 @@ async function processQueueTick() {
     queueTickRunning = false;
   }
 }
-
-setInterval(() => {
-  void processQueueTick();
-}, POLL_INTERVAL);
 
 // ── Delayed Reminders ────────────────────────────────────────────────
 const REMINDER_FILE = path.join(LOGS_ROOT, 'reminders.json');
@@ -3342,8 +3360,7 @@ function fireReminder(reminder) {
   enqueueReminder(reminder);
 }
 
-// Timer: check every second for due reminders
-setInterval(() => {
+function processDueReminders() {
   const now = Date.now();
   let changed = false;
   for (let i = reminders.length - 1; i >= 0; i--) {
@@ -3361,7 +3378,7 @@ setInterval(() => {
   }
   // Periodically broadcast remaining times while reminders exist
   if (reminders.length > 0) broadcastReminders();
-}, 1000);
+}
 
 // POST /api/reminders — create a reminder
 app.post('/api/reminders', (req, res) => {
@@ -3397,16 +3414,42 @@ app.delete('/api/reminders/:id', (req, res) => {
 // ── Dashboard pages ─────────────────────────────────────────────────
 installDashboardPageRoutes(app, { idleThreshold: IDLE_THRESHOLD, idleThresholdSec: IDLE_THRESHOLD_SEC });
 
+function startRuntimeLoops() {
+  if (runtimeLoopsStarted) return;
+  runtimeLoopsStarted = true;
+  trackRuntimeInterval(() => { void pollMessageLogTail(); }, 500);
+  trackRuntimeInterval(() => { void sweepPaneSnapshots(); }, 2000);
+  trackRuntimeInterval(() => { void processQueueTick(); }, POLL_INTERVAL);
+  trackRuntimeInterval(() => { processDueReminders(); }, 1000);
+  void connectBackendSSE();
+}
+
+function stopRuntimeLoops() {
+  runtimeLoopsStarted = false;
+  clearRuntimeHandles();
+  if (backendSSEAbort) {
+    try { backendSSEAbort.abort(); } catch {}
+    backendSSEAbort = null;
+  }
+  for (const client of sseClients) {
+    try { client.end(); } catch {}
+  }
+  sseClients.clear();
+  delivering.clear();
+}
+
 let serverInstance = null;
 function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
   if (serverInstance) return serverInstance;
   serverInstance = app.listen(port, host, () => {
     console.log(`agent-viz running on http://${host}:${port}`);
   });
+  startRuntimeLoops();
   return serverInstance;
 }
 
 function stopServer() {
+  stopRuntimeLoops();
   if (!serverInstance) return;
   const active = serverInstance;
   serverInstance = null;
