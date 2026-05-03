@@ -160,6 +160,48 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).not.toMatch(/\b(?:localStorage|sessionStorage)\.(?:getItem|setItem|removeItem|clear)\b/);
   });
 
+  test('agent detail refresh is self-scheduled and overlap guarded', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/agents/alpha');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('let refreshInFlight = false;');
+    expect(response.text).toContain('function scheduleAgentDetailRefresh(delayMs)');
+    expect(response.text).toContain('setTimeout(runAgentDetailRefreshLoop, nextDelay)');
+    expect(response.text).toContain('document.hidden ? AGENT_DETAIL_REFRESH_HIDDEN_MS : AGENT_DETAIL_REFRESH_VISIBLE_MS');
+    expect(response.text).toContain("window.addEventListener('visibilitychange'");
+    expect(response.text).not.toContain('setInterval(refresh, 5000)');
+  });
+
+  test('alerts page guards timestamps and coalesces refreshes', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/alerts');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('function isoTime(ts)');
+    expect(response.text).toContain('function scheduleFetchAlerts(delay=0)');
+    expect(response.text).toContain('if(alertsInFlight){alertsRefreshQueued=true;return}');
+    expect(response.text).toContain('window._applyFilters=function(){scheduleFetchAlerts(150)}');
+    expect(response.text).toContain('Array.isArray(next)?next:[]');
+    expect(response.text).not.toContain('new Date(a.firstSeenAt).toISOString()');
+    expect(response.text).not.toContain('new Date(a.lastSeenAt).toISOString()');
+  });
+
+  test('monitor normalizes queue and reminder payload arrays', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('function normalizeArrayPayload(payload)');
+    expect(response.text).toContain('queueItems = normalizeArrayPayload(JSON.parse(e.data));');
+    expect(response.text).toContain('reminderItems = normalizeArrayPayload(JSON.parse(e.data));');
+    expect(response.text).toContain('queueItems = normalizeArrayPayload(await r.json());');
+    expect(response.text).toContain('reminderItems = normalizeArrayPayload(await r.json());');
+  });
+
   test.each([
     '/',
     '/agents/alpha',
