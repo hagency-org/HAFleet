@@ -37,6 +37,7 @@ The first phase is documentation and audit only. Code repairs start after the re
 | `15-phase2-7-resumption-plan.md` | Updated Phase 2-7 implementation order using the new CI/CD gates. |
 | `16-cd-b0-remote-install-profile.md` | Remote install/profile/reproducibility decision-support contract and static gate. |
 | `17-systems-skill-scan.md` | Deep systems-audit scan after expanding local systems skills with SRE, delivery, CI/CD, CLI, and architecture lenses. |
+| `18-remote-relay-auto-update-design.md` | Design-only remote relay auto-update plan after the rhodes1 standalone-package update failure. |
 | `system-map.md` | Repository map, runtime components, major flows, and source-of-truth boundaries. |
 | `kernel-boundaries.md` | Core/adjacent/edge classification and ownership rules. |
 | `audit-findings.md` | Consolidated structural and code audit findings with evidence. |
@@ -56,3 +57,4 @@ The first phase is documentation and audit only. Code repairs start after the re
 - CD preflight and post-deploy version checks are implemented; remaining CD work is decision-gated in `14` and remote install/profile facts are locked in `16`.
 - Phase 2-7 resumption is staged in `15`; RLP4-A MCP media cache relocation, RLP4-B v1 home/runtime resolver hardening, RLP2-A runtime observation provenance, RLP2-B custom local server ID/local server record, CLI unknown-activity observability, RLP6-A profile-scoped help/docs, RLP6-B `agent-ls` resolver consistency, RLP3-A auth readiness diagnostics, RLP3-A2 server credential boundary diagnostics, and RLP3-B1 dashboard mutation boundary are implemented. RLP7-B dependency audit findings are documented for approval. CD decision docs now include full-clone remote profile, dependency lock, standalone version, and install-reconciliation decisions; deploy-behavior batches remain operator-gated.
 - The expanded systems skill scan is documented in `17`; it adds new direct-injection, flow-health, delivery-event, CLI-contract, and architecture-fitness repair rows while reconfirming the pending CD/remote decision rows.
+- The rhodes1 recovery and old-relay auto-update design are documented in `18`; implementation is decision-gated, with fleet inventory and standalone update guard recommended first.
