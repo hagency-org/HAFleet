@@ -8357,6 +8357,15 @@ app.get('/api/subconscious/events/:name', (req, res) => {
 
 // ── Tasks CRUD ───────────────────────────────────────────────────────
 const _tokenFromTaskAssignee = r => { const t = taskStore.getTask(r.params?.id); return t?.assignee || ''; };
+function parseTaskPageInt(value, fallback = 0) {
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+function parseTaskPageLimit(value) {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.min(n, 500);
+}
 
 app.post('/api/tasks', requireBearer, (req, res) => {
   try {
@@ -8375,7 +8384,13 @@ app.get('/api/tasks', (req, res) => {
   if (req.query.status) filters.status = req.query.status;
   if (req.query.priority) filters.priority = req.query.priority;
   if (req.query.label) filters.label = req.query.label;
-  const tasks = taskStore.listTasks(filters).map(task => {
+  const offset = parseTaskPageInt(req.query.offset, 0);
+  const limit = parseTaskPageLimit(req.query.limit);
+  let taskRows = taskStore.listTasks(filters);
+  if (offset > 0 || limit !== null) {
+    taskRows = taskRows.slice(offset, limit === null ? undefined : offset + limit);
+  }
+  const tasks = taskRows.map(task => {
     if (!task.assignee) return task;
     const snapshot = supervisorSnapshotStore.getTarget(task.assignee);
     if (!snapshot) return task;

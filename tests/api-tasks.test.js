@@ -56,6 +56,12 @@ describe('task system API', () => {
     const byPriority = await request(context.app).get('/api/tasks?priority=p0');
     expect(byPriority.body).toHaveLength(1);
     expect(byPriority.body[0].title).toBe('A');
+
+    const limited = await request(context.app).get('/api/tasks?limit=2');
+    expect(limited.body.map((task) => task.title)).toEqual(['A', 'B']);
+
+    const paged = await request(context.app).get('/api/tasks?limit=1&offset=1');
+    expect(paged.body.map((task) => task.title)).toEqual(['B']);
   });
 
   test('operator PATCH updates all fields', async () => {

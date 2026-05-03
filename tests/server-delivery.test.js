@@ -626,7 +626,7 @@ describe('server delivery path', () => {
     });
 
     const taskCreate = await request(serverModule.app).post('/api/tasks').send({ title: 'ship it' });
-    const taskList = await request(serverModule.app).get('/api/tasks?assignee=alpha&status=open');
+    const taskList = await request(serverModule.app).get('/api/tasks?assignee=alpha&status=open&limit=25&offset=5');
     const supervisorAgent = await request(serverModule.app).get('/api/supervisor/agents/alpha?limit=7');
     const subconsciousPrompt = await request(serverModule.app)
       .post('/api/subconscious/upstream/user-prompt/alpha')
@@ -653,7 +653,7 @@ describe('server delivery path', () => {
       ));
     expect(proxyRequests).toEqual([
       { url: '/api/tasks', method: 'POST' },
-      { url: '/api/tasks?assignee=alpha&status=open', method: 'GET' },
+      { url: '/api/tasks?assignee=alpha&status=open&limit=25&offset=5', method: 'GET' },
       { url: '/api/supervisor/agents/alpha?limit=7', method: 'GET' },
       { url: '/api/subconscious/upstream/user-prompt/alpha', method: 'POST' },
       { url: '/api/subconscious/events/alpha?limit=5', method: 'GET' },

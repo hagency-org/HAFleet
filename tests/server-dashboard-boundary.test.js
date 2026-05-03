@@ -242,6 +242,27 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).not.toContain('allAgents = await r.json();');
   });
 
+  test('task dashboards bound and coalesce task list refreshes', async () => {
+    const mod = await setup();
+
+    const tasks = await request(mod.app).get('/tasks');
+    const detail = await request(mod.app).get('/agents/alpha');
+
+    expect(tasks.status).toBe(200);
+    expect(detail.status).toBe(200);
+    expect(tasks.text).toContain('const TASK_LIST_LIMIT=200;');
+    expect(tasks.text).toContain('function taskListUrl(filters)');
+    expect(tasks.text).toContain("p.set('limit',String(TASK_LIST_LIMIT));");
+    expect(tasks.text).toContain('if(refreshInFlight){refreshQueued=true;return}');
+    expect(tasks.text).toContain('taskCache=normalizeTaskPayload(await r.json());');
+    expect(detail.text).toContain('const TASK_LIST_LIMIT = 200;');
+    expect(detail.text).toContain('function taskListUrl(filterVal)');
+    expect(detail.text).toContain("p.set('limit', String(TASK_LIST_LIMIT));");
+    expect(detail.text).toContain('if (taskListInFlight) { taskListRefreshQueued = true; return; }');
+    expect(detail.text).toContain('taskListCache = normalizeTaskPayload(await r.json());');
+    expect(detail.text).not.toContain("filterVal ? '/api/tasks?assignee=' + encodeURIComponent(filterVal) : '/api/tasks'");
+  });
+
   test.each([
     '/',
     '/agents/alpha',
