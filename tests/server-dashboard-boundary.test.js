@@ -10,6 +10,11 @@ async function importServer(runtimeDir, extraEnv = {}) {
   process.env.AGENT_CHAT_WEB_PORT = '18084';
   process.env.AGENT_CHAT_BACKEND_PORT = '18090';
   process.env.AGENT_CHAT_DASHBOARD_TOKEN = extraEnv.AGENT_CHAT_DASHBOARD_TOKEN || '';
+  if (extraEnv.AGENT_IDLE_THRESHOLD_MS !== undefined) {
+    process.env.AGENT_IDLE_THRESHOLD_MS = extraEnv.AGENT_IDLE_THRESHOLD_MS;
+  } else {
+    delete process.env.AGENT_IDLE_THRESHOLD_MS;
+  }
   const serverUrl = pathToFileURL(path.resolve('server.js')).href;
   const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   return import(`${serverUrl}?dashboard-boundary-test=${cacheBust}`);
@@ -34,6 +39,7 @@ describe('server dashboard mutation boundary', () => {
     if (runtimeDir) rmSync(runtimeDir, { recursive: true, force: true });
     runtimeDir = null;
     delete process.env.AGENT_CHAT_DASHBOARD_TOKEN;
+    delete process.env.AGENT_IDLE_THRESHOLD_MS;
   });
 
   test('keeps local queue mutation compatible', async () => {
@@ -100,5 +106,55 @@ describe('server dashboard mutation boundary', () => {
       .send({ owner: 'operator' });
     expect(create.status).toBe(403);
     expect(seen).toEqual([]);
+  });
+
+  test.each([
+    ['/', ['<title>Agent Monitor</title>', 'AGENT MONITOR']],
+    ['/agents/alpha', ['<title>Agent Detail · alpha</title>', 'Agent Detail', 'id="supervisor-audit-history"']],
+    ['/alerts', ['<title>Alerts</title>', '<h1>ALERTS</h1>']],
+    ['/tasks', ['<title>Tasks</title>', '<h1>TASKS</h1>']],
+    ['/config', ['<title>Config</title>', '<h1>GLOBAL CONFIG</h1>']],
+  ])('serves %s as non-cacheable html', async (route, markers) => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get(route);
+
+    expect(response.status).toBe(200);
+    expect(response.headers['content-type']).toMatch(/^text\/html\b/);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.text).toContain('<!DOCTYPE html>');
+    for (const marker of markers) expect(response.text).toContain(marker);
+  });
+
+  test('passes the idle threshold into the monitor page renderer', async () => {
+    const mod = await setup({ AGENT_IDLE_THRESHOLD_MS: '45000' });
+
+    const response = await request(mod.app).get('/');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('const IDLE_THRESHOLD_MS = 45000;');
+    expect(response.text).toContain('const IDLE_THRESHOLD_SEC = 45;');
+  });
+
+  test('redirects agent audit page to the detail audit hash', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/agents/alpha/audit');
+
+    expect(response.status).toBe(302);
+    expect(response.headers.location).toBe('/agents/alpha#audit');
+  });
+
+  test.each([
+    '/agents/bad.name',
+    '/agents/bad.name/audit',
+  ])('rejects invalid agent name for %s', async (route) => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get(route);
+
+    expect(response.status).toBe(400);
+    expect(response.headers['content-type']).toMatch(/^text\/plain\b/);
+    expect(response.text).toBe('invalid agent name');
   });
 });
