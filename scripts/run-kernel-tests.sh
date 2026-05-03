@@ -18,24 +18,69 @@ fi
 
 declare -a shard_names=()
 declare -a shard_pids=()
+declare -a shard_pgids=()
 declare -a shard_logs=()
 
+terminate_tracked_process() {
+  local pid="$1"
+  local pgid="$2"
+  local signal="$3"
+  if [[ -n "$pgid" ]]; then
+    if kill -0 -- "-$pgid" >/dev/null 2>&1; then
+      kill "-$signal" -- "-$pgid" >/dev/null 2>&1 || true
+      return 0
+    fi
+    return 1
+  fi
+  [[ -n "$pid" ]] || return 1
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    return 1
+  fi
+  kill "-$signal" "$pid" >/dev/null 2>&1 || true
+  return 0
+}
+
+cleanup_shard_descendants() {
+  local i="$1"
+  local needs_kill=0
+  if terminate_tracked_process "${shard_pids[$i]:-}" "${shard_pgids[$i]:-}" TERM; then
+    needs_kill=1
+  fi
+  if [[ "$needs_kill" -eq 1 ]]; then
+    sleep 0.2
+    terminate_tracked_process "${shard_pids[$i]:-}" "${shard_pgids[$i]:-}" KILL || true
+  fi
+  return 0
+}
+
 cleanup_shards() {
-  local pid
-  for pid in "${shard_pids[@]}"; do
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      kill "$pid" >/dev/null 2>&1 || true
+  local signal="${1:-TERM}"
+  local i
+  local needs_kill=0
+  for i in "${!shard_pids[@]}"; do
+    if terminate_tracked_process "${shard_pids[$i]}" "${shard_pgids[$i]:-}" "$signal"; then
+      needs_kill=1
+    fi
+  done
+  if [[ "$needs_kill" -eq 1 ]]; then
+    sleep 0.2
+  fi
+  for i in "${!shard_pids[@]}"; do
+    terminate_tracked_process "${shard_pids[$i]}" "${shard_pgids[$i]:-}" KILL || true
+    if [[ -n "${shard_pids[$i]:-}" ]]; then
+      wait "${shard_pids[$i]}" >/dev/null 2>&1 || true
     fi
   done
   local log_file
   for log_file in "${shard_logs[@]}"; do
-    rm -f "$log_file"
+    [[ -n "$log_file" ]] && rm -f "$log_file"
   done
+  return 0
 }
 trap cleanup_shards EXIT
-trap 'cleanup_shards; exit 129' HUP
-trap 'cleanup_shards; exit 130' INT
-trap 'cleanup_shards; exit 143' TERM
+trap 'trap - EXIT; cleanup_shards HUP; exit 129' HUP
+trap 'trap - EXIT; cleanup_shards INT; exit 130' INT
+trap 'trap - EXIT; cleanup_shards TERM; exit 143' TERM
 
 start_shard() {
   local name="$1"
@@ -44,11 +89,15 @@ start_shard() {
   log_file="$(mktemp "${TMPDIR:-/tmp}/agent-chat-kernel-tests.XXXXXX")"
   shard_names+=("$name")
   shard_logs+=("$log_file")
+  set -m
   (
     set -euo pipefail
     "$vitest_bin" run --no-file-parallelism --maxWorkers=1 "$@"
   ) >"$log_file" 2>&1 &
-  shard_pids+=("$!")
+  local pid="$!"
+  set +m
+  shard_pids+=("$pid")
+  shard_pgids+=("$pid")
 }
 
 start_shard "api messaging" \
@@ -94,6 +143,7 @@ start_shard "contracts and cli" \
   tests/verify-remote-cli.test.js \
   tests/verify-cd-preflight.test.js \
   tests/verify-ci-timeout.test.js \
+  tests/ci-script-cleanup.test.js \
   tests/remote-install-profile.test.js \
   tests/remote-autodeploy.test.js \
   tests/dev-autodeploy.test.js \
@@ -107,7 +157,11 @@ for i in "${!shard_pids[@]}"; do
   status=$?
   set -e
   cat "${shard_logs[$i]}"
+  cleanup_shard_descendants "$i"
   rm -f "${shard_logs[$i]}"
+  shard_pids[$i]=""
+  shard_pgids[$i]=""
+  shard_logs[$i]=""
   if [[ "$status" -ne 0 ]]; then
     echo "kernel test shard failed: ${shard_names[$i]} (exit ${status})" >&2
     failed=1

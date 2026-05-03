@@ -32,31 +32,71 @@ if [[ "${AGENTCHAT_VERIFY_CI_TIMEOUT_ACTIVE:-0}" != "1" ]]; then
   fi
   exit "$status"
 fi
-unset AGENTCHAT_VERIFY_CI_TIMEOUT_ACTIVE
-
-echo "== environment =="
-npm run report:ci-env
-
 declare -a step_names=()
 declare -a step_pids=()
+declare -a step_pgids=()
 declare -a step_logs=()
 
+terminate_tracked_process() {
+  local pid="$1"
+  local pgid="$2"
+  local signal="$3"
+  if [[ -n "$pgid" ]]; then
+    if kill -0 -- "-$pgid" >/dev/null 2>&1; then
+      kill "-$signal" -- "-$pgid" >/dev/null 2>&1 || true
+      return 0
+    fi
+    return 1
+  fi
+  [[ -n "$pid" ]] || return 1
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    return 1
+  fi
+  kill "-$signal" "$pid" >/dev/null 2>&1 || true
+  return 0
+}
+
+cleanup_step_descendants() {
+  local i="$1"
+  local needs_kill=0
+  if terminate_tracked_process "${step_pids[$i]:-}" "${step_pgids[$i]:-}" TERM; then
+    needs_kill=1
+  fi
+  if [[ "$needs_kill" -eq 1 ]]; then
+    sleep 0.2
+    terminate_tracked_process "${step_pids[$i]:-}" "${step_pgids[$i]:-}" KILL || true
+  fi
+  return 0
+}
+
 cleanup_steps() {
-  local pid
-  for pid in "${step_pids[@]}"; do
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      kill "$pid" >/dev/null 2>&1 || true
+  local signal="${1:-TERM}"
+  local i
+  local needs_kill=0
+  for i in "${!step_pids[@]}"; do
+    if terminate_tracked_process "${step_pids[$i]}" "${step_pgids[$i]:-}" "$signal"; then
+      needs_kill=1
+    fi
+  done
+  if [[ "$needs_kill" -eq 1 ]]; then
+    sleep 0.2
+  fi
+  for i in "${!step_pids[@]}"; do
+    terminate_tracked_process "${step_pids[$i]}" "${step_pgids[$i]:-}" KILL || true
+    if [[ -n "${step_pids[$i]:-}" ]]; then
+      wait "${step_pids[$i]}" >/dev/null 2>&1 || true
     fi
   done
   local log_file
   for log_file in "${step_logs[@]}"; do
-    rm -f "$log_file"
+    [[ -n "$log_file" ]] && rm -f "$log_file"
   done
+  return 0
 }
 trap cleanup_steps EXIT
-trap 'cleanup_steps; exit 129' HUP
-trap 'cleanup_steps; exit 130' INT
-trap 'cleanup_steps; exit 143' TERM
+trap 'trap - EXIT; cleanup_steps HUP; exit 129' HUP
+trap 'trap - EXIT; cleanup_steps INT; exit 130' INT
+trap 'trap - EXIT; cleanup_steps TERM; exit 143' TERM
 
 start_step() {
   local name="$1"
@@ -65,13 +105,46 @@ start_step() {
   log_file="$(mktemp "${TMPDIR:-/tmp}/agent-chat-verify-ci.XXXXXX")"
   step_names+=("$name")
   step_logs+=("$log_file")
+  set -m
   (
     set -euo pipefail
     "$@"
   ) >"$log_file" 2>&1 &
-  step_pids+=("$!")
+  local pid="$!"
+  set +m
+  step_pids+=("$pid")
+  step_pgids+=("$pid")
 }
 
+wait_step() {
+  local i="$1"
+  echo "== ${step_names[$i]} =="
+  set +e
+  wait "${step_pids[$i]}"
+  local status=$?
+  set -e
+  if [[ "$status" -ne 0 ]]; then
+    cat "${step_logs[$i]}"
+    echo "verify:ci step failed: ${step_names[$i]} (exit ${status})" >&2
+  else
+    cat "${step_logs[$i]}"
+  fi
+  cleanup_step_descendants "$i"
+  rm -f "${step_logs[$i]}"
+  step_pids[$i]=""
+  step_pgids[$i]=""
+  step_logs[$i]=""
+  return "$status"
+}
+
+unset AGENTCHAT_VERIFY_CI_TIMEOUT_ACTIVE
+
+start_step "environment" npm run report:ci-env
+if ! wait_step 0; then
+  exit 1
+fi
+
+static_start_index="${#step_pids[@]}"
 start_step "patch hygiene" git diff --check
 start_step "syntax" npm run check:syntax
 start_step "cli contract" npm run check:cli-contract
@@ -80,26 +153,19 @@ start_step "dependency boundary" npm run check:dep-isolation
 start_step "architecture boundaries" npm run check:architecture-boundaries
 
 failed=0
-for i in "${!step_pids[@]}"; do
-  echo "== ${step_names[$i]} =="
-  set +e
-  wait "${step_pids[$i]}"
-  status=$?
-  set -e
-  if [[ "$status" -ne 0 ]]; then
-    cat "${step_logs[$i]}"
-    echo "verify:ci step failed: ${step_names[$i]} (exit ${status})" >&2
+for ((i = static_start_index; i < ${#step_pids[@]}; i++)); do
+  if ! wait_step "$i"; then
     failed=1
-  else
-    cat "${step_logs[$i]}"
   fi
-  rm -f "${step_logs[$i]}"
 done
 if [[ "$failed" -ne 0 ]]; then
   exit 1
 fi
 
-echo "== kernel and cli smoke tests =="
-npm run test:kernel
+kernel_step_index="${#step_pids[@]}"
+start_step "kernel and cli smoke tests" npm run test:kernel
+if ! wait_step "$kernel_step_index"; then
+  exit 1
+fi
 
 echo "CI verification passed."
