@@ -270,10 +270,25 @@ const {
   dataPath,
   agentDataPath,
   loadJsonSync,
-  saveJson,
+  saveJson: storageSaveJson,
   flushAllPendingJsonWrites,
   loadJsonlTailSync,
 } = jsonStorage;
+const forcedJsonSaveFailures = new Set();
+
+function saveJson(name, data, options = {}) {
+  if (forcedJsonSaveFailures.has(name)) {
+    console.error(`Forced JSON save failure for ${dataPath(name)}`);
+    return false;
+  }
+  return storageSaveJson(name, data, options);
+}
+
+function setJsonSaveFailureForTest(name, enabled = true) {
+  if (typeof name !== 'string' || !name.trim()) return;
+  if (enabled) forcedJsonSaveFailures.add(name);
+  else forcedJsonSaveFailures.delete(name);
+}
 
 function normalizeServer(value) {
   if (typeof value !== 'string') return null;
@@ -2833,6 +2848,32 @@ const swapAlertState = {
 // scopePressureState tracks the high/low state for resource alerts (state-based, not just cooldown)
 const scopePressureState = new Map(); // agent -> { high:bool }
 let localMcpSessionCacheAt = 0;
+
+function messageCounterFromId(id) {
+  if (typeof id !== 'string') return 0;
+  const match = /^msg_(\d+)$/.exec(id.trim());
+  if (!match) return 0;
+  const value = Number.parseInt(match[1], 10);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function maxPersistedMessageCounter(rows = messages) {
+  if (!Array.isArray(rows)) return 0;
+  let max = 0;
+  for (const row of rows) {
+    max = Math.max(max, messageCounterFromId(row?.id));
+  }
+  return max;
+}
+
+{
+  const loadedCounter = Number.isFinite(Number(msgCounter)) ? Math.max(0, Math.floor(Number(msgCounter))) : 0;
+  const reconciledCounter = Math.max(loadedCounter, maxPersistedMessageCounter(messages));
+  msgCounter = reconciledCounter;
+  if (reconciledCounter !== loadedCounter) {
+    saveJson('.msg_counter', msgCounter, { immediate: true });
+  }
+}
 let localMcpSessionCache = new Set();
 const agentMachines = new Map(); // agentName -> AgentStateMachine
 
@@ -3202,10 +3243,13 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
 }
 localActivitySweepState.selectionCursor = Math.max(0, Number(localActivitySweepState.selectionCursor) || 0);
 
-function nextMsgId() {
-  msgCounter++;
-  saveJson('.msg_counter', msgCounter);
-  return `msg_${String(msgCounter).padStart(4, '0')}`;
+function reserveNextMsgId() {
+  const nextCounter = msgCounter + 1;
+  if (!saveJson('.msg_counter', nextCounter, { immediate: true })) {
+    return { ok: false, error: 'msg_counter persistence failed' };
+  }
+  msgCounter = nextCounter;
+  return { ok: true, id: `msg_${String(msgCounter).padStart(4, '0')}` };
 }
 
 function saveAgents(immediate = false) { saveJson('agents.json', agents, { immediate }); }
@@ -3292,39 +3336,64 @@ function collectUnreadRetainedMessageIds() {
   return keep;
 }
 
-function pruneMessagesInMemory() {
-  if (!Array.isArray(messages) || messages.length <= MESSAGE_RETENTION_LIMIT) {
-    return { pruned: 0, archived: 0 };
+function planMessagePrune(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (list.length <= MESSAGE_RETENTION_LIMIT) {
+    return { retained: list, pruned: [] };
   }
-  const retainFrom = Math.max(0, messages.length - MESSAGE_RETENTION_LIMIT);
+  const retainFrom = Math.max(0, list.length - MESSAGE_RETENTION_LIMIT);
   const unreadKeepIds = collectUnreadRetainedMessageIds();
   const retained = [];
   const pruned = [];
 
-  for (let i = 0; i < messages.length; i += 1) {
-    const msg = messages[i];
+  for (let i = 0; i < list.length; i += 1) {
+    const msg = list[i];
     const keep = i >= retainFrom || (typeof msg?.id === 'string' && unreadKeepIds.has(msg.id));
     if (keep) retained.push(msg);
     else pruned.push(msg);
   }
+  return { retained, pruned };
+}
 
-  if (pruned.length === 0) return { pruned: 0, archived: 0 };
+function archivePrunedMessages(pruned) {
+  if (!Array.isArray(pruned) || pruned.length === 0) return 0;
   try {
     appendFileSync(MESSAGE_ARCHIVE_LOG, `${pruned.map((msg) => JSON.stringify(msg)).join('\n')}\n`);
+    return pruned.length;
   } catch (e) {
     console.error(`Failed to archive pruned messages to ${MESSAGE_ARCHIVE_LOG}: ${e?.message || e}`);
+    return 0;
   }
+}
+
+function pruneMessagesInMemory() {
+  if (!Array.isArray(messages) || messages.length <= MESSAGE_RETENTION_LIMIT) {
+    return { pruned: 0, archived: 0 };
+  }
+  const { retained, pruned } = planMessagePrune(messages);
+
+  if (pruned.length === 0) return { pruned: 0, archived: 0 };
   messages.splice(0, messages.length, ...retained);
-  return { pruned: pruned.length, archived: pruned.length };
+  const archived = archivePrunedMessages(pruned);
+  return { pruned: pruned.length, archived };
 }
 
 function saveMessages() {
   invalidateUnreadMessageIndex();
-  pruneMessagesInMemory();
+  const { retained, pruned } = planMessagePrune(messages);
+  const nextMessages = pruned.length > 0 ? retained : messages;
+  if (!saveJson('messages.json', nextMessages)) {
+    invalidateUnreadMessageIndex();
+    return false;
+  }
+  if (pruned.length > 0) {
+    messages.splice(0, messages.length, ...retained);
+    archivePrunedMessages(pruned);
+  }
   invalidateUnreadMessageIndex();
-  saveJson('messages.json', messages);
+  return true;
 }
-function saveCursors() { saveJson('cursors.json', cursors); }
+function saveCursors() { return saveJson('cursors.json', cursors); }
 function saveServers() { saveJson('servers.json', servers); }
 function saveAgentRuntime(immediate = false) { saveJson('agent_runtime.json', agentRuntime, { immediate }); }
 function saveTaskGraphs(next = taskGraphStore.dump()) { saveJson('task_graphs.json', next); }
@@ -3872,6 +3941,17 @@ function ensureCursor(agentName) {
   return cursors[agentName];
 }
 
+function snapshotCursor(agentName) {
+  return Object.prototype.hasOwnProperty.call(cursors, agentName)
+    ? cloneJsonValue(cursors[agentName])
+    : undefined;
+}
+
+function restoreCursor(agentName, snapshot) {
+  if (snapshot === undefined) delete cursors[agentName];
+  else cursors[agentName] = snapshot;
+}
+
 function isAfterCursor(msg, ts, id) {
   if (!msg) return false;
   const cursorTs = Number(ts) || 0;
@@ -4118,11 +4198,27 @@ function buildUnreadInboxSnapshot(agentName, options = {}) {
   };
 }
 
+function persistNewMessage(msg) {
+  const index = messages.length;
+  messages.push(msg);
+  if (saveMessages()) return { ok: true };
+  if (messages[index] === msg) {
+    messages.splice(index, 1);
+  } else {
+    const currentIndex = messages.findIndex((row) => row === msg || row?.id === msg?.id);
+    if (currentIndex >= 0) messages.splice(currentIndex, 1);
+  }
+  invalidateUnreadMessageIndex();
+  return { ok: false, error: 'messages persistence failed' };
+}
+
 function dispatchStoredMessage(msg, options = {}) {
   const senderIsAgent = options.senderIsAgent === true;
   const directTargetKind = options.directTargetKind || null;
-  messages.push(msg);
-  saveMessages();
+  const persisted = persistNewMessage(msg);
+  if (!persisted.ok) {
+    return { ok: false, status: 503, error: persisted.error };
+  }
   const targetAgents = deliveryTargetAgentsForMessage(msg, directTargetKind);
   appendDeliveryEvent({
     type: 'message.accepted',
@@ -4169,7 +4265,7 @@ function dispatchStoredMessage(msg, options = {}) {
       if (state.online) pushNotify(agent, msg);
     }
   }
-  return msg;
+  return { ok: true, msg };
 }
 
 function dispatchInternalDirectMessage(payload = {}) {
@@ -4187,8 +4283,13 @@ function dispatchInternalDirectMessage(payload = {}) {
   const summary = normalizeOptionalText(payload.summary, 4000);
   const full = typeof payload.full === 'string' ? payload.full.trim() : '';
   if (!summary) throw new Error('summary required');
+  const idReservation = reserveNextMsgId();
+  if (!idReservation.ok) {
+    throw new Error(idReservation.error || 'message id reservation failed');
+  }
+
   const msg = {
-    id: nextMsgId(),
+    id: idReservation.id,
     ts: Date.now(),
     from: fromName,
     to: toName,
@@ -4205,7 +4306,9 @@ function dispatchInternalDirectMessage(payload = {}) {
   if (normalizedSchema.value) msg.schema = normalizedSchema.value;
   const senderIsAgent = fromName !== 'system' && isAgentRecord(agents[fromName]);
   const directTargetKind = isAgentRecord(agents[toName]) ? 'agent' : 'human';
-  return dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
+  const result = dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
+  if (!result.ok) throw new Error(result.error || 'message persistence failed');
+  return result.msg;
 }
 
 const supervisorActionEngine = createSupervisorActionEngine({
@@ -6463,8 +6566,14 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
     'FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.',
   ].filter(Boolean).join('\n');
 
+  const idReservation = reserveNextMsgId();
+  if (!idReservation.ok) {
+    console.warn(`[catchup] failed to reserve message id for ${agentName}: ${idReservation.error || 'unknown error'}`);
+    return;
+  }
+
   const msg = {
-    id: nextMsgId(),
+    id: idReservation.id,
     ts: Date.now(),
     from: 'system',
     to: agentName,
@@ -6488,8 +6597,11 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
       },
     },
   };
-  messages.push(msg);
-  saveMessages();
+  const persisted = persistNewMessage(msg);
+  if (!persisted.ok) {
+    console.warn(`[catchup] failed to persist catchup message for ${agentName}: ${persisted.error || 'unknown error'}`);
+    return;
+  }
   appendDeliveryEvent({
     type: 'message.accepted',
     source: 'backend',
@@ -9282,8 +9394,13 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
     }
   }
 
+  const idReservation = reserveNextMsgId();
+  if (!idReservation.ok) {
+    return res.status(503).json({ error: idReservation.error || 'message id reservation failed' });
+  }
+
   const msg = {
-    id: nextMsgId(),
+    id: idReservation.id,
     ts: Date.now(),
     from: fromName,
     to: toName || null,
@@ -9369,7 +9486,10 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
     msg.suppressedRecipients = [...suppressedRecipients];
   }
 
-  dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
+  const dispatchResult = dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
+  if (!dispatchResult.ok) {
+    return res.status(dispatchResult.status || 503).json({ error: dispatchResult.error || 'message persistence failed' });
+  }
   const taskGraph = handleTaskGraphMessageHook(msg);
 
   res.json({
@@ -9461,7 +9581,12 @@ app.post('/api/messages/:id/suppress', requireAgentToken(_tokenFromAgent), (req,
   if (!Array.isArray(msg.suppressedRecipients)) msg.suppressedRecipients = [];
   if (!msg.suppressedRecipients.includes(agentName)) {
     msg.suppressedRecipients.push(agentName);
-    saveMessages();
+    if (!saveMessages()) {
+      msg.suppressedRecipients = msg.suppressedRecipients.filter((name) => name !== agentName);
+      if (msg.suppressedRecipients.length === 0) delete msg.suppressedRecipients;
+      invalidateUnreadMessageIndex();
+      return res.status(503).json({ error: 'messages persistence failed' });
+    }
     invalidatePendingHumanTargets(agentName);
     appendDeliveryEvent({
       type: 'message.suppressed',
@@ -9608,6 +9733,7 @@ app.get('/api/inbox/:agent', requireAgentToken(_tokenFromAgent), (req, res) => {
   const kindsList = parseKindsFilter(req.query.kinds);
   const kinds = kindsList.length > 0 ? new Set(kindsList) : null;
 
+  const cursorSnapshot = snapshotCursor(agentName);
   const cursor = ensureCursor(agentName);
   const { unread } = getUnreadInboxMessages(agentName, { kinds: kindsList });
   const dmRaw = unread.filter(m => m.to === agentName);
@@ -9626,7 +9752,10 @@ app.get('/api/inbox/:agent', requireAgentToken(_tokenFromAgent), (req, res) => {
     && unread.some((msg) => msg?.id === pendingGate.sourceMsgId)
   );
   if (!kinds && advanceInboxCursor(cursor, unread)) {
-    saveCursors();
+    if (!saveCursors()) {
+      restoreCursor(agentName, cursorSnapshot);
+      return res.status(503).json({ error: 'cursor persistence failed' });
+    }
     invalidatePendingHumanTargets(agentName);
   }
   if (!kinds) {
@@ -9690,6 +9819,7 @@ app.get('/api/groups/:name/messages', (req, res) => {
   if (unreadLimit === null && advanceMode !== 'all') {
     unreadLimit = 10; // default preview window
   }
+  const cursorSnapshot = snapshotCursor(resolvedAgentName);
   const cursor = ensureCursor(resolvedAgentName);
   const groupCursor = getGroupCursor(cursor, groupName);
   const groupTs = groupCursor.ts;
@@ -9714,7 +9844,10 @@ app.get('/api/groups/:name/messages', (req, res) => {
   if (advanceMode !== 'none') {
     const cursorSource = advanceMode === 'all' ? unreadRaw : deliveredUnreadRaw;
     if (advanceGroupCursor(cursor, groupName, cursorSource)) {
-      saveCursors();
+      if (!saveCursors()) {
+        restoreCursor(resolvedAgentName, cursorSnapshot);
+        return res.status(503).json({ error: 'cursor persistence failed' });
+      }
       const advancedCursor = getGroupCursor(cursor, groupName);
       const advancedIds = unreadRaw
         .filter((msg) => !isAfterCursor(msg, advancedCursor.ts, advancedCursor.id))
@@ -9968,6 +10101,7 @@ export const __backendV2TestInternals = {
   notifyAgentCatchupForTest: notifyAgentCatchup,
   pushNotifyForTest: pushNotify,
   safeWriteJsonFile,
+  setJsonSaveFailureForTest,
 };
 
 if (process.argv[1] === __filename) {

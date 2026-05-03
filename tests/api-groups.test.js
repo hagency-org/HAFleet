@@ -551,6 +551,32 @@ describe('groups api', () => {
     expect(second.body.unread).toHaveLength(0);
   });
 
+  test('advance=all returns 503 and leaves unread state when group cursor persistence fails', async () => {
+    context = await createBackendTestContext('api-groups-test-', baseSeed({
+      groups: {
+        dev: { name: 'dev', members: ['alpha'], createdAt: 1000 },
+      },
+      messages: [
+        { id: 'msg_1', ts: 1000, from: 'beta', group: 'dev', type: 'inform', priority: 'normal', summary: 'm1', full: 'm1', mentions: [], reply_to: null },
+      ],
+    }));
+
+    context.internals.setJsonSaveFailureForTest('cursors.json', true);
+    const failedAdvance = await request(context.app).get('/api/groups/dev/messages?agent=alpha&advance=all');
+
+    expect(failedAdvance.status).toBe(503);
+    expect(failedAdvance.body).toEqual({ error: 'cursor persistence failed' });
+    expect(readJson(cursorsPath(context.runtimeDir))).toEqual({});
+    expect(readDeliveryEvents(context.runtimeDir)).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'group.read_ack' }),
+    ]));
+
+    context.internals.setJsonSaveFailureForTest('cursors.json', false);
+    const preview = await request(context.app).get('/api/groups/dev/messages?agent=alpha&advance=none');
+    expect(preview.status).toBe(200);
+    expect(preview.body.unread.map((row) => row.id)).toEqual(['msg_1']);
+  });
+
   test('requires bearer or target agent token before advancing a group cursor when auth is configured', async () => {
     context = await createBackendTestContext('api-groups-test-', baseSeed({
       groups: {

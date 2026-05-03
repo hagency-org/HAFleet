@@ -25,6 +25,10 @@ function readPersistedMessages(runtimeDir) {
   return JSON.parse(readFileSync(filePath, 'utf-8'));
 }
 
+function readJsonFile(runtimeDir, name) {
+  return JSON.parse(readFileSync(path.join(runtimeDir, 'data', name), 'utf-8'));
+}
+
 async function createQueueStub(handler) {
   const requests = [];
   const server = createServer((req, res) => {
@@ -178,6 +182,52 @@ describe('backend message API', () => {
         reason: 'test-suppress',
       }),
     ]));
+  });
+
+  test('message suppression returns 503 without side effects when messages persistence fails', async () => {
+    const failContext = await createBackendTestContext('agent-chat-message-suppress-save-fail-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: false,
+        },
+      },
+      messages: [
+        {
+          id: 'msg_suppress_fail',
+          ts: 1000,
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          priority: 'normal',
+          summary: 'suppress failure',
+          full: 'suppress failure',
+          mentions: [],
+          reply_to: null,
+        },
+      ],
+      msgCounter: 1,
+      agentTokens: { alpha: ALPHA_TOKEN },
+    });
+
+    try {
+      failContext.internals.setJsonSaveFailureForTest('messages.json', true);
+      const suppressResponse = await request(failContext.app)
+        .post('/api/messages/msg_suppress_fail/suppress')
+        .set('X-Agent-Token', ALPHA_TOKEN)
+        .send({ agent: 'alpha', reason: 'test-suppress-fail' });
+
+      expect(suppressResponse.status).toBe(503);
+      expect(suppressResponse.body).toEqual({ error: 'messages persistence failed' });
+      expect(readPersistedMessages(failContext.runtimeDir)[0].suppressedRecipients || []).toEqual([]);
+      expect(readDeliveryEvents(failContext.runtimeDir)).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'message.suppressed' }),
+      ]));
+    } finally {
+      failContext.cleanup();
+    }
   });
 
   test('delivery event APIs return matching tail entries with the requested limit from a large log', async () => {
@@ -854,6 +904,170 @@ describe('backend message API', () => {
       });
     expect(response.status).toBe(400);
     expect(response.body).toEqual({ error: 'priority must be one of: normal, high, urgent' });
+  });
+
+  test('POST message returns 503 without accept side effects when messages persistence fails', async () => {
+    const failContext = await createBackendTestContext('agent-chat-messages-save-fail-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+        },
+      },
+      agentTokens: { alpha: ALPHA_TOKEN },
+    });
+
+    try {
+      failContext.internals.setJsonSaveFailureForTest('messages.json', true);
+      const response = await request(failContext.app)
+        .post('/api/messages')
+        .send({
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          summary: 'durability failure',
+          full: 'body',
+        });
+
+      expect(response.status).toBe(503);
+      expect(response.body).toEqual({ error: 'messages persistence failed' });
+      expect(readPersistedMessages(failContext.runtimeDir)).toEqual([]);
+      expect(readDeliveryEvents(failContext.runtimeDir)).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'message.accepted' }),
+      ]));
+    } finally {
+      failContext.cleanup();
+    }
+  });
+
+  test('POST message returns 503 without persistence when msg_counter persistence fails', async () => {
+    const failContext = await createBackendTestContext('agent-chat-message-counter-fail-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: false,
+        },
+      },
+    });
+
+    try {
+      failContext.internals.setJsonSaveFailureForTest('.msg_counter', true);
+      const response = await request(failContext.app)
+        .post('/api/messages')
+        .send({
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          summary: 'counter failure',
+          full: 'body',
+        });
+
+      expect(response.status).toBe(503);
+      expect(response.body).toEqual({ error: 'msg_counter persistence failed' });
+      expect(readPersistedMessages(failContext.runtimeDir)).toEqual([]);
+      expect(readJsonFile(failContext.runtimeDir, '.msg_counter')).toBe(0);
+      expect(readDeliveryEvents(failContext.runtimeDir)).toEqual([]);
+    } finally {
+      failContext.cleanup();
+    }
+  });
+
+  test('startup reconciles stale msg_counter from persisted messages before assigning next id', async () => {
+    const staleCounterContext = await createBackendTestContext('agent-chat-message-counter-reconcile-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: false,
+        },
+      },
+      messages: [
+        {
+          id: 'msg_9999',
+          ts: 1000,
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          priority: 'normal',
+          summary: 'seed high id',
+          full: 'seed high id',
+          mentions: [],
+          reply_to: null,
+        },
+      ],
+      msgCounter: 0,
+    });
+
+    try {
+      expect(readJsonFile(staleCounterContext.runtimeDir, '.msg_counter')).toBe(9999);
+      const response = await request(staleCounterContext.app)
+        .post('/api/messages')
+        .send({
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          summary: 'after reconcile',
+          full: 'body',
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body.id).toBe('msg_10000');
+      expect(readJsonFile(staleCounterContext.runtimeDir, '.msg_counter')).toBe(10000);
+    } finally {
+      staleCounterContext.cleanup();
+    }
+  });
+
+  test('GET inbox returns 503 and leaves unread state when cursor persistence fails', async () => {
+    const failContext = await createBackendTestContext('agent-chat-inbox-cursor-fail-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: false,
+        },
+      },
+      messages: [
+        {
+          id: 'msg_0001',
+          ts: 1000,
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          priority: 'normal',
+          summary: 'unread',
+          full: 'unread',
+          mentions: [],
+          reply_to: null,
+        },
+      ],
+      msgCounter: 1,
+    });
+
+    try {
+      failContext.internals.setJsonSaveFailureForTest('cursors.json', true);
+      const failedRead = await request(failContext.app).get('/api/inbox/alpha');
+
+      expect(failedRead.status).toBe(503);
+      expect(failedRead.body).toEqual({ error: 'cursor persistence failed' });
+      expect(readJsonFile(failContext.runtimeDir, 'cursors.json')).toEqual({});
+      expect(readDeliveryEvents(failContext.runtimeDir)).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'inbox.read_ack' }),
+      ]));
+
+      failContext.internals.setJsonSaveFailureForTest('cursors.json', false);
+      const preview = await request(failContext.app).get('/api/inbox/alpha');
+      expect(preview.status).toBe(200);
+      expect(preview.body.dm.map((row) => row.id)).toEqual(['msg_0001']);
+    } finally {
+      failContext.cleanup();
+    }
   });
 
   test('GET inbox with kinds=task_request filter returns only matching messages', async () => {
