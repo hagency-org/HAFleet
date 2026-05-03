@@ -44,6 +44,8 @@ gaps:
 | CLI/CD | Found stable release gate default, remote post-deploy verification, remote dependency retry/install tree, standalone package versioning, and `agentchat send --help` contract gaps. |
 | Operability | Found missing flow-level health, missing server-offline alerting, weak actionable alert fields, unknown-vs-pane-missing collapse, missing durable delivery event correlation, and stale supervisor snapshots. |
 | Architecture | Found backend and dashboard hub/source-of-truth risks; current remote sync/package/CLI/dependency isolation gates are green, but profile and architecture decisions remain open. |
+| External reliability report | Added dashboard-specific evidence that offline/unknown/degraded agents can be hidden or collapsed into active/idle, queue drop history is not product-visible, and alert updates are not consumed by the root dashboard in real time. |
+| External remote/local report | Confirmed current managed mirror gates are green and CI-enforced; recorded two low-risk `agent-up` profile differences for future launch-scope review. |
 
 ## New Findings
 
@@ -67,6 +69,11 @@ gaps:
 | SYS-016 | P1 | Actionable alerts | [lib/alert-store.js](/Users/kamico/agent-chat/lib/alert-store.js:152), [lib/supervisor-action-engine.js](/Users/kamico/agent-chat/lib/supervisor-action-engine.js:45) | Alerts lack owner, runbook, exit condition, SLO impact, and correlation fields, limiting incident actionability. | Add required fields for warning/critical alerts or downgrade incomplete events to non-paging diagnostics. |
 | SYS-017 | P2 | Supervisor snapshot staleness | [lib/supervisor-snapshot-store.js](/Users/kamico/agent-chat/lib/supervisor-snapshot-store.js:247), [backend-v2.js](/Users/kamico/agent-chat/backend-v2.js:8074) | Old negative/focused snapshots can influence current supervisor status or task health. | Add snapshot freshness/expiry and stop enriching current status from expired assessments. |
 | SYS-018 | P2 | Architecture fitness | [backend-v2.js](/Users/kamico/agent-chat/backend-v2.js:11), [server.js](/Users/kamico/agent-chat/server.js:744), [docs/salt/kernel-boundaries.md](/Users/kamico/agent-chat/docs/salt/kernel-boundaries.md:49) | Kernel/edge/dashboard boundaries are mostly documented, not executable, so drift can return. | Add ADRs and `check:architecture-boundaries` for imports, route ownership, write paths, and root/remote profile decisions. |
+| SYS-019 | P1 | Dashboard lifecycle display | [server.js](/Users/kamico/agent-chat/server.js:509), [server.js](/Users/kamico/agent-chat/server.js:7125), [server.js](/Users/kamico/agent-chat/server.js:7580) | The root dashboard can collapse unknown/degraded/offline into active/idle or hide offline agents, weakening operator triage. | Return and render explicit lifecycle states such as `active`, `idle`, `offline`, `pane-missing`, `remote-unknown`, and `degraded`. |
+| SYS-020 | P1 | Queue debug history | [server.js](/Users/kamico/agent-chat/server.js:398), [server.js](/Users/kamico/agent-chat/server.js:2916), [server.js](/Users/kamico/agent-chat/server.js:7174) | Dropped/replayed/retried queue entries are partly written to logs but not available through a read API or dashboard timeline. | Add queue history/dropped read API and show state, attempts, last error, drop reason, redirect chain, and source message id. |
+| SYS-021 | P1 | Delivery diagnosis UI | [server.js](/Users/kamico/agent-chat/server.js:4452), [server.js](/Users/kamico/agent-chat/server.js:4528), [server.js](/Users/kamico/agent-chat/server.js:4851) | Agent detail views show counts but not why a notification is queued, replayed, stale, direct, or inbox-check gated. | Render `notifyMeta.kind`, `sourceMsgId`, `requiresInboxCheck`, unread snapshot, and backend-notification vs normal-payload class. |
+| SYS-022 | P1 | Alert dashboard actionability | [server.js](/Users/kamico/agent-chat/server.js:2775), [server.js](/Users/kamico/agent-chat/server.js:7910), [server.js](/Users/kamico/agent-chat/server.js:8181) | Backend alert SSE is forwarded, but the root dashboard badge still relies on polling and alert/task context links are weak. | Consume alert SSE in the root dashboard, link `linkedTaskId`, and add `assignee`/`alertType` filters and agent-level alert CTAs. |
+| SYS-023 | P3 | Remote launch profile drift | [bin/agent-up](/Users/kamico/agent-chat/bin/agent-up:1670), [remote/bin/agent-up](/Users/kamico/agent-chat/remote/bin/agent-up:1670), [remote/bin/agent-up](/Users/kamico/agent-chat/remote/bin/agent-up:1723) | Managed mirror gates are green, but profile-specific `agent-up` differs in API key fingerprint injection and launch command echo behavior. | Defer to launch-scope approval; use env-var injection consistently and decide whether launch command echo belongs in both profiles. |
 
 ## Existing Rows Reconfirmed
 
@@ -125,6 +132,10 @@ Scope:
 - SYS-011 durable delivery events
 - SYS-012 queue observation state
 - SYS-016 actionable alert fields
+- SYS-019 dashboard lifecycle display
+- SYS-020 queue debug history
+- SYS-021 delivery diagnosis UI
+- SYS-022 alert dashboard actionability
 
 Verification:
 
@@ -132,6 +143,8 @@ Verification:
 - alert-store tests
 - delivery event black-box tests
 - dashboard queue observation tests
+- dashboard status rendering tests
+- alert SSE frontend tests
 
 ### Batch SYS-D: Operator and Architecture Contracts
 
@@ -142,6 +155,7 @@ Scope:
 - SYS-015 dashboard delivery log naming
 - SYS-017 supervisor snapshot freshness
 - SYS-018 architecture fitness checks and ADR index
+- SYS-023 low-priority launch profile drift review, only after launch approval
 
 Verification:
 

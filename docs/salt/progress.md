@@ -66,3 +66,4 @@
 - Used four read-only subagents to scan agent-chat with the expanded skill lenses: delivery/replay/direct injection, CLI/CD, reliability/operability, and architecture/maintainability.
 - Added `17-systems-skill-scan.md` with consolidated findings and proposed SYS-A through SYS-D repair batches.
 - Updated the repair table with new direct-injection idempotency, health, alert, delivery-event, CLI-contract, dashboard-truth, supervisor-staleness, and architecture-fitness rows. Existing CD decision rows R-032/R-033/R-037/R-038/R-047/R-048/R-049/R-050 were reconfirmed by the scan.
+- Integrated two additional agent-chat inbox audit reports: dashboard lifecycle/queue/alert reliability gaps and a remote/local mirror check that found current sync gates green with two low-priority `agent-up` profile differences.
