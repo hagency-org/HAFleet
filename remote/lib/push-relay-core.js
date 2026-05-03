@@ -16,6 +16,7 @@ let readFileSyncImpl = readFileSync;
 let execFileSyncImpl = execFileSync;
 let killProcessImpl = (pid, signal) => process.kill(pid, signal);
 let fetchImpl = (...args) => fetch(...args);
+let EventSourceImpl = EventSource;
 let tmuxBinOverride = null;
 
 const PUSH_RELAY_MODE = (process.env.PUSH_RELAY_MODE || 'local').trim().toLowerCase();
@@ -63,6 +64,9 @@ const deliveredOrder = [];
 const DELIVERED_CAP = 10000;
 let reconnectTimer = null;
 let heartbeatTimer = null;
+let refreshTimer = null;
+let blockScanTimer = null;
+let bootstrapRetryTimer = null;
 let warnedMissingTmux = false;
 const blockedState = new Map();
 const compactState = new Map();
@@ -80,6 +84,12 @@ const MCP_MISS_THRESHOLD = 6;  // report mcpPresent=false after 6 consecutive mi
 const RELAY_QUEUE_DRAIN_INTERVAL_MS = Number.parseInt(process.env.RELAY_QUEUE_DRAIN_INTERVAL_MS || '3000', 10);
 const relayQueue = new Map(); // Map<agentName, Array<{msg, notification, target, dedupeKey, queuedAt}>>
 let relayQueueDrainTimer = null;
+let currentEs = null;
+let runtimeStarted = false;
+let runtimeStopping = false;
+let runtimeStartPromise = null;
+let runtimeGeneration = 0;
+let processHandlersInstalled = false;
 
 const COMPACT_PATTERNS = [
   { marker: 'codex-context-compacted', summary: 'Context compacted', re: /(?:^|\n)\s*(?:•\s*)?Context compacted\s*(?:\n|$)/i },
@@ -1016,71 +1026,181 @@ function drainRelayQueue() {
   }
 }
 
-let currentEs = null;
 function connectSse() {
+  if (runtimeStopping) return null;
   // Clean up previous connection (timers, socket)
-  if (currentEs) { try { currentEs.close(); } catch (_) {} currentEs = null; }
+  if (currentEs) {
+    const previous = currentEs;
+    currentEs = null;
+    try { previous.close(); } catch (_) {}
+  }
   const streamUrl = `${API_BASE}/api/stream`;
   console.log(`[push-relay] connecting ${streamUrl} (server=${SERVER_ID})`);
-  const es = new EventSource(streamUrl, { headers: authHeaders });
+  const es = new EventSourceImpl(streamUrl, { headers: authHeaders });
   currentEs = es;
   es.on('message', (raw) => {
+    if (runtimeStopping || currentEs !== es) return;
     handleMessage(raw).catch((e) => console.error(`[push-relay] message handling failed: ${e.message}`));
   });
   es.on('error', (e) => {
+    if (runtimeStopping || currentEs !== es) return;
     console.error(`[push-relay] SSE error: ${e.message}`);
-    if (currentEs === es) { try { es.close(); } catch (_) {} currentEs = null; }
-    if (reconnectTimer) return;
+    if (currentEs === es) {
+      currentEs = null;
+      try { es.close(); } catch (_) {}
+    }
+    if (reconnectTimer || runtimeStopping || !runtimeStarted) return;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      connectSse();
+      if (!runtimeStopping && runtimeStarted) connectSse();
     }, RECONNECT_MS);
   });
+  return es;
+}
+
+async function startPushRelayRuntime() {
+  if (runtimeStartPromise) return runtimeStartPromise;
+  if (runtimeStarted && !runtimeStopping) return null;
+  runtimeStopping = false;
+  const generation = runtimeGeneration;
+  runtimeStartPromise = (async () => {
+    try {
+      await refreshAgentsSnapshot();
+      await sendHeartbeat();
+      await scanBlockedStates();
+      if (runtimeStopping || generation !== runtimeGeneration) return null;
+      runtimeStarted = true;
+      refreshTimer = setInterval(() => {
+        refreshAgentsSnapshot()
+          .then(() => scanBlockedStates())
+          .catch((e) => console.error(`[push-relay] refresh failed: ${e.message}`));
+      }, SCAN_INTERVAL_MS);
+      heartbeatTimer = setInterval(() => {
+        refreshAgentsSnapshot()
+          .then(() => sendHeartbeat())
+          .catch((e) => console.error(`[push-relay] heartbeat loop failed: ${e.message}`));
+      }, HEARTBEAT_INTERVAL_MS);
+      blockScanTimer = setInterval(() => {
+        scanBlockedStates()
+          .catch((e) => console.error(`[push-relay] block scan failed: ${e.message}`));
+      }, BLOCK_SCAN_INTERVAL_MS);
+      relayQueueDrainTimer = setInterval(() => {
+        try { drainRelayQueue(); } catch (e) { console.error(`[push-relay] queue drain failed: ${e.message}`); }
+      }, RELAY_QUEUE_DRAIN_INTERVAL_MS);
+      connectSse();
+      return { ok: true };
+    } catch (error) {
+      runtimeStarted = false;
+      throw error;
+    }
+  })();
+  try {
+    return await runtimeStartPromise;
+  } finally {
+    runtimeStartPromise = null;
+  }
 }
 
 async function main() {
-  await refreshAgentsSnapshot();
-  await sendHeartbeat();
-  await scanBlockedStates();
-  setInterval(() => {
-    refreshAgentsSnapshot()
-      .then(() => scanBlockedStates())
-      .catch((e) => console.error(`[push-relay] refresh failed: ${e.message}`));
-  }, SCAN_INTERVAL_MS);
-  heartbeatTimer = setInterval(() => {
-    refreshAgentsSnapshot()
-      .then(() => sendHeartbeat())
-      .catch((e) => console.error(`[push-relay] heartbeat loop failed: ${e.message}`));
-  }, HEARTBEAT_INTERVAL_MS);
-  setInterval(() => {
-    scanBlockedStates()
-      .catch((e) => console.error(`[push-relay] block scan failed: ${e.message}`));
-  }, BLOCK_SCAN_INTERVAL_MS);
-  relayQueueDrainTimer = setInterval(() => {
-    try { drainRelayQueue(); } catch (e) { console.error(`[push-relay] queue drain failed: ${e.message}`); }
-  }, RELAY_QUEUE_DRAIN_INTERVAL_MS);
-  connectSse();
+  return startPushRelayRuntime();
 }
 
-let bootstrapRetryTimer = null;
+function clearRuntimeTimers() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  if (blockScanTimer) clearInterval(blockScanTimer);
+  if (relayQueueDrainTimer) clearInterval(relayQueueDrainTimer);
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (bootstrapRetryTimer) clearTimeout(bootstrapRetryTimer);
+  refreshTimer = null;
+  heartbeatTimer = null;
+  blockScanTimer = null;
+  relayQueueDrainTimer = null;
+  reconnectTimer = null;
+  bootstrapRetryTimer = null;
+}
+
+function closeCurrentSse() {
+  if (!currentEs) return;
+  const es = currentEs;
+  currentEs = null;
+  try { es.close(); } catch (_) {}
+}
+
+function stopPushRelayRuntimeSync() {
+  runtimeGeneration += 1;
+  runtimeStopping = true;
+  clearRuntimeTimers();
+  closeCurrentSse();
+  runtimeStarted = false;
+  runtimeStartPromise = null;
+}
+
+async function stopPushRelayRuntime({ offlineReason = null, sendOffline = Boolean(offlineReason) } = {}) {
+  stopPushRelayRuntimeSync();
+  if (sendOffline) {
+    await sendOfflineNotice(offlineReason || 'push-relay-stop');
+  }
+  runtimeStopping = false;
+  return { ok: true };
+}
+
 function scheduleBootstrapRetry(reason = 'unknown') {
-  if (bootstrapRetryTimer) return;
+  if (bootstrapRetryTimer || runtimeStopping) return;
   console.error(`[push-relay] bootstrap failed (${reason}); retrying in ${RECONNECT_MS}ms`);
   bootstrapRetryTimer = setTimeout(() => {
     bootstrapRetryTimer = null;
-    main().catch((e) => scheduleBootstrapRetry(e?.message || 'bootstrap-error'));
+    if (!runtimeStopping) main().catch((e) => scheduleBootstrapRetry(e?.message || 'bootstrap-error'));
   }, RECONNECT_MS);
 }
 
 async function gracefulExit(signal) {
-  if (heartbeatTimer) clearInterval(heartbeatTimer);
-  if (relayQueueDrainTimer) clearInterval(relayQueueDrainTimer);
   console.log(`[push-relay] received ${signal}, marking server offline`);
-  await sendOfflineNotice(signal);
+  await stopPushRelayRuntime({ offlineReason: signal, sendOffline: true });
   process.exit(0);
 }
 
+function handleUnhandledRejection(reason) {
+  const msg = reason && typeof reason === 'object' && 'message' in reason
+    ? reason.message
+    : String(reason);
+  console.error(`[push-relay] unhandled rejection: ${msg}`);
+}
+
+function handleSigterm() {
+  gracefulExit('SIGTERM').catch((e) => {
+    console.error(`[push-relay] shutdown failed: ${e?.message || e}`);
+    process.exit(1);
+  });
+}
+
+function handleSigint() {
+  gracefulExit('SIGINT').catch((e) => {
+    console.error(`[push-relay] shutdown failed: ${e?.message || e}`);
+    process.exit(1);
+  });
+}
+
+function installPushRelayProcessHandlers() {
+  if (processHandlersInstalled) return;
+  process.on('SIGTERM', handleSigterm);
+  process.on('SIGINT', handleSigint);
+  process.on('unhandledRejection', handleUnhandledRejection);
+  processHandlersInstalled = true;
+}
+
+function uninstallPushRelayProcessHandlers() {
+  if (!processHandlersInstalled) return;
+  process.off('SIGTERM', handleSigterm);
+  process.off('SIGINT', handleSigint);
+  process.off('unhandledRejection', handleUnhandledRejection);
+  processHandlersInstalled = false;
+}
+
 function resetRelayState() {
+  stopPushRelayRuntimeSync();
+  runtimeStopping = false;
+  uninstallPushRelayProcessHandlers();
   localAgents.clear();
   agentsByName.clear();
   delivered.clear();
@@ -1101,6 +1221,7 @@ function resetRelayState() {
   execFileSyncImpl = execFileSync;
   killProcessImpl = (pid, signal) => process.kill(pid, signal);
   fetchImpl = (...args) => fetch(...args);
+  EventSourceImpl = EventSource;
   tmuxBinOverride = null;
   pushToTmuxImpl = pushToTmux;
 }
@@ -1126,6 +1247,7 @@ function setPushRelayTestHooks({
   execFileSync: overrideExecFileSync,
   killProcess: overrideKillProcess,
   fetch: overrideFetch,
+  EventSource: overrideEventSource,
   tmuxBin: overrideTmuxBin,
 } = {}) {
   execFileAsyncImpl = typeof overrideExecFileAsync === 'function' ? overrideExecFileAsync : execFileAsync;
@@ -1135,6 +1257,7 @@ function setPushRelayTestHooks({
     ? overrideKillProcess
     : ((pid, signal) => process.kill(pid, signal));
   fetchImpl = typeof overrideFetch === 'function' ? overrideFetch : ((...args) => fetch(...args));
+  EventSourceImpl = typeof overrideEventSource === 'function' ? overrideEventSource : EventSource;
   tmuxBinOverride = typeof overrideTmuxBin === 'string' && overrideTmuxBin.trim()
     ? overrideTmuxBin.trim()
     : null;
@@ -1148,6 +1271,7 @@ export {
   drainRelayQueue,
   evaluateAgentRouting,
   handleMessage,
+  installPushRelayProcessHandlers,
   main,
   messageRecipients,
   normalizeRelayPriority,
@@ -1157,17 +1281,12 @@ export {
   seedRelayState,
   setPushRelayTestHooks,
   setPushToTmuxForTest,
+  startPushRelayRuntime,
+  stopPushRelayRuntime,
+  uninstallPushRelayProcessHandlers,
 };
 
-process.on('SIGTERM', () => { gracefulExit('SIGTERM'); });
-process.on('SIGINT', () => { gracefulExit('SIGINT'); });
-process.on('unhandledRejection', (reason) => {
-  const msg = reason && typeof reason === 'object' && 'message' in reason
-    ? reason.message
-    : String(reason);
-  console.error(`[push-relay] unhandled rejection: ${msg}`);
-});
-
 if (process.argv[1] === __filename) {
+  installPushRelayProcessHandlers();
   main().catch((e) => scheduleBootstrapRetry(e?.message || 'startup-error'));
 }

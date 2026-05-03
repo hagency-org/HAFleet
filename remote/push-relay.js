@@ -35,6 +35,9 @@ if (process.env.AGENTCHAT_WRAPPER_SMOKE === '1') {
 }
 
 if (typeof core.main === 'function') {
+  if (typeof core.installPushRelayProcessHandlers === 'function') {
+    core.installPushRelayProcessHandlers();
+  }
   core.main().catch((e) => {
     console.error(`[push-relay] startup error: ${e?.message || e}`);
     process.exit(1);
