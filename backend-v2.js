@@ -1,5 +1,5 @@
 import express from 'express';
-import { appendFileSync, writeFileSync, mkdirSync, renameSync, statSync, existsSync, readFileSync, readdirSync, unlinkSync, rmSync } from 'fs';
+import { appendFileSync, writeFileSync, mkdirSync, statSync, existsSync, readFileSync, readdirSync, rmSync } from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
 import { execFile, execSync, spawn } from 'child_process';
 import path from 'path';
@@ -14,9 +14,28 @@ import { createTaskStore } from './lib/task-store.js';
 import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
 import { createAlertStore, RECOVERY_MAP as ALERT_RECOVERY_MAP } from './lib/alert-store.js';
+import {
+  authorizeAgentCredential as authorizeAgentCredentialAdapter,
+  authorizeSubconsciousEventIngest as authorizeSubconsciousEventIngestAdapter,
+  buildAgentTokenReadiness as buildAgentTokenReadinessAdapter,
+  buildServerCredentialReadiness as buildServerCredentialReadinessAdapter,
+  canAccessPrivilegedSubconsciousDetail as canAccessPrivilegedSubconsciousDetailAdapter,
+  checkAgentToken as checkAgentTokenAdapter,
+  createApiAuthMiddleware,
+  createRequireAgentToken,
+  createRequireBearer,
+  createRequireBridgeSecret,
+  getBearerToken,
+  getBridgeSecret,
+  getRequestAgentName as getRequestAgentNameAdapter,
+  hasApiTokenAccess as hasApiTokenAccessAdapter,
+  loadAgentTokensFromHomes,
+  resolveAgentTokenMode,
+} from './lib/backend/auth-adapter.js';
 import { buildFlowHealth } from './lib/backend/flow-health.js';
 import { buildFleetInventory } from './lib/backend/fleet-classifier.js';
 import { createSseAdapter } from './lib/backend/sse-adapter.js';
+import { createJsonStorage } from './lib/backend/storage-adapter.js';
 import { createSupervisorLifecycleManager, killTmuxSession as killSupervisorTmux } from './lib/supervisor-lifecycle-manager.js';
 import { provisionSupervisorAgent, buildSupervisorAgentRecord } from './lib/supervisor-provisioning.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
@@ -157,124 +176,36 @@ mkdirSync(MATRIX_MEDIA_DIR, { recursive: true });
 const MATRIX_OPERATOR_MXIDS = new Set(
   (process.env.MATRIX_OPERATOR_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
-/** Read bridge secret fresh from env on each call (tests toggle process.env between cases). */
-function getBridgeSecret() { return (process.env.MATRIX_BRIDGE_SECRET || '').trim(); }
-/** Middleware: reject if bridge secret is configured and caller doesn't match. */
-function requireBridgeSecret(req, res, next) {
-  const secret = getBridgeSecret();
-  if (secret && req.headers['x-bridge-secret'] !== secret) {
-    return res.status(403).json({ error: 'bridge secret required' });
-  }
-  next();
-}
+// Reads bridge secret fresh from env on each call (tests toggle process.env between cases).
+const requireBridgeSecret = createRequireBridgeSecret({ env: process.env });
 // ── Per-agent token authentication (5.8.6) ───────────────────────────
-const AGENT_TOKEN_MODE = (() => {
-  const m = (process.env.AGENTCHAT_AGENT_TOKEN_MODE || 'audit').trim().toLowerCase();
-  return m === 'hard' ? 'hard' : m === 'soft' ? 'soft' : 'audit';
-})();
-const AGENT_TOKEN_CONFIGURED_MODE = (process.env.AGENTCHAT_AGENT_TOKEN_MODE || 'audit').trim().toLowerCase() || 'audit';
+const { mode: AGENT_TOKEN_MODE, configuredMode: AGENT_TOKEN_CONFIGURED_MODE } = resolveAgentTokenMode(process.env);
 const agentTokens = new Map(); // agentName → token string
 function loadAgentTokens() {
-  let loaded = 0;
-  for (const homeRoot of allAgentHomeRoots()) {
-    const agentsDir = path.join(homeRoot, 'agents');
-    try {
-      for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
-        if (!entry.isDirectory() || !entry.name.startsWith('agent_')) continue;
-        const name = entry.name.slice('agent_'.length);
-        if (agentTokens.has(name)) continue; // first root wins
-        const tokenPath = path.join(agentsDir, entry.name, 'state', 'agent-token');
-        try {
-          const token = readFileSync(tokenPath, 'utf-8').trim();
-          if (token) {
-            agentTokens.set(name, token);
-            // Also store under canonical agents.json name if case differs (agentId is lowercase, agent name may be mixed-case)
-            for (const key of Object.keys(agents)) {
-              if (key !== name && key.toLowerCase() === name.toLowerCase()) {
-                agentTokens.set(key, token);
-              }
-            }
-            loaded++;
-          }
-        } catch { /* missing token file — expected for un-provisioned agents */ }
-      }
-    } catch { /* missing agents dir */ }
-  }
-  if (loaded > 0) console.log(`[auth] loaded ${loaded} agent token(s), mode=${AGENT_TOKEN_MODE}`);
+  return loadAgentTokensFromHomes({
+    agentTokens,
+    agents,
+    allAgentHomeRoots,
+    mode: AGENT_TOKEN_MODE,
+  });
 }
 function checkAgentToken(agentName, req) {
-  if (!agentName) return { ok: true };
-  const expected = agentTokens.get(agentName);
-  // No token configured → sender is not a managed agent (system, human, bridge);
-  // allow through in all modes — token auth only applies to managed agents.
-  if (!expected) return { ok: true };
-  const provided = (req.headers['x-agent-token'] || '').trim();
-  if (!provided) return { ok: false, reason: 'token required but not provided' };
-  if (provided !== expected) return { ok: false, reason: 'token mismatch' };
-  return { ok: true };
-}
-function agentTokenModeBehavior(mode = AGENT_TOKEN_MODE) {
-  if (mode === 'audit') return 'log-only';
-  return 'enforce-loaded-tokens';
+  return checkAgentTokenAdapter(agentName, req, { agentTokens });
 }
 function buildAgentTokenReadiness() {
-  const managedAgentNames = Object.keys(agents)
-    .filter(name => isAgentRecord(agents[name]))
-    .sort((a, b) => a.localeCompare(b));
-  const loadedManagedAgentNames = managedAgentNames.filter(name => agentTokens.has(name));
-  const missingManagedAgentNames = managedAgentNames.filter(name => !agentTokens.has(name));
-  const maxNames = 50;
-  return {
-    mode: AGENT_TOKEN_MODE,
+  return buildAgentTokenReadinessAdapter({
+    agents,
+    agentTokens,
+    agentTokenMode: AGENT_TOKEN_MODE,
     configuredMode: AGENT_TOKEN_CONFIGURED_MODE,
-    behavior: agentTokenModeBehavior(),
-    managedAgentCount: managedAgentNames.length,
-    loadedManagedAgentTokenCount: loadedManagedAgentNames.length,
-    missingManagedAgentTokenCount: missingManagedAgentNames.length,
-    missingManagedAgentNames: missingManagedAgentNames.slice(0, maxNames),
-    missingManagedAgentNamesTruncated: missingManagedAgentNames.length > maxNames,
-    failClosedReady: missingManagedAgentNames.length === 0,
-  };
+    isAgentRecord,
+  });
 }
 
 function buildServerCredentialReadiness() {
-  const operatorBearerConfigured = Boolean(normalizeOptionalText(process.env.API_TOKEN, 512));
-  const serverTokenConfigured = Boolean(normalizeOptionalText(process.env.AGENTCHAT_SERVER_TOKEN, 512));
-  return {
-    boundary: 'compat-api-token',
-    behavior: operatorBearerConfigured ? 'server-routes-require-api-token' : 'server-routes-open',
-    operatorBearerConfigured,
-    serverTokenConfigured,
-    serverTokenAccepted: false,
-    serverTokenEnforced: false,
-    serverOwnedRoutes: [
-      'POST /api/servers/heartbeat',
-      'POST /api/servers/:id/offline',
-      'POST /api/agents/:name/runtime',
-      'POST /api/runtime/compact',
-    ],
-    operatorOwnedRoutes: [
-      'POST /api/servers/:id/maintenance',
-    ],
-    relayReadRoutes: [
-      'GET /api/stream',
-    ],
-    futureCredential: 'AGENTCHAT_SERVER_TOKEN',
-  };
+  return buildServerCredentialReadinessAdapter({ env: process.env });
 }
-function requireAgentToken(extractAgent) {
-  return (req, res, next) => {
-    const agentName = extractAgent(req);
-    const result = checkAgentToken(agentName, req);
-    if (!result.ok) {
-      const msg = `[auth] agent-token ${result.reason}: agent=${agentName} mode=${AGENT_TOKEN_MODE}`;
-      if (AGENT_TOKEN_MODE === 'audit') { console.warn(msg); return next(); }
-      console.warn(msg);
-      return res.status(403).json({ error: `agent token ${result.reason}` });
-    }
-    next();
-  };
-}
+const requireAgentToken = createRequireAgentToken({ agentTokens, agentTokenMode: AGENT_TOKEN_MODE });
 const VALID_ENVIRONMENTS = new Set(['live', 'dev', 'benchmark', 'ephemeral']);
 function classifyEnvironment(name) {
   const n = String(name).toLowerCase();
@@ -316,107 +247,19 @@ async function fetchWebBridge(url, init, contextLabel) {
 }
 
 // ── Storage helpers ───────────────────────────────────────────────────
-function dataPath(name) { return path.join(DATA_DIR, name); }
-function agentDataPath(name) { return dataPath(path.join('agents', name)); }
-
-function backupUnreadableJson(filePath) {
-  const backupPath = `${filePath}.corrupt-${Date.now()}`;
-  try {
-    renameSync(filePath, backupPath);
-    console.error(`Backed up unreadable JSON file: ${filePath} -> ${backupPath}`);
-  } catch (backupErr) {
-    console.error(`Failed to backup unreadable JSON file ${filePath}: ${backupErr.message}`);
-  }
-}
-
-function loadJsonSync(name, fallback) {
-  const filePath = dataPath(name);
-  try {
-    return JSON.parse(readFileSync(filePath, 'utf-8'));
-  } catch (e) {
-    if (e?.code !== 'ENOENT') {
-      console.error(`Failed to load JSON ${filePath}: ${e.message}. Using fallback value.`);
-      backupUnreadableJson(filePath);
-    }
-    return fallback;
-  }
-}
-
-function writeJsonAtomic(name, data) {
-  const target = dataPath(name);
-  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
-  try {
-    writeFileSync(tmp, JSON.stringify(data, null, 2));
-    renameSync(tmp, target);
-    return true;
-  } catch (e) {
-    try { unlinkSync(tmp); } catch {}
-    const code = e?.code || 'unknown';
-    const msg = e?.message || 'unknown error';
-    console.error(`Failed to save JSON ${target}: [${code}] ${msg}`);
-    return false;
-  }
-}
-
-const JSON_BATCHED_FILES = new Set(['agents.json', 'agent_runtime.json']);
-const pendingJsonWrites = new Map(); // name -> { data, timer }
-
-function flushPendingJsonWrite(name) {
-  const entry = pendingJsonWrites.get(name);
-  if (!entry) return true;
-  if (entry.timer) clearTimeout(entry.timer);
-  pendingJsonWrites.delete(name);
-  return writeJsonAtomic(name, entry.data);
-}
-
-function scheduleJsonWrite(name, data) {
-  const existing = pendingJsonWrites.get(name);
-  if (existing?.timer) clearTimeout(existing.timer);
-  const entry = { data, timer: null };
-  entry.timer = setTimeout(() => {
-    flushPendingJsonWrite(name);
-  }, JSON_WRITE_BATCH_WINDOW_MS);
-  if (typeof entry.timer?.unref === 'function') entry.timer.unref();
-  pendingJsonWrites.set(name, entry);
-  return true;
-}
-
-function saveJson(name, data, options = {}) {
-  if (options?.immediate === true) {
-    flushPendingJsonWrite(name);
-    return writeJsonAtomic(name, data);
-  }
-  if (!JSON_BATCHED_FILES.has(name) || JSON_WRITE_BATCH_WINDOW_MS <= 0) {
-    return writeJsonAtomic(name, data);
-  }
-  return scheduleJsonWrite(name, data);
-}
-
-function flushAllPendingJsonWrites() {
-  for (const name of [...pendingJsonWrites.keys()]) {
-    flushPendingJsonWrite(name);
-  }
-}
-
-function loadJsonlTailSync(filePath, limit = 2000) {
-  try {
-    if (!existsSync(filePath)) return [];
-    const raw = readFileSync(filePath, 'utf-8');
-    if (!raw.trim()) return [];
-    const rows = raw.trim().split('\n');
-    const tail = rows.slice(-Math.max(1, limit));
-    const out = [];
-    for (const line of tail) {
-      try {
-        const parsed = JSON.parse(line);
-        if (parsed && typeof parsed === 'object') out.push(parsed);
-      } catch {}
-    }
-    return out;
-  } catch {
-    return [];
-  }
-}
+const jsonStorage = createJsonStorage({
+  dataDir: DATA_DIR,
+  jsonWriteBatchWindowMs: JSON_WRITE_BATCH_WINDOW_MS,
+  batchedFiles: ['agents.json', 'agent_runtime.json'],
+});
+const {
+  dataPath,
+  agentDataPath,
+  loadJsonSync,
+  saveJson,
+  flushAllPendingJsonWrites,
+  loadJsonlTailSync,
+} = jsonStorage;
 
 function normalizeServer(value) {
   if (typeof value !== 'string') return null;
@@ -2506,85 +2349,37 @@ function isLocalRequest(req) {
   return LOCALHOST_IPS.has(ip);
 }
 
-function getBearerToken(req) {
-  const raw = typeof req?.headers?.authorization === 'string' ? req.headers.authorization.trim() : '';
-  if (!raw) return null;
-  const match = raw.match(/^Bearer\s+(.+)$/i);
-  return match ? match[1].trim() : null;
-}
-
 function hasApiTokenAccess(req) {
-  const expectedToken = normalizeOptionalText(process.env.API_TOKEN, 512);
-  if (!expectedToken) return false;
-  return getBearerToken(req) === expectedToken;
+  return hasApiTokenAccessAdapter(req, { env: process.env });
 }
 
 function getRequestAgentName(req) {
-  return normalizeAgentName(
-    req?.query?.agent
-    || req?.headers?.['x-agent-name']
-    || req?.headers?.['x-agent']
-    || ''
-  );
+  return getRequestAgentNameAdapter(req, { normalizeAgentName });
 }
 
 function authorizeAgentCredential(req, agentName) {
-  const normalized = normalizeAgentName(agentName);
-  if (!normalized) return { ok: false, status: 400, error: 'agent identity required' };
-  if (hasApiTokenAccess(req)) return { ok: true, mode: 'bearer' };
-
-  const expectedAgentToken = agentTokens.get(normalized);
-  const providedAgentToken = (req?.headers?.['x-agent-token'] || '').trim();
-  if (expectedAgentToken) {
-    if (providedAgentToken === expectedAgentToken) return { ok: true, mode: 'agent-token' };
-    return { ok: false, status: providedAgentToken ? 403 : 401, error: 'agent token required' };
-  }
-
-  const expectedBearer = normalizeOptionalText(process.env.API_TOKEN, 512);
-  if (expectedBearer) {
-    return { ok: false, status: 401, error: 'bearer token or agent token required' };
-  }
-
-  // Development/test compatibility when no auth material is configured.
-  return { ok: true, mode: 'agent-identity-unverified' };
+  return authorizeAgentCredentialAdapter(req, agentName, {
+    agentTokens,
+    normalizeAgentName,
+    env: process.env,
+  });
 }
 
 function authorizeSubconsciousEventIngest(req) {
-  if (isLocalRequest(req)) {
-    return { ok: true, mode: 'local' };
-  }
-  const expectedToken = normalizeOptionalText(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN, 512);
-  if (!expectedToken) {
-    return {
-      ok: false,
-      status: 403,
-      error: 'subconscious event ingest is local-only unless AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN is configured',
-      mode: 'local-only',
-    };
-  }
-  const providedToken = getBearerToken(req);
-  if (providedToken === expectedToken) {
-    return { ok: true, mode: 'token' };
-  }
-  return {
-    ok: false,
-    status: 401,
-    error: 'invalid subconscious event token',
-    mode: 'token-required',
-  };
+  return authorizeSubconsciousEventIngestAdapter(req, {
+    env: process.env,
+    isLocalRequest,
+  });
 }
 
 function canAccessPrivilegedSubconsciousDetail(req) {
-  return isLocalRequest(req) || hasApiTokenAccess(req);
+  return canAccessPrivilegedSubconsciousDetailAdapter(req, {
+    env: process.env,
+    isLocalRequest,
+  });
 }
 
-function requireBearer(req, res, next) {
-  const expectedToken = normalizeOptionalText(process.env.API_TOKEN, 512);
-  if (expectedToken && getBearerToken(req) !== expectedToken) {
-    return res.status(401).json({ error: 'bearer token required' });
-  }
-  next();
-}
+const requireBearer = createRequireBearer({ env: process.env });
 
 function redactPathLikeText(value, maxLen = 1200) {
   const text = normalizeOptionalText(value, maxLen);
@@ -6753,18 +6548,11 @@ app.use('/api', (req, res, next) => {
   if (req.method === 'OPTIONS') return res.status(204).end();
   return next();
 });
-app.use('/api', (req, res, next) => {
-  if (!API_TOKEN) return next();
-  const ip = req.ip || req.connection?.remoteAddress;
-  if (['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) return next();
-  const auth = req.headers.authorization;
-  const apiPath = typeof req.path === 'string' ? req.path : '';
-  if (req.method === 'POST' && apiPath.endsWith('/subconscious/events') && SUBCONSCIOUS_EVENT_TOKEN && auth === `Bearer ${SUBCONSCIOUS_EVENT_TOKEN}`) {
-    return next();
-  }
-  if (auth === `Bearer ${API_TOKEN}`) return next();
-  return res.status(401).json({ error: 'unauthorized' });
-});
+app.use('/api', createApiAuthMiddleware({
+  apiToken: API_TOKEN,
+  subconsciousEventToken: SUBCONSCIOUS_EVENT_TOKEN,
+  isLocalRequest,
+}));
 
 app.post('/api/delivery-events', (req, res) => {
   const result = appendDeliveryEvent({
