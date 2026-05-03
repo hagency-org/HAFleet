@@ -18,6 +18,12 @@ function readDeliveryEvents(runtimeDir) {
     .map((line) => JSON.parse(line));
 }
 
+function readPersistedMessages(runtimeDir) {
+  const filePath = path.join(runtimeDir, 'data', 'messages.json');
+  if (!existsSync(filePath)) return [];
+  return JSON.parse(readFileSync(filePath, 'utf-8'));
+}
+
 describe('backend message API', () => {
   let context;
 
@@ -325,7 +331,7 @@ describe('backend message API', () => {
     }
   });
 
-  test('offline catchup messages append source delivery events', async () => {
+  test('offline catchup messages append source delivery events and do not recurse', async () => {
     const catchupContext = await createBackendTestContext('agent-chat-messages-catchup-test-', {
       agents: {
         alpha: {
@@ -360,6 +366,16 @@ describe('backend message API', () => {
       expect(response.status).toBe(200);
 
       await new Promise((resolve) => setTimeout(resolve, 25));
+      const firstMessages = readPersistedMessages(catchupContext.runtimeDir);
+      const firstCatchups = firstMessages.filter((msg) => msg?.schema?.kind === 'system_catchup');
+      expect(firstCatchups).toHaveLength(1);
+      expect(firstCatchups[0].schema.payload).toMatchObject({
+        reason: 'agent-online-update',
+        sourceUnreadCount: 1,
+        sourceUnreadIds: ['msg_1'],
+        oldestId: 'msg_1',
+        latestId: 'msg_1',
+      });
       expect(readDeliveryEvents(catchupContext.runtimeDir)).toEqual(expect.arrayContaining([
         expect.objectContaining({
           type: 'message.accepted',
@@ -370,6 +386,20 @@ describe('backend message API', () => {
           }),
         }),
       ]));
+
+      const offlineResponse = await request(catchupContext.app)
+        .patch('/api/agents/alpha')
+        .send({ online: false, tmux: null });
+      expect(offlineResponse.status).toBe(200);
+
+      const secondOnlineResponse = await request(catchupContext.app)
+        .patch('/api/agents/alpha')
+        .send({ online: true, tmux: 'alpha:0.0' });
+      expect(secondOnlineResponse.status).toBe(200);
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const secondMessages = readPersistedMessages(catchupContext.runtimeDir);
+      expect(secondMessages.filter((msg) => msg?.schema?.kind === 'system_catchup')).toHaveLength(1);
     } finally {
       catchupContext.cleanup();
     }

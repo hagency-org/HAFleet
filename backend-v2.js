@@ -6347,6 +6347,11 @@ async function localTmuxSessionExistsAsync(sessionName) {
 const mergedPushInboxCursor = new Map();
 const catchupCursor = new Map();
 const pushNotifySkipLog = new Map();
+const SYSTEM_CATCHUP_SCHEMA_KIND = 'system_catchup';
+
+function isSystemCatchupMessage(msg) {
+  return normalizeOptionalText(msg?.schema?.kind, 128) === SYSTEM_CATCHUP_SCHEMA_KIND;
+}
 
 function logPushNotifySkip(agentName, reason, detail = '') {
   const key = `${agentName}:${reason}`;
@@ -6381,7 +6386,8 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
   const state = getAgentDeliveryState(agentName);
   if (!state.online) return;
 
-  const { unread } = getUnreadInboxMessages(agentName);
+  const { unread: rawUnread } = getUnreadInboxMessages(agentName);
+  const unread = rawUnread.filter((msg) => !isSystemCatchupMessage(msg));
   if (!unread.length) return;
 
   const oldest = unread[0];
@@ -6426,6 +6432,17 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
     mentions: [],
     reply_to: null,
     source: 'system',
+    schema: {
+      kind: SYSTEM_CATCHUP_SCHEMA_KIND,
+      version: 1,
+      payload: {
+        reason,
+        sourceUnreadCount: unread.length,
+        sourceUnreadIds: unread.map((m) => m.id).filter(Boolean),
+        oldestId: oldest.id,
+        latestId: latest.id,
+      },
+    },
   };
   messages.push(msg);
   saveMessages();
