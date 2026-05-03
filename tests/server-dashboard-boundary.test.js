@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -142,8 +142,59 @@ describe('server dashboard mutation boundary', () => {
     const response = await request(mod.app).get('/agents/alpha');
 
     expect(response.status).toBe(200);
-    expect(response.text).toContain("sessionStorage.setItem('task_filter_assignee', agent);");
+    expect(response.text).toContain("storageSet(taskFilterStorage, 'task_filter_assignee', agent);");
     expect(response.text).not.toContain('monitoredAgent.name');
+  });
+
+  test('agent detail page guards browser storage access', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/agents/alpha');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('function safeStorage(name)');
+    expect(response.text).toContain('function storageGet(store, key');
+    expect(response.text).toContain('function storageSet(store, key, value)');
+    expect(response.text).toContain("const dmStorage = safeStorage('localStorage');");
+    expect(response.text).toContain("const taskFilterStorage = safeStorage('sessionStorage');");
+    expect(response.text).not.toMatch(/\b(?:localStorage|sessionStorage)\.(?:getItem|setItem|removeItem|clear)\b/);
+  });
+
+  test.each([
+    '/',
+    '/agents/alpha',
+    '/alerts',
+    '/tasks',
+  ])('guards dashboard EventSource setup for %s', async (route) => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get(route);
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('function connectDashboardStream(register)');
+    expect(response.text).toContain("typeof EventSource !== 'function'");
+    expect(response.text).toContain('connectDashboardStream(');
+  });
+
+  test('render modules use shared browser API guards instead of direct browser APIs', () => {
+    const renderFiles = [
+      'lib/dashboard/render/agent-detail-page.js',
+      'lib/dashboard/render/monitor-page.js',
+      'lib/dashboard/render/alerts-page.js',
+      'lib/dashboard/render/tasks-page.js',
+    ];
+
+    for (const file of renderFiles) {
+      const source = readFileSync(path.resolve(file), 'utf-8');
+      expect(source, file).not.toMatch(/\b(?:localStorage|sessionStorage)\.(?:getItem|setItem|removeItem|clear)\b/);
+      expect(source, file).not.toContain("new EventSource('/api/stream')");
+      expect(source, file).toContain('DASHBOARD_BROWSER_GUARDS_SCRIPT');
+    }
+
+    const helper = readFileSync(path.resolve('lib/dashboard/render/browser-guards.js'), 'utf-8');
+    expect(helper).toContain('function safeStorage(name)');
+    expect(helper).toContain("typeof EventSource !== 'function'");
+    expect(helper).toContain("new EventSource('/api/stream')");
   });
 
   test('monitor task SSE handlers do not require task-page globals', async () => {
