@@ -3648,11 +3648,13 @@ function emitSystemInfo(summary, full = '', alertType = null, opts = {}) {
     const recoveryTarget = ALERT_RECOVERY_MAP[alertType];
     if (recoveryTarget) {
       // Recovery event — auto-resolve matching alerts
-      if (opts.sourceAgent) {
-        alertStore.autoResolve(`${recoveryTarget}:${opts.sourceAgent}`);
-      } else {
-        alertStore.autoResolveByPrefix(recoveryTarget);
-      }
+      try {
+        if (opts.sourceAgent) {
+          alertStore.autoResolve(`${recoveryTarget}:${opts.sourceAgent}`);
+        } else {
+          alertStore.autoResolveByPrefix(recoveryTarget);
+        }
+      } catch { /* alert sidecar remains best-effort for system info */ }
     } else {
       // Non-recovery event — ingest as alert
       const dedupeKey = opts.dedupeKey || alertType;
@@ -4195,7 +4197,11 @@ function clearDeletedAgentState(agentName) {
   notificationRouter.clearAgent(name);
 
   // Clean up supervisor state for the deleted agent
-  supervisorSnapshotStore.removeTarget(name);
+  try {
+    supervisorSnapshotStore.removeTarget(name);
+  } catch (error) {
+    console.warn(`[supervisor] failed to remove snapshot for deleted agent '${name}': ${error?.message || error}`);
+  }
   try { killSupervisorTmux(`supervisor-${name}`); } catch { /* tmux not available */ }
 
   let agentDataRemoved = false;
@@ -6999,6 +7005,11 @@ app.get('/health', (_req, res) => {
 
 // ── Supervisor audit (v2 — per-agent supervisor snapshot store) ───────
 const _tokenFromSupervisorTarget = r => `supervisor-${r.params?.target || ''}`;
+function respondSupervisorSnapshotError(res, error, fallbackMessage) {
+  if (error.code === 'snapshot_persistence_failed') return res.status(503).json({ error: error.message });
+  if (error.code) return res.status(400).json({ error: error.message });
+  return res.status(500).json({ error: fallbackMessage });
+}
 
 app.patch('/api/supervisor-state/:target', requireAgentToken(_tokenFromSupervisorTarget), (req, res) => {
   const target = normalizeAgentName(req.params.target);
@@ -7021,8 +7032,7 @@ app.patch('/api/supervisor-state/:target', requireAgentToken(_tokenFromSuperviso
     supervisorActionEngine.evaluateAction(target, snapshot);
     return res.json({ ok: true, snapshot });
   } catch (error) {
-    if (error.code) return res.status(400).json({ error: error.message });
-    return res.status(500).json({ error: 'failed to update supervisor state' });
+    return respondSupervisorSnapshotError(res, error, 'failed to update supervisor state');
   }
 });
 
@@ -7124,14 +7134,18 @@ app.post('/api/supervisor/control', requireBearer, (req, res) => {
     return res.status(400).json({ error: 'enabled must be boolean' });
   }
 
-  supervisorSnapshotStore.setEnabled(body.enabled);
-  if (body.enabled) {
-    try { supervisorLifecycleManager.sweepAll(); } catch (_) { /* best-effort */ }
+  try {
+    supervisorSnapshotStore.setEnabled(body.enabled);
+    if (body.enabled) {
+      try { supervisorLifecycleManager.sweepAll(); } catch (_) { /* best-effort */ }
+    }
+    const control = supervisorSnapshotStore.getControl(agents);
+    const status = supervisorSnapshotStore.getStatus(agents);
+    auditLog(req, { summary: { enabled: body.enabled } });
+    return res.json({ ok: true, control, status });
+  } catch (error) {
+    return respondSupervisorSnapshotError(res, error, 'failed to update supervisor control');
   }
-  const control = supervisorSnapshotStore.getControl(agents);
-  const status = supervisorSnapshotStore.getStatus(agents);
-  auditLog(req, { summary: { enabled: body.enabled } });
-  return res.json({ ok: true, control, status });
 });
 
 // ── Server heartbeats ─────────────────────────────────────────────────
@@ -7664,6 +7678,11 @@ app.post('/api/agents/:name/start', requireBearer, (req, res) => {
       detached: true,
     });
     child.unref();
+    agent.tmux = `${agentName}:0.0`;
+    agent.lastSeen = Date.now();
+    agent.offlineReason = null;
+    transitionAgent(agentName, 'api_register_with_tmux');
+    saveAgents();
     auditLog(req, { agent: agentName, summary: { action: 'start', framework, pid: child.pid } });
     console.log(`[start] launched agentchat up-v1 ${agentName} ${framework} (pid=${child.pid})`);
     res.json({ ok: true, name: agentName, framework, pid: child.pid });
@@ -8765,14 +8784,20 @@ function parseTaskPageLimit(value) {
   return Math.min(n, 500);
 }
 
+function respondTaskStoreError(res, error, fallbackMessage) {
+  if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+  if (error.code === 'persistence_failed') return res.status(503).json({ error: error.message });
+  if (error.code) return res.status(400).json({ error: error.message });
+  return res.status(500).json({ error: fallbackMessage });
+}
+
 app.post('/api/tasks', requireBearer, (req, res) => {
   try {
     const task = taskStore.createTask(req.body || {});
     broadcastSSE('task_created', task);
     return res.json({ ok: true, task });
   } catch (error) {
-    if (error.code) return res.status(400).json({ error: error.message });
-    return res.status(500).json({ error: 'failed to create task' });
+    return respondTaskStoreError(res, error, 'failed to create task');
   }
 });
 
@@ -8826,9 +8851,7 @@ app.patch('/api/tasks/:id', requireBearer, (req, res) => {
     broadcastSSE('task_updated', task);
     return res.json({ ok: true, task });
   } catch (error) {
-    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
-    if (error.code) return res.status(400).json({ error: error.message });
-    return res.status(500).json({ error: 'failed to update task' });
+    return respondTaskStoreError(res, error, 'failed to update task');
   }
 });
 
@@ -8838,17 +8861,19 @@ app.patch('/api/tasks/:id/execution', requireAgentToken(_tokenFromTaskAssignee),
     broadcastSSE('task_updated', task);
     return res.json({ ok: true, task });
   } catch (error) {
-    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
-    if (error.code) return res.status(400).json({ error: error.message });
-    return res.status(500).json({ error: 'failed to update task execution' });
+    return respondTaskStoreError(res, error, 'failed to update task execution');
   }
 });
 
 app.delete('/api/tasks/:id', requireBearer, (req, res) => {
-  const task = taskStore.deleteTask(req.params.id);
-  if (!task) return res.status(404).json({ error: 'task not found' });
-  broadcastSSE('task_deleted', task);
-  return res.json({ ok: true, task });
+  try {
+    const task = taskStore.deleteTask(req.params.id);
+    if (!task) return res.status(404).json({ error: 'task not found' });
+    broadcastSSE('task_deleted', task);
+    return res.json({ ok: true, task });
+  } catch (error) {
+    return respondTaskStoreError(res, error, 'failed to delete task');
+  }
 });
 
 app.post('/api/tasks/:id/accept', requireAgentToken(_tokenFromTaskAssignee), (req, res) => {
@@ -8857,9 +8882,7 @@ app.post('/api/tasks/:id/accept', requireAgentToken(_tokenFromTaskAssignee), (re
     broadcastSSE('task_updated', task);
     return res.json({ ok: true, task });
   } catch (error) {
-    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
-    if (error.code) return res.status(400).json({ error: error.message });
-    return res.status(500).json({ error: 'failed to accept task' });
+    return respondTaskStoreError(res, error, 'failed to accept task');
   }
 });
 
@@ -8871,9 +8894,7 @@ app.post('/api/tasks/:id/transition', requireAgentToken(_tokenFromTaskAssignee),
     broadcastSSE('task_updated', task);
     return res.json({ ok: true, task });
   } catch (error) {
-    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
-    if (error.code) return res.status(400).json({ error: error.message });
-    return res.status(500).json({ error: 'failed to transition task' });
+    return respondTaskStoreError(res, error, 'failed to transition task');
   }
 });
 
@@ -8883,9 +8904,7 @@ app.post('/api/tasks/:id/comments', requireBearer, (req, res) => {
     broadcastSSE('task_updated', task);
     return res.json({ ok: true, task });
   } catch (error) {
-    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
-    if (error.code) return res.status(400).json({ error: error.message });
-    return res.status(500).json({ error: 'failed to add comment' });
+    return respondTaskStoreError(res, error, 'failed to add comment');
   }
 });
 
@@ -9039,6 +9058,16 @@ app.patch('/api/task-graphs/:id/nodes/:nodeId', requireAgentToken(_tokenFromNode
 });
 
 // ── Alerts CRUD ───────────────────────────────────────────────────────
+function respondAlertStoreError(res, error, fallbackMessage) {
+  if (error.code === 'not_found') return res.status(404).json({ error: error.message });
+  if (error.code === 'persistence_failed') return res.status(503).json({ error: error.message });
+  if (error.code === 'bad_transition' || error.code === 'bad_request') {
+    return res.status(400).json({ error: error.message });
+  }
+  if (error.code) return res.status(400).json({ error: error.message });
+  return res.status(500).json({ error: fallbackMessage });
+}
+
 app.get('/api/alerts', requireBearer, (req, res) => {
   const filters = {};
   if (req.query.status) filters.status = req.query.status;
@@ -9091,9 +9120,7 @@ app.post('/api/alerts/:id/transition', _alertTransitionAuth, (req, res) => {
     });
     return res.json({ ok: true, alert });
   } catch (error) {
-    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
-    if (error.code === 'bad_transition') return res.status(400).json({ error: error.message });
-    return res.status(500).json({ error: 'failed to transition alert' });
+    return respondAlertStoreError(res, error, 'failed to transition alert');
   }
 });
 
@@ -9105,9 +9132,7 @@ app.post('/api/alerts/:id/notes', requireBearer, (req, res) => {
     });
     return res.json({ ok: true, alert });
   } catch (error) {
-    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
-    if (error.code) return res.status(400).json({ error: error.message });
-    return res.status(500).json({ error: 'failed to add note' });
+    return respondAlertStoreError(res, error, 'failed to add note');
   }
 });
 
@@ -9116,17 +9141,19 @@ app.patch('/api/alerts/:id', requireBearer, (req, res) => {
     const alert = alertStore.updateAlert(req.params.id, req.body || {});
     return res.json({ ok: true, alert });
   } catch (error) {
-    if (error.code === 'not_found') return res.status(404).json({ error: error.message });
-    if (error.code) return res.status(400).json({ error: error.message });
-    return res.status(500).json({ error: 'failed to update alert' });
+    return respondAlertStoreError(res, error, 'failed to update alert');
   }
 });
 
 app.delete('/api/alerts/:id', requireBearer, (req, res) => {
-  const alert = alertStore.deleteAlert(req.params.id);
-  if (!alert) return res.status(404).json({ error: 'alert not found' });
-  broadcastSSE('alert_deleted', alert);
-  return res.json({ ok: true, alert });
+  try {
+    const alert = alertStore.deleteAlert(req.params.id);
+    if (!alert) return res.status(404).json({ error: 'alert not found' });
+    broadcastSSE('alert_deleted', alert);
+    return res.json({ ok: true, alert });
+  } catch (error) {
+    return respondAlertStoreError(res, error, 'failed to delete alert');
+  }
 });
 
 // ── Groups CRUD ───────────────────────────────────────────────────────

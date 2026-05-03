@@ -527,6 +527,21 @@ describe('server dashboard mutation boundary', () => {
     expect(response.text).not.toContain('allAgents = await r.json();');
   });
 
+  test('config page guards duplicate agent start submissions', async () => {
+    const mod = await setup();
+
+    const response = await request(mod.app).get('/config');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('let startingAgents = new Set();');
+    expect(response.text).toContain('var isStarting = startingAgents.has(a.name);');
+    expect(response.text).toContain('var canStart = !a.online && isLocal && validFw && !isStarting;');
+    expect(response.text).toContain('if (startingAgents.has(name)) return;');
+    expect(response.text).toContain('startingAgents.add(name);');
+    expect(response.text).toContain('<button class="btn btn-accent" disabled>Starting...</button>');
+    expect(response.text).toContain('startingAgents.delete(name);');
+  });
+
   test('dashboard render paths filter malformed array elements before rendering', async () => {
     const mod = await setup();
 

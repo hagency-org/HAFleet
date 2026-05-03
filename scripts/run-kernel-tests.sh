@@ -113,6 +113,10 @@ start_shard "api runtime" \
 
 start_shard "backend api" \
   tests/api-tasks.test.js \
+  tests/alert-store.test.js \
+  tests/supervisor-snapshot-store.test.js \
+  tests/supervisor-action-engine.test.js \
+  tests/api-supervisor-v2.test.js \
   tests/api-agents.test.js \
   tests/api-audit.test.js \
   tests/api-provenance.test.js \

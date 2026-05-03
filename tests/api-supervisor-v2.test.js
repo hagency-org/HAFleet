@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import request from 'supertest';
@@ -22,7 +22,12 @@ describe('supervisor v2 API', () => {
     writeFileSync(path.join(stateDir, 'agent-token'), token + '\n');
   }
 
+  function readRuntimeJson(name) {
+    return JSON.parse(readFileSync(path.join(context.runtimeDir, 'data', name), 'utf8'));
+  }
+
   async function setup(opts = {}) {
+    const { env = {}, agents: extraAgents = {}, ...restOpts } = opts;
     homeDir = mkdtempSync(path.join(os.tmpdir(), 'supervisor-v2-test-home-'));
     provisionSupervisorToken(homeDir, 'supervisor-ac-topleader', SUPERVISOR_TOKEN);
     context = await createBackendTestContext('agent-chat-supervisor-v2-test-', {
@@ -30,11 +35,11 @@ describe('supervisor v2 API', () => {
         'ac-topleader': { name: 'ac-topleader', type: 'agent', kind: 'agent', online: true },
         'supervisor-ac-topleader': { name: 'supervisor-ac-topleader', type: 'agent', kind: 'agent', online: true },
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: true },
-        ...opts.agents,
+        ...extraAgents,
       },
       groups: {},
-      env: { AGENTCHAT_HOMEDIR: homeDir, ...opts.env },
-      ...opts,
+      ...restOpts,
+      env: { AGENTCHAT_HOMEDIR: homeDir, ...env },
     });
     return context;
   }
@@ -69,6 +74,44 @@ describe('supervisor v2 API', () => {
     expect(detail.body.state.lastStatus).toBe('focused');
     expect(detail.body.state.classification).toBe('active');
     expect(detail.body.events).toHaveLength(1);
+  });
+
+  test('assessment persistence failure returns 503 without visible snapshot or events', async () => {
+    await setup();
+    context.internals.setJsonSaveFailureForTest('supervisor_snapshots.json', true);
+
+    const patch = await patchState('ac-topleader', {
+      state: 'focused',
+      confidence: 0.92,
+      reason: 'Agent is working on assigned task',
+      suggested_action: 'none',
+      domain: 'core',
+    });
+
+    expect(patch.status).toBe(503);
+    expect(patch.body.error).toContain('supervisor snapshot persistence failed');
+    const detail = await request(context.app).get('/api/supervisor/agents/ac-topleader');
+    expect(detail.status).toBe(200);
+    expect(detail.body.state).toBe(null);
+    expect(detail.body.latest).toBe(null);
+    expect(detail.body.events).toEqual([]);
+  });
+
+  test('failed negative assessment does not dispatch supervisor action message', async () => {
+    await setup({ env: { SUPERVISOR_WARN_AFTER: '1' } });
+    context.internals.setJsonSaveFailureForTest('supervisor_snapshots.json', true);
+
+    const patch = await patchState('ac-topleader', {
+      state: 'stuck',
+      confidence: 0.95,
+      reason: 'blocked',
+      suggested_action: 'nudge',
+      domain: 'core',
+    });
+
+    expect(patch.status).toBe(503);
+    expect(patch.body.error).toContain('supervisor snapshot persistence failed');
+    expect(readRuntimeJson('messages.json')).toEqual([]);
   });
 
   test('tracks consecutive negative assessments', async () => {
@@ -183,6 +226,22 @@ describe('supervisor v2 API', () => {
     expect(enable.status).toBe(200);
     expect(enable.body.control.enabled).toBe(true);
     expect(enable.body.control.disabledReason).toBe(null);
+  });
+
+  test('control POST persistence failure returns 503 and leaves enabled state unchanged', async () => {
+    await setup();
+    context.internals.setJsonSaveFailureForTest('supervisor_snapshots.json', true);
+
+    const disable = await request(context.app)
+      .post('/api/supervisor/control')
+      .send({ enabled: false });
+
+    expect(disable.status).toBe(503);
+    expect(disable.body.error).toContain('supervisor snapshot persistence failed');
+    const control = await request(context.app).get('/api/supervisor/control');
+    expect(control.status).toBe(200);
+    expect(control.body.enabled).toBe(true);
+    expect(control.body.disabledReason).toBe(null);
   });
 
   test('control POST rejects allowedAgents mutation', async () => {

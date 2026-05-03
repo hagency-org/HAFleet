@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'vitest';
 import request from 'supertest';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
+import { createAlertStore } from '../lib/alert-store.js';
 
 describe('alert system', () => {
   let context = null;
@@ -407,5 +408,135 @@ describe('alert system', () => {
 
     const get = await request(app).get(`/api/alerts/${id}`);
     expect(get.status).toBe(404);
+  });
+
+  test('alert API writes fail closed and keep visible state unchanged', async () => {
+    await setup();
+    const { app } = context;
+
+    await request(app).post('/api/system/info')
+      .send({ summary: 'Test', alertType: 'agent_rule', dedupeKey: 'agent_rule:persist-test' });
+    const list = await request(app).get('/api/alerts');
+    const id = list.body[0].id;
+    const initialOwner = list.body[0].owner;
+    const initialTags = list.body[0].tags;
+
+    context.internals.setJsonSaveFailureForTest('alerts.json', true);
+    const failedTransition = await request(app)
+      .post(`/api/alerts/${id}/transition`)
+      .send({ status: 'acknowledged' });
+    expect(failedTransition.status).toBe(503);
+    expect(failedTransition.body.error).toContain('alert persistence failed');
+    let alert = await request(app).get(`/api/alerts/${id}`);
+    expect(alert.body.status).toBe('open');
+
+    const failedNote = await request(app)
+      .post(`/api/alerts/${id}/notes`)
+      .send({ text: 'volatile note', author: 'operator' });
+    expect(failedNote.status).toBe(503);
+    alert = await request(app).get(`/api/alerts/${id}`);
+    expect(alert.body.notes).toEqual([]);
+
+    const failedPatch = await request(app)
+      .patch(`/api/alerts/${id}`)
+      .send({ owner: 'volatile-owner', tags: ['volatile'] });
+    expect(failedPatch.status).toBe(503);
+    alert = await request(app).get(`/api/alerts/${id}`);
+    expect(alert.body.owner).toBe(initialOwner);
+    expect(alert.body.tags).toEqual(initialTags);
+
+    const failedDelete = await request(app).delete(`/api/alerts/${id}`);
+    expect(failedDelete.status).toBe(503);
+    alert = await request(app).get(`/api/alerts/${id}`);
+    expect(alert.status).toBe(200);
+    expect(alert.body.dedupeKey).toBe('agent_rule:persist-test');
+  });
+});
+
+describe('alert store persistence failure handling', () => {
+  function buildAlert(overrides = {}) {
+    return {
+      id: 'alert_1',
+      alertType: 'mcp_missing',
+      dedupeKey: 'mcp_missing:alpha',
+      severity: 'info',
+      source: 'backend',
+      sourceAgent: 'alpha',
+      summary: 'MCP missing',
+      detail: '',
+      occurrences: 1,
+      firstSeenAt: 1,
+      lastSeenAt: 1,
+      lastPayload: null,
+      status: 'open',
+      assignee: null,
+      owner: null,
+      runbook: null,
+      impact: null,
+      recoveryCondition: null,
+      correlation: { dedupeKey: 'mcp_missing:alpha' },
+      actionable: false,
+      originalSeverity: null,
+      missingActionableFields: [],
+      notes: [],
+      linkedTaskId: null,
+      suppressUntil: null,
+      tags: [],
+      resolvedAt: null,
+      resolvedBy: null,
+      ...overrides,
+    };
+  }
+
+  test('ingest rolls back and does not emit when persistence fails', () => {
+    const events = [];
+    const store = createAlertStore({
+      initialData: [],
+      save: () => false,
+      emitEvent: (name, alert) => events.push({ name, id: alert.id }),
+      now: () => 1000,
+    });
+
+    expect(() => store.ingest({
+      alertType: 'mcp_missing',
+      dedupeKey: 'mcp_missing:alpha',
+      summary: 'MCP missing',
+    })).toThrow(/alert persistence failed/);
+    expect(store.dump()).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  test('transition rollback keeps status and suppresses event on failed persistence', () => {
+    const events = [];
+    const store = createAlertStore({
+      initialData: [buildAlert()],
+      save: () => false,
+      emitEvent: (name, alert) => events.push({ name, status: alert.status }),
+      now: () => 2000,
+    });
+
+    expect(() => store.transition('alert_1', 'resolved', { actor: 'operator' }))
+      .toThrow(/alert persistence failed/);
+    expect(store.getAlert('alert_1').status).toBe('open');
+    expect(store.getAlert('alert_1').resolvedAt).toBe(null);
+    expect(events).toEqual([]);
+  });
+
+  test('prefix auto-resolve rollback preserves dedupe index on failed persistence', () => {
+    const events = [];
+    const store = createAlertStore({
+      initialData: [
+        buildAlert({ id: 'alert_1', dedupeKey: 'server_offline:a', alertType: 'server_offline' }),
+        buildAlert({ id: 'alert_2', dedupeKey: 'server_offline:b', alertType: 'server_offline' }),
+      ],
+      save: () => false,
+      emitEvent: (name, alert) => events.push({ name, id: alert.id }),
+      now: () => 3000,
+    });
+
+    expect(() => store.autoResolveByPrefix('server_offline')).toThrow(/alert persistence failed/);
+    expect(store.getAlert('alert_1').status).toBe('open');
+    expect(store.getAlert('alert_2').status).toBe('open');
+    expect(events).toEqual([]);
   });
 });

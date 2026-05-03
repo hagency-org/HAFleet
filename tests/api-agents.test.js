@@ -1,8 +1,18 @@
-import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 import request from 'supertest';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
+
+const spawnMock = vi.hoisted(() => vi.fn(() => ({ pid: 4242, unref: vi.fn() })));
+
+vi.mock('child_process', async () => {
+  const actual = await vi.importActual('child_process');
+  return {
+    ...actual,
+    spawn: spawnMock,
+  };
+});
 
 function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, 'utf-8'));
@@ -39,6 +49,15 @@ describe('backend agents API', () => {
             notes: 'legacy notes',
             projectScope: 'legacy scope',
           },
+        },
+        starter: {
+          name: 'starter',
+          type: 'claude',
+          kind: 'agent',
+          online: false,
+          manualDown: true,
+          offlineReason: 'idle',
+          server: null,
         },
       },
       groups: {},
@@ -180,5 +199,34 @@ describe('backend agents API', () => {
     expect(Object.prototype.hasOwnProperty.call(runtime, 'alpha')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(cursors, 'alpha')).toBe(false);
     expect(existsSync(path.join(dataDir, 'agents', 'alpha'))).toBe(false);
+  });
+
+  test('POST /api/agents/:name/start claims starting state before launch registration', async () => {
+    spawnMock.mockClear();
+
+    const first = await request(context.app).post('/api/agents/starter/start');
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ ok: true, name: 'starter', framework: 'claude', pid: 4242 });
+
+    const second = await request(context.app).post('/api/agents/starter/start');
+    expect(second.status).toBe(409);
+    expect(second.body.error).toContain('already online');
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+
+    const agent = await request(context.app).get('/api/agents/starter');
+    expect(agent.status).toBe(200);
+    expect(agent.body.state).toBe('starting');
+    expect(agent.body.online).toBe(true);
+    expect(agent.body.tmux).toBe('starter:0.0');
+    expect(agent.body.offlineReason).toBe(null);
+
+    const agents = readJson(path.join(context.runtimeDir, 'data', 'agents.json'));
+    expect(agents.starter).toMatchObject({
+      online: true,
+      manualDown: false,
+      tmux: 'starter:0.0',
+      offlineReason: null,
+      state: 'starting',
+    });
   });
 });

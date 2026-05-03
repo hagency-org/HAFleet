@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, test } from 'vitest';
 import request from 'supertest';
+import { existsSync, readFileSync } from 'fs';
+import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
+
+function readJson(filePath, fallback) {
+  if (!existsSync(filePath)) return fallback;
+  return JSON.parse(readFileSync(filePath, 'utf8'));
+}
 
 describe('task system API', () => {
   let context = null;
@@ -234,5 +241,54 @@ describe('task system API', () => {
     const bad = await request(context.app).post(`/api/tasks/${id}/transition`).send({ status: 'done' });
     expect(bad.status).toBe(400);
     expect(bad.body.error).toContain('cannot transition');
+  });
+
+  test('task writes fail closed and keep in-memory state unchanged', async () => {
+    await setup();
+    const tasksPath = path.join(context.runtimeDir, 'data', 'tasks.json');
+
+    context.internals.setJsonSaveFailureForTest('tasks.json', true);
+    const failedCreate = await request(context.app)
+      .post('/api/tasks')
+      .send({ title: 'Non-durable task', assignee: 'alpha' });
+    expect(failedCreate.status).toBe(503);
+    expect(failedCreate.body.error).toContain('task persistence failed');
+    expect((await request(context.app).get('/api/tasks')).body).toEqual([]);
+    expect(readJson(tasksPath, [])).toEqual([]);
+
+    context.internals.setJsonSaveFailureForTest('tasks.json', false);
+    const create = await request(context.app)
+      .post('/api/tasks')
+      .send({ title: 'Durable task', assignee: 'alpha' });
+    expect(create.status).toBe(200);
+    const id = create.body.task.id;
+
+    context.internals.setJsonSaveFailureForTest('tasks.json', true);
+    const failedPatch = await request(context.app)
+      .patch(`/api/tasks/${id}`)
+      .send({ title: 'Volatile title', priority: 'p0' });
+    expect(failedPatch.status).toBe(503);
+    let task = await request(context.app).get(`/api/tasks/${id}`);
+    expect(task.body.title).toBe('Durable task');
+    expect(task.body.priority).toBe('p2');
+
+    const failedAccept = await request(context.app).post(`/api/tasks/${id}/accept`);
+    expect(failedAccept.status).toBe(503);
+    task = await request(context.app).get(`/api/tasks/${id}`);
+    expect(task.body.status).toBe('created');
+    expect(task.body.started_at).toBe(null);
+
+    const failedComment = await request(context.app)
+      .post(`/api/tasks/${id}/comments`)
+      .send({ author: 'operator', text: 'volatile comment' });
+    expect(failedComment.status).toBe(503);
+    task = await request(context.app).get(`/api/tasks/${id}`);
+    expect(task.body.comments).toEqual([]);
+
+    const failedDelete = await request(context.app).delete(`/api/tasks/${id}`);
+    expect(failedDelete.status).toBe(503);
+    task = await request(context.app).get(`/api/tasks/${id}`);
+    expect(task.status).toBe(200);
+    expect(task.body.title).toBe('Durable task');
   });
 });
