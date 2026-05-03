@@ -541,6 +541,49 @@ describe('server delivery path', () => {
     ]));
   });
 
+  test('canceling an already-missing unread message still drops correlated queue notifications', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    serverModule.setServerTestHooks({
+      backendFetch: async () => ({
+        ok: false,
+        status: 404,
+        text: async () => '',
+        json: async () => ({ error: 'message not found' }),
+      }),
+    });
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'agent-chat-v2',
+      to: 'alpha:0.0',
+      payload: '[NOTIFICATION] unread messages',
+      notifyMeta: {
+        kind: 'merged_unread_actionable',
+        requiresInboxCheck: true,
+        sourceMsgId: 'msg_0002',
+        messageIds: ['msg_0001', 'msg_0002'],
+        unreadCount: 2,
+      },
+    });
+    expect(queued.status).toBe(200);
+
+    const canceled = await request(serverModule.app)
+      .post('/api/agents/alpha/unread-messages/msg_0001/cancel');
+
+    expect(canceled.status).toBe(200);
+    expect(canceled.body).toMatchObject({
+      ok: true,
+      already_absent: true,
+      queue_removed: 1,
+      queue_remove_failed: false,
+    });
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toEqual([]);
+  });
+
   test('manual send does not re-paste payload after tmux enter fails', async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });

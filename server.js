@@ -2040,12 +2040,14 @@ app.post('/api/agents/:name/unread-messages/:msgId/cancel', async (req, res) => 
       body: JSON.stringify({ agent: name, reason: 'web-cancel' }),
     });
     const suppressData = await suppressRes.json().catch(() => ({ error: `backend status ${suppressRes.status}` }));
-    if (!suppressRes.ok) return res.status(suppressRes.status).json(suppressData);
+    const alreadyAbsent = suppressRes.status === 404;
+    if (!suppressRes.ok && !alreadyAbsent) return res.status(suppressRes.status).json(suppressData);
 
     const queueDrop = dropQueuedBackendNotificationsBySource(name, msgId, 'message-canceled');
     res.json({
       ok: true,
       canceled: { agent: name, message: msgId },
+      already_absent: alreadyAbsent,
       queue_removed: queueDrop.removed,
       queue_remove_failed: queueDrop.persistFailed,
       suppress: suppressData,
