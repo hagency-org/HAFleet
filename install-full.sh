@@ -13,6 +13,7 @@ SKIP_MCP=false
 SKIP_NPM=false
 SKIP_PREREQ=false
 WITH_BRIDGE=false
+NODE_BIN="${NODE_BIN:-}"
 
 usage() {
   cat <<'USAGE'
@@ -67,6 +68,15 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+resolve_node_bin() {
+  if [ -n "$NODE_BIN" ]; then
+    [ -x "$NODE_BIN" ] || die "NODE_BIN is not executable: $NODE_BIN"
+    return 0
+  fi
+  NODE_BIN="$(command -v node || true)"
+  [ -n "$NODE_BIN" ] || die "missing required command: node"
+}
+
 is_system_dir() {
   [ "$(cd "$(dirname "$SYSTEMD_DIR")" 2>/dev/null && pwd)/$(basename "$SYSTEMD_DIR")" = "/etc/systemd/system" ]
 }
@@ -97,10 +107,12 @@ render_service() {
   local template="$1"
   local target="$2"
   local tmp
+  resolve_node_bin
   tmp="$(mktemp)"
   sed \
     -e "s|__USER__|$SERVICE_USER|g" \
     -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
+    -e "s|__NODE_BIN__|$NODE_BIN|g" \
     "$template" > "$tmp"
   system_install "$tmp" "$target"
   rm -f "$tmp"

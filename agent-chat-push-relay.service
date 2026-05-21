@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=__USER__
 WorkingDirectory=__INSTALL_DIR__
-ExecStart=/usr/bin/node push-relay.js
+ExecStart=__NODE_BIN__ __INSTALL_DIR__/push-relay.js
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production

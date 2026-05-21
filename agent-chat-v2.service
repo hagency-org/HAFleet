@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=__USER__
 WorkingDirectory=__INSTALL_DIR__
-ExecStart=/usr/bin/node backend-v2.js
+ExecStart=__NODE_BIN__ __INSTALL_DIR__/backend-v2.js
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production

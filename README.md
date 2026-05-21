@@ -132,7 +132,10 @@ Useful options:
 | `--env-file PATH` | Use a custom env file | 指定自定义 `.env` 路径 |
 | `--bin-dir PATH` | Link CLI commands into a custom directory | 指定 CLI 链接目录 |
 | `--systemd-dir PATH` | Render service files into a custom directory | 指定 systemd unit 输出目录 |
+| `--service-user USER` | Render systemd units for a specific user | 指定 systemd unit 的运行用户 |
 | `--skip-mcp` | Skip Claude Code MCP configuration | 跳过 Claude Code MCP 配置 |
+| `--skip-npm` | Skip `npm install` | 跳过 `npm install` |
+| `--skip-prereq-check` | Skip host prerequisite checks | 跳过主机前置条件检查 |
 | `--with-bridge` | Also install and start `bridge-matrix.service` | 同时安装并启动 Matrix bridge |
 
 Legacy entrypoints `install.sh` and `install-v2.sh` are deprecated wrappers that delegate to `install-full.sh`.

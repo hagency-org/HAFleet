@@ -14,10 +14,12 @@ function runScript(script, args, options = {}) {
   return execFileSync('bash', [path.join(ROOT, script), ...args], {
     cwd: ROOT,
     encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
       HOME: options.home,
       API_TOKEN: options.apiToken || 'test-install-token',
+      NODE_BIN: options.nodeBin || process.execPath,
       PATH: options.path || process.env.PATH,
     },
   });
@@ -31,8 +33,10 @@ describe('local install and uninstall scripts', () => {
       const systemdDir = path.join(tmp, 'systemd');
       const binDir = path.join(tmp, 'bin');
       const envFile = path.join(tmp, '.env');
+      const fakeNode = path.join(tmp, 'fake-node');
       mkdirSync(home, { recursive: true });
       mkdirSync(systemdDir, { recursive: true });
+      writeFileSync(fakeNode, '#!/usr/bin/env bash\n', { mode: 0o755 });
 
       runScript('install-full.sh', [
         '--skip-prereq-check',
@@ -43,21 +47,24 @@ describe('local install and uninstall scripts', () => {
         '--systemd-dir', systemdDir,
         '--bin-dir', binDir,
         '--env-file', envFile,
-      ], { home, apiToken: 'fresh-token' });
+      ], { home, apiToken: 'fresh-token', nodeBin: fakeNode });
 
       expect(readFileSync(envFile, 'utf-8')).toContain('API_TOKEN=fresh-token');
       const backendUnit = readFileSync(path.join(systemdDir, 'agent-chat-v2.service'), 'utf-8');
       expect(backendUnit).toContain('User=agentchat-user');
       expect(backendUnit).toContain(`WorkingDirectory=${ROOT}`);
-      expect(backendUnit).toContain('ExecStart=/usr/bin/node backend-v2.js');
+      expect(backendUnit).toContain(`ExecStart=${fakeNode} ${ROOT}/backend-v2.js`);
+      expect(backendUnit).not.toContain('__NODE_BIN__');
 
       const webUnit = readFileSync(path.join(systemdDir, 'agent-chat.service'), 'utf-8');
-      expect(webUnit).toContain('ExecStart=/usr/bin/node server.js');
+      expect(webUnit).toContain(`ExecStart=${fakeNode} ${ROOT}/server.js`);
+      expect(webUnit).not.toContain('__NODE_BIN__');
 
       const relayUnit = readFileSync(path.join(systemdDir, 'agent-chat-push-relay.service'), 'utf-8');
       expect(relayUnit).toContain('After=network-online.target agent-chat-v2.service');
       expect(relayUnit).toContain('Environment=PUSH_RELAY_MODE=local');
-      expect(relayUnit).toContain('ExecStart=/usr/bin/node push-relay.js');
+      expect(relayUnit).toContain(`ExecStart=${fakeNode} ${ROOT}/push-relay.js`);
+      expect(relayUnit).not.toContain('__NODE_BIN__');
 
       expect(lstatSync(path.join(binDir, 'agentchat')).isSymbolicLink()).toBe(true);
       expect(lstatSync(path.join(binDir, 'agent-send')).isSymbolicLink()).toBe(true);
@@ -98,6 +105,40 @@ describe('local install and uninstall scripts', () => {
       expect(claudeArgs).toContain('AGENT_CHAT_API=http://127.0.0.1:8090');
       expect(claudeArgs).toContain('API_TOKEN=test-install-token');
       expect(claudeArgs).toContain(`agent-chat node ${ROOT}/mcp-server.js`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('install-full rejects a configured NODE_BIN that is not executable', () => {
+    const tmp = makeTempRoot('agent-chat-install-node-bin-');
+    try {
+      const home = path.join(tmp, 'home');
+      const systemdDir = path.join(tmp, 'systemd');
+      const binDir = path.join(tmp, 'bin');
+      const notExecutableNode = path.join(tmp, 'not-executable-node');
+      mkdirSync(home, { recursive: true });
+      mkdirSync(systemdDir, { recursive: true });
+      writeFileSync(notExecutableNode, '#!/usr/bin/env bash\n', { mode: 0o644 });
+
+      let failure = null;
+      try {
+        runScript('install-full.sh', [
+          '--skip-prereq-check',
+          '--skip-npm',
+          '--skip-mcp',
+          '--no-start',
+          '--systemd-dir', systemdDir,
+          '--bin-dir', binDir,
+          '--env-file', path.join(tmp, '.env'),
+        ], { home, nodeBin: notExecutableNode });
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure).toBeTruthy();
+      expect(failure.status).toBe(1);
+      expect(String(failure.stderr)).toContain(`NODE_BIN is not executable: ${notExecutableNode}`);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -159,6 +200,7 @@ describe('local install and uninstall scripts', () => {
     const backendUnit = readFileSync('agent-chat-v2.service', 'utf-8');
     const webUnit = readFileSync('agent-chat.service', 'utf-8');
     const relayUnit = readFileSync('agent-chat-push-relay.service', 'utf-8');
+    const bridgeUnit = readFileSync('bridge-matrix.service', 'utf-8');
 
     expect(backendUnit).toContain('After=network.target');
     expect(backendUnit).not.toContain('After=network.target agent-chat.service');
@@ -167,5 +209,30 @@ describe('local install and uninstall scripts', () => {
     expect(webUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
     expect(relayUnit).toContain('After=network-online.target agent-chat-v2.service');
     expect(relayUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
+    expect(bridgeUnit).toContain('After=network.target agent-chat-v2.service');
+    expect(bridgeUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
+    expect(backendUnit).toContain('ExecStart=__NODE_BIN__ __INSTALL_DIR__/backend-v2.js');
+    expect(webUnit).toContain('ExecStart=__NODE_BIN__ __INSTALL_DIR__/server.js');
+    expect(relayUnit).toContain('ExecStart=__NODE_BIN__ __INSTALL_DIR__/push-relay.js');
+    expect(bridgeUnit).toContain('ExecStart=__NODE_BIN__ __INSTALL_DIR__/bridge-matrix.js');
+    expect(`${backendUnit}\n${webUnit}\n${relayUnit}\n${bridgeUnit}`).not.toContain('/usr/bin/node');
+  });
+
+  test('README documents supported install-full options', () => {
+    const readme = readFileSync('README.md', 'utf-8');
+    for (const flag of [
+      '--dry-run',
+      '--no-start',
+      '--env-file PATH',
+      '--bin-dir PATH',
+      '--systemd-dir PATH',
+      '--service-user USER',
+      '--skip-mcp',
+      '--skip-npm',
+      '--skip-prereq-check',
+      '--with-bridge',
+    ]) {
+      expect(readme).toContain(`| \`${flag}\` |`);
+    }
   });
 });

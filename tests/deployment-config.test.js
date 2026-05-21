@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { spawnSync } from 'child_process';
 import { readFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -37,6 +38,54 @@ describe('deployment configuration', () => {
     expect(exitCode).toBe(1);
     expect(errors.join('\n')).toContain('test service cannot start');
     expect(errors.join('\n')).toContain('API_TOKEN');
+  });
+
+  test('push relay entrypoint fails closed without API_TOKEN before core startup', () => {
+    const result = spawnSync(process.execPath, ['push-relay.js'], {
+      cwd: path.resolve('.'),
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        API_TOKEN: '',
+        PUSH_RELAY_MODE: 'local',
+      },
+      timeout: 3000,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Agent Chat push relay cannot start');
+    expect(result.stderr).toContain('API_TOKEN');
+    expect(result.stderr).not.toContain('[push-relay]');
+  });
+
+  test('.env.example documents deployment-facing optional variables', () => {
+    const envExample = readFileSync('.env.example', 'utf-8');
+    for (const name of [
+      'AGENT_CHAT_API',
+      'AGENT_CHAT_RUNTIME_DIR',
+      'AGENT_CHAT_BACKEND_PORT',
+      'AGENT_CHAT_WEB_PORT',
+      'AGENT_CHAT_WEB_URL',
+      'AGENT_CHAT_QUEUE_URL',
+      'AGENTCHAT_HOMEDIR',
+      'AGENT_CHAT_DASHBOARD_TOKEN',
+      'PUSH_RELAY_MODE',
+      'PUSH_RELAY_INCLUDE_LEASE_FIELDS',
+      'PUSH_RELAY_SCAN_INTERVAL_MS',
+      'PUSH_RELAY_RECONNECT_MS',
+      'PUSH_RELAY_HEARTBEAT_INTERVAL_MS',
+      'PUSH_RELAY_INJECT_DELAY_MS',
+      'PUSH_RELAY_BLOCK_SCAN_INTERVAL_MS',
+      'PUSH_RELAY_BLOCK_TAIL_LINES',
+      'PUSH_RELAY_BLOCK_RECENT_LINES',
+      'PUSH_RELAY_COMPACT_RECENT_LINES',
+      'PUSH_RELAY_SKIP_LOG_THROTTLE_MS',
+      'PUSH_RELAY_MCP_SESSION_CACHE_TTL_MS',
+      'RELAY_QUEUE_DRAIN_INTERVAL_MS',
+      'AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN',
+    ]) {
+      expect(envExample).toMatch(new RegExp(`^#?${name}=`, 'm'));
+    }
   });
 
   test('startup config warns for missing optional variables without failing', () => {
