@@ -1,6 +1,6 @@
 [Unit]
 Description=Agent Chat - tmux agent message queue and visualization
-After=network.target
+After=network.target agent-chat-v2.service
 
 [Service]
 Type=simple

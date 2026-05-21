@@ -154,4 +154,18 @@ describe('local install and uninstall scripts', () => {
     expect(readFileSync('install.sh', 'utf-8')).toContain('deprecated');
     expect(readFileSync('install-v2.sh', 'utf-8')).toContain('deprecated');
   });
+
+  test('local service units use optional env files and backend-first ordering', () => {
+    const backendUnit = readFileSync('agent-chat-v2.service', 'utf-8');
+    const webUnit = readFileSync('agent-chat.service', 'utf-8');
+    const relayUnit = readFileSync('agent-chat-push-relay.service', 'utf-8');
+
+    expect(backendUnit).toContain('After=network.target');
+    expect(backendUnit).not.toContain('After=network.target agent-chat.service');
+    expect(backendUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
+    expect(webUnit).toContain('After=network.target agent-chat-v2.service');
+    expect(webUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
+    expect(relayUnit).toContain('After=network-online.target agent-chat-v2.service');
+    expect(relayUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
+  });
 });

@@ -1,13 +1,28 @@
 node_modules/
+coverage/
+.nyc_output/
+
+# Local runtime state
 logs/
 data/
 data.stale*/
 data.stale-backup*/
+*.bak
+*.tmp
+*.log
+
+# Local machine configuration and secrets
 .env
-.DS_Store
+.env.local
+.env.*.local
 .mcp.json
+.DS_Store
+
+# Generated packages and local remote runtime artifacts
 remote-dist/
 remote/.push-relay-launchd.sh
 remote/package-lock.json
+
+# Generated per-agent workspace docs
 docs/agentchat-worker/
 docs/agentchat-develop/
