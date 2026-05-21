@@ -54,6 +54,7 @@ import { createSupervisorLifecycleManager, killTmuxSession as killSupervisorTmux
 import { provisionSupervisorAgent, buildSupervisorAgentRecord } from './lib/supervisor-provisioning.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
 import { assertRuntimeDir, isLocalAgentServer } from './lib/runtime-dir-guard.js';
+import { enforceStartupConfig } from './lib/startup-config.js';
 import { NotificationRouter } from './lib/notification-router.js';
 import { readV1AgentManifest, defaultAgentchatHomeDir, allAgentHomeRoots } from './lib/agent-home-v1.js';
 import {
@@ -144,6 +145,16 @@ const AGENT_COMPACT_SUMMARY_MAX = Number.parseInt(process.env.AGENT_COMPACT_SUMM
 const AGENT_COMPACT_RUNTIME_DEDUPE_MS = Number.parseInt(process.env.AGENT_COMPACT_RUNTIME_DEDUPE_MS || '120000', 10);
 const SUBCONSCIOUS_EVENT_HISTORY_LIMIT = Number.parseInt(process.env.SUBCONSCIOUS_EVENT_HISTORY_LIMIT || '2000', 10);
 const SUBCONSCIOUS_EVENT_AGENT_LIMIT = Number.parseInt(process.env.SUBCONSCIOUS_EVENT_AGENT_LIMIT || '500', 10);
+const BACKEND_STARTUP_OPTIONAL_ENV = [
+  {
+    name: 'AGENT_CHAT_DASHBOARD_TOKEN',
+    description: 'Non-local dashboard mutations will remain unavailable unless this token is configured.',
+  },
+  {
+    name: 'AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN',
+    description: 'Subconscious event webhook bearer auth is disabled unless this token is configured.',
+  },
+];
 const SERVER_MAINTENANCE_IDS = new Set(
   String(process.env.AGENT_SERVER_MAINTENANCE_IDS ?? os.hostname())
     .split(',')
@@ -10364,5 +10375,9 @@ export const __backendV2TestInternals = {
 };
 
 if (process.argv[1] === __filename) {
+  enforceStartupConfig({
+    serviceName: 'Agent Chat v2 backend',
+    optional: BACKEND_STARTUP_OPTIONAL_ENV,
+  });
   startServer();
 }

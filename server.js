@@ -8,6 +8,7 @@ import { promisify } from 'util';
 import { defaultAgentchatHomeDir, resolveAgentDocsPaths, resolveV1ManifestForAgent } from './lib/agent-home-v1.js';
 import { detectPaneBusyState } from './lib/pane-activity.js';
 import { assertRuntimeDir } from './lib/runtime-dir-guard.js';
+import { enforceStartupConfig } from './lib/startup-config.js';
 import { createDashboardMutationBoundary } from './lib/dashboard/request-boundary.js';
 import { installDashboardPageRoutes } from './lib/dashboard/page-routes.js';
 import {
@@ -58,6 +59,12 @@ const IDLE_THRESHOLD_SEC = Math.max(1, Math.ceil(IDLE_THRESHOLD / 1000));
 const execFileAsync = promisify(execFile);
 let execFileAsyncImpl = execFileAsync;
 const DASHBOARD_API_TOKEN = (process.env.AGENT_CHAT_DASHBOARD_TOKEN || '').trim();
+const SERVER_STARTUP_OPTIONAL_ENV = [
+  {
+    name: 'AGENT_CHAT_DASHBOARD_TOKEN',
+    description: 'Non-local dashboard mutations will remain unavailable unless this token is configured.',
+  },
+];
 let dashboardRequestLocalOverride = null;
 const dashboardMutationBoundary = createDashboardMutationBoundary({
   dashboardApiToken: DASHBOARD_API_TOKEN,
@@ -3712,5 +3719,9 @@ export {
 };
 
 if (process.argv[1] === __filename) {
+  enforceStartupConfig({
+    serviceName: 'Agent Chat web dashboard',
+    optional: SERVER_STARTUP_OPTIONAL_ENV,
+  });
   startServer();
 }
