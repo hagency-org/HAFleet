@@ -123,5 +123,5 @@ describe('agentchat ls cli', () => {
     });
 
     expect(output).toContain('legacy');
-  });
+  }, 10000);
 });

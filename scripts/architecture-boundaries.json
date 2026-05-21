@@ -137,6 +137,7 @@
         { "method": "POST", "path": "/api/agents/:name/supervisor", "owner": "operator.local-agent-control", "auth": "bearer-and-local" },
         { "method": "POST", "path": "/api/agents/:name/start", "owner": "operator.local-agent-control", "auth": "bearer-and-local" },
         { "method": "POST", "path": "/api/agents/:name/offline", "owner": "agent-runtime.self-report", "auth": "agent-token" },
+        { "method": "POST", "path": "/api/agents/:name/heartbeat", "owner": "agent-runtime.mcp-heartbeat", "auth": "agent-token" },
         { "method": "POST", "path": "/api/agents/:name/runtime", "owner": "agent-runtime.self-report", "auth": "agent-token" },
         { "method": "POST", "path": "/api/runtime/compact", "owner": "operator.runtime-control", "auth": "bearer" },
         { "method": "POST", "path": "/api/runtime/push-delivered", "owner": "delivery.local-ack", "auth": "local-only" },

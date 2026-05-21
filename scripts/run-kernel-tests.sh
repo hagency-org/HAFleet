@@ -138,6 +138,7 @@ start_shard "contracts and cli" \
   tests/runtime-dir-guard.test.js \
   tests/agent-home-v1.test.js \
   tests/mcp-media-cache.test.js \
+  tests/mcp-heartbeat.test.js \
   tests/architecture-boundaries-check.test.js \
   tests/ci-workflow.test.js \
   tests/bot-command-acl.test.js \

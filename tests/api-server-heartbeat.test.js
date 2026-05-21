@@ -679,6 +679,7 @@ describe('server heartbeat api', () => {
     expect(health.body.auth.serverCredential.serverOwnedRoutes).toEqual([
       'POST /api/servers/heartbeat',
       'POST /api/servers/:id/offline',
+      'POST /api/agents/:name/heartbeat',
       'POST /api/agents/:name/runtime',
       'POST /api/runtime/compact',
     ]);

@@ -125,6 +125,111 @@ describe('backend runtime API', () => {
     expect(agent.body.runtimeObservation).toEqual(response.body.runtime.observation);
   });
 
+  test('MCP heartbeat restores liveness without clearing blocked runtime state', async () => {
+    const staleSeen = Date.now() - 120000;
+    context = await createBackendTestContext('agent-chat-mcp-heartbeat-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: false,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+          lastSeen: staleSeen,
+          offlineReason: 'mcp-missing:auto',
+        },
+      },
+      agentRuntime: {
+        alpha: {
+          agent: 'alpha',
+          blocked: true,
+          blockedReason: 'approval-mode-toggle',
+          blockedTier: 3,
+          mcpPresent: false,
+          mcpMissingSince: staleSeen,
+          lastSeen: staleSeen,
+          updatedAt: staleSeen,
+        },
+      },
+      groups: {},
+    });
+
+    const before = Date.now();
+    const response = await request(context.app)
+      .post('/api/agents/alpha/heartbeat')
+      .send({
+        server: 'local',
+        workspacePath: context.runtimeDir,
+      })
+      .expect(200);
+
+    expect(response.body).toMatchObject({
+      ok: true,
+      created: false,
+      runtime: {
+        agent: 'alpha',
+        mcpPresent: true,
+        mcpMissingSince: null,
+        workspacePath: context.runtimeDir,
+        observation: {
+          observerSource: 'mcp-heartbeat',
+          observerServer: 'local',
+        },
+      },
+    });
+    expect(response.body.runtime.lastSeen).toBeGreaterThanOrEqual(before);
+    expect(response.body.agent.online).toBe(true);
+    expect(response.body.agent.offlineReason).toBeNull();
+
+    const runtime = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtime.alpha.blocked).toBe(true);
+    expect(runtime.alpha.blockedReason).toBe('approval-mode-toggle');
+    expect(runtime.alpha.mcpPresent).toBe(true);
+    expect(runtime.alpha.mcpMissingSince).toBeNull();
+    expect(runtime.alpha.observation.observerSource).toBe('mcp-heartbeat');
+
+    const agents = readJson(path.join(context.runtimeDir, 'data', 'agents.json'));
+    expect(agents.alpha.online).toBe(true);
+    expect(agents.alpha.lastSeen).toBeGreaterThanOrEqual(before);
+    expect(agents.alpha.offlineReason).toBeNull();
+  });
+
+  test('MCP heartbeat can re-register an agent after backend state loss', async () => {
+    context = await createBackendTestContext('agent-chat-mcp-heartbeat-register-test-', {
+      agents: {},
+      groups: {},
+    });
+
+    const response = await request(context.app)
+      .post('/api/agents/bravo/heartbeat')
+      .send({
+        server: 'local',
+        workspacePath: context.runtimeDir,
+      })
+      .expect(200);
+
+    expect(response.body.created).toBe(true);
+    expect(response.body.agent).toMatchObject({
+      name: 'bravo',
+      online: true,
+      server: 'local',
+      tmux: 'bravo:0.0',
+    });
+    expect(response.body.runtime).toMatchObject({
+      agent: 'bravo',
+      mcpPresent: true,
+      workspacePath: context.runtimeDir,
+    });
+
+    const agents = readJson(path.join(context.runtimeDir, 'data', 'agents.json'));
+    expect(agents.bravo).toMatchObject({
+      name: 'bravo',
+      online: true,
+      tmux: 'bravo:0.0',
+    });
+  });
+
   test('remote runtime reports keep API_TOKEN compatibility and do not accept server token yet', async () => {
     context = await createBackendTestContext('agent-chat-runtime-auth-test-', {
       agents: {

@@ -82,6 +82,10 @@ describe('deployment configuration', () => {
       'PUSH_RELAY_SKIP_LOG_THROTTLE_MS',
       'PUSH_RELAY_MCP_SESSION_CACHE_TTL_MS',
       'RELAY_QUEUE_DRAIN_INTERVAL_MS',
+      'MCP_HEARTBEAT_INTERVAL_MS',
+      'MCP_FETCH_TIMEOUT_MS',
+      'MCP_FETCH_RETRIES',
+      'MCP_FETCH_BACKOFF_MS',
       'AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN',
     ]) {
       expect(envExample).toMatch(new RegExp(`^#?${name}=`, 'm'));

@@ -2939,10 +2939,23 @@ function snapshotAgentPersistenceState(agentName) {
   };
 }
 
+function snapshotAgentRuntimeState(agentName) {
+  const hadRuntime = Object.prototype.hasOwnProperty.call(agentRuntime, agentName);
+  return {
+    hadRuntime,
+    runtime: hadRuntime ? cloneJsonValue(agentRuntime[agentName]) : null,
+  };
+}
+
 function restoreAgentPersistenceState(agentName, snapshot) {
   if (snapshot?.hadAgent) agents[agentName] = cloneJsonValue(snapshot.agent);
   else delete agents[agentName];
   resetAgentMachine(agentName, snapshot?.hadMachine ? snapshot.machineSnapshot : null);
+}
+
+function restoreAgentRuntimeState(agentName, snapshot) {
+  if (snapshot?.hadRuntime) agentRuntime[agentName] = cloneJsonValue(snapshot.runtime);
+  else delete agentRuntime[agentName];
 }
 
 function saveAgentsOrRollback(agentName, snapshot) {
@@ -7831,6 +7844,116 @@ app.post('/api/agents/:name/offline', requireAgentToken(_tokenFromName), (req, r
     maybeEmitUnexpectedOfflineAlert(agentName, reason, { server: normalizeServer(agent.server) || 'local', detail: 'Marked offline via API' });
   }
   res.json({ ok: true, agent: serializeAgent(agent) });
+});
+
+app.post('/api/agents/:name/heartbeat', requireAgentToken(_tokenFromName), (req, res) => {
+  refreshServerLiveness();
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+
+  const now = Date.now();
+  const server = normalizeServer(req.body?.server)
+    || normalizeServer(agents[agentName]?.server)
+    || (isLocalRequest(req) ? 'local' : null);
+  const workspacePath = Object.prototype.hasOwnProperty.call(req.body || {}, 'workspacePath')
+    ? req.body.workspacePath
+    : undefined;
+  const normalizedWorkspacePath = normalizeWorkspacePath(workspacePath);
+  const tmux = (typeof req.body?.tmux === 'string' && req.body.tmux.trim())
+    ? req.body.tmux.trim()
+    : `${agentName}:0.0`;
+
+  const agentSnapshot = snapshotAgentPersistenceState(agentName);
+  const runtimeSnapshot = snapshotAgentRuntimeState(agentName);
+  let created = false;
+  let agent = agents[agentName];
+  if (!isAgentRecord(agent)) {
+    const ensured = ensureAgentRecord(agentName, {
+      server,
+      tmux,
+      online: true,
+      type: 'agent',
+      kind: 'agent',
+      offlineReason: null,
+      workdir: normalizedWorkspacePath,
+    });
+    if (!ensured) return res.status(410).json({ error: 'agent cannot be registered' });
+    agent = ensured.agent;
+    created = ensured.created;
+  }
+
+  const wasOnline = agent.online === true;
+  const wasManualDown = agent.manualDown === true;
+  if (server && normalizeServer(agent.server) !== server) agent.server = server;
+  if (!wasManualDown && (!agent.tmux || !String(agent.tmux).trim())) agent.tmux = tmux;
+  if (normalizedWorkspacePath && !normalizeWorkspacePath(agent.workdir)) agent.workdir = normalizedWorkspacePath;
+  if (!wasManualDown && (agent.offlineReason === 'mcp-missing:auto' || agent.offlineReason === 'inactive')) {
+    agent.offlineReason = null;
+  }
+  agent.lastSeen = now;
+  syncAgentMachine(agentName, {
+    heartbeatPresent: true,
+    tmuxPresent: !wasManualDown,
+    mcpPresent: true,
+  });
+
+  const runtime = ensureAgentRuntimeRecord(agentName);
+  if (!runtime) {
+    restoreAgentPersistenceState(agentName, agentSnapshot);
+    restoreAgentRuntimeState(agentName, runtimeSnapshot);
+    return res.status(500).json({ error: 'runtime update failed' });
+  }
+  setRuntimeMcpFields(runtime, { mcpPresent: true }, now);
+  if (workspacePath !== undefined) setRuntimeWorkspacePath(runtime, { workspacePath });
+  setRuntimeObservation(runtime, {
+    observerSource: 'mcp-heartbeat',
+    observerServer: server,
+    observedAt: now,
+  });
+  runtime.lastSeen = now;
+  runtime.updatedAt = now;
+
+  if (!saveAgentsOrRollback(agentName, agentSnapshot)) {
+    restoreAgentRuntimeState(agentName, runtimeSnapshot);
+    return res.status(503).json({ error: 'agents persistence failed' });
+  }
+  if (!saveAgentRuntime(true)) {
+    restoreAgentPersistenceState(agentName, agentSnapshot);
+    restoreAgentRuntimeState(agentName, runtimeSnapshot);
+    saveAgents(true);
+    return res.status(503).json({ error: 'agent runtime persistence failed' });
+  }
+
+  writeThruAgentHome(agentName);
+  if (!wasOnline && !wasManualDown && agent.online === true) {
+    notifyAgentCatchup(agentName, 'mcp-heartbeat-restored').catch((e) => {
+      console.error(`catchup notify failed for ${agentName}:`, e.message);
+    });
+  }
+  auditLog(req, {
+    agent: agentName,
+    summary: {
+      heartbeat: true,
+      created,
+      server,
+      mcpPresent: true,
+      observerSource: 'mcp-heartbeat',
+    },
+  });
+  res.json({
+    ok: true,
+    created,
+    agent: serializeAgent(agent),
+    runtime: {
+      agent: agentName,
+      mcpPresent: runtime.mcpPresent === true,
+      mcpMissingSince: Number(runtime.mcpMissingSince) || null,
+      lastSeen: runtime.lastSeen || now,
+      updatedAt: runtime.updatedAt || now,
+      workspacePath: runtime.workspacePath || null,
+      observation: serializeRuntimeObservation(runtime),
+    },
+  });
 });
 
 app.post('/api/agents/:name/runtime', requireAgentToken(_tokenFromName), (req, res) => {
