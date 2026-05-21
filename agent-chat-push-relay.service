@@ -1,0 +1,18 @@
+[Unit]
+Description=Agent Chat Push Relay - local tmux notifications
+After=network-online.target agent-chat-v2.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=/usr/bin/node push-relay.js
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PUSH_RELAY_MODE=local
+EnvironmentFile=-__INSTALL_DIR__/.env
+
+[Install]
+WantedBy=multi-user.target
