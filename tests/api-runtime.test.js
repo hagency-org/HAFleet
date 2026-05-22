@@ -195,6 +195,105 @@ describe('backend runtime API', () => {
     expect(agents.alpha.offlineReason).toBeNull();
   });
 
+  test('recent MCP heartbeat prevents runtime heuristic from marking MCP missing', async () => {
+    context = await createBackendTestContext('agent-chat-mcp-heartbeat-authority-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'claude',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+          offlineReason: null,
+        },
+      },
+      groups: {},
+    });
+
+    const before = Date.now();
+    await request(context.app)
+      .post('/api/agents/alpha/heartbeat')
+      .send({ server: 'local' })
+      .expect(200);
+
+    await request(context.app)
+      .post('/api/agents/alpha/runtime')
+      .send({
+        blocked: false,
+        reason: null,
+        tail: '',
+        command: 'claude',
+        mcpPresent: false,
+        server: 'local',
+      })
+      .expect(200);
+
+    const runtime = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtime.alpha.mcpPresent).toBe(true);
+    expect(runtime.alpha.mcpMissingSince).toBeNull();
+    expect(runtime.alpha.mcpHeartbeatAt).toBeGreaterThanOrEqual(before);
+
+    const agent = (await request(context.app).get('/api/agents/alpha').expect(200)).body;
+    expect(agent.online).toBe(true);
+    expect(agent.offlineReason).toBeNull();
+
+    const events = readSystemInfoSummaries(context.runtimeDir);
+    expect(events.filter(s => s.includes('missing MCP'))).toHaveLength(0);
+  });
+
+  test('stale MCP heartbeat allows runtime heuristic to mark MCP missing', async () => {
+    const staleHeartbeatAt = Date.now() - 91_000;
+    context = await createBackendTestContext('agent-chat-mcp-heartbeat-stale-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'claude',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+          offlineReason: null,
+        },
+      },
+      agentRuntime: {
+        alpha: {
+          agent: 'alpha',
+          mcpPresent: true,
+          mcpMissingSince: null,
+          mcpHeartbeatAt: staleHeartbeatAt,
+          lastSeen: staleHeartbeatAt,
+          updatedAt: staleHeartbeatAt,
+        },
+      },
+      groups: {},
+    });
+
+    const before = Date.now();
+    await request(context.app)
+      .post('/api/agents/alpha/runtime')
+      .send({
+        blocked: false,
+        reason: null,
+        tail: '',
+        command: 'claude',
+        mcpPresent: false,
+        server: 'local',
+      })
+      .expect(200);
+
+    const runtime = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtime.alpha.mcpPresent).toBe(false);
+    expect(runtime.alpha.mcpMissingSince).toBeGreaterThanOrEqual(before);
+    expect(runtime.alpha.mcpHeartbeatAt).toBe(staleHeartbeatAt);
+
+    const agent = (await request(context.app).get('/api/agents/alpha').expect(200)).body;
+    expect(agent.offlineReason).toBe('mcp-missing:auto');
+
+    const events = readSystemInfoSummaries(context.runtimeDir);
+    expect(events.filter(s => s.includes('missing MCP'))).toHaveLength(1);
+  });
+
   test('MCP heartbeat can re-register an agent after backend state loss', async () => {
     context = await createBackendTestContext('agent-chat-mcp-heartbeat-register-test-', {
       agents: {},

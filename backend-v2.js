@@ -107,6 +107,7 @@ const RULE_REPLY_TIMEOUT_MS = Number.parseInt(process.env.AGENT_RULE_REPLY_TIMEO
 const RULE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_RULE_SWEEP_INTERVAL_MS || '15000', 10);
 const IDLE_THRESHOLD_MS = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '20000', 10);
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.floor((IDLE_THRESHOLD_MS + 999) / 1000));
+const MCP_HEARTBEAT_AUTHORITY_WINDOW_MS = 90_000;
 const LOCAL_ACTIVITY_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_LOCAL_ACTIVITY_SWEEP_MS || '5000', 10);
 const LOCAL_ACTIVITY_CAPTURE_BUDGET_RAW = Number.parseInt(process.env.AGENT_LOCAL_ACTIVITY_CAPTURE_BUDGET || '0', 10);
 const LOCAL_ACTIVITY_CAPTURE_BUDGET = Number.isFinite(LOCAL_ACTIVITY_CAPTURE_BUDGET_RAW)
@@ -3320,6 +3321,7 @@ for (const [agentName, runtime] of Object.entries(agentRuntime)) {
     ? true
     : (runtime.mcpPresent === false ? false : null);
   runtime.mcpMissingSince = Number(runtime.mcpMissingSince) || null;
+  runtime.mcpHeartbeatAt = Number(runtime.mcpHeartbeatAt) || null;
   if (!runtime.rules || typeof runtime.rules !== 'object') runtime.rules = {};
 }
 localActivitySweepState.selectionCursor = Math.max(0, Number(localActivitySweepState.selectionCursor) || 0);
@@ -4626,6 +4628,7 @@ function ensureAgentRuntimeRecord(name) {
       workspacePath: null,
       mcpPresent: null,
       mcpMissingSince: null,
+      mcpHeartbeatAt: null,
       updatedAt: 0,
       lastSeen: 0,
       lastPushNotifyAt: 0,
@@ -4823,6 +4826,14 @@ function setRuntimeMcpFields(runtime, payload = {}, now = Date.now()) {
   const prevMcp = runtime.mcpPresent === true
     ? true
     : (runtime.mcpPresent === false ? false : null);
+  const recentHeartbeatAt = Number(runtime.mcpHeartbeatAt) || 0;
+  const hasRecentMcpHeartbeat = recentHeartbeatAt > 0
+    && now - recentHeartbeatAt >= 0
+    && now - recentHeartbeatAt <= MCP_HEARTBEAT_AUTHORITY_WINDOW_MS;
+
+  if (mcpNow === false && hasRecentMcpHeartbeat) {
+    return false;
+  }
 
   if (prevMcp !== mcpNow) {
     runtime.mcpPresent = mcpNow;
@@ -7904,6 +7915,7 @@ app.post('/api/agents/:name/heartbeat', requireAgentToken(_tokenFromName), (req,
     return res.status(500).json({ error: 'runtime update failed' });
   }
   setRuntimeMcpFields(runtime, { mcpPresent: true }, now);
+  runtime.mcpHeartbeatAt = now;
   if (workspacePath !== undefined) setRuntimeWorkspacePath(runtime, { workspacePath });
   setRuntimeObservation(runtime, {
     observerSource: 'mcp-heartbeat',
