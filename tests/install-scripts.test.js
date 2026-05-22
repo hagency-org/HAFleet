@@ -104,6 +104,7 @@ describe('local install and uninstall scripts', () => {
       expect(claudeArgs).toContain('mcp add -s user');
       expect(claudeArgs).toContain('AGENT_CHAT_API=http://127.0.0.1:8090');
       expect(claudeArgs).toContain('API_TOKEN=test-install-token');
+      expect(claudeArgs).toContain(`AGENTCHAT_HOMEDIR=${home}/.agentchat`);
       expect(claudeArgs).toContain(`agent-chat node ${ROOT}/mcp-server.js`);
     } finally {
       rmSync(tmp, { recursive: true, force: true });

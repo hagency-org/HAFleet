@@ -87,6 +87,12 @@ function defaultAgentchatHome(env = process.env) {
   return envPath(env.AGENTCHAT_HOMEDIR) || path.join(os.homedir(), '.agentchat');
 }
 
+function resolveAgentStateDir(agentName, env = process.env) {
+  const stateDir = (env.AGENTCHAT_AGENT_STATE_DIR || '').trim();
+  if (stateDir) return stateDir;
+  return path.join(defaultAgentchatHome(env), 'agents', `agent_${agentName}`, 'state');
+}
+
 function resolveMediaFetchCacheDir(agentName, env = process.env) {
   const agentSegment = safePathSegment(agentName);
   const stateDir = envPath(env.AGENTCHAT_AGENT_STATE_DIR);
@@ -869,9 +875,10 @@ server.tool(
 
 // ── PID file ──────────────────────────────────────────────────────────
 const MCP_PID_FILE = (() => {
-  const sd = (process.env.AGENTCHAT_AGENT_STATE_DIR || '').trim();
+  const sd = resolveAgentStateDir(AGENT_NAME);
   if (!sd) return null;
   const p = path.join(sd, 'mcp-server.pid');
+  try { mkdirSync(sd, { recursive: true }); } catch { /* dir may already exist */ }
   try { writeFileSync(p, String(process.pid)); } catch { return null; }
   return p;
 })();

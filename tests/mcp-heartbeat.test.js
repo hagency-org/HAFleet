@@ -1,11 +1,18 @@
 import { afterEach, describe, expect, test } from 'vitest';
 import { spawn } from 'child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import http from 'http';
+import os from 'os';
 import path from 'path';
 
 const repoRoot = path.resolve('.');
+const coreFiles = [
+  'lib/mcp-server-core.js',
+  'remote/lib/mcp-server-core.js',
+];
 const children = new Set();
 const servers = new Set();
+const tempDirs = new Set();
 
 function listen(handler, port = 0) {
   return new Promise((resolve, reject) => {
@@ -103,23 +110,27 @@ function heartbeatCalls(calls) {
   return calls.filter(call => call.method === 'POST' && call.url === '/api/agents/alpha/heartbeat');
 }
 
-function spawnMcpServer(apiBase, extraEnv = {}) {
+function spawnMcpServer(apiBase, extraEnv = {}, coreFile = 'lib/mcp-server-core.js') {
   const stderr = [];
-  const child = spawn(process.execPath, [path.join(repoRoot, 'lib/mcp-server-core.js')], {
+  const env = {
+    ...process.env,
+    AGENT_NAME: 'alpha',
+    AGENT_CHAT_API: apiBase,
+    AGENT_CHAT_SERVER: 'local',
+    API_TOKEN: 'test-token',
+    MCP_HEARTBEAT_INTERVAL_MS: '100',
+    MCP_FETCH_TIMEOUT_MS: '100',
+    MCP_FETCH_RETRIES: '1',
+    MCP_FETCH_BACKOFF_MS: '5',
+    NO_PROXY: '*',
+    ...extraEnv,
+  };
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete env[key];
+  }
+  const child = spawn(process.execPath, [path.join(repoRoot, coreFile)], {
     cwd: repoRoot,
-    env: {
-      ...process.env,
-      AGENT_NAME: 'alpha',
-      AGENT_CHAT_API: apiBase,
-      AGENT_CHAT_SERVER: 'local',
-      API_TOKEN: 'test-token',
-      MCP_HEARTBEAT_INTERVAL_MS: '100',
-      MCP_FETCH_TIMEOUT_MS: '100',
-      MCP_FETCH_RETRIES: '1',
-      MCP_FETCH_BACKOFF_MS: '5',
-      NO_PROXY: '*',
-      ...extraEnv,
-    },
+    env,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   children.add(child);
@@ -132,9 +143,63 @@ function spawnMcpServer(apiBase, extraEnv = {}) {
 afterEach(async () => {
   await Promise.all([...children].map(stopChild));
   await Promise.all([...servers].map(closeServer));
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+  tempDirs.clear();
 });
 
 describe('MCP backend heartbeat', () => {
+  test('writes pid file under derived agent state dir when explicit state dir is missing', async () => {
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-mcp-pid-'));
+    tempDirs.add(tempRoot);
+    for (const coreFile of coreFiles) {
+      const homeRoot = path.join(tempRoot, coreFile.replaceAll('/', '-'), 'agentchat-home');
+      const calls = [];
+      const running = await listen(createBackendHandler(calls));
+      const mcp = spawnMcpServer(`http://127.0.0.1:${running.port}`, {
+        AGENTCHAT_AGENT_STATE_DIR: undefined,
+        AGENTCHAT_HOMEDIR: homeRoot,
+        HOME: path.join(tempRoot, 'os-home'),
+      }, coreFile);
+      const pidFile = path.join(homeRoot, 'agents', 'agent_alpha', 'state', 'mcp-server.pid');
+
+      await waitFor(() => (
+        existsSync(pidFile)
+        && readFileSync(pidFile, 'utf-8').trim() === String(mcp.child.pid)
+      ), { detail: `derived mcp pid file for ${coreFile}` });
+
+      expect(() => process.kill(mcp.child.pid, 0)).not.toThrow();
+
+      await stopChild(mcp.child);
+      await waitFor(() => !existsSync(pidFile), { detail: `mcp pid file cleanup for ${coreFile}` });
+      await closeServer(running.server);
+    }
+  }, 10000);
+
+  test('writes pid file under explicit agent state dir when provided', async () => {
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-mcp-pid-'));
+    tempDirs.add(tempRoot);
+    for (const coreFile of coreFiles) {
+      const stateDir = path.join(tempRoot, coreFile.replaceAll('/', '-'), 'custom-state');
+      const calls = [];
+      const running = await listen(createBackendHandler(calls));
+      const mcp = spawnMcpServer(`http://127.0.0.1:${running.port}`, {
+        AGENTCHAT_AGENT_STATE_DIR: stateDir,
+        AGENTCHAT_HOMEDIR: path.join(tempRoot, 'ignored-home'),
+        HOME: path.join(tempRoot, 'os-home'),
+      }, coreFile);
+      const pidFile = path.join(stateDir, 'mcp-server.pid');
+
+      await waitFor(() => (
+        existsSync(pidFile)
+        && readFileSync(pidFile, 'utf-8').trim() === String(mcp.child.pid)
+      ), { detail: `explicit mcp pid file for ${coreFile}` });
+
+      await stopChild(mcp.child);
+      await waitFor(() => !existsSync(pidFile), { detail: `explicit mcp pid cleanup for ${coreFile}` });
+      await closeServer(running.server);
+    }
+  }, 10000);
+
   test('periodic heartbeat reconnects after backend restart', async () => {
     const calls = [];
     let running = await listen(createBackendHandler(calls));

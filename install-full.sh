@@ -279,16 +279,18 @@ configure_claude_mcp() {
   fi
   if ! command -v claude >/dev/null 2>&1; then
     log "Claude Code CLI not found; skipping MCP configuration."
-    log "Run: claude mcp add -s user -e AGENT_CHAT_API=http://127.0.0.1:8090 -e API_TOKEN=<token> -- agent-chat node $INSTALL_DIR/mcp-server.js"
+    log "Run: claude mcp add -s user -e AGENT_CHAT_API=http://127.0.0.1:8090 -e API_TOKEN=<token> -e AGENTCHAT_HOMEDIR=$HOME/.agentchat -- agent-chat node $INSTALL_DIR/mcp-server.js"
     return 0
   fi
-  local api_token api_base
+  local api_token api_base agentchat_home
   api_token="$(read_env_value API_TOKEN "$ENV_FILE")"
   api_base="$(read_env_value AGENT_CHAT_API "$ENV_FILE")"
+  agentchat_home="${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}"
   [ -n "$api_base" ] || api_base="http://127.0.0.1:8090"
   run claude mcp add -s user \
     -e "AGENT_CHAT_API=$api_base" \
     -e "API_TOKEN=$api_token" \
+    -e "AGENTCHAT_HOMEDIR=$agentchat_home" \
     -e "AGENT_CHAT_MCP_SERVER_NAME=agent-chat" \
     -- agent-chat node "$INSTALL_DIR/mcp-server.js"
 }
