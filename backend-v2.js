@@ -5026,7 +5026,7 @@ function collectBlockedHumanTargets(agentName) {
   return snapshot;
 }
 
-function applyAgentBlockedState(agentName, payload = {}) {
+function applyRuntimeObservation(agentName, payload = {}) {
   const runtime = ensureAgentRuntimeRecord(agentName);
   if (!runtime) return null;
 
@@ -5764,7 +5764,7 @@ function applyLocalRuntimeSignals(agentName, payload = {}) {
   });
   if (localRuntimeSignalDigest.get(agentName) === digest && !(blocked && blockedObserved)) return;
   localRuntimeSignalDigest.set(agentName, digest);
-  const transition = applyAgentBlockedState(agentName, {
+  const transition = applyRuntimeObservation(agentName, {
     blocked,
     reason,
     tail: blocked && typeof payload.tail === 'string' ? payload.tail : '',
@@ -8010,7 +8010,7 @@ app.post('/api/agents/:name/runtime', requireAgentToken(_tokenFromName), (req, r
     saveAgents();
   }
 
-  const transition = applyAgentBlockedState(agentName, {
+  const transition = applyRuntimeObservation(agentName, {
     blocked,
     reason,
     tail,

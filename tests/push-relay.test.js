@@ -602,40 +602,61 @@ describe('push relay dispatch', () => {
     expect(relayQueue.get('alpha')).toHaveLength(1);
   });
 
-  test('MCP debounce suppresses false negatives during grace period', async () => {
-    const runtimeReports = [];
-    // Seed with agent that has MCP, then simulate scans without MCP
+  test('local scan warms idle gate without reporting runtime observation', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    const fetchCalls = [];
+    const delivered = [];
+    const paneText = 'stable idle pane';
     seedRelayState({
       localAgentNames: ['alpha'],
-      agents: [{ name: 'alpha', server: null, tmux: 'alpha:0.0' }],
-      mcpSessions: [], // MCP not present from the start
+      agents: [
+        { name: 'alpha', server: null, tmux: 'alpha:0.0' },
+        { name: 'beta', server: null, tmux: 'beta:0.0' },
+      ],
+      mcpSessions: [],
     });
-    // Mock tmux/backend calls so debounce behavior is independent of the host environment.
     setPushRelayTestHooks({
-      execFileAsync: async () => ({ stdout: '', stderr: '' }),
-      execFileSync: () => '',
+      tmuxBin: 'tmux',
+      execFileSync: (_cmd, args) => {
+        if (args[0] === 'capture-pane') return paneText;
+        throw new Error(`unexpected exec ${args.join(' ')}`);
+      },
       readFileSync: () => {
         throw Object.assign(new Error('missing pid file'), { code: 'ENOENT' });
       },
       fetch: async (url, options = {}) => {
-        runtimeReports.push({
+        fetchCalls.push({
           url: String(url),
           body: JSON.parse(String(options.body || '{}')),
         });
         return { ok: true, text: async () => '' };
       },
     });
+    setPushToTmuxForTest((target, payload) => {
+      delivered.push({ target, payload });
+      return true;
+    });
 
-    // Run 5 scans — should still report mcpPresent=true (under threshold of 6)
-    for (let i = 0; i < 5; i++) {
-      await scanBlockedStates();
-    }
-
-    // After 5 misses, agent should still be in grace period
-    // Run scan 6 — now it should flip to mcpPresent=false
     await scanBlockedStates();
+    expect(fetchCalls).toEqual([]);
 
-    expect(runtimeReports.map((report) => report.body.mcpPresent)).toEqual([true, false]);
+    vi.setSystemTime(new Date('2026-01-01T00:00:21Z'));
+    await handleMessage(JSON.stringify({
+      id: 'msg_idle_after_scan',
+      from: 'beta',
+      to: 'alpha',
+      type: 'inform',
+      summary: 'Deliver after idle scan',
+      mentions: [],
+    }));
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].target).toBe('alpha:0.0');
+    expect(delivered[0].payload).toContain('Deliver after idle scan');
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0].url).toContain('/api/delivery-events');
+    expect(fetchCalls[0].body.type).toBe('relay.delivered');
   });
 
   test('detects MCP session from Linux proc cmdline', async () => {
