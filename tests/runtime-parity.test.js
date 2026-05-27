@@ -23,6 +23,9 @@ describe('runtime parity regressions', () => {
       expect(source).toContain('codex_mcp_env API_TOKEN "${API_TOKEN:-}"');
       expect(source).toContain('codex_mcp_env AGENTCHAT_HOMEDIR "${AGENTCHAT_HOMEDIR:-}"');
       expect(source).toContain('tmux send-keys -t "$TMUX_PANE_TARGET" "$(shell_quote "$CODEX_LAUNCH_SCRIPT")" Enter');
+      expect(source).toContain('CODEX_INIT_FILE=$(mktemp "$TMP_RUNTIME_DIR/init-codex.XXXXXX")');
+      expect(source).toContain('codex $CODEX_FLAGS -C $(shell_quote "$AGENT_PATH") --');
+      expect(source).not.toContain('tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"');
       expect(source).not.toContain('Launch cmd:');
     }
   });

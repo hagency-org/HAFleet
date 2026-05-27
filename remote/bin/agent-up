@@ -1808,13 +1808,15 @@ elif [ "$TYPE" = "codex" ]; then
     CODEX_BASELINE_FILE=$(mktemp "$TMP_RUNTIME_DIR/codex-baseline.XXXXXX")
     snapshot_codex_session_ids "$CODEX_BASELINE_FILE"
     echo "Starting new codex session..."
+    # Pass the bootstrap prompt as Codex's initial prompt instead of
+    # typing into the TUI after launch. Tmux key timing is unreliable
+    # while Codex is still drawing its first prompt.
+    CODEX_INIT_FILE=$(mktemp "$TMP_RUNTIME_DIR/init-codex.XXXXXX")
+    echo "$INIT_PROMPT" > "$CODEX_INIT_FILE"
     CODEX_LAUNCH_SCRIPT="$TMP_RUNTIME_DIR/launch-codex.sh"
-    write_launch_script "$CODEX_LAUNCH_SCRIPT" "exec codex $CODEX_FLAGS -C $(shell_quote "$AGENT_PATH")"
+    write_launch_script "$CODEX_LAUNCH_SCRIPT" "codex $CODEX_FLAGS -C $(shell_quote "$AGENT_PATH") -- \"\$(cat $(shell_quote "$CODEX_INIT_FILE"))\"; status=\$?; rm -f $(shell_quote "$CODEX_INIT_FILE"); exit \$status"
     tmux send-keys -t "$TMUX_PANE_TARGET" "$(shell_quote "$CODEX_LAUNCH_SCRIPT")" Enter
-    # Send init prompt after codex starts to create a session deterministically.
-    sleep 5
-    tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"
-    tmux send-keys -t "$TMUX_PANE_TARGET" Enter
+    ( sleep 300; rm -f "$CODEX_INIT_FILE" >/dev/null 2>&1 || true ) &
     # Keep this in foreground for codex to avoid losing resume capture on shell exit/reboot.
     if ! capture_resume_id_from_pane 12; then
       i=0
