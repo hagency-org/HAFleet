@@ -192,6 +192,7 @@ MATRIX_AGENT_PREFIX=ac_
 MATRIX_AGENT_PASSWORD_SECRET=<random-long-secret>
 MATRIX_TRUST_MODE=audit
 MATRIX_OPERATOR_MXIDS=@operator:matrix.example.com
+MATRIX_GREETING_MXIDS=@operator:matrix.example.com
 ```
 
 安装或重启 bridge：
@@ -202,6 +203,8 @@ systemctl status bridge-matrix
 ```
 
 Matrix 客户端不需要 Agent Chat 专用客户端。Element、Cinny、FluffyChat、Nheko 等标准 Matrix 客户端都可以。登录时填写 homeserver URL 和 Matrix 账号凭据，然后按需邀请或私聊 bridge 管理的 Agent 账号。
+
+有些 homeserver 只会在共享房间或公开房间中把用户返回到 Matrix user directory。设置 `MATRIX_GREETING_MXIDS` 后，bridge 可以对已知操作员或测试账号主动创建首次私聊。
 
 对公网部署时，Matrix homeserver 和 Agent Chat 控制台都应放在 HTTPS 反向代理后面。将 `AGENT_CHAT_WEB_URL` 设置为公开控制台 URL；除非明确要暴露后端 API，否则保持 `AGENT_CHAT_API` 只监听 loopback。
 
@@ -278,6 +281,7 @@ agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
 | `MATRIX_BOT_USERNAME` | `agent-bridge` | 桥接机器人用户名 |
 | `MATRIX_BOT_PASSWORD` | 空 | 桥接机器人密码 |
 | `MATRIX_REG_TOKEN` | 空 | 注册 token |
+| `MATRIX_GREETING_MXIDS` | 空 | 逗号分隔的 Matrix 用户；即使 homeserver user directory 不列出这些用户，bridge 也会主动问候 |
 | `MATRIX_TRUST_MODE` | `audit` | 房间信任策略：`enforce`、`audit` 或 `off` |
 | `MATRIX_OPERATOR_MXIDS` | 空 | 允许执行高权限命令的 Matrix 用户 |
 

@@ -48,6 +48,9 @@ const AGENT_PASSWORD_SECRET = (process.env.MATRIX_AGENT_PASSWORD_SECRET || '').t
 const AGENT_PASSWORD_TEMPLATE = (process.env.MATRIX_AGENT_PASSWORD_TEMPLATE || '').trim();
 const ALLOW_LEGACY_AGENT_PASSWORD = (process.env.MATRIX_ALLOW_LEGACY_AGENT_PASSWORD || 'false').trim().toLowerCase() === 'true';
 const AUTO_AVATAR_ENABLED = (process.env.MATRIX_AUTO_AVATAR || 'false').trim().toLowerCase() === 'true';
+const MATRIX_GREETING_MXIDS = new Set(
+  (process.env.MATRIX_GREETING_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
+);
 const DATA_DIR = path.join(RUNTIME_ROOT, 'data', 'matrix');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
 const AGENT_META_ROOT = path.join(RUNTIME_ROOT, 'data', 'agents');
@@ -1681,6 +1684,12 @@ export class MatrixBridge {
   async discoverAndGreetHumans() {
     if (!state.greetedHumans) state.greetedHumans = [];
     const SKIP_USERS = new Set([BOT_USERNAME, 'conduit']);
+    const candidates = new Map();
+
+    for (const rawUser of MATRIX_GREETING_MXIDS) {
+      const userId = humanUserId(rawUser);
+      candidates.set(userId, { user_id: userId });
+    }
 
     try {
       const res = await fetch(`${HOMESERVER}/_matrix/client/v3/user_directory/search`, {
@@ -1689,24 +1698,26 @@ export class MatrixBridge {
         body: JSON.stringify({ search_term: '', limit: 100 }),
       });
       const data = await res.json();
-      if (!data.results) return;
-
-      for (const user of data.results) {
-        const match = user.user_id.match(/^@([^:]+):/);
-        if (!match) continue;
-        const name = match[1];
-
-        // Skip agents, bot, system accounts, underscore-prefixed
-        if (name.startsWith(AGENT_PREFIX)) continue;
-        if (name.startsWith('_')) continue;
-        if (SKIP_USERS.has(name)) continue;
-        if (state.greetedHumans.includes(humanDmKey(name))) continue;
-
-        // This is an ungreeted human — create DM and greet
-        await this.greetHuman(name, user.user_id);
+      for (const user of data.results || []) {
+        if (user?.user_id) candidates.set(user.user_id, user);
       }
     } catch (e) {
       console.error('Failed to discover humans:', e.message);
+    }
+
+    for (const user of candidates.values()) {
+      const match = user.user_id.match(/^@([^:]+):/);
+      if (!match) continue;
+      const name = match[1];
+
+      // Skip agents, bot, system accounts, underscore-prefixed
+      if (name.startsWith(AGENT_PREFIX)) continue;
+      if (name.startsWith('_')) continue;
+      if (SKIP_USERS.has(name)) continue;
+      if (state.greetedHumans.includes(humanDmKey(name))) continue;
+
+      // This is an ungreeted human — create DM and greet
+      await this.greetHuman(name, user.user_id);
     }
   }
 

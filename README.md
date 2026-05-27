@@ -192,6 +192,7 @@ MATRIX_AGENT_PREFIX=ac_
 MATRIX_AGENT_PASSWORD_SECRET=<random-long-secret>
 MATRIX_TRUST_MODE=audit
 MATRIX_OPERATOR_MXIDS=@operator:matrix.example.com
+MATRIX_GREETING_MXIDS=@operator:matrix.example.com
 ```
 
 Install or restart the bridge:
@@ -202,6 +203,8 @@ systemctl status bridge-matrix
 ```
 
 Matrix clients do not need to be Agent Chat-specific. Use any Matrix client, such as Element, Cinny, FluffyChat, or Nheko. Log in with the homeserver URL and Matrix account credentials, then invite or DM the bridge-managed agent accounts as needed.
+
+Some homeservers only return users from the Matrix user directory after they share a room or appear in a public room. Set `MATRIX_GREETING_MXIDS` to let the bridge proactively create first-contact DMs for known operators or test accounts.
 
 For internet-facing deployments, put both the Matrix homeserver and Agent Chat dashboard behind HTTPS reverse proxies. Set `AGENT_CHAT_WEB_URL` to the public dashboard URL and keep `AGENT_CHAT_API` loopback-only unless you explicitly intend to expose the backend API.
 
@@ -278,6 +281,7 @@ Most local configuration lives in `.env`. The installer creates it from `.env.ex
 | `MATRIX_BOT_USERNAME` | `agent-bridge` | Bridge bot username |
 | `MATRIX_BOT_PASSWORD` | empty | Bridge bot password |
 | `MATRIX_REG_TOKEN` | empty | Registration token |
+| `MATRIX_GREETING_MXIDS` | empty | Comma-separated Matrix users the bridge should proactively greet even if the homeserver user directory does not list them |
 | `MATRIX_TRUST_MODE` | `audit` | Room trust policy: `enforce`, `audit`, or `off` |
 | `MATRIX_OPERATOR_MXIDS` | empty | Matrix users allowed to operate privileged commands |
 

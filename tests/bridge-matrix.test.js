@@ -141,6 +141,125 @@ describe('bridge matrix behavior', () => {
     expect(bridge.isKnownAgentName('beta')).toBe(true);
   });
 
+  test('discoverAndGreetHumans greets configured seed users when user directory is empty', async () => {
+    const seedRuntimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-greet-seed-'));
+    const seedEnv = snapshotEnv([
+      'AGENT_CHAT_RUNTIME_DIR',
+      'MATRIX_BOT_USERNAME',
+      'MATRIX_GREETING_MXIDS',
+      'MATRIX_SERVER_NAME',
+    ]);
+
+    try {
+      process.env.AGENT_CHAT_RUNTIME_DIR = seedRuntimeDir;
+      process.env.MATRIX_BOT_USERNAME = 'agent-bridge';
+      process.env.MATRIX_GREETING_MXIDS = '@kamico:matrix.example.test,alice';
+      process.env.MATRIX_SERVER_NAME = 'matrix.example.test';
+      const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
+      const { MatrixBridge: SeedBridge } = await import(`${bridgeUrl}?test=greet-seed-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+      const bridge = new SeedBridge();
+      bridge.ensureBotDmRoom = vi.fn().mockResolvedValue('!dm:test');
+      bridge.botClient = {
+        sendMessage: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        json: vi.fn().mockResolvedValue({ results: [], limited: false }),
+      }));
+
+      await bridge.discoverAndGreetHumans();
+
+      expect(bridge.ensureBotDmRoom).toHaveBeenNthCalledWith(1, 'kamico', '@kamico:matrix.example.test');
+      expect(bridge.ensureBotDmRoom).toHaveBeenNthCalledWith(2, 'alice', '@alice:matrix.example.test');
+      expect(bridge.botClient.sendMessage).toHaveBeenCalledTimes(2);
+    } finally {
+      restoreEnv(seedEnv);
+      rmSync(seedRuntimeDir, { recursive: true, force: true });
+    }
+  });
+
+  test('discoverAndGreetHumans keeps seeded greetings independent of directory failures', async () => {
+    const seedRuntimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-greet-failure-'));
+    const seedEnv = snapshotEnv([
+      'AGENT_CHAT_RUNTIME_DIR',
+      'MATRIX_GREETING_MXIDS',
+      'MATRIX_SERVER_NAME',
+    ]);
+
+    try {
+      process.env.AGENT_CHAT_RUNTIME_DIR = seedRuntimeDir;
+      process.env.MATRIX_GREETING_MXIDS = 'alice';
+      process.env.MATRIX_SERVER_NAME = 'matrix.example.test';
+      const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
+      const { MatrixBridge: SeedBridge } = await import(`${bridgeUrl}?test=greet-failure-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+      const bridge = new SeedBridge();
+      bridge.ensureBotDmRoom = vi.fn().mockResolvedValue('!dm:test');
+      bridge.botClient = {
+        sendMessage: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('directory down')));
+
+      await bridge.discoverAndGreetHumans();
+
+      expect(bridge.ensureBotDmRoom).toHaveBeenCalledWith('alice', '@alice:matrix.example.test');
+      expect(bridge.botClient.sendMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      restoreEnv(seedEnv);
+      rmSync(seedRuntimeDir, { recursive: true, force: true });
+    }
+  });
+
+  test('discoverAndGreetHumans deduplicates seeds and skips non-human accounts', async () => {
+    const seedRuntimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-greet-dedupe-'));
+    const seedEnv = snapshotEnv([
+      'AGENT_CHAT_RUNTIME_DIR',
+      'MATRIX_AGENT_PREFIX',
+      'MATRIX_BOT_USERNAME',
+      'MATRIX_GREETING_MXIDS',
+      'MATRIX_SERVER_NAME',
+    ]);
+
+    try {
+      process.env.AGENT_CHAT_RUNTIME_DIR = seedRuntimeDir;
+      process.env.MATRIX_AGENT_PREFIX = 'ac_';
+      process.env.MATRIX_BOT_USERNAME = 'agent-bridge';
+      process.env.MATRIX_GREETING_MXIDS = [
+        '@kamico:matrix.example.test',
+        'kamico',
+        '@agent-bridge:matrix.example.test',
+        '@ac_alpha:matrix.example.test',
+        '_system',
+        'conduit',
+      ].join(',');
+      process.env.MATRIX_SERVER_NAME = 'matrix.example.test';
+      const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
+      const { MatrixBridge: SeedBridge } = await import(`${bridgeUrl}?test=greet-dedupe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+      const bridge = new SeedBridge();
+      bridge.ensureBotDmRoom = vi.fn().mockResolvedValue('!dm:test');
+      bridge.botClient = {
+        sendMessage: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        json: vi.fn().mockResolvedValue({
+          results: [
+            { user_id: '@kamico:matrix.example.test' },
+            { user_id: '@bob:matrix.example.test' },
+          ],
+          limited: false,
+        }),
+      }));
+
+      await bridge.discoverAndGreetHumans();
+
+      expect(bridge.ensureBotDmRoom).toHaveBeenCalledTimes(2);
+      expect(bridge.ensureBotDmRoom).toHaveBeenNthCalledWith(1, 'kamico', '@kamico:matrix.example.test');
+      expect(bridge.ensureBotDmRoom).toHaveBeenNthCalledWith(2, 'bob', '@bob:matrix.example.test');
+      expect(bridge.botClient.sendMessage).toHaveBeenCalledTimes(2);
+    } finally {
+      restoreEnv(seedEnv);
+      rmSync(seedRuntimeDir, { recursive: true, force: true });
+    }
+  });
+
   test('callBackendApi rejects non-2xx backend responses with HTTP status details', async () => {
     const bridge = new MatrixBridge();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
