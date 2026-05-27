@@ -34,6 +34,7 @@ describe('bridge matrix behavior', () => {
   afterEach(() => {
     resetBridgeMatrixTestHooks();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   test('submitHumanMessage retries once on timeout before surfacing delivery failure', async () => {
@@ -198,6 +199,91 @@ describe('bridge matrix behavior', () => {
     // Circuit should be open — 4th call should be suppressed
     bridge.postWarning('err4', { kind: 'a', scope: '4' });
     expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  test('onSystemInfo filters info alerts and cools down warning alerts', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-27T00:00:00.000Z'));
+    const bridge = new MatrixBridge();
+    bridge.groupRoomMap.info = '!info:test';
+    bridge.botClient = {
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await bridge.onSystemInfo({
+      id: 'sys-info',
+      summary: 'Agent alpha MCP process recovered',
+      alertType: 'mcp_recovered',
+      dedupeKey: 'mcp_missing:alpha',
+    });
+    expect(bridge.botClient.sendMessage).not.toHaveBeenCalled();
+
+    await bridge.onSystemInfo({
+      id: 'sys-warning-1',
+      summary: "Agent 'alpha' missing MCP process",
+      alertType: 'mcp_missing',
+      dedupeKey: 'mcp_missing:alpha',
+    });
+    await bridge.onSystemInfo({
+      id: 'sys-warning-2',
+      summary: "Agent 'alpha' still missing MCP process",
+      alertType: 'mcp_missing',
+      dedupeKey: 'mcp_missing:alpha',
+    });
+    expect(bridge.botClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(300_001);
+    await bridge.onSystemInfo({
+      id: 'sys-warning-3',
+      summary: "Agent 'alpha' missing MCP process again",
+      alertType: 'mcp_missing',
+      dedupeKey: 'mcp_missing:alpha',
+    });
+    await bridge.onSystemInfo({
+      id: 'sys-critical',
+      summary: 'Swap usage is high',
+      alertType: 'swap_high',
+      dedupeKey: 'swap_high',
+    });
+
+    expect(bridge.botClient.sendMessage).toHaveBeenCalledTimes(3);
+    expect(bridge.botClient.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      '!info:test',
+      { msgtype: 'm.text', body: "ℹ️ Agent 'alpha' missing MCP process" }
+    );
+    expect(bridge.botClient.sendMessage).toHaveBeenNthCalledWith(
+      3,
+      '!info:test',
+      { msgtype: 'm.text', body: 'ℹ️ Swap usage is high' }
+    );
+  });
+
+  test('onSystemInfo does not commit warning cooldown when Matrix send fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-27T00:00:00.000Z'));
+    const bridge = new MatrixBridge();
+    bridge.groupRoomMap.info = '!info:test';
+    bridge.botClient = {
+      sendMessage: vi.fn()
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValueOnce(undefined),
+    };
+
+    await bridge.onSystemInfo({
+      id: 'sys-warning-fail-1',
+      summary: "Agent 'alpha' missing MCP process",
+      alertType: 'mcp_missing',
+      dedupeKey: 'mcp_missing:alpha',
+    });
+    await bridge.onSystemInfo({
+      id: 'sys-warning-fail-2',
+      summary: "Agent 'alpha' still missing MCP process",
+      alertType: 'mcp_missing',
+      dedupeKey: 'mcp_missing:alpha',
+    });
+
+    expect(bridge.botClient.sendMessage).toHaveBeenCalledTimes(2);
   });
 
   test('reconcileRoomGroupMembership skips when backend is unhealthy', async () => {

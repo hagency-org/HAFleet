@@ -3598,6 +3598,11 @@ const ALERT_SEVERITY_MAP = {
   mcp_recovered: 'info', swap_clear: 'info',
   server_takeover: 'info', supervisor_nudge: 'info', supervisor_escalation: 'warning',
 };
+const SYSTEM_INFO_RECOVERY_DAMPENER_MS_RAW = Number.parseInt(process.env.SYSTEM_INFO_RECOVERY_DAMPENER_MS || '300000', 10);
+const SYSTEM_INFO_RECOVERY_DAMPENER_MS = Number.isFinite(SYSTEM_INFO_RECOVERY_DAMPENER_MS_RAW) && SYSTEM_INFO_RECOVERY_DAMPENER_MS_RAW > 0
+  ? SYSTEM_INFO_RECOVERY_DAMPENER_MS_RAW
+  : 0;
+const recentlyResolvedAlertKeys = new Map();
 
 const ALERT_ACTION_FIELD_KEYS = ['owner', 'assignee', 'runbook', 'impact', 'recoveryCondition', 'exitCondition', 'correlation'];
 
@@ -3690,36 +3695,81 @@ function buildAlertActionFields(alertType, opts = {}) {
   };
 }
 
+function pruneRecentlyResolvedAlertKeys(now = Date.now()) {
+  if (SYSTEM_INFO_RECOVERY_DAMPENER_MS <= 0 || recentlyResolvedAlertKeys.size === 0) return;
+  const cutoff = now - SYSTEM_INFO_RECOVERY_DAMPENER_MS;
+  for (const [key, ts] of recentlyResolvedAlertKeys) {
+    if (ts < cutoff) recentlyResolvedAlertKeys.delete(key);
+  }
+}
+
+function recordRecentlyResolvedAlertKey(dedupeKey, now = Date.now()) {
+  if (SYSTEM_INFO_RECOVERY_DAMPENER_MS <= 0) return;
+  const key = normalizeOptionalText(dedupeKey, 255);
+  if (!key) return;
+  pruneRecentlyResolvedAlertKeys(now);
+  recentlyResolvedAlertKeys.set(key, now);
+}
+
+function wasRecentlyResolvedAlertKey(dedupeKey, now = Date.now()) {
+  if (SYSTEM_INFO_RECOVERY_DAMPENER_MS <= 0) return false;
+  const key = normalizeOptionalText(dedupeKey, 255);
+  if (!key) return false;
+  pruneRecentlyResolvedAlertKeys(now);
+  const resolvedAt = recentlyResolvedAlertKeys.get(key);
+  if (Number.isFinite(resolvedAt) && (now - resolvedAt) < SYSTEM_INFO_RECOVERY_DAMPENER_MS) return true;
+  try {
+    for (const alert of alertStore.dump()) {
+      if (alert?.dedupeKey !== key || alert.status !== 'resolved') continue;
+      const durableResolvedAt = Number(alert.resolvedAt) || 0;
+      if (durableResolvedAt && (now - durableResolvedAt) < SYSTEM_INFO_RECOVERY_DAMPENER_MS) {
+        recentlyResolvedAlertKeys.set(key, durableResolvedAt);
+        return true;
+      }
+    }
+  } catch { /* alert sidecar remains best-effort for system info */ }
+  return false;
+}
+
 function emitSystemInfo(summary, full = '', alertType = null, opts = {}) {
-  ensureInfoGroup();
+  const now = Date.now();
+  const eventDedupeKey = alertType ? normalizeOptionalText(opts.dedupeKey, 255) : null;
+  const dedupeKey = alertType ? (eventDedupeKey || alertType) : null;
   const event = {
-    id: `sys_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    ts: Date.now(),
+    id: `sys_${now}_${Math.random().toString(36).slice(2, 8)}`,
+    ts: now,
     summary,
     full: full || '',
     alertType: alertType || null,
+    dedupeKey: eventDedupeKey,
     source: 'system',
     group: 'info',
     type: 'inform',
   };
-  appendSystemInfoLog(event);
-  broadcastSSE('system_info', event);
+
+  let suppressSystemInfo = Boolean(opts.suppressSystemInfo);
 
   // Hook A: alert ingestion
   if (alertType) {
     const recoveryTarget = ALERT_RECOVERY_MAP[alertType];
+    if (!recoveryTarget && dedupeKey && wasRecentlyResolvedAlertKey(dedupeKey, now)) {
+      suppressSystemInfo = true;
+    }
     if (recoveryTarget) {
       // Recovery event — auto-resolve matching alerts
       try {
         if (opts.sourceAgent) {
-          alertStore.autoResolve(`${recoveryTarget}:${opts.sourceAgent}`);
+          const resolved = alertStore.autoResolve(`${recoveryTarget}:${opts.sourceAgent}`);
+          if (resolved?.dedupeKey) recordRecentlyResolvedAlertKey(resolved.dedupeKey, now);
         } else {
-          alertStore.autoResolveByPrefix(recoveryTarget);
+          const resolved = alertStore.autoResolveByPrefix(recoveryTarget);
+          if (Array.isArray(resolved)) {
+            for (const alert of resolved) recordRecentlyResolvedAlertKey(alert?.dedupeKey, now);
+          }
         }
       } catch { /* alert sidecar remains best-effort for system info */ }
-    } else {
+    } else if (!opts.skipAlertIngest) {
       // Non-recovery event — ingest as alert
-      const dedupeKey = opts.dedupeKey || alertType;
       try {
         alertStore.ingest({
           alertType,
@@ -3733,6 +3783,12 @@ function emitSystemInfo(summary, full = '', alertType = null, opts = {}) {
         });
       } catch { /* ingest validation failure — non-fatal */ }
     }
+  }
+
+  if (!suppressSystemInfo) {
+    ensureInfoGroup();
+    appendSystemInfoLog(event);
+    broadcastSSE('system_info', event);
   }
 
   return event;
@@ -3769,11 +3825,16 @@ const notificationRouter = new NotificationRouter({
         else blocked.push(p);
       }
       // Per-agent alert ingestion (spec §11.4)
+      const recentlyRecoveredBlockedKeys = new Set();
       for (const p of blocked) {
+        const perAgentDedupeKey = `agent_blocked:${p.agentName}`;
+        if (wasRecentlyResolvedAlertKey(perAgentDedupeKey)) {
+          recentlyRecoveredBlockedKeys.add(perAgentDedupeKey);
+        }
         try {
           alertStore.ingest({
             alertType: 'agent_blocked',
-            dedupeKey: `agent_blocked:${p.agentName}`,
+            dedupeKey: perAgentDedupeKey,
             severity: 'warning',
             source: 'backend',
             sourceAgent: p.agentName,
@@ -3784,7 +3845,7 @@ const notificationRouter = new NotificationRouter({
             impact: 'the agent may be unable to process pending human or operator messages until the blocked state clears',
             recoveryCondition: 'agent_recovered for this agent auto-resolves this alert',
             correlation: {
-              dedupeKey: `agent_blocked:${p.agentName}`,
+              dedupeKey: perAgentDedupeKey,
               agent: p.agentName,
               tier: p.tier === BLOCK_TIER_TRANSIENT ? 'transient' : (p.tier === BLOCK_TIER_SOFT ? 'soft' : 'hard'),
             },
@@ -3792,7 +3853,8 @@ const notificationRouter = new NotificationRouter({
         } catch { /* non-fatal */ }
       }
       for (const agentName of recovered) {
-        alertStore.autoResolve(`agent_blocked:${agentName}`);
+        const resolved = alertStore.autoResolve(`agent_blocked:${agentName}`);
+        if (resolved?.dedupeKey) recordRecentlyResolvedAlertKey(resolved.dedupeKey);
       }
       const parts = [];
       const fullParts = [];
@@ -3805,7 +3867,17 @@ const notificationRouter = new NotificationRouter({
         for (const p of blocked) { if (p.full) fullParts.push(p.full); }
       }
       if (recovered.length) parts.push(`${recovered.length} recovered: ${recovered.join(', ')}`);
-      return { summary: `Agent state summary: ${parts.join('; ')}`, full: fullParts.join('\n---\n') };
+      const singleBlocked = blocked.length === 1 && recovered.length === 0 ? blocked[0] : null;
+      const singleRecovered = recovered.length === 1 && blocked.length === 0 ? recovered[0] : null;
+      return {
+        summary: `Agent state summary: ${parts.join('; ')}`,
+        full: fullParts.join('\n---\n'),
+        alertType: singleRecovered ? 'agent_recovered' : 'agent_blocked',
+        agentName: singleBlocked?.agentName || singleRecovered || null,
+        dedupeKey: singleBlocked ? `agent_blocked:${singleBlocked.agentName}` : null,
+        alertStoreManaged: true,
+        suppressSystemInfo: singleBlocked ? recentlyRecoveredBlockedKeys.has(`agent_blocked:${singleBlocked.agentName}`) : false,
+      };
     },
     sinks: ['log'],
   },
@@ -3832,7 +3904,10 @@ const notificationRouter = new NotificationRouter({
       opts.sourceAgent = payload.agentName;
       opts.dedupeKey = `${_family}:${payload.agentName}:${payload.reason || ''}`.replace(/:$/, '');
     }
-    emitSystemInfo(payload.summary, payload.full || '', _family, opts);
+    if (payload.dedupeKey) opts.dedupeKey = payload.dedupeKey;
+    if (payload.alertStoreManaged) opts.skipAlertIngest = true;
+    if (payload.suppressSystemInfo) opts.suppressSystemInfo = true;
+    emitSystemInfo(payload.summary, payload.full || '', payload.alertType || _family, opts);
   },
   sse: (_family, payload) => {
     if (payload.sseEvent) broadcastSSE(payload.sseEvent, payload.sseData || payload);
@@ -5145,18 +5220,8 @@ function applyRuntimeObservation(agentName, payload = {}) {
       'Offline reason set to: mcp-missing:auto',
     ].join('\n');
     emitSystemInfo(`Agent '${agentName}' missing MCP process`, full, 'mcp_missing', { sourceAgent: agentName, dedupeKey: `mcp_missing:${agentName}` });
-    broadcastSSE('agent_mcp_missing', {
-      agent: agentName,
-      missingSince: runtime.mcpMissingSince || now,
-      server: normalizeServer(payload.server) || normalizeServer(agent?.server) || null,
-    });
   } else if (mcpRecovered) {
     emitSystemInfo(`Agent '${agentName}' MCP process recovered`, `Agent '${agentName}' now has mcp-server.js running inside tmux.`, 'mcp_recovered', { sourceAgent: agentName });
-    broadcastSSE('agent_mcp_recovered', {
-      agent: agentName,
-      recoveredAt: now,
-      server: normalizeServer(payload.server) || normalizeServer(agent?.server) || null,
-    });
   }
 
   return {
@@ -10505,6 +10570,7 @@ export {
 export const __backendV2TestInternals = {
   notifyAgentCatchupForTest: notifyAgentCatchup,
   pushNotifyForTest: pushNotify,
+  sseAdapterForTest: sseAdapter,
   safeWriteJsonFile,
   setJsonSaveFailureForTest,
 };

@@ -60,6 +60,25 @@ const WARNING_DEDUPE_WINDOW_MS = Number.isFinite(WARNING_DEDUPE_WINDOW_MS_RAW) &
   : 300_000; // 5 minutes default
 const WARNING_CB_THRESHOLD = 3;     // consecutive failures before circuit opens
 const WARNING_CB_COOLDOWN_MS = 60_000; // 1 minute cooldown when circuit is open
+const SYSTEM_INFO_ALERT_SEVERITY_MAP = {
+  swap_high: 'critical',
+  server_offline: 'critical',
+  agent_blocked: 'warning',
+  mcp_missing: 'warning',
+  agent_offline: 'warning',
+  resource_alert: 'warning',
+  agent_rule: 'warning',
+  bridge_warning: 'warning',
+  supervisor_escalation: 'warning',
+  mcp_recovered: 'info',
+  swap_clear: 'info',
+  server_takeover: 'info',
+  supervisor_nudge: 'info',
+};
+const SYSTEM_INFO_WARNING_COOLDOWN_MS_RAW = Number.parseInt(process.env.BRIDGE_SYSTEM_INFO_WARNING_COOLDOWN_MS || '300000', 10);
+const SYSTEM_INFO_WARNING_COOLDOWN_MS = Number.isFinite(SYSTEM_INFO_WARNING_COOLDOWN_MS_RAW) && SYSTEM_INFO_WARNING_COOLDOWN_MS_RAW > 0
+  ? SYSTEM_INFO_WARNING_COOLDOWN_MS_RAW
+  : 300_000;
 const OWNER_LOCK_PATH = path.join(DATA_DIR, 'bridge-owner.lock');
 
 // ── Room trust boundary (5.8.1) ─────────────────────────────────────
@@ -1231,6 +1250,7 @@ export class MatrixBridge {
     this._reconcileSuspendLogged = false; // log suspension only once
     this._loggedUntrustedRooms = new Set(); // dedup scan-joined trust logs
     this._bridgeCreatedGroups = new Set(); // groups we POST'd — skip SSE echo
+    this._recentSystemInfoWarningKeys = new Map(); // alert dedupeKey -> last bridged ts
     this._warningRouter = new NotificationRouter({
       warning: {
         cooldownMs: WARNING_DEDUPE_WINDOW_MS,
@@ -2652,6 +2672,23 @@ export class MatrixBridge {
     const summary = (typeof event?.summary === 'string' && event.summary.trim()) ? event.summary.trim() : '';
     if (!summary) return;
     const full = (typeof event?.full === 'string') ? event.full : '';
+    const alertType = (typeof event?.alertType === 'string' && event.alertType.trim()) ? event.alertType.trim() : '';
+    let warningCooldownKey = null;
+    let warningCooldownAt = 0;
+    if (alertType) {
+      const severity = SYSTEM_INFO_ALERT_SEVERITY_MAP[alertType] || 'info';
+      if (severity === 'info') return;
+      if (severity === 'warning') {
+        const now = Date.now();
+        const dedupeKey = (typeof event?.dedupeKey === 'string' && event.dedupeKey.trim())
+          ? event.dedupeKey.trim()
+          : `${alertType}:${summary}`;
+        const lastSent = this._recentSystemInfoWarningKeys.get(dedupeKey) || 0;
+        if ((now - lastSent) < SYSTEM_INFO_WARNING_COOLDOWN_MS) return;
+        warningCooldownKey = dedupeKey;
+        warningCooldownAt = now;
+      }
+    }
     const roomId = roomForGroup('info');
     if (!roomId) {
       console.warn(`No Matrix room for group "info"; system_info skipped: ${summary.slice(0, 80)}`);
@@ -2660,6 +2697,15 @@ export class MatrixBridge {
     const body = full ? `ℹ️ ${summary}\n\n${full}` : `ℹ️ ${summary}`;
     try {
       await this.botClient.sendMessage(roomId, { msgtype: 'm.text', body });
+      if (warningCooldownKey) {
+        this._recentSystemInfoWarningKeys.set(warningCooldownKey, warningCooldownAt);
+        if (this._recentSystemInfoWarningKeys.size > 1000) {
+          const cutoff = warningCooldownAt - SYSTEM_INFO_WARNING_COOLDOWN_MS;
+          for (const [key, ts] of this._recentSystemInfoWarningKeys) {
+            if (ts < cutoff) this._recentSystemInfoWarningKeys.delete(key);
+          }
+        }
+      }
       console.log(`→ Matrix [info] system: ${summary.slice(0, 60)}`);
     } catch (e) {
       console.error(`Failed to bridge system_info to info room ${roomId}:`, e.message);

@@ -754,6 +754,7 @@ describe('backend runtime API', () => {
     context = await createBackendTestContext('agent-chat-runtime-test-', {
       env: {
         AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '1000',
+        SYSTEM_INFO_RECOVERY_DAMPENER_MS: '0',
       },
       agents: {
         alpha: {
@@ -831,6 +832,163 @@ describe('backend runtime API', () => {
     ]);
   });
 
+  test('agent blocked alert uses one per-agent dedupe key without trailing duplicate', async () => {
+    context = await createBackendTestContext('agent-chat-runtime-test-', {
+      env: {
+        AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '0',
+      },
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      groups: {},
+    });
+
+    for (let i = 0; i < 2; i += 1) {
+      const response = await request(context.app).post('/api/agents/alpha/runtime').send({
+        blocked: true,
+        reason: 'update-required',
+        tail: 'update available: run agent-update',
+        command: 'codex',
+      });
+      expect(response.status).toBe(200);
+    }
+
+    const alerts = await request(context.app).get('/api/alerts');
+    expect(alerts.status).toBe(200);
+    expect(alerts.body).toEqual([
+      expect.objectContaining({
+        alertType: 'agent_blocked',
+        dedupeKey: 'agent_blocked:alpha',
+        sourceAgent: 'alpha',
+        status: 'open',
+        occurrences: 1,
+      }),
+    ]);
+    expect(alerts.body.map(alert => alert.dedupeKey)).not.toContain('agent_blocked:alpha:');
+  });
+
+  test('recent recovery dampens repeat blocked system_info while alert occurrence reopens', async () => {
+    const agents = {
+      alpha: {
+        name: 'alpha',
+        type: 'agent',
+        kind: 'agent',
+        online: true,
+        manualDown: false,
+        tmux: 'alpha:0.0',
+      },
+    };
+    context = await createBackendTestContext('agent-chat-runtime-test-', {
+      env: {
+        AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '0',
+      },
+      agents,
+      groups: {},
+    });
+
+    for (let i = 0; i < 2; i += 1) {
+      await request(context.app).post('/api/agents/alpha/runtime').send({
+        blocked: true,
+        reason: 'update-required',
+        tail: 'update available: run agent-update',
+        command: 'codex',
+      });
+    }
+    await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: false,
+      reason: null,
+      tail: '',
+      command: 'codex',
+    });
+
+    expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
+      "Agent state summary: 1 blocked: alpha (hard)",
+      "Agent state summary: 1 recovered: alpha",
+    ]);
+
+    for (let i = 0; i < 2; i += 1) {
+      await request(context.app).post('/api/agents/alpha/runtime').send({
+        blocked: true,
+        reason: 'update-required',
+        tail: 'update available: run agent-update',
+        command: 'codex',
+      });
+    }
+
+    expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([
+      "Agent state summary: 1 blocked: alpha (hard)",
+      "Agent state summary: 1 recovered: alpha",
+    ]);
+    const alerts = await request(context.app).get('/api/alerts');
+    expect(alerts.body).toEqual([
+      expect.objectContaining({
+        dedupeKey: 'agent_blocked:alpha',
+        status: 'open',
+        occurrences: 2,
+      }),
+    ]);
+
+    const alertsSnapshot = readJson(path.join(context.runtimeDir, 'data', 'alerts.json'));
+    expect(alertsSnapshot).toEqual([
+      expect.objectContaining({
+        dedupeKey: 'agent_blocked:alpha',
+        status: 'open',
+      }),
+    ]);
+    await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: false,
+      reason: null,
+      tail: '',
+      command: 'codex',
+    });
+    const resolvedAlertsSnapshot = readJson(path.join(context.runtimeDir, 'data', 'alerts.json'));
+    const runtimeSnapshot = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(resolvedAlertsSnapshot).toEqual([
+      expect.objectContaining({
+        dedupeKey: 'agent_blocked:alpha',
+        status: 'resolved',
+        occurrences: 2,
+      }),
+    ]);
+
+    context.cleanup();
+    context = await createBackendTestContext('agent-chat-runtime-test-', {
+      env: {
+        AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '0',
+      },
+      agents,
+      agentRuntime: runtimeSnapshot,
+      alerts: resolvedAlertsSnapshot,
+      groups: {},
+    });
+
+    for (let i = 0; i < 2; i += 1) {
+      await request(context.app).post('/api/agents/alpha/runtime').send({
+        blocked: true,
+        reason: 'update-required',
+        tail: 'update available: run agent-update',
+        command: 'codex',
+      });
+    }
+
+    expect(readSystemInfoSummaries(context.runtimeDir)).toEqual([]);
+    const reopenedAlerts = await request(context.app).get('/api/alerts');
+    expect(reopenedAlerts.body).toEqual([
+      expect.objectContaining({
+        dedupeKey: 'agent_blocked:alpha',
+        status: 'open',
+        occurrences: 3,
+      }),
+    ]);
+  });
+
   test('blocked system info only targets humans with unread pending messages', async () => {
     context = await createBackendTestContext('agent-chat-runtime-test-', {
       agents: {
@@ -887,6 +1045,7 @@ describe('backend runtime API', () => {
     context = await createBackendTestContext('agent-chat-runtime-test-', {
       env: {
         AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '0',
+        SYSTEM_INFO_RECOVERY_DAMPENER_MS: '0',
       },
       agents: {
         alpha: {
@@ -964,6 +1123,57 @@ describe('backend runtime API', () => {
     expect(events).toHaveLength(3);
     expect(events[2].full).toContain('Pending human messages: no');
     expect(events[2].full).toContain('Target humans: none');
+  });
+
+  test('MCP transitions do not emit legacy MCP-specific SSE event types', async () => {
+    context = await createBackendTestContext('agent-chat-runtime-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          agentModelVersion: 'v1',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      agentRuntime: {
+        alpha: { mcpPresent: true },
+      },
+      groups: {},
+    });
+
+    const frames = [];
+    const client = {
+      write(frame) {
+        frames.push(String(frame));
+        return true;
+      },
+    };
+    context.internals.sseAdapterForTest.clients.add(client);
+
+    await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: false,
+      reason: null,
+      tail: '',
+      command: 'claude',
+      mcpPresent: false,
+    });
+    await request(context.app).post('/api/agents/alpha/runtime').send({
+      blocked: false,
+      reason: null,
+      tail: '',
+      command: 'claude',
+      mcpPresent: true,
+    });
+
+    context.internals.sseAdapterForTest.clients.delete(client);
+    const eventNames = frames
+      .flatMap(frame => [...frame.matchAll(/^event: ([^\n]+)$/gm)].map(match => match[1]));
+    expect(eventNames).toContain('system_info');
+    expect(eventNames).not.toContain('agent_mcp_missing');
+    expect(eventNames).not.toContain('agent_mcp_recovered');
   });
 
   test('stale remote heartbeat marks server and agents offline', async () => {

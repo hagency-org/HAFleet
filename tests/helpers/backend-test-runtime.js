@@ -28,6 +28,7 @@ export async function createBackendTestContext(prefix, seed = {}) {
   writeJson(path.join(dataDir, 'cursors.json'), seed.cursors || {});
   writeJson(path.join(dataDir, 'servers.json'), seed.servers || {});
   writeJson(path.join(dataDir, 'agent_runtime.json'), seed.agentRuntime || {});
+  writeJson(path.join(dataDir, 'alerts.json'), seed.alerts || []);
   writeJson(path.join(dataDir, 'framework-presets.json'), seed.frameworkPresets || []);
   writeJson(path.join(dataDir, 'supervisor_state.json'), seed.supervisorState || { agents: {}, selectionCursor: 0 });
   writeJson(path.join(dataDir, 'local_activity_sweep.json'), { selectionCursor: 0 });
