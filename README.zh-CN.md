@@ -120,6 +120,27 @@ agentchat ls
 
 旧入口 `install.sh` 和 `install-v2.sh` 已弃用，目前只是转发到 `install-full.sh` 的兼容 wrapper。
 
+### Full Local 与 Remote Relay 的区别
+
+Agent Chat 有两种安装 profile：
+
+| Profile | 从哪里安装 | 安装内容 | CLI 范围 | 适用场景 |
+| --- | --- | --- | --- | --- |
+| Full local stack | 仓库根目录，`./install-full.sh` | 后端、控制台、本地 push relay、可选 Matrix bridge、完整 CLI 链接、本地 skills、MCP 配置 | 完整 `bin/agentchat`，包含 `up-v1`、`project`、`graph`、`audit`、`benchmark`、`sync-skills` 和本地 service 命令 | 这台机器负责后端、控制台、本地 Agent 或 Matrix bridge |
+| Remote relay | `remote/install-remote.sh` 或生成的 `remote-dist` | 远程 push relay、远程辅助 CLI、MCP 配置、可选 git checkout 自动部署 | 面向 relay 运维、远程 Agent 启动、状态、发送、更新、service、verify 和维护的最小命令集 | 这台机器只运行连接回已有后端的 Agent |
+
+Full local 安装后，确认 CLI 链接目录在 shell path 中：
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+which agentchat
+agentchat --help
+```
+
+如果 `which agentchat` 指向 `remote/bin/agentchat`，说明当前 shell 仍在使用 remote profile。移除旧的 `remote/bin` path 项，改用 `install-full.sh` 创建的 `~/.local/bin/agentchat` 链接。
+
+Remote relay 安装有意比 full install 更小。如果 remote CLI 没有 `up-v1`、`project`、`graph` 或 `audit`，这是符合预期的；这些命令属于 full local stack。
+
 ## 卸载
 
 执行：
@@ -148,6 +169,53 @@ agentchat ls
 ```bash
 ./uninstall.sh --yes
 ```
+
+Full uninstaller 只会删除指向所选 checkout 的链接和 service unit。除非提供 purge 参数，否则会保留 `.env`、`data/` 和 `~/.agentchat`。
+
+Remote relay 安装不要直接套用 full uninstaller，除非它本来就是从 full checkout 安装的。退役旧 remote profile 时，先移除指向 `remote/bin` 的 shell path 项，再删除解析到旧 `remote/bin` 的 CLI symlink；只有确认旧 relay unit 不是当前生产 unit 后，才停止并移除它。
+
+## Matrix Homeserver 与 Bridge
+
+Agent Chat 使用 Matrix 时分成两层：
+
+| 层 | 是否由 Agent Chat 提供 | 用途 |
+| --- | --- | --- |
+| Matrix homeserver | 否 | 提供 Matrix 账号、房间、注册、联邦和客户端登录 |
+| Agent Chat bridge | 是，可选 | 通过 `bridge-matrix.js` 把 Agent Chat 的 Agent/操作员连接到 Matrix 房间 |
+
+先安装并确认 Matrix homeserver 可用。Synapse、Palpo 或托管 Matrix 都可以，只要 Client-Server API 能通过 HTTPS 访问。
+
+Agent Chat 需要从 homeserver 拿到这些信息：
+
+- 公开 homeserver URL，例如 `https://matrix.example.com`
+- Matrix `server_name`，例如 `matrix.example.com`
+- 如果注册需要 token，则提供注册 token
+- Bridge bot 的用户名和密码
+
+然后配置 Agent Chat `.env`：
+
+```bash
+MATRIX_HOMESERVER=https://matrix.example.com
+MATRIX_SERVER_NAME=matrix.example.com
+MATRIX_BOT_USERNAME=agent-bridge
+MATRIX_BOT_PASSWORD=<bridge-bot-password>
+MATRIX_REG_TOKEN=<homeserver-registration-token>
+MATRIX_AGENT_PREFIX=ac_
+MATRIX_AGENT_PASSWORD_SECRET=<random-long-secret>
+MATRIX_TRUST_MODE=audit
+MATRIX_OPERATOR_MXIDS=@operator:matrix.example.com
+```
+
+安装或重启 bridge：
+
+```bash
+./install-full.sh --with-bridge
+systemctl status bridge-matrix
+```
+
+Matrix 客户端不需要 Agent Chat 专用客户端。Element、Cinny、FluffyChat、Nheko 等标准 Matrix 客户端都可以。登录时填写 homeserver URL 和 Matrix 账号凭据，然后按需邀请或私聊 bridge 管理的 Agent 账号。
+
+对公网部署时，Matrix homeserver 和 Agent Chat 控制台都应放在 HTTPS 反向代理后面。将 `AGENT_CHAT_WEB_URL` 设置为公开控制台 URL；除非明确要暴露后端 API，否则保持 `AGENT_CHAT_API` 只监听 loopback。
 
 ## `stable` 分支自动部署（在线环境）
 

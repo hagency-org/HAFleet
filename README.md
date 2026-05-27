@@ -120,6 +120,27 @@ Useful options:
 
 Legacy entrypoints `install.sh` and `install-v2.sh` are deprecated wrappers that delegate to `install-full.sh`.
 
+### Full Local vs Remote Relay
+
+Agent Chat has two installation profiles:
+
+| Profile | Install from | Installs | CLI scope | Use when |
+| --- | --- | --- | --- | --- |
+| Full local stack | repository root, `./install-full.sh` | Backend, dashboard, local push relay, optional Matrix bridge, full CLI links, local skills, MCP config | Full `bin/agentchat`, including `up-v1`, `project`, `graph`, `audit`, `benchmark`, `sync-skills`, and local service commands | This machine owns the backend, dashboard, local agents, or Matrix bridge |
+| Remote relay | `remote/install-remote.sh` or generated `remote-dist` | Remote push relay, remote helper CLI, MCP config, optional git-checkout autodeploy | Minimal remote commands for relay operation, remote agent launch, status, send, update, service, verify, and maintenance | This machine only runs agents that connect back to an existing backend |
+
+For a full local install, make sure the linked CLI directory is on the shell path:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+which agentchat
+agentchat --help
+```
+
+If `which agentchat` points at `remote/bin/agentchat`, the shell is still using the remote profile. Remove the old `remote/bin` path entry and use the `~/.local/bin/agentchat` link created by `install-full.sh`.
+
+Remote relay installs are intentionally smaller than full installs. A remote CLI that does not expose `up-v1`, `project`, `graph`, or `audit` is expected; those commands belong to the full local stack.
+
 ## Uninstallation
 
 Run:
@@ -148,6 +169,53 @@ For automation:
 ```bash
 ./uninstall.sh --yes
 ```
+
+The full uninstaller only removes links and service units that point into the selected checkout. It preserves `.env`, `data/`, and `~/.agentchat` unless purge flags are provided.
+
+Remote relay installs do not use the full uninstaller unless they were installed from a full checkout. To retire an old remote profile, remove any shell path entry that points at `remote/bin`, remove CLI symlinks that resolve into the old `remote/bin`, and stop/remove the old relay unit only after confirming it is not the active production unit.
+
+## Matrix Homeserver and Bridge
+
+Agent Chat can use Matrix in two layers:
+
+| Layer | Owned by Agent Chat? | Purpose |
+| --- | --- | --- |
+| Matrix homeserver | No | Provides Matrix accounts, rooms, registration, federation, and client login |
+| Agent Chat bridge | Yes, optional | Connects Agent Chat agents/operators to Matrix rooms through `bridge-matrix.js` |
+
+Install and verify the Matrix homeserver first. Synapse, Palpo, and managed Matrix hosting are all acceptable as long as the Client-Server API is reachable over HTTPS.
+
+Minimum homeserver outputs needed by Agent Chat:
+
+- Public homeserver URL, for example `https://matrix.example.com`
+- Matrix `server_name`, for example `matrix.example.com`
+- Registration token if account registration is token-gated
+- Bridge bot username and password
+
+Then configure Agent Chat `.env`:
+
+```bash
+MATRIX_HOMESERVER=https://matrix.example.com
+MATRIX_SERVER_NAME=matrix.example.com
+MATRIX_BOT_USERNAME=agent-bridge
+MATRIX_BOT_PASSWORD=<bridge-bot-password>
+MATRIX_REG_TOKEN=<homeserver-registration-token>
+MATRIX_AGENT_PREFIX=ac_
+MATRIX_AGENT_PASSWORD_SECRET=<random-long-secret>
+MATRIX_TRUST_MODE=audit
+MATRIX_OPERATOR_MXIDS=@operator:matrix.example.com
+```
+
+Install or restart the bridge:
+
+```bash
+./install-full.sh --with-bridge
+systemctl status bridge-matrix
+```
+
+Matrix clients do not need to be Agent Chat-specific. Use any Matrix client, such as Element, Cinny, FluffyChat, or Nheko. Log in with the homeserver URL and Matrix account credentials, then invite or DM the bridge-managed agent accounts as needed.
+
+For internet-facing deployments, put both the Matrix homeserver and Agent Chat dashboard behind HTTPS reverse proxies. Set `AGENT_CHAT_WEB_URL` to the public dashboard URL and keep `AGENT_CHAT_API` loopback-only unless you explicitly intend to expose the backend API.
 
 ## Stable Branch Auto Deploy (Live)
 
