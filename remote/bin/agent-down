@@ -292,11 +292,38 @@ active = data.get("activeNow") is True
 online = data.get("online") is True
 active_dur = int(data.get("activeDurationSec") or 0)
 idle_dur = int(data.get("idleDurationSec") or 0)
+now_ms = int(__import__("time").time() * 1000)
+fresh_ms_raw = os.environ.get("AGENT_DOWN_ACTIVITY_FRESH_MS", "120000")
+try:
+    fresh_ms = int(fresh_ms_raw)
+except Exception:
+    fresh_ms = 120000
+fresh_ms = max(1, fresh_ms)
 
 if active:
     print(f"active:{name}:online={int(online)}:activeDurationSec={active_dur}:idleDurationSec={idle_dur}")
-else:
-    print(f"inactive:{name}:online={int(online)}:activeDurationSec={active_dur}:idleDurationSec={idle_dur}")
+    raise SystemExit(0)
+
+if data.get("activeNow") is not False:
+    print(f"error:unknown-runtime-status:activeNow={data.get('activeNow')!r}")
+    raise SystemExit(0)
+
+observation = data.get("runtimeObservation")
+if not isinstance(observation, dict):
+    print("error:stale-runtime-status:missing-runtime-observation")
+    raise SystemExit(0)
+source = str(observation.get("observerSource") or "").strip()
+try:
+    observed_at = int(observation.get("observedAt") or 0)
+except Exception:
+    observed_at = 0
+fresh_sources = {"runtime-api", "local-sweep"}
+age_ms = now_ms - observed_at if observed_at > 0 else fresh_ms + 1
+if source not in fresh_sources or observed_at <= 0 or age_ms < 0 or age_ms > fresh_ms:
+    print(f"error:stale-runtime-status:source={source or '-'}:ageMs={age_ms}:freshMs={fresh_ms}")
+    raise SystemExit(0)
+
+print(f"inactive:{name}:online={int(online)}:activeDurationSec={active_dur}:idleDurationSec={idle_dur}:source={source}:ageMs={age_ms}")
 PY
 )"
 
