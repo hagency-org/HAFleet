@@ -53,7 +53,7 @@ import { createJsonStorage } from './lib/backend/storage-adapter.js';
 import { createSupervisorLifecycleManager, killTmuxSession as killSupervisorTmux } from './lib/supervisor-lifecycle-manager.js';
 import { provisionSupervisorAgent, buildSupervisorAgentRecord } from './lib/supervisor-provisioning.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
-import { assertRuntimeDir, isLocalAgentServer } from './lib/runtime-dir-guard.js';
+import { assertRuntimeDir, isLocalAgentServer, resolveLocalServerId } from './lib/runtime-dir-guard.js';
 import { enforceStartupConfig } from './lib/startup-config.js';
 import { NotificationRouter } from './lib/notification-router.js';
 import { readV1AgentManifest, defaultAgentchatHomeDir, allAgentHomeRoots } from './lib/agent-home-v1.js';
@@ -92,7 +92,7 @@ const WEB_BRIDGE_FETCH_TIMEOUT_MS = Number.isFinite(WEB_BRIDGE_FETCH_TIMEOUT_MS_
   : 5000;
 const execFileAsync = promisify(execFile);
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
-const LOCAL_SERVER_ID = (process.env.AGENT_CHAT_SERVER || 'local').trim() || 'local';
+const LOCAL_SERVER_ID = resolveLocalServerId();
 const RECORD_LOCAL_SERVER = normalizeBoolean(process.env.AGENT_CHAT_RECORD_LOCAL_SERVER) === true;
 const LOCAL_GIT_VERSION = (() => { try { return execSync('git rev-parse --short HEAD', { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { return null; } })();
 const USER_UID = (typeof process.getuid === 'function') ? process.getuid() : null;
@@ -4796,7 +4796,11 @@ function markAgentPushDelivered(agentName, details = {}) {
   const staleSource = incomingSourceMsgId
     && currentSourceMsgId
     && incomingSourceMsgId !== currentSourceMsgId;
-  if (staleQueueEntry || staleDeliveredAt || staleSource) {
+  const inboxReadAck = normalizeInboxReadAck(runtime.inboxReadAck);
+  const staleReadAck = incomingSourceMsgId
+    && inboxReadAck.sourceMsgId === incomingSourceMsgId
+    && Number(inboxReadAck.ackedAt) > 0;
+  if (staleQueueEntry || staleDeliveredAt || staleSource || staleReadAck) {
     return { ok: true, ignored: 'stale-push-delivered' };
   }
   const delay = Math.max(0, deliveredAt - queuedAt);
@@ -6347,7 +6351,7 @@ async function sweepAgentScopePressure() {
     .filter(isAgentRecord)
     .filter(agent => {
       const serverId = normalizeServer(agent.server);
-      return !serverId || serverId === 'local' || serverId === LOCAL_SERVER_ID;
+      return isLocalAgentServer(serverId, LOCAL_SERVER_ID);
     })
     .map(agent => agent.name);
 
@@ -6921,7 +6925,7 @@ async function pushNotify(agentName, msg) {
     return pushNotifyStatus({ reason: 'missing-tmux-target' });
   }
   const agentServer = normalizeServer(agent.server);
-  if (agentServer && agentServer !== 'local' && agentServer !== LOCAL_SERVER_ID) {
+  if (agentServer && !isLocalAgentServer(agentServer, LOCAL_SERVER_ID)) {
     logPushNotifySkip(agentName, 'remote-relay-expected', `(server=${agentServer})`);
     appendDeliveryEvent({
       type: 'push.not_queued',
@@ -7342,6 +7346,12 @@ app.post('/api/supervisor/control', requireBearer, (req, res) => {
 app.post('/api/servers/heartbeat', requireBearer, (req, res) => {
   const serverId = normalizeServer(req.body?.server);
   if (!serverId) return res.status(400).json({ error: 'server required' });
+  if (!isLocalRequest(req) && isLocalAgentServer(serverId, LOCAL_SERVER_ID)) {
+    return res.status(400).json({
+      error: 'remote server id must not be local',
+      server: serverId,
+    });
+  }
   const heartbeatResult = applyServerHeartbeat(serverId, req.body || {}, req.ip || req.connection?.remoteAddress || null);
   refreshServerLiveness();
   const state = servers[serverId];
@@ -7614,7 +7624,7 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
       || existing.environment || classifyEnvironment(agentName),
   };
   if (resolvedOnline) {
-    const isLocal = resolvedServer === 'local' || resolvedServer === LOCAL_SERVER_ID;
+    const isLocal = isLocalAgentServer(resolvedServer, LOCAL_SERVER_ID);
     if (isLocal && resolvedTmux) {
       // Local registration with tmux → STARTING (grace timer for MCP)
       transitionAgent(agentName, 'api_register_with_tmux');

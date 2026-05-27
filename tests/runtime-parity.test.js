@@ -4,9 +4,12 @@ import path from 'path';
 import { pathToFileURL } from 'url';
 
 describe('runtime parity regressions', () => {
-  test('remote MCP auto-registration defaults server to local', () => {
+  test('MCP auto-registration uses the shared server identity resolver', () => {
+    const localSource = readFileSync(path.resolve('lib/mcp-server-core.js'), 'utf-8');
     const source = readFileSync(path.resolve('remote/lib/mcp-server-core.js'), 'utf-8');
-    expect(source).toMatch(/const AGENT_SERVER = \(process\.env\.AGENT_CHAT_SERVER \|\| ''\)\.trim\(\) \|\| 'local';/);
+    expect(localSource).toContain("import { resolveLocalServerId } from './server-identity.js';");
+    expect(source).toContain("import { resolveLocalServerId } from './server-identity.js';");
+    expect(source).toContain('const AGENT_SERVER = resolveLocalServerId();');
   });
 
   test('deployment and upstream helpers avoid machine-specific hardcoded home paths', async () => {

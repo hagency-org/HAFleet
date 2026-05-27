@@ -101,6 +101,18 @@ describe('verify-remote cli', () => {
     expect(stdout).toContain('verify-remote passed.');
   });
 
+  test('rejects the reserved local server id before backend checks', async () => {
+    await expect(runVerifyRemote([
+      '--no-service',
+      '--api', 'http://127.0.0.1:1',
+      '--server', 'local',
+      '--samples', '1',
+      '--interval', '1',
+    ])).rejects.toMatchObject({
+      stderr: expect.stringContaining("remote server id must not be 'local'"),
+    });
+  });
+
   test('fails when expected version does not match loaded server version', async () => {
     const api = await startFakeBackend((req) => {
       if (req.url === serversPath) {

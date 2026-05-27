@@ -128,6 +128,13 @@ if [ -z "$SERVER_ID" ]; then
   echo "Error: missing server id. Set AGENT_CHAT_SERVER or pass --server." >&2
   exit 1
 fi
+SERVER_ID="${SERVER_ID#"${SERVER_ID%%[![:space:]]*}"}"
+SERVER_ID="${SERVER_ID%"${SERVER_ID##*[![:space:]]}"}"
+SERVER_ID_LOWER="$(printf '%s' "$SERVER_ID" | tr '[:upper:]' '[:lower:]')"
+if [ "$SERVER_ID_LOWER" = "local" ]; then
+  echo "Error: remote server id must not be 'local'. Set AGENT_CHAT_SERVER to this host's unique server id." >&2
+  exit 1
+fi
 
 API_BASE="${API_BASE%/}"
 

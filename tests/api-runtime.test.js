@@ -552,6 +552,111 @@ describe('backend runtime API', () => {
     ]));
   });
 
+  test('push-delivered does not reopen inbox gate after check_inbox consumed the source', async () => {
+    context = await createBackendTestContext('agent-chat-runtime-push-delivered-read-ack-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      messages: [
+        {
+          id: 'msg_read',
+          ts: 1000,
+          from: 'system',
+          to: 'alpha',
+          group: null,
+          type: 'inform',
+          summary: 'already read notification source',
+          full: 'already read notification source',
+          mentions: [],
+          reply_to: null,
+          source: 'system',
+        },
+      ],
+      agentRuntime: {
+        alpha: {
+          lastPushNotifyAt: 1000,
+          lastPushQueuedAt: 1000,
+          lastPushQueueEntryId: 7,
+          lastPushDeliveredAt: 0,
+          lastPushKind: 'single_actionable',
+          lastPushNeedsInboxCheck: true,
+          lastPushUnreadCount: 1,
+          lastPushSourceMsgId: 'msg_read',
+          lastActionablePushAt: 0,
+          inboxGate: {
+            requiresInboxCheck: false,
+            sourceMsgId: null,
+            raisedAt: null,
+            reason: null,
+          },
+          inboxReadAck: {
+            sourceMsgId: 'msg_read',
+            ackedAt: 1500,
+          },
+          lastSeen: 1500,
+          updatedAt: 1500,
+        },
+      },
+      groups: {},
+    });
+
+    const response = await request(context.app)
+      .post('/api/runtime/push-delivered')
+      .send({
+        agent: 'alpha',
+        deliveredAt: 2000,
+        queuedAt: 1000,
+        queueEntryId: 7,
+        notifyMeta: {
+          kind: 'single_actionable',
+          requiresInboxCheck: true,
+          sourceMsgId: 'msg_read',
+          messageIds: ['msg_read'],
+          unreadCount: 1,
+        },
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      agent: 'alpha',
+      ignored: 'stale-push-delivered',
+    });
+
+    const runtime = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtime.alpha.lastPushDeliveredAt).toBe(0);
+    expect(runtime.alpha.lastActionablePushAt).toBe(0);
+    expect(runtime.alpha.inboxGate).toMatchObject({
+      requiresInboxCheck: false,
+      sourceMsgId: null,
+      raisedAt: null,
+      reason: null,
+    });
+    expect(runtime.alpha.inboxReadAck).toEqual({
+      sourceMsgId: 'msg_read',
+      ackedAt: 1500,
+    });
+
+    const rows = readDeliveryEvents(context.runtimeDir);
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'push.delivered_ack',
+        agent: 'alpha',
+        messageId: 'msg_read',
+        queueEntryId: 7,
+        result: 'ignored',
+        reason: 'stale-push-delivered',
+      }),
+    ]));
+  });
+
   test('blocked notifications use tiered debounce and never notify transient blockers', async () => {
     context = await createBackendTestContext('agent-chat-runtime-test-', {
       agents: {

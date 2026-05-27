@@ -58,10 +58,62 @@ describe('deployment configuration', () => {
     expect(result.stderr).not.toContain('[push-relay]');
   });
 
+  test('local push relay entrypoint rejects remote profile drift before core startup', () => {
+    const result = spawnSync(process.execPath, ['push-relay.js'], {
+      cwd: path.resolve('.'),
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        API_TOKEN: 'secret',
+        PUSH_RELAY_MODE: 'remote',
+      },
+      timeout: 3000,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('local entrypoint requires PUSH_RELAY_MODE=local');
+    expect(result.stderr).not.toContain('startup error');
+  });
+
+  test('remote push relay entrypoint rejects local profile drift and local server identity', () => {
+    const wrongMode = spawnSync(process.execPath, ['remote/push-relay.js'], {
+      cwd: path.resolve('.'),
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        AGENTCHAT_WRAPPER_SMOKE: '1',
+        PUSH_RELAY_MODE: 'local',
+        AGENT_CHAT_SERVER: 'remote-a',
+      },
+      timeout: 3000,
+    });
+
+    expect(wrongMode.status).toBe(1);
+    expect(wrongMode.stderr).toContain('remote entrypoint requires PUSH_RELAY_MODE=remote');
+    expect(wrongMode.stderr).not.toContain('startup error');
+
+    const localServer = spawnSync(process.execPath, ['remote/push-relay.js'], {
+      cwd: path.resolve('.'),
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        AGENTCHAT_WRAPPER_SMOKE: '1',
+        PUSH_RELAY_MODE: 'remote',
+        AGENT_CHAT_SERVER: 'local',
+      },
+      timeout: 3000,
+    });
+
+    expect(localServer.status).toBe(1);
+    expect(localServer.stderr).toContain('AGENT_CHAT_SERVER to be a non-local server id');
+    expect(localServer.stderr).not.toContain('startup error');
+  });
+
   test('.env.example documents deployment-facing optional variables', () => {
     const envExample = readFileSync('.env.example', 'utf-8');
     for (const name of [
       'AGENT_CHAT_API',
+      'AGENT_CHAT_SERVER',
       'AGENT_CHAT_RUNTIME_DIR',
       'AGENT_CHAT_BACKEND_PORT',
       'AGENT_CHAT_WEB_PORT',

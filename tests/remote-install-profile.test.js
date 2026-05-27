@@ -7,6 +7,16 @@ function read(relPath) {
 }
 
 describe('remote install profile decision contracts', () => {
+  test('remote install profile rejects reserved local server identity', () => {
+    const installSource = read('remote/install-remote.sh');
+    const remoteEnvExample = read('remote/.env.example');
+    const remoteReadme = read('remote/README.md');
+
+    expect(installSource).toContain("AGENT_CHAT_SERVER must be this remote host's unique server id, not 'local'.");
+    expect(remoteEnvExample).toContain('never use "local"');
+    expect(remoteReadme).toContain('never `local`');
+  });
+
   test('full-clone helper profile remains explicit and decision-gated', () => {
     const installSource = read('remote/install-remote.sh');
     const remoteReadme = read('remote/README.md');

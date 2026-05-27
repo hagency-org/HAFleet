@@ -2,8 +2,12 @@
 
 import { enforceStartupConfig } from './lib/startup-config.js';
 
-if (!process.env.PUSH_RELAY_MODE) {
+const requestedMode = (process.env.PUSH_RELAY_MODE || '').trim().toLowerCase();
+if (!requestedMode) {
   process.env.PUSH_RELAY_MODE = 'local';
+} else if (requestedMode !== 'local') {
+  console.error(`[push-relay] FATAL: local entrypoint requires PUSH_RELAY_MODE=local, got ${process.env.PUSH_RELAY_MODE}`);
+  process.exit(1);
 }
 
 enforceStartupConfig({

@@ -139,6 +139,13 @@ if [ "${#MISSING_ENV[@]}" -gt 0 ]; then
   echo "Error: missing required env in $ENV_FILE: ${MISSING_ENV[*]}" >&2
   exit 1
 fi
+SERVER_ID_TRIMMED="${AGENT_CHAT_SERVER#"${AGENT_CHAT_SERVER%%[![:space:]]*}"}"
+SERVER_ID_TRIMMED="${SERVER_ID_TRIMMED%"${SERVER_ID_TRIMMED##*[![:space:]]}"}"
+SERVER_ID_LOWER="$(printf '%s' "$SERVER_ID_TRIMMED" | tr '[:upper:]' '[:lower:]')"
+if [ "$SERVER_ID_LOWER" = "local" ]; then
+  echo "Error: AGENT_CHAT_SERVER must be this remote host's unique server id, not 'local'." >&2
+  exit 1
+fi
 if [ -z "${API_TOKEN:-}" ]; then
   echo "Warning: API_TOKEN is empty. This only works if backend allows unauthenticated requests."
 fi

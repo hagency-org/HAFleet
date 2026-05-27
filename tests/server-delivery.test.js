@@ -770,6 +770,70 @@ describe('server delivery path', () => {
     expect(queue.body).toEqual([]);
   });
 
+  test('queue tick drops backend notifications whose source message is no longer unread', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const execCalls = [];
+    const unreadSnapshotUrls = [];
+    serverModule.setServerTestHooks({
+      execFileAsync: async (cmd, args) => {
+        execCalls.push([cmd, ...args]);
+        return { stdout: '' };
+      },
+      backendFetch: async (url) => {
+        const urlText = String(url);
+        if (urlText.includes('/api/inbox/alpha/unread-list')) {
+          unreadSnapshotUrls.push(urlText);
+          return {
+            ok: true,
+            json: async () => ({
+              agent: 'alpha',
+              unread_total: 0,
+              messages: [],
+            }),
+          };
+        }
+        if (urlText.includes('/api/inbox/alpha/unread')) throw new Error('legacy unread endpoint used');
+        return { ok: true, text: async () => '', json: async () => ({ ok: true }) };
+      },
+    });
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'agent-chat-v2',
+      to: 'alpha:0.0',
+      payload: '[NOTIFICATION] unread message',
+      notifyMeta: {
+        kind: 'single_actionable',
+        requiresInboxCheck: true,
+        sourceMsgId: 'msg_0001',
+        unreadCount: 1,
+      },
+    });
+
+    await serverModule.processQueueTickForTest();
+
+    expect(queued.status).toBe(200);
+    expect(execCalls.some((call) => call.includes('send-keys'))).toBe(false);
+    expect(unreadSnapshotUrls).toHaveLength(1);
+    expect(unreadSnapshotUrls[0]).toContain('limit=0');
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toEqual([]);
+
+    const events = readJsonl(path.join(runtimeDir, 'logs', 'delivery-events.jsonl'));
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'queue.dropped',
+        reason: 'stale-notification-unread-changed',
+        messageId: 'msg_0001',
+        queueEntryId: queued.body.id,
+      }),
+    ]));
+  });
+
   test('canceling one merged unread message drops correlated queue notifications', async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });

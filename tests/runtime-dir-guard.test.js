@@ -4,6 +4,7 @@ import path from 'path';
 import os from 'os';
 
 import { assertRuntimeDir, isLocalAgentServer } from '../lib/runtime-dir-guard.js';
+import { resolveLocalServerId, serversEquivalent } from '../lib/server-identity.js';
 
 describe('assertRuntimeDir', () => {
   let tmpDir;
@@ -77,6 +78,29 @@ describe('isLocalAgentServer', () => {
 
   test('custom local server id matches', () => {
     expect(isLocalAgentServer('my-server', 'my-server')).toBe(true);
+  });
+
+  test('hostname alias is local when legacy local env is still configured', () => {
+    expect(isLocalAgentServer('shisuiki', 'local', { hostname: 'shisuiki' })).toBe(true);
+  });
+
+  test('legacy local can be disabled for remote relay routing', () => {
+    expect(serversEquivalent('local', 'rhodes1', {
+      localServerId: 'rhodes1',
+      hostname: 'rhodes1',
+      includeLegacyLocal: false,
+    })).toBe(false);
+  });
+
+  test('local and hostname are equivalent on the central local relay', () => {
+    expect(serversEquivalent('local', 'shisuiki', {
+      localServerId: 'shisuiki',
+      hostname: 'shisuiki',
+    })).toBe(true);
+  });
+
+  test('local server id defaults to hostname instead of legacy literal local', () => {
+    expect(resolveLocalServerId({}, 'shisuiki')).toBe('shisuiki');
   });
 
   test('whitespace-only is local', () => {

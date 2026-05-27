@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import request from 'supertest';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { createServer } from 'http';
+import os from 'os';
 import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
@@ -568,6 +569,76 @@ describe('backend message API', () => {
           type: 'push.queued',
           messageIds: ['msg_merged_1', 'msg_merged_2'],
           queueEntryId: 2,
+        }),
+      ]));
+    } finally {
+      retryContext.cleanup();
+      await queueStub.close();
+    }
+  });
+
+  test('backend queues hostname-local agents when backend env still uses legacy local', async () => {
+    const queueStub = await createQueueStub((_req, count) => ({
+      status: 200,
+      body: { ok: true, id: count, queuedAt: 3000 + count },
+    }));
+    const retryContext = await createBackendTestContext('agent-chat-hostname-local-push-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          tmux: 'alpha:0.0',
+          server: os.hostname(),
+        },
+      },
+      groups: {},
+      messages: [
+        {
+          id: 'msg_hostname_local',
+          ts: 1000,
+          from: 'operator',
+          to: 'alpha',
+          type: 'human',
+          summary: 'hostname local push',
+          full: 'hostname local push',
+          mentions: [],
+          trustLevel: 'operator',
+        },
+      ],
+      env: {
+        AGENT_CHAT_SERVER: 'local',
+        AGENT_CHAT_QUEUE_URL: queueStub.url,
+      },
+    });
+
+    try {
+      const result = await retryContext.internals.pushNotifyForTest('alpha', {
+        id: 'msg_hostname_local',
+        ts: 1000,
+        from: 'operator',
+        to: 'alpha',
+        type: 'human',
+        priority: 'normal',
+        summary: 'hostname local push',
+      });
+
+      expect(result).toMatchObject({ queued: true });
+      expect(queueStub.requests).toHaveLength(1);
+      const events = readDeliveryEvents(retryContext.runtimeDir);
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: 'push.queued',
+          messageId: 'msg_hostname_local',
+          agent: 'alpha',
+        }),
+      ]));
+      expect(events).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: 'push.not_queued',
+          messageId: 'msg_hostname_local',
+          reason: 'remote-relay-expected',
         }),
       ]));
     } finally {

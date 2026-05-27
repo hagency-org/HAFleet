@@ -4,11 +4,29 @@ import { accessSync } from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 
-if (!process.env.PUSH_RELAY_MODE) {
+function normalizeWrapperValue(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim();
+}
+
+const requestedMode = normalizeWrapperValue(process.env.PUSH_RELAY_MODE).toLowerCase();
+if (!requestedMode) {
   process.env.PUSH_RELAY_MODE = 'remote';
+} else if (requestedMode !== 'remote') {
+  console.error(`[push-relay] FATAL: remote entrypoint requires PUSH_RELAY_MODE=remote, got ${process.env.PUSH_RELAY_MODE}`);
+  process.exit(1);
 }
 if (!process.env.PUSH_RELAY_INCLUDE_LEASE_FIELDS) {
   process.env.PUSH_RELAY_INCLUDE_LEASE_FIELDS = '1';
+}
+const remoteServerId = normalizeWrapperValue(process.env.AGENT_CHAT_SERVER);
+if (!remoteServerId) {
+  console.error('[push-relay] FATAL: remote entrypoint requires AGENT_CHAT_SERVER');
+  process.exit(1);
+}
+if (remoteServerId.toLowerCase() === 'local') {
+  console.error("[push-relay] FATAL: remote entrypoint requires AGENT_CHAT_SERVER to be a non-local server id, got 'local'");
+  process.exit(1);
 }
 
 const baseDir = path.dirname(fileURLToPath(import.meta.url));

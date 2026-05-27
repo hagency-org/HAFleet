@@ -97,6 +97,7 @@ for required in \
   "lib/push-relay-core.js" \
   "lib/mcp-server-core.js" \
   "lib/blocked-patterns.js" \
+  "lib/server-identity.js" \
   "lib/eventsource-mini.js"
 do
   [ -e "$PKG_DIR/$required" ] || fail "missing generated package file: $required"
@@ -224,7 +225,7 @@ fi
 echo "[OK] Generated standalone update guard fails clearly"
 
 echo "Checking generated remote wrapper resolution..."
-if ! AGENTCHAT_WRAPPER_SMOKE=1 node "$PKG_DIR/push-relay.js"; then
+if ! AGENTCHAT_WRAPPER_SMOKE=1 AGENT_CHAT_SERVER=remote-smoke node "$PKG_DIR/push-relay.js"; then
   fail "generated push-relay wrapper failed to resolve its core module"
 fi
 echo "[OK] Generated push-relay wrapper resolves package-local core"

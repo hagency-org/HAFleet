@@ -79,6 +79,7 @@ MANAGED_SPECS=(
   "lib/blocked-patterns.js:lib/blocked-patterns.js"
   "lib/eventsource-mini.js:lib/eventsource-mini.js"
   "lib/pane-activity.js:lib/pane-activity.js"
+  "lib/server-identity.js:lib/server-identity.js"
   "lib/push-relay-core.js:lib/push-relay-core.js"
   "lib/mcp-server-core.js:lib/mcp-server-core.js"
 )

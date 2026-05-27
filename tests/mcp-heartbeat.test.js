@@ -175,6 +175,21 @@ describe('MCP backend heartbeat', () => {
     }
   }, 10000);
 
+  test('defaults heartbeat server to hostname when AGENT_CHAT_SERVER is unset', async () => {
+    const calls = [];
+    const running = await listen(createBackendHandler(calls));
+    const mcp = spawnMcpServer(`http://127.0.0.1:${running.port}`, {
+      AGENT_CHAT_SERVER: undefined,
+    });
+
+    await waitFor(() => heartbeatCalls(calls).length > 0, { detail: 'hostname-default heartbeat' });
+
+    expect(heartbeatCalls(calls)[0].body.server).toBe(os.hostname());
+
+    await stopChild(mcp.child);
+    await closeServer(running.server);
+  }, 10000);
+
   test('writes pid file under explicit agent state dir when provided', async () => {
     const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-mcp-pid-'));
     tempDirs.add(tempRoot);

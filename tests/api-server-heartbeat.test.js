@@ -976,6 +976,53 @@ describe('server heartbeat api', () => {
     expect(agent.body.online).toBe(true);
   });
 
+  test('rejects non-local heartbeats that claim the local server identity', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
+      env: {
+        API_TOKEN: 'operator-token',
+        AGENT_CHAT_SERVER: 'my-local',
+      },
+    }));
+
+    const legacyLocal = await request(context.app)
+      .post('/api/servers/heartbeat')
+      .set('Authorization', 'Bearer operator-token')
+      .set('X-Forwarded-For', '203.0.113.10')
+      .send({
+        server: 'local',
+        instanceId: 'remote-claimed-local',
+        bootTs: 1000,
+        agents: [],
+        sessions: [],
+      });
+    const configuredLocal = await request(context.app)
+      .post('/api/servers/heartbeat')
+      .set('Authorization', 'Bearer operator-token')
+      .set('X-Forwarded-For', '203.0.113.10')
+      .send({
+        server: 'my-local',
+        instanceId: 'remote-claimed-configured-local',
+        bootTs: 1000,
+        agents: [],
+        sessions: [],
+      });
+
+    expect(legacyLocal.status).toBe(400);
+    expect(legacyLocal.body).toMatchObject({
+      error: 'remote server id must not be local',
+      server: 'local',
+    });
+    expect(configuredLocal.status).toBe(400);
+    expect(configuredLocal.body).toMatchObject({
+      error: 'remote server id must not be local',
+      server: 'my-local',
+    });
+
+    const servers = readJson(serversPath(context.runtimeDir));
+    expect(servers.local).toBeUndefined();
+    expect(servers['my-local']).toBeUndefined();
+  });
+
   test('custom local server rows do not make live local agents undeliverable', async () => {
     context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
       agents: {

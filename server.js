@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 import { promisify } from 'util';
 import { defaultAgentchatHomeDir, resolveAgentDocsPaths, resolveV1ManifestForAgent } from './lib/agent-home-v1.js';
 import { detectPaneBusyState } from './lib/pane-activity.js';
-import { assertRuntimeDir } from './lib/runtime-dir-guard.js';
+import { assertRuntimeDir, isLocalAgentServer as isLocalServerIdentity, resolveLocalServerId } from './lib/runtime-dir-guard.js';
 import { enforceStartupConfig } from './lib/startup-config.js';
 import { createDashboardMutationBoundary } from './lib/dashboard/request-boundary.js';
 import { installDashboardPageRoutes } from './lib/dashboard/page-routes.js';
@@ -102,10 +102,9 @@ mkdirSync(LOGS_ROOT, { recursive: true });
 mkdirSync(path.join(DATA_ROOT, 'agents'), { recursive: true });
 
 // ── Local server identity ───
+const LOCAL_SERVER_ID = resolveLocalServerId();
 function isLocalAgentServer(value) {
-  const raw = typeof value === 'string' ? value.trim() : '';
-  const localServerId = String(process.env.AGENT_CHAT_SERVER || 'local').trim() || 'local';
-  return !raw || raw === 'local' || raw === localServerId;
+  return isLocalServerIdentity(value, LOCAL_SERVER_ID);
 }
 
 // ── Server SSH config for remote tmux capture ────────────────────────

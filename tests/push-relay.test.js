@@ -316,6 +316,133 @@ describe('push relay dispatch', () => {
     expect(delivered).toEqual([]);
   });
 
+  test('local relay routes legacy local agent records to the current host', async () => {
+    const delivered = [];
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'alpha', server: 'local', tmux: 'alpha:0.0' }],
+      mcpSessions: [],
+    });
+    setPushToTmuxForTest((target, payload) => {
+      delivered.push({ target, payload });
+      return true;
+    });
+
+    expect(evaluateAgentRouting('alpha')).toMatchObject({ ok: true, reason: 'ok' });
+
+    await handleMessage(JSON.stringify({
+      id: 'msg_local_alias',
+      from: 'beta',
+      to: 'alpha',
+      type: 'inform',
+      priority: 'urgent',
+      summary: 'legacy local alias should still route',
+      mentions: [],
+    }));
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].target).toBe('alpha:0.0');
+  });
+
+  test('local relay ignores backend-sourced message SSE so dashboard queue owns local delivery', async () => {
+    const delivered = [];
+    const eventPosts = [];
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'alpha', server: 'local', tmux: 'alpha:0.0' }],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      fetch: async (url, options = {}) => {
+        if (String(url).endsWith('/api/delivery-events')) {
+          eventPosts.push(JSON.parse(options.body));
+        }
+        return { ok: true, text: async () => '' };
+      },
+    });
+    setPushToTmuxForTest((target, payload) => {
+      delivered.push({ target, payload });
+      return true;
+    });
+
+    await handleMessage(JSON.stringify({
+      id: 'msg_backend_sse',
+      from: 'operator',
+      to: 'alpha',
+      type: 'human',
+      priority: 'urgent',
+      source: 'matrix',
+      summary: 'backend queue should own this',
+      mentions: [],
+    }));
+
+    expect(delivered).toEqual([]);
+    expect(eventPosts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'relay.local_message_ignored',
+        messageId: 'msg_backend_sse',
+        agent: 'alpha',
+        reason: 'local-dashboard-queue-owns-delivery',
+      }),
+    ]));
+  });
+
+  test('local relay deduplicates duplicate held backfill notifications before drain', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    const delivered = [];
+    let paneText = 'active pane output';
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [{ name: 'alpha', server: 'local', tmux: 'alpha:0.0' }],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      tmuxBin: 'tmux',
+      execFileSync: (_cmd, args) => {
+        if (args[0] === 'capture-pane') return paneText;
+        if (args[0] === 'list-panes' && args.includes('#{pane_current_command}')) return 'codex\n';
+        if (args[0] === 'list-panes' && args.includes('#{pane_current_path}')) return '/tmp\n';
+        throw new Error(`unexpected exec ${args.join(' ')}`);
+      },
+      readFileSync: () => {
+        throw Object.assign(new Error('missing pid file'), { code: 'ENOENT' });
+      },
+      fetch: async () => ({ ok: true, text: async () => '' }),
+    });
+    setPushToTmuxForTest((target, payload) => {
+      delivered.push({ target, payload });
+      return true;
+    });
+
+    await scanBlockedStates();
+    const raw = JSON.stringify({
+      id: 'relay_unread_dup',
+      from: 'agent-chat',
+      to: 'alpha',
+      type: 'inform',
+      source: 'push-relay',
+      kind: 'unread_backfill',
+      summary: 'Unread inbox pending: 1 message(s)',
+      unreadCount: 1,
+      mentions: [],
+    });
+
+    await handleMessage(raw);
+    await handleMessage(raw);
+
+    expect(relayQueue.get('alpha')).toHaveLength(1);
+
+    paneText = '› ready for the next task';
+    vi.setSystemTime(new Date('2026-01-01T00:00:21Z'));
+    drainRelayQueue();
+    vi.setSystemTime(new Date('2026-01-01T00:00:42Z'));
+    drainRelayQueue();
+
+    expect(delivered).toHaveLength(1);
+    expect(relayQueue.get('alpha')).toBeUndefined();
+  });
+
   test('delivers one group message to each mentioned local recipient', async () => {
     const delivered = [];
     seedRelayState({
