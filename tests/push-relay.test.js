@@ -237,6 +237,61 @@ describe('push relay dispatch', () => {
     ]);
   });
 
+  test('fails exact pane delivery without falling back to tmux session', async () => {
+    const sendCalls = [];
+    const eventPosts = [];
+    seedRelayState({
+      localAgentNames: ['alpha'],
+      agents: [
+        { name: 'alpha', server: null, tmux: 'alpha:0.0' },
+        { name: 'beta', server: null, tmux: 'beta:0.0' },
+      ],
+      mcpSessions: [],
+    });
+    setPushRelayTestHooks({
+      tmuxBin: 'tmux',
+      execFileSync: (_cmd, args) => {
+        if (args[0] !== 'send-keys') throw new Error(`unexpected tmux ${args.join(' ')}`);
+        sendCalls.push([...args]);
+        if (args.includes('-l') && args.includes('alpha:0.0')) {
+          throw new Error('exact pane missing');
+        }
+        throw new Error(`unexpected fallback target ${args.join(' ')}`);
+      },
+      fetch: async (url, options = {}) => {
+        if (String(url).endsWith('/api/delivery-events')) {
+          eventPosts.push(JSON.parse(options.body));
+        }
+        return { ok: true, text: async () => '' };
+      },
+    });
+
+    await handleMessage(JSON.stringify({
+      id: 'msg_exact_pane_missing',
+      from: 'beta',
+      to: 'alpha',
+      type: 'request',
+      priority: 'urgent',
+      summary: 'Do not fallback to session',
+      mentions: [],
+    }));
+
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls.map((args) => args[args.indexOf('-t') + 1])).toEqual(['alpha:0.0']);
+    expect(sendCalls.some((args) => args[args.indexOf('-t') + 1] === 'alpha')).toBe(false);
+    expect(eventPosts).toEqual([
+      expect.objectContaining({
+        type: 'relay.delivery_failed',
+        messageId: 'msg_exact_pane_missing',
+        agent: 'alpha',
+        target: 'alpha:0.0',
+        reason: 'tmux-inject-failed',
+      }),
+    ]);
+    expect(eventPosts.some((event) => event.type === 'relay.delivered')).toBe(false);
+    expect(eventPosts.some((event) => event.context?.fallbackTarget)).toBe(false);
+  });
+
   test('skips delivery when the local pane is missing', async () => {
     const delivered = [];
     seedRelayState({

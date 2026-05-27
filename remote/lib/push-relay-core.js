@@ -690,7 +690,6 @@ function pushToTmux(target, payload) {
     sendStep('submit-1', ['send-keys', '-t', resolvedTarget, 'C-m']);
     sendStep('submit-2', ['send-keys', '-t', resolvedTarget, 'C-m'], false);
   };
-  const sessionFallback = String(target || '').split(':', 1)[0];
   try {
     sendSequence(target);
     return { ok: true, partial: false, stage: 'complete' };
@@ -699,21 +698,6 @@ function pushToTmux(target, payload) {
       const preview = String(safePayload || '').replace(/\s+/g, ' ').slice(0, 120);
       console.error(`[push-relay] tmux inject partial for ${target} at ${e.deliveryStage}: ${e.message} payload="${preview}"`);
       return { ok: false, partial: true, stage: e.deliveryStage || 'unknown' };
-    }
-    if (sessionFallback && sessionFallback !== target) {
-      try {
-        sendSequence(sessionFallback);
-        console.warn(`[push-relay] tmux inject fallback ${target} -> ${sessionFallback}`);
-        return { ok: true, partial: false, stage: 'complete', fallbackTarget: sessionFallback };
-      } catch (fallbackErr) {
-        const preview = String(safePayload || '').replace(/\s+/g, ' ').slice(0, 120);
-        if (fallbackErr?.deliveryPartial) {
-          console.error(`[push-relay] tmux inject partial for fallback ${sessionFallback} at ${fallbackErr.deliveryStage}: ${fallbackErr.message} payload="${preview}"`);
-          return { ok: false, partial: true, stage: fallbackErr.deliveryStage || 'unknown', fallbackTarget: sessionFallback };
-        }
-        console.error(`[push-relay] tmux inject failed for ${target} (fallback ${sessionFallback} failed: ${fallbackErr.message}) payload="${preview}"`);
-        return { ok: false, partial: false, stage: fallbackErr?.deliveryStage || e?.deliveryStage || 'unknown' };
-      }
     }
     const preview = String(safePayload || '').replace(/\s+/g, ' ').slice(0, 120);
     console.error(`[push-relay] tmux inject failed for ${target}: ${e.message} payload="${preview}"`);
