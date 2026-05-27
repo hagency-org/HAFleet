@@ -25,7 +25,7 @@ Install the full local Agent Chat stack on Linux:
   - agent-chat-v2, agent-chat, and agent-chat-push-relay systemd units
   - CLI symlinks in ~/.local/bin
   - Claude/Codex skill links
-  - Claude Code MCP user config when the claude CLI is available
+  - Claude Code and Codex MCP user config when the CLIs are available
 
 Options:
   --dry-run              Print actions without changing files or services
@@ -34,7 +34,7 @@ Options:
   --bin-dir PATH         Link CLI commands into PATH instead of ~/.local/bin
   --systemd-dir PATH     Write service units into PATH instead of /etc/systemd/system
   --service-user USER    Render systemd units for USER
-  --skip-mcp            Do not configure Claude Code MCP
+  --skip-mcp            Do not configure Claude Code or Codex MCP
   --skip-npm            Do not run npm install
   --skip-prereq-check   Do not check host prerequisites
   --with-bridge         Also install/enable bridge-matrix.service
@@ -295,6 +295,30 @@ configure_claude_mcp() {
     -- agent-chat node "$INSTALL_DIR/mcp-server.js"
 }
 
+configure_codex_mcp() {
+  if [ "$SKIP_MCP" = true ]; then
+    log "Skipping Codex MCP configuration"
+    return 0
+  fi
+  if ! command -v codex >/dev/null 2>&1; then
+    log "Codex CLI not found; skipping MCP configuration."
+    log "Run: codex mcp add agent-chat --env AGENT_CHAT_API=http://127.0.0.1:8090 --env API_TOKEN=<token> --env AGENTCHAT_HOMEDIR=$HOME/.agentchat -- node $INSTALL_DIR/mcp-server.js"
+    return 0
+  fi
+  local api_token api_base agentchat_home
+  api_token="$(read_env_value API_TOKEN "$ENV_FILE")"
+  api_base="$(read_env_value AGENT_CHAT_API "$ENV_FILE")"
+  agentchat_home="${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}"
+  [ -n "$api_base" ] || api_base="http://127.0.0.1:8090"
+  run codex mcp remove agent-chat >/dev/null 2>&1 || true
+  run codex mcp add agent-chat \
+    --env "AGENT_CHAT_API=$api_base" \
+    --env "API_TOKEN=$api_token" \
+    --env "AGENTCHAT_HOMEDIR=$agentchat_home" \
+    --env "AGENT_CHAT_MCP_SERVER_NAME=agent-chat" \
+    -- node "$INSTALL_DIR/mcp-server.js"
+}
+
 install_services() {
   run mkdir -p "$SYSTEMD_DIR"
   local services=(
@@ -362,6 +386,7 @@ main() {
   install_skills
   install_services
   configure_claude_mcp
+  configure_codex_mcp
   verify_installation
   log "Installation complete."
 }

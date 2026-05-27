@@ -61,7 +61,7 @@ cd agent-chat
 ./install-full.sh
 ```
 
-安装脚本会检查依赖、执行 `npm install`、在缺少 `.env` 时从 `.env.example` 创建配置、提示输入 `API_TOKEN`、安装 systemd unit、把 CLI 命令链接到 `~/.local/bin`、安装本地 skill，并在检测到 `claude` CLI 时配置 Claude Code MCP。
+安装脚本会检查依赖、执行 `npm install`、在缺少 `.env` 时从 `.env.example` 创建配置、提示输入 `API_TOKEN`、安装 systemd unit、把 CLI 命令链接到 `~/.local/bin`、安装本地 skill，并在检测到对应 CLI 时配置 Claude Code 和 Codex MCP。
 
 检查服务：
 
@@ -113,7 +113,7 @@ agentchat ls
 | `--bin-dir PATH` | 将 CLI 命令链接到自定义目录 |
 | `--systemd-dir PATH` | 将 service 文件渲染到自定义目录 |
 | `--service-user USER` | 为指定用户渲染 systemd unit |
-| `--skip-mcp` | 跳过 Claude Code MCP 配置 |
+| `--skip-mcp` | 跳过 Claude Code 和 Codex MCP 配置 |
 | `--skip-npm` | 跳过 `npm install` |
 | `--skip-prereq-check` | 跳过主机前置条件检查 |
 | `--with-bridge` | 同时安装并启动 `bridge-matrix.service` |
@@ -139,7 +139,7 @@ Full installer 会把 `bin/` 下的可执行辅助命令链接到配置的 `--bi
 ./uninstall.sh
 ```
 
-卸载脚本会停止并移除 systemd unit，移除指向当前 checkout 的 CLI symlink，移除 Agent Chat skill 链接，尽可能移除 Claude Code MCP 条目，并删除 `/etc/sudoers.d/agentchat-autodeploy`。
+卸载脚本会停止并移除 systemd unit，移除指向当前 checkout 的 CLI symlink，移除 Agent Chat skill 链接，尽可能移除 Claude Code 和 Codex MCP 条目，并删除 `/etc/sudoers.d/agentchat-autodeploy`。
 
 默认保留用户数据：
 

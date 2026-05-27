@@ -75,18 +75,20 @@ describe('local install and uninstall scripts', () => {
     }
   });
 
-  test('install-full configures Claude Code MCP when the claude CLI is available', () => {
+  test('install-full configures Claude Code and Codex MCP when the CLIs are available', () => {
     const tmp = makeTempRoot('agent-chat-install-mcp-');
     try {
       const home = path.join(tmp, 'home');
       const systemdDir = path.join(tmp, 'systemd');
       const binDir = path.join(tmp, 'bin');
       const fakeBin = path.join(tmp, 'fake-bin');
-      const logPath = path.join(tmp, 'claude.log');
+      const claudeLogPath = path.join(tmp, 'claude.log');
+      const codexLogPath = path.join(tmp, 'codex.log');
       mkdirSync(home, { recursive: true });
       mkdirSync(systemdDir, { recursive: true });
       mkdirSync(fakeBin, { recursive: true });
-      writeFileSync(path.join(fakeBin, 'claude'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(logPath)}\n`, { mode: 0o755 });
+      writeFileSync(path.join(fakeBin, 'claude'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(claudeLogPath)}\n`, { mode: 0o755 });
+      writeFileSync(path.join(fakeBin, 'codex'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(codexLogPath)}\n`, { mode: 0o755 });
 
       runScript('install-full.sh', [
         '--skip-prereq-check',
@@ -100,12 +102,20 @@ describe('local install and uninstall scripts', () => {
         path: `${fakeBin}:${process.env.PATH}`,
       });
 
-      const claudeArgs = readFileSync(logPath, 'utf-8');
+      const claudeArgs = readFileSync(claudeLogPath, 'utf-8');
       expect(claudeArgs).toContain('mcp add -s user');
       expect(claudeArgs).toContain('AGENT_CHAT_API=http://127.0.0.1:8090');
       expect(claudeArgs).toContain('API_TOKEN=test-install-token');
       expect(claudeArgs).toContain(`AGENTCHAT_HOMEDIR=${home}/.agentchat`);
       expect(claudeArgs).toContain(`agent-chat node ${ROOT}/mcp-server.js`);
+
+      const codexArgs = readFileSync(codexLogPath, 'utf-8');
+      expect(codexArgs).toContain('mcp remove agent-chat');
+      expect(codexArgs).toContain('mcp add agent-chat');
+      expect(codexArgs).toContain('AGENT_CHAT_API=http://127.0.0.1:8090');
+      expect(codexArgs).toContain('API_TOKEN=test-install-token');
+      expect(codexArgs).toContain(`AGENTCHAT_HOMEDIR=${home}/.agentchat`);
+      expect(codexArgs).toContain(`node ${ROOT}/mcp-server.js`);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

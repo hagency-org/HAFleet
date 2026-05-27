@@ -12,6 +12,21 @@ describe('runtime parity regressions', () => {
     expect(source).toContain('const AGENT_SERVER = resolveLocalServerId();');
   });
 
+  test('agent-up launches through wrappers and provides complete Codex MCP config', () => {
+    for (const scriptPath of ['bin/agent-up', 'remote/bin/agent-up']) {
+      const source = readFileSync(path.resolve(scriptPath), 'utf-8');
+      expect(source).toContain('write_launch_script()');
+      expect(source).toContain('launch-claude.sh');
+      expect(source).toContain('launch-codex.sh');
+      expect(source).toContain('mcp_servers.${CODEX_MCP_NAME}.command');
+      expect(source).toContain('mcp_servers.${CODEX_MCP_NAME}.args');
+      expect(source).toContain('codex_mcp_env API_TOKEN "${API_TOKEN:-}"');
+      expect(source).toContain('codex_mcp_env AGENTCHAT_HOMEDIR "${AGENTCHAT_HOMEDIR:-}"');
+      expect(source).toContain('tmux send-keys -t "$TMUX_PANE_TARGET" "$(shell_quote "$CODEX_LAUNCH_SCRIPT")" Enter');
+      expect(source).not.toContain('Launch cmd:');
+    }
+  });
+
   test('deployment and upstream helpers avoid machine-specific hardcoded home paths', async () => {
     const autodeploySource = readFileSync(path.resolve('scripts/agentchat-stable-autodeploy.sh'), 'utf-8');
     const autostartSource = readFileSync(path.resolve('bin/agentchat-autostart.sh'), 'utf-8');

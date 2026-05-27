@@ -26,7 +26,7 @@ Options:
   --bin-dir PATH            Remove CLI links from PATH instead of ~/.local/bin
   --systemd-dir PATH        Remove service units from PATH instead of /etc/systemd/system
   --sudoers-dir PATH        Remove sudoers rule from PATH instead of /etc/sudoers.d
-  --skip-mcp               Do not call the Claude Code MCP remover
+  --skip-mcp               Do not call the Claude Code or Codex MCP remover
   --purge-agentchat-home   Also remove ~/.agentchat after separate confirmation
   --purge-data             Also remove INSTALL_DIR/data after separate confirmation
   -h, --help               Show this help
@@ -215,6 +215,18 @@ remove_claude_mcp() {
   fi
 }
 
+remove_codex_mcp() {
+  if [ "$SKIP_MCP" = true ]; then
+    log "Skipping Codex MCP removal"
+    return 0
+  fi
+  if command -v codex >/dev/null 2>&1; then
+    run codex mcp remove agent-chat || true
+  else
+    log "Codex CLI not found; skipping MCP removal."
+  fi
+}
+
 purge_optional_data() {
   if [ "$PURGE_AGENTCHAT_HOME" = true ]; then
     if confirm "Remove user data directory $HOME/.agentchat?"; then
@@ -246,6 +258,7 @@ main() {
   remove_skills
   remove_sudoers
   remove_claude_mcp
+  remove_codex_mcp
   purge_optional_data
   log "Uninstall complete. .env, data, and ~/.agentchat are preserved unless purge flags were confirmed."
 }

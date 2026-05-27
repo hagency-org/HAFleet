@@ -61,7 +61,7 @@ cd agent-chat
 ./install-full.sh
 ```
 
-The installer checks prerequisites, runs `npm install`, creates `.env` from `.env.example` when needed, prompts for `API_TOKEN`, installs systemd units, links CLI commands into `~/.local/bin`, installs local skills, and configures Claude Code MCP when the `claude` CLI is available.
+The installer checks prerequisites, runs `npm install`, creates `.env` from `.env.example` when needed, prompts for `API_TOKEN`, installs systemd units, links CLI commands into `~/.local/bin`, installs local skills, and configures Claude Code and Codex MCP when the CLIs are available.
 
 Verify services:
 
@@ -113,7 +113,7 @@ Useful options:
 | `--bin-dir PATH` | Link CLI commands into a custom directory |
 | `--systemd-dir PATH` | Render service files into a custom directory |
 | `--service-user USER` | Render systemd units for a specific user |
-| `--skip-mcp` | Skip Claude Code MCP configuration |
+| `--skip-mcp` | Skip Claude Code and Codex MCP configuration |
 | `--skip-npm` | Skip `npm install` |
 | `--skip-prereq-check` | Skip host prerequisite checks |
 | `--with-bridge` | Also install and start `bridge-matrix.service` |
@@ -139,7 +139,7 @@ Run:
 ./uninstall.sh
 ```
 
-The uninstaller stops and removes systemd units, removes CLI symlinks that point into this checkout, removes Agent Chat skill links, removes the Claude Code MCP entry when possible, and removes `/etc/sudoers.d/agentchat-autodeploy`.
+The uninstaller stops and removes systemd units, removes CLI symlinks that point into this checkout, removes Agent Chat skill links, removes Claude Code and Codex MCP entries when possible, and removes `/etc/sudoers.d/agentchat-autodeploy`.
 
 By default it preserves user data:
 
