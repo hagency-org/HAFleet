@@ -6739,6 +6739,7 @@ const catchupCursor = new Map();
 const catchupPushCursor = new Map();
 const pushNotifySkipLog = new Map();
 const SYSTEM_CATCHUP_SCHEMA_KIND = 'system_catchup';
+const SYSTEM_TASK_ASSIGNED_SCHEMA_KIND = 'system_task_assigned';
 
 function isSystemCatchupMessage(msg) {
   return normalizeOptionalText(msg?.schema?.kind, 128) === SYSTEM_CATCHUP_SCHEMA_KIND;
@@ -9115,10 +9116,47 @@ function respondTaskStoreError(res, error, fallbackMessage) {
   return res.status(500).json({ error: fallbackMessage });
 }
 
+function notifyTaskAssignee(task) {
+  if (!task || !task.assignee) return;
+  if (!isAgentRecord(agents[task.assignee])) return;
+  const title = (task.title || '').trim() || '(untitled)';
+  const desc = (task.description || '').trim();
+  const summary = `New task assigned: ${title} (${task.id}, ${task.priority})`;
+  const full = [
+    `You have been assigned a new task.`,
+    `id: ${task.id}`,
+    `title: ${title}`,
+    `priority: ${task.priority}`,
+    `status: ${task.status}`,
+    desc ? `description: ${desc}` : 'description: (none)',
+  ].join('\n');
+  try {
+    dispatchInternalDirectMessage({
+      from: 'system',
+      to: task.assignee,
+      type: 'inform',
+      priority: 'normal',
+      summary,
+      full,
+      schema: {
+        kind: SYSTEM_TASK_ASSIGNED_SCHEMA_KIND,
+        version: 1,
+        payload: { taskId: task.id, priority: task.priority, title },
+      },
+    });
+  } catch (e) {
+    // Best-effort notification: task creation is the primary contract and must
+    // succeed even if push-relay/queue isn't healthy. Surface for ops without
+    // failing the request.
+    console.warn(`[task] failed to notify assignee ${task.assignee} of ${task.id}: ${e.message}`);
+  }
+}
+
 app.post('/api/tasks', requireBearer, (req, res) => {
   try {
     const task = taskStore.createTask(req.body || {});
     broadcastSSE('task_created', task);
+    notifyTaskAssignee(task);
     return res.json({ ok: true, task });
   } catch (error) {
     return respondTaskStoreError(res, error, 'failed to create task');
