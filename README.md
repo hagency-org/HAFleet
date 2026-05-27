@@ -120,7 +120,7 @@ Useful options:
 
 Legacy entrypoints `install.sh` and `install-v2.sh` are deprecated wrappers that delegate to `install-full.sh`.
 
-### Full Local vs Remote Relay
+### Installation Profiles
 
 Agent Chat has two installation profiles:
 
@@ -129,17 +129,7 @@ Agent Chat has two installation profiles:
 | Full local stack | repository root, `./install-full.sh` | Backend, dashboard, local push relay, optional Matrix bridge, full CLI links, local skills, MCP config | Full `bin/agentchat`, including `up-v1`, `project`, `graph`, `audit`, `benchmark`, `sync-skills`, and local service commands | This machine owns the backend, dashboard, local agents, or Matrix bridge |
 | Remote relay | `remote/install-remote.sh` or generated `remote-dist` | Remote push relay, remote helper CLI, MCP config, optional git-checkout autodeploy | Minimal remote commands for relay operation, remote agent launch, status, send, update, service, verify, and maintenance | This machine only runs agents that connect back to an existing backend |
 
-For a full local install, make sure the linked CLI directory is on the shell path:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-which agentchat
-agentchat --help
-```
-
-If `which agentchat` points at `remote/bin/agentchat`, the shell is still using the remote profile. Remove the old `remote/bin` path entry and use the `~/.local/bin/agentchat` link created by `install-full.sh`.
-
-Remote relay installs are intentionally smaller than full installs. A remote CLI that does not expose `up-v1`, `project`, `graph`, or `audit` is expected; those commands belong to the full local stack.
+The full installer links every executable helper from `bin/` into the configured `--bin-dir` path. The remote relay installer links the remote helper set only. Remote relay installs are intentionally smaller than full installs, so commands such as `up-v1`, `project`, `graph`, and `audit` are available from the full local stack, not from standalone remote relay packages.
 
 ## Uninstallation
 
@@ -170,9 +160,7 @@ For automation:
 ./uninstall.sh --yes
 ```
 
-The full uninstaller only removes links and service units that point into the selected checkout. It preserves `.env`, `data/`, and `~/.agentchat` unless purge flags are provided.
-
-Remote relay installs do not use the full uninstaller unless they were installed from a full checkout. To retire an old remote profile, remove any shell path entry that points at `remote/bin`, remove CLI symlinks that resolve into the old `remote/bin`, and stop/remove the old relay unit only after confirming it is not the active production unit.
+The full uninstaller only removes links and service units that point into the selected checkout. It preserves `.env`, `data/`, and `~/.agentchat` unless purge flags are provided. Remote relay deployments are operated as a separate profile; see `remote/README.md` for remote package setup and operations.
 
 ## Matrix Homeserver and Bridge
 
