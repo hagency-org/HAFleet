@@ -288,6 +288,7 @@ const QUEUE_DROPPED_FILE = path.join(LOGS_ROOT, 'queue-dropped.jsonl');
 const queue = new Map();
 let queueIdCounter = 0;
 let queueTickRunning = false;
+const QUEUE_DELIVERY_TERMINAL_STATES = new Set(['delivered', 'dropped', 'partial']);
 
 function cloneJsonPlain(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -310,6 +311,91 @@ function restoreQueueState(snapshot) {
   for (const [target, entries] of snapshot.buckets.entries()) {
     queue.set(target, entries.map((entry) => cloneJsonPlain(entry)));
   }
+}
+
+function resetQueueEntryDeliveryState(entry) {
+  if (!entry || typeof entry !== 'object') return entry;
+  delete entry.deliveryState;
+  delete entry.deliveringAt;
+  delete entry.deliveredAt;
+  delete entry.droppedAt;
+  delete entry.partialAt;
+  return entry;
+}
+
+function markQueueEntryDelivering(entry, now = Date.now()) {
+  if (!entry || typeof entry !== 'object') return entry;
+  entry.deliveryState = 'delivering';
+  entry.deliveringAt = now;
+  entry.deliveryAttempt = Math.max(0, Number(entry.deliveryAttempt) || 0) + 1;
+  return entry;
+}
+
+function markQueueEntryTerminal(entry, state, now = Date.now()) {
+  if (!entry || typeof entry !== 'object') return entry;
+  entry.deliveryState = state;
+  if (state === 'delivered') entry.deliveredAt = now;
+  else if (state === 'partial') entry.partialAt = now;
+  else entry.droppedAt = now;
+  return entry;
+}
+
+function removeQueueEntry(target, entry) {
+  const entries = queue.get(target);
+  if (!Array.isArray(entries)) return false;
+  const idx = entries.findIndex((candidate) => candidate === entry || candidate?.id === entry?.id);
+  if (idx === -1) return false;
+  entries.splice(idx, 1);
+  if (entries.length === 0) queue.delete(target);
+  return true;
+}
+
+function claimQueueEntryForDelivery(entry, target, pathName, context = {}) {
+  const rollback = snapshotQueueState();
+  markQueueEntryDelivering(entry);
+  if (!saveQueue()) {
+    restoreQueueState(rollback);
+    appendQueuePersistFailedEvent(entry, 'queue-dequeue-save-failed', {
+      path: pathName,
+      target,
+      ...context,
+    });
+    broadcastQueue();
+    return false;
+  }
+  broadcastQueue();
+  appendDeliveryEvent({
+    type: 'queue.dequeued',
+    ...queueEntryDeliveryEventFields(entry),
+    path: pathName,
+    context,
+  });
+  return true;
+}
+
+function persistQueueEntryQueued(entry, reason, context = {}) {
+  resetQueueEntryDeliveryState(entry);
+  if (!saveQueue()) appendQueuePersistFailedEvent(entry, reason, context);
+  broadcastQueue();
+}
+
+function finalizeQueueEntryAfterSideEffect(entry, target, state, reason, context = {}) {
+  const now = Date.now();
+  const rollback = snapshotQueueState();
+  markQueueEntryTerminal(entry, state, now);
+  const terminalPersisted = saveQueue();
+  if (!terminalPersisted) {
+    restoreQueueState(rollback);
+    appendQueuePersistFailedEvent(entry, reason, context);
+    broadcastQueue();
+    return { ok: false, reason: 'queue-persist-failed' };
+  }
+  removeQueueEntry(target, entry);
+  if (terminalPersisted && !saveQueue()) {
+    appendQueuePersistFailedEvent(entry, `${reason}-remove-failed`, context);
+  }
+  broadcastQueue();
+  return { ok: true };
 }
 
 function isBackendNotificationEntry(entry) {
@@ -728,20 +814,36 @@ try {
     throw new Error('invalid queue file shape');
   }
   queueIdCounter = Number.isFinite(Number(data.idCounter)) ? Number(data.idCounter) : 0;
+  let recoveredDelivering = 0;
+  let discardedTerminal = 0;
   for (const entry of data.items) {
     if (!entry || typeof entry !== 'object' || !entry.to) continue;
+    if (QUEUE_DELIVERY_TERMINAL_STATES.has(entry.deliveryState)) {
+      discardedTerminal++;
+      continue;
+    }
+    if (entry.deliveryState === 'delivering') {
+      resetQueueEntryDeliveryState(entry);
+      recoveredDelivering++;
+    }
     if (!queue.has(entry.to)) queue.set(entry.to, []);
     queue.get(entry.to).push(entry);
   }
   const compacted = compactReminderQueue();
   const normalized = normalizeReminderQueue();
-  if (compacted.changed || normalized) {
+  if (compacted.changed || normalized || recoveredDelivering > 0 || discardedTerminal > 0) {
     saveQueue();
     if (compacted.changed) {
       console.log(`Compacted reminder queue entries on load: merged ${compacted.mergedEntries}`);
     }
     if (normalized) {
       console.log('Normalized reminder queue payloads on load');
+    }
+    if (recoveredDelivering > 0) {
+      console.log(`Recovered ${recoveredDelivering} in-flight queued message(s) on load`);
+    }
+    if (discardedTerminal > 0) {
+      console.log(`Discarded ${discardedTerminal} terminal queued message marker(s) on load`);
     }
   }
   console.log(`Restored ${data.items?.length || 0} queued messages from disk`);
@@ -819,6 +921,10 @@ app.delete('/api/queue/:id', (req, res) => {
     if (idx !== -1) {
       const rollback = snapshotQueueState();
       const [entry] = entries.splice(idx, 1);
+      if (entry.deliveryState) {
+        entries.splice(idx, 0, entry);
+        return res.status(409).json({ ok: false, error: 'delivery in progress', id });
+      }
       if (entries.length === 0) queue.delete(target);
       if (!saveQueue()) {
         restoreQueueState(rollback);
@@ -844,47 +950,57 @@ app.post('/api/queue/:id/send', async (req, res) => {
   for (const [target, entries] of queue) {
     const idx = entries.findIndex(e => e.id === id);
     if (idx !== -1) {
-      const rollback = snapshotQueueState();
-      const entry = entries.splice(idx, 1)[0];
-      if (entries.length === 0) queue.delete(target);
-      if (!saveQueue()) {
-        restoreQueueState(rollback);
-        appendQueuePersistFailedEvent(entry, 'queue-dequeue-save-failed', { path: 'manual', target });
-        broadcastQueue();
-        return res.status(503).json({ ok: false, delivered: id, requeued: true, reason: 'queue-persist-failed' });
+      const entry = entries[idx];
+      if (entry.deliveryState || delivering.has(target)) {
+        return res.status(409).json({ ok: false, delivered: id, requeued: true, reason: 'already-delivering' });
       }
-      broadcastQueue();
-      appendDeliveryEvent({
-        type: 'queue.dequeued',
-        ...queueEntryDeliveryEventFields(entry),
-        path: 'manual',
-      });
-      if (await isStaleNotificationEntry(entry)) {
-        archiveDroppedQueueEntries([entry], 'stale-notification-manual-send', target);
-        return res.json({ ok: true, dropped: id, reason: 'stale-notification' });
-      }
-      const result = await deliverMessage(entry);
-      if (!deliveryResultOk(result)) {
-        if (deliveryResultPartial(result)) {
-          archiveDroppedQueueEntries([entry], 'partial-delivery-manual-send', target);
-          return res.status(409).json({
-            ok: false,
-            delivered: id,
-            requeued: false,
-            reason: 'partial-delivery',
-            stage: result.stage || 'unknown',
-          });
+      delivering.add(target);
+      try {
+        if (!claimQueueEntryForDelivery(entry, target, 'manual')) {
+          return res.status(503).json({ ok: false, delivered: id, requeued: true, reason: 'queue-persist-failed' });
         }
-        // Keep behavior consistent with poll loop: failed delivery is retriable, not lost.
-        if (!queue.has(target)) queue.set(target, []);
-        queue.get(target).unshift(entry);
-        if (!saveQueue()) {
-          appendQueuePersistFailedEvent(entry, 'queue-requeue-save-failed', { path: 'manual', target });
+        if (await isStaleNotificationEntry(entry)) {
+          const finalized = finalizeQueueEntryAfterSideEffect(entry, target, 'dropped', 'queue-stale-drop-save-failed', { path: 'manual', target });
+          if (!finalized.ok) {
+            return res.status(503).json({ ok: false, delivered: id, requeued: true, reason: finalized.reason });
+          }
+          archiveDroppedQueueEntries([entry], 'stale-notification-manual-send', target);
+          return res.json({ ok: true, dropped: id, reason: 'stale-notification' });
         }
-        broadcastQueue();
-        return res.status(503).json({ ok: false, delivered: id, requeued: true, reason: 'deliver-failed' });
+        const result = await deliverMessage(entry);
+        if (!deliveryResultOk(result)) {
+          if (deliveryResultPartial(result)) {
+            const finalized = finalizeQueueEntryAfterSideEffect(entry, target, 'partial', 'queue-partial-save-failed', { path: 'manual', target, stage: result.stage || 'unknown' });
+            if (!finalized.ok) {
+              return res.status(503).json({
+                ok: false,
+                delivered: id,
+                requeued: false,
+                reason: finalized.reason,
+                stage: result.stage || 'unknown',
+              });
+            }
+            archiveDroppedQueueEntries([entry], 'partial-delivery-manual-send', target);
+            return res.status(409).json({
+              ok: false,
+              delivered: id,
+              requeued: false,
+              reason: 'partial-delivery',
+              stage: result.stage || 'unknown',
+            });
+          }
+          // Keep behavior consistent with poll loop: failed delivery is retriable, not lost.
+          persistQueueEntryQueued(entry, 'queue-requeue-save-failed', { path: 'manual', target });
+          return res.status(503).json({ ok: false, delivered: id, requeued: true, reason: 'deliver-failed' });
+        }
+        const finalized = finalizeQueueEntryAfterSideEffect(entry, target, 'delivered', 'queue-delivered-save-failed', { path: 'manual', target });
+        if (!finalized.ok) {
+          return res.status(503).json({ ok: false, delivered: id, requeued: true, reason: finalized.reason });
+        }
+        return res.json({ ok: true, delivered: id });
+      } finally {
+        delivering.delete(target);
       }
-      return res.json({ ok: true, delivered: id });
     }
   }
   res.status(404).json({ error: 'not found' });
@@ -3324,39 +3440,36 @@ async function processQueueTick() {
 
       // Deliver first message
       delivering.add(target);
-      const rollback = snapshotQueueState();
-      const entry = entries.shift();
-      if (entries.length === 0) queue.delete(target);
-      if (!saveQueue()) {
-        restoreQueueState(rollback);
-        appendQueuePersistFailedEvent(entry, 'queue-dequeue-save-failed', {
-          path: 'poll',
-          target,
-          targetObservation,
-          idleMs,
-          bypassIdleGate,
-        });
-        broadcastQueue();
+      const entry = entries[0];
+      if (!entry || entry.deliveryState === 'delivering') {
         delivering.delete(target);
         continue;
       }
-      broadcastQueue();
-      appendDeliveryEvent({
-        type: 'queue.dequeued',
-        ...queueEntryDeliveryEventFields(entry),
-        path: 'poll',
-        context: {
-          targetObservation,
-          idleMs,
-          bypassIdleGate,
-        },
-      });
+      if (!claimQueueEntryForDelivery(entry, target, 'poll', {
+        targetObservation,
+        idleMs,
+        bypassIdleGate,
+      })) {
+        delivering.delete(target);
+        continue;
+      }
 
       const stale = unreadSnapshot && isBackendNotificationEntry(entry)
         ? isStaleNotificationBySnapshot(entry, unreadSnapshot)
         : await isStaleNotificationEntry(entry);
       if (stale) {
         console.log(`[queue] Dropped stale notification ${entry.id} for ${target}`);
+        const finalized = finalizeQueueEntryAfterSideEffect(entry, target, 'dropped', 'queue-stale-drop-save-failed', {
+          path: 'poll',
+          target,
+          targetObservation,
+          idleMs,
+          bypassIdleGate,
+        });
+        if (!finalized.ok) {
+          delivering.delete(target);
+          continue;
+        }
         archiveDroppedQueueEntries([entry], 'stale-notification-on-deliver', target);
         delivering.delete(target);
         continue;
@@ -3365,17 +3478,22 @@ async function processQueueTick() {
       const result = await deliverMessage(entry);
       if (!deliveryResultOk(result) && entry) {
         if (deliveryResultPartial(result)) {
+          const finalized = finalizeQueueEntryAfterSideEffect(entry, target, 'partial', 'queue-partial-save-failed', {
+            path: 'poll',
+            target,
+            stage: result.stage || 'unknown',
+          });
+          if (!finalized.ok) {
+            delivering.delete(target);
+            continue;
+          }
           archiveDroppedQueueEntries([entry], `partial-delivery-${result.stage || 'unknown'}`, target);
           trackRuntimeTimeout(() => delivering.delete(target), IDLE_THRESHOLD + 2000);
           continue;
         }
-        // Put it back at front
-        if (!queue.has(target)) queue.set(target, []);
-        queue.get(target).unshift(entry);
-        if (!saveQueue()) {
-          appendQueuePersistFailedEvent(entry, 'queue-requeue-save-failed', { path: 'poll', target });
-        }
-        broadcastQueue();
+        persistQueueEntryQueued(entry, 'queue-requeue-save-failed', { path: 'poll', target });
+      } else if (entry) {
+        finalizeQueueEntryAfterSideEffect(entry, target, 'delivered', 'queue-delivered-save-failed', { path: 'poll', target });
       }
       // Wait a bit before allowing next delivery to same target
       trackRuntimeTimeout(() => delivering.delete(target), IDLE_THRESHOLD + 2000);

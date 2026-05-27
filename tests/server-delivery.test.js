@@ -374,6 +374,174 @@ describe('server delivery path', () => {
     expect(events.some((event) => event.type === 'tmux.delivered')).toBe(false);
   });
 
+  test('manual send persists delivering before tmux and removes after success', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    let persistedStateDuringPayload = null;
+    const execCalls = [];
+    serverModule.setServerTestHooks({
+      execFileAsync: async (cmd, args) => {
+        execCalls.push([cmd, ...args]);
+        if (args[0] === 'send-keys' && args[1] === '-l') {
+          const queueFile = JSON.parse(readFileSync(path.join(runtimeDir, 'logs', 'queue.json'), 'utf-8'));
+          persistedStateDuringPayload = queueFile.items[0]?.deliveryState || null;
+        }
+        return { stdout: '' };
+      },
+      backendFetch: async () => ({ ok: true, text: async () => '', json: async () => ({ ok: true }) }),
+    });
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'operator',
+      to: 'alpha:0.0',
+      payload: 'deliver durably',
+    });
+    expect(queued.status).toBe(200);
+
+    const sent = await request(serverModule.app).post(`/api/queue/${queued.body.id}/send`);
+
+    expect(sent.status).toBe(200);
+    expect(sent.body).toMatchObject({ ok: true, delivered: queued.body.id });
+    expect(persistedStateDuringPayload).toBe('delivering');
+    expect(execCalls).toEqual([
+      ['tmux', 'send-keys', '-l', '-t', 'alpha:0.0', 'deliver durably'],
+      ['tmux', 'send-keys', '-t', 'alpha:0.0', 'C-m'],
+    ]);
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toEqual([]);
+    const queueFile = JSON.parse(readFileSync(path.join(runtimeDir, 'logs', 'queue.json'), 'utf-8'));
+    expect(queueFile.items).toEqual([]);
+  });
+
+  test('manual send reports terminal persistence failure without hiding in-flight entry', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const execCalls = [];
+    serverModule.setServerTestHooks({
+      execFileAsync: async (cmd, args) => {
+        execCalls.push([cmd, ...args]);
+        if (args[0] === 'send-keys' && args[1] === '-l') {
+          replacePathWithDirectory(path.join(runtimeDir, 'logs', 'queue.json'));
+        }
+        return { stdout: '' };
+      },
+      backendFetch: async () => ({ ok: true, text: async () => '', json: async () => ({ ok: true }) }),
+    });
+
+    const queued = await request(serverModule.app).post('/api/queue').send({
+      from: 'operator',
+      to: 'alpha:0.0',
+      payload: 'tmux side effect happened',
+    });
+    expect(queued.status).toBe(200);
+
+    const sent = await request(serverModule.app).post(`/api/queue/${queued.body.id}/send`);
+
+    expect(sent.status).toBe(503);
+    expect(sent.body).toMatchObject({
+      ok: false,
+      delivered: queued.body.id,
+      requeued: true,
+      reason: 'queue-persist-failed',
+    });
+    expect(execCalls).toEqual([
+      ['tmux', 'send-keys', '-l', '-t', 'alpha:0.0', 'tmux side effect happened'],
+      ['tmux', 'send-keys', '-t', 'alpha:0.0', 'C-m'],
+    ]);
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toHaveLength(1);
+    expect(queue.body[0]).toMatchObject({
+      id: queued.body.id,
+      payload: 'tmux side effect happened',
+      deliveryState: 'delivering',
+      deliveryAttempt: 1,
+    });
+
+    const duplicateSend = await request(serverModule.app).post(`/api/queue/${queued.body.id}/send`);
+    expect(duplicateSend.status).toBe(409);
+    expect(duplicateSend.body).toMatchObject({ ok: false, reason: 'already-delivering' });
+
+    const deleted = await request(serverModule.app).delete(`/api/queue/${queued.body.id}`);
+    expect(deleted.status).toBe(409);
+    expect(deleted.body).toMatchObject({ ok: false, error: 'delivery in progress', id: queued.body.id });
+
+    const events = readJsonl(path.join(runtimeDir, 'logs', 'delivery-events.jsonl'));
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'queue.persist_failed',
+        reason: 'queue-delivered-save-failed',
+        queueEntryId: queued.body.id,
+      }),
+    ]));
+  });
+
+  test('queue load recovers in-flight entries and discards terminal markers', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    writeFileSync(path.join(runtimeDir, 'logs', 'queue.json'), JSON.stringify({
+      idCounter: 4,
+      items: [
+        {
+          id: 1,
+          from: 'operator',
+          to: 'alpha:0.0',
+          payload: 'recover me',
+          queuedAt: 1000,
+          deliveryState: 'delivering',
+          deliveringAt: 2000,
+          deliveryAttempt: 1,
+        },
+        {
+          id: 2,
+          from: 'operator',
+          to: 'alpha:0.0',
+          payload: 'already delivered',
+          queuedAt: 1100,
+          deliveryState: 'delivered',
+          deliveredAt: 2100,
+        },
+        {
+          id: 3,
+          from: 'operator',
+          to: 'beta:0.0',
+          payload: 'already dropped',
+          queuedAt: 1200,
+          deliveryState: 'dropped',
+          droppedAt: 2200,
+        },
+        {
+          id: 4,
+          from: 'operator',
+          to: 'beta:0.0',
+          payload: 'still queued',
+          queuedAt: 1300,
+        },
+      ],
+    }), 'utf-8');
+
+    serverModule = await importServer(runtimeDir);
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body.map((entry) => entry.id)).toEqual([1, 4]);
+    expect(queue.body[0]).toMatchObject({ id: 1, payload: 'recover me' });
+    expect(queue.body[0]).not.toHaveProperty('deliveryState');
+    expect(queue.body[0]).not.toHaveProperty('deliveringAt');
+
+    const queueFile = JSON.parse(readFileSync(path.join(runtimeDir, 'logs', 'queue.json'), 'utf-8'));
+    expect(queueFile.items.map((entry) => entry.id)).toEqual([1, 4]);
+    expect(queueFile.items[0]).not.toHaveProperty('deliveryState');
+    expect(queueFile.items[0]).not.toHaveProperty('deliveringAt');
+  });
+
   test('queue delete rolls back when queue persistence fails', async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
