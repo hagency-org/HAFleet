@@ -39,7 +39,31 @@ const BACKEND_FETCH_RETRY_DELAY_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_
 const BACKEND_FETCH_RETRY_DELAY_MS = Number.isFinite(BACKEND_FETCH_RETRY_DELAY_MS_RAW) && BACKEND_FETCH_RETRY_DELAY_MS_RAW > 0
   ? BACKEND_FETCH_RETRY_DELAY_MS_RAW
   : 2500;
-const MSG_BASE_URL = process.env.MSG_BASE_URL || 'https://agent.example.com/msg';
+function normalizeBaseUrl(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.replace(/\/+$/, '');
+}
+
+function appendMsgPath(baseUrl) {
+  const normalized = normalizeBaseUrl(baseUrl);
+  if (!normalized) return '';
+  return normalized.endsWith('/msg') ? normalized : `${normalized}/msg`;
+}
+
+function resolveMessageBaseUrl(env = process.env) {
+  const webBase = normalizeBaseUrl(env.AGENT_CHAT_WEB_URL);
+  if (webBase) return appendMsgPath(webBase);
+
+  const legacyMsgBase = normalizeBaseUrl(env.MSG_BASE_URL);
+  if (legacyMsgBase) return legacyMsgBase;
+
+  const webPortRaw = Number.parseInt(env.AGENT_CHAT_WEB_PORT || '8084', 10);
+  const webPort = Number.isFinite(webPortRaw) && webPortRaw > 0 ? webPortRaw : 8084;
+  return `http://127.0.0.1:${webPort}/msg`;
+}
+
+const MSG_BASE_URL = resolveMessageBaseUrl();
 const BOT_USERNAME = (process.env.MATRIX_BOT_USERNAME || 'agent-bridge').trim();
 const BOT_PASSWORD = (process.env.MATRIX_BOT_PASSWORD || '').trim();
 const AGENT_PREFIX = (process.env.MATRIX_AGENT_PREFIX || 'ac_').trim(); // Matrix usernames: ac_agentname
@@ -3426,6 +3450,10 @@ export function setBridgeMatrixTestHooks({ execFileAsync: overrideExecFileAsync 
 
 export function resetBridgeMatrixTestHooks() {
   execFileAsyncImpl = execFileAsync;
+}
+
+export function resolveMessageBaseUrlForTest(env = {}) {
+  return resolveMessageBaseUrl(env);
 }
 
 // Test exports for 5.8.1 room trust

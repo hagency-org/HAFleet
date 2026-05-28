@@ -243,7 +243,8 @@ Most local configuration lives in `.env`. The installer creates it from `.env.ex
 | `AGENT_CHAT_RUNTIME_DIR` | Optional | repository root | Runtime root for `data/` and `logs/` |
 | `AGENT_CHAT_BACKEND_PORT` | Optional | `8090` | Backend port |
 | `AGENT_CHAT_WEB_PORT` | Optional | `8084` | Dashboard port |
-| `AGENT_CHAT_WEB_URL` | Optional | `http://127.0.0.1:8084` | Dashboard base URL used by backend push queue calls |
+| `AGENT_CHAT_WEB_URL` | Optional | `http://127.0.0.1:8084` | Public dashboard base URL used by backend push queue calls and Matrix formatted-message links |
+| `MSG_BASE_URL` | Optional legacy | derived from `AGENT_CHAT_WEB_URL` | Override for Matrix `View formatted` `/msg` links when they must use a different base URL |
 | `AGENT_CHAT_QUEUE_URL` | Optional | `${AGENT_CHAT_WEB_URL}/api/queue` | Queue endpoint for backend push notifications |
 | `AGENT_CHAT_DASHBOARD_TOKEN` | Optional | empty | Bearer token for non-local dashboard mutations |
 | `AGENT_CHAT_SERVER` | Optional local, required remote | `local` or hostname | Server identity in runtime reports |

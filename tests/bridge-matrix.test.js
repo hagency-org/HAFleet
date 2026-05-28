@@ -10,6 +10,7 @@ describe('bridge matrix behavior', () => {
   let MatrixBridge;
   let generateAvatarPngForTest;
   let resetBridgeMatrixTestHooks;
+  let resolveMessageBaseUrlForTest;
   let setBridgeMatrixTestHooks;
   let envSnapshot;
 
@@ -22,6 +23,7 @@ describe('bridge matrix behavior', () => {
       MatrixBridge,
       generateAvatarPngForTest,
       resetBridgeMatrixTestHooks,
+      resolveMessageBaseUrlForTest,
       setBridgeMatrixTestHooks,
     } = await import(`${bridgeUrl}?test=${Date.now()}-${Math.random().toString(36).slice(2, 10)}`));
   });
@@ -139,6 +141,22 @@ describe('bridge matrix behavior', () => {
     expect(bridge.ensureAgentToken).toHaveBeenNthCalledWith(2, 'beta', 'registration_poll');
     expect(bridge.isKnownAgentName('alpha')).toBe(true);
     expect(bridge.isKnownAgentName('beta')).toBe(true);
+  });
+
+  test('formatted message links derive from the public dashboard URL', () => {
+    expect(resolveMessageBaseUrlForTest({
+      AGENT_CHAT_WEB_URL: 'https://agentchat.example.test/',
+      MSG_BASE_URL: 'https://legacy.example.test/msg',
+    })).toBe('https://agentchat.example.test/msg');
+    expect(resolveMessageBaseUrlForTest({
+      AGENT_CHAT_WEB_URL: 'https://agentchat.example.test/msg/',
+    })).toBe('https://agentchat.example.test/msg');
+    expect(resolveMessageBaseUrlForTest({
+      MSG_BASE_URL: 'https://legacy.example.test/msg/',
+    })).toBe('https://legacy.example.test/msg');
+    expect(resolveMessageBaseUrlForTest({
+      AGENT_CHAT_WEB_PORT: '18184',
+    })).toBe('http://127.0.0.1:18184/msg');
   });
 
   test('discoverAndGreetHumans greets configured seed users when user directory is empty', async () => {

@@ -243,7 +243,8 @@ agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
 | `AGENT_CHAT_RUNTIME_DIR` | 可选 | 仓库根目录 | `data/` 和 `logs/` 的运行时根目录 |
 | `AGENT_CHAT_BACKEND_PORT` | 可选 | `8090` | 后端端口 |
 | `AGENT_CHAT_WEB_PORT` | 可选 | `8084` | 控制台端口 |
-| `AGENT_CHAT_WEB_URL` | 可选 | `http://127.0.0.1:8084` | 后端推送队列调用使用的控制台基础地址 |
+| `AGENT_CHAT_WEB_URL` | 可选 | `http://127.0.0.1:8084` | 后端推送队列和 Matrix formatted-message 链接使用的公开控制台基础地址 |
+| `MSG_BASE_URL` | 可选旧兼容 | 从 `AGENT_CHAT_WEB_URL` 派生 | 当 Matrix `View formatted` 的 `/msg` 链接必须使用不同基础地址时覆盖 |
 | `AGENT_CHAT_QUEUE_URL` | 可选 | `${AGENT_CHAT_WEB_URL}/api/queue` | 后端推送通知使用的队列端点 |
 | `AGENT_CHAT_DASHBOARD_TOKEN` | 可选 | 空 | 非本地控制台写操作使用的持有者令牌 |
 | `AGENT_CHAT_SERVER` | 本地可选，远程必填 | `local` 或主机名 | 运行时报告中的服务器身份 |
