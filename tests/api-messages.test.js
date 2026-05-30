@@ -939,7 +939,7 @@ describe('backend message API', () => {
     expect(member.body.full).toBe('group body');
   });
 
-  test('GET HTML message detail requires the same message access', async () => {
+  test('GET HTML message detail supports scoped view token access', async () => {
     const createResponse = await request(context.app)
       .post('/api/messages')
       .send({
@@ -953,6 +953,21 @@ describe('backend message API', () => {
 
     const anonymous = await request(context.app).get(`/msg/${createResponse.body.id}`);
     expect(anonymous.status).toBe(401);
+
+    const [persisted] = readPersistedMessages(context.runtimeDir)
+      .filter((message) => message.id === createResponse.body.id);
+    expect(persisted.viewToken).toMatch(/^[A-Za-z0-9_-]{20,}$/);
+
+    const wrongViewToken = await request(context.app)
+      .get(`/msg/${createResponse.body.id}`)
+      .query({ view: 'wrong-token' });
+    expect(wrongViewToken.status).toBe(401);
+
+    const publicView = await request(context.app)
+      .get(`/msg/${createResponse.body.id}`)
+      .query({ view: persisted.viewToken });
+    expect(publicView.status).toBe(200);
+    expect(publicView.text).toContain('html detail');
 
     const recipient = await request(context.app)
       .get(`/msg/${createResponse.body.id}`)

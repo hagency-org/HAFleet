@@ -64,6 +64,14 @@ function resolveMessageBaseUrl(env = process.env) {
 }
 
 const MSG_BASE_URL = resolveMessageBaseUrl();
+
+function buildMessageUrl(messageId, viewToken = null, baseUrl = MSG_BASE_URL) {
+  const id = String(messageId || '').trim();
+  const base = `${normalizeBaseUrl(baseUrl)}/${encodeURIComponent(id)}`;
+  const token = String(viewToken || '').trim();
+  return token ? `${base}?view=${encodeURIComponent(token)}` : base;
+}
+
 const BOT_USERNAME = (process.env.MATRIX_BOT_USERNAME || 'agent-bridge').trim();
 const BOT_PASSWORD = (process.env.MATRIX_BOT_PASSWORD || '').trim();
 const AGENT_PREFIX = (process.env.MATRIX_AGENT_PREFIX || 'ac_').trim(); // Matrix usernames: ac_agentname
@@ -2674,7 +2682,7 @@ export class MatrixBridge {
       ? normalizeMessageText(event.summary).replace(/\s+/g, ' ').trim()
       : '';
     const msgId = (typeof event?.messageId === 'string' && event.messageId.trim()) ? event.messageId.trim() : null;
-    const linkLine = msgId ? `\n🔗 ${MSG_BASE_URL}/${msgId}` : '';
+    const linkLine = msgId ? `\n🔗 ${buildMessageUrl(msgId, event.viewToken)}` : '';
     const summaryLine = summary ? `\nSummary: ${summary}` : '';
     const confidence = mode === 'hook' ? 'reported' : 'likely';
     const text = `ℹ️ Agent @${canonicalAgent} ${confidence} triggered a context compact event (${mode} detection).${summaryLine}${linkLine}`;
@@ -2901,7 +2909,7 @@ export class MatrixBridge {
 
     let plain, html;
     if (hasFull) {
-      const msgUrl = `${MSG_BASE_URL}/${msg.id}`;
+      const msgUrl = buildMessageUrl(msg.id, msg.viewToken);
       plain = `${typeBadge} ${normalizeMessageText(msg.summary)}${mentionText}\n\n${normalizeMessageText(msg.full)}\n\n🔗 ${msgUrl}`;
       const summaryHtml = renderMarkdownInline(msg.summary);
       const fullHtml = renderMarkdownToMatrixHtml(msg.full);
@@ -3454,6 +3462,10 @@ export function resetBridgeMatrixTestHooks() {
 
 export function resolveMessageBaseUrlForTest(env = {}) {
   return resolveMessageBaseUrl(env);
+}
+
+export function buildMessageUrlForTest(messageId, viewToken = null, baseUrl = MSG_BASE_URL) {
+  return buildMessageUrl(messageId, viewToken, baseUrl);
 }
 
 // Test exports for 5.8.1 room trust

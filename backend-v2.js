@@ -17,7 +17,7 @@ import {
 import { readFile as readFileAsync } from 'fs/promises';
 import { execFile, execSync, spawn } from 'child_process';
 import path from 'path';
-import { createHash } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 import { promisify } from 'util';
 import os from 'os';
@@ -814,6 +814,7 @@ function buildAgentCompactEvent(msg, senderIsAgent) {
     marker: signal.marker || null,
     source: 'message',
     summary,
+    viewToken: msg.viewToken || null,
   };
 }
 
@@ -4081,6 +4082,17 @@ function summarizeMsg(m) {
   return out;
 }
 
+function createMessageViewToken() {
+  return randomBytes(24).toString('base64url');
+}
+
+function constantTimeStringEqual(left, right) {
+  const leftBuf = Buffer.from(String(left || ''), 'utf8');
+  const rightBuf = Buffer.from(String(right || ''), 'utf8');
+  if (leftBuf.length === 0 || leftBuf.length !== rightBuf.length) return false;
+  return timingSafeEqual(leftBuf, rightBuf);
+}
+
 function normalizeMessagePriority(value, fallback = 'normal') {
   if (value === undefined || value === null) return fallback;
   const raw = normalizeOptionalText(value, 16);
@@ -4452,7 +4464,14 @@ function deliveryTargetAgentsForMessage(msg, directTargetKind = null) {
   return [...targets];
 }
 
-function authorizeMessageDetailAccess(req, msg) {
+function hasMessageViewTokenAccess(req, msg) {
+  const token = normalizeOptionalText(req.query?.view || req.query?.view_token || req.query?.token, 256);
+  if (!token || !msg?.viewToken) return false;
+  return constantTimeStringEqual(token, msg.viewToken);
+}
+
+function authorizeMessageDetailAccess(req, msg, options = {}) {
+  if (options.allowViewToken && hasMessageViewTokenAccess(req, msg)) return { ok: true, mode: 'view-token' };
   if (hasApiTokenAccess(req)) return { ok: true, mode: 'bearer' };
 
   const agentName = getRequestAgentName(req);
@@ -4586,6 +4605,7 @@ function dispatchInternalDirectMessage(payload = {}) {
     reply_to: null,
     source: 'system',
     sourceRoom: null,
+    viewToken: createMessageViewToken(),
   };
   if (normalizedSchema.value) msg.schema = normalizedSchema.value;
   const senderIsAgent = fromName !== 'system' && isAgentRecord(agents[fromName]);
@@ -6872,6 +6892,7 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
     mentions: [],
     reply_to: null,
     source: 'system',
+    viewToken: createMessageViewToken(),
     schema: {
       kind: SYSTEM_CATCHUP_SCHEMA_KIND,
       version: 1,
@@ -9885,6 +9906,7 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
     trustLevel,
     fromId: isBridgeAuthenticated && (typeof from_id === 'string' && from_id.trim()) ? from_id.trim().slice(0, 255)
       : (senderMxid || null),
+    viewToken: createMessageViewToken(),
   };
   if (normalizedAttachments.length > 0) {
     msg.attachments = normalizedAttachments;
@@ -10097,7 +10119,7 @@ app.post('/api/messages/:id/suppress', requireAgentToken(_tokenFromAgent), (req,
 app.get('/msg/:id', (req, res) => {
   const msg = messages.find(m => m.id === req.params.id);
   if (!msg) return res.status(404).send('<h1>Message not found</h1>');
-  const auth = authorizeMessageDetailAccess(req, msg);
+  const auth = authorizeMessageDetailAccess(req, msg, { allowViewToken: true });
   if (!auth.ok) {
     return res.status(auth.status || 403).type('html').send(`<h1>${auth.status || 403}</h1><p>${String(auth.error || 'message access denied').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`);
   }

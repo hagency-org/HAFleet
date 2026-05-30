@@ -8,6 +8,7 @@ import { restoreEnv, snapshotEnv } from './helpers/env.js';
 describe('bridge matrix behavior', () => {
   let runtimeDir;
   let MatrixBridge;
+  let buildMessageUrlForTest;
   let generateAvatarPngForTest;
   let resetBridgeMatrixTestHooks;
   let resolveMessageBaseUrlForTest;
@@ -21,6 +22,7 @@ describe('bridge matrix behavior', () => {
     const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
     ({
       MatrixBridge,
+      buildMessageUrlForTest,
       generateAvatarPngForTest,
       resetBridgeMatrixTestHooks,
       resolveMessageBaseUrlForTest,
@@ -157,6 +159,8 @@ describe('bridge matrix behavior', () => {
     expect(resolveMessageBaseUrlForTest({
       AGENT_CHAT_WEB_PORT: '18184',
     })).toBe('http://127.0.0.1:18184/msg');
+    expect(buildMessageUrlForTest('msg_1', 'token value', 'https://agentchat.example.test/msg'))
+      .toBe('https://agentchat.example.test/msg/msg_1?view=token%20value');
   });
 
   test('discoverAndGreetHumans greets configured seed users when user directory is empty', async () => {
