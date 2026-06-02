@@ -48,6 +48,54 @@ describe('task system API', () => {
     expect(get.body.title).toBe('Fix the bug');
   });
 
+  test('creating a task with a known assignee posts a system notification', async () => {
+    await setup();
+    const messagesPath = path.join(context.runtimeDir, 'data', 'messages.json');
+
+    const create = await request(context.app)
+      .post('/api/tasks')
+      .send({ title: 'Investigate flake', description: 'tests/foo.test.js fails 1/20 runs', assignee: 'alpha', priority: 'p0' });
+    expect(create.status).toBe(200);
+    const taskId = create.body.task.id;
+
+    const messages = readJson(messagesPath, []);
+    const notif = messages.find(m => m.from === 'system' && m.to === 'alpha' && m?.schema?.kind === 'system_task_assigned');
+    expect(notif).toBeDefined();
+    expect(notif.schema.payload.taskId).toBe(taskId);
+    expect(notif.schema.payload.priority).toBe('p0');
+    expect(notif.summary).toContain(taskId);
+    expect(notif.summary).toContain('Investigate flake');
+    expect(notif.full).toContain('tests/foo.test.js fails 1/20 runs');
+  });
+
+  test('creating a task with an unknown assignee does not produce a notification', async () => {
+    await setup();
+    const messagesPath = path.join(context.runtimeDir, 'data', 'messages.json');
+
+    const create = await request(context.app)
+      .post('/api/tasks')
+      .send({ title: 'For nobody', assignee: 'ghost' });
+    expect(create.status).toBe(200);
+
+    const messages = readJson(messagesPath, []);
+    const notif = messages.find(m => m?.schema?.kind === 'system_task_assigned');
+    expect(notif).toBeUndefined();
+  });
+
+  test('creating an unassigned task does not produce a notification', async () => {
+    await setup();
+    const messagesPath = path.join(context.runtimeDir, 'data', 'messages.json');
+
+    const create = await request(context.app)
+      .post('/api/tasks')
+      .send({ title: 'Unassigned' });
+    expect(create.status).toBe(200);
+
+    const messages = readJson(messagesPath, []);
+    const notif = messages.find(m => m?.schema?.kind === 'system_task_assigned');
+    expect(notif).toBeUndefined();
+  });
+
   test('lists tasks with filters', async () => {
     await setup();
     await request(context.app).post('/api/tasks').send({ title: 'A', assignee: 'alpha', priority: 'p0' });
