@@ -25,6 +25,7 @@ import os from 'os';
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
+import { indexPool, agentRole, agentCapability } from './lib/matrix-agent.js';
 import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
 import { createAlertStore, RECOVERY_MAP as ALERT_RECOVERY_MAP } from './lib/alert-store.js';
@@ -7545,6 +7546,7 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   const {
     name,
     role,
+    capability,
     tmux,
     type: agentType,
     identity,
@@ -7603,6 +7605,10 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   agents[agentName] = {
     name: agentName,
     role: role ?? existing.role ?? null,
+    // matrix-Agent capability tier (strong/medium/lightweight); invalid/absent → keep existing.
+    capability: (['strong', 'medium', 'lightweight'].includes(capability)
+      ? capability
+      : (existing.capability ?? null)),
     identity: identity ?? existing.identity ?? null,
     tmux: resolvedTmux,
     type: presetFramework ?? agentType ?? existing.type ?? 'agent',
@@ -7795,6 +7801,29 @@ app.get('/api/agents', (req, res) => {
     return res.json(names);
   }
   res.json(records.map(serializeAgent));
+});
+
+// matrix-Agent pool view (Phase 2): the role×capability grid, for capability-aware dispatch.
+// Read-only. Filters: ?role= ?capability= ?state=idle|busy|any (default any).
+app.get('/api/pool', (req, res) => {
+  refreshServerLiveness();
+  let records = Object.values(agents).filter(isAgentRecord).map(serializeAgent);
+  const state = String(req.query.state || 'any').toLowerCase();
+  if (state === 'idle') records = records.filter(a => a.online !== false && a.busy !== true);
+  else if (state === 'busy') records = records.filter(a => a.busy === true);
+  if (req.query.role) records = records.filter(a => agentRole(a) === String(req.query.role));
+  if (req.query.capability) records = records.filter(a => agentCapability(a) === String(req.query.capability));
+  const grid = indexPool(records);
+  const counts = {};
+  for (const [r, byCap] of Object.entries(grid)) {
+    counts[r] = Object.fromEntries(Object.entries(byCap).map(([c, list]) => [c, list.length]));
+  }
+  res.json({
+    grid,
+    counts,
+    total: records.length,
+    agents: records.map(a => ({ name: a.name, role: agentRole(a), capability: agentCapability(a), online: a.online !== false, busy: a.busy === true })),
+  });
 });
 
 app.get('/api/agents/:name', (req, res) => {
