@@ -88,7 +88,7 @@ QA owner) set direction and hold the gate (the gate itself is OpenFab's N-of-M s
 - **Acceptance:** OpenFab can request `role=coding capability=medium` and get a build back, with
   the concrete agent recorded in provenance — without naming the agent.
 
-## Phase 7 — observability
+## Phase 7 — observability ✅ (landed)
 - The Agent Monitor (:8084) renders the live **role × tier matrix**: who's idle/busy, queue
   depth per cell, provisioned-vs-named. Surfaces "按能力调度" at a glance.
 - **Acceptance:** the monitor shows the grid + queues and updates live.
