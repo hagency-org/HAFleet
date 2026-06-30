@@ -49,4 +49,22 @@ describe('matrix-Agent capability scheduler', () => {
     const r = await request(context.app).post('/api/dispatch').send({ capability: 'medium' });
     expect(r.status).toBe(400);
   });
+
+  test('auto-provision: under cap returns a provision plan, over cap queues', async () => {
+    const prev = process.env.MATRIX_AGENT_MAX_PER_CELL;
+    process.env.MATRIX_AGENT_MAX_PER_CELL = '1';
+    try {
+      // empty cell (documentation/lightweight has no agents) → first request provisions
+      const a = await request(context.app).post('/api/dispatch').send({ role: 'documentation', capability: 'lightweight' });
+      expect(a.body.status).toBe('provision');
+      expect(a.body.runtime).toBeTruthy();
+      expect(a.body.name).toMatch(/^mx_documentation_lightweight_/);
+      // cap=1 reached (one outstanding plan) → second request queues
+      const b = await request(context.app).post('/api/dispatch').send({ role: 'documentation', capability: 'lightweight' });
+      expect(b.body.status).toBe('queued');
+    } finally {
+      if (prev === undefined) delete process.env.MATRIX_AGENT_MAX_PER_CELL;
+      else process.env.MATRIX_AGENT_MAX_PER_CELL = prev;
+    }
+  });
 });

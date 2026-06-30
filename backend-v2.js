@@ -25,7 +25,7 @@ import os from 'os';
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
-import { indexPool, agentRole, agentCapability, selectAgent, resolveTier } from './lib/matrix-agent.js';
+import { indexPool, agentRole, agentCapability, selectAgent, resolveTier, TIER_RUNTIME } from './lib/matrix-agent.js';
 import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
 import { createAlertStore, RECOVERY_MAP as ALERT_RECOVERY_MAP } from './lib/alert-store.js';
@@ -7810,6 +7810,7 @@ app.get('/api/agents', (req, res) => {
 // delivers the task to it and calls /release on completion. Busy/queue are in-memory.
 const dispatchBusy = new Set();      // agent names currently reserved
 const dispatchQueues = new Map();    // `${role}:${tier}` → [{ ticket, role, tier, task, room }]
+const provisionReservations = new Map(); // `${role}:${tier}` → count of outstanding provision plans
 let dispatchTicketSeq = 0;
 const cellKey = (role, tier) => `${role}:${tier}`;
 const annotateBusy = (records) => records.map((a) => ({ ...a, busy: dispatchBusy.has(a.name) }));
@@ -7849,8 +7850,21 @@ app.post('/api/dispatch', (req, res) => {
     dispatchBusy.add(agent.name);
     return res.json({ status: 'routed', agent: agent.name, role, tier });
   }
-  const ticket = `disp-${Date.now()}-${dispatchTicketSeq++}`;
+  // Phase 4: auto-provision. When MATRIX_AGENT_MAX_PER_CELL > 0 and the cell is below the cap,
+  // return a `provision` plan (the launcher runs `up-v1` with the tier's runtime) instead of
+  // queuing. Default 0 = off (pure queue) — safe. The decision is pure; spawning is the edge.
   const key = cellKey(role, tier);
+  const cap = Number(process.env.MATRIX_AGENT_MAX_PER_CELL || 0);
+  if (cap > 0) {
+    const inCell = poolRecords().filter((a) => agentRole(a) === role && agentCapability(a) === tier).length;
+    const reserved = provisionReservations.get(key) || 0;
+    if (inCell + reserved < cap) {
+      provisionReservations.set(key, reserved + 1);
+      const name = `mx_${role}_${tier}_${dispatchTicketSeq++}`;
+      return res.json({ status: 'provision', role, tier, name, runtime: TIER_RUNTIME[tier] });
+    }
+  }
+  const ticket = `disp-${Date.now()}-${dispatchTicketSeq++}`;
   const q = dispatchQueues.get(key) || [];
   q.push({ ticket, role, tier, task: req.body?.task ?? null, room: req.body?.room ?? null });
   dispatchQueues.set(key, q);

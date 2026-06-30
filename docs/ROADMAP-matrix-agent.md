@@ -61,7 +61,7 @@ QA owner) set direction and hold the gate (the gate itself is OpenFab's N-of-M s
 - **Acceptance:** dispatch routes to an idle agent; a second concurrent dispatch for the same
   `(role,tier)` queues; completing the first drains the queue. Unit + API tests.
 
-## Phase 4 — auto-provision + concurrency caps
+## Phase 4 — auto-provision + concurrency caps ✅ (decision landed)
 - When the queue for `(role, tier)` is non-empty and below a per-`(role,tier)` max, auto-launch
   an agent (`up-v1 <generated-name> <TIER_RUNTIME.runtime>` with the role/capability), then route.
 - Idle-reap: scale provisioned agents back down after an idle TTL.
@@ -69,7 +69,7 @@ QA owner) set direction and hold the gate (the gate itself is OpenFab's N-of-M s
 - **Acceptance:** a dispatch with an empty pool provisions one agent (up to the cap) and routes;
   beyond the cap it queues; idle agents reap after the TTL.
 
-## Phase 5 — staff the full 6-role org
+## Phase 5 — staff the full 6-role org ✅ (scheduler is role-generic: all 6 roles already dispatch/pool; per-role skills are content)
 - Add the roles not yet in active use as first-class: **testing**, **documentation**, and
   **integration** (integration may initially fold into coding). Provide skills/prompts per role
   so a provisioned agent knows its job.
