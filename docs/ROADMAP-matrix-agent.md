@@ -37,7 +37,7 @@ QA owner) set direction and hold the gate (the gate itself is OpenFab's N-of-M s
 `resolveTier`, `canonicalRole`, `agentRole/agentCapability`, `indexPool`, `selectAgent`,
 `planDispatch`. Pure, 6 vitest tests. Foundation for everything below.
 
-## Phase 1 — persist capability on the agent record
+## Phase 1 — persist capability on the agent record ✅ (landed)
 - Extend the agent manifest + registration API: add `capability ∈ {strong,medium,lightweight}`
   (the backend already normalizes `role`). `up-v1 --role <r> --capability <tier>` writes both;
   `capability` selects the launch runtime/model via `TIER_RUNTIME`.
@@ -45,13 +45,13 @@ QA owner) set direction and hold the gate (the gate itself is OpenFab's N-of-M s
 - **Acceptance:** an agent registered with `{role, capability}` shows them in `data/agents.json`
   and `GET /api/agents`; legacy agents still resolve a role/tier.
 
-## Phase 2 — pool query (read-only, safe)
+## Phase 2 — pool query (read-only, safe) ✅ (landed)
 - `GET /api/pool?role=&capability=&state=idle|busy|any` → agents grouped by `(role, capability)`,
   built from the registry via `indexPool`. No scheduling yet — pure visibility.
 - **Acceptance:** returns the role×tier grid; filters by role/capability/state; covered by an
   API test (mirror `tests/api-agents.test.js`).
 
-## Phase 3 — capability scheduler
+## Phase 3 — capability scheduler ✅ (landed)
 - `POST /api/dispatch { role, capability?, task, room? }`:
   1. `resolveTier(role, capability)`;
   2. `selectAgent(pool, role, tier)` → if found, mark **busy**, deliver the task to it;
