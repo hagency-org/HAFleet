@@ -83,6 +83,9 @@ const AUTO_AVATAR_ENABLED = (process.env.MATRIX_AUTO_AVATAR || 'false').trim().t
 const MATRIX_GREETING_MXIDS = new Set(
   (process.env.MATRIX_GREETING_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
+const MATRIX_IGNORED_SENDER_MXIDS = new Set(
+  (process.env.MATRIX_IGNORED_SENDER_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
+);
 const DATA_DIR = path.join(RUNTIME_ROOT, 'data', 'matrix');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
 const AGENT_META_ROOT = path.join(RUNTIME_ROOT, 'data', 'agents');
@@ -1618,15 +1621,29 @@ export class MatrixBridge {
     this.botUserId = await this.botClient.getUserId();
     console.log(`Bot: ${this.botUserId}`);
 
-    // 2. Ensure agent accounts for all known agents
+    // 2. Ensure agent accounts for all known agents.
+    // Service relays (e.g. OpenFab's `openfab-bridge`) post in-app only and never need a Matrix
+    // puppet — skip them. And a single agent's account failure must not crash the whole bridge.
+    const SKIP_AGENTS = new Set(
+      (process.env.MATRIX_BRIDGE_SKIP_AGENTS || 'openfab-bridge')
+        .split(',').map((s) => s.trim()).filter(Boolean),
+    );
     const agents = await this.fetchKnownAgentNames();
     const validAgentNames = new Set();
     const validAgentKeys = new Set();
     for (const agentName of agents) {
+      if (SKIP_AGENTS.has(agentName)) {
+        console.log(`Skipping Matrix puppet for service agent: ${agentName}`);
+        continue;
+      }
       validAgentNames.add(agentName);
       validAgentKeys.add(this.nameKey(agentName));
-      await ensureAgentAccount(agentName);
-      this.addKnownAgent(agentName);
+      try {
+        await ensureAgentAccount(agentName);
+        this.addKnownAgent(agentName);
+      } catch (e) {
+        console.warn(`Skipping agent ${agentName} (account setup failed): ${e.message}`);
+      }
     }
     // Drop stale tokens that were created for non-agent users.
     let cleanedTokenCount = 0;
@@ -1909,6 +1926,7 @@ export class MatrixBridge {
     // Ignore messages from our agent accounts (prevent loops)
     if (isAgentUser(senderId)) return;
     if (senderId === this.botUserId) return;
+    if (MATRIX_IGNORED_SENDER_MXIDS.has(senderId)) return;
 
     // Room trust gate (5.8.1)
     const msgTrust = getRoomTrust(roomId);
@@ -1928,9 +1946,11 @@ export class MatrixBridge {
     }
     const mentions = parseMentions(event.content, body);
     const replyTo = this.resolveReplyToMessageId(parsed.replyEventId);
-    let effectiveMentions = mentions
-      .map(name => this.resolveKnownAgentName(name) || name)
-      .filter(Boolean);
+    let effectiveMentions = [...new Set(mentions
+      // Matrix rooms may also contain Octos or other external bot pills.
+      // Only registered agent-chat agents are routable mention targets.
+      .map(name => this.resolveKnownAgentName(name))
+      .filter(Boolean))];
 
     if (groupName && replyTo) {
       const inferred = await this.inferReplyMention({
