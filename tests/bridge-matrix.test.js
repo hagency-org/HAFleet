@@ -17,8 +17,9 @@ describe('bridge matrix behavior', () => {
 
   beforeAll(async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-test-'));
-    envSnapshot = snapshotEnv(['AGENT_CHAT_RUNTIME_DIR']);
+    envSnapshot = snapshotEnv(['AGENT_CHAT_RUNTIME_DIR', 'MATRIX_IGNORED_SENDER_MXIDS']);
     process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+    process.env.MATRIX_IGNORED_SENDER_MXIDS = '@octosbot:matrix.example.test';
     const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
     ({
       MatrixBridge,
@@ -127,6 +128,78 @@ describe('bridge matrix behavior', () => {
     });
 
     expect(bridge.submitHumanMessage).not.toHaveBeenCalled();
+  });
+
+  test('onRoomMessage skips configured external Matrix bot senders', async () => {
+    const bridge = new MatrixBridge();
+    const roomId = '!octos-sender-room:matrix.example.test';
+    bridge.botUserId = '@agent-bridge:matrix.example.test';
+    bridge.getBridgeState().roomGroupMap[roomId] = 'software-factory';
+    bridge.botClient = {
+      getJoinedRoomMembers: vi.fn().mockResolvedValue([
+        '@agent-bridge:matrix.example.test',
+        '@alice:matrix.example.test',
+        '@octosbot:matrix.example.test',
+      ]),
+    };
+    bridge.submitHumanMessage = vi.fn().mockResolvedValue({ ok: true });
+
+    try {
+      await bridge.onRoomMessage(roomId, {
+        event_id: '$octos-sender-1',
+        sender: '@octosbot:matrix.example.test',
+        content: {
+          msgtype: 'm.text',
+          body: 'Octos status update',
+        },
+      });
+
+      expect(bridge.submitHumanMessage).not.toHaveBeenCalled();
+    } finally {
+      delete bridge.getBridgeState().roomGroupMap[roomId];
+    }
+  });
+
+  test('onRoomMessage ignores non-agent Matrix bot mentions in group routing', async () => {
+    const bridge = new MatrixBridge();
+    const roomId = '!octos-room:matrix.example.test';
+    bridge.botUserId = '@agent-bridge:matrix.example.test';
+    bridge.addKnownAgent('wf_coordinator');
+    bridge.getBridgeState().roomGroupMap[roomId] = 'software-factory';
+    bridge.botClient = {
+      getJoinedRoomMembers: vi.fn().mockResolvedValue([
+        '@agent-bridge:matrix.example.test',
+        '@alice:matrix.example.test',
+        '@octosbot:matrix.example.test',
+      ]),
+    };
+    bridge.submitHumanMessage = vi.fn().mockResolvedValue({ ok: true, id: 'msg_1' });
+
+    try {
+      await bridge.onRoomMessage(roomId, {
+        event_id: '$octos-mention-1',
+        sender: '@alice:matrix.example.test',
+        content: {
+          msgtype: 'm.text',
+          body: 'wf_coordinator 和 octosbot 在吗',
+          'm.mentions': {
+            user_ids: [
+              '@ac_wf_coordinator:matrix.example.test',
+              '@octosbot:matrix.example.test',
+            ],
+          },
+        },
+      });
+
+      expect(bridge.submitHumanMessage).toHaveBeenCalledTimes(1);
+      expect(bridge.submitHumanMessage.mock.calls[0][1]).toMatchObject({
+        group: 'software-factory',
+        mentions: ['wf_coordinator'],
+      });
+      expect(bridge.submitHumanMessage.mock.calls[0][1].mentions).not.toContain('octosbot');
+    } finally {
+      delete bridge.getBridgeState().roomGroupMap[roomId];
+    }
   });
 
   test('pollRegistrations fetches agent names via view=names and provisions new tokens', async () => {

@@ -193,6 +193,7 @@ MATRIX_AGENT_PASSWORD_SECRET=<random-long-secret>
 MATRIX_TRUST_MODE=audit
 MATRIX_OPERATOR_MXIDS=@operator:matrix.example.com
 MATRIX_GREETING_MXIDS=@operator:matrix.example.com
+MATRIX_IGNORED_SENDER_MXIDS=@octosbot:matrix.example.com
 ```
 
 Install or restart the bridge:
@@ -283,6 +284,7 @@ Most local configuration lives in `.env`. The installer creates it from `.env.ex
 | `MATRIX_BOT_PASSWORD` | empty | Bridge bot password |
 | `MATRIX_REG_TOKEN` | empty | Registration token |
 | `MATRIX_GREETING_MXIDS` | empty | Comma-separated Matrix users the bridge should proactively greet even if the homeserver user directory does not list them |
+| `MATRIX_IGNORED_SENDER_MXIDS` | empty | Comma-separated Matrix senders the bridge should ignore entirely, useful for coexisting with external appservice bots |
 | `MATRIX_TRUST_MODE` | `audit` | Room trust policy: `enforce`, `audit`, or `off` |
 | `MATRIX_OPERATOR_MXIDS` | empty | Matrix users allowed to operate privileged commands |
 
