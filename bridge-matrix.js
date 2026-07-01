@@ -26,6 +26,26 @@ assertRuntimeDir(RUNTIME_ROOT);
 // ── Configuration ─────────────────────────────────────────────────────
 const HOMESERVER = process.env.MATRIX_HOMESERVER || 'https://matrix.example.com';
 const REGISTRATION_TOKEN = (process.env.MATRIX_REG_TOKEN || '').trim();
+// Agents that get no Matrix puppet (service relays, or teams excluded on a shared/public server).
+// Shared by the startup ensure-loop AND the periodic registration poll.
+const SKIP_AGENTS = new Set(
+  (process.env.MATRIX_BRIDGE_SKIP_AGENTS || 'openfab-bridge')
+    .split(',').map((s) => s.trim()).filter(Boolean),
+);
+// A homeserver fetch that backs off on M_LIMIT_EXCEEDED. Public servers rate-limit auth hard,
+// so honor the server's `retry_after_ms`, default to a long 20s wait, cap 60s, and be patient
+// (startup may take a couple of minutes, but it won't crash).
+async function fetchWithRateLimit(url, init, tries = 6) {
+  for (let i = 0; i < tries; i++) {
+    const res = await fetch(url, init);
+    if (res.status !== 429) return res;
+    const body = await res.clone().json().catch(() => ({}));
+    const waitMs = Math.min(Number(body.retry_after_ms) || 60000, 120000);
+    console.warn(`[rate-limit] ${url.split('/').pop()} 429; waiting ${Math.round(waitMs / 1000)}s (try ${i + 1}/${tries})`);
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+  return fetch(url, init);
+}
 const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
 const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
   ? DEFAULT_BACKEND_PORT_RAW
@@ -429,28 +449,38 @@ async function tryMatrixLogin(username, passwords) {
 
 // ── Matrix account management ─────────────────────────────────────────
 async function matrixRegister(username, password) {
-  if (!REGISTRATION_TOKEN) {
-    throw new Error('MATRIX_REG_TOKEN is required to register Matrix accounts.');
-  }
-  // Step 1: get session
-  const probe = await fetch(`${HOMESERVER}/_matrix/client/v3/register`, {
+  // Step 1: probe for the UIA session + the server's available flows.
+  const probe = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
   });
   const probeData = await probe.json();
+  // Some servers register without UIA (no session) — done.
+  if (probeData.access_token) return probeData;
   const session = probeData.session;
   if (!session) throw new Error(`No session in registration probe: ${JSON.stringify(probeData)}`);
 
-  // Step 2: register with token
-  const res = await fetch(`${HOMESERVER}/_matrix/client/v3/register`, {
+  // Step 2: complete UIA. Use the registration token when configured; otherwise fall back to
+  // open registration (m.login.dummy) when the server offers it.
+  const flows = probeData.flows || [];
+  const supportsDummy = flows.some(
+    (f) => Array.isArray(f.stages) && f.stages.length === 1 && f.stages[0] === 'm.login.dummy',
+  );
+  let auth;
+  if (REGISTRATION_TOKEN) {
+    auth = { type: 'm.login.registration_token', token: REGISTRATION_TOKEN, session };
+  } else if (supportsDummy) {
+    auth = { type: 'm.login.dummy', session };
+  } else {
+    throw new Error(
+      `No usable registration flow for ${username}: set MATRIX_REG_TOKEN or enable open registration. flows=${JSON.stringify(flows)}`,
+    );
+  }
+  const res = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      username,
-      password,
-      auth: { type: 'm.login.registration_token', token: REGISTRATION_TOKEN, session },
-    }),
+    body: JSON.stringify({ username, password, auth }),
   });
   const data = await res.json();
   if (data.access_token) return data;
@@ -458,7 +488,7 @@ async function matrixRegister(username, password) {
 }
 
 async function matrixLogin(username, password) {
-  const res = await fetch(`${HOMESERVER}/_matrix/client/v3/login`, {
+  const res = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -483,19 +513,34 @@ async function ensureBotAccount() {
   if (!BOT_PASSWORD) {
     throw new Error('MATRIX_BOT_PASSWORD is required to login/register bridge bot account.');
   }
-  try {
-    const data = await matrixLogin(BOT_USERNAME, BOT_PASSWORD);
-    state.botToken = data.access_token;
-    saveState();
-    console.log(`Bot logged in as ${data.user_id}`);
-    return data.access_token;
-  } catch {
-    const data = await matrixRegister(BOT_USERNAME, BOT_PASSWORD);
-    state.botToken = data.access_token;
-    saveState();
-    console.log(`Bot registered as ${data.user_id}`);
-    return data.access_token;
+  // Login → if the account doesn't exist yet, register → if it's already taken (e.g. login was
+  // transiently rate-limited and we fell through), wait and retry login. This survives a public
+  // server's aggressive rate limiter instead of crashing the whole bridge.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const data = await matrixLogin(BOT_USERNAME, BOT_PASSWORD);
+      state.botToken = data.access_token;
+      saveState();
+      console.log(`Bot logged in as ${data.user_id}`);
+      return data.access_token;
+    } catch (loginErr) {
+      try {
+        const data = await matrixRegister(BOT_USERNAME, BOT_PASSWORD);
+        state.botToken = data.access_token;
+        saveState();
+        console.log(`Bot registered as ${data.user_id}`);
+        return data.access_token;
+      } catch (regErr) {
+        if (/M_USER_IN_USE/.test(regErr.message)) {
+          console.warn(`Bot account exists but login failed (${loginErr.message}); retrying login after backoff…`);
+          await new Promise((r) => setTimeout(r, 6000));
+          continue;
+        }
+        throw regErr;
+      }
+    }
   }
+  throw new Error('Bot account: login/register attempts exhausted (rate limited?).');
 }
 
 async function ensureAgentAccount(agentName) {
@@ -1624,10 +1669,6 @@ export class MatrixBridge {
     // 2. Ensure agent accounts for all known agents.
     // Service relays (e.g. OpenFab's `openfab-bridge`) post in-app only and never need a Matrix
     // puppet — skip them. And a single agent's account failure must not crash the whole bridge.
-    const SKIP_AGENTS = new Set(
-      (process.env.MATRIX_BRIDGE_SKIP_AGENTS || 'openfab-bridge')
-        .split(',').map((s) => s.trim()).filter(Boolean),
-    );
     const agents = await this.fetchKnownAgentNames();
     const validAgentNames = new Set();
     const validAgentKeys = new Set();
@@ -1702,6 +1743,7 @@ export class MatrixBridge {
       const validAgentNames = new Set(agents);
       const validAgentKeys = new Set(agents.map(name => this.nameKey(name)));
       for (const agentName of agents) {
+        if (SKIP_AGENTS.has(agentName)) continue;
         const wasKnown = this.isKnownAgentName(agentName);
         const canonicalName = this.addKnownAgent(agentName) || this.normalizeName(agentName);
         if (canonicalName && !this.getAgentToken(canonicalName)) {
