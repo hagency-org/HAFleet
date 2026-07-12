@@ -1,0 +1,47 @@
+{
+  "name": "services-local",
+  "services": [
+    {
+      "name": "backend",
+      "command": ["node", "tests/fixtures/service-child.mjs"],
+      "dependsOn": [],
+      "env": { "SERVICE_CHILD_NAME": "backend" },
+      "health": {
+        "type": "http",
+        "host": "127.0.0.1",
+        "portEnv": "TEST_BACKEND_PORT",
+        "defaultPort": 18090,
+        "path": "/health",
+        "timeoutMs": 300
+      }
+    },
+    {
+      "name": "dashboard",
+      "command": ["node", "tests/fixtures/service-child.mjs"],
+      "dependsOn": ["backend"],
+      "env": { "SERVICE_CHILD_NAME": "dashboard" },
+      "health": {
+        "type": "tcp",
+        "host": "127.0.0.1",
+        "portEnv": "TEST_DASHBOARD_PORT",
+        "defaultPort": 18084,
+        "timeoutMs": 300
+      }
+    },
+    {
+      "name": "bridge",
+      "command": ["node", "tests/fixtures/service-child.mjs"],
+      "dependsOn": ["backend"],
+      "env": { "SERVICE_CHILD_NAME": "bridge" },
+      "health": { "type": "process", "timeoutMs": 300 }
+    },
+    {
+      "name": "relay",
+      "command": ["node", "tests/fixtures/service-child.mjs"],
+      "dependsOn": ["backend"],
+      "env": { "SERVICE_CHILD_NAME": "relay" },
+      "health": { "type": "process", "timeoutMs": 300 }
+    }
+  ]
+}
+

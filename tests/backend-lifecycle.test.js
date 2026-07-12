@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import request from 'supertest';
 
 function writeJson(filePath, value) {
   writeFileSync(filePath, JSON.stringify(value, null, 2));
@@ -177,5 +178,31 @@ describe('backend-v2 lifecycle', () => {
     expect(vi.getTimerCount()).toBe(0);
     await new Promise((resolve) => blocker.close(resolve));
     blockers.delete(blocker);
+  });
+
+  test('registered agent records survive a backend module restart', async () => {
+    restoreEnv = rememberEnv([
+      'AGENT_CHAT_RUNTIME_DIR',
+      'SUPERVISOR_ENABLED',
+      'AGENT_SCOPE_MONITOR_ENABLED',
+      'AGENT_JSON_WRITE_BATCH_MS',
+      'API_TOKEN',
+    ]);
+    runtimeDir = createRuntimeDir('agent-chat-backend-registry-restart-');
+    const first = await importBackend(runtimeDir);
+    for (const name of ['worker-alpha', 'worker-beta', 'worker-gamma']) {
+      const response = await request(first.app)
+        .post('/api/agents')
+        .send({ name, role: 'worker', identity: `registered ${name}` });
+      expect(response.status).toBe(200);
+    }
+    const before = await request(first.app).get('/api/agents').query({ view: 'names' });
+    expect(before.body).toEqual(['worker-alpha', 'worker-beta', 'worker-gamma']);
+    await first.stopServer();
+
+    backendModule = await importBackend(runtimeDir);
+    const after = await request(backendModule.app).get('/api/agents').query({ view: 'names' });
+    expect(after.status).toBe(200);
+    expect(after.body).toEqual(before.body);
   });
 });

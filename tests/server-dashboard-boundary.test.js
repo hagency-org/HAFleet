@@ -506,6 +506,35 @@ describe('server dashboard mutation boundary', () => {
     expect(response.body).toEqual([]);
   });
 
+  test('dashboard roster comes only from the backend registry, not stale tmux sessions', async () => {
+    const mod = await setup();
+    const tmuxCalls = [];
+    const registry = [
+      { name: 'worker-alpha', online: true, tmux: 'worker-alpha:0.0' },
+      { name: 'worker-beta', online: false, tmux: null },
+      { name: 'worker-gamma', online: true, tmux: 'worker-gamma:0.0' },
+    ];
+    mod.setServerTestHooks({
+      backendFetch: async (url) => {
+        expect(String(url)).toMatch(/\/api\/agents$/);
+        return { ok: true, status: 200, json: async () => registry };
+      },
+      execFileAsync: async (command, args) => {
+        tmuxCalls.push([command, ...args]);
+        return { stdout: 'stale-tmux-session\n' };
+      },
+    });
+
+    const response = await request(mod.app).get('/api/agents/all');
+
+    expect(response.status).toBe(200);
+    expect(response.body.map((agent) => agent.name)).toEqual([
+      'worker-alpha', 'worker-beta', 'worker-gamma',
+    ]);
+    expect(response.text).not.toContain('stale-tmux-session');
+    expect(tmuxCalls).toEqual([]);
+  });
+
   test('alert stats payloads are normalized on alerts and monitor pages', async () => {
     const mod = await setup();
 
