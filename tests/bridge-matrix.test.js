@@ -12,13 +12,20 @@ describe('bridge matrix behavior', () => {
   let generateAvatarPngForTest;
   let resetBridgeMatrixTestHooks;
   let resolveMessageBaseUrlForTest;
+  let resolveInvitePollMsForTest;
+  let resolveInboundRoute;
+  let pickDefaultGroupRecipient;
+  let preferredDmRoom;
+  let resolveOutboundDmRoom;
+  let markRoomTrusted;
   let setBridgeMatrixTestHooks;
   let envSnapshot;
 
   beforeAll(async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-test-'));
-    envSnapshot = snapshotEnv(['AGENT_CHAT_RUNTIME_DIR']);
+    envSnapshot = snapshotEnv(['AGENT_CHAT_RUNTIME_DIR', 'MATRIX_IGNORED_SENDER_MXIDS']);
     process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+    process.env.MATRIX_IGNORED_SENDER_MXIDS = '@octosbot:matrix.example.test';
     const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
     ({
       MatrixBridge,
@@ -26,6 +33,12 @@ describe('bridge matrix behavior', () => {
       generateAvatarPngForTest,
       resetBridgeMatrixTestHooks,
       resolveMessageBaseUrlForTest,
+      resolveInvitePollMsForTest,
+      resolveInboundRoute,
+      pickDefaultGroupRecipient,
+      preferredDmRoom,
+      resolveOutboundDmRoom,
+      markRoomTrusted,
       setBridgeMatrixTestHooks,
     } = await import(`${bridgeUrl}?test=${Date.now()}-${Math.random().toString(36).slice(2, 10)}`));
   });
@@ -127,6 +140,201 @@ describe('bridge matrix behavior', () => {
     });
 
     expect(bridge.submitHumanMessage).not.toHaveBeenCalled();
+  });
+
+  test('onRoomMessage skips configured external Matrix bot senders', async () => {
+    const bridge = new MatrixBridge();
+    const roomId = '!octos-sender-room:matrix.example.test';
+    bridge.botUserId = '@agent-bridge:matrix.example.test';
+    bridge.getBridgeState().roomGroupMap[roomId] = 'software-factory';
+    bridge.botClient = {
+      getJoinedRoomMembers: vi.fn().mockResolvedValue([
+        '@agent-bridge:matrix.example.test',
+        '@alice:matrix.example.test',
+        '@octosbot:matrix.example.test',
+      ]),
+    };
+    bridge.submitHumanMessage = vi.fn().mockResolvedValue({ ok: true });
+
+    try {
+      await bridge.onRoomMessage(roomId, {
+        event_id: '$octos-sender-1',
+        sender: '@octosbot:matrix.example.test',
+        content: {
+          msgtype: 'm.text',
+          body: 'Octos status update',
+        },
+      });
+
+      expect(bridge.submitHumanMessage).not.toHaveBeenCalled();
+    } finally {
+      delete bridge.getBridgeState().roomGroupMap[roomId];
+    }
+  });
+
+  test('onRoomMessage ignores non-agent Matrix bot mentions in group routing', async () => {
+    const bridge = new MatrixBridge();
+    const roomId = '!octos-room:matrix.example.test';
+    bridge.botUserId = '@agent-bridge:matrix.example.test';
+    bridge.addKnownAgent('wf_coordinator');
+    bridge.getBridgeState().roomGroupMap[roomId] = 'software-factory';
+    bridge.botClient = {
+      getJoinedRoomMembers: vi.fn().mockResolvedValue([
+        '@agent-bridge:matrix.example.test',
+        '@alice:matrix.example.test',
+        '@octosbot:matrix.example.test',
+      ]),
+    };
+    bridge.submitHumanMessage = vi.fn().mockResolvedValue({ ok: true, id: 'msg_1' });
+
+    try {
+      await bridge.onRoomMessage(roomId, {
+        event_id: '$octos-mention-1',
+        sender: '@alice:matrix.example.test',
+        content: {
+          msgtype: 'm.text',
+          body: 'wf_coordinator 和 octosbot 在吗',
+          'm.mentions': {
+            user_ids: [
+              '@ac_wf_coordinator:matrix.example.test',
+              '@octosbot:matrix.example.test',
+            ],
+          },
+        },
+      });
+
+      expect(bridge.submitHumanMessage).toHaveBeenCalledTimes(1);
+      expect(bridge.submitHumanMessage.mock.calls[0][1]).toMatchObject({
+        group: 'software-factory',
+        mentions: ['wf_coordinator'],
+      });
+      expect(bridge.submitHumanMessage.mock.calls[0][1].mentions).not.toContain('octosbot');
+    } finally {
+      delete bridge.getBridgeState().roomGroupMap[roomId];
+    }
+  });
+
+  test('onRoomMessage routes mapped rooms as groups and wakes the coordinator without mentions', async () => {
+    const bridge = new MatrixBridge();
+    const roomId = '!mapped-single-agent-room:matrix.example.test';
+    bridge.botUserId = '@agent-bridge:matrix.example.test';
+    bridge.addKnownAgent('wf_coordinator');
+    bridge.getBridgeState().roomGroupMap[roomId] = 'website';
+    bridge.botClient = {
+      getJoinedRoomMembers: vi.fn().mockResolvedValue([
+        '@agent-bridge:matrix.example.test',
+        '@alice:matrix.example.test',
+        '@ac_wf_coordinator:matrix.example.test',
+      ]),
+    };
+    bridge.submitHumanMessage = vi.fn().mockResolvedValue({ ok: true, id: 'msg_website_1' });
+
+    try {
+      await bridge.onRoomMessage(roomId, {
+        event_id: '$mapped-room-1',
+        sender: '@alice:matrix.example.test',
+        content: {
+          msgtype: 'm.text',
+          body: 'Please start the Website task',
+        },
+      });
+
+      expect(bridge.submitHumanMessage).toHaveBeenCalledTimes(1);
+      expect(bridge.submitHumanMessage).toHaveBeenCalledWith(roomId, expect.objectContaining({
+        from: 'alice',
+        group: 'website',
+        mentions: ['wf_coordinator'],
+        source: 'matrix',
+        source_room: roomId,
+      }));
+      expect(bridge.submitHumanMessage.mock.calls[0][1]).not.toHaveProperty('to');
+    } finally {
+      delete bridge.getBridgeState().roomGroupMap[roomId];
+    }
+  });
+
+  test('onRoomMessage routes trusted agent rooms even when the bot cannot inspect members', async () => {
+    const bridge = new MatrixBridge();
+    const roomId = '!agent-room-no-bot:matrix.example.test';
+    bridge.botUserId = '@agent-bridge:matrix.example.test';
+    bridge.addKnownAgent('wf_coordinator');
+    markRoomTrusted(roomId, {
+      agent: 'wf_coordinator',
+      inviter: '@alice:matrix.example.test',
+    });
+    bridge.botClient = {
+      getJoinedRoomMembers: vi.fn().mockRejectedValue(new Error('not in room')),
+    };
+    bridge.submitHumanMessage = vi.fn().mockResolvedValue({ ok: true, id: 'msg_agent_room_1' });
+
+    await bridge.onRoomMessage(roomId, {
+      event_id: '$agent-room-message',
+      sender: '@alice:matrix.example.test',
+      content: {
+        msgtype: 'm.text',
+        body: '/create-issue build a local blog',
+      },
+    });
+
+    expect(bridge.submitHumanMessage).toHaveBeenCalledWith(roomId, expect.objectContaining({
+      from: 'alice',
+      to: 'wf_coordinator',
+      source: 'matrix',
+      source_room: roomId,
+      target_type: 'agent',
+    }));
+  });
+
+  test('backfillAgentManagedRooms uses the agent token when the bot is not in an agent room', async () => {
+    const bridge = new MatrixBridge();
+    const roomId = '!agent-room:matrix.example.test';
+    bridge.addKnownAgent('cursor_agent');
+    markRoomTrusted(roomId, {
+      agent: 'cursor_agent',
+      inviter: '@alice:matrix.example.test',
+    });
+    const eventTs = bridge.startupTs + 1000;
+    bridge.getAgentToken = vi.fn((agentName) => agentName === 'cursor_agent' ? 'agent-token' : null);
+    bridge.onRoomMessage = vi.fn().mockResolvedValue(undefined);
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        chunk: [
+          {
+            event_id: '$create-issue',
+            type: 'm.room.message',
+            origin_server_ts: eventTs,
+            sender: '@alice:matrix.example.test',
+            content: {
+              msgtype: 'm.text',
+              body: '/create-issue build a local blog',
+            },
+          },
+        ],
+      }),
+    }));
+
+    await bridge.backfillAgentManagedRooms();
+
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/_matrix/client/v3/rooms/!agent-room%3Amatrix.example.test/messages?dir=b&limit=25'),
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer agent-token' },
+      }),
+    );
+    expect(bridge.onRoomMessage).toHaveBeenCalledWith(roomId, expect.objectContaining({
+      event_id: '$create-issue',
+      sender: '@alice:matrix.example.test',
+    }));
+
+    bridge.onRoomMessage.mockClear();
+    await bridge.backfillAgentManagedRooms();
+    expect(bridge.onRoomMessage).not.toHaveBeenCalledWith(roomId, expect.objectContaining({
+      event_id: '$create-issue',
+    }));
+
+    // Runtime state is isolated to this test module's temporary runtime dir.
   });
 
   test('pollRegistrations fetches agent names via view=names and provisions new tokens', async () => {
@@ -472,5 +680,120 @@ describe('bridge matrix behavior', () => {
     expect(Buffer.isBuffer(png)).toBe(true);
     expect(png.toString()).toBe('png-bytes');
     expect(execMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('pickDefaultGroupRecipient prefers a coordinator, falls back to a sole agent', () => {
+    const nameFromId = id => id.replace(/^@ac_/, '').replace(/:.*/, '');
+
+    // Coordinator wins even when several agents are present.
+    expect(pickDefaultGroupRecipient(
+      ['@ac_wf_implementer:m.test', '@ac_wf_coordinator:m.test'],
+      nameFromId,
+    )).toBe('wf_coordinator');
+
+    // Exactly one agent → that agent.
+    expect(pickDefaultGroupRecipient(['@ac_solo:m.test'], nameFromId)).toBe('solo');
+
+    // Multiple agents, none a coordinator → nobody (defer to explicit mentions).
+    expect(pickDefaultGroupRecipient(
+      ['@ac_alpha:m.test', '@ac_beta:m.test'],
+      nameFromId,
+    )).toBeNull();
+
+    // Empty / non-array input → null.
+    expect(pickDefaultGroupRecipient([], nameFromId)).toBeNull();
+    expect(pickDefaultGroupRecipient(undefined, nameFromId)).toBeNull();
+  });
+
+  test('resolveInboundRoute prioritizes bot-DM then group over agent-DM', () => {
+    expect(resolveInboundRoute({ groupName: 'g', targetAgent: 'a', isBotDm: true })).toBe('bot-dm');
+    // Group mapping wins over DM auto-detection (Change 1).
+    expect(resolveInboundRoute({ groupName: 'g', targetAgent: 'a', isBotDm: false })).toBe('group');
+    expect(resolveInboundRoute({ groupName: null, targetAgent: 'a', isBotDm: false })).toBe('agent-dm');
+    expect(resolveInboundRoute({ groupName: null, targetAgent: null, isBotDm: false })).toBe('ignore');
+  });
+
+  test('preferredDmRoom resolves the room a human last wrote from', () => {
+    const humanDmKey = name => (typeof name === 'string' && name.startsWith('@') && name.includes(':')
+      ? name.slice(1, name.indexOf(':'))
+      : name);
+    const state = { lastHumanRoom: { 'dm:wf_coordinator:overseer': '!watched:m.test' } };
+
+    expect(preferredDmRoom(state, 'wf_coordinator', 'overseer', humanDmKey)).toBe('!watched:m.test');
+    // MXID normalizes to localpart, matching the recorded key.
+    expect(preferredDmRoom(state, 'wf_coordinator', '@overseer:m.test', humanDmKey)).toBe('!watched:m.test');
+    // No record for this pair → null.
+    expect(preferredDmRoom(state, 'wf_coordinator', 'someone_else', humanDmKey)).toBeNull();
+    // No lastHumanRoom state at all → null.
+    expect(preferredDmRoom({}, 'wf_coordinator', 'overseer', humanDmKey)).toBeNull();
+  });
+
+  test('resolveOutboundDmRoom prefers the reply_to thread over the last room', () => {
+    const decision = resolveOutboundDmRoom({ replyToRoom: '!thread:m.test', lastRoom: '!last:m.test' });
+    expect(decision.room).toBe('!thread:m.test');
+    expect(decision.source).toBe('reply_thread');
+    // The last room is still a fallback candidate for send-failure cascade.
+    expect(decision.candidates).toEqual([
+      { room: '!thread:m.test', source: 'reply_thread' },
+      { room: '!last:m.test', source: 'last_room' },
+    ]);
+  });
+
+  test('resolveOutboundDmRoom falls back to the last room when there is no reply thread', () => {
+    const decision = resolveOutboundDmRoom({ replyToRoom: null, lastRoom: '!last:m.test' });
+    expect(decision.room).toBe('!last:m.test');
+    expect(decision.source).toBe('last_room');
+    expect(decision.candidates).toEqual([{ room: '!last:m.test', source: 'last_room' }]);
+  });
+
+  test('resolveOutboundDmRoom yields null when neither room is known', () => {
+    const decision = resolveOutboundDmRoom({ replyToRoom: null, lastRoom: null });
+    expect(decision.room).toBeNull();
+    expect(decision.source).toBeNull();
+    expect(decision.candidates).toEqual([]);
+    // Missing argument object behaves the same (caller falls to ensureDmRoom).
+    expect(resolveOutboundDmRoom().candidates).toEqual([]);
+  });
+
+  test('resolveOutboundDmRoom de-duplicates when reply thread and last room match', () => {
+    const decision = resolveOutboundDmRoom({ replyToRoom: '!same:m.test', lastRoom: '!same:m.test' });
+    expect(decision.room).toBe('!same:m.test');
+    expect(decision.source).toBe('reply_thread');
+    expect(decision.candidates).toEqual([{ room: '!same:m.test', source: 'reply_thread' }]);
+  });
+
+  test('lookupMessageSourceRoom returns source_room and caches the result', async () => {
+    const bridge = new MatrixBridge();
+    bridge.callBackendApi = vi.fn().mockResolvedValue({ id: 'm1', source_room: '!thread:m.test' });
+
+    expect(await bridge.lookupMessageSourceRoom('m1')).toBe('!thread:m.test');
+    // Second call is served from cache — no extra backend hit.
+    expect(await bridge.lookupMessageSourceRoom('m1')).toBe('!thread:m.test');
+    expect(bridge.callBackendApi).toHaveBeenCalledTimes(1);
+  });
+
+  test('lookupMessageSourceRoom caches a confirmed miss but not a transient error', async () => {
+    const bridge = new MatrixBridge();
+    // Message exists but carries no source_room → confirmed miss (cached).
+    bridge.callBackendApi = vi.fn().mockResolvedValue({ id: 'm2' });
+    expect(await bridge.lookupMessageSourceRoom('m2')).toBeNull();
+    expect(await bridge.lookupMessageSourceRoom('m2')).toBeNull();
+    expect(bridge.callBackendApi).toHaveBeenCalledTimes(1);
+
+    // A thrown lookup is not cached — the next call retries.
+    const throwing = new MatrixBridge();
+    throwing.callBackendApi = vi.fn().mockRejectedValue(new Error('backend down'));
+    expect(await throwing.lookupMessageSourceRoom('m3')).toBeNull();
+    expect(await throwing.lookupMessageSourceRoom('m3')).toBeNull();
+    expect(throwing.callBackendApi).toHaveBeenCalledTimes(2);
+  });
+
+  test('MATRIX_INVITE_POLL_MS defaults to 15s and clamps to a 5s floor', () => {
+    expect(resolveInvitePollMsForTest({})).toBe(15000);
+    expect(resolveInvitePollMsForTest({ MATRIX_INVITE_POLL_MS: '20000' })).toBe(20000);
+    // Below the floor → clamped up to protect rate-limited homeservers.
+    expect(resolveInvitePollMsForTest({ MATRIX_INVITE_POLL_MS: '3000' })).toBe(5000);
+    // Non-numeric → fall back to the 15s default.
+    expect(resolveInvitePollMsForTest({ MATRIX_INVITE_POLL_MS: 'not-a-number' })).toBe(15000);
   });
 });

@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+node_modules
+data
+data.stale*
+logs
+coverage
+remote-dist
+*.log
+*.bak
+

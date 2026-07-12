@@ -26,6 +26,26 @@ assertRuntimeDir(RUNTIME_ROOT);
 // ── Configuration ─────────────────────────────────────────────────────
 const HOMESERVER = process.env.MATRIX_HOMESERVER || 'https://matrix.example.com';
 const REGISTRATION_TOKEN = (process.env.MATRIX_REG_TOKEN || '').trim();
+// Agents that get no Matrix puppet (service relays, or teams excluded on a shared/public server).
+// Shared by the startup ensure-loop AND the periodic registration poll.
+const SKIP_AGENTS = new Set(
+  (process.env.MATRIX_BRIDGE_SKIP_AGENTS || 'openfab-bridge')
+    .split(',').map((s) => s.trim()).filter(Boolean),
+);
+// A homeserver fetch that backs off on M_LIMIT_EXCEEDED. Public servers rate-limit auth hard,
+// so honor the server's `retry_after_ms`, default to a long 20s wait, cap 60s, and be patient
+// (startup may take a couple of minutes, but it won't crash).
+async function fetchWithRateLimit(url, init, tries = 6) {
+  for (let i = 0; i < tries; i++) {
+    const res = await fetch(url, init);
+    if (res.status !== 429) return res;
+    const body = await res.clone().json().catch(() => ({}));
+    const waitMs = Math.min(Number(body.retry_after_ms) || 60000, 120000);
+    console.warn(`[rate-limit] ${url.split('/').pop()} 429; waiting ${Math.round(waitMs / 1000)}s (try ${i + 1}/${tries})`);
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+  return fetch(url, init);
+}
 const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
 const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
   ? DEFAULT_BACKEND_PORT_RAW
@@ -83,6 +103,9 @@ const AUTO_AVATAR_ENABLED = (process.env.MATRIX_AUTO_AVATAR || 'false').trim().t
 const MATRIX_GREETING_MXIDS = new Set(
   (process.env.MATRIX_GREETING_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
+const MATRIX_IGNORED_SENDER_MXIDS = new Set(
+  (process.env.MATRIX_IGNORED_SENDER_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
+);
 const DATA_DIR = path.join(RUNTIME_ROOT, 'data', 'matrix');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
 const AGENT_META_ROOT = path.join(RUNTIME_ROOT, 'data', 'agents');
@@ -127,6 +150,18 @@ const MATRIX_TRUSTED_INVITER_MXIDS = new Set(
 const MATRIX_OPERATOR_MXIDS = new Set(
   (process.env.MATRIX_OPERATOR_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
+// Agent-invite poll cadence. Clamped to a 5s floor because public homeservers
+// (e.g. matrix.palpo.im) rate-limit aggressively; polling faster risks 429s.
+function resolveInvitePollMs(env = process.env) {
+  const raw = Number(env.MATRIX_INVITE_POLL_MS || 15000);
+  const ms = Number.isFinite(raw) ? raw : 15000;
+  return Math.max(5000, ms);
+}
+const MATRIX_INVITE_POLL_MS = resolveInvitePollMs();
+const MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW = Number.parseInt(process.env.MATRIX_AGENT_ROOM_BACKFILL_LIMIT || '25', 10);
+const MATRIX_AGENT_ROOM_BACKFILL_LIMIT = Number.isFinite(MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW) && MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW > 0
+  ? MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW
+  : 25;
 
 mkdirSync(DATA_DIR, { recursive: true });
 mkdirSync(MEDIA_DIR, { recursive: true });
@@ -268,6 +303,7 @@ const state = loadState();
 if (!state.agentAvatars) state.agentAvatars = {};
 if (!state.roomAvatars) state.roomAvatars = {};
 if (!state.agentAvatarMeta) state.agentAvatarMeta = {};
+if (!state.agentRoomBackfillCursors) state.agentRoomBackfillCursors = {};
 // Seed trustedManagedRooms from existing bridge-created rooms
 if (!state.trustedManagedRooms) {
   state.trustedManagedRooms = {};
@@ -426,28 +462,38 @@ async function tryMatrixLogin(username, passwords) {
 
 // ── Matrix account management ─────────────────────────────────────────
 async function matrixRegister(username, password) {
-  if (!REGISTRATION_TOKEN) {
-    throw new Error('MATRIX_REG_TOKEN is required to register Matrix accounts.');
-  }
-  // Step 1: get session
-  const probe = await fetch(`${HOMESERVER}/_matrix/client/v3/register`, {
+  // Step 1: probe for the UIA session + the server's available flows.
+  const probe = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
   });
   const probeData = await probe.json();
+  // Some servers register without UIA (no session) — done.
+  if (probeData.access_token) return probeData;
   const session = probeData.session;
   if (!session) throw new Error(`No session in registration probe: ${JSON.stringify(probeData)}`);
 
-  // Step 2: register with token
-  const res = await fetch(`${HOMESERVER}/_matrix/client/v3/register`, {
+  // Step 2: complete UIA. Use the registration token when configured; otherwise fall back to
+  // open registration (m.login.dummy) when the server offers it.
+  const flows = probeData.flows || [];
+  const supportsDummy = flows.some(
+    (f) => Array.isArray(f.stages) && f.stages.length === 1 && f.stages[0] === 'm.login.dummy',
+  );
+  let auth;
+  if (REGISTRATION_TOKEN) {
+    auth = { type: 'm.login.registration_token', token: REGISTRATION_TOKEN, session };
+  } else if (supportsDummy) {
+    auth = { type: 'm.login.dummy', session };
+  } else {
+    throw new Error(
+      `No usable registration flow for ${username}: set MATRIX_REG_TOKEN or enable open registration. flows=${JSON.stringify(flows)}`,
+    );
+  }
+  const res = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      username,
-      password,
-      auth: { type: 'm.login.registration_token', token: REGISTRATION_TOKEN, session },
-    }),
+    body: JSON.stringify({ username, password, auth }),
   });
   const data = await res.json();
   if (data.access_token) return data;
@@ -455,7 +501,7 @@ async function matrixRegister(username, password) {
 }
 
 async function matrixLogin(username, password) {
-  const res = await fetch(`${HOMESERVER}/_matrix/client/v3/login`, {
+  const res = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -480,19 +526,34 @@ async function ensureBotAccount() {
   if (!BOT_PASSWORD) {
     throw new Error('MATRIX_BOT_PASSWORD is required to login/register bridge bot account.');
   }
-  try {
-    const data = await matrixLogin(BOT_USERNAME, BOT_PASSWORD);
-    state.botToken = data.access_token;
-    saveState();
-    console.log(`Bot logged in as ${data.user_id}`);
-    return data.access_token;
-  } catch {
-    const data = await matrixRegister(BOT_USERNAME, BOT_PASSWORD);
-    state.botToken = data.access_token;
-    saveState();
-    console.log(`Bot registered as ${data.user_id}`);
-    return data.access_token;
+  // Login → if the account doesn't exist yet, register → if it's already taken (e.g. login was
+  // transiently rate-limited and we fell through), wait and retry login. This survives a public
+  // server's aggressive rate limiter instead of crashing the whole bridge.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const data = await matrixLogin(BOT_USERNAME, BOT_PASSWORD);
+      state.botToken = data.access_token;
+      saveState();
+      console.log(`Bot logged in as ${data.user_id}`);
+      return data.access_token;
+    } catch (loginErr) {
+      try {
+        const data = await matrixRegister(BOT_USERNAME, BOT_PASSWORD);
+        state.botToken = data.access_token;
+        saveState();
+        console.log(`Bot registered as ${data.user_id}`);
+        return data.access_token;
+      } catch (regErr) {
+        if (/M_USER_IN_USE/.test(regErr.message)) {
+          console.warn(`Bot account exists but login failed (${loginErr.message}); retrying login after backoff…`);
+          await new Promise((r) => setTimeout(r, 6000));
+          continue;
+        }
+        throw regErr;
+      }
+    }
   }
+  throw new Error('Bot account: login/register attempts exhausted (rate limited?).');
 }
 
 async function ensureAgentAccount(agentName) {
@@ -942,6 +1003,63 @@ function mapRoom(roomId, groupName) {
 function groupForRoom(roomId) { return state.roomGroupMap[roomId] || null; }
 function roomForGroup(groupName) { return state.groupRoomMap[groupName] || null; }
 
+// ── Inbound routing helpers (pure, unit-testable) ──────────────────────
+// Decide how a non-command human message is dispatched. A room that carries a
+// group mapping is treated as a group even if only one agent is joined, so the
+// group mapping always wins over DM auto-detection (bot-DM still comes first).
+export function resolveInboundRoute({ groupName, targetAgent, isBotDm }) {
+  if (isBotDm) return 'bot-dm';
+  if (groupName) return 'group';
+  if (targetAgent) return 'agent-dm';
+  return 'ignore';
+}
+
+// Pick a default recipient for an un-addressed group message so it still wakes
+// someone: prefer a coordinator, else the sole agent, else nobody (let explicit
+// mentions decide). `agentUserIds` are Matrix MXIDs; `agentNameFromId` maps one
+// to an agent-chat name (or null if it is not an agent account).
+export function pickDefaultGroupRecipient(agentUserIds, agentNameFromId) {
+  const ids = Array.isArray(agentUserIds) ? agentUserIds.filter(Boolean) : [];
+  if (ids.length === 0) return null;
+  const coordinator = ids.find(id => {
+    const name = agentNameFromId(id);
+    return name && /coordinator/i.test(name);
+  });
+  if (coordinator) return agentNameFromId(coordinator);
+  if (ids.length === 1) return agentNameFromId(ids[0]);
+  return null;
+}
+
+// Look up the room a human last wrote to an agent from, so an agent→human DM
+// reply lands where the human is looking instead of a hidden global DM room.
+// Key form mirrors ensureDmRoom exactly: `dm:${agent}:${humanDmKey(human)}`.
+export function preferredDmRoom(state, agentName, humanName, humanDmKeyFn) {
+  if (!state || !state.lastHumanRoom) return null;
+  const key = `dm:${agentName}:${humanDmKeyFn(humanName)}`;
+  return state.lastHumanRoom[key] || null;
+}
+
+// Decide where an agent→human DM reply should land, given the two candidate
+// rooms the caller has already resolved. Preference order:
+//   1. reply_thread — the room the replied-to message originated from
+//   2. last_room    — the room this human last DM'd the agent from
+// Returns { room, source } for the top choice (nulls when neither is known, so
+// the caller falls back to the global DM room) plus the ordered, de-duplicated
+// candidate list — the caller tries each in turn so a send failure on one level
+// falls through to the next.
+export function resolveOutboundDmRoom({ replyToRoom, lastRoom } = {}) {
+  const candidates = [];
+  const seen = new Set();
+  for (const [room, source] of [[replyToRoom, 'reply_thread'], [lastRoom, 'last_room']]) {
+    if (typeof room === 'string' && room && !seen.has(room)) {
+      seen.add(room);
+      candidates.push({ room, source });
+    }
+  }
+  const top = candidates[0] || { room: null, source: null };
+  return { room: top.room, source: top.source, candidates };
+}
+
 // ── Room trust classifier (5.8.1) ───────────────────────────────────
 function getRoomTrust(roomId, { inviterMxid = null } = {}) {
   if (MATRIX_TRUSTED_ROOM_IDS.has(roomId)) return { trusted: true, reason: 'allowlist' };
@@ -1277,6 +1395,7 @@ export class MatrixBridge {
     this.recentAgentCompactIds = new Set(); // dedupe compact SSE events
     this.recentlyCreatedRooms = new Set(); // rooms we just created (suppress echo)
     this.recentMatrixEvents = new Map(); // event_id -> { ts, msgId }
+    this._msgSourceRoomCache = new Map(); // reply_to message id -> source_room (capped)
     this.blockedAlertRooms = new Map(); // agent -> Set(roomId)
     this.startupTs = Date.now();
     this.commands = null;
@@ -1286,6 +1405,7 @@ export class MatrixBridge {
     this._loggedUntrustedRooms = new Set(); // dedup scan-joined trust logs
     this._bridgeCreatedGroups = new Set(); // groups we POST'd — skip SSE echo
     this._recentSystemInfoWarningKeys = new Map(); // alert dedupeKey -> last bridged ts
+    this._agentRoomBackfillRunning = false;
     this._warningRouter = new NotificationRouter({
       warning: {
         cooldownMs: WARNING_DEDUPE_WINDOW_MS,
@@ -1315,6 +1435,33 @@ export class MatrixBridge {
 
   callBackendApi(method, routePath, body, contextLabel = '') {
     return backendApi(method, routePath, body, contextLabel);
+  }
+
+  // Resolve the source_room of a prior message so a reply can be routed back to
+  // the thread it belongs to. Uses the existing single-message GET endpoint and
+  // caches results (capped) so a burst of replies to the same message doesn't
+  // re-hit the backend. Confirmed misses cache as null; transient errors don't.
+  async lookupMessageSourceRoom(messageId) {
+    if (typeof messageId !== 'string' || !messageId) return null;
+    if (this._msgSourceRoomCache.has(messageId)) return this._msgSourceRoomCache.get(messageId);
+    let room = null;
+    try {
+      const msg = await this.callBackendApi('GET', `/api/messages/${encodeURIComponent(messageId)}`);
+      // The backend stores inbound `source_room` as camelCase `sourceRoom` — accept both
+      // (same tolerance as the OpenFab bridge's command poller).
+      const sourceRoom = msg && !msg.error ? (msg.source_room || msg.sourceRoom) : null;
+      if (typeof sourceRoom === 'string' && sourceRoom) {
+        room = sourceRoom;
+      }
+    } catch (e) {
+      console.warn(`reply_to source_room lookup failed for ${messageId}: ${e.message}`);
+      return null; // transient failure — don't poison the cache
+    }
+    if (this._msgSourceRoomCache.size >= 200) {
+      this._msgSourceRoomCache.delete(this._msgSourceRoomCache.keys().next().value);
+    }
+    this._msgSourceRoomCache.set(messageId, room);
+    return room;
   }
 
   async fetchKnownAgentNames() {
@@ -1618,15 +1765,25 @@ export class MatrixBridge {
     this.botUserId = await this.botClient.getUserId();
     console.log(`Bot: ${this.botUserId}`);
 
-    // 2. Ensure agent accounts for all known agents
+    // 2. Ensure agent accounts for all known agents.
+    // Service relays (e.g. OpenFab's `openfab-bridge`) post in-app only and never need a Matrix
+    // puppet — skip them. And a single agent's account failure must not crash the whole bridge.
     const agents = await this.fetchKnownAgentNames();
     const validAgentNames = new Set();
     const validAgentKeys = new Set();
     for (const agentName of agents) {
+      if (SKIP_AGENTS.has(agentName)) {
+        console.log(`Skipping Matrix puppet for service agent: ${agentName}`);
+        continue;
+      }
       validAgentNames.add(agentName);
       validAgentKeys.add(this.nameKey(agentName));
-      await ensureAgentAccount(agentName);
-      this.addKnownAgent(agentName);
+      try {
+        await ensureAgentAccount(agentName);
+        this.addKnownAgent(agentName);
+      } catch (e) {
+        console.warn(`Skipping agent ${agentName} (account setup failed): ${e.message}`);
+      }
     }
     // Drop stale tokens that were created for non-agent users.
     let cleanedTokenCount = 0;
@@ -1665,11 +1822,12 @@ export class MatrixBridge {
     if (AUTO_AVATAR_ENABLED) {
       await this.backfillAvatars();
     }
+    await this.backfillAgentManagedRooms();
     setInterval(() => this.scanJoinedRooms(), 120_000);
 
     // 8. Periodically check agent accounts for pending invites
     this.pollAgentInvites();
-    setInterval(() => this.pollAgentInvites(), 30_000);
+    setInterval(() => this.pollAgentInvites(), MATRIX_INVITE_POLL_MS);
 
     // 8. Poll for new agents and humans
     await this.pollRegistrations();
@@ -1685,6 +1843,7 @@ export class MatrixBridge {
       const validAgentNames = new Set(agents);
       const validAgentKeys = new Set(agents.map(name => this.nameKey(name)));
       for (const agentName of agents) {
+        if (SKIP_AGENTS.has(agentName)) continue;
         const wasKnown = this.isKnownAgentName(agentName);
         const canonicalName = this.addKnownAgent(agentName) || this.normalizeName(agentName);
         if (canonicalName && !this.getAgentToken(canonicalName)) {
@@ -1909,6 +2068,7 @@ export class MatrixBridge {
     // Ignore messages from our agent accounts (prevent loops)
     if (isAgentUser(senderId)) return;
     if (senderId === this.botUserId) return;
+    if (MATRIX_IGNORED_SENDER_MXIDS.has(senderId)) return;
 
     // Room trust gate (5.8.1)
     const msgTrust = getRoomTrust(roomId);
@@ -1928,9 +2088,11 @@ export class MatrixBridge {
     }
     const mentions = parseMentions(event.content, body);
     const replyTo = this.resolveReplyToMessageId(parsed.replyEventId);
-    let effectiveMentions = mentions
-      .map(name => this.resolveKnownAgentName(name) || name)
-      .filter(Boolean);
+    let effectiveMentions = [...new Set(mentions
+      // Matrix rooms may also contain Octos or other external bot pills.
+      // Only registered agent-chat agents are routable mention targets.
+      .map(name => this.resolveKnownAgentName(name))
+      .filter(Boolean))];
 
     if (groupName && replyTo) {
       const inferred = await this.inferReplyMention({
@@ -1948,10 +2110,11 @@ export class MatrixBridge {
     // Check if this is a DM room (bot-DM or agent-DM)
     let targetAgent = null;
     let isBotDm = false;
+    let agentMembers = [];
     try {
       const members = await this.botClient.getJoinedRoomMembers(roomId);
       const nonBot = members.filter(m => m !== this.botUserId);
-      const agentMembers = nonBot.filter(m => isAgentUser(m));
+      agentMembers = nonBot.filter(m => isAgentUser(m));
       const humanMembers = nonBot.filter(m => !isAgentUser(m));
 
       if (agentMembers.length === 1 && humanMembers.length >= 1 && !isAgentUser(senderId)) {
@@ -1963,6 +2126,10 @@ export class MatrixBridge {
       }
     } catch (e) {
       console.warn(`Failed to inspect room members for ${roomId}: ${e.message}`);
+    }
+    if (!targetAgent && state.trustedManagedRooms?.[roomId]?.agent) {
+      const managedAgent = state.trustedManagedRooms[roomId].agent;
+      targetAgent = this.resolveKnownAgentName(managedAgent) || this.normalizeName(managedAgent);
     }
 
     // ! commands work in any room (bot-DM, group, agent-DM)
@@ -1986,29 +2153,20 @@ export class MatrixBridge {
       return;
     }
 
-    if (isBotDm) {
+    // Route: group mapping wins over DM auto-detection so a mapped room with a
+    // single agent still behaves as a group (bot-DM is still checked first).
+    const route = resolveInboundRoute({ groupName, targetAgent, isBotDm });
+    if (route === 'bot-dm') {
       // Non-command text in bot DM
       await this.commands.handle(roomId, senderId, body, {});
-    } else if (targetAgent) {
-      // DM to agent
-      console.log(`Matrix DM: ${humanName} → ${targetAgent}: ${body.slice(0, 80)}`);
-      const result = await this.submitHumanMessage(roomId, {
-        from: humanName,
-        to: targetAgent,
-        type: 'human',
-        summary: body,
-        full: '',
-        mentions: [],
-        reply_to: replyTo,
-        source: 'matrix',
-        source_room: roomId,
-        target_type: 'agent',
-        sender_mxid: senderId,
-        trust_level: MATRIX_OPERATOR_MXIDS.has(senderId) ? 'operator' : 'external',
-      });
-      if (eventId && result?.id) this.rememberMatrixEvent(eventId, result.id);
-    } else if (groupName) {
+    } else if (route === 'group') {
       // Group message from human
+      // An un-addressed group message would otherwise wake nobody (push relay
+      // only delivers to mentioned agents), so fall back to a default recipient.
+      if (effectiveMentions.length === 0) {
+        const defaultRecipient = pickDefaultGroupRecipient(agentMembers, agentNameFromUserId);
+        if (defaultRecipient) effectiveMentions = [defaultRecipient];
+      }
       console.log(`Matrix group: ${humanName} → ${groupName}: ${body.slice(0, 80)}`);
       // Ensure @ prefix on mentioned names in body (Matrix pills strip @ in plain text)
       let summary = body;
@@ -2026,6 +2184,32 @@ export class MatrixBridge {
         reply_to: replyTo,
         source: 'matrix',
         source_room: roomId,
+        sender_mxid: senderId,
+        trust_level: MATRIX_OPERATOR_MXIDS.has(senderId) ? 'operator' : 'external',
+      });
+      if (eventId && result?.id) this.rememberMatrixEvent(eventId, result.id);
+    } else if (route === 'agent-dm') {
+      // DM to agent
+      console.log(`Matrix DM: ${humanName} → ${targetAgent}: ${body.slice(0, 80)}`);
+      // Remember which room this human wrote from so the agent's reply lands
+      // here rather than in the global per-(agent,human) DM room (Change 2).
+      const lastRoomKey = `dm:${targetAgent}:${humanDmKey(humanName)}`;
+      state.lastHumanRoom = state.lastHumanRoom || {};
+      if (state.lastHumanRoom[lastRoomKey] !== roomId) {
+        state.lastHumanRoom[lastRoomKey] = roomId;
+        saveState();
+      }
+      const result = await this.submitHumanMessage(roomId, {
+        from: humanName,
+        to: targetAgent,
+        type: 'human',
+        summary: body,
+        full: '',
+        mentions: [],
+        reply_to: replyTo,
+        source: 'matrix',
+        source_room: roomId,
+        target_type: 'agent',
         sender_mxid: senderId,
         trust_level: MATRIX_OPERATOR_MXIDS.has(senderId) ? 'operator' : 'external',
       });
@@ -2391,6 +2575,71 @@ export class MatrixBridge {
     }
   }
 
+  async backfillAgentManagedRooms() {
+    if (this._agentRoomBackfillRunning) return;
+    this._agentRoomBackfillRunning = true;
+    try {
+      const managedRooms = Object.entries(state.trustedManagedRooms || {})
+        .filter(([, meta]) => meta && typeof meta.agent === 'string' && meta.agent.trim());
+      for (const [roomId, meta] of managedRooms) {
+        const agentName = this.resolveKnownAgentName(meta.agent) || this.normalizeName(meta.agent);
+        const token = this.getAgentToken(agentName);
+        if (!agentName || !token) continue;
+        try {
+          const url = `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=${MATRIX_AGENT_ROOM_BACKFILL_LIMIT}`;
+          const res = await fetchWithRateLimit(url, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!res.ok) {
+            const errText = (await res.text().catch(() => '')).slice(0, 200);
+            console.warn(`Agent room backfill failed for ${roomId} (${agentName}): HTTP ${res.status} ${errText}`);
+            continue;
+          }
+          const data = await res.json().catch(() => ({}));
+          const events = Array.isArray(data?.chunk) ? data.chunk.slice().reverse() : [];
+          const cursor = state.agentRoomBackfillCursors[roomId] || {};
+          const cursorTs = Number(cursor.lastTs || 0);
+          const cursorEventIds = new Set(Array.isArray(cursor.eventIds) ? cursor.eventIds : []);
+          const initialSinceTs = cursorTs || Number(meta.addedAt || 0) || this.startupTs;
+          let nextCursorTs = cursorTs;
+          let nextCursorEventIds = new Set(cursorTs ? cursorEventIds : []);
+          let cursorChanged = false;
+          for (const event of events) {
+            if (event?.type !== 'm.room.message') continue;
+            const eventTs = Number(event.origin_server_ts || 0);
+            if (!eventTs) continue;
+            if (cursorTs) {
+              if (eventTs < cursorTs) continue;
+              if (eventTs === cursorTs && event.event_id && cursorEventIds.has(event.event_id)) continue;
+            } else if (initialSinceTs && eventTs < initialSinceTs) {
+              continue;
+            }
+            await this.onRoomMessage(roomId, event);
+            if (eventTs > nextCursorTs) {
+              nextCursorTs = eventTs;
+              nextCursorEventIds = new Set();
+            }
+            if (eventTs === nextCursorTs && event.event_id) {
+              nextCursorEventIds.add(event.event_id);
+            }
+            cursorChanged = true;
+          }
+          if (cursorChanged) {
+            state.agentRoomBackfillCursors[roomId] = {
+              lastTs: nextCursorTs,
+              eventIds: [...nextCursorEventIds].slice(-50),
+            };
+            saveState();
+          }
+        } catch (e) {
+          console.warn(`Agent room backfill error for ${roomId} (${agentName}): ${e.message}`);
+        }
+      }
+    } finally {
+      this._agentRoomBackfillRunning = false;
+    }
+  }
+
   // ── Poll agent accounts for pending invites ─────────────────────
   async pollAgentInvites() {
     for (const agentName of this.knownAgents) {
@@ -2420,20 +2669,58 @@ export class MatrixBridge {
             console.log(`Agent ${agentName} joined room ${roomId}`);
             if (trust.trusted) markRoomTrusted(roomId, { agent: agentName, inviter });
             // Invite bot so it can monitor messages
-            await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
+            const botInviteRes = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
               method: 'POST',
               headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
               body: JSON.stringify({ user_id: this.botUserId }),
             });
-            console.log(`Invited bot into room ${roomId}`);
+            if (botInviteRes.ok) {
+              console.log(`Invited bot into room ${roomId}`);
+            } else {
+              const errText = (await botInviteRes.text().catch(() => '')).slice(0, 200);
+              console.warn(`Bot invite request failed for ${roomId}: HTTP ${botInviteRes.status} ${errText}`);
+            }
           }
         }
       } catch (e) {
         console.warn(`Invite poll failed for ${agentName}: ${e.message}`);
       }
     }
+    await this.pollBotInvites();
     // Re-scan for any newly joined rooms that need mapping
     await this.scanJoinedRooms();
+    await this.backfillAgentManagedRooms();
+  }
+
+  // Backstop for the BOT's own pending invites: the realtime room.invite handler can miss
+  // events across sync gaps, and a pending invite never surfaces in joined-room scans —
+  // without this poll a missed bot invite stays stuck forever. Same trust rules as realtime.
+  async pollBotInvites() {
+    const token = state.botToken;
+    if (!token) return;
+    try {
+      const res = await fetch(`${HOMESERVER}/_matrix/client/v3/sync?filter={"room":{"timeline":{"limit":0}}}&timeout=0`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      const invited = data?.rooms?.invite || {};
+      for (const roomId of Object.keys(invited)) {
+        const inviteState = invited[roomId]?.invite_state?.events || [];
+        const inviter = inviteState.find(e => e.type === 'm.room.member' && e.state_key === this.botUserId)?.sender || null;
+        const trust = getRoomTrust(roomId, { inviterMxid: inviter });
+        roomTrustLog('bot-invite-poll', roomId, trust, `inviter=${inviter}`);
+        if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') continue;
+        try {
+          await this.botClient.joinRoom(roomId);
+          console.log(`Bot joined room ${roomId} via invite poll`);
+          if (trust.trusted) markRoomTrusted(roomId, { inviter });
+        } catch (e) {
+          console.warn(`Bot invite-poll join failed for ${roomId}: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      console.warn(`Bot invite poll failed: ${e.message}`);
+    }
   }
 
   // ── Agent-chat → Matrix ───────────────────────────────────────────
@@ -2938,6 +3225,28 @@ export class MatrixBridge {
       if (senderIsSystem) {
         console.log(`Skipping Matrix DM bridge for system message ${msg.id}`);
         return;
+      }
+      // For agent→human replies, resolve the target room with a 3-level
+      // preference so a backlogged reply lands in the conversation it belongs to
+      // rather than wherever the human last typed:
+      //   1. reply_to thread — the room the replied-to message came from
+      //   2. lastHumanRoom    — the room this human last wrote the agent from
+      //   3. ensureDmRoom      — the global DM room (final fallback, below)
+      // A send failure on one level falls through to the next.
+      if (this.isHuman(msg.to)) {
+        const replyToRoom = msg.reply_to ? await this.lookupMessageSourceRoom(msg.reply_to) : null;
+        const lastRoom = preferredDmRoom(state, agentName, msg.to, humanDmKey);
+        const { candidates } = resolveOutboundDmRoom({ replyToRoom, lastRoom });
+        for (const { room, source } of candidates) {
+          try {
+            await this.sendAsAgent(senderToken, room, plain, html, msg.id);
+            await this.sendAttachmentsForMessage(senderToken, room, msg);
+            console.log(`→ Matrix DM ${agentName} → ${msg.to} (${source}): ${msg.summary.slice(0, 60)}`);
+            return;
+          } catch (e) {
+            console.warn(`Preferred DM room ${room} (${source}) send failed, falling through: ${e.message}`);
+          }
+        }
       }
       const roomId = await this.ensureDmRoom(agentName, msg.to);
       if (roomId) {
@@ -3462,6 +3771,10 @@ export function resetBridgeMatrixTestHooks() {
 
 export function resolveMessageBaseUrlForTest(env = {}) {
   return resolveMessageBaseUrl(env);
+}
+
+export function resolveInvitePollMsForTest(env = {}) {
+  return resolveInvitePollMs(env);
 }
 
 export function buildMessageUrlForTest(messageId, viewToken = null, baseUrl = MSG_BASE_URL) {

@@ -190,9 +190,12 @@ MATRIX_BOT_PASSWORD=<bridge-bot-password>
 MATRIX_REG_TOKEN=<homeserver-registration-token>
 MATRIX_AGENT_PREFIX=ac_
 MATRIX_AGENT_PASSWORD_SECRET=<random-long-secret>
-MATRIX_TRUST_MODE=audit
+MATRIX_TRUST_MODE=enforce
+MATRIX_TRUSTED_INVITER_MXIDS=@operator:matrix.example.com
 MATRIX_OPERATOR_MXIDS=@operator:matrix.example.com
 MATRIX_GREETING_MXIDS=@operator:matrix.example.com
+MATRIX_IGNORED_SENDER_MXIDS=@octosbot:matrix.example.com
+MATRIX_INVITE_POLL_MS=15000
 ```
 
 Install or restart the bridge:
@@ -283,8 +286,11 @@ Most local configuration lives in `.env`. The installer creates it from `.env.ex
 | `MATRIX_BOT_PASSWORD` | empty | Bridge bot password |
 | `MATRIX_REG_TOKEN` | empty | Registration token |
 | `MATRIX_GREETING_MXIDS` | empty | Comma-separated Matrix users the bridge should proactively greet even if the homeserver user directory does not list them |
-| `MATRIX_TRUST_MODE` | `audit` | Room trust policy: `enforce`, `audit`, or `off` |
+| `MATRIX_IGNORED_SENDER_MXIDS` | empty | Comma-separated Matrix senders the bridge should ignore entirely, useful for coexisting with external appservice bots |
+| `MATRIX_TRUST_MODE` | `enforce` | Room trust policy: `enforce`, `audit`, or `off`. Use `enforce` on public homeservers |
+| `MATRIX_TRUSTED_INVITER_MXIDS` | empty | Comma-separated Matrix users whose room invites are trusted and auto-joinable |
 | `MATRIX_OPERATOR_MXIDS` | empty | Matrix users allowed to operate privileged commands |
+| `MATRIX_INVITE_POLL_MS` | `15000` | Agent-invite poll interval in ms, clamped to a 5000 floor. Public homeservers like matrix.palpo.im rate-limit aggressively, so do not poll faster |
 
 ### Supervisor and LLM
 

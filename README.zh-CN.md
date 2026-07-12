@@ -190,9 +190,12 @@ MATRIX_BOT_PASSWORD=<bridge-bot-password>
 MATRIX_REG_TOKEN=<homeserver-registration-token>
 MATRIX_AGENT_PREFIX=ac_
 MATRIX_AGENT_PASSWORD_SECRET=<random-long-secret>
-MATRIX_TRUST_MODE=audit
+MATRIX_TRUST_MODE=enforce
+MATRIX_TRUSTED_INVITER_MXIDS=@operator:matrix.example.com
 MATRIX_OPERATOR_MXIDS=@operator:matrix.example.com
 MATRIX_GREETING_MXIDS=@operator:matrix.example.com
+MATRIX_IGNORED_SENDER_MXIDS=@octosbot:matrix.example.com
+MATRIX_INVITE_POLL_MS=15000
 ```
 
 安装或重启 bridge：
@@ -283,8 +286,11 @@ agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
 | `MATRIX_BOT_PASSWORD` | 空 | 桥接机器人密码 |
 | `MATRIX_REG_TOKEN` | 空 | 注册 token |
 | `MATRIX_GREETING_MXIDS` | 空 | 逗号分隔的 Matrix 用户；即使 homeserver user directory 不列出这些用户，bridge 也会主动问候 |
-| `MATRIX_TRUST_MODE` | `audit` | 房间信任策略：`enforce`、`audit` 或 `off` |
+| `MATRIX_IGNORED_SENDER_MXIDS` | 空 | 逗号分隔的 Matrix sender；bridge 会完全忽略这些发送者，适合和外部 appservice bot 共存 |
+| `MATRIX_TRUST_MODE` | `enforce` | 房间信任策略：`enforce`、`audit` 或 `off`。公网 homeserver 建议使用 `enforce` |
+| `MATRIX_TRUSTED_INVITER_MXIDS` | 空 | 逗号分隔的 Matrix 用户；这些用户邀请的房间会被信任并自动加入 |
 | `MATRIX_OPERATOR_MXIDS` | 空 | 允许执行高权限命令的 Matrix 用户 |
+| `MATRIX_INVITE_POLL_MS` | `15000` | 邀请轮询间隔（毫秒），最低钳制到 5000。matrix.palpo.im 等公共 homeserver 限流严格，不要轮询更快 |
 
 ### Supervisor 与 LLM
 

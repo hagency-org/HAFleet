@@ -25,6 +25,7 @@ import os from 'os';
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
+import { indexPool, agentRole, agentCapability, selectAgent, resolveTier, TIER_RUNTIME } from './lib/matrix-agent.js';
 import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
 import { createAlertStore, RECOVERY_MAP as ALERT_RECOVERY_MAP } from './lib/alert-store.js';
@@ -7546,6 +7547,7 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   const {
     name,
     role,
+    capability,
     tmux,
     type: agentType,
     identity,
@@ -7604,6 +7606,10 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   agents[agentName] = {
     name: agentName,
     role: role ?? existing.role ?? null,
+    // matrix-Agent capability tier (strong/medium/lightweight); invalid/absent → keep existing.
+    capability: (['strong', 'medium', 'lightweight'].includes(capability)
+      ? capability
+      : (existing.capability ?? null)),
     identity: identity ?? existing.identity ?? null,
     tmux: resolvedTmux,
     type: presetFramework ?? agentType ?? existing.type ?? 'agent',
@@ -7796,6 +7802,96 @@ app.get('/api/agents', (req, res) => {
     return res.json(names);
   }
   res.json(records.map(serializeAgent));
+});
+
+// matrix-Agent pool view (Phase 2): the role×capability grid, for capability-aware dispatch.
+// Read-only. Filters: ?role= ?capability= ?state=idle|busy|any (default any).
+// matrix-Agent capability scheduler (Phase 3): a reservation/queue over the pool. agent-chat
+// decides *which* agent staffs a (role, capability); the caller (e.g. the OpenFab Bridge)
+// delivers the task to it and calls /release on completion. Busy/queue are in-memory.
+const dispatchBusy = new Set();      // agent names currently reserved
+const dispatchQueues = new Map();    // `${role}:${tier}` → [{ ticket, role, tier, task, room }]
+const provisionReservations = new Map(); // `${role}:${tier}` → count of outstanding provision plans
+let dispatchTicketSeq = 0;
+const cellKey = (role, tier) => `${role}:${tier}`;
+const annotateBusy = (records) => records.map((a) => ({ ...a, busy: dispatchBusy.has(a.name) }));
+const poolRecords = () =>
+  annotateBusy(Object.values(agents).filter(isAgentRecord).map(serializeAgent));
+
+app.get('/api/pool', (req, res) => {
+  refreshServerLiveness();
+  let records = poolRecords();
+  const state = String(req.query.state || 'any').toLowerCase();
+  if (state === 'idle') records = records.filter(a => a.online !== false && a.busy !== true);
+  else if (state === 'busy') records = records.filter(a => a.busy === true);
+  if (req.query.role) records = records.filter(a => agentRole(a) === String(req.query.role));
+  if (req.query.capability) records = records.filter(a => agentCapability(a) === String(req.query.capability));
+  const grid = indexPool(records);
+  const counts = {};
+  for (const [r, byCap] of Object.entries(grid)) {
+    counts[r] = Object.fromEntries(Object.entries(byCap).map(([c, list]) => [c, list.length]));
+  }
+  res.json({
+    grid,
+    counts,
+    total: records.length,
+    agents: records.map(a => ({ name: a.name, role: agentRole(a), capability: agentCapability(a), online: a.online !== false, busy: a.busy === true })),
+  });
+});
+
+// Reserve an agent for (role, capability), or queue when the pool can't staff it. The caller
+// delivers the task to the returned agent and calls /api/dispatch/release when it completes.
+app.post('/api/dispatch', (req, res) => {
+  refreshServerLiveness();
+  const role = req.body?.role ? String(req.body.role) : null;
+  if (!role) return res.status(400).json({ error: 'role required' });
+  const tier = resolveTier(role, req.body?.capability ? String(req.body.capability) : undefined);
+  const agent = selectAgent(poolRecords(), role, tier); // poolRecords() already carries busy
+  if (agent) {
+    dispatchBusy.add(agent.name);
+    return res.json({ status: 'routed', agent: agent.name, role, tier });
+  }
+  // Phase 4: auto-provision. When MATRIX_AGENT_MAX_PER_CELL > 0 and the cell is below the cap,
+  // return a `provision` plan (the launcher runs `up-v1` with the tier's runtime) instead of
+  // queuing. Default 0 = off (pure queue) — safe. The decision is pure; spawning is the edge.
+  const key = cellKey(role, tier);
+  const cap = Number(process.env.MATRIX_AGENT_MAX_PER_CELL || 0);
+  if (cap > 0) {
+    const inCell = poolRecords().filter((a) => agentRole(a) === role && agentCapability(a) === tier).length;
+    const reserved = provisionReservations.get(key) || 0;
+    if (inCell + reserved < cap) {
+      provisionReservations.set(key, reserved + 1);
+      const name = `mx_${role}_${tier}_${dispatchTicketSeq++}`;
+      return res.json({ status: 'provision', role, tier, name, runtime: TIER_RUNTIME[tier] });
+    }
+  }
+  const ticket = `disp-${Date.now()}-${dispatchTicketSeq++}`;
+  const q = dispatchQueues.get(key) || [];
+  q.push({ ticket, role, tier, task: req.body?.task ?? null, room: req.body?.room ?? null });
+  dispatchQueues.set(key, q);
+  res.json({ status: 'queued', ticket, role, tier, queueDepth: q.length });
+});
+
+// Free a reserved agent; if a ticket is waiting for its cell, reserve it again and hand the
+// caller the drained ticket to deliver. (Auto-provision of new agents is Phase 4.)
+app.post('/api/dispatch/release', (req, res) => {
+  const name = req.body?.agent ? String(req.body.agent) : null;
+  if (!name) return res.status(400).json({ error: 'agent required' });
+  dispatchBusy.delete(name);
+  const rec = agents[name];
+  const role = rec ? agentRole(serializeAgent(rec)) : null;
+  const tier = rec ? agentCapability(serializeAgent(rec)) : null;
+  if (role && tier) {
+    const key = cellKey(role, tier);
+    const q = dispatchQueues.get(key) || [];
+    const next = q.shift();
+    if (next) {
+      dispatchQueues.set(key, q);
+      dispatchBusy.add(name); // re-reserve for the drained ticket
+      return res.json({ status: 'drained', agent: name, ...next });
+    }
+  }
+  res.json({ status: 'released', agent: name });
 });
 
 app.get('/api/agents/:name', (req, res) => {
