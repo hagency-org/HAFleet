@@ -344,7 +344,7 @@ describe('push relay dispatch', () => {
     expect(delivered[0].target).toBe('alpha:0.0');
   });
 
-  test('local relay ignores backend-sourced message SSE so dashboard queue owns local delivery', async () => {
+  test('local_relay_ignores_dashboard_owned_backend_sse', async () => {
     const delivered = [];
     const eventPosts = [];
     seedRelayState({
@@ -372,6 +372,7 @@ describe('push relay dispatch', () => {
       type: 'human',
       priority: 'urgent',
       source: 'matrix',
+      deliveryOwner: 'dashboard-queue',
       summary: 'backend queue should own this',
       mentions: [],
     }));

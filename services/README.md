@@ -25,6 +25,10 @@ docker compose -f services/services-team.compose.yml ps
 docker compose -f services/services-team.compose.yml down
 ```
 
+The environment file must define the same non-empty `MATRIX_BRIDGE_SECRET` for
+the backend and bridge. Matrix ingestion fails closed without it; generate a
+secret with `openssl rand -hex 32`.
+
 The Compose profile uses host networking because the existing backend and
 dashboard bind to `127.0.0.1`. The bridge also uses the host PID namespace so
 its persisted owner record can distinguish a restarted container from the old
