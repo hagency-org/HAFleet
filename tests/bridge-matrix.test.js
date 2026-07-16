@@ -1094,5 +1094,49 @@ describe('bridge matrix behavior', () => {
 
       expect(matrixRateLimitGateForTest.beforeRequest()).toBe(false);
     });
+
+    // Review follow-up: the candidates loop itself (createRoom via ensureBotDmRoom, then
+    // sendMessage via greetHuman) had no beforeRequest() check between iterations, so a
+    // 429 partway through a batch (full server first run / large MATRIX_GREETING_MXIDS)
+    // tripped the shared cooldown but the remaining candidates were attempted anyway.
+    test('discoverAndGreetHumans: a 429 on createRoom for the first candidate aborts the remaining candidates', async () => {
+      const bridge = new MatrixBridge();
+      bridge.botClient = { sendMessage: vi.fn().mockResolvedValue(undefined) };
+      const users = [
+        '@gate-multi-a:matrix.example.test',
+        '@gate-multi-b:matrix.example.test',
+        '@gate-multi-c:matrix.example.test',
+      ];
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce({ status: 200, ok: true, json: async () => ({ results: users.map(u => ({ user_id: u })) }) })
+        .mockResolvedValueOnce(rateLimitedFetchResponse());
+      vi.stubGlobal('fetch', fetchMock);
+
+      await bridge.discoverAndGreetHumans();
+
+      // 1 search + 1 createRoom (gate-multi-a, 429) — gate-multi-b/c's createRoom never fires.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(bridge.botClient.sendMessage).not.toHaveBeenCalled();
+    });
+
+    test('discoverAndGreetHumans: a 429 from sendMessage (matrix-bot-sdk) for the first candidate aborts the remaining candidates', async () => {
+      const bridge = new MatrixBridge();
+      const sendMessage = vi.fn()
+        .mockRejectedValueOnce(matrixSdkRateLimitError(4000))
+        .mockResolvedValue(undefined);
+      bridge.botClient = { sendMessage };
+      const users = ['@gate-send-a:matrix.example.test', '@gate-send-b:matrix.example.test'];
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce({ status: 200, ok: true, json: async () => ({ results: users.map(u => ({ user_id: u })) }) })
+        .mockResolvedValue({ status: 200, ok: true, json: async () => ({ room_id: '!gate-send-dm:matrix.example.test' }) });
+      vi.stubGlobal('fetch', fetchMock);
+
+      await bridge.discoverAndGreetHumans();
+
+      // Only gate-send-a's sendMessage is attempted; gate-send-b's greetHuman (createRoom
+      // + sendMessage) never runs once the shared cooldown trips.
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
   });
 });

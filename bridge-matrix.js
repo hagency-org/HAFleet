@@ -1959,6 +1959,14 @@ export class MatrixBridge {
     }
 
     for (const user of candidates.values()) {
+      // A 429 from any earlier candidate's createRoom/sendMessage (below) trips the
+      // shared gate — abort the rest of this batch rather than keep greeting through
+      // it. A busy server's first run (or a freshly-expanded MATRIX_GREETING_MXIDS)
+      // can otherwise fan out N greet attempts back-to-back in one tick.
+      if (!rateLimitGate.beforeRequest()) {
+        console.warn('Human discovery: cooling down (Matrix rate limit), aborting remaining candidates this round');
+        break;
+      }
       const match = user.user_id.match(/^@([^:]+):/);
       if (!match) continue;
       const name = match[1];
@@ -1989,6 +1997,10 @@ export class MatrixBridge {
           preset: 'trusted_private_chat',
         }),
       });
+      if (await rateLimitGate.observeResponse(res)) {
+        console.warn(`Bot DM room: 429 creating room for ${humanName}; shared cooldown updated`);
+        return null;
+      }
       const data = await res.json();
       if (data.room_id) {
         state.botDmRooms[dmKey] = data.room_id;
@@ -1997,7 +2009,9 @@ export class MatrixBridge {
       }
       console.error(`Failed to create bot DM room for ${humanName}:`, data);
     } catch (e) {
-      console.error(`Error creating bot DM room for ${humanName}:`, e.message);
+      if (!rateLimitGate.observeError(e)) {
+        console.error(`Error creating bot DM room for ${humanName}:`, e.message);
+      }
     }
     return null;
   }
@@ -2019,7 +2033,9 @@ export class MatrixBridge {
       saveState();
       console.log(`Greeted human: ${humanName}`);
     } catch (e) {
-      console.error(`Failed to greet ${humanName}:`, e.message);
+      if (!rateLimitGate.observeError(e)) {
+        console.error(`Failed to greet ${humanName}:`, e.message);
+      }
     }
   }
 
