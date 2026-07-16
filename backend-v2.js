@@ -29,6 +29,7 @@ import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOF
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
 import { indexPool, agentRole, agentCapability, selectAgent, resolveTier, TIER_RUNTIME } from './lib/matrix-agent.js';
+import { DispatchLeaseStore } from './src/dispatch-lease-store.mjs';
 import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
 import { createAlertStore, RECOVERY_MAP as ALERT_RECOVERY_MAP } from './lib/alert-store.js';
@@ -135,6 +136,21 @@ const AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW = Number.parseFloat(process.env.AGENT_SC
 const AGENT_SCOPE_ALERT_CLEAR_RATIO = Number.isFinite(AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW)
   ? Math.min(0.99, Math.max(0.1, AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW))
   : 0.85;
+// Task 7: matrix-Agent dispatch lease TTL. Floor-validated — below this, a renew round-trip
+// under real process/network latency has no realistic chance of landing before expiry, so a
+// smaller configured value is almost certainly a misconfiguration and gets clamped up rather
+// than honored.
+const DISPATCH_LEASE_TTL_DEFAULT_MS = 15 * 60 * 1000; // 15 minutes
+const DISPATCH_LEASE_TTL_FLOOR_MS = 1000; // 1 second
+const DISPATCH_LEASE_TTL_MS_RAW = Number.parseInt(process.env.AGENTCHAT_DISPATCH_LEASE_TTL_MS || String(DISPATCH_LEASE_TTL_DEFAULT_MS), 10);
+const DISPATCH_LEASE_TTL_MS = Number.isFinite(DISPATCH_LEASE_TTL_MS_RAW) && DISPATCH_LEASE_TTL_MS_RAW > 0
+  ? Math.max(DISPATCH_LEASE_TTL_FLOOR_MS, DISPATCH_LEASE_TTL_MS_RAW)
+  : DISPATCH_LEASE_TTL_DEFAULT_MS;
+// Owner assigned to a lease when the caller doesn't supply one — keeps pre-Task-7 callers (e.g.
+// the OpenFab Bridge as of this writing, which never sends `owner`) working: they get a real
+// lease, just not one they can renew/release under strict ownership (they don't try to; they
+// use the legacy release path, which has no ownership check — see /api/dispatch/release below).
+const DISPATCH_LEASE_DEFAULT_OWNER = 'unspecified';
 const OFFLINE_CATCHUP_LIST_LIMIT = Number.parseInt(process.env.OFFLINE_CATCHUP_LIST_LIMIT || '50', 10);
 const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_ITEMS || '8', 10);
 const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
@@ -7986,17 +8002,91 @@ app.get('/api/agents', (req, res) => {
 // matrix-Agent capability scheduler (Phase 3): a reservation/queue over the pool. agent-chat
 // decides *which* agent staffs a (role, capability); the caller (e.g. the OpenFab Bridge)
 // delivers the task to it and calls /release on completion. Busy/queue are in-memory.
-const dispatchBusy = new Set();      // agent names currently reserved
+//
+// Task 7: the reservation is an owner-bound, renewable lease (DispatchLeaseStore), not a bare
+// busy flag — a crashed/stuck caller can no longer pin an agent forever. A lease is claimed at
+// dispatch time (leaseId + expiresAt in the response), extended via POST /api/dispatch/renew,
+// and released via POST /api/dispatch/release; renew/release both require the exact
+// (leaseId, agent, owner) tuple and reject otherwise (owner mismatch, unknown/stale leaseId, or
+// an already-expired lease — distinct 4xx reasons). POST /api/dispatch/release also still
+// accepts the pre-Task-7 call shape ({agent} only, no leaseId/owner) for callers that predate
+// ownership (e.g. the OpenFab Bridge as of this writing — see the Task 7 report for the full
+// caller inventory): it releases whatever lease currently holds that agent, no ownership check.
+// An unrenewed lease is reaped once its TTL lapses (checked lazily on GET /api/pool and
+// POST /api/dispatch, mirroring refreshServerLiveness()'s placement): the lease is invalidated
+// first, then the agent is freed, so nothing can observe "agent free, lease still valid" mid-
+// reap. A reaped lease is requeued at most once, and only if it carries a durable ticket (the
+// queue-drain ticket, or one the caller supplied at dispatch time); otherwise the task is
+// presumed failed and an alert is raised — never silently retried/duplicated. The dispatch
+// queue itself remains process-local (known limitation, unchanged by Task 7): a restart drops
+// in-flight leases and queued tickets alike; this is not restart-safe queueing.
+const dispatchLeaseStore = new DispatchLeaseStore({ ttlMs: DISPATCH_LEASE_TTL_MS });
 const dispatchQueues = new Map();    // `${role}:${tier}` → [{ ticket, role, tier, task, room }]
 const provisionReservations = new Map(); // `${role}:${tier}` → count of outstanding provision plans
 let dispatchTicketSeq = 0;
 const cellKey = (role, tier) => `${role}:${tier}`;
-const annotateBusy = (records) => records.map((a) => ({ ...a, busy: dispatchBusy.has(a.name) }));
+const annotateBusy = (records) => records.map((a) => ({ ...a, busy: dispatchLeaseStore.isBusy(a.name) }));
 const poolRecords = () =>
   annotateBusy(Object.values(agents).filter(isAgentRecord).map(serializeAgent));
 
+const DISPATCH_LEASE_ERROR_STATUS = {
+  missing_fields: 400,
+  owner_mismatch: 403,
+  lease_not_found: 404,
+  lease_expired: 410,
+  agent_busy: 409,
+};
+
+function respondDispatchLeaseError(res, error) {
+  const reason = error?.reason || 'internal_error';
+  const status = DISPATCH_LEASE_ERROR_STATUS[reason] || 500;
+  return res.status(status).json({ error: error?.message || 'dispatch lease error', reason });
+}
+
+// Reap leases whose TTL lapsed without a renew. For each: invalidate the lease, free the agent,
+// then either requeue its ticket (durable tickets only, at most once) or mark it failed and
+// raise an alert (no ticket ⇒ never silently duplicate the task). See the Task 7 note above.
+function reapDispatchLeases() {
+  const reaped = dispatchLeaseStore.reapExpired(Date.now());
+  for (const { lease, context, outcome } of reaped) {
+    if (outcome === 'requeued') {
+      const key = cellKey(context.role, context.tier);
+      const q = dispatchQueues.get(key) || [];
+      q.push({ ticket: lease.ticket, role: context.role, tier: context.tier, task: context.task, room: context.room });
+      dispatchQueues.set(key, q);
+      console.warn(`[dispatch-lease] ${lease.agent} lease ${lease.leaseId} expired unrenewed; requeued ticket ${lease.ticket}`);
+      continue;
+    }
+    console.warn(`[dispatch-lease] ${lease.agent} lease ${lease.leaseId} expired unrenewed with no durable ticket; marking failed`);
+    try {
+      alertStore.ingest({
+        alertType: 'dispatch_lease_expired',
+        dedupeKey: `dispatch_lease_expired:${lease.agent}:${lease.leaseId}`,
+        severity: 'warning',
+        source: 'backend',
+        sourceAgent: lease.agent,
+        summary: `Dispatch lease for '${lease.agent}' expired without renewal and has no durable ticket to requeue`,
+        detail: {
+          leaseId: lease.leaseId, agent: lease.agent, owner: lease.owner, taskId: lease.taskId,
+          role: context.role, tier: context.tier, expiresAt: lease.expiresAt,
+        },
+        owner: 'matrix-agent-dispatch',
+        runbook: 'inspect the dispatch lease + task state for this agent; redispatch manually if the work is still needed',
+        impact: 'the in-flight task on this agent is presumed failed; no automatic retry because no durable ticket exists to requeue from',
+        recoveryCondition: 'operator investigates and manually redispatches, or explicitly resolves this alert',
+        correlation: { dedupeKey: `dispatch_lease_expired:${lease.agent}:${lease.leaseId}`, leaseId: lease.leaseId, agent: lease.agent },
+        tags: ['dispatch-lease', `agent:${lease.agent}`],
+      });
+    } catch (error) {
+      console.warn(`[dispatch-lease] failed to ingest expiry alert for ${lease.leaseId}: ${error?.message || error}`);
+    }
+  }
+  return reaped;
+}
+
 app.get('/api/pool', (req, res) => {
   refreshServerLiveness();
+  reapDispatchLeases();
   let records = poolRecords();
   const state = String(req.query.state || 'any').toLowerCase();
   if (state === 'idle') records = records.filter(a => a.online !== false && a.busy !== true);
@@ -8018,19 +8108,29 @@ app.get('/api/pool', (req, res) => {
 
 // Reserve an agent for (role, capability), or queue when the pool can't staff it. The caller
 // delivers the task to the returned agent and calls /api/dispatch/release when it completes.
+// Optional body fields `owner`/`ticket`/`taskId` feed the Task 7 lease (see notes above); a
+// missing `owner` gets DISPATCH_LEASE_DEFAULT_OWNER so pre-Task-7 callers keep working.
 app.post('/api/dispatch', (req, res) => {
   refreshServerLiveness();
+  reapDispatchLeases();
   const role = req.body?.role ? String(req.body.role) : null;
   if (!role) return res.status(400).json({ error: 'role required' });
   const tier = resolveTier(role, req.body?.capability ? String(req.body.capability) : undefined);
   const agent = selectAgent(poolRecords(), role, tier); // poolRecords() already carries busy
   if (agent) {
-    dispatchBusy.add(agent.name);
-    return res.json({ status: 'routed', agent: agent.name, role, tier });
+    const owner = req.body?.owner ? String(req.body.owner) : DISPATCH_LEASE_DEFAULT_OWNER;
+    const ticket = req.body?.ticket ? String(req.body.ticket) : null;
+    const taskId = req.body?.taskId ? String(req.body.taskId) : null;
+    const lease = dispatchLeaseStore.create({
+      agent: agent.name, owner, taskId, ticket,
+      role, tier, task: req.body?.task ?? null, room: req.body?.room ?? null,
+    });
+    return res.json({ status: 'routed', agent: agent.name, role, tier, leaseId: lease.leaseId, expiresAt: lease.expiresAt });
   }
   // Phase 4: auto-provision. When MATRIX_AGENT_MAX_PER_CELL > 0 and the cell is below the cap,
   // return a `provision` plan (the launcher runs `up-v1` with the tier's runtime) instead of
   // queuing. Default 0 = off (pure queue) — safe. The decision is pure; spawning is the edge.
+  // No lease is created here: the named agent doesn't exist yet, so there's nothing to reserve.
   const key = cellKey(role, tier);
   const cap = Number(process.env.MATRIX_AGENT_MAX_PER_CELL || 0);
   if (cap > 0) {
@@ -8049,12 +8149,51 @@ app.post('/api/dispatch', (req, res) => {
   res.json({ status: 'queued', ticket, role, tier, queueDepth: q.length });
 });
 
+// Extend a lease's expiresAt from now (Task 7). Requires the exact (leaseId, agent, owner)
+// tuple that POST /api/dispatch handed out; this is how a long task survives past one TTL
+// window — the lease is never killed on createdAt age alone as long as it keeps renewing.
+app.post('/api/dispatch/renew', (req, res) => {
+  const leaseId = req.body?.leaseId ? String(req.body.leaseId) : null;
+  const agent = req.body?.agent ? String(req.body.agent) : null;
+  const owner = req.body?.owner ? String(req.body.owner) : null;
+  if (!leaseId || !agent || !owner) {
+    return res.status(400).json({ error: 'leaseId, agent, and owner are required', reason: 'missing_fields' });
+  }
+  try {
+    const lease = dispatchLeaseStore.renew({ leaseId, agent, owner });
+    return res.json({ status: 'renewed', agent, leaseId: lease.leaseId, expiresAt: lease.expiresAt });
+  } catch (error) {
+    return respondDispatchLeaseError(res, error);
+  }
+});
+
 // Free a reserved agent; if a ticket is waiting for its cell, reserve it again and hand the
 // caller the drained ticket to deliver. (Auto-provision of new agents is Phase 4.)
+//
+// Task 7 ownership: pass {agent, leaseId, owner} to release under the strict lease contract
+// (owner mismatch / unknown-or-stale leaseId / already-expired lease → rejected, distinct 4xx
+// reasons). Pass {agent} alone (no leaseId, no owner) for the pre-Task-7 legacy shape: it
+// releases whatever lease currently holds that agent, no ownership check — this is what keeps
+// callers that predate leases (e.g. the OpenFab Bridge as of this writing) working unmodified.
+// Passing exactly one of leaseId/owner (not both, not neither) is a malformed request, rejected
+// as `missing_fields` rather than guessed at.
 app.post('/api/dispatch/release', (req, res) => {
   const name = req.body?.agent ? String(req.body.agent) : null;
   if (!name) return res.status(400).json({ error: 'agent required' });
-  dispatchBusy.delete(name);
+  const leaseId = req.body?.leaseId ? String(req.body.leaseId) : null;
+  const owner = req.body?.owner ? String(req.body.owner) : null;
+  if (leaseId || owner) {
+    if (!leaseId || !owner) {
+      return res.status(400).json({ error: 'leaseId and owner must be provided together', reason: 'missing_fields' });
+    }
+    try {
+      dispatchLeaseStore.release({ leaseId, agent: name, owner });
+    } catch (error) {
+      return respondDispatchLeaseError(res, error);
+    }
+  } else {
+    dispatchLeaseStore.releaseByAgent(name); // legacy shape — tolerant no-op if nothing to release
+  }
   const rec = agents[name];
   const role = rec ? agentRole(serializeAgent(rec)) : null;
   const tier = rec ? agentCapability(serializeAgent(rec)) : null;
@@ -8064,8 +8203,13 @@ app.post('/api/dispatch/release', (req, res) => {
     const next = q.shift();
     if (next) {
       dispatchQueues.set(key, q);
-      dispatchBusy.add(name); // re-reserve for the drained ticket
-      return res.json({ status: 'drained', agent: name, ...next });
+      // Re-reserve for the drained ticket under a fresh lease. The releasing owner (if any)
+      // picks it back up; legacy (ownerless) releases fall back to the default owner.
+      const drainedLease = dispatchLeaseStore.create({
+        agent: name, owner: owner || DISPATCH_LEASE_DEFAULT_OWNER, taskId: null, ticket: next.ticket,
+        role, tier, task: next.task, room: next.room,
+      });
+      return res.json({ status: 'drained', agent: name, ...next, leaseId: drainedLease.leaseId, expiresAt: drainedLease.expiresAt });
     }
   }
   res.json({ status: 'released', agent: name });
@@ -10939,6 +11083,7 @@ export const __backendV2TestInternals = {
   setMatrixDispatchFailureForTest(stage = null) {
     matrixDispatchFailureStageForTest = stage;
   },
+  dispatchLeaseStoreForTest: dispatchLeaseStore,
 };
 
 if (process.argv[1] === __filename) {
