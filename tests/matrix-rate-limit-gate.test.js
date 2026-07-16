@@ -258,4 +258,67 @@ describe('MatrixRateLimitGate', () => {
     expect(wasLimited).toBe(true);
     expect(gate.cooldownRemainingMs()).toBe(42_000); // fell back to the default
   });
+
+  // Read-only getter (Task 8: standalone doctor surfaces this in the bridge health
+  // record) — the gate is the single source of truth for 429 state, so the doctor
+  // reads it here instead of the bridge duplicating its own tracking.
+  describe('lastObservedAtMs', () => {
+    test('is null before any 429 has been observed', () => {
+      const gate = new MatrixRateLimitGate({ now: makeClock() });
+      expect(gate.lastObservedAtMs()).toBeNull();
+    });
+
+    test('records the clock time of a 429 response', async () => {
+      const clock = makeClock(1_000_000);
+      const gate = new MatrixRateLimitGate({ now: clock });
+
+      await gate.observeResponse(fakeResponse(429, {}));
+
+      expect(gate.lastObservedAtMs()).toBe(1_000_000);
+    });
+
+    test('records the clock time of a 429 thrown error', () => {
+      const clock = makeClock(2_000_000);
+      const gate = new MatrixRateLimitGate({ now: clock });
+
+      gate.observeError(matrixError({ retryAfterMs: 5_000 }));
+
+      expect(gate.lastObservedAtMs()).toBe(2_000_000);
+    });
+
+    test('does not update on non-429 responses or unrelated errors', async () => {
+      const gate = new MatrixRateLimitGate({ now: makeClock() });
+
+      await gate.observeResponse(fakeResponse(200, {}));
+      gate.observeError(new Error('ECONNRESET'));
+
+      expect(gate.lastObservedAtMs()).toBeNull();
+    });
+
+    test('advances to the most recent 429 even while a longer cooldown from an earlier one is still active', async () => {
+      const clock = makeClock(1_000_000);
+      const gate = new MatrixRateLimitGate({ now: clock });
+
+      await gate.observeResponse(fakeResponse(429, { retry_after_ms: 60_000 }));
+      expect(gate.lastObservedAtMs()).toBe(1_000_000);
+
+      clock.advance(1_000);
+      // Shorter retry_after_ms — does not extend the cooldown (Behavior 5), but it was
+      // still observed just now, so "last observed" must move forward regardless.
+      await gate.observeResponse(fakeResponse(429, { retry_after_ms: 2_000 }));
+
+      expect(gate.lastObservedAtMs()).toBe(1_001_000);
+    });
+
+    test('reset() does not clear the last-observed timestamp (it is a historical record, not cooldown state)', async () => {
+      const clock = makeClock(3_000_000);
+      const gate = new MatrixRateLimitGate({ now: clock });
+      await gate.observeResponse(fakeResponse(429, {}));
+
+      gate.reset();
+
+      expect(gate.lastObservedAtMs()).toBe(3_000_000);
+      expect(gate.isCoolingDown()).toBe(false);
+    });
+  });
 });

@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import os from 'os';
 import path from 'path';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'fs';
 import { pathToFileURL } from 'url';
 import { restoreEnv, snapshotEnv } from './helpers/env.js';
 
@@ -57,6 +57,7 @@ describe('bridge matrix behavior', () => {
   afterEach(() => {
     resetBridgeMatrixTestHooks();
     rmSync(path.join(runtimeDir, 'data', 'matrix', 'processed-events.jsonl'), { force: true });
+    rmSync(path.join(runtimeDir, 'data', 'health'), { recursive: true, force: true });
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -1137,6 +1138,160 @@ describe('bridge matrix behavior', () => {
       // + sendMessage) never runs once the shared cooldown trips.
       expect(sendMessage).toHaveBeenCalledTimes(1);
       expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // Task 8: standalone cross-component doctor. The bridge self-reports a small,
+  // non-secret business-health record to data/health/matrix-bridge.json so the
+  // standalone doctor can check it cross-process without holding Matrix credentials.
+  describe('Task 8: business-health record', () => {
+    test('ReliableMatrixClient invokes onSyncSuccess after each processed sync round, including an empty one', async () => {
+      let client;
+      const storage = {
+        getSyncToken: vi.fn().mockResolvedValue(null),
+        setSyncToken: vi.fn().mockImplementation(async () => { client.stopSyncing = true; }),
+      };
+      client = new ReliableMatrixClient('https://matrix.test', 'test-token', storage);
+      client.doSync = vi.fn().mockResolvedValue({ next_batch: 'health-sync-token' }); // no rooms/events
+      const onSyncSuccess = vi.fn();
+      client.onSyncSuccess = onSyncSuccess;
+
+      await client.startSync();
+
+      await vi.waitFor(() => expect(onSyncSuccess).toHaveBeenCalledOnce());
+    });
+
+    test('_recordMembershipDetail sets agentJoined true (case-insensitively) and records the joined-agent list', () => {
+      const bridge = new MatrixBridge();
+      bridge._requiredMembershipSummary.set('!health-detail-1:test', {
+        roomId: '!health-detail-1:test', group: 'acceptance', requiredAgent: 'reviewer-agent',
+        botJoined: true, agentJoined: null, joinedAgentNames: [],
+      });
+
+      bridge._recordMembershipDetail('!health-detail-1:test', ['Reviewer-Agent', 'coordinator-agent']);
+
+      const entry = bridge._requiredMembershipSummary.get('!health-detail-1:test');
+      expect(entry.joinedAgentNames).toEqual(['Reviewer-Agent', 'coordinator-agent']);
+      expect(entry.agentJoined).toBe(true);
+    });
+
+    test('_recordMembershipDetail sets agentJoined false when the required agent is absent from the joined list', () => {
+      const bridge = new MatrixBridge();
+      bridge._requiredMembershipSummary.set('!health-detail-2:test', {
+        roomId: '!health-detail-2:test', group: 'acceptance', requiredAgent: 'reviewer-agent',
+        botJoined: true, agentJoined: null, joinedAgentNames: [],
+      });
+
+      bridge._recordMembershipDetail('!health-detail-2:test', ['someone-else-agent']);
+
+      expect(bridge._requiredMembershipSummary.get('!health-detail-2:test').agentJoined).toBe(false);
+    });
+
+    test('_recordMembershipDetail leaves agentJoined null for a group room with no single required agent', () => {
+      const bridge = new MatrixBridge();
+      bridge._requiredMembershipSummary.set('!health-detail-3:test', {
+        roomId: '!health-detail-3:test', group: 'acceptance', requiredAgent: null,
+        botJoined: true, agentJoined: null, joinedAgentNames: [],
+      });
+
+      bridge._recordMembershipDetail('!health-detail-3:test', ['reviewer-agent', 'coordinator-agent']);
+
+      const entry = bridge._requiredMembershipSummary.get('!health-detail-3:test');
+      expect(entry.joinedAgentNames).toEqual(['reviewer-agent', 'coordinator-agent']);
+      expect(entry.agentJoined).toBeNull();
+    });
+
+    test('_recordMembershipDetail is a no-op for a room with no existing summary entry', () => {
+      const bridge = new MatrixBridge();
+      expect(() => bridge._recordMembershipDetail('!health-detail-unknown:test', ['x'])).not.toThrow();
+      expect(bridge._requiredMembershipSummary.has('!health-detail-unknown:test')).toBe(false);
+    });
+
+    test('_syncRequiredMembershipBotPresence builds one entry per trusted managed room, reflecting current joined-room membership', () => {
+      const bridge = new MatrixBridge();
+      markRoomTrusted('!health-scan-a:test', { group: 'acceptance' });
+      markRoomTrusted('!health-scan-b:test', { agent: 'reviewer-agent' });
+
+      bridge._syncRequiredMembershipBotPresence(['!health-scan-a:test']); // bot currently joined to scan-a only
+
+      const summary = new Map(bridge._requiredMembershipSummary);
+      expect(summary.get('!health-scan-a:test')).toMatchObject({
+        roomId: '!health-scan-a:test', group: 'acceptance', requiredAgent: null, botJoined: true,
+      });
+      expect(summary.get('!health-scan-b:test')).toMatchObject({
+        roomId: '!health-scan-b:test', requiredAgent: 'reviewer-agent', botJoined: false,
+      });
+    });
+
+    test('_syncRequiredMembershipBotPresence preserves previously recorded agent-membership detail across a refresh', () => {
+      const bridge = new MatrixBridge();
+      markRoomTrusted('!health-scan-c:test', { group: 'acceptance' });
+      bridge._requiredMembershipSummary.set('!health-scan-c:test', {
+        roomId: '!health-scan-c:test', group: 'acceptance', requiredAgent: null, botJoined: true,
+        agentJoined: null, joinedAgentNames: ['reviewer-agent'],
+      });
+
+      bridge._syncRequiredMembershipBotPresence(['!health-scan-c:test']);
+
+      expect(bridge._requiredMembershipSummary.get('!health-scan-c:test').joinedAgentNames).toEqual(['reviewer-agent']);
+    });
+
+    test('_syncRequiredMembershipBotPresence skips DM and bot-DM rooms (summary covers group/managed-agent rooms only)', () => {
+      const bridge = new MatrixBridge();
+      markRoomTrusted('!health-scan-dm:test', { dm: true });
+      markRoomTrusted('!health-scan-botdm:test', { botDm: true, human: 'alice' });
+
+      bridge._syncRequiredMembershipBotPresence(['!health-scan-dm:test', '!health-scan-botdm:test']);
+
+      expect(bridge._requiredMembershipSummary.has('!health-scan-dm:test')).toBe(false);
+      expect(bridge._requiredMembershipSummary.has('!health-scan-botdm:test')).toBe(false);
+    });
+
+    test('writeHealthRecord persists a bridge health record reflecting in-memory state, with restrictive permissions', () => {
+      const bridge = new MatrixBridge();
+      bridge._lastSuccessfulSyncAtMs = Date.now() - 500;
+      bridge._requiredMembershipSummary.set('!health-write-a:test', {
+        roomId: '!health-write-a:test', group: 'acceptance', requiredAgent: 'reviewer-agent',
+        botJoined: true, agentJoined: true, joinedAgentNames: ['reviewer-agent'],
+      });
+
+      bridge.writeHealthRecord();
+
+      const healthPath = path.join(runtimeDir, 'data', 'health', 'matrix-bridge.json');
+      const written = JSON.parse(readFileSync(healthPath, 'utf8'));
+      expect(written.component).toBe('matrix-bridge');
+      expect(written.process.pid).toBe(process.pid);
+      expect(typeof written.lastSuccessfulSyncAt).toBe('string');
+      expect(written.managedRoomCount).toBeGreaterThanOrEqual(1);
+      expect(written.requiredMembership.some((entry) => entry.roomId === '!health-write-a:test' && entry.agentJoined === true)).toBe(true);
+      expect(statSync(healthPath).mode & 0o777).toBe(0o600);
+    });
+
+    test('writeHealthRecord reflects a recent successful backend delivery after a successful backend API call', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{"ok":true}' }));
+      const bridge = new MatrixBridge();
+
+      await bridge.callBackendApi('GET', '/api/agents?view=names');
+      bridge.writeHealthRecord();
+
+      const healthPath = path.join(runtimeDir, 'data', 'health', 'matrix-bridge.json');
+      const written = JSON.parse(readFileSync(healthPath, 'utf8'));
+      expect(written.lastSuccessfulBackendDeliveryAt).not.toBeNull();
+      expect(Date.now() - new Date(written.lastSuccessfulBackendDeliveryAt).getTime()).toBeLessThan(5000);
+    });
+
+    test('writeHealthRecord reflects the shared rate-limit gate\'s last-observed-429 timestamp', () => {
+      const bridge = new MatrixBridge();
+      const rateLimitError = new Error('rate limited');
+      rateLimitError.statusCode = 429;
+      matrixRateLimitGateForTest.observeError(rateLimitError);
+
+      bridge.writeHealthRecord();
+
+      const healthPath = path.join(runtimeDir, 'data', 'health', 'matrix-bridge.json');
+      const written = JSON.parse(readFileSync(healthPath, 'utf8'));
+      expect(written.lastObservedRateLimitAt).not.toBeNull();
+      expect(Date.now() - new Date(written.lastObservedRateLimitAt).getTime()).toBeLessThan(5000);
     });
   });
 });

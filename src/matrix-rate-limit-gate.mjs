@@ -49,6 +49,19 @@ export class MatrixRateLimitGate {
     this._defaultBackoffMs = defaultBackoffMs;
     this._maxBackoffMs = maxBackoffMs;
     this._cooldownUntil = 0;
+    this._lastRateLimitAtMs = null;
+  }
+
+  /**
+   * Epoch ms of the most recently observed 429, across every request source sharing
+   * this gate, or null if none has been seen yet. Unlike the cooldown window, this
+   * always advances on a genuine 429 sighting even if that sighting didn't extend
+   * the cooldown (Behavior 5) — it is a historical record, not cooldown state, so
+   * reset() does not clear it. Read-only: callers (e.g. the standalone doctor's
+   * bridge health record) observe this, they do not set it.
+   */
+  lastObservedAtMs() {
+    return this._lastRateLimitAtMs;
   }
 
   /** True while a shared cooldown is in effect. */
@@ -96,6 +109,7 @@ export class MatrixRateLimitGate {
   }
 
   _applyCooldown(retryAfterMsRaw) {
+    this._lastRateLimitAtMs = this._now();
     const parsed = Number(retryAfterMsRaw);
     const waitMs = Number.isFinite(parsed) && parsed > 0
       ? Math.min(parsed, this._maxBackoffMs)

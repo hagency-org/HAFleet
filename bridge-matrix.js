@@ -15,12 +15,19 @@ import { assertRuntimeDir } from './lib/runtime-dir-guard.js';
 import { NotificationRouter } from './lib/notification-router.js';
 import { MatrixEventStore } from './src/matrix-event-store.mjs';
 import { MatrixRateLimitGate } from './src/matrix-rate-limit-gate.mjs';
+import { getProcessStartIdentity } from './src/process-identity.mjs';
+import { writeBridgeHealthRecord } from './src/health-record.mjs';
 
 export class ReliableMatrixClient extends MatrixClient {
   constructor(...args) {
     super(...args);
     this.persistTokenAfterSync = true;
     this.agentChatSyncHandler = null;
+    // Task 8: standalone doctor's "last successful Matrix sync" signal. Fired after
+    // every successfully-processed /sync round (even an empty one with no room
+    // events), which is the earliest point with real evidence the homeserver
+    // round-trip succeeded — emitFn only fires per room event, not per round.
+    this.onSyncSuccess = null;
   }
 
   startSync() {
@@ -30,6 +37,12 @@ export class ReliableMatrixClient extends MatrixClient {
       }
       return this.emit(eventName, ...payload);
     });
+  }
+
+  async processSync(raw, emitFn) {
+    const result = await super.processSync(raw, emitFn);
+    if (typeof this.onSyncSuccess === 'function') this.onSyncSuccess();
+    return result;
   }
 }
 
@@ -206,6 +219,18 @@ function resolveRoomScanPollMs(env = process.env) {
   return Math.max(30000, ms);
 }
 const MATRIX_ROOM_SCAN_POLL_MS = resolveRoomScanPollMs();
+// Task 8: standalone doctor's business-health record write cadence. Deliberately its
+// own timer rather than piggybacking on MATRIX_ROOM_SCAN_POLL_MS alone: that poll's
+// default (120s) sits right at BRIDGE_HEALTH_MAX_AGE_MS's default staleness threshold
+// (also 120s), which would flap the doctor's freshness check at the boundary. A
+// shorter, independent write cadence keeps the record comfortably fresh regardless
+// of how the room-scan interval is tuned.
+function resolveBridgeHealthWriteIntervalMs(env = process.env) {
+  const raw = Number(env.BRIDGE_HEALTH_WRITE_INTERVAL_MS || 30000);
+  const ms = Number.isFinite(raw) ? raw : 30000;
+  return Math.max(5000, ms);
+}
+const BRIDGE_HEALTH_WRITE_INTERVAL_MS = resolveBridgeHealthWriteIntervalMs();
 const MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW = Number.parseInt(process.env.MATRIX_AGENT_ROOM_BACKFILL_LIMIT || '25', 10);
 const MATRIX_AGENT_ROOM_BACKFILL_LIMIT = Number.isFinite(MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW) && MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW > 0
   ? MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW
@@ -986,6 +1011,13 @@ async function setCustomAgentAvatar(agentName, imageBuffer, mimeType) {
 const MATRIX_BRIDGE_SECRET = (process.env.MATRIX_BRIDGE_SECRET || '').trim();
 const BRIDGE_API_TOKEN = (process.env.API_TOKEN || '').trim();
 
+// Task 8: standalone doctor's "last successful backend delivery" signal. backendApi()
+// is the single choke point every backend call in this file goes through (directly or
+// via MatrixBridge#callBackendApi), so tracking success here covers all of them —
+// dominated in practice by POST /api/messages, but honestly labeled as "backend
+// delivery" rather than "message delivery" since it is not scoped to just that route.
+const bridgeHealthState = { lastSuccessfulBackendDeliveryAtMs: null };
+
 async function backendApi(method, path, body, contextLabel = '') {
   const opts = { method, headers: {}, signal: AbortSignal.timeout(BACKEND_FETCH_TIMEOUT_MS) };
   if (MATRIX_BRIDGE_SECRET) opts.headers['X-Bridge-Secret'] = MATRIX_BRIDGE_SECRET;
@@ -1003,6 +1035,7 @@ async function backendApi(method, path, body, contextLabel = '') {
       const detail = text ? ` body=${text}` : '';
       throw new Error(`backend API ${method} ${path} failed with HTTP ${res.status}${detail}`);
     }
+    bridgeHealthState.lastSuccessfulBackendDeliveryAtMs = Date.now();
     return parsed;
   } catch (error) {
     const elapsedMs = Date.now() - startedAt;
@@ -1465,6 +1498,9 @@ export class MatrixBridge {
     this._bridgeCreatedGroups = new Set(); // groups we POST'd — skip SSE echo
     this._recentSystemInfoWarningKeys = new Map(); // alert dedupeKey -> last bridged ts
     this._agentRoomBackfillRunning = false;
+    // Task 8: standalone cross-component doctor — business-health record inputs.
+    this._lastSuccessfulSyncAtMs = null;
+    this._requiredMembershipSummary = new Map(); // roomId -> { roomId, group, requiredAgent, botJoined, agentJoined, joinedAgentNames }
     this._warningRouter = new NotificationRouter({
       warning: {
         cooldownMs: WARNING_DEDUPE_WINDOW_MS,
@@ -1494,6 +1530,65 @@ export class MatrixBridge {
 
   callBackendApi(method, routePath, body, contextLabel = '') {
     return backendApi(method, routePath, body, contextLabel);
+  }
+
+  // ── Task 8: standalone cross-component doctor — business-health record ──────
+  // Coarse pass: refresh which trusted managed rooms the bot currently sits in.
+  // Called from scanJoinedRooms(), which already fetches the joined-room list, so
+  // this adds zero Matrix API calls. DM/bot-DM rooms are excluded — the health
+  // summary exists for the acceptance-room membership check (group and
+  // agent-managed rooms), not the per-human DM inventory.
+  _syncRequiredMembershipBotPresence(joinedRoomIds) {
+    const joinedSet = new Set(joinedRoomIds);
+    const next = new Map();
+    for (const [roomId, meta] of Object.entries(state.trustedManagedRooms || {})) {
+      if (meta?.dm || meta?.botDm) continue;
+      const previous = this._requiredMembershipSummary.get(roomId);
+      const requiredAgent = typeof meta?.agent === 'string' && meta.agent.trim() ? meta.agent.trim() : null;
+      next.set(roomId, {
+        roomId,
+        group: typeof meta?.group === 'string' ? meta.group : null,
+        requiredAgent,
+        botJoined: joinedSet.has(roomId),
+        agentJoined: previous?.agentJoined ?? null,
+        joinedAgentNames: previous?.joinedAgentNames || [],
+      });
+    }
+    this._requiredMembershipSummary = next;
+  }
+
+  // Detail pass: record which agent-user Matrix members are actually in a given
+  // room. Called from reconcileRoomGroupMembership(), which already fetches this
+  // room's joined members for backend-group reconciliation — again zero extra
+  // Matrix API calls. No-ops for a room _syncRequiredMembershipBotPresence hasn't
+  // seen yet (e.g. an untrusted or not-yet-scanned room).
+  _recordMembershipDetail(roomId, joinedAgentNames) {
+    const entry = this._requiredMembershipSummary.get(roomId);
+    if (!entry) return;
+    entry.joinedAgentNames = [...joinedAgentNames];
+    entry.agentJoined = entry.requiredAgent
+      ? joinedAgentNames.some((name) => this.sameName(name, entry.requiredAgent))
+      : null;
+  }
+
+  // Persists data/health/matrix-bridge.json (0600, atomic). Never throws — a health
+  // record write failure must not take down the bridge itself; the standalone
+  // doctor already treats a missing/stale record as its own failure signal.
+  writeHealthRecord() {
+    try {
+      writeBridgeHealthRecord(RUNTIME_ROOT, {
+        pid: process.pid,
+        startedAt: this.startupTs,
+        processStartIdentity: getProcessStartIdentity(process.pid),
+        lastSuccessfulSyncAt: this._lastSuccessfulSyncAtMs,
+        lastSuccessfulBackendDeliveryAt: bridgeHealthState.lastSuccessfulBackendDeliveryAtMs,
+        lastObservedRateLimitAt: rateLimitGate.lastObservedAtMs(),
+        managedRoomCount: Object.keys(state.trustedManagedRooms || {}).length,
+        requiredMembership: [...this._requiredMembershipSummary.values()],
+      });
+    } catch (e) {
+      console.error(`Failed to write bridge health record: ${e.message}`);
+    }
   }
 
   // Resolve the source_room of a prior message so a reply can be routed back to
@@ -1817,6 +1912,7 @@ export class MatrixBridge {
     const botToken = await ensureBotAccount();
     this.botClient = new ReliableMatrixClient(HOMESERVER, botToken, new SimpleFsStorageProvider(path.join(DATA_DIR, 'bot-store.json')));
     this.configureReliableBotSync(this.botClient);
+    this.botClient.onSyncSuccess = () => { this._lastSuccessfulSyncAtMs = Date.now(); };
     this.botUserId = await this.botClient.getUserId();
     console.log(`Bot: ${this.botUserId}`);
 
@@ -1876,6 +1972,11 @@ export class MatrixBridge {
     }
     await this.backfillAgentManagedRooms();
     setInterval(() => this.scanJoinedRooms(), MATRIX_ROOM_SCAN_POLL_MS);
+    // Task 8: standalone doctor's business-health record. Independent of the room-scan
+    // timer above (see BRIDGE_HEALTH_WRITE_INTERVAL_MS) so the record's freshness isn't
+    // coupled to how MATRIX_ROOM_SCAN_POLL_MS happens to be tuned.
+    this.writeHealthRecord();
+    setInterval(() => this.writeHealthRecord(), BRIDGE_HEALTH_WRITE_INTERVAL_MS);
 
     // 8. Periodically check agent accounts for pending invites
     this.pollAgentInvites();
@@ -2515,6 +2616,7 @@ export class MatrixBridge {
     }
     try {
       const rooms = await this.botClient.getJoinedRooms();
+      this._syncRequiredMembershipBotPresence(rooms);
       let trusted = 0, untrusted = 0, newlyDetected = 0;
       for (const roomId of rooms) {
         // A 429 anywhere in this loop (or in tryMapRoom/reconcileRoomGroupMembership below)
@@ -2552,6 +2654,7 @@ export class MatrixBridge {
         }
       }
       if (untrusted > 0) console.log(`[trust] scan summary: ${trusted} trusted, ${untrusted} untrusted (${newlyDetected} newly detected)`);
+      this.writeHealthRecord();
     } catch (e) {
       rateLimitGate.observeError(e);
       console.error('Failed to scan joined rooms:', e.message);
@@ -2600,6 +2703,7 @@ export class MatrixBridge {
         .map(m => humanNameFromUserId(m))
         .filter(Boolean);
       const matrixMembers = [...new Set([...agentMembers, ...humanMembers].filter(Boolean))];
+      this._recordMembershipDetail(roomId, agentMembers);
       const existing = await backendApi(
         'GET',
         `/api/groups/${encodeURIComponent(groupName)}`,
@@ -4003,6 +4107,10 @@ export function resolveInvitePollMsForTest(env = {}) {
 
 export function resolveRoomScanPollMsForTest(env = {}) {
   return resolveRoomScanPollMs(env);
+}
+
+export function resolveBridgeHealthWriteIntervalMsForTest(env = {}) {
+  return resolveBridgeHealthWriteIntervalMs(env);
 }
 
 export function buildMessageUrlForTest(messageId, viewToken = null, baseUrl = MSG_BASE_URL) {
