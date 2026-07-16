@@ -1396,3 +1396,248 @@ describe('backend runtime API', () => {
     expect(mcpMissing).toHaveLength(0);
   });
 });
+
+// Behavior contract: the pending inbox gate represents "the agent must complete one full,
+// unfiltered inbox read before sending again". send() must never auto-clear it, filtered reads
+// (by kinds) must never clear it, and only a full unfiltered read clears it -- even when the
+// message that raised the gate has already scrolled behind the cursor, or unread is empty.
+describe('inbox gate semantics', () => {
+  let context = null;
+
+  afterEach(() => {
+    context?.cleanup();
+    context = null;
+  });
+
+  test('send blocks on pending gate; filtered reads never clear it; only a full unfiltered read clears it', async () => {
+    context = await createBackendTestContext('agent-chat-inbox-gate-contract-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      messages: [
+        {
+          id: 'msg_src',
+          ts: 1000,
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          priority: 'normal',
+          summary: 'actionable notification',
+          full: 'actionable notification',
+          mentions: [],
+          reply_to: null,
+        },
+      ],
+      agentRuntime: {
+        alpha: {
+          inboxGate: {
+            requiresInboxCheck: true,
+            sourceMsgId: 'msg_src',
+            raisedAt: 1000,
+            reason: 'actionable_notification',
+          },
+        },
+      },
+      groups: {},
+      msgCounter: 1,
+    });
+
+    // Step 1 (establish pending gate) is done via seeded agentRuntime above.
+    // Step 2: send is blocked by the pending gate.
+    const blockedFirst = await request(context.app)
+      .post('/api/messages')
+      .send({ from: 'alpha', to: 'system', type: 'inform', summary: 'ping', full: 'ping' });
+    expect(blockedFirst.status).toBe(409);
+    expect(blockedFirst.body.error).toBe('inbox_check_required');
+
+    // Step 3: a filtered (kinds) read must not clear the gate.
+    const filteredRead = await request(context.app)
+      .get('/api/inbox/alpha')
+      .query({ kinds: 'task_request' });
+    expect(filteredRead.status).toBe(200);
+
+    const runtimeAfterFiltered = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtimeAfterFiltered.alpha.inboxGate.requiresInboxCheck).toBe(true);
+
+    // Step 4: send is still blocked after the filtered read.
+    const blockedSecond = await request(context.app)
+      .post('/api/messages')
+      .send({ from: 'alpha', to: 'system', type: 'inform', summary: 'ping again', full: 'ping again' });
+    expect(blockedSecond.status).toBe(409);
+    expect(blockedSecond.body.error).toBe('inbox_check_required');
+
+    // Step 5: a full, unfiltered read clears the gate.
+    const fullRead = await request(context.app).get('/api/inbox/alpha');
+    expect(fullRead.status).toBe(200);
+    expect(fullRead.body.dm.map((row) => row.id)).toEqual(['msg_src']);
+
+    const runtimeAfterFull = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtimeAfterFull.alpha.inboxGate).toMatchObject({
+      requiresInboxCheck: false,
+      sourceMsgId: null,
+    });
+    expect(runtimeAfterFull.alpha.inboxReadAck).toMatchObject({
+      sourceMsgId: 'msg_src',
+    });
+
+    // Step 6: send now succeeds.
+    const allowed = await request(context.app)
+      .post('/api/messages')
+      .send({ from: 'alpha', to: 'system', type: 'inform', summary: 'unblocked', full: 'unblocked' });
+    expect(allowed.status).toBe(200);
+  });
+
+  test('a full unfiltered read clears the gate even when the source message has already scrolled behind the cursor', async () => {
+    context = await createBackendTestContext('agent-chat-inbox-gate-behind-cursor-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      messages: [
+        {
+          id: 'msg_src',
+          ts: 1000,
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          priority: 'normal',
+          summary: 'actionable notification',
+          full: 'actionable notification',
+          mentions: [],
+          reply_to: null,
+        },
+        {
+          id: 'msg_after',
+          ts: 2000,
+          from: 'system',
+          to: 'alpha',
+          type: 'inform',
+          priority: 'normal',
+          summary: 'later notification',
+          full: 'later notification',
+          mentions: [],
+          reply_to: null,
+        },
+      ],
+      // The inbox cursor has already advanced past msg_src (e.g. an earlier full read consumed
+      // it before the gate below was (re-)raised against it) -- this is the live production
+      // deadlock: msg_src can never appear in `unread` again.
+      cursors: {
+        alpha: {
+          inbox: 1000,
+          inboxId: 'msg_src',
+          groups: {},
+          groupIds: {},
+        },
+      },
+      agentRuntime: {
+        alpha: {
+          inboxGate: {
+            requiresInboxCheck: true,
+            sourceMsgId: 'msg_src',
+            raisedAt: 1000,
+            reason: 'actionable_notification',
+          },
+        },
+      },
+      groups: {},
+      msgCounter: 2,
+    });
+
+    const blocked = await request(context.app)
+      .post('/api/messages')
+      .send({ from: 'alpha', to: 'system', type: 'inform', summary: 'ping', full: 'ping' });
+    expect(blocked.status).toBe(409);
+    expect(blocked.body.error).toBe('inbox_check_required');
+
+    // msg_src is NOT present in the unread set returned by this read (cursor already passed
+    // it) -- only msg_after is unread. The gate must still clear.
+    const fullRead = await request(context.app).get('/api/inbox/alpha');
+    expect(fullRead.status).toBe(200);
+    expect(fullRead.body.dm.map((row) => row.id)).toEqual(['msg_after']);
+
+    const runtimeAfter = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtimeAfter.alpha.inboxGate).toMatchObject({
+      requiresInboxCheck: false,
+      sourceMsgId: null,
+    });
+
+    const allowed = await request(context.app)
+      .post('/api/messages')
+      .send({ from: 'alpha', to: 'system', type: 'inform', summary: 'unblocked', full: 'unblocked' });
+    expect(allowed.status).toBe(200);
+  });
+
+  test('a full unfiltered read clears the gate even when unread is empty, and records one read acknowledgement', async () => {
+    context = await createBackendTestContext('agent-chat-inbox-gate-empty-unread-test-', {
+      agents: {
+        alpha: {
+          name: 'alpha',
+          type: 'agent',
+          kind: 'agent',
+          online: true,
+          manualDown: false,
+          tmux: 'alpha:0.0',
+        },
+      },
+      messages: [],
+      agentRuntime: {
+        alpha: {
+          inboxGate: {
+            requiresInboxCheck: true,
+            sourceMsgId: 'msg_ghost',
+            raisedAt: 1000,
+            reason: 'actionable_notification',
+          },
+        },
+      },
+      groups: {},
+      msgCounter: 0,
+    });
+
+    const blocked = await request(context.app)
+      .post('/api/messages')
+      .send({ from: 'alpha', to: 'system', type: 'inform', summary: 'ping', full: 'ping' });
+    expect(blocked.status).toBe(409);
+    expect(blocked.body.error).toBe('inbox_check_required');
+
+    const fullRead = await request(context.app).get('/api/inbox/alpha');
+    expect(fullRead.status).toBe(200);
+    expect(fullRead.body).toEqual({ dm: [], group: [] });
+
+    const runtimeAfter = readJson(path.join(context.runtimeDir, 'data', 'agent_runtime.json'));
+    expect(runtimeAfter.alpha.inboxGate).toMatchObject({
+      requiresInboxCheck: false,
+      sourceMsgId: null,
+    });
+    expect(runtimeAfter.alpha.inboxReadAck).toMatchObject({
+      sourceMsgId: 'msg_ghost',
+    });
+
+    const events = readDeliveryEvents(context.runtimeDir);
+    const readAcks = events.filter((event) => event.type === 'inbox.read_ack' && event.agent === 'alpha');
+    expect(readAcks).toHaveLength(1);
+    expect(readAcks[0]).toMatchObject({
+      messageId: 'msg_ghost',
+      reason: 'inbox-gate-consumed',
+    });
+
+    const allowed = await request(context.app)
+      .post('/api/messages')
+      .send({ from: 'alpha', to: 'system', type: 'inform', summary: 'unblocked', full: 'unblocked' });
+    expect(allowed.status).toBe(200);
+  });
+});

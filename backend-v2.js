@@ -10578,11 +10578,12 @@ app.get('/api/inbox/:agent', requireAgentToken(_tokenFromAgent), (req, res) => {
   // without implicitly skipping unread messages of other kinds.
   const runtime = ensureAgentRuntimeRecord(agentName);
   const pendingGate = getPendingInboxGate(runtime);
-  const consumedPendingSource = Boolean(
-    pendingGate
-    && pendingGate.sourceMsgId
-    && unread.some((msg) => msg?.id === pendingGate.sourceMsgId)
-  );
+  // A full, unfiltered read always satisfies a pending gate: the agent has now seen the entire
+  // inbox. This must NOT depend on the gate's sourceMsgId still being present in `unread` --
+  // once the cursor advances past it (e.g. from an earlier full read), it can never reappear
+  // there, which would otherwise deadlock the agent's send path forever. Empty `unread` counts
+  // as a satisfied read too.
+  const clearsPendingGate = Boolean(pendingGate) && !kinds;
   if (!kinds && advanceInboxCursor(cursor, unread)) {
     if (!saveCursors()) {
       restoreCursor(agentName, cursorSnapshot);
@@ -10592,22 +10593,22 @@ app.get('/api/inbox/:agent', requireAgentToken(_tokenFromAgent), (req, res) => {
   }
   if (!kinds) {
     markAgentInboxChecked(agentName, {
-      clearInboxGate: consumedPendingSource,
-      sourceMsgId: consumedPendingSource ? pendingGate.sourceMsgId : null,
+      clearInboxGate: clearsPendingGate,
+      sourceMsgId: clearsPendingGate ? pendingGate.sourceMsgId : null,
     });
-    if (unread.length > 0) {
+    if (unread.length > 0 || clearsPendingGate) {
       appendDeliveryEvent({
         type: 'inbox.read_ack',
         source: 'backend',
         agent: agentName,
         messageIds: unread.map((msg) => msg.id).filter(Boolean),
-        messageId: consumedPendingSource ? pendingGate.sourceMsgId : null,
+        messageId: clearsPendingGate ? pendingGate.sourceMsgId : null,
         ackedAt: Date.now(),
         cursor: {
           inboxTs: cursor.inbox || 0,
           inboxId: cursor.inboxId || null,
         },
-        reason: consumedPendingSource ? 'inbox-gate-consumed' : 'inbox-read',
+        reason: clearsPendingGate ? 'inbox-gate-consumed' : 'inbox-read',
       });
     }
     // If the agent just consumed inbox, stale queued notifications should be removed immediately.
