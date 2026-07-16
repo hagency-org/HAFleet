@@ -8,6 +8,7 @@ import { restoreEnv, snapshotEnv } from './helpers/env.js';
 describe('bridge matrix behavior', () => {
   let runtimeDir;
   let MatrixBridge;
+  let ReliableMatrixClient;
   let buildMessageUrlForTest;
   let generateAvatarPngForTest;
   let resetBridgeMatrixTestHooks;
@@ -29,6 +30,7 @@ describe('bridge matrix behavior', () => {
     const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
     ({
       MatrixBridge,
+      ReliableMatrixClient,
       buildMessageUrlForTest,
       generateAvatarPngForTest,
       resetBridgeMatrixTestHooks,
@@ -50,6 +52,7 @@ describe('bridge matrix behavior', () => {
 
   afterEach(() => {
     resetBridgeMatrixTestHooks();
+    rmSync(path.join(runtimeDir, 'data', 'matrix', 'processed-events.jsonl'), { force: true });
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -75,7 +78,7 @@ describe('bridge matrix behavior', () => {
     expect(bridge.handleMessageDeliveryFeedback).toHaveBeenCalledWith('!room:test', { ok: true, id: 'msg_1' });
   });
 
-  test('submitHumanMessage reports a retry failure only after the second timeout', async () => {
+  test('backend_failure_keeps_sync_event_replayable', async () => {
     const bridge = new MatrixBridge();
     const timeoutError = new Error('The operation was aborted due to timeout');
     timeoutError.name = 'TimeoutError';
@@ -87,15 +90,79 @@ describe('bridge matrix behavior', () => {
     bridge.sendDeliveryNotice = vi.fn().mockResolvedValue(undefined);
     bridge.sleep = vi.fn().mockResolvedValue(undefined);
 
-    const result = await bridge.submitHumanMessage('!room:test', { from: 'alice' });
-
-    expect(result).toEqual({ error: 'timeout' });
+    await expect(bridge.submitHumanMessage('!room:test', { from: 'alice' }))
+      .rejects.toThrow('timeout');
     expect(bridge.callBackendApi).toHaveBeenCalledTimes(2);
     expect(bridge.sleep).toHaveBeenCalledTimes(1);
     expect(bridge.sendDeliveryNotice).toHaveBeenCalledWith(
       '!room:test',
       '⚠️ Message delivery failed after retry (timeout).'
     );
+  });
+
+  test('configured sync handler waits for durable routing', async () => {
+    const bridge = new MatrixBridge();
+    let release;
+    const pending = new Promise((resolve) => { release = resolve; });
+    bridge.onRoomMessage = vi.fn().mockImplementation(() => pending);
+    bridge.onRoomEvent = vi.fn().mockResolvedValue(undefined);
+    bridge.handleBotInvite = vi.fn().mockResolvedValue({ accepted: true });
+    const client = { emit: vi.fn() };
+
+    bridge.configureReliableBotSync(client);
+    const handled = client.agentChatSyncHandler('room.message', '!room:test', { event_id: '$event' });
+    let settled = false;
+    handled.finally(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release();
+    await handled;
+
+    expect(client.persistTokenAfterSync).toBe(true);
+    expect(bridge.onRoomMessage).toHaveBeenCalledOnce();
+  });
+
+  test('sdk_sync_waits_for_durable_handler', async () => {
+    const bridge = new MatrixBridge();
+    let release;
+    const pending = new Promise((resolve) => { release = resolve; });
+    bridge.onRoomMessage = vi.fn().mockImplementation(() => pending);
+    bridge.onRoomEvent = vi.fn().mockResolvedValue(undefined);
+    bridge.handleBotInvite = vi.fn().mockResolvedValue({ accepted: true });
+
+    let client;
+    const storage = {
+      getSyncToken: vi.fn().mockResolvedValue(null),
+      setSyncToken: vi.fn().mockImplementation(async () => {
+        client.stopSyncing = true;
+      }),
+    };
+    client = new ReliableMatrixClient('https://matrix.test', 'test-token', storage);
+    client.doSync = vi.fn().mockResolvedValue({
+      next_batch: 'durable-token',
+      rooms: {
+        join: {
+          '!room:test': {
+            timeline: {
+              events: [{
+                type: 'm.room.message',
+                event_id: '$sdk-event',
+                sender: '@alice:matrix.test',
+                content: { msgtype: 'm.text', body: 'durable event' },
+              }],
+            },
+          },
+        },
+      },
+    });
+    bridge.configureReliableBotSync(client);
+
+    await client.startSync();
+    await vi.waitFor(() => expect(bridge.onRoomMessage).toHaveBeenCalledOnce());
+    expect(storage.setSyncToken).not.toHaveBeenCalled();
+
+    release();
+    await vi.waitFor(() => expect(storage.setSyncToken).toHaveBeenCalledWith('durable-token'));
   });
 
   test('onAgentRecovered sends an all-clear to the same rooms that received blocked alerts', async () => {
@@ -682,7 +749,7 @@ describe('bridge matrix behavior', () => {
     expect(execMock).toHaveBeenCalledTimes(2);
   });
 
-  test('pickDefaultGroupRecipient prefers a coordinator, falls back to a sole agent', () => {
+  test('pickDefaultGroupRecipient prefers and defaults to the factory coordinator', () => {
     const nameFromId = id => id.replace(/^@ac_/, '').replace(/:.*/, '');
 
     // Coordinator wins even when several agents are present.
@@ -691,8 +758,8 @@ describe('bridge matrix behavior', () => {
       nameFromId,
     )).toBe('wf_coordinator');
 
-    // Exactly one agent → that agent.
-    expect(pickDefaultGroupRecipient(['@ac_solo:m.test'], nameFromId)).toBe('solo');
+    // A mapped room with exactly one non-coordinator still wakes the coordinator.
+    expect(pickDefaultGroupRecipient(['@ac_solo:m.test'], nameFromId)).toBe('wf_coordinator');
 
     // Multiple agents, none a coordinator → nobody (defer to explicit mentions).
     expect(pickDefaultGroupRecipient(
@@ -711,6 +778,58 @@ describe('bridge matrix behavior', () => {
     expect(resolveInboundRoute({ groupName: 'g', targetAgent: 'a', isBotDm: false })).toBe('group');
     expect(resolveInboundRoute({ groupName: null, targetAgent: 'a', isBotDm: false })).toBe('agent-dm');
     expect(resolveInboundRoute({ groupName: null, targetAgent: null, isBotDm: false })).toBe('ignore');
+  });
+
+  test('realtime bot invite handler delegates to handleBotInvite', async () => {
+    const bridge = new MatrixBridge();
+    let handler = null;
+    bridge.botClient = {
+      on: vi.fn((name, callback) => {
+        if (name === 'room.invite') handler = callback;
+      }),
+    };
+    bridge.handleBotInvite = vi.fn().mockResolvedValue({ accepted: false, reason: 'untrusted_inviter' });
+
+    bridge.installBotInviteHandler();
+    await handler('!room:m.test', { sender: '@evil:m.test' });
+
+    expect(bridge.handleBotInvite).toHaveBeenCalledWith(
+      '!room:m.test',
+      { sender: '@evil:m.test' },
+      { source: 'bot-invite' },
+    );
+  });
+
+  test('polled bot invites delegate to handleBotInvite', async () => {
+    const bridge = new MatrixBridge();
+    bridge.botUserId = '@agent-bridge:m.test';
+    bridge.getBotToken = vi.fn().mockReturnValue('bot-token');
+    bridge.handleBotInvite = vi.fn().mockResolvedValue({ accepted: false, reason: 'untrusted_inviter' });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({
+        rooms: {
+          invite: {
+            '!room:m.test': {
+              invite_state: {
+                events: [{
+                  type: 'm.room.member',
+                  state_key: '@agent-bridge:m.test',
+                  sender: '@evil:m.test',
+                }],
+              },
+            },
+          },
+        },
+      }),
+    }));
+
+    await bridge.pollBotInvites();
+
+    expect(bridge.handleBotInvite).toHaveBeenCalledWith(
+      '!room:m.test',
+      { sender: '@evil:m.test' },
+      { source: 'bot-invite-poll' },
+    );
   });
 
   test('preferredDmRoom resolves the room a human last wrote from', () => {

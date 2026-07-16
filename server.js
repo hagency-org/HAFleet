@@ -1,6 +1,6 @@
 import express from 'express';
 import { readFile as readFileAsync, open, stat as statAsync, appendFile } from 'fs/promises';
-import { appendFileSync, writeFileSync, readFileSync, existsSync, mkdirSync, lstatSync, rmSync, unlinkSync, readdirSync, renameSync } from 'fs';
+import { appendFileSync, chmodSync, closeSync, fsyncSync, openSync, writeFileSync, readFileSync, existsSync, mkdirSync, lstatSync, rmSync, unlinkSync, readdirSync, renameSync } from 'fs';
 import { execFile } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -285,6 +285,7 @@ app.use('/api', requireDashboardMutationBoundary);
 const QUEUE_FILE = path.join(LOGS_ROOT, 'queue.json');
 const QUEUE_DROPPED_FILE = path.join(LOGS_ROOT, 'queue-dropped.jsonl');
 const queue = new Map();
+const queueIdempotency = new Map();
 let queueIdCounter = 0;
 let queueTickRunning = false;
 const QUEUE_DELIVERY_TERMINAL_STATES = new Set(['delivered', 'dropped', 'partial']);
@@ -300,6 +301,7 @@ function snapshotQueueState() {
       target,
       entries.map((entry) => cloneJsonPlain(entry)),
     ])),
+    idempotency: new Map([...queueIdempotency.entries()].map(([key, value]) => [key, cloneJsonPlain(value)])),
   };
 }
 
@@ -309,6 +311,10 @@ function restoreQueueState(snapshot) {
   queue.clear();
   for (const [target, entries] of snapshot.buckets.entries()) {
     queue.set(target, entries.map((entry) => cloneJsonPlain(entry)));
+  }
+  queueIdempotency.clear();
+  for (const [key, value] of snapshot.idempotency.entries()) {
+    queueIdempotency.set(key, cloneJsonPlain(value));
   }
 }
 
@@ -767,12 +773,28 @@ function normalizeReminderQueue() {
 // Persist queue to disk
 function writeQueueFileAtomic(payload) {
   const tmp = `${QUEUE_FILE}.tmp-${process.pid}-${Date.now()}`;
+  let fd = null;
   try {
-    mkdirSync(path.dirname(QUEUE_FILE), { recursive: true });
-    writeFileSync(tmp, JSON.stringify(payload), 'utf-8');
+    const directory = path.dirname(QUEUE_FILE);
+    mkdirSync(directory, { recursive: true });
+    fd = openSync(tmp, 'w', 0o600);
+    writeFileSync(fd, JSON.stringify(payload), 'utf-8');
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
     renameSync(tmp, QUEUE_FILE);
+    chmodSync(QUEUE_FILE, 0o600);
+    const directoryFd = openSync(directory, 'r');
+    try {
+      fsyncSync(directoryFd);
+    } finally {
+      closeSync(directoryFd);
+    }
     return true;
   } catch (e) {
+    if (fd !== null) {
+      try { closeSync(fd); } catch {}
+    }
     try { unlinkSync(tmp); } catch {}
     console.debug(`[server] queue save skipped: ${e.message}`);
     return false;
@@ -782,7 +804,11 @@ function writeQueueFileAtomic(payload) {
 function saveQueue() {
   const items = [];
   for (const [, entries] of queue) items.push(...entries);
-  return writeQueueFileAtomic({ idCounter: queueIdCounter, items });
+  return writeQueueFileAtomic({
+    idCounter: queueIdCounter,
+    items,
+    idempotencyKeys: [...queueIdempotency.entries()],
+  });
 }
 
 function appendQueuePersistFailedEvent(entry, reason, context = {}) {
@@ -813,7 +839,17 @@ try {
     throw new Error('invalid queue file shape');
   }
   queueIdCounter = Number.isFinite(Number(data.idCounter)) ? Number(data.idCounter) : 0;
+  if (Array.isArray(data.idempotencyKeys)) {
+    for (const item of data.idempotencyKeys) {
+      if (!Array.isArray(item) || item.length !== 2) continue;
+      const [key, value] = item;
+      if (typeof key !== 'string' || !key || key.length > 255) continue;
+      if (!value || typeof value !== 'object' || !Number.isFinite(Number(value.id))) continue;
+      queueIdempotency.set(key, cloneJsonPlain(value));
+    }
+  }
   let recoveredDelivering = 0;
+  let suppressedUncertainMatrixWake = 0;
   let discardedTerminal = 0;
   for (const entry of data.items) {
     if (!entry || typeof entry !== 'object' || !entry.to) continue;
@@ -822,6 +858,18 @@ try {
       continue;
     }
     if (entry.deliveryState === 'delivering') {
+      const ledger = typeof entry.idempotencyKey === 'string'
+        ? queueIdempotency.get(entry.idempotencyKey)
+        : null;
+      if (ledger && Number(ledger.id) === Number(entry.id)) {
+        suppressedUncertainMatrixWake++;
+        appendDeliveryEvent({
+          type: 'queue.recovery_suppressed',
+          ...queueEntryDeliveryEventFields(entry),
+          reason: 'idempotent-delivery-outcome-uncertain',
+        });
+        continue;
+      }
       resetQueueEntryDeliveryState(entry);
       recoveredDelivering++;
     }
@@ -830,7 +878,7 @@ try {
   }
   const compacted = compactReminderQueue();
   const normalized = normalizeReminderQueue();
-  if (compacted.changed || normalized || recoveredDelivering > 0 || discardedTerminal > 0) {
+  if (compacted.changed || normalized || recoveredDelivering > 0 || suppressedUncertainMatrixWake > 0 || discardedTerminal > 0) {
     saveQueue();
     if (compacted.changed) {
       console.log(`Compacted reminder queue entries on load: merged ${compacted.mergedEntries}`);
@@ -840,6 +888,9 @@ try {
     }
     if (recoveredDelivering > 0) {
       console.log(`Recovered ${recoveredDelivering} in-flight queued message(s) on load`);
+    }
+    if (suppressedUncertainMatrixWake > 0) {
+      console.log(`Suppressed ${suppressedUncertainMatrixWake} uncertain idempotent wake(s) on load`);
     }
     if (discardedTerminal > 0) {
       console.log(`Discarded ${discardedTerminal} terminal queued message marker(s) on load`);
@@ -855,6 +906,16 @@ try {
 app.post('/api/queue', (req, res) => {
   const { from, to, payload } = req.body;
   if (!to || !payload) return res.status(400).json({ error: 'missing to or payload' });
+  const idempotencyKey = typeof req.headers['idempotency-key'] === 'string'
+    ? req.headers['idempotency-key'].trim()
+    : '';
+  if (idempotencyKey.length > 255) {
+    return res.status(400).json({ error: 'idempotency key must be at most 255 characters' });
+  }
+  const existingIdempotentResult = idempotencyKey ? queueIdempotency.get(idempotencyKey) : null;
+  if (existingIdempotentResult) {
+    return res.json({ ok: true, ...existingIdempotentResult, deduped: true });
+  }
   const rollback = snapshotQueueState();
   const id = ++queueIdCounter;
   const queuedAt = Date.now();
@@ -867,6 +928,7 @@ app.post('/api/queue', (req, res) => {
     redirectedFrom = to;
   }
   const entry = { id, from: from || 'unknown', to: actualTo, payload, queuedAt, priority };
+  if (idempotencyKey) entry.idempotencyKey = idempotencyKey;
   const notifyMeta = sanitizeNotifyMeta(req.body?.notifyMeta);
   if (notifyMeta) entry.notifyMeta = notifyMeta;
   if (redirectedFrom) entry.redirectedFrom = redirectedFrom;
@@ -880,6 +942,14 @@ app.post('/api/queue', (req, res) => {
     }
   }
   bucket.push(entry);
+  if (idempotencyKey) {
+    queueIdempotency.set(idempotencyKey, {
+      id,
+      queuedAt,
+      position: bucket.length,
+      redirected: redirectedFrom || undefined,
+    });
+  }
   if (!saveQueue()) {
     restoreQueueState(rollback);
     appendQueuePersistFailedEvent(entry, 'queue-accept-save-failed', { path: 'api' });

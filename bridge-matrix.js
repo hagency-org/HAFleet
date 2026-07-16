@@ -13,6 +13,24 @@ import EventSource from './lib/eventsource-mini.js';
 import BotCommands from './lib/bot-commands.js';
 import { assertRuntimeDir } from './lib/runtime-dir-guard.js';
 import { NotificationRouter } from './lib/notification-router.js';
+import { MatrixEventStore } from './src/matrix-event-store.mjs';
+
+export class ReliableMatrixClient extends MatrixClient {
+  constructor(...args) {
+    super(...args);
+    this.persistTokenAfterSync = true;
+    this.agentChatSyncHandler = null;
+  }
+
+  startSync() {
+    return super.startSync(async (eventName, ...payload) => {
+      if (this.agentChatSyncHandler) {
+        return this.agentChatSyncHandler(eventName, ...payload);
+      }
+      return this.emit(eventName, ...payload);
+    });
+  }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const execFileAsync = promisify(execFile);
@@ -1015,7 +1033,8 @@ export function resolveInboundRoute({ groupName, targetAgent, isBotDm }) {
 }
 
 // Pick a default recipient for an un-addressed group message so it still wakes
-// someone: prefer a coordinator, else the sole agent, else nobody (let explicit
+// someone: prefer a coordinator, else wake the factory coordinator for the
+// single-agent mapped-room case, else nobody (let explicit
 // mentions decide). `agentUserIds` are Matrix MXIDs; `agentNameFromId` maps one
 // to an agent-chat name (or null if it is not an agent account).
 export function pickDefaultGroupRecipient(agentUserIds, agentNameFromId) {
@@ -1026,7 +1045,7 @@ export function pickDefaultGroupRecipient(agentUserIds, agentNameFromId) {
     return name && /coordinator/i.test(name);
   });
   if (coordinator) return agentNameFromId(coordinator);
-  if (ids.length === 1) return agentNameFromId(ids[0]);
+  if (ids.length === 1) return 'wf_coordinator';
   return null;
 }
 
@@ -1061,7 +1080,13 @@ export function resolveOutboundDmRoom({ replyToRoom, lastRoom } = {}) {
 }
 
 // ── Room trust classifier (5.8.1) ───────────────────────────────────
-function getRoomTrust(roomId, { inviterMxid = null } = {}) {
+function getRoomTrust(roomId, { inviterMxid = null, requireTrustedInviter = false } = {}) {
+  if (requireTrustedInviter) {
+    if (!inviterMxid) return { trusted: false, reason: 'missing_inviter' };
+    if (!MATRIX_TRUSTED_INVITER_MXIDS.has(inviterMxid)) {
+      return { trusted: false, reason: 'untrusted_inviter' };
+    }
+  }
   if (MATRIX_TRUSTED_ROOM_IDS.has(roomId)) return { trusted: true, reason: 'allowlist' };
   if (state.trustedManagedRooms?.[roomId]) return { trusted: true, reason: 'managed' };
   if (inviterMxid && MATRIX_TRUSTED_INVITER_MXIDS.has(inviterMxid)) return { trusted: true, reason: 'trusted_inviter' };
@@ -1383,7 +1408,7 @@ function shouldIgnoreAgentForward(content) {
 
 // ── Main bridge class ─────────────────────────────────────────────────
 export class MatrixBridge {
-  constructor() {
+  constructor({ eventStore = null } = {}) {
     this.botClient = null;
     this.botUserId = null;
     this.knownAgents = new Set(); // names of known agents
@@ -1395,6 +1420,10 @@ export class MatrixBridge {
     this.recentAgentCompactIds = new Set(); // dedupe compact SSE events
     this.recentlyCreatedRooms = new Set(); // rooms we just created (suppress echo)
     this.recentMatrixEvents = new Map(); // event_id -> { ts, msgId }
+    this.eventStore = eventStore || new MatrixEventStore({
+      journalPath: path.join(DATA_DIR, 'processed-events.jsonl'),
+    });
+    this.processingMatrixEventIds = new Map();
     this._msgSourceRoomCache = new Map(); // reply_to message id -> source_room (capped)
     this.blockedAlertRooms = new Map(); // agent -> Set(roomId)
     this.startupTs = Date.now();
@@ -1612,12 +1641,21 @@ export class MatrixBridge {
 
   isDuplicateMatrixEvent(eventId) {
     if (!eventId) return false;
-    return this.recentMatrixEvents.has(eventId);
+    return this.recentMatrixEvents.has(eventId) || this.eventStore.has(eventId);
+  }
+
+  checkpointMatrixEvent(eventId, messageId) {
+    if (!eventId || !messageId) return null;
+    const record = this.eventStore.recordProcessed({ eventId, messageId });
+    this.rememberMatrixEvent(eventId, record.messageId);
+    return record;
   }
 
   resolveReplyToMessageId(replyEventId) {
     if (!replyEventId) return null;
-    return this.recentMatrixEvents.get(replyEventId)?.msgId || null;
+    return this.recentMatrixEvents.get(replyEventId)?.msgId
+      || this.eventStore.get(replyEventId)?.messageId
+      || null;
   }
 
   async cacheInboundMediaToLocal(content) {
@@ -1720,6 +1758,9 @@ export class MatrixBridge {
   }
 
   async start() {
+    if (!MATRIX_BRIDGE_SECRET) {
+      throw new Error('MATRIX_BRIDGE_SECRET is required for reliable Matrix ingestion');
+    }
     console.log('=== Agent Chat Matrix Bridge ===');
     console.log(`Homeserver: ${HOMESERVER}`);
     console.log(`Backend: ${BACKEND_URL}`);
@@ -1744,24 +1785,8 @@ export class MatrixBridge {
 
     // 1. Ensure bot account
     const botToken = await ensureBotAccount();
-    this.botClient = new MatrixClient(HOMESERVER, botToken, new SimpleFsStorageProvider(path.join(DATA_DIR, 'bot-store.json')));
-    // Trust-checked invite handler replaces AutojoinRoomsMixin (5.8.1)
-    this.botClient.on('room.invite', async (roomId, inviteEvent) => {
-      const inviter = inviteEvent?.sender || null;
-      const trust = getRoomTrust(roomId, { inviterMxid: inviter });
-      roomTrustLog('bot-invite', roomId, trust, `inviter=${inviter}`);
-      if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') {
-        console.log(`[trust:enforce] Rejecting bot invite to untrusted room ${roomId}`);
-        try { await this.botClient.leaveRoom(roomId); } catch {}
-        return;
-      }
-      try {
-        await this.botClient.joinRoom(roomId);
-        if (trust.trusted) markRoomTrusted(roomId, { inviter });
-      } catch (e) {
-        console.warn(`Failed to join room ${roomId}: ${e.message}`);
-      }
-    });
+    this.botClient = new ReliableMatrixClient(HOMESERVER, botToken, new SimpleFsStorageProvider(path.join(DATA_DIR, 'bot-store.json')));
+    this.configureReliableBotSync(this.botClient);
     this.botUserId = await this.botClient.getUserId();
     console.log(`Bot: ${this.botUserId}`);
 
@@ -1806,11 +1831,8 @@ export class MatrixBridge {
       botUserId: this.botUserId,
     });
 
-    // 4. Set up Matrix event listeners
-    this.botClient.on('room.message', this.onRoomMessage.bind(this));
-    this.botClient.on('room.event', this.onRoomEvent.bind(this));
-
-    // 5. Start bot sync
+    // 4. Start bot sync. ReliableMatrixClient awaits bridge handlers before
+    // persisting the SDK sync token.
     await this.botClient.start();
     console.log('Bot syncing...');
 
@@ -2043,21 +2065,50 @@ export class MatrixBridge {
             : String(retryError?.message || retryError);
           const notice = `⚠️ Message delivery failed after retry (${detail}).`;
           await this.sendDeliveryNotice(roomId, notice);
-          return { error: detail };
+          throw new Error(detail, { cause: retryError });
         }
       }
       const detail = String(e?.message || e);
       await this.sendDeliveryNotice(roomId, `⚠️ Message delivery failed (${detail}).`);
-      return { error: detail };
+      throw new Error(detail, { cause: e });
     }
+  }
+
+  configureReliableBotSync(client) {
+    client.persistTokenAfterSync = true;
+    client.agentChatSyncHandler = async (eventName, ...payload) => {
+      if (eventName === 'room.message') return this.onRoomMessage(...payload);
+      if (eventName === 'room.event') return this.onRoomEvent(...payload);
+      if (eventName === 'room.invite') {
+        return this.handleBotInvite(...payload, { source: 'bot-invite' });
+      }
+      return client.emit(eventName, ...payload);
+    };
+    return client;
   }
 
   // ── Matrix → Agent-chat ───────────────────────────────────────────
   async onRoomMessage(roomId, event) {
     const eventId = event?.event_id || null;
+    if (!eventId) {
+      console.warn(`[matrix-ingress] ignored event without event_id room=${roomId}`);
+      return { ignored: true, reason: 'missing_event_id' };
+    }
     if (eventId && this.isDuplicateMatrixEvent(eventId)) return;
-    if (eventId) this.rememberMatrixEvent(eventId);
+    const inFlight = this.processingMatrixEventIds.get(eventId);
+    if (inFlight) return inFlight;
+    const attempt = this._onRoomMessageClaimed(roomId, event, eventId);
+    this.processingMatrixEventIds.set(eventId, attempt);
+    try {
+      return await attempt;
+    } finally {
+      if (this.processingMatrixEventIds.get(eventId) === attempt) {
+        this.processingMatrixEventIds.delete(eventId);
+      }
+    }
+  }
 
+  async _onRoomMessageClaimed(roomId, event, eventId) {
     if (shouldIgnoreAgentForward(event?.content)) return;
 
     const parsed = parseInboundTextMessage(event.content);
@@ -2150,6 +2201,7 @@ export class MatrixBridge {
       const context = { groupName, targetAgent };
       console.log(`Bot command from ${humanName} in ${groupName || targetAgent || 'bot-DM'}: ${cmdBody.slice(0, 80)}`);
       await this.commands.handle(roomId, senderId, cmdBody, context);
+      if (eventId) this.rememberMatrixEvent(eventId);
       return;
     }
 
@@ -2163,9 +2215,13 @@ export class MatrixBridge {
       // Group message from human
       // An un-addressed group message would otherwise wake nobody (push relay
       // only delivers to mentioned agents), so fall back to a default recipient.
+      let matrixDefaultRecipient = null;
       if (effectiveMentions.length === 0) {
         const defaultRecipient = pickDefaultGroupRecipient(agentMembers, agentNameFromUserId);
-        if (defaultRecipient) effectiveMentions = [defaultRecipient];
+        if (defaultRecipient) {
+          effectiveMentions = [defaultRecipient];
+          matrixDefaultRecipient = defaultRecipient;
+        }
       }
       console.log(`Matrix group: ${humanName} → ${groupName}: ${body.slice(0, 80)}`);
       // Ensure @ prefix on mentioned names in body (Matrix pills strip @ in plain text)
@@ -2184,10 +2240,14 @@ export class MatrixBridge {
         reply_to: replyTo,
         source: 'matrix',
         source_room: roomId,
+        ...(eventId ? { source_event_id: eventId } : {}),
+        ...(matrixDefaultRecipient ? { matrix_default_recipient: matrixDefaultRecipient } : {}),
         sender_mxid: senderId,
         trust_level: MATRIX_OPERATOR_MXIDS.has(senderId) ? 'operator' : 'external',
       });
-      if (eventId && result?.id) this.rememberMatrixEvent(eventId, result.id);
+      if (!result?.id) throw new Error('backend Matrix acceptance did not return a message id');
+      this.checkpointMatrixEvent(eventId, result.id);
+      return result;
     } else if (route === 'agent-dm') {
       // DM to agent
       console.log(`Matrix DM: ${humanName} → ${targetAgent}: ${body.slice(0, 80)}`);
@@ -2209,11 +2269,14 @@ export class MatrixBridge {
         reply_to: replyTo,
         source: 'matrix',
         source_room: roomId,
+        ...(eventId ? { source_event_id: eventId } : {}),
         target_type: 'agent',
         sender_mxid: senderId,
         trust_level: MATRIX_OPERATOR_MXIDS.has(senderId) ? 'operator' : 'external',
       });
-      if (eventId && result?.id) this.rememberMatrixEvent(eventId, result.id);
+      if (!result?.id) throw new Error('backend Matrix acceptance did not return a message id');
+      this.checkpointMatrixEvent(eventId, result.id);
+      return result;
     }
     // else: unknown room, ignore
   }
@@ -2656,7 +2719,7 @@ export class MatrixBridge {
           // Trust check before agent join (5.8.1)
           const inviteState = invited[roomId]?.invite_state?.events || [];
           const inviter = inviteState.find(e => e.type === 'm.room.member' && e.state_key === `@${AGENT_PREFIX}${agentName}:${MATRIX_SERVER_NAME}`)?.sender || null;
-          const trust = getRoomTrust(roomId, { inviterMxid: inviter });
+          const trust = getRoomTrust(roomId, { inviterMxid: inviter, requireTrustedInviter: true });
           roomTrustLog('agent-invite', roomId, trust, `agent=${agentName} inviter=${inviter}`);
           if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') continue;
           // Auto-join
@@ -2692,11 +2755,36 @@ export class MatrixBridge {
     await this.backfillAgentManagedRooms();
   }
 
+  async handleBotInvite(roomId, inviteEvent, { source = 'bot-invite' } = {}) {
+    const inviter = inviteEvent?.sender || null;
+    const trust = getRoomTrust(roomId, { inviterMxid: inviter, requireTrustedInviter: true });
+    roomTrustLog(source, roomId, trust, `inviter=${inviter}`);
+    if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') {
+      console.log(`[trust:enforce] Rejecting bot invite to untrusted room ${roomId} inviter=${inviter || 'unknown'}`);
+      try { await this.botClient.leaveRoom(roomId); } catch {}
+      return { accepted: false, reason: trust.reason, inviter };
+    }
+    try {
+      await this.botClient.joinRoom(roomId);
+      if (trust.trusted) markRoomTrusted(roomId, { inviter });
+      return { accepted: true, reason: trust.reason, inviter };
+    } catch (error) {
+      console.warn(`Failed to join room ${roomId}: ${error.message}`);
+      return { accepted: false, reason: 'join_failed', inviter };
+    }
+  }
+
+  installBotInviteHandler() {
+    this.botClient.on('room.invite', (roomId, inviteEvent) => (
+      this.handleBotInvite(roomId, inviteEvent, { source: 'bot-invite' })
+    ));
+  }
+
   // Backstop for the BOT's own pending invites: the realtime room.invite handler can miss
   // events across sync gaps, and a pending invite never surfaces in joined-room scans —
   // without this poll a missed bot invite stays stuck forever. Same trust rules as realtime.
   async pollBotInvites() {
-    const token = state.botToken;
+    const token = this.getBotToken();
     if (!token) return;
     try {
       const res = await fetch(`${HOMESERVER}/_matrix/client/v3/sync?filter={"room":{"timeline":{"limit":0}}}&timeout=0`, {
@@ -2707,15 +2795,9 @@ export class MatrixBridge {
       for (const roomId of Object.keys(invited)) {
         const inviteState = invited[roomId]?.invite_state?.events || [];
         const inviter = inviteState.find(e => e.type === 'm.room.member' && e.state_key === this.botUserId)?.sender || null;
-        const trust = getRoomTrust(roomId, { inviterMxid: inviter });
-        roomTrustLog('bot-invite-poll', roomId, trust, `inviter=${inviter}`);
-        if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') continue;
-        try {
-          await this.botClient.joinRoom(roomId);
+        const result = await this.handleBotInvite(roomId, { sender: inviter }, { source: 'bot-invite-poll' });
+        if (result.accepted) {
           console.log(`Bot joined room ${roomId} via invite poll`);
-          if (trust.trusted) markRoomTrusted(roomId, { inviter });
-        } catch (e) {
-          console.warn(`Bot invite-poll join failed for ${roomId}: ${e.message}`);
         }
       }
     } catch (e) {

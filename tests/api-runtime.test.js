@@ -1151,6 +1151,7 @@ describe('backend runtime API', () => {
       env: {
         AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '0',
         SYSTEM_INFO_RECOVERY_DAMPENER_MS: '0',
+        MATRIX_BRIDGE_SECRET: 'runtime-matrix-secret',
       },
       agents: {
         alpha: {
@@ -1174,11 +1175,13 @@ describe('backend runtime API', () => {
 
     const humanMessage = await request(context.app)
       .post('/api/messages')
+      .set('X-Bridge-Secret', 'runtime-matrix-secret')
       .send({
         from: 'humanop',
         to: 'alpha',
         type: 'human',
         source: 'matrix',
+        source_event_id: '$runtime-blocked-human',
         summary: 'Need status',
         full: 'Need status',
       });

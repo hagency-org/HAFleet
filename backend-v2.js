@@ -1,8 +1,10 @@
 import express from 'express';
 import {
   appendFileSync,
+  chmodSync,
   closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -11,6 +13,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  truncateSync,
   unlinkSync,
   writeFileSync,
 } from 'fs';
@@ -58,6 +61,7 @@ import { assertRuntimeDir, isLocalAgentServer, resolveLocalServerId } from './li
 import { enforceStartupConfig } from './lib/startup-config.js';
 import { NotificationRouter } from './lib/notification-router.js';
 import { readV1AgentManifest, defaultAgentchatHomeDir, allAgentHomeRoots } from './lib/agent-home-v1.js';
+import { MatrixDispatchStore } from './src/matrix-dispatch-store.mjs';
 import {
   buildUpstreamClaudeSubconsciousPaths,
   bootstrapUpstreamClaudeSubconsciousAgent,
@@ -2534,12 +2538,21 @@ function appendDeliveryEvent(raw = {}) {
   const normalized = normalizeDeliveryEvent(raw);
   if (normalized.error) return { ok: false, error: normalized.error };
   const row = normalized.row;
+  let fd = null;
   try {
-    appendFileSync(DELIVERY_EVENT_LOG, `${JSON.stringify(row)}\n`);
+    const created = !existsSync(DELIVERY_EVENT_LOG);
+    fd = openSync(DELIVERY_EVENT_LOG, 'a', 0o600);
+    chmodSync(DELIVERY_EVENT_LOG, 0o600);
+    appendFileSync(fd, `${JSON.stringify(row)}\n`);
+    fsyncSync(fd);
+    if (created) fsyncParentDirectory(DELIVERY_EVENT_LOG);
+    if (row.attemptId) deliveryEventAttemptIds.add(row.attemptId);
     return { ok: true, event: row };
   } catch (error) {
     console.warn(`Failed to append delivery event: ${error?.message || error}`);
     return { ok: false, error: error?.message || 'append failed' };
+  } finally {
+    if (fd !== null) closeSync(fd);
   }
 }
 
@@ -2874,6 +2887,22 @@ const AUDIT_LOG = dataPath('audit.jsonl');
 const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
 const MESSAGE_ARCHIVE_LOG = dataPath('messages-archive.jsonl');
 const DELIVERY_EVENT_LOG = dataPath('message-delivery-events.jsonl');
+repairJsonlTornTail(DELIVERY_EVENT_LOG);
+repairJsonlTornTail(MESSAGE_ARCHIVE_LOG);
+const deliveryEventAttemptIds = new Set();
+if (existsSync(DELIVERY_EVENT_LOG)) {
+  for (const line of readFileSync(DELIVERY_EVENT_LOG, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const attemptId = JSON.parse(line)?.attemptId;
+      if (attemptId) deliveryEventAttemptIds.add(attemptId);
+    } catch {}
+  }
+}
+const matrixDispatchStore = new MatrixDispatchStore({
+  journalPath: dataPath('matrix/source-events.jsonl'),
+});
+let matrixDispatchFailureStageForTest = null;
 const subconsciousEventsByAgent = new Map(); // agent -> event[]
 const pendingHumanTargetCache = new Map(); // agent -> { hasPendingHuman, targets }
 const swapAlertState = {
@@ -3442,13 +3471,46 @@ function planMessagePrune(rows) {
 
 function archivePrunedMessages(pruned) {
   if (!Array.isArray(pruned) || pruned.length === 0) return 0;
+  let fd = null;
   try {
-    appendFileSync(MESSAGE_ARCHIVE_LOG, `${pruned.map((msg) => JSON.stringify(msg)).join('\n')}\n`);
+    const created = !existsSync(MESSAGE_ARCHIVE_LOG);
+    fd = openSync(MESSAGE_ARCHIVE_LOG, 'a', 0o600);
+    chmodSync(MESSAGE_ARCHIVE_LOG, 0o600);
+    appendFileSync(fd, `${pruned.map((msg) => JSON.stringify(msg)).join('\n')}\n`);
+    fsyncSync(fd);
+    if (created) fsyncParentDirectory(MESSAGE_ARCHIVE_LOG);
     return pruned.length;
   } catch (e) {
     console.error(`Failed to archive pruned messages to ${MESSAGE_ARCHIVE_LOG}: ${e?.message || e}`);
     return 0;
+  } finally {
+    if (fd !== null) closeSync(fd);
   }
+}
+
+function fsyncParentDirectory(filePath) {
+  const fd = openSync(path.dirname(filePath), 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function repairJsonlTornTail(filePath) {
+  if (!existsSync(filePath)) return false;
+  const bytes = readFileSync(filePath);
+  if (bytes.length === 0 || bytes[bytes.length - 1] === 0x0a) return false;
+  const completeLength = bytes.lastIndexOf(0x0a) + 1;
+  truncateSync(filePath, completeLength);
+  const fd = openSync(filePath, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  fsyncParentDirectory(filePath);
+  return true;
 }
 
 function pruneMessagesInMemory() {
@@ -3458,8 +3520,9 @@ function pruneMessagesInMemory() {
   const { retained, pruned } = planMessagePrune(messages);
 
   if (pruned.length === 0) return { pruned: 0, archived: 0 };
-  messages.splice(0, messages.length, ...retained);
   const archived = archivePrunedMessages(pruned);
+  if (archived !== pruned.length) return { pruned: 0, archived: 0 };
+  messages.splice(0, messages.length, ...retained);
   return { pruned: pruned.length, archived };
 }
 
@@ -3467,13 +3530,16 @@ function saveMessages() {
   invalidateUnreadMessageIndex();
   const { retained, pruned } = planMessagePrune(messages);
   const nextMessages = pruned.length > 0 ? retained : messages;
+  if (pruned.length > 0 && archivePrunedMessages(pruned) !== pruned.length) {
+    invalidateUnreadMessageIndex();
+    return false;
+  }
   if (!saveJson('messages.json', nextMessages)) {
     invalidateUnreadMessageIndex();
     return false;
   }
   if (pruned.length > 0) {
     messages.splice(0, messages.length, ...retained);
-    archivePrunedMessages(pruned);
   }
   invalidateUnreadMessageIndex();
   return true;
@@ -4074,6 +4140,7 @@ function summarizeMsg(m) {
     group: m.group || null,
     source: m.source || 'api',
     sourceRoom: m.sourceRoom || null,
+    sourceEventId: m.sourceEventId || null,
     senderMxid: m.senderMxid || null,
     trustLevel: m.trustLevel || null,
     fromId: m.fromId || null,
@@ -4280,7 +4347,7 @@ function getUnreadInboxMessages(agentName, options = {}) {
   }
   const mentionRows = index.groupMentionsByAgent.get(agentName) || [];
   for (const m of mentionRows.slice(firstMessageAfterCursorIndex(mentionRows, inboxTs, inboxId))) {
-    if (!isGroupMember(m.group, agentName)) continue;
+    if (!isGroupMember(m.group, agentName) && m.matrixDefaultRecipient !== agentName) continue;
     if (!messageMatchesKinds(m, kinds)) continue;
     if (isSuppressedForAgent(m, agentName)) continue;
     unreadById.set(m.id, m);
@@ -4439,7 +4506,7 @@ function messageTargetsAgent(msg, agentName) {
   if (!msg || !agentName) return false;
   if (msg.to === agentName) return true;
   if (!msg.group) return false;
-  if (!isGroupMember(msg.group, agentName)) return false;
+  if (!isGroupMember(msg.group, agentName) && msg.matrixDefaultRecipient !== agentName) return false;
   return Array.isArray(msg.mentions) && msg.mentions.includes(agentName);
 }
 
@@ -4447,6 +4514,7 @@ function messageVisibleToAgent(msg, agentName) {
   const normalized = normalizeAgentName(agentName);
   if (!msg || !normalized) return false;
   if (msg.from === normalized || msg.to === normalized) return true;
+  if (msg.matrixDefaultRecipient === normalized) return true;
   if (msg.group && isGroupMember(msg.group, normalized)) return true;
   return false;
 }
@@ -4461,6 +4529,9 @@ function deliveryTargetAgentsForMessage(msg, directTargetKind = null) {
       if (!name || name === msg.from || isSuppressedForAgent(msg, name)) continue;
       if (isAgentRecord(agents[name])) targets.add(name);
     }
+  }
+  if (msg?.matrixDefaultRecipient && isAgentRecord(agents[msg.matrixDefaultRecipient])) {
+    targets.add(msg.matrixDefaultRecipient);
   }
   return [...targets];
 }
@@ -4548,12 +4619,17 @@ function dispatchStoredMessage(msg, options = {}) {
       reason: 'suppressed-recipient',
     });
   }
+  emitStoredMessageSideEffects(msg, { senderIsAgent, directTargetKind });
+  return { ok: true, msg };
+}
+
+function emitStoredMessageSideEffects(msg, { senderIsAgent = false, directTargetKind = null } = {}) {
   invalidatePendingHumanTargetsForMessage(msg);
   const compactEvent = buildAgentCompactEvent(msg, senderIsAgent);
   if (compactEvent) {
     broadcastSSE('agent_compact', compactEvent);
   }
-  broadcastSSE('message', msg);
+  broadcastSSE('message', { ...msg, deliveryOwner: 'dashboard-queue' });
   if (senderIsAgent) {
     markAgentOutbound(msg.from);
   }
@@ -4569,7 +4645,106 @@ function dispatchStoredMessage(msg, options = {}) {
       if (state.online) pushNotify(agent, msg);
     }
   }
-  return { ok: true, msg };
+}
+
+function deliveryEventAttemptExists(attemptId) {
+  return Boolean(attemptId) && deliveryEventAttemptIds.has(attemptId);
+}
+
+function appendDeliveryEventOnce(raw, attemptId) {
+  if (deliveryEventAttemptExists(attemptId)) return { ok: true, deduped: true };
+  return appendDeliveryEvent({ ...raw, attemptId });
+}
+
+function archivedMessageExists(messageId) {
+  if (!existsSync(MESSAGE_ARCHIVE_LOG)) return false;
+  for (const line of readFileSync(MESSAGE_ARCHIVE_LOG, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    if (JSON.parse(line)?.id === messageId) return true;
+  }
+  return false;
+}
+
+async function emitMatrixStoredMessageSideEffects(msg, receipt, { senderIsAgent = false, directTargetKind = null } = {}) {
+  invalidatePendingHumanTargetsForMessage(msg);
+  const compactEvent = buildAgentCompactEvent(msg, senderIsAgent);
+  if (compactEvent) broadcastSSE('agent_compact', compactEvent);
+  broadcastSSE('message', { ...msg, deliveryOwner: 'dashboard-queue' });
+  if (senderIsAgent) markAgentOutbound(msg.from);
+
+  for (const agentName of deliveryTargetAgentsForMessage(msg, directTargetKind)) {
+    const state = getAgentDeliveryState(agentName);
+    if (!state.online || !agents[agentName]?.tmux) continue;
+    const result = await pushNotify(agentName, msg, {
+      idempotencyKey: `matrix:${receipt.eventId}:${agentName}`,
+    });
+    const durableInboxFallback = result?.reason === 'local-session-not-found'
+      || result?.reason === 'missing-tmux-target';
+    if (!isCatchupNotificationComplete(result) && !durableInboxFallback) {
+      return { ok: false, status: 503, error: `Matrix wake queue failed for ${agentName}: ${result?.reason || 'unknown error'}` };
+    }
+  }
+  return { ok: true };
+}
+
+async function completeMatrixDispatch(receipt) {
+  const msg = receipt.message;
+  const liveMessageExists = messages.some((row) => row?.id === receipt.messageId);
+  const durableArchiveExists = receipt.status === 'committed' && !liveMessageExists
+    ? archivedMessageExists(receipt.messageId)
+    : false;
+  if (!liveMessageExists && !durableArchiveExists) {
+    const persisted = persistNewMessage(msg);
+    if (!persisted.ok) return { ok: false, status: 503, error: persisted.error };
+  }
+  if (receipt.status === 'committed') {
+    return { ok: true, response: { ...(receipt.response || {}), deduped: true }, newlyCommitted: false };
+  }
+  if (matrixDispatchFailureStageForTest === 'after-message-persist') {
+    matrixDispatchFailureStageForTest = null;
+    throw new Error('injected Matrix dispatch failure after message persistence');
+  }
+  const senderIsAgent = receipt.dispatch?.senderIsAgent === true;
+  const directTargetKind = receipt.dispatch?.directTargetKind || null;
+  if (receipt.status === 'reserved') {
+    const targetAgents = deliveryTargetAgentsForMessage(msg, directTargetKind);
+    const accepted = appendDeliveryEventOnce({
+      type: 'message.accepted',
+      source: 'backend',
+      messageId: msg.id,
+      agent: targetAgents.length === 1 ? targetAgents[0] : null,
+      targetAgents,
+      priority: msg.priority,
+      context: {
+        from: msg.from,
+        to: msg.to || null,
+        group: msg.group || null,
+        type: msg.type,
+        targetKind: directTargetKind,
+      },
+    }, `matrix:${receipt.eventId}:accepted`);
+    if (!accepted.ok) return { ok: false, status: 503, error: 'delivery event persistence failed' };
+    if (Array.isArray(msg.suppressedRecipients) && msg.suppressedRecipients.length > 0) {
+      const suppressed = appendDeliveryEventOnce({
+        type: 'message.suppressed',
+        source: 'backend',
+        messageId: msg.id,
+        targetAgents: msg.suppressedRecipients,
+        reason: 'suppressed-recipient',
+      }, `matrix:${receipt.eventId}:suppressed`);
+      if (!suppressed.ok) return { ok: false, status: 503, error: 'suppression event persistence failed' };
+    }
+    receipt = matrixDispatchStore.accept(receipt.eventId, receipt.response);
+  }
+
+  const wake = await emitMatrixStoredMessageSideEffects(msg, receipt, { senderIsAgent, directTargetKind });
+  if (!wake.ok) return wake;
+  if (matrixDispatchFailureStageForTest === 'after-wake-before-commit') {
+    matrixDispatchFailureStageForTest = null;
+    throw new Error('injected Matrix dispatch failure after wake before commit');
+  }
+  const committed = matrixDispatchStore.commit(receipt.eventId, receipt.response);
+  return { ok: true, response: committed.response || {}, newlyCommitted: true };
 }
 
 function dispatchInternalDirectMessage(payload = {}) {
@@ -6926,13 +7101,13 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
       catchupUnreadCount: unread.length,
     },
   });
-  broadcastSSE('message', msg);
+  broadcastSSE('message', { ...msg, deliveryOwner: 'dashboard-queue' });
   catchupCursor.set(agentName, key);
   const result = await pushNotify(agentName, msg);
   if (isCatchupNotificationComplete(result)) catchupPushCursor.set(agentName, key);
 }
 
-async function pushNotify(agentName, msg) {
+async function pushNotify(agentName, msg, options = {}) {
   const agent = agents[agentName];
   if (!agent?.tmux) {
     logPushNotifySkip(agentName, 'missing-tmux-target');
@@ -7090,7 +7265,10 @@ async function pushNotify(agentName, msg) {
     const queuePath = new URL(PUSH_QUEUE_URL).pathname;
     const resp = await fetchWebBridge(PUSH_QUEUE_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}),
+      },
       signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
       body: JSON.stringify({ from: 'agent-chat-v2', to: agent.tmux, payload: notification, priority: notificationPriority || 'normal', notifyMeta }),
     }, `pushNotify() POST ${queuePath} agent=${agentName}`);
@@ -9831,8 +10009,8 @@ app.get('/api/media/fetch', (req, res) => {
 });
 
 // ── Messages ──────────────────────────────────────────────────────────
-app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid, from_id } = req.body;
+app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) => {
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, source_event_id, matrix_default_recipient, attachments, schema, priority, sender_mxid, from_id } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -9840,9 +10018,32 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
   const sourceRoom = (typeof source_room === 'string' && source_room.trim() && source_room.length <= 255)
     ? source_room.trim()
     : null;
-  // Only accept sender_mxid from authenticated bridge requests (or if no secret is configured)
+  // Matrix worker ingestion is accepted only through the authenticated bridge.
   const bridgeSecret = getBridgeSecret();
   const isBridgeAuthenticated = !bridgeSecret || req.headers['x-bridge-secret'] === bridgeSecret;
+  const hasAuthenticatedBridgeSecret = Boolean(bridgeSecret)
+    && req.headers['x-bridge-secret'] === bridgeSecret;
+  let sourceEventId = null;
+  if (sourceType === 'matrix') {
+    if (!bridgeSecret) {
+      return res.status(503).json({ error: 'MATRIX_BRIDGE_SECRET is required for Matrix ingestion' });
+    }
+    if (!hasAuthenticatedBridgeSecret) {
+      return res.status(401).json({ error: 'invalid Matrix bridge credentials' });
+    }
+    if (typeof source_event_id !== 'string' || !source_event_id.trim() || source_event_id.trim().length > 255) {
+      return res.status(400).json({ error: 'source_event_id must be 1..255 characters' });
+    }
+    sourceEventId = source_event_id.trim();
+  }
+  const matrixDefaultRecipient = hasAuthenticatedBridgeSecret
+    && sourceType === 'matrix'
+    && matrix_default_recipient === 'wf_coordinator'
+    ? 'wf_coordinator'
+    : null;
+  if (matrix_default_recipient !== undefined && !matrixDefaultRecipient) {
+    return res.status(400).json({ error: 'invalid matrix_default_recipient' });
+  }
   const senderMxid = isBridgeAuthenticated && sourceType === 'matrix' && typeof sender_mxid === 'string' && /^@[^:]+:.+/.test(sender_mxid.trim())
     ? sender_mxid.trim().slice(0, 255) : null;
   // Derive trustLevel server-side from validated senderMxid — never trust caller-supplied value
@@ -9888,6 +10089,20 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
   }
   if (!['auto', 'agent', 'human'].includes(targetType)) {
     return res.status(400).json({ error: 'target_type must be one of: auto, agent, human' });
+  }
+  if (sourceEventId) {
+    const existing = matrixDispatchStore.get(sourceEventId);
+    if (existing) {
+      try {
+        const completed = await completeMatrixDispatch(existing);
+        if (!completed.ok) {
+          return res.status(completed.status || 503).json({ error: completed.error || 'Matrix dispatch recovery failed' });
+        }
+        return res.json({ ...completed.response, ok: true, id: existing.messageId, deduped: true });
+      } catch (error) {
+        return res.status(503).json({ error: `Matrix dispatch recovery failed: ${error.message}` });
+      }
+    }
   }
   let directTargetKind = null;
   let assumedHumanTarget = false;
@@ -9998,6 +10213,8 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
     reply_to: reply_to || null,
     source: source || 'api',
     sourceRoom,
+    sourceEventId,
+    matrixDefaultRecipient,
     senderMxid,
     trustLevel,
     fromId: isBridgeAuthenticated && (typeof from_id === 'string' && from_id.trim()) ? from_id.trim().slice(0, 255)
@@ -10061,7 +10278,7 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
     }
 
     const outOfGroupMentions = mentionStates
-      .filter(item => item.state.exists && !item.isGroupMember)
+      .filter(item => item.state.exists && !item.isGroupMember && item.name !== matrixDefaultRecipient)
       .map(item => ({ target: item.name, reason: 'not-in-group' }));
     if (outOfGroupMentions.length) {
       warnings.push({ code: 'mentions_not_in_group', targets: outOfGroupMentions });
@@ -10072,7 +10289,30 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
     msg.suppressedRecipients = [...suppressedRecipients];
   }
 
-  const dispatchResult = dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
+  const responseBase = {
+    ok: true,
+    id: msg.id,
+    warnings,
+    delivery: { suppressed: msg.suppressedRecipients || [], targetKind: directTargetKind || null },
+    taskGraph: null,
+  };
+  let dispatchResult;
+  if (sourceEventId) {
+    try {
+      const receipt = matrixDispatchStore.reserve({
+        eventId: sourceEventId,
+        messageId: msg.id,
+        message: msg,
+        dispatch: { senderIsAgent, directTargetKind },
+        response: responseBase,
+      });
+      dispatchResult = await completeMatrixDispatch(receipt);
+    } catch (error) {
+      dispatchResult = { ok: false, status: 503, error: `Matrix dispatch persistence failed: ${error.message}` };
+    }
+  } else {
+    dispatchResult = dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
+  }
   if (!dispatchResult.ok) {
     return res.status(dispatchResult.status || 503).json({ error: dispatchResult.error || 'message persistence failed' });
   }
@@ -10090,13 +10330,7 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
     });
   }
 
-  res.json({
-    ok: true,
-    id: msg.id,
-    warnings,
-    delivery: { suppressed: msg.suppressedRecipients || [], targetKind: directTargetKind || null },
-    taskGraph,
-  });
+  res.json({ ...responseBase, taskGraph });
 });
 
 // ── DM history (bearer-authenticated, for web UI) ─────────────────────
@@ -10701,6 +10935,9 @@ export const __backendV2TestInternals = {
   sseAdapterForTest: sseAdapter,
   safeWriteJsonFile,
   setJsonSaveFailureForTest,
+  setMatrixDispatchFailureForTest(stage = null) {
+    matrixDispatchFailureStageForTest = stage;
+  },
 };
 
 if (process.argv[1] === __filename) {

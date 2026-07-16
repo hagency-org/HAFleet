@@ -4,6 +4,7 @@ import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { createServer } from 'http';
 import os from 'os';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
 const API_TOKEN = 'messages-test-api-token';
@@ -39,7 +40,7 @@ async function createQueueStub(handler) {
     });
     req.on('end', async () => {
       const parsed = raw ? JSON.parse(raw) : null;
-      const requestRow = { method: req.method, url: req.url, body: parsed };
+      const requestRow = { method: req.method, url: req.url, headers: req.headers, body: parsed };
       requests.push(requestRow);
       const response = await handler(requestRow, requests.length);
       res.statusCode = response?.status || 200;
@@ -95,6 +96,332 @@ describe('backend message API', () => {
 
   afterAll(() => {
     context.cleanup();
+  });
+
+  test('authenticated Matrix source_event_id returns the original message without redispatch', async () => {
+    const idempotentContext = await createBackendTestContext('agent-chat-matrix-idempotency-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: true },
+      },
+      env: { MATRIX_BRIDGE_SECRET: 'matrix-idempotency-secret' },
+    });
+    const payload = {
+      from: 'alice',
+      to: 'alpha',
+      target_type: 'agent',
+      type: 'human',
+      summary: 'create issue for exactly-once routing',
+      source: 'matrix',
+      source_room: '!factory:matrix.test',
+      sender_mxid: '@alice:matrix.test',
+      source_event_id: '$factory-event-1',
+    };
+
+    try {
+      const first = await request(idempotentContext.app)
+        .post('/api/messages')
+        .set('X-Bridge-Secret', 'matrix-idempotency-secret')
+        .send(payload);
+      const second = await request(idempotentContext.app)
+        .post('/api/messages')
+        .set('X-Bridge-Secret', 'matrix-idempotency-secret')
+        .send({ ...payload, summary: 'changed replay payload must not redispatch' });
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(second.body).toMatchObject({ ok: true, id: first.body.id, deduped: true });
+      const persisted = readPersistedMessages(idempotentContext.runtimeDir);
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]).toMatchObject({
+        id: first.body.id,
+        sourceEventId: '$factory-event-1',
+        summary: 'create issue for exactly-once routing',
+      });
+      expect(readDeliveryEvents(idempotentContext.runtimeDir).filter((event) => (
+        event.type === 'message.accepted' && event.messageId === first.body.id
+      ))).toHaveLength(1);
+    } finally {
+      idempotentContext.cleanup();
+    }
+  });
+
+  test('committed_receipt_restores_missing_live_message', async () => {
+    const recovering = await createBackendTestContext('agent-chat-matrix-committed-recovery-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true },
+      },
+      env: { MATRIX_BRIDGE_SECRET: 'matrix-committed-secret' },
+    });
+    const payload = {
+      from: 'alice', to: 'alpha', target_type: 'agent', type: 'human',
+      summary: 'restore committed message', source: 'matrix', source_event_id: '$committed-event',
+    };
+
+    try {
+      const first = await request(recovering.app).post('/api/messages')
+        .set('X-Bridge-Secret', 'matrix-committed-secret').send(payload);
+      expect(first.status).toBe(200);
+      writeFileSync(path.join(recovering.runtimeDir, 'data', 'messages.json'), '[]');
+
+      const backendUrl = pathToFileURL(path.resolve('backend-v2.js')).href;
+      const reloaded = await import(`${backendUrl}?matrix-committed-recovery=${Date.now()}-${Math.random()}`);
+      const replay = await request(reloaded.app).post('/api/messages')
+        .set('X-Bridge-Secret', 'matrix-committed-secret').send(payload);
+
+      expect(replay.body).toMatchObject({ ok: true, id: first.body.id, deduped: true });
+      expect(readPersistedMessages(recovering.runtimeDir)).toEqual([
+        expect.objectContaining({ id: first.body.id, sourceEventId: '$committed-event' }),
+      ]);
+      expect(readDeliveryEvents(recovering.runtimeDir).filter((event) => (
+        event.type === 'message.accepted' && event.messageId === first.body.id
+      ))).toHaveLength(1);
+    } finally {
+      recovering.cleanup();
+    }
+  });
+
+  test('backend_repairs_torn_auxiliary_jsonl_tails', async () => {
+    const accepted = JSON.stringify({
+      type: 'message.accepted', attemptId: 'existing-attempt', messageId: 'msg_existing',
+    });
+    const archived = JSON.stringify({ id: 'msg_archived', summary: 'durable archive row' });
+    const repairing = await createBackendTestContext('agent-chat-matrix-jsonl-repair-', {
+      rawDataFiles: {
+        'message-delivery-events.jsonl': `${accepted}\n{"attemptId":"torn`,
+        'messages-archive.jsonl': `${archived}\n{"id":"torn`,
+      },
+    });
+
+    try {
+      expect(readFileSync(
+        path.join(repairing.runtimeDir, 'data', 'message-delivery-events.jsonl'), 'utf8',
+      )).toBe(`${accepted}\n`);
+      expect(readFileSync(
+        path.join(repairing.runtimeDir, 'data', 'messages-archive.jsonl'), 'utf8',
+      )).toBe(`${archived}\n`);
+    } finally {
+      repairing.cleanup();
+    }
+  });
+
+  test('backend_reserved_dispatch_resumes_after_restart', async () => {
+    const recovering = await createBackendTestContext('agent-chat-matrix-recovery-', {
+      agents: { alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: true } },
+      env: { MATRIX_BRIDGE_SECRET: 'matrix-recovery-secret' },
+    });
+    const payload = {
+      from: 'alice', to: 'alpha', target_type: 'agent', type: 'human',
+      summary: 'recover durable Matrix dispatch', source: 'matrix',
+      source_event_id: '$recover-event',
+    };
+
+    try {
+      recovering.internals.setMatrixDispatchFailureForTest('after-message-persist');
+      const interrupted = await request(recovering.app).post('/api/messages')
+        .set('X-Bridge-Secret', 'matrix-recovery-secret').send(payload);
+      expect(interrupted.status).toBe(503);
+      expect(readPersistedMessages(recovering.runtimeDir)).toHaveLength(1);
+      expect(readDeliveryEvents(recovering.runtimeDir)).toHaveLength(0);
+
+      const backendUrl = pathToFileURL(path.resolve('backend-v2.js')).href;
+      const reloaded = await import(`${backendUrl}?matrix-recovery=${Date.now()}-${Math.random()}`);
+      const replay = await request(reloaded.app).post('/api/messages')
+        .set('X-Bridge-Secret', 'matrix-recovery-secret')
+        .send({ ...payload, summary: 'changed replay payload' });
+
+      expect(replay.body).toMatchObject({ ok: true, id: 'msg_0001', deduped: true });
+      expect(readPersistedMessages(recovering.runtimeDir)).toHaveLength(1);
+      expect(readDeliveryEvents(recovering.runtimeDir).filter((event) => (
+        event.type === 'message.accepted' && event.messageId === 'msg_0001'
+      ))).toHaveLength(1);
+    } finally {
+      recovering.cleanup();
+    }
+  });
+
+  test('backend_accepted_receipt_resumes_idempotent_wake_after_restart', async () => {
+    const acceptedKeys = new Map();
+    const queue = await createQueueStub((row) => {
+      const key = row.headers['idempotency-key'];
+      if (acceptedKeys.has(key)) {
+        return { body: { ...acceptedKeys.get(key), deduped: true } };
+      }
+      const result = { ok: true, id: acceptedKeys.size + 1, queuedAt: 4000 + acceptedKeys.size };
+      acceptedKeys.set(key, result);
+      return { body: result };
+    });
+    const recovering = await createBackendTestContext('agent-chat-matrix-wake-recovery-', {
+      agents: {
+        alpha: {
+          name: 'alpha', type: 'agent', kind: 'agent', online: true,
+          tmux: 'alpha:0.0', server: 'local',
+        },
+      },
+      env: {
+        MATRIX_BRIDGE_SECRET: 'matrix-wake-secret',
+        AGENT_CHAT_QUEUE_URL: queue.url,
+      },
+    });
+    const payload = {
+      from: 'alice', to: 'alpha', target_type: 'agent', type: 'human',
+      summary: 'resume reliable wake', source: 'matrix', source_event_id: '$wake-event',
+    };
+
+    try {
+      recovering.internals.setMatrixDispatchFailureForTest('after-wake-before-commit');
+      const interrupted = await request(recovering.app).post('/api/messages')
+        .set('X-Bridge-Secret', 'matrix-wake-secret').send(payload);
+      expect(interrupted.status).toBe(503);
+      expect(queue.requests).toHaveLength(1);
+
+      const backendUrl = pathToFileURL(path.resolve('backend-v2.js')).href;
+      const reloaded = await import(`${backendUrl}?matrix-wake-recovery=${Date.now()}-${Math.random()}`);
+      const replay = await request(reloaded.app).post('/api/messages')
+        .set('X-Bridge-Secret', 'matrix-wake-secret').send(payload);
+
+      expect(replay.body).toMatchObject({ ok: true, id: 'msg_0001', deduped: true });
+      expect(queue.requests).toHaveLength(2);
+      expect(new Set(queue.requests.map((row) => row.headers['idempotency-key'])))
+        .toEqual(new Set(['matrix:$wake-event:alpha']));
+      expect(acceptedKeys.size).toBe(1);
+      const receipts = readFileSync(
+        path.join(recovering.runtimeDir, 'data', 'matrix', 'source-events.jsonl'), 'utf8',
+      ).trim().split('\n').map(JSON.parse);
+      expect(receipts.at(-1).status).toBe('committed');
+    } finally {
+      recovering.cleanup();
+      await queue.close();
+    }
+  });
+
+  test('unauthenticated Matrix source_event_id cannot reserve an idempotency key', async () => {
+    const unauthenticatedContext = await createBackendTestContext('agent-chat-matrix-idempotency-unauth-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: true },
+      },
+      env: { MATRIX_BRIDGE_SECRET: 'required-bridge-secret' },
+    });
+    const payload = {
+      from: 'alice', to: 'alpha', target_type: 'agent', type: 'human',
+      summary: 'unauthenticated Matrix message', source: 'matrix',
+      source_event_id: '$untrusted-event-id',
+    };
+
+    try {
+      const first = await request(unauthenticatedContext.app).post('/api/messages').send(payload);
+      const second = await request(unauthenticatedContext.app).post('/api/messages').send(payload);
+      const authenticated = await request(unauthenticatedContext.app)
+        .post('/api/messages')
+        .set('X-Bridge-Secret', 'required-bridge-secret')
+        .send(payload);
+
+      expect(first.status).toBe(401);
+      expect(second.status).toBe(401);
+      expect(authenticated.status).toBe(200);
+      const persisted = readPersistedMessages(unauthenticatedContext.runtimeDir);
+      expect(persisted.filter((message) => message.sourceEventId === '$untrusted-event-id')).toHaveLength(1);
+    } finally {
+      unauthenticatedContext.cleanup();
+    }
+  });
+
+  test('Matrix ingestion fails closed when bridge secret or event id is missing', async () => {
+    const noSecret = await createBackendTestContext('agent-chat-matrix-no-secret-', {
+      agents: { alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: true } },
+    });
+    const payload = {
+      from: 'alice', to: 'alpha', target_type: 'agent', type: 'human',
+      summary: 'must be idempotent', source: 'matrix',
+    };
+
+    const secretMissing = await request(noSecret.app).post('/api/messages')
+      .send({ ...payload, source_event_id: '$event' });
+    expect(secretMissing.status).toBe(503);
+    expect(readPersistedMessages(noSecret.runtimeDir)).toHaveLength(0);
+    noSecret.cleanup();
+
+    const withSecret = await createBackendTestContext('agent-chat-matrix-no-event-', {
+      agents: { alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: true } },
+      env: { MATRIX_BRIDGE_SECRET: 'required-bridge-secret' },
+    });
+    try {
+      const eventMissing = await request(withSecret.app).post('/api/messages')
+        .set('X-Bridge-Secret', 'required-bridge-secret').send(payload);
+
+      expect(eventMissing.status).toBe(400);
+      expect(readPersistedMessages(withSecret.runtimeDir)).toHaveLength(0);
+    } finally {
+      withSecret.cleanup();
+    }
+  });
+
+  test('backend_receipt_survives_retention', async () => {
+    const retained = await createBackendTestContext('agent-chat-matrix-retention-', {
+      agents: { alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true } },
+      agentTokens: { alpha: ALPHA_TOKEN },
+      env: { MATRIX_BRIDGE_SECRET: 'retention-secret', AGENT_MESSAGE_RETENTION_LIMIT: '100' },
+    });
+    const payload = {
+      from: 'alice', to: 'alpha', target_type: 'agent', type: 'human',
+      summary: 'original Matrix command', source: 'matrix', source_event_id: '$retained-event',
+    };
+
+    try {
+      const first = await request(retained.app).post('/api/messages')
+        .set('X-Bridge-Secret', 'retention-secret').send(payload);
+      for (let index = 0; index < 101; index += 1) {
+        await request(retained.app).post('/api/messages').send({
+          from: 'system', to: 'alpha', type: 'inform', summary: `filler ${index}`,
+        });
+      }
+      await request(retained.app).get('/api/inbox/alpha')
+        .set('X-Agent-Name', 'alpha').set('X-Agent-Token', ALPHA_TOKEN);
+      await request(retained.app).post('/api/messages').send({
+        from: 'system', to: 'alpha', type: 'inform', summary: 'trigger prune',
+      });
+      expect(readPersistedMessages(retained.runtimeDir).some((message) => message.id === first.body.id)).toBe(false);
+
+      const replay = await request(retained.app).post('/api/messages')
+        .set('X-Bridge-Secret', 'retention-secret')
+        .send({ ...payload, summary: 'replayed after pruning' });
+      expect(replay.body).toMatchObject({ ok: true, id: first.body.id, deduped: true });
+      expect(readDeliveryEvents(retained.runtimeDir).filter((event) => (
+        event.type === 'message.accepted' && event.messageId === first.body.id
+      ))).toHaveLength(1);
+    } finally {
+      retained.cleanup();
+    }
+  });
+
+  test('non-Matrix callers cannot reserve source_event_id even with bridge authentication', async () => {
+    const apiContext = await createBackendTestContext('agent-chat-matrix-idempotency-api-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: true },
+      },
+      env: { MATRIX_BRIDGE_SECRET: 'required-bridge-secret' },
+    });
+    const payload = {
+      from: 'system', to: 'alpha', type: 'inform', summary: 'ordinary API message',
+      source: 'api', source_event_id: '$api-forged-event-id',
+    };
+
+    try {
+      const first = await request(apiContext.app)
+        .post('/api/messages')
+        .set('X-Bridge-Secret', 'required-bridge-secret')
+        .send(payload);
+      const second = await request(apiContext.app)
+        .post('/api/messages')
+        .set('X-Bridge-Secret', 'required-bridge-secret')
+        .send(payload);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(second.body.id).not.toBe(first.body.id);
+      expect(readPersistedMessages(apiContext.runtimeDir).every((message) => !message.sourceEventId)).toBe(true);
+    } finally {
+      apiContext.cleanup();
+    }
   });
 
   test('POST message with schema containing kind + payload returns 200 and round-trips', async () => {
