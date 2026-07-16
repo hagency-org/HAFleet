@@ -1295,3 +1295,30 @@ describe('bridge matrix behavior', () => {
     });
   });
 });
+
+// Bridge-side half of "bridge secret missing or mismatched fails closed" (Task 6 row 4).
+// The backend's half (missing/wrong X-Bridge-Secret on /api/messages -> 503/401) is covered by
+// tests/api-messages.test.js ("Matrix ingestion fails closed when bridge secret or event id is
+// missing") and tests/api-provenance.test.js ("wrong bridge secret rejects senderMxid +
+// trustLevel", "missing bridge secret header rejects..."). This is the bridge process's own
+// guard: it refuses to even start when it has no secret to send, rather than relying solely on
+// the backend to reject its (unauthenticated) requests.
+describe('bridge start() fails closed without a bridge secret', () => {
+  test('start() rejects immediately when MATRIX_BRIDGE_SECRET is unset', async () => {
+    const runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-no-secret-'));
+    const envSnapshot = snapshotEnv(['AGENT_CHAT_RUNTIME_DIR', 'MATRIX_BRIDGE_SECRET']);
+    process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+    delete process.env.MATRIX_BRIDGE_SECRET;
+    try {
+      const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
+      const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const { MatrixBridge: NoSecretMatrixBridge } = await import(`${bridgeUrl}?no-bridge-secret=${cacheBust}`);
+      const bridge = new NoSecretMatrixBridge();
+
+      await expect(bridge.start()).rejects.toThrow(/MATRIX_BRIDGE_SECRET is required/);
+    } finally {
+      rmSync(runtimeDir, { recursive: true, force: true });
+      restoreEnv(envSnapshot);
+    }
+  });
+});

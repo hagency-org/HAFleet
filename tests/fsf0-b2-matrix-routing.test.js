@@ -298,7 +298,29 @@ test('untrusted_inviter_denied', async () => {
   expect(result).toMatchObject({ accepted: false, reason: expect.any(String) });
   expect(bridge.botClient.joinRoom).not.toHaveBeenCalled();
   expect(bridge.botClient.leaveRoom).toHaveBeenCalledWith('!untrusted:matrix.test');
+  // The redacted reason tag (never the bridge secret or a raw exception) is what gets logged.
+  expect(log.mock.calls.flat().join(' ')).toContain('reason=untrusted_inviter');
   expect(log.mock.calls.flat().join(' ')).toContain('@evil:matrix.test');
+});
+
+test('trusted_inviter_allowed', async () => {
+  const roomId = '!trusted-invite-room:matrix.test';
+  const bridge = createBridge({
+    store: new MatrixEventStore({
+      journalPath: path.join(runtimeDir, 'data', 'matrix', 'trusted-invite-events.jsonl'),
+    }),
+    submit: vi.fn(),
+  });
+  bridge.botClient.joinRoom = vi.fn().mockResolvedValue(undefined);
+  bridge.botClient.leaveRoom = vi.fn().mockResolvedValue(undefined);
+
+  const result = await bridge.handleBotInvite(roomId, {
+    sender: '@trusted:matrix.test',
+  });
+
+  expect(result).toMatchObject({ accepted: true, reason: 'trusted_inviter', inviter: '@trusted:matrix.test' });
+  expect(bridge.botClient.joinRoom).toHaveBeenCalledWith(roomId);
+  expect(bridge.botClient.leaveRoom).not.toHaveBeenCalled();
 });
 
 test('allowlisted_room_untrusted_inviter_denied', async () => {

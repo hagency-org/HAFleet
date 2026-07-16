@@ -4,6 +4,7 @@ The local profile manages `backend`, `dashboard`, `bridge`, and `relay` under
 one detached supervisor. Use an existing writable runtime directory:
 
 ```bash
+set -a; . ./.env; set +a  # neither script below auto-loads .env — source it first
 export AGENT_CHAT_RUNTIME_DIR="$PWD"
 node services/agentchat-services.mjs start
 node services/agentchat-services.mjs status
@@ -57,6 +58,7 @@ round). If you need a tighter bound on membership staleness specifically,
 tune `MATRIX_ROOM_SCAN_POLL_MS` rather than the health-record thresholds.
 
 ```bash
+set -a; . ./.env; set +a  # the doctor reads MATRIX_HOMESERVER, MATRIX_ACCEPTANCE_*, etc. directly
 export AGENT_CHAT_RUNTIME_DIR="$PWD"
 node services/standalone-doctor.mjs
 node services/standalone-doctor.mjs --json
@@ -70,6 +72,55 @@ room exists yet — it should not be part of a normal production check. Freshnes
 thresholds (`BRIDGE_HEALTH_MAX_AGE_MS`, `RELAY_HEALTH_MAX_AGE_MS`) and the
 bridge/relay's own record-write cadence (`BRIDGE_HEALTH_WRITE_INTERVAL_MS`,
 `PUSH_RELAY_HEALTH_WRITE_INTERVAL_MS`) are also documented there.
+
+## Standalone trust configuration
+
+Before pointing the bridge at real Matrix rooms, five settings define the
+trust boundary between agent-chat and the outside Matrix world. `.env.example`
+ships safe defaults for all five; a fresh `.env` only needs
+`MATRIX_BRIDGE_SECRET` and `MATRIX_TRUSTED_INVITER_MXIDS` filled in.
+
+1. **Bridge secret** (`MATRIX_BRIDGE_SECRET`) — non-empty, and the *same*
+   value loaded by both `backend-v2.js` and `bridge-matrix.js`: start both
+   processes from the same sourced environment, since neither one reads
+   `.env` itself (nothing in this repo auto-loads it — every `start`/`status`/
+   `doctor`/`stop` invocation must source it first, as in the command blocks
+   above). Fails closed two ways: the bridge process refuses to `start()` with
+   no secret to send (`bridge-matrix.js`), and the backend rejects
+   `source: "matrix"` ingestion on `/api/messages` — 503 if its own secret is
+   unset, 401 if the request's `X-Bridge-Secret` is missing or wrong
+   (`backend-v2.js`). Covered by `tests/bridge-matrix.test.js` ("start()
+   rejects immediately when MATRIX_BRIDGE_SECRET is unset"),
+   `tests/api-messages.test.js` ("Matrix ingestion fails closed when bridge
+   secret or event id is missing"), and `tests/api-provenance.test.js`
+   ("wrong bridge secret rejects senderMxid + trustLevel", "missing bridge
+   secret header rejects when MATRIX_BRIDGE_SECRET is set").
+2. **Agent token mode** (`AGENTCHAT_AGENT_TOKEN_MODE=hard`) — see check 7
+   above; a missing managed-agent token flips backend `/health` — and the
+   doctor's `authAndTokenIntegrity` check — to degraded instead of silently
+   letting the agent through. Covered by `tests/api-agent-token.test.js`
+   ("health reports missing managed agent tokens without flipping hard-mode
+   compatibility") and `tests/standalone-doctor.test.js` ("fails when hard
+   mode is configured but a managed agent token is missing").
+3. **Matrix trust mode** (`MATRIX_TRUST_MODE=enforce`) — the code default is
+   `audit` (dev/CI only: logs untrusted rooms but does not block them); every
+   real deployment, and `.env.example`, ship `enforce`, which actively rejects
+   invites and messages from untrusted rooms/inviters. See
+   `docs/architecture/auth-trust-model.md` §6.
+4. **Trusted inviters** (`MATRIX_TRUSTED_INVITER_MXIDS`) — comma-separated
+   Matrix IDs allowed to invite the bridge bot into a room; an invite from
+   anyone else is auto-rejected (bot leaves the room) under `enforce`. Covered
+   by `tests/fsf0-b2-matrix-routing.test.js` ("trusted_inviter_allowed",
+   "untrusted_inviter_denied", "allowlisted_room_untrusted_inviter_denied")
+   and the classifier-level `tests/room-trust.test.js`.
+5. **Ignored senders** (`MATRIX_IGNORED_SENDER_MXIDS`) — comma-separated
+   Matrix IDs whose messages the bridge drops before they ever reach an agent
+   inbox; use it for other loop-causing appservice bots sharing a room. The
+   bridge's own bot account and puppeted agent accounts are excluded from
+   routing automatically and do not need to be listed. Covered by
+   `tests/fsf0-b2-matrix-routing.test.js` ("ignored_sender_not_routed") and
+   `tests/bridge-matrix.test.js` ("onRoomMessage skips configured external
+   Matrix bot senders").
 
 For the four-service team deployment, provide an operator-owned environment
 file containing the existing Agent Chat and Matrix settings:
