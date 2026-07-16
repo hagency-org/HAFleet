@@ -195,7 +195,7 @@ MATRIX_TRUSTED_INVITER_MXIDS=@operator:matrix.example.com
 MATRIX_OPERATOR_MXIDS=@operator:matrix.example.com
 MATRIX_GREETING_MXIDS=@operator:matrix.example.com
 MATRIX_IGNORED_SENDER_MXIDS=@octosbot:matrix.example.com
-MATRIX_INVITE_POLL_MS=15000
+MATRIX_INVITE_POLL_MS=60000
 ```
 
 安装或重启 bridge：
@@ -290,7 +290,7 @@ agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
 | `MATRIX_TRUST_MODE` | `enforce` | 房间信任策略：`enforce`、`audit` 或 `off`。公网 homeserver 建议使用 `enforce` |
 | `MATRIX_TRUSTED_INVITER_MXIDS` | 空 | 逗号分隔的 Matrix 用户；这些用户邀请的房间会被信任并自动加入 |
 | `MATRIX_OPERATOR_MXIDS` | 空 | 允许执行高权限命令的 Matrix 用户 |
-| `MATRIX_INVITE_POLL_MS` | `15000` | 邀请轮询间隔（毫秒），最低钳制到 5000。matrix.palpo.im 等公共 homeserver 限流严格，不要轮询更快 |
+| `MATRIX_INVITE_POLL_MS` | `60000` | 邀请轮询间隔（毫秒），最低钳制到 5000。matrix.palpo.im 等公共 homeserver 限流严格，不要轮询更快 |
 
 ### Supervisor 与 LLM
 
