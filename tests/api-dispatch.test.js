@@ -10,6 +10,10 @@ describe('matrix-Agent capability scheduler', () => {
       agents: {
         cod1: { name: 'cod1', type: 'claude', kind: 'agent', online: true, role: 'coding', capability: 'medium' },
       },
+      // Task 7: this pre-Task-7 suite releases by bare {agent} (no leaseId/owner). That shape is
+      // rejected by default post-Task-7 (see the "dispatch leases" describe block below); the
+      // compatibility shim keeps this suite's original behavior working unchanged.
+      env: { AGENTCHAT_ALLOW_LEGACY_RELEASE: '1' },
     });
   });
 
@@ -81,8 +85,12 @@ describe('matrix-Agent dispatch leases (Task 7)', () => {
     context = await createBackendTestContext('agent-chat-dispatch-lease-test-', {
       agents: {
         cod1: { name: 'cod1', type: 'claude', kind: 'agent', online: true, role: 'coding', capability: 'medium' },
+        cod2: { name: 'cod2', type: 'claude', kind: 'agent', online: true, role: 'coding', capability: 'medium' },
       },
       env: { AGENTCHAT_DISPATCH_LEASE_TTL_MS: '60000' }, // 60s — short enough to fast-forward past in tests
+      // AGENTCHAT_ALLOW_LEGACY_RELEASE deliberately left unset (default off): this block tests
+      // the strict, owner-checked contract. The compatibility-shim describe block below covers
+      // the opt-in legacy path.
     });
   });
 
@@ -181,30 +189,37 @@ describe('matrix-Agent dispatch leases (Task 7)', () => {
   });
 
   test('7. a reaped lease with a durable ticket is requeued exactly once', async () => {
-    const dispatch = await request(context.app).post('/api/dispatch')
+    const first = await request(context.app).post('/api/dispatch')
       .send({ role: 'coding', capability: 'medium', task: 'A', owner: 'dispatcher-a', ticket: 'durable-1' });
-    expect(dispatch.body.status).toBe('routed');
-    const firstExpiry = dispatch.body.expiresAt;
+    expect(first.body.agent).toBe('cod1');
+    vi.setSystemTime(new Date(Date.now() + 5000)); // so cod2's lease outlives cod1's below
+    const second = await request(context.app).post('/api/dispatch')
+      .send({ role: 'coding', capability: 'medium', task: 'B', owner: 'dispatcher-b' });
+    expect(second.body.agent).toBe('cod2'); // cod1 already reserved by `first`
+    expect(second.body.expiresAt).toBeGreaterThan(first.body.expiresAt);
 
-    // expire it unrenewed; GET /api/pool triggers the reap sweep (like refreshServerLiveness()).
-    vi.setSystemTime(new Date(firstExpiry + 1));
+    // expire cod1's lease unrenewed; GET /api/pool triggers the reap sweep (like refreshServerLiveness()).
+    vi.setSystemTime(new Date(first.body.expiresAt + 1));
     await request(context.app).get('/api/pool');
+    // the durable ticket should now be queued for the coding:medium cell.
+    const queuedAfterFirstReap = context.internals.dispatchQueuesForTest.get('coding:medium') || [];
+    expect(queuedAfterFirstReap).toMatchObject([{ ticket: 'durable-1' }]);
 
-    // cod1 is idle again, but the durable ticket should now be queued for its cell; releasing
-    // cod1 (even though nothing currently holds it) drains that queue and re-reserves it.
-    const drained = await request(context.app).post('/api/dispatch/release').send({ agent: 'cod1' });
+    // A fully-owned, strict release of a DIFFERENT agent in the same cell drains that queue —
+    // proving the requeue landed without touching the (now-restricted) legacy release shape.
+    const drained = await request(context.app).post('/api/dispatch/release')
+      .send({ agent: 'cod2', leaseId: second.body.leaseId, owner: 'dispatcher-b' });
     expect(drained.body.status).toBe('drained');
+    expect(drained.body.agent).toBe('cod2');
     expect(drained.body.ticket).toBe('durable-1');
     expect(typeof drained.body.leaseId).toBe('string');
-    expect(drained.body.leaseId).not.toBe(dispatch.body.leaseId);
     const secondExpiry = drained.body.expiresAt;
 
     // let this SECOND (requeued) lease also expire unrenewed — the ticket already used its one
     // automatic requeue, so this time it must NOT be requeued again.
     vi.setSystemTime(new Date(secondExpiry + 1));
     await request(context.app).get('/api/pool');
-    const secondRelease = await request(context.app).post('/api/dispatch/release').send({ agent: 'cod1' });
-    expect(secondRelease.body.status).toBe('released'); // nothing queued this time — no second requeue
+    expect(context.internals.dispatchQueuesForTest.get('coding:medium') || []).toHaveLength(0);
   });
 
   test('8. a reaped lease with no durable ticket is marked failed and raises an alert (never silently duplicated)', async () => {
@@ -213,8 +228,8 @@ describe('matrix-Agent dispatch leases (Task 7)', () => {
     vi.setSystemTime(new Date(dispatch.body.expiresAt + 1));
     await request(context.app).get('/api/pool'); // triggers the reap
 
-    const release = await request(context.app).post('/api/dispatch/release').send({ agent: 'cod1' });
-    expect(release.body.status).toBe('released'); // nothing was queued — no silent duplicate
+    // nothing queued for the cell — no silent duplicate of the failed task
+    expect(context.internals.dispatchQueuesForTest.get('coding:medium') || []).toHaveLength(0);
 
     const alerts = await request(context.app).get('/api/alerts').query({ alertType: 'dispatch_lease_expired' });
     expect(alerts.status).toBe(200);
@@ -248,16 +263,20 @@ describe('matrix-Agent dispatch leases (Task 7)', () => {
     }
   });
 
-  test('legacy release (no leaseId/owner) still works — back-compat for pre-Task-7 callers', async () => {
+  test('release rejects the legacy {agent}-only shape by default (ownership tuple required)', async () => {
     const dispatch = await request(context.app).post('/api/dispatch')
-      .send({ role: 'coding', capability: 'medium', task: 'A' }); // no owner supplied, like the OpenFab Bridge today
+      .send({ role: 'coding', capability: 'medium', task: 'A', owner: 'dispatcher-a' });
     expect(dispatch.body.status).toBe('routed');
-    expect(typeof dispatch.body.leaseId).toBe('string'); // still gets a real lease under a default owner
 
-    const release = await request(context.app).post('/api/dispatch/release').send({ agent: 'cod1' }); // legacy shape
-    expect(release.status).toBe(200);
-    expect(release.body.status).toBe('released');
-    expect(context.internals.dispatchLeaseStoreForTest.size).toBe(0);
+    const release = await request(context.app).post('/api/dispatch/release').send({ agent: 'cod1' });
+    expect(release.status).toBe(400);
+    expect(release.body.reason).toBe('missing_fields');
+    expect(release.body.error).toMatch(/AGENTCHAT_ALLOW_LEGACY_RELEASE/);
+
+    // rejected, not silently released — the lease and the agent's busy state are untouched
+    expect(context.internals.dispatchLeaseStoreForTest.size).toBe(1);
+    const pool = await request(context.app).get('/api/pool?state=busy');
+    expect(pool.body.agents.some((a) => a.name === 'cod1')).toBe(true);
   });
 
   test('release rejects a partial ownership tuple (leaseId without owner, or vice versa)', async () => {
@@ -279,5 +298,43 @@ describe('matrix-Agent dispatch leases (Task 7)', () => {
     const res = await request(context.app).post('/api/dispatch/renew').send({ agent: 'cod1' });
     expect(res.status).toBe(400);
     expect(res.body.reason).toBe('missing_fields');
+  });
+});
+
+// AGENTCHAT_ALLOW_LEGACY_RELEASE=1: an explicit opt-in escape hatch for callers that predate
+// ownership (e.g. a reintroduced OpenFab Bridge). Off by default — see "release rejects the
+// legacy {agent}-only shape by default" above for the default-deny behavior this shim overrides.
+describe('matrix-Agent dispatch leases — legacy release compatibility shim (AGENTCHAT_ALLOW_LEGACY_RELEASE=1)', () => {
+  let context;
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_700_000_000_000));
+    context = await createBackendTestContext('agent-chat-dispatch-lease-shim-test-', {
+      agents: {
+        cod1: { name: 'cod1', type: 'claude', kind: 'agent', online: true, role: 'coding', capability: 'medium' },
+      },
+      env: {
+        AGENTCHAT_DISPATCH_LEASE_TTL_MS: '60000',
+        AGENTCHAT_ALLOW_LEGACY_RELEASE: '1',
+      },
+    });
+  });
+
+  afterEach(async () => {
+    await context?.cleanup?.();
+    vi.useRealTimers();
+  });
+
+  test('legacy {agent}-only release still works when the shim is explicitly enabled', async () => {
+    const dispatch = await request(context.app).post('/api/dispatch')
+      .send({ role: 'coding', capability: 'medium', task: 'A' }); // no owner supplied, like the OpenFab Bridge
+    expect(dispatch.body.status).toBe('routed');
+    expect(typeof dispatch.body.leaseId).toBe('string'); // still gets a real lease under a default owner
+
+    const release = await request(context.app).post('/api/dispatch/release').send({ agent: 'cod1' });
+    expect(release.status).toBe(200);
+    expect(release.body.status).toBe('released');
+    expect(context.internals.dispatchLeaseStoreForTest.size).toBe(0);
   });
 });

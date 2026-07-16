@@ -146,11 +146,17 @@ const DISPATCH_LEASE_TTL_MS_RAW = Number.parseInt(process.env.AGENTCHAT_DISPATCH
 const DISPATCH_LEASE_TTL_MS = Number.isFinite(DISPATCH_LEASE_TTL_MS_RAW) && DISPATCH_LEASE_TTL_MS_RAW > 0
   ? Math.max(DISPATCH_LEASE_TTL_FLOOR_MS, DISPATCH_LEASE_TTL_MS_RAW)
   : DISPATCH_LEASE_TTL_DEFAULT_MS;
-// Owner assigned to a lease when the caller doesn't supply one — keeps pre-Task-7 callers (e.g.
-// the OpenFab Bridge as of this writing, which never sends `owner`) working: they get a real
-// lease, just not one they can renew/release under strict ownership (they don't try to; they
-// use the legacy release path, which has no ownership check — see /api/dispatch/release below).
+// Owner assigned to a lease when the caller doesn't supply one on POST /api/dispatch — dispatch
+// itself never rejects a missing owner (only renew/release do), so a lease always exists to
+// return a leaseId for.
 const DISPATCH_LEASE_DEFAULT_OWNER = 'unspecified';
+// POST /api/dispatch/release defaults to REJECTING the legacy {agent}-only shape (no leaseId,
+// no owner): letting ownership be skipped just by omitting fields would defeat the whole point
+// of "owner mismatch must fail" (a caller could always dodge the check by not claiming an
+// owner). AGENTCHAT_ALLOW_LEGACY_RELEASE=1 is an explicit, off-by-default escape hatch for a
+// caller that predates ownership (e.g. a reintroduced OpenFab Bridge — the version live at the
+// time this lease system was built has since been descoped/stopped, so nothing needs it today).
+const DISPATCH_ALLOW_LEGACY_RELEASE = normalizeBoolean(process.env.AGENTCHAT_ALLOW_LEGACY_RELEASE) === true;
 const OFFLINE_CATCHUP_LIST_LIMIT = Number.parseInt(process.env.OFFLINE_CATCHUP_LIST_LIMIT || '50', 10);
 const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_ITEMS || '8', 10);
 const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
@@ -8008,11 +8014,12 @@ app.get('/api/agents', (req, res) => {
 // dispatch time (leaseId + expiresAt in the response), extended via POST /api/dispatch/renew,
 // and released via POST /api/dispatch/release; renew/release both require the exact
 // (leaseId, agent, owner) tuple and reject otherwise (owner mismatch, unknown/stale leaseId, or
-// an already-expired lease — distinct 4xx reasons). POST /api/dispatch/release also still
-// accepts the pre-Task-7 call shape ({agent} only, no leaseId/owner) for callers that predate
-// ownership (e.g. the OpenFab Bridge as of this writing — see the Task 7 report for the full
-// caller inventory): it releases whatever lease currently holds that agent, no ownership check.
-// An unrenewed lease is reaped once its TTL lapses (checked lazily on GET /api/pool and
+// an already-expired lease — distinct 4xx reasons). POST /api/dispatch/release rejects the
+// pre-Task-7 call shape ({agent} only, no leaseId/owner) by default — letting the ownership
+// check be skipped just by omitting fields would defeat it — unless AGENTCHAT_ALLOW_LEGACY_RELEASE=1
+// is set, an explicit opt-in compatibility shim for a caller that predates ownership (see the
+// Task 7 report for the caller inventory; nothing in this stack needs the shim as of this
+// writing). An unrenewed lease is reaped once its TTL lapses (checked lazily on GET /api/pool and
 // POST /api/dispatch, mirroring refreshServerLiveness()'s placement): the lease is invalidated
 // first, then the agent is freed, so nothing can observe "agent free, lease still valid" mid-
 // reap. A reaped lease is requeued at most once, and only if it carries a durable ticket (the
@@ -8172,11 +8179,11 @@ app.post('/api/dispatch/renew', (req, res) => {
 //
 // Task 7 ownership: pass {agent, leaseId, owner} to release under the strict lease contract
 // (owner mismatch / unknown-or-stale leaseId / already-expired lease → rejected, distinct 4xx
-// reasons). Pass {agent} alone (no leaseId, no owner) for the pre-Task-7 legacy shape: it
-// releases whatever lease currently holds that agent, no ownership check — this is what keeps
-// callers that predate leases (e.g. the OpenFab Bridge as of this writing) working unmodified.
-// Passing exactly one of leaseId/owner (not both, not neither) is a malformed request, rejected
-// as `missing_fields` rather than guessed at.
+// reasons). {agent} alone (no leaseId, no owner) is the pre-Task-7 legacy shape — rejected by
+// default (`missing_fields`, since it can't prove ownership of anything) unless
+// AGENTCHAT_ALLOW_LEGACY_RELEASE=1 is set, in which case it releases whatever lease currently
+// holds that agent, no ownership check. Passing exactly one of leaseId/owner (not both, not
+// neither) is always a malformed request, rejected as `missing_fields` regardless of the flag.
 app.post('/api/dispatch/release', (req, res) => {
   const name = req.body?.agent ? String(req.body.agent) : null;
   if (!name) return res.status(400).json({ error: 'agent required' });
@@ -8191,8 +8198,13 @@ app.post('/api/dispatch/release', (req, res) => {
     } catch (error) {
       return respondDispatchLeaseError(res, error);
     }
+  } else if (DISPATCH_ALLOW_LEGACY_RELEASE) {
+    dispatchLeaseStore.releaseByAgent(name); // shim explicitly enabled — tolerant no-op if nothing to release
   } else {
-    dispatchLeaseStore.releaseByAgent(name); // legacy shape — tolerant no-op if nothing to release
+    return res.status(400).json({
+      error: 'leaseId, agent, and owner are required (set AGENTCHAT_ALLOW_LEGACY_RELEASE=1 to allow legacy {agent}-only release)',
+      reason: 'missing_fields',
+    });
   }
   const rec = agents[name];
   const role = rec ? agentRole(serializeAgent(rec)) : null;
@@ -11084,6 +11096,7 @@ export const __backendV2TestInternals = {
     matrixDispatchFailureStageForTest = stage;
   },
   dispatchLeaseStoreForTest: dispatchLeaseStore,
+  dispatchQueuesForTest: dispatchQueues,
 };
 
 if (process.argv[1] === __filename) {
