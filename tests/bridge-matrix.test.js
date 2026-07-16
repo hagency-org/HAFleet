@@ -14,6 +14,8 @@ describe('bridge matrix behavior', () => {
   let resetBridgeMatrixTestHooks;
   let resolveMessageBaseUrlForTest;
   let resolveInvitePollMsForTest;
+  let resolveRoomScanPollMsForTest;
+  let matrixRateLimitGateForTest;
   let resolveInboundRoute;
   let pickDefaultGroupRecipient;
   let preferredDmRoom;
@@ -36,6 +38,8 @@ describe('bridge matrix behavior', () => {
       resetBridgeMatrixTestHooks,
       resolveMessageBaseUrlForTest,
       resolveInvitePollMsForTest,
+      resolveRoomScanPollMsForTest,
+      matrixRateLimitGateForTest,
       resolveInboundRoute,
       pickDefaultGroupRecipient,
       preferredDmRoom,
@@ -907,12 +911,161 @@ describe('bridge matrix behavior', () => {
     expect(throwing.callBackendApi).toHaveBeenCalledTimes(2);
   });
 
-  test('MATRIX_INVITE_POLL_MS defaults to 15s and clamps to a 5s floor', () => {
-    expect(resolveInvitePollMsForTest({})).toBe(15000);
+  test('MATRIX_INVITE_POLL_MS defaults to 60s and clamps to a 5s floor', () => {
+    // Default raised from 15s → 60s (Task 5: 收敛 Matrix 429) to reduce poll pressure
+    // on rate-limited homeservers like matrix.palpo.im.
+    expect(resolveInvitePollMsForTest({})).toBe(60000);
     expect(resolveInvitePollMsForTest({ MATRIX_INVITE_POLL_MS: '20000' })).toBe(20000);
     // Below the floor → clamped up to protect rate-limited homeservers.
     expect(resolveInvitePollMsForTest({ MATRIX_INVITE_POLL_MS: '3000' })).toBe(5000);
-    // Non-numeric → fall back to the 15s default.
-    expect(resolveInvitePollMsForTest({ MATRIX_INVITE_POLL_MS: 'not-a-number' })).toBe(15000);
+    // Non-numeric → fall back to the 60s default.
+    expect(resolveInvitePollMsForTest({ MATRIX_INVITE_POLL_MS: 'not-a-number' })).toBe(60000);
+  });
+
+  test('MATRIX_ROOM_SCAN_POLL_MS defaults to 120s and clamps to a 30s floor', () => {
+    expect(resolveRoomScanPollMsForTest({})).toBe(120000);
+    expect(resolveRoomScanPollMsForTest({ MATRIX_ROOM_SCAN_POLL_MS: '180000' })).toBe(180000);
+    // Below the floor → clamped up. A room scan issues O(rooms) requests per cycle
+    // (membership + state lookups), so it needs a higher floor than the invite poll.
+    expect(resolveRoomScanPollMsForTest({ MATRIX_ROOM_SCAN_POLL_MS: '1000' })).toBe(30000);
+    // Non-numeric → fall back to the 120s default.
+    expect(resolveRoomScanPollMsForTest({ MATRIX_ROOM_SCAN_POLL_MS: 'not-a-number' })).toBe(120000);
+  });
+
+  // ── Task 5: shared Matrix 429 rate-limit gate wiring ──────────────────
+  describe('shared Matrix 429 rate-limit gate wiring', () => {
+    function rateLimitedFetchResponse(retryAfterMs = 5000) {
+      return {
+        status: 429,
+        ok: false,
+        clone() { return this; },
+        json: async () => ({ errcode: 'M_LIMIT_EXCEEDED', retry_after_ms: retryAfterMs }),
+        text: async () => JSON.stringify({ errcode: 'M_LIMIT_EXCEEDED', retry_after_ms: retryAfterMs }),
+      };
+    }
+
+    function matrixSdkRateLimitError(retryAfterMs = 5000) {
+      const error = new Error('M_LIMIT_EXCEEDED: too many requests');
+      error.statusCode = 429;
+      error.errcode = 'M_LIMIT_EXCEEDED';
+      error.retryAfterMs = retryAfterMs;
+      return error;
+    }
+
+    test('pollAgentInvites: a 429 on the first agent aborts the round — no further agents, no trailing scan/backfill', async () => {
+      const bridge = new MatrixBridge();
+      bridge.knownAgents = new Set(['agent_alpha', 'agent_beta', 'agent_gamma']);
+      bridge.getAgentToken = vi.fn().mockReturnValue('agent-token');
+      bridge.pollBotInvites = vi.fn().mockResolvedValue(undefined);
+      bridge.scanJoinedRooms = vi.fn().mockResolvedValue(undefined);
+      bridge.backfillAgentManagedRooms = vi.fn().mockResolvedValue(undefined);
+      const fetchMock = vi.fn().mockResolvedValue(rateLimitedFetchResponse());
+      vi.stubGlobal('fetch', fetchMock);
+
+      await bridge.pollAgentInvites();
+
+      // Only agent_alpha's sync request should have fired — agent_beta/agent_gamma
+      // must never be reached once the shared cooldown is active.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(bridge.pollBotInvites).not.toHaveBeenCalled();
+      expect(bridge.scanJoinedRooms).not.toHaveBeenCalled();
+      expect(bridge.backfillAgentManagedRooms).not.toHaveBeenCalled();
+    });
+
+    test('pollAgentInvites: skips every agent when a cooldown is already active from another path', async () => {
+      const bridge = new MatrixBridge();
+      bridge.knownAgents = new Set(['agent_alpha', 'agent_beta']);
+      bridge.getAgentToken = vi.fn().mockReturnValue('agent-token');
+      bridge.pollBotInvites = vi.fn().mockResolvedValue(undefined);
+      bridge.scanJoinedRooms = vi.fn().mockResolvedValue(undefined);
+      bridge.backfillAgentManagedRooms = vi.fn().mockResolvedValue(undefined);
+      const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true, json: async () => ({}) });
+      vi.stubGlobal('fetch', fetchMock);
+
+      // A completely unrelated request source (e.g. matrix-bot-sdk) already tripped the gate.
+      matrixRateLimitGateForTest.observeError(matrixSdkRateLimitError(30000));
+
+      await bridge.pollAgentInvites();
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bridge.pollBotInvites).not.toHaveBeenCalled();
+    });
+
+    test('pollBotInvites: a 429 on the sync call aborts before processing any invited room', async () => {
+      const bridge = new MatrixBridge();
+      bridge.botUserId = '@agent-bridge:matrix.example.test';
+      bridge.getBotToken = vi.fn().mockReturnValue('bot-token');
+      bridge.handleBotInvite = vi.fn().mockResolvedValue({ accepted: true });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rateLimitedFetchResponse()));
+
+      await bridge.pollBotInvites();
+
+      expect(bridge.handleBotInvite).not.toHaveBeenCalled();
+    });
+
+    test('scanJoinedRooms: a matrix-bot-sdk 429 while mapping the first room aborts remaining rooms', async () => {
+      const bridge = new MatrixBridge();
+      bridge._backendHealthy = true;
+      const rooms = ['!gate-scan-a:matrix.example.test', '!gate-scan-b:matrix.example.test', '!gate-scan-c:matrix.example.test'];
+      const getJoinedRoomMembers = vi.fn().mockImplementation(async (roomId) => {
+        if (roomId === rooms[0]) throw matrixSdkRateLimitError(9000);
+        return ['@someone:matrix.example.test'];
+      });
+      bridge.botClient = {
+        getJoinedRooms: vi.fn().mockResolvedValue(rooms),
+        getJoinedRoomMembers,
+      };
+
+      await bridge.scanJoinedRooms();
+
+      // tryMapRoom's first botClient call 429s on room A; rooms B and C must be untouched.
+      expect(getJoinedRoomMembers).toHaveBeenCalledTimes(1);
+      expect(getJoinedRoomMembers).toHaveBeenCalledWith(rooms[0]);
+    });
+
+    test('scanJoinedRooms: skips the whole scan when a cooldown is already active from another path', async () => {
+      const bridge = new MatrixBridge();
+      bridge._backendHealthy = true;
+      const getJoinedRooms = vi.fn().mockResolvedValue(['!gate-scan-skip:matrix.example.test']);
+      bridge.botClient = { getJoinedRooms };
+
+      matrixRateLimitGateForTest.observeError(matrixSdkRateLimitError(30000));
+
+      await bridge.scanJoinedRooms();
+
+      expect(getJoinedRooms).not.toHaveBeenCalled();
+    });
+
+    test('backfillAgentManagedRooms: a 429 on the first managed room aborts remaining rooms', async () => {
+      const bridge = new MatrixBridge();
+      bridge.addKnownAgent('gate_agent_one');
+      bridge.addKnownAgent('gate_agent_two');
+      markRoomTrusted('!gate-backfill-a:matrix.example.test', { agent: 'gate_agent_one', inviter: '@x:matrix.example.test' });
+      markRoomTrusted('!gate-backfill-b:matrix.example.test', { agent: 'gate_agent_two', inviter: '@x:matrix.example.test' });
+      bridge.getAgentToken = vi.fn((name) => (name.startsWith('gate_agent') ? `${name}-token` : null));
+      bridge.onRoomMessage = vi.fn().mockResolvedValue(undefined);
+      const fetchMock = vi.fn().mockResolvedValue(rateLimitedFetchResponse());
+      vi.stubGlobal('fetch', fetchMock);
+
+      await bridge.backfillAgentManagedRooms();
+
+      // Single attempt against the first managed room; the second room is never fetched
+      // because the per-room loop checks the shared gate before each iteration.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('a 429 observed via one path is still blocking a different path\'s beforeRequest() with no time elapsed', () => {
+      matrixRateLimitGateForTest.observeError(matrixSdkRateLimitError(15000));
+      expect(matrixRateLimitGateForTest.beforeRequest()).toBe(false);
+    });
+
+    test('a successful response observed after a 429 does not clear the shared cooldown', async () => {
+      matrixRateLimitGateForTest.observeError(matrixSdkRateLimitError(15000));
+      expect(matrixRateLimitGateForTest.beforeRequest()).toBe(false);
+
+      await matrixRateLimitGateForTest.observeResponse({ status: 200, ok: true, json: async () => ({}) });
+
+      expect(matrixRateLimitGateForTest.beforeRequest()).toBe(false);
+    });
   });
 });

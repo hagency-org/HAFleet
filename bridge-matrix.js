@@ -14,6 +14,7 @@ import BotCommands from './lib/bot-commands.js';
 import { assertRuntimeDir } from './lib/runtime-dir-guard.js';
 import { NotificationRouter } from './lib/notification-router.js';
 import { MatrixEventStore } from './src/matrix-event-store.mjs';
+import { MatrixRateLimitGate } from './src/matrix-rate-limit-gate.mjs';
 
 export class ReliableMatrixClient extends MatrixClient {
   constructor(...args) {
@@ -50,19 +51,35 @@ const SKIP_AGENTS = new Set(
   (process.env.MATRIX_BRIDGE_SKIP_AGENTS || 'openfab-bridge')
     .split(',').map((s) => s.trim()).filter(Boolean),
 );
-// A homeserver fetch that backs off on M_LIMIT_EXCEEDED. Public servers rate-limit auth hard,
-// so honor the server's `retry_after_ms`, default to a long 20s wait, cap 60s, and be patient
-// (startup may take a couple of minutes, but it won't crash).
+// Shared Matrix rate-limit cooldown gate (Task 5: 收敛 Matrix 429). Every Matrix request
+// source in this file — agent-invite polling, bot-invite polling, joined-room scan,
+// managed-room backfill/history, and matrix-bot-sdk client errors — funnels 429s through
+// this ONE gate, so a rate limit hit by any path blocks every other path instead of each
+// path backing off independently (which only amplifies the very limit it's dodging).
+const rateLimitGate = new MatrixRateLimitGate();
+
+// A homeserver fetch that backs off on M_LIMIT_EXCEEDED, sharing state with every other
+// Matrix request source via `rateLimitGate`: it waits out an already-active cooldown
+// before firing (even one it didn't cause itself), and honors the server's
+// `retry_after_ms` on 429 (default/cap come from the gate).
 async function fetchWithRateLimit(url, init, tries = 6) {
+  let res;
   for (let i = 0; i < tries; i++) {
-    const res = await fetch(url, init);
-    if (res.status !== 429) return res;
-    const body = await res.clone().json().catch(() => ({}));
-    const waitMs = Math.min(Number(body.retry_after_ms) || 60000, 120000);
-    console.warn(`[rate-limit] ${url.split('/').pop()} 429; waiting ${Math.round(waitMs / 1000)}s (try ${i + 1}/${tries})`);
-    await new Promise((r) => setTimeout(r, waitMs));
+    if (!rateLimitGate.beforeRequest()) {
+      const waitMs = rateLimitGate.cooldownRemainingMs();
+      console.warn(`[rate-limit] ${url.split('/').pop()} shared cooldown active; waiting ${Math.round(waitMs / 1000)}s before try ${i + 1}/${tries}`);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+    res = await fetch(url, init);
+    const limited = await rateLimitGate.observeResponse(res);
+    if (!limited) return res;
+    if (i < tries - 1) {
+      const waitMs = rateLimitGate.cooldownRemainingMs();
+      console.warn(`[rate-limit] ${url.split('/').pop()} 429; waiting ${Math.round(waitMs / 1000)}s (try ${i + 1}/${tries})`);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
   }
-  return fetch(url, init);
+  return res;
 }
 const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
 const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
@@ -170,12 +187,25 @@ const MATRIX_OPERATOR_MXIDS = new Set(
 );
 // Agent-invite poll cadence. Clamped to a 5s floor because public homeservers
 // (e.g. matrix.palpo.im) rate-limit aggressively; polling faster risks 429s.
+// Default raised 15s → 60s (Task 5: 收敛 Matrix 429) — this poll fans out to a
+// sync + join + bot-invite request per known agent, then chains into
+// pollBotInvites/scanJoinedRooms/backfillAgentManagedRooms, so it is the single
+// biggest source of request amplification in the bridge.
 function resolveInvitePollMs(env = process.env) {
-  const raw = Number(env.MATRIX_INVITE_POLL_MS || 15000);
-  const ms = Number.isFinite(raw) ? raw : 15000;
+  const raw = Number(env.MATRIX_INVITE_POLL_MS || 60000);
+  const ms = Number.isFinite(raw) ? raw : 60000;
   return Math.max(5000, ms);
 }
 const MATRIX_INVITE_POLL_MS = resolveInvitePollMs();
+// Joined-room scan cadence. Each cycle can issue O(rooms) requests (membership +
+// room-state lookups per unmapped room), so it gets a higher floor (30s) than the
+// invite poll's 5s floor — a single scan is more expensive than a single invite check.
+function resolveRoomScanPollMs(env = process.env) {
+  const raw = Number(env.MATRIX_ROOM_SCAN_POLL_MS || 120000);
+  const ms = Number.isFinite(raw) ? raw : 120000;
+  return Math.max(30000, ms);
+}
+const MATRIX_ROOM_SCAN_POLL_MS = resolveRoomScanPollMs();
 const MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW = Number.parseInt(process.env.MATRIX_AGENT_ROOM_BACKFILL_LIMIT || '25', 10);
 const MATRIX_AGENT_ROOM_BACKFILL_LIMIT = Number.isFinite(MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW) && MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW > 0
   ? MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW
@@ -1845,7 +1875,7 @@ export class MatrixBridge {
       await this.backfillAvatars();
     }
     await this.backfillAgentManagedRooms();
-    setInterval(() => this.scanJoinedRooms(), 120_000);
+    setInterval(() => this.scanJoinedRooms(), MATRIX_ROOM_SCAN_POLL_MS);
 
     // 8. Periodically check agent accounts for pending invites
     this.pollAgentInvites();
@@ -2453,10 +2483,20 @@ export class MatrixBridge {
         return;
       }
     }
+    if (!rateLimitGate.beforeRequest()) {
+      console.warn('Room scan: cooling down (Matrix rate limit), skipping this round');
+      return;
+    }
     try {
       const rooms = await this.botClient.getJoinedRooms();
       let trusted = 0, untrusted = 0, newlyDetected = 0;
       for (const roomId of rooms) {
+        // A 429 anywhere in this loop (or in tryMapRoom/reconcileRoomGroupMembership below)
+        // trips the shared gate — abort the sweep rather than keep walking the room list.
+        if (!rateLimitGate.beforeRequest()) {
+          console.warn(`Room scan: cooling down (Matrix rate limit), aborting remaining rooms this round`);
+          break;
+        }
         const trust = getRoomTrust(roomId);
         if (!trust.trusted) {
           untrusted++;
@@ -2466,7 +2506,7 @@ export class MatrixBridge {
             roomTrustLog('scan-joined', roomId, trust);
           }
           if (MATRIX_TRUST_MODE === 'enforce') {
-            try { await this.botClient.leaveRoom(roomId); } catch {}
+            try { await this.botClient.leaveRoom(roomId); } catch (e) { rateLimitGate.observeError(e); }
             continue;
           }
         } else {
@@ -2487,6 +2527,7 @@ export class MatrixBridge {
       }
       if (untrusted > 0) console.log(`[trust] scan summary: ${trusted} trusted, ${untrusted} untrusted (${newlyDetected} newly detected)`);
     } catch (e) {
+      rateLimitGate.observeError(e);
       console.error('Failed to scan joined rooms:', e.message);
     }
   }
@@ -2515,6 +2556,10 @@ export class MatrixBridge {
         console.warn('Reconcile suspended — backend is unresponsive');
         this._reconcileSuspendLogged = true;
       }
+      return;
+    }
+    if (!rateLimitGate.beforeRequest()) {
+      console.warn(`Reconcile: cooling down (Matrix rate limit), skipping room ${roomId}`);
       return;
     }
     try {
@@ -2569,6 +2614,7 @@ export class MatrixBridge {
         console.log(`Reconciled group "${groupName}" from room ${roomId}: +[${add.join(', ')}]`);
       }
     } catch (e) {
+      rateLimitGate.observeError(e);
       console.error(`Failed to reconcile group "${groupName}" from room ${roomId}:`, e.message);
       // Mark backend unhealthy on fetch/timeout errors to suspend further reconcile cycles
       const msg = String(e?.message || '');
@@ -2584,12 +2630,17 @@ export class MatrixBridge {
 
   async tryMapRoom(roomId) {
     if (groupForRoom(roomId)) return groupForRoom(roomId); // already mapped
+    if (!rateLimitGate.beforeRequest()) {
+      console.warn(`Room mapping: cooling down (Matrix rate limit), skipping room ${roomId}`);
+      return null;
+    }
     // Check if this is a DM room or bot-DM (skip those)
     try {
       const members = await this.botClient.getJoinedRoomMembers(roomId);
       const nonBot = members.filter(m => m !== this.botUserId);
       if (nonBot.length <= 2) return null; // DM or bot-DM, not a group
     } catch (e) {
+      rateLimitGate.observeError(e);
       console.warn(`Failed to inspect members while probing room ${roomId}: ${e.message}`);
       return null;
     }
@@ -2628,6 +2679,7 @@ export class MatrixBridge {
       console.log(`Mapped room ${roomId} → group "${name}"`);
       return name;
     } catch (e) {
+      rateLimitGate.observeError(e);
       const msg = String(e?.message || '');
       const maybeUnnamedRoom = /M_NOT_FOUND|404|room\.name/i.test(msg);
       if (!maybeUnnamedRoom) {
@@ -2645,14 +2697,22 @@ export class MatrixBridge {
       const managedRooms = Object.entries(state.trustedManagedRooms || {})
         .filter(([, meta]) => meta && typeof meta.agent === 'string' && meta.agent.trim());
       for (const [roomId, meta] of managedRooms) {
+        // A 429 anywhere in this sweep trips the shared gate — abort rather than keep
+        // walking the managed-room list (each remaining room would just 429 again).
+        if (!rateLimitGate.beforeRequest()) {
+          console.warn('Agent room backfill: cooling down (Matrix rate limit), aborting remaining rooms this round');
+          break;
+        }
         const agentName = this.resolveKnownAgentName(meta.agent) || this.normalizeName(meta.agent);
         const token = this.getAgentToken(agentName);
         if (!agentName || !token) continue;
         try {
           const url = `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=${MATRIX_AGENT_ROOM_BACKFILL_LIMIT}`;
+          // Single attempt: a 429 here is registered with the shared gate and the loop
+          // guard above aborts the sweep, instead of retrying in place up to 6x per room.
           const res = await fetchWithRateLimit(url, {
             headers: { Authorization: `Bearer ${token}` },
-          });
+          }, 1);
           if (!res.ok) {
             const errText = (await res.text().catch(() => '')).slice(0, 200);
             console.warn(`Agent room backfill failed for ${roomId} (${agentName}): HTTP ${res.status} ${errText}`);
@@ -2695,6 +2755,7 @@ export class MatrixBridge {
             saveState();
           }
         } catch (e) {
+          rateLimitGate.observeError(e);
           console.warn(`Agent room backfill error for ${roomId} (${agentName}): ${e.message}`);
         }
       }
@@ -2706,6 +2767,12 @@ export class MatrixBridge {
   // ── Poll agent accounts for pending invites ─────────────────────
   async pollAgentInvites() {
     for (const agentName of this.knownAgents) {
+      // A 429 anywhere this round (this agent or an earlier one) trips the shared gate —
+      // abort immediately rather than keep working through the rest of the agent list.
+      if (!rateLimitGate.beforeRequest()) {
+        console.warn('Agent invite poll: cooling down (Matrix rate limit), aborting this round');
+        return;
+      }
       const token = this.getAgentToken(agentName);
       if (!token) continue;
       try {
@@ -2713,6 +2780,10 @@ export class MatrixBridge {
         const res = await fetch(`${HOMESERVER}/_matrix/client/v3/sync?filter={"room":{"timeline":{"limit":0}}}&timeout=0`, {
           headers: { Authorization: `Bearer ${token}` },
         });
+        if (await rateLimitGate.observeResponse(res)) {
+          console.warn(`Agent invite poll: 429 syncing for ${agentName}; aborting this round`);
+          return;
+        }
         const data = await res.json();
         const invited = data?.rooms?.invite || {};
         for (const roomId of Object.keys(invited)) {
@@ -2728,6 +2799,10 @@ export class MatrixBridge {
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
             body: '{}',
           });
+          if (await rateLimitGate.observeResponse(joinRes)) {
+            console.warn(`Agent invite poll: 429 joining ${roomId} for ${agentName}; aborting this round`);
+            return;
+          }
           if ((await joinRes.json()).room_id) {
             console.log(`Agent ${agentName} joined room ${roomId}`);
             if (trust.trusted) markRoomTrusted(roomId, { agent: agentName, inviter });
@@ -2737,6 +2812,10 @@ export class MatrixBridge {
               headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
               body: JSON.stringify({ user_id: this.botUserId }),
             });
+            if (await rateLimitGate.observeResponse(botInviteRes)) {
+              console.warn(`Agent invite poll: 429 inviting bot into ${roomId}; aborting this round`);
+              return;
+            }
             if (botInviteRes.ok) {
               console.log(`Invited bot into room ${roomId}`);
             } else {
@@ -2746,12 +2825,21 @@ export class MatrixBridge {
           }
         }
       } catch (e) {
+        if (rateLimitGate.observeError(e)) {
+          console.warn(`Agent invite poll rate-limited for ${agentName}; aborting this round`);
+          return;
+        }
         console.warn(`Invite poll failed for ${agentName}: ${e.message}`);
       }
     }
+    // Trailing stages each self-guard too, but checking here avoids even calling into
+    // them once this round has already tripped the shared cooldown.
+    if (!rateLimitGate.beforeRequest()) return;
     await this.pollBotInvites();
     // Re-scan for any newly joined rooms that need mapping
+    if (!rateLimitGate.beforeRequest()) return;
     await this.scanJoinedRooms();
+    if (!rateLimitGate.beforeRequest()) return;
     await this.backfillAgentManagedRooms();
   }
 
@@ -2761,14 +2849,19 @@ export class MatrixBridge {
     roomTrustLog(source, roomId, trust, `inviter=${inviter}`);
     if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') {
       console.log(`[trust:enforce] Rejecting bot invite to untrusted room ${roomId} inviter=${inviter || 'unknown'}`);
-      try { await this.botClient.leaveRoom(roomId); } catch {}
+      try { await this.botClient.leaveRoom(roomId); } catch (e) { rateLimitGate.observeError(e); }
       return { accepted: false, reason: trust.reason, inviter };
+    }
+    if (!rateLimitGate.beforeRequest()) {
+      console.warn(`Bot invite: cooling down (Matrix rate limit), deferring join for room ${roomId}`);
+      return { accepted: false, reason: 'rate_limited', inviter };
     }
     try {
       await this.botClient.joinRoom(roomId);
       if (trust.trusted) markRoomTrusted(roomId, { inviter });
       return { accepted: true, reason: trust.reason, inviter };
     } catch (error) {
+      rateLimitGate.observeError(error);
       console.warn(`Failed to join room ${roomId}: ${error.message}`);
       return { accepted: false, reason: 'join_failed', inviter };
     }
@@ -2786,13 +2879,27 @@ export class MatrixBridge {
   async pollBotInvites() {
     const token = this.getBotToken();
     if (!token) return;
+    if (!rateLimitGate.beforeRequest()) {
+      console.warn('Bot invite poll: cooling down (Matrix rate limit), skipping this round');
+      return;
+    }
     try {
       const res = await fetch(`${HOMESERVER}/_matrix/client/v3/sync?filter={"room":{"timeline":{"limit":0}}}&timeout=0`, {
         headers: { Authorization: `Bearer ${token}` },
       });
+      if (await rateLimitGate.observeResponse(res)) {
+        console.warn('Bot invite poll: 429; aborting this round');
+        return;
+      }
       const data = await res.json();
       const invited = data?.rooms?.invite || {};
       for (const roomId of Object.keys(invited)) {
+        // A 429 handled inside handleBotInvite (below) trips the shared gate; stop
+        // walking the invited-room list rather than keep attempting joins.
+        if (!rateLimitGate.beforeRequest()) {
+          console.warn('Bot invite poll: cooling down mid-round, aborting remaining rooms');
+          break;
+        }
         const inviteState = invited[roomId]?.invite_state?.events || [];
         const inviter = inviteState.find(e => e.type === 'm.room.member' && e.state_key === this.botUserId)?.sender || null;
         const result = await this.handleBotInvite(roomId, { sender: inviter }, { source: 'bot-invite-poll' });
@@ -2801,6 +2908,10 @@ export class MatrixBridge {
         }
       }
     } catch (e) {
+      if (rateLimitGate.observeError(e)) {
+        console.warn('Bot invite poll rate-limited; aborting this round');
+        return;
+      }
       console.warn(`Bot invite poll failed: ${e.message}`);
     }
   }
@@ -3849,7 +3960,12 @@ export function setBridgeMatrixTestHooks({ execFileAsync: overrideExecFileAsync 
 
 export function resetBridgeMatrixTestHooks() {
   execFileAsyncImpl = execFileAsync;
+  rateLimitGate.reset();
 }
+
+// Test-only handle onto the shared Matrix rate-limit gate singleton, so tests can both
+// assert on it directly and simulate a cooldown tripped by some other request source.
+export { rateLimitGate as matrixRateLimitGateForTest };
 
 export function resolveMessageBaseUrlForTest(env = {}) {
   return resolveMessageBaseUrl(env);
@@ -3857,6 +3973,10 @@ export function resolveMessageBaseUrlForTest(env = {}) {
 
 export function resolveInvitePollMsForTest(env = {}) {
   return resolveInvitePollMs(env);
+}
+
+export function resolveRoomScanPollMsForTest(env = {}) {
+  return resolveRoomScanPollMs(env);
 }
 
 export function buildMessageUrlForTest(messageId, viewToken = null, baseUrl = MSG_BASE_URL) {
