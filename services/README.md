@@ -43,6 +43,19 @@ It checks:
 7. `AGENTCHAT_AGENT_TOKEN_MODE` is `hard` and every managed agent's token is
    loaded, via the backend `/health` response's `auth.agentTokens`.
 
+**Operator note — record freshness (check 5) is not membership freshness (check
+6):** `bridge-matrix.js` rewrites `data/health/matrix-bridge.json` on its own
+`BRIDGE_HEALTH_WRITE_INTERVAL_MS` timer (default 30s), so `generatedAt` — and
+therefore check 5 — can be seconds old even when nothing about the room
+membership has changed. The `requiredMembership` data *inside* that same
+record is only as current as the bridge's last joined-room scan, which runs on
+`MATRIX_ROOM_SCAN_POLL_MS` (default 120s, floor 30s). A green check 5 proves
+the bridge process is alive and writing; it does not prove check 6 was
+evaluated against membership state newer than the last scan, which can lag by
+up to that poll interval (longer if a Matrix rate-limit cooldown skipped a
+round). If you need a tighter bound on membership staleness specifically,
+tune `MATRIX_ROOM_SCAN_POLL_MS` rather than the health-record thresholds.
+
 ```bash
 export AGENT_CHAT_RUNTIME_DIR="$PWD"
 node services/standalone-doctor.mjs

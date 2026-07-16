@@ -150,6 +150,12 @@ describe('findSensitiveFields', () => {
     ['bearer-shaped value', { lastErrorCode: 'Bearer abc.def.ghi' }],
     ['matrix access token-shaped value', { lastErrorCode: 'syt_YWJjZGVm_reallyLongOpaqueTail1234567890' }],
     ['jwt-shaped value', { lastErrorCode: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U' }],
+    // Bare opaque-secret-shape values — no Bearer/syt_/JWT wrapper — proving the fallback
+    // pattern itself catches a raw hex/base64-looking secret, not just the prefixed cases
+    // above. Regression guard: the suite had zero positive cases against this branch.
+    ['bare 40-char hex value (sha1-shaped)', { lastErrorCode: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0' }],
+    ['bare 32-char hex value (md5-shaped)', { lastErrorCode: '5f4dcc3b5aa765d61d8327deb882cf99' }],
+    ['bare base64-shaped value', { lastErrorCode: Buffer.from('a fairly long secret token value for opaque-shape testing').toString('base64') }],
   ])('flags %s', (_label, fields) => {
     expect(findSensitiveFields(fields).length).toBeGreaterThan(0);
   });
