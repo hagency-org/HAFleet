@@ -1067,5 +1067,32 @@ describe('bridge matrix behavior', () => {
 
       expect(matrixRateLimitGateForTest.beforeRequest()).toBe(false);
     });
+
+    // discoverAndGreetHumans (the 7th Matrix request source: user_directory/search on
+    // pollRegistrations' 30s interval) — flagged as a gap in the original wiring pass,
+    // ratified as in-scope since a single ungated fetch reproduces the exact amplification
+    // the gate exists to prevent.
+    test('discoverAndGreetHumans: skips the user directory search when a cooldown is already active', async () => {
+      const bridge = new MatrixBridge();
+      const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true, json: async () => ({ results: [] }) });
+      vi.stubGlobal('fetch', fetchMock);
+
+      matrixRateLimitGateForTest.observeError(matrixSdkRateLimitError(30000));
+
+      await bridge.discoverAndGreetHumans();
+
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test('discoverAndGreetHumans: a 429 from the user directory search updates the shared cooldown', async () => {
+      const bridge = new MatrixBridge();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rateLimitedFetchResponse()));
+
+      expect(matrixRateLimitGateForTest.beforeRequest()).toBe(true);
+
+      await bridge.discoverAndGreetHumans();
+
+      expect(matrixRateLimitGateForTest.beforeRequest()).toBe(false);
+    });
   });
 });

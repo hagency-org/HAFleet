@@ -1934,18 +1934,28 @@ export class MatrixBridge {
       candidates.set(userId, { user_id: userId });
     }
 
-    try {
-      const res = await fetch(`${HOMESERVER}/_matrix/client/v3/user_directory/search`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${state.botToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ search_term: '', limit: 100 }),
-      });
-      const data = await res.json();
-      for (const user of data.results || []) {
-        if (user?.user_id) candidates.set(user.user_id, user);
+    if (!rateLimitGate.beforeRequest()) {
+      console.warn('Human discovery: cooling down (Matrix rate limit), skipping user directory search this round');
+    } else {
+      try {
+        const res = await fetch(`${HOMESERVER}/_matrix/client/v3/user_directory/search`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${state.botToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ search_term: '', limit: 100 }),
+        });
+        if (await rateLimitGate.observeResponse(res)) {
+          console.warn('Human discovery: 429 from user directory search; shared cooldown updated');
+        } else {
+          const data = await res.json();
+          for (const user of data.results || []) {
+            if (user?.user_id) candidates.set(user.user_id, user);
+          }
+        }
+      } catch (e) {
+        if (!rateLimitGate.observeError(e)) {
+          console.error('Failed to discover humans:', e.message);
+        }
       }
-    } catch (e) {
-      console.error('Failed to discover humans:', e.message);
     }
 
     for (const user of candidates.values()) {
