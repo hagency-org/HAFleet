@@ -1723,6 +1723,12 @@ export class MatrixBridge {
   // Expose groupRoomMap for /group command
   get groupRoomMap() { return state.groupRoomMap; }
 
+  // !bindroom primitive: bind an EXISTING room to an existing backend group
+  // (multi-instance shared rooms — no room/group creation). Reuses mapRoom for
+  // rebind cleanup, trust marking, and state persistence.
+  bindRoom(roomId, groupName) { mapRoom(roomId, groupName); }
+  groupForRoom(roomId) { return groupForRoom(roomId); }
+
   getBotToken() { return state.botToken; }
   getAgentToken(name) {
     const tokenName = this.resolveAgentTokenName(name);
