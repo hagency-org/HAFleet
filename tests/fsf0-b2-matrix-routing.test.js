@@ -414,3 +414,48 @@ test('corrupt_processed_event_journal_fails_closed', () => {
     rmSync(journalPath, { force: true });
   }
 });
+
+test('default_wake_off_unaddressed_message_wakes_nobody_but_mentions_still_route', async () => {
+  const prevMode = process.env.MATRIX_DEFAULT_WAKE;
+  process.env.MATRIX_DEFAULT_WAKE = 'off';
+  try {
+    const roomId = '!factory:matrix.test'; // must be in the suite's trusted-room allowlist
+    const submit = vi.fn().mockResolvedValue({ ok: true, id: 'msg_shared_route' });
+    const bridge = createBridge({
+      store: new MatrixEventStore({
+        journalPath: path.join(runtimeDir, 'data', 'matrix', 'shared-room-events.jsonl'),
+      }),
+      submit,
+      members: [
+        '@agent-bridge:matrix.test',
+        '@alice:matrix.test',
+        '@ac_implementer:matrix.test',
+      ],
+    });
+    bridge.addKnownAgent('implementer');
+    mapRoom(bridge, roomId, 'factory');
+
+    // Unaddressed message: stored for the group, but NO default recipient is
+    // injected — in a shared multi-instance room nobody gets force-woken.
+    await bridge.onRoomMessage(roomId, commandEvent('$shared-unaddressed-event'));
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0][1].mentions ?? []).toEqual([]);
+
+    // Mention-addressed message still routes to exactly the mentioned agent.
+    await bridge.onRoomMessage(roomId, {
+      event_id: '$shared-mentioned-event',
+      sender: '@alice:matrix.test',
+      type: 'm.room.message',
+      content: {
+        msgtype: 'm.text',
+        body: 'implementer please check the build',
+        'm.mentions': { user_ids: ['@ac_implementer:matrix.test'] },
+      },
+    });
+    expect(submit).toHaveBeenCalledTimes(2);
+    expect(submit.mock.calls[1][1].mentions).toEqual(['implementer']);
+  } finally {
+    if (prevMode === undefined) delete process.env.MATRIX_DEFAULT_WAKE;
+    else process.env.MATRIX_DEFAULT_WAKE = prevMode;
+  }
+});
