@@ -25,7 +25,7 @@ describe('command ACL (5.8.2)', () => {
     });
 
     test('mutating commands are tier 2', () => {
-      for (const cmd of ['!mkgroup', '!addmember', '!rmember', '!joingroup', '!dm', '!identity', '!rmgroup']) {
+      for (const cmd of ['!mkgroup', '!bindroom', '!addmember', '!rmember', '!joingroup', '!dm', '!identity', '!rmgroup']) {
         expect(classifyCommand(cmd)).toBe(2);
       }
     });

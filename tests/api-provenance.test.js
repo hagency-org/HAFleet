@@ -10,6 +10,7 @@ function writeJson(filePath, value) {
 }
 
 describe('provenance metadata (5.8.3 Layer 1)', () => {
+  const bridgeSecret = 'provenance-bridge-secret';
   let runtimeDir;
   let app;
 
@@ -31,6 +32,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
     process.env.SUPERVISOR_ENABLED = 'false';
     process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
     process.env.MATRIX_OPERATOR_MXIDS = '@ops:matrix.test';
+    process.env.MATRIX_BRIDGE_SECRET = bridgeSecret;
 
     const backendUrl = pathToFileURL(path.resolve('backend-v2.js')).href;
     const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -39,12 +41,14 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
 
   afterAll(() => {
     rmSync(runtimeDir, { recursive: true, force: true });
+    delete process.env.MATRIX_BRIDGE_SECRET;
   });
 
   test('Matrix message carries senderMxid through to inbox summary', async () => {
     // Post a message with sender_mxid (as bridge would)
     const postRes = await request(app)
       .post('/api/messages')
+      .set('X-Bridge-Secret', bridgeSecret)
       .send({
         from: 'system',
         to: 'alice',
@@ -54,6 +58,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
         source: 'matrix',
         source_room: '!room1:matrix.test',
         sender_mxid: '@human:matrix.test',
+        source_event_id: '$provenance-human',
       });
     expect(postRes.status).toBe(200);
     expect(postRes.body.ok).toBe(true);
@@ -71,6 +76,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
   test('API-origin message has senderMxid=null', async () => {
     const postRes = await request(app)
       .post('/api/messages')
+      .set('X-Bridge-Secret', bridgeSecret)
       .send({
         from: 'system',
         to: 'alice',
@@ -93,6 +99,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
     const longMxid = '@' + 'a'.repeat(300) + ':matrix.test';
     const postRes = await request(app)
       .post('/api/messages')
+      .set('X-Bridge-Secret', bridgeSecret)
       .send({
         from: 'system',
         to: 'alice',
@@ -101,6 +108,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
         full: 'body',
         source: 'matrix',
         sender_mxid: longMxid,
+        source_event_id: '$provenance-long-mxid',
       });
     expect(postRes.status).toBe(200);
 
@@ -113,6 +121,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
   test('API-origin message with forged sender_mxid is stored as null', async () => {
     const postRes = await request(app)
       .post('/api/messages')
+      .set('X-Bridge-Secret', bridgeSecret)
       .send({
         from: 'system',
         to: 'alice',
@@ -132,6 +141,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
   test('invalid MXID format is rejected even from matrix source', async () => {
     const postRes = await request(app)
       .post('/api/messages')
+      .set('X-Bridge-Secret', bridgeSecret)
       .send({
         from: 'system',
         to: 'alice',
@@ -140,6 +150,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
         full: 'body',
         source: 'matrix',
         sender_mxid: 'not-a-valid-mxid',
+        source_event_id: '$provenance-invalid-mxid',
       });
     expect(postRes.status).toBe(200);
 
@@ -152,6 +163,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
   test('Matrix message from operator MXID gets trustLevel=operator (derived server-side)', async () => {
     const postRes = await request(app)
       .post('/api/messages')
+      .set('X-Bridge-Secret', bridgeSecret)
       .send({
         from: 'system',
         to: 'alice',
@@ -160,6 +172,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
         full: 'operator trust test',
         source: 'matrix',
         sender_mxid: '@ops:matrix.test',
+        source_event_id: '$provenance-operator',
       });
     expect(postRes.status).toBe(200);
 
@@ -172,6 +185,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
   test('Matrix message from non-operator gets trustLevel=external (derived server-side)', async () => {
     const postRes = await request(app)
       .post('/api/messages')
+      .set('X-Bridge-Secret', bridgeSecret)
       .send({
         from: 'system',
         to: 'alice',
@@ -180,6 +194,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
         full: 'external trust test',
         source: 'matrix',
         sender_mxid: '@rando:evil.test',
+        source_event_id: '$provenance-external',
       });
     expect(postRes.status).toBe(200);
 
@@ -192,6 +207,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
   test('forged trust_level=operator with non-operator MXID is overridden to external', async () => {
     const postRes = await request(app)
       .post('/api/messages')
+      .set('X-Bridge-Secret', bridgeSecret)
       .send({
         from: 'system',
         to: 'alice',
@@ -201,6 +217,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
         source: 'matrix',
         sender_mxid: '@hacker:evil.test',
         trust_level: 'operator',
+        source_event_id: '$provenance-forged-trust',
       });
     expect(postRes.status).toBe(200);
 
@@ -213,6 +230,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
   test('Matrix source with no senderMxid has trustLevel=null', async () => {
     const postRes = await request(app)
       .post('/api/messages')
+      .set('X-Bridge-Secret', bridgeSecret)
       .send({
         from: 'system',
         to: 'alice',
@@ -221,6 +239,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
         full: 'body',
         source: 'matrix',
         trust_level: 'operator',
+        source_event_id: '$provenance-no-mxid',
       });
     expect(postRes.status).toBe(200);
 
@@ -263,6 +282,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
           full: 'bridge secret ok',
           source: 'matrix',
           sender_mxid: '@ops:matrix.test',
+          source_event_id: '$provenance-secret-ok',
         });
       expect(postRes.status).toBe(200);
 
@@ -272,7 +292,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
       expect(msg.senderMxid).toBe('@ops:matrix.test');
       expect(msg.trustLevel).toBe('operator');
     } finally {
-      delete process.env.MATRIX_BRIDGE_SECRET;
+      process.env.MATRIX_BRIDGE_SECRET = bridgeSecret;
     }
   });
 
@@ -290,16 +310,15 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
           full: 'bridge secret bad',
           source: 'matrix',
           sender_mxid: '@ops:matrix.test',
+          source_event_id: '$provenance-secret-wrong',
         });
-      expect(postRes.status).toBe(200);
+      expect(postRes.status).toBe(401);
 
       const inboxRes = await request(app).get('/api/inbox/alice');
       const msg = inboxRes.body.dm.find(m => m.summary === 'bridge secret bad');
-      expect(msg).toBeDefined();
-      expect(msg.senderMxid).toBeNull();
-      expect(msg.trustLevel).toBeNull();
+      expect(msg).toBeUndefined();
     } finally {
-      delete process.env.MATRIX_BRIDGE_SECRET;
+      process.env.MATRIX_BRIDGE_SECRET = bridgeSecret;
     }
   });
 
@@ -316,16 +335,15 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
           full: 'bridge secret missing',
           source: 'matrix',
           sender_mxid: '@ops:matrix.test',
+          source_event_id: '$provenance-secret-missing',
         });
-      expect(postRes.status).toBe(200);
+      expect(postRes.status).toBe(401);
 
       const inboxRes = await request(app).get('/api/inbox/alice');
       const msg = inboxRes.body.dm.find(m => m.summary === 'bridge secret missing');
-      expect(msg).toBeDefined();
-      expect(msg.senderMxid).toBeNull();
-      expect(msg.trustLevel).toBeNull();
+      expect(msg).toBeUndefined();
     } finally {
-      delete process.env.MATRIX_BRIDGE_SECRET;
+      process.env.MATRIX_BRIDGE_SECRET = bridgeSecret;
     }
   });
 });

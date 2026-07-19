@@ -1,18 +1,21 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import os from 'os';
 import path from 'path';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'fs';
 import { pathToFileURL } from 'url';
 import { restoreEnv, snapshotEnv } from './helpers/env.js';
 
 describe('bridge matrix behavior', () => {
   let runtimeDir;
   let MatrixBridge;
+  let ReliableMatrixClient;
   let buildMessageUrlForTest;
   let generateAvatarPngForTest;
   let resetBridgeMatrixTestHooks;
   let resolveMessageBaseUrlForTest;
   let resolveInvitePollMsForTest;
+  let resolveRoomScanPollMsForTest;
+  let matrixRateLimitGateForTest;
   let resolveInboundRoute;
   let pickDefaultGroupRecipient;
   let preferredDmRoom;
@@ -29,11 +32,14 @@ describe('bridge matrix behavior', () => {
     const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
     ({
       MatrixBridge,
+      ReliableMatrixClient,
       buildMessageUrlForTest,
       generateAvatarPngForTest,
       resetBridgeMatrixTestHooks,
       resolveMessageBaseUrlForTest,
       resolveInvitePollMsForTest,
+      resolveRoomScanPollMsForTest,
+      matrixRateLimitGateForTest,
       resolveInboundRoute,
       pickDefaultGroupRecipient,
       preferredDmRoom,
@@ -50,6 +56,8 @@ describe('bridge matrix behavior', () => {
 
   afterEach(() => {
     resetBridgeMatrixTestHooks();
+    rmSync(path.join(runtimeDir, 'data', 'matrix', 'processed-events.jsonl'), { force: true });
+    rmSync(path.join(runtimeDir, 'data', 'health'), { recursive: true, force: true });
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -75,7 +83,7 @@ describe('bridge matrix behavior', () => {
     expect(bridge.handleMessageDeliveryFeedback).toHaveBeenCalledWith('!room:test', { ok: true, id: 'msg_1' });
   });
 
-  test('submitHumanMessage reports a retry failure only after the second timeout', async () => {
+  test('backend_failure_keeps_sync_event_replayable', async () => {
     const bridge = new MatrixBridge();
     const timeoutError = new Error('The operation was aborted due to timeout');
     timeoutError.name = 'TimeoutError';
@@ -87,15 +95,79 @@ describe('bridge matrix behavior', () => {
     bridge.sendDeliveryNotice = vi.fn().mockResolvedValue(undefined);
     bridge.sleep = vi.fn().mockResolvedValue(undefined);
 
-    const result = await bridge.submitHumanMessage('!room:test', { from: 'alice' });
-
-    expect(result).toEqual({ error: 'timeout' });
+    await expect(bridge.submitHumanMessage('!room:test', { from: 'alice' }))
+      .rejects.toThrow('timeout');
     expect(bridge.callBackendApi).toHaveBeenCalledTimes(2);
     expect(bridge.sleep).toHaveBeenCalledTimes(1);
     expect(bridge.sendDeliveryNotice).toHaveBeenCalledWith(
       '!room:test',
       '⚠️ Message delivery failed after retry (timeout).'
     );
+  });
+
+  test('configured sync handler waits for durable routing', async () => {
+    const bridge = new MatrixBridge();
+    let release;
+    const pending = new Promise((resolve) => { release = resolve; });
+    bridge.onRoomMessage = vi.fn().mockImplementation(() => pending);
+    bridge.onRoomEvent = vi.fn().mockResolvedValue(undefined);
+    bridge.handleBotInvite = vi.fn().mockResolvedValue({ accepted: true });
+    const client = { emit: vi.fn() };
+
+    bridge.configureReliableBotSync(client);
+    const handled = client.agentChatSyncHandler('room.message', '!room:test', { event_id: '$event' });
+    let settled = false;
+    handled.finally(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release();
+    await handled;
+
+    expect(client.persistTokenAfterSync).toBe(true);
+    expect(bridge.onRoomMessage).toHaveBeenCalledOnce();
+  });
+
+  test('sdk_sync_waits_for_durable_handler', async () => {
+    const bridge = new MatrixBridge();
+    let release;
+    const pending = new Promise((resolve) => { release = resolve; });
+    bridge.onRoomMessage = vi.fn().mockImplementation(() => pending);
+    bridge.onRoomEvent = vi.fn().mockResolvedValue(undefined);
+    bridge.handleBotInvite = vi.fn().mockResolvedValue({ accepted: true });
+
+    let client;
+    const storage = {
+      getSyncToken: vi.fn().mockResolvedValue(null),
+      setSyncToken: vi.fn().mockImplementation(async () => {
+        client.stopSyncing = true;
+      }),
+    };
+    client = new ReliableMatrixClient('https://matrix.test', 'test-token', storage);
+    client.doSync = vi.fn().mockResolvedValue({
+      next_batch: 'durable-token',
+      rooms: {
+        join: {
+          '!room:test': {
+            timeline: {
+              events: [{
+                type: 'm.room.message',
+                event_id: '$sdk-event',
+                sender: '@alice:matrix.test',
+                content: { msgtype: 'm.text', body: 'durable event' },
+              }],
+            },
+          },
+        },
+      },
+    });
+    bridge.configureReliableBotSync(client);
+
+    await client.startSync();
+    await vi.waitFor(() => expect(bridge.onRoomMessage).toHaveBeenCalledOnce());
+    expect(storage.setSyncToken).not.toHaveBeenCalled();
+
+    release();
+    await vi.waitFor(() => expect(storage.setSyncToken).toHaveBeenCalledWith('durable-token'));
   });
 
   test('onAgentRecovered sends an all-clear to the same rooms that received blocked alerts', async () => {
@@ -682,7 +754,7 @@ describe('bridge matrix behavior', () => {
     expect(execMock).toHaveBeenCalledTimes(2);
   });
 
-  test('pickDefaultGroupRecipient prefers a coordinator, falls back to a sole agent', () => {
+  test('pickDefaultGroupRecipient prefers and defaults to the factory coordinator', () => {
     const nameFromId = id => id.replace(/^@ac_/, '').replace(/:.*/, '');
 
     // Coordinator wins even when several agents are present.
@@ -691,8 +763,8 @@ describe('bridge matrix behavior', () => {
       nameFromId,
     )).toBe('wf_coordinator');
 
-    // Exactly one agent → that agent.
-    expect(pickDefaultGroupRecipient(['@ac_solo:m.test'], nameFromId)).toBe('solo');
+    // A mapped room with exactly one non-coordinator still wakes the coordinator.
+    expect(pickDefaultGroupRecipient(['@ac_solo:m.test'], nameFromId)).toBe('wf_coordinator');
 
     // Multiple agents, none a coordinator → nobody (defer to explicit mentions).
     expect(pickDefaultGroupRecipient(
@@ -711,6 +783,58 @@ describe('bridge matrix behavior', () => {
     expect(resolveInboundRoute({ groupName: 'g', targetAgent: 'a', isBotDm: false })).toBe('group');
     expect(resolveInboundRoute({ groupName: null, targetAgent: 'a', isBotDm: false })).toBe('agent-dm');
     expect(resolveInboundRoute({ groupName: null, targetAgent: null, isBotDm: false })).toBe('ignore');
+  });
+
+  test('realtime bot invite handler delegates to handleBotInvite', async () => {
+    const bridge = new MatrixBridge();
+    let handler = null;
+    bridge.botClient = {
+      on: vi.fn((name, callback) => {
+        if (name === 'room.invite') handler = callback;
+      }),
+    };
+    bridge.handleBotInvite = vi.fn().mockResolvedValue({ accepted: false, reason: 'untrusted_inviter' });
+
+    bridge.installBotInviteHandler();
+    await handler('!room:m.test', { sender: '@evil:m.test' });
+
+    expect(bridge.handleBotInvite).toHaveBeenCalledWith(
+      '!room:m.test',
+      { sender: '@evil:m.test' },
+      { source: 'bot-invite' },
+    );
+  });
+
+  test('polled bot invites delegate to handleBotInvite', async () => {
+    const bridge = new MatrixBridge();
+    bridge.botUserId = '@agent-bridge:m.test';
+    bridge.getBotToken = vi.fn().mockReturnValue('bot-token');
+    bridge.handleBotInvite = vi.fn().mockResolvedValue({ accepted: false, reason: 'untrusted_inviter' });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({
+        rooms: {
+          invite: {
+            '!room:m.test': {
+              invite_state: {
+                events: [{
+                  type: 'm.room.member',
+                  state_key: '@agent-bridge:m.test',
+                  sender: '@evil:m.test',
+                }],
+              },
+            },
+          },
+        },
+      }),
+    }));
+
+    await bridge.pollBotInvites();
+
+    expect(bridge.handleBotInvite).toHaveBeenCalledWith(
+      '!room:m.test',
+      { sender: '@evil:m.test' },
+      { source: 'bot-invite-poll' },
+    );
   });
 
   test('preferredDmRoom resolves the room a human last wrote from', () => {
@@ -788,12 +912,413 @@ describe('bridge matrix behavior', () => {
     expect(throwing.callBackendApi).toHaveBeenCalledTimes(2);
   });
 
-  test('MATRIX_INVITE_POLL_MS defaults to 15s and clamps to a 5s floor', () => {
-    expect(resolveInvitePollMsForTest({})).toBe(15000);
+  test('MATRIX_INVITE_POLL_MS defaults to 60s and clamps to a 5s floor', () => {
+    // Default raised from 15s → 60s (Task 5: 收敛 Matrix 429) to reduce poll pressure
+    // on rate-limited homeservers like matrix.palpo.im.
+    expect(resolveInvitePollMsForTest({})).toBe(60000);
     expect(resolveInvitePollMsForTest({ MATRIX_INVITE_POLL_MS: '20000' })).toBe(20000);
     // Below the floor → clamped up to protect rate-limited homeservers.
     expect(resolveInvitePollMsForTest({ MATRIX_INVITE_POLL_MS: '3000' })).toBe(5000);
-    // Non-numeric → fall back to the 15s default.
-    expect(resolveInvitePollMsForTest({ MATRIX_INVITE_POLL_MS: 'not-a-number' })).toBe(15000);
+    // Non-numeric → fall back to the 60s default.
+    expect(resolveInvitePollMsForTest({ MATRIX_INVITE_POLL_MS: 'not-a-number' })).toBe(60000);
+  });
+
+  test('MATRIX_ROOM_SCAN_POLL_MS defaults to 120s and clamps to a 30s floor', () => {
+    expect(resolveRoomScanPollMsForTest({})).toBe(120000);
+    expect(resolveRoomScanPollMsForTest({ MATRIX_ROOM_SCAN_POLL_MS: '180000' })).toBe(180000);
+    // Below the floor → clamped up. A room scan issues O(rooms) requests per cycle
+    // (membership + state lookups), so it needs a higher floor than the invite poll.
+    expect(resolveRoomScanPollMsForTest({ MATRIX_ROOM_SCAN_POLL_MS: '1000' })).toBe(30000);
+    // Non-numeric → fall back to the 120s default.
+    expect(resolveRoomScanPollMsForTest({ MATRIX_ROOM_SCAN_POLL_MS: 'not-a-number' })).toBe(120000);
+  });
+
+  // ── Task 5: shared Matrix 429 rate-limit gate wiring ──────────────────
+  describe('shared Matrix 429 rate-limit gate wiring', () => {
+    function rateLimitedFetchResponse(retryAfterMs = 5000) {
+      return {
+        status: 429,
+        ok: false,
+        clone() { return this; },
+        json: async () => ({ errcode: 'M_LIMIT_EXCEEDED', retry_after_ms: retryAfterMs }),
+        text: async () => JSON.stringify({ errcode: 'M_LIMIT_EXCEEDED', retry_after_ms: retryAfterMs }),
+      };
+    }
+
+    function matrixSdkRateLimitError(retryAfterMs = 5000) {
+      const error = new Error('M_LIMIT_EXCEEDED: too many requests');
+      error.statusCode = 429;
+      error.errcode = 'M_LIMIT_EXCEEDED';
+      error.retryAfterMs = retryAfterMs;
+      return error;
+    }
+
+    test('pollAgentInvites: a 429 on the first agent aborts the round — no further agents, no trailing scan/backfill', async () => {
+      const bridge = new MatrixBridge();
+      bridge.knownAgents = new Set(['agent_alpha', 'agent_beta', 'agent_gamma']);
+      bridge.getAgentToken = vi.fn().mockReturnValue('agent-token');
+      bridge.pollBotInvites = vi.fn().mockResolvedValue(undefined);
+      bridge.scanJoinedRooms = vi.fn().mockResolvedValue(undefined);
+      bridge.backfillAgentManagedRooms = vi.fn().mockResolvedValue(undefined);
+      const fetchMock = vi.fn().mockResolvedValue(rateLimitedFetchResponse());
+      vi.stubGlobal('fetch', fetchMock);
+
+      await bridge.pollAgentInvites();
+
+      // Only agent_alpha's sync request should have fired — agent_beta/agent_gamma
+      // must never be reached once the shared cooldown is active.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(bridge.pollBotInvites).not.toHaveBeenCalled();
+      expect(bridge.scanJoinedRooms).not.toHaveBeenCalled();
+      expect(bridge.backfillAgentManagedRooms).not.toHaveBeenCalled();
+    });
+
+    test('pollAgentInvites: skips every agent when a cooldown is already active from another path', async () => {
+      const bridge = new MatrixBridge();
+      bridge.knownAgents = new Set(['agent_alpha', 'agent_beta']);
+      bridge.getAgentToken = vi.fn().mockReturnValue('agent-token');
+      bridge.pollBotInvites = vi.fn().mockResolvedValue(undefined);
+      bridge.scanJoinedRooms = vi.fn().mockResolvedValue(undefined);
+      bridge.backfillAgentManagedRooms = vi.fn().mockResolvedValue(undefined);
+      const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true, json: async () => ({}) });
+      vi.stubGlobal('fetch', fetchMock);
+
+      // A completely unrelated request source (e.g. matrix-bot-sdk) already tripped the gate.
+      matrixRateLimitGateForTest.observeError(matrixSdkRateLimitError(30000));
+
+      await bridge.pollAgentInvites();
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bridge.pollBotInvites).not.toHaveBeenCalled();
+    });
+
+    test('pollBotInvites: a 429 on the sync call aborts before processing any invited room', async () => {
+      const bridge = new MatrixBridge();
+      bridge.botUserId = '@agent-bridge:matrix.example.test';
+      bridge.getBotToken = vi.fn().mockReturnValue('bot-token');
+      bridge.handleBotInvite = vi.fn().mockResolvedValue({ accepted: true });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rateLimitedFetchResponse()));
+
+      await bridge.pollBotInvites();
+
+      expect(bridge.handleBotInvite).not.toHaveBeenCalled();
+    });
+
+    test('scanJoinedRooms: a matrix-bot-sdk 429 while mapping the first room aborts remaining rooms', async () => {
+      const bridge = new MatrixBridge();
+      bridge._backendHealthy = true;
+      const rooms = ['!gate-scan-a:matrix.example.test', '!gate-scan-b:matrix.example.test', '!gate-scan-c:matrix.example.test'];
+      const getJoinedRoomMembers = vi.fn().mockImplementation(async (roomId) => {
+        if (roomId === rooms[0]) throw matrixSdkRateLimitError(9000);
+        return ['@someone:matrix.example.test'];
+      });
+      bridge.botClient = {
+        getJoinedRooms: vi.fn().mockResolvedValue(rooms),
+        getJoinedRoomMembers,
+      };
+
+      await bridge.scanJoinedRooms();
+
+      // tryMapRoom's first botClient call 429s on room A; rooms B and C must be untouched.
+      expect(getJoinedRoomMembers).toHaveBeenCalledTimes(1);
+      expect(getJoinedRoomMembers).toHaveBeenCalledWith(rooms[0]);
+    });
+
+    test('scanJoinedRooms: skips the whole scan when a cooldown is already active from another path', async () => {
+      const bridge = new MatrixBridge();
+      bridge._backendHealthy = true;
+      const getJoinedRooms = vi.fn().mockResolvedValue(['!gate-scan-skip:matrix.example.test']);
+      bridge.botClient = { getJoinedRooms };
+
+      matrixRateLimitGateForTest.observeError(matrixSdkRateLimitError(30000));
+
+      await bridge.scanJoinedRooms();
+
+      expect(getJoinedRooms).not.toHaveBeenCalled();
+    });
+
+    test('backfillAgentManagedRooms: a 429 on the first managed room aborts remaining rooms', async () => {
+      const bridge = new MatrixBridge();
+      bridge.addKnownAgent('gate_agent_one');
+      bridge.addKnownAgent('gate_agent_two');
+      markRoomTrusted('!gate-backfill-a:matrix.example.test', { agent: 'gate_agent_one', inviter: '@x:matrix.example.test' });
+      markRoomTrusted('!gate-backfill-b:matrix.example.test', { agent: 'gate_agent_two', inviter: '@x:matrix.example.test' });
+      bridge.getAgentToken = vi.fn((name) => (name.startsWith('gate_agent') ? `${name}-token` : null));
+      bridge.onRoomMessage = vi.fn().mockResolvedValue(undefined);
+      const fetchMock = vi.fn().mockResolvedValue(rateLimitedFetchResponse());
+      vi.stubGlobal('fetch', fetchMock);
+
+      await bridge.backfillAgentManagedRooms();
+
+      // Single attempt against the first managed room; the second room is never fetched
+      // because the per-room loop checks the shared gate before each iteration.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('a 429 observed via one path is still blocking a different path\'s beforeRequest() with no time elapsed', () => {
+      matrixRateLimitGateForTest.observeError(matrixSdkRateLimitError(15000));
+      expect(matrixRateLimitGateForTest.beforeRequest()).toBe(false);
+    });
+
+    test('a successful response observed after a 429 does not clear the shared cooldown', async () => {
+      matrixRateLimitGateForTest.observeError(matrixSdkRateLimitError(15000));
+      expect(matrixRateLimitGateForTest.beforeRequest()).toBe(false);
+
+      await matrixRateLimitGateForTest.observeResponse({ status: 200, ok: true, json: async () => ({}) });
+
+      expect(matrixRateLimitGateForTest.beforeRequest()).toBe(false);
+    });
+
+    // discoverAndGreetHumans (the 7th Matrix request source: user_directory/search on
+    // pollRegistrations' 30s interval) — flagged as a gap in the original wiring pass,
+    // ratified as in-scope since a single ungated fetch reproduces the exact amplification
+    // the gate exists to prevent.
+    test('discoverAndGreetHumans: skips the user directory search when a cooldown is already active', async () => {
+      const bridge = new MatrixBridge();
+      const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true, json: async () => ({ results: [] }) });
+      vi.stubGlobal('fetch', fetchMock);
+
+      matrixRateLimitGateForTest.observeError(matrixSdkRateLimitError(30000));
+
+      await bridge.discoverAndGreetHumans();
+
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test('discoverAndGreetHumans: a 429 from the user directory search updates the shared cooldown', async () => {
+      const bridge = new MatrixBridge();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rateLimitedFetchResponse()));
+
+      expect(matrixRateLimitGateForTest.beforeRequest()).toBe(true);
+
+      await bridge.discoverAndGreetHumans();
+
+      expect(matrixRateLimitGateForTest.beforeRequest()).toBe(false);
+    });
+
+    // Review follow-up: the candidates loop itself (createRoom via ensureBotDmRoom, then
+    // sendMessage via greetHuman) had no beforeRequest() check between iterations, so a
+    // 429 partway through a batch (full server first run / large MATRIX_GREETING_MXIDS)
+    // tripped the shared cooldown but the remaining candidates were attempted anyway.
+    test('discoverAndGreetHumans: a 429 on createRoom for the first candidate aborts the remaining candidates', async () => {
+      const bridge = new MatrixBridge();
+      bridge.botClient = { sendMessage: vi.fn().mockResolvedValue(undefined) };
+      const users = [
+        '@gate-multi-a:matrix.example.test',
+        '@gate-multi-b:matrix.example.test',
+        '@gate-multi-c:matrix.example.test',
+      ];
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce({ status: 200, ok: true, json: async () => ({ results: users.map(u => ({ user_id: u })) }) })
+        .mockResolvedValueOnce(rateLimitedFetchResponse());
+      vi.stubGlobal('fetch', fetchMock);
+
+      await bridge.discoverAndGreetHumans();
+
+      // 1 search + 1 createRoom (gate-multi-a, 429) — gate-multi-b/c's createRoom never fires.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(bridge.botClient.sendMessage).not.toHaveBeenCalled();
+    });
+
+    test('discoverAndGreetHumans: a 429 from sendMessage (matrix-bot-sdk) for the first candidate aborts the remaining candidates', async () => {
+      const bridge = new MatrixBridge();
+      const sendMessage = vi.fn()
+        .mockRejectedValueOnce(matrixSdkRateLimitError(4000))
+        .mockResolvedValue(undefined);
+      bridge.botClient = { sendMessage };
+      const users = ['@gate-send-a:matrix.example.test', '@gate-send-b:matrix.example.test'];
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce({ status: 200, ok: true, json: async () => ({ results: users.map(u => ({ user_id: u })) }) })
+        .mockResolvedValue({ status: 200, ok: true, json: async () => ({ room_id: '!gate-send-dm:matrix.example.test' }) });
+      vi.stubGlobal('fetch', fetchMock);
+
+      await bridge.discoverAndGreetHumans();
+
+      // Only gate-send-a's sendMessage is attempted; gate-send-b's greetHuman (createRoom
+      // + sendMessage) never runs once the shared cooldown trips.
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // Task 8: standalone cross-component doctor. The bridge self-reports a small,
+  // non-secret business-health record to data/health/matrix-bridge.json so the
+  // standalone doctor can check it cross-process without holding Matrix credentials.
+  describe('Task 8: business-health record', () => {
+    test('ReliableMatrixClient invokes onSyncSuccess after each processed sync round, including an empty one', async () => {
+      let client;
+      const storage = {
+        getSyncToken: vi.fn().mockResolvedValue(null),
+        setSyncToken: vi.fn().mockImplementation(async () => { client.stopSyncing = true; }),
+      };
+      client = new ReliableMatrixClient('https://matrix.test', 'test-token', storage);
+      client.doSync = vi.fn().mockResolvedValue({ next_batch: 'health-sync-token' }); // no rooms/events
+      const onSyncSuccess = vi.fn();
+      client.onSyncSuccess = onSyncSuccess;
+
+      await client.startSync();
+
+      await vi.waitFor(() => expect(onSyncSuccess).toHaveBeenCalledOnce());
+    });
+
+    test('_recordMembershipDetail sets agentJoined true (case-insensitively) and records the joined-agent list', () => {
+      const bridge = new MatrixBridge();
+      bridge._requiredMembershipSummary.set('!health-detail-1:test', {
+        roomId: '!health-detail-1:test', group: 'acceptance', requiredAgent: 'reviewer-agent',
+        botJoined: true, agentJoined: null, joinedAgentNames: [],
+      });
+
+      bridge._recordMembershipDetail('!health-detail-1:test', ['Reviewer-Agent', 'coordinator-agent']);
+
+      const entry = bridge._requiredMembershipSummary.get('!health-detail-1:test');
+      expect(entry.joinedAgentNames).toEqual(['Reviewer-Agent', 'coordinator-agent']);
+      expect(entry.agentJoined).toBe(true);
+    });
+
+    test('_recordMembershipDetail sets agentJoined false when the required agent is absent from the joined list', () => {
+      const bridge = new MatrixBridge();
+      bridge._requiredMembershipSummary.set('!health-detail-2:test', {
+        roomId: '!health-detail-2:test', group: 'acceptance', requiredAgent: 'reviewer-agent',
+        botJoined: true, agentJoined: null, joinedAgentNames: [],
+      });
+
+      bridge._recordMembershipDetail('!health-detail-2:test', ['someone-else-agent']);
+
+      expect(bridge._requiredMembershipSummary.get('!health-detail-2:test').agentJoined).toBe(false);
+    });
+
+    test('_recordMembershipDetail leaves agentJoined null for a group room with no single required agent', () => {
+      const bridge = new MatrixBridge();
+      bridge._requiredMembershipSummary.set('!health-detail-3:test', {
+        roomId: '!health-detail-3:test', group: 'acceptance', requiredAgent: null,
+        botJoined: true, agentJoined: null, joinedAgentNames: [],
+      });
+
+      bridge._recordMembershipDetail('!health-detail-3:test', ['reviewer-agent', 'coordinator-agent']);
+
+      const entry = bridge._requiredMembershipSummary.get('!health-detail-3:test');
+      expect(entry.joinedAgentNames).toEqual(['reviewer-agent', 'coordinator-agent']);
+      expect(entry.agentJoined).toBeNull();
+    });
+
+    test('_recordMembershipDetail is a no-op for a room with no existing summary entry', () => {
+      const bridge = new MatrixBridge();
+      expect(() => bridge._recordMembershipDetail('!health-detail-unknown:test', ['x'])).not.toThrow();
+      expect(bridge._requiredMembershipSummary.has('!health-detail-unknown:test')).toBe(false);
+    });
+
+    test('_syncRequiredMembershipBotPresence builds one entry per trusted managed room, reflecting current joined-room membership', () => {
+      const bridge = new MatrixBridge();
+      markRoomTrusted('!health-scan-a:test', { group: 'acceptance' });
+      markRoomTrusted('!health-scan-b:test', { agent: 'reviewer-agent' });
+
+      bridge._syncRequiredMembershipBotPresence(['!health-scan-a:test']); // bot currently joined to scan-a only
+
+      const summary = new Map(bridge._requiredMembershipSummary);
+      expect(summary.get('!health-scan-a:test')).toMatchObject({
+        roomId: '!health-scan-a:test', group: 'acceptance', requiredAgent: null, botJoined: true,
+      });
+      expect(summary.get('!health-scan-b:test')).toMatchObject({
+        roomId: '!health-scan-b:test', requiredAgent: 'reviewer-agent', botJoined: false,
+      });
+    });
+
+    test('_syncRequiredMembershipBotPresence preserves previously recorded agent-membership detail across a refresh', () => {
+      const bridge = new MatrixBridge();
+      markRoomTrusted('!health-scan-c:test', { group: 'acceptance' });
+      bridge._requiredMembershipSummary.set('!health-scan-c:test', {
+        roomId: '!health-scan-c:test', group: 'acceptance', requiredAgent: null, botJoined: true,
+        agentJoined: null, joinedAgentNames: ['reviewer-agent'],
+      });
+
+      bridge._syncRequiredMembershipBotPresence(['!health-scan-c:test']);
+
+      expect(bridge._requiredMembershipSummary.get('!health-scan-c:test').joinedAgentNames).toEqual(['reviewer-agent']);
+    });
+
+    test('_syncRequiredMembershipBotPresence skips DM and bot-DM rooms (summary covers group/managed-agent rooms only)', () => {
+      const bridge = new MatrixBridge();
+      markRoomTrusted('!health-scan-dm:test', { dm: true });
+      markRoomTrusted('!health-scan-botdm:test', { botDm: true, human: 'alice' });
+
+      bridge._syncRequiredMembershipBotPresence(['!health-scan-dm:test', '!health-scan-botdm:test']);
+
+      expect(bridge._requiredMembershipSummary.has('!health-scan-dm:test')).toBe(false);
+      expect(bridge._requiredMembershipSummary.has('!health-scan-botdm:test')).toBe(false);
+    });
+
+    test('writeHealthRecord persists a bridge health record reflecting in-memory state, with restrictive permissions', () => {
+      const bridge = new MatrixBridge();
+      bridge._lastSuccessfulSyncAtMs = Date.now() - 500;
+      bridge._requiredMembershipSummary.set('!health-write-a:test', {
+        roomId: '!health-write-a:test', group: 'acceptance', requiredAgent: 'reviewer-agent',
+        botJoined: true, agentJoined: true, joinedAgentNames: ['reviewer-agent'],
+      });
+
+      bridge.writeHealthRecord();
+
+      const healthPath = path.join(runtimeDir, 'data', 'health', 'matrix-bridge.json');
+      const written = JSON.parse(readFileSync(healthPath, 'utf8'));
+      expect(written.component).toBe('matrix-bridge');
+      expect(written.process.pid).toBe(process.pid);
+      expect(typeof written.lastSuccessfulSyncAt).toBe('string');
+      expect(written.managedRoomCount).toBeGreaterThanOrEqual(1);
+      expect(written.requiredMembership.some((entry) => entry.roomId === '!health-write-a:test' && entry.agentJoined === true)).toBe(true);
+      expect(statSync(healthPath).mode & 0o777).toBe(0o600);
+    });
+
+    test('writeHealthRecord reflects a recent successful backend delivery after a successful backend API call', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{"ok":true}' }));
+      const bridge = new MatrixBridge();
+
+      await bridge.callBackendApi('GET', '/api/agents?view=names');
+      bridge.writeHealthRecord();
+
+      const healthPath = path.join(runtimeDir, 'data', 'health', 'matrix-bridge.json');
+      const written = JSON.parse(readFileSync(healthPath, 'utf8'));
+      expect(written.lastSuccessfulBackendDeliveryAt).not.toBeNull();
+      expect(Date.now() - new Date(written.lastSuccessfulBackendDeliveryAt).getTime()).toBeLessThan(5000);
+    });
+
+    test('writeHealthRecord reflects the shared rate-limit gate\'s last-observed-429 timestamp', () => {
+      const bridge = new MatrixBridge();
+      const rateLimitError = new Error('rate limited');
+      rateLimitError.statusCode = 429;
+      matrixRateLimitGateForTest.observeError(rateLimitError);
+
+      bridge.writeHealthRecord();
+
+      const healthPath = path.join(runtimeDir, 'data', 'health', 'matrix-bridge.json');
+      const written = JSON.parse(readFileSync(healthPath, 'utf8'));
+      expect(written.lastObservedRateLimitAt).not.toBeNull();
+      expect(Date.now() - new Date(written.lastObservedRateLimitAt).getTime()).toBeLessThan(5000);
+    });
+  });
+});
+
+// Bridge-side half of "bridge secret missing or mismatched fails closed" (Task 6 row 4).
+// The backend's half (missing/wrong X-Bridge-Secret on /api/messages -> 503/401) is covered by
+// tests/api-messages.test.js ("Matrix ingestion fails closed when bridge secret or event id is
+// missing") and tests/api-provenance.test.js ("wrong bridge secret rejects senderMxid +
+// trustLevel", "missing bridge secret header rejects..."). This is the bridge process's own
+// guard: it refuses to even start when it has no secret to send, rather than relying solely on
+// the backend to reject its (unauthenticated) requests.
+describe('bridge start() fails closed without a bridge secret', () => {
+  test('start() rejects immediately when MATRIX_BRIDGE_SECRET is unset', async () => {
+    const runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-no-secret-'));
+    const envSnapshot = snapshotEnv(['AGENT_CHAT_RUNTIME_DIR', 'MATRIX_BRIDGE_SECRET']);
+    process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+    delete process.env.MATRIX_BRIDGE_SECRET;
+    try {
+      const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
+      const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const { MatrixBridge: NoSecretMatrixBridge } = await import(`${bridgeUrl}?no-bridge-secret=${cacheBust}`);
+      const bridge = new NoSecretMatrixBridge();
+
+      await expect(bridge.start()).rejects.toThrow(/MATRIX_BRIDGE_SECRET is required/);
+    } finally {
+      rmSync(runtimeDir, { recursive: true, force: true });
+      restoreEnv(envSnapshot);
+    }
   });
 });

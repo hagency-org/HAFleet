@@ -34,6 +34,13 @@ export async function createBackendTestContext(prefix, seed = {}) {
   writeJson(path.join(dataDir, 'local_activity_sweep.json'), { selectionCursor: 0 });
   if (seed.deletedAgents) writeJson(path.join(dataDir, 'deleted_agents.json'), seed.deletedAgents);
   writeJson(path.join(dataDir, '.msg_counter'), seed.msgCounter || 0);
+  if (seed.rawDataFiles && typeof seed.rawDataFiles === 'object') {
+    for (const [name, contents] of Object.entries(seed.rawDataFiles)) {
+      const filePath = path.join(dataDir, name);
+      mkdirSync(path.dirname(filePath), { recursive: true });
+      writeFileSync(filePath, String(contents));
+    }
+  }
   if (seed.agentTokens && typeof seed.agentTokens === 'object') {
     for (const [name, token] of Object.entries(seed.agentTokens)) {
       const agentId = v1AgentIdFromName(name);

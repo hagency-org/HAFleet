@@ -73,3 +73,57 @@ describe('bot commands async tmux probes', () => {
     expect(sent[0]).toContain('YES');
   });
 });
+
+describe('!bindroom', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resetBotCommandsTestHooks();
+  });
+
+  function makeBindBot({ groupExists = true, prevGroup = null } = {}) {
+    const sent = [];
+    const bindRoom = vi.fn();
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: groupExists,
+      json: async () => (groupExists ? { name: 'factory' } : { error: 'not found' }),
+    })));
+    const bot = new BotCommands({
+      botClient: { sendMessage: vi.fn(async (_roomId, content) => { sent.push(content.body); }) },
+      bridge: {
+        getBridgeState: () => ({}),
+        isKnownAgentName: () => false,
+        bindRoom,
+        groupForRoom: () => prevGroup,
+      },
+    });
+    return { bot, sent, bindRoom };
+  }
+
+  test('binds the current room to an existing group', async () => {
+    const { bot, sent, bindRoom } = makeBindBot();
+    await bot.handle('!room-a:matrix.test', '@alice:matrix.test', '!bindroom factory');
+    expect(bindRoom).toHaveBeenCalledWith('!room-a:matrix.test', 'factory');
+    expect(sent.join('\n')).toMatch(/bound to group "factory"/);
+  });
+
+  test('reports rebind when the room was bound to another group', async () => {
+    const { bot, sent, bindRoom } = makeBindBot({ prevGroup: 'oldteam' });
+    await bot.handle('!room-a:matrix.test', '@alice:matrix.test', '!bindroom factory');
+    expect(bindRoom).toHaveBeenCalledWith('!room-a:matrix.test', 'factory');
+    expect(sent.join('\n')).toMatch(/rebound: oldteam → factory/);
+  });
+
+  test('unknown group is rejected and nothing is bound', async () => {
+    const { bot, sent, bindRoom } = makeBindBot({ groupExists: false });
+    await bot.handle('!room-a:matrix.test', '@alice:matrix.test', '!bindroom ghost');
+    expect(bindRoom).not.toHaveBeenCalled();
+    expect(sent.join('\n')).toMatch(/Group not found: ghost/);
+  });
+
+  test('missing argument prints usage', async () => {
+    const { bot, sent, bindRoom } = makeBindBot();
+    await bot.handle('!room-a:matrix.test', '@alice:matrix.test', '!bindroom');
+    expect(bindRoom).not.toHaveBeenCalled();
+    expect(sent.join('\n')).toMatch(/Usage: !bindroom <group>/);
+  });
+});

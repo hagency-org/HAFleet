@@ -1,5 +1,6 @@
 import {
   closeSync,
+  chmodSync,
   existsSync,
   fsyncSync,
   mkdirSync,
@@ -9,6 +10,44 @@ import {
   writeSync,
 } from 'node:fs';
 import path from 'node:path';
+
+function fsyncPath(targetPath) {
+  const fd = openSync(targetPath, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function secureDirectory(directory) {
+  const missing = [];
+  let current = path.resolve(directory);
+  while (!existsSync(current)) {
+    missing.push(current);
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  for (const created of missing.reverse()) {
+    chmodSync(created, 0o700);
+    fsyncPath(created);
+    fsyncPath(path.dirname(created));
+  }
+  chmodSync(directory, 0o700);
+  fsyncPath(directory);
+}
+
+function writeAllSync(fd, value) {
+  const bytes = Buffer.from(value, 'utf8');
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset);
+    if (written <= 0) throw new Error('short write to Matrix event journal');
+    offset += written;
+  }
+}
 
 function normalizeId(value, field) {
   const text = typeof value === 'string' ? value.trim() : '';
@@ -45,18 +84,29 @@ export class MatrixEventStore {
 
   _load() {
     if (!existsSync(this.journalPath)) return;
+    secureDirectory(path.dirname(this.journalPath));
+    chmodSync(this.journalPath, 0o600);
+    fsyncPath(this.journalPath);
     const bytes = readFileSync(this.journalPath);
     let completeLength = bytes.length;
     if (bytes.length > 0 && bytes[bytes.length - 1] !== 0x0a) {
       completeLength = bytes.lastIndexOf(0x0a) + 1;
       truncateSync(this.journalPath, completeLength);
+      fsyncPath(this.journalPath);
+      fsyncPath(path.dirname(this.journalPath));
     }
     if (completeLength === 0) return;
-    const lines = bytes.subarray(0, completeLength).toString('utf8').split('\n');
+    const lines = bytes.subarray(0, completeLength - 1).toString('utf8').split('\n');
     for (let index = 0; index < lines.length; index += 1) {
-      if (!lines[index]) continue;
+      if (!lines[index]) {
+        throw new Error(`invalid Matrix event journal ${this.journalPath} at line ${index + 1}: blank record`);
+      }
       const record = parseRecord(lines[index], this.journalPath, index + 1);
-      if (!this.records.has(record.eventId)) this.records.set(record.eventId, record);
+      const previous = this.records.get(record.eventId);
+      if (previous && previous.messageId !== record.messageId) {
+        throw new Error(`invalid Matrix event journal ${this.journalPath} at line ${index + 1}: messageId changed`);
+      }
+      if (!previous) this.records.set(record.eventId, record);
     }
   }
 
@@ -79,14 +129,18 @@ export class MatrixEventStore {
       messageId: normalizeId(messageId, 'messageId'),
       processedAt: new Date().toISOString(),
     };
-    mkdirSync(path.dirname(this.journalPath), { recursive: true, mode: 0o700 });
+    const directory = path.dirname(this.journalPath);
+    secureDirectory(directory);
+    const created = !existsSync(this.journalPath);
     const fd = openSync(this.journalPath, 'a', 0o600);
     try {
-      writeSync(fd, `${JSON.stringify(record)}\n`, null, 'utf8');
+      chmodSync(this.journalPath, 0o600);
+      writeAllSync(fd, `${JSON.stringify(record)}\n`);
       fsyncSync(fd);
     } finally {
       closeSync(fd);
     }
+    if (created) fsyncPath(directory);
     this.records.set(normalizedEventId, record);
     return record;
   }

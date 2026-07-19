@@ -326,6 +326,104 @@ describe('server delivery path', () => {
     expect(events.some((event) => event.type === 'queue.accepted')).toBe(false);
   });
 
+  test('queue_idempotency_key_survives_delivery_and_server_reload', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+    serverModule.setServerTestHooks({
+      execFileAsync: async () => ({ stdout: '' }),
+      backendFetch: async (url) => {
+        if (String(url).includes('/unread-list')) {
+          return {
+            ok: true,
+            json: async () => ({ unread_total: 1, unread_ids: ['msg_matrix_1'] }),
+          };
+        }
+        return { ok: true, status: 200, text: async () => '', json: async () => ({ ok: true }) };
+      },
+    });
+
+    const payload = {
+      from: 'agent-chat-v2', to: 'alpha:0.0', payload: '[NOTIFICATION] durable wake',
+      notifyMeta: { sourceMsgId: 'msg_matrix_1', messageIds: ['msg_matrix_1'] },
+    };
+    const first = await request(serverModule.app).post('/api/queue')
+      .set('Idempotency-Key', 'matrix:$event:alpha').send(payload);
+    const duplicate = await request(serverModule.app).post('/api/queue')
+      .set('Idempotency-Key', 'matrix:$event:alpha').send(payload);
+
+    expect(first.status).toBe(200);
+    expect(duplicate.body).toMatchObject({ id: first.body.id, deduped: true });
+    let snapshot = JSON.parse(readFileSync(path.join(runtimeDir, 'logs', 'queue.json'), 'utf8'));
+    expect(snapshot.items).toHaveLength(1);
+    expect(snapshot.idempotencyKeys).toContainEqual([
+      'matrix:$event:alpha', expect.objectContaining({ id: first.body.id }),
+    ]);
+
+    const delivered = await request(serverModule.app).post(`/api/queue/${first.body.id}/send`);
+    expect(delivered.body).toMatchObject({ ok: true, delivered: first.body.id });
+    snapshot = JSON.parse(readFileSync(path.join(runtimeDir, 'logs', 'queue.json'), 'utf8'));
+    expect(snapshot.items).toHaveLength(0);
+    expect(snapshot.idempotencyKeys).toContainEqual([
+      'matrix:$event:alpha', expect.objectContaining({ id: first.body.id }),
+    ]);
+
+    await serverModule.stopServer();
+    serverModule = await importServer(runtimeDir);
+    const afterReload = await request(serverModule.app).post('/api/queue')
+      .set('Idempotency-Key', 'matrix:$event:alpha').send(payload);
+    expect(afterReload.body).toMatchObject({ id: first.body.id, deduped: true });
+    snapshot = JSON.parse(readFileSync(path.join(runtimeDir, 'logs', 'queue.json'), 'utf8'));
+    expect(snapshot.items).toHaveLength(0);
+  });
+
+  test('inflight_matrix_wake_restart_is_not_re_pasted', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    const idempotencyKey = 'matrix:$crash-after-tmux:alpha';
+    writeFileSync(path.join(runtimeDir, 'logs', 'queue.json'), JSON.stringify({
+      idCounter: 1,
+      items: [{
+        id: 1,
+        from: 'agent-chat-v2',
+        to: 'alpha:0.0',
+        payload: '[NOTIFICATION] uncertain prior tmux delivery',
+        queuedAt: 1000,
+        idempotencyKey,
+        deliveryState: 'delivering',
+        deliveringAt: 2000,
+        deliveryAttempt: 1,
+      }],
+      idempotencyKeys: [[idempotencyKey, { id: 1, queuedAt: 1000, position: 1 }]],
+    }));
+
+    serverModule = await importServer(runtimeDir);
+    const execCalls = [];
+    serverModule.setServerTestHooks({
+      execFileAsync: async (...args) => {
+        execCalls.push(args);
+        return { stdout: '' };
+      },
+      backendFetch: async () => ({ ok: true, status: 200, text: async () => '', json: async () => ({ ok: true }) }),
+    });
+
+    const queue = await request(serverModule.app).get('/api/queue');
+    expect(queue.body).toEqual([]);
+    await serverModule.processQueueTickForTest();
+    expect(execCalls).toEqual([]);
+
+    const replay = await request(serverModule.app).post('/api/queue')
+      .set('Idempotency-Key', idempotencyKey)
+      .send({
+        from: 'agent-chat-v2', to: 'alpha:0.0', payload: '[NOTIFICATION] uncertain prior tmux delivery',
+      });
+    expect(replay.body).toMatchObject({ id: 1, deduped: true });
+    expect(JSON.parse(readFileSync(path.join(runtimeDir, 'logs', 'queue.json'), 'utf8')).items)
+      .toEqual([]);
+  });
+
   test('manual send does not deliver when queue dequeue persistence fails', async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });

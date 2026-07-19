@@ -1,8 +1,10 @@
 import express from 'express';
 import {
   appendFileSync,
+  chmodSync,
   closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -11,6 +13,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  truncateSync,
   unlinkSync,
   writeFileSync,
 } from 'fs';
@@ -26,6 +29,7 @@ import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOF
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
 import { indexPool, agentRole, agentCapability, selectAgent, resolveTier, TIER_RUNTIME } from './lib/matrix-agent.js';
+import { DispatchLeaseStore } from './src/dispatch-lease-store.mjs';
 import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
 import { createAlertStore, RECOVERY_MAP as ALERT_RECOVERY_MAP } from './lib/alert-store.js';
@@ -58,6 +62,7 @@ import { assertRuntimeDir, isLocalAgentServer, resolveLocalServerId } from './li
 import { enforceStartupConfig } from './lib/startup-config.js';
 import { NotificationRouter } from './lib/notification-router.js';
 import { readV1AgentManifest, defaultAgentchatHomeDir, allAgentHomeRoots } from './lib/agent-home-v1.js';
+import { MatrixDispatchStore } from './src/matrix-dispatch-store.mjs';
 import {
   buildUpstreamClaudeSubconsciousPaths,
   bootstrapUpstreamClaudeSubconsciousAgent,
@@ -131,6 +136,27 @@ const AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW = Number.parseFloat(process.env.AGENT_SC
 const AGENT_SCOPE_ALERT_CLEAR_RATIO = Number.isFinite(AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW)
   ? Math.min(0.99, Math.max(0.1, AGENT_SCOPE_ALERT_CLEAR_RATIO_RAW))
   : 0.85;
+// Task 7: matrix-Agent dispatch lease TTL. Floor-validated — below this, a renew round-trip
+// under real process/network latency has no realistic chance of landing before expiry, so a
+// smaller configured value is almost certainly a misconfiguration and gets clamped up rather
+// than honored.
+const DISPATCH_LEASE_TTL_DEFAULT_MS = 15 * 60 * 1000; // 15 minutes
+const DISPATCH_LEASE_TTL_FLOOR_MS = 1000; // 1 second
+const DISPATCH_LEASE_TTL_MS_RAW = Number.parseInt(process.env.AGENTCHAT_DISPATCH_LEASE_TTL_MS || String(DISPATCH_LEASE_TTL_DEFAULT_MS), 10);
+const DISPATCH_LEASE_TTL_MS = Number.isFinite(DISPATCH_LEASE_TTL_MS_RAW) && DISPATCH_LEASE_TTL_MS_RAW > 0
+  ? Math.max(DISPATCH_LEASE_TTL_FLOOR_MS, DISPATCH_LEASE_TTL_MS_RAW)
+  : DISPATCH_LEASE_TTL_DEFAULT_MS;
+// Owner assigned to a lease when the caller doesn't supply one on POST /api/dispatch — dispatch
+// itself never rejects a missing owner (only renew/release do), so a lease always exists to
+// return a leaseId for.
+const DISPATCH_LEASE_DEFAULT_OWNER = 'unspecified';
+// POST /api/dispatch/release defaults to REJECTING the legacy {agent}-only shape (no leaseId,
+// no owner): letting ownership be skipped just by omitting fields would defeat the whole point
+// of "owner mismatch must fail" (a caller could always dodge the check by not claiming an
+// owner). AGENTCHAT_ALLOW_LEGACY_RELEASE=1 is an explicit, off-by-default escape hatch for a
+// caller that predates ownership (e.g. a reintroduced OpenFab Bridge — the version live at the
+// time this lease system was built has since been descoped/stopped, so nothing needs it today).
+const DISPATCH_ALLOW_LEGACY_RELEASE = normalizeBoolean(process.env.AGENTCHAT_ALLOW_LEGACY_RELEASE) === true;
 const OFFLINE_CATCHUP_LIST_LIMIT = Number.parseInt(process.env.OFFLINE_CATCHUP_LIST_LIMIT || '50', 10);
 const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_ITEMS || '8', 10);
 const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
@@ -2534,12 +2560,21 @@ function appendDeliveryEvent(raw = {}) {
   const normalized = normalizeDeliveryEvent(raw);
   if (normalized.error) return { ok: false, error: normalized.error };
   const row = normalized.row;
+  let fd = null;
   try {
-    appendFileSync(DELIVERY_EVENT_LOG, `${JSON.stringify(row)}\n`);
+    const created = !existsSync(DELIVERY_EVENT_LOG);
+    fd = openSync(DELIVERY_EVENT_LOG, 'a', 0o600);
+    chmodSync(DELIVERY_EVENT_LOG, 0o600);
+    appendFileSync(fd, `${JSON.stringify(row)}\n`);
+    fsyncSync(fd);
+    if (created) fsyncParentDirectory(DELIVERY_EVENT_LOG);
+    if (row.attemptId) deliveryEventAttemptIds.add(row.attemptId);
     return { ok: true, event: row };
   } catch (error) {
     console.warn(`Failed to append delivery event: ${error?.message || error}`);
     return { ok: false, error: error?.message || 'append failed' };
+  } finally {
+    if (fd !== null) closeSync(fd);
   }
 }
 
@@ -2874,6 +2909,22 @@ const AUDIT_LOG = dataPath('audit.jsonl');
 const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
 const MESSAGE_ARCHIVE_LOG = dataPath('messages-archive.jsonl');
 const DELIVERY_EVENT_LOG = dataPath('message-delivery-events.jsonl');
+repairJsonlTornTail(DELIVERY_EVENT_LOG);
+repairJsonlTornTail(MESSAGE_ARCHIVE_LOG);
+const deliveryEventAttemptIds = new Set();
+if (existsSync(DELIVERY_EVENT_LOG)) {
+  for (const line of readFileSync(DELIVERY_EVENT_LOG, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const attemptId = JSON.parse(line)?.attemptId;
+      if (attemptId) deliveryEventAttemptIds.add(attemptId);
+    } catch {}
+  }
+}
+const matrixDispatchStore = new MatrixDispatchStore({
+  journalPath: dataPath('matrix/source-events.jsonl'),
+});
+let matrixDispatchFailureStageForTest = null;
 const subconsciousEventsByAgent = new Map(); // agent -> event[]
 const pendingHumanTargetCache = new Map(); // agent -> { hasPendingHuman, targets }
 const swapAlertState = {
@@ -3442,13 +3493,46 @@ function planMessagePrune(rows) {
 
 function archivePrunedMessages(pruned) {
   if (!Array.isArray(pruned) || pruned.length === 0) return 0;
+  let fd = null;
   try {
-    appendFileSync(MESSAGE_ARCHIVE_LOG, `${pruned.map((msg) => JSON.stringify(msg)).join('\n')}\n`);
+    const created = !existsSync(MESSAGE_ARCHIVE_LOG);
+    fd = openSync(MESSAGE_ARCHIVE_LOG, 'a', 0o600);
+    chmodSync(MESSAGE_ARCHIVE_LOG, 0o600);
+    appendFileSync(fd, `${pruned.map((msg) => JSON.stringify(msg)).join('\n')}\n`);
+    fsyncSync(fd);
+    if (created) fsyncParentDirectory(MESSAGE_ARCHIVE_LOG);
     return pruned.length;
   } catch (e) {
     console.error(`Failed to archive pruned messages to ${MESSAGE_ARCHIVE_LOG}: ${e?.message || e}`);
     return 0;
+  } finally {
+    if (fd !== null) closeSync(fd);
   }
+}
+
+function fsyncParentDirectory(filePath) {
+  const fd = openSync(path.dirname(filePath), 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function repairJsonlTornTail(filePath) {
+  if (!existsSync(filePath)) return false;
+  const bytes = readFileSync(filePath);
+  if (bytes.length === 0 || bytes[bytes.length - 1] === 0x0a) return false;
+  const completeLength = bytes.lastIndexOf(0x0a) + 1;
+  truncateSync(filePath, completeLength);
+  const fd = openSync(filePath, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  fsyncParentDirectory(filePath);
+  return true;
 }
 
 function pruneMessagesInMemory() {
@@ -3458,8 +3542,9 @@ function pruneMessagesInMemory() {
   const { retained, pruned } = planMessagePrune(messages);
 
   if (pruned.length === 0) return { pruned: 0, archived: 0 };
-  messages.splice(0, messages.length, ...retained);
   const archived = archivePrunedMessages(pruned);
+  if (archived !== pruned.length) return { pruned: 0, archived: 0 };
+  messages.splice(0, messages.length, ...retained);
   return { pruned: pruned.length, archived };
 }
 
@@ -3467,13 +3552,16 @@ function saveMessages() {
   invalidateUnreadMessageIndex();
   const { retained, pruned } = planMessagePrune(messages);
   const nextMessages = pruned.length > 0 ? retained : messages;
+  if (pruned.length > 0 && archivePrunedMessages(pruned) !== pruned.length) {
+    invalidateUnreadMessageIndex();
+    return false;
+  }
   if (!saveJson('messages.json', nextMessages)) {
     invalidateUnreadMessageIndex();
     return false;
   }
   if (pruned.length > 0) {
     messages.splice(0, messages.length, ...retained);
-    archivePrunedMessages(pruned);
   }
   invalidateUnreadMessageIndex();
   return true;
@@ -4074,6 +4162,7 @@ function summarizeMsg(m) {
     group: m.group || null,
     source: m.source || 'api',
     sourceRoom: m.sourceRoom || null,
+    sourceEventId: m.sourceEventId || null,
     senderMxid: m.senderMxid || null,
     trustLevel: m.trustLevel || null,
     fromId: m.fromId || null,
@@ -4280,7 +4369,7 @@ function getUnreadInboxMessages(agentName, options = {}) {
   }
   const mentionRows = index.groupMentionsByAgent.get(agentName) || [];
   for (const m of mentionRows.slice(firstMessageAfterCursorIndex(mentionRows, inboxTs, inboxId))) {
-    if (!isGroupMember(m.group, agentName)) continue;
+    if (!isGroupMember(m.group, agentName) && m.matrixDefaultRecipient !== agentName) continue;
     if (!messageMatchesKinds(m, kinds)) continue;
     if (isSuppressedForAgent(m, agentName)) continue;
     unreadById.set(m.id, m);
@@ -4439,7 +4528,7 @@ function messageTargetsAgent(msg, agentName) {
   if (!msg || !agentName) return false;
   if (msg.to === agentName) return true;
   if (!msg.group) return false;
-  if (!isGroupMember(msg.group, agentName)) return false;
+  if (!isGroupMember(msg.group, agentName) && msg.matrixDefaultRecipient !== agentName) return false;
   return Array.isArray(msg.mentions) && msg.mentions.includes(agentName);
 }
 
@@ -4447,6 +4536,7 @@ function messageVisibleToAgent(msg, agentName) {
   const normalized = normalizeAgentName(agentName);
   if (!msg || !normalized) return false;
   if (msg.from === normalized || msg.to === normalized) return true;
+  if (msg.matrixDefaultRecipient === normalized) return true;
   if (msg.group && isGroupMember(msg.group, normalized)) return true;
   return false;
 }
@@ -4461,6 +4551,9 @@ function deliveryTargetAgentsForMessage(msg, directTargetKind = null) {
       if (!name || name === msg.from || isSuppressedForAgent(msg, name)) continue;
       if (isAgentRecord(agents[name])) targets.add(name);
     }
+  }
+  if (msg?.matrixDefaultRecipient && isAgentRecord(agents[msg.matrixDefaultRecipient])) {
+    targets.add(msg.matrixDefaultRecipient);
   }
   return [...targets];
 }
@@ -4548,12 +4641,17 @@ function dispatchStoredMessage(msg, options = {}) {
       reason: 'suppressed-recipient',
     });
   }
+  emitStoredMessageSideEffects(msg, { senderIsAgent, directTargetKind });
+  return { ok: true, msg };
+}
+
+function emitStoredMessageSideEffects(msg, { senderIsAgent = false, directTargetKind = null } = {}) {
   invalidatePendingHumanTargetsForMessage(msg);
   const compactEvent = buildAgentCompactEvent(msg, senderIsAgent);
   if (compactEvent) {
     broadcastSSE('agent_compact', compactEvent);
   }
-  broadcastSSE('message', msg);
+  broadcastSSE('message', { ...msg, deliveryOwner: 'dashboard-queue' });
   if (senderIsAgent) {
     markAgentOutbound(msg.from);
   }
@@ -4569,7 +4667,106 @@ function dispatchStoredMessage(msg, options = {}) {
       if (state.online) pushNotify(agent, msg);
     }
   }
-  return { ok: true, msg };
+}
+
+function deliveryEventAttemptExists(attemptId) {
+  return Boolean(attemptId) && deliveryEventAttemptIds.has(attemptId);
+}
+
+function appendDeliveryEventOnce(raw, attemptId) {
+  if (deliveryEventAttemptExists(attemptId)) return { ok: true, deduped: true };
+  return appendDeliveryEvent({ ...raw, attemptId });
+}
+
+function archivedMessageExists(messageId) {
+  if (!existsSync(MESSAGE_ARCHIVE_LOG)) return false;
+  for (const line of readFileSync(MESSAGE_ARCHIVE_LOG, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    if (JSON.parse(line)?.id === messageId) return true;
+  }
+  return false;
+}
+
+async function emitMatrixStoredMessageSideEffects(msg, receipt, { senderIsAgent = false, directTargetKind = null } = {}) {
+  invalidatePendingHumanTargetsForMessage(msg);
+  const compactEvent = buildAgentCompactEvent(msg, senderIsAgent);
+  if (compactEvent) broadcastSSE('agent_compact', compactEvent);
+  broadcastSSE('message', { ...msg, deliveryOwner: 'dashboard-queue' });
+  if (senderIsAgent) markAgentOutbound(msg.from);
+
+  for (const agentName of deliveryTargetAgentsForMessage(msg, directTargetKind)) {
+    const state = getAgentDeliveryState(agentName);
+    if (!state.online || !agents[agentName]?.tmux) continue;
+    const result = await pushNotify(agentName, msg, {
+      idempotencyKey: `matrix:${receipt.eventId}:${agentName}`,
+    });
+    const durableInboxFallback = result?.reason === 'local-session-not-found'
+      || result?.reason === 'missing-tmux-target';
+    if (!isCatchupNotificationComplete(result) && !durableInboxFallback) {
+      return { ok: false, status: 503, error: `Matrix wake queue failed for ${agentName}: ${result?.reason || 'unknown error'}` };
+    }
+  }
+  return { ok: true };
+}
+
+async function completeMatrixDispatch(receipt) {
+  const msg = receipt.message;
+  const liveMessageExists = messages.some((row) => row?.id === receipt.messageId);
+  const durableArchiveExists = receipt.status === 'committed' && !liveMessageExists
+    ? archivedMessageExists(receipt.messageId)
+    : false;
+  if (!liveMessageExists && !durableArchiveExists) {
+    const persisted = persistNewMessage(msg);
+    if (!persisted.ok) return { ok: false, status: 503, error: persisted.error };
+  }
+  if (receipt.status === 'committed') {
+    return { ok: true, response: { ...(receipt.response || {}), deduped: true }, newlyCommitted: false };
+  }
+  if (matrixDispatchFailureStageForTest === 'after-message-persist') {
+    matrixDispatchFailureStageForTest = null;
+    throw new Error('injected Matrix dispatch failure after message persistence');
+  }
+  const senderIsAgent = receipt.dispatch?.senderIsAgent === true;
+  const directTargetKind = receipt.dispatch?.directTargetKind || null;
+  if (receipt.status === 'reserved') {
+    const targetAgents = deliveryTargetAgentsForMessage(msg, directTargetKind);
+    const accepted = appendDeliveryEventOnce({
+      type: 'message.accepted',
+      source: 'backend',
+      messageId: msg.id,
+      agent: targetAgents.length === 1 ? targetAgents[0] : null,
+      targetAgents,
+      priority: msg.priority,
+      context: {
+        from: msg.from,
+        to: msg.to || null,
+        group: msg.group || null,
+        type: msg.type,
+        targetKind: directTargetKind,
+      },
+    }, `matrix:${receipt.eventId}:accepted`);
+    if (!accepted.ok) return { ok: false, status: 503, error: 'delivery event persistence failed' };
+    if (Array.isArray(msg.suppressedRecipients) && msg.suppressedRecipients.length > 0) {
+      const suppressed = appendDeliveryEventOnce({
+        type: 'message.suppressed',
+        source: 'backend',
+        messageId: msg.id,
+        targetAgents: msg.suppressedRecipients,
+        reason: 'suppressed-recipient',
+      }, `matrix:${receipt.eventId}:suppressed`);
+      if (!suppressed.ok) return { ok: false, status: 503, error: 'suppression event persistence failed' };
+    }
+    receipt = matrixDispatchStore.accept(receipt.eventId, receipt.response);
+  }
+
+  const wake = await emitMatrixStoredMessageSideEffects(msg, receipt, { senderIsAgent, directTargetKind });
+  if (!wake.ok) return wake;
+  if (matrixDispatchFailureStageForTest === 'after-wake-before-commit') {
+    matrixDispatchFailureStageForTest = null;
+    throw new Error('injected Matrix dispatch failure after wake before commit');
+  }
+  const committed = matrixDispatchStore.commit(receipt.eventId, receipt.response);
+  return { ok: true, response: committed.response || {}, newlyCommitted: true };
 }
 
 function dispatchInternalDirectMessage(payload = {}) {
@@ -6927,13 +7124,13 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
       catchupUnreadCount: unread.length,
     },
   });
-  broadcastSSE('message', msg);
+  broadcastSSE('message', { ...msg, deliveryOwner: 'dashboard-queue' });
   catchupCursor.set(agentName, key);
   const result = await pushNotify(agentName, msg);
   if (isCatchupNotificationComplete(result)) catchupPushCursor.set(agentName, key);
 }
 
-async function pushNotify(agentName, msg) {
+async function pushNotify(agentName, msg, options = {}) {
   const agent = agents[agentName];
   if (!agent?.tmux) {
     logPushNotifySkip(agentName, 'missing-tmux-target');
@@ -7091,7 +7288,10 @@ async function pushNotify(agentName, msg) {
     const queuePath = new URL(PUSH_QUEUE_URL).pathname;
     const resp = await fetchWebBridge(PUSH_QUEUE_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}),
+      },
       signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
       body: JSON.stringify({ from: 'agent-chat-v2', to: agent.tmux, payload: notification, priority: notificationPriority || 'normal', notifyMeta }),
     }, `pushNotify() POST ${queuePath} agent=${agentName}`);
@@ -7809,17 +8009,92 @@ app.get('/api/agents', (req, res) => {
 // matrix-Agent capability scheduler (Phase 3): a reservation/queue over the pool. agent-chat
 // decides *which* agent staffs a (role, capability); the caller (e.g. the OpenFab Bridge)
 // delivers the task to it and calls /release on completion. Busy/queue are in-memory.
-const dispatchBusy = new Set();      // agent names currently reserved
+//
+// Task 7: the reservation is an owner-bound, renewable lease (DispatchLeaseStore), not a bare
+// busy flag — a crashed/stuck caller can no longer pin an agent forever. A lease is claimed at
+// dispatch time (leaseId + expiresAt in the response), extended via POST /api/dispatch/renew,
+// and released via POST /api/dispatch/release; renew/release both require the exact
+// (leaseId, agent, owner) tuple and reject otherwise (owner mismatch, unknown/stale leaseId, or
+// an already-expired lease — distinct 4xx reasons). POST /api/dispatch/release rejects the
+// pre-Task-7 call shape ({agent} only, no leaseId/owner) by default — letting the ownership
+// check be skipped just by omitting fields would defeat it — unless AGENTCHAT_ALLOW_LEGACY_RELEASE=1
+// is set, an explicit opt-in compatibility shim for a caller that predates ownership (see the
+// Task 7 report for the caller inventory; nothing in this stack needs the shim as of this
+// writing). An unrenewed lease is reaped once its TTL lapses (checked lazily on GET /api/pool and
+// POST /api/dispatch, mirroring refreshServerLiveness()'s placement): the lease is invalidated
+// first, then the agent is freed, so nothing can observe "agent free, lease still valid" mid-
+// reap. A reaped lease is requeued at most once, and only if it carries a durable ticket (the
+// queue-drain ticket, or one the caller supplied at dispatch time); otherwise the task is
+// presumed failed and an alert is raised — never silently retried/duplicated. The dispatch
+// queue itself remains process-local (known limitation, unchanged by Task 7): a restart drops
+// in-flight leases and queued tickets alike; this is not restart-safe queueing.
+const dispatchLeaseStore = new DispatchLeaseStore({ ttlMs: DISPATCH_LEASE_TTL_MS });
 const dispatchQueues = new Map();    // `${role}:${tier}` → [{ ticket, role, tier, task, room }]
 const provisionReservations = new Map(); // `${role}:${tier}` → count of outstanding provision plans
 let dispatchTicketSeq = 0;
 const cellKey = (role, tier) => `${role}:${tier}`;
-const annotateBusy = (records) => records.map((a) => ({ ...a, busy: dispatchBusy.has(a.name) }));
+const annotateBusy = (records) => records.map((a) => ({ ...a, busy: dispatchLeaseStore.isBusy(a.name) }));
 const poolRecords = () =>
   annotateBusy(Object.values(agents).filter(isAgentRecord).map(serializeAgent));
 
+const DISPATCH_LEASE_ERROR_STATUS = {
+  missing_fields: 400,
+  owner_mismatch: 403,
+  lease_not_found: 404,
+  lease_expired: 410,
+  agent_busy: 409,
+};
+
+function respondDispatchLeaseError(res, error) {
+  const reason = error?.reason || 'internal_error';
+  const status = DISPATCH_LEASE_ERROR_STATUS[reason] || 500;
+  return res.status(status).json({ error: error?.message || 'dispatch lease error', reason });
+}
+
+// Reap leases whose TTL lapsed without a renew. For each: invalidate the lease, free the agent,
+// then either requeue its ticket (durable tickets only, at most once) or mark it failed and
+// raise an alert (no ticket ⇒ never silently duplicate the task). See the Task 7 note above.
+function reapDispatchLeases() {
+  const reaped = dispatchLeaseStore.reapExpired(Date.now());
+  for (const { lease, context, outcome } of reaped) {
+    if (outcome === 'requeued') {
+      const key = cellKey(context.role, context.tier);
+      const q = dispatchQueues.get(key) || [];
+      q.push({ ticket: lease.ticket, role: context.role, tier: context.tier, task: context.task, room: context.room });
+      dispatchQueues.set(key, q);
+      console.warn(`[dispatch-lease] ${lease.agent} lease ${lease.leaseId} expired unrenewed; requeued ticket ${lease.ticket}`);
+      continue;
+    }
+    console.warn(`[dispatch-lease] ${lease.agent} lease ${lease.leaseId} expired unrenewed with no durable ticket; marking failed`);
+    try {
+      alertStore.ingest({
+        alertType: 'dispatch_lease_expired',
+        dedupeKey: `dispatch_lease_expired:${lease.agent}:${lease.leaseId}`,
+        severity: 'warning',
+        source: 'backend',
+        sourceAgent: lease.agent,
+        summary: `Dispatch lease for '${lease.agent}' expired without renewal and has no durable ticket to requeue`,
+        detail: {
+          leaseId: lease.leaseId, agent: lease.agent, owner: lease.owner, taskId: lease.taskId,
+          role: context.role, tier: context.tier, expiresAt: lease.expiresAt,
+        },
+        owner: 'matrix-agent-dispatch',
+        runbook: 'inspect the dispatch lease + task state for this agent; redispatch manually if the work is still needed',
+        impact: 'the in-flight task on this agent is presumed failed; no automatic retry because no durable ticket exists to requeue from',
+        recoveryCondition: 'operator investigates and manually redispatches, or explicitly resolves this alert',
+        correlation: { dedupeKey: `dispatch_lease_expired:${lease.agent}:${lease.leaseId}`, leaseId: lease.leaseId, agent: lease.agent },
+        tags: ['dispatch-lease', `agent:${lease.agent}`],
+      });
+    } catch (error) {
+      console.warn(`[dispatch-lease] failed to ingest expiry alert for ${lease.leaseId}: ${error?.message || error}`);
+    }
+  }
+  return reaped;
+}
+
 app.get('/api/pool', (req, res) => {
   refreshServerLiveness();
+  reapDispatchLeases();
   let records = poolRecords();
   const state = String(req.query.state || 'any').toLowerCase();
   if (state === 'idle') records = records.filter(a => a.online !== false && a.busy !== true);
@@ -7841,19 +8116,29 @@ app.get('/api/pool', (req, res) => {
 
 // Reserve an agent for (role, capability), or queue when the pool can't staff it. The caller
 // delivers the task to the returned agent and calls /api/dispatch/release when it completes.
+// Optional body fields `owner`/`ticket`/`taskId` feed the Task 7 lease (see notes above); a
+// missing `owner` gets DISPATCH_LEASE_DEFAULT_OWNER so pre-Task-7 callers keep working.
 app.post('/api/dispatch', (req, res) => {
   refreshServerLiveness();
+  reapDispatchLeases();
   const role = req.body?.role ? String(req.body.role) : null;
   if (!role) return res.status(400).json({ error: 'role required' });
   const tier = resolveTier(role, req.body?.capability ? String(req.body.capability) : undefined);
   const agent = selectAgent(poolRecords(), role, tier); // poolRecords() already carries busy
   if (agent) {
-    dispatchBusy.add(agent.name);
-    return res.json({ status: 'routed', agent: agent.name, role, tier });
+    const owner = req.body?.owner ? String(req.body.owner) : DISPATCH_LEASE_DEFAULT_OWNER;
+    const ticket = req.body?.ticket ? String(req.body.ticket) : null;
+    const taskId = req.body?.taskId ? String(req.body.taskId) : null;
+    const lease = dispatchLeaseStore.create({
+      agent: agent.name, owner, taskId, ticket,
+      role, tier, task: req.body?.task ?? null, room: req.body?.room ?? null,
+    });
+    return res.json({ status: 'routed', agent: agent.name, role, tier, leaseId: lease.leaseId, expiresAt: lease.expiresAt });
   }
   // Phase 4: auto-provision. When MATRIX_AGENT_MAX_PER_CELL > 0 and the cell is below the cap,
   // return a `provision` plan (the launcher runs `up-v1` with the tier's runtime) instead of
   // queuing. Default 0 = off (pure queue) — safe. The decision is pure; spawning is the edge.
+  // No lease is created here: the named agent doesn't exist yet, so there's nothing to reserve.
   const key = cellKey(role, tier);
   const cap = Number(process.env.MATRIX_AGENT_MAX_PER_CELL || 0);
   if (cap > 0) {
@@ -7872,12 +8157,56 @@ app.post('/api/dispatch', (req, res) => {
   res.json({ status: 'queued', ticket, role, tier, queueDepth: q.length });
 });
 
+// Extend a lease's expiresAt from now (Task 7). Requires the exact (leaseId, agent, owner)
+// tuple that POST /api/dispatch handed out; this is how a long task survives past one TTL
+// window — the lease is never killed on createdAt age alone as long as it keeps renewing.
+app.post('/api/dispatch/renew', (req, res) => {
+  const leaseId = req.body?.leaseId ? String(req.body.leaseId) : null;
+  const agent = req.body?.agent ? String(req.body.agent) : null;
+  const owner = req.body?.owner ? String(req.body.owner) : null;
+  if (!leaseId || !agent || !owner) {
+    return res.status(400).json({ error: 'leaseId, agent, and owner are required', reason: 'missing_fields' });
+  }
+  try {
+    const lease = dispatchLeaseStore.renew({ leaseId, agent, owner });
+    return res.json({ status: 'renewed', agent, leaseId: lease.leaseId, expiresAt: lease.expiresAt });
+  } catch (error) {
+    return respondDispatchLeaseError(res, error);
+  }
+});
+
 // Free a reserved agent; if a ticket is waiting for its cell, reserve it again and hand the
 // caller the drained ticket to deliver. (Auto-provision of new agents is Phase 4.)
+//
+// Task 7 ownership: pass {agent, leaseId, owner} to release under the strict lease contract
+// (owner mismatch / unknown-or-stale leaseId / already-expired lease → rejected, distinct 4xx
+// reasons). {agent} alone (no leaseId, no owner) is the pre-Task-7 legacy shape — rejected by
+// default (`missing_fields`, since it can't prove ownership of anything) unless
+// AGENTCHAT_ALLOW_LEGACY_RELEASE=1 is set, in which case it releases whatever lease currently
+// holds that agent, no ownership check. Passing exactly one of leaseId/owner (not both, not
+// neither) is always a malformed request, rejected as `missing_fields` regardless of the flag.
 app.post('/api/dispatch/release', (req, res) => {
   const name = req.body?.agent ? String(req.body.agent) : null;
   if (!name) return res.status(400).json({ error: 'agent required' });
-  dispatchBusy.delete(name);
+  const leaseId = req.body?.leaseId ? String(req.body.leaseId) : null;
+  const owner = req.body?.owner ? String(req.body.owner) : null;
+  if (leaseId || owner) {
+    if (!leaseId || !owner) {
+      return res.status(400).json({ error: 'leaseId and owner must be provided together', reason: 'missing_fields' });
+    }
+    try {
+      dispatchLeaseStore.release({ leaseId, agent: name, owner });
+    } catch (error) {
+      return respondDispatchLeaseError(res, error);
+    }
+  } else if (DISPATCH_ALLOW_LEGACY_RELEASE) {
+    dispatchLeaseStore.releaseByAgent(name); // shim explicitly enabled — tolerant no-op if nothing to release
+  } else {
+    return res.status(400).json({
+      error: 'leaseId, agent, and owner are required (set AGENTCHAT_ALLOW_LEGACY_RELEASE=1 to allow legacy {agent}-only release)',
+      reason: 'missing_fields',
+    });
+  }
   const rec = agents[name];
   const role = rec ? agentRole(serializeAgent(rec)) : null;
   const tier = rec ? agentCapability(serializeAgent(rec)) : null;
@@ -7887,8 +8216,13 @@ app.post('/api/dispatch/release', (req, res) => {
     const next = q.shift();
     if (next) {
       dispatchQueues.set(key, q);
-      dispatchBusy.add(name); // re-reserve for the drained ticket
-      return res.json({ status: 'drained', agent: name, ...next });
+      // Re-reserve for the drained ticket under a fresh lease. The releasing owner (if any)
+      // picks it back up; legacy (ownerless) releases fall back to the default owner.
+      const drainedLease = dispatchLeaseStore.create({
+        agent: name, owner: owner || DISPATCH_LEASE_DEFAULT_OWNER, taskId: null, ticket: next.ticket,
+        role, tier, task: next.task, room: next.room,
+      });
+      return res.json({ status: 'drained', agent: name, ...next, leaseId: drainedLease.leaseId, expiresAt: drainedLease.expiresAt });
     }
   }
   res.json({ status: 'released', agent: name });
@@ -9869,8 +10203,8 @@ app.get('/api/media/fetch', (req, res) => {
 });
 
 // ── Messages ──────────────────────────────────────────────────────────
-app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, attachments, schema, priority, sender_mxid, from_id } = req.body;
+app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) => {
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, source_event_id, matrix_default_recipient, attachments, schema, priority, sender_mxid, from_id } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -9878,9 +10212,32 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
   const sourceRoom = (typeof source_room === 'string' && source_room.trim() && source_room.length <= 255)
     ? source_room.trim()
     : null;
-  // Only accept sender_mxid from authenticated bridge requests (or if no secret is configured)
+  // Matrix worker ingestion is accepted only through the authenticated bridge.
   const bridgeSecret = getBridgeSecret();
   const isBridgeAuthenticated = !bridgeSecret || req.headers['x-bridge-secret'] === bridgeSecret;
+  const hasAuthenticatedBridgeSecret = Boolean(bridgeSecret)
+    && req.headers['x-bridge-secret'] === bridgeSecret;
+  let sourceEventId = null;
+  if (sourceType === 'matrix') {
+    if (!bridgeSecret) {
+      return res.status(503).json({ error: 'MATRIX_BRIDGE_SECRET is required for Matrix ingestion' });
+    }
+    if (!hasAuthenticatedBridgeSecret) {
+      return res.status(401).json({ error: 'invalid Matrix bridge credentials' });
+    }
+    if (typeof source_event_id !== 'string' || !source_event_id.trim() || source_event_id.trim().length > 255) {
+      return res.status(400).json({ error: 'source_event_id must be 1..255 characters' });
+    }
+    sourceEventId = source_event_id.trim();
+  }
+  const matrixDefaultRecipient = hasAuthenticatedBridgeSecret
+    && sourceType === 'matrix'
+    && matrix_default_recipient === 'wf_coordinator'
+    ? 'wf_coordinator'
+    : null;
+  if (matrix_default_recipient !== undefined && !matrixDefaultRecipient) {
+    return res.status(400).json({ error: 'invalid matrix_default_recipient' });
+  }
   const senderMxid = isBridgeAuthenticated && sourceType === 'matrix' && typeof sender_mxid === 'string' && /^@[^:]+:.+/.test(sender_mxid.trim())
     ? sender_mxid.trim().slice(0, 255) : null;
   // Derive trustLevel server-side from validated senderMxid — never trust caller-supplied value
@@ -9926,6 +10283,20 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
   }
   if (!['auto', 'agent', 'human'].includes(targetType)) {
     return res.status(400).json({ error: 'target_type must be one of: auto, agent, human' });
+  }
+  if (sourceEventId) {
+    const existing = matrixDispatchStore.get(sourceEventId);
+    if (existing) {
+      try {
+        const completed = await completeMatrixDispatch(existing);
+        if (!completed.ok) {
+          return res.status(completed.status || 503).json({ error: completed.error || 'Matrix dispatch recovery failed' });
+        }
+        return res.json({ ...completed.response, ok: true, id: existing.messageId, deduped: true });
+      } catch (error) {
+        return res.status(503).json({ error: `Matrix dispatch recovery failed: ${error.message}` });
+      }
+    }
   }
   let directTargetKind = null;
   let assumedHumanTarget = false;
@@ -10036,6 +10407,8 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
     reply_to: reply_to || null,
     source: source || 'api',
     sourceRoom,
+    sourceEventId,
+    matrixDefaultRecipient,
     senderMxid,
     trustLevel,
     fromId: isBridgeAuthenticated && (typeof from_id === 'string' && from_id.trim()) ? from_id.trim().slice(0, 255)
@@ -10099,7 +10472,7 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
     }
 
     const outOfGroupMentions = mentionStates
-      .filter(item => item.state.exists && !item.isGroupMember)
+      .filter(item => item.state.exists && !item.isGroupMember && item.name !== matrixDefaultRecipient)
       .map(item => ({ target: item.name, reason: 'not-in-group' }));
     if (outOfGroupMentions.length) {
       warnings.push({ code: 'mentions_not_in_group', targets: outOfGroupMentions });
@@ -10110,7 +10483,30 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
     msg.suppressedRecipients = [...suppressedRecipients];
   }
 
-  const dispatchResult = dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
+  const responseBase = {
+    ok: true,
+    id: msg.id,
+    warnings,
+    delivery: { suppressed: msg.suppressedRecipients || [], targetKind: directTargetKind || null },
+    taskGraph: null,
+  };
+  let dispatchResult;
+  if (sourceEventId) {
+    try {
+      const receipt = matrixDispatchStore.reserve({
+        eventId: sourceEventId,
+        messageId: msg.id,
+        message: msg,
+        dispatch: { senderIsAgent, directTargetKind },
+        response: responseBase,
+      });
+      dispatchResult = await completeMatrixDispatch(receipt);
+    } catch (error) {
+      dispatchResult = { ok: false, status: 503, error: `Matrix dispatch persistence failed: ${error.message}` };
+    }
+  } else {
+    dispatchResult = dispatchStoredMessage(msg, { senderIsAgent, directTargetKind });
+  }
   if (!dispatchResult.ok) {
     return res.status(dispatchResult.status || 503).json({ error: dispatchResult.error || 'message persistence failed' });
   }
@@ -10128,13 +10524,7 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), (req, res) => {
     });
   }
 
-  res.json({
-    ok: true,
-    id: msg.id,
-    warnings,
-    delivery: { suppressed: msg.suppressedRecipients || [], targetKind: directTargetKind || null },
-    taskGraph,
-  });
+  res.json({ ...responseBase, taskGraph });
 });
 
 // ── DM history (bearer-authenticated, for web UI) ─────────────────────
@@ -10382,11 +10772,12 @@ app.get('/api/inbox/:agent', requireAgentToken(_tokenFromAgent), (req, res) => {
   // without implicitly skipping unread messages of other kinds.
   const runtime = ensureAgentRuntimeRecord(agentName);
   const pendingGate = getPendingInboxGate(runtime);
-  const consumedPendingSource = Boolean(
-    pendingGate
-    && pendingGate.sourceMsgId
-    && unread.some((msg) => msg?.id === pendingGate.sourceMsgId)
-  );
+  // A full, unfiltered read always satisfies a pending gate: the agent has now seen the entire
+  // inbox. This must NOT depend on the gate's sourceMsgId still being present in `unread` --
+  // once the cursor advances past it (e.g. from an earlier full read), it can never reappear
+  // there, which would otherwise deadlock the agent's send path forever. Empty `unread` counts
+  // as a satisfied read too.
+  const clearsPendingGate = Boolean(pendingGate) && !kinds;
   if (!kinds && advanceInboxCursor(cursor, unread)) {
     if (!saveCursors()) {
       restoreCursor(agentName, cursorSnapshot);
@@ -10396,22 +10787,22 @@ app.get('/api/inbox/:agent', requireAgentToken(_tokenFromAgent), (req, res) => {
   }
   if (!kinds) {
     markAgentInboxChecked(agentName, {
-      clearInboxGate: consumedPendingSource,
-      sourceMsgId: consumedPendingSource ? pendingGate.sourceMsgId : null,
+      clearInboxGate: clearsPendingGate,
+      sourceMsgId: clearsPendingGate ? pendingGate.sourceMsgId : null,
     });
-    if (unread.length > 0) {
+    if (unread.length > 0 || clearsPendingGate) {
       appendDeliveryEvent({
         type: 'inbox.read_ack',
         source: 'backend',
         agent: agentName,
         messageIds: unread.map((msg) => msg.id).filter(Boolean),
-        messageId: consumedPendingSource ? pendingGate.sourceMsgId : null,
+        messageId: clearsPendingGate ? pendingGate.sourceMsgId : null,
         ackedAt: Date.now(),
         cursor: {
           inboxTs: cursor.inbox || 0,
           inboxId: cursor.inboxId || null,
         },
-        reason: consumedPendingSource ? 'inbox-gate-consumed' : 'inbox-read',
+        reason: clearsPendingGate ? 'inbox-gate-consumed' : 'inbox-read',
       });
     }
     // If the agent just consumed inbox, stale queued notifications should be removed immediately.
@@ -10739,6 +11130,11 @@ export const __backendV2TestInternals = {
   sseAdapterForTest: sseAdapter,
   safeWriteJsonFile,
   setJsonSaveFailureForTest,
+  setMatrixDispatchFailureForTest(stage = null) {
+    matrixDispatchFailureStageForTest = stage;
+  },
+  dispatchLeaseStoreForTest: dispatchLeaseStore,
+  dispatchQueuesForTest: dispatchQueues,
 };
 
 if (process.argv[1] === __filename) {
