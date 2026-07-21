@@ -83,7 +83,7 @@ function usage() {
   console.log(`Usage: provision-v1-agent-home --name <agent> [options]
 
 Options:
-  --type <claude|codex>       Agent client type (default: claude)
+  --type <claude|codex|octos> Agent client type (default: claude)
   --home <path>               AGENTCHAT_HOMEDIR override
   --project <path>            Source project directory to materialize under workdir/projects/
   --project-mode <mode>       copy (default) | symlink
@@ -602,7 +602,7 @@ function main() {
   const name = normalizeName(args.name);
   if (!name) throw new Error('invalid --name (allowed: letters, digits, dot, underscore, hyphen)');
   const type = String(args.type || 'claude').trim().toLowerCase();
-  if (type !== 'claude' && type !== 'codex') throw new Error(`invalid --type: ${type}`);
+  if (type !== 'claude' && type !== 'codex' && type !== 'octos') throw new Error(`invalid --type: ${type}`);
 
   const projectMode = String(args.projectMode || 'copy').trim().toLowerCase();
   if (projectMode !== 'symlink' && projectMode !== 'copy') {

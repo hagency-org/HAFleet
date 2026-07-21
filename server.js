@@ -2088,6 +2088,7 @@ app.get('/api/agents/detail/:name', async (req, res) => {
                 const childCmd = childCmdStdout.toLowerCase();
                 if (childCmd.includes('claude')) return 'claude';
                 if (childCmd.includes('codex')) return 'codex';
+                if (childCmd.includes('octos')) return 'octos';
                 return null;
               });
           })

@@ -462,7 +462,7 @@ while [ $# -gt 0 ]; do
       EXTRA_ARGS="$2"
       shift 2
       ;;
-    claude|codex)
+    claude|codex|octos)
       TYPE="$1"
       shift
       ;;
@@ -551,7 +551,7 @@ fi
 [ -z "$AGENT_PATH" ] && AGENT_PATH="$SAVED_PATH"
 [ -z "$TYPE" ] && TYPE="${SAVED_TYPE:-claude}"
 [ -z "$TYPE" ] && TYPE="claude"
-[ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK:-}" ] && [[ "$SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK" == "claude" || "$SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK" == "codex" ]] && TYPE="$SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK"
+[ -n "${SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK:-}" ] && [[ "$SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK" == "claude" || "$SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK" == "codex" || "$SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK" == "octos" ]] && TYPE="$SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK"
 [ -z "$MODEL" ] && MODEL="${AGENTCHAT_LAUNCH_MODEL:-${SAVED_RUNTIME_PROFILE_PRIMARY_MODEL:-$SAVED_MODEL}}"
 [ -z "$EXTRA_ARGS" ] && EXTRA_ARGS="${AGENTCHAT_LAUNCH_EXTRA_ARGS:-${SAVED_RUNTIME_PROFILE_PRIMARY_EXTRA_ARGS:-$SAVED_EXTRA_ARGS}}"
 # Strip context-length suffix (e.g. [1m], [200k]) — agentchat metadata, not API model name
@@ -595,8 +595,8 @@ if [ ! -d "$AGENT_PATH" ]; then
   exit 1
 fi
 
-if [ "$TYPE" != "claude" ] && [ "$TYPE" != "codex" ]; then
-  echo "Error: type must be 'claude' or 'codex', got '$TYPE'" >&2
+if [ "$TYPE" != "claude" ] && [ "$TYPE" != "codex" ] && [ "$TYPE" != "octos" ]; then
+  echo "Error: type must be 'claude', 'codex', or 'octos', got '$TYPE'" >&2
   exit 1
 fi
 
@@ -1426,6 +1426,111 @@ PY
 }
 ensure_agent_mcp_config
 
+# ── Generate per-agent octos config (.octos/config.json) ──────────────
+# octos discovers external MCP servers as a *client* from its config's
+# `mcp_servers` array. octos's config resolver is first-match-wins (a
+# project-local .octos/config.json fully replaces the home config), so we must
+# MERGE the agent-chat MCP server into a copy of the user's existing octos
+# config to preserve their provider/model/api_key_env settings.
+ensure_octos_mcp_config() {
+  local octos_dir="$AGENT_PATH/.octos"
+  local octos_config="$octos_dir/config.json"
+  local mcp_server_js="$BASE_DIR/mcp-server.js"
+  if [ ! -f "$mcp_server_js" ]; then
+    echo "Warning: mcp-server.js not found at $mcp_server_js, skipping octos config generation" >&2
+    return
+  fi
+  mkdir -p "$octos_dir"
+  local state_dir="${SAVED_STATE_DIR:-}"
+  OCTOS_CONFIG="$octos_config" MCP_SERVER_JS="$mcp_server_js" MCP_SERVER_NAME="$MCP_SERVER_NAME" \
+    AGENT_NAME_VAL="$NAME" BACKEND_URL="$BACKEND_URL" BACKEND_PORT="$BACKEND_PORT" \
+    SERVER_ID="$SERVER_ID" STATE_DIR="$state_dir" RUNTIME_DIR_VAL="$RUNTIME_DIR" \
+    API_TOKEN_VAL="${API_TOKEN:-}" HOMEDIR_VAL="${AGENTCHAT_HOMEDIR:-}" \
+    python3 - <<'PY'
+import json
+import os
+
+octos_config = os.environ["OCTOS_CONFIG"]
+mcp_server_js = os.environ["MCP_SERVER_JS"]
+
+env = {
+    "AGENT_NAME": os.environ.get("AGENT_NAME_VAL", ""),
+    "AGENT_CHAT_API": os.environ.get("BACKEND_URL", ""),
+    "AGENT_CHAT_BACKEND_PORT": os.environ.get("BACKEND_PORT", ""),
+    "AGENT_CHAT_MCP_SERVER_NAME": os.environ.get("MCP_SERVER_NAME", "") or "agent-chat",
+}
+for key, src in [
+    ("AGENT_CHAT_SERVER", "SERVER_ID"),
+    ("AGENTCHAT_AGENT_STATE_DIR", "STATE_DIR"),
+    ("AGENT_CHAT_RUNTIME_DIR", "RUNTIME_DIR_VAL"),
+    ("API_TOKEN", "API_TOKEN_VAL"),
+    ("AGENTCHAT_HOMEDIR", "HOMEDIR_VAL"),
+]:
+    val = os.environ.get(src, "")
+    if val:
+        env[key] = val
+env = {k: v for k, v in env.items() if v}
+
+# `exclusive` — these tools mutate remote mesh state (send_message/post), so the
+# octos M8.8 scheduler must serialise them against native file tools.
+server_entry = {
+    "command": "node",
+    "args": [mcp_server_js],
+    "env": env,
+    "concurrency_class": "exclusive",
+}
+
+def load_base_config():
+    """Load the octos config octos would otherwise resolve, to preserve
+    provider/model/key. Mirrors octos default-context precedence."""
+    home = os.path.expanduser("~")
+    candidates = []
+    if os.path.exists(octos_config):
+        candidates.append(octos_config)  # our prior merged file — idempotent re-run
+    config_dir = os.environ.get("OCTOS_CONFIG_DIR")
+    if config_dir:
+        candidates.append(os.path.join(config_dir, "config.json"))
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    candidates.append(os.path.join(xdg, "octos", "config.json"))
+    octos_home = os.environ.get("OCTOS_HOME")
+    if octos_home:
+        candidates.append(os.path.join(octos_home, "config.json"))
+    candidates.append(os.path.join(home, ".octos", "config.json"))
+    for path in candidates:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError):
+            continue
+    return {}
+
+config = load_base_config()
+servers = config.get("mcp_servers")
+if not isinstance(servers, list):
+    servers = []
+# Drop any prior agent-chat entry (identified by our mcp-server.js) then append.
+servers = [
+    s for s in servers
+    if not (isinstance(s, dict) and mcp_server_js in (s.get("args") or []))
+]
+servers.append(server_entry)
+config["mcp_servers"] = servers
+
+with open(octos_config, "w") as f:
+    json.dump(config, f, indent=2)
+    f.write("\n")
+PY
+  echo "  octos MCP config: $octos_config"
+  if ! grep -q '"provider"' "$octos_config" 2>/dev/null; then
+    echo "  Note: no octos provider found in base config; configure one (run 'octos init') or octos will fail at LLM time." >&2
+  fi
+}
+if [ "$TYPE" = "octos" ]; then
+  ensure_octos_mcp_config
+fi
+
 # ── Save meta ─────────────────────────────────────────────────────────
 mkdir -p "$AGENT_DATA"
 mkdir -p "$TMP_RUNTIME_DIR"
@@ -1835,6 +1940,38 @@ elif [ "$TYPE" = "codex" ]; then
     fi
     rm -f "$CODEX_BASELINE_FILE" >/dev/null 2>&1 || true
   fi
+
+elif [ "$TYPE" = "octos" ]; then
+  # octos has NO resume-id mechanism (no --resume/--session-id); continuity is
+  # provided by its --data-dir episode/memory store. It always starts a fresh
+  # interactive REPL. The bootstrap prompt cannot be passed as an argument that
+  # keeps the REPL open (octos chat -m is one-shot and exits), so it is typed
+  # into the pane after the REPL comes up.
+  OCTOS_FLAGS=""
+  if [ -n "$MODEL" ]; then
+    OCTOS_FLAGS="$OCTOS_FLAGS --model $(shell_quote "$MODEL")"
+  fi
+  if [ -n "$EXTRA_ARGS" ]; then
+    OCTOS_FLAGS="$OCTOS_FLAGS $EXTRA_ARGS"
+  fi
+  OCTOS_DATA_DIR="$AGENT_DATA/octos"
+  mkdir -p "$OCTOS_DATA_DIR"
+  echo "Starting octos chat session..."
+  OCTOS_LAUNCH_SCRIPT="$TMP_RUNTIME_DIR/launch-octos.sh"
+  write_launch_script "$OCTOS_LAUNCH_SCRIPT" "exec octos chat --cwd $(shell_quote "$AGENT_PATH") --data-dir $(shell_quote "$OCTOS_DATA_DIR") $OCTOS_FLAGS"
+  tmux send-keys -t "$TMUX_PANE_TARGET" "$(shell_quote "$OCTOS_LAUNCH_SCRIPT")" Enter
+  # Wait for the REPL to come up, then inject the bootstrap prompt as a typed
+  # line. Best-effort: if the timing is off, push-relay still nudges the agent
+  # to check_inbox on the first inbound message.
+  OCTOS_INIT_FILE=$(mktemp "$TMP_RUNTIME_DIR/init-octos.XXXXXX")
+  printf '%s\n' "$INIT_PROMPT" > "$OCTOS_INIT_FILE"
+  (
+    sleep 6
+    tmux send-keys -t "$TMUX_PANE_TARGET" -l "$(cat "$OCTOS_INIT_FILE")" >/dev/null 2>&1 || true
+    sleep 0.3
+    tmux send-keys -t "$TMUX_PANE_TARGET" Enter >/dev/null 2>&1 || true
+    rm -f "$OCTOS_INIT_FILE" >/dev/null 2>&1 || true
+  ) &
 fi
 
 # Post-launch health check for custom API provider agents

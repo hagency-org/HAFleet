@@ -68,7 +68,7 @@ declare -a PASS_ARGS=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    claude|codex)
+    claude|codex|octos)
       AGENT_TYPE="$1"
       PASS_ARGS+=("$1")
       shift
