@@ -35,7 +35,6 @@ function seedFleet() {
     env: {
       AGENT_HEARTBEAT_TTL_MS: '5000',
       AGENT_SERVER_SWEEP_INTERVAL_MS: '60000',
-      AGENT_SERVER_MAINTENANCE_IDS: '',
     },
   };
 }

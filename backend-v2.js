@@ -192,6 +192,10 @@ const SERVER_MAINTENANCE_IDS = new Set(
     .map(normalizeServer)
     .filter(Boolean)
 );
+const SERVER_MAINTENANCE_ENV_CONFIGURED = Object.prototype.hasOwnProperty.call(
+  process.env,
+  'AGENT_SERVER_MAINTENANCE_IDS'
+);
 const SERVER_MAINTENANCE_LAST_SEEN_UPDATE_MS = Number.parseInt(process.env.AGENT_SERVER_MAINTENANCE_LAST_SEEN_UPDATE_MS || '60000', 10);
 const AGENT_COMPACT_HOOK_PATTERNS = [
   /\[(?:agent[_-]?compact|compact(?:ion)?)\]/i,
@@ -3295,6 +3299,7 @@ if (JSON.stringify(cursors) !== cursorsBeforeNormalization) {
   saveJson('cursors.json', cursors);
 }
 
+let serverMaintenanceChanged = false;
 for (const [serverId, server] of Object.entries(servers)) {
   if (!server || typeof server !== 'object') {
     servers[serverId] = {
@@ -3310,6 +3315,7 @@ for (const [serverId, server] of Object.entries(servers)) {
       agentCount: 0,
       maintenance: SERVER_MAINTENANCE_IDS.has(serverId),
     };
+    serverMaintenanceChanged = true;
     continue;
   }
   server.id = server.id || serverId;
@@ -3321,15 +3327,18 @@ for (const [serverId, server] of Object.entries(servers)) {
   server.relayBootTs = Number(server.relayBootTs) || 0;
   server.online = Boolean(server.online);
   server.updatedAt = Number(server.updatedAt) || server.lastSeen || 0;
-  if (!Object.prototype.hasOwnProperty.call(server, 'maintenance')) {
-    server.maintenance = SERVER_MAINTENANCE_IDS.has(serverId);
-  } else {
-    server.maintenance = server.maintenance === true;
-  }
+  const hadMaintenance = Object.prototype.hasOwnProperty.call(server, 'maintenance');
+  const previousMaintenance = server.maintenance;
+  const configuredMaintenance = SERVER_MAINTENANCE_IDS.has(normalizeServer(server.id) || serverId);
+  server.maintenance = SERVER_MAINTENANCE_ENV_CONFIGURED || !hadMaintenance
+    ? configuredMaintenance
+    : server.maintenance === true;
+  if (!hadMaintenance || previousMaintenance !== server.maintenance) serverMaintenanceChanged = true;
   if (!Array.isArray(server.sessions)) server.sessions = [];
   if (!Array.isArray(server.agents)) server.agents = [];
   server.agentCount = Number(server.agentCount) || server.agents.length || 0;
 }
+if (serverMaintenanceChanged) saveJson('servers.json', servers);
 
 for (const [agentName, runtime] of Object.entries(agentRuntime)) {
   if (!runtime || typeof runtime !== 'object') {
@@ -5977,6 +5986,14 @@ async function captureLocalPaneContentAsync(tmuxTarget) {
   }
 }
 
+function isTmuxEmptyServerError(error) {
+  if (Number(error?.code) !== 1) return false;
+  const detail = `${error?.stderr ?? ''}\n${error instanceof Error ? error.message : String(error)}`;
+  return /no server running on\b/i.test(detail)
+    || /error connecting to .+\(No such file or directory\)/i.test(detail)
+    || /^no sessions(?:\s|$)/im.test(detail);
+}
+
 async function buildLocalPaneMetadataSnapshotAsync(runExecFile = execFileAsync) {
   const sessions = new Map();
   const ttyToSession = new Map();
@@ -6007,6 +6024,9 @@ async function buildLocalPaneMetadataSnapshotAsync(runExecFile = execFileAsync) 
       }
     }
   } catch (error) {
+    if (isTmuxEmptyServerError(error)) {
+      return { ok: true, sessions, ttyToSession, error: null };
+    }
     return {
       ok: false,
       sessions,

@@ -57,6 +57,36 @@ describe('backend local tmux liveness', () => {
     }));
   });
 
+  test.each([
+    'error connecting to /tmp/tmux-501/default (No such file or directory)',
+    'no server running on /tmp/tmux-1000/default',
+  ])('treats a missing tmux server as an empty snapshot and eventually marks agents offline: %s', async (stderr) => {
+    context = await createBackendTestContext('backend-tmux-liveness-test-', seed());
+    const run = vi.fn().mockRejectedValue(Object.assign(new Error('tmux exited with status 1'), {
+      code: 1,
+      stderr,
+    }));
+
+    const snapshot = await context.internals.buildLocalPaneMetadataSnapshotForTest(run);
+    expect(snapshot).toEqual(expect.objectContaining({
+      ok: true,
+      sessions: expect.any(Map),
+      ttyToSession: expect.any(Map),
+      error: null,
+    }));
+
+    await context.internals.sweepLocalActivityDurationsForTest(snapshot);
+    await context.internals.sweepLocalActivityDurationsForTest(snapshot);
+    expect(readAgents(context.runtimeDir).alpha.online).toBe(true);
+
+    await context.internals.sweepLocalActivityDurationsForTest(snapshot);
+    expect(readAgents(context.runtimeDir).alpha).toEqual(expect.objectContaining({
+      online: false,
+      tmux: null,
+      offlineReason: 'tmux-missing:auto',
+    }));
+  });
+
   test('requires three consecutive missing-session observations before taking an agent offline', async () => {
     context = await createBackendTestContext('backend-tmux-liveness-test-', seed());
     const missingSnapshot = await context.internals.buildLocalPaneMetadataSnapshotForTest(
