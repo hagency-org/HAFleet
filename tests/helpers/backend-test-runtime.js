@@ -63,6 +63,8 @@ export async function createBackendTestContext(prefix, seed = {}) {
     'AGENT_SCOPE_MONITOR_ENABLED',
     'AGENT_JSON_WRITE_BATCH_MS',
     'AGENT_BLOCKED_INFO_AGGREGATE_WINDOW_MS',
+    'AGENT_SERVER_MAINTENANCE_IDS',
+    'AGENT_TMUX_MISSING_THRESHOLD',
     'API_TOKEN',
   ]) {
     rememberEnv(key);
@@ -78,6 +80,8 @@ export async function createBackendTestContext(prefix, seed = {}) {
   process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
   process.env.AGENT_JSON_WRITE_BATCH_MS = '0';
   process.env.AGENT_BLOCKED_INFO_AGGREGATE_WINDOW_MS = '0';
+  delete process.env.AGENT_SERVER_MAINTENANCE_IDS;
+  delete process.env.AGENT_TMUX_MISSING_THRESHOLD;
   delete process.env.API_TOKEN; // tests run without Bearer auth unless explicitly configured
   if (seed.env && typeof seed.env === 'object') {
     for (const [key, value] of Object.entries(seed.env)) {

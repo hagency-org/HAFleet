@@ -23,7 +23,6 @@ import path from 'path';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 import { promisify } from 'util';
-import os from 'os';
 
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
@@ -169,6 +168,10 @@ const JSON_WRITE_BATCH_WINDOW_MS = Number.isFinite(JSON_WRITE_BATCH_WINDOW_MS_RA
 const UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS = Number.parseInt(process.env.UNEXPECTED_OFFLINE_ALERT_THROTTLE_MS || '120000', 10);
 const AGENT_TMUX_MISSING_ALERT_GRACE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_GRACE_MS || '15000', 10);
 const AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS = Number.parseInt(process.env.AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS || '900000', 10);
+const AGENT_TMUX_MISSING_THRESHOLD_RAW = Number.parseInt(process.env.AGENT_TMUX_MISSING_THRESHOLD || '3', 10);
+const AGENT_TMUX_MISSING_THRESHOLD = Number.isFinite(AGENT_TMUX_MISSING_THRESHOLD_RAW)
+  ? Math.max(3, AGENT_TMUX_MISSING_THRESHOLD_RAW)
+  : 3;
 const AGENT_COMPACT_SUMMARY_MAX = Number.parseInt(process.env.AGENT_COMPACT_SUMMARY_MAX || '180', 10);
 const AGENT_COMPACT_RUNTIME_DEDUPE_MS = Number.parseInt(process.env.AGENT_COMPACT_RUNTIME_DEDUPE_MS || '120000', 10);
 const SUBCONSCIOUS_EVENT_HISTORY_LIMIT = Number.parseInt(process.env.SUBCONSCIOUS_EVENT_HISTORY_LIMIT || '2000', 10);
@@ -184,7 +187,7 @@ const BACKEND_STARTUP_OPTIONAL_ENV = [
   },
 ];
 const SERVER_MAINTENANCE_IDS = new Set(
-  String(process.env.AGENT_SERVER_MAINTENANCE_IDS ?? os.hostname())
+  String(process.env.AGENT_SERVER_MAINTENANCE_IDS ?? '')
     .split(',')
     .map(normalizeServer)
     .filter(Boolean)
@@ -2897,13 +2900,14 @@ const alertStore = createAlertStore({
 const localActivitySweepState = loadJsonSync('local_activity_sweep.json', { selectionCursor: 0 });
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
-const localTmuxMissingState = new Map(); // agent -> { since:number, alerted:boolean }
+const localTmuxMissingState = new Map(); // agent -> { since:number, alerted:boolean, misses:number, wasOnline:boolean }
 const localCompactState = new Map(); // agent -> marker
 const localRuntimeSignalDigest = new Map(); // agent -> digest of blocked/mcp/workspace
 let localActivitySweepRunning = false;
 let localSwapSweepRunning = false;
 let agentScopeSweepRunning = false;
 let supervisorLifecycleSweepRunning = false;
+let localTmuxSnapshotWarnAt = 0;
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const AUDIT_LOG = dataPath('audit.jsonl');
 const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
@@ -5973,17 +5977,17 @@ async function captureLocalPaneContentAsync(tmuxTarget) {
   }
 }
 
-async function buildLocalPaneMetadataSnapshotAsync() {
+async function buildLocalPaneMetadataSnapshotAsync(runExecFile = execFileAsync) {
   const sessions = new Map();
   const ttyToSession = new Map();
   try {
-    const { stdout } = await execFileAsync(
+    const { stdout } = await runExecFile(
       'tmux',
       ['list-panes', '-a', '-F', '#{pane_tty}\t#{session_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}'],
       { encoding: 'utf-8', timeout: 3000 }
     );
     const raw = stdout.trim();
-    if (!raw) return { sessions, ttyToSession };
+    if (!raw) return { ok: true, sessions, ttyToSession, error: null };
     for (const line of raw.split('\n')) {
       const parts = line.split('\t');
       if (parts.length < 5) continue;
@@ -6002,10 +6006,19 @@ async function buildLocalPaneMetadataSnapshotAsync() {
         });
       }
     }
-  } catch {
-    // best effort snapshot
+  } catch (error) {
+    return {
+      ok: false,
+      sessions,
+      ttyToSession,
+      error: {
+        message: error instanceof Error ? error.message : String(error),
+        code: error?.code || null,
+        signal: error?.signal || null,
+      },
+    };
   }
-  return { sessions, ttyToSession };
+  return { ok: true, sessions, ttyToSession, error: null };
 }
 
 function buildLocalPaneSnapshotMapFromMetadata(paneMetadataSnapshot) {
@@ -6115,14 +6128,22 @@ function pruneEphemeralAgents(names = [], reason = 'ephemeral-prune') {
   // Intentionally silent: ephemeral audit agent pruning is routine housekeeping.
 }
 
-async function sweepLocalActivityDurations() {
+async function sweepLocalActivityDurations(paneMetadataSnapshotOverride = null) {
   const nowSec = Math.floor(Date.now() / 1000);
   const nowMs = Date.now();
   let runtimeChanged = false;
   let agentsChanged = false;
   const pruneCandidates = new Set();
   const localRuntimeAgents = new Set();
-  const paneMetadataSnapshot = await buildLocalPaneMetadataSnapshotAsync();
+  const paneMetadataSnapshot = paneMetadataSnapshotOverride || await buildLocalPaneMetadataSnapshotAsync();
+  if (paneMetadataSnapshot?.ok !== true) {
+    if ((nowMs - localTmuxSnapshotWarnAt) >= 60_000) {
+      localTmuxSnapshotWarnAt = nowMs;
+      const detail = paneMetadataSnapshot?.error?.message || 'unknown tmux query failure';
+      console.warn(`[backend] local tmux pane snapshot unavailable; preserving agent state: ${detail}`);
+    }
+    return;
+  }
   const mcpSessions = await getLocalMcpSessionSetAsync(true, paneMetadataSnapshot);
   const paneSnapshotMap = buildLocalPaneSnapshotMapFromMetadata(paneMetadataSnapshot);
   const localRows = [];
@@ -6185,6 +6206,19 @@ async function sweepLocalActivityDurations() {
     const mcpPresent = hasSession ? mcpSessions.has(agent.name) : null;
 
     if (!hasSession) {
+      let missing = localTmuxMissingState.get(agent.name);
+      if (!missing) {
+        missing = {
+          since: nowMs,
+          alerted: false,
+          misses: 0,
+          wasOnline: agent.online === true,
+        };
+      }
+      missing.misses = Math.max(0, Number(missing.misses) || 0) + 1;
+      localTmuxMissingState.set(agent.name, missing);
+      if (missing.misses < AGENT_TMUX_MISSING_THRESHOLD) continue;
+
       applyLocalRuntimeSignals(agent.name, {
         blocked: false,
         reason: null,
@@ -6205,13 +6239,8 @@ async function sweepLocalActivityDurations() {
         runtime.updatedAt = Date.now();
         runtimeChanged = true;
       }
-      let missing = localTmuxMissingState.get(agent.name);
-      if (!missing) {
-        missing = { since: nowMs, alerted: false };
-        localTmuxMissingState.set(agent.name, missing);
-      }
       const missingForMs = Math.max(0, nowMs - (Number(missing.since) || nowMs));
-      const wasOnline = agent.online === true;
+      const wasOnline = missing.wasOnline === true;
       const prevLastSeenMs = Number(agent.lastSeen) || 0;
       const seenAgeMs = prevLastSeenMs > 0 ? Math.max(0, nowMs - prevLastSeenMs) : 0;
       const recentEnough = prevLastSeenMs <= 0 || seenAgeMs <= AGENT_TMUX_MISSING_ALERT_MAX_AGE_MS;
@@ -11125,6 +11154,7 @@ export {
   notificationRouter,
 };
 export const __backendV2TestInternals = {
+  buildLocalPaneMetadataSnapshotForTest: buildLocalPaneMetadataSnapshotAsync,
   notifyAgentCatchupForTest: notifyAgentCatchup,
   pushNotifyForTest: pushNotify,
   sseAdapterForTest: sseAdapter,
@@ -11135,6 +11165,7 @@ export const __backendV2TestInternals = {
   },
   dispatchLeaseStoreForTest: dispatchLeaseStore,
   dispatchQueuesForTest: dispatchQueues,
+  sweepLocalActivityDurationsForTest: sweepLocalActivityDurations,
 };
 
 if (process.argv[1] === __filename) {
