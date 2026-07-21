@@ -38,8 +38,9 @@ agent-spec ──arc-native──▶ ARC(编译/可视化/编排/系统所有的
 ## 2. 关键事实:ARC 已实现的三级 agent-chat 集成
 
 **分支事实(重要)**:这三级集成不是上游 ARC 自带的,而是**我们自己加的**。
-提交 `54cd6f0`(进度上报)→ `ec49ce6`(serve)→ `e09cb38`(阶段委托)全部
-**作者 AlexZ,2026-07-20**,在 ARC fork **`ZhangHanDong/agentic-requirement-compiler`**
+提交 `54cd6f0`(进度上报)→ `ec49ce6`(serve)→ `e09cb38`(阶段委托)均由
+**AlexZ** 提交;按 `+08:00` 时区,前两项日期为 **2026-07-19**,第三项为
+**2026-07-20**。它们位于 ARC fork **`ZhangHanDong/agentic-requirement-compiler`**
 的分支 **`feat/agent-chat-progress-reporting`** 上;上游是
 `code-philia/agentic-requirement-compiler`。**尚未合入 ARC main / 未回上游**——
 代码与 14 个测试齐全、可用,但状态是"我们 fork 的 feature 分支",要长期依赖需
