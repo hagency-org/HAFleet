@@ -72,6 +72,48 @@ describe('bot commands async tmux probes', () => {
     expect(sent[0]).toContain('codex');
     expect(sent[0]).toContain('YES');
   });
+
+  test('!mkgroup includes the initiating Matrix user when not listed explicitly', async () => {
+    const { bot, sent } = makeBot();
+    const fetchMock = vi.fn().mockResolvedValue({
+      json: vi.fn().mockResolvedValue({ name: 'demo' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await bot.handle(
+      '!room:test',
+      '@alice:matrix.example.test',
+      '!mkgroup demo alpha',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, options] = fetchMock.mock.calls[0];
+    expect(JSON.parse(options.body)).toEqual({
+      name: 'demo',
+      members: ['alpha', 'alice'],
+    });
+    expect(sent[0]).toContain('alpha, alice');
+  });
+
+  test('!mkgroup does not duplicate an explicitly listed initiating user', async () => {
+    const { bot } = makeBot();
+    const fetchMock = vi.fn().mockResolvedValue({
+      json: vi.fn().mockResolvedValue({ name: 'demo' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await bot.handle(
+      '!room:test',
+      '@alice:matrix.example.test',
+      '!mkgroup demo alpha ALICE alice',
+    );
+
+    const [, options] = fetchMock.mock.calls[0];
+    expect(JSON.parse(options.body)).toEqual({
+      name: 'demo',
+      members: ['alpha', 'alice'],
+    });
+  });
 });
 
 describe('!bindroom', () => {

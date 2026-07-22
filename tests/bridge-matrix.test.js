@@ -127,6 +127,25 @@ describe('bridge matrix behavior', () => {
     expect(bridge.onRoomMessage).toHaveBeenCalledOnce();
   });
 
+  test('createRoomForGroup includes human members in the Matrix invite list', async () => {
+    const bridge = new MatrixBridge();
+    const fetchMock = vi.fn().mockResolvedValue({
+      json: vi.fn().mockResolvedValue({ errcode: 'M_TEST_STOP' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await bridge.createRoomForGroup('demo', ['alice']);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, options] = fetchMock.mock.calls[0];
+    const request = JSON.parse(options.body);
+    expect(url).toMatch(/\/_matrix\/client\/v3\/createRoom$/);
+    expect(request).toEqual(expect.objectContaining({
+      name: 'demo',
+      invite: [`@alice:${new URL(url).host}`],
+    }));
+  });
+
   test('sdk_sync_waits_for_durable_handler', async () => {
     const bridge = new MatrixBridge();
     let release;

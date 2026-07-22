@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'vitest';
 import request from 'supertest';
 import { existsSync, readFileSync } from 'fs';
+import os from 'os';
 import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
@@ -80,6 +81,87 @@ describe('server heartbeat api', () => {
   afterEach(() => {
     context?.cleanup();
     context = null;
+  });
+
+  test('does not put the local host in maintenance when the maintenance list is unset', async () => {
+    context = await createBackendTestContext('api-server-heartbeat-test-', {
+      agents: {},
+      env: {
+        AGENT_HEARTBEAT_TTL_MS: '5000',
+        AGENT_SERVER_SWEEP_INTERVAL_MS: '60000',
+      },
+    });
+
+    const response = await postHeartbeat(context.app, {
+      server: os.hostname(),
+      sessions: [],
+      agents: [],
+      instanceId: 'local-instance',
+      bootTs: 1000,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.maintenance).toBe(false);
+    expect(response.body.ignored).toBe(false);
+    const servers = await request(context.app).get('/api/servers');
+    expect(servers.body.find(row => row.id === os.hostname())?.online).toBe(true);
+  });
+
+  test('an explicitly empty maintenance list clears stale persisted maintenance on startup', async () => {
+    const serverId = os.hostname();
+    context = await createBackendTestContext('api-server-heartbeat-test-', {
+      agents: {},
+      servers: {
+        [serverId]: {
+          id: serverId,
+          online: false,
+          maintenance: true,
+          sessions: [],
+          agents: [],
+        },
+      },
+      env: {
+        AGENT_HEARTBEAT_TTL_MS: '5000',
+        AGENT_SERVER_SWEEP_INTERVAL_MS: '60000',
+        AGENT_SERVER_MAINTENANCE_IDS: '',
+      },
+    });
+
+    const response = await postHeartbeat(context.app, {
+      server: serverId,
+      sessions: [],
+      agents: [],
+      instanceId: 'local-instance',
+      bootTs: 1000,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.maintenance).toBe(false);
+    expect(response.body.ignored).toBe(false);
+    expect(readJson(serversPath(context.runtimeDir))[serverId].maintenance).toBe(false);
+  });
+
+  test('preserves persisted API maintenance when no maintenance env policy is configured', async () => {
+    const serverId = os.hostname();
+    context = await createBackendTestContext('api-server-heartbeat-test-', {
+      agents: {},
+      servers: {
+        [serverId]: {
+          id: serverId,
+          online: false,
+          maintenance: true,
+          sessions: [],
+          agents: [],
+        },
+      },
+      env: {
+        AGENT_HEARTBEAT_TTL_MS: '5000',
+        AGENT_SERVER_SWEEP_INTERVAL_MS: '60000',
+      },
+    });
+
+    const servers = await request(context.app).get('/api/servers');
+    expect(servers.body.find(row => row.id === serverId)?.maintenance).toBe(true);
   });
 
   test('registers a server on first heartbeat', async () => {
@@ -1283,7 +1365,7 @@ describe('server heartbeat api', () => {
 
   test('classifies fleet inventory without mutating stale server rows', async () => {
     const now = Date.now();
-    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
+    const seed = baseSeed({
       servers: {
         current: { id: 'current', online: true, heartbeatAt: now - 1000, lastSeen: now - 1000, version: 'cur1234', agents: ['a1'], agentCount: 1, relayInstanceId: 'i-current', relayBootTs: 1 },
         outdated: { id: 'outdated', online: true, heartbeatAt: now - 1000, lastSeen: now - 1000, version: 'old9999', agents: ['a2'], agentCount: 1 },
@@ -1292,7 +1374,9 @@ describe('server heartbeat api', () => {
         stale: { id: 'stale', online: true, heartbeatAt: now - 10_000, lastSeen: now - 10_000, version: 'old9999', agents: ['a4'], agentCount: 1 },
         maintenance: { id: 'maintenance', online: false, heartbeatAt: 0, lastSeen: now - 1000, version: 'old9999', maintenance: true, agents: ['a5'], agentCount: 1 },
       },
-    }));
+    });
+    delete seed.env.AGENT_SERVER_MAINTENANCE_IDS;
+    context = await createBackendTestContext('api-server-heartbeat-test-', seed);
 
     const response = await request(context.app).get('/api/servers/fleet?expectVersion=cur1234');
 
