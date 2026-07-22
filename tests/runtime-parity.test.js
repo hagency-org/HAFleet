@@ -24,7 +24,15 @@ describe('runtime parity regressions', () => {
       expect(source).toContain('codex_mcp_env AGENTCHAT_HOMEDIR "${AGENTCHAT_HOMEDIR:-}"');
       expect(source).toContain('tmux send-keys -t "$TMUX_PANE_TARGET" "$(shell_quote "$CODEX_LAUNCH_SCRIPT")" Enter');
       expect(source).toContain('CODEX_INIT_FILE=$(mktemp "$TMP_RUNTIME_DIR/init-codex.XXXXXX")');
-      expect(source).toContain('codex $CODEX_FLAGS -C $(shell_quote "$AGENT_PATH") --');
+      expect(source).toContain('CLAUDE_FLAGS="--permission-mode auto"');
+      expect(source).toContain('CODEX_FLAGS="--sandbox workspace-write --ask-for-approval on-request -C $(shell_quote "$AGENT_PATH")"');
+      expect(source).toContain('node "$LAUNCH_POLICY_CHECK" "$TYPE" "$EXTRA_ARGS"');
+      expect(source).toContain('CLAUDE_FLAGS="$CLAUDE_FLAGS $SAFE_EXTRA_ARGS"');
+      expect(source).toContain('CODEX_FLAGS="$CODEX_FLAGS $SAFE_EXTRA_ARGS"');
+      expect(source).toContain('MANAGED_PROJECT_PATHS="$(resolve_managed_project_paths)"');
+      expect(source).toContain('codex $CODEX_FLAGS --');
+      expect(source).not.toContain('CLAUDE_FLAGS="--dangerously-skip-permissions"');
+      expect(source).not.toContain('CODEX_FLAGS="--yolo"');
       expect(source).not.toContain('tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"');
       expect(source).not.toContain('Launch cmd:');
     }

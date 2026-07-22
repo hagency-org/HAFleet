@@ -9,7 +9,7 @@ vi.mock('child_process', () => ({
 }));
 
 const { execFileSync } = await import('child_process');
-const { createSupervisorLifecycleManager } = await import('../lib/supervisor-lifecycle-manager.js');
+const { buildLaunchCommand, createSupervisorLifecycleManager } = await import('../lib/supervisor-lifecycle-manager.js');
 const { createSupervisorSnapshotStore } = await import('../lib/supervisor-snapshot-store.js');
 
 describe('SupervisorLifecycleManager', () => {
@@ -145,6 +145,38 @@ describe('SupervisorLifecycleManager', () => {
     // Verify SSE broadcast
     expect(broadcastEvents).toHaveLength(1);
     expect(broadcastEvents[0].data.type).toBe('started');
+  });
+
+  test('builds sandboxed Claude auto-mode and Codex Level 2 supervisor commands', () => {
+    const claudeCommand = buildLaunchCommand('alpha', '/tmp/alpha', {
+      profileSource: 'env/default', framework: 'claude', provider: 'anthropic',
+      model: null, reasoning: null, extraArgs: '--verbose',
+    }, null);
+    expect(claudeCommand).toContain("claude --permission-mode auto '--verbose'");
+    expect(claudeCommand).toContain("AGENTCHAT_AGENT_PERMISSION_MODE='auto'");
+    expect(claudeCommand).toContain("-- 'Read your AGENTS.md and begin your assessment cycle now.'");
+    expect(claudeCommand).not.toContain('--dangerously-skip-permissions');
+
+    const codexCommand = buildLaunchCommand('alpha', '/tmp/alpha', {
+      profileSource: 'env/default', framework: 'codex', provider: 'openai',
+      model: null, reasoning: null, extraArgs: '--search',
+    }, null);
+    expect(codexCommand).toContain("codex --sandbox workspace-write --ask-for-approval on-request '--search'");
+    expect(codexCommand).toContain("AGENTCHAT_AGENT_PERMISSION_LEVEL='2'");
+    expect(codexCommand).toContain("-C '/tmp/alpha'");
+    expect(codexCommand).toContain("-- 'Read your AGENTS.md and begin your assessment cycle now.'");
+    expect(codexCommand).not.toContain('--yolo');
+  });
+
+  test('rejects supervisor extraArgs that override the managed permission policy', () => {
+    expect(() => buildLaunchCommand('alpha', '/tmp/alpha', {
+      profileSource: 'runtimeProfile.supervisor', framework: 'claude', provider: 'anthropic',
+      model: null, reasoning: null, extraArgs: '--permission-mode bypassPermissions',
+    }, null)).toThrow(expect.objectContaining({ code: 'unsafe_launch_extra_args' }));
+    expect(() => buildLaunchCommand('alpha', '/tmp/alpha', {
+      profileSource: 'runtimeProfile.supervisor', framework: 'codex', provider: 'openai',
+      model: null, reasoning: null, extraArgs: '--yolo',
+    }, null)).toThrow(expect.objectContaining({ code: 'unsafe_launch_extra_args' }));
   });
 
   test('keeps existing session when target is active and session exists', () => {

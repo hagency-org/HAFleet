@@ -75,7 +75,7 @@ Git-checkout autodeploy note: after `agent-chat-push-relay` restarts, `agentchat
 - In normal `git clone` deployments, `install-remote.sh` uses repo-root `bin/` as the helper source of truth.
   `remote/bin` is only a fallback when root `bin/` is unavailable.
 - `remote/bin/agentchat` is profile-specific, not a byte-for-byte mirror of root `bin/agentchat`.
-- `remote/bin/agent-up` is temporarily profile-specific while launch work is active; do not manually sync it to root `bin/agent-up` until that work is approved.
+- `remote/bin/agent-up` remains profile-specific, but it enforces the same coding-agent permission baseline as the local launcher: Claude auto-mode and Codex Level 2 (`workspace-write + on-request`).
 - `remote/push-relay.js` and `remote/mcp-server.js` are thin wrappers. Shared logic lives in:
   - `lib/push-relay-core.js`
   - `lib/mcp-server-core.js`

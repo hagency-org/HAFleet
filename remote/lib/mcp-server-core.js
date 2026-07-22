@@ -874,6 +874,139 @@ server.tool(
   }
 );
 
+// 6. list_tasks
+server.tool(
+  'list_tasks',
+  "List tasks. By default, returns only tasks assigned to you. Pass assignee='*' for all tasks or assignee='<name>' for a specific agent. Filter by status (comma-separated for multiple), priority (p0|p1|p2|p3), or label.",
+  {
+    assignee: z.string().optional().describe("Filter by assignee. Defaults to yourself. Use '*' for all tasks."),
+    status: z.string().optional().describe("Filter by status. Comma-separated for multiple, e.g. 'created,accepted'."),
+    priority: z.string().optional().describe('Filter by priority: p0, p1, p2, or p3.'),
+    label: z.string().optional().describe('Filter by a label string.'),
+    limit: z.number().int().positive().optional().describe('Max number of tasks to return.'),
+    offset: z.number().int().nonnegative().optional().describe('Pagination offset.'),
+  },
+  async ({ assignee, status, priority, label, limit, offset }) => {
+    try {
+      const params = new URLSearchParams();
+      const effectiveAssignee = assignee === undefined ? AGENT_NAME : assignee;
+      if (effectiveAssignee && effectiveAssignee !== '*') params.set('assignee', effectiveAssignee);
+      if (status) params.set('status', status);
+      if (priority) params.set('priority', priority);
+      if (label) params.set('label', label);
+      if (limit !== undefined) params.set('limit', String(limit));
+      if (offset !== undefined) params.set('offset', String(offset));
+      const suffix = params.toString() ? `?${params}` : '';
+      const data = await api('GET', `/api/tasks${suffix}`);
+      return text(data);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+// 7. get_task
+server.tool(
+  'get_task',
+  'Fetch full details for a single task by id, including description, status, assignee, priority, labels, and comments.',
+  {
+    id: z.string().describe('Task id, e.g. task_1779920622_6p6sr7'),
+  },
+  async ({ id }) => {
+    try {
+      const data = await api('GET', `/api/tasks/${encodeURIComponent(id)}`);
+      return text(data);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+// 8. accept_task — sugar for transition created → accepted
+server.tool(
+  'accept_task',
+  "Accept a task assigned to you, transitioning its status from 'created' to 'accepted'. Backend enforces that only the assignee can accept.",
+  {
+    id: z.string().describe('Task id, e.g. task_1779920622_6p6sr7'),
+  },
+  async ({ id }) => {
+    try {
+      const data = await api('POST', `/api/tasks/${encodeURIComponent(id)}/accept`);
+      return text(data);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+// 9. transition_task — drive a task through the state machine
+server.tool(
+  'transition_task',
+  "Transition a task to a new status. Valid statuses: 'accepted', 'in_progress', 'blocked', 'done'. The state machine is: created→accepted→in_progress→{blocked,done}, and blocked→in_progress. When transitioning to 'blocked', both waiting_reason and waiting_until are required. Backend enforces that only the assignee can transition.",
+  {
+    id: z.string().describe('Task id'),
+    status: z.enum(['accepted', 'in_progress', 'blocked', 'done']).describe('Target status'),
+    waiting_reason: z.string().optional().describe("Required when status='blocked'. Free-text reason the task is blocked."),
+    waiting_until: z.string().optional().describe("Required when status='blocked'. ISO-8601 timestamp for when to revisit."),
+  },
+  async ({ id, status, waiting_reason, waiting_until }) => {
+    try {
+      const body = { status };
+      if (waiting_reason !== undefined) body.waiting_reason = waiting_reason;
+      if (waiting_until !== undefined) body.waiting_until = waiting_until;
+      const data = await api('POST', `/api/tasks/${encodeURIComponent(id)}/transition`, body);
+      return text(data);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+// 10. comment_task — append a comment to a task
+server.tool(
+  'comment_task',
+  "Append a comment to a task. Use this to record your work product (the answer, the patch, a link), or to communicate blockers and findings on the task itself. The comment author defaults to your agent name.",
+  {
+    id: z.string().describe('Task id'),
+    text: z.string().describe('Comment body, up to 4096 characters.'),
+  },
+  async ({ id, text: commentText }) => {
+    try {
+      const data = await api('POST', `/api/tasks/${encodeURIComponent(id)}/comments`, {
+        author: AGENT_NAME,
+        text: commentText,
+      });
+      return text(data);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+// 11. update_task_execution — self-report heartbeat or waiting metadata mid-flight
+server.tool(
+  'update_task_execution',
+  "Self-report execution state on a task you're working on without changing its status. Use this to refresh a heartbeat on a long-running task, or to set/clear waiting metadata without transitioning to 'blocked'. Backend enforces that only the assignee can update.",
+  {
+    id: z.string().describe('Task id'),
+    heartbeat: z.boolean().optional().describe("When true, refresh heartbeat_at to now."),
+    waiting_reason: z.string().optional().describe('Set or clear waiting reason (pass empty string to clear).'),
+    waiting_until: z.string().optional().describe('Set or clear waiting until (pass empty string to clear).'),
+  },
+  async ({ id, heartbeat, waiting_reason, waiting_until }) => {
+    try {
+      const body = {};
+      if (heartbeat === true) body.heartbeat_at = true;
+      if (waiting_reason !== undefined) body.waiting_reason = waiting_reason;
+      if (waiting_until !== undefined) body.waiting_until = waiting_until;
+      const data = await api('PATCH', `/api/tasks/${encodeURIComponent(id)}/execution`, body);
+      return text(data);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
 // ── PID file ──────────────────────────────────────────────────────────
 const MCP_PID_FILE = (() => {
   const sd = resolveAgentStateDir(AGENT_NAME);
