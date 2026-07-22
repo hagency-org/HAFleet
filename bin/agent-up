@@ -22,7 +22,7 @@ fi
 #   agent-up ddnsserer ~/cloudflare codex                                   # codex agent
 #   agent-up news ~/laplace/news claude --model claude-opus-4-1             # fixed model
 #   agent-up coder ~/laplace/repo codex --model gpt-5.3-codex-spark         # codex model
-#   agent-up ops ~/laplace/ops codex --extra-args "--approval-mode never"   # custom startup args
+#   agent-up ops ~/laplace/ops codex --extra-args "--search"                # custom non-policy args
 
 set -euo pipefail
 
@@ -40,6 +40,8 @@ SCRIPT_DIR="$(_resolve_script_dir)"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
 DATA_DIR=""
 SUBCONSCIOUS_SETUP_SCRIPT="$BASE_DIR/scripts/configure-v1-subconscious.js"
+LAUNCH_POLICY_CHECK="$BASE_DIR/scripts/validate-agent-launch-extra-args.js"
+SANDBOX_ROOTS_RESOLVER="$BASE_DIR/scripts/resolve-agent-sandbox-roots.js"
 
 # Load .env if present
 ENV_FILE="$BASE_DIR/.env"
@@ -92,7 +94,7 @@ Usage: agent-up <name> [path] [claude|codex] [--fresh] [--attach] [--allow-share
   --attach     attach to the session after creating it
   --allow-shared-workspace allow launching when another agent already uses the same path
   --model      model name passed to claude/codex at startup
-  --extra-args additional raw startup args passed to claude/codex
+  --extra-args additional startup args; permission-policy overrides are rejected
 USAGE
 }
 
@@ -599,6 +601,31 @@ if [ "$TYPE" != "claude" ] && [ "$TYPE" != "codex" ]; then
   echo "Error: type must be 'claude' or 'codex', got '$TYPE'" >&2
   exit 1
 fi
+
+if [ ! -f "$LAUNCH_POLICY_CHECK" ]; then
+  echo "Error: missing launch policy validator: $LAUNCH_POLICY_CHECK" >&2
+  exit 1
+fi
+if [ ! -f "$SANDBOX_ROOTS_RESOLVER" ]; then
+  echo "Error: missing sandbox roots resolver: $SANDBOX_ROOTS_RESOLVER" >&2
+  exit 1
+fi
+if ! SAFE_EXTRA_ARGS=$(node "$LAUNCH_POLICY_CHECK" "$TYPE" "$EXTRA_ARGS" 2>&1); then
+  echo "Error: unsafe --extra-args for $TYPE: ${SAFE_EXTRA_ARGS:-rejected by launch policy}" >&2
+  exit 1
+fi
+
+resolve_managed_project_paths() {
+  local resolver_args=(--agent-path "$AGENT_PATH" --home-dir "$HOME")
+  local fallback_manifest="${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}/agents/agent_${NAME}/agent.json"
+  if [ -n "${SAVED_HOME_DIR:-}" ]; then
+    resolver_args+=(--manifest "$SAVED_HOME_DIR/agent.json")
+  fi
+  resolver_args+=(--manifest "$fallback_manifest")
+  node "$SANDBOX_ROOTS_RESOLVER" "${resolver_args[@]}"
+}
+
+MANAGED_PROJECT_PATHS="$(resolve_managed_project_paths)"
 
 run_update_check
 
@@ -1619,6 +1646,14 @@ configure_v1_subconscious
 LAUNCH_ENV_FILE="$AGENT_DATA/launch-env.sh"
 : > "$LAUNCH_ENV_FILE"
 chmod 600 "$LAUNCH_ENV_FILE"
+write_launch_env "AGENTCHAT_AGENT_SANDBOX" "1"
+if [ "$TYPE" = "claude" ]; then
+  write_launch_env "AGENTCHAT_AGENT_PERMISSION_MODE" "auto"
+else
+  write_launch_env "AGENTCHAT_AGENT_PERMISSION_LEVEL" "2"
+  write_launch_env "AGENTCHAT_AGENT_SANDBOX_MODE" "workspace-write"
+  write_launch_env "AGENTCHAT_AGENT_APPROVAL_POLICY" "on-request"
+fi
 
 write_launch_env "AGENT_NAME" "$NAME"
 # Bulk-export all AGENT_CHAT_* vars from current environment
@@ -1721,7 +1756,11 @@ fi
 # ── Launch AI ─────────────────────────────────────────────────────────
 if [ "$TYPE" = "claude" ]; then
   INIT_PROMPT="$INIT_PROMPT $CLAUDE_MODE_GUARD"
-  CLAUDE_FLAGS="--dangerously-skip-permissions"
+  CLAUDE_FLAGS="--permission-mode auto"
+  while IFS= read -r _managed_project_path; do
+    [ -n "$_managed_project_path" ] || continue
+    CLAUDE_FLAGS="$CLAUDE_FLAGS --add-dir=$(shell_quote "$_managed_project_path")"
+  done <<< "$MANAGED_PROJECT_PATHS"
   # Attach the per-agent MCP config so Claude discovers the agentchat MCP server.
   # Skip when an enterprise managed MCP config is present — recent Claude CLI
   # refuses dynamic --mcp-config in that case. The managed config provides the
@@ -1735,8 +1774,8 @@ if [ "$TYPE" = "claude" ]; then
   if [ -n "$MODEL" ]; then
     CLAUDE_FLAGS="$CLAUDE_FLAGS --model $(shell_quote "$MODEL")"
   fi
-  if [ -n "$EXTRA_ARGS" ]; then
-    CLAUDE_FLAGS="$CLAUDE_FLAGS $EXTRA_ARGS"
+  if [ -n "$SAFE_EXTRA_ARGS" ]; then
+    CLAUDE_FLAGS="$CLAUDE_FLAGS $SAFE_EXTRA_ARGS"
   fi
   if [ "$FRESH" = false ] && RID=$(cat "$RESUME_FILE"); then
     echo "Resuming claude session: $RID"
@@ -1757,12 +1796,18 @@ if [ "$TYPE" = "claude" ]; then
   fi
 
 elif [ "$TYPE" = "codex" ]; then
-  CODEX_FLAGS="--yolo"
+  # Agent Chat permission Level 2: project workspace is writable, while
+  # operations outside the sandbox require an explicit approval request.
+  CODEX_FLAGS="--sandbox workspace-write --ask-for-approval on-request -C $(shell_quote "$AGENT_PATH")"
+  while IFS= read -r _managed_project_path; do
+    [ -n "$_managed_project_path" ] || continue
+    CODEX_FLAGS="$CODEX_FLAGS --add-dir $(shell_quote "$_managed_project_path")"
+  done <<< "$MANAGED_PROJECT_PATHS"
   if [ -n "$MODEL" ]; then
     CODEX_FLAGS="$CODEX_FLAGS --model $(shell_quote "$MODEL")"
   fi
-  if [ -n "$EXTRA_ARGS" ]; then
-    CODEX_FLAGS="$CODEX_FLAGS $EXTRA_ARGS"
+  if [ -n "$SAFE_EXTRA_ARGS" ]; then
+    CODEX_FLAGS="$CODEX_FLAGS $SAFE_EXTRA_ARGS"
   fi
   # Inject MCP env vars via -c flags so Codex passes them to the MCP subprocess.
   # Codex strips env vars but honors -c config overrides parsed as TOML.
@@ -1820,7 +1865,7 @@ elif [ "$TYPE" = "codex" ]; then
     CODEX_INIT_FILE=$(mktemp "$TMP_RUNTIME_DIR/init-codex.XXXXXX")
     echo "$INIT_PROMPT" > "$CODEX_INIT_FILE"
     CODEX_LAUNCH_SCRIPT="$TMP_RUNTIME_DIR/launch-codex.sh"
-    write_launch_script "$CODEX_LAUNCH_SCRIPT" "codex $CODEX_FLAGS -C $(shell_quote "$AGENT_PATH") -- \"\$(cat $(shell_quote "$CODEX_INIT_FILE"))\"; status=\$?; rm -f $(shell_quote "$CODEX_INIT_FILE"); exit \$status"
+    write_launch_script "$CODEX_LAUNCH_SCRIPT" "codex $CODEX_FLAGS -- \"\$(cat $(shell_quote "$CODEX_INIT_FILE"))\"; status=\$?; rm -f $(shell_quote "$CODEX_INIT_FILE"); exit \$status"
     tmux send-keys -t "$TMUX_PANE_TARGET" "$(shell_quote "$CODEX_LAUNCH_SCRIPT")" Enter
     ( sleep 300; rm -f "$CODEX_INIT_FILE" >/dev/null 2>&1 || true ) &
     # Keep this in foreground for codex to avoid losing resume capture on shell exit/reboot.

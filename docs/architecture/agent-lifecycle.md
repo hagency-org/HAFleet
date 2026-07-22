@@ -28,7 +28,7 @@ Agentchat supports two agent frameworks: **claude** (Anthropic Claude Code) and 
 |----------|----------|---------|
 | Launch binary | `claude` | `codex` |
 | MCP integration | Built-in MCP server support | MCP via `-c mcp_servers.*` flags |
-| Permission model | `--dangerously-skip-permissions` | `--yolo` (full auto-approve) |
+| Permission model | `--permission-mode auto` | Level 2: `--sandbox workspace-write --ask-for-approval on-request` |
 | Resume mechanism | `--resume <resume-id>` | `codex resume <resume-id>` |
 | New session | `--session-id <uuid>` | `-C <agent-path>` |
 | Exit sequence | `/exit` + Enter + 3×Ctrl+C | 2×Ctrl+C |
@@ -44,10 +44,10 @@ Source: `bin/agent-up:552-575` (framework detection), `bin/agent-up:1641-1654` (
 
 ```bash
 claude --resume "$RESUME_ID" \
-       --dangerously-skip-permissions
+       --permission-mode auto
 # OR for new sessions:
 claude --session-id "$SESSION_ID" \
-       --dangerously-skip-permissions
+       --permission-mode auto
 ```
 
 Key env vars injected: `ANTHROPIC_MODEL`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `DISABLE_PROMPT_CACHING`, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`.
@@ -57,15 +57,20 @@ Source: `bin/agent-up:1641-1654`, `bin/agent-up:1564-1609` (env prefix construct
 ### 1.3 Codex Launch
 
 ```bash
-codex resume "$RESUME_ID"
+codex resume "$RESUME_ID" \
+      --sandbox workspace-write \
+      --ask-for-approval on-request \
+      -C "$AGENT_PATH"
 # OR for new sessions:
-codex --yolo -C "$AGENT_PATH" \
+codex --sandbox workspace-write \
+      --ask-for-approval on-request \
+      -C "$AGENT_PATH" \
       -c mcp_servers.agentchat.type=sse \
       -c "mcp_servers.agentchat.url=$MCP_SSE_URL" \
       -c "mcp_servers.agentchat.headers.Authorization=Bearer $AGENT_TOKEN"
 ```
 
-MCP is configured via `-c` flags rather than a built-in mechanism. The `--yolo` flag enables full auto-approve mode.
+MCP is configured via `-c` flags rather than a built-in mechanism. Agent Chat calls the Codex policy above **Level 2**: the agent can edit its workspace and explicitly bound managed projects, while operations outside that sandbox require approval. Launchers reject `extraArgs` that try to override the managed sandbox or approval policy.
 
 Source: `bin/agent-up:1659-1694`, `bin/agent-up:1502-1530` (Codex MCP flag construction).
 

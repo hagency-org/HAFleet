@@ -77,11 +77,14 @@ MANAGED_SPECS=(
   "bin/self-time-reminder:bin/self-time-reminder"
   "bin/verify-remote:bin/verify-remote"
   "lib/blocked-patterns.js:lib/blocked-patterns.js"
+  "lib/agent-launch-policy.js:lib/agent-launch-policy.js"
   "lib/eventsource-mini.js:lib/eventsource-mini.js"
   "lib/pane-activity.js:lib/pane-activity.js"
   "lib/server-identity.js:lib/server-identity.js"
   "lib/push-relay-core.js:lib/push-relay-core.js"
   "lib/mcp-server-core.js:lib/mcp-server-core.js"
+  "scripts/validate-agent-launch-extra-args.js:scripts/validate-agent-launch-extra-args.js"
+  "scripts/resolve-agent-sandbox-roots.js:scripts/resolve-agent-sandbox-roots.js"
 )
 
 copy_manifest() {

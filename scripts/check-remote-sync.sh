@@ -17,16 +17,19 @@ MIRROR_FILES=(
   "bin/self-time-reminder"
   "bin/verify-remote"
   "lib/blocked-patterns.js"
+  "lib/agent-launch-policy.js"
   "lib/eventsource-mini.js"
   "lib/pane-activity.js"
   "lib/server-identity.js"
   "lib/push-relay-core.js"
   "lib/mcp-server-core.js"
+  "scripts/validate-agent-launch-extra-args.js"
+  "scripts/resolve-agent-sandbox-roots.js"
 )
 
 PROFILE_SPECIFIC_FILES=(
   "bin/agentchat:remote profile-specific command surface"
-  "bin/agent-up:remote launch work is frozen pending Phase 5"
+  "bin/agent-up:remote profile-specific launcher with shared permission baseline"
 )
 
 failures=0

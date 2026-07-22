@@ -260,6 +260,7 @@ Most local configuration lives in `.env`. The installer creates it from `.env.ex
 | --- | --- | --- |
 | `AGENTCHAT_HOMEDIR` | `~/.agentchat` | Agent home root |
 | `AGENTCHAT_AGENT_TOKEN_MODE` | `hard` in `.env.example` | Per-agent token enforcement mode |
+| Coding-agent permission policy | Claude `auto-mode`; Codex Level 2 | Enforced by launchers. Codex Level 2 means `workspace-write + on-request`; policy-changing `extraArgs` are rejected. |
 | `AGENT_IDLE_THRESHOLD_MS` | `20000` | Idle threshold for push delivery |
 | `AGENT_SCOPE_MONITOR_ENABLED` | `true` | Enable local resource monitoring |
 | `OFFLINE_CATCHUP_LIST_LIMIT` | `50` | Offline catchup message limit |
