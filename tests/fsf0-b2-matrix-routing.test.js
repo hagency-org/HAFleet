@@ -35,11 +35,19 @@ function mapRoom(bridge, roomId, groupName = 'factory') {
   mappedRooms.push([bridge, roomId]);
 }
 
-function commandEvent(eventId = '$create-issue-1') {
+function commandEvent(eventId = '$create-issue-1', { mentionCoordinator = true } = {}) {
   return {
     event_id: eventId,
     sender: '@alice:matrix.test',
-    content: { msgtype: 'm.text', body: 'create issue: durable Matrix routing' },
+    content: {
+      msgtype: 'm.text',
+      body: mentionCoordinator
+        ? '@wf_coordinator create issue: durable Matrix routing'
+        : 'create issue: durable Matrix routing',
+      ...(mentionCoordinator
+        ? { 'm.mentions': { user_ids: ['@ac_wf_coordinator:matrix.test'] } }
+        : {}),
+    },
   };
 }
 
@@ -201,7 +209,7 @@ test('accepted_before_checkpoint_replay_zero_duplicates', async () => {
   }
 });
 
-test('routes_mapped_room_as_group_wakes_coordinator', async () => {
+test('routes_mapped_room_as_group_to_explicitly_mentioned_coordinator', async () => {
   const roomId = '!factory:matrix.test';
   const submit = vi.fn().mockResolvedValue({ ok: true, id: 'msg_group_route' });
   const bridge = createBridge({
@@ -236,7 +244,7 @@ test('mapped_room_coordinator_delivered_by_backend', async () => {
       wf_coordinator: { name: 'wf_coordinator', type: 'agent', kind: 'agent', online: true },
     },
     groups: {
-      factory: { name: 'factory', members: ['implementer'], createdAt: 1000 },
+      factory: { name: 'factory', members: ['implementer', 'wf_coordinator'], createdAt: 1000 },
     },
     env: { MATRIX_BRIDGE_SECRET: 'fsf0-b2-bridge-secret' },
   });
@@ -415,9 +423,9 @@ test('corrupt_processed_event_journal_fails_closed', () => {
   }
 });
 
-test('default_wake_off_unaddressed_message_wakes_nobody_but_mentions_still_route', async () => {
+test('default_unaddressed_message_wakes_nobody_but_mentions_still_route', async () => {
   const prevMode = process.env.MATRIX_DEFAULT_WAKE;
-  process.env.MATRIX_DEFAULT_WAKE = 'off';
+  delete process.env.MATRIX_DEFAULT_WAKE;
   try {
     const roomId = '!factory:matrix.test'; // must be in the suite's trusted-room allowlist
     const submit = vi.fn().mockResolvedValue({ ok: true, id: 'msg_shared_route' });
@@ -437,9 +445,13 @@ test('default_wake_off_unaddressed_message_wakes_nobody_but_mentions_still_route
 
     // Unaddressed message: stored for the group, but NO default recipient is
     // injected — in a shared multi-instance room nobody gets force-woken.
-    await bridge.onRoomMessage(roomId, commandEvent('$shared-unaddressed-event'));
+    await bridge.onRoomMessage(roomId, commandEvent(
+      '$shared-unaddressed-event',
+      { mentionCoordinator: false },
+    ));
     expect(submit).toHaveBeenCalledTimes(1);
     expect(submit.mock.calls[0][1].mentions ?? []).toEqual([]);
+    expect(submit.mock.calls[0][1]).not.toHaveProperty('matrix_default_recipient');
 
     // Mention-addressed message still routes to exactly the mentioned agent.
     await bridge.onRoomMessage(roomId, {

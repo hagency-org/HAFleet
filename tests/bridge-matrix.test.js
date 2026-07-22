@@ -16,6 +16,7 @@ describe('bridge matrix behavior', () => {
   let resolveInvitePollMsForTest;
   let resolveRoomScanPollMsForTest;
   let matrixRateLimitGateForTest;
+  let matrixDefaultWakeEnabled;
   let resolveInboundRoute;
   let pickDefaultGroupRecipient;
   let preferredDmRoom;
@@ -40,6 +41,7 @@ describe('bridge matrix behavior', () => {
       resolveInvitePollMsForTest,
       resolveRoomScanPollMsForTest,
       matrixRateLimitGateForTest,
+      matrixDefaultWakeEnabled,
       resolveInboundRoute,
       pickDefaultGroupRecipient,
       preferredDmRoom,
@@ -305,7 +307,7 @@ describe('bridge matrix behavior', () => {
     }
   });
 
-  test('onRoomMessage routes mapped rooms as groups and wakes the coordinator without mentions', async () => {
+  test('onRoomMessage routes mapped rooms only to an explicitly mentioned coordinator', async () => {
     const bridge = new MatrixBridge();
     const roomId = '!mapped-single-agent-room:matrix.example.test';
     bridge.botUserId = '@agent-bridge:matrix.example.test';
@@ -326,7 +328,8 @@ describe('bridge matrix behavior', () => {
         sender: '@alice:matrix.example.test',
         content: {
           msgtype: 'm.text',
-          body: 'Please start the Website task',
+          body: '@wf_coordinator Please start the Website task',
+          'm.mentions': { user_ids: ['@ac_wf_coordinator:matrix.example.test'] },
         },
       });
 
@@ -794,6 +797,13 @@ describe('bridge matrix behavior', () => {
     // Empty / non-array input → null.
     expect(pickDefaultGroupRecipient([], nameFromId)).toBeNull();
     expect(pickDefaultGroupRecipient(undefined, nameFromId)).toBeNull();
+  });
+
+  test('matrix default wake is mention-only unless legacy auto is explicitly enabled', () => {
+    expect(matrixDefaultWakeEnabled({})).toBe(false);
+    expect(matrixDefaultWakeEnabled({ MATRIX_DEFAULT_WAKE: 'off' })).toBe(false);
+    expect(matrixDefaultWakeEnabled({ MATRIX_DEFAULT_WAKE: 'invalid' })).toBe(false);
+    expect(matrixDefaultWakeEnabled({ MATRIX_DEFAULT_WAKE: 'auto' })).toBe(true);
   });
 
   test('resolveInboundRoute prioritizes bot-DM then group over agent-DM', () => {

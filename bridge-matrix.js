@@ -154,14 +154,14 @@ const MATRIX_GREETING_MXIDS = new Set(
 const MATRIX_IGNORED_SENDER_MXIDS = new Set(
   (process.env.MATRIX_IGNORED_SENDER_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
-// Default-wake for un-addressed group messages: 'auto' (default — coordinator /
-// single-agent fallback) or 'off' (mention-only). 'off' is REQUIRED when several
-// members' bridges share one Matrix room: with default-wake on, every instance
-// sees "exactly one of MY agents here" and wakes its own coordinator on every
-// unaddressed message. Read at call time so tests and operators can flip it
+// Default-wake for un-addressed group messages is fail-closed: group rooms are
+// mention-only unless a private/single-owner deployment explicitly opts into
+// the legacy 'auto' behavior. Shared Matrix rooms can contain several bridges;
+// default-wake there would make every instance wake its own coordinator for the
+// same human message. Read at call time so tests and operators can flip it
 // without a module reload.
 export function matrixDefaultWakeEnabled(env = process.env) {
-  return String(env.MATRIX_DEFAULT_WAKE || 'auto').trim().toLowerCase() !== 'off';
+  return String(env.MATRIX_DEFAULT_WAKE || 'off').trim().toLowerCase() === 'auto';
 }
 const DATA_DIR = path.join(RUNTIME_ROOT, 'data', 'matrix');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
@@ -2385,9 +2385,9 @@ export class MatrixBridge {
       await this.commands.handle(roomId, senderId, body, {});
     } else if (route === 'group') {
       // Group message from human
-      // An un-addressed group message would otherwise wake nobody (push relay
-      // only delivers to mentioned agents), so fall back to a default recipient
-      // — unless MATRIX_DEFAULT_WAKE=off (mention-only shared rooms).
+      // Un-addressed group messages are stored but wake nobody. A private,
+      // single-owner deployment may explicitly opt into the legacy default
+      // recipient behavior with MATRIX_DEFAULT_WAKE=auto.
       let matrixDefaultRecipient = null;
       if (effectiveMentions.length === 0 && matrixDefaultWakeEnabled()) {
         const defaultRecipient = pickDefaultGroupRecipient(agentMembers, agentNameFromUserId);

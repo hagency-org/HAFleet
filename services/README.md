@@ -73,16 +73,13 @@ thresholds (`BRIDGE_HEALTH_MAX_AGE_MS`, `RELAY_HEALTH_MAX_AGE_MS`) and the
 bridge/relay's own record-write cadence (`BRIDGE_HEALTH_WRITE_INTERVAL_MS`,
 `PUSH_RELAY_HEALTH_WRITE_INTERVAL_MS`) are also documented there.
 
-**Operator note — `MATRIX_ACCEPTANCE_AGENTS` must name the actual wake
-target(s):** check 6 only proves that the agents you list are joined to the
-room; it says nothing about agents you didn't list. An un-addressed group
-message's default recipient is decided by `pickDefaultGroupRecipient()`
-(`bridge-matrix.js`), which falls back to `wf_coordinator` when the room maps
-to a single agent. If that default-wake agent is left out of
-`MATRIX_ACCEPTANCE_AGENTS`, a green doctor run gives no signal that this path
-— a human's default-wake message actually reaching an agent — still works.
-Include `wf_coordinator` (or whichever agent your rooms actually wake)
-explicitly, not just whatever happens to be convenient to list.
+**Operator note — `MATRIX_ACCEPTANCE_AGENTS` must name the actual explicit
+mention target(s):** check 6 only proves that the agents you list are joined to
+the room; it says nothing about agents you didn't list. Group rooms are
+mention-only by default (`MATRIX_DEFAULT_WAKE=off`), so acceptance checks must
+exercise an explicit `@agent` mention. The legacy `auto` mode uses
+`pickDefaultGroupRecipient()` (`bridge-matrix.js`) and is only suitable for a
+private, single-owner compatibility setup.
 
 ## Standalone trust configuration
 
