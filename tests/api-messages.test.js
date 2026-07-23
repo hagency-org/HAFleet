@@ -124,6 +124,128 @@ describe('backend message API', () => {
     ]));
   });
 
+  test('inbound_thread_context_is_persisted', async () => {
+    const threadContext = await createBackendTestContext('agent-chat-matrix-thread-context-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true },
+      },
+      groups: {
+        dev: { name: 'dev', members: ['alpha'], createdAt: 1000 },
+      },
+      env: { MATRIX_BRIDGE_SECRET: 'matrix-thread-secret' },
+    });
+    try {
+      const response = await request(threadContext.app)
+        .post('/api/messages')
+        .set('X-Bridge-Secret', 'matrix-thread-secret')
+        .send({
+          from: 'alex',
+          group: 'dev',
+          type: 'human',
+          summary: '@alpha continue here',
+          source: 'matrix',
+          source_room: '!dev:matrix.test',
+          source_event_id: '$thread-reply',
+          thread_root_event_id: '$thread-root',
+          sender_mxid: '@alex:matrix.test',
+          reply_to: 'msg_previous',
+        });
+
+      expect(response.status).toBe(200);
+      const persisted = readPersistedMessages(threadContext.runtimeDir);
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]).toMatchObject({
+        id: response.body.id,
+        reply_to: 'msg_previous',
+        matrixContext: {
+          roomId: '!dev:matrix.test',
+          eventId: '$thread-reply',
+          threadRootEventId: '$thread-root',
+        },
+      });
+    } finally {
+      threadContext.cleanup();
+    }
+  });
+
+  test('matrix_delivery_upsert_is_first_write_wins', async () => {
+    const deliveryContext = await createBackendTestContext('agent-chat-matrix-delivery-upsert-', {
+      agents: {
+        alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true },
+      },
+      groups: {
+        dev: { name: 'dev', members: ['alpha'], createdAt: 1000 },
+      },
+      agentTokens: { alpha: ALPHA_TOKEN },
+      env: { MATRIX_BRIDGE_SECRET: 'matrix-delivery-secret' },
+    });
+    try {
+      const created = await request(deliveryContext.app)
+        .post('/api/messages')
+        .set('X-Agent-Token', ALPHA_TOKEN)
+        .send({
+          from: 'alpha',
+          group: 'dev',
+          type: 'reply',
+          summary: 'threaded work complete',
+          reply_to: 'msg_source',
+        });
+      expect(created.status).toBe(200);
+
+      const route = `/api/messages/${created.body.id}/matrix-delivery`;
+      const first = await request(deliveryContext.app)
+        .put(route)
+        .set('X-Bridge-Secret', 'matrix-delivery-secret')
+        .send({
+          room_id: '!dev:matrix.test',
+          primary_event_id: '$agent-event-1',
+          thread_root_event_id: '$thread-root',
+        });
+      const replay = await request(deliveryContext.app)
+        .put(route)
+        .set('X-Bridge-Secret', 'matrix-delivery-secret')
+        .send({
+          room_id: '!dev:matrix.test',
+          primary_event_id: '$agent-event-1',
+          thread_root_event_id: '$thread-root',
+        });
+      const conflict = await request(deliveryContext.app)
+        .put(route)
+        .set('X-Bridge-Secret', 'matrix-delivery-secret')
+        .send({
+          room_id: '!dev:matrix.test',
+          primary_event_id: '$agent-event-2',
+          thread_root_event_id: '$thread-root',
+        });
+
+      expect(first.status).toBe(200);
+      expect(first.body.deduped).toBe(false);
+      expect(replay.status).toBe(200);
+      expect(replay.body.deduped).toBe(true);
+      expect(conflict.status).toBe(409);
+      expect(readPersistedMessages(deliveryContext.runtimeDir)[0].matrixDelivery)
+        .toEqual({
+          roomId: '!dev:matrix.test',
+          primaryEventId: '$agent-event-1',
+          threadRootEventId: '$thread-root',
+        });
+    } finally {
+      deliveryContext.cleanup();
+    }
+  });
+
+  test('group_push_hint_includes_reply_to', () => {
+    const hint = context.backendModule.buildMcpReplyActionHint({
+      id: 'msg_thread_source',
+      from: 'alex',
+      group: 'dev',
+      type: 'human',
+    });
+
+    expect(hint).toContain('post(group="dev"');
+    expect(hint).toContain('reply_to="msg_thread_source"');
+  });
+
   test('authenticated Matrix source_event_id returns the original message without redispatch', async () => {
     const idempotentContext = await createBackendTestContext('agent-chat-matrix-idempotency-', {
       agents: {
