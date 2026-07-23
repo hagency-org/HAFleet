@@ -20,6 +20,11 @@ import { MatrixRateLimitGate } from './src/matrix-rate-limit-gate.mjs';
 import { getProcessStartIdentity } from './src/process-identity.mjs';
 import { writeBridgeHealthRecord } from './src/health-record.mjs';
 import { PendingEncryptedEventStore } from './lib/pending-encrypted-event-store.js';
+import { MatrixDeliveryJournal } from './lib/matrix-delivery-journal.js';
+import {
+  assertMatrixCryptoDeviceIdentity,
+  reconcileMatrixCryptoStoreIdentity,
+} from './lib/matrix-crypto-store-identity.js';
 
 const MATRIX_OTK_COUNT_RECONCILE_MS = 5 * 60_000;
 
@@ -772,6 +777,22 @@ async function getUserId(token) {
   });
   const data = await res.json();
   return data.user_id;
+}
+
+async function getMatrixAccessTokenSession(token) {
+  const res = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/account/whoami`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`Matrix whoami failed with HTTP ${res.status}: ${data?.errcode || data?.error || 'unknown error'}`);
+  }
+  const userId = typeof data?.user_id === 'string' ? data.user_id.trim() : '';
+  const deviceId = typeof data?.device_id === 'string' ? data.device_id.trim() : '';
+  if (!userId || !deviceId) {
+    throw new Error('Matrix whoami did not return both user_id and device_id');
+  }
+  return { userId, deviceId };
 }
 
 // ── Avatar generation & upload ────────────────────────────────────────
@@ -1778,29 +1799,78 @@ function buildFileInboundBody(content) {
 
 export function parseInboundTextMessage(content) {
   if (!content || typeof content !== 'object') {
-    return { skip: true, body: '', replyEventId: null };
+    return { skip: true, body: '', replyEventId: null, threadRootEventId: null };
   }
   const msgType = typeof content.msgtype === 'string' ? content.msgtype : '';
   const relates = content['m.relates_to'] || {};
   if (relates.rel_type === 'm.replace') {
     // Ignore edit events: they should not create a new agent-chat message.
-    return { skip: true, body: '', replyEventId: null };
+    return { skip: true, body: '', replyEventId: null, threadRootEventId: null };
   }
-  const replyEventId = relates?.['m.in_reply_to']?.event_id || null;
+  const threadRootEventId = relates.rel_type === 'm.thread' && typeof relates.event_id === 'string'
+    ? relates.event_id
+    : null;
+  const replyEventId = relates?.['m.in_reply_to']?.event_id || threadRootEventId || null;
   if (msgType === 'm.image') {
     const body = buildImageInboundBody(content);
-    return { skip: !body, body, replyEventId };
+    return { skip: !body, body, replyEventId, threadRootEventId };
   }
   if (msgType === 'm.file') {
     const body = buildFileInboundBody(content);
-    return { skip: !body, body, replyEventId };
+    return { skip: !body, body, replyEventId, threadRootEventId };
   }
   if (msgType && !['m.text', 'm.notice'].includes(msgType)) {
-    return { skip: true, body: '', replyEventId: null };
+    return { skip: true, body: '', replyEventId: null, threadRootEventId: null };
   }
   const rawBody = typeof content.body === 'string' ? content.body : '';
   const body = replyEventId ? stripMatrixReplyFallback(rawBody) : rawBody.trim();
-  return { skip: !body, body, replyEventId };
+  return { skip: !body, body, replyEventId, threadRootEventId };
+}
+
+export function resolveGroupReplyRelation(metadata, { group, roomId } = {}) {
+  if (!metadata) {
+    return { kind: 'fallback', relation: null, threadRootEventId: null, reason: 'source_metadata_missing' };
+  }
+  if (typeof metadata.group !== 'string' || metadata.group !== group) {
+    return { kind: 'reject', relation: null, threadRootEventId: null, reason: 'source_group_mismatch' };
+  }
+  const delivery = metadata.source === 'matrix'
+    ? metadata.matrixContext
+    : metadata.matrixDelivery;
+  if (!delivery || typeof delivery !== 'object') {
+    return { kind: 'fallback', relation: null, threadRootEventId: null, reason: 'source_matrix_delivery_missing' };
+  }
+  if (typeof delivery.roomId !== 'string' || delivery.roomId !== roomId) {
+    return { kind: 'reject', relation: null, threadRootEventId: null, reason: 'source_room_mismatch' };
+  }
+  const targetEventId = metadata.source === 'matrix'
+    ? delivery.eventId
+    : delivery.primaryEventId;
+  if (typeof targetEventId !== 'string' || !targetEventId) {
+    return { kind: 'fallback', relation: null, threadRootEventId: null, reason: 'source_primary_event_missing' };
+  }
+  const threadRootEventId = typeof delivery.threadRootEventId === 'string' && delivery.threadRootEventId
+    ? delivery.threadRootEventId
+    : null;
+  if (threadRootEventId) {
+    return {
+      kind: 'relation',
+      threadRootEventId,
+      relation: {
+        rel_type: 'm.thread',
+        event_id: threadRootEventId,
+        is_falling_back: true,
+        'm.in_reply_to': { event_id: targetEventId },
+      },
+    };
+  }
+  return {
+    kind: 'relation',
+    threadRootEventId: null,
+    relation: {
+      'm.in_reply_to': { event_id: targetEventId },
+    },
+  };
 }
 
 function shouldIgnoreAgentForward(content) {
@@ -1812,6 +1882,7 @@ function shouldIgnoreAgentForward(content) {
 export class MatrixBridge {
   constructor({
     eventStore = null,
+    matrixDeliveryJournal = null,
     pendingEncryptedEventStore = null,
     approvalDmMode = APPROVAL_DM_MODE,
   } = {}) {
@@ -1829,6 +1900,9 @@ export class MatrixBridge {
     this.recentMatrixEvents = new Map(); // event_id -> { ts, msgId }
     this.eventStore = eventStore || new MatrixEventStore({
       journalPath: path.join(DATA_DIR, 'processed-events.jsonl'),
+    });
+    this.matrixDeliveryJournal = matrixDeliveryJournal || new MatrixDeliveryJournal({
+      journalPath: path.join(DATA_DIR, 'pending-matrix-deliveries.jsonl'),
     });
     this.pendingEncryptedEventStore = pendingEncryptedEventStore || new PendingEncryptedEventStore(
       path.join(DATA_DIR, 'pending-approval-encrypted-events.json'),
@@ -1964,6 +2038,8 @@ export class MatrixBridge {
           sourceRoom: msg.source_room || msg.sourceRoom || null,
           senderMxid: msg.sender_mxid || msg.senderMxid || null,
           fromId: msg.from_id || msg.fromId || null,
+          matrixContext: msg.matrix_context || msg.matrixContext || null,
+          matrixDelivery: msg.matrix_delivery || msg.matrixDelivery || null,
         };
       }
     } catch (e) {
@@ -1985,6 +2061,62 @@ export class MatrixBridge {
   async lookupVerifiedDirectReplyRoom(messageId, { agentName, humanName } = {}) {
     const metadata = await this.lookupMessageRouteMetadata(messageId);
     return verifiedDirectReplyRoom(metadata, { agentName, humanName });
+  }
+
+  async persistPendingMatrixDelivery(record) {
+    await this.callBackendApi(
+      'PUT',
+      `/api/messages/${encodeURIComponent(record.messageId)}/matrix-delivery`,
+      {
+        room_id: record.roomId,
+        primary_event_id: record.primaryEventId,
+        thread_root_event_id: record.threadRootEventId,
+      },
+      `context=matrix-delivery message=${record.messageId}`,
+    );
+    this._msgRouteMetadataCache.delete(record.messageId);
+    return this.matrixDeliveryJournal.markCommitted(record.messageId);
+  }
+
+  async replayPendingMatrixDeliveries() {
+    const pending = this.matrixDeliveryJournal.pending();
+    for (const record of pending) {
+      try {
+        await this.persistPendingMatrixDelivery(record);
+        console.log(`[matrix-delivery] recovered message=${record.messageId} event=${record.primaryEventId}`);
+      } catch (error) {
+        console.warn(`[matrix-delivery] recovery deferred message=${record.messageId}: ${error.message}`);
+      }
+    }
+    return pending.length;
+  }
+
+  async resolveOutboundGroupRelation(msg, roomId) {
+    if (!msg?.reply_to) {
+      return { ok: true, relation: null, threadRootEventId: null };
+    }
+    const metadata = await this.lookupMessageRouteMetadata(msg.reply_to);
+    const resolution = resolveGroupReplyRelation(metadata, { group: msg.group, roomId });
+    if (resolution.kind === 'reject') {
+      this.postWarning(
+        `Blocked Matrix group reply ${msg.id}: ${resolution.reason} (reply_to=${msg.reply_to})`,
+        { kind: 'thread-routing', scope: msg.group || roomId },
+      );
+      return { ok: false, relation: null, threadRootEventId: null, reason: resolution.reason };
+    }
+    if (resolution.kind === 'fallback') {
+      console.warn(`[matrix-thread] top-level compatibility fallback message=${msg.id} reply_to=${msg.reply_to} reason=${resolution.reason}`);
+      this.postWarning(
+        `Matrix thread context unavailable for ${msg.id}; sent at room top level (${resolution.reason})`,
+        { kind: 'thread-compatibility', scope: msg.group || roomId },
+      );
+      return { ok: true, relation: null, threadRootEventId: null, fallback: true };
+    }
+    return {
+      ok: true,
+      relation: resolution.relation,
+      threadRootEventId: resolution.threadRootEventId,
+    };
   }
 
   async fetchKnownAgentNames() {
@@ -2307,14 +2439,28 @@ export class MatrixBridge {
         await sleep(STARTUP_RETRY_DELAY_MS);
       }
     }
+    await this.replayPendingMatrixDeliveries();
+
     // 1. Ensure bot account
     const botToken = await ensureBotAccount();
+    const botSession = await getMatrixAccessTokenSession(botToken);
+    const botCryptoPath = path.join(DATA_DIR, 'bot-crypto');
+    const cryptoIdentity = reconcileMatrixCryptoStoreIdentity({
+      cryptoStorePath: botCryptoPath,
+      accessTokenDeviceId: botSession.deviceId,
+    });
+    if (cryptoIdentity.status === 'rotated') {
+      console.warn(
+        `[matrix-e2ee] archived stale bot crypto store device=${cryptoIdentity.storedDeviceId} `
+        + `token_device=${cryptoIdentity.accessTokenDeviceId} archive=${cryptoIdentity.archivePath}`,
+      );
+    }
     this.botClient = new ReliableMatrixClient(
       HOMESERVER,
       botToken,
       new SimpleFsStorageProvider(path.join(DATA_DIR, 'bot-store.json')),
       // RustSdkCryptoStoreType.Sqlite is numeric value 0 in matrix-sdk-crypto.
-      new RustSdkCryptoStorageProvider(path.join(DATA_DIR, 'bot-crypto'), 0),
+      new RustSdkCryptoStorageProvider(botCryptoPath, 0),
     );
     this.configureReliableBotSync(this.botClient);
     this.botClient.onSyncSuccess = async () => {
@@ -2368,6 +2514,11 @@ export class MatrixBridge {
     // 4. Start bot sync. ReliableMatrixClient awaits bridge handlers before
     // persisting the SDK sync token.
     await this.botClient.start();
+    assertMatrixCryptoDeviceIdentity(
+      this.botClient.crypto?.clientDeviceId,
+      botSession.deviceId,
+    );
+    console.log(`[matrix-e2ee] bot crypto device verified device=${botSession.deviceId}`);
     console.log('Bot syncing...');
 
     // 6. Listen to backend SSE for agent-chat → Matrix
@@ -2895,6 +3046,7 @@ export class MatrixBridge {
         source: 'matrix',
         source_room: roomId,
         ...(eventId ? { source_event_id: eventId } : {}),
+        ...(parsed.threadRootEventId ? { thread_root_event_id: parsed.threadRootEventId } : {}),
         ...(matrixDefaultRecipient ? { matrix_default_recipient: matrixDefaultRecipient } : {}),
         sender_mxid: senderId,
         trust_level: MATRIX_OPERATOR_MXIDS.has(senderId) ? 'operator' : 'external',
@@ -2924,6 +3076,7 @@ export class MatrixBridge {
         source: 'matrix',
         source_room: roomId,
         ...(eventId ? { source_event_id: eventId } : {}),
+        ...(parsed.threadRootEventId ? { thread_root_event_id: parsed.threadRootEventId } : {}),
         target_type: 'agent',
         sender_mxid: senderId,
         trust_level: MATRIX_OPERATOR_MXIDS.has(senderId) ? 'operator' : 'external',
@@ -4391,8 +4544,22 @@ export class MatrixBridge {
         }
         return;
       }
-      await this.sendAsAgent(senderToken, roomId, plain, html, msg.id);
-      await this.sendAttachmentsForMessage(senderToken, roomId, msg);
+      const thread = await this.resolveOutboundGroupRelation(msg, roomId);
+      if (!thread.ok) return;
+      const primaryEventId = await this.sendAsAgent(
+        senderToken,
+        roomId,
+        plain,
+        html,
+        msg.id,
+        {
+          persistPrimary: true,
+          relation: thread.relation,
+          threadRootEventId: thread.threadRootEventId,
+        },
+      );
+      if (!primaryEventId) return;
+      await this.sendAttachmentsForMessage(senderToken, roomId, msg, thread.relation);
       console.log(`→ Matrix [${msg.group}] ${agentName}: ${msg.summary.slice(0, 60)}`);
     } else if (msg.to) {
       // DM - bridge to Matrix (both agent-to-agent and agent-to-human)
@@ -4774,9 +4941,31 @@ export class MatrixBridge {
     }
   }
 
-  async sendAsAgentContent(token, roomId, content, sourceMsgId = null) {
+  async sendAsAgentContent(token, roomId, content, sourceMsgId = null, delivery = null) {
+    const persistPrimary = delivery?.persistPrimary === true && Boolean(sourceMsgId);
+    if (persistPrimary) {
+      const existing = this.matrixDeliveryJournal.get(sourceMsgId);
+      if (existing) {
+        if (existing.roomId !== roomId
+          || existing.threadRootEventId !== (delivery?.threadRootEventId || null)) {
+          throw new Error(`primary Matrix delivery context changed for ${sourceMsgId}`);
+        }
+        if (existing.state === 'pending') {
+          try {
+            await this.persistPendingMatrixDelivery(existing);
+          } catch (error) {
+            console.warn(`[matrix-delivery] existing delivery remains pending message=${sourceMsgId}: ${error.message}`);
+          }
+        }
+        this.rememberMatrixEvent(existing.primaryEventId, sourceMsgId);
+        return existing.primaryEventId;
+      }
+    }
+    const txnSeed = persistPrimary
+      ? `primary:${sourceMsgId}`
+      : `${Date.now()}:${Math.random().toString(36).slice(2, 12)}`;
+    const txnId = `bridge_${createHash('sha256').update(txnSeed).digest('hex').slice(0, 32)}`;
     const doSend = async () => {
-      const txnId = `bridge_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const res = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${txnId}`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -4791,8 +4980,9 @@ export class MatrixBridge {
       }
       return data?.event_id || null;
     };
+    let eventId;
     try {
-      return await doSend();
+      eventId = await doSend();
     } catch (e) {
       // Auto-join and retry if the agent has left the room
       if (e.message.includes('membership') && e.message.includes('leave')) {
@@ -4809,7 +4999,7 @@ export class MatrixBridge {
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
             body: '{}',
           });
-          return await doSend();
+          eventId = await doSend();
         } catch (retryErr) {
           console.error(`Auto-join retry failed in ${roomId}:`, retryErr.message);
           this.postWarning(`sendAsAgent failed in room ${roomId} (after auto-join retry): ${retryErr.message}`);
@@ -4821,18 +5011,47 @@ export class MatrixBridge {
         return null;
       }
     }
+    if (persistPrimary && eventId) {
+      let record;
+      try {
+        record = this.matrixDeliveryJournal.recordPending({
+          messageId: sourceMsgId,
+          roomId,
+          primaryEventId: eventId,
+          threadRootEventId: delivery?.threadRootEventId || null,
+        });
+      } catch (error) {
+        console.error(`[matrix-delivery] failed to journal message=${sourceMsgId} event=${eventId}: ${error.message}`);
+        this.postWarning(
+          `Matrix delivery recovery journal failed for ${sourceMsgId}; later thread replies may lose context`,
+          { kind: 'thread-durability', scope: roomId },
+        );
+        return eventId;
+      }
+      try {
+        await this.persistPendingMatrixDelivery(record);
+      } catch (error) {
+        console.warn(`[matrix-delivery] backend write deferred message=${sourceMsgId}: ${error.message}`);
+        this.postWarning(
+          `Matrix delivery context for ${sourceMsgId} is pending recovery`,
+          { kind: 'thread-durability', scope: roomId },
+        );
+      }
+    }
+    return eventId;
   }
 
-  async sendAsAgent(token, roomId, text, html, sourceMsgId = null) {
+  async sendAsAgent(token, roomId, text, html, sourceMsgId = null, delivery = null) {
     const content = { msgtype: 'm.text', body: text };
     if (html) {
       content.format = 'org.matrix.custom.html';
       content.formatted_body = html;
     }
-    return this.sendAsAgentContent(token, roomId, content, sourceMsgId);
+    if (delivery?.relation) content['m.relates_to'] = delivery.relation;
+    return this.sendAsAgentContent(token, roomId, content, sourceMsgId, delivery);
   }
 
-  async sendAttachmentAsAgent(token, roomId, attachment, sourceMsgId = null) {
+  async sendAttachmentAsAgent(token, roomId, attachment, sourceMsgId = null, relation = null) {
     const filePath = (typeof attachment?.path === 'string') ? attachment.path.trim() : '';
     if (!filePath) throw new Error('attachment.path required');
     if (!existsSync(filePath)) throw new Error(`attachment path not found: ${filePath}`);
@@ -4857,15 +5076,16 @@ export class MatrixBridge {
         size: Number.isFinite(stat.size) ? stat.size : bodyBytes.length,
       },
     };
+    if (relation) content['m.relates_to'] = relation;
     return this.sendAsAgentContent(token, roomId, content, sourceMsgId);
   }
 
-  async sendAttachmentsForMessage(token, roomId, msg) {
+  async sendAttachmentsForMessage(token, roomId, msg, relation = null) {
     const attachments = Array.isArray(msg?.attachments) ? msg.attachments : [];
     if (attachments.length === 0) return;
     for (const attachment of attachments) {
       try {
-        await this.sendAttachmentAsAgent(token, roomId, attachment, msg.id);
+        await this.sendAttachmentAsAgent(token, roomId, attachment, msg.id, relation);
       } catch (e) {
         const pathHint = (typeof attachment?.path === 'string' && attachment.path.trim())
           ? attachment.path.trim()

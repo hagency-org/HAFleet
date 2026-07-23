@@ -21,6 +21,8 @@ describe('bridge matrix behavior', () => {
   let pickDefaultGroupRecipient;
   let preferredDmRoom;
   let resolveOutboundDmRoom;
+  let resolveGroupReplyRelation;
+  let parseInboundTextMessage;
   let markRoomTrusted;
   let signedCurve25519CountFromKeysUpload;
   let signedCurve25519CountFromSync;
@@ -55,6 +57,8 @@ describe('bridge matrix behavior', () => {
       pickDefaultGroupRecipient,
       preferredDmRoom,
       resolveOutboundDmRoom,
+      resolveGroupReplyRelation,
+      parseInboundTextMessage,
       markRoomTrusted,
       signedCurve25519CountFromKeysUpload,
       signedCurve25519CountFromSync,
@@ -97,6 +101,265 @@ describe('bridge matrix behavior', () => {
     );
   });
 
+  test('threaded_group_reply_rebuilds_matrix_relation', () => {
+    const resolution = resolveGroupReplyRelation({
+      group: 'robrix2-board',
+      source: 'matrix',
+      matrixContext: {
+        roomId: '!board:matrix.test',
+        eventId: '$human-reply',
+        threadRootEventId: '$thread-root',
+      },
+    }, {
+      group: 'robrix2-board',
+      roomId: '!board:matrix.test',
+    });
+
+    expect(resolution).toEqual({
+      kind: 'relation',
+      threadRootEventId: '$thread-root',
+      relation: {
+        rel_type: 'm.thread',
+        event_id: '$thread-root',
+        is_falling_back: true,
+        'm.in_reply_to': { event_id: '$human-reply' },
+      },
+    });
+  });
+
+  test('inbound Matrix thread parser keeps root and rich-reply target', () => {
+    expect(parseInboundTextMessage({
+      msgtype: 'm.text',
+      body: '> <@agent:test> old\n\ncontinue',
+      'm.relates_to': {
+        rel_type: 'm.thread',
+        event_id: '$thread-root',
+        is_falling_back: true,
+        'm.in_reply_to': { event_id: '$agent-target' },
+      },
+    })).toEqual({
+      skip: false,
+      body: 'continue',
+      replyEventId: '$agent-target',
+      threadRootEventId: '$thread-root',
+    });
+  });
+
+  test('top_level_group_reply_does_not_start_thread', () => {
+    const resolution = resolveGroupReplyRelation({
+      group: 'robrix2-board',
+      source: 'matrix',
+      matrixContext: {
+        roomId: '!board:matrix.test',
+        eventId: '$top-level',
+        threadRootEventId: null,
+      },
+    }, {
+      group: 'robrix2-board',
+      roomId: '!board:matrix.test',
+    });
+
+    expect(resolution).toEqual({
+      kind: 'relation',
+      threadRootEventId: null,
+      relation: {
+        'm.in_reply_to': { event_id: '$top-level' },
+      },
+    });
+    expect(resolution.relation.rel_type).toBeUndefined();
+  });
+
+  test('multi_hop_agent_reply_uses_persisted_primary_delivery', () => {
+    const resolution = resolveGroupReplyRelation({
+      group: 'robrix2-board',
+      source: 'api',
+      matrixDelivery: {
+        roomId: '!board:matrix.test',
+        primaryEventId: '$agent-a-primary',
+        threadRootEventId: '$thread-root',
+      },
+    }, {
+      group: 'robrix2-board',
+      roomId: '!board:matrix.test',
+    });
+
+    expect(resolution.relation).toEqual({
+      rel_type: 'm.thread',
+      event_id: '$thread-root',
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: '$agent-a-primary' },
+    });
+  });
+
+  test('cross_room_group_reply_fails_closed', async () => {
+    const bridge = new MatrixBridge();
+    bridge.callBackendApi = vi.fn().mockResolvedValue({
+      id: 'msg_source',
+      group: 'robrix2-board',
+      source: 'api',
+      matrixDelivery: {
+        roomId: '!other:matrix.test',
+        primaryEventId: '$other-event',
+        threadRootEventId: '$other-root',
+      },
+    });
+    bridge.postWarning = vi.fn();
+
+    const resolution = await bridge.resolveOutboundGroupRelation({
+      id: 'msg_reply',
+      group: 'robrix2-board',
+      reply_to: 'msg_source',
+    }, '!board:matrix.test');
+
+    expect(resolution).toMatchObject({ ok: false, reason: 'source_room_mismatch' });
+    expect(bridge.postWarning).toHaveBeenCalledWith(
+      expect.stringContaining('Blocked Matrix group reply'),
+      expect.objectContaining({ kind: 'thread-routing' }),
+    );
+  });
+
+  test('missing_matrix_delivery_falls_back_to_top_level', async () => {
+    const bridge = new MatrixBridge();
+    bridge.callBackendApi = vi.fn().mockResolvedValue({
+      id: 'msg_legacy',
+      group: 'robrix2-board',
+      source: 'api',
+    });
+    bridge.postWarning = vi.fn();
+
+    const resolution = await bridge.resolveOutboundGroupRelation({
+      id: 'msg_reply',
+      group: 'robrix2-board',
+      reply_to: 'msg_legacy',
+    }, '!board:matrix.test');
+
+    expect(resolution).toMatchObject({ ok: true, relation: null, fallback: true });
+    expect(bridge.postWarning).toHaveBeenCalledWith(
+      expect.stringContaining('sent at room top level'),
+      expect.objectContaining({ kind: 'thread-compatibility' }),
+    );
+  });
+
+  test('pending_delivery_replays_after_restart', async () => {
+    const pending = {
+      messageId: 'msg_pending',
+      roomId: '!board:matrix.test',
+      primaryEventId: '$primary',
+      threadRootEventId: '$root',
+      state: 'pending',
+    };
+    const journal = {
+      pending: vi.fn().mockReturnValue([pending]),
+      markCommitted: vi.fn().mockReturnValue({ ...pending, state: 'committed' }),
+    };
+    const restarted = new MatrixBridge({ matrixDeliveryJournal: journal });
+    restarted.callBackendApi = vi.fn().mockResolvedValue({ ok: true });
+
+    await expect(restarted.replayPendingMatrixDeliveries()).resolves.toBe(1);
+    expect(restarted.callBackendApi).toHaveBeenCalledWith(
+      'PUT',
+      '/api/messages/msg_pending/matrix-delivery',
+      {
+        room_id: '!board:matrix.test',
+        primary_event_id: '$primary',
+        thread_root_event_id: '$root',
+      },
+      expect.stringContaining('message=msg_pending'),
+    );
+    expect(journal.markCommitted).toHaveBeenCalledWith('msg_pending');
+  });
+
+  test('encrypted_approval_send_does_not_create_group_delivery', async () => {
+    const journal = {
+      get: vi.fn(),
+      recordPending: vi.fn(),
+      markCommitted: vi.fn(),
+      pending: vi.fn().mockReturnValue([]),
+    };
+    const bridge = new MatrixBridge({ matrixDeliveryJournal: journal });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ event_id: '$approval-event' }),
+    }));
+
+    await expect(bridge.sendAsAgentContent(
+      'agent-token',
+      '!approval:matrix.test',
+      { msgtype: 'com.agentchat.approval.request.v1', body: 'approval' },
+      'approval_123',
+    )).resolves.toBe('$approval-event');
+
+    expect(journal.get).not.toHaveBeenCalled();
+    expect(journal.recordPending).not.toHaveBeenCalled();
+  });
+
+  test('primary group send journals before upsert and retry does not send twice', async () => {
+    let stored = null;
+    const journal = {
+      get: vi.fn(() => stored),
+      pending: vi.fn(() => stored?.state === 'pending' ? [stored] : []),
+      recordPending: vi.fn((record) => {
+        stored = { ...record, state: 'pending' };
+        return stored;
+      }),
+      markCommitted: vi.fn(() => {
+        stored = { ...stored, state: 'committed' };
+        return stored;
+      }),
+    };
+    const bridge = new MatrixBridge({ matrixDeliveryJournal: journal });
+    bridge.callBackendApi = vi.fn().mockResolvedValue({ ok: true });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ event_id: '$agent-primary' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const relation = {
+      rel_type: 'm.thread',
+      event_id: '$thread-root',
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: '$human-reply' },
+    };
+
+    const first = await bridge.sendAsAgent(
+      'agent-token',
+      '!board:matrix.test',
+      'done',
+      null,
+      'msg_agent',
+      {
+        persistPrimary: true,
+        relation,
+        threadRootEventId: '$thread-root',
+      },
+    );
+    const replay = await bridge.sendAsAgent(
+      'agent-token',
+      '!board:matrix.test',
+      'done',
+      null,
+      'msg_agent',
+      {
+        persistPrimary: true,
+        relation,
+        threadRootEventId: '$thread-root',
+      },
+    );
+
+    expect(first).toBe('$agent-primary');
+    expect(replay).toBe('$agent-primary');
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)['m.relates_to']).toEqual(relation);
+    expect(journal.recordPending).toHaveBeenCalledOnce();
+    expect(bridge.callBackendApi).toHaveBeenCalledOnce();
+    expect(stored).toMatchObject({
+      messageId: 'msg_agent',
+      primaryEventId: '$agent-primary',
+      threadRootEventId: '$thread-root',
+      state: 'committed',
+    });
+  });
+
   afterAll(() => {
     rmSync(runtimeDir, { recursive: true, force: true });
     restoreEnv(envSnapshot);
@@ -105,6 +368,7 @@ describe('bridge matrix behavior', () => {
   afterEach(() => {
     resetBridgeMatrixTestHooks();
     rmSync(path.join(runtimeDir, 'data', 'matrix', 'processed-events.jsonl'), { force: true });
+    rmSync(path.join(runtimeDir, 'data', 'matrix', 'pending-matrix-deliveries.jsonl'), { force: true });
     rmSync(path.join(runtimeDir, 'data', 'health'), { recursive: true, force: true });
     vi.unstubAllGlobals();
     vi.useRealTimers();
@@ -388,6 +652,50 @@ describe('bridge matrix behavior', () => {
         source_room: roomId,
       }));
       expect(bridge.submitHumanMessage.mock.calls[0][1]).not.toHaveProperty('to');
+    } finally {
+      delete bridge.getBridgeState().roomGroupMap[roomId];
+    }
+  });
+
+  test('inbound_thread_context_is_forwarded_with_backend_reply_id', async () => {
+    const bridge = new MatrixBridge();
+    const roomId = '!mapped-thread-room:matrix.example.test';
+    bridge.botUserId = '@agent-bridge:matrix.example.test';
+    bridge.addKnownAgent('wf_coordinator');
+    bridge.getBridgeState().roomGroupMap[roomId] = 'website';
+    bridge.botClient = {
+      getJoinedRoomMembers: vi.fn().mockResolvedValue([
+        '@agent-bridge:matrix.example.test',
+        '@alice:matrix.example.test',
+        '@ac_wf_coordinator:matrix.example.test',
+      ]),
+    };
+    bridge.rememberMatrixEvent('$agent-target', 'msg_agent_target');
+    bridge.submitHumanMessage = vi.fn().mockResolvedValue({ ok: true, id: 'msg_human_thread' });
+
+    try {
+      await bridge.onRoomMessage(roomId, {
+        event_id: '$human-thread-reply',
+        sender: '@alice:matrix.example.test',
+        content: {
+          msgtype: 'm.text',
+          body: '> <@ac_wf_coordinator:matrix.example.test> old\n\n@wf_coordinator continue',
+          'm.mentions': { user_ids: ['@ac_wf_coordinator:matrix.example.test'] },
+          'm.relates_to': {
+            rel_type: 'm.thread',
+            event_id: '$thread-root',
+            is_falling_back: true,
+            'm.in_reply_to': { event_id: '$agent-target' },
+          },
+        },
+      });
+
+      expect(bridge.submitHumanMessage).toHaveBeenCalledWith(roomId, expect.objectContaining({
+        group: 'website',
+        reply_to: 'msg_agent_target',
+        source_event_id: '$human-thread-reply',
+        thread_root_event_id: '$thread-root',
+      }));
     } finally {
       delete bridge.getBridgeState().roomGroupMap[roomId];
     }

@@ -4188,6 +4188,8 @@ function summarizeMsg(m) {
     senderMxid: m.senderMxid || null,
     trustLevel: m.trustLevel || null,
     fromId: m.fromId || null,
+    matrixContext: m.matrixContext || null,
+    matrixDelivery: m.matrixDelivery || null,
   };
   const normalizedSchema = normalizeMessageSchema(m?.schema);
   if (normalizedSchema.value) out.schema = normalizedSchema.value;
@@ -7188,6 +7190,16 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
   if (isCatchupNotificationComplete(result)) catchupPushCursor.set(agentName, key);
 }
 
+export function buildMcpReplyActionHint(msg, replyTo = null) {
+  if (!msg || (msg.type !== 'human' && msg.type !== 'request')) return null;
+  if (msg.group) {
+    return `Reply after ALL WORK is done, using the agent-chat MCP tool: post(group="${msg.group}", summary="your reply", full="detailed reply", reply_to="${msg.id}")`;
+  }
+  const target = normalizeOptionalText(replyTo || msg.from, 255);
+  if (!target) return null;
+  return `Reply after ALL WORK is done, using the agent-chat MCP tool: send_message(to="${target}", summary="your reply", full="detailed reply", reply_to="${msg.id}")`;
+}
+
 async function pushNotify(agentName, msg, options = {}) {
   const agent = agents[agentName];
   if (!agent?.tmux) {
@@ -7300,12 +7312,7 @@ async function pushNotify(agentName, msg, options = {}) {
 
     if (hasMcp) {
       const checkHint = `FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.`;
-      let actionHint;
-      if (needsReply && isGroup) {
-        actionHint = `Reply after ALL WORK is done, using the agent-chat MCP tool: post(group="${msg.group}", summary="your reply", full="detailed reply")`;
-      } else if (needsReply) {
-        actionHint = `Reply after ALL WORK is done, using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
-      }
+      const actionHint = needsReply ? buildMcpReplyActionHint(msg, replyTo) : null;
       notificationKind = needsReply ? 'single_actionable' : 'single_inform';
       requiresInboxCheck = needsReply;
       notification = isHuman
@@ -10397,7 +10404,7 @@ app.get('/api/media/fetch', (req, res) => {
 
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, source_event_id, matrix_default_recipient, attachments, schema, priority, sender_mxid, from_id } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, source_event_id, thread_root_event_id, matrix_default_recipient, attachments, schema, priority, sender_mxid, from_id } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -10411,6 +10418,7 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) =>
   const hasAuthenticatedBridgeSecret = Boolean(bridgeSecret)
     && req.headers['x-bridge-secret'] === bridgeSecret;
   let sourceEventId = null;
+  let threadRootEventId = null;
   if (sourceType === 'matrix') {
     if (!bridgeSecret) {
       return res.status(503).json({ error: 'MATRIX_BRIDGE_SECRET is required for Matrix ingestion' });
@@ -10422,6 +10430,14 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) =>
       return res.status(400).json({ error: 'source_event_id must be 1..255 characters' });
     }
     sourceEventId = source_event_id.trim();
+    if (thread_root_event_id !== undefined && thread_root_event_id !== null && thread_root_event_id !== '') {
+      if (typeof thread_root_event_id !== 'string' || !thread_root_event_id.trim() || thread_root_event_id.trim().length > 255) {
+        return res.status(400).json({ error: 'thread_root_event_id must be 1..255 characters' });
+      }
+      threadRootEventId = thread_root_event_id.trim();
+    }
+  } else if (thread_root_event_id !== undefined) {
+    return res.status(400).json({ error: 'thread_root_event_id is reserved for authenticated Matrix ingestion' });
   }
   const matrixDefaultRecipient = hasAuthenticatedBridgeSecret
     && sourceType === 'matrix'
@@ -10608,6 +10624,13 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) =>
       : (senderMxid || null),
     viewToken: createMessageViewToken(),
   };
+  if (sourceType === 'matrix' && sourceRoom && sourceEventId) {
+    msg.matrixContext = {
+      roomId: sourceRoom,
+      eventId: sourceEventId,
+      threadRootEventId,
+    };
+  }
   if (normalizedAttachments.length > 0) {
     msg.attachments = normalizedAttachments;
   }
@@ -10757,6 +10780,64 @@ app.get('/api/messages/:id', (req, res) => {
     ts: undefined,
     time: relativeTime(msg.ts),
   });
+});
+
+app.put('/api/messages/:id/matrix-delivery', requireBridgeSecret, (req, res) => {
+  if (!getBridgeSecret()) {
+    return res.status(503).json({ error: 'MATRIX_BRIDGE_SECRET is required for Matrix delivery persistence' });
+  }
+  const msg = messages.find(m => m.id === req.params.id);
+  if (!msg) return res.status(404).json({ error: 'message not found' });
+  if (!msg.group || msg.source === 'matrix' || msg.type === 'human') {
+    return res.status(400).json({ error: 'Matrix delivery persistence is limited to outbound group messages' });
+  }
+
+  const normalizeDeliveryId = (value, field, optional = false) => {
+    if (optional && (value === undefined || value === null || value === '')) return { value: null };
+    if (typeof value !== 'string' || !value.trim() || value.trim().length > 255) {
+      return { error: `${field} must be 1..255 characters` };
+    }
+    return { value: value.trim() };
+  };
+  const room = normalizeDeliveryId(req.body?.room_id ?? req.body?.roomId, 'room_id');
+  const primary = normalizeDeliveryId(
+    req.body?.primary_event_id ?? req.body?.primaryEventId,
+    'primary_event_id',
+  );
+  const threadRoot = normalizeDeliveryId(
+    req.body?.thread_root_event_id ?? req.body?.threadRootEventId,
+    'thread_root_event_id',
+    true,
+  );
+  const invalid = room.error || primary.error || threadRoot.error;
+  if (invalid) return res.status(400).json({ error: invalid });
+
+  const candidate = {
+    roomId: room.value,
+    primaryEventId: primary.value,
+    threadRootEventId: threadRoot.value,
+  };
+  const existing = msg.matrixDelivery || null;
+  if (existing) {
+    const identical = existing.roomId === candidate.roomId
+      && existing.primaryEventId === candidate.primaryEventId
+      && (existing.threadRootEventId || null) === candidate.threadRootEventId;
+    if (!identical) {
+      return res.status(409).json({
+        error: 'primary Matrix delivery already recorded',
+        matrixDelivery: existing,
+      });
+    }
+    return res.json({ ok: true, id: msg.id, deduped: true, matrixDelivery: existing });
+  }
+
+  msg.matrixDelivery = candidate;
+  if (!saveMessages()) {
+    delete msg.matrixDelivery;
+    invalidateUnreadMessageIndex();
+    return res.status(503).json({ error: 'messages persistence failed' });
+  }
+  return res.json({ ok: true, id: msg.id, deduped: false, matrixDelivery: candidate });
 });
 
 app.get('/api/messages/:id/delivery', (req, res) => {
