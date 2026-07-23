@@ -20,6 +20,10 @@ import { MatrixRateLimitGate } from './src/matrix-rate-limit-gate.mjs';
 import { getProcessStartIdentity } from './src/process-identity.mjs';
 import { writeBridgeHealthRecord } from './src/health-record.mjs';
 import { PendingEncryptedEventStore } from './lib/pending-encrypted-event-store.js';
+import {
+  assertMatrixCryptoDeviceIdentity,
+  reconcileMatrixCryptoStoreIdentity,
+} from './lib/matrix-crypto-store-identity.js';
 
 const MATRIX_OTK_COUNT_RECONCILE_MS = 5 * 60_000;
 
@@ -772,6 +776,22 @@ async function getUserId(token) {
   });
   const data = await res.json();
   return data.user_id;
+}
+
+async function getMatrixAccessTokenSession(token) {
+  const res = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/account/whoami`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`Matrix whoami failed with HTTP ${res.status}: ${data?.errcode || data?.error || 'unknown error'}`);
+  }
+  const userId = typeof data?.user_id === 'string' ? data.user_id.trim() : '';
+  const deviceId = typeof data?.device_id === 'string' ? data.device_id.trim() : '';
+  if (!userId || !deviceId) {
+    throw new Error('Matrix whoami did not return both user_id and device_id');
+  }
+  return { userId, deviceId };
 }
 
 // ── Avatar generation & upload ────────────────────────────────────────
@@ -2309,12 +2329,24 @@ export class MatrixBridge {
     }
     // 1. Ensure bot account
     const botToken = await ensureBotAccount();
+    const botSession = await getMatrixAccessTokenSession(botToken);
+    const botCryptoPath = path.join(DATA_DIR, 'bot-crypto');
+    const cryptoIdentity = reconcileMatrixCryptoStoreIdentity({
+      cryptoStorePath: botCryptoPath,
+      accessTokenDeviceId: botSession.deviceId,
+    });
+    if (cryptoIdentity.status === 'rotated') {
+      console.warn(
+        `[matrix-e2ee] archived stale bot crypto store device=${cryptoIdentity.storedDeviceId} `
+        + `token_device=${cryptoIdentity.accessTokenDeviceId} archive=${cryptoIdentity.archivePath}`,
+      );
+    }
     this.botClient = new ReliableMatrixClient(
       HOMESERVER,
       botToken,
       new SimpleFsStorageProvider(path.join(DATA_DIR, 'bot-store.json')),
       // RustSdkCryptoStoreType.Sqlite is numeric value 0 in matrix-sdk-crypto.
-      new RustSdkCryptoStorageProvider(path.join(DATA_DIR, 'bot-crypto'), 0),
+      new RustSdkCryptoStorageProvider(botCryptoPath, 0),
     );
     this.configureReliableBotSync(this.botClient);
     this.botClient.onSyncSuccess = async () => {
@@ -2368,6 +2400,11 @@ export class MatrixBridge {
     // 4. Start bot sync. ReliableMatrixClient awaits bridge handlers before
     // persisting the SDK sync token.
     await this.botClient.start();
+    assertMatrixCryptoDeviceIdentity(
+      this.botClient.crypto?.clientDeviceId,
+      botSession.deviceId,
+    );
+    console.log(`[matrix-e2ee] bot crypto device verified device=${botSession.deviceId}`);
     console.log('Bot syncing...');
 
     // 6. Listen to backend SSE for agent-chat → Matrix

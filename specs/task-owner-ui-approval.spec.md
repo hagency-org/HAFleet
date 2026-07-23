@@ -1,7 +1,7 @@
 spec: task
 name: "Owner-scoped Matrix UI approvals"
 inherits: project
-satisfies: [REQ-OWNER-UI-APPROVAL, ADR-002, ADR-003, ADR-004, ADR-005, ADR-006]
+satisfies: [REQ-OWNER-UI-APPROVAL, ADR-002, ADR-003, ADR-004, ADR-005, ADR-006, ADR-008]
 tags: [active, security, matrix, approval]
 estimate: 3d
 ---
@@ -21,6 +21,9 @@ verdicts in the encrypted owner DM.
 - Reconcile and replenish the bridge device's signed Curve25519 one-time keys
   when a homeserver omits usable counts, without turning an absent sync field
   into an unbounded upload loop.
+- Bind the persisted bridge crypto store to the device ID represented by the
+  active Matrix access token. A mismatch must archive the stale private-key
+  store and initialize the token device before sync begins.
 - Validate full Matrix `event.sender`, owner DM room, project room, agent, request id, digest, expiry, and pending state.
 - Preserve one independent inviter, owner, and approval-DM binding for every
   agent invited into the same project room; joining a second agent must not
@@ -166,6 +169,15 @@ Scenario: Missing one-time-key counts are reconciled without an upload loop
   And the bridge obtains the authoritative count from an empty keys-upload request
   And reconciliation runs at most once per bounded interval
   And the crypto state machine replenishes keys only when that count requires it
+
+Scenario: Access-token rotation cannot reuse another device's crypto store
+  Tags: critical
+  Test: stale crypto store is archived before the token device starts syncing
+  Given the active Matrix access token identifies a different device from the persisted bridge crypto store
+  When the bridge starts its encrypted owner-approval client
+  Then the stale crypto store is archived without deleting its private keys
+  And a fresh crypto store is initialized for the access-token device
+  And startup fails if the initialized crypto client still reports another device
 
 Scenario: Plain text cannot approve
   Tags: critical

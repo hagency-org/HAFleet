@@ -34,6 +34,8 @@ the coding runtime's native permission boundary.
 
 [REQ-OWNER-UI-APPROVAL-OTK] The bridge MUST maintain enough signed Curve25519 one-time keys for owner clients to establish Olm sessions and deliver Megolm room keys. Missing sync counts MUST be reconciled against an authoritative keys-upload response at a bounded cadence; an absent sync field MUST NOT be rewritten as zero on every sync.
 
+[REQ-OWNER-UI-APPROVAL-DEVICE] The bridge MUST bind its persisted Matrix crypto store to the device ID represented by the active access token. Before encrypted sync begins, a mismatched store MUST be archived intact and replaced with a fresh store for the token device; missing or post-initialization mismatched device identity MUST fail closed.
+
 [REQ-OWNER-UI-APPROVAL-FAIL-CLOSED] Missing, ambiguous, expired, mismatched, or already-consumed approval state MUST produce denial without administrator fallback.
 
 [REQ-OWNER-UI-APPROVAL-BACKGROUND] A managed background runtime MUST NOT fall back to a native approval prompt that is visible only inside tmux. Adapter startup failures MUST abort launch, and request-time transport failures MUST produce an explicit runtime denial.
@@ -109,6 +111,12 @@ Scenario: Exhausted bridge one-time keys are replenished
   And it passes the authoritative count to the crypto state machine
   And it neither rewrites an absent sync field nor uploads keys every sync
   And replacement key contents are never logged
+
+Scenario: A rotated access token does not reuse stale device private keys
+  Given the bridge access token and crypto store identify different Matrix devices
+  When the encrypted approval bridge starts
+  Then the stale crypto store is archived intact
+  And the crypto client starts with the access-token device identity
 
 Scenario: Empty owner fails closed
   Given no trusted inviter provenance identifies an owner
