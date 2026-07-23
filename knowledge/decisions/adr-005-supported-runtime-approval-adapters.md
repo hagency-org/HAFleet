@@ -61,6 +61,16 @@ replaces the tmux pane shell, so exiting a runtime closes the pane instead of
 leaving an interactive shell that can reopen Claude or Codex without the
 required adapter flags.
 
+The trusted Codex hook handles one narrow non-recursive exception. Exact
+agent-chat MCP coordination and task-control tool names are allowed locally
+because they are the runtime's authenticated control plane, not coding
+capabilities. Text-only `send_message` and `post` calls are included so a
+workflow can report completion without asking permission to ask permission.
+Those two calls are not exempt when they contain local file attachments.
+Unrelated MCP namespaces, shell commands, patches, and unknown tools continue
+through owner approval. The hook verifies its content-bound digest before
+applying this policy.
+
 ## Consequences
 
 Good, because remote approval no longer depends on terminal keystroke injection
@@ -70,6 +80,10 @@ Bad, because Claude custom channels still require their research-preview
 development allowlist flag, and Codex hook definitions must be explicitly
 trusted by Codex before they run. Initial or changed Codex hooks therefore
 require an interactive local launch once before later unattended restarts.
+
+Good, because reading an agent-chat inbox or posting a text workflow result no
+longer creates a recursive approval loop. Local file disclosure and coding
+operations remain owner-gated.
 
 ## Alternatives Considered
 

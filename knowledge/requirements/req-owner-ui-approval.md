@@ -48,6 +48,13 @@ the coding runtime's native permission boundary.
 
 [REQ-OWNER-UI-APPROVAL-CONSUME] A server-authorized verdict MUST be consumed atomically before an allow or deny is delivered to the coding runtime.
 
+[REQ-OWNER-UI-APPROVAL-CODEX-COORDINATION] A trusted Codex permission hook MUST
+allow the exact agent-chat MCP coordination and task-control tools without
+creating a recursive owner approval. Text-only agent-chat messaging MAY use
+this path; any message that asks agent-chat to read and transmit a local file
+attachment MUST remain owner-gated. Unrelated MCP tools and coding operations
+MUST NOT inherit this exemption.
+
 [REQ-OWNER-UI-APPROVAL-CONTROL] Public-room `!ctl key`, `!ctl send`, and equivalent generic controls MUST NOT bypass the approval state machine.
 
 [REQ-OWNER-UI-APPROVAL-AUTHORITY] Robrix2 MUST remain a rendering and event-emission client; agent-chat MUST remain the authorization authority.
@@ -134,6 +141,13 @@ Scenario: Adapter timeout covers approval lifetime
   Then its timeout is derived from that TTL plus a bounded delivery margin
   And the hook cannot expire before the server request
 
+Scenario: Codex reads its workflow inbox without recursive approval
+  Given the managed Codex hook is trusted for its exact current contents
+  When Codex calls the exact agent-chat check_inbox MCP tool
+  Then the hook allows that bounded coordination call locally
+  And it creates no owner approval request
+  And external coding tools remain owner-gated
+
 ## Dependencies
 
 - ADR-002
@@ -149,6 +163,9 @@ Scenario: Adapter timeout covers approval lifetime
 - Codex `PermissionRequest` hook documented at `https://developers.openai.com/codex/hooks`.
 - Codex App Server `hooks/list` and `config/batchWrite` documented at
   `https://developers.openai.com/codex/app-server`.
+- Live Codex incident on 2026-07-24: a wildcard PermissionRequest hook created
+  repeated approvals for `mcp__agent_chat__check_inbox`, preventing the agent
+  from reading the message that triggered it.
 
 ## Open Questions
 

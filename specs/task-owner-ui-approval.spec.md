@@ -29,6 +29,10 @@ verdicts in the encrypted owner DM.
 - Use Claude Code's supported channel permission request/verdict protocol for Claude agents.
 - Keep Claude agents in auto mode, but install content-scoped `ask` rules for protected external VCS operations so auto-mode hard denials become native permission prompts that the channel can relay.
 - Use Codex's supported `PermissionRequest` command hook for Codex agents.
+- Prevent recursive approval loops for the exact agent-chat MCP coordination
+  tools that the managed runtime is expected to use. Text-only messaging and
+  task-control calls may be allowed by the already-trusted hook; sending a
+  local file attachment must still enter owner approval.
 - Before creating a background Codex tmux session, verify the minimum supported
   Codex version, inspect the exact session hook through Codex App Server, and
   require one explicit local trust confirmation when its content-bound hash is
@@ -257,6 +261,15 @@ Scenario: Managed Codex approval transport fails closed
   When agent identity, script integrity, backend transport, polling, or consumption fails
   Then the hook emits the documented deny decision
   And Codex does not fall back to an unattended native prompt
+
+Scenario: Codex coordination does not recursively request owner approval
+  Tags: critical
+  Test: codex_internal_coordination_tools_are_allowed_without_recursive_approval
+  Given the trusted Codex hook receives a permission request for an exact agent-chat MCP tool
+  When the tool reads coordination state or sends text-only workflow messages
+  Then the hook returns allow without creating an owner approval request
+  And a message containing a local file attachment still requires owner approval
+  And Bash, patch, and unrelated MCP tools still require owner approval
 
 ### Rule: public-control-fail-closed — Public generic controls cannot bypass approval
 

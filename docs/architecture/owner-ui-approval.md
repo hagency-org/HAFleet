@@ -75,6 +75,13 @@ approval TTL plus a delivery margin. A hook integrity, identity, transport,
 polling, consumption, or output failure emits the documented deny decision, so
 Codex cannot fall back to an unattended terminal prompt.
 
+After integrity and agent-identity checks, the hook locally allows only the
+exact agent-chat MCP coordination/task tools. This prevents `check_inbox` from
+recursively creating the approval it is trying to read. Text-only
+`send_message` and `post` are also allowed; requests with local file
+attachments, all unrelated MCP namespaces, and coding tools continue through
+the owner approval state machine.
+
 Both runtime adapters consume the terminal approval before delivering it to the
 runtime. This preserves single-use authorization even if the runtime disconnects
 immediately after the server accepts the verdict.

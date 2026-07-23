@@ -14,6 +14,7 @@ import {
 import {
   buildCodexApprovalRequest,
   buildCodexHookDecision,
+  codexPermissionRequestNeedsOwnerApproval,
   runCodexPermissionHook,
 } from '../lib/codex-permission-hook.js';
 import {
@@ -168,6 +169,83 @@ describe('supported runtime approval adapters', () => {
         decision: { behavior: 'deny', message: 'owner denied' },
       },
     });
+  });
+
+  test('codex_internal_coordination_tools_are_allowed_without_recursive_approval', async () => {
+    const safeToolNames = [
+      'whoami',
+      'check_inbox',
+      'check_group',
+      'list_tasks',
+      'get_task',
+      'accept_task',
+      'transition_task',
+      'comment_task',
+      'update_task_execution',
+    ];
+    for (const toolName of safeToolNames) {
+      expect(codexPermissionRequestNeedsOwnerApproval({
+        tool_name: `mcp__agent_chat__${toolName}`,
+        tool_input: {},
+      })).toBe(false);
+    }
+    for (const toolName of ['send_message', 'post']) {
+      expect(codexPermissionRequestNeedsOwnerApproval({
+        tool_name: `mcp__agent_chat__${toolName}`,
+        tool_input: { summary: 'text only' },
+      })).toBe(false);
+      expect(codexPermissionRequestNeedsOwnerApproval({
+        tool_name: `mcp__agent_chat__${toolName}`,
+        tool_input: { summary: 'text only', attachments: [] },
+      })).toBe(false);
+      expect(codexPermissionRequestNeedsOwnerApproval({
+        tool_name: `mcp__agent_chat__${toolName}`,
+        tool_input: { attachments: [{ path: '/private/file.txt' }] },
+      })).toBe(true);
+    }
+    expect(codexPermissionRequestNeedsOwnerApproval({
+      tool_name: 'Bash',
+      tool_input: { command: 'gh issue create' },
+    })).toBe(true);
+    expect(codexPermissionRequestNeedsOwnerApproval({
+      tool_name: 'mcp__filesystem__read_file',
+      tool_input: { path: '/private/file.txt' },
+    })).toBe(true);
+    expect(codexPermissionRequestNeedsOwnerApproval({
+      tool_name: 'mcp__agent_chat__unknown',
+      tool_input: {},
+    })).toBe(true);
+
+    const temporary = mkdtempSync(path.join(os.tmpdir(), 'agentchat-codex-internal-hook-'));
+    try {
+      const hookPath = path.join(temporary, 'hook.js');
+      writeFileSync(hookPath, 'trusted hook contents\n');
+      const api = vi.fn();
+      const stdout = { value: '', write(chunk) { this.value += chunk; } };
+      const decision = await runCodexPermissionHook({
+        stdin: Readable.from([JSON.stringify({
+          hook_event_name: 'PermissionRequest',
+          turn_id: 'turn-inbox',
+          tool_name: 'mcp__agent_chat__check_inbox',
+          tool_input: {},
+        })]),
+        stdout,
+        stderr: { write() {} },
+        env: {
+          AGENT_NAME: 'test_agent',
+          AGENTCHAT_AGENT_TOKEN: 'agent-token',
+        },
+        argv: ['node', hookPath, `--agentchat-hook-sha256=${sha256File(hookPath)}`],
+        scriptPath: hookPath,
+        api,
+      });
+
+      expect(decision).toEqual(buildCodexHookDecision('allow'));
+      expect(api).not.toHaveBeenCalled();
+      expect(JSON.parse(stdout.value)).toEqual(decision);
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
   });
 
   test('codex_hook_failure_emits_explicit_deny', async () => {
