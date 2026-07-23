@@ -93,6 +93,28 @@ QA owner) set direction and hold the gate (the gate itself is OpenFab's N-of-M s
   depth per cell, provisioned-vs-named. Surfaces "按能力调度" at a glance.
 - **Acceptance:** the monitor shows the grid + queues and updates live.
 
+## Phase 8 — owner-scoped execution approval
+- Treat the trusted full MXID that invited an exact managed agent into a project
+  room as that room-agent binding's owner. Display names, client state, and a
+  global administrator role are not approval authority.
+- Publish only a redacted, non-actionable waiting status to the public project
+  room. Send full details and approve-once/deny UI actions to the encrypted
+  agent-owner DM.
+- Persist a single-use, expiring request bound to agent, project, project room,
+  owner MXID, DM room, upstream request id, and input digest. Empty or ambiguous
+  ownership fails closed without administrator fallback.
+- Robrix2 renders structured events and emits button responses; agent-chat
+  validates the Matrix `event.sender` and owns the authorization decision.
+- Plain text and public-room `!ctl key/send/status` cannot approve or bypass the
+  state machine.
+- Claude uses its supported Channel permission relay. Codex uses its supported
+  synchronous `PermissionRequest` hook. Adapter or channel failure denies the
+  unattended request; terminal keystroke injection is not an approval protocol.
+- **Contracts:** `REQ-OWNER-UI-APPROVAL`, `ADR-002`, `ADR-003`, `ADR-005`, and
+  `specs/task-owner-ui-approval.spec.md`.
+- **Acceptance:** encrypted owner-DM request → Robrix2 button verdict → runtime
+  continuation was exercised successfully with both Claude Code and Codex.
+
 ---
 
 ## Sequencing & effort
@@ -106,11 +128,13 @@ QA owner) set direction and hold the gate (the gate itself is OpenFab's N-of-M s
 | 5 six roles | M | low | full org |
 | 6 OpenFab contract | S | low | OpenFab drives by capability |
 | 7 monitor | S | low | operability |
+| 8 owner approval | L | high | private remote execution gate |
 
 Recommended order: **1 → 2 → 3 → 6** (a usable capability-dispatch loop end-to-end with OpenFab),
 then **4 → 5 → 7** (elasticity, full org, operability). Each phase: backward-compatible, vitest
 covered, landed on this branch.
 
 ## Out of scope (stays in OpenFab)
-spec authoring, verification (incl. layered QA / cross-model adversarial *gating*), in-toto/SLSA
-signing, the N-of-M human gate, AI-BOM. agent-chat *executes*; OpenFab *certifies*.
+spec authoring for external product work, verification (incl. layered QA / cross-model adversarial
+*gating*), in-toto/SLSA signing, the N-of-M release gate, and AI-BOM. agent-chat still owns the
+local runtime's owner-scoped execution permission relay; OpenFab certifies delivered work.

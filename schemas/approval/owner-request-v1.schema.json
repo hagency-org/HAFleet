@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentchat.local/schemas/approval/owner-request-v1.schema.json",
+  "title": "Agent Chat encrypted owner approval request v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["msgtype", "body", "com.agentchat.approval"],
+  "properties": {
+    "msgtype": { "const": "com.agentchat.approval.request.v1" },
+    "body": { "type": "string", "minLength": 1, "maxLength": 16384 },
+    "com.agentchat.approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "kind", "agent", "project", "project_room_id",
+        "request_id", "upstream_request_id", "input_digest", "runtime",
+        "tool_name", "description", "input_preview", "expires_at", "actions"
+      ],
+      "properties": {
+        "version": { "const": 1 },
+        "kind": { "const": "request" },
+        "agent": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "project_room_id": { "type": "string", "pattern": "^!" },
+        "request_id": { "type": "string", "pattern": "^approval_[0-9a-f]{32}$" },
+        "upstream_request_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "input_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "runtime": { "enum": ["claude", "codex"] },
+        "tool_name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "description": { "type": "string", "maxLength": 4096 },
+        "input_preview": { "type": "string", "maxLength": 8192 },
+        "expires_at": { "type": "integer", "minimum": 1 },
+        "actions": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "label", "style"],
+              "properties": {
+                "id": { "const": "approve_once" },
+                "label": { "type": "string" },
+                "style": { "const": "primary" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "label", "style"],
+              "properties": {
+                "id": { "const": "deny" },
+                "label": { "type": "string" },
+                "style": { "const": "danger" }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

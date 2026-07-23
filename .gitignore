@@ -19,6 +19,14 @@ data.stale-backup*/
 .mcp.json
 .DS_Store
 
+# agent-spec generated execution state (project contracts and KLL stay tracked)
+.agent-spec/runs/
+.agent-spec/trace/
+.agent-spec/pending-ai-requests.json
+.agent-spec/test_obligations.json
+.agent-spec/work_units.json
+.agent-spec/worktrees.json
+
 # Generated packages and local remote runtime artifacts
 remote-dist/
 remote/.push-relay-launchd.sh

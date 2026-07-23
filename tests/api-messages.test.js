@@ -98,6 +98,32 @@ describe('backend message API', () => {
     context.cleanup();
   });
 
+  test('inferred_human_target_is_a_notice_not_a_warning', async () => {
+    const response = await request(context.app)
+      .post('/api/messages')
+      .set('X-Agent-Token', ALPHA_TOKEN)
+      .send({
+        from: 'alpha',
+        to: 'alex',
+        type: 'inform',
+        summary: 'human delivery classification',
+        full: 'human delivery classification',
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.delivery).toMatchObject({ targetKind: 'human' });
+    expect(response.body.notices).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'target_classified_human',
+        target: 'alex',
+        reason: 'unknown-target-treated-as-human',
+      }),
+    ]));
+    expect(response.body.warnings || []).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'target_assumed_human' }),
+    ]));
+  });
+
   test('authenticated Matrix source_event_id returns the original message without redispatch', async () => {
     const idempotentContext = await createBackendTestContext('agent-chat-matrix-idempotency-', {
       agents: {

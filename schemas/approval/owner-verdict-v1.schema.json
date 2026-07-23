@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentchat.local/schemas/approval/owner-verdict-v1.schema.json",
+  "title": "Agent Chat owner approval verdict v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["msgtype", "body", "com.agentchat.approval"],
+  "properties": {
+    "msgtype": { "const": "com.agentchat.approval.verdict.v1" },
+    "body": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "com.agentchat.approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "kind", "agent", "project", "project_room_id",
+        "request_id", "input_digest", "action"
+      ],
+      "properties": {
+        "version": { "const": 1 },
+        "kind": { "const": "verdict" },
+        "agent": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "project_room_id": { "type": "string", "pattern": "^!" },
+        "request_id": { "type": "string", "pattern": "^approval_[0-9a-f]{32}$" },
+        "input_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "action": { "enum": ["approve_once", "deny"] }
+      }
+    }
+  }
+}

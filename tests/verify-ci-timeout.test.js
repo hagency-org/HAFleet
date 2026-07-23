@@ -24,6 +24,17 @@ exit 0
   return tempDir;
 }
 
+async function makeFakeTimeout(dir) {
+  const timeoutPath = path.join(dir, 'timeout');
+  await fs.writeFile(timeoutPath, `#!/usr/bin/env bash
+set -euo pipefail
+sleep 1
+exit 124
+`);
+  await fs.chmod(timeoutPath, 0o755);
+  return timeoutPath;
+}
+
 describe('verify-ci timeout gate', () => {
   afterEach(async () => {
     if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
@@ -32,9 +43,11 @@ describe('verify-ci timeout gate', () => {
 
   test('fails clearly when the CI gate exceeds the wall-clock timeout', async () => {
     const fakeBin = await makeFakeNpm();
+    const fakeTimeout = await makeFakeTimeout(fakeBin);
     const childEnv = {
       ...process.env,
       AGENTCHAT_VERIFY_CI_TIMEOUT_SEC: '1',
+      AGENTCHAT_TIMEOUT_BIN: fakeTimeout,
       PATH: `${fakeBin}:${process.env.PATH || ''}`,
     };
     delete childEnv.AGENTCHAT_VERIFY_CI_TIMEOUT_ACTIVE;

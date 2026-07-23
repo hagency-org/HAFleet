@@ -23,6 +23,10 @@ MIRROR_FILES=(
   "lib/server-identity.js"
   "lib/push-relay-core.js"
   "lib/mcp-server-core.js"
+  "lib/runtime-approval-client.js"
+  "lib/codex-hook-trust.js"
+  "lib/codex-project-trust.js"
+  "lib/codex-permission-hook.js"
   "scripts/validate-agent-launch-extra-args.js"
   "scripts/resolve-agent-sandbox-roots.js"
 )

@@ -170,7 +170,7 @@ remove_cli_links() {
       "$INSTALL_DIR"/bin/*) run rm -f "$target" ;;
       *) log "Preserving $target; it does not point into $INSTALL_DIR/bin" ;;
     esac
-  done < <(find "$INSTALL_DIR/bin" -maxdepth 1 -type f -perm /111 | sort)
+  done < <(find "$INSTALL_DIR/bin" -maxdepth 1 -type f -perm -111 | sort)
 }
 
 remove_skill_dir_if_owned() {

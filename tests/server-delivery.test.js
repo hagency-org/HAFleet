@@ -1327,6 +1327,38 @@ describe('server delivery path', () => {
     ]);
   });
 
+  test('message detail capability links proxy through the dashboard without operator credentials', async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
+    mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
+    serverModule = await importServer(runtimeDir);
+
+    const seen = [];
+    serverModule.setServerTestHooks({
+      backendFetch: async (url, init = {}) => {
+        seen.push({ url: String(url), headers: init.headers || {} });
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: (name) => name.toLowerCase() === 'content-type' ? 'text/html; charset=utf-8' : null },
+          text: async () => '<html><body>scoped detail</body></html>',
+        };
+      },
+    });
+
+    const response = await request(serverModule.app)
+      .get('/msg/msg_0034')
+      .query({ view: 'scoped-view-token' });
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('scoped detail');
+    expect(seen).toHaveLength(1);
+    const [forwarded] = seen;
+    expect(new URL(forwarded.url).pathname).toBe('/msg/msg_0034');
+    expect(new URL(forwarded.url).searchParams.get('view')).toBe('scoped-view-token');
+    expect(forwarded.headers.Authorization).toBeUndefined();
+  });
+
   test('dashboard backend proxy route clusters forward to the backend correctly', async () => {
     runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });

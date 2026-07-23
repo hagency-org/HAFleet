@@ -50,6 +50,14 @@ function backendFetch(url, opts = {}) {
   if (BACKEND_API_TOKEN) headers['Authorization'] = `Bearer ${BACKEND_API_TOKEN}`;
   return backendFetchTransport(url, { ...opts, headers });
 }
+
+// Capability links must be authorized by the per-message view token, not by
+// the dashboard's backend bearer token. Otherwise exposing /msg/:id through
+// the dashboard would let an anonymous caller enumerate sequential message
+// IDs while the proxy silently authenticates every request as the operator.
+function backendCapabilityFetch(url, opts = {}) {
+  return backendFetchTransport(url, opts);
+}
 const DEFAULT_IDLE_THRESHOLD_MS = 20_000;
 const envIdleThreshold = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || `${DEFAULT_IDLE_THRESHOLD_MS}`, 10);
 const IDLE_THRESHOLD = Number.isFinite(envIdleThreshold) && envIdleThreshold > 0
@@ -2203,6 +2211,32 @@ app.get('/api/subconscious/detail/:name', async (req, res) => {
 });
 
 installSubconsciousProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
+
+// Matrix messages link to the public dashboard origin. Proxy the backend's
+// scoped HTML detail page while preserving only its capability-token query;
+// never attach the dashboard's privileged backend credential here.
+app.get('/msg/:msgId', async (req, res) => {
+  const msgId = String(req.params.msgId || '');
+  if (!/^msg_[A-Za-z0-9_-]+$/.test(msgId)) {
+    return res.status(400).type('html').send('<h1>Invalid message ID</h1>');
+  }
+
+  const backendUrl = new URL(`${BACKEND_V2_URL}/msg/${encodeURIComponent(msgId)}`);
+  for (const key of ['view', 'view_token', 'token']) {
+    const value = typeof req.query?.[key] === 'string' ? req.query[key].trim() : '';
+    if (value) backendUrl.searchParams.set(key, value);
+  }
+
+  try {
+    const upstream = await backendCapabilityFetch(backendUrl);
+    const body = await upstream.text();
+    const contentType = upstream.headers?.get?.('content-type');
+    if (contentType) res.set('content-type', contentType);
+    return res.status(upstream.status || 502).send(body);
+  } catch (error) {
+    return res.status(502).type('html').send('<h1>Message service unavailable</h1>');
+  }
+});
 
 app.get('/api/agents/:name/unread-messages', async (req, res) => {
   const name = req.params.name;

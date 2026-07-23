@@ -32,6 +32,7 @@ import { DispatchLeaseStore } from './src/dispatch-lease-store.mjs';
 import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
 import { createAlertStore, RECOVERY_MAP as ALERT_RECOVERY_MAP } from './lib/alert-store.js';
+import { ApprovalStore, ApprovalStoreError } from './lib/approval-store.js';
 import {
   authorizeAgentCredential as authorizeAgentCredentialAdapter,
   authorizeSubconsciousEventIngest as authorizeSubconsciousEventIngestAdapter,
@@ -61,6 +62,7 @@ import { assertRuntimeDir, isLocalAgentServer, resolveLocalServerId } from './li
 import { enforceStartupConfig } from './lib/startup-config.js';
 import { NotificationRouter } from './lib/notification-router.js';
 import { readV1AgentManifest, defaultAgentchatHomeDir, allAgentHomeRoots } from './lib/agent-home-v1.js';
+import { resolveApprovalTtlMs } from './lib/runtime-approval-client.js';
 import { MatrixDispatchStore } from './src/matrix-dispatch-store.mjs';
 import {
   buildUpstreamClaudeSubconsciousPaths,
@@ -225,6 +227,7 @@ const BLOCKED_INFO_AGGREGATE_WINDOW_MS = Number.isFinite(BLOCKED_INFO_AGGREGATE_
 // agent_blocked aggregation is handled by notificationRouter (initialized after emitSystemInfo)
 
 const AUTO_CLEAR_COOLDOWN_MS = Number.parseInt(process.env.AGENT_AUTO_CLEAR_COOLDOWN_MS || '300000', 10);
+const APPROVAL_TTL_MS = resolveApprovalTtlMs(process.env);
 const autoClearLastTs = new Map();
 const autoClearPrevReason = new Map();
 
@@ -235,6 +238,9 @@ const MATRIX_MEDIA_DIR = path.join(DATA_DIR, 'matrix', 'media');
 mkdirSync(MATRIX_MEDIA_DIR, { recursive: true });
 const MATRIX_OPERATOR_MXIDS = new Set(
   (process.env.MATRIX_OPERATOR_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
+);
+const MATRIX_ADMIN_MXIDS = new Set(
+  (process.env.MATRIX_ADMIN_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
 // Reads bridge secret fresh from env on each call (tests toggle process.env between cases).
 const requireBridgeSecret = createRequireBridgeSecret({ env: process.env });
@@ -2900,6 +2906,9 @@ const alertStore = createAlertStore({
   initialData: alertStoreData,
   save: (data) => saveJson('alerts.json', data),
   emitEvent: (eventName, alert) => broadcastSSE(eventName, alert),
+});
+const approvalStore = new ApprovalStore(path.join(DATA_DIR, 'approvals.json'), {
+  ttlMs: APPROVAL_TTL_MS,
 });
 const localActivitySweepState = loadJsonSync('local_activity_sweep.json', { selectionCursor: 0 });
 let msgCounter = loadJsonSync('.msg_counter', 0);
@@ -7787,6 +7796,141 @@ app.get('/api/servers/fleet', (req, res) => {
 // ── SSE endpoint ──────────────────────────────────────────────────────
 sseAdapter.installRoute(app, '/api/stream');
 
+// ── Owner-scoped runtime approvals ───────────────────────────────────
+function respondApprovalStoreError(res, error, fallback = 'approval operation failed') {
+  if (error instanceof ApprovalStoreError) {
+    if (error.code === 'bad_request') return res.status(400).json({ error: error.message, code: error.code });
+    if (error.code === 'persistence_failed') return res.status(503).json({ error: error.message, code: error.code });
+  }
+  return res.status(500).json({ error: error?.message || fallback });
+}
+
+const _tokenFromApprovalBody = req => req.body?.agent || '';
+const _tokenFromApprovalRecord = req => approvalStore.getRequest(req.params?.id)?.agent || '';
+const requireApprovalBridgeSecret = (req, res, next) => {
+  if (!getBridgeSecret()) {
+    return res.status(503).json({ error: 'MATRIX_BRIDGE_SECRET is required for approval authorization' });
+  }
+  return requireBridgeSecret(req, res, next);
+};
+
+// Only the authenticated Matrix bridge can assert room-scoped owner provenance.
+app.put('/api/approval-bindings', requireApprovalBridgeSecret, (req, res) => {
+  try {
+    const binding = approvalStore.upsertBinding(req.body || {});
+    return res.json({ ok: true, binding });
+  } catch (error) {
+    return respondApprovalStoreError(res, error, 'failed to persist approval binding');
+  }
+});
+
+app.delete('/api/approval-bindings/:agent/:roomId', requireApprovalBridgeSecret, (req, res) => {
+  try {
+    const binding = approvalStore.removeBinding(req.params.agent, req.params.roomId);
+    if (!binding) return res.status(404).json({ error: 'approval binding not found' });
+    return res.json({ ok: true, binding });
+  } catch (error) {
+    return respondApprovalStoreError(res, error, 'failed to remove approval binding');
+  }
+});
+
+app.get('/api/approval-bindings', requireApprovalBridgeSecret, (req, res) => {
+  try {
+    return res.json({
+      ok: true,
+      bindings: approvalStore.listBindings({ agent: req.query?.agent, project: req.query?.project }),
+    });
+  } catch (error) {
+    return respondApprovalStoreError(res, error, 'failed to list approval bindings');
+  }
+});
+
+app.post('/api/approvals', requireAgentToken(_tokenFromApprovalBody), (req, res) => {
+  try {
+    const record = approvalStore.createRequest(req.body || {});
+    if (record.status === 'pending') {
+      // Tool details never enter the shared SSE stream. The bridge fetches them
+      // through the secret-authenticated Matrix endpoint below.
+      broadcastSSE('approval_requested', { request_id: record.id, agent: record.agent });
+    }
+    return res.status(record.status === 'pending' ? 201 : 200).json({ ok: true, approval: record });
+  } catch (error) {
+    return respondApprovalStoreError(res, error, 'failed to create approval request');
+  }
+});
+
+app.get('/api/approvals/:id', requireAgentToken(_tokenFromApprovalRecord), (req, res) => {
+  try {
+    const record = approvalStore.getRequest(req.params.id);
+    if (!record) return res.status(404).json({ error: 'approval request not found' });
+    return res.json({ ok: true, approval: record });
+  } catch (error) {
+    return respondApprovalStoreError(res, error, 'failed to read approval request');
+  }
+});
+
+app.get('/api/approvals/:id/matrix', requireApprovalBridgeSecret, (req, res) => {
+  try {
+    const record = approvalStore.getRequest(req.params.id, { matrix: true });
+    if (!record) return res.status(404).json({ error: 'approval request not found' });
+    return res.json({ ok: true, approval: record });
+  } catch (error) {
+    return respondApprovalStoreError(res, error, 'failed to read Matrix approval request');
+  }
+});
+
+app.post('/api/approvals/:id/verdict', requireApprovalBridgeSecret, (req, res) => {
+  try {
+    const result = approvalStore.submitMatrixVerdict(req.params.id, req.body || {});
+    if (!result.record && result.code === 'not_found') {
+      return res.status(404).json({ error: 'approval request not found', code: result.code });
+    }
+    if (!result.ok) {
+      const status = result.code === 'expired' ? 410 : (result.code === 'not_pending' ? 409 : 403);
+      return res.status(status).json({ error: 'approval verdict rejected', code: result.code, approval: result.record });
+    }
+    broadcastSSE('approval_verdict', {
+      request_id: result.record.id,
+      agent: result.record.agent,
+      status: result.record.status,
+    });
+    return res.json({ ok: true, approval: result.record });
+  } catch (error) {
+    return respondApprovalStoreError(res, error, 'failed to apply approval verdict');
+  }
+});
+
+app.post('/api/approvals/:id/delivery-failed', requireApprovalBridgeSecret, (req, res) => {
+  try {
+    const record = approvalStore.denyPending(req.params.id, req.body?.reason || 'matrix_delivery_failed');
+    if (!record) return res.status(404).json({ error: 'approval request not found' });
+    broadcastSSE('approval_verdict', { request_id: record.id, agent: record.agent, status: record.status });
+    return res.json({ ok: true, approval: record });
+  } catch (error) {
+    return respondApprovalStoreError(res, error, 'failed to deny undeliverable approval');
+  }
+});
+
+app.post('/api/approvals/:id/consume', requireAgentToken(_tokenFromApprovalRecord), (req, res) => {
+  try {
+    const result = approvalStore.consumeDecision(
+      req.params.id,
+      req.body?.agent,
+      req.body?.input_digest || null,
+    );
+    if (!result.record && result.code === 'not_found') {
+      return res.status(404).json({ error: 'approval request not found', code: result.code });
+    }
+    if (!result.ok) {
+      const status = result.code === 'pending' ? 202 : (result.code === 'expired' ? 410 : 409);
+      return res.status(status).json({ ok: false, code: result.code, approval: result.record });
+    }
+    return res.json({ ok: true, decision: result.decision, approval: result.record });
+  } catch (error) {
+    return respondApprovalStoreError(res, error, 'failed to consume approval decision');
+  }
+});
+
 // ── Agents CRUD ───────────────────────────────────────────────────────
 const _tokenFromBody = r => r.body?.from || r.body?.name || '';
 const _tokenFromName = r => r.params?.name || '';
@@ -10472,9 +10616,10 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) =>
   }
 
   const warnings = [];
+  const notices = [];
   if (msg.to && directTargetKind === 'human' && assumedHumanTarget) {
-    warnings.push({
-      code: 'target_assumed_human',
+    notices.push({
+      code: 'target_classified_human',
       target: msg.to,
       reason: 'unknown-target-treated-as-human',
     });
@@ -10536,6 +10681,7 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) =>
     ok: true,
     id: msg.id,
     warnings,
+    notices,
     delivery: { suppressed: msg.suppressedRecipients || [], targetKind: directTargetKind || null },
     taskGraph: null,
   };
@@ -10568,6 +10714,7 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) =>
       id: msg.id,
       messageAccepted: true,
       warnings,
+      notices,
       delivery: { suppressed: msg.suppressedRecipients || [], targetKind: directTargetKind || null },
       taskGraph: null,
     });
@@ -11184,6 +11331,7 @@ export const __backendV2TestInternals = {
     matrixDispatchFailureStageForTest = stage;
   },
   dispatchLeaseStoreForTest: dispatchLeaseStore,
+  approvalStoreForTest: approvalStore,
   dispatchQueuesForTest: dispatchQueues,
   sweepLocalActivityDurationsForTest: sweepLocalActivityDurations,
 };

@@ -183,7 +183,8 @@ set_env_value() {
   local escaped
   escaped="$(printf '%s' "$value" | sed 's/[&|]/\\&/g')"
   if grep -q "^${key}=" "$file"; then
-    sed -i "s|^${key}=.*|${key}=${escaped}|" "$file"
+    sed -i.bak "s|^${key}=.*|${key}=${escaped}|" "$file"
+    rm -f "${file}.bak"
   else
     printf '%s=%s\n' "$key" "$value" >> "$file"
   fi
@@ -249,7 +250,7 @@ link_cli_commands() {
       log "Backed up existing $target to $backup"
     fi
     run ln -sfn "$cmd" "$target"
-  done < <(find "$INSTALL_DIR/bin" -maxdepth 1 -type f -perm /111 | sort)
+  done < <(find "$INSTALL_DIR/bin" -maxdepth 1 -type f -perm -111 | sort)
 
   case ":$PATH:" in
     *":$BIN_DIR:"*) ;;

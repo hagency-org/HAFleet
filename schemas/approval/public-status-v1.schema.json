@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentchat.local/schemas/approval/public-status-v1.schema.json",
+  "title": "Agent Chat public approval status v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["msgtype", "body", "com.agentchat.approval"],
+  "properties": {
+    "msgtype": { "const": "com.agentchat.approval.status.v1" },
+    "body": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "com.agentchat.approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "kind", "agent", "project", "state"],
+      "properties": {
+        "version": { "const": 1 },
+        "kind": { "const": "status" },
+        "agent": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "state": { "const": "waiting_for_owner" }
+      }
+    }
+  }
+}

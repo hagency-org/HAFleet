@@ -49,6 +49,16 @@ The supervisor-local sibling workspace lives at `../supervisor/`. It keeps super
 | Root `AGENTS.md` | Framework entry file equivalent to `CLAUDE.md` | No — system-provisioned |
 | Root `CLAUDE.md` | Framework entry file equivalent to `AGENTS.md` | No — system-provisioned |
 
+## Spec-governed projects
+
+When a managed project contains `specs/project.spec.md`, read it and the relevant
+accepted artifacts under `knowledge/` before changing code. Use the installed
+latest `agent-spec` to parse and lint the active Task Contract, stay inside its
+declared boundaries, run the bound project tests, and record lifecycle output.
+Never reinterpret a `fail`, `skip`, or `uncertain` scenario as passing. In a
+Node/Vitest project, agent-spec 1.2 lifecycle remains Cargo-only, so run exact
+Vitest selectors separately and report the lifecycle limitation honestly.
+
 ## Working rules
 - Record durable knowledge in `docs/agent-knowledge.md`.
 - Record task progress in `docs/progress.md`.

@@ -42,6 +42,9 @@ DATA_DIR=""
 SUBCONSCIOUS_SETUP_SCRIPT="$BASE_DIR/scripts/configure-v1-subconscious.js"
 LAUNCH_POLICY_CHECK="$BASE_DIR/scripts/validate-agent-launch-extra-args.js"
 SANDBOX_ROOTS_RESOLVER="$BASE_DIR/scripts/resolve-agent-sandbox-roots.js"
+CODEX_APPROVAL_HOOK="$BASE_DIR/lib/codex-permission-hook.js"
+CODEX_HOOK_TRUST_PREFLIGHT="$BASE_DIR/lib/codex-hook-trust.js"
+CODEX_PROJECT_TRUST_HELPER="$BASE_DIR/lib/codex-project-trust.js"
 
 # Load .env if present
 ENV_FILE="$BASE_DIR/.env"
@@ -485,6 +488,7 @@ AGENT_DATA="$DATA_DIR/$NAME"
 META_FILE="$AGENT_DATA/meta.json"
 RESUME_FILE="$AGENT_DATA/resume-id"
 TMP_RUNTIME_DIR="$AGENT_DATA/tmp"
+MANAGED_RUNTIME_PID_FILE="$AGENT_DATA/managed-runtime.pid"
 
 # Auto-detect first-time agent: no meta AND no resume-id => fresh start.
 # If resume-id already exists (e.g. recovered via agent-down), keep resume path.
@@ -1092,7 +1096,8 @@ ensure_claude_project_trust() {
 
   local status
   status="$(
-    CLAUDE_JSON_PATH="$HOME/.claude.json" AGENT_PATH="$AGENT_PATH" python3 - <<'PY'
+    CLAUDE_JSON_PATH="$HOME/.claude.json" AGENT_PATH="$AGENT_PATH" \
+      MCP_SERVER_NAME_VALUE="$MCP_SERVER_NAME" python3 - <<'PY'
 import json
 import os
 import pathlib
@@ -1102,6 +1107,7 @@ import time
 
 claude_json_path = pathlib.Path(os.environ["CLAUDE_JSON_PATH"]).expanduser()
 agent_path = pathlib.Path(os.environ["AGENT_PATH"]).resolve()
+mcp_server_name = os.environ["MCP_SERVER_NAME_VALUE"].strip()
 claude_json_path.parent.mkdir(parents=True, exist_ok=True)
 
 if claude_json_path.exists():
@@ -1143,6 +1149,26 @@ for key, value in defaults.items():
     if key not in entry:
         entry[key] = value
         changed = True
+
+enabled_mcp_servers = entry.get("enabledMcpjsonServers")
+if not isinstance(enabled_mcp_servers, list):
+    enabled_mcp_servers = []
+    entry["enabledMcpjsonServers"] = enabled_mcp_servers
+    changed = True
+if mcp_server_name and mcp_server_name not in enabled_mcp_servers:
+    enabled_mcp_servers.append(mcp_server_name)
+    changed = True
+
+disabled_mcp_servers = entry.get("disabledMcpjsonServers")
+if not isinstance(disabled_mcp_servers, list):
+    disabled_mcp_servers = []
+    entry["disabledMcpjsonServers"] = disabled_mcp_servers
+    changed = True
+if mcp_server_name in disabled_mcp_servers:
+    entry["disabledMcpjsonServers"] = [
+        name for name in disabled_mcp_servers if name != mcp_server_name
+    ]
+    changed = True
 
 if entry.get("hasTrustDialogAccepted") is not True:
     entry["hasTrustDialogAccepted"] = True
@@ -1191,115 +1217,24 @@ ensure_codex_project_trust() {
   [ -n "${AGENT_PATH:-}" ] || return 0
 
   local status
-  status="$(
-    CODEX_CONFIG="$HOME/.codex/config.toml" AGENT_PATH="$AGENT_PATH" python3 - <<'PY'
-import os
-import pathlib
-import re
-import shutil
-import tempfile
-import time
-try:
-    import tomllib
-except ModuleNotFoundError:
-    try:
-        import tomli as tomllib
-    except ModuleNotFoundError:
-        tomllib = None
-
-config_path = pathlib.Path(os.environ["CODEX_CONFIG"]).expanduser()
-agent_path = str(pathlib.Path(os.environ["AGENT_PATH"]).resolve())
-config_path.parent.mkdir(parents=True, exist_ok=True)
-
-# Escape backslashes and double quotes for TOML basic string key
-escaped_path = agent_path.replace("\\", "\\\\").replace('"', '\\"')
-section_header = f'[projects."{escaped_path}"]'
-trust_line = 'trust_level = "trusted"'
-
-if config_path.exists():
-    raw = config_path.read_text(encoding="utf-8")
-    # Validate TOML before modifying
-    if tomllib is not None:
-        try:
-            data = tomllib.loads(raw)
-        except Exception as exc:
-            print(f"error:config.toml is malformed TOML: {exc}")
-            raise SystemExit(0)
-    else:
-        data = {}
-
-    # Check if already trusted via parsed data
-    projects = data.get("projects", {})
-    entry = projects.get(agent_path)
-    if isinstance(entry, dict) and entry.get("trust_level") == "trusted":
-        print("already")
-        raise SystemExit(0)
-
-    # Section exists but trust_level differs — update in-place
-    if isinstance(entry, dict):
-        lines = raw.splitlines(keepends=True)
-        out = []
-        in_section = False
-        replaced = False
-        for line in lines:
-            stripped = line.strip()
-            if stripped == section_header:
-                in_section = True
-                out.append(line)
-                continue
-            if in_section and stripped.startswith("["):
-                in_section = False
-            if in_section and not stripped.startswith("#") and re.match(r'^trust_level\s*=', stripped):
-                out.append(f'{trust_line}\n')
-                replaced = True
-                in_section = False
-            else:
-                out.append(line)
-        if not replaced:
-            # trust_level key missing from section — add it after header
-            out2 = []
-            found = False
-            for line in out:
-                out2.append(line)
-                if not found and line.strip() == section_header:
-                    out2.append(f'{trust_line}\n')
-                    found = True
-            out = out2
-        content = "".join(out)
-    else:
-        # No section — append
-        content = raw
-        if not content.endswith("\n") and content:
-            content += "\n"
-        content += f"\n{section_header}\n{trust_line}\n"
-else:
-    content = f"{section_header}\n{trust_line}\n"
-
-# Backup and atomic write
-backup_dir = config_path.parent / "backups"
-backup_dir.mkdir(parents=True, exist_ok=True)
-if config_path.exists():
-    backup_path = backup_dir / f"config.toml.backup.{int(time.time() * 1000)}"
-    shutil.copy2(config_path, backup_path)
-
-with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(config_path.parent), delete=False) as handle:
-    handle.write(content)
-    temp_name = handle.name
-os.replace(temp_name, config_path)
-print("updated")
-PY
-  )"
+  if ! status="$(node "$CODEX_PROJECT_TRUST_HELPER" \
+    --config "$HOME/.codex/config.toml" \
+    --cwd "$AGENT_PATH")"; then
+    echo "Error: failed to prepare Codex project trust for '$AGENT_PATH'." >&2
+    return 1
+  fi
   case "$status" in
     updated)
       echo "Pre-accepted Codex trust for '$AGENT_PATH'."
       ;;
+    deduplicated)
+      echo "Repaired duplicate Codex project trust for '$AGENT_PATH'."
+      ;;
     already)
       ;;
-    error:*)
-      echo "Warning: failed to pre-accept Codex trust for '$AGENT_PATH': ${status#error:}" >&2
-      ;;
     *)
-      echo "Warning: unexpected Codex trust status for '$AGENT_PATH': ${status:-empty}" >&2
+      echo "Error: unexpected Codex trust status for '$AGENT_PATH': ${status:-empty}" >&2
+      return 1
       ;;
   esac
 }
@@ -1367,8 +1302,30 @@ if [ "$TYPE" = "codex" ] && [ "$FRESH" = false ]; then
 fi
 
 # ── Check existing session ───────────────────────────────────────────
+managed_runtime_marker_is_live() {
+  [ -f "$MANAGED_RUNTIME_PID_FILE" ] || return 1
+  local runtime_pid pane_pid cursor_pid
+  runtime_pid="$(tr -d '[:space:]' < "$MANAGED_RUNTIME_PID_FILE" 2>/dev/null || true)"
+  [[ "$runtime_pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$runtime_pid" 2>/dev/null || return 1
+  pane_pid="$(tmux display-message -p -t "$TMUX_PANE_TARGET" '#{pane_pid}' 2>/dev/null || true)"
+  [[ "$pane_pid" =~ ^[0-9]+$ ]] || return 1
+  cursor_pid="$runtime_pid"
+  while [[ "$cursor_pid" =~ ^[0-9]+$ ]] && [ "$cursor_pid" -gt 1 ]; do
+    [ "$cursor_pid" = "$pane_pid" ] && return 0
+    cursor_pid="$(ps -o ppid= -p "$cursor_pid" 2>/dev/null | tr -d ' ' || true)"
+  done
+  return 1
+}
+
 if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
-  # Keep backend online mapping fresh even when session was started outside agent-up.
+  if ! managed_runtime_marker_is_live; then
+    echo "Error: tmux session '$NAME' is not running through the managed Agent Chat launcher." >&2
+    echo "A manually reopened runtime can lose auto mode or the owner approval adapter." >&2
+    echo "Restart it with: bin/agentchat down $(printf '%q' "$NAME") && bin/agentchat up $(printf '%q' "$NAME")" >&2
+    exit 1
+  fi
+  # Keep the backend mapping fresh for a verified managed runtime.
   register_backend_agent
   if [ "$ATTACH" = true ]; then
     exec tmux attach -t "$TMUX_TARGET"
@@ -1520,14 +1477,6 @@ with open(os.environ["META_FILE"], "w") as f:
 PY
 fi
 
-# ── Create tmux session ──────────────────────────────────────────────
-echo "Creating tmux session '$NAME' in $AGENT_PATH..."
-create_tmux_session
-if [ -n "$SCOPE_UNIT" ]; then
-  echo "  Scope:  $SCOPE_UNIT"
-fi
-register_backend_agent
-
 shell_quote() {
   printf "%q" "$1"
 }
@@ -1535,12 +1484,15 @@ shell_quote() {
 write_launch_script() {
   local target="$1"
   local command="$2"
-  local launch_env_quoted
+  local launch_env_quoted runtime_pid_file_quoted
   launch_env_quoted="$(shell_quote "$LAUNCH_ENV_FILE")"
+  runtime_pid_file_quoted="$(shell_quote "$MANAGED_RUNTIME_PID_FILE")"
   {
     printf '#!/usr/bin/env bash\n'
     printf 'set -euo pipefail\n'
     printf 'source %s\n' "$launch_env_quoted"
+    printf 'printf "%%s\\n" "$$" > %s\n' "$runtime_pid_file_quoted"
+    printf 'chmod 600 %s\n' "$runtime_pid_file_quoted"
     printf '%s\n' "$command"
   } > "$target"
   chmod 700 "$target"
@@ -1646,6 +1598,12 @@ configure_v1_subconscious
 LAUNCH_ENV_FILE="$AGENT_DATA/launch-env.sh"
 : > "$LAUNCH_ENV_FILE"
 chmod 600 "$LAUNCH_ENV_FILE"
+# A caller's shell may contain a stale Anthropic key that overrides Claude's
+# authenticated subscription. Only an explicit per-agent runtime profile may
+# select API-key authentication; otherwise make the managed launch deterministic.
+if [ "$TYPE" = "claude" ] && [ -z "${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY:-}" ]; then
+  printf 'unset ANTHROPIC_API_KEY\n' >> "$LAUNCH_ENV_FILE"
+fi
 write_launch_env "AGENTCHAT_AGENT_SANDBOX" "1"
 if [ "$TYPE" = "claude" ]; then
   write_launch_env "AGENTCHAT_AGENT_PERMISSION_MODE" "auto"
@@ -1709,6 +1667,128 @@ if [ "$IS_V1_AGENT" = "1" ]; then
   fi
 fi
 
+ensure_claude_owner_approval_ask_rules() {
+  local settings_dir="$AGENT_PATH/.claude"
+  local settings_file="$settings_dir/settings.json"
+  mkdir -p "$settings_dir"
+  AGENTCHAT_CLAUDE_SETTINGS_FILE="$settings_file" python3 - <<'PY'
+import json
+import os
+import pathlib
+import tempfile
+
+settings_file = pathlib.Path(os.environ["AGENTCHAT_CLAUDE_SETTINGS_FILE"])
+required_rules = [
+    "Bash(gh *)",
+    "Bash(git push *)",
+]
+
+if settings_file.exists():
+    try:
+        settings = json.loads(settings_file.read_text(encoding="utf-8"))
+    except Exception as error:
+        raise SystemExit(f"Refusing to overwrite invalid Claude settings {settings_file}: {error}")
+else:
+    settings = {}
+
+if not isinstance(settings, dict):
+    raise SystemExit(f"Refusing to overwrite non-object Claude settings {settings_file}")
+permissions = settings.setdefault("permissions", {})
+if not isinstance(permissions, dict):
+    raise SystemExit(f"Refusing to overwrite non-object permissions in {settings_file}")
+ask = permissions.setdefault("ask", [])
+if not isinstance(ask, list) or any(not isinstance(rule, str) for rule in ask):
+    raise SystemExit(f"Refusing to overwrite invalid permissions.ask in {settings_file}")
+
+changed = False
+for rule in required_rules:
+    if rule not in ask:
+        ask.append(rule)
+        changed = True
+if not changed:
+    raise SystemExit(0)
+
+settings_dir = settings_file.parent
+with tempfile.NamedTemporaryFile(
+    mode="w",
+    encoding="utf-8",
+    dir=settings_dir,
+    prefix=f".{settings_file.name}.",
+    suffix=".tmp",
+    delete=False,
+) as temporary:
+    json.dump(settings, temporary, indent=2)
+    temporary.write("\n")
+    temporary.flush()
+    os.fsync(temporary.fileno())
+    temporary_path = pathlib.Path(temporary.name)
+os.chmod(temporary_path, 0o600)
+os.replace(temporary_path, settings_file)
+print(f"Installed Claude owner-approval ask rules in {settings_file}")
+PY
+}
+
+preflight_runtime_approval_adapter() {
+  local approval_state_dir approval_token_file
+  approval_state_dir="${SAVED_STATE_DIR:-${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}/agents/agent_${NAME}/state}"
+  approval_token_file="$approval_state_dir/agent-token"
+  if [ ! -s "$approval_token_file" ]; then
+    echo "Error: owner-approval agent token is unavailable at $approval_token_file." >&2
+    echo "Provision the managed agent identity before starting its coding runtime." >&2
+    return 1
+  fi
+
+  if [ "$TYPE" = "claude" ]; then
+    if [ "${AGENTCHAT_CLAUDE_PERMISSION_CHANNEL:-true}" = "false" ]; then
+      echo "Error: managed Claude background agents require the owner approval channel." >&2
+      echo "Unset AGENTCHAT_CLAUDE_PERMISSION_CHANNEL=false and start again." >&2
+      return 1
+    fi
+    if ! command -v claude >/dev/null 2>&1; then
+      echo "Error: Claude Code is not installed or not available on PATH." >&2
+      return 1
+    fi
+    if ! claude --help 2>&1 | grep -F -- '--permission-mode' >/dev/null; then
+      echo "Error: this Claude Code version does not support managed auto-mode approval." >&2
+      return 1
+    fi
+    if [ ! -f "$AGENT_PATH/.mcp.json" ] && [ ! -f /etc/claude-code/managed-mcp.json ]; then
+      echo "Error: Claude owner-approval MCP configuration is unavailable." >&2
+      return 1
+    fi
+    ensure_claude_owner_approval_ask_rules
+    echo "Claude owner-approval channel preflight passed."
+    return 0
+  fi
+
+  if [ "${AGENTCHAT_CODEX_PERMISSION_HOOK:-true}" = "false" ]; then
+    echo "Error: managed Codex background agents require the owner approval hook." >&2
+    echo "Unset AGENTCHAT_CODEX_PERMISSION_HOOK=false and start again." >&2
+    return 1
+  fi
+  if [ ! -f "$CODEX_APPROVAL_HOOK" ] || [ ! -f "$CODEX_HOOK_TRUST_PREFLIGHT" ]; then
+    echo "Error: Codex owner-approval hook or trust preflight helper is unavailable." >&2
+    return 1
+  fi
+  CODEX_APPROVAL_HOOK_CONFIG_FILE="$AGENT_DATA/codex-approval-hook.json"
+  node "$CODEX_HOOK_TRUST_PREFLIGHT" \
+    --cwd "$AGENT_PATH" \
+    --hook "$CODEX_APPROVAL_HOOK" \
+    --output "$CODEX_APPROVAL_HOOK_CONFIG_FILE"
+}
+
+# Approval adapters must be usable before a detached terminal exists. A
+# preflight failure here leaves no hidden runtime prompt behind in tmux.
+preflight_runtime_approval_adapter
+
+# ── Create tmux session ──────────────────────────────────────────────
+echo "Creating tmux session '$NAME' in $AGENT_PATH..."
+create_tmux_session
+if [ -n "$SCOPE_UNIT" ]; then
+  echo "  Scope:  $SCOPE_UNIT"
+fi
+register_backend_agent
+
 # ── Build init prompt for fresh starts ────────────────────────────────
 INIT_PROMPT="Your name is ${NAME}. You have an MCP tool server called '${MCP_SERVER_NAME}' for communicating with other agents and humans. Key tools: check_inbox() to read messages, send_message(to, summary, full) to DM, post(group, summary, full, mentions) for group messages, whoami() to see your identity and available agents/groups. Check your inbox now to see if there are any messages for you."
 CLAUDE_MODE_GUARD="Critical runtime rule: do not enter Plan mode or Select mode in this multi-agent tmux environment, because interactive mode switching cannot be completed. Stay in default mode and continue execution directly. Save this rule in memory and follow it for the whole session."
@@ -1757,6 +1837,11 @@ fi
 if [ "$TYPE" = "claude" ]; then
   INIT_PROMPT="$INIT_PROMPT $CLAUDE_MODE_GUARD"
   CLAUDE_FLAGS="--permission-mode auto"
+  if [ "${AGENTCHAT_CLAUDE_PERMISSION_CHANNEL:-true}" != "false" ]; then
+    # Custom bare-server channels remain outside Anthropic's research-preview
+    # allowlist. This opts in only the exact local Agent Chat server.
+    CLAUDE_FLAGS="$CLAUDE_FLAGS --dangerously-load-development-channels $(shell_quote "server:$MCP_SERVER_NAME")"
+  fi
   while IFS= read -r _managed_project_path; do
     [ -n "$_managed_project_path" ] || continue
     CLAUDE_FLAGS="$CLAUDE_FLAGS --add-dir=$(shell_quote "$_managed_project_path")"
@@ -1781,7 +1866,7 @@ if [ "$TYPE" = "claude" ]; then
     echo "Resuming claude session: $RID"
     CLAUDE_LAUNCH_SCRIPT="$TMP_RUNTIME_DIR/launch-claude.sh"
     write_launch_script "$CLAUDE_LAUNCH_SCRIPT" "exec claude --resume $(shell_quote "$RID") $CLAUDE_FLAGS"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "$(shell_quote "$CLAUDE_LAUNCH_SCRIPT")" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "exec $(shell_quote "$CLAUDE_LAUNCH_SCRIPT")" Enter
   else
     echo "Starting new claude session..."
     # Write init prompt to temp file to avoid shell escaping issues.
@@ -1790,7 +1875,7 @@ if [ "$TYPE" = "claude" ]; then
     echo "$INIT_PROMPT" > "$INIT_FILE"
     CLAUDE_LAUNCH_SCRIPT="$TMP_RUNTIME_DIR/launch-claude.sh"
     write_launch_script "$CLAUDE_LAUNCH_SCRIPT" "claude --session-id $(shell_quote "$SESSION_ID") $CLAUDE_FLAGS -- \"\$(cat $(shell_quote "$INIT_FILE"))\"; status=\$?; rm -f $(shell_quote "$INIT_FILE"); exit \$status"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "$(shell_quote "$CLAUDE_LAUNCH_SCRIPT")" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "exec $(shell_quote "$CLAUDE_LAUNCH_SCRIPT")" Enter
     ( sleep 300; rm -f "$INIT_FILE" >/dev/null 2>&1 || true ) &
     capture_resume_id_background "claude"
   fi
@@ -1834,6 +1919,13 @@ elif [ "$TYPE" = "codex" ]; then
   }
   codex_mcp_config "mcp_servers.${CODEX_MCP_NAME}.command" "$(codex_toml_string "node")"
   codex_mcp_config "mcp_servers.${CODEX_MCP_NAME}.args" "[$(codex_toml_string "$CODEX_MCP_SERVER_JS")]"
+  CODEX_APPROVAL_HOOK_TOML="$(node -e '
+const fs = require("fs");
+const prepared = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (prepared.version !== 1 || typeof prepared.hookToml !== "string" || !prepared.hookToml) process.exit(1);
+process.stdout.write(prepared.hookToml);
+' "$CODEX_APPROVAL_HOOK_CONFIG_FILE")"
+  codex_mcp_config "hooks.PermissionRequest" "$CODEX_APPROVAL_HOOK_TOML"
   codex_mcp_env AGENT_NAME "$NAME"
   codex_mcp_env AGENT_CHAT_API "$BACKEND_URL"
   codex_mcp_env AGENT_CHAT_BACKEND_PORT "$BACKEND_PORT"
@@ -1854,7 +1946,7 @@ elif [ "$TYPE" = "codex" ]; then
     echo "Resuming codex session: $RID"
     CODEX_LAUNCH_SCRIPT="$TMP_RUNTIME_DIR/launch-codex.sh"
     write_launch_script "$CODEX_LAUNCH_SCRIPT" "exec codex resume $(shell_quote "$RID") $CODEX_FLAGS"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "$(shell_quote "$CODEX_LAUNCH_SCRIPT")" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "exec $(shell_quote "$CODEX_LAUNCH_SCRIPT")" Enter
   else
     CODEX_BASELINE_FILE=$(mktemp "$TMP_RUNTIME_DIR/codex-baseline.XXXXXX")
     snapshot_codex_session_ids "$CODEX_BASELINE_FILE"
@@ -1866,7 +1958,7 @@ elif [ "$TYPE" = "codex" ]; then
     echo "$INIT_PROMPT" > "$CODEX_INIT_FILE"
     CODEX_LAUNCH_SCRIPT="$TMP_RUNTIME_DIR/launch-codex.sh"
     write_launch_script "$CODEX_LAUNCH_SCRIPT" "codex $CODEX_FLAGS -- \"\$(cat $(shell_quote "$CODEX_INIT_FILE"))\"; status=\$?; rm -f $(shell_quote "$CODEX_INIT_FILE"); exit \$status"
-    tmux send-keys -t "$TMUX_PANE_TARGET" "$(shell_quote "$CODEX_LAUNCH_SCRIPT")" Enter
+    tmux send-keys -t "$TMUX_PANE_TARGET" "exec $(shell_quote "$CODEX_LAUNCH_SCRIPT")" Enter
     ( sleep 300; rm -f "$CODEX_INIT_FILE" >/dev/null 2>&1 || true ) &
     # Keep this in foreground for codex to avoid losing resume capture on shell exit/reboot.
     if ! capture_resume_id_from_pane 12; then
