@@ -36,7 +36,7 @@ Agentchat supports two agent frameworks: **claude** (Anthropic Claude Code) and 
 | Resume-ID required on shutdown | Yes — agent-down refuses without it | No |
 | CLAUDE.md / AGENTS.md | Read automatically | Read automatically (as AGENTS.md) |
 | Context management | Env vars (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`) | `config.toml` or `-c` flags |
-| Subconscious hooks | Supported via `hooks.json` | Not supported |
+| Lifecycle hooks | Claude hooks plus MCP Channel permission relay | Stable `PermissionRequest` hook |
 
 Source: `bin/agent-up:552-575` (framework detection), `bin/agent-up:1641-1654` (Claude launch), `bin/agent-up:1659-1694` (Codex launch).
 
@@ -44,10 +44,12 @@ Source: `bin/agent-up:552-575` (framework detection), `bin/agent-up:1641-1654` (
 
 ```bash
 claude --resume "$RESUME_ID" \
-       --permission-mode auto
+       --permission-mode auto \
+       --dangerously-load-development-channels server:agent-chat
 # OR for new sessions:
 claude --session-id "$SESSION_ID" \
-       --permission-mode auto
+       --permission-mode auto \
+       --dangerously-load-development-channels server:agent-chat
 ```
 
 Key env vars injected: `ANTHROPIC_MODEL`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `DISABLE_PROMPT_CACHING`, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`.
@@ -71,6 +73,14 @@ codex --sandbox workspace-write \
 ```
 
 MCP is configured via `-c` flags rather than a built-in mechanism. Agent Chat calls the Codex policy above **Level 2**: the agent can edit its workspace and explicitly bound managed projects, while operations outside that sandbox require approval. Launchers reject `extraArgs` that try to override the managed sandbox or approval policy.
+
+The launcher also installs a session-scoped `hooks.PermissionRequest` command
+hook through `-c`. Before starting Codex, agent-chat inspects that exact hook
+through Codex App Server. An untrusted definition requires a one-time local TTY
+confirmation (`TRUST`) written through Codex's official configuration API;
+non-interactive startup fails closed instead of leaving a hidden TUI prompt.
+The hook never types into the TUI. It returns only Codex's documented allow/deny
+JSON after agent-chat consumes an owner-authorized Matrix verdict.
 
 Source: `bin/agent-up:1659-1694`, `bin/agent-up:1502-1530` (Codex MCP flag construction).
 

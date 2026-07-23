@@ -83,6 +83,10 @@ MANAGED_SPECS=(
   "lib/server-identity.js:lib/server-identity.js"
   "lib/push-relay-core.js:lib/push-relay-core.js"
   "lib/mcp-server-core.js:lib/mcp-server-core.js"
+  "lib/runtime-approval-client.js:lib/runtime-approval-client.js"
+  "lib/codex-hook-trust.js:lib/codex-hook-trust.js"
+  "lib/codex-project-trust.js:lib/codex-project-trust.js"
+  "lib/codex-permission-hook.js:lib/codex-permission-hook.js"
   "scripts/validate-agent-launch-extra-args.js:scripts/validate-agent-launch-extra-args.js"
   "scripts/resolve-agent-sandbox-roots.js:scripts/resolve-agent-sandbox-roots.js"
 )

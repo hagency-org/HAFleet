@@ -22,10 +22,14 @@ describe('runtime parity regressions', () => {
       expect(source).toContain('mcp_servers.${CODEX_MCP_NAME}.args');
       expect(source).toContain('codex_mcp_env API_TOKEN "${API_TOKEN:-}"');
       expect(source).toContain('codex_mcp_env AGENTCHAT_HOMEDIR "${AGENTCHAT_HOMEDIR:-}"');
-      expect(source).toContain('tmux send-keys -t "$TMUX_PANE_TARGET" "$(shell_quote "$CODEX_LAUNCH_SCRIPT")" Enter');
+      expect(source).toContain('tmux send-keys -t "$TMUX_PANE_TARGET" "exec $(shell_quote "$CODEX_LAUNCH_SCRIPT")" Enter');
+      expect(source).toContain('MANAGED_RUNTIME_PID_FILE="$AGENT_DATA/managed-runtime.pid"');
+      expect(source).toContain('preflight_runtime_approval_adapter');
       expect(source).toContain('CODEX_INIT_FILE=$(mktemp "$TMP_RUNTIME_DIR/init-codex.XXXXXX")');
       expect(source).toContain('CLAUDE_FLAGS="--permission-mode auto"');
       expect(source).toContain('CODEX_FLAGS="--sandbox workspace-write --ask-for-approval on-request -C $(shell_quote "$AGENT_PATH")"');
+      expect(source).toContain("printf 'unset ANTHROPIC_API_KEY");
+      expect(source).toContain('write_launch_env "ANTHROPIC_API_KEY" "$SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY"');
       expect(source).toContain('node "$LAUNCH_POLICY_CHECK" "$TYPE" "$EXTRA_ARGS"');
       expect(source).toContain('CLAUDE_FLAGS="$CLAUDE_FLAGS $SAFE_EXTRA_ARGS"');
       expect(source).toContain('CODEX_FLAGS="$CODEX_FLAGS $SAFE_EXTRA_ARGS"');

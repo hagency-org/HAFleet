@@ -6,7 +6,7 @@ const envSnapshot = snapshotEnv(['MATRIX_OPERATOR_MXIDS', 'MATRIX_ADMIN_MXIDS'])
 process.env.MATRIX_OPERATOR_MXIDS = '@ops:matrix.test,@dev:matrix.test';
 process.env.MATRIX_ADMIN_MXIDS = '@root:matrix.test';
 
-const { default: BotCommands, classifyCommand, authorizeCommand, COMMAND_TIERS } = await import('../lib/bot-commands.js');
+const { default: BotCommands, classifyCommand, authorizeCommand, isAgentControlBlockedContext, COMMAND_TIERS } = await import('../lib/bot-commands.js');
 
 describe('command ACL (5.8.2)', () => {
   afterAll(() => {
@@ -69,6 +69,30 @@ describe('command ACL (5.8.2)', () => {
   });
 
   describe('handle() ACL integration', () => {
+    test('public_room_ctl_cannot_bypass_approval', async () => {
+      const replies = [];
+      const bot = new BotCommands({
+        botClient: { sendMessage: vi.fn(async (_roomId, content) => replies.push(content)) },
+        bridge: {},
+        botUserId: '@bot:matrix.test',
+      });
+
+      for (const command of ['!ctl status', '!ctl send y', '!ctl key Enter', '!agentctl wf_coordinator key Enter']) {
+        await bot.handle('!project:matrix.test', '@root:matrix.test', command, {
+          groupName: 'robrix2',
+          targetAgent: 'wf_coordinator',
+        });
+      }
+
+      expect(replies).toHaveLength(4);
+      expect(replies.every(row => row.body.includes('terminal control is unavailable'))).toBe(true);
+    });
+
+    test('approval room blocks generic terminal control too', () => {
+      expect(isAgentControlBlockedContext({ approvalRoom: true })).toBe(true);
+      expect(isAgentControlBlockedContext({ targetAgent: 'wf_coordinator' })).toBe(false);
+    });
+
     test('unauthorized user gets denial message for operator command', async () => {
       const replies = [];
       const bot = new BotCommands({
@@ -106,5 +130,6 @@ describe('command ACL (5.8.2)', () => {
       expect(replies).toHaveLength(1);
       expect(replies[0].body).not.toContain('Access denied');
     });
+
   });
 });

@@ -1,5 +1,7 @@
 import {
+  EncryptedRoomEvent,
   MatrixClient,
+  RustSdkCryptoStorageProvider,
   SimpleFsStorageProvider,
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
@@ -17,6 +19,19 @@ import { MatrixEventStore } from './src/matrix-event-store.mjs';
 import { MatrixRateLimitGate } from './src/matrix-rate-limit-gate.mjs';
 import { getProcessStartIdentity } from './src/process-identity.mjs';
 import { writeBridgeHealthRecord } from './src/health-record.mjs';
+import { PendingEncryptedEventStore } from './lib/pending-encrypted-event-store.js';
+
+const MATRIX_OTK_COUNT_RECONCILE_MS = 5 * 60_000;
+
+export function signedCurve25519CountFromSync(rawSync) {
+  const count = rawSync?.device_one_time_keys_count?.signed_curve25519;
+  return Number.isFinite(count) && count >= 0 ? count : null;
+}
+
+export function signedCurve25519CountFromKeysUpload(response) {
+  const count = response?.one_time_key_counts?.signed_curve25519;
+  return Number.isFinite(count) && count >= 0 ? count : 0;
+}
 
 export class ReliableMatrixClient extends MatrixClient {
   constructor(...args) {
@@ -28,6 +43,7 @@ export class ReliableMatrixClient extends MatrixClient {
     // events), which is the earliest point with real evidence the homeserver
     // round-trip succeeded — emitFn only fires per room event, not per round.
     this.onSyncSuccess = null;
+    this._lastOtkCountReconciliationAt = 0;
   }
 
   startSync() {
@@ -39,9 +55,53 @@ export class ReliableMatrixClient extends MatrixClient {
     });
   }
 
+  async doRequest(method, endpoint, query = null, body = null, ...rest) {
+    const response = await super.doRequest(method, endpoint, query, body, ...rest);
+    if (method === 'POST' && endpoint === '/_matrix/client/v3/keys/upload') {
+      console.log('[matrix-e2ee] keys/upload', {
+        deviceKeys: Boolean(body?.device_keys),
+        oneTimeKeys: Object.keys(body?.one_time_keys || {}).length,
+        fallbackKeys: Object.keys(body?.fallback_keys || {}).length,
+        serverCounts: response?.one_time_key_counts || {},
+      });
+    }
+    return response;
+  }
+
+  async probeSignedCurve25519Count() {
+    const response = await super.doRequest(
+      'POST',
+      '/_matrix/client/v3/keys/upload',
+      null,
+      {},
+    );
+    return signedCurve25519CountFromKeysUpload(response);
+  }
+
+  async reconcileSignedCurve25519CountIfDue(now = Date.now()) {
+    if (!this.crypto || now - this._lastOtkCountReconciliationAt < MATRIX_OTK_COUNT_RECONCILE_MS) {
+      return null;
+    }
+    const count = await this.probeSignedCurve25519Count();
+    await this.crypto.updateSyncData([], { signed_curve25519: count }, [], [], []);
+    this._lastOtkCountReconciliationAt = now;
+    console.log(`[matrix-e2ee] reconciled signed_curve25519 count=${count}`);
+    return count;
+  }
+
   async processSync(raw, emitFn) {
     const result = await super.processSync(raw, emitFn);
-    if (typeof this.onSyncSuccess === 'function') this.onSyncSuccess();
+    const reportedCount = signedCurve25519CountFromSync(raw);
+    if (reportedCount !== null) {
+      this._lastOtkCountReconciliationAt = Date.now();
+    } else {
+      try {
+        await this.reconcileSignedCurve25519CountIfDue();
+      } catch (error) {
+        console.warn(`[matrix-e2ee] failed to reconcile signed_curve25519 count: ${error.message}`);
+      }
+    }
+    if (typeof this.onSyncSuccess === 'function') await this.onSyncSuccess();
     return result;
   }
 }
@@ -57,7 +117,29 @@ const RUNTIME_ROOT = (() => {
 assertRuntimeDir(RUNTIME_ROOT);
 // ── Configuration ─────────────────────────────────────────────────────
 const HOMESERVER = process.env.MATRIX_HOMESERVER || 'https://matrix.example.com';
+const APPROVAL_EVENT_KEY = 'com.agentchat.approval';
+const APPROVAL_STATUS_MSGTYPE = 'com.agentchat.approval.status.v1';
+const APPROVAL_REQUEST_MSGTYPE = 'com.agentchat.approval.request.v1';
+const APPROVAL_VERDICT_MSGTYPE = 'com.agentchat.approval.verdict.v1';
+const MATRIX_MEGOLM_ALGORITHM = 'm.megolm.v1.aes-sha2';
 const REGISTRATION_TOKEN = (process.env.MATRIX_REG_TOKEN || '').trim();
+
+export function resolveApprovalDmMode(env = process.env) {
+  const requested = String(env.AGENTCHAT_APPROVAL_DM_MODE || 'required').trim().toLowerCase();
+  if (requested === 'required') return 'required';
+  if (requested !== 'plaintext-test') {
+    throw new Error(`unsupported AGENTCHAT_APPROVAL_DM_MODE: ${requested || '<empty>'}`);
+  }
+  if (String(env.NODE_ENV || '').trim().toLowerCase() === 'production') {
+    throw new Error('plaintext approval diagnostics are forbidden in production');
+  }
+  if (String(env.AGENTCHAT_ALLOW_PLAINTEXT_APPROVAL_TEST || '').trim() !== '1') {
+    throw new Error('plaintext approval diagnostics require AGENTCHAT_ALLOW_PLAINTEXT_APPROVAL_TEST=1');
+  }
+  return 'plaintext-test';
+}
+
+const APPROVAL_DM_MODE = resolveApprovalDmMode();
 // Agents that get no Matrix puppet (service relays, or teams excluded on a shared/public server).
 // Shared by the startup ensure-loop AND the periodic registration poll.
 const SKIP_AGENTS = new Set(
@@ -386,6 +468,8 @@ if (!state.agentAvatars) state.agentAvatars = {};
 if (!state.roomAvatars) state.roomAvatars = {};
 if (!state.agentAvatarMeta) state.agentAvatarMeta = {};
 if (!state.agentRoomBackfillCursors) state.agentRoomBackfillCursors = {};
+if (!state.approvalDmRooms) state.approvalDmRooms = {};
+if (!state.roomAgentBindings) state.roomAgentBindings = {};
 // Seed trustedManagedRooms from existing bridge-created rooms
 if (!state.trustedManagedRooms) {
   state.trustedManagedRooms = {};
@@ -1093,6 +1177,196 @@ function mapRoom(roomId, groupName) {
 function groupForRoom(roomId) { return state.roomGroupMap[roomId] || null; }
 function roomForGroup(groupName) { return state.groupRoomMap[groupName] || null; }
 
+export function isPrivateControlRoomName(name) {
+  return typeof name === 'string'
+    && (
+      name.startsWith('DM: ')
+      || name.startsWith('SPY: ')
+      || name.startsWith('Approval: ')
+      || name.startsWith('Approval Test (UNENCRYPTED): ')
+    );
+}
+
+function approvalDmKey(agentName, ownerMxid) {
+  return `${agentName}\u0000${ownerMxid}`;
+}
+
+function roomAgentBindingEntries(roomId) {
+  const bindings = state.roomAgentBindings?.[roomId];
+  if (!bindings || typeof bindings !== 'object') return [];
+  return Object.entries(bindings)
+    .filter(([agentName, binding]) => (
+      typeof agentName === 'string'
+      && agentName.trim()
+      && binding
+      && typeof binding === 'object'
+    ));
+}
+
+function findRoomAgentBinding(roomId, agentName) {
+  const bindings = state.roomAgentBindings?.[roomId];
+  const storedName = findCaseInsensitiveKey(bindings, agentName);
+  if (!storedName) return null;
+  return { agentName: storedName, binding: bindings[storedName] };
+}
+
+function upsertRoomAgentBinding(roomId, agentName, ownerMxid, options = {}) {
+  const normalizedRoomId = typeof roomId === 'string' ? roomId.trim() : '';
+  const normalizedAgent = typeof agentName === 'string' ? agentName.trim() : '';
+  const normalizedOwner = typeof ownerMxid === 'string' ? ownerMxid.trim() : '';
+  if (!normalizedRoomId || !normalizedAgent || !/^@[^:\s]+:[^\s]+$/.test(normalizedOwner)) {
+    return null;
+  }
+  if (!state.roomAgentBindings[normalizedRoomId]) state.roomAgentBindings[normalizedRoomId] = {};
+  const bindings = state.roomAgentBindings[normalizedRoomId];
+  const storedName = findCaseInsensitiveKey(bindings, normalizedAgent) || normalizedAgent;
+  const existing = bindings[storedName] || {};
+  const defaultApprovalRoom = state.approvalDmRooms[approvalDmKey(storedName, normalizedOwner)] || null;
+  const approvalDmRoomId = typeof options.approvalDmRoomId === 'string' && options.approvalDmRoomId.trim()
+    ? options.approvalDmRoomId.trim()
+    : (defaultApprovalRoom || existing.approvalDmRoomId || null);
+  bindings[storedName] = {
+    inviter: normalizedOwner,
+    ownerMxid: normalizedOwner,
+    approvalDmRoomId,
+    addedAt: Number(existing.addedAt || options.addedAt || Date.now()),
+  };
+  return { agentName: storedName, binding: bindings[storedName] };
+}
+
+function migrateLegacyRoomAgentBindings() {
+  let changed = false;
+  for (const [roomId, meta] of Object.entries(state.trustedManagedRooms || {})) {
+    if (!meta || meta.approvalDm || meta.dm || meta.botDm) continue;
+    const ownerMxid = typeof meta.ownerMxid === 'string' ? meta.ownerMxid : meta.inviter;
+    if (typeof meta.agent === 'string' && meta.agent.trim() && /^@[^:\s]+:[^\s]+$/.test(ownerMxid || '')) {
+      if (!findRoomAgentBinding(roomId, meta.agent)) {
+        upsertRoomAgentBinding(roomId, meta.agent, ownerMxid, { addedAt: meta.addedAt });
+        changed = true;
+      }
+    }
+
+    // A previous single-agent record may already have been overwritten by a
+    // second agent while retaining the first agent's approval room. Recover
+    // that first binding from the content-addressed approval-DM map.
+    if (typeof meta.approvalDmRoomId === 'string' && meta.approvalDmRoomId) {
+      for (const [key, approvalRoomId] of Object.entries(state.approvalDmRooms || {})) {
+        if (approvalRoomId !== meta.approvalDmRoomId) continue;
+        const [approvalAgent, approvalOwner] = key.split('\u0000');
+        if (!approvalAgent || !/^@[^:\s]+:[^\s]+$/.test(approvalOwner || '')) continue;
+        if (!findRoomAgentBinding(roomId, approvalAgent)) {
+          upsertRoomAgentBinding(roomId, approvalAgent, approvalOwner, {
+            approvalDmRoomId: approvalRoomId,
+            addedAt: meta.addedAt,
+          });
+          changed = true;
+        }
+      }
+    }
+  }
+  if (changed) saveState();
+}
+
+migrateLegacyRoomAgentBindings();
+
+export function approvalRoomPowerLevels(botUserId) {
+  if (typeof botUserId !== 'string' || !/^@[^:\s]+:[^\s]+$/.test(botUserId)) {
+    throw new Error('valid bridge bot MXID required for approval room power levels');
+  }
+  return {
+    ban: 100,
+    events_default: 0,
+    invite: 100,
+    kick: 100,
+    notifications: { room: 100 },
+    redact: 100,
+    state_default: 100,
+    users: { [botUserId]: 100 },
+    users_default: 0,
+  };
+}
+
+export function buildPublicApprovalNotice(approval) {
+  const agent = String(approval?.agent || '').trim();
+  const project = String(approval?.project || '').trim();
+  return {
+    msgtype: APPROVAL_STATUS_MSGTYPE,
+    body: `Agent ${agent} is waiting for approval from its owner.`,
+    [APPROVAL_EVENT_KEY]: {
+      version: 1,
+      kind: 'status',
+      agent,
+      project,
+      state: 'waiting_for_owner',
+    },
+  };
+}
+
+export function buildOwnerApprovalRequest(approval) {
+  const detail = {
+    version: 1,
+    kind: 'request',
+    agent: String(approval?.agent || '').trim(),
+    project: String(approval?.project || '').trim(),
+    project_room_id: String(approval?.project_room_id || '').trim(),
+    request_id: String(approval?.id || '').trim(),
+    upstream_request_id: String(approval?.upstream_request_id || '').trim(),
+    input_digest: String(approval?.input_digest || '').trim(),
+    runtime: String(approval?.runtime || '').trim(),
+    tool_name: String(approval?.tool_name || '').trim(),
+    description: String(approval?.description || ''),
+    input_preview: String(approval?.input_preview || ''),
+    expires_at: Number(approval?.expires_at || 0),
+    actions: [
+      { id: 'approve_once', label: 'Approve once', style: 'primary' },
+      { id: 'deny', label: 'Deny', style: 'danger' },
+    ],
+  };
+  const lines = [
+    `Approval required for ${detail.agent}`,
+    `Project: ${detail.project}`,
+    `Runtime: ${detail.runtime}`,
+    `Tool: ${detail.tool_name}`,
+    detail.description ? `Description: ${detail.description}` : null,
+    detail.input_preview ? `Input: ${detail.input_preview}` : null,
+    `Expires: ${new Date(detail.expires_at).toISOString()}`,
+    'Use the Approve once or Deny button. Text replies are not approval.',
+  ].filter(Boolean);
+  return {
+    msgtype: APPROVAL_REQUEST_MSGTYPE,
+    body: lines.join('\n'),
+    [APPROVAL_EVENT_KEY]: detail,
+  };
+}
+
+export function parseApprovalVerdictEvent(roomId, event) {
+  const content = event?.content;
+  if (!content || content.msgtype !== APPROVAL_VERDICT_MSGTYPE) return null;
+  const detail = content[APPROVAL_EVENT_KEY];
+  if (!detail || detail.version !== 1 || detail.kind !== 'verdict') return null;
+  const action = detail.action === 'approve_once' || detail.action === 'deny' ? detail.action : null;
+  const senderMxid = typeof event?.sender === 'string' ? event.sender.trim() : '';
+  const requestId = typeof detail.request_id === 'string' ? detail.request_id.trim() : '';
+  const agent = typeof detail.agent === 'string' ? detail.agent.trim() : '';
+  const project = typeof detail.project === 'string' ? detail.project.trim() : '';
+  const projectRoomId = typeof detail.project_room_id === 'string' ? detail.project_room_id.trim() : '';
+  const inputDigest = typeof detail.input_digest === 'string' ? detail.input_digest.trim() : '';
+  if (!action || !/^@[^:\s]+:[^\s]+$/.test(senderMxid)) return null;
+  if (!/^approval_[0-9a-f]{32}$/.test(requestId) || !agent || !project) return null;
+  if (!/^![^:\s]+:[^\s]+$/.test(projectRoomId) || !/^[0-9a-f]{64}$/.test(inputDigest)) return null;
+  return {
+    request_id: requestId,
+    sender_mxid: senderMxid,
+    room_id: roomId,
+    agent,
+    project,
+    project_room_id: projectRoomId,
+    input_digest: inputDigest,
+    action,
+    event_id: typeof event.event_id === 'string' ? event.event_id : null,
+  };
+}
+
 // ── Inbound routing helpers (pure, unit-testable) ──────────────────────
 // Decide how a non-command human message is dispatched. A room that carries a
 // group mapping is treated as a group even if only one agent is joined, so the
@@ -1151,6 +1425,49 @@ export function resolveOutboundDmRoom({ replyToRoom, lastRoom } = {}) {
   return { room: top.room, source: top.source, candidates };
 }
 
+function humanIdentityKey(value) {
+  const key = humanDmKey(value);
+  return typeof key === 'string' ? key.trim().toLowerCase() : '';
+}
+
+function sameHumanIdentity(a, b) {
+  const aKey = humanIdentityKey(a);
+  const bKey = humanIdentityKey(b);
+  return Boolean(aKey) && aKey === bKey;
+}
+
+// A reply reference is routing context, not authorization to reuse its room.
+// Reuse only when persisted backend metadata proves that the source is a
+// group-less direct message for this exact agent/human pair.
+export function verifiedDirectReplyRoom(message, { agentName, humanName } = {}) {
+  if (!message || typeof message !== 'object') return null;
+  // Direct messages are persisted with an explicit null group. Missing,
+  // malformed, or non-null classification cannot authorize room reuse.
+  if (message.group !== null) return null;
+  const sourceRoom = message.source_room || message.sourceRoom;
+  if (typeof sourceRoom !== 'string' || !sourceRoom.trim()) return null;
+
+  const sameAgent = (value) => {
+    if (typeof value !== 'string' || typeof agentName !== 'string') return false;
+    return value.trim().toLowerCase() === agentName.trim().toLowerCase();
+  };
+  const fromAgent = sameAgent(message.from);
+  const toAgent = sameAgent(message.to);
+  if (fromAgent === toAgent) return null;
+
+  if (fromAgent) {
+    return sameHumanIdentity(message.to, humanName) ? sourceRoom.trim() : null;
+  }
+
+  // Matrix ingestion records the authenticated full sender MXID. Prefer that
+  // identity when present; the display/local name remains a compatibility
+  // fallback for older direct-message records.
+  const authenticatedHuman = [message.senderMxid, message.fromId]
+    .find((value) => typeof value === 'string' && value.startsWith('@') && value.includes(':'));
+  const sourceHuman = authenticatedHuman || message.from;
+  return sameHumanIdentity(sourceHuman, humanName) ? sourceRoom.trim() : null;
+}
+
 // ── Room trust classifier (5.8.1) ───────────────────────────────────
 function getRoomTrust(roomId, { inviterMxid = null, requireTrustedInviter = false } = {}) {
   if (requireTrustedInviter) {
@@ -1167,10 +1484,23 @@ function getRoomTrust(roomId, { inviterMxid = null, requireTrustedInviter = fals
 
 function markRoomTrusted(roomId, meta = {}) {
   if (!state.trustedManagedRooms) state.trustedManagedRooms = {};
+  let changed = false;
   if (!state.trustedManagedRooms[roomId]) {
     state.trustedManagedRooms[roomId] = { ...meta, addedAt: Date.now() };
-    saveState();
+    changed = true;
   }
+  const ownerMxid = typeof meta.ownerMxid === 'string' ? meta.ownerMxid : meta.inviter;
+  if (typeof meta.agent === 'string' && /^@[^:\s]+:[^\s]+$/.test(ownerMxid || '')) {
+    const existing = findRoomAgentBinding(roomId, meta.agent);
+    if (!existing) {
+      upsertRoomAgentBinding(roomId, meta.agent, ownerMxid, {
+        approvalDmRoomId: meta.approvalDmRoomId,
+        addedAt: meta.addedAt,
+      });
+      changed = true;
+    }
+  }
+  if (changed) saveState();
 }
 
 function roomTrustLog(action, roomId, trust, extra = '') {
@@ -1446,7 +1776,7 @@ function buildFileInboundBody(content) {
   return buildInboundMediaBody(content, 'File');
 }
 
-function parseInboundTextMessage(content) {
+export function parseInboundTextMessage(content) {
   if (!content || typeof content !== 'object') {
     return { skip: true, body: '', replyEventId: null };
   }
@@ -1480,9 +1810,14 @@ function shouldIgnoreAgentForward(content) {
 
 // ── Main bridge class ─────────────────────────────────────────────────
 export class MatrixBridge {
-  constructor({ eventStore = null } = {}) {
+  constructor({
+    eventStore = null,
+    pendingEncryptedEventStore = null,
+    approvalDmMode = APPROVAL_DM_MODE,
+  } = {}) {
     this.botClient = null;
     this.botUserId = null;
+    this.approvalDmMode = approvalDmMode;
     this.knownAgents = new Set(); // names of known agents
     this.knownAgentIndex = new Map(); // lower-case name -> canonical name
     this.dmRooms = new Map(); // "agent:human" → roomId
@@ -1495,8 +1830,12 @@ export class MatrixBridge {
     this.eventStore = eventStore || new MatrixEventStore({
       journalPath: path.join(DATA_DIR, 'processed-events.jsonl'),
     });
+    this.pendingEncryptedEventStore = pendingEncryptedEventStore || new PendingEncryptedEventStore(
+      path.join(DATA_DIR, 'pending-approval-encrypted-events.json'),
+    );
+    this._retryingPendingApprovalDecryptions = null;
     this.processingMatrixEventIds = new Map();
-    this._msgSourceRoomCache = new Map(); // reply_to message id -> source_room (capped)
+    this._msgRouteMetadataCache = new Map(); // reply_to message id -> persisted route metadata (capped)
     this.blockedAlertRooms = new Map(); // agent -> Set(roomId)
     this.startupTs = Date.now();
     this.commands = null;
@@ -1551,9 +1890,15 @@ export class MatrixBridge {
     const joinedSet = new Set(joinedRoomIds);
     const next = new Map();
     for (const [roomId, meta] of Object.entries(state.trustedManagedRooms || {})) {
-      if (meta?.dm || meta?.botDm) continue;
+      if (meta?.dm || meta?.botDm || meta?.approvalDm) continue;
       const previous = this._requiredMembershipSummary.get(roomId);
-      const requiredAgent = typeof meta?.agent === 'string' && meta.agent.trim() ? meta.agent.trim() : null;
+      const boundAgents = roomAgentBindingEntries(roomId).map(([agentName]) => agentName);
+      if (boundAgents.length === 0 && typeof meta?.agent === 'string' && meta.agent.trim()) {
+        boundAgents.push(meta.agent.trim());
+      }
+      const requiredAgent = boundAgents.length === 1
+        ? boundAgents[0]
+        : null;
       next.set(roomId, {
         roomId,
         group: typeof meta?.group === 'string' ? meta.group : null,
@@ -1600,31 +1945,46 @@ export class MatrixBridge {
     }
   }
 
-  // Resolve the source_room of a prior message so a reply can be routed back to
-  // the thread it belongs to. Uses the existing single-message GET endpoint and
-  // caches results (capped) so a burst of replies to the same message doesn't
-  // re-hit the backend. Confirmed misses cache as null; transient errors don't.
-  async lookupMessageSourceRoom(messageId) {
+  // Load persisted route metadata for a prior message. Authorization decisions
+  // are made by the caller for the current agent/human pair; the cache never
+  // stores an already-authorized room. Confirmed misses cache as null while
+  // transient backend failures remain retryable.
+  async lookupMessageRouteMetadata(messageId) {
     if (typeof messageId !== 'string' || !messageId) return null;
-    if (this._msgSourceRoomCache.has(messageId)) return this._msgSourceRoomCache.get(messageId);
-    let room = null;
+    if (this._msgRouteMetadataCache.has(messageId)) return this._msgRouteMetadataCache.get(messageId);
+    let metadata = null;
     try {
       const msg = await this.callBackendApi('GET', `/api/messages/${encodeURIComponent(messageId)}`);
-      // The backend stores inbound `source_room` as camelCase `sourceRoom` — accept both
-      // (same tolerance as the OpenFab bridge's command poller).
-      const sourceRoom = msg && !msg.error ? (msg.source_room || msg.sourceRoom) : null;
-      if (typeof sourceRoom === 'string' && sourceRoom) {
-        room = sourceRoom;
+      if (msg && !msg.error) {
+        metadata = {
+          from: msg.from || null,
+          to: msg.to || null,
+          group: msg.group,
+          source: msg.source || null,
+          sourceRoom: msg.source_room || msg.sourceRoom || null,
+          senderMxid: msg.sender_mxid || msg.senderMxid || null,
+          fromId: msg.from_id || msg.fromId || null,
+        };
       }
     } catch (e) {
-      console.warn(`reply_to source_room lookup failed for ${messageId}: ${e.message}`);
+      console.warn(`reply_to route metadata lookup failed for ${messageId}: ${e.message}`);
       return null; // transient failure — don't poison the cache
     }
-    if (this._msgSourceRoomCache.size >= 200) {
-      this._msgSourceRoomCache.delete(this._msgSourceRoomCache.keys().next().value);
+    if (this._msgRouteMetadataCache.size >= 200) {
+      this._msgRouteMetadataCache.delete(this._msgRouteMetadataCache.keys().next().value);
     }
-    this._msgSourceRoomCache.set(messageId, room);
-    return room;
+    this._msgRouteMetadataCache.set(messageId, metadata);
+    return metadata;
+  }
+
+  async lookupMessageSourceRoom(messageId) {
+    const metadata = await this.lookupMessageRouteMetadata(messageId);
+    return metadata?.sourceRoom || null;
+  }
+
+  async lookupVerifiedDirectReplyRoom(messageId, { agentName, humanName } = {}) {
+    const metadata = await this.lookupMessageRouteMetadata(messageId);
+    return verifiedDirectReplyRoom(metadata, { agentName, humanName });
   }
 
   async fetchKnownAgentNames() {
@@ -1672,6 +2032,21 @@ export class MatrixBridge {
     return Boolean(aKey) && aKey === bKey;
   }
 
+  managedAgentBotInviteTrust(roomId, inviterMxid) {
+    if (!inviterMxid || !isAgentUser(inviterMxid)) return null;
+
+    const inviterAgent = agentNameFromUserId(inviterMxid);
+    const canonicalAgent = this.resolveKnownAgentName(inviterAgent);
+    const managedBinding = findRoomAgentBinding(roomId, canonicalAgent);
+    if (!canonicalAgent || !managedBinding) return null;
+
+    // Do not trust an agent-looking account from another homeserver, nor a
+    // different local agent. The room became managed only after a trusted
+    // developer invited this exact local puppet and it successfully joined.
+    if (inviterMxid !== agentUserId(canonicalAgent)) return null;
+    return { trusted: true, reason: 'managed_agent' };
+  }
+
   addKnownAgent(name) {
     const normalized = this.normalizeName(name);
     if (!normalized) return null;
@@ -1716,6 +2091,7 @@ export class MatrixBridge {
       roomGroupMap: state.roomGroupMap,
       groupRoomMap: state.groupRoomMap,
       dmRooms: state.dmRooms || {},
+      roomAgentBindings: state.roomAgentBindings || {},
       agentTokens: Object.fromEntries(Object.keys(state.agentTokens).map(k => [k, '***'])),
     };
   }
@@ -1728,6 +2104,15 @@ export class MatrixBridge {
   // rebind cleanup, trust marking, and state persistence.
   bindRoom(roomId, groupName) { mapRoom(roomId, groupName); }
   groupForRoom(roomId) { return groupForRoom(roomId); }
+  recordRoomAgentBinding(roomId, agentName, ownerMxid, options = {}) {
+    const result = upsertRoomAgentBinding(roomId, agentName, ownerMxid, options);
+    if (result) saveState();
+    return result;
+  }
+  roomAgentBindings(roomId) {
+    return roomAgentBindingEntries(roomId)
+      .map(([agentName, binding]) => ({ agentName, ...binding }));
+  }
 
   getBotToken() { return state.botToken; }
   getAgentToken(name) {
@@ -1922,12 +2307,20 @@ export class MatrixBridge {
         await sleep(STARTUP_RETRY_DELAY_MS);
       }
     }
-
     // 1. Ensure bot account
     const botToken = await ensureBotAccount();
-    this.botClient = new ReliableMatrixClient(HOMESERVER, botToken, new SimpleFsStorageProvider(path.join(DATA_DIR, 'bot-store.json')));
+    this.botClient = new ReliableMatrixClient(
+      HOMESERVER,
+      botToken,
+      new SimpleFsStorageProvider(path.join(DATA_DIR, 'bot-store.json')),
+      // RustSdkCryptoStoreType.Sqlite is numeric value 0 in matrix-sdk-crypto.
+      new RustSdkCryptoStorageProvider(path.join(DATA_DIR, 'bot-crypto'), 0),
+    );
     this.configureReliableBotSync(this.botClient);
-    this.botClient.onSyncSuccess = () => { this._lastSuccessfulSyncAtMs = Date.now(); };
+    this.botClient.onSyncSuccess = async () => {
+      this._lastSuccessfulSyncAtMs = Date.now();
+      await this.retryPendingApprovalDecryptions(this.botClient);
+    };
     this.botUserId = await this.botClient.getUserId();
     console.log(`Bot: ${this.botUserId}`);
 
@@ -1986,6 +2379,7 @@ export class MatrixBridge {
       await this.backfillAvatars();
     }
     await this.backfillAgentManagedRooms();
+    await this.syncApprovalBindings();
     setInterval(() => this.scanJoinedRooms(), MATRIX_ROOM_SCAN_POLL_MS);
     // Task 8: standalone doctor's business-health record. Independent of the room-scan
     // timer above (see BRIDGE_HEALTH_WRITE_INTERVAL_MS) so the record's freshness isn't
@@ -2250,13 +2644,79 @@ export class MatrixBridge {
     client.persistTokenAfterSync = true;
     client.agentChatSyncHandler = async (eventName, ...payload) => {
       if (eventName === 'room.message') return this.onRoomMessage(...payload);
-      if (eventName === 'room.event') return this.onRoomEvent(...payload);
+      if (eventName === 'room.event') {
+        if (client.crypto) await client.crypto.onRoomEvent(...payload);
+        return this.onRoomEvent(...payload);
+      }
+      if (eventName === 'room.join' && client.crypto) {
+        return client.crypto.onRoomJoin(...payload);
+      }
+      if (eventName === 'room.failed_decryption') {
+        return this.onFailedRoomDecryption(client, ...payload);
+      }
       if (eventName === 'room.invite') {
         return this.handleBotInvite(...payload, { source: 'bot-invite' });
       }
       return client.emit(eventName, ...payload);
     };
     return client;
+  }
+
+  async onFailedRoomDecryption(client, roomId, event, error) {
+    const meta = state.trustedManagedRooms?.[roomId];
+    if (!meta?.approvalDm) return client.emit('room.failed_decryption', roomId, event, error);
+
+    try {
+      this.pendingEncryptedEventStore.put({ roomId, event });
+    } catch (storeError) {
+      // Never advance the durable sync token when an approval verdict cannot be
+      // durably retained for a later room-key delivery.
+      throw new Error(`failed to retain encrypted approval event ${event?.event_id || '<unknown>'}: ${storeError.message}`);
+    }
+    console.warn(`[approval-e2ee] queued undecryptable event room=${roomId} event=${event?.event_id || '<unknown>'}`);
+    return client.emit('room.failed_decryption', roomId, event, error);
+  }
+
+  async retryPendingApprovalDecryptions(client = this.botClient) {
+    if (this._retryingPendingApprovalDecryptions) return this._retryingPendingApprovalDecryptions;
+    this._retryingPendingApprovalDecryptions = this._doRetryPendingApprovalDecryptions(client);
+    try {
+      return await this._retryingPendingApprovalDecryptions;
+    } finally {
+      this._retryingPendingApprovalDecryptions = null;
+    }
+  }
+
+  async _doRetryPendingApprovalDecryptions(client) {
+    if (!client?.crypto) return { processed: 0, pending: this.pendingEncryptedEventStore.list().length };
+    for (const expired of this.pendingEncryptedEventStore.prune()) {
+      console.warn(`[approval-e2ee] discarded stale encrypted event room=${expired.roomId} event=${expired.eventId}`);
+    }
+
+    let processed = 0;
+    for (const record of this.pendingEncryptedEventStore.list()) {
+      const meta = state.trustedManagedRooms?.[record.roomId];
+      if (!meta?.approvalDm) {
+        this.pendingEncryptedEventStore.remove(record.eventId);
+        continue;
+      }
+      try {
+        const decrypted = await client.crypto.decryptRoomEvent(
+          new EncryptedRoomEvent(record.event),
+          record.roomId,
+        );
+        const clearEvent = decrypted?.raw;
+        if (clearEvent?.type === 'm.room.message') {
+          await this.onRoomMessage(record.roomId, clearEvent);
+        }
+        this.pendingEncryptedEventStore.remove(record.eventId);
+        processed += 1;
+        console.log(`[approval-e2ee] recovered encrypted event room=${record.roomId} event=${record.eventId}`);
+      } catch (retryError) {
+        console.warn(`[approval-e2ee] event still awaiting room key room=${record.roomId} event=${record.eventId}: ${retryError.message}`);
+      }
+    }
+    return { processed, pending: this.pendingEncryptedEventStore.list().length };
   }
 
   // ── Matrix → Agent-chat ───────────────────────────────────────────
@@ -2281,6 +2741,10 @@ export class MatrixBridge {
   }
 
   async _onRoomMessageClaimed(roomId, event, eventId) {
+    const approvalVerdict = parseApprovalVerdictEvent(roomId, event);
+    if (approvalVerdict) {
+      return this.onApprovalVerdict(approvalVerdict);
+    }
     if (shouldIgnoreAgentForward(event?.content)) return;
 
     const parsed = parseInboundTextMessage(event.content);
@@ -2350,9 +2814,22 @@ export class MatrixBridge {
     } catch (e) {
       console.warn(`Failed to inspect room members for ${roomId}: ${e.message}`);
     }
-    if (!targetAgent && state.trustedManagedRooms?.[roomId]?.agent) {
-      const managedAgent = state.trustedManagedRooms[roomId].agent;
-      targetAgent = this.resolveKnownAgentName(managedAgent) || this.normalizeName(managedAgent);
+    if (!targetAgent && state.trustedManagedRooms?.[roomId]) {
+      const managedAgents = roomAgentBindingEntries(roomId)
+        .map(([agentName]) => this.resolveKnownAgentName(agentName) || this.normalizeName(agentName))
+        .filter(Boolean);
+      const explicitlyMentioned = managedAgents
+        .filter(agentName => effectiveMentions.some(name => this.sameName(name, agentName)));
+      if (explicitlyMentioned.length === 1) {
+        [targetAgent] = explicitlyMentioned;
+      } else if (!groupName && managedAgents.length > 0) {
+        // A trusted agent-managed room is not necessarily a DM. Until the bot
+        // has joined and mapped the room, fail closed instead of treating every
+        // message in a potentially-public project room as direct agent input.
+        console.log(`Matrix managed room ignored unaddressed or ambiguous message: ${humanName} room=${roomId}`);
+        this.rememberMatrixEvent(eventId);
+        return { ignored: true, reason: 'managed_room_unaddressed' };
+      }
     }
 
     // ! commands work in any room (bot-DM, group, agent-DM)
@@ -2370,7 +2847,11 @@ export class MatrixBridge {
       }
     }
     if (cmdBody.startsWith('!')) {
-      const context = { groupName, targetAgent };
+      const context = {
+        groupName,
+        targetAgent,
+        approvalRoom: state.trustedManagedRooms?.[roomId]?.approvalDm === true,
+      };
       console.log(`Bot command from ${humanName} in ${groupName || targetAgent || 'bot-DM'}: ${cmdBody.slice(0, 80)}`);
       await this.commands.handle(roomId, senderId, cmdBody, context);
       if (eventId) this.rememberMatrixEvent(eventId);
@@ -2454,6 +2935,30 @@ export class MatrixBridge {
     // else: unknown room, ignore
   }
 
+  async onApprovalVerdict(verdict) {
+    try {
+      const result = await this.callBackendApi(
+        'POST',
+        `/api/approvals/${encodeURIComponent(verdict.request_id)}/verdict`,
+        verdict,
+        `context=approval:verdict request=${verdict.request_id}`,
+      );
+      if (verdict.event_id) this.rememberMatrixEvent(verdict.event_id, verdict.request_id);
+      return result;
+    } catch (error) {
+      // Authorization, expiry, and replay failures are final for this Matrix
+      // event. Transient backend failures remain replayable through the sync
+      // token contract.
+      const message = String(error?.message || error);
+      if (/failed with HTTP (?:400|401|403|404|409|410)\b/.test(message)) {
+        if (verdict.event_id) this.rememberMatrixEvent(verdict.event_id, verdict.request_id);
+        console.warn(`Approval verdict rejected: request=${verdict.request_id} sender=${verdict.sender_mxid} room=${verdict.room_id}`);
+        return { ok: false, rejected: true };
+      }
+      throw error;
+    }
+  }
+
   async onRoomEvent(roomId, event) {
     // Ignore historical events from before bridge startup
     // But always process m.room.name (needed for mapping rooms bot joins after creation)
@@ -2470,10 +2975,10 @@ export class MatrixBridge {
     if (event.type === 'm.room.name' && event.content?.name) {
       const name = event.content.name;
       // Skip DM/SPY rooms — these are not groups
-      if (name.startsWith('DM: ') || name.startsWith('SPY: ')) {
+      if (isPrivateControlRoomName(name)) {
         // Don't map as group, but update roomGroupMap if it was previously mapped wrong
         const oldGroup = groupForRoom(roomId);
-        if (oldGroup && (oldGroup.startsWith('SPY: ') || oldGroup.startsWith('DM: '))) {
+        if (oldGroup && isPrivateControlRoomName(oldGroup)) {
           // Update the mapping to the new name
           mapRoom(roomId, name);
         }
@@ -2497,9 +3002,10 @@ export class MatrixBridge {
         }
         mapRoom(roomId, name);
         await this.reconcileRoomGroupMembership(roomId, name);
+        await this.syncApprovalBindingForRoom(roomId);
       } else {
         const mapped = groupForRoom(roomId);
-        if (mapped !== name && !name.startsWith('DM: ') && !name.startsWith('SPY: ')) {
+        if (mapped !== name && !isPrivateControlRoomName(name)) {
           const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
           if (existing.error) {
             const joinedMembers = await this.botClient.getJoinedRoomMembers(roomId);
@@ -2518,6 +3024,7 @@ export class MatrixBridge {
           mapRoom(roomId, name);
           console.log(`Room ${roomId} renamed mapping: "${mapped}" -> "${name}"`);
           await this.reconcileRoomGroupMembership(roomId, name);
+          await this.syncApprovalBindingForRoom(roomId);
         } else {
           await this.reconcileRoomGroupMembership(roomId, mapped);
         }
@@ -2547,7 +3054,17 @@ export class MatrixBridge {
       }
 
       const groupName = groupForRoom(roomId);
-      if (!groupName) return;
+      if (!groupName) {
+        const approvalMeta = state.trustedManagedRooms?.[roomId];
+        if (approvalMeta?.approvalDm && targetUserId === approvalMeta.ownerMxid) {
+          if (membership === 'join') {
+            await this.syncApprovalBindings({ agent: approvalMeta.agent, ownerMxid: approvalMeta.ownerMxid });
+          } else if (membership === 'leave' || membership === 'ban') {
+            await this.removeApprovalBindings({ agent: approvalMeta.agent, ownerMxid: approvalMeta.ownerMxid });
+          }
+        }
+        return;
+      }
       // Skip membership events for rooms we just created (prevents echo loop)
       if (this.recentlyCreatedRooms.has(roomId)) return;
 
@@ -2798,7 +3315,7 @@ export class MatrixBridge {
       if (!name) return null;
 
       // Skip DM rooms (name format: "DM: X" or "SPY: X ↔ Y")
-      if (name.startsWith('DM: ') || name.startsWith('SPY: ')) return null;
+      if (isPrivateControlRoomName(name)) return null;
 
       // Check if group exists in backend, create if not
       let existing = null;
@@ -2823,6 +3340,7 @@ export class MatrixBridge {
       }
       mapRoom(roomId, name);
       console.log(`Mapped room ${roomId} → group "${name}"`);
+      await this.syncApprovalBindingForRoom(roomId);
       return name;
     } catch (e) {
       rateLimitGate.observeError(e);
@@ -2841,7 +3359,7 @@ export class MatrixBridge {
     this._agentRoomBackfillRunning = true;
     try {
       const managedRooms = Object.entries(state.trustedManagedRooms || {})
-        .filter(([, meta]) => meta && typeof meta.agent === 'string' && meta.agent.trim());
+        .filter(([roomId, meta]) => meta && !meta.approvalDm && roomAgentBindingEntries(roomId).length > 0);
       for (const [roomId, meta] of managedRooms) {
         // A 429 anywhere in this sweep trips the shared gate — abort rather than keep
         // walking the managed-room list (each remaining room would just 429 again).
@@ -2849,8 +3367,12 @@ export class MatrixBridge {
           console.warn('Agent room backfill: cooling down (Matrix rate limit), aborting remaining rooms this round');
           break;
         }
-        const agentName = this.resolveKnownAgentName(meta.agent) || this.normalizeName(meta.agent);
-        const token = this.getAgentToken(agentName);
+        const backfillAgent = roomAgentBindingEntries(roomId)
+          .map(([agentName]) => this.resolveKnownAgentName(agentName) || this.normalizeName(agentName))
+          .map(agentName => ({ agentName, token: this.getAgentToken(agentName) }))
+          .find(candidate => candidate.agentName && candidate.token);
+        const agentName = backfillAgent?.agentName || null;
+        const token = backfillAgent?.token || null;
         if (!agentName || !token) continue;
         try {
           const url = `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=${MATRIX_AGENT_ROOM_BACKFILL_LIMIT}`;
@@ -2951,7 +3473,25 @@ export class MatrixBridge {
           }
           if ((await joinRes.json()).room_id) {
             console.log(`Agent ${agentName} joined room ${roomId}`);
-            if (trust.trusted) markRoomTrusted(roomId, { agent: agentName, inviter });
+            if (trust.trusted) {
+              markRoomTrusted(roomId, { agent: agentName, inviter });
+              const existing = state.trustedManagedRooms[roomId] || {};
+              upsertRoomAgentBinding(roomId, agentName, inviter, {
+                addedAt: existing.addedAt,
+              });
+              state.trustedManagedRooms[roomId] = {
+                ...existing,
+                // Preserve legacy single-agent metadata for compatibility.
+                // Authoritative ownership now lives per agent in
+                // roomAgentBindings and must never be overwritten by a second
+                // agent joining the same project room.
+                agent: existing.agent || agentName,
+                inviter: existing.inviter || inviter,
+                ownerMxid: existing.ownerMxid || inviter,
+                addedAt: existing.addedAt || Date.now(),
+              };
+              saveState();
+            }
             // Invite bot so it can monitor messages
             const botInviteRes = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
               method: 'POST',
@@ -2968,6 +3508,10 @@ export class MatrixBridge {
               const errText = (await botInviteRes.text().catch(() => '')).slice(0, 200);
               console.warn(`Bot invite request failed for ${roomId}: HTTP ${botInviteRes.status} ${errText}`);
             }
+            // The bot may already be joined because another local agent is in
+            // this project room. Approval setup belongs to the newly joined
+            // room-agent binding and must not depend on re-inviting the bot.
+            if (trust.trusted) await this.syncApprovalBindingForRoom(roomId, agentName);
           }
         }
       } catch (e) {
@@ -2991,7 +3535,11 @@ export class MatrixBridge {
 
   async handleBotInvite(roomId, inviteEvent, { source = 'bot-invite' } = {}) {
     const inviter = inviteEvent?.sender || null;
-    const trust = getRoomTrust(roomId, { inviterMxid: inviter, requireTrustedInviter: true });
+    // Agent puppets invite this instance's bot after a trusted developer has
+    // invited the puppet. Accept only that exact agent/room pair; do not add
+    // agent MXIDs to the global trusted-inviter list.
+    const trust = this.managedAgentBotInviteTrust(roomId, inviter)
+      || getRoomTrust(roomId, { inviterMxid: inviter, requireTrustedInviter: true });
     roomTrustLog(source, roomId, trust, `inviter=${inviter}`);
     if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') {
       console.log(`[trust:enforce] Rejecting bot invite to untrusted room ${roomId} inviter=${inviter || 'unknown'}`);
@@ -3160,6 +3708,14 @@ export class MatrixBridge {
           console.warn(`Failed to parse SSE agent_compact event: ${e.message}`);
         }
       });
+      es.on('approval_requested', (data) => {
+        try {
+          const event = JSON.parse(data);
+          this.onApprovalRequested(event);
+        } catch (e) {
+          console.warn(`Failed to parse SSE approval_requested event: ${e.message}`);
+        }
+      });
       es.on('error', () => {
         if (currentEs === es) { try { es.close(); } catch (_) {} currentEs = null; }
         if (reconnectTimer) return;
@@ -3207,6 +3763,285 @@ export class MatrixBridge {
     } catch (e) {
       console.error(`DM ensure error: ${e.message}`);
       this.postWarning(`DM ensure error for ${agentName} ↔ ${humanName}: ${e.message}`);
+    }
+  }
+
+  async ensureApprovalDmEncrypted(roomId) {
+    if (!this.botClient?.crypto) {
+      throw new Error('Matrix E2EE is unavailable for owner approval rooms');
+    }
+    let encryption = null;
+    try {
+      encryption = await this.botClient.getRoomStateEvent(roomId, 'm.room.encryption', '');
+    } catch (error) {
+      const message = String(error?.message || error);
+      if (!/M_NOT_FOUND|404|not found/i.test(message)) throw error;
+    }
+    if (!encryption) {
+      encryption = { algorithm: MATRIX_MEGOLM_ALGORITHM };
+      await this.botClient.sendStateEvent(roomId, 'm.room.encryption', '', encryption);
+    }
+    if (encryption.algorithm !== MATRIX_MEGOLM_ALGORITHM) {
+      throw new Error(`unsupported Matrix encryption algorithm in ${roomId}`);
+    }
+    await this.botClient.crypto.onRoomEvent(roomId, {
+      type: 'm.room.encryption',
+      state_key: '',
+      content: encryption,
+    });
+    return true;
+  }
+
+  async ensureApprovalDmSecurity(roomId) {
+    if (this.approvalDmMode !== 'plaintext-test') {
+      return this.ensureApprovalDmEncrypted(roomId);
+    }
+    try {
+      await this.botClient.getRoomStateEvent(roomId, 'm.room.encryption', '');
+    } catch (error) {
+      const message = String(error?.message || error);
+      if (/M_NOT_FOUND|404|not found/i.test(message)) return true;
+      throw error;
+    }
+    throw new Error(`plaintext approval test room ${roomId} is already encrypted`);
+  }
+
+  async ensureApprovalDmRoom(agentName, ownerMxid) {
+    const canonicalAgent = this.resolveKnownAgentName(agentName) || this.normalizeName(agentName);
+    if (!canonicalAgent || !/^@[^:\s]+:[^\s]+$/.test(ownerMxid) || isAgentUser(ownerMxid)) {
+      return { ok: false, ready: false, reason: 'invalid_owner_binding' };
+    }
+    const baseKey = approvalDmKey(canonicalAgent, ownerMxid);
+    const key = this.approvalDmMode === 'plaintext-test'
+      ? `${baseKey}\u0000plaintext-test`
+      : baseKey;
+    let roomId = state.approvalDmRooms[key] || null;
+    if (!roomId) {
+      const plaintextTest = this.approvalDmMode === 'plaintext-test';
+      roomId = await this.botClient.createRoom({
+        is_direct: true,
+        preset: 'private_chat',
+        name: plaintextTest
+          ? `Approval Test (UNENCRYPTED): ${canonicalAgent}`
+          : `Approval: ${canonicalAgent}`,
+        topic: plaintextTest
+          ? 'UNENCRYPTED TEST ONLY. Private UI approval diagnostics; text replies do not authorize execution.'
+          : 'Private, UI-only coding-agent approval requests. Text replies do not authorize execution.',
+        invite: [ownerMxid, agentUserId(canonicalAgent)],
+        power_level_content_override: approvalRoomPowerLevels(this.botUserId),
+        initial_state: plaintextTest ? [] : [{
+          type: 'm.room.encryption',
+          state_key: '',
+          content: { algorithm: MATRIX_MEGOLM_ALGORITHM },
+        }],
+      });
+      state.approvalDmRooms[key] = roomId;
+      state.trustedManagedRooms[roomId] = {
+        approvalDm: true,
+        agent: canonicalAgent,
+        ownerMxid,
+        approvalDmMode: this.approvalDmMode,
+        addedAt: Date.now(),
+      };
+      saveState();
+    }
+
+    await this.ensureApprovalDmSecurity(roomId);
+    await this.ensureApprovalDmRestricted(roomId);
+
+    // Keep the local agent visibly attached to its approval room. The bridge bot
+    // remains the E2EE sender and authorization service; the agent token is never
+    // used to submit a verdict.
+    const agentMxid = agentUserId(canonicalAgent);
+    let members = await this.botClient.getJoinedRoomMembers(roomId);
+    if (!members.includes(agentMxid)) {
+      try { await this.botClient.inviteUser(agentMxid, roomId); } catch {}
+      const agentToken = this.getAgentToken(canonicalAgent);
+      if (agentToken) {
+        const join = await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${agentToken}`, 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        if (!join.ok) {
+          const detail = await join.text().catch(() => '');
+          throw new Error(`agent failed to join approval room: HTTP ${join.status} ${detail.slice(0, 160)}`);
+        }
+      }
+    }
+
+    const invite = await this._inviteHumanToDm(roomId, ownerMxid, { agentName: canonicalAgent });
+    if (!invite.ok) return { ok: false, ready: false, roomId, reason: 'owner_invite_failed' };
+    members = await this.botClient.getJoinedRoomMembers(roomId);
+    const ownerJoined = members.includes(ownerMxid);
+    return {
+      ok: true,
+      ready: ownerJoined,
+      roomId,
+      reason: ownerJoined ? 'ready' : 'owner_invite_pending',
+    };
+  }
+
+  async ensureApprovalDmRestricted(roomId) {
+    if (!this.botClient || typeof this.botClient.getRoomStateEvent !== 'function'
+        || typeof this.botClient.sendStateEvent !== 'function') {
+      throw new Error(`approval room ${roomId} cannot be secured: Matrix state-event support is unavailable`);
+    }
+    const expected = approvalRoomPowerLevels(this.botUserId);
+    let current = null;
+    try {
+      current = await this.botClient.getRoomStateEvent(roomId, 'm.room.power_levels', '');
+    } catch {
+      // The bridge is the room creator and can install the fail-closed policy.
+    }
+    const normalizedCurrent = current && typeof current === 'object' ? {
+      ban: current.ban,
+      events_default: current.events_default,
+      invite: current.invite,
+      kick: current.kick,
+      notifications: current.notifications,
+      redact: current.redact,
+      state_default: current.state_default,
+      users: current.users,
+      users_default: current.users_default,
+    } : null;
+    if (JSON.stringify(normalizedCurrent) === JSON.stringify(expected)) return false;
+    await this.botClient.sendStateEvent(roomId, 'm.room.power_levels', '', expected);
+    return true;
+  }
+
+  async syncApprovalBindingForRoomAgent(projectRoomId, agentName) {
+    const meta = state.trustedManagedRooms?.[projectRoomId];
+    const stored = findRoomAgentBinding(projectRoomId, agentName);
+    if (!meta || meta.approvalDm || !stored) return { ok: false, reason: 'not_agent_project_room' };
+    const canonicalAgent = this.resolveKnownAgentName(stored.agentName) || this.normalizeName(stored.agentName);
+    const ownerMxid = typeof stored.binding.ownerMxid === 'string'
+      ? stored.binding.ownerMxid
+      : stored.binding.inviter;
+    if (!canonicalAgent || !/^@[^:\s]+:[^\s]+$/.test(ownerMxid || '') || isAgentUser(ownerMxid)) {
+      return { ok: false, reason: 'missing_trusted_owner' };
+    }
+    const dm = await this.ensureApprovalDmRoom(canonicalAgent, ownerMxid);
+    if (!dm.ready) return { ok: false, reason: dm.reason, roomId: dm.roomId || null };
+    const project = groupForRoom(projectRoomId) || meta.group || projectRoomId;
+    const result = await this.callBackendApi('PUT', '/api/approval-bindings', {
+      agent: canonicalAgent,
+      project,
+      project_room_id: projectRoomId,
+      owner_mxid: ownerMxid,
+      owner_dm_room_id: dm.roomId,
+    }, `context=approval:binding agent=${canonicalAgent} room=${projectRoomId}`);
+    stored.binding.ownerMxid = ownerMxid;
+    stored.binding.approvalDmRoomId = dm.roomId;
+    if (this.sameName(meta.agent, canonicalAgent)) {
+      meta.ownerMxid = ownerMxid;
+      meta.approvalDmRoomId = dm.roomId;
+    }
+    saveState();
+    return result;
+  }
+
+  async syncApprovalBindingForRoom(projectRoomId, agentName = null) {
+    if (agentName) return this.syncApprovalBindingForRoomAgent(projectRoomId, agentName);
+    const bindings = roomAgentBindingEntries(projectRoomId);
+    if (bindings.length === 0) return { ok: false, reason: 'not_agent_project_room' };
+    const results = [];
+    for (const [boundAgent] of bindings) {
+      results.push(await this.syncApprovalBindingForRoomAgent(projectRoomId, boundAgent));
+    }
+    if (results.length === 1) return results[0];
+    return {
+      ok: results.every(result => result?.ok === true),
+      results,
+    };
+  }
+
+  async syncApprovalBindings(filters = {}) {
+    const results = [];
+    for (const [roomId, meta] of Object.entries(state.trustedManagedRooms || {})) {
+      if (meta?.approvalDm) continue;
+      for (const [agentName, binding] of roomAgentBindingEntries(roomId)) {
+        if (filters.agent && !this.sameName(agentName, filters.agent)) continue;
+        const ownerMxid = binding.ownerMxid || binding.inviter || null;
+        if (filters.ownerMxid && ownerMxid !== filters.ownerMxid) continue;
+        try {
+          results.push(await this.syncApprovalBindingForRoomAgent(roomId, agentName));
+        } catch (error) {
+          console.warn(`Approval binding sync failed for ${roomId} (${agentName}): ${error.message}`);
+          results.push({ ok: false, reason: error.message, roomId, agent: agentName });
+        }
+      }
+    }
+    return results;
+  }
+
+  async removeApprovalBindings(filters = {}) {
+    const results = [];
+    for (const [roomId, meta] of Object.entries(state.trustedManagedRooms || {})) {
+      if (meta?.approvalDm) continue;
+      for (const [agentName, binding] of roomAgentBindingEntries(roomId)) {
+        if (filters.agent && !this.sameName(agentName, filters.agent)) continue;
+        const ownerMxid = binding.ownerMxid || binding.inviter || null;
+        if (filters.ownerMxid && ownerMxid !== filters.ownerMxid) continue;
+        try {
+          results.push(await this.callBackendApi(
+            'DELETE',
+            `/api/approval-bindings/${encodeURIComponent(agentName)}/${encodeURIComponent(roomId)}`,
+            null,
+            `context=approval:binding-remove agent=${agentName} room=${roomId}`,
+          ));
+        } catch (error) {
+          if (!/failed with HTTP 404\b/.test(String(error?.message || error))) throw error;
+        }
+      }
+    }
+    return results;
+  }
+
+  async onApprovalRequested(event) {
+    const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : '';
+    if (!requestId) return { ok: false, reason: 'missing_request_id' };
+    let approval = null;
+    try {
+      const response = await this.callBackendApi(
+        'GET',
+        `/api/approvals/${encodeURIComponent(requestId)}/matrix`,
+        null,
+        `context=approval:publish request=${requestId}`,
+      );
+      approval = response?.approval || null;
+      if (!approval || approval.status !== 'pending') return { ok: false, reason: 'request_not_pending' };
+
+      await this.ensureApprovalDmSecurity(approval.owner_dm_room_id);
+      const privateEventId = await this.botClient.sendMessage(
+        approval.owner_dm_room_id,
+        buildOwnerApprovalRequest(approval),
+      );
+      if (privateEventId) this.rememberMatrixEvent(privateEventId, requestId);
+
+      const token = this.getAgentToken(approval.agent);
+      if (!token) throw new Error(`missing Matrix token for approval agent ${approval.agent}`);
+      const publicEventId = await this.sendAsAgentContent(
+        token,
+        approval.project_room_id,
+        buildPublicApprovalNotice(approval),
+        requestId,
+      );
+      if (!publicEventId) throw new Error('public approval status delivery failed');
+      return { ok: true, requestId, privateEventId, publicEventId };
+    } catch (error) {
+      console.error(`Approval publish failed for ${requestId}: ${error.message}`);
+      try {
+        await this.callBackendApi(
+          'POST',
+          `/api/approvals/${encodeURIComponent(requestId)}/delivery-failed`,
+          { reason: 'matrix_approval_delivery_failed' },
+          `context=approval:delivery-failed request=${requestId}`,
+        );
+      } catch (denyError) {
+        console.error(`Approval fail-closed update failed for ${requestId}: ${denyError.message}`);
+      }
+      return { ok: false, reason: error.message, approval };
     }
   }
 
@@ -3573,7 +4408,10 @@ export class MatrixBridge {
       //   3. ensureDmRoom      — the global DM room (final fallback, below)
       // A send failure on one level falls through to the next.
       if (this.isHuman(msg.to)) {
-        const replyToRoom = msg.reply_to ? await this.lookupMessageSourceRoom(msg.reply_to) : null;
+        const replyToRoom = msg.reply_to ? await this.lookupVerifiedDirectReplyRoom(msg.reply_to, {
+          agentName: canonicalAgentName,
+          humanName: msg.to,
+        }) : null;
         const lastRoom = preferredDmRoom(state, agentName, msg.to, humanDmKey);
         const { candidates } = resolveOutboundDmRoom({ replyToRoom, lastRoom });
         for (const { room, source } of candidates) {
@@ -3977,10 +4815,11 @@ export class MatrixBridge {
           this.postWarning(`sendAsAgent failed in room ${roomId} (after auto-join retry): ${retryErr.message}`);
           return null;
         }
+      } else {
+        console.error(`Failed to send as agent in ${roomId}:`, e.message);
+        this.postWarning(`sendAsAgent failed in room ${roomId}: ${e.message}`);
+        return null;
       }
-      console.error(`Failed to send as agent in ${roomId}:`, e.message);
-      this.postWarning(`sendAsAgent failed in room ${roomId}: ${e.message}`);
-      return null;
     }
   }
 
