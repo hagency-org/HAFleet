@@ -61,8 +61,15 @@ import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib
 import { assertRuntimeDir, isLocalAgentServer, resolveLocalServerId } from './lib/runtime-dir-guard.js';
 import { enforceStartupConfig } from './lib/startup-config.js';
 import { NotificationRouter } from './lib/notification-router.js';
-import { readV1AgentManifest, defaultAgentchatHomeDir, allAgentHomeRoots } from './lib/agent-home-v1.js';
+import {
+  readV1AgentManifest,
+  defaultAgentchatHomeDir,
+  allAgentHomeRoots,
+  findV1ManifestByName,
+} from './lib/agent-home-v1.js';
 import { resolveApprovalTtlMs } from './lib/runtime-approval-client.js';
+import { buildProjectBoardSnapshot } from './lib/project-board.js';
+import { createProjectInspector } from './lib/project-inspector.js';
 import { MatrixDispatchStore } from './src/matrix-dispatch-store.mjs';
 import {
   buildUpstreamClaudeSubconsciousPaths,
@@ -114,6 +121,10 @@ const RULE_REPLY_TIMEOUT_MS = Number.parseInt(process.env.AGENT_RULE_REPLY_TIMEO
 const RULE_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_RULE_SWEEP_INTERVAL_MS || '15000', 10);
 const IDLE_THRESHOLD_MS = Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '20000', 10);
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.floor((IDLE_THRESHOLD_MS + 999) / 1000));
+const PROJECT_BOARD_STALE_AFTER_MS = Number.parseInt(
+  process.env.AGENT_PROJECT_BOARD_STALE_AFTER_MS || '300000',
+  10,
+);
 const MCP_HEARTBEAT_AUTHORITY_WINDOW_MS = 90_000;
 const LOCAL_ACTIVITY_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_LOCAL_ACTIVITY_SWEEP_MS || '5000', 10);
 const LOCAL_ACTIVITY_CAPTURE_BUDGET_RAW = Number.parseInt(process.env.AGENT_LOCAL_ACTIVITY_CAPTURE_BUDGET || '0', 10);
@@ -2877,6 +2888,7 @@ const agents = loadJsonSync('agents.json', {});
 loadAgentTokens();
 const deletedAgentTombstones = loadJsonSync('deleted_agents.json', {});
 const groups = loadJsonSync('groups.json', {});
+const workflowBindings = loadJsonSync('workflow_bindings.json', {});
 const messages = loadJsonSync('messages.json', []);
 let unreadMessageIndexVersion = 0;
 const unreadMessageIndex = {
@@ -2896,6 +2908,7 @@ const taskStore = createTaskStore({
   initialData: taskStoreData,
   save: (data) => saveJson('tasks.json', data),
 });
+const projectInspector = createProjectInspector();
 const supervisorSnapshotData = loadJsonSync('supervisor_snapshots.json', {});
 const supervisorSnapshotStore = createSupervisorSnapshotStore({
   initialData: supervisorSnapshotData,
@@ -10078,6 +10091,42 @@ app.patch('/api/task-graphs/:id/nodes/:nodeId', requireAgentToken(_tokenFromNode
     return res.json({ ok: true, graph, node });
   } catch (error) {
     return respondTaskGraphError(res, error, 'failed to update task graph node');
+  }
+});
+
+// Read-only, privacy-filtered project projection for Dashboard and future
+// clients. Group membership is the project boundary; direct/approval messages
+// and raw agent records never leave this endpoint.
+app.get('/api/project-board', async (req, res) => {
+  try {
+    const agentRows = await Promise.all(
+      Object.values(agents).filter(isAgentRecord).map(async agent => {
+        const row = serializeAgent(agent);
+        const manifest = findV1ManifestByName(row.name);
+        const managedProjects = manifest?.managedProjects?.length
+          ? manifest.managedProjects
+          : row.managedProjects;
+        const projectInspections = await Promise.all(
+          normalizeManagedProjects(managedProjects).map(project =>
+            projectInspector.inspectManagedProject(project, row.name)),
+        );
+        return { ...row, projectInspections };
+      }),
+    );
+    const snapshot = buildProjectBoardSnapshot({
+      groups,
+      bindings: workflowBindings,
+      agents: agentRows,
+      tasks: taskStore.listTasks(),
+      taskGraphs: taskGraphStore.listGraphs(),
+      messages,
+      staleAfterMs: PROJECT_BOARD_STALE_AFTER_MS,
+      activityLimit: req.query?.activity_limit,
+    });
+    return res.json(snapshot);
+  } catch (error) {
+    console.error('[project-board] snapshot failed:', error?.message || error);
+    return res.status(500).json({ error: 'project board snapshot failed' });
   }
 });
 
