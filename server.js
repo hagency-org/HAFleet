@@ -13,6 +13,7 @@ import { createDashboardMutationBoundary } from './lib/dashboard/request-boundar
 import { installDashboardPageRoutes } from './lib/dashboard/page-routes.js';
 import {
   installAlertProxyRoutes,
+  installProjectBoardProxyRoutes,
   installSubconsciousEventProxyRoutes,
   installSubconsciousProxyRoutes,
   installSupervisorProxyRoutes,
@@ -2970,6 +2971,7 @@ app.delete('/api/framework-presets/:id', async (req, res) => {
 });
 
 installTaskProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
+installProjectBoardProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
 installSupervisorProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
 installSubconsciousEventProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
 
