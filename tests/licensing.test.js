@@ -1,5 +1,4 @@
 import { describe, expect, test } from 'vitest';
-import { execFileSync } from 'child_process';
 import { readFileSync } from 'fs';
 
 describe('licensing', () => {
@@ -18,33 +17,34 @@ describe('licensing', () => {
     expect(pkg.private).toBe(true);
   });
 
-  test('NOTICE attributes upstream and records the unresolved consent', () => {
+  test('NOTICE credits every upstream author', () => {
     const notice = readFileSync('NOTICE', 'utf-8');
     expect(notice).toContain('shisuiki/agent-chat');
-    // The fork is 93% upstream code and upstream has no license. If this
-    // caveat is ever dropped, the NOTICE starts implying a grant we do not have.
-    expect(notice).toMatch(/no LICENSE file|not covered by the Apache/i);
+    // Apache 2.0 section 4 requires retaining attribution, and 717 of this
+    // tree's commits are upstream's. All five authors must stay named.
+    for (const author of ['shisuiki', 'mayor', 'anantheparty', 'csheargm', '确定下推自动机']) {
+      expect(notice, `NOTICE must credit ${author}`).toContain(author);
+    }
     expect(notice).toContain('docs/LICENSING.md');
   });
 
-  test('LICENSING.md states the blocker and how to undo the license commit', () => {
+  test('NOTICE no longer claims the inherited code is unlicensed', () => {
+    // Upstream adopted Apache 2.0 on 2026-07-29. Leaving the old caveat in place
+    // would understate the license we actually ship under.
+    const notice = readFileSync('NOTICE', 'utf-8');
+    expect(notice).not.toMatch(/publishes no LICENSE|not covered by the Apache/i);
+    expect(notice).toMatch(/Apache License 2\.0/);
+  });
+
+  test('LICENSING.md records the resolution and keeps provenance for attribution', () => {
     const doc = readFileSync('docs/LICENSING.md', 'utf-8');
-    expect(doc).toMatch(/cannot be distributed publicly/i);
-    expect(doc).toContain('chore(license)');
-    expect(doc).toMatch(/git revert/);
+    expect(doc).toMatch(/Status: resolved/i);
+    // The upstream commit is the load-bearing fact; keep it citable.
+    expect(doc).toContain('aa8e5e5');
+    // Provenance stays because Apache 2.0 section 4 needs attribution.
+    expect(doc).toContain('717');
+    expect(doc).toMatch(/Obligations when distributing/i);
+    expect(doc).not.toMatch(/cannot be distributed publicly/i);
   });
 
-  test('the license assertion is one revertable commit', () => {
-    // docs/LICENSING.md promises this is cleanly undoable. Verify the commit
-    // exists and touches only the license-bearing files.
-    const sha = execFileSync('git', ['log', '--format=%H', '--grep=^chore(license)', '-1'], {
-      encoding: 'utf-8',
-    }).trim();
-    expect(sha, 'no chore(license) commit found').toBeTruthy();
-
-    const files = execFileSync('git', ['show', '--name-only', '--format=', sha], {
-      encoding: 'utf-8',
-    }).trim().split('\n').filter(Boolean).sort();
-    expect(files).toEqual(['LICENSE', 'NOTICE', 'package.json']);
-  });
 });

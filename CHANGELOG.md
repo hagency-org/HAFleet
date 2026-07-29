@@ -68,9 +68,9 @@ the starting point: above the stale `1.0.0` without implying a `2.0` rewrite.
 
 - Systemd unit changes have not been smoke-tested on a live `systemctl`; they
   were authored on macOS, where `install-full.sh` refuses to run.
-- The repository has no `LICENSE`. See [docs/LICENSING.md](docs/LICENSING.md):
-  HAFleet is a fork of an unlicensed upstream, so adopting Apache 2.0 requires
-  consent from the upstream copyright holders.
+- ~~The repository has no `LICENSE`.~~ **Resolved 2026-07-29:** upstream adopted
+  Apache 2.0 (commit `aa8e5e5`), so HAFleet is now Apache 2.0 and distributable.
+  See [docs/LICENSING.md](docs/LICENSING.md).
 
 [Unreleased]: https://github.com/hagency-org/HAFleet/compare/v1.2.0...HEAD
 [1.2.0]: https://github.com/hagency-org/HAFleet/releases/tag/v1.2.0

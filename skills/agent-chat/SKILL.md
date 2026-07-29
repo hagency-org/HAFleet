@@ -1,9 +1,9 @@
 ---
 name: agent-chat
-description: Agent Chat operations handbook — MCP messaging, attachments, CLI admin, lifecycle, and remote verification.
+description: HAFleet operations handbook — MCP messaging, attachments, CLI admin, lifecycle, and remote verification.
 ---
 
-# Agent Chat
+# HAFleet
 
 Practical reference for daily operation of the agent-chat system.
 

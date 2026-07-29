@@ -469,7 +469,7 @@ version with a migration, not a documentation change.
 | [docs/RELEASING.md](docs/RELEASING.md) | Versioning, the SemVer surface, cutting a release |
 | [docs/ROLLBACK.md](docs/ROLLBACK.md) | Auto-deploy and manual rollback, state files |
 | [docs/SECURITY-DEBT.md](docs/SECURITY-DEBT.md) | Dependency advisories and the ratchet |
-| [docs/LICENSING.md](docs/LICENSING.md) | Fork provenance and the consent Apache 2.0 needs |
+| [docs/LICENSING.md](docs/LICENSING.md) | Fork provenance and Apache 2.0 attribution obligations |
 | [OPERATIONS.md](OPERATIONS.md) | Operator runbook: health, deploys, incidents |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [remote/README.md](remote/README.md) | Remote relay package |
@@ -480,12 +480,10 @@ Archived, kept for historical context only — use the runbooks above instead:
 
 ## License
 
-Intended license: **Apache 2.0** — `LICENSE` and `NOTICE` are in place.
+**Apache License 2.0** — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
 
-**Not yet distributable.** HAFleet is a fork of an upstream repository that
-publishes no license, and **717 of its commits are inherited from that upstream**
-— the great majority of the tree. Consent from the upstream copyright holders is
-required before this repository or any artifact
-built from it may be redistributed. Read
-[docs/LICENSING.md](docs/LICENSING.md) before pushing publicly, publishing a
-release, or pushing a `v*` tag.
+HAFleet is a fork of [agent-chat](https://github.com/shisuiki/agent-chat), which
+adopted Apache 2.0 on 2026-07-29; both are now under the same license. **717 of
+this tree's commits are inherited from upstream**, so `NOTICE` credits the
+upstream authors — retain it when you redistribute, along with `LICENSE`, and
+mark any files you change. See [docs/LICENSING.md](docs/LICENSING.md).

@@ -72,7 +72,7 @@ codex --sandbox workspace-write \
       -c "mcp_servers.agentchat.headers.Authorization=Bearer $AGENT_TOKEN"
 ```
 
-MCP is configured via `-c` flags rather than a built-in mechanism. Agent Chat calls the Codex policy above **Level 2**: the agent can edit its workspace and explicitly bound managed projects, while operations outside that sandbox require approval. Launchers reject `extraArgs` that try to override the managed sandbox or approval policy.
+MCP is configured via `-c` flags rather than a built-in mechanism. HAFleet calls the Codex policy above **Level 2**: the agent can edit its workspace and explicitly bound managed projects, while operations outside that sandbox require approval. Launchers reject `extraArgs` that try to override the managed sandbox or approval policy.
 
 The launcher also installs a session-scoped `hooks.PermissionRequest` command
 hook through `-c`. Before starting Codex, agent-chat inspects that exact hook

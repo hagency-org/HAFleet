@@ -91,5 +91,11 @@ is why release identity landed first.
 - **npm.** `package.json` keeps `"private": true`. This is a deployed service,
   not a library, and nothing imports it as a dependency.
 - **Container images.** See Phase 3 in [docs/DEPLOYMENT.md](DEPLOYMENT.md).
-- Anything at all, publicly, until [docs/LICENSING.md](LICENSING.md) is
-  resolved. The repository currently has no license.
+
+## Licensing
+
+Publishing is not blocked. Upstream adopted Apache 2.0 on 2026-07-29, so HAFleet
+is distributable under the same license. Retain `LICENSE` and `NOTICE` in
+anything you ship, and mark files you have changed — the release tarballs do this
+automatically because they come from `git archive` of the tracked tree. See
+[docs/LICENSING.md](LICENSING.md).

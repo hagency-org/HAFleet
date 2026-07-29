@@ -19,11 +19,9 @@ HAFleet is a fork of agent-chat (https://github.com/shisuiki/agent-chat).
 
 Copyright in that work is retained by its authors.
 
-IMPORTANT: at the time of writing, the upstream repository publishes no LICENSE
-file, so the inherited portion of this tree is not covered by the Apache License
-2.0 in the accompanying LICENSE file. Consent from the upstream authors is
-required before this repository or any artifact built from it may be
-redistributed. See docs/LICENSING.md.
+Upstream adopted the Apache License 2.0 on 2026-07-29, so the inherited portion
+of this tree and our own additions are under the same license as the accompanying
+LICENSE file. See docs/LICENSING.md.
 
 -------------------------------------------------------------------------------
 Third-party dependencies

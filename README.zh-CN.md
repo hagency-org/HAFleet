@@ -442,7 +442,7 @@ npm run check:remote-sync
 | [docs/RELEASING.md](docs/RELEASING.md) | 版本策略、SemVer 覆盖面、发版流程 |
 | [docs/ROLLBACK.md](docs/ROLLBACK.md) | 自动部署与手工回滚、状态文件 |
 | [docs/SECURITY-DEBT.md](docs/SECURITY-DEBT.md) | 依赖告警与棘轮 |
-| [docs/LICENSING.md](docs/LICENSING.md) | fork 溯源与 Apache 2.0 所需的同意 |
+| [docs/LICENSING.md](docs/LICENSING.md) | fork 溯源与 Apache 2.0 的署名义务 |
 | [OPERATIONS.md](OPERATIONS.md) | 运维手册：健康、部署、事故 |
 | [CHANGELOG.md](CHANGELOG.md) | 发布历史 |
 | [remote/README.md](remote/README.md) | 远程 relay 包 |
@@ -453,9 +453,9 @@ npm run check:remote-sync
 
 ## 许可
 
-预期许可：**Apache 2.0** —— `LICENSE` 与 `NOTICE` 已就位。
+**Apache License 2.0** —— 见 [`LICENSE`](LICENSE) 与 [`NOTICE`](NOTICE)。
 
-**目前还不可分发。** HAFleet fork 自一个未声明许可的上游仓库，其中**有 717 个
-commit 是从该上游继承而来** —— 占整棵树的绝大部分。在本仓库或任何由它构建的产物
-可被再分发之前，需要取得上游版权持有者的同意。在公开推送、发布 release 或推 `v*` tag 之前，请先读
-[docs/LICENSING.md](docs/LICENSING.md)。
+HAFleet fork 自 [agent-chat](https://github.com/shisuiki/agent-chat)，后者已于
+2026-07-29 采用 Apache 2.0，两者现在同许可。本树中**有 717 个 commit 继承自上游**，
+因此 `NOTICE` 里署名了上游作者 —— 再分发时请保留它与 `LICENSE`，并标注你改过的
+文件。见 [docs/LICENSING.md](docs/LICENSING.md)。
