@@ -7,6 +7,9 @@ on:
       - stable
   pull_request:
     branches:
+      # master is the default branch: without it here, PRs targeting master got
+      # no CI at all and were only checked after merge by the push trigger.
+      - master
       - stable
 
 jobs:

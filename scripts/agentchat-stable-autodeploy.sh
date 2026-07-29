@@ -9,7 +9,10 @@ DEPLOY_BRANCH="${AGENTCHAT_DEPLOY_BRANCH:-stable}"
 POLL_SEC="${AGENTCHAT_POLL_SEC:-30}"
 BACKEND_SERVICE="${AGENTCHAT_BACKEND_SERVICE:-agent-chat-v2}"
 DEPLOY_SERVICES="${AGENTCHAT_DEPLOY_SERVICES:-agent-chat ${BACKEND_SERVICE} bridge-matrix}"
-RELEASE_GATE="${AGENTCHAT_RELEASE_GATE:-none}"
+# Defaults to the gate ON. `none` means any commit reaching the deploy branch is
+# checked out and restarted with no test gate; that must be an explicit opt-out,
+# not the default. The shipped unit also sets this.
+RELEASE_GATE="${AGENTCHAT_RELEASE_GATE:-worktree}"
 RELEASE_GATE_ARGS="${AGENTCHAT_RELEASE_GATE_ARGS:-}"
 ONCE="${AGENTCHAT_ONCE:-false}"
 SYSTEMCTL_BIN="${AGENTCHAT_SYSTEMCTL_BIN:-systemctl}"
@@ -39,7 +42,17 @@ run_git() {
 }
 
 run_systemctl() {
-  "$SYSTEMCTL_BIN" "$@"
+  # This watcher runs unprivileged (see agent-chat-stable-autodeploy.service).
+  # Restarts escalate through the narrow /etc/sudoers.d/agentchat-autodeploy
+  # rule. Root needs no escalation, and an explicitly overridden SYSTEMCTL_BIN
+  # (tests, custom harnesses) is always invoked directly.
+  if [ "$(id -u)" = "0" ] \
+    || [ -n "${AGENTCHAT_SYSTEMCTL_BIN:-}" ] \
+    || ! command -v sudo >/dev/null 2>&1; then
+    "$SYSTEMCTL_BIN" "$@"
+  else
+    sudo -n "$SYSTEMCTL_BIN" "$@"
+  fi
 }
 
 run_sleep() {

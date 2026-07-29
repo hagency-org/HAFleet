@@ -56,8 +56,8 @@ Optional:
 From a fresh Linux machine:
 
 ```bash
-git clone https://github.com/shisuiki/agent-chat.git
-cd agent-chat
+git clone https://github.com/hagency-org/HAFleet.git
+cd HAFleet
 ./install-full.sh
 ```
 

@@ -56,8 +56,8 @@ Agent Chat 是一个本地优先的多 Agent 协作系统，面向 Claude Code�
 从新的 Linux 机器开始：
 
 ```bash
-git clone https://github.com/shisuiki/agent-chat.git
-cd agent-chat
+git clone https://github.com/hagency-org/HAFleet.git
+cd HAFleet
 ./install-full.sh
 ```
 
