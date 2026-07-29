@@ -110,8 +110,13 @@ describe('LocalServiceSupervisor', () => {
       const rows = readFileSync(eventLog, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
       return rows.length === 4 ? rows : null;
     });
+    // backend is the only real ordering constraint: dashboard, bridge and relay
+    // all depend on backend alone, so they start CONCURRENTLY and the order in
+    // which they report ready is a race. Asserting a fixed order passed on an
+    // idle machine and failed under CI load.
     expect(events[0]).toMatchObject({ name: 'backend', event: 'ready' });
-    expect(events.map((event) => event.name)).toEqual(['backend', 'dashboard', 'bridge', 'relay']);
+    expect(events.slice(1).map((event) => event.name).sort())
+      .toEqual(['bridge', 'dashboard', 'relay']);
   });
 
   test('automatically restarts a crashed relay exactly once', async () => {
