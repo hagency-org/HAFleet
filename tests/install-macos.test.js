@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { execFileSync } from 'child_process';
-import { readFileSync } from 'fs';
+import { readFileSync, statSync } from 'fs';
+import os from 'os';
 
 // install-full.sh is Linux-only (it renders systemd units), so installing on a
 // Mac previously meant doing it by hand. That matters because HAFleet fleets are
@@ -15,8 +16,9 @@ const runScript = (args) => execFileSync('bash', [SCRIPT, ...args], {
 describe('install/install-macos.sh', () => {
   test('is valid bash and executable', () => {
     execFileSync('bash', ['-n', SCRIPT], { stdio: ['ignore', 'pipe', 'pipe'] });
-    const mode = execFileSync('stat', ['-f', '%Lp', SCRIPT], { encoding: 'utf-8' }).trim();
-    expect(Number.parseInt(mode, 8) & 0o111).toBeGreaterThan(0);
+    // Node's stat rather than stat(1): the -f/-c format flags differ between
+    // BSD and GNU, so shelling out passes on macOS and fails on Linux CI.
+    expect(statSync(SCRIPT).mode & 0o111).toBeGreaterThan(0);
   });
 
   test('refuses to run anywhere but macOS', () => {
@@ -82,7 +84,11 @@ describe('install/install-macos.sh', () => {
   });
 
   describe('dry run', () => {
-    test('changes nothing and reports what it would do', () => {
+    // The installer refuses to run off macOS by design, so the behaviour under
+    // test differs by platform. Both branches are real assertions.
+    const onMac = os.platform() === 'darwin';
+
+    test.runIf(onMac)('changes nothing and reports what it would do', () => {
       const before = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf-8' });
       const out = runScript(['--dry-run', '--no-start', '--skip-mcp', '--allow-existing-tmux']);
       const after = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf-8' });
@@ -90,6 +96,20 @@ describe('install/install-macos.sh', () => {
       expect(out).toContain('[dry-run]');
       expect(out).toMatch(/would write .*services-macos\.json/);
       expect(after).toBe(before);
+    });
+
+    test.runIf(!onMac)('refuses to run on this non-macOS platform', () => {
+      let stderr = '';
+      let exited = false;
+      try {
+        runScript(['--dry-run', '--no-start', '--skip-mcp', '--allow-existing-tmux']);
+      } catch (error) {
+        exited = true;
+        stderr = String(error.stderr || '');
+      }
+      expect(exited, 'installer must exit non-zero off macOS').toBe(true);
+      expect(stderr).toMatch(/this installer is for macOS/);
+      expect(stderr).toMatch(/install-full\.sh/);
     });
 
     test('routes every mutation through the run wrapper', () => {
