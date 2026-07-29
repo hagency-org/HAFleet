@@ -228,4 +228,9 @@ rm -rf "$OUT_DIR"
 mkdir -p "$(dirname "$OUT_DIR")"
 cp -a "$BUILD_DIR"/. "$OUT_DIR"/
 
+# Stamp only the generated artifact. --check and --sync-remote deliberately skip
+# this: they compare against remote/ byte-for-byte, and build-info.json is a
+# build output that must never be committed there.
+"$ROOT_DIR/scripts/stamp-version.sh" "$OUT_DIR" --channel remote
+
 echo "Generated remote package at: $OUT_DIR"

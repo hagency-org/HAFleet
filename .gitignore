@@ -35,3 +35,6 @@ remote/package-lock.json
 # Generated per-agent workspace docs
 docs/agentchat-worker/
 docs/agentchat-develop/
+
+# Generated build identity (scripts/stamp-version.sh)
+build-info.json
