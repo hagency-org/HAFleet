@@ -1,4 +1,4 @@
-# Agent Chat Remote Package
+# HAFleet Remote Package
 
 This folder is the deployable package for remote servers.
 Most files here are managed by root-level generators/sync checks:

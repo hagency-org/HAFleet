@@ -1,0 +1,128 @@
+name: Release
+
+# Tag-driven. Pushing v1.2.0 cuts release 1.2.0; nothing else publishes.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to re-cut (e.g. v1.2.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          # stamp-version.sh reads the commit date; a shallow clone is enough
+          # but tags must be present for describe-style lookups.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.0
+
+      - name: Resolve version
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          RELEASE="${TAG#v}"
+          PKG="$(node -e 'process.stdout.write(require("./package.json").version)')"
+          echo "tag=$TAG"          >> "$GITHUB_OUTPUT"
+          echo "release=$RELEASE"  >> "$GITHUB_OUTPUT"
+          # A tag that disagrees with package.json produces artifacts whose
+          # stamped identity contradicts their filename. Fail instead.
+          if [ "$RELEASE" != "$PKG" ]; then
+            echo "::error::tag $TAG implies $RELEASE but package.json says $PKG"
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - name: Gate
+        run: |
+          npm run verify:ci
+          npm test
+
+      - name: Build remote package
+        run: npm run build:remote
+
+      - name: Stamp release channel
+        run: ./scripts/stamp-version.sh remote-dist --channel release --release "${{ steps.version.outputs.release }}"
+
+      - name: Package artifacts
+        id: package
+        run: |
+          set -euo pipefail
+          RELEASE="${{ steps.version.outputs.release }}"
+          mkdir -p dist
+
+          # Full stack. Built from `git archive` at the tag, so uncommitted work
+          # cannot leak in, and stamped with build-info.json because the
+          # unpacked tree has no .git to derive identity from.
+          ./scripts/build-release-package.sh \
+            --ref "${{ steps.version.outputs.tag }}" \
+            --release "$RELEASE" \
+            --out-dir dist \
+            --channel release
+          FULL_TARBALL="hafleet-${RELEASE}.tar.gz"
+
+          # Remote relay package (unchanged). --sort/--owner/--group/--mtime are
+          # GNU tar extensions; the runner has GNU tar, so both artifacts are
+          # byte-reproducible for a given tag.
+          REMOTE_TARBALL="hafleet-remote-${RELEASE}.tar.gz"
+          tar --sort=name \
+              --owner=0 --group=0 --numeric-owner \
+              --mtime="@$(git log -1 --format=%ct)" \
+              -czf "dist/$REMOTE_TARBALL" -C remote-dist .
+
+          ( cd dist && sha256sum ./*.tar.gz > SHA256SUMS )
+          cat dist/SHA256SUMS
+          echo "full_tarball=$FULL_TARBALL"     >> "$GITHUB_OUTPUT"
+          echo "remote_tarball=$REMOTE_TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Extract changelog section
+        id: notes
+        run: |
+          set -euo pipefail
+          RELEASE="${{ steps.version.outputs.release }}"
+          if awk -v v="$RELEASE" '
+                $0 ~ "^## \\[" v "\\]" {found=1; next}
+                found && /^## \[/ {exit}
+                found {print}
+              ' CHANGELOG.md > release-notes.md && [ -s release-notes.md ]; then
+            echo "Using CHANGELOG section for $RELEASE"
+          else
+            echo "No CHANGELOG section for $RELEASE; falling back to commit log." \
+              | tee release-notes.md
+            git log --pretty='- %s' "$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)"..HEAD \
+              >> release-notes.md
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          # A hyphen in the version means a pre-release (-beta.N, -rc.N).
+          # Computed as an explicit variable rather than inline command
+          # substitution, which is brittle under `set -e`.
+          PRERELEASE=""
+          case "$TAG" in *-*) PRERELEASE="--prerelease" ;; esac
+          gh release create "$TAG" \
+            --title "HAFleet ${{ steps.version.outputs.release }}" \
+            --notes-file release-notes.md \
+            ${PRERELEASE} \
+            "dist/${{ steps.package.outputs.full_tarball }}" \
+            "dist/${{ steps.package.outputs.remote_tarball }}" \
+            "dist/SHA256SUMS"

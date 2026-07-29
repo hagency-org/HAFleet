@@ -228,6 +228,61 @@ prepare_env() {
   fi
 }
 
+bridge_value_missing() {
+  case "${1:-}" in
+    ""|changeme|CHANGEME|placeholder|PLACEHOLDER) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Preflight for --with-bridge. Without this the installer enables and restarts
+# bridge-matrix.service against a fresh .env, the bridge fail-closes on a
+# missing secret (bridge-matrix.js:2419), and the install still reports success.
+prepare_bridge_env() {
+  [ "$WITH_BRIDGE" = true ] || return 0
+  if [ "$DRY_RUN" = true ]; then
+    log "[dry-run] would validate Matrix bridge configuration in $ENV_FILE"
+    return 0
+  fi
+
+  # Generatable: this is a shared secret between bridge and backend, not a
+  # credential registered anywhere else, so minting one is safe.
+  local secret
+  secret="$(read_env_value MATRIX_BRIDGE_SECRET "$ENV_FILE")"
+  if bridge_value_missing "$secret"; then
+    local generated
+    if command -v openssl >/dev/null 2>&1; then
+      generated="$(openssl rand -hex 32)"
+    else
+      generated="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+    [ -n "$generated" ] || die "failed to generate MATRIX_BRIDGE_SECRET"
+    set_env_value MATRIX_BRIDGE_SECRET "$generated" "$ENV_FILE"
+    log "Generated MATRIX_BRIDGE_SECRET in $ENV_FILE"
+  fi
+
+  # Not generatable: must match an account that already exists on the homeserver.
+  local bot_password
+  bot_password="$(read_env_value MATRIX_BOT_PASSWORD "$ENV_FILE")"
+  if bridge_value_missing "$bot_password"; then
+    die "$(printf '%s\n' \
+      "--with-bridge requires MATRIX_BOT_PASSWORD in $ENV_FILE." \
+      "  The bridge logs in as its bot account on your homeserver; there is" \
+      "  nothing to generate. Set MATRIX_HOMESERVER, MATRIX_SERVER_NAME," \
+      "  MATRIX_BOT_USERNAME and MATRIX_BOT_PASSWORD, then re-run." \
+      "  To install the local stack without Matrix, drop --with-bridge.")"
+  fi
+
+  local homeserver
+  homeserver="$(read_env_value MATRIX_HOMESERVER "$ENV_FILE")"
+  case "$homeserver" in
+    ""|*example.com*)
+      log "WARNING: MATRIX_HOMESERVER is unset or still the example placeholder ('$homeserver')."
+      log "         bridge-matrix.service will start but cannot reach a homeserver."
+      ;;
+  esac
+}
+
 install_dependencies() {
   if [ "$SKIP_NPM" = true ]; then
     log "Skipping npm install"
@@ -365,10 +420,20 @@ verify_installation() {
   [ -f "$SYSTEMD_DIR/agent-chat.service" ] || die "agent-chat.service was not installed"
   [ -f "$SYSTEMD_DIR/agent-chat-push-relay.service" ] || die "agent-chat-push-relay.service was not installed"
 
+  if [ "$WITH_BRIDGE" = true ]; then
+    [ -f "$SYSTEMD_DIR/bridge-matrix.service" ] || die "bridge-matrix.service was not installed"
+  fi
+
   if is_system_dir && [ "$NO_START" = false ]; then
     systemctl_run is-active --quiet agent-chat-v2.service
     systemctl_run is-active --quiet agent-chat.service
     systemctl_run is-active --quiet agent-chat-push-relay.service
+    # Previously unchecked, so a bridge that fail-closed on startup still let
+    # the installer print "Installation complete."
+    if [ "$WITH_BRIDGE" = true ]; then
+      systemctl_run is-active --quiet bridge-matrix.service \
+        || die "bridge-matrix.service was enabled but is not active; check: journalctl -u bridge-matrix -n 50"
+    fi
   fi
 }
 
@@ -382,6 +447,7 @@ main() {
   log "User:       $SERVICE_USER"
   [ "$SKIP_PREREQ" = true ] || check_prereqs
   prepare_env
+  prepare_bridge_env
   install_dependencies
   link_cli_commands
   install_skills

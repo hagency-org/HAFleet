@@ -1,4 +1,4 @@
-# Agent Chat Operations Runbook
+# HAFleet Operations Runbook
 
 This runbook replaces `agent-doctor` style tooling.  
 Use these commands directly during incident response.

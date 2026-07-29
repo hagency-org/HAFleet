@@ -1,0 +1,32 @@
+version: 2
+updates:
+  # Direct dependencies only. Nearly all current advisories are transitive
+  # through @modelcontextprotocol/sdk and matrix-bot-sdk, so the actionable
+  # lever is those two moving forward — not thousands of nested bumps.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for patch/minor keeps review load sane; majors stay separate
+      # because they can break the MCP tool surface or the Matrix bridge.
+      safe-updates:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(ci)"
+
+  - package-ecosystem: docker
+    directory: /services
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(docker)"

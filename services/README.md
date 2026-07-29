@@ -1,4 +1,4 @@
-# Agent Chat Supervised Services
+# HAFleet Supervised Services
 
 The local profile manages `backend`, `dashboard`, `bridge`, and `relay` under
 one detached supervisor. Use an existing writable runtime directory:
@@ -131,7 +131,7 @@ ships safe defaults for all five; a fresh `.env` only needs
    Matrix bot senders").
 
 For the four-service team deployment, provide an operator-owned environment
-file containing the existing Agent Chat and Matrix settings:
+file containing the existing HAFleet and Matrix settings:
 
 ```bash
 AGENTCHAT_ENV_FILE=/absolute/path/to/agent-chat.env \

@@ -8,7 +8,7 @@ import { promisify } from 'util';
 import { defaultAgentchatHomeDir, resolveAgentDocsPaths, resolveV1ManifestForAgent } from './lib/agent-home-v1.js';
 import { detectPaneBusyState } from './lib/pane-activity.js';
 import { assertRuntimeDir, isLocalAgentServer as isLocalServerIdentity, resolveLocalServerId } from './lib/runtime-dir-guard.js';
-import { enforceStartupConfig } from './lib/startup-config.js';
+import { enforceStartupConfig, resolveBindHost } from './lib/startup-config.js';
 import { createDashboardMutationBoundary } from './lib/dashboard/request-boundary.js';
 import { installDashboardPageRoutes } from './lib/dashboard/page-routes.js';
 import {
@@ -3876,7 +3876,14 @@ function stopRuntimeLoops() {
 }
 
 let serverInstance = null;
-function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
+// Bind address. Loopback by default; see lib/startup-config.js resolveBindHost.
+function resolvedBindHost() {
+  const { host, warning } = resolveBindHost(process.env.AGENT_CHAT_WEB_HOST);
+  if (warning) console.warn(`[bind] ${warning}`);
+  return host;
+}
+
+function startServer({ port = PORT, host = resolvedBindHost() } = {}) {
   if (serverInstance) return serverInstance;
   serverInstance = app.listen(port, host, () => {
     console.log(`agent-viz running on http://${host}:${port}`);

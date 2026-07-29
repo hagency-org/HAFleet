@@ -223,6 +223,7 @@ function validateRouteAuth(fileName, source, route, expectedAuth) {
     'requireBearer',
     'requireAgentToken',
     'requireBridgeSecret',
+    'requireApprovalBridgeSecret',
     '_alertTransitionAuth',
     'authorizeSubconsciousEventIngest(req)',
     'authorizeMessageDetailAccess(req',
@@ -255,6 +256,8 @@ function validateRouteAuth(fileName, source, route, expectedAuth) {
       return has('requireAgentToken') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireAgentToken`;
     case 'bridge-secret':
       return has('requireBridgeSecret') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireBridgeSecret`;
+    case 'approval-bridge-secret':
+      return has('requireApprovalBridgeSecret') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireApprovalBridgeSecret`;
     case 'bearer-or-agent-token':
       return has('_alertTransitionAuth') ? null : `${fileName}:${route.line} ${routeKey(route)} expected _alertTransitionAuth`;
     case 'bearer-or-agent-token-inline':

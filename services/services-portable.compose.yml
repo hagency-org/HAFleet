@@ -1,0 +1,93 @@
+# Portable profile: works on Docker Desktop for macOS and Windows.
+#
+# The `services-team` profile uses `network_mode: host` (and `pid: host` for the
+# bridge), which only exists on Linux. This profile uses ordinary bridge
+# networking with published ports instead.
+#
+#   docker compose -f services/services-portable.compose.yml up -d
+#
+# DELIBERATELY OMITTED: the push relay.
+#   The relay's job is injecting notifications into tmux panes on the host via
+#   `tmux send-keys`. A container cannot reach the host's tmux server socket at
+#   /tmp/tmux-<uid> (and this profile gives each service its own /tmp), so a
+#   containerised relay could consume the SSE stream but never deliver anything.
+#   Run the relay on the host — see docs/DEPLOYMENT.md.
+#
+# The Matrix bridge is behind a profile because it needs real credentials:
+#   docker compose -f services/services-portable.compose.yml --profile matrix up -d
+
+name: agentchat-services-portable
+
+x-common: &common
+  image: "${AGENTCHAT_IMAGE:-agentchat-services:local}"
+  build:
+    context: ..
+    dockerfile: services/Dockerfile
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  env_file:
+    - ${AGENTCHAT_ENV_FILE:-../.env}
+  volumes:
+    - agentchat-runtime:/var/lib/agent-chat
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  backend:
+    <<: *common
+    command: ["backend"]
+    environment:
+      NODE_ENV: production
+      AGENT_CHAT_RUNTIME_DIR: /var/lib/agent-chat
+      # Bind on all interfaces inside the container so the published port and
+      # sibling containers can reach it. The container boundary is the isolation
+      # here, which is why only 127.0.0.1 is published on the host.
+      AGENT_CHAT_BACKEND_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:${AGENT_CHAT_BACKEND_PORT:-8090}:8090"
+    healthcheck:
+      test: ["CMD", "services/docker-healthcheck.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 15s
+
+  dashboard:
+    <<: *common
+    command: ["dashboard"]
+    environment:
+      NODE_ENV: production
+      AGENT_CHAT_RUNTIME_DIR: /var/lib/agent-chat
+      # Cross-container, so the default 127.0.0.1 backend URL does not apply.
+      AGENT_CHAT_API: http://backend:8090
+      AGENT_CHAT_WEB_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:${AGENT_CHAT_WEB_PORT:-8084}:8084"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "services/docker-healthcheck.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    stop_grace_period: 10s
+
+  bridge:
+    <<: *common
+    command: ["bridge"]
+    profiles: ["matrix"]
+    environment:
+      NODE_ENV: production
+      AGENT_CHAT_RUNTIME_DIR: /var/lib/agent-chat
+      AGENT_CHAT_API: http://backend:8090
+    depends_on:
+      backend:
+        condition: service_healthy
+    stop_grace_period: 15s
+
+volumes:
+  agentchat-runtime:

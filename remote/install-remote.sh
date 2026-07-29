@@ -247,6 +247,12 @@ if [ "$IS_LINUX" = true ]; then
   fi
 else
   echo "[5/9] Installing launchd service ${SERVICE_NAME}..."
+  # Parity note, stated rather than left silent: the auto-deploy watcher is
+  # installed only on Linux (tracked as CD-003). On macOS the relay itself runs
+  # under launchd, but updates must be applied by hand.
+  echo "  NOTE: macOS does not get the autodeploy watcher; update with:"
+  echo "        git -C \"$REPO_ROOT\" pull && ./install-remote.sh"
+  echo "        See docs/DEPLOYMENT.md for the supported platform matrix."
   if [ "$SERVICE_NAME" != "$LEGACY_SERVICE_NAME" ]; then
     cleanup_legacy_launchd_service "$LEGACY_SERVICE_NAME"
   fi

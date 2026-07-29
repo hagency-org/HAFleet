@@ -59,7 +59,12 @@ describe('services-team Compose contract', () => {
   test('builds a non-root Node 22 production image', () => {
     const dockerfile = readFileSync(dockerfilePath, 'utf8');
 
-    expect(dockerfile).toMatch(/^FROM node:22-bookworm-slim$/m);
+    // Multi-stage: both stages must pin the same Node 22 slim base, and the
+    // runtime must take node_modules from the deps stage rather than rebuilding
+    // them (which would drag the npm cache into the shipped layer).
+    expect(dockerfile).toMatch(/^FROM node:22-bookworm-slim AS deps$/m);
+    expect(dockerfile).toMatch(/^FROM node:22-bookworm-slim AS runtime$/m);
+    expect(dockerfile).toMatch(/^COPY --from=deps /m);
     expect(dockerfile).toMatch(/npm ci --omit=dev/);
     expect(dockerfile).toMatch(/^USER node$/m);
     expect(dockerfile).toMatch(/\/var\/lib\/agent-chat/);

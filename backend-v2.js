@@ -59,7 +59,7 @@ import { createSupervisorLifecycleManager, killTmuxSession as killSupervisorTmux
 import { provisionSupervisorAgent, buildSupervisorAgentRecord } from './lib/supervisor-provisioning.js';
 import { AgentStateMachine, deriveStateFromLegacy, agentExpectsMcp } from './lib/agent-state.js';
 import { assertRuntimeDir, isLocalAgentServer, resolveLocalServerId } from './lib/runtime-dir-guard.js';
-import { enforceStartupConfig } from './lib/startup-config.js';
+import { enforceStartupConfig, resolveBindHost } from './lib/startup-config.js';
 import { NotificationRouter } from './lib/notification-router.js';
 import {
   readV1AgentManifest,
@@ -11376,7 +11376,15 @@ function stopBackgroundLoops() {
   endSseClients();
 }
 
-export function startServer({ port = PORT, host = '127.0.0.1' } = {}) {
+// Bind address. Loopback by default; see lib/startup-config.js resolveBindHost
+// for why widening it is opt-in and logged.
+function resolvedBindHost() {
+  const { host, warning } = resolveBindHost(process.env.AGENT_CHAT_BACKEND_HOST);
+  if (warning) console.warn(`[bind] ${warning}`);
+  return host;
+}
+
+export function startServer({ port = PORT, host = resolvedBindHost() } = {}) {
   if (serverInstance) return serverInstance;
   installStartupHooks();
   startBackgroundLoops();
