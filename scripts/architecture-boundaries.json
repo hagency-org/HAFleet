@@ -41,8 +41,7 @@
         "remote/"
       ],
       "forbiddenSpecifierPatterns": [
-        "^\\.\\./\\.\\./",
-        "^\\.\\./lib/"
+        "^\\.\\./\\.\\./"
       ],
       "forbiddenResolvedPrefixes": [
         "backend-v2.js",
@@ -55,52 +54,220 @@
   "routeOwnership": {
     "server.js": {
       "mutationRoutes": [
-        { "method": "POST", "path": "/api/queue", "owner": "dashboard.queue" },
-        { "method": "DELETE", "path": "/api/queue/:id", "owner": "dashboard.queue" },
-        { "method": "POST", "path": "/api/queue/:id/send", "owner": "dashboard.queue" },
-        { "method": "POST", "path": "/api/agents/:name/unread-messages/:msgId/cancel", "owner": "backend.proxy.messages" },
-        { "method": "POST", "path": "/api/agents/:name/dm-send", "owner": "backend.proxy.messages" },
-        { "method": "DELETE", "path": "/api/queue/agents/:name/notifications", "owner": "dashboard.queue" },
-        { "method": "PATCH", "path": "/api/agents/:name", "owner": "backend.proxy.agents" },
-        { "method": "POST", "path": "/api/agents/create", "owner": "backend.proxy.agents" },
-        { "method": "POST", "path": "/api/agents/:name/start", "owner": "backend.proxy.agents" },
-        { "method": "PATCH", "path": "/api/agents/:name/home-metadata", "owner": "backend.proxy.agents" },
-        { "method": "POST", "path": "/api/agents/:name/projects/import", "owner": "backend.proxy.agent-projects" },
-        { "method": "POST", "path": "/api/agents/:name/projects/remove", "owner": "backend.proxy.agent-projects" },
-        { "method": "POST", "path": "/api/agents/:name/workspace/migrate-entry-files", "owner": "backend.proxy.agent-projects" },
-        { "method": "PATCH", "path": "/api/agents/:name/subconscious-guidance", "owner": "backend.proxy.subconscious" },
-        { "method": "PATCH", "path": "/api/agents/:name/subconscious-runtime", "owner": "backend.proxy.subconscious" },
-        { "method": "POST", "path": "/api/agents/:name/offline", "owner": "backend.proxy.agents" },
-        { "method": "POST", "path": "/api/agents/:name/down", "owner": "dashboard.agent-control" },
-        { "method": "DELETE", "path": "/api/agents/:name", "owner": "backend.proxy.agents" },
-        { "method": "POST", "path": "/api/framework-presets", "owner": "backend.proxy.framework-presets" },
-        { "method": "PUT", "path": "/api/framework-presets/:id", "owner": "backend.proxy.framework-presets" },
-        { "method": "DELETE", "path": "/api/framework-presets/:id", "owner": "backend.proxy.framework-presets" },
-        { "method": "POST", "path": "/api/redirects", "owner": "dashboard.redirects" },
-        { "method": "DELETE", "path": "/api/redirects/:from", "owner": "dashboard.redirects" },
-        { "method": "POST", "path": "/api/reminders", "owner": "dashboard.reminders" },
-        { "method": "DELETE", "path": "/api/reminders/:id", "owner": "dashboard.reminders" }
+        {
+          "method": "POST",
+          "path": "/api/queue",
+          "owner": "dashboard.queue"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/queue/:id",
+          "owner": "dashboard.queue"
+        },
+        {
+          "method": "POST",
+          "path": "/api/queue/:id/send",
+          "owner": "dashboard.queue"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/unread-messages/:msgId/cancel",
+          "owner": "backend.proxy.messages"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/dm-send",
+          "owner": "backend.proxy.messages"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/queue/agents/:name/notifications",
+          "owner": "dashboard.queue"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/agents/:name",
+          "owner": "backend.proxy.agents"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/create",
+          "owner": "backend.proxy.agents"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/start",
+          "owner": "backend.proxy.agents"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/agents/:name/home-metadata",
+          "owner": "backend.proxy.agents"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/projects/import",
+          "owner": "backend.proxy.agent-projects"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/projects/remove",
+          "owner": "backend.proxy.agent-projects"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/workspace/migrate-entry-files",
+          "owner": "backend.proxy.agent-projects"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/agents/:name/subconscious-guidance",
+          "owner": "backend.proxy.subconscious"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/agents/:name/subconscious-runtime",
+          "owner": "backend.proxy.subconscious"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/offline",
+          "owner": "backend.proxy.agents"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/down",
+          "owner": "dashboard.agent-control"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/agents/:name",
+          "owner": "backend.proxy.agents"
+        },
+        {
+          "method": "POST",
+          "path": "/api/framework-presets",
+          "owner": "backend.proxy.framework-presets"
+        },
+        {
+          "method": "PUT",
+          "path": "/api/framework-presets/:id",
+          "owner": "backend.proxy.framework-presets"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/framework-presets/:id",
+          "owner": "backend.proxy.framework-presets"
+        },
+        {
+          "method": "POST",
+          "path": "/api/redirects",
+          "owner": "dashboard.redirects"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/redirects/:from",
+          "owner": "dashboard.redirects"
+        },
+        {
+          "method": "POST",
+          "path": "/api/reminders",
+          "owner": "dashboard.reminders"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/reminders/:id",
+          "owner": "dashboard.reminders"
+        }
       ]
     },
     "lib/dashboard/proxy-routes.js": {
       "mutationRoutes": [
-        { "method": "POST", "path": "/api/subconscious/upstream/bootstrap/:name", "owner": "backend.proxy.subconscious" },
-        { "method": "POST", "path": "/api/subconscious/upstream/session-start/:name", "owner": "backend.proxy.subconscious" },
-        { "method": "POST", "path": "/api/subconscious/upstream/user-prompt/:name", "owner": "backend.proxy.subconscious" },
-        { "method": "POST", "path": "/api/subconscious/upstream/pretool/:name", "owner": "backend.proxy.subconscious" },
-        { "method": "POST", "path": "/api/tasks", "owner": "backend.proxy.tasks" },
-        { "method": "PATCH", "path": "/api/tasks/:id", "owner": "backend.proxy.tasks" },
-        { "method": "DELETE", "path": "/api/tasks/:id", "owner": "backend.proxy.tasks" },
-        { "method": "POST", "path": "/api/tasks/:id/transition", "owner": "backend.proxy.tasks" },
-        { "method": "POST", "path": "/api/tasks/:id/comments", "owner": "backend.proxy.tasks" },
-        { "method": "POST", "path": "/api/task-graphs", "owner": "backend.proxy.task-graphs" },
-        { "method": "DELETE", "path": "/api/task-graphs/:id", "owner": "backend.proxy.task-graphs" },
-        { "method": "PATCH", "path": "/api/task-graphs/:id/nodes/:nodeId", "owner": "backend.proxy.task-graphs" },
-        { "method": "POST", "path": "/api/supervisor/control", "owner": "backend.proxy.supervisor" },
-        { "method": "POST", "path": "/api/alerts/:id/transition", "owner": "backend.proxy.alerts" },
-        { "method": "POST", "path": "/api/alerts/:id/notes", "owner": "backend.proxy.alerts" },
-        { "method": "PATCH", "path": "/api/alerts/:id", "owner": "backend.proxy.alerts" },
-        { "method": "DELETE", "path": "/api/alerts/:id", "owner": "backend.proxy.alerts" }
+        {
+          "method": "POST",
+          "path": "/api/subconscious/upstream/bootstrap/:name",
+          "owner": "backend.proxy.subconscious"
+        },
+        {
+          "method": "POST",
+          "path": "/api/subconscious/upstream/session-start/:name",
+          "owner": "backend.proxy.subconscious"
+        },
+        {
+          "method": "POST",
+          "path": "/api/subconscious/upstream/user-prompt/:name",
+          "owner": "backend.proxy.subconscious"
+        },
+        {
+          "method": "POST",
+          "path": "/api/subconscious/upstream/pretool/:name",
+          "owner": "backend.proxy.subconscious"
+        },
+        {
+          "method": "POST",
+          "path": "/api/tasks",
+          "owner": "backend.proxy.tasks"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/tasks/:id",
+          "owner": "backend.proxy.tasks"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/tasks/:id",
+          "owner": "backend.proxy.tasks"
+        },
+        {
+          "method": "POST",
+          "path": "/api/tasks/:id/transition",
+          "owner": "backend.proxy.tasks"
+        },
+        {
+          "method": "POST",
+          "path": "/api/tasks/:id/comments",
+          "owner": "backend.proxy.tasks"
+        },
+        {
+          "method": "POST",
+          "path": "/api/task-graphs",
+          "owner": "backend.proxy.task-graphs"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/task-graphs/:id",
+          "owner": "backend.proxy.task-graphs"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/task-graphs/:id/nodes/:nodeId",
+          "owner": "backend.proxy.task-graphs"
+        },
+        {
+          "method": "POST",
+          "path": "/api/supervisor/control",
+          "owner": "backend.proxy.supervisor"
+        },
+        {
+          "method": "POST",
+          "path": "/api/alerts/:id/transition",
+          "owner": "backend.proxy.alerts"
+        },
+        {
+          "method": "POST",
+          "path": "/api/alerts/:id/notes",
+          "owner": "backend.proxy.alerts"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/alerts/:id",
+          "owner": "backend.proxy.alerts"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/alerts/:id",
+          "owner": "backend.proxy.alerts"
+        }
       ]
     },
     "backend-v2.js": {
@@ -114,83 +281,513 @@
         "appendDeliveryEvent("
       ],
       "statefulGetRoutes": [
-        { "method": "GET", "path": "/health", "owner": "server-runtime.health-liveness" },
-        { "method": "GET", "path": "/api/servers", "owner": "server-runtime.liveness-read", "auth": "global-api-auth-only" },
-        { "method": "GET", "path": "/api/agents", "owner": "agent-runtime.liveness-read", "auth": "global-api-auth-only" },
-        { "method": "GET", "path": "/api/agents/:name", "owner": "agent-runtime.liveness-read", "auth": "global-api-auth-only" },
-        { "method": "GET", "path": "/api/subconscious/detail/:name", "owner": "subconscious.read-through-state", "auth": "global-api-auth-only" },
-        { "method": "GET", "path": "/api/inbox/:agent", "owner": "inbox.agent-read-ack", "auth": "agent-token" },
-        { "method": "GET", "path": "/api/groups/:name/messages", "owner": "groups.member-read-ack", "auth": "agent-credential" }
+        {
+          "method": "GET",
+          "path": "/api/agents",
+          "owner": "agent-runtime.liveness-read",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "GET",
+          "path": "/api/agents/:name",
+          "owner": "agent-runtime.liveness-read",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "GET",
+          "path": "/api/groups/:name/messages",
+          "owner": "groups.member-read-ack",
+          "auth": "agent-credential"
+        },
+        {
+          "method": "GET",
+          "path": "/api/inbox/:agent",
+          "owner": "inbox.agent-read-ack",
+          "auth": "agent-token"
+        },
+        {
+          "method": "GET",
+          "path": "/api/pool",
+          "owner": "pool.agent-matrix-read",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "GET",
+          "path": "/api/servers",
+          "owner": "server-runtime.liveness-read",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "GET",
+          "path": "/api/subconscious/detail/:name",
+          "owner": "subconscious.read-through-state",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "GET",
+          "path": "/health",
+          "owner": "server-runtime.health-liveness"
+        }
       ],
       "mutationRoutes": [
-        { "method": "POST", "path": "/api/delivery-events", "owner": "observability.delivery-ingest", "auth": "global-api-auth-only" },
-        { "method": "PATCH", "path": "/api/supervisor-state/:target", "owner": "supervisor.snapshot-writer", "auth": "agent-token" },
-        { "method": "POST", "path": "/api/supervisor-state/:target/heartbeat", "owner": "supervisor.snapshot-writer", "auth": "agent-token" },
-        { "method": "POST", "path": "/api/supervisor/control", "owner": "operator.supervisor-control", "auth": "bearer" },
-        { "method": "POST", "path": "/api/servers/heartbeat", "owner": "server-runtime.lifecycle", "auth": "bearer" },
-        { "method": "POST", "path": "/api/servers/:id/offline", "owner": "server-runtime.lifecycle", "auth": "bearer" },
-        { "method": "POST", "path": "/api/servers/:id/maintenance", "owner": "operator.server-maintenance", "auth": "bearer" },
-        { "method": "POST", "path": "/api/agents", "owner": "agent-runtime.self-report", "auth": "agent-token" },
-        { "method": "PATCH", "path": "/api/agents/:name", "owner": "agent-runtime.self-report", "auth": "agent-token" },
-        { "method": "DELETE", "path": "/api/agents/:name", "owner": "operator.agent-admin", "auth": "bearer" },
-        { "method": "POST", "path": "/api/agents/:name/undelete", "owner": "operator.agent-admin", "auth": "bearer" },
-        { "method": "POST", "path": "/api/agents/:name/supervisor", "owner": "operator.local-agent-control", "auth": "bearer-and-local" },
-        { "method": "POST", "path": "/api/agents/:name/start", "owner": "operator.local-agent-control", "auth": "bearer-and-local" },
-        { "method": "POST", "path": "/api/agents/:name/offline", "owner": "agent-runtime.self-report", "auth": "agent-token" },
-        { "method": "POST", "path": "/api/agents/:name/heartbeat", "owner": "agent-runtime.mcp-heartbeat", "auth": "agent-token" },
-        { "method": "POST", "path": "/api/agents/:name/runtime", "owner": "agent-runtime.self-report", "auth": "agent-token" },
-        { "method": "POST", "path": "/api/runtime/compact", "owner": "operator.runtime-control", "auth": "bearer" },
-        { "method": "POST", "path": "/api/runtime/push-delivered", "owner": "delivery.local-ack", "auth": "local-only" },
-        { "method": "POST", "path": "/api/subconscious/events", "owner": "subconscious.event-ingest", "auth": "subconscious-event-token-or-local" },
-        { "method": "POST", "path": "/api/subconscious/upstream/bootstrap/:name", "owner": "subconscious.runtime-upstream", "auth": "global-api-auth-only" },
-        { "method": "POST", "path": "/api/subconscious/upstream/session-start/:name", "owner": "subconscious.runtime-upstream", "auth": "global-api-auth-only" },
-        { "method": "POST", "path": "/api/subconscious/upstream/user-prompt/:name", "owner": "subconscious.runtime-upstream", "auth": "global-api-auth-only" },
-        { "method": "POST", "path": "/api/subconscious/upstream/pretool/:name", "owner": "subconscious.runtime-upstream", "auth": "global-api-auth-only" },
-        { "method": "POST", "path": "/api/subconscious/upstream/stop/:name", "owner": "subconscious.runtime-upstream", "auth": "global-api-auth-only" },
-        { "method": "POST", "path": "/api/subconscious/runtime/invoke/:name", "owner": "subconscious.runtime-upstream", "auth": "global-api-auth-only" },
-        { "method": "POST", "path": "/api/tasks", "owner": "task-store.operator", "auth": "bearer" },
-        { "method": "PATCH", "path": "/api/tasks/:id", "owner": "task-store.operator", "auth": "bearer" },
-        { "method": "PATCH", "path": "/api/tasks/:id/execution", "owner": "task-store.assignee", "auth": "agent-token" },
-        { "method": "DELETE", "path": "/api/tasks/:id", "owner": "task-store.operator", "auth": "bearer" },
-        { "method": "POST", "path": "/api/tasks/:id/accept", "owner": "task-store.assignee", "auth": "agent-token" },
-        { "method": "POST", "path": "/api/tasks/:id/transition", "owner": "task-store.assignee", "auth": "agent-token" },
-        { "method": "POST", "path": "/api/tasks/:id/comments", "owner": "task-store.operator", "auth": "bearer" },
-        { "method": "POST", "path": "/api/framework-presets", "owner": "operator.runtime-config", "auth": "bearer" },
-        { "method": "PUT", "path": "/api/framework-presets/:id", "owner": "operator.runtime-config", "auth": "bearer" },
-        { "method": "DELETE", "path": "/api/framework-presets/:id", "owner": "operator.runtime-config", "auth": "bearer" },
-        { "method": "POST", "path": "/api/task-graphs", "owner": "task-graph.operator", "auth": "bearer" },
-        { "method": "DELETE", "path": "/api/task-graphs/:id", "owner": "task-graph.operator", "auth": "bearer" },
-        { "method": "PATCH", "path": "/api/task-graphs/:id/nodes/:nodeId", "owner": "task-graph.node-assignee", "auth": "agent-token" },
-        { "method": "POST", "path": "/api/alerts/:id/transition", "owner": "alerts.operator-or-assignee", "auth": "bearer-or-agent-token" },
-        { "method": "POST", "path": "/api/alerts/:id/notes", "owner": "alerts.operator", "auth": "bearer" },
-        { "method": "PATCH", "path": "/api/alerts/:id", "owner": "alerts.operator", "auth": "bearer" },
-        { "method": "DELETE", "path": "/api/alerts/:id", "owner": "alerts.operator", "auth": "bearer" },
-        { "method": "POST", "path": "/api/groups", "owner": "bridge.matrix-state", "auth": "bridge-secret" },
-        { "method": "POST", "path": "/api/groups/:name/members", "owner": "bridge.matrix-state", "auth": "bridge-secret" },
-        { "method": "DELETE", "path": "/api/groups/:name", "owner": "bridge.matrix-state", "auth": "bridge-secret" },
-        { "method": "POST", "path": "/api/dm/ensure", "owner": "bridge.dm-request", "auth": "bearer" },
-        { "method": "POST", "path": "/api/agents/:name/avatar", "owner": "agent-runtime.self-report", "auth": "agent-token" },
-        { "method": "POST", "path": "/api/system/info", "owner": "bridge.matrix-state", "auth": "bridge-secret" },
-        { "method": "POST", "path": "/api/media/stage", "owner": "media.agent-staging", "auth": "agent-token" },
-        { "method": "POST", "path": "/api/messages", "owner": "messages.ingress.mixed", "auth": "agent-token" },
-        { "method": "POST", "path": "/api/messages/:id/suppress", "owner": "messages.recipient-suppression", "auth": "agent-token" }
+        {
+          "method": "POST",
+          "path": "/api/agents",
+          "owner": "agent-runtime.self-report",
+          "auth": "agent-token"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/agents/:name",
+          "owner": "operator.agent-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/agents/:name",
+          "owner": "agent-runtime.self-report",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/avatar",
+          "owner": "agent-runtime.self-report",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/heartbeat",
+          "owner": "agent-runtime.mcp-heartbeat",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/offline",
+          "owner": "agent-runtime.self-report",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/runtime",
+          "owner": "agent-runtime.self-report",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/start",
+          "owner": "operator.local-agent-control",
+          "auth": "bearer-and-local"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/supervisor",
+          "owner": "operator.local-agent-control",
+          "auth": "bearer-and-local"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/undelete",
+          "owner": "operator.agent-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/alerts/:id",
+          "owner": "alerts.operator",
+          "auth": "bearer"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/alerts/:id",
+          "owner": "alerts.operator",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/alerts/:id/notes",
+          "owner": "alerts.operator",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/alerts/:id/transition",
+          "owner": "alerts.operator-or-assignee",
+          "auth": "bearer-or-agent-token"
+        },
+        {
+          "method": "PUT",
+          "path": "/api/approval-bindings",
+          "owner": "approvals.binding-writer",
+          "auth": "approval-bridge-secret"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/approval-bindings/:agent/:roomId",
+          "owner": "approvals.binding-writer",
+          "auth": "approval-bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/approvals",
+          "owner": "approvals.request-ingress",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/approvals/:id/consume",
+          "owner": "approvals.runtime-consume",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/approvals/:id/delivery-failed",
+          "owner": "approvals.delivery-failure",
+          "auth": "approval-bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/approvals/:id/verdict",
+          "owner": "approvals.owner-verdict",
+          "auth": "approval-bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/delivery-events",
+          "owner": "observability.delivery-ingest",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "POST",
+          "path": "/api/dispatch",
+          "owner": "dispatch.lease-claim",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "POST",
+          "path": "/api/dispatch/release",
+          "owner": "dispatch.lease-release",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "POST",
+          "path": "/api/dispatch/renew",
+          "owner": "dispatch.lease-renew",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "POST",
+          "path": "/api/dm/ensure",
+          "owner": "bridge.dm-request",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/framework-presets",
+          "owner": "operator.runtime-config",
+          "auth": "bearer"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/framework-presets/:id",
+          "owner": "operator.runtime-config",
+          "auth": "bearer"
+        },
+        {
+          "method": "PUT",
+          "path": "/api/framework-presets/:id",
+          "owner": "operator.runtime-config",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/groups",
+          "owner": "bridge.matrix-state",
+          "auth": "bridge-secret"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/groups/:name",
+          "owner": "bridge.matrix-state",
+          "auth": "bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/groups/:name/members",
+          "owner": "bridge.matrix-state",
+          "auth": "bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/media/stage",
+          "owner": "media.agent-staging",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/messages",
+          "owner": "messages.ingress.mixed",
+          "auth": "agent-token"
+        },
+        {
+          "method": "PUT",
+          "path": "/api/messages/:id/matrix-delivery",
+          "owner": "delivery.matrix-journal",
+          "auth": "bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/messages/:id/suppress",
+          "owner": "messages.recipient-suppression",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/runtime/compact",
+          "owner": "operator.runtime-control",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/runtime/push-delivered",
+          "owner": "delivery.local-ack",
+          "auth": "local-only"
+        },
+        {
+          "method": "POST",
+          "path": "/api/servers/:id/maintenance",
+          "owner": "operator.server-maintenance",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/servers/:id/offline",
+          "owner": "server-runtime.lifecycle",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/servers/heartbeat",
+          "owner": "server-runtime.lifecycle",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/subconscious/events",
+          "owner": "subconscious.event-ingest",
+          "auth": "subconscious-event-token-or-local"
+        },
+        {
+          "method": "POST",
+          "path": "/api/subconscious/runtime/invoke/:name",
+          "owner": "subconscious.runtime-upstream",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "POST",
+          "path": "/api/subconscious/upstream/bootstrap/:name",
+          "owner": "subconscious.runtime-upstream",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "POST",
+          "path": "/api/subconscious/upstream/pretool/:name",
+          "owner": "subconscious.runtime-upstream",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "POST",
+          "path": "/api/subconscious/upstream/session-start/:name",
+          "owner": "subconscious.runtime-upstream",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "POST",
+          "path": "/api/subconscious/upstream/stop/:name",
+          "owner": "subconscious.runtime-upstream",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "POST",
+          "path": "/api/subconscious/upstream/user-prompt/:name",
+          "owner": "subconscious.runtime-upstream",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/supervisor-state/:target",
+          "owner": "supervisor.snapshot-writer",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/supervisor-state/:target/heartbeat",
+          "owner": "supervisor.snapshot-writer",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/supervisor/control",
+          "owner": "operator.supervisor-control",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/system/info",
+          "owner": "bridge.matrix-state",
+          "auth": "bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/task-graphs",
+          "owner": "task-graph.operator",
+          "auth": "bearer"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/task-graphs/:id",
+          "owner": "task-graph.operator",
+          "auth": "bearer"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/task-graphs/:id/nodes/:nodeId",
+          "owner": "task-graph.node-assignee",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/tasks",
+          "owner": "task-store.operator",
+          "auth": "bearer"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/tasks/:id",
+          "owner": "task-store.operator",
+          "auth": "bearer"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/tasks/:id",
+          "owner": "task-store.operator",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/tasks/:id/accept",
+          "owner": "task-store.assignee",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/tasks/:id/comments",
+          "owner": "task-store.operator",
+          "auth": "bearer"
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/tasks/:id/execution",
+          "owner": "task-store.assignee",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/tasks/:id/transition",
+          "owner": "task-store.assignee",
+          "auth": "agent-token"
+        }
       ],
       "sensitiveRoutes": [
-        { "method": "GET", "path": "/api/agents/:name/launch-env", "owner": "operator.local-agent-launch-secret", "auth": "bearer-and-local" },
-        { "method": "GET", "path": "/api/framework-presets", "owner": "operator.runtime-config", "auth": "bearer" },
-        { "method": "GET", "path": "/api/alerts", "owner": "alerts.operator", "auth": "bearer" },
-        { "method": "GET", "path": "/api/alerts/stats", "owner": "alerts.operator", "auth": "bearer" },
-        { "method": "GET", "path": "/api/alerts/:id", "owner": "alerts.operator", "auth": "bearer" },
-        { "method": "GET", "path": "/api/media/fetch", "owner": "media.read", "auth": "global-api-auth-only" },
-        { "method": "GET", "path": "/api/dm/:agent/history", "owner": "messages.operator-dm-history", "auth": "bearer" },
-        { "method": "GET", "path": "/api/messages/:id", "owner": "messages.detail-access", "auth": "message-detail-access" },
-        { "method": "GET", "path": "/api/messages/:id/delivery", "owner": "delivery.message-detail-access", "auth": "message-detail-access" },
-        { "method": "GET", "path": "/api/stream", "owner": "events.backend-sse-stream", "auth": "global-api-auth-only" },
-        { "method": "GET", "path": "/api/agents/:name/delivery-events", "owner": "delivery.agent-events", "auth": "agent-token" },
-        { "method": "GET", "path": "/api/inbox/:agent/unread", "owner": "inbox.agent-unread", "auth": "agent-token" },
-        { "method": "GET", "path": "/api/inbox/:agent/unread-list", "owner": "inbox.agent-or-dashboard-unread", "auth": "bearer-or-agent-token-inline" },
-        { "method": "GET", "path": "/api/inbox/:agent", "owner": "inbox.agent-read", "auth": "agent-token" },
-        { "method": "GET", "path": "/api/groups/:name/messages", "owner": "groups.member-read", "auth": "agent-credential" }
+        {
+          "method": "GET",
+          "path": "/api/agents/:name/launch-env",
+          "owner": "operator.local-agent-launch-secret",
+          "auth": "bearer-and-local"
+        },
+        {
+          "method": "GET",
+          "path": "/api/framework-presets",
+          "owner": "operator.runtime-config",
+          "auth": "bearer"
+        },
+        {
+          "method": "GET",
+          "path": "/api/alerts",
+          "owner": "alerts.operator",
+          "auth": "bearer"
+        },
+        {
+          "method": "GET",
+          "path": "/api/alerts/stats",
+          "owner": "alerts.operator",
+          "auth": "bearer"
+        },
+        {
+          "method": "GET",
+          "path": "/api/alerts/:id",
+          "owner": "alerts.operator",
+          "auth": "bearer"
+        },
+        {
+          "method": "GET",
+          "path": "/api/media/fetch",
+          "owner": "media.read",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "GET",
+          "path": "/api/dm/:agent/history",
+          "owner": "messages.operator-dm-history",
+          "auth": "bearer"
+        },
+        {
+          "method": "GET",
+          "path": "/api/messages/:id",
+          "owner": "messages.detail-access",
+          "auth": "message-detail-access"
+        },
+        {
+          "method": "GET",
+          "path": "/api/messages/:id/delivery",
+          "owner": "delivery.message-detail-access",
+          "auth": "message-detail-access"
+        },
+        {
+          "method": "GET",
+          "path": "/api/stream",
+          "owner": "events.backend-sse-stream",
+          "auth": "global-api-auth-only"
+        },
+        {
+          "method": "GET",
+          "path": "/api/agents/:name/delivery-events",
+          "owner": "delivery.agent-events",
+          "auth": "agent-token"
+        },
+        {
+          "method": "GET",
+          "path": "/api/inbox/:agent/unread",
+          "owner": "inbox.agent-unread",
+          "auth": "agent-token"
+        },
+        {
+          "method": "GET",
+          "path": "/api/inbox/:agent/unread-list",
+          "owner": "inbox.agent-or-dashboard-unread",
+          "auth": "bearer-or-agent-token-inline"
+        },
+        {
+          "method": "GET",
+          "path": "/api/inbox/:agent",
+          "owner": "inbox.agent-read",
+          "auth": "agent-token"
+        },
+        {
+          "method": "GET",
+          "path": "/api/groups/:name/messages",
+          "owner": "groups.member-read",
+          "auth": "agent-credential"
+        }
       ]
     }
   }
