@@ -8,6 +8,16 @@ Release process and the compatibility contract live in [docs/RELEASING.md](docs/
 
 ## [Unreleased]
 
+### Changed
+
+- Both READMEs rewritten around the name **HAFleet**, covering the five install
+  paths, the upgrade and rollback story, release artifacts, and an explicit
+  security-posture section separating what is enforced from what is assumed.
+- Internal identifiers (`agent-chat`, `agentchat`, `AGENT_CHAT_`, `AGENTCHAT_`)
+  are deliberately unchanged: unit names, CLI commands, `.env` variables, the MCP
+  server name and `~/.agentchat` are all covered by the compatibility contract in
+  docs/RELEASING.md, so renaming them is a major version with a migration.
+
 ## [1.2.0] - 2026-07-28
 
 First tagged release. The repository carried 768 commits with no tags, no

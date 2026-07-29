@@ -25,13 +25,14 @@ because most of that tree is not ours.
 
 ## Provenance, measured
 
-Measured on this checkout with `upstream` pointing at `shisuiki/agent-chat`:
+Measured 2026-07-29 on this checkout, with `upstream` pointing at
+`shisuiki/agent-chat`. The inherited count is fixed; ours grows with every
+commit, so re-run the commands below rather than trusting a stale ratio.
 
 | | Commits |
 |---|---|
-| HAFleet total | 773 |
-| Inherited from upstream | **717 (93%)** |
-| Added by us | 56 (7%) |
+| Inherited from upstream | **717** |
+| Added by us | 56 and counting |
 
 Per-file, for the components that matter most:
 

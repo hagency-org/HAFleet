@@ -1,20 +1,89 @@
 [English](README.md) | [中文](README.zh-CN.md)
 
-# Agent Chat
+# HAFleet
 
-Agent Chat is a local-first coordination system for Claude Code, Codex, and other tmux-based agents. It provides a backend API, web dashboard, MCP tools, local push notifications, optional Matrix bridge, and command-line helpers for starting agents, sending messages, checking status, and operating remote relays.
+**A control plane for a fleet of interactive coding agents.**
+
+HAFleet runs Claude Code and Codex agents in tmux panes and gives them what they
+otherwise lack: identity, a message bus, a shared task system, human oversight,
+and an optional Matrix front door. It is local-first — the backend binds to
+loopback by construction, and nothing needs to leave the machine.
+
+HAFleet is a fork of [agent-chat](https://github.com/shisuiki/agent-chat). Many
+internal identifiers still carry the `agent-chat` / `AGENTCHAT_` prefix; those
+are stable interfaces and are deliberately unchanged. See
+[Naming](#naming) below.
+
+## Contents
+
+| Section | |
+|---|---|
+| [What it does](#what-it-does) | The capability surface |
+| [Architecture](#architecture) | Components and layers |
+| [Install](#install) | Five paths, pick by host |
+| [Quick start](#quick-start) | First agent, first message |
+| [Operating](#operating) | Upgrade, roll back, verify |
+| [Configuration](#configuration) | `.env` reference |
+| [Security posture](#security-posture) | What is enforced, and what is assumed |
+| [Development](#development) | Tests and gates |
+
+## What it does
+
+**Fleet lifecycle.** Start, stop, list and resume agents as tmux sessions.
+Per-agent home directories, project mounting, and reusable framework presets.
+
+**Message bus.** Agents do not talk to each other directly — they talk to the
+bus. DMs, groups, mailbox semantics (messages persist while an agent is busy),
+offline catch-up, delivery receipts, attachments. Messages can carry a structured
+`schema: {kind, version, payload}` envelope, which is how third-party execution
+backends integrate.
+
+**Task system.** A task store plus **task graphs**: a DAG whose nodes each carry
+an assignee, dependencies and optional conditions. Upstream results are injected
+into downstream dispatches, and only the assigned agent may close its own node.
+
+**Attention routing.** The backend emits SSE; the push relay consumes it and
+delivers by *typing into the agent's tmux pane*. It also infers state from pane
+output — idle vs active, blocked-on-a-prompt, context compaction.
+
+**11 MCP tools** give agents `whoami`, `send_message`, `post`, `check_inbox`,
+`check_group`, `list_tasks`, `get_task`, `accept_task`, `transition_task`,
+`comment_task`, `update_task_execution`.
+
+**Human-in-the-loop approvals.** A coding runtime's permission requests are
+relayed to **the owning developer**, not to everyone in the room.
+
+**Optional Matrix bridge.** Puts agents in real Matrix rooms so you can reach
+them from Element on a phone. Per-agent accounts, E2EE, a trust model, and 20
+`!` operator commands.
+
+**Optional supervisor.** Watches agents and escalates: after N consecutive
+negative assessments it nudges, then escalates. It can message; it cannot start,
+stop or reassign.
+
+Surface area: **101 REST endpoints**, **19 CLI subcommands**, **11 MCP tools**,
+**7 dashboard pages**, **4 runtime dependencies**.
 
 ## Architecture
 
 | Component | Role |
 | --- | --- |
 | `backend-v2.js` | Central API, durable JSON stores, agent registry, task graphs, alerts, SSE stream, auth boundary |
-| `server.js` | Local dashboard and queue/reminder delivery surface |
-| `push-relay.js` | Local SSE consumer that injects notifications into local tmux panes |
-| `mcp-server.js` | Per-agent MCP server exposing messaging tools to Claude/Codex |
+| `server.js` | Dashboard and queue/reminder delivery surface |
+| `push-relay.js` | SSE consumer that injects notifications into tmux panes |
+| `mcp-server.js` | Per-agent MCP server exposing messaging and task tools |
 | `bridge-matrix.js` | Optional Matrix bridge for external rooms and operators |
+| `services/agentchat-services.mjs` | Non-systemd process supervisor (the macOS runtime) |
 | `bin/agentchat` | Unified CLI dispatcher |
 | `remote/` | Minimal remote relay package for other machines |
+
+Three concentric layers, declared in `scripts/architecture-boundaries.json` and
+**enforced in CI**:
+
+- **Kernel** — `agent-state`, `task-graph`, `task-store`, `agent-launch-policy`.
+  Forbidden from importing the backend, dashboard or `remote/`.
+- **Control plane** — the REST API, SSE and JSON persistence, single process.
+- **Edges** — tmux/CLI glue, Matrix bridge, dashboard, MCP. All optional.
 
 Default local ports:
 
@@ -23,204 +92,186 @@ Default local ports:
 | Backend API | `http://127.0.0.1:8090` |
 | Dashboard | `http://127.0.0.1:8084` |
 
-Systemd units installed by the full installer:
+Systemd units (Linux), all shipped with sandboxing and resource limits:
 
 | Unit | Entrypoint | Notes |
 | --- | --- | --- |
 | `agent-chat-v2.service` | `backend-v2.js` | Starts first |
 | `agent-chat.service` | `server.js` | Dashboard and local queue surface |
-| `agent-chat-push-relay.service` | `push-relay.js` | Local tmux notification relay |
+| `agent-chat-push-relay.service` | `push-relay.js` | tmux notification relay |
+| `bridge-matrix.service` | `bridge-matrix.js` | Optional, `--with-bridge` |
+| `agent-chat-stable-autodeploy.service` | watcher | Optional; unprivileged |
 
-## Prerequisites
+## Install
 
-Linux is the supported fresh-machine target for the full installer.
+Five paths. Pick by what the host is for — full detail in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-Required:
+| Path | Host | Use when |
+| --- | --- | --- |
+| Bootstrap | Linux + systemd | The normal case |
+| Manual clone | Linux + systemd | You want the checkout somewhere specific |
+| **macOS** | macOS | A Mac host: launchd + supervised services |
+| Containers | Any | Control plane only, no local agents |
+| Remote relay | Linux or macOS | Agents only, reporting to a backend elsewhere |
 
-- Node.js `22+`
-- npm
-- tmux
-- git
-- bash
-- systemd
-- sudo access for installing service units
+### Bootstrap (recommended, Linux)
 
-Optional:
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/hagency-org/HAFleet/master/install/bootstrap.sh)
+```
 
-- Claude Code CLI, for automatic user-level MCP registration
-- Codex or Claude Code, for using the synced local skill
-- Matrix credentials, only if you run `bridge-matrix.js`
+Downloads the published release tarball, **verifies it against `SHA256SUMS`**,
+and unpacks it — no git required. A checksum mismatch aborts rather than falling
+back. Installer flags go after `--`:
 
-## Quick Start
+```bash
+bash <(curl -fsSL .../bootstrap.sh) -- --dry-run
+bash <(curl -fsSL .../bootstrap.sh) --ref v1.2.0 -- --with-bridge
+bash <(curl -fsSL .../bootstrap.sh) --list
+```
 
-From a fresh Linux machine:
+### Manual clone (Linux)
 
 ```bash
 git clone https://github.com/hagency-org/HAFleet.git
 cd HAFleet
+./install-full.sh --dry-run   # review every action first
 ./install-full.sh
 ```
-
-The installer checks prerequisites, runs `npm install`, creates `.env` from `.env.example` when needed, prompts for `API_TOKEN`, installs systemd units, links CLI commands into `~/.local/bin`, installs local skills, and configures Claude Code and Codex MCP when the CLIs are available.
-
-Verify services:
-
-```bash
-systemctl status agent-chat-v2
-systemctl status agent-chat
-systemctl status agent-chat-push-relay
-```
-
-Open the dashboard:
-
-```text
-http://127.0.0.1:8084
-```
-
-Start an agent:
-
-```bash
-agentchat up-v1 alice codex --project "$HOME/projects/example" --project-mode symlink --fresh
-```
-
-Send a message:
-
-```bash
-agentchat send alice "hello from agentchat"
-```
-
-List agents:
-
-```bash
-agentchat ls
-```
-
-## Installation
-
-Recommended command:
-
-```bash
-./install-full.sh
-```
-
-Useful options:
 
 | Option | Use |
 | --- | --- |
-| `--dry-run` | Print planned actions only |
+| `--dry-run` | Print planned actions only, change nothing |
 | `--no-start` | Install files without enabling or restarting services |
+| `--with-bridge` | Also install and start `bridge-matrix.service` |
 | `--env-file PATH` | Use a custom env file |
 | `--bin-dir PATH` | Link CLI commands into a custom directory |
 | `--systemd-dir PATH` | Render service files into a custom directory |
-| `--service-user USER` | Render systemd units for a specific user |
+| `--service-user USER` | Render units for a specific user |
 | `--skip-mcp` | Skip Claude Code and Codex MCP configuration |
 | `--skip-npm` | Skip `npm install` |
 | `--skip-prereq-check` | Skip host prerequisite checks |
-| `--with-bridge` | Also install and start `bridge-matrix.service` |
 
-Legacy entrypoints `install.sh` and `install-v2.sh` are deprecated wrappers that delegate to `install-full.sh`.
+`install.sh` and `install-v2.sh` are deprecated wrappers that delegate here.
 
-### Installation Profiles
+### macOS
 
-Agent Chat has two installation profiles:
-
-| Profile | Install from | Installs | CLI scope | Use when |
-| --- | --- | --- | --- | --- |
-| Full local stack | repository root, `./install-full.sh` | Backend, dashboard, local push relay, optional Matrix bridge, full CLI links, local skills, MCP config | Full `bin/agentchat`, including `up-v1`, `project`, `graph`, `audit`, `benchmark`, `sync-skills`, and local service commands | This machine owns the backend, dashboard, local agents, or Matrix bridge |
-| Remote relay | `remote/install-remote.sh` or generated `remote-dist` | Remote push relay, remote helper CLI, MCP config, optional git-checkout autodeploy | Minimal remote commands for relay operation, remote agent launch, status, send, update, service, verify, and maintenance | This machine only runs agents that connect back to an existing backend |
-
-The full installer links every executable helper from `bin/` into the configured `--bin-dir` path. The remote relay installer links the remote helper set only. Remote relay installs are intentionally smaller than full installs, so commands such as `up-v1`, `project`, `graph`, and `audit` are available from the full local stack, not from standalone remote relay packages.
-
-## Uninstallation
-
-Run:
+`install-full.sh` refuses to run on macOS, because it renders systemd units.
 
 ```bash
-./uninstall.sh
+./install/install-macos.sh --dry-run
+./install/install-macos.sh
 ```
 
-The uninstaller stops and removes systemd units, removes CLI symlinks that point into this checkout, removes Agent Chat skill links, removes Claude Code and Codex MCP entries when possible, and removes `/etc/sudoers.d/agentchat-autodeploy`.
+launchd user agent instead of systemd, `agentchat-services.mjs` as the
+supervisor, Matrix bridge off by default, and no auto-deploy watcher. Missing
+prerequisites (`node >= 22`, `tmux`) are installed with Homebrew.
 
-By default it preserves user data:
+> **It will refuse if unrelated tmux sessions already exist.** HAFleet registers
+> tmux sessions as agents, and the relay delivers by typing into their panes — so
+> on a shared host it can type into someone else's work. Stop or rename them, or
+> pass `--allow-existing-tmux` to accept the risk knowingly.
 
-- `~/.agentchat/`
-- `data/`
-- `.env`
+### Prerequisites
 
-Optional destructive removals require explicit flags and confirmation:
-
-```bash
-./uninstall.sh --purge-agentchat-home
-./uninstall.sh --purge-data
-```
-
-For automation:
-
-```bash
-./uninstall.sh --yes
-```
-
-The full uninstaller only removes links and service units that point into the selected checkout. It preserves `.env`, `data/`, and `~/.agentchat` unless purge flags are provided. Remote relay deployments are operated as a separate profile; see `remote/README.md` for remote package setup and operations.
-
-## Matrix Homeserver and Bridge
-
-Agent Chat can use Matrix in two layers:
-
-| Layer | Owned by Agent Chat? | Purpose |
+| | Linux | macOS |
 | --- | --- | --- |
-| Matrix homeserver | No | Provides Matrix accounts, rooms, registration, federation, and client login |
-| Agent Chat bridge | Yes, optional | Connects Agent Chat agents/operators to Matrix rooms through `bridge-matrix.js` |
+| Node.js | `22+` | `22+` |
+| tmux, git, bash | required | required |
+| systemd + sudo | required | n/a (launchd) |
+| Homebrew | n/a | required for prereq install |
 
-Install and verify the Matrix homeserver first. Synapse, Palpo, and managed Matrix hosting are all acceptable as long as the Client-Server API is reachable over HTTPS.
+Optional: the Claude Code or Codex CLI for automatic MCP registration; Matrix
+credentials only if you run the bridge.
 
-Minimum homeserver outputs needed by Agent Chat:
-
-- Public homeserver URL, for example `https://matrix.example.com`
-- Matrix `server_name`, for example `matrix.example.com`
-- Registration token if account registration is token-gated
-- Bridge bot username and password
-
-Then configure Agent Chat `.env`:
+### Uninstall
 
 ```bash
-MATRIX_HOMESERVER=https://matrix.example.com
-MATRIX_SERVER_NAME=matrix.example.com
-MATRIX_BOT_USERNAME=agent-bridge
-MATRIX_BOT_PASSWORD=<bridge-bot-password>
-MATRIX_REG_TOKEN=<homeserver-registration-token>
-MATRIX_AGENT_PREFIX=ac_
-MATRIX_AGENT_PASSWORD_SECRET=<random-long-secret>
-MATRIX_TRUST_MODE=enforce
-MATRIX_TRUSTED_INVITER_MXIDS=@operator:matrix.example.com
-MATRIX_OPERATOR_MXIDS=@operator:matrix.example.com
-MATRIX_GREETING_MXIDS=@operator:matrix.example.com
-MATRIX_IGNORED_SENDER_MXIDS=@octosbot:matrix.example.com
-MATRIX_DEFAULT_WAKE=off
-MATRIX_INVITE_POLL_MS=60000
+./uninstall.sh              # preserves ~/.agentchat, data/, .env
+./uninstall.sh --yes        # non-interactive
+./uninstall.sh --purge-data --purge-agentchat-home   # destructive, confirms
 ```
 
-Install or restart the bridge:
+The uninstaller only removes symlinks and units that point into *this* checkout,
+and only skill directories it owns.
+
+## Quick start
 
 ```bash
-./install-full.sh --with-bridge
-systemctl status bridge-matrix
+# Start an agent
+agentchat up-v1 alice codex --project "$HOME/projects/example" --project-mode symlink --fresh
+
+# Talk to it
+agentchat send alice "status?"
+
+# See the fleet
+agentchat ls
+agentchat service status
 ```
 
-Matrix clients do not need to be Agent Chat-specific. Use any Matrix client, such as Element, Cinny, FluffyChat, or Nheko. Log in with the homeserver URL and Matrix account credentials, then invite or DM the bridge-managed agent accounts as needed.
+Then open the dashboard at `http://127.0.0.1:8084`.
 
-Some homeservers only return users from the Matrix user directory after they share a room or appear in a public room. Set `MATRIX_GREETING_MXIDS` to let the bridge proactively create first-contact DMs for known operators or test accounts.
+Dashboard pages:
 
-For internet-facing deployments, put both the Matrix homeserver and Agent Chat dashboard behind HTTPS reverse proxies. Set `AGENT_CHAT_WEB_URL` to the public dashboard URL and keep `AGENT_CHAT_API` loopback-only unless you explicitly intend to expose the backend API.
+| Path | Purpose |
+| --- | --- |
+| `/` | Fleet monitor |
+| `/agents/<name>` | Agent detail, terminal capture, tasks, audit, DM box |
+| `/tasks` | Task list and actions |
+| `/projects` | Project board |
+| `/pool` | Agent pool |
+| `/alerts` | Alerts |
+| `/config` | Agent and preset configuration |
 
-## Stable Branch Auto Deploy (Live)
+Five ways to reach an agent: the dashboard DM box, Matrix, `agentchat send`,
+attaching to the pane directly, or the REST API. All deliver **when the agent is
+idle** — there is no interrupt.
 
-The live deploy checkout is disposable. Run the preflight gate before promoting a deploy candidate:
+## Operating
+
+### Verify
+
+```bash
+systemctl status agent-chat-v2 agent-chat agent-chat-push-relay
+node services/standalone-doctor.mjs     # cross-component health
+agentchat check-mcp
+node -e 'import("./lib/version.js").then(m=>console.log(m.formatBuildIdentity()))'
+```
+
+### Upgrade, with automatic revert
+
+```bash
+./upgrade.sh --list          # current version and available releases
+./upgrade.sh --to v1.3.0     # gate, apply, health-check, revert on failure
+```
+
+It refuses a dirty tree, gates the **target** ref in a throwaway worktree so a
+bad target never touches the live checkout, and reverts if the new version does
+not come up healthy. Exit `1` means rollback succeeded; exit `2` means rollback
+also failed and a human is needed.
+
+### Auto-deploy (optional)
+
+The watcher polls a deploy branch, gates the candidate, and restarts. It runs
+**unprivileged**, escalating only for `systemctl restart` through a narrow
+sudoers rule, and the release gate is **on by default**.
+
+On a health-gate failure it rolls the live checkout back to the last healthy ref
+and **quarantines** the bad one, so the same commit is not re-deployed forever.
+Pushing a fix clears the quarantine. See [docs/ROLLBACK.md](docs/ROLLBACK.md).
+
+### Stable Branch Auto Deploy (Live)
+
+The live deploy checkout is **disposable**. Run the preflight gate before
+promoting a deploy candidate:
 
 ```bash
 npm run verify:cd-preflight
 ```
 
-The stable watcher repairs the live checkout with reset-based operations instead of fast-forward pulls:
+The watcher repairs the live checkout with reset-based operations rather than
+fast-forward pulls, so a diverged or dirty checkout can never block a deploy:
 
 ```bash
 git reset --hard HEAD
@@ -234,153 +285,207 @@ After deployment, verify the loaded remote relay:
 agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
 ```
 
-## Configuration Reference
+### Releases
 
-Most local configuration lives in `.env`. The installer creates it from `.env.example` if missing.
+Tag-driven. Pushing `v1.3.0` runs the gates and publishes two reproducible,
+checksummed tarballs — full stack and remote relay. See
+[docs/RELEASING.md](docs/RELEASING.md).
+
+## Configuration
+
+Most configuration lives in `.env`, created from `.env.example` by the installer.
+
+> The supervised-services path does **not** auto-load `.env`. Source it first:
+> `set -a; . ./.env; set +a`
 
 ### Core
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
-| `API_TOKEN` | Yes | none | Operator bearer token for backend, dashboard proxy, MCP, and relay calls |
-| `AGENT_CHAT_API` | Optional | `http://127.0.0.1:8090` | Backend API base URL |
-| `AGENT_CHAT_RUNTIME_DIR` | Optional | repository root | Runtime root for `data/` and `logs/` |
-| `AGENT_CHAT_BACKEND_PORT` | Optional | `8090` | Backend port |
-| `AGENT_CHAT_WEB_PORT` | Optional | `8084` | Dashboard port |
-| `AGENT_CHAT_WEB_URL` | Optional | `http://127.0.0.1:8084` | Public dashboard base URL used by backend push queue calls and Matrix formatted-message links |
-| `MSG_BASE_URL` | Optional legacy | derived from `AGENT_CHAT_WEB_URL` | Override for Matrix `View formatted` `/msg` links when they must use a different base URL |
-| `AGENT_CHAT_QUEUE_URL` | Optional | `${AGENT_CHAT_WEB_URL}/api/queue` | Queue endpoint for backend push notifications |
-| `AGENT_CHAT_DASHBOARD_TOKEN` | Optional | empty | Bearer token for non-local dashboard mutations |
-| `AGENT_CHAT_SERVER` | Optional local, required remote | `local` or hostname | Server identity in runtime reports |
+| `API_TOKEN` | **Yes** | none | Operator bearer token for backend, dashboard proxy, MCP and relay |
+| `AGENT_CHAT_API` | No | `http://127.0.0.1:8090` | Backend API base URL |
+| `AGENT_CHAT_RUNTIME_DIR` | No | repository root | Runtime root for `data/` and `logs/` |
+| `AGENT_CHAT_BACKEND_PORT` | No | `8090` | Backend port |
+| `AGENT_CHAT_WEB_PORT` | No | `8084` | Dashboard port |
+| `AGENT_CHAT_BACKEND_HOST` | No | `127.0.0.1` | Backend bind address. **Containers only** — see [Security posture](#security-posture) |
+| `AGENT_CHAT_WEB_HOST` | No | `127.0.0.1` | Dashboard bind address. Same caveat |
+| `AGENT_CHAT_WEB_URL` | No | `http://127.0.0.1:8084` | Public dashboard URL used in push queue calls and Matrix links |
+| `AGENT_CHAT_QUEUE_URL` | No | `${AGENT_CHAT_WEB_URL}/api/queue` | Queue endpoint for push notifications |
+| `AGENT_CHAT_DASHBOARD_TOKEN` | No | empty | Bearer token for non-local dashboard mutations |
+| `AGENT_CHAT_SERVER` | Remote: yes | `local` or hostname | Server identity in runtime reports |
+| `MSG_BASE_URL` | Legacy | from `AGENT_CHAT_WEB_URL` | Override for Matrix `/msg` links |
 
-`backend-v2.js` and `server.js` now fail fast when directly started without a non-empty `API_TOKEN`. Optional variables only warn or disable optional integrations.
+`backend-v2.js` and `server.js` fail fast when started without a non-empty
+`API_TOKEN`.
 
-### Agent Runtime
+### Agent runtime
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `AGENTCHAT_HOMEDIR` | `~/.agentchat` | Agent home root |
-| `AGENTCHAT_AGENT_TOKEN_MODE` | `hard` in `.env.example` | Per-agent token enforcement mode |
-| Coding-agent permission policy | Claude `auto-mode`; Codex Level 2 | Enforced by launchers. Codex Level 2 means `workspace-write + on-request`; policy-changing `extraArgs` are rejected. |
+| `AGENTCHAT_AGENT_TOKEN_MODE` | `hard` | Per-agent token enforcement |
 | `AGENT_IDLE_THRESHOLD_MS` | `20000` | Idle threshold for push delivery |
-| `AGENT_SCOPE_MONITOR_ENABLED` | `true` | Enable local resource monitoring |
-| `OFFLINE_CATCHUP_LIST_LIMIT` | `50` | Offline catchup message limit |
+| `AGENT_SCOPE_MONITOR_ENABLED` | `true` | Local resource monitoring |
+| `OFFLINE_CATCHUP_LIST_LIMIT` | `50` | Offline catch-up message limit |
 | `REMINDER_MERGE_PREVIEW_LIMIT` | `20` | Reminder merge preview limit |
 
-### Push Relay
+Coding-agent permission policy is **enforced by the launchers**, not chosen by
+the agent: Claude runs `auto-mode`, Codex runs Level 2
+(`workspace-write` + `on-request`). Policy-changing `extraArgs` are rejected.
+
+### Push relay
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PUSH_RELAY_MODE` | `local` | Local or remote relay profile |
 | `PUSH_RELAY_SCAN_INTERVAL_MS` | `30000` | Runtime scan interval |
 | `PUSH_RELAY_RECONNECT_MS` | `5000` | SSE reconnect interval |
-| `PUSH_RELAY_HEARTBEAT_INTERVAL_MS` | `15000` | Server heartbeat interval |
-| `VERIFY_SAMPLES` | `2` in remote example | Remote post-deploy verification samples |
-| `VERIFY_INTERVAL` | `16` in remote example | Remote verification interval seconds |
+| `PUSH_RELAY_HEARTBEAT_INTERVAL_MS` | `15000` | Heartbeat interval |
 
-### Matrix Bridge
+### Matrix bridge
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `MATRIX_HOMESERVER` | `https://matrix.example.com` | Matrix homeserver |
+| `MATRIX_HOMESERVER` | `https://matrix.example.com` | Homeserver URL |
 | `MATRIX_SERVER_NAME` | homeserver host | Matrix server name |
 | `MATRIX_BOT_USERNAME` | `agent-bridge` | Bridge bot username |
-| `MATRIX_BOT_PASSWORD` | empty | Bridge bot password |
+| `MATRIX_BOT_PASSWORD` | empty | Bridge bot password — **cannot be generated** |
+| `MATRIX_BRIDGE_SECRET` | empty | Shared secret between backend and bridge; generated by the installers |
 | `MATRIX_REG_TOKEN` | empty | Registration token |
-| `MATRIX_GREETING_MXIDS` | empty | Comma-separated Matrix users the bridge should proactively greet even if the homeserver user directory does not list them |
-| `MATRIX_IGNORED_SENDER_MXIDS` | empty | Comma-separated Matrix senders the bridge should ignore entirely, useful for coexisting with external appservice bots |
-| `MATRIX_DEFAULT_WAKE` | `off` | Mention-only by default: unaddressed group messages wake no agent. `auto` is legacy opt-in for private, single-owner rooms only |
-| `MATRIX_TRUST_MODE` | `enforce` | Room trust policy: `enforce`, `audit`, or `off`. Use `enforce` on public homeservers |
-| `MATRIX_TRUSTED_INVITER_MXIDS` | empty | Comma-separated Matrix users whose room invites are trusted and auto-joinable |
-| `MATRIX_OPERATOR_MXIDS` | empty | Matrix users allowed to operate privileged commands |
-| `MATRIX_INVITE_POLL_MS` | `60000` | Agent-invite poll interval in ms, clamped to a 5000 floor. Public homeservers like matrix.palpo.im rate-limit aggressively, so do not poll faster |
+| `MATRIX_AGENT_PREFIX` | `ac_` | Prefix for derived agent Matrix accounts |
+| `MATRIX_AGENT_PASSWORD_SECRET` | empty | Secret from which agent passwords are derived |
+| `MATRIX_DEFAULT_WAKE` | `off` | Mention-only. Unaddressed group messages wake nobody |
+| `MATRIX_TRUST_MODE` | `enforce` | `enforce`, `audit` or `off`. Use `enforce` on public homeservers |
+| `MATRIX_TRUSTED_INVITER_MXIDS` | empty | Users whose invites are auto-joinable |
+| `MATRIX_OPERATOR_MXIDS` | empty | Users allowed privileged commands |
+| `MATRIX_GREETING_MXIDS` | empty | Users to proactively DM when absent from the directory |
+| `MATRIX_IGNORED_SENDER_MXIDS` | empty | Senders to ignore entirely |
+| `MATRIX_INVITE_POLL_MS` | `60000` | Invite poll interval, floor 5000. Public homeservers rate-limit hard |
 
-### Supervisor and LLM
+### Supervisor
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SUPERVISOR_ENABLED` | `false` | Enable supervisor loops |
-| `SUPERVISOR_LLM_PROVIDER` | `deepseek` | Supervisor model provider |
-| `SUPERVISOR_LLM_MODEL` | `deepseek-chat` | Supervisor model |
+| `SUPERVISOR_LLM_PROVIDER` | `deepseek` | Model provider |
+| `SUPERVISOR_LLM_MODEL` | `deepseek-chat` | Model |
 | `SUPERVISOR_LLM_KEY` | placeholder | Provider API key |
-| `SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS` | `60000` | Supervisor lifecycle sweep interval |
+| `SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS` | `60000` | Lifecycle sweep interval |
 
-### Remote and Release Gates
+### Deploy and release gates
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `AGENTCHAT_DEPLOY_BRANCH` | `stable` in remote example | Branch watched by remote deploy scripts |
-| `AGENTCHAT_RELEASE_GATE` | unset | Stable deploy gate command when enabled |
-| `AGENTCHAT_DEPLOY_SERVICES` | script-specific | Services restarted by deploy scripts |
+| `AGENTCHAT_DEPLOY_BRANCH` | `stable` | Branch watched by the deploy watcher |
+| `AGENTCHAT_RELEASE_GATE` | `worktree` | Candidate gate. `none` disables it — an explicit opt-out |
+| `AGENTCHAT_DEPLOY_SERVICES` | script-specific | Services restarted on deploy |
+| `AGENTCHAT_ALERT_URL` | empty | Optional endpoint for deploy-failure alerts |
+| `AGENTCHAT_ALERT_TOKEN` | empty | Bearer token for the above |
 | `AGENTCHAT_VERIFY_REMOTE_BIN` | `bin/verify-remote` | Remote verification helper |
 
-## Agent Management
+## Security posture
 
-Common commands:
+What HAFleet **enforces**:
 
-```bash
-agentchat up-v1 alice codex --project "$HOME/projects/example" --project-mode symlink --fresh
-agentchat ls
-agentchat send alice "status?"
-agentchat down alice
-agentchat service status
-agentchat check-mcp
-agentchat sync-skills
-agentchat maintain --dry-run
-```
+- **Agents cannot widen their own permissions.** Launch policy is applied by the
+  launcher and policy-changing arguments are rejected.
+- **Agents cannot orchestrate other agents.** No MCP tool creates a task graph;
+  that requires the operator token.
+- **Approvals go to the owner**, not the room.
+- **Services are sandboxed.** Every unit ships `NoNewPrivileges`,
+  `ProtectSystem=full`, capability and syscall restrictions, and resource limits.
+- **The backend binds loopback by construction** — a function default with no env
+  override on the Linux/systemd path.
 
-Dashboard pages:
+What it **assumes**, and you should know:
 
-| Path | Purpose |
-| --- | --- |
-| `/` | Fleet monitor |
-| `/agents/<name>` | Agent detail, terminal capture, tasks, audit |
-| `/tasks` | Task list and task actions |
-| `/alerts` | Alert dashboard |
-| `/config` | Agent and preset configuration |
+- **Loopback trust is machine-scoped, not user-scoped.** Any local process is
+  treated as local. On a shared host, per-agent tokens
+  (`AGENTCHAT_AGENT_TOKEN_MODE=hard`) are the real control.
+- **A non-loopback bind is for containers.** `AGENT_CHAT_*_HOST` exists so a
+  container can be reachable through a published port. It is logged loudly at
+  every start; a malformed value falls back to loopback rather than widening.
+- **Task-graph completion is self-reported.** A node closes when its assignee
+  says so; nothing verifies the claim.
+- **Existing tmux sessions get adopted.** HAFleet registers what it finds.
+- **There is known dependency debt** — 53 transitive advisories, ratcheted so
+  nothing new can land. See [docs/SECURITY-DEBT.md](docs/SECURITY-DEBT.md).
 
-## Development Setup
+For internet-facing deployments, put the dashboard behind an HTTPS reverse proxy
+and keep `AGENT_CHAT_API` loopback-only.
 
-Install dependencies:
+## Development
 
 ```bash
 npm install
-```
 
-Run local services manually:
-
-```bash
+# Run services directly
 API_TOKEN=dev-token node backend-v2.js
 API_TOKEN=dev-token node server.js
 API_TOKEN=dev-token node push-relay.js
+
+# Or under the supervisor
+set -a; . ./.env; set +a
+AGENT_CHAT_RUNTIME_DIR="$PWD" node services/agentchat-services.mjs start
 ```
 
-Run tests and gates:
+Tests and gates:
 
 ```bash
-npm test
+npm test                              # full suite
+npm run test:kernel
 npm run check:syntax
 npm run check:cli-contract
-npm run test:kernel
+npm run check:architecture-boundaries # import + route-ownership rules
+npm run audit:baseline                # advisory ratchet
 AGENT_NAME=agentchat-develop npm run verify:ci
 ```
 
-Remote package checks:
+Remote package and release artifacts:
 
 ```bash
 npm run build:remote:check
-npm run check:remote-package-smoke
 npm run check:remote-sync
+./scripts/build-release-package.sh --out-dir dist
 ```
 
-The repository intentionally ignores runtime data, logs, local `.env`, local MCP config, generated `remote-dist/`, and stale backup directories. These files are not source of truth.
+Runtime data, logs, `.env`, generated `remote-dist/` and `dist/` are ignored and
+are not source of truth.
+
+## Naming
+
+The project is **HAFleet**. Internal identifiers still use the upstream
+`agent-chat` / `agentchat` / `AGENT_CHAT_` / `AGENTCHAT_` naming, deliberately:
+systemd unit names, CLI command names, `.env` variable names, the MCP server
+name and the `~/.agentchat` data directory are all covered by the compatibility
+contract in [docs/RELEASING.md](docs/RELEASING.md). Renaming them is a major
+version with a migration, not a documentation change.
 
 ## Documentation
 
-- `OPERATIONS.md` - Operator runbook for service health, deploys, incidents, and maintenance.
-- `remote/README.md` - Remote relay package setup and operation.
-- `ROADMAP-remote.md` — Superseded remote planning archive; keep it as historical context and use current runbooks instead.
+| Document | Covers |
+| --- | --- |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | All five install paths, platform matrix, hardening |
+| [docs/RELEASING.md](docs/RELEASING.md) | Versioning, the SemVer surface, cutting a release |
+| [docs/ROLLBACK.md](docs/ROLLBACK.md) | Auto-deploy and manual rollback, state files |
+| [docs/SECURITY-DEBT.md](docs/SECURITY-DEBT.md) | Dependency advisories and the ratchet |
+| [docs/LICENSING.md](docs/LICENSING.md) | Fork provenance and the consent Apache 2.0 needs |
+| [OPERATIONS.md](OPERATIONS.md) | Operator runbook: health, deploys, incidents |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
+| [remote/README.md](remote/README.md) | Remote relay package |
+| [services/README.md](services/README.md) | Supervised services and the two doctors |
+
+Archived, kept for historical context only — use the runbooks above instead:
+`ROADMAP-remote.md` — Superseded remote planning archive.
 
 ## License
 
-No public license file is currently present. Treat this repository as private or all-rights-reserved unless the owner adds a license.
+Intended license: **Apache 2.0** — `LICENSE` and `NOTICE` are in place.
+
+**Not yet distributable.** HAFleet is a fork of an upstream repository that
+publishes no license, and **717 of its commits are inherited from that upstream**
+— the great majority of the tree. Consent from the upstream copyright holders is
+required before this repository or any artifact
+built from it may be redistributed. Read
+[docs/LICENSING.md](docs/LICENSING.md) before pushing publicly, publishing a
+release, or pushing a `v*` tag.
