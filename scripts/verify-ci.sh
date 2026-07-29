@@ -4,7 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-VERIFY_CI_TIMEOUT_SEC="${AGENTCHAT_VERIFY_CI_TIMEOUT_SEC:-90}"
+# Raised from 90s: kernel test shards now run at concurrency 1 to avoid a
+# memory-pressure flake in the backend test harness (see docs/TESTING.md), which
+# takes ~171s instead of ~69s. This is a hang guard, not a performance budget.
+VERIFY_CI_TIMEOUT_SEC="${AGENTCHAT_VERIFY_CI_TIMEOUT_SEC:-300}"
 if [[ "${AGENTCHAT_VERIFY_CI_TIMEOUT_ACTIVE:-0}" != "1" ]]; then
   if ! [[ "$VERIFY_CI_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [[ "$VERIFY_CI_TIMEOUT_SEC" -le 0 ]]; then
     echo "verify:ci timeout must be a positive integer number of seconds (got: $VERIFY_CI_TIMEOUT_SEC)" >&2

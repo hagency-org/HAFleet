@@ -82,9 +82,41 @@ trap 'trap - EXIT; cleanup_shards HUP; exit 129' HUP
 trap 'trap - EXIT; cleanup_shards INT; exit 130' INT
 trap 'trap - EXIT; cleanup_shards TERM; exit 143' TERM
 
+# Concurrent shards are capped because each one leaks memory badly:
+# tests/helpers/backend-test-runtime.js imports backend-v2.js with a unique
+# cache-buster per context, so the ESM registry retains ~12MB per call and never
+# releases it (212 call sites across the suite, ~2.5GB total). Running all five
+# shards at once multiplied that peak until a worker was recycled mid-run,
+# leaving a partially-evaluated module whose express app had only some of its
+# ~101 routes registered — which surfaced as a valid route returning 404, in
+# whichever heavy file happened to cross the line. See docs/TESTING.md.
+#
+# Capping concurrency removes the trigger. The underlying leak is the real fix.
+# Default 1. Measured on this suite:
+#   concurrency 5 -> ~69s, fails ~2 runs in 3
+#   concurrency 2 -> ~118s, still fails
+#   concurrency 1 -> ~171s, passes
+# Slower but never wrong. Override when you want speed and can tolerate flakes:
+#   AGENTCHAT_KERNEL_MAX_CONCURRENCY=5 npm run test:kernel
+KERNEL_MAX_CONCURRENCY="${AGENTCHAT_KERNEL_MAX_CONCURRENCY:-1}"
+
+# Block until fewer than KERNEL_MAX_CONCURRENCY shards are still running.
+await_shard_slot() {
+  while :; do
+    local running=0
+    local pid
+    for pid in "${shard_pids[@]}"; do
+      [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && running=$((running + 1))
+    done
+    [[ "$running" -lt "$KERNEL_MAX_CONCURRENCY" ]] && return 0
+    sleep 0.3
+  done
+}
+
 start_shard() {
   local name="$1"
   shift
+  await_shard_slot
   local log_file
   log_file="$(mktemp "${TMPDIR:-/tmp}/agent-chat-kernel-tests.XXXXXX")"
   shard_names+=("$name")
@@ -114,6 +146,7 @@ start_shard "api runtime" \
   tests/api-runtime.test.js
 
 start_shard "backend api" \
+  tests/api-server-heartbeat-sweep.test.js \
   tests/api-framework-presets.test.js \
   tests/api-tasks.test.js \
   tests/alert-store.test.js \

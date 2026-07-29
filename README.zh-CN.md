@@ -443,6 +443,7 @@ npm run check:remote-sync
 | [docs/ROLLBACK.md](docs/ROLLBACK.md) | 自动部署与手工回滚、状态文件 |
 | [docs/SECURITY-DEBT.md](docs/SECURITY-DEBT.md) | 依赖告警与棘轮 |
 | [docs/LICENSING.md](docs/LICENSING.md) | fork 溯源与 Apache 2.0 的署名义务 |
+| [docs/TESTING.md](docs/TESTING.md) | 测试架子、导致 flaky 的内存泄漏、并发取舍 |
 | [OPERATIONS.md](OPERATIONS.md) | 运维手册：健康、部署、事故 |
 | [CHANGELOG.md](CHANGELOG.md) | 发布历史 |
 | [remote/README.md](remote/README.md) | 远程 relay 包 |

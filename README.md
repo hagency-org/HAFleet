@@ -470,6 +470,7 @@ version with a migration, not a documentation change.
 | [docs/ROLLBACK.md](docs/ROLLBACK.md) | Auto-deploy and manual rollback, state files |
 | [docs/SECURITY-DEBT.md](docs/SECURITY-DEBT.md) | Dependency advisories and the ratchet |
 | [docs/LICENSING.md](docs/LICENSING.md) | Fork provenance and Apache 2.0 attribution obligations |
+| [docs/TESTING.md](docs/TESTING.md) | Test harness, the memory leak behind flaky runs, concurrency trade-off |
 | [OPERATIONS.md](OPERATIONS.md) | Operator runbook: health, deploys, incidents |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [remote/README.md](remote/README.md) | Remote relay package |
