@@ -22,6 +22,8 @@ NPM_BIN="${AGENTCHAT_NPM_BIN:-npm}"
 DEPLOY_STATE_DIR="${AGENTCHAT_DEPLOY_STATE_DIR:-}"
 LAST_SUCCESSFUL_REF_FILE=""
 INSTALL_NEEDED_FILE=""
+QUARANTINED_REF_FILE=""
+DEPLOY_FAILURE_FILE=""
 
 log() {
   printf '[stable-autodeploy] %s\n' "$*"
@@ -143,6 +145,8 @@ init_deploy_state() {
   fi
   LAST_SUCCESSFUL_REF_FILE="$DEPLOY_STATE_DIR/last-successful-ref"
   INSTALL_NEEDED_FILE="$DEPLOY_STATE_DIR/install-needed"
+  QUARANTINED_REF_FILE="$DEPLOY_STATE_DIR/quarantined-ref"
+  DEPLOY_FAILURE_FILE="$DEPLOY_STATE_DIR/last-failure"
 }
 
 ensure_deploy_state_dir() {
@@ -188,6 +192,89 @@ mark_deploy_success() {
 
 has_install_needed() {
   [ -f "$INSTALL_NEEDED_FILE" ]
+}
+
+# --- Quarantine ---------------------------------------------------------------
+# A ref whose deploy failed its health gate is quarantined so the watcher stops
+# re-deploying it. Previously a failed deploy only set deploy_pending=true, and
+# because origin/<branch> had not moved, the same bad commit was retried every
+# poll interval forever.
+
+read_quarantined_ref() {
+  if [ -s "$QUARANTINED_REF_FILE" ]; then
+    head -n 1 "$QUARANTINED_REF_FILE"
+  fi
+}
+
+quarantine_ref() {
+  write_state_file "$QUARANTINED_REF_FILE" "$1"
+}
+
+clear_quarantine() {
+  remove_state_file "$QUARANTINED_REF_FILE"
+  remove_state_file "$DEPLOY_FAILURE_FILE"
+}
+
+record_failure() {
+  local failed_ref="$1"
+  local stage="$2"
+  local rollback_state="$3"
+  write_state_file "$DEPLOY_FAILURE_FILE" \
+    "$(printf '{"ref":"%s","stage":"%s","rollback":"%s","at":"%s"}' \
+      "$failed_ref" "$stage" "$rollback_state" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
+}
+
+# Best-effort operator alert. Never fatal: a deploy failure must not be masked by
+# an alerting failure. Requires both env vars, so it is opt-in.
+emit_alert() {
+  local summary="$1"
+  [ -n "${AGENTCHAT_ALERT_URL:-}" ] || return 0
+  [ -n "${AGENTCHAT_ALERT_TOKEN:-}" ] || return 0
+  "$CURL_BIN" -sf -m 10 -X POST "$AGENTCHAT_ALERT_URL" \
+    -H "Authorization: Bearer $AGENTCHAT_ALERT_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d "$(printf '{"kind":"deploy_failure","severity":"critical","summary":"%s"}' "$summary")" \
+    >/dev/null 2>&1 || log "WARN: alert POST failed (continuing)"
+}
+
+# --- Rollback -----------------------------------------------------------------
+# Reset the live checkout back to the last ref that passed its health gate,
+# reinstall dependencies for it, and restart. Returns non-zero if the rollback
+# itself could not be completed, which is an operator-intervention situation.
+rollback_to_last_successful() {
+  local failed_ref="$1"
+  local target
+  target="$(read_last_successful_ref || true)"
+
+  if [ -z "$target" ]; then
+    log "ERROR: no last-successful ref recorded; cannot roll back from $failed_ref"
+    return 1
+  fi
+  if [ "$target" = "$failed_ref" ]; then
+    log "ERROR: last-successful ref is the failed ref ($failed_ref); nothing to roll back to"
+    return 1
+  fi
+
+  log "Rolling back from $failed_ref to last successful ref $target"
+  if ! run_git reset --hard "$target" >/dev/null 2>&1; then
+    log "FATAL: rollback reset to $target failed; live checkout may be inconsistent"
+    return 1
+  fi
+
+  # Dependencies may differ between the failed ref and the known-good one, so
+  # force a reinstall rather than trusting the manifest-diff shortcut.
+  if ! maybe_install_deps "$failed_ref" "$target" true; then
+    log "FATAL: dependency install failed while rolling back to $target"
+    return 1
+  fi
+
+  if restart_services; then
+    log "Rollback to $target succeeded; services healthy"
+    return 0
+  fi
+
+  log "FATAL: rolled back to $target but services are still unhealthy"
+  return 1
 }
 
 run_npm_install() {
@@ -304,6 +391,7 @@ if [ "$RELEASE_GATE" != none ] && [ -n "$RELEASE_GATE" ]; then
 fi
 
 deploy_pending=false
+quarantine_logged=""
 
 while true; do
   if ! run_git fetch origin "$DEPLOY_BRANCH" --quiet; then
@@ -316,6 +404,26 @@ while true; do
   remote_ref="$(run_git rev-parse "origin/$DEPLOY_BRANCH" 2>/dev/null || true)"
   if [ -z "$local_ref" ] || [ -z "$remote_ref" ]; then
     log "WARN: cannot resolve refs (local='$local_ref', remote='$remote_ref')"
+    sleep_or_exit_once
+    continue
+  fi
+
+  # A ref that failed its health gate is quarantined and must not be retried.
+  # Clear the quarantine as soon as the branch moves on, so a fix can deploy.
+  quarantined_ref="$(read_quarantined_ref || true)"
+  if [ -n "$quarantined_ref" ] && [ "$quarantined_ref" != "$remote_ref" ]; then
+    log "Deploy branch moved past quarantined ref $quarantined_ref; clearing quarantine"
+    clear_quarantine
+    quarantined_ref=""
+    quarantine_logged=""
+  fi
+  if [ -n "$quarantined_ref" ] && [ "$quarantined_ref" = "$remote_ref" ]; then
+    if [ "$quarantine_logged" != "$quarantined_ref" ]; then
+      log "HOLDING: $remote_ref failed its health gate and was rolled back."
+      log "         Waiting for a new commit on '$DEPLOY_BRANCH'; this ref will not be retried."
+      log "         Failure detail: $DEPLOY_FAILURE_FILE"
+      quarantine_logged="$quarantined_ref"
+    fi
     sleep_or_exit_once
     continue
   fi
@@ -379,10 +487,25 @@ while true; do
   if restart_services; then
     log "Deploy succeeded at commit $new_ref"
     mark_deploy_success "$new_ref"
+    clear_quarantine
     deploy_pending=false
   else
-    log "ERROR: service restart/health check failed at commit $new_ref — will retry next poll"
-    deploy_pending=true
+    # Health-gate failure is not retryable: the branch has not moved, so
+    # retrying re-deploys the same bad commit. Quarantine it and go back to the
+    # last ref that was known healthy.
+    log "ERROR: service restart/health check failed at commit $new_ref"
+    quarantine_ref "$new_ref"
+    if rollback_to_last_successful "$new_ref"; then
+      record_failure "$new_ref" "health_gate" "succeeded"
+      emit_alert "Deploy of $new_ref failed its health gate; rolled back to $(read_last_successful_ref || echo unknown)"
+    else
+      record_failure "$new_ref" "health_gate" "failed"
+      emit_alert "Deploy of $new_ref failed and rollback also failed; manual intervention required"
+      log "FATAL: rollback did not restore a healthy state. Manual intervention required."
+    fi
+    # Not pending: the ref is quarantined, so we wait for a new commit rather
+    # than looping on this one.
+    deploy_pending=false
   fi
 
   sleep_or_exit_once
