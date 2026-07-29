@@ -26,7 +26,9 @@
     "build:remote:sync": "bash scripts/build-remote-package.sh --sync-remote",
     "check:remote-sync": "bash scripts/check-remote-sync.sh",
     "audit:deps": "bash scripts/audit-deps.sh",
-    "audit:deps:strict": "bash scripts/audit-deps.sh --strict"
+    "audit:deps:strict": "bash scripts/audit-deps.sh --strict",
+    "audit:baseline": "node scripts/audit-baseline.mjs",
+    "audit:baseline:update": "node scripts/audit-baseline.mjs --update"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",

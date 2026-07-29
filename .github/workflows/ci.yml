@@ -27,6 +27,13 @@ jobs:
       - run: node --check lib/mcp-server-core.js
       - run: npm run verify:ci
 
+      # Advisory ratchet. Blocking: existing transitive debt is recorded in
+      # security/audit-baseline.json, so this fails only when a NEW advisory
+      # appears. `npm run audit:deps` still fails outright against that debt
+      # and is intentionally not wired here yet - see docs/SECURITY-DEBT.md.
+      - name: Dependency advisory ratchet
+        run: npm run audit:baseline
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
