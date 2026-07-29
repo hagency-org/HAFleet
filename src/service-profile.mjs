@@ -1,7 +1,14 @@
 import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 
-const REQUIRED_SERVICES = Object.freeze(['backend', 'dashboard', 'bridge', 'relay']);
+// The Matrix bridge is optional everywhere else in HAFleet — install-full.sh
+// gates it behind --with-bridge, and it fail-closes without Matrix credentials.
+// Requiring it here meant the supervised-services path (the only one that works
+// on macOS, where there is no systemd) could not run a Matrix-free install at
+// all: the bridge crash-looped and took the profile's health with it.
+const CORE_SERVICES = Object.freeze(['backend', 'dashboard', 'relay']);
+const OPTIONAL_SERVICES = Object.freeze(['bridge']);
+const KNOWN_SERVICES = Object.freeze([...CORE_SERVICES, ...OPTIONAL_SERVICES]);
 const HEALTH_TYPES = new Set(['process', 'tcp', 'http']);
 
 function isInside(root, candidate) {
@@ -102,7 +109,9 @@ function topologicalOrder(services) {
     visited.add(name);
     ordered.push(service);
   }
-  for (const name of REQUIRED_SERVICES) visit(name);
+  // Walk the services actually declared, not a fixed list: an omitted optional
+  // service would otherwise be looked up and dereferenced as undefined.
+  for (const service of services) visit(service.name);
   return ordered;
 }
 
@@ -125,7 +134,7 @@ export function loadServiceProfile({ profilePath, repoRoot }) {
   const services = raw.services.map((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('service entry must be an object');
     const serviceName = requireText(entry.name, 'service.name');
-    if (!REQUIRED_SERVICES.includes(serviceName)) throw new Error(`unknown service ${serviceName}`);
+    if (!KNOWN_SERVICES.includes(serviceName)) throw new Error(`unknown service ${serviceName}`);
     if (seen.has(serviceName)) throw new Error(`duplicate service ${serviceName}`);
     seen.add(serviceName);
     if (!Array.isArray(entry.dependsOn)) throw new Error(`${serviceName}.dependsOn must be an array`);
@@ -139,8 +148,11 @@ export function loadServiceProfile({ profilePath, repoRoot }) {
     };
   });
 
-  if (seen.size !== REQUIRED_SERVICES.length || REQUIRED_SERVICES.some((service) => !seen.has(service))) {
-    throw new Error(`profile must define exactly: ${REQUIRED_SERVICES.join(', ')}`);
+  const missingCore = CORE_SERVICES.filter((service) => !seen.has(service));
+  if (missingCore.length > 0) {
+    throw new Error(
+      `profile must define the core services: ${CORE_SERVICES.join(', ')} (missing: ${missingCore.join(', ')})`,
+    );
   }
   for (const service of services) {
     for (const dependency of service.dependsOn) {

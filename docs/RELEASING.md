@@ -69,8 +69,12 @@ Pushing the tag triggers `.github/workflows/release.yml`, which:
 
 1. refuses to continue if the tag disagrees with `package.json`;
 2. runs `verify:ci` and `npm test`;
-3. builds the remote package and stamps it `channel=release`;
-4. produces a reproducible tarball plus `SHA256SUMS`;
+3. builds **both** artifacts and stamps them `channel=release`:
+   - `hafleet-<version>.tar.gz` — full stack, from `git archive` at the tag so
+     uncommitted work cannot leak in, with `build-info.json` stamped because the
+     unpacked tree has no `.git`
+   - `hafleet-remote-<version>.tar.gz` — remote relay package
+4. produces reproducible tarballs plus `SHA256SUMS`;
 5. creates the GitHub Release using the matching `CHANGELOG.md` section.
 
 Re-cut an existing tag with the `workflow_dispatch` input if a publish step

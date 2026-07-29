@@ -1,13 +1,14 @@
 # Deployment
 
-Four supported install paths. Pick by what the host is for.
+Five supported install paths. Pick by what the host is for.
 
 | Path | Host | Use when |
 |---|---|---|
 | [Bootstrap](#1-bootstrap-recommended) | Linux + systemd | The normal case: this machine owns the backend, dashboard and local agents |
 | [Manual clone](#2-manual-clone) | Linux + systemd | You want the checkout somewhere specific, or to review before installing |
-| [Containers](#3-containers) | Linux, macOS, Windows | Backend and dashboard only, no local agents |
-| [Remote relay](#4-remote-relay) | Linux or macOS | This machine only runs agents reporting to a backend elsewhere |
+| [macOS](#3-macos) | macOS | A Mac host: launchd + the supervised-services runtime |
+| [Containers](#4-containers) | Linux, macOS, Windows | Backend and dashboard only, no local agents |
+| [Remote relay](#5-remote-relay) | Linux or macOS | This machine only runs agents reporting to a backend elsewhere |
 
 ## 1. Bootstrap (recommended)
 
@@ -23,6 +24,11 @@ bash <(curl -fsSL .../bootstrap.sh) -- --dry-run
 bash <(curl -fsSL .../bootstrap.sh) --ref v1.2.0 -- --with-bridge
 bash <(curl -fsSL .../bootstrap.sh) --list          # available releases
 ```
+
+It downloads the published release tarball and **verifies it against
+`SHA256SUMS`** before unpacking — no git required, and the bytes are exactly what
+CI built. A checksum mismatch aborts outright rather than falling back. It clones
+only when installing a branch or commit, or when a tag has no published artifact.
 
 It pins a release rather than a branch tip, so installs are reproducible. If no
 tags exist yet it falls back to `master` and **says so** — that is a moving
@@ -52,7 +58,51 @@ The installer generates `MATRIX_BRIDGE_SECRET` if absent, but
 account on your homeserver and cannot be minted locally. The install fails with
 guidance rather than leaving a dead bridge behind.
 
-## 3. Containers
+## 3. macOS
+
+`install-full.sh` refuses to run on macOS because it renders systemd units. Use:
+
+```bash
+./install/install-macos.sh --dry-run    # review first
+./install/install-macos.sh
+```
+
+What differs from the Linux install, all deliberate:
+
+| | Linux | macOS |
+|---|---|---|
+| Process management | systemd system units | launchd user agent |
+| Supervisor | systemd | `services/agentchat-services.mjs` |
+| Matrix bridge | opt-in via `--with-bridge` | opt-in via `--with-bridge` |
+| Auto-deploy watcher | yes | **no** (tracked as CD-003) |
+
+The launchd agent runs a generated wrapper that sources `.env` (the supervisor
+does not auto-load it) and puts Homebrew's prefix on `PATH`, since launchd jobs
+start with a minimal environment.
+
+Missing prerequisites (`node >= 22`, `tmux`) are installed with Homebrew unless
+you pass `--skip-brew`.
+
+### It will refuse if you already have tmux sessions
+
+HAFleet discovers tmux sessions and registers them as agents; the push relay then
+delivers messages by **typing into their panes**. On a host with unrelated tmux
+sessions that means HAFleet can type into someone else's work — observed for real
+on a fleet host, where a fresh install claimed five pre-existing sessions.
+
+The installer lists them, explains the consequence, and stops. Either stop or
+rename them first, or pass `--allow-existing-tmux` to accept the risk knowingly.
+
+### Managing it
+
+```bash
+node services/agentchat-services.mjs status --profile services-macos.json
+node services/agentchat-services.mjs doctor --profile services-macos.json
+launchctl bootout gui/$(id -u)/io.hafleet.services      # stop
+tail -50 logs/launchd.err.log
+```
+
+## 4. Containers
 
 Two profiles. **Neither runs local agents** — see the limitation below.
 
@@ -114,7 +164,7 @@ boundary's loopback trust check assumes the listener is unreachable off-box. A
 non-loopback bind is logged loudly every start; a malformed value falls back to
 loopback rather than widening it.
 
-## 4. Remote relay
+## 5. Remote relay
 
 For machines that only run agents:
 
@@ -132,12 +182,12 @@ macOS is behind on one point: the autodeploy watcher is installed only on Linux
 | Platform | Full stack | Containers | Remote relay |
 |---|---|---|---|
 | Linux + systemd | Yes | Yes (both profiles) | Yes |
-| macOS | **No** | Portable profile only | Yes (launchd) |
+| macOS | via `install/install-macos.sh` | Portable profile only | Yes (launchd) |
 | Windows | No | Portable profile only | No |
 
-`install-full.sh` refuses to run on non-Linux rather than half-installing. On
-macOS, run the control plane in containers and the agents through the remote
-relay profile.
+`install-full.sh` refuses to run on non-Linux rather than half-installing; use
+`install/install-macos.sh` there instead. It provides the full stack under
+launchd, minus the auto-deploy watcher.
 
 ## Upgrading and rolling back
 

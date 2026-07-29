@@ -77,8 +77,88 @@ if [ -z "$REQUESTED_REF" ]; then
   fi
 fi
 
-# --- Clone -------------------------------------------------------------------
-if [ -e "$TARGET_DIR" ]; then
+# --- Fetch: release tarball preferred, git clone as fallback -----------------
+# A checksummed release artifact is better than a clone: no git dependency, no
+# 20MB of history, and the contents are exactly what CI built and published.
+# Falls back to cloning when installing a branch/commit, or when the release has
+# no attached artifact (anything tagged before this existed).
+RELEASE_BASE="${HAFLEET_RELEASE_BASE:-}"
+if [ -z "$RELEASE_BASE" ]; then
+  # Derive the releases URL from the clone URL so a fork works unchanged.
+  RELEASE_BASE="$(printf '%s' "$REPO_URL" | sed -e 's|\.git$||')/releases/download"
+fi
+
+fetch_release_tarball() {
+  # Only semver tags have artifacts; branches and SHAs must be cloned.
+  case "$REQUESTED_REF" in
+    v[0-9]*.[0-9]*.[0-9]*) ;;
+    *) return 1 ;;
+  esac
+
+  local release="${REQUESTED_REF#v}"
+  local tarball="hafleet-${release}.tar.gz"
+  local base="$RELEASE_BASE/$REQUESTED_REF"
+  local work
+  work="$(mktemp -d)"
+
+  log "Fetching release artifact $tarball"
+  if ! curl -fsSL --retry 2 -o "$work/$tarball" "$base/$tarball"; then
+    log "No release artifact for $REQUESTED_REF; falling back to git clone."
+    rm -rf "$work"; return 1
+  fi
+
+  # Verify against the published SHA256SUMS. A missing checksum file is a hard
+  # failure, not a warning: silently installing unverified bytes is worse than
+  # cloning.
+  if ! curl -fsSL --retry 2 -o "$work/SHA256SUMS" "$base/SHA256SUMS"; then
+    log "ERROR: $tarball published without SHA256SUMS; refusing to use it."
+    rm -rf "$work"; return 1
+  fi
+
+  local expected actual
+  expected="$(awk -v f="$tarball" '$2 ~ f {print $1}' "$work/SHA256SUMS" | head -1)"
+  if [ -z "$expected" ]; then
+    log "ERROR: SHA256SUMS has no entry for $tarball; refusing to use it."
+    rm -rf "$work"; return 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$work/$tarball" | awk '{print $1}')"
+  else
+    actual="$(shasum -a 256 "$work/$tarball" | awk '{print $1}')"
+  fi
+  if [ "$expected" != "$actual" ]; then
+    log "ERROR: checksum mismatch for $tarball"
+    log "  expected $expected"
+    log "  actual   $actual"
+    rm -rf "$work"
+    exit 1   # a mismatch is tampering or corruption; never fall back silently
+  fi
+  log "Checksum verified."
+
+  if [ -e "$TARGET_DIR" ] && [ ! -d "$TARGET_DIR/.git" ] && [ -n "$(ls -A "$TARGET_DIR" 2>/dev/null)" ]; then
+    log "ERROR: $TARGET_DIR is not empty and is not a git checkout; use --dir"
+    rm -rf "$work"; exit 1
+  fi
+
+  tar -xzf "$work/$tarball" -C "$work"
+  mkdir -p "$TARGET_DIR"
+  # The tarball has a single hafleet-<release>/ top level.
+  ( cd "$work/hafleet-${release}" && tar -cf - . ) | ( cd "$TARGET_DIR" && tar -xf - )
+  rm -rf "$work"
+
+  FETCH_MODE="release-artifact"
+  return 0
+}
+
+FETCH_MODE=""
+# Sets FETCH_MODE on success; returns non-zero to mean "clone instead". A
+# checksum mismatch exits outright rather than returning, so it never degrades
+# into a silent clone.
+fetch_release_tarball || true
+
+if [ -n "$FETCH_MODE" ]; then
+  : # already unpacked from the verified artifact
+elif [ -e "$TARGET_DIR" ]; then
   if [ -d "$TARGET_DIR/.git" ]; then
     log "Existing checkout at $TARGET_DIR; fetching $REQUESTED_REF"
     git -C "$TARGET_DIR" fetch --tags --prune origin \
@@ -97,8 +177,15 @@ else
     || die "cannot check out '$REQUESTED_REF'"
 fi
 
-INSTALLED_REF="$(git -C "$TARGET_DIR" rev-parse --short HEAD)"
-log "Checked out $REQUESTED_REF ($INSTALLED_REF)"
+# A tarball install has no .git, so read identity from the stamp instead.
+if [ -n "$FETCH_MODE" ]; then
+  INSTALLED_REF="$(sed -n 's/.*"revision"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$TARGET_DIR/build-info.json" 2>/dev/null || true)"
+  log "Installed $REQUESTED_REF (${INSTALLED_REF:-unknown}) from verified release artifact"
+else
+  INSTALLED_REF="$(git -C "$TARGET_DIR" rev-parse --short HEAD)"
+  log "Checked out $REQUESTED_REF ($INSTALLED_REF) from git"
+fi
 
 # --- Hand off ----------------------------------------------------------------
 if [ "$RUN_INSTALLER" = false ]; then
