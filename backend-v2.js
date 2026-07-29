@@ -25,6 +25,7 @@ import { fileURLToPath } from 'url';
 import { promisify } from 'util';
 
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
+import { createTmuxRuntime } from './lib/runtime/tmux.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
 import { indexPool, agentRole, agentCapability, selectAgent, resolveTier, TIER_RUNTIME } from './lib/matrix-agent.js';
@@ -109,6 +110,12 @@ const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const LOCAL_SERVER_ID = resolveLocalServerId();
 const RECORD_LOCAL_SERVER = normalizeBoolean(process.env.AGENT_CHAT_RECORD_LOCAL_SERVER) === true;
 const LOCAL_GIT_VERSION = (() => { try { return execSync('git rev-parse --short HEAD', { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { return null; } })();
+// How this host reaches its agents. Every platform-specific operation — pane
+// enumeration, output capture, keystroke delivery, session existence — goes
+// through here rather than shelling out to tmux inline, which is what allows a
+// non-tmux runtime to be added without touching the backend. See lib/runtime/.
+const hostRuntime = createTmuxRuntime();
+
 const USER_UID = (typeof process.getuid === 'function') ? process.getuid() : null;
 const USER_RUNTIME_DIR = Number.isFinite(USER_UID) ? `/run/user/${USER_UID}` : null;
 const USER_DBUS_SESSION_BUS = USER_RUNTIME_DIR ? `unix:path=${USER_RUNTIME_DIR}/bus` : null;
@@ -5976,17 +5983,24 @@ function refreshServerLiveness() {
   if (agentsChanged) saveAgents();
 }
 
+// Interrupt, clear the line, type /clear, submit. Inherently an interactive-TUI
+// operation, so it is gated on the runtime advertising key support: a headless
+// runtime has no prompt to interrupt.
 async function injectSlashClear(tmuxTarget) {
   if (!tmuxTarget) return false;
+  if (!hostRuntime.capabilities.keys) {
+    console.error(`[backend] auto-clear unsupported by the ${hostRuntime.name} runtime`);
+    return false;
+  }
   try {
-    const opts = { timeout: 5000 };
-    await execFileAsync('tmux', ['send-keys', '-t', String(tmuxTarget), 'C-c'], opts);
+    const opts = { timeoutMs: 5000 };
+    await hostRuntime.sendKeys(tmuxTarget, ['C-c'], opts);
     await new Promise(r => setTimeout(r, 300));
-    await execFileAsync('tmux', ['send-keys', '-t', String(tmuxTarget), 'C-u'], opts);
+    await hostRuntime.sendKeys(tmuxTarget, ['C-u'], opts);
     await new Promise(r => setTimeout(r, 300));
-    await execFileAsync('tmux', ['send-keys', '-l', '-t', String(tmuxTarget), '/clear'], opts);
+    await hostRuntime.sendKeys(tmuxTarget, ['/clear'], { ...opts, literal: true });
     await new Promise(r => setTimeout(r, 300));
-    await execFileAsync('tmux', ['send-keys', '-t', String(tmuxTarget), 'Enter'], opts);
+    await hostRuntime.sendKeys(tmuxTarget, ['Enter'], opts);
     return true;
   } catch (e) {
     console.error(`[backend] auto-clear inject failed for ${tmuxTarget}: ${e.message}`);
@@ -5994,63 +6008,43 @@ async function injectSlashClear(tmuxTarget) {
   }
 }
 
+// The runtime returns raw text; hashing is this caller's concern, since the hash
+// exists to detect "pane unchanged since last sweep".
 async function captureLocalPaneContentAsync(tmuxTarget) {
   if (!tmuxTarget) return null;
-  try {
-    const { stdout } = await execFileAsync('tmux', ['capture-pane', '-p', '-t', String(tmuxTarget)], {
-      timeout: 3000,
-      encoding: 'utf-8',
-    });
-    return {
-      text: stdout,
-      hash: createHash('md5').update(stdout).digest('hex'),
-    };
-  } catch {
-    return null;
-  }
+  if (!hostRuntime.capabilities.capture) return null;
+  const text = await hostRuntime.capturePane(tmuxTarget);
+  if (text === null || text === undefined) return null;
+  return {
+    text,
+    hash: createHash('md5').update(text).digest('hex'),
+  };
 }
 
+// Classification moved to the runtime, since "is this just an idle host?" is a
+// per-runtime question. Kept as a named wrapper for readability at the call site.
 function isTmuxEmptyServerError(error) {
-  if (Number(error?.code) !== 1) return false;
-  const detail = `${error?.stderr ?? ''}\n${error instanceof Error ? error.message : String(error)}`;
-  return /no server running on\b/i.test(detail)
-    || /error connecting to .+\(No such file or directory\)/i.test(detail)
-    || /^no sessions(?:\s|$)/im.test(detail);
+  return hostRuntime.isEmptyServerError(error);
 }
 
-async function buildLocalPaneMetadataSnapshotAsync(runExecFile = execFileAsync) {
+/**
+ * Whole-host pane snapshot, indexed the way the liveness sweeps want it.
+ *
+ * Parsing and the tmux call now live in the runtime; what remains here is
+ * backend policy: which fields matter, how paths are normalised, and the
+ * session/tty indexes.
+ *
+ * `runExecFile` is retained as a test seam — passing one builds a runtime around
+ * it, so tests can drive this without a live tmux server.
+ */
+async function buildLocalPaneMetadataSnapshotAsync(runExecFile = null) {
+  const runtime = runExecFile ? createTmuxRuntime({ exec: runExecFile }) : hostRuntime;
   const sessions = new Map();
   const ttyToSession = new Map();
-  try {
-    const { stdout } = await runExecFile(
-      'tmux',
-      ['list-panes', '-a', '-F', '#{pane_tty}\t#{session_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}'],
-      { encoding: 'utf-8', timeout: 3000 }
-    );
-    const raw = stdout.trim();
-    if (!raw) return { ok: true, sessions, ttyToSession, error: null };
-    for (const line of raw.split('\n')) {
-      const parts = line.split('\t');
-      if (parts.length < 5) continue;
-      const tty = parts[0].trim();
-      const session = parts[1].trim();
-      const panePid = Number.parseInt(parts[2].trim(), 10);
-      const command = parts[3].trim();
-      const workspacePath = normalizeWorkspacePath(parts.slice(4).join('\t').trim());
-      if (tty && session) ttyToSession.set(tty.replace('/dev/', ''), session);
-      if (!session) continue;
-      if (!sessions.has(session)) {
-        sessions.set(session, {
-          panePid: Number.isFinite(panePid) && panePid > 1 ? panePid : null,
-          command: command || '',
-          workspacePath,
-        });
-      }
-    }
-  } catch (error) {
-    if (isTmuxEmptyServerError(error)) {
-      return { ok: true, sessions, ttyToSession, error: null };
-    }
+
+  const listing = await runtime.listPanes();
+  if (!listing.ok) {
+    const error = listing.error;
     return {
       ok: false,
       sessions,
@@ -6061,6 +6055,16 @@ async function buildLocalPaneMetadataSnapshotAsync(runExecFile = execFileAsync) 
         signal: error?.signal || null,
       },
     };
+  }
+
+  for (const pane of listing.panes) {
+    ttyToSession.set(pane.tty, pane.session);
+    if (sessions.has(pane.session)) continue;
+    sessions.set(pane.session, {
+      panePid: Number.isFinite(pane.pid) && pane.pid > 1 ? pane.pid : null,
+      command: pane.command || '',
+      workspacePath: normalizeWorkspacePath(pane.path),
+    });
   }
   return { ok: true, sessions, ttyToSession, error: null };
 }
@@ -7015,14 +7019,8 @@ async function agentHasMcpAsync(agentName) {
 }
 
 async function localTmuxSessionExistsAsync(sessionName) {
-  const sess = String(sessionName || '').trim();
-  if (!sess) return false;
-  try {
-    await execFileAsync('tmux', ['has-session', '-t', sess], { timeout: 2000 });
-    return true;
-  } catch {
-    return false;
-  }
+  if (!hostRuntime.capabilities.sessions) return false;
+  return hostRuntime.sessionExists(sessionName);
 }
 
 const mergedPushInboxCursor = new Map();

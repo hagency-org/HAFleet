@@ -1,0 +1,242 @@
+import { describe, expect, test, vi } from 'vitest';
+import { readFileSync } from 'fs';
+
+import {
+  RUNTIME_CAPABILITIES,
+  assertRuntimeContract,
+  createNullRuntime,
+  emptyPaneListing,
+} from '../lib/runtime/index.js';
+import { createTmuxRuntime, isTmuxEmptyServerError } from '../lib/runtime/tmux.js';
+
+// HAFleet reached its agents through 43 raw tmux invocations, 34 of them in
+// backend-v2.js with no abstraction. That coupling is what pins the project to
+// Linux and macOS, since tmux has no native Windows build. lib/runtime/ is the
+// seam that lets another runtime be added without touching the backend.
+
+/** Fake exec that records calls and replays scripted results. */
+function fakeExec(handler) {
+  const calls = [];
+  const exec = vi.fn(async (bin, args, options) => {
+    calls.push({ bin, args, options });
+    return handler({ bin, args, options });
+  });
+  return { exec, calls };
+}
+
+const tmuxError = (message, { code = 1, stderr = '' } = {}) => {
+  const error = new Error(message);
+  error.code = code;
+  error.stderr = stderr;
+  return error;
+};
+
+describe('runtime contract', () => {
+  test('declares every capability as a boolean', () => {
+    for (const key of Object.keys(RUNTIME_CAPABILITIES)) {
+      expect(typeof RUNTIME_CAPABILITIES[key]).toBe('boolean');
+    }
+  });
+
+  test('accepts a conforming runtime', () => {
+    expect(() => assertRuntimeContract(createTmuxRuntime(), 'tmux')).not.toThrow();
+    expect(() => assertRuntimeContract(createNullRuntime(), 'null')).not.toThrow();
+  });
+
+  test('rejects a partial implementation with an actionable message', () => {
+    // A half-written runtime must fail at construction, not at the first health
+    // sweep in production.
+    expect(() => assertRuntimeContract({}, 'broken')).toThrow(/broken\.name/);
+    expect(() => assertRuntimeContract({ name: 'x' }, 'broken')).toThrow(/capabilities/);
+    expect(() => assertRuntimeContract({
+      name: 'x', capabilities: { keys: true, capture: true, sessions: true },
+    }, 'broken')).toThrow(/broken\.isAvailable must be a function/);
+  });
+
+  test('emptyPaneListing distinguishes idle from failed', () => {
+    expect(emptyPaneListing(null)).toEqual({ ok: true, panes: [], error: null });
+    const err = new Error('boom');
+    expect(emptyPaneListing(err)).toEqual({ ok: false, panes: [], error: err });
+  });
+});
+
+describe('null runtime', () => {
+  test('answers "nothing here" without throwing', async () => {
+    const runtime = createNullRuntime({ reason: 'windows host' });
+    expect(runtime.capabilities).toEqual(RUNTIME_CAPABILITIES);
+    await expect(runtime.isAvailable()).resolves.toBe(false);
+    await expect(runtime.sessionExists('a')).resolves.toBe(false);
+    await expect(runtime.capturePane('a:0.0')).resolves.toBeNull();
+    await expect(runtime.sendKeys('a:0.0', ['Enter'])).resolves.toBe(false);
+    const listing = await runtime.listPanes();
+    expect(listing.panes).toEqual([]);
+    expect(listing.ok).toBe(false);
+    expect(listing.error).toBe('windows host');
+  });
+});
+
+describe('tmux runtime', () => {
+  test('advertises the capabilities an interactive multiplexer has', () => {
+    expect(createTmuxRuntime().capabilities).toEqual({
+      keys: true, capture: true, sessions: true,
+    });
+  });
+
+  test('parses list-panes output into structured panes', async () => {
+    const { exec, calls } = fakeExec(() => ({
+      stdout: [
+        '/dev/ttys004\talpha\t4242\tnode\t/Users/me/projects/alpha',
+        '/dev/ttys005\tbravo\t4243\tclaude\t/Users/me/projects/bravo',
+      ].join('\n'),
+    }));
+    const listing = await createTmuxRuntime({ exec }).listPanes();
+
+    expect(listing.ok).toBe(true);
+    expect(listing.panes).toEqual([
+      { tty: 'ttys004', session: 'alpha', pid: 4242, command: 'node', path: '/Users/me/projects/alpha' },
+      { tty: 'ttys005', session: 'bravo', pid: 4243, command: 'claude', path: '/Users/me/projects/bravo' },
+    ]);
+    // One call for the whole host, not one per agent.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args.slice(0, 3)).toEqual(['list-panes', '-a', '-F']);
+  });
+
+  test('keeps tabs inside a path rather than truncating it', async () => {
+    const { exec } = fakeExec(() => ({ stdout: '/dev/ttys001\ta\t9\tnode\t/tmp/we\tird\n' }));
+    const { panes } = await createTmuxRuntime({ exec }).listPanes();
+    expect(panes[0].path).toBe('/tmp/we\tird');
+  });
+
+  test('skips malformed rows without failing the whole listing', async () => {
+    const { exec } = fakeExec(() => ({
+      stdout: ['too\tfew\tfields', '/dev/ttys001\tgood\t7\tnode\t/tmp', '\t\t\t\t'].join('\n'),
+    }));
+    const { ok, panes } = await createTmuxRuntime({ exec }).listPanes();
+    expect(ok).toBe(true);
+    expect(panes.map((p) => p.session)).toEqual(['good']);
+  });
+
+  test('reports an idle host with no server as ok, not failed', async () => {
+    // Otherwise every sweep on a host with no agents raises a spurious alert.
+    for (const message of [
+      'no server running on /tmp/tmux-501/default',
+      'error connecting to /tmp/tmux-501/default (No such file or directory)',
+      'no sessions',
+    ]) {
+      const { exec } = fakeExec(() => { throw tmuxError(message); });
+      const listing = await createTmuxRuntime({ exec }).listPanes();
+      expect(listing, message).toEqual({ ok: true, panes: [], error: null });
+    }
+  });
+
+  test('reports a genuine failure as failed', async () => {
+    const { exec } = fakeExec(() => { throw tmuxError('permission denied', { code: 2 }); });
+    const listing = await createTmuxRuntime({ exec }).listPanes();
+    expect(listing.ok).toBe(false);
+    expect(listing.error).toBeInstanceOf(Error);
+  });
+
+  test('capturePane returns raw text and never throws', async () => {
+    const ok = fakeExec(() => ({ stdout: 'line one\nline two\n' }));
+    await expect(createTmuxRuntime({ exec: ok.exec }).capturePane('a:0.0'))
+      .resolves.toBe('line one\nline two\n');
+
+    const dead = fakeExec(() => { throw tmuxError("can't find pane"); });
+    await expect(createTmuxRuntime({ exec: dead.exec }).capturePane('a:0.0')).resolves.toBeNull();
+
+    // No target is not an error condition worth a subprocess.
+    const unused = fakeExec(() => ({ stdout: '' }));
+    await expect(createTmuxRuntime({ exec: unused.exec }).capturePane('')).resolves.toBeNull();
+    expect(unused.calls).toHaveLength(0);
+  });
+
+  test('sendKeys distinguishes key names from literal text', async () => {
+    const { exec, calls } = fakeExec(() => ({ stdout: '' }));
+    const runtime = createTmuxRuntime({ exec });
+
+    await runtime.sendKeys('a:0.0', ['C-c']);
+    expect(calls[0].args).toEqual(['send-keys', '-t', 'a:0.0', 'C-c']);
+
+    // -l stops tmux interpreting "/clear" as key names.
+    await runtime.sendKeys('a:0.0', ['/clear'], { literal: true });
+    expect(calls[1].args).toEqual(['send-keys', '-l', '-t', 'a:0.0', '/clear']);
+  });
+
+  test('sendKeys honours a timeout override', async () => {
+    const { exec, calls } = fakeExec(() => ({ stdout: '' }));
+    await createTmuxRuntime({ exec }).sendKeys('a:0.0', ['Enter'], { timeoutMs: 5000 });
+    expect(calls[0].options.timeout).toBe(5000);
+  });
+
+  test('sendKeys propagates failure so callers can tell delivery apart', async () => {
+    const { exec } = fakeExec(() => { throw tmuxError("can't find pane: gone"); });
+    await expect(createTmuxRuntime({ exec }).sendKeys('gone:0.0', ['Enter'])).rejects.toThrow(/find pane/);
+  });
+
+  test('sessionExists maps exit status to a boolean', async () => {
+    const yes = fakeExec(() => ({ stdout: '' }));
+    await expect(createTmuxRuntime({ exec: yes.exec }).sessionExists('alpha')).resolves.toBe(true);
+    expect(yes.calls[0].args).toEqual(['has-session', '-t', 'alpha']);
+
+    const no = fakeExec(() => { throw tmuxError('session not found'); });
+    await expect(createTmuxRuntime({ exec: no.exec }).sessionExists('nope')).resolves.toBe(false);
+
+    const unused = fakeExec(() => ({ stdout: '' }));
+    await expect(createTmuxRuntime({ exec: unused.exec }).sessionExists('  ')).resolves.toBe(false);
+    expect(unused.calls).toHaveLength(0);
+  });
+
+  test('isAvailable probes the binary', async () => {
+    const present = fakeExec(() => ({ stdout: 'tmux 3.7b\n' }));
+    await expect(createTmuxRuntime({ exec: present.exec }).isAvailable()).resolves.toBe(true);
+    expect(present.calls[0].args).toEqual(['-V']);
+
+    const absent = fakeExec(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); });
+    await expect(createTmuxRuntime({ exec: absent.exec }).isAvailable()).resolves.toBe(false);
+  });
+
+  test('honours a custom binary path', async () => {
+    const { exec, calls } = fakeExec(() => ({ stdout: '' }));
+    await createTmuxRuntime({ exec, bin: '/opt/homebrew/bin/tmux' }).sessionExists('a');
+    expect(calls[0].bin).toBe('/opt/homebrew/bin/tmux');
+  });
+});
+
+describe('empty-server classification', () => {
+  test('requires exit code 1, so unrelated failures are not swallowed', () => {
+    expect(isTmuxEmptyServerError(tmuxError('no server running on /tmp/x'))).toBe(true);
+    // Same text, different exit code: not the idle case.
+    expect(isTmuxEmptyServerError(tmuxError('no server running on /tmp/x', { code: 2 }))).toBe(false);
+    expect(isTmuxEmptyServerError(tmuxError('something else'))).toBe(false);
+    expect(isTmuxEmptyServerError(null)).toBe(false);
+  });
+
+  test('reads stderr as well as the message', () => {
+    expect(isTmuxEmptyServerError(tmuxError('exited', { stderr: 'no server running on /tmp/x' })))
+      .toBe(true);
+  });
+});
+
+describe('backend no longer shells out to tmux directly', () => {
+  const backend = readFileSync('backend-v2.js', 'utf-8');
+
+  test('has zero raw tmux invocations', () => {
+    // 34 before this extraction. Any new one is a regression that re-couples the
+    // backend to a single platform.
+    expect(backend).not.toMatch(/execFile(Async|Sync)?\(\s*'tmux'/);
+    expect(backend).not.toMatch(/\bexec(Sync)?\(\s*[`'"]tmux /);
+  });
+
+  test('goes through the runtime instead', () => {
+    expect(backend).toContain("import { createTmuxRuntime } from './lib/runtime/tmux.js'");
+    expect(backend).toMatch(/const hostRuntime = createTmuxRuntime\(\)/);
+  });
+
+  test('gates terminal-only operations on the capability', () => {
+    // A headless runtime has no prompt to interrupt, so auto-clear must check
+    // rather than assume tmux semantics.
+    expect(backend).toMatch(/if \(!hostRuntime\.capabilities\.keys\)/);
+    expect(backend).toMatch(/if \(!hostRuntime\.capabilities\.capture\)/);
+    expect(backend).toMatch(/if \(!hostRuntime\.capabilities\.sessions\)/);
+  });
+});
