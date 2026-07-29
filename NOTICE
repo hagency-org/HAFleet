@@ -1,0 +1,51 @@
+HAFleet
+Copyright 2026 HAgency contributors
+
+This product includes software developed by the HAgency project
+(https://github.com/hagency-org/HAFleet).
+
+-------------------------------------------------------------------------------
+Upstream provenance
+-------------------------------------------------------------------------------
+
+HAFleet is a fork of agent-chat (https://github.com/shisuiki/agent-chat).
+717 of 773 commits in this repository originate upstream, authored by:
+
+  shisuiki
+  mayor
+  anantheparty
+  csheargm
+  确定下推自动机
+
+Copyright in that work is retained by its authors.
+
+IMPORTANT: at the time of writing, the upstream repository publishes no LICENSE
+file, so the inherited portion of this tree is not covered by the Apache License
+2.0 in the accompanying LICENSE file. Consent from the upstream authors is
+required before this repository or any artifact built from it may be
+redistributed. See docs/LICENSING.md.
+
+-------------------------------------------------------------------------------
+Third-party dependencies
+-------------------------------------------------------------------------------
+
+Runtime dependencies retain their own licenses. See package.json and
+node_modules/<package>/LICENSE for each:
+
+  @modelcontextprotocol/sdk   MIT
+  express                     MIT
+  matrix-bot-sdk              MIT
+  zod                         MIT
+
+Container images are built from the Debian-based node:22-bookworm-slim base
+image, whose components retain their respective licenses.
+
+-------------------------------------------------------------------------------
+Borrowed code
+-------------------------------------------------------------------------------
+
+Record any code incorporated from other Apache 2.0 projects here, with the
+source project, the files affected, and a note that they were modified. Apache
+2.0 section 4 requires retaining notices and marking changed files.
+
+  (none recorded yet)
