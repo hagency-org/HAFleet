@@ -1,14 +1,4 @@
-# Build context exclusions for services/Dockerfile.
-#
-# The runtime image previously used `COPY . .` with only a partial ignore list,
-# so tests/ (100 files) and the full documentation tree shipped to production.
-#
-# docs/ is deliberately NOT excluded: AGENTS.md and CLAUDE.md are symlinks into
-# it, and dropping the target would leave dangling links in the image.
-
-# VCS and local state
 .git
-.gitignore
 .env
 .env.*
 node_modules
@@ -17,17 +7,6 @@ data.stale*
 logs
 coverage
 remote-dist
-build-info.json
 *.log
 *.bak
 
-# Tests and fixtures - the largest unnecessary payload
-tests
-
-# Development and publishing material with no runtime role
-.github
-specs
-.agent-spec
-README.md
-README.zh-CN.md
-CHANGELOG.md

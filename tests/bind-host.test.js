@@ -54,37 +54,3 @@ describe('service bind wiring', () => {
     }
   });
 });
-
-describe('container image is runnable', () => {
-  const dockerfile = readFileSync('services/Dockerfile', 'utf-8');
-
-  test('declares an entrypoint, ports and a healthcheck', () => {
-    // All three were absent: `docker run <image>` did nothing at all.
-    expect(dockerfile).toMatch(/^ENTRYPOINT /m);
-    expect(dockerfile).toMatch(/^CMD /m);
-    expect(dockerfile).toMatch(/^EXPOSE /m);
-    expect(dockerfile).toMatch(/^HEALTHCHECK /m);
-  });
-
-  test('is multi-stage and runs unprivileged', () => {
-    expect(dockerfile).toMatch(/AS deps/);
-    expect(dockerfile).toMatch(/AS runtime/);
-    expect(dockerfile).toContain('COPY --from=deps');
-    expect(dockerfile).toMatch(/^USER node/m);
-  });
-
-  test('accepts build args so published images carry a revision', () => {
-    expect(dockerfile).toContain('ARG HAFLEET_REVISION');
-    expect(dockerfile).toContain('build-info.json');
-  });
-
-  test('excludes tests from the build context', () => {
-    for (const file of ['.dockerignore', 'services/Dockerfile.dockerignore']) {
-      const ignore = readFileSync(file, 'utf-8').split('\n').map((l) => l.trim());
-      expect(ignore, file).toContain('tests');
-      expect(ignore, file).toContain('node_modules');
-      // docs/ must stay: AGENTS.md and CLAUDE.md are symlinks into it.
-      expect(ignore, file).not.toContain('docs');
-    }
-  });
-});

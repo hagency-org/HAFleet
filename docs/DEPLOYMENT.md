@@ -102,67 +102,46 @@ launchctl bootout gui/$(id -u)/io.hafleet.services      # stop
 tail -50 logs/launchd.err.log
 ```
 
-## 4. Containers
+## 4. Containers (team profile, Linux only)
 
-Two profiles. **Neither runs local agents** — see the limitation below.
-
-### Portable — macOS, Windows, Linux
-
-```bash
-docker compose -f services/services-portable.compose.yml up -d
-# with the Matrix bridge:
-docker compose -f services/services-portable.compose.yml --profile matrix up -d
-```
-
-Bridge networking with ports published on `127.0.0.1` only.
-
-### Host networking — Linux only
+Not the supported install path — paths 1–3 are. This is the team Compose profile
+from `services/FSF0-B1-IMPLEMENTATION-PLAN.md`, kept because it is tested
+(`tests/services-team-compose.test.js`, `tests/bridge-container-owner.test.js`),
+not because it is recommended.
 
 ```bash
 docker compose -f services/services-team.compose.yml up -d
 ```
 
-Uses `network_mode: host` (and `pid: host` for the bridge), so it does **not**
-work on Docker Desktop for macOS or Windows.
+Builds `services/Dockerfile` locally. No image is published to any registry.
 
-### The image is directly runnable
+Uses `network_mode: host` throughout (and `pid: host` for the bridge), so it does
+**not** work on Docker Desktop for macOS or Windows. Because it shares the host
+network namespace, the services keep their loopback defaults — do not set
+`AGENT_CHAT_BACKEND_HOST` / `AGENT_CHAT_WEB_HOST` here.
 
-```bash
-docker run --rm ghcr.io/hagency-org/hafleet/agentchat-services:1.2.0 --help
-docker run -d --env-file .env -p 127.0.0.1:8090:8090 \
-  ghcr.io/hagency-org/hafleet/agentchat-services:1.2.0 backend
-```
+`services/run-bridge-container.sh` wraps the bridge in `flock` so two containers
+cannot both claim bridge ownership.
 
-Roles: `backend`, `dashboard`, `relay`, `bridge`, `doctor`, `version`. An
-explicit command such as `node server.js` is passed through unchanged.
+### It does not run local agents
 
-Published on tag for `linux/amd64` and `linux/arm64`, stamped with its release
-and revision, and carrying SBOM and build provenance:
+The relay injects notifications into agents' tmux panes via `tmux send-keys`.
+That needs the host's tmux server socket at `/tmp/tmux-<uid>`, which a container
+cannot reach — each container gets its own `/tmp`. A containerised relay would
+consume the SSE stream and deliver nothing.
 
-```bash
-docker run --rm ghcr.io/.../agentchat-services:1.2.0 version   # 1.2.0 (abc1234)
-```
-
-### Limitation: the push relay cannot be containerised
-
-The relay's job is injecting notifications into agents' tmux panes via
-`tmux send-keys`. That needs the host's tmux server socket at `/tmp/tmux-<uid>`,
-which a container cannot reach — each service gets its own `/tmp`. A
-containerised relay would consume the SSE stream and deliver nothing.
-
-Both compose profiles therefore leave agent-facing delivery to the host. If you
-need local agents, use path 1 or 2. Containers are for the control plane.
+Agent-facing delivery therefore stays on the host. If you need local agents, use
+path 1, 2, or 3.
 
 ### Binding
 
-Inside a container the services must bind `0.0.0.0` to be reachable through a
-published port. Both compose profiles set `AGENT_CHAT_BACKEND_HOST` /
-`AGENT_CHAT_WEB_HOST` accordingly, and only `127.0.0.1` is published on the host.
+On a bare host leave `AGENT_CHAT_BACKEND_HOST` / `AGENT_CHAT_WEB_HOST` unset. The
+default is loopback, and the auth boundary's loopback trust check assumes the
+listener is unreachable off-box. A non-loopback bind is logged loudly every
+start; a malformed value falls back to loopback rather than widening it.
 
-On a bare host, leave these unset. The default is loopback, and the auth
-boundary's loopback trust check assumes the listener is unreachable off-box. A
-non-loopback bind is logged loudly every start; a malformed value falls back to
-loopback rather than widening it.
+Set them only when something in front of the listener terminates access — a
+reverse proxy, or a bridge-networked container you have built yourself.
 
 ## 5. Remote relay
 

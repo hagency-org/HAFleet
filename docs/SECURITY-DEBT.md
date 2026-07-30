@@ -90,6 +90,3 @@ In rough order of value:
 
 - That the current debt is safe. It is recorded, not approved.
 - That `--update` is routine. It records accepted debt; the diff must be read.
-- That SBOM and provenance (added for published images in
-  `.github/workflows/publish-image.yml`) mitigate any of this. They make the
-  contents auditable; they do not fix a vulnerable dependency.
