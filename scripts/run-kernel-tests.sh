@@ -19,6 +19,7 @@ fi
 declare -a shard_names=()
 declare -a shard_pids=()
 declare -a shard_pgids=()
+shard_status=()
 declare -a shard_logs=()
 
 terminate_tracked_process() {
@@ -100,16 +101,32 @@ trap 'trap - EXIT; cleanup_shards TERM; exit 143' TERM
 #   AGENTCHAT_KERNEL_MAX_CONCURRENCY=5 npm run test:kernel
 KERNEL_MAX_CONCURRENCY="${AGENTCHAT_KERNEL_MAX_CONCURRENCY:-1}"
 
-# Block until fewer than KERNEL_MAX_CONCURRENCY shards are still running.
+# Index of the next shard whose exit status has not yet been collected.
+shard_next_reap=0
+
+# Collect one shard's exit status, recording it for the reporting loop.
+#
+# Statuses MUST be collected here rather than left for the reporting loop to
+# `wait` on later. An exited background job is reaped once; a second `wait` on
+# that pid returns 127 on bash 5 (Linux), which the reporting loop would read as
+# a shard failure even though every test passed. That is exactly what broke CI
+# when the concurrency cap was introduced: shard summaries were all green while
+# test:kernel exited 1.
+reap_shard() {
+  local i="$1"
+  [[ -n "${shard_status[$i]:-}" ]] && return 0
+  set +e
+  wait "${shard_pids[$i]}"
+  shard_status[$i]=$?
+  set -e
+}
+
+# Block until fewer than KERNEL_MAX_CONCURRENCY shards are in flight, collecting
+# finished ones as we go so no status is lost.
 await_shard_slot() {
-  while :; do
-    local running=0
-    local pid
-    for pid in "${shard_pids[@]}"; do
-      [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && running=$((running + 1))
-    done
-    [[ "$running" -lt "$KERNEL_MAX_CONCURRENCY" ]] && return 0
-    sleep 0.3
+  while (( ${#shard_pids[@]} - shard_next_reap >= KERNEL_MAX_CONCURRENCY )); do
+    reap_shard "$shard_next_reap"
+    shard_next_reap=$((shard_next_reap + 1))
   done
 }
 
@@ -195,10 +212,8 @@ start_shard "contracts and cli" \
 failed=0
 for i in "${!shard_pids[@]}"; do
   echo "== kernel shard: ${shard_names[$i]} =="
-  set +e
-  wait "${shard_pids[$i]}"
-  status=$?
-  set -e
+  reap_shard "$i"
+  status="${shard_status[$i]}"
   cat "${shard_logs[$i]}"
   cleanup_shard_descendants "$i"
   rm -f "${shard_logs[$i]}"
