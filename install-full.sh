@@ -13,6 +13,9 @@ SKIP_MCP=false
 SKIP_NPM=false
 SKIP_PREREQ=false
 WITH_BRIDGE=false
+ALLOW_EXISTING_TMUX=false
+DENY_EXISTING_TMUX=false
+EXISTING_TMUX_SESSIONS=""
 NODE_BIN="${NODE_BIN:-}"
 
 usage() {
@@ -38,6 +41,9 @@ Options:
   --skip-npm            Do not run npm install
   --skip-prereq-check   Do not check host prerequisites
   --with-bridge         Also install/enable bridge-matrix.service
+  --deny-existing-tmux  Install even if unrelated tmux sessions exist, adding them
+                        to AGENT_CHAT_SESSION_DENYLIST so HAFleet leaves them alone
+  --allow-existing-tmux Install and manage pre-existing tmux sessions anyway
   -h, --help            Show this help
 
 Environment:
@@ -143,6 +149,8 @@ parse_args() {
       --skip-npm) SKIP_NPM=true ;;
       --skip-prereq-check) SKIP_PREREQ=true ;;
       --with-bridge) WITH_BRIDGE=true ;;
+      --deny-existing-tmux) DENY_EXISTING_TMUX=true ;;
+      --allow-existing-tmux) ALLOW_EXISTING_TMUX=true ;;
       -h|--help)
         usage
         exit 0
@@ -153,6 +161,68 @@ parse_args() {
     esac
     shift
   done
+}
+
+# HAFleet registers tmux sessions as agents and the relay delivers by typing into
+# their panes, so a host with unrelated sessions can have someone else's work typed
+# into. Observed on a fleet host: a fresh install claimed five sessions that had
+# been running for eleven days. The macOS installer has warned about this for a
+# while; this is the Linux side of the same guard.
+check_existing_tmux() {
+  command -v tmux >/dev/null 2>&1 || return 0
+  local sessions count
+  sessions="$(tmux ls 2>/dev/null | cut -d: -f1 || true)"
+  [ -n "$sessions" ] || { log "No pre-existing tmux sessions."; return 0; }
+
+  EXISTING_TMUX_SESSIONS="$(printf '%s\n' "$sessions" | paste -sd, - | tr -d ' ')"
+  count="$(printf '%s\n' "$sessions" | grep -c . | tr -d ' ')"
+  log ""
+  log "WARNING: $count existing tmux session(s) on this host:"
+  printf '%s\n' "$sessions" | sed 's/^/           /'
+  log ""
+  log "  HAFleet registers tmux sessions as agents, and the push relay delivers"
+  log "  messages by typing into their panes. These sessions would become"
+  log "  addressable, and anything sent to them would be typed into whatever is"
+  log "  running there."
+  log ""
+  log "  Either stop or rename them first, pass --deny-existing-tmux to have"
+  log "  HAFleet ignore exactly these sessions, or pass --allow-existing-tmux to"
+  log "  accept the risk and manage them."
+  log ""
+
+  if [ "$DENY_EXISTING_TMUX" = true ]; then
+    log "--deny-existing-tmux set; these sessions will be excluded by policy."
+    return 0
+  fi
+  [ "$ALLOW_EXISTING_TMUX" = true ] && { log "--allow-existing-tmux set; continuing."; return 0; }
+  [ "$DRY_RUN" = true ] && { log "[dry-run] would prompt for confirmation here"; return 0; }
+
+  if [ ! -t 0 ]; then
+    die "existing tmux sessions and no TTY to confirm; pass --deny-existing-tmux to exclude them, or --allow-existing-tmux to accept the risk"
+  fi
+  printf '[install-full] Continue anyway? [y/N] '
+  IFS= read -r reply
+  case "$reply" in y|Y|yes|YES) ;; *) die "aborted" ;; esac
+}
+
+# Runs after prepare_env, because it needs ENV_FILE to exist. Merges rather than
+# overwriting: an operator may already have a denylist configured.
+apply_session_denylist() {
+  [ "$DENY_EXISTING_TMUX" = true ] || return 0
+  [ -n "$EXISTING_TMUX_SESSIONS" ] || { log "No sessions to deny."; return 0; }
+  if [ "$DRY_RUN" = true ]; then
+    log "[dry-run] would set AGENT_CHAT_SESSION_DENYLIST=$EXISTING_TMUX_SESSIONS"
+    return 0
+  fi
+  local existing merged
+  existing="$(read_env_value AGENT_CHAT_SESSION_DENYLIST "$ENV_FILE")"
+  if [ -n "$existing" ]; then
+    merged="$existing,$EXISTING_TMUX_SESSIONS"
+  else
+    merged="$EXISTING_TMUX_SESSIONS"
+  fi
+  set_env_value AGENT_CHAT_SESSION_DENYLIST "$merged" "$ENV_FILE"
+  log "AGENT_CHAT_SESSION_DENYLIST=$merged"
 }
 
 check_prereqs() {
@@ -446,7 +516,9 @@ main() {
   log "Systemd:    $SYSTEMD_DIR"
   log "User:       $SERVICE_USER"
   [ "$SKIP_PREREQ" = true ] || check_prereqs
+  check_existing_tmux
   prepare_env
+  apply_session_denylist
   prepare_bridge_env
   install_dependencies
   link_cli_commands

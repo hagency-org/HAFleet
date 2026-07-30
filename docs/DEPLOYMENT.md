@@ -83,14 +83,23 @@ start with a minimal environment.
 Missing prerequisites (`node >= 22`, `tmux`) are installed with Homebrew unless
 you pass `--skip-brew`.
 
-### It will refuse if you already have tmux sessions
+### Managing it
+
+```bash
+node services/agentchat-services.mjs status --profile services-macos.json
+node services/agentchat-services.mjs doctor --profile services-macos.json
+launchctl bootout gui/$(id -u)/io.hafleet.services      # stop
+tail -50 logs/launchd.err.log
+```
+
+## Which tmux sessions HAFleet manages
 
 HAFleet discovers tmux sessions and registers them as agents; the push relay then
 delivers messages by **typing into their panes**. On a host with unrelated tmux
 sessions that means HAFleet can type into someone else's work — observed for real
 on a fleet host, where a fresh install claimed five pre-existing sessions.
 
-The installer lists them, explains the consequence, and stops. You have three
+Both installers list them, explain the consequence, and stop. You have three
 ways forward:
 
 | | |
@@ -99,7 +108,7 @@ ways forward:
 | `--deny-existing-tmux` | installs, and writes those exact names into `AGENT_CHAT_SESSION_DENYLIST` so HAFleet leaves them alone |
 | `--allow-existing-tmux` | installs and manages them, accepting the risk knowingly |
 
-### Session policy
+### Configuring it
 
 Two optional env vars decide which sessions this install may manage:
 
@@ -128,15 +137,6 @@ configured survive as offline agents; remove them with
 `bin/agentchat-prune-agents --older-than-days 0 --mode all-offline --apply`, but
 note that deletion writes a permanent tombstone which blocks re-registering that
 name.
-
-### Managing it
-
-```bash
-node services/agentchat-services.mjs status --profile services-macos.json
-node services/agentchat-services.mjs doctor --profile services-macos.json
-launchctl bootout gui/$(id -u)/io.hafleet.services      # stop
-tail -50 logs/launchd.err.log
-```
 
 ## 4. Containers (team profile, Linux only)
 
@@ -194,15 +194,25 @@ macOS is behind on one point: the autodeploy watcher is installed only on Linux
 
 ## Platform support
 
-| Platform | Full stack | Containers | Remote relay |
-|---|---|---|---|
-| Linux + systemd | Yes | Yes (both profiles) | Yes |
-| macOS | via `install/install-macos.sh` | Portable profile only | Yes (launchd) |
-| Windows | No | Portable profile only | No |
+| Platform | Full stack | Containers | Remote relay | Session guard |
+|---|---|---|---|---|
+| Linux + systemd | Yes | Team profile | Yes | Yes |
+| macOS | via `install/install-macos.sh` | No — needs `network_mode: host` | Yes (launchd) | Yes |
+| Windows | No | No | No | n/a |
 
 `install-full.sh` refuses to run on non-Linux rather than half-installing; use
 `install/install-macos.sh` there instead. It provides the full stack under
 launchd, minus the auto-deploy watcher.
+
+Both installers carry the same tmux session guard and the same
+`--deny-existing-tmux` / `--allow-existing-tmux` flags; `tests/install-session-guard.test.js`
+asserts that parity so the two cannot drift apart again. The session policy itself
+is platform-independent — it lives in `lib/session-policy.js` and is enforced by
+the relay and backend, not by the installer.
+
+Not yet at parity: service hardening. The systemd units carry 17 sandboxing
+directives verified at `systemd-analyze security` 2.4 OK; launchd has no
+equivalent, and the resource keys are still unset.
 
 ## Upgrading and rolling back
 
