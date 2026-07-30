@@ -26,6 +26,7 @@ import { promisify } from 'util';
 
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTmuxRuntime } from './lib/runtime/tmux.js';
+import { sessionPolicyFromEnv } from './lib/session-policy.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
 import { indexPool, agentRole, agentCapability, selectAgent, resolveTier, TIER_RUNTIME } from './lib/matrix-agent.js';
@@ -115,6 +116,12 @@ const LOCAL_GIT_VERSION = (() => { try { return execSync('git rev-parse --short 
 // through here rather than shelling out to tmux inline, which is what allows a
 // non-tmux runtime to be added without touching the backend. See lib/runtime/.
 const hostRuntime = createTmuxRuntime();
+// Which sessions this host may manage. The relay applies the same policy when it
+// enumerates sessions, but the backend enumerates panes itself in local mode and
+// can still hold agent records registered before a policy was configured — so it
+// has to enforce independently rather than trust the relay to have filtered.
+const sessionPolicy = sessionPolicyFromEnv();
+for (const warning of sessionPolicy.warnings) console.warn(`[backend] ${warning}`);
 
 const USER_UID = (typeof process.getuid === 'function') ? process.getuid() : null;
 const USER_RUNTIME_DIR = Number.isFinite(USER_UID) ? `/run/user/${USER_UID}` : null;
@@ -5992,6 +5999,14 @@ async function injectSlashClear(tmuxTarget) {
     console.error(`[backend] auto-clear unsupported by the ${hostRuntime.name} runtime`);
     return false;
   }
+  // C-c then /clear would interrupt and wipe whatever is in the pane. Refuse
+  // outright on a session this install does not own.
+  const sessionName = sessionKeyFromTmuxTarget(tmuxTarget);
+  const verdict = sessionPolicy.evaluate(sessionName);
+  if (!verdict.allowed) {
+    console.warn(`[backend] auto-clear refused for ${tmuxTarget}: ${verdict.reason}`);
+    return false;
+  }
   try {
     const opts = { timeoutMs: 5000 };
     await hostRuntime.sendKeys(tmuxTarget, ['C-c'], opts);
@@ -6058,6 +6073,9 @@ async function buildLocalPaneMetadataSnapshotAsync(runExecFile = null) {
   }
 
   for (const pane of listing.panes) {
+    // A session outside the policy is treated as though it were not on the host:
+    // no pane snapshot, so the activity sweep and the dashboard both skip it.
+    if (!sessionPolicy.allows(pane.session)) continue;
     ttyToSession.set(pane.tty, pane.session);
     if (sessions.has(pane.session)) continue;
     sessions.set(pane.session, {
@@ -11458,6 +11476,8 @@ export {
 };
 export const __backendV2TestInternals = {
   buildLocalPaneMetadataSnapshotForTest: buildLocalPaneMetadataSnapshotAsync,
+  injectSlashClearForTest: injectSlashClear,
+  sessionPolicyForTest: sessionPolicy,
   notifyAgentCatchupForTest: notifyAgentCatchup,
   pushNotifyForTest: pushNotify,
   sseAdapterForTest: sseAdapter,

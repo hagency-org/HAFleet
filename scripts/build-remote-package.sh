@@ -81,6 +81,7 @@ MANAGED_SPECS=(
   "lib/eventsource-mini.js:lib/eventsource-mini.js"
   "lib/pane-activity.js:lib/pane-activity.js"
   "lib/server-identity.js:lib/server-identity.js"
+  "lib/session-policy.js:lib/session-policy.js"
   "lib/push-relay-core.js:lib/push-relay-core.js"
   "lib/mcp-server-core.js:lib/mcp-server-core.js"
   "lib/runtime-approval-client.js:lib/runtime-approval-client.js"

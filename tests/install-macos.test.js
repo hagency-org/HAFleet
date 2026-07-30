@@ -81,6 +81,34 @@ describe('install/install-macos.sh', () => {
     test('refuses when non-interactive with no way to confirm', () => {
       expect(source).toMatch(/no TTY to confirm/);
     });
+
+    test('offers a safe third option that excludes them by policy', () => {
+      // Before this existed the only choices were "abort" or "let HAFleet type
+      // into someone else's work", which left a host like mini5 uninstallable.
+      expect(source).toContain('--deny-existing-tmux');
+      expect(source).toContain('apply_session_denylist');
+      expect(source).toContain('AGENT_CHAT_SESSION_DENYLIST');
+    });
+
+    test('the denylist step runs after prepare_env, since it edits .env', () => {
+      const main = source.slice(source.indexOf('main() {'));
+      expect(main.indexOf('prepare_env')).toBeLessThan(main.indexOf('apply_session_denylist'));
+    });
+
+    test('merges rather than overwriting an existing denylist', () => {
+      const fn = source.slice(source.indexOf('apply_session_denylist() {'));
+      const body = fn.slice(0, fn.indexOf('\n}'));
+      expect(body).toContain('read_env_value AGENT_CHAT_SESSION_DENYLIST');
+      expect(body).toMatch(/\$existing,\$EXISTING_TMUX_SESSIONS/);
+    });
+
+    test('--dry-run does not write the denylist', () => {
+      const fn = source.slice(source.indexOf('apply_session_denylist() {'));
+      const body = fn.slice(0, fn.indexOf('\n}'));
+      const dryRunGuard = body.indexOf('DRY_RUN');
+      expect(dryRunGuard).toBeGreaterThan(-1);
+      expect(dryRunGuard).toBeLessThan(body.indexOf('set_env_value'));
+    });
   });
 
   describe('dry run', () => {

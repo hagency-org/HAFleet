@@ -26,6 +26,8 @@
 #   --skip-mcp         Do not register the MCP server with Claude Code / Codex
 #   --bin-dir PATH     Where to link CLI commands (default: ~/.local/bin)
 #   --allow-existing-tmux  Proceed even if unrelated tmux sessions are present
+#   --deny-existing-tmux   Proceed, but add the existing sessions to
+#                          AGENT_CHAT_SESSION_DENYLIST so HAFleet leaves them alone
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,6 +40,8 @@ NO_START=false
 SKIP_BREW=false
 SKIP_MCP=false
 ALLOW_EXISTING_TMUX=false
+DENY_EXISTING_TMUX=false
+EXISTING_TMUX_SESSIONS=""
 BIN_DIR="${HOME}/.local/bin"
 ENV_FILE="$INSTALL_DIR/.env"
 PROFILE_FILE="$INSTALL_DIR/services-macos.json"
@@ -69,6 +73,7 @@ while [ $# -gt 0 ]; do
     --skip-brew) SKIP_BREW=true; shift ;;
     --skip-mcp) SKIP_MCP=true; shift ;;
     --allow-existing-tmux) ALLOW_EXISTING_TMUX=true; shift ;;
+    --deny-existing-tmux) DENY_EXISTING_TMUX=true; shift ;;
     --bin-dir) BIN_DIR="${2:?--bin-dir requires a value}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
@@ -143,6 +148,8 @@ check_existing_tmux() {
   local sessions
   sessions="$(tmux ls 2>/dev/null | cut -d: -f1 || true)"
   [ -n "$sessions" ] || { log "No pre-existing tmux sessions."; return 0; }
+  # Kept for apply_session_denylist, which runs after .env exists.
+  EXISTING_TMUX_SESSIONS="$(printf '%s\n' "$sessions" | paste -sd, - | tr -d ' ')"
 
   local count
   count="$(printf '%s\n' "$sessions" | grep -c . | tr -d ' ')"
@@ -155,17 +162,23 @@ check_existing_tmux() {
   log "  addressable, and anything sent to them would be typed into whatever is"
   log "  running there."
   log ""
-  log "  Either stop or rename them first, or pass --allow-existing-tmux."
+  log "  Either stop or rename them first, pass --deny-existing-tmux to have"
+  log "  HAFleet ignore exactly these sessions, or pass --allow-existing-tmux to"
+  log "  accept the risk and manage them."
   log ""
 
+  if [ "$DENY_EXISTING_TMUX" = true ]; then
+    log "--deny-existing-tmux set; these sessions will be excluded by policy."
+    return 0
+  fi
   [ "$ALLOW_EXISTING_TMUX" = true ] && { log "--allow-existing-tmux set; continuing."; return 0; }
   [ "$DRY_RUN" = true ] && { log "[dry-run] would prompt for confirmation here"; return 0; }
 
   if [ "$ASSUME_YES" = true ]; then
-    die "refusing to continue with existing tmux sessions under --yes; pass --allow-existing-tmux to accept the risk"
+    die "refusing to continue with existing tmux sessions under --yes; pass --deny-existing-tmux to exclude them, or --allow-existing-tmux to accept the risk"
   fi
   if [ ! -t 0 ]; then
-    die "existing tmux sessions and no TTY to confirm; pass --allow-existing-tmux to accept the risk"
+    die "existing tmux sessions and no TTY to confirm; pass --deny-existing-tmux to exclude them, or --allow-existing-tmux to accept the risk"
   fi
   printf '[install-macos] Continue anyway? [y/N] '
   IFS= read -r reply
@@ -411,10 +424,32 @@ verify() {
     || log "NOTE: dashboard not answering on ${web} yet."
 }
 
+# Writes the sessions found by check_existing_tmux into the session policy, so a
+# host with unrelated work can be installed onto without HAFleet claiming it.
+# Runs after prepare_env because it needs .env to exist.
+apply_session_denylist() {
+  [ "$DENY_EXISTING_TMUX" = true ] || return 0
+  [ -n "$EXISTING_TMUX_SESSIONS" ] || { log "No sessions to deny."; return 0; }
+  if [ "$DRY_RUN" = true ]; then
+    log "[dry-run] would set AGENT_CHAT_SESSION_DENYLIST=$EXISTING_TMUX_SESSIONS"
+    return 0
+  fi
+  local existing merged
+  existing="$(read_env_value AGENT_CHAT_SESSION_DENYLIST)"
+  if [ -n "$existing" ]; then
+    merged="$existing,$EXISTING_TMUX_SESSIONS"
+  else
+    merged="$EXISTING_TMUX_SESSIONS"
+  fi
+  set_env_value AGENT_CHAT_SESSION_DENYLIST "$merged"
+  log "AGENT_CHAT_SESSION_DENYLIST=$merged"
+}
+
 main() {
   check_prereqs
   check_existing_tmux
   prepare_env
+  apply_session_denylist
   install_dependencies
   write_profile
   link_cli_commands
