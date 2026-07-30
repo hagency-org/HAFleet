@@ -517,10 +517,17 @@ describe('server heartbeat api', () => {
     ]));
   });
 
+  // Wall-clock timing, so the margins matter. For the renewal to be load-bearing
+  // the total elapsed time must exceed the TTL while the gap since the renewal
+  // does not: 2*2200 > 3000 > 2200. That leaves ~800ms of slack on the "still
+  // alive" side and ~1400ms on the "would have expired" side.
+  //
+  // It was TTL 500 with 300ms sleeps, i.e. 200ms of slack, which a loaded CI
+  // runner blew regularly — 'expected false to be true'.
   test('keeps a server online when heartbeats renew before ttl expiry', async () => {
     context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
       env: {
-        AGENT_HEARTBEAT_TTL_MS: '500',
+        AGENT_HEARTBEAT_TTL_MS: '3000',
       },
     }));
 
@@ -531,7 +538,7 @@ describe('server heartbeat api', () => {
       agents: [],
       sessions: [],
     });
-    await sleep(300);
+    await sleep(2200);
     await postHeartbeat(context.app, {
       server: 's1',
       instanceId: 'inst-1',
@@ -539,7 +546,7 @@ describe('server heartbeat api', () => {
       agents: [],
       sessions: [],
     });
-    await sleep(300);
+    await sleep(2200);
     const servers = await request(context.app).get('/api/servers');
 
     expect(servers.status).toBe(200);
