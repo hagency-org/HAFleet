@@ -8,6 +8,13 @@ Release process and the compatibility contract live in [docs/RELEASING.md](docs/
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-30
+
+First tagged release. The repository carried 768 commits with no tags, no
+releases, and `package.json` pinned at `1.0.0`, so nothing was installable at a
+pinned version and a failed deploy had no artifact to fall back to. `1.2.0` is
+the starting point: above the stale `1.0.0` without implying a `2.0` rewrite.
+
 ### Changed
 
 - Both READMEs rewritten around the name **HAFleet**, covering the five install
@@ -17,13 +24,30 @@ Release process and the compatibility contract live in [docs/RELEASING.md](docs/
   are deliberately unchanged: unit names, CLI commands, `.env` variables, the MCP
   server name and `~/.agentchat` are all covered by the compatibility contract in
   docs/RELEASING.md, so renaming them is a major version with a migration.
+- **Agent access goes through a platform seam.** `backend-v2.js` had 34 raw tmux
+  invocations and now has none; `lib/runtime/` defines the contract and
+  `lib/runtime/tmux.js` implements it. Terminal-only operations are gated on a
+  declared capability, so a non-tmux runtime becomes additive rather than a
+  refactor. This is what pinned HAFleet to Linux and macOS.
+- **Kernel test shards run at concurrency 1 by default.** The backend test helper
+  retains ~12 MB per context permanently (212 call sites), and running five shards
+  at once pushed workers into recycling mid-run, leaving partially evaluated
+  modules whose express app was missing routes. `verify:ci`'s wall clock moved
+  90s → 300s to fit; that is a hang guard, not a performance budget. See
+  docs/TESTING.md.
 
-## [1.2.0] - 2026-07-28
+### Fixed
 
-First tagged release. The repository carried 768 commits with no tags, no
-releases, and `package.json` pinned at `1.0.0`, so nothing was installable at a
-pinned version and a failed deploy had no artifact to fall back to. `1.2.0` is
-the starting point: above the stale `1.0.0` without implying a `2.0` rewrite.
+- `.env.example` could not be sourced at all: an unquoted `<placeholder>` made the
+  shell read `<` as a redirect, so `set -a; . ./.env` died before setting anything,
+  including `API_TOKEN` — the exact command `services/README.md` documents, on the
+  file `install-full.sh` generates.
+- The Matrix bridge was mandatory in the service profile, so the supervised-services
+  path — the only one that works on macOS — could not run a Matrix-free install.
+- `master` was failing its own `check:architecture-boundaries` gate (13 issues),
+  unnoticed because pull requests to `master` were never gated.
+- A heartbeat renewal test raced the wall clock with 200 ms of slack; margins
+  widened 4x.
 
 ### Added
 
