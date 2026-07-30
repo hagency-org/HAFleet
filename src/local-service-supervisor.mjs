@@ -10,6 +10,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import net from 'node:net';
+
+import { healthPaths } from './health-record.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -80,7 +82,51 @@ async function probeHttp(health, env) {
   }
 }
 
-async function probeOwnHealth(service, record, env) {
+/**
+ * Freshness probe against a component's own health record.
+ *
+ * The bridge and relay expose no port, so a 'process' probe can only assert that
+ * the PID is alive — which reported a crash-looping bridge as healthy on a real
+ * fleet host, because it died between the check and the next one. Both components
+ * already write records via src/health-record.mjs, and standalone-doctor.mjs
+ * already reads them; this reuses that signal in the supervisor's own probe.
+ *
+ * Absent or unparseable is unhealthy, not an error: a component that has never
+ * written a record has not come up.
+ */
+async function probeHealthRecord(health, runtimeRoot) {
+  if (!runtimeRoot) return { ok: false, reason: 'health record probe has no runtime root' };
+  const paths = healthPaths(runtimeRoot);
+  const filePath = health.component === 'bridge' ? paths.bridgePath : paths.relayPath;
+
+  let record;
+  try {
+    record = JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error?.code === 'ENOENT'
+        ? 'health record has not been written yet'
+        : 'health record is unreadable',
+    };
+  }
+
+  const generatedAt = Date.parse(record?.generatedAt ?? '');
+  if (!Number.isFinite(generatedAt)) {
+    return { ok: false, reason: 'health record has no usable generatedAt' };
+  }
+  const ageMs = Date.now() - generatedAt;
+  if (ageMs > health.maxAgeMs) {
+    return { ok: false, reason: `health record is stale by ${Math.round((ageMs - health.maxAgeMs) / 1000)}s` };
+  }
+  // A clock that has jumped backwards should not read as healthy either.
+  if (ageMs < -health.maxAgeMs) {
+    return { ok: false, reason: 'health record is timestamped in the future' };
+  }
+  return { ok: true, reason: null };
+}
+
+async function probeOwnHealth(service, record, env, runtimeRoot) {
   if (record.desired !== 'running') return { healthy: false, reason: 'service explicitly stopped' };
   if (!pidAlive(record.pid)) return { healthy: false, reason: 'service process is not running' };
   if (!processIdentityMatches(record)) {
@@ -94,6 +140,10 @@ async function probeOwnHealth(service, record, env) {
     return stableForMs >= 25
       ? { healthy: true, reason: null }
       : { healthy: false, reason: 'service process is still starting' };
+  }
+  if (service.health.type === 'record') {
+    const result = await probeHealthRecord(service.health, runtimeRoot);
+    return result.ok ? { healthy: true, reason: null } : { healthy: false, reason: result.reason };
   }
   const port = resolvePort(service.health, env);
   const ok = service.health.type === 'tcp'
@@ -117,13 +167,13 @@ function emptyRecord(name) {
   };
 }
 
-async function buildStatus(profile, records, env, { supervisorHealthy = true } = {}) {
+async function buildStatus(profile, records, env, { supervisorHealthy = true, runtimeRoot = null } = {}) {
   const services = [];
   const byName = new Map();
   const ownResults = await Promise.all(profile.services.map(async (service) => {
     const record = records.get(service.name) || emptyRecord(service.name);
     const own = supervisorHealthy
-      ? await probeOwnHealth(service, record, env)
+      ? await probeOwnHealth(service, record, env, runtimeRoot)
       : { healthy: false, reason: 'supervisor process is not running or identity changed' };
     return { service, record, own };
   }));
@@ -183,7 +233,7 @@ export async function readServiceStatus({ profile, runtimeRoot, env = process.en
     profile,
     recordsFromSnapshot(profile, snapshot),
     env,
-    { supervisorHealthy },
+    { supervisorHealthy, runtimeRoot },
   );
   return {
     ...status,
@@ -362,7 +412,7 @@ export class LocalServiceSupervisor {
   }
 
   async status() {
-    return buildStatus(this.profile, this.records, this.env);
+    return buildStatus(this.profile, this.records, this.env, { runtimeRoot: this.runtimeRoot });
   }
 
   async waitForHealthy(timeoutMs = 15000) {

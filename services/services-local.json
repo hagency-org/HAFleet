@@ -3,7 +3,10 @@
   "services": [
     {
       "name": "backend",
-      "command": ["node", "backend-v2.js"],
+      "command": [
+        "node",
+        "backend-v2.js"
+      ],
       "dependsOn": [],
       "health": {
         "type": "http",
@@ -16,8 +19,13 @@
     },
     {
       "name": "dashboard",
-      "command": ["node", "server.js"],
-      "dependsOn": ["backend"],
+      "command": [
+        "node",
+        "server.js"
+      ],
+      "dependsOn": [
+        "backend"
+      ],
       "health": {
         "type": "tcp",
         "host": "127.0.0.1",
@@ -28,8 +36,13 @@
     },
     {
       "name": "bridge",
-      "command": ["node", "bridge-matrix.js"],
-      "dependsOn": ["backend"],
+      "command": [
+        "node",
+        "bridge-matrix.js"
+      ],
+      "dependsOn": [
+        "backend"
+      ],
       "health": {
         "type": "process",
         "timeoutMs": 1000
@@ -37,8 +50,13 @@
     },
     {
       "name": "relay",
-      "command": ["node", "push-relay.js"],
-      "dependsOn": ["backend"],
+      "command": [
+        "node",
+        "push-relay.js"
+      ],
+      "dependsOn": [
+        "backend"
+      ],
       "env": {
         "PUSH_RELAY_MODE": "local"
       },
@@ -49,4 +67,3 @@
     }
   ]
 }
-

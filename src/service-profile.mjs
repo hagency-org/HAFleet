@@ -9,7 +9,12 @@ import path from 'node:path';
 const CORE_SERVICES = Object.freeze(['backend', 'dashboard', 'relay']);
 const OPTIONAL_SERVICES = Object.freeze(['bridge']);
 const KNOWN_SERVICES = Object.freeze([...CORE_SERVICES, ...OPTIONAL_SERVICES]);
-const HEALTH_TYPES = new Set(['process', 'tcp', 'http']);
+// 'record' probes a component's own health record (src/health-record.mjs) for
+// freshness. It exists because 'process' is nearly meaningless for the bridge and
+// relay: they expose no port, so the probe could only assert "PID 1 is alive",
+// which reported a crash-looping bridge as healthy on a real fleet host.
+const HEALTH_TYPES = new Set(['process', 'tcp', 'http', 'record']);
+const HEALTH_RECORD_COMPONENTS = new Set(['bridge', 'relay']);
 
 function isInside(root, candidate) {
   const relative = path.relative(root, candidate);
@@ -41,6 +46,21 @@ function validateHealth(raw, serviceName) {
     throw new Error(`${serviceName}.health.timeoutMs must be between 100 and 4000`);
   }
   const health = { type, timeoutMs };
+  if (type === 'record') {
+    health.component = requireText(raw.component, `${serviceName}.health.component`);
+    if (!HEALTH_RECORD_COMPONENTS.has(health.component)) {
+      throw new Error(`${serviceName}.health.component must be one of: ${[...HEALTH_RECORD_COMPONENTS].join(', ')}`);
+    }
+    // Records are rewritten on a cadence measured in tens of seconds, so the
+    // staleness window is deliberately far wider than timeoutMs (a socket
+    // deadline). Floor of 5s keeps it above any plausible write jitter.
+    const maxAgeMs = raw.maxAgeMs;
+    if (!Number.isInteger(maxAgeMs) || maxAgeMs < 5000 || maxAgeMs > 600000) {
+      throw new Error(`${serviceName}.health.maxAgeMs must be an integer from 5000 to 600000`);
+    }
+    health.maxAgeMs = maxAgeMs;
+    return health;
+  }
   if (type !== 'process') {
     health.host = requireText(raw.host, `${serviceName}.health.host`);
     health.defaultPort = validatePort(raw.defaultPort, `${serviceName}.health.defaultPort`);
