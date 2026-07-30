@@ -90,8 +90,44 @@ delivers messages by **typing into their panes**. On a host with unrelated tmux
 sessions that means HAFleet can type into someone else's work — observed for real
 on a fleet host, where a fresh install claimed five pre-existing sessions.
 
-The installer lists them, explains the consequence, and stops. Either stop or
-rename them first, or pass `--allow-existing-tmux` to accept the risk knowingly.
+The installer lists them, explains the consequence, and stops. You have three
+ways forward:
+
+| | |
+|---|---|
+| stop or rename them | nothing to decide |
+| `--deny-existing-tmux` | installs, and writes those exact names into `AGENT_CHAT_SESSION_DENYLIST` so HAFleet leaves them alone |
+| `--allow-existing-tmux` | installs and manages them, accepting the risk knowingly |
+
+### Session policy
+
+Two optional env vars decide which sessions this install may manage:
+
+```bash
+AGENT_CHAT_SESSION_ALLOWLIST=claude-*,codex-*   # only these
+AGENT_CHAT_SESSION_DENYLIST=ps2,ps3             # never these
+```
+
+Comma- or whitespace-separated; `*` matches any run of characters; denial always
+wins. Leave both unset and HAFleet manages every session, which is the historical
+behaviour — restricting the default would orphan agents on hosts already deployed.
+
+Enforced in three places, because the relay filtering alone is not enough: the
+relay's session enumeration (which gates both registration and delivery), the
+backend's own pane snapshot (local mode has no relay), and `injectSlashClear`,
+which sends `C-c` and `/clear` and so is the operation that can actually destroy
+someone's work.
+
+A variable that is set but unparseable — `AGENT_CHAT_SESSION_ALLOWLIST=,` — refuses
+every session and warns. An empty value (`AGENT_CHAT_SESSION_ALLOWLIST=`) still
+means "no opinion", so it cannot lock a host out by accident.
+
+An excluded session looks absent rather than blocked: no pane snapshot, no
+heartbeat entry, `tmux` reported as unset. Records registered before a policy was
+configured survive as offline agents; remove them with
+`bin/agentchat-prune-agents --older-than-days 0 --mode all-offline --apply`, but
+note that deletion writes a permanent tombstone which blocks re-registering that
+name.
 
 ### Managing it
 
