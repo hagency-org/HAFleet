@@ -90,8 +90,11 @@ the starting point: above the stale `1.0.0` without implying a `2.0` rewrite.
 
 ### Known gaps
 
-- Systemd unit changes have not been smoke-tested on a live `systemctl`; they
-  were authored on macOS, where `install-full.sh` refuses to run.
+- ~~Systemd unit changes have not been smoke-tested on a live `systemctl`.~~
+  **Verified 2026-07-30** on Amazon Linux 2023 / systemd 252: all three units
+  active, `systemd-analyze security` 2.4 OK on each, every directive confirmed in
+  effect, and tmux demonstrated reachable through the sandbox. See
+  docs/DEPLOYMENT.md.
 - ~~The repository has no `LICENSE`.~~ **Resolved 2026-07-29:** upstream adopted
   Apache 2.0 (commit `aa8e5e5`), so HAFleet is now Apache 2.0 and distributable.
   See [docs/LICENSING.md](docs/LICENSING.md).

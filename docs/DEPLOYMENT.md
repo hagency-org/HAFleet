@@ -220,6 +220,26 @@ deliberately **absent** and must not be added:
 `tests/systemd-hardening.test.js` asserts both the required directives and the
 absence of these two.
 
+### Verified on real systemd
+
+Previously this was reasoning only. Validated 2026-07-30 on Amazon Linux 2023
+(systemd 252, node 22.23.2):
+
+| Check | Result |
+|---|---|
+| `install-full.sh` end to end | completed |
+| All three units | `active` |
+| **`systemd-analyze security`** | **2.4 OK** on each unit |
+| `NoNewPrivileges`, `ProtectSystem=full`, `RestrictSUIDSGID`, `LockPersonality`, `SystemCallFilter` | confirmed in effect via `systemctl show`, not just present in the file |
+| `PrivateTmp=no`, `ProtectHome=no` | confirmed |
+| **tmux reachable through the sandbox** | confirmed — `tmux ls` run under the unit's exact properties via `systemd-run` listed the session, and the backend enumerated it within 5s |
+| `--with-bridge` without `MATRIX_BOT_PASSWORD` | refused, naming the variable |
+| Install from the published release | checksum verified, no git required |
+
+The tmux result is the one that mattered most: omitting `PrivateTmp` was a
+judgement call about the socket at `/tmp/tmux-<uid>`, and it is now demonstrated
+rather than argued.
+
 The auto-deploy watcher runs unprivileged and escalates only for
 `systemctl restart`, via `/etc/sudoers.d/agentchat-autodeploy`:
 
