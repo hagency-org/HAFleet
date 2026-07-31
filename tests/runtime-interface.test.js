@@ -54,9 +54,27 @@ describe('runtime contract', () => {
   });
 
   test('emptyPaneListing distinguishes idle from failed', () => {
-    expect(emptyPaneListing(null)).toEqual({ ok: true, panes: [], error: null });
+    expect(emptyPaneListing(null)).toEqual({
+      ok: true, panes: [], error: null, serverUnavailable: false,
+    });
     const err = new Error('boom');
-    expect(emptyPaneListing(err)).toEqual({ ok: false, panes: [], error: err });
+    expect(emptyPaneListing(err)).toEqual({
+      ok: false, panes: [], error: err, serverUnavailable: false,
+    });
+  });
+
+  test('emptyPaneListing distinguishes an unreachable server from an idle one', () => {
+    // Both are ok-with-no-panes, because neither is a fault. But they mean
+    // opposite things to a caller deciding whether an agent has gone away, and
+    // collapsing them made a transient tmux failure look like an idle host — the
+    // backend then marked the whole fleet offline for one sweep and restored it
+    // on the next, flapping 153 times in a single boot on a real host.
+    const idle = emptyPaneListing(null);
+    const unreachable = emptyPaneListing(null, { serverUnavailable: true });
+    expect(idle.ok).toBe(true);
+    expect(unreachable.ok).toBe(true);
+    expect(idle.serverUnavailable).toBe(false);
+    expect(unreachable.serverUnavailable).toBe(true);
   });
 });
 
@@ -125,8 +143,22 @@ describe('tmux runtime', () => {
     ]) {
       const { exec } = fakeExec(() => { throw tmuxError(message); });
       const listing = await createTmuxRuntime({ exec }).listPanes();
-      expect(listing, message).toEqual({ ok: true, panes: [], error: null });
+      // ok, because an idle host is not a fault — but flagged, so the caller can
+      // tell it apart from a reachable server that genuinely has no panes.
+      expect(listing, message).toEqual({
+        ok: true, panes: [], error: null, serverUnavailable: true,
+      });
     }
+  });
+
+  test('a reachable server with no panes is NOT flagged unavailable', async () => {
+    // This is the case where marking agents missing is correct: tmux answered,
+    // and it has nothing running.
+    const { exec } = fakeExec(() => ({ stdout: '' }));
+    const listing = await createTmuxRuntime({ exec }).listPanes();
+    expect(listing).toEqual({
+      ok: true, panes: [], error: null, serverUnavailable: false,
+    });
   });
 
   test('reports a genuine failure as failed', async () => {
