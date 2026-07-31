@@ -1866,6 +1866,40 @@ if [ "$_pane_ready" != true ]; then
   echo "Warning: shell prompt not detected in pane after 10s; sending launch command anyway." >&2
 fi
 
+# Claude asks for confirmation when --dangerously-load-development-channels is
+# passed, and HAFleet passes it deliberately (see the comment where CLAUDE_FLAGS is
+# built: it opts in only the exact local Agent Chat server, and
+# preflight_runtime_approval_adapter refuses to run a managed agent without that
+# channel). Nothing answered the prompt, so every freshly launched Claude agent
+# stalled on it indefinitely while reporting "launched" and "Registered online".
+#
+# The confirmation is not persisted anywhere reachable — ~/.claude.json records
+# hasTrustDialogAccepted but has no equivalent key for this — so it recurs on every
+# launch and pre-seeding is not an option.
+#
+# This waits for the prompt's own text before sending anything. If it never
+# appears, nothing is typed: no keystroke is ever sent speculatively.
+confirm_claude_development_channel() {
+  local marker='I am using this for local development'
+  local waited=0
+  while [ "$waited" -lt 60 ]; do
+    if tmux capture-pane -t "$TMUX_PANE_TARGET" -p 2>/dev/null | grep -qF "$marker"; then
+      echo "  Confirming Claude development-channel prompt (HAFleet passes --dangerously-load-development-channels by design)."
+      tmux send-keys -t "$TMUX_PANE_TARGET" Enter
+      return 0
+    fi
+    # Already past it, or it was never shown: the REPL is up.
+    if tmux capture-pane -t "$TMUX_PANE_TARGET" -p 2>/dev/null | grep -qF 'auto mode on'; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "Warning: neither the development-channel prompt nor a ready Claude prompt appeared within 60s." >&2
+  echo "  Attach to check: tmux attach -t $(shell_quote "$NAME")" >&2
+  return 0
+}
+
 # ── Launch AI ─────────────────────────────────────────────────────────
 if [ "$TYPE" = "claude" ]; then
   INIT_PROMPT="$INIT_PROMPT $CLAUDE_MODE_GUARD"
@@ -1900,6 +1934,7 @@ if [ "$TYPE" = "claude" ]; then
     CLAUDE_LAUNCH_SCRIPT="$TMP_RUNTIME_DIR/launch-claude.sh"
     write_launch_script "$CLAUDE_LAUNCH_SCRIPT" "exec claude --resume $(shell_quote "$RID") $CLAUDE_FLAGS"
     tmux send-keys -t "$TMUX_PANE_TARGET" "exec $(shell_quote "$CLAUDE_LAUNCH_SCRIPT")" Enter
+    confirm_claude_development_channel
   else
     echo "Starting new claude session..."
     # Write init prompt to temp file to avoid shell escaping issues.
@@ -1909,6 +1944,7 @@ if [ "$TYPE" = "claude" ]; then
     CLAUDE_LAUNCH_SCRIPT="$TMP_RUNTIME_DIR/launch-claude.sh"
     write_launch_script "$CLAUDE_LAUNCH_SCRIPT" "claude --session-id $(shell_quote "$SESSION_ID") $CLAUDE_FLAGS -- \"\$(cat $(shell_quote "$INIT_FILE"))\"; status=\$?; rm -f $(shell_quote "$INIT_FILE"); exit \$status"
     tmux send-keys -t "$TMUX_PANE_TARGET" "exec $(shell_quote "$CLAUDE_LAUNCH_SCRIPT")" Enter
+    confirm_claude_development_channel
     ( sleep 300; rm -f "$INIT_FILE" >/dev/null 2>&1 || true ) &
     capture_resume_id_background "claude"
   fi
