@@ -8,7 +8,7 @@
     "command": "hermes",
     "defaultArgs": [],
     "modelFlag": "--model",
-    "permissionSummary": "hermes interactive approval prompts"
+    "permissionSummary": "hermes interactive approval prompts (bypass flags refused)"
   },
   "signals": {
     "comment": "Confirmed by reading cli.py in the upstream checkout. Hermes renders a selection prompt for dangerous commands with the choices Allow once / Allow for this session / Add to permanent allowlist / Deny.",
@@ -36,5 +36,15 @@
   "acp": {
     "comment": "Hermes also ships a full ACP server (hermes-acp, or `hermes acp`) advertising session fork/list/resume. Recorded for when HAFleet grows an ACP runtime; the tmux path above is what is wired today.",
     "command": "hermes-acp"
+  },
+  "guards": {
+    "flags": {
+      "comment": "Hermes prompts for dangerous commands by default, which is the behaviour HAFleet relies on to detect a blocked agent — so it passes no policy args and instead refuses the two flags that would remove the prompt. --safe-mode, --ignore-user-config and --ignore-rules are deliberately NOT guarded: they narrow behaviour or skip context injection, they do not widen permissions.",
+      "exact": [
+        "--yolo",
+        "--accept-hooks"
+      ],
+      "message": "Hermes approval policy flag is managed by agent-chat: {token}"
+    }
   }
 }

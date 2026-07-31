@@ -93,10 +93,30 @@ describe('which guards apply', () => {
     expect(applicableFrameworks('not-a-framework')).toEqual([]);
     expect(validateLaunchExtraArgs('not-a-framework', '--yolo').ok).toBe(true);
     expect(validateLaunchExtraArgs('not-a-framework', '--dangerously-skip-permissions').ok).toBe(true);
-    // And note the shape of the fix: hermes IS registered now, so it no longer
-    // falls in this hole — but it declares no guards of its own, so codex's
-    // --yolo still passes for it. Per-framework guards are the real answer.
-    expect(validateLaunchExtraArgs('hermes', '--yolo').ok).toBe(true);
+    // hermes is registered AND declares its own guards, so it is out of this
+    // hole entirely — see the hermes guard test below.
+    expect(validateLaunchExtraArgs('hermes', '--yolo').ok).toBe(false);
+  });
+});
+
+describe('hermes guards its own bypass flags', () => {
+  // `hermes --help` documents --yolo as "Bypass all dangerous command approval
+  // prompts" and --accept-hooks as auto-approving unseen shell hooks with no TTY
+  // prompt. Those prompts are exactly what HAFleet scrapes for to notice a
+  // blocked agent, so an agent must not be able to turn them off.
+  test.each(['--yolo', '--accept-hooks'])('%s is refused', (flag) => {
+    const result = validateLaunchExtraArgs('hermes', flag);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe(`Hermes approval policy flag is managed by agent-chat: ${flag}`);
+  });
+
+  test.each(['--safe-mode', '--ignore-user-config', '--ignore-rules', '--tui', '-m gpt-5'])(
+    '%s is allowed — it narrows behaviour or skips context, it does not widen permissions',
+    (args) => { expect(validateLaunchExtraArgs('hermes', args).ok).toBe(true); },
+  );
+
+  test('hermes passes no default policy args, because prompting is already the default', () => {
+    expect(defaultLaunchArgs('hermes')).toEqual([]);
   });
 });
 

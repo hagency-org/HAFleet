@@ -2649,10 +2649,8 @@
     "fw": "hermes",
     "input": "--yolo",
     "out": {
-      "ok": true,
-      "tokens": [
-        "--yolo"
-      ]
+      "ok": false,
+      "reason": "Hermes approval policy flag is managed by agent-chat: --yolo"
     }
   },
   {
@@ -2986,11 +2984,8 @@
     "fw": "hermes",
     "input": "--yolo --permission-mode",
     "out": {
-      "ok": true,
-      "tokens": [
-        "--yolo",
-        "--permission-mode"
-      ]
+      "ok": false,
+      "reason": "Hermes approval policy flag is managed by agent-chat: --yolo"
     }
   },
   {
@@ -2998,11 +2993,8 @@
     "fw": "hermes",
     "input": "--permission-mode --yolo",
     "out": {
-      "ok": true,
-      "tokens": [
-        "--permission-mode",
-        "--yolo"
-      ]
+      "ok": false,
+      "reason": "Hermes approval policy flag is managed by agent-chat: --yolo"
     }
   },
   {
@@ -3010,12 +3002,8 @@
     "fw": "hermes",
     "input": "--verbose --yolo --permission-mode",
     "out": {
-      "ok": true,
-      "tokens": [
-        "--verbose",
-        "--yolo",
-        "--permission-mode"
-      ]
+      "ok": false,
+      "reason": "Hermes approval policy flag is managed by agent-chat: --yolo"
     }
   },
   {
@@ -3023,12 +3011,8 @@
     "fw": "hermes",
     "input": "--verbose --permission-mode --yolo",
     "out": {
-      "ok": true,
-      "tokens": [
-        "--verbose",
-        "--permission-mode",
-        "--yolo"
-      ]
+      "ok": false,
+      "reason": "Hermes approval policy flag is managed by agent-chat: --yolo"
     }
   },
   {
@@ -3036,12 +3020,8 @@
     "fw": "hermes",
     "input": "-c unrelated=1 --yolo",
     "out": {
-      "ok": true,
-      "tokens": [
-        "-c",
-        "unrelated=1",
-        "--yolo"
-      ]
+      "ok": false,
+      "reason": "Hermes approval policy flag is managed by agent-chat: --yolo"
     }
   },
   {
@@ -4561,7 +4541,7 @@
     "out": {
       "claude": "auto-mode",
       "codex": "level2 (workspace-write + on-request)",
-      "hermes": "hermes interactive approval prompts"
+      "hermes": "hermes interactive approval prompts (bypass flags refused)"
     }
   }
 ]
