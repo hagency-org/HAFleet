@@ -1747,9 +1747,28 @@ preflight_runtime_approval_adapter() {
   approval_state_dir="$(resolve_agent_state_dir)"
   approval_token_file="$approval_state_dir/agent-token"
   if [ ! -s "$approval_token_file" ]; then
-    echo "Error: owner-approval agent token is unavailable at $approval_token_file." >&2
-    echo "Provision the managed agent identity before starting its coding runtime." >&2
-    return 1
+    # Mint it rather than refusing. This used to fail with "provision the managed
+    # agent identity", an instruction that appears nowhere in the docs and names
+    # no command — while the failing run created the agent home as a side effect,
+    # so running the identical command a second time succeeded. Worse, that first
+    # failure left behind legacy 0.x metadata which then made `up-v1` refuse the
+    # name outright. The token is 32 random bytes at mode 0600, the same thing
+    # lib/supervisor-provisioning.js writes.
+    if ! mkdir -p "$approval_state_dir" 2>/dev/null; then
+      echo "Error: cannot create agent state directory $approval_state_dir" >&2
+      return 1
+    fi
+    chmod 700 "$approval_state_dir" 2>/dev/null || true
+    if ! node -e '
+      const { randomBytes } = require("node:crypto");
+      const { writeFileSync } = require("node:fs");
+      writeFileSync(process.argv[1], randomBytes(32).toString("hex") + "\n", { mode: 0o600 });
+    ' "$approval_token_file" 2>/dev/null; then
+      echo "Error: failed to create the owner-approval agent token at $approval_token_file" >&2
+      return 1
+    fi
+    chmod 600 "$approval_token_file" 2>/dev/null || true
+    echo "  Provisioned agent token: $approval_token_file"
   fi
 
   if [ "$TYPE" = "claude" ]; then

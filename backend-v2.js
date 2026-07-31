@@ -8024,6 +8024,12 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   refreshServerLiveness();
   const agentName = normalizeAgentName(name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  // Agent tokens were read once at startup, so a token minted afterwards — which
+  // is every agent created while the backend is already running — was invisible
+  // until a restart, and with AGENTCHAT_AGENT_TOKEN_MODE=hard every call that
+  // agent made was rejected. Registration is exactly when a new token appears.
+  // loadAgentTokens keeps already-known entries, so this cannot rotate a live one.
+  if (!agentTokens.has(agentName)) loadAgentTokens();
   if (deletedAgentTombstones[agentName]) return res.status(410).json({ error: 'agent permanently deleted', tombstone: deletedAgentTombstones[agentName] });
   const existing = agents[agentName] || {};
   const existingOnline = Boolean(existing.online);
