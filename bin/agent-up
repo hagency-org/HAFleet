@@ -42,6 +42,16 @@ DATA_DIR=""
 SUBCONSCIOUS_SETUP_SCRIPT="$BASE_DIR/scripts/configure-v1-subconscious.js"
 LAUNCH_POLICY_CHECK="$BASE_DIR/scripts/validate-agent-launch-extra-args.js"
 SANDBOX_ROOTS_RESOLVER="$BASE_DIR/scripts/resolve-agent-sandbox-roots.js"
+FRAMEWORK_INFO="$BASE_DIR/scripts/framework-info.js"
+# Read once: the parser consults this per argument, and node startup is not free.
+KNOWN_FRAMEWORK_IDS="$(node "$FRAMEWORK_INFO" ids 2>/dev/null || printf 'claude\ncodex\n')"
+is_known_framework() {
+  local candidate="$1" id
+  for id in $KNOWN_FRAMEWORK_IDS; do
+    [ "$id" = "$candidate" ] && return 0
+  done
+  return 1
+}
 CODEX_APPROVAL_HOOK="$BASE_DIR/lib/codex-permission-hook.js"
 CODEX_HOOK_TRUST_PREFLIGHT="$BASE_DIR/lib/codex-hook-trust.js"
 CODEX_PROJECT_TRUST_HELPER="$BASE_DIR/lib/codex-project-trust.js"
@@ -467,12 +477,15 @@ while [ $# -gt 0 ]; do
       EXTRA_ARGS="$2"
       shift 2
       ;;
-    claude|codex)
-      TYPE="$1"
-      shift
-      ;;
     *)
-      if [ -z "$AGENT_PATH" ]; then
+      # A bare token naming a declared framework is the type. The list comes from
+      # lib/frameworks/, so a new adapter is recognised here without editing this
+      # parser — including one that is declared but not yet launchable, which the
+      # gate below then refuses by name instead of calling it unrecognized.
+      if is_known_framework "$1"; then
+        TYPE="$1"
+        shift
+      elif [ -z "$AGENT_PATH" ]; then
         AGENT_PATH="$1"
         shift
       else
@@ -601,8 +614,17 @@ if [ ! -d "$AGENT_PATH" ]; then
   exit 1
 fi
 
-if [ "$TYPE" != "claude" ] && [ "$TYPE" != "codex" ]; then
-  echo "Error: type must be 'claude' or 'codex', got '$TYPE'" >&2
+if [ ! -f "$FRAMEWORK_INFO" ]; then
+  echo "Error: missing framework registry helper: $FRAMEWORK_INFO" >&2
+  exit 1
+fi
+# Which frameworks can be launched is the registry's call, not a list kept here.
+# lib/frameworks/<id>.json declares launchable:false with a reason for adapters
+# that are described but have no launch branch below yet, so those fail here with
+# that reason rather than falling through and doing something undefined.
+if ! FRAMEWORK_REFUSAL=$(node "$FRAMEWORK_INFO" check "$TYPE" 2>&1); then
+  echo "Error: cannot launch type '$TYPE': ${FRAMEWORK_REFUSAL:-refused by the framework registry}" >&2
+  echo "Launchable types: $(node "$FRAMEWORK_INFO" launchable 2>/dev/null | tr '\n' ' ')" >&2
   exit 1
 fi
 

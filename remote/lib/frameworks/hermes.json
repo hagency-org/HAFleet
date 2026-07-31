@@ -1,0 +1,34 @@
+{
+  "id": "hermes",
+  "displayName": "Hermes",
+  "upstream": "https://github.com/NousResearch/hermes-agent",
+  "launchable": false,
+  "notLaunchableReason": "bin/agent-up has no launch branch for hermes yet; its launch and resume composition is framework-specific (see the claude/codex branches around bin/agent-up:1867-1948)",
+  "launch": {
+    "command": "hermes",
+    "defaultArgs": [],
+    "modelFlag": "--model",
+    "permissionSummary": "hermes interactive approval prompts"
+  },
+  "signals": {
+    "comment": "Confirmed by reading cli.py in the upstream checkout. Hermes renders a selection prompt for dangerous commands with the choices Allow once / Allow for this session / Add to permanent allowlist / Deny.",
+    "blocked": [
+      {
+        "marker": "hermes-dangerous-command",
+        "summary": "Dangerous command awaiting approval",
+        "re": "⚠️\\s+Dangerous Command"
+      },
+      {
+        "marker": "hermes-approval-choices",
+        "summary": "Approval prompt awaiting a choice",
+        "re": "Allow for this session"
+      }
+    ],
+    "compact": [],
+    "compactComment": "Deliberately empty. Hermes compresses context internally (agent.conversation_compression, auto-compress at 50% of the model window) but no user-visible pane string was confirmed. A guessed regex is worse than none: it either never fires, or fires on the wrong line and reports a compaction that did not happen."
+  },
+  "acp": {
+    "comment": "Hermes also ships a full ACP server (hermes-acp, or `hermes acp`) advertising session fork/list/resume. Recorded for when HAFleet grows an ACP runtime; the tmux path above is what is wired today.",
+    "command": "hermes-acp"
+  }
+}

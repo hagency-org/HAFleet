@@ -2509,7 +2509,7 @@
   {
     "k": "defaultLaunchArgs",
     "fw": "hermes",
-    "out": null
+    "out": []
   },
   {
     "k": "validate",
@@ -4560,7 +4560,8 @@
     "k": "summary",
     "out": {
       "claude": "auto-mode",
-      "codex": "level2 (workspace-write + on-request)"
+      "codex": "level2 (workspace-write + on-request)",
+      "hermes": "hermes interactive approval prompts"
     }
   }
 ]

@@ -81,6 +81,7 @@ MANAGED_SPECS=(
   "lib/frameworks/index.js:lib/frameworks/index.js"
   "lib/frameworks/claude.json:lib/frameworks/claude.json"
   "lib/frameworks/codex.json:lib/frameworks/codex.json"
+  "lib/frameworks/hermes.json:lib/frameworks/hermes.json"
   "lib/eventsource-mini.js:lib/eventsource-mini.js"
   "lib/pane-activity.js:lib/pane-activity.js"
   "lib/server-identity.js:lib/server-identity.js"
@@ -92,6 +93,7 @@ MANAGED_SPECS=(
   "lib/codex-project-trust.js:lib/codex-project-trust.js"
   "lib/codex-permission-hook.js:lib/codex-permission-hook.js"
   "scripts/validate-agent-launch-extra-args.js:scripts/validate-agent-launch-extra-args.js"
+  "scripts/framework-info.js:scripts/framework-info.js"
   "scripts/resolve-agent-sandbox-roots.js:scripts/resolve-agent-sandbox-roots.js"
 )
 

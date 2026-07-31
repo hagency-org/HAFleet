@@ -1,19 +1,42 @@
 import { describe, expect, test } from 'vitest';
+import { execFileSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
-  applicableFrameworks, frameworkIds, getFramework, guardViolation, listFrameworks,
+  applicableFrameworks, frameworkIds, getFramework, guardViolation,
+  launchableFrameworkIds, launchBlockedReason, listFrameworks,
 } from '../lib/frameworks/index.js';
 import {
   defaultLaunchArgs, validateLaunchExtraArgs, LAUNCH_PERMISSION_SUMMARY,
 } from '../lib/agent-launch-policy.js';
 
 describe('the registry loads and validates its manifests', () => {
-  test('ships claude and codex, in a stable order', () => {
-    // Order is contractual: it decides nothing today because the two guard sets
-    // are disjoint, but a future adapter could overlap.
-    expect(frameworkIds()).toEqual(['claude', 'codex']);
+  test('ships its adapters in a stable order', () => {
+    // Order is contractual: it decides nothing today because the guard sets are
+    // disjoint, but a future adapter could overlap.
+    expect(frameworkIds()).toEqual(['claude', 'codex', 'hermes']);
+  });
+
+  test('hermes is declared but not launchable, with a stated reason', () => {
+    // Declaring a framework bin/agent-up cannot start must fail loudly at the
+    // gate, not fall through the launch branches and do something undefined.
+    expect(launchableFrameworkIds()).toEqual(['claude', 'codex']);
+    expect(launchBlockedReason('hermes')).toMatch(/no launch branch for hermes/);
+    expect(launchBlockedReason('claude')).toBeNull();
+    expect(launchBlockedReason('nope')).toBe('unknown framework: nope');
+  });
+
+  test('hermes carries the approval signal confirmed from upstream cli.py', () => {
+    const hermes = getFramework('hermes');
+    expect(hermes.signals.blocked.map((s) => s.marker))
+      .toEqual(['hermes-dangerous-command', 'hermes-approval-choices']);
+    expect(hermes.signals.blocked[0].regex.test('  \u26a0\ufe0f  Dangerous Command')).toBe(true);
+    expect(hermes.signals.blocked[1].regex.test('> Allow for this session')).toBe(true);
+    // Deliberately empty: no user-visible compaction string was confirmed, and a
+    // guessed regex either never fires or fires on the wrong line.
+    expect(hermes.signals.compact).toEqual([]);
   });
 
   test('every manifest carries what an operator needs to see', () => {
@@ -28,7 +51,8 @@ describe('the registry loads and validates its manifests', () => {
   test('lookup is case-insensitive and whitespace-tolerant', () => {
     expect(getFramework('CLAUDE')?.id).toBe('claude');
     expect(getFramework('  codex ')?.id).toBe('codex');
-    expect(getFramework('hermes')).toBeNull();
+    expect(getFramework('HERMES')?.id).toBe('hermes');
+    expect(getFramework('nope')).toBeNull();
     expect(getFramework('')).toBeNull();
   });
 
@@ -51,8 +75,8 @@ describe('which guards apply', () => {
 
   test('an unspecified framework gets all of them', () => {
     // Refusing a flag only one framework cares about is harmless; allowing one is not.
-    expect(applicableFrameworks('').map((f) => f.id)).toEqual(['claude', 'codex']);
-    expect(applicableFrameworks(null).map((f) => f.id)).toEqual(['claude', 'codex']);
+    expect(applicableFrameworks('').map((f) => f.id)).toEqual(['claude', 'codex', 'hermes']);
+    expect(applicableFrameworks(null).map((f) => f.id)).toEqual(['claude', 'codex', 'hermes']);
   });
 
   test('KNOWN GAP: an unrecognised framework name gets no guards at all', () => {
@@ -60,9 +84,13 @@ describe('which guards apply', () => {
     // `--framework hermes --extra-args --yolo` is accepted today. Fixing it is a
     // behaviour change and belongs in its own commit; this test exists so the
     // hole is visible and so that fix is a deliberate edit here, not a surprise.
-    expect(applicableFrameworks('hermes')).toEqual([]);
+    expect(applicableFrameworks('not-a-framework')).toEqual([]);
+    expect(validateLaunchExtraArgs('not-a-framework', '--yolo').ok).toBe(true);
+    expect(validateLaunchExtraArgs('not-a-framework', '--dangerously-skip-permissions').ok).toBe(true);
+    // And note the shape of the fix: hermes IS registered now, so it no longer
+    // falls in this hole — but it declares no guards of its own, so codex's
+    // --yolo still passes for it. Per-framework guards are the real answer.
     expect(validateLaunchExtraArgs('hermes', '--yolo').ok).toBe(true);
-    expect(validateLaunchExtraArgs('hermes', '--dangerously-skip-permissions').ok).toBe(true);
   });
 });
 
@@ -135,7 +163,7 @@ describe('the remote package ships everything the adapters need', () => {
   const build = readFileSync('scripts/build-remote-package.sh', 'utf8');
   const managed = [...build.matchAll(/^\s*"([^:"]+):([^"]+)"$/gm)].map((m) => m[1]);
 
-  test.each(['lib/frameworks/index.js', 'lib/frameworks/claude.json', 'lib/frameworks/codex.json'])(
+  test.each(['lib/frameworks/index.js', 'lib/frameworks/claude.json', 'lib/frameworks/codex.json', 'lib/frameworks/hermes.json'])(
     '%s is in MANAGED_SPECS',
     (file) => { expect(managed).toContain(file); },
   );
@@ -153,8 +181,81 @@ describe('the remote package ships everything the adapters need', () => {
   });
 
   test('the synced copy matches source byte for byte', () => {
-    for (const file of ['lib/frameworks/index.js', 'lib/frameworks/claude.json', 'lib/frameworks/codex.json']) {
+    for (const file of ['lib/frameworks/index.js', 'lib/frameworks/claude.json', 'lib/frameworks/codex.json', 'lib/frameworks/hermes.json']) {
       expect(readFileSync(path.join('remote', file), 'utf8'), file).toBe(readFileSync(file, 'utf8'));
     }
+  });
+});
+
+describe('shell callers read the registry instead of their own list', () => {
+  const run = (args) => {
+    try {
+      return { stdout: execFileSync('node', ['scripts/framework-info.js', ...args], { encoding: 'utf-8' }), code: 0, stderr: '' };
+    } catch (error) {
+      return { stdout: error.stdout || '', stderr: error.stderr || '', code: error.status };
+    }
+  };
+
+  test('ids lists every declared framework, launchable or not', () => {
+    expect(run(['ids']).stdout.trim().split('\n')).toEqual(['claude', 'codex', 'hermes']);
+  });
+
+  test('launchable lists only the ones agent-up can start', () => {
+    expect(run(['launchable']).stdout.trim().split('\n')).toEqual(['claude', 'codex']);
+  });
+
+  test.each([
+    ['claude', 0, ''],
+    ['codex', 0, ''],
+    ['hermes', 1, /no launch branch for hermes/],
+    ['nope', 1, /unknown framework: nope/],
+  ])('check %s exits %i', (id, code, stderrMatch) => {
+    const result = run(['check', id]);
+    expect(result.code).toBe(code);
+    if (stderrMatch) expect(result.stderr).toMatch(stderrMatch);
+  });
+
+  test('bad usage exits 2, distinct from a refusal', () => {
+    // agent-up branches on exit status, so "you called me wrong" must not look
+    // like "that framework is not launchable".
+    expect(run(['check']).code).toBe(2);
+    expect(run(['bogus-command']).code).toBe(2);
+  });
+});
+
+describe('bin/agent-up defers to the registry', () => {
+  const source = readFileSync('bin/agent-up', 'utf-8');
+
+  test('no hardcoded claude|codex list remains in the parser or the gate', () => {
+    expect(source).not.toContain('claude|codex)');
+    expect(source).not.toMatch(/type must be 'claude' or 'codex'/);
+  });
+
+  test('it asks the registry, and checks the helper exists before using it', () => {
+    expect(source).toContain('framework-info.js');
+    expect(source).toContain('is_known_framework');
+    // The existence guard must precede the first use, or a missing helper
+    // produces a confusing node error instead of a clear one.
+    expect(source.indexOf('missing framework registry helper'))
+      .toBeLessThan(source.indexOf('FRAMEWORK_INFO" check'));
+  });
+
+  test('a declared-but-unlaunchable framework is refused by name', () => {
+    // Not "unrecognized argument": the parser must recognise hermes as a type so
+    // the gate can explain why it cannot start it.
+    let stderr = '';
+    try {
+      execFileSync('bash', ['bin/agent-up', 'adapter-gate-probe', os.tmpdir(), 'hermes'],
+        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (error) { stderr = error.stderr || ''; }
+    expect(stderr).toMatch(/cannot launch type 'hermes'/);
+    expect(stderr).toMatch(/Launchable types: claude codex/);
+    expect(stderr).not.toMatch(/unrecognized argument/);
+  });
+
+  test('KNOWN GAP: bin/agent-up-v1 still keeps its own list', () => {
+    // Legacy path, deliberately not migrated. Pinned so it is a visible debt
+    // rather than a surprise for whoever adds the next framework.
+    expect(readFileSync('bin/agent-up-v1', 'utf-8')).toContain('claude|codex');
   });
 });
