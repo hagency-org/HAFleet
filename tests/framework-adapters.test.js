@@ -335,17 +335,69 @@ describe('bin/agent-up defers to the registry', () => {
     expect(stderr).not.toMatch(/cannot launch type/);
   });
 
-  test('the hermes branch waits for the REPL instead of guessing', () => {
-    // The stability check this replaced was measured reporting ready ~1s in, on a
-    // pane holding only the echoed launch command.
+  describe('the hermes branch', () => {
     const branch = source.slice(source.indexOf('elif [ "$TYPE" = "hermes" ]'));
     const body = branch.slice(0, branch.indexOf('capture_resume_id_background'));
-    expect(body).toContain('ready-fixed hermes');
-    expect(body).toContain('grep -qF');
-    expect(body).toContain('--cli');
-    // It must refuse to type rather than type into nothing.
-    expect(body).toMatch(/did not appear within 60s/);
-    expect(body).toContain('send-keys');
+
+    test('waits for the input prompt, not for the pane to hold still', () => {
+      // Measured: a stability check reports ready ~1s in on a pane holding only
+      // the echoed launch command, and the pane also goes BLANK part way through
+      // startup — so "unchanged" is true twice before the REPL exists.
+      expect(body).toContain('ready-fixed hermes');
+      expect(body).toContain('grep -qF');
+      expect(body).toContain('--cli');
+      expect(body).toContain('send-keys');
+    });
+
+    test('refuses to type rather than typing into an unknown state', () => {
+      expect(body).toMatch(/did not appear within/);
+      expect(body).toMatch(/exit 1/);
+    });
+
+    test('the skin-dependent marker is overridable', () => {
+      // branding.prompt_symbol in hermes_cli/skin_engine.py is a skin setting, so
+      // a custom skin would otherwise make launch impossible with no way out.
+      expect(body).toContain('AGENTCHAT_HERMES_READY_MARKER');
+      expect(body).toContain('AGENTCHAT_HERMES_READY_TIMEOUT_SEC');
+    });
+
+    test('the failure message tells the operator how to fix it', () => {
+      expect(body).toMatch(/custom Hermes skin/);
+      expect(body).toMatch(/tmux attach/);
+    });
+
+    test('the timeout override is validated before any arithmetic', () => {
+      // Under `set -u` — which agent-up runs with — $(( abc * 2 )) aborts the
+      // whole script with "abc: unbound variable". Measured, not theorised.
+      const guard = body.indexOf('*[!0-9]*');
+      const arithmetic = body.indexOf('HERMES_READY_TIMEOUT * 2');
+      expect(guard).toBeGreaterThan(-1);
+      expect(guard).toBeLessThan(arithmetic);
+      expect(body).toMatch(/-ge 1 \] \|\| HERMES_READY_TIMEOUT=60/);
+    });
+
+    test('hostile timeout overrides fall back instead of aborting or executing', () => {
+      const script = `
+        set -euo pipefail
+        HERMES_READY_TIMEOUT="\${AGENTCHAT_HERMES_READY_TIMEOUT_SEC:-60}"
+        case "$HERMES_READY_TIMEOUT" in
+          ""|*[!0-9]*) HERMES_READY_TIMEOUT=60 ;;
+        esac
+        [ "$HERMES_READY_TIMEOUT" -ge 1 ] || HERMES_READY_TIMEOUT=60
+        echo $(( HERMES_READY_TIMEOUT * 2 ))`;
+      for (const value of ['abc', '-5', '0', '', '7; echo pwned', '9'.repeat(21)]) {
+        const out = execFileSync('bash', ['-c', script], {
+          encoding: 'utf-8',
+          env: { ...process.env, AGENTCHAT_HERMES_READY_TIMEOUT_SEC: value },
+        }).trim();
+        expect(out, `override ${JSON.stringify(value)}`).toBe('120');
+      }
+      // A valid value is still honoured.
+      expect(execFileSync('bash', ['-c', script], {
+        encoding: 'utf-8',
+        env: { ...process.env, AGENTCHAT_HERMES_READY_TIMEOUT_SEC: '5' },
+      }).trim()).toBe('10');
+    });
   });
 
   test('KNOWN GAP: bin/agent-up-v1 still keeps its own list', () => {

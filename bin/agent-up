@@ -2029,9 +2029,30 @@ elif [ "$TYPE" = "hermes" ]; then
     # the typed prompt goes nowhere. This is why bin/agent-up gave up on
     # post-launch typing for Codex.
     # Match a literal, from the manifest, so no regex dialect is assumed here.
-    HERMES_READY=$(node "$FRAMEWORK_INFO" ready-fixed hermes 2>/dev/null || printf '\xe2\x9d\xaf')
+    #
+    # The marker is Hermes's input prompt, which is a SKIN SETTING
+    # (hermes_cli/skin_engine.py: branding.prompt_symbol), not a constant. A
+    # custom skin changes it and this wait would never succeed, so it is
+    # overridable without a code change.
+    #
+    # Timeout is generous because startup time was measured varying from ~3s to
+    # ~20s on an unloaded machine, and the pane goes briefly BLANK part way
+    # through — which is the other reason waiting for the pane to hold still
+    # cannot work here.
+    HERMES_READY="${AGENTCHAT_HERMES_READY_MARKER:-$(node "$FRAMEWORK_INFO" ready-fixed hermes 2>/dev/null || printf '\xe2\x9d\xaf')}"
+    # Validate before any arithmetic: under `set -u` a non-numeric value makes
+    # $(( )) treat it as an unbound variable name and aborts the whole script.
+    HERMES_READY_TIMEOUT="${AGENTCHAT_HERMES_READY_TIMEOUT_SEC:-60}"
+    case "$HERMES_READY_TIMEOUT" in
+      ''|*[!0-9]*)
+        echo "Warning: AGENTCHAT_HERMES_READY_TIMEOUT_SEC is not a positive integer; using 60." >&2
+        HERMES_READY_TIMEOUT=60
+        ;;
+    esac
+    [ "$HERMES_READY_TIMEOUT" -ge 1 ] || HERMES_READY_TIMEOUT=60
+    _hermes_polls=$(( HERMES_READY_TIMEOUT * 2 ))
     _hermes_ready=false
-    for _i in $(seq 1 120); do
+    for _i in $(seq 1 "$_hermes_polls"); do
       if tmux capture-pane -t "$TMUX_PANE_TARGET" -p 2>/dev/null | grep -qF "$HERMES_READY"; then
         _hermes_ready=true
         break
@@ -2039,8 +2060,11 @@ elif [ "$TYPE" = "hermes" ]; then
       sleep 0.5
     done
     if [ "$_hermes_ready" != true ]; then
-      echo "Error: hermes REPL prompt did not appear within 60s; not sending the init prompt." >&2
+      echo "Error: hermes input prompt ($HERMES_READY) did not appear within ${HERMES_READY_TIMEOUT}s." >&2
+      echo "  Not sending the init prompt: it would be typed into an unknown state." >&2
       echo "  The session is running; attach with: tmux attach -t $(shell_quote "$NAME")" >&2
+      echo "  If you use a custom Hermes skin, its prompt symbol differs — set" >&2
+      echo "  AGENTCHAT_HERMES_READY_MARKER to it, or raise AGENTCHAT_HERMES_READY_TIMEOUT_SEC." >&2
       exit 1
     fi
 
