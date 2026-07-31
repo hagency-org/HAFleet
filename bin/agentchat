@@ -87,6 +87,7 @@ case "$cmd" in
   prune-agents) dispatch "agentchat-prune-agents" "$@" ;;
   sync-skills) dispatch "agentchat-sync-skills" "$@" ;;
   reminder|self-time-reminder) dispatch "self-time-reminder" "$@" ;;
+  tell) dispatch "agent-chat-cli" tell "$@" ;;
   cli|admin) dispatch "agent-chat-cli" "$@" ;;
   check-mcp) dispatch "check-mcp" "$@" ;;
   -h|--help|help) usage ;;
