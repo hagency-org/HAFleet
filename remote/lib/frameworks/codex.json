@@ -1,0 +1,35 @@
+{
+  "id": "codex",
+  "displayName": "Codex",
+  "launch": {
+    "command": "codex",
+    "defaultArgs": ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+    "modelFlag": "--model",
+    "permissionSummary": "level2 (workspace-write + on-request)"
+  },
+  "guards": {
+    "flags": {
+      "comment": "Sandbox and approval level are chosen by HAFleet. The patterns cover the clustered short forms (-sfoo, -a=never) that a plain prefix match would miss.",
+      "exact": [
+        "--yolo",
+        "--full-auto",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--sandbox",
+        "-s",
+        "--ask-for-approval",
+        "-a"
+      ],
+      "prefix": ["--sandbox=", "--ask-for-approval="],
+      "pattern": ["^-s(?:=|[^-])", "^-a(?:=|[^-])"],
+      "message": "Codex Level 2 policy flag is managed by agent-chat: {token}"
+    },
+    "config": {
+      "comment": "The same policy can be set through -c/--config, in four spellings: as a separate argument, and inline as --config=K=V, -c=K=V or -cK=V.",
+      "flags": ["-c", "--config"],
+      "inlinePrefix": ["--config=", "-c=", "-c"],
+      "keyPattern": "^(?:approval_policy|sandbox_mode|sandbox_permissions)\\s*=|^(?:[A-Za-z0-9_-]+\\.)+(?:approval_policy|sandbox_mode|sandbox_permissions)\\s*=",
+      "message": "Codex Level 2 config is managed by agent-chat: {key}",
+      "inlineMessage": "Codex Level 2 config is managed by agent-chat"
+    }
+  }
+}

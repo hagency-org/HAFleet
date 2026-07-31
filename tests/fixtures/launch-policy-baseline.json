@@ -1,0 +1,4566 @@
+[
+  {
+    "k": "defaultLaunchArgs",
+    "fw": "claude",
+    "out": [
+      "--permission-mode",
+      "auto"
+    ]
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "   ",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--effort high --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--effort",
+        "high",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--search --enable fast_mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--search",
+        "--enable",
+        "fast_mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--model \"custom model\" --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--model",
+        "custom model",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--model \"unterminated",
+    "out": {
+      "ok": false,
+      "reason": "extraArgs contains an unterminated quote"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --dangerously-skip-permissions"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--allow-dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --allow-dangerously-skip-permissions"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--permission-mode=auto",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode=auto"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--permission-mode auto",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--yolo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--yolo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--full-auto",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--full-auto"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--dangerously-bypass-approvals-and-sandbox",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--dangerously-bypass-approvals-and-sandbox"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--sandbox",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--sandbox"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--sandbox=danger-full-access",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--sandbox=danger-full-access"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-s",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-s"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-s=x",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-s=x"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-sfoo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-sfoo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-should",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-should"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--ask-for-approval",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--ask-for-approval"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--ask-for-approval=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--ask-for-approval=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-a",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-a"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-a=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-a=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-anever",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-anever"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-c approval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "approval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--config approval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "approval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--config=sandbox_mode=danger",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config=sandbox_mode=danger"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-c=sandbox_mode=danger",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c=sandbox_mode=danger"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-capproval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-capproval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-c profiles.x.approval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "profiles.x.approval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-c unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--config unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--verbose --",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--search; touch /tmp/owned",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--x $(id)",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--x `id`",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--x|y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--x&y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--x>y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--x<y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "a\\nb",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--verbose --yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--verbose --permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "-c unrelated=1 --yolo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1",
+        "--yolo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "claude",
+    "input": "--sandbox --dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --dangerously-skip-permissions"
+    }
+  },
+  {
+    "k": "defaultLaunchArgs",
+    "fw": "codex",
+    "out": [
+      "--sandbox",
+      "workspace-write",
+      "--ask-for-approval",
+      "on-request"
+    ]
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "   ",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--effort high --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--effort",
+        "high",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--search --enable fast_mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--search",
+        "--enable",
+        "fast_mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--model \"custom model\" --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--model",
+        "custom model",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--model \"unterminated",
+    "out": {
+      "ok": false,
+      "reason": "extraArgs contains an unterminated quote"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--dangerously-skip-permissions",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--dangerously-skip-permissions"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--allow-dangerously-skip-permissions",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--allow-dangerously-skip-permissions"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--permission-mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--permission-mode=auto",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode=auto"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--permission-mode auto",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode",
+        "auto"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--full-auto",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --full-auto"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--dangerously-bypass-approvals-and-sandbox",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --dangerously-bypass-approvals-and-sandbox"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--sandbox",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--sandbox=danger-full-access",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox=danger-full-access"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-s",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -s"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-s=x",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -s=x"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-sfoo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -sfoo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-should",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -should"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--ask-for-approval",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --ask-for-approval"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--ask-for-approval=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --ask-for-approval=never"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-a",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -a"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-a=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -a=never"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-anever",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -anever"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-c approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--config approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--config=sandbox_mode=danger",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-c=sandbox_mode=danger",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-capproval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-c profiles.x.approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: profiles.x.approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-c unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--config unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--verbose --",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--search; touch /tmp/owned",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--x $(id)",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--x `id`",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--x|y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--x&y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--x>y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--x<y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "a\\nb",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--verbose --yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--verbose --permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "-c unrelated=1 --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "codex",
+    "input": "--sandbox --dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox"
+    }
+  },
+  {
+    "k": "defaultLaunchArgs",
+    "fw": "",
+    "out": null
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "   ",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--effort high --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--effort",
+        "high",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--search --enable fast_mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--search",
+        "--enable",
+        "fast_mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--model \"custom model\" --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--model",
+        "custom model",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--model \"unterminated",
+    "out": {
+      "ok": false,
+      "reason": "extraArgs contains an unterminated quote"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --dangerously-skip-permissions"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--allow-dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --allow-dangerously-skip-permissions"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--permission-mode=auto",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode=auto"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--permission-mode auto",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--full-auto",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --full-auto"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--dangerously-bypass-approvals-and-sandbox",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --dangerously-bypass-approvals-and-sandbox"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--sandbox",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--sandbox=danger-full-access",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox=danger-full-access"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-s",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -s"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-s=x",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -s=x"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-sfoo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -sfoo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-should",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -should"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--ask-for-approval",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --ask-for-approval"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--ask-for-approval=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --ask-for-approval=never"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-a",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -a"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-a=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -a=never"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-anever",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -anever"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-c approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--config approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--config=sandbox_mode=danger",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-c=sandbox_mode=danger",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-capproval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-c profiles.x.approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: profiles.x.approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-c unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--config unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--verbose --",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--search; touch /tmp/owned",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--x $(id)",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--x `id`",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--x|y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--x&y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--x>y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--x<y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "a\\nb",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--verbose --yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--verbose --permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "-c unrelated=1 --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "",
+    "input": "--sandbox --dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox"
+    }
+  },
+  {
+    "k": "defaultLaunchArgs",
+    "fw": "CLAUDE",
+    "out": [
+      "--permission-mode",
+      "auto"
+    ]
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "   ",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--effort high --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--effort",
+        "high",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--search --enable fast_mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--search",
+        "--enable",
+        "fast_mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--model \"custom model\" --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--model",
+        "custom model",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--model \"unterminated",
+    "out": {
+      "ok": false,
+      "reason": "extraArgs contains an unterminated quote"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --dangerously-skip-permissions"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--allow-dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --allow-dangerously-skip-permissions"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--permission-mode=auto",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode=auto"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--permission-mode auto",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--yolo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--yolo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--full-auto",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--full-auto"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--dangerously-bypass-approvals-and-sandbox",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--dangerously-bypass-approvals-and-sandbox"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--sandbox",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--sandbox"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--sandbox=danger-full-access",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--sandbox=danger-full-access"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-s",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-s"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-s=x",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-s=x"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-sfoo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-sfoo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-should",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-should"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--ask-for-approval",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--ask-for-approval"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--ask-for-approval=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--ask-for-approval=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-a",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-a"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-a=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-a=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-anever",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-anever"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-c approval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "approval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--config approval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "approval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--config=sandbox_mode=danger",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config=sandbox_mode=danger"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-c=sandbox_mode=danger",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c=sandbox_mode=danger"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-capproval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-capproval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-c profiles.x.approval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "profiles.x.approval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-c unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--config unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--verbose --",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--search; touch /tmp/owned",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--x $(id)",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--x `id`",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--x|y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--x&y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--x>y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--x<y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "a\\nb",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--verbose --yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--verbose --permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "-c unrelated=1 --yolo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1",
+        "--yolo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "CLAUDE",
+    "input": "--sandbox --dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --dangerously-skip-permissions"
+    }
+  },
+  {
+    "k": "defaultLaunchArgs",
+    "fw": "Codex",
+    "out": [
+      "--sandbox",
+      "workspace-write",
+      "--ask-for-approval",
+      "on-request"
+    ]
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "   ",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--effort high --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--effort",
+        "high",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--search --enable fast_mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--search",
+        "--enable",
+        "fast_mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--model \"custom model\" --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--model",
+        "custom model",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--model \"unterminated",
+    "out": {
+      "ok": false,
+      "reason": "extraArgs contains an unterminated quote"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--dangerously-skip-permissions",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--dangerously-skip-permissions"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--allow-dangerously-skip-permissions",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--allow-dangerously-skip-permissions"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--permission-mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--permission-mode=auto",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode=auto"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--permission-mode auto",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode",
+        "auto"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--full-auto",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --full-auto"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--dangerously-bypass-approvals-and-sandbox",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --dangerously-bypass-approvals-and-sandbox"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--sandbox",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--sandbox=danger-full-access",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox=danger-full-access"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-s",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -s"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-s=x",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -s=x"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-sfoo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -sfoo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-should",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -should"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--ask-for-approval",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --ask-for-approval"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--ask-for-approval=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --ask-for-approval=never"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-a",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -a"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-a=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -a=never"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-anever",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -anever"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-c approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--config approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--config=sandbox_mode=danger",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-c=sandbox_mode=danger",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-capproval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-c profiles.x.approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: profiles.x.approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-c unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--config unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--verbose --",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--search; touch /tmp/owned",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--x $(id)",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--x `id`",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--x|y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--x&y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--x>y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--x<y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "a\\nb",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--verbose --yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--verbose --permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "-c unrelated=1 --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "Codex",
+    "input": "--sandbox --dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox"
+    }
+  },
+  {
+    "k": "defaultLaunchArgs",
+    "fw": "hermes",
+    "out": null
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "   ",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--effort high --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--effort",
+        "high",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--search --enable fast_mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--search",
+        "--enable",
+        "fast_mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--model \"custom model\" --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--model",
+        "custom model",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--model \"unterminated",
+    "out": {
+      "ok": false,
+      "reason": "extraArgs contains an unterminated quote"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--dangerously-skip-permissions",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--dangerously-skip-permissions"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--allow-dangerously-skip-permissions",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--allow-dangerously-skip-permissions"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--permission-mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--permission-mode=auto",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode=auto"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--permission-mode auto",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode",
+        "auto"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--yolo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--yolo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--full-auto",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--full-auto"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--dangerously-bypass-approvals-and-sandbox",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--dangerously-bypass-approvals-and-sandbox"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--sandbox",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--sandbox"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--sandbox=danger-full-access",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--sandbox=danger-full-access"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-s",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-s"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-s=x",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-s=x"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-sfoo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-sfoo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-should",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-should"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--ask-for-approval",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--ask-for-approval"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--ask-for-approval=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--ask-for-approval=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-a",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-a"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-a=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-a=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-anever",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-anever"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-c approval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "approval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--config approval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "approval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--config=sandbox_mode=danger",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config=sandbox_mode=danger"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-c=sandbox_mode=danger",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c=sandbox_mode=danger"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-capproval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-capproval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-c profiles.x.approval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "profiles.x.approval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-c unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--config unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--verbose --",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--search; touch /tmp/owned",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--x $(id)",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--x `id`",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--x|y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--x&y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--x>y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--x<y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "a\\nb",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--yolo --permission-mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--yolo",
+        "--permission-mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--permission-mode --yolo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode",
+        "--yolo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--verbose --yolo --permission-mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose",
+        "--yolo",
+        "--permission-mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--verbose --permission-mode --yolo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose",
+        "--permission-mode",
+        "--yolo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "-c unrelated=1 --yolo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1",
+        "--yolo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "hermes",
+    "input": "--sandbox --dangerously-skip-permissions",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--sandbox",
+        "--dangerously-skip-permissions"
+      ]
+    }
+  },
+  {
+    "k": "defaultLaunchArgs",
+    "fw": "octos",
+    "out": null
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "   ",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--effort high --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--effort",
+        "high",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--search --enable fast_mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--search",
+        "--enable",
+        "fast_mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--model \"custom model\" --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--model",
+        "custom model",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--model \"unterminated",
+    "out": {
+      "ok": false,
+      "reason": "extraArgs contains an unterminated quote"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--dangerously-skip-permissions",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--dangerously-skip-permissions"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--allow-dangerously-skip-permissions",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--allow-dangerously-skip-permissions"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--permission-mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--permission-mode=auto",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode=auto"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--permission-mode auto",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode",
+        "auto"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--yolo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--yolo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--full-auto",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--full-auto"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--dangerously-bypass-approvals-and-sandbox",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--dangerously-bypass-approvals-and-sandbox"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--sandbox",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--sandbox"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--sandbox=danger-full-access",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--sandbox=danger-full-access"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-s",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-s"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-s=x",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-s=x"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-sfoo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-sfoo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-should",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-should"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--ask-for-approval",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--ask-for-approval"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--ask-for-approval=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--ask-for-approval=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-a",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-a"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-a=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-a=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-anever",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-anever"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-c approval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "approval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--config approval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "approval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--config=sandbox_mode=danger",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config=sandbox_mode=danger"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-c=sandbox_mode=danger",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c=sandbox_mode=danger"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-capproval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-capproval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-c profiles.x.approval_policy=never",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "profiles.x.approval_policy=never"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-c unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--config unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--verbose --",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--search; touch /tmp/owned",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--x $(id)",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--x `id`",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--x|y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--x&y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--x>y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--x<y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "a\\nb",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--yolo --permission-mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--yolo",
+        "--permission-mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--permission-mode --yolo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--permission-mode",
+        "--yolo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--verbose --yolo --permission-mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose",
+        "--yolo",
+        "--permission-mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--verbose --permission-mode --yolo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose",
+        "--permission-mode",
+        "--yolo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "-c unrelated=1 --yolo",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1",
+        "--yolo"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "octos",
+    "input": "--sandbox --dangerously-skip-permissions",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--sandbox",
+        "--dangerously-skip-permissions"
+      ]
+    }
+  },
+  {
+    "k": "defaultLaunchArgs",
+    "fw": "null",
+    "out": null
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "   ",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--effort high --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--effort",
+        "high",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--search --enable fast_mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--search",
+        "--enable",
+        "fast_mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--model \"custom model\" --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--model",
+        "custom model",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--model \"unterminated",
+    "out": {
+      "ok": false,
+      "reason": "extraArgs contains an unterminated quote"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --dangerously-skip-permissions"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--allow-dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --allow-dangerously-skip-permissions"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--permission-mode=auto",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode=auto"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--permission-mode auto",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--full-auto",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --full-auto"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--dangerously-bypass-approvals-and-sandbox",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --dangerously-bypass-approvals-and-sandbox"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--sandbox",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--sandbox=danger-full-access",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox=danger-full-access"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-s",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -s"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-s=x",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -s=x"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-sfoo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -sfoo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-should",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -should"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--ask-for-approval",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --ask-for-approval"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--ask-for-approval=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --ask-for-approval=never"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-a",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -a"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-a=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -a=never"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-anever",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -anever"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-c approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--config approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--config=sandbox_mode=danger",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-c=sandbox_mode=danger",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-capproval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-c profiles.x.approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: profiles.x.approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-c unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--config unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--verbose --",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--search; touch /tmp/owned",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--x $(id)",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--x `id`",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--x|y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--x&y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--x>y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--x<y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "a\\nb",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--verbose --yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--verbose --permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "-c unrelated=1 --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "null",
+    "input": "--sandbox --dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox"
+    }
+  },
+  {
+    "k": "defaultLaunchArgs",
+    "fw": "undefined",
+    "out": null
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "   ",
+    "out": {
+      "ok": true,
+      "tokens": []
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--effort high --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--effort",
+        "high",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--search --enable fast_mode",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--search",
+        "--enable",
+        "fast_mode"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--model \"custom model\" --verbose",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--model",
+        "custom model",
+        "--verbose"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--model \"unterminated",
+    "out": {
+      "ok": false,
+      "reason": "extraArgs contains an unterminated quote"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --dangerously-skip-permissions"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--allow-dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --allow-dangerously-skip-permissions"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--permission-mode=auto",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode=auto"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--permission-mode auto",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--full-auto",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --full-auto"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--dangerously-bypass-approvals-and-sandbox",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --dangerously-bypass-approvals-and-sandbox"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--sandbox",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--sandbox=danger-full-access",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox=danger-full-access"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-s",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -s"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-s=x",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -s=x"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-sfoo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -sfoo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-should",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -should"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--ask-for-approval",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --ask-for-approval"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--ask-for-approval=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --ask-for-approval=never"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-a",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -a"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-a=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -a=never"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-anever",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: -anever"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-c approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--config approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--config=sandbox_mode=danger",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-c=sandbox_mode=danger",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-capproval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-c profiles.x.approval_policy=never",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 config is managed by agent-chat: profiles.x.approval_policy"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-c unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "-c",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--config unrelated=1",
+    "out": {
+      "ok": true,
+      "tokens": [
+        "--config",
+        "unrelated=1"
+      ]
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--verbose --",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--",
+    "out": {
+      "ok": false,
+      "reason": "the launch argument delimiter is managed by agent-chat"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--search; touch /tmp/owned",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--x $(id)",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--x `id`",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--x|y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--x&y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--x>y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--x<y",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "a\\nb",
+    "out": {
+      "ok": false,
+      "reason": "shell metacharacters are not allowed in extraArgs"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--verbose --yolo --permission-mode",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--verbose --permission-mode --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Claude permission policy flag is managed by agent-chat: --permission-mode"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "-c unrelated=1 --yolo",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --yolo"
+    }
+  },
+  {
+    "k": "validate",
+    "fw": "undefined",
+    "input": "--sandbox --dangerously-skip-permissions",
+    "out": {
+      "ok": false,
+      "reason": "Codex Level 2 policy flag is managed by agent-chat: --sandbox"
+    }
+  },
+  {
+    "k": "summary",
+    "out": {
+      "claude": "auto-mode",
+      "codex": "level2 (workspace-write + on-request)"
+    }
+  }
+]
