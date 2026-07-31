@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 MIRROR_FILES=(
   "bin/hafleet-prune-agents"
-  "bin/hafleet"
+  "bin/hafleet-legacy"
   "bin/hafleet-cli"
   "bin/hafleet-down"
   "bin/hafleet-ls"

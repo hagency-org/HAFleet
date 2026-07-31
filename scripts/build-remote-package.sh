@@ -65,7 +65,7 @@ MANAGED_SPECS=(
   "remote/mcp-server.js:mcp-server.js"
   "remote/bin/hafleet:bin/hafleet"
   "bin/hafleet-prune-agents:bin/hafleet-prune-agents"
-  "bin/hafleet:bin/hafleet"
+  "bin/hafleet-legacy:bin/hafleet-legacy"
   "bin/hafleet-cli:bin/hafleet-cli"
   "bin/hafleet-down:bin/hafleet-down"
   "bin/hafleet-ls:bin/hafleet-ls"
