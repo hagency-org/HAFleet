@@ -20,6 +20,7 @@ fi
 #   list-groups                                  List all groups
 #   group <name>                                 Show group details
 #   list-agents                                  List all agents
+#   tell <agent> <message>                       Message an agent as the operator
 #   status [name]                                Show status table or one agent status
 #   fleet [--expect-version <sha>] [--json]      Show remote fleet version inventory
 #   agent <name>                                 Show agent details
@@ -540,6 +541,29 @@ PY
       -d "{\"identity\":$(_json_str "$text")}" | python3 -m json.tool
     ;;
 
+  tell)
+    # Operator -> agent messaging. Until now a human had no way to message an
+    # agent at all: `agentchat send` types directly into a pane and refuses
+    # outside tmux ("not running inside a tmux session") because it exists for
+    # agent-to-agent use, and POST /api/messages rejects any sender that is not a
+    # registered agent ("sender agent not registered: operator"). The backend has
+    # always exempted the sender name "system"; nothing exposed it.
+    _require_token
+    agent="${1:?Usage: agent-chat-cli tell <agent> <message>}"
+    shift
+    message="$*"
+    if [ -z "${message// }" ]; then
+      echo "Usage: agent-chat-cli tell <agent> <message>" >&2
+      exit 1
+    fi
+    # Summary is what shows in listings; keep it short, put the whole text in full.
+    summary="$(printf '%s' "$message" | cut -c1-72)"
+    _curl -X POST "$API/api/messages" \
+      -H 'Content-Type: application/json' \
+      -d "{\"from\":\"system\",\"to\":$(_json_str "$agent"),\"type\":\"task\",\"summary\":$(_json_str "$summary"),\"full\":$(_json_str "$message")}" \
+      | python3 -m json.tool
+    ;;
+
   dm)
     _require_token
     agent="${1:?Usage: agent-chat-cli dm <agent> <human>}"
@@ -592,6 +616,9 @@ PY
     echo "  agent <name>                        Agent details"
     echo "  identity <name> <text>              Set agent identity"
     echo "  avatar <name> [image|--force]       Set avatar (custom image; auto-gen may be disabled)"
+    echo ""
+    echo "Messaging:"
+    echo "  tell <agent> <message>              Send a message to an agent as the operator"
     echo ""
     echo "DM management:"
     echo "  dm <agent> <human>                  Ensure DM room exists (Matrix)"
