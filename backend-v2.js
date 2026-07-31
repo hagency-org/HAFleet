@@ -6946,7 +6946,24 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
     });
     if (!ensured) continue;
     const agent = ensured.agent;
-    if (ensured.created) agentsChanged = true;
+    if (ensured.created) {
+      agentsChanged = true;
+      // Adopting a session as an agent was completely silent, so a tmux session
+      // that had nothing to do with HAFleet became a permanent agent record with
+      // no trace of when or why. A throwaway session created to check something
+      // by hand was adopted within one heartbeat and outlived the session itself.
+      // Say so, and record it where an operator will actually see it.
+      console.warn(`[backend] adopted tmux session as a new agent: ${name} (server=${serverId})`);
+      emitSystemInfo(
+        `Adopted tmux session '${name}' as an agent`,
+        `Server '${serverId}' reported session '${name}', which had no agent record, so one was created. `
+          + 'HAFleet can now type into that pane. If it does not belong to HAFleet, add it to '
+          + 'AGENT_CHAT_SESSION_DENYLIST (or set AGENT_CHAT_SESSION_ALLOWLIST) and remove the record with '
+          + 'bin/agentchat-prune-agents.',
+        'agent_adopted',
+        { dedupeKey: `agent_adopted:${serverId}:${name}` }
+      );
+    }
     if (!isAgentRecord(agent)) {
       agent.kind = 'agent';
       if (!Number(agent.registeredAt)) agent.registeredAt = now;
