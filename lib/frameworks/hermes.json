@@ -24,8 +24,14 @@
         "re": "Allow for this session"
       }
     ],
-    "compact": [],
-    "compactComment": "Deliberately empty. Hermes compresses context internally (agent.conversation_compression, auto-compress at 50% of the model window) but no user-visible pane string was confirmed. A guessed regex is worse than none: it either never fires, or fires on the wrong line and reports a compaction that did not happen."
+    "compact": [
+      {
+        "marker": "hermes-context-compacted",
+        "summary": "Compacting context",
+        "re": "⟳\\s*compacting context"
+      }
+    ],
+    "compactComment": "Confirmed at agent/conversation_loop.py:4770 — agent._safe_print(\"  ⟳ compacting context…\"). Note that _build_compact_banner in cli.py is NOT this: it sizes a startup banner to the terminal width. The ellipsis is deliberately outside the pattern so a change in how it is rendered does not break the match."
   },
   "acp": {
     "comment": "Hermes also ships a full ACP server (hermes-acp, or `hermes acp`) advertising session fork/list/resume. Recorded for when HAFleet grows an ACP runtime; the tmux path above is what is wired today.",

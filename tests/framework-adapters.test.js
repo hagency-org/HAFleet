@@ -34,9 +34,15 @@ describe('the registry loads and validates its manifests', () => {
       .toEqual(['hermes-dangerous-command', 'hermes-approval-choices']);
     expect(hermes.signals.blocked[0].regex.test('  \u26a0\ufe0f  Dangerous Command')).toBe(true);
     expect(hermes.signals.blocked[1].regex.test('> Allow for this session')).toBe(true);
-    // Deliberately empty: no user-visible compaction string was confirmed, and a
-    // guessed regex either never fires or fires on the wrong line.
-    expect(hermes.signals.compact).toEqual([]);
+    // Confirmed at agent/conversation_loop.py:4770 in the upstream checkout:
+    // agent._safe_print("  \u27f3 compacting context\u2026")
+    expect(hermes.signals.compact.map((s) => s.marker)).toEqual(['hermes-context-compacted']);
+    const compact = hermes.signals.compact[0].regex;
+    expect(compact.test('  \u27f3 compacting context\u2026')).toBe(true);
+    // Must NOT fire on the two lines that look like matches but are not: one
+    // sizes a startup banner, the other is prose inside a system prompt.
+    expect(compact.test('def _build_compact_banner() -> str:')).toBe(false);
+    expect(compact.test(' \u2014 keep entries compact and high-signal.')).toBe(false);
   });
 
   test('every manifest carries what an operator needs to see', () => {
