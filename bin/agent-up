@@ -1343,6 +1343,19 @@ ensure_codex_project_trust
 # ── Generate per-agent .mcp.json ──────────────────────────────────────
 # Bake all required env vars into .mcp.json for Claude Code agents.
 # (Codex agents use -c flags instead — see Codex launch section below.)
+# The agent's state directory, where <state>/agent-token lives.
+#
+# Metadata only carries an explicit state dir for v1 agents (`up-v1`). For an
+# agent created by plain `agentchat up` it is empty, and callers that treated
+# "empty" as "omit the variable" left the MCP server unable to find the token —
+# so with AGENTCHAT_AGENT_TOKEN_MODE=hard every call the agent made was rejected
+# and its inbox never drained, with nothing said in the agent's own pane.
+# Derived in one place so the MCP config, the Codex env injection and the token
+# preflight cannot disagree about where the token is.
+resolve_agent_state_dir() {
+  printf '%s' "${SAVED_STATE_DIR:-${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}/agents/agent_${NAME}/state}"
+}
+
 ensure_agent_mcp_config() {
   local mcp_json="$AGENT_PATH/.mcp.json"
   local mcp_server_js="$BASE_DIR/mcp-server.js"
@@ -1350,7 +1363,8 @@ ensure_agent_mcp_config() {
     echo "Warning: mcp-server.js not found at $mcp_server_js, skipping .mcp.json generation" >&2
     return
   fi
-  local state_dir="${SAVED_STATE_DIR:-}"
+  local state_dir
+  state_dir="$(resolve_agent_state_dir)"
   MCP_JSON="$mcp_json" MCP_SERVER_JS="$mcp_server_js" MCP_SERVER_NAME="$MCP_SERVER_NAME" \
     AGENT_NAME_VAL="$NAME" BACKEND_URL="$BACKEND_URL" BACKEND_PORT="$BACKEND_PORT" \
     SERVER_ID="$SERVER_ID" STATE_DIR="$state_dir" \
@@ -1730,7 +1744,7 @@ PY
 
 preflight_runtime_approval_adapter() {
   local approval_state_dir approval_token_file
-  approval_state_dir="${SAVED_STATE_DIR:-${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}/agents/agent_${NAME}/state}"
+  approval_state_dir="$(resolve_agent_state_dir)"
   approval_token_file="$approval_state_dir/agent-token"
   if [ ! -s "$approval_token_file" ]; then
     echo "Error: owner-approval agent token is unavailable at $approval_token_file." >&2
@@ -1935,9 +1949,7 @@ process.stdout.write(prepared.hookToml);
   if [ -n "$SERVER_ID" ]; then
     codex_mcp_env AGENT_CHAT_SERVER "$SERVER_ID"
   fi
-  if [ -n "${SAVED_STATE_DIR:-}" ]; then
-    codex_mcp_env AGENTCHAT_AGENT_STATE_DIR "$SAVED_STATE_DIR"
-  fi
+  codex_mcp_env AGENTCHAT_AGENT_STATE_DIR "$(resolve_agent_state_dir)"
   if [ -n "$RUNTIME_DIR" ]; then
     codex_mcp_env AGENT_CHAT_RUNTIME_DIR "$RUNTIME_DIR"
   fi

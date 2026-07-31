@@ -83,13 +83,26 @@ start with a minimal environment.
 Missing prerequisites (`node >= 22`, `tmux`) are installed with Homebrew unless
 you pass `--skip-brew`.
 
+### Where the logs are
+
+Each service writes its own stdout and stderr to `data/services-local/logs/<service>.log`.
+The launchd `StandardErrorPath` (`logs/launchd.err.log`) receives only the
+supervisor's output and is normally **empty**, because the supervisor spawns each
+service with `stdio: ['ignore', logFd, logFd]` pointing at the per-service file.
+
+This cost real debugging time: a backend logging `[auth] agent-token token
+required but not provided` 199 times looked like a silent service, because the
+file the installer named was 0 bytes. `agentchat-services status` and `doctor`
+now print the correct path.
+
 ### Managing it
 
 ```bash
 node services/agentchat-services.mjs status --profile services-macos.json
 node services/agentchat-services.mjs doctor --profile services-macos.json
 launchctl bootout gui/$(id -u)/io.hafleet.services      # stop
-tail -50 logs/launchd.err.log
+tail -50 data/services-local/logs/backend.log   # per-service stdout/stderr
+tail -50 logs/launchd.err.log                   # supervisor only, usually empty
 ```
 
 ## Which tmux sessions HAFleet manages

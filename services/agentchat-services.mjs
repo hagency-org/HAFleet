@@ -19,6 +19,7 @@ import {
   LocalServiceSupervisor,
   diagnoseServices,
   readServiceStatus,
+  statePaths,
 } from '../src/local-service-supervisor.mjs';
 import { loadServiceProfile } from '../src/service-profile.mjs';
 import {
@@ -66,12 +67,14 @@ function parseArgs(argv) {
 }
 
 function runtimePaths(runtimeRoot) {
-  const dir = path.join(runtimeRoot, 'data', 'services-local');
+  // stateDir/statePath/logDir come from the supervisor so the two cannot drift.
+  const { stateDir: dir, statePath, logDir } = statePaths(runtimeRoot);
   return {
     dir,
+    statePath,
+    logDir,
     pidPath: path.join(dir, 'supervisor.pid.json'),
     logPath: path.join(dir, 'supervisor.log'),
-    statePath: path.join(dir, 'state.json'),
     startLockPath: path.join(dir, 'start.lock.json'),
   };
 }
@@ -181,6 +184,18 @@ function output(value, json) {
   }
   if (Array.isArray(value.failures)) {
     for (const failure of value.failures) process.stdout.write(`failure\t${failure.name}\t${failure.cause}\n`);
+  }
+  // Each service's stdout and stderr go to its own file under the runtime state
+  // directory, NOT to the launchd/systemd log the installer prints. Nothing used
+  // to say so, which meant the one place a diagnosis lives was undiscoverable
+  // without reading _spawnService in src/local-service-supervisor.mjs.
+  if (value.logDir) {
+    process.stdout.write(`\nservice logs: ${value.logDir}/<service>.log\n`);
+    if (Array.isArray(value.services) && value.services.length) {
+      const unhealthy = value.services.filter((s) => !s.healthy).map((s) => s.name);
+      const suggest = unhealthy.length ? unhealthy : value.services.map((s) => s.name);
+      process.stdout.write(`  tail -50 ${value.logDir}/${suggest[0]}.log\n`);
+    }
   }
 }
 
@@ -315,6 +330,7 @@ async function main() {
   } else {
     result = await stopDetached({ profile, runtimeRoot: options.runtimeRoot, paths });
   }
+  if (result && typeof result === 'object' && !result.logDir) result.logDir = paths.logDir;
   output(result, options.json);
   if ((options.command === 'status' || options.command === 'doctor') && !result.ok) process.exitCode = 1;
 }

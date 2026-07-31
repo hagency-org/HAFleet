@@ -411,7 +411,8 @@ verify() {
   done
   if [ "$ok" != true ]; then
     log "Backend did not become healthy. Diagnose with:"
-    log "  tail -50 $INSTALL_DIR/logs/launchd.err.log"
+    log "  tail -50 $INSTALL_DIR/data/services-local/logs/backend.log"
+    log "  (launchd.err.log only carries the supervisor's own output, usually empty)"
     log "  node services/agentchat-services.mjs doctor --profile $PROFILE_FILE"
     die "verification failed"
   fi
@@ -462,7 +463,8 @@ main() {
   log "  status:  node services/agentchat-services.mjs status --profile $PROFILE_FILE"
   log "  doctor:  node services/agentchat-services.mjs doctor  --profile $PROFILE_FILE"
   log "  stop:    launchctl bootout $LAUNCHD_DOMAIN/$SERVICE_NAME"
-  log "  logs:    $INSTALL_DIR/logs/launchd.err.log"
+  log "  logs:    $INSTALL_DIR/data/services-local/logs/<service>.log"
+  log "           each service writes its own; launchd.err.log holds only the supervisor"
 }
 
 main "$@"

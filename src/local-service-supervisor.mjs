@@ -201,7 +201,10 @@ async function buildStatus(profile, records, env, { supervisorHealthy = true, ru
   };
 }
 
-function statePaths(runtimeRoot) {
+// Exported so callers cannot keep a second copy. The services CLI derived its
+// own set and simply had no logDir, which is why nothing ever told an operator
+// where a service's stdout actually goes.
+export function statePaths(runtimeRoot) {
   const stateDir = path.join(path.resolve(runtimeRoot), 'data', 'services-local');
   return {
     stateDir,
