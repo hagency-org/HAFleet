@@ -6213,18 +6213,6 @@ async function sweepLocalActivityDurations(paneMetadataSnapshotOverride = null) 
   const pruneCandidates = new Set();
   const localRuntimeAgents = new Set();
   const paneMetadataSnapshot = paneMetadataSnapshotOverride || await buildLocalPaneMetadataSnapshotAsync();
-  // A reachable-but-idle tmux legitimately reports zero panes, and every agent
-  // should then go missing. An UNREACHABLE tmux reports the same thing, and
-  // acting on it marks the whole fleet offline for one sweep and back online on
-  // the next — measured flapping 153 times in a single boot on a real host.
-  // Preserve state instead, exactly as for a failed snapshot.
-  if (paneMetadataSnapshot?.serverUnavailable === true) {
-    if ((nowMs - localTmuxSnapshotWarnAt) >= 60_000) {
-      localTmuxSnapshotWarnAt = nowMs;
-      console.warn('[backend] tmux server not reachable; preserving agent state rather than marking the fleet offline');
-    }
-    return;
-  }
   if (paneMetadataSnapshot?.ok !== true) {
     if ((nowMs - localTmuxSnapshotWarnAt) >= 60_000) {
       localTmuxSnapshotWarnAt = nowMs;
