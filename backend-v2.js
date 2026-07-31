@@ -6091,6 +6091,10 @@ async function buildLocalPaneMetadataSnapshotAsync(runExecFile = null) {
     error: null,
     // Propagated so the sweep can tell "tmux was unreachable" from "tmux is idle".
     serverUnavailable: listing.serverUnavailable === true,
+    // How many panes tmux reported before the session policy filtered them.
+    // Without this an empty snapshot is ambiguous between "tmux returned nothing"
+    // and "policy excluded everything", which are very different faults.
+    rawPaneCount: listing.panes.length,
   };
 }
 
@@ -6349,6 +6353,7 @@ async function sweepLocalActivityDurations(paneMetadataSnapshotOverride = null) 
         // transition once, with what the snapshot actually held, so the next
         // person does not have to reverse-engineer the sweep to find out.
         console.warn(`[backend] agent marked tmux-missing: agent=${agent.name} target=${tmuxTarget} `
+          + `rawPanes=${paneMetadataSnapshot.rawPaneCount ?? '?'} `
           + `snapshotSessions=${JSON.stringify([...paneSnapshotMap.keys()])} misses=${missing.misses}`);
       }
       if (!wasManualDown
