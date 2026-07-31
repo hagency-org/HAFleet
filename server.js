@@ -1191,10 +1191,23 @@ function trimTrailingBlankLines(text) {
   return lines.join('\n');
 }
 
+// Which sessions may be read through this dashboard. The session policy governed
+// agent management but not this route, so a pane belonging to an excluded session
+// could still be read in full — 500 lines of scrollback, and GET is exempt from
+// the dashboard's auth boundary, so no credential was needed either. On a host
+// where the denylist exists specifically to keep HAFleet away from someone else's
+// work, that made the exclusion partial.
+const capturePolicy = sessionPolicyFromEnv();
+
 app.get('/api/tmux/capture/:session', async (req, res) => {
   const session = req.params.session;
   if (!/^[\w\-:.]+$/.test(session)) {
     return res.status(400).type('text').send('invalid session name');
+  }
+  // A session this install may not manage may not be read either.
+  const verdict = capturePolicy.evaluate(session.split(':', 1)[0]);
+  if (!verdict.allowed) {
+    return res.status(403).type('text').send(`session excluded by policy: ${verdict.reason}`);
   }
   const serverName = req.query.server || '';
   const sshConf = serverName ? serverSshConfig[serverName] : null;
@@ -3033,6 +3046,7 @@ let lastPaneListObservation = {
 };
 
 import { createHash } from 'crypto';
+import { sessionPolicyFromEnv } from './lib/session-policy.js';
 
 function formatPaneObservationError(e) {
   const stderr = (e && e.stderr) ? String(e.stderr).trim() : '';

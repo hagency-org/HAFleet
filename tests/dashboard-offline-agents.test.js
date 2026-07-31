@@ -53,3 +53,45 @@ describe('/api/agents/status reports offline agents instead of hiding them', () 
     expect(handler).toContain('const alive = idleMs >= 0');
   });
 });
+
+describe('pane capture honours the session policy', () => {
+  // GET /api/tmux/capture/:session ran `tmux capture-pane -p -S -500` on any
+  // session name matching [\w\-:.]+. The session policy governed agent management
+  // but not this route, and GET is exempt from the dashboard's auth boundary — so
+  // on a host where the denylist exists to keep HAFleet away from someone else's
+  // work, 500 lines of that work were readable with no credential. Verified by
+  // pulling an excluded pane's contents over the LAN before this was fixed.
+  const handler = (() => {
+    const start = source.indexOf("app.get('/api/tmux/capture/:session'");
+    expect(start).toBeGreaterThan(-1);
+    return source.slice(start, source.indexOf('\n});', start));
+  })();
+
+  test('the policy is consulted', () => {
+    expect(handler).toContain('capturePolicy.evaluate');
+  });
+
+  test('an excluded session is refused with 403 and a reason', () => {
+    expect(handler).toMatch(/status\(403\)/);
+    expect(handler).toContain('session excluded by policy');
+    expect(handler).toContain('verdict.reason');
+  });
+
+  test('the check runs before any capture is attempted', () => {
+    const guard = handler.indexOf('capturePolicy.evaluate');
+    const capture = handler.indexOf('capture-pane');
+    expect(guard).toBeGreaterThan(-1);
+    expect(capture).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(capture);
+  });
+
+  test('the session name is taken before any window/pane suffix', () => {
+    // 'ps2:0.0' must be evaluated as 'ps2', or a suffix would bypass the denylist.
+    expect(handler).toMatch(/session\.split\(':', 1\)\[0\]/);
+  });
+
+  test('the policy comes from the environment, like the backend and relay', () => {
+    expect(source).toContain("import { sessionPolicyFromEnv } from './lib/session-policy.js'");
+    expect(source).toContain('const capturePolicy = sessionPolicyFromEnv()');
+  });
+});
