@@ -6324,6 +6324,13 @@ async function sweepLocalActivityDurations(paneMetadataSnapshotOverride = null) 
       if (agent.online !== prevOnline) { agentsChanged = true; transitioned = true; }
       if (transitioned) {
         agent.lastSeen = nowMs;
+        // Marking an agent tmux-missing used to be entirely silent, so an agent
+        // whose session plainly existed could sit offline with nothing anywhere
+        // saying why — the dashboard simply showed an empty fleet. Log the
+        // transition once, with what the snapshot actually held, so the next
+        // person does not have to reverse-engineer the sweep to find out.
+        console.warn(`[backend] agent marked tmux-missing: agent=${agent.name} target=${tmuxTarget} `
+          + `snapshotSessions=${JSON.stringify([...paneSnapshotMap.keys()])} misses=${missing.misses}`);
       }
       if (!wasManualDown
         && wasOnline
