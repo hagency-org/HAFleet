@@ -37,7 +37,24 @@ describe('runtime parity regressions', () => {
       expect(source).toContain('codex $CODEX_FLAGS --');
       expect(source).not.toContain('CLAUDE_FLAGS="--dangerously-skip-permissions"');
       expect(source).not.toContain('CODEX_FLAGS="--yolo"');
-      expect(source).not.toContain('tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"');
+      // Typing the init prompt into a pane after launch was banned outright,
+      // because bin/agent-up tried it for Codex and abandoned it: "tmux key
+      // timing is unreliable while Codex is still drawing its first prompt".
+      //
+      // Hermes leaves no alternative — both -z/--oneshot and `chat -q` print one
+      // response and exit, so an interactive session cannot be given a starting
+      // prompt any other way, and without one the agent never learns its name or
+      // its tools. The ban is therefore narrowed rather than dropped: typing is
+      // permitted only when the same branch first waits for a readiness marker
+      // and refuses to type if it never appears. Blind typing stays forbidden.
+      if (source.includes('send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"')) {
+        const branch = source.slice(source.lastIndexOf('elif [', source.indexOf('-l "$INIT_PROMPT"')));
+        const upToTyping = branch.slice(0, branch.indexOf('-l "$INIT_PROMPT"'));
+        expect(upToTyping, `${scriptPath}: init prompt typed without waiting for readiness`)
+          .toMatch(/ready-fixed|grep -qF/);
+        expect(upToTyping, `${scriptPath}: no refusal path if readiness never appears`)
+          .toMatch(/did not appear within/);
+      }
       expect(source).not.toContain('Launch cmd:');
     }
   });
