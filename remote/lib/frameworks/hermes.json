@@ -2,13 +2,16 @@
   "id": "hermes",
   "displayName": "Hermes",
   "upstream": "https://github.com/NousResearch/hermes-agent",
-  "launchable": false,
-  "notLaunchableReason": "bin/agent-up has no launch branch for hermes yet; its launch and resume composition is framework-specific (see the claude/codex branches around bin/agent-up:1867-1948)",
+  "launchable": true,
   "launch": {
     "command": "hermes",
     "defaultArgs": [],
     "modelFlag": "--model",
-    "permissionSummary": "hermes interactive approval prompts (bypass flags refused)"
+    "permissionSummary": "hermes interactive approval prompts (bypass flags refused)",
+    "interfaceFlag": "--cli",
+    "resumeFlag": "--resume",
+    "initPromptDelivery": "keystrokes",
+    "initPromptComment": "Hermes cannot take an initial prompt while staying interactive: both -z/--oneshot and `chat -q` print one response and exit. So the REPL is started first and the prompt is typed in, which is the same mechanism the relay uses for every later message. This is the approach bin/agent-up abandoned for Codex (\"tmux key timing is unreliable while Codex is still drawing its first prompt\") — it is safe here only because readiness is detected from signals.ready below rather than from a timer or from the pane merely holding still."
   },
   "signals": {
     "comment": "Confirmed by reading cli.py in the upstream checkout. Hermes renders a selection prompt for dangerous commands with the choices Allow once / Allow for this session / Add to permanent allowlist / Deny.",
@@ -31,7 +34,16 @@
         "re": "⟳\\s*compacting context"
       }
     ],
-    "compactComment": "Confirmed at agent/conversation_loop.py:4770 — agent._safe_print(\"  ⟳ compacting context…\"). Note that _build_compact_banner in cli.py is NOT this: it sizes a startup banner to the terminal width. The ellipsis is deliberately outside the pattern so a change in how it is rendered does not break the match."
+    "compactComment": "Confirmed at agent/conversation_loop.py:4770 — agent._safe_print(\"  ⟳ compacting context…\"). Note that _build_compact_banner in cli.py is NOT this: it sizes a startup banner to the terminal width. The ellipsis is deliberately outside the pattern so a change in how it is rendered does not break the match.",
+    "ready": [
+      {
+        "marker": "hermes-repl-prompt",
+        "summary": "REPL accepting input",
+        "re": "^\\s*❯",
+        "fixed": "❯"
+      }
+    ],
+    "readyComment": "Verified live against Hermes Agent v0.18.2: `hermes --cli` renders a '❯' prompt between two horizontal rules, under a status line. Detecting stability instead of this marker does NOT work — the pane sits unchanged for ~1s after the launch command is echoed and before Hermes produces any output, so a settle check reports ready while the REPL does not yet exist and the typed prompt is lost. Each ready pattern also carries `fixed`: a literal substring safe for `grep -F` in shell, so bin/agent-up never has to assume a regex dialect. A test asserts the regex matches the fixed string, so the two cannot drift apart."
   },
   "acp": {
     "comment": "Hermes also ships a full ACP server (hermes-acp, or `hermes acp`) advertising session fork/list/resume. Recorded for when HAFleet grows an ACP runtime; the tmux path above is what is wired today.",

@@ -19,13 +19,29 @@ describe('the registry loads and validates its manifests', () => {
     expect(frameworkIds()).toEqual(['claude', 'codex', 'hermes']);
   });
 
-  test('hermes is declared but not launchable, with a stated reason', () => {
-    // Declaring a framework bin/agent-up cannot start must fail loudly at the
-    // gate, not fall through the launch branches and do something undefined.
-    expect(launchableFrameworkIds()).toEqual(['claude', 'codex']);
-    expect(launchBlockedReason('hermes')).toMatch(/no launch branch for hermes/);
-    expect(launchBlockedReason('claude')).toBeNull();
+  test('all three are launchable, and an unknown name still is not', () => {
+    expect(launchableFrameworkIds()).toEqual(['claude', 'codex', 'hermes']);
+    expect(launchBlockedReason('hermes')).toBeNull();
     expect(launchBlockedReason('nope')).toBe('unknown framework: nope');
+  });
+
+  test('a framework that types its init prompt must declare how to know the REPL is live', () => {
+    // Guards the actual bug this cost: without a readiness signal the keystrokes
+    // race process startup and are silently lost.
+    const hermes = getFramework('hermes');
+    expect(hermes.launch.initPromptDelivery).toBe('keystrokes');
+    expect(hermes.signals.ready.length).toBeGreaterThan(0);
+  });
+
+  test('each ready pattern agrees with its own grep -F literal', () => {
+    // bin/agent-up greps for the literal while the backend uses the regex. If
+    // they drift, the shell waits for something the manifest no longer means.
+    for (const framework of listFrameworks()) {
+      for (const signal of framework.signals.ready) {
+        expect(typeof signal.fixed, `${framework.id}/${signal.marker}`).toBe('string');
+        expect(signal.regex.test(signal.fixed), `${framework.id}/${signal.marker}`).toBe(true);
+      }
+    }
   });
 
   test('hermes carries the approval signal confirmed from upstream cli.py', () => {
@@ -226,14 +242,14 @@ describe('shell callers read the registry instead of their own list', () => {
     expect(run(['ids']).stdout.trim().split('\n')).toEqual(['claude', 'codex', 'hermes']);
   });
 
-  test('launchable lists only the ones agent-up can start', () => {
-    expect(run(['launchable']).stdout.trim().split('\n')).toEqual(['claude', 'codex']);
+  test('launchable lists the ones agent-up can start', () => {
+    expect(run(['launchable']).stdout.trim().split('\n')).toEqual(['claude', 'codex', 'hermes']);
   });
 
   test.each([
     ['claude', 0, ''],
     ['codex', 0, ''],
-    ['hermes', 1, /no launch branch for hermes/],
+    ['hermes', 0, ''],
     ['nope', 1, /unknown framework: nope/],
   ])('check %s exits %i', (id, code, stderrMatch) => {
     const result = run(['check', id]);
@@ -241,11 +257,52 @@ describe('shell callers read the registry instead of their own list', () => {
     if (stderrMatch) expect(result.stderr).toMatch(stderrMatch);
   });
 
+  test('ready-fixed prints the literal agent-up greps for', () => {
+    expect(run(['ready-fixed', 'hermes']).stdout).toBe('\u276f');
+    // claude passes its prompt as an argument, so it declares no ready signal.
+    expect(run(['ready-fixed', 'claude']).code).toBe(1);
+  });
+
   test('bad usage exits 2, distinct from a refusal', () => {
     // agent-up branches on exit status, so "you called me wrong" must not look
     // like "that framework is not launchable".
     expect(run(['check']).code).toBe(2);
     expect(run(['bogus-command']).code).toBe(2);
+  });
+});
+
+describe('the extra-args validator defers to the registry', () => {
+  const validate = (fw, args) => {
+    try {
+      return { stdout: execFileSync('node', ['scripts/validate-agent-launch-extra-args.js', fw, args], { encoding: 'utf-8' }), code: 0, stderr: '' };
+    } catch (error) {
+      return { stdout: error.stdout || '', stderr: error.stderr || '', code: error.status };
+    }
+  };
+
+  test.each(['claude', 'codex', 'hermes'])('%s is accepted', (fw) => {
+    expect(validate(fw, '--verbose').code).toBe(0);
+  });
+
+  test.each(['bogus', ''])('an unknown framework (%p) exits 2', (fw) => {
+    // Load-bearing: validateLaunchExtraArgs applies NO guards to a non-empty
+    // framework it does not recognise, so letting an unknown name through here
+    // would let every policy flag through with it.
+    const result = validate(fw, '--yolo');
+    expect(result.code).toBe(2);
+    expect(result.stderr).toMatch(/unsupported framework for launch policy/);
+  });
+
+  test('a known framework still has its own guards applied', () => {
+    expect(validate('hermes', '--yolo').stderr).toMatch(/Hermes approval policy flag is managed/);
+    expect(validate('codex', '--yolo').stderr).toMatch(/Codex Level 2 policy flag is managed/);
+    expect(validate('claude', '--permission-mode').stderr).toMatch(/Claude permission policy flag is managed/);
+  });
+
+  test('it no longer keeps its own framework list', () => {
+    const source = readFileSync('scripts/validate-agent-launch-extra-args.js', 'utf-8');
+    expect(source).not.toMatch(/framework !== 'claude'/);
+    expect(source).toContain('getFramework');
   });
 });
 
@@ -266,17 +323,29 @@ describe('bin/agent-up defers to the registry', () => {
       .toBeLessThan(source.indexOf('FRAMEWORK_INFO" check'));
   });
 
-  test('a declared-but-unlaunchable framework is refused by name', () => {
-    // Not "unrecognized argument": the parser must recognise hermes as a type so
-    // the gate can explain why it cannot start it.
+  test('hermes now passes the gate as a launchable type', () => {
+    // It must get past parsing AND the gate. It will fail later for want of an
+    // agent token, which is proof it reached the real launch path.
     let stderr = '';
     try {
       execFileSync('bash', ['bin/agent-up', 'adapter-gate-probe', os.tmpdir(), 'hermes'],
         { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (error) { stderr = error.stderr || ''; }
-    expect(stderr).toMatch(/cannot launch type 'hermes'/);
-    expect(stderr).toMatch(/Launchable types: claude codex/);
     expect(stderr).not.toMatch(/unrecognized argument/);
+    expect(stderr).not.toMatch(/cannot launch type/);
+  });
+
+  test('the hermes branch waits for the REPL instead of guessing', () => {
+    // The stability check this replaced was measured reporting ready ~1s in, on a
+    // pane holding only the echoed launch command.
+    const branch = source.slice(source.indexOf('elif [ "$TYPE" = "hermes" ]'));
+    const body = branch.slice(0, branch.indexOf('capture_resume_id_background'));
+    expect(body).toContain('ready-fixed hermes');
+    expect(body).toContain('grep -qF');
+    expect(body).toContain('--cli');
+    // It must refuse to type rather than type into nothing.
+    expect(body).toMatch(/did not appear within 60s/);
+    expect(body).toContain('send-keys');
   });
 
   test('KNOWN GAP: bin/agent-up-v1 still keeps its own list', () => {

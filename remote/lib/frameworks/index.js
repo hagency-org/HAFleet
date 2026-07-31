@@ -54,13 +54,25 @@ function validateManifest(raw, file) {
   if (raw.launchable === false && !String(raw.notLaunchableReason || '').trim()) {
     fail('launchable:false requires notLaunchableReason — an operator needs to know why');
   }
-  for (const kind of ['blocked', 'compact']) {
+  // Typing the init prompt into a pane is only safe if there is a way to know the
+  // prompt is live. Without this, the keystrokes race the process starting up.
+  if (raw.launch?.initPromptDelivery === 'keystrokes' && !(raw.signals?.ready || []).length) {
+    fail('launch.initPromptDelivery "keystrokes" requires at least one signals.ready pattern');
+  }
+  for (const kind of ['blocked', 'compact', 'ready']) {
     const list = raw.signals?.[kind];
     if (list === undefined) continue;
     if (!Array.isArray(list)) fail(`signals.${kind} must be an array`);
     for (const entry of list) {
       if (!entry?.marker || !entry?.re) fail(`signals.${kind} entries need marker and re`);
-      try { new RegExp(entry.re); } catch { fail(`signals.${kind} regex is invalid: ${entry.re}`); }
+      let compiled;
+      try { compiled = new RegExp(entry.re); } catch { fail(`signals.${kind} regex is invalid: ${entry.re}`); }
+      // Ready patterns are also consumed by shell, which must not have to guess a
+      // regex dialect — so they carry a literal, and it has to agree with the regex.
+      if (kind === 'ready') {
+        if (typeof entry.fixed !== 'string' || !entry.fixed) fail('signals.ready entries need a `fixed` literal for grep -F');
+        if (!compiled.test(entry.fixed)) fail(`signals.ready regex does not match its own fixed literal: ${entry.marker}`);
+      }
     }
   }
   const flags = raw.guards?.flags;
@@ -100,6 +112,9 @@ function compile(raw) {
     signals: Object.freeze({
       blocked: Object.freeze((raw.signals?.blocked || []).map((s) => Object.freeze({ ...s, regex: new RegExp(s.re) }))),
       compact: Object.freeze((raw.signals?.compact || []).map((s) => Object.freeze({ ...s, regex: new RegExp(s.re) }))),
+      // How to tell the agent is accepting input. Only needed by frameworks whose
+      // init prompt is typed in rather than passed as an argument.
+      ready: Object.freeze((raw.signals?.ready || []).map((s) => Object.freeze({ ...s, regex: new RegExp(s.re) }))),
     }),
     launch: Object.freeze({ ...raw.launch, defaultArgs: Object.freeze([...raw.launch.defaultArgs]) }),
     flagGuard: flags

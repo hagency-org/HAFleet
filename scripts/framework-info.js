@@ -8,6 +8,7 @@
  *
  *   framework-info.js ids                   -> every declared id, launchable or not
  *   framework-info.js launchable            -> newline-separated ids agent-up can start
+ *   framework-info.js ready-fixed <id>      -> literal for grep -F that means "accepting input"
  *   framework-info.js check <id>            -> exit 0 if launchable; else reason on stderr
  *
  * `check` is the one agent-up calls. Exit codes:
@@ -16,7 +17,7 @@
  *   2  usage error
  */
 
-import { frameworkIds, launchableFrameworkIds, launchBlockedReason } from '../lib/frameworks/index.js';
+import { frameworkIds, getFramework, launchableFrameworkIds, launchBlockedReason } from '../lib/frameworks/index.js';
 
 const [command, argument] = process.argv.slice(2);
 
@@ -33,6 +34,18 @@ if (command === 'launchable') {
   process.exit(0);
 }
 
+if (command === 'ready-fixed') {
+  // A literal for `grep -F`, so shell callers need no regex dialect assumptions.
+  const framework = getFramework(argument);
+  const fixed = framework?.signals?.ready?.[0]?.fixed;
+  if (!fixed) {
+    process.stderr.write(`no ready signal declared for ${argument}\n`);
+    process.exit(1);
+  }
+  process.stdout.write(fixed);
+  process.exit(0);
+}
+
 if (command === 'check') {
   if (!argument) {
     process.stderr.write('usage: framework-info.js check <id>\n');
@@ -44,5 +57,5 @@ if (command === 'check') {
   process.exit(1);
 }
 
-process.stderr.write('usage: framework-info.js <ids|launchable|check <id>>\n');
+process.stderr.write('usage: framework-info.js <ids|launchable|ready-fixed <id>|check <id>>\n');
 process.exit(2);

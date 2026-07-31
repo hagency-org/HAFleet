@@ -1994,6 +1994,62 @@ process.stdout.write(prepared.hookToml);
     fi
     rm -f "$CODEX_BASELINE_FILE" >/dev/null 2>&1 || true
   fi
+
+elif [ "$TYPE" = "hermes" ]; then
+  # --cli forces the classic prompt_toolkit REPL rather than the full-screen TUI.
+  # A blocked agent is detected by regex-scraping capture-pane output, and a TUI
+  # that repaints whole frames makes that unreliable. The approval prompt this
+  # depends on lives in the CLI path upstream (cli.py, covered by
+  # tests/cli/test_cli_approval_ui.py).
+  HERMES_FLAGS="--cli"
+  if [ -n "$MODEL" ]; then
+    HERMES_FLAGS="$HERMES_FLAGS --model $(shell_quote "$MODEL")"
+  fi
+  if [ -n "$SAFE_EXTRA_ARGS" ]; then
+    HERMES_FLAGS="$HERMES_FLAGS $SAFE_EXTRA_ARGS"
+  fi
+  HERMES_LAUNCH_SCRIPT="$TMP_RUNTIME_DIR/launch-hermes.sh"
+  if [ "$FRESH" = false ] && RID=$(cat "$RESUME_FILE" 2>/dev/null) && [ -n "$RID" ]; then
+    echo "Resuming hermes session: $RID"
+    write_launch_script "$HERMES_LAUNCH_SCRIPT" "exec hermes --resume $(shell_quote "$RID") $HERMES_FLAGS"
+    tmux send-keys -t "$TMUX_PANE_TARGET" "exec $(shell_quote "$HERMES_LAUNCH_SCRIPT")" Enter
+  else
+    echo "Starting new hermes session..."
+    # Hermes cannot take an init prompt while staying interactive: both
+    # -z/--oneshot and `chat -q` print one response and exit. So the REPL is
+    # started and the prompt is typed in — the same mechanism the relay uses for
+    # every message after this one.
+    write_launch_script "$HERMES_LAUNCH_SCRIPT" "exec hermes $HERMES_FLAGS"
+    tmux send-keys -t "$TMUX_PANE_TARGET" "exec $(shell_quote "$HERMES_LAUNCH_SCRIPT")" Enter
+
+    # Wait for the REPL prompt itself. Waiting for the pane to hold still does
+    # NOT work and was measured doing the wrong thing: the pane sits unchanged
+    # for about a second after the launch line is echoed and before Hermes emits
+    # anything, so a stability check reports ready while there is no REPL yet and
+    # the typed prompt goes nowhere. This is why bin/agent-up gave up on
+    # post-launch typing for Codex.
+    # Match a literal, from the manifest, so no regex dialect is assumed here.
+    HERMES_READY=$(node "$FRAMEWORK_INFO" ready-fixed hermes 2>/dev/null || printf '\xe2\x9d\xaf')
+    _hermes_ready=false
+    for _i in $(seq 1 120); do
+      if tmux capture-pane -t "$TMUX_PANE_TARGET" -p 2>/dev/null | grep -qF "$HERMES_READY"; then
+        _hermes_ready=true
+        break
+      fi
+      sleep 0.5
+    done
+    if [ "$_hermes_ready" != true ]; then
+      echo "Error: hermes REPL prompt did not appear within 60s; not sending the init prompt." >&2
+      echo "  The session is running; attach with: tmux attach -t $(shell_quote "$NAME")" >&2
+      exit 1
+    fi
+
+    # -l sends the text literally, so a prompt containing ; or - is not parsed as
+    # tmux syntax. Enter is a separate call to submit it.
+    tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"
+    tmux send-keys -t "$TMUX_PANE_TARGET" Enter
+  fi
+  capture_resume_id_background "hermes"
 fi
 
 # Post-launch health check for custom API provider agents
