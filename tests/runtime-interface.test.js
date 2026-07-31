@@ -125,6 +125,37 @@ describe('tmux runtime', () => {
     expect(panes[0].path).toBe('/tmp/we\tird');
   });
 
+  test('parses the sentinel-delimited format the runtime actually requests', () => {
+    // The delimiter was a tab until a real host delivered every pane line with the
+    // tabs replaced by underscores, which made the parser discard all six lines and
+    // report an idle host. The format now uses a sentinel that is not whitespace.
+    const source = readFileSync('lib/runtime/tmux.js', 'utf-8');
+    expect(source).toContain("const PANE_FIELD_SEP = '::|::'");
+    expect(source).toContain('].join(PANE_FIELD_SEP)');
+  });
+
+  test('parses sentinel-delimited output, including a path containing a tab', async () => {
+    const SEP = '::|::';
+    const row = ['/dev/ttys001', 'alpha', '42', 'node', '/tmp/we\tird'].join(SEP);
+    const { exec } = fakeExec(() => ({ stdout: `${row}\n` }));
+    const { ok, panes } = await createTmuxRuntime({ exec }).listPanes();
+    expect(ok).toBe(true);
+    expect(panes).toHaveLength(1);
+    expect(panes[0]).toEqual({
+      tty: 'ttys001', session: 'alpha', pid: 42, command: 'node', path: '/tmp/we\tird',
+    });
+  });
+
+  test('a path containing the sentinel itself survives the round trip', async () => {
+    // parts.slice(4).join(sep) must use the separator that split the line, or the
+    // other one gets rewritten into the path.
+    const SEP = '::|::';
+    const row = ['/dev/ttys002', 'beta', '7', 'zsh', `/tmp/a${SEP}b`].join(SEP);
+    const { exec } = fakeExec(() => ({ stdout: `${row}\n` }));
+    const { panes } = await createTmuxRuntime({ exec }).listPanes();
+    expect(panes[0].path).toBe(`/tmp/a${SEP}b`);
+  });
+
   test('skips malformed rows without failing the whole listing', async () => {
     const { exec } = fakeExec(() => ({
       stdout: ['too\tfew\tfields', '/dev/ttys001\tgood\t7\tnode\t/tmp', '\t\t\t\t'].join('\n'),
