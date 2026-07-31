@@ -1113,6 +1113,28 @@ app.get('/api/agents/status', async (_req, res) => {
     const agentList = Array.isArray(agentPayload)
       ? agentPayload.filter(a => a && typeof a === 'object')
       : [];
+    // An agent with no tmux target used to be dropped here. That made "no agents
+    // exist" and "every agent is offline" render identically as an empty fleet,
+    // which is how a host with six registered agents showed a blank dashboard.
+    // Report them instead, with alive:false and the reason the backend recorded.
+    const withoutPane = agentList
+      .filter(a => !a.tmux)
+      .map(a => ({
+        name: a.name,
+        tmux: null,
+        idleMs: -1,
+        active: false,
+        activeNow: false,
+        activeDurationSec: 0,
+        idleDurationSec: 0,
+        lastTmuxActivitySec: 0,
+        alive: false,
+        remote: !isLocalAgentServer(a.server),
+        type: a.type || 'agent',
+        server: a.server || null,
+        environment: a.environment || 'live',
+        offlineReason: a.offlineReason || 'no-tmux-target',
+      }));
     const result = agentList
       .filter(a => a.tmux)
       .map(a => {
@@ -1153,7 +1175,8 @@ app.get('/api/agents/status', async (_req, res) => {
           environment: a.environment || 'live',
         };
       });
-    res.json(result);
+    // Paneless agents last: the ones you can act on come first.
+    res.json([...result, ...withoutPane]);
   } catch (e) {
     res.status(502).json({ error: 'backend-v2 unreachable', detail: e.message });
   }
