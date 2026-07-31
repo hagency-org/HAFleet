@@ -9,7 +9,7 @@ tags: [dashboard, read-model, privacy, workflow]
 
 ## Context
 
-agent-chat already persists the facts needed for a useful project operations
+hafleet already persists the facts needed for a useful project operations
 view, but they are split across groups, agents, durable tasks, task graphs, and
 messages. Joining those records in browser JavaScript would duplicate domain
 rules, make privacy filtering easy to bypass, and prevent other clients from
@@ -21,7 +21,7 @@ assignees, and a project-scoped detail surface.
 
 ## Decision
 
-The backend owns a read-only project-board projection. An agent-chat group is
+The backend owns a read-only project-board projection. An hafleet group is
 the membership boundary. Managed project resources additionally require an
 explicit exact group-to-project binding. The projection joins:
 
@@ -44,7 +44,7 @@ paths are excluded at the backend projection boundary rather than hidden only
 by the page.
 
 Project resources follow Multica's useful separation between repository
-resources and daemon-local directories, extended for agent-chat's multi-agent
+resources and daemon-local directories, extended for hafleet's multi-agent
 worktree model. A worktree records a safe location label and owning agent; a
 repository records provider-neutral identity. Local issues and specs are
 artifacts of a worktree. Remote issues and pull/merge requests are artifacts of

@@ -14,7 +14,7 @@ import { MatrixDeliveryJournal } from '../lib/matrix-delivery-journal.js';
 const roots = [];
 
 function context() {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'agentchat-matrix-delivery-journal-'));
+  const root = mkdtempSync(path.join(os.tmpdir(), 'hafleet-matrix-delivery-journal-'));
   roots.push(root);
   return {
     root,

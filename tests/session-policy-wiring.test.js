@@ -38,7 +38,7 @@ describe('backend pane snapshot honours the policy', () => {
   ];
 
   test('a denylisted session is absent from the snapshot', async () => {
-    const ctx = await backendWith({ AGENT_CHAT_SESSION_DENYLIST: 'ps2' });
+    const ctx = await backendWith({ HAFLEET_SESSION_DENYLIST: 'ps2' });
     const snap = await ctx.internals.buildLocalPaneMetadataSnapshotForTest(fakePaneLister(PANES));
     expect(snap.ok).toBe(true);
     expect([...snap.sessions.keys()]).toEqual(['claude-a']);
@@ -54,7 +54,7 @@ describe('backend pane snapshot honours the policy', () => {
   });
 
   test('an allowlist excludes everything unnamed', async () => {
-    const ctx = await backendWith({ AGENT_CHAT_SESSION_ALLOWLIST: 'claude-*' });
+    const ctx = await backendWith({ HAFLEET_SESSION_ALLOWLIST: 'claude-*' });
     const snap = await ctx.internals.buildLocalPaneMetadataSnapshotForTest(fakePaneLister(PANES));
     expect([...snap.sessions.keys()]).toEqual(['claude-a']);
   });
@@ -65,17 +65,17 @@ describe('auto-clear refuses sessions outside the policy', () => {
   // pane that interrupts their process and wipes their prompt, which is the
   // concrete damage this policy exists to prevent.
   test('refused for a denylisted session', async () => {
-    const ctx = await backendWith({ AGENT_CHAT_SESSION_DENYLIST: 'ps2' });
+    const ctx = await backendWith({ HAFLEET_SESSION_DENYLIST: 'ps2' });
     await expect(ctx.internals.injectSlashClearForTest('ps2:0.0')).resolves.toBe(false);
   });
 
   test('refused when the target is outside an allowlist', async () => {
-    const ctx = await backendWith({ AGENT_CHAT_SESSION_ALLOWLIST: 'claude-*' });
+    const ctx = await backendWith({ HAFLEET_SESSION_ALLOWLIST: 'claude-*' });
     await expect(ctx.internals.injectSlashClearForTest('ps2:0.0')).resolves.toBe(false);
   });
 
   test('the policy object is the one the backend actually loaded', async () => {
-    const ctx = await backendWith({ AGENT_CHAT_SESSION_DENYLIST: 'ps2,ps3,psf,test,uq' });
+    const ctx = await backendWith({ HAFLEET_SESSION_DENYLIST: 'ps2,ps3,psf,test,uq' });
     const policy = ctx.internals.sessionPolicyForTest;
     for (const name of ['ps2', 'ps3', 'psf', 'test', 'uq']) {
       expect(policy.allows(name), name).toBe(false);

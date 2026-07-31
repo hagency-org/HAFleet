@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SERVICE_NAME="${SERVICE_NAME:-agent-chat-push-relay}"
+SERVICE_NAME="${SERVICE_NAME:-hafleet-push-relay}"
 ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
 INSTALL_BIN_DIR="${INSTALL_BIN_DIR:-$HOME/.local/bin}"
 AGENT_INSTALL_AUTOSTART="${AGENT_INSTALL_AUTOSTART:-1}"
@@ -16,7 +16,7 @@ IS_MAC=false
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${SERVICE_NAME}.plist"
 LAUNCHD_RUNNER="$SCRIPT_DIR/.push-relay-launchd.sh"
 LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-gui/$(id -u)}"
-LEGACY_SERVICE_NAME="com.agentchat.push-relay"
+LEGACY_SERVICE_NAME="com.hafleet.push-relay"
 
 case "$OS_NAME" in
   Linux) IS_LINUX=true ;;
@@ -121,7 +121,7 @@ NODE_BIN="$(command -v node || true)"
 echo "[2/9] Preparing environment..."
 if [ ! -f "$ENV_FILE" ]; then
   cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
-  echo "Created $ENV_FILE (please fill API_TOKEN and AGENT_CHAT_SERVER)."
+  echo "Created $ENV_FILE (please fill API_TOKEN and HAFLEET_SERVER)."
 fi
 mkdir -p "$SCRIPT_DIR/data/agents" "$SCRIPT_DIR/logs" "$INSTALL_BIN_DIR"
 set -a
@@ -133,17 +133,17 @@ fi
 set +a
 
 MISSING_ENV=()
-[ -n "${AGENT_CHAT_API:-}" ] || MISSING_ENV+=("AGENT_CHAT_API")
-[ -n "${AGENT_CHAT_SERVER:-}" ] || MISSING_ENV+=("AGENT_CHAT_SERVER")
+[ -n "${HAFLEET_API:-}" ] || MISSING_ENV+=("HAFLEET_API")
+[ -n "${HAFLEET_SERVER:-}" ] || MISSING_ENV+=("HAFLEET_SERVER")
 if [ "${#MISSING_ENV[@]}" -gt 0 ]; then
   echo "Error: missing required env in $ENV_FILE: ${MISSING_ENV[*]}" >&2
   exit 1
 fi
-SERVER_ID_TRIMMED="${AGENT_CHAT_SERVER#"${AGENT_CHAT_SERVER%%[![:space:]]*}"}"
+SERVER_ID_TRIMMED="${HAFLEET_SERVER#"${HAFLEET_SERVER%%[![:space:]]*}"}"
 SERVER_ID_TRIMMED="${SERVER_ID_TRIMMED%"${SERVER_ID_TRIMMED##*[![:space:]]}"}"
 SERVER_ID_LOWER="$(printf '%s' "$SERVER_ID_TRIMMED" | tr '[:upper:]' '[:lower:]')"
 if [ "$SERVER_ID_LOWER" = "local" ]; then
-  echo "Error: AGENT_CHAT_SERVER must be this remote host's unique server id, not 'local'." >&2
+  echo "Error: HAFLEET_SERVER must be this remote host's unique server id, not 'local'." >&2
   exit 1
 fi
 if [ -z "${API_TOKEN:-}" ]; then
@@ -155,10 +155,10 @@ cd "$SCRIPT_DIR"
 npm install --omit=dev
 
 echo "[4/9] Linking helper commands into $INSTALL_BIN_DIR..."
-required_cmds=(agentchat agent-up agent-down agent-ls agent-send agent-update agent-service verify-remote agent-maintain)
-optional_cmds=(self-time-reminder agent-chat-cli agent-chat agentchat-prune-agents)
+required_cmds=(hafleet hafleet-up hafleet-down hafleet-ls hafleet-send hafleet-update hafleet-service verify-remote hafleet-maintain)
+optional_cmds=(self-time-reminder hafleet-cli hafleet hafleet-prune-agents)
 BIN_SOURCE_DIR="$SCRIPT_DIR/bin"
-if [ -d "$REPO_ROOT/bin" ] && [ -f "$REPO_ROOT/bin/agent-up" ]; then
+if [ -d "$REPO_ROOT/bin" ] && [ -f "$REPO_ROOT/bin/hafleet-up" ]; then
   BIN_SOURCE_DIR="$REPO_ROOT/bin"
 fi
 echo "  Using helper source dir: $BIN_SOURCE_DIR"
@@ -195,9 +195,9 @@ if [ "$IS_LINUX" = true ]; then
   trap - EXIT
 
   # Install remote autodeploy service
-  AUTODEPLOY_SERVICE="agent-chat-remote-autodeploy"
+  AUTODEPLOY_SERVICE="hafleet-remote-autodeploy"
   AUTODEPLOY_UNIT="/etc/systemd/system/${AUTODEPLOY_SERVICE}.service"
-  AUTODEPLOY_SCRIPT="$REPO_ROOT/scripts/agentchat-remote-autodeploy.sh"
+  AUTODEPLOY_SCRIPT="$REPO_ROOT/scripts/hafleet-remote-autodeploy.sh"
   AUTODEPLOY_INSTALLED=false
   if [ ! -d "$REPO_ROOT/.git" ]; then
     echo "  Skipping ${AUTODEPLOY_SERVICE}: standalone package has no git checkout for autodeploy."
@@ -217,7 +217,7 @@ if [ "$IS_LINUX" = true ]; then
     echo "  Installed ${AUTODEPLOY_SERVICE} service."
 
     # Provision sudoers rule so autodeploy (running as agent user) can restart the relay
-    SUDOERS_FILE="/etc/sudoers.d/agentchat-autodeploy"
+    SUDOERS_FILE="/etc/sudoers.d/hafleet-autodeploy"
     SYSTEMCTL_BIN="$(command -v systemctl)"
     echo "$SERVICE_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN restart $SERVICE_NAME" \
       | sudo tee "$SUDOERS_FILE" >/dev/null
@@ -324,7 +324,7 @@ EOF
 fi
 
 MCP_ENV_VARS=()
-[ -n "${AGENT_CHAT_API:-}" ] && MCP_ENV_VARS+=("AGENT_CHAT_API=$AGENT_CHAT_API")
+[ -n "${HAFLEET_API:-}" ] && MCP_ENV_VARS+=("HAFLEET_API=$HAFLEET_API")
 [ -n "${API_TOKEN:-}" ] && MCP_ENV_VARS+=("API_TOKEN=$API_TOKEN")
 if [ -z "${API_TOKEN:-}" ]; then
   echo "  Warning: API_TOKEN is empty. Remote MCP calls to authenticated backend may fail."
@@ -332,43 +332,43 @@ fi
 
 echo "[6/9] Configuring Claude Code MCP server..."
 if command -v claude >/dev/null 2>&1; then
-  CLAUDECODE= claude mcp remove -s user agent-chat 2>/dev/null || true
-  CLAUDECODE= claude mcp remove -s local agent-chat 2>/dev/null || true
-  CLAUDECODE= claude mcp remove -s project agent-chat 2>/dev/null || true
+  CLAUDECODE= claude mcp remove -s user hafleet 2>/dev/null || true
+  CLAUDECODE= claude mcp remove -s local hafleet 2>/dev/null || true
+  CLAUDECODE= claude mcp remove -s project hafleet 2>/dev/null || true
   CLAUDE_CMD=(claude mcp add -s user)
   for env_kv in "${MCP_ENV_VARS[@]}"; do
     CLAUDE_CMD+=(-e "$env_kv")
   done
   # Claude CLI parses -e as variadic; use `--` to terminate env args before name.
-  CLAUDE_CMD+=(-- agent-chat node "$SCRIPT_DIR/mcp-server.js")
+  CLAUDE_CMD+=(-- hafleet node "$SCRIPT_DIR/mcp-server.js")
   if CLAUDECODE= "${CLAUDE_CMD[@]}"; then
-    echo "  MCP server 'agent-chat' configured for Claude Code."
+    echo "  MCP server 'hafleet' configured for Claude Code."
   else
-    echo "Error: failed to configure Claude MCP server 'agent-chat'." >&2
+    echo "Error: failed to configure Claude MCP server 'hafleet'." >&2
     exit 1
   fi
 else
   echo "  Warning: 'claude' CLI not found, skipping MCP configuration."
-  echo "  Run manually: claude mcp add -s user -e AGENT_CHAT_API=<url> -e API_TOKEN=<token> -- agent-chat node $SCRIPT_DIR/mcp-server.js"
+  echo "  Run manually: claude mcp add -s user -e HAFLEET_API=<url> -e API_TOKEN=<token> -- hafleet node $SCRIPT_DIR/mcp-server.js"
 fi
 
 echo "[7/9] Configuring Codex MCP server..."
 if command -v codex >/dev/null 2>&1; then
-  codex mcp remove agent-chat 2>/dev/null || true
-  CODEX_CMD=(codex mcp add agent-chat)
+  codex mcp remove hafleet 2>/dev/null || true
+  CODEX_CMD=(codex mcp add hafleet)
   for env_kv in "${MCP_ENV_VARS[@]}"; do
     CODEX_CMD+=(--env "$env_kv")
   done
   CODEX_CMD+=(-- node "$SCRIPT_DIR/mcp-server.js")
   if "${CODEX_CMD[@]}"; then
-    echo "  MCP server 'agent-chat' configured for Codex."
+    echo "  MCP server 'hafleet' configured for Codex."
   else
-    echo "Error: failed to configure Codex MCP server 'agent-chat'." >&2
+    echo "Error: failed to configure Codex MCP server 'hafleet'." >&2
     exit 1
   fi
 else
   echo "  Warning: 'codex' CLI not found, skipping MCP configuration."
-  echo "  Run manually: codex mcp add agent-chat --env AGENT_CHAT_API=<url> --env API_TOKEN=<token> -- node $SCRIPT_DIR/mcp-server.js"
+  echo "  Run manually: codex mcp add hafleet --env HAFLEET_API=<url> --env API_TOKEN=<token> -- node $SCRIPT_DIR/mcp-server.js"
 fi
 
 echo "[8/9] Running deployment verification..."
@@ -376,8 +376,8 @@ if is_truthy "$AGENT_INSTALL_SKIP_VERIFY" || ! is_truthy "$AGENT_INSTALL_AUTOSTA
   echo "  Skipping verification (AGENT_INSTALL_SKIP_VERIFY=$AGENT_INSTALL_SKIP_VERIFY, AGENT_INSTALL_AUTOSTART=$AGENT_INSTALL_AUTOSTART)."
 else
   VERIFY_ARGS=(
-    --api "$AGENT_CHAT_API"
-    --server "$AGENT_CHAT_SERVER"
+    --api "$HAFLEET_API"
+    --server "$HAFLEET_SERVER"
     --samples "${VERIFY_SAMPLES:-3}"
     --interval "${VERIFY_INTERVAL:-15}"
     --service "$SERVICE_NAME"
@@ -403,5 +403,5 @@ fi
 echo
 echo "Next:"
 echo "  1) Verify MCP: claude mcp list && codex mcp list"
-echo "  2) Start agents: agent-up <name> <path> [claude|codex]"
+echo "  2) Start agents: hafleet-up <name> <path> [claude|codex]"
 echo "  3) Verify one agent: verify-remote --agent <name>"

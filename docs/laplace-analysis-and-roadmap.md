@@ -27,7 +27,7 @@ datasetflow (目录分发)   backtest eval (策略评估)
 MediaCrawler (爬虫) → BettaFish (舆情分析) → [待接入特征工程]
 
 Agent 通讯:
-agentchat (跨服务器消息) ← gastown (多Agent编排)
+hafleet (跨服务器消息) ← gastown (多Agent编排)
 ```
 
 ### 各层成熟度评估
@@ -41,7 +41,7 @@ agentchat (跨服务器消息) ← gastown (多Agent编排)
 | **训练调度** | PRTS_Runner | ★★★★☆ | 队列、远程执行、AutoScale、SSE 监控 |
 | **回测系统** | backtest-web + bridge | ★★★☆☆ | 策略评估、预测诊断已有，但策略引擎在 bridge 本地 |
 | **替代数据** | MediaCrawler + BettaFish | ★★☆☆☆ | 爬虫和情感分析存在，但未接入主管线 |
-| **Agent 通讯** | agentchat | ★★★★☆ | DM/群组/MCP/Matrix/远程推送齐全 |
+| **Agent 通讯** | hafleet | ★★★★☆ | DM/群组/MCP/Matrix/远程推送齐全 |
 | **Agent 编排** | gastown | ★★★☆☆ | Mayor/Rig/Polecat 架构，git-hook 持久化 |
 | **硬件规划** | gpu-cluster-bom | ★★☆☆☆ | BOM 文档阶段，未实际部署 |
 
@@ -49,9 +49,9 @@ agentchat (跨服务器消息) ← gastown (多Agent编排)
 
 ## 二、核心问题诊断
 
-### 问题 1：agentchat 是"通讯"而非"框架"
+### 问题 1：hafleet 是"通讯"而非"框架"
 
-agentchat 当前做到了：
+hafleet 当前做到了：
 - Agent 之间能发消息（DM、群组、@mention）
 - MCP 集成让 Claude Code 原生使用
 - 跨服务器推送（push-relay + tmux 注入）
@@ -59,16 +59,16 @@ agentchat 当前做到了：
 
 **缺失的是 AVB 文章中所有上层抽象：**
 
-| AVB 框架维度 | agentchat 现状 | 缺口 |
+| AVB 框架维度 | hafleet 现状 | 缺口 |
 |-------------|---------------|------|
 | System Prompt 设计 | 无——Agent 的角色/目标/工具由各自定义 | 没有统一的 Agent 角色定义协议 |
 | Lazy Loading Context | 无——消息全量推送 | 没有按需拉取机制，没有"索引页" |
 | Action Space 管理 | 无——Agent 可以做任何事 | 没有工具注册/发现/权限控制 |
-| 子 Agent 委派 | 部分——gastown 有 Polecat 概念 | agentchat 层无任务分解/派发协议 |
+| 子 Agent 委派 | 部分——gastown 有 Polecat 概念 | hafleet 层无任务分解/派发协议 |
 | 持久化策略 | 基础——JSON 文件存消息 | 无 Agent 级 memory、scratchpad、todo |
 | 评估与可观测性 | 基础——活动追踪/阻塞检测 | 无 trace 日志、无回放测试、无量化评分 |
 
-**本质问题：agentchat 解决了 Agent 之间"怎么说话"，但没解决"说什么"、"为什么说"、"说了之后做什么"。**
+**本质问题：hafleet 解决了 Agent 之间"怎么说话"，但没解决"说什么"、"为什么说"、"说了之后做什么"。**
 
 ### 问题 2：量化能力与 Agent 能力割裂
 
@@ -117,7 +117,7 @@ MediaCrawler + BettaFish 是独立系统，没有：
 ### 三条演进路线
 
 ```
-路线 A: agentchat → Agent Framework（Agent 能力升级）
+路线 A: hafleet → Agent Framework（Agent 能力升级）
 路线 B: backtest-web → Simulation Engine（量化能力升级）
 路线 C: 数据闭环（替代数据 → 特征 → 模型 → 信号）
 ```
@@ -126,7 +126,7 @@ MediaCrawler + BettaFish 是独立系统，没有：
 
 ### 路线 A：从通讯平台到 Agent Framework
 
-**目标：** 在 agentchat 之上构建真正的 Agentic 框架层，参考 AVB 的五维设计。
+**目标：** 在 hafleet 之上构建真正的 Agentic 框架层，参考 AVB 的五维设计。
 
 #### A1. Agent 角色协议（对应 AVB: System Prompt）
 
@@ -145,7 +145,7 @@ success_criteria:
   - alert relevant agents with structured signal
 tools:
   - umiki-api (read market features)
-  - agentchat (send alerts)
+  - hafleet (send alerts)
   - memory (persist detected patterns)
 constraints:
   - read-only on market data
@@ -156,7 +156,7 @@ constraints:
 
 #### A2. 上下文管理层（对应 AVB: Lazy Loading + Persisting）
 
-在 agentchat 上增加三个机制：
+在 hafleet 上增加三个机制：
 
 | 机制 | 功能 | 实现方式 |
 |------|------|---------|
@@ -166,7 +166,7 @@ constraints:
 
 #### A3. 任务分解与委派协议（对应 AVB: Delegating）
 
-在 agentchat 的消息类型上扩展：
+在 hafleet 的消息类型上扩展：
 
 ```
 现有: inform, request, reply, human
@@ -195,7 +195,7 @@ constraints:
 
 - **Trace 日志：** 每个 Agent 的每次决策记录（输入 → 推理 → 输出 → 结果）
 - **回放框架：** 给定历史输入，重放 Agent 决策，量化评分
-- **仪表盘：** 扩展 agentchat 的 Web Dashboard，展示 Agent 效能指标
+- **仪表盘：** 扩展 hafleet 的 Web Dashboard，展示 Agent 效能指标
 
 ---
 

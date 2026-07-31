@@ -2,7 +2,7 @@
 //
 // Hardens a local dotenv file for the standalone supervisor cutover:
 //   - generates a fresh MATRIX_BRIDGE_SECRET
-//   - sets AGENTCHAT_AGENT_TOKEN_MODE
+//   - sets HAFLEET_AGENT_TOKEN_MODE
 //   - optionally maps a whitelisted subset of a Palpo env file onto MATRIX_* keys
 //
 // Every write is atomic (temp file + rename) and the result is always chmod'd
@@ -145,7 +145,7 @@ export function configureStandaloneEnv({
 
   const updates = new Map();
   if (generateBridgeSecretFlag) updates.set('MATRIX_BRIDGE_SECRET', randomSecretFn());
-  if (agentTokenMode !== undefined) updates.set('AGENTCHAT_AGENT_TOKEN_MODE', agentTokenMode);
+  if (agentTokenMode !== undefined) updates.set('HAFLEET_AGENT_TOKEN_MODE', agentTokenMode);
   if (mapMatrix) {
     for (const [key, value] of resolveMatrixMapUpdates(path.resolve(palpoEnvPath))) updates.set(key, value);
   }

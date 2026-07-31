@@ -8,7 +8,7 @@ tags: [agent-spec, workflow]
 
 ## Scope
 
-All agent-chat source, protocol, test, and documentation changes.
+All hafleet source, protocol, test, and documentation changes.
 
 ## Instructions
 

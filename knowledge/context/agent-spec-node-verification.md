@@ -5,7 +5,7 @@ As of agent-spec 1.2.0 (upstream revision
 locates a Cargo workspace and executes `cargo test`. It does not dispatch
 Vitest selectors.
 
-For agent-chat:
+For hafleet:
 
 - use agent-spec for Task Contract parsing, linting, boundary checks, lifecycle
   audit output, KLL governance, and requirement traceability;

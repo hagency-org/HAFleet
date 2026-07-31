@@ -40,24 +40,24 @@ Known structural issue: MCP presence detection uses Linux `/proc` assumptions an
 
 Primary command:
 
-- `bin/agentchat`
+- `bin/hafleet`
 
 Important subcommands and wrappers:
 
-- `agent-up`, `agent-up-v1`
-- `agent-down`
-- `agent-ls`
-- `agent-send`
-- `agent-chat-cli`
-- `agent-project`
-- `agent-graph`
-- `agent-service`
-- `agent-audit`
+- `hafleet-up`, `hafleet-up-v1`
+- `hafleet-down`
+- `hafleet-ls`
+- `hafleet-send`
+- `hafleet-cli`
+- `hafleet-project`
+- `hafleet-graph`
+- `hafleet-service`
+- `hafleet-audit`
 
 Current active-work constraint from ac-topleader:
 
-- Do not edit `bin/agent-up`.
-- Do not edit `remote/bin/agent-up`.
+- Do not edit `bin/hafleet-up`.
+- Do not edit `remote/bin/hafleet-up`.
 - Launch compatibility work is active elsewhere.
 
 ## Remote Transport

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "agentchat.benchmark.profile-version/v1",
+  "$id": "hafleet.benchmark.profile-version/v1",
   "title": "AgentChat Benchmark Profile Version",
   "type": "object",
   "required": [
@@ -15,7 +15,7 @@
     "metadata"
   ],
   "properties": {
-    "schema": { "const": "agentchat.benchmark.profile-version/v1" },
+    "schema": { "const": "hafleet.benchmark.profile-version/v1" },
     "profileId": { "type": "string", "minLength": 1 },
     "version": { "type": "string", "minLength": 1 },
     "createdAt": { "type": "string" },

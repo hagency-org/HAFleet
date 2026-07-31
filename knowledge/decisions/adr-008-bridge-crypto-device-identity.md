@@ -17,7 +17,7 @@ arrive on time but remain undecryptable until the backend TTL expires.
 
 ## Decision
 
-Before constructing the encrypted bridge client, agent-chat queries `/whoami`
+Before constructing the encrypted bridge client, hafleet queries `/whoami`
 with the active bot token and compares its `device_id` with the crypto store's
 persisted device ID.
 

@@ -6,7 +6,7 @@ describe('AgentStateMachine backend integration', () => {
   let context;
 
   beforeAll(async () => {
-    context = await createBackendTestContext('agent-chat-state-int-', {
+    context = await createBackendTestContext('hafleet-state-int-', {
       agents: {
         localagent: {
           name: 'localagent',

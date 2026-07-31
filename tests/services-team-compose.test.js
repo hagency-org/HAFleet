@@ -15,8 +15,8 @@ describe('services-team Compose contract', () => {
     expect(compose.match(/restart: unless-stopped/g)).toHaveLength(4);
     expect(compose.match(/network_mode: host/g)).toHaveLength(4);
     expect(compose.match(/read_only: true/g)).toHaveLength(4);
-    expect(compose.match(/agentchat-runtime:\/var\/lib\/agent-chat/g)).toHaveLength(4);
-    expect(compose).toMatch(/^volumes:\n  agentchat-runtime:$/m);
+    expect(compose.match(/hafleet-runtime:\/var\/lib\/hafleet/g)).toHaveLength(4);
+    expect(compose).toMatch(/^volumes:\n  hafleet-runtime:$/m);
   });
 
   test('uses backend health as the startup dependency', () => {
@@ -29,18 +29,18 @@ describe('services-team Compose contract', () => {
     expect(compose).toMatch(/command: \["services\/run-bridge-container\.sh"\]/);
     expect(compose).toMatch(/command: \["node", "push-relay\.js"\]/);
     expect(compose).toMatch(/PUSH_RELAY_MODE: local/);
-    expect(compose).toContain('$${process.env.AGENT_CHAT_BACKEND_PORT || 8090}');
-    expect(compose).toContain('$${process.env.AGENT_CHAT_WEB_PORT || 8084}');
+    expect(compose).toContain('$${process.env.HAFLEET_BACKEND_PORT || 8090}');
+    expect(compose).toContain('$${process.env.HAFLEET_WEB_PORT || 8084}');
   });
 
   test('contains no literal credentials and requires an operator env file', () => {
     const compose = readFileSync(composePath, 'utf8');
 
-    expect(compose).toMatch(/env_file:\n\s+- \$\{AGENTCHAT_ENV_FILE:-\.\.\/\.env\}/);
+    expect(compose).toMatch(/env_file:\n\s+- \$\{HAFLEET_ENV_FILE:-\.\.\/\.env\}/);
     expect(compose).not.toMatch(/(?:API_TOKEN|PASSWORD|SECRET|AS_TOKEN|HS_TOKEN):\s*[A-Za-z0-9]/);
     expect(compose).not.toContain('change-me');
     expect(compose).not.toContain('dev-token');
-    expect(compose).not.toMatch(/^\s+AGENT_CHAT_(?:API|WEB_URL):/m);
+    expect(compose).not.toMatch(/^\s+HAFLEET_(?:API|WEB_URL):/m);
   });
 
   test('serializes bridge ownership with a crash-safe container lock', () => {
@@ -62,7 +62,7 @@ describe('services-team Compose contract', () => {
     expect(dockerfile).toMatch(/^FROM node:22-bookworm-slim$/m);
     expect(dockerfile).toMatch(/npm ci --omit=dev/);
     expect(dockerfile).toMatch(/^USER node$/m);
-    expect(dockerfile).toMatch(/\/var\/lib\/agent-chat/);
+    expect(dockerfile).toMatch(/\/var\/lib\/hafleet/);
     expect(dockerfile).not.toMatch(/(?:API_TOKEN|PASSWORD|SECRET)=/);
   });
 });

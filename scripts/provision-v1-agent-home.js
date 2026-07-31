@@ -84,7 +84,7 @@ function usage() {
 
 Options:
   --type <claude|codex>       Agent client type (default: claude)
-  --home <path>               AGENTCHAT_HOMEDIR override
+  --home <path>               HAFLEET_HOMEDIR override
   --project <path>            Source project directory to materialize under workdir/projects/
   --project-mode <mode>       copy (default) | symlink
   --project-name <name>       Override project directory name in workdir/projects/
@@ -128,9 +128,9 @@ function parseOptionalBool(value, fallback = null) {
 }
 
 function defaultBackendBaseUrl(env = process.env) {
-  const explicit = String(env.AGENT_CHAT_API || '').trim();
+  const explicit = String(env.HAFLEET_API || '').trim();
   if (explicit) return explicit.replace(/\/$/, '');
-  const port = parsePositiveInt(env.AGENT_CHAT_BACKEND_PORT, 8090);
+  const port = parsePositiveInt(env.HAFLEET_BACKEND_PORT, 8090);
   return `http://127.0.0.1:${port}`;
 }
 
@@ -152,7 +152,7 @@ function safeReadJson(filePath, fallback = null) {
 }
 
 function workspaceTemplateMarker(version = WORKSPACE_CLAUDE_TEMPLATE_VERSION) {
-  return `agentchat-workspace-template: ${version}`;
+  return `hafleet-workspace-template: ${version}`;
 }
 
 function isManagedWorkspaceClaudeContent(content) {
@@ -160,7 +160,7 @@ function isManagedWorkspaceClaudeContent(content) {
 }
 
 function workspaceAgentsTemplateMarker(version = WORKSPACE_AGENTS_TEMPLATE_VERSION) {
-  return `agentchat-workspace-agents-template: ${version}`;
+  return `hafleet-workspace-agents-template: ${version}`;
 }
 
 function isManagedWorkspaceAgentsContent(content) {
@@ -168,7 +168,7 @@ function isManagedWorkspaceAgentsContent(content) {
 }
 
 function supervisorClaudeTemplateMarker(version = SUPERVISOR_CLAUDE_TEMPLATE_VERSION) {
-  return `agentchat-supervisor-workspace-template: ${version}`;
+  return `hafleet-supervisor-workspace-template: ${version}`;
 }
 
 function isManagedSupervisorClaudeContent(content) {
@@ -176,7 +176,7 @@ function isManagedSupervisorClaudeContent(content) {
 }
 
 function supervisorAgentsTemplateMarker(version = SUPERVISOR_AGENTS_TEMPLATE_VERSION) {
-  return `agentchat-supervisor-agents-template: ${version}`;
+  return `hafleet-supervisor-agents-template: ${version}`;
 }
 
 function isManagedSupervisorAgentsContent(content) {
@@ -184,7 +184,7 @@ function isManagedSupervisorAgentsContent(content) {
 }
 
 function taskWriterWrapperMarker(version = TASK_WRITER_WRAPPER_VERSION) {
-  return `agentchat-task-writer-wrapper: ${version}`;
+  return `hafleet-task-writer-wrapper: ${version}`;
 }
 
 function isManagedTaskWriterWrapper(content) {
@@ -574,7 +574,7 @@ function configureSubconscious(paths, manifest) {
   if (!existsSync(CONFIGURE_SUBCONSCIOUS_SCRIPT)) {
     throw new Error(`missing subconscious config script: ${CONFIGURE_SUBCONSCIOUS_SCRIPT}`);
   }
-  const eventUrl = String(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_URL || '').trim()
+  const eventUrl = String(process.env.HAFLEET_SUBCONSCIOUS_EVENT_URL || '').trim()
     || defaultSubconsciousEventUrl(process.env);
   const output = execFileSync('node', [
     CONFIGURE_SUBCONSCIOUS_SCRIPT,
@@ -586,7 +586,7 @@ function configureSubconscious(paths, manifest) {
     '--event-url', eventUrl,
   ], {
     encoding: 'utf-8',
-    env: { ...process.env, AGENTCHAT_SUBCONSCIOUS_EVENT_URL: eventUrl },
+    env: { ...process.env, HAFLEET_SUBCONSCIOUS_EVENT_URL: eventUrl },
   }).trim();
   if (!output) return null;
   return JSON.parse(output);
@@ -613,7 +613,7 @@ function main() {
     ? path.resolve(String(args.homeDir).trim())
     : defaultAgentchatHomeDir(process.env);
   const agentId = String(args.agentId || '').trim() || v1AgentIdFromName(name);
-  const paths = buildV1AgentPaths(name, { ...process.env, AGENTCHAT_HOMEDIR: homeRoot }, agentId);
+  const paths = buildV1AgentPaths(name, { ...process.env, HAFLEET_HOMEDIR: homeRoot }, agentId);
   if (!paths) throw new Error('failed to build v1 agent paths');
 
   ensureDir(paths.homeRoot);

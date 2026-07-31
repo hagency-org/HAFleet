@@ -19,13 +19,13 @@ if (!requestedMode) {
 if (!process.env.PUSH_RELAY_INCLUDE_LEASE_FIELDS) {
   process.env.PUSH_RELAY_INCLUDE_LEASE_FIELDS = '1';
 }
-const remoteServerId = normalizeWrapperValue(process.env.AGENT_CHAT_SERVER);
+const remoteServerId = normalizeWrapperValue(process.env.HAFLEET_SERVER);
 if (!remoteServerId) {
-  console.error('[push-relay] FATAL: remote entrypoint requires AGENT_CHAT_SERVER');
+  console.error('[push-relay] FATAL: remote entrypoint requires HAFLEET_SERVER');
   process.exit(1);
 }
 if (remoteServerId.toLowerCase() === 'local') {
-  console.error("[push-relay] FATAL: remote entrypoint requires AGENT_CHAT_SERVER to be a non-local server id, got 'local'");
+  console.error("[push-relay] FATAL: remote entrypoint requires HAFLEET_SERVER to be a non-local server id, got 'local'");
   process.exit(1);
 }
 
@@ -48,7 +48,7 @@ try {
 }
 
 const core = await import(pathToFileURL(path.resolve(corePath)).href);
-if (process.env.AGENTCHAT_WRAPPER_SMOKE === '1') {
+if (process.env.HAFLEET_WRAPPER_SMOKE === '1') {
   process.exit(0);
 }
 

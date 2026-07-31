@@ -11,10 +11,10 @@ Scope: development implementation only (`no migration`, `no live runtime cutover
 
 ## Runtime Root
 
-- Environment variable: `AGENTCHAT_HOMEDIR`
-- Default when unset: `~/.agentchat`
+- Environment variable: `HAFLEET_HOMEDIR`
+- Default when unset: `~/.hafleet`
 - v1 homes are rooted at:
-  - `${AGENTCHAT_HOMEDIR}/agents/<agent-id>/`
+  - `${HAFLEET_HOMEDIR}/agents/<agent-id>/`
 
 ## Directory Layout
 
@@ -118,7 +118,7 @@ Ownership model:
 
 ## Provisioning Rules
 
-1. Use `agentchat up-v1 ...` for new v1 agents.
+1. Use `hafleet up-v1 ...` for new v1 agents.
 2. Project materialization is explicit:
    - `--project-mode copy` (default)
    - `--project-mode symlink` (explicit opt-in compatibility mode)
@@ -139,14 +139,14 @@ Dual-read order:
 
 - Claude-only runtime wiring for v1 agents:
   - `subconsciousEnabled=false` by default; enable it explicitly per agent when needed.
-  - `agent-up-v1` provisioning and `agent-up` launch both run `scripts/configure-v1-subconscious.js`.
-  - Hook runtime is installed under `<stateDir>/subconscious/claude-agentchat/`.
+  - `hafleet-up-v1` provisioning and `hafleet-up` launch both run `scripts/configure-v1-subconscious.js`.
+  - Hook runtime is installed under `<stateDir>/subconscious/claude-hafleet/`.
   - Claude hook settings are merged into `<workdir>/.claude/settings.json`.
   - Per-agent Letta identity is resolved as:
     1. `LETTA_AGENT_ID` env override
     2. existing `<stateDir>/letta.json` `agentId`
     3. deterministic generated `agent-...` id based on v1 agent identity
   - Resolved Letta identity is persisted to `<stateDir>/letta.json` and reused across launches.
-  - Hook event URL default is derived from runtime backend config (`AGENT_CHAT_API` or `AGENT_CHAT_BACKEND_PORT`, fallback `http://127.0.0.1:8090/api/subconscious/events`).
+  - Hook event URL default is derived from runtime backend config (`HAFLEET_API` or `HAFLEET_BACKEND_PORT`, fallback `http://127.0.0.1:8090/api/subconscious/events`).
   - Hook events are posted to backend API: `POST /api/subconscious/events` and are reviewable via `GET /api/subconscious/events` (+ `/:name`).
 - Codex subconscious integration remains out of scope in this batch.

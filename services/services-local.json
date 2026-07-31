@@ -11,7 +11,7 @@
       "health": {
         "type": "http",
         "host": "127.0.0.1",
-        "portEnv": "AGENT_CHAT_BACKEND_PORT",
+        "portEnv": "HAFLEET_BACKEND_PORT",
         "defaultPort": 8090,
         "path": "/health",
         "timeoutMs": 1000
@@ -29,7 +29,7 @@
       "health": {
         "type": "tcp",
         "host": "127.0.0.1",
-        "portEnv": "AGENT_CHAT_WEB_PORT",
+        "portEnv": "HAFLEET_WEB_PORT",
         "defaultPort": 8084,
         "timeoutMs": 1000
       }

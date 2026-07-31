@@ -25,7 +25,7 @@ Usage: ./install-full.sh [options]
 Install the full local Agent Chat stack on Linux:
   - Node dependencies
   - .env bootstrap with required API_TOKEN
-  - agent-chat-v2, agent-chat, and agent-chat-push-relay systemd units
+  - hafleet-backend, hafleet, and hafleet-push-relay systemd units
   - CLI symlinks in ~/.local/bin
   - Claude/Codex skill links
   - Claude Code and Codex MCP user config when the CLIs are available
@@ -42,7 +42,7 @@ Options:
   --skip-prereq-check   Do not check host prerequisites
   --with-bridge         Also install/enable bridge-matrix.service
   --deny-existing-tmux  Install even if unrelated tmux sessions exist, adding them
-                        to AGENT_CHAT_SESSION_DENYLIST so HAFleet leaves them alone
+                        to HAFLEET_SESSION_DENYLIST so HAFleet leaves them alone
   --allow-existing-tmux Install and manage pre-existing tmux sessions anyway
   -h, --help            Show this help
 
@@ -211,18 +211,18 @@ apply_session_denylist() {
   [ "$DENY_EXISTING_TMUX" = true ] || return 0
   [ -n "$EXISTING_TMUX_SESSIONS" ] || { log "No sessions to deny."; return 0; }
   if [ "$DRY_RUN" = true ]; then
-    log "[dry-run] would set AGENT_CHAT_SESSION_DENYLIST=$EXISTING_TMUX_SESSIONS"
+    log "[dry-run] would set HAFLEET_SESSION_DENYLIST=$EXISTING_TMUX_SESSIONS"
     return 0
   fi
   local existing merged
-  existing="$(read_env_value AGENT_CHAT_SESSION_DENYLIST "$ENV_FILE")"
+  existing="$(read_env_value HAFLEET_SESSION_DENYLIST "$ENV_FILE")"
   if [ -n "$existing" ]; then
     merged="$existing,$EXISTING_TMUX_SESSIONS"
   else
     merged="$EXISTING_TMUX_SESSIONS"
   fi
-  set_env_value AGENT_CHAT_SESSION_DENYLIST "$merged" "$ENV_FILE"
-  log "AGENT_CHAT_SESSION_DENYLIST=$merged"
+  set_env_value HAFLEET_SESSION_DENYLIST "$merged" "$ENV_FILE"
+  log "HAFLEET_SESSION_DENYLIST=$merged"
 }
 
 check_prereqs() {
@@ -385,15 +385,15 @@ link_cli_commands() {
 
 link_skill() {
   local target="$1"
-  local template="$INSTALL_DIR/skills/agent-chat/SKILL.md"
+  local template="$INSTALL_DIR/skills/hafleet/SKILL.md"
   [ -f "$template" ] || die "missing skill template: $template"
   run mkdir -p "$(dirname "$target")"
   run ln -sfn "$template" "$target"
 }
 
 install_skills() {
-  link_skill "$HOME/.claude/skills/agent-chat/SKILL.md"
-  link_skill "$HOME/.codex/skills/agent-chat/SKILL.md"
+  link_skill "$HOME/.claude/skills/hafleet/SKILL.md"
+  link_skill "$HOME/.codex/skills/hafleet/SKILL.md"
   link_skill "$HOME/.claude/skills/agent-message/SKILL.md"
   link_skill "$HOME/.codex/skills/agent-message/SKILL.md"
 }
@@ -405,20 +405,20 @@ configure_claude_mcp() {
   fi
   if ! command -v claude >/dev/null 2>&1; then
     log "Claude Code CLI not found; skipping MCP configuration."
-    log "Run: claude mcp add -s user -e AGENT_CHAT_API=http://127.0.0.1:8090 -e API_TOKEN=<token> -e AGENTCHAT_HOMEDIR=$HOME/.agentchat -- agent-chat node $INSTALL_DIR/mcp-server.js"
+    log "Run: claude mcp add -s user -e HAFLEET_API=http://127.0.0.1:8090 -e API_TOKEN=<token> -e HAFLEET_HOMEDIR=$HOME/.hafleet -- hafleet node $INSTALL_DIR/mcp-server.js"
     return 0
   fi
-  local api_token api_base agentchat_home
+  local api_token api_base hafleet_home
   api_token="$(read_env_value API_TOKEN "$ENV_FILE")"
-  api_base="$(read_env_value AGENT_CHAT_API "$ENV_FILE")"
-  agentchat_home="${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}"
+  api_base="$(read_env_value HAFLEET_API "$ENV_FILE")"
+  hafleet_home="${HAFLEET_HOMEDIR:-$HOME/.hafleet}"
   [ -n "$api_base" ] || api_base="http://127.0.0.1:8090"
   run claude mcp add -s user \
-    -e "AGENT_CHAT_API=$api_base" \
+    -e "HAFLEET_API=$api_base" \
     -e "API_TOKEN=$api_token" \
-    -e "AGENTCHAT_HOMEDIR=$agentchat_home" \
-    -e "AGENT_CHAT_MCP_SERVER_NAME=agent-chat" \
-    -- agent-chat node "$INSTALL_DIR/mcp-server.js"
+    -e "HAFLEET_HOMEDIR=$hafleet_home" \
+    -e "HAFLEET_MCP_SERVER_NAME=hafleet" \
+    -- hafleet node "$INSTALL_DIR/mcp-server.js"
 }
 
 configure_codex_mcp() {
@@ -428,29 +428,29 @@ configure_codex_mcp() {
   fi
   if ! command -v codex >/dev/null 2>&1; then
     log "Codex CLI not found; skipping MCP configuration."
-    log "Run: codex mcp add agent-chat --env AGENT_CHAT_API=http://127.0.0.1:8090 --env API_TOKEN=<token> --env AGENTCHAT_HOMEDIR=$HOME/.agentchat -- node $INSTALL_DIR/mcp-server.js"
+    log "Run: codex mcp add hafleet --env HAFLEET_API=http://127.0.0.1:8090 --env API_TOKEN=<token> --env HAFLEET_HOMEDIR=$HOME/.hafleet -- node $INSTALL_DIR/mcp-server.js"
     return 0
   fi
-  local api_token api_base agentchat_home
+  local api_token api_base hafleet_home
   api_token="$(read_env_value API_TOKEN "$ENV_FILE")"
-  api_base="$(read_env_value AGENT_CHAT_API "$ENV_FILE")"
-  agentchat_home="${AGENTCHAT_HOMEDIR:-$HOME/.agentchat}"
+  api_base="$(read_env_value HAFLEET_API "$ENV_FILE")"
+  hafleet_home="${HAFLEET_HOMEDIR:-$HOME/.hafleet}"
   [ -n "$api_base" ] || api_base="http://127.0.0.1:8090"
-  run codex mcp remove agent-chat >/dev/null 2>&1 || true
-  run codex mcp add agent-chat \
-    --env "AGENT_CHAT_API=$api_base" \
+  run codex mcp remove hafleet >/dev/null 2>&1 || true
+  run codex mcp add hafleet \
+    --env "HAFLEET_API=$api_base" \
     --env "API_TOKEN=$api_token" \
-    --env "AGENTCHAT_HOMEDIR=$agentchat_home" \
-    --env "AGENT_CHAT_MCP_SERVER_NAME=agent-chat" \
+    --env "HAFLEET_HOMEDIR=$hafleet_home" \
+    --env "HAFLEET_MCP_SERVER_NAME=hafleet" \
     -- node "$INSTALL_DIR/mcp-server.js"
 }
 
 install_services() {
   run mkdir -p "$SYSTEMD_DIR"
   local services=(
-    "agent-chat-v2.service"
-    "agent-chat.service"
-    "agent-chat-push-relay.service"
+    "hafleet-backend.service"
+    "hafleet.service"
+    "hafleet-push-relay.service"
   )
   if [ "$WITH_BRIDGE" = true ]; then
     services+=("bridge-matrix.service")
@@ -473,10 +473,10 @@ install_services() {
     return 0
   fi
 
-  systemctl_run enable agent-chat-v2.service agent-chat.service agent-chat-push-relay.service
-  systemctl_run restart agent-chat-v2.service
-  systemctl_run restart agent-chat.service
-  systemctl_run restart agent-chat-push-relay.service
+  systemctl_run enable hafleet-backend.service hafleet.service hafleet-push-relay.service
+  systemctl_run restart hafleet-backend.service
+  systemctl_run restart hafleet.service
+  systemctl_run restart hafleet-push-relay.service
   if [ "$WITH_BRIDGE" = true ]; then
     systemctl_run enable bridge-matrix.service
     systemctl_run restart bridge-matrix.service
@@ -485,19 +485,19 @@ install_services() {
 
 verify_installation() {
   [ "$DRY_RUN" = false ] || return 0
-  [ -x "$BIN_DIR/agentchat" ] || die "agentchat command was not linked into $BIN_DIR"
-  [ -f "$SYSTEMD_DIR/agent-chat-v2.service" ] || die "agent-chat-v2.service was not installed"
-  [ -f "$SYSTEMD_DIR/agent-chat.service" ] || die "agent-chat.service was not installed"
-  [ -f "$SYSTEMD_DIR/agent-chat-push-relay.service" ] || die "agent-chat-push-relay.service was not installed"
+  [ -x "$BIN_DIR/hafleet" ] || die "hafleet command was not linked into $BIN_DIR"
+  [ -f "$SYSTEMD_DIR/hafleet-backend.service" ] || die "hafleet-backend.service was not installed"
+  [ -f "$SYSTEMD_DIR/hafleet.service" ] || die "hafleet.service was not installed"
+  [ -f "$SYSTEMD_DIR/hafleet-push-relay.service" ] || die "hafleet-push-relay.service was not installed"
 
   if [ "$WITH_BRIDGE" = true ]; then
     [ -f "$SYSTEMD_DIR/bridge-matrix.service" ] || die "bridge-matrix.service was not installed"
   fi
 
   if is_system_dir && [ "$NO_START" = false ]; then
-    systemctl_run is-active --quiet agent-chat-v2.service
-    systemctl_run is-active --quiet agent-chat.service
-    systemctl_run is-active --quiet agent-chat-push-relay.service
+    systemctl_run is-active --quiet hafleet-backend.service
+    systemctl_run is-active --quiet hafleet.service
+    systemctl_run is-active --quiet hafleet-push-relay.service
     # Previously unchecked, so a bridge that fail-closed on startup still let
     # the installer print "Installation complete."
     if [ "$WITH_BRIDGE" = true ]; then

@@ -51,26 +51,26 @@ the coding runtime's native permission boundary.
 [REQ-OWNER-UI-APPROVAL-CONSUME] A server-authorized verdict MUST be consumed atomically before an allow or deny is delivered to the coding runtime.
 
 [REQ-OWNER-UI-APPROVAL-CODEX-COORDINATION] A trusted Codex permission hook MUST
-allow the exact agent-chat MCP coordination and task-control tools without
-creating a recursive owner approval. Text-only agent-chat messaging MAY use
-this path; any message that asks agent-chat to read and transmit a local file
+allow the exact hafleet MCP coordination and task-control tools without
+creating a recursive owner approval. Text-only hafleet messaging MAY use
+this path; any message that asks hafleet to read and transmit a local file
 attachment MUST remain owner-gated. Unrelated MCP tools and coding operations
 MUST NOT inherit this exemption.
 
 [REQ-OWNER-UI-APPROVAL-CONTROL] Public-room `!ctl key`, `!ctl send`, and equivalent generic controls MUST NOT bypass the approval state machine.
 
-[REQ-OWNER-UI-APPROVAL-AUTHORITY] Robrix2 MUST remain a rendering and event-emission client; agent-chat MUST remain the authorization authority.
+[REQ-OWNER-UI-APPROVAL-AUTHORITY] Robrix2 MUST remain a rendering and event-emission client; hafleet MUST remain the authorization authority.
 
 ## Scenarios
 
 Scenario: Owner approves once from the encrypted DM UI
   Given a pending request is bound to an agent, project, owner, and encrypted DM
   When the exact owner selects the approve-once button before expiry
-  Then agent-chat atomically accepts one matching verdict and relays it through the supported runtime permission protocol
+  Then hafleet atomically accepts one matching verdict and relays it through the supported runtime permission protocol
 
 Scenario: Public project-room notice is read only
   Given an agent is waiting for approval
-  When agent-chat publishes status to the project room
+  When hafleet publishes status to the project room
   Then the notice contains no private input and no actionable approval control
 
 Scenario: Text approval is ignored
@@ -81,12 +81,12 @@ Scenario: Text approval is ignored
 Scenario: Another developer cannot approve
   Given a pending request belongs to one owner MXID
   When another project-room developer selects or forges an approval action
-  Then agent-chat rejects the event
+  Then hafleet rejects the event
 
 Scenario: Two local agents share one project room without sharing authority
   Given a trusted developer invited two distinct managed agents into one project room
   When either runtime creates an approval request
-  Then agent-chat resolves the request through that exact agent's room-agent binding
+  Then hafleet resolves the request through that exact agent's room-agent binding
   And the other agent's approval room and state remain unchanged
 
 Scenario: Public-room control commands cannot approve
@@ -97,7 +97,7 @@ Scenario: Public-room control commands cannot approve
 Scenario: Expired or replayed action is rejected
   Given a request expired or already reached a terminal state
   When the owner repeats the previous UI action
-  Then agent-chat rejects it without changing the terminal result
+  Then hafleet rejects it without changing the terminal result
 
 Scenario: Delayed encrypted verdict key is recoverable
   Given the owner submits a structured verdict before the bridge receives its room key
@@ -121,7 +121,7 @@ Scenario: A rotated access token does not reuse stale device private keys
 Scenario: Empty owner fails closed
   Given no trusted inviter provenance identifies an owner
   When a runtime requests permission
-  Then agent-chat denies the request and creates no generally-approvable fallback
+  Then hafleet denies the request and creates no generally-approvable fallback
 
 Scenario: Managed runtime transport failure does not hide in tmux
   Given a Claude or Codex agent runs as a managed background session
@@ -151,7 +151,7 @@ Scenario: Adapter timeout covers approval lifetime
 
 Scenario: Codex reads its workflow inbox without recursive approval
   Given the managed Codex hook is trusted for its exact current contents
-  When Codex calls the exact agent-chat check_inbox MCP tool
+  When Codex calls the exact hafleet check_inbox MCP tool
   Then the hook allows that bounded coordination call locally
   And it creates no owner approval request
   And external coding tools remain owner-gated

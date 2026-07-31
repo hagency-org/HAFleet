@@ -89,8 +89,8 @@ NODE
 
 echo "Checking generated remote package shape..."
 for required in \
-  "bin/agentchat" \
-  "bin/agent-up" \
+  "bin/hafleet" \
+  "bin/hafleet-up" \
   "push-relay.js" \
   "push-relay-autodeploy.service" \
   "mcp-server.js" \
@@ -142,11 +142,11 @@ autodeploy_service="$(cat "$PKG_DIR/push-relay-autodeploy.service")"
 assert_contains "$autodeploy_service" "User=__USER__" "generated remote autodeploy service"
 assert_contains "$autodeploy_service" "WorkingDirectory=__REPODIR__" "generated remote autodeploy service"
 assert_contains "$autodeploy_service" "EnvironmentFile=__ENV_FILE__" "generated remote autodeploy service"
-assert_contains "$autodeploy_service" "ExecStart=/usr/bin/env bash __REPODIR__/scripts/agentchat-remote-autodeploy.sh" "generated remote autodeploy service"
+assert_contains "$autodeploy_service" "ExecStart=/usr/bin/env bash __REPODIR__/scripts/hafleet-remote-autodeploy.sh" "generated remote autodeploy service"
 echo "[OK] Generated remote autodeploy service contract is stable"
 
-help_output="$("$PKG_DIR/bin/agentchat" --help)"
-printf '%s' "$help_output" | grep -q 'Usage: agentchat <command> \[args\]' || fail "generated agentchat help missing usage"
+help_output="$("$PKG_DIR/bin/hafleet" --help)"
+printf '%s' "$help_output" | grep -q 'Usage: hafleet <command> \[args\]' || fail "generated hafleet help missing usage"
 for unsupported in up-v1 project graph resume-id benchmark audit sync-skills check-mcp; do
   if printf '%s\n' "$help_output" | grep -Eq "^[[:space:]]*$unsupported([[:space:]]|$)"; then
     fail "generated remote help advertises unsupported command: $unsupported"
@@ -154,10 +154,10 @@ for unsupported in up-v1 project graph resume-id benchmark audit sync-skills che
 done
 echo "[OK] Generated remote help is profile-scoped"
 
-GRAPH_OUT="$TMP_DIR/agentchat-remote-graph.out"
-GRAPH_ERR="$TMP_DIR/agentchat-remote-graph.err"
-if "$PKG_DIR/bin/agentchat" graph >"$GRAPH_OUT" 2>"$GRAPH_ERR"; then
-  fail "generated remote agentchat graph unexpectedly succeeded"
+GRAPH_OUT="$TMP_DIR/hafleet-remote-graph.out"
+GRAPH_ERR="$TMP_DIR/hafleet-remote-graph.err"
+if "$PKG_DIR/bin/hafleet" graph >"$GRAPH_OUT" 2>"$GRAPH_ERR"; then
+  fail "generated remote hafleet graph unexpectedly succeeded"
 fi
 if ! grep -qi 'unknown or unsupported remote command' "$GRAPH_ERR"; then
   cat "$GRAPH_ERR" >&2
@@ -165,10 +165,10 @@ if ! grep -qi 'unknown or unsupported remote command' "$GRAPH_ERR"; then
 fi
 echo "[OK] Generated remote unsupported command fails clearly"
 
-AUDIT_OUT="$TMP_DIR/agentchat-remote-audit.out"
-AUDIT_ERR="$TMP_DIR/agentchat-remote-audit.err"
-if "$PKG_DIR/bin/agentchat" audit --quiet >"$AUDIT_OUT" 2>"$AUDIT_ERR"; then
-  fail "generated remote agentchat audit --quiet unexpectedly succeeded"
+AUDIT_OUT="$TMP_DIR/hafleet-remote-audit.out"
+AUDIT_ERR="$TMP_DIR/hafleet-remote-audit.err"
+if "$PKG_DIR/bin/hafleet" audit --quiet >"$AUDIT_OUT" 2>"$AUDIT_ERR"; then
+  fail "generated remote hafleet audit --quiet unexpectedly succeeded"
 fi
 if ! grep -qi 'unknown or unsupported remote command' "$AUDIT_ERR"; then
   cat "$AUDIT_ERR" >&2
@@ -179,10 +179,10 @@ if grep -Eqi 'No such file|not found' "$AUDIT_ERR"; then
   fail "generated remote audit command leaked missing-file details"
 fi
 
-SYNC_SKILLS_OUT="$TMP_DIR/agentchat-remote-sync-skills.out"
-SYNC_SKILLS_ERR="$TMP_DIR/agentchat-remote-sync-skills.err"
-if "$PKG_DIR/bin/agentchat" sync-skills --check >"$SYNC_SKILLS_OUT" 2>"$SYNC_SKILLS_ERR"; then
-  fail "generated remote agentchat sync-skills --check unexpectedly succeeded"
+SYNC_SKILLS_OUT="$TMP_DIR/hafleet-remote-sync-skills.out"
+SYNC_SKILLS_ERR="$TMP_DIR/hafleet-remote-sync-skills.err"
+if "$PKG_DIR/bin/hafleet" sync-skills --check >"$SYNC_SKILLS_OUT" 2>"$SYNC_SKILLS_ERR"; then
+  fail "generated remote hafleet sync-skills --check unexpectedly succeeded"
 fi
 if ! grep -qi 'unknown or unsupported remote command' "$SYNC_SKILLS_ERR"; then
   cat "$SYNC_SKILLS_ERR" >&2
@@ -195,25 +195,25 @@ fi
 echo "[OK] Generated remote git-checkout-only commands fail clearly"
 
 echo "Checking generated remote scoped help..."
-service_help="$("$PKG_DIR/bin/agentchat" service --help)"
+service_help="$("$PKG_DIR/bin/hafleet" service --help)"
 assert_contains "$service_help" "Controls services on the current host only." "generated remote service help"
-assert_contains "$service_help" "remote relay service agent-chat-push-relay" "generated remote service help"
-update_help="$("$PKG_DIR/bin/agentchat" update --help)"
+assert_contains "$service_help" "remote relay service hafleet-push-relay" "generated remote service help"
+update_help="$("$PKG_DIR/bin/hafleet" update --help)"
 assert_contains "$update_help" "Updates git-checkout installs on this host." "generated remote update help"
 assert_contains "$update_help" "Standalone remote packages cannot self-update" "generated remote update help"
-assert_contains "$update_help" "Service flags only control the remote relay service: agent-chat-push-relay." "generated remote update help"
-ls_help="$("$PKG_DIR/bin/agentchat" ls --help)"
+assert_contains "$update_help" "Service flags only control the remote relay service: hafleet-push-relay." "generated remote update help"
+ls_help="$("$PKG_DIR/bin/hafleet" ls --help)"
 assert_contains "$ls_help" "Lists tmux sessions on the current runtime host." "generated remote ls help"
 assert_contains "$ls_help" "backend-registered agents and v1 manifests visible to this host" "generated remote ls help"
-down_help="$("$PKG_DIR/bin/agentchat" down --help)"
+down_help="$("$PKG_DIR/bin/hafleet" down --help)"
 assert_contains "$down_help" "Stops a tmux session on the current runtime host only." "generated remote down help"
 assert_contains "$down_help" "The backend is used for name resolution" "generated remote down help"
 echo "[OK] Generated remote scoped help is explicit"
 
-UPDATE_OUT="$TMP_DIR/agentchat-update-check.out"
-UPDATE_ERR="$TMP_DIR/agentchat-update-check.err"
-if HOME="$TMP_DIR/home" AGENT_CHAT_HOME= AGENT_CHAT_ROOT= "$PKG_DIR/bin/agentchat" update --check >"$UPDATE_OUT" 2>"$UPDATE_ERR"; then
-  fail "generated standalone agentchat update --check unexpectedly succeeded"
+UPDATE_OUT="$TMP_DIR/hafleet-update-check.out"
+UPDATE_ERR="$TMP_DIR/hafleet-update-check.err"
+if HOME="$TMP_DIR/home" HAFLEET_REPO_DIR= HAFLEET_REPO_ROOT= "$PKG_DIR/bin/hafleet" update --check >"$UPDATE_OUT" 2>"$UPDATE_ERR"; then
+  fail "generated standalone hafleet update --check unexpectedly succeeded"
 fi
 assert_contains "$(cat "$UPDATE_ERR")" "standalone remote package cannot self-update" "generated standalone update guard"
 assert_contains "$(cat "$UPDATE_ERR")" ".git checkout" "generated standalone update guard"
@@ -225,11 +225,11 @@ fi
 echo "[OK] Generated standalone update guard fails clearly"
 
 echo "Checking generated remote wrapper resolution..."
-if ! AGENTCHAT_WRAPPER_SMOKE=1 AGENT_CHAT_SERVER=remote-smoke node "$PKG_DIR/push-relay.js"; then
+if ! HAFLEET_WRAPPER_SMOKE=1 HAFLEET_SERVER=remote-smoke node "$PKG_DIR/push-relay.js"; then
   fail "generated push-relay wrapper failed to resolve its core module"
 fi
 echo "[OK] Generated push-relay wrapper resolves package-local core"
-if ! AGENTCHAT_WRAPPER_SMOKE=1 node "$PKG_DIR/mcp-server.js"; then
+if ! HAFLEET_WRAPPER_SMOKE=1 node "$PKG_DIR/mcp-server.js"; then
   fail "generated MCP wrapper failed to resolve its core module"
 fi
 echo "[OK] Generated MCP wrapper resolves package-local core"

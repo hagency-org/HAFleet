@@ -82,11 +82,11 @@ Recommended store name: `delivery-tasks.jsonl` plus a compacted `delivery-tasks.
   "idempotencyKey": "targetAgent:kind:sourceFingerprint",
   "kind": "inbox_notification",
   "status": "pending",
-  "targetAgent": "agentchat-worker",
+  "targetAgent": "hafleet-worker",
   "targetServer": "local",
   "target": {
     "kind": "tmux",
-    "tmux": "agentchat-worker:0.0"
+    "tmux": "hafleet-worker:0.0"
   },
   "source": {
     "messageId": "msg_...",
@@ -277,7 +277,7 @@ Relay sends observations back in `defer` or `ack`:
   "blockedReason": null,
   "mcpPresent": true,
   "paneCommand": "codex",
-  "workspacePath": "/home/shisui/laplace/agent-chat"
+  "workspacePath": "/home/shisui/laplace/hafleet"
 }
 ```
 
@@ -440,7 +440,7 @@ Exit criteria:
 
 ### Phase C: Move Central-Local Default Delivery To Relay
 
-- Ensure central machine runs `agent-chat-push-relay.service` as the local runtime host.
+- Ensure central machine runs `hafleet-push-relay.service` as the local runtime host.
 - Backend no longer posts notifications to `server.js /api/queue`.
 - Dashboard reads backend delivery queue state through `GET /api/delivery/tasks`.
 - Existing queue UI actions call backend cancel/requeue/force-deliver APIs.
@@ -540,11 +540,11 @@ Keep SSE as event transport, but change delivery semantics:
 - `delivery_wakeup` is the only relay delivery signal;
 - relay correctness does not depend on receiving every SSE frame because polling claim is required.
 
-### `bin/agent-up` And `remote/bin/agent-up`
+### `bin/hafleet-up` And `remote/bin/hafleet-up`
 
 Not part of delivery queue migration, but required for full local/remote unification:
 
-- both launchers must inject the same `AGENT_CHAT_SERVER` into MCP;
+- both launchers must inject the same `HAFLEET_SERVER` into MCP;
 - remote must not silently default MCP registration to `local`;
 - managed MCP behavior must be tested and aligned;
 - Codex MCP auth must be explicit through per-agent token or injected host-safe credential.
@@ -632,7 +632,7 @@ Do not do a big-bang cut unless an operator maintenance window accepts notificat
 - same relay worker test runs with `PUSH_RELAY_MODE=local` and `remote`;
 - `remote/lib/push-relay-core.js` mirrors root core;
 - server id mismatch fails closed;
-- missing `AGENT_CHAT_SERVER` in remote profile fails startup or registers no agent.
+- missing `HAFLEET_SERVER` in remote profile fails startup or registers no agent.
 
 ### Dashboard Compatibility
 
@@ -682,8 +682,8 @@ Alerts:
 
 During Phase A/B:
 
-- Keep old `server.js /api/queue` delivery path behind a feature flag such as `AGENTCHAT_LEGACY_WEB_QUEUE_DELIVERY=1`.
-- New backend task creation can be disabled with `AGENTCHAT_DELIVERY_QUEUE_ENABLED=0`.
+- Keep old `server.js /api/queue` delivery path behind a feature flag such as `HAFLEET_LEGACY_WEB_QUEUE_DELIVERY=1`.
+- New backend task creation can be disabled with `HAFLEET_DELIVERY_QUEUE_ENABLED=0`.
 - Relay claim worker can run in dry-run mode: claim/defer without injection.
 
 Rollback from Phase C:

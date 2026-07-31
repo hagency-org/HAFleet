@@ -11,9 +11,9 @@ Active constraints:
 
 - Stay on `master`.
 - Do not modify `stable`.
-- Do not edit `bin/agent-up`.
-- Do not edit `remote/bin/agent-up`.
-- Keep launch/remote-agent-up repairs coordinated with the active bash 3.2/tmux launch work.
+- Do not edit `bin/hafleet-up`.
+- Do not edit `remote/bin/hafleet-up`.
+- Keep launch/remote-hafleet-up repairs coordinated with the active bash 3.2/tmux launch work.
 
 ## Batch 1: Kernel Auth And Memory Boundary
 
@@ -73,26 +73,26 @@ Risk:
 Repairs:
 
 - R-009: cross-platform MCP presence detection.
-- R-015: make `agent-service` compatible with macOS bash 3.2.
+- R-015: make `hafleet-service` compatible with macOS bash 3.2.
 
 Deferred for this pass:
 
 - R-012: move MCP media cache out of project CWD.
-- R-013: allow emergency local `agent-down --kill` during backend outage.
+- R-013: allow emergency local `hafleet-down --kill` during backend outage.
 
 Likely files:
 
 - `lib/push-relay-core.js`
 - `lib/mcp-server-core.js`
-- `bin/agent-down`
-- `bin/agent-service`
+- `bin/hafleet-down`
+- `bin/hafleet-service`
 - related tests.
 
 Verification target:
 
 ```bash
 npm test -- tests/push-relay.test.js
-bash -n bin/agent-down bin/agent-service
+bash -n bin/hafleet-down bin/hafleet-service
 ```
 
 Risk:
@@ -161,7 +161,7 @@ npm run check:remote-sync
 
 Risk:
 
-- Remote launch files are under active work. Do not touch remote `agent-up` until ac-topleader/operator clears that work.
+- Remote launch files are under active work. Do not touch remote `hafleet-up` until ac-topleader/operator clears that work.
 
 ## Commit Plan
 

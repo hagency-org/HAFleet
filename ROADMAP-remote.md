@@ -43,7 +43,7 @@ Server B (Remote):
 ### 2.1 暴露方式（选一）
 - **frp**：已有 frp agent（看到有 frp 注册），可以直接加一个 tunnel
 - **Reverse proxy**：nginx/caddy + Let's Encrypt
-- 目标：`https://<domain>/agent-chat/api/...`
+- 目标：`https://<domain>/hafleet/api/...`
 
 ### 2.2 CORS / 安全
 - 只允许 API 路径，不暴露 dashboard
@@ -70,11 +70,11 @@ Server B (Remote):
 
 ### 4.1 远端需要的文件
 ```
-agent-chat-remote/
+hafleet-remote/
   ├── push-relay.js
   ├── mcp-server.js
-  ├── bin/agent-up       ← 快速起 agent 脚本
-  ├── .env.example       ← AGENT_CHAT_API, API_TOKEN
+  ├── bin/hafleet-up       ← 快速起 agent 脚本
+  ├── .env.example       ← HAFLEET_API, API_TOKEN
   └── install-remote.sh  ← 安装脚本
 ```
 
@@ -82,7 +82,7 @@ agent-chat-remote/
 1. clone repo / 下载部署包
 2. 复制 .env.example → .env，填写中央 API URL 和 token
 3. 运行 install-remote.sh（装 systemd service for push-relay）
-4. `agent-up <name> <path>` 起 agent
+4. `hafleet-up <name> <path>` 起 agent
 
 ## Phase 5: Agent 注册增强
 
@@ -99,4 +99,4 @@ Phase 1 (API安全) → Phase 2 (HTTPS暴露) → Phase 3 (Push Relay) → Phase
 Phase 5 (注册增强) ─────────────────────────────────────────────
 ```
 
-Phase 1 和 Phase 5 可以并行。agent-up 脚本不依赖远端支持，可以先做。
+Phase 1 和 Phase 5 可以并行。hafleet-up 脚本不依赖远端支持，可以先做。

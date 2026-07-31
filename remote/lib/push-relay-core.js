@@ -25,11 +25,11 @@ const PUSH_RELAY_MODE = (process.env.PUSH_RELAY_MODE || 'local').trim().toLowerC
 const PUSH_RELAY_REMOTE_MODE = PUSH_RELAY_MODE === 'remote';
 const DEFAULT_IDLE_THRESHOLD_MS = PUSH_RELAY_REMOTE_MODE ? 20000 : 15000;
 const PUSH_RELAY_INCLUDE_LEASE_FIELDS = (process.env.PUSH_RELAY_INCLUDE_LEASE_FIELDS ?? (PUSH_RELAY_REMOTE_MODE ? '1' : '0')) === '1';
-const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
+const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.HAFLEET_BACKEND_PORT || '8090', 10);
 const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
   ? DEFAULT_BACKEND_PORT_RAW
   : 8090;
-const API_BASE = (process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).replace(/\/$/, '');
+const API_BASE = (process.env.HAFLEET_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).replace(/\/$/, '');
 const API_TOKEN = (process.env.API_TOKEN || '').trim();
 const SERVER_ID = resolveLocalServerId();
 const SCAN_INTERVAL_MS = Number.parseInt(process.env.PUSH_RELAY_SCAN_INTERVAL_MS || '30000', 10);
@@ -564,7 +564,7 @@ async function sendOfflineNotice(reason = 'push-relay-shutdown') {
 }
 
 function mcpPidFilePath(agentName) {
-  const homeRoot = (process.env.AGENTCHAT_HOMEDIR || '').trim() || path.join(os.homedir(), '.agentchat');
+  const homeRoot = (process.env.HAFLEET_HOMEDIR || '').trim() || path.join(os.homedir(), '.hafleet');
   return path.join(homeRoot, 'agents', `agent_${agentName}`, 'state', 'mcp-server.pid');
 }
 
@@ -674,8 +674,8 @@ async function buildNotification(agentName, msg) {
     return `[NOTIFICATION] FIRST ACTION: call check_inbox() now. You have ${unreadCount} unread inbox message(s) pending after push relay reconnect. Read all inbox messages before replying.`;
   }
   if (hasMcp) {
-    const checkHint = 'FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.';
-    const sendHint = `Reply using the agent-chat MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
+    const checkHint = 'FIRST ACTION: call check_inbox() now. Use check_inbox() in hafleet MCP for full context before acting.';
+    const sendHint = `Reply using the hafleet MCP tool: send_message(to="${replyTo}", summary="your reply", full="detailed reply")`;
     const actionHint = needsReply ? ` ${sendHint}.` : '';
     return isHuman
       ? `[NOTIFICATION] From ${msg.from}${humanTag}: "${safeSummary}".${operatorHint} ${checkHint}${actionHint}`
@@ -684,7 +684,7 @@ async function buildNotification(agentName, msg) {
 
   const senderAgent = agentsByName.get(replyTo);
   const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
-  const replyHint = `Reply using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
+  const replyHint = `Reply using /agent-message skill or: hafleet-send ${senderTmux} "<your reply>"`;
   const actionHint = needsReply ? ` ${replyHint}.` : '';
   return isHuman
     ? `[NOTIFICATION] From ${msg.from}${humanTag}: "${safeSummary}".${operatorHint}${actionHint}`
@@ -1121,7 +1121,7 @@ function buildUnreadBackfillMessage(agentName, snapshot, reason) {
   return {
     id: `relay_unread_${digest}`,
     ts: Date.now(),
-    from: 'agent-chat',
+    from: 'hafleet',
     to: agentName,
     group: null,
     type: 'inform',

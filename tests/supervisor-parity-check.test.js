@@ -28,7 +28,7 @@ describe('supervisor parity check', () => {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: true },
       },
       groups: {},
-      env: { AGENTCHAT_HOMEDIR: homeDir },
+      env: { HAFLEET_HOMEDIR: homeDir },
     });
 
     const { baseUrl } = await context.listen();
@@ -46,7 +46,7 @@ describe('supervisor parity check', () => {
         'supervisor-ac-topleader': { name: 'supervisor-ac-topleader', type: 'agent', kind: 'agent', online: true },
       },
       groups: {},
-      env: { AGENTCHAT_HOMEDIR: homeDir },
+      env: { HAFLEET_HOMEDIR: homeDir },
     });
 
     const { baseUrl } = await context.listen();

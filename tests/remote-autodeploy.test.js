@@ -7,7 +7,7 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve('.');
-const autodeployScript = path.join(repoRoot, 'scripts', 'agentchat-remote-autodeploy.sh');
+const autodeployScript = path.join(repoRoot, 'scripts', 'hafleet-remote-autodeploy.sh');
 const tmpRoots = [];
 
 async function run(command, args, options = {}) {
@@ -33,9 +33,9 @@ async function createFakeCommands(ctx) {
   await writeExecutable(
     path.join(ctx.binDir, 'systemctl'),
     `#!/usr/bin/env bash
-printf 'systemctl:%s\\n' "$*" >> "$AGENTCHAT_TEST_LOG"
+printf 'systemctl:%s\\n' "$*" >> "$HAFLEET_TEST_LOG"
 case " $* " in
-  *" list-units "*) printf '%s.service loaded active running\\n' "$AGENTCHAT_RELAY_SERVICE" ;;
+  *" list-units "*) printf '%s.service loaded active running\\n' "$HAFLEET_RELAY_SERVICE" ;;
 esac
 exit 0
 `,
@@ -43,22 +43,22 @@ exit 0
   await writeExecutable(
     path.join(ctx.binDir, 'sudo'),
     `#!/usr/bin/env bash
-printf 'sudo:%s\\n' "$*" >> "$AGENTCHAT_TEST_LOG"
+printf 'sudo:%s\\n' "$*" >> "$HAFLEET_TEST_LOG"
 "$@"
 `,
   );
   await writeExecutable(
     path.join(ctx.binDir, 'sleep'),
     `#!/usr/bin/env bash
-printf 'sleep:%s\\n' "$*" >> "$AGENTCHAT_TEST_LOG"
-if [ -n "\${AGENTCHAT_TEST_SLEEP_COUNT_FILE:-}" ]; then
+printf 'sleep:%s\\n' "$*" >> "$HAFLEET_TEST_LOG"
+if [ -n "\${HAFLEET_TEST_SLEEP_COUNT_FILE:-}" ]; then
   count=0
-  if [ -f "$AGENTCHAT_TEST_SLEEP_COUNT_FILE" ]; then
-    count="$(cat "$AGENTCHAT_TEST_SLEEP_COUNT_FILE")"
+  if [ -f "$HAFLEET_TEST_SLEEP_COUNT_FILE" ]; then
+    count="$(cat "$HAFLEET_TEST_SLEEP_COUNT_FILE")"
   fi
   count="$((count + 1))"
-  printf '%s\\n' "$count" > "$AGENTCHAT_TEST_SLEEP_COUNT_FILE"
-  if [ -n "\${AGENTCHAT_TEST_SLEEP_FAIL_AFTER:-}" ] && [ "$count" -ge "$AGENTCHAT_TEST_SLEEP_FAIL_AFTER" ]; then
+  printf '%s\\n' "$count" > "$HAFLEET_TEST_SLEEP_COUNT_FILE"
+  if [ -n "\${HAFLEET_TEST_SLEEP_FAIL_AFTER:-}" ] && [ "$count" -ge "$HAFLEET_TEST_SLEEP_FAIL_AFTER" ]; then
     exit 42
   fi
 fi
@@ -68,11 +68,11 @@ exit 0
   await writeExecutable(
     path.join(ctx.binDir, 'npm'),
     `#!/usr/bin/env bash
-printf 'npm:%s:%s\\n' "$PWD" "$*" >> "$AGENTCHAT_TEST_LOG"
+printf 'npm:%s:%s\\n' "$PWD" "$*" >> "$HAFLEET_TEST_LOG"
 case " $* " in
   *" install --omit=dev"*)
-    if [ -n "\${AGENTCHAT_FAIL_INSTALL_ONCE:-}" ] && [ -f "$AGENTCHAT_FAIL_INSTALL_ONCE" ]; then
-      rm -f "$AGENTCHAT_FAIL_INSTALL_ONCE"
+    if [ -n "\${HAFLEET_FAIL_INSTALL_ONCE:-}" ] && [ -f "$HAFLEET_FAIL_INSTALL_ONCE" ]; then
+      rm -f "$HAFLEET_FAIL_INSTALL_ONCE"
       exit 8
     fi
     ;;
@@ -83,9 +83,9 @@ exit 0
   await writeExecutable(
     path.join(ctx.binDir, 'verify-remote'),
     `#!/usr/bin/env bash
-printf 'verify-remote:%s\\n' "$*" >> "$AGENTCHAT_TEST_LOG"
-if [ -n "\${AGENTCHAT_FAIL_VERIFY_ONCE:-}" ] && [ -f "$AGENTCHAT_FAIL_VERIFY_ONCE" ]; then
-  rm -f "$AGENTCHAT_FAIL_VERIFY_ONCE"
+printf 'verify-remote:%s\\n' "$*" >> "$HAFLEET_TEST_LOG"
+if [ -n "\${HAFLEET_FAIL_VERIFY_ONCE:-}" ] && [ -f "$HAFLEET_FAIL_VERIFY_ONCE" ]; then
+  rm -f "$HAFLEET_FAIL_VERIFY_ONCE"
   exit 9
 fi
 exit 0
@@ -94,7 +94,7 @@ exit 0
 }
 
 async function setupRepo() {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'agentchat-remote-cd-'));
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hafleet-remote-cd-'));
   tmpRoots.push(tmp);
   const ctx = {
     tmp,
@@ -111,7 +111,7 @@ async function setupRepo() {
   await git(ctx.seed, ['init']);
   await git(ctx.seed, ['checkout', '-b', 'stable']);
   await git(ctx.seed, ['config', 'user.name', 'AgentChat Test']);
-  await git(ctx.seed, ['config', 'user.email', 'agentchat@example.test']);
+  await git(ctx.seed, ['config', 'user.email', 'hafleet@example.test']);
   await fs.writeFile(path.join(ctx.seed, 'package.json'), `${JSON.stringify({ dependencies: {} }, null, 2)}\n`);
   await fs.mkdir(path.join(ctx.seed, 'remote'));
   await fs.writeFile(path.join(ctx.seed, 'remote', 'package.json'), `${JSON.stringify({ dependencies: {} }, null, 2)}\n`);
@@ -141,20 +141,20 @@ async function commitAndPush(ctx, files, message) {
 async function runAutodeploy(ctx, env = {}) {
   const baseEnv = {
     ...process.env,
-    AGENT_CHAT_HOME: ctx.live,
-    AGENTCHAT_DEPLOY_BRANCH: 'stable',
-    AGENTCHAT_POLL_SEC: '5',
-    AGENTCHAT_ONCE: '1',
-    AGENTCHAT_DEPLOY_STATE_DIR: ctx.state,
-    AGENTCHAT_RELAY_SERVICE: 'agent-chat-push-relay',
-    AGENTCHAT_SYSTEMCTL_BIN: path.join(ctx.binDir, 'systemctl'),
-    AGENTCHAT_SUDO_BIN: path.join(ctx.binDir, 'sudo'),
-    AGENTCHAT_SLEEP_BIN: path.join(ctx.binDir, 'sleep'),
-    AGENTCHAT_NPM_BIN: path.join(ctx.binDir, 'npm'),
-    AGENTCHAT_VERIFY_REMOTE_BIN: path.join(ctx.binDir, 'verify-remote'),
-    AGENTCHAT_TEST_LOG: ctx.log,
-    AGENT_CHAT_API: 'http://127.0.0.1:8090',
-    AGENT_CHAT_SERVER: 'remote-test',
+    HAFLEET_REPO_DIR: ctx.live,
+    HAFLEET_DEPLOY_BRANCH: 'stable',
+    HAFLEET_POLL_SEC: '5',
+    HAFLEET_ONCE: '1',
+    HAFLEET_DEPLOY_STATE_DIR: ctx.state,
+    HAFLEET_RELAY_SERVICE: 'hafleet-push-relay',
+    HAFLEET_SYSTEMCTL_BIN: path.join(ctx.binDir, 'systemctl'),
+    HAFLEET_SUDO_BIN: path.join(ctx.binDir, 'sudo'),
+    HAFLEET_SLEEP_BIN: path.join(ctx.binDir, 'sleep'),
+    HAFLEET_NPM_BIN: path.join(ctx.binDir, 'npm'),
+    HAFLEET_VERIFY_REMOTE_BIN: path.join(ctx.binDir, 'verify-remote'),
+    HAFLEET_TEST_LOG: ctx.log,
+    HAFLEET_API: 'http://127.0.0.1:8090',
+    HAFLEET_SERVER: 'remote-test',
     API_TOKEN: 'test-token',
     HOME: ctx.tmp,
   };
@@ -217,7 +217,7 @@ describe('remote autodeploy dependency retry', () => {
     const failOnce = path.join(ctx.tmp, 'fail-install-once');
     await fs.writeFile(failOnce, 'fail\n');
 
-    const firstRun = await runAutodeploy(ctx, { AGENTCHAT_FAIL_INSTALL_ONCE: failOnce });
+    const firstRun = await runAutodeploy(ctx, { HAFLEET_FAIL_INSTALL_ONCE: failOnce });
 
     expect(firstRun.stdout).toContain('Update detected:');
     expect(firstRun.stdout).toContain(`Reset to ${nextRef}`);
@@ -228,7 +228,7 @@ describe('remote autodeploy dependency retry', () => {
     expect(commandLog).toContain(`npm:${path.join(ctx.live, 'remote')}:`);
     expect(commandLog).toContain('install --omit=dev');
     expect(commandLog).not.toContain('sudo:');
-    expect(commandLog).not.toContain('restart agent-chat-push-relay');
+    expect(commandLog).not.toContain('restart hafleet-push-relay');
 
     await fs.writeFile(ctx.log, '');
     const secondRun = await runAutodeploy(ctx);
@@ -242,7 +242,7 @@ describe('remote autodeploy dependency retry', () => {
     expect(commandLog).toContain('install --omit=dev');
     expect(commandLog).toContain('systemctl:list-units --type=service --all');
     expect(commandLog).toContain('sudo:');
-    expect(commandLog).toContain('restart agent-chat-push-relay');
+    expect(commandLog).toContain('restart hafleet-push-relay');
     expect(commandLog).toContain('verify-remote:');
     expect(commandLog).toContain('--api http://127.0.0.1:8090');
     expect(commandLog).toContain('--server remote-test');
@@ -275,7 +275,7 @@ describe('remote autodeploy dependency retry', () => {
     const commandLog = await readIfExists(ctx.log);
     expect(commandLog).not.toContain('npm:');
     expect(commandLog).toContain('systemctl:list-units --type=service --all');
-    expect(commandLog).toContain('restart agent-chat-push-relay');
+    expect(commandLog).toContain('restart hafleet-push-relay');
     expect(commandLog).toContain('verify-remote:');
     expect(commandLog).toContain(`--expect-version ${nextShort}`);
   });
@@ -295,7 +295,7 @@ describe('remote autodeploy dependency retry', () => {
     const commandLog = await readIfExists(ctx.log);
     expect(commandLog).toContain(`npm:${path.join(ctx.live, 'remote')}:`);
     expect(commandLog).toContain('install --omit=dev');
-    expect(commandLog).toContain('restart agent-chat-push-relay');
+    expect(commandLog).toContain('restart hafleet-push-relay');
     expect(commandLog).toContain('verify-remote:');
     expect(commandLog).toContain(`--expect-version ${nextShort}`);
   });
@@ -307,7 +307,7 @@ describe('remote autodeploy dependency retry', () => {
     await fs.writeFile(failOnce, 'fail\n');
 
     const runResult = await runAutodeploy(ctx, {
-      AGENTCHAT_FAIL_VERIFY_ONCE: failOnce,
+      HAFLEET_FAIL_VERIFY_ONCE: failOnce,
       VERIFY_AGENT: 'canary',
       VERIFY_SAMPLES: '3',
       VERIFY_INTERVAL: '17',
@@ -320,7 +320,7 @@ describe('remote autodeploy dependency retry', () => {
     expect(runResult.stdout).toContain(`ERROR: remote post-deploy verification failed at commit ${nextRef}`);
     expect(runResult.stdout).not.toContain('Deploy succeeded');
     const commandLog = await readIfExists(ctx.log);
-    expect(commandLog).toContain('restart agent-chat-push-relay');
+    expect(commandLog).toContain('restart hafleet-push-relay');
     expect(commandLog).toContain('verify-remote:');
     expect(commandLog).toContain('--samples 3');
     expect(commandLog).toContain('--interval 17');
@@ -336,10 +336,10 @@ describe('remote autodeploy dependency retry', () => {
     await fs.writeFile(failOnce, 'fail\n');
 
     const runResult = await runAutodeployExpectFailure(ctx, {
-      AGENTCHAT_ONCE: '0',
-      AGENTCHAT_FAIL_VERIFY_ONCE: failOnce,
-      AGENTCHAT_TEST_SLEEP_COUNT_FILE: sleepCount,
-      AGENTCHAT_TEST_SLEEP_FAIL_AFTER: '2',
+      HAFLEET_ONCE: '0',
+      HAFLEET_FAIL_VERIFY_ONCE: failOnce,
+      HAFLEET_TEST_SLEEP_COUNT_FILE: sleepCount,
+      HAFLEET_TEST_SLEEP_FAIL_AFTER: '2',
     });
     const nextShort = await git(ctx.live, ['rev-parse', '--short', 'HEAD']);
 
@@ -358,8 +358,8 @@ describe('remote autodeploy dependency retry', () => {
     await fs.writeFile(
       path.join(ctx.live, 'remote', '.env'),
       [
-        'AGENT_CHAT_API=http://env-file.example.test',
-        'AGENT_CHAT_SERVER=env-server',
+        'HAFLEET_API=http://env-file.example.test',
+        'HAFLEET_SERVER=env-server',
         'API_TOKEN=env-token',
         'VERIFY_AGENT=env-canary',
         'VERIFY_SAMPLES=4',
@@ -370,8 +370,8 @@ describe('remote autodeploy dependency retry', () => {
     const nextRef = await commitAndPush(ctx, { 'README.md': 'env verify update\n' }, 'env verify');
 
     const runResult = await runAutodeploy(ctx, {
-      AGENT_CHAT_API: undefined,
-      AGENT_CHAT_SERVER: undefined,
+      HAFLEET_API: undefined,
+      HAFLEET_SERVER: undefined,
       API_TOKEN: undefined,
     });
     const nextShort = await git(ctx.live, ['rev-parse', '--short', 'HEAD']);
@@ -393,15 +393,15 @@ describe('remote autodeploy dependency retry', () => {
     const nextRef = await commitAndPush(ctx, { 'README.md': 'missing server update\n' }, 'missing server');
 
     const runResult = await runAutodeploy(ctx, {
-      AGENT_CHAT_SERVER: undefined,
+      HAFLEET_SERVER: undefined,
     });
 
     expect(runResult.stdout).toContain(`Reset to ${nextRef}`);
-    expect(runResult.stdout).toContain('ERROR: missing AGENT_CHAT_SERVER; cannot verify remote deploy');
+    expect(runResult.stdout).toContain('ERROR: missing HAFLEET_SERVER; cannot verify remote deploy');
     expect(runResult.stdout).toContain(`ERROR: remote post-deploy verification failed at commit ${nextRef}`);
     expect(runResult.stdout).not.toContain('Deploy succeeded');
     const commandLog = await readIfExists(ctx.log);
-    expect(commandLog).toContain('restart agent-chat-push-relay');
+    expect(commandLog).toContain('restart hafleet-push-relay');
     expect(commandLog).not.toContain('verify-remote:');
   });
 

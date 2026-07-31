@@ -19,7 +19,7 @@ Every remote execution approval uses two Matrix surfaces. The public project
 room receives only a redacted, non-actionable status notice. The agent-owner
 encrypted DM receives the full structured request and UI buttons for
 single-use approve or deny actions. Button clicks emit structured Matrix events;
-agent-chat alone validates and consumes them. Plain text and generic `!ctl`
+hafleet alone validates and consumes them. Plain text and generic `!ctl`
 commands never authorize an execution request.
 
 ## Consequences
@@ -27,7 +27,7 @@ commands never authorize an execution request.
 Good, because project participants can see progress without receiving private
 details or approval power.
 
-Bad, because the workflow requires coordinated protocol support in agent-chat
+Bad, because the workflow requires coordinated protocol support in hafleet
 and Robrix2, plus a healthy encrypted DM channel.
 
 ## Alternatives Considered

@@ -1,4 +1,4 @@
-# salt agent-chat system audit
+# salt hafleet system audit
 
 Archive notice: This folder is historical audit material, not the current deploy or incident runbook. Current operator procedures live in root `README.md` and `OPERATIONS.md`; verify behavior against code before using details here.
 
@@ -8,10 +8,10 @@ Branch: master
 
 ## Purpose
 
-This folder is the working documentation set for the current agent-chat system audit.
+This folder is the working documentation set for the current hafleet system audit.
 The target interpretation is:
 
-- Core: agentchat kernel, where an agent is treated as an addressable, stateful, remembered individual.
+- Core: hafleet kernel, where an agent is treated as an addressable, stateful, remembered individual.
 - Adjacent: task graph, alerts, runtime monitoring, launch/provisioning, and dashboards that support the kernel.
 - Edge: Supervisor, subconscious hooks, Matrix bridge, remote packaging, and optional operator interfaces.
 
@@ -59,7 +59,7 @@ The first phase is documentation and audit only. Code repairs start after the re
 - Phase 0 terminology is staged in `11`; root docs and current code are the authority for active remote/local runtime terms.
 - CI/CD first gate is implemented in `12` and exposed through `npm run verify:ci`.
 - CD preflight, remote dependency scope, and remote post-deploy version checks are implemented; remaining CD work is decision-gated in `14` and remote install/profile facts are locked in `16`.
-- Phase 2-7 resumption is staged in `15`; RLP4-A MCP media cache relocation, RLP4-B v1 home/runtime resolver hardening, RLP2-A runtime observation provenance, RLP2-B custom local server ID/local server record, CLI unknown-activity observability, RLP6-A profile-scoped help/docs, RLP6-B `agent-ls` resolver consistency, RLP3-A auth readiness diagnostics, RLP3-A2 server credential boundary diagnostics, and RLP3-B1 dashboard mutation boundary are implemented. RLP7-B dependency audit findings are documented for approval. CD decision docs now include full-clone remote profile, dependency lock, standalone version, and install-reconciliation decisions; deploy-behavior batches remain operator-gated.
+- Phase 2-7 resumption is staged in `15`; RLP4-A MCP media cache relocation, RLP4-B v1 home/runtime resolver hardening, RLP2-A runtime observation provenance, RLP2-B custom local server ID/local server record, CLI unknown-activity observability, RLP6-A profile-scoped help/docs, RLP6-B `hafleet-ls` resolver consistency, RLP3-A auth readiness diagnostics, RLP3-A2 server credential boundary diagnostics, and RLP3-B1 dashboard mutation boundary are implemented. RLP7-B dependency audit findings are documented for approval. CD decision docs now include full-clone remote profile, dependency lock, standalone version, and install-reconciliation decisions; deploy-behavior batches remain operator-gated.
 - The expanded systems skill scan is documented in `17`; it adds new direct-injection, flow-health, delivery-event, CLI-contract, and architecture-fitness repair rows while reconfirming the pending CD/remote decision rows.
 - The rhodes1 recovery and old-relay auto-update design are documented in `18`; fleet inventory, standalone update guard, remote dependency scope, and post-restart verification have landed. Durable remote deploy state, rollback, and installer decomposition remain decision-gated.
 - The unified delivery proposal is documented in `19`, and the broader runtime-node/distribution audit is documented in `20`. These documents keep remote/local as legacy deployment wording only and recommend capability-driven runtime nodes plus artifact/install profiles.

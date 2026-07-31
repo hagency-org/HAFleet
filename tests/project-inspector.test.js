@@ -15,7 +15,7 @@ import {
 const temporaryRoots = [];
 
 function temporaryProject() {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-project-inspector-'));
+  const root = mkdtempSync(path.join(os.tmpdir(), 'hafleet-project-inspector-'));
   temporaryRoots.push(root);
   mkdirSync(path.join(root, 'specs'), { recursive: true });
   mkdirSync(path.join(root, 'issues'), { recursive: true });

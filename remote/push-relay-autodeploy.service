@@ -8,7 +8,7 @@ Type=simple
 User=__USER__
 WorkingDirectory=__REPODIR__
 EnvironmentFile=__ENV_FILE__
-ExecStart=/usr/bin/env bash __REPODIR__/scripts/agentchat-remote-autodeploy.sh
+ExecStart=/usr/bin/env bash __REPODIR__/scripts/hafleet-remote-autodeploy.sh
 Restart=always
 RestartSec=10
 

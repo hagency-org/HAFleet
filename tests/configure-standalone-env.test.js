@@ -67,10 +67,10 @@ describe('parseDotEnv / applyEnvUpdates (unit)', () => {
   test('appends a key that does not exist yet, without disturbing existing lines', () => {
     const { content, updatedKeys } = applyEnvUpdates(
       'FOO=bar\n',
-      new Map([['AGENTCHAT_AGENT_TOKEN_MODE', 'hard']]),
+      new Map([['HAFLEET_AGENT_TOKEN_MODE', 'hard']]),
     );
-    expect(updatedKeys).toEqual(['AGENTCHAT_AGENT_TOKEN_MODE']);
-    expect(content).toBe('FOO=bar\nAGENTCHAT_AGENT_TOKEN_MODE=hard\n');
+    expect(updatedKeys).toEqual(['HAFLEET_AGENT_TOKEN_MODE']);
+    expect(content).toBe('FOO=bar\nHAFLEET_AGENT_TOKEN_MODE=hard\n');
   });
 
   test('rejects a target file with duplicate keys and throws before returning any content', () => {
@@ -108,12 +108,12 @@ describe('parseDotEnv / applyEnvUpdates (unit)', () => {
 describe('configure-standalone-env CLI', () => {
   test('generates a random bridge secret and sets hard token mode, printing only key names', async () => {
     const dir = tempDir();
-    const envPath = writeEnvFixture(dir, 'MATRIX_BRIDGE_SECRET=\nAGENTCHAT_AGENT_TOKEN_MODE=audit\nFOO=bar\n');
+    const envPath = writeEnvFixture(dir, 'MATRIX_BRIDGE_SECRET=\nHAFLEET_AGENT_TOKEN_MODE=audit\nFOO=bar\n');
 
     const { stdout } = await runCli(['--env', envPath, '--generate-bridge-secret', '--agent-token-mode', 'hard']);
 
     expect(stdout).toContain('MATRIX_BRIDGE_SECRET');
-    expect(stdout).toContain('AGENTCHAT_AGENT_TOKEN_MODE');
+    expect(stdout).toContain('HAFLEET_AGENT_TOKEN_MODE');
     expect(stdout).not.toContain('FOO');
     expect(stdout).not.toMatch(/=/);
 
@@ -121,7 +121,7 @@ describe('configure-standalone-env CLI', () => {
     const secretMatch = updated.match(/^MATRIX_BRIDGE_SECRET=(.*)$/m);
     expect(secretMatch[1]).toMatch(/^[0-9a-f]{64}$/);
     expect(stdout).not.toContain(secretMatch[1]);
-    expect(updated).toContain('AGENTCHAT_AGENT_TOKEN_MODE=hard');
+    expect(updated).toContain('HAFLEET_AGENT_TOKEN_MODE=hard');
     expect(updated).toContain('FOO=bar');
   });
 

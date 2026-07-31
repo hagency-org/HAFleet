@@ -60,7 +60,7 @@ export function buildCodexApprovalHookCommand({
   return [
     shellQuote(nodeExecutable),
     shellQuote(hookPath),
-    `--agentchat-hook-sha256=${scriptDigest}`,
+    `--hafleet-hook-sha256=${scriptDigest}`,
   ].join(' ');
 }
 

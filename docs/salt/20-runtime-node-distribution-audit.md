@@ -17,7 +17,7 @@ Four read-only subagent audits reviewed:
 - packaging, CI gates, artifact identity, and dependency reproducibility;
 - runtime ownership and operator command surface.
 
-`agentchat-worker` also provided context from the delivery/server-identity drift repair
+`hafleet-worker` also provided context from the delivery/server-identity drift repair
 that landed as `4a10651 Fix push relay server identity drift`.
 
 ## Core Finding
@@ -27,7 +27,7 @@ concerns:
 
 | Concern | Correct question | Current failure mode |
 | --- | --- | --- |
-| Runtime node identity | Which node owns the target tmux sessions? | `local`, hostname, and `AGENT_CHAT_SERVER` all carry compatibility meaning. |
+| Runtime node identity | Which node owns the target tmux sessions? | `local`, hostname, and `HAFLEET_SERVER` all carry compatibility meaning. |
 | Node capabilities | Can this node launch agents, inject tmux notifications, heartbeat MCP, control services, or autodeploy? | Code branches on remote/local instead of explicit capabilities. |
 | Runtime profile | Which process set is running on this node? | Backend sweep, dashboard queue, and relay observation can overlap. |
 | Artifact/install profile | Is this a source checkout, stable live checkout, standalone package, systemd install, or launchd install? | `remote/` is simultaneously a package source, mirror, and runtime profile surface. |
@@ -53,7 +53,7 @@ Evidence:
 
 - The historical current-state audit already says backend sweep, dashboard queue, and
   push relay all infer or write runtime state in overlapping ways.
-- `agentchat-worker` reported a concrete failure mode: a Matrix/operator message reached
+- `hafleet-worker` reported a concrete failure mode: a Matrix/operator message reached
   backend and inbox, but backend classified the target as `remote-relay-expected` while
   the local relay classified itself as `server-mismatch`, so no push was delivered.
 - Short-term hardening now prevents local relay from consuming backend-sourced message
@@ -92,7 +92,7 @@ relay id, or MCP registration id.
 
 Evidence:
 
-- `AGENT_CHAT_SERVER` is used by backend/MCP/relay with inconsistent defaults and
+- `HAFLEET_SERVER` is used by backend/MCP/relay with inconsistent defaults and
   meanings.
 - `agent.server` and `agent.tmux` still carry route key, compatibility marker, and
   observation evidence in one field family.
@@ -138,7 +138,7 @@ Impact:
 
 One update path can deploy code while another leaves service units, helper symlinks,
 sudoers, MCP config, launch wrappers, or version evidence stale. Operators cannot infer
-from `agentchat update` whether a full-stack node, runtime node, or package artifact is
+from `hafleet update` whether a full-stack node, runtime node, or package artifact is
 being reconciled.
 
 Evidence:
@@ -146,7 +146,7 @@ Evidence:
 - Full install owns env files, dependencies, CLI links, service units, skills, Claude
   MCP, and Codex MCP.
 - Remote install owns a different env/deps/link/service/MCP/verify flow.
-- `agent-update` is remote-checkout oriented and reruns `remote/install-remote.sh`.
+- `hafleet-update` is remote-checkout oriented and reruns `remote/install-remote.sh`.
 - Remote autodeploy resets code, optionally installs remote deps, restarts relay, and
   runs `verify-remote`; it does not rerun install-owned artifact reconciliation.
 - Stable autodeploy is a separate full-stack side path with different gates and service
@@ -177,7 +177,7 @@ Acceptance tests:
   service/plist contents, MCP descriptors, and command surface.
 - Autodeploy test changes a service template or MCP descriptor and proves reconcile runs
   or produces a durable manual-action state.
-- `agentchat update` help and output name the artifact/install profile being updated.
+- `hafleet update` help and output name the artifact/install profile being updated.
 
 ### P1: CLI Command Surface Is Not Capability-Driven
 
@@ -190,10 +190,10 @@ than intended.
 Evidence:
 
 - `remote/install-remote.sh` can prefer root `bin/` in a full clone, exposing the full
-  checkout `agentchat` surface even when the node only has worker-node capabilities.
-- Generated standalone package smoke tests validate `remote/bin/agentchat`, not the
+  checkout `hafleet` surface even when the node only has worker-node capabilities.
+- Generated standalone package smoke tests validate `remote/bin/hafleet`, not the
   full-clone path that production may use.
-- `agentchat service` defaults to `all`, which can expand to backend/dashboard/bridge
+- `hafleet service` defaults to `all`, which can expand to backend/dashboard/bridge
   and relay service names together.
 - `verify` is an alias for remote verification even though it reads like a full-stack
   health command.
@@ -218,9 +218,9 @@ Acceptance tests:
 
 - Full checkout, runtime-node checkout, and standalone package each expose only the
   command set declared by their manifest.
-- Mutating `agentchat service pause|resume|restart` requires explicit scope or resolves
+- Mutating `hafleet service pause|resume|restart` requires explicit scope or resolves
   the installed profile from metadata without using `all` as the default.
-- `agentchat verify` becomes profile-aware or is removed in favor of explicit
+- `hafleet verify` becomes profile-aware or is removed in favor of explicit
   `verify-node`, `verify-kernel`, and `verify-artifact` style scopes.
 
 ### P1: Launch And MCP Configuration Have No Single Descriptor
@@ -234,11 +234,11 @@ scripts shortened tmux injection.
 
 Evidence:
 
-- `agent-up` renders Claude `.mcp.json`.
+- `hafleet-up` renders Claude `.mcp.json`.
 - Codex MCP is injected through many `-c` TOML override flags.
 - Full install and remote install each register MCP in their own shape.
-- `agent-up-v1` fetches launch env from backend and merges it into meta at launch time.
-- `agent-up` still mutates global Claude/Codex trust/config during launch.
+- `hafleet-up-v1` fetches launch env from backend and merges it into meta at launch time.
+- `hafleet-up` still mutates global Claude/Codex trust/config during launch.
 
 Repair direction:
 
@@ -247,21 +247,21 @@ provisioner, backend, root wrapper, and package wrapper:
 
 ```json
 {
-  "schema": "agentchat.launch/v1",
-  "agent": "agentchat-develop",
+  "schema": "hafleet.launch/v1",
+  "agent": "hafleet-develop",
   "serverId": "osaka-runtime-1",
   "framework": "codex",
   "homeDir": "...",
   "stateDir": "...",
   "workdir": "...",
   "mcp": {
-    "serverName": "agent-chat",
+    "serverName": "hafleet",
     "command": "node",
     "args": [".../mcp-server.js"],
     "env": {
-      "AGENT_NAME": "agentchat-develop",
-      "AGENT_CHAT_API": "https://...",
-      "AGENT_CHAT_SERVER": "osaka-runtime-1"
+      "AGENT_NAME": "hafleet-develop",
+      "HAFLEET_API": "https://...",
+      "HAFLEET_SERVER": "osaka-runtime-1"
     }
   },
   "argv": ["codex", "..."]

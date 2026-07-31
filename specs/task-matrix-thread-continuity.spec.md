@@ -150,7 +150,7 @@ Scenario: Thread delivery applies only to plaintext group messages
 Scenario: Single group wake tells agent how to preserve context
   Test: group_push_hint_includes_reply_to
   Given one actionable human group message wakes an MCP-enabled agent
-  When agent-chat constructs the push notification
+  When hafleet constructs the push notification
   Then the post example includes that message's backend reply_to id
 
 ## Out of Scope

@@ -58,14 +58,14 @@ describe('SupervisorLifecycleManager', () => {
       stateDir,
       workdir,
     }));
-    // Set AGENTCHAT_HOMEDIR so resolveV1ManifestForAgent finds the workspace
-    process.env.AGENTCHAT_HOMEDIR = tmpDir;
+    // Set HAFLEET_HOMEDIR so resolveV1ManifestForAgent finds the workspace
+    process.env.HAFLEET_HOMEDIR = tmpDir;
   });
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
     process.env.PATH = originalPath;
-    delete process.env.AGENTCHAT_HOMEDIR;
+    delete process.env.HAFLEET_HOMEDIR;
     delete process.env.SUPERVISOR_TRAILING_HEARTBEAT_PERIODS;
     delete process.env.SUPERVISOR_HEARTBEAT_TTL_MS;
   });
@@ -153,7 +153,7 @@ describe('SupervisorLifecycleManager', () => {
       model: null, reasoning: null, extraArgs: '--verbose',
     }, null);
     expect(claudeCommand).toContain("claude --permission-mode auto '--verbose'");
-    expect(claudeCommand).toContain("AGENTCHAT_AGENT_PERMISSION_MODE='auto'");
+    expect(claudeCommand).toContain("HAFLEET_AGENT_PERMISSION_MODE='auto'");
     expect(claudeCommand).toContain("-- 'Read your AGENTS.md and begin your assessment cycle now.'");
     expect(claudeCommand).not.toContain('--dangerously-skip-permissions');
 
@@ -162,7 +162,7 @@ describe('SupervisorLifecycleManager', () => {
       model: null, reasoning: null, extraArgs: '--search',
     }, null);
     expect(codexCommand).toContain("codex --sandbox workspace-write --ask-for-approval on-request '--search'");
-    expect(codexCommand).toContain("AGENTCHAT_AGENT_PERMISSION_LEVEL='2'");
+    expect(codexCommand).toContain("HAFLEET_AGENT_PERMISSION_LEVEL='2'");
     expect(codexCommand).toContain("-C '/tmp/alpha'");
     expect(codexCommand).toContain("-- 'Read your AGENTS.md and begin your assessment cycle now.'");
     expect(codexCommand).not.toContain('--yolo');

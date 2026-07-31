@@ -52,15 +52,15 @@ function commandEvent(eventId = '$create-issue-1', { mentionCoordinator = true }
 }
 
 beforeAll(async () => {
-  runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agentchat-fsf0-b2-routing-'));
+  runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-fsf0-b2-routing-'));
   envSnapshot = snapshotEnv([
-    'AGENT_CHAT_RUNTIME_DIR',
+    'HAFLEET_RUNTIME_DIR',
     'MATRIX_TRUST_MODE',
     'MATRIX_TRUSTED_ROOM_IDS',
     'MATRIX_TRUSTED_INVITER_MXIDS',
     'MATRIX_IGNORED_SENDER_MXIDS',
   ]);
-  process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+  process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
   process.env.MATRIX_TRUST_MODE = 'enforce';
   process.env.MATRIX_TRUSTED_ROOM_IDS = '!factory:matrix.test';
   process.env.MATRIX_TRUSTED_INVITER_MXIDS = '@trusted:matrix.test';
@@ -149,7 +149,7 @@ test('concurrent duplicate waits for the claimed attempt and remains replayable 
 });
 
 test('accepted_before_checkpoint_replay_zero_duplicates', async () => {
-  const backend = await createBackendTestContext('agentchat-fsf0-b2-crash-window-', {
+  const backend = await createBackendTestContext('hafleet-fsf0-b2-crash-window-', {
     agents: {
       wf_coordinator: {
         name: 'wf_coordinator', type: 'agent', kind: 'agent', online: true,
@@ -238,7 +238,7 @@ test('routes_mapped_room_as_group_to_explicitly_mentioned_coordinator', async ()
 });
 
 test('mapped_room_coordinator_delivered_by_backend', async () => {
-  const backend = await createBackendTestContext('agentchat-fsf0-b2-group-delivery-', {
+  const backend = await createBackendTestContext('hafleet-fsf0-b2-group-delivery-', {
     agents: {
       implementer: { name: 'implementer', type: 'agent', kind: 'agent', online: true },
       wf_coordinator: { name: 'wf_coordinator', type: 'agent', kind: 'agent', online: true },

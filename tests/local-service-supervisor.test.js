@@ -34,7 +34,7 @@ async function freePort() {
 async function fixtureContext() {
   const backendPort = await freePort();
   const dashboardPort = await freePort();
-  const runtimeRoot = mkdtempSync(path.join(os.tmpdir(), 'agentchat-services-runtime-'));
+  const runtimeRoot = mkdtempSync(path.join(os.tmpdir(), 'hafleet-services-runtime-'));
   runtimes.push(runtimeRoot);
   const eventLog = path.join(runtimeRoot, 'events.jsonl');
   const service = (name, dependsOn, health, extraEnv = {}) => ({
@@ -188,7 +188,7 @@ describe('LocalServiceSupervisor', () => {
   });
 
   test('offline status rejects a live PID whose command does not match the service script', async () => {
-    const runtimeRoot = mkdtempSync(path.join(os.tmpdir(), 'agentchat-services-pid-reuse-'));
+    const runtimeRoot = mkdtempSync(path.join(os.tmpdir(), 'hafleet-services-pid-reuse-'));
     runtimes.push(runtimeRoot);
     const stateDir = path.join(runtimeRoot, 'data', 'services-local');
     mkdirSync(stateDir, { recursive: true });
@@ -226,7 +226,7 @@ describe('LocalServiceSupervisor', () => {
   });
 
   test('offline status rejects a matching command with a stale process identity', async () => {
-    const runtimeRoot = mkdtempSync(path.join(os.tmpdir(), 'agentchat-services-service-identity-'));
+    const runtimeRoot = mkdtempSync(path.join(os.tmpdir(), 'hafleet-services-service-identity-'));
     runtimes.push(runtimeRoot);
     const stateDir = path.join(runtimeRoot, 'data', 'services-local');
     mkdirSync(stateDir, { recursive: true });
@@ -269,7 +269,7 @@ describe('LocalServiceSupervisor', () => {
   });
 
   test('offline status checks four slow probes concurrently within five seconds', async () => {
-    const runtimeRoot = mkdtempSync(path.join(os.tmpdir(), 'agentchat-services-bounded-status-'));
+    const runtimeRoot = mkdtempSync(path.join(os.tmpdir(), 'hafleet-services-bounded-status-'));
     runtimes.push(runtimeRoot);
     const stateDir = path.join(runtimeRoot, 'data', 'services-local');
     mkdirSync(stateDir, { recursive: true });

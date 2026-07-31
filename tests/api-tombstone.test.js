@@ -92,7 +92,7 @@ describe('tombstoned agent with retained home manifest', () => {
   const AGENT_NAME = 'ghost';
 
   beforeAll(async () => {
-    // Create a fake agentchat home with agent manifest on disk
+    // Create a fake hafleet home with agent manifest on disk
     fakeHome = mkdtempSync(path.join(os.tmpdir(), 'tombstone-orphan-'));
     const agentDir = path.join(fakeHome, 'agents', `agent_${AGENT_NAME}`);
     const workdir = path.join(agentDir, 'workdir');
@@ -116,7 +116,7 @@ describe('tombstoned agent with retained home manifest', () => {
       deletedAgents: {
         [AGENT_NAME]: { deletedAt: Date.now(), reason: 'force-delete' },
       },
-      env: { AGENTCHAT_HOMEDIR: fakeHome },
+      env: { HAFLEET_HOMEDIR: fakeHome },
     });
   });
 

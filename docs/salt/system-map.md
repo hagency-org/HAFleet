@@ -43,7 +43,7 @@ Agent CLI / Claude / Codex
 
 ## Kernel Data Stores
 
-`backend-v2.js` loads JSON-backed state under `DATA_DIR`, currently rooted at `AGENT_CHAT_RUNTIME_DIR` or the repository root. Key stores include:
+`backend-v2.js` loads JSON-backed state under `DATA_DIR`, currently rooted at `HAFLEET_RUNTIME_DIR` or the repository root. Key stores include:
 
 | Store | Current file |
 | --- | --- |

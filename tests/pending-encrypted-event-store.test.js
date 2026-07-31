@@ -14,7 +14,7 @@ describe('pending encrypted approval event store', () => {
   });
 
   test('retains an encrypted event across restart and removes it after recovery', () => {
-    const directory = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-pending-e2ee-'));
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'hafleet-pending-e2ee-'));
     temporaryDirectories.push(directory);
     const filePath = path.join(directory, 'pending.json');
     const event = {
@@ -42,7 +42,7 @@ describe('pending encrypted approval event store', () => {
   });
 
   test('prunes retained ciphertext after the bounded recovery window', () => {
-    const directory = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-pending-e2ee-'));
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'hafleet-pending-e2ee-'));
     temporaryDirectories.push(directory);
     const filePath = path.join(directory, 'pending.json');
     let now = 1000;
@@ -65,7 +65,7 @@ describe('pending encrypted approval event store', () => {
   });
 
   test('fails closed instead of evicting an unprocessed event at capacity', () => {
-    const directory = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-pending-e2ee-'));
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'hafleet-pending-e2ee-'));
     temporaryDirectories.push(directory);
     const store = new PendingEncryptedEventStore(path.join(directory, 'pending.json'), {
       maxEntries: 1,

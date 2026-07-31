@@ -12,7 +12,7 @@ describe('alert system', () => {
   });
 
   async function setup(opts = {}) {
-    context = await createBackendTestContext('agent-chat-alert-test-', {
+    context = await createBackendTestContext('hafleet-alert-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: true },
         beta: { name: 'beta', type: 'agent', kind: 'agent', online: true },

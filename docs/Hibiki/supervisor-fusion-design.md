@@ -1,4 +1,4 @@
-# Subconscious × agentchat 集成设计
+# Subconscious × hafleet 集成设计
 
 **日期：** 2026-03-06
 **作者：** Hibiki
@@ -9,14 +9,14 @@
 
 1. **以 claude-subconscious 为基底** — 它是成熟的开源项目，hooks 架构、Letta 记忆、transcript 处理都已经生产就绪
 2. **per-agent 部署** — 每个 agent 一个 Letta subconscious 实例，不做中心化监控
-3. **扩展而非改造** — 在 subconscious 的基础上增加 agentchat 感知，不重写核心逻辑
+3. **扩展而非改造** — 在 subconscious 的基础上增加 hafleet 感知，不重写核心逻辑
 4. **现有 supervisor 逐步退役** — 审计 UI 保留并改为消费 subconscious 的事件流
 
 ---
 
 ## 二、需要扩展的三个方向
 
-### 方向 1：让 Subconscious 感知 agentchat 工作流
+### 方向 1：让 Subconscious 感知 hafleet 工作流
 
 当前 subconscious 是一个通用的 Claude Code 记忆层，不了解我们的 CLAUDE.md 工作约定。需要让它知道：
 
@@ -96,19 +96,19 @@ WORKSPACE AWARENESS:
 </claude_code_session_update>
 ```
 
-**实现方式：** fork claude-subconscious 的 `send_messages_to_letta.ts`，在构造 XML 前读取 `docs/{agent}/plan.md` 和 `docs/{agent}/agents.md`。agent 名从环境变量 `AGENT_NAME` 获取（agent-up 启动时注入）。
+**实现方式：** fork claude-subconscious 的 `send_messages_to_letta.ts`，在构造 XML 前读取 `docs/{agent}/plan.md` 和 `docs/{agent}/agents.md`。agent 名从环境变量 `AGENT_NAME` 获取（hafleet-up 启动时注入）。
 
-### 方向 2：Subconscious 事件上报到 agentchat 审计 UI
+### 方向 2：Subconscious 事件上报到 hafleet 审计 UI
 
 当前审计 UI 消费 supervisor 的事件格式。让 subconscious 也能产生兼容的事件，审计 UI 就能展示 subconscious 的判断。
 
 #### 方案：Letta guidance → 审计事件
 
-Subconscious 通过 `guidance` memory block 表达判断。新增一个机制：每当 guidance block 变化时，解析其中的焦点判断并推送到 agentchat。
+Subconscious 通过 `guidance` memory block 表达判断。新增一个机制：每当 guidance block 变化时，解析其中的焦点判断并推送到 hafleet。
 
 **在 sync_letta_memory.ts 中增加逻辑：**
 
-当检测到 `guidance` block 变化且包含焦点相关内容时，POST 到 agentchat：
+当检测到 `guidance` block 变化且包含焦点相关内容时，POST 到 hafleet：
 
 ```javascript
 // 检测 guidance block 变化
@@ -137,8 +137,8 @@ if (guidanceChanged && guidanceContent.includes('[focus:')) {
     }
   };
 
-  // POST to agentchat backend
-  await fetch(`${AGENTCHAT_URL}/api/supervisor/events`, {
+  // POST to hafleet backend
+  await fetch(`${HAFLEET_URL}/api/supervisor/events`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(event)
@@ -146,7 +146,7 @@ if (guidanceChanged && guidanceContent.includes('[focus:')) {
 }
 ```
 
-**agentchat backend 侧新增：**
+**hafleet backend 侧新增：**
 
 ```javascript
 // POST /api/supervisor/events — 接收外部事件
@@ -179,11 +179,11 @@ Agent 已完成 API 缓存层实现但未更新 plan.md。提醒更新。
 1. 注入回 Claude 时是自然语言指导
 2. 上报到审计 UI 时可以 parse 成结构化事件
 
-### 方向 3：agent-up 集成
+### 方向 3：hafleet-up 集成
 
 每个 agent 启动时自动配置 subconscious。
 
-#### agent-up 新增流程：
+#### hafleet-up 新增流程：
 
 ```bash
 # 1. 为该 agent 创建/获取 Letta agent
@@ -198,7 +198,7 @@ export LETTA_API_KEY="$LETTA_API_KEY"
 export LETTA_AGENT_ID="$LETTA_AGENT_ID"
 export LETTA_MODE="whisper"  # 默认轻量模式
 export AGENT_NAME="$AGENT_NAME"
-export AGENTCHAT_URL="http://localhost:8090"
+export HAFLEET_URL="http://localhost:8090"
 ```
 
 #### Letta agent 初始化
@@ -264,13 +264,13 @@ Subconscious 在每次收到 transcript 时同时收到 plan.md 内容。它可�
 
 这个逻辑完全由 Letta agent 的 prompt 驱动，不需要额外代码。
 
-### Q4: 和现有 agentchat MCP 的关系？
+### Q4: 和现有 hafleet MCP 的关系？
 
-Subconscious 的 hooks 和 agentchat 的 MCP server 是独立的：
+Subconscious 的 hooks 和 hafleet 的 MCP server 是独立的：
 - **MCP** 提供 agent 通讯能力（send_message, post, check_inbox）
 - **Hooks** 提供观察和注入能力（观察 transcript，注入 guidance）
 
-两者不冲突。agent-up 同时配置 MCP server 和 hooks 即可。
+两者不冲突。hafleet-up 同时配置 MCP server 和 hooks 即可。
 
 ---
 
@@ -282,23 +282,23 @@ Subconscious 的 hooks 和 agentchat 的 MCP server 是独立的：
 |------|------|
 | `Subconscious.af` | 新增 `workspace_conventions` block，修改 `core_directives` |
 | `scripts/send_messages_to_letta.ts` | Stop hook 发送 transcript 时附加 plan.md + agents.md 内容 |
-| `scripts/sync_letta_memory.ts` | 检测 guidance 变化时 POST 事件到 agentchat |
+| `scripts/sync_letta_memory.ts` | 检测 guidance 变化时 POST 事件到 hafleet |
 | `hooks/hooks.json` | 可能需要调整 hook 命令以支持 AGENT_NAME 环境变量 |
-| `scripts/agent_config.ts` | 支持从 agentchat 的 data/agents/ 读取 Letta agent ID |
+| `scripts/agent_config.ts` | 支持从 hafleet 的 data/agents/ 读取 Letta agent ID |
 
-### agentchat 侧
+### hafleet 侧
 
 | 文件 | 改动 |
 |------|------|
 | `backend-v2.js` | 新增 `POST /api/supervisor/events` 端点接收外部事件 |
-| `bin/agent-up` | 新增 Letta agent 初始化 + hooks 配置逻辑 |
+| `bin/hafleet-up` | 新增 Letta agent 初始化 + hooks 配置逻辑 |
 | `supervisor/index.js` | 可选：支持混合模式（自有判断 + 外部事件） |
 
 ### 新增文件
 
 | 文件 | 用途 |
 |------|------|
-| `subconscious/Subconscious-agentchat.af` | 定制的 agent 定义（包含 workspace_conventions） |
+| `subconscious/Subconscious-hafleet.af` | 定制的 agent 定义（包含 workspace_conventions） |
 | `subconscious/setup.js` | Letta agent 初始化脚本（创建 agent、配置 hooks） |
 
 ---
@@ -320,10 +320,10 @@ Agent Claude Code 会话
   │          ──→ Letta 处理：更新 memory blocks，可能写 guidance
   │
   ├─ 下一个 UserPromptSubmit ──→ 检测 guidance 变化
-  │                              ──→ 如果有 [focus:...] 标记 ──→ POST to agentchat
+  │                              ──→ 如果有 [focus:...] 标记 ──→ POST to hafleet
   │                              ──→ 注入 guidance 到 Claude context
   │
-  └─ agentchat 审计 UI ──→ 展示事件（来源标记 subconscious）
+  └─ hafleet 审计 UI ──→ 展示事件（来源标记 subconscious）
                           ──→ 和 supervisor 事件并存
 ```
 
@@ -331,4 +331,4 @@ Agent Claude Code 会话
 
 ## 七、一句话总结
 
-**用 claude-subconscious 的成熟 hooks 架构和 Letta 持久化记忆替代自研 supervisor 的无状态判断，通过定制 memory block 让 Letta 理解 agentchat 的 plan.md 工作流，通过事件上报让审计 UI 统一展示——本质上是让每个 agent 拥有一个"知道 agentchat 规矩的潜意识"。**
+**用 claude-subconscious 的成熟 hooks 架构和 Letta 持久化记忆替代自研 supervisor 的无状态判断，通过定制 memory block 让 Letta 理解 hafleet 的 plan.md 工作流，通过事件上报让审计 UI 统一展示——本质上是让每个 agent 拥有一个"知道 hafleet 规矩的潜意识"。**

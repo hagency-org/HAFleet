@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Deprecated legacy entrypoint: forward to unified 'agentchat'.
-if [ "${AGENTCHAT_INTERNAL_DISPATCH:-0}" != "1" ]; then
+# Deprecated legacy entrypoint: forward to unified 'hafleet'.
+if [ "${HAFLEET_INTERNAL_DISPATCH:-0}" != "1" ]; then
   _ac_legacy_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   _ac_legacy_name="$(basename "$0")"
-  echo "[DEPRECATED] ${_ac_legacy_name} is deprecated. Use: agentchat reminder ..." >&2
-  exec "${_ac_legacy_dir}/agentchat" "reminder" "$@"
+  echo "[DEPRECATED] ${_ac_legacy_name} is deprecated. Use: hafleet reminder ..." >&2
+  exec "${_ac_legacy_dir}/hafleet" "reminder" "$@"
 fi
 # self-time-reminder — Schedule, list, and cancel reminders
 #
@@ -36,17 +36,17 @@ Options:
 USAGE
 }
 
-WEB_PORT_RAW="${AGENT_CHAT_WEB_PORT:-8084}"
+WEB_PORT_RAW="${HAFLEET_WEB_PORT:-8084}"
 if [[ "$WEB_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$WEB_PORT_RAW" -gt 0 ]; then
   WEB_PORT="$WEB_PORT_RAW"
 else
   WEB_PORT="8084"
 fi
-WEB_BASE_URL="${AGENT_CHAT_WEB_URL:-http://127.0.0.1:$WEB_PORT}"
-API_BASE="${AGENT_CHAT_REMINDER_URL:-${WEB_BASE_URL%/}/api/reminders}"
+WEB_BASE_URL="${HAFLEET_WEB_URL:-http://127.0.0.1:$WEB_PORT}"
+API_BASE="${HAFLEET_REMINDER_URL:-${WEB_BASE_URL%/}/api/reminders}"
 CURL_DASHBOARD_AUTH_ARGS=()
-if [ -n "${AGENT_CHAT_DASHBOARD_TOKEN:-}" ]; then
-  CURL_DASHBOARD_AUTH_ARGS=(-H "Authorization: Bearer ${AGENT_CHAT_DASHBOARD_TOKEN}")
+if [ -n "${HAFLEET_DASHBOARD_TOKEN:-}" ]; then
+  CURL_DASHBOARD_AUTH_ARGS=(-H "Authorization: Bearer ${HAFLEET_DASHBOARD_TOKEN}")
 fi
 
 # ── Detect self target ──────────────────────────

@@ -216,7 +216,7 @@ describe('supported runtime approval adapters', () => {
       tool_input: {},
     })).toBe(true);
 
-    const temporary = mkdtempSync(path.join(os.tmpdir(), 'agentchat-codex-internal-hook-'));
+    const temporary = mkdtempSync(path.join(os.tmpdir(), 'hafleet-codex-internal-hook-'));
     try {
       const hookPath = path.join(temporary, 'hook.js');
       writeFileSync(hookPath, 'trusted hook contents\n');
@@ -233,9 +233,9 @@ describe('supported runtime approval adapters', () => {
         stderr: { write() {} },
         env: {
           AGENT_NAME: 'test_agent',
-          AGENTCHAT_AGENT_TOKEN: 'agent-token',
+          HAFLEET_AGENT_TOKEN: 'agent-token',
         },
-        argv: ['node', hookPath, `--agentchat-hook-sha256=${sha256File(hookPath)}`],
+        argv: ['node', hookPath, `--hafleet-hook-sha256=${sha256File(hookPath)}`],
         scriptPath: hookPath,
         api,
       });
@@ -249,7 +249,7 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('codex_hook_failure_emits_explicit_deny', async () => {
-    const temporary = mkdtempSync(path.join(os.tmpdir(), 'agentchat-codex-hook-'));
+    const temporary = mkdtempSync(path.join(os.tmpdir(), 'hafleet-codex-hook-'));
     try {
       const hookPath = path.join(temporary, 'hook.js');
       writeFileSync(hookPath, 'test hook contents\n');
@@ -266,7 +266,7 @@ describe('supported runtime approval adapters', () => {
         stdout,
         stderr,
         env: {},
-        argv: ['node', hookPath, `--agentchat-hook-sha256=${sha256File(hookPath)}`],
+        argv: ['node', hookPath, `--hafleet-hook-sha256=${sha256File(hookPath)}`],
         scriptPath: hookPath,
         api: vi.fn(),
       });
@@ -284,7 +284,7 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('codex hook consumes allow before emitting it', async () => {
-    const temporary = mkdtempSync(path.join(os.tmpdir(), 'agentchat-codex-hook-'));
+    const temporary = mkdtempSync(path.join(os.tmpdir(), 'hafleet-codex-hook-'));
     try {
       const hookPath = path.join(temporary, 'hook.js');
       writeFileSync(hookPath, 'trusted hook contents\n');
@@ -315,9 +315,9 @@ describe('supported runtime approval adapters', () => {
         stderr: { write() {} },
         env: {
           AGENT_NAME: 'wf_coordinator',
-          AGENTCHAT_AGENT_TOKEN: 'agent-token',
+          HAFLEET_AGENT_TOKEN: 'agent-token',
         },
-        argv: ['node', hookPath, `--agentchat-hook-sha256=${sha256File(hookPath)}`],
+        argv: ['node', hookPath, `--hafleet-hook-sha256=${sha256File(hookPath)}`],
         scriptPath: hookPath,
         api,
       });
@@ -337,13 +337,13 @@ describe('supported runtime approval adapters', () => {
     const digest = 'e'.repeat(64);
     const command = buildCodexApprovalHookCommand({
       nodeExecutable: '/usr/local/bin/node',
-      hookPath: '/opt/agent-chat/lib/codex-permission-hook.js',
+      hookPath: '/opt/hafleet/lib/codex-permission-hook.js',
       scriptDigest: digest,
     });
-    const timeoutSeconds = approvalHookTimeoutSeconds({ AGENTCHAT_APPROVAL_TTL_MS: '900000' });
+    const timeoutSeconds = approvalHookTimeoutSeconds({ HAFLEET_APPROVAL_TTL_MS: '900000' });
     const toml = buildCodexApprovalHookToml({ command, timeoutSeconds });
 
-    expect(command).toContain(`--agentchat-hook-sha256=${digest}`);
+    expect(command).toContain(`--hafleet-hook-sha256=${digest}`);
     expect(timeoutSeconds).toBe(960);
     expect(toml).toContain('timeout = 960');
     expect(toml).toContain(command);
@@ -370,7 +370,7 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('codex_hook_preflight_precedes_tmux_and_requires_exact_trust', async () => {
-    const temporary = mkdtempSync(path.join(os.tmpdir(), 'agentchat-codex-preflight-'));
+    const temporary = mkdtempSync(path.join(os.tmpdir(), 'hafleet-codex-preflight-'));
     try {
       const hookPath = path.join(temporary, 'codex-permission-hook.js');
       const outputPath = path.join(temporary, 'prepared.json');
@@ -451,7 +451,7 @@ describe('supported runtime approval adapters', () => {
       expect(prepared.scriptDigest).toBe(digest);
       expect(JSON.parse(readFileSync(outputPath, 'utf8')).hookToml).toBe(prepared.hookToml);
 
-      for (const file of ['bin/agent-up', 'remote/bin/agent-up']) {
+      for (const file of ['bin/hafleet-up', 'remote/bin/hafleet-up']) {
         const source = readFileSync(file, 'utf8');
         const preflightCall = source.indexOf('\npreflight_runtime_approval_adapter\n');
         const createCall = source.indexOf('\ncreate_tmux_session\n', preflightCall);
@@ -468,7 +468,7 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('launchers keep sandbox defaults and wire only supported adapters', () => {
-    for (const file of ['bin/agent-up', 'remote/bin/agent-up']) {
+    for (const file of ['bin/hafleet-up', 'remote/bin/hafleet-up']) {
       const source = readFileSync(file, 'utf8');
       expect(source).toContain('CLAUDE_FLAGS="--permission-mode auto"');
       expect(source).toContain('--dangerously-load-development-channels');
@@ -483,7 +483,7 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('launchers_clear_ambient_anthropic_key_without_explicit_profile', () => {
-    for (const file of ['bin/agent-up', 'remote/bin/agent-up']) {
+    for (const file of ['bin/hafleet-up', 'remote/bin/hafleet-up']) {
       const source = readFileSync(file, 'utf8');
       expect(source).toContain(
         'if [ "$TYPE" = "claude" ] && [ -z "${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY:-}" ]; then',

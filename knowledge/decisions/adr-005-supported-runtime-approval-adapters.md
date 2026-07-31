@@ -24,7 +24,7 @@ rules for protected external VCS operations in the agent-local Claude settings.
 This keeps the sandbox and auto-mode baseline while ensuring those operations
 open a native prompt that the supported channel can relay. Codex agents use a
 synchronous `PermissionRequest` hook that submits the
-request to agent-chat, waits for one server-authorized verdict, and writes the
+request to hafleet, waits for one server-authorized verdict, and writes the
 documented `hookSpecificOutput` decision to stdout.
 
 Managed agents are background tmux processes, so a native prompt is not a safe
@@ -62,7 +62,7 @@ leaving an interactive shell that can reopen Claude or Codex without the
 required adapter flags.
 
 The trusted Codex hook handles one narrow non-recursive exception. Exact
-agent-chat MCP coordination and task-control tool names are allowed locally
+hafleet MCP coordination and task-control tool names are allowed locally
 because they are the runtime's authenticated control plane, not coding
 capabilities. Text-only `send_message` and `post` calls are included so a
 workflow can report completion without asking permission to ask permission.
@@ -81,7 +81,7 @@ development allowlist flag, and Codex hook definitions must be explicitly
 trusted by Codex before they run. Initial or changed Codex hooks therefore
 require an interactive local launch once before later unattended restarts.
 
-Good, because reading an agent-chat inbox or posting a text workflow result no
+Good, because reading an hafleet inbox or posting a text workflow result no
 longer creates a recursive approval loop. Local file disclosure and coding
 operations remain owner-gated.
 

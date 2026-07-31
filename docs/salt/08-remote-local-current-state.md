@@ -45,7 +45,7 @@ The kernel invariant is already clear in practice: backend data is the only dura
 - determines `AGENT_NAME`;
 - calls backend APIs for `send_message`, `post`, `check_inbox`, and `check_group`;
 - reads bearer and per-agent auth material from environment and agent state;
-- writes `mcp-server.pid` under `AGENTCHAT_AGENT_STATE_DIR` when available.
+- writes `mcp-server.pid` under `HAFLEET_AGENT_STATE_DIR` when available.
 
 This part is mostly profile-neutral: local and remote agents both use the same backend API contract.
 
@@ -55,7 +55,7 @@ Local currently has multiple overlapping paths:
 
 - Backend local tmux sweep observes sessions and MCP process presence.
 - `server.js` has a legacy local queue, local `/api/messages`, local `/api/stream`, and tmux capture/delivery helpers.
-- `push-relay` can also run locally and consume backend SSE, but its default `AGENT_CHAT_SERVER` differs from backend/MCP defaults.
+- `push-relay` can also run locally and consume backend SSE, but its default `HAFLEET_SERVER` differs from backend/MCP defaults.
 
 This means "local" can mean central backend owner, dashboard host, runtime host, or developer checkout.
 
@@ -65,7 +65,7 @@ Remote is intended to be lighter:
 
 - `push-relay.js` consumes central `/api/stream`, reports heartbeat/runtime, and injects into local tmux.
 - `mcp-server.js` connects directly to the central backend.
-- `agentchat` helpers manage local tmux agents and verify the central record.
+- `hafleet` helpers manage local tmux agents and verify the central record.
 - Remote does not run backend, dashboard, or Matrix bridge.
 
 The model is cleaner, but the package and CLI surface do not consistently match it.
@@ -78,7 +78,7 @@ The model is cleaner, but the package and CLI surface do not consistently match 
 | Push delivery | Backend can call dashboard queue; local relay may also consume SSE. | Relay consumes SSE and injects tmux. | Delivery path differs by profile and can duplicate concepts. |
 | Liveness | Backend local sweep infers tmux/MCP. | Relay heartbeat reports sessions and runtime. | Observation owner differs. |
 | `mcpPresent` | Backend can `pgrep` and map panes. | Relay checks pid/process and reports runtime. | Presence source differs. |
-| Server id | Backend/MCP default to `local`; relay defaults to hostname. | Remote expects explicit `AGENT_CHAT_SERVER`. | Same env var has inconsistent defaults and meanings. |
+| Server id | Backend/MCP default to `local`; relay defaults to hostname. | Remote expects explicit `HAFLEET_SERVER`. | Same env var has inconsistent defaults and meanings. |
 | `agent.server` | Empty/`local`/current server id can all mean local. | Heartbeat binds agents to remote server id. | Server is both route key and legacy compatibility marker. |
 | `agent.tmux` | Local pane target and online evidence. | Remote pane target and online evidence. | One field carries target, host observation, and compatibility. |
 | Auth | Bearer, agent token, and localhost trust overlap. | Relay mainly uses bearer; MCP may use bearer + agent token. | Operator, server, and agent identities are not separated. |
@@ -91,20 +91,20 @@ Current read-only checks fail:
 
 ```text
 bash scripts/check-remote-sync.sh
-  bin/agentchat != remote/bin/agentchat
-  bin/agent-service != remote/bin/agent-service
-  bin/agent-up != remote/bin/agent-up
+  bin/hafleet != remote/bin/hafleet
+  bin/hafleet-service != remote/bin/hafleet-service
+  bin/hafleet-up != remote/bin/hafleet-up
   generated remote package out of date
 
 bash scripts/build-remote-package.sh --check
-  remote/bin/agentchat drifted
-  remote/bin/agent-service drifted
-  remote/bin/agent-up drifted
+  remote/bin/hafleet drifted
+  remote/bin/hafleet-service drifted
+  remote/bin/hafleet-up drifted
   remote/lib/push-relay-core.js missing
   remote/lib/mcp-server-core.js drifted
 ```
 
-`remote/bin/agentchat` advertises commands that the remote package does not contain, including `agent-up-v1`, `agent-project`, `agent-graph`, `agent-benchmark`, `check-mcp`, and `agent-resume-id`. Some included commands also assume git-checkout layout or root `remote/install-remote.sh`, which a standalone generated package does not have.
+`remote/bin/hafleet` advertises commands that the remote package does not contain, including `hafleet-up-v1`, `hafleet-project`, `hafleet-graph`, `hafleet-benchmark`, `check-mcp`, and `hafleet-resume-id`. Some included commands also assume git-checkout layout or root `remote/install-remote.sh`, which a standalone generated package does not have.
 
 ## Documentation Evidence
 
@@ -123,7 +123,7 @@ When backend sweep, dashboard queue, and push relay can all write or infer runti
 
 ### P0: Identity Boundary Drift
 
-`API_TOKEN` currently means backend admin bearer, remote relay credential, and dashboard backend proxy credential. `AGENT_CHAT_SERVER` currently means backend local id, relay id, MCP auto-register id, and dashboard locality check. These overloads make profile behavior hard to reason about and hard to secure.
+`API_TOKEN` currently means backend admin bearer, remote relay credential, and dashboard backend proxy credential. `HAFLEET_SERVER` currently means backend local id, relay id, MCP auto-register id, and dashboard locality check. These overloads make profile behavior hard to reason about and hard to secure.
 
 ### P1: Package Drift
 
@@ -131,7 +131,7 @@ Remote package sync currently fails. The remote command surface is not guarantee
 
 ### P1: Operator Misuse
 
-Commands such as `agentchat update`, `agentchat service`, `agent-up`, `agent-down`, `agent-ls`, and `check-mcp` do not clearly state whether they operate on central services, remote relay services, local tmux sessions, or backend registry records.
+Commands such as `hafleet update`, `hafleet service`, `hafleet-up`, `hafleet-down`, `hafleet-ls`, and `check-mcp` do not clearly state whether they operate on central services, remote relay services, local tmux sessions, or backend registry records.
 
 ## Root Cause
 

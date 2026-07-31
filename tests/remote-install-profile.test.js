@@ -12,7 +12,7 @@ describe('remote install profile decision contracts', () => {
     const remoteEnvExample = read('remote/.env.example');
     const remoteReadme = read('remote/README.md');
 
-    expect(installSource).toContain("AGENT_CHAT_SERVER must be this remote host's unique server id, not 'local'.");
+    expect(installSource).toContain("HAFLEET_SERVER must be this remote host's unique server id, not 'local'.");
     expect(remoteEnvExample).toContain('never use "local"');
     expect(remoteReadme).toContain('never `local`');
   });
@@ -52,7 +52,7 @@ describe('remote install profile decision contracts', () => {
 
     expect(relaySource).toContain("execFileSync('git', ['rev-parse', '--short', 'HEAD']");
     expect(remoteRelaySource).toContain("execFileSync('git', ['rev-parse', '--short', 'HEAD']");
-    expect(buildSource).not.toMatch(/AGENT_CHAT_VERSION|VERSION_FILE|version\.txt/);
+    expect(buildSource).not.toMatch(/HAFLEET_VERSION|VERSION_FILE|version\.txt/);
     expect(decisionDoc).toContain('Decision 8: Standalone Remote Package Version');
     expect(cdB0Doc).toContain('R-049');
     expect(cdB0Doc).toContain('Standalone `remote-dist` packages currently have no packaged version file.');
@@ -60,7 +60,7 @@ describe('remote install profile decision contracts', () => {
 
   test('remote autodeploy installs remote runtime dependencies from the remote tree', () => {
     const installSource = read('remote/install-remote.sh');
-    const autodeploySource = read('scripts/agentchat-remote-autodeploy.sh');
+    const autodeploySource = read('scripts/hafleet-remote-autodeploy.sh');
     const decisionDoc = read('docs/salt/14-cd-next-decisions.md');
     const cdB0Doc = read('docs/salt/16-cd-b0-remote-install-profile.md');
 
@@ -77,8 +77,8 @@ describe('remote install profile decision contracts', () => {
     const buildSource = read('scripts/build-remote-package.sh');
     const installSource = read('remote/install-remote.sh');
 
-    expect(buildSource).not.toContain('scripts/agentchat-remote-autodeploy.sh:');
-    expect(installSource).toContain('AUTODEPLOY_SCRIPT="$REPO_ROOT/scripts/agentchat-remote-autodeploy.sh"');
+    expect(buildSource).not.toContain('scripts/hafleet-remote-autodeploy.sh:');
+    expect(installSource).toContain('AUTODEPLOY_SCRIPT="$REPO_ROOT/scripts/hafleet-remote-autodeploy.sh"');
     expect(installSource).toContain('[ ! -d "$REPO_ROOT/.git" ]');
     expect(installSource).toContain('standalone package has no git checkout for autodeploy');
     expect(installSource).toContain('[ ! -x "$AUTODEPLOY_SCRIPT" ]');
@@ -90,23 +90,23 @@ describe('remote install profile decision contracts', () => {
     const buildSource = read('scripts/build-remote-package.sh');
     const syncSource = read('scripts/check-remote-sync.sh');
     const manifestSource = read('scripts/cli-command-manifest.json');
-    const remoteCli = read('remote/bin/agentchat');
+    const remoteCli = read('remote/bin/hafleet');
     const installSource = read('remote/install-remote.sh');
     const remoteReadme = read('remote/README.md');
 
-    expect(buildSource).not.toContain('bin/agent-audit:bin/agent-audit');
-    expect(buildSource).not.toContain('bin/agentchat-sync-skills:bin/agentchat-sync-skills');
-    expect(syncSource).not.toContain('"bin/agent-audit"');
-    expect(syncSource).not.toContain('"bin/agentchat-sync-skills"');
+    expect(buildSource).not.toContain('bin/hafleet-audit:bin/hafleet-audit');
+    expect(buildSource).not.toContain('bin/hafleet-sync-skills:bin/hafleet-sync-skills');
+    expect(syncSource).not.toContain('"bin/hafleet-audit"');
+    expect(syncSource).not.toContain('"bin/hafleet-sync-skills"');
     expect(manifestSource).toContain('"audit"');
     expect(manifestSource).toContain('"sync-skills"');
     expect(remoteCli).not.toMatch(/^\s*audit\)/m);
     expect(remoteCli).not.toMatch(/^\s*sync-skills\)/m);
-    expect(installSource).not.toContain('agent-audit');
-    expect(installSource).not.toContain('agentchat-sync-skills');
-    expect(remoteReadme).not.toContain('bin/agent-audit');
-    expect(remoteReadme).not.toContain('bin/agentchat-sync-skills');
-    expect(remoteReadme).not.toContain('agentchat audit');
-    expect(remoteReadme).not.toContain('agentchat sync-skills');
+    expect(installSource).not.toContain('hafleet-audit');
+    expect(installSource).not.toContain('hafleet-sync-skills');
+    expect(remoteReadme).not.toContain('bin/hafleet-audit');
+    expect(remoteReadme).not.toContain('bin/hafleet-sync-skills');
+    expect(remoteReadme).not.toContain('hafleet audit');
+    expect(remoteReadme).not.toContain('hafleet sync-skills');
   });
 });

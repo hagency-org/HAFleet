@@ -8,7 +8,7 @@
 #
 # Differences from the Linux install, all deliberate:
 #   - launchd user agent instead of systemd system units
-#   - services/agentchat-services.mjs supervises the processes, not systemd
+#   - services/hafleet-services.mjs supervises the processes, not systemd
 #   - the Matrix bridge is OFF by default (--with-bridge to include it)
 #   - no auto-deploy watcher (Linux only; tracked as CD-003)
 #
@@ -27,7 +27,7 @@
 #   --bin-dir PATH     Where to link CLI commands (default: ~/.local/bin)
 #   --allow-existing-tmux  Proceed even if unrelated tmux sessions are present
 #   --deny-existing-tmux   Proceed, but add the existing sessions to
-#                          AGENT_CHAT_SESSION_DENYLIST so HAFleet leaves them alone
+#                          HAFLEET_SESSION_DENYLIST so HAFleet leaves them alone
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -319,8 +319,8 @@ set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\${PATH:-}"
 cd "$INSTALL_DIR"
 set -a; . "$ENV_FILE"; set +a
-export AGENT_CHAT_RUNTIME_DIR="$INSTALL_DIR"
-exec node services/agentchat-services.mjs run --profile "$PROFILE_FILE" --runtime "$INSTALL_DIR"
+export HAFLEET_RUNTIME_DIR="$INSTALL_DIR"
+exec node services/hafleet-services.mjs run --profile "$PROFILE_FILE" --runtime "$INSTALL_DIR"
 EOF
   chmod 0755 "$RUNNER"
 
@@ -367,12 +367,12 @@ configure_mcp() {
   token="$(read_env_value API_TOKEN 2>/dev/null || true)"
 
   if command -v claude >/dev/null 2>&1; then
-    run claude mcp remove agent-chat >/dev/null 2>&1 || true
+    run claude mcp remove hafleet >/dev/null 2>&1 || true
     run claude mcp add -s user \
-      -e "AGENT_CHAT_API=http://127.0.0.1:8090" \
+      -e "HAFLEET_API=http://127.0.0.1:8090" \
       -e "API_TOKEN=$token" \
-      -e "AGENTCHAT_HOMEDIR=$HOME/.agentchat" \
-      -- agent-chat node "$INSTALL_DIR/mcp-server.js" >/dev/null 2>&1 \
+      -e "HAFLEET_HOMEDIR=$HOME/.hafleet" \
+      -- hafleet node "$INSTALL_DIR/mcp-server.js" >/dev/null 2>&1 \
       && log "Registered MCP with Claude Code" \
       || log "NOTE: claude mcp add failed; register manually."
   else
@@ -380,11 +380,11 @@ configure_mcp() {
   fi
 
   if command -v codex >/dev/null 2>&1; then
-    run codex mcp remove agent-chat >/dev/null 2>&1 || true
-    run codex mcp add agent-chat \
-      --env "AGENT_CHAT_API=http://127.0.0.1:8090" \
+    run codex mcp remove hafleet >/dev/null 2>&1 || true
+    run codex mcp add hafleet \
+      --env "HAFLEET_API=http://127.0.0.1:8090" \
       --env "API_TOKEN=$token" \
-      --env "AGENTCHAT_HOMEDIR=$HOME/.agentchat" \
+      --env "HAFLEET_HOMEDIR=$HOME/.hafleet" \
       -- node "$INSTALL_DIR/mcp-server.js" >/dev/null 2>&1 \
       && log "Registered MCP with Codex" \
       || log "NOTE: codex mcp add failed; register manually."
@@ -397,11 +397,11 @@ configure_mcp() {
 verify() {
   [ "$DRY_RUN" = false ] || return 0
   [ -f "$PROFILE_FILE" ] || die "service profile was not written"
-  [ -x "$BIN_DIR/agentchat" ] || die "agentchat was not linked into $BIN_DIR"
+  [ -x "$BIN_DIR/hafleet" ] || die "hafleet was not linked into $BIN_DIR"
   [ "$NO_START" = false ] || { log "--no-start set; skipping health checks."; return 0; }
 
   local port i ok=false
-  port="$(read_env_value AGENT_CHAT_BACKEND_PORT)"; port="${port:-8090}"
+  port="$(read_env_value HAFLEET_BACKEND_PORT)"; port="${port:-8090}"
   log "Waiting for the backend on 127.0.0.1:$port ..."
   for i in $(seq 40); do
     if curl -sf --noproxy '*' "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
@@ -413,13 +413,13 @@ verify() {
     log "Backend did not become healthy. Diagnose with:"
     log "  tail -50 $INSTALL_DIR/data/services-local/logs/backend.log"
     log "  (launchd.err.log only carries the supervisor's own output, usually empty)"
-    log "  node services/agentchat-services.mjs doctor --profile $PROFILE_FILE"
+    log "  node services/hafleet-services.mjs doctor --profile $PROFILE_FILE"
     die "verification failed"
   fi
   log "Backend healthy."
 
   local web
-  web="$(read_env_value AGENT_CHAT_WEB_PORT)"; web="${web:-8084}"
+  web="$(read_env_value HAFLEET_WEB_PORT)"; web="${web:-8084}"
   curl -sf --noproxy '*' "http://127.0.0.1:${web}/" >/dev/null 2>&1 \
     && log "Dashboard healthy at http://127.0.0.1:${web}" \
     || log "NOTE: dashboard not answering on ${web} yet."
@@ -432,18 +432,18 @@ apply_session_denylist() {
   [ "$DENY_EXISTING_TMUX" = true ] || return 0
   [ -n "$EXISTING_TMUX_SESSIONS" ] || { log "No sessions to deny."; return 0; }
   if [ "$DRY_RUN" = true ]; then
-    log "[dry-run] would set AGENT_CHAT_SESSION_DENYLIST=$EXISTING_TMUX_SESSIONS"
+    log "[dry-run] would set HAFLEET_SESSION_DENYLIST=$EXISTING_TMUX_SESSIONS"
     return 0
   fi
   local existing merged
-  existing="$(read_env_value AGENT_CHAT_SESSION_DENYLIST)"
+  existing="$(read_env_value HAFLEET_SESSION_DENYLIST)"
   if [ -n "$existing" ]; then
     merged="$existing,$EXISTING_TMUX_SESSIONS"
   else
     merged="$EXISTING_TMUX_SESSIONS"
   fi
-  set_env_value AGENT_CHAT_SESSION_DENYLIST "$merged"
-  log "AGENT_CHAT_SESSION_DENYLIST=$merged"
+  set_env_value HAFLEET_SESSION_DENYLIST "$merged"
+  log "HAFLEET_SESSION_DENYLIST=$merged"
 }
 
 main() {
@@ -460,8 +460,8 @@ main() {
   verify
   log ""
   log "Installation complete."
-  log "  status:  node services/agentchat-services.mjs status --profile $PROFILE_FILE"
-  log "  doctor:  node services/agentchat-services.mjs doctor  --profile $PROFILE_FILE"
+  log "  status:  node services/hafleet-services.mjs status --profile $PROFILE_FILE"
+  log "  doctor:  node services/hafleet-services.mjs doctor  --profile $PROFILE_FILE"
   log "  stop:    launchctl bootout $LAUNCHD_DOMAIN/$SERVICE_NAME"
   log "  logs:    $INSTALL_DIR/data/services-local/logs/<service>.log"
   log "           each service writes its own; launchd.err.log holds only the supervisor"

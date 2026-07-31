@@ -18,7 +18,7 @@ function run(cmd) {
 }
 
 function detectAgentName() {
-  // Highest priority: explicit launcher injection (agent-up sets this).
+  // Highest priority: explicit launcher injection (hafleet-up sets this).
   // This avoids cross-agent identity bleed when tmux client context is ambiguous.
   const envAgent = (process.env.AGENT_NAME || '').trim();
   if (envAgent) return envAgent;
@@ -63,26 +63,26 @@ if (!AGENT_NAME) {
   process.exit(1);
 }
 
-const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
+const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.HAFLEET_BACKEND_PORT || '8090', 10);
 const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
   ? DEFAULT_BACKEND_PORT_RAW
   : 8090;
-const API = process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`;
+const API = process.env.HAFLEET_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`;
 const API_TOKEN = (process.env.API_TOKEN || '').trim();
 const AGENT_SERVER = resolveLocalServerId();
 const AGENT_TOKEN = (() => {
-  const stateDir = (process.env.AGENTCHAT_AGENT_STATE_DIR || '').trim();
+  const stateDir = (process.env.HAFLEET_AGENT_STATE_DIR || '').trim();
   if (!stateDir) return '';
   try { return readFileSync(path.join(stateDir, 'agent-token'), 'utf-8').trim(); } catch { return ''; }
 })();
 const CLAUDE_PERMISSION_CHANNEL_ENABLED = Boolean(AGENT_TOKEN)
-  && (process.env.AGENTCHAT_CLAUDE_PERMISSION_CHANNEL || 'true').trim().toLowerCase() !== 'false';
-const APPROVAL_POLL_INTERVAL_MS_RAW = Number.parseInt(process.env.AGENTCHAT_APPROVAL_POLL_INTERVAL_MS || '1000', 10);
+  && (process.env.HAFLEET_CLAUDE_PERMISSION_CHANNEL || 'true').trim().toLowerCase() !== 'false';
+const APPROVAL_POLL_INTERVAL_MS_RAW = Number.parseInt(process.env.HAFLEET_APPROVAL_POLL_INTERVAL_MS || '1000', 10);
 const APPROVAL_POLL_INTERVAL_MS = Number.isFinite(APPROVAL_POLL_INTERVAL_MS_RAW) && APPROVAL_POLL_INTERVAL_MS_RAW > 0
   ? Math.max(250, APPROVAL_POLL_INTERVAL_MS_RAW)
   : 1000;
-const ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.AGENT_CHAT_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
-const ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.AGENT_CHAT_ATTACHMENT_MAX_ITEMS || '8', 10);
+const ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.HAFLEET_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
+const ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.HAFLEET_ATTACHMENT_MAX_ITEMS || '8', 10);
 
 function envPath(value) {
   const raw = typeof value === 'string' ? value.trim() : '';
@@ -96,21 +96,21 @@ function safePathSegment(value, fallback = 'agent') {
 }
 
 function defaultAgentchatHome(env = process.env) {
-  return envPath(env.AGENTCHAT_HOMEDIR) || path.join(os.homedir(), '.agentchat');
+  return envPath(env.HAFLEET_HOMEDIR) || path.join(os.homedir(), '.hafleet');
 }
 
 function resolveAgentStateDir(agentName, env = process.env) {
-  const stateDir = (env.AGENTCHAT_AGENT_STATE_DIR || '').trim();
+  const stateDir = (env.HAFLEET_AGENT_STATE_DIR || '').trim();
   if (stateDir) return stateDir;
   return path.join(defaultAgentchatHome(env), 'agents', `agent_${agentName}`, 'state');
 }
 
 function resolveMediaFetchCacheDir(agentName, env = process.env) {
   const agentSegment = safePathSegment(agentName);
-  const stateDir = envPath(env.AGENTCHAT_AGENT_STATE_DIR);
+  const stateDir = envPath(env.HAFLEET_AGENT_STATE_DIR);
   if (stateDir) return path.join(stateDir, 'mcp-media-cache');
 
-  const runtimeDir = envPath(env.AGENT_CHAT_RUNTIME_DIR);
+  const runtimeDir = envPath(env.HAFLEET_RUNTIME_DIR);
   if (runtimeDir) return path.join(runtimeDir, 'data', 'mcp-media-cache', agentSegment);
 
   return path.join(defaultAgentchatHome(env), 'data', 'mcp-media-cache', agentSegment);
@@ -119,7 +119,7 @@ function resolveMediaFetchCacheDir(agentName, env = process.env) {
 const MEDIA_FETCH_CACHE_DIR = resolveMediaFetchCacheDir(AGENT_NAME);
 mkdirSync(MEDIA_FETCH_CACHE_DIR, { recursive: true });
 
-if (process.env.AGENTCHAT_MCP_MEDIA_CACHE_SMOKE === '1') {
+if (process.env.HAFLEET_MCP_MEDIA_CACHE_SMOKE === '1') {
   process.stdout.write(`${MEDIA_FETCH_CACHE_DIR}\n`);
   process.exit(0);
 }
@@ -535,7 +535,7 @@ function sanitizeImageSync(filePath, kind, mime) {
     const w = Number(wStr) || 0;
     const h = Number(hStr) || 0;
     if (w <= 0 || h <= 0) {
-      process.stderr.write(`[agent-chat] image sanitize: invalid dimensions ${w}x${h} for ${filePath}, downgrading to file\n`);
+      process.stderr.write(`[hafleet] image sanitize: invalid dimensions ${w}x${h} for ${filePath}, downgrading to file\n`);
       return { path: filePath, kind: 'file', mime, sanitized: true, warning: `Image has invalid dimensions (${w}x${h}), not viewable as image` };
     }
     const needsResize = w > IMAGE_MAX_DIMENSION || h > IMAGE_MAX_DIMENSION;
@@ -555,10 +555,10 @@ function sanitizeImageSync(filePath, kind, mime) {
     execFileSync('convert', args, { timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] });
     const newStat = statSync(sanitizedPath);
     const newMime = ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : mime;
-    process.stderr.write(`[agent-chat] image sanitized: ${filePath} -> ${sanitizedPath} (${stat.size} -> ${newStat.size})\n`);
+    process.stderr.write(`[hafleet] image sanitized: ${filePath} -> ${sanitizedPath} (${stat.size} -> ${newStat.size})\n`);
     return { path: sanitizedPath, kind: 'image', mime: newMime, size: newStat.size, sanitized: true };
   } catch (e) {
-    process.stderr.write(`[agent-chat] image sanitize failed for ${filePath}: ${e.message}, downgrading to file\n`);
+    process.stderr.write(`[hafleet] image sanitize failed for ${filePath}: ${e.message}, downgrading to file\n`);
     return { path: filePath, kind: 'file', mime, sanitized: true, warning: `Image could not be validated (${e.message}), attached as file instead of image` };
   }
 }
@@ -667,7 +667,7 @@ async function localizeTextLocalPaths(value) {
       lines[i] = `LocalPath: ${localized.path}`;
       extraAttachments.push(localized);
     } catch (e) {
-      process.stderr.write(`[agent-chat/${AGENT_NAME}] failed to localize LocalPath ${sourcePath}: ${e.message}\n`);
+      process.stderr.write(`[hafleet/${AGENT_NAME}] failed to localize LocalPath ${sourcePath}: ${e.message}\n`);
     }
   }
   return { text: lines.join('\n'), attachments: extraAttachments };
@@ -700,7 +700,7 @@ async function localizeMessageMedia(message) {
       }
       localizedAttachments.push(final);
     } catch (e) {
-      process.stderr.write(`[agent-chat/${AGENT_NAME}] failed to localize attachment ${sourcePath}: ${e.message}\n`);
+      process.stderr.write(`[hafleet/${AGENT_NAME}] failed to localize attachment ${sourcePath}: ${e.message}\n`);
       localizedAttachments.push(raw);
     }
   }
@@ -738,7 +738,7 @@ async function localizeGroupData(data) {
 
 // ── MCP Server ────────────────────────────────────────────────────────
 const server = new McpServer({
-  name: `agent-chat-${AGENT_NAME}`,
+  name: `hafleet-${AGENT_NAME}`,
   version: '2.1.0',
 }, claudeChannelServerOptions(CLAUDE_PERMISSION_CHANNEL_ENABLED));
 
@@ -758,8 +758,8 @@ if (CLAUDE_PERMISSION_CHANNEL_ENABLED) {
       const created = await api('POST', '/api/approvals', {
         agent: AGENT_NAME,
         runtime: 'claude',
-        ...((process.env.AGENTCHAT_PROJECT_ID || '').trim()
-          ? { project: process.env.AGENTCHAT_PROJECT_ID.trim() }
+        ...((process.env.HAFLEET_PROJECT_ID || '').trim()
+          ? { project: process.env.HAFLEET_PROJECT_ID.trim() }
           : {}),
         upstream_request_id: params.request_id,
         tool_name: params.tool_name,

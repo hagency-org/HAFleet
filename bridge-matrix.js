@@ -116,30 +116,30 @@ const execFileAsync = promisify(execFile);
 let execFileAsyncImpl = execFileAsync;
 const REPO_ROOT = path.dirname(__filename);
 const RUNTIME_ROOT = (() => {
-  const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
+  const raw = String(process.env.HAFLEET_RUNTIME_DIR || '').trim();
   return raw ? path.resolve(raw) : REPO_ROOT;
 })();
 assertRuntimeDir(RUNTIME_ROOT);
 // ── Configuration ─────────────────────────────────────────────────────
 const HOMESERVER = process.env.MATRIX_HOMESERVER || 'https://matrix.example.com';
-const APPROVAL_EVENT_KEY = 'com.agentchat.approval';
-const APPROVAL_STATUS_MSGTYPE = 'com.agentchat.approval.status.v1';
-const APPROVAL_REQUEST_MSGTYPE = 'com.agentchat.approval.request.v1';
-const APPROVAL_VERDICT_MSGTYPE = 'com.agentchat.approval.verdict.v1';
+const APPROVAL_EVENT_KEY = 'com.hafleet.approval';
+const APPROVAL_STATUS_MSGTYPE = 'com.hafleet.approval.status.v1';
+const APPROVAL_REQUEST_MSGTYPE = 'com.hafleet.approval.request.v1';
+const APPROVAL_VERDICT_MSGTYPE = 'com.hafleet.approval.verdict.v1';
 const MATRIX_MEGOLM_ALGORITHM = 'm.megolm.v1.aes-sha2';
 const REGISTRATION_TOKEN = (process.env.MATRIX_REG_TOKEN || '').trim();
 
 export function resolveApprovalDmMode(env = process.env) {
-  const requested = String(env.AGENTCHAT_APPROVAL_DM_MODE || 'required').trim().toLowerCase();
+  const requested = String(env.HAFLEET_APPROVAL_DM_MODE || 'required').trim().toLowerCase();
   if (requested === 'required') return 'required';
   if (requested !== 'plaintext-test') {
-    throw new Error(`unsupported AGENTCHAT_APPROVAL_DM_MODE: ${requested || '<empty>'}`);
+    throw new Error(`unsupported HAFLEET_APPROVAL_DM_MODE: ${requested || '<empty>'}`);
   }
   if (String(env.NODE_ENV || '').trim().toLowerCase() === 'production') {
     throw new Error('plaintext approval diagnostics are forbidden in production');
   }
-  if (String(env.AGENTCHAT_ALLOW_PLAINTEXT_APPROVAL_TEST || '').trim() !== '1') {
-    throw new Error('plaintext approval diagnostics require AGENTCHAT_ALLOW_PLAINTEXT_APPROVAL_TEST=1');
+  if (String(env.HAFLEET_ALLOW_PLAINTEXT_APPROVAL_TEST || '').trim() !== '1') {
+    throw new Error('plaintext approval diagnostics require HAFLEET_ALLOW_PLAINTEXT_APPROVAL_TEST=1');
   }
   return 'plaintext-test';
 }
@@ -181,16 +181,16 @@ async function fetchWithRateLimit(url, init, tries = 6) {
   }
   return res;
 }
-const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
+const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.HAFLEET_BACKEND_PORT || '8090', 10);
 const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
   ? DEFAULT_BACKEND_PORT_RAW
   : 8090;
-const BACKEND_URL = (process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
-const BACKEND_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_FETCH_TIMEOUT_MS || '12000', 10);
+const BACKEND_URL = (process.env.HAFLEET_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
+const BACKEND_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.HAFLEET_BACKEND_FETCH_TIMEOUT_MS || '12000', 10);
 const BACKEND_FETCH_TIMEOUT_MS = Number.isFinite(BACKEND_FETCH_TIMEOUT_MS_RAW) && BACKEND_FETCH_TIMEOUT_MS_RAW > 0
   ? BACKEND_FETCH_TIMEOUT_MS_RAW
   : 12000;
-const BACKEND_FETCH_RETRY_DELAY_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_FETCH_RETRY_DELAY_MS || '2500', 10);
+const BACKEND_FETCH_RETRY_DELAY_MS_RAW = Number.parseInt(process.env.HAFLEET_BACKEND_FETCH_RETRY_DELAY_MS || '2500', 10);
 const BACKEND_FETCH_RETRY_DELAY_MS = Number.isFinite(BACKEND_FETCH_RETRY_DELAY_MS_RAW) && BACKEND_FETCH_RETRY_DELAY_MS_RAW > 0
   ? BACKEND_FETCH_RETRY_DELAY_MS_RAW
   : 2500;
@@ -207,13 +207,13 @@ function appendMsgPath(baseUrl) {
 }
 
 function resolveMessageBaseUrl(env = process.env) {
-  const webBase = normalizeBaseUrl(env.AGENT_CHAT_WEB_URL);
+  const webBase = normalizeBaseUrl(env.HAFLEET_WEB_URL);
   if (webBase) return appendMsgPath(webBase);
 
   const legacyMsgBase = normalizeBaseUrl(env.MSG_BASE_URL);
   if (legacyMsgBase) return legacyMsgBase;
 
-  const webPortRaw = Number.parseInt(env.AGENT_CHAT_WEB_PORT || '8084', 10);
+  const webPortRaw = Number.parseInt(env.HAFLEET_WEB_PORT || '8084', 10);
   const webPort = Number.isFinite(webPortRaw) && webPortRaw > 0 ? webPortRaw : 8084;
   return `http://127.0.0.1:${webPort}/msg`;
 }
@@ -568,7 +568,7 @@ if (ALLOW_LEGACY_AGENT_PASSWORD) {
   }
 }
 if (!AUTO_AVATAR_ENABLED) {
-  console.warn('MATRIX_AUTO_AVATAR is disabled. Automatic avatar generation/sync is off; use agent-chat-cli avatar <name> <image-file> for manual updates.');
+  console.warn('MATRIX_AUTO_AVATAR is disabled. Automatic avatar generation/sync is off; use hafleet-cli avatar <name> <image-file> for manual updates.');
 }
 
 function makeUserId(localpart) {
@@ -1403,7 +1403,7 @@ export function resolveInboundRoute({ groupName, targetAgent, isBotDm }) {
 // someone: prefer a coordinator, else wake the factory coordinator for the
 // single-agent mapped-room case, else nobody (let explicit
 // mentions decide). `agentUserIds` are Matrix MXIDs; `agentNameFromId` maps one
-// to an agent-chat name (or null if it is not an agent account).
+// to an hafleet name (or null if it is not an agent account).
 export function pickDefaultGroupRecipient(agentUserIds, agentNameFromId) {
   const ids = Array.isArray(agentUserIds) ? agentUserIds.filter(Boolean) : [];
   if (ids.length === 0) return null;
@@ -1804,7 +1804,7 @@ export function parseInboundTextMessage(content) {
   const msgType = typeof content.msgtype === 'string' ? content.msgtype : '';
   const relates = content['m.relates_to'] || {};
   if (relates.rel_type === 'm.replace') {
-    // Ignore edit events: they should not create a new agent-chat message.
+    // Ignore edit events: they should not create a new hafleet message.
     return { skip: true, body: '', replyEventId: null, threadRootEventId: null };
   }
   const threadRootEventId = relates.rel_type === 'm.thread' && typeof relates.event_id === 'string'
@@ -2521,7 +2521,7 @@ export class MatrixBridge {
     console.log(`[matrix-e2ee] bot crypto device verified device=${botSession.deviceId}`);
     console.log('Bot syncing...');
 
-    // 6. Listen to backend SSE for agent-chat → Matrix
+    // 6. Listen to backend SSE for hafleet → Matrix
     this.connectSSE();
 
     // 7. Scan all joined rooms for unmapped groups + backfill avatars
@@ -2928,7 +2928,7 @@ export class MatrixBridge {
     const replyTo = this.resolveReplyToMessageId(parsed.replyEventId);
     let effectiveMentions = [...new Set(mentions
       // Matrix rooms may also contain Octos or other external bot pills.
-      // Only registered agent-chat agents are routable mention targets.
+      // Only registered hafleet agents are routable mention targets.
       .map(name => this.resolveKnownAgentName(name))
       .filter(Boolean))];
 
@@ -4474,7 +4474,7 @@ export class MatrixBridge {
         await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/kick`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${state.botToken}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: userId, reason: 'Removed from agent-chat group' }),
+          body: JSON.stringify({ user_id: userId, reason: 'Removed from hafleet group' }),
         });
         console.log(`Kicked ${m} (${userId}) from Matrix room for ${update.name}`);
       } catch (e) {
@@ -5097,7 +5097,7 @@ export class MatrixBridge {
     }
   }
 
-  // ── Create Matrix room for agent-chat group ───────────────────────
+  // ── Create Matrix room for hafleet group ───────────────────────
   async createRoomForGroup(groupName, members) {
     const invite = [];
     for (const m of members) {

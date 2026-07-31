@@ -1,0 +1,638 @@
+#!/bin/bash
+
+# Deprecated legacy entrypoint: forward to unified 'hafleet'.
+if [ "${HAFLEET_INTERNAL_DISPATCH:-0}" != "1" ]; then
+  _ac_legacy_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _ac_legacy_name="$(basename "$0")"
+  echo "[DEPRECATED] ${_ac_legacy_name} is deprecated. Use: hafleet cli ..." >&2
+  exec "${_ac_legacy_dir}/hafleet" "cli" "$@"
+fi
+# hafleet-cli — Admin CLI for hafleet backend API
+#
+# Usage:
+#   hafleet-cli <command> [args...]
+#
+# Commands:
+#   create-group <name> [member1 member2 ...]   Create a group (optionally with members)
+#   delete-group <name>                          Delete a group
+#   add-member <group> <name1> [name2 ...]       Add members to a group
+#   rm-member <group> <name1> [name2 ...]        Remove members from a group
+#   list-groups                                  List all groups
+#   group <name>                                 Show group details
+#   list-agents                                  List all agents
+#   tell <agent> <message>                       Message an agent as the operator
+#   status [name]                                Show status table or one agent status
+#   fleet [--expect-version <sha>] [--json]      Show remote fleet version inventory
+#   agent <name>                                 Show agent details
+#   identity <name> <text>                       Set agent identity/description
+#   dm <agent> <human>                           Ensure DM room exists (Matrix)
+set -euo pipefail
+
+BACKEND_PORT_RAW="${HAFLEET_BACKEND_PORT:-8090}"
+if [[ "$BACKEND_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT_RAW" -gt 0 ]; then
+  BACKEND_PORT="$BACKEND_PORT_RAW"
+else
+  BACKEND_PORT="8090"
+fi
+API="${HAFLEET_API:-http://127.0.0.1:$BACKEND_PORT}"
+TOKEN="${API_TOKEN:-}"
+IDLE_THRESHOLD_MS_RAW="${AGENT_IDLE_THRESHOLD_MS:-20000}"
+CURL_CONNECT_TIMEOUT_RAW="${HAFLEET_CURL_CONNECT_TIMEOUT_SEC:-2}"
+CURL_MAX_TIME_RAW="${HAFLEET_CURL_MAX_TIME_SEC:-8}"
+if [[ "$IDLE_THRESHOLD_MS_RAW" =~ ^[0-9]+$ ]] && [ "$IDLE_THRESHOLD_MS_RAW" -gt 0 ]; then
+  IDLE_THRESHOLD_MS="$IDLE_THRESHOLD_MS_RAW"
+else
+  IDLE_THRESHOLD_MS="20000"
+fi
+IDLE_THRESHOLD_SEC="$(( (IDLE_THRESHOLD_MS + 999) / 1000 ))"
+if [[ "$CURL_CONNECT_TIMEOUT_RAW" =~ ^[0-9]+$ ]] && [ "$CURL_CONNECT_TIMEOUT_RAW" -gt 0 ]; then
+  CURL_CONNECT_TIMEOUT_SEC="$CURL_CONNECT_TIMEOUT_RAW"
+else
+  CURL_CONNECT_TIMEOUT_SEC="2"
+fi
+if [[ "$CURL_MAX_TIME_RAW" =~ ^[0-9]+$ ]] && [ "$CURL_MAX_TIME_RAW" -gt 0 ]; then
+  CURL_MAX_TIME_SEC="$CURL_MAX_TIME_RAW"
+else
+  CURL_MAX_TIME_SEC="8"
+fi
+
+_require_token() {
+  if [ -z "$TOKEN" ]; then
+    echo "Error: API_TOKEN env var required for mutation commands" >&2
+    exit 1
+  fi
+}
+
+_curl() {
+  if [ -n "$TOKEN" ]; then
+    curl --noproxy '*' --silent --show-error \
+      --connect-timeout "$CURL_CONNECT_TIMEOUT_SEC" \
+      --max-time "$CURL_MAX_TIME_SEC" \
+      -H "Authorization: Bearer $TOKEN" "$@"
+  else
+    curl --noproxy '*' --silent --show-error \
+      --connect-timeout "$CURL_CONNECT_TIMEOUT_SEC" \
+      --max-time "$CURL_MAX_TIME_SEC" \
+      "$@"
+  fi
+}
+
+_json_str() {
+  printf '%s' "$1" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()), end="")'
+}
+
+_json_arr() {
+  python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "$@"
+}
+
+_urlencode() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""), end="")' "$1"
+}
+
+_tmux_snapshot_json() {
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "{}"
+    return
+  fi
+  tmp_tmux="$(mktemp)"
+  tmux list-panes -a -F '#{session_name}|#{session_activity}|#{pane_current_command}' > "$tmp_tmux" 2>/dev/null || true
+  python3 - "$tmp_tmux" <<'PY'
+import json
+import sys
+
+out = {}
+with open(sys.argv[1]) as f:
+  lines = f.readlines()
+for raw in lines:
+    line = raw.rstrip('\n')
+    if not line:
+        continue
+    parts = line.split('|', 2)
+    if len(parts) < 2:
+        continue
+    session = parts[0].strip()
+    if not session:
+        continue
+    try:
+        activity = int(parts[1]) if parts[1].strip() else 0
+    except ValueError:
+        activity = 0
+    cmd = parts[2].strip() if len(parts) > 2 else ''
+    prev = out.get(session)
+    if not prev or activity >= int(prev.get('session_activity', 0)):
+        out[session] = {'session_activity': activity, 'command': cmd}
+
+print(json.dumps(out), end='')
+PY
+  rm -f "$tmp_tmux"
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  create-group)
+    name="${1:?Usage: hafleet-cli create-group <name> [member1 ...]}"
+    shift
+    members=$(_json_arr "$@")
+    _curl -X POST "$API/api/groups" \
+      -H 'Content-Type: application/json' \
+      -d "{\"name\":$(_json_str "$name"),\"members\":$members}" | python3 -m json.tool
+    ;;
+
+  delete-group)
+    name="${1:?Usage: hafleet-cli delete-group <name>}"
+    _curl -X DELETE "$API/api/groups/$name" | python3 -m json.tool
+    ;;
+
+  add-member)
+    group="${1:?Usage: hafleet-cli add-member <group> <name1> [name2 ...]}"
+    shift
+    [ $# -lt 1 ] && { echo "Error: at least one member name required" >&2; exit 1; }
+    members=$(_json_arr "$@")
+    _curl -X POST "$API/api/groups/$group/members" \
+      -H 'Content-Type: application/json' \
+      -d "{\"add\":$members}" | python3 -m json.tool
+    ;;
+
+  rm-member)
+    group="${1:?Usage: hafleet-cli rm-member <group> <name1> [name2 ...]}"
+    shift
+    [ $# -lt 1 ] && { echo "Error: at least one member name required" >&2; exit 1; }
+    members=$(_json_arr "$@")
+    _curl -X POST "$API/api/groups/$group/members" \
+      -H 'Content-Type: application/json' \
+      -d "{\"remove\":$members}" | python3 -m json.tool
+    ;;
+
+  list-groups)
+    _curl "$API/api/groups" | python3 -m json.tool
+    ;;
+
+  group)
+    name="${1:?Usage: hafleet-cli group <name>}"
+    _curl "$API/api/groups/$name" | python3 -m json.tool
+    ;;
+
+  register|unregister)
+    echo "Error: '$cmd' has been removed. Agent presence is discovered via heartbeat (online/inactive)." >&2
+    echo "Use: list-agents / agent / identity" >&2
+    exit 1
+    ;;
+
+  list-agents)
+    tmux_snapshot="$(_tmux_snapshot_json)"
+    tmp_json="$(mktemp)"
+    _curl "$API/api/agents" > "$tmp_json"
+    TMUX_SNAPSHOT="$tmux_snapshot" IDLE_THRESHOLD_SEC="$IDLE_THRESHOLD_SEC" python3 - "$tmp_json" <<'PY'
+import json
+import os
+import sys
+import time
+
+def fmt_span(sec):
+    sec = int(max(0, sec))
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec//60}m{sec%60:02d}s"
+    if sec < 86400:
+        h, rem = divmod(sec, 3600)
+        m = rem // 60
+        return f"{h}h{m:02d}m"
+    d, rem = divmod(sec, 86400)
+    h = rem // 3600
+    return f"{d}d{h:02d}h"
+
+def to_int(v):
+    try:
+        if v is None:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+tmux_map = json.loads(os.environ.get('TMUX_SNAPSHOT') or '{}')
+with open(sys.argv[1]) as f:
+    agents = json.load(f)
+now_ms = int(time.time() * 1000)
+now_sec = int(time.time())
+threshold_sec = max(1, int(os.environ.get('IDLE_THRESHOLD_SEC', '30')))
+
+print("  NAME                 STATE    ACTIVE   IDLE     LASTSEEN  SERVER         TYPE     TMUX")
+for a in sorted(agents, key=lambda x: x.get('name', '')):
+    name = str(a.get('name', '?'))
+    typ = str(a.get('type', '?'))
+    server = str(a.get('server') or '-')
+    tmux = str(a.get('tmux') or '-')
+    online = bool(a.get('online'))
+    active_raw = a.get('activeNow') if 'activeNow' in a else None
+    active_unknown = online and 'activeNow' in a and active_raw is None
+    active_now = active_raw if isinstance(active_raw, bool) else None
+
+    session = tmux.split(':', 1)[0] if tmux and tmux != '-' else ''
+    snap = tmux_map.get(session) if session else None
+    idle_sec_snapshot = None
+    if snap and snap.get('session_activity'):
+        idle_sec_snapshot = max(0, now_sec - int(snap['session_activity']))
+    active_sec = to_int(a.get('activeDurationSec'))
+    idle_sec = to_int(a.get('idleDurationSec'))
+    if active_unknown:
+        active_sec = None
+        idle_sec = None
+    elif idle_sec is None:
+        idle_sec = idle_sec_snapshot
+
+    if active_unknown:
+        state = 'unknown'
+    elif online and active_now is not None:
+        state = 'active' if active_now else 'idle'
+    elif online and idle_sec is not None:
+        state = 'active' if idle_sec < threshold_sec else 'idle'
+    elif online:
+        state = 'online'
+    else:
+        state = 'offline'
+
+    last_seen = a.get('lastSeen')
+    if isinstance(last_seen, (int, float)) and last_seen > 0:
+        seen_txt = fmt_span((now_ms - int(last_seen)) // 1000)
+    else:
+        seen_txt = '-'
+    active_txt = fmt_span(active_sec) if active_sec is not None else '-'
+    idle_txt = fmt_span(idle_sec) if idle_sec is not None else '-'
+
+    print(f"  {name:20.20s} {state:8s} {active_txt:8s} {idle_txt:8s} {seen_txt:9s} {server:14.14s} {typ:8.8s} {tmux}")
+PY
+    rm -f "$tmp_json"
+    ;;
+
+  status)
+    tmux_snapshot="$(_tmux_snapshot_json)"
+    if [ $# -eq 0 ]; then
+      tmp_json="$(mktemp)"
+      _curl "$API/api/agents" > "$tmp_json"
+      TMUX_SNAPSHOT="$tmux_snapshot" IDLE_THRESHOLD_SEC="$IDLE_THRESHOLD_SEC" python3 - "$tmp_json" <<'PY'
+import json
+import os
+import sys
+import time
+
+def fmt_span(sec):
+    sec = int(max(0, sec))
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec//60}m{sec%60:02d}s"
+    if sec < 86400:
+        h, rem = divmod(sec, 3600)
+        m = rem // 60
+        return f"{h}h{m:02d}m"
+    d, rem = divmod(sec, 86400)
+    h = rem // 3600
+    return f"{d}d{h:02d}h"
+
+def to_int(v):
+    try:
+        if v is None:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+tmux_map = json.loads(os.environ.get('TMUX_SNAPSHOT') or '{}')
+with open(sys.argv[1]) as f:
+    agents = json.load(f)
+now_ms = int(time.time() * 1000)
+now_sec = int(time.time())
+threshold_sec = max(1, int(os.environ.get('IDLE_THRESHOLD_SEC', '30')))
+
+print("  NAME                 STATE    ACTIVE   IDLE     LASTSEEN  SERVER         TYPE")
+for a in sorted(agents, key=lambda x: x.get('name', '')):
+    name = str(a.get('name', '?'))
+    typ = str(a.get('type', '?'))
+    server = str(a.get('server') or '-')
+    tmux = str(a.get('tmux') or '')
+    online = bool(a.get('online'))
+    active_raw = a.get('activeNow') if 'activeNow' in a else None
+    active_unknown = online and 'activeNow' in a and active_raw is None
+    active_now = active_raw if isinstance(active_raw, bool) else None
+
+    session = tmux.split(':', 1)[0] if tmux else ''
+    snap = tmux_map.get(session) if session else None
+    idle_sec_snapshot = None
+    if snap and snap.get('session_activity'):
+        idle_sec_snapshot = max(0, now_sec - int(snap['session_activity']))
+    active_sec = to_int(a.get('activeDurationSec'))
+    idle_sec = to_int(a.get('idleDurationSec'))
+    if active_unknown:
+        active_sec = None
+        idle_sec = None
+    elif idle_sec is None:
+        idle_sec = idle_sec_snapshot
+
+    if active_unknown:
+        state = 'unknown'
+    elif online and active_now is not None:
+        state = 'active' if active_now else 'idle'
+    elif online and idle_sec is not None:
+        state = 'active' if idle_sec < threshold_sec else 'idle'
+    elif online:
+        state = 'online'
+    else:
+        state = 'offline'
+
+    last_seen = a.get('lastSeen')
+    if isinstance(last_seen, (int, float)) and last_seen > 0:
+        seen_txt = fmt_span((now_ms - int(last_seen)) // 1000)
+    else:
+        seen_txt = '-'
+    active_txt = fmt_span(active_sec) if active_sec is not None else '-'
+    idle_txt = fmt_span(idle_sec) if idle_sec is not None else '-'
+
+    print(f"  {name:20.20s} {state:8s} {active_txt:8s} {idle_txt:8s} {seen_txt:9s} {server:14.14s} {typ:8.8s}")
+PY
+      rm -f "$tmp_json"
+    else
+      name="${1:?Usage: hafleet-cli status [name]}"
+      tmp_json="$(mktemp)"
+      _curl "$API/api/agents/$name" > "$tmp_json"
+      TMUX_SNAPSHOT="$tmux_snapshot" IDLE_THRESHOLD_SEC="$IDLE_THRESHOLD_SEC" python3 - "$tmp_json" <<'PY'
+import json
+import os
+import sys
+import time
+
+def fmt_span(sec):
+    sec = int(max(0, sec))
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec//60}m{sec%60:02d}s"
+    if sec < 86400:
+        h, rem = divmod(sec, 3600)
+        m = rem // 60
+        return f"{h}h{m:02d}m"
+    d, rem = divmod(sec, 86400)
+    h = rem // 3600
+    return f"{d}d{h:02d}h"
+
+def to_int(v):
+    try:
+        if v is None:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+tmux_map = json.loads(os.environ.get('TMUX_SNAPSHOT') or '{}')
+with open(sys.argv[1]) as f:
+    obj = json.load(f)
+if isinstance(obj, dict) and obj.get('error'):
+    print(json.dumps(obj, ensure_ascii=False, indent=2))
+    sys.exit(0)
+
+now_ms = int(time.time() * 1000)
+now_sec = int(time.time())
+threshold_sec = max(1, int(os.environ.get('IDLE_THRESHOLD_SEC', '30')))
+
+name = str(obj.get('name', '?'))
+typ = str(obj.get('type', '?'))
+server = str(obj.get('server') or '-')
+tmux = str(obj.get('tmux') or '-')
+online = bool(obj.get('online'))
+active_raw = obj.get('activeNow') if 'activeNow' in obj else None
+active_unknown = online and 'activeNow' in obj and active_raw is None
+active_now = active_raw if isinstance(active_raw, bool) else None
+session = tmux.split(':', 1)[0] if tmux and tmux != '-' else ''
+snap = tmux_map.get(session) if session else None
+idle_sec_snapshot = None
+if snap and snap.get('session_activity'):
+    idle_sec_snapshot = max(0, now_sec - int(snap['session_activity']))
+active_sec = to_int(obj.get('activeDurationSec'))
+idle_sec = to_int(obj.get('idleDurationSec'))
+if active_unknown:
+    active_sec = None
+    idle_sec = None
+elif idle_sec is None:
+    idle_sec = idle_sec_snapshot
+
+if active_unknown:
+    state = 'unknown'
+elif online and active_now is not None:
+    state = 'active' if active_now else 'idle'
+elif online and idle_sec is not None:
+    state = 'active' if idle_sec < threshold_sec else 'idle'
+elif online:
+    state = 'online'
+else:
+    state = 'offline'
+
+last_seen = obj.get('lastSeen')
+if isinstance(last_seen, (int, float)) and last_seen > 0:
+    seen_txt = fmt_span((now_ms - int(last_seen)) // 1000)
+else:
+    seen_txt = '-'
+active_txt = fmt_span(active_sec) if active_sec is not None else '-'
+idle_txt = fmt_span(idle_sec) if idle_sec is not None else '-'
+
+print(f"name:        {name}")
+print(f"state:       {state}")
+print(f"active:      {active_txt}")
+print(f"idle:        {idle_txt}")
+print(f"lastSeen:    {seen_txt} ago")
+print(f"online:      {str(online).lower()}")
+print(f"type:        {typ}")
+print(f"server:      {server}")
+print(f"tmux:        {tmux}")
+offline_reason = obj.get('offlineReason')
+print(f"offlineReason:{offline_reason if offline_reason else '-'}")
+print(f"manualDown:  {str(bool(obj.get('manualDown'))).lower()}")
+PY
+      rm -f "$tmp_json"
+    fi
+    ;;
+
+  agent)
+    name="${1:?Usage: hafleet-cli agent <name>}"
+    _curl "$API/api/agents/$name" | python3 -m json.tool
+    ;;
+
+  fleet)
+    fleet_json="false"
+    expected_version=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --json)
+          fleet_json="true"
+          shift
+          ;;
+        --expect-version|--expected-version|-e)
+          expected_version="${2:?Usage: hafleet-cli fleet [--expect-version <sha>] [--json]}"
+          shift 2
+          ;;
+        --api)
+          API="${2:?Usage: hafleet-cli fleet [--api <url>] [--expect-version <sha>] [--json]}"
+          shift 2
+          ;;
+        --token)
+          TOKEN="${2:?Usage: hafleet-cli fleet [--token <token>] [--expect-version <sha>] [--json]}"
+          shift 2
+          ;;
+        *)
+          echo "Unknown fleet option: $1" >&2
+          echo "Usage: hafleet-cli fleet [--expect-version <sha>] [--json]" >&2
+          exit 1
+          ;;
+      esac
+    done
+    fleet_url="$API/api/servers/fleet"
+    if [ -n "$expected_version" ]; then
+      fleet_url="${fleet_url}?expectVersion=$(_urlencode "$expected_version")"
+    fi
+    tmp_json="$(mktemp)"
+    _curl "$fleet_url" > "$tmp_json"
+    if [ "$fleet_json" = "true" ]; then
+      python3 -m json.tool "$tmp_json"
+    else
+      python3 - "$tmp_json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+if isinstance(data, dict) and data.get('error'):
+    print(json.dumps(data, indent=2))
+    sys.exit(0)
+
+summary = data.get('summary') or {}
+expected = data.get('expectedVersion') or '-'
+print(f"FLEET expected={expected} generatedAt={data.get('generatedAt') or '-'}")
+print(
+    "SUMMARY "
+    f"total={summary.get('total', 0)} "
+    f"current={summary.get('current', 0)} "
+    f"outdated={summary.get('outdated', 0)} "
+    f"unknown={summary.get('unknown', 0)} "
+    f"offline={summary.get('offline', 0)} "
+    f"maintenance={summary.get('maintenance', 0)}"
+)
+print("  SERVER               STATUS       ONLINE  AGENTS VERSION       LASTSEEN")
+for row in data.get('servers') or []:
+    server = str(row.get('id') or '-')
+    status = str(row.get('versionStatus') or 'unknown')
+    online = 'yes' if row.get('online') else 'no'
+    agents = str(row.get('agentCount') or 0)
+    version = str(row.get('version') or '-')
+    last_seen = str(row.get('lastSeen') or '-')
+    print(f"  {server:20.20s} {status:12.12s} {online:6s} {agents:6s} {version:13.13s} {last_seen}")
+PY
+    fi
+    rm -f "$tmp_json"
+    ;;
+
+  identity)
+    name="${1:?Usage: hafleet-cli identity <name> <text>}"
+    shift
+    text="$*"
+    [ -z "$text" ] && { echo "Error: identity text required" >&2; exit 1; }
+    _curl -X PATCH "$API/api/agents/$name" \
+      -H 'Content-Type: application/json' \
+      -d "{\"identity\":$(_json_str "$text")}" | python3 -m json.tool
+    ;;
+
+  tell)
+    # Operator -> agent messaging. Until now a human had no way to message an
+    # agent at all: `hafleet send` types directly into a pane and refuses
+    # outside tmux ("not running inside a tmux session") because it exists for
+    # agent-to-agent use, and POST /api/messages rejects any sender that is not a
+    # registered agent ("sender agent not registered: operator"). The backend has
+    # always exempted the sender name "system"; nothing exposed it.
+    _require_token
+    agent="${1:?Usage: hafleet-cli tell <agent> <message>}"
+    shift
+    message="$*"
+    if [ -z "${message// }" ]; then
+      echo "Usage: hafleet-cli tell <agent> <message>" >&2
+      exit 1
+    fi
+    # Summary is what shows in listings; keep it short, put the whole text in full.
+    summary="$(printf '%s' "$message" | cut -c1-72)"
+    _curl -X POST "$API/api/messages" \
+      -H 'Content-Type: application/json' \
+      -d "{\"from\":\"system\",\"to\":$(_json_str "$agent"),\"type\":\"task\",\"summary\":$(_json_str "$summary"),\"full\":$(_json_str "$message")}" \
+      | python3 -m json.tool
+    ;;
+
+  dm)
+    _require_token
+    agent="${1:?Usage: hafleet-cli dm <agent> <human>}"
+    human="${2:?Usage: hafleet-cli dm <agent> <human>}"
+    echo "Ensuring DM room: $agent ↔ $human ..."
+    _curl -X POST "$API/api/dm/ensure" \
+      -H 'Content-Type: application/json' \
+      -d "{\"agent\":$(_json_str "$agent"),\"human\":$(_json_str "$human")}" | python3 -m json.tool
+    ;;
+
+  avatar)
+    name="${1:?Usage: hafleet-cli avatar <name> [<image-file>|--force]}"
+    shift
+    arg="${1:-}"
+    if [ -n "$arg" ] && [ "$arg" != "--force" ]; then
+      # Custom image file
+      [ -f "$arg" ] || { echo "Error: file not found: $arg" >&2; exit 1; }
+      mime=$(file -b --mime-type "$arg" 2>/dev/null || echo "image/png")
+      b64=$(base64 -w0 "$arg" 2>/dev/null || base64 "$arg" 2>/dev/null)
+      echo "Uploading custom avatar for: $name ($mime, $(wc -c < "$arg") bytes) ..."
+      _curl -X POST "$API/api/agents/$name/avatar" \
+        -H 'Content-Type: application/json' \
+        -d "{\"image\":\"$b64\",\"mime\":\"$mime\"}" | python3 -m json.tool
+    else
+      force="false"
+      [ "$arg" = "--force" ] && force="true"
+      echo "Requesting generated avatar for: $name (force=$force) ..."
+      echo "Note: if MATRIX_AUTO_AVATAR is disabled on bridge, this will be ignored. Use image file upload for manual avatar changes."
+      _curl -X POST "$API/api/agents/$name/avatar?force=$force" \
+        -H 'Content-Type: application/json' \
+        -d "{\"generate\":$force}" | python3 -m json.tool
+    fi
+    ;;
+
+  help|--help|-h)
+    echo "hafleet-cli — Admin CLI for hafleet"
+    echo ""
+    echo "Group management:"
+    echo "  create-group <name> [member1 ...]   Create group"
+    echo "  delete-group <name>                 Delete group"
+    echo "  add-member <group> <m1> [m2 ...]    Add members"
+    echo "  rm-member <group> <m1> [m2 ...]     Remove members"
+    echo "  list-groups                         List all groups"
+    echo "  group <name>                        Group details"
+    echo ""
+    echo "Agent management:"
+    echo "  list-agents                         List all agents"
+    echo "  status [name]                       Status table or one agent status"
+    echo "  fleet [--expect-version <sha>] [--json]  Remote fleet version inventory"
+    echo "  agent <name>                        Agent details"
+    echo "  identity <name> <text>              Set agent identity"
+    echo "  avatar <name> [image|--force]       Set avatar (custom image; auto-gen may be disabled)"
+    echo ""
+    echo "Messaging:"
+    echo "  tell <agent> <message>              Send a message to an agent as the operator"
+    echo ""
+    echo "DM management:"
+    echo "  dm <agent> <human>                  Ensure DM room exists (Matrix)"
+    echo ""
+    echo "Environment:"
+    echo "  HAFLEET_API  Backend URL (default: http://127.0.0.1:${BACKEND_PORT})"
+    echo "  API_TOKEN       Auth token (optional for localhost)"
+    echo "  HAFLEET_CURL_CONNECT_TIMEOUT_SEC  API connect timeout (default: 2)"
+    echo "  HAFLEET_CURL_MAX_TIME_SEC         API request max time (default: 8)"
+    ;;
+
+  *)
+    echo "Unknown command: $cmd" >&2
+    echo "Run 'hafleet-cli help' for usage" >&2
+    exit 1
+    ;;
+esac

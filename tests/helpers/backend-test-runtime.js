@@ -56,9 +56,9 @@ export async function createBackendTestContext(prefix, seed = {}) {
     if (!savedEnv.has(key)) savedEnv.set(key, process.env[key]);
   };
   for (const key of [
-    'AGENT_CHAT_RUNTIME_DIR',
-    'AGENT_CHAT_SERVER',
-    'AGENT_CHAT_RECORD_LOCAL_SERVER',
+    'HAFLEET_RUNTIME_DIR',
+    'HAFLEET_SERVER',
+    'HAFLEET_RECORD_LOCAL_SERVER',
     'SUPERVISOR_ENABLED',
     'AGENT_SCOPE_MONITOR_ENABLED',
     'AGENT_JSON_WRITE_BATCH_MS',
@@ -73,9 +73,9 @@ export async function createBackendTestContext(prefix, seed = {}) {
     for (const key of Object.keys(seed.env)) rememberEnv(key);
   }
 
-  process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
-  delete process.env.AGENT_CHAT_SERVER;
-  delete process.env.AGENT_CHAT_RECORD_LOCAL_SERVER;
+  process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
+  delete process.env.HAFLEET_SERVER;
+  delete process.env.HAFLEET_RECORD_LOCAL_SERVER;
   process.env.SUPERVISOR_ENABLED = 'false';
   process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
   process.env.AGENT_JSON_WRITE_BATCH_MS = '0';

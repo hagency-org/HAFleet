@@ -4,7 +4,7 @@ Date: 2026-05-02
 
 ## Working Definition
 
-agent-chat is primarily a chat kernel for agents as persistent individuals. The kernel must answer these questions consistently:
+hafleet is primarily a chat kernel for agents as persistent individuals. The kernel must answer these questions consistently:
 
 - Who is this agent?
 - What state and memory identify it across sessions?
@@ -32,7 +32,7 @@ Core files and concepts:
 | Tasks and task graphs | `lib/task-store.js`, `lib/task-graph.js`, task routes in `backend-v2.js` | Useful workflow layer; must not redefine agent identity or message truth. |
 | Alerts and monitoring | `lib/alert-store.js`, runtime routes in `backend-v2.js` | Operational layer; should observe kernel state and emit tickets. |
 | Dashboard and queue | `server.js` | Operator/UI layer; should not become a second message or delivery truth. |
-| Launch/provisioning | `bin/agent-up`, `bin/agent-up-v1`, `scripts/provision-v1-agent-home.js` | Creates runtime homes and sessions; must preserve one identity mapping. |
+| Launch/provisioning | `bin/hafleet-up`, `bin/hafleet-up-v1`, `scripts/provision-v1-agent-home.js` | Creates runtime homes and sessions; must preserve one identity mapping. |
 | Runtime host profile | local tmux sweep, push relay heartbeat, MCP pid reports | Adjacent contract for availability and delivery; backend inbox remains recovery truth. |
 
 ## Edge / Optional Systems

@@ -63,17 +63,17 @@ MANAGED_SPECS=(
   "remote/package.json:package.json"
   "remote/push-relay.js:push-relay.js"
   "remote/mcp-server.js:mcp-server.js"
-  "remote/bin/agentchat:bin/agentchat"
-  "bin/agentchat-prune-agents:bin/agentchat-prune-agents"
-  "bin/agent-chat:bin/agent-chat"
-  "bin/agent-chat-cli:bin/agent-chat-cli"
-  "bin/agent-down:bin/agent-down"
-  "bin/agent-ls:bin/agent-ls"
-  "bin/agent-maintain:bin/agent-maintain"
-  "bin/agent-send:bin/agent-send"
-  "bin/agent-service:bin/agent-service"
-  "remote/bin/agent-up:bin/agent-up"
-  "bin/agent-update:bin/agent-update"
+  "remote/bin/hafleet:bin/hafleet"
+  "bin/hafleet-prune-agents:bin/hafleet-prune-agents"
+  "bin/hafleet:bin/hafleet"
+  "bin/hafleet-cli:bin/hafleet-cli"
+  "bin/hafleet-down:bin/hafleet-down"
+  "bin/hafleet-ls:bin/hafleet-ls"
+  "bin/hafleet-maintain:bin/hafleet-maintain"
+  "bin/hafleet-send:bin/hafleet-send"
+  "bin/hafleet-service:bin/hafleet-service"
+  "remote/bin/hafleet-up:bin/hafleet-up"
+  "bin/hafleet-update:bin/hafleet-update"
   "bin/self-time-reminder:bin/self-time-reminder"
   "bin/verify-remote:bin/verify-remote"
   "lib/blocked-patterns.js:lib/blocked-patterns.js"
@@ -154,19 +154,19 @@ compare_managed_against_remote() {
 
 check_dispatch_targets() {
   local build_root="$1"
-  local cli="$build_root/bin/agentchat"
+  local cli="$build_root/bin/hafleet"
   local bin_dir="$build_root/bin"
   local targets target target_path
   local failures=0
 
   if [ ! -f "$cli" ]; then
-    echo "[FAIL] generated bin/agentchat missing"
+    echo "[FAIL] generated bin/hafleet missing"
     return 1
   fi
 
   targets="$(sed -n 's/.*dispatch "\([^"]*\)".*/\1/p' "$cli" | sort -u)"
   if [ -z "$targets" ]; then
-    echo "[FAIL] generated bin/agentchat has no dispatch targets"
+    echo "[FAIL] generated bin/hafleet has no dispatch targets"
     return 1
   fi
 

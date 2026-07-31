@@ -54,7 +54,7 @@ function runCli(cliPath, args) {
     encoding: 'utf8',
     env: {
       ...process.env,
-      AGENTCHAT_CLI_CONTRACT_CHECK: '1',
+      HAFLEET_CLI_CONTRACT_CHECK: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -153,7 +153,7 @@ for (const [profileName, profile] of Object.entries(manifest.profiles || {})) {
     continue;
   }
 
-  if (!help.includes('Usage: agentchat <command> [args]')) {
+  if (!help.includes('Usage: hafleet <command> [args]')) {
     fail(`${cliRel} help is missing usage header`);
   }
 

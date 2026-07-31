@@ -121,7 +121,7 @@ describe('5.6.3 reconciliation: disk task with newer updated_at wins', () => {
   });
 });
 
-describe('5.6.3 task-writer: defaultApiBaseUrl ignores AGENT_CHAT_WEB_URL', () => {
+describe('5.6.3 task-writer: defaultApiBaseUrl ignores HAFLEET_WEB_URL', () => {
   let tmpDir;
 
   beforeAll(() => {
@@ -157,7 +157,7 @@ describe('5.6.3 task-writer: defaultApiBaseUrl ignores AGENT_CHAT_WEB_URL', () =
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  test('uses backend port not AGENT_CHAT_WEB_URL for task writes', async () => {
+  test('uses backend port not HAFLEET_WEB_URL for task writes', async () => {
     const script = path.join(REPO_ROOT, 'scripts', 'write-v1-agent-task.js');
     const workdir = path.join(tmpDir, 'agent_urltest', 'workdir');
     const requests = [];
@@ -181,9 +181,9 @@ describe('5.6.3 task-writer: defaultApiBaseUrl ignores AGENT_CHAT_WEB_URL', () =
         encoding: 'utf-8',
         env: {
           ...process.env,
-          AGENT_CHAT_WEB_URL: 'http://web-should-not-be-used.example.com:9999',
-          AGENT_CHAT_API: '',
-          AGENT_CHAT_BACKEND_PORT: backendPort,
+          HAFLEET_WEB_URL: 'http://web-should-not-be-used.example.com:9999',
+          HAFLEET_API: '',
+          HAFLEET_BACKEND_PORT: backendPort,
         },
         timeout: 5000,
       });

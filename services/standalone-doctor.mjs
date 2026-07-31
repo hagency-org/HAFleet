@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Standalone cross-component business-health doctor.
 //
-// agentchat-services.mjs's own `doctor` command is process-level: it only asks "is
+// hafleet-services.mjs's own `doctor` command is process-level: it only asks "is
 // each service's PID alive and passing its configured TCP/HTTP/process probe". That
 // says nothing about whether the bridge is actually syncing with Matrix, whether the
 // relay is actually delivering to agents, or whether the acceptance room the whole
@@ -55,11 +55,11 @@ async function checkPalpo({ env, fetchImpl }) {
   }
 }
 
-// ── check 2 + 8: agent-chat backend /health (fetched once, reused by check 8) ──
+// ── check 2 + 8: hafleet backend /health (fetched once, reused by check 8) ──
 function resolveBackendBaseUrl(env) {
-  const apiBase = String(env.AGENT_CHAT_API || '').trim();
+  const apiBase = String(env.HAFLEET_API || '').trim();
   if (apiBase) return apiBase.replace(/\/+$/, '');
-  const portRaw = Number.parseInt(env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
+  const portRaw = Number.parseInt(env.HAFLEET_BACKEND_PORT || '8090', 10);
   const port = Number.isFinite(portRaw) && portRaw > 0 ? portRaw : 8090;
   return `http://127.0.0.1:${port}`;
 }
@@ -290,8 +290,8 @@ export async function runDoctor(options = {}) {
 // ── CLI ──────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
   let profilePath = null;
-  let runtimeRoot = process.env.AGENT_CHAT_RUNTIME_DIR
-    ? path.resolve(process.env.AGENT_CHAT_RUNTIME_DIR)
+  let runtimeRoot = process.env.HAFLEET_RUNTIME_DIR
+    ? path.resolve(process.env.HAFLEET_RUNTIME_DIR)
     : repoRoot;
   let json = false;
   let allowUnconfiguredRoom = false;

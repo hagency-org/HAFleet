@@ -48,9 +48,9 @@ function execFileAsync(command, args, options = {}) {
 }
 
 const SERVER_ENV_KEYS = [
-  'AGENT_CHAT_RUNTIME_DIR',
-  'AGENT_CHAT_WEB_PORT',
-  'AGENT_CHAT_BACKEND_PORT',
+  'HAFLEET_RUNTIME_DIR',
+  'HAFLEET_WEB_PORT',
+  'HAFLEET_BACKEND_PORT',
 ];
 
 function snapshotEnv(keys) {
@@ -69,9 +69,9 @@ let serverImportEnvSnapshot = null;
 
 async function importServer(runtimeDir) {
   if (!serverImportEnvSnapshot) serverImportEnvSnapshot = snapshotEnv(SERVER_ENV_KEYS);
-  process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
-  process.env.AGENT_CHAT_WEB_PORT = '18084';
-  process.env.AGENT_CHAT_BACKEND_PORT = '18090';
+  process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
+  process.env.HAFLEET_WEB_PORT = '18084';
+  process.env.HAFLEET_BACKEND_PORT = '18090';
   const serverUrl = pathToFileURL(path.resolve('server.js')).href;
   const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   return import(`${serverUrl}?server-test=${cacheBust}`);
@@ -93,7 +93,7 @@ describe('server delivery path', () => {
   });
 
   test('server import and stop do not leave runtime handles active', async () => {
-    const probeRuntimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-lifecycle-probe-'));
+    const probeRuntimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-lifecycle-probe-'));
     mkdirSync(path.join(probeRuntimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(probeRuntimeDir, 'data', 'agents'), { recursive: true });
     const serverUrl = pathToFileURL(path.resolve('server.js')).href;
@@ -108,9 +108,9 @@ describe('server delivery path', () => {
         cwd: path.resolve('.'),
         env: {
           ...process.env,
-          AGENT_CHAT_RUNTIME_DIR: probeRuntimeDir,
-          AGENT_CHAT_WEB_PORT: '18084',
-          AGENT_CHAT_BACKEND_PORT: '18090',
+          HAFLEET_RUNTIME_DIR: probeRuntimeDir,
+          HAFLEET_WEB_PORT: '18084',
+          HAFLEET_BACKEND_PORT: '18090',
         },
         timeout: 3000,
       });
@@ -121,7 +121,7 @@ describe('server delivery path', () => {
   });
 
   test('stopServer cancels backend SSE reconnect timers', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -150,7 +150,7 @@ describe('server delivery path', () => {
   });
 
   test('deliverMessage uses the async tmux path and appends to the message log', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -208,7 +208,7 @@ describe('server delivery path', () => {
   });
 
   test('message log API supports bounded tail pagination', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     const logPath = path.join(runtimeDir, 'logs', 'messages.jsonl');
@@ -235,7 +235,7 @@ describe('server delivery path', () => {
   });
 
   test('message log tail keeps partial JSONL records until newline', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     const logPath = path.join(runtimeDir, 'logs', 'messages.jsonl');
@@ -265,7 +265,7 @@ describe('server delivery path', () => {
   });
 
   test('SSE write failures do not fail queue or reminder mutations', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -297,7 +297,7 @@ describe('server delivery path', () => {
   });
 
   test('queue accept rolls back when queue persistence fails', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -327,7 +327,7 @@ describe('server delivery path', () => {
   });
 
   test('queue_idempotency_key_survives_delivery_and_server_reload', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -345,7 +345,7 @@ describe('server delivery path', () => {
     });
 
     const payload = {
-      from: 'agent-chat-v2', to: 'alpha:0.0', payload: '[NOTIFICATION] durable wake',
+      from: 'hafleet-backend', to: 'alpha:0.0', payload: '[NOTIFICATION] durable wake',
       notifyMeta: { sourceMsgId: 'msg_matrix_1', messageIds: ['msg_matrix_1'] },
     };
     const first = await request(serverModule.app).post('/api/queue')
@@ -379,7 +379,7 @@ describe('server delivery path', () => {
   });
 
   test('inflight_matrix_wake_restart_is_not_re_pasted', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     const idempotencyKey = 'matrix:$crash-after-tmux:alpha';
@@ -387,7 +387,7 @@ describe('server delivery path', () => {
       idCounter: 1,
       items: [{
         id: 1,
-        from: 'agent-chat-v2',
+        from: 'hafleet-backend',
         to: 'alpha:0.0',
         payload: '[NOTIFICATION] uncertain prior tmux delivery',
         queuedAt: 1000,
@@ -417,7 +417,7 @@ describe('server delivery path', () => {
     const replay = await request(serverModule.app).post('/api/queue')
       .set('Idempotency-Key', idempotencyKey)
       .send({
-        from: 'agent-chat-v2', to: 'alpha:0.0', payload: '[NOTIFICATION] uncertain prior tmux delivery',
+        from: 'hafleet-backend', to: 'alpha:0.0', payload: '[NOTIFICATION] uncertain prior tmux delivery',
       });
     expect(replay.body).toMatchObject({ id: 1, deduped: true });
     expect(JSON.parse(readFileSync(path.join(runtimeDir, 'logs', 'queue.json'), 'utf8')).items)
@@ -425,7 +425,7 @@ describe('server delivery path', () => {
   });
 
   test('manual send does not deliver when queue dequeue persistence fails', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -473,7 +473,7 @@ describe('server delivery path', () => {
   });
 
   test('manual send persists delivering before tmux and removes after success', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -516,7 +516,7 @@ describe('server delivery path', () => {
   });
 
   test('manual send reports terminal persistence failure without hiding in-flight entry', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -582,7 +582,7 @@ describe('server delivery path', () => {
   });
 
   test('queue load recovers in-flight entries and discards terminal markers', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     writeFileSync(path.join(runtimeDir, 'logs', 'queue.json'), JSON.stringify({
@@ -641,7 +641,7 @@ describe('server delivery path', () => {
   });
 
   test('queue delete rolls back when queue persistence fails', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -674,7 +674,7 @@ describe('server delivery path', () => {
   });
 
   test('reminder create rolls back when reminder persistence fails', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -703,7 +703,7 @@ describe('server delivery path', () => {
   });
 
   test('reminder delete rolls back when reminder persistence fails', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -737,7 +737,7 @@ describe('server delivery path', () => {
   test('due reminders remain scheduled when queue persistence fails', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -772,7 +772,7 @@ describe('server delivery path', () => {
   test('due reminders do not enqueue when reminder persistence fails', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -809,7 +809,7 @@ describe('server delivery path', () => {
   });
 
   test('manual send drops backend notifications whose source message is no longer unread', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -841,7 +841,7 @@ describe('server delivery path', () => {
     });
 
     const queued = await request(serverModule.app).post('/api/queue').send({
-      from: 'agent-chat-v2',
+      from: 'hafleet-backend',
       to: 'alpha:0.0',
       payload: '[NOTIFICATION] unread message',
       notifyMeta: {
@@ -869,7 +869,7 @@ describe('server delivery path', () => {
   });
 
   test('queue tick drops backend notifications whose source message is no longer unread', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -900,7 +900,7 @@ describe('server delivery path', () => {
     });
 
     const queued = await request(serverModule.app).post('/api/queue').send({
-      from: 'agent-chat-v2',
+      from: 'hafleet-backend',
       to: 'alpha:0.0',
       payload: '[NOTIFICATION] unread message',
       notifyMeta: {
@@ -933,7 +933,7 @@ describe('server delivery path', () => {
   });
 
   test('canceling one merged unread message drops correlated queue notifications', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -943,7 +943,7 @@ describe('server delivery path', () => {
     });
 
     const queued = await request(serverModule.app).post('/api/queue').send({
-      from: 'agent-chat-v2',
+      from: 'hafleet-backend',
       to: 'alpha:0.0',
       payload: '[NOTIFICATION] unread messages',
       notifyMeta: {
@@ -976,7 +976,7 @@ describe('server delivery path', () => {
   });
 
   test('canceling an already-missing unread message still drops correlated queue notifications', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -991,7 +991,7 @@ describe('server delivery path', () => {
     });
 
     const queued = await request(serverModule.app).post('/api/queue').send({
-      from: 'agent-chat-v2',
+      from: 'hafleet-backend',
       to: 'alpha:0.0',
       payload: '[NOTIFICATION] unread messages',
       notifyMeta: {
@@ -1019,7 +1019,7 @@ describe('server delivery path', () => {
   });
 
   test('manual send does not re-paste payload after tmux enter fails', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -1068,7 +1068,7 @@ describe('server delivery path', () => {
   });
 
   test('queue snapshot reports untracked target observation before pane sweep', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -1100,7 +1100,7 @@ describe('server delivery path', () => {
   test('queue tick does not drop backend notifications when pane capture fails', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -1123,7 +1123,7 @@ describe('server delivery path', () => {
     });
 
     const queued = await request(serverModule.app).post('/api/queue').send({
-      from: 'agent-chat-v2',
+      from: 'hafleet-backend',
       to: 'alpha:0.0',
       payload: '[NOTIFICATION] unread message',
       notifyMeta: {
@@ -1156,7 +1156,7 @@ describe('server delivery path', () => {
   test('queue tick drops old backend notifications only after pane is confirmed missing', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -1181,7 +1181,7 @@ describe('server delivery path', () => {
     });
 
     const queued = await request(serverModule.app).post('/api/queue').send({
-      from: 'agent-chat-v2',
+      from: 'hafleet-backend',
       to: 'alpha:0.0',
       payload: '[NOTIFICATION] unread message',
       notifyMeta: {
@@ -1205,7 +1205,7 @@ describe('server delivery path', () => {
   });
 
   test('pane snapshot sweep tracks live panes and removes stale panes', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -1246,7 +1246,7 @@ describe('server delivery path', () => {
   test('pane snapshot sweep keeps Codex working panes non-idle even when content is stable', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -1285,7 +1285,7 @@ describe('server delivery path', () => {
   });
 
   test('task graph proxy routes forward to the backend correctly', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -1328,7 +1328,7 @@ describe('server delivery path', () => {
   });
 
   test('message detail capability links proxy through the dashboard without operator credentials', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);
@@ -1360,7 +1360,7 @@ describe('server delivery path', () => {
   });
 
   test('dashboard backend proxy route clusters forward to the backend correctly', async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-server-delivery-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-server-delivery-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     serverModule = await importServer(runtimeDir);

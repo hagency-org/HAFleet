@@ -2,16 +2,16 @@
 
 - 版本:v2(2026-07-20;v1 为 2026-07-19 的借鉴分析,本版并入项目定位、
   ARC serve mode 实况、无上限规模修正与已交付项状态)
-- 范围:**robrix2 + agent-chat + agent-spec(核心)/ ARC(合作)**;
+- 范围:**robrix2 + hafleet + agent-spec(核心)/ ARC(合作)**;
   OpenFab 暂缓,不在本路线图的启动链与验收依赖中
 - 决策存档:mempal `drawer_openfab_review_ccf10f7be401`(AgentTeams 对照)、
   `drawer_robrix2_default_2b59c0798987`(standalone 实现里程碑)
 
 ## 0. 三句话总纲
 
-1. **核心项目定标准,合作项目接标准**:agentd/agent-chat 与 agent-spec 是
+1. **核心项目定标准,合作项目接标准**:agentd/hafleet 与 agent-spec 是
    重心资产,负责协议、合约与验收把门;ARC 是合作项目,经由稳定协议面接入
-   (serve mode 已证明依赖方向正确:是 ARC 适配了 agent-chat 的方言)。
+   (serve mode 已证明依赖方向正确:是 ARC 适配了 hafleet 的方言)。
 2. **抄 AgentTeams 的运维壳,守自己的信任核**:编排/部署/凭证隔离向它学;
    合约(agent-spec)、对抗评审(异构 Codex 终审)、证据链是它没有而我们
    不得放弃的。
@@ -23,7 +23,7 @@
 
 | 项目 | 定位 | 投资姿势 |
 |---|---|---|
-| agent-chat / agentd | 核心:运行时与执行面 | 深耕(下表批次) |
+| hafleet / agentd | 核心:运行时与执行面 | 深耕(下表批次) |
 | agent-spec | 核心:需求中枢 + 质量契约(KLL/gate/export±provenance/verify) | 深耕;`arc-native` dialect 是中枢地位的证明 |
 | robrix2 | 核心:人机界面 | 深耕(cockpit 下期) |
 | ARC | 合作:可派发执行后端 | **接口化**:不 import 其内部、不为其特化核心;需求走 feature request |
@@ -69,7 +69,7 @@ ARC `ec49ce6` 落地 serve mode:以 `arc-compiler` 身份 heartbeat 自动注册
 
 | # | 病灶 | 修法 |
 |---|---|---|
-| N1 | `MATRIX_IGNORED_SENDER_MXIDS` 精确黑名单 = O(N²) 维护 | **反转为 O(1) 白名单**:bridge 默认只路由"人类 + 本团队 agents",其余忽略——代码缺口,agent-chat 小 PR(接替原 F1 的黑名单生成思路) |
+| N1 | `MATRIX_IGNORED_SENDER_MXIDS` 精确黑名单 = O(N²) 维护 | **反转为 O(1) 白名单**:bridge 默认只路由"人类 + 本团队 agents",其余忽略——代码缺口,hafleet 小 PR(接替原 F1 的黑名单生成思路) |
 | N2 | 花名册角色 | 从"生成黑名单"改为**成员权威**(人类名单/团队归属/trusted inviters 来源);终局即 Specify Human/RBAC(参考 AgentTeams Human CRD) |
 | N3 | 云端 Palpo 限流 | team profile 的 rc 按"bridge 数可增长"设 |
 | N4 | token 铸造/注册 × N 手工步骤 | member-up 自动化从体验项升为规模前提 |
@@ -79,9 +79,9 @@ ARC `ec49ce6` 落地 serve mode:以 `arc-compiler` 身份 heartbeat 自动注册
 
 ### 已交付 ✅(2026-07-16~20)
 
-- provision-team 成员开通脚本(agent-chat master)
+- provision-team 成员开通脚本(hafleet master)
 - 三节工作流约定:gh 集成 / 多人协作 / shared-room(robrix2 #259)
-- 共享房三件套:`MATRIX_DEFAULT_WAKE=off`、`!bindroom`(agent-chat master)、
+- 共享房三件套:`MATRIX_DEFAULT_WAKE=off`、`!bindroom`(hafleet master)、
   按团队派生伴生 bot(robrix2 #258)
 - 本文档 v1
 
@@ -100,7 +100,7 @@ ARC `ec49ce6` 落地 serve mode:以 `arc-compiler` 身份 heartbeat 自动注册
 | 项 | 内容 |
 |---|---|
 | F5 preflight | `standalone-doctor --preflight`(可提前到验收前) |
-| F6 agentchat-embedded 镜像 | Palpo + 四件套单镜像 supervisord,成员开通 = docker run |
+| F6 hafleet-embedded 镜像 | Palpo + 四件套单镜像 supervisord,成员开通 = docker run |
 | F7 upgrade.sh | 版本化 + 协调快照 → 换版 → 失败回滚 |
 | F8 rotate | configure-standalone-env `--rotate` |
 

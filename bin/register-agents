@@ -5,5 +5,5 @@
 set -euo pipefail
 
 echo "register-agents is deprecated."
-echo "Use 'agent-up' + running push-relay heartbeat to discover agents automatically."
+echo "Use 'hafleet-up' + running push-relay heartbeat to discover agents automatically."
 exit 1

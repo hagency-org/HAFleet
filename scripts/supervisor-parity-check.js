@@ -18,9 +18,9 @@ function parseArgs(argv) {
 }
 
 function defaultApiBaseUrl() {
-  const explicit = String(process.env.AGENT_CHAT_API || '').trim();
+  const explicit = String(process.env.HAFLEET_API || '').trim();
   if (explicit) return explicit.replace(/\/$/, '');
-  const port = parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
+  const port = parseInt(process.env.HAFLEET_BACKEND_PORT || '8090', 10);
   return `http://127.0.0.1:${port}`;
 }
 

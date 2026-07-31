@@ -115,8 +115,8 @@ function spawnMcpServer(apiBase, extraEnv = {}, coreFile = 'lib/mcp-server-core.
   const env = {
     ...process.env,
     AGENT_NAME: 'alpha',
-    AGENT_CHAT_API: apiBase,
-    AGENT_CHAT_SERVER: 'local',
+    HAFLEET_API: apiBase,
+    HAFLEET_SERVER: 'local',
     API_TOKEN: 'test-token',
     MCP_HEARTBEAT_INTERVAL_MS: '100',
     MCP_FETCH_TIMEOUT_MS: '100',
@@ -149,15 +149,15 @@ afterEach(async () => {
 
 describe('MCP backend heartbeat', () => {
   test('writes pid file under derived agent state dir when explicit state dir is missing', async () => {
-    const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-mcp-pid-'));
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'hafleet-mcp-pid-'));
     tempDirs.add(tempRoot);
     for (const coreFile of coreFiles) {
-      const homeRoot = path.join(tempRoot, coreFile.replaceAll('/', '-'), 'agentchat-home');
+      const homeRoot = path.join(tempRoot, coreFile.replaceAll('/', '-'), 'hafleet-home');
       const calls = [];
       const running = await listen(createBackendHandler(calls));
       const mcp = spawnMcpServer(`http://127.0.0.1:${running.port}`, {
-        AGENTCHAT_AGENT_STATE_DIR: undefined,
-        AGENTCHAT_HOMEDIR: homeRoot,
+        HAFLEET_AGENT_STATE_DIR: undefined,
+        HAFLEET_HOMEDIR: homeRoot,
         HOME: path.join(tempRoot, 'os-home'),
       }, coreFile);
       const pidFile = path.join(homeRoot, 'agents', 'agent_alpha', 'state', 'mcp-server.pid');
@@ -175,11 +175,11 @@ describe('MCP backend heartbeat', () => {
     }
   }, 10000);
 
-  test('defaults heartbeat server to hostname when AGENT_CHAT_SERVER is unset', async () => {
+  test('defaults heartbeat server to hostname when HAFLEET_SERVER is unset', async () => {
     const calls = [];
     const running = await listen(createBackendHandler(calls));
     const mcp = spawnMcpServer(`http://127.0.0.1:${running.port}`, {
-      AGENT_CHAT_SERVER: undefined,
+      HAFLEET_SERVER: undefined,
     });
 
     await waitFor(() => heartbeatCalls(calls).length > 0, { detail: 'hostname-default heartbeat' });
@@ -191,15 +191,15 @@ describe('MCP backend heartbeat', () => {
   }, 10000);
 
   test('writes pid file under explicit agent state dir when provided', async () => {
-    const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-mcp-pid-'));
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'hafleet-mcp-pid-'));
     tempDirs.add(tempRoot);
     for (const coreFile of coreFiles) {
       const stateDir = path.join(tempRoot, coreFile.replaceAll('/', '-'), 'custom-state');
       const calls = [];
       const running = await listen(createBackendHandler(calls));
       const mcp = spawnMcpServer(`http://127.0.0.1:${running.port}`, {
-        AGENTCHAT_AGENT_STATE_DIR: stateDir,
-        AGENTCHAT_HOMEDIR: path.join(tempRoot, 'ignored-home'),
+        HAFLEET_AGENT_STATE_DIR: stateDir,
+        HAFLEET_HOMEDIR: path.join(tempRoot, 'ignored-home'),
         HOME: path.join(tempRoot, 'os-home'),
       }, coreFile);
       const pidFile = path.join(stateDir, 'mcp-server.pid');

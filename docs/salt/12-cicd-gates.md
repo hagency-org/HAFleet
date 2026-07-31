@@ -55,7 +55,7 @@ Each candidate commit should report:
 
 The current gate is single-node executable. The next CD layer should run the same gate on both local and remote checkouts, then compare the environment metadata and command results. A difference is allowed only when the profile explicitly owns it, such as remote command surface limits or optional Matrix native dependencies.
 
-`npm run report:ci-env` is the first piece of this layer. It prints the environment metadata at the start of `verify:ci` without failing the run on expected local/remote differences. CD scripts can set `AGENTCHAT_INSTALL_MODE` when the install mode is known but no longer visible to the later `npm run` process.
+`npm run report:ci-env` is the first piece of this layer. It prints the environment metadata at the start of `verify:ci` without failing the run on expected local/remote differences. CD scripts can set `HAFLEET_INSTALL_MODE` when the install mode is known but no longer visible to the later `npm run` process.
 
 ## CLI Contract
 
@@ -97,7 +97,7 @@ This covers the gap where `remote/` and generated package behavior can drift eve
 
 These remain future gates:
 
-- real tmux launch smoke for `agent-up`;
+- real tmux launch smoke for `hafleet-up`;
 - remote relay heartbeat against a staging backend;
 - MCP authenticated tool smoke against a staging backend;
 - stable/live deploy and rollback verification;

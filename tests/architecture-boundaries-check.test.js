@@ -12,7 +12,7 @@ const REPO_ROOT = path.resolve(path.dirname(__filename), '..');
 const CHECKER = path.join(REPO_ROOT, 'scripts', 'check-architecture-boundaries.js');
 
 async function withFixture({ source, manifest }, fn) {
-  const root = await mkdtemp(path.join(tmpdir(), 'agent-chat-arch-boundary-'));
+  const root = await mkdtemp(path.join(tmpdir(), 'hafleet-arch-boundary-'));
   try {
     await writeFile(path.join(root, 'fixture.js'), source);
     const manifestPath = path.join(root, 'manifest.json');
@@ -30,8 +30,8 @@ async function runChecker(fixture) {
         cwd: REPO_ROOT,
         env: {
           ...process.env,
-          AGENTCHAT_ARCH_BOUNDARY_ROOT: root,
-          AGENTCHAT_ARCH_BOUNDARY_MANIFEST: manifestPath,
+          HAFLEET_ARCH_BOUNDARY_ROOT: root,
+          HAFLEET_ARCH_BOUNDARY_MANIFEST: manifestPath,
         },
       });
       return { ok: true, stdout: result.stdout, stderr: result.stderr };

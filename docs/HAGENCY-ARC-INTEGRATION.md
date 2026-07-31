@@ -1,18 +1,18 @@
 # HAgency × ARC 整合:需求编译与可插拔实现后端
 
 - 版本:v1(2026-07-20)
-- 范围:HAgency(robrix + agent-chat)× agent-spec × ARC × octos
+- 范围:HAgency(robrix + hafleet)× agent-spec × ARC × octos
 - 定位参考:`docs/AGENTTEAMS-BORROWINGS-AND-S3-INTEGRATION.md`(协作栈路线图 v2)
 
 ## 0. 名词与一句话
 
-- **HAgency** = robrix2(人机界面)+ agent-chat(编排 / 运行时 / 消息总线)。
+- **HAgency** = robrix2(人机界面)+ hafleet(编排 / 运行时 / 消息总线)。
   是人和多 agent 在可信、可审计的房间里协作的那一层。
 - **agent-spec**(自研工具)= 需求中枢:把自然语言需求编译成机器可查的需求图,
   并**导出 ARC 兼容的输入格式**(arc-native dialect)。
 - **ARC** = 需求编译器 + 可视化(ARC-Bench):把结构化需求树编译成接口、
   测试、代码,带可追溯执行轨迹。上游是**合作方项目**(`code-philia`);其
-  **agent-chat 集成层是我们在自有 fork(`ZhangHanDong`)上加的**(见 §2)。
+  **hafleet 集成层是我们在自有 fork(`ZhangHanDong`)上加的**(见 §2)。
 - **octos**(自研)= Rust-native API-first Agentic OS,可作为一个 coding agent。
 
 **一句话**:HAgency 负责"人机协作 + 把门",agent-spec 负责"需求 → ARC 输入",
@@ -26,29 +26,29 @@ agent-spec ──arc-native──▶ ARC(编译/可视化/编排/系统所有的
      ▲                          │  委托实现阶段
      │自然语言                   ▼
    人(robrix)          coding agent(可插拔:ARC自带 / Claude / Codex / octos)
-     └────────── 全程在 agent-chat 房间里编排、审计 ────────────┘
+     └────────── 全程在 hafleet 房间里编排、审计 ────────────┘
 ```
 
-铁律:**agent-chat 协议是主,ARC 侧适配它**。而且这个适配是**我们主动加的**
-(见 §2 的分支事实):agent-chat 集成三级全部由 AlexZ 写在 ARC 的 fork 分支上,
-所以 `arc_stage` 等 schema 的定义权与协议主动权都在我们手里。agent-chat 核心
+铁律:**hafleet 协议是主,ARC 侧适配它**。而且这个适配是**我们主动加的**
+(见 §2 的分支事实):hafleet 集成三级全部由 AlexZ 写在 ARC 的 fork 分支上,
+所以 `arc_stage` 等 schema 的定义权与协议主动权都在我们手里。hafleet 核心
 永不 import ARC/octos 内部,一切经 `task_request/task_result` 协议门;ARC 上游
 未来独立演进,HAgency 一行不改。
 
-## 2. 关键事实:ARC 已实现的三级 agent-chat 集成
+## 2. 关键事实:ARC 已实现的三级 hafleet 集成
 
 **分支事实(重要)**:这三级集成不是上游 ARC 自带的,而是**我们自己加的**。
 提交 `54cd6f0`(进度上报)→ `ec49ce6`(serve)→ `e09cb38`(阶段委托)均由
 **AlexZ** 提交;按 `+08:00` 时区,前两项日期为 **2026-07-19**,第三项为
 **2026-07-20**。它们位于 ARC fork **`ZhangHanDong/agentic-requirement-compiler`**
-的分支 **`feat/agent-chat-progress-reporting`** 上;上游是
+的分支 **`feat/hafleet-progress-reporting`** 上;上游是
 `code-philia/agentic-requirement-compiler`。**尚未合入 ARC main / 未回上游**——
 代码与 14 个测试齐全、可用,但状态是"我们 fork 的 feature 分支",要长期依赖需
 决定是回贡上游还是维护自有 fork。
 
 来源:该分支的 `AGENT-CHAT.md` + 上述三个提交。全部用同一组 env:
-`AGENT_CHAT_URL` / `AGENT_CHAT_TOKEN` / `AGENT_CHAT_AGENT_TOKEN` /
-`AGENT_CHAT_AGENT_NAME`(默认 `arc-compiler`)。
+`HAFLEET_URL` / `HAFLEET_TOKEN` / `HAFLEET_AGENT_TOKEN` /
+`HAFLEET_AGENT_NAME`(默认 `arc-compiler`)。
 
 | 级别 | 是什么 | 对我们的意义 |
 |---|---|---|
@@ -59,7 +59,7 @@ agent-spec ──arc-native──▶ ARC(编译/可视化/编排/系统所有的
 ③ 的信任设计尤其契合我们:**验证仍归系统所有**——委托 TDD 阶段后,**ARC 自己
 跑该节点的测试,exit code 0 才接受 IMPLEMENTED**;委托失败则记为 failed,绝不静默
 放过。这与我们"信任来自证据、不来自 agent 自报"的哲学同源。启用:`--delegate-to`
-/ `ARC_DELEGATE_TO` + `AGENT_CHAT_URL`;可与 `--serve` 组合(任务串行,不与 worker
+/ `ARC_DELEGATE_TO` + `HAFLEET_URL`;可与 `--serve` 组合(任务串行,不与 worker
 的 cursor 读竞争)。
 
 ## 3. 路径一:HAgency 里选后端(ARC 或其他)
@@ -97,7 +97,7 @@ octos 是 Rust-native Agentic OS(~140 REST endpoints,14 消息通道含 **Matrix
 可多租户)。两种接入姿势:
 
 **2a. octos 作为 ARC 的委托 coding agent**
-octos 能在 Matrix/agent-chat 通道里以一个 agent 身份存在;当它实现了
+octos 能在 Matrix/hafleet 通道里以一个 agent 身份存在;当它实现了
 `task_request(arc_stage)` 的应答,就能被 ARC 的 `--delegate-to` 指向——
 即 ARC 编译、octos 写码。这是路径一 1b 的"coding agent = octos"变体。
 > 状态:octos 具备通道与 REST 能力(已实现);作为 ARC 委托端的 `arc_stage`

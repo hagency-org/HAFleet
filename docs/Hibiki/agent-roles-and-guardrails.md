@@ -40,7 +40,7 @@
 ├─────────────────────────────────────────────┤
 │          Outside（域外）                      │
 │  和当前任务无关的一切                         │
-│  例：agentchat 的消息格式、backtest-web 的    │
+│  例：hafleet 的消息格式、backtest-web 的    │
 │  前端组件、GPU 集群的硬件配置                 │
 └─────────────────────────────────────────────┘
 ```
@@ -78,7 +78,7 @@
 ## Boundaries
 ### 该做
 - 完成 plan.md Current 中的任务
-- 遇到 Adjacent 依赖的问题时，记录现象并通过 agentchat 转交给负责人
+- 遇到 Adjacent 依赖的问题时，记录现象并通过 hafleet 转交给负责人
 
 ### 不该关心
 - 不调查 Adjacent 依赖的内部实现问题（它坏了不是你的事，报告给负责人）
@@ -107,7 +107,7 @@
 - PRTS 的调度逻辑、队列状态、bug（报告给 ops-worker）
 - umiki 的管线代码、数据质量问题（报告给 data-worker）
 - 训练服务器的硬件状态、网络问题（报告给 ops-worker）
-- agentchat、gastown 的任何事务
+- hafleet、gastown 的任何事务
 ```
 
 ### 示例：data-worker
@@ -140,7 +140,7 @@
 
 Supervisor 不是警察，是**焦点助手**——像一个坐在旁边的同事，偶尔提醒你"你是不是跑偏了"。
 
-它是一个**独立的传统进程**（Node.js 或 Python 脚本），不是 Claude/Codex Agent。它通过 agentchat REST API 和 tmux 与系统交互。
+它是一个**独立的传统进程**（Node.js 或 Python 脚本），不是 Claude/Codex Agent。它通过 hafleet REST API 和 tmux 与系统交互。
 
 ### 3.2 信息输入
 
@@ -212,7 +212,7 @@ Supervisor 不是警察，是**焦点助手**——像一个坐在旁边的同�
   → 不干预，仅记录（可能是短暂的正常偏移）
 
 连续 2 次检测到同一方向的非 FOCUSED:
-  → 通过 agentchat 发送轻提醒（DM, type: inform）
+  → 通过 hafleet 发送轻提醒（DM, type: inform）
 
 连续 3 次:
   → 发送明确纠正（DM, type: request）
@@ -245,7 +245,7 @@ Supervisor 不是警察，是**焦点助手**——像一个坐在旁边的同�
 | 条件 | 处理 |
 |------|------|
 | Agent idle（pane hash 未变化） | 跳过本轮检查 |
-| Agent blocked（agentchat runtime 报告 blocked） | 跳过，blocked 有自己的处理机制 |
+| Agent blocked（hafleet runtime 报告 blocked） | 跳过，blocked 有自己的处理机制 |
 | 上一轮判断为 FOCUSED | 可以适当延长下次检查间隔（如 60s → 90s） |
 | 上一轮判断为 DRIFTING/LOST | 缩短下次检查间隔（如 60s → 30s） |
 
@@ -272,7 +272,7 @@ Supervisor 不是警察，是**焦点助手**——像一个坐在旁边的同�
 ### 目录结构
 
 ```
-agentchat/
+hafleet/
 └── supervisor/
     ├── index.js           # 入口：主循环、agent 发现、调度
     ├── collector.js        # 收集三样输入（plan.md、agents.md、tmux pane）
@@ -286,7 +286,7 @@ agentchat/
 
 ### 依赖
 
-- agentchat backend API（获取在线 agent 列表、发送消息）
+- hafleet backend API（获取在线 agent 列表、发送消息）
 - tmux（capture-pane）
 - 一个 LLM API（DeepSeek / Qwen / 任何兼容 OpenAI 格式的）
 - 文件系统（读 plan.md、agents.md）
@@ -315,7 +315,7 @@ thresholds:
   correct_after: 3                # 连续 N 次后发纠正
   escalate_after: 5               # 连续 N 次后通知人类
 
-agentchat:
+hafleet:
   api_url: http://127.0.0.1:8090
   api_token_env: API_TOKEN
 
@@ -324,7 +324,7 @@ docs_root: /path/to/workspace/docs  # 读 plan.md 和 agents.md 的根路径
 log_file: logs/supervisor.jsonl
 ```
 
-### 与 agentchat 的集成点
+### 与 hafleet 的集成点
 
 | 集成点 | 方式 | 说明 |
 |--------|------|------|
@@ -382,7 +382,7 @@ Supervisor 注册为一个特殊 agent（kind: "service"），不占 tmux sessio
 - 调优 prompt 直到误判率可接受
 
 ### Step 3：接入纠正动作
-- 开启 agentchat 消息发送
+- 开启 hafleet 消息发送
 - 先只做轻提醒（连续 2 次），观察 agent 响应
 - 逐步开启明确纠正和人类升级
 

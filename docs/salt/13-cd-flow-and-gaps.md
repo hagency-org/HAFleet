@@ -24,11 +24,11 @@ That is necessary but not sufficient for CD. A deployed host can still fail afte
 
 Local CLI observation after the push-relay idle fix showed the useful CD signals:
 
-- `agent-chat-push-relay` was restarted through `agentchat service restart --profile remote`.
-- `agentchat verify-remote --no-service --samples 2 --interval 16 --agent salt` passed. A 3 second interval failed because it was below the 15 second heartbeat cadence, which is expected.
+- `hafleet-push-relay` was restarted through `hafleet service restart --profile remote`.
+- `hafleet verify-remote --no-service --samples 2 --interval 16 --agent salt` passed. A 3 second interval failed because it was below the 15 second heartbeat cadence, which is expected.
 - `/api/servers` reported `kamico-MBP` online with `version=f24cb17`.
-- `agentchat cli status aoi`, `agentchat cli status nazuna`, and `agentchat cli status yamori` agreed with raw `/api/agents/<name>` runtime fields: inactive panes reported `activeNow=false`.
-- `agentchat cli status salt` stayed active while tools were running, which is correct because the active Codex pane content is changing.
+- `hafleet cli status aoi`, `hafleet cli status nazuna`, and `hafleet cli status yamori` agreed with raw `/api/agents/<name>` runtime fields: inactive panes reported `activeNow=false`.
+- `hafleet cli status salt` stayed active while tools were running, which is correct because the active Codex pane content is changing.
 
 This proves the deployed relay can expose a loaded commit through the backend. Remote autodeploy now consumes that check after restart; stable gate policy and macOS remote CD policy remain separate decisions.
 
@@ -39,13 +39,13 @@ This proves the deployed relay can expose a loaded commit through the backend. R
 Evidence:
 
 - `.github/workflows/ci.yml:3` runs CI on `master` and `stable` pushes.
-- `scripts/agentchat-stable-autodeploy.sh:12` defaults `AGENTCHAT_RELEASE_GATE` to `none`.
-- `scripts/agentchat-stable-autodeploy.sh:220` supports a `worktree` release gate that prepares a detached target worktree and runs `npm ci`.
-- `scripts/agentchat-stable-autodeploy.sh:243` runs `verify:cd-preflight` in that gate before `scripts/agentchat-stable-autodeploy.sh:343` resets the live checkout.
+- `scripts/hafleet-stable-autodeploy.sh:12` defaults `HAFLEET_RELEASE_GATE` to `none`.
+- `scripts/hafleet-stable-autodeploy.sh:220` supports a `worktree` release gate that prepares a detached target worktree and runs `npm ci`.
+- `scripts/hafleet-stable-autodeploy.sh:243` runs `verify:cd-preflight` in that gate before `scripts/hafleet-stable-autodeploy.sh:343` resets the live checkout.
 
 Impact:
 
-A bad commit pushed to `stable` can still deploy on hosts that keep the default `AGENTCHAT_RELEASE_GATE=none`. The worktree gate exists, but CD policy does not yet require it or consume GitHub check-run status.
+A bad commit pushed to `stable` can still deploy on hosts that keep the default `HAFLEET_RELEASE_GATE=none`. The worktree gate exists, but CD policy does not yet require it or consume GitHub check-run status.
 
 Fix direction:
 
@@ -62,11 +62,11 @@ Implemented for git-checkout remote autodeploy.
 
 Evidence:
 
-- `scripts/agentchat-remote-autodeploy.sh:134` defines `verify_remote_deploy`.
-- `scripts/agentchat-remote-autodeploy.sh:138` passes `--api`, `--server`, deploy-safe `--samples`, `--interval`, `--service`, and `--expect-version`.
-- `scripts/agentchat-remote-autodeploy.sh:160` passes `--token` when `API_TOKEN` is configured, and `scripts/agentchat-remote-autodeploy.sh:163` passes optional `VERIFY_AGENT`.
-- `scripts/agentchat-remote-autodeploy.sh:262` calls verification only after relay restart succeeds.
-- `scripts/agentchat-remote-autodeploy.sh:265` keeps `deploy_pending=true` when verification fails, so the next poll retries instead of declaring success.
+- `scripts/hafleet-remote-autodeploy.sh:134` defines `verify_remote_deploy`.
+- `scripts/hafleet-remote-autodeploy.sh:138` passes `--api`, `--server`, deploy-safe `--samples`, `--interval`, `--service`, and `--expect-version`.
+- `scripts/hafleet-remote-autodeploy.sh:160` passes `--token` when `API_TOKEN` is configured, and `scripts/hafleet-remote-autodeploy.sh:163` passes optional `VERIFY_AGENT`.
+- `scripts/hafleet-remote-autodeploy.sh:262` calls verification only after relay restart succeeds.
+- `scripts/hafleet-remote-autodeploy.sh:265` keeps `deploy_pending=true` when verification fails, so the next poll retries instead of declaring success.
 - `remote/.env.example` documents `VERIFY_SAMPLES=2`, `VERIFY_INTERVAL=16`, and optional `VERIFY_AGENT`.
 
 Impact:
@@ -85,8 +85,8 @@ Implemented for the current remote profile.
 
 Evidence:
 
-- `scripts/agentchat-remote-autodeploy.sh:72` sets the dependency install target to `$REPO_DIR/remote`.
-- `scripts/agentchat-remote-autodeploy.sh:87` watches `remote/package.json` and `remote/package-lock.json`.
+- `scripts/hafleet-remote-autodeploy.sh:72` sets the dependency install target to `$REPO_DIR/remote`.
+- `scripts/hafleet-remote-autodeploy.sh:87` watches `remote/package.json` and `remote/package-lock.json`.
 - `remote/install-remote.sh:146` installs dependencies after changing into `remote/`.
 - `remote/package.json:10` owns the remote runtime dependencies used by `remote/mcp-server.js`.
 
@@ -102,28 +102,28 @@ Implemented. Stable and remote autodeploy persist an `install-needed` marker bef
 
 Evidence:
 
-- `scripts/agentchat-stable-autodeploy.sh:127` stores deploy state under the checkout's git dir by default.
-- `scripts/agentchat-stable-autodeploy.sh:199` touches the install-needed marker before install and `scripts/agentchat-stable-autodeploy.sh:352` uses that marker to force retry from the last successful ref.
-- `scripts/agentchat-remote-autodeploy.sh:46` stores remote deploy state and `scripts/agentchat-remote-autodeploy.sh:192` forces install retry when the marker remains.
+- `scripts/hafleet-stable-autodeploy.sh:127` stores deploy state under the checkout's git dir by default.
+- `scripts/hafleet-stable-autodeploy.sh:199` touches the install-needed marker before install and `scripts/hafleet-stable-autodeploy.sh:352` uses that marker to force retry from the last successful ref.
+- `scripts/hafleet-remote-autodeploy.sh:46` stores remote deploy state and `scripts/hafleet-remote-autodeploy.sh:192` forces install retry when the marker remains.
 
 ### CD-003 macOS Remote Hosts Do Not Get An Autodeploy Watcher
 
 Evidence:
 
-- `remote/install-remote.sh:190` installs `agent-chat-remote-autodeploy` only in the Linux/systemd branch.
+- `remote/install-remote.sh:190` installs `hafleet-remote-autodeploy` only in the Linux/systemd branch.
 - `remote/push-relay-autodeploy.service:11` exists only as a systemd unit template.
 - `remote/push-relay.plist:9` defines only the push-relay launchd service, not the remote autodeploy watcher.
 
 Impact:
 
-macOS remote hosts can run push-relay, but they do not get the polling CD watcher from `install-remote.sh`. They rely on manual `agentchat update` or operator restarts, so remote/local CD behavior diverges.
+macOS remote hosts can run push-relay, but they do not get the polling CD watcher from `install-remote.sh`. They rely on manual `hafleet update` or operator restarts, so remote/local CD behavior diverges.
 
 Fix direction:
 
 Operator decision required:
 
 - either declare macOS remote hosts manual-update only;
-- or add a launchd plist/runner for `agentchat-remote-autodeploy.sh`.
+- or add a launchd plist/runner for `hafleet-remote-autodeploy.sh`.
 
 ### CD-004 Expected Version Check Is Used By Remote Autodeploy
 
@@ -137,8 +137,8 @@ Evidence:
 - `lib/push-relay-core.js:482` sends `version` in heartbeat when available.
 - `bin/verify-remote:35` exposes `--expect-version <v>`.
 - `bin/verify-remote:231` fails when `/api/servers[].version` does not match the expected version.
-- `scripts/agentchat-remote-autodeploy.sh:245` computes the expected short commit after reset.
-- `scripts/agentchat-remote-autodeploy.sh:262` passes that expected version to post-restart verification.
+- `scripts/hafleet-remote-autodeploy.sh:245` computes the expected short commit after reset.
+- `scripts/hafleet-remote-autodeploy.sh:262` passes that expected version to post-restart verification.
 
 Impact:
 
@@ -154,7 +154,7 @@ Evidence:
 
 - `scripts/check-remote-package-smoke.sh:226` starts wrapper resolution smoke.
 - `scripts/check-remote-package-smoke.sh:230` checks the generated push-relay wrapper.
-- `scripts/check-remote-package-smoke.sh:231` checks the generated MCP wrapper with `AGENTCHAT_WRAPPER_SMOKE=1`.
+- `scripts/check-remote-package-smoke.sh:231` checks the generated MCP wrapper with `HAFLEET_WRAPPER_SMOKE=1`.
 
 Impact:
 
@@ -180,7 +180,7 @@ The generated package gate now fails if the remote autodeploy service template i
 
 Evidence:
 
-- `bin/agent-chat-cli:81` builds a tmux snapshot from `#{session_activity}`.
+- `bin/hafleet-cli:81` builds a tmux snapshot from `#{session_activity}`.
 - The fallback is used only when backend runtime metrics do not provide `idleDurationSec`.
 
 Impact:
@@ -189,15 +189,15 @@ Normal deployed observation uses backend runtime fields and is currently correct
 
 Status:
 
-Implemented for the current backend/CLI contract. Backend runtime now preserves `activeNow=null`, and `agentchat cli status` displays unknown instead of idle for that state. RLP idle repair now keeps normal/high push notifications queued while the pane shows interactive busy markers and removes max-hold force delivery for active panes; urgent remains the explicit bypass. The legacy `session_activity` fallback remains only for older backends that omit the activity field entirely.
+Implemented for the current backend/CLI contract. Backend runtime now preserves `activeNow=null`, and `hafleet cli status` displays unknown instead of idle for that state. RLP idle repair now keeps normal/high push notifications queued while the pane shows interactive busy markers and removes max-hold force delivery for active panes; urgent remains the explicit bypass. The legacy `session_activity` fallback remains only for older backends that omit the activity field entirely.
 
 ### CD-007 Operations Runbook Does Not Match Destructive Deploy Behavior
 
 Evidence:
 
 - Before R-040, `OPERATIONS.md` said stable deploy used `git pull --ff-only origin stable`.
-- `scripts/agentchat-stable-autodeploy.sh:208` runs a dirty-worktree cleaner.
-- `scripts/agentchat-stable-autodeploy.sh:343` resets the live checkout to `origin/stable`.
+- `scripts/hafleet-stable-autodeploy.sh:208` runs a dirty-worktree cleaner.
+- `scripts/hafleet-stable-autodeploy.sh:343` resets the live checkout to `origin/stable`.
 
 Impact:
 
@@ -243,17 +243,17 @@ Runs only in the deploy environment:
 - install changed dependencies;
 - restart services in the correct order.
 
-For the remote profile, the deploy service is `agent-chat-push-relay`.
+For the remote profile, the deploy service is `hafleet-push-relay`.
 
 ### Stage D: Post-Deploy Verification
 
 Runs after service restart:
 
-- `agentchat service status --profile remote`;
-- `agentchat verify-remote --samples 2 --interval 16`;
+- `hafleet service status --profile remote`;
+- `hafleet verify-remote --samples 2 --interval 16`;
 - compare backend `/api/servers[].version` to the expected short commit;
-- when a known agent is configured, run `agentchat verify-remote --agent <name>`;
-- run `agentchat cli status <agent>` or `agentchat cli status` as a human-readable diagnostic smoke.
+- when a known agent is configured, run `hafleet verify-remote --agent <name>`;
+- run `hafleet cli status <agent>` or `hafleet cli status` as a human-readable diagnostic smoke.
 
 Remote autodeploy now enforces this layer for git-checkout remote deployments. Manual status and CLI checks remain useful acceptance diagnostics after stable rollout.
 
@@ -275,7 +275,7 @@ Remote autodeploy now enforces this layer for git-checkout remote deployments. M
 | CD-001 | Done | Remote CD | Remote autodeploy runs post-deploy `verify-remote --expect-version <short-sha>` after restart and keeps `deploy_pending=true` on failure. | Implemented with fake-repo remote autodeploy tests; manual remote smoke still required after stable merge. |
 | CD-002 | Done | Remote deps | Remote autodeploy installs dependencies in `remote/` when `remote/package*.json` changes. | Implemented with fake-repo remote autodeploy tests. |
 | CD-002A | Done | CD deps | Dependency-install-needed state persists across retry after failed install. | Implemented with stable/dev/remote autodeploy tests. |
-| CD-003 | P1 | macOS CD | Decide and implement launchd autodeploy watcher or document manual-only policy. | macOS launchctl status and `agentchat service status --profile remote`. |
+| CD-003 | P1 | macOS CD | Decide and implement launchd autodeploy watcher or document manual-only policy. | macOS launchctl status and `hafleet service status --profile remote`. |
 | CD-004 | Done | Loaded commit | `verify-remote --expect-version <sha>` fails on version mismatch and remote autodeploy invokes it after restart. | Implemented with `verify-remote` and remote autodeploy tests. |
 | CD-005 | Done | Package smoke | Generated package smoke checks MCP wrapper resolution. | `npm run check:remote-package-smoke`. |
 | CD-005A | Done | Remote package | Generated package includes and smoke-checks `push-relay-autodeploy.service`. | `npm run build:remote:check` and `npm run check:remote-package-smoke`. |

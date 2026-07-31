@@ -1,6 +1,6 @@
 # Group & Room System Architecture
 
-> **Scope**: How agentchat groups, DM rooms, SPY rooms, and Matrix rooms are created, mapped, reconciled, and queried.
+> **Scope**: How hafleet groups, DM rooms, SPY rooms, and Matrix rooms are created, mapped, reconciled, and queried.
 > **Primary sources**: `backend-v2.js`, `bridge-matrix.js`, `lib/group-store.js` (does not exist — all group logic is inline in backend-v2.js).
 
 ---

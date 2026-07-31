@@ -1,0 +1,647 @@
+#!/usr/bin/env bash
+
+# Deprecated legacy entrypoint: forward to unified 'hafleet'.
+if [ "${HAFLEET_INTERNAL_DISPATCH:-0}" != "1" ]; then
+  _ac_legacy_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _ac_legacy_name="$(basename "$0")"
+  echo "[DEPRECATED] ${_ac_legacy_name} is deprecated. Use: hafleet service ..." >&2
+  exec "${_ac_legacy_dir}/hafleet" "service" "$@"
+fi
+set -euo pipefail
+
+_resolve_script_dir() {
+  local src="$0"
+  while [ -L "$src" ]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+SCRIPT_DIR="$(_resolve_script_dir)"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+OS_NAME="$(uname -s)"
+UID_NUM="$(id -u)"
+ACTION=""
+PROFILE="all"
+QUIET=false
+declare -a EXPLICIT_SERVICES=()
+declare -a TARGET_SERVICES=()
+ENV_LOADED=false
+
+load_agent_env() {
+  if [ "$ENV_LOADED" = true ]; then
+    return
+  fi
+  local candidates=()
+  if [ -n "${HAFLEET_ENV:-}" ]; then
+    candidates+=("$HAFLEET_ENV")
+  fi
+  candidates+=("$BASE_DIR/remote/.env" "$BASE_DIR/.env")
+  local envf
+  for envf in "${candidates[@]}"; do
+    [ -f "$envf" ] || continue
+    set -a
+    # shellcheck disable=SC1090
+    source "$envf"
+    set +a
+    break
+  done
+  ENV_LOADED=true
+}
+
+usage() {
+  cat <<'EOF'
+Usage: hafleet-service <pause|resume|restart|status> [options]
+
+Scope:
+  Controls services on the current host only.
+  local:  central backend/web/bridge services in a full checkout.
+  remote: remote relay service hafleet-push-relay.
+  all:    local + remote service labels known on this host.
+
+Options:
+  --profile <local|remote|all>   Service profile (default: all)
+  --service <name>               Service name/label (repeatable)
+  --quiet                        Reduce output
+  -h, --help                     Show this help
+
+Examples:
+  hafleet-service status
+  hafleet-service pause --profile local
+  hafleet-service resume --service hafleet-push-relay
+EOF
+}
+
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Error: missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+log() {
+  if [ "$QUIET" = false ]; then
+    echo "$@"
+  fi
+}
+
+normalize_services() {
+  local item existing duplicate
+  local out=()
+  local out_count=0
+
+  for item in "$@"; do
+    [ -n "${item:-}" ] || continue
+
+    duplicate=false
+    if [ "$out_count" -gt 0 ]; then
+      for existing in "${out[@]}"; do
+        if [ "$existing" = "$item" ]; then
+          duplicate=true
+          break
+        fi
+      done
+    fi
+
+    if [ "$duplicate" = false ]; then
+      out+=("$item")
+      out_count=$((out_count + 1))
+    fi
+  done
+
+  if [ "$out_count" -gt 0 ]; then
+    printf '%s\n' "${out[@]}"
+  fi
+}
+
+resolve_services_from_profile() {
+  case "$PROFILE" in
+    local)
+      printf '%s\n' hafleet-backend bridge-matrix hafleet
+      ;;
+    remote)
+      printf '%s\n' hafleet-push-relay
+      ;;
+    all)
+      printf '%s\n' hafleet-backend bridge-matrix hafleet hafleet-push-relay
+      ;;
+    *)
+      echo "Error: unknown profile '$PROFILE'" >&2
+      exit 1
+      ;;
+  esac
+}
+
+linux_run_systemctl() {
+  local subcmd="$1"
+  local svc="$2"
+  if [ "$UID_NUM" -eq 0 ]; then
+    systemctl "$subcmd" "$svc"
+  else
+    sudo systemctl "$subcmd" "$svc"
+  fi
+}
+
+linux_service_exists() {
+  local svc="$1"
+  local load_state
+  load_state="$(systemctl show "$svc" -p LoadState --value 2>/dev/null || true)"
+  [ "$load_state" != "not-found" ] && [ -n "$load_state" ]
+}
+
+linux_service_status() {
+  local svc="$1"
+  local active
+  active="$(systemctl is-active "$svc" 2>/dev/null || true)"
+  if linux_service_exists "$svc"; then
+    echo "${active:-inactive}"
+  else
+    echo "not-found"
+  fi
+}
+
+mac_launchd_plist() {
+  local label="$1"
+  echo "$HOME/Library/LaunchAgents/${label}.plist"
+}
+
+service_label_variants() {
+  local label="$1"
+  echo "$label"
+  if [ "$label" = "hafleet-push-relay" ]; then
+    echo "com.hafleet.push-relay"
+  elif [ "$label" = "com.hafleet.push-relay" ]; then
+    echo "hafleet-push-relay"
+  fi
+}
+
+mac_launchd_detect_domain() {
+  local label="$1"
+  local domain probe
+  while IFS= read -r probe; do
+    [ -n "$probe" ] || continue
+    for domain in "gui/$UID_NUM" "user/$UID_NUM"; do
+      if launchctl print "$domain/$probe" >/dev/null 2>&1; then
+        echo "$domain|$probe"
+        return 0
+      fi
+    done
+  done < <(service_label_variants "$label")
+  return 1
+}
+
+mac_launchd_bootout_variants() {
+  local label="$1"
+  local domain probe
+  while IFS= read -r probe; do
+    [ -n "$probe" ] || continue
+    for domain in "gui/$UID_NUM" "user/$UID_NUM"; do
+      launchctl bootout "$domain/$probe" >/dev/null 2>&1 || true
+    done
+  done < <(service_label_variants "$label")
+}
+
+mac_launchd_unload_variant_plists() {
+  local label="$1"
+  local probe plist
+  while IFS= read -r probe; do
+    [ -n "$probe" ] || continue
+    plist="$(mac_launchd_plist "$probe")"
+    if [ -f "$plist" ]; then
+      launchctl unload "$plist" >/dev/null 2>&1 || true
+    fi
+  done < <(service_label_variants "$label")
+}
+
+mac_resolve_bootstrap_target() {
+  local label="$1"
+  local plist
+  plist="$(mac_launchd_plist "$label")"
+  if [ -f "$plist" ]; then
+    echo "$label|$plist"
+    return 0
+  fi
+  local probe probe_plist
+  while IFS= read -r probe; do
+    [ -n "$probe" ] || continue
+    probe_plist="$(mac_launchd_plist "$probe")"
+    if [ -f "$probe_plist" ]; then
+      echo "$probe|$probe_plist"
+      return 0
+    fi
+  done < <(service_label_variants "$label")
+  return 1
+}
+
+mac_launchd_status() {
+  local label="$1"
+  local detected domain actual_label dump state
+  if detected="$(mac_launchd_detect_domain "$label")"; then
+    domain="${detected%%|*}"
+    actual_label="${detected#*|}"
+    dump="$(launchctl print "$domain/$actual_label" 2>/dev/null || true)"
+    state="$(printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*state = //p' | head -n 1)"
+    if [ -z "$state" ]; then
+      echo "loaded"
+    else
+      echo "$state"
+    fi
+  else
+    echo "not-found"
+  fi
+}
+
+mac_bootstrap_label() {
+  local label="$1"
+  local target plist domain target_label
+  if ! target="$(mac_resolve_bootstrap_target "$label")"; then
+    echo "Error: plist not found for '$label' (or legacy variants)." >&2
+    return 1
+  fi
+  target_label="${target%%|*}"
+  plist="${target#*|}"
+  mac_launchd_bootout_variants "$label"
+  for domain in "gui/$UID_NUM" "user/$UID_NUM"; do
+    if launchctl bootstrap "$domain" "$plist" >/dev/null 2>&1; then
+      launchctl enable "$domain/$target_label" >/dev/null 2>&1 || true
+      launchctl kickstart -k "$domain/$target_label" >/dev/null 2>&1 || true
+      return 0
+    fi
+  done
+  mac_launchd_unload_variant_plists "$label"
+  launchctl load -w "$plist" >/dev/null 2>&1
+}
+
+mac_pause_label() {
+  local label="$1"
+  local domain
+  local stopped=0
+  while IFS= read -r domain; do
+    [ -n "$domain" ] || continue
+    stopped=1
+  done < <(mac_launchd_detect_domain "$label" | cut -d'|' -f1)
+  mac_launchd_bootout_variants "$label"
+  mac_launchd_unload_variant_plists "$label"
+  # If we have any variant plist present, treat pause action as handled.
+  local probe plist
+  while IFS= read -r probe; do
+    [ -n "$probe" ] || continue
+    plist="$(mac_launchd_plist "$probe")"
+    if [ -f "$plist" ]; then
+      stopped=1
+      break
+    fi
+  done < <(service_label_variants "$label")
+  if [ "$stopped" -eq 1 ]; then
+    return 0
+  fi
+  return 1
+}
+
+is_push_relay_service() {
+  [ "$1" = "hafleet-push-relay" ]
+}
+
+list_user_push_relay_pids() {
+  ps -eo pid=,uid=,command= 2>/dev/null | awk -v uid="$UID_NUM" '
+    $2 == uid && ($0 ~ /push-relay\.js/ || $0 ~ /\.push-relay-launchd\.sh/ || $0 ~ /hafleet-push-relay/) { print $1 }
+  ' || true
+}
+
+kill_push_relay_orphans() {
+  local pid
+  local found=false
+  local killed_any=false
+  local pids=()
+
+  local pass
+  for pass in 1 2 3; do
+    found=false
+    pids=()
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      found=true
+      pids+=("$pid")
+    done < <(list_user_push_relay_pids)
+
+    if [ "$found" = false ]; then
+      if [ "$killed_any" = true ]; then
+        log "hafleet-push-relay: cleaned residual relay processes"
+      fi
+      return 0
+    fi
+
+    for pid in "${pids[@]}"; do
+      if kill "$pid" >/dev/null 2>&1; then
+        killed_any=true
+      fi
+    done
+    sleep 0.4
+    for pid in "${pids[@]}"; do
+      if kill -0 "$pid" >/dev/null 2>&1; then
+        kill -9 "$pid" >/dev/null 2>&1 || true
+      fi
+    done
+    sleep 0.4
+  done
+
+  echo "Error: residual push-relay process still alive after kill attempts." >&2
+  return 1
+}
+
+fetch_server_online_state() {
+  load_agent_env
+  local api_base="${HAFLEET_API:-}"
+  local server_id="${HAFLEET_SERVER:-}"
+  if [ -z "$api_base" ] || [ -z "$server_id" ]; then
+    echo "unknown"
+    return 0
+  fi
+  local url="${api_base%/}/api/servers"
+  local raw
+  if [ -n "${API_TOKEN:-}" ]; then
+    raw="$(curl --noproxy '*' -sS -m 5 -H "Authorization: Bearer ${API_TOKEN}" "$url" 2>/dev/null || true)"
+  else
+    raw="$(curl --noproxy '*' -sS -m 5 "$url" 2>/dev/null || true)"
+  fi
+  if [ -z "$raw" ]; then
+    echo "unknown"
+    return 0
+  fi
+  TARGET_SERVER="$server_id" RAW_JSON="$raw" python3 - <<'PY'
+import json
+import os
+
+target = os.environ.get("TARGET_SERVER", "")
+raw = os.environ.get("RAW_JSON", "")
+state = "unknown"
+try:
+    rows = json.loads(raw)
+    if isinstance(rows, list):
+        row = next((r for r in rows if isinstance(r, dict) and r.get("id") == target), None)
+        if row is None:
+            state = "missing"
+        else:
+            state = "online" if bool(row.get("online")) else "offline"
+except Exception:
+    state = "unknown"
+print(state)
+PY
+}
+
+verify_push_relay_paused() {
+  load_agent_env
+  local api_base="${HAFLEET_API:-}"
+  local server_id="${HAFLEET_SERVER:-}"
+  if [ -z "$api_base" ] || [ -z "$server_id" ]; then
+    log "hafleet-push-relay: skip backend pause verification (missing HAFLEET_API or HAFLEET_SERVER)"
+    return 0
+  fi
+  local state=""
+  local i
+  for i in 1 2 3 4; do
+    state="$(fetch_server_online_state)"
+    case "$state" in
+      offline|missing)
+        log "hafleet-push-relay: backend reports '$server_id' ${state} after pause"
+        return 0
+        ;;
+      online)
+        sleep 1
+        ;;
+      *)
+        sleep 1
+        ;;
+    esac
+  done
+  echo "Error: backend still reports remote server '$server_id' online after pause." >&2
+  echo "Hint: another push-relay process (or duplicate server id source) is still heartbeating." >&2
+  return 1
+}
+
+post_push_relay_offline_notice() {
+  local reason="${1:-service-paused}"
+  load_agent_env
+  local api_base="${HAFLEET_API:-}"
+  local server_id="${HAFLEET_SERVER:-}"
+  if [ -z "$api_base" ] || [ -z "$server_id" ]; then
+    log "hafleet-push-relay: skipped offline notice (missing HAFLEET_API or HAFLEET_SERVER)"
+    return 0
+  fi
+
+  local url="${api_base%/}/api/servers/${server_id}/offline"
+  local http_code
+  if [ -n "${API_TOKEN:-}" ]; then
+    http_code="$(curl --noproxy '*' -sS -m 5 -o /dev/null -w '%{http_code}' \
+      -X POST "$url" \
+      -H "Authorization: Bearer ${API_TOKEN}" \
+      -H 'Content-Type: application/json' \
+      -d "{\"reason\":\"$reason\"}" 2>/dev/null || true)"
+  else
+    http_code="$(curl --noproxy '*' -sS -m 5 -o /dev/null -w '%{http_code}' \
+      -X POST "$url" \
+      -H 'Content-Type: application/json' \
+      -d "{\"reason\":\"$reason\"}" 2>/dev/null || true)"
+  fi
+
+  case "$http_code" in
+    200|201|204)
+      log "hafleet-push-relay: reported backend offline ($reason)"
+      ;;
+    "")
+      echo "Warning: failed to report backend offline ($reason): no HTTP response" >&2
+      ;;
+    *)
+      echo "Warning: failed to report backend offline ($reason): HTTP $http_code" >&2
+      ;;
+  esac
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    pause|resume|restart|status)
+      if [ -n "$ACTION" ]; then
+        echo "Error: action already set to '$ACTION'" >&2
+        exit 1
+      fi
+      ACTION="$1"
+      shift
+      ;;
+    --profile)
+      PROFILE="${2:-}"
+      shift 2
+      ;;
+    --service)
+      EXPLICIT_SERVICES+=("${2:-}")
+      shift 2
+      ;;
+    --quiet)
+      QUIET=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$ACTION" ]; then
+  echo "Error: action required" >&2
+  usage >&2
+  exit 1
+fi
+
+if [ "${#EXPLICIT_SERVICES[@]}" -gt 0 ]; then
+  while IFS= read -r svc; do
+    [ -n "$svc" ] && TARGET_SERVICES+=("$svc")
+  done < <(normalize_services "${EXPLICIT_SERVICES[@]}")
+else
+  while IFS= read -r svc; do
+    [ -n "$svc" ] && TARGET_SERVICES+=("$svc")
+  done < <(resolve_services_from_profile)
+fi
+
+if [ "${#TARGET_SERVICES[@]}" -eq 0 ]; then
+  echo "Error: no services selected" >&2
+  exit 1
+fi
+
+if [ "$OS_NAME" = "Linux" ]; then
+  need_cmd systemctl
+  if [ "$ACTION" != "status" ] && [ "$UID_NUM" -ne 0 ]; then
+    need_cmd sudo
+  fi
+elif [ "$OS_NAME" = "Darwin" ]; then
+  need_cmd launchctl
+else
+  echo "Error: unsupported OS '$OS_NAME' (expected Linux or macOS)" >&2
+  exit 1
+fi
+
+failures=0
+for svc in "${TARGET_SERVICES[@]}"; do
+  if [ "$OS_NAME" = "Linux" ]; then
+    case "$ACTION" in
+      status)
+        state="$(linux_service_status "$svc")"
+        log "$svc: $state"
+        ;;
+      pause)
+        if linux_service_exists "$svc"; then
+          if linux_run_systemctl stop "$svc" >/dev/null 2>&1; then
+            log "$svc: stopped"
+            if is_push_relay_service "$svc"; then
+              if ! kill_push_relay_orphans; then
+                failures=$((failures + 1))
+              fi
+              post_push_relay_offline_notice "service-paused"
+              if ! verify_push_relay_paused; then
+                failures=$((failures + 1))
+              fi
+            fi
+          else
+            echo "Error: failed to stop $svc" >&2
+            failures=$((failures + 1))
+          fi
+        else
+          log "$svc: not installed on this host"
+          if is_push_relay_service "$svc"; then
+            if ! kill_push_relay_orphans; then
+              failures=$((failures + 1))
+            fi
+            post_push_relay_offline_notice "service-paused-no-unit"
+            if ! verify_push_relay_paused; then
+              failures=$((failures + 1))
+            fi
+          fi
+        fi
+        ;;
+      resume)
+        if linux_service_exists "$svc"; then
+          if linux_run_systemctl start "$svc" >/dev/null 2>&1; then
+            log "$svc: started"
+          else
+            echo "Error: failed to start $svc" >&2
+            failures=$((failures + 1))
+          fi
+        else
+          log "$svc: not installed on this host"
+        fi
+        ;;
+      restart)
+        if linux_service_exists "$svc"; then
+          if linux_run_systemctl restart "$svc" >/dev/null 2>&1; then
+            log "$svc: restarted"
+          else
+            echo "Error: failed to restart $svc" >&2
+            failures=$((failures + 1))
+          fi
+        else
+          log "$svc: not installed on this host"
+        fi
+        ;;
+    esac
+  else
+    case "$ACTION" in
+      status)
+        state="$(mac_launchd_status "$svc")"
+        log "$svc: $state"
+        ;;
+      pause)
+        if mac_pause_label "$svc"; then
+          log "$svc: stopped"
+          if is_push_relay_service "$svc"; then
+            if ! kill_push_relay_orphans; then
+              failures=$((failures + 1))
+            fi
+            post_push_relay_offline_notice "service-paused"
+            if ! verify_push_relay_paused; then
+              failures=$((failures + 1))
+            fi
+          fi
+        else
+          log "$svc: not installed on this host"
+          if is_push_relay_service "$svc"; then
+            if ! kill_push_relay_orphans; then
+              failures=$((failures + 1))
+            fi
+            post_push_relay_offline_notice "service-paused-no-unit"
+            if ! verify_push_relay_paused; then
+              failures=$((failures + 1))
+            fi
+          fi
+        fi
+        ;;
+      resume)
+        if mac_bootstrap_label "$svc"; then
+          log "$svc: started"
+        else
+          echo "Error: failed to start $svc" >&2
+          failures=$((failures + 1))
+        fi
+        ;;
+      restart)
+        mac_pause_label "$svc" >/dev/null 2>&1 || true
+        if mac_bootstrap_label "$svc"; then
+          log "$svc: restarted"
+        else
+          echo "Error: failed to restart $svc" >&2
+          failures=$((failures + 1))
+        fi
+        ;;
+    esac
+  fi
+done
+
+if [ "$failures" -gt 0 ]; then
+  exit 1
+fi

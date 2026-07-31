@@ -22,13 +22,13 @@ display names, and localparts are never fallback approvers.
 
 The versioned JSON Schemas live under `schemas/approval/`.
 
-- Public room: `com.agentchat.approval.status.v1`. It contains only agent,
+- Public room: `com.hafleet.approval.status.v1`. It contains only agent,
   project, and `waiting_for_owner`; it has no request id, digest, input preview,
   or actions.
-- Encrypted owner room: `com.agentchat.approval.request.v1`. It contains the
+- Encrypted owner room: `com.hafleet.approval.request.v1`. It contains the
   complete binding, expiry, runtime details, input digest, and exactly two UI
   actions: `approve_once` and `deny`.
-- Encrypted owner response: `com.agentchat.approval.verdict.v1`. The bridge
+- Encrypted owner response: `com.hafleet.approval.verdict.v1`. The bridge
   forwards the Matrix event's real `event.sender`, room id, event id, binding,
   digest, request id, and action to the backend.
 
@@ -37,8 +37,8 @@ Free-form text is ordinary chat and never becomes a verdict. `!ctl` and
 global administrator.
 
 For E2EE fault isolation only, a local non-production bridge may set both
-`AGENTCHAT_APPROVAL_DM_MODE=plaintext-test` and
-`AGENTCHAT_ALLOW_PLAINTEXT_APPROVAL_TEST=1`. This creates a separate private,
+`HAFLEET_APPROVAL_DM_MODE=plaintext-test` and
+`HAFLEET_ALLOW_PLAINTEXT_APPROVAL_TEST=1`. This creates a separate private,
 bridge-restricted room named `Approval Test (UNENCRYPTED): <agent>`. The mode is
 never selected automatically, is rejected when `NODE_ENV=production`, and must
 not be used for deployment.
@@ -52,10 +52,10 @@ unexpired request matching every bound field can accept one verdict.
 Claude Code uses the documented MCP Channel permission notification pair.
 Because custom channels are still a research preview, the launcher enables the
 development channel allowlist exception only for the configured local
-agent-chat MCP server. Managed channel failures are returned to Claude as an
+hafleet MCP server. Managed channel failures are returned to Claude as an
 explicit deny for the original request id; they are never left as a prompt that
 can only be seen inside tmux. Restarting a managed Claude agent must go through
-`agentchat up`, which restores auto mode, the channel flag, MCP configuration,
+`hafleet up`, which restores auto mode, the channel flag, MCP configuration,
 and agent-local protected-operation ask rules. The launcher replaces the tmux
 pane shell with its managed runtime wrapper; when Claude exits, the pane closes
 instead of leaving a shell where an unconfigured Claude process can be started.
@@ -76,7 +76,7 @@ polling, consumption, or output failure emits the documented deny decision, so
 Codex cannot fall back to an unattended terminal prompt.
 
 After integrity and agent-identity checks, the hook locally allows only the
-exact agent-chat MCP coordination/task tools. This prevents `check_inbox` from
+exact hafleet MCP coordination/task tools. This prevents `check_inbox` from
 recursively creating the approval it is trying to read. Text-only
 `send_message` and `post` are also allowed; requests with local file
 attachments, all unrelated MCP namespaces, and coding tools continue through

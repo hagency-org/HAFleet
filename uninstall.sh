@@ -9,7 +9,7 @@ SUDOERS_DIR="${SUDOERS_DIR:-/etc/sudoers.d}"
 YES=false
 DRY_RUN=false
 SKIP_MCP=false
-PURGE_AGENTCHAT_HOME=false
+PURGE_HAFLEET_HOME=false
 PURGE_DATA=false
 
 usage() {
@@ -27,7 +27,7 @@ Options:
   --systemd-dir PATH        Remove service units from PATH instead of /etc/systemd/system
   --sudoers-dir PATH        Remove sudoers rule from PATH instead of /etc/sudoers.d
   --skip-mcp               Do not call the Claude Code or Codex MCP remover
-  --purge-agentchat-home   Also remove ~/.agentchat after separate confirmation
+  --purge-hafleet-home   Also remove ~/.hafleet after separate confirmation
   --purge-data             Also remove INSTALL_DIR/data after separate confirmation
   -h, --help               Show this help
 USAGE
@@ -118,7 +118,7 @@ parse_args() {
         SUDOERS_DIR="$2"; shift
         ;;
       --skip-mcp) SKIP_MCP=true ;;
-      --purge-agentchat-home) PURGE_AGENTCHAT_HOME=true ;;
+      --purge-hafleet-home) PURGE_HAFLEET_HOME=true ;;
       --purge-data) PURGE_DATA=true ;;
       -h|--help)
         usage
@@ -134,12 +134,12 @@ parse_args() {
 
 stop_services() {
   local services=(
-    agent-chat-push-relay.service
-    agent-chat-remote-autodeploy.service
-    agent-chat-stable-autodeploy.service
+    hafleet-push-relay.service
+    hafleet-remote-autodeploy.service
+    hafleet-stable-autodeploy.service
     bridge-matrix.service
-    agent-chat.service
-    agent-chat-v2.service
+    hafleet.service
+    hafleet-backend.service
   )
   if [ "$DRY_RUN" = true ] || ! is_system_dir; then
     log "Skipping systemctl stop/disable outside real systemd dir."
@@ -195,12 +195,12 @@ remove_skill_dir_if_owned() {
 remove_skills() {
   remove_skill_dir_if_owned "$HOME/.claude/skills/agent-message"
   remove_skill_dir_if_owned "$HOME/.codex/skills/agent-message"
-  remove_skill_dir_if_owned "$HOME/.claude/skills/agent-chat"
-  remove_skill_dir_if_owned "$HOME/.codex/skills/agent-chat"
+  remove_skill_dir_if_owned "$HOME/.claude/skills/hafleet"
+  remove_skill_dir_if_owned "$HOME/.codex/skills/hafleet"
 }
 
 remove_sudoers() {
-  remove_file "$SUDOERS_DIR/agentchat-autodeploy"
+  remove_file "$SUDOERS_DIR/hafleet-autodeploy"
 }
 
 remove_claude_mcp() {
@@ -209,7 +209,7 @@ remove_claude_mcp() {
     return 0
   fi
   if command -v claude >/dev/null 2>&1; then
-    run claude mcp remove -s user agent-chat || true
+    run claude mcp remove -s user hafleet || true
   else
     log "Claude Code CLI not found; skipping MCP removal."
   fi
@@ -221,18 +221,18 @@ remove_codex_mcp() {
     return 0
   fi
   if command -v codex >/dev/null 2>&1; then
-    run codex mcp remove agent-chat || true
+    run codex mcp remove hafleet || true
   else
     log "Codex CLI not found; skipping MCP removal."
   fi
 }
 
 purge_optional_data() {
-  if [ "$PURGE_AGENTCHAT_HOME" = true ]; then
-    if confirm "Remove user data directory $HOME/.agentchat?"; then
-      run rm -rf "$HOME/.agentchat"
+  if [ "$PURGE_HAFLEET_HOME" = true ]; then
+    if confirm "Remove user data directory $HOME/.hafleet?"; then
+      run rm -rf "$HOME/.hafleet"
     else
-      log "Preserved $HOME/.agentchat"
+      log "Preserved $HOME/.hafleet"
     fi
   fi
   if [ "$PURGE_DATA" = true ]; then
@@ -260,7 +260,7 @@ main() {
   remove_claude_mcp
   remove_codex_mcp
   purge_optional_data
-  log "Uninstall complete. .env, data, and ~/.agentchat are preserved unless purge flags were confirmed."
+  log "Uninstall complete. .env, data, and ~/.hafleet are preserved unless purge flags were confirmed."
 }
 
 main "$@"

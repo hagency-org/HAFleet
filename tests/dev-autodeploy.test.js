@@ -7,7 +7,7 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve('.');
-const autodeployScript = path.join(repoRoot, 'scripts', 'agentchat-dev-autodeploy.sh');
+const autodeployScript = path.join(repoRoot, 'scripts', 'hafleet-dev-autodeploy.sh');
 const tmpRoots = [];
 
 async function run(command, args, options = {}) {
@@ -33,14 +33,14 @@ async function createFakeCommands(ctx) {
   await writeExecutable(
     path.join(ctx.binDir, 'systemctl'),
     `#!/usr/bin/env bash
-printf 'systemctl:%s\\n' "$*" >> "$AGENTCHAT_TEST_LOG"
+printf 'systemctl:%s\\n' "$*" >> "$HAFLEET_TEST_LOG"
 exit 0
 `,
   );
   await writeExecutable(
     path.join(ctx.binDir, 'sleep'),
     `#!/usr/bin/env bash
-printf 'sleep:%s\\n' "$*" >> "$AGENTCHAT_TEST_LOG"
+printf 'sleep:%s\\n' "$*" >> "$HAFLEET_TEST_LOG"
 exit 0
 `,
   );
@@ -56,11 +56,11 @@ for arg in "$@"; do
   previous="$arg"
 done
 target="\${prefix:-$PWD}"
-printf 'npm:%s:%s\\n' "$target" "$*" >> "$AGENTCHAT_TEST_LOG"
+printf 'npm:%s:%s\\n' "$target" "$*" >> "$HAFLEET_TEST_LOG"
 case " $* " in
   *" install --omit=dev"*)
-    if [ -n "\${AGENTCHAT_FAIL_INSTALL_ONCE:-}" ] && [ -f "$AGENTCHAT_FAIL_INSTALL_ONCE" ]; then
-      rm -f "$AGENTCHAT_FAIL_INSTALL_ONCE"
+    if [ -n "\${HAFLEET_FAIL_INSTALL_ONCE:-}" ] && [ -f "$HAFLEET_FAIL_INSTALL_ONCE" ]; then
+      rm -f "$HAFLEET_FAIL_INSTALL_ONCE"
       exit 8
     fi
     ;;
@@ -71,7 +71,7 @@ exit 0
 }
 
 async function setupRepo() {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'agentchat-dev-cd-'));
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hafleet-dev-cd-'));
   tmpRoots.push(tmp);
   const ctx = {
     tmp,
@@ -88,7 +88,7 @@ async function setupRepo() {
   await git(ctx.seed, ['init']);
   await git(ctx.seed, ['checkout', '-b', 'master']);
   await git(ctx.seed, ['config', 'user.name', 'AgentChat Test']);
-  await git(ctx.seed, ['config', 'user.email', 'agentchat@example.test']);
+  await git(ctx.seed, ['config', 'user.email', 'hafleet@example.test']);
   await fs.writeFile(path.join(ctx.seed, 'package.json'), `${JSON.stringify({ dependencies: {} }, null, 2)}\n`);
   await fs.writeFile(path.join(ctx.seed, 'README.md'), 'initial\n');
   await git(ctx.seed, ['add', '.']);
@@ -116,16 +116,16 @@ async function commitAndPush(ctx, files, message) {
 async function runAutodeploy(ctx, env = {}) {
   const baseEnv = {
     ...process.env,
-    AGENTCHAT_DEPLOY_DIR: ctx.live,
-    AGENTCHAT_DEPLOY_BRANCH: 'master',
-    AGENTCHAT_POLL_SEC: '5',
-    AGENTCHAT_ONCE: '1',
-    AGENTCHAT_DEPLOY_STATE_DIR: ctx.state,
-    AGENTCHAT_DEPLOY_SERVICES: 'agent-chat-dev-backend.service agent-chat-dev-web.service',
-    AGENTCHAT_SYSTEMCTL_BIN: path.join(ctx.binDir, 'systemctl'),
-    AGENTCHAT_SLEEP_BIN: path.join(ctx.binDir, 'sleep'),
-    AGENTCHAT_NPM_BIN: path.join(ctx.binDir, 'npm'),
-    AGENTCHAT_TEST_LOG: ctx.log,
+    HAFLEET_DEPLOY_DIR: ctx.live,
+    HAFLEET_DEPLOY_BRANCH: 'master',
+    HAFLEET_POLL_SEC: '5',
+    HAFLEET_ONCE: '1',
+    HAFLEET_DEPLOY_STATE_DIR: ctx.state,
+    HAFLEET_DEPLOY_SERVICES: 'hafleet-dev-backend.service hafleet-dev-web.service',
+    HAFLEET_SYSTEMCTL_BIN: path.join(ctx.binDir, 'systemctl'),
+    HAFLEET_SLEEP_BIN: path.join(ctx.binDir, 'sleep'),
+    HAFLEET_NPM_BIN: path.join(ctx.binDir, 'npm'),
+    HAFLEET_TEST_LOG: ctx.log,
     HOME: ctx.tmp,
   };
   for (const [key, value] of Object.entries(env)) {
@@ -171,7 +171,7 @@ describe('dev autodeploy dependency retry', () => {
     const failOnce = path.join(ctx.tmp, 'fail-install-once');
     await fs.writeFile(failOnce, 'fail\n');
 
-    const firstRun = await runAutodeploy(ctx, { AGENTCHAT_FAIL_INSTALL_ONCE: failOnce });
+    const firstRun = await runAutodeploy(ctx, { HAFLEET_FAIL_INSTALL_ONCE: failOnce });
 
     expect(firstRun.stdout).toContain('Update detected:');
     expect(firstRun.stdout).toContain(`Reset to ${nextRef}`);
@@ -191,10 +191,10 @@ describe('dev autodeploy dependency retry', () => {
     commandLog = await readIfExists(ctx.log);
     expect(commandLog).toContain('npm:');
     expect(commandLog).toContain('install --omit=dev');
-    expect(commandLog).toContain('systemctl:--user restart agent-chat-dev-backend.service');
-    expect(commandLog).toContain('systemctl:--user restart agent-chat-dev-web.service');
-    expect(commandLog).toContain('systemctl:--user is-active --quiet agent-chat-dev-backend.service');
-    expect(commandLog).toContain('systemctl:--user is-active --quiet agent-chat-dev-web.service');
+    expect(commandLog).toContain('systemctl:--user restart hafleet-dev-backend.service');
+    expect(commandLog).toContain('systemctl:--user restart hafleet-dev-web.service');
+    expect(commandLog).toContain('systemctl:--user is-active --quiet hafleet-dev-backend.service');
+    expect(commandLog).toContain('systemctl:--user is-active --quiet hafleet-dev-web.service');
   });
 
   test('install-needed marker forces install when refs are unchanged', async () => {
@@ -210,8 +210,8 @@ describe('dev autodeploy dependency retry', () => {
     const commandLog = await readIfExists(ctx.log);
     expect(commandLog).toContain('npm:');
     expect(commandLog).toContain('install --omit=dev');
-    expect(commandLog).toContain('systemctl:--user restart agent-chat-dev-backend.service');
-    expect(commandLog).toContain('systemctl:--user restart agent-chat-dev-web.service');
+    expect(commandLog).toContain('systemctl:--user restart hafleet-dev-backend.service');
+    expect(commandLog).toContain('systemctl:--user restart hafleet-dev-web.service');
   });
 
   test('unchanged refs without marker stay idle', async () => {

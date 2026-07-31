@@ -27,7 +27,7 @@ function runScript(script, args, options = {}) {
 
 describe('local install and uninstall scripts', () => {
   test('install-full bootstraps env, systemd units, CLI links, and skill links without starting services', () => {
-    const tmp = makeTempRoot('agent-chat-install-full-');
+    const tmp = makeTempRoot('hafleet-install-full-');
     try {
       const home = path.join(tmp, 'home');
       const systemdDir = path.join(tmp, 'systemd');
@@ -43,32 +43,32 @@ describe('local install and uninstall scripts', () => {
         '--skip-npm',
         '--skip-mcp',
         '--no-start',
-        '--service-user', 'agentchat-user',
+        '--service-user', 'hafleet-user',
         '--systemd-dir', systemdDir,
         '--bin-dir', binDir,
         '--env-file', envFile,
       ], { home, apiToken: 'fresh-token', nodeBin: fakeNode });
 
       expect(readFileSync(envFile, 'utf-8')).toContain('API_TOKEN=fresh-token');
-      const backendUnit = readFileSync(path.join(systemdDir, 'agent-chat-v2.service'), 'utf-8');
-      expect(backendUnit).toContain('User=agentchat-user');
+      const backendUnit = readFileSync(path.join(systemdDir, 'hafleet-backend.service'), 'utf-8');
+      expect(backendUnit).toContain('User=hafleet-user');
       expect(backendUnit).toContain(`WorkingDirectory=${ROOT}`);
       expect(backendUnit).toContain(`ExecStart=${fakeNode} ${ROOT}/backend-v2.js`);
       expect(backendUnit).not.toContain('__NODE_BIN__');
 
-      const webUnit = readFileSync(path.join(systemdDir, 'agent-chat.service'), 'utf-8');
+      const webUnit = readFileSync(path.join(systemdDir, 'hafleet.service'), 'utf-8');
       expect(webUnit).toContain(`ExecStart=${fakeNode} ${ROOT}/server.js`);
       expect(webUnit).not.toContain('__NODE_BIN__');
 
-      const relayUnit = readFileSync(path.join(systemdDir, 'agent-chat-push-relay.service'), 'utf-8');
-      expect(relayUnit).toContain('After=network-online.target agent-chat-v2.service');
+      const relayUnit = readFileSync(path.join(systemdDir, 'hafleet-push-relay.service'), 'utf-8');
+      expect(relayUnit).toContain('After=network-online.target hafleet-backend.service');
       expect(relayUnit).toContain('Environment=PUSH_RELAY_MODE=local');
       expect(relayUnit).toContain(`ExecStart=${fakeNode} ${ROOT}/push-relay.js`);
       expect(relayUnit).not.toContain('__NODE_BIN__');
 
-      expect(lstatSync(path.join(binDir, 'agentchat')).isSymbolicLink()).toBe(true);
-      expect(lstatSync(path.join(binDir, 'agent-send')).isSymbolicLink()).toBe(true);
-      expect(lstatSync(path.join(home, '.claude', 'skills', 'agent-chat', 'SKILL.md')).isSymbolicLink()).toBe(true);
+      expect(lstatSync(path.join(binDir, 'hafleet')).isSymbolicLink()).toBe(true);
+      expect(lstatSync(path.join(binDir, 'hafleet-send')).isSymbolicLink()).toBe(true);
+      expect(lstatSync(path.join(home, '.claude', 'skills', 'hafleet', 'SKILL.md')).isSymbolicLink()).toBe(true);
       expect(lstatSync(path.join(home, '.codex', 'skills', 'agent-message', 'SKILL.md')).isSymbolicLink()).toBe(true);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -76,7 +76,7 @@ describe('local install and uninstall scripts', () => {
   });
 
   test('install-full configures Claude Code and Codex MCP when the CLIs are available', () => {
-    const tmp = makeTempRoot('agent-chat-install-mcp-');
+    const tmp = makeTempRoot('hafleet-install-mcp-');
     try {
       const home = path.join(tmp, 'home');
       const systemdDir = path.join(tmp, 'systemd');
@@ -104,17 +104,17 @@ describe('local install and uninstall scripts', () => {
 
       const claudeArgs = readFileSync(claudeLogPath, 'utf-8');
       expect(claudeArgs).toContain('mcp add -s user');
-      expect(claudeArgs).toContain('AGENT_CHAT_API=http://127.0.0.1:8090');
+      expect(claudeArgs).toContain('HAFLEET_API=http://127.0.0.1:8090');
       expect(claudeArgs).toContain('API_TOKEN=test-install-token');
-      expect(claudeArgs).toContain(`AGENTCHAT_HOMEDIR=${home}/.agentchat`);
-      expect(claudeArgs).toContain(`agent-chat node ${ROOT}/mcp-server.js`);
+      expect(claudeArgs).toContain(`HAFLEET_HOMEDIR=${home}/.hafleet`);
+      expect(claudeArgs).toContain(`hafleet node ${ROOT}/mcp-server.js`);
 
       const codexArgs = readFileSync(codexLogPath, 'utf-8');
-      expect(codexArgs).toContain('mcp remove agent-chat');
-      expect(codexArgs).toContain('mcp add agent-chat');
-      expect(codexArgs).toContain('AGENT_CHAT_API=http://127.0.0.1:8090');
+      expect(codexArgs).toContain('mcp remove hafleet');
+      expect(codexArgs).toContain('mcp add hafleet');
+      expect(codexArgs).toContain('HAFLEET_API=http://127.0.0.1:8090');
       expect(codexArgs).toContain('API_TOKEN=test-install-token');
-      expect(codexArgs).toContain(`AGENTCHAT_HOMEDIR=${home}/.agentchat`);
+      expect(codexArgs).toContain(`HAFLEET_HOMEDIR=${home}/.hafleet`);
       expect(codexArgs).toContain(`node ${ROOT}/mcp-server.js`);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -122,7 +122,7 @@ describe('local install and uninstall scripts', () => {
   });
 
   test('install-full rejects a configured NODE_BIN that is not executable', () => {
-    const tmp = makeTempRoot('agent-chat-install-node-bin-');
+    const tmp = makeTempRoot('hafleet-install-node-bin-');
     try {
       const home = path.join(tmp, 'home');
       const systemdDir = path.join(tmp, 'systemd');
@@ -156,7 +156,7 @@ describe('local install and uninstall scripts', () => {
   });
 
   test('uninstall removes installed units, CLI symlinks, owned skills, and sudoers while preserving data by default', () => {
-    const tmp = makeTempRoot('agent-chat-uninstall-');
+    const tmp = makeTempRoot('hafleet-uninstall-');
     try {
       const home = path.join(tmp, 'home');
       const systemdDir = path.join(tmp, 'systemd');
@@ -166,8 +166,8 @@ describe('local install and uninstall scripts', () => {
       mkdirSync(home, { recursive: true });
       mkdirSync(systemdDir, { recursive: true });
       mkdirSync(sudoersDir, { recursive: true });
-      mkdirSync(path.join(home, '.agentchat'), { recursive: true });
-      writeFileSync(path.join(sudoersDir, 'agentchat-autodeploy'), 'agentchat sudoers\n');
+      mkdirSync(path.join(home, '.hafleet'), { recursive: true });
+      writeFileSync(path.join(sudoersDir, 'hafleet-autodeploy'), 'hafleet sudoers\n');
 
       runScript('install-full.sh', [
         '--skip-prereq-check',
@@ -187,14 +187,14 @@ describe('local install and uninstall scripts', () => {
         '--bin-dir', binDir,
       ], { home });
 
-      expect(existsSync(path.join(systemdDir, 'agent-chat.service'))).toBe(false);
-      expect(existsSync(path.join(systemdDir, 'agent-chat-v2.service'))).toBe(false);
-      expect(existsSync(path.join(systemdDir, 'agent-chat-push-relay.service'))).toBe(false);
-      expect(existsSync(path.join(binDir, 'agentchat'))).toBe(false);
+      expect(existsSync(path.join(systemdDir, 'hafleet.service'))).toBe(false);
+      expect(existsSync(path.join(systemdDir, 'hafleet-backend.service'))).toBe(false);
+      expect(existsSync(path.join(systemdDir, 'hafleet-push-relay.service'))).toBe(false);
+      expect(existsSync(path.join(binDir, 'hafleet'))).toBe(false);
       expect(existsSync(path.join(home, '.claude', 'skills', 'agent-message'))).toBe(false);
-      expect(existsSync(path.join(home, '.codex', 'skills', 'agent-chat'))).toBe(false);
-      expect(existsSync(path.join(sudoersDir, 'agentchat-autodeploy'))).toBe(false);
-      expect(existsSync(path.join(home, '.agentchat'))).toBe(true);
+      expect(existsSync(path.join(home, '.codex', 'skills', 'hafleet'))).toBe(false);
+      expect(existsSync(path.join(sudoersDir, 'hafleet-autodeploy'))).toBe(false);
+      expect(existsSync(path.join(home, '.hafleet'))).toBe(true);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -208,19 +208,19 @@ describe('local install and uninstall scripts', () => {
   });
 
   test('local service units use optional env files and backend-first ordering', () => {
-    const backendUnit = readFileSync('agent-chat-v2.service', 'utf-8');
-    const webUnit = readFileSync('agent-chat.service', 'utf-8');
-    const relayUnit = readFileSync('agent-chat-push-relay.service', 'utf-8');
+    const backendUnit = readFileSync('hafleet-backend.service', 'utf-8');
+    const webUnit = readFileSync('hafleet.service', 'utf-8');
+    const relayUnit = readFileSync('hafleet-push-relay.service', 'utf-8');
     const bridgeUnit = readFileSync('bridge-matrix.service', 'utf-8');
 
     expect(backendUnit).toContain('After=network.target');
-    expect(backendUnit).not.toContain('After=network.target agent-chat.service');
+    expect(backendUnit).not.toContain('After=network.target hafleet.service');
     expect(backendUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
-    expect(webUnit).toContain('After=network.target agent-chat-v2.service');
+    expect(webUnit).toContain('After=network.target hafleet-backend.service');
     expect(webUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
-    expect(relayUnit).toContain('After=network-online.target agent-chat-v2.service');
+    expect(relayUnit).toContain('After=network-online.target hafleet-backend.service');
     expect(relayUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
-    expect(bridgeUnit).toContain('After=network.target agent-chat-v2.service');
+    expect(bridgeUnit).toContain('After=network.target hafleet-backend.service');
     expect(bridgeUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
     expect(backendUnit).toContain('ExecStart=__NODE_BIN__ __INSTALL_DIR__/backend-v2.js');
     expect(webUnit).toContain('ExecStart=__NODE_BIN__ __INSTALL_DIR__/server.js');

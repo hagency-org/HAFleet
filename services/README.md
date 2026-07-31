@@ -5,11 +5,11 @@ one detached supervisor. Use an existing writable runtime directory:
 
 ```bash
 set -a; . ./.env; set +a  # neither script below auto-loads .env — source it first
-export AGENT_CHAT_RUNTIME_DIR="$PWD"
-node services/agentchat-services.mjs start
-node services/agentchat-services.mjs status
-node services/agentchat-services.mjs doctor
-node services/agentchat-services.mjs stop
+export HAFLEET_RUNTIME_DIR="$PWD"
+node services/hafleet-services.mjs start
+node services/hafleet-services.mjs status
+node services/hafleet-services.mjs doctor
+node services/hafleet-services.mjs stop
 ```
 
 Add `--json` to `status` or `doctor` for structured output. Runtime state and
@@ -18,7 +18,7 @@ returns exit code 1 and names each unhealthy service.
 
 ## Two doctors: process-level vs. business-level
 
-`agentchat-services.mjs doctor` (above) is **process-level**: it answers "is each
+`hafleet-services.mjs doctor` (above) is **process-level**: it answers "is each
 service's PID alive and passing its configured TCP/HTTP/process probe". That is
 necessary but not sufficient — a bridge process can be alive and still not be
 syncing with Matrix; a relay process can be alive and still not be delivering to
@@ -28,9 +28,9 @@ any agent.
 It checks:
 
 1. Palpo (`MATRIX_HOMESERVER`) responds on `/_matrix/client/versions`.
-2. The agent-chat backend responds healthy on `/health`.
-3. The dashboard's TCP/HTTP probe (reusing `agentchat-services.mjs`'s own check).
-4. The four-service supervisor status (reusing `agentchat-services.mjs`'s own check).
+2. The hafleet backend responds healthy on `/health`.
+3. The dashboard's TCP/HTTP probe (reusing `hafleet-services.mjs`'s own check).
+4. The four-service supervisor status (reusing `hafleet-services.mjs`'s own check).
 5. Freshness of the bridge and relay's self-reported business-health records
    (`data/health/matrix-bridge.json`, `data/health/push-relay.json` under the
    runtime root — written atomically at 0600 by `bridge-matrix.js` /
@@ -41,7 +41,7 @@ It checks:
    are joined to `MATRIX_ACCEPTANCE_ROOM_ID`, using the bridge's own
    self-reported membership summary (the doctor never holds Matrix credentials
    itself).
-7. `AGENTCHAT_AGENT_TOKEN_MODE` is `hard` and every managed agent's token is
+7. `HAFLEET_AGENT_TOKEN_MODE` is `hard` and every managed agent's token is
    loaded, via the backend `/health` response's `auth.agentTokens`.
 
 **Operator note — record freshness (check 5) is not membership freshness (check
@@ -59,7 +59,7 @@ tune `MATRIX_ROOM_SCAN_POLL_MS` rather than the health-record thresholds.
 
 ```bash
 set -a; . ./.env; set +a  # the doctor reads MATRIX_HOMESERVER, MATRIX_ACCEPTANCE_*, etc. directly
-export AGENT_CHAT_RUNTIME_DIR="$PWD"
+export HAFLEET_RUNTIME_DIR="$PWD"
 node services/standalone-doctor.mjs
 node services/standalone-doctor.mjs --json
 ```
@@ -84,7 +84,7 @@ private, single-owner compatibility setup.
 ## Standalone trust configuration
 
 Before pointing the bridge at real Matrix rooms, five settings define the
-trust boundary between agent-chat and the outside Matrix world. `.env.example`
+trust boundary between hafleet and the outside Matrix world. `.env.example`
 ships safe defaults for all five; a fresh `.env` only needs
 `MATRIX_BRIDGE_SECRET` and `MATRIX_TRUSTED_INVITER_MXIDS` filled in.
 
@@ -103,7 +103,7 @@ ships safe defaults for all five; a fresh `.env` only needs
    secret or event id is missing"), and `tests/api-provenance.test.js`
    ("wrong bridge secret rejects senderMxid + trustLevel", "missing bridge
    secret header rejects when MATRIX_BRIDGE_SECRET is set").
-2. **Agent token mode** (`AGENTCHAT_AGENT_TOKEN_MODE=hard`) — see check 7
+2. **Agent token mode** (`HAFLEET_AGENT_TOKEN_MODE=hard`) — see check 7
    above; a missing managed-agent token flips backend `/health` — and the
    doctor's `authAndTokenIntegrity` check — to degraded instead of silently
    letting the agent through. Covered by `tests/api-agent-token.test.js`
@@ -134,7 +134,7 @@ For the four-service team deployment, provide an operator-owned environment
 file containing the existing HAFleet and Matrix settings:
 
 ```bash
-AGENTCHAT_ENV_FILE=/absolute/path/to/agent-chat.env \
+HAFLEET_ENV_FILE=/absolute/path/to/hafleet.env \
   docker compose -f services/services-team.compose.yml up -d --build
 docker compose -f services/services-team.compose.yml ps
 docker compose -f services/services-team.compose.yml down

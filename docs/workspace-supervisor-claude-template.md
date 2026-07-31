@@ -1,4 +1,4 @@
-<!-- agentchat-supervisor-workspace-template: v1 -->
+<!-- hafleet-supervisor-workspace-template: v1 -->
 # {{AGENT_NAME}} Supervisor Workspace
 
 Template-Version: v1

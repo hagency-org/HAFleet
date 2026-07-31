@@ -40,7 +40,7 @@ describe('task graph API', () => {
   });
 
   test('graph creation dispatches roots and chained completion dispatches downstream nodes', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
         beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
@@ -96,7 +96,7 @@ describe('task graph API', () => {
   });
 
   test('graph creation fails closed without dispatch when graph persistence fails', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
       },
@@ -126,7 +126,7 @@ describe('task graph API', () => {
   });
 
   test('dispatch persistence failure leaves created graph pending instead of failed', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
       },
@@ -158,7 +158,7 @@ describe('task graph API', () => {
   });
 
   test('node update persistence failure leaves graph state unchanged', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
         beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
@@ -190,7 +190,7 @@ describe('task graph API', () => {
   });
 
   test('downstream dispatch graph save failure reuses the durable dispatch on retry', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
         beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
@@ -237,7 +237,7 @@ describe('task graph API', () => {
   });
 
   test('task graph result hook persistence failure returns 503 and leaves graph unchanged', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
       },
@@ -296,7 +296,7 @@ describe('task graph API', () => {
   });
 
   test('delete persistence failure returns 503 and leaves active graph intact', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
         beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
@@ -323,7 +323,7 @@ describe('task graph API', () => {
   });
 
   test('failed dependency cascades failure through remaining pending nodes', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
         beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
@@ -350,7 +350,7 @@ describe('task graph API', () => {
   });
 
   test('delete cancels the graph and all non-terminal nodes', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
         beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
@@ -373,7 +373,7 @@ describe('task graph API', () => {
   });
 
   test('task_graph_result messages auto-complete dispatched nodes via message hook', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
       },
@@ -432,7 +432,7 @@ describe('task graph API', () => {
   });
 
   test('task_graph_result messages from non-assignees are ignored by the message hook', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
         beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
@@ -486,7 +486,7 @@ describe('task graph API', () => {
   });
 
   test('task_graph_result messages without dispatch reply binding are ignored', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
       },
@@ -558,7 +558,7 @@ describe('task graph API', () => {
   });
 
   test('task_graph_failed messages from non-assignees are ignored by the message hook', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
         mallory: { name: 'mallory', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
@@ -612,7 +612,7 @@ describe('task graph API', () => {
   });
 
   test('rejects graph creation when dependencies contain a cycle', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
         beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
@@ -644,7 +644,7 @@ describe('task graph API', () => {
   });
 
   test('rejects oversized result payloads on direct node updates', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
       },
@@ -680,7 +680,7 @@ describe('task graph API', () => {
   });
 
   test('ignores oversized task_graph_result payloads in the message hook', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
       },
@@ -735,7 +735,7 @@ describe('task graph API', () => {
   });
 
   test('blocks dangerous prototype path segments during condition evaluation', async () => {
-    context = await createBackendTestContext('agent-chat-task-graphs-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
         beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
@@ -784,15 +784,15 @@ describe('task graph API', () => {
     mkdirSync(alphaStateDir, { recursive: true });
     writeFileSync(path.join(alphaStateDir, 'agent-token'), 'alpha-secret\n');
 
-    context = await createBackendTestContext('agent-chat-task-graphs-token-test-', {
+    context = await createBackendTestContext('hafleet-task-graphs-token-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false },
         orchestrator: { name: 'orchestrator', type: 'agent', kind: 'agent', online: false },
       },
       groups: {},
       env: {
-        AGENTCHAT_AGENT_TOKEN_MODE: 'hard',
-        AGENTCHAT_HOMEDIR: homeDir,
+        HAFLEET_AGENT_TOKEN_MODE: 'hard',
+        HAFLEET_HOMEDIR: homeDir,
       },
     });
 

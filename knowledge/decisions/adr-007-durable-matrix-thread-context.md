@@ -9,7 +9,7 @@ tags: [matrix, threads, durability, bridge]
 
 ## Context
 
-agent-chat previously reduced an inbound Matrix reply to a backend `reply_to`
+hafleet previously reduced an inbound Matrix reply to a backend `reply_to`
 id and discarded the Matrix thread root. Outbound group messages contained no
 relation at all. The bridge also kept successful outbound event ids only in
 process memory, so a second agent or a bridge restart could not continue the

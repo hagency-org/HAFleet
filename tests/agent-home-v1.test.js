@@ -23,18 +23,18 @@ afterEach(() => {
 });
 
 describe('agent home v1 resolver', () => {
-  test('uses absolute AGENTCHAT_HOMEDIR before runtime-derived homes', () => {
-    const homeRoot = trackTempDir('agentchat-home-root-');
-    const runtimeRoot = trackTempDir('agentchat-runtime-root-');
+  test('uses absolute HAFLEET_HOMEDIR before runtime-derived homes', () => {
+    const homeRoot = trackTempDir('hafleet-home-root-');
+    const runtimeRoot = trackTempDir('hafleet-runtime-root-');
 
     expect(defaultAgentchatHomeDir({
-      AGENTCHAT_HOMEDIR: homeRoot,
-      AGENT_CHAT_RUNTIME_DIR: runtimeRoot,
+      HAFLEET_HOMEDIR: homeRoot,
+      HAFLEET_RUNTIME_DIR: runtimeRoot,
     })).toBe(homeRoot);
 
     expect(buildV1AgentPaths('Alpha Agent', {
-      AGENTCHAT_HOMEDIR: homeRoot,
-      AGENT_CHAT_RUNTIME_DIR: runtimeRoot,
+      HAFLEET_HOMEDIR: homeRoot,
+      HAFLEET_RUNTIME_DIR: runtimeRoot,
     })).toMatchObject({
       homeRoot,
       agentId: 'agent_alpha_agent',
@@ -45,30 +45,30 @@ describe('agent home v1 resolver', () => {
   });
 
   test('ignores relative home env values before falling back to runtime-derived homes', () => {
-    const runtimeRoot = trackTempDir('agentchat-runtime-root-');
+    const runtimeRoot = trackTempDir('hafleet-runtime-root-');
 
     expect(defaultAgentchatHomeDir({
-      AGENTCHAT_HOMEDIR: 'relative-home',
-      AGENT_CHAT_RUNTIME_DIR: runtimeRoot,
+      HAFLEET_HOMEDIR: 'relative-home',
+      HAFLEET_RUNTIME_DIR: runtimeRoot,
     })).toBe(path.join(runtimeRoot, 'homes'));
   });
 
   test('ignores relative runtime env values before falling back to legacy home', () => {
     expect(defaultAgentchatHomeDir({
-      AGENT_CHAT_RUNTIME_DIR: 'relative-runtime',
-    })).toBe(path.join(os.homedir(), '.agentchat'));
+      HAFLEET_RUNTIME_DIR: 'relative-runtime',
+    })).toBe(path.join(os.homedir(), '.hafleet'));
   });
 
   test('keeps legacy home as a lookup fallback when primary differs', () => {
-    const runtimeRoot = trackTempDir('agentchat-runtime-root-');
-    expect(allAgentHomeRoots({ AGENT_CHAT_RUNTIME_DIR: runtimeRoot })).toEqual([
+    const runtimeRoot = trackTempDir('hafleet-runtime-root-');
+    expect(allAgentHomeRoots({ HAFLEET_RUNTIME_DIR: runtimeRoot })).toEqual([
       path.join(runtimeRoot, 'homes'),
-      path.join(os.homedir(), '.agentchat'),
+      path.join(os.homedir(), '.hafleet'),
     ]);
   });
 
   test('rejects manifests with relative runtime paths', () => {
-    const manifestDir = trackTempDir('agentchat-manifest-');
+    const manifestDir = trackTempDir('hafleet-manifest-');
     const manifestPath = path.join(manifestDir, 'agent.json');
     mkdirSync(path.join(manifestDir, 'state'), { recursive: true });
     writeFileSync(manifestPath, JSON.stringify({

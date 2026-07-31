@@ -10,7 +10,7 @@ You output your assessment via the `./supervisor-writer` CLI. You do NOT send me
 
 Each assessment cycle:
 
-1. **Read target agent's task state**: Query the task API: `curl --noproxy '*' $AGENT_CHAT_API/api/tasks?assignee={{TARGET_AGENT}}` — this is the canonical task truth source
+1. **Read target agent's task state**: Query the task API: `curl --noproxy '*' $HAFLEET_API/api/tasks?assignee={{TARGET_AGENT}}` — this is the canonical task truth source
 2. **Capture tmux pane**: `tmux capture-pane -t {{TARGET_TMUX_SESSION}}:0.0 -p -S -120`
 3. **Read recent docs for context**: Check plan.md, progress.md in target agent's workspace for activity context (NOT as task status truth — use the task API for that)
 4. **Assess alignment**: Is the agent working on their assigned task? Making progress?

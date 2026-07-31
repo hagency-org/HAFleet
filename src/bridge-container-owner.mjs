@@ -9,7 +9,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 
-const MANAGED_BY = 'agentchat-services-compose';
+const MANAGED_BY = 'hafleet-services-compose';
 
 function readJson(filename) {
   try {

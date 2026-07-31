@@ -11,7 +11,7 @@ Phase 0 and Phase 1 are complete enough to resume the deferred remote/local road
 2. remote package honesty is enforced by `check:cli-contract`, `build:remote:check`, `check:remote-sync`, and `check:remote-package-smoke`;
 3. source/package CI is exposed as `npm run verify:ci`;
 4. deploy-candidate preflight is exposed as `npm run verify:cd-preflight`;
-5. remote loaded-version verification is exposed as `agentchat verify-remote --expect-version <short-sha>`.
+5. remote loaded-version verification is exposed as `hafleet verify-remote --expect-version <short-sha>`.
 
 The remaining Phase 2-7 work should now use those gates as a required part of each batch, rather than relying on manual confidence.
 
@@ -20,7 +20,7 @@ The remaining Phase 2-7 work should now use those gates as a required part of ea
 Keep these boundaries unless ac-topleader explicitly changes them:
 
 1. work on `master`, never directly on `stable`;
-2. do not edit `bin/agent-up` or `remote/bin/agent-up` until Phase 5 is approved;
+2. do not edit `bin/hafleet-up` or `remote/bin/hafleet-up` until Phase 5 is approved;
 3. do not change actual deploy/autodeploy behavior unless the specific CD batch is approved;
 4. commit and push each completed batch;
 5. run `npm run verify:ci` before every push;
@@ -33,8 +33,8 @@ Keep these boundaries unless ac-topleader explicitly changes them:
 | Phase 2 runtime observation | Runtime writes now carry backend-derived observation provenance; RLP2-B fixed custom local server ID delivery/liveness and added an opt-in local server record; unknown activity is preserved as `activeNow=null` instead of being shown as idle. Central-local still uses backend tmux sweeps and local-only idle probes. | Continue with richer local-host adapter design only after approval, not default behavior flips. | Required |
 | Phase 3 credentials/trust | RLP3-A added diagnostics-only agent-token readiness; RLP3-A2 documented and tested the server credential compatibility boundary; RLP3-B1 added a local-only or explicit-token boundary for mutating dashboard APIs. Shared `API_TOKEN`, actual server credential enforcement, full dashboard web auth, and Matrix trust remain compatibility surfaces. | Continue with server credential enforcement migration, dashboard web-auth decisions, or Matrix trust only after approval; do not flip fail-closed until tokens are provisioned and relay/server credentials are rolled out. | Required |
 | Phase 4 paths | Runtime dir guard exists; MCP media cache relocation is implemented in RLP4-A; RLP4-B added v1 home/runtime resolver contract tests and rejects relative env/manifest paths before normalization. | Continue with broader path unification only after approval. | Required |
-| Phase 5 launch | Explicitly frozen because `agent-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
-| Phase 6 CLI/ops profile | Remote command honesty is enforced; RLP6-A made `service`, `update`, `ls`, and `down` help/docs profile-scoped; CLI status/list now report unknown runtime activity without treating it as idle; RLP6-B aligned `agent-ls --all` v1 home discovery with the shared resolver. | Continue with `agent-down` resolver tests only after separate approval; do not change shutdown safety behavior implicitly. | Required |
+| Phase 5 launch | Explicitly frozen because `hafleet-up` launch work was active. | Keep frozen; only write design/tests until approval clears launch files. | Required |
+| Phase 6 CLI/ops profile | Remote command honesty is enforced; RLP6-A made `service`, `update`, `ls`, and `down` help/docs profile-scoped; CLI status/list now report unknown runtime activity without treating it as idle; RLP6-B aligned `hafleet-ls --all` v1 home discovery with the shared resolver. | Continue with `hafleet-down` resolver tests only after separate approval; do not change shutdown safety behavior implicitly. | Required |
 | Phase 7 CI/release gates | `verify:ci` and remote package gates are enforced; `audit:deps` is intentionally separate and currently red; CD-A stable watcher tests and state handling are implemented. | Add missing focused gates after each repair; handle dependency audit as a dedicated security batch after policy approval; continue remote CD only after remote policy decisions. | Required |
 
 ## Phase 2: Runtime Observation
@@ -78,13 +78,13 @@ Completed batch RLP2-B: custom local server ID and opt-in local server record.
 
 Goal:
 
-Make the central-local runtime host visible through the same `servers.json` liveness model without changing delivery. This can be done by recording a local server row for `AGENT_CHAT_SERVER` and associating local agents with it.
+Make the central-local runtime host visible through the same `servers.json` liveness model without changing delivery. This can be done by recording a local server row for `HAFLEET_SERVER` and associating local agents with it.
 
 Implementation shape:
 
 1. fixed custom local server delivery by using the shared `isLocalAgentServer()` classifier instead of checking only literal `local`;
 2. prevented stale local server rows from running remote-offline cascade against local agents;
-3. added opt-in `AGENT_CHAT_RECORD_LOCAL_SERVER=1` to record a central-local server row;
+3. added opt-in `HAFLEET_RECORD_LOCAL_SERVER=1` to record a central-local server row;
 4. kept the local row path separate from `applyServerHeartbeat()`;
 5. did not disable local sweep or change default behavior.
 
@@ -106,7 +106,7 @@ Completed batch RLP3-A: auth readiness and diagnostics.
 
 Scope:
 
-1. document and test the exact `AGENTCHAT_AGENT_TOKEN_MODE` behavior;
+1. document and test the exact `HAFLEET_AGENT_TOKEN_MODE` behavior;
 2. add a diagnostics-only `/health` readiness check that reports missing managed agent tokens without flipping production to hard mode;
 3. keep current fail-open compatibility for registered agents without loaded token files;
 4. keep R-003 fail-closed deferred until tokens are provisioned for existing agents.
@@ -116,7 +116,7 @@ Completed batch RLP3-A2: server credential boundary diagnostics.
 Scope:
 
 1. expose diagnostics-only server credential boundary under `/health.auth.serverCredential`;
-2. document that heartbeat/offline/runtime report currently use `API_TOKEN` compatibility bearer and `AGENTCHAT_SERVER_TOKEN` is not accepted or enforced yet;
+2. document that heartbeat/offline/runtime report currently use `API_TOKEN` compatibility bearer and `HAFLEET_SERVER_TOKEN` is not accepted or enforced yet;
 3. test that heartbeat/offline/runtime report and operator maintenance still require `API_TOKEN` when configured;
 4. keep `API_TOKEN` behavior unchanged and defer relay/server credential migration.
 
@@ -124,7 +124,7 @@ Recommended later batch RLP3-A3: server credential enforcement migration.
 
 Scope:
 
-1. introduce a server/relay credential such as `AGENTCHAT_SERVER_TOKEN` or a per-server token store;
+1. introduce a server/relay credential such as `HAFLEET_SERVER_TOKEN` or a per-server token store;
 2. add `requireServerCredential(serverId)` for `/api/servers/*` and host-owned runtime report paths;
 3. keep `API_TOKEN` accepted only behind an explicit compatibility flag during migration;
 4. update relay clients to prefer server credential for heartbeat/runtime/offline after the credential model is approved.
@@ -141,7 +141,7 @@ Implemented:
 
 1. `server.js` now gates `/api` mutating methods after body parsing and before dashboard queue/proxy routes;
 2. local loopback callers remain compatible without a token;
-3. non-local callers must send `Authorization: Bearer $AGENT_CHAT_DASHBOARD_TOKEN`;
+3. non-local callers must send `Authorization: Bearer $HAFLEET_DASHBOARD_TOKEN`;
 4. backend web-bridge calls and queue/reminder CLI helpers pass the optional dashboard token when configured;
 5. full browser login/session/OIDC/basic-auth and safe public dashboard exposure remain operator decisions.
 
@@ -176,8 +176,8 @@ Completed batch RLP4-A: MCP media cache relocation.
 
 Scope:
 
-1. compute MCP media cache under `AGENTCHAT_AGENT_STATE_DIR` when available;
-2. otherwise use a stable runtime data dir derived from `AGENT_CHAT_RUNTIME_DIR` or the agentchat home;
+1. compute MCP media cache under `HAFLEET_AGENT_STATE_DIR` when available;
+2. otherwise use a stable runtime data dir derived from `HAFLEET_RUNTIME_DIR` or the hafleet home;
 3. keep root and remote `lib/mcp-server-core.js` mirrored;
 4. add tests that prove media cache no longer writes into arbitrary cwd.
 
@@ -205,15 +205,15 @@ Completed batch RLP4-B: v1 home/runtime resolver tests.
 Scope:
 
 1. add tests for `lib/agent-home-v1.js` env precedence and absolute normalization;
-2. preserve legacy `~/.agentchat` fallback behavior;
+2. preserve legacy `~/.hafleet` fallback behavior;
 3. do not change launch files or provisioning behavior in the same batch.
 
 Implementation:
 
-1. `AGENTCHAT_HOMEDIR` wins only when it is an absolute path;
-2. `AGENT_CHAT_RUNTIME_DIR` contributes `<runtime>/homes` only when it is absolute;
+1. `HAFLEET_HOMEDIR` wins only when it is an absolute path;
+2. `HAFLEET_RUNTIME_DIR` contributes `<runtime>/homes` only when it is absolute;
 3. relative manifest `homeDir`/`stateDir`/`workdir` values are rejected instead of being resolved under the caller cwd;
-4. legacy `~/.agentchat` remains the fallback lookup root;
+4. legacy `~/.hafleet` remains the fallback lookup root;
 5. launch files remain untouched.
 
 ## Phase 5: Launch Decomposition
@@ -224,8 +224,8 @@ Frozen until ac-topleader explicitly clears launch work.
 
 Do not edit:
 
-- `bin/agent-up`
-- `remote/bin/agent-up`
+- `bin/hafleet-up`
+- `remote/bin/hafleet-up`
 
 Allowed before approval:
 
@@ -239,7 +239,7 @@ This phase should not block Phase 4 cache cleanup or Phase 6 CLI help/profile cl
 
 Current evidence:
 
-- Phase 1 made root and remote `agentchat` command surfaces honest.
+- Phase 1 made root and remote `hafleet` command surfaces honest.
 - `scripts/cli-command-manifest.json` is now the command contract source for root/remote dispatch checks.
 - Some commands still need clearer host/backend/profile wording in help and operations docs.
 
@@ -247,7 +247,7 @@ Completed batch RLP6-A: profile-scoped help and docs.
 
 Scope:
 
-1. make `agentchat service`, `agentchat update`, `agent-ls`, and `agent-down` help text explicit about current-host services, remote relay, backend registry context, and local tmux shutdown scope;
+1. make `hafleet service`, `hafleet update`, `hafleet-ls`, and `hafleet-down` help text explicit about current-host services, remote relay, backend registry context, and local tmux shutdown scope;
 2. keep remote command set aligned with `scripts/cli-command-manifest.json`;
 3. update `OPERATIONS.md` command scope where needed;
 4. add help-scope assertions to `check:cli-contract` and `check:remote-package-smoke`.
@@ -263,16 +263,16 @@ Partial batch RLP6-B: shell resolver consistency.
 
 Scope:
 
-1. align `agent-ls` home/runtime defaults with `lib/agent-home-v1.js` semantics without touching launch;
-2. add shell-level fake `tmux`/`curl` tests for `agent-ls --all`;
-3. keep `agent-down` shutdown behavior unchanged.
+1. align `hafleet-ls` home/runtime defaults with `lib/agent-home-v1.js` semantics without touching launch;
+2. add shell-level fake `tmux`/`curl` tests for `hafleet-ls --all`;
+3. keep `hafleet-down` shutdown behavior unchanged.
 
 Implemented:
 
-1. `agent-ls --all` now searches absolute `AGENTCHAT_HOMEDIR`, absolute `AGENT_CHAT_RUNTIME_DIR/homes`, and legacy `~/.agentchat` fallback;
-2. relative `AGENTCHAT_HOMEDIR` is ignored for v1 discovery, matching `lib/agent-home-v1.js`;
-3. root and remote mirrored `agent-ls` stay synchronized;
-4. `agent-down` resolver/backend-unavailable behavior remains a future test/design item because changing local shutdown safety requires explicit approval.
+1. `hafleet-ls --all` now searches absolute `HAFLEET_HOMEDIR`, absolute `HAFLEET_RUNTIME_DIR/homes`, and legacy `~/.hafleet` fallback;
+2. relative `HAFLEET_HOMEDIR` is ignored for v1 discovery, matching `lib/agent-home-v1.js`;
+3. root and remote mirrored `hafleet-ls` stay synchronized;
+4. `hafleet-down` resolver/backend-unavailable behavior remains a future test/design item because changing local shutdown safety requires explicit approval.
 
 ## Phase 7: CI And Release Gates
 
@@ -282,7 +282,7 @@ Current state:
 - `verify:ci` includes syntax, CLI contract, remote sync, generated remote package smoke, dependency isolation, and kernel/CLI smoke.
 - `npm run audit:deps` remains separate because the current advisory baseline is not fixed.
 - CD-A stable/live release gate support and dependency retry state are implemented with fake-repo tests.
-- Live release gate enforcement still requires deploy-host configuration: `AGENTCHAT_RELEASE_GATE=worktree`.
+- Live release gate enforcement still requires deploy-host configuration: `HAFLEET_RELEASE_GATE=worktree`.
 
 Recommended batch RLP7-A: keep gates attached to each repair.
 
@@ -291,7 +291,7 @@ Policy:
 1. every Phase 2-6 code batch must add or update a targeted test;
 2. every batch must pass `npm run verify:ci`;
 3. every deploy-relevant batch must pass clean `npm run verify:cd-preflight`;
-4. after stable deployment, verify the remote side with `agentchat verify-remote --expect-version <short-sha>`;
+4. after stable deployment, verify the remote side with `hafleet verify-remote --expect-version <short-sha>`;
 5. do not make `audit:deps` blocking until R-024 dependency remediation and policy approval are complete.
 
 Recommended batch RLP7-B: dependency audit decision and repair.
@@ -315,7 +315,7 @@ Read-only audit result:
 2. RLP2-A runtime observation provenance. Completed after ac-topleader approval.
 3. RLP6-A profile-scoped help/docs. Completed after ac-topleader approval.
 4. RLP3-A auth readiness diagnostics. Completed after ac-topleader approval.
-5. CD-A stable release gate and dependency retry. Implemented after operator resumed CD work; pending ac-topleader acceptance and deploy-host opt-in for `AGENTCHAT_RELEASE_GATE=worktree`.
+5. CD-A stable release gate and dependency retry. Implemented after operator resumed CD work; pending ac-topleader acceptance and deploy-host opt-in for `HAFLEET_RELEASE_GATE=worktree`.
 6. RLP3-B dashboard local-only/auth gate. Completed as RLP3-B1 after ac-topleader approval.
 7. RLP3-C Matrix trust default.
 8. RLP2-B local-host server record.
@@ -328,7 +328,7 @@ The next candidates are:
 
 1. RLP3-C Matrix trust default, pending operator decision;
 2. RLP7-B dependency audit repair: lock refresh, Matrix allowlist update, or Matrix migration decision;
-3. RLP6 `agent-down` resolver/backend-unavailable tests, pending shutdown-safety approval;
+3. RLP6 `hafleet-down` resolver/backend-unavailable tests, pending shutdown-safety approval;
 4. CD-B remote deploy behavior, pending operator decisions in `14-cd-next-decisions.md`.
 
 These should keep avoiding launch, stable, deploy scripts, full dashboard web auth, Matrix default flips, and default observation behavior unless ac-topleader explicitly approves that narrower batch.

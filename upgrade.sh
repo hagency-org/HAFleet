@@ -16,13 +16,13 @@
 #   --list            Show the current version and available tags, then exit
 #   --dry-run         Print the plan without changing anything
 #   --no-rollback     Do not revert on failure (leaves the host broken; for debugging)
-#   --services "A B"  Services to restart (default: agent-chat-v2 agent-chat agent-chat-push-relay)
+#   --services "A B"  Services to restart (default: hafleet-backend hafleet hafleet-push-relay)
 #   --skip-gate       Skip the pre-upgrade verify:ci gate
 #   --yes             Do not prompt for confirmation
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="${AGENTCHAT_INSTALL_DIR:-$SCRIPT_DIR}"
+INSTALL_DIR="${HAFLEET_INSTALL_DIR:-$SCRIPT_DIR}"
 
 TARGET_REF=""
 DO_LIST=false
@@ -30,13 +30,13 @@ DRY_RUN=false
 ALLOW_ROLLBACK=true
 SKIP_GATE=false
 ASSUME_YES=false
-SERVICES="${AGENTCHAT_UPGRADE_SERVICES:-agent-chat-v2 agent-chat agent-chat-push-relay}"
-BACKEND_SERVICE="${AGENTCHAT_BACKEND_SERVICE:-agent-chat-v2}"
-HEALTH_URL="${AGENTCHAT_BACKEND_HEALTH_URL:-http://127.0.0.1:8090/api/agents}"
-HEALTH_TIMEOUT="${AGENTCHAT_BACKEND_HEALTH_TIMEOUT:-30}"
-SYSTEMCTL_BIN="${AGENTCHAT_SYSTEMCTL_BIN:-systemctl}"
-CURL_BIN="${AGENTCHAT_CURL_BIN:-curl}"
-NPM_BIN="${AGENTCHAT_NPM_BIN:-npm}"
+SERVICES="${HAFLEET_UPGRADE_SERVICES:-hafleet-backend hafleet hafleet-push-relay}"
+BACKEND_SERVICE="${HAFLEET_BACKEND_SERVICE:-hafleet-backend}"
+HEALTH_URL="${HAFLEET_BACKEND_HEALTH_URL:-http://127.0.0.1:8090/api/agents}"
+HEALTH_TIMEOUT="${HAFLEET_BACKEND_HEALTH_TIMEOUT:-30}"
+SYSTEMCTL_BIN="${HAFLEET_SYSTEMCTL_BIN:-systemctl}"
+CURL_BIN="${HAFLEET_CURL_BIN:-curl}"
+NPM_BIN="${HAFLEET_NPM_BIN:-npm}"
 
 log()  { printf '[upgrade] %s\n' "$*"; }
 die()  { printf '[upgrade] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -137,7 +137,7 @@ wait_for_backend() {
 }
 
 systemctl_run() {
-  if [ "$(id -u)" = "0" ] || [ -n "${AGENTCHAT_SYSTEMCTL_BIN:-}" ] || ! command -v sudo >/dev/null 2>&1; then
+  if [ "$(id -u)" = "0" ] || [ -n "${HAFLEET_SYSTEMCTL_BIN:-}" ] || ! command -v sudo >/dev/null 2>&1; then
     "$SYSTEMCTL_BIN" "$@"
   else
     sudo "$SYSTEMCTL_BIN" "$@"

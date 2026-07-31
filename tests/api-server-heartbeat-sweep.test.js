@@ -29,7 +29,7 @@ describe('server heartbeat api (sweep and lifecycle)', () => {
     context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
       env: {
         API_TOKEN: 'operator-token',
-        AGENTCHAT_SERVER_TOKEN: 'server-token',
+        HAFLEET_SERVER_TOKEN: 'server-token',
       },
     }));
 
@@ -252,7 +252,7 @@ describe('server heartbeat api (sweep and lifecycle)', () => {
         'local-a': makeAgent('local-a', { server: 'my-local', online: true, tmux: 'local-a:0.0' }),
       },
       env: {
-        AGENT_CHAT_SERVER: 'my-local',
+        HAFLEET_SERVER: 'my-local',
       },
     }));
 
@@ -269,7 +269,7 @@ describe('server heartbeat api (sweep and lifecycle)', () => {
     context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
       env: {
         API_TOKEN: 'operator-token',
-        AGENT_CHAT_SERVER: 'my-local',
+        HAFLEET_SERVER: 'my-local',
       },
     }));
 
@@ -331,7 +331,7 @@ describe('server heartbeat api (sweep and lifecycle)', () => {
         },
       },
       env: {
-        AGENT_CHAT_SERVER: 'my-local',
+        HAFLEET_SERVER: 'my-local',
       },
     }));
 
@@ -374,7 +374,7 @@ describe('server heartbeat api (sweep and lifecycle)', () => {
         },
       },
       env: {
-        AGENT_CHAT_SERVER: 'my-local',
+        HAFLEET_SERVER: 'my-local',
         AGENT_HEARTBEAT_TTL_MS: '100',
       },
     }));
@@ -396,8 +396,8 @@ describe('server heartbeat api (sweep and lifecycle)', () => {
         'remote-a': makeAgent('remote-a', { server: 'remote-host-1', online: true, tmux: 'remote-a:0.0' }),
       },
       env: {
-        AGENT_CHAT_SERVER: 'my-local',
-        AGENT_CHAT_RECORD_LOCAL_SERVER: '1',
+        HAFLEET_SERVER: 'my-local',
+        HAFLEET_RECORD_LOCAL_SERVER: '1',
       },
     }));
 

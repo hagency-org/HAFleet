@@ -12,7 +12,7 @@ import {
 const temporaryRoots = [];
 
 async function temporaryRoot() {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'agentchat-crypto-identity-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'hafleet-crypto-identity-'));
   temporaryRoots.push(root);
   return root;
 }

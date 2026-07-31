@@ -16,7 +16,7 @@ import {
 const runtimes = [];
 
 function tempRuntime() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'agentchat-health-record-'));
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-health-record-'));
   runtimes.push(dir);
   return dir;
 }

@@ -15,7 +15,7 @@ well behaved.
 
 ## Decision
 
-agent-chat launches Claude Code with `--permission-mode auto` and launches
+hafleet launches Claude Code with `--permission-mode auto` and launches
 Codex with `--sandbox workspace-write --ask-for-approval on-request`. Agent
 workspace materialization exposes only the configured managed project paths.
 Launch arguments that disable these boundaries are rejected.

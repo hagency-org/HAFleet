@@ -7,10 +7,10 @@ import request from 'supertest';
 import { shouldPreserveDetailSettings } from '../lib/dashboard/render/agent-detail-page.js';
 
 const SERVER_ENV_KEYS = [
-  'AGENT_CHAT_RUNTIME_DIR',
-  'AGENT_CHAT_WEB_PORT',
-  'AGENT_CHAT_BACKEND_PORT',
-  'AGENT_CHAT_DASHBOARD_TOKEN',
+  'HAFLEET_RUNTIME_DIR',
+  'HAFLEET_WEB_PORT',
+  'HAFLEET_BACKEND_PORT',
+  'HAFLEET_DASHBOARD_TOKEN',
   'AGENT_IDLE_THRESHOLD_MS',
 ];
 
@@ -37,10 +37,10 @@ function waitFor(promise, timeoutMs = 1000) {
 }
 
 async function importServer(runtimeDir, extraEnv = {}) {
-  process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
-  process.env.AGENT_CHAT_WEB_PORT = '18084';
-  process.env.AGENT_CHAT_BACKEND_PORT = '18090';
-  process.env.AGENT_CHAT_DASHBOARD_TOKEN = extraEnv.AGENT_CHAT_DASHBOARD_TOKEN || '';
+  process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
+  process.env.HAFLEET_WEB_PORT = '18084';
+  process.env.HAFLEET_BACKEND_PORT = '18090';
+  process.env.HAFLEET_DASHBOARD_TOKEN = extraEnv.HAFLEET_DASHBOARD_TOKEN || '';
   if (extraEnv.AGENT_IDLE_THRESHOLD_MS !== undefined) {
     process.env.AGENT_IDLE_THRESHOLD_MS = extraEnv.AGENT_IDLE_THRESHOLD_MS;
   } else {
@@ -93,7 +93,7 @@ describe('server dashboard mutation boundary', () => {
 
   async function setup(extraEnv = {}) {
     envSnapshot = snapshotEnv(SERVER_ENV_KEYS);
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-dashboard-boundary-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-dashboard-boundary-test-'));
     mkdirSync(path.join(runtimeDir, 'logs'), { recursive: true });
     mkdirSync(path.join(runtimeDir, 'data', 'agents'), { recursive: true });
     if (typeof extraEnv.beforeImport === 'function') extraEnv.beforeImport(runtimeDir);
@@ -159,7 +159,7 @@ describe('server dashboard mutation boundary', () => {
   });
 
   test('allows non-local mutation with the dashboard bearer token only', async () => {
-    const mod = await setup({ AGENT_CHAT_DASHBOARD_TOKEN: 'dash-secret' });
+    const mod = await setup({ HAFLEET_DASHBOARD_TOKEN: 'dash-secret' });
     mod.setServerTestHooks({ dashboardRequestLocal: () => false });
 
     const wrongToken = await request(mod.app)
@@ -204,7 +204,7 @@ describe('server dashboard mutation boundary', () => {
 
     mod.setServerTestHooks({
       execFileAsync: async (cmd, args) => {
-        if (String(cmd).endsWith('/bin/agent-down')) {
+        if (String(cmd).endsWith('/bin/hafleet-down')) {
           startedAgentDown();
           return new Promise((resolve) => {
             releaseAgentDown = () => resolve({ stdout: 'agent stopped\n' });
@@ -226,7 +226,7 @@ describe('server dashboard mutation boundary', () => {
     expect(downResponse.status).toBe(200);
     expect(downResponse.body).toMatchObject({
       ok: true,
-      action: 'agent-down-kill',
+      action: 'hafleet-down-kill',
       outputTail: 'agent stopped',
     });
   });
@@ -239,8 +239,8 @@ describe('server dashboard mutation boundary', () => {
     mod.setServerTestHooks({
       execFileAsync: async (cmd, args) => {
         execCalls.push([cmd, ...args]);
-        if (String(cmd).endsWith('/bin/agent-down')) {
-          const error = new Error('agent-down failed');
+        if (String(cmd).endsWith('/bin/hafleet-down')) {
+          const error = new Error('hafleet-down failed');
           error.stdout = 'partial stdout\n';
           error.stderr = 'partial stderr\n';
           throw error;
@@ -259,7 +259,7 @@ describe('server dashboard mutation boundary', () => {
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
       ok: true,
-      action: 'agent-down-kill-fallback',
+      action: 'hafleet-down-kill-fallback',
     });
     expect(response.body.outputTail).toContain('partial stdout');
     expect(response.body.outputTail).toContain('partial stderr');

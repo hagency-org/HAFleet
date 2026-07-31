@@ -17,7 +17,7 @@ several coding agents collaborate in one project room.
 
 ## Requirements
 
-[REQ-PROJECT-BOARD-BOUNDARY] A project board entry MUST use an agent-chat group
+[REQ-PROJECT-BOARD-BOUNDARY] A project board entry MUST use an hafleet group
 as its project-room boundary and MUST NOT infer project membership from agent
 names.
 
@@ -129,9 +129,9 @@ Scenario: AtomGit project resources are visible
 
 ## Source Trace
 
-- User request on 2026-07-24 for an agent-chat project board.
+- User request on 2026-07-24 for an hafleet project board.
 - Multica project, issue-board, and usage-dashboard review on 2026-07-24.
-- Existing agent-chat group, task, task-graph, agent-runtime, and message APIs.
+- Existing hafleet group, task, task-graph, agent-runtime, and message APIs.
 - User request on 2026-07-24 to support AtomGit OpenAPI in addition to GitHub.
 
 ## Open Questions
