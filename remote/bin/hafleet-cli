@@ -556,8 +556,18 @@ PY
       echo "Usage: hafleet-cli tell <agent> <message>" >&2
       exit 1
     fi
-    # Summary is what shows in listings; keep it short, put the whole text in full.
-    summary="$(printf '%s' "$message" | cut -c1-72)"
+    # The relay types the SUMMARY into the agent's pane, not the full text — so a
+    # truncated summary is a truncated instruction. A 73-character message lost its
+    # last character and the agent faithfully did the wrong thing.
+    #
+    # Short messages are therefore passed through whole. Longer ones are cut at a
+    # word boundary and marked, so the agent can see it is partial and read the
+    # rest with check_inbox rather than acting on a sentence that stops mid-word.
+    if [ "${#message}" -le 240 ]; then
+      summary="$message"
+    else
+      summary="$(printf '%s' "$message" | cut -c1-237 | sed 's/[[:space:]][^[:space:]]*$//')…"
+    fi
     _curl -X POST "$API/api/messages" \
       -H 'Content-Type: application/json' \
       -d "{\"from\":\"system\",\"to\":$(_json_str "$agent"),\"type\":\"task\",\"summary\":$(_json_str "$summary"),\"full\":$(_json_str "$message")}" \
