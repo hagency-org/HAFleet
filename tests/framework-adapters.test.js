@@ -336,7 +336,7 @@ describe('bin/hafleet-up defers to the registry', () => {
     } catch (error) { stderr = error.stderr || ''; }
     expect(stderr).not.toMatch(/unrecognized argument/);
     expect(stderr).toMatch(/cannot launch type 'octos'/);
-    expect(stderr).toMatch(/paneless subprocess/);
+    expect(stderr).toMatch(/hafleet acp-up/);
     expect(stderr).toMatch(/Launchable types: claude codex hermes/);
   });
 

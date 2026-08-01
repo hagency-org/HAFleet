@@ -196,7 +196,7 @@ describe('the octos adapter', () => {
     // hafleet-up creates a tmux session; an ACP agent is paneless. Declaring it
     // launchable before the backend understands that shape would fail obscurely.
     expect(octos.launchable).toBe(false);
-    expect(octos.notLaunchableReason).toMatch(/paneless subprocess/);
+    expect(octos.notLaunchableReason).toMatch(/hafleet acp-up/);
   });
 
   test('records that octos does not block on ACP permission requests', () => {

@@ -27,9 +27,14 @@ describe('/api/agents/status reports offline agents instead of hiding them', () 
     expect(handler).not.toMatch(/res\.json\(result\);/);
   });
 
-  test('they carry alive:false so the UI can render them as down', () => {
+  test('a paneless tmux agent renders as down, while an ACP one does not', () => {
+    // Absence of a pane is a fault for a tmux agent and normal for an ACP agent,
+    // so aliveness is no longer a constant here: it follows the backend's `online`
+    // for acp and is false otherwise. Reporting every paneless agent dead would
+    // have hidden every working ACP agent.
     const block = handler.slice(handler.indexOf('withoutPane'), handler.indexOf('const result'));
-    expect(block).toContain('alive: false');
+    expect(block).toContain("a.transport === 'acp'");
+    expect(block).toMatch(/alive: acp \? a\.online === true : false/);
     expect(block).toContain('active: false');
     expect(block).toContain('idleMs: -1');
   });
