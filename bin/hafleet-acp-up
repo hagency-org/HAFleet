@@ -29,8 +29,13 @@ Arguments:
   framework    Framework id with an ACP adapter (e.g. octos)
 
 Options:
-  --model <m>  Model to request from the framework
-  -h, --help   Show this help
+  --model <m>    Model to request from the framework
+  --supervised   Register with the local supervisor instead of running detached,
+                 so the agent is restarted if it dies and comes back after a
+                 reboot. A tmux agent survives its launcher because tmux owns the
+                 pane; an ACP agent dies with this process and cannot be resumed.
+  --profile <f>  Service profile to register into (default: the installed one)
+  -h, --help     Show this help
 USAGE
 }
 
@@ -48,9 +53,13 @@ WORKSPACE="${2:?workspace required}"
 FRAMEWORK="${3:?framework required}"
 shift 3
 MODEL=""
+SUPERVISED=false
+PROFILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --model) MODEL="${2:?--model requires a value}"; shift 2 ;;
+    --supervised) SUPERVISED=true; shift ;;
+    --profile) PROFILE="${2:?--profile requires a value}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -85,6 +94,82 @@ fi
 PID_FILE="$STATE_DIR/acp.pid"
 if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
   echo "Agent '$NAME' is already running (pid $(cat "$PID_FILE"))."
+  exit 0
+fi
+
+# ── Supervised path ───────────────────────────────────────────────────────────
+# Registers the agent in the service profile and lets HAFleet's own supervisor
+# own the process, which gives restart-on-crash and reboot survival together
+# (the supervisor is itself started by launchd or systemd). Returns here; the
+# detached path below is the unsupervised alternative, and running both would
+# leave two hosts fighting over one ACP session.
+if [ "$SUPERVISED" = true ]; then
+  if [ -z "$PROFILE" ]; then
+    for candidate in "$BASE_DIR/services-macos.json" "$BASE_DIR/services/services-local.json"; do
+      [ -f "$candidate" ] && PROFILE="$candidate" && break
+    done
+  fi
+  [ -n "$PROFILE" ] && [ -f "$PROFILE" ] || {
+    echo "Error: no service profile found; pass --profile <file>" >&2
+    echo "       (looked for services-macos.json and services/services-local.json)" >&2
+    exit 1
+  }
+
+  # The supervisor runs with whatever PATH its launchd/systemd unit exports, which
+  # on mini5 omits ~/.local/bin where octos lives. Without the framework binary's
+  # directory the host exits at once and the entry restarts forever. Resolve it
+  # from the PATH in effect here, where the operator can see it working.
+  FRAMEWORK_CMD="$(node -e "
+    const { getFramework } = await import('$BASE_DIR/lib/frameworks/index.js');
+    process.stdout.write(getFramework(process.argv[1])?.launch?.command ?? '');
+  " "$FRAMEWORK")"
+  BIN_PATH=""
+  if [ -n "$FRAMEWORK_CMD" ] && command -v "$FRAMEWORK_CMD" >/dev/null 2>&1; then
+    BIN_PATH="$(dirname "$(command -v "$FRAMEWORK_CMD")")"
+  else
+    echo "Warning: '$FRAMEWORK_CMD' is not on PATH here; the supervised agent may not find it." >&2
+  fi
+  SUPERVISED_PATH="${BIN_PATH:+$BIN_PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+  node "$BASE_DIR/scripts/hafleet-supervise-agent.mjs" add \
+    --name "$NAME" --profile "$PROFILE" \
+    --workspace "$WORKSPACE" --framework "$FRAMEWORK" \
+    ${MODEL:+--model "$MODEL"} --path "$SUPERVISED_PATH"
+
+  # Stop any unsupervised host first: two processes holding sessions for one agent
+  # would both poll the inbox and both answer.
+  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+    kill "$(cat "$PID_FILE")" 2>/dev/null || true
+    rm -f "$PID_FILE"
+    echo "  Stopped the unsupervised host; the supervisor owns this agent now."
+  fi
+
+  case "$(uname -s)" in
+    Darwin)
+      if launchctl kickstart -k "gui/$(id -u)/io.hafleet.services" >/dev/null 2>&1; then
+        echo "  Reloaded the supervisor (launchd)."
+      else
+        echo "  Registered. Reload the supervisor to start it:" >&2
+        echo "    launchctl kickstart -k gui/\$(id -u)/io.hafleet.services" >&2
+      fi
+      ;;
+    Linux)
+      if systemctl --user restart hafleet-services >/dev/null 2>&1 \
+        || sudo -n systemctl restart hafleet-services >/dev/null 2>&1; then
+        echo "  Reloaded the supervisor (systemd)."
+      else
+        echo "  Registered. Reload the supervisor to start it:" >&2
+        echo "    systemctl --user restart hafleet-services" >&2
+      fi
+      ;;
+    *)
+      echo "  Registered. Reload your supervisor to start it." >&2
+      ;;
+  esac
+
+  echo "Agent '$NAME' ($FRAMEWORK over ACP) is supervised as 'agent:$NAME'."
+  echo "  profile: $PROFILE"
+  echo "  status:  hafleet service status"
   exit 0
 fi
 
