@@ -10,6 +10,39 @@
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
+  cat <<'USAGE'
+Usage: hafleet acp-up <name> <workspace> <framework> [--model <m>]
+
+Starts a paneless agent over the Agent Client Protocol and registers it with the
+backend. Use this for frameworks whose adapter declares transport "acp" (octos);
+tmux frameworks use 'hafleet up' instead and are refused here.
+
+An ACP agent has no tmux pane, so it cannot be captured or sent keys. Its
+liveness is whether the subprocess exists, and progress arrives as session/update
+notifications rather than screen output.
+
+Arguments:
+  name         Agent name to register
+  workspace    Existing directory the agent runs in
+  framework    Framework id with an ACP adapter (e.g. octos)
+
+Options:
+  --model <m>  Model to request from the framework
+  -h, --help   Show this help
+USAGE
+}
+
+# Before positional parsing: `${1:?...}` would otherwise report "workspace
+# required" for `--help`, which is what the CLI contract gate caught.
+for arg in "$@"; do
+  if [ "$arg" = "-h" ] || [ "$arg" = "--help" ]; then
+    usage
+    exit 0
+  fi
+done
+
 NAME="${1:?Usage: hafleet-acp-up <name> <workspace> <framework> [--model <m>]}"
 WORKSPACE="${2:?workspace required}"
 FRAMEWORK="${3:?framework required}"

@@ -19,7 +19,8 @@ usage() {
 Usage: hafleet <command> [args]
 
 Core:
-  up             Start or resume an agent
+  up             Start or resume an agent (tmux frameworks)
+  acp-up         Start a paneless ACP agent (octos)
   up-v1          Provision + launch a new v1 agent-home runtime
   project        Manage v1 agent project bindings
   graph          Manage orchestration task graphs

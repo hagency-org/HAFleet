@@ -4,6 +4,7 @@
       "cli": "bin/hafleet",
       "commands": [
         { "command": "up", "target": "hafleet-up" },
+        { "command": "acp-up", "target": "hafleet-acp-up" },
         { "command": "up-v1", "target": "hafleet-up-v1", "aliases": ["v1-up"] },
         { "command": "project", "target": "hafleet-project" },
         { "command": "graph", "target": "hafleet-graph" },
