@@ -42,6 +42,16 @@ DATA_DIR=""
 SUBCONSCIOUS_SETUP_SCRIPT="$BASE_DIR/scripts/configure-v1-subconscious.js"
 LAUNCH_POLICY_CHECK="$BASE_DIR/scripts/validate-agent-launch-extra-args.js"
 SANDBOX_ROOTS_RESOLVER="$BASE_DIR/scripts/resolve-agent-sandbox-roots.js"
+FRAMEWORK_INFO="$BASE_DIR/scripts/framework-info.js"
+# Read once: the parser consults this per argument, and node startup is not free.
+KNOWN_FRAMEWORK_IDS="$(node "$FRAMEWORK_INFO" ids 2>/dev/null || printf 'claude\ncodex\n')"
+is_known_framework() {
+  local candidate="$1" id
+  for id in $KNOWN_FRAMEWORK_IDS; do
+    [ "$id" = "$candidate" ] && return 0
+  done
+  return 1
+}
 CODEX_APPROVAL_HOOK="$BASE_DIR/lib/codex-permission-hook.js"
 CODEX_HOOK_TRUST_PREFLIGHT="$BASE_DIR/lib/codex-hook-trust.js"
 CODEX_PROJECT_TRUST_HELPER="$BASE_DIR/lib/codex-project-trust.js"
@@ -467,12 +477,15 @@ while [ $# -gt 0 ]; do
       EXTRA_ARGS="$2"
       shift 2
       ;;
-    claude|codex)
-      TYPE="$1"
-      shift
-      ;;
     *)
-      if [ -z "$AGENT_PATH" ]; then
+      # A bare token naming a declared framework is the type. The list comes from
+      # lib/frameworks/, so a new adapter is recognised here without editing this
+      # parser — including one that is declared but not yet launchable, which the
+      # gate below then refuses by name instead of calling it unrecognized.
+      if is_known_framework "$1"; then
+        TYPE="$1"
+        shift
+      elif [ -z "$AGENT_PATH" ]; then
         AGENT_PATH="$1"
         shift
       else
@@ -601,8 +614,19 @@ if [ ! -d "$AGENT_PATH" ]; then
   exit 1
 fi
 
-if [ "$TYPE" != "claude" ] && [ "$TYPE" != "codex" ]; then
-  echo "Error: type must be 'claude' or 'codex', got '$TYPE'" >&2
+if [ ! -f "$FRAMEWORK_INFO" ]; then
+  echo "Error: missing framework registry helper: $FRAMEWORK_INFO" >&2
+  exit 1
+fi
+
+# Which frameworks can be launched is the registry's call, not a list kept here.
+# lib/frameworks/<id>.json declares launchable:false with a reason for adapters
+# that are described but have no launch branch below — an ACP framework has no
+# tmux pane at all — so those fail here with that reason rather than falling
+# through into a launch path that does not fit them.
+if ! FRAMEWORK_REFUSAL=$(node "$FRAMEWORK_INFO" check "$TYPE" 2>&1); then
+  echo "Error: cannot launch type '$TYPE': ${FRAMEWORK_REFUSAL:-refused by the framework registry}" >&2
+  echo "Launchable types: $(node "$FRAMEWORK_INFO" launchable 2>/dev/null | tr '\n' ' ')" >&2
   exit 1
 fi
 
@@ -1794,6 +1818,14 @@ preflight_runtime_approval_adapter() {
     return 0
   fi
 
+  # Everything below is Codex-specific. It used to be reached by falling through
+  # the claude branch, which was safe only while claude and codex were the sole
+  # options — hermes and octos both hit the Codex hook-trust check instead of
+  # their own path.
+  if [ "$TYPE" != "codex" ]; then
+    return 0
+  fi
+
   if [ "${HAFLEET_CODEX_PERMISSION_HOOK:-true}" = "false" ]; then
     echo "Error: managed Codex background agents require the owner approval hook." >&2
     echo "Unset HAFLEET_CODEX_PERMISSION_HOOK=false and start again." >&2
@@ -2039,6 +2071,86 @@ process.stdout.write(prepared.hookToml);
     fi
     rm -f "$CODEX_BASELINE_FILE" >/dev/null 2>&1 || true
   fi
+
+elif [ "$TYPE" = "hermes" ]; then
+  # --cli forces the classic prompt_toolkit REPL rather than the full-screen TUI.
+  # A blocked agent is detected by regex-scraping capture-pane output, and a TUI
+  # that repaints whole frames makes that unreliable. The approval prompt this
+  # depends on lives in the CLI path upstream (cli.py, covered by
+  # tests/cli/test_cli_approval_ui.py).
+  HERMES_FLAGS="--cli"
+  if [ -n "$MODEL" ]; then
+    HERMES_FLAGS="$HERMES_FLAGS --model $(shell_quote "$MODEL")"
+  fi
+  if [ -n "$SAFE_EXTRA_ARGS" ]; then
+    HERMES_FLAGS="$HERMES_FLAGS $SAFE_EXTRA_ARGS"
+  fi
+  HERMES_LAUNCH_SCRIPT="$TMP_RUNTIME_DIR/launch-hermes.sh"
+  if [ "$FRESH" = false ] && RID=$(cat "$RESUME_FILE" 2>/dev/null) && [ -n "$RID" ]; then
+    echo "Resuming hermes session: $RID"
+    write_launch_script "$HERMES_LAUNCH_SCRIPT" "exec hermes --resume $(shell_quote "$RID") $HERMES_FLAGS"
+    tmux send-keys -t "$TMUX_PANE_TARGET" "exec $(shell_quote "$HERMES_LAUNCH_SCRIPT")" Enter
+  else
+    echo "Starting new hermes session..."
+    # Hermes cannot take an init prompt while staying interactive: both
+    # -z/--oneshot and `chat -q` print one response and exit. So the REPL is
+    # started and the prompt is typed in — the same mechanism the relay uses for
+    # every message after this one.
+    write_launch_script "$HERMES_LAUNCH_SCRIPT" "exec hermes $HERMES_FLAGS"
+    tmux send-keys -t "$TMUX_PANE_TARGET" "exec $(shell_quote "$HERMES_LAUNCH_SCRIPT")" Enter
+
+    # Wait for the REPL prompt itself. Waiting for the pane to hold still does
+    # NOT work and was measured doing the wrong thing: the pane sits unchanged
+    # for about a second after the launch line is echoed and before Hermes emits
+    # anything, so a stability check reports ready while there is no REPL yet and
+    # the typed prompt goes nowhere. This is why bin/agent-up gave up on
+    # post-launch typing for Codex.
+    # Match a literal, from the manifest, so no regex dialect is assumed here.
+    #
+    # The marker is Hermes's input prompt, which is a SKIN SETTING
+    # (hermes_cli/skin_engine.py: branding.prompt_symbol), not a constant. A
+    # custom skin changes it and this wait would never succeed, so it is
+    # overridable without a code change.
+    #
+    # Timeout is generous because startup time was measured varying from ~3s to
+    # ~20s on an unloaded machine, and the pane goes briefly BLANK part way
+    # through — which is the other reason waiting for the pane to hold still
+    # cannot work here.
+    HERMES_READY="${HAFLEET_HERMES_READY_MARKER:-$(node "$FRAMEWORK_INFO" ready-fixed hermes 2>/dev/null || printf '\xe2\x9d\xaf')}"
+    # Validate before any arithmetic: under `set -u` a non-numeric value makes
+    # $(( )) treat it as an unbound variable name and aborts the whole script.
+    HERMES_READY_TIMEOUT="${HAFLEET_HERMES_READY_TIMEOUT_SEC:-60}"
+    case "$HERMES_READY_TIMEOUT" in
+      ''|*[!0-9]*)
+        echo "Warning: HAFLEET_HERMES_READY_TIMEOUT_SEC is not a positive integer; using 60." >&2
+        HERMES_READY_TIMEOUT=60
+        ;;
+    esac
+    [ "$HERMES_READY_TIMEOUT" -ge 1 ] || HERMES_READY_TIMEOUT=60
+    _hermes_polls=$(( HERMES_READY_TIMEOUT * 2 ))
+    _hermes_ready=false
+    for _i in $(seq 1 "$_hermes_polls"); do
+      if tmux capture-pane -t "$TMUX_PANE_TARGET" -p 2>/dev/null | grep -qF "$HERMES_READY"; then
+        _hermes_ready=true
+        break
+      fi
+      sleep 0.5
+    done
+    if [ "$_hermes_ready" != true ]; then
+      echo "Error: hermes input prompt ($HERMES_READY) did not appear within ${HERMES_READY_TIMEOUT}s." >&2
+      echo "  Not sending the init prompt: it would be typed into an unknown state." >&2
+      echo "  The session is running; attach with: tmux attach -t $(shell_quote "$NAME")" >&2
+      echo "  If you use a custom Hermes skin, its prompt symbol differs — set" >&2
+      echo "  HAFLEET_HERMES_READY_MARKER to it, or raise HAFLEET_HERMES_READY_TIMEOUT_SEC." >&2
+      exit 1
+    fi
+
+    # -l sends the text literally, so a prompt containing ; or - is not parsed as
+    # tmux syntax. Enter is a separate call to submit it.
+    tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"
+    tmux send-keys -t "$TMUX_PANE_TARGET" Enter
+  fi
+  capture_resume_id_background "hermes"
 fi
 
 # Post-launch health check for custom API provider agents

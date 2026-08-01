@@ -3039,7 +3039,7 @@
   {
     "k": "defaultLaunchArgs",
     "fw": "octos",
-    "out": null
+    "out": []
   },
   {
     "k": "validate",
@@ -3179,10 +3179,8 @@
     "fw": "octos",
     "input": "--yolo",
     "out": {
-      "ok": true,
-      "tokens": [
-        "--yolo"
-      ]
+      "ok": false,
+      "reason": "Octos sandbox flag is managed by hafleet: --yolo"
     }
   },
   {
@@ -3223,10 +3221,8 @@
     "fw": "octos",
     "input": "--sandbox=danger-full-access",
     "out": {
-      "ok": true,
-      "tokens": [
-        "--sandbox=danger-full-access"
-      ]
+      "ok": false,
+      "reason": "Octos sandbox flag is managed by hafleet: --sandbox=danger-full-access"
     }
   },
   {
@@ -3516,11 +3512,8 @@
     "fw": "octos",
     "input": "--yolo --permission-mode",
     "out": {
-      "ok": true,
-      "tokens": [
-        "--yolo",
-        "--permission-mode"
-      ]
+      "ok": false,
+      "reason": "Octos sandbox flag is managed by hafleet: --yolo"
     }
   },
   {
@@ -3528,11 +3521,8 @@
     "fw": "octos",
     "input": "--permission-mode --yolo",
     "out": {
-      "ok": true,
-      "tokens": [
-        "--permission-mode",
-        "--yolo"
-      ]
+      "ok": false,
+      "reason": "Octos sandbox flag is managed by hafleet: --yolo"
     }
   },
   {
@@ -3540,12 +3530,8 @@
     "fw": "octos",
     "input": "--verbose --yolo --permission-mode",
     "out": {
-      "ok": true,
-      "tokens": [
-        "--verbose",
-        "--yolo",
-        "--permission-mode"
-      ]
+      "ok": false,
+      "reason": "Octos sandbox flag is managed by hafleet: --yolo"
     }
   },
   {
@@ -3553,12 +3539,8 @@
     "fw": "octos",
     "input": "--verbose --permission-mode --yolo",
     "out": {
-      "ok": true,
-      "tokens": [
-        "--verbose",
-        "--permission-mode",
-        "--yolo"
-      ]
+      "ok": false,
+      "reason": "Octos sandbox flag is managed by hafleet: --yolo"
     }
   },
   {
@@ -3566,12 +3548,8 @@
     "fw": "octos",
     "input": "-c unrelated=1 --yolo",
     "out": {
-      "ok": true,
-      "tokens": [
-        "-c",
-        "unrelated=1",
-        "--yolo"
-      ]
+      "ok": false,
+      "reason": "Octos sandbox flag is managed by hafleet: --yolo"
     }
   },
   {
@@ -4541,7 +4519,8 @@
     "out": {
       "claude": "auto-mode",
       "codex": "level2 (workspace-write + on-request)",
-      "hermes": "hermes interactive approval prompts (bypass flags refused)"
+      "hermes": "hermes interactive approval prompts (bypass flags refused)",
+      "octos": "octos sandbox as configured (hafleet never passes --danger-full-access)"
     }
   }
 ]

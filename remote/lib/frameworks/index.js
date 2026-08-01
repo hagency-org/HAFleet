@@ -24,7 +24,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 // decides which message a token matching two frameworks produces), and the
 // remote package ships a copied file tree where a scan would silently find
 // nothing.
-const MANIFEST_FILES = Object.freeze(['claude.json', 'codex.json', 'hermes.json']);
+const MANIFEST_FILES = Object.freeze(['claude.json', 'codex.json', 'hermes.json', 'octos.json']);
 
 /** Fields a manifest must carry to be usable. Kept small on purpose. */
 function validateManifest(raw, file) {
@@ -56,6 +56,17 @@ function validateManifest(raw, file) {
   }
   // Typing the init prompt into a pane is only safe if there is a way to know the
   // prompt is live. Without this, the keystrokes race the process starting up.
+  if (raw.transport !== undefined && !['tmux', 'acp'].includes(raw.transport)) {
+    fail(`transport must be "tmux" or "acp", got ${JSON.stringify(raw.transport)}`);
+  }
+  // A pane-scraping signal on an ACP adapter is a category error: there is no pane.
+  if (raw.transport === 'acp') {
+    for (const kind of ['blocked', 'compact', 'ready']) {
+      if ((raw.signals?.[kind] || []).length) {
+        fail(`signals.${kind} is meaningless for transport "acp" — progress comes from session/update`);
+      }
+    }
+  }
   if (raw.launch?.initPromptDelivery === 'keystrokes' && !(raw.signals?.ready || []).length) {
     fail('launch.initPromptDelivery "keystrokes" requires at least one signals.ready pattern');
   }
@@ -105,6 +116,10 @@ function compile(raw) {
   return Object.freeze({
     id: raw.id,
     displayName: raw.displayName,
+    // How hafleet drives this framework. 'tmux' types into a pane and scrapes the
+    // screen back; 'acp' speaks JSON-RPC to a paneless subprocess. Defaulted so
+    // every existing manifest keeps its current behaviour.
+    transport: raw.transport === 'acp' ? 'acp' : 'tmux',
     // Declared but not yet wired into bin/hafleet-up. Kept explicit so the gate can
     // refuse with a real reason instead of letting a launch fall through.
     launchable: raw.launchable !== false,

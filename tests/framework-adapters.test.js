@@ -16,7 +16,7 @@ describe('the registry loads and validates its manifests', () => {
   test('ships its adapters in a stable order', () => {
     // Order is contractual: it decides nothing today because the guard sets are
     // disjoint, but a future adapter could overlap.
-    expect(frameworkIds()).toEqual(['claude', 'codex', 'hermes']);
+    expect(frameworkIds()).toEqual(['claude', 'codex', 'hermes', 'octos']);
   });
 
   test('all three are launchable, and an unknown name still is not', () => {
@@ -97,8 +97,8 @@ describe('which guards apply', () => {
 
   test('an unspecified framework gets all of them', () => {
     // Refusing a flag only one framework cares about is harmless; allowing one is not.
-    expect(applicableFrameworks('').map((f) => f.id)).toEqual(['claude', 'codex', 'hermes']);
-    expect(applicableFrameworks(null).map((f) => f.id)).toEqual(['claude', 'codex', 'hermes']);
+    expect(applicableFrameworks('').map((f) => f.id)).toEqual(['claude', 'codex', 'hermes', 'octos']);
+    expect(applicableFrameworks(null).map((f) => f.id)).toEqual(['claude', 'codex', 'hermes', 'octos']);
   });
 
   test('KNOWN GAP: an unrecognised framework name gets no guards at all', () => {
@@ -239,7 +239,7 @@ describe('shell callers read the registry instead of their own list', () => {
   };
 
   test('ids lists every declared framework, launchable or not', () => {
-    expect(run(['ids']).stdout.trim().split('\n')).toEqual(['claude', 'codex', 'hermes']);
+    expect(run(['ids']).stdout.trim().split('\n')).toEqual(['claude', 'codex', 'hermes', 'octos']);
   });
 
   test('launchable lists the ones hafleet-up can start', () => {
@@ -323,16 +323,21 @@ describe('bin/hafleet-up defers to the registry', () => {
       .toBeLessThan(source.indexOf('FRAMEWORK_INFO" check'));
   });
 
-  test('hermes now passes the gate as a launchable type', () => {
-    // It must get past parsing AND the gate. It will fail later for want of an
-    // agent token, which is proof it reached the real launch path.
+  test('a declared framework is recognised by the parser, not called unrecognized', () => {
+    // Uses octos deliberately: it is declared but launchable:false, so it proves
+    // the parser recognises a registry name AND the gate refuses it by reason —
+    // without starting anything. The earlier version of this test used hermes,
+    // which became genuinely launchable, so it launched a real agent inside the
+    // suite and blocked on its readiness wait until the run timed out.
     let stderr = '';
     try {
-      execFileSync('bash', ['bin/hafleet-up', 'adapter-gate-probe', os.tmpdir(), 'hermes'],
-        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+      execFileSync('bash', ['bin/hafleet-up', 'registry-gate-probe', os.tmpdir(), 'octos'],
+        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 });
     } catch (error) { stderr = error.stderr || ''; }
     expect(stderr).not.toMatch(/unrecognized argument/);
-    expect(stderr).not.toMatch(/cannot launch type/);
+    expect(stderr).toMatch(/cannot launch type 'octos'/);
+    expect(stderr).toMatch(/paneless subprocess/);
+    expect(stderr).toMatch(/Launchable types: claude codex hermes/);
   });
 
   describe('the hermes branch', () => {
