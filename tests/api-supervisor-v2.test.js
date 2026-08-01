@@ -30,7 +30,7 @@ describe('supervisor v2 API', () => {
     const { env = {}, agents: extraAgents = {}, ...restOpts } = opts;
     homeDir = mkdtempSync(path.join(os.tmpdir(), 'supervisor-v2-test-home-'));
     provisionSupervisorToken(homeDir, 'supervisor-ac-topleader', SUPERVISOR_TOKEN);
-    context = await createBackendTestContext('agent-chat-supervisor-v2-test-', {
+    context = await createBackendTestContext('hafleet-supervisor-v2-test-', {
       agents: {
         'ac-topleader': { name: 'ac-topleader', type: 'agent', kind: 'agent', online: true },
         'supervisor-ac-topleader': { name: 'supervisor-ac-topleader', type: 'agent', kind: 'agent', online: true },
@@ -39,7 +39,7 @@ describe('supervisor v2 API', () => {
       },
       groups: {},
       ...restOpts,
-      env: { AGENTCHAT_HOMEDIR: homeDir, ...env },
+      env: { HAFLEET_HOMEDIR: homeDir, ...env },
     });
     return context;
   }
@@ -143,13 +143,13 @@ describe('supervisor v2 API', () => {
   test('rejects PATCH when supervisor agent has no token provisioned', async () => {
     homeDir = mkdtempSync(path.join(os.tmpdir(), 'supervisor-v2-test-home-'));
     // Register supervisor agent but do NOT provision a token file
-    context = await createBackendTestContext('agent-chat-supervisor-v2-test-', {
+    context = await createBackendTestContext('hafleet-supervisor-v2-test-', {
       agents: {
         'ac-topleader': { name: 'ac-topleader', type: 'agent', kind: 'agent', online: true },
         'supervisor-ac-topleader': { name: 'supervisor-ac-topleader', type: 'agent', kind: 'agent', online: true },
       },
       groups: {},
-      env: { AGENTCHAT_HOMEDIR: homeDir },
+      env: { HAFLEET_HOMEDIR: homeDir },
     });
     const res = await request(context.app)
       .patch('/api/supervisor-state/ac-topleader')
@@ -161,13 +161,13 @@ describe('supervisor v2 API', () => {
   test('rejects PATCH with wrong token in enforce mode', async () => {
     homeDir = mkdtempSync(path.join(os.tmpdir(), 'supervisor-v2-test-home-'));
     provisionSupervisorToken(homeDir, 'supervisor-ac-topleader', SUPERVISOR_TOKEN);
-    context = await createBackendTestContext('agent-chat-supervisor-v2-test-', {
+    context = await createBackendTestContext('hafleet-supervisor-v2-test-', {
       agents: {
         'ac-topleader': { name: 'ac-topleader', type: 'agent', kind: 'agent', online: true },
         'supervisor-ac-topleader': { name: 'supervisor-ac-topleader', type: 'agent', kind: 'agent', online: true },
       },
       groups: {},
-      env: { AGENTCHAT_HOMEDIR: homeDir, AGENTCHAT_AGENT_TOKEN_MODE: 'hard' },
+      env: { HAFLEET_HOMEDIR: homeDir, HAFLEET_AGENT_TOKEN_MODE: 'hard' },
     });
     const res = await request(context.app)
       .patch('/api/supervisor-state/ac-topleader')

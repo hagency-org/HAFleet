@@ -8,7 +8,7 @@ import { MatrixDispatchStore } from '../src/matrix-dispatch-store.mjs';
 const roots = [];
 
 function context() {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'agentchat-matrix-dispatch-store-'));
+  const root = mkdtempSync(path.join(os.tmpdir(), 'hafleet-matrix-dispatch-store-'));
   roots.push(root);
   return { journalPath: path.join(root, 'data', 'matrix', 'source-events.jsonl') };
 }

@@ -10,7 +10,7 @@ and an optional Matrix front door. It is local-first — the backend binds to
 loopback by construction, and nothing needs to leave the machine.
 
 HAFleet is a fork of [agent-chat](https://github.com/shisuiki/agent-chat). Many
-internal identifiers still carry the `agent-chat` / `AGENTCHAT_` prefix; those
+internal identifiers still carry the `hafleet` / `HAFLEET_` prefix; those
 are stable interfaces and are deliberately unchanged. See
 [Naming](#naming) below.
 
@@ -73,8 +73,8 @@ Surface area: **101 REST endpoints**, **19 CLI subcommands**, **11 MCP tools**,
 | `push-relay.js` | SSE consumer that injects notifications into tmux panes |
 | `mcp-server.js` | Per-agent MCP server exposing messaging and task tools |
 | `bridge-matrix.js` | Optional Matrix bridge for external rooms and operators |
-| `services/agentchat-services.mjs` | Non-systemd process supervisor (the macOS runtime) |
-| `bin/agentchat` | Unified CLI dispatcher |
+| `services/hafleet-services.mjs` | Non-systemd process supervisor (the macOS runtime) |
+| `bin/hafleet` | Unified CLI dispatcher |
 | `remote/` | Minimal remote relay package for other machines |
 
 Three concentric layers, declared in `scripts/architecture-boundaries.json` and
@@ -96,11 +96,11 @@ Systemd units (Linux), all shipped with sandboxing and resource limits:
 
 | Unit | Entrypoint | Notes |
 | --- | --- | --- |
-| `agent-chat-v2.service` | `backend-v2.js` | Starts first |
-| `agent-chat.service` | `server.js` | Dashboard and local queue surface |
-| `agent-chat-push-relay.service` | `push-relay.js` | tmux notification relay |
+| `hafleet-backend.service` | `backend-v2.js` | Starts first |
+| `hafleet.service` | `server.js` | Dashboard and local queue surface |
+| `hafleet-push-relay.service` | `push-relay.js` | tmux notification relay |
 | `bridge-matrix.service` | `bridge-matrix.js` | Optional, `--with-bridge` |
-| `agent-chat-stable-autodeploy.service` | watcher | Optional; unprivileged |
+| `hafleet-stable-autodeploy.service` | watcher | Optional; unprivileged |
 
 ## Install
 
@@ -164,7 +164,7 @@ cd HAFleet
 ./install/install-macos.sh
 ```
 
-launchd user agent instead of systemd, `agentchat-services.mjs` as the
+launchd user agent instead of systemd, `hafleet-services.mjs` as the
 supervisor, Matrix bridge off by default, and no auto-deploy watcher. Missing
 prerequisites (`node >= 22`, `tmux`) are installed with Homebrew.
 
@@ -188,9 +188,9 @@ credentials only if you run the bridge.
 ### Uninstall
 
 ```bash
-./uninstall.sh              # preserves ~/.agentchat, data/, .env
+./uninstall.sh              # preserves ~/.hafleet, data/, .env
 ./uninstall.sh --yes        # non-interactive
-./uninstall.sh --purge-data --purge-agentchat-home   # destructive, confirms
+./uninstall.sh --purge-data --purge-hafleet-home   # destructive, confirms
 ```
 
 The uninstaller only removes symlinks and units that point into *this* checkout,
@@ -200,14 +200,14 @@ and only skill directories it owns.
 
 ```bash
 # Start an agent
-agentchat up-v1 alice codex --project "$HOME/projects/example" --project-mode symlink --fresh
+hafleet up-v1 alice codex --project "$HOME/projects/example" --project-mode symlink --fresh
 
 # Talk to it
-agentchat send alice "status?"
+hafleet send alice "status?"
 
 # See the fleet
-agentchat ls
-agentchat service status
+hafleet ls
+hafleet service status
 ```
 
 Then open the dashboard at `http://127.0.0.1:8084`.
@@ -224,7 +224,7 @@ Dashboard pages:
 | `/alerts` | Alerts |
 | `/config` | Agent and preset configuration |
 
-Five ways to reach an agent: the dashboard DM box, Matrix, `agentchat send`,
+Five ways to reach an agent: the dashboard DM box, Matrix, `hafleet send`,
 attaching to the pane directly, or the REST API. All deliver **when the agent is
 idle** — there is no interrupt.
 
@@ -233,9 +233,9 @@ idle** — there is no interrupt.
 ### Verify
 
 ```bash
-systemctl status agent-chat-v2 agent-chat agent-chat-push-relay
+systemctl status hafleet-backend hafleet hafleet-push-relay
 node services/standalone-doctor.mjs     # cross-component health
-agentchat check-mcp
+hafleet check-mcp
 node -e 'import("./lib/version.js").then(m=>console.log(m.formatBuildIdentity()))'
 ```
 
@@ -282,7 +282,7 @@ git reset --hard origin/stable
 After deployment, verify the loaded remote relay:
 
 ```bash
-agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
+hafleet verify-remote --samples 2 --interval 16 --expect-version <short-sha>
 ```
 
 ### Releases
@@ -303,17 +303,17 @@ Most configuration lives in `.env`, created from `.env.example` by the installer
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `API_TOKEN` | **Yes** | none | Operator bearer token for backend, dashboard proxy, MCP and relay |
-| `AGENT_CHAT_API` | No | `http://127.0.0.1:8090` | Backend API base URL |
-| `AGENT_CHAT_RUNTIME_DIR` | No | repository root | Runtime root for `data/` and `logs/` |
-| `AGENT_CHAT_BACKEND_PORT` | No | `8090` | Backend port |
-| `AGENT_CHAT_WEB_PORT` | No | `8084` | Dashboard port |
-| `AGENT_CHAT_BACKEND_HOST` | No | `127.0.0.1` | Backend bind address. **Containers only** — see [Security posture](#security-posture) |
-| `AGENT_CHAT_WEB_HOST` | No | `127.0.0.1` | Dashboard bind address. Same caveat |
-| `AGENT_CHAT_WEB_URL` | No | `http://127.0.0.1:8084` | Public dashboard URL used in push queue calls and Matrix links |
-| `AGENT_CHAT_QUEUE_URL` | No | `${AGENT_CHAT_WEB_URL}/api/queue` | Queue endpoint for push notifications |
-| `AGENT_CHAT_DASHBOARD_TOKEN` | No | empty | Bearer token for non-local dashboard mutations |
-| `AGENT_CHAT_SERVER` | Remote: yes | `local` or hostname | Server identity in runtime reports |
-| `MSG_BASE_URL` | Legacy | from `AGENT_CHAT_WEB_URL` | Override for Matrix `/msg` links |
+| `HAFLEET_API` | No | `http://127.0.0.1:8090` | Backend API base URL |
+| `HAFLEET_RUNTIME_DIR` | No | repository root | Runtime root for `data/` and `logs/` |
+| `HAFLEET_BACKEND_PORT` | No | `8090` | Backend port |
+| `HAFLEET_WEB_PORT` | No | `8084` | Dashboard port |
+| `HAFLEET_BACKEND_HOST` | No | `127.0.0.1` | Backend bind address. **Containers only** — see [Security posture](#security-posture) |
+| `HAFLEET_WEB_HOST` | No | `127.0.0.1` | Dashboard bind address. Same caveat |
+| `HAFLEET_WEB_URL` | No | `http://127.0.0.1:8084` | Public dashboard URL used in push queue calls and Matrix links |
+| `HAFLEET_QUEUE_URL` | No | `${HAFLEET_WEB_URL}/api/queue` | Queue endpoint for push notifications |
+| `HAFLEET_DASHBOARD_TOKEN` | No | empty | Bearer token for non-local dashboard mutations |
+| `HAFLEET_SERVER` | Remote: yes | `local` or hostname | Server identity in runtime reports |
+| `MSG_BASE_URL` | Legacy | from `HAFLEET_WEB_URL` | Override for Matrix `/msg` links |
 
 `backend-v2.js` and `server.js` fail fast when started without a non-empty
 `API_TOKEN`.
@@ -322,8 +322,8 @@ Most configuration lives in `.env`, created from `.env.example` by the installer
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `AGENTCHAT_HOMEDIR` | `~/.agentchat` | Agent home root |
-| `AGENTCHAT_AGENT_TOKEN_MODE` | `hard` | Per-agent token enforcement |
+| `HAFLEET_HOMEDIR` | `~/.hafleet` | Agent home root |
+| `HAFLEET_AGENT_TOKEN_MODE` | `hard` | Per-agent token enforcement |
 | `AGENT_IDLE_THRESHOLD_MS` | `20000` | Idle threshold for push delivery |
 | `AGENT_SCOPE_MONITOR_ENABLED` | `true` | Local resource monitoring |
 | `OFFLINE_CATCHUP_LIST_LIMIT` | `50` | Offline catch-up message limit |
@@ -376,12 +376,12 @@ the agent: Claude runs `auto-mode`, Codex runs Level 2
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `AGENTCHAT_DEPLOY_BRANCH` | `stable` | Branch watched by the deploy watcher |
-| `AGENTCHAT_RELEASE_GATE` | `worktree` | Candidate gate. `none` disables it — an explicit opt-out |
-| `AGENTCHAT_DEPLOY_SERVICES` | script-specific | Services restarted on deploy |
-| `AGENTCHAT_ALERT_URL` | empty | Optional endpoint for deploy-failure alerts |
-| `AGENTCHAT_ALERT_TOKEN` | empty | Bearer token for the above |
-| `AGENTCHAT_VERIFY_REMOTE_BIN` | `bin/verify-remote` | Remote verification helper |
+| `HAFLEET_DEPLOY_BRANCH` | `stable` | Branch watched by the deploy watcher |
+| `HAFLEET_RELEASE_GATE` | `worktree` | Candidate gate. `none` disables it — an explicit opt-out |
+| `HAFLEET_DEPLOY_SERVICES` | script-specific | Services restarted on deploy |
+| `HAFLEET_ALERT_URL` | empty | Optional endpoint for deploy-failure alerts |
+| `HAFLEET_ALERT_TOKEN` | empty | Bearer token for the above |
+| `HAFLEET_VERIFY_REMOTE_BIN` | `bin/verify-remote` | Remote verification helper |
 
 ## Security posture
 
@@ -401,8 +401,8 @@ What it **assumes**, and you should know:
 
 - **Loopback trust is machine-scoped, not user-scoped.** Any local process is
   treated as local. On a shared host, per-agent tokens
-  (`AGENTCHAT_AGENT_TOKEN_MODE=hard`) are the real control.
-- **A non-loopback bind is for containers.** `AGENT_CHAT_*_HOST` exists so a
+  (`HAFLEET_AGENT_TOKEN_MODE=hard`) are the real control.
+- **A non-loopback bind is for containers.** `HAFLEET_*_HOST` exists so a
   container can be reachable through a published port. It is logged loudly at
   every start; a malformed value falls back to loopback rather than widening.
 - **Task-graph completion is self-reported.** A node closes when its assignee
@@ -412,7 +412,7 @@ What it **assumes**, and you should know:
   nothing new can land. See [docs/SECURITY-DEBT.md](docs/SECURITY-DEBT.md).
 
 For internet-facing deployments, put the dashboard behind an HTTPS reverse proxy
-and keep `AGENT_CHAT_API` loopback-only.
+and keep `HAFLEET_API` loopback-only.
 
 ## Development
 
@@ -426,7 +426,7 @@ API_TOKEN=dev-token node push-relay.js
 
 # Or under the supervisor
 set -a; . ./.env; set +a
-AGENT_CHAT_RUNTIME_DIR="$PWD" node services/agentchat-services.mjs start
+HAFLEET_RUNTIME_DIR="$PWD" node services/hafleet-services.mjs start
 ```
 
 Tests and gates:
@@ -438,7 +438,7 @@ npm run check:syntax
 npm run check:cli-contract
 npm run check:architecture-boundaries # import + route-ownership rules
 npm run audit:baseline                # advisory ratchet
-AGENT_NAME=agentchat-develop npm run verify:ci
+AGENT_NAME=hafleet-develop npm run verify:ci
 ```
 
 Remote package and release artifacts:
@@ -455,9 +455,9 @@ are not source of truth.
 ## Naming
 
 The project is **HAFleet**. Internal identifiers still use the upstream
-`agent-chat` / `agentchat` / `AGENT_CHAT_` / `AGENTCHAT_` naming, deliberately:
+`hafleet` / `hafleet` / `HAFLEET_` / `HAFLEET_` naming, deliberately:
 systemd unit names, CLI command names, `.env` variable names, the MCP server
-name and the `~/.agentchat` data directory are all covered by the compatibility
+name and the `~/.hafleet` data directory are all covered by the compatibility
 contract in [docs/RELEASING.md](docs/RELEASING.md). Renaming them is a major
 version with a migration, not a documentation change.
 

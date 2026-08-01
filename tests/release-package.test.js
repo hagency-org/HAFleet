@@ -38,11 +38,11 @@ describe('build-release-package.sh', () => {
       'package-lock.json',     // npm install must be reproducible
       'backend-v2.js',
       'server.js',
-      'bin/agentchat',
+      'bin/hafleet',
       'lib/version.js',
-      'services/agentchat-services.mjs',
+      'services/hafleet-services.mjs',
       'services/services-local.json',
-      'agent-chat-v2.service',
+      'hafleet-backend.service',
       '.env.example',          // install-full.sh copies this to .env
       'build-info.json',       // stamped: the unpacked tree has no .git
     ]) {

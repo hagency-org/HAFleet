@@ -4,5 +4,5 @@ import os from 'node:os';
 
 import { prepareBridgeContainerOwnership } from '../src/bridge-container-owner.mjs';
 
-const runtimeRoot = process.env.AGENT_CHAT_RUNTIME_DIR || '/var/lib/agent-chat';
+const runtimeRoot = process.env.HAFLEET_RUNTIME_DIR || '/var/lib/hafleet';
 prepareBridgeContainerOwnership({ runtimeRoot, hostname: os.hostname() });

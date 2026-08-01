@@ -78,8 +78,8 @@ function waitForExit(child, timeoutMs = 5000) {
 
 async function assertNoCiTempLogs(tempDir) {
   const entries = await fs.readdir(tempDir);
-  expect(entries.filter((entry) => entry.startsWith('agent-chat-verify-ci.'))).toEqual([]);
-  expect(entries.filter((entry) => entry.startsWith('agent-chat-kernel-tests.'))).toEqual([]);
+  expect(entries.filter((entry) => entry.startsWith('hafleet-verify-ci.'))).toEqual([]);
+  expect(entries.filter((entry) => entry.startsWith('hafleet-kernel-tests.'))).toEqual([]);
 }
 
 const signalCases = [
@@ -88,15 +88,15 @@ const signalCases = [
   { signal: 'SIGTERM', exitCode: 143 },
 ];
 
-const blockingDescendantScript = `bash -c 'sleep 60 & echo "$!" >>"$AGENTCHAT_TEST_CHILD_PID_FILE"; wait "$!"' &
+const blockingDescendantScript = `bash -c 'sleep 60 & echo "$!" >>"$HAFLEET_TEST_CHILD_PID_FILE"; wait "$!"' &
 child="$!"
-echo "$child" >>"$AGENTCHAT_TEST_CHILD_PID_FILE"
+echo "$child" >>"$HAFLEET_TEST_CHILD_PID_FILE"
 wait "$child"
 `;
 
-const leakingDescendantScript = `bash -c 'sleep 60 & echo "$!" >>"$AGENTCHAT_TEST_CHILD_PID_FILE"; exit 0' &
+const leakingDescendantScript = `bash -c 'sleep 60 & echo "$!" >>"$HAFLEET_TEST_CHILD_PID_FILE"; exit 0' &
 child="$!"
-echo "$child" >>"$AGENTCHAT_TEST_CHILD_PID_FILE"
+echo "$child" >>"$HAFLEET_TEST_CHILD_PID_FILE"
 wait "$child"
 `;
 
@@ -118,7 +118,7 @@ describe('CI script signal cleanup', () => {
 
   for (const { signal, exitCode } of signalCases) {
     test(`verify-ci ${signal} cleanup kills descendants from the tracked environment step`, async () => {
-      const tempDir = await makeTempDir('agent-chat-ci-cleanup-');
+      const tempDir = await makeTempDir('hafleet-ci-cleanup-');
       const fakeBin = path.join(tempDir, 'bin');
       await fs.mkdir(fakeBin);
       const childPidFile = path.join(tempDir, 'child-pids');
@@ -134,8 +134,8 @@ exit 0
         cwd: repoRoot,
         env: {
           ...process.env,
-          AGENTCHAT_VERIFY_CI_TIMEOUT_ACTIVE: '1',
-          AGENTCHAT_TEST_CHILD_PID_FILE: childPidFile,
+          HAFLEET_VERIFY_CI_TIMEOUT_ACTIVE: '1',
+          HAFLEET_TEST_CHILD_PID_FILE: childPidFile,
           PATH: `${fakeBin}:${process.env.PATH || ''}`,
           TMPDIR: tempDir,
         },
@@ -157,7 +157,7 @@ exit 0
   }
 
   test('verify-ci normal exit cleanup kills descendants left by successful steps', async () => {
-    const tempDir = await makeTempDir('agent-chat-ci-cleanup-');
+    const tempDir = await makeTempDir('hafleet-ci-cleanup-');
     const fakeBin = path.join(tempDir, 'bin');
     await fs.mkdir(fakeBin);
     const childPidFile = path.join(tempDir, 'child-pids');
@@ -173,8 +173,8 @@ exit 0
       cwd: repoRoot,
       env: {
         ...process.env,
-        AGENTCHAT_VERIFY_CI_TIMEOUT_ACTIVE: '1',
-        AGENTCHAT_TEST_CHILD_PID_FILE: childPidFile,
+        HAFLEET_VERIFY_CI_TIMEOUT_ACTIVE: '1',
+        HAFLEET_TEST_CHILD_PID_FILE: childPidFile,
         PATH: `${fakeBin}:${process.env.PATH || ''}`,
         TMPDIR: tempDir,
       },
@@ -195,7 +195,7 @@ exit 0
 
   for (const { signal, exitCode } of signalCases) {
     test(`run-kernel-tests ${signal} cleanup kills shard descendants`, async () => {
-      const tempDir = await makeTempDir('agent-chat-kernel-cleanup-');
+      const tempDir = await makeTempDir('hafleet-kernel-cleanup-');
       const childPidFile = path.join(tempDir, 'child-pids');
       const fakeVitest = path.join(tempDir, 'vitest');
       await writeExecutable(fakeVitest, `#!/usr/bin/env bash
@@ -207,8 +207,8 @@ ${blockingDescendantScript}
         cwd: repoRoot,
         env: {
           ...process.env,
-          AGENTCHAT_VITEST_BIN: fakeVitest,
-          AGENTCHAT_TEST_CHILD_PID_FILE: childPidFile,
+          HAFLEET_VITEST_BIN: fakeVitest,
+          HAFLEET_TEST_CHILD_PID_FILE: childPidFile,
           TMPDIR: tempDir,
         },
         stdio: 'ignore',
@@ -229,7 +229,7 @@ ${blockingDescendantScript}
   }
 
   test('run-kernel-tests normal exit cleanup kills descendants left by successful shards', async () => {
-    const tempDir = await makeTempDir('agent-chat-kernel-cleanup-');
+    const tempDir = await makeTempDir('hafleet-kernel-cleanup-');
     const childPidFile = path.join(tempDir, 'child-pids');
     const fakeVitest = path.join(tempDir, 'vitest');
     await writeExecutable(fakeVitest, `#!/usr/bin/env bash
@@ -241,8 +241,8 @@ ${leakingDescendantScript}
       cwd: repoRoot,
       env: {
         ...process.env,
-        AGENTCHAT_VITEST_BIN: fakeVitest,
-        AGENTCHAT_TEST_CHILD_PID_FILE: childPidFile,
+        HAFLEET_VITEST_BIN: fakeVitest,
+        HAFLEET_TEST_CHILD_PID_FILE: childPidFile,
         TMPDIR: tempDir,
       },
       stdio: 'ignore',

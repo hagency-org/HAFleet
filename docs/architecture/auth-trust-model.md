@@ -84,7 +84,7 @@ app.use('/api', (req, res, next) => {
 - Dashboard HTTP requests (server.js → backend-v2.js)
 - Bridge-matrix API calls (sends both bridge secret and bearer token)
 - MCP server API calls (sends both bearer and per-agent token)
-- CLI tools (`agent-send`, `agent-audit`, etc.)
+- CLI tools (`hafleet-send`, `hafleet-audit`, etc.)
 
 ### Additional Bearer-Protected Route
 
@@ -114,7 +114,7 @@ Prevents agent impersonation. Each provisioned agent receives a unique cryptogra
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `AGENTCHAT_AGENT_TOKEN_MODE` | No | `hard` | Enforcement mode: `hard`, `soft`, or `audit` |
+| `HAFLEET_AGENT_TOKEN_MODE` | No | `hard` | Enforcement mode: `hard`, `soft`, or `audit` |
 
 ### Token Generation
 
@@ -156,7 +156,7 @@ function loadAgentTokens() {
 
 ### Enforcement Modes
 
-The `AGENTCHAT_AGENT_TOKEN_MODE` variable (`backend-v2.js:163-167`) controls what happens when a token check fails:
+The `HAFLEET_AGENT_TOKEN_MODE` variable (`backend-v2.js:163-167`) controls what happens when a token check fails:
 
 | Mode | Behavior on Failure | Use Case |
 |------|---------------------|----------|
@@ -191,7 +191,7 @@ The `requireAgentToken(extractAgent)` middleware (`backend-v2.js:206-220`) wraps
 
 ### How Agents Send Tokens
 
-**MCP server** (`lib/mcp-server-core.js:66-70`): Each agent's MCP process loads its token from `$AGENTCHAT_AGENT_STATE_DIR/agent-token` at startup.
+**MCP server** (`lib/mcp-server-core.js:66-70`): Each agent's MCP process loads its token from `$HAFLEET_AGENT_STATE_DIR/agent-token` at startup.
 
 **Dual-auth API calls** (`lib/mcp-server-core.js:77-95`): MCP sends both headers on every backend call:
 ```javascript
@@ -319,7 +319,7 @@ Trust level is derived at message ingestion time in backend-v2.js (`lines 8334-8
 |------|--------|----------|
 | 0 | Public — any Matrix user | `!help`, `!status` |
 | 1 | Operator — read-only management | `!agents`, `!groups` |
-| 2 | Operator — management actions | `!agent-up`, `!agent-down` |
+| 2 | Operator — management actions | `!hafleet-up`, `!hafleet-down` |
 | 3 | Admin only (`MATRIX_ADMIN_MXIDS`) | System-level commands |
 
 Authorization check (`bot-commands.js:40-46`):
@@ -346,7 +346,7 @@ Authenticates remote Claude hook event ingestion. The subconscious system captur
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN` | No | Token for remote subconscious event ingestion. If unset, only localhost can post events. |
+| `HAFLEET_SUBCONSCIOUS_EVENT_TOKEN` | No | Token for remote subconscious event ingestion. If unset, only localhost can post events. |
 
 ### Authorization Logic
 
@@ -355,7 +355,7 @@ Authenticates remote Claude hook event ingestion. The subconscious system captur
 ```javascript
 function authorizeSubconsciousEventIngest(req) {
   if (isLocalRequest(req)) return { ok: true, mode: 'local' };
-  const expectedToken = normalizeOptionalText(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN, 512);
+  const expectedToken = normalizeOptionalText(process.env.HAFLEET_SUBCONSCIOUS_EVENT_TOKEN, 512);
   if (!expectedToken) return { ok: false, status: 403, error: '...local-only...', mode: 'local-only' };
   const providedToken = getBearerToken(req);
   if (providedToken === expectedToken) return { ok: true, mode: 'token' };
@@ -365,7 +365,7 @@ function authorizeSubconsciousEventIngest(req) {
 
 - **Localhost**: Always allowed, no token needed.
 - **Remote + no token configured**: Rejected (403) — subconscious events are local-only by default.
-- **Remote + token configured**: Must provide `Authorization: Bearer <AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN>`.
+- **Remote + token configured**: Must provide `Authorization: Bearer <HAFLEET_SUBCONSCIOUS_EVENT_TOKEN>`.
 
 The global `/api` middleware also has a special exception for this endpoint (`backend-v2.js:6056-6058`), allowing the subconscious event token to pass even if it doesn't match `API_TOKEN`.
 
@@ -403,7 +403,7 @@ function getRoomTrust(roomId, { inviterMxid = null } = {}) {
 | Priority | Source | Reason Tag | Description |
 |----------|--------|------------|-------------|
 | 1 | `MATRIX_TRUSTED_ROOM_IDS` env var | `allowlist` | Manually configured trusted rooms |
-| 2 | `state.trustedManagedRooms` | `managed` | Rooms created/managed by agentchat |
+| 2 | `state.trustedManagedRooms` | `managed` | Rooms created/managed by hafleet |
 | 3 | `MATRIX_TRUSTED_INVITER_MXIDS` env var | `trusted_inviter` | Room invited by a trusted user |
 | 4 | Fallback | `unknown_room` | Not trusted by any criterion |
 
@@ -411,7 +411,7 @@ function getRoomTrust(roomId, { inviterMxid = null } = {}) {
 
 On bridge startup, `trustedManagedRooms` is auto-populated from existing state (`bridge-matrix.js:217-241`):
 
-1. **roomGroupMap**: All rooms mapped to agentchat groups are seeded as managed
+1. **roomGroupMap**: All rooms mapped to hafleet groups are seeded as managed
 2. **dmRooms**: All DM rooms between operators and agents are seeded
 3. **botDmRooms**: All bot-DM rooms are seeded (re-checked on every startup for upgrades)
 
@@ -451,8 +451,8 @@ function roomTrustLog(action, roomId, trust, extra = '') {
 |----------|---------|---------|
 | `API_TOKEN` | backend-v2, bridge-matrix, mcp-server-core, server.js | Global bearer token for API access |
 | `MATRIX_BRIDGE_SECRET` | backend-v2, bridge-matrix | Shared secret for bridge ↔ backend auth |
-| `AGENTCHAT_AGENT_TOKEN_MODE` | backend-v2 | Per-agent token enforcement: `hard` / `soft` / `audit` |
-| `AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN` | backend-v2 | Remote subconscious event ingestion token |
+| `HAFLEET_AGENT_TOKEN_MODE` | backend-v2 | Per-agent token enforcement: `hard` / `soft` / `audit` |
+| `HAFLEET_SUBCONSCIOUS_EVENT_TOKEN` | backend-v2 | Remote subconscious event ingestion token |
 
 ### Trust Variables
 

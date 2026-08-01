@@ -11,23 +11,23 @@ const coreFiles = [
 ];
 
 function makeTempRoot() {
-  return mkdtempSync(path.join(os.tmpdir(), 'agent-chat-mcp-cache-'));
+  return mkdtempSync(path.join(os.tmpdir(), 'hafleet-mcp-cache-'));
 }
 
 function runCacheSmoke(coreFile, { cwd, env = {}, agent = 'alpha' }) {
   const childEnv = { ...process.env };
   for (const key of [
-    'AGENTCHAT_AGENT_STATE_DIR',
-    'AGENT_CHAT_RUNTIME_DIR',
-    'AGENTCHAT_HOMEDIR',
-    'AGENTCHAT_MCP_MEDIA_CACHE_SMOKE',
+    'HAFLEET_AGENT_STATE_DIR',
+    'HAFLEET_RUNTIME_DIR',
+    'HAFLEET_HOMEDIR',
+    'HAFLEET_MCP_MEDIA_CACHE_SMOKE',
     'AGENT_NAME',
   ]) {
     delete childEnv[key];
   }
   Object.assign(childEnv, env, {
     AGENT_NAME: agent,
-    AGENTCHAT_MCP_MEDIA_CACHE_SMOKE: '1',
+    HAFLEET_MCP_MEDIA_CACHE_SMOKE: '1',
     NO_PROXY: '*',
   });
   const result = spawnSync(process.execPath, [path.join(repoRoot, coreFile)], {
@@ -62,8 +62,8 @@ describe('MCP media cache directory', () => {
         const actual = runCacheSmoke(coreFile, {
           cwd,
           env: {
-            AGENTCHAT_AGENT_STATE_DIR: stateDir,
-            AGENT_CHAT_RUNTIME_DIR: runtimeDir,
+            HAFLEET_AGENT_STATE_DIR: stateDir,
+            HAFLEET_RUNTIME_DIR: runtimeDir,
             HOME: path.join(tempRoot, 'home'),
           },
         });
@@ -88,7 +88,7 @@ describe('MCP media cache directory', () => {
         const actual = runCacheSmoke(coreFile, {
           cwd,
           env: {
-            AGENT_CHAT_RUNTIME_DIR: runtimeDir,
+            HAFLEET_RUNTIME_DIR: runtimeDir,
             HOME: path.join(tempRoot, 'home'),
           },
           agent: 'alpha/beta',
@@ -102,11 +102,11 @@ describe('MCP media cache directory', () => {
     }
   });
 
-  test('falls back to agentchat home instead of project cwd', () => {
+  test('falls back to hafleet home instead of project cwd', () => {
     const tempRoot = makeTempRoot();
     try {
       const cwd = path.join(tempRoot, 'project');
-      const homeDir = path.join(tempRoot, 'agentchat-home');
+      const homeDir = path.join(tempRoot, 'hafleet-home');
       mkdirSync(cwd, { recursive: true });
       mkdirSync(homeDir, { recursive: true });
 
@@ -114,7 +114,7 @@ describe('MCP media cache directory', () => {
         const actual = runCacheSmoke(coreFile, {
           cwd,
           env: {
-            AGENTCHAT_HOMEDIR: homeDir,
+            HAFLEET_HOMEDIR: homeDir,
             HOME: path.join(tempRoot, 'home'),
           },
         });

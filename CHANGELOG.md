@@ -20,9 +20,9 @@ the starting point: above the stale `1.0.0` without implying a `2.0` rewrite.
 - Both READMEs rewritten around the name **HAFleet**, covering the five install
   paths, the upgrade and rollback story, release artifacts, and an explicit
   security-posture section separating what is enforced from what is assumed.
-- Internal identifiers (`agent-chat`, `agentchat`, `AGENT_CHAT_`, `AGENTCHAT_`)
+- Internal identifiers (`hafleet`, `hafleet`, `HAFLEET_`, `HAFLEET_`)
   are deliberately unchanged: unit names, CLI commands, `.env` variables, the MCP
-  server name and `~/.agentchat` are all covered by the compatibility contract in
+  server name and `~/.hafleet` are all covered by the compatibility contract in
   docs/RELEASING.md, so renaming them is a major version with a migration.
 - **Agent access goes through a platform seam.** `backend-v2.js` had 34 raw tmux
   invocations and now has none; `lib/runtime/` defines the contract and
@@ -69,7 +69,7 @@ the starting point: above the stale `1.0.0` without implying a `2.0` rewrite.
   `Restart=always`, so anything pushed to the deploy branch executed as root
   within one poll interval. It now runs as the service user and escalates only
   for `systemctl restart`, through a narrow sudoers rule.
-- **The release gate is on by default.** `AGENTCHAT_RELEASE_GATE` defaulted to
+- **The release gate is on by default.** `HAFLEET_RELEASE_GATE` defaulted to
   `none`, meaning untested commits deployed. It now defaults to `worktree`,
   which builds the candidate ref in a detached worktree and runs
   `verify:cd-preflight` before the live checkout is touched.

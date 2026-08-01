@@ -9,6 +9,20 @@ import path from 'node:path';
 const CORE_SERVICES = Object.freeze(['backend', 'dashboard', 'relay']);
 const OPTIONAL_SERVICES = Object.freeze(['bridge']);
 const KNOWN_SERVICES = Object.freeze([...CORE_SERVICES, ...OPTIONAL_SERVICES]);
+/**
+ * Supervised agents, named `agent:<agent-name>`.
+ *
+ * The service list is a closed allowlist so a typo cannot silently supervise
+ * something unintended, and agents cannot join it: they are created and destroyed
+ * by operators, so their names are not knowable here. They get a namespace instead.
+ *
+ * Only paneless (ACP) agents need this. A tmux agent survives its launcher exiting
+ * because tmux owns the pane, but an ACP agent dies with its host process and
+ * cannot be resumed — octos's ACP v1 reports loadSession:false, so a lost session
+ * is lost for good.
+ */
+const AGENT_SERVICE_RE = /^agent:[A-Za-z0-9][\w-]{0,63}$/;
+export const isAgentServiceName = (name) => AGENT_SERVICE_RE.test(String(name ?? ''));
 // 'record' probes a component's own health record (src/health-record.mjs) for
 // freshness. It exists because 'process' is nearly meaningless for the bridge and
 // relay: they expose no port, so the probe could only assert "PID 1 is alive",
@@ -154,7 +168,9 @@ export function loadServiceProfile({ profilePath, repoRoot }) {
   const services = raw.services.map((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('service entry must be an object');
     const serviceName = requireText(entry.name, 'service.name');
-    if (!KNOWN_SERVICES.includes(serviceName)) throw new Error(`unknown service ${serviceName}`);
+    if (!KNOWN_SERVICES.includes(serviceName) && !isAgentServiceName(serviceName)) {
+      throw new Error(`unknown service ${serviceName}`);
+    }
     if (seen.has(serviceName)) throw new Error(`duplicate service ${serviceName}`);
     seen.add(serviceName);
     if (!Array.isArray(entry.dependsOn)) throw new Error(`${serviceName}.dependsOn must be an array`);

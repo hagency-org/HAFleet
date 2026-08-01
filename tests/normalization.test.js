@@ -23,7 +23,7 @@ function writeJson(filePath, value) {
 let normalizationEnvSnapshot = null;
 
 async function importBackend(seed = {}) {
-  const runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-normalization-test-'));
+  const runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-normalization-test-'));
   const dataDir = path.join(runtimeDir, 'data');
   mkdirSync(dataDir, { recursive: true });
   writeJson(path.join(dataDir, 'agents.json'), seed.agents || {});
@@ -37,12 +37,12 @@ async function importBackend(seed = {}) {
   writeJson(path.join(dataDir, '.msg_counter'), 0);
 
   normalizationEnvSnapshot = snapshotEnv([
-    'AGENT_CHAT_RUNTIME_DIR',
+    'HAFLEET_RUNTIME_DIR',
     'SUPERVISOR_ENABLED',
     'AGENT_SCOPE_MONITOR_ENABLED',
     'AGENT_JSON_WRITE_BATCH_MS',
   ]);
-  process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+  process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
   process.env.SUPERVISOR_ENABLED = 'false';
   process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
   process.env.AGENT_JSON_WRITE_BATCH_MS = '0';
@@ -255,6 +255,6 @@ describe('normalization helpers', () => {
     expect(byReason.get('plan-mode')?.re.test('1. Plan mode')).toBe(true);
     expect(byReason.get('approval-mode-toggle')?.re.test('Bypass permissions on (Shift+Tab to cycle)')).toBe(true);
     expect(byReason.get('interactive-confirm')?.re.test('Press enter to continue')).toBe(true);
-    expect(byReason.get('update-required')?.re.test('Updates available: run agent-update now')).toBe(true);
+    expect(byReason.get('update-required')?.re.test('Updates available: run hafleet-update now')).toBe(true);
   });
 });

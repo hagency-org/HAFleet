@@ -12,8 +12,8 @@ describe('runtime parity regressions', () => {
     expect(source).toContain('const AGENT_SERVER = resolveLocalServerId();');
   });
 
-  test('agent-up launches through wrappers and provides complete Codex MCP config', () => {
-    for (const scriptPath of ['bin/agent-up', 'remote/bin/agent-up']) {
+  test('hafleet-up launches through wrappers and provides complete Codex MCP config', () => {
+    for (const scriptPath of ['bin/hafleet-up', 'remote/bin/hafleet-up']) {
       const source = readFileSync(path.resolve(scriptPath), 'utf-8');
       expect(source).toContain('write_launch_script()');
       expect(source).toContain('launch-claude.sh');
@@ -21,7 +21,7 @@ describe('runtime parity regressions', () => {
       expect(source).toContain('mcp_servers.${CODEX_MCP_NAME}.command');
       expect(source).toContain('mcp_servers.${CODEX_MCP_NAME}.args');
       expect(source).toContain('codex_mcp_env API_TOKEN "${API_TOKEN:-}"');
-      expect(source).toContain('codex_mcp_env AGENTCHAT_HOMEDIR "${AGENTCHAT_HOMEDIR:-}"');
+      expect(source).toContain('codex_mcp_env HAFLEET_HOMEDIR "${HAFLEET_HOMEDIR:-}"');
       expect(source).toContain('tmux send-keys -t "$TMUX_PANE_TARGET" "exec $(shell_quote "$CODEX_LAUNCH_SCRIPT")" Enter');
       expect(source).toContain('MANAGED_RUNTIME_PID_FILE="$AGENT_DATA/managed-runtime.pid"');
       expect(source).toContain('preflight_runtime_approval_adapter');
@@ -37,28 +37,45 @@ describe('runtime parity regressions', () => {
       expect(source).toContain('codex $CODEX_FLAGS --');
       expect(source).not.toContain('CLAUDE_FLAGS="--dangerously-skip-permissions"');
       expect(source).not.toContain('CODEX_FLAGS="--yolo"');
-      expect(source).not.toContain('tmux send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"');
+      // Typing the init prompt into a pane after launch was banned outright,
+      // because bin/hafleet-up tried it for Codex and abandoned it: "tmux key
+      // timing is unreliable while Codex is still drawing its first prompt".
+      //
+      // Hermes leaves no alternative — both -z/--oneshot and `chat -q` print one
+      // response and exit, so an interactive session cannot be given a starting
+      // prompt any other way, and without one the agent never learns its name or
+      // its tools. The ban is therefore narrowed rather than dropped: typing is
+      // permitted only when the same branch first waits for a readiness marker
+      // and refuses to type if it never appears. Blind typing stays forbidden.
+      if (source.includes('send-keys -t "$TMUX_PANE_TARGET" -l "$INIT_PROMPT"')) {
+        const branch = source.slice(source.lastIndexOf('elif [', source.indexOf('-l "$INIT_PROMPT"')));
+        const upToTyping = branch.slice(0, branch.indexOf('-l "$INIT_PROMPT"'));
+        expect(upToTyping, `${scriptPath}: init prompt typed without waiting for readiness`)
+          .toMatch(/ready-fixed|grep -qF/);
+        expect(upToTyping, `${scriptPath}: no refusal path if readiness never appears`)
+          .toMatch(/did not appear within/);
+      }
       expect(source).not.toContain('Launch cmd:');
     }
   });
 
   test('deployment and upstream helpers avoid machine-specific hardcoded home paths', async () => {
-    const autodeploySource = readFileSync(path.resolve('scripts/agentchat-stable-autodeploy.sh'), 'utf-8');
-    const autostartSource = readFileSync(path.resolve('bin/agentchat-autostart.sh'), 'utf-8');
-    const previousRoot = process.env.AGENT_CHAT_ROOT;
+    const autodeploySource = readFileSync(path.resolve('scripts/hafleet-stable-autodeploy.sh'), 'utf-8');
+    const autostartSource = readFileSync(path.resolve('bin/hafleet-autostart.sh'), 'utf-8');
+    const previousRoot = process.env.HAFLEET_REPO_ROOT;
     const previousUpstreamRoot = process.env.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT;
     try {
-      process.env.AGENT_CHAT_ROOT = '/tmp/agent-chat-root';
+      process.env.HAFLEET_REPO_ROOT = '/tmp/hafleet-root';
       delete process.env.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT;
       const moduleUrl = pathToFileURL(path.resolve('lib/upstream-claude-subconscious.js')).href;
       const upstreamModule = await import(`${moduleUrl}?test=${Date.now()}`);
 
-      expect(autodeploySource).not.toMatch(/\/home\/[a-z_][a-z0-9_-]*\/.*agent-chat/);
+      expect(autodeploySource).not.toMatch(/\/home\/[a-z_][a-z0-9_-]*\/.*hafleet/);
       expect(autostartSource).not.toMatch(/export HOME="\/home\/[a-z_][a-z0-9_-]*"/);
       expect(upstreamModule.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT).toBe('/tmp/claude-subconscious');
     } finally {
-      if (previousRoot === undefined) delete process.env.AGENT_CHAT_ROOT;
-      else process.env.AGENT_CHAT_ROOT = previousRoot;
+      if (previousRoot === undefined) delete process.env.HAFLEET_REPO_ROOT;
+      else process.env.HAFLEET_REPO_ROOT = previousRoot;
       if (previousUpstreamRoot === undefined) delete process.env.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT;
       else process.env.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT = previousUpstreamRoot;
     }
@@ -68,7 +85,7 @@ describe('runtime parity regressions', () => {
     const localSource = readFileSync(path.resolve('lib/push-relay-core.js'), 'utf-8');
     const hintPattern = /const checkHint = '([^']+)';/;
     const localHint = localSource.match(hintPattern)?.[1] || null;
-    expect(localHint).toBe('FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.');
+    expect(localHint).toBe('FIRST ACTION: call check_inbox() now. Use check_inbox() in hafleet MCP for full context before acting.');
   });
 
   test('backend and local push-relay import blocked patterns from the shared module', () => {
@@ -96,7 +113,7 @@ describe('runtime parity regressions', () => {
     expect(readmeStableDeploy).toContain('git clean -fd');
     expect(readmeStableDeploy).toContain('git reset --hard origin/stable');
     expect(readmeStableDeploy).toContain('npm run verify:cd-preflight');
-    expect(readmeStableDeploy).toContain('agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>');
+    expect(readmeStableDeploy).toContain('hafleet verify-remote --samples 2 --interval 16 --expect-version <short-sha>');
 
     expect(operationsSource).toContain('The live deploy checkout is disposable.');
     expect(operationsSource).toContain('git reset --hard HEAD');

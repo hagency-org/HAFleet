@@ -9,14 +9,14 @@ Status: partial implementation landed; remaining mutation policy requires ac-top
 The rhodes1 incident was a live instance of the remote install/profile gap:
 
 - Karin could not receive messages because rhodes1 was running an old relay.
-- `agentchat update` failed with `Error: /home/shu is not a git repository`.
-- The installed `/home/shu/agent-chat` was a standalone remote package, not a git checkout.
-- Its helper symlinks pointed to `/home/shu/agent-chat/bin/*`; `agent-update` inferred `/home/shu` as the repo root and failed.
+- `hafleet update` failed with `Error: /home/shu is not a git repository`.
+- The installed `/home/shu/hafleet` was a standalone remote package, not a git checkout.
+- Its helper symlinks pointed to `/home/shu/hafleet/bin/*`; `hafleet-update` inferred `/home/shu` as the repo root and failed.
 
 Emergency recovery converted rhodes1 to a `stable` git checkout and reinstalled the remote profile. After recovery:
 
-- `agentchat update --check` worked on rhodes1.
-- `agent-chat-push-relay` ran `/home/shu/agent-chat/remote/push-relay.js`.
+- `hafleet update --check` worked on rhodes1.
+- `hafleet-push-relay` ran `/home/shu/hafleet/remote/push-relay.js`.
 - `verify-remote --server rhodes1 --agent Karin` passed.
 - The backend reported rhodes1 relay version `bd5872b`; Karin was online with MCP present.
 
@@ -70,29 +70,29 @@ It intentionally excludes `.git`, `.env`, logs, `node_modules`, and `package-loc
 Current limitations:
 
 - No packaged build version exists, so `verify-remote --expect-version` cannot prove loaded code.
-- `agent-update` still requires a git checkout and does not implement standalone self-update.
-- The generated package includes `push-relay-autodeploy.service`, but the service expects `scripts/agentchat-remote-autodeploy.sh`; the standalone package does not include that script.
+- `hafleet-update` still requires a git checkout and does not implement standalone self-update.
+- The generated package includes `push-relay-autodeploy.service`, but the service expects `scripts/hafleet-remote-autodeploy.sh`; the standalone package does not include that script.
 - Remote autodeploy itself requires `REPO_DIR/.git`, so it cannot run in a standalone package.
 
 ## Failure Modes
 
 1. Standalone update path resolves the wrong root.
 
-If a package is installed at `/home/shu/agent-chat`, `bin/agent-update` computes:
+If a package is installed at `/home/shu/hafleet`, `bin/hafleet-update` computes:
 
-- `SCRIPT_DIR=/home/shu/agent-chat/bin`
-- `BASE_DIR=/home/shu/agent-chat`
+- `SCRIPT_DIR=/home/shu/hafleet/bin`
+- `BASE_DIR=/home/shu/hafleet`
 - `REPO_DIR=/home/shu`
 
 Before RAU-B, when no candidate git checkout was found, it exited with `/home/shu is not a git repository`.
 
 2. Standalone package advertises update but cannot self-update.
 
-Before RAU-B, the help said `agentchat update` updated the current checkout or remote package, but there was no package source URL, version file, atomic unpack, rollback directory, or expected-version heartbeat. RAU-B changes the help and generated-package behavior to make standalone self-update unsupported explicitly.
+Before RAU-B, the help said `hafleet update` updated the current checkout or remote package, but there was no package source URL, version file, atomic unpack, rollback directory, or expected-version heartbeat. RAU-B changes the help and generated-package behavior to make standalone self-update unsupported explicitly.
 
 3. Linux standalone install can create a broken autodeploy unit.
 
-The unit points at `<repo>/scripts/agentchat-remote-autodeploy.sh`; standalone packages do not ship `scripts/`. RAU-B keeps the template available for git-checkout installs but skips installing the autodeploy service when the checkout/script contract is missing.
+The unit points at `<repo>/scripts/hafleet-remote-autodeploy.sh`; standalone packages do not ship `scripts/`. RAU-B keeps the template available for git-checkout installs but skips installing the autodeploy service when the checkout/script contract is missing.
 
 4. Remote autodeploy can strand a host on a bad reset.
 
@@ -120,7 +120,7 @@ Recommended near-term policy:
 
 1. Treat git checkout remote installs as the only auto-update/CD target.
 2. Treat standalone packages as bootstrap/manual install artifacts until versioned standalone release directories exist.
-3. Make standalone `agentchat update` fail clearly with migration guidance instead of resolving parent home directories.
+3. Make standalone `hafleet update` fail clearly with migration guidance instead of resolving parent home directories.
 4. Add fleet inventory before fleet mutation.
 5. Harden git-checkout remote autodeploy in small batches: durable state, remote dependency scope, post-restart verify, rollback.
 6. Do not let autodeploy rerun full `install-remote.sh` until the installer is decomposed into testable phases.
@@ -139,8 +139,8 @@ Shape:
 
 - Implemented read paths:
   - `GET /api/servers/fleet?expectVersion=<short-sha>`
-  - `agentchat cli fleet --expect-version <short-sha>`
-  - `agentchat cli fleet --expect-version <short-sha> --json`
+  - `hafleet cli fleet --expect-version <short-sha>`
+  - `hafleet cli fleet --expect-version <short-sha> --json`
 - The inventory lists servers with:
   - `id`
   - `online`
@@ -168,22 +168,22 @@ Verification:
 
 Goal:
 
-- Stop `agentchat update` from failing with misleading parent-directory git errors.
+- Stop `hafleet update` from failing with misleading parent-directory git errors.
 
 Shape:
 
 - Implemented standalone package layout detection with no `.git`.
-- `agentchat update` now prints a clear message:
+- `hafleet update` now prints a clear message:
   - standalone package self-update is not supported yet;
   - migrate to git checkout for auto-update;
   - preserve `.env`, `data`, and `logs`;
   - run `bash remote/install-remote.sh`;
-  - service-only operations remain available through `agentchat service`.
-- `remote/install-remote.sh` now skips the remote autodeploy service unless the install is a git checkout and `scripts/agentchat-remote-autodeploy.sh` exists.
+  - service-only operations remain available through `hafleet service`.
+- `remote/install-remote.sh` now skips the remote autodeploy service unless the install is a git checkout and `scripts/hafleet-remote-autodeploy.sh` exists.
 
 Tests:
 
-- Generated standalone package invokes `agentchat update --check` and fails with migration guidance instead of a parent-directory git error.
+- Generated standalone package invokes `hafleet update --check` and fails with migration guidance instead of a parent-directory git error.
 - Static install-profile contract proves standalone packages do not install the broken git-only autodeploy service.
 
 Verification:
@@ -201,9 +201,9 @@ Goal:
 Steps:
 
 1. SSH to host and inspect current install:
-   - `command -v agentchat`
-   - `readlink -f "$(command -v agentchat)"`
-   - `systemctl cat agent-chat-push-relay`
+   - `command -v hafleet`
+   - `readlink -f "$(command -v hafleet)"`
+   - `systemctl cat hafleet-push-relay`
    - `git -C <install> rev-parse --is-inside-work-tree`
 2. Backup standalone install.
 3. Clone `stable` with host proxy settings if required.
@@ -211,8 +211,8 @@ Steps:
 5. Swap directory or install into a new stable path.
 6. Run `VERIFY_AGENT=<known-agent> VERIFY_SAMPLES=2 VERIFY_INTERVAL=16 bash remote/install-remote.sh`.
 7. Verify:
-   - `agentchat update --check`
-   - `agentchat verify-remote --server <host> --agent <known-agent> --expect-version <short-sha>`
+   - `hafleet update --check`
+   - `hafleet verify-remote --server <host> --agent <known-agent> --expect-version <short-sha>`
 
 This should be a runbook first, not an automatic fleet rewrite.
 
@@ -273,7 +273,7 @@ Goal:
 Shape:
 
 - Implemented. After restart, run:
-  - `agentchat verify-remote --samples 2 --interval 16 --expect-version "$(git rev-parse --short HEAD)"`
+  - `hafleet verify-remote --samples 2 --interval 16 --expect-version "$(git rev-parse --short HEAD)"`
 - Include `--agent <name>` only when configured.
 - Keep deploy pending on verification failure.
 
@@ -329,7 +329,7 @@ Decision 1: Are git checkout installs the only supported auto-update/CD target f
 
 Recommended: yes. Use standalone packages only for bootstrap/manual install until versioned package releases exist.
 
-Decision 2: Should standalone `agentchat update` fail with migration guidance immediately?
+Decision 2: Should standalone `hafleet update` fail with migration guidance immediately?
 
 Recommended: yes. This is a safe operator-experience fix and prevents rhodes1-style misleading errors.
 

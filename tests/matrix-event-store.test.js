@@ -16,7 +16,7 @@ import { MatrixEventStore } from '../src/matrix-event-store.mjs';
 const roots = [];
 
 function context() {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'agentchat-matrix-event-store-'));
+  const root = mkdtempSync(path.join(os.tmpdir(), 'hafleet-matrix-event-store-'));
   roots.push(root);
   return { root, journalPath: path.join(root, 'data', 'matrix', 'processed-events.jsonl') };
 }

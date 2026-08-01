@@ -18,7 +18,7 @@ if (!requestedMode) {
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.dirname(__filename);
 const RUNTIME_ROOT = (() => {
-  const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
+  const raw = String(process.env.HAFLEET_RUNTIME_DIR || '').trim();
   return raw ? path.resolve(raw) : REPO_ROOT;
 })();
 assertRuntimeDir(RUNTIME_ROOT);

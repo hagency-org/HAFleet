@@ -17,7 +17,7 @@ import { loadServiceProfile } from '../src/service-profile.mjs';
 
 const repoRoot = path.resolve('.');
 const execFileAsync = promisify(execFile);
-const cliPath = path.join(repoRoot, 'services', 'agentchat-services.mjs');
+const cliPath = path.join(repoRoot, 'services', 'hafleet-services.mjs');
 const supervisors = [];
 const runtimes = [];
 const modulesToStop = [];
@@ -73,7 +73,7 @@ function createBackendRuntime(prefix) {
 }
 
 async function importBackend(runtime) {
-  process.env.AGENT_CHAT_RUNTIME_DIR = runtime;
+  process.env.HAFLEET_RUNTIME_DIR = runtime;
   process.env.SUPERVISOR_ENABLED = 'false';
   process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
   process.env.AGENT_JSON_WRITE_BATCH_MS = '0';
@@ -87,7 +87,7 @@ async function importBackend(runtime) {
 async function fixtureSupervisor({ restartDelayMs = 40 } = {}) {
   const backendPort = await freePort();
   const dashboardPort = await freePort();
-  const runtimeRoot = mkdtempSync(path.join(os.tmpdir(), 'agentchat-fsf0-b1-services-'));
+  const runtimeRoot = mkdtempSync(path.join(os.tmpdir(), 'hafleet-fsf0-b1-services-'));
   runtimes.push(runtimeRoot);
   const fixture = 'tests/fixtures/service-child.mjs';
   const service = (name, dependsOn, health, env = {}) => ({
@@ -122,9 +122,9 @@ async function fixtureSupervisor({ restartDelayMs = 40 } = {}) {
 }
 
 async function importDashboard(runtime) {
-  process.env.AGENT_CHAT_RUNTIME_DIR = runtime;
-  process.env.AGENT_CHAT_WEB_PORT = '18084';
-  process.env.AGENT_CHAT_BACKEND_PORT = '18090';
+  process.env.HAFLEET_RUNTIME_DIR = runtime;
+  process.env.HAFLEET_WEB_PORT = '18084';
+  process.env.HAFLEET_BACKEND_PORT = '18090';
   const url = pathToFileURL(path.join(repoRoot, 'server.js')).href;
   const mod = await import(`${url}?fsf0-b1-dashboard=${Date.now()}-${Math.random()}`);
   modulesToStop.push(mod);
@@ -159,7 +159,7 @@ test('services_start_all_healthy', async () => {
     profilePath: path.join(repoRoot, 'services', 'services-local.json'),
     repoRoot,
   });
-  const runtimeRoot = createBackendRuntime('agentchat-fsf0-b1-production-services-');
+  const runtimeRoot = createBackendRuntime('hafleet-fsf0-b1-production-services-');
   mkdirSync(path.join(runtimeRoot, 'logs'), { recursive: true });
   const backendPort = await freePort();
   const dashboardPort = await freePort();
@@ -173,9 +173,9 @@ test('services_start_all_healthy', async () => {
     runtimeRoot,
     env: {
       ...process.env,
-      AGENT_CHAT_RUNTIME_DIR: runtimeRoot,
-      AGENT_CHAT_BACKEND_PORT: String(backendPort),
-      AGENT_CHAT_WEB_PORT: String(dashboardPort),
+      HAFLEET_RUNTIME_DIR: runtimeRoot,
+      HAFLEET_BACKEND_PORT: String(backendPort),
+      HAFLEET_WEB_PORT: String(dashboardPort),
       API_TOKEN: 'fsf0-b1-production-smoke-token',
       SUPERVISOR_ENABLED: 'false',
       AGENT_SCOPE_MONITOR_ENABLED: 'false',
@@ -200,10 +200,10 @@ test('services_start_all_healthy', async () => {
 
 test('restart_preserves_agent_registry', async () => {
   snapshotEnv([
-    'AGENT_CHAT_RUNTIME_DIR', 'SUPERVISOR_ENABLED', 'AGENT_SCOPE_MONITOR_ENABLED',
+    'HAFLEET_RUNTIME_DIR', 'SUPERVISOR_ENABLED', 'AGENT_SCOPE_MONITOR_ENABLED',
     'AGENT_JSON_WRITE_BATCH_MS', 'API_TOKEN',
   ]);
-  const runtime = createBackendRuntime('agentchat-fsf0-b1-registry-');
+  const runtime = createBackendRuntime('hafleet-fsf0-b1-registry-');
   const first = await importBackend(runtime);
   for (const name of ['worker-alpha', 'worker-beta', 'worker-gamma']) {
     await request(first.app).post('/api/agents').send({ name, role: 'worker' }).expect(200);
@@ -216,8 +216,8 @@ test('restart_preserves_agent_registry', async () => {
 });
 
 test('dashboard_roster_matches_registry', async () => {
-  snapshotEnv(['AGENT_CHAT_RUNTIME_DIR', 'AGENT_CHAT_WEB_PORT', 'AGENT_CHAT_BACKEND_PORT']);
-  const runtime = createBackendRuntime('agentchat-fsf0-b1-dashboard-');
+  snapshotEnv(['HAFLEET_RUNTIME_DIR', 'HAFLEET_WEB_PORT', 'HAFLEET_BACKEND_PORT']);
+  const runtime = createBackendRuntime('hafleet-fsf0-b1-dashboard-');
   mkdirSync(path.join(runtime, 'logs'), { recursive: true });
   const dashboard = await importDashboard(runtime);
   const registry = [

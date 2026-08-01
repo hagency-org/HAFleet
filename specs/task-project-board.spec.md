@@ -8,7 +8,7 @@ estimate: 1.5d
 
 ## Intent
 
-Add a read-only agent-chat project board that lets an operator understand
+Add a read-only hafleet project board that lets an operator understand
 project health, agent activity, task progress, workflow execution, and recent
 public updates without inspecting multiple Dashboard pages or private approval
 rooms.
@@ -17,7 +17,7 @@ rooms.
 
 ### Must
 - Use a backend-owned project-board projection.
-- Treat an agent-chat group, excluding the reserved `info` group, as a project.
+- Treat an hafleet group, excluding the reserved `info` group, as a project.
 - Include all explicit group members without inferring identity or role from a name.
 - Require an explicit group-to-project binding before exposing managed project resources.
 - Redact runtime secrets and absolute filesystem paths before the Dashboard receives data.
@@ -65,7 +65,7 @@ rooms.
   backend-only `ATOMGIT_TOKEN` environment variable.
 - The visual hierarchy borrows Multica's project filter, KPI strip,
   status-board, and first-class agent assignment concepts while using the
-  existing agent-chat Dashboard style and dependency-free renderer.
+  existing hafleet Dashboard style and dependency-free renderer.
 
 ## Boundaries
 

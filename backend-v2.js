@@ -27,6 +27,7 @@ import { promisify } from 'util';
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTmuxRuntime } from './lib/runtime/tmux.js';
 import { sessionPolicyFromEnv } from './lib/session-policy.js';
+import { getFramework } from './lib/frameworks/index.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
 import { indexPool, agentRole, agentCapability, selectAgent, resolveTier, TIER_RUNTIME } from './lib/matrix-agent.js';
@@ -86,30 +87,30 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.dirname(__filename);
 const RUNTIME_ROOT = (() => {
-  const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
+  const raw = String(process.env.HAFLEET_RUNTIME_DIR || '').trim();
   return raw ? path.resolve(raw) : REPO_ROOT;
 })();
 assertRuntimeDir(RUNTIME_ROOT);
-const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
+const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.HAFLEET_BACKEND_PORT || '8090', 10);
 const PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
   ? DEFAULT_BACKEND_PORT_RAW
   : 8090;
-const DEFAULT_WEB_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_WEB_PORT || '8084', 10);
+const DEFAULT_WEB_PORT_RAW = Number.parseInt(process.env.HAFLEET_WEB_PORT || '8084', 10);
 const DEFAULT_WEB_PORT = Number.isFinite(DEFAULT_WEB_PORT_RAW) && DEFAULT_WEB_PORT_RAW > 0
   ? DEFAULT_WEB_PORT_RAW
   : 8084;
 const DATA_DIR = path.join(RUNTIME_ROOT, 'data');
-const WEB_BASE_URL = (process.env.AGENT_CHAT_WEB_URL || `http://127.0.0.1:${DEFAULT_WEB_PORT}`).trim().replace(/\/$/, '');
-const PUSH_QUEUE_URL = (process.env.AGENT_CHAT_QUEUE_URL || `${WEB_BASE_URL}/api/queue`).trim().replace(/\/$/, '');
-const WEB_BRIDGE_DASHBOARD_TOKEN = (process.env.AGENT_CHAT_DASHBOARD_TOKEN || '').trim();
-const WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.AGENT_CHAT_WEB_BRIDGE_FETCH_TIMEOUT_MS || '5000', 10);
+const WEB_BASE_URL = (process.env.HAFLEET_WEB_URL || `http://127.0.0.1:${DEFAULT_WEB_PORT}`).trim().replace(/\/$/, '');
+const PUSH_QUEUE_URL = (process.env.HAFLEET_QUEUE_URL || `${WEB_BASE_URL}/api/queue`).trim().replace(/\/$/, '');
+const WEB_BRIDGE_DASHBOARD_TOKEN = (process.env.HAFLEET_DASHBOARD_TOKEN || '').trim();
+const WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.HAFLEET_WEB_BRIDGE_FETCH_TIMEOUT_MS || '5000', 10);
 const WEB_BRIDGE_FETCH_TIMEOUT_MS = Number.isFinite(WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW) && WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW > 0
   ? WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW
   : 5000;
 const execFileAsync = promisify(execFile);
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const LOCAL_SERVER_ID = resolveLocalServerId();
-const RECORD_LOCAL_SERVER = normalizeBoolean(process.env.AGENT_CHAT_RECORD_LOCAL_SERVER) === true;
+const RECORD_LOCAL_SERVER = normalizeBoolean(process.env.HAFLEET_RECORD_LOCAL_SERVER) === true;
 const LOCAL_GIT_VERSION = (() => { try { return execSync('git rev-parse --short HEAD', { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { return null; } })();
 // How this host reaches its agents. Every platform-specific operation — pane
 // enumeration, output capture, keystroke delivery, session existence — goes
@@ -126,7 +127,7 @@ for (const warning of sessionPolicy.warnings) console.warn(`[backend] ${warning}
 const USER_UID = (typeof process.getuid === 'function') ? process.getuid() : null;
 const USER_RUNTIME_DIR = Number.isFinite(USER_UID) ? `/run/user/${USER_UID}` : null;
 const USER_DBUS_SESSION_BUS = USER_RUNTIME_DIR ? `unix:path=${USER_RUNTIME_DIR}/bus` : null;
-const CORS_ALLOWED_ORIGIN = (process.env.FRP_API_ORIGIN || 'https://agentchat.example.com').trim();
+const CORS_ALLOWED_ORIGIN = (process.env.FRP_API_ORIGIN || 'https://hafleet.example.com').trim();
 const HEARTBEAT_TTL_MS = Number.parseInt(process.env.AGENT_HEARTBEAT_TTL_MS || '90000', 10);
 const SERVER_SWEEP_INTERVAL_MS = Number.parseInt(process.env.AGENT_SERVER_SWEEP_INTERVAL_MS || '15000', 10);
 const HUMAN_SUMMARY_LIMIT = Number.parseInt(process.env.HUMAN_SUMMARY_LIMIT || '50', 10);
@@ -168,7 +169,7 @@ const AGENT_SCOPE_ALERT_CLEAR_RATIO = Number.isFinite(AGENT_SCOPE_ALERT_CLEAR_RA
 // than honored.
 const DISPATCH_LEASE_TTL_DEFAULT_MS = 15 * 60 * 1000; // 15 minutes
 const DISPATCH_LEASE_TTL_FLOOR_MS = 1000; // 1 second
-const DISPATCH_LEASE_TTL_MS_RAW = Number.parseInt(process.env.AGENTCHAT_DISPATCH_LEASE_TTL_MS || String(DISPATCH_LEASE_TTL_DEFAULT_MS), 10);
+const DISPATCH_LEASE_TTL_MS_RAW = Number.parseInt(process.env.HAFLEET_DISPATCH_LEASE_TTL_MS || String(DISPATCH_LEASE_TTL_DEFAULT_MS), 10);
 const DISPATCH_LEASE_TTL_MS = Number.isFinite(DISPATCH_LEASE_TTL_MS_RAW) && DISPATCH_LEASE_TTL_MS_RAW > 0
   ? Math.max(DISPATCH_LEASE_TTL_FLOOR_MS, DISPATCH_LEASE_TTL_MS_RAW)
   : DISPATCH_LEASE_TTL_DEFAULT_MS;
@@ -179,10 +180,10 @@ const DISPATCH_LEASE_DEFAULT_OWNER = 'unspecified';
 // POST /api/dispatch/release defaults to REJECTING the legacy {agent}-only shape (no leaseId,
 // no owner): letting ownership be skipped just by omitting fields would defeat the whole point
 // of "owner mismatch must fail" (a caller could always dodge the check by not claiming an
-// owner). AGENTCHAT_ALLOW_LEGACY_RELEASE=1 is an explicit, off-by-default escape hatch for a
+// owner). HAFLEET_ALLOW_LEGACY_RELEASE=1 is an explicit, off-by-default escape hatch for a
 // caller that predates ownership (e.g. a reintroduced OpenFab Bridge — the version live at the
 // time this lease system was built has since been descoped/stopped, so nothing needs it today).
-const DISPATCH_ALLOW_LEGACY_RELEASE = normalizeBoolean(process.env.AGENTCHAT_ALLOW_LEGACY_RELEASE) === true;
+const DISPATCH_ALLOW_LEGACY_RELEASE = normalizeBoolean(process.env.HAFLEET_ALLOW_LEGACY_RELEASE) === true;
 const OFFLINE_CATCHUP_LIST_LIMIT = Number.parseInt(process.env.OFFLINE_CATCHUP_LIST_LIMIT || '50', 10);
 const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_ITEMS || '8', 10);
 const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
@@ -205,11 +206,11 @@ const SUBCONSCIOUS_EVENT_HISTORY_LIMIT = Number.parseInt(process.env.SUBCONSCIOU
 const SUBCONSCIOUS_EVENT_AGENT_LIMIT = Number.parseInt(process.env.SUBCONSCIOUS_EVENT_AGENT_LIMIT || '500', 10);
 const BACKEND_STARTUP_OPTIONAL_ENV = [
   {
-    name: 'AGENT_CHAT_DASHBOARD_TOKEN',
+    name: 'HAFLEET_DASHBOARD_TOKEN',
     description: 'Non-local dashboard mutations will remain unavailable unless this token is configured.',
   },
   {
-    name: 'AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN',
+    name: 'HAFLEET_SUBCONSCIOUS_EVENT_TOKEN',
     description: 'Subconscious event webhook bearer auth is disabled unless this token is configured.',
   },
 ];
@@ -1986,7 +1987,7 @@ function resolveSubconsciousState(agentName) {
   const letta = safeReadJsonFile(lettaPath, {});
   const runtimeMeta = safeReadJsonFile(runtimeMetaPath, {});
   const settingsPath = normalizeWorkspacePath(runtimeMeta?.settingsPath) || (workdir ? path.join(workdir, '.claude', 'settings.json') : null);
-  const pluginRoot = normalizeWorkspacePath(runtimeMeta?.pluginRoot) || (stateDir ? path.join(stateDir, 'subconscious', 'claude-agentchat') : null);
+  const pluginRoot = normalizeWorkspacePath(runtimeMeta?.pluginRoot) || (stateDir ? path.join(stateDir, 'subconscious', 'claude-hafleet') : null);
   const installedHooks = detectInstalledSubconsciousHooks(settingsPath);
   const runtimeCfg = (letta?.runtime && typeof letta.runtime === 'object') ? letta.runtime : {};
   const stateProvider = normalizeProviderOrNull(runtimeCfg.provider);
@@ -2013,9 +2014,9 @@ function resolveSubconsciousState(agentName) {
   const desiredEnabled = normalizeBoolean(runtimeCfg.enabled);
   const runtimeDesired = desiredEnabled !== false;
   const invokeUrl = normalizeOptionalText(runtimeMeta?.invokeUrl, 2048)
-    || `${process.env.AGENT_CHAT_API || `http://127.0.0.1:${PORT}`}/api/subconscious/runtime/invoke`;
+    || `${process.env.HAFLEET_API || `http://127.0.0.1:${PORT}`}/api/subconscious/runtime/invoke`;
   const eventUrl = normalizeOptionalText(runtimeMeta?.eventUrl, 2048)
-    || `${process.env.AGENT_CHAT_API || `http://127.0.0.1:${PORT}`}/api/subconscious/events`;
+    || `${process.env.HAFLEET_API || `http://127.0.0.1:${PORT}`}/api/subconscious/events`;
   let disabledReason = null;
   if (!agent.stateDir) disabledReason = 'missing agent stateDir';
   else if (!runtimeDesired) disabledReason = 'runtime disabled in subconscious contract';
@@ -2284,7 +2285,7 @@ function buildSubconsciousInvokePrompt(agentName, payload, state, recentEvents, 
     ? state.contract.conversation.current
     : null;
   return [
-    'You are the agentchat subconscious runtime for one agent.',
+    'You are the hafleet subconscious runtime for one agent.',
     'Generate a short, concrete internal guidance snippet for the next Claude hook step.',
     'Do not claim long-term memory or external facts you do not have.',
     'Base your output only on the supplied hook payload, recent subconscious events, retrieved local episodic memories, and optional human manual guidance.',
@@ -3675,7 +3676,7 @@ function isManualDownReason(reason) {
   if (!text) return false;
   return text === 'manual-offline'
     || text === 'session-missing'
-    || text.startsWith('agent-down')
+    || text.startsWith('hafleet-down')
     || text.startsWith('server-maintenance:');
 }
 
@@ -6084,7 +6085,18 @@ async function buildLocalPaneMetadataSnapshotAsync(runExecFile = null) {
       workspacePath: normalizeWorkspacePath(pane.path),
     });
   }
-  return { ok: true, sessions, ttyToSession, error: null };
+  return {
+    ok: true,
+    sessions,
+    ttyToSession,
+    error: null,
+    // Propagated so the sweep can tell "tmux was unreachable" from "tmux is idle".
+    serverUnavailable: listing.serverUnavailable === true,
+    // How many panes tmux reported before the session policy filtered them.
+    // Without this an empty snapshot is ambiguous between "tmux returned nothing"
+    // and "policy excluded everything", which are very different faults.
+    rawPaneCount: listing.panes.length,
+  };
 }
 
 function buildLocalPaneSnapshotMapFromMetadata(paneMetadataSnapshot) {
@@ -6194,6 +6206,39 @@ function pruneEphemeralAgents(names = [], reason = 'ephemeral-prune') {
   // Intentionally silent: ephemeral audit agent pruning is routine housekeeping.
 }
 
+
+/**
+ * How this agent is driven. Recorded on the record at registration; falls back to
+ * the framework registry, then to tmux, so records written before transports
+ * existed keep their behaviour.
+ */
+function agentTransport(agent) {
+  const declared = typeof agent?.transport === 'string' ? agent.transport.trim().toLowerCase() : '';
+  if (declared === 'acp' || declared === 'tmux') return declared;
+  return getFramework(agent?.type)?.transport === 'acp' ? 'acp' : 'tmux';
+}
+
+/**
+ * Liveness for a paneless ACP agent: is the process recorded at launch alive?
+ * There is no pane hash to compare and no heartbeat from a relay, because the
+ * relay enumerates tmux sessions and this agent has none.
+ */
+function syncAcpAgentLiveness(agent, runtime) {
+  const pid = Number(agent.acpPid) || 0;
+  let alive = false;
+  if (pid > 1) {
+    try { process.kill(pid, 0); alive = true; } catch { alive = false; }
+  }
+  let changed = false;
+  if (agent.tmux !== null) { agent.tmux = null; changed = true; }
+  if (agent.online !== alive) { agent.online = alive; changed = true; }
+  const reason = alive ? null : 'acp-process-gone';
+  if (agent.offlineReason !== reason) { agent.offlineReason = reason; changed = true; }
+  if (changed) agent.lastSeen = Date.now();
+  if (runtime && runtime.mcpPresent === undefined) runtime.mcpPresent = null;
+  return changed;
+}
+
 async function sweepLocalActivityDurations(paneMetadataSnapshotOverride = null) {
   const nowSec = Math.floor(Date.now() / 1000);
   const nowMs = Date.now();
@@ -6222,9 +6267,21 @@ async function sweepLocalActivityDurations(paneMetadataSnapshotOverride = null) 
 
     const manualDown = agent.manualDown === true;
     const configuredTmux = (typeof agent.tmux === 'string' && agent.tmux.trim()) ? agent.tmux.trim() : null;
-    const tmuxTarget = configuredTmux || (manualDown ? null : `${agent.name}:0.0`);
+    // An ACP agent is a subprocess, not a tmux session: there is no pane to
+    // probe, capture or type into. Deriving a pane target for it would mark it
+    // tmux-missing on the first sweep and keep it offline forever, which is
+    // exactly what "agent equals tmux session" costs once that stops being true.
+    const transport = agentTransport(agent);
+    const tmuxTarget = transport === 'acp'
+      ? null
+      : (configuredTmux || (manualDown ? null : `${agent.name}:0.0`));
     const runtime = ensureAgentRuntimeRecord(agent.name);
     if (!runtime) continue;
+    if (transport === 'acp') {
+      // Liveness for these comes from the process itself, recorded at launch.
+      if (syncAcpAgentLiveness(agent, runtime)) agentsChanged = true;
+      continue;
+    }
     localRows.push({
       agent,
       runtime,
@@ -6324,6 +6381,14 @@ async function sweepLocalActivityDurations(paneMetadataSnapshotOverride = null) 
       if (agent.online !== prevOnline) { agentsChanged = true; transitioned = true; }
       if (transitioned) {
         agent.lastSeen = nowMs;
+        // Marking an agent tmux-missing used to be entirely silent, so an agent
+        // whose session plainly existed could sit offline with nothing anywhere
+        // saying why — the dashboard simply showed an empty fleet. Log the
+        // transition once, with what the snapshot actually held, so the next
+        // person does not have to reverse-engineer the sweep to find out.
+        console.warn(`[backend] agent marked tmux-missing: agent=${agent.name} target=${tmuxTarget} `
+          + `rawPanes=${paneMetadataSnapshot.rawPaneCount ?? '?'} `
+          + `snapshotSessions=${JSON.stringify([...paneSnapshotMap.keys()])} misses=${missing.misses}`);
       }
       if (!wasManualDown
         && wasOnline
@@ -6633,7 +6698,7 @@ function pushResourceAlertToAgent(agentName, summary) {
     headers: { 'Content-Type': 'application/json' },
     signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
     body: JSON.stringify({
-      from: 'agent-chat-v2',
+      from: 'hafleet-backend',
       to: agent.tmux,
       payload,
       notifyMeta: {
@@ -6927,7 +6992,24 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
     });
     if (!ensured) continue;
     const agent = ensured.agent;
-    if (ensured.created) agentsChanged = true;
+    if (ensured.created) {
+      agentsChanged = true;
+      // Adopting a session as an agent was completely silent, so a tmux session
+      // that had nothing to do with HAFleet became a permanent agent record with
+      // no trace of when or why. A throwaway session created to check something
+      // by hand was adopted within one heartbeat and outlived the session itself.
+      // Say so, and record it where an operator will actually see it.
+      console.warn(`[backend] adopted tmux session as a new agent: ${name} (server=${serverId})`);
+      emitSystemInfo(
+        `Adopted tmux session '${name}' as an agent`,
+        `Server '${serverId}' reported session '${name}', which had no agent record, so one was created. `
+          + 'HAFleet can now type into that pane. If it does not belong to HAFleet, add it to '
+          + 'HAFLEET_SESSION_DENYLIST (or set HAFLEET_SESSION_ALLOWLIST) and remove the record with '
+          + 'bin/hafleet-prune-agents.',
+        'agent_adopted',
+        { dedupeKey: `agent_adopted:${serverId}:${name}` }
+      );
+    }
     if (!isAgentRecord(agent)) {
       agent.kind = 'agent';
       if (!Number(agent.registeredAt)) agent.registeredAt = now;
@@ -6959,6 +7041,11 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   for (const agent of Object.values(agents)) {
     if (normalizeServer(agent.server) !== serverId) continue;
     if (liveSet.has(agent.name)) continue;
+    // The relay builds this list by enumerating tmux sessions, so a paneless ACP
+    // agent is never in it. Treating that absence as heartbeat-missing marked
+    // every ACP agent offline within one beat, undoing what the sweep had just
+    // concluded from its live process. The sweep owns liveness for these.
+    if (agentTransport(agent) === 'acp') continue;
     const wasOnline = agent.online === true;
     const wasManualDown = agent.manualDown === true;
     const reason = `heartbeat-missing:${serverId}`;
@@ -7158,7 +7245,7 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
     omitted > 0 ? `... ${omitted} older message(s) omitted from replay list.` : null,
     'These messages may be time-sensitive. Review timestamps and decide whether a reply is still needed.',
     'check_inbox() returns per-message time fields: ts / at / time.',
-    'FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.',
+    'FIRST ACTION: call check_inbox() now. Use check_inbox() in hafleet MCP for full context before acting.',
   ].filter(Boolean).join('\n');
 
   const idReservation = reserveNextMsgId();
@@ -7222,15 +7309,36 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
 export function buildMcpReplyActionHint(msg, replyTo = null) {
   if (!msg || (msg.type !== 'human' && msg.type !== 'request')) return null;
   if (msg.group) {
-    return `Reply after ALL WORK is done, using the agent-chat MCP tool: post(group="${msg.group}", summary="your reply", full="detailed reply", reply_to="${msg.id}")`;
+    return `Reply after ALL WORK is done, using the hafleet MCP tool: post(group="${msg.group}", summary="your reply", full="detailed reply", reply_to="${msg.id}")`;
   }
   const target = normalizeOptionalText(replyTo || msg.from, 255);
   if (!target) return null;
-  return `Reply after ALL WORK is done, using the agent-chat MCP tool: send_message(to="${target}", summary="your reply", full="detailed reply", reply_to="${msg.id}")`;
+  return `Reply after ALL WORK is done, using the hafleet MCP tool: send_message(to="${target}", summary="your reply", full="detailed reply", reply_to="${msg.id}")`;
 }
 
 async function pushNotify(agentName, msg, options = {}) {
   const agent = agents[agentName];
+  // An ACP agent has no pane, and its session is held by a separate host process
+  // (scripts/hafleet-acp-agent.mjs) that this process cannot reach into. So the
+  // backend does not push to it — the host pulls, by polling the same inbox
+  // endpoint check_inbox uses, and prompts the agent over session/prompt.
+  //
+  // Reporting this as 'missing-tmux-target' was wrong twice over: it read as a
+  // broken tmux agent, and pushNotifyStatus turned it into ok:false while
+  // POST /api/messages still answered {"ok":true,"warnings":[]}. A message to an
+  // ACP agent looked sent, was never delivered, and nothing said otherwise.
+  // 'acp-pull-pending' is terminal-but-fine: the backend's obligation ends here.
+  if (!agent?.tmux && agentTransport(agent) === 'acp') {
+    appendDeliveryEvent({
+      type: 'push.pull_pending',
+      source: 'backend',
+      messageId: msg?.id,
+      messageIds: msg?.id ? [msg.id] : [],
+      agent: agentName,
+      reason: 'acp-pull-pending',
+    });
+    return pushNotifyStatus({ terminal: true, reason: 'acp-pull-pending' });
+  }
   if (!agent?.tmux) {
     logPushNotifySkip(agentName, 'missing-tmux-target');
     appendDeliveryEvent({
@@ -7340,7 +7448,7 @@ async function pushNotify(agentName, msg, options = {}) {
     const operatorHint = isHuman && (isOperator || !isMatrix) ? ' This is your human operator.' : '';
 
     if (hasMcp) {
-      const checkHint = `FIRST ACTION: call check_inbox() now. Use check_inbox() in agent-chat MCP for full context before acting.`;
+      const checkHint = `FIRST ACTION: call check_inbox() now. Use check_inbox() in hafleet MCP for full context before acting.`;
       const actionHint = needsReply ? buildMcpReplyActionHint(msg, replyTo) : null;
       notificationKind = needsReply ? 'single_actionable' : 'single_inform';
       requiresInboxCheck = needsReply;
@@ -7354,7 +7462,7 @@ async function pushNotify(agentName, msg, options = {}) {
       const senderTmux = senderAgent?.tmux || `${replyTo}:0.0`;
       let actionHint;
       if (needsReply) {
-        actionHint = `Reply after ALL WORK is done, using /agent-message skill or: agent-send ${senderTmux} "<your reply>"`;
+        actionHint = `Reply after ALL WORK is done, using /agent-message skill or: hafleet-send ${senderTmux} "<your reply>"`;
       }
       notificationKind = needsReply ? 'single_actionable' : 'single_inform';
       requiresInboxCheck = false;
@@ -7387,7 +7495,7 @@ async function pushNotify(agentName, msg, options = {}) {
         ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}),
       },
       signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
-      body: JSON.stringify({ from: 'agent-chat-v2', to: agent.tmux, payload: notification, priority: notificationPriority || 'normal', notifyMeta }),
+      body: JSON.stringify({ from: 'hafleet-backend', to: agent.tmux, payload: notification, priority: notificationPriority || 'normal', notifyMeta }),
     }, `pushNotify() POST ${queuePath} agent=${agentName}`);
     if (resp.ok) {
       const body = await resp.json().catch(() => ({}));
@@ -7445,7 +7553,7 @@ async function pushNotify(agentName, msg, options = {}) {
 const app = express();
 app.set('trust proxy', 'loopback');  // trust nginx on localhost, use X-Forwarded-For for real IP
 const API_TOKEN = process.env.API_TOKEN;
-const SUBCONSCIOUS_EVENT_TOKEN = normalizeOptionalText(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN, 512);
+const SUBCONSCIOUS_EVENT_TOKEN = normalizeOptionalText(process.env.HAFLEET_SUBCONSCIOUS_EVENT_TOKEN, 512);
 app.use((req, res, next) => {
   // Skip global JSON parser for large-upload routes (they have route-specific limits).
   if (req.method === 'POST' && (req.path.endsWith('/avatar') || req.path === '/api/media/stage')) return next();
@@ -8005,6 +8113,12 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   refreshServerLiveness();
   const agentName = normalizeAgentName(name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  // Agent tokens were read once at startup, so a token minted afterwards — which
+  // is every agent created while the backend is already running — was invisible
+  // until a restart, and with HAFLEET_AGENT_TOKEN_MODE=hard every call that
+  // agent made was rejected. Registration is exactly when a new token appears.
+  // loadAgentTokens keeps already-known entries, so this cannot rotate a live one.
+  if (!agentTokens.has(agentName)) loadAgentTokens();
   if (deletedAgentTombstones[agentName]) return res.status(410).json({ error: 'agent permanently deleted', tombstone: deletedAgentTombstones[agentName] });
   const existing = agents[agentName] || {};
   const existingOnline = Boolean(existing.online);
@@ -8042,6 +8156,15 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     identity: identity ?? existing.identity ?? null,
     tmux: resolvedTmux,
     type: presetFramework ?? agentType ?? existing.type ?? 'agent',
+    // Recorded so the sweep does not have to re-derive it, and so a record stays
+    // correct even if the registry later changes.
+    transport: (() => {
+      const fromBody = typeof req.body?.transport === 'string' ? req.body.transport.trim().toLowerCase() : '';
+      if (fromBody === 'acp' || fromBody === 'tmux') return fromBody;
+      if (existing.transport) return existing.transport;
+      return getFramework(presetFramework ?? agentType ?? existing.type)?.transport === 'acp' ? 'acp' : 'tmux';
+    })(),
+    acpPid: Number(req.body?.acpPid) > 1 ? Number(req.body.acpPid) : (existing.acpPid ?? null),
     kind: 'agent',
     server: resolvedServer,
     online: resolvedOnline,
@@ -8235,7 +8358,7 @@ app.get('/api/agents', (req, res) => {
 
 // matrix-Agent pool view (Phase 2): the role×capability grid, for capability-aware dispatch.
 // Read-only. Filters: ?role= ?capability= ?state=idle|busy|any (default any).
-// matrix-Agent capability scheduler (Phase 3): a reservation/queue over the pool. agent-chat
+// matrix-Agent capability scheduler (Phase 3): a reservation/queue over the pool. hafleet
 // decides *which* agent staffs a (role, capability); the caller (e.g. the OpenFab Bridge)
 // delivers the task to it and calls /release on completion. Busy/queue are in-memory.
 //
@@ -8246,7 +8369,7 @@ app.get('/api/agents', (req, res) => {
 // (leaseId, agent, owner) tuple and reject otherwise (owner mismatch, unknown/stale leaseId, or
 // an already-expired lease — distinct 4xx reasons). POST /api/dispatch/release rejects the
 // pre-Task-7 call shape ({agent} only, no leaseId/owner) by default — letting the ownership
-// check be skipped just by omitting fields would defeat it — unless AGENTCHAT_ALLOW_LEGACY_RELEASE=1
+// check be skipped just by omitting fields would defeat it — unless HAFLEET_ALLOW_LEGACY_RELEASE=1
 // is set, an explicit opt-in compatibility shim for a caller that predates ownership (see the
 // Task 7 report for the caller inventory; nothing in this stack needs the shim as of this
 // writing). An unrenewed lease is reaped once its TTL lapses (checked lazily on GET /api/pool and
@@ -8411,7 +8534,7 @@ app.post('/api/dispatch/renew', (req, res) => {
 // (owner mismatch / unknown-or-stale leaseId / already-expired lease → rejected, distinct 4xx
 // reasons). {agent} alone (no leaseId, no owner) is the pre-Task-7 legacy shape — rejected by
 // default (`missing_fields`, since it can't prove ownership of anything) unless
-// AGENTCHAT_ALLOW_LEGACY_RELEASE=1 is set, in which case it releases whatever lease currently
+// HAFLEET_ALLOW_LEGACY_RELEASE=1 is set, in which case it releases whatever lease currently
 // holds that agent, no ownership check. Passing exactly one of leaseId/owner (not both, not
 // neither) is always a malformed request, rejected as `missing_fields` regardless of the flag.
 app.post('/api/dispatch/release', (req, res) => {
@@ -8432,7 +8555,7 @@ app.post('/api/dispatch/release', (req, res) => {
     dispatchLeaseStore.releaseByAgent(name); // shim explicitly enabled — tolerant no-op if nothing to release
   } else {
     return res.status(400).json({
-      error: 'leaseId, agent, and owner are required (set AGENTCHAT_ALLOW_LEGACY_RELEASE=1 to allow legacy {agent}-only release)',
+      error: 'leaseId, agent, and owner are required (set HAFLEET_ALLOW_LEGACY_RELEASE=1 to allow legacy {agent}-only release)',
       reason: 'missing_fields',
     });
   }
@@ -8554,15 +8677,15 @@ app.post('/api/agents/:name/start', requireBearer, (req, res) => {
   if (!framework || !VALID_FRAMEWORKS.has(framework)) {
     return res.status(400).json({ error: `agent has no valid framework (type='${agent.type || 'null'}'). Update agent type to claude or codex first.` });
   }
-  const agentchatBin = path.join(REPO_ROOT, 'bin', 'agentchat');
+  const hafleetBin = path.join(REPO_ROOT, 'bin', 'hafleet');
   const launchEnv = { ...process.env };
   const rp = agent.runtimeProfile?.primary;
   if (rp?.apiBaseUrl) launchEnv.ANTHROPIC_BASE_URL = rp.apiBaseUrl;
   if (rp?.apiKey) launchEnv.ANTHROPIC_API_KEY = rp.apiKey;
-  if (rp?.model) launchEnv.AGENTCHAT_LAUNCH_MODEL = rp.model;
-  if (rp?.extraArgs) launchEnv.AGENTCHAT_LAUNCH_EXTRA_ARGS = rp.extraArgs;
+  if (rp?.model) launchEnv.HAFLEET_LAUNCH_MODEL = rp.model;
+  if (rp?.extraArgs) launchEnv.HAFLEET_LAUNCH_EXTRA_ARGS = rp.extraArgs;
   try {
-    const child = spawn(agentchatBin, ['up-v1', agentName, framework], {
+    const child = spawn(hafleetBin, ['up-v1', agentName, framework], {
       cwd: REPO_ROOT,
       env: launchEnv,
       stdio: 'ignore',
@@ -8575,7 +8698,7 @@ app.post('/api/agents/:name/start', requireBearer, (req, res) => {
     transitionAgent(agentName, 'api_register_with_tmux');
     saveAgents();
     auditLog(req, { agent: agentName, summary: { action: 'start', framework, pid: child.pid } });
-    console.log(`[start] launched agentchat up-v1 ${agentName} ${framework} (pid=${child.pid})`);
+    console.log(`[start] launched hafleet up-v1 ${agentName} ${framework} (pid=${child.pid})`);
     res.json({ ok: true, name: agentName, framework, pid: child.pid });
   } catch (e) {
     console.error(`[start] failed to launch ${agentName}:`, e.message);
@@ -11395,7 +11518,7 @@ function stopBackgroundLoops() {
 // Bind address. Loopback by default; see lib/startup-config.js resolveBindHost
 // for why widening it is opt-in and logged.
 function resolvedBindHost() {
-  const { host, warning } = resolveBindHost(process.env.AGENT_CHAT_BACKEND_HOST);
+  const { host, warning } = resolveBindHost(process.env.HAFLEET_BACKEND_HOST);
   if (warning) console.warn(`[bind] ${warning}`);
   return host;
 }

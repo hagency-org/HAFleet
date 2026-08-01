@@ -41,7 +41,7 @@ function listMatrixNativePackages() {
 }
 
 function detectInstallMode() {
-  if (process.env.AGENTCHAT_INSTALL_MODE) return process.env.AGENTCHAT_INSTALL_MODE;
+  if (process.env.HAFLEET_INSTALL_MODE) return process.env.HAFLEET_INSTALL_MODE;
   const ignoreScripts = process.env.npm_config_ignore_scripts;
   if (ignoreScripts === 'true') return 'npm ci --ignore-scripts';
   if (ignoreScripts === 'false') return 'npm ci';
@@ -74,7 +74,7 @@ console.log(`platform: ${os.platform()} ${os.release()} ${os.arch()}`);
 console.log(`node: ${process.version}`);
 console.log(`npm: ${npmVersion}`);
 console.log(`install_mode: ${detectInstallMode()}`);
-console.log(`agentchat_install_mode: ${process.env.AGENTCHAT_INSTALL_MODE || 'unset'}`);
+console.log(`hafleet_install_mode: ${process.env.HAFLEET_INSTALL_MODE || 'unset'}`);
 console.log(`npm_config_ignore_scripts: ${process.env.npm_config_ignore_scripts || 'unset'}`);
 console.log(`matrix_bot_sdk: ${matrixBotSdk ? 'present' : 'missing'}`);
 console.log(`matrix_native_optional: ${matrixNativePackages.length ? matrixNativePackages.join(',') : 'none'}`);

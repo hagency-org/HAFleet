@@ -185,21 +185,21 @@ describe('supported runtime approval adapters', () => {
     ];
     for (const toolName of safeToolNames) {
       expect(codexPermissionRequestNeedsOwnerApproval({
-        tool_name: `mcp__agent_chat__${toolName}`,
+        tool_name: `mcp__hafleet__${toolName}`,
         tool_input: {},
       })).toBe(false);
     }
     for (const toolName of ['send_message', 'post']) {
       expect(codexPermissionRequestNeedsOwnerApproval({
-        tool_name: `mcp__agent_chat__${toolName}`,
+        tool_name: `mcp__hafleet__${toolName}`,
         tool_input: { summary: 'text only' },
       })).toBe(false);
       expect(codexPermissionRequestNeedsOwnerApproval({
-        tool_name: `mcp__agent_chat__${toolName}`,
+        tool_name: `mcp__hafleet__${toolName}`,
         tool_input: { summary: 'text only', attachments: [] },
       })).toBe(false);
       expect(codexPermissionRequestNeedsOwnerApproval({
-        tool_name: `mcp__agent_chat__${toolName}`,
+        tool_name: `mcp__hafleet__${toolName}`,
         tool_input: { attachments: [{ path: '/private/file.txt' }] },
       })).toBe(true);
     }
@@ -212,11 +212,11 @@ describe('supported runtime approval adapters', () => {
       tool_input: { path: '/private/file.txt' },
     })).toBe(true);
     expect(codexPermissionRequestNeedsOwnerApproval({
-      tool_name: 'mcp__agent_chat__unknown',
+      tool_name: 'mcp__hafleet__unknown',
       tool_input: {},
     })).toBe(true);
 
-    const temporary = mkdtempSync(path.join(os.tmpdir(), 'agentchat-codex-internal-hook-'));
+    const temporary = mkdtempSync(path.join(os.tmpdir(), 'hafleet-codex-internal-hook-'));
     try {
       const hookPath = path.join(temporary, 'hook.js');
       writeFileSync(hookPath, 'trusted hook contents\n');
@@ -226,16 +226,16 @@ describe('supported runtime approval adapters', () => {
         stdin: Readable.from([JSON.stringify({
           hook_event_name: 'PermissionRequest',
           turn_id: 'turn-inbox',
-          tool_name: 'mcp__agent_chat__check_inbox',
+          tool_name: 'mcp__hafleet__check_inbox',
           tool_input: {},
         })]),
         stdout,
         stderr: { write() {} },
         env: {
           AGENT_NAME: 'test_agent',
-          AGENTCHAT_AGENT_TOKEN: 'agent-token',
+          HAFLEET_AGENT_TOKEN: 'agent-token',
         },
-        argv: ['node', hookPath, `--agentchat-hook-sha256=${sha256File(hookPath)}`],
+        argv: ['node', hookPath, `--hafleet-hook-sha256=${sha256File(hookPath)}`],
         scriptPath: hookPath,
         api,
       });
@@ -249,7 +249,7 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('codex_hook_failure_emits_explicit_deny', async () => {
-    const temporary = mkdtempSync(path.join(os.tmpdir(), 'agentchat-codex-hook-'));
+    const temporary = mkdtempSync(path.join(os.tmpdir(), 'hafleet-codex-hook-'));
     try {
       const hookPath = path.join(temporary, 'hook.js');
       writeFileSync(hookPath, 'test hook contents\n');
@@ -266,7 +266,7 @@ describe('supported runtime approval adapters', () => {
         stdout,
         stderr,
         env: {},
-        argv: ['node', hookPath, `--agentchat-hook-sha256=${sha256File(hookPath)}`],
+        argv: ['node', hookPath, `--hafleet-hook-sha256=${sha256File(hookPath)}`],
         scriptPath: hookPath,
         api: vi.fn(),
       });
@@ -284,7 +284,7 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('codex hook consumes allow before emitting it', async () => {
-    const temporary = mkdtempSync(path.join(os.tmpdir(), 'agentchat-codex-hook-'));
+    const temporary = mkdtempSync(path.join(os.tmpdir(), 'hafleet-codex-hook-'));
     try {
       const hookPath = path.join(temporary, 'hook.js');
       writeFileSync(hookPath, 'trusted hook contents\n');
@@ -315,9 +315,9 @@ describe('supported runtime approval adapters', () => {
         stderr: { write() {} },
         env: {
           AGENT_NAME: 'wf_coordinator',
-          AGENTCHAT_AGENT_TOKEN: 'agent-token',
+          HAFLEET_AGENT_TOKEN: 'agent-token',
         },
-        argv: ['node', hookPath, `--agentchat-hook-sha256=${sha256File(hookPath)}`],
+        argv: ['node', hookPath, `--hafleet-hook-sha256=${sha256File(hookPath)}`],
         scriptPath: hookPath,
         api,
       });
@@ -337,13 +337,13 @@ describe('supported runtime approval adapters', () => {
     const digest = 'e'.repeat(64);
     const command = buildCodexApprovalHookCommand({
       nodeExecutable: '/usr/local/bin/node',
-      hookPath: '/opt/agent-chat/lib/codex-permission-hook.js',
+      hookPath: '/opt/hafleet/lib/codex-permission-hook.js',
       scriptDigest: digest,
     });
-    const timeoutSeconds = approvalHookTimeoutSeconds({ AGENTCHAT_APPROVAL_TTL_MS: '900000' });
+    const timeoutSeconds = approvalHookTimeoutSeconds({ HAFLEET_APPROVAL_TTL_MS: '900000' });
     const toml = buildCodexApprovalHookToml({ command, timeoutSeconds });
 
-    expect(command).toContain(`--agentchat-hook-sha256=${digest}`);
+    expect(command).toContain(`--hafleet-hook-sha256=${digest}`);
     expect(timeoutSeconds).toBe(960);
     expect(toml).toContain('timeout = 960');
     expect(toml).toContain(command);
@@ -370,7 +370,7 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('codex_hook_preflight_precedes_tmux_and_requires_exact_trust', async () => {
-    const temporary = mkdtempSync(path.join(os.tmpdir(), 'agentchat-codex-preflight-'));
+    const temporary = mkdtempSync(path.join(os.tmpdir(), 'hafleet-codex-preflight-'));
     try {
       const hookPath = path.join(temporary, 'codex-permission-hook.js');
       const outputPath = path.join(temporary, 'prepared.json');
@@ -451,14 +451,21 @@ describe('supported runtime approval adapters', () => {
       expect(prepared.scriptDigest).toBe(digest);
       expect(JSON.parse(readFileSync(outputPath, 'utf8')).hookToml).toBe(prepared.hookToml);
 
-      for (const file of ['bin/agent-up', 'remote/bin/agent-up']) {
+      for (const file of ['bin/hafleet-up', 'remote/bin/hafleet-up']) {
         const source = readFileSync(file, 'utf8');
         const preflightCall = source.indexOf('\npreflight_runtime_approval_adapter\n');
         const createCall = source.indexOf('\ncreate_tmux_session\n', preflightCall);
         expect(preflightCall).toBeGreaterThan(-1);
         expect(createCall).toBeGreaterThan(preflightCall);
         expect(source).toContain('managed-runtime.pid');
-        expect(source.match(/tmux send-keys[^\\n]+\"exec /g)).toHaveLength(4);
+        // One per framework per resume/fresh path. bin/hafleet-up carries three
+        // frameworks (claude, codex, hermes) so six; remote/bin/hafleet-up is a
+        // separately maintained file — MANAGED_SPECS sources it directly rather
+        // than copying from bin/hafleet-up — and still has only claude and codex.
+        // KNOWN GAP, pinned here so the divergence stays visible and adding a
+        // framework still forces the new launch sites to be reviewed.
+        const launchSites = source.match(/tmux send-keys[^\\n]+\"exec /g);
+        expect(launchSites, file).toHaveLength(file.startsWith('remote/') ? 4 : 6);
         expect(source).not.toContain('dangerously-bypass-hook-trust');
         expect(source).not.toContain('timeout = 330');
       }
@@ -468,7 +475,7 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('launchers keep sandbox defaults and wire only supported adapters', () => {
-    for (const file of ['bin/agent-up', 'remote/bin/agent-up']) {
+    for (const file of ['bin/hafleet-up', 'remote/bin/hafleet-up']) {
       const source = readFileSync(file, 'utf8');
       expect(source).toContain('CLAUDE_FLAGS="--permission-mode auto"');
       expect(source).toContain('--dangerously-load-development-channels');
@@ -483,7 +490,7 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('launchers_clear_ambient_anthropic_key_without_explicit_profile', () => {
-    for (const file of ['bin/agent-up', 'remote/bin/agent-up']) {
+    for (const file of ['bin/hafleet-up', 'remote/bin/hafleet-up']) {
       const source = readFileSync(file, 'utf8');
       expect(source).toContain(
         'if [ "$TYPE" = "claude" ] && [ -z "${SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY:-}" ]; then',

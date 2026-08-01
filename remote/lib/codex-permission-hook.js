@@ -11,32 +11,32 @@ import {
   resolveAndConsumeRuntimeApproval,
 } from './runtime-approval-client.js';
 
-const HOOK_DIGEST_ARGUMENT = '--agentchat-hook-sha256=';
-const TRUSTED_AGENT_CHAT_COORDINATION_TOOLS = new Set([
-  'mcp__agent_chat__whoami',
-  'mcp__agent_chat__send_message',
-  'mcp__agent_chat__post',
-  'mcp__agent_chat__check_inbox',
-  'mcp__agent_chat__check_group',
-  'mcp__agent_chat__list_tasks',
-  'mcp__agent_chat__get_task',
-  'mcp__agent_chat__accept_task',
-  'mcp__agent_chat__transition_task',
-  'mcp__agent_chat__comment_task',
-  'mcp__agent_chat__update_task_execution',
+const HOOK_DIGEST_ARGUMENT = '--hafleet-hook-sha256=';
+const TRUSTED_HAFLEET_COORDINATION_TOOLS = new Set([
+  'mcp__hafleet__whoami',
+  'mcp__hafleet__send_message',
+  'mcp__hafleet__post',
+  'mcp__hafleet__check_inbox',
+  'mcp__hafleet__check_group',
+  'mcp__hafleet__list_tasks',
+  'mcp__hafleet__get_task',
+  'mcp__hafleet__accept_task',
+  'mcp__hafleet__transition_task',
+  'mcp__hafleet__comment_task',
+  'mcp__hafleet__update_task_execution',
 ]);
-const AGENT_CHAT_ATTACHMENT_TOOLS = new Set([
-  'mcp__agent_chat__send_message',
-  'mcp__agent_chat__post',
+const HAFLEET_ATTACHMENT_TOOLS = new Set([
+  'mcp__hafleet__send_message',
+  'mcp__hafleet__post',
 ]);
 
 function resolveAgentToken(agentName, env = process.env) {
-  const explicit = typeof env.AGENTCHAT_AGENT_TOKEN === 'string' ? env.AGENTCHAT_AGENT_TOKEN.trim() : '';
+  const explicit = typeof env.HAFLEET_AGENT_TOKEN === 'string' ? env.HAFLEET_AGENT_TOKEN.trim() : '';
   if (explicit) return explicit;
-  const stateDir = typeof env.AGENTCHAT_AGENT_STATE_DIR === 'string' ? env.AGENTCHAT_AGENT_STATE_DIR.trim() : '';
-  const home = typeof env.AGENTCHAT_HOMEDIR === 'string' && env.AGENTCHAT_HOMEDIR.trim()
-    ? path.resolve(env.AGENTCHAT_HOMEDIR.trim())
-    : path.join(os.homedir(), '.agentchat');
+  const stateDir = typeof env.HAFLEET_AGENT_STATE_DIR === 'string' ? env.HAFLEET_AGENT_STATE_DIR.trim() : '';
+  const home = typeof env.HAFLEET_HOMEDIR === 'string' && env.HAFLEET_HOMEDIR.trim()
+    ? path.resolve(env.HAFLEET_HOMEDIR.trim())
+    : path.join(os.homedir(), '.hafleet');
   const tokenPath = stateDir
     ? path.join(stateDir, 'agent-token')
     : path.join(home, 'agents', `agent_${agentName}`, 'state', 'agent-token');
@@ -49,8 +49,8 @@ function stableJson(value) {
 
 export function codexPermissionRequestNeedsOwnerApproval(input) {
   const toolName = typeof input?.tool_name === 'string' ? input.tool_name.trim() : '';
-  if (!TRUSTED_AGENT_CHAT_COORDINATION_TOOLS.has(toolName)) return true;
-  if (!AGENT_CHAT_ATTACHMENT_TOOLS.has(toolName)) return false;
+  if (!TRUSTED_HAFLEET_COORDINATION_TOOLS.has(toolName)) return true;
+  if (!HAFLEET_ATTACHMENT_TOOLS.has(toolName)) return false;
 
   const toolInput = input?.tool_input;
   if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) return true;
@@ -145,7 +145,7 @@ async function decideCodexPermission({
       denial_reason: 'trusted_agent_chat_coordination',
     };
   }
-  const apiBase = (env.AGENT_CHAT_API || 'http://127.0.0.1:8090').trim().replace(/\/$/, '');
+  const apiBase = (env.HAFLEET_API || 'http://127.0.0.1:8090').trim().replace(/\/$/, '');
   const api = providedApi || (async (method, apiPath, body) => {
     const options = {
       method,
@@ -165,7 +165,7 @@ async function decideCodexPermission({
   const created = await api('POST', '/api/approvals', buildCodexApprovalRequest(
     input,
     agentName,
-    (env.AGENTCHAT_PROJECT_ID || '').trim(),
+    (env.HAFLEET_PROJECT_ID || '').trim(),
   ));
   const approval = created?.approval;
   if (!approval) throw new Error('approval API returned no request');

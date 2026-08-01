@@ -8,7 +8,7 @@ import { prepareBridgeContainerOwnership } from '../src/bridge-container-owner.m
 const runtimes = [];
 
 function runtime() {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'agentchat-bridge-container-owner-'));
+  const root = mkdtempSync(path.join(os.tmpdir(), 'hafleet-bridge-container-owner-'));
   runtimes.push(root);
   mkdirSync(path.join(root, 'data', 'matrix'), { recursive: true });
   mkdirSync(path.join(root, 'data', 'services-local'), { recursive: true });
@@ -42,7 +42,7 @@ describe('bridge container owner preparation', () => {
     const markerPath = path.join(root, 'data', 'services-local', 'bridge-container-owner.json');
     writeJson(ownerPath, { pid: 1, hostname: 'old-compose-container' });
     writeJson(markerPath, {
-      managedBy: 'agentchat-services-compose',
+      managedBy: 'hafleet-services-compose',
       hostname: 'old-compose-container',
     });
 
@@ -54,7 +54,7 @@ describe('bridge container owner preparation', () => {
     expect(result.recovered).toBe(true);
     expect(() => readFileSync(ownerPath, 'utf8')).toThrow();
     expect(JSON.parse(readFileSync(markerPath, 'utf8'))).toMatchObject({
-      managedBy: 'agentchat-services-compose',
+      managedBy: 'hafleet-services-compose',
       hostname: 'new-compose-container',
     });
   });

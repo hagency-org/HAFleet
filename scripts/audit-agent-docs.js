@@ -5,15 +5,15 @@ import { resolveAgentDocsPaths, resolveV1ManifestForAgent } from '../lib/agent-h
 
 const ROOT = process.cwd();
 const RUNTIME_ROOT = (() => {
-  const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
+  const raw = String(process.env.HAFLEET_RUNTIME_DIR || '').trim();
   return raw ? path.resolve(raw) : ROOT;
 })();
 const DATA_AGENTS_DIR = path.join(RUNTIME_ROOT, 'data', 'agents');
-const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
+const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.HAFLEET_BACKEND_PORT || '8090', 10);
 const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
   ? DEFAULT_BACKEND_PORT_RAW
   : 8090;
-const DEFAULT_BACKEND_URL = (process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
+const DEFAULT_BACKEND_URL = (process.env.HAFLEET_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
 const BACKEND_URL = (process.env.AGENT_AUDIT_BACKEND_URL || DEFAULT_BACKEND_URL).trim().replace(/\/$/, '');
 
 function parseArgs(argv) {

@@ -15,7 +15,7 @@ Approved bounds:
 - keep generated standalone remote package support as secondary packaging;
 - do not make local delivery use push relay by default in this phase;
 - keep shared bearer credentials and trusted-local dashboard as compatibility decisions until Phase 3;
-- do not edit or synchronize `bin/agent-up` and `remote/bin/agent-up` in Phase 0/1.
+- do not edit or synchronize `bin/hafleet-up` and `remote/bin/hafleet-up` in Phase 0/1.
 
 ## Frozen Terms
 
@@ -40,9 +40,9 @@ Approved bounds:
 
 ## Package Shape Rules
 
-- Root `bin/agentchat` is the full checkout CLI.
-- `remote/bin/agentchat` is a remote-profile CLI and must advertise only commands included in the remote package.
-- `remote/bin/agent-up` is temporarily profile-specific and frozen until launch work clears.
+- Root `bin/hafleet` is the full checkout CLI.
+- `remote/bin/hafleet` is a remote-profile CLI and must advertise only commands included in the remote package.
+- `remote/bin/hafleet-up` is temporarily profile-specific and frozen until launch work clears.
 - Mirrored remote files must match root unless explicitly listed as profile-specific.
 - Generated `remote-dist/` is build output and should not be committed as a partial artifact.
 - Runtime artifacts such as `.env`, `.DS_Store`, logs, `node_modules`, package locks, and launchd runner scripts must stay out of git.
@@ -51,15 +51,15 @@ Approved bounds:
 
 | Command | Root Checkout Scope | Remote Relay Scope |
 | --- | --- | --- |
-| `agentchat up` | Start or resume a tmux agent on the current runtime host. | Same, using remote launch profile. |
-| `agentchat down` | Stop a tmux agent on the current runtime host; backend update is best effort. | Same. |
-| `agentchat ls` | Host-local session view plus backend context. | Host-local session view plus central backend context. |
-| `agentchat send` | Inject into a host-local target. | Inject into a host-local target. |
-| `agentchat update` | Checkout/runtime update helper; service side effects depend on local install. | Remote checkout/package update helper. |
-| `agentchat service` | Service control for configured local/remote profiles. | Remote service control only. |
-| `agentchat verify-remote` | Verify a remote runtime host from checkout. | Verify this remote host against central backend. |
-| `agentchat check-mcp` | Full checkout MCP wiring check. | Not packaged in Phase 1. |
-| `agentchat up-v1`, `project`, `graph`, `resume-id`, `benchmark` | Full checkout commands. | Not packaged in Phase 1. |
+| `hafleet up` | Start or resume a tmux agent on the current runtime host. | Same, using remote launch profile. |
+| `hafleet down` | Stop a tmux agent on the current runtime host; backend update is best effort. | Same. |
+| `hafleet ls` | Host-local session view plus backend context. | Host-local session view plus central backend context. |
+| `hafleet send` | Inject into a host-local target. | Inject into a host-local target. |
+| `hafleet update` | Checkout/runtime update helper; service side effects depend on local install. | Remote checkout/package update helper. |
+| `hafleet service` | Service control for configured local/remote profiles. | Remote service control only. |
+| `hafleet verify-remote` | Verify a remote runtime host from checkout. | Verify this remote host against central backend. |
+| `hafleet check-mcp` | Full checkout MCP wiring check. | Not packaged in Phase 1. |
+| `hafleet up-v1`, `project`, `graph`, `resume-id`, `benchmark` | Full checkout commands. | Not packaged in Phase 1. |
 
 ## Phase 1 Gate
 
@@ -68,6 +68,6 @@ Phase 1 is limited to package honesty:
 - remote CLI help and dispatch must match included files;
 - dispatch targets must be checked for root and remote CLIs;
 - remote shared `lib` mirrors must include transitive dependencies;
-- remote sync checks may pass while explicitly treating `remote/bin/agent-up` as profile-specific pending Phase 5.
+- remote sync checks may pass while explicitly treating `remote/bin/hafleet-up` as profile-specific pending Phase 5.
 
 Anything that changes runtime observation, credentials, path resolution, launch internals, service semantics, or old-doc archival remains outside Phase 0/1.

@@ -34,17 +34,17 @@ describe('resolveBindHost', () => {
 });
 
 describe('service bind wiring', () => {
-  test('backend reads AGENT_CHAT_BACKEND_HOST through resolveBindHost', () => {
+  test('backend reads HAFLEET_BACKEND_HOST through resolveBindHost', () => {
     const src = readFileSync('backend-v2.js', 'utf-8');
-    expect(src).toContain('resolveBindHost(process.env.AGENT_CHAT_BACKEND_HOST)');
+    expect(src).toContain('resolveBindHost(process.env.HAFLEET_BACKEND_HOST)');
     // The hardcoded literal default must be gone, but loopback must remain the
     // effective default via resolveBindHost.
     expect(src).not.toContain("host = '127.0.0.1' } = {}");
   });
 
-  test('dashboard reads AGENT_CHAT_WEB_HOST through resolveBindHost', () => {
+  test('dashboard reads HAFLEET_WEB_HOST through resolveBindHost', () => {
     const src = readFileSync('server.js', 'utf-8');
-    expect(src).toContain('resolveBindHost(process.env.AGENT_CHAT_WEB_HOST)');
+    expect(src).toContain('resolveBindHost(process.env.HAFLEET_WEB_HOST)');
     expect(src).not.toContain("host = '127.0.0.1' } = {}");
   });
 

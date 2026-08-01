@@ -14,9 +14,9 @@ describe('deployment configuration', () => {
     expect(readFileSync('.nvmrc', 'utf-8').trim()).toBe('22');
   });
 
-  test('benchmark runtime defaults under ~/.agentchat', () => {
-    expect(defaultBenchmarkRuntimeRoot({})).toBe(path.resolve(os.homedir(), '.agentchat', 'bench-runtime'));
-    expect(defaultBenchmarkRuntimeRoot({ AGENT_CHAT_BENCH_RUNTIME_DIR: '/tmp/custom-bench' })).toBe('/tmp/custom-bench');
+  test('benchmark runtime defaults under ~/.hafleet', () => {
+    expect(defaultBenchmarkRuntimeRoot({})).toBe(path.resolve(os.homedir(), '.hafleet', 'bench-runtime'));
+    expect(defaultBenchmarkRuntimeRoot({ HAFLEET_BENCH_RUNTIME_DIR: '/tmp/custom-bench' })).toBe('/tmp/custom-bench');
   });
 
   test('startup config treats API_TOKEN as required', () => {
@@ -81,9 +81,9 @@ describe('deployment configuration', () => {
       encoding: 'utf-8',
       env: {
         ...process.env,
-        AGENTCHAT_WRAPPER_SMOKE: '1',
+        HAFLEET_WRAPPER_SMOKE: '1',
         PUSH_RELAY_MODE: 'local',
-        AGENT_CHAT_SERVER: 'remote-a',
+        HAFLEET_SERVER: 'remote-a',
       },
       timeout: 3000,
     });
@@ -97,30 +97,30 @@ describe('deployment configuration', () => {
       encoding: 'utf-8',
       env: {
         ...process.env,
-        AGENTCHAT_WRAPPER_SMOKE: '1',
+        HAFLEET_WRAPPER_SMOKE: '1',
         PUSH_RELAY_MODE: 'remote',
-        AGENT_CHAT_SERVER: 'local',
+        HAFLEET_SERVER: 'local',
       },
       timeout: 3000,
     });
 
     expect(localServer.status).toBe(1);
-    expect(localServer.stderr).toContain('AGENT_CHAT_SERVER to be a non-local server id');
+    expect(localServer.stderr).toContain('HAFLEET_SERVER to be a non-local server id');
     expect(localServer.stderr).not.toContain('startup error');
   });
 
   test('.env.example documents deployment-facing optional variables', () => {
     const envExample = readFileSync('.env.example', 'utf-8');
     for (const name of [
-      'AGENT_CHAT_API',
-      'AGENT_CHAT_SERVER',
-      'AGENT_CHAT_RUNTIME_DIR',
-      'AGENT_CHAT_BACKEND_PORT',
-      'AGENT_CHAT_WEB_PORT',
-      'AGENT_CHAT_WEB_URL',
-      'AGENT_CHAT_QUEUE_URL',
-      'AGENTCHAT_HOMEDIR',
-      'AGENT_CHAT_DASHBOARD_TOKEN',
+      'HAFLEET_API',
+      'HAFLEET_SERVER',
+      'HAFLEET_RUNTIME_DIR',
+      'HAFLEET_BACKEND_PORT',
+      'HAFLEET_WEB_PORT',
+      'HAFLEET_WEB_URL',
+      'HAFLEET_QUEUE_URL',
+      'HAFLEET_HOMEDIR',
+      'HAFLEET_DASHBOARD_TOKEN',
       'PUSH_RELAY_MODE',
       'PUSH_RELAY_INCLUDE_LEASE_FIELDS',
       'PUSH_RELAY_SCAN_INTERVAL_MS',
@@ -138,7 +138,7 @@ describe('deployment configuration', () => {
       'MCP_FETCH_TIMEOUT_MS',
       'MCP_FETCH_RETRIES',
       'MCP_FETCH_BACKOFF_MS',
-      'AGENTCHAT_SUBCONSCIOUS_EVENT_TOKEN',
+      'HAFLEET_SUBCONSCIOUS_EVENT_TOKEN',
     ]) {
       expect(envExample).toMatch(new RegExp(`^#?${name}=`, 'm'));
     }

@@ -35,9 +35,9 @@ describe('Matrix owner approval bridge', () => {
   };
 
   beforeAll(async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-approval-'));
-    envSnapshot = snapshotEnv(['AGENT_CHAT_RUNTIME_DIR', 'MATRIX_AGENT_PREFIX']);
-    process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-bridge-approval-'));
+    envSnapshot = snapshotEnv(['HAFLEET_RUNTIME_DIR', 'MATRIX_AGENT_PREFIX']);
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
     process.env.MATRIX_AGENT_PREFIX = 'ac_';
     const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
     ({
@@ -62,8 +62,8 @@ describe('Matrix owner approval bridge', () => {
     const serialized = JSON.stringify(content);
 
     expect(content).toMatchObject({
-      msgtype: 'com.agentchat.approval.status.v1',
-      'com.agentchat.approval': {
+      msgtype: 'com.hafleet.approval.status.v1',
+      'com.hafleet.approval': {
         version: 1,
         kind: 'status',
         agent: 'wf_coordinator',
@@ -80,8 +80,8 @@ describe('Matrix owner approval bridge', () => {
   test('owner_dm_approval_request_contains_structured_actions', () => {
     const content = buildOwnerApprovalRequest(approval);
 
-    expect(content.msgtype).toBe('com.agentchat.approval.request.v1');
-    expect(content['com.agentchat.approval']).toMatchObject({
+    expect(content.msgtype).toBe('com.hafleet.approval.request.v1');
+    expect(content['com.hafleet.approval']).toMatchObject({
       agent: 'wf_coordinator',
       project: 'robrix2',
       project_room_id: '!project:palpo.test',
@@ -108,9 +108,9 @@ describe('Matrix owner approval bridge', () => {
       event_id: '$verdict',
       sender: '@alex:palpo.test',
       content: {
-        msgtype: 'com.agentchat.approval.verdict.v1',
+        msgtype: 'com.hafleet.approval.verdict.v1',
         body: 'Approval response submitted',
-        'com.agentchat.approval': {
+        'com.hafleet.approval': {
           version: 1,
           kind: 'verdict',
           agent: approval.agent,
@@ -153,9 +153,9 @@ describe('Matrix owner approval bridge', () => {
       ...encrypted,
       type: 'm.room.message',
       content: {
-        msgtype: 'com.agentchat.approval.verdict.v1',
+        msgtype: 'com.hafleet.approval.verdict.v1',
         body: 'Approval response submitted',
-        'com.agentchat.approval': {
+        'com.hafleet.approval': {
           version: 1,
           kind: 'verdict',
           agent: approval.agent,
@@ -226,7 +226,7 @@ describe('Matrix owner approval bridge', () => {
     bridge.botClient = {
       sendMessage: vi.fn().mockImplementation(async (_room, content) => {
         order.push('private');
-        expect(content['com.agentchat.approval'].input_preview).toContain('gh issue create');
+        expect(content['com.hafleet.approval'].input_preview).toContain('gh issue create');
         return '$private';
       }),
     };
@@ -247,16 +247,16 @@ describe('Matrix owner approval bridge', () => {
   test('plaintext approval diagnostics require explicit non-production opt-in', () => {
     expect(resolveApprovalDmMode({})).toBe('required');
     expect(() => resolveApprovalDmMode({
-      AGENTCHAT_APPROVAL_DM_MODE: 'plaintext-test',
-    })).toThrow('AGENTCHAT_ALLOW_PLAINTEXT_APPROVAL_TEST=1');
+      HAFLEET_APPROVAL_DM_MODE: 'plaintext-test',
+    })).toThrow('HAFLEET_ALLOW_PLAINTEXT_APPROVAL_TEST=1');
     expect(() => resolveApprovalDmMode({
-      AGENTCHAT_APPROVAL_DM_MODE: 'plaintext-test',
-      AGENTCHAT_ALLOW_PLAINTEXT_APPROVAL_TEST: '1',
+      HAFLEET_APPROVAL_DM_MODE: 'plaintext-test',
+      HAFLEET_ALLOW_PLAINTEXT_APPROVAL_TEST: '1',
       NODE_ENV: 'production',
     })).toThrow('forbidden in production');
     expect(resolveApprovalDmMode({
-      AGENTCHAT_APPROVAL_DM_MODE: 'plaintext-test',
-      AGENTCHAT_ALLOW_PLAINTEXT_APPROVAL_TEST: '1',
+      HAFLEET_APPROVAL_DM_MODE: 'plaintext-test',
+      HAFLEET_ALLOW_PLAINTEXT_APPROVAL_TEST: '1',
       NODE_ENV: 'test',
     })).toBe('plaintext-test');
   });

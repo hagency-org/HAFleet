@@ -61,7 +61,7 @@ and reject repository path escape. The production profile maps:
 
 ```text
 backend   -> node backend-v2.js     -> HTTP /health
-dashboard -> node server.js         -> TCP AGENT_CHAT_WEB_PORT
+dashboard -> node server.js         -> TCP HAFLEET_WEB_PORT
 bridge    -> node bridge-matrix.js  -> process + backend dependency
 relay     -> node push-relay.js     -> process + backend dependency
 ```
@@ -74,7 +74,7 @@ Expected: PASS.
 
 **Files:**
 - Create: `src/local-service-supervisor.mjs`
-- Create: `services/agentchat-services.mjs`
+- Create: `services/hafleet-services.mjs`
 - Create: `tests/fixtures/service-child.mjs`
 - Test: `tests/local-service-supervisor.test.js`
 
@@ -82,7 +82,7 @@ Expected: PASS.
 - Produces: `LocalServiceSupervisor`, `readServiceStatus`, and
   `diagnoseServices`.
 - Runtime files: `<runtime>/data/services-local/{supervisor.pid,state.json}`.
-- CLI: `node services/agentchat-services.mjs start|run|status|doctor|stop`.
+- CLI: `node services/hafleet-services.mjs start|run|status|doctor|stop`.
 
 - [x] **Step 1: Write failing process tests**
 
@@ -223,7 +223,7 @@ selector tests together; then run `node --check` on new `.mjs` files and
 - [x] **Step 3: Validate the OpenFab task contract**
 
 Run `agent-spec parse` and `agent-spec lint --min-score 0.7` on
-`specs/phase1/fsf0-b1-agentchat-services.spec.md`; expected quality 100%.
+`specs/phase1/fsf0-b1-hafleet-services.spec.md`; expected quality 100%.
 
 - [ ] **Step 4: Present for user testing**
 

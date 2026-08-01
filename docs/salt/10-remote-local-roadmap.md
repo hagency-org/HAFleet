@@ -34,11 +34,11 @@ Suggested files:
 - `docs/salt/10-remote-local-roadmap.md`
 - `docs/salt/11-remote-local-phase0-terms.md`
 
-Root docs such as `README.md`, `OPERATIONS.md`, `remote/README.md`, and `skills/agent-chat/SKILL.md` are later synchronization targets, not Phase 0 edit targets.
+Root docs such as `README.md`, `OPERATIONS.md`, `remote/README.md`, and `skills/hafleet/SKILL.md` are later synchronization targets, not Phase 0 edit targets.
 
 ## Phase 1: Make Package Shape Honest
 
-Type: packaging/docs/tests. Avoid `agent-up` internals until approved.
+Type: packaging/docs/tests. Avoid `hafleet-up` internals until approved.
 
 Objectives:
 
@@ -46,7 +46,7 @@ Objectives:
   - git checkout profile, or
   - standalone generated package, or
   - both with explicit tests.
-- Make `remote/bin/agentchat` advertise only packaged commands.
+- Make `remote/bin/hafleet` advertise only packaged commands.
 - Add dispatch-target existence checks for every command in every profile.
 - Include all transitive shared library deps, including `lib/blocked-patterns.js`.
 - Stop committing partial `remote-dist/`, or commit a complete checked artifact.
@@ -61,7 +61,7 @@ Exit criteria:
 
 Known current blockers:
 
-- `remote/bin/agent-up` drift is under active launch work and is explicitly deferred.
+- `remote/bin/hafleet-up` drift is under active launch work and is explicitly deferred.
 - Remote package checks must still prove every advertised command dispatches to an included executable.
 
 ## Phase 2: Converge Runtime Observation
@@ -71,7 +71,7 @@ Type: runtime code after approval.
 Objectives:
 
 - Run central-local through the same runtime host heartbeat path as remote.
-- Make `AGENT_CHAT_SERVER` explicit for every runtime host.
+- Make `HAFLEET_SERVER` explicit for every runtime host.
 - Move local backend tmux sweep behind a compatibility flag.
 - Ensure only one observer updates `mcpPresent`, activity, and blocked state for a hosted agent.
 - Preserve missed-message recovery through inbox, not through delivery memory.
@@ -121,7 +121,7 @@ Type: shared library and launcher work after approval.
 Objectives:
 
 - Use one resolver for home root, agent home, state dir, workdir, token path, pid path, and media cache.
-- Make `AGENTCHAT_AGENT_STATE_DIR` a derived injected value, not a human-authored truth source.
+- Make `HAFLEET_AGENT_STATE_DIR` a derived injected value, not a human-authored truth source.
 - Move MCP media cache under agent state or runtime data.
 - Make push relay pid lookup use the same resolver as v1 homes.
 
@@ -129,7 +129,7 @@ Exit criteria:
 
 - MCP pid and token paths resolve the same way for local and remote.
 - No component writes MCP cache into arbitrary project cwd.
-- Tests cover runtime-dir derived home root and explicit `AGENTCHAT_HOMEDIR`.
+- Tests cover runtime-dir derived home root and explicit `HAFLEET_HOMEDIR`.
 
 Related repair table entries:
 
@@ -139,11 +139,11 @@ Related repair table entries:
 
 ## Phase 5: Decompose Launch
 
-Type: launcher refactor after active `agent-up` work clears.
+Type: launcher refactor after active `hafleet-up` work clears.
 
 Objectives:
 
-- Extract launch responsibilities from `agent-up` into testable pieces:
+- Extract launch responsibilities from `hafleet-up` into testable pieces:
   - profile config;
   - v1 home resolver;
   - MCP config generation;
@@ -152,7 +152,7 @@ Objectives:
   - resume/path recovery;
   - Claude/Codex differences.
 - Generate or share remote launcher behavior instead of maintaining hand-edited mirrors.
-- Keep `bin/agent-up` and `remote/bin/agent-up` untouched until this phase is explicitly approved.
+- Keep `bin/hafleet-up` and `remote/bin/hafleet-up` untouched until this phase is explicitly approved.
 
 Exit criteria:
 
@@ -163,7 +163,7 @@ Exit criteria:
 Related repair table entries:
 
 - R-011 MCP launch auth.
-- R-014 remote `agent-up` drift.
+- R-014 remote `hafleet-up` drift.
 - R-022 remote package sync.
 
 ## Phase 6: CLI And Ops Profile Cleanup
@@ -172,15 +172,15 @@ Type: CLI/docs/tests after package and launch shape are clear.
 
 Objectives:
 
-- Make `agentchat service` require explicit profile or derive safe profile from install metadata.
-- Rename or scope `agentchat update` if it remains remote-specific.
-- Make `agent-ls` explicitly distinguish host-local sessions from backend registry.
-- Make `agent-down` clearly host-local.
+- Make `hafleet service` require explicit profile or derive safe profile from install metadata.
+- Rename or scope `hafleet update` if it remains remote-specific.
+- Make `hafleet-ls` explicitly distinguish host-local sessions from backend registry.
+- Make `hafleet-down` clearly host-local.
 - Advertise `check-mcp` only where it is packaged.
 
 Exit criteria:
 
-- `agentchat <command> --help` states profile support.
+- `hafleet <command> --help` states profile support.
 - Remote install cannot expose commands that fail due missing targets.
 - Operations docs map each incident command to central or remote scope.
 
@@ -219,7 +219,7 @@ Phase 0 docs terms
             -> Phase 7 CI gates
 ```
 
-Phase 3 and Phase 4 can partly run in parallel after Phase 2 starts, but Phase 5 should wait until active `agent-up` work is no longer in flight.
+Phase 3 and Phase 4 can partly run in parallel after Phase 2 starts, but Phase 5 should wait until active `hafleet-up` work is no longer in flight.
 
 ## Design Decisions Needed
 

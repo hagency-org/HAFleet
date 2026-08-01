@@ -4,7 +4,7 @@ export const DEFAULT_APPROVAL_TTL_MS = 5 * 60 * 1000;
 export const APPROVAL_HOOK_TIMEOUT_MARGIN_SECONDS = 60;
 
 export function resolveApprovalTtlMs(env = process.env) {
-  const raw = Number.parseInt(env.AGENTCHAT_APPROVAL_TTL_MS || String(DEFAULT_APPROVAL_TTL_MS), 10);
+  const raw = Number.parseInt(env.HAFLEET_APPROVAL_TTL_MS || String(DEFAULT_APPROVAL_TTL_MS), 10);
   return Number.isFinite(raw) && raw > 0 ? Math.max(5_000, raw) : DEFAULT_APPROVAL_TTL_MS;
 }
 

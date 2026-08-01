@@ -1,11 +1,11 @@
 spec: project
-name: "agent-chat project contract"
+name: "hafleet project contract"
 tags: [project, security, matrix, agent-runtime]
 ---
 
 ## Intent
 
-Keep agent-chat's local coding-agent runtime, Matrix bridge, and control plane
+Keep hafleet's local coding-agent runtime, Matrix bridge, and control plane
 safe by default and mechanically verifiable. Durable project truth belongs in
 the agent-spec knowledge layer, while each bounded change is implemented from
 an executable task contract.
@@ -44,7 +44,7 @@ an executable task contract.
 - skills/**
 - lib/**
 - tests/**
-- bin/agentchat-sync-skills
+- bin/hafleet-sync-skills
 - install*.sh
 - uninstall*.sh
 - backend-v2.js

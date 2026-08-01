@@ -40,7 +40,7 @@ describe('default install is unchanged', () => {
   });
 
   test('an empty value is the same as unset', () => {
-    // `AGENT_CHAT_SESSION_ALLOWLIST=` in a .env must not lock the host out.
+    // `HAFLEET_SESSION_ALLOWLIST=` in a .env must not lock the host out.
     const p = createSessionPolicy({ allowlist: '', denylist: '' });
     expect(p.unrestricted).toBe(true);
     expect(p.allows('ps2')).toBe(true);
@@ -175,8 +175,8 @@ describe('filter', () => {
 describe('sessionPolicyFromEnv', () => {
   test('reads both vars from an injected env', () => {
     const policy = sessionPolicyFromEnv({
-      AGENT_CHAT_SESSION_DENYLIST: 'ps2',
-      AGENT_CHAT_SESSION_ALLOWLIST: '',
+      HAFLEET_SESSION_DENYLIST: 'ps2',
+      HAFLEET_SESSION_ALLOWLIST: '',
     });
     expect(policy.allows('ps2')).toBe(false);
     expect(policy.allows('other')).toBe(true);

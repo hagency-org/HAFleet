@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentchat.local/schemas/approval/public-status-v1.schema.json",
+  "$id": "https://hafleet.local/schemas/approval/public-status-v1.schema.json",
   "title": "Agent Chat public approval status v1",
   "type": "object",
   "additionalProperties": true,
-  "required": ["msgtype", "body", "com.agentchat.approval"],
+  "required": ["msgtype", "body", "com.hafleet.approval"],
   "properties": {
-    "msgtype": { "const": "com.agentchat.approval.status.v1" },
+    "msgtype": { "const": "com.hafleet.approval.status.v1" },
     "body": { "type": "string", "minLength": 1, "maxLength": 512 },
-    "com.agentchat.approval": {
+    "com.hafleet.approval": {
       "type": "object",
       "additionalProperties": false,
       "required": ["version", "kind", "agent", "project", "state"],

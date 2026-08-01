@@ -3,7 +3,7 @@
 Archive notice: This is historical architecture/audit material, not the current deploy or incident runbook. Current operator procedures live in root `README.md` and `OPERATIONS.md`; verify behavior against code before using details here.
 
 Date: 2026-03-28
-Scope: All agentchat services, data flows, subsystems, external dependencies, and configuration model
+Scope: All hafleet services, data flows, subsystems, external dependencies, and configuration model
 Author: ac-researcher (task 5.38)
 
 ---
@@ -253,14 +253,14 @@ Source: `server.js:11-19` (config), `server.js:2450-2590` (idle detection and de
 
 **Size**: ~3400 lines | **Port**: None (client only) | **Process**: Long-running bridge
 
-Provides bidirectional message bridging between agentchat and a Matrix homeserver. Creates puppet accounts for each agent and a management bot for room operations.
+Provides bidirectional message bridging between hafleet and a Matrix homeserver. Creates puppet accounts for each agent and a management bot for room operations.
 
 #### Architecture
 
 ```
 Matrix Homeserver
   │
-  ├── Bot account (@agentchat-bot:domain)
+  ├── Bot account (@hafleet-bot:domain)
   │     └── Room management, !commands, invite handling
   │
   └── Puppet accounts (@ac_<agentname>:domain)
@@ -282,7 +282,7 @@ Matrix Homeserver
 |-----------|---------|--------|
 | Account registration | Register bot + puppet Matrix accounts with derived passwords | `bridge-matrix.js:374-426` |
 | Token management | Obtain and cache Matrix access tokens | `bridge-matrix.js:428-477` |
-| Room-group mapping | Map Matrix rooms to agentchat groups, persisted to `data/room-mapping.json` | `bridge-matrix.js:113-147` |
+| Room-group mapping | Map Matrix rooms to hafleet groups, persisted to `data/room-mapping.json` | `bridge-matrix.js:113-147` |
 | Room creation | Create `[AC] groupName` rooms with correct membership | `bridge-matrix.js:3292-3338` |
 | DM rooms | Create direct-message rooms for agent pairs | `bridge-matrix.js:2883-3043` |
 | Puppet sending | Send messages as agent puppets in mapped rooms | `bridge-matrix.js:2771-2852` |
@@ -312,7 +312,7 @@ Source: `bridge-matrix.js:2335-2380` (SSE setup), `lib/eventsource-mini.js` (cus
 
 ### 2.4 MCP Server (lib/mcp-server-core.js)
 
-**Size**: 711 lines | **Port**: Dynamic per-agent | **Process**: One per agent (launched by agent-up)
+**Size**: 711 lines | **Port**: Dynamic per-agent | **Process**: One per agent (launched by hafleet-up)
 
 Each agent gets a dedicated MCP (Model Context Protocol) server that provides messaging tools. The agent's AI framework (Claude/Codex) calls these tools via the MCP protocol.
 
@@ -339,8 +339,8 @@ Source: `mcp-server-core.js:199-235` (staging), `mcp-server-core.js:368-439` (lo
 
 The MCP server auto-detects which agent it serves by checking (in order):
 1. `AGENT_NAME` env var
-2. `AGENTCHAT_AGENT_NAME` env var
-3. Path-based detection from CWD (extracts from `.agentchat/agents/agent_<name>/`)
+2. `HAFLEET_AGENT_NAME` env var
+3. Path-based detection from CWD (extracts from `.hafleet/agents/agent_<name>/`)
 
 Source: `mcp-server-core.js:13-50`.
 
@@ -348,7 +348,7 @@ Source: `mcp-server-core.js:13-50`.
 
 ### 2.5 Push Relay (lib/push-relay-core.js)
 
-**Size**: 822 lines | **Port**: None (client only) | **Process**: One per agent (launched by agent-up)
+**Size**: 822 lines | **Port**: None (client only) | **Process**: One per agent (launched by hafleet-up)
 
 The push relay subscribes to backend SSE and injects relevant messages into the agent's tmux pane, acting as a real-time notification system.
 
@@ -431,11 +431,11 @@ The `bin/` directory contains 22 operational scripts, all invocable from the com
 
 | Script | Purpose |
 |--------|---------|
-| `bin/agentchat` | Main CLI entry point — dispatches to subcommands |
-| `bin/agent-up` | Provision and launch an agent (local or remote) — ~350 lines |
-| `bin/agent-down` | Graceful agent shutdown — scrollback archival, resume-id capture, tmux kill — ~250 lines |
-| `bin/agent-ls` | List running agents and their status |
-| `bin/agent-send` | Send a message to an agent from the CLI |
+| `bin/hafleet` | Main CLI entry point — dispatches to subcommands |
+| `bin/hafleet-up` | Provision and launch an agent (local or remote) — ~350 lines |
+| `bin/hafleet-down` | Graceful agent shutdown — scrollback archival, resume-id capture, tmux kill — ~250 lines |
+| `bin/hafleet-ls` | List running agents and their status |
+| `bin/hafleet-send` | Send a message to an agent from the CLI |
 
 **Group Management**:
 
@@ -449,7 +449,7 @@ The `bin/` directory contains 22 operational scripts, all invocable from the com
 
 | Script | Purpose |
 |--------|---------|
-| `bin/agent-audit` | Audit agent state for inconsistencies |
+| `bin/hafleet-audit` | Audit agent state for inconsistencies |
 | `bin/agent-dashboard` | Quick terminal status view |
 | `bin/agent-task` | Query/update task state from CLI |
 
@@ -459,8 +459,8 @@ The `bin/` directory contains 22 operational scripts, all invocable from the com
 |--------|---------|
 | `bin/mcp-run` | Launch a standalone MCP server |
 | `bin/push-relay-run` | Launch a standalone push relay |
-| `bin/agentchat-prune-agents` | Clean up stale agent registrations |
-| `bin/agentchat-sync-skills` | Synchronize skill definitions across agents |
+| `bin/hafleet-prune-agents` | Clean up stale agent registrations |
+| `bin/hafleet-sync-skills` | Synchronize skill definitions across agents |
 
 ### 4.2 scripts/ Directory (Provisioning & Automation)
 
@@ -470,7 +470,7 @@ The `bin/` directory contains 22 operational scripts, all invocable from the com
 | `scripts/configure-v1-subconscious.js` | 455 | Install subconscious hooks into agent Claude config (`hooks.json` with 4 hook points) |
 | `scripts/write-v1-agent-task.js` | 360 | Write task state into the shared control plane (used by `./task-writer` wrapper) |
 | `scripts/write-supervisor-state.js` | 160 | Persist supervisor state to agent home |
-| `scripts/build-remote-package.sh` | 186 | Package agentchat for remote deployment (tar bundle) |
+| `scripts/build-remote-package.sh` | 186 | Package hafleet for remote deployment (tar bundle) |
 
 ### 4.3 Autodeploy Scripts
 
@@ -478,9 +478,9 @@ Three autodeploy variants, all git-poll-based with health-gated restarts:
 
 | Script | Lines | Purpose |
 |--------|-------|---------|
-| `scripts/agentchat-dev-autodeploy.sh` | 150 | Dev mode: pull + restart on any new commit, no health gate |
-| `scripts/agentchat-stable-autodeploy.sh` | 195 | Stable mode: pull → health check → graceful restart with agent preservation |
-| `scripts/agentchat-remote-autodeploy.sh` | 122 | Remote server: pull remote package → restart push-relay + MCP |
+| `scripts/hafleet-dev-autodeploy.sh` | 150 | Dev mode: pull + restart on any new commit, no health gate |
+| `scripts/hafleet-stable-autodeploy.sh` | 195 | Stable mode: pull → health check → graceful restart with agent preservation |
+| `scripts/hafleet-remote-autodeploy.sh` | 122 | Remote server: pull remote package → restart push-relay + MCP |
 
 All use `git fetch` + `git rev-parse` to detect new commits on their tracked branch.
 
@@ -541,7 +541,7 @@ Matrix Homeserver
 bridge-matrix.js
   │
   ├─► Room trust check: is this room trusted?
-  ├─► Room-group mapping: which agentchat group?
+  ├─► Room-group mapping: which hafleet group?
   ├─► Trust level: operator or external?
   │
   │ POST /api/messages { from: "@user:domain", to: "group-name", trustLevel: "operator"|"external" }
@@ -689,10 +689,10 @@ Source: `backend-v2.js:7580-7640` (cursor API), `mcp-server-core.js:287-365` (cu
 
 Agent provisioning creates the full home directory structure and configures all per-agent services.
 
-**Provisioning pipeline** (triggered by `agent-up`):
+**Provisioning pipeline** (triggered by `hafleet-up`):
 
 ```
-agent-up
+hafleet-up
   │
   ├─► scripts/provision-v1-agent-home.js
   │     ├─► Create directory tree: state/, workdir/, workdir/docs/, workdir/projects/, etc.
@@ -730,13 +730,13 @@ Source: `scripts/provision-v1-agent-home.js:1-726`, `scripts/configure-v1-subcon
 
 Agent sessions are managed through tmux with lifecycle hooks:
 
-**Startup** (agent-up):
+**Startup** (hafleet-up):
 1. Create named tmux session: `tmux new-session -d -s agent_<name>`
 2. Set environment variables in tmux session (API tokens, model config, paths)
 3. Launch MCP server and push relay as background processes
 4. Start the agent binary (claude/codex) in the foreground tmux pane
 
-**Shutdown** (agent-down):
+**Shutdown** (hafleet-down):
 1. Validate agent has no active task (unless `--force`)
 2. Capture scrollback: `tmux capture-pane` → archive to `state/scrollback-<timestamp>.txt`
 3. Capture resume-id from `state/resume-id` file
@@ -744,12 +744,12 @@ Agent sessions are managed through tmux with lifecycle hooks:
 5. Wait for graceful exit (30s Claude, 8s Codex), then kill tmux session
 6. Update agent status via `PATCH /api/agents/:name { status: "stopped" }`
 
-**Resume** (agent-up --resume):
+**Resume** (hafleet-up --resume):
 1. Read resume-id from `state/resume-id`
 2. Launch agent with `--resume <id>` flag — continues previous conversation context
 3. Re-launch MCP server and push relay
 
-Source: `bin/agent-up:1-350` (startup), `bin/agent-down:1-250` (shutdown).
+Source: `bin/hafleet-up:1-350` (startup), `bin/hafleet-down:1-250` (shutdown).
 
 ### 6.6 Supervisor System
 
@@ -836,7 +836,7 @@ Configuration is loaded from `.env` files at the project root. Variables are org
 | `AGENT_TOKEN_ENFORCEMENT` | `audit` | Per-agent token mode: `hard`, `soft`, `audit` |
 | `BRIDGE_SECRET` | (none) | Shared secret for bridge authentication |
 | `DATA_DIR` | `./data` | Directory for all JSON stores |
-| `AGENTCHAT_HOME` | `~/.agentchat` | Root for agent home directories |
+| `HAFLEET_HOMEDIR` | `~/.hafleet` | Root for agent home directories |
 | `MAX_MESSAGE_LENGTH` | `50000` | Maximum message body length |
 
 **Dashboard (server.js)**:
@@ -853,7 +853,7 @@ Configuration is loaded from `.env` files at the project root. Variables are org
 |----------|---------|---------|
 | `MATRIX_HOMESERVER_URL` | (required) | Matrix server URL |
 | `MATRIX_DOMAIN` | (required) | Matrix server domain for user IDs |
-| `MATRIX_BOT_USER` | `agentchat-bot` | Bot account username |
+| `MATRIX_BOT_USER` | `hafleet-bot` | Bot account username |
 | `MATRIX_BOT_PASSWORD` | (required) | Bot account password |
 | `MATRIX_PUPPET_PREFIX` | `ac_` | Prefix for puppet usernames |
 | `MATRIX_OPERATOR_MXIDS` | (none) | Comma-separated operator Matrix IDs |
@@ -889,7 +889,7 @@ Source: `.env.example:1-55`, `backend-v2.js:34-151`, `bridge-matrix.js:27-75`, `
 
 ### 8.2 Per-Agent Configuration (agent.json)
 
-Each agent has an `agent.json` in its home directory (`~/.agentchat/agents/agent_<name>/agent.json`) with:
+Each agent has an `agent.json` in its home directory (`~/.hafleet/agents/agent_<name>/agent.json`) with:
 
 | Field | Type | Purpose |
 |-------|------|---------|
@@ -911,14 +911,14 @@ Source: `scripts/provision-v1-agent-home.js:200-280`, `docs/v1-agent-home-contra
 Agent-up supports preset configurations via `--preset` flag:
 
 - Presets define model, token limits, compaction settings, and permissions
-- Stored in the agentchat configuration
+- Stored in the hafleet configuration
 - Override individual settings via command-line flags
 
-Source: `bin/agent-up:400-450` (preset loading).
+Source: `bin/hafleet-up:400-450` (preset loading).
 
 ### 8.4 Runtime State
 
-Per-agent runtime state in `~/.agentchat/agents/agent_<name>/state/`:
+Per-agent runtime state in `~/.hafleet/agents/agent_<name>/state/`:
 
 | File | Purpose |
 |------|---------|
@@ -929,4 +929,4 @@ Per-agent runtime state in `~/.agentchat/agents/agent_<name>/state/`:
 | `letta/` | Letta integration state |
 | `lock` | Process lock file to prevent duplicate launches |
 
-Source: `lib/agent-state.js`, `bin/agent-down:100-150` (scrollback capture).
+Source: `lib/agent-state.js`, `bin/hafleet-down:100-150` (scrollback capture).

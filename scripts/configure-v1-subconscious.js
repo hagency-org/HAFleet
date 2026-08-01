@@ -7,7 +7,7 @@ import { buildUpstreamClaudeSubconsciousPaths } from '../lib/upstream-claude-sub
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const TEMPLATE_ROOT = path.resolve(__dirname, '..', 'subconscious', 'claude-agentchat');
+const TEMPLATE_ROOT = path.resolve(__dirname, '..', 'subconscious', 'claude-hafleet');
 const HOOK_MARKER = 'hook-entry.mjs';
 
 function parseArgs(argv) {
@@ -87,9 +87,9 @@ function parsePositiveInt(value, fallback) {
 }
 
 function defaultBackendBaseUrl() {
-  const explicit = normalizeText(process.env.AGENT_CHAT_API, 2048);
+  const explicit = normalizeText(process.env.HAFLEET_API, 2048);
   if (explicit) return explicit.replace(/\/$/, '');
-  const port = parsePositiveInt(process.env.AGENT_CHAT_BACKEND_PORT, 8090);
+  const port = parsePositiveInt(process.env.HAFLEET_BACKEND_PORT, 8090);
   return `http://127.0.0.1:${port}`;
 }
 
@@ -329,9 +329,9 @@ function main() {
   const stateDir = normalizeAbsPath(args.stateDir, '--state-dir');
   const enabled = parseBool(args.enabled, true);
   const eventUrl = normalizeText(args.eventUrl, 2048)
-    || normalizeText(process.env.AGENTCHAT_SUBCONSCIOUS_EVENT_URL, 2048)
+    || normalizeText(process.env.HAFLEET_SUBCONSCIOUS_EVENT_URL, 2048)
     || defaultSubconsciousEventUrl();
-  const invokeUrl = normalizeText(process.env.AGENTCHAT_SUBCONSCIOUS_INVOKE_URL, 2048)
+  const invokeUrl = normalizeText(process.env.HAFLEET_SUBCONSCIOUS_INVOKE_URL, 2048)
     || deriveInvokeUrl(eventUrl)
     || defaultSubconsciousInvokeUrl();
 
@@ -339,7 +339,7 @@ function main() {
     throw new Error(`missing subconscious template root: ${TEMPLATE_ROOT}`);
   }
 
-  const pluginRoot = path.join(stateDir, 'subconscious', 'claude-agentchat');
+  const pluginRoot = path.join(stateDir, 'subconscious', 'claude-hafleet');
   const claudeDir = path.join(workdir, '.claude');
   const settingsPath = path.join(claudeDir, 'settings.json');
   const lettaPath = path.join(stateDir, 'letta.json');
@@ -385,7 +385,7 @@ function main() {
     updatedAt: new Date().toISOString(),
   }));
   writeJson(runtimeMetaPath, {
-    source: 'agentchat-v1',
+    source: 'hafleet-v1',
     backendMode: 'runtime-contract',
     reasoningRuntime: 'llm-compatible',
     memoryStore: {

@@ -1,8 +1,8 @@
-# Roadmap — matrix-Agent execution layer (agent-chat)
+# Roadmap — matrix-Agent execution layer (hafleet)
 
 The execution-layer counterpart to OpenFab's verify-thickness roadmap. Scope boundary:
 **OpenFab drives** (asks for "a `<role>` agent at `<capability>`, do this task") and signs the
-result; **agent-chat is matrix-Agent** — it owns *agent pooling, capability scheduling, and the
+result; **hafleet is matrix-Agent** — it owns *agent pooling, capability scheduling, and the
 6-role org matrix* (OpenFab pitch S8). This plan implements that here, incrementally, without
 disturbing OpenFab's trust line.
 
@@ -103,7 +103,7 @@ QA owner) set direction and hold the gate (the gate itself is OpenFab's N-of-M s
 - Persist a single-use, expiring request bound to agent, project, project room,
   owner MXID, DM room, upstream request id, and input digest. Empty or ambiguous
   ownership fails closed without administrator fallback.
-- Robrix2 renders structured events and emits button responses; agent-chat
+- Robrix2 renders structured events and emits button responses; hafleet
   validates the Matrix `event.sender` and owns the authorization decision.
 - Plain text and public-room `!ctl key/send/status` cannot approve or bypass the
   state machine.
@@ -136,5 +136,5 @@ covered, landed on this branch.
 
 ## Out of scope (stays in OpenFab)
 spec authoring for external product work, verification (incl. layered QA / cross-model adversarial
-*gating*), in-toto/SLSA signing, the N-of-M release gate, and AI-BOM. agent-chat still owns the
+*gating*), in-toto/SLSA signing, the N-of-M release gate, and AI-BOM. hafleet still owns the
 local runtime's owner-scoped execution permission relay; OpenFab certifies delivered work.

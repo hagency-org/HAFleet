@@ -1,4 +1,4 @@
-<!-- agentchat-workspace-template: v1 -->
+<!-- hafleet-workspace-template: v1 -->
 # {{AGENT_NAME}} Workspace
 
 Template-Version: v1

@@ -30,14 +30,14 @@ describe('bridge matrix behavior', () => {
   let envSnapshot;
 
   beforeAll(async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-test-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-bridge-test-'));
     envSnapshot = snapshotEnv([
-      'AGENT_CHAT_RUNTIME_DIR',
+      'HAFLEET_RUNTIME_DIR',
       'MATRIX_AGENT_PREFIX',
       'MATRIX_IGNORED_SENDER_MXIDS',
       'MATRIX_TRUSTED_INVITER_MXIDS',
     ]);
-    process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
     process.env.MATRIX_AGENT_PREFIX = 'ac_';
     process.env.MATRIX_IGNORED_SENDER_MXIDS = '@octosbot:matrix.example.test';
     process.env.MATRIX_TRUSTED_INVITER_MXIDS = '@alice:matrix.example.com';
@@ -285,7 +285,7 @@ describe('bridge matrix behavior', () => {
     await expect(bridge.sendAsAgentContent(
       'agent-token',
       '!approval:matrix.test',
-      { msgtype: 'com.agentchat.approval.request.v1', body: 'approval' },
+      { msgtype: 'com.hafleet.approval.request.v1', body: 'approval' },
       'approval_123',
     )).resolves.toBe('$approval-event');
 
@@ -845,33 +845,33 @@ describe('bridge matrix behavior', () => {
 
   test('formatted message links derive from the public dashboard URL', () => {
     expect(resolveMessageBaseUrlForTest({
-      AGENT_CHAT_WEB_URL: 'https://agentchat.example.test/',
+      HAFLEET_WEB_URL: 'https://hafleet.example.test/',
       MSG_BASE_URL: 'https://legacy.example.test/msg',
-    })).toBe('https://agentchat.example.test/msg');
+    })).toBe('https://hafleet.example.test/msg');
     expect(resolveMessageBaseUrlForTest({
-      AGENT_CHAT_WEB_URL: 'https://agentchat.example.test/msg/',
-    })).toBe('https://agentchat.example.test/msg');
+      HAFLEET_WEB_URL: 'https://hafleet.example.test/msg/',
+    })).toBe('https://hafleet.example.test/msg');
     expect(resolveMessageBaseUrlForTest({
       MSG_BASE_URL: 'https://legacy.example.test/msg/',
     })).toBe('https://legacy.example.test/msg');
     expect(resolveMessageBaseUrlForTest({
-      AGENT_CHAT_WEB_PORT: '18184',
+      HAFLEET_WEB_PORT: '18184',
     })).toBe('http://127.0.0.1:18184/msg');
-    expect(buildMessageUrlForTest('msg_1', 'token value', 'https://agentchat.example.test/msg'))
-      .toBe('https://agentchat.example.test/msg/msg_1?view=token%20value');
+    expect(buildMessageUrlForTest('msg_1', 'token value', 'https://hafleet.example.test/msg'))
+      .toBe('https://hafleet.example.test/msg/msg_1?view=token%20value');
   });
 
   test('discoverAndGreetHumans greets configured seed users when user directory is empty', async () => {
-    const seedRuntimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-greet-seed-'));
+    const seedRuntimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-bridge-greet-seed-'));
     const seedEnv = snapshotEnv([
-      'AGENT_CHAT_RUNTIME_DIR',
+      'HAFLEET_RUNTIME_DIR',
       'MATRIX_BOT_USERNAME',
       'MATRIX_GREETING_MXIDS',
       'MATRIX_SERVER_NAME',
     ]);
 
     try {
-      process.env.AGENT_CHAT_RUNTIME_DIR = seedRuntimeDir;
+      process.env.HAFLEET_RUNTIME_DIR = seedRuntimeDir;
       process.env.MATRIX_BOT_USERNAME = 'agent-bridge';
       process.env.MATRIX_GREETING_MXIDS = '@kamico:matrix.example.test,alice';
       process.env.MATRIX_SERVER_NAME = 'matrix.example.test';
@@ -898,15 +898,15 @@ describe('bridge matrix behavior', () => {
   });
 
   test('discoverAndGreetHumans keeps seeded greetings independent of directory failures', async () => {
-    const seedRuntimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-greet-failure-'));
+    const seedRuntimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-bridge-greet-failure-'));
     const seedEnv = snapshotEnv([
-      'AGENT_CHAT_RUNTIME_DIR',
+      'HAFLEET_RUNTIME_DIR',
       'MATRIX_GREETING_MXIDS',
       'MATRIX_SERVER_NAME',
     ]);
 
     try {
-      process.env.AGENT_CHAT_RUNTIME_DIR = seedRuntimeDir;
+      process.env.HAFLEET_RUNTIME_DIR = seedRuntimeDir;
       process.env.MATRIX_GREETING_MXIDS = 'alice';
       process.env.MATRIX_SERVER_NAME = 'matrix.example.test';
       const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
@@ -929,9 +929,9 @@ describe('bridge matrix behavior', () => {
   });
 
   test('discoverAndGreetHumans deduplicates seeds and skips non-human accounts', async () => {
-    const seedRuntimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-greet-dedupe-'));
+    const seedRuntimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-bridge-greet-dedupe-'));
     const seedEnv = snapshotEnv([
-      'AGENT_CHAT_RUNTIME_DIR',
+      'HAFLEET_RUNTIME_DIR',
       'MATRIX_AGENT_PREFIX',
       'MATRIX_BOT_USERNAME',
       'MATRIX_GREETING_MXIDS',
@@ -939,7 +939,7 @@ describe('bridge matrix behavior', () => {
     ]);
 
     try {
-      process.env.AGENT_CHAT_RUNTIME_DIR = seedRuntimeDir;
+      process.env.HAFLEET_RUNTIME_DIR = seedRuntimeDir;
       process.env.MATRIX_AGENT_PREFIX = 'ac_';
       process.env.MATRIX_BOT_USERNAME = 'agent-bridge';
       process.env.MATRIX_GREETING_MXIDS = [
@@ -1258,7 +1258,7 @@ describe('bridge matrix behavior', () => {
 
   test('one project room retains independent owner bindings for multiple local agents', async () => {
     const bridge = new MatrixBridge();
-    const roomId = '!multi-agent-project:matrix.example.test';
+    const roomId = '!multi-hafleet-project:matrix.example.test';
     const ownerMxid = '@alice:matrix.example.com';
     bridge.addKnownAgent('wf_coordinator');
     bridge.addKnownAgent('wf_codex');
@@ -1993,9 +1993,9 @@ describe('bridge matrix behavior', () => {
 // the backend to reject its (unauthenticated) requests.
 describe('bridge start() fails closed without a bridge secret', () => {
   test('start() rejects immediately when MATRIX_BRIDGE_SECRET is unset', async () => {
-    const runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-bridge-no-secret-'));
-    const envSnapshot = snapshotEnv(['AGENT_CHAT_RUNTIME_DIR', 'MATRIX_BRIDGE_SECRET']);
-    process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+    const runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-bridge-no-secret-'));
+    const envSnapshot = snapshotEnv(['HAFLEET_RUNTIME_DIR', 'MATRIX_BRIDGE_SECRET']);
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
     delete process.env.MATRIX_BRIDGE_SECRET;
     try {
       const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;

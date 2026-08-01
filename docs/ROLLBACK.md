@@ -24,7 +24,7 @@ On a health-gate failure the watcher now:
 2. **rolls back** — resets the live checkout to `last-successful-ref`, reinstalls
    dependencies for it, restarts, and re-runs the health gate;
 3. **records** the failure to `<state>/last-failure` as JSON;
-4. **alerts**, if `AGENTCHAT_ALERT_URL` and `AGENTCHAT_ALERT_TOKEN` are set
+4. **alerts**, if `HAFLEET_ALERT_URL` and `HAFLEET_ALERT_TOKEN` are set
    (best-effort — an alerting failure never masks the deploy failure);
 5. **holds.** The quarantined ref is not retried. The watcher logs `HOLDING`
    once and waits for a new commit.
@@ -32,8 +32,8 @@ On a health-gate failure the watcher now:
 Pushing any new commit clears the quarantine automatically, so shipping a fix is
 the normal recovery. No manual state cleanup.
 
-State lives in `$(git rev-parse --absolute-git-dir)/agentchat-autodeploy/`
-unless `AGENTCHAT_DEPLOY_STATE_DIR` overrides it:
+State lives in `$(git rev-parse --absolute-git-dir)/hafleet-autodeploy/`
+unless `HAFLEET_DEPLOY_STATE_DIR` overrides it:
 
 | File | Meaning |
 |---|---|
@@ -54,11 +54,11 @@ Not every failure quarantines, and the distinction is deliberate:
 ### Checking state
 
 ```bash
-STATE="$(git rev-parse --absolute-git-dir)/agentchat-autodeploy"
+STATE="$(git rev-parse --absolute-git-dir)/hafleet-autodeploy"
 cat "$STATE/last-failure"        # what failed, and whether rollback worked
 cat "$STATE/quarantined-ref"     # what is being held
 cat "$STATE/last-successful-ref" # what is running now
-journalctl -u agent-chat-stable-autodeploy -n 100
+journalctl -u hafleet-stable-autodeploy -n 100
 ```
 
 ## Operator-driven upgrade
@@ -91,16 +91,16 @@ If rollback itself failed, both paths print the exact commands. In full:
 
 ```bash
 cd /path/to/install
-systemctl stop agent-chat agent-chat-push-relay bridge-matrix
+systemctl stop hafleet hafleet-push-relay bridge-matrix
 
 # Return to the last ref known to have been healthy.
-STATE="$(git rev-parse --absolute-git-dir)/agentchat-autodeploy"
+STATE="$(git rev-parse --absolute-git-dir)/hafleet-autodeploy"
 git checkout --force "$(cat "$STATE/last-successful-ref")"
 npm install --production
 
-systemctl restart agent-chat-v2
+systemctl restart hafleet-backend
 curl -sf http://127.0.0.1:8090/api/agents >/dev/null && echo "backend healthy"
-systemctl restart agent-chat agent-chat-push-relay
+systemctl restart hafleet hafleet-push-relay
 ```
 
 If `last-successful-ref` is also unhealthy, pin a known-good release instead:
@@ -117,9 +117,9 @@ release that changes on-disk layout is a breaking change requiring a migration
 (see [RELEASING.md](RELEASING.md)). Before upgrading across such a release:
 
 ```bash
-systemctl stop agent-chat agent-chat-v2
+systemctl stop hafleet hafleet-backend
 tar -czf ~/hafleet-data-$(date -u +%Y%m%dT%H%M%SZ).tar.gz data/
 ```
 
-`.env` and `~/.agentchat` are likewise untouched by rollback, which is
+`.env` and `~/.hafleet` are likewise untouched by rollback, which is
 deliberate — the uninstaller makes the same guarantee.

@@ -16,7 +16,7 @@ try {
   corePath = repoCore;
 }
 
-if (process.env.AGENTCHAT_WRAPPER_SMOKE === '1') {
+if (process.env.HAFLEET_WRAPPER_SMOKE === '1') {
   accessSync(corePath);
   process.exit(0);
 }

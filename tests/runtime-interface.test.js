@@ -54,9 +54,27 @@ describe('runtime contract', () => {
   });
 
   test('emptyPaneListing distinguishes idle from failed', () => {
-    expect(emptyPaneListing(null)).toEqual({ ok: true, panes: [], error: null });
+    expect(emptyPaneListing(null)).toEqual({
+      ok: true, panes: [], error: null, serverUnavailable: false,
+    });
     const err = new Error('boom');
-    expect(emptyPaneListing(err)).toEqual({ ok: false, panes: [], error: err });
+    expect(emptyPaneListing(err)).toEqual({
+      ok: false, panes: [], error: err, serverUnavailable: false,
+    });
+  });
+
+  test('emptyPaneListing distinguishes an unreachable server from an idle one', () => {
+    // Both are ok-with-no-panes, because neither is a fault. But they mean
+    // opposite things to a caller deciding whether an agent has gone away, and
+    // collapsing them made a transient tmux failure look like an idle host — the
+    // backend then marked the whole fleet offline for one sweep and restored it
+    // on the next, flapping 153 times in a single boot on a real host.
+    const idle = emptyPaneListing(null);
+    const unreachable = emptyPaneListing(null, { serverUnavailable: true });
+    expect(idle.ok).toBe(true);
+    expect(unreachable.ok).toBe(true);
+    expect(idle.serverUnavailable).toBe(false);
+    expect(unreachable.serverUnavailable).toBe(true);
   });
 });
 
@@ -107,6 +125,37 @@ describe('tmux runtime', () => {
     expect(panes[0].path).toBe('/tmp/we\tird');
   });
 
+  test('parses the sentinel-delimited format the runtime actually requests', () => {
+    // The delimiter was a tab until a real host delivered every pane line with the
+    // tabs replaced by underscores, which made the parser discard all six lines and
+    // report an idle host. The format now uses a sentinel that is not whitespace.
+    const source = readFileSync('lib/runtime/tmux.js', 'utf-8');
+    expect(source).toContain("const PANE_FIELD_SEP = '::|::'");
+    expect(source).toContain('].join(PANE_FIELD_SEP)');
+  });
+
+  test('parses sentinel-delimited output, including a path containing a tab', async () => {
+    const SEP = '::|::';
+    const row = ['/dev/ttys001', 'alpha', '42', 'node', '/tmp/we\tird'].join(SEP);
+    const { exec } = fakeExec(() => ({ stdout: `${row}\n` }));
+    const { ok, panes } = await createTmuxRuntime({ exec }).listPanes();
+    expect(ok).toBe(true);
+    expect(panes).toHaveLength(1);
+    expect(panes[0]).toEqual({
+      tty: 'ttys001', session: 'alpha', pid: 42, command: 'node', path: '/tmp/we\tird',
+    });
+  });
+
+  test('a path containing the sentinel itself survives the round trip', async () => {
+    // parts.slice(4).join(sep) must use the separator that split the line, or the
+    // other one gets rewritten into the path.
+    const SEP = '::|::';
+    const row = ['/dev/ttys002', 'beta', '7', 'zsh', `/tmp/a${SEP}b`].join(SEP);
+    const { exec } = fakeExec(() => ({ stdout: `${row}\n` }));
+    const { panes } = await createTmuxRuntime({ exec }).listPanes();
+    expect(panes[0].path).toBe(`/tmp/a${SEP}b`);
+  });
+
   test('skips malformed rows without failing the whole listing', async () => {
     const { exec } = fakeExec(() => ({
       stdout: ['too\tfew\tfields', '/dev/ttys001\tgood\t7\tnode\t/tmp', '\t\t\t\t'].join('\n'),
@@ -125,8 +174,22 @@ describe('tmux runtime', () => {
     ]) {
       const { exec } = fakeExec(() => { throw tmuxError(message); });
       const listing = await createTmuxRuntime({ exec }).listPanes();
-      expect(listing, message).toEqual({ ok: true, panes: [], error: null });
+      // ok, because an idle host is not a fault — but flagged, so the caller can
+      // tell it apart from a reachable server that genuinely has no panes.
+      expect(listing, message).toEqual({
+        ok: true, panes: [], error: null, serverUnavailable: true,
+      });
     }
+  });
+
+  test('a reachable server with no panes is NOT flagged unavailable', async () => {
+    // This is the case where marking agents missing is correct: tmux answered,
+    // and it has nothing running.
+    const { exec } = fakeExec(() => ({ stdout: '' }));
+    const listing = await createTmuxRuntime({ exec }).listPanes();
+    expect(listing).toEqual({
+      ok: true, panes: [], error: null, serverUnavailable: false,
+    });
   });
 
   test('reports a genuine failure as failed', async () => {

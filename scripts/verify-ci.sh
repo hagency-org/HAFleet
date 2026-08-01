@@ -7,13 +7,13 @@ cd "$ROOT_DIR"
 # Raised from 90s: kernel test shards now run at concurrency 1 to avoid a
 # memory-pressure flake in the backend test harness (see docs/TESTING.md), which
 # takes ~171s instead of ~69s. This is a hang guard, not a performance budget.
-VERIFY_CI_TIMEOUT_SEC="${AGENTCHAT_VERIFY_CI_TIMEOUT_SEC:-300}"
-if [[ "${AGENTCHAT_VERIFY_CI_TIMEOUT_ACTIVE:-0}" != "1" ]]; then
+VERIFY_CI_TIMEOUT_SEC="${HAFLEET_VERIFY_CI_TIMEOUT_SEC:-300}"
+if [[ "${HAFLEET_VERIFY_CI_TIMEOUT_ACTIVE:-0}" != "1" ]]; then
   if ! [[ "$VERIFY_CI_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [[ "$VERIFY_CI_TIMEOUT_SEC" -le 0 ]]; then
     echo "verify:ci timeout must be a positive integer number of seconds (got: $VERIFY_CI_TIMEOUT_SEC)" >&2
     exit 2
   fi
-  timeout_bin="${AGENTCHAT_TIMEOUT_BIN:-}"
+  timeout_bin="${HAFLEET_TIMEOUT_BIN:-}"
   if [[ -z "$timeout_bin" ]]; then
     if command -v timeout >/dev/null 2>&1; then
       timeout_bin="$(command -v timeout)"
@@ -26,7 +26,7 @@ if [[ "${AGENTCHAT_VERIFY_CI_TIMEOUT_ACTIVE:-0}" != "1" ]]; then
     exit 127
   fi
   set +e
-  AGENTCHAT_VERIFY_CI_TIMEOUT_ACTIVE=1 "$timeout_bin" --kill-after=5s "${VERIFY_CI_TIMEOUT_SEC}s" bash "$0" "$@"
+  HAFLEET_VERIFY_CI_TIMEOUT_ACTIVE=1 "$timeout_bin" --kill-after=5s "${VERIFY_CI_TIMEOUT_SEC}s" bash "$0" "$@"
   status=$?
   set -e
   if [[ "$status" -eq 124 ]]; then
@@ -105,7 +105,7 @@ start_step() {
   local name="$1"
   shift
   local log_file
-  log_file="$(mktemp "${TMPDIR:-/tmp}/agent-chat-verify-ci.XXXXXX")"
+  log_file="$(mktemp "${TMPDIR:-/tmp}/hafleet-verify-ci.XXXXXX")"
   step_names+=("$name")
   step_logs+=("$log_file")
   set -m
@@ -140,7 +140,7 @@ wait_step() {
   return "$status"
 }
 
-unset AGENTCHAT_VERIFY_CI_TIMEOUT_ACTIVE
+unset HAFLEET_VERIFY_CI_TIMEOUT_ACTIVE
 
 start_step "environment" npm run report:ci-env
 if ! wait_step 0; then

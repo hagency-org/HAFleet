@@ -56,9 +56,9 @@ export async function createBackendTestContext(prefix, seed = {}) {
     if (!savedEnv.has(key)) savedEnv.set(key, process.env[key]);
   };
   for (const key of [
-    'AGENT_CHAT_RUNTIME_DIR',
-    'AGENT_CHAT_SERVER',
-    'AGENT_CHAT_RECORD_LOCAL_SERVER',
+    'HAFLEET_RUNTIME_DIR',
+    'HAFLEET_SERVER',
+    'HAFLEET_RECORD_LOCAL_SERVER',
     'SUPERVISOR_ENABLED',
     'AGENT_SCOPE_MONITOR_ENABLED',
     'AGENT_JSON_WRITE_BATCH_MS',
@@ -73,9 +73,9 @@ export async function createBackendTestContext(prefix, seed = {}) {
     for (const key of Object.keys(seed.env)) rememberEnv(key);
   }
 
-  process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
-  delete process.env.AGENT_CHAT_SERVER;
-  delete process.env.AGENT_CHAT_RECORD_LOCAL_SERVER;
+  process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
+  delete process.env.HAFLEET_SERVER;
+  delete process.env.HAFLEET_RECORD_LOCAL_SERVER;
   process.env.SUPERVISOR_ENABLED = 'false';
   process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
   process.env.AGENT_JSON_WRITE_BATCH_MS = '0';
@@ -126,6 +126,31 @@ export async function createBackendTestContext(prefix, seed = {}) {
       };
     },
     cleanup() {
+      // Stop the module's background loops before the runtime dir is deleted
+      // underneath them.
+      //
+      // Each context imports backend-v2.js under a unique ?test= URL to get a
+      // fresh instance. A unique URL is a permanent ESM registry entry, so every
+      // context in a run stays resident, and until now nothing stopped the sweep
+      // and heartbeat intervals those instances started. stopServer() already
+      // exists and does exactly that (stopBackgroundLoops -> clearLifecycleHandles,
+      // endSseClients); the helper simply never called it.
+      //
+      // Scope of what this fixes, honestly: it stops the loop leak. It did NOT
+      // change the intermittent failures — measured before and after on the same
+      // machine, the counts were unchanged. Those remain unexplained; see
+      // docs/TESTING.md. Do not cite this as their fix.
+      //
+      // The sync work happens before stopServer()'s first await, and it returns
+      // early when no server was started — the case here, since tests drive `app`
+      // through supertest. So the timers are gone once this returns, nothing to await.
+      try {
+        const stopping = backendModule?.stopServer?.();
+        if (stopping && typeof stopping.catch === 'function') stopping.catch(() => {});
+      } catch {
+        // A context that failed mid-import may have no stopServer; nothing to stop.
+      }
+
       for (const server of servers) {
         try {
           server.close();

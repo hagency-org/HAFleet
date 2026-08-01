@@ -18,7 +18,7 @@ describe('task system API', () => {
   });
 
   async function setup() {
-    context = await createBackendTestContext('agent-chat-tasks-test-', {
+    context = await createBackendTestContext('hafleet-tasks-test-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },
         beta: { name: 'beta', type: 'agent', kind: 'agent', online: false, manualDown: true, offlineReason: 'idle' },

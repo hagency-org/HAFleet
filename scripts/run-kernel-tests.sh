@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-vitest_bin="${AGENTCHAT_VITEST_BIN:-}"
+vitest_bin="${HAFLEET_VITEST_BIN:-}"
 if [[ -z "$vitest_bin" ]]; then
   if command -v vitest >/dev/null 2>&1; then
     vitest_bin="$(command -v vitest)"
@@ -98,8 +98,8 @@ trap 'trap - EXIT; cleanup_shards TERM; exit 143' TERM
 #   concurrency 2 -> ~118s, still fails
 #   concurrency 1 -> ~171s, passes
 # Slower but never wrong. Override when you want speed and can tolerate flakes:
-#   AGENTCHAT_KERNEL_MAX_CONCURRENCY=5 npm run test:kernel
-KERNEL_MAX_CONCURRENCY="${AGENTCHAT_KERNEL_MAX_CONCURRENCY:-1}"
+#   HAFLEET_KERNEL_MAX_CONCURRENCY=5 npm run test:kernel
+KERNEL_MAX_CONCURRENCY="${HAFLEET_KERNEL_MAX_CONCURRENCY:-1}"
 
 # Index of the next shard whose exit status has not yet been collected.
 shard_next_reap=0
@@ -135,7 +135,7 @@ start_shard() {
   shift
   await_shard_slot
   local log_file
-  log_file="$(mktemp "${TMPDIR:-/tmp}/agent-chat-kernel-tests.XXXXXX")"
+  log_file="$(mktemp "${TMPDIR:-/tmp}/hafleet-kernel-tests.XXXXXX")"
   shard_names+=("$name")
   shard_logs+=("$log_file")
   set -m
@@ -193,9 +193,9 @@ start_shard "contracts and cli" \
   tests/ci-workflow.test.js \
   tests/bot-command-acl.test.js \
   tests/source-of-truth.test.js \
-  tests/cli-agent-project.test.js \
-  tests/cli-agent-graph.test.js \
-  tests/cli-agent-ls.test.js \
+  tests/cli-hafleet-project.test.js \
+  tests/cli-hafleet-graph.test.js \
+  tests/cli-hafleet-ls.test.js \
   tests/cli-agent-status.test.js \
   tests/cli-fleet.test.js \
   tests/cli-resume-id.test.js \

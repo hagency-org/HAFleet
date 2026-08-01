@@ -3,13 +3,13 @@ import { readFileSync } from 'fs';
 
 // Node services that shell out to tmux and own the runtime tree.
 const NODE_UNITS = [
-  'agent-chat-v2.service',
-  'agent-chat.service',
-  'agent-chat-push-relay.service',
+  'hafleet-backend.service',
+  'hafleet.service',
+  'hafleet-push-relay.service',
   'bridge-matrix.service',
 ];
 
-const AUTODEPLOY_UNIT = 'agent-chat-stable-autodeploy.service';
+const AUTODEPLOY_UNIT = 'hafleet-stable-autodeploy.service';
 const ALL_UNITS = [...NODE_UNITS, AUTODEPLOY_UNIT];
 
 // Sandboxing every long-lived Node service must carry.
@@ -98,8 +98,8 @@ describe('systemd unit hardening', () => {
   describe(AUTODEPLOY_UNIT, () => {
     test('enables the release gate so untested commits cannot deploy', () => {
       const service = parseUnit(AUTODEPLOY_UNIT).Service || [];
-      expect(service).toContain('Environment=AGENTCHAT_RELEASE_GATE=worktree');
-      expect(service).not.toContain('Environment=AGENTCHAT_RELEASE_GATE=none');
+      expect(service).toContain('Environment=HAFLEET_RELEASE_GATE=worktree');
+      expect(service).not.toContain('Environment=HAFLEET_RELEASE_GATE=none');
     });
 
     test('omits the three directives that would break sudo escalation', () => {
@@ -129,16 +129,16 @@ describe('systemd unit hardening', () => {
 
 describe('autodeploy release gate default', () => {
   test('script defaults to the gate ON', () => {
-    const script = readFileSync('scripts/agentchat-stable-autodeploy.sh', 'utf-8');
-    expect(script).toContain('RELEASE_GATE="${AGENTCHAT_RELEASE_GATE:-worktree}"');
-    expect(script).not.toContain('RELEASE_GATE="${AGENTCHAT_RELEASE_GATE:-none}"');
+    const script = readFileSync('scripts/hafleet-stable-autodeploy.sh', 'utf-8');
+    expect(script).toContain('RELEASE_GATE="${HAFLEET_RELEASE_GATE:-worktree}"');
+    expect(script).not.toContain('RELEASE_GATE="${HAFLEET_RELEASE_GATE:-none}"');
   });
 
   test('systemctl calls escalate via sudo when unprivileged', () => {
-    const script = readFileSync('scripts/agentchat-stable-autodeploy.sh', 'utf-8');
+    const script = readFileSync('scripts/hafleet-stable-autodeploy.sh', 'utf-8');
     expect(script).toContain('sudo -n "$SYSTEMCTL_BIN"');
     // An explicitly overridden binary (tests, custom harnesses) bypasses sudo.
-    expect(script).toContain('[ -n "${AGENTCHAT_SYSTEMCTL_BIN:-}" ]');
+    expect(script).toContain('[ -n "${HAFLEET_SYSTEMCTL_BIN:-}" ]');
   });
 });
 

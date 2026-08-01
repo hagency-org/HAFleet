@@ -23,24 +23,24 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.dirname(__filename);
 const RUNTIME_ROOT = (() => {
-  const raw = String(process.env.AGENT_CHAT_RUNTIME_DIR || '').trim();
+  const raw = String(process.env.HAFLEET_RUNTIME_DIR || '').trim();
   return raw ? path.resolve(raw) : REPO_ROOT;
 })();
 assertRuntimeDir(RUNTIME_ROOT);
 const LOGS_ROOT = path.join(RUNTIME_ROOT, 'logs');
 const DATA_ROOT = path.join(RUNTIME_ROOT, 'data');
-const DEFAULT_WEB_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_WEB_PORT || '8084', 10);
+const DEFAULT_WEB_PORT_RAW = Number.parseInt(process.env.HAFLEET_WEB_PORT || '8084', 10);
 const PORT = Number.isFinite(DEFAULT_WEB_PORT_RAW) && DEFAULT_WEB_PORT_RAW > 0
   ? DEFAULT_WEB_PORT_RAW
   : 8084;
-const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.AGENT_CHAT_BACKEND_PORT || '8090', 10);
+const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.HAFLEET_BACKEND_PORT || '8090', 10);
 const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
   ? DEFAULT_BACKEND_PORT_RAW
   : 8090;
 const LOG_FILE = path.join(LOGS_ROOT, 'messages.jsonl');
 const DELIVERY_EVENT_FILE = path.join(LOGS_ROOT, 'delivery-events.jsonl');
-const AGENT_DOWN_BIN = path.join(REPO_ROOT, 'bin', 'agent-down');
-const BACKEND_V2_URL = (process.env.AGENT_CHAT_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
+const AGENT_DOWN_BIN = path.join(REPO_ROOT, 'bin', 'hafleet-down');
+const BACKEND_V2_URL = (process.env.HAFLEET_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`).trim().replace(/\/$/, '');
 const PUSH_DELIVERED_URL = `${BACKEND_V2_URL}/api/runtime/push-delivered`;
 const DELIVERY_EVENTS_URL = `${BACKEND_V2_URL}/api/delivery-events`;
 const BACKEND_API_TOKEN = (process.env.API_TOKEN || '').trim();
@@ -67,10 +67,10 @@ const IDLE_THRESHOLD = Number.isFinite(envIdleThreshold) && envIdleThreshold > 0
 const IDLE_THRESHOLD_SEC = Math.max(1, Math.ceil(IDLE_THRESHOLD / 1000));
 const execFileAsync = promisify(execFile);
 let execFileAsyncImpl = execFileAsync;
-const DASHBOARD_API_TOKEN = (process.env.AGENT_CHAT_DASHBOARD_TOKEN || '').trim();
+const DASHBOARD_API_TOKEN = (process.env.HAFLEET_DASHBOARD_TOKEN || '').trim();
 const SERVER_STARTUP_OPTIONAL_ENV = [
   {
-    name: 'AGENT_CHAT_DASHBOARD_TOKEN',
+    name: 'HAFLEET_DASHBOARD_TOKEN',
     description: 'Non-local dashboard mutations will remain unavailable unless this token is configured.',
   },
 ];
@@ -413,7 +413,7 @@ function finalizeQueueEntryAfterSideEffect(entry, target, state, reason, context
 }
 
 function isBackendNotificationEntry(entry) {
-  if (!entry || entry.from !== 'agent-chat-v2') return false;
+  if (!entry || entry.from !== 'hafleet-backend') return false;
   return typeof entry.payload === 'string' && entry.payload.startsWith('[NOTIFICATION]');
 }
 
@@ -911,7 +911,7 @@ try {
   console.debug(`[server] queue load skipped: ${e.message}`);
 }
 
-// Accept queued message from agent-send
+// Accept queued message from hafleet-send
 app.post('/api/queue', (req, res) => {
   const { from, to, payload } = req.body;
   if (!to || !payload) return res.status(400).json({ error: 'missing to or payload' });
@@ -1113,6 +1113,36 @@ app.get('/api/agents/status', async (_req, res) => {
     const agentList = Array.isArray(agentPayload)
       ? agentPayload.filter(a => a && typeof a === 'object')
       : [];
+    // An agent with no tmux target used to be dropped here. That made "no agents
+    // exist" and "every agent is offline" render identically as an empty fleet,
+    // which is how a host with six registered agents showed a blank dashboard.
+    // Report them instead, with alive:false and the reason the backend recorded.
+    const withoutPane = agentList
+      .filter(a => !a.tmux)
+      .map(a => {
+        // An ACP agent has no pane by design, so "no tmux target" is not a fault
+        // for it — its liveness is the backend's `online`, derived from whether
+        // the process is still there. Reporting it dead alongside genuinely
+        // missing tmux agents would hide every working ACP agent.
+        const acp = a.transport === 'acp';
+        return {
+          name: a.name,
+          tmux: null,
+          idleMs: -1,
+          active: false,
+          activeNow: false,
+          activeDurationSec: 0,
+          idleDurationSec: 0,
+          lastTmuxActivitySec: 0,
+          alive: acp ? a.online === true : false,
+          transport: a.transport || 'tmux',
+          remote: !isLocalAgentServer(a.server),
+          type: a.type || 'agent',
+          server: a.server || null,
+          environment: a.environment || 'live',
+          offlineReason: acp && a.online === true ? null : (a.offlineReason || 'no-tmux-target'),
+        };
+      });
     const result = agentList
       .filter(a => a.tmux)
       .map(a => {
@@ -1153,7 +1183,8 @@ app.get('/api/agents/status', async (_req, res) => {
           environment: a.environment || 'live',
         };
       });
-    res.json(result);
+    // Paneless agents last: the ones you can act on come first.
+    res.json([...result, ...withoutPane]);
   } catch (e) {
     res.status(502).json({ error: 'backend-v2 unreachable', detail: e.message });
   }
@@ -1168,10 +1199,23 @@ function trimTrailingBlankLines(text) {
   return lines.join('\n');
 }
 
+// Which sessions may be read through this dashboard. The session policy governed
+// agent management but not this route, so a pane belonging to an excluded session
+// could still be read in full — 500 lines of scrollback, and GET is exempt from
+// the dashboard's auth boundary, so no credential was needed either. On a host
+// where the denylist exists specifically to keep HAFleet away from someone else's
+// work, that made the exclusion partial.
+const capturePolicy = sessionPolicyFromEnv();
+
 app.get('/api/tmux/capture/:session', async (req, res) => {
   const session = req.params.session;
   if (!/^[\w\-:.]+$/.test(session)) {
     return res.status(400).type('text').send('invalid session name');
+  }
+  // A session this install may not manage may not be read either.
+  const verdict = capturePolicy.evaluate(session.split(':', 1)[0]);
+  if (!verdict.allowed) {
+    return res.status(403).type('text').send(`session excluded by policy: ${verdict.reason}`);
   }
   const serverName = req.query.server || '';
   const sshConf = serverName ? serverSshConfig[serverName] : null;
@@ -1213,7 +1257,7 @@ app.get('/api/tmux/capture/:session', async (req, res) => {
 
 // ── Agent detail (metadata + backend info) ───────────────────────────
 const AGENTS_DATA_DIR = path.join(DATA_ROOT, 'agents');
-const AGENTCHAT_HOMEDIR = defaultAgentchatHomeDir(process.env);
+const HAFLEET_HOMEDIR = defaultAgentchatHomeDir(process.env);
 const PROGRESS_TAIL_LINE_LIMIT = 80;
 
 function safeReadJsonSync(filePath) {
@@ -1279,7 +1323,7 @@ async function readTextFilePayload(filePath, options = {}) {
 }
 
 async function buildAgentDocsPayload(agentName, workspacePath, v1Manifest = null) {
-  const resolved = resolveAgentDocsPaths(agentName, workspacePath || AGENTCHAT_HOMEDIR, {
+  const resolved = resolveAgentDocsPaths(agentName, workspacePath || HAFLEET_HOMEDIR, {
     cwd: REPO_ROOT,
     v1Manifest,
     includeWorkspaceFlatDocs: v1Manifest?.workdir ? true : false,
@@ -1617,7 +1661,7 @@ async function runProvisionForManifest(manifest, localMeta = null, options = {})
     encoding: 'utf-8',
     env: {
       ...process.env,
-      AGENTCHAT_HOMEDIR: homeRoot,
+      HAFLEET_HOMEDIR: homeRoot,
     },
     timeout: 30_000,
   });
@@ -1981,7 +2025,7 @@ function buildSubconsciousDetailPayload(name, manifest = null, detail = null) {
   const runtime = runtimeMetaPath && existsSync(runtimeMetaPath) ? safeReadJsonSync(runtimeMetaPath) : null;
   const letta = lettaPath && existsSync(lettaPath) ? safeReadJsonSync(lettaPath) : null;
   const settingsPath = runtime?.settingsPath || (workdir ? path.join(workdir, '.claude', 'settings.json') : null);
-  const pluginRoot = runtime?.pluginRoot || (stateDir ? path.join(stateDir, 'subconscious', 'claude-agentchat') : null);
+  const pluginRoot = runtime?.pluginRoot || (stateDir ? path.join(stateDir, 'subconscious', 'claude-hafleet') : null);
   const hookScriptPath = pluginRoot ? path.join(pluginRoot, 'scripts', 'hook-entry.mjs') : null;
   const installedHooks = detectInstalledSubconsciousHooks(settingsPath);
   const guidanceText = normalizeMetaText(letta?.guidance, 6000) || '';
@@ -2054,7 +2098,7 @@ app.get('/api/agents/detail/:name', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
 
-  const detail = { name, homeRoot: AGENTCHAT_HOMEDIR };
+  const detail = { name, homeRoot: HAFLEET_HOMEDIR };
   const { metaPath, meta: localMeta } = loadLocalAgentMeta(name);
   const v1Manifest = loadV1Manifest(name, localMeta);
 
@@ -2149,7 +2193,7 @@ app.get('/api/agents/detail/:name', async (req, res) => {
   const resumeRoot = detail.v1 && detail.stateDir
     ? detail.stateDir
     : path.join(AGENTS_DATA_DIR, name);
-  const docsWorkspacePath = detail.workdir || v1Manifest?.workdir || AGENTCHAT_HOMEDIR;
+  const docsWorkspacePath = detail.workdir || v1Manifest?.workdir || HAFLEET_HOMEDIR;
   const needsTypeProbe = detail.tmux && isLocalAgentServer(detail.server) && !detail.agentType;
 
   const [resumeResult, typeResult, docsResult] = await Promise.allSettled([
@@ -2650,7 +2694,7 @@ app.get('/api/agents/:name/hooks', async (req, res) => {
   const manifest = loadV1Manifest(name, localMeta);
   const stateDir = manifest?.stateDir || localMeta?.stateDir || null;
   if (!stateDir) return res.json({ hooks: null });
-  const hooksPath = path.join(stateDir, 'subconscious', 'claude-agentchat', 'hooks', 'hooks.json');
+  const hooksPath = path.join(stateDir, 'subconscious', 'claude-hafleet', 'hooks', 'hooks.json');
   try {
     const hooks = JSON.parse(readFileSync(hooksPath, 'utf8'));
     return res.json({ hooks });
@@ -2867,7 +2911,7 @@ app.post('/api/agents/:name/down', async (req, res) => {
   const name = req.params.name;
   if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
   if (!existsSync(AGENT_DOWN_BIN)) {
-    return res.status(500).json({ ok: false, error: 'agent-down binary missing', path: AGENT_DOWN_BIN });
+    return res.status(500).json({ ok: false, error: 'hafleet-down binary missing', path: AGENT_DOWN_BIN });
   }
   const toTail = (text, lines) => String(text || '').trim().split('\n').slice(-lines).join('\n');
   try {
@@ -2878,7 +2922,7 @@ app.post('/api/agents/:name/down', async (req, res) => {
       env: { ...process.env, NO_PROXY: '*' },
     });
     const outputTail = toTail(stdout, 20);
-    return res.json({ ok: true, action: 'agent-down-kill', outputTail });
+    return res.json({ ok: true, action: 'hafleet-down-kill', outputTail });
   } catch (e) {
     const stdout = String(e?.stdout || '');
     const stderr = String(e?.stderr || e?.message || '');
@@ -2905,13 +2949,13 @@ app.post('/api/agents/:name/down', async (req, res) => {
       const data = await r.json().catch(() => null);
       if (!r.ok || !data?.ok) {
         const apiErr = (data && (data.error || data.detail)) || `backend status ${r.status}`;
-        return res.status(500).json({ ok: false, error: 'agent-down failed', detail, fallbackError: String(apiErr) });
+        return res.status(500).json({ ok: false, error: 'hafleet-down failed', detail, fallbackError: String(apiErr) });
       }
-      return res.json({ ok: true, action: 'agent-down-kill-fallback', outputTail: detail });
+      return res.json({ ok: true, action: 'hafleet-down-kill-fallback', outputTail: detail });
     } catch (fallbackErr) {
       return res.status(500).json({
         ok: false,
-        error: 'agent-down failed',
+        error: 'hafleet-down failed',
         detail,
         fallbackError: String(fallbackErr?.message || fallbackErr),
       });
@@ -3010,6 +3054,7 @@ let lastPaneListObservation = {
 };
 
 import { createHash } from 'crypto';
+import { sessionPolicyFromEnv } from './lib/session-policy.js';
 
 function formatPaneObservationError(e) {
   const stderr = (e && e.stderr) ? String(e.stderr).trim() : '';
@@ -3878,7 +3923,7 @@ function stopRuntimeLoops() {
 let serverInstance = null;
 // Bind address. Loopback by default; see lib/startup-config.js resolveBindHost.
 function resolvedBindHost() {
-  const { host, warning } = resolveBindHost(process.env.AGENT_CHAT_WEB_HOST);
+  const { host, warning } = resolveBindHost(process.env.HAFLEET_WEB_HOST);
   if (warning) console.warn(`[bind] ${warning}`);
   return host;
 }

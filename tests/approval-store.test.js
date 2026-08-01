@@ -7,7 +7,7 @@ import { ApprovalStore } from '../lib/approval-store.js';
 const roots = [];
 
 function makeStore(options = {}) {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-approval-store-'));
+  const root = mkdtempSync(path.join(os.tmpdir(), 'hafleet-approval-store-'));
   roots.push(root);
   const file = path.join(root, 'approvals.json');
   return { store: new ApprovalStore(file, options), file };

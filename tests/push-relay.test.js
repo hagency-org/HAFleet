@@ -136,7 +136,7 @@ describe('push relay dispatch', () => {
     expect(delivered).toHaveLength(1);
     expect(delivered[0].target).toBe('alpha:0.0');
     expect(delivered[0].payload).toContain('Need help');
-    expect(delivered[0].payload).toContain('agent-send beta:0.0');
+    expect(delivered[0].payload).toContain('hafleet-send beta:0.0');
     expect(eventPosts).toEqual(expect.arrayContaining([
       expect.objectContaining({
         type: 'relay.delivered',
@@ -419,7 +419,7 @@ describe('push relay dispatch', () => {
     await scanBlockedStates();
     const raw = JSON.stringify({
       id: 'relay_unread_dup',
-      from: 'agent-chat',
+      from: 'hafleet',
       to: 'alpha',
       type: 'inform',
       source: 'push-relay',
@@ -927,7 +927,7 @@ describe('push relay dispatch', () => {
     });
 
     expect(text).not.toContain('check_inbox()');
-    expect(text).toContain('agent-send sender:0.0');
+    expect(text).toContain('hafleet-send sender:0.0');
   });
 
   test('rejects missing process from MCP pid file', async () => {

@@ -33,8 +33,8 @@ remote/.push-relay-launchd.sh
 remote/package-lock.json
 
 # Generated per-agent workspace docs
-docs/agentchat-worker/
-docs/agentchat-develop/
+docs/hafleet-worker/
+docs/hafleet-develop/
 
 # Generated build identity (scripts/stamp-version.sh)
 build-info.json

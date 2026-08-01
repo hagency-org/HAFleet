@@ -81,7 +81,7 @@ Options:
   --owner <name>     Override task owner (default: manifest/current owner)
   --reason <text>    Required for wait
   --until <iso8601>  Required for wait
-  --web-url <url>    Override backend API base URL (default: AGENT_CHAT_API or http://127.0.0.1:8090)
+  --web-url <url>    Override backend API base URL (default: HAFLEET_API or http://127.0.0.1:8090)
   --graph <id>       Report a task graph node result/failure instead of home metadata
   --node <id>        Task graph node id (required with --graph)
   --result <json>    JSON payload for graph completion
@@ -140,9 +140,9 @@ function parsePositiveInt(value, fallback) {
 }
 
 function defaultApiBaseUrl(env = process.env) {
-  const explicit = String(env.AGENT_CHAT_API || '').trim();
+  const explicit = String(env.HAFLEET_API || '').trim();
   if (explicit) return explicit.replace(/\/$/, '');
-  const port = parsePositiveInt(env.AGENT_CHAT_BACKEND_PORT, 8090);
+  const port = parsePositiveInt(env.HAFLEET_BACKEND_PORT, 8090);
   return `http://127.0.0.1:${port}`;
 }
 

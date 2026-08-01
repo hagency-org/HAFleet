@@ -68,8 +68,8 @@ function runInstaller(args, { sessions = [], envSeed = null } = {}) {
 }
 
 const denylistOf = (env) => {
-  const line = env.split('\n').filter((l) => l.startsWith('AGENT_CHAT_SESSION_DENYLIST='));
-  return { count: line.length, value: line[0]?.slice('AGENT_CHAT_SESSION_DENYLIST='.length) };
+  const line = env.split('\n').filter((l) => l.startsWith('HAFLEET_SESSION_DENYLIST='));
+  return { count: line.length, value: line[0]?.slice('HAFLEET_SESSION_DENYLIST='.length) };
 };
 
 describe('install-full.sh tmux session guard', () => {
@@ -91,7 +91,7 @@ describe('install-full.sh tmux session guard', () => {
   test('--deny-existing-tmux merges with an existing denylist', () => {
     const r = runInstaller(['--deny-existing-tmux'], {
       sessions: ['alpha'],
-      envSeed: 'API_TOKEN=guard-token\nAGENT_CHAT_SESSION_DENYLIST=already-here\n',
+      envSeed: 'API_TOKEN=guard-token\nHAFLEET_SESSION_DENYLIST=already-here\n',
     });
     // Overwriting would silently un-protect whatever the operator had listed.
     expect(denylistOf(r.env)).toEqual({ count: 1, value: 'already-here,alpha' });
@@ -111,7 +111,7 @@ describe('install-full.sh tmux session guard', () => {
 
   test('--dry-run writes nothing even with the flag set', () => {
     const r = runInstaller(['--dry-run', '--deny-existing-tmux'], { sessions: ['alpha'] });
-    expect(r.stdout).toMatch(/\[dry-run\] would set AGENT_CHAT_SESSION_DENYLIST=alpha/);
+    expect(r.stdout).toMatch(/\[dry-run\] would set HAFLEET_SESSION_DENYLIST=alpha/);
     expect(denylistOf(r.env).count).toBe(0);
   });
 
@@ -122,8 +122,31 @@ describe('install-full.sh tmux session guard', () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), 'hafleet-source-'));
     const envPath = path.join(tmp, 'env');
     writeFileSync(envPath, r.env);
-    const out = execFileSync('bash', ['-c', `set -a; . "${envPath}"; printf '%s' "$AGENT_CHAT_SESSION_DENYLIST"`], { encoding: 'utf-8' });
+    const out = execFileSync('bash', ['-c', `set -a; . "${envPath}"; printf '%s' "$HAFLEET_SESSION_DENYLIST"`], { encoding: 'utf-8' });
     expect(out).toBe('alpha,beta');
+  });
+});
+
+describe('installer tests do not depend on the host having no tmux sessions', () => {
+  // The guard makes install-full.sh refuse non-interactively when sessions exist.
+  // A test that invokes the installer without stating a stance therefore passes on
+  // a machine with no tmux server and fails on a real fleet host. That is a test
+  // that reports the state of the developer's laptop, not the state of the code.
+  test('every install-full.sh invocation in the suite states a tmux stance', () => {
+    const files = execFileSync('git', ['ls-files', 'tests'], { encoding: 'utf-8' })
+      .split('\n').filter((f) => f.endsWith('.test.js'));
+    const offenders = [];
+    for (const file of files) {
+      const text = readFileSync(file, 'utf-8');
+      // Each call is an array literal of args; check the block that follows.
+      for (const match of text.matchAll(/install-full\.sh'?,?\s*\[([\s\S]{0,600}?)\]/g)) {
+        const args = match[1];
+        if (!/--(deny|allow)-existing-tmux/.test(args)) {
+          offenders.push(`${file}: ${args.trim().split('\n')[0].trim()}`);
+        }
+      }
+    }
+    expect(offenders, 'invocations missing --deny/--allow-existing-tmux').toEqual([]);
   });
 });
 
@@ -136,7 +159,7 @@ describe('both installers offer the same protection', () => {
     'apply_session_denylist',
     '--deny-existing-tmux',
     '--allow-existing-tmux',
-    'AGENT_CHAT_SESSION_DENYLIST',
+    'HAFLEET_SESSION_DENYLIST',
     'no TTY to confirm',
     'registers tmux sessions as agents',
   ])('%s is present in both', (needle) => {

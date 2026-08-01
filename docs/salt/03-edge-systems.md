@@ -24,7 +24,7 @@ Boundary:
 
 Current risk:
 
-- Dashboard calls backend with `API_TOKEN`. RLP3-B1 gates mutating dashboard `/api/*` surfaces to loopback callers or `AGENT_CHAT_DASHBOARD_TOKEN`, but there is still no full browser login/session model.
+- Dashboard calls backend with `API_TOKEN`. RLP3-B1 gates mutating dashboard `/api/*` surfaces to loopback callers or `HAFLEET_DASHBOARD_TOKEN`, but there is still no full browser login/session model.
 - Queue/tmux injection needs stronger caller and target validation if dashboard is ever exposed beyond one trusted local user.
 
 ## Task And Task Graph
@@ -93,7 +93,7 @@ Current risks:
 Files:
 
 - `lib/upstream-claude-subconscious.js`
-- `subconscious/claude-agentchat/*`
+- `subconscious/claude-hafleet/*`
 - subconscious routes in `backend-v2.js`
 
 Boundary:

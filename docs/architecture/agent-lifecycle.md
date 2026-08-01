@@ -1,7 +1,7 @@
 # Agent Lifecycle Architecture
 
 > **Scope**: End-to-end agent lifecycle — types, provisioning, session management, supervisor oversight, task system, home directory layout, subconscious hooks, and key files.
-> **Primary sources**: `bin/agent-up`, `bin/agent-down`, `scripts/provision-v1-agent-home.js`, `lib/agent-state.js`, `lib/supervisor-lifecycle-manager.js`, `lib/task-store.js`, `backend-v2.js`.
+> **Primary sources**: `bin/hafleet-up`, `bin/hafleet-down`, `scripts/provision-v1-agent-home.js`, `lib/agent-state.js`, `lib/supervisor-lifecycle-manager.js`, `lib/task-store.js`, `backend-v2.js`.
 
 ---
 
@@ -20,7 +20,7 @@
 
 ## 1. Agent Types
 
-Agentchat supports two agent frameworks: **claude** (Anthropic Claude Code) and **codex** (OpenAI Codex CLI). The framework is set via `--framework` flag on `agent-up` or the `framework` field in `agent.json`.
+Agentchat supports two agent frameworks: **claude** (Anthropic Claude Code) and **codex** (OpenAI Codex CLI). The framework is set via `--framework` flag on `hafleet-up` or the `framework` field in `agent.json`.
 
 ### 1.1 Framework Comparison
 
@@ -33,28 +33,28 @@ Agentchat supports two agent frameworks: **claude** (Anthropic Claude Code) and 
 | New session | `--session-id <uuid>` | `-C <agent-path>` |
 | Exit sequence | `/exit` + Enter + 3×Ctrl+C | 2×Ctrl+C |
 | Shutdown timeout | 30s | 8s |
-| Resume-ID required on shutdown | Yes — agent-down refuses without it | No |
+| Resume-ID required on shutdown | Yes — hafleet-down refuses without it | No |
 | CLAUDE.md / AGENTS.md | Read automatically | Read automatically (as AGENTS.md) |
 | Context management | Env vars (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`) | `config.toml` or `-c` flags |
 | Lifecycle hooks | Claude hooks plus MCP Channel permission relay | Stable `PermissionRequest` hook |
 
-Source: `bin/agent-up:552-575` (framework detection), `bin/agent-up:1641-1654` (Claude launch), `bin/agent-up:1659-1694` (Codex launch).
+Source: `bin/hafleet-up:552-575` (framework detection), `bin/hafleet-up:1641-1654` (Claude launch), `bin/hafleet-up:1659-1694` (Codex launch).
 
 ### 1.2 Claude Launch
 
 ```bash
 claude --resume "$RESUME_ID" \
        --permission-mode auto \
-       --dangerously-load-development-channels server:agent-chat
+       --dangerously-load-development-channels server:hafleet
 # OR for new sessions:
 claude --session-id "$SESSION_ID" \
        --permission-mode auto \
-       --dangerously-load-development-channels server:agent-chat
+       --dangerously-load-development-channels server:hafleet
 ```
 
 Key env vars injected: `ANTHROPIC_MODEL`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `DISABLE_PROMPT_CACHING`, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`.
 
-Source: `bin/agent-up:1641-1654`, `bin/agent-up:1564-1609` (env prefix construction).
+Source: `bin/hafleet-up:1641-1654`, `bin/hafleet-up:1564-1609` (env prefix construction).
 
 ### 1.3 Codex Launch
 
@@ -67,22 +67,22 @@ codex resume "$RESUME_ID" \
 codex --sandbox workspace-write \
       --ask-for-approval on-request \
       -C "$AGENT_PATH" \
-      -c mcp_servers.agentchat.type=sse \
-      -c "mcp_servers.agentchat.url=$MCP_SSE_URL" \
-      -c "mcp_servers.agentchat.headers.Authorization=Bearer $AGENT_TOKEN"
+      -c mcp_servers.hafleet.type=sse \
+      -c "mcp_servers.hafleet.url=$MCP_SSE_URL" \
+      -c "mcp_servers.hafleet.headers.Authorization=Bearer $AGENT_TOKEN"
 ```
 
 MCP is configured via `-c` flags rather than a built-in mechanism. HAFleet calls the Codex policy above **Level 2**: the agent can edit its workspace and explicitly bound managed projects, while operations outside that sandbox require approval. Launchers reject `extraArgs` that try to override the managed sandbox or approval policy.
 
 The launcher also installs a session-scoped `hooks.PermissionRequest` command
-hook through `-c`. Before starting Codex, agent-chat inspects that exact hook
+hook through `-c`. Before starting Codex, hafleet inspects that exact hook
 through Codex App Server. An untrusted definition requires a one-time local TTY
 confirmation (`TRUST`) written through Codex's official configuration API;
 non-interactive startup fails closed instead of leaving a hidden TUI prompt.
 The hook never types into the TUI. It returns only Codex's documented allow/deny
-JSON after agent-chat consumes an owner-authorized Matrix verdict.
+JSON after hafleet consumes an owner-authorized Matrix verdict.
 
-Source: `bin/agent-up:1659-1694`, `bin/agent-up:1502-1530` (Codex MCP flag construction).
+Source: `bin/hafleet-up:1659-1694`, `bin/hafleet-up:1502-1530` (Codex MCP flag construction).
 
 ### 1.4 Framework Validation
 
@@ -106,7 +106,7 @@ backend-v2.js validates + registers agent
 provision-v1-agent-home.js creates directory tree
   │
   ▼
-agent-up launches tmux session + framework binary
+hafleet-up launches tmux session + framework binary
   │
   ▼
 Agent online (heartbeat begins)
@@ -117,7 +117,7 @@ Agent online (heartbeat begins)
 `scripts/provision-v1-agent-home.js` builds the V1 agent home layout:
 
 ```
-~/.agentchat/agents/<agent_id>/
+~/.hafleet/agents/<agent_id>/
 ├── agent.json              # Agent manifest
 ├── state/                  # System-owned runtime state
 │   ├── locks/              # Coordination locks
@@ -217,7 +217,7 @@ Agents progress through a state machine defined in `lib/agent-state.js:4-10`:
 
 Source: `lib/agent-state.js:4-10` (states), `lib/agent-state.js:17-60` (transitions), `lib/agent-state.js:98-108` (grace period).
 
-### 3.2 Launch Sequence (agent-up)
+### 3.2 Launch Sequence (hafleet-up)
 
 ```
 1. Parse args (--name, --framework, --resume, --remote, etc.)
@@ -232,7 +232,7 @@ Source: `lib/agent-state.js:4-10` (states), `lib/agent-state.js:17-60` (transiti
 10. MCP confirms → state: online
 ```
 
-Source: `bin/agent-up` (~1700 lines total).
+Source: `bin/hafleet-up` (~1700 lines total).
 
 ### 3.3 Idle Detection
 
@@ -255,12 +255,12 @@ Source: `backend-v2.js` (idle detection loop), `server.js` (dashboard idle displ
 
 Resume ID is stored at `state/resume-id` and captured during shutdown.
 
-**Validation** (`bin/agent-up:1260-1295`):
-- If `--resume` is passed, agent-up reads `state/resume-id`
+**Validation** (`bin/hafleet-up:1260-1295`):
+- If `--resume` is passed, hafleet-up reads `state/resume-id`
 - If the file doesn't exist or is empty, falls back to new session
 - For Claude, a missing resume-id is a warning; for Codex, it's acceptable
 
-### 3.5 Shutdown (agent-down)
+### 3.5 Shutdown (hafleet-down)
 
 ```
 1. Validate agent is registered
@@ -274,11 +274,11 @@ Resume ID is stored at `state/resume-id` and captured during shutdown.
 7. Update agent state → manual_down
 ```
 
-**Activity check** (`bin/agent-down:257-319`): Before shutdown, agent-down queries whether the agent is actively working. If the agent appears busy, shutdown is refused unless `--force` is passed.
+**Activity check** (`bin/hafleet-down:257-319`): Before shutdown, hafleet-down queries whether the agent is actively working. If the agent appears busy, shutdown is refused unless `--force` is passed.
 
-**Resume-ID capture** (`bin/agent-down:480-506`): For Claude agents, agent-down checks `state/resume-id` and warns if missing — this means the session cannot be resumed later.
+**Resume-ID capture** (`bin/hafleet-down:480-506`): For Claude agents, hafleet-down checks `state/resume-id` and warns if missing — this means the session cannot be resumed later.
 
-Source: `bin/agent-down:518-543` (exit signals), `bin/agent-down:473-478` (scrollback archival), `bin/agent-down:562-599` (shutdown sequence).
+Source: `bin/hafleet-down:518-543` (exit signals), `bin/hafleet-down:473-478` (scrollback archival), `bin/hafleet-down:562-599` (shutdown sequence).
 
 ---
 
@@ -422,7 +422,7 @@ Source: `lib/task-store.js:220-226` (validation).
 
 ### 6.1 V1 Layout
 
-The V1 agent home is the standard layout for all agents. Root: `~/.agentchat/agents/<agent_id>/`.
+The V1 agent home is the standard layout for all agents. Root: `~/.hafleet/agents/<agent_id>/`.
 
 ```
 <agent_id>/
@@ -511,7 +511,7 @@ Four hook events are configured in `.claude/hooks/hooks.json`:
 | `PreToolUse` | 10s | Before a tool call executes |
 | `Stop` | 15s | Claude Code session ends or agent stops |
 
-Source: `subconscious/claude-agentchat/hooks/hooks.json:3-51`.
+Source: `subconscious/claude-hafleet/hooks/hooks.json:3-51`.
 
 ### 7.3 Event Flow
 
@@ -537,7 +537,7 @@ Appended to state/subconscious-events.jsonl
 Broadcast via SSE to subscribers
 ```
 
-Source: `subconscious/claude-agentchat/scripts/hook-entry.mjs:500-596` (main entry), `backend-v2.js:6866-6945` (event ingestion).
+Source: `subconscious/claude-hafleet/scripts/hook-entry.mjs:500-596` (main entry), `backend-v2.js:6866-6945` (event ingestion).
 
 ### 7.4 Handler Details
 
@@ -582,8 +582,8 @@ The agent manifest at `<agent_home>/agent.json` is the single source of truth fo
   "framework": "claude",
   "managedProjects": [
     {
-      "name": "agentchat",
-      "source": "/path/to/agent-chat",
+      "name": "hafleet",
+      "source": "/path/to/hafleet",
       "mode": "symlink"
     }
   ],
@@ -619,11 +619,11 @@ Source: `scripts/provision-v1-agent-home.js:671-690` (creation), `lib/agent-home
 | File | Purpose | Written by |
 |------|---------|------------|
 | `agent-token` | 64-char hex token for X-Agent-Token auth | Provisioning |
-| `resume-id` | Last session's resume identifier | agent-down (capture) / framework (write) |
+| `resume-id` | Last session's resume identifier | hafleet-down (capture) / framework (write) |
 | `letta.json` | Letta memory integration config | Provisioning (if subconscious enabled) |
 | `subconscious-events.jsonl` | Append-only hook event log | hook-entry.mjs |
 | `locks/` | Coordination lock files | System |
-| `history/` | Archived tmux scrollback logs | agent-down |
+| `history/` | Archived tmux scrollback logs | hafleet-down |
 
 ### 8.3 resume-id
 
@@ -631,25 +631,25 @@ The resume ID enables session continuity across agent restarts.
 
 **Write**: The framework binary writes its session/resume ID to a known location. For Claude, this is captured from the session state.
 
-**Read**: `agent-up --resume` reads `state/resume-id` and passes it to the framework's resume flag.
+**Read**: `hafleet-up --resume` reads `state/resume-id` and passes it to the framework's resume flag.
 
-**Capture on shutdown**: `agent-down` reads the resume-id before killing the tmux session and preserves it in `state/resume-id` for future restarts.
+**Capture on shutdown**: `hafleet-down` reads the resume-id before killing the tmux session and preserves it in `state/resume-id` for future restarts.
 
-**Claude requirement**: agent-down warns (and by default refuses) if a Claude agent's resume-id cannot be captured — without it, the conversation context is permanently lost.
+**Claude requirement**: hafleet-down warns (and by default refuses) if a Claude agent's resume-id cannot be captured — without it, the conversation context is permanently lost.
 
-Source: `bin/agent-up:1260-1295` (resume validation), `bin/agent-down:480-506` (resume-id capture).
+Source: `bin/hafleet-up:1260-1295` (resume validation), `bin/hafleet-down:480-506` (resume-id capture).
 
 ### 8.4 Scrollback Archives
 
-On shutdown, agent-down captures the full tmux pane scrollback and archives it to `state/history/<timestamp>.log`. This provides a forensic record of the agent's terminal session.
+On shutdown, hafleet-down captures the full tmux pane scrollback and archives it to `state/history/<timestamp>.log`. This provides a forensic record of the agent's terminal session.
 
-Source: `bin/agent-down:473-478`.
+Source: `bin/hafleet-down:473-478`.
 
 ---
 
 ## Appendix: Environment Variables
 
-Key environment variables injected by agent-up at launch time:
+Key environment variables injected by hafleet-up at launch time:
 
 | Variable | Framework | Purpose |
 |----------|-----------|---------|
@@ -660,8 +660,8 @@ Key environment variables injected by agent-up at launch time:
 | `DISABLE_PROMPT_CACHING` | claude | Disable prompt caching |
 | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` | claude | Disable Anthropic-specific beta headers |
 | `AGENT_IDLE_THRESHOLD_MS` | both | Idle detection threshold in milliseconds |
-| `AGENTCHAT_BACKEND_URL` | both | Backend API endpoint |
-| `AGENTCHAT_AGENT_NAME` | both | Agent's registered name |
-| `AGENTCHAT_AGENT_TOKEN` | both | Per-agent auth token |
+| `HAFLEET_BACKEND_URL` | both | Backend API endpoint |
+| `HAFLEET_AGENT_NAME` | both | Agent's registered name |
+| `HAFLEET_AGENT_TOKEN` | both | Per-agent auth token |
 
-Source: `bin/agent-up:1564-1609`.
+Source: `bin/hafleet-up:1564-1609`.

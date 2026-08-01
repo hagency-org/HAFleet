@@ -6,7 +6,7 @@ import { promisify } from 'util';
 import { afterEach, describe, expect, test } from 'vitest';
 
 const REPO_ROOT = path.resolve('.');
-const AGENTCHAT_BIN = path.join(REPO_ROOT, 'bin', 'agentchat');
+const HAFLEET_BIN = path.join(REPO_ROOT, 'bin', 'hafleet');
 const execFileAsync = promisify(execFile);
 const cleanupDirs = new Set();
 
@@ -22,7 +22,7 @@ function writeExecutable(filePath, content) {
 }
 
 function setupFakePath() {
-  const binDir = trackTempDir('agent-chat-cli-ls-bin-');
+  const binDir = trackTempDir('hafleet-cli-ls-bin-');
   writeExecutable(path.join(binDir, 'tmux'), `#!/usr/bin/env bash
 case "$1" in
   list-sessions) exit 0 ;;
@@ -59,7 +59,7 @@ function writeV1Manifest(homeRoot, name, type = 'codex') {
 }
 
 async function runAgentLs(env = {}) {
-  const { stdout } = await execFileAsync(AGENTCHAT_BIN, ['ls', '--all'], {
+  const { stdout } = await execFileAsync(HAFLEET_BIN, ['ls', '--all'], {
     cwd: REPO_ROOT,
     encoding: 'utf-8',
     env: {
@@ -75,17 +75,17 @@ afterEach(() => {
   cleanupDirs.clear();
 });
 
-describe('agentchat ls cli', () => {
+describe('hafleet ls cli', () => {
   test('lists v1 manifests from runtime-derived homes', async () => {
-    const runtimeDir = trackTempDir('agent-chat-ls-runtime-');
+    const runtimeDir = trackTempDir('hafleet-ls-runtime-');
     const homeDir = path.join(runtimeDir, 'homes');
     const paths = writeV1Manifest(homeDir, 'alpha');
     const output = await runAgentLs({
       PATH: setupFakePath(),
-      HOME: trackTempDir('agent-chat-ls-home-'),
-      AGENT_CHAT_RUNTIME_DIR: runtimeDir,
-      AGENT_CHAT_API: 'http://127.0.0.1:1',
-      AGENTCHAT_HOMEDIR: '',
+      HOME: trackTempDir('hafleet-ls-home-'),
+      HAFLEET_RUNTIME_DIR: runtimeDir,
+      HAFLEET_API: 'http://127.0.0.1:1',
+      HAFLEET_HOMEDIR: '',
     });
 
     expect(output).toContain('alpha');
@@ -94,16 +94,16 @@ describe('agentchat ls cli', () => {
     expect(output).toContain(paths.workdir);
   });
 
-  test('ignores relative AGENTCHAT_HOMEDIR and still lists runtime homes', async () => {
-    const runtimeDir = trackTempDir('agent-chat-ls-runtime-');
+  test('ignores relative HAFLEET_HOMEDIR and still lists runtime homes', async () => {
+    const runtimeDir = trackTempDir('hafleet-ls-runtime-');
     const homeDir = path.join(runtimeDir, 'homes');
     writeV1Manifest(homeDir, 'beta', 'claude');
     const output = await runAgentLs({
       PATH: setupFakePath(),
-      HOME: trackTempDir('agent-chat-ls-home-'),
-      AGENT_CHAT_RUNTIME_DIR: runtimeDir,
-      AGENT_CHAT_API: 'http://127.0.0.1:1',
-      AGENTCHAT_HOMEDIR: 'relative-home',
+      HOME: trackTempDir('hafleet-ls-home-'),
+      HAFLEET_RUNTIME_DIR: runtimeDir,
+      HAFLEET_API: 'http://127.0.0.1:1',
+      HAFLEET_HOMEDIR: 'relative-home',
     });
 
     expect(output).toContain('beta');
@@ -111,15 +111,15 @@ describe('agentchat ls cli', () => {
   });
 
   test('keeps legacy home fallback visible', async () => {
-    const fakeHome = trackTempDir('agent-chat-ls-home-');
-    const legacyHome = path.join(fakeHome, '.agentchat');
+    const fakeHome = trackTempDir('hafleet-ls-home-');
+    const legacyHome = path.join(fakeHome, '.hafleet');
     writeV1Manifest(legacyHome, 'legacy');
     const output = await runAgentLs({
       PATH: setupFakePath(),
       HOME: fakeHome,
-      AGENT_CHAT_API: 'http://127.0.0.1:1',
-      AGENTCHAT_HOMEDIR: '',
-      AGENT_CHAT_RUNTIME_DIR: '',
+      HAFLEET_API: 'http://127.0.0.1:1',
+      HAFLEET_HOMEDIR: '',
+      HAFLEET_RUNTIME_DIR: '',
     });
 
     expect(output).toContain('legacy');

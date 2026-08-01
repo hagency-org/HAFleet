@@ -50,13 +50,13 @@ Three git-poll-based autodeploy scripts manage continuous deployment across envi
 
 | Branch | Environment | Script | Services |
 |--------|-------------|--------|----------|
-| `master` | Dev (`agent-chat/`) | `agentchat-dev-autodeploy.sh` | backend-v2, bridge-matrix, server |
-| `stable` | Production (`agent-chat-live/`) | `agentchat-stable-autodeploy.sh` | backend-v2, bridge-matrix, server |
-| `stable` | Remote servers | `agentchat-remote-autodeploy.sh` | push-relay only |
+| `master` | Dev (`hafleet/`) | `hafleet-dev-autodeploy.sh` | backend-v2, bridge-matrix, server |
+| `stable` | Production (`hafleet-live/`) | `hafleet-stable-autodeploy.sh` | backend-v2, bridge-matrix, server |
+| `stable` | Remote servers | `hafleet-remote-autodeploy.sh` | push-relay only |
 
 ### Dev Autodeploy
 
-**File**: `scripts/agentchat-dev-autodeploy.sh`
+**File**: `scripts/hafleet-dev-autodeploy.sh`
 
 **Behavior**:
 - Polls `master` branch every 30 seconds
@@ -67,9 +67,9 @@ Three git-poll-based autodeploy scripts manage continuous deployment across envi
 **Service restart** (lines 27-47):
 ```
 restart_services():
-  systemctl restart agent-chat-v2
+  systemctl restart hafleet-backend
   wait_for_backend (30s health gate)
-  systemctl restart agent-chat
+  systemctl restart hafleet
   systemctl restart bridge-matrix
 ```
 
@@ -85,7 +85,7 @@ restart_services():
 
 ### Stable Autodeploy
 
-**File**: `scripts/agentchat-stable-autodeploy.sh`
+**File**: `scripts/hafleet-stable-autodeploy.sh`
 
 **Behavior**:
 - Polls `stable` branch every 30 seconds
@@ -103,17 +103,17 @@ wait_for_backend():
 ```
 
 **Service restart order** (lines 55-93):
-1. Restart `agent-chat-v2` (backend)
+1. Restart `hafleet-backend` (backend)
 2. `wait_for_backend` (30s timeout)
-3. Restart remaining services (`agent-chat`, `bridge-matrix`)
+3. Restart remaining services (`hafleet`, `bridge-matrix`)
 
-**Systemd unit**: `agent-chat-stable-autodeploy.service`
+**Systemd unit**: `hafleet-stable-autodeploy.service`
 - Runs as root
-- Logs to `/path/to/agent-chat-live/logs/`
+- Logs to `/path/to/hafleet-live/logs/`
 
 ### Remote Autodeploy
 
-**File**: `scripts/agentchat-remote-autodeploy.sh`
+**File**: `scripts/hafleet-remote-autodeploy.sh`
 
 **Behavior**:
 - Polls `stable` branch every 60 seconds (longer interval for remote)
@@ -385,15 +385,15 @@ Agent ──(every ~60s)──► POST /api/heartbeat ──► backend stores t
 
 | Service | Log Method | Location |
 |---------|-----------|----------|
-| backend-v2 (dev) | systemd journal | `journalctl --user -u agent-chat-dev-backend` |
-| backend-v2 (stable) | systemd journal + file | `journalctl -u agent-chat-v2`, `agent-chat-live/logs/` |
+| backend-v2 (dev) | systemd journal | `journalctl --user -u hafleet-dev-backend` |
+| backend-v2 (stable) | systemd journal + file | `journalctl -u hafleet-backend`, `hafleet-live/logs/` |
 | bridge-matrix | systemd journal | `journalctl -u bridge-matrix` |
-| server (dev) | systemd journal | `journalctl --user -u agent-chat-dev-web` |
-| server (stable) | systemd journal | `journalctl -u agent-chat` |
+| server (dev) | systemd journal | `journalctl --user -u hafleet-dev-web` |
+| server (stable) | systemd journal | `journalctl -u hafleet` |
 | push-relay | systemd journal | `journalctl -u push-relay` |
 | push-relay (remote) | systemd journal | `journalctl -u push-relay-autodeploy` on remote host |
-| autodeploy (dev) | systemd journal | `journalctl --user -u agentchat-dev-autodeploy` |
-| autodeploy (stable) | file | `agent-chat-live/logs/autodeploy.log` |
+| autodeploy (dev) | systemd journal | `journalctl --user -u hafleet-dev-autodeploy` |
+| autodeploy (stable) | file | `hafleet-live/logs/autodeploy.log` |
 | subconscious events | JSONL file | `data/subconscious-events.jsonl` |
 | supervisor snapshots | In-memory + API | `GET /api/supervisor/snapshots` |
 
@@ -447,7 +447,7 @@ Claude Code Session
 
 ### Hook Points
 
-**Configuration file**: `subconscious/claude-agentchat/hooks/hooks.json`
+**Configuration file**: `subconscious/claude-hafleet/hooks/hooks.json`
 
 | Hook | Trigger | Timeout | Data Captured |
 |------|---------|---------|---------------|
@@ -456,7 +456,7 @@ Claude Code Session
 | `PreToolUse` | Before any tool execution | 10s | Session ID, tool name, parameters (`hooks.json:25-35`) |
 | `Stop` | Session ends (completion/error) | 15s | Session ID, stop reason, transcript (`hooks.json:36-46`) |
 
-**Entry script**: `subconscious/claude-agentchat/scripts/hook-entry.mjs`
+**Entry script**: `subconscious/claude-hafleet/scripts/hook-entry.mjs`
 
 Each hook invokes:
 ```bash
@@ -467,8 +467,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/hook-entry.mjs" <HookType>
 
 1. **Hook fires** — Claude Code invokes `hook-entry.mjs` with hook type
 2. **Context resolution** (`hook-entry.mjs:94-101`) — reads env vars:
-   - `CLAUDE_SESSION_ID`, `AGENTCHAT_AGENT_NAME` or `CLAUDE_AGENT_NAME`
-   - `AGENTCHAT_HOMEDIR` or `CLAUDE_AGENT_HOME`
+   - `CLAUDE_SESSION_ID`, `HAFLEET_AGENT_NAME` or `CLAUDE_AGENT_NAME`
+   - `HAFLEET_HOMEDIR` or `CLAUDE_AGENT_HOME`
 3. **State resolution** (`hook-entry.mjs:103-163`) — loads `state/letta.json` to determine mode
 4. **Optional LLM guidance** — if local runtime mode enabled:
    - Calls `POST /api/subconscious/runtime/invoke/:name` (`hook-entry.mjs:226-269`)
@@ -540,7 +540,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/hook-entry.mjs" <HookType>
 {
   "provider": "local",
   "mode": "runtime",
-  "agentId": "claude-agentchat-<agentName>",
+  "agentId": "claude-hafleet-<agentName>",
   "resolutionSource": "deterministic",
   "guidance": {
     "type": "manual",
@@ -570,7 +570,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/hook-entry.mjs" <HookType>
   "hooks": {
     "installed": true,
     "hookFile": ".claude/hooks/hooks.json",
-    "entryScript": "<repoRoot>/subconscious/claude-agentchat/scripts/hook-entry.mjs"
+    "entryScript": "<repoRoot>/subconscious/claude-hafleet/scripts/hook-entry.mjs"
   },
   "endpoints": {
     "eventUrl": "http://localhost:8090/api/subconscious/events",
@@ -714,8 +714,8 @@ The push-relay is the core communication component for remote agents.
 2. **Environment setup** (lines 122-144):
    - Creates `.env` file with:
      - `API_TOKEN` — bearer token for backend API
-     - `AGENTCHAT_BACKEND_URL` — central backend URL (e.g. `https://host:8090`)
-     - `AGENTCHAT_AGENT_NAME` — agent name for this remote instance
+     - `HAFLEET_BACKEND_URL` — central backend URL (e.g. `https://host:8090`)
+     - `HAFLEET_AGENT_NAME` — agent name for this remote instance
 
 3. **Dependencies** (lines 146-148):
    - Runs `npm install` in the cloned repo
@@ -761,40 +761,40 @@ The dev autodeploy service handles this automatically. To trigger manually:
 
 ```bash
 # Check autodeploy status
-systemctl --user status agentchat-dev-autodeploy
+systemctl --user status hafleet-dev-autodeploy
 
 # View recent deploy logs
-journalctl --user -u agentchat-dev-autodeploy --since "1 hour ago"
+journalctl --user -u hafleet-dev-autodeploy --since "1 hour ago"
 
 # Manual deploy (if autodeploy is stopped)
-cd ~/laplace/agent-chat
+cd ~/laplace/hafleet
 git pull --ff-only origin master
 npm install
-systemctl --user restart agent-chat-dev-backend
-systemctl --user restart agent-chat-dev-web
+systemctl --user restart hafleet-dev-backend
+systemctl --user restart hafleet-dev-web
 ```
 
 #### Stable Deploy (automatic, health-gated)
 
 ```bash
 # Check stable autodeploy status
-systemctl status agent-chat-stable-autodeploy
+systemctl status hafleet-stable-autodeploy
 
 # View deploy logs
-tail -f ~/laplace/agent-chat-live/logs/autodeploy.log
+tail -f ~/laplace/hafleet-live/logs/autodeploy.log
 
 # Manual stable deploy
-cd ~/laplace/agent-chat-live
+cd ~/laplace/hafleet-live
 git pull --ff-only origin stable
 npm install
-systemctl restart agent-chat-v2
+systemctl restart hafleet-backend
 # Wait for backend health
 for i in $(seq 1 30); do
   curl -sf http://localhost:8090/api/agents && break
   sleep 1
 done
 systemctl restart bridge-matrix
-systemctl restart agent-chat
+systemctl restart hafleet
 ```
 
 ### 5.2 Agent Restart
@@ -803,14 +803,14 @@ systemctl restart agent-chat
 
 ```bash
 # Check agent activity first
-bin/agent-ls                          # List running agents
-bin/agent-audit <agentName>           # Check recent activity
+bin/hafleet-ls                          # List running agents
+bin/hafleet-audit <agentName>           # Check recent activity
 
 # Graceful shutdown (archives scrollback, captures resume-id)
-bin/agent-down <agentName>
+bin/hafleet-down <agentName>
 ```
 
-**`agent-down` sequence** (`bin/agent-down`, 600 lines):
+**`hafleet-down` sequence** (`bin/hafleet-down`, 600 lines):
 
 1. **Safety checks** (lines 257-319):
    - Validates agent exists and is running
@@ -823,7 +823,7 @@ bin/agent-down <agentName>
 
 3. **Archive & resume** (lines 456-506):
    - Captures tmux scrollback to archive file
-   - Saves `resume-id` to `state/resume-id` for later `agent-up --resume`
+   - Saves `resume-id` to `state/resume-id` for later `hafleet-up --resume`
    - Preserves conversation state
 
 4. **Exit sequence** (lines 518-543):
@@ -835,17 +835,17 @@ bin/agent-down <agentName>
 
 ```bash
 # Fresh start
-bin/agent-up <agentName>
+bin/hafleet-up <agentName>
 
 # Resume from previous session
-bin/agent-up <agentName> --resume
+bin/hafleet-up <agentName> --resume
 ```
 
 **Resume** reads `state/resume-id` to continue the previous conversation.
 
 ### 5.3 Merge-to-Stable Checklist
 
-Based on `docs/agentchat-develop/stable-merge-readiness-audit.md` (246 lines) and `docs/agentchat-develop/stable-merge-execution-hygiene-plan.md` (175 lines).
+Based on `docs/hafleet-develop/stable-merge-readiness-audit.md` (246 lines) and `docs/hafleet-develop/stable-merge-execution-hygiene-plan.md` (175 lines).
 
 #### Pre-Merge Blockers (must all pass)
 
@@ -867,10 +867,10 @@ Based on `docs/agentchat-develop/stable-merge-readiness-audit.md` (246 lines) an
 
 ```bash
 # 1. Stop all agents
-bin/agent-down --all
+bin/hafleet-down --all
 
 # 2. Switch to stable branch
-cd ~/laplace/agent-chat-live
+cd ~/laplace/hafleet-live
 git checkout stable
 
 # 3. Merge master into stable
@@ -891,11 +891,11 @@ curl -sf http://localhost:8090/api/agents
 - Monitor autodeploy logs for 5 minutes
 - Verify all services restarted cleanly
 - Check dashboard for agent connectivity
-- Restart agents as needed with `bin/agent-up`
+- Restart agents as needed with `bin/hafleet-up`
 
 ### 5.4 Trust Mode Flip
 
-**Configuration**: `AGENTCHAT_AGENT_TOKEN_MODE` environment variable
+**Configuration**: `HAFLEET_AGENT_TOKEN_MODE` environment variable
 
 **Enforcement logic**: `backend-v2.js:163-220`
 
@@ -909,12 +909,12 @@ curl -sf http://localhost:8090/api/agents
 
 ```bash
 # 1. Update environment
-export AGENTCHAT_AGENT_TOKEN_MODE=hard   # or: audit, off
+export HAFLEET_AGENT_TOKEN_MODE=hard   # or: audit, off
 
 # 2. Restart backend to pick up new mode
-systemctl --user restart agent-chat-dev-backend   # dev
+systemctl --user restart hafleet-dev-backend   # dev
 # or
-systemctl restart agent-chat-v2                   # stable
+systemctl restart hafleet-backend                   # stable
 
 # 3. Verify mode is active
 curl -s http://localhost:8090/api/health | grep tokenMode
@@ -958,11 +958,11 @@ curl -X DELETE -H "Authorization: Bearer <admin_token>" \
 
 | Script | Purpose |
 |--------|---------|
-| `bin/agent-up` | Start or resume an agent (tmux session, MCP, push-relay) |
-| `bin/agent-down` | Graceful agent shutdown (archive, resume-id capture) |
-| `bin/agent-ls` | List running agents with status |
-| `bin/agent-send` | Send a message to an agent |
-| `bin/agent-audit` | Check agent activity and recent messages |
+| `bin/hafleet-up` | Start or resume an agent (tmux session, MCP, push-relay) |
+| `bin/hafleet-down` | Graceful agent shutdown (archive, resume-id capture) |
+| `bin/hafleet-ls` | List running agents with status |
+| `bin/hafleet-send` | Send a message to an agent |
+| `bin/hafleet-audit` | Check agent activity and recent messages |
 | `bin/agent-dashboard` | Open the web dashboard |
 | `bin/agent-task` | Manage agent tasks (create, update, list) |
 | `bin/group-add` | Add member to a group |
@@ -975,18 +975,18 @@ curl -X DELETE -H "Authorization: Bearer <admin_token>" \
 
 ```bash
 # ─── Dev environment (systemctl --user) ───
-systemctl --user status agent-chat-dev-backend
-systemctl --user status agent-chat-dev-web
-systemctl --user status agentchat-dev-autodeploy
+systemctl --user status hafleet-dev-backend
+systemctl --user status hafleet-dev-web
+systemctl --user status hafleet-dev-autodeploy
 
-systemctl --user restart agent-chat-dev-backend
-systemctl --user restart agent-chat-dev-web
+systemctl --user restart hafleet-dev-backend
+systemctl --user restart hafleet-dev-web
 
 # ─── Stable environment (systemctl as root) ───
-systemctl status agent-chat-v2
+systemctl status hafleet-backend
 systemctl status bridge-matrix
-systemctl status agent-chat
-systemctl status agent-chat-stable-autodeploy
+systemctl status hafleet
+systemctl status hafleet-stable-autodeploy
 
 # ─── Health checks ───
 curl -s http://localhost:8090/api/agents          # Backend API
@@ -994,7 +994,7 @@ curl -s http://localhost:8090/api/health          # Health summary
 curl -s http://localhost:8084/                     # Dashboard
 
 # ─── Logs ───
-journalctl --user -u agent-chat-dev-backend -f    # Dev backend logs
-journalctl --user -u agent-chat-dev-web -f         # Dev web/dashboard logs
-tail -f ~/laplace/agent-chat-live/logs/*.log       # Stable logs
+journalctl --user -u hafleet-dev-backend -f    # Dev backend logs
+journalctl --user -u hafleet-dev-web -f         # Dev web/dashboard logs
+tail -f ~/laplace/hafleet-live/logs/*.log       # Stable logs
 ```

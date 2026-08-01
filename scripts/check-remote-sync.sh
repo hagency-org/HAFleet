@@ -5,15 +5,15 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 MIRROR_FILES=(
-  "bin/agentchat-prune-agents"
-  "bin/agent-chat"
-  "bin/agent-chat-cli"
-  "bin/agent-down"
-  "bin/agent-ls"
-  "bin/agent-maintain"
-  "bin/agent-send"
-  "bin/agent-service"
-  "bin/agent-update"
+  "bin/hafleet-prune-agents"
+  "bin/hafleet-legacy"
+  "bin/hafleet-cli"
+  "bin/hafleet-down"
+  "bin/hafleet-ls"
+  "bin/hafleet-maintain"
+  "bin/hafleet-send"
+  "bin/hafleet-service"
+  "bin/hafleet-update"
   "bin/self-time-reminder"
   "bin/verify-remote"
   "lib/blocked-patterns.js"
@@ -32,8 +32,8 @@ MIRROR_FILES=(
 )
 
 PROFILE_SPECIFIC_FILES=(
-  "bin/agentchat:remote profile-specific command surface"
-  "bin/agent-up:remote profile-specific launcher with shared permission baseline"
+  "bin/hafleet:remote profile-specific command surface"
+  "bin/hafleet-up:remote profile-specific launcher with shared permission baseline"
 )
 
 failures=0
@@ -83,14 +83,14 @@ check_profile_specific_file() {
   echo "[OK] Profile-specific remote file: remote/$rel ($reason)"
 }
 
-check_agentchat_dispatch_targets() {
+check_hafleet_dispatch_targets() {
   local file="$1"
   local label="$2"
   local bin_dir target target_path targets
   bin_dir="$(dirname "$file")"
 
   if [ ! -f "$file" ]; then
-    echo "[FAIL] Missing agentchat CLI for dispatch check: $file"
+    echo "[FAIL] Missing hafleet CLI for dispatch check: $file"
     failures=$((failures + 1))
     return
   fi
@@ -170,9 +170,9 @@ for spec in "${PROFILE_SPECIFIC_FILES[@]}"; do
   check_profile_specific_file "$spec"
 done
 
-echo "Checking agentchat dispatch targets..."
-check_agentchat_dispatch_targets "bin/agentchat" "root"
-check_agentchat_dispatch_targets "remote/bin/agentchat" "remote"
+echo "Checking hafleet dispatch targets..."
+check_hafleet_dispatch_targets "bin/hafleet" "root"
+check_hafleet_dispatch_targets "remote/bin/hafleet" "remote"
 
 echo "Checking wrapper contracts..."
 check_wrapper_contract "push-relay.js" "root" "push-relay-core.js"

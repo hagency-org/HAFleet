@@ -48,7 +48,7 @@ describe('backend runtime API', () => {
   });
 
   test('safe JSON writes clean up temp files and preserve the target on rename failure', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-safe-write-test-', {
+    context = await createBackendTestContext('hafleet-runtime-safe-write-test-', {
       agents: {},
       groups: {},
     });
@@ -67,7 +67,7 @@ describe('backend runtime API', () => {
   });
 
   test('runtime reports persist backend-derived observation provenance', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-provenance-test-', {
+    context = await createBackendTestContext('hafleet-runtime-provenance-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -127,7 +127,7 @@ describe('backend runtime API', () => {
 
   test('MCP heartbeat restores liveness without clearing blocked runtime state', async () => {
     const staleSeen = Date.now() - 120000;
-    context = await createBackendTestContext('agent-chat-mcp-heartbeat-test-', {
+    context = await createBackendTestContext('hafleet-mcp-heartbeat-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -196,7 +196,7 @@ describe('backend runtime API', () => {
   });
 
   test('recent MCP heartbeat prevents runtime heuristic from marking MCP missing', async () => {
-    context = await createBackendTestContext('agent-chat-mcp-heartbeat-authority-test-', {
+    context = await createBackendTestContext('hafleet-mcp-heartbeat-authority-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -244,7 +244,7 @@ describe('backend runtime API', () => {
 
   test('stale MCP heartbeat allows runtime heuristic to mark MCP missing', async () => {
     const staleHeartbeatAt = Date.now() - 91_000;
-    context = await createBackendTestContext('agent-chat-mcp-heartbeat-stale-test-', {
+    context = await createBackendTestContext('hafleet-mcp-heartbeat-stale-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -295,7 +295,7 @@ describe('backend runtime API', () => {
   });
 
   test('MCP heartbeat can re-register an agent after backend state loss', async () => {
-    context = await createBackendTestContext('agent-chat-mcp-heartbeat-register-test-', {
+    context = await createBackendTestContext('hafleet-mcp-heartbeat-register-test-', {
       agents: {},
       groups: {},
     });
@@ -330,7 +330,7 @@ describe('backend runtime API', () => {
   });
 
   test('remote runtime reports keep API_TOKEN compatibility and do not accept server token yet', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-auth-test-', {
+    context = await createBackendTestContext('hafleet-runtime-auth-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -344,7 +344,7 @@ describe('backend runtime API', () => {
       groups: {},
       env: {
         API_TOKEN: 'operator-token',
-        AGENTCHAT_SERVER_TOKEN: 'server-token',
+        HAFLEET_SERVER_TOKEN: 'server-token',
       },
     });
 
@@ -376,7 +376,7 @@ describe('backend runtime API', () => {
   });
 
   test('runtime reports preserve unknown activity instead of reporting idle', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-unknown-activity-test-', {
+    context = await createBackendTestContext('hafleet-runtime-unknown-activity-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -417,7 +417,7 @@ describe('backend runtime API', () => {
   });
 
   test('push-delivered ignores stale queue acknowledgements', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-push-delivered-test-', {
+    context = await createBackendTestContext('hafleet-runtime-push-delivered-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -553,7 +553,7 @@ describe('backend runtime API', () => {
   });
 
   test('push-delivered does not reopen inbox gate after check_inbox consumed the source', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-push-delivered-read-ack-test-', {
+    context = await createBackendTestContext('hafleet-runtime-push-delivered-read-ack-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -658,7 +658,7 @@ describe('backend runtime API', () => {
   });
 
   test('blocked notifications use tiered debounce and never notify transient blockers', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-test-', {
+    context = await createBackendTestContext('hafleet-runtime-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -730,7 +730,7 @@ describe('backend runtime API', () => {
   });
 
   test('severity rebroadcast only happens when blocked tier increases', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-test-', {
+    context = await createBackendTestContext('hafleet-runtime-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -761,7 +761,7 @@ describe('backend runtime API', () => {
     const hardFirst = await request(context.app).post('/api/agents/alpha/runtime').send({
       blocked: true,
       reason: 'update-required',
-      tail: 'update available: run agent-update',
+      tail: 'update available: run hafleet-update',
       command: 'codex',
     });
     expect(hardFirst.status).toBe(200);
@@ -772,7 +772,7 @@ describe('backend runtime API', () => {
     const hardSecond = await request(context.app).post('/api/agents/alpha/runtime').send({
       blocked: true,
       reason: 'update-required',
-      tail: 'update available: run agent-update',
+      tail: 'update available: run hafleet-update',
       command: 'codex',
     });
     expect(hardSecond.status).toBe(200);
@@ -806,7 +806,7 @@ describe('backend runtime API', () => {
   });
 
   test('blocked recovery resets debounce state after a notified block', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-test-', {
+    context = await createBackendTestContext('hafleet-runtime-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -823,13 +823,13 @@ describe('backend runtime API', () => {
     await request(context.app).post('/api/agents/alpha/runtime').send({
       blocked: true,
       reason: 'update-required',
-      tail: 'update available: run agent-update',
+      tail: 'update available: run hafleet-update',
       command: 'codex',
     });
     await request(context.app).post('/api/agents/alpha/runtime').send({
       blocked: true,
       reason: 'update-required',
-      tail: 'update available: run agent-update',
+      tail: 'update available: run hafleet-update',
       command: 'codex',
     });
 
@@ -856,7 +856,7 @@ describe('backend runtime API', () => {
   });
 
   test('blocked notifications observe a per-agent cooldown across episodes', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-test-', {
+    context = await createBackendTestContext('hafleet-runtime-test-', {
       env: {
         AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '1000',
         SYSTEM_INFO_RECOVERY_DAMPENER_MS: '0',
@@ -938,7 +938,7 @@ describe('backend runtime API', () => {
   });
 
   test('agent blocked alert uses one per-agent dedupe key without trailing duplicate', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-test-', {
+    context = await createBackendTestContext('hafleet-runtime-test-', {
       env: {
         AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '0',
       },
@@ -959,7 +959,7 @@ describe('backend runtime API', () => {
       const response = await request(context.app).post('/api/agents/alpha/runtime').send({
         blocked: true,
         reason: 'update-required',
-        tail: 'update available: run agent-update',
+        tail: 'update available: run hafleet-update',
         command: 'codex',
       });
       expect(response.status).toBe(200);
@@ -990,7 +990,7 @@ describe('backend runtime API', () => {
         tmux: 'alpha:0.0',
       },
     };
-    context = await createBackendTestContext('agent-chat-runtime-test-', {
+    context = await createBackendTestContext('hafleet-runtime-test-', {
       env: {
         AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '0',
       },
@@ -1002,7 +1002,7 @@ describe('backend runtime API', () => {
       await request(context.app).post('/api/agents/alpha/runtime').send({
         blocked: true,
         reason: 'update-required',
-        tail: 'update available: run agent-update',
+        tail: 'update available: run hafleet-update',
         command: 'codex',
       });
     }
@@ -1022,7 +1022,7 @@ describe('backend runtime API', () => {
       await request(context.app).post('/api/agents/alpha/runtime').send({
         blocked: true,
         reason: 'update-required',
-        tail: 'update available: run agent-update',
+        tail: 'update available: run hafleet-update',
         command: 'codex',
       });
     }
@@ -1064,7 +1064,7 @@ describe('backend runtime API', () => {
     ]);
 
     context.cleanup();
-    context = await createBackendTestContext('agent-chat-runtime-test-', {
+    context = await createBackendTestContext('hafleet-runtime-test-', {
       env: {
         AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '0',
       },
@@ -1078,7 +1078,7 @@ describe('backend runtime API', () => {
       await request(context.app).post('/api/agents/alpha/runtime').send({
         blocked: true,
         reason: 'update-required',
-        tail: 'update available: run agent-update',
+        tail: 'update available: run hafleet-update',
         command: 'codex',
       });
     }
@@ -1095,7 +1095,7 @@ describe('backend runtime API', () => {
   });
 
   test('blocked system info only targets humans with unread pending messages', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-test-', {
+    context = await createBackendTestContext('hafleet-runtime-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -1130,13 +1130,13 @@ describe('backend runtime API', () => {
     await request(context.app).post('/api/agents/alpha/runtime').send({
       blocked: true,
       reason: 'update-required',
-      tail: 'update available: run agent-update',
+      tail: 'update available: run hafleet-update',
       command: 'codex',
     });
     await request(context.app).post('/api/agents/alpha/runtime').send({
       blocked: true,
       reason: 'update-required',
-      tail: 'update available: run agent-update',
+      tail: 'update available: run hafleet-update',
       command: 'codex',
     });
 
@@ -1147,7 +1147,7 @@ describe('backend runtime API', () => {
   });
 
   test('blocked human target snapshot updates after human message delivery and inbox read', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-test-', {
+    context = await createBackendTestContext('hafleet-runtime-test-', {
       env: {
         AGENT_BLOCKED_NOTIFICATION_COOLDOWN_MS: '0',
         SYSTEM_INFO_RECOVERY_DAMPENER_MS: '0',
@@ -1190,13 +1190,13 @@ describe('backend runtime API', () => {
     await request(context.app).post('/api/agents/alpha/runtime').send({
       blocked: true,
       reason: 'update-required',
-      tail: 'update available: run agent-update',
+      tail: 'update available: run hafleet-update',
       command: 'codex',
     });
     await request(context.app).post('/api/agents/alpha/runtime').send({
       blocked: true,
       reason: 'update-required',
-      tail: 'update available: run agent-update',
+      tail: 'update available: run hafleet-update',
       command: 'codex',
     });
 
@@ -1217,13 +1217,13 @@ describe('backend runtime API', () => {
     await request(context.app).post('/api/agents/alpha/runtime').send({
       blocked: true,
       reason: 'update-required',
-      tail: 'update available: run agent-update',
+      tail: 'update available: run hafleet-update',
       command: 'codex',
     });
     await request(context.app).post('/api/agents/alpha/runtime').send({
       blocked: true,
       reason: 'update-required',
-      tail: 'update available: run agent-update',
+      tail: 'update available: run hafleet-update',
       command: 'codex',
     });
 
@@ -1234,7 +1234,7 @@ describe('backend runtime API', () => {
   });
 
   test('MCP transitions do not emit legacy MCP-specific SSE event types', async () => {
-    context = await createBackendTestContext('agent-chat-runtime-test-', {
+    context = await createBackendTestContext('hafleet-runtime-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -1286,7 +1286,7 @@ describe('backend runtime API', () => {
 
   test('stale remote heartbeat marks server and agents offline', async () => {
     const staleHeartbeatAt = Date.now() - 120_000;
-    context = await createBackendTestContext('agent-chat-runtime-test-', {
+    context = await createBackendTestContext('hafleet-runtime-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -1361,7 +1361,7 @@ describe('backend runtime API', () => {
   });
 
   test('codex agent reports mcpPresent=null and does not trigger mcp_missing', async () => {
-    context = await createBackendTestContext('agent-chat-mcp-type-test-', {
+    context = await createBackendTestContext('hafleet-mcp-type-test-', {
       agents: {
         codexbot: {
           name: 'codexbot',
@@ -1410,7 +1410,7 @@ describe('inbox gate semantics', () => {
   });
 
   test('send blocks on pending gate; filtered reads never clear it; only a full unfiltered read clears it', async () => {
-    context = await createBackendTestContext('agent-chat-inbox-gate-contract-test-', {
+    context = await createBackendTestContext('hafleet-inbox-gate-contract-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -1495,7 +1495,7 @@ describe('inbox gate semantics', () => {
   });
 
   test('a full unfiltered read clears the gate even when the source message has already scrolled behind the cursor', async () => {
-    context = await createBackendTestContext('agent-chat-inbox-gate-behind-cursor-test-', {
+    context = await createBackendTestContext('hafleet-inbox-gate-behind-cursor-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -1582,7 +1582,7 @@ describe('inbox gate semantics', () => {
   });
 
   test('a full unfiltered read clears the gate even when unread is empty, and records one read acknowledgement', async () => {
-    context = await createBackendTestContext('agent-chat-inbox-gate-empty-unread-test-', {
+    context = await createBackendTestContext('hafleet-inbox-gate-empty-unread-test-', {
       agents: {
         alpha: {
           name: 'alpha',

@@ -1,37 +1,38 @@
 {
   "profiles": {
     "root": {
-      "cli": "bin/agentchat",
+      "cli": "bin/hafleet",
       "commands": [
-        { "command": "up", "target": "agent-up" },
-        { "command": "up-v1", "target": "agent-up-v1", "aliases": ["v1-up"] },
-        { "command": "project", "target": "agent-project" },
-        { "command": "graph", "target": "agent-graph" },
-        { "command": "down", "target": "agent-down" },
-        { "command": "ls", "target": "agent-ls", "aliases": ["list"] },
-        { "command": "resume-id", "target": "agent-resume-id" },
-        { "command": "send", "target": "agent-send" },
-        { "command": "update", "target": "agent-update" },
-        { "command": "service", "target": "agent-service" },
+        { "command": "up", "target": "hafleet-up" },
+        { "command": "acp-up", "target": "hafleet-acp-up" },
+        { "command": "up-v1", "target": "hafleet-up-v1", "aliases": ["v1-up"] },
+        { "command": "project", "target": "hafleet-project" },
+        { "command": "graph", "target": "hafleet-graph" },
+        { "command": "down", "target": "hafleet-down" },
+        { "command": "ls", "target": "hafleet-ls", "aliases": ["list"] },
+        { "command": "resume-id", "target": "hafleet-resume-id" },
+        { "command": "send", "target": "hafleet-send" },
+        { "command": "update", "target": "hafleet-update" },
+        { "command": "service", "target": "hafleet-service" },
         { "command": "verify-remote", "target": "verify-remote", "aliases": ["verify"] },
-        { "command": "audit", "target": "agent-audit" },
-        { "command": "benchmark", "target": "agent-benchmark" },
-        { "command": "maintain", "target": "agent-maintain" },
-        { "command": "prune-agents", "target": "agentchat-prune-agents" },
-        { "command": "sync-skills", "target": "agentchat-sync-skills" },
+        { "command": "audit", "target": "hafleet-audit" },
+        { "command": "benchmark", "target": "hafleet-benchmark" },
+        { "command": "maintain", "target": "hafleet-maintain" },
+        { "command": "prune-agents", "target": "hafleet-prune-agents" },
+        { "command": "sync-skills", "target": "hafleet-sync-skills" },
         { "command": "reminder", "target": "self-time-reminder", "aliases": ["self-time-reminder"] },
-        { "command": "cli", "target": "agent-chat-cli", "aliases": ["admin"] },
+        { "command": "cli", "target": "hafleet-cli", "aliases": ["admin"] },
         { "command": "check-mcp", "target": "check-mcp" }
       ],
       "unsupportedSmoke": ["definitely-not-a-command"],
       "helpAssertions": [
         {
           "command": "service",
-          "mustContain": ["Controls services on the current host only.", "remote relay service agent-chat-push-relay"]
+          "mustContain": ["Controls services on the current host only.", "remote relay service hafleet-push-relay"]
         },
         {
           "command": "update",
-          "mustContain": ["Updates git-checkout installs on this host.", "Standalone remote packages cannot self-update", "Service flags only control the remote relay service: agent-chat-push-relay."]
+          "mustContain": ["Updates git-checkout installs on this host.", "Standalone remote packages cannot self-update", "Service flags only control the remote relay service: hafleet-push-relay."]
         },
         {
           "command": "ls",
@@ -44,19 +45,19 @@
       ]
     },
     "remote": {
-      "cli": "remote/bin/agentchat",
+      "cli": "remote/bin/hafleet",
       "commands": [
-        { "command": "up", "target": "agent-up" },
-        { "command": "down", "target": "agent-down" },
-        { "command": "ls", "target": "agent-ls", "aliases": ["list"] },
-        { "command": "send", "target": "agent-send" },
-        { "command": "update", "target": "agent-update" },
-        { "command": "service", "target": "agent-service" },
+        { "command": "up", "target": "hafleet-up" },
+        { "command": "down", "target": "hafleet-down" },
+        { "command": "ls", "target": "hafleet-ls", "aliases": ["list"] },
+        { "command": "send", "target": "hafleet-send" },
+        { "command": "update", "target": "hafleet-update" },
+        { "command": "service", "target": "hafleet-service" },
         { "command": "verify-remote", "target": "verify-remote", "aliases": ["verify"] },
-        { "command": "maintain", "target": "agent-maintain" },
-        { "command": "prune-agents", "target": "agentchat-prune-agents" },
+        { "command": "maintain", "target": "hafleet-maintain" },
+        { "command": "prune-agents", "target": "hafleet-prune-agents" },
         { "command": "reminder", "target": "self-time-reminder", "aliases": ["self-time-reminder"] },
-        { "command": "cli", "target": "agent-chat-cli", "aliases": ["admin"] }
+        { "command": "cli", "target": "hafleet-cli", "aliases": ["admin"] }
       ],
       "unsupportedSmoke": [
         "up-v1",
@@ -71,11 +72,11 @@
       "helpAssertions": [
         {
           "command": "service",
-          "mustContain": ["Controls services on the current host only.", "remote relay service agent-chat-push-relay"]
+          "mustContain": ["Controls services on the current host only.", "remote relay service hafleet-push-relay"]
         },
         {
           "command": "update",
-          "mustContain": ["Updates git-checkout installs on this host.", "Standalone remote packages cannot self-update", "Service flags only control the remote relay service: agent-chat-push-relay."]
+          "mustContain": ["Updates git-checkout installs on this host.", "Standalone remote packages cannot self-update", "Service flags only control the remote relay service: hafleet-push-relay."]
         },
         {
           "command": "ls",

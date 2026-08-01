@@ -15,7 +15,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
   let app;
 
   beforeAll(async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-provenance-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-provenance-'));
     const dataDir = path.join(runtimeDir, 'data');
     mkdirSync(dataDir, { recursive: true });
     writeJson(path.join(dataDir, 'agents.json'), {
@@ -28,7 +28,7 @@ describe('provenance metadata (5.8.3 Layer 1)', () => {
     writeJson(path.join(dataDir, 'agent_runtime.json'), {});
     writeJson(path.join(dataDir, 'local_activity_sweep.json'), { selectionCursor: 0 });
 
-    process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
     process.env.SUPERVISOR_ENABLED = 'false';
     process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';
     process.env.MATRIX_OPERATOR_MXIDS = '@ops:matrix.test';

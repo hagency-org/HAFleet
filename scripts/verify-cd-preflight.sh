@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 RUN_CI=true
 ALLOW_DIRTY=false
-EXPECT_BRANCH="${AGENTCHAT_DEPLOY_BRANCH:-}"
+EXPECT_BRANCH="${HAFLEET_DEPLOY_BRANCH:-}"
 
 usage() {
   cat <<'EOF'
@@ -112,12 +112,12 @@ else
 fi
 
 echo "== post-deploy verification hint =="
-verify_cmd=(agentchat verify-remote --samples 2 --interval 16 --expect-version "$short_commit")
-if [ -n "${AGENT_CHAT_API:-}" ]; then
-  verify_cmd+=(--api "${AGENT_CHAT_API%/}")
+verify_cmd=(hafleet verify-remote --samples 2 --interval 16 --expect-version "$short_commit")
+if [ -n "${HAFLEET_API:-}" ]; then
+  verify_cmd+=(--api "${HAFLEET_API%/}")
 fi
-if [ -n "${AGENT_CHAT_SERVER:-}" ]; then
-  verify_cmd+=(--server "$AGENT_CHAT_SERVER")
+if [ -n "${HAFLEET_SERVER:-}" ]; then
+  verify_cmd+=(--server "$HAFLEET_SERVER")
 fi
 if [ -n "${VERIFY_AGENT:-}" ]; then
   verify_cmd+=(--agent "$VERIFY_AGENT")

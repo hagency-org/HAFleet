@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 
-# Deprecated legacy entrypoint: forward to unified 'agentchat'.
-if [ "${AGENTCHAT_INTERNAL_DISPATCH:-0}" != "1" ]; then
+# Deprecated legacy entrypoint: forward to unified 'hafleet'.
+if [ "${HAFLEET_INTERNAL_DISPATCH:-0}" != "1" ]; then
   _ac_legacy_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   _ac_legacy_name="$(basename "$0")"
-  echo "[DEPRECATED] ${_ac_legacy_name} is deprecated. Use: agentchat verify-remote ..." >&2
-  exec "${_ac_legacy_dir}/agentchat" "verify-remote" "$@"
+  echo "[DEPRECATED] ${_ac_legacy_name} is deprecated. Use: hafleet verify-remote ..." >&2
+  exec "${_ac_legacy_dir}/hafleet" "verify-remote" "$@"
 fi
 set -euo pipefail
 
-API_BASE="${AGENT_CHAT_API:-}"
-SERVER_ID="${AGENT_CHAT_SERVER:-}"
+API_BASE="${HAFLEET_API:-}"
+SERVER_ID="${HAFLEET_SERVER:-}"
 AGENT_NAME=""
 API_TOKEN_VALUE="${API_TOKEN:-}"
-SERVICE_NAME="${SERVICE_NAME:-agent-chat-push-relay}"
+SERVICE_NAME="${SERVICE_NAME:-hafleet-push-relay}"
 EXPECT_VERSION="${EXPECT_VERSION:-}"
 SAMPLES="${VERIFY_SAMPLES:-3}"
 INTERVAL="${VERIFY_INTERVAL:-15}"
@@ -25,8 +25,8 @@ usage() {
 Usage: verify-remote [options]
 
 Options:
-  --api <url>         Backend base URL (default: $AGENT_CHAT_API)
-  --server <id>       Remote server id (default: $AGENT_CHAT_SERVER)
+  --api <url>         Backend base URL (default: $HAFLEET_API)
+  --server <id>       Remote server id (default: $HAFLEET_SERVER)
   --agent <name>      Also verify /api/agents/<name>
   --token <token>     API token (default: $API_TOKEN)
   --samples <n>       Number of heartbeat samples (default: 3)
@@ -121,18 +121,18 @@ if [[ ! "$INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 if [ -z "$API_BASE" ]; then
-  echo "Error: missing API base URL. Set AGENT_CHAT_API or pass --api." >&2
+  echo "Error: missing API base URL. Set HAFLEET_API or pass --api." >&2
   exit 1
 fi
 if [ -z "$SERVER_ID" ]; then
-  echo "Error: missing server id. Set AGENT_CHAT_SERVER or pass --server." >&2
+  echo "Error: missing server id. Set HAFLEET_SERVER or pass --server." >&2
   exit 1
 fi
 SERVER_ID="${SERVER_ID#"${SERVER_ID%%[![:space:]]*}"}"
 SERVER_ID="${SERVER_ID%"${SERVER_ID##*[![:space:]]}"}"
 SERVER_ID_LOWER="$(printf '%s' "$SERVER_ID" | tr '[:upper:]' '[:lower:]')"
 if [ "$SERVER_ID_LOWER" = "local" ]; then
-  echo "Error: remote server id must not be 'local'. Set AGENT_CHAT_SERVER to this host's unique server id." >&2
+  echo "Error: remote server id must not be 'local'. Set HAFLEET_SERVER to this host's unique server id." >&2
   exit 1
 fi
 

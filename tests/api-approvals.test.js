@@ -9,7 +9,7 @@ describe('owner approval API', () => {
   let context;
 
   beforeAll(async () => {
-    context = await createBackendTestContext('agent-chat-approval-api-', {
+    context = await createBackendTestContext('hafleet-approval-api-', {
       agents: {
         wf_coordinator: { name: 'wf_coordinator', type: 'agent', kind: 'agent', online: true },
         unbound: { name: 'unbound', type: 'agent', kind: 'agent', online: true },
@@ -17,8 +17,8 @@ describe('owner approval API', () => {
       agentTokens: { wf_coordinator: AGENT_TOKEN, unbound: 'unbound-token' },
       env: {
         MATRIX_BRIDGE_SECRET: BRIDGE_SECRET,
-        AGENTCHAT_AGENT_TOKEN_MODE: 'hard',
-        AGENTCHAT_APPROVAL_TTL_MS: '60000',
+        HAFLEET_AGENT_TOKEN_MODE: 'hard',
+        HAFLEET_APPROVAL_TTL_MS: '60000',
       },
     });
   });

@@ -7,7 +7,7 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve('.');
-const autodeployScript = path.join(repoRoot, 'scripts', 'agentchat-stable-autodeploy.sh');
+const autodeployScript = path.join(repoRoot, 'scripts', 'hafleet-stable-autodeploy.sh');
 const tmpRoots = [];
 
 async function run(command, args, options = {}) {
@@ -32,27 +32,27 @@ async function writeExecutable(file, content) {
 async function createFakeCommands(ctx) {
   await fs.mkdir(ctx.binDir, { recursive: true });
   await writeExecutable(path.join(ctx.binDir, 'systemctl'), `#!/usr/bin/env bash
-printf 'systemctl:%s\\n' "$*" >> "$AGENTCHAT_TEST_LOG"
-if [ -f "$AGENTCHAT_LIVE_DIR/breaks-service" ]; then
-  printf 'systemctl:FAILED (breaks-service present)\\n' >> "$AGENTCHAT_TEST_LOG"
+printf 'systemctl:%s\\n' "$*" >> "$HAFLEET_TEST_LOG"
+if [ -f "$HAFLEET_LIVE_DIR/breaks-service" ]; then
+  printf 'systemctl:FAILED (breaks-service present)\\n' >> "$HAFLEET_TEST_LOG"
   exit 1
 fi
 exit 0
 `);
   for (const name of ['curl', 'sleep']) {
     await writeExecutable(path.join(ctx.binDir, name), `#!/usr/bin/env bash
-printf '${name}:%s\\n' "$*" >> "$AGENTCHAT_TEST_LOG"
+printf '${name}:%s\\n' "$*" >> "$HAFLEET_TEST_LOG"
 exit 0
 `);
   }
   await writeExecutable(path.join(ctx.binDir, 'npm'), `#!/usr/bin/env bash
-printf 'npm:%s\\n' "$*" >> "$AGENTCHAT_TEST_LOG"
+printf 'npm:%s\\n' "$*" >> "$HAFLEET_TEST_LOG"
 exit 0
 `);
 }
 
 async function setupRepo({ brokenFromStart = false } = {}) {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'agentchat-cd-rollback-'));
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hafleet-cd-rollback-'));
   tmpRoots.push(tmp);
   const ctx = {
     tmp,
@@ -69,7 +69,7 @@ async function setupRepo({ brokenFromStart = false } = {}) {
   await git(ctx.seed, ['init']);
   await git(ctx.seed, ['checkout', '-b', 'stable']);
   await git(ctx.seed, ['config', 'user.name', 'AgentChat Test']);
-  await git(ctx.seed, ['config', 'user.email', 'agentchat@example.test']);
+  await git(ctx.seed, ['config', 'user.email', 'hafleet@example.test']);
   await fs.writeFile(path.join(ctx.seed, 'package.json'), `${JSON.stringify({ dependencies: {} }, null, 2)}\n`);
   await fs.writeFile(path.join(ctx.seed, 'README.md'), 'initial\n');
   if (brokenFromStart) {
@@ -108,21 +108,21 @@ function runAutodeploy(ctx, env = {}) {
     maxBuffer: 1024 * 1024 * 4,
     env: {
       ...process.env,
-      AGENTCHAT_LIVE_DIR: ctx.live,
-      AGENTCHAT_DEPLOY_USER: os.userInfo().username,
-      AGENTCHAT_DEPLOY_BRANCH: 'stable',
+      HAFLEET_LIVE_DIR: ctx.live,
+      HAFLEET_DEPLOY_USER: os.userInfo().username,
+      HAFLEET_DEPLOY_BRANCH: 'stable',
       // The script enforces a floor of 5; sleep is faked, so this costs nothing.
-      AGENTCHAT_POLL_SEC: '5',
-      AGENTCHAT_ONCE: '1',
-      AGENTCHAT_DEPLOY_STATE_DIR: ctx.state,
-      AGENTCHAT_BACKEND_HEALTH_TIMEOUT: '1',
-      AGENTCHAT_DEPLOY_SERVICES: 'agent-chat-v2 agent-chat',
-      AGENTCHAT_SYSTEMCTL_BIN: path.join(ctx.binDir, 'systemctl'),
-      AGENTCHAT_CURL_BIN: path.join(ctx.binDir, 'curl'),
-      AGENTCHAT_SLEEP_BIN: path.join(ctx.binDir, 'sleep'),
-      AGENTCHAT_NPM_BIN: path.join(ctx.binDir, 'npm'),
-      AGENTCHAT_RELEASE_GATE: 'none',
-      AGENTCHAT_TEST_LOG: ctx.log,
+      HAFLEET_POLL_SEC: '5',
+      HAFLEET_ONCE: '1',
+      HAFLEET_DEPLOY_STATE_DIR: ctx.state,
+      HAFLEET_BACKEND_HEALTH_TIMEOUT: '1',
+      HAFLEET_DEPLOY_SERVICES: 'hafleet-backend hafleet',
+      HAFLEET_SYSTEMCTL_BIN: path.join(ctx.binDir, 'systemctl'),
+      HAFLEET_CURL_BIN: path.join(ctx.binDir, 'curl'),
+      HAFLEET_SLEEP_BIN: path.join(ctx.binDir, 'sleep'),
+      HAFLEET_NPM_BIN: path.join(ctx.binDir, 'npm'),
+      HAFLEET_RELEASE_GATE: 'none',
+      HAFLEET_TEST_LOG: ctx.log,
       ...env,
     },
   });
@@ -255,8 +255,8 @@ describe('autodeploy rollback', () => {
     // Point the alert at a URL the fake curl "accepts"; the run must still
     // report the rollback rather than being derailed by alerting.
     const { stdout } = await runAutodeploy(ctx, {
-      AGENTCHAT_ALERT_URL: 'http://127.0.0.1:9/api/alerts',
-      AGENTCHAT_ALERT_TOKEN: 'test-token',
+      HAFLEET_ALERT_URL: 'http://127.0.0.1:9/api/alerts',
+      HAFLEET_ALERT_TOKEN: 'test-token',
     });
 
     expect(stdout).toContain('Rollback to');

@@ -24,7 +24,7 @@ describe('DM key backward compatibility (5.8.4 migration)', () => {
         'dm:testagent': '!old-correct-room:matrix.test',
       },
     }, null, 2));
-    process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
     process.env.MATRIX_TRUST_MODE = 'audit';
 
     const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;

@@ -7,7 +7,7 @@ export function normalizeServer(value) {
 }
 
 export function resolveLocalServerId(env = process.env, hostname = os.hostname()) {
-  return normalizeServer(env?.AGENT_CHAT_SERVER) || normalizeServer(hostname) || 'local';
+  return normalizeServer(env?.HAFLEET_SERVER) || normalizeServer(hostname) || 'local';
 }
 
 export function localServerAliases(localServerId = resolveLocalServerId(), options = {}) {

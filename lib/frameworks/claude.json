@@ -1,0 +1,22 @@
+{
+  "id": "claude",
+  "displayName": "Claude Code",
+  "launch": {
+    "command": "claude",
+    "defaultArgs": ["--permission-mode", "auto"],
+    "modelFlag": "--model",
+    "permissionSummary": "auto-mode"
+  },
+  "guards": {
+    "flags": {
+      "comment": "Permission mode is chosen by HAFleet; an agent may not widen it.",
+      "exact": [
+        "--dangerously-skip-permissions",
+        "--allow-dangerously-skip-permissions",
+        "--permission-mode"
+      ],
+      "prefix": ["--permission-mode="],
+      "message": "Claude permission policy flag is managed by hafleet: {token}"
+    }
+  }
+}

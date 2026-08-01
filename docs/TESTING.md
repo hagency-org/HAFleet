@@ -53,7 +53,7 @@ several unrelated flakes rather than one systemic problem.
 
 ### Measured concurrency trade-off
 
-| `AGENTCHAT_KERNEL_MAX_CONCURRENCY` | Wall clock | Result |
+| `HAFLEET_KERNEL_MAX_CONCURRENCY` | Wall clock | Result |
 |---|---|---|
 | 5 | ~69 s | fails ~2 runs in 3 |
 | 2 | ~118 s | still fails |
@@ -67,7 +67,7 @@ performance budget.
 Override when you want speed and can tolerate flakes:
 
 ```bash
-AGENTCHAT_KERNEL_MAX_CONCURRENCY=5 npm run test:kernel
+HAFLEET_KERNEL_MAX_CONCURRENCY=5 npm run test:kernel
 ```
 
 ### Ruled out
@@ -85,7 +85,7 @@ Recorded so nobody re-investigates these:
 ### The real fix, not yet done
 
 Stop minting a module per context. The cache-buster exists only because
-`backend-v2.js` reads `AGENT_CHAT_RUNTIME_DIR` at module scope
+`backend-v2.js` reads `HAFLEET_RUNTIME_DIR` at module scope
 (`backend-v2.js:87`), so a fresh runtime directory requires a fresh module.
 
 Making the runtime directory injectable would let one module instance serve every

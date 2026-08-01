@@ -1,5 +1,5 @@
 {
-  "name": "agent-chat",
+  "name": "hafleet",
   "version": "1.2.0",
   "private": true,
   "license": "Apache-2.0",
@@ -40,5 +40,8 @@
   "devDependencies": {
     "supertest": "^7.2.2",
     "vitest": "^4.0.18"
+  },
+  "overrides": {
+    "sanitize-html": "^2.17.6"
   }
 }

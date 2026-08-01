@@ -10,7 +10,7 @@ surface that governs a major bump is:
 |---|---|
 | REST API paths, request/response shapes | Yes |
 | MCP tool names and schemas | Yes |
-| `agentchat` CLI subcommands and flags | Yes |
+| `hafleet` CLI subcommands and flags | Yes |
 | `.env` variable names and defaults | Yes |
 | Message `schema.kind` contracts (`task_request`, `task_result`, …) | Yes |
 | systemd unit names | Yes |

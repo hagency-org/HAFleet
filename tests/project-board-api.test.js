@@ -13,7 +13,7 @@ afterEach(() => {
 describe('project board backend API', () => {
   it('returns a privacy-filtered project snapshot', async () => {
     const agentName = `board-agent-${Date.now()}`;
-    context = await createBackendTestContext('agent-chat-project-board-api-', {
+    context = await createBackendTestContext('hafleet-project-board-api-', {
       env: { AGENT_PROJECT_BOARD_REMOTE_SYNC: '0' },
       agents: {
         [agentName]: {

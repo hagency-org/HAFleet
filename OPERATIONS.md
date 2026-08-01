@@ -3,19 +3,19 @@
 This runbook replaces `agent-doctor` style tooling.  
 Use these commands directly during incident response.
 
-Primary CLI is now `agentchat`.  
-Legacy commands (`agent-update`, `agent-audit`, `agent-up`, etc.) are deprecated wrappers and still work for compatibility.
+Primary CLI is now `hafleet`.  
+Legacy commands (`hafleet-update`, `hafleet-audit`, `hafleet-up`, etc.) are deprecated wrappers and still work for compatibility.
 
 ## 1) Remote Service Lifecycle
 
 These commands target the remote relay service on the current host:
-- `agent-chat-push-relay`
+- `hafleet-push-relay`
 
 They do not stop local agent tmux sessions.
 
 ### Update and keep relay paused (maintenance mode)
 ```bash
-agentchat update --pause-services
+hafleet update --pause-services
 ```
 
 Expected:
@@ -25,18 +25,18 @@ Expected:
 
 ### Resume relay
 ```bash
-agentchat update --resume-services
+hafleet update --resume-services
 ```
 
 ### Check remote relay service status
 ```bash
-agentchat update --service-status
+hafleet update --service-status
 ```
 
 ## 1.1) Stable Branch Auto Deploy (Live)
 
 This watcher runs on the local host and polls `origin/stable` every 30s from the live deploy checkout:
-- `/path/to/agent-chat`
+- `/path/to/hafleet`
 
 The live deploy checkout is disposable. Do not use it for local edits, scratch files, or manual debugging changes that need to survive deployment. The watcher can discard both tracked and untracked changes in that checkout.
 
@@ -56,26 +56,26 @@ When a new commit appears, it will:
 3. if the deploy checkout is dirty, log the first dirty paths and clean it with `git reset --hard HEAD` plus `git clean -fd`
 4. reset the deploy checkout to `origin/stable` with `git reset --hard origin/stable`
 5. run `npm install --production` only if `package.json` or `package-lock.json` changed
-6. restart `agent-chat-v2` first and wait for `/api/agents` health
-7. restart the remaining services from `AGENTCHAT_DEPLOY_SERVICES` (defaults: `agent-chat`, `agent-chat-v2`, `bridge-matrix`)
+6. restart `hafleet-backend` first and wait for `/api/agents` health
+7. restart the remaining services from `HAFLEET_DEPLOY_SERVICES` (defaults: `hafleet`, `hafleet-backend`, `bridge-matrix`)
 8. verify all listed services are active
 
 Install/update the service:
 ```bash
-sudo cp /path/to/agent-chat/agent-chat-stable-autodeploy.service /etc/systemd/system/agent-chat-stable-autodeploy.service
+sudo cp /path/to/hafleet/hafleet-stable-autodeploy.service /etc/systemd/system/hafleet-stable-autodeploy.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now agent-chat-stable-autodeploy
+sudo systemctl enable --now hafleet-stable-autodeploy
 ```
 
 Check status/logs:
 ```bash
-systemctl status agent-chat-stable-autodeploy --no-pager
-tail -f /path/to/agent-chat/logs/stable-autodeploy.out.log
+systemctl status hafleet-stable-autodeploy --no-pager
+tail -f /path/to/hafleet/logs/stable-autodeploy.out.log
 ```
 
 After deployment, verify the loaded remote relay version when the deployed commit is expected to reach remote hosts:
 ```bash
-agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
+hafleet verify-remote --samples 2 --interval 16 --expect-version <short-sha>
 ```
 
 ## 2) Verify Backend State
@@ -87,8 +87,8 @@ curl -s http://127.0.0.1:8090/api/servers | jq '.[] | {id, online, lastSeen, age
 
 Fleet version inventory:
 ```bash
-agentchat cli fleet --expect-version <short-sha>
-agentchat cli fleet --expect-version <short-sha> --json
+hafleet cli fleet --expect-version <short-sha>
+hafleet cli fleet --expect-version <short-sha> --json
 curl -s 'http://127.0.0.1:8090/api/servers/fleet?expectVersion=<short-sha>' | jq
 ```
 
@@ -114,15 +114,15 @@ curl -s http://127.0.0.1:8090/api/agents/<agent_name> | jq '{name, online, serve
 ## 3) Known macOS Legacy Label Issue
 
 Legacy launchd label:
-- `com.agentchat.push-relay`
+- `com.hafleet.push-relay`
 
 Current label:
-- `agent-chat-push-relay`
+- `hafleet-push-relay`
 
 If pause still shows backend online, check both:
 ```bash
-launchctl list | rg "agent-chat-push-relay|com.agentchat.push-relay"
-pgrep -af "push-relay\\.js|agent-chat-push-relay|com\\.agentchat\\.push-relay"
+launchctl list | rg "hafleet-push-relay|com.hafleet.push-relay"
+pgrep -af "push-relay\\.js|hafleet-push-relay|com\\.hafleet\\.push-relay"
 ```
 
 ## 4) Offline Delivery Semantics
@@ -149,7 +149,7 @@ When an agent comes back online, the catch-up notification now includes:
 ### Remote relay pause/resume
 
 After pausing the remote relay, verify all three:
-1. relay service stopped (`agentchat update --service-status`)
+1. relay service stopped (`hafleet update --service-status`)
 2. no relay process (`pgrep -af "push-relay\\.js"`)
 3. backend server row offline (`/api/servers` shows `online=false` for that remote host)
 
@@ -157,7 +157,7 @@ If any of the three fails, treat relay shutdown as incomplete.
 
 ### Host-local agent shutdown
 
-`agentchat down <agent>` acts on the tmux session for that agent on the current runtime host. The backend is used for name resolution, active-work guard, and offline marking; it is not a global remote shutdown command.
+`hafleet down <agent>` acts on the tmux session for that agent on the current runtime host. The backend is used for name resolution, active-work guard, and offline marking; it is not a global remote shutdown command.
 
 After downing a host-local agent, verify:
 1. no tmux session for the agent (`tmux has-session -t <agent>` fails)
@@ -168,7 +168,7 @@ After downing a host-local agent, verify:
 
 ### Full one-shot audit
 ```bash
-agentchat audit
+hafleet audit
 ```
 
 Checks include:
@@ -179,28 +179,28 @@ Checks include:
 
 ### Rotate logs + prune stale tmp data
 ```bash
-agentchat maintain
+hafleet maintain
 ```
 
 Preview mode:
 ```bash
-agentchat maintain --dry-run
+hafleet maintain --dry-run
 ```
 
 ### Sync skill links (~/.codex + ~/.claude)
 ```bash
-agentchat sync-skills
+hafleet sync-skills
 ```
 
 Check only:
 ```bash
-agentchat sync-skills --check
+hafleet sync-skills --check
 ```
 
 ### Prune stale offline agent records
 ```bash
-agentchat prune-agents --older-than-days 7
-agentchat prune-agents --older-than-days 7 --apply
+hafleet prune-agents --older-than-days 7
+hafleet prune-agents --older-than-days 7 --apply
 ```
 
 ## 8) Supervisor Focus Audit Checks

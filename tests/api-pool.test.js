@@ -6,7 +6,7 @@ describe('matrix-Agent pool API', () => {
   let context;
 
   beforeAll(async () => {
-    context = await createBackendTestContext('agent-chat-pool-test-', {
+    context = await createBackendTestContext('hafleet-pool-test-', {
       agents: {
         // a legacy agent with no role/capability — should be inferred into the matrix
         wf_implementer: { name: 'wf_implementer', type: 'claude', kind: 'agent', online: true },

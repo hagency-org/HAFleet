@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+_resolve_script_dir() {
+  local src="$0"
+  while [ -L "$src" ]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+SCRIPT_DIR="$(_resolve_script_dir)"
+
+usage() {
+  cat <<'USAGE'
+Usage: hafleet <command> [args]
+
+Core:
+  up             Start or resume an agent (tmux frameworks)
+  acp-up         Start a paneless ACP agent (octos)
+  up-v1          Provision + launch a new v1 agent-home runtime
+  project        Manage v1 agent project bindings
+  graph          Manage orchestration task graphs
+  down           Stop an agent
+  ls             List agents
+  resume-id      View/set/clear an agent's resume-id
+  send           Send message to target pane
+  update         Update/install hafleet runtime
+  service        Control local/remote services
+  verify-remote  Verify remote relay + MCP + agent status
+
+Ops:
+  audit          Run one-shot audit gate
+  benchmark      Benchmark workflow foundations / trial scaffolding
+  maintain       Rotate logs and prune stale tmp files
+  prune-agents   Prune stale offline agent records from backend
+  sync-skills    Sync ~/.codex and ~/.claude skill links to repo template
+  reminder       Schedule/check reminders
+
+Admin:
+  cli            Backend/group/admin helper CLI
+  check-mcp      Check MCP wiring
+
+Compatibility notes:
+  Legacy commands (hafleet-up, hafleet-down, hafleet-send, ...) are deprecated and
+  will forward to this unified entrypoint.
+USAGE
+}
+
+dispatch() {
+  local target="$1"
+  shift
+  local target_path="$SCRIPT_DIR/$target"
+  if [ ! -x "$target_path" ]; then
+    echo "Error: command target '$target' is not available in this installation." >&2
+    echo "Expected executable: $target_path" >&2
+    exit 127
+  fi
+  HAFLEET_INTERNAL_DISPATCH=1 exec "$target_path" "$@"
+}
+
+if [ $# -lt 1 ]; then
+  usage
+  exit 1
+fi
+
+cmd="$1"
+shift
+
+case "$cmd" in
+  up) dispatch "hafleet-up" "$@" ;;
+  up-v1|v1-up) dispatch "hafleet-up-v1" "$@" ;;
+  project) dispatch "hafleet-project" "$@" ;;
+  graph) dispatch "hafleet-graph" "$@" ;;
+  down) dispatch "hafleet-down" "$@" ;;
+  ls|list) dispatch "hafleet-ls" "$@" ;;
+  resume-id) dispatch "hafleet-resume-id" "$@" ;;
+  send) dispatch "hafleet-send" "$@" ;;
+  update) dispatch "hafleet-update" "$@" ;;
+  service) dispatch "hafleet-service" "$@" ;;
+  verify-remote|verify) dispatch "verify-remote" "$@" ;;
+  audit) dispatch "hafleet-audit" "$@" ;;
+  benchmark) dispatch "hafleet-benchmark" "$@" ;;
+  maintain) dispatch "hafleet-maintain" "$@" ;;
+  prune-agents) dispatch "hafleet-prune-agents" "$@" ;;
+  sync-skills) dispatch "hafleet-sync-skills" "$@" ;;
+  reminder|self-time-reminder) dispatch "self-time-reminder" "$@" ;;
+  acp-up) dispatch "hafleet-acp-up" "$@" ;;
+  tell) dispatch "hafleet-cli" tell "$@" ;;
+  cli|admin) dispatch "hafleet-cli" "$@" ;;
+  check-mcp) dispatch "check-mcp" "$@" ;;
+  -h|--help|help) usage ;;
+  *)
+    echo "Error: unknown command '$cmd'" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

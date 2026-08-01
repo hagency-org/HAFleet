@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "agentchat.benchmark.trial/v1",
+  "$id": "hafleet.benchmark.trial/v1",
   "title": "AgentChat Benchmark Trial",
   "type": "object",
   "required": [
@@ -18,7 +18,7 @@
     "artifactPaths"
   ],
   "properties": {
-    "schema": { "const": "agentchat.benchmark.trial/v1" },
+    "schema": { "const": "hafleet.benchmark.trial/v1" },
     "runId": { "type": "string" },
     "trialId": { "type": "string" },
     "taskId": { "type": "string" },

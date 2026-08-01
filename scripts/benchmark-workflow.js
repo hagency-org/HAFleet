@@ -108,13 +108,13 @@ function parsePositiveInt(value, fallback) {
 
 function defaultBenchmarkBackendPort(env = process.env) {
   return parsePositiveInt(
-    env.AGENT_CHAT_BENCH_BACKEND_PORT || env.AGENT_CHAT_BACKEND_PORT,
+    env.HAFLEET_BENCH_BACKEND_PORT || env.HAFLEET_BACKEND_PORT,
     18190
   );
 }
 
 function defaultBenchmarkBackendUrl(env = process.env) {
-  const explicit = normalizeText(env.AGENT_CHAT_BENCH_API || env.AGENT_CHAT_API, 2048);
+  const explicit = normalizeText(env.HAFLEET_BENCH_API || env.HAFLEET_API, 2048);
   if (explicit) return explicit.replace(/\/$/, '');
   return `http://127.0.0.1:${defaultBenchmarkBackendPort(env)}`;
 }
@@ -603,7 +603,7 @@ function buildProfilePayload({ profileId, version, description, agentType, docsF
       mcpTemplate: mcpTemplatePath ? 'config/mcp.json' : null,
       hooksRuntimeDefaults: {
         executionModel: 'host-v1-home',
-        launcher: 'agent-up',
+        launcher: 'hafleet-up',
         scaffoldOnly: true,
       },
     },
@@ -824,10 +824,10 @@ function prepareTrial(args) {
     encoding: 'utf-8',
     env: {
       ...process.env,
-      AGENT_CHAT_API: benchmarkBackendUrl,
-      AGENT_CHAT_BACKEND_PORT: String(benchmarkBackendPort),
-      AGENTCHAT_SUBCONSCIOUS_EVENT_URL: subconsciousEventUrl,
-      AGENTCHAT_SUBCONSCIOUS_INVOKE_URL: subconsciousInvokeUrl,
+      HAFLEET_API: benchmarkBackendUrl,
+      HAFLEET_BACKEND_PORT: String(benchmarkBackendPort),
+      HAFLEET_SUBCONSCIOUS_EVENT_URL: subconsciousEventUrl,
+      HAFLEET_SUBCONSCIOUS_INVOKE_URL: subconsciousInvokeUrl,
     },
   }).trim();
   const provision = JSON.parse(provisionJson);
@@ -884,18 +884,18 @@ function prepareTrial(args) {
     },
     execution: {
       mode: 'host-v1-home-scaffold',
-      launcher: 'agent-up',
+      launcher: 'hafleet-up',
       preparedOnly: true,
       launchPlan: {
-        command: ['agentchat', 'up', trialAgentName, trialPaths.v1Paths.workdir, run.agentType === 'codex' ? 'codex' : 'claude', '--fresh'],
+        command: ['hafleet', 'up', trialAgentName, trialPaths.v1Paths.workdir, run.agentType === 'codex' ? 'codex' : 'claude', '--fresh'],
         env: {
-          AGENTCHAT_HOMEDIR: trialPaths.homesRoot,
-          AGENT_CHAT_BENCH_RUNTIME_DIR: path.resolve(runtimeRoot),
-          AGENT_CHAT_RUNTIME_DIR: path.resolve(runtimeRoot),
-          AGENT_CHAT_API: benchmarkBackendUrl,
-          AGENT_CHAT_BACKEND_PORT: String(benchmarkBackendPort),
-          AGENTCHAT_SUBCONSCIOUS_EVENT_URL: subconsciousEventUrl,
-          AGENTCHAT_SUBCONSCIOUS_INVOKE_URL: subconsciousInvokeUrl,
+          HAFLEET_HOMEDIR: trialPaths.homesRoot,
+          HAFLEET_BENCH_RUNTIME_DIR: path.resolve(runtimeRoot),
+          HAFLEET_RUNTIME_DIR: path.resolve(runtimeRoot),
+          HAFLEET_API: benchmarkBackendUrl,
+          HAFLEET_BACKEND_PORT: String(benchmarkBackendPort),
+          HAFLEET_SUBCONSCIOUS_EVENT_URL: subconsciousEventUrl,
+          HAFLEET_SUBCONSCIOUS_INVOKE_URL: subconsciousInvokeUrl,
         },
       },
       notes: 'Batch 1 scaffold only. No live agent launch or benchmark task execution performed.',
@@ -983,26 +983,26 @@ function runLongcliTrial(args) {
   };
   const launchStartedAt = new Date().toISOString();
   const upResult = runCommand(
-    path.join(REPO_ROOT, 'bin', 'agentchat'),
+    path.join(REPO_ROOT, 'bin', 'hafleet'),
     ['up', trial.agentName, trialPaths.v1Paths.workdir, trial.agentType === 'codex' ? 'codex' : 'claude', '--fresh'],
     { env: launchEnv }
   );
-  ensureCommandOk(upResult, `agentchat up ${trial.agentName}`);
+  ensureCommandOk(upResult, `hafleet up ${trial.agentName}`);
 
-  const backendUrl = launchEnv.AGENT_CHAT_API || defaultBenchmarkBackendUrl(launchEnv);
+  const backendUrl = launchEnv.HAFLEET_API || defaultBenchmarkBackendUrl(launchEnv);
   writeJson(onlineStatusPath, fetchBackendAgentStatus(backendUrl, trial.agentName));
 
   const sendEnv = {
     ...launchEnv,
-    AGENT_CHAT_WEB_PORT: process.env.AGENT_CHAT_WEB_PORT || '18184',
-    AGENT_CHAT_WEB_URL: process.env.AGENT_CHAT_WEB_URL || 'http://127.0.0.1:18184',
+    HAFLEET_WEB_PORT: process.env.HAFLEET_WEB_PORT || '18184',
+    HAFLEET_WEB_URL: process.env.HAFLEET_WEB_URL || 'http://127.0.0.1:18184',
   };
   const sendResult = runCommand(
-    path.join(REPO_ROOT, 'bin', 'agentchat'),
+    path.join(REPO_ROOT, 'bin', 'hafleet'),
     ['send', '--force', trial.agentName, prompt],
     { env: sendEnv }
   );
-  ensureCommandOk(sendResult, `agentchat send ${trial.agentName}`);
+  ensureCommandOk(sendResult, `hafleet send ${trial.agentName}`);
 
   const sentinel = `BENCHMARK_LONGCLI_DONE ${trial.taskId}`;
   const waitResult = waitForSentinel(`${trial.agentName}:0.0`, sentinel, agentTimeoutSec, pollIntervalSec);
@@ -1019,8 +1019,8 @@ function runLongcliTrial(args) {
   const baseImage = extractDockerBaseImage(path.join(trialPaths.v1Paths.workdir, 'Dockerfile'));
   ensureLongcliBaseImage(baseImage, longcliRoot, baseBuildLogPath);
 
-  const dockerImageName = `agentchat-bench-${sanitizeHandle(`${trial.runId}-${trial.trialId}`)}`;
-  const dockerContainerName = `agentchat-bench-${sanitizeHandle(`${trial.runId}-${trial.trialId}`)}`;
+  const dockerImageName = `hafleet-bench-${sanitizeHandle(`${trial.runId}-${trial.trialId}`)}`;
+  const dockerContainerName = `hafleet-bench-${sanitizeHandle(`${trial.runId}-${trial.trialId}`)}`;
   let testStatus = null;
   let metrics = {
     parserName: task.parser_name || null,
@@ -1079,13 +1079,13 @@ function runLongcliTrial(args) {
   } finally {
     if (!forcedStopBeforeEvaluation) {
       const downResult = runCommand(
-        path.join(REPO_ROOT, 'bin', 'agentchat'),
+        path.join(REPO_ROOT, 'bin', 'hafleet'),
         ['down', trial.agentName],
         { env: launchEnv }
       );
       if (downResult.status !== 0) {
         const killResult = runCommand(
-          path.join(REPO_ROOT, 'bin', 'agentchat'),
+          path.join(REPO_ROOT, 'bin', 'hafleet'),
           ['down', trial.agentName, '--kill'],
           { env: launchEnv }
         );
@@ -1102,7 +1102,7 @@ function runLongcliTrial(args) {
   const endedAt = new Date().toISOString();
   const summary = `LongCLI task ${trial.taskId}: f2p=${metrics.f2p_is_pass ?? 'n/a'} (${metrics.f2p_step_score ?? 'n/a'}), p2p=${metrics.p2p_is_pass ?? 'n/a'} (${metrics.p2p_step_score ?? 'n/a'})`;
   const harnessResult = {
-    schema: 'agentchat.benchmark.harness-result/v1',
+    schema: 'hafleet.benchmark.harness-result/v1',
     runId: trial.runId,
     trialId: trial.trialId,
     taskId: trial.taskId,
@@ -1148,7 +1148,7 @@ function runLongcliTrial(args) {
     },
   };
   const taskSummary = {
-    schema: 'agentchat.benchmark.task-result-summary/v1',
+    schema: 'hafleet.benchmark.task-result-summary/v1',
     taskId: trial.taskId,
     agent: trial.agentName,
     status: metrics.pass ? 'passed' : 'failed',

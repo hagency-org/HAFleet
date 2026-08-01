@@ -72,7 +72,7 @@ What differs from the Linux install, all deliberate:
 | | Linux | macOS |
 |---|---|---|
 | Process management | systemd system units | launchd user agent |
-| Supervisor | systemd | `services/agentchat-services.mjs` |
+| Supervisor | systemd | `services/hafleet-services.mjs` |
 | Matrix bridge | opt-in via `--with-bridge` | opt-in via `--with-bridge` |
 | Auto-deploy watcher | yes | **no** (tracked as CD-003) |
 
@@ -83,13 +83,26 @@ start with a minimal environment.
 Missing prerequisites (`node >= 22`, `tmux`) are installed with Homebrew unless
 you pass `--skip-brew`.
 
+### Where the logs are
+
+Each service writes its own stdout and stderr to `data/services-local/logs/<service>.log`.
+The launchd `StandardErrorPath` (`logs/launchd.err.log`) receives only the
+supervisor's output and is normally **empty**, because the supervisor spawns each
+service with `stdio: ['ignore', logFd, logFd]` pointing at the per-service file.
+
+This cost real debugging time: a backend logging `[auth] agent-token token
+required but not provided` 199 times looked like a silent service, because the
+file the installer named was 0 bytes. `hafleet-services status` and `doctor`
+now print the correct path.
+
 ### Managing it
 
 ```bash
-node services/agentchat-services.mjs status --profile services-macos.json
-node services/agentchat-services.mjs doctor --profile services-macos.json
+node services/hafleet-services.mjs status --profile services-macos.json
+node services/hafleet-services.mjs doctor --profile services-macos.json
 launchctl bootout gui/$(id -u)/io.hafleet.services      # stop
-tail -50 logs/launchd.err.log
+tail -50 data/services-local/logs/backend.log   # per-service stdout/stderr
+tail -50 logs/launchd.err.log                   # supervisor only, usually empty
 ```
 
 ## Which tmux sessions HAFleet manages
@@ -105,7 +118,7 @@ ways forward:
 | | |
 |---|---|
 | stop or rename them | nothing to decide |
-| `--deny-existing-tmux` | installs, and writes those exact names into `AGENT_CHAT_SESSION_DENYLIST` so HAFleet leaves them alone |
+| `--deny-existing-tmux` | installs, and writes those exact names into `HAFLEET_SESSION_DENYLIST` so HAFleet leaves them alone |
 | `--allow-existing-tmux` | installs and manages them, accepting the risk knowingly |
 
 ### Configuring it
@@ -113,8 +126,8 @@ ways forward:
 Two optional env vars decide which sessions this install may manage:
 
 ```bash
-AGENT_CHAT_SESSION_ALLOWLIST=claude-*,codex-*   # only these
-AGENT_CHAT_SESSION_DENYLIST=ps2,ps3             # never these
+HAFLEET_SESSION_ALLOWLIST=claude-*,codex-*   # only these
+HAFLEET_SESSION_DENYLIST=ps2,ps3             # never these
 ```
 
 Comma- or whitespace-separated; `*` matches any run of characters; denial always
@@ -127,14 +140,14 @@ backend's own pane snapshot (local mode has no relay), and `injectSlashClear`,
 which sends `C-c` and `/clear` and so is the operation that can actually destroy
 someone's work.
 
-A variable that is set but unparseable — `AGENT_CHAT_SESSION_ALLOWLIST=,` — refuses
-every session and warns. An empty value (`AGENT_CHAT_SESSION_ALLOWLIST=`) still
+A variable that is set but unparseable — `HAFLEET_SESSION_ALLOWLIST=,` — refuses
+every session and warns. An empty value (`HAFLEET_SESSION_ALLOWLIST=`) still
 means "no opinion", so it cannot lock a host out by accident.
 
 An excluded session looks absent rather than blocked: no pane snapshot, no
 heartbeat entry, `tmux` reported as unset. Records registered before a policy was
 configured survive as offline agents; remove them with
-`bin/agentchat-prune-agents --older-than-days 0 --mode all-offline --apply`, but
+`bin/hafleet-prune-agents --older-than-days 0 --mode all-offline --apply`, but
 note that deletion writes a permanent tombstone which blocks re-registering that
 name.
 
@@ -154,7 +167,7 @@ Builds `services/Dockerfile` locally. No image is published to any registry.
 Uses `network_mode: host` throughout (and `pid: host` for the bridge), so it does
 **not** work on Docker Desktop for macOS or Windows. Because it shares the host
 network namespace, the services keep their loopback defaults — do not set
-`AGENT_CHAT_BACKEND_HOST` / `AGENT_CHAT_WEB_HOST` here.
+`HAFLEET_BACKEND_HOST` / `HAFLEET_WEB_HOST` here.
 
 `services/run-bridge-container.sh` wraps the bridge in `flock` so two containers
 cannot both claim bridge ownership.
@@ -171,7 +184,7 @@ path 1, 2, or 3.
 
 ### Binding
 
-On a bare host leave `AGENT_CHAT_BACKEND_HOST` / `AGENT_CHAT_WEB_HOST` unset. The
+On a bare host leave `HAFLEET_BACKEND_HOST` / `HAFLEET_WEB_HOST` unset. The
 default is loopback, and the auth boundary's loopback trust check assumes the
 listener is unreachable off-box. A non-loopback bind is logged loudly every
 start; a malformed value falls back to loopback rather than widening it.
@@ -226,9 +239,9 @@ See [RELEASING.md](RELEASING.md) and [ROLLBACK.md](ROLLBACK.md).
 ## Verifying an install
 
 ```bash
-systemctl status agent-chat-v2 agent-chat agent-chat-push-relay
+systemctl status hafleet-backend hafleet hafleet-push-relay
 node services/standalone-doctor.mjs        # cross-component health
-agentchat check-mcp                        # MCP registration
+hafleet check-mcp                        # MCP registration
 node -e 'import("./lib/version.js").then(m=>console.log(m.formatBuildIdentity()))'
 ```
 
@@ -266,10 +279,10 @@ judgement call about the socket at `/tmp/tmux-<uid>`, and it is now demonstrated
 rather than argued.
 
 The auto-deploy watcher runs unprivileged and escalates only for
-`systemctl restart`, via `/etc/sudoers.d/agentchat-autodeploy`:
+`systemctl restart`, via `/etc/sudoers.d/hafleet-autodeploy`:
 
 ```
-<user> ALL=(root) NOPASSWD: /usr/bin/systemctl restart agent-chat agent-chat-v2 bridge-matrix
+<user> ALL=(root) NOPASSWD: /usr/bin/systemctl restart hafleet hafleet-backend bridge-matrix
 ```
 
 Its sandbox set is intentionally smaller than the Node services': `NoNewPrivileges`,

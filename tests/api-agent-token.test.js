@@ -17,7 +17,7 @@ function makeSeed(overrides = {}) {
     servers: {},
     agentRuntime: {},
     env: {
-      AGENTCHAT_AGENT_TOKEN_MODE: 'hard',
+      HAFLEET_AGENT_TOKEN_MODE: 'hard',
       ...(overrides.env || {}),
     },
   };
@@ -44,8 +44,8 @@ describe('per-agent token authentication', () => {
     homeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-token-test-'));
     context = await createBackendTestContext('agent-token-test-', makeSeed({
       env: {
-        AGENTCHAT_AGENT_TOKEN_MODE: 'hard',
-        AGENTCHAT_HOMEDIR: homeDir,
+        HAFLEET_AGENT_TOKEN_MODE: 'hard',
+        HAFLEET_HOMEDIR: homeDir,
       },
     }));
 
@@ -65,8 +65,8 @@ describe('per-agent token authentication', () => {
         beta: { name: 'beta', type: 'agent', kind: 'agent', online: true },
       },
       env: {
-        AGENTCHAT_AGENT_TOKEN_MODE: 'hard',
-        AGENTCHAT_HOMEDIR: homeDir,
+        HAFLEET_AGENT_TOKEN_MODE: 'hard',
+        HAFLEET_HOMEDIR: homeDir,
       },
     }));
 
@@ -105,8 +105,8 @@ describe('per-agent token authentication', () => {
 
     context = await createBackendTestContext('agent-token-test-', makeSeed({
       env: {
-        AGENTCHAT_AGENT_TOKEN_MODE: 'soft',
-        AGENTCHAT_HOMEDIR: homeDir,
+        HAFLEET_AGENT_TOKEN_MODE: 'soft',
+        HAFLEET_HOMEDIR: homeDir,
       },
     }));
 
@@ -130,8 +130,8 @@ describe('per-agent token authentication', () => {
 
     context = await createBackendTestContext('agent-token-test-', makeSeed({
       env: {
-        AGENTCHAT_AGENT_TOKEN_MODE: 'off',
-        AGENTCHAT_HOMEDIR: homeDir,
+        HAFLEET_AGENT_TOKEN_MODE: 'off',
+        HAFLEET_HOMEDIR: homeDir,
       },
     }));
 
@@ -155,8 +155,8 @@ describe('per-agent token authentication', () => {
 
     context = await createBackendTestContext('agent-token-test-', makeSeed({
       env: {
-        AGENTCHAT_AGENT_TOKEN_MODE: 'hard',
-        AGENTCHAT_HOMEDIR: homeDir,
+        HAFLEET_AGENT_TOKEN_MODE: 'hard',
+        HAFLEET_HOMEDIR: homeDir,
       },
     }));
 
@@ -173,8 +173,8 @@ describe('per-agent token authentication', () => {
 
     context = await createBackendTestContext('agent-token-test-', makeSeed({
       env: {
-        AGENTCHAT_AGENT_TOKEN_MODE: 'hard',
-        AGENTCHAT_HOMEDIR: homeDir,
+        HAFLEET_AGENT_TOKEN_MODE: 'hard',
+        HAFLEET_HOMEDIR: homeDir,
       },
     }));
 
@@ -191,8 +191,8 @@ describe('per-agent token authentication', () => {
 
     context = await createBackendTestContext('agent-token-test-', makeSeed({
       env: {
-        AGENTCHAT_AGENT_TOKEN_MODE: 'hard',
-        AGENTCHAT_HOMEDIR: homeDir,
+        HAFLEET_AGENT_TOKEN_MODE: 'hard',
+        HAFLEET_HOMEDIR: homeDir,
       },
     }));
 

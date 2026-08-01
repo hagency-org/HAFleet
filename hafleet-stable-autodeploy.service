@@ -1,0 +1,61 @@
+[Unit]
+Description=Agent Chat Live Stable Auto Deploy Watcher
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# Runs UNPRIVILEGED. Previously User=root, which meant anything pushed to the
+# deploy branch executed as root. The only privileged operation this watcher
+# needs is `systemctl restart` on its own units, granted narrowly through
+# /etc/sudoers.d/hafleet-autodeploy (installed by install-full.sh).
+User=__USER__
+Group=__USER__
+WorkingDirectory=__INSTALL_DIR__
+Environment=HAFLEET_LIVE_DIR=__INSTALL_DIR__
+Environment=HAFLEET_DEPLOY_USER=__USER__
+Environment=HAFLEET_DEPLOY_BRANCH=stable
+Environment=HAFLEET_POLL_SEC=30
+Environment="HAFLEET_DEPLOY_SERVICES=hafleet hafleet-backend bridge-matrix"
+# Release gate ON by default. With `none`, any commit reaching the deploy branch
+# is checked out and restarted with no test gate. `worktree` builds the candidate
+# ref in a detached worktree, runs `npm ci` and `verify:cd-preflight` there, and
+# refuses to touch the live checkout unless it passes.
+Environment=HAFLEET_RELEASE_GATE=worktree
+ExecStart=/usr/bin/env bash __INSTALL_DIR__/scripts/hafleet-stable-autodeploy.sh
+Restart=always
+RestartSec=5
+StandardOutput=append:__INSTALL_DIR__/logs/stable-autodeploy.out.log
+StandardError=append:__INSTALL_DIR__/logs/stable-autodeploy.err.log
+
+# --- Sandboxing ---
+# This unit's set is deliberately SMALLER than the Node services'. Three
+# directives are omitted because they would break the sudo escalation this
+# watcher needs for `systemctl restart`:
+#   NoNewPrivileges     - blocks execution of setuid binaries, including sudo.
+#   RestrictSUIDSGID    - same.
+#   CapabilityBoundingSet= (empty) - strips the capabilities sudo needs to
+#                         escalate, so the restart would fail.
+# PrivateTmp and ProtectHome are omitted for the same reasons as the Node units.
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=yes
+SystemCallArchitectures=native
+
+# --- Resource limits ---
+# npm ci in the gate worktree is the memory-hungry step.
+LimitNOFILE=4096
+MemoryHigh=1G
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

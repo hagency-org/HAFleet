@@ -17,7 +17,7 @@ describe('backend API smoke', () => {
   let envSnapshot;
 
   beforeAll(async () => {
-    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'agent-chat-api-smoke-'));
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-api-smoke-'));
     const dataDir = path.join(runtimeDir, 'data');
     mkdirSync(dataDir, { recursive: true });
     writeJson(path.join(dataDir, 'agents.json'), {
@@ -38,12 +38,12 @@ describe('backend API smoke', () => {
     writeJson(path.join(dataDir, 'local_activity_sweep.json'), { selectionCursor: 0 });
 
     envSnapshot = snapshotEnv([
-      'AGENT_CHAT_RUNTIME_DIR',
+      'HAFLEET_RUNTIME_DIR',
       'API_TOKEN',
       'SUPERVISOR_ENABLED',
       'AGENT_SCOPE_MONITOR_ENABLED',
     ]);
-    process.env.AGENT_CHAT_RUNTIME_DIR = runtimeDir;
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
     process.env.API_TOKEN = 'api-smoke-test-token';
     process.env.SUPERVISOR_ENABLED = 'false';
     process.env.AGENT_SCOPE_MONITOR_ENABLED = 'false';

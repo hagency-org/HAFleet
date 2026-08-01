@@ -41,7 +41,7 @@ Status: complete, read-only.
 
 Flow summary:
 
-- Agent registration is launched primarily by `agent-up`, with MCP core doing best-effort auto-registration.
+- Agent registration is launched primarily by `hafleet-up`, with MCP core doing best-effort auto-registration.
 - Agent send/post calls go through MCP to `POST /api/messages`; attachments are staged first through `/api/media/stage`.
 - Agent inbox/group reads go through MCP `check_inbox` and `check_group`; attachments are localized into an MCP media cache.
 - Push relay subscribes to `/api/stream`, routes by backend agent `server/tmux`, and injects notifications into local tmux panes.
@@ -50,12 +50,12 @@ Flow summary:
 Accepted findings for consolidation:
 
 - macOS MCP presence detection reads `/proc/<pid>/cmdline`, so local macOS deployments can continuously report `mcpPresent=false`.
-- Remote `agentchat` advertises commands whose scripts are absent from `remote/bin`.
-- Codex MCP launch auth can be incomplete for non-v1 agents because explicit injected env omits `API_TOKEN`; this touches active `agent-up` work and must be coordinated before any edit.
+- Remote `hafleet` advertises commands whose scripts are absent from `remote/bin`.
+- Codex MCP launch auth can be incomplete for non-v1 agents because explicit injected env omits `API_TOKEN`; this touches active `hafleet-up` work and must be coordinated before any edit.
 - MCP media cache is rooted in the current working directory, which can pollute project repos.
-- `agent-down --kill` can still be blocked by backend unavailability before local tmux kill.
-- Remote `agent-up` has drifted from root `agent-up`; this touches active launch work and must be coordinated before any edit.
-- `agent-service` uses bash associative arrays and may fail on macOS bash 3.2.
+- `hafleet-down --kill` can still be blocked by backend unavailability before local tmux kill.
+- Remote `hafleet-up` has drifted from root `hafleet-up`; this touches active launch work and must be coordinated before any edit.
+- `hafleet-service` uses bash associative arrays and may fail on macOS bash 3.2.
 - Tmux injection uses a fixed defensive key sequence that may over-submit in some CLI states.
 
 ### Banach: edge systems
@@ -69,7 +69,7 @@ Boundary conclusion:
 
 Accepted findings for consolidation:
 
-- Historical finding: dashboard `server.js` acted as an unauthenticated privileged proxy that could call backend with `API_TOKEN` and write into tmux through queue/delivery APIs. RLP3-B1 now gates mutating dashboard APIs to loopback or `AGENT_CHAT_DASHBOARD_TOKEN`; full browser web auth remains separate.
+- Historical finding: dashboard `server.js` acted as an unauthenticated privileged proxy that could call backend with `API_TOKEN` and write into tmux through queue/delivery APIs. RLP3-B1 now gates mutating dashboard APIs to loopback or `HAFLEET_DASHBOARD_TOKEN`; full browser web auth remains separate.
 - Matrix trust and bot command ACL defaults are fail-open: audit mode continues processing, and empty operator/admin ACLs can allow command execution paths.
 - Supervisor lifecycle is imported and initialized by backend and can kill/restart supervisor tmux sessions as a backend side effect.
 - `write-supervisor-state start` claims to register/begin lease but only patches existing supervisor state.
@@ -110,7 +110,7 @@ Status: complete, read-only.
 
 Key conclusions:
 
-- Current reliable documentation spine: `README.md`, `OPERATIONS.md`, `skills/agent-chat/SKILL.md`, v1 workspace templates, and actual routes in code.
+- Current reliable documentation spine: `README.md`, `OPERATIONS.md`, `skills/hafleet/SKILL.md`, v1 workspace templates, and actual routes in code.
 - The old `docs/{agent}` model conflicts with the current flat v1 workspace model. `docs/agent-role-and-scope-editing.md`, `docs/agent-roles-and-guardrails.md`, and `docs/Hibiki/agents.md` still describe old per-agent folders.
 - `docs/architecture/system-components.md` has stale route names and API tables, including an outdated `/api/sse` path where current code exposes `/api/stream`.
 - `ROADMAP-remote.md` reads as an implementation roadmap even though remote support is now a documented feature.
@@ -120,7 +120,7 @@ Accepted actions for consolidation:
 
 - Add a stale-doc section to the repair table.
 - Make `docs/salt` the current-system audit set, not another long-lived `docs/{agent}` model.
-- Use the phrase "agentchat is a stateful-individual chat kernel" as the documentation anchor, with Task/Supervisor/Matrix/Dashboard/Remote relay as replaceable edges.
+- Use the phrase "hafleet is a stateful-individual chat kernel" as the documentation anchor, with Task/Supervisor/Matrix/Dashboard/Remote relay as replaceable edges.
 
 ## Batch 3 focused repair probes
 
@@ -136,7 +136,7 @@ Accepted recommendations:
 - Require the command line to identify `mcp-server.js` or `mcp-server-core.js` to reduce PID reuse false positives.
 - Add test hooks instead of exporting internal detection functions as production API.
 
-### Descartes: R-015 agent-service Bash compatibility
+### Descartes: R-015 hafleet-service Bash compatibility
 
 Status: complete, read-only.
 
@@ -170,7 +170,7 @@ Accepted conclusions:
 - `remote/` mixes authored remote package files and managed mirrors.
 - `remote-dist/` is stale/incomplete.
 - `check-remote-sync` and `build-remote-package.sh --check` fail because remote files drifted and generated package dependencies are incomplete.
-- Remote `agentchat` advertises commands not included in the remote package.
+- Remote `hafleet` advertises commands not included in the remote package.
 - Future packaging should be manifest-driven and profile-aware, not hand-maintained mirrors.
 
 ### Linnaeus: config/auth/identity
@@ -180,7 +180,7 @@ Status: complete, read-only.
 Accepted conclusions:
 
 - `API_TOKEN` currently conflates operator/admin bearer, relay credential, and dashboard backend proxy credential.
-- `AGENT_CHAT_SERVER` currently conflates backend local id, relay id, MCP auto-register id, and dashboard locality checks.
+- `HAFLEET_SERVER` currently conflates backend local id, relay id, MCP auto-register id, and dashboard locality checks.
 - Agent identity is repeated across backend record, v1 manifest, tmux session, `AGENT_NAME`, and heartbeat sessions.
 - Runtime paths should be derived from a common v1 home/state resolver instead of being hand-assembled by relay/MCP/launch scripts.
 
@@ -191,7 +191,7 @@ Status: complete, read-only.
 Accepted conclusions:
 
 - Docs mostly state the right high-level model, but command semantics are not profile-aware.
-- `agentchat update`, `agentchat service`, `agent-up`, `agent-down`, `agent-ls`, and `check-mcp` are the most confusing operator surfaces.
+- `hafleet update`, `hafleet service`, `hafleet-up`, `hafleet-down`, `hafleet-ls`, and `check-mcp` are the most confusing operator surfaces.
 - `ROADMAP-remote.md` is stale as a roadmap and should become a current deployment document or be marked superseded after review.
 - The formal docs spine should split kernel invariants, deployment profiles, CLI semantics, install guides, and operations runbooks.
 
@@ -215,10 +215,10 @@ Status: complete, read-only.
 Accepted conclusions:
 
 - Do not add central-only commands to the remote package just to satisfy CLI help.
-- Make `remote/bin/agentchat` advertise only packaged commands.
+- Make `remote/bin/hafleet` advertise only packaged commands.
 - Add explicit dispatch-target checks so missing remote commands fail during package validation instead of at operator runtime.
-- Treat `bin/agentchat` and `remote/bin/agentchat` as profile-specific, not byte-for-byte mirrors.
-- Keep `remote/bin/agent-up` drift outside this batch; launch work remains deferred.
+- Treat `bin/hafleet` and `remote/bin/hafleet` as profile-specific, not byte-for-byte mirrors.
+- Keep `remote/bin/hafleet-up` drift outside this batch; launch work remains deferred.
 
 ## CI/CD focused audit round
 

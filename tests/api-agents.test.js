@@ -38,7 +38,7 @@ describe('backend agents API', () => {
   let context;
 
   beforeAll(async () => {
-    context = await createBackendTestContext('agent-chat-agents-test-', {
+    context = await createBackendTestContext('hafleet-agents-test-', {
       agents: {
         alpha: {
           name: 'alpha',
@@ -281,7 +281,7 @@ describe('backend agents API persistence failures', () => {
       offlineReason: null,
       state: 'online',
     });
-    context = await createBackendTestContext('agent-chat-agents-force-delete-test-', {
+    context = await createBackendTestContext('hafleet-agents-force-delete-test-', {
       agents: { forcey: original },
       groups: {},
       agentRuntime: {
@@ -314,7 +314,7 @@ describe('backend agents API persistence failures', () => {
   }
 
   test('POST /api/agents returns 503 and leaves no visible agent when agents persistence fails', async () => {
-    context = await createBackendTestContext('agent-chat-agents-persist-test-', {
+    context = await createBackendTestContext('hafleet-agents-persist-test-', {
       agents: {},
       groups: {},
     });
@@ -335,7 +335,7 @@ describe('backend agents API persistence failures', () => {
   });
 
   test('POST /api/agents with tmux persists the transitioned agent state', async () => {
-    context = await createBackendTestContext('agent-chat-agents-persist-test-', {
+    context = await createBackendTestContext('hafleet-agents-persist-test-', {
       agents: {},
       groups: {},
     });
@@ -366,7 +366,7 @@ describe('backend agents API persistence failures', () => {
       name: 'patchy',
       role: 'worker',
     });
-    context = await createBackendTestContext('agent-chat-agents-persist-test-', {
+    context = await createBackendTestContext('hafleet-agents-persist-test-', {
       agents: { patchy: original },
       groups: {},
     });
@@ -401,7 +401,7 @@ describe('backend agents API persistence failures', () => {
       offlineReason: null,
       state: 'online',
     });
-    context = await createBackendTestContext('agent-chat-agents-persist-test-', {
+    context = await createBackendTestContext('hafleet-agents-persist-test-', {
       agents: { 'online-agent': original },
       groups: {},
     });
@@ -437,7 +437,7 @@ describe('backend agents API persistence failures', () => {
       offlineReason: null,
       state: 'online',
     });
-    context = await createBackendTestContext('agent-chat-agents-persist-test-', {
+    context = await createBackendTestContext('hafleet-agents-persist-test-', {
       agents: { registered: original },
       groups: {},
     });

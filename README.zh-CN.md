@@ -9,7 +9,7 @@ HAFleet 把 Claude Code 和 Codex agent 跑在 tmux pane 里，并补上它们�
 local-first 的 —— 后端在构造上就只监听 loopback，任何东西都不需要离开这台机器。
 
 HAFleet 是 [agent-chat](https://github.com/shisuiki/agent-chat) 的 fork。许多内部
-标识符仍带 `agent-chat` / `AGENTCHAT_` 前缀；那些是稳定接口，刻意保持不变，
+标识符仍带 `hafleet` / `HAFLEET_` 前缀；那些是稳定接口，刻意保持不变，
 见下文[命名](#命名)。
 
 ## 目录
@@ -64,8 +64,8 @@ HAFleet 是 [agent-chat](https://github.com/shisuiki/agent-chat) 的 fork。许�
 | `push-relay.js` | SSE 消费者，向 tmux pane 注入通知 |
 | `mcp-server.js` | 每 agent 一个 MCP server，暴露消息与任务工具 |
 | `bridge-matrix.js` | 可选的 Matrix 桥，对接外部房间与运维人员 |
-| `services/agentchat-services.mjs` | 非 systemd 的进程 supervisor（macOS 上的运行方式） |
-| `bin/agentchat` | 统一 CLI 分发器 |
+| `services/hafleet-services.mjs` | 非 systemd 的进程 supervisor（macOS 上的运行方式） |
+| `bin/hafleet` | 统一 CLI 分发器 |
 | `remote/` | 给其它机器用的最小远程 relay 包 |
 
 三层同心结构，在 `scripts/architecture-boundaries.json` 中声明，并**由 CI 强制**：
@@ -86,11 +86,11 @@ systemd 单元（Linux），全部带沙箱与资源限制：
 
 | 单元 | 入口 | 说明 |
 | --- | --- | --- |
-| `agent-chat-v2.service` | `backend-v2.js` | 最先启动 |
-| `agent-chat.service` | `server.js` | Dashboard 与本地队列面 |
-| `agent-chat-push-relay.service` | `push-relay.js` | tmux 通知 relay |
+| `hafleet-backend.service` | `backend-v2.js` | 最先启动 |
+| `hafleet.service` | `server.js` | Dashboard 与本地队列面 |
+| `hafleet-push-relay.service` | `push-relay.js` | tmux 通知 relay |
 | `bridge-matrix.service` | `bridge-matrix.js` | 可选，`--with-bridge` |
-| `agent-chat-stable-autodeploy.service` | 监视器 | 可选；非特权运行 |
+| `hafleet-stable-autodeploy.service` | 监视器 | 可选；非特权运行 |
 
 ## 安装
 
@@ -152,7 +152,7 @@ cd HAFleet
 ./install/install-macos.sh
 ```
 
-用 launchd 用户 agent 代替 systemd，用 `agentchat-services.mjs` 作 supervisor，
+用 launchd 用户 agent 代替 systemd，用 `hafleet-services.mjs` 作 supervisor，
 Matrix 桥默认关闭，且没有 autodeploy 监视器。缺失的前置（`node >= 22`、`tmux`）
 会用 Homebrew 安装。
 
@@ -175,9 +175,9 @@ Matrix 桥默认关闭，且没有 autodeploy 监视器。缺失的前置（`nod
 ### 卸载
 
 ```bash
-./uninstall.sh              # 保留 ~/.agentchat、data/、.env
+./uninstall.sh              # 保留 ~/.hafleet、data/、.env
 ./uninstall.sh --yes        # 非交互
-./uninstall.sh --purge-data --purge-agentchat-home   # 破坏性，需二次确认
+./uninstall.sh --purge-data --purge-hafleet-home   # 破坏性，需二次确认
 ```
 
 卸载器只移除指向*本* checkout 的符号链接与单元，且只删它自己拥有的 skill 目录。
@@ -186,14 +186,14 @@ Matrix 桥默认关闭，且没有 autodeploy 监视器。缺失的前置（`nod
 
 ```bash
 # 启动一个 agent
-agentchat up-v1 alice codex --project "$HOME/projects/example" --project-mode symlink --fresh
+hafleet up-v1 alice codex --project "$HOME/projects/example" --project-mode symlink --fresh
 
 # 跟它说话
-agentchat send alice "status?"
+hafleet send alice "status?"
 
 # 看舰队
-agentchat ls
-agentchat service status
+hafleet ls
+hafleet service status
 ```
 
 然后打开 `http://127.0.0.1:8084`。
@@ -210,7 +210,7 @@ Dashboard 页面：
 | `/alerts` | 告警 |
 | `/config` | agent 与 preset 配置 |
 
-联系 agent 有五条路径：dashboard 的 DM 框、Matrix、`agentchat send`、直接 attach
+联系 agent 有五条路径：dashboard 的 DM 框、Matrix、`hafleet send`、直接 attach
 到 pane，或 REST API。全部都是**等 agent 空闲时**才投递 —— 没有打断机制。
 
 ## 运维
@@ -218,9 +218,9 @@ Dashboard 页面：
 ### 验证
 
 ```bash
-systemctl status agent-chat-v2 agent-chat agent-chat-push-relay
+systemctl status hafleet-backend hafleet hafleet-push-relay
 node services/standalone-doctor.mjs     # 跨组件健康
-agentchat check-mcp
+hafleet check-mcp
 node -e 'import("./lib/version.js").then(m=>console.log(m.formatBuildIdentity()))'
 ```
 
@@ -264,7 +264,7 @@ git reset --hard origin/stable
 部署之后，验证已加载的远程 relay：
 
 ```bash
-agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
+hafleet verify-remote --samples 2 --interval 16 --expect-version <short-sha>
 ```
 
 ### 发布
@@ -284,17 +284,17 @@ agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
 | 变量 | 必需 | 默认 | 含义 |
 | --- | --- | --- | --- |
 | `API_TOKEN` | **是** | 无 | 后端、dashboard 代理、MCP 与 relay 的运维 bearer token |
-| `AGENT_CHAT_API` | 否 | `http://127.0.0.1:8090` | 后端 API 基址 |
-| `AGENT_CHAT_RUNTIME_DIR` | 否 | 仓库根 | `data/` 与 `logs/` 的运行根目录 |
-| `AGENT_CHAT_BACKEND_PORT` | 否 | `8090` | 后端端口 |
-| `AGENT_CHAT_WEB_PORT` | 否 | `8084` | Dashboard 端口 |
-| `AGENT_CHAT_BACKEND_HOST` | 否 | `127.0.0.1` | 后端监听地址。**仅容器场景** —— 见[安全立场](#安全立场) |
-| `AGENT_CHAT_WEB_HOST` | 否 | `127.0.0.1` | Dashboard 监听地址，同上 |
-| `AGENT_CHAT_WEB_URL` | 否 | `http://127.0.0.1:8084` | 公开 dashboard 地址，用于推送队列调用与 Matrix 链接 |
-| `AGENT_CHAT_QUEUE_URL` | 否 | `${AGENT_CHAT_WEB_URL}/api/queue` | 推送通知的队列端点 |
-| `AGENT_CHAT_DASHBOARD_TOKEN` | 否 | 空 | 非本地 dashboard 变更所需的 bearer token |
-| `AGENT_CHAT_SERVER` | 远程：是 | `local` 或主机名 | 运行报告里的 server 身份 |
-| `MSG_BASE_URL` | 遗留 | 由 `AGENT_CHAT_WEB_URL` 推导 | 覆盖 Matrix `/msg` 链接基址 |
+| `HAFLEET_API` | 否 | `http://127.0.0.1:8090` | 后端 API 基址 |
+| `HAFLEET_RUNTIME_DIR` | 否 | 仓库根 | `data/` 与 `logs/` 的运行根目录 |
+| `HAFLEET_BACKEND_PORT` | 否 | `8090` | 后端端口 |
+| `HAFLEET_WEB_PORT` | 否 | `8084` | Dashboard 端口 |
+| `HAFLEET_BACKEND_HOST` | 否 | `127.0.0.1` | 后端监听地址。**仅容器场景** —— 见[安全立场](#安全立场) |
+| `HAFLEET_WEB_HOST` | 否 | `127.0.0.1` | Dashboard 监听地址，同上 |
+| `HAFLEET_WEB_URL` | 否 | `http://127.0.0.1:8084` | 公开 dashboard 地址，用于推送队列调用与 Matrix 链接 |
+| `HAFLEET_QUEUE_URL` | 否 | `${HAFLEET_WEB_URL}/api/queue` | 推送通知的队列端点 |
+| `HAFLEET_DASHBOARD_TOKEN` | 否 | 空 | 非本地 dashboard 变更所需的 bearer token |
+| `HAFLEET_SERVER` | 远程：是 | `local` 或主机名 | 运行报告里的 server 身份 |
+| `MSG_BASE_URL` | 遗留 | 由 `HAFLEET_WEB_URL` 推导 | 覆盖 Matrix `/msg` 链接基址 |
 
 `backend-v2.js` 与 `server.js` 在缺少非空 `API_TOKEN` 时会 fail fast。
 
@@ -302,8 +302,8 @@ agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>
 
 | 变量 | 默认 | 含义 |
 | --- | --- | --- |
-| `AGENTCHAT_HOMEDIR` | `~/.agentchat` | agent home 根目录 |
-| `AGENTCHAT_AGENT_TOKEN_MODE` | `hard` | 每 agent token 的强制模式 |
+| `HAFLEET_HOMEDIR` | `~/.hafleet` | agent home 根目录 |
+| `HAFLEET_AGENT_TOKEN_MODE` | `hard` | 每 agent token 的强制模式 |
 | `AGENT_IDLE_THRESHOLD_MS` | `20000` | 推送投递的空闲阈值 |
 | `AGENT_SCOPE_MONITOR_ENABLED` | `true` | 本地资源监控 |
 | `OFFLINE_CATCHUP_LIST_LIMIT` | `50` | 离线补投消息上限 |
@@ -356,12 +356,12 @@ Codex 跑 Level 2（`workspace-write` + `on-request`）。会改变策略的 `ex
 
 | 变量 | 默认 | 含义 |
 | --- | --- | --- |
-| `AGENTCHAT_DEPLOY_BRANCH` | `stable` | 部署监视器 watch 的分支 |
-| `AGENTCHAT_RELEASE_GATE` | `worktree` | 候选门禁。`none` 关闭它 —— 必须是显式选择 |
-| `AGENTCHAT_DEPLOY_SERVICES` | 按脚本而定 | 部署时重启的服务 |
-| `AGENTCHAT_ALERT_URL` | 空 | 部署失败告警的可选端点 |
-| `AGENTCHAT_ALERT_TOKEN` | 空 | 上者的 bearer token |
-| `AGENTCHAT_VERIFY_REMOTE_BIN` | `bin/verify-remote` | 远程验证助手 |
+| `HAFLEET_DEPLOY_BRANCH` | `stable` | 部署监视器 watch 的分支 |
+| `HAFLEET_RELEASE_GATE` | `worktree` | 候选门禁。`none` 关闭它 —— 必须是显式选择 |
+| `HAFLEET_DEPLOY_SERVICES` | 按脚本而定 | 部署时重启的服务 |
+| `HAFLEET_ALERT_URL` | 空 | 部署失败告警的可选端点 |
+| `HAFLEET_ALERT_TOKEN` | 空 | 上者的 bearer token |
+| `HAFLEET_VERIFY_REMOTE_BIN` | `bin/verify-remote` | 远程验证助手 |
 
 ## 安全立场
 
@@ -378,15 +378,15 @@ HAFleet **强制**的：
 它**假设**的，你应当知道：
 
 - **loopback 信任是机器级的，不是用户级的。** 本机任何进程都被当作 local。共享
-  主机上，真正的控制手段是 per-agent token（`AGENTCHAT_AGENT_TOKEN_MODE=hard`）。
-- **非 loopback 绑定是给容器用的。** `AGENT_CHAT_*_HOST` 的存在是为了让容器能
+  主机上，真正的控制手段是 per-agent token（`HAFLEET_AGENT_TOKEN_MODE=hard`）。
+- **非 loopback 绑定是给容器用的。** `HAFLEET_*_HOST` 的存在是为了让容器能
   通过发布端口被访问。每次启动都会大声记录；值写错时会退回 loopback 而不是放宽。
 - **任务图的完成是自报的。** 节点由被指派者宣布关闭，没有任何东西校验这个声明。
 - **已存在的 tmux session 会被收编。** HAFleet 会注册它找到的东西。
 - **存在已知的依赖债** —— 53 条传递性告警，已做成棘轮，新的进不来。见
   [docs/SECURITY-DEBT.md](docs/SECURITY-DEBT.md)。
 
-面向公网部署时，把 dashboard 放到 HTTPS 反向代理后面，并让 `AGENT_CHAT_API`
+面向公网部署时，把 dashboard 放到 HTTPS 反向代理后面，并让 `HAFLEET_API`
 只监听 loopback。
 
 ## 开发
@@ -401,7 +401,7 @@ API_TOKEN=dev-token node push-relay.js
 
 # 或者跑在 supervisor 下
 set -a; . ./.env; set +a
-AGENT_CHAT_RUNTIME_DIR="$PWD" node services/agentchat-services.mjs start
+HAFLEET_RUNTIME_DIR="$PWD" node services/hafleet-services.mjs start
 ```
 
 测试与门禁：
@@ -413,7 +413,7 @@ npm run check:syntax
 npm run check:cli-contract
 npm run check:architecture-boundaries # import 与路由归属规则
 npm run audit:baseline                # 告警棘轮
-AGENT_NAME=agentchat-develop npm run verify:ci
+AGENT_NAME=hafleet-develop npm run verify:ci
 ```
 
 远程包与发布产物：
@@ -428,9 +428,9 @@ npm run check:remote-sync
 
 ## 命名
 
-项目名是 **HAFleet**。内部标识符仍沿用上游的 `agent-chat` / `agentchat` /
-`AGENT_CHAT_` / `AGENTCHAT_` 命名，这是刻意的：systemd 单元名、CLI 命令名、`.env`
-变量名、MCP server 名以及 `~/.agentchat` 数据目录，都在
+项目名是 **HAFleet**。内部标识符仍沿用上游的 `hafleet` / `hafleet` /
+`HAFLEET_` / `HAFLEET_` 命名，这是刻意的：systemd 单元名、CLI 命令名、`.env`
+变量名、MCP server 名以及 `~/.hafleet` 数据目录，都在
 [docs/RELEASING.md](docs/RELEASING.md) 的兼容性契约覆盖范围内。重命名它们属于
 一次带迁移的大版本，而不是一次文档改动。
 

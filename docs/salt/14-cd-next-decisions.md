@@ -12,13 +12,13 @@ Implemented gates:
 1. `npm run verify:ci` validates syntax, CLI contracts, remote package shape, remote/local drift, dependency isolation, and kernel/CLI smoke tests.
 2. `npm run verify:cd-preflight` validates a candidate checkout, requires a clean tree by default, runs `verify:ci`, and prints the expected post-deploy version check.
 3. `tests/verify-cd-preflight.test.js` locks the preflight wrapper contract without touching deploy watchers.
-4. `agentchat verify-remote --expect-version <short-sha>` can verify heartbeat continuity and loaded remote relay commit after deployment.
+4. `hafleet verify-remote --expect-version <short-sha>` can verify heartbeat continuity and loaded remote relay commit after deployment.
 5. Remote package smoke now checks both push-relay and MCP wrapper resolution, plus the Linux remote autodeploy service template.
 6. Remote autodeploy calls `verify-remote --expect-version <short-sha>` after relay restart, using deploy-safe samples and optional `VERIFY_AGENT`.
 
 Not implemented yet:
 
-1. stable/live release gate support exists but must be enabled explicitly with `AGENTCHAT_RELEASE_GATE=worktree` on the deploy host.
+1. stable/live release gate support exists but must be enabled explicitly with `HAFLEET_RELEASE_GATE=worktree` on the deploy host.
 2. remote deploy failure state is still mostly in memory; durable state and rollback remain separate decisions.
 3. macOS remote hosts install launchd for push-relay but no launchd remote autodeploy watcher.
 
@@ -27,7 +27,7 @@ Not implemented yet:
 The current operator topology is useful for CD validation:
 
 - ac-topleader is effectively on the local/stable deployment side and can observe the live stable CD environment.
-- salt is effectively on the remote/client side and can observe remote relay, MCP wrapper, loaded commit, heartbeat, and CLI status behavior through agent-chat.
+- salt is effectively on the remote/client side and can observe remote relay, MCP wrapper, loaded commit, heartbeat, and CLI status behavior through hafleet.
 
 That split should be kept in the CD process. A complete release should require both:
 
@@ -38,7 +38,7 @@ That split should be kept in the CD process. A complete release should require b
 
 Problem:
 
-`scripts/agentchat-stable-autodeploy.sh` fetches `origin/stable` and resets the live checkout without waiting for the target commit's CI result.
+`scripts/hafleet-stable-autodeploy.sh` fetches `origin/stable` and resets the live checkout without waiting for the target commit's CI result.
 
 Options:
 
@@ -52,7 +52,7 @@ Prefer the staging worktree gate first. It uses the project's own gate without r
 
 Implemented in CD-A:
 
-1. `AGENTCHAT_RELEASE_GATE=none|worktree` now exists, defaulting to `none` until the live deploy service opts in;
+1. `HAFLEET_RELEASE_GATE=none|worktree` now exists, defaulting to `none` until the live deploy service opts in;
 2. before `force_clean_workdir` and the live `git reset --hard`, `worktree` mode creates a detached staging worktree outside the live checkout under the deploy state dir;
 3. the staging worktree checks out the target `remote_ref`;
 4. it runs `npm run verify:cd-preflight` from that staged checkout before mutating the live checkout;
@@ -64,7 +64,7 @@ The staging worktree should normally check out the target commit detached. The l
 
 Operational decision still needed:
 
-After this batch reaches stable, ac-topleader should decide when to set `AGENTCHAT_RELEASE_GATE=worktree` in the live stable autodeploy environment. Until that is configured, the code path exists and is tested but the live watcher keeps current behavior.
+After this batch reaches stable, ac-topleader should decide when to set `HAFLEET_RELEASE_GATE=worktree` in the live stable autodeploy environment. Until that is configured, the code path exists and is tested but the live watcher keeps current behavior.
 
 ## Decision 2: Dependency Retry State
 
@@ -74,8 +74,8 @@ Both autodeploy scripts reset to the target commit before dependency installatio
 
 Affected files before CD-A:
 
-- `scripts/agentchat-stable-autodeploy.sh`
-- `scripts/agentchat-remote-autodeploy.sh`
+- `scripts/hafleet-stable-autodeploy.sh`
+- `scripts/hafleet-remote-autodeploy.sh`
 
 Options:
 
@@ -89,7 +89,7 @@ Use last-successful commit as the primary model, with an install-needed marker a
 
 Implemented for stable/live in CD-A:
 
-1. `AGENTCHAT_DEPLOY_STATE_DIR` defaults under the absolute git dir at `.git/agentchat-autodeploy`, so `git clean -fd` in the live checkout does not delete deploy state;
+1. `HAFLEET_DEPLOY_STATE_DIR` defaults under the absolute git dir at `.git/hafleet-autodeploy`, so `git clean -fd` in the live checkout does not delete deploy state;
 2. `last-successful-ref` is written only after dependency installation, backend restart, backend health, dependent restarts, and service-active checks pass;
 3. the first deploy initializes `last-successful-ref` from the pre-reset live `HEAD`;
 4. failed dependency installation leaves an `install-needed` marker;
@@ -107,7 +107,7 @@ Problem:
 
 Status:
 
-Resolved for the current remote profile. `scripts/agentchat-remote-autodeploy.sh` watches `remote/package.json` and `remote/package-lock.json`, then runs `npm install --omit=dev` inside `remote/`. Root `package*.json` changes still deploy and restart the relay, but they do not trigger a root dependency install.
+Resolved for the current remote profile. `scripts/hafleet-remote-autodeploy.sh` watches `remote/package.json` and `remote/package-lock.json`, then runs `npm install --omit=dev` inside `remote/`. Root `package*.json` changes still deploy and restart the relay, but they do not trigger a root dependency install.
 
 Options:
 
@@ -127,7 +127,7 @@ If remote hosts become root-service hosts later, that should be a separate profi
 
 Problem:
 
-Resolved for the current git-checkout remote profile. `scripts/agentchat-remote-autodeploy.sh` no longer treats service-manager restart success alone as deploy success.
+Resolved for the current git-checkout remote profile. `scripts/hafleet-remote-autodeploy.sh` no longer treats service-manager restart success alone as deploy success.
 
 Implemented behavior:
 
@@ -145,7 +145,7 @@ Rollback to the last known good ref and durable restart/verification failure sta
 
 Problem:
 
-Linux remote install provisions `agent-chat-remote-autodeploy` as a systemd service. macOS remote install provisions only the push-relay launchd service.
+Linux remote install provisions `hafleet-remote-autodeploy` as a systemd service. macOS remote install provisions only the push-relay launchd service.
 
 Options:
 
@@ -154,7 +154,7 @@ Options:
 
 Recommendation:
 
-If macOS remote hosts are first-class deploy targets, add a launchd watcher. If they are mainly developer/client machines, document manual-update-only and require `agentchat update` plus `verify-remote` for macOS updates.
+If macOS remote hosts are first-class deploy targets, add a launchd watcher. If they are mainly developer/client machines, document manual-update-only and require `hafleet update` plus `verify-remote` for macOS updates.
 
 Decision needed:
 
@@ -164,13 +164,13 @@ Pick one policy. The system should not leave macOS remote CD behavior implicit.
 
 Problem:
 
-`remote/install-remote.sh` can run from a full source clone. In that case it currently prefers the root `bin/` directory when root `bin/agent-up` exists, so the installed `agentchat` helper can expose the root command surface instead of the remote-scoped `remote/bin/agentchat` surface. The generated remote package smoke validates the remote-scoped command surface, not this full-clone install path.
+`remote/install-remote.sh` can run from a full source clone. In that case it currently prefers the root `bin/` directory when root `bin/hafleet-up` exists, so the installed `hafleet` helper can expose the root command surface instead of the remote-scoped `remote/bin/hafleet` surface. The generated remote package smoke validates the remote-scoped command surface, not this full-clone install path.
 
 Options:
 
-1. Remote profile always links `remote/bin/agentchat`, even from a full clone.
+1. Remote profile always links `remote/bin/hafleet`, even from a full clone.
 2. Full clone remotes intentionally expose the root command surface and docs/tests say so.
-3. Add an explicit install flag, such as `AGENTCHAT_REMOTE_BIN_PROFILE=root|remote`, and require operators to choose.
+3. Add an explicit install flag, such as `HAFLEET_REMOTE_BIN_PROFILE=root|remote`, and require operators to choose.
 
 Recommendation:
 
@@ -251,7 +251,7 @@ All next-batch code changes should be tested without touching live deployment:
 5. Generated package smoke for any new remote service/plist files.
 6. A manual two-sided acceptance run after stable merge:
    - local/stable side: run the approved preflight and observe autodeploy logs;
-   - remote side: run `agentchat verify-remote --samples 2 --interval 16 --expect-version <short-sha>` and spot-check `agentchat cli status`.
+   - remote side: run `hafleet verify-remote --samples 2 --interval 16 --expect-version <short-sha>` and spot-check `hafleet cli status`.
 
 Implemented test files:
 
@@ -259,13 +259,13 @@ Implemented test files:
 - `tests/remote-install-profile.test.js`
 - `tests/remote-autodeploy.test.js`
 
-Suggested CD-A harness knobs for `scripts/agentchat-stable-autodeploy.sh`:
+Suggested CD-A harness knobs for `scripts/hafleet-stable-autodeploy.sh`:
 
-1. `AGENTCHAT_ONCE=1` to execute one poll/deploy cycle and exit;
-2. `AGENTCHAT_SYSTEMCTL_BIN=<path>` or a wrapper function so tests can fake restart and status checks;
-3. `AGENTCHAT_NPM_BIN=<path>` or a wrapper function so tests can force install pass/fail;
-4. `AGENTCHAT_RELEASE_GATE=none|worktree`;
-5. `AGENTCHAT_DEPLOY_STATE_DIR=<tmpdir>`.
+1. `HAFLEET_ONCE=1` to execute one poll/deploy cycle and exit;
+2. `HAFLEET_SYSTEMCTL_BIN=<path>` or a wrapper function so tests can fake restart and status checks;
+3. `HAFLEET_NPM_BIN=<path>` or a wrapper function so tests can force install pass/fail;
+4. `HAFLEET_RELEASE_GATE=none|worktree`;
+5. `HAFLEET_DEPLOY_STATE_DIR=<tmpdir>`.
 
 Suggested CD-A tests:
 
@@ -276,7 +276,7 @@ Suggested CD-A tests:
 
 ## Recommended Approval Order
 
-1. Batch CD-A: stable release gate and dependency retry state for `scripts/agentchat-stable-autodeploy.sh` only, with fake-repo tests. Implemented.
+1. Batch CD-A: stable release gate and dependency retry state for `scripts/hafleet-stable-autodeploy.sh` only, with fake-repo tests. Implemented.
 2. Batch CD-B: remote dependency install scope and remote post-deploy `verify-remote` integration are implemented with retry-pending failure behavior.
 3. Batch CD-C: macOS remote CD policy implementation or manual-update documentation.
 4. Batch CD-D: optional GitHub check-runs gate if staging worktree is not enough or if deploy-host GitHub credentials are approved.
@@ -289,14 +289,14 @@ CD-A intentionally avoided remote/macOS work. Its purpose was to make the stable
 
 Edited only:
 
-1. `scripts/agentchat-stable-autodeploy.sh`
+1. `scripts/hafleet-stable-autodeploy.sh`
 2. `tests/stable-autodeploy.test.js`
 3. `package.json` to include `tests/stable-autodeploy.test.js` in `test:kernel`
 
 Do not edit in CD-A:
 
-1. `scripts/agentchat-remote-autodeploy.sh`
+1. `scripts/hafleet-remote-autodeploy.sh`
 2. macOS launchd plist files
 3. remote package smoke, unless stable-CD tests expose a shared package issue
 4. `.github/workflows/ci.yml`
-5. `bin/agent-up` or `remote/bin/agent-up`
+5. `bin/hafleet-up` or `remote/bin/hafleet-up`

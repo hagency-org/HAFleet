@@ -9,7 +9,7 @@ tags: [agent-spec, governance, knowledge]
 
 ## Context
 
-agent-chat has accumulated implementation plans and architecture documents, but
+hafleet has accumulated implementation plans and architecture documents, but
 security-sensitive behavior has not consistently been connected to executable
 acceptance contracts or stable decision identifiers. This makes it difficult
 for coding agents to distinguish current project truth from historical prose.

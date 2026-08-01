@@ -1,6 +1,6 @@
 [Unit]
 Description=Agent Chat Matrix Bridge
-After=network.target agent-chat-v2.service
+After=network.target hafleet-backend.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -15,7 +15,7 @@ Environment=NODE_ENV=production
 EnvironmentFile=-__INSTALL_DIR__/.env
 
 # --- Sandboxing ---
-# PrivateTmp and ProtectHome are deliberately omitted; see agent-chat-v2.service
+# PrivateTmp and ProtectHome are deliberately omitted; see hafleet-backend.service
 # for the rationale (tmux socket lives in /tmp, runtime tree under the user's home).
 NoNewPrivileges=yes
 ProtectSystem=full

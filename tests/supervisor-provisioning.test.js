@@ -8,19 +8,19 @@ describe('supervisor provisioning', () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), 'supervisor-provision-test-'));
-    process.env.AGENTCHAT_HOMEDIR = tmpDir;
+    process.env.HAFLEET_HOMEDIR = tmpDir;
   });
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
-    delete process.env.AGENTCHAT_HOMEDIR;
+    delete process.env.HAFLEET_HOMEDIR;
   });
 
   test('provisions supervisor agent home with directories, token, AGENTS.md, and manifest', async () => {
     const { provisionSupervisorAgent } = await import('../lib/supervisor-provisioning.js');
     const result = provisionSupervisorAgent('ac-topleader', {
       targetTmux: 'ac-topleader',
-      targetWorkdir: '/home/test/.agentchat/agents/agent_ac-topleader/workdir',
+      targetWorkdir: '/home/test/.hafleet/agents/agent_ac-topleader/workdir',
     });
 
     expect(result.supervisorName).toBe('supervisor-ac-topleader');
