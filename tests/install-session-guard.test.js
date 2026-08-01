@@ -127,6 +127,29 @@ describe('install-full.sh tmux session guard', () => {
   });
 });
 
+describe('installer tests do not depend on the host having no tmux sessions', () => {
+  // The guard makes install-full.sh refuse non-interactively when sessions exist.
+  // A test that invokes the installer without stating a stance therefore passes on
+  // a machine with no tmux server and fails on a real fleet host. That is a test
+  // that reports the state of the developer's laptop, not the state of the code.
+  test('every install-full.sh invocation in the suite states a tmux stance', () => {
+    const files = execFileSync('git', ['ls-files', 'tests'], { encoding: 'utf-8' })
+      .split('\n').filter((f) => f.endsWith('.test.js'));
+    const offenders = [];
+    for (const file of files) {
+      const text = readFileSync(file, 'utf-8');
+      // Each call is an array literal of args; check the block that follows.
+      for (const match of text.matchAll(/install-full\.sh'?,?\s*\[([\s\S]{0,600}?)\]/g)) {
+        const args = match[1];
+        if (!/--(deny|allow)-existing-tmux/.test(args)) {
+          offenders.push(`${file}: ${args.trim().split('\n')[0].trim()}`);
+        }
+      }
+    }
+    expect(offenders, 'invocations missing --deny/--allow-existing-tmux').toEqual([]);
+  });
+});
+
 describe('both installers offer the same protection', () => {
   const linux = readFileSync('install-full.sh', 'utf-8');
   const macos = readFileSync('install/install-macos.sh', 'utf-8');

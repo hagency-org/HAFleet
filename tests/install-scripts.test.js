@@ -10,6 +10,16 @@ function makeTempRoot(prefix) {
   return mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+// Every install-full.sh invocation below passes --deny-existing-tmux.
+//
+// The installer refuses to run non-interactively on a host that already has tmux
+// sessions, because adopting them means the relay starts typing into someone
+// else's work. That guard is correct, but it made these tests depend on ambient
+// host state: they passed on a dev Mac with no tmux server and on CI runners,
+// and failed on every real fleet host — four failures on mini5, which was running
+// two live agents at the time. Stating the stance explicitly makes the outcome
+// the same everywhere. --deny-existing-tmux is the safe stance: whatever sessions
+// the host has are excluded by policy rather than claimed.
 function runScript(script, args, options = {}) {
   return execFileSync('bash', [path.join(ROOT, script), ...args], {
     cwd: ROOT,
@@ -39,6 +49,7 @@ describe('local install and uninstall scripts', () => {
       writeFileSync(fakeNode, '#!/usr/bin/env bash\n', { mode: 0o755 });
 
       runScript('install-full.sh', [
+        '--deny-existing-tmux',
         '--skip-prereq-check',
         '--skip-npm',
         '--skip-mcp',
@@ -91,6 +102,7 @@ describe('local install and uninstall scripts', () => {
       writeFileSync(path.join(fakeBin, 'codex'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(codexLogPath)}\n`, { mode: 0o755 });
 
       runScript('install-full.sh', [
+        '--deny-existing-tmux',
         '--skip-prereq-check',
         '--skip-npm',
         '--no-start',
@@ -135,6 +147,7 @@ describe('local install and uninstall scripts', () => {
       let failure = null;
       try {
         runScript('install-full.sh', [
+          '--deny-existing-tmux',
           '--skip-prereq-check',
           '--skip-npm',
           '--skip-mcp',
@@ -170,6 +183,7 @@ describe('local install and uninstall scripts', () => {
       writeFileSync(path.join(sudoersDir, 'hafleet-autodeploy'), 'hafleet sudoers\n');
 
       runScript('install-full.sh', [
+        '--deny-existing-tmux',
         '--skip-prereq-check',
         '--skip-npm',
         '--skip-mcp',
