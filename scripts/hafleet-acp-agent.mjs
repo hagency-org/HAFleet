@@ -215,6 +215,10 @@ async function pollAndDeliver() {
     if (!messages.length) return;
     const text = messages.map(formatMessage).join('\n\n---\n\n');
     log(`delivering ${messages.length} message(s): ${messages.map((m) => m.id).join(', ')}`);
+    // Mark the update stream before prompting so this turn's output is read
+    // alone. Without it the previous answer is prepended — verified on mini5,
+    // where a reply went out as "TokyoThe command exited with code 7…".
+    const cursor = runtime.updateCursor(name);
     const stopReason = await runtime.prompt(name, text);
     deliveredCount += messages.length;
     log(`turn finished (${stopReason}); delivered ${deliveredCount} message(s) so far`);
@@ -230,7 +234,7 @@ async function pollAndDeliver() {
     // to be joined before they mean anything.
     let said = '';
     const tools = [];
-    for (const { update } of runtime.recentUpdates(name, 400)) {
+    for (const { update } of runtime.updatesSince(name, cursor)) {
       const kind = update?.sessionUpdate;
       if (kind === 'agent_message_chunk') {
         said += update.content?.text || '';

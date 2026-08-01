@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
 
 import { createAcpRuntime } from '../lib/runtime/acp.js';
 import { assertRuntimeContract } from '../lib/runtime/index.js';
@@ -230,5 +231,56 @@ describe('mcp servers are handed to the agent at session/new', () => {
     await rt.startSession('no-mcp', { cwd: '/tmp/ws' });
     const newSession = agent.sent.find((m) => m.method === 'session/new');
     expect(newSession.params.mcpServers).toEqual([]);
+  });
+});
+
+describe('one turn\'s updates can be read without the previous turn\'s', () => {
+  // recentUpdates(name, N) returns the last N notifications whatever produced
+  // them. A caller reconstructing the agent's answer from that silently prepends
+  // the previous one. On mini5 a reply was posted into HAFleet reading
+  // "TokyoThe command exited with code 7…" — "Tokyo" answered the question before.
+  test('updatesSince returns only what arrived after the cursor', async () => {
+    const { rt } = runtimeWith();
+    await rt.startSession('cursor', { cwd: '/tmp/ws' });
+    await rt.prompt('cursor', 'first');          // fake agent emits one update
+    const cursor = rt.updateCursor('cursor');
+    expect(cursor).toBeGreaterThan(0);
+    await rt.prompt('cursor', 'second');
+    const since = rt.updatesSince('cursor', cursor);
+    expect(since.length).toBe(1);
+    expect(rt.recentUpdates('cursor').length).toBe(2); // both still in the buffer
+  });
+
+  test('a cursor of 0 returns everything', async () => {
+    const { rt } = runtimeWith();
+    await rt.startSession('c0', { cwd: '/tmp/ws' });
+    await rt.prompt('c0', 'x');
+    expect(rt.updatesSince('c0', 0).length).toBe(1);
+  });
+
+  test('a cursor older than the bounded buffer does not return nonsense', async () => {
+    // The buffer keeps 200 and drops oldest-first, so a cursor can point at
+    // something already gone. It must clamp, not produce negative slices.
+    const { rt } = runtimeWith();
+    await rt.startSession('drop', { cwd: '/tmp/ws' });
+    await rt.prompt('drop', 'x');
+    const all = rt.updatesSince('drop', 0);
+    expect(Array.isArray(all)).toBe(true);
+    expect(rt.updatesSince('drop', -5).length).toBeGreaterThanOrEqual(all.length);
+  });
+
+  test('an unknown session yields an empty list, not a throw', () => {
+    const { rt } = runtimeWith();
+    expect(rt.updateCursor('nope')).toBe(0);
+    expect(rt.updatesSince('nope', 0)).toEqual([]);
+  });
+
+  test('the host reads from a cursor rather than the whole buffer', () => {
+    // The bug was in the caller, so the caller is what must not regress.
+    const host = readFileSync('scripts/hafleet-acp-agent.mjs', 'utf-8');
+    expect(host).toContain('runtime.updateCursor(name)');
+    expect(host).toContain('runtime.updatesSince(name, cursor)');
+    expect(host, 'reading the whole buffer is what welded two turns together')
+      .not.toContain('recentUpdates(name, 400)');
   });
 });
