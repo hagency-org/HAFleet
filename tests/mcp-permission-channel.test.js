@@ -185,21 +185,21 @@ describe('supported runtime approval adapters', () => {
     ];
     for (const toolName of safeToolNames) {
       expect(codexPermissionRequestNeedsOwnerApproval({
-        tool_name: `mcp__agent_chat__${toolName}`,
+        tool_name: `mcp__hafleet__${toolName}`,
         tool_input: {},
       })).toBe(false);
     }
     for (const toolName of ['send_message', 'post']) {
       expect(codexPermissionRequestNeedsOwnerApproval({
-        tool_name: `mcp__agent_chat__${toolName}`,
+        tool_name: `mcp__hafleet__${toolName}`,
         tool_input: { summary: 'text only' },
       })).toBe(false);
       expect(codexPermissionRequestNeedsOwnerApproval({
-        tool_name: `mcp__agent_chat__${toolName}`,
+        tool_name: `mcp__hafleet__${toolName}`,
         tool_input: { summary: 'text only', attachments: [] },
       })).toBe(false);
       expect(codexPermissionRequestNeedsOwnerApproval({
-        tool_name: `mcp__agent_chat__${toolName}`,
+        tool_name: `mcp__hafleet__${toolName}`,
         tool_input: { attachments: [{ path: '/private/file.txt' }] },
       })).toBe(true);
     }
@@ -212,7 +212,7 @@ describe('supported runtime approval adapters', () => {
       tool_input: { path: '/private/file.txt' },
     })).toBe(true);
     expect(codexPermissionRequestNeedsOwnerApproval({
-      tool_name: 'mcp__agent_chat__unknown',
+      tool_name: 'mcp__hafleet__unknown',
       tool_input: {},
     })).toBe(true);
 
@@ -226,7 +226,7 @@ describe('supported runtime approval adapters', () => {
         stdin: Readable.from([JSON.stringify({
           hook_event_name: 'PermissionRequest',
           turn_id: 'turn-inbox',
-          tool_name: 'mcp__agent_chat__check_inbox',
+          tool_name: 'mcp__hafleet__check_inbox',
           tool_input: {},
         })]),
         stdout,

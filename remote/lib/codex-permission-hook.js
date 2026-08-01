@@ -13,21 +13,21 @@ import {
 
 const HOOK_DIGEST_ARGUMENT = '--hafleet-hook-sha256=';
 const TRUSTED_HAFLEET_COORDINATION_TOOLS = new Set([
-  'mcp__agent_chat__whoami',
-  'mcp__agent_chat__send_message',
-  'mcp__agent_chat__post',
-  'mcp__agent_chat__check_inbox',
-  'mcp__agent_chat__check_group',
-  'mcp__agent_chat__list_tasks',
-  'mcp__agent_chat__get_task',
-  'mcp__agent_chat__accept_task',
-  'mcp__agent_chat__transition_task',
-  'mcp__agent_chat__comment_task',
-  'mcp__agent_chat__update_task_execution',
+  'mcp__hafleet__whoami',
+  'mcp__hafleet__send_message',
+  'mcp__hafleet__post',
+  'mcp__hafleet__check_inbox',
+  'mcp__hafleet__check_group',
+  'mcp__hafleet__list_tasks',
+  'mcp__hafleet__get_task',
+  'mcp__hafleet__accept_task',
+  'mcp__hafleet__transition_task',
+  'mcp__hafleet__comment_task',
+  'mcp__hafleet__update_task_execution',
 ]);
 const HAFLEET_ATTACHMENT_TOOLS = new Set([
-  'mcp__agent_chat__send_message',
-  'mcp__agent_chat__post',
+  'mcp__hafleet__send_message',
+  'mcp__hafleet__post',
 ]);
 
 function resolveAgentToken(agentName, env = process.env) {
