@@ -205,3 +205,30 @@ describe('the octos adapter', () => {
     expect(octos.raw.acp.blocksOnPermissionRequest).toBe(false);
   });
 });
+
+describe('mcp servers are handed to the agent at session/new', () => {
+  // Without this an ACP agent can be prompted but cannot read its own inbox or
+  // reply, which makes it a spectator — the tmux agents reach the same tools
+  // through .mcp.json. Delivery is only half the wiring; this is the other half.
+  test('the configured servers reach session/new', async () => {
+    const { rt, agent } = runtimeWith();
+    const mcpServers = [{
+      name: 'hafleet',
+      command: '/usr/bin/node',
+      args: ['/repo/mcp-server.js'],
+      env: [{ name: 'AGENT_NAME', value: 'octos-agent' }],
+    }];
+    await rt.startSession('with-mcp', { cwd: '/tmp/ws', mcpServers });
+    const newSession = agent.sent.find((m) => m.method === 'session/new');
+    expect(newSession.params.mcpServers).toEqual(mcpServers);
+  });
+
+  test('omitting them sends an empty list, not undefined', async () => {
+    // session/new requires the field; sending undefined drops it from the JSON
+    // and some agents reject the request outright.
+    const { rt, agent } = runtimeWith();
+    await rt.startSession('no-mcp', { cwd: '/tmp/ws' });
+    const newSession = agent.sent.find((m) => m.method === 'session/new');
+    expect(newSession.params.mcpServers).toEqual([]);
+  });
+});

@@ -8,10 +8,15 @@
  * does — so the pid recorded at registration is an honest liveness signal for
  * the backend sweep.
  *
- * It deliberately does NOT poll the backend for work. Delivery to ACP agents is
- * the next layer; this exists so an ACP agent can be launched, registered, and
- * seen as alive in the fleet.
+ * It also owns delivery, because it owns the session. The backend cannot deliver
+ * to an ACP agent the way it does to a tmux one — there is no pane to type into,
+ * and the session lives in this process, which the backend cannot reach into. So
+ * the direction is inverted: the backend records the message and this host pulls,
+ * polling the same inbox endpoint check_inbox uses and prompting the agent over
+ * session/prompt.
  */
+import { readFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -44,20 +49,85 @@ if (model && framework.launch.modelFlag) acpArgs.push(framework.launch.modelFlag
 
 const log = (message) => process.stdout.write(`[${new Date().toISOString()}] ${message}\n`);
 
+// ── Backend access ────────────────────────────────────────────────────────────
+// Same layout hafleet-acp-up provisions the token into.
+const HOME_DIR = process.env.HAFLEET_HOMEDIR || path.join(os.homedir(), '.hafleet');
+const STATE_DIR = process.env.HAFLEET_AGENT_STATE_DIR
+  || path.join(HOME_DIR, 'agents', `agent_${name}`, 'state');
+const BACKEND_PORT = process.env.HAFLEET_BACKEND_PORT || '8090';
+const API = (process.env.HAFLEET_API || `http://127.0.0.1:${BACKEND_PORT}`).replace(/\/$/, '');
+const MCP_SERVER_NAME = process.env.HAFLEET_MCP_SERVER_NAME || 'hafleet';
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+let agentToken = '';
+try {
+  agentToken = readFileSync(path.join(STATE_DIR, 'agent-token'), 'utf8').trim();
+} catch {
+  // Delivery needs the token; liveness does not. Warn rather than refuse to
+  // start, so a session already open is not lost over a missing file.
+  log(`WARNING: no agent token at ${STATE_DIR}/agent-token — inbox polling disabled`);
+}
+
+async function api(pathname, { method = 'GET' } = {}) {
+  const response = await fetch(`${API}${pathname}`, {
+    method,
+    headers: { 'X-Agent-Token': agentToken, Authorization: `Bearer ${agentToken}` },
+  });
+  if (!response.ok) throw new Error(`${method} ${pathname} -> ${response.status}`);
+  return response.json();
+}
+
+/**
+ * HAFleet's own MCP server, handed to the agent at session/new.
+ *
+ * Without this the agent can be prompted but cannot read its inbox or reply — it
+ * would be a spectator, unlike the tmux agents that reach the same tools through
+ * .mcp.json. ACP passes env as {name,value} pairs rather than an object.
+ */
+const mcpServers = agentToken ? [{
+  name: MCP_SERVER_NAME,
+  command: process.execPath,
+  args: [path.join(REPO_ROOT, 'mcp-server.js')],
+  env: [
+    { name: 'AGENT_NAME', value: name },
+    { name: 'HAFLEET_API', value: API },
+    { name: 'HAFLEET_BACKEND_PORT', value: String(BACKEND_PORT) },
+    { name: 'HAFLEET_MCP_SERVER_NAME', value: MCP_SERVER_NAME },
+    { name: 'HAFLEET_AGENT_STATE_DIR', value: STATE_DIR },
+  ],
+}] : [];
+
 const runtime = createAcpRuntime({ command: framework.launch.command, args: acpArgs });
 if (!(await runtime.isAvailable())) {
   process.stderr.write(`${framework.launch.command} is not available on PATH\n`);
   process.exit(1);
 }
 
+const cwd = path.resolve(workspace);
 let sessionId;
+let mcpAttached = false;
 try {
-  sessionId = await runtime.startSession(name, { cwd: path.resolve(workspace) });
+  sessionId = await runtime.startSession(name, { cwd, mcpServers });
+  mcpAttached = mcpServers.length > 0;
 } catch (error) {
-  process.stderr.write(`failed to open an ACP session: ${error.message}\n${error.data ? `${error.data}\n` : ''}`);
-  process.exit(1);
+  // octos 2.0.2's ACP v1 advertises no session capabilities, and its handling of
+  // mcpServers is unverified. Rather than lose a working agent to a rejected
+  // field, fall back to a plain session: delivery still works, the agent just
+  // cannot reply through MCP. Say so plainly instead of degrading silently.
+  if (mcpServers.length > 0) {
+    log(`session/new with mcpServers failed (${error.message}); retrying without — the agent will receive prompts but cannot reply via MCP`);
+    try {
+      sessionId = await runtime.startSession(name, { cwd });
+    } catch (retryError) {
+      process.stderr.write(`failed to open an ACP session: ${retryError.message}\n${retryError.data ? `${retryError.data}\n` : ''}`);
+      process.exit(1);
+    }
+  } else {
+    process.stderr.write(`failed to open an ACP session: ${error.message}\n${error.data ? `${error.data}\n` : ''}`);
+    process.exit(1);
+  }
 }
-log(`acp session open: ${sessionId} (${frameworkId}, cwd=${path.resolve(workspace)})`);
+log(`acp session open: ${sessionId} (${frameworkId}, cwd=${cwd}, mcp=${mcpAttached ? MCP_SERVER_NAME : 'none'})`);
 
 const shutdown = (signal) => {
   log(`received ${signal}, closing the acp session`);
@@ -66,6 +136,83 @@ const shutdown = (signal) => {
 };
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+// ── Delivery ──────────────────────────────────────────────────────────────────
+
+/** Render an inbox message the way the pane nudge would read to a tmux agent. */
+function formatMessage(msg) {
+  const from = msg.from || 'unknown';
+  const where = msg.group ? ` in group ${msg.group}` : '';
+  const body = msg.full || msg.summary || '';
+  const lines = [`Message ${msg.id} from ${from}${where}:`, '', body];
+  if (msg.type === 'human' || msg.type === 'request') {
+    lines.push('', `Reply when the work is done: ${MCP_SERVER_NAME} send_message(to="${from}", summary="...", full="...", reply_to="${msg.id}")`);
+  }
+  return lines.join('\n');
+}
+
+// One ACP turn at a time. session/prompt is a turn, not a queue, so overlapping
+// prompts would interleave; a long turn simply defers the next poll.
+let turnInFlight = false;
+let deliveredCount = 0;
+
+async function pollAndDeliver() {
+  if (!agentToken || turnInFlight) return;
+  let snapshot;
+  try {
+    snapshot = await api(`/api/inbox/${encodeURIComponent(name)}/unread`);
+  } catch (error) {
+    log(`inbox poll failed: ${error.message}`);
+    return;
+  }
+  const pending = Number(snapshot?.unread_total ?? snapshot?.total ?? 0);
+  if (!pending) return;
+
+  turnInFlight = true;
+  try {
+    // The unfiltered read is what advances the inbox cursor, so a message is
+    // marked seen exactly once even if the prompt below fails. Failing to
+    // re-deliver is better than re-prompting an agent forever on a poison message.
+    const inbox = await api(`/api/inbox/${encodeURIComponent(name)}`);
+    const messages = [...(inbox.dm || []), ...(inbox.group || [])];
+    if (!messages.length) return;
+    const text = messages.map(formatMessage).join('\n\n---\n\n');
+    log(`delivering ${messages.length} message(s): ${messages.map((m) => m.id).join(', ')}`);
+    const stopReason = await runtime.prompt(name, text);
+    deliveredCount += messages.length;
+    log(`turn finished (${stopReason}); delivered ${deliveredCount} message(s) so far`);
+
+    // Record what the agent said and which tools it used. Without this, a turn
+    // that ends in 'end_turn' having done nothing looks identical to one that did
+    // the work — the first live delivery reported success and had accomplished
+    // nothing visible. There is no pane to read back, so this log is the only
+    // place an operator can see it.
+    //
+    // agent_message_chunk is emitted per token, not per message: logging each one
+    // produced a column of word fragments ("cloud", "/", "oct", "os"). They have
+    // to be joined before they mean anything.
+    let said = '';
+    const tools = [];
+    for (const { update } of runtime.recentUpdates(name, 400)) {
+      const kind = update?.sessionUpdate;
+      if (kind === 'agent_message_chunk') {
+        said += update.content?.text || '';
+      } else if (kind === 'tool_call' || kind === 'tool_call_update') {
+        const label = update.title || update.kind || 'call';
+        const status = update.status ? ` [${update.status}]` : '';
+        const entry = `${label}${status}`;
+        if (tools.at(-1) !== entry) tools.push(entry);
+      }
+    }
+    if (tools.length) log(`  tools: ${tools.slice(0, 12).join(', ')}`);
+    const reply = said.replace(/\s+/g, ' ').trim();
+    if (reply) log(`  agent: ${reply.slice(0, 600)}${reply.length > 600 ? '…' : ''}`);
+  } catch (error) {
+    log(`delivery failed: ${error.message}${error.data ? ` — ${error.data}` : ''}`);
+  } finally {
+    turnInFlight = false;
+  }
+}
 
 // Hold the process open and notice if the agent dies underneath us: the backend
 // reads this pid, so exiting quietly would leave the fleet reporting a live
@@ -76,4 +223,5 @@ const interval = setInterval(async () => {
     clearInterval(interval);
     process.exit(1);
   }
+  await pollAndDeliver();
 }, 5000);

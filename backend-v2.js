@@ -7318,6 +7318,27 @@ export function buildMcpReplyActionHint(msg, replyTo = null) {
 
 async function pushNotify(agentName, msg, options = {}) {
   const agent = agents[agentName];
+  // An ACP agent has no pane, and its session is held by a separate host process
+  // (scripts/hafleet-acp-agent.mjs) that this process cannot reach into. So the
+  // backend does not push to it — the host pulls, by polling the same inbox
+  // endpoint check_inbox uses, and prompts the agent over session/prompt.
+  //
+  // Reporting this as 'missing-tmux-target' was wrong twice over: it read as a
+  // broken tmux agent, and pushNotifyStatus turned it into ok:false while
+  // POST /api/messages still answered {"ok":true,"warnings":[]}. A message to an
+  // ACP agent looked sent, was never delivered, and nothing said otherwise.
+  // 'acp-pull-pending' is terminal-but-fine: the backend's obligation ends here.
+  if (!agent?.tmux && agentTransport(agent) === 'acp') {
+    appendDeliveryEvent({
+      type: 'push.pull_pending',
+      source: 'backend',
+      messageId: msg?.id,
+      messageIds: msg?.id ? [msg.id] : [],
+      agent: agentName,
+      reason: 'acp-pull-pending',
+    });
+    return pushNotifyStatus({ terminal: true, reason: 'acp-pull-pending' });
+  }
   if (!agent?.tmux) {
     logPushNotifySkip(agentName, 'missing-tmux-target');
     appendDeliveryEvent({
