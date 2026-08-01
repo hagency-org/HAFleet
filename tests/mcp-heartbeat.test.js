@@ -53,7 +53,16 @@ async function stopChild(child) {
   });
 }
 
-async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 25, detail = 'condition' } = {}) {
+// 5s was too tight for the waits that span a real process lifecycle: spawn a
+// node MCP server, let it exit, and see its pid file removed. That is fine on an
+// idle machine and false-fails on a busy one — twice here, once at load average
+// 523, each time passing 4/4 when run alone.
+//
+// The assertion is that cleanup happens, not that it happens quickly, so the
+// timeout only exists to avoid hanging forever. A slow machine should make the
+// test slower, not wrong. vitest's own testTimeout still bounds the whole test,
+// and a genuine failure to clean up still fails — just later.
+async function waitFor(predicate, { timeoutMs = 30000, intervalMs = 25, detail = 'condition' } = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {

@@ -682,12 +682,34 @@ describe('server dashboard mutation boundary', () => {
     expect(detail.text).toContain('await taskListRefresh();');
   });
 
+
+/**
+ * Explain a non-200 from a dashboard page instead of just asserting the number.
+ *
+ * `GET /agents/alpha` returned 404 in one sequential run and passed 3/3 alone
+ * afterwards, so the cause was never captured. The page route is registered
+ * unconditionally at module scope, which means a 404 is Express saying no route
+ * matched — so the useful question is whether the route is there at all. Without
+ * this the next occurrence is another dead end.
+ */
+function describeRouting(mod, requestPath) {
+  const stack = mod?.app?._router?.stack ?? mod?.app?.router?.stack ?? [];
+  const routes = stack
+    .filter((layer) => layer?.route?.path)
+    .map((layer) => layer.route.path);
+  return [
+    `requested ${requestPath}`,
+    `routes registered: ${routes.length}`,
+    `page routes: ${routes.filter((r) => typeof r === 'string' && !r.startsWith('/api')).join(', ') || '(none)'}`,
+  ].join(' | ');
+}
+
   test('agent detail save refresh preserves newer dirty edits', async () => {
     const mod = await setup();
 
     const detail = await request(mod.app).get('/agents/alpha');
 
-    expect(detail.status).toBe(200);
+    expect(detail.status, describeRouting(mod, '/agents/alpha')).toBe(200);
     expect(detail.text).toContain('let detailEditVersion = 0;');
     expect(detail.text).toContain('function markDetailEdited()');
     expect(detail.text).toContain('el.addEventListener(evt, markDetailEdited);');
