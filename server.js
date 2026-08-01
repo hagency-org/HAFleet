@@ -1119,22 +1119,30 @@ app.get('/api/agents/status', async (_req, res) => {
     // Report them instead, with alive:false and the reason the backend recorded.
     const withoutPane = agentList
       .filter(a => !a.tmux)
-      .map(a => ({
-        name: a.name,
-        tmux: null,
-        idleMs: -1,
-        active: false,
-        activeNow: false,
-        activeDurationSec: 0,
-        idleDurationSec: 0,
-        lastTmuxActivitySec: 0,
-        alive: false,
-        remote: !isLocalAgentServer(a.server),
-        type: a.type || 'agent',
-        server: a.server || null,
-        environment: a.environment || 'live',
-        offlineReason: a.offlineReason || 'no-tmux-target',
-      }));
+      .map(a => {
+        // An ACP agent has no pane by design, so "no tmux target" is not a fault
+        // for it — its liveness is the backend's `online`, derived from whether
+        // the process is still there. Reporting it dead alongside genuinely
+        // missing tmux agents would hide every working ACP agent.
+        const acp = a.transport === 'acp';
+        return {
+          name: a.name,
+          tmux: null,
+          idleMs: -1,
+          active: false,
+          activeNow: false,
+          activeDurationSec: 0,
+          idleDurationSec: 0,
+          lastTmuxActivitySec: 0,
+          alive: acp ? a.online === true : false,
+          transport: a.transport || 'tmux',
+          remote: !isLocalAgentServer(a.server),
+          type: a.type || 'agent',
+          server: a.server || null,
+          environment: a.environment || 'live',
+          offlineReason: acp && a.online === true ? null : (a.offlineReason || 'no-tmux-target'),
+        };
+      });
     const result = agentList
       .filter(a => a.tmux)
       .map(a => {

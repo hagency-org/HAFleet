@@ -27,6 +27,7 @@ import { promisify } from 'util';
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTmuxRuntime } from './lib/runtime/tmux.js';
 import { sessionPolicyFromEnv } from './lib/session-policy.js';
+import { getFramework } from './lib/frameworks/index.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
 import { indexPool, agentRole, agentCapability, selectAgent, resolveTier, TIER_RUNTIME } from './lib/matrix-agent.js';
@@ -6205,6 +6206,39 @@ function pruneEphemeralAgents(names = [], reason = 'ephemeral-prune') {
   // Intentionally silent: ephemeral audit agent pruning is routine housekeeping.
 }
 
+
+/**
+ * How this agent is driven. Recorded on the record at registration; falls back to
+ * the framework registry, then to tmux, so records written before transports
+ * existed keep their behaviour.
+ */
+function agentTransport(agent) {
+  const declared = typeof agent?.transport === 'string' ? agent.transport.trim().toLowerCase() : '';
+  if (declared === 'acp' || declared === 'tmux') return declared;
+  return getFramework(agent?.type)?.transport === 'acp' ? 'acp' : 'tmux';
+}
+
+/**
+ * Liveness for a paneless ACP agent: is the process recorded at launch alive?
+ * There is no pane hash to compare and no heartbeat from a relay, because the
+ * relay enumerates tmux sessions and this agent has none.
+ */
+function syncAcpAgentLiveness(agent, runtime) {
+  const pid = Number(agent.acpPid) || 0;
+  let alive = false;
+  if (pid > 1) {
+    try { process.kill(pid, 0); alive = true; } catch { alive = false; }
+  }
+  let changed = false;
+  if (agent.tmux !== null) { agent.tmux = null; changed = true; }
+  if (agent.online !== alive) { agent.online = alive; changed = true; }
+  const reason = alive ? null : 'acp-process-gone';
+  if (agent.offlineReason !== reason) { agent.offlineReason = reason; changed = true; }
+  if (changed) agent.lastSeen = Date.now();
+  if (runtime && runtime.mcpPresent === undefined) runtime.mcpPresent = null;
+  return changed;
+}
+
 async function sweepLocalActivityDurations(paneMetadataSnapshotOverride = null) {
   const nowSec = Math.floor(Date.now() / 1000);
   const nowMs = Date.now();
@@ -6233,9 +6267,21 @@ async function sweepLocalActivityDurations(paneMetadataSnapshotOverride = null) 
 
     const manualDown = agent.manualDown === true;
     const configuredTmux = (typeof agent.tmux === 'string' && agent.tmux.trim()) ? agent.tmux.trim() : null;
-    const tmuxTarget = configuredTmux || (manualDown ? null : `${agent.name}:0.0`);
+    // An ACP agent is a subprocess, not a tmux session: there is no pane to
+    // probe, capture or type into. Deriving a pane target for it would mark it
+    // tmux-missing on the first sweep and keep it offline forever, which is
+    // exactly what "agent equals tmux session" costs once that stops being true.
+    const transport = agentTransport(agent);
+    const tmuxTarget = transport === 'acp'
+      ? null
+      : (configuredTmux || (manualDown ? null : `${agent.name}:0.0`));
     const runtime = ensureAgentRuntimeRecord(agent.name);
     if (!runtime) continue;
+    if (transport === 'acp') {
+      // Liveness for these comes from the process itself, recorded at launch.
+      if (syncAcpAgentLiveness(agent, runtime)) agentsChanged = true;
+      continue;
+    }
     localRows.push({
       agent,
       runtime,
@@ -8084,6 +8130,15 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     identity: identity ?? existing.identity ?? null,
     tmux: resolvedTmux,
     type: presetFramework ?? agentType ?? existing.type ?? 'agent',
+    // Recorded so the sweep does not have to re-derive it, and so a record stays
+    // correct even if the registry later changes.
+    transport: (() => {
+      const fromBody = typeof req.body?.transport === 'string' ? req.body.transport.trim().toLowerCase() : '';
+      if (fromBody === 'acp' || fromBody === 'tmux') return fromBody;
+      if (existing.transport) return existing.transport;
+      return getFramework(presetFramework ?? agentType ?? existing.type)?.transport === 'acp' ? 'acp' : 'tmux';
+    })(),
+    acpPid: Number(req.body?.acpPid) > 1 ? Number(req.body.acpPid) : (existing.acpPid ?? null),
     kind: 'agent',
     server: resolvedServer,
     online: resolvedOnline,

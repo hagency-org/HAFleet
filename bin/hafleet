@@ -87,6 +87,7 @@ case "$cmd" in
   prune-agents) dispatch "hafleet-prune-agents" "$@" ;;
   sync-skills) dispatch "hafleet-sync-skills" "$@" ;;
   reminder|self-time-reminder) dispatch "self-time-reminder" "$@" ;;
+  acp-up) dispatch "hafleet-acp-up" "$@" ;;
   tell) dispatch "hafleet-cli" tell "$@" ;;
   cli|admin) dispatch "hafleet-cli" "$@" ;;
   check-mcp) dispatch "check-mcp" "$@" ;;

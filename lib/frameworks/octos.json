@@ -4,10 +4,12 @@
   "upstream": "https://github.com/octos-org/octos",
   "transport": "acp",
   "launchable": false,
-  "notLaunchableReason": "bin/hafleet-up creates a tmux session; an ACP agent is a paneless subprocess, so the backend and relay must learn a second agent shape before it can be started that way",
+  "notLaunchableReason": "hafleet-up creates a tmux session and an ACP agent has no pane; start it with `hafleet acp-up <name> <workspace> octos` instead",
   "launch": {
     "command": "octos",
-    "acpArgs": ["acp"],
+    "acpArgs": [
+      "acp"
+    ],
     "defaultArgs": [],
     "modelFlag": "--model",
     "permissionSummary": "octos sandbox as configured (hafleet never passes --danger-full-access)"
@@ -15,8 +17,13 @@
   "guards": {
     "flags": {
       "comment": "octos treats full access as a per-run opt-in it refuses to even persist — config_layer.rs: 'full access is a per-run opt-in, not a saved default that would silently disable the sandbox'. A hafleet-launched agent runs detached, takes instructions from the message API, and has nobody watching, so it must not be able to widen its own sandbox.",
-      "exact": ["--danger-full-access", "--yolo"],
-      "prefix": ["--sandbox="],
+      "exact": [
+        "--danger-full-access",
+        "--yolo"
+      ],
+      "prefix": [
+        "--sandbox="
+      ],
       "message": "Octos sandbox flag is managed by hafleet: {token}"
     }
   },
