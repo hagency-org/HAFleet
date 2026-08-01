@@ -36,7 +36,13 @@ async function pidMatchesService(pid, service) {
       encoding: 'utf8',
       timeout: Math.min(service.health.timeoutMs, 1000),
     });
-    return command.includes(service.command[1]);
+    if (!command.includes(service.command[1])) return false;
+    // Every supervised ACP agent runs the same script, so the script path alone
+    // cannot tell two of them apart — each would happily match the other's
+    // process and report itself healthy while its own child was dead. Anything
+    // sharing a script must also match its distinguishing arguments.
+    const discriminators = service.command.slice(2);
+    return discriminators.every((argument) => command.includes(argument));
   } catch {
     return false;
   }
@@ -161,6 +167,8 @@ function emptyRecord(name) {
     processStartIdentity: null,
     desired: 'stopped',
     restarts: 0,
+    restartStreak: 0,
+    nextRestartDelayMs: 0,
     startedAt: null,
     startedAtMs: 0,
     lastExit: null,
@@ -187,6 +195,8 @@ async function buildStatus(profile, records, env, { supervisorHealthy = true, ru
       healthy: own.healthy && !dependency,
       reason: dependency ? `dependency ${dependency} is not healthy` : own.reason,
       restarts: Number.isInteger(record.restarts) ? record.restarts : 0,
+      restartStreak: Number.isInteger(record.restartStreak) ? record.restartStreak : 0,
+      nextRestartDelayMs: Number.isInteger(record.nextRestartDelayMs) ? record.nextRestartDelayMs : 0,
       startedAt: record.startedAt || null,
       lastExit: record.lastExit || null,
     };
@@ -262,6 +272,17 @@ export class LocalServiceSupervisor {
     runtimeRoot,
     env = process.env,
     restartDelayMs = 500,
+    // A service that cannot start was restarted every 500ms forever. That is how
+    // the Matrix bridge "crash-looped and took the profile's health with it" (see
+    // src/service-profile.mjs). Backing off gives a broken service room to look
+    // broken instead of drowning the host, and matters more as supervised things
+    // multiply: an agent fails for ordinary reasons a core service does not —
+    // a model name its API rejects, a missing binary, expired credentials.
+    maxRestartDelayMs = 60000,
+    // Once a service has stayed up this long, treat it as recovered and start the
+    // backoff from scratch. Without this a service that restarts rarely but for
+    // years would eventually inherit the maximum delay from history.
+    restartBackoffResetMs = 120000,
     dependencyTimeoutMs = 15000,
   }) {
     this.profile = profile;
@@ -269,6 +290,8 @@ export class LocalServiceSupervisor {
     this.runtimeRoot = path.resolve(runtimeRoot);
     this.env = { ...env };
     this.restartDelayMs = Math.max(10, Number(restartDelayMs) || 500);
+    this.maxRestartDelayMs = Math.max(this.restartDelayMs, Number(maxRestartDelayMs) || 60000);
+    this.restartBackoffResetMs = Math.max(1000, Number(restartBackoffResetMs) || 120000);
     this.dependencyTimeoutMs = Math.max(100, Number(dependencyTimeoutMs) || 15000);
     this.running = false;
     this.token = randomUUID();
@@ -379,6 +402,18 @@ export class LocalServiceSupervisor {
       record.pid = null;
       record.processStartIdentity = null;
       record.lastExit = { code, signal, at: new Date().toISOString() };
+
+      // Exponential backoff, so a service that cannot start stops hammering the
+      // host. `restarts` stays a lifetime count for reporting; the streak is what
+      // drives the delay, and a service that stayed up past restartBackoffResetMs
+      // is treated as recovered rather than carrying its history forward.
+      const upForMs = record.startedAtMs ? Date.now() - record.startedAtMs : 0;
+      if (upForMs >= this.restartBackoffResetMs) record.restartStreak = 0;
+      const streak = Number.isInteger(record.restartStreak) ? record.restartStreak : 0;
+      const delay = Math.min(this.restartDelayMs * (2 ** streak), this.maxRestartDelayMs);
+      record.restartStreak = streak + 1;
+      record.nextRestartDelayMs = delay;
+
       this._writeState();
       if (!this.running || record.desired !== 'running') return;
       record.restartTimer = setTimeout(() => {
@@ -386,7 +421,7 @@ export class LocalServiceSupervisor {
         if (!this.running || record.desired !== 'running') return;
         record.restarts += 1;
         this._spawnService(service);
-      }, this.restartDelayMs);
+      }, delay);
     });
     this._writeState();
   }
