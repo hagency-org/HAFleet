@@ -16,7 +16,7 @@
   },
   "guards": {
     "flags": {
-      "comment": "octos treats full access as a per-run opt-in it refuses to even persist — config_layer.rs: 'full access is a per-run opt-in, not a saved default that would silently disable the sandbox'. A hafleet-launched agent runs detached, takes instructions from the message API, and has nobody watching, so it must not be able to widen its own sandbox.",
+      "comment": "octos treats full access as a per-run opt-in it refuses to even persist \u2014 config_layer.rs: 'full access is a per-run opt-in, not a saved default that would silently disable the sandbox'. A hafleet-launched agent runs detached, takes instructions from the message API, and has nobody watching, so it must not be able to widen its own sandbox.",
       "exact": [
         "--danger-full-access",
         "--yolo"
@@ -39,6 +39,8 @@
     "loadSession": false,
     "sessionCapabilities": {},
     "blocksOnPermissionRequest": false,
-    "blocksOnPermissionRequestNote": "octos surfaces tool calls as ACP tool_call records but does not block on session/request_permission in v1, so hafleet can observe permission activity and cannot answer it. The sandbox chosen at launch remains the real control."
+    "blocksOnPermissionRequestNote": "octos surfaces tool calls as ACP tool_call records but does not block on session/request_permission in v1, so hafleet can observe permission activity and cannot answer it. The sandbox chosen at launch remains the real control.",
+    "honorsMcpServers": false,
+    "mcpServersNote": "octos 2.0.2 accepts the mcpServers field on session/new and silently ignores it: verified on mini5 where claude and codex each spawn an mcp-server.js child and octos spawns none. `octos mcp` only does OAuth login for remote servers and its config.json has no MCP section, so there is no way to hand it local tools. The ACP host therefore posts the agent's replies on its behalf."
   }
 }

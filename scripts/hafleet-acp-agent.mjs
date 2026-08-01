@@ -20,6 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { buildSummary } from '../lib/message-summary.js';
 import { createAcpRuntime } from '../lib/runtime/acp.js';
 import { getFramework } from '../lib/frameworks/index.js';
 
@@ -68,13 +69,45 @@ try {
   log(`WARNING: no agent token at ${STATE_DIR}/agent-token — inbox polling disabled`);
 }
 
-async function api(pathname, { method = 'GET' } = {}) {
+async function api(pathname, { method = 'GET', body = null } = {}) {
   const response = await fetch(`${API}${pathname}`, {
     method,
-    headers: { 'X-Agent-Token': agentToken, Authorization: `Bearer ${agentToken}` },
+    headers: {
+      'X-Agent-Token': agentToken,
+      Authorization: `Bearer ${agentToken}`,
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
   });
   if (!response.ok) throw new Error(`${method} ${pathname} -> ${response.status}`);
   return response.json();
+}
+
+/**
+ * Post the agent's answer back into HAFleet, as the agent.
+ *
+ * A tmux agent replies itself, by calling the hafleet MCP tool send_message. An
+ * ACP agent cannot: octos 2.0.2 accepts the mcpServers field on session/new and
+ * silently ignores it — verified on mini5, where claude and codex each spawned an
+ * mcp-server.js child and octos spawned none. Its `octos mcp` subcommand only does
+ * OAuth login for remote servers, and its config.json has no MCP section at all.
+ * There is no way to hand it the tools.
+ *
+ * So the host speaks for it. That is a real difference in kind and worth naming:
+ * a tmux agent decides when it has something to say, whereas this posts the result
+ * of every turn that produced text. It is a relay, not agency.
+ */
+async function postReply({ to, replyTo, text }) {
+  const body = text.trim();
+  if (!body) return;
+  // Same rule as `hafleet tell`, shared rather than reimplemented: the summary is
+  // what a reader sees, so cutting it mid-word turns a reply into a wrong reply.
+  const summary = buildSummary(body);
+  await api('/api/messages', {
+    method: 'POST',
+    body: { from: name, to, type: 'inform', summary, full: body, reply_to: replyTo },
+  });
+  log(`  replied to ${to} (reply_to=${replyTo})`);
 }
 
 /**
@@ -127,7 +160,11 @@ try {
     process.exit(1);
   }
 }
-log(`acp session open: ${sessionId} (${frameworkId}, cwd=${cwd}, mcp=${mcpAttached ? MCP_SERVER_NAME : 'none'})`);
+// "requested", not "attached": session/new accepting the field does not mean the
+// agent honoured it. octos 2.0.2 accepts mcpServers and silently ignores it —
+// claude and codex each spawn an mcp-server.js child, octos spawns none. Saying
+// mcp=hafleet here read as a working tool channel that did not exist.
+log(`acp session open: ${sessionId} (${frameworkId}, cwd=${cwd}, mcp-requested=${mcpAttached ? MCP_SERVER_NAME : 'none'})`);
 
 const shutdown = (signal) => {
   log(`received ${signal}, closing the acp session`);
@@ -207,6 +244,19 @@ async function pollAndDeliver() {
     if (tools.length) log(`  tools: ${tools.slice(0, 12).join(', ')}`);
     const reply = said.replace(/\s+/g, ' ').trim();
     if (reply) log(`  agent: ${reply.slice(0, 600)}${reply.length > 600 ? '…' : ''}`);
+
+    // Send the answer back to whoever asked. Reply to the last message in the
+    // batch: they were delivered as one prompt, so the turn answers all of them,
+    // and threading it under the most recent is the closest honest attribution.
+    const trigger = messages.at(-1);
+    if (reply && trigger?.from && trigger.from !== name) {
+      try {
+        await postReply({ to: trigger.from, replyTo: trigger.id, text: said });
+      } catch (error) {
+        // A failed reply must not look like a failed turn: the work was done.
+        log(`  reply failed: ${error.message}`);
+      }
+    }
   } catch (error) {
     log(`delivery failed: ${error.message}${error.data ? ` — ${error.data}` : ''}`);
   } finally {
