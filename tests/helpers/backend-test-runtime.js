@@ -126,6 +126,31 @@ export async function createBackendTestContext(prefix, seed = {}) {
       };
     },
     cleanup() {
+      // Stop the module's background loops before the runtime dir is deleted
+      // underneath them.
+      //
+      // Each context imports backend-v2.js under a unique ?test= URL to get a
+      // fresh instance. A unique URL is a permanent ESM registry entry, so every
+      // context in a run stays resident, and until now nothing stopped the sweep
+      // and heartbeat intervals those instances started. stopServer() already
+      // exists and does exactly that (stopBackgroundLoops -> clearLifecycleHandles,
+      // endSseClients); the helper simply never called it.
+      //
+      // Scope of what this fixes, honestly: it stops the loop leak. It did NOT
+      // change the intermittent failures — measured before and after on the same
+      // machine, the counts were unchanged. Those remain unexplained; see
+      // docs/TESTING.md. Do not cite this as their fix.
+      //
+      // The sync work happens before stopServer()'s first await, and it returns
+      // early when no server was started — the case here, since tests drive `app`
+      // through supertest. So the timers are gone once this returns, nothing to await.
+      try {
+        const stopping = backendModule?.stopServer?.();
+        if (stopping && typeof stopping.catch === 'function') stopping.catch(() => {});
+      } catch {
+        // A context that failed mid-import may have no stopServer; nothing to stop.
+      }
+
       for (const server of servers) {
         try {
           server.close();
