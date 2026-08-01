@@ -7041,6 +7041,11 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
   for (const agent of Object.values(agents)) {
     if (normalizeServer(agent.server) !== serverId) continue;
     if (liveSet.has(agent.name)) continue;
+    // The relay builds this list by enumerating tmux sessions, so a paneless ACP
+    // agent is never in it. Treating that absence as heartbeat-missing marked
+    // every ACP agent offline within one beat, undoing what the sweep had just
+    // concluded from its live process. The sweep owns liveness for these.
+    if (agentTransport(agent) === 'acp') continue;
     const wasOnline = agent.online === true;
     const wasManualDown = agent.manualDown === true;
     const reason = `heartbeat-missing:${serverId}`;
