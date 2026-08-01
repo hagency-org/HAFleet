@@ -458,7 +458,14 @@ describe('supported runtime approval adapters', () => {
         expect(preflightCall).toBeGreaterThan(-1);
         expect(createCall).toBeGreaterThan(preflightCall);
         expect(source).toContain('managed-runtime.pid');
-        expect(source.match(/tmux send-keys[^\\n]+\"exec /g)).toHaveLength(4);
+        // One per framework per resume/fresh path. bin/hafleet-up carries three
+        // frameworks (claude, codex, hermes) so six; remote/bin/hafleet-up is a
+        // separately maintained file — MANAGED_SPECS sources it directly rather
+        // than copying from bin/hafleet-up — and still has only claude and codex.
+        // KNOWN GAP, pinned here so the divergence stays visible and adding a
+        // framework still forces the new launch sites to be reviewed.
+        const launchSites = source.match(/tmux send-keys[^\\n]+\"exec /g);
+        expect(launchSites, file).toHaveLength(file.startsWith('remote/') ? 4 : 6);
         expect(source).not.toContain('dangerously-bypass-hook-trust');
         expect(source).not.toContain('timeout = 330');
       }

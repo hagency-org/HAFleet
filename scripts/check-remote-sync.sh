@@ -83,7 +83,7 @@ check_profile_specific_file() {
   echo "[OK] Profile-specific remote file: remote/$rel ($reason)"
 }
 
-check_agentchat_dispatch_targets() {
+check_hafleet_dispatch_targets() {
   local file="$1"
   local label="$2"
   local bin_dir target target_path targets
@@ -171,8 +171,8 @@ for spec in "${PROFILE_SPECIFIC_FILES[@]}"; do
 done
 
 echo "Checking hafleet dispatch targets..."
-check_agentchat_dispatch_targets "bin/hafleet" "root"
-check_agentchat_dispatch_targets "remote/bin/hafleet" "remote"
+check_hafleet_dispatch_targets "bin/hafleet" "root"
+check_hafleet_dispatch_targets "remote/bin/hafleet" "remote"
 
 echo "Checking wrapper contracts..."
 check_wrapper_contract "push-relay.js" "root" "push-relay-core.js"
