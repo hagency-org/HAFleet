@@ -51,14 +51,23 @@ describe('the permission hook allowlist matches the MCP server it will actually 
     // fix anything. An earlier pass of the rename did exactly that to some
     // upstream provenance strings and had to be reverted.
     const tracked = execFileSync('git', ['ls-files'], { encoding: 'utf-8' }).split('\n').filter(Boolean);
+    // This file necessarily contains the string it searches for, so it must skip
+    // itself. It passed while the file was untracked and git ls-files could not
+    // see it; committing made it visible to its own scan and it failed on the
+    // first CI run and on mini5.
+    const SELF = 'tests/mcp-namespace-drift.test.js';
     const offenders = [];
     for (const file of tracked) {
+      if (file === SELF) continue;
       if (!/\.(js|mjs|cjs|json|sh)$/.test(file)) continue;
       let text;
       try { text = readFileSync(file, 'utf-8'); } catch { continue; }
       if (text.includes('mcp__agent_chat__')) offenders.push(file);
     }
     expect(offenders).toEqual([]);
+    // Guard the guard: if this file is ever renamed, SELF goes stale and the
+    // exclusion silently stops applying to it while still hiding nothing else.
+    expect(tracked, `${SELF} is not tracked — update SELF`).toContain(SELF);
   });
 
   test.each(['check_inbox', 'whoami', 'list_tasks', 'accept_task'])(
