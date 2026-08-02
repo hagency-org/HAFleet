@@ -15,7 +15,7 @@
  * polling the same inbox endpoint check_inbox uses and prompting the agent over
  * session/prompt.
  */
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -118,11 +118,44 @@ if (!(await runtime.isAvailable())) {
   process.exit(1);
 }
 
+// Where the ACP session id is remembered between runs.
+//
+// Without this the host called session/new on every start, so even an agent that
+// can restore a conversation was handed a blank one — the supervisor would bring
+// an agent back promptly and it would have forgotten what it was doing. Kept
+// beside the agent token in the state dir, which already survives restarts and is
+// mode 0700.
+const SESSION_ID_FILE = path.join(STATE_DIR, 'acp-session-id');
+
+function rememberSessionId(id) {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(SESSION_ID_FILE, `${id}\n`, { mode: 0o600 });
+  } catch (error) {
+    // Not fatal: the session works, it just will not be resumable next time.
+    log(`could not remember the session id (${error.message}); the next start will begin fresh`);
+  }
+}
+
+function recallSessionId() {
+  try {
+    if (!existsSync(SESSION_ID_FILE)) return null;
+    const id = readFileSync(SESSION_ID_FILE, 'utf8').trim();
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
 const cwd = path.resolve(workspace);
 let sessionId;
 let mcpAttached = false;
 try {
-  sessionId = await runtime.startSession(name, { cwd, mcpServers });
+  sessionId = await runtime.startSession(name, {
+    cwd,
+    mcpServers,
+    resumeSessionId: recallSessionId(),
+  });
   mcpAttached = mcpServers.length > 0;
 } catch (error) {
   // octos 2.0.2's ACP v1 advertises no session capabilities, and its handling of
@@ -146,7 +179,19 @@ try {
 // agent honoured it. octos 2.0.2 accepts mcpServers and silently ignores it —
 // claude and codex each spawn an mcp-server.js child, octos spawns none. Saying
 // mcp=hafleet here read as a working tool channel that did not exist.
-log(`acp session open: ${sessionId} (${frameworkId}, cwd=${cwd}, mcp-requested=${mcpAttached ? MCP_SERVER_NAME : 'none'})`);
+const origin = runtime.sessionOrigin(name);
+rememberSessionId(sessionId);
+// Say which happened. A resumed session and a fresh one look identical from the
+// outside, and "the agent forgot everything" is exactly the failure this is meant
+// to prevent — so it must not be silent when it still occurs.
+if (origin.resumed) {
+  log(`acp session RESUMED: ${sessionId} (${frameworkId}, cwd=${cwd}, mcp-requested=${mcpAttached ? MCP_SERVER_NAME : 'none'})`);
+} else {
+  const why = origin.loadError
+    ? ` (could not resume: ${origin.loadError})`
+    : (origin.canLoad ? ' (no stored session to resume)' : ' (agent cannot resume sessions)');
+  log(`acp session open: ${sessionId} (${frameworkId}, cwd=${cwd}, mcp-requested=${mcpAttached ? MCP_SERVER_NAME : 'none'})${why}`);
+}
 
 // Register with the backend from here, because this is the process that knows its
 // own pid.

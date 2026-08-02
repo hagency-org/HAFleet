@@ -284,3 +284,88 @@ describe('one turn\'s updates can be read without the previous turn\'s', () => {
       .not.toContain('recentUpdates(name, 400)');
   });
 });
+
+describe('resuming a session across a restart', () => {
+  // The host called session/new on every start, so even an agent that can restore
+  // a conversation was handed a blank one. The supervisor would bring an agent
+  // back promptly and it would have forgotten what it was doing — which looks
+  // healthy from the outside and is worse than staying down.
+
+  /** A fake agent that advertises loadSession and accepts session/load. */
+  function resumableAgent({ loadFails = false, canLoad = true } = {}) {
+    const child = new EventEmitter();
+    child.pid = 5150;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    const sent = [];
+    child.stdin = {
+      write(line) {
+        const msg = JSON.parse(line);
+        sent.push(msg);
+        queueMicrotask(() => {
+          if (msg.method === 'initialize') {
+            reply({ id: msg.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: canLoad } } });
+          } else if (msg.method === 'session/load') {
+            if (loadFails) reply({ id: msg.id, error: { message: 'unknown session' } });
+            else reply({ id: msg.id, result: {} });
+          } else if (msg.method === 'session/new') {
+            reply({ id: msg.id, result: { sessionId: 'fresh-session' } });
+          }
+        });
+        return true;
+      },
+    };
+    const reply = (o) => child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', ...o })}\n`));
+    return { child, sent };
+  }
+  const withAgent = (opts) => {
+    const agent = resumableAgent(opts);
+    return { rt: createAcpRuntime({ command: 'octos', spawnFn: () => agent.child }), agent };
+  };
+
+  test('a stored id is resumed rather than replaced', async () => {
+    const { rt, agent } = withAgent();
+    const id = await rt.startSession('a', { cwd: '/tmp/ws', resumeSessionId: 'prior-session' });
+    expect(id).toBe('prior-session');
+    expect(agent.sent.map((m) => m.method)).toEqual(['initialize', 'session/load']);
+    expect(rt.sessionOrigin('a').resumed).toBe(true);
+  });
+
+  test('no stored id means a fresh session, and load is never called', async () => {
+    const { rt, agent } = withAgent();
+    expect(await rt.startSession('b', { cwd: '/tmp/ws' })).toBe('fresh-session');
+    expect(agent.sent.map((m) => m.method)).toEqual(['initialize', 'session/new']);
+  });
+
+  test('an agent that cannot resume is not asked to', async () => {
+    // Calling session/load on an agent that does not advertise it earns a
+    // method_not_found and loses the session. octos reported loadSession:false
+    // until it gained a real implementation.
+    const { rt, agent } = withAgent({ canLoad: false });
+    expect(await rt.startSession('c', { cwd: '/tmp/ws', resumeSessionId: 'prior' })).toBe('fresh-session');
+    expect(agent.sent.map((m) => m.method)).not.toContain('session/load');
+    expect(rt.sessionOrigin('c').loadError).toMatch(/does not advertise/);
+  });
+
+  test('a stale id falls back to a fresh session instead of failing to start', async () => {
+    // Expected after the store is cleared or the agent reinstalled. An agent that
+    // starts blank beats one that will not start.
+    const { rt, agent } = withAgent({ loadFails: true });
+    expect(await rt.startSession('d', { cwd: '/tmp/ws', resumeSessionId: 'gone' })).toBe('fresh-session');
+    expect(agent.sent.map((m) => m.method)).toEqual(['initialize', 'session/load', 'session/new']);
+    const origin = rt.sessionOrigin('d');
+    expect(origin.resumed).toBe(false);
+    expect(origin.loadError).toMatch(/unknown session/);
+  });
+
+  test('the host remembers the id and says which path it took', () => {
+    const host = readFileSync('scripts/hafleet-acp-agent.mjs', 'utf-8');
+    expect(host).toContain('acp-session-id');
+    expect(host).toContain('rememberSessionId(sessionId)');
+    expect(host).toMatch(/resumeSessionId: recallSessionId\(\)/);
+    // A resumed session and a fresh one look identical from outside; the failure
+    // being prevented is precisely a silent one.
+    expect(host).toContain('acp session RESUMED');
+  });
+});
