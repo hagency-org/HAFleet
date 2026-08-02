@@ -1,4 +1,5 @@
 import express from 'express';
+import { buildReplyHint } from './lib/reply-hint.js';
 import {
   appendFileSync,
   chmodSync,
@@ -7325,13 +7326,10 @@ async function notifyAgentCatchup(agentName, reason = 'online') {
 }
 
 export function buildMcpReplyActionHint(msg, replyTo = null) {
-  if (!msg || (msg.type !== 'human' && msg.type !== 'request')) return null;
-  if (msg.group) {
-    return `Reply after ALL WORK is done, using the hafleet MCP tool: post(group="${msg.group}", summary="your reply", full="detailed reply", reply_to="${msg.id}")`;
-  }
-  const target = normalizeOptionalText(replyTo || msg.from, 255);
-  if (!target) return null;
-  return `Reply after ALL WORK is done, using the hafleet MCP tool: send_message(to="${target}", summary="your reply", full="detailed reply", reply_to="${msg.id}")`;
+  // Delegates to lib/reply-hint.js so the ACP host applies the same rule. It did
+  // not: it told its agent to reply unconditionally, so one `hafleet tell` task
+  // produced silence from claude and codex and a message from octos.
+  return buildReplyHint(msg, replyTo);
 }
 
 async function pushNotify(agentName, msg, options = {}) {
