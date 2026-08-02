@@ -20,7 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { OUTBOX_PROTOCOL, validateOutboxRequest } from '../lib/acp-outbox.js';
+import { validateOutboxRequest } from '../lib/acp-outbox.js';
 import { buildSummary } from '../lib/message-summary.js';
 import { createAcpRuntime } from '../lib/runtime/acp.js';
 import { getFramework } from '../lib/frameworks/index.js';
@@ -334,8 +334,15 @@ function buildNudge(pending, snapshot) {
     '',
     `FIRST ACTION: call check_inbox() now. Use check_inbox() in ${MCP_SERVER_NAME} MCP for full context before acting.`,
     `Reply with ${MCP_SERVER_NAME} send_message(to="<sender>", summary="...", full="...", reply_to="<id>") when the work is done.`,
-    '',
-    OUTBOX_PROTOCOL,
+    // The workspace outbox is deliberately NOT advertised here.
+    //
+    // It exists because octos once had no way to reach HAFleet at all, and it is
+    // still drained on every poll as a fallback for an agent whose MCP tools are
+    // unavailable. But advertising it alongside send_message tells the agent two
+    // ways to do one thing, and it reasonably used both: msg_0063 and msg_0064,
+    // same reply_to, both "Pacific", one from send_message and one from a dropped
+    // outbox file. That is the same duplicate-reply bug just removed from the host
+    // side, reintroduced one layer up by the prompt.
   ].join('\n');
 }
 
