@@ -212,6 +212,57 @@ const shutdown = (signal) => {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
+// ── Activity ──────────────────────────────────────────────────────────────────
+//
+// A tmux agent's activity is inferred by hashing its pane each sweep: changed
+// pixels mean it did something. An ACP agent has no pane, so the sweep's ACP
+// branch does liveness only and the activity fields stay null — the dashboard
+// showed idleMs=-1 and lastTmuxActivitySec=0 while claude and codex had real
+// numbers. A hung octos and a healthy idle octos looked identical to the fleet.
+//
+// The signal already existed and was simply never wired up: the runtime counts
+// every session/update notification it receives. Reporting that is strictly
+// better than a pane hash, because a hash also fires on a spinner, a clock or a
+// redraw, whereas an update means the agent actually emitted a token, a tool call
+// or a status change. A wedged ACP agent stops emitting; a wedged TUI can keep
+// animating forever.
+//
+// lastTmuxActivitySec is a tmux-flavoured name for a transport-neutral idea. It is
+// what the dashboard already reads, so it is reused rather than adding a parallel
+// field the UI would have to learn.
+let lastUpdateCount = 0;
+let lastActivityMs = Date.now();
+
+async function reportActivity() {
+  if (!agentToken) return;
+  const seen = runtime.updateCursor(name);
+  if (seen > lastUpdateCount) {
+    lastUpdateCount = seen;
+    lastActivityMs = Date.now();
+  }
+  try {
+    await api(`/api/agents/${encodeURIComponent(name)}/runtime`, {
+      method: 'POST',
+      body: {
+        // Declared so the backend never conjures a tmux target for this agent if
+        // its record has gone missing.
+        transport: 'acp',
+        activeNow: turnInFlight,
+        idleDurationSec: Math.max(0, Math.floor((Date.now() - lastActivityMs) / 1000)),
+        lastTmuxActivitySec: Math.floor(lastActivityMs / 1000),
+        command: framework.launch.command,
+        // This host cannot see whether the agent is waiting on anything: octos
+        // surfaces tool calls but does not block on ACP permission requests. Say
+        // "not observed" rather than asserting it is unblocked.
+        blockedObserved: false,
+      },
+    });
+  } catch (error) {
+    // Reporting is telemetry. A backend blip must not disturb a working session.
+    log(`activity report failed: ${error.message}`);
+  }
+}
+
 // ── Delivery ──────────────────────────────────────────────────────────────────
 
 // ── Outbox ────────────────────────────────────────────────────────────────────
@@ -310,7 +361,11 @@ let turnInFlight = false;
 let deliveredCount = 0;
 
 async function pollAndDeliver() {
-  if (!agentToken || turnInFlight) return;
+  if (!agentToken) return;
+  // Before the early return: an agent mid-turn is exactly when the fleet most
+  // needs to see it is alive.
+  await reportActivity();
+  if (turnInFlight) return;
   // Before the inbox: the agent may have written something during the last turn,
   // and it should go out even if nobody is messaging it.
   await drainOutbox();

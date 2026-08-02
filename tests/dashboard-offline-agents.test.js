@@ -35,8 +35,20 @@ describe('/api/agents/status reports offline agents instead of hiding them', () 
     const block = handler.slice(handler.indexOf('withoutPane'), handler.indexOf('const result'));
     expect(block).toContain("a.transport === 'acp'");
     expect(block).toMatch(/alive: acp \? a\.online === true : false/);
-    expect(block).toContain('active: false');
-    expect(block).toContain('idleMs: -1');
+
+    // Activity is no longer a constant either. An ACP agent reports its own, and
+    // a paneless non-ACP agent still has none — so every activity field must be
+    // gated on `acp` rather than hardcoded. Asserting the literal `active: false`
+    // pinned an implementation detail and broke the moment ACP agents gained a
+    // real signal, while the behaviour it cared about was unchanged.
+    expect(block).toMatch(/const reportedActiveNow = acp &&/);
+    expect(block).toMatch(/idleMs: acpIdleMs/);
+    expect(block).toMatch(/acpIdleMs = acp && reportedActivitySec > 0/);
+    // The non-ACP paneless case must still fall through to "no signal".
+    expect(block).toMatch(/: -1;/);
+    for (const field of ['activeDurationSec', 'idleDurationSec', 'lastTmuxActivitySec']) {
+      expect(block, `${field} must be gated on acp`).toMatch(new RegExp(`${field}: acp `));
+    }
   });
 
   test('they carry the reason the backend recorded', () => {
