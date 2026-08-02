@@ -5152,6 +5152,14 @@ function setRuntimeActivityFields(runtime, payload = {}) {
       changed = true;
     }
   }
+  // NAME IS HISTORICAL. This means "when the agent last did something", for any
+  // transport. An ACP agent has no tmux and still reports it, derived from
+  // session/update counts rather than a pane hash.
+  //
+  // Not renamed because it is a relay wire field (lib/push-relay-core.js and its
+  // remote/ twin) and is persisted in agent_runtime.json, so a rename needs a
+  // dual-read compatibility window and a migration — disproportionate to the
+  // confusion it causes. If it is renamed, do it as its own change.
   if (payload.lastTmuxActivitySec !== undefined) {
     const v = Number.parseInt(payload.lastTmuxActivitySec, 10);
     const normalized = Number.isFinite(v) && v > 0 ? v : null;
@@ -5465,13 +5473,17 @@ function applyRuntimeObservation(agentName, payload = {}) {
     const wasManualDown = agent.manualDown === true;
 
     if (mcpNow === false && !wasManualDown) {
-      if (!agent.tmux || !String(agent.tmux).trim()) { agent.tmux = `${agentName}:0.0`; agentChanged = true; }
+      // Paneless agents excluded: this exists to give a tmux agent a target it never
+      // registered, and fabricating one for an ACP agent routes it down the pane path.
+      if (!agent.tmux && agentTransport(agent) !== 'acp') { agent.tmux = `${agentName}:0.0`; agentChanged = true; }
       // online/manualDown driven by machine below
       if (agent.offlineReason !== 'mcp-missing:auto') { agent.offlineReason = 'mcp-missing:auto'; agentChanged = true; }
       if (agent.lastSeen !== now) { agent.lastSeen = now; agentChanged = true; }
     } else if (mcpNow === true) {
       const recoverable = agent.offlineReason === 'mcp-missing:auto' || !wasOnline;
-      if (!agent.tmux || !String(agent.tmux).trim()) { agent.tmux = `${agentName}:0.0`; agentChanged = true; }
+      // Paneless agents excluded: this exists to give a tmux agent a target it never
+      // registered, and fabricating one for an ACP agent routes it down the pane path.
+      if (!agent.tmux && agentTransport(agent) !== 'acp') { agent.tmux = `${agentName}:0.0`; agentChanged = true; }
       // online/manualDown driven by machine below
       if (agent.offlineReason === 'mcp-missing:auto') { agent.offlineReason = null; agentChanged = true; }
       if (agent.lastSeen !== now) { agent.lastSeen = now; agentChanged = true; }
@@ -7016,7 +7028,13 @@ function applyServerHeartbeat(serverId, payload = {}, sourceIp = null) {
       agentsChanged = true;
     }
     if (normalizeServer(agent.server) !== serverId) { agent.server = serverId; agentsChanged = true; }
-    if (!agent.tmux) { agent.tmux = `${name}:0.0`; agentsChanged = true; }
+    // Never fabricate a pane target for a paneless agent. This backfill exists so a
+    // tmux agent that registered without one still gets swept, but it ran before the
+    // ACP guard further down and so handed every ACP agent a tmux target it does not
+    // have. The dashboard then routed it as a tmux agent and asked getPaneIdleMs for a
+    // pane that cannot exist, which reported idleMs -1 forever while the agent was
+    // plainly reporting activity.
+    if (!agent.tmux && agentTransport(agent) !== 'acp') { agent.tmux = `${name}:0.0`; agentsChanged = true; }
     const wasAgentOnline = agent.online === true;
     const runtime = ensureAgentRuntimeRecord(name);
     // Drive online/manualDown through machine
@@ -8775,7 +8793,14 @@ app.post('/api/agents/:name/heartbeat', requireAgentToken(_tokenFromName), (req,
   const wasOnline = agent.online === true;
   const wasManualDown = agent.manualDown === true;
   if (server && normalizeServer(agent.server) !== server) agent.server = server;
-  if (!wasManualDown && (!agent.tmux || !String(agent.tmux).trim())) agent.tmux = tmux;
+  // The heartbeat comes from the agent's own mcp-server.js child, which sends a
+  // tmux target because historically every agent had one. An ACP agent does not,
+  // and accepting it here routes a paneless agent down the pane path: the
+  // dashboard then asks getPaneIdleMs about a pane that cannot exist and reports
+  // idleMs -1 forever. This only started happening once octos gained MCP support,
+  // because before that it never sent a heartbeat at all.
+  if (!wasManualDown && (!agent.tmux || !String(agent.tmux).trim())
+      && agentTransport(agent) !== 'acp') agent.tmux = tmux;
   if (normalizedWorkspacePath && !normalizeWorkspacePath(agent.workdir)) agent.workdir = normalizedWorkspacePath;
   if (!wasManualDown && (agent.offlineReason === 'mcp-missing:auto' || agent.offlineReason === 'inactive')) {
     agent.offlineReason = null;
@@ -8874,11 +8899,15 @@ app.post('/api/agents/:name/runtime', requireAgentToken(_tokenFromName), (req, r
     ? req.body.blockedObserved === true
     : true;
 
+  const bodyTransport = typeof req.body?.transport === 'string' ? req.body.transport.trim().toLowerCase() : '';
   let agent = agents[agentName];
   if (!isAgentRecord(agent)) {
     const ensured = ensureAgentRecord(agentName, {
       server,
-      tmux: `${agentName}:0.0`,
+      // A paneless agent reporting runtime state must not be conjured into existence
+      // as a tmux agent. The body declares its transport; honour it.
+      tmux: bodyTransport === 'acp' ? null : `${agentName}:0.0`,
+      transport: bodyTransport === 'acp' ? 'acp' : undefined,
       online: true,
       type: 'agent',
       kind: 'agent',

@@ -1125,15 +1125,36 @@ app.get('/api/agents/status', async (_req, res) => {
         // the process is still there. Reporting it dead alongside genuinely
         // missing tmux agents would hide every working ACP agent.
         const acp = a.transport === 'acp';
+        // Activity for a paneless agent comes from what it reports, not from
+        // hashing a screen it does not have. These were hardcoded to -1/0/false
+        // when this branch only had to stop hiding offline agents, which left the
+        // dashboard unable to tell a hung ACP agent from a healthy idle one:
+        // claude and codex showed real numbers beside octos's idleMs of -1.
+        //
+        // The host derives lastTmuxActivitySec from session/update counts, a truer
+        // signal than a pane hash — a hash also fires on a spinner or a redraw,
+        // whereas an update means a token, a tool call or a status change actually
+        // happened.
+        const reportedActivitySec = Number.isFinite(Number(a.lastTmuxActivitySec))
+          ? Math.max(0, Number(a.lastTmuxActivitySec))
+          : 0;
+        // -1 keeps its established meaning of "no activity signal available",
+        // still the honest answer for a paneless agent that is not ACP.
+        const acpIdleMs = acp && reportedActivitySec > 0
+          ? Math.max(0, Date.now() - reportedActivitySec * 1000)
+          : -1;
+        const reportedActiveNow = acp && typeof a.activeNow === 'boolean' ? a.activeNow : false;
         return {
           name: a.name,
           tmux: null,
-          idleMs: -1,
-          active: false,
-          activeNow: false,
-          activeDurationSec: 0,
-          idleDurationSec: 0,
-          lastTmuxActivitySec: 0,
+          idleMs: acpIdleMs,
+          active: reportedActiveNow,
+          activeNow: reportedActiveNow,
+          activeDurationSec: acp && Number.isFinite(Number(a.activeDurationSec))
+            ? Math.max(0, Number(a.activeDurationSec)) : 0,
+          idleDurationSec: acp && Number.isFinite(Number(a.idleDurationSec))
+            ? Math.max(0, Number(a.idleDurationSec)) : 0,
+          lastTmuxActivitySec: acp ? reportedActivitySec : 0,
           alive: acp ? a.online === true : false,
           transport: a.transport || 'tmux',
           remote: !isLocalAgentServer(a.server),

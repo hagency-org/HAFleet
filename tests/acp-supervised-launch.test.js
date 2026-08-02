@@ -160,3 +160,94 @@ describe('a supervised ACP agent reports its own pid', () => {
     expect(body).not.toMatch(/process\.exit/);
   });
 });
+
+describe('an ACP agent reports its own activity', () => {
+  // A tmux agent's activity comes from hashing its pane. An ACP agent has no pane,
+  // so the sweep's ACP branch does liveness only and the activity fields stayed
+  // null: idleMs=-1, lastTmuxActivitySec=0, while claude and codex had real values.
+  // A hung octos and a healthy idle octos were indistinguishable to the fleet.
+  const host = readFileSync('scripts/hafleet-acp-agent.mjs', 'utf-8');
+
+  test('it derives activity from session/update counts, not a pane', () => {
+    expect(host).toContain('runtime.updateCursor(name)');
+    expect(host).toMatch(/lastTmuxActivitySec/);
+    expect(host).toMatch(/\/runtime`/);
+  });
+
+  test('it reports even while a turn is in flight', () => {
+    // Mid-turn is exactly when the fleet most needs to see the agent is alive, so
+    // the report must happen before the turnInFlight early return.
+    const fn = host.slice(host.indexOf('async function pollAndDeliver'));
+    const report = fn.indexOf('await reportActivity()');
+    const earlyReturn = fn.indexOf('if (turnInFlight) return;');
+    expect(report).toBeGreaterThan(-1);
+    expect(report).toBeLessThan(earlyReturn);
+  });
+
+  test('it does not claim the agent is unblocked when it cannot tell', () => {
+    // octos surfaces tool calls but does not block on ACP permission requests, so
+    // this host has no way to observe blocking. Asserting blocked=false would be
+    // a fabricated signal.
+    const fn = host.slice(host.indexOf('async function reportActivity'));
+    const body = fn.slice(0, fn.indexOf('\n}'));
+    expect(body).toContain('blockedObserved: false');
+    expect(body).not.toMatch(/blocked: (true|false)/);
+  });
+
+  test('a failed report does not disturb the session', () => {
+    const fn = host.slice(host.indexOf('async function reportActivity'));
+    const body = fn.slice(0, fn.indexOf('\n}'));
+    expect(body).toMatch(/catch/);
+    expect(body).not.toMatch(/process\.exit|throw/);
+  });
+});
+
+describe('a paneless agent is never given a pane target', () => {
+  // The heartbeat path backfills `tmux` for any agent lacking one, so a tmux agent
+  // that registered without a target still gets swept. It ran *before* the ACP
+  // guard further down, so every ACP agent was handed `<name>:0.0` — a pane that
+  // cannot exist. The dashboard then routed it as a tmux agent and asked
+  // getPaneIdleMs about that pane, reporting idleMs -1 forever while the agent was
+  // plainly reporting activity. Seen live: tmux='octos-agent:0.0' on an agent with
+  // transport='acp' and no tmux session on the host.
+  const backend = readFileSync('backend-v2.js', 'utf-8');
+
+  test('the tmux backfill is gated on transport', () => {
+    expect(backend).toMatch(/if \(!agent\.tmux && agentTransport\(agent\) !== 'acp'\)/);
+  });
+
+  test('the gate precedes the ACP skip it used to rely on', () => {
+    // The bug was ordering, not absence: the guard existed, 21 lines too late.
+    const backfill = backend.indexOf("if (!agent.tmux && agentTransport(agent) !== 'acp')");
+    const acpSkip = backend.indexOf("if (agentTransport(agent) === 'acp') continue;");
+    expect(backfill).toBeGreaterThan(-1);
+    expect(acpSkip).toBeGreaterThan(-1);
+    expect(backfill).toBeLessThan(acpSkip);
+  });
+
+  test('no unguarded backfill remains', () => {
+    const unguarded = backend.match(/if \(!agent\.tmux\) \{ agent\.tmux =/g) || [];
+    expect(unguarded).toEqual([]);
+  });
+
+  test('the heartbeat does not accept a tmux target for an ACP agent', () => {
+    // The heartbeat comes from the agent's own mcp-server.js child, which sends a
+    // tmux target because historically every agent had one. This only became a
+    // problem when octos gained MCP support and started heartbeating at all —
+    // fixing MCP is what broke the transport routing. Observed as octos flapping
+    // between tmux=null (via acp, idleMs real) and tmux='octos-agent:0.0'
+    // (via null, idleMs -1) on every heartbeat cycle.
+    expect(backend).toMatch(/&& agentTransport\(agent\) !== 'acp'\) agent\.tmux = tmux;/);
+  });
+
+  test('every path that can fabricate a pane target is guarded', () => {
+    // Four sites assign a tmux target. Three are reachable for an ACP agent —
+    // two backfills in applyRuntimeObservation, one in the heartbeat sweep — plus
+    // the heartbeat route. Each must check the transport. The remaining one is the
+    // up-v1 launch path, which has just created a real tmux session, so it is
+    // correct there.
+    const guarded = backend.match(/agentTransport\(agent\) !== 'acp'/g) || [];
+    expect(guarded.length, 'expected every ACP-reachable assignment to be guarded')
+      .toBeGreaterThanOrEqual(4);
+  });
+});
