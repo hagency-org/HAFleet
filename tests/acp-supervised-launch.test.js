@@ -127,3 +127,36 @@ describe('the registration helper', () => {
     expect(failed).toBe(true);
   });
 });
+
+describe('a supervised ACP agent reports its own pid', () => {
+  // bin/hafleet-acp-up registers on the operator's behalf, which only covers the
+  // detached path. The supervisor spawns the host directly, so acp-up never runs
+  // and the backend kept probing whichever pid registered first. Observed live:
+  // acpPid=73908 against a live host pid of 5832, offlineReason=acp-process-gone.
+  // The supervisor was restarting an agent the dashboard insisted was dead.
+  const host = readFileSync('scripts/hafleet-acp-agent.mjs', 'utf-8');
+
+  test('the host registers itself, not just acp-up', () => {
+    expect(host).toContain("api('/api/agents'");
+    expect(host).toMatch(/acpPid: process\.pid/);
+    expect(host).toMatch(/transport: 'acp'/);
+  });
+
+  test('it registers after the session opens, so the pid is real', () => {
+    // Registering before the session could exist would advertise an agent that
+    // then fails to start.
+    const sessionOpen = host.indexOf('acp session open:');
+    const register = host.indexOf('await registerWithBackend()');
+    expect(sessionOpen).toBeGreaterThan(-1);
+    expect(register).toBeGreaterThan(sessionOpen);
+  });
+
+  test('a failed registration warns instead of killing a working session', () => {
+    // Delivery pulls from the inbox and does not depend on registration, so a
+    // backend blip must not take down an agent that is otherwise fine.
+    const fn = host.slice(host.indexOf('async function registerWithBackend'));
+    const body = fn.slice(0, fn.indexOf('\n}'));
+    expect(body).toContain('WARNING');
+    expect(body).not.toMatch(/process\.exit/);
+  });
+});
