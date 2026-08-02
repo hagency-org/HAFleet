@@ -11598,6 +11598,15 @@ export {
   notificationRouter,
 };
 export const __backendV2TestInternals = {
+  // The directory this module bound to when its body evaluated. RUNTIME_ROOT is
+  // read from process.env at import time, and process.env is process-global, so a
+  // test that sets it and then awaits import() can have the value changed
+  // underneath by any other test doing the same. A module that bound to someone
+  // else's directory finds no seeded agents and answers 404 to everything —
+  // observed as GET /api/agents/doomed and DELETE /api/agents/deletetest returning
+  // 404 for agents that were definitely seeded. Exposed so a caller can check
+  // rather than discover it as a mystery failure much later.
+  runtimeRootForTest: RUNTIME_ROOT,
   buildLocalPaneMetadataSnapshotForTest: buildLocalPaneMetadataSnapshotAsync,
   injectSlashClearForTest: injectSlashClear,
   sessionPolicyForTest: sessionPolicy,

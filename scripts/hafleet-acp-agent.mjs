@@ -15,11 +15,12 @@
  * polling the same inbox endpoint check_inbox uses and prompting the agent over
  * session/prompt.
  */
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { OUTBOX_PROTOCOL, validateOutboxRequest } from '../lib/acp-outbox.js';
 import { buildSummary } from '../lib/message-summary.js';
 import { createAcpRuntime } from '../lib/runtime/acp.js';
 import { getFramework } from '../lib/frameworks/index.js';
@@ -130,7 +131,13 @@ const mcpServers = agentToken ? [{
   ],
 }] : [];
 
-const runtime = createAcpRuntime({ command: framework.launch.command, args: acpArgs });
+const runtime = createAcpRuntime({
+  command: framework.launch.command,
+  args: acpArgs,
+  // The agent's own diagnostics. Noisy lines are worth it: this is the only
+  // channel where a paneless agent can tell an operator what went wrong.
+  onStderr: (_agent, line) => log(`  [${frameworkId}] ${line.slice(0, 300)}`),
+});
 if (!(await runtime.isAvailable())) {
   process.stderr.write(`${framework.launch.command} is not available on PATH\n`);
   process.exit(1);
@@ -176,6 +183,84 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ── Delivery ──────────────────────────────────────────────────────────────────
 
+// ── Outbox ────────────────────────────────────────────────────────────────────
+//
+// How an ACP agent initiates anything at all.
+//
+// A tmux agent calls HAFleet's MCP tools directly. octos 2.0.2 cannot: it accepts
+// the mcpServers field on session/new and ignores it, its config has no MCP
+// section, and `octos mcp` only does OAuth login for remote servers. Its shell
+// cannot substitute either — the sandbox is network-isolated, verified on mini5
+// where `nc -z 127.0.0.1 8090` reports PORT_CLOSED while the backend is plainly
+// listening there.
+//
+// What it can do is write files in its workspace. So that is the channel: the
+// agent drops a JSON file, the host validates it and performs the action against
+// the API. Deliberate, agent-initiated, and using the only capability it has.
+//
+// This is narrower than the MCP surface on purpose. Two verbs, both messaging.
+// Anything that mutates task state or approvals stays out until an ACP agent can
+// be authenticated as itself rather than trusted because it wrote to a directory.
+const outboxDir = path.join(path.resolve(workspace), '.hafleet', 'outbox');
+
+async function drainOutbox() {
+  if (!agentToken) return;
+  let entries;
+  try {
+    entries = readdirSync(outboxDir).filter((f) => f.endsWith('.json')).sort();
+  } catch {
+    return; // the agent has not created it; nothing to do
+  }
+  if (!entries.length) return;
+  mkdirSync(path.join(outboxDir, 'sent'), { recursive: true });
+  mkdirSync(path.join(outboxDir, 'rejected'), { recursive: true });
+
+  for (const file of entries) {
+    const source = path.join(outboxDir, file);
+    let request;
+    try {
+      request = JSON.parse(readFileSync(source, 'utf8'));
+    } catch (error) {
+      // Move it aside rather than retrying forever, and leave the reason next to
+      // it so the agent can see what it got wrong.
+      writeFileSync(`${source}.error`, `unparseable JSON: ${error.message}\n`);
+      renameSync(source, path.join(outboxDir, 'rejected', file));
+      log(`  outbox ${file}: unparseable JSON`);
+      continue;
+    }
+    const problem = validateOutboxRequest(request);
+    if (problem) {
+      writeFileSync(`${source}.error`, `${problem}\n`);
+      renameSync(source, path.join(outboxDir, 'rejected', file));
+      log(`  outbox ${file}: ${problem}`);
+      continue;
+    }
+    const full = String(request.full || request.summary);
+    const body = {
+      from: name,
+      type: request.type === 'request' ? 'request' : 'inform',
+      summary: buildSummary(request.summary || full),
+      full,
+      ...(request.reply_to ? { reply_to: request.reply_to } : {}),
+      ...((request.action || 'send_message') === 'post'
+        ? { group: request.group }
+        : { to: request.to }),
+    };
+    try {
+      await api('/api/messages', { method: 'POST', body });
+      renameSync(source, path.join(outboxDir, 'sent', file));
+      log(`  outbox ${file}: sent to ${request.to || `group ${request.group}`}`);
+    } catch (error) {
+      // The backend refused it. Rejecting is right: retrying a message the
+      // backend will not take just repeats the failure every five seconds.
+      writeFileSync(`${source}.error`, `${error.message}\n`);
+      renameSync(source, path.join(outboxDir, 'rejected', file));
+      log(`  outbox ${file}: rejected — ${error.message}`);
+    }
+  }
+}
+
+
 /** Render an inbox message the way the pane nudge would read to a tmux agent. */
 function formatMessage(msg) {
   const from = msg.from || 'unknown';
@@ -195,6 +280,9 @@ let deliveredCount = 0;
 
 async function pollAndDeliver() {
   if (!agentToken || turnInFlight) return;
+  // Before the inbox: the agent may have written something during the last turn,
+  // and it should go out even if nobody is messaging it.
+  await drainOutbox();
   let snapshot;
   try {
     snapshot = await api(`/api/inbox/${encodeURIComponent(name)}/unread`);
@@ -213,8 +301,12 @@ async function pollAndDeliver() {
     const inbox = await api(`/api/inbox/${encodeURIComponent(name)}`);
     const messages = [...(inbox.dm || []), ...(inbox.group || [])];
     if (!messages.length) return;
-    const text = messages.map(formatMessage).join('\n\n---\n\n');
+    const text = `${messages.map(formatMessage).join('\n\n---\n\n')}\n\n---\n\n${OUTBOX_PROTOCOL}`;
     log(`delivering ${messages.length} message(s): ${messages.map((m) => m.id).join(', ')}`);
+    // Mark the update stream before prompting so this turn's output is read
+    // alone. Without it the previous answer is prepended — verified on mini5,
+    // where a reply went out as "TokyoThe command exited with code 7…".
+    const cursor = runtime.updateCursor(name);
     const stopReason = await runtime.prompt(name, text);
     deliveredCount += messages.length;
     log(`turn finished (${stopReason}); delivered ${deliveredCount} message(s) so far`);
@@ -230,7 +322,7 @@ async function pollAndDeliver() {
     // to be joined before they mean anything.
     let said = '';
     const tools = [];
-    for (const { update } of runtime.recentUpdates(name, 400)) {
+    for (const { update } of runtime.updatesSince(name, cursor)) {
       const kind = update?.sessionUpdate;
       if (kind === 'agent_message_chunk') {
         said += update.content?.text || '';
@@ -248,6 +340,13 @@ async function pollAndDeliver() {
     // Send the answer back to whoever asked. Reply to the last message in the
     // batch: they were delivered as one prompt, so the turn answers all of them,
     // and threading it under the most recent is the closest honest attribution.
+    // Drain immediately, not on the next poll. The agent writes its outbox file
+    // during the turn and then looks for it: on mini5 it reported "the file is
+    // still sitting in .hafleet/outbox/ ... the runtime watcher may pick it up on
+    // its next sweep". Waiting up to a poll interval invites it to conclude the
+    // mechanism is broken and try something else.
+    await drainOutbox();
+
     const trigger = messages.at(-1);
     if (reply && trigger?.from && trigger.from !== name) {
       try {

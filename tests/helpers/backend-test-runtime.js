@@ -3,6 +3,16 @@ import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
 
+/** Serialises the env-set/import window. See createBackendTestContext. */
+let importLock = Promise.resolve();
+function acquireImportLock() {
+  let release;
+  const next = new Promise((resolve) => { release = resolve; });
+  const waitFor = importLock;
+  importLock = importLock.then(() => next);
+  return waitFor.then(() => release);
+}
+
 function writeJson(filePath, value) {
   writeFileSync(filePath, JSON.stringify(value, null, 2));
 }
@@ -91,7 +101,39 @@ export async function createBackendTestContext(prefix, seed = {}) {
 
   const backendUrl = pathToFileURL(path.resolve('backend-v2.js')).href;
   const cacheBust = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  const backendModule = await import(`${backendUrl}?test=${cacheBust}`);
+
+  // Serialise env-set through import.
+  //
+  // backend-v2.js reads HAFLEET_RUNTIME_DIR at module-evaluation time and loads
+  // agents.json from it immediately. process.env is process-global and `await
+  // import()` yields, so between setting the variable above and the module body
+  // running, any other context doing the same — or any cleanup() restoring the
+  // previous value — silently rebinds this module to the wrong directory. There
+  // are 18 such assignment sites across 12 test files.
+  //
+  // A module bound to the wrong directory finds no seeded agents and answers 404
+  // to everything, which is how "GET /api/agents/doomed -> 404" and
+  // "DELETE /api/agents/deletetest -> 404" appeared for agents that were plainly
+  // seeded: rare, a different file each time, and passing in isolation.
+  const release = await acquireImportLock();
+  let backendModule;
+  try {
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
+    backendModule = await import(`${backendUrl}?test=${cacheBust}`);
+  } finally {
+    release();
+  }
+
+  // Belt and braces: the lock only covers contexts created through this helper,
+  // and twelve files set the variable themselves. If one of them lands mid-import
+  // anyway, fail here with the reason rather than as a 404 several assertions later.
+  const boundRoot = backendModule.__backendV2TestInternals?.runtimeRootForTest;
+  if (boundRoot && path.resolve(boundRoot) !== path.resolve(runtimeDir)) {
+    throw new Error(
+      `backend bound to the wrong runtime dir: expected ${runtimeDir}, got ${boundRoot}. `
+      + 'Another test mutated HAFLEET_RUNTIME_DIR during this import.',
+    );
+  }
   const { app } = backendModule;
   const servers = new Set();
 

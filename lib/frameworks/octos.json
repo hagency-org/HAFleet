@@ -8,11 +8,14 @@
   "launch": {
     "command": "octos",
     "acpArgs": [
-      "acp"
+      "acp",
+      "--profile",
+      "coding-full"
     ],
     "defaultArgs": [],
     "modelFlag": "--model",
-    "permissionSummary": "octos sandbox as configured (hafleet never passes --danger-full-access)"
+    "permissionSummary": "octos sandbox as configured (hafleet never passes --danger-full-access)",
+    "acpArgsNote": "coding-full is required, not a preference. octos's default 'coding' profile narrows the tool registry with ToolRegistry::filter_by_profile, an allow-list retain(). MCP tool names are not in that list, so operator-configured MCP tools are evicted \u2014 and because McpService is an Arc<RunningService>, eviction drops the last references and cancels the transport. Observed on mini5 as 'MCP server started tools=11' followed 1ms later by 'task cancelled' and 'Child exited'. Under coding-full the child survives and the agent reaches HAFleet's tools: verified by octos calling whoami and check_inbox and returning their real output."
   },
   "guards": {
     "flags": {
@@ -41,6 +44,7 @@
     "blocksOnPermissionRequest": false,
     "blocksOnPermissionRequestNote": "octos surfaces tool calls as ACP tool_call records but does not block on session/request_permission in v1, so hafleet can observe permission activity and cannot answer it. The sandbox chosen at launch remains the real control.",
     "honorsMcpServers": false,
-    "mcpServersNote": "octos 2.0.2 accepts the mcpServers field on session/new and silently ignores it: verified on mini5 where claude and codex each spawn an mcp-server.js child and octos spawns none. `octos mcp` only does OAuth login for remote servers and its config.json has no MCP section, so there is no way to hand it local tools. The ACP host therefore posts the agent's replies on its behalf."
+    "mcpServersNote": "octos ignores mcpServers on ACP session/new (acp.rs: 'ignored in v1'). HAFleet's tools must instead be declared in octos's own config at ~/.config/octos/config.json under mcp_servers, which the ACP session loader does honour (acp.rs:431). HAFleet does not write that file; see docs.",
+    "requiresConfigMcpServers": true
   }
 }
