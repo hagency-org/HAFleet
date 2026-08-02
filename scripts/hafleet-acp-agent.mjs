@@ -131,7 +131,13 @@ const mcpServers = agentToken ? [{
   ],
 }] : [];
 
-const runtime = createAcpRuntime({ command: framework.launch.command, args: acpArgs });
+const runtime = createAcpRuntime({
+  command: framework.launch.command,
+  args: acpArgs,
+  // The agent's own diagnostics. Noisy lines are worth it: this is the only
+  // channel where a paneless agent can tell an operator what went wrong.
+  onStderr: (_agent, line) => log(`  [${frameworkId}] ${line.slice(0, 300)}`),
+});
 if (!(await runtime.isAvailable())) {
   process.stderr.write(`${framework.launch.command} is not available on PATH\n`);
   process.exit(1);
