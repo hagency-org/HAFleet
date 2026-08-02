@@ -21,6 +21,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { validateOutboxRequest } from '../lib/acp-outbox.js';
+import { anyReplyable, buildReplyHint } from '../lib/reply-hint.js';
 import { buildSummary } from '../lib/message-summary.js';
 import { createAcpRuntime } from '../lib/runtime/acp.js';
 import { getFramework } from '../lib/frameworks/index.js';
@@ -326,24 +327,27 @@ let lastNudgedCount = 0;
  * to fetch the detail itself. Deliberately carries no message bodies — the point
  * of the change is that the agent reads its own inbox.
  */
-function buildNudge(pending, snapshot) {
-  const senders = [...new Set((snapshot?.messages || snapshot?.unread || [])
-    .map((m) => m && m.from).filter(Boolean))];
-  return [
+function buildNudge(pending, messages) {
+  const senders = [...new Set(messages.map((m) => m && m.from).filter(Boolean))];
+  const lines = [
     `You have ${pending} unread message(s)${senders.length ? ` from ${senders.join(', ')}` : ''}.`,
     '',
     `FIRST ACTION: call check_inbox() now. Use check_inbox() in ${MCP_SERVER_NAME} MCP for full context before acting.`,
-    `Reply with ${MCP_SERVER_NAME} send_message(to="<sender>", summary="...", full="...", reply_to="<id>") when the work is done.`,
-    // The workspace outbox is deliberately NOT advertised here.
-    //
-    // It exists because octos once had no way to reach HAFleet at all, and it is
-    // still drained on every poll as a fallback for an agent whose MCP tools are
-    // unavailable. But advertising it alongside send_message tells the agent two
-    // ways to do one thing, and it reasonably used both: msg_0063 and msg_0064,
-    // same reply_to, both "Pacific", one from send_message and one from a dropped
-    // outbox file. That is the same duplicate-reply bug just removed from the host
-    // side, reintroduced one layer up by the prompt.
-  ].join('\n');
+  ];
+  // Only ask for a reply when one is actually wanted. A `task` is work to do; a
+  // `human` or `request` is someone waiting. This host used to instruct a reply
+  // unconditionally, so the same `hafleet tell` produced silence from claude and
+  // codex and a message from octos — verified by sending one task to all three:
+  // all answered "Au", only octos posted it. The rule now comes from the same
+  // module the tmux path uses, so the two cannot drift again.
+  const replyable = messages.filter((m) => m && anyReplyable([m]));
+  for (const msg of replyable.slice(0, 3)) {
+    const hint = buildReplyHint(msg, null, MCP_SERVER_NAME);
+    if (hint) lines.push(hint);
+  }
+  // The workspace outbox is deliberately not advertised: the agent has
+  // send_message, and offering two ways to reply got both used.
+  return lines.join('\n');
 }
 
 
@@ -362,14 +366,18 @@ async function pollAndDeliver() {
   // and it should go out even if nobody is messaging it.
   await drainOutbox();
 
+  // unread-list rather than unread: it returns the messages, so the nudge can see
+  // their types and ask for a reply only when one is wanted. Neither endpoint
+  // advances the inbox cursor — the agent's own check_inbox does.
   let snapshot;
   try {
-    snapshot = await api(`/api/inbox/${encodeURIComponent(name)}/unread`);
+    snapshot = await api(`/api/inbox/${encodeURIComponent(name)}/unread-list`);
   } catch (error) {
     log(`inbox poll failed: ${error.message}`);
     return;
   }
-  const pending = Number(snapshot?.unread_total ?? snapshot?.total ?? 0);
+  const messages = Array.isArray(snapshot?.messages) ? snapshot.messages : [];
+  const pending = Number(snapshot?.unread_total ?? messages.length ?? 0);
   if (!pending) { lastNudgedCount = 0; return; }
 
   // Nudge, do not deliver.
@@ -390,7 +398,7 @@ async function pollAndDeliver() {
     lastNudgedCount = pending;
     log(`nudging: ${pending} unread`);
     const cursor = runtime.updateCursor(name);
-    const stopReason = await runtime.prompt(name, buildNudge(pending, snapshot));
+    const stopReason = await runtime.prompt(name, buildNudge(pending, messages));
     log(`turn finished (${stopReason})`);
 
     // Record what the agent said and which tools it used. Without this a turn that
