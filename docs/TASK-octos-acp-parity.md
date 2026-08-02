@@ -35,58 +35,49 @@ cheap everywhere. The cost is in what backs each method.
 
 ---
 
-## 1. Fix the MCP client lifetime bug — do this first
+## 1. ~~Fix the MCP client lifetime bug~~ — WITHDRAWN, the diagnosis was wrong
 
-**Highest value per line in the whole task, and it is not an ACP method.**
+**Do not do this.** An earlier version of this document called for changing
+`McpClient::register_tools` because it consumes `self` and drops `self.services`,
+"the field whose own comment says it keeps the stdio children alive".
 
-`crates/octos-agent/src/mcp.rs:334`:
+That reading was wrong. `McpService` is
+`Arc<RunningService<RoleClient, ClientInfo>>` (`crates/octos-agent/src/mcp.rs:40`).
+Each registered `McpTool` holds a clone, so dropping the `services` vec only
+decrements a refcount. The doc comment describes an invariant `Arc` already
+provides, and the eleven identical call sites are all fine.
 
-```rust
-pub struct McpClient {
-    /// Kept alive so the underlying transports (and stdio child processes) stay
-    /// open for as long as any registered tool references them.
-    #[allow(dead_code)]
-    services: Vec<(String, McpService)>,
-    tools: Vec<McpToolSpec>,
-}
+**What actually kills the transport is profile narrowing.**
+`finalize_tool_registry` (acp.rs:197) ends with `profile.apply_to_registry(tools)`,
+which calls `ToolRegistry::filter_by_profile` (registry.rs:839). For an
+`AllowList` profile that is a `retain()` over tool names. MCP tool names are not in
+the lean `coding` profile's list, so they are evicted — and eviction drops the last
+`Arc` references, which cancels the rmcp service and exits the child.
 
-pub fn register_tools(self, registry: &mut ToolRegistry) {   // consumes self
-    for spec in self.tools { registry.register(McpTool { ... }) }
-}                                                            // services dropped here
-```
-
-`register_tools` takes `self`, uses `self.tools`, and drops `self.services` — the
-field whose own doc comment says it exists to keep the stdio children alive. The
-call site (`acp.rs:431`) holds the client only as a temporary:
-
-```rust
-Ok(client) => client.register_tools(&mut tools),
-```
-
-**Observed live**, with stderr captured from a supervised octos on a real host:
+Log signature, captured live:
 
 ```
 MCP server started server="node" tools=11 concurrency_class=Safe
 task cancelled
 Child exited gracefully exit status: 0
-serve finished quit_reason=Cancelled
 ```
 
-All 11 tools register, then the transport dies ~1 ms later.
+**There is no octos code change required.** Two configuration changes fix it:
 
-**Fix:** retain the client for the registry's lifetime, or move `services` into the
-registry alongside the tools. Either is small.
+1. declare HAFleet's MCP server in `~/.config/octos/config.json` under
+   `mcp_servers` — ACP ignores `mcpServers` on `session/new` but does load them
+   from config (acp.rs:431)
+2. run with `--profile coding-full` so narrowing does not evict them
 
-**Acceptance:** configure any stdio MCP server in `~/.config/octos/config.json`
-under `mcp_servers`, start `octos acp`, and confirm the child process is still
-alive after `session/new` returns and that its tools are callable in a turn. A
-regression test should assert the child outlives registration.
+Verified end to end: octos called `whoami` and `check_inbox` and returned their
+real output, with `tools=52` in the LLM call.
 
-**Why first:** it unblocks the entire MCP tool surface for ACP sessions, which is a
-large fraction of what "parity" is wanted for, at a fraction of the cost of any
-task below.
-
----
+**A genuine octos issue remains, smaller than the one claimed.** Operator-configured
+MCP tools being silently evicted by profile narrowing is surprising, and the failure
+is invisible — the transport dies with an INFO-level log and the agent simply lacks
+the tools. Worth raising upstream as either "profile narrowing should preserve
+explicitly configured MCP tools" or "warn when narrowing evicts an MCP tool". Not a
+blocker for HAFleet.
 
 ## 2. Tier 1 — methods needing no new state
 
@@ -200,7 +191,7 @@ side. Build it when a client asks for it.
 
 | task | estimate | confidence | blocks |
 |---|---|---|---|
-| 1. MCP lifetime fix | hours | high | nothing |
+| 1. ~~MCP lifetime fix~~ | withdrawn — config, not code | — | nothing |
 | 2. Tier 1 | ~1 day | high | nothing |
 | 3. Tier 2 | days | medium — rests on the `SessionKey` finding | 4 is easier after |
 | 4. Tier 3 | ~1 week | medium | — |
@@ -208,8 +199,9 @@ side. Build it when a client asks for it.
 
 Tasks 1 and 2 are independent and can run in parallel with anything.
 
-**Do not treat this as a single month-long project.** Task 1 alone delivers most of
-the practical benefit. Stop after Tier 3 unless a client needs Tier 4.
+**Do not treat this as a single month-long project.** Task 1 turned out to be
+configuration rather than code, and it alone delivered coordination parity with the
+tmux frameworks. Stop after Tier 3 unless a client needs Tier 4.
 
 ---
 
