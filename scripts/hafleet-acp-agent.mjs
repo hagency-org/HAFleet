@@ -173,6 +173,37 @@ try {
 // mcp=hafleet here read as a working tool channel that did not exist.
 log(`acp session open: ${sessionId} (${frameworkId}, cwd=${cwd}, mcp-requested=${mcpAttached ? MCP_SERVER_NAME : 'none'})`);
 
+// Register with the backend from here, because this is the process that knows its
+// own pid.
+//
+// bin/hafleet-acp-up registered on the operator's behalf, which is correct only
+// for the detached path. Under the supervisor the host is spawned directly, so
+// acp-up never runs: the backend kept probing the pid from whichever host started
+// the agent first and reported acp-process-gone forever after the first restart.
+// Seen on a real host as acpPid=73908 against a live pid of 5832 — the supervisor
+// was faithfully restarting an agent the dashboard insisted was dead.
+async function registerWithBackend() {
+  if (!agentToken) return;
+  try {
+    await api('/api/agents', {
+      method: 'POST',
+      body: {
+        name,
+        type: frameworkId,
+        transport: 'acp',
+        acpPid: process.pid,
+        server: process.env.HAFLEET_SERVER || os.hostname(),
+      },
+    });
+    log(`registered with the backend (acp, pid ${process.pid})`);
+  } catch (error) {
+    // Not fatal: the session is open and delivery pulls from the inbox anyway.
+    // The agent will read as offline until something re-registers it, so say so.
+    log(`WARNING: backend registration failed (${error.message}); the fleet will show this agent offline`);
+  }
+}
+await registerWithBackend();
+
 const shutdown = (signal) => {
   log(`received ${signal}, closing the acp session`);
   runtime.stopAll();
