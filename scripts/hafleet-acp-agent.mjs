@@ -84,32 +84,6 @@ async function api(pathname, { method = 'GET', body = null } = {}) {
   return response.json();
 }
 
-/**
- * Post the agent's answer back into HAFleet, as the agent.
- *
- * A tmux agent replies itself, by calling the hafleet MCP tool send_message. An
- * ACP agent cannot: octos 2.0.2 accepts the mcpServers field on session/new and
- * silently ignores it — verified on mini5, where claude and codex each spawned an
- * mcp-server.js child and octos spawned none. Its `octos mcp` subcommand only does
- * OAuth login for remote servers, and its config.json has no MCP section at all.
- * There is no way to hand it the tools.
- *
- * So the host speaks for it. That is a real difference in kind and worth naming:
- * a tmux agent decides when it has something to say, whereas this posts the result
- * of every turn that produced text. It is a relay, not agency.
- */
-async function postReply({ to, replyTo, text }) {
-  const body = text.trim();
-  if (!body) return;
-  // Same rule as `hafleet tell`, shared rather than reimplemented: the summary is
-  // what a reader sees, so cutting it mid-word turns a reply into a wrong reply.
-  const summary = buildSummary(body);
-  await api('/api/messages', {
-    method: 'POST',
-    body: { from: name, to, type: 'inform', summary, full: body, reply_to: replyTo },
-  });
-  log(`  replied to ${to} (reply_to=${replyTo})`);
-}
 
 /**
  * HAFleet's own MCP server, handed to the agent at session/new.
@@ -343,17 +317,28 @@ async function drainOutbox() {
 }
 
 
-/** Render an inbox message the way the pane nudge would read to a tmux agent. */
-function formatMessage(msg) {
-  const from = msg.from || 'unknown';
-  const where = msg.group ? ` in group ${msg.group}` : '';
-  const body = msg.full || msg.summary || '';
-  const lines = [`Message ${msg.id} from ${from}${where}:`, '', body];
-  if (msg.type === 'human' || msg.type === 'request') {
-    lines.push('', `Reply when the work is done: ${MCP_SERVER_NAME} send_message(to="${from}", summary="...", full="...", reply_to="${msg.id}")`);
-  }
-  return lines.join('\n');
+/** Tracks the backlog size already nudged for, so an agent that ignores a nudge is
+ * not re-prompted every five seconds. Reset when the inbox drains. */
+let lastNudgedCount = 0;
+
+/**
+ * What a tmux agent sees typed into its pane: who is waiting, and an instruction
+ * to fetch the detail itself. Deliberately carries no message bodies — the point
+ * of the change is that the agent reads its own inbox.
+ */
+function buildNudge(pending, snapshot) {
+  const senders = [...new Set((snapshot?.messages || snapshot?.unread || [])
+    .map((m) => m && m.from).filter(Boolean))];
+  return [
+    `You have ${pending} unread message(s)${senders.length ? ` from ${senders.join(', ')}` : ''}.`,
+    '',
+    `FIRST ACTION: call check_inbox() now. Use check_inbox() in ${MCP_SERVER_NAME} MCP for full context before acting.`,
+    `Reply with ${MCP_SERVER_NAME} send_message(to="<sender>", summary="...", full="...", reply_to="<id>") when the work is done.`,
+    '',
+    OUTBOX_PROTOCOL,
+  ].join('\n');
 }
+
 
 // One ACP turn at a time. session/prompt is a turn, not a queue, so overlapping
 // prompts would interleave; a long turn simply defers the next poll.
@@ -369,6 +354,7 @@ async function pollAndDeliver() {
   // Before the inbox: the agent may have written something during the last turn,
   // and it should go out even if nobody is messaging it.
   await drainOutbox();
+
   let snapshot;
   try {
     snapshot = await api(`/api/inbox/${encodeURIComponent(name)}/unread`);
@@ -377,35 +363,35 @@ async function pollAndDeliver() {
     return;
   }
   const pending = Number(snapshot?.unread_total ?? snapshot?.total ?? 0);
-  if (!pending) return;
+  if (!pending) { lastNudgedCount = 0; return; }
+
+  // Nudge, do not deliver.
+  //
+  // This host used to read the inbox itself and paste the message bodies into the
+  // prompt. That was right when octos had no way to reach HAFleet, and wrong once
+  // it did: the unfiltered read advances the cursor, so by the time the agent ran
+  // check_inbox the host had already consumed its mail and it saw NONE — verified
+  // live. It also left octos on a different contract from claude and codex, which
+  // get a summary plus "call check_inbox for full context" and fetch their own.
+  //
+  // The /unread probe deliberately does NOT advance the cursor. The agent's own
+  // check_inbox does, which is what makes the read an acknowledgement.
+  if (pending === lastNudgedCount) return;   // already nudged for this backlog
 
   turnInFlight = true;
   try {
-    // The unfiltered read is what advances the inbox cursor, so a message is
-    // marked seen exactly once even if the prompt below fails. Failing to
-    // re-deliver is better than re-prompting an agent forever on a poison message.
-    const inbox = await api(`/api/inbox/${encodeURIComponent(name)}`);
-    const messages = [...(inbox.dm || []), ...(inbox.group || [])];
-    if (!messages.length) return;
-    const text = `${messages.map(formatMessage).join('\n\n---\n\n')}\n\n---\n\n${OUTBOX_PROTOCOL}`;
-    log(`delivering ${messages.length} message(s): ${messages.map((m) => m.id).join(', ')}`);
-    // Mark the update stream before prompting so this turn's output is read
-    // alone. Without it the previous answer is prepended — verified on mini5,
-    // where a reply went out as "TokyoThe command exited with code 7…".
+    lastNudgedCount = pending;
+    log(`nudging: ${pending} unread`);
     const cursor = runtime.updateCursor(name);
-    const stopReason = await runtime.prompt(name, text);
-    deliveredCount += messages.length;
-    log(`turn finished (${stopReason}); delivered ${deliveredCount} message(s) so far`);
+    const stopReason = await runtime.prompt(name, buildNudge(pending, snapshot));
+    log(`turn finished (${stopReason})`);
 
-    // Record what the agent said and which tools it used. Without this, a turn
-    // that ends in 'end_turn' having done nothing looks identical to one that did
-    // the work — the first live delivery reported success and had accomplished
-    // nothing visible. There is no pane to read back, so this log is the only
-    // place an operator can see it.
+    // Record what the agent said and which tools it used. Without this a turn that
+    // ends in 'end_turn' having done nothing is indistinguishable from one that did
+    // the work, and there is no pane to read back.
     //
-    // agent_message_chunk is emitted per token, not per message: logging each one
-    // produced a column of word fragments ("cloud", "/", "oct", "os"). They have
-    // to be joined before they mean anything.
+    // agent_message_chunk is emitted per token, so the chunks must be joined before
+    // they mean anything — logging each produced a column of word fragments.
     let said = '';
     const tools = [];
     for (const { update } of runtime.updatesSince(name, cursor)) {
@@ -413,9 +399,7 @@ async function pollAndDeliver() {
       if (kind === 'agent_message_chunk') {
         said += update.content?.text || '';
       } else if (kind === 'tool_call' || kind === 'tool_call_update') {
-        const label = update.title || update.kind || 'call';
-        const status = update.status ? ` [${update.status}]` : '';
-        const entry = `${label}${status}`;
+        const entry = `${update.title || update.kind || 'call'}${update.status ? ` [${update.status}]` : ''}`;
         if (tools.at(-1) !== entry) tools.push(entry);
       }
     }
@@ -423,25 +407,11 @@ async function pollAndDeliver() {
     const reply = said.replace(/\s+/g, ' ').trim();
     if (reply) log(`  agent: ${reply.slice(0, 600)}${reply.length > 600 ? '…' : ''}`);
 
-    // Send the answer back to whoever asked. Reply to the last message in the
-    // batch: they were delivered as one prompt, so the turn answers all of them,
-    // and threading it under the most recent is the closest honest attribution.
-    // Drain immediately, not on the next poll. The agent writes its outbox file
-    // during the turn and then looks for it: on mini5 it reported "the file is
-    // still sitting in .hafleet/outbox/ ... the runtime watcher may pick it up on
-    // its next sweep". Waiting up to a poll interval invites it to conclude the
-    // mechanism is broken and try something else.
+    // No reply is posted from here any more. The agent has send_message and the
+    // workspace outbox, and posting the turn text as well produced two messages
+    // for one answer. Whether to respond is the agent's judgement, exactly as it
+    // is for claude and codex.
     await drainOutbox();
-
-    const trigger = messages.at(-1);
-    if (reply && trigger?.from && trigger.from !== name) {
-      try {
-        await postReply({ to: trigger.from, replyTo: trigger.id, text: said });
-      } catch (error) {
-        // A failed reply must not look like a failed turn: the work was done.
-        log(`  reply failed: ${error.message}`);
-      }
-    }
   } catch (error) {
     log(`delivery failed: ${error.message}${error.data ? ` — ${error.data}` : ''}`);
   } finally {

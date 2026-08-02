@@ -56,9 +56,13 @@ describe('buildSummary', () => {
 
 describe('the two callers share the rule rather than reimplementing it', () => {
   test('the ACP host imports it', () => {
+    // The caller moved. It was postReply, where the host answered on the agent's
+    // behalf; that path is gone now that octos replies for itself via send_message.
+    // The rule is still needed for the workspace outbox, where the agent supplies a
+    // summary and the same truncation applies.
     const host = readFileSync('scripts/hafleet-acp-agent.mjs', 'utf-8');
     expect(host).toContain("from '../lib/message-summary.js'");
-    expect(host).toContain('buildSummary(body)');
+    expect(host).toMatch(/summary: buildSummary\(/);
   });
 
   test('the ACP host does not carry its own truncation arithmetic', () => {

@@ -251,3 +251,51 @@ describe('a paneless agent is never given a pane target', () => {
       .toBeGreaterThanOrEqual(4);
   });
 });
+
+describe('an ACP agent is nudged, not spoon-fed', () => {
+  // octos used to have the message bodies pasted into its prompt by the host,
+  // while claude and codex get a summary plus "call check_inbox for full context"
+  // and fetch their own. Two agents, two contracts.
+  //
+  // Worse, the host's unfiltered inbox read advances the cursor — so by the time
+  // the agent ran check_inbox its mail was already consumed and it saw NONE.
+  // Verified live before the change.
+  const host = readFileSync('scripts/hafleet-acp-agent.mjs', 'utf-8');
+
+  test('the host probes /unread and never consumes the inbox', () => {
+    // /unread does not advance the cursor; the unfiltered read does. Reading it
+    // here is what made the agent's own check_inbox return nothing.
+    expect(host).toContain('/unread');
+    expect(host, 'the host must not perform the cursor-advancing read')
+      .not.toMatch(/api\(`\/api\/inbox\/\$\{encodeURIComponent\(name\)\}`\)/);
+  });
+
+  test('the nudge carries no message bodies', () => {
+    const fn = host.slice(host.indexOf('function buildNudge'));
+    const body = fn.slice(0, fn.indexOf('\n}'));
+    expect(body).toMatch(/unread message\(s\)/);
+    expect(body).toContain('check_inbox');
+    expect(body, 'a nudge that includes the body defeats the point')
+      .not.toMatch(/msg\.full|\.full \|\|/);
+  });
+
+  test('the host no longer replies on the agent\'s behalf', () => {
+    // Two reply paths produced two messages for one answer. Whether to respond is
+    // the agent's judgement, as it is for claude and codex.
+    expect(host).not.toContain('async function postReply');
+    expect(host).not.toContain('replied to');
+  });
+
+  test('a backlog is not re-nudged every poll', () => {
+    // The cursor no longer advances on the host's read, so without this an agent
+    // that ignores a nudge would be re-prompted every five seconds forever.
+    expect(host).toMatch(/lastNudgedCount/);
+    expect(host).toMatch(/if \(pending === lastNudgedCount\) return;/);
+    expect(host, 'the guard must reset when the inbox drains')
+      .toMatch(/if \(!pending\) \{ lastNudgedCount = 0; return; \}/);
+  });
+
+  test('the dead rendering helpers are gone, not just unused', () => {
+    expect(host).not.toContain('function formatMessage');
+  });
+});
