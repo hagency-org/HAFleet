@@ -112,3 +112,30 @@ describe('the host drains the outbox promptly', () => {
     expect(host).toMatch(/\.error/);
   });
 });
+
+describe('the outbox is a fallback, not a second advertised channel', () => {
+  const host = readFileSync('scripts/hafleet-acp-agent.mjs', 'utf-8');
+
+  test('the nudge does not advertise it alongside send_message', () => {
+    // Telling the agent two ways to reply got both used: msg_0063 and msg_0064,
+    // same reply_to, both "Pacific" — one via send_message, one via a dropped
+    // outbox file. Same duplicate-reply bug as the host relay, one layer up.
+    const fn = host.slice(host.indexOf('function buildNudge'));
+    const body = fn.slice(0, fn.indexOf('\n}'));
+    expect(body).toContain('send_message');
+    expect(body, 'advertising both channels invites duplicate replies')
+      .not.toContain('OUTBOX_PROTOCOL');
+  });
+
+  test('but it is still drained, so an agent without MCP is not stranded', () => {
+    // The mechanism stays: it is the only channel for an agent whose MCP tools
+    // failed to load, which is exactly how octos behaved before today.
+    expect((host.match(/await drainOutbox\(\)/g) || []).length).toBeGreaterThanOrEqual(2);
+    expect(host).toContain('validateOutboxRequest');
+  });
+
+  test('the protocol text still exists for whoever needs to document it', () => {
+    // Not deleted, just not injected into every prompt.
+    expect(OUTBOX_PROTOCOL).toContain('.hafleet/outbox/');
+  });
+});
