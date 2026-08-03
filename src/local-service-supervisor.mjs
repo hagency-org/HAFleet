@@ -467,6 +467,54 @@ export class LocalServiceSupervisor {
     return this.records.get(name)?.pid || null;
   }
 
+  /**
+   * Adopt a freshly-read profile without restarting the fleet.
+   *
+   * Removing a supervised agent used to mean editing the profile and restarting
+   * everything, because the supervisor holds its profile in memory and never
+   * looks at the file again. Doing that to drop one crash-looping agent took the
+   * whole fleet down: the restart was run without the environment the original
+   * supervisor had, and the backend exited on a missing API_TOKEN.
+   *
+   * Only additions and removals are applied. A service whose definition changed
+   * is reported but left running, because swapping a live service's command out
+   * from under it is a different operation with different failure modes, and
+   * doing it silently on a config reload is worse than declining to.
+   *
+   * @returns {{added: string[], removed: string[], changed: string[]}}
+   */
+  async reconcile(newProfile) {
+    const next = new Map((newProfile?.services ?? []).map((s) => [s.name, s]));
+    const current = new Map(this.profile.services.map((s) => [s.name, s]));
+
+    const removed = [...current.keys()].filter((name) => !next.has(name));
+    const added = [...next.keys()].filter((name) => !current.has(name));
+    const changed = [...next.keys()].filter((name) => current.has(name)
+      && JSON.stringify(current.get(name)) !== JSON.stringify(next.get(name)));
+
+    for (const name of removed) {
+      // stopService sets desired='stopped' and clears any pending restart timer,
+      // so the backoff loop cannot resurrect it after we drop the record.
+      await this.stopService(name, { restart: false }).catch(() => {});
+      this.records.delete(name);
+    }
+
+    this.profile = { ...this.profile, ...newProfile, services: [...next.values()] };
+
+    for (const name of added) {
+      this.records.set(name, { ...emptyRecord(name), child: null, restartTimer: null });
+    }
+    // Spawn in profile order so a new service still starts after its dependencies.
+    for (const service of this.profile.services) {
+      if (!added.includes(service.name)) continue;
+      this._spawnService(service);
+      await this._waitServiceHealthy(service.name);
+    }
+
+    this._writeState();
+    return { added, removed, changed };
+  }
+
   async stopService(name, { restart = false } = {}) {
     const record = this.records.get(name);
     if (!record) throw new Error(`unknown service ${name}`);

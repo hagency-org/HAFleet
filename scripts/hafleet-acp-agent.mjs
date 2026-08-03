@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 
 import { validateOutboxRequest } from '../lib/acp-outbox.js';
 import { anyReplyable, buildReplyHint } from '../lib/reply-hint.js';
+import { codexPermissionRequestNeedsOwnerApproval } from '../lib/codex-permission-hook.js';
 import { buildSummary } from '../lib/message-summary.js';
 import { createAcpRuntime } from '../lib/runtime/acp.js';
 import { getFramework } from '../lib/frameworks/index.js';
@@ -106,9 +107,54 @@ const mcpServers = agentToken ? [{
   ],
 }] : [];
 
+/**
+ * Answer session/request_permission.
+ *
+ * codex-acp asks the client before running an MCP tool, and a client that does
+ * not answer is not merely impolite: the agent blocks until something times out.
+ * Every turn that touched an MCP tool died at the 600s prompt timeout with no
+ * output, which reads as a hung model rather than an unanswered request.
+ *
+ * The decision reuses the rule the tmux path already applies via the Codex
+ * permission hook, so an agent gets the same answer on either transport. That
+ * rule allows HAFleet's own coordination tools — reading an inbox is not shell
+ * access — and refers everything else for approval, which here means declining.
+ * send_message carrying attachments is refused, because it can exfiltrate a file.
+ */
+function decidePermission({ server, tool, options, title, input }) {
+  // Only ever approve our own MCP server's tools. Anything whose identity we
+  // could not establish from the tool_call update is declined, not guessed at.
+  if (!server || server !== MCP_SERVER_NAME || !tool) {
+    log(`declining a permission request we cannot identify (${title ?? 'unknown tool'})`);
+    return null;
+  }
+  const qualified = `mcp__${MCP_SERVER_NAME.replace(/-/g, '_')}__${tool}`;
+  // The arguments must go too. send_message and post are allowlisted only while
+  // they carry no attachments, so the hook inspects tool_input — and treats a
+  // missing one as "cannot tell, refer for approval". Omitting it declined every
+  // reply with "not a trusted coordination tool", which is the opposite of what
+  // the allowlist says: the agent read its inbox, composed "PARITY", and was then
+  // refused permission to send it.
+  if (codexPermissionRequestNeedsOwnerApproval({ tool_name: qualified, tool_input: input ?? {} })) {
+    log(`declining ${qualified}: needs owner approval (attachments, or not allowlisted)`);
+    return null;
+  }
+  // allow_once, deliberately: never allow_always. A per-call decision keeps the
+  // policy in force for the rest of the session instead of widening it once.
+  const once = options.find((o) => o.kind === 'allow_once') ?? options.find((o) => o.optionId === 'allow_once');
+  if (!once) {
+    log(`no allow_once option offered for ${qualified}; declining rather than allowing always`);
+    return null;
+  }
+  return once.optionId;
+}
+
 const runtime = createAcpRuntime({
   command: framework.launch.command,
   args: acpArgs,
+  decidePermission,
+  // Declared per adapter: octos takes --cwd, hermes-acp rejects it.
+  cwdFlag: framework.launch.acpCwdFlag ?? null,
   // The agent's own diagnostics. Noisy lines are worth it: this is the only
   // channel where a paneless agent can tell an operator what went wrong.
   onStderr: (_agent, line) => log(`  [${frameworkId}] ${line.slice(0, 300)}`),
@@ -127,7 +173,27 @@ if (!(await runtime.isAvailable())) {
 // mode 0700.
 const SESSION_ID_FILE = path.join(STATE_DIR, 'acp-session-id');
 
+/**
+ * Values that are not session ids but survive `${id}` interpolation. Writing a
+ * null id produced the six-character string "null", which reads back as a
+ * perfectly truthy id and was then sent to session/load. hermes answered with a
+ * warning rather than an error, so the resume looked like it worked and the agent
+ * came up with sessionId "null".
+ */
+const NOT_AN_ID = new Set(['null', 'undefined', 'NaN', '']);
+
+/** True when a value can be used, stored, or sent as a session id. */
+export function isUsableSessionId(id) {
+  return typeof id === 'string' && !NOT_AN_ID.has(id.trim());
+}
+
 function rememberSessionId(id) {
+  if (!isUsableSessionId(id)) {
+    // Nothing to remember. Leaving the previous id alone is right: a failed start
+    // should not erase a good session from an earlier one.
+    log(`not storing an unusable session id (${JSON.stringify(id)}); keeping any previous one`);
+    return;
+  }
   try {
     mkdirSync(STATE_DIR, { recursive: true });
     writeFileSync(SESSION_ID_FILE, `${id}\n`, { mode: 0o600 });
@@ -141,10 +207,31 @@ function recallSessionId() {
   try {
     if (!existsSync(SESSION_ID_FILE)) return null;
     const id = readFileSync(SESSION_ID_FILE, 'utf8').trim();
-    return id || null;
+    if (!isUsableSessionId(id)) {
+      // An id poisoned by an older build. Start fresh rather than resuming nothing.
+      log(`ignoring a stored session id that is not one (${JSON.stringify(id)})`);
+      return null;
+    }
+    return id;
   } catch {
     return null;
   }
+}
+
+/**
+ * Report why a session could not be opened, and stop.
+ *
+ * The JSON-RPC `data` field is where an agent puts the actual reason — a bare
+ * `${error.data}` printed "[object Object]" and threw away the only useful part.
+ * That is how a hermes start that failed for want of a model provider looked
+ * identical to every other Internal error.
+ */
+function failToOpen(error) {
+  const detail = error?.data === undefined || error?.data === null
+    ? ''
+    : typeof error.data === 'string' ? error.data : JSON.stringify(error.data, null, 2);
+  process.stderr.write(`failed to open an ACP session: ${error?.message ?? error}\n${detail ? `${detail}\n` : ''}`);
+  process.exit(1);
 }
 
 const cwd = path.resolve(workspace);
@@ -167,12 +254,10 @@ try {
     try {
       sessionId = await runtime.startSession(name, { cwd });
     } catch (retryError) {
-      process.stderr.write(`failed to open an ACP session: ${retryError.message}\n${retryError.data ? `${retryError.data}\n` : ''}`);
-      process.exit(1);
+      failToOpen(retryError);
     }
   } else {
-    process.stderr.write(`failed to open an ACP session: ${error.message}\n${error.data ? `${error.data}\n` : ''}`);
-    process.exit(1);
+    failToOpen(error);
   }
 }
 // "requested", not "attached": session/new accepting the field does not mean the

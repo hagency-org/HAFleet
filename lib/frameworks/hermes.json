@@ -2,61 +2,73 @@
   "id": "hermes",
   "displayName": "Hermes",
   "upstream": "https://github.com/NousResearch/hermes-agent",
-  "launchable": true,
+  "launchable": false,
   "launch": {
-    "command": "hermes",
+    "command": "hermes-acp",
     "defaultArgs": [],
     "modelFlag": "--model",
     "permissionSummary": "hermes interactive approval prompts (bypass flags refused)",
     "interfaceFlag": "--cli",
     "resumeFlag": "--resume",
-    "initPromptDelivery": "keystrokes",
-    "initPromptComment": "Hermes cannot take an initial prompt while staying interactive: both -z/--oneshot and `chat -q` print one response and exit. So the REPL is started first and the prompt is typed in, which is the same mechanism the relay uses for every later message. This is the approach bin/hafleet-up abandoned for Codex (\"tmux key timing is unreliable while Codex is still drawing its first prompt\") — it is safe here only because readiness is detected from signals.ready below rather than from a timer or from the pane merely holding still."
-  },
-  "signals": {
-    "comment": "Confirmed by reading cli.py in the upstream checkout. Hermes renders a selection prompt for dangerous commands with the choices Allow once / Allow for this session / Add to permanent allowlist / Deny.",
-    "blocked": [
-      {
-        "marker": "hermes-dangerous-command",
-        "summary": "Dangerous command awaiting approval",
-        "re": "⚠️\\s+Dangerous Command"
-      },
-      {
-        "marker": "hermes-approval-choices",
-        "summary": "Approval prompt awaiting a choice",
-        "re": "Allow for this session"
-      }
-    ],
-    "compact": [
-      {
-        "marker": "hermes-context-compacted",
-        "summary": "Compacting context",
-        "re": "⟳\\s*compacting context"
-      }
-    ],
-    "compactComment": "Confirmed at agent/conversation_loop.py:4770 — agent._safe_print(\"  ⟳ compacting context…\"). Note that _build_compact_banner in cli.py is NOT this: it sizes a startup banner to the terminal width. The ellipsis is deliberately outside the pattern so a change in how it is rendered does not break the match.",
-    "ready": [
-      {
-        "marker": "hermes-repl-prompt",
-        "summary": "REPL accepting input",
-        "re": "^\\s*❯",
-        "fixed": "❯"
-      }
-    ],
-    "readyComment": "Verified live against Hermes Agent v0.18.2: `hermes --cli` renders a '❯' prompt between two horizontal rules, under a status line. Detecting stability instead of this marker does NOT work — the pane sits unchanged for ~1s after the launch command is echoed and before Hermes produces any output, so a settle check reports ready while the REPL does not yet exist and the typed prompt is lost. Each ready pattern also carries `fixed`: a literal substring safe for `grep -F` in shell, so bin/hafleet-up never has to assume a regex dialect. A test asserts the regex matches the fixed string, so the two cannot drift apart."
+    "acpArgs": [],
+    "commandNote": "hermes-acp is the ACP entry point (acp_adapter.entry:main), installed by the [acp] extra. It is a separate binary rather than a subcommand, unlike `octos acp`.",
+    "initPromptDeliveryNote": "Was 'keystrokes' on the tmux path: hermes needed its opening prompt typed into the pane after a readiness marker appeared, because a settle check fired ~1s early and the typed prompt was lost. Over ACP the prompt is a session/prompt request, so there is nothing to time and no marker to wait for. Original note: Hermes cannot take an initial prompt while staying interactive: both -z/--oneshot and `chat -q` print one response and exit. So the REPL is started first and the prompt is typed in, which is the same mechanism the relay uses for every later message. This is the approach bin/hafleet-up abandoned for Codex (\"tmux key timing is unreliable while Codex is still drawing its first prompt\") \u2014 it is safe here only because readiness is detected from signals.ready below rather than from a timer or from the pane merely holding still."
   },
   "acp": {
     "comment": "Hermes also ships a full ACP server (hermes-acp, or `hermes acp`) advertising session fork/list/resume. Recorded for when HAFleet grows an ACP runtime; the tmux path above is what is wired today.",
-    "command": "hermes-acp"
+    "command": "hermes-acp",
+    "honorsMcpServers": true,
+    "mcpServersNote": "hermes registers ACP-supplied MCP servers on session/new (_register_session_mcp_servers: 'Register ACP-provided MCP servers and refresh the agent tool surface'). HAFleet's tools ride the protocol, so no config-file injection is needed \u2014 unlike octos, which ignores the field.",
+    "declaredCapabilities": "loadSession, sessionCapabilities{fork,list,resume}, promptCapabilities{image} \u2014 verified against v0.19.1"
   },
   "guards": {
     "flags": {
-      "comment": "Hermes prompts for dangerous commands by default, which is the behaviour HAFleet relies on to detect a blocked agent — so it passes no policy args and instead refuses the two flags that would remove the prompt. --safe-mode, --ignore-user-config and --ignore-rules are deliberately NOT guarded: they narrow behaviour or skip context injection, they do not widen permissions.",
+      "comment": "Hermes prompts for dangerous commands by default, which is the behaviour HAFleet relies on to detect a blocked agent \u2014 so it passes no policy args and instead refuses the two flags that would remove the prompt. --safe-mode, --ignore-user-config and --ignore-rules are deliberately NOT guarded: they narrow behaviour or skip context injection, they do not widen permissions.",
       "exact": [
         "--yolo",
         "--accept-hooks"
       ],
       "message": "Hermes approval policy flag is managed by hafleet: {token}"
     }
-  }
+  },
+  "transport": "acp",
+  "signals": {
+    "comment": "Emptied when hermes moved to ACP. Progress now arrives as session/update notifications, so there is no pane to scrape and no readiness marker to match. The previous tmux patterns were confirmed by reading upstream cli.py and agent/conversation_loop.py:4770, and are preserved below in case the tmux path is ever needed again.",
+    "blocked": [],
+    "compact": [],
+    "ready": [],
+    "retiredTmuxSignals": {
+      "comment": "Confirmed by reading cli.py in the upstream checkout. Hermes renders a selection prompt for dangerous commands with the choices Allow once / Allow for this session / Add to permanent allowlist / Deny.",
+      "blocked": [
+        {
+          "marker": "hermes-dangerous-command",
+          "summary": "Dangerous command awaiting approval",
+          "re": "\u26a0\ufe0f\\s+Dangerous Command"
+        },
+        {
+          "marker": "hermes-approval-choices",
+          "summary": "Approval prompt awaiting a choice",
+          "re": "Allow for this session"
+        }
+      ],
+      "compact": [
+        {
+          "marker": "hermes-context-compacted",
+          "summary": "Compacting context",
+          "re": "\u27f3\\s*compacting context"
+        }
+      ],
+      "compactComment": "Confirmed at agent/conversation_loop.py:4770 \u2014 agent._safe_print(\"  \u27f3 compacting context\u2026\"). Note that _build_compact_banner in cli.py is NOT this: it sizes a startup banner to the terminal width. The ellipsis is deliberately outside the pattern so a change in how it is rendered does not break the match.",
+      "ready": [
+        {
+          "marker": "hermes-repl-prompt",
+          "summary": "REPL accepting input",
+          "re": "^\\s*\u276f",
+          "fixed": "\u276f"
+        }
+      ],
+      "readyComment": "Verified live against Hermes Agent v0.18.2: `hermes --cli` renders a '\u276f' prompt between two horizontal rules, under a status line. Detecting stability instead of this marker does NOT work \u2014 the pane sits unchanged for ~1s after the launch command is echoed and before Hermes produces any output, so a settle check reports ready while the REPL does not yet exist and the typed prompt is lost. Each ready pattern also carries `fixed`: a literal substring safe for `grep -F` in shell, so bin/hafleet-up never has to assume a regex dialect. A test asserts the regex matches the fixed string, so the two cannot drift apart."
+    }
+  },
+  "notLaunchableReason": "hafleet-up creates a tmux session and an ACP agent has no pane; start it with `hafleet acp-up <name> <workspace> hermes` instead"
 }
