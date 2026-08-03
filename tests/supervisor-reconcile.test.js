@@ -233,3 +233,27 @@ describe('SIGHUP is wired to a reload', () => {
     expect(source).toMatch(/loadServiceProfile\(\{ profilePath, repoRoot \}\)/);
   });
 });
+
+describe('acp-up reloads instead of restarting', () => {
+  const source = readFileSync('bin/hafleet-acp-up', 'utf-8');
+
+  test('it signals a running supervisor', () => {
+    // `launchctl kickstart -k` kills and respawns the job. Using it to add one
+    // agent restarts every other service — and if a supervisor was started by
+    // hand rather than by launchd, kickstart adds a second one. Two supervisors
+    // both spawn the backend; it dies on EADDRINUSE and the fleet goes with it.
+    expect(source).toContain('kill -HUP');
+    expect(source).toContain('supervisor.pid.json');
+  });
+
+  test('kickstart is only the fallback when nothing is running', () => {
+    expect(source.indexOf('kill -HUP')).toBeLessThan(source.indexOf('launchctl kickstart'));
+    expect(source).toMatch(/if \[ "\$RELOADED" = false \]; then/);
+  });
+
+  test('both halves of the lifecycle use the same mechanism', () => {
+    // Adding and removing an agent should not differ in how disruptive they are.
+    const down = readFileSync('bin/hafleet-acp-down', 'utf-8');
+    for (const src of [source, down]) expect(src).toContain('kill -HUP');
+  });
+});

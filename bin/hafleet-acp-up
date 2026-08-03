@@ -144,6 +144,27 @@ if [ "$SUPERVISED" = true ]; then
     echo "  Stopped the unsupervised host; the supervisor owns this agent now."
   fi
 
+  # Prefer signalling the running supervisor over restarting it. `kickstart -k`
+  # kills and respawns the launchd job, taking every other service down for the
+  # sake of adding one agent — and if a supervisor was started by hand rather
+  # than by launchd, kickstart adds a SECOND one. Two supervisors both spawn the
+  # backend, it dies on EADDRINUSE, and the fleet goes with it. Observed.
+  SUPERVISOR_PID_FILE="$BASE_DIR/data/services-local/supervisor.pid.json"
+  RELOADED=false
+  if [ -f "$SUPERVISOR_PID_FILE" ]; then
+    SUPERVISOR_PID="$(node -e "
+      const fs = require('fs');
+      try { process.stdout.write(String(JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).pid ?? '')); }
+      catch { process.stdout.write(''); }
+    " "$SUPERVISOR_PID_FILE")"
+    if [ -n "$SUPERVISOR_PID" ] && kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
+      kill -HUP "$SUPERVISOR_PID"
+      echo "  Signalled the running supervisor to reload; other services were left alone."
+      RELOADED=true
+    fi
+  fi
+
+  if [ "$RELOADED" = false ]; then
   case "$(uname -s)" in
     Darwin)
       if launchctl kickstart -k "gui/$(id -u)/io.hafleet.services" >/dev/null 2>&1; then
@@ -166,6 +187,7 @@ if [ "$SUPERVISED" = true ]; then
       echo "  Registered. Reload your supervisor to start it." >&2
       ;;
   esac
+  fi
 
   echo "Agent '$NAME' ($FRAMEWORK over ACP) is supervised as 'agent:$NAME'."
   echo "  profile: $PROFILE"
