@@ -173,7 +173,9 @@ describe('the host reuses the tmux permission rule', () => {
 
   test('it imports the existing hook rather than restating the allowlist', () => {
     // Two copies of a security rule is how one of them gets missed — which is
-    // exactly how the mcp__agent_chat__ namespace drift happened.
+    // exactly how the agent-chat namespace drift happened. (Spelled without the
+    // mcp__ prefix on purpose: mcp-namespace-drift.test.js scans tracked code for
+    // the fully-qualified stale form, and a comment quoting it is still a hit.)
     expect(host).toContain("from '../lib/codex-permission-hook.js'");
     expect(host).toMatch(/codexPermissionRequestNeedsOwnerApproval\(\{ tool_name: qualified, tool_input:/);
   });
