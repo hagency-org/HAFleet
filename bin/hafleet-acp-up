@@ -312,9 +312,33 @@ nohup node "$BASE_DIR/scripts/hafleet-acp-agent.mjs" \
 AGENT_PID=$!
 echo "$AGENT_PID" > "$PID_FILE"; chmod 600 "$PID_FILE"
 
-sleep 6
-if ! kill -0 "$AGENT_PID" 2>/dev/null; then
-  echo "Error: the ACP agent exited immediately. Last lines:" >&2
+# Wait for the readiness marker the host prints as its LAST startup step, not for a
+# fixed number of seconds. `sleep 6` was a stopwatch where the tmux path has real
+# readiness signals: an agent that needs longer than 6s looked broken, and one that
+# died at t=7s looked healthy. hermes spends ~10s loading plugins before it even
+# attempts a session.
+READY_MARKER="registered with the backend"
+READY=false
+READY_DEADLINE=$(( $(date +%s) + 45 ))
+while [ "$(date +%s)" -lt "$READY_DEADLINE" ]; do
+  if grep -qa "$READY_MARKER" "$LOG_DIR/$NAME.log" 2>/dev/null; then
+    READY=true
+    break
+  fi
+  if ! kill -0 "$AGENT_PID" 2>/dev/null; then
+    break   # died before it was ready; reported below with the log
+  fi
+  sleep 1
+done
+
+if [ "$READY" != true ]; then
+  if kill -0 "$AGENT_PID" 2>/dev/null; then
+    echo "Error: the ACP agent started but never registered with the backend within 45s." >&2
+    kill "$AGENT_PID" 2>/dev/null || true
+  else
+    echo "Error: the ACP agent exited before it was ready." >&2
+  fi
+  echo "  last lines of $LOG_DIR/$NAME.log:" >&2
   tail -8 "$LOG_DIR/$NAME.log" >&2 || true
   rm -f "$PID_FILE"
   exit 1

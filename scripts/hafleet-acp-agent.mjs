@@ -500,6 +500,44 @@ function buildNudge(pending, messages) {
 let turnInFlight = false;
 let deliveredCount = 0;
 
+/**
+ * Replace a session that has stopped answering.
+ *
+ * Bounded on purpose. Recycling is the automated form of the manual restart that
+ * is known to fix this, but a session that will not come back must not be retried
+ * forever — after a few attempts the whole host exits so the supervisor restarts
+ * it, which is the heavier hammer that definitely works.
+ */
+let consecutiveRecycles = 0;
+const MAX_CONSECUTIVE_RECYCLES = 3;
+
+async function recycleSession() {
+  consecutiveRecycles += 1;
+  if (consecutiveRecycles > MAX_CONSECUTIVE_RECYCLES) {
+    log(`session unusable after ${MAX_CONSECUTIVE_RECYCLES} recycle attempts; exiting so the supervisor restarts this host`);
+    process.exit(1);
+  }
+  log(`recycling the ACP session (attempt ${consecutiveRecycles}/${MAX_CONSECUTIVE_RECYCLES})`);
+  try {
+    runtime.stop(name);
+  } catch (error) {
+    log(`  could not stop the old session cleanly (${error.message}); continuing`);
+  }
+  try {
+    // Resume from the stored id so context is not lost just because the transport
+    // had to be rebuilt. A fresh session is still better than a dead one.
+    const resumed = await runtime.startSession(name, {
+      cwd, mcpServers, resumeSessionId: recallSessionId(),
+    });
+    rememberSessionId(resumed);
+    log(`  session replaced: ${resumed}`);
+    return true;
+  } catch (error) {
+    log(`  could not reopen a session (${error.message})`);
+    return false;
+  }
+}
+
 async function pollAndDeliver() {
   if (!agentToken) return;
   // Before the early return: an agent mid-turn is exactly when the fleet most
@@ -544,6 +582,15 @@ async function pollAndDeliver() {
     const cursor = runtime.updateCursor(name);
     const stopReason = await runtime.prompt(name, buildNudge(pending, messages));
     log(`turn finished (${stopReason})`);
+    // Only CONSECUTIVE failures should escalate to a host restart. Without this the
+    // counter is a lifetime total and three unrelated timeouts days apart would take
+    // the agent down.
+    consecutiveRecycles = 0;
+    if (!stopReason) {
+      // The state the session was in immediately before it wedged. Worth naming
+      // rather than logging as if it were a normal ending.
+      log('  stopReason was null — the turn did not end cleanly');
+    }
 
     // Record what the agent said and which tools it used. Without this a turn that
     // ends in 'end_turn' having done nothing is indistinguishable from one that did
@@ -572,7 +619,18 @@ async function pollAndDeliver() {
     // is for claude and codex.
     await drainOutbox();
   } catch (error) {
-    log(`delivery failed: ${error.message}${error.data ? ` — ${error.data}` : ''}`);
+    const detail = error?.data === undefined || error?.data === null
+      ? ''
+      : typeof error.data === 'string' ? error.data : JSON.stringify(error.data);
+    log(`delivery failed: ${error.message}${detail ? ` — ${detail}` : ''}`);
+    // A prompt that timed out means the session stopped answering, and nothing here
+    // used to do anything about it: the session stayed in place, so every later
+    // nudge hung for another 600s and the agent was useless until someone restarted
+    // it by hand. That is exactly what happened to codex-acp-agent — one turn ended
+    // with stopReason null and an unfinished tool call, and the next delivery ten
+    // hours later timed out. A manual restart fixed it instantly, which is the
+    // clue: the session was dead, not the agent.
+    if (/timed out/.test(error.message || '')) await recycleSession();
   } finally {
     turnInFlight = false;
   }

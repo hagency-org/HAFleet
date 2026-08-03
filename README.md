@@ -212,6 +212,11 @@ hafleet service status
 
 Then open the dashboard at `http://127.0.0.1:8084`.
 
+Agents run over one of two transports, decided by their framework adapter: tmux
+(`hafleet up`) or ACP (`hafleet acp-up`). `hafleet ls` shows which in the `TRANS`
+column. See [docs/agent-onboarding.md](docs/agent-onboarding.md) for both paths,
+what onboarding actually does, and what the failure messages mean.
+
 Dashboard pages:
 
 | Path | Purpose |
