@@ -81,6 +81,23 @@ if [ "$TRANSPORT" != "acp" ]; then
   exit 1
 fi
 
+# Refuse a --model the adapter cannot deliver, before anything is registered or
+# spawned. The framework's CLI model flag is NOT its ACP one: octos acp takes
+# --model, hermes-acp dies on it ("unrecognized arguments"), and codex-acp accepts
+# it and ignores it. Silently dropping the flag is worse than refusing it, because
+# the operator goes on believing a model was selected.
+if [ -n "$MODEL" ]; then
+  ACP_MODEL_FLAG="$(node -e "
+    const { getFramework } = await import('$BASE_DIR/lib/frameworks/index.js');
+    process.stdout.write(getFramework(process.argv[1])?.launch?.acpModelFlag ?? '');
+  " "$FRAMEWORK")"
+  if [ -z "$ACP_MODEL_FLAG" ]; then
+    echo "Error: '$FRAMEWORK' takes no model flag over ACP, so --model '$MODEL' cannot be applied." >&2
+    echo "       Select the model inside the agent instead, and re-run without --model." >&2
+    exit 1
+  fi
+fi
+
 STATE_DIR="${HAFLEET_HOMEDIR:-$HOME/.hafleet}/agents/agent_${NAME}/state"
 mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
 if [ ! -s "$STATE_DIR/agent-token" ]; then
@@ -189,10 +206,103 @@ if [ "$SUPERVISED" = true ]; then
   esac
   fi
 
+  # Verify it actually came up, and STAYED up.
+  #
+  # This branch used to print success unconditionally, so an agent that could never
+  # start still reported "is supervised as ..." — hermes did exactly that and then
+  # crash-looped 35 times on a missing credential.
+  #
+  # A single healthy reading is not enough, which the first version of this check
+  # got wrong: an agent's health type is `process`, so it reads healthy the moment
+  # the process exists. hermes spends ~10s loading plugins before it dies, so the
+  # first poll passed and the check reported success for an agent that never
+  # served a request. The failure mode is a crash LOOP, and the field that exposes
+  # one is `restarts`. So: require health sustained across several samples with the
+  # restart count never moving.
+  if [ "$RELOADED" = true ]; then
+    SERVICE="agent:$NAME"
+    SETTLED=false
+    STABLE=0
+    BASELINE=""
+    DEADLINE=$(( $(date +%s) + 60 ))
+    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+      sleep 4
+      # `|| true` matters: `services status` exits non-zero when ANY service is
+      # unhealthy, which is precisely the case being detected here. Under
+      # `set -e` that killed the script mid-check, so acp-up exited 1 having
+      # printed no reason at all — worse than the unconditional success it
+      # replaced, because the operator learns nothing.
+      SAMPLE="$( { node "$BASE_DIR/services/hafleet-services.mjs" status \
+                  --profile "$PROFILE" --runtime "$BASE_DIR" --json 2>/dev/null || true; } \
+                | node -e "
+                    let raw = '';
+                    process.stdin.on('data', (d) => { raw += d; });
+                    process.stdin.on('end', () => {
+                      let parsed; try { parsed = JSON.parse(raw); } catch { return; }
+                      const rows = Array.isArray(parsed) ? parsed : (parsed.services ?? []);
+                      const row = rows.find((s) => s.name === process.argv[1]);
+                      if (row) process.stdout.write(\`\${row.healthy ? 'up' : 'down'} \${row.restarts ?? 0}\`);
+                    });
+                  " "$SERVICE" || true)"
+      HEALTH="${SAMPLE%% *}"
+      RESTARTS="${SAMPLE##* }"
+      [ -z "$SAMPLE" ] && continue
+      [ -z "$BASELINE" ] && BASELINE="$RESTARTS"
+      if [ "$HEALTH" = up ] && [ "$RESTARTS" = "$BASELINE" ]; then
+        STABLE=$(( STABLE + 1 ))
+        # Three consecutive good samples, so at least ~12s of continuous health.
+        if [ "$STABLE" -ge 3 ]; then SETTLED=true; break; fi
+      else
+        # Any restart, or any unhealthy reading, means it is not settled. Start over
+        # from the new count so a slow first start is not mistaken for a loop.
+        STABLE=0
+        BASELINE="$RESTARTS"
+      fi
+    done
+    if [ "$SETTLED" != true ]; then
+      LOG="$BASE_DIR/data/services-local/logs/$SERVICE.log"
+      echo "Error: '$NAME' was registered but did not stay healthy (restarts=${RESTARTS:-?})." >&2
+      [ -f "$LOG" ] && { echo "  last lines of $LOG:" >&2; tail -8 "$LOG" >&2; }
+      echo "  It is still in the profile and the supervisor will keep retrying it." >&2
+      echo "  To take it back out:  hafleet acp-down $NAME" >&2
+      exit 1
+    fi
+  fi
+
   echo "Agent '$NAME' ($FRAMEWORK over ACP) is supervised as 'agent:$NAME'."
   echo "  profile: $PROFILE"
   echo "  status:  hafleet service status"
+  echo "  remove:  hafleet acp-down $NAME"
   exit 0
+fi
+
+# Refuse to start a second host for an agent the supervisor already owns.
+# acp.pid is written only by THIS path, so the check above cannot see a supervised
+# agent, and the host has no single-instance guard of its own. Two hosts on one
+# inbox both poll it, both nudge, and both answer — the duplicate-reply failure
+# twice over. The opposite direction was already handled: going supervised kills a
+# running unsupervised host. This is the same guard facing the other way.
+PROFILE_CHECK="$PROFILE"
+if [ -z "$PROFILE_CHECK" ]; then
+  for candidate in "$BASE_DIR/services-macos.json" "$BASE_DIR/services/services-local.json"; do
+    [ -f "$candidate" ] && PROFILE_CHECK="$candidate" && break
+  done
+fi
+if [ -n "$PROFILE_CHECK" ] && [ -f "$PROFILE_CHECK" ]; then
+  if node -e "
+        const fs = require('fs');
+        let profile;
+        try { profile = JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); } catch { process.exit(1); }
+        const services = Array.isArray(profile.services) ? profile.services : [];
+        process.exit(services.some((s) => s && s.name === process.argv[2]) ? 0 : 1);
+      " "$PROFILE_CHECK" "agent:$NAME"; then
+    echo "Error: '$NAME' is already registered with the supervisor in $(basename "$PROFILE_CHECK")." >&2
+    echo "       Starting an unsupervised host too would give one agent two hosts: both would" >&2
+    echo "       poll its inbox and both would reply." >&2
+    echo "  status:                 hafleet service status" >&2
+    echo "  to run unsupervised:    hafleet acp-down $NAME   (then re-run this command)" >&2
+    exit 1
+  fi
 fi
 
 LOG_DIR="$BASE_DIR/data/acp-agents"; mkdir -p "$LOG_DIR"
