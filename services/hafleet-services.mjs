@@ -99,7 +99,17 @@ function supervisorCommandMatches(pid, runtimeRoot) {
       encoding: 'utf8',
       timeout: 1000,
     });
-    return command.includes(cliPath) && command.includes(' run ') && command.includes(runtimeRoot);
+    // The supervisor is started as `node services/hafleet-services.mjs run ...`
+    // from the runtime root, so ps reports a RELATIVE script path while cliPath is
+    // absolute. Testing only the absolute form meant this never matched and `stop`
+    // refused with "supervisor PID belongs to an unexpected process" — the fleet
+    // could not be stopped through its own CLI. Observed on a fleet host, where
+    // the command line was exactly:
+    //   node services/hafleet-services.mjs run --profile ... --runtime <runtime-root>
+    const relativeCli = path.relative(runtimeRoot, cliPath);
+    const namesThisCli = command.includes(cliPath)
+      || (Boolean(relativeCli) && !relativeCli.startsWith('..') && command.includes(relativeCli));
+    return namesThisCli && command.includes(' run ') && command.includes(runtimeRoot);
   } catch {
     return false;
   }

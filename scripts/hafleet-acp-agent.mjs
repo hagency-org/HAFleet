@@ -109,6 +109,8 @@ const mcpServers = agentToken ? [{
 const runtime = createAcpRuntime({
   command: framework.launch.command,
   args: acpArgs,
+  // Declared per adapter: octos takes --cwd, hermes-acp rejects it.
+  cwdFlag: framework.launch.acpCwdFlag ?? null,
   // The agent's own diagnostics. Noisy lines are worth it: this is the only
   // channel where a paneless agent can tell an operator what went wrong.
   onStderr: (_agent, line) => log(`  [${frameworkId}] ${line.slice(0, 300)}`),
@@ -127,7 +129,27 @@ if (!(await runtime.isAvailable())) {
 // mode 0700.
 const SESSION_ID_FILE = path.join(STATE_DIR, 'acp-session-id');
 
+/**
+ * Values that are not session ids but survive `${id}` interpolation. Writing a
+ * null id produced the six-character string "null", which reads back as a
+ * perfectly truthy id and was then sent to session/load. hermes answered with a
+ * warning rather than an error, so the resume looked like it worked and the agent
+ * came up with sessionId "null".
+ */
+const NOT_AN_ID = new Set(['null', 'undefined', 'NaN', '']);
+
+/** True when a value can be used, stored, or sent as a session id. */
+export function isUsableSessionId(id) {
+  return typeof id === 'string' && !NOT_AN_ID.has(id.trim());
+}
+
 function rememberSessionId(id) {
+  if (!isUsableSessionId(id)) {
+    // Nothing to remember. Leaving the previous id alone is right: a failed start
+    // should not erase a good session from an earlier one.
+    log(`not storing an unusable session id (${JSON.stringify(id)}); keeping any previous one`);
+    return;
+  }
   try {
     mkdirSync(STATE_DIR, { recursive: true });
     writeFileSync(SESSION_ID_FILE, `${id}\n`, { mode: 0o600 });
@@ -141,10 +163,31 @@ function recallSessionId() {
   try {
     if (!existsSync(SESSION_ID_FILE)) return null;
     const id = readFileSync(SESSION_ID_FILE, 'utf8').trim();
-    return id || null;
+    if (!isUsableSessionId(id)) {
+      // An id poisoned by an older build. Start fresh rather than resuming nothing.
+      log(`ignoring a stored session id that is not one (${JSON.stringify(id)})`);
+      return null;
+    }
+    return id;
   } catch {
     return null;
   }
+}
+
+/**
+ * Report why a session could not be opened, and stop.
+ *
+ * The JSON-RPC `data` field is where an agent puts the actual reason — a bare
+ * `${error.data}` printed "[object Object]" and threw away the only useful part.
+ * That is how a hermes start that failed for want of a model provider looked
+ * identical to every other Internal error.
+ */
+function failToOpen(error) {
+  const detail = error?.data === undefined || error?.data === null
+    ? ''
+    : typeof error.data === 'string' ? error.data : JSON.stringify(error.data, null, 2);
+  process.stderr.write(`failed to open an ACP session: ${error?.message ?? error}\n${detail ? `${detail}\n` : ''}`);
+  process.exit(1);
 }
 
 const cwd = path.resolve(workspace);
@@ -167,12 +210,10 @@ try {
     try {
       sessionId = await runtime.startSession(name, { cwd });
     } catch (retryError) {
-      process.stderr.write(`failed to open an ACP session: ${retryError.message}\n${retryError.data ? `${retryError.data}\n` : ''}`);
-      process.exit(1);
+      failToOpen(retryError);
     }
   } else {
-    process.stderr.write(`failed to open an ACP session: ${error.message}\n${error.data ? `${error.data}\n` : ''}`);
-    process.exit(1);
+    failToOpen(error);
   }
 }
 // "requested", not "attached": session/new accepting the field does not mean the

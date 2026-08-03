@@ -19,18 +19,44 @@ describe('the registry loads and validates its manifests', () => {
     expect(frameworkIds()).toEqual(['claude', 'codex', 'hermes', 'octos']);
   });
 
-  test('all three are launchable, and an unknown name still is not', () => {
-    expect(launchableFrameworkIds()).toEqual(['claude', 'codex', 'hermes']);
-    expect(launchBlockedReason('hermes')).toBeNull();
+  test('only the tmux frameworks are hafleet-up launchable', () => {
+    // "Launchable" here means launchable by hafleet-up, which creates a tmux
+    // session. An ACP agent has no pane, so octos and now hermes are blocked from
+    // that path and started with `hafleet acp-up` instead. hermes moved when its
+    // transport changed; leaving it launchable meant hafleet-up would look for a
+    // ready signal the adapter no longer declares and fail with "no ready signal
+    // declared for hermes", which reads as a missing field rather than a
+    // deliberate change of transport.
+    expect(launchableFrameworkIds()).toEqual(['claude', 'codex']);
     expect(launchBlockedReason('nope')).toBe('unknown framework: nope');
+  });
+
+  test('every ACP framework is blocked from the tmux launcher, with a reason that names acp-up', () => {
+    // Stated as an invariant over the registry rather than a list, so the next
+    // adapter to move to ACP cannot be half-migrated.
+    for (const framework of listFrameworks()) {
+      if (framework.transport !== 'acp') continue;
+      const reason = launchBlockedReason(framework.id);
+      expect(reason, `${framework.id} is ACP but still hafleet-up launchable`).toBeTruthy();
+      expect(reason).toContain('acp-up');
+      expect(reason).toContain(framework.id);
+    }
   });
 
   test('a framework that types its init prompt must declare how to know the REPL is live', () => {
     // Guards the actual bug this cost: without a readiness signal the keystrokes
     // race process startup and are silently lost.
-    const hermes = getFramework('hermes');
-    expect(hermes.launch.initPromptDelivery).toBe('keystrokes');
-    expect(hermes.signals.ready.length).toBeGreaterThan(0);
+    //
+    // No framework types its init prompt today — hermes was the last and moved to
+    // ACP, where the prompt is a session/prompt request with nothing to time. The
+    // rule still has to hold for whichever framework needs it next, so this asserts
+    // the invariant across the registry rather than naming one adapter.
+    for (const framework of listFrameworks()) {
+      if (framework.launch.initPromptDelivery !== 'keystrokes') continue;
+      expect(framework.signals.ready.length,
+        `${framework.id} types its init prompt but declares no readiness signal`)
+        .toBeGreaterThan(0);
+    }
   });
 
   test('each ready pattern agrees with its own grep -F literal', () => {
@@ -44,16 +70,27 @@ describe('the registry loads and validates its manifests', () => {
     }
   });
 
-  test('hermes carries the approval signal confirmed from upstream cli.py', () => {
+  test('hermes keeps its hard-won tmux signals on record after moving to ACP', () => {
+    // These cost a reading of upstream cli.py and conversation_loop.py to establish.
+    // hermes now runs over ACP, where pane signals are meaningless and the registry
+    // rejects them — but deleting them would throw away the research if the tmux
+    // path is ever needed again, so they are retired rather than removed.
     const hermes = getFramework('hermes');
-    expect(hermes.signals.blocked.map((s) => s.marker))
+    expect(hermes.transport).toBe('acp');
+    expect(hermes.signals.blocked).toEqual([]);
+    const retired = hermes.raw.signals.retiredTmuxSignals;
+    // Raw manifest entries carry `re`; the compiler renames it to `regex`. Reading
+    // the wrong one yields `new RegExp(undefined)` — an empty pattern that matches
+    // everything, so every positive assertion below would pass vacuously. Only the
+    // negative assertion at the end catches that, which is why it is here.
+    expect(retired.blocked.map((s) => s.marker))
       .toEqual(['hermes-dangerous-command', 'hermes-approval-choices']);
-    expect(hermes.signals.blocked[0].regex.test('  \u26a0\ufe0f  Dangerous Command')).toBe(true);
-    expect(hermes.signals.blocked[1].regex.test('> Allow for this session')).toBe(true);
+    expect(new RegExp(retired.blocked[0].re).test('  \u26a0\ufe0f  Dangerous Command')).toBe(true);
+    expect(new RegExp(retired.blocked[1].re).test('> Allow for this session')).toBe(true);
     // Confirmed at agent/conversation_loop.py:4770 in the upstream checkout:
     // agent._safe_print("  \u27f3 compacting context\u2026")
-    expect(hermes.signals.compact.map((s) => s.marker)).toEqual(['hermes-context-compacted']);
-    const compact = hermes.signals.compact[0].regex;
+    expect(retired.compact.map((s) => s.marker)).toEqual(['hermes-context-compacted']);
+    const compact = new RegExp(retired.compact[0].re);
     expect(compact.test('  \u27f3 compacting context\u2026')).toBe(true);
     // Must NOT fire on the two lines that look like matches but are not: one
     // sizes a startup banner, the other is prose inside a system prompt.
@@ -243,13 +280,16 @@ describe('shell callers read the registry instead of their own list', () => {
   });
 
   test('launchable lists the ones hafleet-up can start', () => {
-    expect(run(['launchable']).stdout.trim().split('\n')).toEqual(['claude', 'codex', 'hermes']);
+    // hermes left this list when it moved to ACP; the ACP pair is started by
+    // `hafleet acp-up`, which does not consult this gate.
+    expect(run(['launchable']).stdout.trim().split('\n')).toEqual(['claude', 'codex']);
   });
 
   test.each([
     ['claude', 0, ''],
     ['codex', 0, ''],
-    ['hermes', 0, ''],
+    ['hermes', 1, /acp-up <name> <workspace> hermes/],
+    ['octos', 1, /acp-up <name> <workspace> octos/],
     ['nope', 1, /unknown framework: nope/],
   ])('check %s exits %i', (id, code, stderrMatch) => {
     const result = run(['check', id]);
@@ -257,10 +297,19 @@ describe('shell callers read the registry instead of their own list', () => {
     if (stderrMatch) expect(result.stderr).toMatch(stderrMatch);
   });
 
-  test('ready-fixed prints the literal hafleet-up greps for', () => {
-    expect(run(['ready-fixed', 'hermes']).stdout).toBe('\u276f');
+  test('ready-fixed refuses for frameworks with no readiness signal', () => {
+    // hermes was the one framework that printed a literal here; on ACP it has no
+    // pane and no marker, so it now refuses like the others. Kept as a test rather
+    // than deleted because hafleet-up branches on this exit status — a framework
+    // that starts declaring a ready pattern must start printing one.
+    expect(run(['ready-fixed', 'hermes']).code).toBe(1);
     // claude passes its prompt as an argument, so it declares no ready signal.
     expect(run(['ready-fixed', 'claude']).code).toBe(1);
+    // The command still works for anything that does declare one.
+    const withReady = ['claude', 'codex', 'hermes', 'octos']
+      .map((id) => run(['ready-fixed', id]))
+      .filter((r) => r.code === 0);
+    for (const r of withReady) expect(r.stdout.length).toBeGreaterThan(0);
   });
 
   test('bad usage exits 2, distinct from a refusal', () => {
@@ -337,7 +386,7 @@ describe('bin/hafleet-up defers to the registry', () => {
     expect(stderr).not.toMatch(/unrecognized argument/);
     expect(stderr).toMatch(/cannot launch type 'octos'/);
     expect(stderr).toMatch(/hafleet acp-up/);
-    expect(stderr).toMatch(/Launchable types: claude codex hermes/);
+    expect(stderr).toMatch(/Launchable types: claude codex/);
   });
 
   describe('the hermes branch', () => {
