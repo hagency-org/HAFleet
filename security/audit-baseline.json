@@ -26,18 +26,6 @@
       "title": "express-rate-limit: IPv4-mapped IPv6 addresses bypass per-client rate limiting on servers with dual-stack network"
     },
     {
-      "id": "GHSA-4C8G-83QW-93J6",
-      "severity": "high",
-      "package": "fast-uri",
-      "title": "fast-uri vulnerable to host confusion via failed IDN canonicalization"
-    },
-    {
-      "id": "GHSA-88FW-HQM2-52QC",
-      "severity": "high",
-      "package": "hono",
-      "title": "hono: CORS Middleware reflects any Origin with credentials when `origin` defaults to the wildcard"
-    },
-    {
       "id": "GHSA-HMW2-7CC7-3QXX",
       "severity": "high",
       "package": "form-data",
@@ -50,34 +38,10 @@
       "title": "path-to-regexp vulnerable to Denial of Service via sequential optional groups"
     },
     {
-      "id": "GHSA-Q3J6-QGPJ-74H6",
-      "severity": "high",
-      "package": "fast-uri",
-      "title": "fast-uri vulnerable to path traversal via percent-encoded dot segments"
-    },
-    {
-      "id": "GHSA-Q5QW-H33P-QVWR",
-      "severity": "high",
-      "package": "hono",
-      "title": "Hono vulnerable to arbitrary file access via serveStatic vulnerability"
-    },
-    {
       "id": "GHSA-R5FR-RJXR-66JC",
       "severity": "high",
       "package": "lodash",
       "title": "lodash vulnerable to Code Injection via `_.template` imports key names"
-    },
-    {
-      "id": "GHSA-V2HH-GCRM-F6HX",
-      "severity": "high",
-      "package": "fast-uri",
-      "title": "fast-uri vulnerable to host confusion via literal backslash authority delimiter"
-    },
-    {
-      "id": "GHSA-V39H-62P7-JPJC",
-      "severity": "high",
-      "package": "fast-uri",
-      "title": "fast-uri vulnerable to host confusion via percent-encoded authority delimiters"
     },
     {
       "id": "GHSA-WC8C-QW6V-H7F6",
@@ -86,52 +50,16 @@
       "title": "@hono/node-server has authorization bypass for protected static paths via encoded slashes in Serve Static Middleware"
     },
     {
-      "id": "GHSA-26PP-8WGV-HJVM",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono missing validation of cookie name on write path in setCookie()"
-    },
-    {
       "id": "GHSA-27V5-C462-WPQ7",
       "severity": "moderate",
       "package": "path-to-regexp",
       "title": "path-to-regexp vulnerable to Regular Expression Denial of Service via multiple wildcards"
     },
     {
-      "id": "GHSA-2GCR-MFCQ-WCC3",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono: app.mount() strips mount prefix using undecoded path, causing incorrect routing for percent-encoded paths"
-    },
-    {
-      "id": "GHSA-3HRH-PFW6-9M5X",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono: Cookie helper does not sanitize sameSite and priority, allowing Set-Cookie injection"
-    },
-    {
-      "id": "GHSA-458J-XX4X-4375",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "hono Improperly Handles JSX Attribute Names Allows HTML Injection in hono/jsx SSR"
-    },
-    {
       "id": "GHSA-4VJ7-5MJ6-JM8M",
       "severity": "moderate",
       "package": "morgan",
       "title": "morgan vulnerable to Log Forging via unneutralized control characters in :remote-user"
-    },
-    {
-      "id": "GHSA-5PQ2-9X2X-5P6W",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono Vulnerable to Cookie Attribute Injection via Unsanitized domain and path in setCookie()"
-    },
-    {
-      "id": "GHSA-69XW-7HCM-H432",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "hono/jsx has Unvalidated JSX Tag Names that May Allow HTML Injection"
     },
     {
       "id": "GHSA-6RW7-VPXM-498P",
@@ -152,52 +80,16 @@
       "title": "@hono/node-server: Middleware bypass via repeated slashes in serveStatic"
     },
     {
-      "id": "GHSA-9VQF-7F2P-GF9V",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono: bodyLimit() can be bypassed for chunked / unknown-length requests"
-    },
-    {
       "id": "GHSA-F23M-R3PF-42RH",
       "severity": "moderate",
       "package": "lodash",
       "title": "lodash vulnerable to Prototype Pollution via array path bypass in `_.unset` and `_.omit`"
     },
     {
-      "id": "GHSA-F577-QRJJ-4474",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono: JWT middleware accepts any Authorization scheme, not only Bearer"
-    },
-    {
       "id": "GHSA-FRVP-7C67-39W9",
       "severity": "moderate",
       "package": "@hono/node-server",
       "title": "Node.js Adapter for Hono: Path traversal in `serve-static` on Windows via encoded backslash (`%5C`)"
-    },
-    {
-      "id": "GHSA-HVRM-45R6-MJFJ",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "hono/jsx does not isolate context per request, leading to cross-request data disclosure"
-    },
-    {
-      "id": "GHSA-J6C9-X7QJ-28XF",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "hono: AWS Lambda adapter merges multiple `Set-Cookie` headers into one value, dropping cookies on ALB single-header and Lattice"
-    },
-    {
-      "id": "GHSA-P6XX-57QC-3WXR",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono Vulnerable to SSE Control Field Injection via CR/LF in writeSSE()"
-    },
-    {
-      "id": "GHSA-P77W-8QQV-26RM",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono's Cache Middleware ignores Vary: Authorization / Vary: Cookie leading to cross-user cache leakage"
     },
     {
       "id": "GHSA-P8P7-X288-28G6",
@@ -212,94 +104,10 @@
       "title": "qs has a remotely triggerable DoS: qs.stringify crashes with TypeError on null/undefined entries in comma-format arrays when encodeValuesOnly is set"
     },
     {
-      "id": "GHSA-QP7P-654G-CW7P",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono has CSS Declaration Injection via Style Object Values in JSX SSR"
-    },
-    {
-      "id": "GHSA-R5RP-J6WH-RVV4",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono: Non-breaking space prefix bypass in cookie name handling in getCookie()"
-    },
-    {
-      "id": "GHSA-RV63-4MWF-QQC2",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "hono: Body Limit Middleware can be bypassed on AWS Lambda by understating `Content-Length`"
-    },
-    {
-      "id": "GHSA-V2V4-37R5-5V8G",
-      "severity": "moderate",
-      "package": "ip-address",
-      "title": "ip-address has XSS in Address6 HTML-emitting methods"
-    },
-    {
-      "id": "GHSA-V8W9-8MX6-G223",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono vulnerable to Prototype Pollution possible through __proto__ key allowed in parseBody({ dot: true })"
-    },
-    {
       "id": "GHSA-W5HQ-G745-H8PQ",
       "severity": "moderate",
       "package": "uuid",
       "title": "uuid: Missing buffer bounds check in v3/v5/v6 when buf is provided"
-    },
-    {
-      "id": "GHSA-W62V-XXXG-MG59",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono: Server-Side XSS via JSX Escaping Bypass in cx() Utility"
-    },
-    {
-      "id": "GHSA-WGPF-JWQJ-8H8P",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "hono: Lambda@Edge adapter keeps only the last value of a repeated request header, dropping the rest"
-    },
-    {
-      "id": "GHSA-WMMM-F939-6G9C",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono: Middleware bypass via repeated slashes in serveStatic"
-    },
-    {
-      "id": "GHSA-WWFH-H76J-FC44",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "hono: Path traversal in `serve-static` on Windows via encoded backslash (`%5C`)"
-    },
-    {
-      "id": "GHSA-XF4J-XP2R-RQQX",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono: Path traversal in toSSG() allows writing files outside the output directory"
-    },
-    {
-      "id": "GHSA-XGM2-5F3F-MVVC",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono: API Gateway v1 adapter can drop a distinct repeated request header value during de-duplication"
-    },
-    {
-      "id": "GHSA-XPCF-PG52-R92G",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono has incorrect IP matching in ipRestriction() for IPv4-mapped IPv6 addresses"
-    },
-    {
-      "id": "GHSA-XRHX-7G5J-RCJ5",
-      "severity": "moderate",
-      "package": "hono",
-      "title": "Hono: IP Restriction bypasses static deny rules for non-canonical IPv6"
-    },
-    {
-      "id": "GHSA-HM8Q-7F3Q-5F36",
-      "severity": "low",
-      "package": "hono",
-      "title": "Hono has improper validation of NumericDate claims (exp, nbf, iat) in JWT verify()"
     },
     {
       "id": "GHSA-V422-HMWV-36X6",
