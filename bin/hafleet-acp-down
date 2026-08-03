@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Remove a supervised ACP agent from the service profile and stop it, without
+# restarting the fleet.
+#
+# `hafleet acp-up --supervised` could add an entry but nothing could take one
+# out. Removing one meant hand-editing the profile and restarting everything,
+# because the supervisor holds its profile in memory. Doing exactly that to drop
+# a crash-looping agent took the backend down with it.
+set -euo pipefail
+
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
+  cat <<'USAGE'
+Usage: hafleet acp-down <name> [--profile <file>] [--keep-running]
+
+Remove a supervised ACP agent from the service profile and stop its process.
+
+Options:
+  --profile <f>   Service profile to edit (default: the installed one)
+  --keep-running  Deregister only; leave the running process alone. It will not
+                  be restarted if it dies, and will not come back after a reboot.
+  -h, --help      Show this help
+USAGE
+}
+
+for arg in "$@"; do
+  if [ "$arg" = "-h" ] || [ "$arg" = "--help" ]; then usage; exit 0; fi
+done
+
+NAME="${1:?Usage: hafleet-acp-down <name> [--profile <file>]}"
+shift
+PROFILE=""
+KEEP_RUNNING=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) PROFILE="${2:?--profile requires a value}"; shift 2 ;;
+    --keep-running) KEEP_RUNNING=true; shift ;;
+    *) echo "unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [ -z "$PROFILE" ]; then
+  for candidate in "$BASE_DIR/services-macos.json" "$BASE_DIR/services/services-local.json"; do
+    [ -f "$candidate" ] && PROFILE="$candidate" && break
+  done
+fi
+[ -n "$PROFILE" ] && [ -f "$PROFILE" ] || {
+  echo "Error: no service profile found; pass --profile <file>" >&2
+  exit 1
+}
+
+node "$BASE_DIR/scripts/hafleet-supervise-agent.mjs" remove --name "$NAME" --profile "$PROFILE"
+
+if [ "$KEEP_RUNNING" = true ]; then
+  echo "Left the running process alone; it is no longer supervised."
+  exit 0
+fi
+
+# Tell the running supervisor to re-read the profile. Without this the entry is
+# gone from disk but the supervisor keeps restarting the agent from memory —
+# which is what made the removal look like it had not worked.
+PID_FILE="$BASE_DIR/data/services-local/supervisor.pid.json"
+if [ -f "$PID_FILE" ]; then
+  SUPERVISOR_PID="$(node -e "
+    const fs = require('fs');
+    try { process.stdout.write(String(JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).pid ?? '')); }
+    catch { process.stdout.write(''); }
+  " "$PID_FILE")"
+  if [ -n "$SUPERVISOR_PID" ] && kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
+    kill -HUP "$SUPERVISOR_PID"
+    echo "Removed '$NAME' from $(basename "$PROFILE") and signalled the supervisor to reload."
+    exit 0
+  fi
+fi
+echo "Removed '$NAME' from $(basename "$PROFILE"). No running supervisor found, so nothing to reload."

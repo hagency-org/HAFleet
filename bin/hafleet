@@ -21,6 +21,7 @@ Usage: hafleet <command> [args]
 Core:
   up             Start or resume an agent (tmux frameworks)
   acp-up         Start a paneless ACP agent (octos)
+  acp-down       Deregister a supervised ACP agent and stop it
   up-v1          Provision + launch a new v1 agent-home runtime
   project        Manage v1 agent project bindings
   graph          Manage orchestration task graphs
@@ -89,6 +90,7 @@ case "$cmd" in
   sync-skills) dispatch "hafleet-sync-skills" "$@" ;;
   reminder|self-time-reminder) dispatch "self-time-reminder" "$@" ;;
   acp-up) dispatch "hafleet-acp-up" "$@" ;;
+  acp-down) dispatch "hafleet-acp-down" "$@" ;;
   tell) dispatch "hafleet-cli" tell "$@" ;;
   cli|admin) dispatch "hafleet-cli" "$@" ;;
   check-mcp) dispatch "check-mcp" "$@" ;;

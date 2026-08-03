@@ -209,7 +209,7 @@ function output(value, json) {
   }
 }
 
-async function runSupervisor({ profile, runtimeRoot, paths }) {
+async function runSupervisor({ profile, profilePath, runtimeRoot, paths }) {
   mkdirSync(paths.dir, { recursive: true, mode: 0o700 });
   const supervisor = new LocalServiceSupervisor({
     profile,
@@ -239,6 +239,34 @@ async function runSupervisor({ profile, runtimeRoot, paths }) {
   };
   process.once('SIGTERM', () => { stop('SIGTERM').finally(() => process.exit(0)); });
   process.once('SIGINT', () => { stop('SIGINT').finally(() => process.exit(0)); });
+
+  // SIGHUP re-reads the profile and applies additions and removals in place.
+  // Without it, dropping one supervised agent meant restarting the whole fleet,
+  // which is how a single crash-looping agent turned into a backend outage.
+  // `once` is wrong here: a reload must be repeatable.
+  let reloading = false;
+  process.on('SIGHUP', () => {
+    if (reloading || stopping) return;
+    reloading = true;
+    (async () => {
+      try {
+        const next = loadServiceProfile({ profilePath, repoRoot });
+        const { added, removed, changed } = await supervisor.reconcile(next);
+        const summary = [
+          removed.length ? `removed ${removed.join(', ')}` : null,
+          added.length ? `added ${added.join(', ')}` : null,
+          // Named, not applied — see reconcile().
+          changed.length ? `${changed.join(', ')} changed but left running (restart to apply)` : null,
+        ].filter(Boolean).join('; ') || 'no changes';
+        process.stdout.write(`[hafleet-services] reload: ${summary}\n`);
+      } catch (error) {
+        // A reload that fails must leave the running fleet exactly as it was.
+        process.stderr.write(`[hafleet-services] reload failed, keeping the running profile: ${error.message}\n`);
+      } finally {
+        reloading = false;
+      }
+    })();
+  });
 
   try {
     await supervisor.start();
@@ -328,7 +356,7 @@ async function main() {
   const paths = runtimePaths(options.runtimeRoot);
   let result;
   if (options.command === 'run') {
-    await runSupervisor({ profile, runtimeRoot: options.runtimeRoot, paths });
+    await runSupervisor({ profile, profilePath: options.profilePath, runtimeRoot: options.runtimeRoot, paths });
     return;
   }
   if (options.command === 'start') {
