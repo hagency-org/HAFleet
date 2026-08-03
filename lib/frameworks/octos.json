@@ -17,7 +17,9 @@
     "permissionSummary": "octos sandbox as configured (hafleet never passes --danger-full-access)",
     "acpArgsNote": "coding-full is required, not a preference. octos's default 'coding' profile narrows the tool registry with ToolRegistry::filter_by_profile, an allow-list retain(). MCP tool names are not in that list, so operator-configured MCP tools are evicted \u2014 and because McpService is an Arc<RunningService>, eviction drops the last references and cancels the transport. Observed on mini5 as 'MCP server started tools=11' followed 1ms later by 'task cancelled' and 'Child exited'. Under coding-full the child survives and the agent reaches HAFleet's tools: verified by octos calling whoami and check_inbox and returning their real output.",
     "acpCwdFlag": "--cwd",
-    "acpCwdFlagNote": "octos acp accepts --cwd as the default working directory when a client omits it from session/new. hermes-acp rejects the flag and dies before the handshake, so it is declared per adapter rather than assumed."
+    "acpCwdFlagNote": "octos acp accepts --cwd as the default working directory when a client omits it from session/new. hermes-acp rejects the flag and dies before the handshake, so it is declared per adapter rather than assumed.",
+    "acpModelFlag": "--model",
+    "acpModelFlagNote": "Verified: `octos acp --help` lists --model <MODEL> and the handshake survives it. Declared separately from launch.modelFlag because that one describes the tmux CLI, and the two are not the same surface \u2014 hermes-acp and codex-acp take no model flag at all even though their CLIs do."
   },
   "guards": {
     "flags": {

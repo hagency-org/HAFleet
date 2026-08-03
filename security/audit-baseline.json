@@ -32,12 +32,6 @@
       "title": "fast-uri vulnerable to host confusion via failed IDN canonicalization"
     },
     {
-      "id": "GHSA-6G55-P6WH-862Q",
-      "severity": "high",
-      "package": "postcss",
-      "title": "PostCSS: Arbitrary file read and information disclosure via attacker-controlled sourceMappingURL in CSS comments"
-    },
-    {
       "id": "GHSA-88FW-HQM2-52QC",
       "severity": "high",
       "package": "hono",
@@ -66,12 +60,6 @@
       "severity": "high",
       "package": "hono",
       "title": "Hono vulnerable to arbitrary file access via serveStatic vulnerability"
-    },
-    {
-      "id": "GHSA-R28C-9Q8G-F849",
-      "severity": "high",
-      "package": "postcss",
-      "title": "PostCSS: Path Traversal in Previous Source Map Auto-Loading (sourceMappingURL) leads to Arbitrary .map File Disclosure"
     },
     {
       "id": "GHSA-R5FR-RJXR-66JC",
@@ -228,12 +216,6 @@
       "severity": "moderate",
       "package": "hono",
       "title": "Hono has CSS Declaration Injection via Style Object Values in JSX SSR"
-    },
-    {
-      "id": "GHSA-QX2V-QP2M-JG93",
-      "severity": "moderate",
-      "package": "postcss",
-      "title": "PostCSS has XSS via Unescaped </style> in its CSS Stringify Output"
     },
     {
       "id": "GHSA-R5RP-J6WH-RVV4",

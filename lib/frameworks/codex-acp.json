@@ -12,7 +12,9 @@
     "modelFlag": "--model",
     "permissionSummary": "level2 (workspace-write + on-request)",
     "acpArgs": [],
-    "commandNote": "codex-acp is an adapter, not codex itself: it wraps the Codex SDK and speaks ACP on stdio. Unlike octos and hermes, whose vendors ship ACP directly, this puts a third-party process in the chain, version-coupled to both the adapter and the codex CLI underneath it. Installed from @agentclientprotocol/codex-acp; the older @zed-industries/codex-acp is deprecated in favour of it."
+    "commandNote": "codex-acp is an adapter, not codex itself: it wraps the Codex SDK and speaks ACP on stdio. Unlike octos and hermes, whose vendors ship ACP directly, this puts a third-party process in the chain, version-coupled to both the adapter and the codex CLI underneath it. Installed from @agentclientprotocol/codex-acp; the older @zed-industries/codex-acp is deprecated in favour of it.",
+    "acpModelFlag": null,
+    "acpModelFlagNote": "codex-acp accepts --model without complaint and then ignores it \u2014 verified: the handshake succeeds either way. Declaring null so hafleet refuses the flag up front rather than letting an operator believe a model was selected when it was not."
   },
   "acp": {
     "command": "codex-acp",

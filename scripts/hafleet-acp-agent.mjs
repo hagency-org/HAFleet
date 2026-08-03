@@ -49,7 +49,21 @@ if (framework.transport !== 'acp') {
 }
 
 const acpArgs = [...(framework.launch.acpArgs ?? ['acp'])];
-if (model && framework.launch.modelFlag) acpArgs.push(framework.launch.modelFlag, model);
+// launch.modelFlag describes the framework's own CLI, which is a different surface
+// from its ACP entry point: octos acp takes --model, hermes-acp dies on it, and
+// codex-acp accepts it and ignores it. Using the CLI's flag here made --model
+// fatal for one adapter and a silent no-op for another, so the ACP flag is
+// declared separately and a model with nowhere to go is an error rather than a
+// guess. Refusing beats pretending the model was applied.
+if (model) {
+  const flag = framework.launch.acpModelFlag ?? null;
+  if (!flag) {
+    process.stderr.write(`${frameworkId} takes no model flag over ACP; --model ${model} would be `
+      + `${frameworkId === 'hermes' ? 'fatal' : 'silently ignored'}. Select the model in the agent itself.\n`);
+    process.exit(2);
+  }
+  acpArgs.push(flag, model);
+}
 
 const log = (message) => process.stdout.write(`[${new Date().toISOString()}] ${message}\n`);
 
