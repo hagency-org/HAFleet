@@ -1,0 +1,63 @@
+{
+  "id": "codex-acp",
+  "displayName": "Codex (ACP)",
+  "upstream": "https://www.npmjs.com/package/@agentclientprotocol/codex-acp",
+  "comment": "Codex over ACP. Separate from the `codex` adapter deliberately: this is a trial transport for an agent that already works over tmux, and merging them would put a working production agent behind an untested code path. Retire one of the two once a winner is clear.",
+  "launchable": false,
+  "notLaunchableReason": "hafleet-up creates a tmux session and an ACP agent has no pane; start it with `hafleet acp-up <name> <workspace> codex-acp` instead",
+  "transport": "acp",
+  "launch": {
+    "command": "codex-acp",
+    "defaultArgs": [],
+    "modelFlag": "--model",
+    "permissionSummary": "level2 (workspace-write + on-request)",
+    "acpArgs": [],
+    "commandNote": "codex-acp is an adapter, not codex itself: it wraps the Codex SDK and speaks ACP on stdio. Unlike octos and hermes, whose vendors ship ACP directly, this puts a third-party process in the chain, version-coupled to both the adapter and the codex CLI underneath it. Installed from @agentclientprotocol/codex-acp; the older @zed-industries/codex-acp is deprecated in favour of it."
+  },
+  "acp": {
+    "command": "codex-acp",
+    "honorsMcpServers": true,
+    "mcpServersNote": "Verified live: codex-acp spawns the MCP server passed in session/new (observed as mcp-server.js with the vendored codex binary as its parent) and calls its tools. Unlike octos, which accepted the field and spawned nothing. Note it declares mcpCapabilities {acp:false, http:true, sse:false} \u2014 that governs MCP over the ACP connection itself, not the plain stdio server used here.",
+    "declaredCapabilities": "Verified live against codex-acp 1.1.9: protocolVersion 1, loadSession true, sessionCapabilities{resume,list,close,delete,additionalDirectories}, promptCapabilities{embeddedContext,image}, authMethods[api-key,chat-gpt]. session/new succeeded using the codex CLI's existing login, so this adapter carries no separate credential.",
+    "permissionNote": "codex-acp asks the CLIENT before running an MCP tool: session/request_permission with _meta.is_mcp_tool_approval, offering allow_once/allow_session/allow_always/decline. The request identifies the call only by toolCallId and carries no tool name, so the preceding tool_call update must be correlated to answer it. HAFleet answers allow_once for its own coordination tools and declines everything else, reusing lib/codex-permission-hook.js. octos never asks, which is why this gap went unnoticed until codex-acp hung every turn for the full 600s prompt timeout.",
+    "verifiedEndToEnd": "2026-08-03: received a type=request over ACP, called check_inbox through HAFleet's MCP server, and replied via send_message (msg_0099, msg_0100, both 'PARITY'). Same contract as octos and the tmux agents."
+  },
+  "guards": {
+    "flags": {
+      "comment": "Sandbox and approval level are chosen by HAFleet. The patterns cover the clustered short forms (-sfoo, -a=never) that a plain prefix match would miss.",
+      "exact": [
+        "--yolo",
+        "--full-auto",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--sandbox",
+        "-s",
+        "--ask-for-approval",
+        "-a"
+      ],
+      "prefix": [
+        "--sandbox=",
+        "--ask-for-approval="
+      ],
+      "pattern": [
+        "^-s(?:=|[^-])",
+        "^-a(?:=|[^-])"
+      ],
+      "message": "Codex Level 2 policy flag is managed by hafleet: {token}"
+    },
+    "config": {
+      "comment": "The same policy can be set through -c/--config, in four spellings: as a separate argument, and inline as --config=K=V, -c=K=V or -cK=V.",
+      "flags": [
+        "-c",
+        "--config"
+      ],
+      "inlinePrefix": [
+        "--config=",
+        "-c=",
+        "-c"
+      ],
+      "keyPattern": "^(?:approval_policy|sandbox_mode|sandbox_permissions)\\s*=|^(?:[A-Za-z0-9_-]+\\.)+(?:approval_policy|sandbox_mode|sandbox_permissions)\\s*=",
+      "message": "Codex Level 2 config is managed by hafleet: {key}",
+      "inlineMessage": "Codex Level 2 config is managed by hafleet"
+    }
+  }
+}

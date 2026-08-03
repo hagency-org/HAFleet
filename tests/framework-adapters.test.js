@@ -16,7 +16,7 @@ describe('the registry loads and validates its manifests', () => {
   test('ships its adapters in a stable order', () => {
     // Order is contractual: it decides nothing today because the guard sets are
     // disjoint, but a future adapter could overlap.
-    expect(frameworkIds()).toEqual(['claude', 'codex', 'hermes', 'octos']);
+    expect(frameworkIds()).toEqual(['claude', 'codex-acp', 'codex', 'hermes', 'octos']);
   });
 
   test('only the tmux frameworks are hafleet-up launchable', () => {
@@ -134,8 +134,8 @@ describe('which guards apply', () => {
 
   test('an unspecified framework gets all of them', () => {
     // Refusing a flag only one framework cares about is harmless; allowing one is not.
-    expect(applicableFrameworks('').map((f) => f.id)).toEqual(['claude', 'codex', 'hermes', 'octos']);
-    expect(applicableFrameworks(null).map((f) => f.id)).toEqual(['claude', 'codex', 'hermes', 'octos']);
+    expect(applicableFrameworks('').map((f) => f.id)).toEqual(['claude', 'codex-acp', 'codex', 'hermes', 'octos']);
+    expect(applicableFrameworks(null).map((f) => f.id)).toEqual(['claude', 'codex-acp', 'codex', 'hermes', 'octos']);
   });
 
   test('KNOWN GAP: an unrecognised framework name gets no guards at all', () => {
@@ -276,7 +276,7 @@ describe('shell callers read the registry instead of their own list', () => {
   };
 
   test('ids lists every declared framework, launchable or not', () => {
-    expect(run(['ids']).stdout.trim().split('\n')).toEqual(['claude', 'codex', 'hermes', 'octos']);
+    expect(run(['ids']).stdout.trim().split('\n')).toEqual(['claude', 'codex-acp', 'codex', 'hermes', 'octos']);
   });
 
   test('launchable lists the ones hafleet-up can start', () => {
@@ -306,7 +306,7 @@ describe('shell callers read the registry instead of their own list', () => {
     // claude passes its prompt as an argument, so it declares no ready signal.
     expect(run(['ready-fixed', 'claude']).code).toBe(1);
     // The command still works for anything that does declare one.
-    const withReady = ['claude', 'codex', 'hermes', 'octos']
+    const withReady = ['claude', 'codex-acp', 'codex', 'hermes', 'octos']
       .map((id) => run(['ready-fixed', id]))
       .filter((r) => r.code === 0);
     for (const r of withReady) expect(r.stdout.length).toBeGreaterThan(0);
@@ -458,5 +458,71 @@ describe('bin/hafleet-up defers to the registry', () => {
     // Legacy path, deliberately not migrated. Pinned so it is a visible debt
     // rather than a surprise for whoever adds the next framework.
     expect(readFileSync('bin/hafleet-up-v1', 'utf-8')).toContain('claude|codex');
+  });
+});
+
+describe('the codex-acp adapter', () => {
+  const acp = getFramework('codex-acp');
+  const codex = getFramework('codex');
+
+  test('is a separate adapter from codex, not a mutation of it', () => {
+    // codex-agent is a working production agent on tmux. Folding an untested
+    // transport into its manifest would put it behind a code path nobody has run.
+    expect(codex.transport ?? 'tmux').toBe('tmux');
+    expect(codex.launchable).toBe(true);
+    expect(acp.transport).toBe('acp');
+    expect(acp.launchable).toBe(false);
+  });
+
+  test('it inherits codex\'s guards verbatim rather than restating them', () => {
+    // Same underlying CLI, so the same flags must stay blocked. Two hand-written
+    // copies of a security guard is how one of them gets missed. Compared on .raw
+    // because the compiled object exposes flagGuard/configGuard, not guards.
+    expect(acp.raw.guards).toEqual(codex.raw.guards);
+  });
+
+  test('the inherited guards are live, not just present in the manifest', () => {
+    // Stronger than asserting the strings are there: drive the compiled guard and
+    // check it actually refuses. A manifest can carry a flag list that never got
+    // wired into flagGuard, and the string assertion would still pass.
+    // guardViolation takes the applicable-framework list, not a single manifest.
+    const acpScope = applicableFrameworks('codex-acp');
+    const codexScope = applicableFrameworks('codex');
+    for (const flag of ['--yolo', '--dangerously-bypass-approvals-and-sandbox', '--full-auto']) {
+      expect(guardViolation(flag, '', acpScope), `${flag} is not blocked for codex-acp`).toBeTruthy();
+      // And blocked for the same reason as on the tmux adapter.
+      expect(guardViolation(flag, '', acpScope)).toEqual(guardViolation(flag, '', codexScope));
+    }
+    expect(guardViolation('--verbose', '', acpScope)).toBeNull();
+  });
+
+  test('it declares no cwd flag, because the adapter takes none', () => {
+    // Verified against codex-acp 1.1.9: cwd rides session/new. octos is the only
+    // adapter that wants --cwd.
+    expect(acp.launch.acpCwdFlag ?? null).toBeNull();
+    expect(getFramework('octos').launch.acpCwdFlag).toBe('--cwd');
+  });
+
+  test('mcpServers support is recorded as observed, not inferred', () => {
+    // It advertises mcpCapabilities {acp:false, http:true, sse:false}, which is a
+    // different question from "does it honour a stdio server in session/new" —
+    // the one octos failed by accepting the field and spawning nothing. Confirmed
+    // by seeing mcp-server.js running with codex as its parent, then by the agent
+    // calling check_inbox and replying.
+    expect(acp.raw.acp.honorsMcpServers).toBe(true);
+    expect(acp.raw.acp.mcpServersNote).toMatch(/Verified live/);
+    expect(acp.raw.acp.verifiedEndToEnd).toMatch(/check_inbox/);
+  });
+
+  test('it records that this adapter asks permission, because octos does not', () => {
+    // The distinguishing behaviour, and the one that cost a full debug cycle: a
+    // client that does not answer session/request_permission hangs the agent.
+    expect(acp.raw.acp.permissionNote).toMatch(/session\/request_permission/);
+    expect(acp.raw.acp.permissionNote).toMatch(/octos never asks/);
+  });
+
+  test('it is honest that it is an adapter, not the vendor speaking ACP', () => {
+    expect(acp.launch.commandNote).toMatch(/adapter, not codex itself/);
+    expect(acp.launch.command).toBe('codex-acp');
   });
 });

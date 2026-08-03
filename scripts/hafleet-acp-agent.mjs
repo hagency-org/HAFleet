@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 
 import { validateOutboxRequest } from '../lib/acp-outbox.js';
 import { anyReplyable, buildReplyHint } from '../lib/reply-hint.js';
+import { codexPermissionRequestNeedsOwnerApproval } from '../lib/codex-permission-hook.js';
 import { buildSummary } from '../lib/message-summary.js';
 import { createAcpRuntime } from '../lib/runtime/acp.js';
 import { getFramework } from '../lib/frameworks/index.js';
@@ -106,9 +107,52 @@ const mcpServers = agentToken ? [{
   ],
 }] : [];
 
+/**
+ * Answer session/request_permission.
+ *
+ * codex-acp asks the client before running an MCP tool, and a client that does
+ * not answer is not merely impolite: the agent blocks until something times out.
+ * Every turn that touched an MCP tool died at the 600s prompt timeout with no
+ * output, which reads as a hung model rather than an unanswered request.
+ *
+ * The decision reuses the rule the tmux path already applies via the Codex
+ * permission hook, so an agent gets the same answer on either transport. That
+ * rule allows HAFleet's own coordination tools — reading an inbox is not shell
+ * access — and refers everything else for approval, which here means declining.
+ * send_message carrying attachments is refused, because it can exfiltrate a file.
+ */
+function decidePermission({ server, tool, options, title, input }) {
+  // Only ever approve our own MCP server's tools. Anything whose identity we
+  // could not establish from the tool_call update is declined, not guessed at.
+  if (!server || server !== MCP_SERVER_NAME || !tool) {
+    log(`declining a permission request we cannot identify (${title ?? 'unknown tool'})`);
+    return null;
+  }
+  const qualified = `mcp__${MCP_SERVER_NAME.replace(/-/g, '_')}__${tool}`;
+  // The arguments must go too. send_message and post are allowlisted only while
+  // they carry no attachments, so the hook inspects tool_input — and treats a
+  // missing one as "cannot tell, refer for approval". Omitting it declined every
+  // reply with "not a trusted coordination tool", which is the opposite of what
+  // the allowlist says: the agent read its inbox, composed "PARITY", and was then
+  // refused permission to send it.
+  if (codexPermissionRequestNeedsOwnerApproval({ tool_name: qualified, tool_input: input ?? {} })) {
+    log(`declining ${qualified}: needs owner approval (attachments, or not allowlisted)`);
+    return null;
+  }
+  // allow_once, deliberately: never allow_always. A per-call decision keeps the
+  // policy in force for the rest of the session instead of widening it once.
+  const once = options.find((o) => o.kind === 'allow_once') ?? options.find((o) => o.optionId === 'allow_once');
+  if (!once) {
+    log(`no allow_once option offered for ${qualified}; declining rather than allowing always`);
+    return null;
+  }
+  return once.optionId;
+}
+
 const runtime = createAcpRuntime({
   command: framework.launch.command,
   args: acpArgs,
+  decidePermission,
   // Declared per adapter: octos takes --cwd, hermes-acp rejects it.
   cwdFlag: framework.launch.acpCwdFlag ?? null,
   // The agent's own diagnostics. Noisy lines are worth it: this is the only
