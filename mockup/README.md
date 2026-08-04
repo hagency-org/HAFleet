@@ -32,7 +32,8 @@ is checked against the served HTML.
 | `/queue` | What is waiting for delivery, and what is it waiting on |
 | `/tasks` | What is blocked, overdue or unowned |
 | `/projects` | State of a coordinated project across agents and repos |
-| `/capacity` | Which roles have an idle agent available |
+| `/capacity` | Which roles have an idle agent available, and what is currently leased |
+| `/onboard` | What this host can actually run, and bringing one up |
 | `/config` | Fleet-wide policy, and the destructive things |
 
 `/` redirects to `/overview`. In the real dashboard it does **not** — `/` keeps serving
@@ -59,24 +60,79 @@ today's monitor until every surface in the migration table has a destination.
   decision.
 - **Every action reports its outcome**, success or failure, through one `role="status"`
   live region. Failures linger longer, because they are the ones needing action.
+- **Capacity is a scheduler view.** `/api/pool` is read by `lib/matrix-agent.js` and
+  `src/dispatch-lease-store.mjs`: `POST /api/dispatch` picks an agent from these cells and
+  leases it, and an expired lease raises the `dispatch_lease_expired` alert. Two drafts of
+  the design suggested retiring the page; both had checked the page and not the API.
 - **One `TaskList`** serves both fleet Tasks and the agent Work tab, which passes a
   locked assignee scope. Two renderers for one record is how the statuses in
   `lib/project-board.js` ended up with two vocabularies.
 
-## Verifying it
 
-With the app running on 3100:
+## Language and theme
 
-```bash
-node scripts/check-invariants.mjs
+Both switches are in the rail footer and persist to `localStorage`. English and
+Simplified Chinese, 407 keys in `lib/i18n.js`, and three theme states — light, dark,
+system — as a token swap in `app/globals.css`.
+
+Deliberately **not** translated: agent names and ids, lifecycle values that are also API
+values (`open`, `blocked`, `in_progress`), `ACTIVE`/`IDLE` because that is what
+`hafleet ls` prints, shell commands and env vars, and payload data such as alert
+summaries. Severity words *are* translated — the dot-and-word rule exists so severity
+never rests on colour, and an operator who cannot read "critical" is back to reading the
+dot. The raw API value stays in the element's `title`.
+
+## Onboarding
+
+`/onboard` reads a per-framework detection result and offers to bring up the ones that
+are ready. Every field it shows comes from `lib/frameworks/<id>.json`, the same manifests
+the launcher uses.
+
+**`GET /api/frameworks/detect` does not exist yet.** The page is drawn against the shape
+it needs; writing it is the implementation task. See the design doc for the field-by-field
+contract.
+
+`state` is derived, never stored: `ready` → `needs_auth` → `needs_setup` → `absent`,
+checked in that order. Four states because "installed" and "usable" came apart in
+practice — hermes with only the `[acp]` extra starts, reports healthy, and then cannot
+see `check_inbox`.
+
+No credential fields: an agent authenticates itself *before* it joins the fleet, so an
+unauthenticated framework gets the one command that fixes it and no input box.
+
+## Checks
+
+```
+npm run check            # 71 assertions against the served HTML
+npm run check:switches   # 33 assertions in a real browser
+npm run verify           # both
 ```
 
-Checks the route inventory, one `aria-current` per page, the full tablist contract,
-severity ordering, blocked-first task ordering, and that ACP agents are never offered
-pane polling.
+`check-invariants.mjs` covers the route inventory, one `aria-current` per page, the full
+tablist contract, severity ordering, blocked-first task ordering, that ACP agents are
+never offered pane polling, and the whole dictionary — both locales complete, placeholders
+matching, every key used, no key rendered raw. It needs the server running (`npm start`). `check-switches.mjs` also
+needs Chrome — it drives the system install through `puppeteer-core` and downloads
+nothing; override with `CHROME=/path/to/chrome`.
+
+The browser pass exists because the static pass reads server-rendered HTML, which is
+always English and always light. It covers what only a browser can see: that the words
+change, that dark actually repaints and is measurably darker, that contrast survives,
+that both choices survive a route change, that no page scrolls sideways at 375 / 640 /
+900 / 1440px, and that no button was shipped without a handler.
 
 ## Known limits
 
-It is a prototype. No backend, no persistence, no live pane proxying, and the numbers are
-illustrative rather than measured. The benchmark's *today* column in the design document
-still needs measuring against the real dashboard.
+It is a prototype: no backend, no persistence, no live pane proxying, and the numbers are
+illustrative rather than measured.
+
+Still open, and listed in the design document's gaps table:
+
+- `GET /api/frameworks/detect`, which `/onboard` is drawn against, has to be written.
+- The fixture has five agents. Layout at 1 / 20 / 100 is untested and needs fixture
+  variants rather than layout changes.
+- The dispatch queue and the message queue share the word "queue". Both pages point at
+  each other and say so; one needs renaming before either ships.
+- The benchmark's *today* column still needs measuring against the real dashboard.
+- `docs/design/page-*.jpg` predate several corrections the prototype carries. Prefer
+  `docs/design/shots/`, which is generated from the running app.

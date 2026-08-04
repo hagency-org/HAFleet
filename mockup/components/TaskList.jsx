@@ -2,7 +2,8 @@
 
 import { useMemo, useState } from 'react';
 import Link from 'next/link';
-import { byBlockedFirst, isOpenTask, TASK_TRANSITIONS, TRANSITION_LABELS } from '@/lib/mock-data';
+import { byBlockedFirst, isOpenTask, TASK_TRANSITIONS } from '@/lib/mock-data';
+import { useT } from '@/components/Prefs';
 
 /*
  * ONE list-and-detail renderer, used by both fleet Tasks and the agent Work tab.
@@ -20,33 +21,36 @@ import { byBlockedFirst, isOpenTask, TASK_TRANSITIONS, TRANSITION_LABELS } from 
  * BLOCKED and OVERDUE appear as words. Colour is never the only signal.
  */
 
-function relAge(iso) {
+// Relative age has to go through the dictionary too: "5m ago" is not readable
+// Chinese, and a number glued to an English unit is the classic half-translated UI.
+function relAge(iso, t) {
   if (!iso) return '—';
   const then = new Date(iso).getTime();
   const mins = Math.max(0, Math.round((Date.parse('2026-08-04T06:00:00Z') - then) / 60000));
-  if (mins < 60) return `${mins}m ago`;
-  if (mins < 1440) return `${Math.floor(mins / 60)}h ago`;
-  return `${Math.floor(mins / 1440)}d ago`;
+  if (mins < 60) return t('age.m', { n: mins });
+  if (mins < 1440) return t('age.h', { n: Math.floor(mins / 60) });
+  return t('age.d', { n: Math.floor(mins / 1440) });
 }
 
 export default function TaskList({ tasks, scope, onSay, lockedAssignee = null, agentNames = [] }) {
+  const t = useT();
   const [selectedId, setSelectedId] = useState(null);
   const [busy, setBusy] = useState(null);
   const [draft, setDraft] = useState('');
 
   const rows = useMemo(() => {
     let out = tasks;
-    if (lockedAssignee) out = out.filter((t) => t.assignee === lockedAssignee);
-    else if (scope.assignee === '__none') out = out.filter((t) => !t.assignee);
-    else if (scope.assignee && scope.assignee !== 'all') out = out.filter((t) => t.assignee === scope.assignee);
+    if (lockedAssignee) out = out.filter((x) => x.assignee === lockedAssignee);
+    else if (scope.assignee === '__none') out = out.filter((x) => !x.assignee);
+    else if (scope.assignee && scope.assignee !== 'all') out = out.filter((x) => x.assignee === scope.assignee);
 
     if (scope.status === 'open') out = out.filter(isOpenTask);
-    else if (scope.status && scope.status !== 'all') out = out.filter((t) => t.status === scope.status);
+    else if (scope.status && scope.status !== 'all') out = out.filter((x) => x.status === scope.status);
 
-    if (scope.priority && scope.priority !== 'all') out = out.filter((t) => t.priority === scope.priority);
+    if (scope.priority && scope.priority !== 'all') out = out.filter((x) => x.priority === scope.priority);
     if (scope.q) {
       const q = scope.q.toLowerCase();
-      out = out.filter((t) => t.title.toLowerCase().includes(q) || t.id.includes(q));
+      out = out.filter((x) => x.title.toLowerCase().includes(q) || x.id.includes(q));
     }
     return [...out].sort(byBlockedFirst);
   }, [tasks, scope, lockedAssignee]);
@@ -58,18 +62,18 @@ export default function TaskList({ tasks, scope, onSay, lockedAssignee = null, a
     setBusy(next);
     setTimeout(() => {
       setBusy(null);
-      onSay?.('ok', `${TRANSITION_LABELS[next]}: ${selected.id} → ${next.replace('_', ' ')}`);
+      onSay?.('ok', `${t(`tr.${next}`)}: ${selected.id} \u2192 ${next.replace('_', ' ')}`);
     }, 400);
   }
 
   if (rows.length === 0) {
     return (
       <div className="empty">
-        <div className="big">No tasks match this view</div>
+        <div className="big">{t('tk.noMatch')}</div>
         <p className="small">
           {lockedAssignee
-            ? `${lockedAssignee} has no tasks in this scope. A task is a work item with a lifecycle: created, accepted, in progress, blocked, done.`
-            : 'Widen a filter, or create one. A task is a work item assigned to an agent and grouped under a project.'}
+            ? t('tk.emptyLocked', { name: lockedAssignee })
+            : t('tk.emptyFleet')}
         </p>
         <div className="flow" style={{ justifyContent: 'center' }}>
           <span className="node">created</span><span className="arr">→</span>
@@ -80,8 +84,7 @@ export default function TaskList({ tasks, scope, onSay, lockedAssignee = null, a
           <span className="node">done</span>
         </div>
         <p className="small" style={{ marginTop: 10 }}>
-          <code>blocked</code> is a detour from <code>in progress</code> and returns to it — not a
-          step before <code>done</code>.
+          {t('tk.lifecycleNote')}
         </p>
       </div>
     );
@@ -93,48 +96,50 @@ export default function TaskList({ tasks, scope, onSay, lockedAssignee = null, a
         <table className="tbl">
           <thead>
             <tr>
-              <th>Status</th>
-              <th className="num">Pri</th>
-              <th>Task</th>
-              <th>Assignee</th>
-              <th>Waiting / heartbeat</th>
-              <th className="num">Updated</th>
+              <th>{t('col.status')}</th>
+              <th className="num">{t('col.priority')}</th>
+              <th>{t('col.task')}</th>
+              <th>{t('col.assignee')}</th>
+              <th>{t('tk.waitingHeartbeat')}</th>
+              <th className="num">{t('col.updated')}</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((t) => (
+            {rows.map((x) => (
               <tr
-                key={t.id}
-                aria-selected={selected?.id === t.id}
-                onClick={() => { setSelectedId(t.id); setDraft(''); }}
+                key={x.id}
+                aria-selected={selected?.id === x.id}
+                onClick={() => { setSelectedId(x.id); setDraft(''); }}
                 style={{ cursor: 'pointer' }}
               >
                 <td>
-                  <span className={`badge ${t.status}`}>
-                    {t.status === 'in_progress' ? 'IN PROGRESS' : t.status.toUpperCase()}
+                  {/* The status VALUE is not translated — it is the API's word and
+                      appears in curl output. Only the column heading is. */}
+                  <span className={`badge ${x.status}`}>
+                    {x.status === 'in_progress' ? 'IN PROGRESS' : x.status.toUpperCase()}
                   </span>
                 </td>
-                <td className="num">{t.priority}</td>
+                <td className="num">{x.priority}</td>
                 <td>
-                  <div>{t.title}</div>
-                  <div className="faint" style={{ fontSize: 11 }}>{t.id}</div>
+                  <div>{x.title}</div>
+                  <div className="faint" style={{ fontSize: 11 }}>{x.id}</div>
                 </td>
-                <td className="dim">{t.assignee ?? 'Unassigned'}</td>
+                <td className="dim">{x.assignee ?? t('tk.unassigned')}</td>
                 <td>
-                  {t.status === 'blocked' ? (
+                  {x.status === 'blocked' ? (
                     <>
-                      <div style={{ fontSize: 11.5 }}>{t.waiting_reason}</div>
-                      {t.overdue && <span className="badge overdue">OVERDUE</span>}
+                      <div style={{ fontSize: 11.5 }}>{x.waiting_reason}</div>
+                      {x.overdue && <span className="badge overdue">{t('ov.overdue')}</span>}
                     </>
-                  ) : t.status === 'in_progress' ? (
-                    <span className={`badge${t.stale ? ' attention' : ' ok'}`}>
-                      {t.stale ? 'HEARTBEAT STALE' : 'heartbeat ok'}
+                  ) : x.status === 'in_progress' ? (
+                    <span className={`badge${x.stale ? ' attention' : ' ok'}`}>
+                      {t(x.stale ? 'tk.heartbeatStale' : 'tk.heartbeatOk')}
                     </span>
                   ) : (
                     <span className="faint">—</span>
                   )}
                 </td>
-                <td className="num dim" title={t.updated_at}>{relAge(t.updated_at)}</td>
+                <td className="num dim" title={x.updated_at}>{relAge(x.updated_at, t)}</td>
               </tr>
             ))}
           </tbody>
@@ -145,44 +150,44 @@ export default function TaskList({ tasks, scope, onSay, lockedAssignee = null, a
         <div className="panel">
           <h3>{selected.title}</h3>
           <dl className="kv">
-            <dt>Id</dt><dd>{selected.id}</dd>
-            <dt>Status</dt>
+            <dt>{t('col.id')}</dt><dd>{selected.id}</dd>
+            <dt>{t('col.status')}</dt>
             <dd>
               <span className={`badge ${selected.status}`}>
                 {selected.status === 'in_progress' ? 'IN PROGRESS' : selected.status.toUpperCase()}
               </span>
             </dd>
-            <dt>Priority</dt><dd>{selected.priority}</dd>
-            <dt>Assignee</dt>
+            <dt>{t('col.priority')}</dt><dd>{selected.priority}</dd>
+            <dt>{t('col.assignee')}</dt>
             <dd>
               {selected.assignee
                 ? <Link href={`/agents/${selected.assignee}`}>{selected.assignee}</Link>
-                : 'Unassigned'}
+                : t('tk.unassigned')}
             </dd>
             {selected.labels?.length > 0 && (
               <>
-                <dt>Labels</dt>
+                <dt>{t('tk.labels')}</dt>
                 <dd>{selected.labels.map((l) => <span key={l} className="badge" style={{ marginRight: 5 }}>{l}</span>)}</dd>
               </>
             )}
-            <dt>Created</dt><dd className="dim">{relAge(selected.created_at)}</dd>
-            <dt>Updated</dt><dd className="dim">{relAge(selected.updated_at)}</dd>
+            <dt>{t('tk.created')}</dt><dd className="dim">{relAge(selected.created_at, t)}</dd>
+            <dt>{t('col.updated')}</dt><dd className="dim">{relAge(selected.updated_at, t)}</dd>
             {selected.status === 'blocked' && (
               <>
-                <dt>Waiting on</dt><dd>{selected.waiting_reason}</dd>
-                <dt>Until</dt>
+                <dt>{t('col.waitingOn')}</dt><dd>{selected.waiting_reason}</dd>
+                <dt>{t('tk.until')}</dt>
                 <dd>
                   {selected.waiting_until}{' '}
-                  {selected.overdue && <span className="badge overdue">OVERDUE</span>}
+                  {selected.overdue && <span className="badge overdue">{t('ov.overdue')}</span>}
                 </dd>
               </>
             )}
             {selected.status === 'in_progress' && (
               <>
-                <dt>Heartbeat</dt>
+                <dt>{t('tk.heartbeat')}</dt>
                 <dd>
-                  {relAge(selected.heartbeat_at)}{' '}
-                  {selected.stale && <span className="badge attention">STALE</span>}
+                  {relAge(selected.heartbeat_at, t)}{' '}
+                  {selected.stale && <span className="badge attention">{t('tk.stale')}</span>}
                 </dd>
               </>
             )}
@@ -193,20 +198,20 @@ export default function TaskList({ tasks, scope, onSay, lockedAssignee = null, a
           <div className="btn-row" style={{ marginTop: 14 }}>
             {TASK_TRANSITIONS[selected.status].length === 0 ? (
               <span className="dim" style={{ fontSize: 12 }}>
-                No transitions from “{selected.status}”.
+                {t('tk.noTransitions', { s: selected.status })}
               </span>
             ) : (
               TASK_TRANSITIONS[selected.status].map((n) => (
                 <button key={n} className="btn" disabled={busy === n} onClick={() => transition(n)}>
-                  {busy === n ? '…' : TRANSITION_LABELS[n]}
+                  {busy === n ? '…' : t(`tr.${n}`)}
                 </button>
               ))
             )}
           </div>
 
-          <h3 style={{ marginTop: 18 }}>Comments</h3>
+          <h3 style={{ marginTop: 18 }}>{t('tk.comments')}</h3>
           {selected.comments.length === 0 && (
-            <p className="faint" style={{ fontSize: 12 }}>None yet.</p>
+            <p className="faint" style={{ fontSize: 12 }}>{t('tk.noneYet')}</p>
           )}
           {selected.comments.map((c, i) => (
             <div key={i} style={{ fontSize: 12.5, marginBottom: 9 }}>
@@ -215,8 +220,8 @@ export default function TaskList({ tasks, scope, onSay, lockedAssignee = null, a
             </div>
           ))}
           <textarea
-            placeholder="Add a comment"
-            aria-label="Add a comment"
+            placeholder={t('tk.addComment')}
+            aria-label={t('tk.addComment')}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             rows={2}
@@ -229,24 +234,24 @@ export default function TaskList({ tasks, scope, onSay, lockedAssignee = null, a
             <button
               className="btn"
               disabled={!draft.trim()}
-              onClick={() => { onSay?.('ok', `Comment posted on ${selected.id}`); setDraft(''); }}
+              onClick={() => { onSay?.('ok', t('tk.commentOn', { id: selected.id })); setDraft(''); }}
             >
-              Post
+              {t('act.post')}
             </button>
           </div>
           {draft.trim() && (
             <p className="faint" style={{ fontSize: 11 }}>
-              Draft is preserved across refresh — an unsaved comment is not discarded by a poll.
+              {t('tk.draftKept')}
             </p>
           )}
 
           <div className="danger-zone">
-            <span className="lbl">Task actions</span>
+            <span className="lbl">{t('tk.actions')}</span>
             <button
               className="btn danger"
-              onClick={() => onSay?.('fail', `Delete needs confirmation: type ${selected.id} to proceed`)}
+              onClick={() => onSay?.('fail', t('tk.deleteNeedsConfirm', { id: selected.id }))}
             >
-              Delete task
+              {t('tk.deleteTask')}
             </button>
           </div>
         </div>

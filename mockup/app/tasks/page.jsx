@@ -6,6 +6,7 @@ import PageHead from '@/components/PageHead';
 import { Toast, useToast } from '@/components/Toast';
 import TaskList from '@/components/TaskList';
 import { tasks as ALL, isOpenTask, agents } from '@/lib/mock-data';
+import { useT } from '@/components/Prefs';
 
 /*
  * Fleet task list.
@@ -21,6 +22,7 @@ import { tasks as ALL, isOpenTask, agents } from '@/lib/mock-data';
  */
 
 export default function TasksPage() {
+  const t = useT();
   const [assignee, setAssignee] = useState('all');
   const [status, setStatus] = useState('open');
   const [priority, setPriority] = useState('all');
@@ -32,26 +34,28 @@ export default function TasksPage() {
 
   return (
     <>
-      <PageHead title="Tasks" sub={`${openCount} open · ${ALL.length} total`}>
-        <button className="btn primary" onClick={() => say('ok', 'New task form would open here')}>
-          + New task
+      <PageHead title={t('tk.title')} sub={t('tk.count', { open: openCount, total: ALL.length })}>
+        <button className="btn primary" onClick={() => say('ok', t('tk.newTaskForm'))}>
+          {t('tk.new')}
         </button>
       </PageHead>
 
       <div className="btn-row" style={{ marginBottom: 12 }}>
         <label style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
-          Assignee{' '}
+          {t('col.assignee')}{' '}
           <select value={assignee} onChange={(e) => setAssignee(e.target.value)}>
-            <option value="all">all</option>
-            <option value="__none">Unassigned</option>
+            <option value="all">{t('common.all')}</option>
+            <option value="__none">{t('tk.unassigned')}</option>
             {names.map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
         </label>
         <label style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
-          Status{' '}
+          {/* Status VALUES stay in English: they are the API's values and appear
+              in curl output and logs. Only the label and "all" are translated. */}
+          {t('col.status')}{' '}
           <select value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="open">open</option>
-            <option value="all">all</option>
+            <option value="all">{t('common.all')}</option>
             <option value="blocked">blocked</option>
             <option value="in_progress">in progress</option>
             <option value="accepted">accepted</option>
@@ -60,16 +64,16 @@ export default function TasksPage() {
           </select>
         </label>
         <label style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
-          Priority{' '}
+          {t('col.priority')}{' '}
           <select value={priority} onChange={(e) => setPriority(e.target.value)}>
-            <option value="all">all</option>
+            <option value="all">{t('common.all')}</option>
             {['P0', 'P1', 'P2', 'P3'].map((p) => <option key={p} value={p}>{p}</option>)}
           </select>
         </label>
         <input
           type="search"
-          placeholder="Search titles"
-          aria-label="Search task titles"
+          placeholder={t('tk.search')}
+          aria-label={t('tk.searchAria')}
           value={q}
           onChange={(e) => setQ(e.target.value)}
           style={{
@@ -80,8 +84,7 @@ export default function TasksPage() {
       </div>
 
       <p className="dim" style={{ fontSize: 12, marginTop: -4 }}>
-        <strong>Open</strong> means every status except <code>done</code>. The rail pill counts the
-        same set, so the two cannot disagree.
+        {t('tk.openMeans')}
       </p>
 
       <TaskList

@@ -3,7 +3,9 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
+import { Toast, useToast } from '@/components/Toast';
 import { board, tasks, TASK_STATUSES, byBlockedFirst } from '@/lib/mock-data';
+import { useT } from '@/components/Prefs';
 
 /*
  * Project board — fleet scope, not an agent attribute.
@@ -18,49 +20,51 @@ import { board, tasks, TASK_STATUSES, byBlockedFirst } from '@/lib/mock-data';
  * agree — the static mockup said "0 groups" while showing a selected group.
  */
 export default function ProjectsPage() {
+  const t = useT();
+  const [toast, say] = useToast();
   const [group, setGroup] = useState(board.group);
-  const t = board.totals;
+  const totals = board.totals;
   const lanes = TASK_STATUSES.map((s) => ({ status: s, items: tasks.filter((x) => x.status === s) }));
 
   return (
     <>
-      <PageHead title="Project board" sub={`updated 12s ago`}>
+      <PageHead title={t('pj.title')} sub={t('pj.sub', { n: '12s' })}>
         <label style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
-          Group{' '}
+          {t('pj.group')}{' '}
           <select value={group} onChange={(e) => setGroup(e.target.value)}>
             {board.groups.map((g) => <option key={g} value={g}>{g}</option>)}
           </select>
         </label>
-        <button className="btn">Refresh</button>
+        <button className="btn" onClick={() => say('ok', t('act.refreshed'))}>{t('act.refresh')}</button>
       </PageHead>
 
       <div className="cards">
-        <div className="card"><div className="cap">Members</div><div className="val">{t.members}</div></div>
-        <div className="card"><div className="cap">Online</div><div className="val ok">{t.online}</div></div>
-        <div className="card"><div className="cap">Working</div><div className="val">{t.working}</div></div>
-        <div className="card"><div className="cap">Open tasks</div><div className="val">{t.openTasks}</div></div>
-        <div className="card"><div className="cap">Worktrees</div><div className="val">{t.worktrees}</div></div>
+        <div className="card"><div className="cap">{t('pj.members')}</div><div className="val">{totals.members}</div></div>
+        <div className="card"><div className="cap">{t('pj.online')}</div><div className="val ok">{totals.online}</div></div>
+        <div className="card"><div className="cap">{t('pj.working')}</div><div className="val">{totals.working}</div></div>
+        <div className="card"><div className="cap">{t('pj.openTasks')}</div><div className="val">{totals.openTasks}</div></div>
+        <div className="card"><div className="cap">{t('pj.worktrees')}</div><div className="val">{totals.worktrees}</div></div>
         <div className="card">
-          <div className="cap">Dirty</div>
-          <div className={`val${t.dirtyWorktrees > 0 ? ' warn' : ''}`}>{t.dirtyWorktrees}</div>
+          <div className="cap">{t('pj.dirty')}</div>
+          <div className={`val${totals.dirtyWorktrees > 0 ? ' warn' : ''}`}>{totals.dirtyWorktrees}</div>
         </div>
       </div>
 
-      <div className="split" style={{ marginTop: 4, gridTemplateColumns: 'minmax(0,1.5fr) minmax(0,1fr)' }}>
+      <div className="split wide-left" style={{ marginTop: 4 }}>
         <div>
-          <h2 className="sec">Task board<span className="note">blocked lane first in the ordering, not the layout</span></h2>
+          <h2 className="sec">{t('pj.taskBoard')}<span className="note">{t('pj.laneNote')}</span></h2>
           <div className="lanes">
             {lanes.map((l) => (
               <div className={`lane${l.status === 'blocked' ? ' blocked' : ''}`} key={l.status}>
                 <h4>
-                  <span>{l.status === 'in_progress' ? 'In progress' : l.status[0].toUpperCase() + l.status.slice(1)}</span>
+                  <span>{t(`pj.lane.${l.status}`)}</span>
                   <span className="dim">{l.items.length}</span>
                 </h4>
                 <div className="cards-in">
                   {[...l.items].sort(byBlockedFirst).map((x) => (
                     <Link className="mini" key={x.id} href={`/tasks?task=${x.id}`}>
                       {x.title}
-                      <span className="who">{x.assignee ?? 'Unassigned'} · {x.priority}</span>
+                      <span className="who">{`${x.assignee ?? t('tk.unassigned')} · ${x.priority}`}</span>
                     </Link>
                   ))}
                 </div>
@@ -68,10 +72,10 @@ export default function ProjectsPage() {
             ))}
           </div>
 
-          <h2 className="sec">Repositories and worktrees</h2>
+          <h2 className="sec">{t('pj.repos')}</h2>
           <div className="tbl-wrap">
             <table className="tbl">
-              <thead><tr><th>Repo</th><th>Branch</th><th>State</th></tr></thead>
+              <thead><tr><th>{t('col.repo')}</th><th>{t('col.branch')}</th><th>{t('col.state')}</th></tr></thead>
               <tbody>
                 {board.repos.map((r) => (
                   <tr key={r.repo}>
@@ -86,7 +90,7 @@ export default function ProjectsPage() {
         </div>
 
         <div>
-          <h2 className="sec" style={{ marginTop: 0 }}>Members</h2>
+          <h2 className="sec" style={{ marginTop: 0 }}>{t('pj.members')}</h2>
           <div className="panel">
             {board.members.map((m) => (
               <div key={m.name} style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 8 }}>
@@ -99,25 +103,25 @@ export default function ProjectsPage() {
             ))}
           </div>
 
-          <h2 className="sec">Specs and issues</h2>
+          <h2 className="sec">{t('pj.specs')}</h2>
           <div className="cards" style={{ gridTemplateColumns: '1fr 1fr' }}>
-            <div className="card"><div className="cap">Local</div><div className="val">{t.localIssues}</div></div>
-            <div className="card"><div className="cap">Remote</div><div className="val">{t.remoteIssues}</div></div>
+            <div className="card"><div className="cap">{t('pj.local')}</div><div className="val">{totals.localIssues}</div></div>
+            <div className="card"><div className="cap">{t('pj.remote')}</div><div className="val">{totals.remoteIssues}</div></div>
           </div>
 
-          <h2 className="sec">Changes</h2>
+          <h2 className="sec">{t('pj.changes')}</h2>
           <div className="panel">
             {board.changes.map((c) => (
               <div key={c.title} style={{ display: 'flex', gap: 10, marginBottom: 8, fontSize: 12.5 }}>
                 <span style={{ flex: 1 }}>{c.title}</span>
                 <span className={c.checksPassed === c.checksTotal ? 'badge ok' : 'badge'}>
-                  {c.checksPassed}/{c.checksTotal} checks
+                  {t('pj.nChecks', { a: c.checksPassed, b: c.checksTotal })}
                 </span>
               </div>
             ))}
           </div>
 
-          <h2 className="sec">Activity</h2>
+          <h2 className="sec">{t('pj.activity')}</h2>
           <div className="log">
             {board.activity.map((a, i) => (
               <div className="log-row" key={i} style={{ gridTemplateColumns: '52px 128px 1fr' }}>
@@ -129,6 +133,8 @@ export default function ProjectsPage() {
           </div>
         </div>
       </div>
+
+      <Toast toast={toast} />
     </>
   );
 }

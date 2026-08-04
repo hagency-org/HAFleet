@@ -1,14 +1,15 @@
+'use client';
+
 import Link from 'next/link';
+import { useT } from '@/components/Prefs';
 
 export default function NotFound() {
+  const t = useT();
   return (
     <div className="empty">
-      <div className="big">No such page</div>
-      <p className="small">
-        Every destination in the rail resolves to a route. If you reached this from one,
-        that is the bug the route-inventory test exists to catch.
-      </p>
-      <Link className="btn primary" href="/overview">Back to overview</Link>
+      <div className="big">{t('nf.title')}</div>
+      <p className="small">{t('nf.body')}</p>
+      <Link className="btn primary" href="/overview">{t('nf.back')}</Link>
     </div>
   );
 }

@@ -4,7 +4,8 @@ import { useState } from 'react';
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Toast, useToast } from '@/components/Toast';
-import { queue as INITIAL, reminders, fmtSpanSec, agents } from '@/lib/mock-data';
+import { queue as INITIAL, reminders, fmtSpanSec, fmtIn, agents } from '@/lib/mock-data';
+import { useT } from '@/components/Prefs';
 
 /*
  * Queue — the destination the migration table promised and nothing ever designed.
@@ -25,6 +26,7 @@ import { queue as INITIAL, reminders, fmtSpanSec, agents } from '@/lib/mock-data
 export const dynamic = 'force-static';
 
 export default function QueuePage() {
+  const t = useT();
   const [items, setItems] = useState(INITIAL);
   const [pending, setPending] = useState(new Set());
   const [toast, say] = useToast();
@@ -43,9 +45,9 @@ export default function QueuePage() {
       const fails = item.id === 4468 && action === 'send';
       if (fails) {
         setItems((list) => [...list, item].sort((a, b) => b.id - a.id));
-        say('fail', `Send failed for #${item.id}: already-delivering (409)`);
+        say('fail', t('q.sendFailed', { id: item.id }));
       } else {
-        say('ok', `${action === 'send' ? 'Sent' : 'Discarded'} queued message #${item.id}`);
+        say('ok', t(action === 'send' ? 'q.sentOne' : 'q.discardedOne', { id: item.id }));
       }
     }, 500);
   }
@@ -54,30 +56,24 @@ export default function QueuePage() {
 
   return (
     <>
-      <PageHead title="Queue" sub={`${items.length} waiting · updated 3s ago`} />
+      <PageHead title={t('q.title')} sub={t('q.sub', { n: items.length, t: '3s' })} />
 
-      <div className="notice">
-        Messages wait here until their target agent goes idle. <strong>Send now</strong> skips that
-        wait and delivers immediately — it does not make the agent finish sooner.
-      </div>
+      <div className="notice">{t('q.explain')}</div>
 
       {items.length === 0 ? (
         <div className="empty">
-          <div className="big">Nothing queued</div>
-          <p className="small">
-            Messages appear here when their target is busy. An empty queue means every agent has
-            taken delivery of everything addressed to it.
-          </p>
+          <div className="big">{t('q.empty')}</div>
+          <p className="small">{t('q.emptyNote')}</p>
         </div>
       ) : (
         <div className="tbl-wrap" style={{ marginTop: 16 }}>
           <table className="tbl">
             <thead>
               <tr>
-                <th>To</th>
-                <th>Message</th>
-                <th>Waiting on</th>
-                <th className="num">Held</th>
+                <th>{t('col.to')}</th>
+                <th>{t('col.message')}</th>
+                <th>{t('col.waitingOn')}</th>
+                <th className="num">{t('col.held')}</th>
                 <th />
               </tr>
             </thead>
@@ -95,7 +91,7 @@ export default function QueuePage() {
                     <td>
                       <div>{i.summary}</div>
                       <div className="faint" style={{ fontSize: 11 }}>
-                        #{i.id} · from {i.from} · type {i.type}
+                        {t('q.meta', { id: i.id, from: i.from, type: i.type })}
                       </div>
                     </td>
                     <td className="dim">{i.reason}</td>
@@ -105,18 +101,18 @@ export default function QueuePage() {
                         <button
                           className="btn"
                           disabled={busy}
-                          title="Deliver immediately, without waiting for the agent to go idle."
+                          title={t('q.sendTitle')}
                           onClick={() => act(i, 'send')}
                         >
-                          {busy ? '…' : 'Send now · skip wait'}
+                          {busy ? '…' : t('q.sendNow')}
                         </button>
                         <button
                           className="btn"
                           disabled={busy}
-                          title="Drop this queued message. It is not delivered."
+                          title={t('q.discardTitle')}
                           onClick={() => act(i, 'discard')}
                         >
-                          Discard
+                          {t('q.discard')}
                         </button>
                       </div>
                     </td>
@@ -129,16 +125,16 @@ export default function QueuePage() {
       )}
 
       <h2 className="sec">
-        Reminders
-        <span className="note">discarding a reminder stops it firing; it is not rescheduled</span>
+        {t('q.reminders')}
+        <span className="note">{t('q.remindersNote')}</span>
       </h2>
       <div className="panel">
         {reminders.map((r) => (
           <div key={r.id} style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 10 }}>
-            <span className="badge">{r.at}</span>
+            <span className="badge">{fmtIn(r.inMinutes, t)}</span>
             <span style={{ fontSize: 12.5, flex: 1 }}>{r.text}</span>
-            <button className="btn" onClick={() => say('ok', `Discarded reminder ${r.id}`)}>
-              Discard
+            <button className="btn" onClick={() => say('ok', t('q.discardedReminder', { id: r.id }))}>
+              {t('q.discard')}
             </button>
           </div>
         ))}

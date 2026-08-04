@@ -89,8 +89,12 @@ requests with check counts, activity. All of it survives.
 ### /pool — Capacity
 ![Capacity](page-capacity.jpg)
 Renamed from `POOL`, which named a data structure. The `idle/total` fractions and the three-item
-legend make the axes legible. The closing notice is deliberate: if nothing makes dispatch
-decisions from this page, it should be retired rather than redesigned.
+legend make the axes legible.
+
+**Correction.** Two earlier drafts said this page might be retired "if nothing dispatches from
+it". Wrong, and wrong for the same reason as the Terminal error: I checked the page and not the
+API. `/api/pool` is consumed by `lib/matrix-agent.js` and `src/dispatch-lease-store.mjs` —
+it is the state of a live scheduler.
 
 ### /config — Fleet configuration
 ![Config](page-config.jpg)
@@ -488,7 +492,7 @@ Round 2's standing objection: only happy paths are drawn. Each page owes four st
 | Alerts | stats strip skeleton, 3 list placeholders | "No alerts match these filters" + a reset link | keep last good list, banner above it | transition button busy, row stays until confirmed |
 | Tasks | table skeleton | drawn — states its denominator | banner, filters remain usable | create/edit/comment each own their button |
 | Projects | per-section skeletons, independent | "No project groups" + how to create one | per-section failure; one dead section must not blank the board | Refresh busy state |
-| Capacity | grid skeleton | "No agents report capabilities" | banner | n/a, read-only |
+| Capacity | grid skeleton | "No agents report capabilities" | banner | leases and tickets refresh; releasing a lease is an action and reports its outcome |
 | Config | section skeletons | presets empty, credentials unset | per-section, never a whole-page white screen | Save busy; blank-means-unchanged restated |
 
 Two rules across all seven: a failed refresh keeps the last good data and says it is stale, and
@@ -577,6 +581,23 @@ HTML rather than trusting the prose:
 The last two rows are the argument for building it. Both are real defects that a picture
 cannot contain and prose did not catch.
 
+### Renders
+
+`docs/design/shots/` holds screenshots taken from the running prototype, so they cannot
+drift from it the way a hand-drawn mockup does — regenerate them by driving the page,
+not by editing an image. Two locales × two themes are covered:
+
+| file | shows |
+|---|---|
+| `overview-en-light.png` | the triage surface, English, light |
+| `overview-zh-dark.png` | the same page, Chinese, dark — the comparison that matters |
+| `alerts-zh-light.png` | two summary strips and list/detail in Chinese |
+| `tasks-zh-dark.png` | populated blocked-first list |
+| `capacity-en-light.png` | role × capability with leases |
+| `agent-en-dark.png` | agent detail, Activity tab, dark |
+| `onboard-en-light.png` | detection table and the form with a model field |
+| `onboard-zh-dark.png` | the same form for an adapter that takes **no** model flag |
+
 ## Known gaps in the drawings
 
 Stated because a mockup that contradicts the spec is worse than no mockup — an implementer follows
@@ -586,12 +607,18 @@ the picture. From the final review round:
 |---|---|---|
 | Alerts mockup still shows the rejected mixed strip (four statuses + `Critical`), omits `resolved`, and highlights one row while the detail panel shows another | `page-alerts.jpg` | spec is correct above; drawing is stale |
 | Projects mockup reads `0 groups` in the rail while `acme-platform` is selected | `page-projects.jpg` | contradiction, drawing is stale |
-| Populated Tasks — blocked-first list, waiting/heartbeat density, master/detail, legal-transition actions | not drawn | specified above, only the empty state is drawn |
-| The Queue destination the migration table promises | not designed | no route, layout, empty/error state or send/cancel consequence copy |
-| Reminder cancel/dismiss semantics; whether the global message log narrows in scope when it moves to per-agent Messages | not specified | open |
-| Responsive behaviour at real fleet sizes (1 / 5 / 20 / 100 agents, 375 / 640 / 900 / 1440 px) | breakpoints specified, untested | open |
+| Populated Tasks — blocked-first list, waiting/heartbeat density, master/detail, legal-transition actions | `mockup/components/TaskList.jsx` | **closed** — built and asserted, shared verbatim by fleet Tasks and the agent Work tab |
+| The Queue destination the migration table promises | `mockup/app/queue/page.jsx` | **closed** — route, layout, empty state, optimistic send with a visible restore-on-failure |
+| Reminder cancel/dismiss semantics | `mockup/app/queue/page.jsx` | **closed** — discarding a reminder stops it firing and does not reschedule it; stated on the page |
+| Whether the global message log narrows in scope when it moves to per-agent Messages | not specified | open |
+| Responsive behaviour at 375 / 640 / 900 / 1440 px | asserted in `check-switches.mjs` | **closed** — found one real defect: `/projects` overflowed 28px at 375px because an inline `grid-template-columns` beat the collapse media query. Column ratios are modifier classes now |
+| Responsive behaviour at real fleet sizes (1 / 20 / 100 agents) | fixture has 5 | open — needs fixture variants, not a layout change |
 | The benchmark's *today* column | estimated | must be measured once before it means anything |
 | `page-config.jpg` still shows the withdrawn *Credentials* panel | `page-config.jpg` | the prototype is correct; the drawing is stale |
+| `page-capacity.jpg` still shows the withdrawn "retire it" notice and no leases | `page-capacity.jpg` | the prototype is correct; the drawing is stale |
+| The dispatch queue and the message queue share the word "queue" | naming | open — needs one renamed before either page ships. Both pages currently point at each other and say so |
+| Three buttons shipped with no handler — projects Refresh, the agent cadence button, Pause display | header controls | **closed** — all three do something, and `check-switches.mjs` now fails on any button React gave no `onClick`. A dead control teaches the operator to distrust the live ones |
+| The four page mockups predate the corrections above | `page-alerts.jpg`, `page-projects.jpg`, `page-config.jpg`, `page-capacity.jpg` | open — the clickable prototype supersedes them and `shots/` holds accurate renders; the JPEGs should be deleted rather than left to mislead |
 
 ## Change plan
 
@@ -601,17 +628,39 @@ the picture. From the final review round:
 | 2 | Move rail helpers out of `monitor-page.js` into `SHELL_SCRIPT` | `monitor-page.js`, `shell.js` | low — same functions, one home |
 | 3 | Rename tabs; default to **Activity**; full tablist ARIA | `agent-detail-page.js` | **moderate** — Activity needs the step-7 endpoint for ACP agents, so it is not a label change |
 | 4 | Re-parent Internals sections; delete the duplicate audit | `agent-detail-page.js` | moderate — mechanical, but do it alone |
-| 5 | Rename `POOL` to `Capacity`; explain the axes | `pool-page.js`, shell | low |
+| 5 | Rename `POOL` to `Capacity`; explain the axes; surface active leases and waiting tickets | `pool-page.js`, shell | moderate — it is a scheduler view, not a static grid |
 | 6 | Keep `/projects` as the fleet board; add a per-agent Repos lens that links to it | `projects-page.js`, shell | moderate |
 | 7 | Add the bounded ACP log-read endpoint that Activity needs | `server.js`, new route | moderate — new surface |
 
 Steps 1–3 ship together as one reviewable change. Step 4 is its own PR. Steps 5–6 need a
-product decision first, and it is not what round 1 said. `pool-page.js` states its own purpose
-in lines 3-4 — *"the live role x capability grid — who's idle/busy per cell"*, reading
-`GET /api/pool` — so the label is the problem, not the file. Round 1 claimed the purpose was not
-evident from the file, having read only the label. The real open question is whether anything or
-anyone actually dispatches work from this view. If nothing does, retire it; if something does,
-the grid is fine and only the name was wrong.
+product decision, and neither earlier answer was right. `pool-page.js` states its own purpose in
+lines 3-4 — *"the live role x capability grid — who's idle/busy per cell"* — so round 1's claim
+that the purpose was not evident from the file was wrong; it had read only the label.
+
+Round 2 then framed it as "retire it if nothing dispatches from this view". Also wrong.
+Something does. `lib/matrix-agent.js` opens: *"agent pooling + capability scheduling + the role
+matrix... The execution layer is driven by OpenFab: OpenFab asks for 'a `<role>` agent at
+`<capability>`', and the scheduler picks/queues one."*
+
+`POST /api/dispatch` resolves a `{role, capability}` request three ways:
+
+| outcome | when | what comes back |
+|---|---|---|
+| `routed` | `selectAgent()` finds a free agent in the cell | a **lease** marking it busy — `HAFLEET_DISPATCH_LEASE_TTL_MS`, default 15 min, floor 1s |
+| `provision` | no free agent, `MATRIX_AGENT_MAX_PER_CELL > 0`, cell under cap | a plan (`mx_<role>_<tier>_<n>`) for the launcher to run `up-v1`. Default 0 = off |
+| queued | otherwise | a ticket on that cell's dispatch queue |
+
+`GET /api/pool` reaps expired leases before answering, and an expired lease raises the
+`dispatch_lease_expired` alert. So the grid, the leases and Alerts are **one mechanism**, and
+this page is the human window onto it. It should show active leases and waiting tickets, not
+just idle counts — the prototype now does.
+
+The only thing wrong with the old page was its name: `POOL` named the data structure rather
+than the question.
+
+**A collision worth fixing separately.** That per-cell *dispatch* queue is not `/api/queue`,
+which holds messages waiting for an agent to go idle. Two different queues share one word, in
+the same way `TASK_STATUSES` and `AGENT_TASK_STATUSES` share "task".
 
 ## Invariants
 
@@ -650,3 +699,185 @@ Must still hold after every step:
 
 The last three are a new kind of guard for this codebase: they assert IA properties
 rather than behaviour, which is what regressed here in the first place.
+
+## Language and theme
+
+Both are viewer preferences, so both live in the rail footer next to each other and
+persist to `localStorage` — not in Config, which is fleet-wide state that changes what
+the *fleet* does. A language choice changes nothing about the fleet.
+
+**Locales.** `en` and `zh-CN`, as a flat dictionary in `mockup/lib/i18n.js`. No i18n
+library: two locales with flat keys do not need ICU plurals, and the prototype's
+constraint is no new runtime dependency. 344 keys, identical in both.
+
+What is **not** translated, and why:
+
+| kept in English | reason |
+|---|---|
+| agent names, task/alert/lease/ticket ids, repo paths | identifiers |
+| lifecycle values — `open`, `acknowledged`, `assigned`, `resolved`, `suppressed`, `in_progress`, `blocked`, `done` | the operator reads these in `curl` output and logs. Translating the value breaks the correspondence; the column *heading* is translated |
+| `ACTIVE` / `IDLE` | the exact strings `runtimeStatusText()` emits, and what `hafleet ls` prints |
+| shell commands, env var names, config paths | `hermes auth add`, `DEEPSEEK_API_KEY`, `~/.codex/` |
+| the activity log, alert summaries, task titles, waiting reasons | data, not chrome. In the product these come from the API; a dashboard cannot translate its payload |
+
+One deliberate exception: **severity words are translated** (`严重` / `警告` / `提示`).
+The dot-and-word rule exists so severity never rests on colour alone — an operator who
+cannot read "critical" is back to reading the dot. The raw API value stays in the
+element's `title`, so the correspondence is one hover away rather than lost.
+
+**Theme.** Three states, not two: `light`, `dark`, `system`. A hard light choice on a
+dark OS is a legitimate preference, and so is deferring to the OS. Implemented purely
+as a token swap — 19 custom properties, redefined under `@media (prefers-color-scheme:
+dark)` for the OS signal and under `:root[data-theme="dark"]` for the explicit choice,
+with `:root[data-theme="light"]` restating the full light palette so an explicit choice
+wins in **both** directions. No component styles inside the media query.
+
+Dark is not an inversion. Greys carry a cool bias toward the accent, and the semantic
+colours are re-picked for a dark ground: `#c5221f` is mud on near-black, so critical
+becomes `#f2726b`. Two tokens exist only because of dark mode — `--on-accent`, because
+white-on-accent stops working once the accent is a light blue, and `--accent-hover`,
+which cannot be derived by darkening in both themes.
+
+Both are applied before first paint by an inline script in `app/layout.jsx` reading
+`localStorage`. Without it the page renders light-and-English, then flips on hydration,
+and the flash is worse than not offering the switch.
+
+### What this cost elsewhere
+
+| change | why it was forced |
+|---|---|
+| `PageHead` renders `<title>` instead of assigning `document.title` in an effect | Next writes `metadata.title` into `<head>` during hydration, *after* effects flush, so the effect version lost on first load and only looked right after a client navigation. React 19 hoists a rendered `<title>`. `layout.jsx` now exports no `metadata.title` — one owner |
+| `reminders` fixture stores `inMinutes`, not `'in 25m'` | a pre-formatted English fixture leaks straight through the dictionary |
+| `TaskList`'s `relAge()` takes `t` | `"5m ago"` is not readable Chinese, and a digit glued to an English unit is the classic half-translated UI |
+| `TABS` holds ids, not labels; `ACTION_LABEL` became `ACTION_KEY` | the URL hash must not change with the language while the visible word must |
+| four hover tints and two button colours became tokens | hardcoded `rgba()` does not follow a palette swap: a 5% light-blue wash is invisible on a dark ground |
+| `projects/page.jsx` renamed `const t = board.totals` | collided with the translator; `totals` was the clearer name anyway |
+
+### Tests
+
+`scripts/check-invariants.mjs` covers what is static (41 assertions):
+
+| assertion | guards |
+|---|---|
+| Both locales define the same key set | a half-translated locale shipping |
+| `{placeholders}` match across locales | a Chinese string missing `{n}` renders the sentence with the number silently gone |
+| Every literal `t('…')` key in `app/`, `components/` and `lib/` resolves | a typo, which the fallback renders as the key itself |
+| Every interpolated `t(\`…\`)` key belongs to a declared family | a rename breaking `t(\`ag.${id}\`)` |
+| No key is unused | 17 had accumulated. `lib/i18n.js` is excluded from the scan on purpose — it contains every key as a literal, so including it makes the check pass unconditionally |
+| No route renders an unresolved key | the runtime symptom of the two above |
+| Every key is namespaced | a bare key like `all` is indistinguishable from `value="all"` in the check above |
+| Both dark selectors define the same tokens, and every dark token has a light counterpart | a token defined for one theme only |
+| No colour literal outside the palette blocks | the `rgba()` class of bug. Split per **declaration**, not per line: `color: var(--ok); background: #e9f6ee;` is one line with one literal, and a line-granular check waved the toast's background through |
+| The pre-paint script reads both storage keys | the flash returning |
+| Switch styling is bound to `aria-pressed`, not a parallel class | the accessible state and the visible state disagreeing |
+
+`scripts/check-switches.mjs` covers what only a browser can (28 assertions, system
+Chrome via `puppeteer-core`): the words actually change, `lang` becomes `zh-CN`, the
+background actually repaints and is measurably darker, contrast survives, no element
+stays painted for the other theme, both choices survive a route change, `System` hands
+control back to the OS, an explicit `Light` beats a dark OS, and the Noto Sans SC face
+is actually reached.
+
+Every static assertion was mutation-tested — remove a `zh` key, drop a placeholder,
+typo a key, add a hex literal, delete the `[data-theme="light"]` block, stub the
+pre-paint script — and each was caught.
+
+Two bugs came out of writing these rather than out of reading the code: the `<title>`
+race above, and the test's own first version, which drove the switches **by their
+English labels** and so silently clicked nothing after the language switch. When the
+labels are the thing under test they cannot also be the selector; it now clicks by
+position.
+
+## Onboarding
+
+A destination, `/onboard`, sitting with the fleet nav rather than inside Config —
+it *adds* an agent, and Config's other sections change agents that already exist. The
+rail pill counts frameworks that are ready to onboard, which is the thing an operator
+wants to know before opening the page.
+
+The CLI path already works and is documented in `docs/agent-onboarding.md`. This is the
+same four steps behind a form, and it must not claim more than the CLI does.
+
+### Detection
+
+**`GET /api/frameworks/detect` does not exist and has to be written.** Named as new
+rather than drawn as if it were already there — that is the mistake an earlier round
+made with the invented "ACP session stream".
+
+Everything it reports is something a host can actually establish, and every value comes
+from the adapter manifests in `lib/frameworks/<id>.json` — which is already the single
+source for launch and guard behaviour, so detection reads it rather than re-listing
+frameworks:
+
+| field | how the server gets it |
+|---|---|
+| `onPath`, `version` | `launch.command` resolved on `PATH`, then `--version` |
+| `transport` | `raw.transport === 'acp' ? 'acp' : 'tmux'` — the manifest's own default |
+| `startWith` | derived from `transport`: `hafleet acp-up` or `hafleet up` |
+| `credentialHome`, `credentialPresent`, `authFix` | per-framework path, `stat`, and the one command that fixes it |
+| `acpModelFlag` | `launch.acpModelFlag`, verbatim |
+| `permissionSummary` | `launch.permissionSummary` — the manifest requires it precisely because it is shown to operators |
+| `setup[]` | framework-specific prerequisites, below |
+
+`state` is **derived, never stored**: `ready` → `needs_auth` → `needs_setup` →
+`absent`, checked in that order. Four states, not two, because "installed" and "usable"
+came apart in practice: hermes with only the `[acp]` extra starts, reports healthy, logs
+*"refreshed tool surface after ACP MCP registration (23 tools)"* — its own built-ins —
+and then declines to answer because it cannot see `check_inbox`. Order matters: a
+framework that is not installed cannot be authenticated, so reporting the
+furthest-along problem first would send someone to fix the wrong thing.
+
+Prerequisites are their own column, not appended to the credential cell. "Not
+authenticated" and "an extra is missing" are different problems with different fixes,
+and stacking them made one framework look like it had two credential faults.
+
+### The form
+
+Mirrors `hafleet acp-up <name> <workspace> <framework> --supervised` field for field,
+and prints the **equivalent command** underneath. Shown, not hidden: an operator has to
+be able to reproduce and script what the page just did, and seeing the command is also
+how you notice the form built the wrong one. The command block scrolls sideways rather
+than wrapping — `--model gpt-5-\ncodex` is a different command from the one displayed.
+
+Constraints the form enforces because the CLI does:
+
+- **Only `ready` frameworks are selectable.** Offering an unauthenticated one and
+  failing at step 4 spends the 30-second health wait to report something detection
+  already knew.
+- **`--model` appears only when the adapter declares `acpModelFlag`.** `octos acp` takes
+  it; `hermes-acp` dies on it and `codex-acp` accepts and silently ignores it. A form
+  that always shows the field lies for two of the five frameworks — so for those it
+  shows why, and `onboardCommand()` drops the flag.
+- **`--supervised` appears only for ACP frameworks.** A tmux framework goes through
+  `hafleet up` and has no supervised option here; selecting one says so, and notes that
+  a host with existing tmux sessions needs a stance on adopting them.
+- **Duplicate and malformed names are refused inline**, against `/^[\w-]+$/` — the same
+  expression `POST /api/agents/create` validates with, so the page cannot accept a name
+  the endpoint will reject.
+- **One agent, one host** is stated on the page, because the guard is bidirectional and
+  surprises people: going supervised stops a running unsupervised host, and an
+  unsupervised start is refused when the supervisor already owns the agent.
+
+### Progress and failure
+
+The four steps are listed and walked individually, not collapsed into one spinner.
+Step 4 is the slow one and the only one that can fail after the others succeeded, so
+collapsing them would hide where onboarding actually got to. A failure renders the real
+CLI failure — `did not stay healthy (restarts=N)` — with the note that the agent stays
+in the profile and the supervisor keeps retrying, plus the `acp-down` command that
+takes it out. A crash-looping agent must not be reported as running; that was the
+`acp-up --supervised` false-success bug, and the page inherits the fix rather than
+re-introducing it.
+
+### What is not on this page
+
+No credential fields, for the reason the operator gave about Config: **an agent
+authenticates itself before it joins the fleet.** HAFleet never sees the secret and
+offers no way to set one. An unauthenticated framework gets the one command that fixes
+it and no input box. HAFleet also does not install frameworks — `absent` rows are
+informational, and the page says so in its opening line rather than implying a missing
+framework is something it can fetch.
+
+Prerequisite findings **are** translated, unlike alert summaries. The distinction:
+these are HAFleet's own detection output, and an alert summary arrives from the API. A
+dashboard can translate its own words and cannot translate its payload.

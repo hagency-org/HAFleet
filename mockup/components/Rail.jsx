@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useMemo, useState } from 'react';
 import { agents, railCounts, runtimeStatusText } from '@/lib/mock-data';
+import { PrefsSwitch, useT } from '@/components/Prefs';
 
 /*
  * The rail. Present on every route, which is the whole point of the relayout:
@@ -23,16 +24,20 @@ import { agents, railCounts, runtimeStatusText } from '@/lib/mock-data';
  */
 
 const FLEET = [
-  { href: '/overview', label: 'Overview', icon: '▦', count: null },
-  { href: '/alerts', label: 'Alerts', icon: '◉', count: 'alertsOpen', unit: 'open', hot: true },
-  { href: '/queue', label: 'Queue', icon: '↧', count: 'queued', unit: 'waiting' },
-  { href: '/tasks', label: 'Tasks', icon: '☑', count: 'tasksOpen', unit: 'open' },
-  { href: '/projects', label: 'Projects', icon: '▤', count: 'projectGroups', unit: 'groups' },
-  { href: '/capacity', label: 'Capacity', icon: '◫', count: null },
-  { href: '/config', label: 'Config', icon: '⚙', count: null },
+  { href: '/overview', key: 'overview', icon: '▦', count: null },
+  { href: '/alerts', key: 'alerts', icon: '◉', count: 'alertsOpen', unit: 'open', hot: true },
+  { href: '/queue', key: 'queue', icon: '↧', count: 'queued', unit: 'waiting' },
+  { href: '/tasks', key: 'tasks', icon: '☑', count: 'tasksOpen', unit: 'open' },
+  { href: '/projects', key: 'projects', icon: '▤', count: 'projectGroups', unit: 'groups' },
+  { href: '/capacity', key: 'capacity', icon: '◫', count: null },
+  // Onboarding sits with the fleet destinations rather than inside Config: it
+  // adds an agent, and Config's other sections change agents that already exist.
+  { href: '/onboard', key: 'onboard', icon: '＋', count: 'frameworksReady', unit: 'ready' },
+  { href: '/config', key: 'config', icon: '⚙', count: null },
 ];
 
 export default function Rail() {
+  const t = useT();
   const pathname = usePathname();
   const [filter, setFilter] = useState('');
   const counts = railCounts();
@@ -47,26 +52,26 @@ export default function Rail() {
   const downCount = agents.filter((a) => a.alive === false).length;
 
   return (
-    <nav className="rail" aria-label="Fleet">
+    <nav className="rail" aria-label={t('rail.fleet')}>
       <div className="rail-brand">
         <b>HAFLEET</b>
         <span>
-          {agents.length} agents · {downCount} down
+          {`${agents.length} ${t('rail.agentsCount')} · ${downCount} ${t('rail.agentsDown')}`}
         </span>
       </div>
 
       <div className="rail-filter">
         <input
           type="search"
-          placeholder="Filter agents"
-          aria-label="Filter agents by name"
+          placeholder={t('rail.filter')}
+          aria-label={t('rail.filter')}
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />
       </div>
 
       <div className="rail-scroll">
-        <h2 className="rail-sec">Agents · {shown.length}</h2>
+        <h2 className="rail-sec">{`${t('rail.agents')} · ${shown.length}`}</h2>
         <ul className="rail-list">
           {shown.map((a) => {
             const href = `/agents/${a.name}`;
@@ -93,14 +98,14 @@ export default function Rail() {
           })}
           {shown.length === 0 && (
             <li style={{ padding: '6px 16px', fontSize: 12, color: 'var(--ink-faint)' }}>
-              No agent matches “{filter}”
+              {`${t('rail.noMatch')} “${filter}”`}
             </li>
           )}
         </ul>
       </div>
 
       <div className="rail-fleet">
-        <h2 className="rail-sec">Fleet</h2>
+        <h2 className="rail-sec">{t('rail.fleet')}</h2>
         <ul className="rail-list">
           {FLEET.map((f) => {
             const n = f.count ? counts[f.count] : null;
@@ -113,13 +118,13 @@ export default function Rail() {
                   aria-current={current ? 'page' : undefined}
                 >
                   <span className="ico" aria-hidden="true">{f.icon}</span>
-                  <span className="grow">{f.label}</span>
+                  <span className="grow">{t(`nav.${f.key}`)}</span>
                   {/* One interpolated string below, not two adjacent expressions:
                       React separates those with a comment marker in SSR, which
                       fragments the text node and breaks selection and copy. */}
                   {f.count && (
                     <span className={`pill${n > 0 && f.hot ? ' hot' : ''}${n === 0 ? ' zero' : ''}`}>
-                      {`${n} ${f.unit}`}
+                      {`${n} ${t(`unit.${f.unit}`)}`}
                     </span>
                   )}
                 </Link>
@@ -128,6 +133,8 @@ export default function Rail() {
           })}
         </ul>
       </div>
+
+      <PrefsSwitch />
     </nav>
   );
 }

@@ -1,9 +1,13 @@
+'use client';
+
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import Severity from '@/components/Severity';
+import { useT } from '@/components/Prefs';
 import {
   agents, alerts, alertCounts, tasks, queue, reminders, board,
   bySeverityThenAge, fmtSpanSec, isOpenTask,
+  fmtIn,
 } from '@/lib/mock-data';
 
 /*
@@ -21,9 +25,8 @@ import {
  *    heartbeat-OK chatter on a triage surface.
  */
 
-export const metadata = { title: 'Fleet overview — HAFleet' };
-
 export default function OverviewPage() {
+  const t = useT();
   const { byStatus } = alertCounts();
   const blocked = tasks.filter((t) => t.status === 'blocked');
   const offline = agents.filter((a) => a.alive === false);
@@ -37,43 +40,43 @@ export default function OverviewPage() {
 
   return (
     <>
-      <PageHead title="Fleet overview" sub="updated 4s ago" />
+      <PageHead title={t('ov.title')} sub={t('common.updatedAgo', { n: '4s' })} />
 
       <div className="cards">
         <div className="card">
-          <div className="cap">Open alerts</div>
+          <div className="cap">{t('ov.openAlerts')}</div>
           <div className={`val${byStatus.open > 0 ? ' warn' : ''}`}>{byStatus.open}</div>
         </div>
         <div className="card">
-          <div className="cap">Blocked tasks</div>
+          <div className="cap">{t('ov.blockedTasks')}</div>
           <div className={`val${blocked.length > 0 ? ' warn' : ''}`}>{blocked.length}</div>
         </div>
         <div className="card">
-          <div className="cap">Queued delivery</div>
+          <div className="cap">{t('ov.queuedDelivery')}</div>
           <div className="val">{queue.length}</div>
         </div>
         <div className="card">
-          <div className="cap">Agents offline</div>
+          <div className="cap">{t('ov.agentsOffline')}</div>
           <div className={`val${offline.length === 0 ? ' ok' : ' bad'}`}>{offline.length}</div>
         </div>
       </div>
 
       <h2 className="sec">
-        Needs attention
-        <span className="note">sorted by severity, then oldest</span>
+        {t('ov.needsAttention')}
+        <span className="note">{t('ov.sortedBySeverity')}</span>
       </h2>
 
       {attention.length === 0 ? (
-        <div className="notice">Nothing needs attention. Last checked 4s ago.</div>
+        <div className="notice">{t('ov.nothing', { n: '4s' })}</div>
       ) : (
         <div className="tbl-wrap">
           <table className="tbl">
             <thead>
               <tr>
-                <th>Severity</th>
-                <th>What</th>
-                <th>Agent</th>
-                <th className="num">Age</th>
+                <th>{t('col.severity')}</th>
+                <th>{t('col.what')}</th>
+                <th>{t('col.agent')}</th>
+                <th className="num">{t('col.age')}</th>
               </tr>
             </thead>
             <tbody>
@@ -95,29 +98,29 @@ export default function OverviewPage() {
       {blocked.length > 0 && (
         <>
           <h2 className="sec">
-            Blocked work
-            <span className="note">what is waiting, and on what</span>
+            {t('ov.blockedWork')}
+            <span className="note">{t('ov.blockedNote')}</span>
           </h2>
           <div className="tbl-wrap">
             <table className="tbl">
               <thead>
                 <tr>
-                  <th>Task</th>
-                  <th>Assignee</th>
-                  <th>Waiting on</th>
+                  <th>{t('col.task')}</th>
+                  <th>{t('col.assignee')}</th>
+                  <th>{t('col.waitingOn')}</th>
                   <th />
                 </tr>
               </thead>
               <tbody>
-                {blocked.map((t) => (
-                  <tr key={t.id}>
+                {blocked.map((t2) => (
+                  <tr key={t2.id}>
                     <td>
-                      <Link href={`/tasks?task=${t.id}`}>{t.title}</Link>
-                      <span className="faint"> {t.id}</span>
+                      <Link href={`/tasks?task=${t2.id}`}>{t2.title}</Link>
+                      <span className="faint"> {t2.id}</span>
                     </td>
-                    <td className="dim">{t.assignee ?? 'Unassigned'}</td>
-                    <td className="dim">{t.waiting_reason}</td>
-                    <td>{t.overdue && <span className="badge overdue">OVERDUE</span>}</td>
+                    <td className="dim">{t2.assignee ?? t('tk.unassigned')}</td>
+                    <td className="dim">{t2.waiting_reason}</td>
+                    <td>{t2.overdue && <span className="badge overdue">{t('ov.overdue')}</span>}</td>
                   </tr>
                 ))}
               </tbody>
@@ -129,8 +132,8 @@ export default function OverviewPage() {
       <div className="split" style={{ marginTop: 26 }}>
         <div>
           <h2 className="sec" style={{ marginTop: 0 }}>
-            Recent activity
-            <span className="note">state changes only</span>
+            {t('ov.recentActivity')}
+            <span className="note">{t('ov.stateChangesOnly')}</span>
           </h2>
           <div className="log">
             {activity.map((r, i) => (
@@ -144,30 +147,30 @@ export default function OverviewPage() {
         </div>
 
         <div>
-          <h2 className="sec" style={{ marginTop: 0 }}>Reminders</h2>
+          <h2 className="sec" style={{ marginTop: 0 }}>{t('ov.reminders')}</h2>
           <div className="panel">
             {reminders.map((r) => (
               <div key={r.id} style={{ display: 'flex', gap: 10, alignItems: 'baseline', marginBottom: 8 }}>
-                <span className="badge">{r.at}</span>
+                <span className="badge">{fmtIn(r.inMinutes, t)}</span>
                 <span style={{ fontSize: 12.5 }}>{r.text}</span>
               </div>
             ))}
           </div>
 
-          <h2 className="sec">Project</h2>
+          <h2 className="sec">{t('ov.project')}</h2>
           <div className="panel">
             <dl className="kv">
-              <dt>Group</dt><dd>{board.group}</dd>
-              <dt>Open tasks</dt><dd>{tasks.filter(isOpenTask).length}</dd>
-              <dt>Dirty worktrees</dt>
+              <dt>{t('pj.group')}</dt><dd>{board.group}</dd>
+              <dt>{t('pj.openTasks')}</dt><dd>{tasks.filter(isOpenTask).length}</dd>
+              <dt>{t('ov.dirtyWorktrees')}</dt>
               <dd>
                 {board.totals.dirtyWorktrees > 0
-                  ? <span className="badge attention">{board.totals.dirtyWorktrees} dirty</span>
-                  : 'none'}
+                  ? <span className="badge attention">{t('ov.nDirty', { n: board.totals.dirtyWorktrees })}</span>
+                  : t('common.none')}
               </dd>
             </dl>
             <div className="btn-row" style={{ marginTop: 12 }}>
-              <Link className="btn" href="/projects">Open project board</Link>
+              <Link className="btn" href="/projects">{t('ov.openBoard')}</Link>
             </div>
           </div>
         </div>

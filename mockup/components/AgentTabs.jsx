@@ -5,6 +5,7 @@ import Link from 'next/link';
 import TaskList from '@/components/TaskList';
 import { Toast, useToast } from '@/components/Toast';
 import { agentLog, board, presets, runtimeStatusText, tasks } from '@/lib/mock-data';
+import { useT } from '@/components/Prefs';
 
 /*
  * Seven tabs, not six. `Configuration` was doing two unrelated jobs and splits into
@@ -17,17 +18,12 @@ import { agentLog, board, presets, runtimeStatusText, tasks } from '@/lib/mock-d
  * roving tabindex driven by Left/Right/Home/End.
  */
 
-const TABS = [
-  { id: 'activity', label: 'Activity' },
-  { id: 'work', label: 'Work' },
-  { id: 'messages', label: 'Messages' },
-  { id: 'repos', label: 'Repos' },
-  { id: 'profile', label: 'Profile' },
-  { id: 'runtime', label: 'Runtime' },
-  { id: 'oversight', label: 'Oversight' },
-];
+// Ids, not labels: the id is the URL hash and must not change with the language,
+// while the visible word must. Keeping them in one list keeps the two in step.
+const TABS = ['activity', 'work', 'messages', 'repos', 'profile', 'runtime', 'oversight'];
 
 export default function AgentTabs({ agent }) {
+  const t = useT();
   const [active, setActive] = useState('activity');
   const [toast, say] = useToast();
   const refs = useRef([]);
@@ -35,43 +31,48 @@ export default function AgentTabs({ agent }) {
   // Selection mirrors the hash so a link and the Back button both work.
   useEffect(() => {
     const fromHash = window.location.hash.replace('#', '');
-    if (TABS.some((t) => t.id === fromHash)) setActive(fromHash);
+    if (TABS.includes(fromHash)) setActive(fromHash);
   }, []);
 
   function select(id, focus = false) {
     setActive(id);
     if (typeof window !== 'undefined') history.replaceState(null, '', `#${id}`);
     if (focus) {
-      const i = TABS.findIndex((t) => t.id === id);
+      const i = TABS.indexOf(id);
       refs.current[i]?.focus();
     }
   }
 
   function onKeyDown(e) {
-    const i = TABS.findIndex((t) => t.id === active);
-    if (e.key === 'ArrowRight') { e.preventDefault(); select(TABS[(i + 1) % TABS.length].id, true); }
-    if (e.key === 'ArrowLeft') { e.preventDefault(); select(TABS[(i - 1 + TABS.length) % TABS.length].id, true); }
-    if (e.key === 'Home') { e.preventDefault(); select(TABS[0].id, true); }
-    if (e.key === 'End') { e.preventDefault(); select(TABS[TABS.length - 1].id, true); }
+    const i = TABS.indexOf(active);
+    if (e.key === 'ArrowRight') { e.preventDefault(); select(TABS[(i + 1) % TABS.length], true); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); select(TABS[(i - 1 + TABS.length) % TABS.length], true); }
+    if (e.key === 'Home') { e.preventDefault(); select(TABS[0], true); }
+    if (e.key === 'End') { e.preventDefault(); select(TABS[TABS.length - 1], true); }
   }
 
   return (
     <>
-      <div className="tabs" role="tablist" aria-label={`${agent.name} sections`} onKeyDown={onKeyDown}>
-        {TABS.map((t, i) => (
+      <div
+        className="tabs"
+        role="tablist"
+        aria-label={t('ag.sections', { name: agent.name })}
+        onKeyDown={onKeyDown}
+      >
+        {TABS.map((id, i) => (
           <button
-            key={t.id}
+            key={id}
             ref={(el) => { refs.current[i] = el; }}
             role="tab"
-            id={`tab-${t.id}`}
+            id={`tab-${id}`}
             className="tab"
-            aria-selected={active === t.id}
-            aria-controls={`panel-${t.id}`}
+            aria-selected={active === id}
+            aria-controls={`panel-${id}`}
             /* Roving tabindex: only the selected tab is in the tab order. */
-            tabIndex={active === t.id ? 0 : -1}
-            onClick={() => select(t.id)}
+            tabIndex={active === id ? 0 : -1}
+            onClick={() => select(id)}
           >
-            {t.label}
+            {t(`ag.${id}`)}
           </button>
         ))}
       </div>
@@ -102,6 +103,7 @@ export default function AgentTabs({ agent }) {
  * server. This is the honest third answer.
  */
 function Activity({ agent }) {
+  const t = useT();
   const [showFramework, setShowFramework] = useState(false);
   const src = agentLog[agent.name] ?? { source: 'none', lines: [] };
   const isPane = src.source === 'pane';
@@ -109,19 +111,7 @@ function Activity({ agent }) {
   return (
     <>
       <div className="notice">
-        {isPane ? (
-          <>
-            <strong>Terminal pane</strong> — captured from <code>{agent.tmux}</code> via{' '}
-            <code>/api/tmux/capture</code>. This is the live screen, so it is the ground truth for
-            what the agent is doing.
-          </>
-        ) : (
-          <>
-            <strong>Agent log</strong> — this agent has no terminal pane, so this is the
-            supervisor&apos;s log for it, not a full work history. ANSI colour codes are stripped and
-            framework output is collapsed.
-          </>
-        )}
+        {isPane ? t('ag.paneNotice', { s: agent.tmux }) : t('ag.logNotice')}
       </div>
 
       {isPane ? (
@@ -129,19 +119,12 @@ function Activity({ agent }) {
           <div className="dim">
             {'$ '}hafleet · pane {agent.tmux}
           </div>
-          <div className="faint" style={{ marginTop: 8 }}>
-            The prototype does not proxy a live pane. In the product this is the existing
-            terminal surface, with its ETag reuse, request sequencing, visibility-aware poll
-            rates and auto-scroll preservation carried over unchanged.
-          </div>
+          <div className="faint" style={{ marginTop: 8 }}>{t('ag.paneStub')}</div>
         </div>
       ) : src.lines.length === 0 ? (
         <div className="empty">
-          <div className="big">No activity yet</div>
-          <p className="small">
-            No pane and no log for this agent. If it was never started, bring it up with{' '}
-            <code>hafleet acp-up</code>.
-          </p>
+          <div className="big">{t('ag.noActivity')}</div>
+          <p className="small">{t('ag.noActivityNote')}</p>
         </div>
       ) : (
         <div className="log" style={{ marginTop: 12 }}>
@@ -150,14 +133,14 @@ function Activity({ agent }) {
               <div key={i}>
                 <button className="log-fold" onClick={() => setShowFramework((v) => !v)}
                   aria-expanded={showFramework}>
-                  {showFramework ? '▾' : '▸'} {l.collapsed} lines of framework output
+                  {`${showFramework ? '▾' : '▸'} ${t('ag.frameworkLines', { n: l.collapsed })}`}
                 </button>
                 {showFramework && (
                   <div className="faint" style={{ paddingLeft: 18 }}>
                     {'INFO connection: calling LLM iteration=3'}<br />
                     {'INFO connection: LLM response received iteration=3'}<br />
                     {'INFO connection: all tools in batch completed'}<br />
-                    <span style={{ opacity: 0.7 }}>…9 more, ANSI stripped</span>
+                    <span style={{ opacity: 0.7 }}>{t('ag.moreStripped', { n: 9 })}</span>
                   </div>
                 )}
               </div>
@@ -177,11 +160,15 @@ function Activity({ agent }) {
 
 /* ── Work — the same TaskList, scoped. Not a fork. ─────────────────────── */
 function Work({ agent, onSay }) {
+  const t = useT();
   return (
     <>
+      {/* The link keeps its own anchor rather than being folded into the sentence:
+          a translated sentence and a hardcoded English link text is how localised
+          UIs end up with one English word mid-paragraph. */}
       <div className="notice">
-        Scoped to <strong>{agent.name}</strong>. Same records and same renderer as{' '}
-        <Link href="/tasks">all fleet tasks</Link> — Work is a scope, not a separate system.
+        {t('ag.workScoped', { name: agent.name })}{' '}
+        <Link href="/tasks">{t('ag.allFleetTasks')}</Link>
       </div>
       <div style={{ marginTop: 12 }}>
         <TaskList
@@ -196,6 +183,7 @@ function Work({ agent, onSay }) {
 }
 
 function Messages({ agent }) {
+  const t = useT();
   const msgs = [
     { at: '01:22', dir: 'in', from: 'system', type: 'request', text: 'Reply with exactly PARITY2.' },
     { at: '01:22', dir: 'out', to: 'system', type: 'reply', text: 'PARITY2' },
@@ -203,19 +191,15 @@ function Messages({ agent }) {
   ];
   return (
     <>
-      <div className="notice">
-        Direct messages to and from <strong>{agent.name}</strong>. A <code>task</code> is work to do;
-        a <code>request</code> or <code>human</code> message is someone waiting for an answer, and
-        only those get a reply instruction.
-      </div>
+      <div className="notice">{t('ag.msgNotice', { name: agent.name })}</div>
       <div className="tbl-wrap" style={{ marginTop: 12 }}>
         <table className="tbl">
-          <thead><tr><th>When</th><th>Direction</th><th>Type</th><th>Message</th></tr></thead>
+          <thead><tr><th>{t('col.when')}</th><th>{t('col.direction')}</th><th>{t('col.type')}</th><th>{t('col.message')}</th></tr></thead>
           <tbody>
             {msgs.map((m, i) => (
               <tr key={i}>
                 <td className="dim">{m.at}</td>
-                <td>{m.dir === 'in' ? `from ${m.from}` : `to ${m.to}`}</td>
+                <td>{m.dir === 'in' ? t('ag.from', { who: m.from }) : t('ag.toWho', { who: m.to })}</td>
                 <td><span className="badge">{m.type}</span></td>
                 <td>{m.text}</td>
               </tr>
@@ -229,16 +213,16 @@ function Messages({ agent }) {
 
 /* ── Repos — the per-agent lens, linking to the fleet board ────────────── */
 function Repos({ agent }) {
+  const t = useT();
   return (
     <>
       <div className="notice">
-        Repositories bound into this agent&apos;s home. The fleet-wide view, with worktrees, specs
-        and change requests, is the <Link href="/projects">project board</Link> — this is a lens on
-        it, not a replacement.
+        {t('ag.reposNotice')}{' '}
+        <Link href="/projects">{t('ag.projectBoard')}</Link>
       </div>
       <div className="tbl-wrap" style={{ marginTop: 12 }}>
         <table className="tbl">
-          <thead><tr><th>Repo</th><th>Binding</th><th>Branch</th><th>State</th></tr></thead>
+          <thead><tr><th>{t('col.repo')}</th><th>{t('col.binding')}</th><th>{t('col.branch')}</th><th>{t('col.state')}</th></tr></thead>
           <tbody>
             {board.repos.slice(0, 3).map((r) => (
               <tr key={r.repo}>
@@ -254,8 +238,7 @@ function Repos({ agent }) {
         </table>
       </div>
       <p className="dim" style={{ fontSize: 12, marginTop: 10 }}>
-        <strong>copy</strong> means edits stay here. <strong>symlink</strong> means edits land in the
-        source repo — worth knowing before committing.
+        {t('ag.bindingNote')}
       </p>
     </>
   );
@@ -263,43 +246,45 @@ function Repos({ agent }) {
 
 /* ── Profile — who is this agent ───────────────────────────────────────── */
 function Profile({ agent, onSay }) {
+  const t = useT();
   return (
     <>
       <div className="panel">
-        <h3>Identity</h3>
+        <h3>{t('ag.identity')}</h3>
         <dl className="kv">
-          <dt>Name</dt><dd>{agent.name}</dd>
-          <dt>Environment</dt><dd>{agent.environment}</dd>
-          <dt>Created</dt><dd className="dim">2026-08-02</dd>
+          <dt>{t('ag.name')}</dt><dd>{agent.name}</dd>
+          <dt>{t('ag.environment')}</dt><dd>{agent.environment}</dd>
+          <dt>{t('ag.createdOn')}</dt><dd className="dim">2026-08-02</dd>
         </dl>
       </div>
       <div className="panel">
-        <h3>Guidance</h3>
+        <h3>{t('ag.guidance')}</h3>
+        {/* key={} forces a remount when the language changes, because defaultValue is
+            only read on mount — without it the guidance text would stay in whichever
+            language the panel first rendered in. */}
         <textarea
+          key={t('ag.guidanceText')}
           rows={4}
-          defaultValue={'Prefer small, reviewable changes. Verify from the path you edited, not a copy of it.'}
+          defaultValue={t('ag.guidanceText')}
           style={{
             width: '100%', font: '400 12.5px var(--sans)', padding: 8,
             border: '1px solid var(--line)', borderRadius: 5, resize: 'vertical',
           }}
         />
-        <p className="faint" style={{ fontSize: 11 }}>
-          Unsaved edits survive the periodic refresh — the refresh skips this panel while it is
-          dirty rather than overwriting what you are typing.
-        </p>
+        <p className="faint" style={{ fontSize: 11 }}>{t('ag.dirtyPanelNote')}</p>
       </div>
       <div className="panel">
-        <h3>Ownership</h3>
+        <h3>{t('ag.ownership')}</h3>
         <dl className="kv">
-          <dt>Owner</dt><dd>operator</dd>
-          <dt>Escalation</dt><dd className="dim">none configured</dd>
+          <dt>{t('ag.owner')}</dt><dd>{t('ag.operator')}</dd>
+          <dt>{t('ag.escalation')}</dt><dd className="dim">{t('ag.noneConfigured')}</dd>
         </dl>
       </div>
       <div className="btn-row" style={{ marginTop: 12 }}>
-        <button className="btn primary" onClick={() => onSay('ok', 'Profile saved')}>Save profile</button>
-        <span className="faint" style={{ fontSize: 11.5 }}>
-          One save covers identity, guidance and ownership.
-        </span>
+        <button className="btn primary" onClick={() => onSay('ok', t('ag.profileSaved'))}>
+          {t('ag.saveProfile')}
+        </button>
+        <span className="faint" style={{ fontSize: 11.5 }}>{t('ag.oneSaveNote')}</span>
       </div>
     </>
   );
@@ -307,75 +292,74 @@ function Profile({ agent, onSay }) {
 
 /* ── Runtime — how it is launched, and what shapes it ──────────────────── */
 function Runtime({ agent, onSay }) {
+  const t = useT();
   const preset = presets.find((p) => p.framework === agent.framework);
   return (
     <>
       <div className="panel">
-        <h3>Effective runtime</h3>
+        <h3>{t('ag.effectiveRuntime')}</h3>
         <dl className="kv">
-          <dt>Framework</dt><dd>{agent.framework}</dd>
-          <dt>Transport</dt><dd>{agent.transport}</dd>
-          <dt>Pane</dt><dd>{agent.tmux ?? <span className="dim">none — ACP agents have no pane</span>}</dd>
-          <dt>Model</dt><dd>{preset?.model ?? <span className="dim">provider default</span>}</dd>
-          <dt>Workspace</dt><dd className="dim">~/{agent.name.replace('-agent', '')}-ws</dd>
+          <dt>{t('col.framework')}</dt><dd>{agent.framework}</dd>
+          <dt>{t('col.transport')}</dt><dd>{agent.transport}</dd>
+          <dt>{t('ag.pane')}</dt><dd>{agent.tmux ?? <span className="dim">{t('ag.noPaneAcp')}</span>}</dd>
+          <dt>{t('col.model')}</dt><dd>{preset?.model ?? <span className="dim">{t('ag.providerDefault')}</span>}</dd>
+          <dt>{t('ag.workspace')}</dt><dd className="dim">~/{agent.name.replace('-agent', '')}-ws</dd>
         </dl>
       </div>
       <div className="panel">
-        <h3>Framework preset</h3>
+        <h3>{t('ag.frameworkPreset')}</h3>
         <dl className="kv">
-          <dt>Applied</dt><dd>{preset?.name ?? <span className="dim">none</span>}</dd>
-          <dt>Resolved model</dt><dd>{preset?.model ?? '—'}</dd>
+          <dt>{t('ag.applied')}</dt><dd>{preset?.name ?? <span className="dim">{t('common.none')}</span>}</dd>
+          <dt>{t('ag.resolvedModel')}</dt><dd>{preset?.model ?? '—'}</dd>
         </dl>
         <p className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>
-          Global preset management is on <Link href="/config">Config</Link>. Changing a preset does
-          not alter a running agent.
+          {t('ag.presetNote')} <Link href="/config">{t('nav.config')}</Link>
         </p>
       </div>
       <div className="panel">
-        <h3>Roles</h3>
+        <h3>{t('ag.roles')}</h3>
         <dl className="kv">
-          <dt>Primary</dt><dd>engineer</dd>
-          <dt>Supervisor</dt><dd className="dim">not a supervisor</dd>
+          <dt>{t('ag.primary')}</dt><dd>{t('ag.engineer')}</dd>
+          <dt>{t('ag.supervisor')}</dt><dd className="dim">{t('ag.notSupervisor')}</dd>
         </dl>
       </div>
       <div className="panel">
-        <h3>Supervisor control</h3>
+        <h3>{t('ag.supervisorControl')}</h3>
         <dl className="kv">
-          <dt>Enabled</dt><dd>yes</dd>
-          <dt>Cadence</dt><dd>every 15m</dd>
+          <dt>{t('ag.enabled')}</dt><dd>{t('ag.yes')}</dd>
+          <dt>{t('ag.cadence')}</dt><dd>{t('ag.every15m')}</dd>
         </dl>
       </div>
       <div className="panel">
-        <h3>Guidance path (subconscious)</h3>
+        <h3>{t('ag.guidancePath')}</h3>
         <dl className="kv">
-          <dt>Mode</dt><dd>authoritative</dd>
-          <dt>Provider</dt><dd>{agent.framework === 'hermes' ? 'deepseek' : 'inherit'}</dd>
-          <dt>Key</dt>
+          <dt>{t('ag.mode')}</dt><dd>{t('ag.authoritative')}</dd>
+          <dt>{t('col.provider')}</dt><dd>{agent.framework === 'hermes' ? 'deepseek' : t('ag.inherit')}</dd>
+          <dt>{t('ag.key')}</dt>
           <dd>
             <code>DEEPSEEK_API_KEY</code>{' '}
-            <span className="badge ok">resolved</span>
-            <div className="faint" style={{ fontSize: 11 }}>
-              The reference is shown, never the value.
-            </div>
+            <span className="badge ok">{t('cf.resolved')}</span>
+            <div className="faint" style={{ fontSize: 11 }}>{t('ag.refShown')}</div>
           </dd>
         </dl>
       </div>
       <div className="panel">
-        <h3>Workspace migration</h3>
-        <div className="notice warn">
-          Disruptive. Moves this agent&apos;s home to the current layout and restarts it. Preview
-          first; the outcome is reported when it completes.
-        </div>
+        <h3>{t('ag.migration')}</h3>
+        <div className="notice warn">{t('ag.migrationWarn')}</div>
         <div className="btn-row" style={{ marginTop: 10 }}>
-          <button className="btn" onClick={() => onSay('ok', 'Preview: 3 files would move, 0 conflicts')}>
-            Preview migration
+          <button className="btn" onClick={() => onSay('ok', t('ag.previewResult'))}>
+            {t('ag.previewMigration')}
           </button>
         </div>
       </div>
       <div className="btn-row" style={{ marginTop: 12 }}>
-        <button className="btn primary" onClick={() => onSay('ok', 'Runtime saved')}>Save runtime</button>
-        <button className="btn" onClick={() => onSay('ok', 'Supervisor settings saved')}>Save supervisor</button>
-        <span className="faint" style={{ fontSize: 11.5 }}>Saved per subsystem, not all at once.</span>
+        <button className="btn primary" onClick={() => onSay('ok', t('ag.runtimeSaved'))}>
+          {t('ag.saveRuntime')}
+        </button>
+        <button className="btn" onClick={() => onSay('ok', t('ag.supervisorSaved'))}>
+          {t('ag.saveSupervisor')}
+        </button>
+        <span className="faint" style={{ fontSize: 11.5 }}>{t('ag.perSubsystem')}</span>
       </div>
     </>
   );
@@ -383,69 +367,72 @@ function Runtime({ agent, onSay }) {
 
 /* ── Oversight — read only. No controls. ──────────────────────────────── */
 function Oversight({ agent }) {
+  const t = useT();
   return (
     <>
-      <div className="notice">
-        Read-only. Every control that could change what you see here lives on{' '}
-        <strong>Runtime</strong> — judgement and the levers that affect it are kept apart on purpose.
-      </div>
+      <div className="notice">{t('ag.readOnlyNote')}</div>
 
       <div className="panel" style={{ marginTop: 12 }}>
-        <h3>Current assessment</h3>
+        <h3>{t('ag.assessment')}</h3>
         <dl className="kv">
-          <dt>Signal</dt>
+          <dt>{t('ag.signal')}</dt>
           <dd>
             {agent.activeNow
-              ? <span className="badge ok">healthy</span>
-              : <span className="badge">idle, no concern</span>}
+              ? <span className="badge ok">{t('ag.healthy')}</span>
+              : <span className="badge">{t('ag.idleNoConcern')}</span>}
           </dd>
-          <dt>Reason</dt>
+          <dt>{t('col.reason')}</dt>
           <dd className="dim">
             {agent.activeNow
-              ? 'Turn in progress, tools completing normally.'
-              : `Idle ${runtimeStatusText(agent).replace('IDLE ', '')} with no unread work.`}
+              ? t('ag.reasonActive')
+              : t('ag.reasonIdle', { span: runtimeStatusText(agent).replace('IDLE ', '') })}
           </dd>
-          <dt>Evaluated</dt><dd className="dim">42s ago</dd>
-          <dt>Recommended</dt><dd>no action</dd>
+          <dt>{t('ag.evaluated')}</dt><dd className="dim">{t('common.ago', { n: '42s' })}</dd>
+          <dt>{t('ag.recommended')}</dt><dd>{t('ag.noAction')}</dd>
         </dl>
       </div>
 
       <div className="panel">
-        <h3>Current work evidence</h3>
+        <h3>{t('ag.workEvidence')}</h3>
         <p className="faint" style={{ fontSize: 11.5 }}>
-          A snapshot of the agent&apos;s own docs. <strong>Not</strong> the canonical task record — for
-          that, use <Link href="/tasks">Tasks</Link>.
+          {t('ag.evidenceNote')} <Link href="/tasks">{t('nav.tasks')}</Link>
         </p>
         <div className="log" style={{ marginTop: 8 }}>
-          <div className="dim">progress.md · captured 6m ago</div>
-          <div style={{ marginTop: 6 }}>Wired the rail; seven pages building. Next: contract tests.</div>
+          <div className="dim">{t('ag.captured', { n: '6m' })}</div>
+          <div style={{ marginTop: 6 }}>{t('ag.progressLine')}</div>
         </div>
       </div>
 
       <div className="panel">
-        <h3>Guidance path status</h3>
+        <h3>{t('ag.pathStatus')}</h3>
         <dl className="kv">
-          <dt>Active path</dt><dd>authoritative</dd>
-          <dt>Stage</dt><dd className="dim">idle</dd>
-          <dt>Last injection</dt><dd className="dim">18m ago</dd>
+          <dt>{t('ag.activePath')}</dt><dd>{t('ag.authoritative')}</dd>
+          <dt>{t('ag.stage')}</dt><dd className="dim">{t('ag.stageIdle')}</dd>
+          <dt>{t('ag.lastInjection')}</dt><dd className="dim">{t('common.ago', { n: '18m' })}</dd>
         </dl>
       </div>
 
       <div className="panel">
-        <h3>Recent supervisor decisions</h3>
+        <h3>{t('ag.decisions')}</h3>
         <div className="tbl-wrap">
           <table className="tbl">
-            <thead><tr><th>When</th><th>Decision</th><th>Reason</th></tr></thead>
+            <thead><tr><th>{t('col.when')}</th><th>{t('col.decision')}</th><th>{t('col.reason')}</th></tr></thead>
             <tbody>
-              <tr><td className="dim">42s ago</td><td>no action</td><td className="dim">healthy</td></tr>
-              <tr><td className="dim">15m ago</td><td>no action</td><td className="dim">healthy</td></tr>
-              <tr><td className="dim">4h ago</td><td>recycled session</td><td className="dim">prompt timed out at 600s</td></tr>
+              {[
+                { at: '42s', decision: 'ag.noAction', reason: 'ag.healthy' },
+                { at: '15m', decision: 'ag.noAction', reason: 'ag.healthy' },
+                { at: '4h', decision: 'ag.recycled', reason: 'ag.promptTimeout' },
+              ].map((d, i) => (
+                <tr key={i}>
+                  <td className="dim">{t('common.ago', { n: d.at })}</td>
+                  <td>{t(d.decision)}</td>
+                  <td className="dim">{t(d.reason)}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
-        <p className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>
-          This and the full audit history are two views of one event collection, not two records.
-        </p>
+        <p className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>{t('ag.oneCollection')}</p>
       </div>
     </>
   );

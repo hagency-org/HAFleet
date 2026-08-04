@@ -9,6 +9,7 @@ import {
   alerts as ALL, alertCounts, ALERT_STATUSES, SEVERITIES,
   bySeverityThenAge, fmtSpanSec,
 } from '@/lib/mock-data';
+import { useT } from '@/components/Prefs';
 
 /*
  * Alerts triage.
@@ -34,15 +35,18 @@ const NEXT_STATUS = {
   suppressed: ['open'],
 };
 
-const ACTION_LABEL = {
-  acknowledged: 'Acknowledge',
-  assigned: 'Assign to me',
-  resolved: 'Resolve',
-  suppressed: 'Suppress',
-  open: 'Reopen',
+// Keys, not words: the button text has to follow the language switch, and the
+// toast that reports the result has to use the same word as the button.
+const ACTION_KEY = {
+  acknowledged: 'act.acknowledge',
+  assigned: 'act.assignToMe',
+  resolved: 'act.resolve',
+  suppressed: 'act.suppress',
+  open: 'act.reopen',
 };
 
 export default function AlertsPage() {
+  const t = useT();
   const [status, setStatus] = useState('open');
   const [severity, setSeverity] = useState('all');
   const [agent, setAgent] = useState('all');
@@ -70,18 +74,18 @@ export default function AlertsPage() {
     // A real action stays in-flight until confirmed; failure keeps prior state.
     setTimeout(() => {
       setBusy(null);
-      say('ok', `${ACTION_LABEL[next]}: ${selected.id} is now ${next}`);
+      say('ok', t('al.didTransition', { action: t(ACTION_KEY[next]), id: selected.id, status: next }));
     }, 420);
   }
 
   return (
     <>
-      <PageHead title="Alerts" sub="updated 6s ago" />
+      <PageHead title={t('al.title')} sub={t('common.updatedAgo', { n: '6s' })} />
 
       {/* Strip 1 — lifecycle status, all five, including resolved */}
       <h2 className="sec" style={{ marginTop: 0 }}>
-        By status
-        <span className="note">every alert, one bucket each</span>
+        {t('al.byStatus')}
+        <span className="note">{t('al.byStatusNote')}</span>
       </h2>
       <div className="cards">
         {ALERT_STATUSES.map((s) => (
@@ -94,8 +98,8 @@ export default function AlertsPage() {
 
       {/* Strip 2 — severity, of the OPEN set only. Stated, so the number is unambiguous. */}
       <h2 className="sec">
-        By severity
-        <span className="note">of the {byStatus.open} open alerts only</span>
+        {t('al.bySeverity')}
+        <span className="note">{t('al.bySeverityNote', { n: byStatus.open })}</span>
       </h2>
       <div className="cards">
         {SEVERITIES.map((s) => (
@@ -110,40 +114,38 @@ export default function AlertsPage() {
 
       <div className="btn-row" style={{ margin: '22px 0 12px' }}>
         <label style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
-          Status{' '}
+          {t('col.status')}{' '}
           <select value={status} onChange={(e) => { setStatus(e.target.value); setSelectedId(null); }}>
-            <option value="all">all</option>
+            <option value="all">{t('common.all')}</option>
             {ALERT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </label>
         <label style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
-          Severity{' '}
+          {t('col.severity')}{' '}
           <select value={severity} onChange={(e) => { setSeverity(e.target.value); setSelectedId(null); }}>
-            <option value="all">all</option>
-            {SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+            <option value="all">{t('common.all')}</option>
+            {SEVERITIES.map((s) => <option key={s} value={s}>{t(`sev.${s}`)}</option>)}
           </select>
         </label>
         <label style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
-          Agent{' '}
+          {t('col.agent')}{' '}
           <select value={agent} onChange={(e) => { setAgent(e.target.value); setSelectedId(null); }}>
-            <option value="all">all</option>
+            <option value="all">{t('common.all')}</option>
             {agentNames.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
         </label>
         <span className="spacer" style={{ flex: 1 }} />
         <span className="sub dim" style={{ fontSize: 12 }}>
-          {rows.length} of {ALL.length} shown
+          {t('common.shown', { a: rows.length, b: ALL.length })}
         </span>
       </div>
 
       {rows.length === 0 ? (
         <div className="empty">
-          <div className="big">No alerts match these filters</div>
-          <p className="small">
-            {ALL.length} alerts exist. Widen a filter to see them.
-          </p>
-          <button className="btn" onClick={() => { setStatus('all'); setSeverity('all'); setAgent('all'); }}>
-            Reset filters
+          <div className="big">{t('al.noMatch')}</div>
+          <p className="small">{t('al.widen', { n: ALL.length })}</p>
+          <button className="btn" onClick={() => { setStatus('all'); setSeverity('all'); setAgent('common.all'); }}>
+            {t('al.reset')}
           </button>
         </div>
       ) : (
@@ -152,9 +154,9 @@ export default function AlertsPage() {
             <table className="tbl">
               <thead>
                 <tr>
-                  <th>Severity</th>
-                  <th>Alert</th>
-                  <th className="num">Age</th>
+                  <th>{t('col.severity')}</th>
+                  <th>{t('col.alert')}</th>
+                  <th className="num">{t('col.age')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -183,13 +185,13 @@ export default function AlertsPage() {
             <div className="panel">
               <h3>{selected.summary}</h3>
               <dl className="kv">
-                <dt>Id</dt><dd>{selected.id}</dd>
-                <dt>Status</dt><dd>{selected.status}</dd>
-                <dt>Severity</dt><dd><Severity level={selected.severity} /></dd>
-                <dt>Agent</dt>
+                <dt>{t('col.id')}</dt><dd>{selected.id}</dd>
+                <dt>{t('col.status')}</dt><dd>{selected.status}</dd>
+                <dt>{t('col.severity')}</dt><dd><Severity level={selected.severity} /></dd>
+                <dt>{t('col.agent')}</dt>
                 <dd><Link href={`/agents/${selected.agent}`}>{selected.agent}</Link></dd>
-                <dt>First seen</dt><dd>{fmtSpanSec(selected.firstSeenSec)} ago</dd>
-                <dt>Occurrences</dt><dd>{selected.occurrences}</dd>
+                <dt>{t('al.firstSeen')}</dt><dd>{t('common.ago', { n: fmtSpanSec(selected.firstSeenSec) })}</dd>
+                <dt>{t('al.occurrences')}</dt><dd>{selected.occurrences}</dd>
               </dl>
 
               <p style={{ fontSize: 12.5, color: 'var(--ink-2)', marginTop: 12 }}>{selected.detail}</p>
@@ -197,12 +199,12 @@ export default function AlertsPage() {
               <div className="btn-row" style={{ marginTop: 14 }}>
                 {NEXT_STATUS[selected.status].length === 0 ? (
                   <span className="dim" style={{ fontSize: 12 }}>
-                    No transitions available from “{selected.status}”.
+                    {t('al.noTransitions', { s: selected.status })}
                   </span>
                 ) : (
                   NEXT_STATUS[selected.status].map((n) => (
                     <button key={n} className="btn" disabled={busy === n} onClick={() => act(n)}>
-                      {busy === n ? '…' : ACTION_LABEL[n]}
+                      {busy === n ? '…' : t(ACTION_KEY[n])}
                     </button>
                   ))
                 )}
@@ -210,7 +212,7 @@ export default function AlertsPage() {
 
               {selected.notes.length > 0 && (
                 <>
-                  <h3 style={{ marginTop: 18 }}>Notes</h3>
+                  <h3 style={{ marginTop: 18 }}>{t('al.notes')}</h3>
                   {selected.notes.map((n, i) => (
                     <div key={i} style={{ fontSize: 12.5, marginBottom: 8 }}>
                       <span className="faint">{n.at} · {n.by}</span>
@@ -221,9 +223,9 @@ export default function AlertsPage() {
               )}
 
               <div className="danger-zone">
-                <span className="lbl">Alert actions</span>
-                <button className="btn danger" onClick={() => say('fail', `Delete refused: ${selected.id} is still open`)}>
-                  Delete
+                <span className="lbl">{t('al.actions')}</span>
+                <button className="btn danger" onClick={() => say('fail', t('al.deleteRefused', { id: selected.id }))}>
+                  {t('act.delete')}
                 </button>
               </div>
             </div>

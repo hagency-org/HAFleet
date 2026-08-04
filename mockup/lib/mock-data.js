@@ -26,13 +26,6 @@ export const TASK_TRANSITIONS = {
   done: [],
 };
 
-export const TRANSITION_LABELS = {
-  accepted: 'Accept',
-  in_progress: 'Start work',
-  blocked: 'Mark blocked',
-  done: 'Mark done',
-};
-
 // ── agents ────────────────────────────────────────────────────────────────────
 // The five real agents, with their real transports. Three are ACP with tmux:null,
 // which is why Activity cannot assume a pane exists.
@@ -205,9 +198,158 @@ export const queue = [
   },
 ];
 
+// `in` is the OFFSET, not a rendered string: "in 25m" is not readable Chinese, and a
+// pre-formatted English fixture would have leaked straight through the dictionary.
 export const reminders = [
-  { id: 'rm_09', at: 'in 25m', text: 'Check whether the staging credential rotation cleared tk_0051' },
-  { id: 'rm_08', at: 'in 3h', text: 'Re-run the fleet benchmark and replace the estimated column' },
+  { id: 'rm_09', inMinutes: 25, text: 'Check whether the staging credential rotation cleared tk_0051' },
+  { id: 'rm_08', inMinutes: 180, text: 'Re-run the fleet benchmark and replace the estimated column' },
+];
+
+/** A reminder's countdown, localised. Both Overview and Queue render these. */
+export function fmtIn(mins, t) {
+  return mins < 60 ? t('in.m', { n: mins }) : t('in.h', { n: Math.round(mins / 60) });
+}
+
+// ── framework detection, for the onboarding page ──────────────────────────────
+// Shape mirrors the endpoint the real page needs: GET /api/frameworks/detect,
+// which does not exist yet. Every field here is something a host can actually
+// establish, and every value is taken from the real lib/frameworks/<id>.json —
+// see docs/design/dashboard-relayout.md for the contract and the reasoning.
+//
+// `state` is derived, never stored: ready | needs_auth | needs_setup | absent.
+// Four states, not two, because "installed" and "usable" came apart in practice —
+// hermes with only the [acp] extra starts, reports healthy, and then cannot see
+// check_inbox.
+export const detected = [
+  {
+    id: 'octos',
+    displayName: 'Octos',
+    transport: 'acp',
+    command: 'octos',
+    acpArgs: ['acp', '--profile', 'coding-full'],
+    onPath: true,
+    version: '2.0.2',
+    credentialHome: '~/.config/octos/config.json',
+    credentialPresent: true,
+    authFix: 'edit octos config.json',
+    acpModelFlag: '--model',
+    permissionSummary: 'octos sandbox as configured (hafleet never passes --danger-full-access)',
+    // Keys, not sentences. These are HAFleet's OWN detection findings, unlike an
+    // alert summary that arrives from the API — so they follow the language switch.
+    setup: [
+      { ok: true, key: 'ob.pre.codingFull' },
+      { ok: true, key: 'ob.pre.mcpServers' },
+    ],
+    startWith: 'hafleet acp-up',
+  },
+  {
+    id: 'hermes',
+    displayName: 'Hermes',
+    transport: 'acp',
+    command: 'hermes-acp',
+    acpArgs: [],
+    onPath: true,
+    version: '0.9.4',
+    credentialHome: '~/.hermes/',
+    credentialPresent: true,
+    authFix: 'hermes auth add <provider> --type api-key',
+    acpModelFlag: null,
+    permissionSummary: 'hermes interactive approval prompts (bypass flags refused)',
+    setup: [
+      { ok: true, key: 'ob.pre.acpExtra' },
+      { ok: false, key: 'ob.pre.mcpExtra', fix: 'uv pip install -e ".[acp,mcp]"' },
+    ],
+    startWith: 'hafleet acp-up',
+  },
+  {
+    id: 'codex-acp',
+    displayName: 'Codex (ACP)',
+    transport: 'acp',
+    command: 'codex-acp',
+    acpArgs: [],
+    onPath: true,
+    version: '0.4.1',
+    credentialHome: '~/.codex/',
+    credentialPresent: true,
+    authFix: 'codex login',
+    acpModelFlag: null,
+    permissionSummary: 'level2 (workspace-write + on-request)',
+    setup: [],
+    startWith: 'hafleet acp-up',
+  },
+  {
+    id: 'claude',
+    displayName: 'Claude Code',
+    transport: 'tmux',
+    command: 'claude',
+    acpArgs: null,
+    onPath: true,
+    version: '2.1.8',
+    credentialHome: '~/.claude/',
+    credentialPresent: false,
+    authFix: 'claude login',
+    acpModelFlag: null,
+    permissionSummary: 'auto-mode',
+    setup: [],
+    startWith: 'hafleet up',
+  },
+  {
+    id: 'codex',
+    displayName: 'Codex (tmux)',
+    transport: 'tmux',
+    command: 'codex',
+    acpArgs: null,
+    onPath: false,
+    version: null,
+    credentialHome: '~/.codex/',
+    credentialPresent: true,
+    authFix: 'codex login',
+    acpModelFlag: null,
+    permissionSummary: 'level2 (workspace-write + on-request)',
+    setup: [],
+    startWith: 'hafleet up',
+  },
+];
+
+/**
+ * Derive the one state that decides what the operator can do.
+ *
+ * Order matters: a framework that is not installed cannot be authenticated, and one
+ * that is not authenticated will fail at first prompt however complete its setup is.
+ * Reporting the furthest-along problem first would send someone to fix the wrong thing.
+ */
+export function detectState(f) {
+  if (!f.onPath) return 'absent';
+  if (!f.credentialPresent) return 'needs_auth';
+  if (f.setup.some((s) => !s.ok)) return 'needs_setup';
+  return 'ready';
+}
+
+/** Onboarding is only offered for a framework in `ready`. */
+export function onboardable(list = detected) {
+  return list.filter((f) => detectState(f) === 'ready');
+}
+
+/**
+ * The exact command the form is equivalent to. Shown, not hidden: an operator has
+ * to be able to reproduce and script what the page just did, and seeing the command
+ * is also how you notice the form built the wrong one.
+ */
+export function onboardCommand({ name, workspace, framework, supervised, model }) {
+  const f = detected.find((x) => x.id === framework);
+  const parts = [f?.startWith ?? 'hafleet acp-up', name || '<name>', workspace || '<workspace>', framework];
+  if (supervised && f?.transport === 'acp') parts.push('--supervised');
+  if (model && f?.acpModelFlag) parts.push(f.acpModelFlag, model);
+  return parts.join(' ');
+}
+
+// The four steps acp-up actually performs, in order. Named here so the page and the
+// progress display cannot describe different work.
+export const onboardSteps = [
+  { id: 'refuse', label: 'ob.step.refuse' },
+  { id: 'token', label: 'ob.step.token' },
+  { id: 'register', label: 'ob.step.register' },
+  { id: 'health', label: 'ob.step.health' },
 ];
 
 // ── project board ─────────────────────────────────────────────────────────────
@@ -241,6 +383,36 @@ export const board = {
 };
 
 // ── capacity ──────────────────────────────────────────────────────────────────
+/*
+ * Capacity is a LIVE SCHEDULER, not a read-only grid.
+ *
+ * POST /api/dispatch takes { role, capability } and has three outcomes:
+ *   routed    — selectAgent() found a free agent in the cell; a lease is created
+ *               (HAFLEET_DISPATCH_LEASE_TTL_MS, default 15 min, floor 1s) and the
+ *               agent is marked busy until it expires or is released
+ *   provision — no free agent, but MATRIX_AGENT_MAX_PER_CELL > 0 and the cell is
+ *               under cap, so a plan comes back (mx_<role>_<tier>_<n>) for the
+ *               launcher to run up-v1. Default 0 = off.
+ *   queued    — otherwise a ticket joins that cell's dispatch queue
+ *
+ * GET /api/pool reaps expired leases before answering, and an expired lease raises
+ * the `dispatch_lease_expired` alert. So the grid, the leases and Alerts are one
+ * mechanism, and Capacity is the human window onto it.
+ *
+ * Note the collision: this per-cell DISPATCH queue is not /api/queue, which holds
+ * messages waiting for an agent to go idle. Two different queues, one word.
+ */
+export const dispatch = {
+  leaseTtlMinutes: 15,
+  autoProvisionCap: 0, // MATRIX_AGENT_MAX_PER_CELL; 0 means pure queue
+  leases: [
+    { leaseId: 'ls_3391', agent: 'octos-agent', role: 'coder', capability: 'shell', owner: 'openfab', expiresIn: '11m' },
+  ],
+  queuedTickets: [
+    { ticket: 'disp-1785734-14', role: 'researcher', capability: 'git', waiting: '4m' },
+  ],
+};
+
 export const pool = {
   capabilities: ['shell', 'git', 'web', 'browser'],
   roles: [
@@ -369,5 +541,8 @@ export function railCounts() {
     tasksOpen: tasks.filter(isOpenTask).length,
     projectGroups: board.groups.length,
     queued: queue.length,
+    // How many frameworks this host can actually onboard — the count an operator
+    // checks before opening the page, which is the whole point of a rail pill.
+    frameworksReady: onboardable().length,
   };
 }

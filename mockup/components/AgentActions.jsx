@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { Toast, useToast } from '@/components/Toast';
+import { useT } from '@/components/Prefs';
 
 /*
  * Stop and Remove, deliberately exiled.
@@ -13,6 +14,7 @@ import { Toast, useToast } from '@/components/Toast';
  * because a confirm dialog is a reflex whereas typing is a decision.
  */
 export default function AgentActions({ agent }) {
+  const t = useT();
   const [confirming, setConfirming] = useState(null);
   const [typed, setTyped] = useState('');
   const [toast, say] = useToast();
@@ -20,12 +22,12 @@ export default function AgentActions({ agent }) {
   return (
     <>
       <div className="danger-zone">
-        <span className="lbl">Agent actions</span>
+        <span className="lbl">{t('ag.agentActions')}</span>
         {confirming === null && (
           <>
-            <button className="btn warn" onClick={() => setConfirming('stop')}>Stop agent</button>
+            <button className="btn warn" onClick={() => setConfirming('stop')}>{t('ag.stopAgent')}</button>
             <button className="btn danger" onClick={() => { setConfirming('remove'); setTyped(''); }}>
-              Remove agent
+              {t('ag.removeAgent')}
             </button>
           </>
         )}
@@ -33,36 +35,35 @@ export default function AgentActions({ agent }) {
 
       {confirming === 'stop' && (
         <div className="notice warn" style={{ marginTop: 10 }}>
-          Stop <strong>{agent.name}</strong>? It stays registered and the supervisor will restart it.
+          {t('ag.stopConfirm', { name: agent.name })}
           <div className="btn-row" style={{ marginTop: 10 }}>
-            <button className="btn warn" onClick={() => { setConfirming(null); say('ok', `${agent.name} stopped`); }}>
-              Stop it
+            <button className="btn warn" onClick={() => { setConfirming(null); say('ok', t('ag.stopped', { name: agent.name })); }}>
+              {t('ag.stopIt')}
             </button>
-            <button className="btn" onClick={() => setConfirming(null)}>Cancel</button>
+            <button className="btn" onClick={() => setConfirming(null)}>{t('act.cancel')}</button>
           </div>
         </div>
       )}
 
       {confirming === 'remove' && (
         <div className="notice warn" style={{ marginTop: 10, borderColor: 'var(--bad)', color: 'var(--bad)', background: 'var(--bad-soft)' }}>
-          Remove <strong>{agent.name}</strong> permanently. This deregisters it and deletes its
-          record. It cannot be undone. Type the agent name to confirm.
+          {t('ag.removeConfirm', { name: agent.name })}
           <div className="btn-row" style={{ marginTop: 10 }}>
             <input
               value={typed}
               onChange={(e) => setTyped(e.target.value)}
               placeholder={agent.name}
-              aria-label={`Type ${agent.name} to confirm removal`}
+              aria-label={t('ag.typeToConfirm', { name: agent.name })}
               style={{ font: '400 12px var(--sans)', padding: '5px 9px', border: '1px solid var(--bad)', borderRadius: 5 }}
             />
             <button
               className="btn danger"
               disabled={typed !== agent.name}
-              onClick={() => { setConfirming(null); say('ok', `${agent.name} removed`); }}
+              onClick={() => { setConfirming(null); say('ok', t('ag.removed', { name: agent.name })); }}
             >
-              Remove permanently
+              {t('ag.removePermanently')}
             </button>
-            <button className="btn" onClick={() => setConfirming(null)}>Cancel</button>
+            <button className="btn" onClick={() => setConfirming(null)}>{t('act.cancel')}</button>
           </div>
         </div>
       )}

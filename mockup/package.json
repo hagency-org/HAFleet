@@ -7,11 +7,16 @@
     "dev": "next dev -p 3100",
     "build": "next build",
     "start": "next start -p 3100",
-    "check": "node scripts/check-invariants.mjs"
+    "check": "node scripts/check-invariants.mjs",
+    "check:switches": "node scripts/check-switches.mjs",
+    "verify": "npm run check && npm run check:switches"
   },
   "dependencies": {
     "next": "16.3.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.4.0"
   }
 }

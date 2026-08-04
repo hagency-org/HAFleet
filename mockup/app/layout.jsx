@@ -1,6 +1,7 @@
 import { Roboto, Noto_Sans_SC } from 'next/font/google';
 import './globals.css';
 import Rail from '@/components/Rail';
+import { PrefsProvider } from '@/components/Prefs';
 
 /*
  * Typography: Roboto for Latin, Noto Sans SC for Simplified Chinese.
@@ -33,19 +34,40 @@ const notoSansSC = Noto_Sans_SC({
   variable: '--font-opensans-sc',
 });
 
+/*
+ * No `title` here on purpose. PageHead renders the <title> so it can follow the
+ * language switch; a metadata title would compete with it and win during hydration.
+ */
 export const metadata = {
-  title: 'HAFleet — dashboard relayout prototype',
   description: 'Clickable mockup of the left-rail relayout. Mock data only; no backend.',
 };
 
 export default function RootLayout({ children }) {
   return (
     <html lang="en" className={`${roboto.variable} ${notoSansSC.variable}`}>
+      <head>
+        {/* Applied before first paint. Without this the page renders light, then
+            flips to dark once React hydrates — the flash is worse than no dark mode.
+            suppressHydrationWarning on <html> is not needed because this only sets
+            attributes, and the provider reads them back rather than overwriting. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{
+              var t=localStorage.getItem('hafleet.theme');
+              if(t&&t!=='system')document.documentElement.setAttribute('data-theme',t);
+              var l=localStorage.getItem('hafleet.locale');
+              if(l==='zh')document.documentElement.setAttribute('lang','zh-CN');
+            }catch(e){}})();`,
+          }}
+        />
+      </head>
       <body>
-        <div className="app">
-          <Rail />
-          <main className="main">{children}</main>
-        </div>
+        <PrefsProvider>
+          <div className="app">
+            <Rail />
+            <main className="main">{children}</main>
+          </div>
+        </PrefsProvider>
       </body>
     </html>
   );

@@ -19,10 +19,15 @@
   --accent: #1a73e8;
   --accent-soft: #e8f0fe;
   --ok: #188038;
+  --ok-soft: #e9f6ee;
   --warn: #b06000;
   --warn-soft: #fef7e6;
   --bad: #c5221f;
   --bad-soft: #fce8e6;
+  --accent-hover: #1765cc;
+  /* Text that sits ON the accent. White works while the accent is dark; the dark
+     theme's accent is a light blue, so this has to be a token, not a literal. */
+  --on-accent: #ffffff;
 
   --rail-w: 244px;
   --radius: 6px;
@@ -72,7 +77,7 @@ a { color: inherit; text-decoration: none; }
   background: var(--panel-2);
   border-right: 1px solid var(--line);
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto auto;
   min-height: 0;
 }
 
@@ -114,7 +119,7 @@ a { color: inherit; text-decoration: none; }
   padding: 6px 16px;
   border-left: 3px solid transparent;
 }
-.agent-row:hover { background: rgba(26, 115, 232, 0.05); }
+.agent-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .agent-row[aria-current="page"] {
   background: var(--accent-soft);
   border-left-color: var(--accent);
@@ -158,7 +163,7 @@ a { color: inherit; text-decoration: none; }
   color: var(--ink-2);
   border-left: 3px solid transparent;
 }
-.fleet-row:hover { background: rgba(26, 115, 232, 0.05); color: var(--ink); }
+.fleet-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--ink); }
 .fleet-row[aria-current="page"] {
   background: var(--accent-soft);
   border-left-color: var(--accent);
@@ -239,7 +244,7 @@ table.tbl th {
 }
 table.tbl td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
 table.tbl tr:last-child td { border-bottom: 0; }
-table.tbl tbody tr:hover { background: rgba(26, 115, 232, 0.035); }
+table.tbl tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
 table.tbl tr[aria-selected="true"] { background: var(--accent-soft); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .dim { color: var(--ink-dim); }
@@ -286,8 +291,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   cursor: pointer;
 }
 .btn:hover { border-color: var(--accent); color: var(--accent); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn.primary:hover { background: #1765cc; color: #fff; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
 .btn.warn { border-color: var(--warn); color: var(--warn); }
 .btn.danger { border-color: var(--bad); color: var(--bad); }
 .btn[disabled] { opacity: 0.5; cursor: default; }
@@ -364,6 +369,11 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* two-column master/detail */
 .split { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+/* Column ratios as modifiers, not inline styles. An inline grid-template-columns wins
+   over the media query below, so /projects kept two columns at 375px and overflowed by
+   28px — the exact cascade collision that a `style={{}}` override sets up. */
+.split.wide-left { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); }
+.split.even { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 
 /* empty state */
 .empty { text-align: center; padding: 44px 20px; }
@@ -424,7 +434,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .toast {
   position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
   padding: 7px 15px; border-radius: 5px; font-size: 12.5px; z-index: 60;
-  border: 1px solid var(--ok); color: var(--ok); background: #e9f6ee;
+  border: 1px solid var(--ok); color: var(--ok); background: var(--ok-soft);
 }
 .toast.fail { border-color: var(--bad); color: var(--bad); background: var(--bad-soft); }
 
@@ -435,7 +445,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 /* ── responsive: keep name and status, drop the tag ───────────────── */
 
 @media (max-width: 1080px) {
-  .split { grid-template-columns: 1fr; }
+  /* Must beat the modifiers above, hence the doubled class. */
+  .split, .split.wide-left, .split.even { grid-template-columns: 1fr; }
   .lanes { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
@@ -457,3 +468,189 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ── dark theme ───────────────────────────────────────────────────────
+ * Tokens only. Every rule above styles through a var(), so dark is a palette
+ * swap rather than a second stylesheet — which is the whole reason the tokens
+ * exist.
+ *
+ * Not an inversion: greys are given a slight cool bias toward the accent, and the
+ * semantic colours are re-picked for a dark ground rather than reused. #c5221f on
+ * near-black is muddy, so critical becomes a lighter red that still reads as red.
+ * Contrast was checked against the panel colour, not against pure black.
+ *
+ * Two selectors, deliberately. prefers-color-scheme carries the OS preference for
+ * anyone who never touches the switch; [data-theme] is the explicit choice and must
+ * win in BOTH directions, including light-on-a-dark-OS.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #10151b;
+    --panel: #171d25;
+    --panel-2: #131922;
+    --line: #26303b;
+    --line-strong: #3a4653;
+    --ink: #e2e8ef;
+    --ink-2: #b3bfcb;
+    --ink-dim: #8b98a5;
+    --ink-faint: #66727e;
+    --accent: #6ba9f5;
+    --accent-soft: #1b2c42;
+    --ok: #4ec97f;
+    --ok-soft: #16301f;
+    --warn: #e0a340;
+    --warn-soft: #33280f;
+    --bad: #f2726b;
+    --accent-hover: #8cbcf8;
+    --on-accent: #0d1319;
+    --bad-soft: #3a1d1c;
+  }
+}
+
+:root[data-theme="dark"] {
+  --page: #10151b;
+  --panel: #171d25;
+  --panel-2: #131922;
+  --line: #26303b;
+  --line-strong: #3a4653;
+  --ink: #e2e8ef;
+  --ink-2: #b3bfcb;
+  --ink-dim: #8b98a5;
+  --ink-faint: #66727e;
+  --accent: #6ba9f5;
+  --accent-soft: #1b2c42;
+  --ok: #4ec97f;
+  --ok-soft: #16301f;
+  --warn: #e0a340;
+  --warn-soft: #33280f;
+  --bad: #f2726b;
+  --accent-hover: #8cbcf8;
+  --on-accent: #0d1319;
+  --bad-soft: #3a1d1c;
+}
+
+/* An explicit light choice must beat a dark OS. */
+:root[data-theme="light"] {
+  --page: #ffffff;
+  --panel: #f6f7f9;
+  --panel-2: #fafbfc;
+  --line: #e3e6ea;
+  --line-strong: #cfd5dc;
+  --ink: #1f2933;
+  --ink-2: #52616f;
+  --ink-dim: #69737d;
+  --ink-faint: #98a2ac;
+  --accent: #1a73e8;
+  --accent-soft: #e8f0fe;
+  --ok: #188038;
+  --ok-soft: #e9f6ee;
+  --warn: #b06000;
+  --warn-soft: #fef7e6;
+  --bad: #c5221f;
+  --bad-soft: #fce8e6;
+  --accent-hover: #1765cc;
+  --on-accent: #ffffff;
+}
+
+/* ── language and theme switches ──────────────────────────────────── */
+
+.prefs {
+  border-top: 1px solid var(--line);
+  padding: 10px 12px 12px;
+  display: grid;
+  gap: 6px;
+}
+.prefs-row { display: flex; gap: 4px; }
+.seg {
+  flex: 1;
+  font: 400 11px var(--sans);
+  color: var(--ink-dim);
+  background: var(--page);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.seg:hover { color: var(--ink); border-color: var(--line-strong); }
+/* aria-pressed is the state, and the styling follows it rather than a parallel
+   class — so the accessible state and the visible state cannot disagree. */
+.seg[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* CJK needs a touch more line height and no letter-spacing tricks. */
+:root[lang="zh-CN"] body { line-height: 1.7; }
+:root[lang="zh-CN"] .rail-sec,
+:root[lang="zh-CN"] .card .cap,
+:root[lang="zh-CN"] table.tbl th { letter-spacing: 0.02em; text-transform: none; }
+
+/* ── onboarding form ──────────────────────────────────────────────────
+ * A form, not a settings grid: one field per row with its own label and hint,
+ * because every field here changes what the equivalent command below it says.
+ */
+
+.field { margin-bottom: 14px; }
+.field > label {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-2);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+.field input[type="text"],
+.field input:not([type]),
+.field select {
+  width: 100%;
+  font: 400 12.5px var(--sans);
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--page);
+  color: var(--ink);
+}
+.field input:focus-visible, .field select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* aria-invalid is the state; the ring follows it rather than a parallel class. */
+.field input[aria-invalid="true"] { border-color: var(--bad); }
+.field input[type="checkbox"] { width: auto; vertical-align: -1px; }
+.field > label:has(input[type="checkbox"]) { font-weight: 400; color: var(--ink); }
+p.hint { font-size: 11px; margin: 4px 0 0; line-height: 1.5; }
+p.bad-hint { font-size: 11px; margin: 4px 0 0; color: var(--bad); }
+
+/* The four onboarding steps. State is a mark AND a word — the mark alone would
+   put this page back on colour, which is the rule the rest of the design keeps. */
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; }
+.steps li {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 9px;
+  align-items: baseline;
+  font-size: 12.5px;
+  color: var(--ink-dim);
+}
+.steps .mark {
+  display: inline-grid;
+  place-items: center;
+  width: 18px; height: 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  font-size: 10.5px;
+  color: var(--ink-faint);
+}
+.steps li.done { color: var(--ink); }
+.steps li.done .mark { border-color: var(--ok); color: var(--ok); }
+.steps li.now { color: var(--ink); font-weight: 500; }
+.steps li.now .mark { border-color: var(--accent); color: var(--accent); }
+.steps li.bad { color: var(--bad); }
+.steps li.bad .mark { border-color: var(--bad); color: var(--bad); }
+
+/* A command block scrolls rather than wraps: `--model gpt-5-\ncodex` is a different
+   command from the one shown, and the operator is expected to copy this. */
+.log.cmd { overflow-x: auto; }
+.log.cmd > div { white-space: pre; word-break: normal; overflow-wrap: normal; }
