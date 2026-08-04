@@ -20,6 +20,11 @@ export default defineConfig({
     // parallel races on process.env: RUNTIME_ROOT is captured at import time, and
     // `await import()` yields, so one file's env assignment lands in another
     // file's module. That produced ~20 spurious failures in a parallel run.
+    // The Next.js prototype under mockup/ is a separate package with its own
+    // toolchain. vitest's default include is **/*.{test,spec}.* with only
+    // node_modules and .git excluded, so without this the root suite would sweep
+    // anything added there.
+    exclude: ['**/node_modules/**', '**/.git/**', 'mockup/**'],
     fileParallelism: false,
     maxWorkers: 1,
   },
