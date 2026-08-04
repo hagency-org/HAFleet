@@ -81,6 +81,28 @@ On a host that already has tmux sessions, the installer needs a stance:
 `--deny-existing-tmux` adds them to `HAFLEET_SESSION_DENYLIST` so HAFleet will not
 adopt them as agents, `--allow-existing-tmux` proceeds anyway.
 
+## Framework-specific install notes
+
+**hermes** needs two extras, not one: `uv pip install -e ".[acp,mcp]"`. The `acp`
+extra provides the protocol library; the `mcp` extra provides the MCP *client*
+hermes uses to reach HAFleet's tools. With only `[acp]`, `register_mcp_servers()`
+returns nothing at debug level and hermes still logs "refreshed tool surface after
+ACP MCP registration (23 tools)" — the count is its own built-ins. The agent starts,
+reports healthy, and then declines to answer because it cannot see `check_inbox`.
+
+hermes also needs a model provider of its own. Any of its 35 registry providers
+works; the flag-free path is an API key:
+
+    hermes auth add <provider> --type api-key    # prompts, so nothing lands in history
+    hermes model                                 # interactive picker, needs a TTY
+
+Or set it directly in `~/.hermes/config.yaml`:
+
+    model: deepseek-v4-flash
+
+Check what a key actually grants before choosing a model name — `hermes model
+--refresh` re-fetches each provider's live `/v1/models`.
+
 ## Troubleshooting
 
 **"did not stay healthy (restarts=N)"** — the agent starts and dies repeatedly.

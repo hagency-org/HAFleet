@@ -20,8 +20,9 @@
     "comment": "Hermes also ships a full ACP server (hermes-acp, or `hermes acp`) advertising session fork/list/resume. Recorded for when HAFleet grows an ACP runtime; the tmux path above is what is wired today.",
     "command": "hermes-acp",
     "honorsMcpServers": true,
-    "mcpServersNote": "hermes registers ACP-supplied MCP servers on session/new (_register_session_mcp_servers: 'Register ACP-provided MCP servers and refresh the agent tool surface'). HAFleet's tools ride the protocol, so no config-file injection is needed \u2014 unlike octos, which ignores the field.",
-    "declaredCapabilities": "loadSession, sessionCapabilities{fork,list,resume}, promptCapabilities{image} \u2014 verified against v0.19.1"
+    "mcpServersNote": "hermes registers ACP-supplied MCP servers on session/new (_register_session_mcp_servers -> tools.mcp_tool.register_mcp_servers) and spawns them as child processes. VERIFIED end to end: it called mcp__hafleet__send_message and replied (msg_0114, msg_0116).",
+    "declaredCapabilities": "loadSession, sessionCapabilities{fork,list,resume}, promptCapabilities{image} \u2014 verified against v0.19.1",
+    "installNote": "The `mcp` extra is REQUIRED and is separate from `acp`. Installing with `.[acp]` alone leaves tools.mcp_tool._MCP_AVAILABLE False, and register_mcp_servers() then returns [] at DEBUG level \u2014 so hermes still logs \"refreshed tool surface after ACP MCP registration (23 tools)\" while having registered none of ours. The agent presents as working and then refuses to answer, saying it cannot reach the hafleet MCP. Install with `uv pip install -e \".[acp,mcp]\"`."
   },
   "guards": {
     "flags": {
