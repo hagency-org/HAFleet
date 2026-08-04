@@ -519,6 +519,40 @@ surfaces that the Overview does not replace. Each needs a destination before `/`
 Until that table is implemented, `/` keeps rendering the monitor and Overview lives at
 `/overview`. The rail links `/overview` from day one, so no route changes twice.
 
+## The prototype
+
+A running Next.js app implements this design: [`mockup/`](../../mockup/), on port 3100.
+
+```bash
+cd mockup && npm install && npm run dev
+```
+
+It exists because three findings could not be answered by a drawing:
+
+- **Populated Tasks.** An empty state cannot demonstrate blocked-first ordering, waiting
+  and heartbeat density, or a detail panel offering only the legal transitions.
+- **The corrected Alerts strips.** The static mockup kept showing the rejected version
+  that mixed four lifecycle statuses with one severity metric.
+- **The Queue destination.** Promised by the migration table, never designed.
+
+It also makes the invariants executable — `npm run check` asserts them against the served
+HTML rather than trusting the prose:
+
+| assertion | catches |
+|---|---|
+| every rail destination returns 200, an unregistered one 404s | a dead link like round 1's `queue` |
+| the rail renders on all 12 routes, marking exactly one destination | a page forgetting the shell |
+| `role="tablist"`, seven tabs, one `aria-selected`, `aria-controls` on each | the half-applied ARIA round 2 called fake |
+| every severity dot has a word beside it | the red dot labelled `info` |
+| needs-attention ranked most-severe-first | the page that claimed to rank and sorted by age |
+| task list ordered blocked-first | ordering asserted in prose only |
+| a status class is not reused as a warning | found by this check: `.badge.blocked` was doing duty as both a task status and a stale-heartbeat warning, so no assertion could tell them apart |
+| an ACP agent is offered no `10/sec`, and says it has no pane | pane polling for agents with no pane |
+| rail counts carry their unit | found by this check: React splits adjacent JSX expressions with a comment marker in SSR, so `{n} {unit}` rendered as `4<!-- --> open` and fragmented the text node |
+
+The last two rows are the argument for building it. Both are real defects that a picture
+cannot contain and prose did not catch.
+
 ## Known gaps in the drawings
 
 Stated because a mockup that contradicts the spec is worse than no mockup — an implementer follows
