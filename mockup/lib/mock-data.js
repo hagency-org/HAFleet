@@ -258,11 +258,25 @@ export const presets = [
   { id: 'ps_03', name: 'hermes-deepseek', framework: 'hermes', model: 'deepseek-v4-flash' },
 ];
 
-export const credentials = [
-  { env: 'ANTHROPIC_API_KEY', set: true, setAgo: '3 days ago' },
-  { env: 'DEEPSEEK_API_KEY', set: true, setAgo: '2 hours ago' },
-  { env: 'OPENROUTER_API_KEY', set: false, setAgo: null },
-];
+/*
+ * No credential store. An agent authenticates itself before joining the fleet —
+ * hermes via `hermes auth add`, codex and claude via their own logins, octos via
+ * its config file — and HAFleet never holds the secret. An earlier draft of this
+ * prototype had a Credentials panel on Config; it was invented. The real
+ * config-page.js has no credentials endpoint, only /api/agents and
+ * /api/framework-presets.
+ *
+ * What HAFleet legitimately knows is whether an agent RESOLVED a provider, because
+ * failing to is the most common reason onboarding fails — hermes reported healthy
+ * and then crash-looped 35 times on a missing provider.
+ */
+export const providerHomes = {
+  hermes: { home: '~/.hermes/', fix: 'hermes auth add <provider>' },
+  codex: { home: '~/.codex/', fix: 'codex login' },
+  'codex-acp': { home: '~/.codex/', fix: 'codex login' },
+  claude: { home: '~/.claude/', fix: 'claude login' },
+  octos: { home: '~/.config/octos/config.json', fix: 'edit octos config.json' },
+};
 
 // ── the agent log Activity renders ────────────────────────────────────────────
 // Line kinds are the real ones the ACP host writes. Framework passthrough is

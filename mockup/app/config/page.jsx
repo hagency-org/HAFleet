@@ -4,7 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Toast, useToast } from '@/components/Toast';
-import { presets, credentials, agents } from '@/lib/mock-data';
+import { presets, agents } from '@/lib/mock-data';
 
 /*
  * Config — three sections separated by blast radius, not by data type.
@@ -51,37 +51,57 @@ export default function ConfigPage() {
       </div>
 
       <h2 className="sec">
-        Credentials
-        <span className="note">stored per provider; a blank field leaves the existing value unchanged</span>
+        Provider readiness
+        <span className="badge" style={{ marginLeft: 8 }}>read only</span>
+        <span className="note">HAFleet does not hold provider credentials</span>
       </h2>
-      <div className="panel">
-        {credentials.map((c) => (
-          <div key={c.env} style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
-            <code style={{ minWidth: 210, fontSize: 12 }}>{c.env}</code>
-            <input
-              type="password"
-              placeholder={c.set ? '••••••••••••  (unchanged)' : 'not set'}
-              aria-label={c.env}
-              style={{
-                flex: 1, maxWidth: 300, font: '400 12px var(--mono)', padding: '5px 9px',
-                border: '1px solid var(--line)', borderRadius: 5,
-              }}
-            />
-            <span className={c.set ? 'badge ok' : 'badge'}>
-              {c.set ? `set ${c.setAgo}` : 'unset'}
-            </span>
-          </div>
-        ))}
-        <div className="btn-row" style={{ marginTop: 4 }}>
-          <button className="btn" onClick={() => say('ok', 'Credentials saved; blank fields left unchanged')}>
-            Save credentials
-          </button>
-        </div>
-        <p className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>
-          Values are never displayed, only their set state and age. To clear one, use the explicit
-          Clear action rather than submitting an empty field — a blank field means “unchanged”.
-        </p>
+      <div className="notice">
+        An agent authenticates itself <strong>before</strong> it joins the fleet — its provider
+        credential lives with the framework, not here. HAFleet never sees the secret and offers no
+        way to set one; it only reports whether the agent resolved a provider, because that is the
+        most common reason onboarding fails.
       </div>
+      <div className="tbl-wrap" style={{ marginTop: 12 }}>
+        <table className="tbl">
+          <thead>
+            <tr><th>Agent</th><th>Credential lives in</th><th>Provider</th><th>State</th><th>If unresolved</th></tr>
+          </thead>
+          <tbody>
+            {agents.map((a) => {
+              const home = {
+                hermes: '~/.hermes/',
+                codex: '~/.codex/',
+                'codex-acp': '~/.codex/',
+                claude: '~/.claude/',
+                octos: '~/.config/octos/config.json',
+              }[a.framework] ?? '—';
+              const fix = {
+                hermes: 'hermes auth add <provider>',
+                codex: 'codex login',
+                'codex-acp': 'codex login',
+                claude: 'claude login',
+                octos: 'edit octos config.json',
+              }[a.framework] ?? '—';
+              const provider = a.framework === 'hermes' ? 'deepseek' : 'account default';
+              return (
+                <tr key={a.name}>
+                  <td><Link href={`/agents/${a.name}`}>{a.name}</Link></td>
+                  <td><code style={{ fontSize: 11.5 }}>{home}</code></td>
+                  <td className="dim">{provider}</td>
+                  <td><span className="badge ok">resolved</span></td>
+                  <td><code style={{ fontSize: 11.5 }}>{fix}</code></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="dim" style={{ fontSize: 12, marginTop: 10 }}>
+        HAFleet&apos;s own secrets — <code>API_TOKEN</code>, per-agent tokens,{' '}
+        <code>MATRIX_REG_TOKEN</code> — are set once in <code>.env</code> at mode 600 during
+        install. They are deliberately not editable from a browser: a dashboard that can rewrite
+        its own auth token is a dashboard that can lock everyone out of itself.
+      </p>
 
       <h2 className="sec">
         Agent lifecycle

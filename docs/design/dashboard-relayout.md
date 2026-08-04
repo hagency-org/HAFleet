@@ -94,9 +94,33 @@ decisions from this page, it should be retired rather than redesigned.
 
 ### /config — Fleet configuration
 ![Config](page-config.jpg)
-Split into three separated sections by blast radius — presets, credentials, then agent lifecycle
-behind a `destructive` marker. Masked credentials state what a blank field means, which is the
-difference between "unchanged" and "cleared".
+Three sections separated by blast radius: framework presets, provider readiness, then agent
+lifecycle behind a `destructive` marker.
+
+**Correction.** An earlier draft put a *Credentials* panel here, with masked inputs and
+"a blank field leaves the existing value unchanged". That was wrong twice. It was
+fabricated — `config-page.js` has no credentials endpoint, only `/api/agents` and
+`/api/framework-presets` — and it inverted where provider auth belongs. **An agent
+authenticates itself before it joins the fleet**, and HAFleet never sees the secret:
+
+| framework | credential lives in | set by |
+|---|---|---|
+| hermes | `~/.hermes/` | `hermes auth add <provider>` |
+| codex, codex-acp | `~/.codex/` | `codex login` |
+| claude | `~/.claude/` | `claude login` |
+| octos | `~/.config/octos/config.json` | its own config |
+
+What replaces it is **read-only**: whether each agent resolved a provider, and the command
+to fix it if not. That is information HAFleet legitimately has, because a missing provider
+is the most common onboarding failure — hermes reported healthy and then crash-looped 35
+times on one. `acp-up` already refuses to report success in that case rather than offering
+to configure it.
+
+HAFleet's own secrets — `API_TOKEN`, per-agent tokens, `MATRIX_REG_TOKEN` — are a different
+kind: install-time `.env` material at mode 600, deliberately not editable from a browser. A
+dashboard that can rewrite its own auth token is a dashboard that can lock everyone out of
+itself. The static `page-config.jpg` above still shows the withdrawn panel; the prototype is
+correct.
 
 ## Constraints taken as given
 
@@ -567,6 +591,7 @@ the picture. From the final review round:
 | Reminder cancel/dismiss semantics; whether the global message log narrows in scope when it moves to per-agent Messages | not specified | open |
 | Responsive behaviour at real fleet sizes (1 / 5 / 20 / 100 agents, 375 / 640 / 900 / 1440 px) | breakpoints specified, untested | open |
 | The benchmark's *today* column | estimated | must be measured once before it means anything |
+| `page-config.jpg` still shows the withdrawn *Credentials* panel | `page-config.jpg` | the prototype is correct; the drawing is stale |
 
 ## Change plan
 
