@@ -320,5 +320,5 @@ describe('LocalServiceSupervisor', () => {
     expect(Date.now() - startedAt).toBeLessThan(5000);
     expect(status.ok).toBe(false);
     expect(status.services.every((service) => !service.healthy)).toBe(true);
-  }, 10000);
+  });
 });

@@ -128,7 +128,12 @@ function spawnMcpServer(apiBase, extraEnv = {}, coreFile = 'lib/mcp-server-core.
     HAFLEET_SERVER: 'local',
     API_TOKEN: 'test-token',
     MCP_HEARTBEAT_INTERVAL_MS: '100',
-    MCP_FETCH_TIMEOUT_MS: '100',
+    // 100ms here was a real race, not a slow machine: a local loopback response
+    // takes ~2ms, but under full-suite load it can exceed 100ms, and then the
+    // client reports "timeout (attempt 1/2)" instead of the HTTP status the test
+    // asserts on. No test exercises timeout behaviour, so the short value bought
+    // nothing — every fake backend in this file answers immediately.
+    MCP_FETCH_TIMEOUT_MS: '2000',
     MCP_FETCH_RETRIES: '1',
     MCP_FETCH_BACKOFF_MS: '5',
     NO_PROXY: '*',
@@ -156,6 +161,12 @@ afterEach(async () => {
   tempDirs.clear();
 });
 
+// Per-test `}, 10000)` overrides were removed from this file. They were added to
+// raise the limit above vitest's 5000ms default; once vitest.config.js set a 30s
+// default they were CAPPING it instead, and "writes pid file under explicit agent
+// state dir" kept timing out at exactly 10s. Spawning a node process, waiting for
+// a pid file, killing it and waiting for cleanup is not reliably a 10s operation
+// on a loaded machine.
 describe('MCP backend heartbeat', () => {
   test('writes pid file under derived agent state dir when explicit state dir is missing', async () => {
     const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'hafleet-mcp-pid-'));
@@ -182,7 +193,7 @@ describe('MCP backend heartbeat', () => {
       await waitFor(() => !existsSync(pidFile), { detail: `mcp pid file cleanup for ${coreFile}` });
       await closeServer(running.server);
     }
-  }, 10000);
+  });
 
   test('defaults heartbeat server to hostname when HAFLEET_SERVER is unset', async () => {
     const calls = [];
@@ -197,7 +208,7 @@ describe('MCP backend heartbeat', () => {
 
     await stopChild(mcp.child);
     await closeServer(running.server);
-  }, 10000);
+  });
 
   test('writes pid file under explicit agent state dir when provided', async () => {
     const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'hafleet-mcp-pid-'));
@@ -222,7 +233,7 @@ describe('MCP backend heartbeat', () => {
       await waitFor(() => !existsSync(pidFile), { detail: `explicit mcp pid cleanup for ${coreFile}` });
       await closeServer(running.server);
     }
-  }, 10000);
+  });
 
   test('periodic heartbeat reconnects after backend restart', async () => {
     const calls = [];
@@ -250,7 +261,7 @@ describe('MCP backend heartbeat', () => {
       mcpPresent: true,
     });
     expect(latest.body.pid).toBeGreaterThan(0);
-  }, 10000);
+  });
 
   test('heartbeat requests retry transient backend failures', async () => {
     const calls = [];
@@ -265,5 +276,5 @@ describe('MCP backend heartbeat', () => {
     });
 
     expect(mcp.stderr()).toContain('API POST /api/agents/alpha/heartbeat HTTP 503 (attempt 1/2)');
-  }, 10000);
+  });
 });

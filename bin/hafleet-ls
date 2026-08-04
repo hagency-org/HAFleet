@@ -171,7 +171,17 @@ if isinstance(data, list):
                 active = "0"
             else:
                 active = "unknown"
-            lines.append(item["name"] + "|" + active)
+            # Transport is carried through so the table can distinguish a tmux
+            # agent from a paneless ACP one. With two transports live, `hafleet ls`
+            # could not tell them apart and the only way to find out was to query
+            # /api/agents by hand.
+            transport = item.get("transport") or "tmux"
+            # Online, too. An ACP agent has no pane, so the tmux scan cannot see it
+            # and it fell through to "down" — `hafleet ls` reported octos-agent and
+            # codex-acp-agent as down while both were healthy and answering. For a
+            # paneless agent, backend liveness is the only thing that knows.
+            online = "1" if item.get("online") is True else "0"
+            lines.append(item["name"] + "|" + active + "|" + str(transport) + "|" + online)
 if active_map and lines:
     with open(active_map, "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -243,8 +253,13 @@ if [ "$SHOW_ALL" = true ]; then
       elif [ -s "$V1_INFO_FILE" ]; then
         _reg_sup=$(awk -F'|' -v n="$reg_name" '$1==n && $6!="-" {print $6; exit}' "$V1_INFO_FILE" 2>/dev/null || true)
       fi
+      # A paneless ACP agent is not "down" merely because it has no tmux session.
+      _reg_transport=$(awk -F'|' -v n="$reg_name" '$1==n {print $3; exit}' "$ACTIVE_MAP_FILE" 2>/dev/null || true)
+      _reg_online=$(awk -F'|' -v n="$reg_name" '$1==n {print $4; exit}' "$ACTIVE_MAP_FILE" 2>/dev/null || true)
       if [ -n "$_reg_sup" ]; then
         echo "$reg_name standby" >> "$AGENTS_FILE"
+      elif [ "$_reg_transport" = "acp" ] && [ "$_reg_online" = "1" ]; then
+        echo "$reg_name idle" >> "$AGENTS_FILE"
       else
         echo "$reg_name down" >> "$AGENTS_FILE"
       fi
@@ -258,8 +273,8 @@ if [ ! -s "$AGENTS_FILE" ]; then
 fi
 
 # Print header
-printf "%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\n" "NAME" "STATUS" "TYPE" "VER" "MODEL" "KNOWN" "MCP" "RESUME" "PATH"
-printf "%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\n" "----" "------" "----" "---" "-----" "----------" "---" "------" "----"
+printf "%-20s %-8s %-10s %-5s %-6s %-20s %-10s %-5s %-10s %s\n" "NAME" "STATUS" "TYPE" "TRANS" "VER" "MODEL" "KNOWN" "MCP" "RESUME" "PATH"
+printf "%-20s %-8s %-10s %-5s %-6s %-20s %-10s %-5s %-10s %s\n" "----" "------" "----" "-----" "---" "-----" "----------" "---" "------" "----"
 
 # Sort and print
 sort "$AGENTS_FILE" | while IFS=' ' read -r name status; do
@@ -302,10 +317,27 @@ EOFV1
   # Known in backend?
   reg="no"
   echo "$REG_NAMES" | grep -qx "$name" && reg="yes"
+  # Field 3 of the map file; "-" when the backend does not know this agent. tmux
+  # agents predate the field, so the parse block defaults them rather than leaving
+  # a blank that would read as "unknown".
+  transport=$(awk -F'|' -v n="$name" '$1==n {print $3; exit}' "$ACTIVE_MAP_FILE" 2>/dev/null || true)
+  [ -n "$transport" ] || transport="-"
 
-  # MCP? (for active and idle — both have tmux sessions)
+  # MCP? The tmux detection maps an mcp-server.js process to a session via its tty,
+  # which a paneless ACP agent does not have — so it reported "no" for agents whose
+  # MCP was demonstrably working (octos-agent and codex-acp-agent had both just
+  # answered messages through check_inbox). For those, the pid file the MCP server
+  # writes into the agent state dir is the signal, and it has to be a LIVE pid: a
+  # stale file left by a crash would otherwise report MCP that is not there.
   mcp="-"
   [ "$status" != "down" ] && [ "$status" != "standby" ] && mcp="no"
+  if [ "$transport" = "acp" ]; then
+    _mcp_pid_file="${HAFLEET_HOMEDIR:-$HOME/.hafleet}/agents/agent_${name}/state/mcp-server.pid"
+    if [ -s "$_mcp_pid_file" ]; then
+      _mcp_pid=$(tr -dc '0-9' < "$_mcp_pid_file" 2>/dev/null || true)
+      [ -n "$_mcp_pid" ] && kill -0 "$_mcp_pid" 2>/dev/null && mcp="yes"
+    fi
+  fi
   grep -qx "$name" "$MCP_SESSIONS_FILE" 2>/dev/null && mcp="yes"
 
   # Resume ID
@@ -326,12 +358,12 @@ EOFV1
 
   # Color: active=default, idle=yellow, standby=cyan, down=dimmed
   if [ "$status" = "down" ]; then
-    printf "\033[2m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
+    printf "\033[2m%-20s %-8s %-10s %-5s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$transport" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   elif [ "$status" = "standby" ]; then
-    printf "\033[36m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
+    printf "\033[36m%-20s %-8s %-10s %-5s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$transport" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   elif [ "$status" = "idle" ]; then
-    printf "\033[33m%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
+    printf "\033[33m%-20s %-8s %-10s %-5s %-6s %-20s %-10s %-5s %-10s %s\033[0m\n" "$name" "$status" "$type" "$transport" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   else
-    printf "%-20s %-8s %-8s %-6s %-20s %-10s %-5s %-10s %s\n" "$name" "$status" "$type" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
+    printf "%-20s %-8s %-10s %-5s %-6s %-20s %-10s %-5s %-10s %s\n" "$name" "$status" "$type" "$transport" "$model_ver" "$model" "$reg" "$mcp" "$resume" "$path_val"
   fi
 done
