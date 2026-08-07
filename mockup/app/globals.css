@@ -111,11 +111,13 @@ a { color: inherit; text-decoration: none; }
 
 .rail-list { list-style: none; margin: 0; padding: 0 0 8px; }
 
+/* Two columns, not three: the transport tag became the job line inside .id, so
+   there is nothing left to sit in a third column and the name gets the width. */
 .agent-row {
   display: grid;
-  grid-template-columns: 14px 1fr auto;
+  grid-template-columns: 14px 1fr;
   gap: 8px;
-  align-items: center;
+  align-items: start;
   padding: 6px 16px;
   border-left: 3px solid transparent;
 }
@@ -141,6 +143,17 @@ a { color: inherit; text-decoration: none; }
   font-variant-numeric: tabular-nums;
 }
 .agent-row.on .st { color: var(--ok); }
+/* The job an operator navigates by. Truncates rather than wrapping, because a
+   two-line role would push the fleet nav down the rail. */
+.agent-row .job {
+  display: block;
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-row .glyph { line-height: 17px; }
 
 .tag {
   font-size: 9px;
@@ -403,15 +416,11 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   color: var(--ink-faint);
 }
 
-/* capacity matrix */
-.cap-cell { font-variant-numeric: tabular-nums; }
-.cap-cell .bar { height: 3px; background: var(--line); border-radius: 2px; margin-top: 5px; overflow: hidden; }
-.cap-cell .bar i { display: block; height: 100%; background: var(--ok); }
-.cap-cell.busy .bar i { background: var(--line-strong); }
-.cap-cell.tight .bar i { background: var(--warn); }
-.cap-free { color: var(--ok); }
-.cap-busy { color: var(--ink-dim); }
-.cap-tight { color: var(--warn); }
+/* The capacity matrix styles live at the end of this file, with the dispatch grid they
+   belong to. What stood here — `.cap-cell .bar`, `.cap-cell.busy`, `.cap-cell.tight`,
+   `.cap-free/busy/tight` — styled the withdrawn `idle/total` cell and nothing rendered it
+   any more. `.cap-cell.busy` was also competing with `.agent-chip.busy` for one word,
+   which is the class-reuse defect this suite already has an assertion for. */
 .legend { display: flex; gap: 18px; font-size: 11.5px; color: var(--ink-dim); margin-top: 10px; flex-wrap: wrap; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
 
@@ -654,3 +663,256 @@ p.bad-hint { font-size: 11px; margin: 4px 0 0; color: var(--bad); }
    command from the one shown, and the operator is expected to copy this. */
 .log.cmd { overflow-x: auto; }
 .log.cmd > div { white-space: pre; word-break: normal; overflow-wrap: normal; }
+
+/* ── the dispatch grid ────────────────────────────────────────────────
+ * A cell lists real agent names with their busy state, matching pool-page.js. The
+ * previous version showed an `idle/total` count, which could not express the one
+ * thing that decides whether a dispatch routes: a stronger idle agent in the same
+ * role covers a weaker request.
+ */
+
+.cap-cell { display: flex; flex-wrap: wrap; gap: 4px; }
+.agent-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 11.5px;
+  padding: 2px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--page);
+  white-space: nowrap;
+}
+.agent-chip > i { font-style: normal; font-size: 10px; color: var(--ink-faint); }
+.agent-chip.idle { border-color: var(--ok); }
+.agent-chip.idle > i { color: var(--ok); }
+.agent-chip.busy { border-color: var(--warn); }
+.agent-chip.busy > i { color: var(--warn); }
+
+/* An empty cell a stronger agent covers. Marked, because "empty" and "undispatchable"
+   are different answers and the old dash conflated them. Both empty states read
+   mark-then-word — `↑ strong`, `— queues` — so neither rests on the glyph or the colour. */
+td.cap-via { color: var(--ok); }
+.cap-mark { margin-right: 4px; }
+
+/* The legend keys these two states with the mark itself, so there is one notation. */
+.legend b.lg-mark { font-weight: 400; margin-right: 5px; }
+.legend b.lg-mark.ok { color: var(--ok); }
+
+.legend i.lg {
+  display: inline-block;
+  width: 9px; height: 9px;
+  border-radius: 2px;
+  border: 1px solid var(--line-strong);
+  margin-right: 5px;
+  vertical-align: 0;
+}
+.legend i.lg.idle { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 30%, transparent); }
+.legend i.lg.busy { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 30%, transparent); }
+
+/* ── the workforce console ─────────────────────────────────────────────
+ * Six state axes — classification, qualification, connection, eligibility,
+ * capacity, health — must never collapse into one enum or one colour. So a
+ * state is a mark AND a word, and the mark alone is never the carrier.
+ */
+.wstate {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.wstate i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.wstate.deployed, .wstate.run { color: var(--ok); }
+.wstate.idle { color: var(--ink-dim); }
+.wstate.throttled { color: var(--warn); }
+.wstate.pend { color: var(--accent); }
+.wstate.wait { color: var(--ink-dim); }
+.wstate.unassigned { color: var(--ink-faint); }
+/* Unassigned is the one state with no colour to lend it: a dashed outline, so it
+   still reads as a state rather than as a missing value. */
+.wstate.unassigned i, .wstate.wait i {
+  background: transparent;
+  border: 1px dashed currentColor;
+  border-radius: 2px;
+}
+
+/* A blank is never a zero, and never a bare mark. Both halves are required:
+   the dash says "no value", the reason says why there is no value. */
+.mk-dash { color: var(--ink-faint); }
+.why-inline { color: var(--ink-faint); font-size: 11px; margin-left: 5px; }
+.why-inline::before { content: "— "; }
+
+/* Provenance rides with the number, so an aggregate can never silently mix
+   reported, measured and unknown. */
+.prov {
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  padding: 1px 4px;
+  color: var(--ink-faint);
+  margin-left: 5px;
+  vertical-align: 1px;
+}
+
+.card .val small { font-size: 11px; color: var(--ink-dim); font-weight: 400; }
+
+.meter { display: block; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; margin-top: 4px; }
+.meter i { display: block; height: 100%; background: var(--accent); }
+.meter i.ok { background: var(--ok); }
+
+.spark { display: inline-flex; align-items: flex-end; gap: 2px; height: 20px; }
+.spark i { width: 5px; border-radius: 1px; background: var(--accent); }
+
+.ok-text { color: var(--ok); }
+.warn-text { color: var(--warn); }
+.mono-s { font-family: var(--mono); font-size: 11.5px; }
+
+.chip-mem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--ok);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.chip-mem > i { font-style: normal; font-size: 9.5px; color: var(--ok); }
+.chip-mem.off { border-color: var(--warn); }
+.chip-mem.off > i { color: var(--warn); }
+
+/* ── the two lines of report ────────────────────────────────────────────────
+   Everything below serves one rule from the design document: a mark never
+   states a fact on its own. A gap strip is words AND a border treatment; an
+   over-qualified allocation prints both tiers rather than a colour; a stranded
+   worker names the clause it failed. Colour is always the second signal. */
+
+/* the authored org chart */
+.rolegrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+  margin-top: 4px;
+}
+.rolecard {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  padding: 11px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+/* A role nobody can fill is a hiring problem. It reads differently from a role
+   nobody has got round to allocating, and the word says so too. */
+.rolecard.unhireable { border-color: var(--warn); background: var(--warn-soft); }
+
+.rc-head { display: flex; align-items: baseline; gap: 8px; }
+.rc-name { font-size: 13.5px; font-weight: 600; }
+.rc-stage {
+  margin-left: auto;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+.rc-def { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11.5px; }
+.rc-key { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
+.rc-min { color: var(--ink-2); }
+.rc-skills { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.chip-skill {
+  font-size: 10.5px;
+  font-family: var(--mono);
+  padding: 1px 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.chip-role {
+  display: inline-block;
+  font-size: 11.5px;
+  padding: 1px 7px;
+  margin-right: 4px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.rc-staff { border-top: 1px solid var(--line); padding-top: 7px; margin-top: auto; }
+.rc-list { list-style: none; display: flex; flex-direction: column; gap: 5px; }
+.rc-list li { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.rc-tier { font-size: 11px; color: var(--ink-dim); font-family: var(--mono); }
+.rc-gap { font-size: 11.5px; color: var(--ink-dim); }
+.rc-gap.bad { color: var(--warn); }
+.rc-elig { font-size: 11px; color: var(--ink-dim); margin-top: 6px; }
+
+/* Floor routes, fix accounts: the substitution is never left silent. */
+.overqual {
+  font-size: 11px;
+  color: var(--warn);
+  border-bottom: 1px dotted var(--warn);
+}
+.stranded { font-size: 11px; color: var(--bad); }
+
+/* lifecycle coverage — held vs nobody-allocated, as words plus a treatment */
+.stages { display: inline-flex; flex-wrap: wrap; gap: 3px; }
+.stages.big { gap: 5px; margin-bottom: 8px; }
+.stg {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--line-strong);
+  white-space: nowrap;
+}
+.stg.held { color: var(--ok); border-color: var(--ok); }
+.stg.gap {
+  color: var(--warn);
+  border-color: var(--warn);
+  border-style: dashed;
+  background: var(--warn-soft);
+}
+.stages.big .stg { font-size: 12px; padding: 3px 9px; }
+
+/* the affiliation lines on an employee record */
+.affil {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 10px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+.af-row { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; font-size: 12px; }
+.af-line {
+  min-width: 116px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-dim);
+}
+
+/* one row of a provenance-carrying list — cost, over-qualification, memory */
+.prov-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+  padding: 4px 0;
+  flex-wrap: wrap;
+}
+.prov-row + .prov-row { border-top: 1px solid var(--line); }
+.prov-row .grow { flex: 1; min-width: 0; }
+.amount { font-family: var(--mono); font-size: 12.5px; }

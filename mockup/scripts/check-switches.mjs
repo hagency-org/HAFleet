@@ -34,12 +34,28 @@ const browser = await puppeteer.launch({ executablePath: CHROME, headless: true 
  * state.
  */
 const contexts = [];
-async function fresh({ colorScheme = 'light', path = '/overview' } = {}) {
+
+/*
+ * Wait for hydration, not just for the network.
+ *
+ * `networkidle0` says the bytes arrived, not that React attached its handlers. A click
+ * that lands before that does nothing — silently — and every assertion after it reads the
+ * pre-click state. Against `npm start` the bundle was fast enough to hide this; against
+ * `npm run dev` the language switch failed on every run. The signal is the same one block
+ * 8 uses to tell a live button from a dead one: React's props object on the element.
+ */
+const hydrated = (page) => page.waitForFunction(() => {
+  const el = document.querySelector('.prefs-row .seg');
+  return Boolean(el && Object.keys(el).some((k) => k.startsWith('__reactProps$')));
+});
+
+async function fresh({ colorScheme = 'light', path = '/org' } = {}) {
   const ctx = await browser.createBrowserContext();
   contexts.push(ctx);
   const page = await ctx.newPage();
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: colorScheme }]);
   await page.goto(BASE + path, { waitUntil: 'networkidle0' });
+  await hydrated(page);
   return page;
 }
 
@@ -83,21 +99,23 @@ const state = (page) => page.evaluate(() => ({
 {
   const page = await fresh();
   const before = await state(page);
-  check('starts in English', before.navFirst === 'Overview' && before.lang === 'en', before.navFirst);
-  check('tab title follows the H1', before.title === 'Fleet overview — HAFleet', before.title);
+  // navFirst is the rail's FIRST destination, which is now Projects: the rail leads
+  // with the solid line and the H1 belongs to /org, the dotted-line landing page.
+  check('starts in English', before.navFirst === 'Projects' && before.lang === 'en', before.navFirst);
+  check('tab title follows the H1', before.title === 'Organization — HAFleet', before.title);
 
   check('中文 button exists', await pick(page, LOCALE, 'zh'));
   await page.waitForFunction(() => document.documentElement.getAttribute('lang') === 'zh-CN');
   const after = await state(page);
 
   check('lang becomes zh-CN', after.lang === 'zh-CN', after.lang);
-  check('nav text is translated', after.navFirst === '总览', after.navFirst);
-  check('the H1 is translated', after.h1 === '集群总览', after.h1);
-  check('the tab title is translated', after.title.startsWith('集群总览'), after.title);
+  check('nav text is translated', after.navFirst === '项目', after.navFirst);
+  check('the H1 is translated', after.h1 === '组织', after.h1);
+  check('the tab title is translated', after.title.startsWith('组织'), after.title);
   check('the rail heading is translated', /代理/.test(after.railHeading), after.railHeading);
   check('the pressed state moved to 中文', after.pressed[0] === 1, after.pressedText.join(','));
   check('no raw key is visible',
-    !/\b(rail|nav|ov|col|al)\.[a-zA-Z]/.test(await page.evaluate(() => document.body.innerText)));
+    !/\b(rail|nav|wf|as|pf|kn|col|al)\.[a-zA-Z]/.test(await page.evaluate(() => document.body.innerText)));
   await page.close();
 }
 
@@ -213,6 +231,54 @@ const state = (page) => page.evaluate(() => ({
   await page.close();
 }
 
+// ── raw {placeholder} leaks, on the views only a browser renders ─────────
+{
+  /*
+   * Every ?view=assigned surface is client-rendered, so none of it reaches the static
+   * pass — which is exactly where both real leaks were: `{role}` on a queued
+   * assignment's blocked reason, and `{a}`/`{b}` on a flagged performance row. Both
+   * were found by reading a screenshot, and a static assertion over the same URLs
+   * passed with the bugs in.
+   */
+  const PROJECTED = ['/org', '/projects', '/org/coding', '/org/system-engineer',
+    '/org/documentation', '/projects/api-service', '/projects/docs-portal', '/assignments',
+    '/agents/octos-agent', '/agents/claude-agent'];
+  const leaked = [];
+  for (const route of PROJECTED) {
+    const page = await fresh({ path: `${route}?view=assigned` });
+    const hit = await page.evaluate(() => {
+      const m = document.body.innerText.match(/\{[a-zA-Z][a-zA-Z0-9]{0,10}\}/);
+      return m ? m[0] : null;
+    });
+    if (hit) leaked.push(`${route}:${hit}`);
+  }
+  check(`no projected view renders a raw {placeholder} (${PROJECTED.length} routes)`,
+    leaked.length === 0, leaked.slice(0, 4).join(' '));
+}
+
+// ── the doubled em dash, which only a browser can see ────────────────────
+{
+  /*
+   * `.why-inline::before` draws "— ", so a <Blank> that ALSO emits a `.mk-dash` span
+   * renders "— — reason". None of it is visible to a markup check: generated content
+   * is not in the HTML, and `innerText` does not include it either. So the invariant is
+   * asserted structurally — a `.why-inline` never follows a `.mk-dash` — plus a read of
+   * the computed content to confirm the pseudo-element is still the thing drawing it.
+   */
+  const page = await fresh({ path: '/org' });
+  const dash = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('.why-inline')];
+    return {
+      n: rows.length,
+      before: rows.length ? getComputedStyle(rows[0], '::before').content : null,
+      doubled: rows.filter((el) => el.previousElementSibling?.classList.contains('mk-dash')).length,
+    };
+  });
+  check('the reason spans render', dash.n > 0, `${dash.n} found`);
+  check('the dash comes from ::before', /—/.test(dash.before ?? ''), String(dash.before));
+  check('no blank draws the dash twice', dash.doubled === 0, `${dash.doubled} doubled`);
+}
+
 // ── 7. no horizontal overflow at any specified width ─────────────────────
 {
   /*
@@ -221,8 +287,11 @@ const state = (page) => page.evaluate(() => ({
    * collapses .split to one column — a cascade collision an inline style sets up and
    * a stylesheet cannot undo. Column ratios are modifier classes now.
    */
-  const ROUTES_R = ['/overview', '/alerts', '/queue', '/tasks', '/projects', '/capacity',
-    '/onboard', '/config', '/agents/octos-agent'];
+  // `/capacity?view=assigned` is listed because the populated grid is the WIDE one — six
+  // role columns of agent chips — and while the view lived in component state no
+  // URL-driven pass could reach it. This sweep was measuring the empty view twice.
+  const ROUTES_R = ['/workforce', '/assignments', '/alerts', '/queue', '/tasks', '/projects', '/capacity',
+    '/capacity?view=assigned', '/performance', '/knowledge', '/onboard', '/config', '/agents/octos-agent'];
   const WIDTHS = [375, 640, 900, 1440];
   const over = [];
   const ctx = await browser.createBrowserContext();
@@ -256,12 +325,13 @@ const state = (page) => page.evaluate(() => ({
 
   // The rail is the whole navigation model, so it must survive the narrowest width.
   await page.setViewport({ width: 375, height: 900 });
-  await page.goto(`${BASE}/overview`, { waitUntil: 'networkidle0' });
+  await page.goto(`${BASE}/workforce`, { waitUntil: 'networkidle0' });
   const rail = await page.evaluate(() => {
     const r = document.querySelector('.rail');
     return { w: r?.offsetWidth ?? 0, rows: document.querySelectorAll('.fleet-row').length };
   });
-  check('the rail survives 375px', rail.w > 0 && rail.rows === 8, `${rail.w}px, ${rail.rows} destinations`);
+  // Six, down from nine: four of the old destinations became sections under Org.
+  check('the rail survives 375px', rail.w > 0 && rail.rows === 6, `${rail.w}px, ${rail.rows} destinations`);
   await page.close();
 }
 
@@ -274,9 +344,10 @@ const state = (page) => page.evaluate(() => ({
    */
   const page = await fresh();
   const dead = [];
-  for (const r of ['/overview', '/alerts', '/queue', '/tasks', '/projects', '/capacity',
-    '/onboard', '/config', '/agents/octos-agent', '/agents/codex-agent']) {
+  for (const r of ['/workforce', '/assignments', '/alerts', '/queue', '/tasks', '/projects', '/capacity',
+    '/performance', '/knowledge', '/onboard', '/config', '/agents/octos-agent']) {
     await page.goto(BASE + r, { waitUntil: 'networkidle0' });
+    await hydrated(page); // or every button reads as dead, which is the same false positive
     const found = await page.$$eval('button', (els) => els
       // React attaches listeners at the root, so the DOM cannot be asked directly.
       // A live button is one React gave an onClick prop to, which shows up on the
@@ -290,6 +361,76 @@ const state = (page) => page.evaluate(() => ({
     for (const label of found) dead.push(`${r}:${label}`);
   }
   check('every button has a handler', dead.length === 0, dead.slice(0, 5).join(' | '));
+  await page.close();
+}
+
+// ── 9. the capacity view round-trips through the URL ─────────────────────
+{
+  /*
+   * The populated grid is the page's hypothetical view, and it used to be reachable only
+   * by clicking: not linkable, lost on reload, and invisible to every check here. Which
+   * meant the assertion that matters most about it — that a lease table full of rows says
+   * on screen that it is illustrative — could not be written at all.
+   */
+  const page = await fresh();
+  await page.goto(`${BASE}/capacity?view=assigned`, { waitUntil: 'networkidle0' });
+  await hydrated(page); // the URL is read in an effect, so the view exists only after this
+  // The rail footer's language and theme switches are `.prefs-row` too, and they come
+  // first in the document — the first version of these three assertions clicked 中文 and
+  // then reported that the URL had not changed. The view row is the one outside the rail.
+  const VIEW_ROW = '.prefs-row:not(.rail .prefs-row)';
+  /*
+   * Count GRID chips, not every `.agent-chip` on the page. The empty view lists the five
+   * unassigned agents as chips too, so a bare `.agent-chip` count is 5 in both views and
+   * proves nothing — it read as "the view never changes" while the view was changing
+   * correctly. Only a chip in a cell carries idle/busy.
+   */
+  const GRID_CHIPS = '.agent-chip.idle, .agent-chip.busy';
+  const assigned = await page.evaluate((sel) => ({
+    chips: document.querySelectorAll('.agent-chip.idle, .agent-chip.busy').length,
+    pressed: document.querySelector(`${sel} button[aria-pressed="true"]`)?.textContent.trim(),
+    labelled: [...document.querySelectorAll('.notice.warn')].some((n) => /[Hh]ypothetical|假设/.test(n.textContent)),
+    leases: document.querySelectorAll('.tbl tbody tr').length,
+    // Same rule as the static pass, on the view the static pass cannot see —
+    // and the same refinement: a mark alone fails, a self-describing number
+    // like `74%` in the seat table does not.
+    wordless: [...document.querySelectorAll('td')]
+      .filter((td) => !/[A-Za-z0-9一-鿿]/.test(td.textContent.trim())).length,
+  }), VIEW_ROW);
+  check('?view=assigned selects the populated grid', assigned.chips > 0, `${assigned.chips} chips`);
+  check('the pressed segment agrees with the URL', assigned.pressed === 'With roles assigned', assigned.pressed);
+  check('the populated view says on screen that it is hypothetical', assigned.labelled);
+  check('no cell in the populated view is a mark alone', assigned.wordless === 0, `${assigned.wordless} wordless`);
+
+  // Reload keeps it, and Back returns to the honest default.
+  await page.reload({ waitUntil: 'networkidle0' });
+  await hydrated(page);
+  const kept = await page.$$eval(GRID_CHIPS, (e) => e.length);
+  check('a reload keeps the view', kept > 0, `${kept} chips in cells`);
+  await page.goto(`${BASE}/capacity`, { waitUntil: 'networkidle0' });
+  await hydrated(page);
+  const clicked = await page.evaluate((sel) => {
+    const b = [...document.querySelectorAll(`${sel} button`)]
+      .find((x) => x.getAttribute('aria-pressed') === 'false');
+    b?.click();
+    return b?.textContent.trim() ?? null;
+  }, VIEW_ROW);
+  check('the unpressed segment is the other view', clicked === 'With roles assigned', String(clicked));
+  const url = await page.evaluate(() => location.search);
+  await page.goBack({ waitUntil: 'networkidle0' });
+  await hydrated(page);
+  // popstate → setState → render is asynchronous, so reading the DOM in the same tick
+  // measures the frame before the update. Wait for it, but swallow the timeout: if the
+  // view never resets, the assertion below should say so rather than the run crashing.
+  await page.waitForFunction((sel) => document.querySelectorAll(sel).length === 0,
+    { timeout: 5000 }, GRID_CHIPS).catch(() => {});
+  const back = await page.evaluate((sel) => ({
+    search: location.search,
+    chips: document.querySelectorAll(sel).length,
+  }), GRID_CHIPS);
+  check('choosing a view writes the URL', url === '?view=assigned', url || '(empty)');
+  check('Back returns to the default view', back.search === '' && back.chips === 0,
+    `${back.search || '(empty)'}, ${back.chips} chips in cells`);
   await page.close();
 }
 

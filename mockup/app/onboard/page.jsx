@@ -5,7 +5,8 @@ import PageHead from '@/components/PageHead';
 import { Toast, useToast } from '@/components/Toast';
 import { useT } from '@/components/Prefs';
 import {
-  detected, detectState, onboardable, onboardCommand, onboardSteps, agents,
+  detected, detectState, onboardable, onboardCommand, roleCommand, onboardSteps, agents,
+  ROLES, CAPABILITY_TIERS, ROLE_DEFAULT_TIER,
 } from '@/lib/mock-data';
 
 /*
@@ -47,6 +48,10 @@ export default function OnboardPage() {
   const [workspace, setWorkspace] = useState('');
   const [framework, setFramework] = useState('');
   const [supervised, setSupervised] = useState(true);
+  // Role and capability are what fill the dispatch grid. They are optional — an agent
+  // without a role still works, it just never gets dispatched to.
+  const [role, setRole] = useState('');
+  const [capability, setCapability] = useState('');
   const [model, setModel] = useState('');
   const [phase, setPhase] = useState(null); // null | step id | 'done' | 'failed'
 
@@ -62,6 +67,7 @@ export default function OnboardPage() {
   }, []);
 
   const command = onboardCommand({ name, workspace, framework, supervised, model });
+  const roleCmd = roleCommand({ name, role, capability });
 
   function start() {
     // Walk the four real steps rather than showing one spinner: step 4 is the slow
@@ -215,6 +221,37 @@ export default function OnboardPage() {
                 </select>
               </div>
 
+              <div className="field">
+                <label htmlFor="ob-role">{t('ob.role')}</label>
+                <select
+                  id="ob-role"
+                  value={role}
+                  onChange={(e) => { setRole(e.target.value); setCapability(''); }}
+                  aria-describedby="ob-role-hint"
+                >
+                  <option value="">{t('ob.roleNone')}</option>
+                  {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                </select>
+                <p id="ob-role-hint" className="faint hint">{t('ob.roleHint')}</p>
+              </div>
+
+              {role ? (
+                <div className="field">
+                  <label htmlFor="ob-cap">{t('ob.capability')}</label>
+                  <select id="ob-cap" value={capability} onChange={(e) => setCapability(e.target.value)}>
+                    {/* Blank means "use the role default", which is what resolveTier()
+                        does — so the empty option is a real choice, not a prompt. */}
+                    <option value="">{`${ROLE_DEFAULT_TIER[role]} · ${t('cap.defaultTier')}`}</option>
+                    {CAPABILITY_TIERS.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <p className="faint hint">
+                    {t('ob.capabilityHint', { tier: ROLE_DEFAULT_TIER[role] })}
+                  </p>
+                </div>
+              ) : (
+                <div className="notice">{t('ob.roleOmitted')}</div>
+              )}
+
               {chosen?.transport === 'acp' && (
                 <div className="field">
                   <label htmlFor="ob-sup">
@@ -266,6 +303,26 @@ export default function OnboardPage() {
                   correctly, and `--model gpt-5-\ncodex` is a different command. It
                   scrolls sideways in its own box instead. */}
               <div className="log cmd"><div>{`$ ${command}`}</div></div>
+
+              {roleCmd && (
+                <>
+                  <h3 style={{ marginTop: 16 }}>{t('ob.roleCommand')}</h3>
+                  {/* A second command, not a flag on the first — surfaced rather than
+                      hidden, because a form that quietly needs two calls is a form
+                      whose printed command is a lie. */}
+                  <p className="faint hint" style={{ marginTop: 0 }}>{t('ob.noRoleFlag')}</p>
+                  <div className="log cmd"><div>{`$ ${roleCmd.patch}`}</div></div>
+                  {/* The Content-Type header above is load-bearing, and auth is
+                      conditional — both stated, because a command that looks right and
+                      silently changes nothing is worse than no command. */}
+                  <p className="faint hint">{t('ob.roleCmdHeaders')}</p>
+                  {roleCmd.tierNotPatchable && (
+                    <div className="notice warn">
+                      {t('ob.tierNotPatchable', { tier: ROLE_DEFAULT_TIER[role] })}
+                    </div>
+                  )}
+                </>
+              )}
 
               <div className="btn-row" style={{ marginTop: 14 }}>
                 <button className="btn primary" disabled={!canStart} onClick={start}>
