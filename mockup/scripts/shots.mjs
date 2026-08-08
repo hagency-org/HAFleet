@@ -26,27 +26,16 @@ const OUT = '../docs/design/shots';
  * conclude that a fresh install produces a staffed org chart. It does not.
  */
 const SHOTS = [
-  // the dotted line — PDU
-  ['org-live-en-light', '/org', 'en', 'light'],
-  ['org-allocated-en-light', '/org?view=assigned', 'en', 'light'],
-  ['org-allocated-zh-dark', '/org?view=assigned', 'zh', 'dark'],
-  ['role-coding-en-light', '/org/coding?view=assigned', 'en', 'light'],
-  ['role-integration-en-light', '/org/integration?view=assigned', 'en', 'light'],
-  // the solid line — PDT
-  ['projects-live-en-light', '/projects', 'en', 'light'],
-  ['projects-portfolio-en-light', '/projects?view=assigned', 'en', 'light'],
-  ['project-api-service-en-light', '/projects/api-service?view=assigned', 'en', 'light'],
-  ['project-api-service-zh-dark', '/projects/api-service?view=assigned', 'zh', 'dark'],
-  // where the two lines meet
-  ['agent-en-dark', '/agents/octos-agent?view=assigned', 'en', 'dark'],
-  // the demoted routes, still reachable
-  ['workforce-en-light', '/workforce', 'en', 'light'],
-  ['assignments-en-light', '/assignments', 'en', 'light'],
-  ['capacity-empty-en-light', '/capacity', 'en', 'light'],
-  ['capacity-assigned-en-light', '/capacity?view=assigned', 'en', 'light'],
-  ['performance-en-light', '/performance', 'en', 'light'],
-  ['knowledge-en-light', '/knowledge', 'en', 'light'],
-  ['knowledge-zh-dark', '/knowledge', 'zh', 'dark'],
+  ['resources-en-light', '/resources', 'en', 'light'],
+  ['resources-zh-dark', '/resources', 'zh', 'dark'],
+  ['wizard-en-light', '/resources/new', 'en', 'light'],
+  ['capability-en-light', '/capability', 'en', 'light'],
+  ['capability-zh-dark', '/capability', 'zh', 'dark'],
+  ['engagements-en-light', '/engagements', 'en', 'light'],
+  ['usage-en-light', '/usage', 'en', 'light'],
+  ['agent-en-dark', '/agents/claude-agent', 'en', 'dark'],
+  ['agent-bare-en-light', '/agents/codex-acp-agent', 'en', 'light'],
+  ['alerts-en-light', '/alerts', 'en', 'light'],
   ['onboard-en-light', '/onboard', 'en', 'light'],
 ];
 

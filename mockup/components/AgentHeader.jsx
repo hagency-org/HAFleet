@@ -1,11 +1,13 @@
 'use client';
 
 import { useState } from 'react';
-import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Toast, useToast } from '@/components/Toast';
-import { runtimeStatusText, allocationRows, projects, workerOf } from '@/lib/mock-data';
-import { useProjectedView, ViewToggle } from '@/components/ViewToggle';
+import {
+  runtimeStatusText, presetOf, tierOf, familyOf, remaining, committed, fmtTokens,
+  engagements, roleCapacity,
+} from '@/lib/mock-data';
+import { Blank } from '@/components/Blank';
 import { useT } from '@/components/Prefs';
 
 /*
@@ -26,20 +28,19 @@ export default function AgentHeader({ agent }) {
   const t = useT();
   const [toast, say] = useToast();
   const [paused, setPaused] = useState(false);
-  const [view, choose] = useProjectedView();
 
-  // The two lines of report, on the record where they intersect. Until now the
-  // employee page showed neither: you could not tell from it who this employee
-  // works FOR (solid) or which bench it belongs TO (dotted), which is the whole
-  // matrix the console exists to make legible.
-  const allocation = allocationRows(view).find((a) => a.agent === agent.name) ?? null;
-  const onProjects = projects.filter((p) => p.members.includes(agent.name));
-  const worker = workerOf(agent.name);
+  // What this agent CONTRIBUTES, on the record where the contributor looks. The
+  // previous console showed which bench an agent belonged to and which projects
+  // it was a member of — a dispatcher's framing. A lender asks three things: what
+  // model am I giving away, how much of my ceiling is already promised, and who
+  // is currently drawing on it.
+  const preset = presetOf(agent);
+  const tier = tierOf(preset);
+  const serving = engagements.filter((e) => e.agent === agent.name && e.state === 'active');
 
   return (
     <>
       <PageHead title={agent.name}>
-        <ViewToggle view={view} choose={choose} />
         <button
           className="btn"
           title={t(agent.tmux ? 'ag.refreshPaneTitle' : 'ag.refreshLogTitle')}
@@ -78,44 +79,42 @@ export default function AgentHeader({ agent }) {
 
       <div className="affil">
         <div className="af-row">
-          <span className="af-line">{t('ag.solidLine')}</span>
-          {view === 'assigned' && onProjects.length > 0
-            ? onProjects.map((p) => (
-              <Link className="chip-role" key={p.key} href={`/projects/${p.key}`}>{p.key}</Link>
-            ))
-            : (<>
-              <span className="mk-dash">—</span>
-              <span className="why-inline">{t(view === 'assigned' ? 'ag.noProject' : 'ag.noProjectLive')}</span>
-            </>)}
-        </div>
-        <div className="af-row">
-          <span className="af-line">{t('ag.dottedLine')}</span>
-          {allocation ? (
+          <span className="af-line">{t('ag.contributes')}</span>
+          {preset ? (
             <>
-              <Link className="chip-role" href={`/org/${allocation.role.key}`}>{allocation.role.name}</Link>
-              {allocation.aliased && (
-                <span className="badge">
-                  {t('og.aliasTo', { from: allocation.aliased.from, to: allocation.aliased.to })}
-                </span>
-              )}
-              <span className="rc-tier">{worker.capability}</span>
-              {/* The same accounting rule as everywhere else: where the worker's own
-                  tier exceeds the role's minimum, both are shown. */}
-              {allocation.match.tierDelta > 0 && (
-                <span className="overqual">
-                  {t('sc.overBy', { have: worker.capability, need: allocation.role.minTier })}
-                </span>
-              )}
-              {!allocation.match.ok && (
-                <span className="stranded">{t(`sat.${allocation.match.failedClause}`)}</span>
-              )}
+              <span className="mono-s">{preset.model}</span>
+              <span className={`tierchip ${tier}`}>{tier}</span>
+              <span className="dim">{familyOf(preset)}</span>
+              {preset.reasoning && <span className="badge">{`${t('col.reasoning')} ${preset.reasoning}`}</span>}
             </>
           ) : (
-            <>
-              <span className="mk-dash">—</span>
-              <span className="why-inline">{t(view === 'assigned' ? 'ag.noRole' : 'ag.noRoleLive')}</span>
-            </>
+            /* The state that makes an agent useless, said plainly: it is running
+               and lending nothing, because nobody chose a model for it. */
+            <Blank why="ag.why.noPreset" t={t} />
           )}
+        </div>
+        <div className="af-row">
+          <span className="af-line">{t('ag.ceiling')}</span>
+          {preset ? (
+            <>
+              <span className="amount">{fmtTokens(preset.ceiling.tokens)}</span>
+              <span className="dim">
+                {t('ag.committedLeft', {
+                  used: fmtTokens(committed(agent.name)),
+                  left: fmtTokens(remaining(agent.name)),
+                })}
+              </span>
+              {!preset.ceiling.enforced && <span className="badge warn-b">{t('rs.notEnforced')}</span>}
+            </>
+          ) : <Blank why="ag.why.noCeiling" t={t} />}
+        </div>
+        <div className="af-row">
+          <span className="af-line">{t('ag.serving')}</span>
+          {serving.length ? serving.map((e) => (
+            <span className="chip-role" key={e.id}>
+              {`${e.project} · ${roleCapacity.roles[e.role]?.displayName ?? e.role}`}
+            </span>
+          )) : <Blank why="ag.why.notServing" t={t} />}
         </div>
       </div>
 

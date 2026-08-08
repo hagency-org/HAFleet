@@ -1,0 +1,131 @@
+{
+  "$schema_version": 1,
+  "$comment": [
+    "Role -> (coding agent x model) mapping for contributed capacity.",
+    "",
+    "This EXTENDS the model already in lib/matrix-agent.js rather than replacing it. That file",
+    "defines the six roles, the three tiers, each role's default tier, and tier subsumption",
+    "(strong superset-of medium superset-of lightweight). All of that is preserved verbatim here.",
+    "",
+    "What it does NOT define is which non-Claude runtimes qualify: TIER_RUNTIME maps a tier to a",
+    "single { runtime: 'claude', model } pair. A contributor lending Octos on Kimi K3, or Codex,",
+    "has nothing to match against. `tiers[].accepts` is that missing enumeration.",
+    "",
+    "Why an enumeration and not a score: what a provider exposes upward to HAgency is a ROLE, so",
+    "the project side must be able to trust that 'System Architect' means something. A free-form",
+    "capability string would make the role name unfalsifiable."
+  ],
+
+  "$provenance": {
+    "verified": [
+      "roles, tiers, defaultTier and subsumption: lib/matrix-agent.js:11-35",
+      "cross-model review intent: lib/matrix-agent.js:26-27 comment",
+      "claude model ids: the Claude 5 family (opus-5, sonnet-5, haiku-4-5, fable-5)",
+      "gpt-5.6-sol: observed in the codex CLI's own session banner, codex-cli 0.146.0",
+      "framework ids and their model/provider flags: lib/frameworks/*.json",
+      "provider + model + reasoning are real fields: backend-v2.js:713 normalizeRuntimeProfileRole"
+    ],
+    "unverified": [
+      "Octos and Hermes model strings below are the provider FAMILIES the operator named, not",
+      "strings read off an installed CLI. Confirm each against `octos --help` / the provider's",
+      "own config before relying on an exact match; the family is what the tier turns on."
+    ]
+  },
+
+  "tiers": ["strong", "medium", "lightweight"],
+
+  "roles": {
+    "architect": {
+      "displayName": "System Architect",
+      "defaultTier": "strong",
+      "note": "Cross-cutting design. The tier floor is the point: a lightweight model produces plausible architecture that does not survive contact with the codebase."
+    },
+    "review": {
+      "displayName": "Reviewer",
+      "defaultTier": "strong",
+      "crossFamily": true,
+      "note": "lib/matrix-agent.js:26 — 'Cross-model review = staff review from two different model families at strong.' A reviewer SHOULD come from a different family than the author, so this role is the one where a provider offering only one family cannot fill both sides alone."
+    },
+    "coding": {
+      "displayName": "Software Engineer",
+      "defaultTier": "medium"
+    },
+    "testing": {
+      "displayName": "Test Engineer",
+      "defaultTier": "medium"
+    },
+    "integration": {
+      "displayName": "Integration / Release",
+      "defaultTier": "medium"
+    },
+    "documentation": {
+      "displayName": "Technical Writer",
+      "defaultTier": "lightweight"
+    }
+  },
+
+  "$acceptsComment": [
+    "A combination qualifies for a role if its tier rank is >= the role's defaultTier rank.",
+    "Subsumption is inherited from matrix-agent.js, so `strong` entries also fill `medium` and",
+    "`lightweight` roles — a contributor lending only Opus can serve every role, and pays Opus",
+    "rates to write documentation. That trade-off belongs to the contributor, so the console",
+    "shows it rather than preventing it."
+  ],
+
+  "tierAccepts": {
+    "strong": [
+      { "framework": "claude", "provider": "anthropic", "model": "claude-opus-5", "family": "claude" },
+      { "framework": "codex", "provider": "openai", "model": "gpt-5.6-sol", "family": "gpt", "reasoning": "high" },
+      { "framework": "octos", "provider": "moonshot", "model": "kimi-k3", "family": "kimi" },
+      { "framework": "octos", "provider": "deepseek", "model": "deepseek-v-flash", "family": "deepseek" },
+      { "framework": "hermes", "provider": "deepseek", "model": "deepseek-v-flash", "family": "deepseek" }
+    ],
+    "medium": [
+      { "framework": "claude", "provider": "anthropic", "model": "claude-sonnet-5", "family": "claude" },
+      { "framework": "codex", "provider": "openai", "model": "gpt-5.6-sol", "family": "gpt", "reasoning": "medium" },
+      { "framework": "octos", "provider": "google", "model": "gemini", "family": "gemini" }
+    ],
+    "lightweight": [
+      { "framework": "claude", "provider": "anthropic", "model": "claude-haiku-4-5", "family": "claude" },
+      { "framework": "claude", "provider": "anthropic", "model": "claude-fable-5", "family": "claude" },
+      { "framework": "codex", "provider": "openai", "model": "gpt-5.6-sol", "family": "gpt", "reasoning": "low" }
+    ]
+  },
+
+  "$excludedComment": [
+    "Stated rather than implied. A role card that simply omits Haiku reads as an oversight;",
+    "one that names the exclusion is a decision the contributor can argue with."
+  ],
+  "excluded": [
+    {
+      "role": "architect",
+      "models": ["claude-haiku-4-5", "claude-fable-5"],
+      "reason": "below the strong floor"
+    },
+    {
+      "role": "review",
+      "models": ["claude-haiku-4-5", "claude-fable-5"],
+      "reason": "below the strong floor"
+    }
+  ],
+
+  "$budgetComment": [
+    "Per-agent capacity budget: the ceiling is attached to the AGENT, whose model is fixed by",
+    "its runtimeProfile — e.g. one Claude Code agent on Opus, 5,000,000 tokens per month.",
+    "",
+    "Consequence the console must show: an engagement draws on one agent's ceiling, so two",
+    "projects wanting an architect served by the same Opus agent SHARE that 5M. Over-commitment",
+    "is therefore per agent, not against a global pool.",
+    "",
+    "NEITHER FIELD IS ENFORCED TODAY. There is no token accounting anywhere in this repo — every",
+    "`usage`/`budget` match in lib/ and backend-v2.js is a CLI help string. Until that exists a",
+    "ceiling is a declaration of intent, and the console must label it as one."
+  ],
+  "budgetDefaults": {
+    "unit": "tokens",
+    "period": "monthly",
+    "perAgent": null,
+    "rateCapPerDay": null,
+    "enforced": false
+  }
+}

@@ -916,3 +916,105 @@ td.cap-via { color: var(--ok); }
 .prov-row + .prov-row { border-top: 1px solid var(--line); }
 .prov-row .grow { flex: 1; min-width: 0; }
 .amount { font-family: var(--mono); font-size: 12.5px; }
+
+/* ── the contribution console ───────────────────────────────────────────────
+   One rule governs everything below: a mark never states a fact on its own.
+   A tier is a word in a chip, not a colour; an over-tier allocation prints both
+   tiers; an unenforced ceiling says "not enforced" beside the number. Colour is
+   always the second signal. */
+
+/* tier is a wire value, so it is never translated — it is set in the type face
+   that signals "this is an identifier the scheduler matches on" */
+.tierchip {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--line-strong);
+  white-space: nowrap;
+  margin-right: 5px;
+}
+.tierchip.strong { border-color: var(--accent); color: var(--accent); }
+.tierchip.medium { border-color: var(--ok); color: var(--ok); }
+.tierchip.lightweight { color: var(--ink-dim); }
+
+/* the wizard: a list of decisions with the current one marked, not a percentage
+   bar — the reader needs to know which decision they are on */
+.steps.wizard { display: flex; gap: 0; list-style: none; margin: 4px 0 12px; flex-wrap: wrap; }
+.steps.wizard li {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12.5px; color: var(--ink-faint);
+  padding: 7px 16px 7px 12px; border: 1px solid var(--line); border-right: 0;
+  background: var(--panel-2);
+}
+.steps.wizard li:last-child { border-right: 1px solid var(--line); }
+.steps.wizard li .n {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1px solid var(--line-strong); font-size: 10.5px;
+}
+.steps.wizard li.done { color: var(--ok); }
+.steps.wizard li.done .n { border-color: var(--ok); color: var(--ok); }
+.steps.wizard li.on { color: var(--ink); background: var(--accent-soft); border-color: var(--accent); }
+.steps.wizard li.on .n { border-color: var(--accent); color: var(--accent); }
+
+.fw-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.fw {
+  display: flex; flex-direction: column; gap: 4px; align-items: flex-start;
+  padding: 11px 12px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel-2); cursor: pointer; text-align: left; font: inherit; color: inherit;
+}
+.fw:hover { border-color: var(--line-strong); }
+.fw.on { border-color: var(--accent); background: var(--accent-soft); }
+.fw b { font-size: 13px; }
+
+.field-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; flex-wrap: wrap; }
+.field-row label { min-width: 180px; font-size: 12.5px; color: var(--ink-2); }
+.field-row input { width: 160px; }
+
+h3.sub { font-size: 12.5px; font-weight: 600; margin: 2px 0 8px; color: var(--ink-2); }
+
+.panel.outcome { border-left: 3px solid var(--accent); }
+
+/* a role card's terms and exclusions */
+.rc-excl { font-size: 11px; color: var(--ink-dim); border-top: 1px solid var(--line); padding-top: 6px; }
+.rc-offer {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  border-top: 1px solid var(--line); padding-top: 8px; margin-top: 2px;
+}
+.rc-offer .btn { margin-left: auto; }
+
+/* the cross-family review rule: a definition, not a warning, so it reads as a
+   property of the role rather than a transient problem */
+.xfam { font-size: 11.5px; padding: 5px 8px; border-radius: 4px; }
+.xfam.ok { color: var(--ok); background: var(--ok-soft); }
+.xfam.bad { color: var(--warn); background: var(--warn-soft); }
+
+/* an unenforced ceiling has to say so beside the number, or a reader treats a
+   declaration of intent as a guard rail */
+.badge.warn-b { border-color: var(--warn); color: var(--warn); }
+
+/* destructive things are exiled below a divider under their own heading */
+.divider { border: 0; border-top: 1px solid var(--line-strong); margin: 30px 0 4px; }
+.sec.danger-head { color: var(--bad); }
+.btn.danger { border-color: var(--bad); color: var(--bad); }
+.btn.danger:hover { background: var(--bad-soft); }
+
+.btn-row.tight { gap: 5px; margin: 0; }
+.rail-empty { padding: 6px 16px; font-size: 12px; color: var(--ink-faint); }
+/* an agent lending nothing is the state worth seeing in the rail */
+.agent-row .job.none { color: var(--warn); }
+.rc-excl.over { color: var(--warn); }
+
+/* A secondary line inside a cell is a LINE, not a continuation.
+   Three cells shipped as "claude-agent1.1M left", "1.2M60k/d" and a room id
+   welded to an mxid, because adjacent inline spans have no separator. Fixing it
+   per-call-site kept missing one, so the rule lives here: any `.dim` that is a
+   direct child of a `<td>` gets its own line. Not visible to a markup check —
+   the HTML is identical either way — so check-switches.mjs asserts the computed
+   display instead. */
+.tbl td > span.dim { display: block; }
+/* a badge that qualifies a number needs air, or "5.0M" and "not enforced" weld
+   into "5.0Mnot enforced" */
+.amount + .badge, .tbl td .badge { margin-left: 6px; }
