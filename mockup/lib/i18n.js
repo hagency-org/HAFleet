@@ -475,6 +475,7 @@ const en = {
   'ob.presetHint': 'A role is not chosen here. The model decides the tier, and the tier decides which roles this agent can be offered as.',
   'ob.presetOutcome': 'Qualifies at {tier}, so it can be offered as: {roles}.',
   'ob.presetOmitted': 'Without a preset this agent registers and runs, but contributes nothing and can fill no request — which is what every agent looks like today, since no onboarding path writes one.',
+  'rail.addAgent': '+ Onboard',
 };
 
 const zh = {
@@ -921,6 +922,7 @@ const zh = {
   'ob.presetHint': '这里不选角色。模型决定能力档,能力档决定这个 agent 能以哪些角色对外提供。',
   'ob.presetOutcome': '符合 {tier} 档,因此可作为以下角色提供:{roles}。',
   'ob.presetOmitted': '不选配置的话,这个 agent 会注册并运行,但不贡献任何东西、也无法承接请求 —— 而这正是今天所有 agent 的样子,因为没有任何接入路径会写入配置。',
+  'rail.addAgent': '+ 接入',
 };
 
 export const DICTS = { en, zh };

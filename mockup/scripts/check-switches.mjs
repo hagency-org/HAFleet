@@ -157,7 +157,7 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
     heads: document.querySelectorAll('.rail-fleet .rail-sec').length,
     current: document.querySelectorAll('[aria-current="page"]').length,
   }));
-  check('seven destinations', rail.rows === 7, String(rail.rows));
+  check('six nav destinations — onboard moved onto the roster', rail.rows === 6, String(rail.rows));
   check('under four headings', rail.heads === 4, String(rail.heads));
   check('exactly one marked current', rail.current === 1, String(rail.current));
 }

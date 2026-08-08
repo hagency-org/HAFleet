@@ -28,7 +28,6 @@ const SECTIONS = [
     head: 'rail.secResource',
     rows: [
       { href: '/resources', key: 'resources', icon: '▦', count: 'agentsConfigured', unit: 'configured', also: ['/'] },
-      { href: '/onboard', key: 'onboard', icon: '＋', count: null },
     ],
   },
   {
@@ -82,51 +81,6 @@ export default function Rail() {
         </span>
       </div>
 
-      <div className="rail-filter">
-        <input
-          type="search"
-          placeholder={t('rail.filter')}
-          aria-label={t('rail.filter')}
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
-      </div>
-
-      <div className="rail-scroll">
-        <h2 className="rail-sec">{`${t('rail.agents')} · ${shown.length}`}</h2>
-        <ul className="rail-list">
-          {shown.map((a) => {
-            const href = `/agents/${a.name}`;
-            const preset = presetOf(a);
-            const tier = tierOf(preset);
-            return (
-              <li key={a.name}>
-                <Link
-                  href={href}
-                  className={`agent-row${a.activeNow ? ' on' : ''}`}
-                  aria-current={pathname === href ? 'page' : undefined}
-                >
-                  <span className="glyph" aria-hidden="true">{a.activeNow ? '●' : '○'}</span>
-                  <span className="id">
-                    <span className="nm">{a.name}</span>
-                    {/* Status is text, not colour. */}
-                    <span className="st">{runtimeStatusText(a)}</span>
-                    {/* What it contributes. An unconfigured agent contributes
-                        nothing, and that is the fact worth surfacing. */}
-                    <span className={`job${preset ? '' : ' none'}`}>
-                      {preset ? `${preset.model} · ${tier}` : t('rail.noModel')}
-                    </span>
-                  </span>
-                </Link>
-              </li>
-            );
-          })}
-          {shown.length === 0 && (
-            <li className="rail-empty">{`${t('rail.noMatch')} “${filter}”`}</li>
-          )}
-        </ul>
-      </div>
-
       <div className="rail-fleet">
         {SECTIONS.map((sec) => (
           <div key={sec.head}>
@@ -161,6 +115,61 @@ export default function Rail() {
             </ul>
           </div>
         ))}
+      </div>
+
+      <div className="rail-filter roster-filter">
+        <input
+          type="search"
+          placeholder={t('rail.filter')}
+          aria-label={t('rail.filter')}
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        />
+      </div>
+
+      <div className="rail-scroll">
+        <h2 className="rail-sec roster-head">
+          <span className="grow">{`${t('rail.agents')} · ${shown.length}`}</span>
+          {/* The action that adds a row to THIS list, attached to the list it
+              changes rather than sitting in the nav as a peer of the four
+              destinations — a contributor onboards far less often than they
+              look at what they are lending. */}
+          <Link href="/onboard" className="roster-add" title={t('nav.onboard')}
+            aria-current={pathname === '/onboard' ? 'page' : undefined}>
+            {t('rail.addAgent')}
+          </Link>
+        </h2>
+        <ul className="rail-list">
+          {shown.map((a) => {
+            const href = `/agents/${a.name}`;
+            const preset = presetOf(a);
+            const tier = tierOf(preset);
+            return (
+              <li key={a.name}>
+                <Link
+                  href={href}
+                  className={`agent-row${a.activeNow ? ' on' : ''}`}
+                  aria-current={pathname === href ? 'page' : undefined}
+                >
+                  <span className="glyph" aria-hidden="true">{a.activeNow ? '●' : '○'}</span>
+                  <span className="id">
+                    <span className="nm">{a.name}</span>
+                    {/* Status is text, not colour. */}
+                    <span className="st">{runtimeStatusText(a)}</span>
+                    {/* What it contributes. An unconfigured agent contributes
+                        nothing, and that is the fact worth surfacing. */}
+                    <span className={`job${preset ? '' : ' none'}`}>
+                      {preset ? `${preset.model} · ${tier}` : t('rail.noModel')}
+                    </span>
+                  </span>
+                </Link>
+              </li>
+            );
+          })}
+          {shown.length === 0 && (
+            <li className="rail-empty">{`${t('rail.noMatch')} “${filter}”`}</li>
+          )}
+        </ul>
       </div>
 
       <PrefsSwitch />

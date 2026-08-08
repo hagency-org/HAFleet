@@ -77,7 +77,13 @@ a { color: inherit; text-decoration: none; }
   background: var(--panel-2);
   border-right: 1px solid var(--line);
   display: grid;
-  grid-template-rows: auto auto 1fr auto auto;
+  /* brand · nav · filter · roster(scrolls) · prefs.
+     The nav sits ABOVE the roster now. It used to be the other way round, which
+     led with a list of individual agents — a fleet operator's headline, inherited
+     from the console this replaced. A contributor's headline is the resource
+     view; a single agent is a drill-down target. Only the roster gets 1fr, so a
+     long list scrolls instead of pushing the nav off screen. */
+  grid-template-rows: auto auto auto 1fr auto;
   min-height: 0;
 }
 
@@ -1018,3 +1024,16 @@ h3.sub { font-size: 12.5px; font-weight: 600; margin: 2px 0 8px; color: var(--in
 /* a badge that qualifies a number needs air, or "5.0M" and "not enforced" weld
    into "5.0Mnot enforced" */
 .amount + .badge, .tbl td .badge { margin-left: 6px; }
+
+/* the roster heading carries the action that adds a row to it */
+.rail-sec.roster-head { display: flex; align-items: baseline; gap: 8px; padding-right: 12px; }
+.rail-sec.roster-head .grow { flex: 1; }
+.roster-add {
+  font-size: 11px; letter-spacing: 0; text-transform: none;
+  padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: 10px;
+  color: var(--ink-2); white-space: nowrap;
+}
+.roster-add:hover { border-color: var(--accent); color: var(--accent); }
+.roster-add[aria-current="page"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+/* the filter belongs to the roster it filters, so it sits directly above it */
+.rail-filter.roster-filter { padding: 4px 12px 8px; }
