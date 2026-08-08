@@ -329,5 +329,34 @@ for (const r of ROUTES) {
   check('no model, tier or role key is translated', translated.length === 0, translated.join(' '));
 }
 
+// 16. the word "agent" is never rendered as 代理
+{
+  /*
+   * 代理 means *proxy* in Chinese technical usage, and an earlier version of this
+   * dictionary used it for both senses in adjacent keys — `ACP 代理没有终端窗格`
+   * (agent) next to `原型不会代理真实的终端窗格` (proxy), and `代理令牌` reading as
+   * "proxy token". One word cannot carry both when one of them is the real
+   * meaning, so Agent stays in Latin script — which is also how the operators
+   * write it.
+   */
+  const offenders = Object.entries(DICTS.zh).filter(([, v]) => v.includes('代理'));
+  check('no Chinese string translates "agent" as 代理', offenders.length === 0,
+    offenders.slice(0, 4).map(([k]) => k).join(' '));
+  // And it really is present in Latin script where the English says Agent.
+  check('Agent appears in Latin script in the Chinese dictionary',
+    Object.values(DICTS.zh).some((v) => /Agent/.test(v)));
+
+  /*
+   * A space between CJK and Latin is typography, not decoration: without it
+   * `5 个Agent` and `筛选Agent` read as single words. The 代理 -> Agent rewrite
+   * created 52 of these in one pass, which is why the rule is asserted rather
+   * than left to whoever edits the dictionary next.
+   */
+  const unspaced = Object.entries(DICTS.zh)
+    .filter(([, v]) => /[一-鿿][A-Za-z0-9]|[A-Za-z0-9][一-鿿]/.test(v));
+  check('Chinese strings space CJK against Latin', unspaced.length === 0,
+    unspaced.slice(0, 4).map(([k]) => k).join(' '));
+}
+
 console.log(`\n${failed === 0 ? 'All invariants hold.' : `${failed} FAILED.`}\n`);
 process.exit(failed === 0 ? 0 : 1);

@@ -94,6 +94,10 @@ which is what makes this a resource market rather than a directory of remote she
   a dash with a reason. `0` would claim a measurement nobody takes.
 - **An unenforced ceiling says so beside the number**, or a reader treats a declaration of
   intent as a guard rail.
+- **"Agent" stays in Latin script in Chinese.** 代理 means *proxy* in Chinese technical usage,
+  and an earlier dictionary used it for both senses in adjacent keys — `ACP 代理没有终端窗格`
+  (agent) beside `原型不会代理真实的终端窗格` (proxy), with `代理令牌` reading as "proxy token".
+  Both the term and CJK/Latin spacing are asserted.
 
 ## What is drawn as a contract
 
@@ -121,7 +125,7 @@ npm run check:switches   # assertions that need a real browser
 npm run verify           # both
 ```
 
-**87 static** and **29 in-browser**. `check-invariants.mjs` needs the server running
+**90 static** and **29 in-browser**. `check-invariants.mjs` needs the server running
 (`npm start`); `check-switches.mjs` also needs Chrome — it drives the system install through
 `puppeteer-core` and downloads nothing (`CHROME=/path/to/chrome` to override).
 
