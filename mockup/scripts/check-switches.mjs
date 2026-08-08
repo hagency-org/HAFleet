@@ -96,7 +96,24 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
   }
 }
 
-// ── 3. the language switch actually changes the words ──────────────────────
+// ── 3. a qualifier beside a heading has air ────────────────────────────────
+{
+  /*
+   * `.note` had its margin scoped to `h2.sec .note`, so every `h3.sub` note
+   * welded to its heading — `Ceiling used, per agentcommitted, not consumed`.
+   * Same class as the welded table cell, and equally invisible to markup: the
+   * HTML is identical either way.
+   */
+  const page = await fresh({ path: '/usage' });
+  const notes = await page.evaluate(() => {
+    const els = [...document.querySelectorAll('.note')];
+    return { n: els.length, flush: els.filter((e) => parseFloat(getComputedStyle(e).marginLeft) < 4).length };
+  });
+  check('notes render', notes.n > 0, `${notes.n} found`);
+  check('every qualifier is spaced from its heading', notes.flush === 0, `${notes.flush} flush`);
+}
+
+// ── 4. the language switch actually changes the words ──────────────────────
 {
   const page = await fresh({ path: '/resources' });
   const before = await state(page);
@@ -111,7 +128,7 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
   check('the pressed locale moved', after.pressed[0] === 1, after.pressed.join(','));
 }
 
-// ── 4. wire values survive translation ────────────────────────────────────
+// ── 5. wire values survive translation ────────────────────────────────────
 {
   /*
    * A translated model name is unsearchable and a translated tier would stop
@@ -124,7 +141,7 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
   }
 }
 
-// ── 5. dark actually repaints, and is measurably darker ────────────────────
+// ── 6. dark actually repaints, and is measurably darker ────────────────────
 {
   const light = await state(await fresh({ colorScheme: 'light' }));
   const dark = await state(await fresh({ colorScheme: 'dark' }));
@@ -136,7 +153,7 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
     `${light.bg} -> ${dark.bg}`);
 }
 
-// ── 6. no page scrolls sideways ───────────────────────────────────────────
+// ── 7. no page scrolls sideways ───────────────────────────────────────────
 {
   for (const w of [375, 900, 1440]) {
     const ctx = await browser.createBrowserContext();
@@ -149,7 +166,7 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
   }
 }
 
-// ── 7. the rail is six destinations under four headings ───────────────────
+// ── 8. the rail is six destinations under four headings ───────────────────
 {
   const page = await fresh();
   const rail = await page.evaluate(() => ({
@@ -162,7 +179,7 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
   check('exactly one marked current', rail.current === 1, String(rail.current));
 }
 
-// ── 8. every button has a handler ─────────────────────────────────────────
+// ── 9. every button has a handler ─────────────────────────────────────────
 {
   /*
    * A control that looks live and does nothing teaches the reader to distrust
@@ -179,7 +196,7 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
   }
 }
 
-// ── 9. the wizard shows the consequence before the last step ──────────────
+// ── 10. the wizard shows the consequence before the last step ──────────────
 {
   /*
    * "Which roles does this let me offer" is the question the whole wizard

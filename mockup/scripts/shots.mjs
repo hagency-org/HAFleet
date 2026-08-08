@@ -33,6 +33,7 @@ const SHOTS = [
   ['capability-zh-dark', '/capability', 'zh', 'dark'],
   ['engagements-en-light', '/engagements', 'en', 'light'],
   ['usage-en-light', '/usage', 'en', 'light'],
+  ['usage-zh-dark', '/usage', 'zh', 'dark'],
   ['agent-en-dark', '/agents/claude-agent', 'en', 'dark'],
   ['agent-bare-en-light', '/agents/codex-acp-agent', 'en', 'light'],
   ['alerts-en-light', '/alerts', 'en', 'light'],

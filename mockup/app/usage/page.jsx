@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Blank } from '@/components/Blank';
+import { CeilingBars, AllocationDonut, TaskBars, MissingSeries } from '@/components/Charts';
 import { useT } from '@/components/Prefs';
 import {
   usage, engagements, roleCapacity, fmtTokens, agents, presetOf, committed, remaining,
@@ -39,6 +40,30 @@ export default function UsagePage() {
 
   const configured = agents.filter((a) => a.presetId);
 
+  /*
+   * Every series below is ALLOCATION — what I promised — because that is what is
+   * knowable. The one real measurement is the task count, and the one series a
+   * reader will look for (spend over time) is rendered as its own absence.
+   */
+  const ceilingRows = configured.map((a) => ({
+    agent: a.name,
+    committed: committed(a.name),
+    ceiling: presetOf(a).ceiling.tokens,
+  }));
+
+  const donutSlices = Object.entries(
+    engagements.filter((e) => e.state !== 'pending').reduce((acc, e) => {
+      acc[e.project] = (acc[e.project] ?? 0) + (e.allocatedTokens ?? 0);
+      return acc;
+    }, {}),
+  ).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+
+  const taskRows = Object.entries(byProject).map(([label, rows]) => ({
+    label,
+    done: rows.reduce((n, u) => n + u.tasksDone, 0),
+    open: rows.reduce((n, u) => n + u.tasksOpen, 0),
+  }));
+
   return (
     <>
       <PageHead title={t('us.title')} sub={t('us.sub')} />
@@ -63,6 +88,26 @@ export default function UsagePage() {
           <div className="val"><Blank why="us.why.noMeter" t={t} /></div>
         </div>
         <div className="card"><div className="cap">{t('us.cTasks')}</div><div className="val">{usage.reduce((n, u) => n + u.tasksDone, 0)}</div></div>
+      </div>
+
+      <h2 className="sec">{t('us.charts')}<span className="note">{t('us.chartsNote')}</span></h2>
+      <div className="chart-grid">
+        <div className="panel">
+          <h3 className="sub">{t('ch.ceilingTitle')}<span className="note">{t('ch.ceilingNote')}</span></h3>
+          <CeilingBars rows={ceilingRows} />
+        </div>
+        <div className="panel">
+          <h3 className="sub">{t('ch.donutTitle')}<span className="note">{t('ch.donutNote')}</span></h3>
+          <AllocationDonut slices={donutSlices} />
+        </div>
+        <div className="panel">
+          <h3 className="sub">{t('ch.taskTitle')}<span className="note">{t('ch.taskNote')}</span></h3>
+          <TaskBars rows={taskRows} />
+        </div>
+        <div className="panel">
+          <h3 className="sub">{t('ch.missingSection')}</h3>
+          <MissingSeries />
+        </div>
       </div>
 
       <h2 className="sec">{t('us.byProject')}<span className="note">{t('us.byProjectNote')}</span></h2>

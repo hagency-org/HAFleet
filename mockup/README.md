@@ -90,6 +90,14 @@ which is what makes this a resource market rather than a directory of remote she
   afterwards is indistinguishable from a compromise.
 - **De-trusting cannot cancel work.** Removing a project affects future requests only;
   revoking a running engagement is a separate, confirmed act.
+- **The chart a reader expects is drawn as its own absence.** A usage dashboard normally opens
+  with spend over time. Nothing meters tokens, so that series does not exist — and leaving the
+  panel out would let the dashboard look complete, while an invented curve would be worse. It
+  renders an empty axis and says why. Every other series is *allocation* (what I promised), and
+  the one real measurement on the page is the task count.
+- **Every chart prints its value.** Colour and length are the second and third signals; a
+  greyscale print loses nothing. Charts sit above the tables, never instead of them — shape from
+  the chart, values from the table.
 - **A blank is never a zero.** Nothing in HAFleet meters tokens, so every consumption figure is
   a dash with a reason. `0` would claim a measurement nobody takes.
 - **An unenforced ceiling says so beside the number**, or a reader treats a declaration of
@@ -125,7 +133,7 @@ npm run check:switches   # assertions that need a real browser
 npm run verify           # both
 ```
 
-**90 static** and **29 in-browser**. `check-invariants.mjs` needs the server running
+**90 static** and **31 in-browser**. `check-invariants.mjs` needs the server running
 (`npm start`); `check-switches.mjs` also needs Chrome — it drives the system install through
 `puppeteer-core` and downloads nothing (`CHROME=/path/to/chrome` to override).
 
