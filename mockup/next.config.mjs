@@ -1,6 +1,21 @@
 /** @type {import('next').NextConfig} */
+// PAGES=1 switches to a static export for GitHub Pages. Gated on an env var so
+// `npm run dev` and `npm start` keep their normal behaviour — a prototype that
+// can only be built one way is a prototype nobody runs locally.
+const pages = process.env.PAGES === '1';
+
 const nextConfig = {
   // A prototype, not a product: no telemetry, no image optimisation server.
   images: { unoptimized: true },
+  ...(pages ? {
+    output: 'export',
+    // Pages serves a project site from /<repo>/, so every asset and link needs
+    // the prefix or the CSS 404s and the rail stops navigating.
+    basePath: '/HAFleet',
+    assetPrefix: '/HAFleet',
+    // Pages has no rewrite layer, so /resources must resolve as a directory
+    // with an index.html rather than a bare file.
+    trailingSlash: true,
+  } : {}),
 };
 export default nextConfig;

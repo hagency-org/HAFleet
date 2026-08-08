@@ -1,14 +1,12 @@
-import { redirect } from 'next/navigation';
-
 /*
- * `/` serves 我的资源.
+ * `/` IS 我的资源, rather than a redirect to it.
  *
- * The contributor's first question is "what am I lending, and on what terms" —
- * and on a fresh host the answer is "nothing", because no onboarding path writes
- * a preset. Landing here puts that in front of them rather than making them find
- * it, which is the same reason the previous console landed on the classification
- * step it was missing.
+ * It was `redirect('/resources')`, which a static export cannot honour — the
+ * exported index.html came out as Next's error page, so the published site had a
+ * broken front door. A server redirect also needs a server, and this prototype
+ * should be servable from any static host.
+ *
+ * Two URLs render one page, which the rail already accommodated: the resources
+ * entry carries `also: ['/']`, so it marks itself current either way.
  */
-export default function Home() {
-  redirect('/resources');
-}
+export { default } from './resources/page';

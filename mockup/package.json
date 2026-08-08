@@ -9,6 +9,7 @@
     "start": "next start -p 3100",
     "check": "node scripts/check-invariants.mjs",
     "check:switches": "node scripts/check-switches.mjs",
+    "export": "PAGES=1 next build",
     "verify": "npm run check && npm run check:switches"
   },
   "dependencies": {

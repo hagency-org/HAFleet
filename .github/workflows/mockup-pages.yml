@@ -1,0 +1,75 @@
+# Publish the design prototype to GitHub Pages.
+#
+# The prototype is a static export (PAGES=1 in mockup/next.config.mjs), so Pages
+# needs no server. It carries mock data only and talks to no backend, which is
+# why publishing it is safe: there is nothing here a reader could point at a real
+# fleet.
+#
+# Manual dispatch plus pushes that touch mockup/. Deliberately NOT every push to
+# the branch — a docs-only commit should not redeploy a site.
+name: mockup → Pages
+
+on:
+  push:
+    branches: [feat/contribution-console]
+    paths:
+      - 'mockup/**'
+      - 'lib/role-capacity.json'   # the prototype imports it, so it is an input
+      - '.github/workflows/mockup-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and let a newer one supersede a queued one rather than
+# publishing a stale build after a fresh one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mockup/package-lock.json
+      - run: npm ci
+        working-directory: mockup
+      # The static assertions need a running server, so they run against
+      # `npm start` before the export. A prototype that ships with a broken
+      # invariant is worse than one that fails to publish.
+      - run: npm run build
+        working-directory: mockup
+      - name: Start and assert
+        working-directory: mockup
+        run: |
+          npm start &
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:3100/resources && break
+            sleep 1
+          done
+          npm run check
+      - name: Static export
+        working-directory: mockup
+        env:
+          PAGES: '1'
+        run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: mockup/out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
