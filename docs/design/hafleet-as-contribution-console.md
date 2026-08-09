@@ -1,8 +1,15 @@
 # HAFleet as a resource-contribution console — UX design for review
 
-Status: **design, one question left (§7).** Q1–Q3 answered and folded in;
+Status: **built, and distilled into a decision record.** Q1–Q3 answered and folded in;
 `lib/role-capacity.json` is written and validated against the live constants.
 The superseded PDU/two-lens console is tagged `mockup/pdu-two-lens`.
+
+The decisions in this document are recorded as
+[`../../knowledge/decisions/adr-013-resource-contribution-console.md`](../../knowledge/decisions/adr-013-resource-contribution-console.md)
+(`status: Proposed`), which is also the record that withdraws the dispatch half of
+[`../PRD-hafleet-pdu.md`](../PRD-hafleet-pdu.md). Read the ADR for the build order and the
+seat-versus-agent accounting consequence found after this document was written; read this one for
+the per-layer grounding evidence behind it.
 
 Every claim in §2 was checked against this repo. Anything not found is marked ❌ and is drawn
 as a *contract* in §6, the way `/onboard` was drawn against `GET /api/frameworks/detect` — never
@@ -318,11 +325,18 @@ Drawn explicitly, never as if they existed:
   approval for everything else. Falling back to approval rather than rejecting when a
   whitelisted project exceeds its cap is the rule that keeps the two halves coherent.
 
+- ~~1. Does the mockup keep `/agents/[name]` and `/alerts`?~~ → **answered by construction: it
+  keeps them.** The built prototype carries ten routes — `/resources`, `/resources/new`,
+  `/capability`, `/engagements`, `/usage`, `/onboard`, `/alerts`, `/config`, `/agents/[name]` and
+  `/`. Dropping working, asserted surfaces to hit a five-screen target would have cost coverage for
+  no user benefit.
+
 **Still open:**
 
-1. **Does the mockup keep `/agents/[name]` and `/alerts`** from the current prototype, or is
-   this a clean five-screen build? A clean build is ~1,400 lines and drops working, asserted
-   surfaces; keeping them means the rail carries seven entries rather than five.
+1. **Nothing.** The remaining work is the five contracts in ADR-013 §7, not design questions. Note
+   that `specs/project.spec.md:18` requires implementation to link to an *accepted requirement*
+   through `satisfies`, so a paired `knowledge/requirements/req-*.md` must exist and be accepted
+   before the round can legally start.
 
 ## 8. Explicitly dropped
 

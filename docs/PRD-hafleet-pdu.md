@@ -1,8 +1,19 @@
 # PRD — HAFleet as a digital-labour resource plane
 
 Version: 0.2
-Status: revised draft for review
+Status: **partly superseded — revision to 0.3 required.** See
+[`../knowledge/decisions/adr-013-resource-contribution-console.md`](../knowledge/decisions/adr-013-resource-contribution-console.md).
 Date: 2026-08-06
+
+> **Supersession notice (2026-08-07).** ADR-013 is the amending record this PRD demands in §2.1 and
+> §R0. It rules that HAFleet's user is the resource *contributor*, not a dispatching house.
+> **Withdrawn:** the PDU/outsourcing-house product statement in §1, R0's `AssignmentRequest` /
+> `StaffingAssignment` contract, `/api/dispatch` and any successor assignment path, and every
+> staffing-request requirement that depends on them. Those requirements are not implementable and
+> must not be scheduled until this document reaches 0.3.
+> **Retained and now load-bearing:** R7 usage/cost accrual including A-R7-3's unknown-never-zero
+> rule, R8's `Seat` / `SeatBinding` / `BillingSource` / `PriceBook` / `BudgetReservation` model, and
+> R12's roster acceptance written against `mockup/`. Read §1–§9 with this notice applied.
 
 ## Evidence baseline
 
@@ -24,6 +35,11 @@ Current-state evidence and target governance are two different baselines:
   no claim depending on the durable router, thread-scoped sessions or the Agent Operations client
   contract can be checked from this repository. **`adr-010` is also absent**; its status must be
   recorded alongside the four above, or the gap in the sequence reads as a lost document.
+- **Numbering resolved for the amending record only (2026-08-07).** The superseding ADR took
+  **013**, the first identifier that cannot collide with the review checkout's `adr-011` and
+  `adr-012`. `adr-010` remains unaccounted for and this does not close it. `adr-013` is present in
+  this checkout with `status: Proposed`; it is `[target-governance]`, not a released implementation
+  fact, and no claim resting on its five contracts can be checked here — none of them is built.
 
 Current facts, current limitations, product decisions and target requirements are deliberately
 separated below. Authentication middleware is treated as evidence of caller identity, not as proof
@@ -33,6 +49,9 @@ of domain ownership.
 
 | document | relationship |
 |---|---|
+| [`../knowledge/decisions/adr-013-resource-contribution-console.md`](../knowledge/decisions/adr-013-resource-contribution-console.md) | **the amending record.** Withdraws the dispatch half of this PRD and fixes the next round's build order. Read it before §1 |
+| [`PLAN-console-api-integration.md`](PLAN-console-api-integration.md) | the API gap inventory and phased plan implementing ADR-013's contracts. Records that eight endpoint groups, two field extensions and the integration layer itself are absent, and that `seat`/`quota` have zero occurrences in the baseline |
+| [`design/hafleet-as-contribution-console.md`](design/hafleet-as-contribution-console.md) | the UX design ADR-013 distils, with the per-layer exists/absent grounding table behind every claim |
 | [`design/hafleet-as-pdu.md`](design/hafleet-as-pdu.md) | the capability review this PRD rests on: per-function inventory with `file:line` evidence, and the three-memories diagnosis behind §6.5 |
 | [`design/dashboard-relayout.md`](design/dashboard-relayout.md) | the console's information architecture, its invariants and its executable checks |
 | [`../mockup/`](../mockup/) | a running Next.js prototype of the console. It already implements part of R12 and R14 and carries its own known-gaps list, so acceptance for those two requirements must be written against it rather than from scratch |
