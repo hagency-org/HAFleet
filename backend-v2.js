@@ -19,6 +19,7 @@ import {
   writeFileSync,
 } from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
+import { homedir, hostname } from 'os';
 import { execFile, execSync, spawn } from 'child_process';
 import path from 'path';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
@@ -28,10 +29,16 @@ import { promisify } from 'util';
 import { BLOCK_PATTERNS as LOCAL_BLOCK_PATTERNS, BLOCK_TIER_HARD, BLOCK_TIER_SOFT, BLOCK_TIER_TRANSIENT } from './lib/blocked-patterns.js';
 import { createTmuxRuntime } from './lib/runtime/tmux.js';
 import { sessionPolicyFromEnv } from './lib/session-policy.js';
-import { getFramework } from './lib/frameworks/index.js';
+import { getFramework, listFrameworks } from './lib/frameworks/index.js';
+import roleCapacity from './lib/role-capacity.json' with { type: 'json' };
+import { buildSeats, normalizeDeclaration, seatIdentity } from './lib/seat-store.js';
+import { createEngagementStore, routeRequest, EngagementError } from './lib/engagement-store.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
-import { indexPool, agentRole, agentCapability, selectAgent, resolveTier, TIER_RUNTIME } from './lib/matrix-agent.js';
+import {
+  indexPool, agentRole, agentCapability, selectAgent, resolveTier, TIER_RUNTIME,
+  modelTier, modelFamily, ROLES, CAPABILITY_TIERS, ROLE_DEFAULT_TIER,
+} from './lib/matrix-agent.js';
 import { DispatchLeaseStore } from './src/dispatch-lease-store.mjs';
 import { createSupervisorSnapshotStore } from './lib/supervisor-snapshot-store.js';
 import { createSupervisorActionEngine } from './lib/supervisor-action-engine.js';
@@ -2919,6 +2926,64 @@ const agentRuntime = loadJsonSync('agent_runtime.json', {});
 const taskGraphs = loadJsonSync('task_graphs.json', {});
 const frameworkPresets = loadJsonSync('framework-presets.json', []);
 function saveFrameworkPresets() { return saveJson('framework-presets.json', frameworkPresets); }
+
+/*
+ * Operator declarations about seats, keyed by derived seat id.
+ *
+ * Only the QUOTA is stored. Which agents share a seat is derived from how they
+ * were launched (lib/seat-store.js), so persisting that would be persisting a
+ * cache of a fact. What cannot be derived is how many tokens a subscription
+ * includes — no provider exposes it and nothing here meters — so that is a
+ * declaration, recorded as one.
+ */
+const seatDeclarations = loadJsonSync('seats.json', {});
+function saveSeatDeclarations() { return saveJson('seats.json', seatDeclarations); }
+
+/*
+ * Engagements, offers and the whitelist, in one store because they are one
+ * decision: whether a project may draw on this contributor's capacity, and for how
+ * much. Splitting them would put the routing rule — which reads all three — outside
+ * whatever holds the data.
+ */
+const engagementStore = createEngagementStore({
+  load: () => loadJsonSync('engagements.json', {}),
+  persist: (state) => saveJson('engagements.json', state),
+});
+
+/*
+ * Deployment-local key material for the seat digest, and its key id for rotation.
+ *
+ * Absent by default, and the digest says so in its own key id rather than
+ * pretending to be keyed. An unkeyed hash over (server, framework, authMode) is
+ * trivially reversible — the input set is tiny — so an unkeyed value must never be
+ * mistaken for one that protects anything.
+ */
+const SEAT_KEY_SECRET = String(process.env.HAFLEET_SEAT_KEY || '').trim();
+const SEAT_KEY_ID = String(process.env.HAFLEET_SEAT_KEY_ID || 'default').trim() || 'default';
+
+/** Ceiling on a preset: the field the contributor is actually deciding. */
+function normalizeCeiling(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'object') return null;
+  const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.floor(Number(v)) : null);
+  const tokens = n(value.tokens);
+  if (tokens === null) return null;
+  const period = ['daily', 'monthly'].includes(value.period) ? value.period : 'monthly';
+  return {
+    tokens,
+    period,
+    // Null and 0 are different: "no rate cap set" versus "nothing per day".
+    rateCapPerDay: n(value.rateCapPerDay),
+    /*
+     * Always false, and stored rather than assumed by the reader. Nothing meters
+     * tokens at any granularity, so this ceiling is a declaration of intent. A
+     * client that treats it as a guard rail will over-promise and learn about it
+     * from an exhausted plan. When metering lands, this flips at the store rather
+     * than in every caller.
+     */
+    enforced: false,
+  };
+}
 const taskStoreData = loadJsonSync('tasks.json', []);
 const taskStore = createTaskStore({
   initialData: taskStoreData,
@@ -8172,6 +8237,11 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     identity: identity ?? existing.identity ?? null,
     tmux: resolvedTmux,
     type: presetFramework ?? agentType ?? existing.type ?? 'agent',
+    // Which named preset produced runtimeProfile. Recorded, not just consumed:
+    // the resolved values alone cannot say which reusable configuration an agent
+    // is on, so a client could show the model but never the preset behind it,
+    // and editing a preset could not identify the agents it affects.
+    presetId: normalizeOptionalText(presetId, 128) || existing.presetId || null,
     // Recorded so the sweep does not have to re-derive it, and so a record stays
     // correct even if the registry later changes.
     transport: (() => {
@@ -10111,6 +10181,909 @@ app.get('/api/agents/:name/tasks', (req, res) => {
   return res.json(tasks);
 });
 
+// ── Framework manifests ────────────────────────────────────────────────
+/*
+ * The five adapters, as a client can consume them.
+ *
+ * listFrameworks() has been available since the registry existed but was never
+ * routed, so every caller that needed to know "which frameworks are there, and
+ * what will they refuse" had to hardcode the answer. A configuration wizard is
+ * the first client that cannot: it has to show the sandbox being lent before the
+ * contributor commits to lending it.
+ *
+ * Projected rather than returned wholesale — a compiled manifest carries RegExp
+ * and Set values that JSON.stringify flattens to `{}`, so a bare res.json() would
+ * silently ship empty guards and read as "this framework refuses nothing".
+ */
+function serializeFramework(f) {
+  return {
+    id: f.id,
+    displayName: f.displayName,
+    transport: f.transport,
+    launchable: f.launchable,
+    notLaunchableReason: f.notLaunchableReason,
+    command: f.launch?.command ?? null,
+    defaultArgs: [...(f.launch?.defaultArgs ?? [])],
+    modelFlag: f.launch?.modelFlag ?? null,
+    permissionSummary: f.launch?.permissionSummary ?? null,
+    // ACP-specific notes. `codex-acp` accepts --model and ignores it; `hermes`
+    // dies on it. A wizard that offers a model choice the adapter cannot honour
+    // is worse than one that says so, hence these travel with the manifest.
+    acpModelFlag: f.launch?.acpModelFlag ?? null,
+    acpModelFlagNote: f.launch?.acpModelFlagNote ?? null,
+    commandNote: f.launch?.commandNote ?? null,
+    // Flattened from the guard's Set/RegExp forms so the client can list what
+    // hafleet will refuse without reimplementing the matcher.
+    refusedFlags: f.flagGuard
+      ? [...f.flagGuard.exact, ...f.flagGuard.prefix].sort()
+      : [],
+    guardMessage: f.flagGuard?.message ?? null,
+  };
+}
+
+app.get('/api/frameworks', (_req, res) => {
+  return res.json(listFrameworks().map(serializeFramework));
+});
+
+/*
+ * What this host can actually run — probed, not declared.
+ *
+ * The distinction from GET /api/frameworks matters and is the reason both exist:
+ * that route answers "which adapters does hafleet know", which is a property of the
+ * manifests and identical on every machine. This one answers "which of them will
+ * start HERE", which is a property of the machine and is the only question an
+ * onboarding page can be built on. A console that showed the manifest list as
+ * though it were an inventory would invite a contributor to onboard a framework
+ * that is not installed, and the failure would surface at launch.
+ *
+ * WHAT IS PROBED AND WHAT IS NOT:
+ *
+ *  - **on PATH, and its version** — real, by running the binary's own version flag
+ *    with a short timeout. A binary that hangs is reported as present-but-unusable
+ *    rather than allowed to hang this request.
+ *  - **credential home present** — real, but only that the path EXISTS. Whether the
+ *    credential inside it is valid cannot be determined without spending a request
+ *    against the provider, so `credentialPresent` means "there is somewhere for a
+ *    login to live", never "you are logged in". Conflating those two would be the
+ *    worst possible error here: it would tell a contributor they are ready when the
+ *    first real task will fail on auth.
+ *
+ * hafleet does not install frameworks and does not hold their credentials, so the
+ * response carries the one command that fixes each gap rather than offering to fix
+ * it.
+ */
+const VERSION_FLAG = { claude: '--version', codex: '--version', 'codex-acp': '--version', octos: '--version', hermes: '--version' };
+
+async function probeFramework(f) {
+  const command = f.launch?.command ?? f.id;
+  let onPath = false;
+  let version = null;
+  let probeError = null;
+  try {
+    // `which` first: a missing binary must be reported as missing, not as a
+    // version probe that failed for some unexplained reason.
+    await execFileAsync('which', [command], { timeout: 3000 });
+    onPath = true;
+  } catch {
+    onPath = false;
+  }
+  if (onPath) {
+    try {
+      const { stdout } = await execFileAsync(command, [VERSION_FLAG[f.id] ?? '--version'], {
+        timeout: 5000,
+        // Never inherit stdin: a CLI that reads it waits forever, which is how a
+        // health probe becomes an outage.
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      version = String(stdout).trim().split('\n')[0].slice(0, 80) || null;
+    } catch (e) {
+      probeError = e?.killed ? 'version probe timed out' : (e?.message ?? 'version probe failed').slice(0, 120);
+    }
+  }
+
+  /*
+   * Where a login would live. Reported as a path relative to home so the response
+   * never contains the operator's absolute directory layout.
+   */
+  const CRED = {
+    claude: '.claude',
+    codex: '.codex',
+    'codex-acp': '.codex',
+    octos: path.join('.config', 'octos'),
+    hermes: '.hermes',
+  };
+  const credRel = CRED[f.id] ?? null;
+  const credAbs = credRel ? path.join(homedir(), credRel) : null;
+  const credentialPresent = credAbs ? existsSync(credAbs) : null;
+
+  /*
+   * `launchable: false` does NOT mean "cannot be started".
+   *
+   * Every ACP manifest carries it, and every one of their reasons says the same
+   * thing: `hafleet up` opens a tmux session and an ACP agent has no pane, so use
+   * `hafleet acp-up` instead. That is a different START COMMAND, not an inability —
+   * and reporting it as a state alongside `absent` told a contributor their
+   * installed, working framework was unusable. The distinction is carried by
+   * `startWith`, which already resolves to the right command per transport.
+   */
+  let state;
+  if (!onPath) state = 'absent';
+  else if (probeError) state = 'unusable';
+  else if (credentialPresent === false) state = 'needs_auth';
+  else state = 'ready';
+
+  return {
+    id: f.id,
+    displayName: f.displayName,
+    transport: f.transport,
+    command,
+    onPath,
+    version,
+    probeError,
+    // `~/.codex`, never `/Users/someone/.codex`.
+    credentialHome: credRel ? `~/${credRel}` : null,
+    // true / false / null: null means this adapter has no credential home to check,
+    // which is not the same as "not present".
+    credentialPresent,
+    launchable: f.launchable,
+    notLaunchableReason: f.notLaunchableReason,
+    permissionSummary: f.launch?.permissionSummary ?? null,
+    state,
+    // The one command that fixes this state, or null when nothing is wrong.
+    fix: state === 'absent' ? `install ${command} and put it on PATH`
+      : state === 'needs_auth' ? `${command} login`
+        : state === 'unusable' ? `check that \`${command} --version\` returns`
+          : null,
+    startWith: f.transport === 'acp' ? 'hafleet acp-up' : 'hafleet up',
+  };
+}
+
+app.get('/api/frameworks/detect', requireBearer, async (_req, res) => {
+  try {
+    const frameworks = await Promise.all(listFrameworks().map(probeFramework));
+    return res.json({
+      scannedAt: Date.now(),
+      host: hostname(),
+      frameworks,
+      /*
+       * Said in the payload, not left to the client to remember: a present
+       * credential directory is not a valid session, and nothing short of a real
+       * request to the provider can tell the difference.
+       */
+      caveat: 'credentialPresent means the credential directory exists, not that a valid session is in it',
+    });
+  } catch (error) {
+    console.error('[frameworks/detect] probe failed:', error?.message || error);
+    return res.status(500).json({ error: 'framework detection failed' });
+  }
+});
+
+// ── Role capability ────────────────────────────────────────────────────
+/*
+ * Which roles this deployment can actually fill, and why not when it cannot.
+ *
+ * `lib/role-capacity.json` shipped with no consumer at all: the role vocabulary
+ * existed as a constant nothing imported, and the enumeration of which
+ * (framework, model, reasoning) combinations qualify at each tier existed only as
+ * a file. This is its first reader, which means role eligibility is now computed
+ * from each agent's RESOLVED MODEL rather than inferred from its name.
+ *
+ * Two distinctions the response keeps that a headcount would lose:
+ *
+ *  - **Why a role cannot be filled.** "A model I have not configured" and "an
+ *    agent I do not own" are different problems with different fixes, so `unable`
+ *    carries a reason per agent rather than a total.
+ *  - **What subsumption costs.** A stronger tier fills a weaker role, so an
+ *    Opus-only deployment fills everything and pays Opus rates to write
+ *    documentation. `overTier` reports that rather than the check refusing it —
+ *    it is the operator's trade to make.
+ *
+ * Read-only, and it deliberately does not decide anything: nothing here staffs,
+ * reserves or dispatches. It answers what is possible.
+ */
+/*
+ * Guarded, unlike GET /api/frameworks.
+ *
+ * It was left open on the reasoning that role capability is the outward-facing layer.
+ * But the payload names AGENTS — which agent backs each role, its tier, its family,
+ * its online state — and ADR-013's L2 boundary is precisely that a project sees roles
+ * and never the raw agents behind them. An open endpoint that publishes the private
+ * half of that mapping inverts the boundary it was meant to express. A project-facing
+ * projection would have to drop `able`/`unable` entirely; until one exists, this is
+ * the contributor's own view and is authenticated as such.
+ */
+app.get('/api/capability', requireBearer, (_req, res) => {
+  refreshServerLiveness();
+  const rows = Object.values(agents).filter(isAgentRecord).map(serializeAgent);
+  const TIER_RANK = Object.fromEntries(
+    [...CAPABILITY_TIERS].reverse().map((t, i) => [t, i]),
+  );
+
+  const roles = ROLES.map((key) => {
+    const def = roleCapacity.roles[key];
+    const need = ROLE_DEFAULT_TIER[key];
+    const able = [];
+    const unable = [];
+
+    for (const a of rows) {
+      const tier = modelTier(a.runtimeProfile);
+      if (!tier) {
+        // Two different absences, and the fix differs: no profile at all versus a
+        // profile whose model no tier accepts.
+        unable.push({
+          agent: a.name,
+          reason: a.runtimeProfile?.primary?.model ? 'model-not-accepted' : 'no-model',
+          model: a.runtimeProfile?.primary?.model ?? null,
+        });
+        continue;
+      }
+      if (TIER_RANK[tier] < TIER_RANK[need]) {
+        unable.push({ agent: a.name, reason: 'below-tier', tier, need });
+        continue;
+      }
+      able.push({
+        agent: a.name,
+        tier,
+        family: modelFamily(a.runtimeProfile),
+        overTier: TIER_RANK[tier] - TIER_RANK[need],
+        online: a.online === true,
+      });
+    }
+
+    const families = [...new Set(able.map((r) => r.family).filter(Boolean))].sort();
+    return {
+      role: key,
+      displayName: def.displayName,
+      defaultTier: need,
+      // lib/matrix-agent.js:26 — review must be staffed from two different model
+      // families, so one family cannot cover both sides however many agents it
+      // has. Reported as a property of the role, not as a warning.
+      crossFamily: def.crossFamily === true,
+      crossFamilyOk: def.crossFamily === true ? families.length >= 2 : true,
+      families,
+      fillable: able.length,
+      able,
+      unable,
+      overTier: able.filter((r) => r.overTier > 0).length,
+      excluded: (roleCapacity.excluded ?? []).filter((e) => e.role === key),
+    };
+  });
+
+  return res.json({
+    generatedAt: Date.now(),
+    tiers: CAPABILITY_TIERS,
+    agents: rows.length,
+    // Named so a client cannot mistake a computed judgement for stored state.
+    source: 'lib/role-capacity.json',
+    roles,
+  });
+});
+
+// ── Engagements, offers, whitelist ─────────────────────────────────────
+/*
+ * What replaces dispatch. See lib/engagement-store.js for the routing rules and
+ * why each branch is the way it is; this layer supplies the two facts the store
+ * deliberately does not know.
+ *
+ *  - WHICH AGENT would serve a role. That is the capability model's answer, and it
+ *    has to be computed BEFORE a decision so an approval form can name whose
+ *    ceiling is about to be spent.
+ *  - HOW MUCH IS LEFT on that agent. Its declared ceiling minus what active
+ *    engagements have already committed against it. Per agent, because an
+ *    engagement draws on one agent's ceiling — two projects wanting an architect
+ *    served by the same agent share it.
+ */
+
+/** The agent that would serve a role: qualified, and with the most headroom. */
+function agentForRole(role) {
+  const rows = Object.values(agents).filter(isAgentRecord).map(serializeAgent);
+  const TIER_RANK = Object.fromEntries([...CAPABILITY_TIERS].reverse().map((t, i) => [t, i]));
+  const need = ROLE_DEFAULT_TIER[role];
+  if (!need) return null;
+  const qualified = rows
+    .map((a) => ({ a, tier: modelTier(a.runtimeProfile) }))
+    .filter(({ tier }) => tier && TIER_RANK[tier] >= TIER_RANK[need]);
+  if (!qualified.length) return null;
+  /*
+   * Most headroom first, so a second request for the same role does not pile onto
+   * the agent that is already nearly committed. Deliberately NOT round-robin: the
+   * point is to keep as many roles fillable as possible, and an agent with nothing
+   * left cannot fill anything however fairly it was chosen.
+   */
+  qualified.sort((x, y) => (remainingFor(y.a.name) ?? -1) - (remainingFor(x.a.name) ?? -1));
+  return qualified[0].a.name;
+}
+
+/**
+ * What is left on the SEAT this agent occupies, or null if no quota is declared.
+ *
+ * The seat is the accounting root: agents sharing a credential home share one quota
+ * however much each of them declares. Without this, the per-agent ceiling was the
+ * only constraint and it is the wrong one — verified against a running backend, two
+ * agents with 5M ceilings on a seat declared at 6M both took a 4M allocation, for
+ * 8M committed against 6M. The seat page reported `overSubscribed: true` afterwards
+ * and nothing had stopped it.
+ */
+function seatRemainingFor(agentName) {
+  const rows = Object.values(agents).filter(isAgentRecord).map(serializeAgent);
+  const target = rows.find((a) => a.name === agentName);
+  if (!target) return null;
+  const seatId = seatIdentity(target, { keyId: SEAT_KEY_ID, secret: SEAT_KEY_SECRET }).seatId;
+  const quota = Number(seatDeclarations[seatId]?.quotaTokens);
+  // Undeclared quota is UNKNOWN, not unlimited. Returning null lets the caller
+  // decide; returning Infinity here would silently reinstate the bug.
+  if (!Number.isFinite(quota) || quota <= 0) return null;
+
+  const sameSeat = rows.filter((a) => (
+    seatIdentity(a, { keyId: SEAT_KEY_ID, secret: SEAT_KEY_SECRET }).seatId === seatId
+  ));
+  const committed = sameSeat.reduce((n, a) => n + engagementStore.committedFor(a.name), 0);
+  return Math.max(0, quota - committed);
+}
+
+/**
+ * How much may still be allocated to this agent: the TIGHTER of its own declared
+ * ceiling and what is left on its seat.
+ *
+ * Both can be null, and null means "not declared" rather than "no limit". A null on
+ * either side must not relax the other — so the result is the minimum of whichever
+ * limits exist, and null only when neither does.
+ */
+function remainingFor(agentName) {
+  const agent = Object.values(agents).filter(isAgentRecord).find((a) => a.name === agentName);
+  if (!agent?.presetId) return null;
+  const preset = frameworkPresets.find((p) => p.id === agent.presetId);
+  const ceiling = preset?.ceiling?.tokens;
+  const byCeiling = Number.isFinite(ceiling)
+    ? Math.max(0, ceiling - engagementStore.committedFor(agentName))
+    : null;
+  const bySeat = seatRemainingFor(agentName);
+  const limits = [byCeiling, bySeat].filter((v) => v !== null);
+  return limits.length ? Math.min(...limits) : null;
+}
+
+/*
+ * A REQUESTER IS NOT THE CONTRIBUTOR.
+ *
+ * `POST /api/engagements` is the one project-facing write on this surface: a project
+ * asks to draw on someone's capacity. Every other engagement route — the verdict,
+ * the revoke, the whitelist, the offer — is the contributor deciding. They all sat
+ * behind the same `requireBearer`, so a project handed the credential it needs to
+ * ASK could also approve its own request, whitelist itself for future auto-join, and
+ * widen the offer it was measured against.
+ *
+ * This is the narrow, correct half of the scoped-token problem: the console still
+ * has no read-only tier and one shared API_TOKEN still opens the rest of `/api`.
+ * What is fixed here is the specific escalation — submitting no longer implies
+ * deciding.
+ *
+ * `HAFLEET_REQUESTER_TOKEN` is a separate secret that authorises submission ONLY.
+ * The operator token continues to work, because the console and the local operator
+ * legitimately submit too (the seed script and the preview both do).
+ */
+const REQUESTER_TOKEN = String(process.env.HAFLEET_REQUESTER_TOKEN || '').trim();
+
+function requireRequester(req, res, next) {
+  if (!REQUESTER_TOKEN) return requireBearer(req, res, next);
+  const auth = req.headers.authorization || '';
+  if (auth === `Bearer ${REQUESTER_TOKEN}`) return next();
+  // The operator may still submit; a requester may do nothing else.
+  return requireBearer(req, res, next);
+}
+
+/*
+ * MAKE THE APPROVAL DO SOMETHING.
+ *
+ * An engagement going active used to change nothing about the world: it allocated a
+ * number, wrote an audit line, and left the agent unattached to the project. Six
+ * active engagements existed against zero bindings. `upsertBinding()` at
+ * lib/approval-store.js:186 is the record that actually attaches an agent to a
+ * project room with an owner, and nothing was calling it from here.
+ *
+ * WHERE THE OWNER COMES FROM, in order:
+ *
+ *  1. An existing binding for this agent. If the agent is already bound to some
+ *     project, that binding names the human who owns it and the DM room the
+ *     approval flow uses — reusing it keeps one owner per agent, which is what the
+ *     approval machinery assumes.
+ *  2. `HAFLEET_OWNER_MXID` + `HAFLEET_OWNER_DM_ROOM`, for the first binding on a
+ *     fresh deployment.
+ *
+ * There is deliberately no third fallback. `POST /api/dm/ensure` only broadcasts a
+ * request to the bridge and returns no room id, so the backend cannot invent one,
+ * and `upsertBinding` requires both fields. When neither source has an owner the
+ * bind FAILS AND SAYS SO — recorded on the engagement, returned to the caller, and
+ * shown in the console. Silently approving without binding is the exact defect this
+ * replaces; a silent partial success would be the same defect wearing a hat.
+ */
+const OWNER_MXID = String(process.env.HAFLEET_OWNER_MXID || '').trim();
+const OWNER_DM_ROOM = String(process.env.HAFLEET_OWNER_DM_ROOM || '').trim();
+
+function resolveOwnerFor(agentName) {
+  try {
+    const existing = approvalStore.listBindings({ agent: agentName })[0];
+    if (existing?.ownerMxid && existing?.ownerDmRoomId) {
+      return { ownerMxid: existing.ownerMxid, ownerDmRoomId: existing.ownerDmRoomId, from: 'existing binding' };
+    }
+  } catch { /* store unavailable: fall through to config */ }
+  if (OWNER_MXID && OWNER_DM_ROOM) {
+    return { ownerMxid: OWNER_MXID, ownerDmRoomId: OWNER_DM_ROOM, from: 'HAFLEET_OWNER_MXID' };
+  }
+  return null;
+}
+
+/** Attach the agent to the project. Returns the outcome; never throws at the caller. */
+function bindEngagement(engagement) {
+  if (!engagement?.agent) {
+    return { bound: false, error: 'engagement names no agent' };
+  }
+  const owner = resolveOwnerFor(engagement.agent);
+  if (!owner) {
+    return {
+      bound: false,
+      error: 'no owner known for this agent: set HAFLEET_OWNER_MXID and HAFLEET_OWNER_DM_ROOM, '
+        + 'or let the Matrix bridge create the first binding',
+    };
+  }
+  try {
+    approvalStore.upsertBinding({
+      agent: engagement.agent,
+      project: engagement.project,
+      project_room_id: engagement.projectRoomId,
+      owner_mxid: owner.ownerMxid,
+      owner_dm_room_id: owner.ownerDmRoomId,
+    });
+    return { bound: true, ownerMxid: owner.ownerMxid, from: owner.from };
+  } catch (error) {
+    return { bound: false, error: error?.message ?? 'upsertBinding failed' };
+  }
+}
+
+/** Detach on revoke or rejection, so an ended engagement leaves no live binding. */
+function unbindEngagement(engagement) {
+  if (!engagement?.agent || !engagement?.projectRoomId) return;
+  try {
+    approvalStore.removeBinding(engagement.agent, engagement.projectRoomId);
+  } catch (error) {
+    // A binding that was never created is not an error worth failing the revoke for.
+    console.warn(`[engagements] unbind ${engagement.agent}: ${error?.message ?? error}`);
+  }
+}
+
+function respondEngagementError(res, error, fallback) {
+  if (error instanceof EngagementError) {
+    const status = { bad_request: 400, not_found: 404, conflict: 409, over_commit: 409, no_ceiling: 409 }[error.code] ?? 500;
+    return res.status(status).json({ error: error.message, code: error.code });
+  }
+  console.error(`[engagements] ${fallback}:`, error?.message || error);
+  return res.status(500).json({ error: fallback });
+}
+
+app.get('/api/engagements', requireBearer, (req, res) => {
+  const state = normalizeOptionalText(req.query.state, 32) || undefined;
+  const rows = engagementStore.list({ state }).map((e) => ({
+    ...e,
+    // What is LEFT on the agent behind it, so the queue can show over-commitment
+    // before the decision rather than reporting it afterwards.
+    agentRemainingTokens: e.agent ? remainingFor(e.agent) : null,
+  }));
+  return res.json({ engagements: rows, generatedAt: Date.now() });
+});
+
+app.get('/api/engagements/audit', requireBearer, (req, res) => {
+  const limit = Number(req.query.limit) || 200;
+  return res.json({ audit: engagementStore.listAudit({ limit }) });
+});
+
+/*
+ * An inbound request. Routed on arrival, and the agent is resolved here so the
+ * record names it from the start.
+ *
+ * Not guarded by requireApprovalBridgeSecret: an engagement request comes from a
+ * project, which is a different caller from the bridge that carries per-tool-call
+ * approvals. Wiring it behind the bridge secret would have made the console unable
+ * to read its own queue, which is the mistake the existing binding endpoint makes.
+ */
+app.post('/api/engagements', requireRequester, (req, res) => {
+  try {
+    const b = req.body || {};
+    const role = normalizeOptionalText(b.role, 64);
+    if (!ROLES.includes(role)) return res.status(400).json({ error: `unknown role: ${role}` });
+
+    /*
+     * WHICH AGENT SERVES A ROLE IS NOT THE REQUESTER'S CHOICE.
+     *
+     * `normalizeOptionalText(b.agent) || agentForRole(role)` let the body override the
+     * capability model entirely: posting `{ role: 'architect', agent: 'some-weak-agent' }`
+     * produced an architect engagement served by an agent that does not qualify at
+     * `strong`, and auto-joined it if that agent had headroom. The tier check was
+     * simply skipped.
+     *
+     * A requested agent is now a HINT, honoured only if it independently qualifies
+     * for the role. Anything else falls back to the capability model's own answer.
+     */
+    const requested = normalizeOptionalText(b.agent, 128);
+    let agent = agentForRole(role);
+    if (requested) {
+      const TIER_RANK = Object.fromEntries([...CAPABILITY_TIERS].reverse().map((t, i) => [t, i]));
+      const row = Object.values(agents).filter(isAgentRecord).map(serializeAgent)
+        .find((a) => a.name === requested);
+      const tier = row ? modelTier(row.runtimeProfile) : null;
+      const qualifies = tier && TIER_RANK[tier] >= TIER_RANK[ROLE_DEFAULT_TIER[role]];
+      if (qualifies) agent = requested;
+      else if (row) {
+        // Refused rather than silently reassigned: a caller that named an agent is
+        // making a claim, and quietly serving a different one hides that it was wrong.
+        return res.status(400).json({
+          error: `${requested} does not qualify for ${role} (needs ${ROLE_DEFAULT_TIER[role]}, has ${tier ?? 'no qualifying model'})`,
+        });
+      } else {
+        return res.status(400).json({ error: `unknown agent: ${requested}` });
+      }
+    }
+    const engagement = engagementStore.createRequest({
+      project: b.project,
+      projectRoomId: b.projectRoomId,
+      role,
+      requester: b.requester,
+      requestedTokens: b.requestedTokens,
+      ratePerDay: b.ratePerDay,
+      agent,
+      remainingTokens: agent ? remainingFor(agent) : null,
+    });
+    /*
+     * An auto-join goes straight to active, so it must bind here — the verdict
+     * route it would otherwise pass through never runs for it.
+     */
+    if (engagement.state === 'active') {
+      const outcome = bindEngagement(engagement);
+      engagementStore.setBindingOutcome(engagement.id, outcome);
+      return res.json({ ok: true, engagement: engagementStore.get(engagement.id), binding: outcome });
+    }
+    return res.json({ ok: true, engagement });
+  } catch (e) {
+    return respondEngagementError(res, e, 'failed to create engagement');
+  }
+});
+
+app.post('/api/engagements/:id/verdict', requireBearer, (req, res) => {
+  try {
+    const b = req.body || {};
+    const existing = engagementStore.get(req.params.id);
+    const e = engagementStore.decide({
+      engagementId: req.params.id,
+      approve: b.approve === true,
+      allocatedTokens: b.allocatedTokens,
+      // Recomputed here rather than taken from the request: a client-supplied
+      // headroom would let any caller authorise the over-commitment the form
+      // prevents.
+      remainingTokens: existing?.agent ? remainingFor(existing.agent) : null,
+      by: getRequestAgentName(req) || 'operator',
+      reason: b.reason,
+    });
+    if (e.state === 'active') {
+      const outcome = bindEngagement(e);
+      engagementStore.setBindingOutcome(e.id, outcome);
+      /*
+       * The binding outcome rides back with the verdict rather than being left for
+       * the caller to discover. An approval that allocated budget but could not
+       * attach the agent is a half-done thing, and the form that pressed Approve is
+       * the only place anyone will look.
+       */
+      return res.json({ ok: true, engagement: engagementStore.get(e.id), binding: outcome });
+    }
+    // Rejected: nothing to attach, and anything already attached must go.
+    unbindEngagement(e);
+    return res.json({ ok: true, engagement: e });
+  } catch (e) {
+    return respondEngagementError(res, e, 'failed to record verdict');
+  }
+});
+
+app.post('/api/engagements/:id/revoke', requireBearer, (req, res) => {
+  try {
+    const e = engagementStore.revoke({
+      engagementId: req.params.id,
+      by: getRequestAgentName(req) || 'operator',
+      reason: req.body?.reason,
+    });
+    // Revoking is the explicit act that ends a contribution, so it is the one that
+    // detaches. A whitelist removal deliberately does not — see engagement-store.
+    unbindEngagement(e);
+    return res.json({ ok: true, engagement: e });
+  } catch (e) {
+    return respondEngagementError(res, e, 'failed to revoke engagement');
+  }
+});
+
+app.get('/api/offers', requireBearer, (_req, res) => {
+  /*
+   * Every role, whether or not it has an offer. An absent offer is a real state —
+   * capacity configured but not advertised — and returning only the configured ones
+   * would make "not offered" indistinguishable from "role does not exist".
+   */
+  const configured = new Map(engagementStore.listOffers().map((o) => [o.role, o]));
+  return res.json({
+    offers: ROLES.map((role) => configured.get(role) ?? {
+      role, count: null, budgetCapPerEngagement: null, rateCap: null, published: false, updatedAt: null,
+    }),
+  });
+});
+
+app.put('/api/offers/:role', requireBearer, (req, res) => {
+  try {
+    const role = normalizeOptionalText(req.params.role, 64);
+    // Narrow, never invent: the project side has to recognise a role name for any
+    // of this to mean anything, so a role outside the vocabulary is refused.
+    if (!ROLES.includes(role)) return res.status(400).json({ error: `unknown role: ${role}` });
+    const offer = engagementStore.setOffer({
+      role,
+      count: req.body?.count,
+      budgetCapPerEngagement: req.body?.budgetCapPerEngagement,
+      rateCap: req.body?.rateCap,
+      published: req.body?.published,
+      by: getRequestAgentName(req) || 'operator',
+    });
+    return res.json({ ok: true, offer });
+  } catch (e) {
+    return respondEngagementError(res, e, 'failed to set offer');
+  }
+});
+
+app.get('/api/whitelist', requireBearer, (_req, res) => {
+  return res.json({ whitelist: engagementStore.listWhitelist() });
+});
+
+app.post('/api/whitelist', requireBearer, (req, res) => {
+  try {
+    const entry = engagementStore.addToWhitelist({
+      projectRoomId: req.body?.projectRoomId,
+      displayName: req.body?.displayName,
+      addedBy: req.body?.addedBy,
+    });
+    return res.json({ ok: true, entry });
+  } catch (e) {
+    return respondEngagementError(res, e, 'failed to add to whitelist');
+  }
+});
+
+app.delete('/api/whitelist/:roomId', requireBearer, (req, res) => {
+  try {
+    const result = engagementStore.removeFromWhitelist({
+      projectRoomId: req.params.roomId,
+      by: getRequestAgentName(req) || 'operator',
+    });
+    /*
+     * `stillActive` is returned rather than swallowed: removal affects future
+     * requests only, so the caller has to be told what is still running under the
+     * trust it just withdrew. Silently leaving them would be correct behaviour
+     * reported as if nothing happened.
+     */
+    return res.json({ ok: true, ...result });
+  } catch (e) {
+    return respondEngagementError(res, e, 'failed to remove from whitelist');
+  }
+});
+
+/*
+ * A bearer-readable projection of the contribution binding.
+ *
+ * `GET /api/approval-bindings` is guarded by requireApprovalBridgeSecret — a
+ * bridge-only secret — so a console holding the API token cannot read the record
+ * that already carries the (agent, project, room, owner) tuple. Widening that guard
+ * would hand the console the bridge's authority; this projects instead, and omits
+ * `ownerDmRoomId`, which is a private channel the console has no business seeing.
+ */
+app.get('/api/contributions', requireBearer, (_req, res) => {
+  try {
+    const bindings = approvalStore.listBindings({});
+    return res.json({
+      contributions: bindings.map((b) => ({
+        agent: b.agent,
+        project: b.project,
+        projectRoomId: b.projectRoomId,
+        ownerMxid: b.ownerMxid,
+        active: b.active !== false,
+      })),
+    });
+  } catch (error) {
+    return respondApprovalStoreError(res, error, 'failed to list contributions');
+  }
+});
+
+/** What a hypothetical request WOULD do, without creating anything. */
+app.get('/api/engagements/preview', requireBearer, (req, res) => {
+  const role = normalizeOptionalText(req.query.role, 64);
+  const projectRoomId = normalizeOptionalText(req.query.projectRoomId, 256);
+  const requestedTokens = Number(req.query.requestedTokens) || 0;
+  const agent = agentForRole(role);
+  const decision = routeRequest({
+    request: { requestedTokens, ratePerDay: Number(req.query.ratePerDay) || null },
+    whitelisted: engagementStore.isWhitelisted(projectRoomId),
+    offer: engagementStore.getOffer(role),
+    remainingTokens: agent ? remainingFor(agent) : null,
+  });
+  return res.json({ ...decision, agent, agentRemainingTokens: agent ? remainingFor(agent) : null });
+});
+
+// ── Usage ──────────────────────────────────────────────────────────────
+/*
+ * What each contributed agent actually did, and — stated rather than implied —
+ * which of those signals is measured.
+ *
+ * THE PARTITION IS THE POINT. Three signals, and they are not equally real:
+ *
+ *   tasks     MEASURED. lib/task-store.js has five statuses and every task carries
+ *             an assignee, so "what did my agent work on" is answerable.
+ *   busyTime  MEASURED. The runtime sweep observes each agent's pane or ACP session
+ *             and records activeDurationSec / idleDurationSec.
+ *   tokens    NOT MEASURED, at any granularity. Every `usage` and `budget` match in
+ *             lib/ and backend-v2.js is a CLI help string.
+ *
+ * WHY TOKENS CANNOT SIMPLY BE ADDED. It is not a missing field. HAFleet launches a
+ * coding-agent CLI and that CLI talks to the provider directly — the API traffic
+ * never passes through this process, so there is no response to read a usage header
+ * from. This holds in API-key mode too, which is worth saying because it is the
+ * intuitive place to expect numbers and they are not there either. The two routes
+ * that could work are (a) reading each framework's own session log, which is
+ * per-framework and best-effort, or (b) becoming a proxy, which changes what
+ * HAFleet is. Both are decisions, not omissions.
+ *
+ * So `tokens` is null with a reason on every row, and the `metering` block below
+ * declares availability per signal so a client never has to guess which of its
+ * columns is a measurement. A zero here would claim a reading nobody took, and the
+ * difference between "this cost me nothing" and "I cannot see what this cost me" is
+ * the whole reason a contributor opens this page.
+ */
+const TOKENS_UNAVAILABLE_REASON =
+  'no token accounting exists at any granularity: hafleet launches a CLI that talks '
+  + 'to the provider directly, so no API response passes through it to read a usage '
+  + 'figure from. This is true in api-key mode as well as on a subscription.';
+
+app.get('/api/usage', requireBearer, (_req, res) => {
+  refreshServerLiveness();
+  const rows = Object.values(agents).filter(isAgentRecord).map(serializeAgent);
+  const allTasks = taskStore.listTasks();
+  const TASK_STATUSES = ['created', 'accepted', 'in_progress', 'blocked', 'done'];
+
+  const byAgent = rows.map((a) => {
+    const mine = allTasks.filter((t) => t.assignee === a.name);
+    const tasksByStatus = Object.fromEntries(TASK_STATUSES.map((s) => [s, 0]));
+    for (const t of mine) if (tasksByStatus[t.status] !== undefined) tasksByStatus[t.status] += 1;
+    const preset = a.presetId ? frameworkPresets.find((p) => p.id === a.presetId) : null;
+    return {
+      agent: a.name,
+      framework: a.type ?? null,
+      model: a.runtimeProfile?.primary?.model ?? null,
+      // Measured.
+      busySec: Number(a.activeDurationSec) || 0,
+      idleSec: Number(a.idleDurationSec) || 0,
+      activeNow: a.activeNow === true,
+      lastActivitySec: a.lastTmuxActivitySec ?? null,
+      tasks: mine.length,
+      tasksByStatus,
+      // Declared, which is knowable: I know what I promised.
+      ceilingTokens: preset?.ceiling?.tokens ?? null,
+      // Not measured. Null with a reason, never 0.
+      tokensUsed: null,
+      tokensReason: TOKENS_UNAVAILABLE_REASON,
+    };
+  });
+
+  return res.json({
+    generatedAt: Date.now(),
+    /*
+     * Availability per signal, so a client renders a blank-with-a-reason rather
+     * than inferring one from an absent key — an absent key is indistinguishable
+     * from a zero once it has been through JSON.
+     */
+    metering: {
+      tasks: { available: true, source: 'lib/task-store.js' },
+      busyTime: { available: true, source: 'agent runtime observation (tmux pane / ACP session sweep)' },
+      tokens: {
+        available: false,
+        reason: TOKENS_UNAVAILABLE_REASON,
+        // Named so the gap is actionable rather than merely admitted.
+        candidateSources: [
+          'per-framework session logs written by the CLI itself (best-effort, per framework)',
+          'hafleet proxying provider traffic (changes what hafleet is)',
+        ],
+      },
+    },
+    agents: byAgent,
+    totals: {
+      agents: byAgent.length,
+      busySec: byAgent.reduce((n, r) => n + r.busySec, 0),
+      tasks: byAgent.reduce((n, r) => n + r.tasks, 0),
+      tokensUsed: null,
+    },
+  });
+});
+
+// ── Seats ──────────────────────────────────────────────────────────────
+/*
+ * The unit capacity is actually bought in, and the over-subscription it makes
+ * visible.
+ *
+ * A ceiling is declared per agent because that is the unit an operator reasons
+ * about. But two Claude agents on one host share one authenticated subscription —
+ * `$HOME` is never reassigned in the launch path and bin/hafleet-up:1640-1644 only
+ * unsets ANTHROPIC_API_KEY when no per-agent key is set — so their two ceilings are
+ * two claims on one quota, not two quotas. Nothing in the product could say that
+ * before this route.
+ *
+ * Identity is derived; quota is declared. See lib/seat-store.js for why the split
+ * is that way round and why the seat id is a keyed digest rather than a path.
+ */
+app.get('/api/seats', requireBearer, (_req, res) => {
+  refreshServerLiveness();
+  const rows = Object.values(agents).filter(isAgentRecord).map(serializeAgent);
+  const seats = buildSeats({
+    agents: rows,
+    presets: frameworkPresets,
+    declarations: seatDeclarations,
+    keyId: SEAT_KEY_ID,
+    secret: SEAT_KEY_SECRET,
+  });
+  return res.json({
+    generatedAt: Date.now(),
+    // Surfaced rather than buried: an unkeyed digest protects nothing, and a
+    // caller deciding whether a seat id is safe to log needs to know which it is.
+    keyed: Boolean(SEAT_KEY_SECRET),
+    keyId: SEAT_KEY_ID,
+    seats,
+  });
+});
+
+/*
+ * Declare what a seat holds.
+ *
+ * PUT rather than POST because the seat already exists — it is derived from the
+ * agents on it. What is being created is the operator's belief about its quota, and
+ * that belief is addressed by the seat's own id.
+ */
+app.put('/api/seats/:seatId', requireBearer, (req, res) => {
+  const seatId = normalizeOptionalText(req.params.seatId, 128);
+  if (!seatId) return res.status(400).json({ error: 'seatId is required' });
+
+  // Refuse a declaration about a seat no agent occupies. Otherwise seats.json
+  // accumulates beliefs about seats that never existed — usually a typo, and
+  // indistinguishable afterwards from a seat whose agents were removed.
+  const rows = Object.values(agents).filter(isAgentRecord).map(serializeAgent);
+  const known = new Set(rows.map((a) => seatIdentity(a, { keyId: SEAT_KEY_ID, secret: SEAT_KEY_SECRET }).seatId));
+  if (!known.has(seatId)) {
+    return res.status(404).json({ error: `no agent occupies seat ${seatId}` });
+  }
+
+  const declaration = normalizeDeclaration(req.body || {});
+  if (!declaration) return res.status(400).json({ error: 'nothing to declare: quotaTokens, period or planLabel required' });
+
+  const previous = seatDeclarations[seatId];
+  seatDeclarations[seatId] = {
+    ...declaration,
+    declaredBy: getRequestAgentName(req) || 'operator',
+    declaredAt: Date.now(),
+  };
+  if (!saveSeatDeclarations()) {
+    if (previous === undefined) delete seatDeclarations[seatId];
+    else seatDeclarations[seatId] = previous;
+    return res.status(503).json({ error: 'seat declaration persistence failed' });
+  }
+  return res.json({ ok: true, seatId, declaration: seatDeclarations[seatId] });
+});
+
+app.delete('/api/seats/:seatId', requireBearer, (req, res) => {
+  const seatId = normalizeOptionalText(req.params.seatId, 128);
+  const previous = seatDeclarations[seatId];
+  if (previous === undefined) return res.status(404).json({ error: 'no declaration for that seat' });
+  delete seatDeclarations[seatId];
+  if (!saveSeatDeclarations()) {
+    seatDeclarations[seatId] = previous;
+    return res.status(503).json({ error: 'seat declaration persistence failed' });
+  }
+  return res.json({ ok: true, seatId });
+});
+
 // ── Framework Presets CRUD ─────────────────────────────────────────────
 app.get('/api/framework-presets', requireBearer, (_req, res) => {
   return res.json(frameworkPresets.map(p => ({
@@ -10152,6 +11125,13 @@ app.post('/api/framework-presets', requireBearer, (req, res) => {
     extraArgs,
     apiBaseUrl,
     apiKey: normalizeOptionalText(b.apiKey, 256) || null,
+    /*
+     * The one field a contributor is really deciding, and until now the only one
+     * with nowhere to live: this handler built its record from a closed field
+     * list, so a `ceiling` sent by a client was accepted with 200 and dropped.
+     * The console had to render every ceiling cell as "no ceiling field upstream".
+     */
+    ceiling: normalizeCeiling(b.ceiling),
   };
   frameworkPresets.push(preset);
   if (!saveFrameworkPresets()) {
@@ -10192,6 +11172,15 @@ app.put('/api/framework-presets/:id', requireBearer, (req, res) => {
     extraArgs,
     apiBaseUrl,
     apiKey: normalizeOptionalText(b.apiKey, 256) || previousPreset.apiKey || null,
+    /*
+     * An omitted `ceiling` KEEPS the stored one, matching how apiKey behaves just
+     * above. The alternative — treating absent as "clear it" — would silently
+     * unset a contributor's budget every time a client saved the form without
+     * re-sending it. An explicit `null` still clears.
+     */
+    ceiling: b.ceiling === undefined
+      ? (previousPreset.ceiling ?? null)
+      : normalizeCeiling(b.ceiling),
   };
   frameworkPresets[idx] = nextPreset;
   if (!saveFrameworkPresets()) {
