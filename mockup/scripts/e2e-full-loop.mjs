@@ -45,7 +45,8 @@
  *   - a homeserver reachable at MATRIX_HS (mini1, via ssh tunnel)
  *   - bridge-matrix.js running and joined to the room
  *   - the hafleet backend, and the console dev server
- *   - optionally Robrix, logged into the same account; skipped with a reason if not
+ *   - optionally Robrix; only its liveness is checked, and it no longer shares an
+ *     account with this suite — see scripts/lib/matrix-account.mjs
  *
  * Not in `npm test` — specs/project.spec.md:26 forbids tests contacting live Palpo.
  */
@@ -53,7 +54,8 @@
 import { chromium } from 'playwright-core';
 import { MatrixClient, SimpleFsStorageProvider } from 'matrix-bot-sdk';
 import { withRateLimitRetry } from './lib/matrix-rate-limit.mjs';
-import { readFileSync, existsSync, mkdtempSync, readdirSync } from 'node:fs';
+import { registerThrowaway } from './lib/matrix-account.mjs';
+import { existsSync, mkdtempSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -63,7 +65,12 @@ const BACKEND = process.env.BACKEND ?? 'http://127.0.0.1:8090';
 const CONSOLE = process.env.BASE ?? 'http://127.0.0.1:3100';
 const TOKEN = process.env.API_TOKEN ?? 'devtoken';
 const CHROME = process.env.CHROME ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const USER_JSON = process.env.MATRIX_USER_JSON ?? '/tmp/lin.json';
+/*
+ * Registration token for this run's throwaway account. No default: it gates
+ * registration on a homeserver reachable from the internet, so a literal here would
+ * be a credential published with this file.
+ */
+const REG_TOKEN = process.env.MATRIX_TOKEN ?? '';
 const BOT_MXID = process.env.BOT_MXID ?? '@hafleet-bot:palpo.test';
 /*
  * The client's state store. Defaults to the newest db_* directory macOS Robrix
@@ -127,11 +134,27 @@ function clientAlive() {
 (async () => {
   console.log(`\nFull loop — Matrix ${HS} · bridge · hafleet ${BACKEND} · console ${CONSOLE}\n`);
 
-  const acct = JSON.parse(readFileSync(USER_JSON, 'utf8'));
+  /*
+   * A THROWAWAY ACCOUNT, not the operator's.
+   *
+   * This used to log in as the human's own user and create a `loop/…` room per run
+   * in their real client, then leave and forget it at teardown — leaving the client
+   * holding rooms its account was no longer in, which surfaced to them as
+   * "failed to load early messages … M_FORBIDDEN: you aren't member of the room".
+   * A suite that leaves debris in someone's live client is not isolated, whatever it
+   * reports. See scripts/lib/matrix-account.mjs.
+   */
+  if (!REG_TOKEN) {
+    check('a registration token is configured', false,
+      'set MATRIX_TOKEN — this suite registers its own throwaway account rather than using yours');
+    process.exit(1);
+  }
+  const acct = await registerThrowaway(HS, REG_TOKEN, 'loopuser');
   const user = new MatrixClient(HS, acct.access_token, new SimpleFsStorageProvider(
     join(mkdtempSync(join(tmpdir(), 'loop-')), 'user.json'),
   ));
   const mxid = await user.getUserId();
+  check('the suite runs as its own throwaway account, not the operator\'s', /^@loopuser-/.test(mxid), mxid);
 
   // A fresh room per run: reusing one inherits the previous run's whitelist state
   // and engagement history, which changes the routing and makes the result depend

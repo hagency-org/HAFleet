@@ -33,6 +33,7 @@
 
 import { MatrixClient, SimpleFsStorageProvider } from 'matrix-bot-sdk';
 import { withRateLimitRetry } from './lib/matrix-rate-limit.mjs';
+import { registerThrowaway } from './lib/matrix-account.mjs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -72,37 +73,9 @@ async function api(path, opts = {}) {
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
 
-/**
- * A fresh Matrix account per run.
- *
- * Reusing fixed usernames made the second run fail on M_USER_IN_USE, and worse,
- * inherited whatever rooms and state the previous run left behind. A unique suffix
- * keeps each run independent — the same reason the live-ux suite creates the
- * engagements it consumes.
- */
-async function register(prefix) {
-  const username = `${prefix}-${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
-  // The retry lives in scripts/lib/matrix-rate-limit.mjs — the full-loop suite needs
-  // the identical behaviour, and two copies would drift.
-  return withRateLimitRetry(async () => {
-    const res = await fetch(`${HS}/_matrix/client/v3/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username,
-        password: `pw-${username}`,
-        auth: { type: 'm.login.registration_token', token: REG_TOKEN },
-      }),
-    });
-    const body = await res.json();
-    if (res.ok) return body;
-    // Thrown with errcode attached so the shared helper can recognise the one case
-    // it retries and rethrow everything else untouched.
-    const err = new Error(`register ${username}: ${body.errcode} ${body.error}`);
-    Object.assign(err, body);
-    throw err;
-  }, `register ${username}`);
-}
+// Fresh accounts per run; the reasoning and the rate-limit retry live in the helper,
+// which the full-loop suite shares.
+const register = (prefix) => registerThrowaway(HS, REG_TOKEN, prefix);
 
 const store = (name) => new SimpleFsStorageProvider(join(mkdtempSync(join(tmpdir(), 'e2e-')), `${name}.json`));
 
