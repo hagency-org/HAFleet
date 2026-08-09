@@ -275,6 +275,12 @@ for (const r of ROUTES) {
       'readyWhy', 'needs_authWhy', 'needs_setupWhy', 'absentWhy'],
     'ob.step.': ['refuse', 'token', 'register', 'health'],
     'ob.pre.': ['codingFull', 'mcpServers', 'acpExtra', 'mcpExtra'],
+    // The provenance banner names each data slice it reports on. Declared as a
+    // family because the member list is the slice set in lib/api.js — adding a
+    // slice there without a label here now fails this check rather than printing
+    // a raw key on screen.
+    'prov.slice.': ['agents', 'presets', 'frameworks', 'alerts',
+      'engagements', 'offers', 'whitelist', 'usage', 'ceilings', 'capability', 'seats', 'detected'],
   };
   const missingFamily = [];
   for (const [prefix, members] of Object.entries(families)) {

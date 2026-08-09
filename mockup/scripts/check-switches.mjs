@@ -39,7 +39,10 @@ async function fresh({ colorScheme = 'light', path = '/resources', locale = null
   if (locale) {
     await page.evaluateOnNewDocument((l) => localStorage.setItem('hafleet.locale', l), locale);
   }
-  await page.goto(BASE + path, { waitUntil: 'networkidle0' });
+  // Fixture mode explicitly. This suite's subject is the fixture's own rendering —
+  // contract slices are empty against a live backend, so its cell-layout checks
+  // would inspect zero cells and pass or fail for reasons unrelated to layout.
+  await page.goto(`${BASE}${path}${path.includes('?') ? '&' : '?'}data=fixture`, { waitUntil: 'networkidle0' });
   // `networkidle0` only says the bytes arrived. A click before React attaches its
   // handlers does nothing, silently, and every assertion after it reads the
   // pre-click state — which passed against `npm start` and failed against
@@ -159,7 +162,7 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
     const ctx = await browser.createBrowserContext();
     const page = await ctx.newPage();
     await page.setViewport({ width: w, height: 900 });
-    await page.goto(`${BASE}/engagements`, { waitUntil: 'networkidle0' });
+    await page.goto(`${BASE}/engagements?data=fixture`, { waitUntil: 'networkidle0' });
     const over = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
     check(`/engagements does not scroll sideways at ${w}px`, !over);
     await ctx.close();
@@ -184,15 +187,32 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
   /*
    * A control that looks live and does nothing teaches the reader to distrust
    * every other control on the page.
+   *
+   * `onClick` is not the only legitimate way to handle a button. A `type="submit"`
+   * inside a form with an `onSubmit` is handled — and handled better, since Enter
+   * works too. The first version of this check counted the whitelist form's submit
+   * as dead, which is a false positive: broadened to the two real forms of handling
+   * rather than relaxed, so a genuinely inert button still fails.
    */
   for (const path of ['/resources', '/capability', '/engagements', '/resources/new']) {
     const page = await fresh({ path });
     const dead = await page.evaluate(() => {
+      const props = (el) => {
+        const key = Object.keys(el).find((k) => k.startsWith('__reactProps$'));
+        return key ? el[key] : null;
+      };
       const btns = [...document.querySelectorAll('button:not([disabled])')];
-      return btns.filter((b) => !Object.keys(b).some((k) => k.startsWith('__reactProps$')
-        && b[k]?.onClick)).length;
+      return btns.filter((b) => {
+        if (props(b)?.onClick) return false;
+        if (b.type === 'submit') {
+          const form = b.closest('form');
+          if (form && props(form)?.onSubmit) return false;
+        }
+        return true;
+      }).map((b) => b.innerText.trim().slice(0, 24));
     });
-    check(`${path}: no button shipped without a handler`, dead === 0, `${dead} dead`);
+    check(`${path}: no button shipped without a handler`, dead.length === 0,
+      dead.length ? `${dead.length} dead: ${dead.join(' | ')}` : '0 dead');
   }
 }
 
