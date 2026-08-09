@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import os from 'os';
 import {
   authModeOf, seatIdentity, buildSeats, normalizeDeclaration,
 } from '../lib/seat-store.js';
@@ -37,6 +38,95 @@ describe('seat identity', () => {
     const a = seatIdentity(withModel('a', 'claude-opus-5'));
     const b = seatIdentity(withModel('b', 'claude-sonnet-5'));
     expect(a.seatId).toBe(b.seatId);
+  });
+
+  it('treats the machine\'s own hostname and "local" as ONE server', () => {
+    /*
+     * The same machine and the same `~/.claude`. The key used to lowercase the raw
+     * string, so `local` and the hostname were two servers and two seats — and each
+     * seat declared the whole subscription quota, promising one plan's capacity out
+     * twice with nothing reporting the overlap.
+     *
+     * The alias set is lib/server-identity.js's, not this module's: `local`, the
+     * resolved hostname, and absent. It deliberately does NOT include `localhost` or
+     * `127.0.0.1`, which are not values the agent record carries — widening a helper
+     * the whole codebase shares, to satisfy a case that does not arise, would be a
+     * larger change than the defect warrants.
+     */
+    const base = seatIdentity(withModel('a', 'claude-opus-5'));
+    for (const alias of ['local', os.hostname(), '']) {
+      const other = seatIdentity({ ...withModel('b', 'claude-sonnet-5'), server: alias });
+      expect(other.seatId, `alias ${alias || '(empty)'}`).toBe(base.seatId);
+    }
+    // A genuinely different host is still a different seat, or the collapse has gone
+    // too far and two real machines would share one quota.
+    expect(seatIdentity({ ...withModel('c', 'claude-opus-5'), server: 'mini1.lan' }).seatId)
+      .not.toBe(base.seatId);
+  });
+
+  it('does not add a DAILY ceiling to a MONTHLY one', () => {
+    /*
+     * buildSeats summed every member's tokens regardless of period, so 1M/day plus
+     * 5M/month became "6M declared" and was compared against a 10M/month quota —
+     * two units added together and measured against a third. `overSubscribed`
+     * reported that as fact. Only same-period ceilings are summed now; the rest are
+     * counted so the caller can say the total is partial.
+     */
+    const seats = buildSeats({
+      agents: [
+        { ...withModel('a', 'claude-opus-5'), presetId: 'p-month' },
+        { ...withModel('b', 'claude-sonnet-5'), presetId: 'p-day' },
+      ],
+      presets: [
+        { id: 'p-month', ceiling: { tokens: 5_000_000, period: 'monthly' } },
+        { id: 'p-day', ceiling: { tokens: 1_000_000, period: 'daily' } },
+      ],
+      declarations: {},
+    });
+    expect(seats).toHaveLength(1);
+    const [seat] = seats;
+    // Both agents share one credential home, so one seat with two members.
+    expect(seat.members).toHaveLength(2);
+    // With a monthly quota declared, only the monthly ceiling counts toward it.
+    const declared = buildSeats({
+      agents: [
+        { ...withModel('a', 'claude-opus-5'), presetId: 'p-month' },
+        { ...withModel('b', 'claude-sonnet-5'), presetId: 'p-day' },
+      ],
+      presets: [
+        { id: 'p-month', ceiling: { tokens: 5_000_000, period: 'monthly' } },
+        { id: 'p-day', ceiling: { tokens: 1_000_000, period: 'daily' } },
+      ],
+      declarations: { [seat.seatId]: { quotaTokens: 10_000_000, period: 'monthly' } },
+    })[0];
+    expect(declared.declaredTokens).toBe(5_000_000);
+    expect(declared.membersWithOtherPeriod).toBe(1);
+    expect(declared.headroomTokens).toBe(5_000_000);
+    expect(declared.overSubscribed).toBe(false);
+  });
+
+  it('refuses to compare a quota that states no period', () => {
+    // "10M" against a monthly ceiling and a daily one are different claims. Picking
+    // one silently is how the incoherent sum got treated as fact.
+    const first = buildSeats({
+      agents: [{ ...withModel('a', 'claude-opus-5'), presetId: 'p' }],
+      presets: [{ id: 'p', ceiling: { tokens: 9_000_000, period: 'monthly' } }],
+      declarations: {},
+    })[0];
+    const noPeriod = buildSeats({
+      agents: [{ ...withModel('a', 'claude-opus-5'), presetId: 'p' }],
+      presets: [{ id: 'p', ceiling: { tokens: 9_000_000, period: 'monthly' } }],
+      declarations: { [first.seatId]: { quotaTokens: 1_000_000 } },
+    })[0];
+    expect(noPeriod.overSubscribed).toBeNull();
+    expect(noPeriod.headroomTokens).toBeNull();
+    // ...and with a period it compares normally, so this bounds the change.
+    const withPeriod = buildSeats({
+      agents: [{ ...withModel('a', 'claude-opus-5'), presetId: 'p' }],
+      presets: [{ id: 'p', ceiling: { tokens: 9_000_000, period: 'monthly' } }],
+      declarations: { [first.seatId]: { quotaTokens: 1_000_000, period: 'monthly' } },
+    })[0];
+    expect(withPeriod.overSubscribed).toBe(true);
   });
 
   it('separates api-key mode from the subscription', () => {

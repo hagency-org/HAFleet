@@ -339,6 +339,14 @@ const MATRIX_JOIN_BACKFILL_LIMIT_RAW = Number.parseInt(process.env.MATRIX_JOIN_B
 const MATRIX_JOIN_BACKFILL_LIMIT = Number.isFinite(MATRIX_JOIN_BACKFILL_LIMIT_RAW) && MATRIX_JOIN_BACKFILL_LIMIT_RAW > 0
   ? MATRIX_JOIN_BACKFILL_LIMIT_RAW
   : 50;
+// Bounds on walking back for the invite that delimits the window. Both are needed:
+// pages caps the requests made, events caps what a server returning huge pages can
+// cost. Exhausting either fails closed, which is the same answer as not finding it.
+const MATRIX_JOIN_BACKFILL_PAGES = Math.max(1, Number.parseInt(process.env.MATRIX_JOIN_BACKFILL_PAGES || '5', 10) || 5);
+const MATRIX_JOIN_BACKFILL_MAX_EVENTS = Math.max(
+  MATRIX_JOIN_BACKFILL_LIMIT,
+  Number.parseInt(process.env.MATRIX_JOIN_BACKFILL_MAX_EVENTS || '500', 10) || 500,
+);
 
 mkdirSync(DATA_DIR, { recursive: true });
 mkdirSync(MEDIA_DIR, { recursive: true });
@@ -3850,18 +3858,47 @@ export class MatrixBridge {
       console.warn(`Join backfill: cooling down (Matrix rate limit), skipping room ${roomId}`);
       return 0;
     }
+    /*
+     * PAGINATE UNTIL THE BOUNDARY IS FOUND, rather than give up after one page.
+     *
+     * Selection needs the bot's own invite to be IN the fetched events; without it
+     * the window cannot be delimited and nothing is routed. A single 50-event page
+     * made that outcome depend on how chatty the room had been just beforehand — a
+     * busy room silently swallowed the request the backfill exists to deliver, and
+     * "fails closed" turned into "usually fails".
+     *
+     * Bounded on both pages and events, because /messages will happily walk a room
+     * back to its creation. An exhausted budget is reported as unproven, which is
+     * the same fail-closed answer, not a guess.
+     */
     let chunk = [];
-    try {
-      const data = await this.botClient.doRequest(
-        'GET',
-        `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages`,
-        { dir: 'b', limit: MATRIX_JOIN_BACKFILL_LIMIT },
-      );
-      chunk = Array.isArray(data?.chunk) ? data.chunk : [];
-    } catch (error) {
-      rateLimitGate.observeError(error);
-      console.warn(`Join backfill failed for ${roomId}: ${error.message}`);
-      return 0;
+    let from = null;
+    let pages = 0;
+    while (pages < MATRIX_JOIN_BACKFILL_PAGES && chunk.length < MATRIX_JOIN_BACKFILL_MAX_EVENTS) {
+      if (pages > 0 && !rateLimitGate.beforeRequest()) {
+        console.warn(`Join backfill: cooling down mid-pagination in ${roomId}; stopping with what was fetched`);
+        break;
+      }
+      let data;
+      try {
+        data = await this.botClient.doRequest(
+          'GET',
+          `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages`,
+          { dir: 'b', limit: MATRIX_JOIN_BACKFILL_LIMIT, ...(from ? { from } : {}) },
+        );
+      } catch (error) {
+        rateLimitGate.observeError(error);
+        console.warn(`Join backfill failed for ${roomId} on page ${pages + 1}: ${error.message}`);
+        break;
+      }
+      const page = Array.isArray(data?.chunk) ? data.chunk : [];
+      chunk = chunk.concat(page);
+      pages += 1;
+      // The boundary is what we are paginating FOR; stop as soon as it is in hand.
+      if (pendingJoinBackfill(chunk, { botUserId: this.botUserId }).boundary !== 'unproven') break;
+      // No further pages, or the server stopped moving: walking again would repeat.
+      if (!page.length || !data?.end || data.end === from) break;
+      from = data.end;
     }
     const { events: pending, boundary } = pendingJoinBackfill(chunk, { botUserId: this.botUserId });
     let delivered = 0;
@@ -3906,13 +3943,14 @@ export class MatrixBridge {
        * room whose recent history is busier than the page.
        */
       console.warn(
-        `Join backfill ${roomId}: could not locate this invite in the last `
-        + `${MATRIX_JOIN_BACKFILL_LIMIT} events; routed nothing rather than guess a boundary`,
+        `Join backfill ${roomId}: could not locate this invite within ${chunk.length} events `
+        + `over ${pages} page(s); routed nothing rather than guess a boundary. `
+        + 'Raise MATRIX_JOIN_BACKFILL_PAGES or MATRIX_JOIN_BACKFILL_MAX_EVENTS for a busier room.',
       );
     }
     console.log(
       `Join backfill ${roomId}: fetched=${chunk.length} eligible=${pending.length} `
-      + `delivered=${delivered} already-claimed=${alreadySeen} boundary=${boundary}`,
+      + `delivered=${delivered} already-claimed=${alreadySeen} boundary=${boundary} pages=${pages}`,
     );
     return delivered;
   }

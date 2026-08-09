@@ -1,4 +1,23 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
+
+/*
+ * Configure an operator BEFORE bot-commands.js is evaluated.
+ *
+ * The module reads MATRIX_OPERATOR_MXIDS at import time, and imports are hoisted, so
+ * a plain assignment above the import would run too late — hence vi.hoisted.
+ *
+ * These tier-2 tests (`!mkgroup`, `!bindroom`) previously passed with NO acl
+ * configured, because authorizeCommand fell open in that case and handed every
+ * sender full authority. That fail-open is now a refusal, and the tests say what a
+ * real deployment says: @alice is an operator. Left unconfigured they would only
+ * have proved that an unconfigured deployment is wide open.
+ */
+vi.hoisted(() => {
+  // Both domains: this file uses matrix.test in some cases and matrix.example.test
+  // in others, and an ACL matches the full MXID.
+  process.env.MATRIX_OPERATOR_MXIDS = '@alice:matrix.test,@alice:matrix.example.test';
+});
+
 import BotCommands, { resetBotCommandsTestHooks, setBotCommandsTestHooks } from '../lib/bot-commands.js';
 
 function makeBot() {

@@ -486,11 +486,16 @@ started.
 - **Enforcement.** Ceilings and seat quotas are declarations; every surface says
   `not enforced`. Enforcement needs metering first and is a separate decision about what
   happens when a cap is hit.
-- **One flaky test, unexplained.** `tests/api-server-heartbeat-sweep.test.js` >
-  "disables maintenance mode and allows normal heartbeats again" failed in 3 of roughly ten
-  full-suite runs and passes every time in isolation — including under the environment
-  variables that looked like the cause and were not (it passes with `API_TOKEN` and
-  `HAFLEET_REQUESTER_TOKEN` both set, which is what killed that theory). It imports no
-  bridge code, so it is not fallout from the backfill work. It is recorded rather than
-  written off: a suite that is green seven times in ten is not green, and the cause is
-  currently unknown rather than benign.
+- **A cluster of load-sensitive flaky tests, cause unknown.** Across roughly twenty
+  full-suite runs, three files failed intermittently and never twice in the same run:
+  `api-server-heartbeat-sweep` ("disables maintenance mode…"), `api-server-heartbeat`
+  ("heartbeat recovery resolves only the matching server outage") and `api-messages`
+  ("backend_receipt_survives_retention", failing with `Parse Error: Expected HTTP/`).
+  All three pass every time in isolation, and none imports anything this branch
+  changed. Ruled out so far: an `API_TOKEN`/`HAFLEET_REQUESTER_TOKEN` leak from the
+  caller's shell (they pass with both set), a shared runtime directory (the harness
+  uses `mkdtempSync`, which randomises), and per-file timing constructs (one of the
+  three has none). All three go through `createBackendTestContext` and two bind real
+  ports, which is the next thing to look at. Recorded rather than written off: a suite
+  that is green four runs in five is not green, and the cause is unknown rather than
+  known-benign.
