@@ -1052,12 +1052,55 @@ suites.proxyBoundary = async () => {
     }
   }
 
-  // A remote-looking caller is refused. The nearest hop is what counts: a client can
-  // put anything at the FRONT of x-forwarded-for, but each proxy appends the peer it
-  // actually saw, so the tail is the real one.
+  /*
+   * X-FORWARDED-FOR IS NOT THE CONTROL, and the comment that used to sit here said
+   * it was: "each proxy appends the peer it actually saw, so the tail is the real
+   * one". Next does not append — it sets the header only when absent (`??=`) — so a
+   * caller that can reach the listener can put `127.0.0.1` in the tail and satisfy a
+   * last-hop check. That is the Host-header mistake a second time.
+   *
+   * The bind is the control. What is asserted here is only the residual use: a
+   * request carrying evidence that it was forwarded is refused. Both a non-loopback
+   * tail and a spoofed-loopback tail behind a real hop must fail.
+   */
   const remote = await fetch(`${BASE}/api/hafleet/agents`, { headers: { 'X-Forwarded-For': '10.1.1.5' } });
-  check('proxy refuses a caller whose nearest hop is not loopback', remote.status === 403,
+  check('proxy refuses a caller that says it was forwarded', remote.status === 403,
     `HTTP ${remote.status}`);
+  const spoofed = await fetch(`${BASE}/api/hafleet/agents`, { headers: { 'X-Forwarded-For': '10.1.1.5, 127.0.0.1' } });
+  check('and a loopback tail does not launder a remote hop in front of it',
+    spoofed.status === 403, `HTTP ${spoofed.status}`);
+
+  /*
+   * LOOPBACK IS NOT A PRINCIPAL — a cross-site write must be refused.
+   *
+   * Binding to 127.0.0.1 keeps the network out and does nothing about the operator's
+   * browser. A `text/plain` body is a CORS simple request, so any page they visit can
+   * POST here with no preflight, and the proxy relabels it application/json and
+   * attaches the operator token. One visited page could whitelist a room.
+   */
+  const crossSite = await fetch(`${BASE}/api/hafleet/whitelist`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain', 'Sec-Fetch-Site': 'cross-site', Origin: 'https://evil.example' },
+    body: JSON.stringify({ projectRoomId: '!csrf:hq.example', displayName: 'csrf' }),
+  });
+  check('proxy refuses a cross-site write', crossSite.status === 403, `HTTP ${crossSite.status}`);
+  /*
+   * Read the OUTCOME, and prove the read itself worked.
+   *
+   * The first version did `(await api('whitelist')).some?.(...)`, which returns
+   * undefined when the read fails — so a 401 on the read made this pass while
+   * proving nothing. Optional chaining on the assertion path turns any failure into
+   * a green check. The list is asserted to be a list before it is searched.
+   */
+  const { whitelist: wl } = await api('whitelist');
+  check('and the cross-site write reached nothing',
+    Array.isArray(wl) && !wl.some((w) => w.projectRoomId === '!csrf:hq.example'),
+    Array.isArray(wl) ? `${wl.length} entries, none of them the csrf room` : `whitelist unreadable: ${JSON.stringify(wl)}`);
+
+  // The allowlist must permit the action it names and no more: a room id is ONE
+  // segment, and `whitelist/.+` used to pre-authorise any nested DELETE added later.
+  const nested = await fetch(`${BASE}/api/hafleet/whitelist/a/b`, { method: 'DELETE' });
+  check('proxy refuses a nested whitelist delete', nested.status === 403, `HTTP ${nested.status}`);
 
   // And the writes it exists to permit still work, or the fix has broken the console.
   const room = '!proxyBoundaryCheck:hq.example';

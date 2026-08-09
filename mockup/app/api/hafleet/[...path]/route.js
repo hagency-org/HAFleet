@@ -71,7 +71,11 @@ const WRITES = [
   { method: 'POST', re: /^engagements\/[A-Za-z0-9._-]+\/revoke$/ },
   { method: 'PUT', re: /^offers\/[A-Za-z0-9._-]+$/ },
   { method: 'POST', re: /^whitelist$/ },
-  { method: 'DELETE', re: /^whitelist\/.+$/ },
+  // ONE segment, not `.+`. A room id is a single segment, and `.+` matched
+  // `whitelist/a/b` too — harmless against today's backend, which 404s it, but it
+  // silently pre-authorises any nested DELETE /api/whitelist/* added later. An
+  // allowlist that permits more than the action it represents is not an allowlist.
+  { method: 'DELETE', re: /^whitelist\/[^/]+$/ },
 ];
 
 function allowed(method, joined) {
@@ -157,13 +161,48 @@ function callerAllowed(req) {
     const auth = req.headers.get('authorization') ?? '';
     return auth === `Bearer ${CONSOLE_TOKEN}`;
   }
+  /*
+   * X-Forwarded-For IS NOT A CONTROL, and treating it as one was the Host-header
+   * mistake a second time. Next only sets this header when it is absent (`??=`); it
+   * does not append the socket peer. So any caller that can reach the listener can
+   * send `X-Forwarded-For: 127.0.0.1` and satisfy a check that reads the last hop.
+   *
+   * The bind is the control. This is kept only to REFUSE an obviously-forwarded
+   * request — evidence of remoteness is worth acting on, absence of it proves
+   * nothing — and it is never the thing granting access.
+   */
   const xff = req.headers.get('x-forwarded-for');
-  // No header at all: nothing in front of us, and the bind decides. Absence is not
-  // evidence of remoteness.
-  if (!xff) return true;
-  const hops = xff.split(',').map((h) => h.trim()).filter(Boolean);
-  const nearest = hops[hops.length - 1];
-  return LOOPBACK.has(nearest);
+  if (xff) {
+    const hops = xff.split(',').map((h) => h.trim()).filter(Boolean);
+    if (!hops.every((h) => LOOPBACK.has(h))) return false;
+  }
+  return true;
+}
+
+/*
+ * LOOPBACK IS NOT A PRINCIPAL.
+ *
+ * Binding to 127.0.0.1 keeps the network out; it does nothing about the operator's
+ * own browser. Any page they visit can POST to this origin, and a `text/plain` body
+ * is a CORS "simple request" — no preflight, so the browser sends it and the proxy
+ * happily relabels it `application/json` on the way out, with the operator token
+ * attached. One visited page could whitelist a room or approve an engagement.
+ *
+ * So state-changing requests must prove they came from this app. Sec-Fetch-Site is
+ * browser-set and unforgeable by page script; Origin is checked too for clients that
+ * predate it. A request with NEITHER header is not from a browser (curl, the test
+ * suite, a server-side caller) and is allowed — the bind is what bounds those.
+ */
+function sameOriginWrite(req) {
+  const site = req.headers.get('sec-fetch-site');
+  if (site) return site === 'same-origin' || site === 'none';
+  const origin = req.headers.get('origin');
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === new URL(req.url).host;
+  } catch {
+    return false;
+  }
 }
 
 async function forward(req, ctx, method) {
@@ -198,6 +237,10 @@ async function forward(req, ctx, method) {
     return Response.json({ error: `proxy refuses ${method} /${joined}` }, { status: 403 });
   }
 
+  if (method !== 'GET' && !sameOriginWrite(req)) {
+    return Response.json({ error: 'proxy refuses a cross-site write' }, { status: 403 });
+  }
+
   const qs = new URL(req.url).search;
   const headers = { Accept: 'application/json' };
   if (TOKEN) headers.Authorization = `Bearer ${TOKEN}`;
@@ -215,8 +258,21 @@ async function forward(req, ctx, method) {
      */
     const res = await fetch(`${BACKEND}/api/${outboundPath}${qs}`, {
       method, headers, body, cache: 'no-store',
+      /*
+       * Do not follow redirects. fetch's default would re-issue the request at the
+       * Location the backend names — carrying the method and the operator token — to
+       * a path the allowlist never approved. Nothing in the backend redirects today,
+       * which is exactly why this is cheap to guarantee now.
+       */
+      redirect: 'manual',
       signal: AbortSignal.timeout(8000),
     });
+    if (res.status >= 300 && res.status < 400) {
+      return Response.json(
+        { error: 'backend redirected; the proxy does not follow redirects' },
+        { status: 502 },
+      );
+    }
     const text = await res.text();
     return new Response(text, {
       status: res.status,

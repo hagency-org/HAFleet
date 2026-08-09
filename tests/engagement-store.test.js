@@ -51,10 +51,39 @@ describe('routeRequest', () => {
 
   it('falls back to approval — not rejection — when the request exceeds what is LEFT', () => {
     // The branch the design turns on. Inside the offer, over the ceiling.
+    // The rate is stated so this reaches the ceiling check: without it the request
+    // now stops at the rate cap, and this test would be passing on the wrong branch.
     const r = routeRequest({
-      request: { requestedTokens: 900_000 }, whitelisted: true, offer, remainingTokens: 400_000,
+      request: { requestedTokens: 900_000, ratePerDay: 20_000 },
+      whitelisted: true, offer, remainingTokens: 400_000,
     });
     expect(r).toEqual({ route: 'overCeiling', autoJoin: false });
+  });
+
+  /*
+   * AN UNSTATED RATE IS UNKNOWN, NOT ZERO.
+   *
+   * `offer.rateCap && request.ratePerDay && …` skipped the cap entirely when the
+   * project omitted the rate — which `!request architect 100000` does — so a
+   * published rate cap was bypassed by saying nothing, and the engagement carried no
+   * daily commitment at all. Refused for the same reason a null ceiling is: an
+   * unknown limit is where a contributor loses track of what they lent.
+   */
+  it('refuses to auto-join when a rate cap is published and the request states no rate', () => {
+    const r = routeRequest({
+      request: { requestedTokens: 100 }, whitelisted: true, offer, remainingTokens: 1e7,
+    });
+    expect(r).toEqual({ route: 'overOffer', autoJoin: false });
+    // Stating a rate inside the cap still auto-joins, so this bounds the behaviour
+    // rather than just refusing more.
+    expect(routeRequest({
+      request: { requestedTokens: 100, ratePerDay: 20_000 }, whitelisted: true, offer, remainingTokens: 1e7,
+    })).toEqual({ route: 'autoJoin', autoJoin: true });
+    // And with no rate cap published, an unstated rate is not an obstacle.
+    expect(routeRequest({
+      request: { requestedTokens: 100 }, whitelisted: true,
+      offer: { ...offer, rateCap: null }, remainingTokens: 1e7,
+    })).toEqual({ route: 'autoJoin', autoJoin: true });
   });
 
   it('refuses to auto-join against an UNKNOWN ceiling', () => {
@@ -221,6 +250,76 @@ describe('the store', () => {
   it('surfaces a persistence failure instead of reporting success', () => {
     const failing = createEngagementStore({ load: () => ({}), persist: () => false, now: () => 1 });
     expect(() => failing.addToWhitelist({ projectRoomId: ROOM })).toThrow(/persist/);
+  });
+
+  /*
+   * A FRACTIONAL CAP MUST NOT BECOME AN UNLIMITED ONE.
+   *
+   * posInt validated the raw number and floored afterwards, so 0.5 passed the
+   * "positive" check and was stored as 0 — and every later guard is `if (cap)`, which
+   * reads 0 as "no cap set". A cap of half a token silently became no cap at all.
+   * Beyond 2^53 integer arithmetic on token counts stops being exact, so that is
+   * refused rather than truncated.
+   */
+  it('refuses a cap that would floor to zero, instead of storing an unlimited one', () => {
+    const s2 = createEngagementStore({ load: () => ({}), persist: () => true, now: () => 1 });
+    for (const bad of [0.5, 0.9, Number.MAX_SAFE_INTEGER + 10]) {
+      expect(() => s2.setOffer({ role: 'architect', published: true, budgetCapPerEngagement: bad, by: 'op' }))
+        .toThrow(/positive integer/);
+    }
+    // A value above one still floors normally; only the zero-producing range is refused.
+    s2.setOffer({ role: 'architect', published: true, budgetCapPerEngagement: 1.5, by: 'op' });
+    expect(s2.listOffers().find((o) => o.role === 'architect').budgetCapPerEngagement).toBe(1);
+  });
+
+  /*
+   * A THROWN persist must roll back too.
+   *
+   * commit() was `if (save()) return; undo(); throw`, which covers an adapter that
+   * returns false and not one that THROWS — and persist is caller-supplied, so
+   * ENOSPC, EACCES or a serialisation error is ordinary. On that path the in-memory
+   * change stayed live while the caller was told the write had failed: the room was
+   * whitelisted, isWhitelisted() said so, and nothing on disk agreed.
+   */
+  it('rolls back when the persist adapter THROWS, not only when it returns false', () => {
+    const throwing = createEngagementStore({
+      load: () => ({}),
+      persist: () => { throw new Error('ENOSPC'); },
+      now: () => 1,
+    });
+    expect(() => throwing.addToWhitelist({ projectRoomId: ROOM })).toThrow(/persist/);
+    expect(throwing.isWhitelisted(ROOM)).toBe(false);
+    expect(throwing.listWhitelist()).toHaveLength(0);
+  });
+
+  /*
+   * A rollback that loses history is not a rollback.
+   *
+   * Every undo does audit.pop(), which removes the entry just added but cannot bring
+   * back the oldest entry that record() shifted off at the cap. At exactly
+   * AUDIT_LIMIT the failed write left the audit one entry SHORTER than the state it
+   * claimed to have restored.
+   */
+  it('restores an audit entry trimmed at the cap when the write then fails', () => {
+    let failNext = false;
+    let tick = 0;
+    const s2 = createEngagementStore({
+      load: () => ({}),
+      persist: () => !failNext,
+      now: () => { tick += 1; return tick; },
+    });
+    // Fill past the cap so the next record() must shift one off.
+    for (let i = 0; i < 2001; i += 1) s2.addToWhitelist({ projectRoomId: `!fill${i}:hq.example` });
+    // listAudit caps and reverses, so ask for the whole log: newest first.
+    const before = s2.listAudit({ limit: 2000 });
+    expect(before.length).toBe(2000);
+    failNext = true;
+    expect(() => s2.addToWhitelist({ projectRoomId: '!overflow:hq.example' })).toThrow(/persist/);
+    const after = s2.listAudit({ limit: 2000 });
+    // Identical, including the OLDEST entry — that is the one a bare pop() lost.
+    expect(after.length).toBe(before.length);
+    expect(after.at(-1)).toEqual(before.at(-1));
+    expect(after).toEqual(before);
   });
 });
 
