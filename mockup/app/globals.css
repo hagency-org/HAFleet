@@ -978,6 +978,11 @@ td.cap-via { color: var(--ok); }
 .fw:hover { border-color: var(--line-strong); }
 .fw.on { border-color: var(--accent); background: var(--accent-soft); }
 .fw b { font-size: 13px; }
+/* A badge longer than the card must wrap, not be clipped. `declared but not
+   launchable` overflowed the 150px column and was cut mid-word — the one badge on
+   the card whose whole job is to stop a contributor configuring something that
+   cannot start. */
+.fw .badge { white-space: normal; text-align: left; max-width: 100%; line-height: 1.35; }
 
 .field-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; flex-wrap: wrap; }
 .field-row label { min-width: 180px; font-size: 12.5px; color: var(--ink-2); }
@@ -1105,3 +1110,50 @@ h3.sub { font-size: 12.5px; font-weight: 600; margin: 2px 0 8px; color: var(--in
 .missing-why { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; }
 .missing-why b { color: var(--warn); }
 .missing-why span { color: var(--ink-dim); line-height: 1.5; }
+
+/* ── provenance banner ─────────────────────────────────────────────────────
+   Which slices of this page are live, which are contracts with no endpoint.
+   Not decoration: four slices have endpoints and five do not, so a console that
+   looked uniformly live would misrepresent five of its own numbers. Rendered as
+   a strip above the content rather than a per-cell badge, because the honest
+   unit is "this data source", not "this number". */
+.prov {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px;
+  margin: 0 0 14px; padding: 7px 11px;
+  border: 1px solid var(--line); border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-soft, transparent);
+  font-size: 11.5px; line-height: 1.5;
+}
+.prov.loading { opacity: 0.72; }
+.prov-k {
+  text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 10px; font-weight: 500; color: var(--ink-dim);
+}
+/* Colour is the second signal; each span also carries the word, so a greyscale
+   print or a reader who cannot separate the hues loses nothing. */
+.prov-live { color: var(--ok); }
+.prov-contract { color: var(--warn); }
+.prov-stale { color: var(--ink-dim); }
+
+/* Text inputs. Only the whitelist form uses one so far — the rest of the console
+   is read-and-decide rather than data entry — but it needs to match the controls
+   beside it rather than inherit the browser default. */
+.inp {
+  padding: 6px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+}
+.inp:focus-visible { outline: 2px solid var(--accent, var(--ok)); outline-offset: 1px; }
+.inp::placeholder { color: var(--ink-dim); }
+/* A slice whose endpoint failed and which has no fixture to stand in. Distinct from
+   `contract` (there is no endpoint by design) and from `fixture` (the design is being
+   shown instead) — this one means the page is showing nothing at all. */
+.prov-absent { color: var(--bad, #b3261e); }
+/* A framework with no qualifying model. Pressable-looking controls that lead
+   nowhere teach the reader to distrust the ones that work. */
+.fw-dead { opacity: 0.55; cursor: not-allowed; }

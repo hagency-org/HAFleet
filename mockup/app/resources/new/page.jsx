@@ -5,9 +5,9 @@ import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Toast, useToast } from '@/components/Toast';
 import { useT } from '@/components/Prefs';
-import {
-  FRAMEWORKS, MODEL_SELECTABLE, modelsFor, presetCommand, roleCapacity, fmtTokens,
-} from '@/lib/mock-data';
+import { presetCommand, fmtTokens } from '@/lib/mock-data';
+import { useData, Provenance } from '@/components/Data';
+import { send } from '@/lib/api';
 
 /*
  * ② 配置向导 — four steps, and three of them write a field that already exists.
@@ -27,7 +27,7 @@ import {
 const STEPS = ['framework', 'model', 'reasoning', 'budget'];
 
 /** Codex thinking levels, from the real enumeration's `reasoning` values. */
-function reasoningChoices(framework) {
+function reasoningChoices(roleCapacity, framework) {
   const seen = new Set();
   for (const tier of roleCapacity.tiers) {
     for (const c of roleCapacity.tierAccepts[tier] ?? []) {
@@ -38,7 +38,7 @@ function reasoningChoices(framework) {
 }
 
 /** Which roles this combination would qualify for, computed live from the config. */
-function qualifiesFor(framework, model, reasoning) {
+function qualifiesFor(roleCapacity, framework, model, reasoning) {
   const rank = { lightweight: 0, medium: 1, strong: 2 };
   let tier = null;
   for (const tr of roleCapacity.tiers) {
@@ -57,6 +57,11 @@ function qualifiesFor(framework, model, reasoning) {
 
 export default function WizardPage() {
   const t = useT();
+  const {
+    FRAMEWORKS, MODEL_SELECTABLE, modelsFor, roleCapacity, frameworks, detected,
+    provenance, refresh,
+  } = useData();
+  const live = provenance.presets === 'live';
   const [toast, say] = useToast();
   const [step, setStep] = useState(0);
   const [draft, setDraft] = useState({
@@ -67,16 +72,21 @@ export default function WizardPage() {
   const set = (patch) => setDraft((d) => ({ ...d, ...patch }));
   const selectable = draft.framework ? MODEL_SELECTABLE[draft.framework] : null;
   const models = draft.framework ? modelsFor(draft.framework) : [];
-  const reasonings = draft.framework ? reasoningChoices(draft.framework) : [];
+  const reasonings = draft.framework ? reasoningChoices(roleCapacity, draft.framework) : [];
   const outcome = draft.framework && draft.model
-    ? qualifiesFor(draft.framework, draft.model, draft.reasoning)
+    ? qualifiesFor(roleCapacity, draft.framework, draft.model, draft.reasoning)
     : { tier: null, roles: [] };
+  // The manifest for the chosen framework, when the live endpoint supplied one.
+  const manifest = frameworks.find((f) => f.id === draft.framework) ?? null;
+  const chosenDetect = detected.find((f) => f.id === draft.framework) ?? null;
 
   return (
     <>
       <PageHead title={t('wz.title')} sub={t('wz.sub')}>
         <Link className="btn" href="/resources">{t('wz.cancel')}</Link>
       </PageHead>
+
+      <Provenance slices={['frameworks', 'ceilings']} />
 
       {/* Progress is a list of steps with the current one marked, not a bar: the
           reader needs to know which decision they are on, not a percentage. */}
@@ -93,24 +103,100 @@ export default function WizardPage() {
         <div className="panel">
           <h3 className="sub">{t('wz.pickFramework')}</h3>
           <div className="fw-grid">
-            {FRAMEWORKS.map((f) => (
-              <button
-                key={f}
-                className={`fw${draft.framework === f ? ' on' : ''}`}
-                aria-pressed={draft.framework === f}
-                onClick={() => set({ framework: f, model: null, provider: null, reasoning: null })}
-              >
-                <b>{f}</b>
-                <span className="dim">{t('wz.nModels', { n: modelsFor(f).length })}</span>
-                {MODEL_SELECTABLE[f]?.ok === false && (
-                  <span className="badge warn-b">{t('wz.modelFixed')}</span>
-                )}
-              </button>
-            ))}
+            {FRAMEWORKS.map((f) => {
+              const mf = frameworks.find((x) => x.id === f) ?? null;
+              // The host probe, which knows whether it is actually installed here.
+              const det = detected.find((x) => x.id === f) ?? null;
+              return (
+                <button
+                  key={f}
+                  /*
+                   * Disabled when nothing can be selected for it.
+                   *
+                   * `codex-acp` has zero qualifying combinations, so choosing it led to
+                   * an empty model step with a permanently disabled Next — a dead end
+                   * reached by clicking, with nothing on screen explaining why. A
+                   * control that cannot lead anywhere should not be pressable.
+                   */
+                  className={`fw${draft.framework === f ? ' on' : ''}${modelsFor(f).length === 0 ? ' fw-dead' : ''}`}
+                  disabled={modelsFor(f).length === 0}
+                  aria-pressed={draft.framework === f}
+                  onClick={() => set({ framework: f, model: null, provider: null, reasoning: null })}
+                >
+                  <b>{mf?.displayName ?? f}</b>
+                  <span className="dim">{f}</span>
+                  <span className="dim">{t('wz.nModels', { n: modelsFor(f).length })}</span>
+                  {modelsFor(f).length === 0
+                    ? <span className="badge warn-b">{t('wz.noQualifyingModel')}</span>
+                    : MODEL_SELECTABLE[f]?.ok === false && (
+                      <span className="badge warn-b">{t('wz.modelFixed')}</span>
+                    )}
+                  {/*
+                    * NOT INSTALLED is the fact worth warning about. `launchable:false`
+                    * is not: every ACP manifest carries it, and each one's reason says
+                    * "start it with hafleet acp-up instead" — a different command, not
+                    * an inability. Warning on it told a contributor their working
+                    * framework could not run.
+                    */}
+                  {det && det.state === 'absent' && (
+                    <span className="badge warn-b">{t('wz.notInstalled')}</span>
+                  )}
+                  {det && det.state === 'needs_auth' && (
+                    <span className="badge warn-b">{t('wz.needsAuth')}</span>
+                  )}
+                </button>
+              );
+            })}
           </div>
+
           {/* Stated up front, because it changes what the next step can promise. */}
           {selectable?.ok === false && (
             <div className="notice warn">{t(selectable.why)}</div>
+          )}
+
+          {/* How it starts, from the probe — not a warning, a fact. */}
+          {chosenDetect && chosenDetect.state !== 'absent' && (
+            <div className="notice">
+              {t('wz.startsWith', { cmd: chosenDetect.startWith })}
+            </div>
+          )}
+          {chosenDetect && chosenDetect.state === 'absent' && (
+            <div className="notice warn">
+              <div><b>{t('wz.notInstalled')}</b></div>
+              <div>{t('wz.notInstalledWhy', { fix: chosenDetect.fix ?? '' })}</div>
+            </div>
+          )}
+
+          {/*
+            * THE SANDBOX BEING LENT.
+            *
+            * The design asked for this in step 1 and the fixture could not supply
+            * it: `permissionSummary` and the refused flags live in the manifests,
+            * which had no endpoint until GET /api/frameworks existed. A
+            * contributor deciding what to lend is deciding what permissions to
+            * lend, so this is a first-step fact rather than a footnote.
+            */}
+          {manifest && (
+            <dl className="kv" style={{ marginTop: 14 }}>
+              <dt>{t('wz.transport')}</dt><dd className="mono-s">{manifest.transport}</dd>
+              {manifest.permissionSummary && (
+                <>
+                  <dt>{t('wz.sandbox')}</dt>
+                  <dd>{manifest.permissionSummary}</dd>
+                </>
+              )}
+              {manifest.refusedFlags?.length > 0 && (
+                <>
+                  <dt>{t('wz.refuses')}</dt>
+                  <dd>
+                    {manifest.refusedFlags.map((fl) => (
+                      <span className="badge" key={fl}>{fl}</span>
+                    ))}
+                    <div className="dim">{t('wz.refusesNote')}</div>
+                  </dd>
+                </>
+              )}
+            </dl>
           )}
         </div>
       )}
@@ -187,10 +273,31 @@ export default function WizardPage() {
       {step === 3 && (
         <div className="panel">
           <h3 className="sub">{t('wz.setBudget')}</h3>
+          {/*
+            * The preset's NAME, which the form never asked for.
+            *
+            * A preset is reusable across agents — that is its whole point — so it
+            * needs a name a contributor recognises six weeks later. Without this
+            * field the name was auto-derived as `codex · gpt-5.6-sol`, which is the
+            * model configuration restated rather than a label: two presets on the
+            * same model at different reasoning levels would be indistinguishable in
+            * every list that shows them. The printed equivalent command already
+            * referenced a `name`, which is how the omission surfaced.
+            */}
+          <div className="field-row">
+            <label htmlFor="wz-name">{t('wz.presetName')}</label>
+            <input
+              id="wz-name" type="text" style={{ width: 240 }}
+              value={draft.name}
+              placeholder={`${draft.framework} · ${draft.model ?? ''}`}
+              onChange={(e) => set({ name: e.target.value })}
+            />
+            <span className="dim">{t('wz.presetNameHint')}</span>
+          </div>
           <div className="field-row">
             <label htmlFor="wz-tokens">{t('wz.monthlyTokens')}</label>
             <input
-              id="wz-tokens" type="number" min="0" step="100000"
+              id="wz-tokens" type="number" min="100000" step="100000"
               value={draft.tokens}
               onChange={(e) => set({ tokens: Number(e.target.value) })}
             />
@@ -241,7 +348,37 @@ export default function WizardPage() {
             {t('wz.next')}
           </button>
         ) : (
-          <button className="btn primary" onClick={() => say('ok', t('wz.wouldCreate'))}>
+          <button
+            className="btn primary"
+            onClick={async () => {
+              if (!live) return say('ok', t('wz.wouldCreate'));
+              /*
+               * The ceiling goes in the payload. It used to be omitted on purpose,
+               * because POST /api/framework-presets built its record from a closed
+               * field list and dropped it — sending it would have made the form
+               * appear to save a budget the backend never held. It persists now, so
+               * withholding it would silently discard the one field the contributor
+               * actually came to set.
+               */
+              const res = await send('framework-presets', {
+                body: {
+                  name: draft.name?.trim() || `${draft.framework} · ${draft.model}`,
+                  framework: draft.framework,
+                  provider: draft.provider,
+                  model: draft.model,
+                  reasoning: draft.reasoning,
+                  ceiling: {
+                    tokens: draft.tokens,
+                    period: 'monthly',
+                    rateCapPerDay: draft.rateCapPerDay || null,
+                  },
+                },
+              });
+              if (!res.ok) return say('fail', res.error);
+              await refresh();
+              return say('ok', t('wz.didCreate', { name: res.body?.preset?.name ?? draft.model }));
+            }}
+          >
             {t('wz.create')}
           </button>
         )}
@@ -254,7 +391,7 @@ export default function WizardPage() {
         <>
           <h2 className="sec">{t('wz.equivalent')}</h2>
           <pre className="cmd">{presetCommand(draft)}</pre>
-          <div className="notice">{t('wz.ceilingOmitted')}</div>
+          <div className="notice">{t(live ? 'wz.ceilingSaved' : 'wz.ceilingOmitted')}</div>
         </>
       )}
 

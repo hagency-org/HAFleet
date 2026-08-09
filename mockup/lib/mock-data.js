@@ -29,11 +29,14 @@
 // import and the assertion scripts load this module in plain Node. Next accepts
 // the attribute too, so one spelling serves both the bundler and the checker.
 import roleCapacity from '../../lib/role-capacity.json' with { type: 'json' };
+// The derivations are shared with the live data source rather than duplicated
+// here. See lib/derive.js: two copies of fills() would drift, and this fixture is
+// what the assertion suite checks, so a drift would be invisible.
+import { makeDerive } from './derive.js';
 
 export { roleCapacity };
 export const ROLE_KEYS = Object.keys(roleCapacity.roles);
 export const TIERS = roleCapacity.tiers;
-const TIER_RANK = { lightweight: 0, medium: 1, strong: 2 };
 
 // ── agents ───────────────────────────────────────────────────────────────────
 // The five real agents with their real transports. Three are ACP with tmux:null,
@@ -105,116 +108,6 @@ export const presets = [
   },
 ];
 
-export const presetOf = (agent) => presets.find((p) => p.id === agent?.presetId) ?? null;
-
-/*
- * Whether a model can be selected at all, per framework. Verified in
- * lib/frameworks/*.json: codex-acp accepts --model and silently ignores it,
- * hermes-acp dies on it. The wizard must not offer what cannot be delivered.
- */
-export const MODEL_SELECTABLE = {
-  claude: { ok: true },
-  codex: { ok: true },
-  octos: { ok: true },
-  'codex-acp': { ok: false, why: 'wz.model.ignored' },
-  hermes: { ok: false, why: 'wz.model.fatal' },
-};
-
-/** Model choices per framework, from the real config file's enumeration. */
-export function modelsFor(framework) {
-  const out = [];
-  for (const tier of TIERS) {
-    for (const c of roleCapacity.tierAccepts[tier] ?? []) {
-      if (c.framework !== framework) continue;
-      out.push({ ...c, tier });
-    }
-  }
-  return out;
-}
-
-export const FRAMEWORKS = [...new Set(
-  TIERS.flatMap((t) => (roleCapacity.tierAccepts[t] ?? []).map((c) => c.framework)),
-)];
-
-// ── L2: what my configuration can fill ───────────────────────────────────────
-/**
- * The entry in the real enumeration this preset matches, or null.
- *
- * Matches on (framework, model, reasoning) — reasoning is NOT optional. The same
- * model string can appear at several tiers with only the thinking level telling
- * them apart: `gpt-5.6-sol` is `strong` at high, `medium` at medium and
- * `lightweight` at low. Matching on (framework, model) alone silently promoted a
- * medium-thinking Codex agent to `strong`, which would have advertised an
- * architect the contributor never configured.
- *
- * An entry with no `reasoning` accepts any, so Claude and Octos are unaffected.
- */
-function acceptEntry(preset) {
-  for (const tier of TIERS) {
-    const hit = (roleCapacity.tierAccepts[tier] ?? []).find((c) => (
-      c.framework === preset.framework
-      && c.model === preset.model
-      && (c.reasoning === undefined || c.reasoning === preset.reasoning)
-    ));
-    if (hit) return { ...hit, tier };
-  }
-  return null;
-}
-
-export function tierOf(preset) {
-  return preset ? (acceptEntry(preset)?.tier ?? null) : null;
-}
-
-export function familyOf(preset) {
-  return preset ? (acceptEntry(preset)?.family ?? null) : null;
-}
-
-/**
- * Can this agent fill this role?
- *
- * Tier subsumption is inherited from lib/matrix-agent.js — strong ⊇ medium ⊇
- * lightweight — so an Opus agent fills every role and pays Opus rates to write
- * documentation. That trade belongs to the contributor, so `overTier` reports it
- * rather than the check refusing it.
- */
-export function fills(agent, roleKey) {
-  const preset = presetOf(agent);
-  const role = roleCapacity.roles[roleKey];
-  if (!preset) return { ok: false, why: 'cap.why.noModel' };
-  const tier = tierOf(preset);
-  if (!tier) return { ok: false, why: 'cap.why.notAccepted' };
-  if (TIER_RANK[tier] < TIER_RANK[role.defaultTier]) {
-    return { ok: false, why: 'cap.why.belowTier', tier, need: role.defaultTier };
-  }
-  return {
-    ok: true, tier, family: familyOf(preset),
-    overTier: TIER_RANK[tier] - TIER_RANK[role.defaultTier],
-  };
-}
-
-/** One entry per role: who can fill it, and what the shortfall is when nobody can. */
-export function capability() {
-  return ROLE_KEYS.map((key) => {
-    const role = roleCapacity.roles[key];
-    const rows = agents.map((a) => ({ agent: a, match: fills(a, key) }));
-    const able = rows.filter((r) => r.match.ok);
-    const families = [...new Set(able.map((r) => r.match.family))].sort();
-    return {
-      key,
-      role,
-      able,
-      unable: rows.filter((r) => !r.match.ok),
-      families,
-      // lib/matrix-agent.js:26 — review must be staffed from two different model
-      // families, so one family cannot cover both sides however many agents it has.
-      crossFamilyOk: role.crossFamily ? families.length >= 2 : true,
-      overTier: able.filter((r) => r.match.overTier > 0),
-      excluded: (roleCapacity.excluded ?? []).filter((e) => e.role === key),
-      offer: offers.find((o) => o.role === key) ?? null,
-    };
-  });
-}
-
 // ── L3: the standing offer + the whitelist ───────────────────────────────────
 /*
  * Neither record exists upstream; both are contracts.
@@ -247,8 +140,6 @@ export const whitelist = [
   { projectRoomId: '!aXbY7pQ2:hq.example', displayName: 'acme/api-service', addedAt: '9d ago', addedBy: '@me:hq.example' },
   { projectRoomId: '!kL9mN4rS:hq.example', displayName: 'acme/docs-portal', addedAt: '3d ago', addedBy: '@me:hq.example' },
 ];
-
-export const isWhitelisted = (roomId) => whitelist.some((w) => w.projectRoomId === roomId);
 
 export const ENGAGEMENT_STATES = ['pending', 'active', 'ended'];
 /** Why a request needs the owner. Null on an auto-joined engagement. */
@@ -308,37 +199,6 @@ export const engagements = [
   },
 ];
 
-/**
- * Tokens already committed against ONE agent's ceiling.
- *
- * This is the per-agent constraint: an engagement draws on one agent's ceiling,
- * so two projects wanting an architect served by the same Opus agent share that
- * 5M. Over-commitment is therefore computed per agent, and the approval form has
- * to name which agent would serve the role BEFORE the decision.
- */
-export function committed(agentName) {
-  return engagements
-    .filter((e) => e.agent === agentName && e.state === 'active')
-    .reduce((n, e) => n + (e.allocatedTokens ?? 0), 0);
-}
-
-export function remaining(agentName) {
-  const preset = presetOf(agents.find((a) => a.name === agentName));
-  if (!preset) return null;
-  return Math.max(0, preset.ceiling.tokens - committed(agentName));
-}
-
-/** Would approving this request over-commit the agent behind it? */
-export function overCommits(engagement) {
-  const left = remaining(engagement.agent);
-  if (left === null) return null;
-  return engagement.requestedTokens > left;
-}
-
-export const pendingEngagements = () => engagements.filter((e) => e.state === 'pending');
-export const activeEngagements = () => engagements.filter((e) => e.state === 'active');
-export const endedEngagements = () => engagements.filter((e) => e.state === 'ended');
-
 // ── L4: usage ────────────────────────────────────────────────────────────────
 /*
  * Task structure is real (lib/task-store.js, five statuses). Token consumption
@@ -361,9 +221,6 @@ export const usage = [
  * The preset-drift one is the sharpest — "I advertised Opus and something else
  * ran" is both a trust problem and a billing one.
  */
-export const ALERT_STATUSES = ['open', 'acknowledged', 'assigned', 'resolved', 'suppressed'];
-export const SEVERITIES = ['critical', 'warning', 'info'];
-
 export const alerts = [
   {
     id: 'al_0044', severity: 'critical', status: 'open',
@@ -412,11 +269,20 @@ export function runtimeStatusText(a) {
     : `IDLE ${fmtSpanSec(a.idleDurationSec)}`;
 }
 
-/** Tokens, readably. 5_000_000 -> "5.0M". Null stays null: a blank is not a zero. */
+/**
+ * Tokens, readably. 5_000_000 -> "5.0M". Null stays null: a blank is not a zero.
+ *
+ * Signed, because a magnitude can now legitimately be negative: seat headroom is
+ * quota minus what has been promised out of it, and over-subscription is exactly
+ * the case where that goes below zero. The first version compared `n >= 1_000_000`
+ * and so printed -4000000 raw next to four neatly formatted figures.
+ */
 export function fmtTokens(n) {
   if (n === null || n === undefined) return null;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  const sign = n < 0 ? '-' : '';
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000) return `${sign}${Math.round(abs / 1_000)}k`;
   return String(n);
 }
 
@@ -427,29 +293,23 @@ export function bySeverityThenAge(a, b) {
   return s !== 0 ? s : b.ageSec - a.ageSec;
 }
 
-export function alertCounts() {
-  const byStatus = Object.fromEntries(ALERT_STATUSES.map((s) => [s, 0]));
-  for (const a of alerts) byStatus[a.status] += 1;
-  // Severity counts the OPEN set only: mixing statuses with a severity in one
-  // strip encodes two dimensions as if they were one.
-  const bySeverity = Object.fromEntries(SEVERITIES.map((s) => [s, 0]));
-  for (const a of alerts) if (a.status === 'open') bySeverity[a.severity] += 1;
-  return { byStatus, bySeverity };
-}
+/*
+ * Everything data-dependent, bound to the fixture above.
+ *
+ * The same factory is called by components/Data.jsx with the live backend's data,
+ * so a page reads identical function names whichever source is behind it and the
+ * two cannot diverge in their reasoning about tiers, ceilings or over-commitment.
+ */
+const D = makeDerive({ roleCapacity, agents, presets, offers, whitelist, engagements, alerts });
 
-export function railCounts() {
-  const { byStatus } = alertCounts();
-  const cap = capability();
-  return {
-    agentsConfigured: agents.filter((a) => a.presetId).length,
-    rolesOffered: offers.filter((o) => o.published).length,
-    rolesFillable: cap.filter((c) => c.able.length > 0 && c.crossFamilyOk).length,
-    pending: pendingEngagements().length,
-    active: activeEngagements().length,
-    alertsOpen: byStatus.open,
-    whitelisted: whitelist.length,
-  };
-}
+export const {
+  ALERT_STATUSES, SEVERITIES,
+  presetOf, tierOf, familyOf, fills, capability, modelsFor,
+  isWhitelisted, committed, remaining, overCommits,
+  pendingEngagements, activeEngagements, endedEngagements,
+  alertCounts, railCounts,
+  MODEL_SELECTABLE, FRAMEWORKS,
+} = D;
 
 // ── the agent log Activity renders ───────────────────────────────────────────
 // Line kinds are the real ones the ACP host writes. Framework passthrough is
@@ -495,6 +355,22 @@ export function presetCommand(draft) {
     ...(draft.provider ? { provider: draft.provider } : {}),
     ...(draft.model ? { model: draft.model } : {}),
     ...(draft.reasoning ? { reasoning: draft.reasoning } : {}),
+    /*
+     * The ceiling belongs here now.
+     *
+     * It was omitted deliberately while POST /api/framework-presets dropped the
+     * field — printing it would have implied the endpoint stored it. The endpoint
+     * stores it, and the form sends it, so a command that leaves it out no longer
+     * reproduces what the form did: running the printed curl created the same preset
+     * with no budget at all.
+     */
+    ...(draft.tokens ? {
+      ceiling: {
+        tokens: draft.tokens,
+        period: 'monthly',
+        ...(draft.rateCapPerDay ? { rateCapPerDay: draft.rateCapPerDay } : {}),
+      },
+    } : {}),
   };
   return `curl -X POST ${API_BASE}/api/framework-presets`
     + ` -H 'Content-Type: application/json'`
@@ -564,10 +440,22 @@ export const detected = [
  * is. Reporting the furthest-along problem first would send someone to fix the
  * wrong thing.
  */
+/**
+ * The state of one detected framework.
+ *
+ * The HOST PROBE's own verdict wins when there is one. Recomputing it here from
+ * `onPath` / `credentialPresent` / `setup` threw away the state the probe can see
+ * and this cannot: `unusable` — on PATH, but `--version` hangs or errors. A binary
+ * in that condition was recomputed straight back to `ready` and offered for
+ * onboarding, which is the worst of the four answers to be wrong about.
+ *
+ * The recomputation remains for fixture entries, which carry no `state`.
+ */
 export function detectState(f) {
+  if (f.state) return f.state;
   if (!f.onPath) return 'absent';
   if (!f.credentialPresent) return 'needs_auth';
-  if (f.setup.some((s) => !s.ok)) return 'needs_setup';
+  if ((f.setup ?? []).some((s) => !s.ok)) return 'needs_setup';
   return 'ready';
 }
 

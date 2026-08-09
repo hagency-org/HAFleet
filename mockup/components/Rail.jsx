@@ -3,7 +3,8 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useMemo, useState } from 'react';
-import { agents, presetOf, railCounts, runtimeStatusText, tierOf } from '@/lib/mock-data';
+import { runtimeStatusText } from '@/lib/mock-data';
+import { useData } from '@/components/Data';
 import { PrefsSwitch, useT } from '@/components/Prefs';
 
 /*
@@ -61,14 +62,40 @@ export default function Rail() {
   const t = useT();
   const pathname = usePathname();
   const [filter, setFilter] = useState('');
+  /*
+   * The rail reads the same source as the page beside it.
+   *
+   * It did not, briefly, and the result was the clearest possible symptom: a live
+   * roster in the table and five fixture names in the rail, on the same screen. A
+   * navigation surface that disagrees with the content it navigates to is worse
+   * than one with no counts at all.
+   */
+  const { agents, presetOf, railCounts, tierOf } = useData();
   const counts = railCounts();
 
+  /*
+   * EVERY agent, not only the running ones.
+   *
+   * This filtered on `alive !== false`, which was invisible against a fixture where
+   * every agent is alive. Against a real backend it emptied the rail completely:
+   * registered-but-not-running is the ordinary state of a contributed agent, and
+   * the page beside it listed five while the rail said "AGENTS · 0".
+   *
+   * Hiding them is also wrong on its own terms. This is a roster of what the
+   * contributor OWNS, not of what happens to be executing; an idle agent is still
+   * lent capacity, and it is the one you would click to find out why it is idle.
+   * The row already carries its state, so nothing is lost by showing it.
+   *
+   * `agents` belongs in the dependency list. When the roster was a module-level
+   * import it never changed, so [filter] alone was harmless; now it arrives from a
+   * fetch, and omitting it froze the rail on the fixture names while the counts
+   * beside them — computed outside the memo — had already switched to live.
+   */
   const shown = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    const live = agents.filter((a) => a.alive !== false);
-    if (!q) return live;
-    return live.filter((a) => a.name.toLowerCase().includes(q));
-  }, [filter]);
+    if (!q) return agents;
+    return agents.filter((a) => a.name.toLowerCase().includes(q));
+  }, [agents, filter]);
 
   const unconfigured = agents.filter((a) => !a.presetId).length;
 
@@ -166,8 +193,15 @@ export default function Rail() {
               </li>
             );
           })}
+          {/* Two different empty states. `No agent matches ""` — which is what a
+              fresh install used to read — describes a search nobody performed. The
+              quoted term only belongs here when there IS one. */}
           {shown.length === 0 && (
-            <li className="rail-empty">{`${t('rail.noMatch')} “${filter}”`}</li>
+            <li className="rail-empty">
+              {agents.length === 0
+                ? t('rail.noAgentsAtAll')
+                : `${t('rail.noMatch')} “${filter}”`}
+            </li>
           )}
         </ul>
       </div>

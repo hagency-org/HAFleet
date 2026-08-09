@@ -5,9 +5,8 @@ import PageHead from '@/components/PageHead';
 import { Blank } from '@/components/Blank';
 import { CeilingBars, AllocationDonut, TaskBars, MissingSeries } from '@/components/Charts';
 import { useT } from '@/components/Prefs';
-import {
-  usage, engagements, roleCapacity, fmtTokens, agents, presetOf, committed, remaining,
-} from '@/lib/mock-data';
+import { fmtTokens, fmtSpanSec } from '@/lib/mock-data';
+import { useData, Provenance } from '@/components/Data';
 
 /*
  * ⑤ 用量 — L4, and the layer where this design is most honest about what it
@@ -28,10 +27,14 @@ import {
  * because conflating them would let a contributor believe an untouched engagement
  * had consumed its whole budget.
  */
-const roleName = (key) => roleCapacity.roles[key]?.displayName ?? key;
-
 export default function UsagePage() {
   const t = useT();
+  const {
+    usage, engagements, roleCapacity, agents, presetOf, committed, remaining,
+    usageLive = [], metering,
+  } = useData();
+
+  const roleName = (key) => roleCapacity.roles[key]?.displayName ?? key;
 
   const byProject = usage.reduce((acc, u) => {
     (acc[u.project] ??= []).push(u);
@@ -45,11 +48,16 @@ export default function UsagePage() {
    * knowable. The one real measurement is the task count, and the one series a
    * reader will look for (spend over time) is rendered as its own absence.
    */
-  const ceilingRows = configured.map((a) => ({
-    agent: a.name,
-    committed: committed(a.name),
-    ceiling: presetOf(a).ceiling.tokens,
-  }));
+  // Only agents whose preset carries a ceiling can be charted against one. The
+  // rest are not drawn at 0% — a bar with no denominator is not an empty bar, it
+  // is a chart that should not exist, and the panel says so when the set is empty.
+  const ceilingRows = configured
+    .filter((a) => presetOf(a)?.ceiling)
+    .map((a) => ({
+      agent: a.name,
+      committed: committed(a.name),
+      ceiling: presetOf(a).ceiling.tokens,
+    }));
 
   const donutSlices = Object.entries(
     engagements.filter((e) => e.state !== 'pending').reduce((acc, e) => {
@@ -67,6 +75,104 @@ export default function UsagePage() {
   return (
     <>
       <PageHead title={t('us.title')} sub={t('us.sub')} />
+
+      <Provenance slices={['agents', 'usage', 'engagements', 'ceilings']} />
+
+      {/*
+        * WHAT THIS DEPLOYMENT ACTUALLY MEASURES, from the backend's own declaration.
+        *
+        * `GET /api/usage` returns a `metering` block naming each signal's
+        * availability, so the page states the partition instead of the reader
+        * inferring it from which cells happen to be full. That inference is the
+        * failure mode: an empty column reads as "nothing happened" when it means
+        * "nothing was counted".
+        *
+        * Tokens is the interesting one, and it is not a missing field. HAFleet
+        * launches a CLI that talks to the provider directly, so no API response
+        * passes through it to read a usage figure from — in api-key mode as much as
+        * on a subscription. The routes that could work are listed rather than
+        * merely admitted, because a named route is a decision someone can take.
+        */}
+      {metering && (
+        <>
+          <h2 className="sec" style={{ marginTop: 0 }}>
+            {t('us.measured')}<span className="note">{t('us.measuredNote')}</span>
+          </h2>
+          <div className="cards">
+            {[
+              ['us.sigTasks', metering.tasks],
+              ['us.sigBusy', metering.busyTime],
+              ['us.sigTokens', metering.tokens],
+            ].map(([key, sig]) => (
+              <div className="card" key={key}>
+                <div className="cap">{t(key)}</div>
+                <div className={`val${sig?.available ? ' ok' : ' warn'}`} style={{ fontSize: 15 }}>
+                  {t(sig?.available ? 'us.sigYes' : 'us.sigNo')}
+                </div>
+                <span className="dim">{sig?.source ?? sig?.reason ?? ''}</span>
+              </div>
+            ))}
+          </div>
+          {metering.tokens?.candidateSources?.length > 0 && (
+            <div className="notice warn">
+              <div>{t('us.tokenRoutes')}</div>
+              <ul style={{ margin: '6px 0 0 18px' }}>
+                {metering.tokens.candidateSources.map((c) => <li key={c}>{c}</li>)}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+
+      {usageLive.length > 0 && (
+        <>
+          <h2 className="sec">
+            {t('us.byAgentLive')}<span className="note">{t('us.byAgentLiveNote')}</span>
+          </h2>
+          <div className="tbl-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>{t('col.agent')}</th><th>{t('col.model')}</th>
+                  <th>{t('col.busy')}</th><th>{t('col.tasks')}</th>
+                  <th>{t('col.ceiling')}</th><th>{t('col.used')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {usageLive.map((r) => (
+                  <tr key={r.agent}>
+                    <td><Link href={`/agents/${r.agent}`}>{r.agent}</Link><span className="dim">{r.framework}</span></td>
+                    <td>{r.model ? <span className="mono-s">{r.model}</span> : <Blank why="rs.why.noPreset" t={t} />}</td>
+                    <td>
+                      {/* Real, and zero is a real answer here: the sweep observed
+                          this agent and it was never busy. Distinct from the token
+                          column below, where nothing observed anything. */}
+                      {r.busySec > 0
+                        ? <><span className="amount">{fmtSpanSec(r.busySec)}</span><span className="dim">{r.activeNow ? 'active' : `idle ${fmtSpanSec(r.idleSec)}`}</span></>
+                        : <Blank why="us.why.noBusy" t={t} />}
+                    </td>
+                    <td>
+                      <span className="amount">{r.tasks}</span>
+                      <span className="dim">
+                        {t('us.taskBreak', {
+                          done: r.tasksByStatus?.done ?? 0,
+                          open: r.tasks - (r.tasksByStatus?.done ?? 0),
+                        })}
+                      </span>
+                    </td>
+                    <td>
+                      {r.ceilingTokens === null
+                        ? <Blank why="rs.why.noCeiling" t={t} />
+                        : <span className="amount">{fmtTokens(r.ceilingTokens)}</span>}
+                    </td>
+                    <td><Blank why="us.why.noMeter" t={t} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
 
       {/* Said once, plainly, at the top. The alternative — a dash on every row —
           reads as many small unknowns rather than one systemic one. */}
@@ -163,17 +269,28 @@ export default function UsagePage() {
               const p = presetOf(a);
               const used = committed(a.name);
               const left = remaining(a.name);
-              const pct = Math.round((used / p.ceiling.tokens) * 100);
+              const pct = p?.ceiling ? Math.round((used / p.ceiling.tokens) * 100) : null;
               return (
                 <tr key={a.name}>
                   <td><Link href={`/agents/${a.name}`}>{a.name}</Link></td>
                   <td className="mono-s">{p.model}</td>
-                  <td className="amount">{fmtTokens(p.ceiling.tokens)}</td>
+                  <td>
+                    {p?.ceiling
+                      ? <span className="amount">{fmtTokens(p.ceiling.tokens)}</span>
+                      : <Blank why="rs.why.noCeiling" t={t} />}
+                  </td>
                   <td className="amount">{fmtTokens(used)}</td>
                   <td>
-                    <span className={`amount${pct > 80 ? ' warn' : ''}`}>{fmtTokens(left)}</span>
-                    <span className="meter"><i style={{ width: `${Math.min(100, pct)}%` }} /></span>
-                    <span className="dim">{t('us.pctCommitted', { n: pct })}</span>
+                    {/* Headroom is ceiling minus committed. With no ceiling there
+                        is no headroom to report — not zero headroom, which would
+                        read as an exhausted agent. */}
+                    {left === null ? <Blank why="rs.why.noCeiling" t={t} /> : (
+                      <>
+                        <span className={`amount${pct > 80 ? ' warn' : ''}`}>{fmtTokens(left)}</span>
+                        <span className="meter"><i style={{ width: `${Math.min(100, pct)}%` }} /></span>
+                        <span className="dim">{t('us.pctCommitted', { n: pct })}</span>
+                      </>
+                    )}
                   </td>
                   <td><Blank why="us.why.noMeter" t={t} /></td>
                 </tr>

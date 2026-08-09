@@ -1,14 +1,14 @@
 'use client';
 
+import { useState } from 'react';
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Toast, useToast } from '@/components/Toast';
 import { Blank } from '@/components/Blank';
 import { useT } from '@/components/Prefs';
-import {
-  pendingEngagements, activeEngagements, endedEngagements, whitelist,
-  roleCapacity, remaining, overCommits, fmtTokens, offers, presetOf, agents,
-} from '@/lib/mock-data';
+import { fmtTokens } from '@/lib/mock-data';
+import { useData, Provenance } from '@/components/Data';
+import { send } from '@/lib/api';
 
 /*
  * ④ 接洽 — what replaces dispatch.
@@ -33,10 +33,15 @@ import {
  * not after.
  */
 
-const roleName = (key) => roleCapacity.roles[key]?.displayName ?? key;
-
-/** Why this request needs a decision instead of auto-joining. */
+/**
+ * Why this request needs a decision instead of auto-joining.
+ *
+ * Reads the data context itself rather than taking `offers` and `remaining` as
+ * props. It is a component, so a hook is legal here, and threading two more props
+ * through every call site would make the row markup harder to read for no gain.
+ */
 function RouteReason({ e, t }) {
+  const { offers, remaining } = useData();
   if (e.route === 'notWhitelisted') {
     return <span className="stranded">{t('en.route.notWhitelisted')}</span>;
   }
@@ -53,7 +58,38 @@ function RouteReason({ e, t }) {
 
 export default function EngagementsPage() {
   const t = useT();
+  const {
+    pendingEngagements, activeEngagements, endedEngagements, whitelist,
+    roleCapacity, remaining, overCommits, offers, presetOf, agents,
+    provenance, refresh,
+  } = useData();
+  const roleName = (key) => roleCapacity.roles[key]?.displayName ?? key;
   const [toast, say] = useToast();
+  const [wlRoom, setWlRoom] = useState('');
+  const [wlName, setWlName] = useState('');
+
+  /*
+   * Real writes when the endpoint is behind the page, simulated otherwise.
+   *
+   * The server re-derives the headroom and refuses an over-committing allocation
+   * itself, so the check the form performs before the click is a courtesy rather
+   * than the guard — a client-side-only limit is one any other client can ignore.
+   * A refusal is surfaced with the server's own message, which names the agent and
+   * what is left on it, because "declined" alone leaves nothing to act on.
+   */
+  const live = provenance.engagements === 'live';
+  async function act(kind, e, body) {
+    if (!live) return null;
+    const path = kind === 'verdict' ? `engagements/${e.id}/verdict`
+      : kind === 'revoke' ? `engagements/${e.id}/revoke`
+        : null;
+    if (!path) return null;
+    const res = await send(path, { body });
+    if (res.ok) await refresh();
+    else say('fail', res.error);
+    return res;
+  }
+
   const pending = pendingEngagements();
   const active = activeEngagements();
   const ended = endedEngagements();
@@ -61,6 +97,12 @@ export default function EngagementsPage() {
   return (
     <>
       <PageHead title={t('en.title')} sub={t('en.sub')} />
+
+      {/* All five slices have endpoints now. The banner stays because the page's
+          controls behave differently behind a live store — they write — and a
+          reader pressing Approve is entitled to know whether it committed
+          anything. */}
+      <Provenance slices={['agents', 'engagements', 'offers', 'whitelist', 'ceilings']} />
 
       {/* The routing stated once, at the top, because every row below is an
           instance of it and a reader who has to infer the rule from examples will
@@ -107,8 +149,16 @@ export default function EngagementsPage() {
                   </td>
                   <td>{roleName(e.role)}</td>
                   <td>
-                    <Link href={`/agents/${e.agent}`}>{e.agent}</Link>
-                    <span className="dim">{t('en.leftN', { n: fmtTokens(remaining(e.agent)) })}</span>
+                    {/* `agent` is legitimately null when no configured agent qualifies
+                        for the role. Rendering it anyway produced a link to
+                        /agents/null and a headroom of "—" with no explanation; the
+                        useful answer is that nothing can serve this request. */}
+                    {e.agent ? (
+                      <>
+                        <Link href={`/agents/${e.agent}`}>{e.agent}</Link>
+                        <span className="dim">{t('en.leftN', { n: fmtTokens(remaining(e.agent)) })}</span>
+                      </>
+                    ) : <Blank why="en.why.noQualifyingAgent" t={t} />}
                   </td>
                   <td>
                     <span className="amount">{fmtTokens(e.requestedTokens)}</span>
@@ -119,16 +169,30 @@ export default function EngagementsPage() {
                     <div className="btn-row tight">
                       <button
                         className="btn primary"
-                        onClick={() => say(
-                          over ? 'err' : 'ok',
-                          over
-                            ? t('en.wouldRefuse', { left: fmtTokens(remaining(e.agent)), agent: e.agent })
-                            : t('en.wouldApprove', { n: fmtTokens(e.requestedTokens) }),
-                        )}
+                        onClick={async () => {
+                          if (!live) {
+                            return say(over ? 'err' : 'ok', over
+                              ? t('en.wouldRefuse', { left: fmtTokens(remaining(e.agent)), agent: e.agent })
+                              : t('en.wouldApprove', { n: fmtTokens(e.requestedTokens) }));
+                          }
+                          const res = await act('verdict', e, {
+                            approve: true, allocatedTokens: e.requestedTokens,
+                          });
+                          if (res?.ok) say('ok', t('en.didApprove', { n: fmtTokens(e.requestedTokens) }));
+                          return null;
+                        }}
                       >
                         {t('en.approve')}
                       </button>
-                      <button className="btn" onClick={() => say('ok', t('en.wouldReject'))}>
+                      <button
+                        className="btn"
+                        onClick={async () => {
+                          if (!live) return say('ok', t('en.wouldReject'));
+                          const res = await act('verdict', e, { approve: false, reason: 'rejected from the console' });
+                          if (res?.ok) say('ok', t('en.didReject', { id: e.id }));
+                          return null;
+                        }}
+                      >
                         {t('en.reject')}
                       </button>
                     </div>
@@ -175,7 +239,15 @@ export default function EngagementsPage() {
                     : <span className="badge">{t('en.byApproval')}</span>}
                 </td>
                 <td>
-                  <button className="btn danger" onClick={() => say('ok', t('en.wouldRevoke', { project: e.project }))}>
+                  <button
+                    className="btn danger"
+                    onClick={async () => {
+                      if (!live) return say('ok', t('en.wouldRevoke', { project: e.project }));
+                      const res = await act('revoke', e, { reason: 'revoked from the console' });
+                      if (res?.ok) say('ok', t('en.didRevoke', { project: e.project }));
+                      return null;
+                    }}
+                  >
                     {t('en.revoke')}
                   </button>
                 </td>
@@ -196,8 +268,24 @@ export default function EngagementsPage() {
               <tr key={e.id}>
                 <td>{e.project}</td>
                 <td>{roleName(e.role)}</td>
-                <td className="amount">{fmtTokens(e.allocatedTokens)}</td>
-                <td className="dim">{t(e.endedReason)}</td>
+                {/* An engagement that ended without ever being approved never had
+                    an allocation, and a blank cell here says nothing — the rule
+                    everywhere else on this console is that an absence carries its
+                    reason. `fmtTokens(null)` returns null, which React renders as
+                    literally nothing. */}
+                <td>
+                  {e.allocatedTokens === null || e.allocatedTokens === undefined
+                    ? <Blank why="en.why.neverAllocated" t={t} />
+                    : <span className="amount">{fmtTokens(e.allocatedTokens)}</span>}
+                </td>
+                {/*
+                  * The reason may be a dictionary key (the fixture's
+                  * `en.ended.completed`) or free text a person typed at the point
+                  * of rejection. `t()` returns the key back when it does not
+                  * resolve, which printed a raw `en.ended.*` string on screen for
+                  * anything the backend recorded.
+                  */}
+                <td className="dim">{/^[a-z]+\.[a-zA-Z.]+$/.test(e.endedReason ?? '') ? t(e.endedReason) : (e.endedReason ?? '')}</td>
               </tr>
             ))}
           </tbody>
@@ -210,6 +298,56 @@ export default function EngagementsPage() {
       <hr className="divider" />
       <h2 className="sec danger-head">{t('en.wlHead')}<span className="note">{t('en.wlNote')}</span></h2>
       <div className="notice warn">{t('en.wlKeyNote')}</div>
+
+      {/*
+        * ADDING, which the page could not do at all until now — it offered only
+        * removal, so the trust list was read-mostly and the one direction that
+        * grants power had no control.
+        *
+        * The room id is typed, never picked from a list of projects that have
+        * asked: a chooser would make it trivial to trust the wrong one by clicking
+        * a familiar display name, and the display name is precisely the spoofable
+        * part. The backend validates the id shape too, so a mistyped entry is
+        * refused rather than stored as a rule that can never match.
+        */}
+      <form
+        className="btn-row"
+        style={{ margin: '10px 0 14px', flexWrap: 'wrap' }}
+        onSubmit={async (ev) => {
+          ev.preventDefault();
+          const room = wlRoom.trim();
+          if (!room) return say('fail', t('en.wlNeedRoom'));
+          if (!live) return say('ok', t('en.wouldAdd', { room }));
+          const res = await send('whitelist', {
+            body: { projectRoomId: room, displayName: wlName.trim() || null },
+          });
+          if (!res.ok) return say('fail', res.error);
+          setWlRoom('');
+          setWlName('');
+          await refresh();
+          return say('ok', t('en.didAdd', { room }));
+        }}
+      >
+        <input
+          className="inp mono-s"
+          style={{ minWidth: 260 }}
+          value={wlRoom}
+          onChange={(e) => setWlRoom(e.target.value)}
+          placeholder={t('en.wlRoomPlaceholder')}
+          aria-label={t('en.wlRoom')}
+        />
+        <input
+          className="inp"
+          style={{ minWidth: 200 }}
+          value={wlName}
+          onChange={(e) => setWlName(e.target.value)}
+          placeholder={t('en.wlNamePlaceholder')}
+          aria-label={t('en.wlName')}
+        />
+        <button className="btn" type="submit">{t('en.wlAdd')}</button>
+        <span className="dim" style={{ flexBasis: '100%' }}>{t('en.wlAddWarn')}</span>
+      </form>
+
       <div className="tbl-wrap">
         <table className="tbl">
           <thead>
@@ -222,7 +360,25 @@ export default function EngagementsPage() {
                 <td className="dim">{w.displayName}</td>
                 <td className="dim">{`${w.addedAt} · ${w.addedBy}`}</td>
                 <td>
-                  <button className="btn danger" onClick={() => say('ok', t('en.wouldRemove', { name: w.displayName }))}>
+                  <button
+                    className="btn danger"
+                    onClick={async () => {
+                      if (!live) return say('ok', t('en.wouldRemove', { name: w.displayName }));
+                      const res = await send(`whitelist/${encodeURIComponent(w.projectRoomId)}`, { method: 'DELETE' });
+                      if (!res.ok) return say('fail', res.error);
+                      await refresh();
+                      /*
+                       * The count of surviving engagements is reported, not
+                       * swallowed. Removal affects future requests only, so a
+                       * silent success would read as "that project is gone" while
+                       * its work is still running under the trust just withdrawn.
+                       */
+                      const still = res.body?.stillActive?.length ?? 0;
+                      return say('ok', still > 0
+                        ? t('en.didRemoveStillActive', { name: w.displayName ?? w.projectRoomId, n: still })
+                        : t('en.didRemove', { name: w.displayName ?? w.projectRoomId }));
+                    }}
+                  >
                     {t('en.wlRemove')}
                   </button>
                 </td>

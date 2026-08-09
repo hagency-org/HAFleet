@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Toast, useToast } from '@/components/Toast';
-import { agentLog, presets, presetOf, runtimeStatusText, tierOf, fmtTokens } from '@/lib/mock-data';
+import { agentLog, runtimeStatusText, fmtTokens } from '@/lib/mock-data';
+import { useData } from '@/components/Data';
 import { useT } from '@/components/Prefs';
 
 /*
@@ -30,6 +31,7 @@ import { useT } from '@/components/Prefs';
 const TABS = ['runtime', 'activity', 'oversight', 'profile'];
 
 export default function AgentTabs({ agent }) {
+  const { presets, presetOf, tierOf } = useData();
   const t = useT();
   const [active, setActive] = useState('activity');
   const [toast, say] = useToast();

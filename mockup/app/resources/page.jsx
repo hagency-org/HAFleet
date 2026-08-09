@@ -4,10 +4,10 @@ import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Blank } from '@/components/Blank';
 import { useT } from '@/components/Prefs';
-import {
-  agents, presetOf, tierOf, familyOf, committed, remaining, fmtTokens,
-  runtimeStatusText, presets, capability,
-} from '@/lib/mock-data';
+import { useData, Provenance } from '@/components/Data';
+// Pure formatters only: they take a number and return a string, so they have no
+// data source to belong to. Everything data-dependent comes from useData().
+import { fmtTokens, runtimeStatusText } from '@/lib/mock-data';
 
 /*
  * ① 我的资源 — L1, and the home route.
@@ -28,13 +28,34 @@ import {
  *
  * What IS real: `committed` — the sum of budgets I have allocated to active
  * engagements. I know what I promised even though I cannot see what was used.
+ *
+ * A CEILING MAY NOT EXIST. It does now — POST /api/framework-presets persists one,
+ * where it previously accepted a `ceiling` with 200 and dropped it because the
+ * record was built from a closed field list. But a preset saved before the field
+ * existed still has none, so every ceiling cell has to survive that and say which
+ * of the two absences it is: "no model chosen" or "no ceiling field upstream".
+ *
+ * AND A CEILING IS NOT A QUOTA. The seats section below is the reason: two agents
+ * on one credential home share one subscription, so two 5.0M ceilings on this page
+ * can be ten million promised out of a seat that holds six.
  */
 export default function ResourcesPage() {
   const t = useT();
+  const {
+    agents, presets, presetOf, tierOf, familyOf, committed, remaining, capability,
+    seats = [], seatKeyed,
+  } = useData();
+
   const configured = agents.filter((a) => a.presetId);
   const bare = agents.filter((a) => !a.presetId);
   const fillable = capability().filter((c) => c.able.length > 0 && c.crossFamilyOk).length;
-  const totalCeiling = configured.reduce((n, a) => n + (presetOf(a)?.ceiling.tokens ?? 0), 0);
+
+  // Summed over the presets that HAVE a ceiling, with the rest counted rather
+  // than treated as zero. A total that quietly folded in missing ceilings as 0
+  // would understate what is being lent and read as a measurement.
+  const withCeiling = configured.filter((a) => presetOf(a)?.ceiling);
+  const totalCeiling = withCeiling.reduce((n, a) => n + presetOf(a).ceiling.tokens, 0);
+  const noCeilingCount = presets.filter((p) => !p.ceiling).length;
   const totalCommitted = configured.reduce((n, a) => n + committed(a.name), 0);
 
   return (
@@ -42,6 +63,8 @@ export default function ResourcesPage() {
       <PageHead title={t('rs.title')} sub={t('rs.sub')}>
         <Link className="btn primary" href="/resources/new">{t('rs.configure')}</Link>
       </PageHead>
+
+      <Provenance slices={['agents', 'presets', 'ceilings', 'seats', 'engagements']} />
 
       {bare.length > 0 && (
         <div className="notice warn">{t('rs.bareWarn', { n: bare.length })}</div>
@@ -58,7 +81,16 @@ export default function ResourcesPage() {
         <div className="card"><div className="cap">{t('rs.cFillable')}</div><div className="val">{fillable}<small> {t('rs.ofRoles', { n: 6 })}</small></div></div>
         <div className="card">
           <div className="cap">{t('rs.cCeiling')}</div>
-          <div className="val">{fmtTokens(totalCeiling)}<small> /{t('rs.monthly')}</small></div>
+          {withCeiling.length === 0
+            ? <div className="val"><Blank why="rs.why.noCeilingSum" t={t} /></div>
+            : (
+              <div className="val">
+                {fmtTokens(totalCeiling)}<small> /{t('rs.monthly')}</small>
+                {noCeilingCount > 0 && (
+                  <span className="dim">{t('rs.ceilingPartial', { n: noCeilingCount, of: presets.length })}</span>
+                )}
+              </div>
+            )}
         </div>
         <div className="card">
           <div className="cap">{t('rs.cCommitted')}</div>
@@ -86,7 +118,10 @@ export default function ResourcesPage() {
               const tier = tierOf(p);
               const left = remaining(a.name);
               const used = committed(a.name);
-              const pct = p ? Math.round((used / p.ceiling.tokens) * 100) : 0;
+              // Percent-of-ceiling only means something when there is a ceiling.
+              // Without one there is no denominator, so the meter is not drawn at
+              // all rather than drawn empty — an empty bar reads as "0% used".
+              const pct = p?.ceiling ? Math.round((used / p.ceiling.tokens) * 100) : null;
               return (
                 <tr key={a.name}>
                   <td>
@@ -108,8 +143,13 @@ export default function ResourcesPage() {
                       ? <><span className={`tierchip ${tier}`}>{tier}</span><span className="dim"> {familyOf(p)}</span></>
                       : <Blank why="rs.why.noTier" t={t} />}
                   </td>
+                  {/* Three distinct states, and conflating any two of them would
+                      mislead: no preset at all, a preset the backend cannot store
+                      a ceiling for, and a real ceiling that nothing enforces. */}
                   <td>
-                    {p ? (
+                    {!p && <Blank why="rs.why.noPreset" t={t} />}
+                    {p && !p.ceiling && <Blank why="rs.why.noCeiling" t={t} />}
+                    {p && p.ceiling && (
                       <>
                         <span className="amount">{fmtTokens(p.ceiling.tokens)}</span>
                         {/* Stated, not implied: a ceiling nothing enforces is a
@@ -117,14 +157,16 @@ export default function ResourcesPage() {
                             a guard rail will over-commit. */}
                         {!p.ceiling.enforced && <span className="badge warn-b">{t('rs.notEnforced')}</span>}
                       </>
-                    ) : <Blank why="rs.why.noPreset" t={t} />}
+                    )}
                   </td>
                   <td>
                     {p ? (
                       <>
                         <span className="amount">{fmtTokens(used)}</span>
-                        <span className="meter"><i style={{ width: `${Math.min(100, pct)}%` }} /></span>
-                        <span className="dim">{t('rs.leftN', { n: fmtTokens(left) })}</span>
+                        {pct !== null && <span className="meter"><i style={{ width: `${Math.min(100, pct)}%` }} /></span>}
+                        {left === null
+                          ? <Blank why="rs.why.noCeiling" t={t} />
+                          : <span className="dim">{t('rs.leftN', { n: fmtTokens(left) })}</span>}
                       </>
                     ) : <Blank why="rs.why.noPreset" t={t} />}
                   </td>
@@ -138,6 +180,109 @@ export default function ResourcesPage() {
           </tbody>
         </table>
       </div>
+      {/* A table with headers and no rows states nothing. On a fresh install this
+          is the FIRST thing a contributor sees, so it has to say what is missing and
+          where the next step lives — including the part this console cannot do. */}
+      {agents.length === 0 && (
+        <div className="notice warn">
+          <div><b>{t('rs.noAgents')}</b></div>
+          <div>{t('rs.noAgentsHow')}</div>
+        </div>
+      )}
+
+      {/*
+        * SEATS — the layer under every ceiling above.
+        *
+        * A ceiling is declared per agent because that is the unit a contributor
+        * reasons about. It is not the unit the capacity was bought in: two Claude
+        * agents on one host read one credential home ($HOME is never reassigned in
+        * the launch path) and consume one authenticated subscription. So the roster
+        * above can show 5.0M twice while the seat below holds one quota, and
+        * without this section that arithmetic is invisible until a plan runs out.
+        *
+        * The quota is a DECLARATION, not a reading. Nothing can measure what a
+        * subscription includes, so an undeclared seat reports unknown rather than
+        * unlimited — and over-subscription is null in that case, because "not
+        * over-subscribed" would be the reassuring half of a coin nobody flipped.
+        */}
+      <h2 className="sec">{t('rs.seats')}<span className="note">{t('rs.seatsNote')}</span></h2>
+      <div className="notice">{t('rs.seatWhy')}</div>
+      {seats.length === 0 ? (
+        <div className="notice warn">{t('rs.seatsEmpty')}</div>
+      ) : (
+        <>
+          {seatKeyed === false && (
+            <div className="notice warn">
+              <div><b>{t('rs.seatUnkeyed')}</b></div>
+              <div>{t('rs.seatUnkeyedWhy')}</div>
+            </div>
+          )}
+          <div className="tbl-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>{t('col.seat')}</th>
+                  <th>{t('col.authMode')}</th>
+                  <th>{t('col.members')}</th>
+                  <th>{t('col.declared')}</th>
+                  <th>{t('col.quota')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {seats.map((s) => (
+                  <tr key={s.seatId}>
+                    <td>
+                      <div className="mono-s">{s.framework}</div>
+                      <span className="dim">{s.seatId}</span>
+                    </td>
+                    <td>
+                      <span className={s.authMode === 'api-key' ? 'badge' : 'badge attention'}>{s.authMode}</span>
+                      <span className="dim">{s.server}</span>
+                    </td>
+                    <td>
+                      {s.members.map((m) => (
+                        <Link className="chip-role" key={m.agent} href={`/agents/${m.agent}`}>{m.agent}</Link>
+                      ))}
+                      {s.membersWithoutCeiling > 0 && (
+                        <span className="dim">
+                          {t('rs.seatNoCeilings', { n: s.membersWithoutCeiling, of: s.members.length })}
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      <span className={`amount${s.overSubscribed ? ' warn' : ''}`}>{fmtTokens(s.declaredTokens)}</span>
+                      {s.overSubscribed && (
+                        <span className="badge warn-b">
+                          {t('rs.seatOver', { n: fmtTokens(Math.abs(s.headroomTokens)) })}
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      {s.quotaTokens === null ? <Blank why="rs.why.noQuota" t={t} /> : (
+                        <>
+                          <span className="amount">{fmtTokens(s.quotaTokens)}</span>
+                          {s.planLabel && <span className="dim">{s.planLabel}</span>}
+                          {/* "left" only reads correctly when something is left.
+                              Negative headroom is already stated as
+                              "over-subscribed by N" on the declared column, and
+                              saying "-4.0M left" beside it is the same fact
+                              phrased as its own contradiction. */}
+                          {s.headroomTokens >= 0 && (
+                            <span className="dim">{t('rs.seatHeadroom', { n: fmtTokens(s.headroomTokens) })}</span>
+                          )}
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {seats.some((s) => s.quotaTokens === null) && (
+            <div className="notice">{t('rs.why.noQuotaLong')}</div>
+          )}
+        </>
+      )}
 
       <h2 className="sec">{t('rs.presets')}<span className="note">{t('rs.presetsNote')}</span></h2>
       <div className="tbl-wrap">
@@ -162,11 +307,16 @@ export default function ResourcesPage() {
                   <td>{p.framework}</td>
                   <td className="mono-s">{p.model}</td>
                   <td>{p.reasoning ?? <Blank why="rs.why.noReasoning" t={t} />}</td>
-                  <td className="amount">{fmtTokens(p.ceiling.tokens)}</td>
                   <td>
-                    {p.ceiling.rateCapPerDay
+                    {p.ceiling
+                      ? <span className="amount">{fmtTokens(p.ceiling.tokens)}</span>
+                      : <Blank why="rs.why.noCeiling" t={t} />}
+                  </td>
+                  <td>
+                    {!p.ceiling && <Blank why="rs.why.noCeiling" t={t} />}
+                    {p.ceiling && (p.ceiling.rateCapPerDay
                       ? <span className="amount">{`${fmtTokens(p.ceiling.rateCapPerDay)}/d`}</span>
-                      : <Blank why="rs.why.noRateCap" t={t} />}
+                      : <Blank why="rs.why.noRateCap" t={t} />)}
                   </td>
                   <td>
                     {users.length
@@ -179,6 +329,12 @@ export default function ResourcesPage() {
           </tbody>
         </table>
       </div>
+      {presets.length === 0 && (
+        <div className="notice warn">
+          <div><b>{t('rs.noPresets')}</b></div>
+          <div>{t('rs.noPresetsHow')}</div>
+        </div>
+      )}
 
       <div className="notice">{t('rs.meterGap')}</div>
     </>

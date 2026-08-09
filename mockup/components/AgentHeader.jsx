@@ -3,10 +3,8 @@
 import { useState } from 'react';
 import PageHead from '@/components/PageHead';
 import { Toast, useToast } from '@/components/Toast';
-import {
-  runtimeStatusText, presetOf, tierOf, familyOf, remaining, committed, fmtTokens,
-  engagements, roleCapacity,
-} from '@/lib/mock-data';
+import { runtimeStatusText, fmtTokens } from '@/lib/mock-data';
+import { useData } from '@/components/Data';
 import { Blank } from '@/components/Blank';
 import { useT } from '@/components/Prefs';
 
@@ -25,6 +23,9 @@ import { useT } from '@/components/Prefs';
  * the confusion the old "10/sec" label caused in the first place.
  */
 export default function AgentHeader({ agent }) {
+  const {
+    presetOf, tierOf, familyOf, remaining, committed, engagements, roleCapacity,
+  } = useData();
   const t = useT();
   const [toast, say] = useToast();
   const [paused, setPaused] = useState(false);
@@ -97,14 +98,14 @@ export default function AgentHeader({ agent }) {
           <span className="af-line">{t('ag.ceiling')}</span>
           {preset ? (
             <>
-              <span className="amount">{fmtTokens(preset.ceiling.tokens)}</span>
+              <span className="amount">{fmtTokens(preset.ceiling?.tokens)}</span>
               <span className="dim">
                 {t('ag.committedLeft', {
                   used: fmtTokens(committed(agent.name)),
                   left: fmtTokens(remaining(agent.name)),
                 })}
               </span>
-              {!preset.ceiling.enforced && <span className="badge warn-b">{t('rs.notEnforced')}</span>}
+              {!preset.ceiling?.enforced && <span className="badge warn-b">{t('rs.notEnforced')}</span>}
             </>
           ) : <Blank why="ag.why.noCeiling" t={t} />}
         </div>

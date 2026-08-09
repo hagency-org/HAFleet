@@ -4,10 +4,8 @@ import { useMemo, useState } from 'react';
 import PageHead from '@/components/PageHead';
 import { Toast, useToast } from '@/components/Toast';
 import { useT } from '@/components/Prefs';
-import {
-  detected, detectState, onboardable, onboardCommand, onboardSteps, agents,
-  presets, tierOf, roleCapacity,
-} from '@/lib/mock-data';
+import { detectState, onboardable, onboardCommand, onboardSteps } from '@/lib/mock-data';
+import { useData, Provenance } from '@/components/Data';
 
 /*
  * Onboarding — detect what this host can run, then bring one up.
@@ -43,6 +41,16 @@ function StateBadge({ state, t }) {
 
 export default function OnboardPage() {
   const t = useT();
+  /*
+   * `detected` is now a REAL probe of this host (GET /api/frameworks/detect), not a
+   * table of plausible versions. The difference was not cosmetic: the fixture
+   * claimed octos 2.0.2 and hermes 0.9.4 were installed, and on this machine
+   * neither is on PATH — so the page invited a contributor to onboard two
+   * frameworks that cannot start.
+   */
+  const {
+    detected, detectCaveat, agents, presets, tierOf, roleCapacity,
+  } = useData();
   const [toast, say] = useToast();
   const [name, setName] = useState('');
   const [workspace, setWorkspace] = useState('');
@@ -55,16 +63,28 @@ export default function OnboardPage() {
   const [model, setModel] = useState('');
   const [phase, setPhase] = useState(null); // null | step id | 'done' | 'failed'
 
-  const ready = onboardable();
+  // `onboardable()` defaults its argument to the FIXTURE's list, so calling it bare
+  // measured the fixture while the table beside it was meant to show the probe.
+  const ready = onboardable(detected);
   const chosen = detected.find((f) => f.id === framework) ?? null;
   const taken = agents.some((a) => a.name === name);
   const badName = name !== '' && !/^[\w-]+$/.test(name);
   const canStart = name && !taken && !badName && workspace && chosen && phase === null;
 
+  /*
+   * `detected` belongs in the dependency list.
+   *
+   * With `[]` this captured whatever the context held on first render — the fixture
+   * default — and never recomputed when the host probe arrived. The provenance
+   * banner said LIVE while the table below it listed octos 2.0.2 and hermes 0.9.4,
+   * neither of which is installed on this machine. Identical to the bug that froze
+   * the rail on fixture names, which is the argument for treating an empty
+   * dependency array as suspect wherever the data now comes from a fetch.
+   */
   const byState = useMemo(() => {
     const order = Object.fromEntries(STATES.map((s, i) => [s, i]));
     return [...detected].sort((a, b) => order[detectState(a)] - order[detectState(b)]);
-  }, []);
+  }, [detected]);
 
   const command = onboardCommand({ name, workspace, framework, supervised, model });
 
@@ -99,6 +119,8 @@ export default function OnboardPage() {
       </PageHead>
 
       <div className="notice">{t('ob.explain')}</div>
+
+      <Provenance slices={['detected', 'agents', 'presets']} />
 
       <h2 className="sec">
         {t('ob.detected')}
