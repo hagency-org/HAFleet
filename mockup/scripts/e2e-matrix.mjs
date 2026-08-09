@@ -34,6 +34,7 @@
 import { MatrixClient, SimpleFsStorageProvider } from 'matrix-bot-sdk';
 import { withRateLimitRetry } from './lib/matrix-rate-limit.mjs';
 import { registerThrowaway } from './lib/matrix-account.mjs';
+import { purgeRoom } from './lib/matrix-teardown.mjs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -217,6 +218,18 @@ const store = (name) => new SimpleFsStorageProvider(join(mkdtempSync(join(tmpdir
   const after = ((await api('contributions')).body?.contributions ?? [])
     .filter((b) => b.projectRoomId === room);
   check('and detaches the agent', after.length === 0, JSON.stringify(after));
+
+  /*
+   * Both accounts this suite registered joined the room, and neither was leaving it.
+   * No bot account is involved here — the command handler runs in-process — so these
+   * two are the whole membership.
+   */
+  const purge = await purgeRoom(HS, room, [
+    { label: 'project', token: projectAcct.access_token },
+    { label: 'contributor', token: contribAcct.access_token },
+  ]);
+  check('the run leaves no room behind in any account', purge.failed.length === 0,
+    `left by: ${purge.left.join(', ')}${purge.failed.length ? ` | failed: ${JSON.stringify(purge.failed)}` : ''}`);
 
   console.log(`\n${failed === 0 ? `All ${ran} end-to-end checks pass.` : `${failed} of ${ran} FAILED.`}\n`);
   process.exit(failed === 0 ? 0 : 1);

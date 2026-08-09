@@ -55,6 +55,7 @@ import { chromium } from 'playwright-core';
 import { MatrixClient, SimpleFsStorageProvider } from 'matrix-bot-sdk';
 import { withRateLimitRetry } from './lib/matrix-rate-limit.mjs';
 import { registerThrowaway } from './lib/matrix-account.mjs';
+import { purgeRoom, botCredentials, roomsTouchedBy } from './lib/matrix-teardown.mjs';
 import { existsSync, mkdtempSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -72,6 +73,17 @@ const CHROME = process.env.CHROME ?? '/Applications/Google Chrome.app/Contents/M
  */
 const REG_TOKEN = process.env.MATRIX_TOKEN ?? '';
 const BOT_MXID = process.env.BOT_MXID ?? '@hafleet-bot:palpo.test';
+/*
+ * The bot's own credentials, used only to remove it from the room this run created.
+ * Optional: without them the suite still passes its assertions and reports that the
+ * bot was left behind, rather than quietly leaking a room per run.
+ */
+const BOT_USER = process.env.MATRIX_BOT_USERNAME ?? '';
+const BOT_PASSWORD = process.env.MATRIX_BOT_PASSWORD ?? '';
+// The running bridge's state file, which already holds a valid bot token. Preferred
+// over /login, which Palpo throttles hard enough to fail teardown outright.
+const BRIDGE_STATE = process.env.BRIDGE_STATE
+  ?? (process.env.HAFLEET_RUNTIME_DIR ? join(process.env.HAFLEET_RUNTIME_DIR, 'data', 'matrix', 'bridge-state.json') : '');
 /*
  * The client's state store. Defaults to the newest db_* directory macOS Robrix
  * creates, so the caller usually needs to set nothing.
@@ -297,7 +309,34 @@ function clientAlive() {
   }
   const after = ((await api('contributions')).body?.contributions ?? []).filter((b) => b.projectRoomId === room);
   check('revoking detaches the agent again', after.length === 0, JSON.stringify(after));
-  try { await user.leaveRoom(room); await user.forgetRoom(room); } catch { /* best effort */ }
+  /*
+   * Remove the room from EVERY account in it, not just this suite's.
+   *
+   * Teardown used to leave as the creating account only, so the bot stayed — and over
+   * a few dozen runs it accumulated 42 abandoned rooms. Invisible from here, because
+   * the suite checked its own account and found it clean. The failure is reported
+   * rather than swallowed: a leak nobody is told about is how it reached 42.
+   */
+  const botToken = await botCredentials(HS, BOT_USER, BOT_PASSWORD, BRIDGE_STATE);
+  const accounts = [
+    { label: 'suite', token: acct.access_token },
+    ...(botToken ? [{ label: 'bot', token: botToken }] : []),
+  ];
+  // Every room this run's identity touched, not just the one it created — the bridge
+  // opens a greeting DM with each new human, and that was leaking a room per run on
+  // its own after the project room was already being cleaned.
+  const touched = new Set([room, ...await roomsTouchedBy(HS, acct.access_token)]);
+  const failures = [];
+  for (const r of touched) {
+    // eslint-disable-next-line no-await-in-loop
+    const result = await purgeRoom(HS, r, accounts);
+    failures.push(...result.failed.map((f) => ({ room: r, ...f })));
+  }
+  check('the run leaves no room behind in any account',
+    failures.length === 0 && Boolean(botToken),
+    botToken
+      ? `purged ${touched.size} room(s)${failures.length ? ` | failed: ${JSON.stringify(failures)}` : ''}`
+      : 'no bot credentials (MATRIX_BOT_USERNAME/MATRIX_BOT_PASSWORD) — the bot stays in the room');
 
   const tail = skipped ? ` ${skipped} skipped.` : '';
   console.log(`\n${failed === 0 ? `All ${ran} full-loop checks pass.${tail}` : `${failed} of ${ran} FAILED.${tail}`}\n`);
