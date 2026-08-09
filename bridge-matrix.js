@@ -331,6 +331,22 @@ const MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW = Number.parseInt(process.env.MATRIX_
 const MATRIX_AGENT_ROOM_BACKFILL_LIMIT = Number.isFinite(MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW) && MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW > 0
   ? MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW
   : 25;
+// How far back to look when the bot joins a room, for messages sent between the
+// invite and the join. Its own knob rather than sharing the agent-room limit: this
+// one is a single fetch per join, not a periodic sweep, so it can afford a wider
+// window, and tying the two would make tuning one silently retune the other.
+const MATRIX_JOIN_BACKFILL_LIMIT_RAW = Number.parseInt(process.env.MATRIX_JOIN_BACKFILL_LIMIT || '50', 10);
+const MATRIX_JOIN_BACKFILL_LIMIT = Number.isFinite(MATRIX_JOIN_BACKFILL_LIMIT_RAW) && MATRIX_JOIN_BACKFILL_LIMIT_RAW > 0
+  ? MATRIX_JOIN_BACKFILL_LIMIT_RAW
+  : 50;
+// Lookback used only when the invite carries no usable timestamp at all. 5 minutes
+// comfortably covers invite -> join (the realtime handler is immediate and the poll
+// backstop runs on MATRIX_INVITE_POLL_MS, with rate-limit cooldowns on top) while
+// still refusing to replay a room's older history as if it had just been said.
+const MATRIX_JOIN_BACKFILL_WINDOW_MS_RAW = Number.parseInt(process.env.MATRIX_JOIN_BACKFILL_WINDOW_MS || '300000', 10);
+const MATRIX_JOIN_BACKFILL_WINDOW_MS = Number.isFinite(MATRIX_JOIN_BACKFILL_WINDOW_MS_RAW) && MATRIX_JOIN_BACKFILL_WINDOW_MS_RAW >= 0
+  ? MATRIX_JOIN_BACKFILL_WINDOW_MS_RAW
+  : 300000;
 
 mkdirSync(DATA_DIR, { recursive: true });
 mkdirSync(MEDIA_DIR, { recursive: true });
@@ -1528,6 +1544,93 @@ function roomTrustLog(action, roomId, trust, extra = '') {
   const tag = trust.trusted ? 'TRUSTED' : 'UNTRUSTED';
   const detail = extra ? ` ${extra}` : '';
   console.log(`[trust:${MATRIX_TRUST_MODE}] ${action} room=${roomId} ${tag} reason=${trust.reason}${detail}`);
+}
+
+/*
+ * Which messages in a room the bot has JUST JOINED still need routing.
+ *
+ * THE DEFECT THIS EXISTS FOR. Sync only delivers events from after the join point,
+ * and nothing backfilled a room the bot joined by invite. So anything said between
+ * the invite and the join was lost permanently — no engagement, no reply, no error.
+ * Reproduced against the live deployment: a `!request` sent at t+0 into a freshly
+ * created room, bot joined at t+2s, and 80 seconds later there was still no answer.
+ * That window is not exotic; inviting the bot and immediately stating what you want
+ * is the obvious way to use it.
+ *
+ * `backfillAgentManagedRooms()` did not cover this. It only walks rooms that already
+ * have an agent BINDING, and a project room asking for its first agent has none —
+ * the backfill was gated on the very state the dropped message was trying to create.
+ *
+ * WHY THE INVITE TIMESTAMP IS THE FLOOR. A room may carry long history the bot can
+ * now read, and replaying it would execute commands nobody just issued — including
+ * `!request`s from a previous membership if the bot was invited, left, and
+ * re-invited. Events at or after THIS invite are the ones addressed to this join.
+ *
+ * This decides only WHICH events to deliver. Trust, sender filtering and dedup stay
+ * in onRoomMessage, so a backfilled event is gated exactly like a synced one.
+ */
+/*
+ * When the bot was invited — the floor for what a fresh join owes a reply to.
+ *
+ * WHY THIS IS ITS OWN FUNCTION, AND NOT `inviteEvent.origin_server_ts`. That was the
+ * first attempt and it silently discarded every message the fix exists for. The
+ * invite handed to `room.invite` comes from sync's `invite_state`, which is STRIPPED
+ * state: it carries type, sender, state_key and content, and no `origin_server_ts` at
+ * all. So the timestamp was always absent, the fallback was `Date.now()`, and a floor
+ * of "now" sits AFTER the pre-join message. The live log said it plainly once it was
+ * asked to — `fetched=10 eligible=0` on three consecutive runs.
+ *
+ * Four sources, most precise first. `unsigned.age` is the one that actually fires for
+ * a stripped invite, and matrix-bot-sdk reads the same field to pick between
+ * competing invites, so it is reliably present.
+ */
+export function resolveJoinBackfillFloor(chunk, {
+  botUserId = null, inviteEvent = null, now = Date.now(), windowMs = 0,
+} = {}) {
+  const exact = Number(inviteEvent?.origin_server_ts) || 0;
+  if (exact > 0) return { floor: exact, source: 'invite-ts' };
+
+  const age = Number(inviteEvent?.unsigned?.age) || 0;
+  // Guard against a nonsensical age putting the floor in the future.
+  if (age > 0 && age <= now) return { floor: now - age, source: 'invite-age' };
+
+  // The invite is also a real timeline event, so the fetch we already did usually
+  // contains it with a true timestamp.
+  for (const event of Array.isArray(chunk) ? chunk : []) {
+    if (event?.type !== 'm.room.member') continue;
+    if (event.state_key !== botUserId) continue;
+    if (event.content?.membership !== 'invite') continue;
+    const ts = Number(event.origin_server_ts) || 0;
+    if (ts > 0) return { floor: ts, source: 'timeline-invite' };
+  }
+
+  /*
+   * Last resort: a bounded lookback. Deliberately NOT "everything" — a room can carry
+   * long history the bot may now read, and replaying it would run commands nobody
+   * just issued. Deliberately not "nothing" either, which is the bug this replaces.
+   */
+  return { floor: Math.max(0, now - windowMs), source: 'window' };
+}
+
+export function pendingJoinBackfill(chunk, { inviteTs = 0, botUserId = null, seen = null } = {}) {
+  const events = Array.isArray(chunk) ? chunk : [];
+  const floor = Number(inviteTs) || 0;
+  const out = [];
+  for (const event of events) {
+    if (event?.type !== 'm.room.message') continue;
+    if (!event.event_id) continue;
+    // The bot's own messages would loop, and its join notice is not a command.
+    if (botUserId && event.sender === botUserId) continue;
+    const ts = Number(event.origin_server_ts || 0);
+    // No timestamp means the floor cannot be honoured, and replaying an event that
+    // might predate the invite is worse than missing it.
+    if (!ts || ts < floor) continue;
+    if (seen && seen.has(event.event_id)) continue;
+    out.push(event);
+  }
+  // /messages?dir=b returns newest first; commands must run in the order they were
+  // said, so oldest first.
+  return out.sort((a, b) => Number(a.origin_server_ts) - Number(b.origin_server_ts));
 }
 
 function escapeHtml(value) {
@@ -3706,12 +3809,77 @@ export class MatrixBridge {
     try {
       await this.botClient.joinRoom(roomId);
       if (trust.trusted) markRoomTrusted(roomId, { inviter });
-      return { accepted: true, reason: trust.reason, inviter };
+      // Anything said between the invite and this join never arrives by sync. Awaited
+      // rather than fired off, so a caller that reports "accepted" has already
+      // delivered what was waiting — pollBotInvites and the realtime handler both
+      // rely on that to avoid racing each other into the same room.
+      const backfilled = await this.backfillJoinedRoom(roomId, inviteEvent);
+      return { accepted: true, reason: trust.reason, inviter, backfilled };
     } catch (error) {
       rateLimitGate.observeError(error);
       console.warn(`Failed to join room ${roomId}: ${error.message}`);
       return { accepted: false, reason: 'join_failed', inviter };
     }
+  }
+
+  /**
+   * Deliver messages that arrived in a just-joined room before the join landed.
+   *
+   * See pendingJoinBackfill() for why this is needed and why the invite timestamp is
+   * the floor. Failure here is logged and swallowed: the join itself succeeded, and
+   * turning a missed backfill into a failed join would take the bot out of a room it
+   * is now legitimately in.
+   */
+  async backfillJoinedRoom(roomId, inviteEvent = null) {
+    if (!rateLimitGate.beforeRequest()) {
+      console.warn(`Join backfill: cooling down (Matrix rate limit), skipping room ${roomId}`);
+      return 0;
+    }
+    let chunk = [];
+    try {
+      const data = await this.botClient.doRequest(
+        'GET',
+        `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages`,
+        { dir: 'b', limit: MATRIX_JOIN_BACKFILL_LIMIT },
+      );
+      chunk = Array.isArray(data?.chunk) ? data.chunk : [];
+    } catch (error) {
+      rateLimitGate.observeError(error);
+      console.warn(`Join backfill failed for ${roomId}: ${error.message}`);
+      return 0;
+    }
+    const { floor: inviteTs, source: floorSource } = resolveJoinBackfillFloor(chunk, {
+      botUserId: this.botUserId, inviteEvent, windowMs: MATRIX_JOIN_BACKFILL_WINDOW_MS,
+    });
+    const pending = pendingJoinBackfill(chunk, { inviteTs, botUserId: this.botUserId });
+    let delivered = 0;
+    let alreadySeen = 0;
+    for (const event of pending) {
+      // onRoomMessage dedups by event id, so an event the sync loop also delivers is
+      // handled once whichever path gets there first.
+      if (this.isDuplicateMatrixEvent(event.event_id)) { alreadySeen += 1; continue; }
+      try {
+        await this.onRoomMessage(roomId, event);
+        delivered += 1;
+      } catch (error) {
+        console.warn(`Join backfill: failed to route ${event.event_id} in ${roomId}: ${error.message}`);
+      }
+    }
+    /*
+     * Logged on EVERY join, including the empty case.
+     *
+     * This first only logged when it delivered something, which made a no-op
+     * indistinguishable from not having run — and that ambiguity immediately misled
+     * me: a pre-join `!request` was answered, no backfill line appeared, and the
+     * obvious reading ("the fix worked") was wrong. Sync had won the race and the
+     * backfill had correctly deduped to zero. Whether this path ran, and what it
+     * decided, has to be visible or the live behaviour cannot be attributed.
+     */
+    console.log(
+      `Join backfill ${roomId}: fetched=${chunk.length} eligible=${pending.length} `
+      + `delivered=${delivered} already-synced=${alreadySeen} floor=${floorSource}`,
+    );
+    return delivered;
   }
 
   installBotInviteHandler() {
