@@ -10282,6 +10282,36 @@ async function probeFramework(f) {
   }
 
   /*
+   * FOR AN ACP FRAMEWORK, `--version` IS NOT EVIDENCE IT CAN START.
+   *
+   * The probe used to stop above, so a binary that answered `--version` was
+   * reported `state: ready` — and octos 0.1.1 on a fresh machine did exactly that,
+   * then `hafleet acp-up` died with `unrecognized subcommand 'acp'`. The console
+   * had told the operator the framework was ready for a launch path the installed
+   * version does not have. This manifest's own note says it was verified against
+   * 2.0.2; nothing checked that.
+   *
+   * So the subcommand the launch path actually uses is probed too. `--help` on it
+   * is cheap, needs no credentials, starts no session and reads no stdin. Any
+   * non-zero exit means the launch would fail, which is the thing `ready` claims
+   * will not happen.
+   */
+  const acpSubcommand = f.transport === 'acp' ? (f.launch?.acpArgs ?? [])[0] : null;
+  if (onPath && !probeError && acpSubcommand) {
+    try {
+      await execFileAsync(command, [acpSubcommand, '--help'], {
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      const detail = String(e?.stderr || e?.message || '').split('\n')[0].slice(0, 100);
+      probeError = e?.killed
+        ? `\`${command} ${acpSubcommand}\` probe timed out`
+        : `installed ${command} has no working \`${acpSubcommand}\` subcommand, which is how hafleet starts it: ${detail}`;
+    }
+  }
+
+  /*
    * Where a login would live. Reported as a path relative to home so the response
    * never contains the operator's absolute directory layout.
    */
@@ -10441,7 +10471,25 @@ app.get('/api/capability', requireBearer, (_req, res) => {
       crossFamily: def.crossFamily === true,
       crossFamilyOk: def.crossFamily === true ? families.length >= 2 : true,
       families,
-      fillable: able.length,
+      /*
+       * FILLABLE MEANS STAFFABLE, NOT "MEETS THE TIER BAR".
+       *
+       * This was `able.length`, which ignores the cross-family rule right above it —
+       * so a deployment with one model family reported `review` as
+       * `fillable: 1, crossFamilyOk: false`, two fields of the same object
+       * contradicting each other. Review needs two different families, so one agent
+       * cannot staff it however strong it is, and a caller reading the headline
+       * number was told it could.
+       *
+       * Found on a clean single-agent install; a mixed-family deployment never shows
+       * it, which is why it survived. The console already gated on both
+       * (mockup/lib/derive.js:170) — this makes the API agree with the surface that
+       * was getting it right.
+       *
+       * `able` still lists every agent that clears the tier, so nothing is hidden:
+       * the two fields now answer different questions instead of the same one twice.
+       */
+      fillable: (def.crossFamily === true && families.length < 2) ? 0 : able.length,
       able,
       unable,
       overTier: able.filter((r) => r.overTier > 0).length,
