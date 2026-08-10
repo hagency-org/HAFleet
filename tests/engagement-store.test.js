@@ -273,6 +273,91 @@ describe('the store', () => {
   });
 
   /*
+   * ENDED ENGAGEMENTS ARE BOUNDED, LIVE ONES ARE NOT.
+   *
+   * A 48-cycle soak took engagements.json from 3.4kB to 71.8kB, strictly linear with
+   * no plateau — and the file is rewritten on every mutation, so every later write
+   * pays for the accumulation. The audit log has had a cap since it was written; the
+   * engagement list never got one, and no suite noticed because they all tear their
+   * own records down.
+   */
+  describe('the ended-engagement cap', () => {
+    /**
+     * Create and REJECT `n` engagements so they land in `ended`.
+     *
+     * Rejection rather than approve-then-revoke: it reaches `ended` in one decision
+     * and exercises the other of the two prune sites, so a cap wired into only the
+     * revoke path would fail here.
+     */
+    const churn = (store, n, roomPrefix = '!churn') => {
+      for (let i = 0; i < n; i += 1) {
+        const room = `${roomPrefix}${i}:hq.example`;
+        store.addToWhitelist({ projectRoomId: room });
+        const e = store.createRequest({
+          project: `p${i}`, projectRoomId: room, role: 'coding',
+          requester: '@r:hq.example', requestedTokens: 10, agent: 'a1', remainingTokens: null,
+        });
+        store.decide({ engagementId: e.id, approve: false, reason: 'churn' });
+      }
+    };
+
+    it('keeps live engagements however many there are, and caps ended ones', () => {
+      let tick = 0;
+      const s2 = createEngagementStore({ load: () => ({}), persist: () => true, now: () => { tick += 1; return tick; } });
+      churn(s2, 520);
+      const ended = s2.list({ state: 'ended' });
+      expect(ended.length).toBeLessThanOrEqual(500);
+      // And the ones kept are the NEWEST: dropping recent history would make the
+      // console show a stale tail of a busy deployment.
+      const ids = ended.map((e) => e.id).sort();
+      expect(ids[ids.length - 1]).toBeTruthy();
+    });
+
+    it('never prunes pending or active engagements', () => {
+      let tick = 0;
+      const s2 = createEngagementStore({ load: () => ({}), persist: () => true, now: () => { tick += 1; return tick; } });
+      churn(s2, 505);
+      // One live engagement, created after the cap is already exceeded.
+      s2.addToWhitelist({ projectRoomId: '!live:hq.example' });
+      const live = s2.createRequest({
+        project: 'live', projectRoomId: '!live:hq.example', role: 'coding',
+        requester: '@r:hq.example', requestedTokens: 10, agent: 'a1', remainingTokens: null,
+      });
+      churn(s2, 5, '!more');
+      expect(s2.get(live.id)).toBeTruthy();
+      expect(s2.get(live.id).state).toBe('pending');
+    });
+
+    it('restores pruned records when the write then fails', () => {
+      /*
+       * The same hazard the audit trim had: an undo that only reverses the visible
+       * mutation cannot bring back what the prune removed, so a failed write would
+       * leave the store SHORTER than the state it claimed to have restored.
+       */
+      let failNext = false;
+      let tick = 0;
+      const s2 = createEngagementStore({
+        load: () => ({}), persist: () => !failNext, now: () => { tick += 1; return tick; },
+      });
+      churn(s2, 505);
+      const before = s2.list().length;
+      s2.addToWhitelist({ projectRoomId: '!fail:hq.example' });
+      const e = s2.createRequest({
+        project: 'fail', projectRoomId: '!fail:hq.example', role: 'coding',
+        requester: '@r:hq.example', requestedTokens: 10, agent: 'a1', remainingTokens: null,
+      });
+      failNext = true;
+      // Rejection is the transition that both ends the engagement and prunes, so it
+      // is the one whose failed write must restore what the prune removed.
+      expect(() => s2.decide({ engagementId: e.id, approve: false, reason: 'boom' }))
+        .toThrow(/persist/);
+      const after = s2.list().length;
+      expect(after).toBe(before + 1); // the new one survives, nothing else was lost
+      expect(s2.get(e.id).state).not.toBe('ended');
+    });
+  });
+
+  /*
    * A THROWN persist must roll back too.
    *
    * commit() was `if (save()) return; undo(); throw`, which covers an adapter that

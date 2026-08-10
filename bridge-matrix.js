@@ -602,6 +602,37 @@ function humanUserId(name) {
 }
 
 /** DM key: federated users key by full MXID, local users by localpart. */
+/*
+ * Which of the bot's DM rooms are DEAD, and therefore reapable.
+ *
+ * WHY THIS EXISTS. The bridge opens a DM with each new human it discovers and never
+ * closes one. `ensureBotDmRoom` reuses per human, so it is one room per person rather
+ * than per encounter — but nothing removes the room when the person is gone, and
+ * `botDmRooms` grows beside it. A 50-minute soak that registered 48 throwaway
+ * projects left the bot sitting alone in 52 DMs, and in production that is one
+ * permanent room per user who ever appeared.
+ *
+ * THE DISTINCTION THAT MATTERS: a DM the human has not ACCEPTED yet also shows the
+ * bot as the only joined member. Reaping on "nobody else joined" would cancel every
+ * greeting still in flight — the invitation would vanish before it was seen. Only
+ * membership `leave` (or `ban`) means gone. Absence of a join is not evidence of
+ * departure, it is usually evidence of not having looked yet.
+ *
+ * @param dmRooms   state.botDmRooms — { humanKey: roomId }
+ * @param membership { roomId: 'join' | 'invite' | 'leave' | 'ban' | null } for the
+ *                   counterpart, as read from the room. `null` means unknown, which
+ *                   is never treated as gone.
+ */
+export function reapableBotDms(dmRooms = {}, membership = {}) {
+  const out = [];
+  for (const [humanKey, roomId] of Object.entries(dmRooms || {})) {
+    if (typeof roomId !== 'string' || !roomId) continue;
+    const state = membership[roomId] ?? null;
+    if (state === 'leave' || state === 'ban') out.push({ humanKey, roomId, reason: state });
+  }
+  return out;
+}
+
 function humanDmKey(name) {
   if (typeof name === 'string' && name.startsWith('@') && name.includes(':')) {
     const homeserver = name.slice(name.indexOf(':') + 1);
@@ -2644,6 +2675,9 @@ export class MatrixBridge {
     await this.backfillAgentManagedRooms();
     await this.syncApprovalBindings();
     setInterval(() => this.scanJoinedRooms(), MATRIX_ROOM_SCAN_POLL_MS);
+    // Reaped on the room-scan cadence rather than its own timer: it walks the same
+    // rooms, on a deliberately slow interval, behind the same rate-limit gate.
+    setInterval(() => this.reapDeadBotDms(), MATRIX_ROOM_SCAN_POLL_MS);
     // Task 8: standalone doctor's business-health record. Independent of the room-scan
     // timer above (see BRIDGE_HEALTH_WRITE_INTERVAL_MS) so the record's freshness isn't
     // coupled to how MATRIX_ROOM_SCAN_POLL_MS happens to be tuned.
@@ -2752,6 +2786,67 @@ export class MatrixBridge {
 
       // This is an ungreeted human — create DM and greet
       await this.greetHuman(name, user.user_id);
+    }
+  }
+
+  /**
+   * Leave DM rooms whose human has gone, and forget the state that pointed at them.
+   *
+   * See reapableBotDms() for what counts as gone and why a pending invitation does
+   * not. Failure is logged and skipped: a DM that cannot be left is a room to try
+   * again next scan, not a reason to abort the sweep — and every removal is reported,
+   * because the leak this fixes was invisible precisely because nothing said anything.
+   */
+  async reapDeadBotDms() {
+    if (this._reapingBotDms) return 0;
+    const dmRooms = state.botDmRooms || {};
+    const roomIds = Object.values(dmRooms).filter((r) => typeof r === 'string' && r);
+    if (roomIds.length === 0) return 0;
+    this._reapingBotDms = true;
+    try {
+      const membership = {};
+      for (const roomId of roomIds) {
+        if (!rateLimitGate.beforeRequest()) return 0;
+        try {
+          const members = await this.botClient.getRoomMembers(roomId, undefined, ['leave', 'ban']);
+          // Anyone but the bot whose membership has ended. getRoomMembers with a
+          // membership filter returns only those, so presence here IS departure.
+          const gone = (members ?? []).some((m) => {
+            const who = m?.membershipFor ?? m?.stateKey ?? m?.state_key;
+            return who && who !== this.botUserId;
+          });
+          if (gone) {
+            const joined = await this.botClient.getJoinedRoomMembers(roomId);
+            // Only reap when nobody else is still IN the room: a DM that gained a
+            // second human is not dead just because the first one left.
+            const others = (joined ?? []).filter((m) => m !== this.botUserId);
+            membership[roomId] = others.length === 0 ? 'leave' : null;
+          }
+        } catch (error) {
+          rateLimitGate.observeError(error);
+        }
+      }
+      const dead = reapableBotDms(dmRooms, membership);
+      let reaped = 0;
+      for (const { humanKey, roomId, reason } of dead) {
+        try {
+          await this.botClient.leaveRoom(roomId);
+          try { await this.botClient.forgetRoom(roomId); } catch { /* older homeservers */ }
+          delete state.botDmRooms[humanKey];
+          if (Array.isArray(state.greetedHumans)) {
+            state.greetedHumans = state.greetedHumans.filter((h) => h !== humanKey);
+          }
+          reaped += 1;
+          console.log(`Reaped dead bot DM for ${humanKey} (${reason}): ${roomId}`);
+        } catch (error) {
+          rateLimitGate.observeError(error);
+          console.warn(`Could not reap bot DM ${roomId} for ${humanKey}: ${error.message}`);
+        }
+      }
+      if (reaped > 0) saveState();
+      return reaped;
+    } finally {
+      this._reapingBotDms = false;
     }
   }
 
