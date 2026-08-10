@@ -473,7 +473,35 @@ have a top-level catch. Without it a rate-limited `createRoom` exited on an unha
 rejection printing no summary line at all — a failed run that read as a run that never
 started.
 
-### 7.6 Still open
+### 7.6 What a clean host exposed that the development machine could not
+
+The whole thing was stood up from nothing on a second Mac (clone, install, fresh
+secrets, fresh runtime dir, fresh Matrix accounts) and the documented onboarding
+process walked end to end with a real Octos agent. Four defects surfaced, and **none
+of them reproduce on the machine this was built on**. That is the finding worth
+keeping: every one needed a condition the developer's box happened not to have.
+
+| Defect | The condition that hides it |
+|---|---|
+| `fillable` contradicted `crossFamilyOk` on the same object — a one-family fleet reported `review: {fillable: 1, crossFamilyOk: false}` | a mixed-family fleet |
+| `state: ready` for a framework that cannot start — the probe ran `--version` only, so octos 0.1.1 passed and `acp-up` then died on `unrecognized subcommand 'acp'` | a current binary |
+| the preset's provider never reached the process — a preset saying `moonshot` launched a **deepseek** client and died on `DEEPSEEK_API_KEY`, because octos resolves the provider from its own config and hafleet passed none | a local octos config that agrees with the preset |
+| a running ACP agent reported **offline** — `syncAcpAgentLiveness` set `agent.online` on the record, but `serializeAgent` reads the state machine, which only the tmux sweep updated | never having launched an ACP agent and looked at the console |
+
+The last one is the sharpest: `agents.json` said `online: true` and the API said
+`online: false`, indefinitely, for a healthy agent serving a live binding. Two
+sources of truth where only one is ever read. Its test now asserts the two AGREE in
+both directions, so a change that fixes one side and not the other fails whichever
+side it breaks.
+
+Two bootstrap gaps also showed up, neither a bug but both undocumented: the first
+binding needs `HAFLEET_OWNER_DM_ROOM` as well as `HAFLEET_OWNER_MXID` (without it
+approval goes `active` with `bound: false` — loudly, which is the behaviour §7.4
+built), and `credentialPresent: true` means only that the credential DIRECTORY
+exists. On the clean host that directory was root-owned and empty, and the framework
+was reported ready three separate times before a launch proved otherwise.
+
+### 7.7 Still open
 
 - **Token metering itself.** P3 shipped the partition, not the measurement. Nothing here
   counts a token, and the console says so on every affected cell.
