@@ -618,17 +618,33 @@ function humanUserId(name) {
  * membership `leave` (or `ban`) means gone. Absence of a join is not evidence of
  * departure, it is usually evidence of not having looked yet.
  *
+ * TWO OUTCOMES, NOT ONE. A room the bot is still in but the human has left needs
+ * leaving. A room the bot is ALREADY out of needs nothing but the stale pointer
+ * removed — and those entries were accumulating unnoticed, because the first version
+ * tried to read the room's joined members, got M_FORBIDDEN (the bot is not in it),
+ * treated that as an unknown, and kept the entry forever. Verified against the live
+ * homeserver: `/members?membership=leave` still answers for a room you have left,
+ * `/joined_members` does not.
+ *
+ * `bot-absent` is durable — not a member is not a transient condition — whereas a
+ * rate limit or a network error leaves the entry `null` and is skipped, because a
+ * failed lookup must never become a deletion.
+ *
  * @param dmRooms   state.botDmRooms — { humanKey: roomId }
- * @param membership { roomId: 'join' | 'invite' | 'leave' | 'ban' | null } for the
- *                   counterpart, as read from the room. `null` means unknown, which
- *                   is never treated as gone.
+ * @param membership { roomId: 'join' | 'invite' | 'leave' | 'ban' | 'bot-absent' |
+ *                   null }. `null` means unknown, which is never treated as gone.
+ * @returns [{ humanKey, roomId, reason, action: 'leave' | 'drop' }]
  */
 export function reapableBotDms(dmRooms = {}, membership = {}) {
   const out = [];
   for (const [humanKey, roomId] of Object.entries(dmRooms || {})) {
     if (typeof roomId !== 'string' || !roomId) continue;
     const state = membership[roomId] ?? null;
-    if (state === 'leave' || state === 'ban') out.push({ humanKey, roomId, reason: state });
+    if (state === 'leave' || state === 'ban') {
+      out.push({ humanKey, roomId, reason: state, action: 'leave' });
+    } else if (state === 'bot-absent') {
+      out.push({ humanKey, roomId, reason: state, action: 'drop' });
+    }
   }
   return out;
 }
@@ -2816,11 +2832,29 @@ export class MatrixBridge {
             return who && who !== this.botUserId;
           });
           if (gone) {
-            const joined = await this.botClient.getJoinedRoomMembers(roomId);
-            // Only reap when nobody else is still IN the room: a DM that gained a
-            // second human is not dead just because the first one left.
-            const others = (joined ?? []).filter((m) => m !== this.botUserId);
-            membership[roomId] = others.length === 0 ? 'leave' : null;
+            try {
+              const joined = await this.botClient.getJoinedRoomMembers(roomId);
+              // Only reap when nobody else is still IN the room: a DM that gained a
+              // second human is not dead just because the first one left.
+              const others = (joined ?? []).filter((m) => m !== this.botUserId);
+              membership[roomId] = others.length === 0 ? 'leave' : null;
+            } catch (error) {
+              /*
+               * M_FORBIDDEN here means the BOT is not in the room, which is durable
+               * and makes the state entry a pointer to nothing. Anything else — a
+               * rate limit, a network failure — is transient and left unknown.
+               *
+               * Swallowing this uniformly is what let 50 stale entries survive a
+               * reaper that was otherwise working: the read failed, the entry looked
+               * unknown, and unknown is deliberately never reaped.
+               */
+              const code = error?.errcode ?? error?.body?.errcode;
+              if (code === 'M_FORBIDDEN' || code === 'M_NOT_FOUND') {
+                membership[roomId] = 'bot-absent';
+              } else {
+                rateLimitGate.observeError(error);
+              }
+            }
           }
         } catch (error) {
           rateLimitGate.observeError(error);
@@ -2828,10 +2862,12 @@ export class MatrixBridge {
       }
       const dead = reapableBotDms(dmRooms, membership);
       let reaped = 0;
-      for (const { humanKey, roomId, reason } of dead) {
+      for (const { humanKey, roomId, reason, action } of dead) {
         try {
-          await this.botClient.leaveRoom(roomId);
-          try { await this.botClient.forgetRoom(roomId); } catch { /* older homeservers */ }
+          if (action === 'leave') {
+            await this.botClient.leaveRoom(roomId);
+            try { await this.botClient.forgetRoom(roomId); } catch { /* older homeservers */ }
+          }
           delete state.botDmRooms[humanKey];
           if (Array.isArray(state.greetedHumans)) {
             state.greetedHumans = state.greetedHumans.filter((h) => h !== humanKey);

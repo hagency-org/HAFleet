@@ -96,6 +96,26 @@ describe('reaping dead bot DM rooms', () => {
     expect(keys(reap)).toEqual(['alice', 'eve']);
   });
 
+  test('a room the BOT has left drops the entry without trying to leave again', () => {
+    /*
+     * The residual leak the first version had. `/members?membership=leave` still
+     * answers for a room you have left, but `/joined_members` returns M_FORBIDDEN —
+     * so the reaper read that as "unknown", and unknown is deliberately never reaped.
+     * 50 entries pointing at nothing survived a reaper that was otherwise working.
+     *
+     * Not a member is durable, unlike a rate limit, so it is safe to act on — but the
+     * action is dropping the pointer, NOT leaving a room the bot is already out of.
+     */
+    const reap = reapableBotDms({ frank: DMS.gone }, { [DMS.gone]: 'bot-absent' });
+    expect(keys(reap)).toEqual(['frank']);
+    expect(reap[0].action).toBe('drop');
+  });
+
+  test('a live departure is a LEAVE, not a bare entry drop', () => {
+    const reap = reapableBotDms({ alice: DMS.gone }, { [DMS.gone]: 'leave' });
+    expect(reap[0].action).toBe('leave');
+  });
+
   test('malformed state yields nothing rather than throwing', () => {
     // This runs on a timer against persisted state, so a corrupt entry must not take
     // the sweep down with it.
