@@ -40,7 +40,7 @@ What Activity actually resolves to:
 
 | transport | source | status |
 |---|---|---|
-| tmux (`codex-agent`, `renamed-agent`) | `GET /api/tmux/capture/:session` | exists today |
+| tmux (`codex-agent`, `claude-agent`) | `GET /api/tmux/capture/:session` | exists today |
 | ACP (`octos-agent`, `hermes-agent`, `codex-acp-agent`) | tail of `data/services-local/logs/agent:<name>.log` | file exists (189 KB for octos); needs one read-only endpoint |
 | neither / not started | empty state naming why, and a link to `hafleet acp-up` | to draw |
 
@@ -598,6 +598,185 @@ not by editing an image. Two locales × two themes are covered:
 | `onboard-en-light.png` | detection table and the form with a model field |
 | `onboard-zh-dark.png` | the same form for an adapter that takes **no** model flag |
 
+## Capacity, corrected a third time
+
+This page was wrong three times, and each time the error was the same shape: I read the
+renderer and the API signature instead of running the scheduler against real data.
+
+1. **"Retire it if nothing reads `/api/pool`."** Wrong — `lib/matrix-agent.js` and
+   `src/dispatch-lease-store.mjs` both read it. Withdrawn earlier.
+2. **Invented axes.** The fixture had `shell/git/web/browser` × `coder/reviewer/
+   researcher/operator`. Neither list exists anywhere in the scheduler.
+3. **Invented populated data**, which is worse than either. On this fleet the grid is
+   empty, and drawing a busy-looking scheduler for a feature that has never been
+   connected is the one failure mode a mockup must not have — an implementer would
+   conclude that wiring up the API produces rows.
+
+### The real model
+
+`lib/matrix-agent.js` declares six organisational **roles** as columns and three
+**ordered capability tiers** as rows, which is also how `pool-page.js` orients them:
+
+| | architect | coding | testing | review | integration | documentation |
+|---|---|---|---|---|---|---|
+| `strong` — claude opus | | | | | | |
+| `medium` — claude sonnet | | | | | | |
+| `lightweight` — claude haiku | | | | | | |
+
+Each role has a default tier (`ROLE_DEFAULT_TIER`): `architect` and `review` at
+`strong`, `coding`/`testing`/`integration` at `medium`, `documentation` at
+`lightweight`. A cell holds the actual agent records with their busy state, not a count.
+
+`POST /api/dispatch {role, capability}` → `resolveTier()` (explicit wins, else the role
+default) → `selectAgent()`, which filters to the same role, online and idle, keeps
+anything at a tier no weaker than requested, and sorts cheapest-sufficient-first so a
+`strong` agent is not spent on `lightweight` work. A hit returns `routed` plus a
+15-minute renewable lease; a miss returns `provision` when `MATRIX_AGENT_MAX_PER_CELL`
+is above zero and the cell is under cap, otherwise `queued` with a per-cell ticket.
+
+**Substitution is real but bounded.** A stronger idle agent covers a weaker request, so
+an empty `lightweight` cell does not mean undispatchable. It never crosses a role —
+`selectAgent()` matches `agentRole(a) === role` before it looks at the tier. The old
+`idle/total` cell could not express either half of that, and its legend ("`–` not
+supported") actively taught the opposite.
+
+### What is actually true of this fleet
+
+Measured, not assumed, by running the real module against the real agent names:
+
+```
+octos-agent  codex-agent  hermes-agent  codex-acp-agent  claude-agent
+  -> role=null for all five
+  -> indexPool() grid: {}     total: 0
+```
+
+`canonicalRole()` infers a role from substrings in the agent name — `architect`,
+`review`, `test`, `integrat`, `doc`, `coder` — and none of these names match one.
+`agentRole()` returns `null` and `indexPool()` skips the record outright.
+
+**One name differs from the transcript.** The live fleet's fifth agent is called
+`renamed-agent` — visible in [dashboard-ux-review.md](dashboard-ux-review.md)'s success-test
+capture, which is a record of what was on screen and is left alone. Nothing in the codebase
+implements an agent rename (the sole mention is a comment at `backend-v2.js:5161` noting a
+rename would have to move the runtime twin in `agent_runtime.json`), and `data/acp-agents/`
+holds `a-different-name.log`, `already-supervised.log` and `probe-agent.log` — so the name is
+almost certainly a probe artifact that outlived its test, and it breaks the fleet's own
+`<framework>-agent` convention.
+
+The prototype fixture therefore calls it **`claude-agent`**, which is what the convention
+implies and what makes the roster legible. `canonicalRole('claude-agent')` still returns
+`null`, so the measurement above is unchanged. Noted rather than silently corrected, because
+the fixture is now a tidied version of the fleet rather than a transcript of it — and the two
+should be reconciled by fixing the fleet, not by editing the capture.
+
+The consequence is not cosmetic. A dispatch for each of the six roles:
+
+```
+architect / coding / testing / review / integration / documentation
+  -> selectAgent = null,  plan = provision  (all six)
+```
+
+With `MATRIX_AGENT_MAX_PER_CELL` at its default of `0` there is no provisioning either,
+so **every `POST /api/dispatch` on this fleet queues, and nothing will ever staff the
+cell.** The page is not broken; it was never connected.
+
+`POST /api/agents` already destructures `role` and `capability`. No onboarding path
+sends either — not `hafleet acp-up`, not `register-agents`, not the ACP host. That gap is
+the whole explanation.
+
+One asymmetry to know before building the fix: `PATCH /api/agents/:name` destructures
+`role` but **not** `capability`. An existing agent can be given a role and lands on that
+role's default tier; a non-default tier can only be set at registration, which no CLI
+path exposes. `/onboard` shows the `PATCH` as a second command and says so, rather than
+printing an `acp-up` line that silently cannot carry the field.
+
+**The printed command has to run.** The first version of it — `curl -X PATCH
+.../api/agents/<name> -d '{"role":"coding"}'` — could not, in three ways, and the page's
+whole argument for printing a command is that seeing it is how you notice the form built
+the wrong one. `...` is not a host, so it uses `http://127.0.0.1:8090`, the documented
+`HAFLEET_API` default. **`-H 'Content-Type: application/json'` is load-bearing**: the
+global `express.json()` parses nothing without it, so `role` arrives `undefined`, and the
+handler's `if (role !== undefined)` guard turns the request into a 200 that changed
+nothing — a silent no-op on the one command that fixes the empty grid. Auth stays a note
+rather than a printed flag, because it is conditional: the `/api` gate exempts local
+requests, and the per-agent `X-Agent-Token` check only bites when that agent has a token
+and `HAFLEET_AGENT_TOKEN_MODE` is not `audit`. A printed header that the local case does
+not need is its own small lie.
+
+### How the page handles it
+
+It opens on the truth — empty grid, with the reason, the dispatch consequence, and the
+fix — and offers the populated layout as an explicitly labelled second view of the same
+five agents. Leases and tickets belong to the view, not beside it: a lease exists only
+because `selectAgent()` returned an agent, so an empty grid above a populated lease table
+is the page contradicting itself.
+
+Three things about that second view were wrong in the first build of it, and all three
+came from treating the view as component state rather than as a selection:
+
+- **The label has to travel with the view.** A pressed segment button in the header is a
+  screen and a half above the lease table, and a lease table with rows in it is exactly
+  what makes an implementer conclude that wiring up the API produces data. The
+  hypothetical notice now sits in the body, above the grid.
+- **The view lives in the URL** — `/capacity?view=assigned`, read on mount and on
+  `popstate`, written with `pushState`. Selection round-tripping through the URL is
+  already an invariant here; holding this one in `useState` also meant it was not
+  linkable, was lost on reload, and — the part that mattered — **no URL-driven check
+  could reach it**, so the responsive sweep was measuring the empty view twice and the
+  populated grid, which is the wide one, was never tested at all. Plain `history` rather
+  than `useSearchParams()`, so the server render stays the honest default view and
+  `/capacity` keeps prerendering statically.
+- **Emptiness is a property of the cells, never of `total`.** `GET /api/pool` answers
+  `total: records.length` — every pool record, including the ones `indexPool()` skipped —
+  which on this fleet is **5 while the grid is `{}`**. The fixture had `total: 0` and the
+  page gated its empty state on it, so wiring the page to the real endpoint would have
+  produced a blank grid with none of the explanation, on precisely the fleet the page was
+  written for. `gridTotal()` reads the cells.
+
+**And no cell states itself in a mark alone.** The empty cells rendered `—` or a green
+`↑` with the meaning only in `title` — mark plus colour, word in a tooltip, invisible to
+touch and unreliable on a `<td>`. That is the rule the severity component exists to
+enforce, and the assertion covering it only inspected severity dots, so the newest page
+walked past both. Cells now read `— queues` and `↑ strong`, and naming the covering tier
+says more than the arrow did. The legend keys those two states with the marks themselves
+rather than a colour swatch standing in for text.
+
+### Assertions
+
+The axes are not checked against a copy of themselves. `check-invariants.mjs` reads
+`../lib/matrix-agent.js`, extracts `ROLES` and `CAPABILITY_TIERS`, and compares — so
+renaming a role upstream fails the check, and inventing one in the fixture fails it too.
+On top of that: every role has a valid default tier, every lease and ticket names a real
+cell, the leased set equals the busy set in both views (mutation-tested), substitution
+covers a weaker request, substitution does not cross a role, a busy agent is not
+available, and the empty view has no leases but does show queued tickets.
+
+The four corrections above are asserted rather than remembered:
+
+| assertion | guards |
+|---|---|
+| **every `<td>` on `/capacity` contains a word** | the general property, not the two specific marks — a mark-only cell in any column fails it. This is the check the severity-dot assertion should always have been |
+| emptiness is derived from `gridTotal()`, and the empty view still reports `total > 0` | the `/api/pool` semantics above. Both halves are needed: the fixture must keep lying in the *same* way the endpoint does |
+| `routable()` and `coveringTier()` agree on every cell of the grid | two implementations of one rule drifting, now that the cell needs the tier and not just a boolean |
+| the printed `PATCH` names a real host, sends a JSON content type, and still carries the role | the silent no-op above |
+| `?view=assigned` selects the populated grid, the pressed segment agrees with the URL, a reload keeps it, Back returns to the default | the view leaving the URL again |
+| the populated view says on screen that it is hypothetical | the label drifting back into the header alone |
+| no cell in the *populated* view is a mark alone | the half the static pass cannot see, since the server render is always the default view |
+| `/capacity?view=assigned` is in the 375/640/900/1440 sweep | the wide view going untested, which it was |
+
+Two notes on writing those, both of which cost more than the fixes:
+
+- **`.agent-chip` was the wrong signal.** The empty view lists the five unassigned agents
+  as chips too, so a bare chip count is 5 in *both* views and reads as "the view never
+  changes" while the view is changing correctly. Only a chip in a cell carries
+  `idle`/`busy`; the assertions count those.
+- **`networkidle0` is not hydration.** A click that lands before React attaches its
+  handlers does nothing, silently, and every assertion after it reads the pre-click state.
+  Against `npm start` the bundle was fast enough to hide this; against `npm run dev` the
+  language switch failed on every run. `check-switches.mjs` now waits for React's props
+  object to appear before it clicks anything — which also means the "every button has a
+  handler" pass can no longer report a whole page of dead buttons because it asked early.
+
 ## Known gaps in the drawings
 
 Stated because a mockup that contradicts the spec is worse than no mockup — an implementer follows
@@ -616,6 +795,8 @@ the picture. From the final review round:
 | The benchmark's *today* column | estimated | must be measured once before it means anything |
 | `page-config.jpg` still shows the withdrawn *Credentials* panel | `page-config.jpg` | the prototype is correct; the drawing is stale |
 | `page-capacity.jpg` still shows the withdrawn "retire it" notice and no leases | `page-capacity.jpg` | the prototype is correct; the drawing is stale |
+| Nothing populates the dispatch pool: no onboarding path sends `role`/`capability`, so the grid is empty and every dispatch queues forever | `bin/hafleet-acp-up`, `bin/register-agents`, `scripts/hafleet-acp-agent.mjs` | open — the real fix is upstream of the dashboard. `/onboard` offers the fields and shows the `PATCH`, which is as far as a page can go |
+| `PATCH /api/agents/:name` accepts `role` but not `capability` | `backend-v2.js` | open — an existing agent can only reach its role's default tier |
 | The dispatch queue and the message queue share the word "queue" | naming | open — needs one renamed before either page ships. Both pages currently point at each other and say so |
 | Three buttons shipped with no handler — projects Refresh, the agent cadence button, Pause display | header controls | **closed** — all three do something, and `check-switches.mjs` now fails on any button React gave no `onClick`. A dead control teaches the operator to distrust the live ones |
 | The four page mockups predate the corrections above | `page-alerts.jpg`, `page-projects.jpg`, `page-config.jpg`, `page-capacity.jpg` | open — the clickable prototype supersedes them and `shots/` holds accurate renders; the JPEGs should be deleted rather than left to mislead |
@@ -755,7 +936,8 @@ and the flash is worse than not offering the switch.
 
 ### Tests
 
-`scripts/check-invariants.mjs` covers what is static (41 assertions):
+`scripts/check-invariants.mjs` covers what is static — run it for the current count,
+which rises every time a review finds something:
 
 | assertion | guards |
 |---|---|
@@ -771,8 +953,8 @@ and the flash is worse than not offering the switch.
 | The pre-paint script reads both storage keys | the flash returning |
 | Switch styling is bound to `aria-pressed`, not a parallel class | the accessible state and the visible state disagreeing |
 
-`scripts/check-switches.mjs` covers what only a browser can (28 assertions, system
-Chrome via `puppeteer-core`): the words actually change, `lang` becomes `zh-CN`, the
+`scripts/check-switches.mjs` covers what only a browser can (system Chrome via
+`puppeteer-core`, no download): the words actually change, `lang` becomes `zh-CN`, the
 background actually repaints and is measurably darker, contrast survives, no element
 stays painted for the other theme, both choices survive a route change, `System` hands
 control back to the OS, an explicit `Light` beats a dark OS, and the Noto Sans SC face

@@ -1,14 +1,12 @@
-import { redirect } from 'next/navigation';
-
 /*
- * `/` redirects to `/overview` in the prototype.
+ * `/` IS 我的资源, rather than a redirect to it.
  *
- * In the real dashboard it does NOT: `/` keeps serving today's monitor until
- * every surface in the migration table has a destination, and Overview lives at
- * `/overview` throughout. The rail links `/overview` from day one so no route
- * changes twice. Here there is no monitor to preserve, so the redirect stands in
- * for the eventual end state.
+ * It was `redirect('/resources')`, which a static export cannot honour — the
+ * exported index.html came out as Next's error page, so the published site had a
+ * broken front door. A server redirect also needs a server, and this prototype
+ * should be servable from any static host.
+ *
+ * Two URLs render one page, which the rail already accommodated: the resources
+ * entry carries `also: ['/']`, so it marks itself current either way.
  */
-export default function Home() {
-  redirect('/overview');
-}
+export { default } from './resources/page';

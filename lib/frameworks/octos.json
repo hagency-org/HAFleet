@@ -19,6 +19,8 @@
     "acpCwdFlag": "--cwd",
     "acpCwdFlagNote": "octos acp accepts --cwd as the default working directory when a client omits it from session/new. hermes-acp rejects the flag and dies before the handshake, so it is declared per adapter rather than assumed.",
     "acpModelFlag": "--model",
+    "acpProviderFlag": "--provider",
+    "acpProviderFlagNote": "octos acp takes --provider and it OVERRIDES the config. Without it a launch uses whatever ~/.config/octos/config.json names, so a preset declaring provider 'moonshot' silently ran against the config's 'deepseek' and failed on DEEPSEEK_API_KEY. Observed on a clean host: the console showed one provider and the process used another.",
     "acpModelFlagNote": "Verified: `octos acp --help` lists --model <MODEL> and the handshake survives it. Declared separately from launch.modelFlag because that one describes the tmux CLI, and the two are not the same surface \u2014 hermes-acp and codex-acp take no model flag at all even though their CLIs do."
   },
   "guards": {

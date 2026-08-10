@@ -5,11 +5,10 @@ import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import Severity from '@/components/Severity';
 import { Toast, useToast } from '@/components/Toast';
-import {
-  alerts as ALL, alertCounts, ALERT_STATUSES, SEVERITIES,
-  bySeverityThenAge, fmtSpanSec,
-} from '@/lib/mock-data';
+import { bySeverityThenAge, fmtSpanSec } from '@/lib/mock-data';
 import { useT } from '@/components/Prefs';
+import { useData, Provenance } from '@/components/Data';
+import { send } from '@/lib/api';
 
 /*
  * Alerts triage.
@@ -47,6 +46,9 @@ const ACTION_KEY = {
 
 export default function AlertsPage() {
   const t = useT();
+  const {
+    alerts: ALL, alertCounts, ALERT_STATUSES, SEVERITIES, provenance, refresh,
+  } = useData();
   const [status, setStatus] = useState('open');
   const [severity, setSeverity] = useState('all');
   const [agent, setAgent] = useState('all');
@@ -55,32 +57,50 @@ export default function AlertsPage() {
   const [toast, say] = useToast();
 
   const { byStatus, bySeverity } = alertCounts();
-  const agentNames = useMemo(() => [...new Set(ALL.map((a) => a.agent))], []);
+  const agentNames = useMemo(() => [...new Set(ALL.map((a) => a.agent))].filter(Boolean), [ALL]);
 
   const rows = useMemo(() => {
     const out = ALL.filter((a) => (status === 'all' ? true : a.status === status))
       .filter((a) => (severity === 'all' ? true : a.severity === severity))
       .filter((a) => (agent === 'all' ? true : a.agent === agent));
     return out.sort(bySeverityThenAge);
-  }, [status, severity, agent]);
+  }, [ALL, status, severity, agent]);
 
   // The selected row is always one of the visible rows, so the panel can never
   // describe something other than what is highlighted.
   const selected = rows.find((r) => r.id === selectedId) ?? rows[0] ?? null;
 
-  function act(next) {
+  /*
+   * A real transition when the alerts slice is live, a simulated one otherwise.
+   *
+   * Both paths keep the same rule: the control stays in-flight until the server
+   * answers, and a failure leaves the prior state on screen rather than
+   * optimistically showing the status that was refused. The refetch afterwards is
+   * what makes the panel show the RESULT rather than the intention.
+   */
+  async function act(next) {
     if (!selected) return;
     setBusy(next);
-    // A real action stays in-flight until confirmed; failure keeps prior state.
-    setTimeout(() => {
-      setBusy(null);
-      say('ok', t('al.didTransition', { action: t(ACTION_KEY[next]), id: selected.id, status: next }));
-    }, 420);
+    if (provenance.alerts !== 'live') {
+      setTimeout(() => {
+        setBusy(null);
+        say('ok', t('al.didTransition', { action: t(ACTION_KEY[next]), id: selected.id, status: next }));
+      }, 420);
+      return;
+    }
+    const res = await send(`alerts/${selected.id}/transition`, { body: { status: next, actor: 'console' } });
+    if (res.ok) await refresh();
+    setBusy(null);
+    say(res.ok ? 'ok' : 'fail', res.ok
+      ? t('al.didTransition', { action: t(ACTION_KEY[next]), id: selected.id, status: next })
+      : t('al.transitionFailed', { id: selected.id, why: res.error }));
   }
 
   return (
     <>
       <PageHead title={t('al.title')} sub={t('common.updatedAgo', { n: '6s' })} />
+
+      <Provenance slices={['alerts']} />
 
       {/* Strip 1 — lifecycle status, all five, including resolved */}
       <h2 className="sec" style={{ marginTop: 0 }}>
@@ -144,7 +164,11 @@ export default function AlertsPage() {
         <div className="empty">
           <div className="big">{t('al.noMatch')}</div>
           <p className="small">{t('al.widen', { n: ALL.length })}</p>
-          <button className="btn" onClick={() => { setStatus('all'); setSeverity('all'); setAgent('common.all'); }}>
+          {/* `'common.all'` is the dictionary KEY for the word "all", not the
+              sentinel the filter compares against. Reset therefore set an agent name
+              no row could match, so the empty state it exists to clear stayed
+              empty. */}
+          <button className="btn" onClick={() => { setStatus('all'); setSeverity('all'); setAgent('all'); }}>
             {t('al.reset')}
           </button>
         </div>
@@ -167,7 +191,16 @@ export default function AlertsPage() {
                     onClick={() => setSelectedId(a.id)}
                     style={{ cursor: 'pointer' }}
                   >
-                    <td><Severity level={a.severity} /></td>
+                    <td>
+                      <Severity level={a.severity} />
+                      {/* The severity on screen is not always the severity the
+                          system meant. Saying so on the row matters more than in
+                          the panel: triage scans the list and never opens the
+                          rows it judges quiet. */}
+                      {a.originalSeverity && (
+                        <span className="badge warn-b">{t('al.downgraded', { from: a.originalSeverity })}</span>
+                      )}
+                    </td>
                     <td>
                       <div>{a.summary}</div>
                       <div className="faint" style={{ fontSize: 11 }}>
@@ -195,6 +228,47 @@ export default function AlertsPage() {
               </dl>
 
               <p style={{ fontSize: 12.5, color: 'var(--ink-2)', marginTop: 12 }}>{selected.detail}</p>
+
+              {/*
+                * THE DOWNGRADE, IN FULL.
+                *
+                * lib/alert-store.js:125-128 turns a warning or critical into an
+                * `info` when the fields needed to act on it are absent, and
+                * records both the original severity and what was missing. A
+                * console that renders only `severity` shows a quiet `info` and
+                * silently loses the fact that something louder was intended and
+                * that the fix is to supply the missing fields — so the alert
+                * stays quiet forever and looks like it was always meant to be.
+                *
+                * Both live `agent_offline` alerts on a freshly seeded backend are
+                * exactly this case, which is why this block is not hypothetical.
+                */}
+              {selected.originalSeverity && (
+                <div className="notice warn" style={{ marginTop: 12 }}>
+                  <div><b>{t('al.downgradedTitle', { from: selected.originalSeverity })}</b></div>
+                  <div>{t('al.downgradedWhy', { from: selected.originalSeverity })}</div>
+                  {selected.missingActionableFields?.length > 0 && (
+                    <div style={{ marginTop: 6 }}>
+                      {t('al.missingFields')}{' '}
+                      {selected.missingActionableFields.map((f) => (
+                        <span className="badge warn-b" key={f}>{f}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* The actionable fields themselves, when the alert has them. Shown
+                  because "what do I do about this" is the only question a triage
+                  surface exists to answer. */}
+              {(selected.runbook || selected.impact || selected.recoveryCondition || selected.owner) && (
+                <dl className="kv" style={{ marginTop: 12 }}>
+                  {selected.owner && <><dt>{t('al.owner')}</dt><dd>{selected.owner}</dd></>}
+                  {selected.impact && <><dt>{t('al.impact')}</dt><dd>{selected.impact}</dd></>}
+                  {selected.runbook && <><dt>{t('al.runbook')}</dt><dd>{selected.runbook}</dd></>}
+                  {selected.recoveryCondition && <><dt>{t('al.recovery')}</dt><dd>{selected.recoveryCondition}</dd></>}
+                </dl>
+              )}
 
               <div className="btn-row" style={{ marginTop: 14 }}>
                 {NEXT_STATUS[selected.status].length === 0 ? (

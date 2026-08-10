@@ -6,14 +6,14 @@
 # than a branch inside that one: the agent is a subprocess speaking JSON-RPC, its
 # liveness is whether that process exists, and nothing may ever send-keys to it.
 #
-# Usage: hafleet-acp-up <name> <workspace> <framework> [--model <m>]
+# Usage: hafleet-acp-up <name> <workspace> <framework> [--model <m>] [--provider <p>]
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
   cat <<'USAGE'
-Usage: hafleet acp-up <name> <workspace> <framework> [--model <m>]
+Usage: hafleet acp-up <name> <workspace> <framework> [--model <m>] [--provider <p>]
 
 Starts a paneless agent over the Agent Client Protocol and registers it with the
 backend. Use this for frameworks whose adapter declares transport "acp" (octos);
@@ -30,6 +30,8 @@ Arguments:
 
 Options:
   --model <m>    Model to request from the framework
+  --provider <p> LLM provider to request. Without it the framework uses whatever its
+                 own config names, which is not necessarily the one the preset shows.
   --supervised   Register with the local supervisor instead of running detached,
                  so the agent is restarted if it dies and comes back after a
                  reboot. A tmux agent survives its launcher because tmux owns the
@@ -48,16 +50,18 @@ for arg in "$@"; do
   fi
 done
 
-NAME="${1:?Usage: hafleet-acp-up <name> <workspace> <framework> [--model <m>]}"
+NAME="${1:?Usage: hafleet-acp-up <name> <workspace> <framework> [--model <m>] [--provider <p>]}"
 WORKSPACE="${2:?workspace required}"
 FRAMEWORK="${3:?framework required}"
 shift 3
 MODEL=""
+PROVIDER=""
 SUPERVISED=false
 PROFILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --model) MODEL="${2:?--model requires a value}"; shift 2 ;;
+    --provider) PROVIDER="${2:?--provider requires a value}"; shift 2 ;;
     --supervised) SUPERVISED=true; shift ;;
     --profile) PROFILE="${2:?--profile requires a value}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
@@ -94,6 +98,24 @@ if [ -n "$MODEL" ]; then
   if [ -z "$ACP_MODEL_FLAG" ]; then
     echo "Error: '$FRAMEWORK' takes no model flag over ACP, so --model '$MODEL' cannot be applied." >&2
     echo "       Select the model inside the agent instead, and re-run without --model." >&2
+    exit 1
+  fi
+fi
+
+# The provider gets the same treatment, and for a sharper reason than the model.
+# --model without --provider is not a narrower request, it is a DIFFERENT one: octos
+# resolves the provider from its own config, so asking for `kimi-k3` while the config
+# says `deepseek` produced an agent that tried to build a deepseek client and died on
+# DEEPSEEK_API_KEY. The console had shown provider `moonshot` throughout. Observed on
+# a clean host; the developer machine's config happened to agree, so it never showed.
+if [ -n "$PROVIDER" ]; then
+  ACP_PROVIDER_FLAG="$(node -e "
+    const { getFramework } = await import('$BASE_DIR/lib/frameworks/index.js');
+    process.stdout.write(getFramework(process.argv[1])?.launch?.acpProviderFlag ?? '');
+  " "$FRAMEWORK")"
+  if [ -z "$ACP_PROVIDER_FLAG" ]; then
+    echo "Error: '$FRAMEWORK' takes no provider flag over ACP, so --provider '$PROVIDER' cannot be applied." >&2
+    echo "       Configure the provider inside the agent instead, and re-run without --provider." >&2
     exit 1
   fi
 fi
@@ -151,7 +173,7 @@ if [ "$SUPERVISED" = true ]; then
   node "$BASE_DIR/scripts/hafleet-supervise-agent.mjs" add \
     --name "$NAME" --profile "$PROFILE" \
     --workspace "$WORKSPACE" --framework "$FRAMEWORK" \
-    ${MODEL:+--model "$MODEL"} --path "$SUPERVISED_PATH"
+    ${MODEL:+--model "$MODEL"} ${PROVIDER:+--provider "$PROVIDER"} --path "$SUPERVISED_PATH"
 
   # Stop any unsupervised host first: two processes holding sessions for one agent
   # would both poll the inbox and both answer.
@@ -308,7 +330,7 @@ fi
 LOG_DIR="$BASE_DIR/data/acp-agents"; mkdir -p "$LOG_DIR"
 nohup node "$BASE_DIR/scripts/hafleet-acp-agent.mjs" \
   --name "$NAME" --workspace "$WORKSPACE" --framework "$FRAMEWORK" \
-  ${MODEL:+--model "$MODEL"} >>"$LOG_DIR/$NAME.log" 2>&1 &
+  ${MODEL:+--model "$MODEL"} ${PROVIDER:+--provider "$PROVIDER"} >>"$LOG_DIR/$NAME.log" 2>&1 &
 AGENT_PID=$!
 echo "$AGENT_PID" > "$PID_FILE"; chmod 600 "$PID_FILE"
 

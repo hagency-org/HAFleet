@@ -36,8 +36,10 @@ const name = read('--name');
 const workspace = read('--workspace');
 const frameworkId = read('--framework');
 const model = read('--model');
+const provider = read('--provider');
 if (!name || !workspace || !frameworkId) {
-  process.stderr.write('usage: hafleet-acp-agent.mjs --name <n> --workspace <dir> --framework <id> [--model <m>]\n');
+  process.stderr.write('usage: hafleet-acp-agent.mjs --name <n> --workspace <dir> --framework <id> '
+    + '[--model <m>] [--provider <p>]\n');
   process.exit(2);
 }
 
@@ -63,6 +65,29 @@ if (model) {
     process.exit(2);
   }
   acpArgs.push(flag, model);
+}
+
+/*
+ * THE PROVIDER IS NOT IMPLIED BY THE MODEL, and leaving it out is not a smaller
+ * request — it is a different one.
+ *
+ * octos resolves the provider from its own config when none is given, so launching
+ * with `--model kimi-k3` against a config naming `deepseek` built a deepseek client
+ * and died on `DEEPSEEK_API_KEY not set`. The preset said `moonshot` the whole time,
+ * and every surface the operator could see agreed with the preset. Only the process
+ * disagreed, and only on a host whose octos config differed from the developer's.
+ *
+ * Same refusal as the model above: an adapter with nowhere to put it is an error,
+ * not a silent drop.
+ */
+if (provider) {
+  const flag = framework.launch.acpProviderFlag ?? null;
+  if (!flag) {
+    process.stderr.write(`${frameworkId} takes no provider flag over ACP; --provider ${provider} `
+      + 'would be silently ignored. Configure the provider in the agent itself.\n');
+    process.exit(2);
+  }
+  acpArgs.push(flag, provider);
 }
 
 const log = (message) => process.stdout.write(`[${new Date().toISOString()}] ${message}\n`);

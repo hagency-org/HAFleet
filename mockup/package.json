@@ -4,15 +4,17 @@
   "version": "0.1.0",
   "description": "Clickable mockup of the HAFleet dashboard relayout. Mock data only; talks to no backend.",
   "scripts": {
-    "dev": "next dev -p 3100",
+    "dev": "next dev -p 3100 -H 127.0.0.1",
     "build": "next build",
-    "start": "next start -p 3100",
+    "start": "next start -p 3100 -H 127.0.0.1",
     "check": "node scripts/check-invariants.mjs",
     "check:switches": "node scripts/check-switches.mjs",
+    "export": "PAGES=1 next build",
     "verify": "npm run check && npm run check:switches"
   },
   "dependencies": {
     "next": "16.3.0",
+    "playwright-core": "^1.62.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

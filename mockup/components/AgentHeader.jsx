@@ -3,7 +3,9 @@
 import { useState } from 'react';
 import PageHead from '@/components/PageHead';
 import { Toast, useToast } from '@/components/Toast';
-import { runtimeStatusText } from '@/lib/mock-data';
+import { runtimeStatusText, fmtTokens } from '@/lib/mock-data';
+import { useData } from '@/components/Data';
+import { Blank } from '@/components/Blank';
 import { useT } from '@/components/Prefs';
 
 /*
@@ -21,9 +23,21 @@ import { useT } from '@/components/Prefs';
  * the confusion the old "10/sec" label caused in the first place.
  */
 export default function AgentHeader({ agent }) {
+  const {
+    presetOf, tierOf, familyOf, remaining, committed, engagements, roleCapacity,
+  } = useData();
   const t = useT();
   const [toast, say] = useToast();
   const [paused, setPaused] = useState(false);
+
+  // What this agent CONTRIBUTES, on the record where the contributor looks. The
+  // previous console showed which bench an agent belonged to and which projects
+  // it was a member of — a dispatcher's framing. A lender asks three things: what
+  // model am I giving away, how much of my ceiling is already promised, and who
+  // is currently drawing on it.
+  const preset = presetOf(agent);
+  const tier = tierOf(preset);
+  const serving = engagements.filter((e) => e.agent === agent.name && e.state === 'active');
 
   return (
     <>
@@ -62,6 +76,47 @@ export default function AgentHeader({ agent }) {
         {/* Paused is a state the page is in, so it belongs with the other state
             badges and not only inside a toast that disappears. */}
         {paused && <span className="badge attention">{t('ag.paused')}</span>}
+      </div>
+
+      <div className="affil">
+        <div className="af-row">
+          <span className="af-line">{t('ag.contributes')}</span>
+          {preset ? (
+            <>
+              <span className="mono-s">{preset.model}</span>
+              <span className={`tierchip ${tier}`}>{tier}</span>
+              <span className="dim">{familyOf(preset)}</span>
+              {preset.reasoning && <span className="badge">{`${t('col.reasoning')} ${preset.reasoning}`}</span>}
+            </>
+          ) : (
+            /* The state that makes an agent useless, said plainly: it is running
+               and lending nothing, because nobody chose a model for it. */
+            <Blank why="ag.why.noPreset" t={t} />
+          )}
+        </div>
+        <div className="af-row">
+          <span className="af-line">{t('ag.ceiling')}</span>
+          {preset ? (
+            <>
+              <span className="amount">{fmtTokens(preset.ceiling?.tokens)}</span>
+              <span className="dim">
+                {t('ag.committedLeft', {
+                  used: fmtTokens(committed(agent.name)),
+                  left: fmtTokens(remaining(agent.name)),
+                })}
+              </span>
+              {!preset.ceiling?.enforced && <span className="badge warn-b">{t('rs.notEnforced')}</span>}
+            </>
+          ) : <Blank why="ag.why.noCeiling" t={t} />}
+        </div>
+        <div className="af-row">
+          <span className="af-line">{t('ag.serving')}</span>
+          {serving.length ? serving.map((e) => (
+            <span className="chip-role" key={e.id}>
+              {`${e.project} · ${roleCapacity.roles[e.role]?.displayName ?? e.role}`}
+            </span>
+          )) : <Blank why="ag.why.notServing" t={t} />}
+        </div>
       </div>
 
       <Toast toast={toast} />

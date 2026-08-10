@@ -2,6 +2,7 @@ import { Roboto, Noto_Sans_SC } from 'next/font/google';
 import './globals.css';
 import Rail from '@/components/Rail';
 import { PrefsProvider } from '@/components/Prefs';
+import { DataProvider } from '@/components/Data';
 
 /*
  * Typography: Roboto for Latin, Noto Sans SC for Simplified Chinese.
@@ -63,10 +64,14 @@ export default function RootLayout({ children }) {
       </head>
       <body>
         <PrefsProvider>
-          <div className="app">
-            <Rail />
-            <main className="main">{children}</main>
-          </div>
+          {/* Inside PrefsProvider: the provenance banner and every empty state it
+              produces are translated, so the data layer needs `t` available. */}
+          <DataProvider>
+            <div className="app">
+              <Rail />
+              <main className="main">{children}</main>
+            </div>
+          </DataProvider>
         </PrefsProvider>
       </body>
     </html>

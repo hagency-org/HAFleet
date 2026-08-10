@@ -4,8 +4,10 @@ import { useState } from 'react';
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Toast, useToast } from '@/components/Toast';
-import { presets, agents, providerHomes } from '@/lib/mock-data';
+import { Blank } from '@/components/Blank';
 import { useT } from '@/components/Prefs';
+import { useData, Provenance } from '@/components/Data';
+import { send } from '@/lib/api';
 
 /*
  * Config — three sections separated by blast radius, not by data type.
@@ -16,6 +18,8 @@ import { useT } from '@/components/Prefs';
  */
 export default function ConfigPage() {
   const t = useT();
+  const { presets, agents, detected, provenance, refresh } = useData();
+  const live = provenance.presets === 'live';
   const [toast, say] = useToast();
   const [removing, setRemoving] = useState(null);
 
@@ -24,6 +28,8 @@ export default function ConfigPage() {
       <PageHead title={t('cf.title')}>
         <span className="badge attention">{t('cf.fleetWide')}</span>
       </PageHead>
+
+      <Provenance slices={['presets', 'agents', 'detected']} />
 
       <h2 className="sec" style={{ marginTop: 6 }}>
         {t('cf.presets')}
@@ -39,7 +45,16 @@ export default function ConfigPage() {
                 <td className="dim">{p.framework}</td>
                 <td className="dim">{p.model}</td>
                 <td>
-                  <button className="btn" onClick={() => say('ok', t('cf.presetDeleted', { name: p.name }))}>
+                  <button
+                    className="btn"
+                    onClick={async () => {
+                      if (!live) return say('ok', t('cf.presetDeleted', { name: p.name }));
+                      const res = await send(`framework-presets/${p.id}`, { method: 'DELETE' });
+                      if (!res.ok) return say('fail', res.error);
+                      await refresh();
+                      return say('ok', t('cf.presetDeleted', { name: p.name }));
+                    }}
+                  >
                     {t('act.delete')}
                   </button>
                 </td>
@@ -66,18 +81,47 @@ export default function ConfigPage() {
             <tr><th>{t('col.agent')}</th><th>{t('col.livesIn')}</th><th>{t('col.provider')}</th><th>{t('col.state')}</th><th>{t('col.ifUnresolved')}</th></tr>
           </thead>
           <tbody>
+            {/*
+              * DRIVEN BY THE HOST PROBE, not by the agent's framework name.
+              *
+              * This table used to mark every agent `resolved` unconditionally, read
+              * the credential home from a fixture, and infer the provider from a
+              * string comparison (`hermes` -> 'deepseek', everything else -> "account
+              * default"). So an agent with no credential directory at all appeared
+              * provider-resolved, under a banner claiming live data.
+              *
+              * GET /api/frameworks/detect knows the real answer for the framework, and
+              * the agent's own runtimeProfile knows its real provider. Where the probe
+              * has nothing to say, the cell says so rather than guessing.
+              */}
             {agents.map((a) => {
-              // Kept in mock-data with the rest of the fixture so this page reads
-              // data rather than carrying its own copy of it.
-              const { home = '—', fix = '—' } = providerHomes[a.framework] ?? {};
-              const provider = a.framework === 'hermes' ? 'deepseek' : t('cf.accountDefault');
+              const det = detected.find((d) => d.id === a.framework) ?? null;
+              const provider = a.runtimeProfile?.provider ?? null;
               return (
                 <tr key={a.name}>
                   <td><Link href={`/agents/${a.name}`}>{a.name}</Link></td>
-                  <td><code style={{ fontSize: 11.5 }}>{home}</code></td>
-                  <td className="dim">{provider}</td>
-                  <td><span className="badge ok">{t('cf.resolved')}</span></td>
-                  <td><code style={{ fontSize: 11.5 }}>{fix}</code></td>
+                  <td>
+                    {det?.credentialHome
+                      ? <code style={{ fontSize: 11.5 }}>{det.credentialHome}</code>
+                      : <Blank why="cf.why.noProbe" t={t} />}
+                  </td>
+                  <td>
+                    {provider
+                      ? <span className="dim">{provider}</span>
+                      : <Blank why="cf.why.noProvider" t={t} />}
+                  </td>
+                  <td>
+                    {!det && <Blank why="cf.why.noProbe" t={t} />}
+                    {det && det.state === 'ready' && <span className="badge ok">{t('cf.resolved')}</span>}
+                    {det && det.state === 'needs_auth' && <span className="badge warn-b">{t('cf.noCredential')}</span>}
+                    {det && det.state === 'absent' && <span className="badge warn-b">{t('cf.notInstalled')}</span>}
+                    {det && det.state === 'unusable' && <span className="badge warn-b">{t('cf.unusable')}</span>}
+                  </td>
+                  <td>
+                    {det?.fix
+                      ? <code style={{ fontSize: 11.5 }}>{det.fix}</code>
+                      : <span className="dim">{t('cf.nothingToFix')}</span>}
+                  </td>
                 </tr>
               );
             })}

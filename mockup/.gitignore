@@ -1,3 +1,6 @@
 node_modules/
 .next/
 out/
+
+# static export for GitHub Pages
+out/

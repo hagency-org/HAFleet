@@ -16,13 +16,26 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROVISION_AGENT = path.join(__dirname, 'provision-v1-agent-home.js');
 
-// Role order mirrors the issue-workflow skill; final_reviewer runs a different
-// runtime (codex) on purpose — adversarial diversity for the final gate.
+/*
+ * Role order mirrors the issue-workflow skill; final_reviewer runs a different
+ * runtime (codex) on purpose — adversarial diversity for the final gate.
+ *
+ * `role` here is an agent-NAME suffix, not a capability role: these become
+ * `<team>_coordinator` and so on. They are a different vocabulary from the six in
+ * lib/role-capacity.json, and the bridge between them has always been
+ * canonicalRole(), which matches substrings of the agent's name.
+ *
+ * `canonical` states the intended target explicitly. The substring match still
+ * does the work at runtime, but the intent is now written down and checked
+ * (tests/provision-team.test.js), so renaming a workflow role or editing
+ * canonicalRole's patterns can no longer silently re-file an agent under a
+ * different capability role.
+ */
 export const ROLES = [
-  { role: 'coordinator', defaultType: 'claude' },
-  { role: 'implementer', defaultType: 'claude' },
-  { role: 'reviewer', defaultType: 'claude' },
-  { role: 'final_reviewer', defaultType: 'codex' },
+  { role: 'coordinator', defaultType: 'claude', canonical: 'architect' },
+  { role: 'implementer', defaultType: 'claude', canonical: 'coding' },
+  { role: 'reviewer', defaultType: 'claude', canonical: 'review' },
+  { role: 'final_reviewer', defaultType: 'codex', canonical: 'review' },
 ];
 
 function fail(message) {

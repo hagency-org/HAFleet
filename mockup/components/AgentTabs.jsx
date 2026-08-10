@@ -2,9 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import TaskList from '@/components/TaskList';
 import { Toast, useToast } from '@/components/Toast';
-import { agentLog, board, presets, runtimeStatusText, tasks } from '@/lib/mock-data';
+import { agentLog, runtimeStatusText, fmtTokens } from '@/lib/mock-data';
+import { useData } from '@/components/Data';
 import { useT } from '@/components/Prefs';
 
 /*
@@ -20,9 +20,18 @@ import { useT } from '@/components/Prefs';
 
 // Ids, not labels: the id is the URL hash and must not change with the language,
 // while the visible word must. Keeping them in one list keeps the two in step.
-const TABS = ['activity', 'work', 'messages', 'repos', 'profile', 'runtime', 'oversight'];
+/*
+ * Four tabs, down from seven. `work`, `messages` and `repos` answered a
+ * dispatcher's questions — which task, what queue, which repositories — and this
+ * console has no dispatcher. A contributor asks: what does this agent contribute
+ * (runtime), is it alive (activity), how is it being judged (oversight), and who
+ * is it (profile). Runtime leads because it IS the L1 detail page: the model, the
+ * preset, and whether that preset was applied or inherited.
+ */
+const TABS = ['runtime', 'activity', 'oversight', 'profile'];
 
 export default function AgentTabs({ agent }) {
+  const { presets, presetOf, tierOf } = useData();
   const t = useT();
   const [active, setActive] = useState('activity');
   const [toast, say] = useToast();
@@ -79,9 +88,6 @@ export default function AgentTabs({ agent }) {
 
       <div role="tabpanel" id={`panel-${active}`} aria-labelledby={`tab-${active}`}>
         {active === 'activity' && <Activity agent={agent} />}
-        {active === 'work' && <Work agent={agent} onSay={say} />}
-        {active === 'messages' && <Messages agent={agent} />}
-        {active === 'repos' && <Repos agent={agent} />}
         {active === 'profile' && <Profile agent={agent} onSay={say} />}
         {active === 'runtime' && <Runtime agent={agent} onSay={say} />}
         {active === 'oversight' && <Oversight agent={agent} />}
@@ -158,93 +164,6 @@ function Activity({ agent }) {
   );
 }
 
-/* ── Work — the same TaskList, scoped. Not a fork. ─────────────────────── */
-function Work({ agent, onSay }) {
-  const t = useT();
-  return (
-    <>
-      {/* The link keeps its own anchor rather than being folded into the sentence:
-          a translated sentence and a hardcoded English link text is how localised
-          UIs end up with one English word mid-paragraph. */}
-      <div className="notice">
-        {t('ag.workScoped', { name: agent.name })}{' '}
-        <Link href="/tasks">{t('ag.allFleetTasks')}</Link>
-      </div>
-      <div style={{ marginTop: 12 }}>
-        <TaskList
-          tasks={tasks}
-          scope={{ status: 'open', assignee: 'all', priority: 'all', q: '' }}
-          lockedAssignee={agent.name}
-          onSay={onSay}
-        />
-      </div>
-    </>
-  );
-}
-
-function Messages({ agent }) {
-  const t = useT();
-  const msgs = [
-    { at: '01:22', dir: 'in', from: 'system', type: 'request', text: 'Reply with exactly PARITY2.' },
-    { at: '01:22', dir: 'out', to: 'system', type: 'reply', text: 'PARITY2' },
-    { at: '00:38', dir: 'in', from: 'system', type: 'request', text: 'Reply with exactly HERMES-LIVE.' },
-  ];
-  return (
-    <>
-      <div className="notice">{t('ag.msgNotice', { name: agent.name })}</div>
-      <div className="tbl-wrap" style={{ marginTop: 12 }}>
-        <table className="tbl">
-          <thead><tr><th>{t('col.when')}</th><th>{t('col.direction')}</th><th>{t('col.type')}</th><th>{t('col.message')}</th></tr></thead>
-          <tbody>
-            {msgs.map((m, i) => (
-              <tr key={i}>
-                <td className="dim">{m.at}</td>
-                <td>{m.dir === 'in' ? t('ag.from', { who: m.from }) : t('ag.toWho', { who: m.to })}</td>
-                <td><span className="badge">{m.type}</span></td>
-                <td>{m.text}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </>
-  );
-}
-
-/* ── Repos — the per-agent lens, linking to the fleet board ────────────── */
-function Repos({ agent }) {
-  const t = useT();
-  return (
-    <>
-      <div className="notice">
-        {t('ag.reposNotice')}{' '}
-        <Link href="/projects">{t('ag.projectBoard')}</Link>
-      </div>
-      <div className="tbl-wrap" style={{ marginTop: 12 }}>
-        <table className="tbl">
-          <thead><tr><th>{t('col.repo')}</th><th>{t('col.binding')}</th><th>{t('col.branch')}</th><th>{t('col.state')}</th></tr></thead>
-          <tbody>
-            {board.repos.slice(0, 3).map((r) => (
-              <tr key={r.repo}>
-                <td>{r.repo}</td>
-                <td className="dim">{r.repo.includes('infra') ? 'symlink' : 'copy'}</td>
-                <td className="dim">{r.branch}</td>
-                <td>
-                  <span className={`badge${r.state === 'dirty' ? ' attention' : ' ok'}`}>{r.state}</span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <p className="dim" style={{ fontSize: 12, marginTop: 10 }}>
-        {t('ag.bindingNote')}
-      </p>
-    </>
-  );
-}
-
-/* ── Profile — who is this agent ───────────────────────────────────────── */
 function Profile({ agent, onSay }) {
   const t = useT();
   return (

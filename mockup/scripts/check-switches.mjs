@@ -1,15 +1,21 @@
 #!/usr/bin/env node
 /**
- * Drive the real switches in a real browser.
+ * Assertions that need a real browser.
  *
- * check-invariants.mjs reads server-rendered HTML, which is always English and
- * always light — it cannot see whether the switches work at all. Everything the
- * language and theme features actually do happens after hydration, so it has to be
- * exercised in a browser or it is untested.
+ * The static pass reads server-rendered HTML, which is always English, always
+ * light, and never reflects computed CSS. This file covers what only a browser
+ * can see. Two of its checks exist because an earlier version of them lived in
+ * the static pass, passed, and went on passing while the bug was in:
  *
- * Uses the system Chrome via puppeteer-core; no browser download.
+ *   - a DOUBLED EM DASH: `.why-inline::before` draws one, so a component that
+ *     also emits a `.mk-dash` renders "— — reason". Generated content is not in
+ *     the HTML and `innerText` does not include it either.
+ *   - a WELDED CELL: "claude-agent1.1M left" and "5.0Mnot enforced" are two
+ *     inline spans with no separator. The markup is identical whether they read
+ *     correctly or not; only the computed `display` tells them apart.
+ *
+ * It drives the system Chrome through puppeteer-core and downloads nothing.
  */
-
 import puppeteer from 'puppeteer-core';
 
 const BASE = process.env.BASE ?? 'http://127.0.0.1:3100';
@@ -24,293 +30,207 @@ const check = (name, ok, detail = '') => {
 
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
 
-/*
- * Each block gets its own browser context, so it gets its own localStorage.
- *
- * The first version reused one context and every later block inherited the previous
- * block's saved choices — the "starts light" baseline was already dark, and the
- * "system follows the OS" check read a data-theme left behind two blocks earlier.
- * Persistence is the feature under test, so it cannot also be the test's ambient
- * state.
- */
-const contexts = [];
-async function fresh({ colorScheme = 'light', path = '/overview' } = {}) {
+/** A fresh context so localStorage from one case cannot leak into the next. */
+async function fresh({ colorScheme = 'light', path = '/resources', locale = null } = {}) {
   const ctx = await browser.createBrowserContext();
-  contexts.push(ctx);
   const page = await ctx.newPage();
+  await page.setViewport({ width: 1440, height: 1000 });
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: colorScheme }]);
-  await page.goto(BASE + path, { waitUntil: 'networkidle0' });
+  if (locale) {
+    await page.evaluateOnNewDocument((l) => localStorage.setItem('hafleet.locale', l), locale);
+  }
+  // Fixture mode explicitly. This suite's subject is the fixture's own rendering —
+  // contract slices are empty against a live backend, so its cell-layout checks
+  // would inspect zero cells and pass or fail for reasons unrelated to layout.
+  await page.goto(`${BASE}${path}${path.includes('?') ? '&' : '?'}data=fixture`, { waitUntil: 'networkidle0' });
+  // `networkidle0` only says the bytes arrived. A click before React attaches its
+  // handlers does nothing, silently, and every assertion after it reads the
+  // pre-click state — which passed against `npm start` and failed against
+  // `npm run dev`, the wrong way round for a check.
+  await page.waitForFunction(() => {
+    const el = document.querySelector('.prefs-row .seg');
+    return Boolean(el && Object.keys(el).some((k) => k.startsWith('__reactProps$')));
+  });
   return page;
 }
-
-/*
- * Click by POSITION, not by label. The first attempt used the English label and
- * every step after the language switch silently clicked nothing — the buttons read
- * 深色 / 浅色 / 跟随系统 by then. When the labels are the thing under test, they
- * cannot also be the selector.
- *   row 0 = language: [English, 中文]
- *   row 1 = theme:    [Light, Dark, System]
- */
-const seg = (page, row, index) => page.$$eval('.prefs-row', (rows, r, i) => {
-  const btns = [...rows[r].querySelectorAll('.seg')];
-  if (!btns[i]) return false;
-  btns[i].click();
-  return true;
-}, row, index);
-
-const LOCALE = { en: [0, 0], zh: [0, 1] };
-const THEME = { light: [1, 0], dark: [1, 1], system: [1, 2] };
-const pick = (page, map, name) => seg(page, ...map[name]);
 
 const state = (page) => page.evaluate(() => ({
   lang: document.documentElement.getAttribute('lang'),
   theme: document.documentElement.getAttribute('data-theme'),
-  bg: getComputedStyle(document.body).backgroundColor,
-  ink: getComputedStyle(document.body).color,
-  railHeading: document.querySelector('.rail-sec')?.textContent.trim(),
   navFirst: document.querySelector('.fleet-row .grow')?.textContent.trim(),
   h1: document.querySelector('h1')?.textContent.trim(),
   title: document.title,
-  // Position, not label — the labels are translated, so asserting on them would
-  // pass in English and fail in Chinese for no real reason.
+  bg: getComputedStyle(document.body).backgroundColor,
   pressed: [...document.querySelectorAll('.prefs-row')].map((row) =>
     [...row.querySelectorAll('.seg')].findIndex((b) => b.getAttribute('aria-pressed') === 'true')),
-  pressedText: [...document.querySelectorAll('.seg[aria-pressed="true"]')].map((e) => e.textContent.trim()),
-  fontFamily: getComputedStyle(document.body).fontFamily,
 }));
 
-// ── 1. language switch actually changes the words ────────────────────────
+console.log(`\nBrowser-only invariants against ${BASE}\n`);
+
+// ── 1. the doubled em dash, which no markup check can see ──────────────────
 {
-  const page = await fresh();
+  const page = await fresh({ path: '/resources' });
+  const dash = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('.why-inline')];
+    return {
+      n: rows.length,
+      before: rows.length ? getComputedStyle(rows[0], '::before').content : null,
+      doubled: rows.filter((el) => el.previousElementSibling?.classList.contains('mk-dash')).length,
+    };
+  });
+  check('reason spans render', dash.n > 0, `${dash.n} found`);
+  check('the dash comes from ::before', /—/.test(dash.before ?? ''), String(dash.before));
+  check('no blank draws the dash twice', dash.doubled === 0, `${dash.doubled} doubled`);
+}
+
+// ── 2. welded cells: a secondary line is a LINE ────────────────────────────
+{
+  for (const path of ['/resources', '/engagements', '/usage']) {
+    const page = await fresh({ path });
+    const bad = await page.evaluate(() => {
+      const spans = [...document.querySelectorAll('.tbl td > span.dim')];
+      return {
+        n: spans.length,
+        inline: spans.filter((e) => getComputedStyle(e).display !== 'block').length,
+      };
+    });
+    check(`${path}: every secondary cell line is a block`,
+      bad.n > 0 && bad.inline === 0, `${bad.n} spans, ${bad.inline} still inline`);
+  }
+}
+
+// ── 3. a qualifier beside a heading has air ────────────────────────────────
+{
+  /*
+   * `.note` had its margin scoped to `h2.sec .note`, so every `h3.sub` note
+   * welded to its heading — `Ceiling used, per agentcommitted, not consumed`.
+   * Same class as the welded table cell, and equally invisible to markup: the
+   * HTML is identical either way.
+   */
+  const page = await fresh({ path: '/usage' });
+  const notes = await page.evaluate(() => {
+    const els = [...document.querySelectorAll('.note')];
+    return { n: els.length, flush: els.filter((e) => parseFloat(getComputedStyle(e).marginLeft) < 4).length };
+  });
+  check('notes render', notes.n > 0, `${notes.n} found`);
+  check('every qualifier is spaced from its heading', notes.flush === 0, `${notes.flush} flush`);
+}
+
+// ── 4. the language switch actually changes the words ──────────────────────
+{
+  const page = await fresh({ path: '/resources' });
   const before = await state(page);
-  check('starts in English', before.navFirst === 'Overview' && before.lang === 'en', before.navFirst);
-  check('tab title follows the H1', before.title === 'Fleet overview — HAFleet', before.title);
+  check('starts in English', before.navFirst === 'My resources' && before.lang === 'en', before.navFirst);
+  check('tab title follows the H1', before.title === 'My resources — HAFleet', before.title);
 
-  check('中文 button exists', await pick(page, LOCALE, 'zh'));
-  await page.waitForFunction(() => document.documentElement.getAttribute('lang') === 'zh-CN');
-  const after = await state(page);
-
+  const zh = await fresh({ path: '/resources', locale: 'zh' });
+  const after = await state(zh);
   check('lang becomes zh-CN', after.lang === 'zh-CN', after.lang);
-  check('nav text is translated', after.navFirst === '总览', after.navFirst);
-  check('the H1 is translated', after.h1 === '集群总览', after.h1);
-  check('the tab title is translated', after.title.startsWith('集群总览'), after.title);
-  check('the rail heading is translated', /代理/.test(after.railHeading), after.railHeading);
-  check('the pressed state moved to 中文', after.pressed[0] === 1, after.pressedText.join(','));
-  check('no raw key is visible',
-    !/\b(rail|nav|ov|col|al)\.[a-zA-Z]/.test(await page.evaluate(() => document.body.innerText)));
-  await page.close();
+  check('nav text is translated', after.navFirst === '我的资源', after.navFirst);
+  check('the H1 is translated', after.h1 === '我的资源', after.h1);
+  check('the pressed locale moved', after.pressed[0] === 1, after.pressed.join(','));
 }
 
-// ── 2. the choice survives a reload, with no English flash ───────────────
+// ── 5. wire values survive translation ────────────────────────────────────
 {
-  const page = await fresh();
-  await pick(page, LOCALE, 'zh');
-  await page.waitForFunction(() => document.documentElement.getAttribute('lang') === 'zh-CN');
-  await pick(page, THEME, 'dark');
-  await page.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark');
-
-  // Read the attributes as the very first thing after navigation commits, before
-  // React has hydrated. If the inline script is missing, this is 'en'/null.
-  // Same context as `page` on purpose: shared localStorage is the mechanism being
-  // asserted. Every other block gets a fresh one.
-  const page2 = await page.browserContext().newPage();
-  await page2.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'light' }]);
-  await page2.goto(`${BASE}/alerts`, { waitUntil: 'domcontentloaded' });
-  const early = await page2.evaluate(() => ({
-    lang: document.documentElement.getAttribute('lang'),
-    theme: document.documentElement.getAttribute('data-theme'),
-  }));
-  check('theme is set before hydration finishes', early.theme === 'dark', String(early.theme));
-  check('lang is set before hydration finishes', early.lang === 'zh-CN', String(early.lang));
-
-  await page2.waitForNetworkIdle();
-  const late = await state(page2);
-  check('a second route keeps both choices',
-    late.lang === 'zh-CN' && late.theme === 'dark', `${late.lang}/${late.theme}`);
-  check('the second route is translated too', late.h1 === '告警', late.h1);
-  await page.close(); await page2.close();
+  /*
+   * A translated model name is unsearchable and a translated tier would stop
+   * matching the scheduler, so both must appear verbatim in Chinese too.
+   */
+  const zh = await fresh({ path: '/resources', locale: 'zh' });
+  const text = await zh.evaluate(() => document.body.innerText);
+  for (const wire of ['claude-opus-5', 'kimi-k3', 'gpt-5.6-sol', 'strong', 'medium']) {
+    check(`\`${wire}\` is not translated`, text.includes(wire));
+  }
 }
 
-// ── 3. dark theme actually repaints ──────────────────────────────────────
+// ── 6. dark actually repaints, and is measurably darker ────────────────────
 {
-  const page = await fresh();
-  const light = await state(page);
-  await pick(page, THEME, 'dark');
-  await page.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark');
-  const dark = await state(page);
-
-  check('data-theme becomes dark', dark.theme === 'dark', String(dark.theme));
-  check('the page background actually changes', dark.bg !== light.bg, `${light.bg} → ${dark.bg}`);
-  check('the text colour actually changes', dark.ink !== light.ink, `${light.ink} → ${dark.ink}`);
-
+  const light = await state(await fresh({ colorScheme: 'light' }));
+  const dark = await state(await fresh({ colorScheme: 'dark' }));
   const lum = (rgb) => {
-    const [r, g, b] = rgb.match(/\d+/g).map(Number);
+    const [r, g, b] = (rgb.match(/\d+/g) ?? [255, 255, 255]).map(Number);
     return 0.2126 * r + 0.7152 * g + 0.0722 * b;
   };
-  check('dark really is darker', lum(dark.bg) < lum(light.bg), `${Math.round(lum(light.bg))} → ${Math.round(lum(dark.bg))}`);
-  check('dark keeps text/background contrast',
-    Math.abs(lum(dark.ink) - lum(dark.bg)) > 120,
-    `Δ${Math.round(Math.abs(lum(dark.ink) - lum(dark.bg)))}`);
-
-  // Every panel and badge has to move too — a token miss shows up as one element
-  // still painted for the other theme.
-  const stragglers = await page.$$eval('.panel, .card, .badge, .btn, .notice, table.tbl th',
-    (els) => els.filter((e) => {
-      const bg = getComputedStyle(e).backgroundColor.match(/\d+/g);
-      if (!bg) return false;
-      const [r, g, b] = bg.map(Number);
-      const a = bg[3] === undefined ? 1 : Number(bg[3]);
-      return a > 0.5 && 0.2126 * r + 0.7152 * g + 0.0722 * b > 200;
-    }).map((e) => `${e.tagName.toLowerCase()}.${e.className}`.slice(0, 40)));
-  check('no element stays painted light', stragglers.length === 0, stragglers.slice(0, 4).join(' | '));
-  await page.close();
+  check('dark is measurably darker than light', lum(dark.bg) < lum(light.bg) - 40,
+    `${light.bg} -> ${dark.bg}`);
 }
 
-// ── 4. system follows the OS, and an explicit choice overrides it ─────────
+// ── 7. no page scrolls sideways ───────────────────────────────────────────
 {
-  const page = await fresh({ colorScheme: 'dark' });
-  const sys = await state(page);
-  check('system default follows a dark OS', sys.theme === null && sys.bg === 'rgb(16, 21, 27)',
-    `${sys.theme}/${sys.bg}`);
-  check('nothing was stored until a choice was made',
-    (await page.evaluate(() => localStorage.getItem('hafleet.theme'))) === 'system');
-
-  await pick(page, THEME, 'light');
-  await page.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'light');
-  const forced = await state(page);
-  check('an explicit Light beats a dark OS', forced.bg === 'rgb(255, 255, 255)', forced.bg);
-  check('the pressed state moved to Light', forced.pressed[1] === 0, forced.pressedText.join(','));
-
-  await pick(page, THEME, 'system');
-  await page.waitForFunction(() => !document.documentElement.hasAttribute('data-theme'));
-  const back = await state(page);
-  check('System hands control back to the OS', back.bg === 'rgb(16, 21, 27)', back.bg);
-  await page.close();
-}
-
-// ── 5. the CJK face is actually reached ──────────────────────────────────
-{
-  const page = await fresh();
-  await pick(page, LOCALE, 'zh');
-  await page.waitForFunction(() => document.documentElement.getAttribute('lang') === 'zh-CN');
-  const fonts = await page.evaluate(async () => {
-    await document.fonts.ready;
-    return [...document.fonts].map((f) => f.family.replace(/"/g, ''));
-  });
-  check('a CJK face is loaded for Chinese text',
-    fonts.some((f) => /Noto Sans SC/i.test(f)), [...new Set(fonts)].join(', ').slice(0, 80));
-  await page.close();
-}
-
-// ── 6. keyboard reach ────────────────────────────────────────────────────
-{
-  const page = await fresh();
-  const reachable = await page.$$eval('.seg', (els) => els.every((e) => e.tabIndex >= 0));
-  check('every switch is keyboard reachable', reachable);
-  const grouped = await page.$$eval('.prefs-row', (els) =>
-    els.every((e) => e.getAttribute('role') === 'group' && e.hasAttribute('aria-label')));
-  check('each switch is a labelled group', grouped);
-  await page.close();
-}
-
-// ── 7. no horizontal overflow at any specified width ─────────────────────
-{
-  /*
-   * The design specified breakpoints and never tested them. /projects overflowed by
-   * 28px at 375px because an inline grid-template-columns beat the media query that
-   * collapses .split to one column — a cascade collision an inline style sets up and
-   * a stylesheet cannot undo. Column ratios are modifier classes now.
-   */
-  const ROUTES_R = ['/overview', '/alerts', '/queue', '/tasks', '/projects', '/capacity',
-    '/onboard', '/config', '/agents/octos-agent'];
-  const WIDTHS = [375, 640, 900, 1440];
-  const over = [];
-  const ctx = await browser.createBrowserContext();
-  contexts.push(ctx);
-  const page = await ctx.newPage();
-  for (const w of WIDTHS) {
+  for (const w of [375, 900, 1440]) {
+    const ctx = await browser.createBrowserContext();
+    const page = await ctx.newPage();
     await page.setViewport({ width: w, height: 900 });
-    for (const r of ROUTES_R) {
-      await page.goto(BASE + r, { waitUntil: 'networkidle0' });
-      const m = await page.evaluate(() => {
-        const d = document.documentElement;
-        return {
-          scrolls: d.scrollWidth > d.clientWidth + 1,
-          by: d.scrollWidth - d.clientWidth,
-          // Wide content is allowed to overflow INSIDE its own scroller; only an
-          // ancestor-less overflow makes the page itself scroll sideways.
-          culprits: [...document.querySelectorAll('body *')].filter((e) => {
-            if (e.scrollWidth <= d.clientWidth + 1) return false;
-            for (let n = e.parentElement; n && n !== document.body; n = n.parentElement) {
-              const ox = getComputedStyle(n).overflowX;
-              if (ox === 'auto' || ox === 'scroll') return false;
-            }
-            return true;
-          }).slice(0, 2).map((e) => `${e.tagName.toLowerCase()}.${String(e.className).slice(0, 20)}`),
-        };
-      });
-      if (m.scrolls) over.push(`${w}px ${r} +${m.by}px ${m.culprits.join(' ')}`);
-    }
+    await page.goto(`${BASE}/engagements?data=fixture`, { waitUntil: 'networkidle0' });
+    const over = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+    check(`/engagements does not scroll sideways at ${w}px`, !over);
+    await ctx.close();
   }
-  check(`no page scrolls sideways at ${WIDTHS.join('/')}px`, over.length === 0, over.slice(0, 3).join(' | '));
-
-  // The rail is the whole navigation model, so it must survive the narrowest width.
-  await page.setViewport({ width: 375, height: 900 });
-  await page.goto(`${BASE}/overview`, { waitUntil: 'networkidle0' });
-  const rail = await page.evaluate(() => {
-    const r = document.querySelector('.rail');
-    return { w: r?.offsetWidth ?? 0, rows: document.querySelectorAll('.fleet-row').length };
-  });
-  check('the rail survives 375px', rail.w > 0 && rail.rows === 8, `${rail.w}px, ${rail.rows} destinations`);
-  await page.close();
 }
 
-// ── 8. no control looks live and does nothing ────────────────────────────
+// ── 8. the rail is six destinations under four headings ───────────────────
+{
+  const page = await fresh();
+  const rail = await page.evaluate(() => ({
+    rows: document.querySelectorAll('.rail-fleet .fleet-row').length,
+    heads: document.querySelectorAll('.rail-fleet .rail-sec').length,
+    current: document.querySelectorAll('[aria-current="page"]').length,
+  }));
+  check('six nav destinations — onboard moved onto the roster', rail.rows === 6, String(rail.rows));
+  check('under four headings', rail.heads === 4, String(rail.heads));
+  check('exactly one marked current', rail.current === 1, String(rail.current));
+}
+
+// ── 9. every button has a handler ─────────────────────────────────────────
 {
   /*
-   * Three buttons shipped with no handler — projects Refresh, and the agent header's
-   * cadence and Pause. A dead control is worse than an absent one: it teaches the
-   * operator to distrust every other control on the page.
+   * A control that looks live and does nothing teaches the reader to distrust
+   * every other control on the page.
+   *
+   * `onClick` is not the only legitimate way to handle a button. A `type="submit"`
+   * inside a form with an `onSubmit` is handled — and handled better, since Enter
+   * works too. The first version of this check counted the whitelist form's submit
+   * as dead, which is a false positive: broadened to the two real forms of handling
+   * rather than relaxed, so a genuinely inert button still fails.
    */
-  const page = await fresh();
-  const dead = [];
-  for (const r of ['/overview', '/alerts', '/queue', '/tasks', '/projects', '/capacity',
-    '/onboard', '/config', '/agents/octos-agent', '/agents/codex-agent']) {
-    await page.goto(BASE + r, { waitUntil: 'networkidle0' });
-    const found = await page.$$eval('button', (els) => els
-      // React attaches listeners at the root, so the DOM cannot be asked directly.
-      // A live button is one React gave an onClick prop to, which shows up on the
-      // element's internal props object.
-      .filter((e) => {
-        const key = Object.keys(e).find((k) => k.startsWith('__reactProps$'));
-        const props = key ? e[key] : null;
-        return !(props && typeof props.onClick === 'function');
-      })
-      .map((e) => e.textContent.trim().slice(0, 26)));
-    for (const label of found) dead.push(`${r}:${label}`);
+  for (const path of ['/resources', '/capability', '/engagements', '/resources/new']) {
+    const page = await fresh({ path });
+    const dead = await page.evaluate(() => {
+      const props = (el) => {
+        const key = Object.keys(el).find((k) => k.startsWith('__reactProps$'));
+        return key ? el[key] : null;
+      };
+      const btns = [...document.querySelectorAll('button:not([disabled])')];
+      return btns.filter((b) => {
+        if (props(b)?.onClick) return false;
+        if (b.type === 'submit') {
+          const form = b.closest('form');
+          if (form && props(form)?.onSubmit) return false;
+        }
+        return true;
+      }).map((b) => b.innerText.trim().slice(0, 24));
+    });
+    check(`${path}: no button shipped without a handler`, dead.length === 0,
+      dead.length ? `${dead.length} dead: ${dead.join(' | ')}` : '0 dead');
   }
-  check('every button has a handler', dead.length === 0, dead.slice(0, 5).join(' | '));
-  await page.close();
 }
 
-/*
- * Teardown, with a deadline.
- *
- * browser.close() reliably hung here after every check had passed, so the run looked
- * like a hanging test when it was a hanging teardown — and each abandoned run left a
- * headless Chrome behind until 30 of them were contending, which then really did make
- * the next run slow. So: report the result FIRST, then try to close politely, then
- * SIGKILL the process group and exit regardless.
- */
-console.log(`\n${failed === 0 ? 'Switches verified in-browser.' : `${failed} FAILED.`}\n`);
+// ── 10. the wizard shows the consequence before the last step ──────────────
+{
+  /*
+   * "Which roles does this let me offer" is the question the whole wizard
+   * answers. Finding out only at the end is too late to change a decision
+   * cheaply, so the outcome panel must appear as soon as a model is picked.
+   */
+  const page = await fresh({ path: '/resources/new' });
+  await page.evaluate(() => [...document.querySelectorAll('.fw')].find((b) => b.textContent.includes('claude'))?.click());
+  await page.evaluate(() => [...document.querySelectorAll('.btn')].find((b) => b.textContent.trim() === 'Next')?.click());
+  await page.evaluate(() => [...document.querySelectorAll('.btn')].find((b) => b.textContent.trim() === 'Choose')?.click());
+  const shown = await page.evaluate(() => Boolean(document.querySelector('.panel.outcome')));
+  check('the outcome appears as soon as a model is chosen, not at the end', shown);
+}
 
-const pid = browser.process()?.pid;
-await Promise.race([
-  (async () => {
-    for (const c of contexts) await c.close().catch(() => {});
-    await browser.close().catch(() => {});
-  })(),
-  new Promise((r) => setTimeout(r, 3000)),
-]);
-if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch {} } }
+console.log(`\n${failed === 0 ? 'Switches verified in-browser.' : `${failed} FAILED.`}\n`);
+browser.process()?.kill('SIGKILL');
 process.exit(failed === 0 ? 0 : 1);

@@ -3,64 +3,148 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useMemo, useState } from 'react';
-import { agents, railCounts, runtimeStatusText } from '@/lib/mock-data';
+import { runtimeStatusText } from '@/lib/mock-data';
+import { useData } from '@/components/Data';
 import { PrefsSwitch, useT } from '@/components/Prefs';
 
 /*
- * The rail. Present on every route, which is the whole point of the relayout:
- * agent state never leaves the screen.
+ * The rail. Present on every route, so what I am lending never leaves the screen.
  *
- * Design decisions encoded here, each answering a review finding:
- *  - agents are <Link>, not <button>: they already have real URLs, so
- *    middle-click, bookmarking and keyboard navigation come free
- *  - every row shows ACTIVE/IDLE and a duration, so the first screen answers
- *    "what needs attention" without a click
- *  - Fleet nav is a separate pinned grid row, so a long agent list cannot push
- *    it below the fold
- *  - counts are labelled ("9 open", "0 groups"), never bare numbers whose
- *    denominator the operator has to guess
- *  - aria-current="page" marks the destination, so the rail necessarily differs
- *    by one attribute per page rather than being byte-identical
+ * Decisions carried over from the previous console, each of which answered a
+ * review finding:
+ *  - agents are <Link>, not <button>: they have real URLs, so middle-click,
+ *    bookmarking and keyboard navigation come free
+ *  - nav is a pinned grid row, so a long agent list cannot push it below the fold
+ *  - counts are labelled ("3 pending"), never bare numbers whose denominator the
+ *    reader has to guess
+ *  - aria-current="page" marks the destination exactly once
+ *
+ * What changed is the tag under each agent. It used to read the transport, then
+ * the role it had been allocated. For a contributor the useful fact is **what it
+ * contributes** — the model, and the tier that model qualifies for. An agent with
+ * no preset says so, because that is the state which makes it useless.
  */
-
-const FLEET = [
-  { href: '/overview', key: 'overview', icon: '▦', count: null },
-  { href: '/alerts', key: 'alerts', icon: '◉', count: 'alertsOpen', unit: 'open', hot: true },
-  { href: '/queue', key: 'queue', icon: '↧', count: 'queued', unit: 'waiting' },
-  { href: '/tasks', key: 'tasks', icon: '☑', count: 'tasksOpen', unit: 'open' },
-  { href: '/projects', key: 'projects', icon: '▤', count: 'projectGroups', unit: 'groups' },
-  { href: '/capacity', key: 'capacity', icon: '◫', count: null },
-  // Onboarding sits with the fleet destinations rather than inside Config: it
-  // adds an agent, and Config's other sections change agents that already exist.
-  { href: '/onboard', key: 'onboard', icon: '＋', count: 'frameworksReady', unit: 'ready' },
-  { href: '/config', key: 'config', icon: '⚙', count: null },
+const SECTIONS = [
+  {
+    head: 'rail.secResource',
+    rows: [
+      { href: '/resources', key: 'resources', icon: '▦', count: 'agentsConfigured', unit: 'configured', also: ['/'] },
+    ],
+  },
+  {
+    head: 'rail.secCapability',
+    rows: [
+      { href: '/capability', key: 'capability', icon: '◫', count: 'rolesOffered', unit: 'offered' },
+    ],
+  },
+  {
+    head: 'rail.secEngagement',
+    rows: [
+      { href: '/engagements', key: 'engagements', icon: '⇄', count: 'pending', unit: 'pending', hot: true },
+      { href: '/usage', key: 'usage', icon: '◎', count: 'active', unit: 'active' },
+    ],
+  },
+  {
+    head: 'rail.secFleet',
+    rows: [
+      { href: '/alerts', key: 'alerts', icon: '◉', count: 'alertsOpen', unit: 'open', hot: true },
+      { href: '/config', key: 'config', icon: '⚙', count: null },
+    ],
+  },
 ];
+
+// A dynamic segment marks its parent, so /resources/new and /agents/<name> never
+// render a rail with nothing current — which the invariant suite rejects and a
+// reader experiences as being lost.
+const isUnder = (pathname, href) => pathname.startsWith(`${href}/`);
 
 export default function Rail() {
   const t = useT();
   const pathname = usePathname();
   const [filter, setFilter] = useState('');
+  /*
+   * The rail reads the same source as the page beside it.
+   *
+   * It did not, briefly, and the result was the clearest possible symptom: a live
+   * roster in the table and five fixture names in the rail, on the same screen. A
+   * navigation surface that disagrees with the content it navigates to is worse
+   * than one with no counts at all.
+   */
+  const { agents, presetOf, railCounts, tierOf } = useData();
   const counts = railCounts();
 
+  /*
+   * EVERY agent, not only the running ones.
+   *
+   * This filtered on `alive !== false`, which was invisible against a fixture where
+   * every agent is alive. Against a real backend it emptied the rail completely:
+   * registered-but-not-running is the ordinary state of a contributed agent, and
+   * the page beside it listed five while the rail said "AGENTS · 0".
+   *
+   * Hiding them is also wrong on its own terms. This is a roster of what the
+   * contributor OWNS, not of what happens to be executing; an idle agent is still
+   * lent capacity, and it is the one you would click to find out why it is idle.
+   * The row already carries its state, so nothing is lost by showing it.
+   *
+   * `agents` belongs in the dependency list. When the roster was a module-level
+   * import it never changed, so [filter] alone was harmless; now it arrives from a
+   * fetch, and omitting it froze the rail on the fixture names while the counts
+   * beside them — computed outside the memo — had already switched to live.
+   */
   const shown = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    const live = agents.filter((a) => a.alive !== false);
-    if (!q) return live;
-    return live.filter((a) => a.name.toLowerCase().includes(q));
-  }, [filter]);
+    if (!q) return agents;
+    return agents.filter((a) => a.name.toLowerCase().includes(q));
+  }, [agents, filter]);
 
-  const downCount = agents.filter((a) => a.alive === false).length;
+  const unconfigured = agents.filter((a) => !a.presetId).length;
 
   return (
-    <nav className="rail" aria-label={t('rail.fleet')}>
+    <nav className="rail" aria-label={t('rail.nav')}>
       <div className="rail-brand">
         <b>HAFLEET</b>
         <span>
-          {`${agents.length} ${t('rail.agentsCount')} · ${downCount} ${t('rail.agentsDown')}`}
+          {`${agents.length} ${t('rail.agentsCount')} · ${unconfigured} ${t('rail.unconfigured')}`}
         </span>
       </div>
 
-      <div className="rail-filter">
+      <div className="rail-fleet">
+        {SECTIONS.map((sec) => (
+          <div key={sec.head}>
+            <h2 className="rail-sec">{t(sec.head)}</h2>
+            <ul className="rail-list">
+              {sec.rows.map((f) => {
+                const n = f.count ? counts[f.count] : null;
+                const current = pathname === f.href
+                  || isUnder(pathname, f.href)
+                  || (f.also ?? []).includes(pathname);
+                return (
+                  <li key={f.href}>
+                    <Link
+                      href={f.href}
+                      className="fleet-row"
+                      aria-current={current ? 'page' : undefined}
+                    >
+                      <span className="ico" aria-hidden="true">{f.icon}</span>
+                      <span className="grow">{t(`nav.${f.key}`)}</span>
+                      {/* One interpolated string, not two adjacent expressions:
+                          React separates those with a comment marker in SSR,
+                          which fragments the text node and breaks copy. */}
+                      {f.count && (
+                        <span className={`pill${n > 0 && f.hot ? ' hot' : ''}${n === 0 ? ' zero' : ''}`}>
+                          {`${n} ${t(`unit.${f.unit}`)}`}
+                        </span>
+                      )}
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))}
+      </div>
+
+      <div className="rail-filter roster-filter">
         <input
           type="search"
           placeholder={t('rail.filter')}
@@ -71,66 +155,54 @@ export default function Rail() {
       </div>
 
       <div className="rail-scroll">
-        <h2 className="rail-sec">{`${t('rail.agents')} · ${shown.length}`}</h2>
+        <h2 className="rail-sec roster-head">
+          <span className="grow">{`${t('rail.agents')} · ${shown.length}`}</span>
+          {/* The action that adds a row to THIS list, attached to the list it
+              changes rather than sitting in the nav as a peer of the four
+              destinations — a contributor onboards far less often than they
+              look at what they are lending. */}
+          <Link href="/onboard" className="roster-add" title={t('nav.onboard')}
+            aria-current={pathname === '/onboard' ? 'page' : undefined}>
+            {t('rail.addAgent')}
+          </Link>
+        </h2>
         <ul className="rail-list">
           {shown.map((a) => {
             const href = `/agents/${a.name}`;
-            const current = pathname === href;
+            const preset = presetOf(a);
+            const tier = tierOf(preset);
             return (
               <li key={a.name}>
                 <Link
                   href={href}
                   className={`agent-row${a.activeNow ? ' on' : ''}`}
-                  aria-current={current ? 'page' : undefined}
+                  aria-current={pathname === href ? 'page' : undefined}
                 >
-                  <span className="glyph" aria-hidden="true">
-                    {a.activeNow ? '●' : '○'}
-                  </span>
+                  <span className="glyph" aria-hidden="true">{a.activeNow ? '●' : '○'}</span>
                   <span className="id">
                     <span className="nm">{a.name}</span>
-                    {/* Status is text, not colour. Hidden nothing at narrow widths. */}
+                    {/* Status is text, not colour. */}
                     <span className="st">{runtimeStatusText(a)}</span>
+                    {/* What it contributes. An unconfigured agent contributes
+                        nothing, and that is the fact worth surfacing. */}
+                    <span className={`job${preset ? '' : ' none'}`}>
+                      {preset ? `${preset.model} · ${tier}` : t('rail.noModel')}
+                    </span>
                   </span>
-                  <span className="tag">{a.transport === 'acp' ? 'ACP' : 'TMUX'}</span>
                 </Link>
               </li>
             );
           })}
+          {/* Two different empty states. `No agent matches ""` — which is what a
+              fresh install used to read — describes a search nobody performed. The
+              quoted term only belongs here when there IS one. */}
           {shown.length === 0 && (
-            <li style={{ padding: '6px 16px', fontSize: 12, color: 'var(--ink-faint)' }}>
-              {`${t('rail.noMatch')} “${filter}”`}
+            <li className="rail-empty">
+              {agents.length === 0
+                ? t('rail.noAgentsAtAll')
+                : `${t('rail.noMatch')} “${filter}”`}
             </li>
           )}
-        </ul>
-      </div>
-
-      <div className="rail-fleet">
-        <h2 className="rail-sec">{t('rail.fleet')}</h2>
-        <ul className="rail-list">
-          {FLEET.map((f) => {
-            const n = f.count ? counts[f.count] : null;
-            const current = pathname === f.href || (f.href === '/overview' && pathname === '/');
-            return (
-              <li key={f.href}>
-                <Link
-                  href={f.href}
-                  className="fleet-row"
-                  aria-current={current ? 'page' : undefined}
-                >
-                  <span className="ico" aria-hidden="true">{f.icon}</span>
-                  <span className="grow">{t(`nav.${f.key}`)}</span>
-                  {/* One interpolated string below, not two adjacent expressions:
-                      React separates those with a comment marker in SSR, which
-                      fragments the text node and breaks selection and copy. */}
-                  {f.count && (
-                    <span className={`pill${n > 0 && f.hot ? ' hot' : ''}${n === 0 ? ' zero' : ''}`}>
-                      {`${n} ${t(`unit.${f.unit}`)}`}
-                    </span>
-                  )}
-                </Link>
-              </li>
-            );
-          })}
         </ul>
       </div>
 

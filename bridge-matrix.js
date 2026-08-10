@@ -331,6 +331,22 @@ const MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW = Number.parseInt(process.env.MATRIX_
 const MATRIX_AGENT_ROOM_BACKFILL_LIMIT = Number.isFinite(MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW) && MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW > 0
   ? MATRIX_AGENT_ROOM_BACKFILL_LIMIT_RAW
   : 25;
+// How far back to look when the bot joins a room, for messages sent between the
+// invite and the join. Its own knob rather than sharing the agent-room limit: this
+// one is a single fetch per join, not a periodic sweep, so it can afford a wider
+// window, and tying the two would make tuning one silently retune the other.
+const MATRIX_JOIN_BACKFILL_LIMIT_RAW = Number.parseInt(process.env.MATRIX_JOIN_BACKFILL_LIMIT || '50', 10);
+const MATRIX_JOIN_BACKFILL_LIMIT = Number.isFinite(MATRIX_JOIN_BACKFILL_LIMIT_RAW) && MATRIX_JOIN_BACKFILL_LIMIT_RAW > 0
+  ? MATRIX_JOIN_BACKFILL_LIMIT_RAW
+  : 50;
+// Bounds on walking back for the invite that delimits the window. Both are needed:
+// pages caps the requests made, events caps what a server returning huge pages can
+// cost. Exhausting either fails closed, which is the same answer as not finding it.
+const MATRIX_JOIN_BACKFILL_PAGES = Math.max(1, Number.parseInt(process.env.MATRIX_JOIN_BACKFILL_PAGES || '5', 10) || 5);
+const MATRIX_JOIN_BACKFILL_MAX_EVENTS = Math.max(
+  MATRIX_JOIN_BACKFILL_LIMIT,
+  Number.parseInt(process.env.MATRIX_JOIN_BACKFILL_MAX_EVENTS || '500', 10) || 500,
+);
 
 mkdirSync(DATA_DIR, { recursive: true });
 mkdirSync(MEDIA_DIR, { recursive: true });
@@ -586,6 +602,72 @@ function humanUserId(name) {
 }
 
 /** DM key: federated users key by full MXID, local users by localpart. */
+/*
+ * Which of the bot's DM rooms are DEAD, and therefore reapable.
+ *
+ * WHY THIS EXISTS. The bridge opens a DM with each new human it discovers and never
+ * closes one. `ensureBotDmRoom` reuses per human, so it is one room per person rather
+ * than per encounter — but nothing removes the room when the person is gone, and
+ * `botDmRooms` grows beside it. A 50-minute soak that registered 48 throwaway
+ * projects left the bot sitting alone in 52 DMs, and in production that is one
+ * permanent room per user who ever appeared.
+ *
+ * THE DISTINCTION THAT MATTERS: a DM the human has not ACCEPTED yet also shows the
+ * bot as the only joined member. Reaping on "nobody else joined" would cancel every
+ * greeting still in flight — the invitation would vanish before it was seen. Only
+ * membership `leave` (or `ban`) means gone. Absence of a join is not evidence of
+ * departure, it is usually evidence of not having looked yet.
+ *
+ * TWO OUTCOMES, NOT ONE. A room the bot is still in but the human has left needs
+ * leaving. A room the bot is ALREADY out of needs nothing but the stale pointer
+ * removed — and those entries were accumulating unnoticed, because the first version
+ * tried to read the room's joined members, got M_FORBIDDEN (the bot is not in it),
+ * treated that as an unknown, and kept the entry forever. Verified against the live
+ * homeserver: `/members?membership=leave` still answers for a room you have left,
+ * `/joined_members` does not.
+ *
+ * `bot-absent` is durable — not a member is not a transient condition — whereas a
+ * rate limit or a network error leaves the entry `null` and is skipped, because a
+ * failed lookup must never become a deletion.
+ *
+ * @param dmRooms   state.botDmRooms — { humanKey: roomId }
+ * @param membership { roomId: 'join' | 'invite' | 'leave' | 'ban' | 'bot-absent' |
+ *                   null }. `null` means unknown, which is never treated as gone.
+ * @returns [{ humanKey, roomId, reason, action: 'leave' | 'drop' }]
+ */
+/**
+ * Should reaping this room also forget that the human was greeted?
+ *
+ * SEPARATED OUT BECAUSE THIS IS WHERE THE BUG WAS, and no test could see it. The
+ * decision above (which rooms are dead) was well covered; this — what state to delete
+ * as a consequence — was inline in the caller, and getting it wrong turned a bounded
+ * leak into an unbounded churn loop: forget the greeting, re-greet, create a DM, reap
+ * it, forget again. Observed live, 39 -> 45 rooms in forty-five seconds. A pure
+ * function over the decision cannot catch a mistake in the consequence, so the
+ * consequence is a pure function too.
+ *
+ * `greetedHumans` means "this person has already been greeted". Tidying a room the bot
+ * stepped out of says nothing about the person, so the memory stays. An actual
+ * departure does mean a future arrival deserves a greeting.
+ */
+export function forgetGreetingOnReap(reason) {
+  return reason === 'leave' || reason === 'ban';
+}
+
+export function reapableBotDms(dmRooms = {}, membership = {}) {
+  const out = [];
+  for (const [humanKey, roomId] of Object.entries(dmRooms || {})) {
+    if (typeof roomId !== 'string' || !roomId) continue;
+    const state = membership[roomId] ?? null;
+    if (state === 'leave' || state === 'ban') {
+      out.push({ humanKey, roomId, reason: state, action: 'leave' });
+    } else if (state === 'bot-absent') {
+      out.push({ humanKey, roomId, reason: state, action: 'drop' });
+    }
+  }
+  return out;
+}
+
 function humanDmKey(name) {
   if (typeof name === 'string' && name.startsWith('@') && name.includes(':')) {
     const homeserver = name.slice(name.indexOf(':') + 1);
@@ -1528,6 +1610,102 @@ function roomTrustLog(action, roomId, trust, extra = '') {
   const tag = trust.trusted ? 'TRUSTED' : 'UNTRUSTED';
   const detail = extra ? ` ${extra}` : '';
   console.log(`[trust:${MATRIX_TRUST_MODE}] ${action} room=${roomId} ${tag} reason=${trust.reason}${detail}`);
+}
+
+/*
+ * Which messages in a room the bot has JUST JOINED still need routing.
+ *
+ * THE DEFECT THIS EXISTS FOR. Sync only delivers events from after the join point,
+ * and nothing backfilled a room the bot joined by invite. So anything said between
+ * the invite and the join was lost permanently — no engagement, no reply, no error.
+ * Reproduced against the live deployment: a `!request` sent at t+0 into a freshly
+ * created room, bot joined at t+2s, and 80 seconds later there was still no answer.
+ * That window is not exotic; inviting the bot and immediately stating what you want
+ * is the obvious way to use it.
+ *
+ * `backfillAgentManagedRooms()` did not cover this. It only walks rooms that already
+ * have an agent BINDING, and a project room asking for its first agent has none —
+ * the backfill was gated on the very state the dropped message was trying to create.
+ *
+ * WHY THE INVITE TIMESTAMP IS THE FLOOR. A room may carry long history the bot can
+ * now read, and replaying it would execute commands nobody just issued — including
+ * `!request`s from a previous membership if the bot was invited, left, and
+ * re-invited. Events at or after THIS invite are the ones addressed to this join.
+ *
+ * This decides only WHICH events to deliver. Trust, sender filtering and dedup stay
+ * in onRoomMessage, so a backfilled event is gated exactly like a synced one.
+ */
+/*
+ * Which messages in a room the bot has JUST JOINED still need routing.
+ *
+ * THE DEFECT THIS EXISTS FOR. Sync delivers only events from after the join point,
+ * and nothing backfilled a room the bot joined by invite. So anything said between
+ * the invite and the join was lost permanently — no engagement, no reply, no error.
+ * Reproduced against the live deployment: a `!request` sent at t+0 into a freshly
+ * created room, bot joined at t+2s, and 80 seconds later there was still no answer.
+ *
+ * `backfillAgentManagedRooms()` did not cover this: it only walks rooms that already
+ * have an agent BINDING, so the backfill was gated on the very state the dropped
+ * message was trying to create.
+ *
+ * SELECTION IS BY POSITION, NOT BY TIMESTAMP, and the first version got that wrong.
+ * It computed a time "floor" from the invite and admitted anything newer. Matrix does
+ * not order by wall clock: `/messages` order is server-defined, `origin_server_ts`
+ * can be set by an application service without changing DAG order, and clocks skew.
+ * A counterexample runs cleanly against the timestamp version — an older-in-timeline
+ * `!request` carrying a newer timestamp than the invite is admitted and executed. The
+ * same flaw reversed command order whenever two events shared a millisecond, because
+ * a stable sort with a zero comparator preserved the newest-first fetch order and
+ * turned `!request` then `!cancel` into cancel-then-request.
+ *
+ * So the window is delimited by the membership events themselves: everything after
+ * the bot's CURRENT invite and before its join. Those are the two events that define
+ * the gap, they are in the timeline the server just returned, and their relative
+ * position is authoritative in a way their timestamps are not.
+ *
+ * IT FAILS CLOSED. If the current invite is not in the fetched page, no boundary can
+ * be proven and NOTHING is routed — commands are executable, and replaying one nobody
+ * just issued is worse than missing it. The previous bounded-window fallback was
+ * fail-open by construction: it admitted a four-minute-old `!request` on a re-invite.
+ *
+ * This decides only WHICH events to deliver. Trust, sender filtering and dedup stay
+ * in onRoomMessage, so a backfilled event is gated exactly like a synced one.
+ */
+export function pendingJoinBackfill(chunk, { botUserId = null, seen = null } = {}) {
+  if (!Array.isArray(chunk) || !botUserId) return { events: [], boundary: 'no-input' };
+  // /messages?dir=b is newest-first; every index below is in timeline order.
+  const timeline = [...chunk].reverse();
+
+  /*
+   * The LAST invite, and the join that follows it. A room the bot was invited to,
+   * left, and re-invited to carries several — anchoring on an older one is how a
+   * previous membership's commands get replayed.
+   */
+  let inviteIdx = -1;
+  let joinIdx = -1;
+  for (let i = 0; i < timeline.length; i += 1) {
+    const e = timeline[i];
+    if (e?.type !== 'm.room.member' || e.state_key !== botUserId) continue;
+    const membership = e.content?.membership;
+    if (membership === 'invite') { inviteIdx = i; joinIdx = -1; }
+    else if (membership === 'join' && inviteIdx >= 0 && joinIdx < 0) { joinIdx = i; }
+  }
+  if (inviteIdx < 0) return { events: [], boundary: 'unproven' };
+
+  // No join in the page means we joined after everything it contains; the window is
+  // the rest of the page.
+  const end = joinIdx >= 0 ? joinIdx : timeline.length;
+  const events = [];
+  for (let i = inviteIdx + 1; i < end; i += 1) {
+    const e = timeline[i];
+    if (e?.type !== 'm.room.message') continue;
+    if (!e.event_id) continue;
+    // The bot's own messages would loop back into it.
+    if (e.sender === botUserId) continue;
+    if (seen && seen.has(e.event_id)) continue;
+    events.push(e);
+  }
+  return { events, boundary: joinIdx >= 0 ? 'invite..join' : 'invite..end' };
 }
 
 function escapeHtml(value) {
@@ -2532,6 +2710,9 @@ export class MatrixBridge {
     await this.backfillAgentManagedRooms();
     await this.syncApprovalBindings();
     setInterval(() => this.scanJoinedRooms(), MATRIX_ROOM_SCAN_POLL_MS);
+    // Reaped on the room-scan cadence rather than its own timer: it walks the same
+    // rooms, on a deliberately slow interval, behind the same rate-limit gate.
+    setInterval(() => this.reapDeadBotDms(), MATRIX_ROOM_SCAN_POLL_MS);
     // Task 8: standalone doctor's business-health record. Independent of the room-scan
     // timer above (see BRIDGE_HEALTH_WRITE_INTERVAL_MS) so the record's freshness isn't
     // coupled to how MATRIX_ROOM_SCAN_POLL_MS happens to be tuned.
@@ -2640,6 +2821,141 @@ export class MatrixBridge {
 
       // This is an ungreeted human — create DM and greet
       await this.greetHuman(name, user.user_id);
+    }
+  }
+
+  /**
+   * Leave DM rooms whose human has gone, and forget the state that pointed at them.
+   *
+   * See reapableBotDms() for what counts as gone and why a pending invitation does
+   * not. Failure is logged and skipped: a DM that cannot be left is a room to try
+   * again next scan, not a reason to abort the sweep — and every removal is reported,
+   * because the leak this fixes was invisible precisely because nothing said anything.
+   */
+  async reapDeadBotDms() {
+    if (this._reapingBotDms) return 0;
+    const dmRooms = state.botDmRooms || {};
+    const roomIds = Object.values(dmRooms).filter((r) => typeof r === 'string' && r);
+    if (roomIds.length === 0) return 0;
+    this._reapingBotDms = true;
+    try {
+      const membership = {};
+
+      /*
+       * BOT PRESENCE FIRST, AND FROM ONE CALL.
+       *
+       * Whether the bot is in a room is a fact about the BOT, not about the human, and
+       * nesting it inside "has the human left" made it unreachable: these entries'
+       * humans were `invite` — invited and never accepted — so the human-left check
+       * was correctly false and the bot-absent branch never ran. 50 entries, 8
+       * examined, 0 classified, every pass.
+       *
+       * Asking `/joined_rooms` once answers it for every entry with no per-room
+       * request at all, which also means a backlog of stale pointers costs one call to
+       * clear rather than one per room. An earlier probe of
+       * `/members?membership=leave` looked like it answered this and did not: for a
+       * room the bot has left, that list contains the BOT's own leave event and
+       * nothing about the human.
+       */
+      let joinedRooms = null;
+      if (rateLimitGate.beforeRequest()) {
+        try {
+          joinedRooms = new Set(await this.botClient.getJoinedRooms());
+        } catch (error) {
+          // Unknown, not absent. Without this list nothing is classified as stale.
+          rateLimitGate.observeError(error);
+        }
+      }
+
+      /*
+       * Bounded work per pass, and never an abort. This was
+       * `if (!rateLimitGate.beforeRequest()) return 0;` — with a gate that trips
+       * constantly it aborted on the FIRST room every pass and classified nothing,
+       * and the return jumped over the reporting too. `break` keeps what this pass
+       * managed and reports it; the backlog clears over successive passes.
+       */
+      const budget = Math.max(1, Number(process.env.MATRIX_DM_REAP_PER_PASS || '8'));
+      let examined = 0;
+      for (const roomId of roomIds) {
+        // Free: no request needed, so a stale backlog is not rate-limited.
+        if (joinedRooms && !joinedRooms.has(roomId)) {
+          membership[roomId] = 'bot-absent';
+          continue;
+        }
+        if (examined >= budget) break;
+        if (!rateLimitGate.beforeRequest()) break;
+        examined += 1;
+        try {
+          const members = await this.botClient.getRoomMembers(roomId, undefined, ['leave', 'ban']);
+          // The bot's own leave event appears in this list; only a COUNTERPARTY
+          // having gone means the DM is dead.
+          const gone = (members ?? []).some((m) => {
+            const who = m?.membershipFor ?? m?.stateKey ?? m?.state_key;
+            return who && who !== this.botUserId;
+          });
+          if (!gone) continue;
+          const joined = await this.botClient.getJoinedRoomMembers(roomId);
+          // A DM that gained a second human is not dead because the first one left.
+          const others = (joined ?? []).filter((m) => m !== this.botUserId);
+          membership[roomId] = others.length === 0 ? 'leave' : null;
+        } catch (error) {
+          rateLimitGate.observeError(error);
+        }
+      }
+
+      const dead = reapableBotDms(dmRooms, membership);
+      let reaped = 0;
+      for (const { humanKey, roomId, reason, action } of dead) {
+        try {
+          if (action === 'leave') {
+            await this.botClient.leaveRoom(roomId);
+            try { await this.botClient.forgetRoom(roomId); } catch { /* older homeservers */ }
+          }
+          delete state.botDmRooms[humanKey];
+          /*
+           * FORGETTING THE GREETING IS NOT PART OF CLEANING UP THE ROOM.
+           *
+           * Dropping `greetedHumans` alongside every reap turned a bounded leak into
+           * an unbounded churn loop: the bridge forgot it had greeted the person,
+           * greeted them again, created a fresh DM, and the reaper reaped that too.
+           * Observed on the live host — 50 reaped, 38 immediately re-greeted, and the
+           * count climbing 39 -> 45 in forty-five seconds. Strictly worse than the
+           * leak it replaced, because a leak is finite and this spends rate limit
+           * forever.
+           *
+           * `greetedHumans` means "this person has already been greeted", and that
+           * stays true after the room is tidied. It is only forgotten when the person
+           * has actually LEFT or been banned — then a future greeting is the right
+           * thing, because they would be arriving again. A stale pointer to a room
+           * the bot merely stepped out of says nothing about the person at all.
+           */
+          if (forgetGreetingOnReap(reason) && Array.isArray(state.greetedHumans)) {
+            state.greetedHumans = state.greetedHumans.filter((h) => h !== humanKey);
+          }
+          reaped += 1;
+          console.log(`Reaped dead bot DM for ${humanKey} (${reason}): ${roomId}`);
+        } catch (error) {
+          rateLimitGate.observeError(error);
+          console.warn(`Could not reap bot DM ${roomId} for ${humanKey}: ${error.message}`);
+        }
+      }
+      if (reaped > 0) saveState();
+      /*
+       * LOGGED UNCONDITIONALLY, including the nothing-to-do case.
+       *
+       * This first logged only on a reap or a failure, and that is exactly how the
+       * previous round wasted a deploy: 50 stale entries, zero reaped, zero failed,
+       * and no way to tell whether the sweep had run, found nothing, or never fired.
+       * The join backfill had the identical blind spot and the identical cost. A
+       * no-op has to be as visible as an action or it cannot be attributed.
+       */
+      console.log(
+        `Bot DM reap: entries=${roomIds.length} examined=${examined} `
+        + `classified=${Object.keys(membership).length} dead=${dead.length} reaped=${reaped}`,
+      );
+      return reaped;
+    } finally {
+      this._reapingBotDms = false;
     }
   }
 
@@ -3706,12 +4022,141 @@ export class MatrixBridge {
     try {
       await this.botClient.joinRoom(roomId);
       if (trust.trusted) markRoomTrusted(roomId, { inviter });
-      return { accepted: true, reason: trust.reason, inviter };
+      /*
+       * Anything said between the invite and this join never arrives by sync.
+       *
+       * Awaited so a caller that reports `accepted` has already delivered what was
+       * waiting. That is sequencing, NOT mutual exclusion — an earlier comment here
+       * claimed awaiting stopped the realtime handler and pollBotInvites racing into
+       * the same room, and there is no per-room lock to make that true. The guard is
+       * the one below plus onRoomMessage's own event-id dedup, which make a
+       * concurrent second pass a no-op rather than a double-handle.
+       */
+      if (this._joinBackfillInFlight?.has(roomId)) return { accepted: true, reason: trust.reason, inviter, backfilled: 0 };
+      if (!this._joinBackfillInFlight) this._joinBackfillInFlight = new Set();
+      this._joinBackfillInFlight.add(roomId);
+      let backfilled = 0;
+      try {
+        backfilled = await this.backfillJoinedRoom(roomId, inviteEvent);
+      } finally {
+        this._joinBackfillInFlight.delete(roomId);
+      }
+      return { accepted: true, reason: trust.reason, inviter, backfilled };
     } catch (error) {
       rateLimitGate.observeError(error);
       console.warn(`Failed to join room ${roomId}: ${error.message}`);
       return { accepted: false, reason: 'join_failed', inviter };
     }
+  }
+
+  /**
+   * Deliver messages that arrived in a just-joined room before the join landed.
+   *
+   * See pendingJoinBackfill() for why this is needed and why the invite timestamp is
+   * the floor. Failure here is logged and swallowed: the join itself succeeded, and
+   * turning a missed backfill into a failed join would take the bot out of a room it
+   * is now legitimately in.
+   */
+  async backfillJoinedRoom(roomId, inviteEvent = null) {
+    if (!rateLimitGate.beforeRequest()) {
+      console.warn(`Join backfill: cooling down (Matrix rate limit), skipping room ${roomId}`);
+      return 0;
+    }
+    /*
+     * PAGINATE UNTIL THE BOUNDARY IS FOUND, rather than give up after one page.
+     *
+     * Selection needs the bot's own invite to be IN the fetched events; without it
+     * the window cannot be delimited and nothing is routed. A single 50-event page
+     * made that outcome depend on how chatty the room had been just beforehand — a
+     * busy room silently swallowed the request the backfill exists to deliver, and
+     * "fails closed" turned into "usually fails".
+     *
+     * Bounded on both pages and events, because /messages will happily walk a room
+     * back to its creation. An exhausted budget is reported as unproven, which is
+     * the same fail-closed answer, not a guess.
+     */
+    let chunk = [];
+    let from = null;
+    let pages = 0;
+    while (pages < MATRIX_JOIN_BACKFILL_PAGES && chunk.length < MATRIX_JOIN_BACKFILL_MAX_EVENTS) {
+      if (pages > 0 && !rateLimitGate.beforeRequest()) {
+        console.warn(`Join backfill: cooling down mid-pagination in ${roomId}; stopping with what was fetched`);
+        break;
+      }
+      let data;
+      try {
+        data = await this.botClient.doRequest(
+          'GET',
+          `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages`,
+          { dir: 'b', limit: MATRIX_JOIN_BACKFILL_LIMIT, ...(from ? { from } : {}) },
+        );
+      } catch (error) {
+        rateLimitGate.observeError(error);
+        console.warn(`Join backfill failed for ${roomId} on page ${pages + 1}: ${error.message}`);
+        break;
+      }
+      const page = Array.isArray(data?.chunk) ? data.chunk : [];
+      chunk = chunk.concat(page);
+      pages += 1;
+      // The boundary is what we are paginating FOR; stop as soon as it is in hand.
+      if (pendingJoinBackfill(chunk, { botUserId: this.botUserId }).boundary !== 'unproven') break;
+      // No further pages, or the server stopped moving: walking again would repeat.
+      if (!page.length || !data?.end || data.end === from) break;
+      from = data.end;
+    }
+    const { events: pending, boundary } = pendingJoinBackfill(chunk, { botUserId: this.botUserId });
+    let delivered = 0;
+    let alreadySeen = 0;
+    for (const event of pending) {
+      /*
+       * Count only what THIS path claimed.
+       *
+       * onRoomMessage returns the in-flight promise when another path is already
+       * handling an event, so awaiting it and incrementing `delivered` credited the
+       * backfill with sync's work. That mattered: `already-synced=0` was the evidence
+       * used to claim the backfill — not sync — had delivered a pre-join message, and
+       * a counter that cannot tell them apart cannot support that claim. Checking the
+       * in-flight map first narrows it to events the backfill actually took on. It is
+       * still not a lock, so the name says "claimed", not "delivered by us".
+       */
+      if (this.isDuplicateMatrixEvent(event.event_id)) { alreadySeen += 1; continue; }
+      if (this.processingMatrixEventIds.has(event.event_id)) { alreadySeen += 1; continue; }
+      try {
+        await this.onRoomMessage(roomId, event);
+        delivered += 1;
+      } catch (error) {
+        console.warn(`Join backfill: failed to route ${event.event_id} in ${roomId}: ${error.message}`);
+      }
+    }
+    /*
+     * Logged on EVERY join, including the empty case.
+     *
+     * This first only logged when it delivered something, which made a no-op
+     * indistinguishable from not having run — and that ambiguity immediately misled
+     * me: a pre-join `!request` was answered, no backfill line appeared, and the
+     * obvious reading ("the fix worked") was wrong. Sync had won the race and the
+     * backfill had correctly deduped to zero. Whether this path ran, and what it
+     * decided, has to be visible or the live behaviour cannot be attributed.
+     */
+    if (boundary === 'unproven') {
+      /*
+       * The bot's current invite was not in the page, so the invite->join window
+       * cannot be delimited and nothing is routed. Warned rather than logged at
+       * info: a project's request really may have been dropped, and the operator
+       * should be able to find out why. Raising MATRIX_JOIN_BACKFILL_LIMIT covers a
+       * room whose recent history is busier than the page.
+       */
+      console.warn(
+        `Join backfill ${roomId}: could not locate this invite within ${chunk.length} events `
+        + `over ${pages} page(s); routed nothing rather than guess a boundary. `
+        + 'Raise MATRIX_JOIN_BACKFILL_PAGES or MATRIX_JOIN_BACKFILL_MAX_EVENTS for a busier room.',
+      );
+    }
+    console.log(
+      `Join backfill ${roomId}: fetched=${chunk.length} eligible=${pending.length} `
+      + `delivered=${delivered} already-claimed=${alreadySeen} boundary=${boundary} pages=${pages}`,
+    );
+    return delivered;
   }
 
   installBotInviteHandler() {
