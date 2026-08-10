@@ -391,6 +391,21 @@ async function reportActivity() {
         // Declared so the backend never conjures a tmux target for this agent if
         // its record has gone missing.
         transport: 'acp',
+        /*
+         * THE WORKSPACE IS THE ONLY LINK BETWEEN AN AGENT AND ITS TOKEN USAGE.
+         *
+         * The coding CLIs record their own consumption — Claude Code writes a per-message
+         * `usage` object under `~/.claude/projects/<slugified-cwd>/`, Codex writes
+         * `total_token_usage` alongside a `session_meta.cwd` — and the working directory
+         * is what ties either back to an agent. HAFleet launches the agent knowing that
+         * directory and discarded it: `workspacePath` was null on every ACP
+         * agent, so nothing downstream could attribute a token to anyone.
+         *
+         * A tmux agent already reports this via the MCP server (lib/mcp-server-core.js:274).
+         * An ACP agent has no such path — octos ignores `mcpServers` on session/new in v1 —
+         * so the host reports it directly.
+         */
+        workspacePath: cwd,
         activeNow: turnInFlight,
         idleDurationSec: Math.max(0, Math.floor((Date.now() - lastActivityMs) / 1000)),
         lastTmuxActivitySec: Math.floor(lastActivityMs / 1000),

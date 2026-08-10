@@ -9016,7 +9016,21 @@ app.post('/api/agents/:name/runtime', requireAgentToken(_tokenFromName), (req, r
     activeDurationSec,
     idleDurationSec,
     lastTmuxActivitySec,
-    workspacePath,
+    /*
+     * SPREAD, NOT SHORTHAND — the shorthand defeated its own guard downstream.
+     *
+     * `workspacePath` is `undefined` when the request omitted it, and
+     * `workspacePath,` puts the KEY there regardless. setRuntimeWorkspacePath()
+     * correctly asks `hasOwnProperty`, sees the key, normalizes `undefined` to null,
+     * and erases a path that was already known. So a heartbeat that mentioned nothing
+     * about the workspace wiped it, and the next one restored it.
+     *
+     * Latent until something actually set the field for ACP agents: while it was always
+     * null, clearing it was a no-op. It matters now because the workspace is the only
+     * link between an agent and the token usage its CLI records, and attribution that
+     * flickers with the heartbeat is worse than attribution that is absent.
+     */
+    ...(workspacePath !== undefined ? { workspacePath } : {}),
     mcpPresent,
     blockedObserved,
     observerSource: 'runtime-api',
