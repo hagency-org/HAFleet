@@ -635,6 +635,25 @@ function humanUserId(name) {
  *                   null }. `null` means unknown, which is never treated as gone.
  * @returns [{ humanKey, roomId, reason, action: 'leave' | 'drop' }]
  */
+/**
+ * Should reaping this room also forget that the human was greeted?
+ *
+ * SEPARATED OUT BECAUSE THIS IS WHERE THE BUG WAS, and no test could see it. The
+ * decision above (which rooms are dead) was well covered; this — what state to delete
+ * as a consequence — was inline in the caller, and getting it wrong turned a bounded
+ * leak into an unbounded churn loop: forget the greeting, re-greet, create a DM, reap
+ * it, forget again. Observed live, 39 -> 45 rooms in forty-five seconds. A pure
+ * function over the decision cannot catch a mistake in the consequence, so the
+ * consequence is a pure function too.
+ *
+ * `greetedHumans` means "this person has already been greeted". Tidying a room the bot
+ * stepped out of says nothing about the person, so the memory stays. An actual
+ * departure does mean a future arrival deserves a greeting.
+ */
+export function forgetGreetingOnReap(reason) {
+  return reason === 'leave' || reason === 'ban';
+}
+
 export function reapableBotDms(dmRooms = {}, membership = {}) {
   const out = [];
   for (const [humanKey, roomId] of Object.entries(dmRooms || {})) {
@@ -2821,45 +2840,69 @@ export class MatrixBridge {
     this._reapingBotDms = true;
     try {
       const membership = {};
+
+      /*
+       * BOT PRESENCE FIRST, AND FROM ONE CALL.
+       *
+       * Whether the bot is in a room is a fact about the BOT, not about the human, and
+       * nesting it inside "has the human left" made it unreachable: these entries'
+       * humans were `invite` — invited and never accepted — so the human-left check
+       * was correctly false and the bot-absent branch never ran. 50 entries, 8
+       * examined, 0 classified, every pass.
+       *
+       * Asking `/joined_rooms` once answers it for every entry with no per-room
+       * request at all, which also means a backlog of stale pointers costs one call to
+       * clear rather than one per room. An earlier probe of
+       * `/members?membership=leave` looked like it answered this and did not: for a
+       * room the bot has left, that list contains the BOT's own leave event and
+       * nothing about the human.
+       */
+      let joinedRooms = null;
+      if (rateLimitGate.beforeRequest()) {
+        try {
+          joinedRooms = new Set(await this.botClient.getJoinedRooms());
+        } catch (error) {
+          // Unknown, not absent. Without this list nothing is classified as stale.
+          rateLimitGate.observeError(error);
+        }
+      }
+
+      /*
+       * Bounded work per pass, and never an abort. This was
+       * `if (!rateLimitGate.beforeRequest()) return 0;` — with a gate that trips
+       * constantly it aborted on the FIRST room every pass and classified nothing,
+       * and the return jumped over the reporting too. `break` keeps what this pass
+       * managed and reports it; the backlog clears over successive passes.
+       */
+      const budget = Math.max(1, Number(process.env.MATRIX_DM_REAP_PER_PASS || '8'));
+      let examined = 0;
       for (const roomId of roomIds) {
-        if (!rateLimitGate.beforeRequest()) return 0;
+        // Free: no request needed, so a stale backlog is not rate-limited.
+        if (joinedRooms && !joinedRooms.has(roomId)) {
+          membership[roomId] = 'bot-absent';
+          continue;
+        }
+        if (examined >= budget) break;
+        if (!rateLimitGate.beforeRequest()) break;
+        examined += 1;
         try {
           const members = await this.botClient.getRoomMembers(roomId, undefined, ['leave', 'ban']);
-          // Anyone but the bot whose membership has ended. getRoomMembers with a
-          // membership filter returns only those, so presence here IS departure.
+          // The bot's own leave event appears in this list; only a COUNTERPARTY
+          // having gone means the DM is dead.
           const gone = (members ?? []).some((m) => {
             const who = m?.membershipFor ?? m?.stateKey ?? m?.state_key;
             return who && who !== this.botUserId;
           });
-          if (gone) {
-            try {
-              const joined = await this.botClient.getJoinedRoomMembers(roomId);
-              // Only reap when nobody else is still IN the room: a DM that gained a
-              // second human is not dead just because the first one left.
-              const others = (joined ?? []).filter((m) => m !== this.botUserId);
-              membership[roomId] = others.length === 0 ? 'leave' : null;
-            } catch (error) {
-              /*
-               * M_FORBIDDEN here means the BOT is not in the room, which is durable
-               * and makes the state entry a pointer to nothing. Anything else — a
-               * rate limit, a network failure — is transient and left unknown.
-               *
-               * Swallowing this uniformly is what let 50 stale entries survive a
-               * reaper that was otherwise working: the read failed, the entry looked
-               * unknown, and unknown is deliberately never reaped.
-               */
-              const code = error?.errcode ?? error?.body?.errcode;
-              if (code === 'M_FORBIDDEN' || code === 'M_NOT_FOUND') {
-                membership[roomId] = 'bot-absent';
-              } else {
-                rateLimitGate.observeError(error);
-              }
-            }
-          }
+          if (!gone) continue;
+          const joined = await this.botClient.getJoinedRoomMembers(roomId);
+          // A DM that gained a second human is not dead because the first one left.
+          const others = (joined ?? []).filter((m) => m !== this.botUserId);
+          membership[roomId] = others.length === 0 ? 'leave' : null;
         } catch (error) {
           rateLimitGate.observeError(error);
         }
       }
+
       const dead = reapableBotDms(dmRooms, membership);
       let reaped = 0;
       for (const { humanKey, roomId, reason, action } of dead) {
@@ -2869,7 +2912,24 @@ export class MatrixBridge {
             try { await this.botClient.forgetRoom(roomId); } catch { /* older homeservers */ }
           }
           delete state.botDmRooms[humanKey];
-          if (Array.isArray(state.greetedHumans)) {
+          /*
+           * FORGETTING THE GREETING IS NOT PART OF CLEANING UP THE ROOM.
+           *
+           * Dropping `greetedHumans` alongside every reap turned a bounded leak into
+           * an unbounded churn loop: the bridge forgot it had greeted the person,
+           * greeted them again, created a fresh DM, and the reaper reaped that too.
+           * Observed on the live host — 50 reaped, 38 immediately re-greeted, and the
+           * count climbing 39 -> 45 in forty-five seconds. Strictly worse than the
+           * leak it replaced, because a leak is finite and this spends rate limit
+           * forever.
+           *
+           * `greetedHumans` means "this person has already been greeted", and that
+           * stays true after the room is tidied. It is only forgotten when the person
+           * has actually LEFT or been banned — then a future greeting is the right
+           * thing, because they would be arriving again. A stale pointer to a room
+           * the bot merely stepped out of says nothing about the person at all.
+           */
+          if (forgetGreetingOnReap(reason) && Array.isArray(state.greetedHumans)) {
             state.greetedHumans = state.greetedHumans.filter((h) => h !== humanKey);
           }
           reaped += 1;
@@ -2880,6 +2940,19 @@ export class MatrixBridge {
         }
       }
       if (reaped > 0) saveState();
+      /*
+       * LOGGED UNCONDITIONALLY, including the nothing-to-do case.
+       *
+       * This first logged only on a reap or a failure, and that is exactly how the
+       * previous round wasted a deploy: 50 stale entries, zero reaped, zero failed,
+       * and no way to tell whether the sweep had run, found nothing, or never fired.
+       * The join backfill had the identical blind spot and the identical cost. A
+       * no-op has to be as visible as an action or it cannot be attributed.
+       */
+      console.log(
+        `Bot DM reap: entries=${roomIds.length} examined=${examined} `
+        + `classified=${Object.keys(membership).length} dead=${dead.length} reaped=${reaped}`,
+      );
       return reaped;
     } finally {
       this._reapingBotDms = false;

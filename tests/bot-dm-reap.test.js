@@ -24,6 +24,7 @@ import { restoreEnv, snapshotEnv } from './helpers/env.js';
 describe('reaping dead bot DM rooms', () => {
   let runtimeDir;
   let reapableBotDms;
+  let forgetGreetingOnReap;
   let envSnapshot;
 
   const DMS = {
@@ -44,7 +45,8 @@ describe('reaping dead bot DM rooms', () => {
     process.env.MATRIX_TRUST_MODE = 'audit';
 
     const url = pathToFileURL(path.resolve('bridge-matrix.js')).href;
-    ({ reapableBotDms } = await import(`${url}?dm-reap-test=${Date.now()}-${Math.random()}`));
+    ({ reapableBotDms, forgetGreetingOnReap } = await import(
+      `${url}?dm-reap-test=${Date.now()}-${Math.random()}`));
   });
 
   afterAll(() => {
@@ -114,6 +116,34 @@ describe('reaping dead bot DM rooms', () => {
   test('a live departure is a LEAVE, not a bare entry drop', () => {
     const reap = reapableBotDms({ alice: DMS.gone }, { [DMS.gone]: 'leave' });
     expect(reap[0].action).toBe('leave');
+  });
+
+  /*
+   * WHERE THE REAL BUG WAS, and what no test could previously see.
+   *
+   * The decision above was well covered; the CONSEQUENCE — what state to delete after
+   * acting — was inline in the caller. Deleting the greeting record on every reap made
+   * the bridge forget it had greeted the person, so it greeted them again, created a
+   * fresh DM, reaped that too, forever. Live: 50 reaped, 38 re-greeted, 39 -> 45 rooms
+   * in forty-five seconds. Strictly worse than the leak it replaced, because a leak is
+   * finite.
+   */
+  describe('whether reaping also forgets the greeting', () => {
+    test('a stale pointer does NOT forget it — that was the churn loop', () => {
+      expect(forgetGreetingOnReap('bot-absent')).toBe(false);
+    });
+
+    test('an actual departure does, so a returning human is greeted again', () => {
+      expect(forgetGreetingOnReap('leave')).toBe(true);
+      expect(forgetGreetingOnReap('ban')).toBe(true);
+    });
+
+    test('an unrecognised reason forgets nothing', () => {
+      // Fail toward keeping state: forgetting is the side with the runaway loop.
+      for (const r of [undefined, null, '', 'invite', 'join', 'weird']) {
+        expect(forgetGreetingOnReap(r)).toBe(false);
+      }
+    });
   });
 
   test('malformed state yields nothing rather than throwing', () => {
