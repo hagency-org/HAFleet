@@ -6314,6 +6314,26 @@ function syncAcpAgentLiveness(agent, runtime) {
   if (agent.offlineReason !== reason) { agent.offlineReason = reason; changed = true; }
   if (changed) agent.lastSeen = Date.now();
   if (runtime && runtime.mcpPresent === undefined) runtime.mcpPresent = null;
+
+  /*
+   * FEED THE STATE MACHINE TOO, or the record and the API disagree.
+   *
+   * `agent.online` above is the persisted record; `serializeAgent` does not read it.
+   * It reads getAgentMachine(name), and the tmux sweep is what keeps that machine
+   * current — via syncAgentMachine, which this path never called. So a running ACP
+   * agent had `online: true` on disk and `online: false` over the API, forever. On a
+   * clean host that is the whole picture the console shows: a healthy octos agent,
+   * launched and registered and serving a binding, displayed as offline.
+   *
+   * `heartbeatPresent` is the right signal rather than `tmuxPresent`: an ACP agent
+   * has no pane, and its liveness IS the process check just performed. The machine's
+   * heartbeat events carry exactly that meaning — the agent is answering — and using
+   * the tmux event would make an agent with no pane depend on a pane transition.
+   */
+  syncAgentMachine(agent.name, alive
+    ? { heartbeatPresent: true, manualDown: agent.manualDown === true }
+    : { heartbeatMissing: true });
+
   return changed;
 }
 
