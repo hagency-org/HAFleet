@@ -2,10 +2,18 @@
 kind: decision
 id: ADR-013
 title: "Serve the resource contributor, not the dispatching house"
-status: Proposed
+status: Accepted
 liveness: auto
 tags: [hafleet, resource-plane, contribution, capacity, metering, engagement]
 ---
+
+## Requirement
+
+Derived into `REQ-CONTRIBUTION-CONSOLE`
+(`knowledge/requirements/req-contribution-console.md`), which carries the MUST-form
+statements and scenarios implementation is linked to. Contract 1 (token metering) has no
+requirement statement yet and is recorded there as an open question, because a
+requirement for a measurement nobody can take would be unmeetable by construction.
 
 ## Context
 
@@ -93,8 +101,10 @@ each tier, since `TIER_RUNTIME` maps a tier to one Claude pair and leaves a cont
 K3 nothing to match against. Exclusions are named with their reason rather than omitted, because a
 role card that silently lacks a model reads as an oversight. The file ships with the product: a
 provider may decline to offer a role or a combination, but may not invent a role name, because the
-project side must recognise it for the vocabulary to mean anything. The file currently has **no
-consumer**; the console is its first, and the backend must become its second.
+project side must recognise it for the vocabulary to mean anything. When this was written the file had **no consumer**. It now has five —
+`backend-v2.js`, `lib/matrix-agent.js`, `lib/dashboard/render/pool-page.js`, the
+console's capability page, and the role tests — so the vocabulary is single-sourced as
+intended rather than restated per surface.
 
 **4. 接洽 replaces dispatch, gated by a whitelist.** A standing offer makes the provider
 discoverable; a whitelist decides who may skip them.
