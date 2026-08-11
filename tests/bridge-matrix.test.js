@@ -375,6 +375,102 @@ describe('bridge matrix behavior', () => {
     );
   });
 
+  test('a backend LOOKUP FAILURE is not conflated with a compatibility miss', async () => {
+    /*
+     * REQ-MATRIX-THREAD-COMPATIBILITY, the distinction the fallback used to erase. A transient
+     * backend error and a legacy message both used to return null from the metadata lookup, and
+     * both mapped to `source_metadata_missing` → silent top-level send. But they are not the same:
+     * a legacy message never had thread context, while a failed lookup means the context PROBABLY
+     * EXISTS and is about to be lost permanently, because the reply is sent and cannot be recalled.
+     *
+     * The fix does not block — ADR-007 chose fallback over blocking so one failed lookup cannot
+     * wedge later workflow — but it now SAYS which case it is: a distinct reason and a distinct
+     * warning kind, so a backend problem is not filed as "these were all legacy replies".
+     */
+    const bridge = new MatrixBridge();
+    // Every lookup throws: the backend is down for the whole of this attempt, retry included.
+    bridge.callBackendApi = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    bridge.postWarning = vi.fn();
+
+    const resolution = await bridge.resolveOutboundGroupRelation({
+      id: 'msg_reply',
+      group: 'robrix2-board',
+      reply_to: 'msg_source',
+    }, '!board:matrix.test');
+
+    // Falls back (does not block), but with the reason that names it a failure, not a blank.
+    expect(resolution).toMatchObject({ ok: true, relation: null, fallback: true, reason: 'source_lookup_failed' });
+    expect(bridge.postWarning).toHaveBeenCalledWith(
+      expect.stringContaining('could not be read'),
+      expect.objectContaining({ kind: 'thread-lookup-failed' }),
+    );
+    // It is a retry, not a loop: exactly two attempts, no more.
+    expect(bridge.callBackendApi).toHaveBeenCalledTimes(2);
+  });
+
+  test('a lookup that fails ONCE then succeeds keeps the thread intact', async () => {
+    /*
+     * The reason the retry exists. A backend momentarily busy loses one call and answers the
+     * next; without the retry that live thread would have degraded to top-level for good. The
+     * second call returns real delivery metadata, so the reply threads correctly.
+     */
+    const bridge = new MatrixBridge();
+    let calls = 0;
+    bridge.callBackendApi = vi.fn().mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('503 momentarily busy');
+      return {
+        id: 'msg_source',
+        group: 'robrix2-board',
+        source: 'api',
+        matrixDelivery: { roomId: '!board:matrix.test', primaryEventId: '$src-event', threadRootEventId: null },
+      };
+    });
+    bridge.postWarning = vi.fn();
+
+    const resolution = await bridge.resolveOutboundGroupRelation({
+      id: 'msg_reply',
+      group: 'robrix2-board',
+      reply_to: 'msg_source',
+    }, '!board:matrix.test');
+
+    expect(resolution.ok).toBe(true);
+    expect(resolution.fallback).toBeUndefined();
+    expect(resolution.relation).toMatchObject({ 'm.in_reply_to': { event_id: '$src-event' } });
+    // No warning: nothing degraded.
+    expect(bridge.postWarning).not.toHaveBeenCalled();
+  });
+
+  test('source_group_mismatch is rejected, not sent to the wrong group', async () => {
+    /*
+     * REQ-MATRIX-THREAD-ROOM-BOUNDARY's other half, which the audit found untested — the sibling
+     * of `cross_room_group_reply_fails_closed`. There the room varied and the group held; here the
+     * GROUP differs, so the reply_to points at a message from a different group entirely. A reply
+     * threaded across that boundary would leak one group's context into another; it must be
+     * refused, and the refusal must block the send (`ok: false`), not fall back.
+     */
+    const bridge = new MatrixBridge();
+    bridge.callBackendApi = vi.fn().mockResolvedValue({
+      id: 'msg_source',
+      group: 'some-other-group',
+      source: 'api',
+      matrixDelivery: { roomId: '!board:matrix.test', primaryEventId: '$x', threadRootEventId: null },
+    });
+    bridge.postWarning = vi.fn();
+
+    const resolution = await bridge.resolveOutboundGroupRelation({
+      id: 'msg_reply',
+      group: 'robrix2-board',
+      reply_to: 'msg_source',
+    }, '!board:matrix.test');
+
+    expect(resolution).toMatchObject({ ok: false, reason: 'source_group_mismatch' });
+    expect(bridge.postWarning).toHaveBeenCalledWith(
+      expect.stringContaining('Blocked Matrix group reply'),
+      expect.objectContaining({ kind: 'thread-routing' }),
+    );
+  });
+
   test('pending_delivery_replays_after_restart', async () => {
     /*
      * REQ-MATRIX-THREAD-DELIVERY. The requirement's force is in "before the delivery is

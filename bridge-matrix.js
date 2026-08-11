@@ -2404,9 +2404,26 @@ export class MatrixBridge {
   // are made by the caller for the current agent/human pair; the cache never
   // stores an already-authorized room. Confirmed misses cache as null while
   // transient backend failures remain retryable.
-  async lookupMessageRouteMetadata(messageId) {
-    if (typeof messageId !== 'string' || !messageId) return null;
-    if (this._msgRouteMetadataCache.has(messageId)) return this._msgRouteMetadataCache.get(messageId);
+  /**
+   * Look up a message's route metadata, DISTINGUISHING "found nothing" from "could not look".
+   *
+   * Returns `{ ok, metadata }`. `ok: true, metadata: null` means the message genuinely carries
+   * no metadata — a message written before threading existed, a legitimate compatibility miss.
+   * `ok: false` means the backend lookup THREW — a transient failure, where the metadata
+   * probably exists and simply could not be read right now.
+   *
+   * The two used to be the same `null`, and that conflation was the defect: a backend blip fed
+   * `resolveGroupReplyRelation(null)` → `source_metadata_missing` → top-level fallback, silently
+   * and permanently dropping the thread context of a LIVE reply, indistinguishable from a legacy
+   * message that never had any. `lookupMessageRouteMetadata` below preserves the old
+   * null-for-both contract for the callers that only want the value; the group-reply path uses
+   * this result form so it can tell a blip from a blank.
+   */
+  async lookupMessageRouteMetadataResult(messageId) {
+    if (typeof messageId !== 'string' || !messageId) return { ok: true, metadata: null };
+    if (this._msgRouteMetadataCache.has(messageId)) {
+      return { ok: true, metadata: this._msgRouteMetadataCache.get(messageId) };
+    }
     let metadata = null;
     try {
       const msg = await this.callBackendApi('GET', `/api/messages/${encodeURIComponent(messageId)}`);
@@ -2425,13 +2442,26 @@ export class MatrixBridge {
       }
     } catch (e) {
       console.warn(`reply_to route metadata lookup failed for ${messageId}: ${e.message}`);
-      return null; // transient failure — don't poison the cache
+      // Transient — not cached (don't poison), and reported as a FAILURE, not as absence.
+      return { ok: false, metadata: null };
     }
     if (this._msgRouteMetadataCache.size >= 200) {
       this._msgRouteMetadataCache.delete(this._msgRouteMetadataCache.keys().next().value);
     }
     this._msgRouteMetadataCache.set(messageId, metadata);
-    return metadata;
+    return { ok: true, metadata };
+  }
+
+  /**
+   * The value-only wrapper, unchanged in contract: null for both absence and failure.
+   *
+   * Kept because three callers — `lookupMessageSourceRoom`, `lookupVerifiedDirectReplyRoom`,
+   * and the DM-routing path — genuinely do not care which null they got; a fail-closed DM
+   * fallback is correct either way. Only the group-reply path, which can permanently lose thread
+   * context, needs the distinction, and it calls the result form directly.
+   */
+  async lookupMessageRouteMetadata(messageId) {
+    return (await this.lookupMessageRouteMetadataResult(messageId)).metadata;
   }
 
   async lookupMessageSourceRoom(messageId) {
@@ -2476,8 +2506,41 @@ export class MatrixBridge {
     if (!msg?.reply_to) {
       return { ok: true, relation: null, threadRootEventId: null };
     }
-    const metadata = await this.lookupMessageRouteMetadata(msg.reply_to);
-    const resolution = resolveGroupReplyRelation(metadata, { group: msg.group, roomId });
+    /*
+     * A transient lookup failure is NOT a compatibility miss, and must not be sent top-level as
+     * though it were: the message is about to go out and cannot be recalled, so a wrong fallback
+     * here loses thread context that actually exists, forever.
+     *
+     * One retry, because the common transient — a backend momentarily busy — clears immediately,
+     * and catching it keeps a live thread intact. It is a retry, not a loop: if the backend is
+     * genuinely down the second call fails too and we fall through. No delay, so nothing to hang
+     * a test on; the value is the "one call happened to lose the race" case, not waiting out an
+     * outage.
+     */
+    let result = await this.lookupMessageRouteMetadataResult(msg.reply_to);
+    if (!result.ok) result = await this.lookupMessageRouteMetadataResult(msg.reply_to);
+    if (!result.ok) {
+      /*
+       * Still failing after the retry. ADR-007 chose fallback over blocking so one failed lookup
+       * cannot wedge all later workflow — that choice stands, and this does NOT block. What it
+       * does differently from a compatibility miss is SAY SO: a distinct reason and a distinct
+       * warning kind, so an operator sees "the thread context could not be read" rather than "this
+       * message had none", and a monitor can tell a backend problem from a legacy reply.
+       *
+       * Whether a transient failure should instead HOLD the reply for later delivery is a policy
+       * question ADR-007 did not address — it reasoned about compatibility misses, not backend
+       * outages — and is deliberately left to a future amendment rather than decided here.
+       */
+      console.warn(`[matrix-thread] top-level fallback on lookup FAILURE message=${msg.id} reply_to=${msg.reply_to}`);
+      this.postWarning(
+        `Matrix thread context could not be read for ${msg.id} (backend lookup failed); sent at `
+        + 'room top level. This is a transient failure, not a legacy message — the thread link '
+        + 'is lost for this reply only.',
+        { kind: 'thread-lookup-failed', scope: msg.group || roomId },
+      );
+      return { ok: true, relation: null, threadRootEventId: null, fallback: true, reason: 'source_lookup_failed' };
+    }
+    const resolution = resolveGroupReplyRelation(result.metadata, { group: msg.group, roomId });
     if (resolution.kind === 'reject') {
       this.postWarning(
         `Blocked Matrix group reply ${msg.id}: ${resolution.reason} (reply_to=${msg.reply_to})`,

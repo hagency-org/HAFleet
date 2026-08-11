@@ -30,6 +30,26 @@ source, and uses a rich reply for a top-level source. Missing delivery metadata
 is a compatibility miss: the message is sent at the top level and a warning is
 logged.
 
+> **Amended 2026-08-11 — a lookup FAILURE is not a compatibility miss.** The paragraph above
+> conflated two cases that the code also conflated: a message that genuinely has no metadata (a
+> legacy reply, correctly sent top-level) and a backend lookup that THREW. Both returned `null`
+> and both fell to `source_metadata_missing`, so a transient backend blip silently degraded a
+> LIVE thread to top-level and dropped its context permanently — the reply is sent and cannot be
+> recalled — while reading in the logs as just another legacy message.
+>
+> `resolveOutboundGroupRelation` now distinguishes them (`lookupMessageRouteMetadataResult`
+> returns `{ ok, metadata }`): on a lookup failure it retries once — a momentarily-busy backend
+> clears immediately, and catching it keeps the thread intact — and if the retry also fails it
+> still falls back top-level, because the "never block workflow" choice in Alternatives stands,
+> but with a distinct reason (`source_lookup_failed`) and warning kind (`thread-lookup-failed`)
+> so the degradation is named as a failure rather than filed as compatibility.
+>
+> **Left open, deliberately:** whether a transient failure should instead HOLD the reply for
+> later delivery rather than fall back at all. Alternatives reasoned about compatibility misses,
+> not backend outages, so the "fallback beats blocking" choice does not obviously extend to this
+> case — but deciding it is a policy change for a future amendment, not something the fix
+> smuggled in. Today it falls back and says so.
+
 Before acknowledging a successful Matrix send as complete, the bridge appends
 the primary event to a private local pending-delivery journal. It then calls a
 bridge-secret-protected, idempotent backend upsert. Startup replays unfinished
