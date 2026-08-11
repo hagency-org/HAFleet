@@ -83,13 +83,35 @@ export class ReliableMatrixClient extends MatrixClient {
     return signedCurve25519CountFromKeysUpload(response);
   }
 
+  /**
+   * Ask the homeserver for the current one-time-key count, at most once per interval.
+   *
+   * THE THROTTLE COUNTS ATTEMPTS, NOT SUCCESSES, and that is the fix. The stamp used to be
+   * written after both awaits, so a probe that THREW never recorded anything — and
+   * `processSync` swallows the error, so the next sync round found the throttle unset and
+   * probed again. Measured against the real class: with a failing probe, five rounds one
+   * millisecond apart produced five POSTs and left the stamp at 0.
+   *
+   * The consequence was the opposite of the intent. `syncingTimeout` defaults to 30s, so a
+   * homeserver returning 429 or 5xx got one empty `/keys/upload` per sync round — roughly ten
+   * times the interval this method exists to enforce, for as long as the failure lasted, and
+   * hardest on a server that was already struggling. It also refuted ADR-006's own Consequence
+   * that "affected homeservers require one additional bounded count probe".
+   *
+   * Stamping first is safe because the probe body is `{}` — no keys are uploaded, and the call
+   * that makes the crypto layer generate keys (`updateSyncData`) is not reached on the failure
+   * path. So the cost of a skipped interval after a failure is one stale count for five
+   * minutes, against a retry storm; and the count is only ever a hint the crypto state machine
+   * uses to decide whether to top up.
+   */
   async reconcileSignedCurve25519CountIfDue(now = Date.now()) {
     if (!this.crypto || now - this._lastOtkCountReconciliationAt < MATRIX_OTK_COUNT_RECONCILE_MS) {
       return null;
     }
+    // Before the awaits: an attempt has been made, whether or not it lands.
+    this._lastOtkCountReconciliationAt = now;
     const count = await this.probeSignedCurve25519Count();
     await this.crypto.updateSyncData([], { signed_curve25519: count }, [], [], []);
-    this._lastOtkCountReconciliationAt = now;
     console.log(`[matrix-e2ee] reconciled signed_curve25519 count=${count}`);
     return count;
   }

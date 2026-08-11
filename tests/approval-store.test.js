@@ -111,6 +111,95 @@ describe('owner approval store', () => {
     ]));
   });
 
+  /*
+   * EVERY field the comparison guards, one case each.
+   *
+   * `submitMatrixVerdict` compares six fields through a single generic loop
+   * (`Object.keys(expected).find(...)`), and only `senderMxid` had a case. That left the
+   * MECHANISM covered and the FIELD LIST unguarded: delete `roomId` from `expected` and every
+   * test above still passes, while an owner-signed verdict emitted in the PUBLIC PROJECT ROOM
+   * becomes acceptable — precisely what ADR-003's Context forbids ("a public project room …
+   * must not become the approval authority").
+   *
+   * That matters more than a missing test usually would, because `bridge-matrix.js:3211`
+   * parses a verdict-shaped event BEFORE the room-trust gate at :3228 and relays it straight
+   * to the backend. So a verdict-shaped event in any room the bot has joined reaches this
+   * comparison, and this comparison is the only thing standing between it and a decision.
+   *
+   * Table-driven on purpose: the point is that each field is IN the list, so one case per
+   * field is exactly the coverage required and a seventh field added later without a case here
+   * is visibly missing.
+   */
+  const GUARDED_FIELDS = [
+    ['room_id', '!public-project:palpo.test', 'roomId_mismatch',
+      'the owner\'s own verdict, but emitted in the public project room instead of their DM'],
+    ['agent', 'some-other-agent', 'agent_mismatch',
+      'a verdict for a different agent than the one the request names'],
+    ['project', 'some-other-project', 'project_mismatch',
+      'a verdict relabelled with another project'],
+    ['project_room_id', '!elsewhere:palpo.test', 'projectRoomId_mismatch',
+      'a verdict claiming a different project room than the request was raised in'],
+    ['input_digest', 'sha256:0000000000000000', 'inputDigest_mismatch',
+      'a verdict approving something other than what was shown to the owner'],
+  ];
+
+  test.each(GUARDED_FIELDS)(
+    'a verdict wrong ONLY in %s is refused as %s',
+    (field, wrongValue, expectedCode) => {
+      const { store } = makeStore();
+      store.upsertBinding(binding());
+      const created = store.createRequest(request());
+
+      const result = store.submitMatrixVerdict(created.id, verdict(created, { [field]: wrongValue }));
+
+      expect(result).toMatchObject({ ok: false, code: expectedCode });
+      // Still pending, so a refused verdict has not consumed the request either.
+      expect(store.getRequest(created.id).status).toBe('pending');
+      expect(store.listAudit()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'approval.verdict_rejected', reason: expectedCode }),
+      ]));
+    },
+  );
+
+  test('a verdict correct in every field but naming an unknown action is refused', () => {
+    /*
+     * The sixth branch of the same guard, and the one that is not a field: `invalid_action`
+     * had zero assertions, so only `approve_once` and `deny` were ever exercised. A third
+     * action arriving from a client — a typo, an older schema, a probe — must be refused
+     * rather than treated as one of the two.
+     */
+    const { store } = makeStore();
+    store.upsertBinding(binding());
+    const created = store.createRequest(request());
+
+    for (const action of ['approve_always', 'allow', 'APPROVE_ONCE', '']) {
+      const result = store.submitMatrixVerdict(created.id, verdict(created, { action }));
+      expect(result, action).toMatchObject({ ok: false, code: 'invalid_action' });
+    }
+    expect(store.getRequest(created.id).status).toBe('pending');
+  });
+
+  test('the owner\'s DM is where a verdict must come from, and their OWN room is not enough', () => {
+    /*
+     * States the rule positively as well, because the table above only proves that a wrong
+     * room is refused — not that the right one is the owner's DM specifically. `expected.roomId`
+     * is `record.ownerDmRoomId`, so a verdict from the project room fails while the same
+     * verdict from the DM succeeds. Both halves, or "wrong room refused" could be satisfied by
+     * a comparison against anything at all.
+     */
+    const { store } = makeStore();
+    store.upsertBinding(binding());
+    const created = store.createRequest(request());
+
+    const fromProjectRoom = store.submitMatrixVerdict(created.id, verdict(created, {
+      room_id: created.project_room_id,
+    }));
+    expect(fromProjectRoom).toMatchObject({ ok: false, code: 'roomId_mismatch' });
+
+    const fromOwnerDm = store.submitMatrixVerdict(created.id, verdict(created));
+    expect(fromOwnerDm.ok).toBe(true);
+  });
+
   test('expired_or_replayed_ui_verdict_is_rejected', () => {
     /*
      * REQ-OWNER-UI-APPROVAL-LIFETIME, the expiry half: the clock is moved one millisecond

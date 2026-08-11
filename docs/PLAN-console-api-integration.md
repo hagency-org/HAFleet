@@ -620,6 +620,14 @@ tests that did not exist, and those tests failed:
   slip, which does not match the "load-sensitive timing" theory and is worth recording
   as evidence against it.
 
+- **A FIFTH file joined on 2026-08-11**: `alert-store` ("suppressed alert reopens on new
+  occurrence after suppressUntil expires"), one failure in a full run, passing in isolation
+  immediately after, and the next full run completely green (160 files, 2580 passed). It shares
+  the one trait the others do — it goes through the shared test runtime — and shares none of the
+  ruled-out suspects. Five files now, spanning server heartbeat, message retention, ACP workspace
+  attribution and alert suppression: no two of them are near each other in the code, which is
+  the strongest evidence yet that the cause is in the harness rather than in any subsystem.
+
 - **A FOURTH file joined the intermittent set on 2026-08-11.**
   `acp-workspace-attribution` ("the workspace is REMEMBERED after the sweep clears it")
   failed once in a full run and passed in isolation immediately afterwards, and the very

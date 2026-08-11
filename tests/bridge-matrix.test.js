@@ -123,6 +123,83 @@ describe('bridge matrix behavior', () => {
     );
   });
 
+  test('a FAILING otk probe still consumes the interval', async () => {
+    /*
+     * The throttle counts attempts, not successes, and this is the case that proves it.
+     *
+     * The stamp used to be written after both awaits, so a probe that threw recorded nothing —
+     * and `processSync` swallows the error, so the next sync round found the throttle unset and
+     * probed again. Measured before the fix: five rounds one millisecond apart produced FIVE
+     * POSTs with the stamp still at 0.
+     *
+     * The consequence inverted the intent. `syncingTimeout` defaults to 30s, so a homeserver
+     * answering 429 or 5xx received one empty `/keys/upload` per sync round — about ten times
+     * the interval this method exists to enforce, for as long as the failure lasted, and hardest
+     * on a server already struggling. It also refuted ADR-006's own Consequence that an affected
+     * homeserver "requires one additional bounded count probe".
+     */
+    const client = Object.create(ReliableMatrixClient.prototype);
+    client.crypto = { updateSyncData: vi.fn().mockResolvedValue(undefined) };
+    client._lastOtkCountReconciliationAt = 0;
+    client.probeSignedCurve25519Count = vi.fn().mockRejectedValue(new Error('429 rate limited'));
+
+    /*
+     * Five sync rounds one millisecond apart, as a rate-limited server would produce. Only the
+     * FIRST reaches the network — the four after it are throttled and return null, which is the
+     * fix stated as an observation: before it, all five probed.
+     */
+    await expect(client.reconcileSignedCurve25519CountIfDue(400_000)).rejects.toThrow('429');
+    for (let i = 1; i < 5; i += 1) {
+      await expect(client.reconcileSignedCurve25519CountIfDue(400_000 + i)).resolves.toBeNull();
+    }
+
+    expect(client.probeSignedCurve25519Count).toHaveBeenCalledOnce();
+    expect(client._lastOtkCountReconciliationAt).toBe(400_000);
+    // And nothing was fed to the crypto layer, so a failed probe cannot report a bogus count.
+    expect(client.crypto.updateSyncData).not.toHaveBeenCalled();
+  });
+
+  test('a probe that lands but whose updateSyncData fails also consumes the interval', async () => {
+    /*
+     * The second await, which the original code left equally unguarded. Distinguished from the
+     * case above because it fails AFTER the network request, so retrying it re-sends a request
+     * that already succeeded — the throttle is the only thing preventing that.
+     */
+    const client = Object.create(ReliableMatrixClient.prototype);
+    client.crypto = { updateSyncData: vi.fn().mockRejectedValue(new Error('crypto not ready')) };
+    client._lastOtkCountReconciliationAt = 0;
+    client.probeSignedCurve25519Count = vi.fn().mockResolvedValue(7);
+
+    await expect(client.reconcileSignedCurve25519CountIfDue(400_000)).rejects.toThrow('crypto not ready');
+    await expect(client.reconcileSignedCurve25519CountIfDue(400_001)).resolves.toBeNull();
+
+    expect(client.probeSignedCurve25519Count).toHaveBeenCalledOnce();
+  });
+
+  test('the interval is still honoured exactly, and reopens after it', async () => {
+    /*
+     * Bounds the fix in the other direction. Stamping earlier must not make the throttle
+     * permanent — the previous test pins that a failure consumes the interval, and this pins
+     * that the interval then EXPIRES. Without it, `_lastOtkCountReconciliationAt = now` moved to
+     * the top would pass while never reconciling again.
+     *
+     * Also pins the boundary as an equality rather than a range: the existing cadence test only
+     * proved (1ms, 400_000ms], which would pass with a two-second or a four-hundred-second
+     * interval. Five minutes is now asserted, not merely a constant in the source.
+     */
+    const client = Object.create(ReliableMatrixClient.prototype);
+    client.crypto = { updateSyncData: vi.fn().mockResolvedValue(undefined) };
+    client._lastOtkCountReconciliationAt = 0;
+    client.probeSignedCurve25519Count = vi.fn().mockResolvedValue(11);
+
+    await expect(client.reconcileSignedCurve25519CountIfDue(1_000_000)).resolves.toBe(11);
+    // One millisecond short of five minutes: still closed.
+    await expect(client.reconcileSignedCurve25519CountIfDue(1_000_000 + 299_999)).resolves.toBeNull();
+    // Exactly five minutes: open again.
+    await expect(client.reconcileSignedCurve25519CountIfDue(1_000_000 + 300_000)).resolves.toBe(11);
+    expect(client.probeSignedCurve25519Count).toHaveBeenCalledTimes(2);
+  });
+
   test('threaded_group_reply_rebuilds_matrix_relation', () => {
     /*
      * REQ-MATRIX-THREAD-RELATION. Both halves of "target the source primary event and retain

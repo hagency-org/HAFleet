@@ -35,6 +35,17 @@ the primary event to a private local pending-delivery journal. It then calls a
 bridge-secret-protected, idempotent backend upsert. Startup replays unfinished
 upserts. The first primary event wins; replays and retries cannot overwrite it.
 
+> **Corrected 2026-08-11.** "Before acknowledging … as complete" reads as a barrier, and it
+> cannot be one. The journal write happens after the Matrix send has already succeeded, so if
+> `recordPending` throws, the bridge logs, posts a `thread-durability` warning, and returns the
+> event id anyway (`bridge-matrix.js:5462-5478`). That is the only available behaviour — the
+> message is on the homeserver and cannot be recalled — so the sentence describes an ordering
+> the code observes, not a guarantee it enforces. What is actually guaranteed: the journal is
+> attempted before the send is reported, and a failure to journal is surfaced as a warning
+> rather than swallowed. Thread context for later replies may still be lost in that window, and
+> the warning is what says so. That path has no test (`thread-durability` occurs nowhere under
+> `tests/`).
+
 ## Consequences
 
 Good, because multi-agent thread replies survive process restarts and do not
@@ -49,6 +60,24 @@ The raw agent-token `sendAsAgentContent` path is for non-encrypted group rooms.
 Encrypted approval DMs remain on the Matrix crypto client path. If encrypted
 thread replies are added later, thread relation metadata must remain outside
 the encrypted payload as required by Matrix.
+
+> **Corrected 2026-08-11.** The first sentence states a scope that nothing enforces.
+> `sendAsAgentContent` (`bridge-matrix.js:5392-5490`) performs an unconditional plaintext
+> `PUT /rooms/{roomId}/send/m.room.message/{txn}` and **contains no encryption check of any
+> kind** — neither it nor any caller reads a room's encryption state. It is called for group
+> sends, DM sends, and the public approval notice.
+>
+> So "is for non-encrypted group rooms" is a **convention held at the call sites**, not a
+> property the function has. The separation is real today — the encrypted approval path goes
+> through `botClient.sendMessage` after `ensureApprovalDmEncrypted`, and
+> `tests/bridge-matrix-approval.test.js` asserts that the sensitive payload only ever reaches
+> that sender — but nothing would stop a future caller from handing this function an encrypted
+> room, and no test asserts such a send is refused.
+>
+> Stated rather than fixed because the fix is a design choice this record should not make
+> silently: either the function gains an encryption check and fails closed, or the convention is
+> made explicit by narrowing its callers. Until one is chosen, a reader should know the boundary
+> is maintained by discipline.
 
 ## Alternatives Considered
 
