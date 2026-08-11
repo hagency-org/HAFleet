@@ -38,13 +38,18 @@ upserts. The first primary event wins; replays and retries cannot overwrite it.
 > **Corrected 2026-08-11.** "Before acknowledging … as complete" reads as a barrier, and it
 > cannot be one. The journal write happens after the Matrix send has already succeeded, so if
 > `recordPending` throws, the bridge logs, posts a `thread-durability` warning, and returns the
-> event id anyway (`bridge-matrix.js:5462-5478`). That is the only available behaviour — the
-> message is on the homeserver and cannot be recalled — so the sentence describes an ordering
+> event id anyway (the `recordPending` catch inside `sendAsAgentContent`, `bridge-matrix.js`).
+> That is the only available behaviour — the message is on the homeserver and cannot be
+> recalled — so the sentence describes an ordering
 > the code observes, not a guarantee it enforces. What is actually guaranteed: the journal is
 > attempted before the send is reported, and a failure to journal is surfaced as a warning
 > rather than swallowed. Thread context for later replies may still be lost in that window, and
 > the warning is what says so. That path has no test (`thread-durability` occurs nowhere under
 > `tests/`).
+>
+> Cited by symbol rather than by line range, and that is the convention for code references in
+> these records: line numbers rot as the file grows, and a rotted citation is worse than none,
+> because a reader who follows it lands on unrelated code and may conclude the claim is false.
 
 ## Consequences
 
@@ -62,7 +67,7 @@ thread replies are added later, thread relation metadata must remain outside
 the encrypted payload as required by Matrix.
 
 > **Corrected 2026-08-11.** The first sentence states a scope that nothing enforces.
-> `sendAsAgentContent` (`bridge-matrix.js:5392-5490`) performs an unconditional plaintext
+> `sendAsAgentContent` (`bridge-matrix.js`) performs an unconditional plaintext
 > `PUT /rooms/{roomId}/send/m.room.message/{txn}` and **contains no encryption check of any
 > kind** — neither it nor any caller reads a room's encryption state. It is called for group
 > sends, DM sends, and the public approval notice.

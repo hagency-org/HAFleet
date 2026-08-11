@@ -1510,11 +1510,32 @@ function upsertRoomAgentBinding(roomId, agentName, ownerMxid, options = {}) {
   const approvalDmRoomId = typeof options.approvalDmRoomId === 'string' && options.approvalDmRoomId.trim()
     ? options.approvalDmRoomId.trim()
     : (defaultApprovalRoom || existing.approvalDmRoomId || null);
+  /*
+   * An ownership TRANSFER is logged. ADR-002's Consequences claim "transferring ownership
+   * requires an explicit, audited transition", and this function rewrote `inviter`/`ownerMxid`
+   * wholesale with no trace — so a re-invite by a different human silently moved who may approve
+   * this agent's work in this room. The backend half of the audit exists (approval-store records
+   * `owner_binding_changed` and denies in-flight requests), but nothing recorded the bridge-side
+   * change that caused it, which left the two halves of one event impossible to correlate.
+   *
+   * A log line, not a refusal: a genuine transfer is legitimate — a project's maintainer changes
+   * — and blocking it here would strand the agent. What was missing was the record.
+   */
+  const previousOwner = typeof existing.ownerMxid === 'string' ? existing.ownerMxid : null;
+  if (previousOwner && previousOwner !== normalizedOwner) {
+    console.warn(
+      `[room-agent] ownership transfer for ${storedName} in ${normalizedRoomId}: `
+      + `${previousOwner} -> ${normalizedOwner}`,
+    );
+  }
   bindings[storedName] = {
     inviter: normalizedOwner,
     ownerMxid: normalizedOwner,
     approvalDmRoomId,
     addedAt: Number(existing.addedAt || options.addedAt || Date.now()),
+    ...(previousOwner && previousOwner !== normalizedOwner
+      ? { previousOwnerMxid: previousOwner, ownerChangedAt: Date.now() }
+      : {}),
   };
   return { agentName: storedName, binding: bindings[storedName] };
 }
@@ -4169,7 +4190,21 @@ export class MatrixBridge {
           }
           if ((await joinRes.json()).room_id) {
             console.log(`Agent ${agentName} joined room ${roomId}`);
-            if (trust.trusted) {
+            /*
+             * The same guard `acceptPendingInvite` applies, so the two ownership writers agree.
+             * Reaching here already requires the inviter to be in MATRIX_TRUSTED_INVITER_MXIDS,
+             * so a non-human owner needs an operator to have put an agent's MXID in that list —
+             * but the consequence of that misconfiguration is severe and silent:
+             * `upsertRoomAgentBinding` returns null for a non-human owner without saying so, so
+             * the agent would join with NO binding and every later approval would fail
+             * `owner_binding_missing`. Refusing the trust promotion says so instead.
+             */
+            if (trust.trusted && isAgentUser(inviter)) {
+              console.warn(
+                `Agent invite poll: refusing to bind ${agentName} in ${roomId} — inviter `
+                + `${inviter} is an agent, not a human owner`,
+              );
+            } else if (trust.trusted) {
               markRoomTrusted(roomId, { agent: agentName, inviter });
               const existing = state.trustedManagedRooms[roomId] || {};
               upsertRoomAgentBinding(roomId, agentName, inviter, {
@@ -4189,20 +4224,8 @@ export class MatrixBridge {
               saveState();
             }
             // Invite bot so it can monitor messages
-            const botInviteRes = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ user_id: this.botUserId }),
-            });
-            if (await rateLimitGate.observeResponse(botInviteRes)) {
-              console.warn(`Agent invite poll: 429 inviting bot into ${roomId}; aborting this round`);
+            if (await this.inviteBotIntoAgentRoom(roomId, token, 'Agent invite poll') === 'rate-limited') {
               return;
-            }
-            if (botInviteRes.ok) {
-              console.log(`Invited bot into room ${roomId}`);
-            } else {
-              const errText = (await botInviteRes.text().catch(() => '')).slice(0, 200);
-              console.warn(`Bot invite request failed for ${roomId}: HTTP ${botInviteRes.status} ${errText}`);
             }
             // The bot may already be joined because another local agent is in
             // this project room. Approval setup belongs to the newly joined
@@ -4822,6 +4845,53 @@ export class MatrixBridge {
   }
 
   /**
+   * Invite the bridge bot into a room an agent has just joined.
+   *
+   * WHY THIS IS A SHARED METHOD AND NOT A COPIED BLOCK. The bot is the only syncing client —
+   * agents are token-only puppets, and `pollBotInvites` only joins rooms the bot is itself
+   * invited to. So without this step a project room has the agent present and its ownership
+   * bound, approvals still work, and yet **project-room messages, commands and mention routing
+   * are dead** until a human invites the bot by hand. Present but unusable: the exact shape of
+   * dead end the pending-invite work was written to remove.
+   *
+   * `acceptPendingInvite` shipped without it while the auto-join path had it inline. Two writers
+   * of the same sequence, one missing a step — which is the drift this audit round kept finding
+   * (two ownership-binding writers, two `expected`-field lists). Extracting it means the next
+   * person to add a third join path gets the step by calling one method, and a future change to
+   * it lands in both places at once.
+   *
+   * Returns `'rate-limited'` so a caller inside a polling loop can abort its round, `'invited'`
+   * on success, and `'failed'` otherwise — a failed invite is reported, never thrown: the agent
+   * has already joined, and unwinding that is neither possible nor desirable.
+   */
+  async inviteBotIntoAgentRoom(roomId, agentToken, context = 'bot invite') {
+    const res = await fetch(
+      `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${agentToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: this.botUserId }),
+      },
+    );
+    if (await rateLimitGate.observeResponse(res)) {
+      console.warn(`${context}: 429 inviting bot into ${roomId}; aborting this round`);
+      return 'rate-limited';
+    }
+    if (res.ok) {
+      console.log(`Invited bot into room ${roomId}`);
+      return 'invited';
+    }
+    /*
+     * M_FORBIDDEN here is usually benign and common: the bot is already in the room because
+     * another of this contributor's agents is serving the same project. Logged rather than
+     * escalated, and deliberately not treated as failure by the caller.
+     */
+    const errText = (await res.text().catch(() => '')).slice(0, 200);
+    console.warn(`Bot invite request failed for ${roomId}: HTTP ${res.status} ${errText}`);
+    return 'failed';
+  }
+
+  /**
    * Accept an invitation: join, trust the room, and record who owns the agent in it.
    *
    * The three are one act. ADR-002 derives ownership from the inviter, so **accepting the
@@ -4881,8 +4951,23 @@ export class MatrixBridge {
     if (canonicalAgent !== agentName) settlePendingInvite(roomId, agentName, 'accepted', by);
     saveState();
     console.log(`[invite] accepted: ${canonicalAgent} joined ${roomId}, owner=${record.inviter}`);
+    /*
+     * The bot has to be in the room too, or the accept produces a project room the agent is
+     * present in and nothing can read: the bot is the only syncing client, so message ingress,
+     * commands and mention routing all depend on it. This step was missing when
+     * acceptPendingInvite shipped — the auto-join path had it inline — which made accepting an
+     * invitation a milder rerun of the "present but unengageable" dead end this whole feature
+     * exists to remove.
+     *
+     * Its outcome does not gate the result. The agent has joined and the ownership binding is
+     * written, so those are true regardless; a failed or rate-limited invite is reported and
+     * returned as `botInvited` for the caller to surface rather than silently swallowed. Most
+     * failures here are the benign case — the bot is already in the room because another of
+     * this contributor's agents serves the same project.
+     */
+    const botInvited = await this.inviteBotIntoAgentRoom(roomId, token, '[invite] accept');
     await this.syncApprovalBindingForRoomAgent(roomId, canonicalAgent);
-    return { ok: true, roomId, agent: canonicalAgent, ownerMxid: record.inviter };
+    return { ok: true, roomId, agent: canonicalAgent, ownerMxid: record.inviter, botInvited };
   }
 
   /**
@@ -6047,6 +6132,25 @@ export function buildMessageUrlForTest(messageId, viewToken = null, baseUrl = MS
 
 // Test exports for 5.8.1 room trust
 export { getRoomTrust, markRoomTrusted, MATRIX_TRUST_MODE };
+/*
+ * The pending-invite helpers, exported so a test can seed and inspect the record without a
+ * homeserver. Same pattern as the line above and as `matrixRateLimitGateForTest`.
+ *
+ * Worth exporting rather than testing only through the backend projection: the backend store has
+ * its own 15 tests, but none of them execute the BRIDGE-side writer — and the bridge is where the
+ * join, the trust promotion and the ownership binding actually happen. A missing bot invite in
+ * `acceptPendingInvite` was found by reading, not by a failing test, precisely because nothing
+ * reached that code.
+ */
+export {
+  rememberPendingInvite,
+  listPendingInvites,
+  getPendingInvite,
+  settlePendingInvite,
+  projectServerFromRoomId,
+  upsertRoomAgentBinding,
+  findRoomAgentBinding,
+};
 
 const isMainModule = (() => {
   const entry = process.argv[1];

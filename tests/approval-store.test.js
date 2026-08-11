@@ -121,10 +121,12 @@ describe('owner approval store', () => {
    * becomes acceptable — precisely what ADR-003's Context forbids ("a public project room …
    * must not become the approval authority").
    *
-   * That matters more than a missing test usually would, because `bridge-matrix.js:3211`
-   * parses a verdict-shaped event BEFORE the room-trust gate at :3228 and relays it straight
-   * to the backend. So a verdict-shaped event in any room the bot has joined reaches this
-   * comparison, and this comparison is the only thing standing between it and a decision.
+   * That matters more than a missing test usually would, because `_onRoomMessageClaimed`
+   * (`bridge-matrix.js`) calls `parseApprovalVerdictEvent` and hands the result to
+   * `onApprovalVerdict` — which POSTs it straight to the backend — BEFORE it ever reaches the
+   * `getRoomTrust` message-ingress gate further down the same method. So a verdict-shaped
+   * event in any room the bot has joined reaches this comparison, and this comparison is the
+   * only thing standing between it and a decision.
    *
    * Table-driven on purpose: the point is that each field is IN the list, so one case per
    * field is exactly the coverage required and a seventh field added later without a case here

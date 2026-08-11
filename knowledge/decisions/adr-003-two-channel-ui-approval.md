@@ -27,8 +27,8 @@ commands never authorize an execution request.
 "The agent-owner **encrypted** DM" above reads as admitting no exception, and the
 implementation has one: with `HAFLEET_APPROVAL_DM_MODE=plaintext-test` **and**
 `HAFLEET_ALLOW_PLAINTEXT_APPROVAL_TEST=1` **and** `NODE_ENV !== 'production'`
-(`bridge-matrix.js:132-147`), the full structured request — input preview included — is sent to
-a deliberately unencrypted diagnostic room.
+(`resolveApprovalDmMode`, `bridge-matrix.js`), the full structured request — input preview
+included — is sent to a deliberately unencrypted diagnostic room.
 
 The exception is authorised. It is not recorded here, which is the defect: the authorisation
 lives in **ADR-006's Alternatives** section and in `specs/task-owner-ui-approval.spec.md:56-58`,
@@ -37,8 +37,9 @@ record is read — ADR-003 overstates its own guarantee.
 
 Recorded rather than removed, because the carve-out is genuinely useful: E2EE failures are
 otherwise undiagnosable from outside the crypto layer. What makes it safe is that it requires
-three independent settings and refuses in production, which
-`tests/bridge-matrix-approval.test.js:300-313` asserts. What makes it honest is saying so in the
+three independent settings and refuses in production, which the
+`plaintext approval diagnostics require explicit non-production opt-in` test in
+`tests/bridge-matrix-approval.test.js` asserts. What makes it honest is saying so in the
 document that promises encryption.
 
 ## Consequences

@@ -224,3 +224,50 @@ Validate role/boundary/current docs coverage:
 ```bash
 npm run audit:agent-docs -- --active
 ```
+
+## 11) Bridge Refuses To Start: "crypto store contains data but has no device identity"
+
+A **permanent** startup failure, not a crash loop that heals. `bridge-matrix.service` is
+`Restart=on-failure` with `RestartSec=5`, so systemd retries and then stops trying once
+`StartLimitBurst=5` is reached inside `StartLimitIntervalSec=300`.
+
+```
+Bridge failed to start: Error: Matrix crypto store at <path> contains data but has no device identity
+```
+
+### Why it happens
+
+`holdsKeyMaterial` (`lib/matrix-crypto-store-identity.js`) treats every file except
+`bot-sdk.json` as key material — deliberately, because being cautious about an unrecognised
+file beats discarding keys a future matrix-bot-sdk version stored under a name the list does
+not know. So a store holding only the `bot-sdk.json` placeholder **plus a stray file** —
+`.DS_Store` being the realistic one — fails closed even though it holds no keys at all.
+
+Most likely if the store directory was opened in Finder on a Mac during the startup window.
+Not a regression: before the placeholder fix this directory bricked too, along with more
+besides.
+
+### Check and recover
+
+```bash
+# Where the store is: $HAFLEET_RUNTIME_DIR/data/matrix/bot-crypto
+#   (RUNTIME_ROOT is HAFLEET_RUNTIME_DIR if set, else the repo root)
+ls -la "${HAFLEET_RUNTIME_DIR:-.}/data/matrix/bot-crypto"
+```
+
+If the only entries are `bot-sdk.json` and stray files — **no** `matrix-sdk-crypto.sqlite3*` —
+the store holds no key material and removing them is safe:
+
+```bash
+rm -f "${HAFLEET_RUNTIME_DIR:-.}/data/matrix/bot-crypto/.DS_Store"
+# or, equivalently safe in this state:
+rm -rf "${HAFLEET_RUNTIME_DIR:-.}/data/matrix/bot-crypto"
+```
+
+The next start takes the `empty` path and initialises a fresh store for the access token's
+device. Nothing is archived, because there is nothing to archive.
+
+**If `matrix-sdk-crypto.sqlite3` IS present, stop.** That store holds real keys, and the same
+error then means a genuine device mismatch the bridge is right to refuse. Do not delete it —
+the bridge archives a mismatched store itself on the next start, and the archive is the
+rollback path.

@@ -114,8 +114,8 @@ describe('Matrix crypto store device identity', () => {
     /*
      * `empty`, not `matched` — the honest status. The store is recognised as holding nothing
      * rather than as agreeing with the token device, and the caller
-     * (`bridge-matrix.js:2656`) special-cases only `rotated`, so `empty` proceeds to construct
-     * the client exactly as a fresh install does.
+     * (`MatrixBridge.start` in `bridge-matrix.js`) special-cases only `rotated`, so `empty`
+     * proceeds to construct the client exactly as a fresh install does.
      */
     expect(result).toMatchObject({ status: 'empty', archivePath: null });
     // Nothing archived, because there was nothing to archive.
