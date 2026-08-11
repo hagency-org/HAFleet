@@ -38,6 +38,14 @@ describe('project board Dashboard', () => {
   it('project_page_coalesces_refresh', () => {
     const html = renderProjectsPage();
 
+    /*
+     * NOT a citation for the refresh statement in req-project-board.md, which asks for two
+     * things: no overlapping requests, and the selected project preserved while new data
+     * arrives. Only the first is touched here, and only as a source-string match on the
+     * guard rather than as behavior. The page does keep the selection (`selectedProjectId` is
+     * re-resolved against the incoming project list), but no assertion in this repo reaches
+     * that, so the statement is left uncovered rather than half-claimed.
+     */
     expect(html).toContain('if(refreshInFlight){refreshQueued=true;return}');
     expect(html).toContain("if(refreshQueued){refreshQueued=false;refresh()}");
   });
@@ -70,6 +78,14 @@ describe('project board Dashboard', () => {
       backendFetch,
     });
 
+    /*
+     * REQ-PROJECT-BOARD-READ-ONLY. `installProjectBoardProxyRoutes` is the whole route surface
+     * the board adds to the Dashboard, so proving that surface is GET-only proves the release
+     * adds no mutation — the task, graph, group, agent and approval mutations the statement
+     * names live behind other installers this one does not touch. Two assertions carry it: one
+     * GET reaches the backend per request, and a POST to the same path is a 404 rather than a
+     * proxied write.
+     */
     const response = await request(app).get('/api/project-board?activity_limit=17').expect(200);
     expect(backendFetch).toHaveBeenCalledTimes(1);
     expect(backendFetch.mock.calls[0][0]).toBeInstanceOf(URL);

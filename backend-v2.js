@@ -10804,10 +10804,51 @@ function bindEngagement(engagement) {
   }
 }
 
-/** Detach on revoke or rejection, so an ended engagement leaves no live binding. */
+/**
+ * Detach on revoke or rejection — but only when this was the LAST live engagement holding
+ * the binding.
+ *
+ * A binding is keyed on `(agent, projectRoomId)` while engagements are individual, so one
+ * binding serves every engagement between that agent and that room. Removing it whenever any
+ * one of them ended detached the agent from the project while other engagements were still
+ * ACTIVE: the access granted by an approval was revoked by an unrelated refusal.
+ *
+ * Not hypothetical. The live store holds six concurrent active engagements for a single
+ * (agent, project room) pair, each drawing on the ceiling separately, so refusing a seventh
+ * request would have cut the access the other six were relying on — a rejection acting as a
+ * revocation of work nobody decided to end.
+ *
+ * Caught by tests/engagement-binding.test.js, and only because that case approves before it
+ * rejects. Rejecting without a prior approval cannot tell "the rejection removed nothing"
+ * from "nothing was there to remove", which is why the first version of that test passed
+ * against this bug.
+ */
 function unbindEngagement(engagement) {
   if (!engagement?.agent || !engagement?.projectRoomId) return;
   try {
+    /*
+     * Live means active or pending — anything a project could still be relying on.
+     *
+     * The `e.id !== engagement.id` term is REDUNDANT TODAY and kept deliberately. The store
+     * records the new state before calling here, so this engagement is already `rejected` or
+     * `revoked` and the state filter alone excludes it; a mutation removing the id term
+     * passes every test, which is the honest description of it. It stays because the
+     * alternative failure is silent and total: if that ordering ever changed, the engagement
+     * would count itself as still live and NOTHING would ever unbind, leaving standing
+     * reachability behind every ended engagement.
+     */
+    const stillLive = engagementStore.list()
+      .filter((e) => e.id !== engagement.id
+        && e.agent === engagement.agent
+        && e.projectRoomId === engagement.projectRoomId
+        && (e.state === 'active' || e.state === 'pending'));
+    if (stillLive.length > 0) {
+      console.log(
+        `[engagements] keeping ${engagement.agent} bound to ${engagement.projectRoomId}: `
+        + `${stillLive.length} engagement(s) still live`,
+      );
+      return;
+    }
     approvalStore.removeBinding(engagement.agent, engagement.projectRoomId);
   } catch (error) {
     // A binding that was never created is not an error worth failing the revoke for.
@@ -11263,12 +11304,32 @@ app.get('/api/usage', requireBearer, async (_req, res) => {
       },
     },
     agents: byAgent,
-    totals: {
-      agents: byAgent.length,
-      busySec: byAgent.reduce((n, r) => n + r.busySec, 0),
-      tasks: byAgent.reduce((n, r) => n + r.tasks, 0),
-      tokensUsed: null,
-    },
+    /*
+     * A fleet total that carries its own denominator.
+     *
+     * `tokensUsed` was unconditionally null here even when per-agent rows were measured,
+     * which threw away a real figure. But a bare sum would be worse: with 2 of 7 agents
+     * attributable it understates the fleet while looking authoritative, and nothing in the
+     * number says so.
+     *
+     * So the numerator never travels without its denominator, and it stays null when
+     * nothing at all was measured — null is "not known", 0 would be the claim that this
+     * fleet consumed nothing.
+     */
+    totals: (() => {
+      const measured = byAgent.filter((r) => typeof r.tokensUsed === 'number');
+      return {
+        agents: byAgent.length,
+        busySec: byAgent.reduce((n, r) => n + r.busySec, 0),
+        tasks: byAgent.reduce((n, r) => n + r.tasks, 0),
+        tokensUsed: measured.length
+          ? measured.reduce((n, r) => n + r.tokensUsed, 0)
+          : null,
+        // Read these together with the figure above or not at all.
+        tokensMeasuredFor: measured.length,
+        tokensPartial: measured.length > 0 && measured.length < byAgent.length,
+      };
+    })(),
   });
 });
 

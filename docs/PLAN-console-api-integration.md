@@ -525,6 +525,79 @@ What remains genuinely open from those ten is item 6's other half — usage even
 persisted (`lib/metering/ledger.js`) but there is no *cost* event ledger, and by the
 amendment there should not be one.
 
+### 7.9 Requirement traceability, and the four bugs it surfaced
+
+Sixty-eight statement-level MUSTs live in `knowledge/requirements/`. Two were cited by a
+test. The rest were verified or not, and nobody could tell which without reading every test
+file — which is the state a traceability requirement exists to prevent, not a documentation
+preference.
+
+`scripts/check-requirement-traceability.mjs` now produces the answer, and it is a **ratchet
+rather than a target**: coverage may not fall below the recorded baseline (63/68), and
+demanding 100% is deliberately avoided. A required percentage pushes toward the empty
+citation — add the tag, ship the green table, verify nothing — which is worse than an honest
+92%, because it removes the signal the table exists to carry.
+
+Two mechanical failure modes make a coverage table lie, and both were present:
+
+- **Prefix collision.** `REQ-X` matched inside `REQ-X-DURABLE` reports a parent covered
+  because a child is. The first survey made exactly that mistake and counted
+  `REQ-CONTRIBUTION-CONSOLE` as covered. Matching is on word boundary — and `\b` is wrong
+  here, because it treats `-` as a boundary.
+- **Citing an id that does not exist.** A test naming `…-CEILING` when the statement is
+  `…-CEILING-SEAT` looks like coverage and is nothing. Unknown ids are errors, with a named
+  exception list for the one legitimate non-citation (`REQ-DEMO` is fixture data inside a
+  synthetic spec file).
+
+**Five statements remain on prose alone, and stay that way honestly:**
+`REQ-OWNER-UI-APPROVAL-CONTROL` (the guard at `lib/bot-commands.js:86` is wired but every
+test calls `bot.handle` with an empty context, so its true branch never executes),
+`REQ-PROJECT-BOARD-AGENTS`, `-GRAPHS`, `-REPOSITORIES` and `-REFRESH`. In each case the
+adjacent test was close enough to cite and citing it would have been the false green this
+tooling exists to catch.
+
+**Ten of fifty-eight spec `Test:` selectors do not resolve.** Reported, not failed: every one
+checked so far is naming drift over real coverage — three project-board scenarios consolidated
+into one test, one selector that lost its `project_board_` prefix — with two exceptions that
+are genuine gaps (`public_room_ctl_cannot_bypass_approval`, `MATRIX_DEFAULT_WAKE defaults to
+mention-only mode` have zero occurrences under `tests/`). Drift is still a defect: an
+unresolvable selector means the chain cannot be followed without reading everything.
+
+#### Writing the missing tests found four real defects
+
+Traceability was supposed to be a documentation exercise. Filling the gaps required writing
+tests that did not exist, and those tests failed:
+
+1. **A rejection revoked an unrelated active engagement.** A binding is keyed on
+   `(agent, projectRoomId)` while engagements are individual, so one binding serves every
+   engagement between that agent and that room — and `unbindEngagement` removed it whenever
+   any one of them ended. The live store holds **six** concurrent active engagements for one
+   such pair, so refusing a seventh request would have cut the access the other six were
+   relying on. Now last-one-out.
+
+   Found only because the test approves before it rejects. The first version rejected without
+   approving, which cannot distinguish "the rejection removed nothing" from "nothing was
+   there to remove" — it passed against the bug, and a mutation confirmed the pass was
+   vacuous.
+
+2. **`REQ-CONTRIBUTION-CONSOLE-UNIT` and `-INWARD` were each checked on one page.** Both are
+   stated about the console; both were asserted only on `/workforce`, the newest route, so the
+   seven older ones were never checked. Now a per-route sweep — and the first run failed on
+   `$HOME` in prose and on a string whose content is "a roster of my agents, **not** of
+   assignments". Both were the check being wrong, not the pages: a shell variable is not a
+   price and a disclaimer is not a violation. Narrowed to a symbol adjacent to a digit, and
+   to column headings rather than body text.
+
+3. **`GET /api/usage` discarded the fleet token total** — `tokensUsed: null` unconditionally
+   while per-agent rows carried real figures. Restored as a sum that travels with its
+   denominator (`tokensMeasuredFor`, `tokensPartial`), because a bare sum over 2 of 7
+   measured agents understates the fleet while reading as authoritative.
+
+4. **`!request` had no test at all** — the entire inbound path of L3, including the clause
+   that the `request_id` must be the authenticated Matrix event id and never a value from
+   message content. Four mutations (id from args, generated id, inverted credential
+   preference, room id from args) each now fail exactly one case.
+
 ### 7.8 Still open
 
 - **Token metering itself.** P3 shipped the partition, not the measurement. Nothing here

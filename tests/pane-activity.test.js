@@ -45,6 +45,28 @@ describe('detectPaneBusyState', () => {
     }
   });
 
+  it('answers rather than throwing when handed a non-string', () => {
+    /*
+     * `String(text || '')`. Both call sites currently pass a string, but they get there
+     * by their own coercion of a child-process result — server.js:3094 and
+     * lib/push-relay-core.js:290 each write `String(stdout || '')` because `stdout` can
+     * be a Buffer when the encoding option is dropped. If either coercion is ever
+     * removed, a Buffer or an execFile result object arrives here, and the difference
+     * between this function coercing and not is the difference between "idle" and a
+     * TypeError thrown out of the pane sweep — which is caught and reported as
+     * capture-failed, so every agent on the host silently stops being observed at all.
+     *
+     * The falsy cases above cannot show this: they short-circuit to '' either way. Only
+     * a TRUTHY non-string reaches the coercion.
+     */
+    for (const value of [42, {}, ['line'], Buffer.from('some pane output'), () => {}]) {
+      expect(busy(value), String(value)).toEqual(IDLE);
+    }
+    // And a Buffer carrying a real status line is still read correctly, so the coercion
+    // is a coercion and not a swallow.
+    expect(busy(Buffer.from('• Working (2s · esc to interrupt)')).reason).toBe('codex-working');
+  });
+
   it('reports idle for ordinary agent output', () => {
     // The baseline. Most captures are a finished command and a prompt, and every one of
     // them must be idle or an agent never receives another message.

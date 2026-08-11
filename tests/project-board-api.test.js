@@ -47,6 +47,13 @@ describe('project board backend API', () => {
     const response = await request(context.app).get('/api/project-board?activity_limit=5').expect(200);
     const serialized = JSON.stringify(response.body);
 
+    /*
+     * REQ-PROJECT-BOARD-ACTIVITY end to end. The unit test pins the filter against a
+     * hand-built input; this pins it against the records the backend actually stored, which
+     * is what the statement is about — the `group` on the backend's own record decides, not
+     * anything the caller passed in. `private-1` targets an owner, carries no group, and does
+     * not appear.
+     */
     expect(response.body.projects).toHaveLength(1);
     expect(response.body.projects[0].activity).toEqual([
       expect.objectContaining({ id: 'public-1', summary: 'Public update' }),
@@ -55,6 +62,13 @@ describe('project board backend API', () => {
       group: 'demo',
       project: 'demo-project',
     }));
+    /*
+     * REQ-PROJECT-BOARD-PRIVACY at the HTTP boundary, which is the boundary the statement
+     * cares about — a projection that redacts correctly in a unit test but hands the raw
+     * agent record to `res.json()` would satisfy the one and violate the other. The seeded
+     * agent carries a runtime `apiKey` and a `workspacePath` precisely so the response can be
+     * checked for them, and the direct message is here so its summary and body can be too.
+     */
     expect(serialized).not.toContain('Private update');
     expect(serialized).not.toContain('full body');
     expect(serialized).not.toContain('/Users/private');

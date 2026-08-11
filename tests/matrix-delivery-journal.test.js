@@ -57,6 +57,12 @@ describe('MatrixDeliveryJournal', () => {
   });
 
   test('same pending record is idempotent and conflicting primary is rejected', () => {
+    /*
+     * REQ-MATRIX-THREAD-IDEMPOTENCY at the journal layer, which is where recovery reads from.
+     * The line-count assertion is the one that matters: a re-recorded delivery must not append
+     * a second row, or a later replay would upsert twice. The throw on a changed
+     * primaryEventId is the "retain the first" half — the journal refuses to forget it.
+     */
     const { journalPath } = context();
     const journal = new MatrixDeliveryJournal({ journalPath });
     journal.recordPending(delivery());

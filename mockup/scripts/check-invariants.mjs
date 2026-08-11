@@ -67,6 +67,19 @@ for (const r of ROUTES) {
 // 2. the mapping is IMPORTED from the shipped config, not copied
 {
   const disk = JSON.parse(readFileSync('../lib/role-capacity.json', 'utf8'));
+  /*
+   * REQ-CONTRIBUTION-CONSOLE-VOCABULARY — the role vocabulary comes from the system's own
+   * enumeration, so a console role name the borrower cannot recognise is impossible by
+   * construction rather than by review. The byte-for-byte check is what makes that true:
+   * a console-local copy of the mapping would drift, and the drift would be invisible.
+   * 'and the reason is named rather than left blank' is the requirement's last clause —
+   * an excluded combination states why instead of being silently omitted.
+   *
+   * REQ-CONTRIBUTION-CONSOLE-ROLES — the borrower-facing surface is roles, and the
+   * role-to-(agent x model) mapping stays the provider's. `/capability` returns roles with
+   * counts; the checks below assert every role resolves through the config rather than
+   * naming an agent, which is the observable half of that privacy rule.
+   */
   check('the role mapping is the shipped file, byte for byte',
     JSON.stringify(disk) === JSON.stringify(roleCapacity));
   // The whole point of importing it: the prototype cannot advertise a role the
@@ -188,6 +201,13 @@ for (const r of ROUTES) {
     presets.every((p) => p.ceiling.enforced === false));
   const { html } = await rendered('/resources');
   check('/resources states the ceiling is not enforced', html.includes('not enforced'));
+  /*
+   * REQ-CONTRIBUTION-CONSOLE-BLANK — an unmeasured quantity renders as unknown WITH its
+   * reason, never as zero, and allocations stay distinct from consumption. The pair below is
+   * both halves: the gap is named, and no cell is a bare 0. A zero here would read as "this
+   * agent consumed nothing", which is a claim rather than an absence — the backend half of
+   * the same rule is tests/api-usage-metering.test.js.
+   */
   check('/usage names the metering gap instead of printing zeros',
     (await rendered('/usage')).html.includes('not measured'));
   // A zero would claim a measurement nobody takes.

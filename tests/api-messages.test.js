@@ -99,6 +99,13 @@ describe('backend message API', () => {
   });
 
   test('inferred_human_target_is_a_notice_not_a_warning', async () => {
+    /*
+     * REQ-MATRIX-DM-PRIVACY-FEEDBACK. `alex` is not a registered agent, so the backend
+     * classifies the target as human — a success, which the old code reported under warnings
+     * and which agents then relayed as a delivery failure. Both directions are asserted,
+     * and both are needed: the notice proves the outcome is reported, and the absence of
+     * `target_assumed_human` from warnings proves it is no longer reported as a problem.
+     */
     const response = await request(context.app)
       .post('/api/messages')
       .set('X-Agent-Token', ALPHA_TOKEN)
@@ -125,6 +132,13 @@ describe('backend message API', () => {
   });
 
   test('inbound_thread_context_is_persisted', async () => {
+    /*
+     * REQ-MATRIX-THREAD-CONTEXT. All three named fields are asserted on the message as it was
+     * written to disk, not on the API response — persistence is the requirement, and a
+     * response-only assertion would pass even if the fields never survived the write. The
+     * X-Bridge-Secret header is what makes this the "authenticated inbound" path the
+     * statement scopes itself to.
+     */
     const threadContext = await createBackendTestContext('hafleet-matrix-thread-context-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true },
@@ -169,6 +183,13 @@ describe('backend message API', () => {
   });
 
   test('matrix_delivery_upsert_is_first_write_wins', async () => {
+    /*
+     * REQ-MATRIX-THREAD-IDEMPOTENCY. Both of the statement's clauses are separated here on
+     * purpose. "MUST NOT create a second backend delivery record" is the replay returning
+     * deduped:true; "MUST retain the first primary event id" is the 409 on `$agent-event-2`
+     * plus the final on-disk read still showing `$agent-event-1`. A last-write-wins backend
+     * would pass the first assertion and fail the second, which is why the read matters.
+     */
     const deliveryContext = await createBackendTestContext('hafleet-matrix-delivery-upsert-', {
       agents: {
         alpha: { name: 'alpha', type: 'agent', kind: 'agent', online: false, manualDown: true },

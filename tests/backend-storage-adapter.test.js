@@ -241,28 +241,30 @@ describe('writeJsonAtomic', () => {
   });
 
   it.skipIf(!CAN_DENY_DIRECTORY_READ)(
-    'reports FAILURE for a write whose rename already succeeded, when the directory fsync fails',
+    'OWNS a write whose rename succeeded even when the directory fsync fails',
     () => {
       /*
-       * DEFECT, characterised rather than endorsed. See lib/backend/storage-adapter.js:68-84.
+       * This case was written to characterise a defect and now asserts its fix, which is
+       * what its previous form asked for — "a future fix has a case that changes colour".
        *
        * The sequence is: write temp, fsync temp, close, RENAME, then open the parent
        * directory and fsync it so the rename itself is durable. If only that last step
-       * fails, the new bytes are already the file's contents — but the catch block
-       * returns false, which every caller reads as "nothing was written".
+       * fails, the new bytes ARE already the file's contents. Returning false there is read
+       * by every caller as "nothing was written".
        *
-       * What that costs the product: lib/task-store.js:81 turns the false into
-       * `persistence_failed` and restores its in-memory snapshot, so the API reports the
-       * task was not created while tasks.json contains it. The task is invisible until a
-       * restart, at which point it reappears — and the assignee was already notified
-       * (backend-v2.js:10131). Memory and disk disagree in the one direction the
-       * rollback machinery cannot detect.
+       * What that cost the product, and why this is not a cosmetic return value:
+       * lib/task-store.js:74-84 turns a false into `persistence_failed` and
+       * `commitMutation` restores its in-memory snapshot — so the API reported the task was
+       * not created while tasks.json contained it. Invisible until a restart, at which point
+       * it reappeared, with the assignee already notified. Memory and disk disagreed in the
+       * one direction the rollback machinery cannot detect.
        *
-       * This test asserts what the code actually does, so that a future fix (report the
-       * fsync failure without disowning a landed write) has a case that changes colour
-       * and a reader has the mechanism written down.
+       * The fix draws the line at the rename: before it, nothing landed and false is honest;
+       * after it, the data is readable by everyone and the only thing in doubt is whether
+       * the rename survives a power cut. That is reported by logging, not by lying about
+       * whether the write happened.
        */
-      const { dataDir, storage } = context();
+      const { dataDir, storage, logged } = context();
       storage.writeJsonAtomic('durable.json', { v: 'old' });
       chmodSync(dataDir, 0o300); // write+execute: rename works, opening the dir to read does not
       let result;
@@ -271,16 +273,57 @@ describe('writeJsonAtomic', () => {
       } finally {
         chmodSync(dataDir, 0o700);
       }
-      expect(result).toBe(false);
-      // ...and yet:
+      expect(result).toBe(true);
       expect(read(dataDir, 'durable.json')).toEqual({ v: 'new' });
       expect(tmpLeftovers(dataDir)).toEqual([]);
+      /*
+       * Still reported. An operator on a filesystem that cannot fsync a directory has lost
+       * crash-safety and should hear about it — silently returning true would trade a
+       * false alarm for a hidden one.
+       */
+      expect(logged.error.join(' ')).toMatch(/fsync/i);
     },
   );
 });
 
 // ── loadJsonSync ──────────────────────────────────────────────────────
 describe('loadJsonSync', () => {
+  it('uses the fallback for a file containing literal null, and SAYS SO', () => {
+    /*
+     * `null` parses successfully, so it slipped past the catch that provides the fallback
+     * and was handed to the caller. backend-v2.js:2914 does
+     * `Object.values(loadJsonSync('agents.json', {}))` — "Cannot convert undefined or null
+     * to object", and the backend does not start.
+     *
+     * Reachable rather than theoretical: `saveJson(name, null)` writes exactly this, so any
+     * caller that computes a value and gets undefined can produce the file.
+     *
+     * Logged, not silently substituted: a null agents.json means something wrote null over
+     * the fleet registry. The fallback keeps the process up; the log is the only thing that
+     * distinguishes "your fleet is empty" from "your fleet was overwritten".
+     */
+    const { dataDir, storage, logged } = context();
+    writeFileSync(path.join(dataDir, 'agents.json'), 'null');
+    expect(storage.loadJsonSync('agents.json', {})).toEqual({});
+    expect(() => Object.values(storage.loadJsonSync('agents.json', {}))).not.toThrow();
+    expect(logged.error.join(' ')).toMatch(/null/i);
+  });
+
+  it('KEEPS a stored false, 0, empty string or empty array rather than replacing it', () => {
+    /*
+     * The line between "parsed to nothing" and "somebody stored a falsy value on purpose".
+     * The one-line version of the fix above is `if (!parsed) return fallback`, which would
+     * silently substitute the fallback for real data — so the distinction is pinned here
+     * rather than left to whoever next edits that branch.
+     */
+    const { dataDir, storage } = context();
+    for (const value of [false, 0, '', []]) {
+      const name = `falsy-${JSON.stringify(value)}.json`.replace(/[^\w.-]/g, '_');
+      writeFileSync(path.join(dataDir, name), JSON.stringify(value));
+      expect(storage.loadJsonSync(name, { fallbackUsed: true }), name).toEqual(value);
+    }
+  });
+
   it('returns the fallback for a missing file WITHOUT quarantining anything', () => {
     /*
      * A fresh install has none of these files. Both halves matter: the fallback is what

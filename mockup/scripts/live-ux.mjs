@@ -184,6 +184,12 @@ suites.resources = async (page) => {
   check('/resources renders with no page error', errors.length === 0, errors.slice(0, 2).join(' | '));
 
   const banner = await text(page, '[data-testid="provenance"]');
+  /*
+   * REQ-CONTRIBUTION-CONSOLE-PROVENANCE — provenance is reported PER SLICE, and one slice
+   * never implies another. Checked against the live backend rather than a fixture, which is
+   * the only way the distinction can be observed: with everything fixture, a per-slice
+   * banner and a global one look identical.
+   */
   check('provenance names agents and presets as live',
     /live/i.test(banner ?? '') && /agent/i.test(banner ?? '') && /preset|预设/i.test(banner ?? ''),
     banner);
@@ -372,8 +378,28 @@ suites.alerts = async (page) => {
       `${downgraded.length} downgraded, original=${downgraded[0].originalSeverity}`);
     const field = downgraded[0].missingActionableFields?.[0];
     if (field) {
+      /*
+       * SELECT the downgraded alert before asking whether the page names what was
+       * missing.
+       *
+       * This asserted against the page as it loads, and passed for two runs by
+       * coincidence: the field list lives in the DETAIL panel, which shows the
+       * selected alert, and the selection defaults to the highest-severity row. That
+       * happened to be a downgraded `agent_offline` until the metering work raised a
+       * genuine `warning` that now sorts above it — at which point the assertion
+       * failed while the page was doing exactly what the requirement asks. The
+       * requirement is "the page names the missing field", not "it names it without
+       * being asked", so the check now performs the interaction its subject needs.
+       */
+      await page.evaluate((summary) => {
+        const row = [...document.querySelectorAll('table.tbl tbody tr')]
+          .find((tr) => tr.innerText.includes(summary));
+        row?.click();
+      }, downgraded[0].summary);
+      await page.waitForTimeout(150);
+      const detail = await text(page, 'main');
       check('and names a field whose absence caused the downgrade',
-        body.includes(field), field);
+        detail.includes(field), field);
     }
   } else {
     check('no downgraded alerts to disclose (vacuous)', true, 'none present');
@@ -642,6 +668,211 @@ suites.engagements = async (page) => {
   const banner = await text(page, '[data-testid="provenance"]');
   check('engagements are labelled live now that the endpoint exists',
     /live|实时/i.test(banner ?? ''), banner);
+};
+
+// ── /workforce — the roster ─────────────────────────────────────────────────
+/*
+ * The roster is a JOIN of six payloads, so it is the page where a wrong join is
+ * most likely and least visible: every cell can look plausible while belonging to
+ * the wrong agent. Each check below therefore compares one cell against the
+ * endpoint that owns it, and the two structural ones assert the join itself —
+ * a row per agent, and the borrower set matching the engagement store.
+ */
+suites.workforce = async (page) => {
+  const errors = await open(page, '/workforce');
+  const agents = await api('agents');
+  check('/workforce renders with no page error', errors.length === 0, errors.slice(0, 2).join(' | '));
+
+  const body = await text(page, 'main');
+  assertNotFixture(body, '/workforce');
+  await assertRail(page, agents, '/workforce');
+  check('no NaN on /workforce', !/NaN/.test(body));
+  check('no literal "null" on /workforce', !/\bnull\b/.test(body));
+  check('no literal "undefined" on /workforce', !/undefined/.test(body));
+
+  /*
+   * One row per agent, counted exactly against the first table on the page.
+   *
+   * `>=` would let the five-question table below pad the count, and a missing agent
+   * would pass. Equality against the roster alone is the assertion — the same fix
+   * the /resources roster needed.
+   */
+  const rosterRows = await page.$$eval('table.tbl',
+    (tables) => (tables[0] ? tables[0].querySelectorAll('tbody tr').length : -1));
+  check('the roster has exactly one row per live agent',
+    rosterRows === agents.length, `roster=${rosterRows} api=${agents.length}`);
+  const missing = agents.map((a) => a.name).filter((n) => !body.includes(n));
+  check('every live agent name appears', missing.length === 0, missing.join(' '));
+
+  /*
+   * WHAT A BORROWER MAY ASK FOR, against GET /api/capability rather than against
+   * role names typed here. The server owns this judgement, so the roster showing a
+   * role the server does not grant — or omitting one it does — is drift.
+   */
+  const cap = await api('capability');
+  const rolesOf = (name) => (cap.roles ?? [])
+    .filter((r) => r.able.some((x) => x.agent === name))
+    .map((r) => r.displayName);
+  const wrongRoles = agents
+    .map((a) => ({ name: a.name, want: rolesOf(a.name) }))
+    .filter(({ want }) => want.length > 0)
+    .filter(({ want }) => want.some((d) => !body.includes(d)));
+  check('every role the server grants is named on the roster',
+    wrongRoles.length === 0, wrongRoles.map((w) => w.name).join(' '));
+  /*
+   * And the inverse, which is the one that catches an inferred-from-the-name
+   * eligibility: an agent the server grants nothing must be shown as qualifying
+   * for nothing, with the reason. Asserted on the reason rather than on the
+   * absence of role names, because absence is what a crashed cell also looks like.
+   */
+  const barren = agents.filter((a) => rolesOf(a.name).length === 0);
+  if (barren.length > 0) {
+    check('an agent the server grants no role says why',
+      /no model chosen|qualifies for nothing|below every role|没有选定模型|不符合任何|低于所有角色/.test(body),
+      barren.map((a) => a.name).join(' '));
+  } else {
+    check('every agent qualifies for something (vacuous)', true, `${agents.length} agents`);
+  }
+
+  /*
+   * THE BORROWER SET, against the engagement store.
+   *
+   * An active engagement's project must appear; an agent with none must be stated
+   * as unborrowed rather than left blank. Both directions, because "no rows" is
+   * also what a failed join renders.
+   */
+  const { engagements } = await api('engagements');
+  const active = engagements.filter((e) => e.state === 'active');
+  const missingProjects = [...new Set(active.map((e) => e.project))].filter((p) => !body.includes(p));
+  check('every active engagement’s project is on the roster',
+    missingProjects.length === 0, missingProjects.join(' '));
+  const lentNames = new Set(active.map((e) => e.agent));
+  if (agents.some((a) => !lentNames.has(a.name))) {
+    check('an agent nobody is borrowing says so, rather than showing an empty cell',
+      /nobody is borrowing|当前没有人借用/.test(body));
+  } else {
+    check('every agent is borrowed (vacuous)', true, `${active.length} active`);
+  }
+
+  /*
+   * THE ACCESS RECORD, which is why this page reads a sixth endpoint.
+   *
+   * GET /api/contributions is the binding that actually lets a project reach an
+   * agent; an engagement is only the allocation. The roster reconciles them, so the
+   * check is that the reconciliation reports the state the two payloads actually
+   * describe — including agreement, since a column that only speaks up on failure
+   * is indistinguishable from one that is broken.
+   */
+  const { contributions } = await api('contributions');
+  const bindings = (contributions ?? []).filter((c) => c.active !== false);
+  check('the access record is read, not inferred from the engagement',
+    /access record|可达记录/i.test(await text(page, '[data-testid="provenance"]') ?? ''));
+  /*
+   * Standing reachability that outlived its engagement is the finding this column
+   * exists for, so it must be NAMED rather than silently counted.
+   *
+   * Reported as vacuous when no such binding exists, rather than skipped inside a
+   * loop that prints nothing: a check that quietly does not run is the one outcome
+   * this suite refuses, because it reads exactly like a pass.
+   */
+  const standing = agents.flatMap((a) => {
+    const rooms = new Set(active.filter((e) => e.agent === a.name).map((e) => e.projectRoomId));
+    return bindings.filter((b) => b.agent === a.name && !rooms.has(b.projectRoomId));
+  });
+  if (standing.length > 0) {
+    check('a binding with no active engagement is flagged, not merely counted',
+      /no active engagement|没有对应的进行中接洽/.test(body),
+      standing.map((b) => `${b.agent}:${b.project}`).join(' '));
+  } else {
+    check('no binding outlives its engagement on this backend (vacuous)', true,
+      `${bindings.length} bindings, every one with an active engagement behind it`);
+  }
+  if (bindings.length > 0 && agents.some((a) => bindings.some((b) => b.agent === a.name))) {
+    check('an agent with bindings reports how many rooms can reach it',
+      /reachable from \d+ rooms|\d+ 个房间可达/.test(body), `${bindings.length} bindings`);
+  } else {
+    check('no binding on this backend (vacuous)', true, '0 active bindings');
+  }
+  const unbound = agents.filter((a) => !bindings.some((b) => b.agent === a.name)
+    && !active.some((e) => e.agent === a.name));
+  if (unbound.length > 0) {
+    check('an unreachable agent says that, rather than rendering an empty cell',
+      /no project can reach it|没有项目能连上它/.test(body), `${unbound.length} agents`);
+  } else {
+    check('every agent is reachable by someone (vacuous)', true, '');
+  }
+
+  /*
+   * CONSUMPTION — the rule the whole console rests on, asserted per agent.
+   *
+   * Not "the page says something about metering somewhere": the per-agent reason is
+   * fetched from the payload and looked for on screen. That is what catches a page
+   * which renders one generic footnote and drops the specific reason, which for this
+   * backend differs by framework — a missing workspace is a different problem from
+   * an adapter whose transcripts nobody has located.
+   */
+  const usage = await api('usage');
+  const rows = usage.agents ?? [];
+  const unmeasured = rows.filter((r) => r.tokensUsed === null);
+  const lostReasons = unmeasured.filter((r) => !body.includes(r.tokensReason));
+  check('every unmeasured agent carries its OWN reason on screen',
+    lostReasons.length === 0, lostReasons.map((r) => r.agent).join(' '));
+  check('and none of them renders as a zero',
+    rows.every((r) => r.tokensUsed === null || r.tokensUsed > 0),
+    rows.filter((r) => r.tokensUsed === 0).map((r) => r.agent).join(' '));
+  const measured = rows.filter((r) => r.tokensUsed !== null);
+  if (measured.length > 0) {
+    const shown = measured.filter((r) => {
+      const m = r.tokensUsed >= 1_000_000 ? `${(r.tokensUsed / 1_000_000).toFixed(1)}M`
+        : r.tokensUsed >= 1_000 ? `${Math.round(r.tokensUsed / 1_000)}k`
+          : String(r.tokensUsed);
+      return !body.includes(m);
+    });
+    check('a measured agent shows its figure', shown.length === 0, shown.map((r) => r.agent).join(' '));
+    // Cache reads run orders of magnitude above fresh input, so one summed figure
+    // hides the only number that distinguishes two agents.
+    check('and the kinds are shown apart, not as one total',
+      /cache read|缓存读取/i.test(body));
+  } else {
+    check('nothing is attributable on this host (vacuous)', true,
+      `${unmeasured.length} agents, all with a reason — the measured branch is unexercised here`);
+  }
+
+  /*
+   * THE SEAT under the ceiling. A per-agent ceiling is a sub-allocation of a shared
+   * credential home, so the roster naming a ceiling without naming the seat would
+   * repeat the arithmetic the seats table exists to correct.
+   */
+  const { seats } = await api('seats');
+  const shared = (seats ?? []).filter((s) => s.members.length > 1);
+  if (shared.length > 0) {
+    check('an agent on a shared seat says how many share it',
+      /shared with \d+ more|与另外 \d+ 个共用/.test(body),
+      `${shared.length} shared seats`);
+  } else {
+    check('no shared seat in this deployment (vacuous)', true, `${(seats ?? []).length} seats`);
+  }
+
+  /*
+   * WHAT THE ROSTER MUST NOT BECOME. ADR-013 §1 withdrew dispatch, so a page that
+   * grew an assignment, a queue or a lease column would be building the thing the
+   * decision removed — and it would look like a feature. Asserted as an absence,
+   * with the withdrawal stated on the page rather than merely implied by omission.
+   */
+  check('the roster states whose decision the work is',
+    /decided on the project side|由项目一侧决定/.test(body));
+  check('and names the withdrawal rather than leaving a silent gap',
+    /withdrawn|撤回/i.test(body));
+  check('and it carries no assignment, queue or lease column',
+    !/\b(assignment|work item|lease|queue)\b/i.test(
+      await page.$eval('table.tbl thead', (el) => el.innerText).catch(() => ''),
+    ));
+  /*
+   * Currency, in either direction. ADR-013's 2026-08-10 amendment makes the token
+   * the unit of account, and a `$` on a roster of lent capacity would be the
+   * withdrawn pricing model reappearing as a formatting choice.
+   */
+  check('no currency anywhere on the roster', !/[$€£¥]|\bUSD\b|\bCNY\b/.test(body));
 };
 
 // ── /agents/[name] ──────────────────────────────────────────────────────────
@@ -1014,6 +1245,22 @@ suites.writes = async (page) => {
  * Asserted on the OUTCOME — the agent still exists — as well as the status code,
  * because a 403 from the wrong layer would still be a 403.
  */
+/*
+ * REQ-CONTRIBUTION-CONSOLE-BROWSER-CREDENTIAL — every clause of it, as a live request the
+ * proxy must refuse.
+ *
+ * The requirement names five things: the browser holds no operator credential, the proxy
+ * enforces a default-deny path allowlist, it validates segments BEFORE any decoding and
+ * rebuilds the outbound path from what it validated, it refuses a cross-site state-changing
+ * request, and it does not follow a redirect. Each has a check below, and each was a real
+ * defect first — the allowlist was matched against a path Next had already decoded once, so
+ * a double-encoded segment reached the backend intact.
+ *
+ * Exercised through the browser and the running proxy rather than by unit-testing the route
+ * handler, because four of the five are properties of the REQUEST as it actually arrives:
+ * Sec-Fetch-Site, the forwarded-for chain, the redirect response, and the decoding Next does
+ * before any handler code runs.
+ */
 suites.proxyBoundary = async () => {
   const before = (await api('agents')).map((a) => a.name).sort();
 
@@ -1147,7 +1394,69 @@ suites.proxyBoundary = async () => {
   check('and so does its removal, room id and all', del.ok, `HTTP ${del.status}`);
 };
 
-const ORDER = ['resources', 'config', 'alerts', 'capability', 'wizard', 'onboard', 'usage', 'engagements', 'agentDetail', 'writes', 'proxyBoundary'];
+const ORDER = ['resources', 'workforce', 'config', 'alerts', 'capability', 'wizard', 'onboard', 'usage', 'engagements', 'agentDetail', 'writes', 'proxyBoundary'];
+
+/*
+ * Two rules that are properties of the WHOLE console, not of any one page.
+ *
+ * REQ-CONTRIBUTION-CONSOLE-UNIT and REQ-CONTRIBUTION-CONSOLE-INWARD were each asserted on
+ * exactly one route — currency on the roster, the absent scheduler columns on the roster's
+ * table head. Both requirements are stated about the console: "the console MUST NOT convert
+ * tokens to currency", "MUST NOT present a scheduler, lease, queue, or work-assignment
+ * surface". A per-page check satisfies neither, and the page it happened to cover was the
+ * newest one — so the seven older routes were never checked at all.
+ *
+ * Swept per route rather than folded into each suite, because the failure being guarded
+ * against is a NEW page or a re-worded label reintroducing the withdrawn model somewhere
+ * nobody thought to look. A rule that lives in one suite does not travel to the next page
+ * somebody adds; this loop does.
+ */
+const CONSOLE_WIDE_ROUTES = [
+  '/resources', '/resources/new', '/workforce', '/capability', '/engagements', '/usage',
+  '/alerts', '/config', '/onboard',
+];
+
+/*
+ * A MONETARY FIGURE, not a currency character.
+ *
+ * The first version of this matched `[$€£¥]` anywhere in the body and failed on `/resources`
+ * and `/onboard` — both because they explain that `$HOME` is never reassigned in the launch
+ * path. A shell variable in prose is not a price, and widening the check until it passed
+ * would have been the wrong repair; what the requirement forbids is CONVERTING TOKENS TO
+ * CURRENCY, which on screen is a symbol against a number.
+ *
+ * So: a symbol or ISO code adjacent to a digit. `$HOME` does not match, `$1,234` and
+ * `500 USD` do.
+ */
+const MONETARY = /[$€£¥]\s?\d|\d\s?(USD|CNY|EUR|GBP|JPY)\b|\b(USD|CNY|EUR|GBP|JPY)\s?\d/i;
+
+/*
+ * The withdrawn dispatcher vocabulary — checked against COLUMN HEADINGS, not prose.
+ *
+ * Same lesson from the same run: `/workforce` failed on the word "assignments" inside
+ * `wf.notScheduler`, a string whose entire content is "A roster of my agents, NOT of
+ * assignments… nothing here is a queue, a lease or a work item". Flagging a page for
+ * disclaiming the thing it is required not to do is the check being wrong, not the page.
+ *
+ * The requirement forbids PRESENTING a scheduler, lease, queue, or work-assignment
+ * SURFACE. A surface is a column, so table headings are where to look — which is also what
+ * the roster's own narrower check already did before this loop generalised it.
+ */
+const DISPATCH_COLUMN = /\b(work item|lease|scheduler|assignment|queue)\b/i;
+
+async function consoleWideRules(page) {
+  console.log('— console-wide');
+  for (const route of CONSOLE_WIDE_ROUTES) {
+    await open(page, route);
+    const body = await page.$eval('body', (el) => el.innerText).catch(() => '');
+    check(`${route}: no monetary figure`, !MONETARY.test(body), (body.match(MONETARY) || [''])[0]);
+
+    // Every table on the route, so a second table cannot be the one that regresses.
+    const heads = await page.$$eval('thead', (els) => els.map((e) => e.innerText)).catch(() => []);
+    const offending = heads.map((h) => (h.match(DISPATCH_COLUMN) || [''])[0]).filter(Boolean);
+    check(`${route}: no dispatcher column`, offending.length === 0, offending.join(', '));
+  }
+}
 
 (async () => {
   console.log(`\nLive UX — browser ${BASE} against backend ${BACKEND}\n`);
@@ -1163,6 +1472,8 @@ const ORDER = ['resources', 'config', 'alerts', 'capability', 'wizard', 'onboard
       check(`${key} suite completed`, false, e.message);
     }
   }
+
+  if (!ONLY) await consoleWideRules(page);
 
   await browser.close();
   const tail = skipped > 0 ? ` ${skipped} skipped.` : '';

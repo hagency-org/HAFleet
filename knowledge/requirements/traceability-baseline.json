@@ -1,0 +1,11 @@
+{
+  "statements": 68,
+  "covered": 63,
+  "uncovered": [
+    "REQ-OWNER-UI-APPROVAL-CONTROL",
+    "REQ-PROJECT-BOARD-AGENTS",
+    "REQ-PROJECT-BOARD-GRAPHS",
+    "REQ-PROJECT-BOARD-REPOSITORIES",
+    "REQ-PROJECT-BOARD-REFRESH"
+  ]
+}

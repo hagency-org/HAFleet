@@ -45,6 +45,75 @@ describe('GET /api/usage metering block', () => {
     expect(row.tokensReason).toMatch(/no workspace recorded/);
   });
 
+  /*
+   * The third failure mode this file's header names — "a total that silently omits what it
+   * could not attribute" — and the one that went untested longest, because no endpoint case
+   * produced a MEASURED row: doing that by transcript needs a real
+   * `~/.claude/projects/<encoded>` tree. Seeding the ledger reaches the same branch, since
+   * the row prefers `usageLedger.totalsFor()` over the live scan.
+   *
+   * `totals.tokensUsed` was unconditionally null here while per-agent rows carried real
+   * figures, so the fleet number was thrown away. The fix must not overcorrect into a bare
+   * sum: with some agents unattributable, a sum understates the fleet while reading as
+   * authoritative.
+   */
+  const ledgerFor = (rows) => ({
+    'usage-ledger.json': JSON.stringify({
+      agents: Object.fromEntries(Object.entries(rows).map(([name, total]) => [name, {
+        sessions: { s1: { input: total, output: 0, cacheWrite: 0, cacheRead: 0, lastSeen: 1 } },
+        retired: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 },
+        retiredSessions: 0, regressions: 0, framework: 'claude',
+        periods: { daily: {}, monthly: {} },
+      }])),
+    }),
+  });
+
+  test('the fleet total sums what was measured instead of discarding it', async () => {
+    ctx = await createBackendTestContext('usage-total-', {
+      agents: { a1: agentRec('a1', 'claude'), a2: agentRec('a2', 'claude') },
+      rawDataFiles: ledgerFor({ a1: 1000, a2: 2500 }),
+    });
+    const res = await request(ctx.app).get('/api/usage');
+    expect(res.body.totals.tokensUsed).toBe(3500);
+    expect(res.body.totals.tokensMeasuredFor).toBe(2);
+    // Every agent measured, so the figure is a fleet total rather than a partial one.
+    expect(res.body.totals.tokensPartial).toBe(false);
+  });
+
+  test('a partial total says so, so it cannot be read as the whole fleet', async () => {
+    /*
+     * The case that makes a bare sum dangerous: one agent measured out of three. 1000 is
+     * true of what was measured and false of the fleet, and only `tokensPartial` and
+     * `tokensMeasuredFor` distinguish them.
+     */
+    ctx = await createBackendTestContext('usage-partial-', {
+      agents: {
+        a1: agentRec('a1', 'claude'), a2: agentRec('a2', 'claude'), a3: agentRec('a3', 'octos'),
+      },
+      rawDataFiles: ledgerFor({ a1: 1000 }),
+    });
+    const res = await request(ctx.app).get('/api/usage');
+    expect(res.body.totals.tokensUsed).toBe(1000);
+    expect(res.body.totals.tokensMeasuredFor).toBe(1);
+    expect(res.body.totals.tokensPartial).toBe(true);
+    expect(res.body.totals.agents).toBe(3);
+  });
+
+  test('a fleet with nothing measured reports null, not zero', async () => {
+    /*
+     * The same rule the per-agent rows follow, at fleet scale: 0 is the claim that this
+     * fleet consumed nothing, which is a stronger statement than anything measured it.
+     */
+    ctx = await createBackendTestContext('usage-total-none-', {
+      agents: { a1: agentRec('a1', 'claude') },
+    });
+    const res = await request(ctx.app).get('/api/usage');
+    expect(res.body.totals.tokensUsed).toBeNull();
+    expect(res.body.totals.tokensMeasuredFor).toBe(0);
+    // Not partial either — partial means "some of a set", and none were measured.
+    expect(res.body.totals.tokensPartial).toBe(false);
+  });
+
   test('availability is reported per framework, not once for the fleet', async () => {
     /*
      * REQ-CONTRIBUTION-CONSOLE-METERING-SCOPE. Claude and Codex write the provider's

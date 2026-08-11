@@ -96,6 +96,15 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('runtime_approval_failure_is_delivered_as_explicit_deny', async () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-BACKGROUND, the Claude side of "request-time transport failures MUST
+     * produce an explicit runtime denial". The backend throws and the outcome is a deny with a
+     * named reason rather than a thrown error, because an error propagating out of the channel
+     * handler is what leaves Claude sitting on its own native prompt inside tmux where nobody
+     * is watching. The three source assertions at the end pin the caller: mcp-server-core
+     * forwards `outcome.behavior` and no longer contains the string that used to accompany the
+     * old fall-back-to-native path.
+     */
     const onError = vi.fn();
     const outcome = await failClosedRuntimeApproval(
       async () => {
@@ -118,6 +127,13 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('authorized runtime result is consumed before delivery', async () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-CONSUME, Claude side. The approval is already `approved` when the
+     * adapter sees it, and the assertion that matters is `calls` — the consume POST is the only
+     * request made, and it happens before the allow is returned. Delivering the allow first and
+     * consuming afterwards would leave a window where the same approved verdict could be
+     * consumed twice, which is the atomicity this statement is about.
+     */
     const calls = [];
     const approval = {
       id: 'approval_0123456789abcdef0123456789abcdef',
@@ -172,6 +188,16 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('codex_internal_coordination_tools_are_allowed_without_recursive_approval', async () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-CODEX-COORDINATION, all three of its clauses, and the exemption is
+     * bounded in both directions below. Allowed: the exact named hafleet coordination tools, and
+     * send_message/post while `attachments` is absent or empty. Still owner-gated: the same
+     * send_message once it carries a file path, Bash, an unrelated MCP filesystem read, and
+     * `mcp__hafleet__unknown` — the last one is what makes this a whitelist rather than a
+     * namespace exemption a future tool would silently inherit. The live hook run at the end
+     * closes the loop: check_inbox returns allow with `api` never called, so no approval request
+     * was created for the call that was blocking the agent from reading its own inbox.
+     */
     const safeToolNames = [
       'whoami',
       'check_inbox',
@@ -249,6 +275,13 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('codex_hook_failure_emits_explicit_deny', async () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-BACKGROUND, the Codex side. `env: {}` denies the hook the identity it
+     * needs to reach the backend at all, and it still writes a well-formed documented deny to
+     * stdout instead of exiting non-zero or staying silent. That distinction is the requirement:
+     * Codex treats a hook that fails to answer as no decision and falls back to its own
+     * unattended prompt, which in a detached tmux session nobody ever sees.
+     */
     const temporary = mkdtempSync(path.join(os.tmpdir(), 'hafleet-codex-hook-'));
     try {
       const hookPath = path.join(temporary, 'hook.js');
@@ -284,6 +317,11 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('codex hook consumes allow before emitting it', async () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-CONSUME, Codex side. `calls` records the exact order — create, then
+     * consume — and only then is the allow written to stdout, so the verdict Codex acts on has
+     * already been spent server-side and cannot be spent again by a retried turn.
+     */
     const temporary = mkdtempSync(path.join(os.tmpdir(), 'hafleet-codex-hook-'));
     try {
       const hookPath = path.join(temporary, 'hook.js');
@@ -334,6 +372,16 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('codex_hook_command_binds_script_digest_and_dynamic_timeout', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-TIMEOUT, arithmetically: a 900_000 ms server TTL yields 960 seconds,
+     * a bounded 60-second delivery margin ON TOP of the approval lifetime, and that same number
+     * reaches Codex through the generated TOML. The direction is what the requirement cares
+     * about — a timeout under the TTL would kill the hook while the owner still had a live
+     * request in front of them, and the owner would be answering something already dead.
+     *
+     * Also REQ-OWNER-UI-APPROVAL-TRUST's content-binding clause: the hook command embeds the
+     * script's sha256, so trust granted to this configuration is trust in these exact contents.
+     */
     const digest = 'e'.repeat(64);
     const command = buildCodexApprovalHookCommand({
       nodeExecutable: '/usr/local/bin/node',
@@ -370,6 +418,30 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('codex_hook_preflight_precedes_tmux_and_requires_exact_trust', async () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-TRUST. Four of its clauses are asserted below.
+     *
+     * Supported interface: the request sequence is hooks/list -> config/batchWrite -> hooks/list,
+     * i.e. trust is read and written through Codex App Server, and the re-inspection confirms
+     * Codex itself now reports the hook trusted rather than the launcher assuming it did.
+     *
+     * Exact and content-bound: the batchWrite upserts `trusted_hash` for the one hook key
+     * Codex reported, set to Codex's own `currentHash` — so trust attaches to that exact
+     * configuration, and the hooks/list stage refuses to proceed unless exactly one session
+     * PermissionRequest hook matches.
+     *
+     * Explicit confirmation: `confirm` is called exactly once, on the inspection that came back
+     * `untrusted`. No bypass: `not.toContain('dangerously-bypass-hook-trust')` over both
+     * launchers.
+     *
+     * Also REQ-OWNER-UI-APPROVAL-BACKGROUND's ordering clause — the index comparison proves
+     * preflight_runtime_approval_adapter is invoked before create_tmux_session in both
+     * launchers, so no detached terminal exists to hide a native prompt in until the adapter has
+     * been verified.
+     *
+     * NOT asserted here (see report): that a declined or non-interactive confirmation aborts.
+     * `confirm` is stubbed true, so only the accept path runs.
+     */
     const temporary = mkdtempSync(path.join(os.tmpdir(), 'hafleet-codex-preflight-'));
     try {
       const hookPath = path.join(temporary, 'codex-permission-hook.js');
@@ -490,6 +562,13 @@ describe('supported runtime approval adapters', () => {
   });
 
   test('launchers_clear_ambient_anthropic_key_without_explicit_profile', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-CLAUDE-AUTH, both halves, and the guard condition is the whole
+     * statement: the unset is emitted only when SAVED_RUNTIME_PROFILE_PRIMARY_API_KEY is empty,
+     * and the export is emitted when it is set. An unconditional unset would break the explicit
+     * per-agent key; an unconditional inherit lets whatever is in the operator's shell decide
+     * which account the managed agent bills and authenticates as.
+     */
     for (const file of ['bin/hafleet-up', 'remote/bin/hafleet-up']) {
       const source = readFileSync(file, 'utf8');
       expect(source).toContain(
