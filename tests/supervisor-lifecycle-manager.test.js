@@ -58,14 +58,29 @@ describe('SupervisorLifecycleManager', () => {
       stateDir,
       workdir,
     }));
+    /*
+     * A PROVISIONED home, because the launcher now verifies the approval adapter before it creates
+     * a session (ADR-005: "verifies every required adapter before it creates tmux"). A fixture
+     * without these artifacts is an unprovisioned agent, and the launcher is right to refuse it —
+     * which is how these two files first failed when the check landed.
+     *
+     * The token is what the runtime submits an approval request WITH; `.mcp.json` is what declares
+     * the channel Claude asks over. Both are what `hafleet up` writes.
+     */
+    writeFileSync(path.join(stateDir, 'agent-token'), 'a'.repeat(64) + '\n', { mode: 0o600 });
+    writeFileSync(path.join(homeRoot, '.mcp.json'), JSON.stringify({ mcpServers: {} }));
     // Set HAFLEET_HOMEDIR so resolveV1ManifestForAgent finds the workspace
     process.env.HAFLEET_HOMEDIR = tmpDir;
+    // The readiness check reads the agent data dir from here, matching bin/hafleet-up's
+    // DATA_DIR="$RUNTIME_DIR/data/agents".
+    process.env.HAFLEET_RUNTIME_DIR = tmpDir;
   });
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
     process.env.PATH = originalPath;
     delete process.env.HAFLEET_HOMEDIR;
+    delete process.env.HAFLEET_RUNTIME_DIR;
     delete process.env.SUPERVISOR_TRAILING_HEARTBEAT_PERIODS;
     delete process.env.SUPERVISOR_HEARTBEAT_TTL_MS;
   });
@@ -147,6 +162,108 @@ describe('SupervisorLifecycleManager', () => {
     expect(broadcastEvents[0].data.type).toBe('started');
   });
 
+  test('REFUSES to launch when the approval adapter is not ready', () => {
+    /*
+     * ADR-005: "the launcher verifies every required adapter before it creates tmux." Two launchers
+     * did; this one did not, so a supervisor Claude agent ran `--permission-mode auto` in a detached
+     * pane with NO permission relay — auto mode then either hard-denies everything or opens a native
+     * prompt inside a pane nobody is watching, which is the state
+     * REQ-OWNER-UI-APPROVAL-BACKGROUND forbids by name.
+     *
+     * Asserted as a refusal AND as no tmux call: reporting `failed` while still creating the session
+     * would be the same defect with a better error message.
+     */
+    rmSync(path.join(tmpDir, 'agents', 'agent_supervisor-ac-topleader', 'state', 'agent-token'), { force: true });
+    runtimes['ac-topleader'] = { activeNow: true };
+    mockTmuxExists(new Set());
+
+    const result = createManager().reconcile('ac-topleader');
+
+    expect(result.action).toBe('failed');
+    expect(result.reason).toBe('approval-adapter-unready');
+    // The reason names what to run, because "unready" alone leaves an operator nowhere to go.
+    expect(result.error).toMatch(/missing_agent_approval_token/);
+    expect(result.error).toMatch(/hafleet up/);
+    expect(execFileSync.mock.calls.some((c) => c[0] === 'tmux' && c[1][0] === 'new-session')).toBe(false);
+  });
+
+  test('refuses a Claude launch when the permission channel is switched off', () => {
+    // The channel is the ONLY way this runtime can ask a human. Turning it off and launching anyway
+    // is the forbidden state reached by configuration rather than by omission.
+    process.env.HAFLEET_CLAUDE_PERMISSION_CHANNEL = 'false';
+    try {
+      runtimes['ac-topleader'] = { activeNow: true };
+      mockTmuxExists(new Set());
+      const result = createManager().reconcile('ac-topleader');
+      expect(result.action).toBe('failed');
+      expect(result.error).toMatch(/claude_permission_channel_disabled/);
+    } finally {
+      delete process.env.HAFLEET_CLAUDE_PERMISSION_CHANNEL;
+    }
+  });
+
+  test('an already-running supervisor is KEPT even if an artifact went missing', () => {
+    /*
+     * The placement the first draft got wrong. ADR-005's wording is "before it CREATES tmux", and a
+     * supervisor already running healthily is not creating one — so gating the `kept` path would
+     * report `failed` for a working session and, worse, invite a caller to restart it. The suite
+     * caught that draft by failing this case's ancestor.
+     */
+    rmSync(path.join(tmpDir, 'agents', 'agent_supervisor-ac-topleader', 'state', 'agent-token'), { force: true });
+    runtimes['ac-topleader'] = { activeNow: true };
+    /*
+     * The pane path has to MATCH, or this exercises the restart branch instead — which does create a
+     * session and is therefore correctly gated. The first version of this test omitted the
+     * display-message mock and failed for exactly that reason, which is a useful thing to have
+     * learned: a path-mismatch restart goes through the gate, and only a true `kept` bypasses it.
+     */
+    const workdir = path.join(tmpDir, 'agents', 'agent_supervisor-ac-topleader', 'workdir');
+    execFileSync.mockImplementation((cmd, args) => {
+      if (cmd !== 'tmux') return '';
+      if (args[0] === 'has-session') return '';
+      if (args[0] === 'display-message') return workdir + '\n';
+      return '';
+    });
+
+    const result = createManager().reconcile('ac-topleader');
+
+    expect(result.action).toBe('kept');
+  });
+
+  test('a path-mismatch RESTART is gated, because it does create a session', () => {
+    // The other half of the placement rule. `kept` bypasses the check; anything that calls
+    // startTmuxSession — including a restart — goes through it.
+    rmSync(path.join(tmpDir, 'agents', 'agent_supervisor-ac-topleader', 'state', 'agent-token'), { force: true });
+    runtimes['ac-topleader'] = { activeNow: true };
+    execFileSync.mockImplementation((cmd, args) => {
+      if (cmd !== 'tmux') return '';
+      if (args[0] === 'has-session') return '';
+      if (args[0] === 'display-message') return '/somewhere/else\n';
+      return '';
+    });
+
+    const result = createManager().reconcile('ac-topleader');
+
+    expect(result.action).toBe('failed');
+    expect(result.reason).toBe('approval-adapter-unready');
+  });
+
+  test('the launch replaces the pane shell, so a dead runtime does not look alive', () => {
+    /*
+     * ADR-005 ¶6. Without `exec`, a runtime that exits leaves the pane at an interactive shell — and
+     * because the SESSION still exists, `tmuxSessionExists` reports it and reconcile returns `kept`,
+     * so a supervisor whose runtime died is indistinguishable from one that is running and is never
+     * restarted. `bin/hafleet-up` has always done this; this launcher did not.
+     */
+    runtimes['ac-topleader'] = { activeNow: true };
+    mockTmuxExists(new Set());
+    createManager().reconcile('ac-topleader');
+
+    const sendKeys = execFileSync.mock.calls.find((c) => c[0] === 'tmux' && c[1][0] === 'send-keys');
+    expect(sendKeys).toBeTruthy();
+    expect(sendKeys[1][3]).toMatch(/^exec /);
+  });
+
   test('builds sandboxed Claude auto-mode and Codex Level 2 supervisor commands', () => {
     const claudeCommand = buildLaunchCommand('alpha', '/tmp/alpha', {
       profileSource: 'env/default', framework: 'claude', provider: 'anthropic',
@@ -166,6 +283,40 @@ describe('SupervisorLifecycleManager', () => {
     expect(codexCommand).toContain("-C '/tmp/alpha'");
     expect(codexCommand).toContain("-- 'Read your AGENTS.md and begin your assessment cycle now.'");
     expect(codexCommand).not.toContain('--yolo');
+  });
+
+  test('an ambient ANTHROPIC_API_KEY is unset for Claude with no profile key', () => {
+    /*
+     * ADR-005 ¶5. Both hafleet-up launchers do this — pinned by
+     * `launchers_clear_ambient_anthropic_key_without_explicit_profile` — and this one did not, so a
+     * key sitting in the operator's shell was inherited by the tmux server and used INSTEAD of the
+     * subscription the contributor configured. Silent, and it bills the wrong credential: ADR-013's
+     * seat accounting assumes an agent draws on the credential home its profile names.
+     */
+    const command = buildLaunchCommand('alpha', '/tmp/alpha', {
+      profileSource: 'env/default', framework: 'claude', provider: 'anthropic',
+      model: null, reasoning: null, extraArgs: '',
+    }, null);
+    expect(command).toMatch(/^env -u ANTHROPIC_API_KEY /);
+  });
+
+  test('an EXPLICIT profile key is left alone', () => {
+    // A per-agent key is a deliberate choice. Unsetting it here would override the operator in the
+    // opposite direction, which is the same class of surprise.
+    const command = buildLaunchCommand('alpha', '/tmp/alpha', {
+      profileSource: 'agent/runtimeProfile', framework: 'claude', provider: 'anthropic',
+      model: null, reasoning: null, extraArgs: '',
+    }, { primary: { apiKey: 'sk-explicit-per-agent' } });
+    expect(command).not.toMatch(/env -u ANTHROPIC_API_KEY/);
+  });
+
+  test('Codex is not touched by the Anthropic hygiene', () => {
+    // The variable means nothing to Codex, and unsetting it there would be cargo-culting the fix.
+    const command = buildLaunchCommand('alpha', '/tmp/alpha', {
+      profileSource: 'env/default', framework: 'codex', provider: 'openai',
+      model: null, reasoning: null, extraArgs: '',
+    }, null);
+    expect(command).not.toMatch(/env -u ANTHROPIC_API_KEY/);
   });
 
   test('rejects supervisor extraArgs that override the managed permission policy', () => {

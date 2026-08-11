@@ -150,8 +150,11 @@ home, not per agent.** `bin/hafleet-up:1640-1644` unsets `ANTHROPIC_API_KEY` for
 unless a per-agent runtime profile supplies one explicitly, and `$HOME` is never reassigned in the
 launch path. So Claude agents share the operator's authenticated subscription and its quota by
 default; API-key mode is the deliberate exception. Registering more agents does not add capacity.
-The PRD already models this correctly as `Seat` / `SeatBinding` / `BillingSource` (R8), which
-survives this ADR intact.
+The PRD already models this correctly as `Seat` / `SeatBinding` / ~~`BillingSource`~~ (R8), which
+survives this ADR intact. (`BillingSource` struck by the 2026-08-10 amendment. That amendment corrects
+only decision 8's list, and this sentence was the second place the ADR asserted `BillingSource`
+survived — found while revising the PRD to v0.3, which is exactly the reader this contradiction would
+have misled.)
 
 **Numbering.** `knowledge/decisions/` holds `adr-001`…`adr-009`. The PRD records
 `adr-011-backend-owned-ephemeral-runner-sessions` and `adr-012-agent-operations-client-access` as
@@ -187,10 +190,16 @@ each tier, since `TIER_RUNTIME` maps a tier to one Claude pair and leaves a cont
 K3 nothing to match against. Exclusions are named with their reason rather than omitted, because a
 role card that silently lacks a model reads as an oversight. The file ships with the product: a
 provider may decline to offer a role or a combination, but may not invent a role name, because the
-project side must recognise it for the vocabulary to mean anything. When this was written the file had **no consumer**. It now has five —
-`backend-v2.js`, `lib/matrix-agent.js`, `lib/dashboard/render/pool-page.js`, the
-console's capability page, and the role tests — so the vocabulary is single-sourced as
-intended rather than restated per surface.
+project side must recognise it for the vocabulary to mean anything. When this was written the file had
+**no consumer at all**, which was the whole risk: a vocabulary nothing imports is a suggestion. That
+has changed, and the claim worth recording is the property rather than the tally — **the role
+vocabulary is now single-sourced from this file rather than restated per surface.** It is imported,
+not copied, by the backend (`backend-v2.js`), by `lib/matrix-agent.js` — through which
+`lib/dashboard/render/pool-page.js` renders — by the prototype's data layer and its capability and
+onboarding pages, by the invariant suite, and by the role tests; CI even treats the file as a build
+input for the prototype. As of 2026-08-11 that is five direct readers and twenty files in the tree
+that name it, but those figures are a snapshot: the first version of this sentence said "five
+consumers" and was stale within a day.
 
 **4. 接洽 replaces dispatch, gated by a whitelist.** A standing offer makes the provider
 discoverable; a whitelist decides who may skip them.
@@ -268,8 +277,21 @@ the token, and token-to-currency conversion is out of scope. R7's accrual is ret
 this split; until then its dispatch requirements are not implementable and must not be scheduled.
 
 The console is a running Next.js prototype under `mockup/`, published at
-`hagency-org.github.io/HAFleet`, with 90 static and 31 in-browser assertions run before export. It
-is the executable form of this decision and acceptance for the round should be written against it.
+`hagency-org.github.io/HAFleet`. What matters about it is not its size but that **this decision has
+an executable form whose invariants are asserted before every export** — the layer boundaries, the
+role vocabulary, the blank-is-never-a-zero rule and the i18n contract are all checked rather than
+described. Three suites do that checking: `scripts/check-invariants.mjs` against the rendered HTML,
+`scripts/check-switches.mjs` in a browser over fixture data, and `scripts/live-ux.mjs` in a browser
+against a live backend — the only one that can catch a real payload the UI mishandles. As of
+2026-08-11 the first two report 97 and 35 passing assertions respectively (the figures this record
+first carried, 90 and 31, were already stale); `live-ux.mjs` is the newest and its count is not cited
+here, because it needs a running backend and is the suite most likely to grow. The prototype is the
+executable form of this decision and acceptance for the round should be written against it.
+
+**The lesson both of this section's stale numbers teach:** a precise count of anything in the
+codebase is stale the day a decision record is written, so state what the number is evidence *for* —
+that the design is executable and asserted, that the vocabulary is single-sourced — and either date
+the figure or leave it to the suite that measures it.
 
 ## Consequences
 

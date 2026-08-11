@@ -621,6 +621,17 @@ tests that did not exist, and those tests failed:
   slip, which does not match the "load-sensitive timing" theory and is worth recording
   as evidence against it.
 
+- **SEVEN files now, and the spread is the finding.** `api-groups` ("treats adding an existing
+  member as idempotent") and `api-pool` ("returns the role×capability grid") failed together in one
+  full run, passed in isolation, and the next full run was green (162 files, 2615 passed). Neither
+  references anything the commit under test changed — checked, because a permissionSummary string
+  did change in that commit and `api-pool` serves that field. The set is now server heartbeat ×2,
+  message retention, ACP workspace attribution, alert suppression, group membership and the
+  capability grid: no two adjacent in the code, and every one of them goes through
+  `createBackendTestContext`. That is as close to a proof as observation gets that the cause is the
+  harness — most likely port binding or the cache-busted module import — and not any subsystem.
+  Worth one focused session on the harness rather than another round of per-file suspicion.
+
 - **A FIFTH file joined on 2026-08-11**: `alert-store` ("suppressed alert reopens on new
   occurrence after suppressUntil expires"), one failure in a full run, passing in isolation
   immediately after, and the next full run completely green (160 files, 2580 passed). It shares
