@@ -5,7 +5,7 @@ import {
   SimpleFsStorageProvider,
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { execFile } from 'child_process';
 import os from 'os';
 import path from 'path';
@@ -481,8 +481,34 @@ function loadState() {
     return { botToken: null, agentTokens: {}, roomGroupMap: {}, groupRoomMap: {} };
   }
 }
+/*
+ * Owner-only, because this file is a credential store.
+ *
+ * `bridge-state.json` holds `botToken` and every entry of `agentTokens` — see loadState's own
+ * fallback shape above. A Matrix access token is the identity: whoever reads one can post as
+ * that agent and read every room it is in. The file was being written with
+ * `writeFileSync(path, data)` and no mode, which is 0644 on this platform, so it was readable by
+ * every other account on the host. Verified on the live deployment:
+ * `-rw-r--r-- data/matrix/bridge-state.json`.
+ *
+ * An omission rather than a decision, and the same file proves it: the crypto store directory
+ * beside it is explicitly chmod 0700, `.env` is 0600, and the backend's JSON writer opens its
+ * temp file 0600. This was the one credential-bearing path left on the default.
+ *
+ * The chmod is separate from the mode option and not redundant: `mode` applies only when the
+ * file is CREATED, so every deployment that already has a 0644 file would keep it forever
+ * without this line.
+ */
 function saveState() {
-  writeFileSync(path.join(DATA_DIR, 'bridge-state.json'), JSON.stringify(state, null, 2));
+  const statePath = path.join(DATA_DIR, 'bridge-state.json');
+  writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
+  try {
+    chmodSync(statePath, 0o600);
+  } catch (error) {
+    // A store that cannot be tightened is worth saying out loud rather than failing the write:
+    // the tokens are already persisted, and refusing here would lose them instead.
+    console.warn(`[bridge] could not restrict ${statePath} to 0600: ${error.message}`);
+  }
 }
 const state = loadState();
 if (!state.agentAvatars) state.agentAvatars = {};
