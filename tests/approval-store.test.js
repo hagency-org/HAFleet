@@ -285,4 +285,86 @@ describe('owner approval store', () => {
 
     expect(store.getRequest(created.id)).toMatchObject({ status: 'denied', denial_reason: 'owner_binding_changed' });
   });
+
+  describe('denyPending — the fail-closed leg of "two surfaces or nothing"', () => {
+    /*
+     * ADR-003 requires every remote-execution approval to use BOTH Matrix surfaces (the
+     * encrypted owner DM and the redacted public notice) or neither. `denyPending` is the
+     * "or neither" half: when the bridge cannot deliver a surface, the request must go to
+     * `denied`, not sit `pending` forever waiting for a verdict that can never be typed
+     * because the owner never saw the buttons. It had zero direct tests — the API round-trip
+     * touched it, but nothing pinned its own contract.
+     */
+    test('a pending request becomes denied, with the reason and an audit line', () => {
+      const { store } = makeStore();
+      store.upsertBinding(binding());
+      const created = store.createRequest(request());
+      expect(created.status).toBe('pending');
+
+      const denied = store.denyPending(created.id, 'matrix_delivery_failed');
+
+      expect(denied).toMatchObject({ status: 'denied', denial_reason: 'matrix_delivery_failed' });
+      // Auditable, because a request denied by a delivery failure rather than by the owner is
+      // exactly the case an operator needs to be able to reconstruct after the fact.
+      expect(store.listAudit()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'approval.denied', reason: 'matrix_delivery_failed' }),
+      ]));
+    });
+
+    test('an empty or missing reason falls back to a named default, never blank', () => {
+      // "denied" with no reason is unactionable; the default records that it was a delivery
+      // failure rather than an owner decision.
+      const { store } = makeStore();
+      store.upsertBinding(binding());
+      const created = store.createRequest(request());
+      expect(store.denyPending(created.id, '').denial_reason).toBe('delivery_failed');
+    });
+
+    test('an already-DECIDED request is not overwritten by a late delivery failure', () => {
+      /*
+       * The race this guards: the owner approves, and only then does the (now irrelevant)
+       * public-status send report failure. Denying here would revoke a decision the owner
+       * actually made. `denyPending` only touches a still-pending record.
+       */
+      const { store } = makeStore();
+      store.upsertBinding(binding());
+      const created = store.createRequest(request());
+      const approved = store.submitMatrixVerdict(created.id, verdict(created));
+      expect(approved.ok).toBe(true);
+
+      const result = store.denyPending(created.id, 'matrix_delivery_failed');
+
+      expect(result.status).toBe('approved');
+      expect(result.denial_reason ?? null).toBeNull();
+    });
+
+    test('denying twice is idempotent and keeps the first reason', () => {
+      // A retry of the fail-closed POST must not rewrite the reason or re-audit as a new denial.
+      const { store } = makeStore();
+      store.upsertBinding(binding());
+      const created = store.createRequest(request());
+      store.denyPending(created.id, 'first_reason');
+      const second = store.denyPending(created.id, 'second_reason');
+      expect(second).toMatchObject({ status: 'denied', denial_reason: 'first_reason' });
+    });
+
+    test('an unknown request id returns null rather than inventing a record', () => {
+      const { store } = makeStore();
+      expect(store.denyPending('$nonexistent', 'matrix_delivery_failed')).toBeNull();
+    });
+
+    test('an expired request stays expired — a delivery failure cannot revive it', () => {
+      /*
+       * If the TTL passed before delivery was even attempted, the truthful terminal state is
+       * `expired`, not `denied`: the owner was never going to be asked. `_expire` runs first.
+       */
+      let clock = 1_000_000;
+      const { store } = makeStore({ ttlMs: 1000, now: () => clock });
+      store.upsertBinding(binding());
+      const created = store.createRequest(request());
+      clock += 5000;
+      const result = store.denyPending(created.id, 'matrix_delivery_failed');
+      expect(result.status).toBe('expired');
+    });
+  });
 });

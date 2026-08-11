@@ -105,9 +105,13 @@ Theories tested and **falsified** this round, recorded so nobody re-walks them:
 - **Not** foreground load as the cause: six runs on a quiet machine still produced two
   failing runs, matching the historical rate. Concurrent local work (mutation testing,
   single-file vitest runs) is at most an amplifier.
-- Context-count correlation is real but not sufficient: four of the five heaviest files by
-  `createBackendTestContext` call sites have flaked, but `api-runtime` (25 sites) never
-  has, and `api-agents` (7) has.
+- Context-count correlation is real but not sufficient, and 2026-08-11 weakened it further:
+  `api-runtime` (25 sites) had been the clean counterexample cited against the theory — and
+  then it flaked too (whole-suite run, `runtime reports persist backend-derived observation
+  provenance`, passing alone immediately after). Eight files now. The one file that argued
+  "heavy but stable" is no longer stable, so what the flaky set has in common is not a
+  property of any file — it is `createBackendTestContext` under whole-suite memory pressure,
+  exactly the mechanism the section above describes.
 
 Method note, learned twice in one day: greping vitest output for failure counts silently
 matches nothing because of ANSI escapes — strip them (`sed 's/\x1b\[[0-9;]*m//g'`) or the
