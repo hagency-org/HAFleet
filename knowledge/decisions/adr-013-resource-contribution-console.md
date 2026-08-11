@@ -28,10 +28,20 @@ a fixed plan the marginal cost of a token is zero, so a per-engagement "cost" is
 of a bill paid regardless — an allocation with no rate. Presenting that beside a metered
 charge would invite a comparison that means nothing.
 
-`lib/cost-model.js` remains in the tree, **deliberately unwired**: it reaches no
-endpoint and no surface. It is retained only for one verified finding — pricing cache
-reads at the fresh-input rate overstated a real session by 7.79× — which is worth
-keeping should pricing ever be taken up elsewhere.
+`lib/cost-model.js` and its test have been **deleted** (2026-08-10). An earlier version of
+this amendment kept them in the tree, unwired, "for one verified finding". That was the
+wrong call twice over: 430 lines implementing precisely the conversion this ADR withdraws
+is a standing invitation to wire it up, and code is a poor place to store a finding — the
+finding is a sentence, and the sentence is here:
+
+> Pricing cache reads at the fresh-input rate overstated a real session by **7.79×**.
+> Cache reads run orders of magnitude above fresh input in volume and below it in rate, so
+> any future pricing work must price the four token kinds separately. A single blended rate
+> is not an approximation of this; it is wrong by most of the total.
+
+That is the whole of what the module was being kept for, and it survives its deletion. Its
+one non-pricing export, `TOKEN_KINDS`, was a duplicate of `KINDS` in
+`lib/metering/parsers.js`, which is the copy every live caller already used.
 
 ## Requirement
 
