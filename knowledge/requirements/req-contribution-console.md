@@ -45,8 +45,20 @@ negotiated terms that HAFleet does not observe, and on a fixed subscription the 
 cost of a token is zero — so a monetary figure per engagement would be an allocation of a
 bill paid regardless, not a charge.
 
-[REQ-CONTRIBUTION-CONSOLE-ROLES] A borrower MUST see roles, never raw agents. The
-mapping from role to a specific `(agent × model)` MUST remain private to the provider.
+[REQ-CONTRIBUTION-CONSOLE-ROLES] A borrower MUST request a role and MUST NOT be able to
+select an agent; a named agent MUST be honoured only if it independently qualifies for the
+role, and refused otherwise. The resource that serves a role MUST be disclosed to the
+borrower — agent, framework, model and reasoning level — because a borrower who cannot tell
+one model from another must discount every offer to the worst case, which makes a
+contributor's strong subscription indistinguishable from a weak one. The provider's
+deployment MUST NOT be disclosed: host, workspace path, credential home, seat, API keys,
+tmux session, owner MXID and environment variable names are private, and a failure reported
+to a project MUST NOT carry the provider's own configuration as its remedy.
+
+> Rewritten 2026-08-11. This statement previously required the opposite — that the
+> `role → (agent × model)` mapping stay private. See the amendment at the head of
+> `knowledge/decisions/adr-013-resource-contribution-console.md`: choosing stays the
+> provider's, knowing becomes the borrower's.
 
 [REQ-CONTRIBUTION-CONSOLE-VOCABULARY] The role vocabulary MUST come from the system's
 own enumeration. A provider MAY decline to offer a role or a model combination, and

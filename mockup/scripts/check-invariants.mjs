@@ -75,10 +75,16 @@ for (const r of ROUTES) {
    * 'and the reason is named rather than left blank' is the requirement's last clause —
    * an excluded combination states why instead of being silently omitted.
    *
-   * REQ-CONTRIBUTION-CONSOLE-ROLES — the borrower-facing surface is roles, and the
-   * role-to-(agent x model) mapping stays the provider's. `/capability` returns roles with
-   * counts; the checks below assert every role resolves through the config rather than
-   * naming an agent, which is the observable half of that privacy rule.
+   * REQ-CONTRIBUTION-CONSOLE-ROLES is deliberately NOT claimed here any more. This comment
+   * used to cite it, on the reasoning that the console keeps the role-to-(agent x model)
+   * mapping private — which the operator ruling of 2026-08-11 reversed: the serving agent
+   * and its model are disclosed to the borrower. The console was never the surface that
+   * statement governed anyway, since it faces the provider, who may see everything.
+   *
+   * The rewritten statement is established where its two halves actually live:
+   * tests/bot-commands-request.test.js (what a project is told, and what it is not) and
+   * tests/engagement-serving-disclosure.test.js (a named agent is honoured only if it
+   * independently qualifies).
    */
   check('the role mapping is the shipped file, byte for byte',
     JSON.stringify(disk) === JSON.stringify(roleCapacity));

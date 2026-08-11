@@ -7,6 +7,56 @@ liveness: auto
 tags: [hafleet, resource-plane, contribution, capacity, metering, engagement]
 ---
 
+## Amendment 2026-08-11 — the serving agent and its model are transparent, not hidden
+
+Decision 2 made the privacy of the `role → (agent × model)` mapping the boundary the whole
+design turned on: "HAgency sees roles, never raw agents … keeping that mapping private to the
+provider is what makes this a resource market rather than a remote-shell directory."
+
+**The operator's ruling reverses that: there is no need to hide the coding agent or the
+model — they should be made transparent.** This is withdrawn as a design error, not relaxed
+as a convenience.
+
+The original argument had it backwards. Hiding model quality does not protect a market, it
+produces a **lemon market**: a borrower who cannot tell Opus from a cheap model must assume
+the worst and discount every offer accordingly, so the contributor lending a strong
+subscription is priced as though they had lent nothing much. For a **contribution** console
+that failure is fatal rather than incidental — the whole point is that lending capacity is a
+legible contribution, and a contribution nobody can distinguish is not one. Disclosure is
+what makes it legible. Reproducibility points the same way: a project reviewing work
+produced by an agent has a legitimate engineering need to know which model produced it.
+
+**The boundary moves; it does not disappear.** The line is now between the *capability* and
+the *deployment*:
+
+| | |
+|---|---|
+| **disclosed** | agent name, framework, model, reasoning level, the tier it qualifies at — everything a borrower needs to judge whether the work will be good enough, and to attribute it afterwards |
+| **private** | host, workspace path, credential home, seat, API keys, tmux session, owner MXID, environment variable names — the provider's deployment, which tells a borrower nothing about the work and is a standing invitation to probe |
+
+**The request direction is unchanged, and that is what preserves what decision 2 was
+actually protecting.** A borrower still asks for a **role** and cannot pick an agent; a named
+agent is a hint that is honoured only if it independently qualifies, and refused otherwise.
+So the provider keeps full freedom to allocate, substitute and reconfigure. **Choosing stays
+the provider's; knowing becomes the borrower's.**
+
+Two facts about the state this replaces, recorded because they are the reason the ruling
+matters in practice rather than only on paper:
+
+- The implementation was **accidentally half-transparent**. The auto-join reply already
+  named the agent into the project room (`lib/bot-commands.js`), and this deployment's names
+  encode the framework — `claude-agent`, `codex-agent`, `octos-agent`. So it leaked the
+  identity while withholding the model, the one fact a borrower can act on: the worst of
+  both policies.
+- The leak was **structural, not textual**. An agent replies in a project room under its own
+  Matrix identity (`sendAsAgent` takes that agent's own access token; the MXID is
+  `@ac_<name>:server`), so the name is the message sender on every message. Editing the
+  reply text would have been theatre. Honouring the *old* decision would have required
+  per-engagement anonymous Matrix identities, with their own E2EE devices and key handling —
+  a cost this amendment removes rather than pays.
+
+`REQ-CONTRIBUTION-CONSOLE-ROLES` is rewritten to match.
+
 ## Amendment 2026-08-10 — pricing is out of scope
 
 Section 8 originally listed R8's `PriceBook` and `BillingSource` among the PRD models

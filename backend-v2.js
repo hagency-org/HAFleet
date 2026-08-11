@@ -10605,6 +10605,58 @@ app.get('/api/capability', requireBearer, (_req, res) => {
  */
 
 /** The agent that would serve a role: qualified, and with the most headroom. */
+/**
+ * What is disclosed about the resource serving a role — and what is not.
+ *
+ * OPERATOR RULING 2026-08-11, inverting ADR-013 decision 2: the coding agent and its model
+ * are not hidden from the borrower, they are made TRANSPARENT. See the amendment in
+ * `knowledge/decisions/adr-013-resource-contribution-console.md`.
+ *
+ * The original decision reasoned that hiding the `(agent × model)` mapping is what makes
+ * this a resource market rather than a remote-shell directory. The opposite is more likely
+ * true, and it is why this reads as a correction rather than a relaxation: a market where
+ * model quality is undisclosed is a market where the borrower cannot tell Opus from a cheap
+ * model, so they discount every offer to the worst case. For a CONTRIBUTION console that is
+ * backwards — a contributor lending their Opus subscription becomes indistinguishable from
+ * one lending nothing much, and disclosure is what makes the contribution legible.
+ *
+ * THE LINE THAT REPLACES THE OLD ONE. Not "everything is public" — the distinction is
+ * between the CAPABILITY and the DEPLOYMENT:
+ *
+ *   disclosed   framework, model, reasoning level, the tier it qualifies at, the agent's
+ *               name — everything a borrower needs to judge whether the work will be good
+ *               enough, and to attribute it afterwards
+ *
+ *   private     host, workspace path, credential home, seat, API keys, tmux session, owner
+ *               MXID, env var names — the provider's deployment, which tells a borrower
+ *               nothing about the work and is a standing invitation to probe
+ *
+ * The request direction is unchanged: a borrower still asks for a ROLE and cannot pick an
+ * agent (`b.agent` is a hint that must independently qualify, refused otherwise). So the
+ * provider keeps allocation freedom while the borrower is told what they got. Choosing is
+ * still the provider's; knowing is now the borrower's.
+ */
+function servingConfiguration(agentName) {
+  if (!agentName) return null;
+  const row = Object.values(agents).filter(isAgentRecord).map(serializeAgent)
+    .find((a) => a.name === agentName);
+  if (!row) return null;
+  const primary = row.runtimeProfile?.primary ?? {};
+  return {
+    agent: agentName,
+    framework: primary.framework ?? row.type ?? null,
+    model: primary.model ?? null,
+    /*
+     * Included because it is load-bearing rather than decorative: the same model at a
+     * different reasoning level is a different tier (`lib/role-capacity.json` lists
+     * gpt-5.6-sol at both high and medium, qualifying differently), so a model name alone
+     * does not tell a borrower what they are getting.
+     */
+    reasoning: primary.reasoning ?? null,
+    tier: modelTier(row.runtimeProfile) ?? null,
+  };
+}
+
 function agentForRole(role) {
   const rows = Object.values(agents).filter(isAgentRecord).map(serializeAgent);
   const TIER_RANK = Object.fromEntries([...CAPABILITY_TIERS].reverse().map((t, i) => [t, i]));
@@ -10951,12 +11003,20 @@ app.post('/api/engagements', requireRequester, (req, res) => {
      * An auto-join goes straight to active, so it must bind here — the verdict
      * route it would otherwise pass through never runs for it.
      */
+    /*
+     * `serving` rides with the engagement rather than being looked up separately, so a
+     * borrower learns what they got in the same response that tells them they got it —
+     * and so a caller cannot end up displaying a role without its fulfilment.
+     */
+    const serving = servingConfiguration(engagement.agent);
     if (engagement.state === 'active') {
       const outcome = bindEngagement(engagement);
       engagementStore.setBindingOutcome(engagement.id, outcome);
-      return res.json({ ok: true, engagement: engagementStore.get(engagement.id), binding: outcome });
+      return res.json({
+        ok: true, engagement: engagementStore.get(engagement.id), binding: outcome, serving,
+      });
     }
-    return res.json({ ok: true, engagement });
+    return res.json({ ok: true, engagement, serving });
   } catch (e) {
     return respondEngagementError(res, e, 'failed to create engagement');
   }

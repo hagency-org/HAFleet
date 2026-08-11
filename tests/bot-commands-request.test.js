@@ -161,6 +161,73 @@ describe('the narrowest credential that can submit', () => {
   });
 });
 
+describe('what the project is told it got', () => {
+  /*
+   * REQ-CONTRIBUTION-CONSOLE-ROLES as rewritten by the operator ruling of 2026-08-11: the
+   * serving agent and its model are DISCLOSED to the borrower, while the provider's
+   * deployment is not. Both halves are asserted, because a transparency rule with only its
+   * first half is indistinguishable from a leak.
+   */
+  const autoJoined = (serving) => async (url, opts = {}) => {
+    calls.push({ path: String(url), headers: opts.headers ?? {}, body: opts.body ? JSON.parse(opts.body) : null });
+    return {
+      json: async () => ({
+        engagement: {
+          id: 'e1', role: 'coding', allocatedTokens: 400_000, autoJoined: true, agent: 'claude-agent',
+        },
+        binding: { bound: false, error: 'no owner known for this agent: set HAFLEET_OWNER_MXID and HAFLEET_OWNER_DM_ROOM, or let the Matrix bridge create the first binding' },
+        serving,
+      }),
+    };
+  };
+
+  test('the reply names the framework, model and reasoning level', async () => {
+    /*
+     * The fact a borrower can act on. Before the ruling this line named the agent and
+     * nothing else — and this deployment's names encode the framework, so it disclosed the
+     * identity while withholding the model: the worst of both policies.
+     */
+    global.fetch = autoJoined({
+      agent: 'claude-agent', framework: 'claude', model: 'claude-opus-5', reasoning: 'high', tier: 'strong',
+    });
+    const { bot, replies } = harness();
+    await bot.cmdRequest(ROOM, ['coding', '400000'], SENDER, { eventId: EVENT_ID });
+    const body = replies.at(-1).body;
+    expect(body).toContain('claude-opus-5');
+    expect(body).toContain('high');
+    expect(body).toContain('strong');
+  });
+
+  test('a failure does NOT hand the project the provider\'s configuration', async () => {
+    /*
+     * The private half, and the one that was wrong under the previous policy too. The
+     * backend's bind error names `HAFLEET_OWNER_MXID` and `HAFLEET_OWNER_DM_ROOM` as the
+     * remedy — actionable for the provider, and for a project it is a description of
+     * somebody else's deployment. The project is told the attach did not happen, which is
+     * all they can act on.
+     */
+    global.fetch = autoJoined({ agent: 'claude-agent', framework: 'claude', model: 'claude-opus-5', reasoning: null, tier: 'strong' });
+    const { bot, replies } = harness();
+    await bot.cmdRequest(ROOM, ['coding', '400000'], SENDER, { eventId: EVENT_ID });
+    const body = replies.at(-1).body;
+    expect(body).not.toMatch(/HAFLEET_/);
+    expect(body).not.toMatch(/DM_ROOM|MXID/);
+    // Still told, though — a silent partial success would be its own defect.
+    expect(body).toMatch(/could not be attached/i);
+  });
+
+  test('an unknown configuration degrades to the agent alone, not to a fabricated one', async () => {
+    // `serving: null` happens when the agent record is gone. Naming a model nobody
+    // measured would be worse than naming none.
+    global.fetch = autoJoined(null);
+    const { bot, replies } = harness();
+    await bot.cmdRequest(ROOM, ['coding', '400000'], SENDER, { eventId: EVENT_ID });
+    const body = replies.at(-1).body;
+    expect(body).toContain('claude-agent');
+    expect(body).not.toMatch(/running/);
+  });
+});
+
 describe('what the project is told', () => {
   test('a malformed token amount is refused without reaching the backend', async () => {
     /*
