@@ -7,6 +7,32 @@ liveness: auto
 tags: [hafleet, resource-plane, contribution, capacity, metering, engagement]
 ---
 
+## Amendment 2026-08-10 — pricing is out of scope
+
+Section 8 originally listed R8's `PriceBook` and `BillingSource` among the PRD models
+**retained and load-bearing**. That was wrong and is withdrawn.
+
+The operator's ruling: HAFleet's unit of account is the **token**. It answers how much
+capacity was lent and to whom. Converting tokens to money depends on the contract, the
+plan, the region and the negotiated rate — none of which HAFleet observes — so it is a
+separate problem for a separate system.
+
+The implementation had already voted this way and the ADR had not noticed: every
+interface is denominated in tokens (`budgetCapPerEngagement`, `rateCap`, `quotaTokens`,
+`requestedTokens`, `allocatedTokens`), and `currency` appears zero times in
+`backend-v2.js`, `lib/seat-store.js` and `lib/engagement-store.js`. Contract 1 was always
+written as **Token** metering.
+
+The subscription case shows the confusion was semantic rather than a missing feature: on
+a fixed plan the marginal cost of a token is zero, so a per-engagement "cost" is a share
+of a bill paid regardless — an allocation with no rate. Presenting that beside a metered
+charge would invite a comparison that means nothing.
+
+`lib/cost-model.js` remains in the tree, **deliberately unwired**: it reaches no
+endpoint and no surface. It is retained only for one verified finding — pricing cache
+reads at the fresh-input rate overstated a real session by 7.79× — which is worth
+keeping should pricing ever be taken up elsewhere.
+
 ## Requirement
 
 Derived into `REQ-CONTRIBUTION-CONSOLE`
@@ -87,7 +113,7 @@ UI, performance scoring and the knowledge/memory surfaces are withdrawn.
 | L1 | 资源 Resource | my agents, their model configuration, their declared ceiling |
 | L2 | 能力 Capability | role templates: which `(agent × model)` combinations qualify |
 | L3 | 接洽 Engagement | standing offer + whitelist → auto-join, else approve/reject with a budget |
-| L4 | 用量 Consumption | what my agents did, for whom, and what it cost |
+| L4 | 用量 Consumption | what my agents did, for whom, and how many tokens it took (see the 2026-08-10 amendment: not what it cost in money) |
 
 The boundary that matters: **HAgency sees roles, never raw agents.** A project asks for a System
 Architect, not for `octos-agent running kimi-k3`. Keeping that mapping private to the provider is
@@ -174,9 +200,11 @@ the implementation plan for this table.
 **8. What this withdraws from `docs/PRD-hafleet-pdu.md`.** Withdrawn: the PDU/outsourcing-house
 product statement, R0's `AssignmentRequest` / `StaffingAssignment` contract, `/api/dispatch` and
 any successor router-facing assignment path, and the staffing-request direction of travel.
-**Retained and now load-bearing:** R7's usage/cost accrual with A-R7-3's unknown-never-zero rule,
-R8's `Seat` / `SeatBinding` / `BillingSource` / `PriceBook` / `BudgetReservation` model, and R12's
-roster acceptance written against the running prototype. The PRD must be revised to v0.3 to record
+**Retained and now load-bearing:** R7's usage accrual with A-R7-3's unknown-never-zero rule,
+R8's `Seat` / `SeatBinding` / `BudgetReservation` model, and R12's roster acceptance written
+against the running prototype. **Also withdrawn (amended 2026-08-10):** R8's `PriceBook` and
+`BillingSource`, and the monetary half of R7's usage/cost accrual — HAFleet's unit of account is
+the token, and token-to-currency conversion is out of scope. R7's accrual is retained in tokens. The PRD must be revised to v0.3 to record
 this split; until then its dispatch requirements are not implementable and must not be scheduled.
 
 The console is a running Next.js prototype under `mockup/`, published at

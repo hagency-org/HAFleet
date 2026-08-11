@@ -26,11 +26,24 @@ provider directly, so no API response passes through HAFleet to read a usage fig
 from — in api-key mode as much as on a subscription. A console that shows a number
 there would be inventing it.
 
+Consumption here means **tokens**, not money. ADR-013's amendment of 2026-08-10 withdrew
+R8's `PriceBook` and `BillingSource`: converting tokens to currency depends on contract,
+plan, region and negotiated rate, none of which HAFleet observes, so it belongs to a
+different system. The implementation had already settled this — every interface is
+denominated in tokens and `currency` appears nowhere in the stores.
+
 ## Requirements
 
 [REQ-CONTRIBUTION-CONSOLE-INWARD] The console MUST answer what the provider offers, on
-what terms, and what it costs. It MUST NOT schedule work, and MUST NOT present a
-scheduler, lease, queue, or work-assignment surface.
+what terms, and how much of their capacity it consumed. It MUST NOT schedule work, and
+MUST NOT present a scheduler, lease, queue, or work-assignment surface.
+
+[REQ-CONTRIBUTION-CONSOLE-UNIT] The unit of account MUST be the token. Every ceiling,
+quota, offer cap, rate cap and allocation MUST be denominated in tokens. The console MUST
+NOT convert tokens to currency, because the rate depends on contract, plan, region and
+negotiated terms that HAFleet does not observe, and on a fixed subscription the marginal
+cost of a token is zero — so a monetary figure per engagement would be an allocation of a
+bill paid regardless, not a charge.
 
 [REQ-CONTRIBUTION-CONSOLE-ROLES] A borrower MUST see roles, never raw agents. The
 mapping from role to a specific `(agent × model)` MUST remain private to the provider.
@@ -211,8 +224,8 @@ Scenario: A pending greeting survives room cleanup
 
 ## Open Questions
 
-- **Consumption measurement.** ADR-013 contract 1 (token metering) is unbuilt, and it
-  gates enforcement. Session transcripts written by the CLIs themselves do carry usage
+- **Consumption measurement, in tokens.** ADR-013 contract 1 (token metering) is unbuilt,
+  and it gates enforcement. It is a token count, not a cost. Session transcripts written by the CLIs themselves do carry usage
   (Claude Code records per-message `usage` with cache reads separated; Codex records
   `total_token_usage` and `last_token_usage`), so a per-framework reader is viable
   without proxying provider traffic. Two questions remain open: whether a session file
