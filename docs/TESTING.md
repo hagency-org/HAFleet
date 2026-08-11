@@ -82,6 +82,37 @@ Recorded so nobody re-investigates these:
 - **Not** CPU load by itself. A single file ran 40 contexts clean at load
   average 101.
 
+### The specimen round (2026-08-11)
+
+The intermittent failures continued under `maxWorkers: 1` — nine files by then, no two
+adjacent in the code — and stayed unexplained for ~25 observations for a reason that had
+nothing to do with the code: **every observation kept only the failing test's title.** The
+assertion diff, the response body, the child stderr all scrolled away, so each occurrence
+was an anecdote. `scripts/flake-hunt.sh` fixes that: K full runs, every failure's complete
+output kept as a specimen. Its first deployment (six runs, quiet machine) produced three
+specimens and three DIFFERENT mechanisms:
+
+| Specimen | Test | Mechanism | Status |
+|---|---|---|---|
+| 2a | `api-server-heartbeat` recovery | TTL 100ms + sleep(200): every assertion after the recovery heartbeat sat inside a 100ms window, and one GC pause re-marked the recovered server stale, re-opening its alert | **FIXED** — the test now ages `heartbeatAt` directly through `internals.serversForTest` with a 60s TTL; no sleep, no window |
+| 2b | `mcp-heartbeat` pid file | `waitFor`'s default timeout was 30000ms — the SAME as vitest's test timeout — so vitest's limit always fired first and replaced the wait's own error (which names what was awaited) with a bare "Test timed out" | **INSTRUMENTED** — `waitFor` defaults to 20s and takes a `diagnose` callback; the pid-file waits dump child stderr, so the next occurrence answers its own question |
+| 5 | `api-messages` delivery tail | `expected 404 to be 200` on an entity seeded three lines earlier in the same context. A handler 404 would be JSON (points at seeding); a route-level 404 would be express's HTML fallback (points at the partial-evaluation class above). The status alone cannot distinguish them | **INSTRUMENTED** — the assertion now carries the response body in its failure message; the next occurrence settles which class this is |
+
+Theories tested and **falsified** this round, recorded so nobody re-walks them:
+
+- **Not** background sweeps racing test requests: the loops start only in `startServer()`,
+  which supertest-driven tests never call.
+- **Not** foreground load as the cause: six runs on a quiet machine still produced two
+  failing runs, matching the historical rate. Concurrent local work (mutation testing,
+  single-file vitest runs) is at most an amplifier.
+- Context-count correlation is real but not sufficient: four of the five heaviest files by
+  `createBackendTestContext` call sites have flaked, but `api-runtime` (25 sites) never
+  has, and `api-agents` (7) has.
+
+Method note, learned twice in one day: greping vitest output for failure counts silently
+matches nothing because of ANSI escapes — strip them (`sed 's/\x1b\[[0-9;]*m//g'`) or the
+count reads as "no failures", which is precisely how a flaky observation lies.
+
 ### The real fix, not yet done
 
 Stop minting a module per context. The cache-buster exists only because

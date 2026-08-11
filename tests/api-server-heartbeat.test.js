@@ -474,7 +474,17 @@ describe('server heartbeat api', () => {
         'agent-b': makeAgent('agent-b', { online: false, server: 's2' }),
       },
       env: {
-        AGENT_HEARTBEAT_TTL_MS: '100',
+        /*
+         * Large ON PURPOSE, and the staleness is manufactured by AGING THE STORE, not by
+         * sleeping past a tiny TTL. The previous shape — TTL 100ms, sleep(200) — made the
+         * outage real but put every assertion after the recovery heartbeat inside a 100ms
+         * window: one GC pause and the recovery GET re-evaluated s1 as stale again, re-opened
+         * its alert, and `openAfter` read [s1, s2]. That is the forensic hunt's specimen 2,
+         * verbatim. With a 60s TTL the assertion window is effectively unbounded, and the
+         * neighbouring test's comment shows this file has paid the small-TTL tax before —
+         * "It was TTL 500 with 300ms sleeps … which a loaded CI runner blew regularly."
+         */
+        AGENT_HEARTBEAT_TTL_MS: '60000',
       },
     }));
 
@@ -492,7 +502,14 @@ describe('server heartbeat api', () => {
       agents: ['agent-b'],
       sessions: ['agent-b:0.0'],
     });
-    await sleep(200);
+    /*
+     * Both heartbeats are now two minutes old as far as liveness is concerned. The store is
+     * the in-memory truth (`serversForTest` IS the module's `servers` object), so this is the
+     * same state sleep(200) used to produce, minus the race and minus 200ms of wall clock.
+     */
+    for (const id of ['s1', 's2']) {
+      context.internals.serversForTest[id].heartbeatAt = Date.now() - 120_000;
+    }
     await request(context.app).get('/api/servers');
 
     const openBefore = await request(context.app).get('/api/alerts?status=open&alertType=server_offline');

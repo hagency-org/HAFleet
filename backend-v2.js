@@ -13182,6 +13182,17 @@ export const __backendV2TestInternals = {
   approvalStoreForTest: approvalStore,
   dispatchQueuesForTest: dispatchQueues,
   sweepLocalActivityDurationsForTest: sweepLocalActivityDurations,
+  /*
+   * The live server store, for tests that need a heartbeat to be OLD.
+   *
+   * The alternative was what tests/api-server-heartbeat.test.js actually did: set the TTL to
+   * 100ms and sleep(200) to make a server stale — which put every assertion after the recovery
+   * heartbeat inside a 100ms window that a GC pause under load regularly blew. Specimen (run 2 of
+   * the forensic hunt): s1's outage re-opened between the recovery heartbeat and the assertion
+   * GET, so `openAfter` read [s1, s2] instead of [s2]. Rewriting servers.json does not work —
+   * this store is the in-memory truth and the file is only its persistence.
+   */
+  serversForTest: servers,
 };
 
 if (process.argv[1] === __filename) {

@@ -62,7 +62,19 @@ async function stopChild(child) {
 // timeout only exists to avoid hanging forever. A slow machine should make the
 // test slower, not wrong. vitest's own testTimeout still bounds the whole test,
 // and a genuine failure to clean up still fails — just later.
-async function waitFor(predicate, { timeoutMs = 30000, intervalMs = 25, detail = 'condition' } = {}) {
+/*
+ * The default deadline is DELIBERATELY below vitest's 30s test timeout. It used to be 30000 —
+ * the same number — so whenever a wait genuinely timed out, vitest's own limit fired first and
+ * replaced this function's error (which names WHAT was being waited for) with a bare "Test
+ * timed out in 30000ms". The forensic hunt's specimen 2b is exactly that: a pid file never
+ * appeared, and every clue — which child, its stderr, whether the file existed at all — was
+ * discarded with the swallowed error.
+ *
+ * `diagnose` exists for the same reason: a timeout on a REAL child process is only as useful as
+ * the state it prints. Callers waiting on a child pass `() => child stderr` and the timeout
+ * becomes a specimen instead of another anecdote.
+ */
+async function waitFor(predicate, { timeoutMs = 20000, intervalMs = 25, detail = 'condition', diagnose = null } = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {
@@ -73,7 +85,15 @@ async function waitFor(predicate, { timeoutMs = 30000, intervalMs = 25, detail =
     }
     await new Promise(resolve => setTimeout(resolve, intervalMs));
   }
-  throw new Error(`Timed out waiting for ${detail}${lastError ? `: ${lastError.message}` : ''}`);
+  let extra = '';
+  if (typeof diagnose === 'function') {
+    try {
+      extra = `\n--- diagnostics ---\n${String(diagnose()).slice(0, 2000)}`;
+    } catch (error) {
+      extra = `\n--- diagnostics threw: ${error.message} ---`;
+    }
+  }
+  throw new Error(`Timed out waiting for ${detail}${lastError ? `: ${lastError.message}` : ''}${extra}`);
 }
 
 function collectBody(req) {
@@ -227,10 +247,17 @@ describe('MCP backend heartbeat', () => {
       await waitFor(() => (
         existsSync(pidFile)
         && readFileSync(pidFile, 'utf-8').trim() === String(mcp.child.pid)
-      ), { detail: `explicit mcp pid file for ${coreFile}` });
+      ), {
+        detail: `explicit mcp pid file for ${coreFile}`,
+        // The next occurrence of specimen 2b answers its own question.
+        diagnose: () => `pidFile exists: ${existsSync(pidFile)}\nchild stderr:\n${mcp.stderr()}`,
+      });
 
       await stopChild(mcp.child);
-      await waitFor(() => !existsSync(pidFile), { detail: `explicit mcp pid cleanup for ${coreFile}` });
+      await waitFor(() => !existsSync(pidFile), {
+        detail: `explicit mcp pid cleanup for ${coreFile}`,
+        diagnose: () => `child stderr:\n${mcp.stderr()}`,
+      });
       await closeServer(running.server);
     }
   });

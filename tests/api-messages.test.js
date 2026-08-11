@@ -775,7 +775,16 @@ describe('backend message API', () => {
       const messageDelivery = await request(largeContext.app)
         .get('/api/messages/msg_tail/delivery?agent=alpha&limit=2')
         .set('Authorization', `Bearer ${API_TOKEN}`);
-      expect(messageDelivery.status).toBe(200);
+      /*
+       * The body rides in the failure message, because this exact assertion flaked as a bare
+       * "expected 404 to be 200" (forensic hunt, specimen 5) and the number alone cannot say
+       * WHICH 404 it was: a handler 404 is JSON ({"error": "..."} — the message was not found,
+       * pointing at seeding), while a route-level 404 is express's HTML fallback ("Cannot GET",
+       * pointing at the partial-evaluation class docs/TESTING.md describes). msg_tail is seeded
+       * three lines up in this test's own context, so on the evidence so far the second reading
+       * is the likely one — but likely is not proven, and the next occurrence settles it.
+       */
+      expect(messageDelivery.status, `body: ${JSON.stringify(messageDelivery.body).slice(0, 300)} text: ${String(messageDelivery.text).slice(0, 200)}`).toBe(200);
       expect(messageDelivery.body.events.map((row) => row.type)).toEqual(['message.tail_2', 'message.tail_3']);
 
       const agentDelivery = await request(largeContext.app)
