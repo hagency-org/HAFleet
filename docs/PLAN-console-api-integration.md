@@ -514,6 +514,15 @@ was reported ready three separate times before a launch proved otherwise.
 - **Enforcement.** Ceilings and seat quotas are declarations; every surface says
   `not enforced`. Enforcement needs metering first and is a separate decision about what
   happens when a cap is hit.
+- **The flaky cluster got worse, still unexplained.** One full-suite run failed **42
+  tests across 5 files** — an order of magnitude beyond the usual one to three — with
+  task and server endpoints returning 404 where 200 was expected. All five files pass in
+  isolation, and pass with and without the change being tested at the time, so it is not
+  a regression. Two immediately following full runs were completely green (2309 passed).
+  A 404 on a registered route suggests routes not being served rather than a timing
+  slip, which does not match the "load-sensitive timing" theory and is worth recording
+  as evidence against it.
+
 - **A cluster of load-sensitive flaky tests, cause unknown.** Across roughly twenty
   full-suite runs, three files failed intermittently and never twice in the same run:
   `api-server-heartbeat-sweep` ("disables maintenance mode…"), `api-server-heartbeat`

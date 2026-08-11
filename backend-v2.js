@@ -2,6 +2,7 @@ import express from 'express';
 import { buildReplyHint } from './lib/reply-hint.js';
 import { meterFleet } from './lib/metering/reader.js';
 import { meteringSupport } from './lib/metering/parsers.js';
+import { createUsageLedger } from './lib/metering/ledger.js';
 import {
   appendFileSync,
   chmodSync,
@@ -2950,6 +2951,20 @@ function saveSeatDeclarations() { return saveJson('seats.json', seatDeclarations
 const engagementStore = createEngagementStore({
   load: () => loadJsonSync('engagements.json', {}),
   persist: (state) => saveJson('engagements.json', state),
+});
+
+/*
+ * Measured consumption, persisted, because the transcripts it is read from are not ours.
+ *
+ * The coding CLIs rotate, prune and delete their own session files. Computing usage on
+ * demand means a figure that silently drops when one goes away, while the ceiling was
+ * still spent by that work. The ledger keeps a high-water mark per session, so the total
+ * survives a source disappearing and is idempotent under re-reading — see
+ * lib/metering/ledger.js for why an appended snapshot would have double-counted.
+ */
+const usageLedger = createUsageLedger({
+  load: () => loadJsonSync('usage-ledger.json', {}),
+  persist: (state) => saveJson('usage-ledger.json', state),
 });
 
 /*
@@ -11087,6 +11102,27 @@ app.get('/api/usage', requireBearer, async (_req, res) => {
   } catch (error) {
     meteredError = String(error?.message ?? error).slice(0, 200);
   }
+  /*
+   * Record what this scan saw, then answer from the LEDGER rather than the scan.
+   *
+   * The scan only knows what is on disk right now. The ledger knows what was ever
+   * observed, which is the honest answer to "what did this agent consume" once a
+   * transcript can disappear between two requests.
+   */
+  if (metered && !metered.cached) {
+    try {
+      usageLedger.record((metered.agents ?? [])
+        .filter((m) => m.available)
+        .map((m) => ({
+          agent: m.agent,
+          framework: m.framework,
+          sessions: (m.files ?? []).map((f) => ({ key: f.file, totals: f.totals })),
+        })));
+    } catch (error) {
+      // A ledger write failure must not cost the caller the figures it already has.
+      meteredError = meteredError ?? `ledger write failed: ${String(error?.message ?? error).slice(0, 120)}`;
+    }
+  }
   const meteredByAgent = new Map((metered?.agents ?? []).map((m) => [m.agent, m]));
 
   const byAgent = rows.map((a) => {
@@ -11114,14 +11150,24 @@ app.get('/api/usage', requireBearer, async (_req, res) => {
        */
       ...(() => {
         const m = meteredByAgent.get(a.name);
-        if (m?.available) {
+        /*
+         * The ledger's figure, which includes sessions whose transcripts are gone. It is
+         * never smaller than the live scan, so preferring it cannot understate.
+         */
+        const ever = usageLedger.totalsFor(a.name);
+        if (m?.available || ever) {
           return {
-            tokensUsed: m.total,
+            tokensUsed: ever ? ever.total : m.total,
             // The kinds stay apart: cache reads run several orders of magnitude above
             // fresh input, so one summed figure hides the only number that matters for
             // comparing two agents.
-            tokensByKind: m.totals,
-            tokensSessions: m.sessions,
+            tokensByKind: ever ? ever.totals : m.totals,
+            tokensSessions: ever ? ever.sessions + ever.retiredSessions : m.sessions,
+            // Non-zero means a transcript reported less than it had before, so the figure
+            // rests on a source that changed underneath. Surfaced, not buried.
+            tokensSourceRegressions: ever?.regressions ?? 0,
+            // True when the figure includes work whose transcript is no longer on disk.
+            tokensFromLedger: Boolean(ever && !m?.available),
             tokensReason: null,
           };
         }
