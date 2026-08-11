@@ -501,7 +501,31 @@ built), and `credentialPresent: true` means only that the credential DIRECTORY
 exists. On the clean host that directory was root-owned and empty, and the framework
 was reported ready three separate times before a launch proved otherwise.
 
-### 7.7 Still open
+### 7.7 Two PRD items that are withdrawn scope, not gaps
+
+An assessment of the PRD's ten in-scope items listed these as unimplemented. They are
+not. Both were withdrawn by ADR-013 §8 and its 2026-08-10 amendment, and recording them
+as gaps invites someone to build scope the decision removed — which is exactly what
+happened once with the cost model before it was caught.
+
+**PRD 4.1 item 5, "use the durable router as the only execution truth."** The router is
+`/api/dispatch`, backed by `src/dispatch-lease-store.mjs`. ADR-013 §8 withdraws
+"`/api/dispatch` and any successor router-facing assignment path, and the staffing-request
+direction of travel." The engagement path REPLACES it rather than feeding it, so
+`engagement-store` not referencing the lease store is the decision, not an omission.
+
+Worth noting independently: that machinery was never durable anyway. `backend-v2.js:8527`
+states "a restart drops in-flight leases and queued tickets alike; this is not restart-safe
+queueing." So the PRD item asks for a property its own named component does not have.
+
+**PRD 4.1 item 8, "attribute cost … to assignment and project."** Withdrawn by the
+2026-08-10 amendment: the unit of account is the token. See §7.6.
+
+What remains genuinely open from those ten is item 6's other half — usage events are now
+persisted (`lib/metering/ledger.js`) but there is no *cost* event ledger, and by the
+amendment there should not be one.
+
+### 7.8 Still open
 
 - **Token metering itself.** P3 shipped the partition, not the measurement. Nothing here
   counts a token, and the console says so on every affected cell.

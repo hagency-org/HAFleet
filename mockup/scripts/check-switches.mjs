@@ -85,7 +85,7 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
 
 // ── 2. welded cells: a secondary line is a LINE ────────────────────────────
 {
-  for (const path of ['/resources', '/engagements', '/usage']) {
+  for (const path of ['/resources', '/engagements', '/usage', '/workforce']) {
     const page = await fresh({ path });
     const bad = await page.evaluate(() => {
       const spans = [...document.querySelectorAll('.tbl td > span.dim')];
@@ -158,18 +158,27 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
 
 // ── 7. no page scrolls sideways ───────────────────────────────────────────
 {
-  for (const w of [375, 900, 1440]) {
-    const ctx = await browser.createBrowserContext();
-    const page = await ctx.newPage();
-    await page.setViewport({ width: w, height: 900 });
-    await page.goto(`${BASE}/engagements?data=fixture`, { waitUntil: 'networkidle0' });
-    const over = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
-    check(`/engagements does not scroll sideways at ${w}px`, !over);
-    await ctx.close();
+  /*
+   * /workforce is checked beside /engagements because it is the widest table in the
+   * console — eight columns, one of which carries a whole sentence from the backend
+   * — so it is where a `.tbl-wrap` that failed to contain its own overflow would
+   * show up first. A body that scrolls sideways loses the rail's right edge and the
+   * last column at once.
+   */
+  for (const path of ['/engagements', '/workforce']) {
+    for (const w of [375, 900, 1440]) {
+      const ctx = await browser.createBrowserContext();
+      const page = await ctx.newPage();
+      await page.setViewport({ width: w, height: 900 });
+      await page.goto(`${BASE}${path}?data=fixture`, { waitUntil: 'networkidle0' });
+      const over = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+      check(`${path} does not scroll sideways at ${w}px`, !over);
+      await ctx.close();
+    }
   }
 }
 
-// ── 8. the rail is six destinations under four headings ───────────────────
+// ── 8. the rail is seven destinations under four headings ─────────────────
 {
   const page = await fresh();
   const rail = await page.evaluate(() => ({
@@ -177,7 +186,15 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
     heads: document.querySelectorAll('.rail-fleet .rail-sec').length,
     current: document.querySelectorAll('[aria-current="page"]').length,
   }));
-  check('six nav destinations — onboard moved onto the roster', rail.rows === 6, String(rail.rows));
+  /*
+   * Seven since /workforce landed, and the count stays an equality rather than a
+   * floor: the rail's density is the thing being asserted, and `>= 6` would let a
+   * page be added without anyone deciding where it belongs. FOUR headings is the
+   * load-bearing half — they are the four layers of ADR-013, so a fifth heading
+   * would be claiming a fifth layer. The roster joins the four rather than adding
+   * one, which is why it sits under 资源 beside the resources it is a view of.
+   */
+  check('seven nav destinations — onboard moved onto the roster', rail.rows === 7, String(rail.rows));
   check('under four headings', rail.heads === 4, String(rail.heads));
   check('exactly one marked current', rail.current === 1, String(rail.current));
 }

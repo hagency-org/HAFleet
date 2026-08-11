@@ -52,6 +52,17 @@ const READS = [
   /^usage$/,
   /^seats$/,
   /^capability$/,
+  /*
+   * The contribution binding, read by the workforce roster.
+   *
+   * `GET /api/contributions` is a deliberately narrow projection of the binding
+   * store — it omits `ownerDmRoomId`, the owner's private channel — precisely so a
+   * console holding the API token can read it. `GET /api/approval-bindings`, which
+   * carries that field, is guarded by the bridge secret and is NOT added here: the
+   * proxy should expose the projection somebody designed for it, not the record it
+   * was projected from.
+   */
+  /^contributions$/,
 ];
 
 /*

@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, test } from 'vitest';
-import { createUsageLedger } from '../lib/metering/ledger.js';
+import { createUsageLedger, periodKey } from '../lib/metering/ledger.js';
 
 const kinds = (input, output, cacheWrite, cacheRead) => ({ input, output, cacheWrite, cacheRead });
 
@@ -127,6 +127,79 @@ describe('storage is bounded without losing the number', () => {
     // Re-observing s0 after it retired adds it back as a fresh session, which is the
     // honest outcome: its detail was folded away and cannot be matched again.
     expect(l.totalsFor('a1').retiredSessions).toBeGreaterThan(0);
+  });
+});
+
+describe('period buckets, because a ceiling has a period', () => {
+  /*
+   * A ceiling is `{tokens, period}` — 5,000,000 per MONTH. Comparing an all-time total to
+   * a monthly ceiling exhausts it permanently and never recovers, so enforcement against
+   * an unbucketed total is wrong in the direction that matters: it refuses work that is
+   * within budget.
+   *
+   * GROWTH is bucketed, not totals. A session spanning a month boundary must split across
+   * both; bucketing its total would dump the whole session into whichever period it was
+   * last seen in.
+   */
+  const at = (iso) => new Date(iso).getTime();
+  const ledgerAtTimes = (times) => {
+    let i = -1;
+    return createUsageLedger({
+      load: () => ({}), persist: () => true,
+      now: () => { i += 1; return times[Math.min(i, times.length - 1)]; },
+    });
+  };
+
+  test('growth lands in the bucket for the moment it was observed', () => {
+    const l = ledgerAtTimes([at('2026-08-10T00:00:00Z'), at('2026-08-10T00:00:00Z')]);
+    l.record(obs('a1', [{ key: 's1', totals: kinds(1, 1, 1, 1) }]));
+    const cur = l.currentPeriod('a1', 'monthly', at('2026-08-10T12:00:00Z'));
+    expect(cur.key).toBe('2026-08');
+    expect(cur.total).toBe(4);
+  });
+
+  test('a session spanning two months splits across both, rather than landing in one', () => {
+    /*
+     * The case that makes growth-bucketing necessary. One session, observed in August and
+     * again in September; each period gets what was actually seen in it.
+     */
+    const times = [
+      at('2026-08-31T23:00:00Z'), at('2026-08-31T23:00:00Z'),
+      at('2026-09-01T01:00:00Z'), at('2026-09-01T01:00:00Z'),
+    ];
+    const l = ledgerAtTimes(times);
+    l.record(obs('a1', [{ key: 's1', totals: kinds(10, 0, 0, 0) }]));
+    l.record(obs('a1', [{ key: 's1', totals: kinds(25, 0, 0, 0) }]));
+    expect(l.currentPeriod('a1', 'monthly', at('2026-08-15T00:00:00Z')).total).toBe(10);
+    expect(l.currentPeriod('a1', 'monthly', at('2026-09-15T00:00:00Z')).total).toBe(15);
+    // And the all-time figure is still the whole thing.
+    expect(l.totalsFor('a1').total).toBe(25);
+  });
+
+  test('a period with no observation is null, not zero', () => {
+    /*
+     * No bucket means no sweep has measured growth in this period, which is not the same
+     * as measuring none. A ceiling check reading that as zero would report full headroom
+     * for an agent nobody has looked at.
+     */
+    const l = ledgerAtTimes([at('2026-08-10T00:00:00Z')]);
+    l.record(obs('a1', [{ key: 's1', totals: kinds(1, 1, 1, 1) }]));
+    expect(l.currentPeriod('a1', 'monthly', at('2026-12-01T00:00:00Z'))).toBeNull();
+    expect(l.currentPeriod('never-seen', 'monthly')).toBeNull();
+  });
+
+  test('both granularities are kept, because neither derives from the other', () => {
+    // Months cannot be split into days after the fact, and summing days misses any period
+    // before bucketing began.
+    const l = ledgerAtTimes([at('2026-08-10T00:00:00Z'), at('2026-08-10T00:00:00Z')]);
+    l.record(obs('a1', [{ key: 's1', totals: kinds(2, 0, 0, 0) }]));
+    expect(l.currentPeriod('a1', 'daily', at('2026-08-10T05:00:00Z')).key).toBe('2026-08-10');
+    expect(l.currentPeriod('a1', 'monthly', at('2026-08-10T05:00:00Z')).key).toBe('2026-08');
+  });
+
+  test('periodKey is UTC and zero-padded, so buckets sort as strings', () => {
+    expect(periodKey(at('2026-01-05T00:00:00Z'), 'monthly')).toBe('2026-01');
+    expect(periodKey(at('2026-01-05T00:00:00Z'), 'daily')).toBe('2026-01-05');
   });
 });
 

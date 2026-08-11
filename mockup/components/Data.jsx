@@ -39,6 +39,14 @@ const FIXTURE_DATA = {
    */
   seats: [],
   seatKeyed: null,
+  /*
+   * No contribution fixture either, and for the same kind of reason. A binding is
+   * the record that a project can REACH an agent; inventing one would invent an
+   * access grant, and the roster's access column exists precisely to reconcile that
+   * record against the allocations. With no backend there is no binding store, so
+   * fixture mode shows the column as unanswered — which is true.
+   */
+  contributions: [],
   detected: fixture.detected,
   detectedAt: null,
   detectCaveat: null,

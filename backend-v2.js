@@ -1378,7 +1378,15 @@ function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta
   const importedAgentId = normalizeOptionalText(config.agentId, 256);
   const agentId = boundAgentId || importedAgentId;
   const apiKeyConfigured = Boolean(normalizeOptionalText(process.env.LETTA_API_KEY, 4096));
-  const lettaBaseUrl = normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com';
+  /*
+   * Null when unconfigured, not a SaaS endpoint.
+   *
+   * PRD R20 wants transcript export defaulting to off or to an approved local destination.
+   * This defaulted to `https://api.letta.com` in seven places, for a subsystem that sends
+   * FULL session transcripts. lib/memory-export-policy.js decides whether a destination is
+   * approved; the job here is only to stop inventing one.
+   */
+  const lettaBaseUrl = normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || null;
   const conversationCurrentSessionId = normalizeOptionalText(
     conversationStore.currentSessionId
       || conversationSessions[conversationSessions.length - 1]?.sessionId,
@@ -9326,7 +9334,7 @@ app.post('/api/subconscious/upstream/bootstrap/:name', async (req, res) => {
       model: normalizeOptionalText(result.config?.model, 256) || null,
       agentName: normalizeOptionalText(result.agent?.name, 256) || null,
       blockCount: Array.isArray(result.agent?.blocks) ? result.agent.blocks.length : 0,
-      lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
+      lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || null,
       configPath: result.paths?.configPath || null,
       conversationsFile: result.paths?.conversationsFile || null,
       promptFile: result.paths?.promptFile || null,
@@ -9452,7 +9460,7 @@ app.post('/api/subconscious/upstream/session-start/:name', async (req, res) => {
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
         agentName: normalizeOptionalText(result.agent?.name, 256) || normalizeOptionalText(existingUpstream.agentName, 256) || null,
         blockCount: Array.isArray(result.agent?.blocks) ? result.agent.blocks.length : normalizeNonNegativeInt(existingUpstream.blockCount, 0),
-        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
+        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || null,
         configPath: result.paths?.configPath || null,
         conversationsFile: result.paths?.conversationsFile || null,
         promptFile: result.paths?.promptFile || null,
@@ -9469,7 +9477,7 @@ app.post('/api/subconscious/upstream/session-start/:name', async (req, res) => {
         blockedReason: null,
         checkedAt: now,
         apiKeyConfigured: Boolean(normalizeOptionalText(process.env.LETTA_API_KEY, 4096)),
-        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
+        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || null,
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
         importedAt: normalizeOptionalText(existingUpstream.importedAt, 128) || null,
         model: normalizeOptionalText(process.env.LETTA_MODEL, 256)
@@ -9599,7 +9607,7 @@ app.post('/api/subconscious/upstream/user-prompt/:name', async (req, res) => {
         bootstrapStatus: 'configured',
         blocker: null,
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
+        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || null,
         userPrompt: buildPersistedUpstreamRecord('userPrompt', {
           ...existingUpstreamUserPrompt,
           ...userPromptRecord,
@@ -9718,7 +9726,7 @@ app.post('/api/subconscious/upstream/pretool/:name', async (req, res) => {
         bootstrapStatus: 'configured',
         blocker: null,
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
+        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || null,
         preTool: buildPersistedUpstreamRecord('preTool', {
           ...existingUpstreamPreTool,
           ...preToolRecord,
@@ -9842,7 +9850,7 @@ app.post('/api/subconscious/upstream/stop/:name', async (req, res) => {
         bootstrapStatus: 'configured',
         blocker: null,
         agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
+        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || null,
         stop: buildPersistedUpstreamRecord('stop', {
           ...existingUpstreamStop,
           ...stopRecord,
@@ -10651,14 +10659,49 @@ function seatRemainingFor(agentName) {
  * either side must not relax the other — so the result is the minimum of whichever
  * limits exist, and null only when neither does.
  */
+/*
+ * WHAT IS LEFT OF AN AGENT'S CEILING, counting what was SPENT as well as what was promised.
+ *
+ * This used to subtract only allocations. That was the whole truth while nothing measured
+ * consumption: a ceiling could be over-promised but never over-spent, because spending was
+ * invisible. Now that lib/metering measures it, the two can disagree in both directions —
+ * an engagement allocated 400k and consumed 900k has exceeded the ceiling while its
+ * allocation says otherwise, and one allocated 400k that consumed 50k is holding 350k it
+ * has not used.
+ *
+ * `max(reserved, spent)`, not the sum. Consumption largely happens INSIDE an allocation, so
+ * adding them double-counts the same tokens; taking the larger is the conservative reading
+ * that never under-reports what the ceiling has to cover.
+ *
+ * SPENT IS PERIOD-SCOPED OR IT IS NOT USED. A ceiling is `{tokens, period}`, and comparing
+ * an all-time total to a monthly budget exhausts it permanently. If the ledger has no
+ * bucket for the current period, spend is treated as UNKNOWN rather than zero and the
+ * allocation figure stands alone — an absent bucket means nobody has measured this period,
+ * which is not the same as measuring none.
+ */
+function ceilingSpendFor(agentName) {
+  const agent = Object.values(agents).filter(isAgentRecord).find((a) => a.name === agentName);
+  const preset = agent?.presetId ? frameworkPresets.find((p) => p.id === agent.presetId) : null;
+  const period = preset?.ceiling?.period === 'daily' ? 'daily' : 'monthly';
+  const bucket = usageLedger.currentPeriod(agentName, period);
+  return {
+    period,
+    reserved: engagementStore.committedFor(agentName),
+    spent: bucket ? bucket.total : null,
+    spendPeriodKey: bucket?.key ?? null,
+  };
+}
+
 function remainingFor(agentName) {
   const agent = Object.values(agents).filter(isAgentRecord).find((a) => a.name === agentName);
   if (!agent?.presetId) return null;
   const preset = frameworkPresets.find((p) => p.id === agent.presetId);
   const ceiling = preset?.ceiling?.tokens;
-  const byCeiling = Number.isFinite(ceiling)
-    ? Math.max(0, ceiling - engagementStore.committedFor(agentName))
-    : null;
+  const { reserved, spent } = ceilingSpendFor(agentName);
+  // An unknown spend cannot lower the figure; it also must not be read as zero, which is
+  // why it falls back to the allocation rather than to `ceiling - 0`.
+  const drawn = spent === null ? reserved : Math.max(reserved, spent);
+  const byCeiling = Number.isFinite(ceiling) ? Math.max(0, ceiling - drawn) : null;
   const bySeat = seatRemainingFor(agentName);
   const limits = [byCeiling, bySeat].filter((v) => v !== null);
   return limits.length ? Math.min(...limits) : null;

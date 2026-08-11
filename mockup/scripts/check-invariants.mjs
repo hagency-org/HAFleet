@@ -28,7 +28,7 @@ import {
 const BASE = process.env.BASE ?? 'http://127.0.0.1:3100';
 
 const ROUTES = [
-  '/resources', '/resources/new', '/capability', '/engagements', '/usage',
+  '/resources', '/resources/new', '/workforce', '/capability', '/engagements', '/usage',
   '/alerts', '/config', '/onboard',
   '/agents/claude-agent', '/agents/octos-agent', '/agents/codex-agent',
   '/agents/hermes-agent', '/agents/codex-acp-agent',
@@ -223,7 +223,7 @@ for (const r of ROUTES) {
    * measurement carrying its own unit and passes; a bare `—` has neither and
    * fails, which is what caught two reasonless dashes on /resources.
    */
-  for (const path of ['/resources', '/engagements', '/usage', '/capability']) {
+  for (const path of ['/resources', '/engagements', '/usage', '/capability', '/workforce']) {
     const { html } = await rendered(path);
     const cells = [...html.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1]);
     const wordless = cells
@@ -266,8 +266,8 @@ for (const r of ROUTES) {
   check(`all ${asked.size} literal t() keys resolve`, unresolved.length === 0, unresolved.join(' '));
 
   const families = {
-    'nav.': ['resources', 'onboard', 'capability', 'engagements', 'usage', 'alerts', 'config'],
-    'unit.': ['configured', 'offered', 'pending', 'active', 'open'],
+    'nav.': ['resources', 'workforce', 'onboard', 'capability', 'engagements', 'usage', 'alerts', 'config'],
+    'unit.': ['configured', 'offered', 'pending', 'active', 'lent', 'open'],
     'wz.step.': ['framework', 'model', 'reasoning', 'budget'],
     'ag.': ['runtime', 'activity', 'oversight', 'profile'],
     'sev.': ['critical', 'warning', 'info'],
@@ -280,7 +280,8 @@ for (const r of ROUTES) {
     // slice there without a label here now fails this check rather than printing
     // a raw key on screen.
     'prov.slice.': ['agents', 'presets', 'frameworks', 'alerts',
-      'engagements', 'offers', 'whitelist', 'usage', 'ceilings', 'capability', 'seats', 'detected'],
+      'engagements', 'offers', 'whitelist', 'usage', 'ceilings', 'capability', 'seats', 'detected',
+      'contributions'],
   };
   const missingFamily = [];
   for (const [prefix, members] of Object.entries(families)) {

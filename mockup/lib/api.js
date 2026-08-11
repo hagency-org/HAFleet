@@ -21,7 +21,7 @@ const PROXY = '/api/hafleet';
 /** Slices with a real endpoint behind them at this baseline. */
 export const LIVE_SLICES = [
   'agents', 'presets', 'frameworks', 'alerts', 'capability', 'seats', 'usage',
-  'engagements', 'offers', 'whitelist', 'detected',
+  'engagements', 'offers', 'whitelist', 'detected', 'contributions',
 ];
 /*
  * Empty now. Every slice this console reads has an endpoint behind it — the four
@@ -308,6 +308,30 @@ export async function fetchLive() {
         out.offers = [];
         provenance.offers = 'absent';
         errors.offers = e.message;
+      }
+    })(),
+    /*
+     * The contribution binding — the record that actually lets a project reach an
+     * agent, as opposed to the engagement, which is the allocation I approved.
+     *
+     * Read from GET /api/contributions rather than from the engagement's own
+     * `bound` flag, because the two can disagree and only the binding store knows
+     * which projects hold standing access right now. The endpoint is a deliberately
+     * narrow projection: `ownerDmRoomId` is omitted upstream, so nothing here can
+     * expose the owner's private channel.
+     *
+     * `absent` rather than a fixture on failure. An empty access list rendered
+     * beside live engagements would read as "no project can reach this agent" —
+     * a claim, where the truth is that the record did not answer.
+     */
+    (async () => {
+      try {
+        out.contributions = (await get('contributions'))?.contributions ?? [];
+        provenance.contributions = 'live';
+      } catch (e) {
+        out.contributions = [];
+        provenance.contributions = 'absent';
+        errors.contributions = e.message;
       }
     })(),
     (async () => {
