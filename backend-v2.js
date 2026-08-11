@@ -10810,6 +10810,16 @@ app.post('/api/engagements', requireRequester, (req, res) => {
       requester: b.requester,
       requestedTokens: b.requestedTokens,
       ratePerDay: b.ratePerDay,
+      /*
+       * PRD A-R0-1: repeating the same request_id and digest yields the same
+       * assignment; a different digest is a conflict. The bridge supplies the Matrix
+       * event id, which both sides already share and the sender cannot forge.
+       *
+       * Optional, because requiring it would refuse every existing caller. Its absence
+       * is recorded on the engagement rather than replaced with a generated key, so a
+       * request that could not be deduped says so.
+       */
+      requestId: b.requestId,
       agent,
       remainingTokens: agent ? remainingFor(agent) : null,
     });

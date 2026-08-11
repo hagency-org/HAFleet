@@ -58,6 +58,14 @@ unlimited.
 ceiling, an unstated rate against a published rate cap, and a quota whose period is
 unknown MUST each fall back to approval rather than be read as unbounded.
 
+[REQ-CONTRIBUTION-CONSOLE-IDEMPOTENT] A request carrying a `request_id` MUST produce at
+most one engagement. Repeating the same `request_id` with the same request digest MUST
+return the existing engagement; the same `request_id` with a different digest MUST be
+refused as a conflict rather than merged or overwritten. The `request_id` for a request
+arriving over Matrix MUST be the authenticated event id, never a value taken from message
+content. A request with no `request_id` MUST record that it could not be deduplicated
+rather than be assigned a generated one.
+
 [REQ-CONTRIBUTION-CONSOLE-WHITELIST-AUDIT] Adding to or removing from the whitelist MUST
 be audited. Removal MUST affect only future requests and MUST NOT terminate a running
 engagement.
@@ -124,6 +132,18 @@ Scenario: A whitelisted project over the offer falls back to approval
   When the project submits the request
   Then the engagement awaits a decision and is not rejected
 
+Scenario: A repeated request does not become two engagements
+  Given a project has submitted a request carrying an event id
+  When the identical request arrives again with the same event id
+  Then the existing engagement is returned
+  And the queue holds one engagement for that room
+
+Scenario: A reused request id with a changed amount is refused
+  Given a pending engagement created under an event id
+  When a request reuses that event id but asks for twenty times the tokens
+  Then the request is refused as a conflict
+  And the original engagement is unchanged
+
 Scenario: An unstated rate does not bypass a published rate cap
   Given a published offer carrying a rate cap
   When a whitelisted project requests capacity without stating a rate
@@ -169,6 +189,14 @@ Scenario: A pending greeting survives room cleanup
 - ADR-013
 - REQ-OWNER-UI-APPROVAL — supplies the owner-scoped approval and binding machinery that
   `REQ-CONTRIBUTION-CONSOLE-BIND` attaches to.
+
+## Traceability
+
+- `REQ-CONTRIBUTION-CONSOLE-IDEMPOTENT` implements PRD acceptance **A-R0-1**
+  (`docs/PRD-hafleet-pdu.md:325`), whose traceability row names the gate `CT/IT-R0-IDEMP`
+  and the accountable parties as the HAFleet and Robrix2 owners. The shared identifier is
+  the Matrix event id rather than a negotiated token: it already exists on both sides, is
+  stable, and cannot be forged by the sender.
 
 ## Source Trace
 

@@ -253,6 +253,88 @@ describe('the store', () => {
   });
 
   /*
+   * IDEMPOTENCY, PER PRD A-R0-1.
+   *
+   * "Repeating the same `request_id` and digest produces the same assignment; a
+   * different digest is rejected as a conflict."
+   *
+   * Two identical asks used to become two pending engagements, each spending the
+   * agent's ceiling when approved. The interface is a human typing
+   * `!request coding 400000 20000` and nobody types a UUID, so the store had no key —
+   * but both sides already share the Matrix event id, and the bridge passes it.
+   *
+   * The digest is the half that matters. Without it a request_id is an overwrite
+   * handle: a caller could reuse an id and quietly change the amount already under
+   * review, and the store would return the old engagement as though nothing was asked.
+   */
+  describe('request idempotency', () => {
+    const ask = (over = {}) => ({
+      project: 'acme/api', projectRoomId: ROOM, role: 'coding',
+      requester: '@lin:hq.example', requestedTokens: 100_000, ratePerDay: 10_000,
+      agent: 'a1', remainingTokens: null, ...over,
+    });
+
+    it('the same request id and digest yields the SAME engagement', () => {
+      store.addToWhitelist({ projectRoomId: ROOM });
+      const first = store.createRequest(ask({ requestId: '$evt1:hq.example' }));
+      const again = store.createRequest(ask({ requestId: '$evt1:hq.example' }));
+      expect(again.id).toBe(first.id);
+      expect(store.list({ state: 'pending' }).filter((e) => e.projectRoomId === ROOM))
+        .toHaveLength(1);
+    });
+
+    it('the same id with a DIFFERENT ask is a conflict, not a merge or an overwrite', () => {
+      store.addToWhitelist({ projectRoomId: ROOM });
+      store.createRequest(ask({ requestId: '$evt2:hq.example' }));
+      // Reusing the id to ask for twenty times as much must not silently return the
+      // small one, and must not replace it either.
+      expect(() => store.createRequest(ask({
+        requestId: '$evt2:hq.example', requestedTokens: 2_000_000,
+      }))).toThrow(/already used for a different request/);
+      const rows = store.list().filter((e) => e.projectRoomId === ROOM);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requestedTokens).toBe(100_000);
+    });
+
+    it('different ids are different requests even when identical in content', () => {
+      // Two genuine asks that happen to match must not be collapsed — the failure mode
+      // of deduping on (room, role, amount) instead of on an id.
+      store.addToWhitelist({ projectRoomId: ROOM });
+      const a = store.createRequest(ask({ requestId: '$evtA:hq.example' }));
+      const b = store.createRequest(ask({ requestId: '$evtB:hq.example' }));
+      expect(b.id).not.toBe(a.id);
+    });
+
+    it('a request with no id is accepted and SAYS it could not be deduped', () => {
+      /*
+       * Requiring an id would refuse every existing caller. Generating one silently
+       * would give no idempotency while appearing to have some, which is the worse
+       * option — so absence is recorded on the record.
+       */
+      store.addToWhitelist({ projectRoomId: ROOM });
+      const one = store.createRequest(ask());
+      const two = store.createRequest(ask());
+      expect(one.idempotent).toBe(false);
+      expect(two.id).not.toBe(one.id);
+      const withKey = store.createRequest(ask({ requestId: '$evtC:hq.example' }));
+      expect(withKey.idempotent).toBe(true);
+    });
+
+    it('the digest ignores the room label but not the amount', () => {
+      // A renamed project is not a different request; a different amount is.
+      store.addToWhitelist({ projectRoomId: ROOM });
+      const first = store.createRequest(ask({ requestId: '$evtD:hq.example' }));
+      const renamed = store.createRequest(ask({
+        requestId: '$evtD:hq.example', project: 'acme/api-renamed',
+      }));
+      expect(renamed.id).toBe(first.id);
+      expect(() => store.createRequest(ask({
+        requestId: '$evtD:hq.example', ratePerDay: 99_000,
+      }))).toThrow(/different request/);
+    });
+  });
+
+  /*
    * A FRACTIONAL CAP MUST NOT BECOME AN UNLIMITED ONE.
    *
    * posInt validated the raw number and floored afterwards, so 0.5 passed the

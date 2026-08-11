@@ -3318,6 +3318,9 @@ export class MatrixBridge {
         groupName,
         targetAgent,
         approvalRoom: state.trustedManagedRooms?.[roomId]?.approvalDm === true,
+        // The request id for anything that creates a record: stable, shared with the
+        // sender, and not forgeable by them. See cmdRequest.
+        eventId,
       };
       console.log(`Bot command from ${humanName} in ${groupName || targetAgent || 'bot-DM'}: ${cmdBody.slice(0, 80)}`);
       await this.commands.handle(roomId, senderId, cmdBody, context);
