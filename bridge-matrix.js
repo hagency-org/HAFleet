@@ -1432,6 +1432,15 @@ function rememberPendingInvite(roomId, agentName, inviter) {
   return true;
 }
 
+/**
+ * Clear all pending-invite state. Test-only: the store is module-global, so a suite that seeds
+ * invitations leaks them into the next test's `listPendingInvites()` unless it resets between
+ * cases. Named `...ForTest` and exported beside the other test seams.
+ */
+function resetPendingInvitesForTest() {
+  state.pendingInvites = {};
+}
+
 /** Every invitation still awaiting a decision, newest first. */
 function listPendingInvites() {
   const out = [];
@@ -6210,6 +6219,7 @@ export {
   listPendingInvites,
   getPendingInvite,
   settlePendingInvite,
+  resetPendingInvitesForTest,
   projectServerFromRoomId,
   upsertRoomAgentBinding,
   findRoomAgentBinding,

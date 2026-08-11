@@ -35,6 +35,8 @@ let MatrixBridge;
 let rememberPendingInvite;
 let getPendingInvite;
 let listPendingInvites;
+let settlePendingInvite;
+let resetPendingInvitesForTest;
 let upsertRoomAgentBinding;
 let findRoomAgentBinding;
 const saved = {};
@@ -50,8 +52,8 @@ beforeAll(async () => {
   process.env.MATRIX_SERVER_NAME = 'hq.example';
   const url = pathToFileURL(path.resolve('bridge-matrix.js')).href;
   ({
-    MatrixBridge, rememberPendingInvite, getPendingInvite, listPendingInvites,
-    upsertRoomAgentBinding, findRoomAgentBinding,
+    MatrixBridge, rememberPendingInvite, getPendingInvite, listPendingInvites, settlePendingInvite,
+    resetPendingInvitesForTest, upsertRoomAgentBinding, findRoomAgentBinding,
   } = await import(`${url}?invite-accept-test=${Date.now()}`));
 });
 
@@ -110,7 +112,12 @@ function harness({ joinOk = true, botInviteOk = true, agentToken = 'syt_agent' }
 const joinCalls = () => calls.filter((c) => c.url.includes('/join/'));
 const botInvites = () => calls.filter((c) => c.url.includes('/invite'));
 
-beforeEach(() => { realFetch = global.fetch; });
+beforeEach(() => {
+  realFetch = global.fetch;
+  // The pending-invite store is module-global; without this, invitations left pending by one
+  // test (the accept-failure cases legitimately do) leak into the next test's listPendingInvites.
+  resetPendingInvitesForTest();
+});
 afterEach(() => { global.fetch = realFetch; });
 
 describe('accepting an invitation makes the room usable, not merely joined', () => {
@@ -281,5 +288,165 @@ describe('an ownership transfer is recorded', () => {
 
     expect(again.binding.previousOwnerMxid).toBeUndefined();
     expect(again.binding.ownerChangedAt).toBeUndefined();
+  });
+});
+
+describe('declining an invitation records "no" so the poll cannot re-ask', () => {
+  test('a declined invitation leaves the pending list and is remembered as declined', async () => {
+    /*
+     * The whole point of settling to `declined` rather than deleting the record: the invitation
+     * is still in Matrix state, so the invite poll will see it again — and `rememberPendingInvite`
+     * returns false for an already-declined key, so it is not re-surfaced. Deleting would make
+     * "no" un-expressible: the next poll would re-add it as pending forever.
+     */
+    const room = '!decline:hq.example';
+    const bridge = harness();
+    rememberPendingInvite(room, 'lend-opus-01', OWNER);
+
+    const result = await bridge.rejectPendingInvite(room, 'lend-opus-01');
+
+    expect(result.ok).toBe(true);
+    expect(getPendingInvite(room, 'lend-opus-01').state).toBe('declined');
+    expect(listPendingInvites().some((r) => r.roomId === room)).toBe(false);
+    // The join was never attempted — declining is not joining-then-leaving.
+    expect(joinCalls()).toEqual([]);
+  });
+
+  test('the agent LEAVES the Matrix room as a courtesy, but a failed leave still declines', async () => {
+    /*
+     * Leaving is best-effort: the decision IS the record, so a homeserver that refuses the leave
+     * must not leave the contributor unable to say no. Both halves asserted — the leave is
+     * attempted, and a thrown leave still ends in `declined`.
+     */
+    const room = '!decline-leave:hq.example';
+    const bridge = harness();
+    // Make only the leave call throw; nothing else in reject touches fetch.
+    const realFetch = global.fetch;
+    global.fetch = async (url) => {
+      if (String(url).includes('/leave')) throw new Error('homeserver refused');
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    };
+    try {
+      rememberPendingInvite(room, 'lend-opus-01', OWNER);
+      const result = await bridge.rejectPendingInvite(room, 'lend-opus-01');
+      expect(result.ok).toBe(true);
+      expect(getPendingInvite(room, 'lend-opus-01').state).toBe('declined');
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  test('an unknown or already-decided invitation is refused, not re-declined', async () => {
+    const room = '!decline-twice:hq.example';
+    const bridge = harness();
+    expect(await bridge.rejectPendingInvite(room, 'never-invited'))
+      .toMatchObject({ ok: false, reason: 'unknown_invite' });
+
+    rememberPendingInvite(room, 'lend-opus-01', OWNER);
+    await bridge.rejectPendingInvite(room, 'lend-opus-01');
+    // Deciding a settled invitation again is refused with its current state, not silently redone.
+    expect(await bridge.rejectPendingInvite(room, 'lend-opus-01'))
+      .toMatchObject({ ok: false, reason: 'already_declined' });
+  });
+});
+
+describe('reporting an invitation to the backend is where the console learns of it', () => {
+  test('a recorded invitation is PUT to the backend with its derived server and inviter', async () => {
+    /*
+     * The bridge owns the Matrix truth and the backend is the copy the console reads, so an
+     * invitation nobody reports is invisible to the operator. The PUT carries the derived
+     * project server, not one supplied by anyone — the backend derives it too, but reporting the
+     * bridge's own derivation keeps the two consistent.
+     */
+    const room = '!report:their-server.example';
+    const bridge = harness();
+    const puts = [];
+    bridge.callBackendApi = async (method, routePath, body) => {
+      puts.push({ method, routePath, body });
+      return { ok: true };
+    };
+    rememberPendingInvite(room, 'lend-opus-01', '@admin:their-server.example');
+
+    const result = await bridge.reportPendingInvite(room, 'lend-opus-01', '@admin:their-server.example');
+
+    expect(result.ok).toBe(true);
+    expect(puts).toHaveLength(1);
+    expect(puts[0]).toMatchObject({ method: 'PUT', routePath: '/api/matrix/pending-invites' });
+    expect(puts[0].body).toMatchObject({
+      project_room_id: room,
+      agent: 'lend-opus-01',
+      inviter: '@admin:their-server.example',
+      project_server: 'their-server.example',
+    });
+  });
+
+  test('a backend that rejects the report is surfaced, not swallowed', async () => {
+    /*
+     * A failed report is not fatal — the invitation stays in bridge state and resync will retry
+     * it on the next start — but it must be REPORTED as failed, or a monitor cannot tell a
+     * backend outage from "no invitations". Distinguished from ok so the caller (resync) counts
+     * it correctly.
+     */
+    const room = '!report-fail:hq.example';
+    const bridge = harness();
+    bridge.callBackendApi = async () => ({ error: 'backend down' });
+    rememberPendingInvite(room, 'lend-opus-01', OWNER);
+
+    expect(await bridge.reportPendingInvite(room, 'lend-opus-01', OWNER))
+      .toMatchObject({ ok: false, reason: 'backend_unavailable' });
+  });
+
+  test('reporting an invitation the bridge does not hold is refused', async () => {
+    const bridge = harness();
+    bridge.callBackendApi = async () => ({ ok: true });
+    expect(await bridge.reportPendingInvite('!nope:hq.example', 'ghost', OWNER))
+      .toMatchObject({ ok: false, reason: 'not_recorded' });
+  });
+});
+
+describe('resync replays pending invitations the backend missed', () => {
+  test('every still-pending invitation is re-reported, settled ones are not', async () => {
+    /*
+     * The recovery path: invitations recorded while the backend was down would otherwise stay
+     * invisible forever, because `rememberPendingInvite` will not re-notify for an invite it has
+     * already seen — so the poll alone never surfaces them again. Resync on startup is the only
+     * thing that catches them up. Settled invitations are excluded: a declined one must not be
+     * re-pushed as if it were waiting.
+     */
+    const bridge = harness();
+    const reported = [];
+    bridge.callBackendApi = async (_m, _p, body) => { reported.push(body.project_room_id); return { ok: true }; };
+
+    rememberPendingInvite('!p1:hq.example', 'a1', OWNER);
+    rememberPendingInvite('!p2:hq.example', 'a2', OWNER);
+    rememberPendingInvite('!settled:hq.example', 'a3', OWNER);
+    settlePendingInvite('!settled:hq.example', 'a3', 'declined', 'operator');
+
+    const count = await bridge.resyncPendingInvites();
+
+    expect(count).toBe(2);
+    expect(reported.sort()).toEqual(['!p1:hq.example', '!p2:hq.example']);
+    expect(reported).not.toContain('!settled:hq.example');
+  });
+
+  test('resync counts only the reports the backend accepted', async () => {
+    // If the backend is still flaky during resync, the count must reflect what actually landed,
+    // so a half-successful catch-up is not reported as complete.
+    const bridge = harness();
+    bridge.callBackendApi = async (_m, _p, body) =>
+      (body.project_room_id === '!good:hq.example' ? { ok: true } : { error: 'still down' });
+
+    rememberPendingInvite('!good:hq.example', 'a1', OWNER);
+    rememberPendingInvite('!bad:hq.example', 'a2', OWNER);
+
+    expect(await bridge.resyncPendingInvites()).toBe(1);
+  });
+
+  test('resync with nothing pending does no work', async () => {
+    const bridge = harness();
+    let called = false;
+    bridge.callBackendApi = async () => { called = true; return { ok: true }; };
+    expect(await bridge.resyncPendingInvites()).toBe(0);
+    expect(called).toBe(false);
   });
 });
