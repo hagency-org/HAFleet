@@ -60,6 +60,14 @@ to a project MUST NOT carry the provider's own configuration as its remedy.
 > `knowledge/decisions/adr-013-resource-contribution-console.md`: choosing stays the
 > provider's, knowing becomes the borrower's.
 
+[REQ-CONTRIBUTION-CONSOLE-OFFER-BOOK] A borrower MUST be able to read what is on offer
+before requesting it, and that read MUST be available to the submit-only credential. It MUST
+expose published offers only, the configuration that would serve each published role, and the
+asking room's own whitelist state. It MUST NOT expose an unpublished offer, another project's
+whitelist entry, or a ceiling — remaining ceiling is provider state that moves with other
+projects' activity, whereas an offer cap is a published promise. A role that nothing
+currently qualifies to serve MUST be reported as such rather than omitted.
+
 [REQ-CONTRIBUTION-CONSOLE-VOCABULARY] The role vocabulary MUST come from the system's
 own enumeration. A provider MAY decline to offer a role or a model combination, and
 MUST NOT introduce a role name the borrower cannot recognise. An excluded combination

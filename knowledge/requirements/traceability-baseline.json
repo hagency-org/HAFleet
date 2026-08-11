@@ -1,6 +1,6 @@
 {
-  "statements": 68,
-  "covered": 63,
+  "statements": 69,
+  "covered": 64,
   "uncovered": [
     "REQ-OWNER-UI-APPROVAL-CONTROL",
     "REQ-PROJECT-BOARD-AGENTS",

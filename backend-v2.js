@@ -11072,6 +11072,70 @@ app.post('/api/engagements/:id/revoke', requireBearer, (req, res) => {
   }
 });
 
+/*
+ * `GET /api/offer-book?projectRoomId=…` — what a PROJECT may see before it asks.
+ *
+ * The gap the transparency ruling opened. Once the serving agent and its model are disclosed
+ * (see the 2026-08-11 amendment to ADR-013), a borrower will reasonably want to know what is
+ * on offer BEFORE committing to a request — and until now the only inbound verb was
+ * `!request` itself. `/api/capability`, `/api/offers` and `/api/whitelist` all exist, but they
+ * are the PROVIDER's views: every role whether offered or not, every agent including ones
+ * that serve nothing, and the whitelist in full. Handing those to a project would disclose
+ * the provider's whole posture, which is a different thing from disclosing what serves a role.
+ *
+ * So this is a separate, narrower projection rather than a relaxation of the existing three:
+ *
+ *   PUBLISHED OFFERS ONLY. An unpublished offer is not on offer
+ *   (REQ-CONTRIBUTION-CONSOLE-ROUTE), and listing it would advertise capacity the provider
+ *   has deliberately not advertised. Absent roles are omitted rather than returned as null,
+ *   because a project cannot act on the difference between "not offered" and "no such role".
+ *
+ *   THIS ROOM'S OWN WHITELIST STATE, never the list. Whether YOUR request auto-joins is the
+ *   single most actionable fact for you and yours alone; who else is trusted is not yours.
+ *
+ *   NO CEILINGS. The offer caps are a promise the provider published; remaining ceiling is
+ *   internal state that moves with every other project's activity. A request over it still
+ *   falls back to approval with `overCeiling` as the stated reason, so the fact is disclosed
+ *   when it becomes relevant rather than published as a number that is stale on arrival.
+ *
+ * Guarded by `requireRequester`, so a project can read it with the submit-only credential —
+ * the same scope that may already ask. It grants nothing new: every field is either the
+ * provider's own published decision or a fact about the caller's own room.
+ */
+app.get('/api/offer-book', requireRequester, (req, res) => {
+  const room = normalizeOptionalText(req.query.projectRoomId, 256);
+  const active = engagementStore.list({ state: 'active' });
+  const roles = engagementStore.listOffers()
+    .filter((o) => o.published)
+    .map((o) => {
+      const agent = agentForRole(o.role);
+      return {
+        role: o.role,
+        budgetCapPerEngagement: o.budgetCapPerEngagement ?? null,
+        rateCap: o.rateCap ?? null,
+        count: o.count ?? null,
+        // Named `runningNow` rather than `used`: `count` bounds concurrent engagements, so
+        // this is a live figure and not a quota consumed.
+        runningNow: active.filter((e) => e.role === o.role).length,
+        /*
+         * Who would serve it if the request arrived now — deliberately not a reservation.
+         * `agentForRole` picks by most remaining headroom, so this answer moves as other
+         * projects are served, and a borrower who read it as a promise would be wrong.
+         */
+        serving: servingConfiguration(agent),
+      };
+    });
+  return res.json({
+    roles,
+    /*
+     * Null rather than false when no room was named: false would assert that the caller's
+     * room is not trusted, which is a claim about a room nobody identified.
+     */
+    whitelisted: room ? engagementStore.isWhitelisted(room) : null,
+    projectRoomId: room || null,
+  });
+});
+
 app.get('/api/offers', requireBearer, (_req, res) => {
   /*
    * Every role, whether or not it has an offer. An absent offer is a real state —

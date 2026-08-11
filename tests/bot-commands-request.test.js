@@ -161,6 +161,106 @@ describe('the narrowest credential that can submit', () => {
   });
 });
 
+describe('!offer — the read that precedes the ask', () => {
+  /*
+   * Before the transparency ruling there was nothing useful to answer: role names and caps,
+   * with the one fact a borrower most needs — what actually serves the role — withheld by
+   * policy. The command exists because the answer became worth giving.
+   */
+  const bookReply = (body) => async (url, opts = {}) => {
+    calls.push({ path: String(url), headers: opts.headers ?? {}, body: opts.body ? JSON.parse(opts.body) : null });
+    return { json: async () => body };
+  };
+  const oneRole = {
+    roles: [{
+      role: 'coding', budgetCapPerEngagement: 400_000, rateCap: 20_000, count: 2, runningNow: 1,
+      serving: { agent: 'claude-agent', framework: 'claude', model: 'claude-opus-5', reasoning: 'high', tier: 'strong' },
+    }],
+    whitelisted: false,
+    projectRoomId: ROOM,
+  };
+
+  test('the room id comes from the ROOM, and the command takes no arguments', async () => {
+    /*
+     * Same rule as `!request`, and here it decides what a caller is told about their own
+     * trust state: a room id from message content would let a sender ask whether SOMEONE
+     * ELSE's room is whitelisted.
+     */
+    global.fetch = bookReply(oneRole);
+    const { bot } = harness();
+    await bot.cmdOffer(ROOM);
+    expect(calls[0].path).toContain(encodeURIComponent(ROOM));
+  });
+
+  test('it names the model and tier, not just the role', async () => {
+    global.fetch = bookReply(oneRole);
+    const { bot, replies } = harness();
+    await bot.cmdOffer(ROOM);
+    const body = replies.at(-1).body;
+    expect(body).toContain('coding');
+    expect(body).toContain('claude-opus-5');
+    expect(body).toContain('strong');
+    // And the caps a request has to fit inside.
+    expect(body).toContain('400000');
+    expect(body).toMatch(/1 of 2 running/);
+  });
+
+  test('a not-whitelisted room is told its request will wait', async () => {
+    // The most actionable line in the reply: auto-join or a decision.
+    global.fetch = bookReply(oneRole);
+    const { bot, replies } = harness();
+    await bot.cmdOffer(ROOM);
+    expect(replies.at(-1).body).toMatch(/waits for the contributor/);
+  });
+
+  test('a whitelisted room is told its request joins automatically', async () => {
+    global.fetch = bookReply({ ...oneRole, whitelisted: true });
+    const { bot, replies } = harness();
+    await bot.cmdOffer(ROOM);
+    expect(replies.at(-1).body).toMatch(/joins automatically/);
+  });
+
+  test('an unknown trust state says NOTHING about trust', async () => {
+    /*
+     * `whitelisted: null` is "no room was identified", and rendering that as either sentence
+     * would be a statement the bot cannot support.
+     */
+    global.fetch = bookReply({ ...oneRole, whitelisted: null });
+    const { bot, replies } = harness();
+    await bot.cmdOffer(ROOM);
+    expect(replies.at(-1).body).not.toMatch(/whitelist|automatically|waits/i);
+  });
+
+  test('nothing published reads as a state, not as a failure', async () => {
+    /*
+     * A contributor with capacity configured but unadvertised is a normal state. Reporting it
+     * as an error sends the project to ask why the bot is broken.
+     */
+    global.fetch = bookReply({ roles: [], whitelisted: false, projectRoomId: ROOM });
+    const { bot, replies } = harness();
+    await bot.cmdOffer(ROOM);
+    expect(replies.at(-1).body).toMatch(/nothing on offer/i);
+    expect(replies.at(-1).body).not.toMatch(/error|cannot/i);
+  });
+
+  test('a published role nothing can serve says so', async () => {
+    global.fetch = bookReply({
+      roles: [{ role: 'coding', budgetCapPerEngagement: null, rateCap: null, count: null, runningNow: 0, serving: null }],
+      whitelisted: false, projectRoomId: ROOM,
+    });
+    const { bot, replies } = harness();
+    await bot.cmdOffer(ROOM);
+    expect(replies.at(-1).body).toMatch(/nothing currently qualifies/);
+  });
+
+  test('a backend error is reported as one', async () => {
+    global.fetch = bookReply({ error: 'unauthorized' });
+    const { bot, replies } = harness();
+    await bot.cmdOffer(ROOM);
+    expect(replies.at(-1).body).toMatch(/Cannot read the offer book/);
+  });
+});
+
 describe('what the project is told it got', () => {
   /*
    * REQ-CONTRIBUTION-CONSOLE-ROLES as rewritten by the operator ruling of 2026-08-11: the

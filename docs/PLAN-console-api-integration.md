@@ -620,6 +620,16 @@ tests that did not exist, and those tests failed:
   slip, which does not match the "load-sensitive timing" theory and is worth recording
   as evidence against it.
 
+- **A FOURTH file joined the intermittent set on 2026-08-11.**
+  `acp-workspace-attribution` ("the workspace is REMEMBERED after the sweep clears it")
+  failed once in a full run and passed in isolation immediately afterwards, and the very
+  next full run was completely green (157 files, 2534 passed). It shares the trait the
+  other three have — it goes through `createBackendTestContext` — and shares none of the
+  suspects that have been ruled out. Recorded because the set growing is the most
+  informative thing that has happened to this problem: whatever it is, it is not specific
+  to server-heartbeat or message-retention logic, which is where the search had been
+  looking.
+
 - **A cluster of load-sensitive flaky tests, cause unknown.** Across roughly twenty
   full-suite runs, three files failed intermittently and never twice in the same run:
   `api-server-heartbeat-sweep` ("disables maintenance mode…"), `api-server-heartbeat`
