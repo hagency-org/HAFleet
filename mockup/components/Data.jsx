@@ -47,6 +47,11 @@ const FIXTURE_DATA = {
    * fixture mode shows the column as unanswered — which is true.
    */
   contributions: [],
+  /*
+   * Never fixtured. A fabricated invitation would invite the contributor to accept a
+   * project that does not exist, and an empty fixture would tell them nobody is waiting.
+   */
+  invites: [],
   detected: fixture.detected,
   detectedAt: null,
   detectCaveat: null,

@@ -1412,7 +1412,7 @@ const ORDER = ['resources', 'workforce', 'config', 'alerts', 'capability', 'wiza
  * somebody adds; this loop does.
  */
 const CONSOLE_WIDE_ROUTES = [
-  '/resources', '/resources/new', '/workforce', '/capability', '/engagements', '/usage',
+  '/resources', '/resources/new', '/workforce', '/capability', '/projects', '/engagements', '/usage',
   '/alerts', '/config', '/onboard',
 ];
 

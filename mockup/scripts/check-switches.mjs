@@ -187,14 +187,17 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
     current: document.querySelectorAll('[aria-current="page"]').length,
   }));
   /*
-   * Seven since /workforce landed, and the count stays an equality rather than a
-   * floor: the rail's density is the thing being asserted, and `>= 6` would let a
-   * page be added without anyone deciding where it belongs. FOUR headings is the
-   * load-bearing half — they are the four layers of ADR-013, so a fifth heading
-   * would be claiming a fifth layer. The roster joins the four rather than adding
-   * one, which is why it sits under 资源 beside the resources it is a view of.
+   * Eight since /projects landed (seven when /workforce did), and the count stays an
+   * equality rather than a floor: the rail's density is the thing being asserted, and
+   * `>= 6` would let a page be added without anyone deciding where it belongs.
+   *
+   * FOUR headings is the load-bearing half — they are the four layers of ADR-013, so a
+   * fifth heading would be claiming a fifth layer. Both additions joined the four rather
+   * than adding one: the roster sits under 资源 beside the resources it is a view of, and
+   * /projects sits under 接洽 above /engagements, because a project must have invited me
+   * before it can ask for anything.
    */
-  check('seven nav destinations — onboard moved onto the roster', rail.rows === 7, String(rail.rows));
+  check('eight nav destinations — projects sits above engagements', rail.rows === 8, String(rail.rows));
   check('under four headings', rail.heads === 4, String(rail.heads));
   check('exactly one marked current', rail.current === 1, String(rail.current));
 }

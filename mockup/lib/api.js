@@ -21,7 +21,7 @@ const PROXY = '/api/hafleet';
 /** Slices with a real endpoint behind them at this baseline. */
 export const LIVE_SLICES = [
   'agents', 'presets', 'frameworks', 'alerts', 'capability', 'seats', 'usage',
-  'engagements', 'offers', 'whitelist', 'detected', 'contributions',
+  'engagements', 'offers', 'whitelist', 'detected', 'contributions', 'invites',
 ];
 /*
  * Empty now. Every slice this console reads has an endpoint behind it — the four
@@ -332,6 +332,24 @@ export async function fetchLive() {
         out.contributions = [];
         provenance.contributions = 'absent';
         errors.contributions = e.message;
+      }
+    })(),
+    /*
+     * Invitations a project has extended that I have not answered (ADR-014).
+     *
+     * `absent` rather than a fixture on failure, for the same reason `contributions` is:
+     * an empty invitation list is a CLAIM — "no project is waiting on you" — and the truth
+     * when this endpoint does not answer is that nobody asked the question. A contributor
+     * who reads "nothing pending" and looks away has been misinformed by a fixture.
+     */
+    (async () => {
+      try {
+        out.invites = (await get('matrix/pending-invites'))?.invites ?? [];
+        provenance.invites = 'live';
+      } catch (e) {
+        out.invites = [];
+        provenance.invites = 'absent';
+        errors.invites = e.message;
       }
     })(),
     (async () => {

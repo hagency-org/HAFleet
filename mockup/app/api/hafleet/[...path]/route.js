@@ -63,6 +63,15 @@ const READS = [
    * was projected from.
    */
   /^contributions$/,
+  /*
+   * Invitations a project has extended that the contributor has not answered (ADR-014).
+   *
+   * Read-safe for a console holding the API token: the projection carries the room, the
+   * derived project server, the inviter and which agent was invited — the facts a human
+   * needs to decide — and no credential. The DECISION is a separate write below, because
+   * accepting spends the contributor's tokens.
+   */
+  /^matrix\/pending-invites$/,
 ];
 
 /*
@@ -87,6 +96,12 @@ const WRITES = [
   // silently pre-authorises any nested DELETE /api/whitelist/* added later. An
   // allowlist that permits more than the action it represents is not an allowlist.
   { method: 'DELETE', re: /^whitelist\/[^/]+$/ },
+  /*
+   * Answering an invitation. A write rather than a read because it commits the
+   * contributor's capacity, and the one action the console has a form for here — the room
+   * and agent travel in the body, so there is no path segment to over-match.
+   */
+  { method: 'POST', re: /^matrix\/pending-invites\/decide$/ },
 ];
 
 function allowed(method, joined) {

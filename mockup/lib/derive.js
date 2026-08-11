@@ -331,6 +331,13 @@ export function makeDerive(data) {
       lent: new Set(activeEngagements().map((e) => e.agent)).size,
       alertsOpen: byStatus.open,
       whitelisted: whitelist.length,
+      /*
+       * Invitations awaiting my decision (ADR-014). Counted from the slice rather than
+       * derived, because there is nothing to derive: an invitation either arrived or it did
+       * not, and a slice that failed to answer contributes 0 here while the page itself says
+       * "not known" — the rail is a badge, and a badge cannot carry that distinction.
+       */
+      invitesPending: (data.invites ?? []).filter((i) => i?.state === 'pending' || !i?.state).length,
     };
   }
 

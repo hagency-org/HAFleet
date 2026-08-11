@@ -28,7 +28,7 @@ import {
 const BASE = process.env.BASE ?? 'http://127.0.0.1:3100';
 
 const ROUTES = [
-  '/resources', '/resources/new', '/workforce', '/capability', '/engagements', '/usage',
+  '/resources', '/resources/new', '/workforce', '/capability', '/projects', '/engagements', '/usage',
   '/alerts', '/config', '/onboard',
   '/agents/claude-agent', '/agents/octos-agent', '/agents/codex-agent',
   '/agents/hermes-agent', '/agents/codex-acp-agent',

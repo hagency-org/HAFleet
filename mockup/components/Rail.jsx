@@ -50,6 +50,13 @@ const SECTIONS = [
   {
     head: 'rail.secEngagement',
     rows: [
+      /*
+       * Projects sits above engagements because it is upstream of them: a project has to
+       * have invited me before it can ask for anything. `hot` for the same reason
+       * /engagements is — an unanswered invitation is a person waiting on me, and ADR-014
+       * exists because that used to be invisible.
+       */
+      { href: '/projects', key: 'projects', icon: '⌂', count: 'invitesPending', unit: 'waiting', hot: true },
       { href: '/engagements', key: 'engagements', icon: '⇄', count: 'pending', unit: 'pending', hot: true },
       { href: '/usage', key: 'usage', icon: '◎', count: 'active', unit: 'active' },
     ],
