@@ -184,8 +184,16 @@ export default function WorkforcePage() {
             ? <div className="val"><Blank why="wf.why.noneMeasured" t={t} /></div>
             : (
               <div className="val">
+                {/*
+                  * `<small>`, not a `.dim` span. The block rule that keeps a
+                  * secondary line off the end of a primary one is scoped to table
+                  * cells, so a `.dim` here inherits the card's 26px and welds:
+                  * "12.3Mmeasured for 2 of 7". The card's own qualifier element is
+                  * already sized and spaced for this, and /resources uses it the
+                  * same way.
+                  */}
                 {fmtTokens(measuredTotal)}
-                <span className="dim">{t('wf.measuredFor', { n: measured.length, of: agents.length })}</span>
+                <small> {t('wf.measuredFor', { n: measured.length, of: agents.length })}</small>
               </div>
             )}
         </div>

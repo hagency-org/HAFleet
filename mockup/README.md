@@ -2,7 +2,11 @@
 
 A Next.js app implementing the design in
 [`../docs/design/hafleet-as-contribution-console.md`](../docs/design/hafleet-as-contribution-console.md).
-Mock data only: it talks to no backend and cannot affect a fleet.
+It reads a real backend through a same-origin proxy (`app/api/hafleet/`) and writes to it where a
+page has a form; every page labels which of its slices came from the backend and which from the
+fixture. With no backend reachable — a static export has no proxy at all — it renders the fixture
+and says so. (This line read "mock data only", which stopped being true when the integration
+landed.)
 
 ```bash
 cd mockup
@@ -41,12 +45,17 @@ The boundary that matters: **a project asks for a System Architect, never for
 `octos-agent running kimi-k3`.** The mapping between the two is private to the contributor,
 which is what makes this a resource market rather than a directory of remote shells.
 
+Each of those four is a column through the fleet. `/workforce` is the **row** — one line per
+agent, joining all four, because "what is *this* one of mine doing, for whom, at what cost,
+and is it healthy" is not answerable from any single layer.
+
 ## Routes
 
 | route | what it answers |
 |---|---|
 | `/resources` | What I lend, on what terms, how much is already promised. `/` serves it |
 | `/resources/new` | The wizard: framework → model → reasoning → budget |
+| `/workforce` | The roster: per agent, what it can be asked for, who is borrowing it, what it consumed, its condition, and the seat under its ceiling |
 | `/capability` | The six roles, who can fill each, and what I publish |
 | `/engagements` | Inbound requests, the routing that decided them, and the whitelist |
 | `/usage` | What ran, for whom, and the metering gap |
@@ -98,10 +107,41 @@ which is what makes this a resource market rather than a directory of remote she
 - **Every chart prints its value.** Colour and length are the second and third signals; a
   greyscale print loses nothing. Charts sit above the tables, never instead of them — shape from
   the chart, values from the table.
-- **A blank is never a zero.** Nothing in HAFleet meters tokens, so every consumption figure is
-  a dash with a reason. `0` would claim a measurement nobody takes.
+- **A blank is never a zero.** A consumption figure appears only where something measured it;
+  everywhere else it is a dash with the reason in place. `0` would claim a measurement nobody
+  took. (This read "nothing in HAFleet meters tokens", which was true when it was written and
+  is now true only per framework and per agent — the rule is unchanged, its reach is not.)
 - **An unenforced ceiling says so beside the number**, or a reader treats a declaration of
   intent as a guard rail.
+- **The roster names the two questions it refuses to answer.** PRD 6.4 R12 defines a workforce
+  roster by five standing questions, and ADR-013 withdrew two of them: "how far along is the
+  work" went with R0's assignment contract, and the monetary half of "at what cost" went with
+  pricing on 2026-08-10. `/workforce` carries no work item, assignment state, queue, lease or
+  currency — and prints the withdrawn row in its five-question table rather than omitting it,
+  because a gap a reader has to notice reads as an oversight. It is the only place in the product
+  where the PRD/ADR split is visible to the person using it.
+- **The task count is the column that was hardest to leave out.** `GET /api/usage` reports one
+  per agent and it is a real measurement, but a task on a *workforce roster* is the withdrawn
+  work-item column wearing a number. That an agent is busy is the contributor's to see; what it
+  is busy with is the borrower's, so the figure stays on `/usage` where it reads as activity.
+- **An allocation and a reachability are different records, and the roster reconciles them.**
+  An engagement is what I approved; the contribution binding at `lib/approval-store.js:186` is
+  what actually lets a project reach the agent. `GET /api/contributions` had no consumer, so the
+  two had never been compared on screen. Both disagreements matter: an allocation with no
+  binding is capacity a project cannot use, and a binding with no live engagement is standing
+  reachability outliving its justification. Agreement is stated too — a column that speaks only
+  on failure is indistinguishable from one that is broken.
+- **No utilisation percentage.** R13 asks for one derived from durable intervals; what exists is
+  a sweep's busy and idle counters — a numerator with no denominator, since nothing declares
+  availability, maintenance or a period. A percentage over a denominator nobody set would be the
+  most authoritative-looking number on the page and the least defensible.
+- **A consumption gap states its own reason, per agent, in the backend's words.** Metering now
+  works where a framework writes its own transcript and the agent's workspace is known, so the
+  reasons differ by row — a missing workspace is not the same problem as an adapter whose
+  transcripts nobody has located. That reason is quoted verbatim rather than mapped to a
+  dictionary key, which makes it the one string that stays in English when the console is in
+  Chinese: enumerating the backend's reasons as keys would render a new one as a raw key, and
+  paraphrasing them locally would drift from what the server said.
 - **"Agent" stays in Latin script in Chinese.** 代理 means *proxy* in Chinese technical usage,
   and an earlier dictionary used it for both senses in adjacent keys — `ACP 代理没有终端窗格`
   (agent) beside `原型不会代理真实的终端窗格` (proxy), with `代理令牌` reading as "proxy token".
@@ -133,7 +173,8 @@ npm run check:switches   # assertions that need a real browser
 npm run verify           # both
 ```
 
-**90 static** and **31 in-browser**. `check-invariants.mjs` needs the server running
+**94 static** and **35 in-browser**, plus **142 live-UX** checks in `scripts/live-ux.mjs`, which
+is the only suite that drives a real browser against a real backend. `check-invariants.mjs` needs the server running
 (`npm start`); `check-switches.mjs` also needs Chrome — it drives the system install through
 `puppeteer-core` and downloads nothing (`CHROME=/path/to/chrome` to override).
 
