@@ -7,6 +7,87 @@ liveness: auto
 tags: [matrix, identity, credentials, authorization, appservice]
 ---
 
+## Amendment 2026-08-11 — the project dictates access, and an invitation is the input
+
+Two things in the Decision below are corrected, and one clause is added. The original text put
+the credential on the **agent** (`{ homeserver, accessToken }` per agent) and had an operator
+type a server address. Both are wrong.
+
+**The credential belongs to the project, not the agent.** A homeserver is a property of the
+project, so an agent serving three projects on three servers would need three credentials — the
+real key is `(project, agent)` and the project is what supplies the server. Dispatch therefore
+assigns the homeserver by itself; nothing needs to be chosen twice.
+
+**The server is not typed, it is derived.** A Matrix room id is `!opaque:origin-server`
+(`ROOM_ID_RE = /^![^:\s]+:[^\s]+$/`), so `projectRoomId` — already carried on every engagement and
+every whitelist entry — names the project's server. What an operator cannot derive is the
+server's *API* base URL, which may differ from the server name by `.well-known` delegation; that
+is discovery, not data entry.
+
+**And in the normal case there is no credential at all.** The operator's framing settles this: a
+project dictates how you join it, the way an open-source project runs a Discord and developers
+join it by accepting an invitation. What that analogy establishes is that **your account is yours
+and portable** — an invitation authorises entry, it does not issue you an identity. Matrix's
+equivalent is exactly federation plus a room invite: the agent keeps its one identity on the
+contributor's homeserver, and joining a project is accepting an invite to a room hosted
+elsewhere. So:
+
+| mode | when | what is configured |
+|---|---|---|
+| **federated invite** (normal) | the servers federate and the project does not require local accounts | nothing — only the decision to accept |
+| appservice | the project's server will install our registration | `{ apiUrl, asToken, namespace: '@ac_.*' }` on the project |
+| project-issued tokens | the project requires local accounts | one token per `(project, agent)` on the project |
+
+Per-`(project, agent)` rather than one token per project, in the last two modes, because
+ADR-013's transparency amendment requires the borrower to know **which** agent and model serves
+them, and ADR-002 binds ownership per `(room, agent)`. One shared account for all lent agents
+collapses both.
+
+**Where the analogy breaks, and it is the point where this product's economics differ:** joining
+a Discord costs the joiner nothing. Lending an agent spends tokens. So acceptance stays a
+deliberate, audited act by the contributor — never a link click, and never automatic. The shape
+is still invitation-driven; only the click becomes an approval.
+
+**What this replaces is broken in both directions today, which is why it is a fix and not a
+feature.** `MATRIX_TRUST_MODE` defaults to `audit`, and the invite handler reads
+`if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') continue;`:
+
+- On the **default**, an agent joins any room anyone invites it to, but `markRoomTrusted` and
+  `upsertRoomAgentBinding` are skipped — so the agent is present, the project can send
+  `!request`, and every approval then fails `owner_binding_missing`. Joined and unengageable: a
+  dead end that looks like presence.
+- Under **`enforce`**, the invite is silently skipped. `untrusted_inviter` occurs exactly once in
+  the repository — the line that produces it. There is no record, no API and no pending state, so
+  the contributor never learns they were invited.
+- And `MATRIX_TRUSTED_INVITER_MXIDS` is an env var read at module load, absent from the backend
+  and the console. So "join a project" today means: learn an MXID out of band, edit `.env`,
+  restart the bridge, and hope the invite is re-polled. The invitation carries no weight; the
+  authorisation happens in a text editor.
+
+**The decision:** an invite from an inviter that is not already trusted is recorded as a
+**pending invitation** — room, derived server, inviter, and which agent was invited — and the
+agent does **not** join until the contributor accepts. Accepting joins the room, marks it
+trusted, and writes the `(room, agent)` ownership binding from the inviter, which is ADR-002's
+mechanism unchanged: **accepting an invitation is how ownership is established.**
+
+Accepting does **not** whitelist the project. The whitelist decides who may skip approval
+(ADR-013 decision 4), which is a stronger and separate statement than "this agent may be in this
+project". An earlier draft of this amendment had acceptance produce the whitelist entry too;
+that was wrong.
+
+The project surface is therefore read-mostly — the projects we have been invited into, their
+server, their inviter, which agents are in them, and their trust state — with credential fields
+appearing only in the two exceptional modes. `MATRIX_TRUSTED_INVITER_MXIDS` degrades from a
+prerequisite to an optional bootstrap accelerator.
+
+**A correction to decision 4 below.** "The bot keeps one homeserver … rooms hosted elsewhere are
+reachable through federation" is true **only where the servers federate**. Where they do not, the
+bot cannot see the project's room at all, so project-issued-token mode without federation needs a
+project-level **bot** credential as well — and with it a second crypto store, a second device and
+a second E2EE state machine, doubling the ADR-008 surface. Non-federating homeservers are
+therefore **out of scope** until a real project requires one, and that limitation is stated to
+the operator rather than discovered.
+
 ## Context
 
 An agent needs a Matrix identity to participate in a project room. Today `bridge-matrix.js`

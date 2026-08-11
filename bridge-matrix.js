@@ -5,7 +5,7 @@ import {
   SimpleFsStorageProvider,
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { execFile } from 'child_process';
 import os from 'os';
 import path from 'path';
@@ -499,14 +499,56 @@ function loadState() {
  * file is CREATED, so every deployment that already has a 0644 file would keep it forever
  * without this line.
  */
+/*
+ * Written atomically, because a torn write here loses every credential.
+ *
+ * `loadState` above returns `{ botToken: null, agentTokens: {}, … }` on ANY parse failure. That
+ * is a reasonable first-boot default and a catastrophic recovery: a half-written file reads as
+ * "no credentials", and the bridge proceeds as though this were a fresh install.
+ *
+ * Under the model this file has today that was survivable — a derived password can always
+ * re-login, so the tokens regenerate. Under ADR-014 it is not: an appservice `as_token` or a
+ * project-issued access token CANNOT be re-minted by software, and this file is their only copy.
+ * A single interrupted write would mean re-provisioning every agent identity by hand, and the
+ * symptom would be a bridge that came up looking healthy with an empty state.
+ *
+ * temp-in-the-same-directory → fsync → rename, so a reader sees either the whole old file or the
+ * whole new one. The temp file is created 0600 so there is no window in which credentials sit in
+ * a world-readable file, and the rename replaces the inode, which is also what keeps the mode at
+ * 0600 rather than inheriting a loose mode from an older release.
+ */
 function saveState() {
   const statePath = path.join(DATA_DIR, 'bridge-state.json');
-  writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
+  const tmpPath = `${statePath}.tmp-${process.pid}`;
+  const payload = JSON.stringify(state, null, 2);
+  let fd = null;
+  try {
+    fd = openSync(tmpPath, 'w', 0o600);
+    writeFileSync(fd, payload);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    renameSync(tmpPath, statePath);
+  } catch (error) {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+    try { unlinkSync(tmpPath); } catch { /* nothing to clean */ }
+    /*
+     * Loud and rethrown rather than swallowed. Every caller of saveState has just changed
+     * something it believes is now durable — a new agent token, a room binding, an accepted
+     * invitation — and continuing as if it were persisted is how memory and disk diverge.
+     */
+    console.error(`[bridge] FAILED to persist ${statePath}: ${error.message}`);
+    throw error;
+  }
+  /*
+   * Belt and braces for a file that predates this function: `renameSync` carries the temp
+   * file's 0600, so this only matters if the target somehow survives with a looser mode.
+   */
   try {
     chmodSync(statePath, 0o600);
   } catch (error) {
-    // A store that cannot be tightened is worth saying out loud rather than failing the write:
-    // the tokens are already persisted, and refusing here would lose them instead.
     console.warn(`[bridge] could not restrict ${statePath} to 0600: ${error.message}`);
   }
 }
@@ -517,6 +559,8 @@ if (!state.agentAvatarMeta) state.agentAvatarMeta = {};
 if (!state.agentRoomBackfillCursors) state.agentRoomBackfillCursors = {};
 if (!state.approvalDmRooms) state.approvalDmRooms = {};
 if (!state.roomAgentBindings) state.roomAgentBindings = {};
+// ADR-014: invitations awaiting the contributor's decision, keyed [roomId][agentName].
+if (!state.pendingInvites) state.pendingInvites = {};
 // Seed trustedManagedRooms from existing bridge-created rooms
 if (!state.trustedManagedRooms) {
   state.trustedManagedRooms = {};
@@ -1305,6 +1349,96 @@ function mapRoom(roomId, groupName) {
 
 function groupForRoom(roomId) { return state.roomGroupMap[roomId] || null; }
 function roomForGroup(groupName) { return state.groupRoomMap[groupName] || null; }
+
+/*
+ * ── Pending project invitations (ADR-014 amendment 2026-08-11) ────────────────────────────
+ *
+ * An invitation from an inviter we do not already trust is a DECISION for the contributor, not
+ * an error and not an auto-join. The record exists so the decision can be presented: which room,
+ * which server, who invited, and which agent they invited.
+ *
+ * Keyed `[roomId][agentName]` for the same reason ownership is (ADR-002): one project room can
+ * hold several of the contributor's agents, each invited separately and each owned by whoever
+ * invited THAT one. A room-only key would let a second agent's invitation overwrite the first's
+ * inviter, which is precisely the ownership confusion ADR-002 exists to prevent.
+ */
+function pendingInviteKey(roomId, agentName) {
+  if (!state.pendingInvites[roomId]) state.pendingInvites[roomId] = {};
+  return state.pendingInvites[roomId];
+}
+
+/**
+ * The project's homeserver, read off the room id rather than configured.
+ *
+ * A Matrix room id is `!opaque:origin-server`, so the server hosting a project room is already
+ * in the id every engagement and whitelist entry carries. ADR-014 originally had an operator type
+ * this; deriving it removes a field that could be typed wrong.
+ *
+ * This is the room's ORIGIN server, which is where the project lives — not necessarily the server
+ * an agent's account must live on. With federation those differ and that is fine; the amendment
+ * records that non-federating servers are out of scope.
+ */
+function projectServerFromRoomId(roomId) {
+  if (typeof roomId !== 'string') return null;
+  const at = roomId.indexOf(':');
+  return at > 0 ? roomId.slice(at + 1) : null;
+}
+
+/**
+ * Record an invitation as awaiting a decision.
+ *
+ * @returns true only when this is NEW information. The invite poll runs on a timer, so returning
+ * true unconditionally would re-log and re-notify every few seconds for as long as the invitation
+ * sits there. A previously DECLINED invitation also returns false: the contributor already
+ * answered, and re-asking would make "no" impossible to express.
+ */
+function rememberPendingInvite(roomId, agentName, inviter) {
+  const byAgent = pendingInviteKey(roomId, agentName);
+  const existing = byAgent[agentName];
+  if (existing && (existing.state === 'pending' || existing.state === 'declined')) return false;
+  byAgent[agentName] = {
+    roomId,
+    agentName,
+    // May be null when the invite state does not name the sender; surfaced rather than guessed,
+    // because the inviter IS the owner under ADR-002 and inventing one would forge ownership.
+    inviter: inviter ?? null,
+    projectServer: projectServerFromRoomId(roomId),
+    state: 'pending',
+    seenAt: Date.now(),
+  };
+  saveState();
+  return true;
+}
+
+/** Every invitation still awaiting a decision, newest first. */
+function listPendingInvites() {
+  const out = [];
+  for (const byAgent of Object.values(state.pendingInvites || {})) {
+    for (const record of Object.values(byAgent || {})) {
+      if (record?.state === 'pending') out.push(record);
+    }
+  }
+  return out.sort((a, b) => (b.seenAt ?? 0) - (a.seenAt ?? 0));
+}
+
+/** The record for one (room, agent), whatever its state. */
+function getPendingInvite(roomId, agentName) {
+  return state.pendingInvites?.[roomId]?.[agentName] ?? null;
+}
+
+/**
+ * Mark a decision. `accepted` records that the join has happened; `declined` is remembered so the
+ * poll does not resurrect it.
+ */
+function settlePendingInvite(roomId, agentName, decision, by = 'operator') {
+  const record = getPendingInvite(roomId, agentName);
+  if (!record) return null;
+  record.state = decision;
+  record.decidedAt = Date.now();
+  record.decidedBy = by;
+  saveState();
+  return record;
+}
 
 export function isPrivateControlRoomName(name) {
   return typeof name === 'string'
@@ -2735,6 +2869,15 @@ export class MatrixBridge {
     }
     await this.backfillAgentManagedRooms();
     await this.syncApprovalBindings();
+    /*
+     * ADR-014: replay invitations recorded while the backend was unreachable. Placed after
+     * syncApprovalBindings for the same reason that exists — bridge-owned facts have to be
+     * pushed to the backend for the console to see them, and a restart is the only chance to
+     * catch up on what was missed. `rememberPendingInvite` will not re-notify for an invite it
+     * has already seen, so without this an invitation reported during a backend outage would
+     * stay invisible until the project gave up and invited again.
+     */
+    await this.resyncPendingInvites();
     setInterval(() => this.scanJoinedRooms(), MATRIX_ROOM_SCAN_POLL_MS);
     // Reaped on the room-scan cadence rather than its own timer: it walks the same
     // rooms, on a deliberately slow interval, behind the same rate-limit gate.
@@ -3958,7 +4101,40 @@ export class MatrixBridge {
           const inviter = inviteState.find(e => e.type === 'm.room.member' && e.state_key === `@${AGENT_PREFIX}${agentName}:${MATRIX_SERVER_NAME}`)?.sender || null;
           const trust = getRoomTrust(roomId, { inviterMxid: inviter, requireTrustedInviter: true });
           roomTrustLog('agent-invite', roomId, trust, `agent=${agentName} inviter=${inviter}`);
-          if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') continue;
+          /*
+           * AN UNTRUSTED INVITE BECOMES A PENDING DECISION, NOT A JOIN AND NOT A LOG LINE.
+           *
+           * ADR-014's 2026-08-11 amendment. What this replaces was wrong in both directions:
+           *
+           *   MATRIX_TRUST_MODE defaults to `audit`, so the old `if (!trust.trusted && MODE ===
+           *   'enforce') continue` did NOT stop the join — the agent joined any room anyone
+           *   invited it to, while `markRoomTrusted` and `upsertRoomAgentBinding` below were
+           *   skipped. Present, messageable, and permanently unengageable: with no ownership
+           *   binding every approval for that room later fails `owner_binding_missing`. A dead
+           *   end that looks like presence.
+           *
+           *   Under `enforce` the invite was skipped silently. `untrusted_inviter` appears
+           *   exactly once in this repository — the line that produces it. No record, no API, no
+           *   pending state, so the contributor never learned they had been invited.
+           *
+           * And joining is not free: lending an agent spends the contributor's tokens, which is
+           * where the Discord invite-link analogy stops applying. So the invitation is recorded
+           * and the decision waits for a human — deliberate, like accepting it always should
+           * have been, but no longer requiring an MXID typed into `.env` and a bridge restart.
+           *
+           * `rememberPendingInvite` returns false when this invite is already recorded or was
+           * already declined, so a poll every few seconds does not re-notify.
+           */
+          if (!trust.trusted) {
+            if (rememberPendingInvite(roomId, agentName, inviter)) {
+              console.log(
+                `[invite] pending: ${agentName} invited to ${roomId} by ${inviter ?? 'unknown'}`
+                + ' — awaiting the contributor\'s decision',
+              );
+              await this.reportPendingInvite(roomId, agentName, inviter);
+            }
+            continue;
+          }
           // Auto-join
           const joinRes = await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
             method: 'POST',
@@ -4266,6 +4442,45 @@ export class MatrixBridge {
           console.warn(`Failed to parse SSE group_created event: ${e.message}`);
         }
       });
+      /*
+       * The contributor answered a project's invitation (ADR-014). Only the bridge can act on it:
+       * joining a room, trusting it, and writing the ownership binding are all Matrix operations.
+       * The backend recorded the decision and said "queued" rather than "joined" precisely
+       * because this step is the one that makes it true.
+       */
+      es.on('matrix_invite_decision', (data) => {
+        (async () => {
+          try {
+            const { projectRoomId, agent, accept } = JSON.parse(data);
+            if (!projectRoomId || !agent) {
+              console.warn('SSE: matrix_invite_decision missing projectRoomId or agent');
+              return;
+            }
+            const outcome = accept
+              ? await this.acceptPendingInvite(projectRoomId, agent)
+              : await this.rejectPendingInvite(projectRoomId, agent);
+            if (!outcome.ok) {
+              /*
+               * Loud, and left for the operator to see rather than retried silently. Every
+               * refusal reason here is something a human has to resolve — an invitation naming
+               * no human inviter, an agent with no Matrix credential, a rate limit — and a
+               * background retry loop would turn "needs you" into "mysteriously quiet".
+               */
+              console.warn(
+                `SSE: matrix_invite_decision ${accept ? 'accept' : 'decline'} failed for `
+                + `${agent}@${projectRoomId}: ${outcome.reason}`,
+              );
+              this.postWarning(
+                `Could not ${accept ? 'accept' : 'decline'} the invitation for ${agent} in `
+                + `${projectRoomId}: ${outcome.reason}`,
+                { kind: 'invite-decision', scope: projectRoomId },
+              );
+            }
+          } catch (e) {
+            console.warn(`Failed to handle SSE matrix_invite_decision: ${e.message}`);
+          }
+        })();
+      });
       es.on('group_members', (data) => {
         try {
           const update = JSON.parse(data);
@@ -4535,6 +4750,148 @@ export class MatrixBridge {
     if (JSON.stringify(normalizedCurrent) === JSON.stringify(expected)) return false;
     await this.botClient.sendStateEvent(roomId, 'm.room.power_levels', '', expected);
     return true;
+  }
+
+  /**
+   * Make a pending invitation visible to the operator's surfaces.
+   *
+   * The bridge owns the Matrix state; the console reads the backend. Same shape as
+   * `PUT /api/approval-bindings` — the bridge pushes, the backend stores, the console reads —
+   * because that is the established way a bridge-owned fact reaches the console here.
+   *
+   * Failure is logged, never thrown. The invitation is already recorded in bridge state, so a
+   * backend that is down or restarting delays the notification rather than losing the decision;
+   * `resyncPendingInvites` replays the list when the bridge next starts.
+   */
+  async reportPendingInvite(roomId, agentName, inviter) {
+    const record = getPendingInvite(roomId, agentName);
+    if (!record) return { ok: false, reason: 'not_recorded' };
+    const result = await this.callBackendApi('PUT', '/api/matrix/pending-invites', {
+      project_room_id: roomId,
+      agent: agentName,
+      inviter: record.inviter,
+      project_server: record.projectServer,
+      seen_at: record.seenAt,
+    }, `pending-invite ${agentName}@${roomId}`);
+    if (result?.error) {
+      console.warn(`[invite] could not report ${agentName}@${roomId} to the backend: ${result.error}`);
+      return { ok: false, reason: 'backend_unavailable' };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Replay every still-pending invitation to the backend on startup.
+   *
+   * Without this, an invitation recorded while the backend was down would stay invisible until
+   * the inviting party gave up and invited again — and `rememberPendingInvite` deliberately does
+   * not re-notify for an invite it has already seen, so the poll alone would never surface it.
+   */
+  async resyncPendingInvites() {
+    const pending = listPendingInvites();
+    if (!pending.length) return 0;
+    let reported = 0;
+    for (const record of pending) {
+      const outcome = await this.reportPendingInvite(record.roomId, record.agentName, record.inviter);
+      if (outcome.ok) reported += 1;
+    }
+    console.log(`[invite] resynced ${reported}/${pending.length} pending invitation(s) to the backend`);
+    return reported;
+  }
+
+  /**
+   * Accept an invitation: join, trust the room, and record who owns the agent in it.
+   *
+   * The three are one act. ADR-002 derives ownership from the inviter, so **accepting the
+   * invitation is how ownership is established** — there is no separate step and no place for a
+   * human to supply an owner by hand.
+   *
+   * It deliberately does NOT whitelist the project. The whitelist decides who may skip approval
+   * (ADR-013 decision 4), which is a stronger statement than "this agent may be in this project".
+   * An earlier draft had accept do both; conflating them would have granted auto-join on the
+   * strength of an invitation from someone the contributor had just met.
+   */
+  async acceptPendingInvite(roomId, agentName, by = 'operator') {
+    const record = getPendingInvite(roomId, agentName);
+    if (!record) return { ok: false, reason: 'unknown_invite' };
+    if (record.state !== 'pending') return { ok: false, reason: `already_${record.state}` };
+    /*
+     * Refused rather than accepted with a null owner. `upsertRoomAgentBinding` would store the
+     * null, and a room-agent binding with no owner is exactly the `owner_binding_missing` dead
+     * end this whole change exists to remove — it would look accepted and work for nothing.
+     */
+    if (!record.inviter || !/^@[^:\s]+:[^\s]+$/.test(record.inviter) || isAgentUser(record.inviter)) {
+      return { ok: false, reason: 'invite_names_no_human_inviter' };
+    }
+    const canonicalAgent = this.resolveKnownAgentName(agentName) || this.normalizeName(agentName);
+    if (!canonicalAgent) return { ok: false, reason: 'unknown_agent' };
+    const token = this.getAgentToken(canonicalAgent);
+    if (!token) return { ok: false, reason: 'agent_has_no_matrix_credential' };
+
+    const joinRes = await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    if (await rateLimitGate.observeResponse(joinRes)) {
+      // Left pending on purpose: a 429 is "not yet", not "no".
+      return { ok: false, reason: 'rate_limited' };
+    }
+    const joined = await joinRes.json();
+    if (!joined?.room_id) {
+      return { ok: false, reason: `join_failed: ${joined?.error || joinRes.status}` };
+    }
+
+    markRoomTrusted(roomId, { agent: canonicalAgent, inviter: record.inviter });
+    const existing = state.trustedManagedRooms[roomId] || {};
+    upsertRoomAgentBinding(roomId, canonicalAgent, record.inviter, { addedAt: existing.addedAt });
+    state.trustedManagedRooms[roomId] = {
+      ...existing,
+      // Legacy single-agent metadata, preserved exactly as the auto-join path does: per-agent
+      // ownership is authoritative in roomAgentBindings and must not be overwritten by a second
+      // agent joining the same project room.
+      agent: existing.agent || canonicalAgent,
+      inviter: existing.inviter || record.inviter,
+      ownerMxid: existing.ownerMxid || record.inviter,
+      addedAt: existing.addedAt || Date.now(),
+    };
+    settlePendingInvite(roomId, canonicalAgent, 'accepted', by);
+    if (canonicalAgent !== agentName) settlePendingInvite(roomId, agentName, 'accepted', by);
+    saveState();
+    console.log(`[invite] accepted: ${canonicalAgent} joined ${roomId}, owner=${record.inviter}`);
+    await this.syncApprovalBindingForRoomAgent(roomId, canonicalAgent);
+    return { ok: true, roomId, agent: canonicalAgent, ownerMxid: record.inviter };
+  }
+
+  /**
+   * Decline an invitation: leave the invite and remember the answer.
+   *
+   * The record is kept rather than deleted so the invite poll cannot resurrect it — without that,
+   * "no" is unexpressible, because the invitation is still in Matrix state and would be seen
+   * again on the next round.
+   */
+  async rejectPendingInvite(roomId, agentName, by = 'operator') {
+    const record = getPendingInvite(roomId, agentName);
+    if (!record) return { ok: false, reason: 'unknown_invite' };
+    if (record.state !== 'pending') return { ok: false, reason: `already_${record.state}` };
+    const canonicalAgent = this.resolveKnownAgentName(agentName) || this.normalizeName(agentName);
+    const token = canonicalAgent ? this.getAgentToken(canonicalAgent) : null;
+    if (token) {
+      // Best-effort: declining in Matrix is courtesy. The decision is the record, so a failed
+      // leave must not leave the contributor unable to say no.
+      try {
+        await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+      } catch (error) {
+        console.warn(`[invite] declined ${agentName}@${roomId} but could not leave: ${error.message}`);
+      }
+    }
+    settlePendingInvite(roomId, agentName, 'declined', by);
+    console.log(`[invite] declined: ${agentName} for ${roomId}`);
+    return { ok: true, roomId, agent: agentName };
   }
 
   async syncApprovalBindingForRoomAgent(projectRoomId, agentName) {

@@ -3,6 +3,7 @@ import { buildReplyHint } from './lib/reply-hint.js';
 import { meterFleet } from './lib/metering/reader.js';
 import { meteringSupport } from './lib/metering/parsers.js';
 import { createUsageLedger } from './lib/metering/ledger.js';
+import { createPendingInviteStore, PendingInviteError } from './lib/pending-invite-store.js';
 import {
   appendFileSync,
   chmodSync,
@@ -2973,6 +2974,18 @@ const engagementStore = createEngagementStore({
 const usageLedger = createUsageLedger({
   load: () => loadJsonSync('usage-ledger.json', {}),
   persist: (state) => saveJson('usage-ledger.json', state),
+});
+
+/*
+ * Invitations a project has extended that the contributor has not answered (ADR-014).
+ *
+ * The bridge owns the Matrix state and pushes here; this is the copy the console reads. Same
+ * shape as approval-bindings, for the same reason: the console talks to the backend, and a
+ * bridge-owned fact has to cross that line somewhere.
+ */
+const pendingInviteStore = createPendingInviteStore({
+  load: () => loadJsonSync('pending-invites.json', {}),
+  persist: (state) => saveJson('pending-invites.json', state),
 });
 
 /*
@@ -8135,6 +8148,80 @@ app.get('/api/approval-bindings', requireApprovalBridgeSecret, (req, res) => {
     });
   } catch (error) {
     return respondApprovalStoreError(res, error, 'failed to list approval bindings');
+  }
+});
+
+/*
+ * ── Pending project invitations (ADR-014 amendment 2026-08-11) ─────────────────────────────
+ *
+ * A project invites one of the contributor's agents into its room. Until this existed the
+ * invitation either caused a silent auto-join with no ownership binding — present and
+ * permanently unengageable — or was dropped with a log line the contributor never saw.
+ *
+ * The split of authority below is the point:
+ *
+ *   the BRIDGE reports (bridge secret). It is the only thing that sees Matrix state.
+ *   the OPERATOR decides (bearer). Accepting spends their tokens, so it is their call.
+ *
+ * Deciding does not happen here. The backend records the answer and broadcasts it; only the
+ * bridge can join a Matrix room, mark it trusted, and write the ownership binding. Recording a
+ * decision the bridge then failed to carry out would be the "looks accepted, works for nothing"
+ * state this replaces — so the endpoints below record and broadcast, and the bridge's own
+ * acceptance is what makes it true.
+ */
+function respondPendingInviteError(res, error, fallback) {
+  if (error instanceof PendingInviteError) {
+    const status = { bad_request: 400, not_found: 404, conflict: 409 }[error.code] ?? 500;
+    return res.status(status).json({ error: error.message, code: error.code });
+  }
+  console.error(`[pending-invites] ${fallback}:`, error?.message || error);
+  return res.status(500).json({ error: fallback });
+}
+
+app.put('/api/matrix/pending-invites', requireBridgeSecret, (req, res) => {
+  try {
+    return res.json({ ok: true, invite: pendingInviteStore.upsert(req.body || {}) });
+  } catch (error) {
+    return respondPendingInviteError(res, error, 'failed to record pending invitation');
+  }
+});
+
+app.get('/api/matrix/pending-invites', requireBearer, (req, res) => {
+  try {
+    const state = normalizeOptionalText(req.query?.state, 16) || 'pending';
+    return res.json({
+      ok: true,
+      invites: pendingInviteStore.list({ state }),
+      pending: pendingInviteStore.pendingCount(),
+    });
+  } catch (error) {
+    return respondPendingInviteError(res, error, 'failed to list pending invitations');
+  }
+});
+
+app.post('/api/matrix/pending-invites/decide', requireBearer, (req, res) => {
+  try {
+    const b = req.body || {};
+    const roomId = normalizeOptionalText(b.projectRoomId ?? b.project_room_id, 256);
+    const agent = normalizeOptionalText(b.agent, 64);
+    const accept = b.accept === true;
+    if (!roomId || !agent) {
+      return res.status(400).json({ error: 'projectRoomId and agent are required' });
+    }
+    const record = pendingInviteStore.settle(
+      roomId, agent, accept ? 'accepted' : 'declined',
+      getRequestAgentName(req) || 'operator',
+    );
+    /*
+     * Broadcast, because the join can only happen in the bridge. The response says the decision
+     * was recorded and queued — deliberately not that the agent has joined, which the backend
+     * cannot know. Overstating that is the same class of defect as the binding outcome that used
+     * to be omitted from a verdict.
+     */
+    broadcastSSE('matrix_invite_decision', { projectRoomId: roomId, agent, accept });
+    return res.json({ ok: true, queued: true, invite: record });
+  } catch (error) {
+    return respondPendingInviteError(res, error, 'failed to record the invitation decision');
   }
 });
 

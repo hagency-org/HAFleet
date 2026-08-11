@@ -22,7 +22,8 @@
 
 import { afterEach, describe, expect, test } from 'vitest';
 import {
-  chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
+  chmodSync, closeSync, existsSync, fsyncSync, mkdtempSync, openSync, readFileSync,
+  readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -40,15 +41,30 @@ afterEach(() => {
 const mode = (file) => statSync(file).mode & 0o777;
 
 /**
- * The exact two steps `saveState` performs.
+ * What `saveState` does: temp at 0600 → fsync → rename, then chmod the target.
  *
  * Mirrored rather than imported because `bridge-matrix.js` connects to a homeserver at module
- * evaluation. Kept to two lines so the mirror cannot drift far, and the second test below is
- * what makes the second line non-optional.
+ * evaluation, so importing it here would need a live server. The mirror is a real risk and the
+ * tests below are chosen to constrain it: each step is load-bearing for one of them, so a mirror
+ * that drifts by dropping a step fails rather than passing quietly.
  */
 function saveStateLike(dir, state) {
   const statePath = path.join(dir, 'bridge-state.json');
-  writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
+  const tmpPath = `${statePath}.tmp-${process.pid}`;
+  const payload = JSON.stringify(state, null, 2);
+  let fd = null;
+  try {
+    fd = openSync(tmpPath, 'w', 0o600);
+    writeFileSync(fd, payload);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    renameSync(tmpPath, statePath);
+  } catch (error) {
+    if (fd !== null) { try { closeSync(fd); } catch { /* closed */ } }
+    try { unlinkSync(tmpPath); } catch { /* nothing to clean */ }
+    throw error;
+  }
   try { chmodSync(statePath, 0o600); } catch { /* reported by the caller in production */ }
   return statePath;
 }
@@ -85,6 +101,44 @@ describe('the bridge state file is owner-only', () => {
     const state = { botToken: 'syt_bot', agentTokens: { a1: 'syt_a1', a2: 'syt_a2' } };
     const file = saveStateLike(dir, state);
     expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(state);
+  });
+
+  test('the write is atomic, so a reader never sees a half file', () => {
+    /*
+     * Why this matters more than it looks: `loadState` returns
+     * `{ botToken: null, agentTokens: {} }` on ANY parse failure, so a torn write does not
+     * read as an error — it reads as a FRESH INSTALL. Under ADR-014 that is unrecoverable: an
+     * appservice as_token or a project-issued access token cannot be re-minted by software, and
+     * this file is their only copy. The old code self-healed because a derived password could
+     * always re-login; that safety net is exactly what ADR-014 removes.
+     *
+     * Asserted by the mechanism rather than by racing a reader: the target is replaced by
+     * rename, so at no point does a partially-written target exist.
+     */
+    const dir = tempRoot();
+    const file = saveStateLike(dir, { botToken: 'syt_first', agentTokens: { a1: 'syt_a1' } });
+    saveStateLike(dir, { botToken: 'syt_second', agentTokens: { a1: 'syt_a1', a2: 'syt_a2' } });
+
+    // Whole new content, and no temp file left behind for the next write to trip over.
+    expect(JSON.parse(readFileSync(file, 'utf8')).botToken).toBe('syt_second');
+    expect(readdirSync(dir).filter((f) => f.includes('.tmp-'))).toEqual([]);
+  });
+
+  test('a failed write leaves the PREVIOUS credentials intact', () => {
+    /*
+     * The contract the atomic write exists for. If the new state cannot be written, the old
+     * tokens must still be on disk — losing them is worse than failing to add one.
+     */
+    const dir = tempRoot();
+    const file = saveStateLike(dir, { botToken: 'syt_good', agentTokens: { a1: 'syt_a1' } });
+
+    // An unwritable directory: the temp file cannot be created, so the rename never happens.
+    chmodSync(dir, 0o500);
+    expect(() => saveStateLike(dir, { botToken: 'syt_new', agentTokens: {} })).toThrow();
+    chmodSync(dir, 0o700);
+
+    expect(JSON.parse(readFileSync(file, 'utf8')).botToken).toBe('syt_good');
+    expect(readdirSync(dir).filter((f) => f.includes('.tmp-'))).toEqual([]);
   });
 
   test('the file the bridge actually writes on this host is not world-readable', () => {
