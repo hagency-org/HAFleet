@@ -66,11 +66,41 @@ describe('ACP agent workspace attribution', () => {
     expect(res.body.find((a) => a.name === 'octos-01').workspacePath).toBe(WORKSPACE);
   });
 
+  test('the workspace is REMEMBERED after the sweep clears it', async () => {
+    /*
+     * Two fields, two questions, and conflating them made a stopped agent unmeterable.
+     *
+     * `workspacePath` answers "where is it running now", and the activity sweep clears it
+     * when an agent has no pane — correctly, a stopped agent runs nowhere. But transcripts
+     * stay on disk, and an agent that worked this month and then stopped still spent
+     * against its ceiling. Reading only the live field reported it as having consumed
+     * nothing, which is an answer rather than an absence.
+     *
+     * Verified live before this test existed: two sweep cycles cleared `workspacePath`
+     * while `lastWorkspacePath` survived.
+     */
+    ctx = await createBackendTestContext('acp-ws-remember-', seed);
+    await request(ctx.app).post('/api/agents/octos-01/runtime')
+      .send({ transport: 'acp', workspacePath: WORKSPACE });
+
+    // What the sweep does to an agent with no pane.
+    await request(ctx.app).post('/api/agents/octos-01/runtime')
+      .send({ transport: 'acp', workspacePath: null });
+
+    const res = await request(ctx.app).get('/api/agents');
+    const agent = res.body.find((a) => a.name === 'octos-01');
+    expect(agent.workspacePath ?? null).toBeNull();
+    expect(agent.lastWorkspacePath).toBe(WORKSPACE);
+  });
+
   test('an agent that has never reported one has null, not a guess', async () => {
     // Attribution must fail closed. A guessed workspace would attribute one agent's
     // tokens to another, which is worse than reporting the consumption as unattributable.
     ctx = await createBackendTestContext('acp-ws-none-', seed);
     const res = await request(ctx.app).get('/api/agents');
-    expect(res.body.find((a) => a.name === 'octos-01').workspacePath ?? null).toBeNull();
+    const agent = res.body.find((a) => a.name === 'octos-01');
+    expect(agent.workspacePath ?? null).toBeNull();
+    // And nothing is remembered either, so metering cannot fall back to a guess.
+    expect(agent.lastWorkspacePath ?? null).toBeNull();
   });
 });

@@ -1,5 +1,7 @@
 import express from 'express';
 import { buildReplyHint } from './lib/reply-hint.js';
+import { meterFleet } from './lib/metering/reader.js';
+import { meteringSupport } from './lib/metering/parsers.js';
 import {
   appendFileSync,
   chmodSync,
@@ -5283,9 +5285,29 @@ function setRuntimeWorkspacePath(runtime, payload = {}) {
   if (!runtime || typeof runtime !== 'object') return false;
   if (!Object.prototype.hasOwnProperty.call(payload, 'workspacePath')) return false;
   const normalized = normalizeWorkspacePath(payload.workspacePath);
-  if ((runtime.workspacePath || null) === (normalized || null)) return false;
-  runtime.workspacePath = normalized;
-  return true;
+  /*
+   * TWO FIELDS, TWO QUESTIONS.
+   *
+   * `workspacePath` answers "where is this agent running now", and the activity sweep
+   * correctly clears it when an agent has no pane — a stopped agent is running nowhere.
+   *
+   * `lastWorkspacePath` answers "where did it last run", and is never cleared. Metering
+   * needs that one: consumption is read from transcripts that stay on disk after the
+   * agent stops, and clearing the only key to them made a stopped agent's usage
+   * unattributable — a monthly ceiling still spent by work that has finished. Reporting
+   * an agent as having consumed nothing because it is no longer running would be the
+   * wrong answer to a question nobody asked.
+   */
+  let changed = false;
+  if (normalized && runtime.lastWorkspacePath !== normalized) {
+    runtime.lastWorkspacePath = normalized;
+    changed = true;
+  }
+  if ((runtime.workspacePath || null) !== (normalized || null)) {
+    runtime.workspacePath = normalized;
+    changed = true;
+  }
+  return changed;
 }
 
 function syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown) {
@@ -6997,6 +7019,9 @@ function serializeAgent(agent) {
     idleDurationSec: Number(runtime?.idleDurationSec) || 0,
     lastTmuxActivitySec: Number(runtime?.lastTmuxActivitySec) || null,
     workspacePath: runtime?.workspacePath || null,
+    // Where it last ran, retained after it stops. Metering reads this; see
+    // setRuntimeWorkspacePath.
+    lastWorkspacePath: runtime?.lastWorkspacePath || runtime?.workspacePath || null,
     runtimeObservation: serializeRuntimeObservation(runtime),
     mcpPresent: runtime?.mcpPresent === true
       ? true
@@ -11027,16 +11052,42 @@ app.get('/api/engagements/preview', requireBearer, (req, res) => {
  * difference between "this cost me nothing" and "I cannot see what this cost me" is
  * the whole reason a contributor opens this page.
  */
+/*
+ * Why a framework cannot be metered, when it cannot.
+ *
+ * No longer a blanket statement. HAFleet still never sees an API response — it launches a
+ * CLI that talks to the provider directly — but the CLIs write the provider's own figures
+ * to disk, and lib/metering reads them. So the reason is now per framework: Claude Code
+ * and Codex record usage, octos records none.
+ */
 const TOKENS_UNAVAILABLE_REASON =
-  'no token accounting exists at any granularity: hafleet launches a CLI that talks '
-  + 'to the provider directly, so no API response passes through it to read a usage '
-  + 'figure from. This is true in api-key mode as well as on a subscription.';
+  'this framework writes no token accounting hafleet can read: hafleet launches a CLI '
+  + 'that talks to the provider directly, so no API response passes through it, and this '
+  + "CLI does not record the provider's figures to disk either.";
 
-app.get('/api/usage', requireBearer, (_req, res) => {
+app.get('/api/usage', requireBearer, async (_req, res) => {
   refreshServerLiveness();
   const rows = Object.values(agents).filter(isAgentRecord).map(serializeAgent);
   const allTasks = taskStore.listTasks();
   const TASK_STATUSES = ['created', 'accepted', 'in_progress', 'blocked', 'done'];
+
+  /*
+   * Measured consumption, from the transcripts the CLIs write themselves.
+   *
+   * Bounded and cached (lib/metering/reader.js): a scan that opened every transcript on
+   * every request would cost seconds and grow with history. Failure here degrades to
+   * unavailable-with-a-reason rather than failing the endpoint — usage is a read-only
+   * view, and losing the task and busy-time figures because a transcript was unreadable
+   * would be the wrong trade.
+   */
+  let metered = null;
+  let meteredError = null;
+  try {
+    metered = await meterFleet({ agents: rows, homeDir: homedir() });
+  } catch (error) {
+    meteredError = String(error?.message ?? error).slice(0, 200);
+  }
+  const meteredByAgent = new Map((metered?.agents ?? []).map((m) => [m.agent, m]));
 
   const byAgent = rows.map((a) => {
     const mine = allTasks.filter((t) => t.assignee === a.name);
@@ -11056,9 +11107,32 @@ app.get('/api/usage', requireBearer, (_req, res) => {
       tasksByStatus,
       // Declared, which is knowable: I know what I promised.
       ceilingTokens: preset?.ceiling?.tokens ?? null,
-      // Not measured. Null with a reason, never 0.
-      tokensUsed: null,
-      tokensReason: TOKENS_UNAVAILABLE_REASON,
+      /*
+       * Measured where the framework records it and the agent's workspace is known;
+       * null with the specific reason otherwise. Never 0 — a zero here reads as "this
+       * agent consumed nothing", which is a claim rather than an absence.
+       */
+      ...(() => {
+        const m = meteredByAgent.get(a.name);
+        if (m?.available) {
+          return {
+            tokensUsed: m.total,
+            // The kinds stay apart: cache reads run several orders of magnitude above
+            // fresh input, so one summed figure hides the only number that matters for
+            // comparing two agents.
+            tokensByKind: m.totals,
+            tokensSessions: m.sessions,
+            tokensReason: null,
+          };
+        }
+        return {
+          tokensUsed: null,
+          tokensByKind: null,
+          tokensReason: m?.reason ?? (meteredError
+            ? `metering failed: ${meteredError}`
+            : TOKENS_UNAVAILABLE_REASON),
+        };
+      })(),
     };
   });
 
@@ -11073,8 +11147,25 @@ app.get('/api/usage', requireBearer, (_req, res) => {
       tasks: { available: true, source: 'lib/task-store.js' },
       busyTime: { available: true, source: 'agent runtime observation (tmux pane / ACP session sweep)' },
       tokens: {
-        available: false,
-        reason: TOKENS_UNAVAILABLE_REASON,
+        /*
+         * True when ANY agent could be metered, and the per-agent rows carry the detail.
+         * A global false would deny measurements that exist; a global true would promise
+         * ones that do not. REQ-CONTRIBUTION-CONSOLE-METERING-SCOPE requires it per
+         * framework, which is what `frameworks` below reports.
+         */
+        available: (metered?.attributed ?? 0) > 0,
+        source: 'lib/metering — the coding CLIs\' own transcripts, which record the '
+          + "provider's reported usage rather than an estimate",
+        attributed: metered?.attributed ?? 0,
+        unattributed: metered?.unattributed ?? null,
+        // Two distinct caveats, deliberately not merged: agents that could not be
+        // attributed at all, and a scan that stopped early and therefore understates.
+        reason: metered?.reason ?? (meteredError ? `metering failed: ${meteredError}` : null),
+        boundsReason: metered?.boundsReason ?? null,
+        frameworks: [...new Set(rows.map((r) => r.type).filter(Boolean))]
+          .map((f) => meteringSupport(f)),
+        computedAt: metered?.computedAt ?? null,
+        cached: metered?.cached ?? null,
         // Named so the gap is actionable rather than merely admitted.
         candidateSources: [
           'per-framework session logs written by the CLI itself (best-effort, per framework)',

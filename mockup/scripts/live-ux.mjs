@@ -537,18 +537,51 @@ suites.usage = async (page) => {
    */
   const usage = await api('usage');
   const m = usage.metering ?? {};
-  check('tokens are declared unmeasured by the backend', m.tokens?.available === false,
-    JSON.stringify(m.tokens?.available));
-  check('and the page says so rather than showing 0',
-    /not measured|无测量/i.test(body) && !/\b0 tokens\b/i.test(body));
+  /*
+   * TOKENS ARE NOW MEASURED WHERE THE FRAMEWORK RECORDS THEM.
+   *
+   * This asserted `m.tokens.available === false` — the truth when nothing metered. It is
+   * now false only when no agent could be attributed, so asserting it unconditionally
+   * would pin the product to a limitation it no longer has. What is invariant is the
+   * PARTITION, not the answer: availability is stated per framework, and a figure is
+   * either measured or absent with a reason.
+   */
+  check('token availability is stated per framework, not once for the fleet',
+    Array.isArray(m.tokens?.frameworks) && m.tokens.frameworks.every(
+      (f) => typeof f.available === 'boolean' && (f.available || typeof f.reason === 'string'),
+    ),
+    JSON.stringify(m.tokens?.frameworks ?? null).slice(0, 110));
+  check('a framework that records no usage says why, rather than reporting a bare false',
+    (m.tokens?.frameworks ?? []).filter((f) => !f.available).every((f) => f.reason && f.reason.length > 20),
+    (m.tokens?.frameworks ?? []).filter((f) => !f.available).map((f) => f.framework).join(' '));
+  /*
+   * Never a zero, whichever way availability landed. An unmeasured agent carries null and
+   * a reason; a measured one carries a real figure. `0` in that column would be a claim
+   * that the agent consumed nothing.
+   */
+  check('no agent reports a zero token figure',
+    (usage.agents ?? []).every((r) => r.tokensUsed === null || r.tokensUsed > 0),
+    (usage.agents ?? []).filter((r) => r.tokensUsed === 0).map((r) => r.agent).join(' '));
+  check('every unmeasured agent carries a reason',
+    (usage.agents ?? []).filter((r) => r.tokensUsed === null).every((r) => typeof r.tokensReason === 'string' && r.tokensReason.length > 20));
+  check('a measured agent reports its kinds apart, not one summed figure',
+    (usage.agents ?? []).filter((r) => r.tokensUsed !== null)
+      .every((r) => r.tokensByKind && typeof r.tokensByKind.cacheRead === 'number'),
+    'cache reads run orders of magnitude above fresh input; one figure hides that');
   check('tasks and busy time are declared measured',
     m.tasks?.available === true && m.busyTime?.available === true);
   check('and the page marks them measured, not merely omits the token column',
     /measured|有测量/i.test(body));
-  // A named route is a decision someone can take; an unnamed gap is just a complaint.
-  check('the routes to a real token figure are named on the page',
-    (m.tokens?.candidateSources ?? []).every((c) => body.includes(c.slice(0, 24))),
-    (m.tokens?.candidateSources ?? []).join(' | ').slice(0, 90));
+  /*
+   * A bounded scan understates consumption, so if a bound bit, the payload must say so.
+   * Vacuous when the scan was complete, and labelled that way rather than left to imply
+   * the bound was tested.
+   */
+  if (m.tokens?.boundsReason) {
+    check('a bounded scan discloses that it understates', /understates/.test(m.tokens.boundsReason));
+  } else {
+    check('the scan was complete this run (vacuous)', true, 'no bound bit');
+  }
   // Every agent the backend measured must have a row.
   const missingRows = (usage.agents ?? []).map((r) => r.agent).filter((n) => !body.includes(n));
   check('every measured agent has a usage row', missingRows.length === 0, missingRows.join(' '));
