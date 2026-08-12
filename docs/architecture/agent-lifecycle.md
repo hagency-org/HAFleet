@@ -1,5 +1,9 @@
 # Agent Lifecycle Architecture
 
+> **已移除(2026-08-12)**:本文提到的「潜意识 / subconscious」子系统已整体删除,详见
+> `knowledge/decisions/adr-015-remove-subconscious-memory-subsystem.md`。以下描述保留为当时的记录。
+
+
 > **Scope**: End-to-end agent lifecycle — types, provisioning, session management, supervisor oversight, task system, home directory layout, subconscious hooks, and key files.
 > **Primary sources**: `bin/hafleet-up`, `bin/hafleet-down`, `scripts/provision-v1-agent-home.js`, `lib/agent-state.js`, `lib/supervisor-lifecycle-manager.js`, `lib/task-store.js`, `backend-v2.js`.
 

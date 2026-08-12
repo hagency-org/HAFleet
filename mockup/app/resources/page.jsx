@@ -1,10 +1,14 @@
 'use client';
 
+import { useState } from 'react';
+
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Blank } from '@/components/Blank';
 import { useT } from '@/components/Prefs';
 import { useData, Provenance } from '@/components/Data';
+import { send } from '@/lib/api';
+import { Toast, useToast } from '@/components/Toast';
 // Pure formatters only: they take a number and return a string, so they have no
 // data source to belong to. Everything data-dependent comes from useData().
 import { fmtTokens, runtimeStatusText } from '@/lib/mock-data';
@@ -46,6 +50,9 @@ export default function ResourcesPage() {
     seats = [], seatKeyed,
   } = useData();
 
+  const toast = useToast();
+  const [busy, setBusy] = useState(null);
+
   const configured = agents.filter((a) => a.presetId);
   const bare = agents.filter((a) => !a.presetId);
   const fillable = capability().filter((c) => c.able.length > 0 && c.crossFamilyOk).length;
@@ -61,13 +68,70 @@ export default function ResourcesPage() {
   return (
     <>
       <PageHead title={t('rs.title')} sub={t('rs.sub')}>
+        {/*
+          * TWO actions, because there are two different things missing and this page had a button
+          * for only one of them. A preset is a declaration; an AGENT is the resource. With no
+          * agents the page said "no seat can be derived, i.e. no registered agent" and offered a
+          * single button that makes another preset — naming the problem while routing away from it.
+          */}
+        <Link className="btn" href="/onboard">{t('rs.addAgent')}</Link>
         <Link className="btn primary" href="/resources/new">{t('rs.configure')}</Link>
       </PageHead>
 
       <Provenance slices={['agents', 'presets', 'ceilings', 'seats', 'engagements']} />
 
       {bare.length > 0 && (
-        <div className="notice warn">{t('rs.bareWarn', { n: bare.length })}</div>
+        <div className="notice warn">
+          <div>{t('rs.bareWarn', { n: bare.length })}</div>
+          {/*
+            * Was a warning with no remedy. `presetId` is what attaches a CEILING to an agent, and
+            * without one `engagementStore.decide()` refuses every approval — so an agent listed
+            * here is not merely "unconfigured", it is UNLENDABLE. The console named that state and
+            * offered no way out of it; the only writers of presetId were guarded by the agent's own
+            * token, which is the wrong authority for a budget anyway.
+            */}
+          <table className="tbl" style={{ marginTop: 10 }}>
+            <thead><tr><th>{t('rs.cAgents')}</th><th>{t('rs.bindPreset')}</th></tr></thead>
+            <tbody>
+              {bare.map((a) => (
+                <tr key={a.name}>
+                  <td><Link href={`/agents/${encodeURIComponent(a.name)}`}>{a.name}</Link></td>
+                  <td>
+                    <select
+                      defaultValue=""
+                      disabled={busy === a.name}
+                      onChange={async (ev) => {
+                        const presetId = ev.target.value;
+                        if (!presetId) return;
+                        setBusy(a.name);
+                        const res = await send(`agents/${encodeURIComponent(a.name)}/preset`, {
+                          method: 'PUT', body: { presetId },
+                        });
+                        setBusy(null);
+                        if (!res.ok) { toast.show(res.error, 'bad'); return; }
+                        /*
+                         * The ceiling is reported back rather than assumed: binding a preset that
+                         * declares no ceiling leaves the agent exactly as unlendable, and a bare
+                         * "saved" would hide that.
+                         */
+                        const c = res.body?.ceilingTokens;
+                        toast.show(c ? t('rs.bindOkCeiling', { n: fmtTokens(c) }) : t('rs.bindOkNoCeiling'), c ? 'ok' : 'warn');
+                        if (typeof window !== 'undefined') window.location.reload();
+                      }}
+                    >
+                      <option value="">{t('rs.bindPick')}</option>
+                      {presets.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}{p.ceiling ? ` — ${fmtTokens(p.ceiling.tokens)}` : ` — ${t('rs.bindNoCeiling')}`}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       <div className="cards">
@@ -208,7 +272,12 @@ export default function ResourcesPage() {
       <h2 className="sec">{t('rs.seats')}<span className="note">{t('rs.seatsNote')}</span></h2>
       <div className="notice">{t('rs.seatWhy')}</div>
       {seats.length === 0 ? (
-        <div className="notice warn">{t('rs.seatsEmpty')}</div>
+        <div className="notice warn">
+          {t('rs.seatsEmpty')}
+          {/* An empty state that names a missing thing should say where it comes from. A seat is
+              derived from a registered agent, and agents are registered by onboarding one. */}
+          {' '}<Link href="/onboard">{t('rs.seatsEmptyFix')}</Link>
+        </div>
       ) : (
         <>
           {seatKeyed === false && (
@@ -337,6 +406,7 @@ export default function ResourcesPage() {
       )}
 
       <div className="notice">{t('rs.meterGap')}</div>
+      <Toast toast={toast} />
     </>
   );
 }

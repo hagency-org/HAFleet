@@ -29,7 +29,6 @@ Scope: development implementation only (`no migration`, `no live runtime cutover
       progress.md
   state/
     resume-id
-    letta.json
     history/
     locks/
     tmp/
@@ -72,7 +71,6 @@ Ownership model:
   "homeDir": "<absolute path>",
   "workdir": "<absolute path>",
   "stateDir": "<absolute path>",
-  "subconsciousEnabled": true,
   "managedProjects": [
     {
       "name": "<project-name>",
@@ -134,19 +132,3 @@ Dual-read order:
 1. v1: `<workdir>/docs/` with `AGENTS.md` compatibility link (fallback `agents.md`) + `plan.md`; root `<workdir>/AGENTS.md` is the primary workspace entry file
 2. legacy workspace: `<workspace>/docs/<agent>/`
 3. repo fallback: `<repo>/docs/<agent>/`
-
-## Subconscious Scope (This Batch)
-
-- Claude-only runtime wiring for v1 agents:
-  - `subconsciousEnabled=false` by default; enable it explicitly per agent when needed.
-  - `hafleet-up-v1` provisioning and `hafleet-up` launch both run `scripts/configure-v1-subconscious.js`.
-  - Hook runtime is installed under `<stateDir>/subconscious/claude-hafleet/`.
-  - Claude hook settings are merged into `<workdir>/.claude/settings.json`.
-  - Per-agent Letta identity is resolved as:
-    1. `LETTA_AGENT_ID` env override
-    2. existing `<stateDir>/letta.json` `agentId`
-    3. deterministic generated `agent-...` id based on v1 agent identity
-  - Resolved Letta identity is persisted to `<stateDir>/letta.json` and reused across launches.
-  - Hook event URL default is derived from runtime backend config (`HAFLEET_API` or `HAFLEET_BACKEND_PORT`, fallback `http://127.0.0.1:8090/api/subconscious/events`).
-  - Hook events are posted to backend API: `POST /api/subconscious/events` and are reviewable via `GET /api/subconscious/events` (+ `/:name`).
-- Codex subconscious integration remains out of scope in this batch.

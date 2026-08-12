@@ -14,6 +14,14 @@ describe('pending encrypted approval event store', () => {
   });
 
   test('retains an encrypted event across restart and removes it after recovery', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-DELIVERY, the word "durably". A second store instance is
+     * constructed over the same path — the stand-in for a bridge restart — and the ciphertext
+     * plus its original receivedAt are still there, so a verdict that arrived before its room
+     * key survives the process that could not read it. The 0600 check belongs to the same
+     * claim: retaining an undecrypted owner verdict is only acceptable if it is retained
+     * privately.
+     */
     const directory = mkdtempSync(path.join(os.tmpdir(), 'hafleet-pending-e2ee-'));
     temporaryDirectories.push(directory);
     const filePath = path.join(directory, 'pending.json');
@@ -65,6 +73,12 @@ describe('pending encrypted approval event store', () => {
   });
 
   test('fails closed instead of evicting an unprocessed event at capacity', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-DELIVERY. "Retained durably" has to hold under pressure too: at
+     * capacity the store throws and keeps `$first`, rather than making room by dropping the
+     * oldest retained verdict. An LRU here would lose exactly the verdict that has been
+     * waiting longest for its key, which is the one most likely to be about to arrive.
+     */
     const directory = mkdtempSync(path.join(os.tmpdir(), 'hafleet-pending-e2ee-'));
     temporaryDirectories.push(directory);
     const store = new PendingEncryptedEventStore(path.join(directory, 'pending.json'), {

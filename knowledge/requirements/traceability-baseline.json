@@ -1,0 +1,10 @@
+{
+  "statements": 69,
+  "covered": 65,
+  "uncovered": [
+    "REQ-PROJECT-BOARD-AGENTS",
+    "REQ-PROJECT-BOARD-GRAPHS",
+    "REQ-PROJECT-BOARD-REPOSITORIES",
+    "REQ-PROJECT-BOARD-REFRESH"
+  ]
+}

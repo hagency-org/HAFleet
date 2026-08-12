@@ -225,10 +225,10 @@ function validateRouteAuth(fileName, source, route, expectedAuth) {
     'requireBridgeSecret',
     'requireApprovalBridgeSecret',
     '_alertTransitionAuth',
-    'authorizeSubconsciousEventIngest(req)',
     'authorizeMessageDetailAccess(req',
     'authorizeAgentCredential(req',
     'isLocalRequest(req)',
+    'requireRequester',
   ];
 
   switch (expectedAuth) {
@@ -249,6 +249,14 @@ function validateRouteAuth(fileName, source, route, expectedAuth) {
     }
     case 'bearer':
       return has('requireBearer') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireBearer`;
+    /*
+     * A distinct policy rather than an alias for `bearer`. `requireRequester` admits a SECOND
+     * credential — REQUESTER_TOKEN — that no bearer-guarded route accepts, so recording these
+     * routes as `bearer` would understate who can reach them, which is the one thing this registry
+     * exists to state accurately.
+     */
+    case 'requester':
+      return has('requireRequester') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireRequester`;
     case 'bearer-and-local':
       if (!has('requireBearer')) return `${fileName}:${route.line} ${routeKey(route)} expected requireBearer`;
       return has('isLocalRequest(req)') ? null : `${fileName}:${route.line} ${routeKey(route)} expected isLocalRequest(req) local-only guard`;
@@ -265,8 +273,6 @@ function validateRouteAuth(fileName, source, route, expectedAuth) {
       return has('requireAgentToken') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireAgentToken fallback`;
     case 'local-only':
       return has('isLocalRequest(req)') ? null : `${fileName}:${route.line} ${routeKey(route)} expected isLocalRequest(req) local-only guard`;
-    case 'subconscious-event-token-or-local':
-      return has('authorizeSubconsciousEventIngest(req)') ? null : `${fileName}:${route.line} ${routeKey(route)} expected authorizeSubconsciousEventIngest(req)`;
     case 'message-detail-access':
       return has('authorizeMessageDetailAccess(req') ? null : `${fileName}:${route.line} ${routeKey(route)} expected authorizeMessageDetailAccess(req)`;
     case 'agent-credential':

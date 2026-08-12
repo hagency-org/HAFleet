@@ -113,11 +113,22 @@ function Activity({ agent }) {
   const [showFramework, setShowFramework] = useState(false);
   const src = agentLog[agent.name] ?? { source: 'none', lines: [] };
   const isPane = src.source === 'pane';
+  /*
+   * WHETHER A PANE EXISTS IS READ FROM THE AGENT, not inferred from this fixture.
+   *
+   * `agentLog` is fixture data keyed by name. An agent absent from it fell through to a notice that
+   * ASSERTED "this agent has no terminal pane" — a fact the panel never checked. For BigLittle,
+   * which has pane `BigLittle:0.0` and captures fine, the page stated the opposite of the truth.
+   * Same defect as the guidance panel that reported a subconscious state it never read.
+   */
+  const hasPane = Boolean(agent.tmux);
 
   return (
     <>
       <div className="notice">
-        {isPane ? t('ag.paneNotice', { s: agent.tmux }) : t('ag.logNotice')}
+        {isPane
+          ? t('ag.paneNotice', { s: agent.tmux })
+          : t(hasPane ? 'ag.logNoticeHasPane' : 'ag.logNotice', { s: agent.tmux ?? '' })}
       </div>
 
       {isPane ? (
@@ -212,9 +223,68 @@ function Profile({ agent, onSay }) {
 /* ── Runtime — how it is launched, and what shapes it ──────────────────── */
 function Runtime({ agent, onSay }) {
   const t = useT();
-  const preset = presets.find((p) => p.framework === agent.framework);
+  /*
+   * `presets` was a FREE VARIABLE here — destructured in another component in this same file, never
+   * in this one — so opening any agent's Runtime tab threw
+   * `ReferenceError: presets is not defined` and the page crashed. Reported as "click agent 运行时,
+   * crashed"; nothing server-side could see it, because the crash is in the browser.
+   *
+   * And `presetOf`, not a framework match: `presets.find(p => p.framework === agent.framework)`
+   * returns ANY preset for that framework, so with two codex presets it would have shown the wrong
+   * one's model and called it the effective runtime. The agent's own `presetId` is the only correct
+   * key, which is what `presetOf` uses.
+   */
+  const { presetOf } = useData();
+  const preset = presetOf(agent);
+  /*
+   * The live pane. Polled rather than streamed: a capture is one cheap call and the backend returns
+   * a hash, so an unchanged screen costs a comparison instead of a re-render. Read-only on purpose —
+   * this shows what the agent is doing, it does not type into it.
+   */
+  const [pane, setPane] = useState({ state: 'loading', text: '', hash: null, reason: null });
+  useEffect(() => {
+    let stop = false;
+    let timer = null;
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/hafleet/agents/${encodeURIComponent(agent.name)}/pane`, {
+          headers: { Accept: 'application/json' },
+        });
+        const body = await res.json().catch(() => null);
+        if (stop) return;
+        if (res.ok && body?.ok) {
+          setPane((prev) => (prev.hash === body.hash
+            ? prev
+            : { state: 'live', text: body.text || '', hash: body.hash, reason: null }));
+        } else {
+          /*
+           * The REASON is kept, not flattened to "unavailable": 501 means this runtime has no pane
+           * at all, 409 means the agent is offline or its session is gone, and an operator needs to
+           * tell those apart before deciding whether something is broken.
+           */
+          setPane({ state: 'unavailable', text: '', hash: null, reason: body?.error || `HTTP ${res.status}` });
+        }
+      } catch (e) {
+        if (!stop) setPane({ state: 'unavailable', text: '', hash: null, reason: e?.message ?? 'fetch failed' });
+      }
+      if (!stop) timer = setTimeout(tick, 4000);
+    };
+    tick();
+    return () => { stop = true; if (timer) clearTimeout(timer); };
+  }, [agent.name]);
   return (
     <>
+      <div className="panel">
+        <h3>{t('ag.livePane')}<span className="note">{t('ag.livePaneNote')}</span></h3>
+        {pane.state === 'live' ? (
+          <pre className="log" style={{ maxHeight: 320, overflow: 'auto', whiteSpace: 'pre' }}>{pane.text || t('ag.livePaneEmpty')}</pre>
+        ) : pane.state === 'loading' ? (
+          <p className="dim">{t('ag.livePaneLoading')}</p>
+        ) : (
+          <div className="notice warn">{t('ag.livePaneUnavailable', { why: pane.reason ?? '' })}</div>
+        )}
+      </div>
+
       <div className="panel">
         <h3>{t('ag.effectiveRuntime')}</h3>
         <dl className="kv">
@@ -222,7 +292,12 @@ function Runtime({ agent, onSay }) {
           <dt>{t('col.transport')}</dt><dd>{agent.transport}</dd>
           <dt>{t('ag.pane')}</dt><dd>{agent.tmux ?? <span className="dim">{t('ag.noPaneAcp')}</span>}</dd>
           <dt>{t('col.model')}</dt><dd>{preset?.model ?? <span className="dim">{t('ag.providerDefault')}</span>}</dd>
-          <dt>{t('ag.workspace')}</dt><dd className="dim">~/{agent.name.replace('-agent', '')}-ws</dd>
+          {/* The real path, or nothing. This was `~/${name.replace('-agent','')}-ws` — a guess
+              derived from the agent's name, which reads exactly like a fact. */}
+          <dt>{t('ag.workspace')}</dt>
+          <dd className={agent.workdir ? '' : 'dim'}>
+            {agent.workdir ?? t('ag.workdirUnknown')}
+          </dd>
         </dl>
       </div>
       <div className="panel">
@@ -248,37 +323,6 @@ function Runtime({ agent, onSay }) {
           <dt>{t('ag.enabled')}</dt><dd>{t('ag.yes')}</dd>
           <dt>{t('ag.cadence')}</dt><dd>{t('ag.every15m')}</dd>
         </dl>
-      </div>
-      <div className="panel">
-        <h3>{t('ag.guidancePath')}</h3>
-        <dl className="kv">
-          <dt>{t('ag.mode')}</dt><dd>{t('ag.authoritative')}</dd>
-          <dt>{t('col.provider')}</dt><dd>{agent.framework === 'hermes' ? 'deepseek' : t('ag.inherit')}</dd>
-          <dt>{t('ag.key')}</dt>
-          <dd>
-            <code>DEEPSEEK_API_KEY</code>{' '}
-            <span className="badge ok">{t('cf.resolved')}</span>
-            <div className="faint" style={{ fontSize: 11 }}>{t('ag.refShown')}</div>
-          </dd>
-        </dl>
-      </div>
-      <div className="panel">
-        <h3>{t('ag.migration')}</h3>
-        <div className="notice warn">{t('ag.migrationWarn')}</div>
-        <div className="btn-row" style={{ marginTop: 10 }}>
-          <button className="btn" onClick={() => onSay('ok', t('ag.previewResult'))}>
-            {t('ag.previewMigration')}
-          </button>
-        </div>
-      </div>
-      <div className="btn-row" style={{ marginTop: 12 }}>
-        <button className="btn primary" onClick={() => onSay('ok', t('ag.runtimeSaved'))}>
-          {t('ag.saveRuntime')}
-        </button>
-        <button className="btn" onClick={() => onSay('ok', t('ag.supervisorSaved'))}>
-          {t('ag.saveSupervisor')}
-        </button>
-        <span className="faint" style={{ fontSize: 11.5 }}>{t('ag.perSubsystem')}</span>
       </div>
     </>
   );

@@ -21,7 +21,7 @@ const PROXY = '/api/hafleet';
 /** Slices with a real endpoint behind them at this baseline. */
 export const LIVE_SLICES = [
   'agents', 'presets', 'frameworks', 'alerts', 'capability', 'seats', 'usage',
-  'engagements', 'offers', 'whitelist', 'detected',
+  'engagements', 'offers', 'whitelist', 'detected', 'contributions', 'invites',
 ];
 /*
  * Empty now. Every slice this console reads has an endpoint behind it — the four
@@ -110,6 +110,11 @@ function mapAgent(a) {
     // null is "not measured", which is not the same as "absent".
     mcp: a.mcpPresent,
     presetId: a.presetId ?? null,
+    // The REAL working directory, because /agents/<name> used to invent one from the agent's name
+    // (`~/${name.replace('-agent','')}-ws`) — which for `ops-agent` printed `~/ops-ws`, plausible
+    // and entirely fictional. Under `up-v1` the agent runs in its own provisioned home, which is
+    // nowhere near that guess.
+    workdir: a.workdir ?? null,
     // Carried so a page can show the resolved configuration even when the preset
     // it came from has since been edited or deleted.
     runtimeProfile: rp,
@@ -308,6 +313,48 @@ export async function fetchLive() {
         out.offers = [];
         provenance.offers = 'absent';
         errors.offers = e.message;
+      }
+    })(),
+    /*
+     * The contribution binding — the record that actually lets a project reach an
+     * agent, as opposed to the engagement, which is the allocation I approved.
+     *
+     * Read from GET /api/contributions rather than from the engagement's own
+     * `bound` flag, because the two can disagree and only the binding store knows
+     * which projects hold standing access right now. The endpoint is a deliberately
+     * narrow projection: `ownerDmRoomId` is omitted upstream, so nothing here can
+     * expose the owner's private channel.
+     *
+     * `absent` rather than a fixture on failure. An empty access list rendered
+     * beside live engagements would read as "no project can reach this agent" —
+     * a claim, where the truth is that the record did not answer.
+     */
+    (async () => {
+      try {
+        out.contributions = (await get('contributions'))?.contributions ?? [];
+        provenance.contributions = 'live';
+      } catch (e) {
+        out.contributions = [];
+        provenance.contributions = 'absent';
+        errors.contributions = e.message;
+      }
+    })(),
+    /*
+     * Invitations a project has extended that I have not answered (ADR-014).
+     *
+     * `absent` rather than a fixture on failure, for the same reason `contributions` is:
+     * an empty invitation list is a CLAIM — "no project is waiting on you" — and the truth
+     * when this endpoint does not answer is that nobody asked the question. A contributor
+     * who reads "nothing pending" and looks away has been misinformed by a fixture.
+     */
+    (async () => {
+      try {
+        out.invites = (await get('matrix/pending-invites'))?.invites ?? [];
+        provenance.invites = 'live';
+      } catch (e) {
+        out.invites = [];
+        provenance.invites = 'absent';
+        errors.invites = e.message;
       }
     })(),
     (async () => {

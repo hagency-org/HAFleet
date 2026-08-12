@@ -4519,7 +4519,7 @@
     "out": {
       "claude": "auto-mode",
       "codex": "level2 (workspace-write + on-request)",
-      "codex-acp": "level2 (workspace-write + on-request)",
+      "codex-acp": "codex-acp asks before each tool call and hafleet declines all but its own coordination tools; hafleet passes NO filesystem sandbox flag on this transport",
       "hermes": "hermes interactive approval prompts (bypass flags refused)",
       "octos": "octos sandbox as configured (hafleet never passes --danger-full-access)"
     }

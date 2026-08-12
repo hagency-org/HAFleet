@@ -29,6 +29,16 @@ const SECTIONS = [
     head: 'rail.secResource',
     rows: [
       { href: '/resources', key: 'resources', icon: '▦', count: 'agentsConfigured', unit: 'configured', also: ['/'] },
+      /*
+       * The roster sits under 资源 rather than getting a heading of its own,
+       * although it joins all four layers. The four headings ARE the four layers, so
+       * a fifth for one row would imply a fifth layer; and the row's subject is the
+       * agent — the resource itself — seen across the layers rather than a new kind
+       * of thing. The count is AGENTS lent out, not engagements: the row below
+       * already counts those, and one agent serving three projects is one agent
+       * whose capacity is spoken for.
+       */
+      { href: '/workforce', key: 'workforce', icon: '☰', count: 'lent', unit: 'lent' },
     ],
   },
   {
@@ -40,6 +50,13 @@ const SECTIONS = [
   {
     head: 'rail.secEngagement',
     rows: [
+      /*
+       * Projects sits above engagements because it is upstream of them: a project has to
+       * have invited me before it can ask for anything. `hot` for the same reason
+       * /engagements is — an unanswered invitation is a person waiting on me, and ADR-014
+       * exists because that used to be invisible.
+       */
+      { href: '/projects', key: 'projects', icon: '⌂', count: 'invitesPending', unit: 'waiting', hot: true },
       { href: '/engagements', key: 'engagements', icon: '⇄', count: 'pending', unit: 'pending', hot: true },
       { href: '/usage', key: 'usage', icon: '◎', count: 'active', unit: 'active' },
     ],

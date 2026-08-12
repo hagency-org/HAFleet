@@ -22,6 +22,19 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 RUNTIME_DIR="${HAFLEET_RUNTIME_DIR:-$BASE_DIR}"
+
+# The RUNTIME's .env wins, exactly as in hafleet-up — and for a reason this script learned the hard
+# way. Sourcing only $BASE_DIR/.env above OVERWRITES whatever the caller passed, including API_TOKEN.
+# When the backend's POST /api/agents/:name/start spawned this script, the repo token replaced the
+# deployment's, `GET /api/agents/<name>/launch-env` (requireBearer) answered 401, `curl -sf` returned
+# empty, and — because /start also sets HAFLEET_LAUNCH_MODEL — the launch died with
+# "FATAL: Failed to fetch launch-env from backend". The failure was invisible: /start reported
+# {ok:true,pid} and marked the agent online.
+if [ "$RUNTIME_DIR" != "$BASE_DIR" ] && [ -f "$RUNTIME_DIR/.env" ]; then
+  set -a
+  source "$RUNTIME_DIR/.env"
+  set +a
+fi
 COMPAT_DATA_DIR="$RUNTIME_DIR/data/agents"
 
 usage() {
@@ -163,14 +176,6 @@ env_map = {
     "V1_AGENT_ID": paths["agentId"],
     "V1_AGENT_JSON": paths["agentJsonPath"],
 }
-subconscious_enabled = data.get("subconsciousEnabled")
-if subconscious_enabled is True:
-    env_map["V1_SUBCONSCIOUS_ENABLED"] = "1"
-elif subconscious_enabled is False:
-    env_map["V1_SUBCONSCIOUS_ENABLED"] = "0"
-else:
-    env_map["V1_SUBCONSCIOUS_ENABLED"] = ""
-
 for key, value in env_map.items():
     print(f"{key}={shlex.quote(value)}")
 PY
@@ -209,7 +214,7 @@ fi
 
 META_FILE="$META_FILE" NAME="$NAME" AGENT_TYPE="$AGENT_TYPE" \
   V1_WORKDIR="$V1_WORKDIR" V1_HOME_DIR="$V1_HOME_DIR" V1_STATE_DIR="$V1_STATE_DIR" \
-  V1_AGENT_ID="$V1_AGENT_ID" V1_AGENT_JSON="$V1_AGENT_JSON" V1_SUBCONSCIOUS_ENABLED="${V1_SUBCONSCIOUS_ENABLED:-}" NOW="$(date -Iseconds)" \
+  V1_AGENT_ID="$V1_AGENT_ID" V1_AGENT_JSON="$V1_AGENT_JSON" NOW="$(date -Iseconds)" \
   python3 - <<'PY'
 import json
 import os
@@ -234,10 +239,6 @@ meta["stateDir"] = os.environ["V1_STATE_DIR"]
 meta["workdir"] = os.environ["V1_WORKDIR"]
 meta["agentJsonPath"] = os.environ["V1_AGENT_JSON"]
 meta["v1HomeManaged"] = True
-if os.environ.get("V1_SUBCONSCIOUS_ENABLED", "") == "1":
-    meta["subconsciousEnabled"] = True
-elif os.environ.get("V1_SUBCONSCIOUS_ENABLED", "") == "0":
-    meta["subconsciousEnabled"] = False
 if "createdAt" not in meta:
     meta["createdAt"] = os.environ["NOW"]
 meta["lastUp"] = os.environ["NOW"]

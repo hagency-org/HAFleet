@@ -138,7 +138,6 @@ describe('deployment configuration', () => {
       'MCP_FETCH_TIMEOUT_MS',
       'MCP_FETCH_RETRIES',
       'MCP_FETCH_BACKOFF_MS',
-      'HAFLEET_SUBCONSCIOUS_EVENT_TOKEN',
     ]) {
       expect(envExample).toMatch(new RegExp(`^#?${name}=`, 'm'));
     }

@@ -11,6 +11,16 @@ import { createEngagementStore, routeRequest, EngagementError } from '../lib/eng
  * is that a whitelisted project asking for more than is left FALLS BACK to approval
  * rather than being rejected, because it has not misbehaved. An implementation that
  * rejects there looks correct until someone reads the code.
+ *
+ * REQ-CONTRIBUTION-CONSOLE-ROUTE — the three-way AND (whitelisted, inside the offer,
+ * inside the remaining ceiling) and the fall-back-to-approval rule are exactly what these
+ * cases enumerate, including the requirement that an absent or unpublished offer is not
+ * read as unlimited ('treats an unpublished offer as not being on offer at all').
+ *
+ * REQ-CONTRIBUTION-CONSOLE-UNKNOWN-LIMIT — two of its three unknowns are here: a null
+ * ceiling ('refuses to auto-join against an UNKNOWN ceiling') and an unstated rate against
+ * a published rate cap. The third, a quota with no period, is in tests/seat-store.test.js
+ * ('refuses to compare a quota that states no period') because periods are a seat concern.
  */
 
 const ROOM = '!aXbY7pQ2:hq.example';
@@ -220,6 +230,12 @@ describe('the store', () => {
     expect(store.committedFor('lend-sonnet-01')).toBe(0);
   });
 
+  /*
+   * REQ-CONTRIBUTION-CONSOLE-WHITELIST-AUDIT, both halves. This case is the audit half;
+   * 'removing a project from the whitelist leaves live engagements running' is the other —
+   * removal affects future requests only and must not terminate a running engagement,
+   * because ending live work is a separate explicit act with its own confirmation.
+   */
   it('audits both directions of a trust change', () => {
     store.addToWhitelist({ projectRoomId: ROOM });
     store.removeFromWhitelist({ projectRoomId: ROOM });
@@ -253,6 +269,96 @@ describe('the store', () => {
   });
 
   /*
+   * IDEMPOTENCY, PER PRD A-R0-1.
+   *
+   * "Repeating the same `request_id` and digest produces the same assignment; a
+   * different digest is rejected as a conflict."
+   *
+   * Two identical asks used to become two pending engagements, each spending the
+   * agent's ceiling when approved. The interface is a human typing
+   * `!request coding 400000 20000` and nobody types a UUID, so the store had no key —
+   * but both sides already share the Matrix event id, and the bridge passes it.
+   *
+   * The digest is the half that matters. Without it a request_id is an overwrite
+   * handle: a caller could reuse an id and quietly change the amount already under
+   * review, and the store would return the old engagement as though nothing was asked.
+   *
+   * REQ-CONTRIBUTION-CONSOLE-IDEMPOTENT, with one part deliberately elsewhere. Same id +
+   * same digest returning the same engagement, same id + different digest as a conflict,
+   * and a request with no id recording that it could not be deduped are all below. The
+   * clause requiring the id to be the AUTHENTICATED Matrix event id rather than a value
+   * from message content cannot be tested here — this store never sees Matrix — and is
+   * asserted in tests/bot-commands-request.test.js, against the `!request` handler that
+   * chooses the id.
+   */
+  describe('request idempotency', () => {
+    const ask = (over = {}) => ({
+      project: 'acme/api', projectRoomId: ROOM, role: 'coding',
+      requester: '@lin:hq.example', requestedTokens: 100_000, ratePerDay: 10_000,
+      agent: 'a1', remainingTokens: null, ...over,
+    });
+
+    it('the same request id and digest yields the SAME engagement', () => {
+      store.addToWhitelist({ projectRoomId: ROOM });
+      const first = store.createRequest(ask({ requestId: '$evt1:hq.example' }));
+      const again = store.createRequest(ask({ requestId: '$evt1:hq.example' }));
+      expect(again.id).toBe(first.id);
+      expect(store.list({ state: 'pending' }).filter((e) => e.projectRoomId === ROOM))
+        .toHaveLength(1);
+    });
+
+    it('the same id with a DIFFERENT ask is a conflict, not a merge or an overwrite', () => {
+      store.addToWhitelist({ projectRoomId: ROOM });
+      store.createRequest(ask({ requestId: '$evt2:hq.example' }));
+      // Reusing the id to ask for twenty times as much must not silently return the
+      // small one, and must not replace it either.
+      expect(() => store.createRequest(ask({
+        requestId: '$evt2:hq.example', requestedTokens: 2_000_000,
+      }))).toThrow(/already used for a different request/);
+      const rows = store.list().filter((e) => e.projectRoomId === ROOM);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requestedTokens).toBe(100_000);
+    });
+
+    it('different ids are different requests even when identical in content', () => {
+      // Two genuine asks that happen to match must not be collapsed — the failure mode
+      // of deduping on (room, role, amount) instead of on an id.
+      store.addToWhitelist({ projectRoomId: ROOM });
+      const a = store.createRequest(ask({ requestId: '$evtA:hq.example' }));
+      const b = store.createRequest(ask({ requestId: '$evtB:hq.example' }));
+      expect(b.id).not.toBe(a.id);
+    });
+
+    it('a request with no id is accepted and SAYS it could not be deduped', () => {
+      /*
+       * Requiring an id would refuse every existing caller. Generating one silently
+       * would give no idempotency while appearing to have some, which is the worse
+       * option — so absence is recorded on the record.
+       */
+      store.addToWhitelist({ projectRoomId: ROOM });
+      const one = store.createRequest(ask());
+      const two = store.createRequest(ask());
+      expect(one.idempotent).toBe(false);
+      expect(two.id).not.toBe(one.id);
+      const withKey = store.createRequest(ask({ requestId: '$evtC:hq.example' }));
+      expect(withKey.idempotent).toBe(true);
+    });
+
+    it('the digest ignores the room label but not the amount', () => {
+      // A renamed project is not a different request; a different amount is.
+      store.addToWhitelist({ projectRoomId: ROOM });
+      const first = store.createRequest(ask({ requestId: '$evtD:hq.example' }));
+      const renamed = store.createRequest(ask({
+        requestId: '$evtD:hq.example', project: 'acme/api-renamed',
+      }));
+      expect(renamed.id).toBe(first.id);
+      expect(() => store.createRequest(ask({
+        requestId: '$evtD:hq.example', ratePerDay: 99_000,
+      }))).toThrow(/different request/);
+    });
+  });
+
+  /*
    * A FRACTIONAL CAP MUST NOT BECOME AN UNLIMITED ONE.
    *
    * posInt validated the raw number and floored afterwards, so 0.5 passed the
@@ -280,6 +386,10 @@ describe('the store', () => {
    * pays for the accumulation. The audit log has had a cap since it was written; the
    * engagement list never got one, and no suite noticed because they all tear their
    * own records down.
+   *
+   * REQ-CONTRIBUTION-CONSOLE-BOUNDED, first half: ended engagements MAY be capped, live
+   * ones MUST NOT be. Its second half — a bot DM room whose counterpart has left is
+   * released, one merely un-accepted is not — is in tests/bot-dm-reap.test.js.
    */
   describe('the ended-engagement cap', () => {
     /**
@@ -413,6 +523,11 @@ describe('the store', () => {
  * behaviour. Three of these existed because the original tests could not observe
  * them: the over-commit test hand-supplied `remainingTokens`, the persistence test
  * only checked that an exception was thrown, and no test ever passed a null offer.
+ *
+ * REQ-CONTRIBUTION-CONSOLE-OVERCOMMIT — 'refuses an approval that would over-commit the
+ * agent' refuses at the point of decision, and 'approves with an allocation and counts it
+ * against that agent only' is the naming half: the allocation lands on one named agent's
+ * ceiling rather than a pool.
  */
 describe('routing holes that the first tests could not see', () => {
   let store;
@@ -454,6 +569,20 @@ describe('routing holes that the first tests could not see', () => {
   });
 });
 
+/*
+ * REQ-CONTRIBUTION-CONSOLE-DURABLE — memory matches the state the error reports.
+ *
+ * Every clause of it is a case below: a rejected write rolls back ('rolls back a whitelist
+ * add', '… removal', '… an approval, so a failed verdict consumes no headroom', '… an offer
+ * change'), a THROWN write rolls back identically ('rolls back when the persist adapter
+ * THROWS, not only when it returns false'), and a record trimmed by a cap DURING the same
+ * mutation is restored too ('restores pruned records when the write then fails', 'restores
+ * an audit entry trimmed at the cap when the write then fails') — the clause that is easy to
+ * miss, because the trimmed record is not the one the caller was writing.
+ *
+ * The storage layer's half of the same contract, which decides what a false RETURN means, is
+ * in tests/backend-storage-adapter.test.js.
+ */
 describe('persistence failure leaves no phantom state', () => {
   /*
    * The original test asserted only that an exception was thrown. It therefore

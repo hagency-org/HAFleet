@@ -1,5 +1,9 @@
 import express from 'express';
 import { buildReplyHint } from './lib/reply-hint.js';
+import { meterFleet } from './lib/metering/reader.js';
+import { meteringSupport } from './lib/metering/parsers.js';
+import { createUsageLedger } from './lib/metering/ledger.js';
+import { createPendingInviteStore, PendingInviteError } from './lib/pending-invite-store.js';
 import {
   appendFileSync,
   chmodSync,
@@ -20,7 +24,7 @@ import {
 } from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
 import { homedir, hostname } from 'os';
-import { execFile, execSync, spawn } from 'child_process';
+import { execFile, execFileSync, execSync, spawn } from 'child_process';
 import path from 'path';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
@@ -46,10 +50,8 @@ import { createAlertStore, RECOVERY_MAP as ALERT_RECOVERY_MAP } from './lib/aler
 import { ApprovalStore, ApprovalStoreError } from './lib/approval-store.js';
 import {
   authorizeAgentCredential as authorizeAgentCredentialAdapter,
-  authorizeSubconsciousEventIngest as authorizeSubconsciousEventIngestAdapter,
   buildAgentTokenReadiness as buildAgentTokenReadinessAdapter,
   buildServerCredentialReadiness as buildServerCredentialReadinessAdapter,
-  canAccessPrivilegedSubconsciousDetail as canAccessPrivilegedSubconsciousDetailAdapter,
   checkAgentToken as checkAgentTokenAdapter,
   createApiAuthMiddleware,
   createRequireAgentToken,
@@ -82,15 +84,6 @@ import { resolveApprovalTtlMs } from './lib/runtime-approval-client.js';
 import { buildProjectBoardSnapshot } from './lib/project-board.js';
 import { createProjectInspector } from './lib/project-inspector.js';
 import { MatrixDispatchStore } from './src/matrix-dispatch-store.mjs';
-import {
-  buildUpstreamClaudeSubconsciousPaths,
-  bootstrapUpstreamClaudeSubconsciousAgent,
-  readUpstreamClaudeSubconsciousState,
-  startUpstreamClaudeSubconsciousSession,
-  syncUpstreamClaudeSubconsciousPreTool,
-  syncUpstreamClaudeSubconsciousStop,
-  syncUpstreamClaudeSubconsciousUserPrompt,
-} from './lib/upstream-claude-subconscious.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.dirname(__filename);
@@ -210,18 +203,12 @@ const AGENT_TMUX_MISSING_THRESHOLD = Number.isFinite(AGENT_TMUX_MISSING_THRESHOL
   : 3;
 const AGENT_COMPACT_SUMMARY_MAX = Number.parseInt(process.env.AGENT_COMPACT_SUMMARY_MAX || '180', 10);
 const AGENT_COMPACT_RUNTIME_DEDUPE_MS = Number.parseInt(process.env.AGENT_COMPACT_RUNTIME_DEDUPE_MS || '120000', 10);
-const SUBCONSCIOUS_EVENT_HISTORY_LIMIT = Number.parseInt(process.env.SUBCONSCIOUS_EVENT_HISTORY_LIMIT || '2000', 10);
-const SUBCONSCIOUS_EVENT_AGENT_LIMIT = Number.parseInt(process.env.SUBCONSCIOUS_EVENT_AGENT_LIMIT || '500', 10);
 const BACKEND_STARTUP_OPTIONAL_ENV = [
   {
     name: 'HAFLEET_DASHBOARD_TOKEN',
     description: 'Non-local dashboard mutations will remain unavailable unless this token is configured.',
   },
-  {
-    name: 'HAFLEET_SUBCONSCIOUS_EVENT_TOKEN',
-    description: 'Subconscious event webhook bearer auth is disabled unless this token is configured.',
-  },
-];
+  ];
 const SERVER_MAINTENANCE_IDS = new Set(
   String(process.env.AGENT_SERVER_MAINTENANCE_IDS ?? '')
     .split(',')
@@ -791,11 +778,6 @@ function normalizeLooseAgentName(value) {
   return normalizeAgentName(trimmed);
 }
 
-function normalizeSubconsciousHook(value) {
-  const hook = normalizeOptionalText(value, 120);
-  if (!hook) return null;
-  return hook;
-}
 
 function normalizeEventTs(value) {
   const n = Number.parseInt(value, 10);
@@ -941,118 +923,9 @@ function emitRuntimeCompactEvent(agentName, payload = {}) {
   return { ok: true, event };
 }
 
-function buildSubconsciousEvent(body = {}) {
-  const agent = normalizeLooseAgentName(body.agent);
-  if (!agent) return null;
-  const ts = normalizeEventTs(body.ts);
-  return {
-    id: `subconscious_${ts}_${agent}_${Math.random().toString(36).slice(2, 8)}`,
-    ts,
-    source: normalizeOptionalText(body.source, 120) || 'claude-subconscious-v1',
-    agent,
-    hook: normalizeSubconsciousHook(body.hook),
-    hookEventName: normalizeSubconsciousHook(body.hookEventName),
-    sessionId: normalizeOptionalText(body.sessionId, 256),
-    transcriptPath: normalizeOptionalText(body.transcriptPath, 4096),
-    toolName: normalizeOptionalText(body.toolName, 128),
-    promptPreview: normalizeOptionalText(body.promptPreview, 1200),
-    summary: normalizeOptionalText(body.summary, 600),
-    lettaAgentId: normalizeOptionalText(body.lettaAgentId, 256),
-    lettaStateFile: normalizeWorkspacePath(body.lettaStateFile),
-    resolutionSource: normalizeOptionalText(body.resolutionSource, 64),
-    backendMode: normalizeOptionalText(body.backendMode, 64),
-    subconsciousEnabled: body.subconsciousEnabled === true
-      ? true
-      : (body.subconsciousEnabled === false ? false : null),
-    guidancePresent: body.guidancePresent === true
-      ? true
-      : (body.guidancePresent === false ? false : null),
-    guidanceConfigured: body.guidanceConfigured === true
-      ? true
-      : (body.guidanceConfigured === false ? false : null),
-    guidanceInjected: body.guidanceInjected === true
-      ? true
-      : (body.guidanceInjected === false ? false : null),
-    guidanceSource: normalizeOptionalText(body.guidanceSource, 64),
-    guidancePreview: normalizeOptionalText(body.guidancePreview, 320),
-    runtimeInvoked: body.runtimeInvoked === true
-      ? true
-      : (body.runtimeInvoked === false ? false : null),
-    runtimeProvider: normalizeOptionalText(body.runtimeProvider, 64),
-    runtimeModel: normalizeOptionalText(body.runtimeModel, 128),
-    runtimeLatencyMs: normalizePositiveInt(body.runtimeLatencyMs, null),
-    runtimeError: normalizeOptionalText(body.runtimeError, 600),
-    upstreamUserPromptAttempted: body.upstreamUserPromptAttempted === true
-      ? true
-      : (body.upstreamUserPromptAttempted === false ? false : null),
-    upstreamUserPromptStatus: normalizeOptionalText(body.upstreamUserPromptStatus, 64),
-    upstreamUserPromptBlockedReason: normalizeOptionalText(body.upstreamUserPromptBlockedReason, 600),
-    upstreamUserPromptMessageSent: body.upstreamUserPromptMessageSent === true
-      ? true
-      : (body.upstreamUserPromptMessageSent === false ? false : null),
-    upstreamUserPromptConversationId: normalizeOptionalText(body.upstreamUserPromptConversationId, 256),
-    upstreamUserPromptTranscriptPath: normalizeWorkspacePath(body.upstreamUserPromptTranscriptPath),
-    upstreamUserPromptSyncStateFile: normalizeWorkspacePath(body.upstreamUserPromptSyncStateFile),
-    upstreamUserPromptScriptPath: normalizeWorkspacePath(body.upstreamUserPromptScriptPath),
-    upstreamUserPromptTranscriptLineCount: normalizeNonNegativeInt(body.upstreamUserPromptTranscriptLineCount, null),
-    upstreamUserPromptLastProcessedIndexBefore: normalizeNonNegativeInt(body.upstreamUserPromptLastProcessedIndexBefore, null),
-    upstreamUserPromptLastProcessedIndexAfter: normalizeNonNegativeInt(body.upstreamUserPromptLastProcessedIndexAfter, null),
-    upstreamPreToolAttempted: body.upstreamPreToolAttempted === true
-      ? true
-      : (body.upstreamPreToolAttempted === false ? false : null),
-    upstreamPreToolStatus: normalizeOptionalText(body.upstreamPreToolStatus, 64),
-    upstreamPreToolBlockedReason: normalizeOptionalText(body.upstreamPreToolBlockedReason, 600),
-    upstreamPreToolInjected: body.upstreamPreToolInjected === true
-      ? true
-      : (body.upstreamPreToolInjected === false ? false : null),
-    upstreamPreToolConversationId: normalizeOptionalText(body.upstreamPreToolConversationId, 256),
-    upstreamPreToolSyncStateFile: normalizeWorkspacePath(body.upstreamPreToolSyncStateFile),
-    upstreamPreToolScriptPath: normalizeWorkspacePath(body.upstreamPreToolScriptPath),
-    upstreamPreToolNewMessageCount: normalizeNonNegativeInt(body.upstreamPreToolNewMessageCount, null),
-    upstreamPreToolChangedBlockCount: normalizeNonNegativeInt(body.upstreamPreToolChangedBlockCount, null),
-    upstreamPreToolLastSeenMessageIdBefore: normalizeOptionalText(body.upstreamPreToolLastSeenMessageIdBefore, 256),
-    upstreamPreToolLastSeenMessageIdAfter: normalizeOptionalText(body.upstreamPreToolLastSeenMessageIdAfter, 256),
-    upstreamPreToolBlockLabelCount: normalizeNonNegativeInt(body.upstreamPreToolBlockLabelCount, null),
-    upstreamStopAttempted: body.upstreamStopAttempted === true
-      ? true
-      : (body.upstreamStopAttempted === false ? false : null),
-    upstreamStopStatus: normalizeOptionalText(body.upstreamStopStatus, 64),
-    upstreamStopBlockedReason: normalizeOptionalText(body.upstreamStopBlockedReason, 600),
-    upstreamStopMessageSent: body.upstreamStopMessageSent === true
-      ? true
-      : (body.upstreamStopMessageSent === false ? false : null),
-    upstreamStopConversationId: normalizeOptionalText(body.upstreamStopConversationId, 256),
-    upstreamStopTranscriptPath: normalizeWorkspacePath(body.upstreamStopTranscriptPath),
-    upstreamStopSyncStateFile: normalizeWorkspacePath(body.upstreamStopSyncStateFile),
-    upstreamStopScriptPath: normalizeWorkspacePath(body.upstreamStopScriptPath),
-    upstreamStopTranscriptMessageCount: normalizeNonNegativeInt(body.upstreamStopTranscriptMessageCount, null),
-    upstreamStopNewMessageCount: normalizeNonNegativeInt(body.upstreamStopNewMessageCount, null),
-  };
-}
 
-function appendSubconsciousEvent(event) {
-  const list = subconsciousEventsByAgent.get(event.agent) || [];
-  list.push(event);
-  if (list.length > SUBCONSCIOUS_EVENT_AGENT_LIMIT) {
-    subconsciousEventsByAgent.set(event.agent, list.slice(list.length - SUBCONSCIOUS_EVENT_AGENT_LIMIT));
-  } else {
-    subconsciousEventsByAgent.set(event.agent, list);
-  }
-  try {
-    appendFileSync(SUBCONSCIOUS_EVENT_LOG, JSON.stringify(event) + '\n');
-  } catch (e) {
-    console.error(`Failed to append subconscious event log: ${e.message}`);
-  }
-  broadcastSSE('subconscious_event', event);
-}
 
-function getSubconsciousEvents(agentName, limit = 120) {
-  const rows = subconsciousEventsByAgent.get(agentName) || [];
-  const n = Math.max(1, Math.min(Number(limit) || 120, SUBCONSCIOUS_EVENT_AGENT_LIMIT));
-  return rows.slice(-n);
-}
 
-const SUBCONSCIOUS_RUNTIME_HOOKS = ['UserPromptSubmit', 'PreToolUse'];
 
 function safeReadJsonFile(filePath, fallback = {}) {
   try {
@@ -1078,620 +951,21 @@ function safeWriteJsonFile(filePath, payload) {
   }
 }
 
-function detectInstalledSubconsciousHooks(settingsPath) {
-  if (!settingsPath || !existsSync(settingsPath)) return [];
-  const settings = safeReadJsonFile(settingsPath, {});
-  const hooksRoot = (settings && typeof settings.hooks === 'object' && settings.hooks) ? settings.hooks : {};
-  const installed = [];
-  for (const hookName of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Stop']) {
-    const rows = Array.isArray(hooksRoot[hookName]) ? hooksRoot[hookName] : [];
-    const hasManagedEntry = rows.some((entry) => {
-      const hooks = Array.isArray(entry?.hooks) ? entry.hooks : [];
-      return hooks.some((row) => typeof row?.command === 'string' && row.command.includes('hook-entry.mjs'));
-    });
-    if (hasManagedEntry) installed.push(hookName);
-  }
-  return installed;
-}
 
-function defaultSubconsciousMemoryStore(agentName) {
-  return {
-    schemaVersion: 1,
-    kind: 'local-episodic-journal',
-    retrievalStrategy: 'keyword-overlap-recency',
-    agent: agentName,
-    entryLimit: 80,
-    retrievalLimit: 4,
-    episodes: [],
-    lastStoredAt: null,
-    lastStoredEpisodeId: null,
-    lastRetrievedAt: null,
-    lastRetrievedQuery: null,
-    lastRetrievedIds: [],
-    updatedAt: null,
-  };
-}
 
-function defaultSubconsciousConversationStore(agentName) {
-  return {
-    schemaVersion: 1,
-    kind: 'claude-jsonl-session-journal',
-    agent: agentName,
-    sessionLimit: 24,
-    currentSessionId: null,
-    currentTranscriptPath: null,
-    currentConversationUpdatedAt: null,
-    lastSyncedAt: null,
-    sessions: [],
-    updatedAt: null,
-  };
-}
 
-function normalizeSubconsciousMemoryEpisode(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  const id = normalizeOptionalText(raw.id, 128);
-  const at = normalizeOptionalText(raw.at, 128);
-  const hook = normalizeOptionalText(raw.hook, 120);
-  const promptPreview = normalizeOptionalText(raw.promptPreview, 320);
-  const toolName = normalizeOptionalText(raw.toolName, 120);
-  const summary = normalizeOptionalText(raw.summary, 600);
-  const guidance = normalizeOptionalText(raw.guidance, 2000);
-  const keywords = Array.isArray(raw.keywords)
-    ? raw.keywords
-      .map((item) => normalizeOptionalText(item, 64))
-      .filter(Boolean)
-      .slice(0, 32)
-    : [];
-  if (!id || !at) return null;
-  return {
-    id,
-    at,
-    hook: hook || null,
-    promptPreview: promptPreview || '',
-    toolName: toolName || null,
-    summary: summary || '',
-    guidance: guidance || '',
-    keywords,
-  };
-}
 
-function normalizeSubconsciousConversationTurn(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  const role = normalizeOptionalText(raw.role, 32);
-  const at = normalizeOptionalText(raw.at, 128);
-  const preview = normalizeOptionalText(raw.preview, 320);
-  if (!role || !preview) return null;
-  return {
-    role,
-    at: at || null,
-    preview,
-  };
-}
 
-function normalizeSubconsciousConversationSession(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  const sessionId = normalizeOptionalText(raw.sessionId, 200);
-  const transcriptPath = normalizeWorkspacePath(raw.transcriptPath);
-  if (!sessionId && !transcriptPath) return null;
-  return {
-    sessionId: sessionId || null,
-    transcriptPath: transcriptPath || null,
-    transcriptExists: raw.transcriptExists === true,
-    transcriptLineCount: normalizeNonNegativeInt(raw.transcriptLineCount, 0),
-    eventCount: normalizeNonNegativeInt(raw.eventCount, 0),
-    userTurnCount: normalizeNonNegativeInt(raw.userTurnCount, 0),
-    assistantTurnCount: normalizeNonNegativeInt(raw.assistantTurnCount, 0),
-    startedAt: normalizeOptionalText(raw.startedAt, 128),
-    updatedAt: normalizeOptionalText(raw.updatedAt, 128),
-    lastEventAt: normalizeOptionalText(raw.lastEventAt, 128),
-    lastHook: normalizeOptionalText(raw.lastHook, 120),
-    lastToolName: normalizeOptionalText(raw.lastToolName, 120),
-    lastRuntimeAt: normalizeOptionalText(raw.lastRuntimeAt, 128),
-    lastRuntimeProvider: normalizeOptionalText(raw.lastRuntimeProvider, 64),
-    lastRuntimeModel: normalizeOptionalText(raw.lastRuntimeModel, 128),
-    latestUserText: normalizeOptionalText(raw.latestUserText, 320) || '',
-    latestAssistantText: normalizeOptionalText(raw.latestAssistantText, 320) || '',
-    latestGuidancePreview: normalizeOptionalText(raw.latestGuidancePreview, 320) || '',
-    latestGuidanceAt: normalizeOptionalText(raw.latestGuidanceAt, 128),
-    latestGuidanceSource: normalizeOptionalText(raw.latestGuidanceSource, 64),
-    recentTurns: Array.isArray(raw.recentTurns)
-      ? raw.recentTurns.map((row) => normalizeSubconsciousConversationTurn(row)).filter(Boolean).slice(-8)
-      : [],
-  };
-}
 
-function resolveSubconsciousMemoryState(agentName, stateDir, runtimeMeta) {
-  if (!stateDir) return { path: null, store: defaultSubconsciousMemoryStore(agentName) };
-  const configuredPath = normalizeWorkspacePath(runtimeMeta?.memoryStore?.path);
-  const memoryPath = configuredPath || path.join(stateDir, 'subconscious', 'memory.json');
-  const base = defaultSubconsciousMemoryStore(agentName);
-  const raw = safeReadJsonFile(memoryPath, {});
-  const entryLimit = normalizePositiveInt(raw?.entryLimit, base.entryLimit);
-  const retrievalLimit = normalizePositiveInt(raw?.retrievalLimit, base.retrievalLimit);
-  const episodes = Array.isArray(raw?.episodes)
-    ? raw.episodes
-      .map((row) => normalizeSubconsciousMemoryEpisode(row))
-      .filter(Boolean)
-      .slice(-entryLimit)
-    : [];
-  const store = {
-    schemaVersion: 1,
-    kind: normalizeOptionalText(raw?.kind, 128) || base.kind,
-    retrievalStrategy: normalizeOptionalText(raw?.retrievalStrategy, 128) || base.retrievalStrategy,
-    agent: normalizeOptionalText(raw?.agent, 128) || agentName,
-    entryLimit,
-    retrievalLimit,
-    episodes,
-    lastStoredAt: normalizeOptionalText(raw?.lastStoredAt, 128),
-    lastStoredEpisodeId: normalizeOptionalText(raw?.lastStoredEpisodeId, 128),
-    lastRetrievedAt: normalizeOptionalText(raw?.lastRetrievedAt, 128),
-    lastRetrievedQuery: normalizeOptionalText(raw?.lastRetrievedQuery, 600),
-    lastRetrievedIds: Array.isArray(raw?.lastRetrievedIds)
-      ? raw.lastRetrievedIds.map((item) => normalizeOptionalText(item, 128)).filter(Boolean).slice(0, retrievalLimit)
-      : [],
-    updatedAt: normalizeOptionalText(raw?.updatedAt, 128),
-  };
-  if (!existsSync(memoryPath)) safeWriteJsonFile(memoryPath, store);
-  return { path: memoryPath, store };
-}
 
-function resolveSubconsciousConversationState(agentName, stateDir, runtimeMeta) {
-  if (!stateDir) return { path: null, store: defaultSubconsciousConversationStore(agentName) };
-  const configuredPath = normalizeWorkspacePath(runtimeMeta?.conversationStore?.path);
-  const conversationPath = configuredPath || path.join(stateDir, 'subconscious', 'conversations.json');
-  const base = defaultSubconsciousConversationStore(agentName);
-  const raw = safeReadJsonFile(conversationPath, {});
-  const sessionLimit = normalizePositiveInt(raw?.sessionLimit, base.sessionLimit);
-  const sessions = Array.isArray(raw?.sessions)
-    ? raw.sessions
-      .map((row) => normalizeSubconsciousConversationSession(row))
-      .filter(Boolean)
-      .slice(-sessionLimit)
-    : [];
-  const store = {
-    schemaVersion: 1,
-    kind: normalizeOptionalText(raw?.kind, 128) || base.kind,
-    agent: normalizeOptionalText(raw?.agent, 128) || agentName,
-    sessionLimit,
-    currentSessionId: normalizeOptionalText(raw?.currentSessionId, 200)
-      || sessions[sessions.length - 1]?.sessionId
-      || null,
-    currentTranscriptPath: normalizeWorkspacePath(raw?.currentTranscriptPath)
-      || sessions[sessions.length - 1]?.transcriptPath
-      || null,
-    currentConversationUpdatedAt: normalizeOptionalText(raw?.currentConversationUpdatedAt, 128)
-      || sessions[sessions.length - 1]?.updatedAt
-      || null,
-    lastSyncedAt: normalizeOptionalText(raw?.lastSyncedAt, 128),
-    sessions,
-    updatedAt: normalizeOptionalText(raw?.updatedAt, 128),
-  };
-  if (!existsSync(conversationPath)) safeWriteJsonFile(conversationPath, store);
-  return { path: conversationPath, store };
-}
 
-function writeSubconsciousMemoryStore(memoryState) {
-  if (!memoryState?.path || !memoryState?.store) return false;
-  memoryState.store.updatedAt = new Date().toISOString();
-  return safeWriteJsonFile(memoryState.path, memoryState.store);
-}
 
-function writeSubconsciousConversationStore(conversationState) {
-  if (!conversationState?.path || !conversationState?.store) return false;
-  conversationState.store.updatedAt = new Date().toISOString();
-  return safeWriteJsonFile(conversationState.path, conversationState.store);
-}
 
-function mergeUpstreamDirectReuse(existing = []) {
-  const merged = [];
-  const seen = new Set();
-  for (const item of [
-    ...(Array.isArray(existing) ? existing : []),
-    'Subconscious.af prompt source',
-    'agent_config.ts Letta bootstrap/config',
-    'conversation_utils.ts durable conversation bookkeeping',
-    'conversation_utils.ts real session/conversation lifecycle',
-    'sync_letta_memory.ts UserPromptSubmit prompt-send source',
-    'pretool_sync.ts PreToolUse mid-workflow sync',
-    'send_messages_to_letta.ts Stop transcript/send flow',
-    'transcript_utils.ts transcript formatting/parser source',
-  ]) {
-    const text = normalizeOptionalText(item, 160);
-    if (!text || seen.has(text)) continue;
-    seen.add(text);
-    merged.push(text);
-  }
-  return merged;
-}
 
-function deriveUpstreamNotifyDecision(blocker, agentId, model) {
-  const text = normalizeOptionalText(blocker, 1200);
-  if (!text) return null;
-  if (/model-unknown/i.test(text)) {
-    const bits = [];
-    if (agentId) bits.push(`bound Letta agent ${agentId}`);
-    if (model) bits.push(`current model ${model}`);
-    const scope = bits.length ? `${bits.join(' / ')} ` : '';
-    return `Choose a Letta-served model/config for ${scope}that accepts conversation message sends; current notify step returns model-unknown.`;
-  }
-  return 'Decide the external Letta model/config required for conversation message sends to succeed on the bound agent.';
-}
 
-function buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta, conversationState = null) {
-  const upstreamPaths = buildUpstreamClaudeSubconsciousPaths(stateDir);
-  const upstreamMeta = (runtimeMeta?.upstream && typeof runtimeMeta.upstream === 'object') ? runtimeMeta.upstream : {};
-  const upstreamState = readUpstreamClaudeSubconsciousState(stateDir);
-  const lettaUpstream = (letta?.upstream && typeof letta.upstream === 'object') ? letta.upstream : {};
-  const runtimeUpstreamSession = (upstreamMeta.session && typeof upstreamMeta.session === 'object') ? upstreamMeta.session : {};
-  const lettaUpstreamSession = (lettaUpstream.session && typeof lettaUpstream.session === 'object') ? lettaUpstream.session : {};
-  const runtimeUpstreamUserPrompt = (upstreamMeta.userPrompt && typeof upstreamMeta.userPrompt === 'object') ? upstreamMeta.userPrompt : {};
-  const lettaUpstreamUserPrompt = (lettaUpstream.userPrompt && typeof lettaUpstream.userPrompt === 'object') ? lettaUpstream.userPrompt : {};
-  const runtimeUpstreamPreTool = (upstreamMeta.preTool && typeof upstreamMeta.preTool === 'object') ? upstreamMeta.preTool : {};
-  const lettaUpstreamPreTool = (lettaUpstream.preTool && typeof lettaUpstream.preTool === 'object') ? lettaUpstream.preTool : {};
-  const runtimeUpstreamStop = (upstreamMeta.stop && typeof upstreamMeta.stop === 'object') ? upstreamMeta.stop : {};
-  const lettaUpstreamStop = (lettaUpstream.stop && typeof lettaUpstream.stop === 'object') ? lettaUpstream.stop : {};
-  const conversationStore = (conversationState?.store && typeof conversationState.store === 'object') ? conversationState.store : {};
-  const conversationSessions = Array.isArray(conversationStore.sessions) ? conversationStore.sessions : [];
-  const directReuse = mergeUpstreamDirectReuse(upstreamMeta.directReuse);
-  const config = (upstreamState.config && typeof upstreamState.config === 'object') ? upstreamState.config : {};
-  const conversations = (upstreamState.conversations && typeof upstreamState.conversations === 'object') ? upstreamState.conversations : {};
-  const readDurableUpstreamSession = (sessionId) => {
-    const normalizedSessionId = normalizeOptionalText(sessionId, 200);
-    const mappedConversation = normalizedSessionId ? conversations[normalizedSessionId] : null;
-    const mappedConversationId = typeof mappedConversation === 'string'
-      ? mappedConversation
-      : normalizeOptionalText(mappedConversation?.conversationId, 256);
-    const sessionStateFile = normalizeWorkspacePath(
-      normalizedSessionId && upstreamPaths.durableStateDir
-        ? path.join(upstreamPaths.durableStateDir, `session-${normalizedSessionId}.json`)
-        : null
-    );
-    const sessionState = safeReadJsonFile(sessionStateFile, {});
-    const lastProcessedIndexRaw = Number(sessionState?.lastProcessedIndex);
-    const lastSeenMessageId = normalizeOptionalText(sessionState?.lastSeenMessageId, 256);
-    const lastBlockValues = (sessionState?.lastBlockValues && typeof sessionState.lastBlockValues === 'object')
-      ? sessionState.lastBlockValues
-      : null;
-    return {
-      sessionId: normalizedSessionId,
-      sessionStateFile,
-      sessionState,
-      conversationId: normalizeOptionalText(sessionState?.conversationId, 256) || mappedConversationId || null,
-      lastProcessedIndex: Number.isFinite(lastProcessedIndexRaw) ? lastProcessedIndexRaw : null,
-      lastSeenMessageId,
-      lastBlockValues,
-      hasLastBlockValues: Boolean(lastBlockValues),
-      blockLabelCount: lastBlockValues ? Object.keys(lastBlockValues).length : null,
-      sessionStartedAt: normalizeOptionalText(sessionState?.startedAt, 128) || null,
-    };
-  };
-  const boundAgentId = normalizeOptionalText(
-    letta?.agentId
-      || letta?.lettaAgentId
-      || lettaUpstream.agentId
-      || upstreamMeta.agentId,
-    256,
-  );
-  const importedAgentId = normalizeOptionalText(config.agentId, 256);
-  const agentId = boundAgentId || importedAgentId;
-  const apiKeyConfigured = Boolean(normalizeOptionalText(process.env.LETTA_API_KEY, 4096));
-  const lettaBaseUrl = normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com';
-  const conversationCurrentSessionId = normalizeOptionalText(
-    conversationStore.currentSessionId
-      || conversationSessions[conversationSessions.length - 1]?.sessionId,
-    200,
-  );
-  const currentSessionId = normalizeOptionalText(
-    lettaUpstreamSession.sessionId
-      || runtimeUpstreamSession.sessionId
-      || conversationCurrentSessionId,
-    200,
-  );
-  const currentSessionDurable = readDurableUpstreamSession(currentSessionId);
-  const currentSessionStateFile = currentSessionDurable.sessionStateFile
-    || normalizeWorkspacePath(lettaUpstreamSession.sessionStateFile)
-    || normalizeWorkspacePath(runtimeUpstreamSession.sessionStateFile)
-    || null;
-  const currentSessionState = currentSessionDurable.sessionState;
-  const currentConversationId = normalizeOptionalText(
-    currentSessionDurable.conversationId
-      || lettaUpstreamSession.conversationId
-      || runtimeUpstreamSession.conversationId,
-    256,
-  );
-  const sessionEstablished = Boolean(currentSessionId && currentConversationId);
-  const rawNotify = (lettaUpstreamSession.notify && typeof lettaUpstreamSession.notify === 'object')
-    ? lettaUpstreamSession.notify
-    : ((runtimeUpstreamSession.notify && typeof runtimeUpstreamSession.notify === 'object') ? runtimeUpstreamSession.notify : {});
-  const notifyBlockedReason = normalizeOptionalText(rawNotify.blockedReason, 1200);
-  const notifyStatus = normalizeOptionalText(rawNotify.status, 64)
-    || (normalizeBoolean(rawNotify.messageSent) === true ? 'sent' : null)
-    || (notifyBlockedReason ? 'blocked' : null)
-    || (normalizeBoolean(rawNotify.attempted) === true ? 'attempted' : null)
-    || 'not-attempted';
-  const rawUserPrompt = (lettaUpstreamUserPrompt && typeof lettaUpstreamUserPrompt === 'object' && Object.keys(lettaUpstreamUserPrompt).length)
-    ? lettaUpstreamUserPrompt
-    : ((runtimeUpstreamUserPrompt && typeof runtimeUpstreamUserPrompt === 'object') ? runtimeUpstreamUserPrompt : {});
-  const userPromptSessionId = normalizeOptionalText(rawUserPrompt.sessionId, 200) || currentSessionDurable.sessionId || null;
-  const userPromptDurable = readDurableUpstreamSession(userPromptSessionId);
-  const userPromptBlockedReason = normalizeOptionalText(rawUserPrompt.blockedReason, 1200);
-  const userPromptStatus = (userPromptDurable.lastProcessedIndex !== null ? 'sent' : null)
-    || normalizeOptionalText(rawUserPrompt.status, 64)
-    || (normalizeBoolean(rawUserPrompt.messageSent) === true ? 'sent' : null)
-    || (userPromptBlockedReason ? 'blocked' : null)
-    || (normalizeBoolean(rawUserPrompt.attempted) === true ? 'attempted' : null)
-    || 'not-run';
-  const userPromptTranscriptPath = normalizeWorkspacePath(rawUserPrompt.transcriptPath) || null;
-  const userPromptSyncStateFile = userPromptDurable.sessionStateFile || normalizeWorkspacePath(rawUserPrompt.syncStateFile) || null;
-  const userPromptLastProcessedIndexAfterRaw = userPromptDurable.lastProcessedIndex !== null
-    ? userPromptDurable.lastProcessedIndex
-    : Number(rawUserPrompt.lastProcessedIndexAfter);
-  const rawPreTool = (lettaUpstreamPreTool && typeof lettaUpstreamPreTool === 'object' && Object.keys(lettaUpstreamPreTool).length)
-    ? lettaUpstreamPreTool
-    : ((runtimeUpstreamPreTool && typeof runtimeUpstreamPreTool === 'object') ? runtimeUpstreamPreTool : {});
-  const preToolSessionId = normalizeOptionalText(rawPreTool.sessionId, 200) || currentSessionDurable.sessionId || null;
-  const preToolDurable = readDurableUpstreamSession(preToolSessionId);
-  const preToolBlockedReason = normalizeOptionalText(rawPreTool.blockedReason, 1200);
-  const preToolStatus = (preToolDurable.lastSeenMessageId ? 'seeded-baseline' : null)
-    || normalizeOptionalText(rawPreTool.status, 64)
-    || (normalizeBoolean(rawPreTool.injected) === true ? 'injected' : null)
-    || (preToolBlockedReason ? 'blocked' : null)
-    || (normalizeBoolean(rawPreTool.attempted) === true ? 'attempted' : null)
-    || 'not-run';
-  const preToolSyncStateFile = preToolDurable.sessionStateFile || normalizeWorkspacePath(rawPreTool.syncStateFile) || null;
-  const rawStop = (lettaUpstreamStop && typeof lettaUpstreamStop === 'object' && Object.keys(lettaUpstreamStop).length)
-    ? lettaUpstreamStop
-    : ((runtimeUpstreamStop && typeof runtimeUpstreamStop === 'object') ? runtimeUpstreamStop : {});
-  const stopSessionId = normalizeOptionalText(rawStop.sessionId, 200) || currentSessionDurable.sessionId || null;
-  const stopDurable = readDurableUpstreamSession(stopSessionId);
-  const stopBlockedReason = normalizeOptionalText(rawStop.blockedReason, 1200);
-  const stopStatus = normalizeOptionalText(rawStop.status, 64)
-    || (normalizeBoolean(rawStop.messageSent) === true ? 'sent' : null)
-    || (stopBlockedReason ? 'blocked' : null)
-    || (normalizeBoolean(rawStop.attempted) === true ? 'attempted' : null)
-    || 'not-run';
-  const stopTranscriptPath = normalizeWorkspacePath(rawStop.transcriptPath) || null;
-  const stopSyncStateFile = stopDurable.sessionStateFile || normalizeWorkspacePath(rawStop.syncStateFile) || null;
-  const stopLastProcessedIndexAfterRaw = stopDurable.lastProcessedIndex !== null
-    ? stopDurable.lastProcessedIndex
-    : Number(rawStop.lastProcessedIndexAfter);
-  let blocker = null;
-  if (!upstreamPaths.available) blocker = `missing upstream claude-subconscious root at ${upstreamPaths.root || '-'}`;
-  else if (!apiKeyConfigured) blocker = 'missing LETTA_API_KEY';
-  const explicitBootstrapStatus = normalizeOptionalText(lettaUpstream.bootstrapStatus, 64)
-    || normalizeOptionalText(upstreamMeta.bootstrapStatus, 64);
-  const durableUpstreamObserved = Boolean(
-    boundAgentId
-    || currentSessionId
-    || currentConversationId
-    || Object.keys(conversations).length > 0
-  );
-  const bootstrapStatus = durableUpstreamObserved
-    ? 'configured'
-    : (explicitBootstrapStatus || (agentId ? 'configured' : 'not-run'));
-  const bootstrapBlockedReason = bootstrapStatus === 'configured'
-    ? (blocker === 'missing LETTA_API_KEY' ? blocker : null)
-    : (
-      normalizeOptionalText(lettaUpstream.blocker, 240)
-      || normalizeOptionalText(upstreamMeta.blocker, 240)
-      || blocker
-    );
-  return {
-    classification: 'authoritative',
-    available: upstreamPaths.available,
-    root: upstreamPaths.root,
-    promptFile: upstreamPaths.promptFile,
-    scripts: upstreamPaths.scripts,
-    durableHome: upstreamPaths.durableHome,
-    durableStateDir: upstreamPaths.durableStateDir,
-    conversationsFile: upstreamPaths.conversationsFile,
-    configPath: upstreamPaths.configPath,
-    directReuse,
-    transitionalBoundary: [
-      'SessionStart lifecycle can now run through the explicit upstream Letta session/conversation entrypoint.',
-      'UserPromptSubmit can now send the real user prompt into the bound upstream Letta conversation and advance the durable sync state.',
-      'PreToolUse can now read real upstream assistant-message and memory-block deltas from the bound Letta conversation/agent and inject them before tool execution.',
-      'Stop transcript/send can now run through the explicit upstream Letta send_messages_to_letta.ts-style path.',
-      'Upstream Letta transcript send/checkpoint scripts are only partially live; SessionStart, UserPromptSubmit, PreToolUse, and Stop are cut over, but the full remaining hook flow is not.',
-      'Local episodic memory/conversation journals remain transitional until full upstream Letta flow is wired.',
-    ],
-    bootstrap: {
-      supported: upstreamPaths.available,
-      status: bootstrapStatus,
-      blockedReason: bootstrapBlockedReason,
-      apiKeyConfigured,
-      lettaBaseUrl,
-      agentId,
-      importedAt: normalizeOptionalText(config.importedAt, 128)
-        || normalizeOptionalText(lettaUpstream.importedAt, 128)
-        || normalizeOptionalText(upstreamMeta.importedAt, 128),
-      model: normalizeOptionalText(config.model, 256)
-        || normalizeOptionalText(lettaUpstream.model, 256)
-        || normalizeOptionalText(upstreamMeta.model, 256),
-      agentName: normalizeOptionalText(lettaUpstream.agentName, 256)
-        || normalizeOptionalText(upstreamMeta.agentName, 256),
-      blockCount: normalizeNonNegativeInt(lettaUpstream.blockCount ?? upstreamMeta.blockCount, 0),
-      conversationCount: Object.keys(conversations).length,
-      workdir: workdir || null,
-    },
-    session: {
-      supported: upstreamPaths.available && apiKeyConfigured && Boolean(agentId),
-      established: sessionEstablished,
-      status: sessionEstablished
-        ? 'started'
-        : (
-          normalizeOptionalText(lettaUpstreamSession.status, 64)
-          || normalizeOptionalText(runtimeUpstreamSession.status, 64)
-          || 'not-run'
-        ),
-      blockedReason: sessionEstablished
-        ? null
-        : (
-          normalizeOptionalText(lettaUpstreamSession.blocker, 240)
-          || normalizeOptionalText(runtimeUpstreamSession.blocker, 240)
-          || null
-        ),
-      sessionId: currentSessionId,
-      conversationId: currentConversationId,
-      conversationStatus: normalizeOptionalText(lettaUpstreamSession.conversationStatus, 64)
-        || normalizeOptionalText(runtimeUpstreamSession.conversationStatus, 64)
-        || (currentConversationId ? 'recorded' : null),
-      sessionStateFile: currentSessionStateFile,
-      sessionStartedAt: currentSessionDurable.sessionStartedAt
-        || normalizeOptionalText(lettaUpstreamSession.sessionStartedAt, 128)
-        || normalizeOptionalText(runtimeUpstreamSession.sessionStartedAt, 128)
-        || null,
-      messageSent: normalizeBoolean(lettaUpstreamSession.messageSent) === true
-        || normalizeBoolean(runtimeUpstreamSession.messageSent) === true,
-      cwd: normalizeWorkspacePath(lettaUpstreamSession.cwd || runtimeUpstreamSession.cwd) || workdir || null,
-      notify: {
-        attempted: notifyStatus !== 'not-attempted',
-        status: notifyStatus,
-        blockedReason: notifyStatus === 'blocked' ? notifyBlockedReason : null,
-        messageSent: normalizeBoolean(rawNotify.messageSent) === true
-          || normalizeBoolean(lettaUpstreamSession.messageSent) === true
-          || normalizeBoolean(runtimeUpstreamSession.messageSent) === true,
-        requiredDecision: notifyStatus === 'blocked'
-          ? deriveUpstreamNotifyDecision(
-            notifyBlockedReason,
-            agentId,
-            normalizeOptionalText(config.model, 256)
-              || normalizeOptionalText(lettaUpstream.model, 256)
-              || normalizeOptionalText(upstreamMeta.model, 256)
-          )
-          : null,
-      },
-    },
-    userPrompt: {
-      supported: upstreamPaths.available && apiKeyConfigured && Boolean(agentId),
-      attempted: normalizeBoolean(rawUserPrompt.attempted) === true || userPromptStatus === 'attempted' || userPromptStatus === 'sent' || userPromptStatus === 'blocked',
-      status: userPromptStatus,
-      blockedReason: userPromptStatus === 'blocked' ? userPromptBlockedReason : null,
-      messageSent: normalizeBoolean(rawUserPrompt.messageSent) === true || userPromptDurable.lastProcessedIndex !== null,
-      sessionId: userPromptSessionId,
-      conversationId: userPromptDurable.conversationId
-        || normalizeOptionalText(rawUserPrompt.conversationId, 256)
-        || null,
-      transcriptPath: userPromptTranscriptPath,
-      transcriptExists: userPromptTranscriptPath ? existsSync(userPromptTranscriptPath) : false,
-      syncStateFile: userPromptSyncStateFile,
-      lastProcessedIndexAfter: Number.isFinite(userPromptLastProcessedIndexAfterRaw) ? userPromptLastProcessedIndexAfterRaw : null,
-      scriptPath: normalizeWorkspacePath(rawUserPrompt.scriptPath || upstreamPaths.scripts?.syncMemory) || upstreamPaths.scripts?.syncMemory || null,
-    },
-    preTool: {
-      supported: upstreamPaths.available && apiKeyConfigured && Boolean(agentId),
-      attempted: normalizeBoolean(rawPreTool.attempted) === true || preToolStatus === 'attempted' || preToolStatus === 'injected' || preToolStatus === 'blocked' || preToolStatus === 'no-updates' || preToolStatus === 'seeded-baseline',
-      status: preToolStatus,
-      blockedReason: preToolStatus === 'blocked' ? preToolBlockedReason : null,
-      injected: normalizeBoolean(rawPreTool.injected) === true,
-      sessionId: preToolSessionId,
-      conversationId: preToolDurable.conversationId
-        || normalizeOptionalText(rawPreTool.conversationId, 256)
-        || null,
-      syncStateFile: preToolSyncStateFile,
-      lastSeenMessageIdAfter: preToolDurable.lastSeenMessageId
-        || normalizeOptionalText(rawPreTool.lastSeenMessageIdAfter, 256)
-        || null,
-      blockLabelCount: preToolDurable.hasLastBlockValues
-        ? preToolDurable.blockLabelCount
-        : normalizeNonNegativeInt(rawPreTool.blockLabelCount, 0),
-      scriptPath: normalizeWorkspacePath(rawPreTool.scriptPath || upstreamPaths.scripts?.pretoolSync) || upstreamPaths.scripts?.pretoolSync || null,
-    },
-    stop: {
-      supported: upstreamPaths.available && apiKeyConfigured && Boolean(agentId),
-      attempted: normalizeBoolean(rawStop.attempted) === true || stopStatus === 'attempted' || stopStatus === 'sent' || stopStatus === 'blocked',
-      status: stopStatus,
-      blockedReason: stopStatus === 'blocked' ? stopBlockedReason : null,
-      messageSent: normalizeBoolean(rawStop.messageSent) === true,
-      sessionId: stopSessionId,
-      conversationId: stopDurable.conversationId
-        || normalizeOptionalText(rawStop.conversationId, 256)
-        || null,
-      transcriptPath: stopTranscriptPath,
-      transcriptExists: stopTranscriptPath ? existsSync(stopTranscriptPath) : false,
-      syncStateFile: stopSyncStateFile,
-      lastProcessedIndexAfter: Number.isFinite(stopLastProcessedIndexAfterRaw) ? stopLastProcessedIndexAfterRaw : null,
-      scriptPath: normalizeWorkspacePath(rawStop.scriptPath || upstreamPaths.scripts?.stopSend) || upstreamPaths.scripts?.stopSend || null,
-    },
-  };
-}
 
-function buildSubconsciousAuthoritySummary({ enabled, upstream, lettaAgentId }) {
-  const bootstrap = (upstream && typeof upstream.bootstrap === 'object') ? upstream.bootstrap : {};
-  const session = (upstream && typeof upstream.session === 'object') ? upstream.session : {};
-  const userPrompt = (upstream && typeof upstream.userPrompt === 'object') ? upstream.userPrompt : {};
-  const preTool = (upstream && typeof upstream.preTool === 'object') ? upstream.preTool : {};
-  const stop = (upstream && typeof upstream.stop === 'object') ? upstream.stop : {};
-  const boundAgentId = normalizeOptionalText(bootstrap.agentId || lettaAgentId, 256);
-  const bindingConfigured = Boolean(boundAgentId);
-  const sessionEstablished = session.established === true;
-  const progress = [
-    { key: 'stop', label: 'Stop', status: normalizeOptionalText(stop.status, 64) || 'not-run' },
-    { key: 'preTool', label: 'PreToolUse', status: normalizeOptionalText(preTool.status, 64) || 'not-run' },
-    { key: 'userPrompt', label: 'UserPromptSubmit', status: normalizeOptionalText(userPrompt.status, 64) || 'not-run' },
-    { key: 'session', label: 'SessionStart', status: normalizeOptionalText(session.status, 64) || 'not-run' },
-  ];
-  const latestProgress = progress.find((row) => row.status && row.status !== 'not-run') || progress[progress.length - 1];
-  let status = 'off';
-  let reason = enabled === true ? null : 'subconscious disabled';
-  if (enabled === true) {
-    if (sessionEstablished) {
-      status = 'active';
-      reason = null;
-    } else if (bindingConfigured || normalizeOptionalText(bootstrap.status, 64) === 'configured') {
-      status = 'degraded';
-      reason = normalizeOptionalText(session.blockedReason, 1200)
-        || normalizeOptionalText(session.status, 64) === 'not-run'
-        || normalizeOptionalText(session.status, 64) === null
-          ? 'authoritative upstream session not established'
-          : normalizeOptionalText(bootstrap.blockedReason, 1200)
-            || 'authoritative upstream path is configured but not established';
-    } else {
-      status = 'unconfigured';
-      reason = normalizeOptionalText(bootstrap.blockedReason, 1200)
-        || 'authoritative upstream path is not configured';
-    }
-  }
-  return {
-    classification: 'authoritative',
-    path: 'upstream-letta',
-    status,
-    reason,
-    bindingConfigured,
-    agentId: boundAgentId || null,
-    sessionEstablished,
-    conversationEstablished: Boolean(session.conversationId),
-    latestProgress,
-  };
-}
 
-function buildSubconsciousFallbackSummary(guidanceText) {
-  const configured = typeof guidanceText === 'string' && guidanceText.trim().length > 0;
-  return {
-    classification: 'fallback',
-    status: configured ? 'configured' : 'none',
-    configured,
-    source: configured ? 'manual-state-file' : 'none',
-    note: 'Guidance is fallback configuration only; it is not the authoritative subconscious behavior path.',
-  };
-}
 
-function buildSubconsciousTransitionalSummary(runtime, memoryInfo, conversationInfo) {
-  const runtimeDesired = runtime?.desiredEnabled === true;
-  let runtimeStatus = 'off';
-  if (runtimeDesired && runtime?.invocationConfigured === true) runtimeStatus = 'ready';
-  else if (runtimeDesired) runtimeStatus = 'degraded';
-  return {
-    classification: 'transitional',
-    runtimeStatus,
-    runtimeDesired,
-    runtimeInvocationConfigured: runtime?.invocationConfigured === true,
-    runtimeDisabledReason: normalizeOptionalText(runtime?.disabledReason, 1200),
-    localMemoryConfigured: normalizeNonNegativeInt(memoryInfo?.entryCount, 0) > 0,
-    localConversationConfigured: normalizeNonNegativeInt(conversationInfo?.sessionCount, 0) > 0,
-    note: 'Local runtime, memory, and conversation journals are transitional compatibility/debug surfaces only.',
-  };
-}
 
 function extractTranscriptTextParts(content, out = []) {
   if (typeof content === 'string') {
@@ -1793,68 +1067,6 @@ function parseClaudeConversationTranscript(sessionId, transcriptPath) {
   return base;
 }
 
-function syncSubconsciousConversationState(state, payload = {}, extra = {}) {
-  const conversationState = state?.conversationState;
-  const store = conversationState?.store;
-  if (!conversationState?.path || !store) return null;
-  const transcriptPath = normalizeWorkspacePath(payload?.transcriptPath || extra.transcriptPath);
-  const sessionId = normalizeOptionalText(payload?.sessionId || extra.sessionId, 200)
-    || inferTranscriptSessionId(transcriptPath)
-    || store.currentSessionId;
-  if (!sessionId && !transcriptPath) return null;
-  const parsed = parseClaudeConversationTranscript(sessionId, transcriptPath);
-  const key = parsed.sessionId || sessionId || transcriptPath;
-  const nowIso = new Date().toISOString();
-  const sessions = Array.isArray(store.sessions) ? [...store.sessions] : [];
-  const existingIndex = sessions.findIndex((row) => (row.sessionId && row.sessionId === key) || (row.transcriptPath && row.transcriptPath === transcriptPath));
-  const existing = existingIndex >= 0 ? sessions[existingIndex] : null;
-  const nextGuidancePreview = normalizeOptionalText(extra.guidancePreview, 320);
-  const nextGuidanceAt = nextGuidancePreview
-    ? (normalizeOptionalText(extra.guidanceAt, 128) || normalizeOptionalText(extra.at, 128) || nowIso)
-    : null;
-  const nextGuidanceSource = nextGuidancePreview
-    ? (normalizeOptionalText(extra.guidanceSource, 64) || existing?.latestGuidanceSource || null)
-    : null;
-  const nextSession = {
-    sessionId: parsed.sessionId || sessionId || existing?.sessionId || null,
-    transcriptPath: parsed.transcriptPath || transcriptPath || existing?.transcriptPath || null,
-    transcriptExists: parsed.transcriptExists === true,
-    transcriptLineCount: parsed.transcriptLineCount || existing?.transcriptLineCount || 0,
-    eventCount: parsed.eventCount || existing?.eventCount || 0,
-    userTurnCount: parsed.userTurnCount || existing?.userTurnCount || 0,
-    assistantTurnCount: parsed.assistantTurnCount || existing?.assistantTurnCount || 0,
-    startedAt: parsed.startedAt || existing?.startedAt || normalizeOptionalText(extra.at, 128) || nowIso,
-    updatedAt: parsed.updatedAt || normalizeOptionalText(extra.at, 128) || existing?.updatedAt || nowIso,
-    lastEventAt: normalizeOptionalText(extra.at, 128) || parsed.updatedAt || existing?.lastEventAt || nowIso,
-    lastHook: normalizeOptionalText(extra.hook, 120) || existing?.lastHook || null,
-    lastToolName: normalizeOptionalText(extra.toolName, 120) || existing?.lastToolName || null,
-    lastRuntimeAt: extra.runtimeInvoked === true
-      ? (normalizeOptionalText(extra.at, 128) || nowIso)
-      : (existing?.lastRuntimeAt || null),
-    lastRuntimeProvider: extra.runtimeInvoked === true
-      ? (normalizeOptionalText(extra.runtimeProvider, 64) || existing?.lastRuntimeProvider || null)
-      : (existing?.lastRuntimeProvider || null),
-    lastRuntimeModel: extra.runtimeInvoked === true
-      ? (normalizeOptionalText(extra.runtimeModel, 128) || existing?.lastRuntimeModel || null)
-      : (existing?.lastRuntimeModel || null),
-    latestUserText: parsed.latestUserText || existing?.latestUserText || '',
-    latestAssistantText: parsed.latestAssistantText || existing?.latestAssistantText || '',
-    latestGuidancePreview: nextGuidancePreview || existing?.latestGuidancePreview || '',
-    latestGuidanceAt: nextGuidanceAt || existing?.latestGuidanceAt || null,
-    latestGuidanceSource: nextGuidanceSource || existing?.latestGuidanceSource || null,
-    recentTurns: parsed.recentTurns.length ? parsed.recentTurns : (existing?.recentTurns || []),
-  };
-  if (existingIndex >= 0) sessions.splice(existingIndex, 1);
-  sessions.push(nextSession);
-  sessions.sort((a, b) => String(a.lastEventAt || a.updatedAt || '').localeCompare(String(b.lastEventAt || b.updatedAt || '')));
-  store.sessions = sessions.slice(-normalizePositiveInt(store.sessionLimit, 24));
-  store.currentSessionId = nextSession.sessionId || store.currentSessionId || null;
-  store.currentTranscriptPath = nextSession.transcriptPath || store.currentTranscriptPath || null;
-  store.currentConversationUpdatedAt = nextSession.updatedAt || store.currentConversationUpdatedAt || null;
-  store.lastSyncedAt = nowIso;
-  writeSubconsciousConversationStore(conversationState);
-  return nextSession;
-}
 
 function applyConversationSnapshotToContract(state, sessionSnapshot = null) {
   const contract = state?.contract;
@@ -1900,463 +1112,12 @@ function applyConversationSnapshotToContract(state, sessionSnapshot = null) {
   return current;
 }
 
-function tokenizeSubconsciousMemoryText(...parts) {
-  const seen = new Set();
-  for (const part of parts) {
-    const text = String(part || '').toLowerCase();
-    for (const token of text.match(/[a-z0-9][a-z0-9_-]{1,31}/g) || []) {
-      if (token.length < 3) continue;
-      seen.add(token);
-    }
-  }
-  return [...seen];
-}
 
-function retrieveSubconsciousMemories(memoryState, payload) {
-  const store = memoryState?.store;
-  const episodes = Array.isArray(store?.episodes) ? store.episodes : [];
-  const queryText = [
-    normalizeOptionalText(payload?.promptPreview, 320),
-    normalizeOptionalText(payload?.summary, 600),
-    normalizeOptionalText(payload?.toolName, 120),
-    normalizeOptionalText(payload?.hook, 120),
-  ].filter(Boolean).join(' | ');
-  const queryTokens = tokenizeSubconsciousMemoryText(queryText);
-  if (!queryTokens.length || !episodes.length) {
-    return { queryText, queryTokens, matches: [] };
-  }
-  const scored = episodes.map((episode, index) => {
-    const episodeKeywords = Array.isArray(episode.keywords) ? episode.keywords : [];
-    const overlap = episodeKeywords.filter((token) => queryTokens.includes(token));
-    if (!overlap.length) return null;
-    const recency = (index + 1) / episodes.length;
-    return {
-      episode,
-      overlap,
-      score: overlap.length * 10 + recency,
-    };
-  }).filter(Boolean);
-  scored.sort((a, b) => b.score - a.score || String(b.episode.at || '').localeCompare(String(a.episode.at || '')));
-  const limit = normalizePositiveInt(store?.retrievalLimit, 4);
-  return {
-    queryText,
-    queryTokens,
-    matches: scored.slice(0, limit).map((row) => ({
-      id: row.episode.id,
-      at: row.episode.at,
-      hook: row.episode.hook || null,
-      summary: row.episode.summary || '',
-      guidancePreview: row.episode.guidance || '',
-      overlapKeywords: row.overlap.slice(0, 8),
-      score: Number(row.score.toFixed(2)),
-    })),
-  };
-}
 
-function appendSubconsciousMemoryEpisode(memoryState, promptPayload, parsed) {
-  const store = memoryState?.store;
-  if (!memoryState?.path || !store) return null;
-  const nowIso = new Date().toISOString();
-  const guidance = normalizeOptionalText(parsed?.guidance, 4000) || '';
-  const summary = normalizeOptionalText(parsed?.summary, 600) || 'runtime guidance';
-  const episode = {
-    id: `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-    at: nowIso,
-    hook: normalizeOptionalText(promptPayload?.hook, 120),
-    promptPreview: normalizeOptionalText(promptPayload?.promptPreview, 320) || '',
-    toolName: normalizeOptionalText(promptPayload?.toolName, 120),
-    summary,
-    guidance: guidance ? guidance.slice(0, 600) : '',
-    keywords: tokenizeSubconsciousMemoryText(
-      promptPayload?.hook,
-      promptPayload?.toolName,
-      promptPayload?.promptPreview,
-      promptPayload?.summary,
-      summary,
-      guidance
-    ).slice(0, 32),
-  };
-  const entryLimit = normalizePositiveInt(store.entryLimit, 80);
-  const nextEpisodes = Array.isArray(store.episodes) ? [...store.episodes, episode] : [episode];
-  store.episodes = nextEpisodes.slice(-entryLimit);
-  store.lastStoredAt = nowIso;
-  store.lastStoredEpisodeId = episode.id;
-  writeSubconsciousMemoryStore(memoryState);
-  return episode;
-}
 
-function resolveSubconsciousState(agentName) {
-  const agent = agents[agentName];
-  if (!isAgentRecord(agent)) return null;
-  const stateDir = normalizeWorkspacePath(agent.stateDir);
-  const workdir = normalizeWorkspacePath(agent.workdir);
-  const lettaPath = stateDir ? path.join(stateDir, 'letta.json') : null;
-  const runtimeMetaPath = stateDir ? path.join(stateDir, 'subconscious', 'runtime.json') : null;
-  const letta = safeReadJsonFile(lettaPath, {});
-  const runtimeMeta = safeReadJsonFile(runtimeMetaPath, {});
-  const settingsPath = normalizeWorkspacePath(runtimeMeta?.settingsPath) || (workdir ? path.join(workdir, '.claude', 'settings.json') : null);
-  const pluginRoot = normalizeWorkspacePath(runtimeMeta?.pluginRoot) || (stateDir ? path.join(stateDir, 'subconscious', 'claude-hafleet') : null);
-  const installedHooks = detectInstalledSubconsciousHooks(settingsPath);
-  const runtimeCfg = (letta?.runtime && typeof letta.runtime === 'object') ? letta.runtime : {};
-  const stateProvider = normalizeProviderOrNull(runtimeCfg.provider);
-  const envProvider = normalizeProviderOrNull(process.env.SUBCONSCIOUS_LLM_PROVIDER);
-  const provider = stateProvider || envProvider || 'deepseek';
-  const providerSource = stateProvider ? 'state' : (envProvider ? 'subconscious-env' : 'default');
-  const stateModel = normalizeOptionalText(runtimeCfg.model, 256);
-  const envModel = normalizeOptionalText(process.env.SUBCONSCIOUS_LLM_MODEL, 256);
-  const model = stateModel || envModel || defaultCompatibleModel(provider);
-  const modelSource = stateModel ? 'state' : (envModel ? 'subconscious-env' : 'default');
-  const stateEndpoint = normalizeCompatibleEndpointOrNull(runtimeCfg.endpoint);
-  const envEndpoint = normalizeCompatibleEndpointOrNull(process.env.SUBCONSCIOUS_LLM_ENDPOINT);
-  const endpoint = stateEndpoint || envEndpoint || defaultCompatibleEndpoint(provider);
-  const endpointSource = stateEndpoint ? 'state' : (envEndpoint ? 'subconscious-env' : 'default');
-  const stateKeyEnv = normalizeOptionalText(runtimeCfg.keyEnv, 128);
-  const envKeyEnv = normalizeOptionalText(process.env.SUBCONSCIOUS_LLM_KEY_ENV, 128);
-  const keyEnv = stateKeyEnv || envKeyEnv || 'SUBCONSCIOUS_LLM_KEY';
-  const keyEnvSource = stateKeyEnv ? 'state' : (envKeyEnv ? 'subconscious-env' : 'default');
-  const apiKey = normalizeOptionalText(process.env[keyEnv], 4096);
-  const timeoutMs = normalizePositiveInt(runtimeCfg.timeoutMs, 8000);
-  const maxTokens = normalizePositiveInt(runtimeCfg.maxTokens, 220);
-  const temperatureRaw = Number.parseFloat(String(runtimeCfg.temperature ?? process.env.SUBCONSCIOUS_LLM_TEMPERATURE ?? '0.2').trim());
-  const temperature = Number.isFinite(temperatureRaw) ? temperatureRaw : 0.2;
-  const desiredEnabled = normalizeBoolean(runtimeCfg.enabled);
-  const runtimeDesired = desiredEnabled !== false;
-  const invokeUrl = normalizeOptionalText(runtimeMeta?.invokeUrl, 2048)
-    || `${process.env.HAFLEET_API || `http://127.0.0.1:${PORT}`}/api/subconscious/runtime/invoke`;
-  const eventUrl = normalizeOptionalText(runtimeMeta?.eventUrl, 2048)
-    || `${process.env.HAFLEET_API || `http://127.0.0.1:${PORT}`}/api/subconscious/events`;
-  let disabledReason = null;
-  if (!agent.stateDir) disabledReason = 'missing agent stateDir';
-  else if (!runtimeDesired) disabledReason = 'runtime disabled in subconscious contract';
-  else if (!apiKey) disabledReason = `missing API key env ${keyEnv}`;
 
-  const invocationConfigured = disabledReason === null;
-  const generatedGuidance = (letta?.lastRuntimeGuidance && typeof letta.lastRuntimeGuidance === 'object') ? letta.lastRuntimeGuidance : null;
-  const lastInvocation = (letta?.lastInvocation && typeof letta.lastInvocation === 'object') ? letta.lastInvocation : null;
-  const guidanceText = normalizeOptionalText(letta?.guidance, 6000) || '';
-  const memoryState = resolveSubconsciousMemoryState(agentName, stateDir, runtimeMeta);
-  const conversationState = resolveSubconsciousConversationState(agentName, stateDir, runtimeMeta);
-  const memoryStore = memoryState.store || defaultSubconsciousMemoryStore(agentName);
-  const conversationStore = conversationState.store || defaultSubconsciousConversationStore(agentName);
-  const upstream = buildSubconsciousUpstreamContract(stateDir, workdir, runtimeMeta, letta, conversationState);
-  const currentConversation = Array.isArray(conversationStore.sessions)
-    ? conversationStore.sessions.find((row) => row.sessionId && row.sessionId === conversationStore.currentSessionId)
-      || conversationStore.sessions[conversationStore.sessions.length - 1]
-      || null
-    : null;
-  const memoryInfo = {
-    classification: 'transitional',
-    kind: normalizeOptionalText(memoryStore.kind, 128) || 'local-episodic-journal',
-    path: memoryState.path,
-    retrievalStrategy: normalizeOptionalText(memoryStore.retrievalStrategy, 128) || 'keyword-overlap-recency',
-    entryCount: Array.isArray(memoryStore.episodes) ? memoryStore.episodes.length : 0,
-    entryLimit: normalizePositiveInt(memoryStore.entryLimit, 80),
-    retrievalLimit: normalizePositiveInt(memoryStore.retrievalLimit, 4),
-    lastStoredAt: normalizeOptionalText(memoryStore.lastStoredAt, 128),
-    lastStoredEpisodeId: normalizeOptionalText(memoryStore.lastStoredEpisodeId, 128),
-    lastRetrievedAt: normalizeOptionalText(memoryStore.lastRetrievedAt, 128),
-    lastRetrievedQuery: normalizeOptionalText(memoryStore.lastRetrievedQuery, 600),
-    lastRetrievedIds: Array.isArray(memoryStore.lastRetrievedIds) ? memoryStore.lastRetrievedIds.slice(0, 12) : [],
-  };
-  const conversationContract = {
-    classification: 'transitional',
-    kind: conversationStore.kind || 'claude-jsonl-session-journal',
-    path: conversationState.path,
-    sessionCount: Array.isArray(conversationStore.sessions) ? conversationStore.sessions.length : 0,
-    sessionLimit: normalizePositiveInt(conversationStore.sessionLimit, 24),
-    currentSessionId: conversationStore.currentSessionId || null,
-    currentTranscriptPath: conversationStore.currentTranscriptPath || null,
-    lastSyncedAt: conversationStore.lastSyncedAt || null,
-    updatedAt: conversationStore.updatedAt || null,
-    current: currentConversation
-      ? {
-          sessionId: currentConversation.sessionId || null,
-          transcriptPath: currentConversation.transcriptPath || null,
-          transcriptExists: currentConversation.transcriptExists === true,
-          transcriptLineCount: currentConversation.transcriptLineCount || 0,
-          eventCount: currentConversation.eventCount || 0,
-          userTurnCount: currentConversation.userTurnCount || 0,
-          assistantTurnCount: currentConversation.assistantTurnCount || 0,
-          startedAt: currentConversation.startedAt || null,
-          updatedAt: currentConversation.updatedAt || null,
-          lastEventAt: currentConversation.lastEventAt || null,
-          lastHook: currentConversation.lastHook || null,
-          lastToolName: currentConversation.lastToolName || null,
-          lastRuntimeAt: currentConversation.lastRuntimeAt || null,
-          lastRuntimeProvider: currentConversation.lastRuntimeProvider || null,
-          lastRuntimeModel: currentConversation.lastRuntimeModel || null,
-          latestUserText: currentConversation.latestUserText || '',
-          latestAssistantText: currentConversation.latestAssistantText || '',
-          recentTurns: Array.isArray(currentConversation.recentTurns) ? currentConversation.recentTurns : [],
-        }
-      : null,
-  };
-  const runtimeContract = {
-    classification: 'transitional',
-    desiredEnabled: runtimeDesired,
-    invocationConfigured,
-    disabledReason,
-    provider,
-    model,
-    endpoint,
-    keyEnv,
-    configFamily: 'SUBCONSCIOUS_LLM_*',
-    configSources: {
-      provider: providerSource,
-      model: modelSource,
-      endpoint: endpointSource,
-      keyEnv: keyEnvSource,
-    },
-    keyAvailable: Boolean(apiKey),
-    timeoutMs,
-    maxTokens,
-    temperature,
-    allowedHooks: Array.isArray(runtimeCfg.allowedHooks) && runtimeCfg.allowedHooks.length
-      ? runtimeCfg.allowedHooks
-      : [...SUBCONSCIOUS_RUNTIME_HOOKS],
-    hookRuntimeInstalled: Boolean(pluginRoot && existsSync(path.join(pluginRoot, 'scripts', 'hook-entry.mjs'))),
-    hookBindingsInstalled: installedHooks.length === 4,
-    installedHooks,
-    settingsPath: settingsPath || null,
-    pluginRoot: pluginRoot || null,
-    eventSinkConfigured: Boolean(eventUrl),
-    eventUrl: eventUrl || null,
-    invokeUrl,
-    runtimeMetaPath: runtimeMetaPath || null,
-    updatedAt: normalizeOptionalText(runtimeMeta?.updatedAt, 128),
-  };
-  const providerContract = {
-    provider: normalizeOptionalText(letta?.provider, 128) || 'letta',
-    mode: normalizeOptionalText(letta?.mode, 128) || 'claude-subconscious',
-    lettaAgentId: normalizeOptionalText(letta?.agentId || letta?.lettaAgentId, 256),
-    resolutionSource: normalizeOptionalText(letta?.resolutionSource, 64),
-    lettaStateFile: lettaPath || null,
-    backendRuntimeConfigured: invocationConfigured,
-    modelConfigConfigured: Boolean(model && endpoint),
-    memoryStoreConfigured: Boolean(memoryInfo.path && memoryInfo.kind === 'local-episodic-journal'),
-    invocationConfigured,
-    upstreamBootstrapConfigured: upstream.bootstrap.status === 'configured',
-    upstreamSessionConfigured: upstream.session?.established === true,
-  };
-  const authority = buildSubconsciousAuthoritySummary({
-    enabled: agent.subconsciousEnabled === true,
-    upstream,
-    lettaAgentId: providerContract.lettaAgentId,
-  });
-  const fallback = buildSubconsciousFallbackSummary(guidanceText);
-  const transitional = buildSubconsciousTransitionalSummary(runtimeContract, memoryInfo, conversationContract);
-  const missingBackendPieces = [];
-  if (!invocationConfigured) {
-    missingBackendPieces.push(disabledReason
-      ? `Runtime invocation unavailable: ${disabledReason}.`
-      : 'Runtime invocation is not configured.');
-  }
-  if (!upstream.bootstrap.apiKeyConfigured) {
-    missingBackendPieces.push('Direct upstream Letta bootstrap is wired but blocked by missing LETTA_API_KEY in the running process.');
-  }
-  if (upstream.preTool?.status && upstream.preTool.status !== 'not-run') {
-    missingBackendPieces.push(
-      'SessionStart lifecycle, UserPromptSubmit prompt send, PreToolUse read-and-inject, and Stop transcript/send are cut over to upstream Letta; local runtime guidance and local journals remain transitional.'
-    );
-  } else if (upstream.userPrompt?.status && upstream.userPrompt.status !== 'not-run') {
-    missingBackendPieces.push(
-      'SessionStart lifecycle, UserPromptSubmit prompt send, and Stop transcript/send are cut over to upstream Letta; PreToolUse still has not recorded an upstream-backed result yet.'
-    );
-  } else if (upstream.session?.established === true) {
-    missingBackendPieces.push(
-      'SessionStart lifecycle and the Stop transcript/send path are cut over to upstream Letta, and an explicit UserPromptSubmit upstream send path is wired, but no prompt-send state has been recorded yet; PreToolUse has not been exercised through the upstream-backed path yet.'
-    );
-  } else {
-    missingBackendPieces.push(
-      'Explicit upstream SessionStart, UserPromptSubmit, PreToolUse, and Stop routes are wired, but the broader hook flow still carries local transitional runtime and journal paths.'
-    );
-  }
-  missingBackendPieces.push(
-    'Full Letta-style semantic or relational memory is not implemented; current memory is a local episodic journal with keyword-overlap retrieval only.'
-  );
-  missingBackendPieces.push(
-    'Conversation bookkeeping is transcript-backed session state, not full multi-session semantic orchestration or relational memory.'
-  );
-  if (upstream.session?.notify?.status === 'blocked') {
-    missingBackendPieces.push(
-      `Upstream SessionStart notify/send is separately blocked by Letta: ${upstream.session.notify.blockedReason || 'unknown constraint'}.`
-    );
-  }
-  if (upstream.stop?.status === 'blocked') {
-    missingBackendPieces.push(
-      `Upstream Stop transcript/send is separately blocked by Letta: ${upstream.stop.blockedReason || 'unknown constraint'}.`
-    );
-  }
-  if (upstream.userPrompt?.status === 'blocked') {
-    missingBackendPieces.push(
-      `Upstream UserPromptSubmit send is separately blocked by Letta: ${upstream.userPrompt.blockedReason || 'unknown constraint'}.`
-    );
-  }
-  if (upstream.preTool?.status === 'blocked') {
-    missingBackendPieces.push(
-      `Upstream PreToolUse read/inject is separately blocked: ${upstream.preTool.blockedReason || 'unknown constraint'}.`
-    );
-  }
 
-  return {
-    agentName,
-    agent,
-    stateDir,
-    lettaPath,
-    runtimeMetaPath,
-    letta,
-    runtimeMeta,
-    settingsPath,
-    pluginRoot,
-    installedHooks,
-    memoryState,
-    conversationState,
-    contract: {
-      ok: true,
-      agent: agentName,
-      stage: upstream.preTool?.status && upstream.preTool.status !== 'not-run'
-        ? 'upstream-pretool-lifecycle'
-        : (upstream.userPrompt?.status && upstream.userPrompt.status !== 'not-run'
-        ? 'upstream-user-prompt-lifecycle'
-        : (upstream.session?.established === true
-          ? 'upstream-session-lifecycle'
-          : (invocationConfigured ? 'conversation-aware-runtime' : 'scaffold'))),
-      writable: Boolean(stateDir),
-      enabled: agent.subconsciousEnabled === true,
-      authority,
-      fallback,
-      guidance: {
-        classification: 'fallback',
-        configured: guidanceText.length > 0,
-        source: guidanceText ? 'manual-state-file' : 'none',
-        role: 'fallback',
-        text: guidanceText,
-        preview: guidanceText.length > 240 ? `${guidanceText.slice(0, 240)}...` : guidanceText,
-        updatedAt: normalizeOptionalText(letta?.updatedAt, 128),
-      },
-      runtime: runtimeContract,
-      transitional,
-      provider: providerContract,
-      upstream,
-      memory: memoryInfo,
-      conversation: conversationContract,
-      lastInvocation: lastInvocation || null,
-      lastRuntimeGuidance: generatedGuidance
-        ? {
-            ...generatedGuidance,
-            preview: normalizeOptionalText(generatedGuidance.preview, 600)
-              || (normalizeOptionalText(generatedGuidance.text, 600) || null),
-            text: normalizeOptionalText(generatedGuidance.text, 4000) || '',
-          }
-        : null,
-      missingBackendPieces,
-    },
-    runtimeConfig: {
-      provider,
-      model,
-      endpoint,
-      apiKey,
-      keyEnv,
-      timeoutMs,
-      maxTokens,
-      temperature,
-      allowedHooks: Array.isArray(runtimeCfg.allowedHooks) && runtimeCfg.allowedHooks.length
-        ? runtimeCfg.allowedHooks
-        : [...SUBCONSCIOUS_RUNTIME_HOOKS],
-      invocationConfigured,
-      disabledReason,
-    },
-  };
-  out.contract.manualGuidance = { ...out.contract.guidance };
-  return out;
-}
 
-function buildSubconsciousInvokePrompt(agentName, payload, state, recentEvents, retrievedMemories = null) {
-  const recent = (Array.isArray(recentEvents) ? recentEvents.slice(-6) : []).map((ev) => ({
-    ts: ev?.ts || null,
-    hook: ev?.hook || ev?.hookEventName || null,
-    summary: ev?.summary || null,
-    guidanceSource: ev?.guidanceSource || null,
-    runtimeInvoked: ev?.runtimeInvoked === true,
-  }));
-  const memories = Array.isArray(retrievedMemories?.matches)
-    ? retrievedMemories.matches.map((row) => ({
-      id: row.id,
-      at: row.at,
-      hook: row.hook,
-      summary: row.summary,
-      guidancePreview: row.guidancePreview,
-      overlapKeywords: row.overlapKeywords,
-    }))
-    : [];
-  const conversation = state?.contract?.conversation?.current && typeof state.contract.conversation.current === 'object'
-    ? state.contract.conversation.current
-    : null;
-  return [
-    'You are the hafleet subconscious runtime for one agent.',
-    'Generate a short, concrete internal guidance snippet for the next Claude hook step.',
-    'Do not claim long-term memory or external facts you do not have.',
-    'Base your output only on the supplied hook payload, recent subconscious events, retrieved local episodic memories, and optional human manual guidance.',
-    'Return JSON only: {"guidance":"...", "summary":"..."}',
-    'If no useful guidance should be injected, return {"guidance":"","summary":"no guidance"}',
-    '',
-    `Agent: ${agentName}`,
-    `Hook: ${payload.hook || payload.hookEventName || 'Unknown'}`,
-    `Prompt preview: ${payload.promptPreview || '-'}`,
-    `Tool: ${payload.toolName || '-'}`,
-    `Guidance: ${(state.contract.guidance?.text || state.contract.manualGuidance?.text || '-')}`,
-    `Conversation session: ${conversation?.sessionId || payload?.sessionId || '-'}`,
-    `Conversation transcript: ${conversation?.transcriptPath || payload?.transcriptPath || '-'}`,
-    `Conversation turn counts: user=${conversation?.userTurnCount ?? 0} assistant=${conversation?.assistantTurnCount ?? 0}`,
-    `Recent conversation turns: ${JSON.stringify(Array.isArray(conversation?.recentTurns) ? conversation.recentTurns : [])}`,
-    `Recent events: ${JSON.stringify(recent)}`,
-    `Retrieved local episodic memories: ${JSON.stringify(memories)}`,
-  ].join('\n');
-}
-
-function parseSubconsciousInvokeResponse(raw) {
-  const cleaned = normalizeJsonText(raw);
-  const parsed = JSON.parse(cleaned);
-  return {
-    guidance: normalizeOptionalText(parsed?.guidance, 4000) || '',
-    summary: normalizeOptionalText(parsed?.summary, 600) || 'runtime guidance',
-  };
-}
-
-async function callSubconsciousRuntimeLlm(state, prompt) {
-  const body = {
-    model: state.runtimeConfig.model,
-    temperature: state.runtimeConfig.temperature,
-    max_tokens: state.runtimeConfig.maxTokens,
-    messages: [
-      { role: 'system', content: 'You are a strict JSON generator. Output only valid JSON.' },
-      { role: 'user', content: prompt },
-    ],
-  };
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), state.runtimeConfig.timeoutMs);
-  try {
-    const resp = await fetch(state.runtimeConfig.endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${state.runtimeConfig.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => '');
-      throw new Error(`llm http ${resp.status}: ${errText.slice(0, 220)}`);
-    }
-    const json = await resp.json();
-    const content = json?.choices?.[0]?.message?.content;
-    if (!content) throw new Error('llm response missing choices[0].message.content');
-    return { content, usage: json?.usage || null };
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 function normalizeAttachmentName(value, fallback = 'file') {
   let name = typeof value === 'string' ? value.trim() : '';
@@ -2507,19 +1268,7 @@ function authorizeAgentCredential(req, agentName) {
   });
 }
 
-function authorizeSubconsciousEventIngest(req) {
-  return authorizeSubconsciousEventIngestAdapter(req, {
-    env: process.env,
-    isLocalRequest,
-  });
-}
 
-function canAccessPrivilegedSubconsciousDetail(req) {
-  return canAccessPrivilegedSubconsciousDetailAdapter(req, {
-    env: process.env,
-    isLocalRequest,
-  });
-}
 
 const requireBearer = createRequireBearer({ env: process.env });
 
@@ -2765,137 +1514,6 @@ function buildPersistedUpstreamState(upstream) {
   return safe;
 }
 
-function buildOperationalSubconsciousContract(contract) {
-  const safe = cloneJsonValue(contract);
-  if (!safe || typeof safe !== 'object') return safe;
-
-  if (safe.runtime && typeof safe.runtime === 'object') {
-    const runtimeSummary = {
-      classification: safe.runtime.classification || 'transitional',
-      desiredEnabled: safe.runtime.desiredEnabled === true,
-      invocationConfigured: safe.runtime.invocationConfigured === true,
-      disabledReason: safe.runtime.disabledReason || null,
-    };
-    delete safe.runtime.settingsPath;
-    delete safe.runtime.pluginRoot;
-    delete safe.runtime.eventUrl;
-    delete safe.runtime.invokeUrl;
-    delete safe.runtime.runtimeMetaPath;
-    safe.runtime = runtimeSummary;
-  }
-
-  if (safe.provider && typeof safe.provider === 'object') {
-    delete safe.provider.lettaStateFile;
-  }
-
-  if (safe.upstream && typeof safe.upstream === 'object') {
-    delete safe.upstream.root;
-    delete safe.upstream.promptFile;
-    delete safe.upstream.scripts;
-    delete safe.upstream.durableHome;
-    delete safe.upstream.durableStateDir;
-    delete safe.upstream.conversationsFile;
-    delete safe.upstream.configPath;
-
-    if (safe.upstream.bootstrap && typeof safe.upstream.bootstrap === 'object') {
-      delete safe.upstream.bootstrap.workdir;
-      delete safe.upstream.bootstrap.checkedAt;
-      if (safe.upstream.bootstrap.blockedReason) {
-        safe.upstream.bootstrap.blockedReason = redactPathLikeText(safe.upstream.bootstrap.blockedReason, 1200);
-      }
-    }
-    if (safe.upstream.session && typeof safe.upstream.session === 'object') {
-      delete safe.upstream.session.sessionStateFile;
-      delete safe.upstream.session.cwd;
-      delete safe.upstream.session.checkedAt;
-      delete safe.upstream.session.messageSentAt;
-      if (safe.upstream.session.blockedReason) {
-        safe.upstream.session.blockedReason = redactPathLikeText(safe.upstream.session.blockedReason, 1200);
-      }
-      if (safe.upstream.session.notify && typeof safe.upstream.session.notify === 'object') {
-        delete safe.upstream.session.notify.attemptedAt;
-        delete safe.upstream.session.notify.messageSentAt;
-        if (safe.upstream.session.notify.blockedReason) {
-          safe.upstream.session.notify.blockedReason = redactPathLikeText(safe.upstream.session.notify.blockedReason, 1200);
-        }
-      }
-    }
-    if (safe.upstream.userPrompt && typeof safe.upstream.userPrompt === 'object') {
-      delete safe.upstream.userPrompt.transcriptPath;
-      delete safe.upstream.userPrompt.transcriptExists;
-      delete safe.upstream.userPrompt.syncStateFile;
-      delete safe.upstream.userPrompt.scriptPath;
-      delete safe.upstream.userPrompt.checkedAt;
-      delete safe.upstream.userPrompt.attemptedAt;
-      delete safe.upstream.userPrompt.messageSentAt;
-      delete safe.upstream.userPrompt.transcriptLineCount;
-      delete safe.upstream.userPrompt.lastProcessedIndexBefore;
-      if (safe.upstream.userPrompt.blockedReason) {
-        safe.upstream.userPrompt.blockedReason = redactPathLikeText(safe.upstream.userPrompt.blockedReason, 1200);
-      }
-    }
-    if (safe.upstream.preTool && typeof safe.upstream.preTool === 'object') {
-      delete safe.upstream.preTool.syncStateFile;
-      delete safe.upstream.preTool.scriptPath;
-      delete safe.upstream.preTool.checkedAt;
-      delete safe.upstream.preTool.attemptedAt;
-      delete safe.upstream.preTool.injectedAt;
-      delete safe.upstream.preTool.newMessageCount;
-      delete safe.upstream.preTool.changedBlockCount;
-      delete safe.upstream.preTool.lastSeenMessageIdBefore;
-      delete safe.upstream.preTool.toolName;
-      if (safe.upstream.preTool.blockedReason) {
-        safe.upstream.preTool.blockedReason = redactPathLikeText(safe.upstream.preTool.blockedReason, 1200);
-      }
-    }
-    if (safe.upstream.stop && typeof safe.upstream.stop === 'object') {
-      delete safe.upstream.stop.transcriptPath;
-      delete safe.upstream.stop.transcriptExists;
-      delete safe.upstream.stop.syncStateFile;
-      delete safe.upstream.stop.scriptPath;
-      delete safe.upstream.stop.checkedAt;
-      delete safe.upstream.stop.attemptedAt;
-      delete safe.upstream.stop.messageSentAt;
-      delete safe.upstream.stop.transcriptMessageCount;
-      delete safe.upstream.stop.newMessageCount;
-      delete safe.upstream.stop.lastProcessedIndexBefore;
-      if (safe.upstream.stop.blockedReason) {
-        safe.upstream.stop.blockedReason = redactPathLikeText(safe.upstream.stop.blockedReason, 1200);
-      }
-    }
-  }
-
-  if (safe.memory && typeof safe.memory === 'object') {
-    safe.memory = {
-      classification: safe.memory.classification || 'transitional',
-    };
-  }
-
-  if (safe.conversation && typeof safe.conversation === 'object') {
-    safe.conversation = {
-      classification: safe.conversation.classification || 'transitional',
-    };
-  }
-
-  if (safe.guidance && typeof safe.guidance === 'object') {
-    delete safe.guidance.text;
-    delete safe.guidance.preview;
-  }
-  if (safe.manualGuidance && typeof safe.manualGuidance === 'object') {
-    delete safe.manualGuidance.text;
-    delete safe.manualGuidance.preview;
-    if (!safe.guidance) safe.guidance = { ...safe.manualGuidance };
-  }
-
-  if (Object.prototype.hasOwnProperty.call(safe, 'lastRuntimeGuidance')) delete safe.lastRuntimeGuidance;
-  if (Object.prototype.hasOwnProperty.call(safe, 'lastInvocation')) delete safe.lastInvocation;
-
-  if (Array.isArray(safe.missingBackendPieces)) {
-    safe.missingBackendPieces = safe.missingBackendPieces.map((item) => redactPathLikeText(item, 1200) || item);
-  }
-
-  return safe;
-}
 
 // ── In-memory state ───────────────────────────────────────────────────
 const sseAdapter = createSseAdapter();
@@ -2948,6 +1566,32 @@ function saveSeatDeclarations() { return saveJson('seats.json', seatDeclarations
 const engagementStore = createEngagementStore({
   load: () => loadJsonSync('engagements.json', {}),
   persist: (state) => saveJson('engagements.json', state),
+});
+
+/*
+ * Measured consumption, persisted, because the transcripts it is read from are not ours.
+ *
+ * The coding CLIs rotate, prune and delete their own session files. Computing usage on
+ * demand means a figure that silently drops when one goes away, while the ceiling was
+ * still spent by that work. The ledger keeps a high-water mark per session, so the total
+ * survives a source disappearing and is idempotent under re-reading — see
+ * lib/metering/ledger.js for why an appended snapshot would have double-counted.
+ */
+const usageLedger = createUsageLedger({
+  load: () => loadJsonSync('usage-ledger.json', {}),
+  persist: (state) => saveJson('usage-ledger.json', state),
+});
+
+/*
+ * Invitations a project has extended that the contributor has not answered (ADR-014).
+ *
+ * The bridge owns the Matrix state and pushes here; this is the copy the console reads. Same
+ * shape as approval-bindings, for the same reason: the console talks to the backend, and a
+ * bridge-owned fact has to cross that line somewhere.
+ */
+const pendingInviteStore = createPendingInviteStore({
+  load: () => loadJsonSync('pending-invites.json', {}),
+  persist: (state) => saveJson('pending-invites.json', state),
 });
 
 /*
@@ -3017,7 +1661,6 @@ let supervisorLifecycleSweepRunning = false;
 let localTmuxSnapshotWarnAt = 0;
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const AUDIT_LOG = dataPath('audit.jsonl');
-const SUBCONSCIOUS_EVENT_LOG = dataPath('subconscious-events.jsonl');
 const MESSAGE_ARCHIVE_LOG = dataPath('messages-archive.jsonl');
 const DELIVERY_EVENT_LOG = dataPath('message-delivery-events.jsonl');
 repairJsonlTornTail(DELIVERY_EVENT_LOG);
@@ -3036,7 +1679,6 @@ const matrixDispatchStore = new MatrixDispatchStore({
   journalPath: dataPath('matrix/source-events.jsonl'),
 });
 let matrixDispatchFailureStageForTest = null;
-const subconsciousEventsByAgent = new Map(); // agent -> event[]
 const pendingHumanTargetCache = new Map(); // agent -> { hasPendingHuman, targets }
 const swapAlertState = {
   active: false,
@@ -3193,22 +1835,6 @@ function syncAgentMachine(agentName, signals) {
 
 const agentsBeforeNormalization = JSON.stringify(agents);
 
-for (const ev of loadJsonlTailSync(SUBCONSCIOUS_EVENT_LOG, SUBCONSCIOUS_EVENT_HISTORY_LIMIT)) {
-  const agent = normalizeLooseAgentName(ev?.agent);
-  if (!agent) continue;
-  const row = {
-    ...ev,
-    agent,
-    ts: normalizeEventTs(ev?.ts),
-  };
-  const list = subconsciousEventsByAgent.get(agent) || [];
-  list.push(row);
-  if (list.length > SUBCONSCIOUS_EVENT_AGENT_LIMIT) {
-    subconsciousEventsByAgent.set(agent, list.slice(list.length - SUBCONSCIOUS_EVENT_AGENT_LIMIT));
-  } else {
-    subconsciousEventsByAgent.set(agent, list);
-  }
-}
 
 for (const agent of Object.values(agents)) {
   agent.name = agent.name || null;
@@ -3246,9 +1872,6 @@ for (const agent of Object.values(agents)) {
   agent.homeDir = normalizeWorkspacePath(agent.homeDir) || null;
   agent.workdir = normalizeWorkspacePath(agent.workdir) || null;
   agent.stateDir = normalizeWorkspacePath(agent.stateDir) || null;
-  agent.subconsciousEnabled = agent.subconsciousEnabled === true
-    ? true
-    : (agent.subconsciousEnabled === false ? false : null);
   agent.managedProjects = normalizeManagedProjects(agent.managedProjects);
   agent.human = normalizeHumanMeta(agent.human, { preserveLegacy: true });
   agent.task = normalizeAgentTask(agent.task, agent.name);
@@ -3724,9 +2347,6 @@ function ensureAgentRecord(name, defaults = {}) {
     homeDir: normalizeWorkspacePath(defaults.homeDir) || null,
     workdir: normalizeWorkspacePath(defaults.workdir) || null,
     stateDir: normalizeWorkspacePath(defaults.stateDir) || null,
-    subconsciousEnabled: defaults.subconsciousEnabled === true
-      ? true
-      : (defaults.subconsciousEnabled === false ? false : null),
     managedProjects: normalizeManagedProjects(defaults.managedProjects),
     human: normalizeHumanMeta(defaults.human, { preserveLegacy: true }),
     task: normalizeAgentTask(defaults.task, agentName),
@@ -5283,9 +3903,29 @@ function setRuntimeWorkspacePath(runtime, payload = {}) {
   if (!runtime || typeof runtime !== 'object') return false;
   if (!Object.prototype.hasOwnProperty.call(payload, 'workspacePath')) return false;
   const normalized = normalizeWorkspacePath(payload.workspacePath);
-  if ((runtime.workspacePath || null) === (normalized || null)) return false;
-  runtime.workspacePath = normalized;
-  return true;
+  /*
+   * TWO FIELDS, TWO QUESTIONS.
+   *
+   * `workspacePath` answers "where is this agent running now", and the activity sweep
+   * correctly clears it when an agent has no pane — a stopped agent is running nowhere.
+   *
+   * `lastWorkspacePath` answers "where did it last run", and is never cleared. Metering
+   * needs that one: consumption is read from transcripts that stay on disk after the
+   * agent stops, and clearing the only key to them made a stopped agent's usage
+   * unattributable — a monthly ceiling still spent by work that has finished. Reporting
+   * an agent as having consumed nothing because it is no longer running would be the
+   * wrong answer to a question nobody asked.
+   */
+  let changed = false;
+  if (normalized && runtime.lastWorkspacePath !== normalized) {
+    runtime.lastWorkspacePath = normalized;
+    changed = true;
+  }
+  if ((runtime.workspacePath || null) !== (normalized || null)) {
+    runtime.workspacePath = normalized;
+    changed = true;
+  }
+  return changed;
 }
 
 function syncLocalAgentOnlineState(agent, runtime, tmuxTarget, manualDown) {
@@ -6984,9 +5624,6 @@ function serializeAgent(agent) {
     homeDir: normalizeWorkspacePath(agent.homeDir) || null,
     workdir: normalizeWorkspacePath(agent.workdir) || null,
     stateDir: normalizeWorkspacePath(agent.stateDir) || null,
-    subconsciousEnabled: agent.subconsciousEnabled === true
-      ? true
-      : (agent.subconsciousEnabled === false ? false : null),
     managedProjects: normalizeManagedProjects(agent.managedProjects),
     human: normalizeHumanMeta(agent.human),
     task: normalizeAgentTask(agent.task, agent.name),
@@ -6997,6 +5634,9 @@ function serializeAgent(agent) {
     idleDurationSec: Number(runtime?.idleDurationSec) || 0,
     lastTmuxActivitySec: Number(runtime?.lastTmuxActivitySec) || null,
     workspacePath: runtime?.workspacePath || null,
+    // Where it last ran, retained after it stops. Metering reads this; see
+    // setRuntimeWorkspacePath.
+    lastWorkspacePath: runtime?.lastWorkspacePath || runtime?.workspacePath || null,
     runtimeObservation: serializeRuntimeObservation(runtime),
     mcpPresent: runtime?.mcpPresent === true
       ? true
@@ -7654,7 +6294,6 @@ async function pushNotify(agentName, msg, options = {}) {
 const app = express();
 app.set('trust proxy', 'loopback');  // trust nginx on localhost, use X-Forwarded-For for real IP
 const API_TOKEN = process.env.API_TOKEN;
-const SUBCONSCIOUS_EVENT_TOKEN = normalizeOptionalText(process.env.HAFLEET_SUBCONSCIOUS_EVENT_TOKEN, 512);
 app.use((req, res, next) => {
   // Skip global JSON parser for large-upload routes (they have route-specific limits).
   if (req.method === 'POST' && (req.path.endsWith('/avatar') || req.path === '/api/media/stage')) return next();
@@ -7673,7 +6312,6 @@ app.use('/api', (req, res, next) => {
 });
 app.use('/api', createApiAuthMiddleware({
   apiToken: API_TOKEN,
-  subconsciousEventToken: SUBCONSCIOUS_EVENT_TOKEN,
   isLocalRequest,
 }));
 
@@ -8090,6 +6728,80 @@ app.get('/api/approval-bindings', requireApprovalBridgeSecret, (req, res) => {
   }
 });
 
+/*
+ * ── Pending project invitations (ADR-014 amendment 2026-08-11) ─────────────────────────────
+ *
+ * A project invites one of the contributor's agents into its room. Until this existed the
+ * invitation either caused a silent auto-join with no ownership binding — present and
+ * permanently unengageable — or was dropped with a log line the contributor never saw.
+ *
+ * The split of authority below is the point:
+ *
+ *   the BRIDGE reports (bridge secret). It is the only thing that sees Matrix state.
+ *   the OPERATOR decides (bearer). Accepting spends their tokens, so it is their call.
+ *
+ * Deciding does not happen here. The backend records the answer and broadcasts it; only the
+ * bridge can join a Matrix room, mark it trusted, and write the ownership binding. Recording a
+ * decision the bridge then failed to carry out would be the "looks accepted, works for nothing"
+ * state this replaces — so the endpoints below record and broadcast, and the bridge's own
+ * acceptance is what makes it true.
+ */
+function respondPendingInviteError(res, error, fallback) {
+  if (error instanceof PendingInviteError) {
+    const status = { bad_request: 400, not_found: 404, conflict: 409 }[error.code] ?? 500;
+    return res.status(status).json({ error: error.message, code: error.code });
+  }
+  console.error(`[pending-invites] ${fallback}:`, error?.message || error);
+  return res.status(500).json({ error: fallback });
+}
+
+app.put('/api/matrix/pending-invites', requireBridgeSecret, (req, res) => {
+  try {
+    return res.json({ ok: true, invite: pendingInviteStore.upsert(req.body || {}) });
+  } catch (error) {
+    return respondPendingInviteError(res, error, 'failed to record pending invitation');
+  }
+});
+
+app.get('/api/matrix/pending-invites', requireBearer, (req, res) => {
+  try {
+    const state = normalizeOptionalText(req.query?.state, 16) || 'pending';
+    return res.json({
+      ok: true,
+      invites: pendingInviteStore.list({ state }),
+      pending: pendingInviteStore.pendingCount(),
+    });
+  } catch (error) {
+    return respondPendingInviteError(res, error, 'failed to list pending invitations');
+  }
+});
+
+app.post('/api/matrix/pending-invites/decide', requireBearer, (req, res) => {
+  try {
+    const b = req.body || {};
+    const roomId = normalizeOptionalText(b.projectRoomId ?? b.project_room_id, 256);
+    const agent = normalizeOptionalText(b.agent, 64);
+    const accept = b.accept === true;
+    if (!roomId || !agent) {
+      return res.status(400).json({ error: 'projectRoomId and agent are required' });
+    }
+    const record = pendingInviteStore.settle(
+      roomId, agent, accept ? 'accepted' : 'declined',
+      getRequestAgentName(req) || 'operator',
+    );
+    /*
+     * Broadcast, because the join can only happen in the bridge. The response says the decision
+     * was recorded and queued — deliberately not that the agent has joined, which the backend
+     * cannot know. Overstating that is the same class of defect as the binding outcome that used
+     * to be omitted from a verdict.
+     */
+    broadcastSSE('matrix_invite_decision', { projectRoomId: roomId, agent, accept });
+    return res.json({ ok: true, queued: true, invite: record });
+  } catch (error) {
+    return respondPendingInviteError(res, error, 'failed to record the invitation decision');
+  }
+});
+
 app.post('/api/approvals', requireAgentToken(_tokenFromApprovalBody), (req, res) => {
   try {
     const record = approvalStore.createRequest(req.body || {});
@@ -8197,7 +6909,6 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     workdir,
     stateDir,
     presetId,
-    subconsciousEnabled,
     managedProjects,
     human,
     task,
@@ -8235,17 +6946,7 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     const preset = frameworkPresets.find(p => p.id === presetId);
     if (!preset) return res.status(400).json({ error: `unknown preset: ${presetId}` });
     presetFramework = preset.framework || null;
-    resolvedRuntimeProfile = {
-      primary: {
-        framework: preset.framework || null,
-        provider: preset.provider || null,
-        model: preset.model || null,
-        reasoning: preset.reasoning || null,
-        ...(preset.extraArgs ? { extraArgs: preset.extraArgs } : {}),
-        ...(preset.apiBaseUrl ? { apiBaseUrl: preset.apiBaseUrl } : {}),
-        ...(preset.apiKey ? { apiKey: preset.apiKey } : {}),
-      },
-    };
+    resolvedRuntimeProfile = runtimeProfileFromPreset(preset);
   }
   agents[agentName] = {
     name: agentName,
@@ -8289,13 +6990,6 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     homeDir: normalizeWorkspacePath(homeDir) || normalizeWorkspacePath(existing.homeDir) || null,
     workdir: normalizeWorkspacePath(workdir) || normalizeWorkspacePath(existing.workdir) || null,
     stateDir: normalizeWorkspacePath(stateDir) || normalizeWorkspacePath(existing.stateDir) || null,
-    subconsciousEnabled: subconsciousEnabled === true
-      ? true
-      : (subconsciousEnabled === false
-        ? false
-        : (existing.subconsciousEnabled === true
-          ? true
-          : (existing.subconsciousEnabled === false ? false : null))),
     managedProjects: Array.isArray(managedProjects)
       ? normalizeManagedProjects(managedProjects)
       : normalizeManagedProjects(existing.managedProjects),
@@ -8332,6 +7026,101 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   res.json({ ok: true, agent: serializeAgent(agents[agentName]) });
 });
 
+/**
+ * A preset, expressed as the runtimeProfile an agent runs under.
+ *
+ * Extracted rather than copied, because the two callers must not drift: `POST /api/agents`
+ * resolves a preset at registration, and `PUT /api/agents/:name/preset` resolves the same preset
+ * when a contributor attaches one later. The first version of the binding route set `presetId`
+ * ALONE, and the result was an agent that looked configured and still filled no role —
+ * `agentForRole()` reads `modelTier(agent.runtimeProfile)`, not the preset, so a ceiling without a
+ * profile is a tierless agent. Nothing failed loudly; the engagement simply came back with
+ * `agent: null` and then `no_ceiling`.
+ */
+function runtimeProfileFromPreset(preset) {
+  if (!preset) return null;
+  return {
+    primary: {
+      framework: preset.framework || null,
+      provider: preset.provider || null,
+      model: preset.model || null,
+      reasoning: preset.reasoning || null,
+      ...(preset.extraArgs ? { extraArgs: preset.extraArgs } : {}),
+      ...(preset.apiBaseUrl ? { apiBaseUrl: preset.apiBaseUrl } : {}),
+      ...(preset.apiKey ? { apiKey: preset.apiKey } : {}),
+    },
+  };
+}
+
+/**
+ * Bind an agent to a framework preset — the CONTRIBUTOR's act, not the agent's.
+ *
+ * WHY THIS ROUTE EXISTS. `presetId` is what attaches a CEILING to an agent:
+ * `remainingFor()` reads `agents[name].presetId` -> `preset.ceiling.tokens`, and
+ * `engagementStore.decide()` refuses to allocate against an agent whose remaining is null
+ * ("cannot allocate against an agent with no declared ceiling"). Until this route, the only
+ * writers of `presetId` were `POST /api/agents` and the agent PATCH, both guarded by
+ * `requireAgentToken` — and no CLI path passes a preset. So a contributor could create a
+ * preset with a ceiling, onboard an agent, and never connect them: every engagement was
+ * unapprovable, and the console showed the agent under "bare" with no action to fix it.
+ * Found by walking the flow end to end rather than by a failing test.
+ *
+ * WHY `requireBearer` AND NOT `requireAgentToken`. The ceiling is the contributor's
+ * declaration about their own resource — how much of their capacity they are willing to lend
+ * (ADR-013's L1/L2). Gating it on the agent's own credential makes the resource the authority
+ * on its own budget, which is self-authorization: an agent could raise its ceiling by
+ * re-registering with a richer preset. The runtimeProfile stays the agent's to report; the
+ * budget does not.
+ *
+ * Unbinding is `presetId: null` rather than a DELETE, so "which preset" and "no preset" travel
+ * through one code path and cannot disagree about what the absent case means.
+ */
+app.put('/api/agents/:name/preset', requireBearer, (req, res) => {
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+
+  const raw = req.body?.presetId;
+  // Absent and explicit-null both mean unbind; anything else must name a real preset.
+  const requested = raw === null || raw === undefined || raw === '' ? null : normalizeOptionalText(raw, 128);
+  if (requested !== null && !requested) return res.status(400).json({ error: 'invalid presetId' });
+  const preset = requested ? frameworkPresets.find((p) => p.id === requested) : null;
+  if (requested && !preset) return res.status(400).json({ error: `unknown preset: ${requested}` });
+
+  const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
+  const previous = agent.presetId ?? null;
+  agent.presetId = requested;
+  /*
+   * The PROFILE moves with the preset, not just the id. `agentForRole()` decides whether an agent
+   * can fill a role from `modelTier(agent.runtimeProfile)`, so setting `presetId` alone produces an
+   * agent with a ceiling, no tier, and no role — which surfaces later as an engagement with
+   * `agent: null` and a `no_ceiling` refusal, pointing at the budget rather than at the profile.
+   *
+   * Unbinding clears it. Leaving the last preset's profile behind would let a contributor detach a
+   * resource and have it keep serving on the terms they just withdrew.
+   */
+  const resolvedProfile = runtimeProfileFromPreset(preset);
+  agent.runtimeProfile = resolvedProfile ? normalizeRuntimeProfile(resolvedProfile) : null;
+  if (!saveAgentsOrRollback(agentName, persistenceSnapshot)) {
+    return res.status(503).json({ error: 'agents persistence failed' });
+  }
+  auditLog(req, { agent: agentName, summary: { presetId: requested, previousPresetId: previous } });
+  /*
+   * `remaining` is returned because it is the question the caller actually has — binding a
+   * preset with no ceiling leaves the agent just as unapprovable as before, and answering with
+   * only `ok: true` would hide that.
+   */
+  return res.json({
+    ok: true,
+    agent: serializeAgent(agents[agentName]),
+    ceilingTokens: preset?.ceiling?.tokens ?? null,
+    remaining: remainingFor(agentName),
+    // The tier is what makes the agent fillable at all, so it is reported beside the budget.
+    tier: modelTier(agents[agentName].runtimeProfile) ?? null,
+  });
+});
+
 app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => {
   refreshServerLiveness();
   const agentName = normalizeAgentName(req.params.name);
@@ -8352,7 +7141,6 @@ app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => 
     homeDir,
     workdir,
     stateDir,
-    subconsciousEnabled,
     managedProjects,
     human,
     task,
@@ -8412,11 +7200,6 @@ app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => 
   }
   if (stateDir !== undefined) {
     agent.stateDir = normalizeWorkspacePath(stateDir) || null;
-  }
-  if (subconsciousEnabled !== undefined) {
-    agent.subconsciousEnabled = subconsciousEnabled === true
-      ? true
-      : (subconsciousEnabled === false ? false : null);
   }
   if (managedProjects !== undefined) {
     agent.managedProjects = normalizeManagedProjects(managedProjects);
@@ -8696,17 +7479,43 @@ app.get('/api/agents/:name', (req, res) => {
   res.json({ ...serializeAgent(agent), groups: memberOf });
 });
 
-app.delete('/api/agents/:name', requireBearer, (req, res) => {
+app.delete('/api/agents/:name', requireBearer, async (req, res) => {
   const agentName = normalizeAgentName(req.params.name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
   if (req.query.force === 'true') {
+    /*
+     * STOP IT FIRST. Deleting the record left the agent's tmux session and its codex process
+     * running: an orphan that keeps spending the contributor's tokens, keeps its MCP server talking
+     * to a backend that no longer knows it, and holds the workspace — while the console reports the
+     * agent gone. Observed for real: a session from 00:03 still alive after the record was deleted
+     * at 07:55.
+     *
+     * Not conditional on `online`: the record's own liveness can be stale, and the session either
+     * exists or it does not — asking tmux is cheaper and more truthful than trusting the flag.
+     */
+    const sessionName = normalizeOptionalText(String(agent.tmux || '').split(':')[0], 128) || agentName;
+    /*
+     * Through `hostRuntime`, never a direct shell-out to the tmux binary. The first version of this
+     * fix did exactly that and tests/runtime-interface.test.js rejected it: 34 raw invocations were
+     * extracted from this file precisely so it does not assume one platform, and adding one back
+     * re-couples it. (The invariant is a source grep, so this comment must not spell the forbidden
+     * call either — quoting it verbatim tripped the check on the very line explaining the rule.) Gated on the capability for the same reason — a headless ACP runtime has no
+     * pane to kill, and it answers for itself rather than being assumed to behave like tmux.
+     */
+    let stopped = false;
+    if (hostRuntime.capabilities.sessions) {
+      stopped = await hostRuntime.killSession(sessionName);
+      if (stopped) console.log(`Agent '${agentName}': stopped session '${sessionName}' before deleting`);
+    } else {
+      console.warn(`[backend] ${hostRuntime.name} runtime cannot stop sessions; deleting '${agentName}' may leave its process running`);
+    }
     const deletion = clearDeletedAgentState(agentName);
     if (!deletion.ok) return res.status(503).json({ error: deletion.error || 'agent force-delete persistence failed' });
     console.log(`Agent '${agentName}' permanently deleted`);
-    auditLog(req, { agent: agentName, summary: { action: 'force-delete' } });
-    return res.json({ ok: true, deleted: true, name: agentName });
+    auditLog(req, { agent: agentName, summary: { action: 'force-delete', sessionKilled: stopped } });
+    return res.json({ ok: true, deleted: true, name: agentName, sessionKilled: stopped });
   }
   const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
   agent.tmux = null;
@@ -8771,6 +7580,226 @@ app.get('/api/agents/:name/launch-env', requireBearer, (req, res) => {
   res.json({ runtimeProfile: rp || null });
 });
 
+/**
+ * Provision a NEW agent — the step nothing could do before.
+ *
+ * THE HOLE THIS FILLS. Every launcher in the system starts an agent that already exists:
+ * `/start` 404s on an unknown name, and the supervisor's own comment says it "launches into an
+ * already-provisioned home". The only writer of a new agent record is `POST /api/agents`, which is
+ * `requireAgentToken` — the agent registers ITSELF. But it cannot authenticate without a token, and
+ * the token lives in a provisioned home, and the only thing that provisioned a home was a shell
+ * command. So the first launch of any agent had to be typed by a human on the host, and no UI
+ * could offer it.
+ *
+ * WHY local-only, like `/start`. This spawns a process on the machine the backend runs on. A
+ * console served from host A cannot provision on contributor host B — that needs an agent-side
+ * daemon there, which does not exist. Rather than pretend otherwise, the constraint is enforced
+ * here and stated on the page.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO: launch. Provisioning writes a home, a token and an offline
+ * agent record; `/start` runs it. Kept separate because they fail for unrelated reasons — a
+ * provisioning failure is a filesystem or naming problem, a launch failure is tmux or the
+ * framework CLI — and a single call would report the second while hiding which one happened.
+ */
+/**
+ * The agent's pane, as text. Read-only.
+ *
+ * Asked for directly: "why don't you show the live tmux session in the console". Everything needed
+ * already existed — `hostRuntime.capturePane` and `captureLocalPaneContentAsync` — but only the old
+ * dashboard on its own port exposed it (`GET /api/tmux/capture/:session` in server.js), and the
+ * console proxy speaks to this backend alone. So the capability was present and unreachable.
+ *
+ * Through the runtime, never a direct tmux call: tests/runtime-interface.test.js forbids the latter,
+ * and gating on `capabilities.capture` is what keeps this honest on a headless ACP runtime, which
+ * has no pane to capture and says so rather than returning an empty string that reads as "idle".
+ *
+ * `requireBearer` and NOT local-only: capturing is a read, and unlike /start it spawns nothing. But
+ * a pane is the agent's raw screen — it can contain anything the agent printed, including secrets it
+ * was handed — so it stays behind the operator credential and is never part of any public payload.
+ */
+app.get('/api/agents/:name/pane', requireBearer, async (req, res) => {
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+  if (!hostRuntime.capabilities.capture) {
+    /*
+     * 501, not an empty capture: "this runtime cannot show you a screen" and "the screen is blank"
+     * are different answers, and a caller that cannot tell them apart will render the second.
+     */
+    return res.status(501).json({
+      error: `the ${hostRuntime.name} runtime cannot capture a pane`,
+      capture: false,
+    });
+  }
+  const target = normalizeOptionalText(agent.tmux, 128);
+  if (!target) {
+    return res.status(409).json({ error: 'agent has no pane', reason: agent.online ? 'no_tmux_target' : 'offline' });
+  }
+  try {
+    /*
+     * `{ text, hash }`, not a bare string — this helper hashes for the change-detection callers, and
+     * assuming a string here cost one round trip with `text.split is not a function`.
+     */
+    const capture = await captureLocalPaneContentAsync(target);
+    if (!capture || typeof capture.text !== 'string') {
+      // The pane target is recorded but the runtime could not read it — a session that has gone.
+      return res.status(409).json({ error: 'pane could not be captured', target, reason: 'capture_failed' });
+    }
+    const text = capture.text;
+    return res.json({
+      ok: true,
+      agent: agentName,
+      target,
+      capturedAt: Date.now(),
+      // The hash lets a poller skip re-rendering an unchanged pane.
+      hash: capture.hash,
+      // Line-capped so one enormous paste cannot make this response the biggest thing on the wire.
+      text: text.split('\n').slice(-400).join('\n'),
+    });
+  } catch (error) {
+    console.error(`[pane] capture failed for ${agentName}: ${error.message}`);
+    return res.status(502).json({ error: 'pane capture failed', detail: error.message });
+  }
+});
+
+app.post('/api/agents/:name/provision', requireBearer, (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: 'local-only endpoint' });
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  /*
+   * Refused rather than merged. Provisioning re-runs a script that writes a home directory and a
+   * token; doing that over a live agent could replace the credential it is currently authenticating
+   * with, which would take a working agent offline for no stated reason.
+   */
+  if (isAgentRecord(agents[agentName])) {
+    return res.status(409).json({ error: `agent '${agentName}' already exists` });
+  }
+
+  const framework = normalizeOptionalText(req.body?.framework, 32);
+  const VALID_FRAMEWORKS = new Set(['claude', 'codex']);
+  if (!framework || !VALID_FRAMEWORKS.has(framework)) {
+    return res.status(400).json({ error: `framework must be one of: ${[...VALID_FRAMEWORKS].join(', ')}` });
+  }
+
+  const presetId = normalizeOptionalText(req.body?.presetId, 128) || null;
+  const preset = presetId ? frameworkPresets.find((p) => p.id === presetId) : null;
+  if (presetId && !preset) return res.status(400).json({ error: `unknown preset: ${presetId}` });
+  /*
+   * A preset whose framework disagrees with the requested one would produce an agent whose
+   * runtimeProfile says codex while its launcher runs claude. Refused here, where the mismatch is
+   * still a sentence, rather than at launch where it is a confusing crash.
+   */
+  if (preset?.framework && preset.framework !== framework) {
+    return res.status(400).json({
+      error: `preset '${preset.name}' is for ${preset.framework}, not ${framework}`,
+    });
+  }
+
+  /*
+   * `~/foo` is expanded rather than refused. The onboarding form's own placeholder shows `~/ops-ws`,
+   * so the shape it teaches was the shape the API rejected — and `normalizeWorkspacePath` wants an
+   * absolute path. The expansion is unambiguous HERE and only here: this endpoint is local-only, so
+   * `~` can only mean the home of the user the backend runs as, which is the same user the agent
+   * will run as. It would not be well-defined on a remote route, which is why it is not done in the
+   * shared helper.
+   */
+  const rawProject = String(req.body?.project ?? '').trim();
+  const tildeExpanded = rawProject === '~' || rawProject.startsWith('~/')
+    ? path.join(homedir(), rawProject.slice(1))
+    : rawProject;
+  const project = normalizeWorkspacePath(tildeExpanded);
+  if (rawProject && !project) {
+    return res.status(400).json({ error: 'project must be an absolute path (or start with ~/)' });
+  }
+
+  /*
+   * Created if missing, because the form's own hint promises it ("created automatically if it does
+   * not exist") while `provision-v1-agent-home.js` refuses with "project path does not exist". The
+   * contradiction is what an operator actually hit: they typed a directory they intended to work in
+   * and provisioning failed.
+   *
+   * Only a directory is created, and only the one named. This is a local-only, operator-authenticated
+   * route, so the path is the caller's own filesystem and the caller just asked for it — but it is
+   * still a write outside the runtime dir, which is why it is logged.
+   */
+  if (project && !existsSync(project)) {
+    try {
+      mkdirSync(project, { recursive: true });
+      console.log(`[provision] created project directory ${project}`);
+    } catch (error) {
+      return res.status(400).json({ error: `could not create project directory ${project}: ${error.message}` });
+    }
+  }
+
+  const script = path.join(REPO_ROOT, 'scripts', 'provision-v1-agent-home.js');
+  const args = [script, '--name', agentName, '--type', framework];
+  if (project) args.push('--project', project, '--project-mode', 'symlink');
+
+  let provisioned;
+  try {
+    // Synchronous on purpose: the caller cannot do anything useful until the home exists, and a
+    // detached provision whose failure arrives later is how a UI ends up showing a half-made agent.
+    const out = execFileSync(process.execPath, args, {
+      cwd: REPO_ROOT,
+      env: process.env,
+      encoding: 'utf-8',
+      timeout: 120_000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    provisioned = JSON.parse(out);
+  } catch (error) {
+    // stderr carries the actual reason (bad name, unreadable project path, template missing).
+    const detail = String(error?.stderr || error?.message || 'provisioning failed').trim().slice(0, 400);
+    console.error(`[provision] ${agentName} failed: ${detail}`);
+    return res.status(500).json({ error: `provisioning failed: ${detail}` });
+  }
+  if (!provisioned?.ok || !provisioned?.paths) {
+    return res.status(500).json({ error: 'provisioning script returned no paths' });
+  }
+
+  const paths = provisioned.paths;
+  const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
+  agents[agentName] = {
+    name: agentName,
+    kind: 'agent',
+    type: framework,
+    presetId,
+    runtimeProfile: preset ? normalizeRuntimeProfile(runtimeProfileFromPreset(preset)) : null,
+    agentId: normalizeAgentId(provisioned.name ? `agent_${agentName}` : null) || null,
+    homeDir: normalizeWorkspacePath(paths.homeDir) || null,
+    workdir: normalizeWorkspacePath(paths.workdir) || null,
+    stateDir: normalizeWorkspacePath(paths.stateDir) || null,
+    server: LOCAL_SERVER_ID,
+    tmux: null,
+    // Provisioned is NOT running. Said explicitly so the UI shows "ready to start" rather than a
+    // bare offline agent indistinguishable from one that crashed.
+    online: false,
+    offlineReason: 'provisioned',
+    manualDown: false,
+    registeredAt: Date.now(),
+    discoveredAt: Date.now(),
+    lastSeen: Date.now(),
+  };
+  if (!saveAgentsOrRollback(agentName, persistenceSnapshot)) {
+    return res.status(503).json({ error: 'agents persistence failed' });
+  }
+  /*
+   * Reload tokens NOW. Provisioning just wrote <state>/agent-token, and until the backend loads it
+   * the agent's own calls are checked against a map that has no entry — which under
+   * HAFLEET_AGENT_TOKEN_MODE=hard is the difference between an agent that works and one whose every
+   * request is rejected with nothing said in its pane.
+   */
+  loadAgentTokens();
+  auditLog(req, { agent: agentName, summary: { action: 'provision', framework, presetId } });
+  return res.status(201).json({
+    ok: true,
+    agent: serializeAgent(agents[agentName]),
+    paths: { homeDir: paths.homeDir, workdir: paths.workdir, stateDir: paths.stateDir },
+    nextStep: `POST /api/agents/${encodeURIComponent(agentName)}/start`,
+  });
+});
+
 app.post('/api/agents/:name/start', requireBearer, (req, res) => {
   if (!isLocalRequest(req)) return res.status(403).json({ error: 'local-only endpoint' });
   const agentName = normalizeAgentName(req.params.name);
@@ -8791,11 +7820,46 @@ app.post('/api/agents/:name/start', requireBearer, (req, res) => {
   if (rp?.model) launchEnv.HAFLEET_LAUNCH_MODEL = rp.model;
   if (rp?.extraArgs) launchEnv.HAFLEET_LAUNCH_EXTRA_ARGS = rp.extraArgs;
   try {
+    /*
+     * The launcher's OUTPUT IS KEPT. This was `stdio: 'ignore'`, so a launch that failed — a
+     * missing framework CLI, tmux refusing, an untrusted hook, a bad workdir — produced
+     * `{ok: true, pid}` and nothing else: the endpoint reported success because the process had
+     * been created, and the reason it then died went to /dev/null. Observed doing exactly that.
+     */
+    const logDir = path.join(RUNTIME_ROOT, 'data', 'agents', agentName);
+    mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, 'launch.log');
+    const logFd = openSync(logPath, 'a');
     const child = spawn(hafleetBin, ['up-v1', agentName, framework], {
       cwd: REPO_ROOT,
       env: launchEnv,
-      stdio: 'ignore',
+      // stdin stays closed: a launcher that waits for input from a daemon would hang forever, and
+      // the one prompt that exists (codex hook trust) is designed to refuse rather than block.
+      stdio: ['ignore', logFd, logFd],
       detached: true,
+    });
+    /*
+     * Attached BEFORE unref, and it still fires: unref only stops the child keeping the event loop
+     * alive, it does not stop the exit event while the backend is running. This is the only place a
+     * non-zero exit becomes visible at all, since the response has long since been sent.
+     */
+    child.on('exit', (code, signal) => {
+      try { closeSync(logFd); } catch { /* already closed */ }
+      if (code === 0) return;
+      console.error(`[start] hafleet up-v1 ${agentName} exited ${signal ? `on ${signal}` : `with code ${code}`} — see ${logPath}`);
+      /*
+       * Undo the optimistic online. The record was marked running on the assumption the launch
+       * would work; leaving it there after a failure claims a tmux session that does not exist,
+       * which reads as a live agent that has merely gone quiet.
+       */
+      const a = agents[agentName];
+      if (isAgentRecord(a) && !a.online) return;
+      if (isAgentRecord(a)) {
+        a.tmux = null;
+        a.offlineReason = `launch-failed:exit-${signal || code}`;
+        transitionAgent(agentName, 'api_unregister');
+        saveAgents();
+      }
     });
     child.unref();
     agent.tmux = `${agentName}:0.0`;
@@ -8804,8 +7868,13 @@ app.post('/api/agents/:name/start', requireBearer, (req, res) => {
     transitionAgent(agentName, 'api_register_with_tmux');
     saveAgents();
     auditLog(req, { agent: agentName, summary: { action: 'start', framework, pid: child.pid } });
-    console.log(`[start] launched hafleet up-v1 ${agentName} ${framework} (pid=${child.pid})`);
-    res.json({ ok: true, name: agentName, framework, pid: child.pid });
+    console.log(`[start] launched hafleet up-v1 ${agentName} ${framework} (pid=${child.pid}, log=${logPath})`);
+    /*
+     * `launching`, not `started`. The process exists; whether the agent comes up is decided by the
+     * launcher over the next few seconds and reported by its own heartbeat. Saying "ok" alone
+     * invited the caller to treat spawn success as agent success, which is the bug above.
+     */
+    res.json({ ok: true, name: agentName, framework, pid: child.pid, state: 'launching', log: logPath });
   } catch (e) {
     console.error(`[start] failed to launch ${agentName}:`, e.message);
     res.status(500).json({ error: 'launch failed', detail: e.message });
@@ -9016,7 +8085,21 @@ app.post('/api/agents/:name/runtime', requireAgentToken(_tokenFromName), (req, r
     activeDurationSec,
     idleDurationSec,
     lastTmuxActivitySec,
-    workspacePath,
+    /*
+     * SPREAD, NOT SHORTHAND — the shorthand defeated its own guard downstream.
+     *
+     * `workspacePath` is `undefined` when the request omitted it, and
+     * `workspacePath,` puts the KEY there regardless. setRuntimeWorkspacePath()
+     * correctly asks `hasOwnProperty`, sees the key, normalizes `undefined` to null,
+     * and erases a path that was already known. So a heartbeat that mentioned nothing
+     * about the workspace wiped it, and the next one restored it.
+     *
+     * Latent until something actually set the field for ACP agents: while it was always
+     * null, clearing it was a no-op. It matters now because the workspace is the only
+     * link between an agent and the token usage its CLI records, and attribution that
+     * flickers with the heartbeat is worse than attribution that is absent.
+     */
+    ...(workspacePath !== undefined ? { workspacePath } : {}),
     mcpPresent,
     blockedObserved,
     observerSource: 'runtime-api',
@@ -9114,908 +8197,15 @@ app.post('/api/runtime/push-delivered', (req, res) => {
   res.json({ ok: true, agent: agentName });
 });
 
-app.post('/api/subconscious/events', (req, res) => {
-  const authz = authorizeSubconsciousEventIngest(req);
-  if (!authz.ok) {
-    return res.status(authz.status).json({
-      error: authz.error,
-      ingestBoundary: authz.mode,
-    });
-  }
-  const body = req.body || {};
-  const event = buildSubconsciousEvent({
-    ...body,
-    hookEventName: body.hookEventName ?? body.hook_event_name,
-    sessionId: body.sessionId ?? body.session_id,
-    transcriptPath: body.transcriptPath ?? body.transcript_path,
-    toolName: body.toolName ?? body.tool_name,
-    promptPreview: body.promptPreview ?? body.prompt_preview,
-    lettaAgentId: body.lettaAgentId ?? body.letta_agent_id,
-    lettaStateFile: body.lettaStateFile ?? body.letta_state_file,
-    guidancePresent: body.guidancePresent ?? body.guidance_present,
-    guidanceConfigured: body.guidanceConfigured ?? body.guidance_configured,
-    guidanceInjected: body.guidanceInjected ?? body.guidance_injected,
-    guidanceSource: body.guidanceSource ?? body.guidance_source,
-    guidancePreview: body.guidancePreview ?? body.guidance_preview,
-    runtimeInvoked: body.runtimeInvoked ?? body.runtime_invoked,
-    runtimeProvider: body.runtimeProvider ?? body.runtime_provider,
-    runtimeModel: body.runtimeModel ?? body.runtime_model,
-    runtimeLatencyMs: body.runtimeLatencyMs ?? body.runtime_latency_ms,
-    runtimeError: body.runtimeError ?? body.runtime_error,
-    upstreamUserPromptAttempted: body.upstreamUserPromptAttempted ?? body.upstream_user_prompt_attempted,
-    upstreamUserPromptStatus: body.upstreamUserPromptStatus ?? body.upstream_user_prompt_status,
-    upstreamUserPromptBlockedReason: body.upstreamUserPromptBlockedReason ?? body.upstream_user_prompt_blocked_reason,
-    upstreamUserPromptMessageSent: body.upstreamUserPromptMessageSent ?? body.upstream_user_prompt_message_sent,
-    upstreamUserPromptConversationId: body.upstreamUserPromptConversationId ?? body.upstream_user_prompt_conversation_id,
-    upstreamUserPromptTranscriptPath: body.upstreamUserPromptTranscriptPath ?? body.upstream_user_prompt_transcript_path,
-    upstreamUserPromptSyncStateFile: body.upstreamUserPromptSyncStateFile ?? body.upstream_user_prompt_sync_state_file,
-    upstreamUserPromptScriptPath: body.upstreamUserPromptScriptPath ?? body.upstream_user_prompt_script_path,
-    upstreamUserPromptTranscriptLineCount: body.upstreamUserPromptTranscriptLineCount ?? body.upstream_user_prompt_transcript_line_count,
-    upstreamUserPromptLastProcessedIndexBefore: body.upstreamUserPromptLastProcessedIndexBefore ?? body.upstream_user_prompt_last_processed_index_before,
-    upstreamUserPromptLastProcessedIndexAfter: body.upstreamUserPromptLastProcessedIndexAfter ?? body.upstream_user_prompt_last_processed_index_after,
-    upstreamPreToolAttempted: body.upstreamPreToolAttempted ?? body.upstream_pre_tool_attempted,
-    upstreamPreToolStatus: body.upstreamPreToolStatus ?? body.upstream_pre_tool_status,
-    upstreamPreToolBlockedReason: body.upstreamPreToolBlockedReason ?? body.upstream_pre_tool_blocked_reason,
-    upstreamPreToolInjected: body.upstreamPreToolInjected ?? body.upstream_pre_tool_injected,
-    upstreamPreToolConversationId: body.upstreamPreToolConversationId ?? body.upstream_pre_tool_conversation_id,
-    upstreamPreToolSyncStateFile: body.upstreamPreToolSyncStateFile ?? body.upstream_pre_tool_sync_state_file,
-    upstreamPreToolScriptPath: body.upstreamPreToolScriptPath ?? body.upstream_pre_tool_script_path,
-    upstreamPreToolNewMessageCount: body.upstreamPreToolNewMessageCount ?? body.upstream_pre_tool_new_message_count,
-    upstreamPreToolChangedBlockCount: body.upstreamPreToolChangedBlockCount ?? body.upstream_pre_tool_changed_block_count,
-    upstreamPreToolLastSeenMessageIdBefore: body.upstreamPreToolLastSeenMessageIdBefore ?? body.upstream_pre_tool_last_seen_message_id_before,
-    upstreamPreToolLastSeenMessageIdAfter: body.upstreamPreToolLastSeenMessageIdAfter ?? body.upstream_pre_tool_last_seen_message_id_after,
-    upstreamPreToolBlockLabelCount: body.upstreamPreToolBlockLabelCount ?? body.upstream_pre_tool_block_label_count,
-    upstreamStopAttempted: body.upstreamStopAttempted ?? body.upstream_stop_attempted,
-    upstreamStopStatus: body.upstreamStopStatus ?? body.upstream_stop_status,
-    upstreamStopBlockedReason: body.upstreamStopBlockedReason ?? body.upstream_stop_blocked_reason,
-    upstreamStopMessageSent: body.upstreamStopMessageSent ?? body.upstream_stop_message_sent,
-    upstreamStopConversationId: body.upstreamStopConversationId ?? body.upstream_stop_conversation_id,
-    upstreamStopTranscriptPath: body.upstreamStopTranscriptPath ?? body.upstream_stop_transcript_path,
-    upstreamStopSyncStateFile: body.upstreamStopSyncStateFile ?? body.upstream_stop_sync_state_file,
-    upstreamStopScriptPath: body.upstreamStopScriptPath ?? body.upstream_stop_script_path,
-    upstreamStopTranscriptMessageCount: body.upstreamStopTranscriptMessageCount ?? body.upstream_stop_transcript_message_count,
-    upstreamStopNewMessageCount: body.upstreamStopNewMessageCount ?? body.upstream_stop_new_message_count,
-  });
-  if (!event) return res.status(400).json({ error: 'agent required' });
-  appendSubconsciousEvent(event);
-  const state = resolveSubconsciousState(event.agent);
-  const at = new Date(event.ts || Date.now()).toISOString();
-  const conversation = state
-    ? syncSubconsciousConversationState(state, event, {
-        at,
-        hook: event.hook || event.hookEventName,
-        toolName: event.toolName,
-        runtimeInvoked: event.runtimeInvoked === true,
-        runtimeProvider: event.runtimeProvider,
-        runtimeModel: event.runtimeModel,
-      })
-    : null;
-  if (state && conversation) applyConversationSnapshotToContract(state, conversation);
-  return res.json({
-    ok: true,
-    ingestBoundary: authz.mode,
-    event,
-    conversation,
-  });
-});
 
-app.get('/api/subconscious/detail/:name', (req, res) => {
-  const agent = normalizeLooseAgentName(req.params.name);
-  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
-  const state = resolveSubconsciousState(agent);
-  if (!state) return res.status(404).json({ error: 'agent not found' });
-  const wantsDebug = normalizeBoolean(req.query?.debug) === true || normalizeBoolean(req.query?.privileged) === true;
-  if (wantsDebug && !canAccessPrivilegedSubconsciousDetail(req)) {
-    return res.status(403).json({ error: 'privileged debug access required' });
-  }
-  return res.json(wantsDebug ? state.contract : buildOperationalSubconsciousContract(state.contract));
-});
 
-app.post('/api/subconscious/upstream/bootstrap/:name', async (req, res) => {
-  const agent = normalizeLooseAgentName(req.params.name);
-  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
-  const state = resolveSubconsciousState(agent);
-  if (!state) return res.status(404).json({ error: 'agent not found' });
 
-  const now = new Date().toISOString();
-  const existingUpstream = (state.letta?.upstream && typeof state.letta.upstream === 'object') ? state.letta.upstream : {};
-  const existingRuntimeUpstream = (state.runtimeMeta?.upstream && typeof state.runtimeMeta.upstream === 'object')
-    ? state.runtimeMeta.upstream
-    : {};
-  const requestedAgentId = normalizeOptionalText(req.body?.lettaAgentId, 256);
-  const configuredAgentId = normalizeOptionalText(process.env.LETTA_AGENT_ID, 256);
-  const result = await bootstrapUpstreamClaudeSubconsciousAgent({
-    stateDir: state.stateDir,
-    workdir: state.agent.workdir || '',
-    apiKey: normalizeOptionalText(process.env.LETTA_API_KEY, 4096),
-    lettaBaseUrl: normalizeOptionalText(process.env.LETTA_BASE_URL, 2048),
-    lettaAgentId: requestedAgentId
-      || configuredAgentId
-      || normalizeOptionalText(existingUpstream.agentId, 256),
-    lettaModel: normalizeOptionalText(process.env.LETTA_MODEL, 256),
-    lettaContextWindow: normalizeOptionalText(process.env.LETTA_CONTEXT_WINDOW, 64),
-  });
-  const directReuse = mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse);
-  const persistedRuntimeUpstream = buildPersistedUpstreamState(existingRuntimeUpstream);
-  const persistedUpstream = buildPersistedUpstreamState(existingUpstream);
-  const nextRuntimeMeta = {
-    ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
-    upstream: {
-      ...persistedRuntimeUpstream,
-      available: result.paths?.available === true,
-      root: result.paths?.root || null,
-      promptFile: result.paths?.promptFile || null,
-      scripts: result.paths?.scripts || null,
-      durableHome: result.paths?.durableHome || null,
-      durableStateDir: result.paths?.durableStateDir || null,
-      conversationsFile: result.paths?.conversationsFile || null,
-      configPath: result.paths?.configPath || null,
-      directReuse,
-      bootstrapStatus: result.ok ? 'configured' : 'blocked',
-      blocker: result.blocker || null,
-      agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-      importedAt: normalizeOptionalText(result.config?.importedAt, 128) || null,
-      model: normalizeOptionalText(result.config?.model, 256) || null,
-      agentName: normalizeOptionalText(result.agent?.name, 256) || null,
-      blockCount: Array.isArray(result.agent?.blocks) ? result.agent.blocks.length : 0,
-    },
-    updatedAt: now,
-  };
-  const nextLetta = {
-    ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
-    upstream: {
-      ...persistedUpstream,
-      bootstrapStatus: result.ok ? 'configured' : 'blocked',
-      blocker: result.blocker || null,
-      agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-      importedAt: normalizeOptionalText(result.config?.importedAt, 128) || null,
-      model: normalizeOptionalText(result.config?.model, 256) || null,
-      agentName: normalizeOptionalText(result.agent?.name, 256) || null,
-      blockCount: Array.isArray(result.agent?.blocks) ? result.agent.blocks.length : 0,
-      lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
-      configPath: result.paths?.configPath || null,
-      conversationsFile: result.paths?.conversationsFile || null,
-      promptFile: result.paths?.promptFile || null,
-    },
-    updatedAt: now,
-  };
-  safeWriteJsonFile(state.runtimeMetaPath, nextRuntimeMeta);
-  safeWriteJsonFile(state.lettaPath, nextLetta);
-  const refreshed = resolveSubconsciousState(agent);
-  return res.json({
-    ok: result.ok,
-    blocked: result.blocked === true,
-    blocker: result.blocker || null,
-    logs: Array.isArray(result.logs) ? result.logs.slice(-20) : [],
-    upstream: refreshed?.contract?.upstream || buildSubconsciousUpstreamContract(state.stateDir, state.agent.workdir || null, nextRuntimeMeta, nextLetta, state.conversationState),
-  });
-});
 
-app.post('/api/subconscious/upstream/session-start/:name', async (req, res) => {
-  const agent = normalizeLooseAgentName(req.params.name);
-  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
-  const state = resolveSubconsciousState(agent);
-  if (!state) return res.status(404).json({ error: 'agent not found' });
 
-  try {
-    const payload = req.body || {};
-    const sessionId = normalizeOptionalText(payload.sessionId || payload.session_id, 200);
-    if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
 
-    const now = new Date().toISOString();
-    const existingUpstream = (state.letta?.upstream && typeof state.letta.upstream === 'object') ? state.letta.upstream : {};
-    const existingRuntimeUpstream = (state.runtimeMeta?.upstream && typeof state.runtimeMeta.upstream === 'object')
-      ? state.runtimeMeta.upstream
-      : {};
-    const requestedAgentId = normalizeOptionalText(payload.lettaAgentId, 256);
-    const configuredAgentId = normalizeOptionalText(process.env.LETTA_AGENT_ID, 256);
-    const result = await startUpstreamClaudeSubconsciousSession({
-      stateDir: state.stateDir,
-      workdir: state.agent.workdir || '',
-      cwd: normalizeWorkspacePath(payload.cwd) || state.agent.workdir || '',
-      apiKey: normalizeOptionalText(process.env.LETTA_API_KEY, 4096),
-      lettaBaseUrl: normalizeOptionalText(process.env.LETTA_BASE_URL, 2048),
-      lettaAgentId: requestedAgentId
-        || configuredAgentId
-        || normalizeOptionalText(existingUpstream.agentId, 256),
-      lettaModel: normalizeOptionalText(process.env.LETTA_MODEL, 256),
-      lettaContextWindow: normalizeOptionalText(process.env.LETTA_CONTEXT_WINDOW, 64),
-      sessionId,
-      sendSessionStartMessage: normalizeBoolean(payload.sendMessage) !== false,
-    });
-    const directReuse = mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse);
-    const persistedRuntimeUpstream = buildPersistedUpstreamState(existingRuntimeUpstream);
-    const persistedUpstream = buildPersistedUpstreamState(existingUpstream);
-    const sendMessageRequested = normalizeBoolean(payload.sendMessage) !== false;
-    const sessionEstablished = Boolean((result.sessionId || sessionId) && result.conversationId);
-    const notifyBlockedReason = sendMessageRequested && result.blocker ? result.blocker : null;
-    const notifyRecord = {
-      attempted: sendMessageRequested,
-      status: result.messageSent === true
-        ? 'sent'
-        : (sendMessageRequested
-          ? (notifyBlockedReason ? 'blocked' : 'attempted')
-          : 'not-attempted'),
-      blockedReason: notifyBlockedReason,
-      messageSent: result.messageSent === true,
-      attemptedAt: sendMessageRequested ? now : null,
-      messageSentAt: result.messageSent === true ? now : null,
-      requiredDecision: notifyBlockedReason
-        ? deriveUpstreamNotifyDecision(
-          notifyBlockedReason,
-          result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-          normalizeOptionalText(result.agent?.llm_config?.handle, 256)
-            || normalizeOptionalText(result.agent?.llm_config?.model, 256)
-            || normalizeOptionalText(existingUpstream.model, 256)
-            || normalizeOptionalText(existingRuntimeUpstream.model, 256)
-        )
-        : null,
-    };
-    const sessionRecord = {
-      established: sessionEstablished,
-      status: sessionEstablished ? 'started' : (result.blocked === true ? 'blocked' : 'not-run'),
-      blocker: sessionEstablished ? null : (result.blocker || null),
-      checkedAt: now,
-      sessionId: result.sessionId || sessionId,
-      conversationId: result.conversationId || null,
-      conversationStatus: result.conversationStatus || null,
-      sessionStateFile: result.sessionStateFile || null,
-      sessionStartedAt: normalizeOptionalText(result.sessionState?.startedAt, 128) || now,
-      messageSent: result.messageSent === true,
-      messageSentAt: result.messageSent === true ? now : null,
-      cwd: normalizeWorkspacePath(result.cwd) || state.agent.workdir || null,
-      notify: notifyRecord,
-    };
-    const persistedSessionRecord = buildPersistedUpstreamRecord('session', sessionRecord);
-    const nextRuntimeMeta = {
-      ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
-      upstream: {
-        ...persistedRuntimeUpstream,
-        available: result.paths?.available === true,
-        root: result.paths?.root || null,
-        promptFile: result.paths?.promptFile || null,
-        scripts: result.paths?.scripts || null,
-        durableHome: result.paths?.durableHome || null,
-        durableStateDir: result.paths?.durableStateDir || null,
-        conversationsFile: result.paths?.conversationsFile || null,
-        configPath: result.paths?.configPath || null,
-        directReuse,
-        bootstrapStatus: 'configured',
-        blocker: null,
-        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-        agentName: normalizeOptionalText(result.agent?.name, 256) || normalizeOptionalText(existingUpstream.agentName, 256) || null,
-        blockCount: Array.isArray(result.agent?.blocks) ? result.agent.blocks.length : normalizeNonNegativeInt(existingRuntimeUpstream.blockCount, 0),
-        session: persistedSessionRecord,
-      },
-      updatedAt: now,
-    };
-    const nextLetta = {
-      ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
-      upstream: {
-        ...persistedUpstream,
-        bootstrapStatus: 'configured',
-        blocker: null,
-        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-        agentName: normalizeOptionalText(result.agent?.name, 256) || normalizeOptionalText(existingUpstream.agentName, 256) || null,
-        blockCount: Array.isArray(result.agent?.blocks) ? result.agent.blocks.length : normalizeNonNegativeInt(existingUpstream.blockCount, 0),
-        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
-        configPath: result.paths?.configPath || null,
-        conversationsFile: result.paths?.conversationsFile || null,
-        promptFile: result.paths?.promptFile || null,
-        session: persistedSessionRecord,
-      },
-      updatedAt: now,
-    };
-    safeWriteJsonFile(state.runtimeMetaPath, nextRuntimeMeta);
-    safeWriteJsonFile(state.lettaPath, nextLetta);
-    const upstreamResponse = {
-      bootstrap: {
-        supported: result.paths?.available === true,
-        status: 'configured',
-        blockedReason: null,
-        checkedAt: now,
-        apiKeyConfigured: Boolean(normalizeOptionalText(process.env.LETTA_API_KEY, 4096)),
-        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
-        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-        importedAt: normalizeOptionalText(existingUpstream.importedAt, 128) || null,
-        model: normalizeOptionalText(process.env.LETTA_MODEL, 256)
-          || normalizeOptionalText(existingUpstream.model, 256)
-          || normalizeOptionalText(existingRuntimeUpstream.model, 256)
-          || null,
-        agentName: normalizeOptionalText(result.agent?.name, 256)
-          || normalizeOptionalText(existingUpstream.agentName, 256)
-          || null,
-        blockCount: Array.isArray(result.agent?.blocks)
-          ? result.agent.blocks.length
-          : normalizeNonNegativeInt(existingUpstream.blockCount, 0),
-        workdir: state.agent.workdir || null,
-      },
-      session: sessionRecord,
-    };
-    return res.json({
-      ok: sessionEstablished,
-      blocked: !sessionEstablished && result.blocked === true,
-      blocker: sessionEstablished ? null : (result.blocker || null),
-      logs: Array.isArray(result.logs) ? result.logs.slice(-20) : [],
-      session: sessionRecord,
-      upstream: upstreamResponse,
-    });
-  } catch (err) {
-    return res.status(502).json({ ok: false, blocked: true, blocker: err?.message || String(err) });
-  }
-});
 
-app.post('/api/subconscious/upstream/user-prompt/:name', async (req, res) => {
-  const agent = normalizeLooseAgentName(req.params.name);
-  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
-  const state = resolveSubconsciousState(agent);
-  if (!state) return res.status(404).json({ error: 'agent not found' });
 
-  try {
-    const payload = req.body || {};
-    const sessionId = normalizeOptionalText(payload.sessionId || payload.session_id, 200);
-    const prompt = normalizeOptionalText(payload.prompt, 8000);
-    const transcriptPath = normalizeWorkspacePath(payload.transcriptPath || payload.transcript_path);
-    if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
-    if (!prompt) return res.status(400).json({ error: 'prompt required' });
 
-    const now = new Date().toISOString();
-    const existingUpstream = (state.letta?.upstream && typeof state.letta.upstream === 'object') ? state.letta.upstream : {};
-    const existingRuntimeUpstream = (state.runtimeMeta?.upstream && typeof state.runtimeMeta.upstream === 'object')
-      ? state.runtimeMeta.upstream
-      : {};
-    const existingUpstreamUserPrompt = (existingUpstream.userPrompt && typeof existingUpstream.userPrompt === 'object')
-      ? existingUpstream.userPrompt
-      : {};
-    const existingRuntimeUpstreamUserPrompt = (existingRuntimeUpstream.userPrompt && typeof existingRuntimeUpstream.userPrompt === 'object')
-      ? existingRuntimeUpstream.userPrompt
-      : {};
-    const persistedRuntimeUpstream = buildPersistedUpstreamState(existingRuntimeUpstream);
-    const persistedUpstream = buildPersistedUpstreamState(existingUpstream);
-    const requestedAgentId = normalizeOptionalText(payload.lettaAgentId, 256);
-    const configuredAgentId = normalizeOptionalText(process.env.LETTA_AGENT_ID, 256);
-    const result = await syncUpstreamClaudeSubconsciousUserPrompt({
-      stateDir: state.stateDir,
-      workdir: state.agent.workdir || '',
-      cwd: normalizeWorkspacePath(payload.cwd) || state.agent.workdir || '',
-      transcriptPath,
-      prompt,
-      apiKey: normalizeOptionalText(process.env.LETTA_API_KEY, 4096),
-      lettaBaseUrl: normalizeOptionalText(process.env.LETTA_BASE_URL, 2048),
-      lettaAgentId: requestedAgentId
-        || configuredAgentId
-        || normalizeOptionalText(existingUpstream.agentId, 256),
-      lettaModel: normalizeOptionalText(process.env.LETTA_MODEL, 256),
-      lettaContextWindow: normalizeOptionalText(process.env.LETTA_CONTEXT_WINDOW, 64),
-      sessionId,
-    });
-    const userPromptRecord = {
-      attempted: result.sendAttempted === true,
-      status: normalizeOptionalText(result.sendStatus, 64)
-        || (result.messageSent === true ? 'sent' : (result.blocked === true ? 'blocked' : 'not-run')),
-      blockedReason: result.blocker || null,
-      checkedAt: now,
-      attemptedAt: result.sendAttempted === true ? now : null,
-      messageSent: result.messageSent === true,
-      messageSentAt: result.messageSent === true ? now : null,
-      sessionId: result.sessionId || sessionId,
-      conversationId: result.conversationId || null,
-      transcriptPath: transcriptPath || null,
-      transcriptLineCount: normalizeNonNegativeInt(result.transcriptLineCount, 0),
-      syncStateFile: normalizeWorkspacePath(result.syncStateFile) || null,
-      lastProcessedIndexBefore: Number.isFinite(Number(result.lastProcessedIndexBefore))
-        ? Number(result.lastProcessedIndexBefore)
-        : null,
-      lastProcessedIndexAfter: Number.isFinite(Number(result.lastProcessedIndexAfter))
-        ? Number(result.lastProcessedIndexAfter)
-        : null,
-      scriptPath: normalizeWorkspacePath(result.paths?.scripts?.syncMemory) || result.paths?.scripts?.syncMemory || null,
-    };
-    const persistedUserPromptRecord = buildPersistedUpstreamRecord('userPrompt', {
-      ...existingRuntimeUpstreamUserPrompt,
-      ...userPromptRecord,
-    });
-    const nextRuntimeMeta = {
-      ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
-      upstream: {
-        ...persistedRuntimeUpstream,
-        available: result.paths?.available === true,
-        root: result.paths?.root || null,
-        promptFile: result.paths?.promptFile || null,
-        scripts: result.paths?.scripts || null,
-        durableHome: result.paths?.durableHome || null,
-        durableStateDir: result.paths?.durableStateDir || null,
-        conversationsFile: result.paths?.conversationsFile || null,
-        configPath: result.paths?.configPath || null,
-        directReuse: mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse),
-        bootstrapStatus: 'configured',
-        blocker: null,
-        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-        model: normalizeOptionalText(existingUpstream.model, 256)
-          || normalizeOptionalText(existingRuntimeUpstream.model, 256)
-          || null,
-        userPrompt: persistedUserPromptRecord,
-      },
-      updatedAt: now,
-    };
-    const nextLetta = {
-      ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
-      upstream: {
-        ...persistedUpstream,
-        bootstrapStatus: 'configured',
-        blocker: null,
-        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
-        userPrompt: buildPersistedUpstreamRecord('userPrompt', {
-          ...existingUpstreamUserPrompt,
-          ...userPromptRecord,
-        }),
-      },
-      updatedAt: now,
-    };
-    safeWriteJsonFile(state.runtimeMetaPath, nextRuntimeMeta);
-    safeWriteJsonFile(state.lettaPath, nextLetta);
-    const refreshed = resolveSubconsciousState(agent);
-    return res.json({
-      ok: result.ok,
-      blocked: result.blocked === true,
-      blocker: result.blocker || null,
-      logs: Array.isArray(result.logs) ? result.logs.slice(-20) : [],
-      userPrompt: userPromptRecord,
-      upstream: refreshed?.contract?.upstream || buildSubconsciousUpstreamContract(state.stateDir, state.agent.workdir || null, nextRuntimeMeta, nextLetta, state.conversationState),
-    });
-  } catch (err) {
-    return res.status(502).json({ ok: false, blocked: true, blocker: err?.message || String(err) });
-  }
-});
-
-app.post('/api/subconscious/upstream/pretool/:name', async (req, res) => {
-  const agent = normalizeLooseAgentName(req.params.name);
-  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
-  const state = resolveSubconsciousState(agent);
-  if (!state) return res.status(404).json({ error: 'agent not found' });
-
-  try {
-    const payload = req.body || {};
-    const sessionId = normalizeOptionalText(payload.sessionId || payload.session_id, 200);
-    const toolName = normalizeOptionalText(payload.toolName || payload.tool_name, 120);
-    if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
-
-    const now = new Date().toISOString();
-    const existingUpstream = (state.letta?.upstream && typeof state.letta.upstream === 'object') ? state.letta.upstream : {};
-    const existingRuntimeUpstream = (state.runtimeMeta?.upstream && typeof state.runtimeMeta.upstream === 'object')
-      ? state.runtimeMeta.upstream
-      : {};
-    const existingUpstreamPreTool = (existingUpstream.preTool && typeof existingUpstream.preTool === 'object')
-      ? existingUpstream.preTool
-      : {};
-    const existingRuntimeUpstreamPreTool = (existingRuntimeUpstream.preTool && typeof existingRuntimeUpstream.preTool === 'object')
-      ? existingRuntimeUpstream.preTool
-      : {};
-    const persistedRuntimeUpstream = buildPersistedUpstreamState(existingRuntimeUpstream);
-    const persistedUpstream = buildPersistedUpstreamState(existingUpstream);
-    const requestedAgentId = normalizeOptionalText(payload.lettaAgentId, 256);
-    const configuredAgentId = normalizeOptionalText(process.env.LETTA_AGENT_ID, 256);
-    const result = await syncUpstreamClaudeSubconsciousPreTool({
-      stateDir: state.stateDir,
-      workdir: state.agent.workdir || '',
-      cwd: normalizeWorkspacePath(payload.cwd) || state.agent.workdir || '',
-      toolName,
-      apiKey: normalizeOptionalText(process.env.LETTA_API_KEY, 4096),
-      lettaBaseUrl: normalizeOptionalText(process.env.LETTA_BASE_URL, 2048),
-      lettaAgentId: requestedAgentId
-        || configuredAgentId
-        || normalizeOptionalText(existingUpstream.agentId, 256),
-      lettaModel: normalizeOptionalText(process.env.LETTA_MODEL, 256),
-      lettaContextWindow: normalizeOptionalText(process.env.LETTA_CONTEXT_WINDOW, 64),
-      sessionId,
-    });
-    const preToolRecord = {
-      attempted: result.sendAttempted === true,
-      status: normalizeOptionalText(result.sendStatus, 64)
-        || (result.injected === true ? 'injected' : (result.blocked === true ? 'blocked' : 'not-run')),
-      blockedReason: result.blocker || null,
-      checkedAt: now,
-      attemptedAt: result.sendAttempted === true ? now : null,
-      injected: result.injected === true,
-      injectedAt: result.injected === true ? now : null,
-      sessionId: result.sessionId || sessionId,
-      conversationId: result.conversationId || null,
-      syncStateFile: normalizeWorkspacePath(result.syncStateFile) || null,
-      newMessageCount: normalizeNonNegativeInt(result.newMessageCount, 0),
-      changedBlockCount: normalizeNonNegativeInt(result.changedBlockCount, 0),
-      lastSeenMessageIdBefore: normalizeOptionalText(result.lastSeenMessageIdBefore, 256) || null,
-      lastSeenMessageIdAfter: normalizeOptionalText(result.lastSeenMessageIdAfter, 256) || null,
-      blockLabelCount: normalizeNonNegativeInt(result.blockLabelCount, 0),
-      scriptPath: normalizeWorkspacePath(result.paths?.scripts?.pretoolSync) || result.paths?.scripts?.pretoolSync || null,
-      toolName: toolName || null,
-    };
-    const persistedPreToolRecord = buildPersistedUpstreamRecord('preTool', {
-      ...existingRuntimeUpstreamPreTool,
-      ...preToolRecord,
-    });
-    const nextRuntimeMeta = {
-      ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
-      upstream: {
-        ...persistedRuntimeUpstream,
-        available: result.paths?.available === true,
-        root: result.paths?.root || null,
-        promptFile: result.paths?.promptFile || null,
-        scripts: result.paths?.scripts || null,
-        durableHome: result.paths?.durableHome || null,
-        durableStateDir: result.paths?.durableStateDir || null,
-        conversationsFile: result.paths?.conversationsFile || null,
-        configPath: result.paths?.configPath || null,
-        directReuse: mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse),
-        bootstrapStatus: 'configured',
-        blocker: null,
-        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-        model: normalizeOptionalText(existingUpstream.model, 256)
-          || normalizeOptionalText(existingRuntimeUpstream.model, 256)
-          || null,
-        preTool: persistedPreToolRecord,
-      },
-      updatedAt: now,
-    };
-    const nextLetta = {
-      ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
-      upstream: {
-        ...persistedUpstream,
-        bootstrapStatus: 'configured',
-        blocker: null,
-        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
-        preTool: buildPersistedUpstreamRecord('preTool', {
-          ...existingUpstreamPreTool,
-          ...preToolRecord,
-        }),
-      },
-      updatedAt: now,
-    };
-    safeWriteJsonFile(state.runtimeMetaPath, nextRuntimeMeta);
-    safeWriteJsonFile(state.lettaPath, nextLetta);
-    const refreshed = resolveSubconsciousState(agent);
-    return res.json({
-      ok: result.ok,
-      blocked: result.blocked === true,
-      blocker: result.blocker || null,
-      logs: Array.isArray(result.logs) ? result.logs.slice(-20) : [],
-      preTool: {
-        ...preToolRecord,
-        additionalContext: normalizeOptionalText(result.additionalContext, 12000) || null,
-      },
-      upstream: refreshed?.contract?.upstream || buildSubconsciousUpstreamContract(state.stateDir, state.agent.workdir || null, nextRuntimeMeta, nextLetta, state.conversationState),
-    });
-  } catch (err) {
-    return res.status(502).json({ ok: false, blocked: true, blocker: err?.message || String(err) });
-  }
-});
-
-app.post('/api/subconscious/upstream/stop/:name', async (req, res) => {
-  const agent = normalizeLooseAgentName(req.params.name);
-  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
-  const state = resolveSubconsciousState(agent);
-  if (!state) return res.status(404).json({ error: 'agent not found' });
-
-  try {
-    const payload = req.body || {};
-    const sessionId = normalizeOptionalText(payload.sessionId || payload.session_id, 200);
-    const transcriptPath = normalizeWorkspacePath(payload.transcriptPath || payload.transcript_path);
-    if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
-    if (!transcriptPath) return res.status(400).json({ error: 'transcriptPath required' });
-
-    const now = new Date().toISOString();
-    const existingUpstream = (state.letta?.upstream && typeof state.letta.upstream === 'object') ? state.letta.upstream : {};
-    const existingRuntimeUpstream = (state.runtimeMeta?.upstream && typeof state.runtimeMeta.upstream === 'object')
-      ? state.runtimeMeta.upstream
-      : {};
-    const existingUpstreamStop = (existingUpstream.stop && typeof existingUpstream.stop === 'object') ? existingUpstream.stop : {};
-    const existingRuntimeUpstreamStop = (existingRuntimeUpstream.stop && typeof existingRuntimeUpstream.stop === 'object')
-      ? existingRuntimeUpstream.stop
-      : {};
-    const persistedRuntimeUpstream = buildPersistedUpstreamState(existingRuntimeUpstream);
-    const persistedUpstream = buildPersistedUpstreamState(existingUpstream);
-    const requestedAgentId = normalizeOptionalText(payload.lettaAgentId, 256);
-    const configuredAgentId = normalizeOptionalText(process.env.LETTA_AGENT_ID, 256);
-    const result = await syncUpstreamClaudeSubconsciousStop({
-      stateDir: state.stateDir,
-      workdir: state.agent.workdir || '',
-      cwd: normalizeWorkspacePath(payload.cwd) || state.agent.workdir || '',
-      transcriptPath,
-      apiKey: normalizeOptionalText(process.env.LETTA_API_KEY, 4096),
-      lettaBaseUrl: normalizeOptionalText(process.env.LETTA_BASE_URL, 2048),
-      lettaAgentId: requestedAgentId
-        || configuredAgentId
-        || normalizeOptionalText(existingUpstream.agentId, 256),
-      lettaModel: normalizeOptionalText(process.env.LETTA_MODEL, 256),
-      lettaContextWindow: normalizeOptionalText(process.env.LETTA_CONTEXT_WINDOW, 64),
-      sessionId,
-    });
-    const stopRecord = {
-      attempted: result.sendAttempted === true,
-      status: normalizeOptionalText(result.sendStatus, 64)
-        || (result.messageSent === true ? 'sent' : (result.blocked === true ? 'blocked' : 'not-run')),
-      blockedReason: result.blocker || null,
-      checkedAt: now,
-      attemptedAt: result.sendAttempted === true ? now : null,
-      messageSent: result.messageSent === true,
-      messageSentAt: result.messageSent === true ? now : null,
-      sessionId: result.sessionId || sessionId,
-      conversationId: result.conversationId || null,
-      transcriptPath,
-      transcriptMessageCount: normalizeNonNegativeInt(result.transcriptMessageCount, 0),
-      newMessageCount: normalizeNonNegativeInt(result.newMessageCount, 0),
-      syncStateFile: normalizeWorkspacePath(result.syncStateFile) || null,
-      lastProcessedIndexBefore: Number.isFinite(Number(result.lastProcessedIndexBefore))
-        ? Number(result.lastProcessedIndexBefore)
-        : null,
-      lastProcessedIndexAfter: Number.isFinite(Number(result.lastProcessedIndexAfter))
-        ? Number(result.lastProcessedIndexAfter)
-        : null,
-      scriptPath: normalizeWorkspacePath(result.paths?.scripts?.stopSend) || result.paths?.scripts?.stopSend || null,
-    };
-    const persistedStopRecord = buildPersistedUpstreamRecord('stop', {
-      ...existingRuntimeUpstreamStop,
-      ...stopRecord,
-    });
-    const nextRuntimeMeta = {
-      ...(state.runtimeMeta && typeof state.runtimeMeta === 'object' ? state.runtimeMeta : {}),
-      upstream: {
-        ...persistedRuntimeUpstream,
-        available: result.paths?.available === true,
-        root: result.paths?.root || null,
-        promptFile: result.paths?.promptFile || null,
-        scripts: result.paths?.scripts || null,
-        durableHome: result.paths?.durableHome || null,
-        durableStateDir: result.paths?.durableStateDir || null,
-        conversationsFile: result.paths?.conversationsFile || null,
-        configPath: result.paths?.configPath || null,
-        directReuse: mergeUpstreamDirectReuse(existingRuntimeUpstream.directReuse),
-        bootstrapStatus: 'configured',
-        blocker: null,
-        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-        model: normalizeOptionalText(existingUpstream.model, 256)
-          || normalizeOptionalText(existingRuntimeUpstream.model, 256)
-          || null,
-        stop: persistedStopRecord,
-      },
-      updatedAt: now,
-    };
-    const nextLetta = {
-      ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
-      upstream: {
-        ...persistedUpstream,
-        bootstrapStatus: 'configured',
-        blocker: null,
-        agentId: result.agentId || normalizeOptionalText(existingUpstream.agentId, 256) || null,
-        lettaBaseUrl: result.lettaBaseUrl || normalizeOptionalText(process.env.LETTA_BASE_URL, 2048) || 'https://api.letta.com',
-        stop: buildPersistedUpstreamRecord('stop', {
-          ...existingUpstreamStop,
-          ...stopRecord,
-        }),
-      },
-      updatedAt: now,
-    };
-    safeWriteJsonFile(state.runtimeMetaPath, nextRuntimeMeta);
-    safeWriteJsonFile(state.lettaPath, nextLetta);
-    const refreshed = resolveSubconsciousState(agent);
-    return res.json({
-      ok: result.blocked !== true,
-      blocked: result.blocked === true,
-      blocker: result.blocker || null,
-      logs: Array.isArray(result.logs) ? result.logs.slice(-20) : [],
-      stop: stopRecord,
-      upstream: refreshed?.contract?.upstream || buildSubconsciousUpstreamContract(state.stateDir, state.agent.workdir || null, nextRuntimeMeta, nextLetta, state.conversationState),
-    });
-  } catch (err) {
-    return res.status(502).json({ ok: false, blocked: true, blocker: err?.message || String(err) });
-  }
-});
-
-app.post('/api/subconscious/runtime/invoke/:name', async (req, res) => {
-  const agent = normalizeLooseAgentName(req.params.name);
-  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
-  const state = resolveSubconsciousState(agent);
-  if (!state) return res.status(404).json({ error: 'agent not found' });
-
-  const payload = req.body || {};
-  const hook = normalizeOptionalText(payload.hook, 120) || normalizeOptionalText(payload.hookEventName, 120) || null;
-  if (!hook) return res.status(400).json({ error: 'hook required' });
-
-  const promptPayload = {
-    hook,
-    hookEventName: normalizeOptionalText(payload.hookEventName, 120) || hook,
-    sessionId: normalizeOptionalText(payload.sessionId, 200),
-    transcriptPath: normalizeWorkspacePath(payload.transcriptPath),
-    toolName: normalizeOptionalText(payload.toolName, 120),
-    promptPreview: normalizeOptionalText(payload.promptPreview, 320),
-    summary: normalizeOptionalText(payload.summary, 600),
-  };
-  const invokeStartedAt = new Date().toISOString();
-  const conversationBefore = syncSubconsciousConversationState(state, promptPayload, {
-    at: invokeStartedAt,
-    hook,
-    toolName: promptPayload.toolName,
-    runtimeInvoked: false,
-  });
-  if (conversationBefore) applyConversationSnapshotToContract(state, conversationBefore);
-
-  if (!state.runtimeConfig.invocationConfigured) {
-    return res.json({
-      ok: true,
-      invoked: false,
-      guidance: null,
-      guidanceSource: (state.contract.guidance?.configured === true || state.contract.manualGuidance?.configured === true) ? 'manual-state-file' : 'none',
-      disabledReason: state.runtimeConfig.disabledReason,
-      provider: state.runtimeConfig.provider,
-      model: state.runtimeConfig.model,
-      conversation: state.contract.conversation,
-    });
-  }
-
-  if (!state.runtimeConfig.allowedHooks.includes(hook)) {
-    return res.json({
-      ok: true,
-      invoked: false,
-      guidance: null,
-      guidanceSource: (state.contract.guidance?.configured === true || state.contract.manualGuidance?.configured === true) ? 'manual-state-file' : 'none',
-      disabledReason: `hook ${hook} is not eligible for runtime guidance`,
-      provider: state.runtimeConfig.provider,
-      model: state.runtimeConfig.model,
-      conversation: state.contract.conversation,
-    });
-  }
-  const recentEvents = getSubconsciousEvents(agent, 12);
-  const retrievedMemories = retrieveSubconsciousMemories(state.memoryState, promptPayload);
-  if (state.memoryState?.store) {
-    state.memoryState.store.lastRetrievedAt = new Date().toISOString();
-    state.memoryState.store.lastRetrievedQuery = retrievedMemories.queryText || null;
-    state.memoryState.store.lastRetrievedIds = retrievedMemories.matches.map((row) => row.id);
-    writeSubconsciousMemoryStore(state.memoryState);
-  }
-  const prompt = buildSubconsciousInvokePrompt(agent, promptPayload, state, recentEvents, retrievedMemories);
-  const started = Date.now();
-
-  try {
-    const llm = await callSubconsciousRuntimeLlm(state, prompt);
-    const parsed = parseSubconsciousInvokeResponse(llm.content);
-    const guidance = parsed.guidance || '';
-    const nowIso = new Date().toISOString();
-    const storedEpisode = appendSubconsciousMemoryEpisode(state.memoryState, promptPayload, parsed);
-    const conversationAfter = syncSubconsciousConversationState(state, promptPayload, {
-      at: nowIso,
-      hook,
-      toolName: promptPayload.toolName,
-      runtimeInvoked: true,
-      runtimeProvider: state.runtimeConfig.provider,
-      runtimeModel: state.runtimeConfig.model,
-      guidancePreview: guidance ? guidance.slice(0, 320) : '',
-      guidanceAt: guidance ? nowIso : null,
-      guidanceSource: guidance ? 'runtime-llm' : 'none',
-    });
-    const currentConversation = applyConversationSnapshotToContract(state, conversationAfter);
-    const nextLetta = {
-      ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
-      lastInvocation: {
-        ok: true,
-        hook,
-        ts: Date.now(),
-        at: nowIso,
-        provider: state.runtimeConfig.provider,
-        model: state.runtimeConfig.model,
-        latencyMs: Date.now() - started,
-        guidancePreview: guidance ? guidance.slice(0, 240) : '',
-        error: null,
-        summary: parsed.summary,
-        memoryRetrieval: {
-          query: retrievedMemories.queryText || '',
-          matchCount: retrievedMemories.matches.length,
-          matchIds: retrievedMemories.matches.map((row) => row.id),
-          storedEpisodeId: storedEpisode?.id || null,
-        },
-        conversation: {
-          sessionId: currentConversation?.sessionId || promptPayload.sessionId || null,
-          transcriptPath: currentConversation?.transcriptPath || promptPayload.transcriptPath || null,
-          userTurnCount: currentConversation?.userTurnCount ?? 0,
-          assistantTurnCount: currentConversation?.assistantTurnCount ?? 0,
-        },
-      },
-      lastRuntimeGuidance: {
-        text: guidance,
-        preview: guidance ? guidance.slice(0, 600) : '',
-        updatedAt: nowIso,
-        hook,
-        summary: parsed.summary,
-        guidanceSource: guidance ? 'runtime-llm' : 'none',
-        sessionId: currentConversation?.sessionId || promptPayload.sessionId || null,
-        transcriptPath: currentConversation?.transcriptPath || promptPayload.transcriptPath || null,
-      },
-      updatedAt: nowIso,
-    };
-    safeWriteJsonFile(state.lettaPath, nextLetta);
-    return res.json({
-      ok: true,
-      invoked: true,
-      guidance,
-      guidanceSource: guidance ? 'runtime-llm' : 'none',
-      provider: state.runtimeConfig.provider,
-      model: state.runtimeConfig.model,
-      latencyMs: Date.now() - started,
-      usage: llm.usage || null,
-      summary: parsed.summary,
-      memoryRetrieval: {
-        query: retrievedMemories.queryText || '',
-        matchCount: retrievedMemories.matches.length,
-        matches: retrievedMemories.matches,
-        storedEpisodeId: storedEpisode?.id || null,
-      },
-      conversation: state.contract.conversation,
-    });
-  } catch (e) {
-    const nowIso = new Date().toISOString();
-    const conversationAfter = syncSubconsciousConversationState(state, promptPayload, {
-      at: nowIso,
-      hook,
-      toolName: promptPayload.toolName,
-      runtimeInvoked: false,
-      runtimeProvider: state.runtimeConfig.provider,
-      runtimeModel: state.runtimeConfig.model,
-    });
-    applyConversationSnapshotToContract(state, conversationAfter);
-    const nextLetta = {
-      ...(state.letta && typeof state.letta === 'object' ? state.letta : {}),
-      lastInvocation: {
-        ok: false,
-        hook,
-        ts: Date.now(),
-        at: nowIso,
-        provider: state.runtimeConfig.provider,
-        model: state.runtimeConfig.model,
-        latencyMs: Date.now() - started,
-        guidancePreview: '',
-        error: String(e?.message || e),
-        summary: 'runtime invocation failed',
-      },
-      updatedAt: nowIso,
-    };
-    safeWriteJsonFile(state.lettaPath, nextLetta);
-    return res.status(502).json({
-      ok: false,
-      error: 'runtime invocation failed',
-      detail: String(e?.message || e),
-      provider: state.runtimeConfig.provider,
-      model: state.runtimeConfig.model,
-      conversation: state.contract.conversation,
-    });
-  }
-});
-
-app.get('/api/subconscious/events', (req, res) => {
-  const limitRaw = Number.parseInt(req.query.limit, 10);
-  const limit = Number.isFinite(limitRaw) && limitRaw > 0
-    ? Math.min(limitRaw, SUBCONSCIOUS_EVENT_HISTORY_LIMIT)
-    : 120;
-  const agent = normalizeLooseAgentName(req.query.agent);
-  if (agent) {
-    return res.json({ ok: true, agent, events: getSubconsciousEvents(agent, limit) });
-  }
-  const merged = [];
-  for (const rows of subconsciousEventsByAgent.values()) {
-    merged.push(...rows);
-  }
-  merged.sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
-  return res.json({ ok: true, events: merged.slice(-limit) });
-});
-
-app.get('/api/subconscious/events/:name', (req, res) => {
-  const agent = normalizeLooseAgentName(req.params.name);
-  if (!agent) return res.status(400).json({ error: 'invalid agent name' });
-  const limitRaw = Number.parseInt(req.query.limit, 10);
-  const limit = Number.isFinite(limitRaw) && limitRaw > 0
-    ? Math.min(limitRaw, SUBCONSCIOUS_EVENT_HISTORY_LIMIT)
-    : 120;
-  return res.json({ ok: true, agent, events: getSubconsciousEvents(agent, limit) });
-});
 
 // ── Tasks CRUD ───────────────────────────────────────────────────────
 const _tokenFromTaskAssignee = r => { const t = taskStore.getTask(r.params?.id); return t?.assignee || ''; };
@@ -10543,6 +8733,58 @@ app.get('/api/capability', requireBearer, (_req, res) => {
  */
 
 /** The agent that would serve a role: qualified, and with the most headroom. */
+/**
+ * What is disclosed about the resource serving a role — and what is not.
+ *
+ * OPERATOR RULING 2026-08-11, inverting ADR-013 decision 2: the coding agent and its model
+ * are not hidden from the borrower, they are made TRANSPARENT. See the amendment in
+ * `knowledge/decisions/adr-013-resource-contribution-console.md`.
+ *
+ * The original decision reasoned that hiding the `(agent × model)` mapping is what makes
+ * this a resource market rather than a remote-shell directory. The opposite is more likely
+ * true, and it is why this reads as a correction rather than a relaxation: a market where
+ * model quality is undisclosed is a market where the borrower cannot tell Opus from a cheap
+ * model, so they discount every offer to the worst case. For a CONTRIBUTION console that is
+ * backwards — a contributor lending their Opus subscription becomes indistinguishable from
+ * one lending nothing much, and disclosure is what makes the contribution legible.
+ *
+ * THE LINE THAT REPLACES THE OLD ONE. Not "everything is public" — the distinction is
+ * between the CAPABILITY and the DEPLOYMENT:
+ *
+ *   disclosed   framework, model, reasoning level, the tier it qualifies at, the agent's
+ *               name — everything a borrower needs to judge whether the work will be good
+ *               enough, and to attribute it afterwards
+ *
+ *   private     host, workspace path, credential home, seat, API keys, tmux session, owner
+ *               MXID, env var names — the provider's deployment, which tells a borrower
+ *               nothing about the work and is a standing invitation to probe
+ *
+ * The request direction is unchanged: a borrower still asks for a ROLE and cannot pick an
+ * agent (`b.agent` is a hint that must independently qualify, refused otherwise). So the
+ * provider keeps allocation freedom while the borrower is told what they got. Choosing is
+ * still the provider's; knowing is now the borrower's.
+ */
+function servingConfiguration(agentName) {
+  if (!agentName) return null;
+  const row = Object.values(agents).filter(isAgentRecord).map(serializeAgent)
+    .find((a) => a.name === agentName);
+  if (!row) return null;
+  const primary = row.runtimeProfile?.primary ?? {};
+  return {
+    agent: agentName,
+    framework: primary.framework ?? row.type ?? null,
+    model: primary.model ?? null,
+    /*
+     * Included because it is load-bearing rather than decorative: the same model at a
+     * different reasoning level is a different tier (`lib/role-capacity.json` lists
+     * gpt-5.6-sol at both high and medium, qualifying differently), so a model name alone
+     * does not tell a borrower what they are getting.
+     */
+    reasoning: primary.reasoning ?? null,
+    tier: modelTier(row.runtimeProfile) ?? null,
+  };
+}
+
 function agentForRole(role) {
   const rows = Object.values(agents).filter(isAgentRecord).map(serializeAgent);
   const TIER_RANK = Object.fromEntries([...CAPABILITY_TIERS].reverse().map((t, i) => [t, i]));
@@ -10597,14 +8839,49 @@ function seatRemainingFor(agentName) {
  * either side must not relax the other — so the result is the minimum of whichever
  * limits exist, and null only when neither does.
  */
+/*
+ * WHAT IS LEFT OF AN AGENT'S CEILING, counting what was SPENT as well as what was promised.
+ *
+ * This used to subtract only allocations. That was the whole truth while nothing measured
+ * consumption: a ceiling could be over-promised but never over-spent, because spending was
+ * invisible. Now that lib/metering measures it, the two can disagree in both directions —
+ * an engagement allocated 400k and consumed 900k has exceeded the ceiling while its
+ * allocation says otherwise, and one allocated 400k that consumed 50k is holding 350k it
+ * has not used.
+ *
+ * `max(reserved, spent)`, not the sum. Consumption largely happens INSIDE an allocation, so
+ * adding them double-counts the same tokens; taking the larger is the conservative reading
+ * that never under-reports what the ceiling has to cover.
+ *
+ * SPENT IS PERIOD-SCOPED OR IT IS NOT USED. A ceiling is `{tokens, period}`, and comparing
+ * an all-time total to a monthly budget exhausts it permanently. If the ledger has no
+ * bucket for the current period, spend is treated as UNKNOWN rather than zero and the
+ * allocation figure stands alone — an absent bucket means nobody has measured this period,
+ * which is not the same as measuring none.
+ */
+function ceilingSpendFor(agentName) {
+  const agent = Object.values(agents).filter(isAgentRecord).find((a) => a.name === agentName);
+  const preset = agent?.presetId ? frameworkPresets.find((p) => p.id === agent.presetId) : null;
+  const period = preset?.ceiling?.period === 'daily' ? 'daily' : 'monthly';
+  const bucket = usageLedger.currentPeriod(agentName, period);
+  return {
+    period,
+    reserved: engagementStore.committedFor(agentName),
+    spent: bucket ? bucket.total : null,
+    spendPeriodKey: bucket?.key ?? null,
+  };
+}
+
 function remainingFor(agentName) {
   const agent = Object.values(agents).filter(isAgentRecord).find((a) => a.name === agentName);
   if (!agent?.presetId) return null;
   const preset = frameworkPresets.find((p) => p.id === agent.presetId);
   const ceiling = preset?.ceiling?.tokens;
-  const byCeiling = Number.isFinite(ceiling)
-    ? Math.max(0, ceiling - engagementStore.committedFor(agentName))
-    : null;
+  const { reserved, spent } = ceilingSpendFor(agentName);
+  // An unknown spend cannot lower the figure; it also must not be read as zero, which is
+  // why it falls back to the allocation rather than to `ceiling - 0`.
+  const drawn = spent === null ? reserved : Math.max(reserved, spent);
+  const byCeiling = Number.isFinite(ceiling) ? Math.max(0, ceiling - drawn) : null;
   const bySeat = seatRemainingFor(agentName);
   const limits = [byCeiling, bySeat].filter((v) => v !== null);
   return limits.length ? Math.min(...limits) : null;
@@ -10707,10 +8984,51 @@ function bindEngagement(engagement) {
   }
 }
 
-/** Detach on revoke or rejection, so an ended engagement leaves no live binding. */
+/**
+ * Detach on revoke or rejection — but only when this was the LAST live engagement holding
+ * the binding.
+ *
+ * A binding is keyed on `(agent, projectRoomId)` while engagements are individual, so one
+ * binding serves every engagement between that agent and that room. Removing it whenever any
+ * one of them ended detached the agent from the project while other engagements were still
+ * ACTIVE: the access granted by an approval was revoked by an unrelated refusal.
+ *
+ * Not hypothetical. The live store holds six concurrent active engagements for a single
+ * (agent, project room) pair, each drawing on the ceiling separately, so refusing a seventh
+ * request would have cut the access the other six were relying on — a rejection acting as a
+ * revocation of work nobody decided to end.
+ *
+ * Caught by tests/engagement-binding.test.js, and only because that case approves before it
+ * rejects. Rejecting without a prior approval cannot tell "the rejection removed nothing"
+ * from "nothing was there to remove", which is why the first version of that test passed
+ * against this bug.
+ */
 function unbindEngagement(engagement) {
   if (!engagement?.agent || !engagement?.projectRoomId) return;
   try {
+    /*
+     * Live means active or pending — anything a project could still be relying on.
+     *
+     * The `e.id !== engagement.id` term is REDUNDANT TODAY and kept deliberately. The store
+     * records the new state before calling here, so this engagement is already `rejected` or
+     * `revoked` and the state filter alone excludes it; a mutation removing the id term
+     * passes every test, which is the honest description of it. It stays because the
+     * alternative failure is silent and total: if that ordering ever changed, the engagement
+     * would count itself as still live and NOTHING would ever unbind, leaving standing
+     * reachability behind every ended engagement.
+     */
+    const stillLive = engagementStore.list()
+      .filter((e) => e.id !== engagement.id
+        && e.agent === engagement.agent
+        && e.projectRoomId === engagement.projectRoomId
+        && (e.state === 'active' || e.state === 'pending'));
+    if (stillLive.length > 0) {
+      console.log(
+        `[engagements] keeping ${engagement.agent} bound to ${engagement.projectRoomId}: `
+        + `${stillLive.length} engagement(s) still live`,
+      );
+      return;
+    }
     approvalStore.removeBinding(engagement.agent, engagement.projectRoomId);
   } catch (error) {
     // A binding that was never created is not an error worth failing the revoke for.
@@ -10796,6 +9114,16 @@ app.post('/api/engagements', requireRequester, (req, res) => {
       requester: b.requester,
       requestedTokens: b.requestedTokens,
       ratePerDay: b.ratePerDay,
+      /*
+       * PRD A-R0-1: repeating the same request_id and digest yields the same
+       * assignment; a different digest is a conflict. The bridge supplies the Matrix
+       * event id, which both sides already share and the sender cannot forge.
+       *
+       * Optional, because requiring it would refuse every existing caller. Its absence
+       * is recorded on the engagement rather than replaced with a generated key, so a
+       * request that could not be deduped says so.
+       */
+      requestId: b.requestId,
       agent,
       remainingTokens: agent ? remainingFor(agent) : null,
     });
@@ -10803,12 +9131,20 @@ app.post('/api/engagements', requireRequester, (req, res) => {
      * An auto-join goes straight to active, so it must bind here — the verdict
      * route it would otherwise pass through never runs for it.
      */
+    /*
+     * `serving` rides with the engagement rather than being looked up separately, so a
+     * borrower learns what they got in the same response that tells them they got it —
+     * and so a caller cannot end up displaying a role without its fulfilment.
+     */
+    const serving = servingConfiguration(engagement.agent);
     if (engagement.state === 'active') {
       const outcome = bindEngagement(engagement);
       engagementStore.setBindingOutcome(engagement.id, outcome);
-      return res.json({ ok: true, engagement: engagementStore.get(engagement.id), binding: outcome });
+      return res.json({
+        ok: true, engagement: engagementStore.get(engagement.id), binding: outcome, serving,
+      });
     }
-    return res.json({ ok: true, engagement });
+    return res.json({ ok: true, engagement, serving });
   } catch (e) {
     return respondEngagementError(res, e, 'failed to create engagement');
   }
@@ -10838,9 +9174,24 @@ app.post('/api/engagements/:id/verdict', requireBearer, (req, res) => {
        * attach the agent is a half-done thing, and the form that pressed Approve is
        * the only place anyone will look.
        */
-      return res.json({ ok: true, engagement: engagementStore.get(e.id), binding: outcome });
+      /*
+       * `serving` rides back here for the same reason it rides with the request, and the argument
+       * is stronger at this end: the request only asks, the VERDICT is where the agent is actually
+       * granted. Omitting it meant the one response that says "you have it" did not say what you
+       * have, so a borrower had to make a second call to learn which agent and model they were
+       * given — the exact "role without its fulfilment" the request route refuses to serve.
+       * Disclosed, not concealed, per the 2026-08-11 transparency ruling.
+       */
+      return res.json({
+        ok: true,
+        engagement: engagementStore.get(e.id),
+        binding: outcome,
+        serving: servingConfiguration(e.agent),
+      });
     }
-    // Rejected: nothing to attach, and anything already attached must go.
+    // Rejected: nothing to attach, and anything already attached must go. No `serving` either —
+    // nothing was granted, and reporting a fulfilment for a refusal would be a lie in the
+    // direction that matters.
     unbindEngagement(e);
     return res.json({ ok: true, engagement: e });
   } catch (e) {
@@ -10862,6 +9213,70 @@ app.post('/api/engagements/:id/revoke', requireBearer, (req, res) => {
   } catch (e) {
     return respondEngagementError(res, e, 'failed to revoke engagement');
   }
+});
+
+/*
+ * `GET /api/offer-book?projectRoomId=…` — what a PROJECT may see before it asks.
+ *
+ * The gap the transparency ruling opened. Once the serving agent and its model are disclosed
+ * (see the 2026-08-11 amendment to ADR-013), a borrower will reasonably want to know what is
+ * on offer BEFORE committing to a request — and until now the only inbound verb was
+ * `!request` itself. `/api/capability`, `/api/offers` and `/api/whitelist` all exist, but they
+ * are the PROVIDER's views: every role whether offered or not, every agent including ones
+ * that serve nothing, and the whitelist in full. Handing those to a project would disclose
+ * the provider's whole posture, which is a different thing from disclosing what serves a role.
+ *
+ * So this is a separate, narrower projection rather than a relaxation of the existing three:
+ *
+ *   PUBLISHED OFFERS ONLY. An unpublished offer is not on offer
+ *   (REQ-CONTRIBUTION-CONSOLE-ROUTE), and listing it would advertise capacity the provider
+ *   has deliberately not advertised. Absent roles are omitted rather than returned as null,
+ *   because a project cannot act on the difference between "not offered" and "no such role".
+ *
+ *   THIS ROOM'S OWN WHITELIST STATE, never the list. Whether YOUR request auto-joins is the
+ *   single most actionable fact for you and yours alone; who else is trusted is not yours.
+ *
+ *   NO CEILINGS. The offer caps are a promise the provider published; remaining ceiling is
+ *   internal state that moves with every other project's activity. A request over it still
+ *   falls back to approval with `overCeiling` as the stated reason, so the fact is disclosed
+ *   when it becomes relevant rather than published as a number that is stale on arrival.
+ *
+ * Guarded by `requireRequester`, so a project can read it with the submit-only credential —
+ * the same scope that may already ask. It grants nothing new: every field is either the
+ * provider's own published decision or a fact about the caller's own room.
+ */
+app.get('/api/offer-book', requireRequester, (req, res) => {
+  const room = normalizeOptionalText(req.query.projectRoomId, 256);
+  const active = engagementStore.list({ state: 'active' });
+  const roles = engagementStore.listOffers()
+    .filter((o) => o.published)
+    .map((o) => {
+      const agent = agentForRole(o.role);
+      return {
+        role: o.role,
+        budgetCapPerEngagement: o.budgetCapPerEngagement ?? null,
+        rateCap: o.rateCap ?? null,
+        count: o.count ?? null,
+        // Named `runningNow` rather than `used`: `count` bounds concurrent engagements, so
+        // this is a live figure and not a quota consumed.
+        runningNow: active.filter((e) => e.role === o.role).length,
+        /*
+         * Who would serve it if the request arrived now — deliberately not a reservation.
+         * `agentForRole` picks by most remaining headroom, so this answer moves as other
+         * projects are served, and a borrower who read it as a promise would be wrong.
+         */
+        serving: servingConfiguration(agent),
+      };
+    });
+  return res.json({
+    roles,
+    /*
+     * Null rather than false when no room was named: false would assert that the caller's
+     * room is not trusted, which is a claim about a room nobody identified.
+     */
+    whitelisted: room ? engagementStore.isWhitelisted(room) : null,
+    projectRoomId: room || null,
+  });
 });
 
 app.get('/api/offers', requireBearer, (_req, res) => {
@@ -11003,16 +9418,63 @@ app.get('/api/engagements/preview', requireBearer, (req, res) => {
  * difference between "this cost me nothing" and "I cannot see what this cost me" is
  * the whole reason a contributor opens this page.
  */
+/*
+ * Why a framework cannot be metered, when it cannot.
+ *
+ * No longer a blanket statement. HAFleet still never sees an API response — it launches a
+ * CLI that talks to the provider directly — but the CLIs write the provider's own figures
+ * to disk, and lib/metering reads them. So the reason is now per framework: Claude Code
+ * and Codex record usage, octos records none.
+ */
 const TOKENS_UNAVAILABLE_REASON =
-  'no token accounting exists at any granularity: hafleet launches a CLI that talks '
-  + 'to the provider directly, so no API response passes through it to read a usage '
-  + 'figure from. This is true in api-key mode as well as on a subscription.';
+  'this framework writes no token accounting hafleet can read: hafleet launches a CLI '
+  + 'that talks to the provider directly, so no API response passes through it, and this '
+  + "CLI does not record the provider's figures to disk either.";
 
-app.get('/api/usage', requireBearer, (_req, res) => {
+app.get('/api/usage', requireBearer, async (_req, res) => {
   refreshServerLiveness();
   const rows = Object.values(agents).filter(isAgentRecord).map(serializeAgent);
   const allTasks = taskStore.listTasks();
   const TASK_STATUSES = ['created', 'accepted', 'in_progress', 'blocked', 'done'];
+
+  /*
+   * Measured consumption, from the transcripts the CLIs write themselves.
+   *
+   * Bounded and cached (lib/metering/reader.js): a scan that opened every transcript on
+   * every request would cost seconds and grow with history. Failure here degrades to
+   * unavailable-with-a-reason rather than failing the endpoint — usage is a read-only
+   * view, and losing the task and busy-time figures because a transcript was unreadable
+   * would be the wrong trade.
+   */
+  let metered = null;
+  let meteredError = null;
+  try {
+    metered = await meterFleet({ agents: rows, homeDir: homedir() });
+  } catch (error) {
+    meteredError = String(error?.message ?? error).slice(0, 200);
+  }
+  /*
+   * Record what this scan saw, then answer from the LEDGER rather than the scan.
+   *
+   * The scan only knows what is on disk right now. The ledger knows what was ever
+   * observed, which is the honest answer to "what did this agent consume" once a
+   * transcript can disappear between two requests.
+   */
+  if (metered && !metered.cached) {
+    try {
+      usageLedger.record((metered.agents ?? [])
+        .filter((m) => m.available)
+        .map((m) => ({
+          agent: m.agent,
+          framework: m.framework,
+          sessions: (m.files ?? []).map((f) => ({ key: f.file, totals: f.totals })),
+        })));
+    } catch (error) {
+      // A ledger write failure must not cost the caller the figures it already has.
+      meteredError = meteredError ?? `ledger write failed: ${String(error?.message ?? error).slice(0, 120)}`;
+    }
+  }
+  const meteredByAgent = new Map((metered?.agents ?? []).map((m) => [m.agent, m]));
 
   const byAgent = rows.map((a) => {
     const mine = allTasks.filter((t) => t.assignee === a.name);
@@ -11032,9 +9494,42 @@ app.get('/api/usage', requireBearer, (_req, res) => {
       tasksByStatus,
       // Declared, which is knowable: I know what I promised.
       ceilingTokens: preset?.ceiling?.tokens ?? null,
-      // Not measured. Null with a reason, never 0.
-      tokensUsed: null,
-      tokensReason: TOKENS_UNAVAILABLE_REASON,
+      /*
+       * Measured where the framework records it and the agent's workspace is known;
+       * null with the specific reason otherwise. Never 0 — a zero here reads as "this
+       * agent consumed nothing", which is a claim rather than an absence.
+       */
+      ...(() => {
+        const m = meteredByAgent.get(a.name);
+        /*
+         * The ledger's figure, which includes sessions whose transcripts are gone. It is
+         * never smaller than the live scan, so preferring it cannot understate.
+         */
+        const ever = usageLedger.totalsFor(a.name);
+        if (m?.available || ever) {
+          return {
+            tokensUsed: ever ? ever.total : m.total,
+            // The kinds stay apart: cache reads run several orders of magnitude above
+            // fresh input, so one summed figure hides the only number that matters for
+            // comparing two agents.
+            tokensByKind: ever ? ever.totals : m.totals,
+            tokensSessions: ever ? ever.sessions + ever.retiredSessions : m.sessions,
+            // Non-zero means a transcript reported less than it had before, so the figure
+            // rests on a source that changed underneath. Surfaced, not buried.
+            tokensSourceRegressions: ever?.regressions ?? 0,
+            // True when the figure includes work whose transcript is no longer on disk.
+            tokensFromLedger: Boolean(ever && !m?.available),
+            tokensReason: null,
+          };
+        }
+        return {
+          tokensUsed: null,
+          tokensByKind: null,
+          tokensReason: m?.reason ?? (meteredError
+            ? `metering failed: ${meteredError}`
+            : TOKENS_UNAVAILABLE_REASON),
+        };
+      })(),
     };
   });
 
@@ -11049,8 +9544,25 @@ app.get('/api/usage', requireBearer, (_req, res) => {
       tasks: { available: true, source: 'lib/task-store.js' },
       busyTime: { available: true, source: 'agent runtime observation (tmux pane / ACP session sweep)' },
       tokens: {
-        available: false,
-        reason: TOKENS_UNAVAILABLE_REASON,
+        /*
+         * True when ANY agent could be metered, and the per-agent rows carry the detail.
+         * A global false would deny measurements that exist; a global true would promise
+         * ones that do not. REQ-CONTRIBUTION-CONSOLE-METERING-SCOPE requires it per
+         * framework, which is what `frameworks` below reports.
+         */
+        available: (metered?.attributed ?? 0) > 0,
+        source: 'lib/metering — the coding CLIs\' own transcripts, which record the '
+          + "provider's reported usage rather than an estimate",
+        attributed: metered?.attributed ?? 0,
+        unattributed: metered?.unattributed ?? null,
+        // Two distinct caveats, deliberately not merged: agents that could not be
+        // attributed at all, and a scan that stopped early and therefore understates.
+        reason: metered?.reason ?? (meteredError ? `metering failed: ${meteredError}` : null),
+        boundsReason: metered?.boundsReason ?? null,
+        frameworks: [...new Set(rows.map((r) => r.type).filter(Boolean))]
+          .map((f) => meteringSupport(f)),
+        computedAt: metered?.computedAt ?? null,
+        cached: metered?.cached ?? null,
         // Named so the gap is actionable rather than merely admitted.
         candidateSources: [
           'per-framework session logs written by the CLI itself (best-effort, per framework)',
@@ -11059,12 +9571,32 @@ app.get('/api/usage', requireBearer, (_req, res) => {
       },
     },
     agents: byAgent,
-    totals: {
-      agents: byAgent.length,
-      busySec: byAgent.reduce((n, r) => n + r.busySec, 0),
-      tasks: byAgent.reduce((n, r) => n + r.tasks, 0),
-      tokensUsed: null,
-    },
+    /*
+     * A fleet total that carries its own denominator.
+     *
+     * `tokensUsed` was unconditionally null here even when per-agent rows were measured,
+     * which threw away a real figure. But a bare sum would be worse: with 2 of 7 agents
+     * attributable it understates the fleet while looking authoritative, and nothing in the
+     * number says so.
+     *
+     * So the numerator never travels without its denominator, and it stays null when
+     * nothing at all was measured — null is "not known", 0 would be the claim that this
+     * fleet consumed nothing.
+     */
+    totals: (() => {
+      const measured = byAgent.filter((r) => typeof r.tokensUsed === 'number');
+      return {
+        agents: byAgent.length,
+        busySec: byAgent.reduce((n, r) => n + r.busySec, 0),
+        tasks: byAgent.reduce((n, r) => n + r.tasks, 0),
+        tokensUsed: measured.length
+          ? measured.reduce((n, r) => n + r.tokensUsed, 0)
+          : null,
+        // Read these together with the figure above or not at all.
+        tokensMeasuredFor: measured.length,
+        tokensPartial: measured.length > 0 && measured.length < byAgent.length,
+      };
+    })(),
   });
 });
 
@@ -12706,6 +11238,17 @@ export const __backendV2TestInternals = {
   approvalStoreForTest: approvalStore,
   dispatchQueuesForTest: dispatchQueues,
   sweepLocalActivityDurationsForTest: sweepLocalActivityDurations,
+  /*
+   * The live server store, for tests that need a heartbeat to be OLD.
+   *
+   * The alternative was what tests/api-server-heartbeat.test.js actually did: set the TTL to
+   * 100ms and sleep(200) to make a server stale — which put every assertion after the recovery
+   * heartbeat inside a 100ms window that a GC pause under load regularly blew. Specimen (run 2 of
+   * the forensic hunt): s1's outage re-opened between the recovery heartbeat and the assertion
+   * GET, so `openAfter` read [s1, s2] instead of [s2]. Rewriting servers.json does not work —
+   * this store is the in-memory truth and the file is only its persistence.
+   */
+  serversForTest: servers,
 };
 
 if (process.argv[1] === __filename) {

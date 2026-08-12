@@ -2,10 +2,104 @@
 kind: decision
 id: ADR-013
 title: "Serve the resource contributor, not the dispatching house"
-status: Proposed
+status: Accepted
 liveness: auto
 tags: [hafleet, resource-plane, contribution, capacity, metering, engagement]
 ---
+
+## Amendment 2026-08-11 — the serving agent and its model are transparent, not hidden
+
+Decision 2 made the privacy of the `role → (agent × model)` mapping the boundary the whole
+design turned on: "HAgency sees roles, never raw agents … keeping that mapping private to the
+provider is what makes this a resource market rather than a remote-shell directory."
+
+**The operator's ruling reverses that: there is no need to hide the coding agent or the
+model — they should be made transparent.** This is withdrawn as a design error, not relaxed
+as a convenience.
+
+The original argument had it backwards. Hiding model quality does not protect a market, it
+produces a **lemon market**: a borrower who cannot tell Opus from a cheap model must assume
+the worst and discount every offer accordingly, so the contributor lending a strong
+subscription is priced as though they had lent nothing much. For a **contribution** console
+that failure is fatal rather than incidental — the whole point is that lending capacity is a
+legible contribution, and a contribution nobody can distinguish is not one. Disclosure is
+what makes it legible. Reproducibility points the same way: a project reviewing work
+produced by an agent has a legitimate engineering need to know which model produced it.
+
+**The boundary moves; it does not disappear.** The line is now between the *capability* and
+the *deployment*:
+
+| | |
+|---|---|
+| **disclosed** | agent name, framework, model, reasoning level, the tier it qualifies at — everything a borrower needs to judge whether the work will be good enough, and to attribute it afterwards |
+| **private** | host, workspace path, credential home, seat, API keys, tmux session, owner MXID, environment variable names — the provider's deployment, which tells a borrower nothing about the work and is a standing invitation to probe |
+
+**The request direction is unchanged, and that is what preserves what decision 2 was
+actually protecting.** A borrower still asks for a **role** and cannot pick an agent; a named
+agent is a hint that is honoured only if it independently qualifies, and refused otherwise.
+So the provider keeps full freedom to allocate, substitute and reconfigure. **Choosing stays
+the provider's; knowing becomes the borrower's.**
+
+Two facts about the state this replaces, recorded because they are the reason the ruling
+matters in practice rather than only on paper:
+
+- The implementation was **accidentally half-transparent**. The auto-join reply already
+  named the agent into the project room (`lib/bot-commands.js`), and this deployment's names
+  encode the framework — `claude-agent`, `codex-agent`, `octos-agent`. So it leaked the
+  identity while withholding the model, the one fact a borrower can act on: the worst of
+  both policies.
+- The leak was **structural, not textual**. An agent replies in a project room under its own
+  Matrix identity (`sendAsAgent` takes that agent's own access token; the MXID is
+  `@ac_<name>:server`), so the name is the message sender on every message. Editing the
+  reply text would have been theatre. Honouring the *old* decision would have required
+  per-engagement anonymous Matrix identities, with their own E2EE devices and key handling —
+  a cost this amendment removes rather than pays.
+
+`REQ-CONTRIBUTION-CONSOLE-ROLES` is rewritten to match.
+
+## Amendment 2026-08-10 — pricing is out of scope
+
+Section 8 originally listed R8's `PriceBook` and `BillingSource` among the PRD models
+**retained and load-bearing**. That was wrong and is withdrawn.
+
+The operator's ruling: HAFleet's unit of account is the **token**. It answers how much
+capacity was lent and to whom. Converting tokens to money depends on the contract, the
+plan, the region and the negotiated rate — none of which HAFleet observes — so it is a
+separate problem for a separate system.
+
+The implementation had already voted this way and the ADR had not noticed: every
+interface is denominated in tokens (`budgetCapPerEngagement`, `rateCap`, `quotaTokens`,
+`requestedTokens`, `allocatedTokens`), and `currency` appears zero times in
+`backend-v2.js`, `lib/seat-store.js` and `lib/engagement-store.js`. Contract 1 was always
+written as **Token** metering.
+
+The subscription case shows the confusion was semantic rather than a missing feature: on
+a fixed plan the marginal cost of a token is zero, so a per-engagement "cost" is a share
+of a bill paid regardless — an allocation with no rate. Presenting that beside a metered
+charge would invite a comparison that means nothing.
+
+`lib/cost-model.js` and its test have been **deleted** (2026-08-10). An earlier version of
+this amendment kept them in the tree, unwired, "for one verified finding". That was the
+wrong call twice over: 430 lines implementing precisely the conversion this ADR withdraws
+is a standing invitation to wire it up, and code is a poor place to store a finding — the
+finding is a sentence, and the sentence is here:
+
+> Pricing cache reads at the fresh-input rate overstated a real session by **7.79×**.
+> Cache reads run orders of magnitude above fresh input in volume and below it in rate, so
+> any future pricing work must price the four token kinds separately. A single blended rate
+> is not an approximation of this; it is wrong by most of the total.
+
+That is the whole of what the module was being kept for, and it survives its deletion. Its
+one non-pricing export, `TOKEN_KINDS`, was a duplicate of `KINDS` in
+`lib/metering/parsers.js`, which is the copy every live caller already used.
+
+## Requirement
+
+Derived into `REQ-CONTRIBUTION-CONSOLE`
+(`knowledge/requirements/req-contribution-console.md`), which carries the MUST-form
+statements and scenarios implementation is linked to. Contract 1 (token metering) has no
+requirement statement yet and is recorded there as an open question, because a
+requirement for a measurement nobody can take would be unmeetable by construction.
 
 ## Context
 
@@ -56,8 +150,11 @@ home, not per agent.** `bin/hafleet-up:1640-1644` unsets `ANTHROPIC_API_KEY` for
 unless a per-agent runtime profile supplies one explicitly, and `$HOME` is never reassigned in the
 launch path. So Claude agents share the operator's authenticated subscription and its quota by
 default; API-key mode is the deliberate exception. Registering more agents does not add capacity.
-The PRD already models this correctly as `Seat` / `SeatBinding` / `BillingSource` (R8), which
-survives this ADR intact.
+The PRD already models this correctly as `Seat` / `SeatBinding` / ~~`BillingSource`~~ (R8), which
+survives this ADR intact. (`BillingSource` struck by the 2026-08-10 amendment. That amendment corrects
+only decision 8's list, and this sentence was the second place the ADR asserted `BillingSource`
+survived — found while revising the PRD to v0.3, which is exactly the reader this contradiction would
+have misled.)
 
 **Numbering.** `knowledge/decisions/` holds `adr-001`…`adr-009`. The PRD records
 `adr-011-backend-owned-ephemeral-runner-sessions` and `adr-012-agent-operations-client-access` as
@@ -79,7 +176,7 @@ UI, performance scoring and the knowledge/memory surfaces are withdrawn.
 | L1 | 资源 Resource | my agents, their model configuration, their declared ceiling |
 | L2 | 能力 Capability | role templates: which `(agent × model)` combinations qualify |
 | L3 | 接洽 Engagement | standing offer + whitelist → auto-join, else approve/reject with a budget |
-| L4 | 用量 Consumption | what my agents did, for whom, and what it cost |
+| L4 | 用量 Consumption | what my agents did, for whom, and how many tokens it took (see the 2026-08-10 amendment: not what it cost in money) |
 
 The boundary that matters: **HAgency sees roles, never raw agents.** A project asks for a System
 Architect, not for `octos-agent running kimi-k3`. Keeping that mapping private to the provider is
@@ -93,8 +190,16 @@ each tier, since `TIER_RUNTIME` maps a tier to one Claude pair and leaves a cont
 K3 nothing to match against. Exclusions are named with their reason rather than omitted, because a
 role card that silently lacks a model reads as an oversight. The file ships with the product: a
 provider may decline to offer a role or a combination, but may not invent a role name, because the
-project side must recognise it for the vocabulary to mean anything. The file currently has **no
-consumer**; the console is its first, and the backend must become its second.
+project side must recognise it for the vocabulary to mean anything. When this was written the file had
+**no consumer at all**, which was the whole risk: a vocabulary nothing imports is a suggestion. That
+has changed, and the claim worth recording is the property rather than the tally — **the role
+vocabulary is now single-sourced from this file rather than restated per surface.** It is imported,
+not copied, by the backend (`backend-v2.js`), by `lib/matrix-agent.js` — through which
+`lib/dashboard/render/pool-page.js` renders — by the prototype's data layer and its capability and
+onboarding pages, by the invariant suite, and by the role tests; CI even treats the file as a build
+input for the prototype. As of 2026-08-11 that is five direct readers and twenty files in the tree
+that name it, but those figures are a snapshot: the first version of this sentence said "five
+consumers" and was stale within a day.
 
 **4. 接洽 replaces dispatch, gated by a whitelist.** A standing offer makes the provider
 discoverable; a whitelist decides who may skip them.
@@ -164,14 +269,29 @@ the implementation plan for this table.
 **8. What this withdraws from `docs/PRD-hafleet-pdu.md`.** Withdrawn: the PDU/outsourcing-house
 product statement, R0's `AssignmentRequest` / `StaffingAssignment` contract, `/api/dispatch` and
 any successor router-facing assignment path, and the staffing-request direction of travel.
-**Retained and now load-bearing:** R7's usage/cost accrual with A-R7-3's unknown-never-zero rule,
-R8's `Seat` / `SeatBinding` / `BillingSource` / `PriceBook` / `BudgetReservation` model, and R12's
-roster acceptance written against the running prototype. The PRD must be revised to v0.3 to record
+**Retained and now load-bearing:** R7's usage accrual with A-R7-3's unknown-never-zero rule,
+R8's `Seat` / `SeatBinding` / `BudgetReservation` model, and R12's roster acceptance written
+against the running prototype. **Also withdrawn (amended 2026-08-10):** R8's `PriceBook` and
+`BillingSource`, and the monetary half of R7's usage/cost accrual — HAFleet's unit of account is
+the token, and token-to-currency conversion is out of scope. R7's accrual is retained in tokens. The PRD must be revised to v0.3 to record
 this split; until then its dispatch requirements are not implementable and must not be scheduled.
 
 The console is a running Next.js prototype under `mockup/`, published at
-`hagency-org.github.io/HAFleet`, with 90 static and 31 in-browser assertions run before export. It
-is the executable form of this decision and acceptance for the round should be written against it.
+`hagency-org.github.io/HAFleet`. What matters about it is not its size but that **this decision has
+an executable form whose invariants are asserted before every export** — the layer boundaries, the
+role vocabulary, the blank-is-never-a-zero rule and the i18n contract are all checked rather than
+described. Three suites do that checking: `scripts/check-invariants.mjs` against the rendered HTML,
+`scripts/check-switches.mjs` in a browser over fixture data, and `scripts/live-ux.mjs` in a browser
+against a live backend — the only one that can catch a real payload the UI mishandles. As of
+2026-08-11 the first two report 97 and 35 passing assertions respectively (the figures this record
+first carried, 90 and 31, were already stale); `live-ux.mjs` is the newest and its count is not cited
+here, because it needs a running backend and is the suite most likely to grow. The prototype is the
+executable form of this decision and acceptance for the round should be written against it.
+
+**The lesson both of this section's stale numbers teach:** a precise count of anything in the
+codebase is stale the day a decision record is written, so state what the number is evidence *for* —
+that the design is executable and asserted, that the vocabulary is single-sourced — and either date
+the figure or leave it to the suite that measures it.
 
 ## Consequences
 

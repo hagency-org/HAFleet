@@ -4,13 +4,25 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
-const spawnMock = vi.hoisted(() => vi.fn(() => ({ pid: 4242, unref: vi.fn() })));
+/*
+ * `on` belongs in this mock. /start now attaches an exit listener so a launcher that dies is not
+ * left reported as a running agent — and a child stub without `on` made the route throw TypeError
+ * and answer 500, which is how this mock's incompleteness surfaced.
+ */
+const spawnMock = vi.hoisted(() => vi.fn(() => ({ pid: 4242, unref: vi.fn(), on: vi.fn() })));
+/*
+ * execFileSync is mocked because a stray real call from this file would run against the developer's
+ * own machine. The delete path no longer uses it — it goes through the runtime — but the mock stays
+ * as a guard: if anything in the backend starts shelling out again, it hits this instead of tmux.
+ */
+const execFileSyncMock = vi.hoisted(() => vi.fn(() => ''));
 
 vi.mock('child_process', async () => {
   const actual = await vi.importActual('child_process');
   return {
     ...actual,
     spawn: spawnMock,
+    execFileSync: execFileSyncMock,
   };
 });
 
@@ -68,6 +80,17 @@ describe('backend agents API', () => {
         },
         starter: {
           name: 'starter',
+          type: 'claude',
+          kind: 'agent',
+          online: false,
+          manualDown: true,
+          offlineReason: 'idle',
+          server: null,
+        },
+        // A second offline agent, so the launch-failure case does not have to reuse `starter`
+        // after that test has already brought it online.
+        failer: {
+          name: 'failer',
           type: 'claude',
           kind: 'agent',
           online: false,
@@ -197,10 +220,17 @@ describe('backend agents API', () => {
   test('DELETE /api/agents/:name?force=true cascades cleanup across runtime state files', async () => {
     const response = await request(context.app).delete('/api/agents/alpha').query({ force: 'true' });
     expect(response.status).toBe(200);
+    /*
+     * `sessionKilled` joined this response when force-delete started stopping the agent's tmux
+     * session — deleting the record used to leave the process running. Asserted explicitly rather
+     * than loosened to toMatchObject, so a future field cannot appear here unnoticed: this is the
+     * body a destructive operation reports, and it is worth pinning exactly.
+     */
     expect(response.body).toEqual({
       ok: true,
       deleted: true,
       name: 'alpha',
+      sessionKilled: expect.any(Boolean),
     });
 
     const agentResponse = await request(context.app).get('/api/agents/alpha');
@@ -244,6 +274,66 @@ describe('backend agents API', () => {
       offlineReason: null,
       state: 'starting',
     });
+  });
+
+  test('force-delete stops the agent process, and says whether it found one', async () => {
+    /*
+     * Deleting the record used to leave the tmux session and its coding-CLI process running: an
+     * orphan spending the contributor's tokens, its MCP server still calling a backend that no
+     * longer knows the agent, while the console reported it gone. Seen for real — a session started
+     * at 00:03 was still alive after the record was deleted at 07:55.
+     *
+     * `sessionKilled` is in the response because "deleted, and stopped a session" and "deleted, no
+     * session was running" are different outcomes, and a caller that cannot tell them apart cannot
+     * warn an operator that something is still running.
+     */
+    const res = await request(context.app).delete('/api/agents/starter?force=true');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, deleted: true, name: 'starter' });
+    /*
+     * The OUTCOME is asserted here, not the tmux arguments. The stop goes through
+     * `hostRuntime.killSession`, which is the point — the backend must not shell out to tmux itself
+     * (tests/runtime-interface.test.js). No session called `starter` exists in a test runtime, so
+     * false is the correct answer, and it must be REPORTED rather than omitted: a caller that cannot
+     * tell "stopped something" from "there was nothing to stop" cannot warn that a process may still
+     * be running. The tmux arguments are asserted where they live, in
+     * tests/runtime-interface.test.js.
+     */
+    expect(res.body.sessionKilled).toBe(false);
+  });
+
+  test('a launcher that exits non-zero takes the optimistic online back', async () => {
+    /*
+     * The claim above is OPTIMISTIC — /start marks the agent starting before the launcher has done
+     * anything, because the heartbeat is what confirms it. That is fine while the launcher works.
+     * It was not fine when the launcher failed: the process was spawned with `stdio: 'ignore'`, the
+     * endpoint answered `{ok: true, pid}`, and the record kept claiming a tmux session that did not
+     * exist — an agent that looked alive and merely quiet. Observed for real: `hafleet up-v1` died
+     * with "FATAL: Failed to fetch launch-env from backend" and /start reported success.
+     */
+    let exitHandler = null;
+    spawnMock.mockClear();
+    spawnMock.mockImplementationOnce(() => ({
+      pid: 9191,
+      unref: vi.fn(),
+      on: (event, handler) => { if (event === 'exit') exitHandler = handler; },
+    }));
+
+    const started = await request(context.app).post('/api/agents/failer/start');
+    expect(started.status).toBe(200);
+    // `launching`, not `started`: the process exists, the agent does not yet.
+    expect(started.body).toMatchObject({ ok: true, state: 'launching' });
+    expect(started.body.log).toContain('launch.log');
+
+    // The launcher now dies the way the real one did.
+    expect(exitHandler, 'no exit handler was attached').toBeTypeOf('function');
+    exitHandler(1, null);
+
+    const after = await request(context.app).get('/api/agents/failer');
+    expect(after.status).toBe(200);
+    expect(after.body.online).toBe(false);
+    expect(after.body.tmux).toBeNull();
+    expect(after.body.offlineReason).toBe('launch-failed:exit-1');
   });
 });
 

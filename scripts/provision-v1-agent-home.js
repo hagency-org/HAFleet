@@ -13,7 +13,6 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const CONFIGURE_SUBCONSCIOUS_SCRIPT = path.join(__dirname, 'configure-v1-subconscious.js');
 const WORKSPACE_CLAUDE_TEMPLATE_PATH = path.join(__dirname, '..', 'docs', 'workspace-claude-md-template.md');
 const WORKSPACE_AGENTS_TEMPLATE_PATH = path.join(__dirname, '..', 'docs', 'workspace-agents-md-template.md');
 const SUPERVISOR_CLAUDE_TEMPLATE_PATH = path.join(__dirname, '..', 'docs', 'workspace-supervisor-claude-template.md');
@@ -34,7 +33,6 @@ function parseArgs(argv) {
     projectMode: 'copy',
     projectName: '',
     agentId: '',
-    subconsciousEnabled: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
@@ -66,10 +64,6 @@ function parseArgs(argv) {
       args.agentId = argv[++i];
       continue;
     }
-    if (token === '--subconscious-enabled' && argv[i + 1]) {
-      args.subconsciousEnabled = argv[++i];
-      continue;
-    }
     if ((token === '-h') || (token === '--help')) {
       args.help = true;
       continue;
@@ -89,7 +83,6 @@ Options:
   --project-mode <mode>       copy (default) | symlink
   --project-name <name>       Override project directory name in workdir/projects/
   --agent-id <id>             Explicit internal id (default: agent_<normalized-name>)
-  --subconscious-enabled <b>  Override subconscious default (true/false)
 `);
 }
 
@@ -134,9 +127,6 @@ function defaultBackendBaseUrl(env = process.env) {
   return `http://127.0.0.1:${port}`;
 }
 
-function defaultSubconsciousEventUrl(env = process.env) {
-  return `${defaultBackendBaseUrl(env)}/api/subconscious/events`;
-}
 
 function writeIfMissing(filePath, content) {
   if (existsSync(filePath)) return;
@@ -528,7 +518,6 @@ function syncLegacyMeta(homeRoot, manifest) {
     stateDir: manifest?.stateDir || null,
     agentJsonPath: manifest?.agentJsonPath || null,
     v1HomeManaged: true,
-    subconsciousEnabled: manifest?.subconsciousEnabled === true,
     managedProjects: Array.isArray(manifest?.managedProjects) ? manifest.managedProjects : [],
     human: (manifest?.human && typeof manifest.human === 'object') ? manifest.human : {},
     task: manifest?.task || null,
@@ -539,58 +528,8 @@ function syncLegacyMeta(homeRoot, manifest) {
   return metaPath;
 }
 
-function deterministicLettaAgentId(seed) {
-  const hex = createHash('sha1').update(String(seed || '')).digest('hex').slice(0, 32).padEnd(32, '0');
-  return `agent-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-}
 
-function ensureLettaState(paths, enabled, seed, agentName = null) {
-  const lettaPath = path.join(paths.stateDir, 'letta.json');
-  if (!enabled) return lettaPath;
-  const now = new Date().toISOString();
-  const existing = safeReadJson(lettaPath, {});
-  const envAgentId = String(process.env.LETTA_AGENT_ID || '').trim();
-  const existingAgentId = (existing && typeof existing.agentId === 'string')
-    ? String(existing.agentId).trim()
-    : '';
-  const resolvedAgentId = envAgentId || existingAgentId || deterministicLettaAgentId(seed);
-  const next = {
-    provider: 'letta',
-    mode: 'claude-subconscious',
-    enabled: true,
-    agentName: String(agentName || '').trim() || (typeof existing?.agentName === 'string' ? existing.agentName : null),
-    agentId: resolvedAgentId,
-    resolutionSource: envAgentId ? 'env' : (existingAgentId ? 'state' : 'generated'),
-    guidance: (existing && typeof existing.guidance === 'string') ? existing.guidance : '',
-    createdAt: existing?.createdAt || now,
-    updatedAt: now,
-  };
-  writeFileSync(lettaPath, `${JSON.stringify(next, null, 2)}\n`, 'utf-8');
-  return lettaPath;
-}
 
-function configureSubconscious(paths, manifest) {
-  if (manifest.type !== 'claude') return null;
-  if (!existsSync(CONFIGURE_SUBCONSCIOUS_SCRIPT)) {
-    throw new Error(`missing subconscious config script: ${CONFIGURE_SUBCONSCIOUS_SCRIPT}`);
-  }
-  const eventUrl = String(process.env.HAFLEET_SUBCONSCIOUS_EVENT_URL || '').trim()
-    || defaultSubconsciousEventUrl(process.env);
-  const output = execFileSync('node', [
-    CONFIGURE_SUBCONSCIOUS_SCRIPT,
-    '--agent-name', manifest.name,
-    '--agent-id', manifest.id,
-    '--workdir', paths.workdir,
-    '--state-dir', paths.stateDir,
-    '--enabled', manifest.subconsciousEnabled ? 'true' : 'false',
-    '--event-url', eventUrl,
-  ], {
-    encoding: 'utf-8',
-    env: { ...process.env, HAFLEET_SUBCONSCIOUS_EVENT_URL: eventUrl },
-  }).trim();
-  if (!output) return null;
-  return JSON.parse(output);
-}
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -664,10 +603,6 @@ function main() {
   }
 
   const now = new Date().toISOString();
-  const existingSubconsciousEnabled = existing?.subconsciousEnabled === true
-    ? true
-    : (existing?.subconsciousEnabled === false ? false : false);
-  const subconsciousEnabled = parseOptionalBool(args.subconsciousEnabled, existingSubconsciousEnabled);
   const manifest = {
     id: paths.agentId,
     name,
@@ -677,7 +612,6 @@ function main() {
     homeDir: paths.homeDir,
     workdir: paths.workdir,
     stateDir: paths.stateDir,
-    subconsciousEnabled,
     managedProjects,
     task: existing?.task || null,
     runtimeProfile: existing?.runtimeProfile || null,
@@ -697,8 +631,6 @@ function main() {
     ...manifest,
     agentJsonPath: paths.agentJsonPath,
   });
-  const lettaPath = ensureLettaState(paths, subconsciousEnabled, `${paths.agentId}:${name}`, name);
-  const subconsciousRuntime = configureSubconscious(paths, manifest);
 
   console.log(JSON.stringify({
     ok: true,
@@ -707,12 +639,9 @@ function main() {
     homeRoot,
     paths,
     manifestPath: paths.agentJsonPath,
-    subconsciousEnabled,
     workspaceSync,
     supervisorWorkspaceSync,
     legacyMetaPath,
-    lettaPath,
-    subconsciousRuntime,
     materialization,
   }, null, 2));
 }

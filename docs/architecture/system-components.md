@@ -1,5 +1,9 @@
 # System Components Overview
 
+> **已移除(2026-08-12)**:本文提到的「潜意识 / subconscious」子系统已整体删除,详见
+> `knowledge/decisions/adr-015-remove-subconscious-memory-subsystem.md`。以下描述保留为当时的记录。
+
+
 Archive notice: This is historical architecture/audit material, not the current deploy or incident runbook. Current operator procedures live in root `README.md` and `OPERATIONS.md`; verify behavior against code before using details here.
 
 Date: 2026-03-28

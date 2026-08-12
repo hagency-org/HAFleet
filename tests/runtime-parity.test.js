@@ -59,28 +59,6 @@ describe('runtime parity regressions', () => {
     }
   });
 
-  test('deployment and upstream helpers avoid machine-specific hardcoded home paths', async () => {
-    const autodeploySource = readFileSync(path.resolve('scripts/hafleet-stable-autodeploy.sh'), 'utf-8');
-    const autostartSource = readFileSync(path.resolve('bin/hafleet-autostart.sh'), 'utf-8');
-    const previousRoot = process.env.HAFLEET_REPO_ROOT;
-    const previousUpstreamRoot = process.env.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT;
-    try {
-      process.env.HAFLEET_REPO_ROOT = '/tmp/hafleet-root';
-      delete process.env.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT;
-      const moduleUrl = pathToFileURL(path.resolve('lib/upstream-claude-subconscious.js')).href;
-      const upstreamModule = await import(`${moduleUrl}?test=${Date.now()}`);
-
-      expect(autodeploySource).not.toMatch(/\/home\/[a-z_][a-z0-9_-]*\/.*hafleet/);
-      expect(autostartSource).not.toMatch(/export HOME="\/home\/[a-z_][a-z0-9_-]*"/);
-      expect(upstreamModule.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT).toBe('/tmp/claude-subconscious');
-    } finally {
-      if (previousRoot === undefined) delete process.env.HAFLEET_REPO_ROOT;
-      else process.env.HAFLEET_REPO_ROOT = previousRoot;
-      if (previousUpstreamRoot === undefined) delete process.env.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT;
-      else process.env.UPSTREAM_CLAUDE_SUBCONSCIOUS_ROOT = previousUpstreamRoot;
-    }
-  });
-
   test('push-relay check_inbox hint exists', () => {
     const localSource = readFileSync(path.resolve('lib/push-relay-core.js'), 'utf-8');
     const hintPattern = /const checkHint = '([^']+)';/;

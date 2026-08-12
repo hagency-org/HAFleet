@@ -28,7 +28,7 @@ import {
 const BASE = process.env.BASE ?? 'http://127.0.0.1:3100';
 
 const ROUTES = [
-  '/resources', '/resources/new', '/capability', '/engagements', '/usage',
+  '/resources', '/resources/new', '/workforce', '/capability', '/projects', '/engagements', '/usage',
   '/alerts', '/config', '/onboard',
   '/agents/claude-agent', '/agents/octos-agent', '/agents/codex-agent',
   '/agents/hermes-agent', '/agents/codex-acp-agent',
@@ -67,6 +67,25 @@ for (const r of ROUTES) {
 // 2. the mapping is IMPORTED from the shipped config, not copied
 {
   const disk = JSON.parse(readFileSync('../lib/role-capacity.json', 'utf8'));
+  /*
+   * REQ-CONTRIBUTION-CONSOLE-VOCABULARY — the role vocabulary comes from the system's own
+   * enumeration, so a console role name the borrower cannot recognise is impossible by
+   * construction rather than by review. The byte-for-byte check is what makes that true:
+   * a console-local copy of the mapping would drift, and the drift would be invisible.
+   * 'and the reason is named rather than left blank' is the requirement's last clause —
+   * an excluded combination states why instead of being silently omitted.
+   *
+   * REQ-CONTRIBUTION-CONSOLE-ROLES is deliberately NOT claimed here any more. This comment
+   * used to cite it, on the reasoning that the console keeps the role-to-(agent x model)
+   * mapping private — which the operator ruling of 2026-08-11 reversed: the serving agent
+   * and its model are disclosed to the borrower. The console was never the surface that
+   * statement governed anyway, since it faces the provider, who may see everything.
+   *
+   * The rewritten statement is established where its two halves actually live:
+   * tests/bot-commands-request.test.js (what a project is told, and what it is not) and
+   * tests/engagement-serving-disclosure.test.js (a named agent is honoured only if it
+   * independently qualifies).
+   */
   check('the role mapping is the shipped file, byte for byte',
     JSON.stringify(disk) === JSON.stringify(roleCapacity));
   // The whole point of importing it: the prototype cannot advertise a role the
@@ -188,6 +207,13 @@ for (const r of ROUTES) {
     presets.every((p) => p.ceiling.enforced === false));
   const { html } = await rendered('/resources');
   check('/resources states the ceiling is not enforced', html.includes('not enforced'));
+  /*
+   * REQ-CONTRIBUTION-CONSOLE-BLANK — an unmeasured quantity renders as unknown WITH its
+   * reason, never as zero, and allocations stay distinct from consumption. The pair below is
+   * both halves: the gap is named, and no cell is a bare 0. A zero here would read as "this
+   * agent consumed nothing", which is a claim rather than an absence — the backend half of
+   * the same rule is tests/api-usage-metering.test.js.
+   */
   check('/usage names the metering gap instead of printing zeros',
     (await rendered('/usage')).html.includes('not measured'));
   // A zero would claim a measurement nobody takes.
@@ -223,7 +249,7 @@ for (const r of ROUTES) {
    * measurement carrying its own unit and passes; a bare `—` has neither and
    * fails, which is what caught two reasonless dashes on /resources.
    */
-  for (const path of ['/resources', '/engagements', '/usage', '/capability']) {
+  for (const path of ['/resources', '/engagements', '/usage', '/capability', '/workforce']) {
     const { html } = await rendered(path);
     const cells = [...html.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1]);
     const wordless = cells
@@ -266,8 +292,8 @@ for (const r of ROUTES) {
   check(`all ${asked.size} literal t() keys resolve`, unresolved.length === 0, unresolved.join(' '));
 
   const families = {
-    'nav.': ['resources', 'onboard', 'capability', 'engagements', 'usage', 'alerts', 'config'],
-    'unit.': ['configured', 'offered', 'pending', 'active', 'open'],
+    'nav.': ['resources', 'workforce', 'onboard', 'capability', 'engagements', 'usage', 'alerts', 'config'],
+    'unit.': ['configured', 'offered', 'pending', 'active', 'lent', 'open'],
     'wz.step.': ['framework', 'model', 'reasoning', 'budget'],
     'ag.': ['runtime', 'activity', 'oversight', 'profile'],
     'sev.': ['critical', 'warning', 'info'],
@@ -280,7 +306,8 @@ for (const r of ROUTES) {
     // slice there without a label here now fails this check rather than printing
     // a raw key on screen.
     'prov.slice.': ['agents', 'presets', 'frameworks', 'alerts',
-      'engagements', 'offers', 'whitelist', 'usage', 'ceilings', 'capability', 'seats', 'detected'],
+      'engagements', 'offers', 'whitelist', 'usage', 'ceilings', 'capability', 'seats', 'detected',
+      'contributions'],
   };
   const missingFamily = [];
   for (const [prefix, members] of Object.entries(families)) {

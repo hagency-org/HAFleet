@@ -67,6 +67,12 @@ describe('bridge matrix behavior', () => {
   });
 
   test('missing sync count field preserves unchanged-count semantics', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-OTK, the clause that names the actual bug: "an absent sync field
+     * MUST NOT be rewritten as zero on every sync". Null, not 0, is the whole assertion — a
+     * zero would read as "no one-time keys left" and drive an upload on every single sync,
+     * and the third case shows a present count is still passed through unchanged.
+     */
     expect(signedCurve25519CountFromSync({})).toBeNull();
     expect(signedCurve25519CountFromSync({ device_one_time_keys_count: {} })).toBeNull();
     expect(signedCurve25519CountFromSync({
@@ -75,6 +81,12 @@ describe('bridge matrix behavior', () => {
   });
 
   test('keys upload response supplies an authoritative reconciliation count', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-OTK: the count that replaces a missing sync figure has to come
+     * from somewhere authoritative. Here /keys/upload's own response is that source, and the
+     * asymmetry with the sync reader above is the point — an empty `one_time_key_counts` from
+     * a keys-upload response genuinely means zero, so it maps to 0 rather than null.
+     */
     expect(signedCurve25519CountFromKeysUpload({ one_time_key_counts: {} })).toBe(0);
     expect(signedCurve25519CountFromKeysUpload({
       one_time_key_counts: { signed_curve25519: 42 },
@@ -82,6 +94,16 @@ describe('bridge matrix behavior', () => {
   });
 
   test('OTK count reconciliation is bounded to one probe per interval', async () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-OTK, the bounded-cadence clause. Two calls one millisecond apart:
+     * the first probes and returns 42, the second returns null having probed nothing, and the
+     * single updateSyncData call proves the authoritative count — not a fabricated one — is
+     * what reaches the crypto state machine that replenishes keys.
+     *
+     * Partially covers the statement: the first sentence, "maintain enough signed Curve25519
+     * one-time keys", is delegated to the crypto state machine here and no test asserts that
+     * keys are actually uploaded when the count runs low.
+     */
     const client = Object.create(ReliableMatrixClient.prototype);
     client.crypto = { updateSyncData: vi.fn().mockResolvedValue(undefined) };
     client._lastOtkCountReconciliationAt = 0;
@@ -101,7 +123,91 @@ describe('bridge matrix behavior', () => {
     );
   });
 
+  test('a FAILING otk probe still consumes the interval', async () => {
+    /*
+     * The throttle counts attempts, not successes, and this is the case that proves it.
+     *
+     * The stamp used to be written after both awaits, so a probe that threw recorded nothing —
+     * and `processSync` swallows the error, so the next sync round found the throttle unset and
+     * probed again. Measured before the fix: five rounds one millisecond apart produced FIVE
+     * POSTs with the stamp still at 0.
+     *
+     * The consequence inverted the intent. `syncingTimeout` defaults to 30s, so a homeserver
+     * answering 429 or 5xx received one empty `/keys/upload` per sync round — about ten times
+     * the interval this method exists to enforce, for as long as the failure lasted, and hardest
+     * on a server already struggling. It also refuted ADR-006's own Consequence that an affected
+     * homeserver "requires one additional bounded count probe".
+     */
+    const client = Object.create(ReliableMatrixClient.prototype);
+    client.crypto = { updateSyncData: vi.fn().mockResolvedValue(undefined) };
+    client._lastOtkCountReconciliationAt = 0;
+    client.probeSignedCurve25519Count = vi.fn().mockRejectedValue(new Error('429 rate limited'));
+
+    /*
+     * Five sync rounds one millisecond apart, as a rate-limited server would produce. Only the
+     * FIRST reaches the network — the four after it are throttled and return null, which is the
+     * fix stated as an observation: before it, all five probed.
+     */
+    await expect(client.reconcileSignedCurve25519CountIfDue(400_000)).rejects.toThrow('429');
+    for (let i = 1; i < 5; i += 1) {
+      await expect(client.reconcileSignedCurve25519CountIfDue(400_000 + i)).resolves.toBeNull();
+    }
+
+    expect(client.probeSignedCurve25519Count).toHaveBeenCalledOnce();
+    expect(client._lastOtkCountReconciliationAt).toBe(400_000);
+    // And nothing was fed to the crypto layer, so a failed probe cannot report a bogus count.
+    expect(client.crypto.updateSyncData).not.toHaveBeenCalled();
+  });
+
+  test('a probe that lands but whose updateSyncData fails also consumes the interval', async () => {
+    /*
+     * The second await, which the original code left equally unguarded. Distinguished from the
+     * case above because it fails AFTER the network request, so retrying it re-sends a request
+     * that already succeeded — the throttle is the only thing preventing that.
+     */
+    const client = Object.create(ReliableMatrixClient.prototype);
+    client.crypto = { updateSyncData: vi.fn().mockRejectedValue(new Error('crypto not ready')) };
+    client._lastOtkCountReconciliationAt = 0;
+    client.probeSignedCurve25519Count = vi.fn().mockResolvedValue(7);
+
+    await expect(client.reconcileSignedCurve25519CountIfDue(400_000)).rejects.toThrow('crypto not ready');
+    await expect(client.reconcileSignedCurve25519CountIfDue(400_001)).resolves.toBeNull();
+
+    expect(client.probeSignedCurve25519Count).toHaveBeenCalledOnce();
+  });
+
+  test('the interval is still honoured exactly, and reopens after it', async () => {
+    /*
+     * Bounds the fix in the other direction. Stamping earlier must not make the throttle
+     * permanent — the previous test pins that a failure consumes the interval, and this pins
+     * that the interval then EXPIRES. Without it, `_lastOtkCountReconciliationAt = now` moved to
+     * the top would pass while never reconciling again.
+     *
+     * Also pins the boundary as an equality rather than a range: the existing cadence test only
+     * proved (1ms, 400_000ms], which would pass with a two-second or a four-hundred-second
+     * interval. Five minutes is now asserted, not merely a constant in the source.
+     */
+    const client = Object.create(ReliableMatrixClient.prototype);
+    client.crypto = { updateSyncData: vi.fn().mockResolvedValue(undefined) };
+    client._lastOtkCountReconciliationAt = 0;
+    client.probeSignedCurve25519Count = vi.fn().mockResolvedValue(11);
+
+    await expect(client.reconcileSignedCurve25519CountIfDue(1_000_000)).resolves.toBe(11);
+    // One millisecond short of five minutes: still closed.
+    await expect(client.reconcileSignedCurve25519CountIfDue(1_000_000 + 299_999)).resolves.toBeNull();
+    // Exactly five minutes: open again.
+    await expect(client.reconcileSignedCurve25519CountIfDue(1_000_000 + 300_000)).resolves.toBe(11);
+    expect(client.probeSignedCurve25519Count).toHaveBeenCalledTimes(2);
+  });
+
   test('threaded_group_reply_rebuilds_matrix_relation', () => {
+    /*
+     * REQ-MATRIX-THREAD-RELATION. Both halves of "target the source primary event and retain
+     * the original thread root" are asserted on one object: `m.in_reply_to` carries the
+     * source event `$human-reply`, and `event_id` under `m.thread` stays `$thread-root`
+     * rather than becoming the event being replied to — which is the mistake that would
+     * silently start a new thread per reply.
+     */
     const resolution = resolveGroupReplyRelation({
       group: 'robrix2-board',
       source: 'matrix',
@@ -146,6 +252,12 @@ describe('bridge matrix behavior', () => {
   });
 
   test('top_level_group_reply_does_not_start_thread', () => {
+    /*
+     * REQ-MATRIX-RICH-REPLY. "Without implicitly creating a thread" is a negative, so the
+     * equality on the whole relation object is what establishes it: any `rel_type`/`event_id`
+     * pair the resolver added would fail the toEqual. The explicit rel_type assertion below
+     * names the field that would carry the accidental thread.
+     */
     const resolution = resolveGroupReplyRelation({
       group: 'robrix2-board',
       source: 'matrix',
@@ -170,6 +282,13 @@ describe('bridge matrix behavior', () => {
   });
 
   test('multi_hop_agent_reply_uses_persisted_primary_delivery', () => {
+    /*
+     * REQ-MATRIX-THREAD-RELATION for the agent-to-agent hop. `source: 'api'` makes the
+     * resolver read `matrixDelivery.primaryEventId` instead of the inbound `matrixContext`,
+     * so this is the case where the source event id came from a persisted record rather than
+     * from a live Matrix event — the hand-off that used to break on bridge restart. The
+     * relation still targets the source primary event and keeps the inherited root.
+     */
     const resolution = resolveGroupReplyRelation({
       group: 'robrix2-board',
       source: 'api',
@@ -192,6 +311,15 @@ describe('bridge matrix behavior', () => {
   });
 
   test('cross_room_group_reply_fails_closed', async () => {
+    /*
+     * REQ-MATRIX-THREAD-ROOM-BOUNDARY, for the "another Matrix room" half. The gate asserted
+     * here is `resolveOutboundGroupRelation`, which runs before the send in onAgentMessage
+     * (`if (!thread.ok) return;`), so an ok:false is the rejection the requirement asks for.
+     *
+     * PARTIAL: the requirement says "another known group OR Matrix room". This fixture keeps
+     * the group equal and varies only roomId, so it pins `source_room_mismatch`. The sibling
+     * `source_group_mismatch` branch in resolveGroupReplyRelation has no test.
+     */
     const bridge = new MatrixBridge();
     bridge.callBackendApi = vi.fn().mockResolvedValue({
       id: 'msg_source',
@@ -219,6 +347,13 @@ describe('bridge matrix behavior', () => {
   });
 
   test('missing_matrix_delivery_falls_back_to_top_level', async () => {
+    /*
+     * REQ-MATRIX-THREAD-COMPATIBILITY. The source message deliberately has no matrixDelivery,
+     * which is what every message written before threading existed looks like. Both halves of
+     * the requirement are asserted: ok:true with a null relation is the top-level degrade
+     * (a legacy reply must not be blocked), and postWarning is what makes the miss
+     * operator-visible instead of silent.
+     */
     const bridge = new MatrixBridge();
     bridge.callBackendApi = vi.fn().mockResolvedValue({
       id: 'msg_legacy',
@@ -240,7 +375,110 @@ describe('bridge matrix behavior', () => {
     );
   });
 
+  test('a backend LOOKUP FAILURE is not conflated with a compatibility miss', async () => {
+    /*
+     * REQ-MATRIX-THREAD-COMPATIBILITY, the distinction the fallback used to erase. A transient
+     * backend error and a legacy message both used to return null from the metadata lookup, and
+     * both mapped to `source_metadata_missing` → silent top-level send. But they are not the same:
+     * a legacy message never had thread context, while a failed lookup means the context PROBABLY
+     * EXISTS and is about to be lost permanently, because the reply is sent and cannot be recalled.
+     *
+     * The fix does not block — ADR-007 chose fallback over blocking so one failed lookup cannot
+     * wedge later workflow — but it now SAYS which case it is: a distinct reason and a distinct
+     * warning kind, so a backend problem is not filed as "these were all legacy replies".
+     */
+    const bridge = new MatrixBridge();
+    // Every lookup throws: the backend is down for the whole of this attempt, retry included.
+    bridge.callBackendApi = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    bridge.postWarning = vi.fn();
+
+    const resolution = await bridge.resolveOutboundGroupRelation({
+      id: 'msg_reply',
+      group: 'robrix2-board',
+      reply_to: 'msg_source',
+    }, '!board:matrix.test');
+
+    // Falls back (does not block), but with the reason that names it a failure, not a blank.
+    expect(resolution).toMatchObject({ ok: true, relation: null, fallback: true, reason: 'source_lookup_failed' });
+    expect(bridge.postWarning).toHaveBeenCalledWith(
+      expect.stringContaining('could not be read'),
+      expect.objectContaining({ kind: 'thread-lookup-failed' }),
+    );
+    // It is a retry, not a loop: exactly two attempts, no more.
+    expect(bridge.callBackendApi).toHaveBeenCalledTimes(2);
+  });
+
+  test('a lookup that fails ONCE then succeeds keeps the thread intact', async () => {
+    /*
+     * The reason the retry exists. A backend momentarily busy loses one call and answers the
+     * next; without the retry that live thread would have degraded to top-level for good. The
+     * second call returns real delivery metadata, so the reply threads correctly.
+     */
+    const bridge = new MatrixBridge();
+    let calls = 0;
+    bridge.callBackendApi = vi.fn().mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('503 momentarily busy');
+      return {
+        id: 'msg_source',
+        group: 'robrix2-board',
+        source: 'api',
+        matrixDelivery: { roomId: '!board:matrix.test', primaryEventId: '$src-event', threadRootEventId: null },
+      };
+    });
+    bridge.postWarning = vi.fn();
+
+    const resolution = await bridge.resolveOutboundGroupRelation({
+      id: 'msg_reply',
+      group: 'robrix2-board',
+      reply_to: 'msg_source',
+    }, '!board:matrix.test');
+
+    expect(resolution.ok).toBe(true);
+    expect(resolution.fallback).toBeUndefined();
+    expect(resolution.relation).toMatchObject({ 'm.in_reply_to': { event_id: '$src-event' } });
+    // No warning: nothing degraded.
+    expect(bridge.postWarning).not.toHaveBeenCalled();
+  });
+
+  test('source_group_mismatch is rejected, not sent to the wrong group', async () => {
+    /*
+     * REQ-MATRIX-THREAD-ROOM-BOUNDARY's other half, which the audit found untested — the sibling
+     * of `cross_room_group_reply_fails_closed`. There the room varied and the group held; here the
+     * GROUP differs, so the reply_to points at a message from a different group entirely. A reply
+     * threaded across that boundary would leak one group's context into another; it must be
+     * refused, and the refusal must block the send (`ok: false`), not fall back.
+     */
+    const bridge = new MatrixBridge();
+    bridge.callBackendApi = vi.fn().mockResolvedValue({
+      id: 'msg_source',
+      group: 'some-other-group',
+      source: 'api',
+      matrixDelivery: { roomId: '!board:matrix.test', primaryEventId: '$x', threadRootEventId: null },
+    });
+    bridge.postWarning = vi.fn();
+
+    const resolution = await bridge.resolveOutboundGroupRelation({
+      id: 'msg_reply',
+      group: 'robrix2-board',
+      reply_to: 'msg_source',
+    }, '!board:matrix.test');
+
+    expect(resolution).toMatchObject({ ok: false, reason: 'source_group_mismatch' });
+    expect(bridge.postWarning).toHaveBeenCalledWith(
+      expect.stringContaining('Blocked Matrix group reply'),
+      expect.objectContaining({ kind: 'thread-routing' }),
+    );
+  });
+
   test('pending_delivery_replays_after_restart', async () => {
+    /*
+     * REQ-MATRIX-THREAD-DELIVERY. The requirement's force is in "before the delivery is
+     * considered complete": Matrix already accepted the body event, so if the backend upsert
+     * were simply dropped the association would be lost with no way to notice. A fresh
+     * MatrixBridge (the restart) replays the journalled record to the same message with the
+     * same primaryEventId and only then marks it committed.
+     */
     const pending = {
       messageId: 'msg_pending',
       roomId: '!board:matrix.test',
@@ -270,6 +508,16 @@ describe('bridge matrix behavior', () => {
   });
 
   test('encrypted_approval_send_does_not_create_group_delivery', async () => {
+    /*
+     * REQ-MATRIX-THREAD-PLAINTEXT-SCOPE, first clause. The approval send reaches
+     * sendAsAgentContent without a delivery argument, so persistPrimary is false and the
+     * journal is never touched — the thread sender's durable path stays out of the approval
+     * room. The second clause (encrypted approvals keep their crypto-client path) is asserted
+     * in tests/bridge-matrix-approval.test.js, which is where the botClient send lives.
+     *
+     * PARTIAL: this pins the approval call site, not an encryption check inside the sender —
+     * nothing asserts that a persistPrimary send into an encrypted room is refused.
+     */
     const journal = {
       get: vi.fn(),
       recordPending: vi.fn(),
@@ -294,6 +542,13 @@ describe('bridge matrix behavior', () => {
   });
 
   test('primary group send journals before upsert and retry does not send twice', async () => {
+    /*
+     * REQ-MATRIX-THREAD-DELIVERY on the happy path. `stored.state === 'committed'` is the
+     * assertion that carries the requirement: markCommitted only runs after the backend
+     * upsert resolves, so a committed record proves the primary event id was durably
+     * associated with the backend message and not merely sent. The single-fetch assertion
+     * shows the second attempt reuses that record instead of emitting a second body event.
+     */
     let stored = null;
     const journal = {
       get: vi.fn(() => stored),
@@ -1257,6 +1512,18 @@ describe('bridge matrix behavior', () => {
   });
 
   test('one project room retains independent owner bindings for multiple local agents', async () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-MULTI-AGENT. One room, two managed agents, and the assertions are
+     * about plurality: both room-agent bindings survive the sync, callBackendApi is called
+     * exactly TWICE, and the two PUTs carry distinct owner_dm_room_ids for the same project
+     * room. A implementation that overwrote the first binding, or reused one approval room for
+     * both agents, fails on the call count and on the second matcher respectively — which is
+     * the failure this requirement exists to prevent, since a shared approval room would let
+     * one agent's owner answer for the other's agent.
+     *
+     * This is also the test the spec's `project room retains independent room-agent approval
+     * bindings` selector means; the title drifted, the coverage did not.
+     */
     const bridge = new MatrixBridge();
     const roomId = '!multi-hafleet-project:matrix.example.test';
     const ownerMxid = '@alice:matrix.example.com';
@@ -1314,6 +1581,14 @@ describe('bridge matrix behavior', () => {
   });
 
   test('a second agent creates its approval binding even when the bridge bot is already joined', async () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-MULTI-AGENT, the other half — "adding one agent MUST NOT ... reuse
+     * another agent's approval room" implies the second agent gets set up at all. The third
+     * fetch here returns 403 "already joined" for the bridge bot, and the assertions are that
+     * syncApprovalBindingForRoom still ran for wf_codex and its inviter/owner binding was
+     * recorded. Treating the already-joined bot as a failure would silently leave the second
+     * agent with no approval channel while the first agent's kept working.
+     */
     const bridge = new MatrixBridge();
     const roomId = '!bot-already-joined:matrix.example.com';
     const ownerMxid = '@alice:matrix.example.com';
@@ -1523,6 +1798,14 @@ describe('bridge matrix behavior', () => {
   }
 
   test('direct_human_reply_to_group_uses_private_dm', async () => {
+    /*
+     * REQ-MATRIX-DM-PRIVACY-ROUTE (the "has no group" clause) and
+     * REQ-MATRIX-DM-PRIVACY-FALLBACK (the "came from a group" case). This is the original
+     * leak: a private reply whose reply_to points at a public project-room message. The
+     * assertion that establishes it is on the room argument, not on the call count —
+     * sendAsAgent receives `!private:…`, so `!public:…` was never even a candidate, and
+     * ensureDmRoom shows the fallback resolved the pair's own room.
+     */
     const bridge = prepareOutboundHumanBridge({
       id: 'msg_group',
       from: 'alex',
@@ -1540,6 +1823,13 @@ describe('bridge matrix behavior', () => {
   });
 
   test('direct_human_reply_to_matching_dm_reuses_reply_room', async () => {
+    /*
+     * REQ-MATRIX-DM-PRIVACY-ROUTE, the positive direction. "MUST reuse ... only when" is a
+     * biconditional, and the three sibling tests only show rooms being rejected; without this
+     * one the requirement would also be satisfied by a bridge that never reuses a reply room
+     * at all. Here group is null and senderMxid proves the same human-agent pair, so the
+     * referenced DM room is used and ensureDmRoom is not consulted.
+     */
     const bridge = prepareOutboundHumanBridge({
       id: 'msg_matching_dm',
       from: 'alex',
@@ -1557,6 +1847,13 @@ describe('bridge matrix behavior', () => {
   });
 
   test('direct_human_reply_to_mismatched_pair_uses_private_dm', async () => {
+    /*
+     * REQ-MATRIX-DM-PRIVACY-ROUTE (the "same pair" clause), REQ-MATRIX-DM-PRIVACY-FALLBACK
+     * (the "another pair" case), and REQ-MATRIX-DM-PRIVACY-FAIL-CLOSED (the "mismatched"
+     * case). The referenced message is a genuine group-less DM, so it passes every privacy
+     * check except identity — the room is private, just not private *to this human*. Sending
+     * alex's content into tyrese's DM room would be a leak between two private rooms.
+     */
     const bridge = prepareOutboundHumanBridge({
       id: 'msg_other_dm',
       from: 'tyrese',
@@ -1574,6 +1871,12 @@ describe('bridge matrix behavior', () => {
   });
 
   test('direct_human_reply_lookup_failure_uses_private_dm', async () => {
+    /*
+     * REQ-MATRIX-DM-PRIVACY-FAIL-CLOSED, the "unavailable" case. A rejected metadata lookup
+     * is the one where failing open is tempting, because the bridge has a room id in hand and
+     * no evidence against it. The assertion is that an unproven room is still not used: the
+     * send goes to the pair's private room even though nothing was learned about reply_to.
+     */
     const bridge = prepareOutboundHumanBridge(null);
     bridge.callBackendApi = vi.fn().mockRejectedValue(new Error('backend unavailable'));
 
@@ -1585,6 +1888,12 @@ describe('bridge matrix behavior', () => {
   });
 
   test('direct_human_reply_with_missing_group_uses_private_dm', async () => {
+    /*
+     * REQ-MATRIX-DM-PRIVACY-FAIL-CLOSED, the "missing" case. The fixture omits `group`
+     * entirely rather than setting it to null, so the record is unclassified — and the pair
+     * does match, meaning a `group == null` check written as falsy would let this room
+     * through. Absent classification is not proof of privacy; the private room is used.
+     */
     const bridge = prepareOutboundHumanBridge({
       id: 'msg_unclassified',
       from: 'alex',

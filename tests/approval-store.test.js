@@ -57,6 +57,21 @@ afterEach(() => {
 
 describe('owner approval store', () => {
   test('owner_ui_verdict_is_consumed_once', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-BINDING and REQ-OWNER-UI-APPROVAL-LIFETIME.
+     *
+     * BINDING is established by construction rather than by a field-presence check:
+     * `verdict(created)` builds the response out of the created record's own agent, project,
+     * project_room_id, owner_mxid (as sender) and owner_dm_room_id, and submitMatrixVerdict
+     * compares all of them against the record. A record missing or misreporting any one of
+     * those fields makes this accepted verdict fail with a `*_mismatch` code, so the
+     * `{ ok: true, code: 'approved' }` below is exactly the claim that the request bound
+     * them. The digest is pinned separately by the 64-hex assertion.
+     *
+     * LIFETIME's at-most-once half is the two pairs that follow: a replayed verdict is
+     * `not_pending`, and the second consumeDecision is `consumed` — with the on-disk status
+     * read back, so the atomic transition is what persisted, not just what was returned.
+     */
     let now = 1_000;
     const { store, file } = makeStore({ now: () => now, ttlMs: 60_000 });
     store.upsertBinding(binding());
@@ -74,6 +89,13 @@ describe('owner approval store', () => {
   });
 
   test('non_owner_ui_verdict_is_rejected', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-IDENTITY. Everything about this verdict is correct except the
+     * MXID: right request id, right room, right agent, right digest, right action. It is
+     * refused on `senderMxid_mismatch` alone and the request stays pending, which is what
+     * "authorize using the event's complete sender MXID" means in practice — no other field
+     * can stand in for it, and room membership does not confer authority.
+     */
     const { store } = makeStore();
     store.upsertBinding(binding());
     const created = store.createRequest(request());
@@ -89,7 +111,104 @@ describe('owner approval store', () => {
     ]));
   });
 
+  /*
+   * EVERY field the comparison guards, one case each.
+   *
+   * `submitMatrixVerdict` compares six fields through a single generic loop
+   * (`Object.keys(expected).find(...)`), and only `senderMxid` had a case. That left the
+   * MECHANISM covered and the FIELD LIST unguarded: delete `roomId` from `expected` and every
+   * test above still passes, while an owner-signed verdict emitted in the PUBLIC PROJECT ROOM
+   * becomes acceptable — precisely what ADR-003's Context forbids ("a public project room …
+   * must not become the approval authority").
+   *
+   * That matters more than a missing test usually would, because `_onRoomMessageClaimed`
+   * (`bridge-matrix.js`) calls `parseApprovalVerdictEvent` and hands the result to
+   * `onApprovalVerdict` — which POSTs it straight to the backend — BEFORE it ever reaches the
+   * `getRoomTrust` message-ingress gate further down the same method. So a verdict-shaped
+   * event in any room the bot has joined reaches this comparison, and this comparison is the
+   * only thing standing between it and a decision.
+   *
+   * Table-driven on purpose: the point is that each field is IN the list, so one case per
+   * field is exactly the coverage required and a seventh field added later without a case here
+   * is visibly missing.
+   */
+  const GUARDED_FIELDS = [
+    ['room_id', '!public-project:palpo.test', 'roomId_mismatch',
+      'the owner\'s own verdict, but emitted in the public project room instead of their DM'],
+    ['agent', 'some-other-agent', 'agent_mismatch',
+      'a verdict for a different agent than the one the request names'],
+    ['project', 'some-other-project', 'project_mismatch',
+      'a verdict relabelled with another project'],
+    ['project_room_id', '!elsewhere:palpo.test', 'projectRoomId_mismatch',
+      'a verdict claiming a different project room than the request was raised in'],
+    ['input_digest', 'sha256:0000000000000000', 'inputDigest_mismatch',
+      'a verdict approving something other than what was shown to the owner'],
+  ];
+
+  test.each(GUARDED_FIELDS)(
+    'a verdict wrong ONLY in %s is refused as %s',
+    (field, wrongValue, expectedCode) => {
+      const { store } = makeStore();
+      store.upsertBinding(binding());
+      const created = store.createRequest(request());
+
+      const result = store.submitMatrixVerdict(created.id, verdict(created, { [field]: wrongValue }));
+
+      expect(result).toMatchObject({ ok: false, code: expectedCode });
+      // Still pending, so a refused verdict has not consumed the request either.
+      expect(store.getRequest(created.id).status).toBe('pending');
+      expect(store.listAudit()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'approval.verdict_rejected', reason: expectedCode }),
+      ]));
+    },
+  );
+
+  test('a verdict correct in every field but naming an unknown action is refused', () => {
+    /*
+     * The sixth branch of the same guard, and the one that is not a field: `invalid_action`
+     * had zero assertions, so only `approve_once` and `deny` were ever exercised. A third
+     * action arriving from a client — a typo, an older schema, a probe — must be refused
+     * rather than treated as one of the two.
+     */
+    const { store } = makeStore();
+    store.upsertBinding(binding());
+    const created = store.createRequest(request());
+
+    for (const action of ['approve_always', 'allow', 'APPROVE_ONCE', '']) {
+      const result = store.submitMatrixVerdict(created.id, verdict(created, { action }));
+      expect(result, action).toMatchObject({ ok: false, code: 'invalid_action' });
+    }
+    expect(store.getRequest(created.id).status).toBe('pending');
+  });
+
+  test('the owner\'s DM is where a verdict must come from, and their OWN room is not enough', () => {
+    /*
+     * States the rule positively as well, because the table above only proves that a wrong
+     * room is refused — not that the right one is the owner's DM specifically. `expected.roomId`
+     * is `record.ownerDmRoomId`, so a verdict from the project room fails while the same
+     * verdict from the DM succeeds. Both halves, or "wrong room refused" could be satisfied by
+     * a comparison against anything at all.
+     */
+    const { store } = makeStore();
+    store.upsertBinding(binding());
+    const created = store.createRequest(request());
+
+    const fromProjectRoom = store.submitMatrixVerdict(created.id, verdict(created, {
+      room_id: created.project_room_id,
+    }));
+    expect(fromProjectRoom).toMatchObject({ ok: false, code: 'roomId_mismatch' });
+
+    const fromOwnerDm = store.submitMatrixVerdict(created.id, verdict(created));
+    expect(fromOwnerDm.ok).toBe(true);
+  });
+
   test('expired_or_replayed_ui_verdict_is_rejected', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-LIFETIME, the expiry half: the clock is moved one millisecond
+     * past the TTL and the owner's own otherwise-valid verdict is refused as `expired`, with
+     * the record transitioned to `expired` rather than left pending. A request that merely
+     * stops being answerable would satisfy neither.
+     */
     let now = 10_000;
     const { store } = makeStore({ now: () => now, ttlMs: 1_000 });
     store.upsertBinding(binding());
@@ -119,6 +238,12 @@ describe('owner approval store', () => {
   });
 
   test('missing_owner_denies_without_admin_fallback', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-FAIL-CLOSED, the "missing" state. With no binding at all the
+     * request is born `denied` — not pending-and-unanswerable, which would leave something an
+     * administrator could later approve. `owner_mxid: null` and the empty binding list
+     * together say no fallback owner was invented to carry it.
+     */
     const { store } = makeStore();
     const created = store.createRequest(request());
 
@@ -132,6 +257,11 @@ describe('owner approval store', () => {
   });
 
   test('ambiguous room ownership denies instead of selecting an administrator', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-FAIL-CLOSED, the "ambiguous" state — the one where a fallback is
+     * most tempting, because two candidate owners exist and picking either would let the
+     * request proceed. `owner_binding_ambiguous` is a denial, so neither is picked.
+     */
     const { store } = makeStore();
     store.upsertBinding(binding({ project: 'project-a', project_room_id: '!a:palpo.test' }));
     store.upsertBinding(binding({ project: 'project-b', project_room_id: '!b:palpo.test' }));
@@ -142,11 +272,99 @@ describe('owner approval store', () => {
   });
 
   test('owner binding change denies existing pending requests', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-FAIL-CLOSED, the "mismatched" state. Re-binding the room to a new
+     * owner does not silently re-target the live request at whoever now holds the room; the
+     * request that was raised under the old binding transitions to `denied`. Carrying it over
+     * would hand a pending approval to an owner who never saw the request that created it.
+     */
     const { store } = makeStore();
     store.upsertBinding(binding());
     const created = store.createRequest(request());
     store.upsertBinding(binding({ owner_mxid: '@new-owner:palpo.test', owner_dm_room_id: '!new-dm:palpo.test' }));
 
     expect(store.getRequest(created.id)).toMatchObject({ status: 'denied', denial_reason: 'owner_binding_changed' });
+  });
+
+  describe('denyPending — the fail-closed leg of "two surfaces or nothing"', () => {
+    /*
+     * ADR-003 requires every remote-execution approval to use BOTH Matrix surfaces (the
+     * encrypted owner DM and the redacted public notice) or neither. `denyPending` is the
+     * "or neither" half: when the bridge cannot deliver a surface, the request must go to
+     * `denied`, not sit `pending` forever waiting for a verdict that can never be typed
+     * because the owner never saw the buttons. It had zero direct tests — the API round-trip
+     * touched it, but nothing pinned its own contract.
+     */
+    test('a pending request becomes denied, with the reason and an audit line', () => {
+      const { store } = makeStore();
+      store.upsertBinding(binding());
+      const created = store.createRequest(request());
+      expect(created.status).toBe('pending');
+
+      const denied = store.denyPending(created.id, 'matrix_delivery_failed');
+
+      expect(denied).toMatchObject({ status: 'denied', denial_reason: 'matrix_delivery_failed' });
+      // Auditable, because a request denied by a delivery failure rather than by the owner is
+      // exactly the case an operator needs to be able to reconstruct after the fact.
+      expect(store.listAudit()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'approval.denied', reason: 'matrix_delivery_failed' }),
+      ]));
+    });
+
+    test('an empty or missing reason falls back to a named default, never blank', () => {
+      // "denied" with no reason is unactionable; the default records that it was a delivery
+      // failure rather than an owner decision.
+      const { store } = makeStore();
+      store.upsertBinding(binding());
+      const created = store.createRequest(request());
+      expect(store.denyPending(created.id, '').denial_reason).toBe('delivery_failed');
+    });
+
+    test('an already-DECIDED request is not overwritten by a late delivery failure', () => {
+      /*
+       * The race this guards: the owner approves, and only then does the (now irrelevant)
+       * public-status send report failure. Denying here would revoke a decision the owner
+       * actually made. `denyPending` only touches a still-pending record.
+       */
+      const { store } = makeStore();
+      store.upsertBinding(binding());
+      const created = store.createRequest(request());
+      const approved = store.submitMatrixVerdict(created.id, verdict(created));
+      expect(approved.ok).toBe(true);
+
+      const result = store.denyPending(created.id, 'matrix_delivery_failed');
+
+      expect(result.status).toBe('approved');
+      expect(result.denial_reason ?? null).toBeNull();
+    });
+
+    test('denying twice is idempotent and keeps the first reason', () => {
+      // A retry of the fail-closed POST must not rewrite the reason or re-audit as a new denial.
+      const { store } = makeStore();
+      store.upsertBinding(binding());
+      const created = store.createRequest(request());
+      store.denyPending(created.id, 'first_reason');
+      const second = store.denyPending(created.id, 'second_reason');
+      expect(second).toMatchObject({ status: 'denied', denial_reason: 'first_reason' });
+    });
+
+    test('an unknown request id returns null rather than inventing a record', () => {
+      const { store } = makeStore();
+      expect(store.denyPending('$nonexistent', 'matrix_delivery_failed')).toBeNull();
+    });
+
+    test('an expired request stays expired — a delivery failure cannot revive it', () => {
+      /*
+       * If the TTL passed before delivery was even attempted, the truthful terminal state is
+       * `expired`, not `denied`: the owner was never going to be asked. `_expire` runs first.
+       */
+      let clock = 1_000_000;
+      const { store } = makeStore({ ttlMs: 1000, now: () => clock });
+      store.upsertBinding(binding());
+      const created = store.createRequest(request());
+      clock += 5000;
+      const result = store.denyPending(created.id, 'matrix_delivery_failed');
+      expect(result.status).toBe('expired');
+    });
   });
 });

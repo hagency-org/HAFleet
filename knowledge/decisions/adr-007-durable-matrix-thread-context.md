@@ -30,10 +30,46 @@ source, and uses a rich reply for a top-level source. Missing delivery metadata
 is a compatibility miss: the message is sent at the top level and a warning is
 logged.
 
+> **Amended 2026-08-11 — a lookup FAILURE is not a compatibility miss.** The paragraph above
+> conflated two cases that the code also conflated: a message that genuinely has no metadata (a
+> legacy reply, correctly sent top-level) and a backend lookup that THREW. Both returned `null`
+> and both fell to `source_metadata_missing`, so a transient backend blip silently degraded a
+> LIVE thread to top-level and dropped its context permanently — the reply is sent and cannot be
+> recalled — while reading in the logs as just another legacy message.
+>
+> `resolveOutboundGroupRelation` now distinguishes them (`lookupMessageRouteMetadataResult`
+> returns `{ ok, metadata }`): on a lookup failure it retries once — a momentarily-busy backend
+> clears immediately, and catching it keeps the thread intact — and if the retry also fails it
+> still falls back top-level, because the "never block workflow" choice in Alternatives stands,
+> but with a distinct reason (`source_lookup_failed`) and warning kind (`thread-lookup-failed`)
+> so the degradation is named as a failure rather than filed as compatibility.
+>
+> **Left open, deliberately:** whether a transient failure should instead HOLD the reply for
+> later delivery rather than fall back at all. Alternatives reasoned about compatibility misses,
+> not backend outages, so the "fallback beats blocking" choice does not obviously extend to this
+> case — but deciding it is a policy change for a future amendment, not something the fix
+> smuggled in. Today it falls back and says so.
+
 Before acknowledging a successful Matrix send as complete, the bridge appends
 the primary event to a private local pending-delivery journal. It then calls a
 bridge-secret-protected, idempotent backend upsert. Startup replays unfinished
 upserts. The first primary event wins; replays and retries cannot overwrite it.
+
+> **Corrected 2026-08-11.** "Before acknowledging … as complete" reads as a barrier, and it
+> cannot be one. The journal write happens after the Matrix send has already succeeded, so if
+> `recordPending` throws, the bridge logs, posts a `thread-durability` warning, and returns the
+> event id anyway (the `recordPending` catch inside `sendAsAgentContent`, `bridge-matrix.js`).
+> That is the only available behaviour — the message is on the homeserver and cannot be
+> recalled — so the sentence describes an ordering
+> the code observes, not a guarantee it enforces. What is actually guaranteed: the journal is
+> attempted before the send is reported, and a failure to journal is surfaced as a warning
+> rather than swallowed. Thread context for later replies may still be lost in that window, and
+> the warning is what says so. That path has no test (`thread-durability` occurs nowhere under
+> `tests/`).
+>
+> Cited by symbol rather than by line range, and that is the convention for code references in
+> these records: line numbers rot as the file grows, and a rotted citation is worse than none,
+> because a reader who follows it lands on unrelated code and may conclude the claim is false.
 
 ## Consequences
 
@@ -49,6 +85,24 @@ The raw agent-token `sendAsAgentContent` path is for non-encrypted group rooms.
 Encrypted approval DMs remain on the Matrix crypto client path. If encrypted
 thread replies are added later, thread relation metadata must remain outside
 the encrypted payload as required by Matrix.
+
+> **Corrected 2026-08-11.** The first sentence states a scope that nothing enforces.
+> `sendAsAgentContent` (`bridge-matrix.js`) performs an unconditional plaintext
+> `PUT /rooms/{roomId}/send/m.room.message/{txn}` and **contains no encryption check of any
+> kind** — neither it nor any caller reads a room's encryption state. It is called for group
+> sends, DM sends, and the public approval notice.
+>
+> So "is for non-encrypted group rooms" is a **convention held at the call sites**, not a
+> property the function has. The separation is real today — the encrypted approval path goes
+> through `botClient.sendMessage` after `ensureApprovalDmEncrypted`, and
+> `tests/bridge-matrix-approval.test.js` asserts that the sensitive payload only ever reaches
+> that sender — but nothing would stop a future caller from handing this function an encrypted
+> room, and no test asserts such a send is refused.
+>
+> Stated rather than fixed because the fix is a design choice this record should not make
+> silently: either the function gains an encryption check and fails closed, or the convention is
+> made explicit by narrowing its callers. Until one is chosen, a reader should know the boundary
+> is maintained by discipline.
 
 ## Alternatives Considered
 

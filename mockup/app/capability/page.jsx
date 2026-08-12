@@ -55,6 +55,34 @@ export default function CapabilityPage() {
     await refresh();
     return say('ok', t(current.published ? 'cp.didWithdraw' : 'cp.didPublish', { role: c.role.displayName }));
   }
+  /*
+   * The offer's TERMS — how many of this role, the per-engagement cap, the daily rate cap.
+   * `PUT /api/offers/:role` has always accepted all three; nothing in the console asked for them,
+   * so every offer a contributor published carried none and the card read "no terms". Publishing a
+   * role while being unable to state its price is the half of the transaction the contributor
+   * actually cares about, so the inputs belong next to the toggle rather than in a second place.
+   *
+   * `published` is carried through unchanged, for the same reason the toggle carries the caps: a
+   * write that touches one field must not silently reset the others.
+   */
+  async function saveTerms(c, patch) {
+    const current = offers.find((o) => o.role === c.key) ?? c.offer ?? {};
+    if (!live) return say('ok', t('cp.wouldSetTerms', { role: c.role.displayName }));
+    const res = await send(`offers/${c.key}`, {
+      method: 'PUT',
+      body: {
+        count: current.count ?? null,
+        budgetCapPerEngagement: current.budgetCapPerEngagement ?? null,
+        rateCap: current.rateCap ?? null,
+        published: current.published ?? false,
+        ...patch,
+      },
+    });
+    if (!res.ok) return say('fail', res.error);
+    await refresh();
+    return say('ok', t('cp.didSetTerms', { role: c.role.displayName }));
+  }
+
   const [toast, say] = useToast();
   /*
    * The offer is joined here rather than inside the capability payload.
@@ -222,6 +250,48 @@ export default function CapabilityPage() {
                         rate: fmtTokens(c.offer.rateCap) ?? t('cp.unset'),
                       })}
                   </span>
+                  <div className="terms">
+                    {/*
+                      * A blank field means "not set" and is sent as null, never as 0: an offer of
+                      * zero tokens is a refusal, and one that was simply never priced is not.
+                      */}
+                    <label>
+                      {t('cp.termCount')}
+                      <input
+                        type="number" min="1" placeholder={t('cp.unset')}
+                        defaultValue={c.offer.count ?? ''}
+                        onBlur={(ev) => {
+                          const v = ev.target.value.trim();
+                          const next = v === '' ? null : Number(v);
+                          if (next !== (c.offer.count ?? null)) saveTerms(c, { count: next });
+                        }}
+                      />
+                    </label>
+                    <label>
+                      {t('cp.termCap')}
+                      <input
+                        type="number" min="1" placeholder={t('cp.unset')}
+                        defaultValue={c.offer.budgetCapPerEngagement ?? ''}
+                        onBlur={(ev) => {
+                          const v = ev.target.value.trim();
+                          const next = v === '' ? null : Number(v);
+                          if (next !== (c.offer.budgetCapPerEngagement ?? null)) saveTerms(c, { budgetCapPerEngagement: next });
+                        }}
+                      />
+                    </label>
+                    <label>
+                      {t('cp.termRate')}
+                      <input
+                        type="number" min="1" placeholder={t('cp.unset')}
+                        defaultValue={c.offer.rateCap ?? ''}
+                        onBlur={(ev) => {
+                          const v = ev.target.value.trim();
+                          const next = v === '' ? null : Number(v);
+                          if (next !== (c.offer.rateCap ?? null)) saveTerms(c, { rateCap: next });
+                        }}
+                      />
+                    </label>
+                  </div>
                   <button
                     className="btn"
                     disabled={c.able.length === 0 || !c.crossFamilyOk}

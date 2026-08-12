@@ -280,6 +280,45 @@ describe('empty-server classification', () => {
   });
 });
 
+describe('killSession', () => {
+  /*
+   * Added because deleting an agent used to leave its tmux session and coding-CLI process running:
+   * an orphan spending the contributor's tokens, its MCP server still calling a backend that no
+   * longer knew the agent, while the console reported it gone. The backend's first attempt shelled
+   * out to tmux itself and the invariant below rejected it — so the capability lives here, and the
+   * arguments are asserted here rather than in a backend test that cannot see them.
+   */
+  test('ends the named session', async () => {
+    const { exec, calls } = fakeExec(() => ({ stdout: '' }));
+    const ok = await createTmuxRuntime({ exec }).killSession('ops-agent');
+    expect(ok).toBe(true);
+    // The SESSION name, not the `name:0.0` pane address — tmux rejects a pane target here.
+    expect(calls[0].args).toEqual(['kill-session', '-t', 'ops-agent']);
+  });
+
+  test('an absent session is false, not an error', async () => {
+    /*
+     * For an agent that was never started this is the ordinary case, and a caller has to tell
+     * "stopped something" from "there was nothing to stop" without treating the second as a failure
+     * — that distinction is what lets the delete response warn honestly.
+     */
+    const { exec } = fakeExec(() => { throw tmuxError("can't find session: nope"); });
+    await expect(createTmuxRuntime({ exec }).killSession('nope')).resolves.toBe(false);
+  });
+
+  test('an idle host with no tmux server is false, not an error', async () => {
+    const { exec } = fakeExec(() => { throw tmuxError('no server running on /tmp/x'); });
+    await expect(createTmuxRuntime({ exec }).killSession('anything')).resolves.toBe(false);
+  });
+
+  test('a blank name does not reach tmux at all', async () => {
+    // Otherwise `kill-session -t ''` is sent, and an empty target is not a name tmux ignores.
+    const { exec, calls } = fakeExec(() => ({ stdout: '' }));
+    await expect(createTmuxRuntime({ exec }).killSession('  ')).resolves.toBe(false);
+    expect(calls).toEqual([]);
+  });
+});
+
 describe('backend no longer shells out to tmux directly', () => {
   const backend = readFileSync('backend-v2.js', 'utf-8');
 

@@ -11,49 +11,84 @@
     "agentRuntime",
     "docsBundle",
     "configBundle",
-    "subconsciousDefaults",
     "metadata"
   ],
   "properties": {
-    "schema": { "const": "hafleet.benchmark.profile-version/v1" },
-    "profileId": { "type": "string", "minLength": 1 },
-    "version": { "type": "string", "minLength": 1 },
-    "createdAt": { "type": "string" },
-    "description": { "type": "string" },
+    "schema": {
+      "const": "hafleet.benchmark.profile-version/v1"
+    },
+    "profileId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "createdAt": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
     "agentRuntime": {
       "type": "object",
-      "required": ["agentType", "modelFamilyDefaults"],
+      "required": [
+        "agentType",
+        "modelFamilyDefaults"
+      ],
       "properties": {
-        "agentType": { "type": "string" },
-        "modelFamilyDefaults": { "type": "object" }
+        "agentType": {
+          "type": "string"
+        },
+        "modelFamilyDefaults": {
+          "type": "object"
+        }
       }
     },
     "docsBundle": {
       "type": "object",
-      "required": ["root", "files"],
+      "required": [
+        "root",
+        "files"
+      ],
       "properties": {
-        "root": { "type": "string" },
-        "files": { "type": "array", "items": { "type": "string" } }
+        "root": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "configBundle": {
       "type": "object",
-      "required": ["hooksRuntimeDefaults"],
+      "required": [
+        "hooksRuntimeDefaults"
+      ],
       "properties": {
-        "claudeSettingsTemplate": { "type": ["string", "null"] },
-        "mcpTemplate": { "type": ["string", "null"] },
-        "hooksRuntimeDefaults": { "type": "object" }
+        "claudeSettingsTemplate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mcpTemplate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hooksRuntimeDefaults": {
+          "type": "object"
+        }
       }
     },
-    "subconsciousDefaults": {
-      "type": "object",
-      "required": ["enabled", "runtimeContractDefaults", "memoryMode"],
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "runtimeContractDefaults": { "type": "object" },
-        "memoryMode": { "type": "object" }
-      }
-    },
-    "metadata": { "type": "object" }
+    "metadata": {
+      "type": "object"
+    }
   }
 }

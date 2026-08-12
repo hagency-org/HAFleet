@@ -6,7 +6,50 @@ npm run test:kernel       # sharded kernel + CLI subset
 npm run verify:ci         # all gates (needs GNU timeout; macOS: brew install coreutils)
 ```
 
-## The backend test harness leaks memory, and it matters
+## The memory theory, measured and dropped (2026-08-11)
+
+**The section below is retained for its measurements but its DIAGNOSIS is wrong.** The retention
+it describes is real; the claim that it causes the intermittent failures is not, and two rounds
+of effort were aimed at it before anyone measured the thing it depends on.
+
+Measured with `scripts/heap-probe-config.js`:
+
+| file | contexts (runtime) | end heap | share of Node's limit |
+|---|---|---|---|
+| `api-groups` | 45 | 642 MB | **15%** |
+| `api-tasks` | 16 | 249 MB | 6% |
+| `alert-store` | 15 | 234 MB | 5% |
+| `api-pool` | 1 | 43 MB | **1%** |
+
+Node's `heap_size_limit` here is **4288 MB**. Nothing comes close to it, so "a worker gets
+recycled or a module evaluates only partway" has no pressure to arise from. And `api-pool` — one
+context, 43 MB, 1% of the limit — is one of the files that flakes. Memory cannot be why.
+
+Two further measurements close the theory's escape routes:
+
+- **Retention does not accumulate across the run.** Each file gets a fresh worker process (the
+  pid in the probe output changes per file) and every file starts near 12 MB regardless of what
+  ran before. So the heaviest file's 642 MB cannot pressure a later light one.
+- **A dead instance cannot be made cheap.** Emptying every JSON store, Map and Set on `cleanup()`
+  moved the numbers by 0.5%: 642→639, 249→249, 234→236 MB. The ~14 MB per instance is the
+  MODULE — 13k lines of code, its closures, an express Router with ~101 layers — not its data. A
+  test seeds two agents; that is kilobytes.
+
+**And the prescribed fix would not have worked.** "Make the runtime directory injectable so one
+module instance serves every test" is blocked by something the inventory below missed: **51 test
+files inject `seed.env` at 156 sites**, including `API_TOKEN` (17), `AGENT_HEARTBEAT_TTL_MS` (12),
+`HAFLEET_AGENT_TOKEN_MODE` (10) and `AGENT_SERVER_SWEEP_INTERVAL_MS` (7) — all read into module
+CONSTANTS at import time. One shared instance would serve all of them whatever the first import
+saw, silently: a test handed the wrong TTL does not fail, it measures the wrong thing.
+
+So: do not spend more effort on memory here, and do not reduce contexts for flake reasons (wall
+clock is dominated by test execution, ~322 s of a 342 s run, not by the ~5 s of module imports).
+The cause of the intermittent failures is still **unknown**; what is now known is where it is not.
+The live leads are the three specimens in "The specimen round" below — one of which was a genuine
+timing race and is fixed, which is itself evidence that these failures are several unrelated bugs
+rather than one systemic cause.
+
+## The backend test harness leaks memory (measurements sound, diagnosis superseded above)
 
 `tests/helpers/backend-test-runtime.js` gives each test an isolated backend by
 importing `backend-v2.js` with a unique cache-buster:
@@ -29,7 +72,7 @@ start:         11 MB
 There are **212** `createBackendTestContext()` call sites, plus 34 `importServer()`
 calls doing the same to `server.js`.
 
-### Why it causes flaky failures rather than a clean OOM
+### Why it was thought to cause flaky failures (superseded)
 
 Vitest discards each test *file's* module graph, so the leak is per-file rather
 than cumulative — a fresh file starts at 11 MB again. But a single heavy file can
@@ -82,7 +125,119 @@ Recorded so nobody re-investigates these:
 - **Not** CPU load by itself. A single file ran 40 contexts clean at load
   average 101.
 
-### The real fix, not yet done
+### The specimen round (2026-08-11)
+
+The intermittent failures continued under `maxWorkers: 1` — nine files by then, no two
+adjacent in the code — and stayed unexplained for ~25 observations for a reason that had
+nothing to do with the code: **every observation kept only the failing test's title.** The
+assertion diff, the response body, the child stderr all scrolled away, so each occurrence
+was an anecdote. `scripts/flake-hunt.sh` fixes that: K full runs, every failure's complete
+output kept as a specimen. Its first deployment (six runs, quiet machine) produced three
+specimens and three DIFFERENT mechanisms:
+
+| Specimen | Test | Mechanism | Status |
+|---|---|---|---|
+| 2a | `api-server-heartbeat` recovery | TTL 100ms + sleep(200): every assertion after the recovery heartbeat sat inside a 100ms window, and one GC pause re-marked the recovered server stale, re-opening its alert | **FIXED** — the test now ages `heartbeatAt` directly through `internals.serversForTest` with a 60s TTL; no sleep, no window |
+| 2b | `mcp-heartbeat` pid file | `waitFor`'s default timeout was 30000ms — the SAME as vitest's test timeout — so vitest's limit always fired first and replaced the wait's own error (which names what was awaited) with a bare "Test timed out" | **INSTRUMENTED** — `waitFor` defaults to 20s and takes a `diagnose` callback; the pid-file waits dump child stderr, so the next occurrence answers its own question |
+| 5 | `api-messages` delivery tail | `expected 404 to be 200` on an entity seeded three lines earlier in the same context. A handler 404 would be JSON (points at seeding); a route-level 404 would be express's HTML fallback (points at the partial-evaluation class above). The status alone cannot distinguish them | **INSTRUMENTED** — the assertion now carries the response body in its failure message; the next occurrence settles which class this is |
+
+Theories tested and **falsified** this round, recorded so nobody re-walks them:
+
+- **Not** background sweeps racing test requests: the loops start only in `startServer()`,
+  which supertest-driven tests never call.
+- **Not** foreground load as the cause: six runs on a quiet machine still produced two
+  failing runs, matching the historical rate. Concurrent local work (mutation testing,
+  single-file vitest runs) is at most an amplifier.
+- Context-count correlation is real but not sufficient, and 2026-08-11 weakened it further:
+  `api-runtime` (25 sites) had been the clean counterexample cited against the theory — and
+  then it flaked too (whole-suite run, `runtime reports persist backend-derived observation
+  provenance`, passing alone immediately after). Eight files now. The one file that argued
+  "heavy but stable" is no longer stable, so what the flaky set has in common is not a
+  property of any file — it is `createBackendTestContext` under whole-suite memory pressure,
+  exactly the mechanism the section above describes.
+
+Method note, learned twice in one day: greping vitest output for failure counts silently
+matches nothing because of ANSI escapes — strip them (`sed 's/\x1b\[[0-9;]*m//g'`) or the
+count reads as "no failures", which is precisely how a flaky observation lies.
+
+### Occurrence log
+
+Appended per sighting so the membership list stops being reconstructed from prose. A file
+belongs here once it has failed in a whole-suite run and passed in isolation immediately after.
+
+| Date | File | Test | Specimen kept? |
+|---|---|---|---|
+| 2026-08-11 | `alert-store` | `agent can resolve their assigned alert via agent-token` | **no** — title only |
+| 2026-08-11 | `api-groups` | `lists groups for an agent with unread message and mention counts` | **yes** — `Error: Parse Error: Expected HTTP/, RTSP/ or ICE/` |
+| 2026-08-11 | `engagement-binding` | `the failure is RECORDED on the engagement, not only returned` | **yes** — `Error: read ECONNRESET` |
+| 2026-08-11 | `api-server-heartbeat-sweep` | `ignores heartbeats during maintenance while still updating lastSeen` | **yes** — `TypeError: Cannot read properties of undefined (reading 'lastSeen')` |
+| 2026-08-12 | `api-usage-metering` | `a fleet with nothing measured reports null, not zero` | **yes** — `Error: Parse Error: Expected HTTP/, RTSP/ or ICE/` |
+| 2026-08-12 | `api-pending-invites` | `reading the list needs the operator credential too` | **yes** — `AssertionError: expected 404 to be 401` |
+| 2026-08-12 | `api-agent-preset-binding` | `presetId null unbinds, and the ceiling goes with it` | **yes** — `Error: Parse Error: Expected HTTP/, RTSP/ or ICE/` |
+| 2026-08-12 | `server-delivery` | `queue snapshot reports untracked target observation before pane sweep` | **yes** — `AssertionError: expected 404 to be 200` |
+
+**A second same-run pair, in the same two shapes.** The last two rows also arrived together in one
+whole-suite pass and were clean in isolation immediately after (41/41) — again one transport error and
+one `expected 404 to be 200`, again in two unrelated files. That is now twice that the two shapes have
+co-occurred, which is the strongest evidence yet for the single-mechanism reading below rather than
+for two independent bugs. Neither file was touched by the change under test in either sighting.
+
+The 2026-08-12 pair landed in ONE run, and that is the useful part: a transport error and a
+`expected 404 to be …` in the same whole-suite pass, both files clean in isolation (24/24). The
+second shape is the one this document has been recording since the beginning and attributing to
+seeding or module state; seeing it beside a socket error, in the same run, is what a single
+mechanism looks like from two angles.
+
+**The first real specimens, and they change the shape of the problem.** Neither is an assertion
+failure. Both are TRANSPORT errors from supertest's own socket: one is the HTTP parser refusing a
+response that did not begin with a status line, the other a connection reset mid-read. Both files
+passed together in isolation immediately afterwards (52/52).
+
+That points somewhere different from every theory recorded above. `expected 404 to be 200` invited
+explanations about seeding, ordering and module state; `Expected HTTP/, RTSP/ or ICE/` cannot be any
+of those — the request reached a listening socket and what came back was not a valid HTTP response.
+The candidates it does admit: an in-process server torn down by `cleanup()` while a request is still
+in flight, a socket reused after close, or a response written after the connection went away. All
+three are properties of the harness's server lifecycle rather than of any test's data.
+
+The third specimen looked like a different mechanism and is probably the same one. `readJson(...).s1`
+being undefined suggests a write race, so the obvious hypothesis was the JSON write batcher — and it
+is WRONG: `batchedFiles` is `['agents.json', 'agent_runtime.json']`, so `servers.json` writes
+immediately with no debounce window to lose. Checked before it went in the log, and recorded here
+because it is the theory anyone would reach for next.
+
+What remains fits all three: a REQUEST failed at the transport layer, and the symptom depends only on
+what the test did with the result. Where the assertion was on the response, it surfaced as a parse
+error or a reset; where an earlier request had created the state a later line reads, it surfaced as a
+TypeError on something missing. That also explains why the failures look unrelated and land in a
+different file each time.
+
+Two things follow. The flaky set is probably ONE mechanism rather than the per-file coincidence the
+context-count theory kept suggesting — and it is checkable, because a lifecycle bug leaves evidence:
+whether `cleanup()` awaits the server's close, and whether any context outlives the test that made
+it. Worth doing before another round of memory measurement.
+
+Method note that made this possible: the run was `npx vitest run 2>&1 | tee <log>`, so the specimens
+survived. The previous entry was lost to a run filtered to summary lines.
+
+The `alert-store` sighting is recorded as a **failure of method, not just a new data point**: this
+section exists because ~25 observations kept only the failing title, and this one kept only the
+failing title too. It happened during unrelated work (the ADR-014 credential change), the suite was
+run with output filtered to summary lines, and by the time the failure was noticed the assertion
+diff had already scrolled. Passed twice in isolation straight after; nothing in that change touches
+alerts, agent tokens, or the backend.
+
+The lesson is narrow and worth stating: **filtering a full-suite run's output to the summary line
+throws away the only specimen you were going to get.** Run `scripts/flake-hunt.sh` when the goal is
+to catch a flake, and tee the output when it is not — a filtered run can only ever tell you that the
+problem still exists, which is already known.
+
+### The proposed "real fix" — do not attempt as written
+
+Superseded: see "The memory theory, measured and dropped" at the top. It is blocked by
+import-time `seed.env` in 51 files, and there is no memory pressure for it to relieve. Kept
+because the state inventory below is accurate and useful for other purposes — with one
+correction: there are **8** module-level `Set`s, not 3.
 
 Stop minting a module per context. The cache-buster exists only because
 `backend-v2.js` reads `HAFLEET_RUNTIME_DIR` at module scope

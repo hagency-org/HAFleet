@@ -501,7 +501,104 @@ built), and `credentialPresent: true` means only that the credential DIRECTORY
 exists. On the clean host that directory was root-owned and empty, and the framework
 was reported ready three separate times before a launch proved otherwise.
 
-### 7.7 Still open
+### 7.7 Two PRD items that are withdrawn scope, not gaps
+
+An assessment of the PRD's ten in-scope items listed these as unimplemented. They are
+not. Both were withdrawn by ADR-013 §8 and its 2026-08-10 amendment, and recording them
+as gaps invites someone to build scope the decision removed — which is exactly what
+happened once with the cost model before it was caught.
+
+**PRD 4.1 item 5, "use the durable router as the only execution truth."** The router is
+`/api/dispatch`, backed by `src/dispatch-lease-store.mjs`. ADR-013 §8 withdraws
+"`/api/dispatch` and any successor router-facing assignment path, and the staffing-request
+direction of travel." The engagement path REPLACES it rather than feeding it, so
+`engagement-store` not referencing the lease store is the decision, not an omission.
+
+Worth noting independently: that machinery was never durable anyway. `backend-v2.js:8527`
+states "a restart drops in-flight leases and queued tickets alike; this is not restart-safe
+queueing." So the PRD item asks for a property its own named component does not have.
+
+**PRD 4.1 item 8, "attribute cost … to assignment and project."** Withdrawn by the
+2026-08-10 amendment: the unit of account is the token. See §7.6.
+
+What remains genuinely open from those ten is item 6's other half — usage events are now
+persisted (`lib/metering/ledger.js`) but there is no *cost* event ledger, and by the
+amendment there should not be one.
+
+### 7.9 Requirement traceability, and the four bugs it surfaced
+
+Sixty-eight statement-level MUSTs live in `knowledge/requirements/`. Two were cited by a
+test. The rest were verified or not, and nobody could tell which without reading every test
+file — which is the state a traceability requirement exists to prevent, not a documentation
+preference.
+
+`scripts/check-requirement-traceability.mjs` now produces the answer, and it is a **ratchet
+rather than a target**: coverage may not fall below the recorded baseline (63/68), and
+demanding 100% is deliberately avoided. A required percentage pushes toward the empty
+citation — add the tag, ship the green table, verify nothing — which is worse than an honest
+92%, because it removes the signal the table exists to carry.
+
+Two mechanical failure modes make a coverage table lie, and both were present:
+
+- **Prefix collision.** `REQ-X` matched inside `REQ-X-DURABLE` reports a parent covered
+  because a child is. The first survey made exactly that mistake and counted
+  `REQ-CONTRIBUTION-CONSOLE` as covered. Matching is on word boundary — and `\b` is wrong
+  here, because it treats `-` as a boundary.
+- **Citing an id that does not exist.** A test naming `…-CEILING` when the statement is
+  `…-CEILING-SEAT` looks like coverage and is nothing. Unknown ids are errors, with a named
+  exception list for the one legitimate non-citation (`REQ-DEMO` is fixture data inside a
+  synthetic spec file).
+
+**Five statements remain on prose alone, and stay that way honestly:**
+`REQ-OWNER-UI-APPROVAL-CONTROL` (the guard at `lib/bot-commands.js:86` is wired but every
+test calls `bot.handle` with an empty context, so its true branch never executes),
+`REQ-PROJECT-BOARD-AGENTS`, `-GRAPHS`, `-REPOSITORIES` and `-REFRESH`. In each case the
+adjacent test was close enough to cite and citing it would have been the false green this
+tooling exists to catch.
+
+**Ten of fifty-eight spec `Test:` selectors do not resolve.** Reported, not failed: every one
+checked so far is naming drift over real coverage — three project-board scenarios consolidated
+into one test, one selector that lost its `project_board_` prefix — with two exceptions that
+are genuine gaps (`public_room_ctl_cannot_bypass_approval`, `MATRIX_DEFAULT_WAKE defaults to
+mention-only mode` have zero occurrences under `tests/`). Drift is still a defect: an
+unresolvable selector means the chain cannot be followed without reading everything.
+
+#### Writing the missing tests found four real defects
+
+Traceability was supposed to be a documentation exercise. Filling the gaps required writing
+tests that did not exist, and those tests failed:
+
+1. **A rejection revoked an unrelated active engagement.** A binding is keyed on
+   `(agent, projectRoomId)` while engagements are individual, so one binding serves every
+   engagement between that agent and that room — and `unbindEngagement` removed it whenever
+   any one of them ended. The live store holds **six** concurrent active engagements for one
+   such pair, so refusing a seventh request would have cut the access the other six were
+   relying on. Now last-one-out.
+
+   Found only because the test approves before it rejects. The first version rejected without
+   approving, which cannot distinguish "the rejection removed nothing" from "nothing was
+   there to remove" — it passed against the bug, and a mutation confirmed the pass was
+   vacuous.
+
+2. **`REQ-CONTRIBUTION-CONSOLE-UNIT` and `-INWARD` were each checked on one page.** Both are
+   stated about the console; both were asserted only on `/workforce`, the newest route, so the
+   seven older ones were never checked. Now a per-route sweep — and the first run failed on
+   `$HOME` in prose and on a string whose content is "a roster of my agents, **not** of
+   assignments". Both were the check being wrong, not the pages: a shell variable is not a
+   price and a disclaimer is not a violation. Narrowed to a symbol adjacent to a digit, and
+   to column headings rather than body text.
+
+3. **`GET /api/usage` discarded the fleet token total** — `tokensUsed: null` unconditionally
+   while per-agent rows carried real figures. Restored as a sum that travels with its
+   denominator (`tokensMeasuredFor`, `tokensPartial`), because a bare sum over 2 of 7
+   measured agents understates the fleet while reading as authoritative.
+
+4. **`!request` had no test at all** — the entire inbound path of L3, including the clause
+   that the `request_id` must be the authenticated Matrix event id and never a value from
+   message content. Four mutations (id from args, generated id, inverted credential
+   preference, room id from args) each now fail exactly one case.
+
+### 7.8 Still open
 
 - **Token metering itself.** P3 shipped the partition, not the measurement. Nothing here
   counts a token, and the console says so on every affected cell.
@@ -514,6 +611,45 @@ was reported ready three separate times before a launch proved otherwise.
 - **Enforcement.** Ceilings and seat quotas are declarations; every surface says
   `not enforced`. Enforcement needs metering first and is a separate decision about what
   happens when a cap is hit.
+
+- **The flaky cluster got worse, still unexplained.** One full-suite run failed **42
+  tests across 5 files** — an order of magnitude beyond the usual one to three — with
+  task and server endpoints returning 404 where 200 was expected. All five files pass in
+  isolation, and pass with and without the change being tested at the time, so it is not
+  a regression. Two immediately following full runs were completely green (2309 passed).
+  A 404 on a registered route suggests routes not being served rather than a timing
+  slip, which does not match the "load-sensitive timing" theory and is worth recording
+  as evidence against it.
+
+- **SEVEN files now, and the spread is the finding.** `api-groups` ("treats adding an existing
+  member as idempotent") and `api-pool` ("returns the role×capability grid") failed together in one
+  full run, passed in isolation, and the next full run was green (162 files, 2615 passed). Neither
+  references anything the commit under test changed — checked, because a permissionSummary string
+  did change in that commit and `api-pool` serves that field. The set is now server heartbeat ×2,
+  message retention, ACP workspace attribution, alert suppression, group membership and the
+  capability grid: no two adjacent in the code, and every one of them goes through
+  `createBackendTestContext`. That is as close to a proof as observation gets that the cause is the
+  harness — most likely port binding or the cache-busted module import — and not any subsystem.
+  Worth one focused session on the harness rather than another round of per-file suspicion.
+
+- **A FIFTH file joined on 2026-08-11**: `alert-store` ("suppressed alert reopens on new
+  occurrence after suppressUntil expires"), one failure in a full run, passing in isolation
+  immediately after, and the next full run completely green (160 files, 2580 passed). It shares
+  the one trait the others do — it goes through the shared test runtime — and shares none of the
+  ruled-out suspects. Five files now, spanning server heartbeat, message retention, ACP workspace
+  attribution and alert suppression: no two of them are near each other in the code, which is
+  the strongest evidence yet that the cause is in the harness rather than in any subsystem.
+
+- **A FOURTH file joined the intermittent set on 2026-08-11.**
+  `acp-workspace-attribution` ("the workspace is REMEMBERED after the sweep clears it")
+  failed once in a full run and passed in isolation immediately afterwards, and the very
+  next full run was completely green (157 files, 2534 passed). It shares the trait the
+  other three have — it goes through `createBackendTestContext` — and shares none of the
+  suspects that have been ruled out. Recorded because the set growing is the most
+  informative thing that has happened to this problem: whatever it is, it is not specific
+  to server-heartbeat or message-retention logic, which is where the search had been
+  looking.
+
 - **A cluster of load-sensitive flaky tests, cause unknown.** Across roughly twenty
   full-suite runs, three files failed intermittently and never twice in the same run:
   `api-server-heartbeat-sweep` ("disables maintenance mode…"), `api-server-heartbeat`

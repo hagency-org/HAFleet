@@ -1,3 +1,18 @@
+/*
+ * REQ-CONTRIBUTION-CONSOLE-CEILING-SEAT — a per-agent ceiling is a sub-allocation of the
+ * seat that funds it.
+ *
+ * The requirement has four clauses and this file establishes each: the seat is keyed on the
+ * CREDENTIAL HOME rather than the agent ('gives two agents on one host, framework and auth
+ * mode the SAME seat'), a declared total above the seat's quota surfaces as
+ * over-subscription ('sums what has been promised out of one shared seat'), ceilings in
+ * different periods are not summed ('does not add a DAILY ceiling to a MONTHLY one'), and a
+ * quota with no period is not compared at all ('refuses to compare a quota that states no
+ * period') — that last one is also the third unknown named by
+ * REQ-CONTRIBUTION-CONSOLE-UNKNOWN-LIMIT, whose other two live in
+ * tests/engagement-store.test.js.
+ */
+
 import { describe, it, expect } from 'vitest';
 import os from 'os';
 import {

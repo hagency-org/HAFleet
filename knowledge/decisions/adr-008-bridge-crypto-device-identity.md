@@ -1,7 +1,9 @@
 ---
+kind: decision
 id: ADR-008
 title: "Bind bridge crypto storage to the access-token device"
-status: accepted
+status: Accepted
+liveness: auto
 tags: [matrix, e2ee, approval, device]
 ---
 

@@ -66,7 +66,6 @@ function syncLegacyMeta(homeRoot, manifest) {
     stateDir: manifest?.stateDir || null,
     agentJsonPath: manifest?.agentJsonPath || null,
     v1HomeManaged: true,
-    subconsciousEnabled: manifest?.subconsciousEnabled === true,
     managedProjects: Array.isArray(manifest?.managedProjects) ? manifest.managedProjects : [],
     human: (manifest?.human && typeof manifest.human === 'object') ? manifest.human : {},
     task: manifest?.task || null,
@@ -120,7 +119,6 @@ function runProvisionForManifest(manifest, options = {}) {
     '--type', manifest.type || 'claude',
     '--agent-id', manifest.id,
     '--home', homeRoot,
-    '--subconscious-enabled', manifest.subconsciousEnabled === true ? 'true' : 'false',
     '--project', options.projectPath,
     '--project-mode', options.projectMode,
   ];

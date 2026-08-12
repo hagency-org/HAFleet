@@ -10,6 +10,12 @@
  *
  * Found by standing up a clean single-agent install on a fresh machine. A deployment
  * with a mixed fleet never shows it, which is why it survived every run here.
+ *
+ * REQ-CONTRIBUTION-CONSOLE-CROSS-FAMILY, both of its sentences: a role needing two
+ * families is not reported fillable by one however many agents qualify on tier, and the
+ * summarising field agrees with the constraint beside it — which is what
+ * 'fillable never disagrees with crossFamilyOk on any role' checks across the whole
+ * catalogue rather than for review alone.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';

@@ -10,9 +10,10 @@
     "command": "codex-acp",
     "defaultArgs": [],
     "modelFlag": "--model",
-    "permissionSummary": "level2 (workspace-write + on-request)",
+    "permissionSummary": "codex-acp asks before each tool call and hafleet declines all but its own coordination tools; hafleet passes NO filesystem sandbox flag on this transport",
     "acpArgs": [],
     "commandNote": "codex-acp is an adapter, not codex itself: it wraps the Codex SDK and speaks ACP on stdio. Unlike octos and hermes, whose vendors ship ACP directly, this puts a third-party process in the chain, version-coupled to both the adapter and the codex CLI underneath it. Installed from @agentclientprotocol/codex-acp; the older @zed-industries/codex-acp is deprecated in favour of it.",
+    "permissionSummaryNote": "It said \"level2 (workspace-write + on-request)\" — copied from codex.json — and half of that was false. The tmux transport really does pass --sandbox workspace-write --ask-for-approval on-request (bin/hafleet-up); this transport passes defaultArgs and acpArgs, both empty, so NO filesystem sandbox flag reaches the process. The approval half is real by a different mechanism: codex-acp asks the client via session/request_permission and hafleet answers allow_once only for its own coordination tools, declining everything else (see permissionNote, and lib/codex-permission-hook.js). So the summary now describes the mechanism that exists rather than naming a Codex level whose sandbox half nothing establishes — the same honesty octos.json already practises. This string is operator-facing (served by /api/frameworks, shown on the onboard page), and it is pinned in tests/fixtures/launch-policy-baseline.json so changing it stays a deliberate act. Giving the ACP transport a real filesystem sandbox is a separate, open decision: it needs verification that codex-acp accepts --sandbox and that the flag means the same thing over ACP as over a pane.",
     "acpModelFlag": null,
     "acpModelFlagNote": "codex-acp accepts --model without complaint and then ignores it \u2014 verified: the handshake succeeds either way. Declaring null so hafleet refuses the flag up front rather than letting an operator believe a model was selected when it was not."
   },

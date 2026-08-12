@@ -14,8 +14,6 @@ import { installDashboardPageRoutes } from './lib/dashboard/page-routes.js';
 import {
   installAlertProxyRoutes,
   installProjectBoardProxyRoutes,
-  installSubconsciousEventProxyRoutes,
-  installSubconsciousProxyRoutes,
   installSupervisorProxyRoutes,
   installTaskProxyRoutes,
 } from './lib/dashboard/proxy-routes.js';
@@ -1412,7 +1410,6 @@ function syncLocalAgentMetaFromManifest(name, metaPath, localMeta, manifest, hum
     workdir: manifest?.workdir || null,
     stateDir: manifest?.stateDir || null,
     agentJsonPath: manifest?.agentJsonPath || (manifest?.homeDir ? path.join(manifest.homeDir, 'agent.json') : null),
-    subconsciousEnabled: manifest?.subconsciousEnabled === true,
     managedProjects: Array.isArray(manifest?.managedProjects) ? manifest.managedProjects : [],
     human: nextHuman,
     task: normalizeTaskMeta(manifest?.task, name),
@@ -1441,7 +1438,6 @@ function buildExpectedBackendAgentHomeState(name, manifest, human = null) {
     homeDir: manifest?.homeDir || null,
     workdir: manifest?.workdir || null,
     stateDir: manifest?.stateDir || null,
-    subconsciousEnabled: manifest?.subconsciousEnabled === true,
     managedProjects: Array.isArray(manifest?.managedProjects) ? sanitizeManagedProjects(manifest.managedProjects) : [],
     human: normalizeHumanSyncMeta(nextHuman),
     task: normalizeTaskMeta(manifest?.task, name),
@@ -1459,7 +1455,6 @@ function normalizeBackendAgentHomeState(agent, fallbackName = null) {
     homeDir: agent?.homeDir || null,
     workdir: agent?.workdir || null,
     stateDir: agent?.stateDir || null,
-    subconsciousEnabled: agent?.subconsciousEnabled === true,
     managedProjects: Array.isArray(agent?.managedProjects) ? sanitizeManagedProjects(agent.managedProjects) : [],
     human: normalizeHumanSyncMeta(agent?.human),
     task: normalizeTaskMeta(agent?.task, fallbackName),
@@ -1475,7 +1470,6 @@ function summarizeBackendStateMismatches(expected, actual) {
     'homeDir',
     'workdir',
     'stateDir',
-    'subconsciousEnabled',
     'managedProjects',
     'human',
     'task',
@@ -1661,7 +1655,6 @@ function buildProvisionArgsForManifest(manifest, localMeta = null, options = {})
     '--type', manifest.type || (localMeta?.type || 'claude'),
     '--agent-id', manifest.id,
     '--home', homeRoot,
-    '--subconscious-enabled', manifest.subconsciousEnabled === true ? 'true' : 'false',
   ];
   if (options.projectPath) {
     args.push('--project', options.projectPath);
@@ -1811,180 +1804,9 @@ function redactMetaPathLikeText(value, maxLen = 1200) {
   return text.replace(/(^|[\s(])((?:\/[^/\s)]+)+\/?[^)\s]*)/g, '$1[path removed]');
 }
 
-function buildOperationalSubconsciousDetail(detail) {
-  const safe = cloneMetaValue(detail);
-  if (!safe || typeof safe !== 'object') return safe;
 
-  if (safe.runtime && typeof safe.runtime === 'object') {
-    const runtimeSummary = {
-      classification: safe.runtime.classification || 'transitional',
-      desiredEnabled: safe.runtime.desiredEnabled === true,
-      invocationConfigured: safe.runtime.invocationConfigured === true,
-      disabledReason: safe.runtime.disabledReason || null,
-    };
-    delete safe.runtime.settingsPath;
-    delete safe.runtime.pluginRoot;
-    delete safe.runtime.eventUrl;
-    delete safe.runtime.invokeUrl;
-    delete safe.runtime.runtimeMetaPath;
-    safe.runtime = runtimeSummary;
-  }
-  if (safe.provider && typeof safe.provider === 'object') {
-    delete safe.provider.lettaStateFile;
-  }
-  if (safe.upstream && typeof safe.upstream === 'object') {
-    delete safe.upstream.root;
-    delete safe.upstream.promptFile;
-    delete safe.upstream.scripts;
-    delete safe.upstream.durableHome;
-    delete safe.upstream.durableStateDir;
-    delete safe.upstream.conversationsFile;
-    delete safe.upstream.configPath;
-    if (safe.upstream.bootstrap && typeof safe.upstream.bootstrap === 'object') {
-      delete safe.upstream.bootstrap.workdir;
-      if (safe.upstream.bootstrap.blockedReason) {
-        safe.upstream.bootstrap.blockedReason = redactMetaPathLikeText(safe.upstream.bootstrap.blockedReason, 1200);
-      }
-    }
-    if (safe.upstream.session && typeof safe.upstream.session === 'object') {
-      delete safe.upstream.session.sessionStateFile;
-      delete safe.upstream.session.cwd;
-      if (safe.upstream.session.blockedReason) {
-        safe.upstream.session.blockedReason = redactMetaPathLikeText(safe.upstream.session.blockedReason, 1200);
-      }
-      if (safe.upstream.session.notify && typeof safe.upstream.session.notify === 'object' && safe.upstream.session.notify.blockedReason) {
-        safe.upstream.session.notify.blockedReason = redactMetaPathLikeText(safe.upstream.session.notify.blockedReason, 1200);
-      }
-    }
-    if (safe.upstream.userPrompt && typeof safe.upstream.userPrompt === 'object') {
-      delete safe.upstream.userPrompt.transcriptPath;
-      delete safe.upstream.userPrompt.transcriptExists;
-      delete safe.upstream.userPrompt.syncStateFile;
-      delete safe.upstream.userPrompt.scriptPath;
-      if (safe.upstream.userPrompt.blockedReason) {
-        safe.upstream.userPrompt.blockedReason = redactMetaPathLikeText(safe.upstream.userPrompt.blockedReason, 1200);
-      }
-    }
-    if (safe.upstream.preTool && typeof safe.upstream.preTool === 'object') {
-      delete safe.upstream.preTool.syncStateFile;
-      delete safe.upstream.preTool.scriptPath;
-      if (safe.upstream.preTool.blockedReason) {
-        safe.upstream.preTool.blockedReason = redactMetaPathLikeText(safe.upstream.preTool.blockedReason, 1200);
-      }
-    }
-    if (safe.upstream.stop && typeof safe.upstream.stop === 'object') {
-      delete safe.upstream.stop.transcriptPath;
-      delete safe.upstream.stop.transcriptExists;
-      delete safe.upstream.stop.syncStateFile;
-      delete safe.upstream.stop.scriptPath;
-      if (safe.upstream.stop.blockedReason) {
-        safe.upstream.stop.blockedReason = redactMetaPathLikeText(safe.upstream.stop.blockedReason, 1200);
-      }
-    }
-  }
-  if (safe.memory && typeof safe.memory === 'object') {
-    safe.memory = {
-      classification: safe.memory.classification || 'transitional',
-    };
-  }
-  if (safe.conversation && typeof safe.conversation === 'object') {
-    safe.conversation = {
-      classification: safe.conversation.classification || 'transitional',
-    };
-  }
-  if (safe.guidance && typeof safe.guidance === 'object') {
-    delete safe.guidance.text;
-    delete safe.guidance.preview;
-  }
-  if (safe.manualGuidance && typeof safe.manualGuidance === 'object') {
-    delete safe.manualGuidance.text;
-    delete safe.manualGuidance.preview;
-    if (!safe.guidance) safe.guidance = { ...safe.manualGuidance };
-  }
-  if (Object.prototype.hasOwnProperty.call(safe, 'lastRuntimeGuidance')) delete safe.lastRuntimeGuidance;
-  if (Object.prototype.hasOwnProperty.call(safe, 'lastInvocation')) delete safe.lastInvocation;
-  if (Array.isArray(safe.missingBackendPieces)) {
-    safe.missingBackendPieces = safe.missingBackendPieces.map((item) => redactMetaPathLikeText(item, 1200) || item);
-  }
-  return safe;
-}
 
-function buildSubconsciousAuthoritySummaryMeta(enabled, upstream, lettaAgentId = null) {
-  const bootstrap = (upstream && typeof upstream.bootstrap === 'object') ? upstream.bootstrap : {};
-  const session = (upstream && typeof upstream.session === 'object') ? upstream.session : {};
-  const userPrompt = (upstream && typeof upstream.userPrompt === 'object') ? upstream.userPrompt : {};
-  const preTool = (upstream && typeof upstream.preTool === 'object') ? upstream.preTool : {};
-  const stop = (upstream && typeof upstream.stop === 'object') ? upstream.stop : {};
-  const boundAgentId = normalizeMetaText(bootstrap.agentId || lettaAgentId, 256);
-  const bindingConfigured = Boolean(boundAgentId);
-  const sessionEstablished = session.established === true;
-  const progress = [
-    { key: 'stop', label: 'Stop', status: normalizeMetaText(stop.status, 64) || 'not-run' },
-    { key: 'preTool', label: 'PreToolUse', status: normalizeMetaText(preTool.status, 64) || 'not-run' },
-    { key: 'userPrompt', label: 'UserPromptSubmit', status: normalizeMetaText(userPrompt.status, 64) || 'not-run' },
-    { key: 'session', label: 'SessionStart', status: normalizeMetaText(session.status, 64) || 'not-run' },
-  ];
-  const latestProgress = progress.find((row) => row.status && row.status !== 'not-run') || progress[progress.length - 1];
-  let status = 'off';
-  let reason = enabled === true ? null : 'subconscious disabled';
-  if (enabled === true) {
-    if (sessionEstablished) {
-      status = 'active';
-      reason = null;
-    } else if (bindingConfigured || normalizeMetaText(bootstrap.status, 64) === 'configured') {
-      const sessionStatus = normalizeMetaText(session.status, 64);
-      status = 'degraded';
-      reason = normalizeMetaText(session.blockedReason, 1200)
-        || normalizeMetaText(bootstrap.blockedReason, 1200)
-        || ((sessionStatus === 'not-run' || sessionStatus === null)
-          ? 'authoritative upstream session not established'
-          : 'authoritative upstream path is configured but not established');
-    } else {
-      status = 'unconfigured';
-      reason = normalizeMetaText(bootstrap.blockedReason, 1200)
-        || 'authoritative upstream path is not configured';
-    }
-  }
-  return {
-    classification: 'authoritative',
-    path: 'upstream-letta',
-    status,
-    reason,
-    bindingConfigured,
-    agentId: boundAgentId || null,
-    sessionEstablished,
-    conversationEstablished: Boolean(session.conversationId),
-    latestProgress,
-  };
-}
 
-function buildSubconsciousFallbackSummaryMeta(guidanceText) {
-  const configured = typeof guidanceText === 'string' && guidanceText.trim().length > 0;
-  return {
-    classification: 'fallback',
-    status: configured ? 'configured' : 'none',
-    configured,
-    source: configured ? 'manual-state-file' : 'none',
-    note: 'Guidance is fallback configuration only; it is not the authoritative subconscious behavior path.',
-  };
-}
-
-function buildSubconsciousTransitionalSummaryMeta(runtime, memory = null, conversation = null) {
-  const runtimeDesired = runtime?.desiredEnabled === true;
-  let runtimeStatus = 'off';
-  if (runtimeDesired && runtime?.invocationConfigured === true) runtimeStatus = 'ready';
-  else if (runtimeDesired) runtimeStatus = 'degraded';
-  return {
-    classification: 'transitional',
-    runtimeStatus,
-    runtimeDesired,
-    runtimeInvocationConfigured: runtime?.invocationConfigured === true,
-    runtimeDisabledReason: normalizeMetaText(runtime?.disabledReason, 1200),
-    localMemoryConfigured: Number(memory?.entryCount || 0) > 0,
-    localConversationConfigured: Number(conversation?.sessionCount || 0) > 0,
-    note: 'Local runtime, memory, and conversation journals are transitional compatibility/debug surfaces only.',
-  };
-}
 
 function normalizePositiveMetaInt(value, fallback) {
   const n = Number.parseInt(String(value ?? '').trim(), 10);
@@ -1996,124 +1818,10 @@ function normalizeMetaFloat(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function normalizeSubconsciousProviderInput(value) {
-  const raw = normalizeMetaText(value, 64);
-  if (!raw) return null;
-  const lower = raw.toLowerCase();
-  return ['deepseek', 'qwen', 'openai', 'openai-compatible'].includes(lower) ? lower : null;
-}
 
-function normalizeSubconsciousHooksInput(value) {
-  const raw = Array.isArray(value)
-    ? value
-    : String(value ?? '').split(',');
-  const out = [];
-  const seen = new Set();
-  for (const item of raw) {
-    const hook = normalizeMetaText(String(item ?? ''), 120);
-    if (!hook) continue;
-    if (!['UserPromptSubmit', 'PreToolUse'].includes(hook)) continue;
-    if (seen.has(hook)) continue;
-    seen.add(hook);
-    out.push(hook);
-  }
-  return out.length ? out : ['UserPromptSubmit', 'PreToolUse'];
-}
 
-const SUBCONSCIOUS_HOOK_NAMES = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Stop'];
 
-function detectInstalledSubconsciousHooks(settingsPath) {
-  if (!settingsPath || !existsSync(settingsPath)) return [];
-  const settings = safeReadJsonSync(settingsPath);
-  const hooksRoot = (settings && typeof settings.hooks === 'object' && settings.hooks) ? settings.hooks : {};
-  const installed = [];
-  for (const hookName of SUBCONSCIOUS_HOOK_NAMES) {
-    const rows = Array.isArray(hooksRoot[hookName]) ? hooksRoot[hookName] : [];
-    const hasManagedEntry = rows.some((entry) => {
-      const hooks = Array.isArray(entry?.hooks) ? entry.hooks : [];
-      return hooks.some((row) => typeof row?.command === 'string' && row.command.includes('hook-entry.mjs'));
-    });
-    if (hasManagedEntry) installed.push(hookName);
-  }
-  return installed;
-}
 
-function buildSubconsciousDetailPayload(name, manifest = null, detail = null) {
-  const stateDir = manifest?.stateDir || detail?.stateDir || null;
-  const workdir = manifest?.workdir || detail?.workdir || null;
-  const runtimeMetaPath = stateDir ? path.join(stateDir, 'subconscious', 'runtime.json') : null;
-  const lettaPath = stateDir ? path.join(stateDir, 'letta.json') : null;
-  const runtime = runtimeMetaPath && existsSync(runtimeMetaPath) ? safeReadJsonSync(runtimeMetaPath) : null;
-  const letta = lettaPath && existsSync(lettaPath) ? safeReadJsonSync(lettaPath) : null;
-  const settingsPath = runtime?.settingsPath || (workdir ? path.join(workdir, '.claude', 'settings.json') : null);
-  const pluginRoot = runtime?.pluginRoot || (stateDir ? path.join(stateDir, 'subconscious', 'claude-hafleet') : null);
-  const hookScriptPath = pluginRoot ? path.join(pluginRoot, 'scripts', 'hook-entry.mjs') : null;
-  const installedHooks = detectInstalledSubconsciousHooks(settingsPath);
-  const guidanceText = normalizeMetaText(letta?.guidance, 6000) || '';
-  const eventUrl = normalizeMetaText(runtime?.eventUrl, 2048);
-  const upstream = (runtime?.upstream && typeof runtime.upstream === 'object') ? runtime.upstream : {};
-  if (upstream && typeof upstream === 'object' && !upstream.classification) upstream.classification = 'authoritative';
-  const missingBackendPieces = [
-    'Direct upstream reuse may be recorded in runtime metadata, but the fallback detail path cannot execute the upstream Letta bootstrap itself.',
-    'Real provider/model config path for subconscious reasoning is not implemented in this fallback path.',
-    'Real memory state store semantics beyond a local state file are not implemented.',
-    'No actual Letta/LLM invocation boundary is configured or executed by this fallback scaffold payload.',
-  ];
-  const runtimeContract = {
-    classification: 'transitional',
-    hookRuntimeInstalled: Boolean(hookScriptPath && existsSync(hookScriptPath)),
-    hookBindingsInstalled: installedHooks.length === SUBCONSCIOUS_HOOK_NAMES.length,
-    installedHooks,
-    settingsPath: settingsPath || null,
-    pluginRoot: pluginRoot || null,
-    eventSinkConfigured: Boolean(eventUrl),
-    eventUrl: eventUrl || null,
-    runtimeMetaPath: runtimeMetaPath || null,
-    updatedAt: normalizeMetaText(runtime?.updatedAt, 128),
-  };
-  const providerContract = {
-    provider: normalizeMetaText(letta?.provider, 128) || 'letta',
-    mode: normalizeMetaText(letta?.mode, 128) || 'claude-subconscious',
-    lettaAgentId: normalizeMetaText(letta?.agentId || letta?.lettaAgentId, 256),
-    resolutionSource: normalizeMetaText(letta?.resolutionSource, 64),
-    lettaStateFile: lettaPath || null,
-    backendRuntimeConfigured: false,
-    modelConfigConfigured: false,
-    memoryStoreConfigured: false,
-    invocationConfigured: false,
-  };
-  const authority = buildSubconsciousAuthoritySummaryMeta(
-    manifest?.subconsciousEnabled === true || detail?.subconsciousEnabled === true,
-    upstream,
-    providerContract.lettaAgentId,
-  );
-  const fallback = buildSubconsciousFallbackSummaryMeta(guidanceText);
-  const transitional = buildSubconsciousTransitionalSummaryMeta(runtimeContract);
-
-  return buildOperationalSubconsciousDetail({
-    ok: true,
-    agent: name,
-    stage: 'scaffold',
-    writable: Boolean(manifest?.stateDir),
-    enabled: manifest?.subconsciousEnabled === true || detail?.subconsciousEnabled === true,
-    authority,
-    fallback,
-    guidance: {
-      classification: 'fallback',
-      configured: guidanceText.length > 0,
-      source: guidanceText ? 'manual-state-file' : 'none',
-      role: 'fallback',
-      text: guidanceText,
-      preview: guidanceText.length > 240 ? `${guidanceText.slice(0, 240)}...` : guidanceText,
-      updatedAt: normalizeMetaText(letta?.updatedAt, 128),
-    },
-    runtime: runtimeContract,
-    transitional,
-    provider: providerContract,
-    upstream,
-    missingBackendPieces,
-  });
-}
 
 app.get('/api/agents/detail/:name', async (req, res) => {
   const name = req.params.name;
@@ -2138,7 +1846,6 @@ app.get('/api/agents/detail/:name', async (req, res) => {
       detail.homeDir = agent.homeDir || null;
       detail.workdir = agent.workdir || null;
       detail.stateDir = agent.stateDir || null;
-      detail.subconsciousEnabled = agent.subconsciousEnabled === true;
       detail.managedProjects = Array.isArray(agent.managedProjects) ? agent.managedProjects : [];
       detail.human = (agent.human && typeof agent.human === 'object') ? agent.human : {};
       detail.task = normalizeTaskMeta(agent.task, name);
@@ -2146,7 +1853,7 @@ app.get('/api/agents/detail/:name', async (req, res) => {
       detail.role = agent.role || null;
     }
   } catch (e) {
-    console.debug(`[server] backend subconscious detail fetch skipped for ${name}: ${e.message}`);
+    console.debug(`[server] backend agent detail fetch skipped for ${name}: ${e.message}`);
   }
 
   // From local meta.json
@@ -2179,7 +1886,6 @@ app.get('/api/agents/detail/:name', async (req, res) => {
     detail.homeDir = v1Manifest.homeDir || detail.homeDir || null;
     detail.workdir = v1Manifest.workdir || detail.workdir || null;
     detail.stateDir = v1Manifest.stateDir || detail.stateDir || null;
-    detail.subconsciousEnabled = v1Manifest.subconsciousEnabled === true;
     detail.managedProjects = Array.isArray(v1Manifest.managedProjects) ? v1Manifest.managedProjects : [];
     detail.human = (v1Manifest.human && typeof v1Manifest.human === 'object')
       ? v1Manifest.human
@@ -2193,17 +1899,6 @@ app.get('/api/agents/detail/:name', async (req, res) => {
   const humanMeta = (detail.human && typeof detail.human === 'object') ? detail.human : {};
   detail.human = normalizeHumanSyncMeta(humanMeta);
   detail.owner = typeof humanMeta.owner === 'string' ? humanMeta.owner : null;
-  if (detail.stateDir) {
-    const lettaPath = path.join(detail.stateDir, 'letta.json');
-    const letta = existsSync(lettaPath) ? safeReadJsonSync(lettaPath) : null;
-    const guidance = normalizeMetaText(letta?.guidance, 6000) || '';
-    detail.subconsciousGuidanceText = guidance;
-    detail.subconsciousGuidancePreview = guidance.length > 240 ? `${guidance.slice(0, 240)}...` : guidance;
-  } else {
-    detail.subconsciousGuidanceText = '';
-    detail.subconsciousGuidancePreview = '';
-  }
-
   // Idle info (sync — reads from in-memory snapshot cache)
   if (detail.tmux && isLocalAgentServer(detail.server)) {
     detail.idleMs = getPaneIdleMs(detail.tmux);
@@ -2249,34 +1944,7 @@ app.get('/api/agents/detail/:name', async (req, res) => {
   res.json(detail);
 });
 
-app.get('/api/subconscious/detail/:name', async (req, res) => {
-  const name = req.params.name;
-  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
-  try {
-    const backendUrl = new URL(`${BACKEND_V2_URL}/api/subconscious/detail/${encodeURIComponent(name)}`);
-    if (normalizeMetaText(String(req.query?.debug ?? ''), 8) === '1') {
-      backendUrl.searchParams.set('debug', '1');
-    }
-    const r = await backendFetch(backendUrl);
-    const data = await r.json().catch(() => ({ error: `backend status ${r.status}` }));
-    if (r.ok) return res.json(data);
-  } catch (e) {
-    console.debug(`[server] backend agent detail fetch skipped for ${name}: ${e.message}`);
-  }
 
-  const { meta: localMeta } = loadLocalAgentMeta(name);
-  const manifest = loadV1Manifest(name, localMeta);
-  let detail = null;
-  try {
-    const r = await backendFetch(`${BACKEND_V2_URL}/api/agents/${encodeURIComponent(name)}`);
-    detail = await r.json();
-  } catch (e) {
-    console.debug(`[server] backend agent detail fetch skipped for ${name}: ${e.message}`);
-  }
-  return res.json(buildSubconsciousDetailPayload(name, manifest, detail));
-});
-
-installSubconsciousProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
 
 // Matrix messages link to the public dashboard origin. Proxy the backend's
 // scoped HTML detail page while preserving only its capability-token query;
@@ -2499,9 +2167,6 @@ app.patch('/api/agents/:name/home-metadata', async (req, res) => {
     }
     next.runtimeProfile = nextRuntimeProfile;
   }
-  if (Object.prototype.hasOwnProperty.call(body, 'subconsciousEnabled')) {
-    next.subconsciousEnabled = body.subconsciousEnabled === true;
-  }
 
   next.human = nextHuman;
   next.updatedAt = new Date().toISOString();
@@ -2517,7 +2182,6 @@ app.patch('/api/agents/:name/home-metadata', async (req, res) => {
     backendSync,
     metadata: {
       owner: nextHuman.owner,
-      subconsciousEnabled: next.subconsciousEnabled === true,
       managedProjects: Array.isArray(next.managedProjects) ? next.managedProjects : [],
       agentModelVersion: next.agentModelVersion || '1.0',
       layoutVersion: Number(next.layoutVersion) || 1,
@@ -2708,22 +2372,6 @@ app.post('/api/agents/:name/workspace/migrate-entry-files', async (req, res) => 
   });
 });
 
-app.get('/api/agents/:name/hooks', async (req, res) => {
-  const name = req.params.name;
-  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
-  const { meta: localMeta } = loadLocalAgentMeta(name);
-  const manifest = loadV1Manifest(name, localMeta);
-  const stateDir = manifest?.stateDir || localMeta?.stateDir || null;
-  if (!stateDir) return res.json({ hooks: null });
-  const hooksPath = path.join(stateDir, 'subconscious', 'claude-hafleet', 'hooks', 'hooks.json');
-  try {
-    const hooks = JSON.parse(readFileSync(hooksPath, 'utf8'));
-    return res.json({ hooks });
-  } catch {
-    return res.json({ hooks: null });
-  }
-});
-
 app.get('/api/config/mcp', (_req, res) => {
   const homedir = process.env.HOME || process.env.USERPROFILE || '/root';
   const settingsPath = path.join(homedir, '.claude', 'settings.json');
@@ -2740,177 +2388,7 @@ app.get('/api/config/mcp', (_req, res) => {
   }
 });
 
-app.patch('/api/agents/:name/subconscious-guidance', async (req, res) => {
-  const name = req.params.name;
-  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
 
-  const { meta: localMeta } = loadLocalAgentMeta(name);
-  const manifest = loadV1Manifest(name, localMeta);
-  if (!manifest?.stateDir) {
-    return res.status(404).json({ error: 'v1 subconscious state not found' });
-  }
-
-  const body = req.body || {};
-  const guidance = normalizeMetaText(body.guidance, 6000)
-    || normalizeMetaText(body.manualGuidance, 6000)
-    || '';
-  const lettaPath = path.join(manifest.stateDir, 'letta.json');
-  const existing = safeReadJsonSync(lettaPath) || {};
-  const now = new Date().toISOString();
-  const next = {
-    ...(existing && typeof existing === 'object' ? existing : {}),
-    provider: normalizeMetaText(existing.provider, 128) || 'letta',
-    mode: normalizeMetaText(existing.mode, 128) || 'claude-subconscious',
-    enabled: manifest.subconsciousEnabled === true,
-    agentName: normalizeMetaText(existing.agentName, 128) || manifest.name || name,
-    agentId: normalizeMetaText(existing.agentId || existing.lettaAgentId, 256) || manifest.id || name,
-    resolutionSource: normalizeMetaText(existing.resolutionSource, 64) || 'state',
-    guidance,
-    createdAt: normalizeMetaText(existing.createdAt, 128) || now,
-    updatedAt: now,
-  };
-
-  mkdirSync(path.dirname(lettaPath), { recursive: true });
-  writeFileSync(lettaPath, `${JSON.stringify(next, null, 2)}\n`, 'utf-8');
-
-  return res.json({
-    ok: true,
-    agent: name,
-    guidance: {
-      configured: guidance.length > 0,
-      source: guidance ? 'manual-state-file' : 'none',
-      text: guidance,
-      updatedAt: now,
-      lettaPath,
-    },
-  });
-});
-
-app.patch('/api/agents/:name/subconscious-runtime', async (req, res) => {
-  const name = req.params.name;
-  if (!/^[\w\-]+$/.test(name)) return res.status(400).json({ error: 'invalid name' });
-
-  const { meta: localMeta } = loadLocalAgentMeta(name);
-  const manifest = loadV1Manifest(name, localMeta);
-  if (!manifest?.stateDir) {
-    return res.status(404).json({ error: 'v1 subconscious state not found' });
-  }
-
-  const lettaPath = path.join(manifest.stateDir, 'letta.json');
-  const runtimeMetaPath = path.join(manifest.stateDir, 'subconscious', 'runtime.json');
-  const existing = safeReadJsonSync(lettaPath) || {};
-  const runtimeMeta = safeReadJsonSync(runtimeMetaPath) || {};
-  const existingRuntime = (existing.runtime && typeof existing.runtime === 'object') ? existing.runtime : {};
-  const body = req.body || {};
-  const hasProvider = Object.prototype.hasOwnProperty.call(body, 'provider');
-  const providerRaw = typeof body.provider === 'string' ? body.provider.trim() : '';
-  const clearProvider = hasProvider && providerRaw === '';
-  const provider = clearProvider ? null : normalizeSubconsciousProviderInput(body.provider);
-  if (hasProvider && !clearProvider && !provider) {
-    return res.status(400).json({ error: 'invalid subconscious provider' });
-  }
-
-  const hasModel = Object.prototype.hasOwnProperty.call(body, 'model');
-  const modelRaw = typeof body.model === 'string' ? body.model.trim() : '';
-  const clearModel = hasModel && modelRaw === '';
-  const model = clearModel ? null : normalizeMetaText(body.model, 256);
-
-  const hasEndpoint = Object.prototype.hasOwnProperty.call(body, 'endpoint');
-  const endpointRaw = typeof body.endpoint === 'string' ? body.endpoint.trim() : '';
-  const clearEndpoint = hasEndpoint && endpointRaw === '';
-  const endpoint = clearEndpoint ? null : normalizeMetaText(body.endpoint, 2048);
-
-  const hasKeyEnv = Object.prototype.hasOwnProperty.call(body, 'keyEnv');
-  const keyEnvRaw = typeof body.keyEnv === 'string' ? body.keyEnv.trim() : '';
-  const clearKeyEnv = hasKeyEnv && keyEnvRaw === '';
-  const keyEnv = clearKeyEnv ? null : normalizeMetaText(body.keyEnv, 128);
-  if (hasKeyEnv && !clearKeyEnv && !keyEnv) {
-    return res.status(400).json({ error: 'invalid subconscious key env' });
-  }
-
-  const now = new Date().toISOString();
-  const nextRuntime = {
-    ...existingRuntime,
-    enabled: Object.prototype.hasOwnProperty.call(body, 'enabled')
-      ? body.enabled === true
-      : (existingRuntime.enabled !== false),
-    timeoutMs: Object.prototype.hasOwnProperty.call(body, 'timeoutMs')
-      ? normalizePositiveMetaInt(body.timeoutMs, 8000)
-      : normalizePositiveMetaInt(existingRuntime.timeoutMs, 8000),
-    maxTokens: Object.prototype.hasOwnProperty.call(body, 'maxTokens')
-      ? normalizePositiveMetaInt(body.maxTokens, 220)
-      : normalizePositiveMetaInt(existingRuntime.maxTokens, 220),
-    temperature: Object.prototype.hasOwnProperty.call(body, 'temperature')
-      ? normalizeMetaFloat(body.temperature, 0.2)
-      : normalizeMetaFloat(existingRuntime.temperature, 0.2),
-    allowedHooks: Object.prototype.hasOwnProperty.call(body, 'allowedHooks')
-      ? normalizeSubconsciousHooksInput(body.allowedHooks)
-      : normalizeSubconsciousHooksInput(existingRuntime.allowedHooks),
-  };
-  if (hasProvider) {
-    if (clearProvider) delete nextRuntime.provider;
-    else nextRuntime.provider = provider;
-  }
-  if (hasModel) {
-    if (clearModel) delete nextRuntime.model;
-    else nextRuntime.model = model || '';
-  }
-  if (hasEndpoint) {
-    if (clearEndpoint) delete nextRuntime.endpoint;
-    else nextRuntime.endpoint = endpoint || '';
-  }
-  if (hasKeyEnv) {
-    if (clearKeyEnv) delete nextRuntime.keyEnv;
-    else nextRuntime.keyEnv = keyEnv;
-  }
-
-  const next = {
-    ...(existing && typeof existing === 'object' ? existing : {}),
-    provider: normalizeMetaText(existing.provider, 128) || 'letta',
-    mode: normalizeMetaText(existing.mode, 128) || 'claude-subconscious',
-    enabled: manifest.subconsciousEnabled === true,
-    agentName: normalizeMetaText(existing.agentName, 128) || manifest.name || name,
-    agentId: normalizeMetaText(existing.agentId || existing.lettaAgentId, 256) || manifest.id || name,
-    resolutionSource: normalizeMetaText(existing.resolutionSource, 64) || 'state',
-    guidance: normalizeMetaText(existing.guidance, 6000) || '',
-    runtime: nextRuntime,
-    createdAt: normalizeMetaText(existing.createdAt, 128) || now,
-    updatedAt: now,
-  };
-  mkdirSync(path.dirname(lettaPath), { recursive: true });
-  writeFileSync(lettaPath, `${JSON.stringify(next, null, 2)}\n`, 'utf-8');
-
-  const nextRuntimeMeta = {
-    ...(runtimeMeta && typeof runtimeMeta === 'object' ? runtimeMeta : {}),
-    backendMode: 'runtime-contract',
-    reasoningRuntime: 'llm-compatible',
-    memoryStore: (runtimeMeta && typeof runtimeMeta.memoryStore === 'object')
-      ? runtimeMeta.memoryStore
-        : {
-          kind: 'local-episodic-journal',
-          path: path.join(manifest.stateDir, 'subconscious', 'memory.json'),
-          retrievalStrategy: 'keyword-overlap-recency',
-        },
-    conversationStore: (runtimeMeta && typeof runtimeMeta.conversationStore === 'object')
-      ? runtimeMeta.conversationStore
-      : {
-          kind: 'claude-jsonl-session-journal',
-          path: path.join(manifest.stateDir, 'subconscious', 'conversations.json'),
-          syncSource: 'claude-jsonl-transcript',
-        },
-    updatedAt: now,
-  };
-  mkdirSync(path.dirname(runtimeMetaPath), { recursive: true });
-  writeFileSync(runtimeMetaPath, `${JSON.stringify(nextRuntimeMeta, null, 2)}\n`, 'utf-8');
-
-  return res.json({
-    ok: true,
-    agent: name,
-    runtime: nextRuntime,
-    runtimeMetaPath,
-    lettaPath,
-  });
-});
 
 app.post('/api/agents/:name/offline', async (req, res) => {
   const name = req.params.name;
@@ -3038,7 +2516,6 @@ app.delete('/api/framework-presets/:id', async (req, res) => {
 installTaskProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
 installProjectBoardProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
 installSupervisorProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
-installSubconsciousEventProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
 
 // SSE for queue updates (reuse existing SSE clients, send typed events)
 function queueSnapshot() {

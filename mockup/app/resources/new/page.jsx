@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Toast, useToast } from '@/components/Toast';
@@ -69,6 +70,7 @@ export default function WizardPage() {
     tokens: 1_000_000, rateCapPerDay: 50_000,
   });
 
+  const router = useRouter();
   const set = (patch) => setDraft((d) => ({ ...d, ...patch }));
   const selectable = draft.framework ? MODEL_SELECTABLE[draft.framework] : null;
   const models = draft.framework ? modelsFor(draft.framework) : [];
@@ -376,7 +378,20 @@ export default function WizardPage() {
               });
               if (!res.ok) return say('fail', res.error);
               await refresh();
-              return say('ok', t('wz.didCreate', { name: res.body?.preset?.name ?? draft.model }));
+              say('ok', t('wz.didCreate', { name: res.body?.preset?.name ?? draft.model }));
+              /*
+               * LEAVE THE FORM. It used to raise a toast and stay put, with every field still
+               * filled — so the one visible difference between "saved" and "did nothing" was a
+               * message that fades, and the honest reading of the screen was that nothing had
+               * happened. Reported as a bug within a minute of someone using it.
+               *
+               * /resources is the right destination rather than a dead end: it lists the preset
+               * that was just created and, when an agent is running, carries the attach control
+               * that is genuinely the next step — a preset does nothing until something is bound
+               * to it. The delay is only so the confirmation is legible before the page changes.
+               */
+              setTimeout(() => router.push('/resources'), 1200);
+              return undefined;
             }}
           >
             {t('wz.create')}

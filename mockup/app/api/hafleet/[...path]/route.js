@@ -36,6 +36,12 @@ const READS = [
   /^agents$/,
   /^agents\/[A-Za-z0-9._-]+$/,
   /^agents\/[A-Za-z0-9._-]+\/tasks$/,
+  /*
+   * The agent's live pane. A read, and the reason it is admitted: the console could describe an
+   * agent's runtime but never show what it was actually doing, so "is it stuck?" had no answer
+   * short of attaching to tmux on the host — which risks killing the pane on a wrong detach.
+   */
+  /^agents\/[A-Za-z0-9._-]+\/pane$/,
   /^agents\/[A-Za-z0-9._-]+\/groups$/,
   /^framework-presets$/,
   /^frameworks$/,
@@ -52,6 +58,26 @@ const READS = [
   /^usage$/,
   /^seats$/,
   /^capability$/,
+  /*
+   * The contribution binding, read by the workforce roster.
+   *
+   * `GET /api/contributions` is a deliberately narrow projection of the binding
+   * store — it omits `ownerDmRoomId`, the owner's private channel — precisely so a
+   * console holding the API token can read it. `GET /api/approval-bindings`, which
+   * carries that field, is guarded by the bridge secret and is NOT added here: the
+   * proxy should expose the projection somebody designed for it, not the record it
+   * was projected from.
+   */
+  /^contributions$/,
+  /*
+   * Invitations a project has extended that the contributor has not answered (ADR-014).
+   *
+   * Read-safe for a console holding the API token: the projection carries the room, the
+   * derived project server, the inviter and which agent was invited — the facts a human
+   * needs to decide — and no credential. The DECISION is a separate write below, because
+   * accepting spends the contributor's tokens.
+   */
+  /^matrix\/pending-invites$/,
 ];
 
 /*
@@ -76,6 +102,35 @@ const WRITES = [
   // silently pre-authorises any nested DELETE /api/whitelist/* added later. An
   // allowlist that permits more than the action it represents is not an allowlist.
   { method: 'DELETE', re: /^whitelist\/[^/]+$/ },
+  /*
+   * Answering an invitation. A write rather than a read because it commits the
+   * contributor's capacity, and the one action the console has a form for here — the room
+   * and agent travel in the body, so there is no path segment to over-match.
+   */
+  { method: 'POST', re: /^matrix\/pending-invites\/decide$/ },
+  /*
+   * Attaching a preset to an agent — the act that gives the agent a CEILING, and therefore the
+   * act without which no engagement can be approved (`decide()` refuses an agent whose remaining
+   * is null). One segment for the name, and no agent route beyond this one: the shared token also
+   * authorises DELETE /api/agents/:name, so the allowlist admits the binding and nothing else.
+   */
+  { method: 'PUT', re: /^agents\/[A-Za-z0-9._-]+\/preset$/ },
+  /*
+   * Creating and launching an agent. Both are local-only on the backend (`isLocalRequest`), because
+   * they spawn a process on the machine the backend runs on — a console served from another host
+   * cannot provision on a contributor's machine, and the page says so rather than failing obscurely.
+   * Admitted here and nothing wider: the shared token also authorises DELETE /api/agents/:name, so
+   * the allowlist names these two exact actions.
+   */
+  { method: 'POST', re: /^agents\/[A-Za-z0-9._-]+\/provision$/ },
+  { method: 'POST', re: /^agents\/[A-Za-z0-9._-]+\/start$/ },
+  /*
+   * Removing an agent. The console's own Remove button used to be a toast and nothing else — it
+   * said "removed" and made no request, which is why an operator reported "remove agent ui worked
+   * but agent is not removed". Admitted here so the button can do what it claims. One segment for
+   * the name; `?force=true` rides in the query string, which the forwarder preserves.
+   */
+  { method: 'DELETE', re: /^agents\/[A-Za-z0-9._-]+$/ },
 ];
 
 function allowed(method, joined) {

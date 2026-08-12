@@ -17,7 +17,6 @@
         "lib/alert-store.js",
         "lib/supervisor-",
         "lib/task-",
-        "lib/upstream-claude-subconscious.js",
         "remote/"
       ]
     },
@@ -121,16 +120,6 @@
           "owner": "backend.proxy.agent-projects"
         },
         {
-          "method": "PATCH",
-          "path": "/api/agents/:name/subconscious-guidance",
-          "owner": "backend.proxy.subconscious"
-        },
-        {
-          "method": "PATCH",
-          "path": "/api/agents/:name/subconscious-runtime",
-          "owner": "backend.proxy.subconscious"
-        },
-        {
           "method": "POST",
           "path": "/api/agents/:name/offline",
           "owner": "backend.proxy.agents"
@@ -184,26 +173,6 @@
     },
     "lib/dashboard/proxy-routes.js": {
       "mutationRoutes": [
-        {
-          "method": "POST",
-          "path": "/api/subconscious/upstream/bootstrap/:name",
-          "owner": "backend.proxy.subconscious"
-        },
-        {
-          "method": "POST",
-          "path": "/api/subconscious/upstream/session-start/:name",
-          "owner": "backend.proxy.subconscious"
-        },
-        {
-          "method": "POST",
-          "path": "/api/subconscious/upstream/user-prompt/:name",
-          "owner": "backend.proxy.subconscious"
-        },
-        {
-          "method": "POST",
-          "path": "/api/subconscious/upstream/pretool/:name",
-          "owner": "backend.proxy.subconscious"
-        },
         {
           "method": "POST",
           "path": "/api/tasks",
@@ -274,7 +243,6 @@
     "backend-v2.js": {
       "statefulGetMarkers": [
         "refreshServerLiveness()",
-        "resolveSubconsciousState(",
         "saveCursors()",
         "markAgentInboxChecked(",
         "advanceGroupCursor(",
@@ -296,6 +264,18 @@
         },
         {
           "method": "GET",
+          "path": "/api/agents/:name/pane",
+          "owner": "operator.agent-pane-read",
+          "auth": "bearer"
+        },
+        {
+          "method": "GET",
+          "path": "/api/capability",
+          "owner": "console.capability-read",
+          "auth": "bearer"
+        },
+        {
+          "method": "GET",
           "path": "/api/groups/:name/messages",
           "owner": "groups.member-read-ack",
           "auth": "agent-credential"
@@ -314,15 +294,21 @@
         },
         {
           "method": "GET",
+          "path": "/api/seats",
+          "owner": "operator.seat-read",
+          "auth": "bearer"
+        },
+        {
+          "method": "GET",
           "path": "/api/servers",
           "owner": "server-runtime.liveness-read",
           "auth": "global-api-auth-only"
         },
         {
           "method": "GET",
-          "path": "/api/subconscious/detail/:name",
-          "owner": "subconscious.read-through-state",
-          "auth": "global-api-auth-only"
+          "path": "/api/usage",
+          "owner": "console.usage-read",
+          "auth": "bearer"
         },
         {
           "method": "GET",
@@ -366,6 +352,18 @@
           "path": "/api/agents/:name/offline",
           "owner": "agent-runtime.self-report",
           "auth": "agent-token"
+        },
+        {
+          "method": "PUT",
+          "path": "/api/agents/:name/preset",
+          "owner": "contributor.agent-preset-binding",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agents/:name/provision",
+          "owner": "operator.agent-provisioning",
+          "auth": "bearer-and-local"
         },
         {
           "method": "POST",
@@ -483,6 +481,24 @@
         },
         {
           "method": "POST",
+          "path": "/api/engagements",
+          "owner": "console.engagement-request",
+          "auth": "requester"
+        },
+        {
+          "method": "POST",
+          "path": "/api/engagements/:id/revoke",
+          "owner": "operator.engagement-revoke",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/engagements/:id/verdict",
+          "owner": "operator.engagement-verdict",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
           "path": "/api/framework-presets",
           "owner": "operator.runtime-config",
           "auth": "bearer"
@@ -518,6 +534,18 @@
           "auth": "bridge-secret"
         },
         {
+          "method": "PUT",
+          "path": "/api/matrix/pending-invites",
+          "owner": "matrix-bridge.pending-invite-write",
+          "auth": "bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/matrix/pending-invites/decide",
+          "owner": "operator.pending-invite-decide",
+          "auth": "bearer"
+        },
+        {
           "method": "POST",
           "path": "/api/media/stage",
           "owner": "media.agent-staging",
@@ -542,6 +570,12 @@
           "auth": "agent-token"
         },
         {
+          "method": "PUT",
+          "path": "/api/offers/:role",
+          "owner": "operator.offer-book-write",
+          "auth": "bearer"
+        },
+        {
           "method": "POST",
           "path": "/api/runtime/compact",
           "owner": "operator.runtime-control",
@@ -552,6 +586,18 @@
           "path": "/api/runtime/push-delivered",
           "owner": "delivery.local-ack",
           "auth": "local-only"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/seats/:seatId",
+          "owner": "operator.seat-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "PUT",
+          "path": "/api/seats/:seatId",
+          "owner": "operator.seat-admin",
+          "auth": "bearer"
         },
         {
           "method": "POST",
@@ -570,48 +616,6 @@
           "path": "/api/servers/heartbeat",
           "owner": "server-runtime.lifecycle",
           "auth": "bearer"
-        },
-        {
-          "method": "POST",
-          "path": "/api/subconscious/events",
-          "owner": "subconscious.event-ingest",
-          "auth": "subconscious-event-token-or-local"
-        },
-        {
-          "method": "POST",
-          "path": "/api/subconscious/runtime/invoke/:name",
-          "owner": "subconscious.runtime-upstream",
-          "auth": "global-api-auth-only"
-        },
-        {
-          "method": "POST",
-          "path": "/api/subconscious/upstream/bootstrap/:name",
-          "owner": "subconscious.runtime-upstream",
-          "auth": "global-api-auth-only"
-        },
-        {
-          "method": "POST",
-          "path": "/api/subconscious/upstream/pretool/:name",
-          "owner": "subconscious.runtime-upstream",
-          "auth": "global-api-auth-only"
-        },
-        {
-          "method": "POST",
-          "path": "/api/subconscious/upstream/session-start/:name",
-          "owner": "subconscious.runtime-upstream",
-          "auth": "global-api-auth-only"
-        },
-        {
-          "method": "POST",
-          "path": "/api/subconscious/upstream/stop/:name",
-          "owner": "subconscious.runtime-upstream",
-          "auth": "global-api-auth-only"
-        },
-        {
-          "method": "POST",
-          "path": "/api/subconscious/upstream/user-prompt/:name",
-          "owner": "subconscious.runtime-upstream",
-          "auth": "global-api-auth-only"
         },
         {
           "method": "PATCH",
@@ -696,6 +700,18 @@
           "path": "/api/tasks/:id/transition",
           "owner": "task-store.assignee",
           "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/whitelist",
+          "owner": "operator.whitelist-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/whitelist/:roomId",
+          "owner": "operator.whitelist-admin",
+          "auth": "bearer"
         }
       ],
       "sensitiveRoutes": [

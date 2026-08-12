@@ -5,7 +5,7 @@ import {
   SimpleFsStorageProvider,
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { execFile } from 'child_process';
 import os from 'os';
 import path from 'path';
@@ -83,13 +83,35 @@ export class ReliableMatrixClient extends MatrixClient {
     return signedCurve25519CountFromKeysUpload(response);
   }
 
+  /**
+   * Ask the homeserver for the current one-time-key count, at most once per interval.
+   *
+   * THE THROTTLE COUNTS ATTEMPTS, NOT SUCCESSES, and that is the fix. The stamp used to be
+   * written after both awaits, so a probe that THREW never recorded anything — and
+   * `processSync` swallows the error, so the next sync round found the throttle unset and
+   * probed again. Measured against the real class: with a failing probe, five rounds one
+   * millisecond apart produced five POSTs and left the stamp at 0.
+   *
+   * The consequence was the opposite of the intent. `syncingTimeout` defaults to 30s, so a
+   * homeserver returning 429 or 5xx got one empty `/keys/upload` per sync round — roughly ten
+   * times the interval this method exists to enforce, for as long as the failure lasted, and
+   * hardest on a server that was already struggling. It also refuted ADR-006's own Consequence
+   * that "affected homeservers require one additional bounded count probe".
+   *
+   * Stamping first is safe because the probe body is `{}` — no keys are uploaded, and the call
+   * that makes the crypto layer generate keys (`updateSyncData`) is not reached on the failure
+   * path. So the cost of a skipped interval after a failure is one stale count for five
+   * minutes, against a retry storm; and the count is only ever a hint the crypto state machine
+   * uses to decide whether to top up.
+   */
   async reconcileSignedCurve25519CountIfDue(now = Date.now()) {
     if (!this.crypto || now - this._lastOtkCountReconciliationAt < MATRIX_OTK_COUNT_RECONCILE_MS) {
       return null;
     }
+    // Before the awaits: an attempt has been made, whether or not it lands.
+    this._lastOtkCountReconciliationAt = now;
     const count = await this.probeSignedCurve25519Count();
     await this.crypto.updateSyncData([], { signed_curve25519: count }, [], [], []);
-    this._lastOtkCountReconciliationAt = now;
     console.log(`[matrix-e2ee] reconciled signed_curve25519 count=${count}`);
     return count;
   }
@@ -231,9 +253,31 @@ const BOT_USERNAME = (process.env.MATRIX_BOT_USERNAME || 'agent-bridge').trim();
 const BOT_PASSWORD = (process.env.MATRIX_BOT_PASSWORD || '').trim();
 const AGENT_PREFIX = (process.env.MATRIX_AGENT_PREFIX || 'ac_').trim(); // Matrix usernames: ac_agentname
 const MATRIX_SERVER_NAME = (process.env.MATRIX_SERVER_NAME || new URL(HOMESERVER).host).trim();
-const AGENT_PASSWORD_SECRET = (process.env.MATRIX_AGENT_PASSWORD_SECRET || '').trim();
-const AGENT_PASSWORD_TEMPLATE = (process.env.MATRIX_AGENT_PASSWORD_TEMPLATE || '').trim();
-const ALLOW_LEGACY_AGENT_PASSWORD = (process.env.MATRIX_ALLOW_LEGACY_AGENT_PASSWORD || 'false').trim().toLowerCase() === 'true';
+/*
+ * MATRIX_AGENT_PASSWORD_SECRET, MATRIX_AGENT_PASSWORD_TEMPLATE and
+ * MATRIX_ALLOW_LEGACY_AGENT_PASSWORD are GONE (ADR-014 decision 3, 2026-08-11).
+ *
+ * An agent's Matrix password used to be derived: sha256(secret + ':' + agentName), one operator
+ * secret behind every agent identity. Three properties condemned it, and they compound:
+ *
+ *   THE SECRET COULD NEVER BE ROTATED. Change it and every derived password changes at once, so
+ *   the bridge can no longer log in to any existing account — and it cannot re-register them
+ *   either, because the usernames are taken. The whole fleet locks out. (The now-deleted
+ *   MATRIX_ALLOW_LEGACY_AGENT_PASSWORD existed to migrate off an even earlier template scheme,
+ *   so this class of trap had already been hit once; rotating the secret itself never had a path.)
+ *
+ *   THE CREDENTIALS WERE NOT REVOCABLE. Revoking every access token achieved nothing: the
+ *   password is re-derivable, so anyone holding .env logs straight back in. A leak was permanent,
+ *   recoverable only by renaming the agents.
+ *
+ *   IT REQUIRED ACCOUNT-CREATION PRIVILEGE on the homeserver (MATRIX_REG_TOKEN or open
+ *   registration) — a far larger grant than acting as a few existing accounts, and one no
+ *   third-party project gives an external bridge. So the model structurally could not put an
+ *   agent on a homeserver we do not administer, which is exactly what ADR-013's contribution
+ *   persona meets.
+ *
+ * Replaced by the credential the operator supplies: see ensureAgentAccount below.
+ */
 const AUTO_AVATAR_ENABLED = (process.env.MATRIX_AUTO_AVATAR || 'false').trim().toLowerCase() === 'true';
 const MATRIX_GREETING_MXIDS = new Set(
   (process.env.MATRIX_GREETING_MXIDS || '').split(',').map(s => s.trim()).filter(Boolean)
@@ -474,15 +518,142 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 
 // ── State persistence ─────────────────────────────────────────────────
+/*
+ * Set when `bridge-state.json` existed but could not be read or parsed. While it is set, the
+ * in-memory state is NOT a picture of the file, and writing it out would replace real credentials
+ * with an empty object.
+ *
+ * This distinction did not matter before ADR-014 decision 3: an erased agent token was re-derived
+ * from the master secret on the next startup, so an empty-state overwrite cost one login. Nothing
+ * can re-mint a token now, so the same overwrite is permanent and needs a human per agent — which
+ * turns "degrade to empty and carry on" from a robustness feature into the most destructive path
+ * in the file.
+ */
+let stateWritesBlockedReason = null;
+
 function loadState() {
+  const statePath = path.join(DATA_DIR, 'bridge-state.json');
+  const fresh = { botToken: null, agentTokens: {}, roomGroupMap: {}, groupRoomMap: {} };
   try {
-    return JSON.parse(readFileSync(path.join(DATA_DIR, 'bridge-state.json'), 'utf-8'));
-  } catch {
-    return { botToken: null, agentTokens: {}, roomGroupMap: {}, groupRoomMap: {} };
+    return JSON.parse(readFileSync(statePath, 'utf-8'));
+  } catch (error) {
+    /*
+     * ENOENT is the ONLY safe reason to start empty — there is no file, so there is nothing to
+     * lose and the empty state is literally accurate. Every other failure (EACCES, EIO, a torn or
+     * truncated write, trailing bytes) means the file EXISTS and holds something this process
+     * failed to understand. Those bytes may be the only copy of every agent credential.
+     */
+    if (error?.code === 'ENOENT') return fresh;
+
+    /*
+     * Preserve the bytes before anything can overwrite them. If the copy lands, the data is safe
+     * elsewhere and the bridge may continue writing a fresh file; if it does not, writes are
+     * BLOCKED, because running degraded is recoverable and overwriting the only copy is not.
+     */
+    const sidecar = `${statePath}.unreadable-${Date.now()}`;
+    let preserved = false;
+    try {
+      copyFileSync(statePath, sidecar);
+      chmodSync(sidecar, 0o600);
+      preserved = true;
+    } catch (copyError) {
+      console.error(`[bridge] could not preserve unreadable ${statePath}: ${copyError.message}`);
+    }
+
+    if (preserved) {
+      console.error(
+        `[bridge] ${statePath} was unreadable (${error.message}). Its bytes are preserved at `
+        + `${sidecar} — recover any agent tokens from there. Starting from an empty state.`,
+      );
+    } else {
+      stateWritesBlockedReason = `${statePath} was unreadable (${error.message}) and could not be copied aside`;
+      console.error(
+        `[bridge] REFUSING to persist state: ${stateWritesBlockedReason}. The file may hold the only `
+        + 'copy of every agent Matrix token, and nothing can re-mint them (ADR-014 decision 3). '
+        + 'Fix the file or move it aside by hand, then restart.',
+      );
+    }
+    return fresh;
   }
 }
+/*
+ * Owner-only, because this file is a credential store.
+ *
+ * `bridge-state.json` holds `botToken` and every entry of `agentTokens` — see loadState's own
+ * fallback shape above. A Matrix access token is the identity: whoever reads one can post as
+ * that agent and read every room it is in. The file was being written with
+ * `writeFileSync(path, data)` and no mode, which is 0644 on this platform, so it was readable by
+ * every other account on the host. Verified on the live deployment:
+ * `-rw-r--r-- data/matrix/bridge-state.json`.
+ *
+ * An omission rather than a decision, and the same file proves it: the crypto store directory
+ * beside it is explicitly chmod 0700, `.env` is 0600, and the backend's JSON writer opens its
+ * temp file 0600. This was the one credential-bearing path left on the default.
+ *
+ * The chmod is separate from the mode option and not redundant: `mode` applies only when the
+ * file is CREATED, so every deployment that already has a 0644 file would keep it forever
+ * without this line.
+ */
+/*
+ * Written atomically, because a torn write here loses every credential.
+ *
+ * `loadState` above returns `{ botToken: null, agentTokens: {}, … }` on ANY parse failure. That
+ * is a reasonable first-boot default and a catastrophic recovery: a half-written file reads as
+ * "no credentials", and the bridge proceeds as though this were a fresh install.
+ *
+ * Under the model this file has today that was survivable — a derived password can always
+ * re-login, so the tokens regenerate. Under ADR-014 it is not: an appservice `as_token` or a
+ * project-issued access token CANNOT be re-minted by software, and this file is their only copy.
+ * A single interrupted write would mean re-provisioning every agent identity by hand, and the
+ * symptom would be a bridge that came up looking healthy with an empty state.
+ *
+ * temp-in-the-same-directory → fsync → rename, so a reader sees either the whole old file or the
+ * whole new one. The temp file is created 0600 so there is no window in which credentials sit in
+ * a world-readable file, and the rename replaces the inode, which is also what keeps the mode at
+ * 0600 rather than inheriting a loose mode from an older release.
+ */
 function saveState() {
-  writeFileSync(path.join(DATA_DIR, 'bridge-state.json'), JSON.stringify(state, null, 2));
+  /*
+   * Refused, not silently skipped: see `stateWritesBlockedReason`. Throwing keeps saveState's
+   * existing contract — every caller has just changed something it believes became durable, and the
+   * one thing worse than failing to persist is reporting that it persisted.
+   */
+  if (stateWritesBlockedReason) {
+    throw new Error(`bridge state writes are blocked: ${stateWritesBlockedReason}`);
+  }
+  const statePath = path.join(DATA_DIR, 'bridge-state.json');
+  const tmpPath = `${statePath}.tmp-${process.pid}`;
+  const payload = JSON.stringify(state, null, 2);
+  let fd = null;
+  try {
+    fd = openSync(tmpPath, 'w', 0o600);
+    writeFileSync(fd, payload);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    renameSync(tmpPath, statePath);
+  } catch (error) {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+    try { unlinkSync(tmpPath); } catch { /* nothing to clean */ }
+    /*
+     * Loud and rethrown rather than swallowed. Every caller of saveState has just changed
+     * something it believes is now durable — a new agent token, a room binding, an accepted
+     * invitation — and continuing as if it were persisted is how memory and disk diverge.
+     */
+    console.error(`[bridge] FAILED to persist ${statePath}: ${error.message}`);
+    throw error;
+  }
+  /*
+   * Belt and braces for a file that predates this function: `renameSync` carries the temp
+   * file's 0600, so this only matters if the target somehow survives with a looser mode.
+   */
+  try {
+    chmodSync(statePath, 0o600);
+  } catch (error) {
+    console.warn(`[bridge] could not restrict ${statePath} to 0600: ${error.message}`);
+  }
 }
 const state = loadState();
 if (!state.agentAvatars) state.agentAvatars = {};
@@ -491,6 +662,8 @@ if (!state.agentAvatarMeta) state.agentAvatarMeta = {};
 if (!state.agentRoomBackfillCursors) state.agentRoomBackfillCursors = {};
 if (!state.approvalDmRooms) state.approvalDmRooms = {};
 if (!state.roomAgentBindings) state.roomAgentBindings = {};
+// ADR-014: invitations awaiting the contributor's decision, keyed [roomId][agentName].
+if (!state.pendingInvites) state.pendingInvites = {};
 // Seed trustedManagedRooms from existing bridge-created rooms
 if (!state.trustedManagedRooms) {
   state.trustedManagedRooms = {};
@@ -573,16 +746,7 @@ const AGENT_PREFIX_RE = escapeRegex(AGENT_PREFIX);
 if (!BOT_PASSWORD) {
   console.warn('MATRIX_BOT_PASSWORD is not set. Bridge can run with cached token, but re-login will fail if token expires.');
 }
-if (!AGENT_PASSWORD_SECRET && !ALLOW_LEGACY_AGENT_PASSWORD) {
-  console.warn('MATRIX_AGENT_PASSWORD_SECRET is not set and legacy fallback is disabled. New agent account login/register will fail.');
-}
-if (ALLOW_LEGACY_AGENT_PASSWORD) {
-  if (!AGENT_PASSWORD_TEMPLATE) {
-    console.warn('MATRIX_ALLOW_LEGACY_AGENT_PASSWORD=true but MATRIX_AGENT_PASSWORD_TEMPLATE is empty. Legacy fallback is effectively disabled.');
-  } else {
-    console.warn('MATRIX_ALLOW_LEGACY_AGENT_PASSWORD=true enabled. This keeps compatibility but is less secure.');
-  }
-}
+
 if (!AUTO_AVATAR_ENABLED) {
   console.warn('MATRIX_AUTO_AVATAR is disabled. Automatic avatar generation/sync is off; use hafleet-cli avatar <name> <image-file> for manual updates.');
 }
@@ -591,8 +755,24 @@ function makeUserId(localpart) {
   return `@${localpart}:${MATRIX_SERVER_NAME}`;
 }
 
+/**
+ * The agent's MXID, with a LOWERCASE localpart.
+ *
+ * Matrix requires it: a user ID localpart must be lowercase, and uppercase survives only in
+ * historical IDs. Homeservers therefore normalise on registration — Palpo accepted `ac_BigLittle`
+ * and handed back `@ac_biglittle:palpo.test`.
+ *
+ * Composing with the agent's own casing produced an ID that could never exist. It went unnoticed
+ * while every agent happened to be named in lower case, and surfaced the moment one was not: the
+ * identity check in `ensureAgentAccount` compared `/whoami`'s `@ac_biglittle` against a composed
+ * `@ac_BigLittle` and correctly refused a perfectly good credential. The check was right; this was
+ * the bug.
+ *
+ * ADR-014 decision 5 says an MXID should be DISCOVERED rather than composed, which would remove this
+ * function's reason to exist. Until then it must at least compose something the server can hold.
+ */
 function agentUserId(name) {
-  return makeUserId(`${AGENT_PREFIX}${name}`);
+  return makeUserId(`${AGENT_PREFIX}${String(name || '')}`.toLowerCase());
 }
 
 function humanUserId(name) {
@@ -675,42 +855,6 @@ function humanDmKey(name) {
     return name.slice(1, name.indexOf(':')); // local → localpart
   }
   return name;
-}
-
-function deriveAgentPassword(agentName) {
-  if (!AGENT_PASSWORD_SECRET) return null;
-  return createHash('sha256')
-    .update(`${AGENT_PASSWORD_SECRET}:${agentName}`)
-    .digest('hex');
-}
-
-function legacyAgentPassword(agentName) {
-  if (!AGENT_PASSWORD_TEMPLATE) return null;
-  return AGENT_PASSWORD_TEMPLATE
-    .replace(/\{name\}/g, agentName)
-    .replace(/\$\{name\}/g, agentName);
-}
-
-function agentPasswordCandidates(agentName) {
-  const out = [];
-  const derived = deriveAgentPassword(agentName);
-  if (derived) out.push(derived);
-  if (ALLOW_LEGACY_AGENT_PASSWORD) out.push(legacyAgentPassword(agentName));
-  return [...new Set(out.filter(Boolean))];
-}
-
-async function tryMatrixLogin(username, passwords) {
-  let lastErr = null;
-  for (const pwd of passwords) {
-    try {
-      const data = await matrixLogin(username, pwd);
-      return { data, password: pwd };
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  if (lastErr) throw lastErr;
-  throw new Error(`No usable password candidates for Matrix account '${username}'.`);
 }
 
 // ── Matrix account management ─────────────────────────────────────────
@@ -809,43 +953,196 @@ async function ensureBotAccount() {
   throw new Error('Bot account: login/register attempts exhausted (rate limited?).');
 }
 
-async function ensureAgentAccount(agentName) {
-  const canonicalAgentName = resolveStoredAgentTokenName(agentName) || agentName;
-  const matrixUsername = `${AGENT_PREFIX}${canonicalAgentName}`;
-
-  const existingToken = getStoredAgentToken(canonicalAgentName);
-  if (existingToken) {
-    try {
-      const res = await fetch(`${HOMESERVER}/_matrix/client/v3/account/whoami`, {
-        headers: { Authorization: `Bearer ${existingToken}` },
-      });
-      if (res.ok) return existingToken;
-    } catch { /* re-login */ }
-  }
-
-  const passwords = agentPasswordCandidates(canonicalAgentName);
-  if (passwords.length === 0) {
-    throw new Error(`No agent password configured for '${canonicalAgentName}'. Set MATRIX_AGENT_PASSWORD_SECRET (recommended), or enable MATRIX_ALLOW_LEGACY_AGENT_PASSWORD=true for migration.`);
-  }
-
-  try {
-    const { data } = await tryMatrixLogin(matrixUsername, passwords);
-    state.agentTokens[canonicalAgentName] = data.access_token;
-    saveState();
-    return data.access_token;
-  } catch {
-    const data = await matrixRegister(matrixUsername, passwords[0]);
-    state.agentTokens[canonicalAgentName] = data.access_token;
-    saveState();
-    console.log(`Registered Matrix account for agent: ${canonicalAgentName} → ${agentUserId(canonicalAgentName)}`);
-    // Set display name
-    await setDisplayName(data.access_token, canonicalAgentName);
-    return data.access_token;
+/**
+ * Thrown when an agent has no usable Matrix credential.
+ *
+ * A distinct type rather than a bare Error because callers must be able to tell "this agent needs
+ * a human to provision it" from a transient network failure — the first is a standing condition
+ * that no amount of retrying fixes, and ADR-014 decision 6 requires it to be visible as such
+ * rather than absorbed into a retry loop.
+ */
+class AgentCredentialMissingError extends Error {
+  constructor(agentName, detail) {
+    super(`agent '${agentName}' has no usable Matrix credential: ${detail}`);
+    this.name = 'AgentCredentialMissingError';
+    this.agentName = agentName;
+    this.detail = detail;
+    this.needsProvisioning = true;
   }
 }
 
-async function setDisplayName(token, agentName) {
-  const userId = await getUserId(token);
+/**
+ * The agent's Matrix credential — supplied, never minted.
+ *
+ * ADR-014 decision 3 deleted the derived-password path this used to fall back on. What remains is
+ * the stored access token and a check that it still works, which is the whole of the BYO model:
+ * a human creates the account on whichever homeserver the project lives on and hands over a
+ * token, so the credential is REVOCABLE (server-side, per agent) and needs no account-creation
+ * privilege from us.
+ *
+ * WHAT CHANGES FOR AN EXISTING DEPLOYMENT: nothing, until a token stops working. Tokens already in
+ * bridge-state.json keep being used exactly as before — the /whoami check is unchanged — so a
+ * running fleet does not notice this commit. What no longer happens silently is REPLACEMENT: a
+ * missing or dead credential used to be re-minted from the master secret, and now it stops and
+ * says so. That is the point rather than a regression: re-minting is what made the credential
+ * unrevocable, because revoking a token achieved nothing while the password could be re-derived.
+ *
+ * Refuses rather than returning null so no caller can mistake "no credential" for "no agent" and
+ * carry on with an undefined token — the class of bug where an unauthenticated request looks like
+ * an empty result.
+ */
+/**
+ * The operator-supplied Matrix access token for one agent, or null.
+ *
+ * `MATRIX_AGENT_TOKEN_<AGENT>`, with the agent name upper-cased and every character outside
+ * [A-Z0-9] turned into `_` (so `wf_coordinator` reads MATRIX_AGENT_TOKEN_WF_COORDINATOR). Env
+ * because that is already how every other bridge credential arrives — BOT_PASSWORD, the bridge
+ * secret, the registration token — so this needs no new file format, no new parser, and inherits
+ * the 0600 .env the deployment already protects.
+ *
+ * Per agent, deliberately, since the whole point of ADR-014 decision 3 is that no single value may
+ * stand behind every agent identity: one variable can be replaced without touching any other
+ * agent, and revoking one token server-side ends exactly one agent's access.
+ */
+/** The env var name an agent's token is read from. Exported shape of the mangling, so the
+ *  collision check below and the error messages cannot drift from the actual lookup. */
+function agentTokenEnvVarName(agentName) {
+  const suffix = String(agentName || '').toUpperCase().replace(/[^A-Z0-9]/g, '_');
+  return suffix ? `MATRIX_AGENT_TOKEN_${suffix}` : null;
+}
+
+function agentTokenFromEnv(agentName) {
+  const varName = agentTokenEnvVarName(agentName);
+  if (!varName) return null;
+  const raw = process.env[varName];
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  return trimmed || null;
+}
+
+async function ensureAgentAccount(agentName) {
+  const canonicalAgentName = resolveStoredAgentTokenName(agentName) || agentName;
+  const envVarName = agentTokenEnvVarName(canonicalAgentName);
+
+  /*
+   * Stored first, operator-supplied second. The stored token is the one already in use, so trying
+   * it first keeps the steady state at a single whoami and makes this function idempotent; the env
+   * value is the REPLACEMENT path, consulted when the stored one is absent or has been rejected.
+   * That ordering is what lets an operator rotate by editing one variable: the dead stored token
+   * fails, the fresh env token is adopted, and no other agent is touched.
+   */
+  const candidates = [];
+  const stored = getStoredAgentToken(canonicalAgentName);
+  if (stored) candidates.push({ token: stored, source: 'stored' });
+  const supplied = agentTokenFromEnv(canonicalAgentName);
+  // Deduplicated: after adoption the stored and env values are normally IDENTICAL, and while that
+  // costs nothing on the success path (the loop returns on the first hit), a dead token would
+  // otherwise be presented to the homeserver twice and reported as two separate rejections.
+  if (supplied && supplied !== stored) candidates.push({ token: supplied, source: 'env' });
+
+  if (candidates.length === 0) {
+    throw new AgentCredentialMissingError(
+      canonicalAgentName,
+      `no Matrix access token is stored for it and ${envVarName} is unset. Create or claim an `
+      + `account for ${agentUserId(canonicalAgentName)} on ${MATRIX_SERVER_NAME}, then put its `
+      + `access token in ${envVarName}. Agent passwords are no longer derived (ADR-014 `
+      + 'decision 3), so the bridge cannot mint this credential itself.',
+    );
+  }
+
+  /*
+   * Validated, not trusted. A token can be revoked server-side, expired by policy, or invalidated
+   * by deleting its device — and nothing here can re-mint it, so "works" has to be ESTABLISHED
+   * before the token is handed to a caller that will send messages as that agent. The alternative,
+   * returning it unchecked, converts a dead credential into a failure at some later send, attached
+   * to whatever unrelated action happened to be first.
+   */
+  let lastAuthFailure = null;
+  for (const candidate of candidates) {
+    let session;
+    try {
+      session = await getMatrixAccessTokenSession(candidate.token);
+    } catch (error) {
+      /*
+       * A network failure is NOT a dead credential and must not be reported as one — telling an
+       * operator to re-provision because the homeserver blinked sends them to replace a token that
+       * was fine, and here replacing means a human doing account work. Rethrown unchanged so the
+       * caller's own retry sees a transport error, and NOT swallowed into the next candidate:
+       * during an outage every candidate would fail this way and the loop would end by declaring
+       * the credentials dead.
+       */
+      if (!isMatrixAuthFailure(error)) throw error;
+      lastAuthFailure = error;
+      console.warn(`[agent-credential] ${candidate.source} token for '${canonicalAgentName}' was rejected: ${error.errcode || error.status}`);
+      continue;
+    }
+
+    /*
+     * IDENTITY, not just validity. A valid token proves someone's account exists; it does not prove
+     * it is THIS agent's. Paste agent A's token into agent B's variable — trivial with one line per
+     * agent, and the mangled variable names are not injective (`octos-agent` and `octos_agent` both
+     * read MATRIX_AGENT_TOKEN_OCTOS_AGENT) — and without this check the bridge would send B's
+     * messages as A, and rename A's profile to `🤖 B` on the way. Both are silent: A's traffic
+     * simply grows.
+     *
+     * Compared against the composed MXID because that is what every other path in this file uses
+     * today. When decision 4 gives an agent its own homeserver and decision 5 records a discovered
+     * MXID, this becomes a comparison against the recorded value — the check stays, its right-hand
+     * side moves.
+     */
+    const expectedUserId = agentUserId(canonicalAgentName);
+    if (session.userId !== expectedUserId) {
+      console.error(`[agent-credential] REFUSING ${candidate.source} token for '${canonicalAgentName}': it belongs to ${session.userId}, not ${expectedUserId}`);
+      throw new AgentCredentialMissingError(
+        canonicalAgentName,
+        `the ${candidate.source} Matrix token belongs to ${session.userId}, not ${expectedUserId}. `
+        + `Supply a token issued for ${expectedUserId} in ${envVarName}. Note that variable names `
+        + 'collapse non-alphanumerics, so two similarly named agents can map to the same variable.',
+      );
+    }
+
+    /*
+     * Adopted into state so the next call is one whoami against the token that works. Written only
+     * after the homeserver accepted it AND proved it is this agent's, so neither a typo nor another
+     * agent's credential can displace a working one.
+     */
+    if (state.agentTokens[canonicalAgentName] !== candidate.token) {
+      state.agentTokens[canonicalAgentName] = candidate.token;
+      saveState();
+      console.log(`[agent-credential] adopted ${candidate.source} Matrix token for '${canonicalAgentName}' (${session.userId})`);
+
+      /*
+       * Keep the display name the old register path used to set. An operator-created account
+       * arrives with whatever profile they gave it — often none — and an agent showing as a raw
+       * `@ac_foo:server` in every client is a regression this change would otherwise ship.
+       *
+       * Best-effort: the credential is already validated and usable, so failing to pretty up a
+       * profile must not deny the agent its token. Setting one's own display name is a privilege
+       * every account has over itself, so this needs nothing beyond the token in hand.
+       */
+      await setDisplayName(candidate.token, canonicalAgentName, session.userId)
+        .catch((e) => console.warn(`[agent-credential] could not set display name for '${canonicalAgentName}': ${e.message}`));
+    }
+
+    /*
+     * session.userId is the agent's real MXID and is deliberately NOT persisted here: that is
+     * ADR-014 decision 5 (identity discovery), still open. Settling it as a side effect of a
+     * credential change would decide an open design question in a commit about something else.
+     */
+    return candidate.token;
+  }
+
+  throw new AgentCredentialMissingError(
+    canonicalAgentName,
+    `every Matrix token available for it was rejected by the homeserver (${lastAuthFailure?.errcode || lastAuthFailure?.status}). `
+    + `Issue a new access token for ${agentUserId(canonicalAgentName)} and set ${envVarName}. `
+    + 'Nothing can re-mint it: agent passwords are no longer derived (ADR-014 decision 3).',
+  );
+}
+
+async function setDisplayName(token, agentName, knownUserId = null) {
+  // The MXID is passed in where the caller already has it: adoption just ran whoami, and repeating
+  // it here would be a second round trip for an answer already in hand.
+  const userId = knownUserId || await getUserId(token);
   await fetch(`${HOMESERVER}/_matrix/client/v3/profile/${encodeURIComponent(userId)}/displayname`, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -861,13 +1158,48 @@ async function getUserId(token) {
   return data.user_id;
 }
 
+/**
+ * Did the homeserver REJECT this credential, as opposed to failing to answer?
+ *
+ * Only 401 (M_UNKNOWN_TOKEN and friends) and 403 mean the token itself is no good. Everything
+ * else — a 5xx, a timeout, DNS failure, a rate limit — says nothing about the credential, and
+ * must not be reported as "your token was revoked": that sends an operator to replace a token
+ * that was fine, and on this path replacing means a human doing account work on a homeserver.
+ * Unknown shapes therefore answer FALSE, so an unrecognised failure is treated as transient
+ * rather than as a verdict on the credential.
+ */
+function isMatrixAuthFailure(error) {
+  return error?.status === 401 || error?.status === 403;
+}
+
 async function getMatrixAccessTokenSession(token) {
   const res = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/account/whoami`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  const data = await res.json();
+  /*
+   * Body parsed DEFENSIVELY and after the status is in hand. `await res.json()` on a 401 whose body
+   * is empty or HTML — a proxy, or a non-conforming homeserver — throws a SyntaxError that carries
+   * no `.status`, so the rejection would be classified transient and retried forever while the
+   * fresh credential sitting in the environment is never tried. The status is the reliable signal;
+   * the body only enriches the message.
+   */
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
   if (!res.ok) {
-    throw new Error(`Matrix whoami failed with HTTP ${res.status}: ${data?.errcode || data?.error || 'unknown error'}`);
+    /*
+     * The status travels on the error, not just inside its message. A caller has to tell a
+     * REJECTED credential from an UNREACHABLE homeserver, and recovering that by matching
+     * /HTTP 401/ against a human-readable string is a check that breaks the next time anyone
+     * rewords the message — silently, and in the direction of calling an outage a dead token.
+     */
+    const error = new Error(`Matrix whoami failed with HTTP ${res.status}: ${data?.errcode || data?.error || 'unknown error'}`);
+    error.status = res.status;
+    error.errcode = typeof data?.errcode === 'string' ? data.errcode : undefined;
+    throw error;
   }
   const userId = typeof data?.user_id === 'string' ? data.user_id.trim() : '';
   const deviceId = typeof data?.device_id === 'string' ? data.device_id.trim() : '';
@@ -1280,6 +1612,126 @@ function mapRoom(roomId, groupName) {
 function groupForRoom(roomId) { return state.roomGroupMap[roomId] || null; }
 function roomForGroup(groupName) { return state.groupRoomMap[groupName] || null; }
 
+/*
+ * ── Pending project invitations (ADR-014 amendment 2026-08-11) ────────────────────────────
+ *
+ * An invitation from an inviter we do not already trust is a DECISION for the contributor, not
+ * an error and not an auto-join. The record exists so the decision can be presented: which room,
+ * which server, who invited, and which agent they invited.
+ *
+ * Keyed `[roomId][agentName]` for the same reason ownership is (ADR-002): one project room can
+ * hold several of the contributor's agents, each invited separately and each owned by whoever
+ * invited THAT one. A room-only key would let a second agent's invitation overwrite the first's
+ * inviter, which is precisely the ownership confusion ADR-002 exists to prevent.
+ */
+function pendingInviteKey(roomId, agentName) {
+  if (!state.pendingInvites[roomId]) state.pendingInvites[roomId] = {};
+  return state.pendingInvites[roomId];
+}
+
+/**
+ * The project's homeserver, read off the room id rather than configured.
+ *
+ * A Matrix room id is `!opaque:origin-server`, so the server hosting a project room is already
+ * in the id every engagement and whitelist entry carries. ADR-014 originally had an operator type
+ * this; deriving it removes a field that could be typed wrong.
+ *
+ * This is the room's ORIGIN server, which is where the project lives — not necessarily the server
+ * an agent's account must live on. With federation those differ and that is fine; the amendment
+ * records that non-federating servers are out of scope.
+ */
+function projectServerFromRoomId(roomId) {
+  if (typeof roomId !== 'string') return null;
+  const at = roomId.indexOf(':');
+  return at > 0 ? roomId.slice(at + 1) : null;
+}
+
+/**
+ * Record an invitation as awaiting a decision.
+ *
+ * @returns true only when this is NEW information. The invite poll runs on a timer, so returning
+ * true unconditionally would re-log and re-notify every few seconds for as long as the invitation
+ * sits there. A previously DECLINED invitation also returns false: the contributor already
+ * answered, and re-asking would make "no" impossible to express.
+ */
+/**
+ * Fill in an inviter the first observation could not read.
+ *
+ * The inviter IS the owner (ADR-002), so a pending record frozen at null yields an invitation that
+ * cannot be accepted — /projects disables Accept precisely because storing a null owner would look
+ * accepted and work for nothing. Observed: poll 1 recorded null, poll 2 resolved
+ * `@yue:palpo.test`, and the record kept the null because the resolving poll took the join path.
+ *
+ * Only ever fills a null. Never replaces a known inviter — that would be ownership changing hands
+ * silently, which is the one thing this record exists to prevent.
+ */
+function backfillPendingInviteInviter(roomId, agentName, inviter) {
+  if (!inviter) return false;
+  const existing = (state.pendingInvites?.[roomId] || {})[agentName];
+  if (!existing || existing.state !== 'pending' || existing.inviter) return false;
+  existing.inviter = inviter;
+  saveState();
+  console.log(`[invite] backfilled inviter for ${agentName} in ${roomId}: ${inviter}`);
+  return true;
+}
+
+function rememberPendingInvite(roomId, agentName, inviter) {
+  const byAgent = pendingInviteKey(roomId, agentName);
+  const existing = byAgent[agentName];
+  if (existing && (existing.state === 'pending' || existing.state === 'declined')) return false;
+  byAgent[agentName] = {
+    roomId,
+    agentName,
+    // May be null when the invite state does not name the sender; surfaced rather than guessed,
+    // because the inviter IS the owner under ADR-002 and inventing one would forge ownership.
+    inviter: inviter ?? null,
+    projectServer: projectServerFromRoomId(roomId),
+    state: 'pending',
+    seenAt: Date.now(),
+  };
+  saveState();
+  return true;
+}
+
+/**
+ * Clear all pending-invite state. Test-only: the store is module-global, so a suite that seeds
+ * invitations leaks them into the next test's `listPendingInvites()` unless it resets between
+ * cases. Named `...ForTest` and exported beside the other test seams.
+ */
+function resetPendingInvitesForTest() {
+  state.pendingInvites = {};
+}
+
+/** Every invitation still awaiting a decision, newest first. */
+function listPendingInvites() {
+  const out = [];
+  for (const byAgent of Object.values(state.pendingInvites || {})) {
+    for (const record of Object.values(byAgent || {})) {
+      if (record?.state === 'pending') out.push(record);
+    }
+  }
+  return out.sort((a, b) => (b.seenAt ?? 0) - (a.seenAt ?? 0));
+}
+
+/** The record for one (room, agent), whatever its state. */
+function getPendingInvite(roomId, agentName) {
+  return state.pendingInvites?.[roomId]?.[agentName] ?? null;
+}
+
+/**
+ * Mark a decision. `accepted` records that the join has happened; `declined` is remembered so the
+ * poll does not resurrect it.
+ */
+function settlePendingInvite(roomId, agentName, decision, by = 'operator') {
+  const record = getPendingInvite(roomId, agentName);
+  if (!record) return null;
+  record.state = decision;
+  record.decidedAt = Date.now();
+  record.decidedBy = by;
+  saveState();
+  return record;
+}
+
 export function isPrivateControlRoomName(name) {
   return typeof name === 'string'
     && (
@@ -1328,11 +1780,32 @@ function upsertRoomAgentBinding(roomId, agentName, ownerMxid, options = {}) {
   const approvalDmRoomId = typeof options.approvalDmRoomId === 'string' && options.approvalDmRoomId.trim()
     ? options.approvalDmRoomId.trim()
     : (defaultApprovalRoom || existing.approvalDmRoomId || null);
+  /*
+   * An ownership TRANSFER is logged. ADR-002's Consequences claim "transferring ownership
+   * requires an explicit, audited transition", and this function rewrote `inviter`/`ownerMxid`
+   * wholesale with no trace — so a re-invite by a different human silently moved who may approve
+   * this agent's work in this room. The backend half of the audit exists (approval-store records
+   * `owner_binding_changed` and denies in-flight requests), but nothing recorded the bridge-side
+   * change that caused it, which left the two halves of one event impossible to correlate.
+   *
+   * A log line, not a refusal: a genuine transfer is legitimate — a project's maintainer changes
+   * — and blocking it here would strand the agent. What was missing was the record.
+   */
+  const previousOwner = typeof existing.ownerMxid === 'string' ? existing.ownerMxid : null;
+  if (previousOwner && previousOwner !== normalizedOwner) {
+    console.warn(
+      `[room-agent] ownership transfer for ${storedName} in ${normalizedRoomId}: `
+      + `${previousOwner} -> ${normalizedOwner}`,
+    );
+  }
   bindings[storedName] = {
     inviter: normalizedOwner,
     ownerMxid: normalizedOwner,
     approvalDmRoomId,
     addedAt: Number(existing.addedAt || options.addedAt || Date.now()),
+    ...(previousOwner && previousOwner !== normalizedOwner
+      ? { previousOwnerMxid: previousOwner, ownerChangedAt: Date.now() }
+      : {}),
   };
   return { agentName: storedName, binding: bindings[storedName] };
 }
@@ -2191,6 +2664,8 @@ export class MatrixBridge {
         lastObservedRateLimitAt: rateLimitGate.lastObservedAtMs(),
         managedRoomCount: Object.keys(state.trustedManagedRooms || {}).length,
         requiredMembership: [...this._requiredMembershipSummary.values()],
+        // ADR-014 decision 6: which agents need a human to issue a Matrix token. Names only.
+        unprovisionedAgents: this.unprovisionedAgentNames(),
       });
     } catch (e) {
       console.error(`Failed to write bridge health record: ${e.message}`);
@@ -2201,9 +2676,26 @@ export class MatrixBridge {
   // are made by the caller for the current agent/human pair; the cache never
   // stores an already-authorized room. Confirmed misses cache as null while
   // transient backend failures remain retryable.
-  async lookupMessageRouteMetadata(messageId) {
-    if (typeof messageId !== 'string' || !messageId) return null;
-    if (this._msgRouteMetadataCache.has(messageId)) return this._msgRouteMetadataCache.get(messageId);
+  /**
+   * Look up a message's route metadata, DISTINGUISHING "found nothing" from "could not look".
+   *
+   * Returns `{ ok, metadata }`. `ok: true, metadata: null` means the message genuinely carries
+   * no metadata — a message written before threading existed, a legitimate compatibility miss.
+   * `ok: false` means the backend lookup THREW — a transient failure, where the metadata
+   * probably exists and simply could not be read right now.
+   *
+   * The two used to be the same `null`, and that conflation was the defect: a backend blip fed
+   * `resolveGroupReplyRelation(null)` → `source_metadata_missing` → top-level fallback, silently
+   * and permanently dropping the thread context of a LIVE reply, indistinguishable from a legacy
+   * message that never had any. `lookupMessageRouteMetadata` below preserves the old
+   * null-for-both contract for the callers that only want the value; the group-reply path uses
+   * this result form so it can tell a blip from a blank.
+   */
+  async lookupMessageRouteMetadataResult(messageId) {
+    if (typeof messageId !== 'string' || !messageId) return { ok: true, metadata: null };
+    if (this._msgRouteMetadataCache.has(messageId)) {
+      return { ok: true, metadata: this._msgRouteMetadataCache.get(messageId) };
+    }
     let metadata = null;
     try {
       const msg = await this.callBackendApi('GET', `/api/messages/${encodeURIComponent(messageId)}`);
@@ -2222,13 +2714,26 @@ export class MatrixBridge {
       }
     } catch (e) {
       console.warn(`reply_to route metadata lookup failed for ${messageId}: ${e.message}`);
-      return null; // transient failure — don't poison the cache
+      // Transient — not cached (don't poison), and reported as a FAILURE, not as absence.
+      return { ok: false, metadata: null };
     }
     if (this._msgRouteMetadataCache.size >= 200) {
       this._msgRouteMetadataCache.delete(this._msgRouteMetadataCache.keys().next().value);
     }
     this._msgRouteMetadataCache.set(messageId, metadata);
-    return metadata;
+    return { ok: true, metadata };
+  }
+
+  /**
+   * The value-only wrapper, unchanged in contract: null for both absence and failure.
+   *
+   * Kept because three callers — `lookupMessageSourceRoom`, `lookupVerifiedDirectReplyRoom`,
+   * and the DM-routing path — genuinely do not care which null they got; a fail-closed DM
+   * fallback is correct either way. Only the group-reply path, which can permanently lose thread
+   * context, needs the distinction, and it calls the result form directly.
+   */
+  async lookupMessageRouteMetadata(messageId) {
+    return (await this.lookupMessageRouteMetadataResult(messageId)).metadata;
   }
 
   async lookupMessageSourceRoom(messageId) {
@@ -2273,8 +2778,41 @@ export class MatrixBridge {
     if (!msg?.reply_to) {
       return { ok: true, relation: null, threadRootEventId: null };
     }
-    const metadata = await this.lookupMessageRouteMetadata(msg.reply_to);
-    const resolution = resolveGroupReplyRelation(metadata, { group: msg.group, roomId });
+    /*
+     * A transient lookup failure is NOT a compatibility miss, and must not be sent top-level as
+     * though it were: the message is about to go out and cannot be recalled, so a wrong fallback
+     * here loses thread context that actually exists, forever.
+     *
+     * One retry, because the common transient — a backend momentarily busy — clears immediately,
+     * and catching it keeps a live thread intact. It is a retry, not a loop: if the backend is
+     * genuinely down the second call fails too and we fall through. No delay, so nothing to hang
+     * a test on; the value is the "one call happened to lose the race" case, not waiting out an
+     * outage.
+     */
+    let result = await this.lookupMessageRouteMetadataResult(msg.reply_to);
+    if (!result.ok) result = await this.lookupMessageRouteMetadataResult(msg.reply_to);
+    if (!result.ok) {
+      /*
+       * Still failing after the retry. ADR-007 chose fallback over blocking so one failed lookup
+       * cannot wedge all later workflow — that choice stands, and this does NOT block. What it
+       * does differently from a compatibility miss is SAY SO: a distinct reason and a distinct
+       * warning kind, so an operator sees "the thread context could not be read" rather than "this
+       * message had none", and a monitor can tell a backend problem from a legacy reply.
+       *
+       * Whether a transient failure should instead HOLD the reply for later delivery is a policy
+       * question ADR-007 did not address — it reasoned about compatibility misses, not backend
+       * outages — and is deliberately left to a future amendment rather than decided here.
+       */
+      console.warn(`[matrix-thread] top-level fallback on lookup FAILURE message=${msg.id} reply_to=${msg.reply_to}`);
+      this.postWarning(
+        `Matrix thread context could not be read for ${msg.id} (backend lookup failed); sent at `
+        + 'room top level. This is a transient failure, not a legacy message — the thread link '
+        + 'is lost for this reply only.',
+        { kind: 'thread-lookup-failed', scope: msg.group || roomId },
+      );
+      return { ok: true, relation: null, threadRootEventId: null, fallback: true, reason: 'source_lookup_failed' };
+    }
+    const resolution = resolveGroupReplyRelation(result.metadata, { group: msg.group, roomId });
     if (resolution.kind === 'reject') {
       this.postWarning(
         `Blocked Matrix group reply ${msg.id}: ${resolution.reason} (reply_to=${msg.reply_to})`,
@@ -2299,7 +2837,42 @@ export class MatrixBridge {
 
   async fetchKnownAgentNames() {
     const payload = await this.callBackendApi('GET', '/api/agents?view=names');
+    /*
+     * Whether the payload was WELL-FORMED is recorded separately, because
+     * `normalizeAgentNameList` maps every unusable shape to `[]` — and an empty roster is the input
+     * that makes the pruning loops below delete every credential. A 200 carrying `{}`, an error
+     * object, or an HTML error page is therefore indistinguishable from "this fleet has no agents"
+     * unless the distinction is kept here.
+     */
+    this._rosterWasArray = Array.isArray(payload);
+    if (!this._rosterWasArray) {
+      console.error(`[roster] /api/agents?view=names returned ${typeof payload}, not an array — treating the roster as untrusted`);
+    }
     return normalizeAgentNameList(payload);
+  }
+
+  /**
+   * May a roster observation be used to DELETE credentials?
+   *
+   * No, unless it is a well-formed non-empty array. The two costs are not symmetric: a stale token
+   * left in state is inert — it belongs to no agent, is never looked up, and costs a few bytes —
+   * whereas deleting a live agent's token is permanent, because ADR-014 decision 3 removed the
+   * derivation that used to re-mint it. So pruning, which is only housekeeping, must never run on
+   * evidence it cannot trust.
+   *
+   * Empty is refused as well as malformed. A genuinely empty fleet then keeps its orphaned entries
+   * forever, which is the correct trade against one bad observation wiping a working fleet.
+   */
+  _mayPruneAgentTokens(agents) {
+    if (this._rosterWasArray === false) return false;
+    if (!Array.isArray(agents) || agents.length === 0) {
+      const held = Object.keys(state.agentTokens || {}).length;
+      if (held > 0) {
+        console.warn(`[roster] refusing to prune ${held} Matrix token(s) against an empty agent roster — nothing can re-mint them`);
+      }
+      return false;
+    }
+    return true;
   }
 
   sleep(ms) {
@@ -2431,16 +3004,44 @@ export class MatrixBridge {
   }
   isKnownAgentName(name) { return Boolean(this.resolveKnownAgentName(name)); }
 
+  /*
+   * The live set of agents with no usable Matrix credential.
+   *
+   * A SET maintained as things happen, not a snapshot taken at startup. A snapshot goes stale in
+   * both directions — an agent provisioned after boot stays listed, and one whose token is revoked
+   * at runtime never appears — which would make the health record confidently wrong, the one
+   * failure mode worse than having no record.
+   */
+  markAgentUnprovisioned(agentName) {
+    if (!this._unprovisionedAgents) this._unprovisionedAgents = new Set();
+    const name = this.normalizeName(agentName) || agentName;
+    if (name) this._unprovisionedAgents.add(name);
+  }
+
+  clearAgentUnprovisioned(agentName) {
+    if (!this._unprovisionedAgents) return;
+    const name = this.normalizeName(agentName) || agentName;
+    if (name) this._unprovisionedAgents.delete(name);
+  }
+
+  unprovisionedAgentNames() {
+    return this._unprovisionedAgents ? [...this._unprovisionedAgents].sort() : [];
+  }
+
   async ensureAgentToken(agentName, context = 'unknown') {
     const normalized = this.normalizeName(agentName);
     if (!normalized) return null;
     const canonical = this.addKnownAgent(normalized) || normalized;
     let token = this.getAgentToken(canonical);
-    if (token) return token;
+    if (token) {
+      this.clearAgentUnprovisioned(canonical);
+      return token;
+    }
     try {
       await ensureAgentAccount(canonical);
       this.addKnownAgent(canonical);
       token = this.getAgentToken(canonical);
+      if (token) this.clearAgentUnprovisioned(canonical);
       if (!token) {
         console.warn(`Agent token still missing after ensureAgentAccount for "${canonical}" (context=${context})`);
         return null;
@@ -2448,7 +3049,17 @@ export class MatrixBridge {
       console.log(`Backfilled Matrix token for agent "${canonical}" (context=${context})`);
       return token;
     } catch (e) {
-      console.warn(`Failed to ensure Matrix token for agent "${canonical}" (context=${context}): ${e.message}`);
+      /*
+       * A missing credential is a STANDING condition, not a failure to retry: it ends only when a
+       * human issues a token. Labelled distinctly so it reads as an action item in the log rather
+       * than as one more transient Matrix error scrolling past (ADR-014 decision 6).
+       */
+      if (e?.needsProvisioning) {
+        this.markAgentUnprovisioned(canonical);
+        console.warn(`[agent-credential] NEEDS PROVISIONING — agent "${canonical}" cannot act on Matrix (context=${context}): ${e.message}`);
+      } else {
+        console.warn(`Failed to ensure Matrix token for agent "${canonical}" (context=${context}): ${e.message}`);
+      }
       return null;
     }
   }
@@ -2665,12 +3276,55 @@ export class MatrixBridge {
         await ensureAgentAccount(agentName);
         this.addKnownAgent(agentName);
       } catch (e) {
-        console.warn(`Skipping agent ${agentName} (account setup failed): ${e.message}`);
+        if (e?.needsProvisioning) {
+          this.markAgentUnprovisioned(agentName);
+          console.warn(`[agent-credential] NEEDS PROVISIONING — ${agentName}: ${e.message}`);
+        } else {
+          console.warn(`Skipping agent ${agentName} (account setup failed): ${e.message}`);
+        }
       }
     }
-    // Drop stale tokens that were created for non-agent users.
+    /*
+     * One summary line, because the per-agent warnings above are individually easy to miss and the
+     * thing an operator needs is the LIST — how many agents are inert and which. The same list goes
+     * into the health record (see writeHealthRecord), so the log is not the only witness.
+     */
+    /*
+     * Two agent names can mangle to ONE variable — the mangling collapses every non-alphanumeric
+     * to `_`, so `octos-agent` and `octos_agent` both read MATRIX_AGENT_TOKEN_OCTOS_AGENT. Then one
+     * variable would have to serve two identities, and only one of them can be right.
+     *
+     * Reported rather than resolved, because there is no safe automatic answer: renaming an agent
+     * is a decision with consequences elsewhere. It is not silent either — the identity check in
+     * ensureAgentAccount refuses a token whose /whoami MXID is not the requested agent's, so the
+     * collision fails closed. This warning exists so an operator learns why, before the refusal.
+     */
+    const envVarOwners = new Map();
+    for (const agentName of validAgentNames) {
+      const varName = agentTokenEnvVarName(agentName);
+      if (!varName) continue;
+      if (!envVarOwners.has(varName)) envVarOwners.set(varName, []);
+      envVarOwners.get(varName).push(agentName);
+    }
+    for (const [varName, owners] of envVarOwners) {
+      if (owners.length > 1) {
+        console.error(`[agent-credential] NAME COLLISION — ${owners.join(', ')} all read ${varName}; at most one of them can be provisioned from it. Rename an agent, or supply the others' tokens some other way.`);
+      }
+    }
+
+    const unprovisioned = this.unprovisionedAgentNames();
+    if (unprovisioned.length > 0) {
+      console.warn(
+        `[agent-credential] ${unprovisioned.length} agent(s) have no usable Matrix credential `
+        + `and cannot send or receive: ${unprovisioned.join(', ')}. `
+        + 'Set MATRIX_AGENT_TOKEN_<AGENT> for each.',
+      );
+    }
+
+    // Drop stale tokens that were created for non-agent users — only on a roster we can trust.
     let cleanedTokenCount = 0;
-    for (const name of Object.keys(state.agentTokens || {})) {
+    const mayPrune = this._mayPruneAgentTokens(agents);
+    for (const name of mayPrune ? Object.keys(state.agentTokens || {}) : []) {
       if (!validAgentNames.has(name) && !validAgentKeys.has(this.nameKey(name))) {
         delete state.agentTokens[name];
         cleanedTokenCount++;
@@ -2709,6 +3363,15 @@ export class MatrixBridge {
     }
     await this.backfillAgentManagedRooms();
     await this.syncApprovalBindings();
+    /*
+     * ADR-014: replay invitations recorded while the backend was unreachable. Placed after
+     * syncApprovalBindings for the same reason that exists — bridge-owned facts have to be
+     * pushed to the backend for the console to see them, and a restart is the only chance to
+     * catch up on what was missed. `rememberPendingInvite` will not re-notify for an invite it
+     * has already seen, so without this an invitation reported during a backend outage would
+     * stay invisible until the project gave up and invited again.
+     */
+    await this.resyncPendingInvites();
     setInterval(() => this.scanJoinedRooms(), MATRIX_ROOM_SCAN_POLL_MS);
     // Reaped on the room-scan cadence rather than its own timer: it walks the same
     // rooms, on a deliberately slow interval, behind the same rate-limit gate.
@@ -2748,7 +3411,7 @@ export class MatrixBridge {
         }
       }
       let pruned = 0;
-      for (const name of Object.keys(state.agentTokens || {})) {
+      for (const name of this._mayPruneAgentTokens(agents) ? Object.keys(state.agentTokens || {}) : []) {
         if (!validAgentNames.has(name) && !validAgentKeys.has(this.nameKey(name))) {
           delete state.agentTokens[name];
           pruned++;
@@ -3318,6 +3981,9 @@ export class MatrixBridge {
         groupName,
         targetAgent,
         approvalRoom: state.trustedManagedRooms?.[roomId]?.approvalDm === true,
+        // The request id for anything that creates a record: stable, shared with the
+        // sender, and not forgeable by them. See cmdRequest.
+        eventId,
       };
       console.log(`Bot command from ${humanName} in ${groupName || targetAgent || 'bot-DM'}: ${cmdBody.slice(0, 80)}`);
       await this.commands.handle(roomId, senderId, cmdBody, context);
@@ -3926,10 +4592,65 @@ export class MatrixBridge {
         for (const roomId of Object.keys(invited)) {
           // Trust check before agent join (5.8.1)
           const inviteState = invited[roomId]?.invite_state?.events || [];
-          const inviter = inviteState.find(e => e.type === 'm.room.member' && e.state_key === `@${AGENT_PREFIX}${agentName}:${MATRIX_SERVER_NAME}`)?.sender || null;
+          /*
+           * `agentUserId()`, not a hand-composed key. This line built the state_key inline and so
+           * missed the lowercasing the homeserver applies: for an agent named `BigLittle` it looked
+           * for `@ac_BigLittle:…` while the invite event carried `@ac_biglittle:…`, found nothing,
+           * and reported `inviter = null`. The consequence is not cosmetic — owner IS the inviter
+           * (ADR-002), so a null inviter means the room is untrusted, no ownership is recorded, and
+           * every later approval fails `owner_binding_missing`. Fixing agentUserId() alone did not
+           * help while this copy existed, which is the argument for having one.
+           */
+          const expectedStateKey = agentUserId(agentName);
+          const inviter = inviteState.find(e => e.type === 'm.room.member' && e.state_key === expectedStateKey)?.sender || null;
           const trust = getRoomTrust(roomId, { inviterMxid: inviter, requireTrustedInviter: true });
           roomTrustLog('agent-invite', roomId, trust, `agent=${agentName} inviter=${inviter}`);
-          if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') continue;
+          /*
+           * AN UNTRUSTED INVITE BECOMES A PENDING DECISION, NOT A JOIN AND NOT A LOG LINE.
+           *
+           * ADR-014's 2026-08-11 amendment. What this replaces was wrong in both directions:
+           *
+           *   MATRIX_TRUST_MODE defaults to `audit`, so the old `if (!trust.trusted && MODE ===
+           *   'enforce') continue` did NOT stop the join — the agent joined any room anyone
+           *   invited it to, while `markRoomTrusted` and `upsertRoomAgentBinding` below were
+           *   skipped. Present, messageable, and permanently unengageable: with no ownership
+           *   binding every approval for that room later fails `owner_binding_missing`. A dead
+           *   end that looks like presence.
+           *
+           *   Under `enforce` the invite was skipped silently. `untrusted_inviter` appears
+           *   exactly once in this repository — the line that produces it. No record, no API, no
+           *   pending state, so the contributor never learned they had been invited.
+           *
+           * And joining is not free: lending an agent spends the contributor's tokens, which is
+           * where the Discord invite-link analogy stops applying. So the invitation is recorded
+           * and the decision waits for a human — deliberate, like accepting it always should
+           * have been, but no longer requiring an MXID typed into `.env` and a bridge restart.
+           *
+           * `rememberPendingInvite` returns false when this invite is already recorded or was
+           * already declined, so a poll every few seconds does not re-notify.
+           */
+          /*
+           * Backfill BEFORE the trust branch, because the two branches disagree about which poll
+           * carries the inviter. A poll that cannot read the invite's state events records
+           * `inviter: null` and lands here as untrusted; the next poll resolves the sender and, being
+           * trusted, takes the join path and never touches the record. The row then sits on
+           * /projects forever with 「无邀请人」 and a disabled Accept — for a room the agent has
+           * already joined.
+           *
+           * Placed at the top so it runs whichever way the poll goes. It only ever fills a null.
+           */
+          backfillPendingInviteInviter(roomId, agentName, inviter);
+
+          if (!trust.trusted) {
+            if (rememberPendingInvite(roomId, agentName, inviter)) {
+              console.log(
+                `[invite] pending: ${agentName} invited to ${roomId} by ${inviter ?? 'unknown'}`
+                + ' — awaiting the contributor\'s decision',
+              );
+              await this.reportPendingInvite(roomId, agentName, inviter);
+            }
+            continue;
+          }
           // Auto-join
           const joinRes = await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
             method: 'POST',
@@ -3942,7 +4663,33 @@ export class MatrixBridge {
           }
           if ((await joinRes.json()).room_id) {
             console.log(`Agent ${agentName} joined room ${roomId}`);
-            if (trust.trusted) {
+            /*
+             * SETTLE the record, because the invitation has just been answered — by policy rather
+             * than by a human, but answered. Without this the auto-join left a `pending` row on
+             * /projects for a room the agent was already in, with 「无邀请人」 and a disabled Accept,
+             * and nothing could ever clear it: once joined, the invite leaves `rooms.invite`, so the
+             * poll that would have filled in the inviter has nothing left to observe. The stale row
+             * pointed at an invitation that no longer existed in Matrix.
+             *
+             * `by: 'trusted-inviter'` rather than an operator name, so the audit trail says who
+             * actually decided: the trusted-inviter policy, not a person at a screen.
+             */
+            settlePendingInvite(roomId, agentName, 'accepted', 'trusted-inviter');
+            /*
+             * The same guard `acceptPendingInvite` applies, so the two ownership writers agree.
+             * Reaching here already requires the inviter to be in MATRIX_TRUSTED_INVITER_MXIDS,
+             * so a non-human owner needs an operator to have put an agent's MXID in that list —
+             * but the consequence of that misconfiguration is severe and silent:
+             * `upsertRoomAgentBinding` returns null for a non-human owner without saying so, so
+             * the agent would join with NO binding and every later approval would fail
+             * `owner_binding_missing`. Refusing the trust promotion says so instead.
+             */
+            if (trust.trusted && isAgentUser(inviter)) {
+              console.warn(
+                `Agent invite poll: refusing to bind ${agentName} in ${roomId} — inviter `
+                + `${inviter} is an agent, not a human owner`,
+              );
+            } else if (trust.trusted) {
               markRoomTrusted(roomId, { agent: agentName, inviter });
               const existing = state.trustedManagedRooms[roomId] || {};
               upsertRoomAgentBinding(roomId, agentName, inviter, {
@@ -3962,20 +4709,8 @@ export class MatrixBridge {
               saveState();
             }
             // Invite bot so it can monitor messages
-            const botInviteRes = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ user_id: this.botUserId }),
-            });
-            if (await rateLimitGate.observeResponse(botInviteRes)) {
-              console.warn(`Agent invite poll: 429 inviting bot into ${roomId}; aborting this round`);
+            if (await this.inviteBotIntoAgentRoom(roomId, token, 'Agent invite poll') === 'rate-limited') {
               return;
-            }
-            if (botInviteRes.ok) {
-              console.log(`Invited bot into room ${roomId}`);
-            } else {
-              const errText = (await botInviteRes.text().catch(() => '')).slice(0, 200);
-              console.warn(`Bot invite request failed for ${roomId}: HTTP ${botInviteRes.status} ${errText}`);
             }
             // The bot may already be joined because another local agent is in
             // this project room. Approval setup belongs to the newly joined
@@ -4184,6 +4919,33 @@ export class MatrixBridge {
         return;
       }
       const data = await res.json();
+      /*
+       * RECONCILE FIRST, against the joined list this same sync already carries.
+       *
+       * A pending record can outlive the invitation that made it. Once the agent joins, the room
+       * leaves `rooms.invite` — so a record written while the inviter was unreadable is frozen with
+       * `inviter: null`, which /projects renders as 「读不到发起人」 with Accept disabled, for a room
+       * the agent is demonstrably in. Nothing in the invite path can ever clear it, because the
+       * invite path only sees invitations and there is no longer one to see. Three earlier attempts
+       * at fixing this from inside the invite branch could not fire for exactly that reason.
+       *
+       * Checked against membership rather than against the invite: `rooms.join` is the authority on
+       * whether the agent is in the room, and it costs nothing here because this sync already
+       * returned it.
+       */
+      const joinedRoomIds = Object.keys(data?.rooms?.join || {});
+      for (const roomId of joinedRoomIds) {
+        const record = (state.pendingInvites?.[roomId] || {})[agentName];
+        if (record?.state !== 'pending') continue;
+        /*
+         * `accepted`, and attributed to the policy rather than to a person: the agent is in the
+         * room, so the invitation WAS answered — by the trusted-inviter rule, with no human at a
+         * screen. Recording it as an operator decision would credit someone who never decided.
+         */
+        settlePendingInvite(roomId, agentName, 'accepted', 'trusted-inviter');
+        console.log(`[invite] reconciled: ${agentName} is already joined to ${roomId}, settling the stale pending record`);
+      }
+
       const invited = data?.rooms?.invite || {};
       for (const roomId of Object.keys(invited)) {
         // A 429 handled inside handleBotInvite (below) trips the shared gate; stop
@@ -4223,25 +4985,84 @@ export class MatrixBridge {
         try {
           const msg = JSON.parse(data);
           if (msg.source === 'matrix') return; // prevent loops
-          this.onAgentMessage(msg);
+          this.onAgentMessage(msg).catch((err) => {
+            console.error(`Failed to handle agent_message (${msg?.id}): ${err.message}`);
+          });
         } catch (e) {
           console.warn(`Failed to parse SSE message event: ${e.message}`);
         }
       });
+      /*
+       * Every handler below is async and deliberately NOT awaited — the SSE reader must keep
+       * consuming events rather than block on room creation or a Matrix send. The consequence is
+       * that each call returns a floating promise, and a floating promise that rejects is an
+       * UNHANDLED REJECTION, which modern Node treats as fatal. The enclosing try/catch cannot help:
+       * it is synchronous and returns before the handler resolves. Hence a .catch on every one.
+       */
       es.on('group_created', (data) => {
         try {
           const group = JSON.parse(data);
           console.log(`SSE: group created "${group.name}" with members: ${group.members.join(', ')}`);
-          this.onGroupCreated(group);
+          /*
+           * .catch() because this try only guards JSON.parse — it is synchronous, and the handler
+           * is not awaited, so without this an async rejection escapes as an UNHANDLED REJECTION,
+           * which modern Node treats as fatal. Not awaited deliberately (the SSE reader must not
+           * block on room creation), which is exactly why the rejection needs a home.
+           */
+          this.onGroupCreated(group).catch((err) => {
+            console.error(`Failed to handle group_created "${group?.name}": ${err.message}`);
+          });
         } catch (e) {
           console.warn(`Failed to parse SSE group_created event: ${e.message}`);
         }
+      });
+      /*
+       * The contributor answered a project's invitation (ADR-014). Only the bridge can act on it:
+       * joining a room, trusting it, and writing the ownership binding are all Matrix operations.
+       * The backend recorded the decision and said "queued" rather than "joined" precisely
+       * because this step is the one that makes it true.
+       */
+      es.on('matrix_invite_decision', (data) => {
+        (async () => {
+          try {
+            const { projectRoomId, agent, accept } = JSON.parse(data);
+            if (!projectRoomId || !agent) {
+              console.warn('SSE: matrix_invite_decision missing projectRoomId or agent');
+              return;
+            }
+            const outcome = accept
+              ? await this.acceptPendingInvite(projectRoomId, agent)
+              : await this.rejectPendingInvite(projectRoomId, agent);
+            if (!outcome.ok) {
+              /*
+               * Loud, and left for the operator to see rather than retried silently. Every
+               * refusal reason here is something a human has to resolve — an invitation naming
+               * no human inviter, an agent with no Matrix credential, a rate limit — and a
+               * background retry loop would turn "needs you" into "mysteriously quiet".
+               */
+              console.warn(
+                `SSE: matrix_invite_decision ${accept ? 'accept' : 'decline'} failed for `
+                + `${agent}@${projectRoomId}: ${outcome.reason}`,
+              );
+              this.postWarning(
+                `Could not ${accept ? 'accept' : 'decline'} the invitation for ${agent} in `
+                + `${projectRoomId}: ${outcome.reason}`,
+                { kind: 'invite-decision', scope: projectRoomId },
+              );
+            }
+          } catch (e) {
+            console.warn(`Failed to handle SSE matrix_invite_decision: ${e.message}`);
+          }
+        })();
       });
       es.on('group_members', (data) => {
         try {
           const update = JSON.parse(data);
           console.log(`SSE: group "${update.name}" members updated — added: [${update.added}], removed: [${update.removed}]`);
-          this.onGroupMembersChanged(update);
+          // See group_created above: not awaited, so the rejection needs an explicit home.
+          this.onGroupMembersChanged(update).catch((err) => {
+            console.error(`Failed to handle group_members "${update?.name}": ${err.message}`);
+          });
         } catch (e) {
           console.warn(`Failed to parse SSE group_members event: ${e.message}`);
         }
@@ -4277,7 +5098,9 @@ export class MatrixBridge {
       es.on('agent_blocked', (data) => {
         try {
           const event = JSON.parse(data);
-          this.onAgentBlocked(event);
+          this.onAgentBlocked(event).catch((err) => {
+            console.error(`Failed to handle agent_blocked (${event?.agent}): ${err.message}`);
+          });
         } catch (e) {
           console.warn(`Failed to parse SSE agent_blocked event: ${e.message}`);
         }
@@ -4285,7 +5108,9 @@ export class MatrixBridge {
       es.on('agent_recovered', (data) => {
         try {
           const event = JSON.parse(data);
-          this.onAgentRecovered(event);
+          this.onAgentRecovered(event).catch((err) => {
+            console.error(`Failed to handle agent_recovered (${event?.agent}): ${err.message}`);
+          });
         } catch (e) {
           console.warn(`Failed to parse SSE agent_recovered event: ${e.message}`);
         }
@@ -4293,7 +5118,9 @@ export class MatrixBridge {
       es.on('system_info', (data) => {
         try {
           const event = JSON.parse(data);
-          this.onSystemInfo(event);
+          this.onSystemInfo(event).catch((err) => {
+            console.error(`Failed to handle system_info (${event?.agent}): ${err.message}`);
+          });
         } catch (e) {
           console.warn(`Failed to parse SSE system_info event: ${e.message}`);
         }
@@ -4301,7 +5128,9 @@ export class MatrixBridge {
       es.on('agent_compact', (data) => {
         try {
           const event = JSON.parse(data);
-          this.onAgentCompact(event);
+          this.onAgentCompact(event).catch((err) => {
+            console.error(`Failed to handle agent_compact (${event?.agent}): ${err.message}`);
+          });
         } catch (e) {
           console.warn(`Failed to parse SSE agent_compact event: ${e.message}`);
         }
@@ -4309,7 +5138,9 @@ export class MatrixBridge {
       es.on('approval_requested', (data) => {
         try {
           const event = JSON.parse(data);
-          this.onApprovalRequested(event);
+          this.onApprovalRequested(event).catch((err) => {
+            console.error(`Failed to handle approval_requested (${event?.request_id}): ${err.message}`);
+          });
         } catch (e) {
           console.warn(`Failed to parse SSE approval_requested event: ${e.message}`);
         }
@@ -4506,6 +5337,210 @@ export class MatrixBridge {
     if (JSON.stringify(normalizedCurrent) === JSON.stringify(expected)) return false;
     await this.botClient.sendStateEvent(roomId, 'm.room.power_levels', '', expected);
     return true;
+  }
+
+  /**
+   * Make a pending invitation visible to the operator's surfaces.
+   *
+   * The bridge owns the Matrix state; the console reads the backend. Same shape as
+   * `PUT /api/approval-bindings` — the bridge pushes, the backend stores, the console reads —
+   * because that is the established way a bridge-owned fact reaches the console here.
+   *
+   * Failure is logged, never thrown. The invitation is already recorded in bridge state, so a
+   * backend that is down or restarting delays the notification rather than losing the decision;
+   * `resyncPendingInvites` replays the list when the bridge next starts.
+   */
+  async reportPendingInvite(roomId, agentName, inviter) {
+    const record = getPendingInvite(roomId, agentName);
+    if (!record) return { ok: false, reason: 'not_recorded' };
+    const result = await this.callBackendApi('PUT', '/api/matrix/pending-invites', {
+      project_room_id: roomId,
+      agent: agentName,
+      inviter: record.inviter,
+      project_server: record.projectServer,
+      seen_at: record.seenAt,
+    }, `pending-invite ${agentName}@${roomId}`);
+    if (result?.error) {
+      console.warn(`[invite] could not report ${agentName}@${roomId} to the backend: ${result.error}`);
+      return { ok: false, reason: 'backend_unavailable' };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Replay every still-pending invitation to the backend on startup.
+   *
+   * Without this, an invitation recorded while the backend was down would stay invisible until
+   * the inviting party gave up and invited again — and `rememberPendingInvite` deliberately does
+   * not re-notify for an invite it has already seen, so the poll alone would never surface it.
+   */
+  async resyncPendingInvites() {
+    const pending = listPendingInvites();
+    if (!pending.length) return 0;
+    let reported = 0;
+    for (const record of pending) {
+      const outcome = await this.reportPendingInvite(record.roomId, record.agentName, record.inviter);
+      if (outcome.ok) reported += 1;
+    }
+    console.log(`[invite] resynced ${reported}/${pending.length} pending invitation(s) to the backend`);
+    return reported;
+  }
+
+  /**
+   * Invite the bridge bot into a room an agent has just joined.
+   *
+   * WHY THIS IS A SHARED METHOD AND NOT A COPIED BLOCK. The bot is the only syncing client —
+   * agents are token-only puppets, and `pollBotInvites` only joins rooms the bot is itself
+   * invited to. So without this step a project room has the agent present and its ownership
+   * bound, approvals still work, and yet **project-room messages, commands and mention routing
+   * are dead** until a human invites the bot by hand. Present but unusable: the exact shape of
+   * dead end the pending-invite work was written to remove.
+   *
+   * `acceptPendingInvite` shipped without it while the auto-join path had it inline. Two writers
+   * of the same sequence, one missing a step — which is the drift this audit round kept finding
+   * (two ownership-binding writers, two `expected`-field lists). Extracting it means the next
+   * person to add a third join path gets the step by calling one method, and a future change to
+   * it lands in both places at once.
+   *
+   * Returns `'rate-limited'` so a caller inside a polling loop can abort its round, `'invited'`
+   * on success, and `'failed'` otherwise — a failed invite is reported, never thrown: the agent
+   * has already joined, and unwinding that is neither possible nor desirable.
+   */
+  async inviteBotIntoAgentRoom(roomId, agentToken, context = 'bot invite') {
+    const res = await fetch(
+      `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${agentToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: this.botUserId }),
+      },
+    );
+    if (await rateLimitGate.observeResponse(res)) {
+      console.warn(`${context}: 429 inviting bot into ${roomId}; aborting this round`);
+      return 'rate-limited';
+    }
+    if (res.ok) {
+      console.log(`Invited bot into room ${roomId}`);
+      return 'invited';
+    }
+    /*
+     * M_FORBIDDEN here is usually benign and common: the bot is already in the room because
+     * another of this contributor's agents is serving the same project. Logged rather than
+     * escalated, and deliberately not treated as failure by the caller.
+     */
+    const errText = (await res.text().catch(() => '')).slice(0, 200);
+    console.warn(`Bot invite request failed for ${roomId}: HTTP ${res.status} ${errText}`);
+    return 'failed';
+  }
+
+  /**
+   * Accept an invitation: join, trust the room, and record who owns the agent in it.
+   *
+   * The three are one act. ADR-002 derives ownership from the inviter, so **accepting the
+   * invitation is how ownership is established** — there is no separate step and no place for a
+   * human to supply an owner by hand.
+   *
+   * It deliberately does NOT whitelist the project. The whitelist decides who may skip approval
+   * (ADR-013 decision 4), which is a stronger statement than "this agent may be in this project".
+   * An earlier draft had accept do both; conflating them would have granted auto-join on the
+   * strength of an invitation from someone the contributor had just met.
+   */
+  async acceptPendingInvite(roomId, agentName, by = 'operator') {
+    const record = getPendingInvite(roomId, agentName);
+    if (!record) return { ok: false, reason: 'unknown_invite' };
+    if (record.state !== 'pending') return { ok: false, reason: `already_${record.state}` };
+    /*
+     * Refused rather than accepted with a null owner. `upsertRoomAgentBinding` would store the
+     * null, and a room-agent binding with no owner is exactly the `owner_binding_missing` dead
+     * end this whole change exists to remove — it would look accepted and work for nothing.
+     */
+    if (!record.inviter || !/^@[^:\s]+:[^\s]+$/.test(record.inviter) || isAgentUser(record.inviter)) {
+      return { ok: false, reason: 'invite_names_no_human_inviter' };
+    }
+    const canonicalAgent = this.resolveKnownAgentName(agentName) || this.normalizeName(agentName);
+    if (!canonicalAgent) return { ok: false, reason: 'unknown_agent' };
+    const token = this.getAgentToken(canonicalAgent);
+    if (!token) return { ok: false, reason: 'agent_has_no_matrix_credential' };
+
+    const joinRes = await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    if (await rateLimitGate.observeResponse(joinRes)) {
+      // Left pending on purpose: a 429 is "not yet", not "no".
+      return { ok: false, reason: 'rate_limited' };
+    }
+    const joined = await joinRes.json();
+    if (!joined?.room_id) {
+      return { ok: false, reason: `join_failed: ${joined?.error || joinRes.status}` };
+    }
+
+    markRoomTrusted(roomId, { agent: canonicalAgent, inviter: record.inviter });
+    const existing = state.trustedManagedRooms[roomId] || {};
+    upsertRoomAgentBinding(roomId, canonicalAgent, record.inviter, { addedAt: existing.addedAt });
+    state.trustedManagedRooms[roomId] = {
+      ...existing,
+      // Legacy single-agent metadata, preserved exactly as the auto-join path does: per-agent
+      // ownership is authoritative in roomAgentBindings and must not be overwritten by a second
+      // agent joining the same project room.
+      agent: existing.agent || canonicalAgent,
+      inviter: existing.inviter || record.inviter,
+      ownerMxid: existing.ownerMxid || record.inviter,
+      addedAt: existing.addedAt || Date.now(),
+    };
+    settlePendingInvite(roomId, canonicalAgent, 'accepted', by);
+    if (canonicalAgent !== agentName) settlePendingInvite(roomId, agentName, 'accepted', by);
+    saveState();
+    console.log(`[invite] accepted: ${canonicalAgent} joined ${roomId}, owner=${record.inviter}`);
+    /*
+     * The bot has to be in the room too, or the accept produces a project room the agent is
+     * present in and nothing can read: the bot is the only syncing client, so message ingress,
+     * commands and mention routing all depend on it. This step was missing when
+     * acceptPendingInvite shipped — the auto-join path had it inline — which made accepting an
+     * invitation a milder rerun of the "present but unengageable" dead end this whole feature
+     * exists to remove.
+     *
+     * Its outcome does not gate the result. The agent has joined and the ownership binding is
+     * written, so those are true regardless; a failed or rate-limited invite is reported and
+     * returned as `botInvited` for the caller to surface rather than silently swallowed. Most
+     * failures here are the benign case — the bot is already in the room because another of
+     * this contributor's agents serves the same project.
+     */
+    const botInvited = await this.inviteBotIntoAgentRoom(roomId, token, '[invite] accept');
+    await this.syncApprovalBindingForRoomAgent(roomId, canonicalAgent);
+    return { ok: true, roomId, agent: canonicalAgent, ownerMxid: record.inviter, botInvited };
+  }
+
+  /**
+   * Decline an invitation: leave the invite and remember the answer.
+   *
+   * The record is kept rather than deleted so the invite poll cannot resurrect it — without that,
+   * "no" is unexpressible, because the invitation is still in Matrix state and would be seen
+   * again on the next round.
+   */
+  async rejectPendingInvite(roomId, agentName, by = 'operator') {
+    const record = getPendingInvite(roomId, agentName);
+    if (!record) return { ok: false, reason: 'unknown_invite' };
+    if (record.state !== 'pending') return { ok: false, reason: `already_${record.state}` };
+    const canonicalAgent = this.resolveKnownAgentName(agentName) || this.normalizeName(agentName);
+    const token = canonicalAgent ? this.getAgentToken(canonicalAgent) : null;
+    if (token) {
+      // Best-effort: declining in Matrix is courtesy. The decision is the record, so a failed
+      // leave must not leave the contributor unable to say no.
+      try {
+        await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+      } catch (error) {
+        console.warn(`[invite] declined ${agentName}@${roomId} but could not leave: ${error.message}`);
+      }
+    }
+    settlePendingInvite(roomId, agentName, 'declined', by);
+    console.log(`[invite] declined: ${agentName} for ${roomId}`);
+    return { ok: true, roomId, agent: agentName };
   }
 
   async syncApprovalBindingForRoomAgent(projectRoomId, agentName) {
@@ -4821,11 +5856,20 @@ export class MatrixBridge {
     // Skip if room already exists for this group (e.g. created from Matrix)
     if (roomForGroup(group.name)) return;
 
-    // Ensure agent accounts exist for agent members
+    /*
+     * Ensure agent accounts exist for agent members. Per agent, and NON-FATAL: since ADR-014
+     * decision 3 a missing credential is an expected standing state, so one unprovisioned agent
+     * must not abort room creation for the rest of the group — the old derived-password path could
+     * always mint one, and this loop was written when a throw here was nearly impossible.
+     */
     for (const m of group.members) {
       const canonicalAgent = this.resolveKnownAgentName(m);
       if (canonicalAgent && !this.getAgentToken(canonicalAgent)) {
-        await ensureAgentAccount(canonicalAgent);
+        try {
+          await ensureAgentAccount(canonicalAgent);
+        } catch (e) {
+          console.warn(`[agent-credential] group "${group.name}": ${canonicalAgent} joins without a Matrix identity: ${e.message}`);
+        }
       }
     }
     await this.createRoomForGroup(group.name, group.members);
@@ -4861,12 +5905,17 @@ export class MatrixBridge {
         }
       }
 
-      // Ensure agent has a Matrix account
+      // Ensure agent has a Matrix account. Non-fatal for the same reason as onGroupCreated: an
+      // unprovisioned agent is an expected state and must not abort the whole membership update.
       if (isAgent) {
         const ensuredName = canonicalAgent || this.normalizeName(m);
         if (ensuredName && !this.getAgentToken(ensuredName)) {
-          await ensureAgentAccount(ensuredName);
-          canonicalAgent = this.addKnownAgent(ensuredName) || ensuredName;
+          try {
+            await ensureAgentAccount(ensuredName);
+            canonicalAgent = this.addKnownAgent(ensuredName) || ensuredName;
+          } catch (e) {
+            console.warn(`[agent-credential] group "${update.name}": ${ensuredName} has no Matrix identity: ${e.message}`);
+          }
         }
       }
 
@@ -5348,31 +6397,67 @@ export class MatrixBridge {
     try {
       const members = await this.botClient.getJoinedRoomMembers(roomId);
       if (members.includes(staleUserId)) {
-        const staleUsername = `${AGENT_PREFIX}${humanName}`;
-        const passwords = agentPasswordCandidates(humanName);
-        if (passwords.length === 0) {
-          console.warn(`Cannot remove stale ${staleUserId}: no password candidates configured`);
+        /*
+         * NEVER evict a known agent. This routine exists to remove an `@ac_`-prefixed account that
+         * belongs to a HUMAN, so if `humanName` resolves to a real agent the account is legitimate
+         * and its presence in the room is the normal case.
+         *
+         * Reachable, not theoretical: `ensureHumanDmRoom` passes `forceAgentName`, which sets
+         * `toIsAgent = false` WITHOUT checking whether that side is an agent, so an agent name
+         * arriving as `humanName` produces a `dm:`-keyed room and lands here.
+         *
+         * This guard is new with the token change, and deliberately so. Under the derived password
+         * the eviction was equally possible in principle but dormant in practice — deriving needed
+         * MATRIX_AGENT_PASSWORD_SECRET, and with it unset `agentPasswordCandidates` returned an
+         * empty list and this block bailed out. Stored tokens are not optional in the same way:
+         * every live agent has one, so switching to them would have re-armed a path that can make
+         * a working agent leave a room it belongs in.
+         */
+        if (this.isKnownAgentName(humanName)) {
+          console.warn(`Refusing to remove ${staleUserId} from ${roomId}: '${humanName}' is a known agent, not a human with a stale agent account`);
+          return;
+        }
+
+        /*
+         * Self-leave needs a credential for the stale account, and since ADR-014 decision 3 the
+         * bridge cannot derive one — so this works only if that account happens to have a stored
+         * token (it was a real agent once), and otherwise reports what a human has to do.
+         *
+         * Deliberately NOT escalated to a kick: the surrounding comment records that the stale
+         * account holds a power level equal to the bot's, so a kick would fail anyway, and raising
+         * the bot's power to win that fight is a privilege change to make deliberately rather than
+         * inside a cleanup routine. A leftover member in a legacy DM is cosmetic; it holds no
+         * token and receives nothing, so leaving it in place costs correctness nothing.
+         */
+        const staleToken = getStoredAgentToken(humanName);
+        if (!staleToken) {
+          console.warn(
+            `Cannot remove stale ${staleUserId} from room ${roomId}: no stored Matrix token for `
+            + `'${humanName}', and agent passwords are no longer derivable (ADR-014). Remove that `
+            + 'member with homeserver admin rights if it matters.',
+          );
           return;
         }
         try {
-          const { data: loginData } = await tryMatrixLogin(staleUsername, passwords);
           const leaveRes = await fetch(
             `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`,
             {
               method: 'POST',
-              headers: { Authorization: `Bearer ${loginData.access_token}`, 'Content-Type': 'application/json' },
+              headers: { Authorization: `Bearer ${staleToken}`, 'Content-Type': 'application/json' },
               body: '{}',
             }
           );
           if (leaveRes.ok) {
             console.log(`Removed stale ${staleUserId} from room ${roomId} (self-leave)`);
+          } else {
+            console.warn(`Could not remove stale ${staleUserId}: HTTP ${leaveRes.status}`);
           }
-          // Logout the temp session
-          await fetch(`${HOMESERVER}/_matrix/client/v3/logout`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${loginData.access_token}`, 'Content-Type': 'application/json' },
-            body: '{}',
-          }).catch(() => {});
+          /*
+           * No logout. The old code opened a throwaway login and closed it; this token is the
+           * agent's stored credential, and logging out would invalidate it fleet-wide — under the
+           * new model nothing can re-mint it, so that single call would take a working agent
+           * offline until a human re-provisioned it.
+           */
         } catch (e) {
           console.warn(`Could not remove stale ${staleUserId}: ${e.message}`);
         }
@@ -5639,6 +6724,52 @@ export function buildMessageUrlForTest(messageId, viewToken = null, baseUrl = MS
 
 // Test exports for 5.8.1 room trust
 export { getRoomTrust, markRoomTrusted, MATRIX_TRUST_MODE };
+/*
+ * The pending-invite helpers, exported so a test can seed and inspect the record without a
+ * homeserver. Same pattern as the line above and as `matrixRateLimitGateForTest`.
+ *
+ * Worth exporting rather than testing only through the backend projection: the backend store has
+ * its own 15 tests, but none of them execute the BRIDGE-side writer — and the bridge is where the
+ * join, the trust promotion and the ownership binding actually happen. A missing bot invite in
+ * `acceptPendingInvite` was found by reading, not by a failing test, precisely because nothing
+ * reached that code.
+ */
+export {
+  rememberPendingInvite,
+  listPendingInvites,
+  getPendingInvite,
+  settlePendingInvite,
+  resetPendingInvitesForTest,
+  projectServerFromRoomId,
+  upsertRoomAgentBinding,
+  findRoomAgentBinding,
+};
+
+/*
+ * The supplied-credential path (ADR-014 decision 3). Exported because this is the seam where the
+ * derived-password mechanism used to live, and the properties that replaced it are exactly the
+ * kind that rot silently: that a transient homeserver failure is NOT reported as a dead token,
+ * that a bad env value never displaces a working stored one, and that a missing credential REFUSES
+ * instead of returning something falsy a caller might send with.
+ */
+export {
+  ensureAgentAccount as ensureAgentAccountForTest,
+  agentTokenFromEnv as agentTokenFromEnvForTest,
+  agentTokenEnvVarName as agentTokenEnvVarNameForTest,
+  agentUserId as agentUserIdForTest,
+  isMatrixAuthFailure as isMatrixAuthFailureForTest,
+  AgentCredentialMissingError,
+};
+
+/** The live `state.agentTokens`, so a test can seed a stored credential and read back adoption. */
+export function agentTokenStateForTest() {
+  return state.agentTokens;
+}
+
+/** Persist the live state, so a durability test can assert what reaches disk. */
+export function saveStateForTest() {
+  return saveState();
+}
 
 const isMainModule = (() => {
   const entry = process.argv[1];

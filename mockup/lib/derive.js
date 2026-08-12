@@ -19,6 +19,10 @@ export function makeDerive(data) {
   const {
     roleCapacity, agents = [], presets = [], offers = [], whitelist = [],
     engagements = [], alerts = [], frameworks = [],
+    // The three slices the workforce roster joins on top of the four layers
+    // above. All default to empty, because a slice whose endpoint did not answer
+    // must produce a stated absence rather than a number.
+    usageLive = [], seats = [], contributions = [],
   } = data;
 
   const TIERS = roleCapacity.tiers;
@@ -161,6 +165,158 @@ export function makeDerive(data) {
   const activeEngagements = () => engagements.filter((e) => e.state === 'active');
   const endedEngagements = () => engagements.filter((e) => e.state === 'ended');
 
+  /*
+   * The capability rows this console is entitled to trust, and why the roster has
+   * to make the same choice components/Data.jsx makes for `capability()`.
+   *
+   * When GET /api/capability answered, the SERVER's judgement wins: that is where
+   * role-capacity.json is authoritative and where a project-side caller would read
+   * it. If the roster recomputed locally instead, /workforce and /capability could
+   * disagree about whether an agent fills Reviewer — two answers to one question,
+   * which is the drift this factory exists to prevent.
+   */
+  const capabilityRows = () => data.capabilityRows ?? capability();
+
+  /**
+   * ONE ROW PER AGENT, joining all four layers — the workforce roster.
+   *
+   * It lives here rather than in the page because it is a set of claims, not a
+   * layout: which roles an agent can be asked for, who it is currently lent to,
+   * whether the access record agrees with the allocation, what it consumed, and
+   * which seat that consumption lands on. The fixture and the live backend must
+   * make those claims identically, so there is one implementation.
+   *
+   * What it deliberately does NOT join: pending requests. A request is queue
+   * content and belongs to /engagements; folding it into a per-agent roster is how
+   * a resource console starts looking like a dispatcher.
+   *
+   * Every field that can be absent is absent as a distinguishable state rather
+   * than a zero — `lent: []` with a live engagement store means "nobody is
+   * borrowing it", and that is a different fact from a store that did not answer,
+   * which the page reads off `provenance` rather than guessing from an empty list.
+   */
+  function workforce() {
+    const rows = capabilityRows();
+    const usageByAgent = new Map(usageLive.map((r) => [r.agent, r]));
+    const seatOf = new Map();
+    for (const s of seats) for (const m of s.members ?? []) seatOf.set(m.agent, s);
+
+    return agents.map((a) => {
+      const preset = presetOf(a);
+
+      /*
+       * L2 — what a borrower may ask for. Roles, never the agent behind them: the
+       * mapping is the contributor's private business, and this column is the only
+       * per-agent view of the catalogue (which is organised per role).
+       */
+      const roles = rows.flatMap((c) => {
+        const hit = c.able.find((x) => x.agent?.name === a.name);
+        if (!hit) return [];
+        return [{
+          key: c.key,
+          displayName: c.role.displayName,
+          tier: hit.match.tier,
+          overTier: hit.match.overTier ?? 0,
+        }];
+      });
+
+      /*
+       * Why it can be asked for nothing — read off the same rows rather than
+       * recomputed, so the answer cannot disagree with the catalogue.
+       *
+       * Three reasons, three different actions: no model was ever chosen
+       * (configure one), the model is not in the shipped enumeration at all
+       * (nothing to do but change it), or it is real but below every role's floor
+       * (acquire capacity). Collapsing them into "not eligible" would leave a
+       * contributor with no next step.
+       */
+      const whys = rows
+        .map((c) => c.unable.find((x) => x.agent?.name === a.name)?.match?.why)
+        .filter(Boolean);
+      const noRoleWhy = roles.length > 0 ? null
+        : whys.includes('cap.why.noModel') ? 'cap.why.noModel'
+          : whys.includes('cap.why.notAccepted') ? 'cap.why.notAccepted'
+            : whys.length > 0 ? 'cap.why.belowTier'
+              : 'wf.why.notInCatalogue';
+
+      /*
+       * L3 — who is borrowing it, and whether they can actually reach it.
+       *
+       * Two records answer this and they are kept apart on purpose. An ENGAGEMENT
+       * is the allocation I approved; a CONTRIBUTION binding is the
+       * (agent, project, room, owner) tuple that lets the project reach the agent
+       * at all. They normally agree. When they do not, both directions matter and
+       * neither is visible anywhere else in the console:
+       *
+       *  - an allocation with no binding is capacity a project was promised and
+       *    cannot use (backend-v2.js:10736 records exactly this having happened);
+       *  - a binding with no active engagement is standing access outliving the
+       *    engagement that justified it, which for a resource contributor is the
+       *    security-relevant half.
+       */
+      const lent = engagements.filter((e) => e.agent === a.name && e.state === 'active');
+      const bindings = contributions.filter((c) => c.agent === a.name && c.active !== false);
+      const boundRooms = new Set(bindings.map((b) => b.projectRoomId));
+      const lentRooms = new Set(lent.map((e) => e.projectRoomId));
+      const unreachable = lent.filter((e) => !boundRooms.has(e.projectRoomId));
+      const standing = bindings.filter((b) => !lentRooms.has(b.projectRoomId));
+
+      /*
+       * L4 — consumption, which is measured for some frameworks and not others.
+       *
+       * Passed through as the endpoint reports it, including `reason`: the reason
+       * differs per agent (no workspace recorded / this framework's session files
+       * carry no usage / no transcript location verified for this adapter), so it
+       * belongs in the cell rather than being generalised into one page-level note.
+       */
+      const u = usageByAgent.get(a.name) ?? null;
+      const tokens = u ? {
+        used: u.tokensUsed ?? null,
+        byKind: u.tokensByKind ?? null,
+        sessions: u.tokensSessions ?? null,
+        // A figure that includes sessions whose transcript is gone, and a source
+        // that reported less than it had before. Both are caveats on a number that
+        // otherwise looks exact.
+        fromLedger: u.tokensFromLedger === true,
+        regressions: Number(u.tokensSourceRegressions) || 0,
+        reason: u.tokensReason ?? null,
+      } : null;
+
+      return {
+        agent: a,
+        preset,
+        tier: tierOf(preset),
+        family: familyOf(preset),
+        roles,
+        noRoleWhy,
+        overTier: roles.filter((r) => r.overTier > 0).length,
+        lent,
+        bindings,
+        unreachable,
+        standing,
+        tokens,
+        /*
+         * NO TASK COUNT, deliberately, though the usage row carries one.
+         *
+         * Tasks are the closest thing left to R12's withdrawn "work item" column,
+         * and a workforce roster is exactly where that would creep back in. What a
+         * borrowed agent is busy WITH is the borrower's business; that it is busy is
+         * the contributor's. /usage keeps the task measurement, where it reads as
+         * activity rather than as an assignment.
+         */
+        ceiling: preset?.ceiling ?? null,
+        // Known: what I promised. Kept strictly apart from `tokens`, which is what
+        // was spent — ADR-013 §6.
+        promised: committed(a.name),
+        left: remaining(a.name),
+        // The accounting root under the ceiling. A per-agent ceiling is a
+        // sub-allocation of a seat, so a roster showing one without naming the
+        // other repeats the error the seats table exists to correct.
+        seat: seatOf.get(a.name) ?? null,
+      };
+    });
+  }
+
   function railCounts() {
     const { byStatus } = alertCounts();
     const cap = capability();
@@ -170,8 +326,18 @@ export function makeDerive(data) {
       rolesFillable: cap.filter((c) => c.able.length > 0 && c.crossFamilyOk).length,
       pending: pendingEngagements().length,
       active: activeEngagements().length,
+      // AGENTS lent, not engagements: the rail row beside it already counts
+      // engagements, and one agent serving three projects is one agent lent out.
+      lent: new Set(activeEngagements().map((e) => e.agent)).size,
       alertsOpen: byStatus.open,
       whitelisted: whitelist.length,
+      /*
+       * Invitations awaiting my decision (ADR-014). Counted from the slice rather than
+       * derived, because there is nothing to derive: an invitation either arrived or it did
+       * not, and a slice that failed to answer contributes 0 here while the page itself says
+       * "not known" — the rail is a badge, and a badge cannot carry that distinction.
+       */
+      invitesPending: (data.invites ?? []).filter((i) => i?.state === 'pending' || !i?.state).length,
     };
   }
 
@@ -216,7 +382,7 @@ export function makeDerive(data) {
     presetOf, tierOf, familyOf, fills, capability, modelsFor,
     isWhitelisted, committed, remaining, overCommits,
     pendingEngagements, activeEngagements, endedEngagements,
-    alertCounts, railCounts,
+    alertCounts, railCounts, workforce,
     MODEL_SELECTABLE, FRAMEWORKS,
   };
 }

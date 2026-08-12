@@ -58,6 +58,13 @@ describe('Matrix owner approval bridge', () => {
   });
 
   test('public_approval_notice_is_redacted_and_non_actionable', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-PUBLIC. This notice is the only approval artifact the project
+     * room ever receives, so what it must NOT carry is the requirement: the assertions
+     * below check the serialized event for the input preview, the request id, the digest,
+     * and the `actions` key that would make it clickable. Serialized rather than a shallow
+     * property check, because a leak nested one level deeper would still pass the latter.
+     */
     const content = buildPublicApprovalNotice(approval);
     const serialized = JSON.stringify(content);
 
@@ -78,6 +85,14 @@ describe('Matrix owner approval bridge', () => {
   });
 
   test('owner_dm_approval_request_contains_structured_actions', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-DM and REQ-OWNER-UI-APPROVAL-UI. The DM event is the full
+     * request — it is the only place the bound agent, project, project room, request id and
+     * digest appear together — and the approve-once/deny action descriptors asserted here
+     * are the only mechanism offered for answering it. The body line pinned at the end says
+     * so to the owner in words, which is why "text replies are not approval" is an assertion
+     * and not a nicety.
+     */
     const content = buildOwnerApprovalRequest(approval);
 
     expect(content.msgtype).toBe('com.hafleet.approval.request.v1');
@@ -96,6 +111,12 @@ describe('Matrix owner approval bridge', () => {
   });
 
   test('approval_text_message_is_ignored', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-UI, the negative half: a verdict MUST be a structured UI action,
+     * so approval-shaped chat text in the owner's own DM must parse to nothing. Null here
+     * means the bridge never submits a verdict for it and the request stays pending — the
+     * Chinese text is deliberate, since a keyword scanner is exactly what this forbids.
+     */
     expect(parseApprovalVerdictEvent('!approval-dm:palpo.test', {
       event_id: '$text',
       sender: '@alex:palpo.test',
@@ -104,6 +125,14 @@ describe('Matrix owner approval bridge', () => {
   });
 
   test('structured verdict preserves authenticated Matrix sender and binding fields', () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-IDENTITY and REQ-OWNER-UI-APPROVAL-AUTHORITY. The exact-object
+     * assertion is what carries both: `sender_mxid` is the complete MXID taken from
+     * `event.sender` and `room_id` is the room the bridge observed the event in, neither of
+     * which the client's `com.hafleet.approval` payload can supply or override. That is the
+     * whole of "Robrix2 emits, hafleet authorizes" on the bridge side — the identity used
+     * downstream is homeserver-stamped, not self-reported.
+     */
     const parsed = parseApprovalVerdictEvent('!approval-dm:palpo.test', {
       event_id: '$verdict',
       sender: '@alex:palpo.test',
@@ -137,6 +166,14 @@ describe('Matrix owner approval bridge', () => {
   });
 
   test('delayed_room_key_retries_encrypted_owner_verdict', async () => {
+    /*
+     * REQ-OWNER-UI-APPROVAL-DELIVERY, both halves, in the order they appear below. The first
+     * decryption rejects, and the assertions are that the ciphertext went to the durable
+     * store and that onRoomMessage was NOT called — an undecryptable verdict is not an
+     * approval. The second retry succeeds, and onRoomMessage is called exactly once with the
+     * cleartext before the record is removed, so the key arriving late recovers the verdict
+     * without replaying it.
+     */
     const roomId = '!approval-delayed-key:palpo.test';
     const encrypted = {
       type: 'm.room.encrypted',
@@ -219,6 +256,14 @@ describe('Matrix owner approval bridge', () => {
   });
 
   test('publishes encrypted private details before redacted public status', async () => {
+    /*
+     * REQ-MATRIX-THREAD-PLAINTEXT-SCOPE, second clause: "encrypted approvals MUST retain their
+     * crypto-client path". The split asserted here is exactly that boundary — the payload
+     * carrying `gh issue create` goes through botClient.sendMessage after
+     * ensureApprovalDmEncrypted, while sendAsAgentContent (the raw agent-token sender that
+     * thread delivery uses) only ever receives content the test proves is redacted. The
+     * ordering assertion keeps the encrypted room from being set up after the private send.
+     */
     const bridge = new MatrixBridge();
     const order = [];
     bridge.callBackendApi = vi.fn().mockResolvedValue({ ok: true, approval });
@@ -238,6 +283,13 @@ describe('Matrix owner approval bridge', () => {
     });
     bridge.rememberMatrixEvent = vi.fn();
 
+    /*
+     * REQ-OWNER-UI-APPROVAL-DM and REQ-OWNER-UI-APPROVAL-PUBLIC also rest on the two
+     * expectations inside the mocks above plus the `order` assertion below: the only sender
+     * that sees `gh issue create` is botClient.sendMessage, and it only runs after
+     * ensureApprovalDmEncrypted has settled, so the full request exists nowhere but the
+     * encrypted DM. The project-room send is asserted to carry none of it.
+     */
     const result = await bridge.onApprovalRequested({ request_id: approval.id });
 
     expect(result).toMatchObject({ ok: true, privateEventId: '$private', publicEventId: '$public' });
