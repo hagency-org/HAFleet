@@ -81,7 +81,6 @@ describe('supervisor provisioning', () => {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
     manifest.runtimeProfile = { primary: { framework: 'claude', model: 'opus' } };
     manifest.task = { id: 'task-123', title: 'Test task' };
-    manifest.subconsciousEnabled = true;
     const { writeFileSync: writeFs } = await import('fs');
     writeFs(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
 
@@ -94,7 +93,6 @@ describe('supervisor provisioning', () => {
     // Existing fields preserved
     expect(updated.runtimeProfile).toEqual({ primary: { framework: 'claude', model: 'opus' } });
     expect(updated.task).toEqual({ id: 'task-123', title: 'Test task' });
-    expect(updated.subconsciousEnabled).toBe(true);
     // createdAt preserved from original
     expect(updated.createdAt).toBe(manifest.createdAt);
   });

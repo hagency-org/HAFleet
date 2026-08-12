@@ -20,10 +20,10 @@ has implemented yet.
 | A | amendment below — pending invitation, project supplies the server | **built** | `state.pendingInvites` and `pendingInviteKey()` in `bridge-matrix.js`; `createPendingInviteStore` plus its list/upsert/settle API in `backend-v2.js` |
 | 1 | the ownership invariant does not change | **built** | true by construction — ADR-002's `(room, agent)` binding from the inviter is untouched, and acceptance now writes it |
 | 2 | two provisioning flows, chosen by server capability | **decided, not built** | the repository still contains zero appservice support: no `as_token`, `hs_token`, `sender_localpart` or registration file — the only matches are prose in this ADR's own lineage |
-| 3 | derived-password self-registration is to be deleted | **decided, not built** | every named symbol is still live: `deriveAgentPassword`, `agentPasswordCandidates`, `matrixRegister`, `MATRIX_AGENT_PASSWORD_SECRET`, `MATRIX_ALLOW_LEGACY_AGENT_PASSWORD`, and the last two are still documented in `.env.example` |
+| 3 | derived-password self-registration is to be deleted | **built**, with one named exception | `deriveAgentPassword`, `legacyAgentPassword`, `agentPasswordCandidates` and `tryMatrixLogin` are gone from `bridge-matrix.js`, as are all three env vars and their `.env.example` entries; `ensureAgentAccount` now validates a SUPPLIED token (`agentTokenFromEnv`) and refuses with `AgentCredentialMissingError` rather than minting one. Exception: `matrixRegister` stays — the BOT uses it with its own explicit `MATRIX_BOT_PASSWORD`, which this decision never covered. `tests/agent-credential-supplied.test.js` (20 cases, 10/10 mutants caught) |
 | 4 | multiple homeservers; a per-agent credential record | **decided, not built** | `HOMESERVER` is one module constant, and `state.agentTokens[name]` is a bare access-token string, not `{ homeserver, accessToken }` |
 | 5 | an agent MXID is discovered via `/whoami`, not constructed | **decided, not built** | `agentUserId()` still composes `@${AGENT_PREFIX}${name}:${MATRIX_SERVER_NAME}`, and the invite poll's owner-derivation filter still matches that constructed `state_key` |
-| 6 | a dead credential is a human-visible state | **decided, not built** | no "credential invalid, re-issue needed" state exists on any surface; a failed agent `/whoami` still falls through to re-login |
+| 6 | a dead credential is a human-visible state | **built at the record, not the UI** | the retry loop is gone (`AgentCredentialMissingError`), the state is LIVE (`markAgentUnprovisioned`/`clearAgentUnprovisioned`, not a startup snapshot), and it reaches a durable cross-process surface: `unprovisionedAgents` in `data/health/matrix-bridge.json`, which the standalone doctor already reads. Still absent: a dashboard view, and the homeserver per agent (needs decision 4) |
 | 7 | flow B requires a dedicated login, stated where an operator reads | **decided, not built** | the rule exists only as prose here; there is no startup check and nothing in `.env.example` says it |
 | 8 | the ADR-008 crypto-store defect is a prerequisite | **built** | `lib/matrix-crypto-store-identity.js` now excludes the `bot-sdk.json` placeholder by name, so an empty `{}` store no longer reads as "data without a device identity" |
 
@@ -122,12 +122,16 @@ the operator rather than discovered.
 
 ## Context
 
-An agent needs a Matrix identity to participate in a project room. Today `bridge-matrix.js`
-creates one itself: the username is composed as `@ac_<agent>:<our server>`, and the password is
-**derived** — `sha256(MATRIX_AGENT_PASSWORD_SECRET + ':' + agentName)`. On startup the bridge
-tries the cached access token, falls back to logging in with the derived password, and falls
-back again to *registering* the account, which needs `MATRIX_REG_TOKEN` or open registration on
-the homeserver.
+An agent needs a Matrix identity to participate in a project room. **When this ADR was written**,
+`bridge-matrix.js` created one itself: the username was composed as `@ac_<agent>:<our server>`, and
+the password was **derived** — `sha256(MATRIX_AGENT_PASSWORD_SECRET + ':' + agentName)`. On startup
+the bridge tried the cached access token, fell back to logging in with the derived password, and
+fell back again to *registering* the account, which needed `MATRIX_REG_TOKEN` or open registration
+on the homeserver.
+
+*(Past tense as of 2026-08-11: decision 3 is built and that mechanism is gone. The description is
+kept because the three properties below are the entire argument for this ADR, and they are only
+legible against the model they condemn.)*
 
 Three properties of that model, each verified against the code rather than assumed:
 
@@ -191,24 +195,74 @@ to it.
 
 *Status — **decided, not built**. Neither flow exists. Flow A has no support of any kind: no
 `as_token`, `hs_token`, `sender_localpart` or registration file anywhere in the repository. Flow B
-has no intake either — nothing accepts a human-supplied token for an agent, because
-`ensureAgentAccount` still mints its own credential (decision 3). The table in the amendment above
-adds a third mode, **federated invite**, which is the one that is built; it needs no credential, so
-it does not satisfy this decision, it postpones it.*
+has an INTAKE as of 2026-08-11 — `MATRIX_AGENT_TOKEN_<AGENT>` accepts a human-supplied token and
+`ensureAgentAccount` validates and adopts it (decision 3) — but an intake is not the flow: flow B
+also requires the per-agent homeserver of decision 4, the discovered MXID of decision 5 and the
+dedicated-login rule of decision 7, none of which exist. The table in the amendment above adds a
+third mode, **federated invite**, which is the one that is built; it needs no credential, so it does
+not satisfy this decision, it postpones it.*
 
 **3. Derived-password self-registration is to be deleted, without a compatibility flag.** Not
 deprecated behind a switch: a switch would be used, and it is the only one of the three that
-produces a credential nobody can revoke. `MATRIX_AGENT_PASSWORD_SECRET`,
-`MATRIX_ALLOW_LEGACY_AGENT_PASSWORD` and the `matrixRegister` path go with it when it goes.
+produces a credential nobody can revoke. `MATRIX_AGENT_PASSWORD_SECRET` and
+`MATRIX_ALLOW_LEGACY_AGENT_PASSWORD` go with it.
 
-*Status — **decided, not built**, and this decision's own wording is what made that hard to see. It
-read "Derived-password self-registration **is** deleted … all **go** with it", which asserts a
-completed deletion. Nothing has been deleted. `ensureAgentAccount` still runs the whole ladder —
-cached token → login with the derived password → `matrixRegister` — on the default startup path;
-`deriveAgentPassword` still hashes `MATRIX_AGENT_PASSWORD_SECRET + ':' + agentName`;
-`agentPasswordCandidates` still appends the `MATRIX_ALLOW_LEGACY_AGENT_PASSWORD` template fallback;
-and both variables are still published in `.env.example`. The non-revocable credential this decision
-exists to abolish is the one the bridge mints today, and the ADR read as though it did not.*
+*Status — **built** (2026-08-11), and one prediction in the original wording was wrong.*
+
+*Deleted from `bridge-matrix.js`: `deriveAgentPassword`, `legacyAgentPassword`,
+`agentPasswordCandidates`, the three env vars, their startup warnings, their `.env.example`
+entries, and the README rows in both languages. `tryMatrixLogin` went too — a multi-candidate
+password login has no remaining caller once there are no candidates to iterate.*
+
+*Corrected: this decision also claimed "the `matrixRegister` path" would go, and it has NOT. That
+path is what the BOT uses, at `ensureBotAccount`, with an explicit operator-set
+`MATRIX_BOT_PASSWORD` inside a login→register→backoff loop. The bot is a single account whose
+password an operator chose, so none of the three condemned properties applies to it: it is
+rotatable (change the variable, change the password), revocable, and its registration is a
+one-time act on the homeserver the operator runs. The decision named a symbol when it meant a
+mechanism, and deleting `matrixRegister` would have broken bot startup for no security gain.*
+
+*What replaced it: `ensureAgentAccount` takes the stored token, then `MATRIX_AGENT_TOKEN_<AGENT>`,
+validates the candidate against `/whoami`, and ADOPTS it into `state.agentTokens` only after the
+homeserver accepts — so a typo in `.env` never displaces a working credential. With neither
+available it throws `AgentCredentialMissingError` (`needsProvisioning: true`), naming both the
+exact variable to set and the exact MXID to create. It refuses rather than returning null so no
+caller can send with `Bearer undefined`, which fails as an empty result rather than as an error.*
+
+*The distinction this hinges on: a REJECTED credential (401/403) versus an UNREACHABLE homeserver.
+Only the first is a verdict on the token. `isMatrixAuthFailure` therefore answers false for
+everything it does not recognise, because misreading an outage as mass revocation would send an
+operator to reissue tokens by hand for a fleet whose credentials were fine.*
+
+*Not built here: persisting the discovered MXID. `/whoami` now returns it on every adoption, which
+makes decision 5 nearly free — but decision 5 is still open, and settling it as a side effect of a
+credential change would decide it without deciding it.*
+
+*Adversarial review of the first version (2026-08-11) found six real defects, all now fixed with
+tests and 22 mutants killed. Two were introduced by this change: the credential was validated but
+its IDENTITY was not, so a token pasted under the wrong agent's variable was adopted and used to
+send as its real owner (and to rename that owner's profile); and `ensureAgentAccount` began throwing
+on SSE paths that awaited it bare inside a synchronous try, turning an EXPECTED standing condition
+into an unhandled rejection — fatal on modern Node. Three were pre-existing paths whose severity
+this change escalated from recoverable to permanent, because they lose credentials that can no
+longer be re-minted: `loadState` treated every read failure as "start empty" and startup then
+persisted that over the file; both pruning loops delete every token absent from a roster, and a 200
+carrying a non-array normalizes to an empty roster; and the variable-name mangling is not injective,
+so `octos-agent` and `octos_agent` read the same variable. The sixth: the stale-account cleanup
+could make a LIVE agent self-leave a room, dormant under the derived password (which needed an unset
+secret) and re-armed by stored tokens, which every live agent has.*
+
+*The pattern worth keeping: removing a self-healing fallback does not just delete a feature, it
+reclassifies every path that relied on it. Paths that were merely inefficient became destructive,
+and paths where a throw was almost impossible became paths where a throw is routine. Neither class
+announces itself in the diff.*
+
+*Migration: nothing breaks on deploy. Tokens already in `bridge-state.json` keep working, since the
+`/whoami` check is unchanged. What stops happening silently is REPLACEMENT — a missing or dead
+credential used to be re-minted from the master secret, and now startup logs
+`[agent-credential] NEEDS PROVISIONING` per agent plus one summary line listing every inert agent.
+That is the point rather than a regression: re-minting is precisely what made the credential
+unrevocable.*
 
 **4. HAFleet may connect agents to MULTIPLE homeservers; the bot stays on one.** The operator's
 ruling is that agents must be registerable against different Matrix servers, not a single one.
@@ -279,11 +333,24 @@ and a human must re-issue it" state on the operator's surfaces, carrying which a
 homeserver. It must not be absorbed into a background retry: the symptom would otherwise be an
 agent that has silently stopped speaking.
 
-*Status — **decided, not built**. No such state exists on any surface, and the current code does the
-opposite by design: a failed agent `whoami` in `ensureAgentAccount` falls straight through to a
-derived-password re-login, which is precisely the self-healing retry this decision forbids. That
-fall-through is not a bug today — under a derived password it works — which is why it has to be
-removed in the same change that lands flow B rather than after it.*
+*Status — **partly built** (2026-08-11). The half this decision leads with is done: the
+self-healing retry it forbids no longer exists, because the thing it retried into — a
+derived-password re-login — was deleted with decision 3. `ensureAgentAccount` now raises
+`AgentCredentialMissingError` carrying `needsProvisioning: true`, `agentName`, the variable to set
+and the MXID to create; startup logs one `[agent-credential] NEEDS PROVISIONING` line per agent and
+a summary naming every agent that cannot speak.*
+
+*Then completed further after adversarial review, which made the fair objection that a log line is
+not a surface: it scrolls, and an operator who missed startup cannot ask which agents are inert. The
+list is now written to `data/health/matrix-bridge.json` as `unprovisionedAgents` — a durable
+cross-process record the standalone doctor already reads — and it is maintained LIVE rather than
+snapshotted at startup, because a snapshot goes stale in both directions (an agent provisioned later
+stays listed; one revoked at runtime never appears) and a confidently wrong record is worse than
+none. The field is named `unprovisionedAgents` and not `agentsMissingCredential` because the health
+writer's redaction guard refuses any key matching /credential/; a test pins that so a future rename
+fails loudly instead of silently disabling the record.*
+
+*Still NOT built: a dashboard view, and WHICH HOMESERVER — that needs decision 4.*
 
 **7. Flow B requires a DEDICATED login, and this must be stated where an operator will read it.**
 An access token identifies a *device*. If an operator pastes a token from their own Element
@@ -314,7 +381,8 @@ part of this ADR whose implementation unblocks the rest.*
 ## Consequences
 
 These are the consequences the decisions above would have, not outcomes anyone has observed. Per the
-status table, only decisions 1 and 8 and the amendment are built, so nothing below has happened yet.
+status table, decisions 1, 3 and 8 and the amendment are built and decision 6 is partly built, so of
+what follows, only the parts that turn on a supplied credential have actually happened.
 
 Good, because the credential a compromise yields becomes **revocable**, which the derived
 password never was; because onboarding onto a homeserver we do not administer becomes possible at

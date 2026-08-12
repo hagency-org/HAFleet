@@ -119,25 +119,25 @@ describe('architecture boundary checker stateful GET routes', () => {
     expect(result.ok).toBe(true);
   });
 
-  test('catches helper-mediated subconscious read-through state creation', async () => {
+  test('catches helper-mediated read-through state creation', async () => {
     const result = await runChecker({
       source: `
         const app = {};
-        app.get('/api/subconscious/detail/:name', (req, res) => {
-          const state = resolveSubconsciousState(req.params.name);
+        app.get('/api/widget/detail/:name', (req, res) => {
+          const state = resolveWidgetState(req.params.name);
           res.json(state);
         });
       `,
       manifest: manifestFor({
         mutationRoutes: [],
         sensitiveRoutes: [],
-        statefulGetMarkers: ['resolveSubconsciousState('],
+        statefulGetMarkers: ['resolveWidgetState('],
         statefulGetRoutes: [],
       }),
     });
 
     expect(result.ok).toBe(false);
-    expect(result.stderr).toContain('stateful GET route lacks owner entry: GET /api/subconscious/detail/:name');
+    expect(result.stderr).toContain('stateful GET route lacks owner entry: GET /api/widget/detail/:name');
   });
 
   test('recognizes explicit installRoute registrations for expected sensitive routes', async () => {

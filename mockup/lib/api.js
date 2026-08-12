@@ -110,6 +110,11 @@ function mapAgent(a) {
     // null is "not measured", which is not the same as "absent".
     mcp: a.mcpPresent,
     presetId: a.presetId ?? null,
+    // The REAL working directory, because /agents/<name> used to invent one from the agent's name
+    // (`~/${name.replace('-agent','')}-ws`) — which for `ops-agent` printed `~/ops-ws`, plausible
+    // and entirely fictional. Under `up-v1` the agent runs in its own provisioned home, which is
+    // nowhere near that guess.
+    workdir: a.workdir ?? null,
     // Carried so a page can show the resolved configuration even when the preset
     // it came from has since been edited or deleted.
     runtimeProfile: rp,

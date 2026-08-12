@@ -2,10 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   agentTokenModeBehavior,
   authorizeAgentCredential,
-  authorizeSubconsciousEventIngest,
   buildAgentTokenReadiness,
   buildServerCredentialReadiness,
-  canAccessPrivilegedSubconsciousDetail,
   checkAgentToken,
   createApiAuthMiddleware,
   createRequireAgentToken,
@@ -23,7 +21,7 @@ import {
  * This module is the whole authentication surface of backend-v2.js. Every export here
  * is wired at backend-v2.js:283-311 and 2497-2527, and between them they decide who
  * may call /api/agents/:name/runtime, /api/servers/heartbeat, /api/tasks and
- * /api/subconscious/events. It had no test file at all.
+ * It had no test file at all.
  *
  * What these tests are for, in one sentence each:
  *   - the mode resolver, because an unrecognised mode FAILS OPEN to audit and the
@@ -599,97 +597,6 @@ describe('authorizeAgentCredential', () => {
   });
 });
 
-// ── authorizeSubconsciousEventIngest ──────────────────────────────────
-describe('authorizeSubconsciousEventIngest', () => {
-  it('accepts a local request with no credential configured or presented', () => {
-    // Subconscious hooks run on the same host as the backend and have no secret to
-    // present. Locality IS the credential, and it is checked before anything else.
-    expect(authorizeSubconsciousEventIngest(req(), { env: {}, isLocalRequest: () => true }))
-      .toEqual({ ok: true, mode: 'local' });
-    // Even a wrong bearer cannot spoil a local request — the token branch is not reached.
-    expect(authorizeSubconsciousEventIngest(
-      req({ headers: { authorization: 'Bearer garbage' } }),
-      { env: { HAFLEET_SUBCONSCIOUS_EVENT_TOKEN: 'sub' }, isLocalRequest: () => true },
-    )).toEqual({ ok: true, mode: 'local' });
-  });
-
-  it('answers 403 local-only — not 401 — when no ingest token is configured', () => {
-    /*
-     * The module's own error text promises "local-only unless
-     * HAFLEET_SUBCONSCIOUS_EVENT_TOKEN is configured". 403 with mode `local-only` says
-     * no credential exists to try; a 401 would invite a client to keep guessing against
-     * a route that accepts none, and would read in the logs as a failed auth attempt
-     * rather than a misdirected request.
-     */
-    const result = authorizeSubconsciousEventIngest(
-      req({ headers: { authorization: 'Bearer whatever' } }),
-      { env: {}, isLocalRequest: () => false },
-    );
-    expect(result.ok).toBe(false);
-    expect(result.status).toBe(403);
-    expect(result.mode).toBe('local-only');
-    expect(result.error).toMatch(/local-only unless HAFLEET_SUBCONSCIOUS_EVENT_TOKEN/);
-  });
-
-  it('accepts the ingest token remotely, and rejects a wrong one with 401', () => {
-    const env = { HAFLEET_SUBCONSCIOUS_EVENT_TOKEN: 'sub-secret' };
-    expect(authorizeSubconsciousEventIngest(
-      req({ headers: { authorization: 'Bearer sub-secret' } }),
-      { env, isLocalRequest: () => false },
-    )).toEqual({ ok: true, mode: 'token' });
-    expect(authorizeSubconsciousEventIngest(
-      req({ headers: { authorization: 'Bearer sub-secre' } }),
-      { env, isLocalRequest: () => false },
-    )).toEqual({ ok: false, status: 401, error: 'invalid subconscious event token', mode: 'token-required' });
-    expect(authorizeSubconsciousEventIngest(req({ headers: {} }), { env, isLocalRequest: () => false }))
-      .toMatchObject({ ok: false, status: 401 });
-  });
-
-  it('does NOT accept the operator API_TOKEN in place of the ingest token', () => {
-    /*
-     * Two credentials at two trust levels, deliberately separate. The ingest token is
-     * distributed to every agent home so hooks can post events; the operator token
-     * controls the whole fleet. If either authenticated the other, handing a machine the
-     * ability to write events would hand it the ability to delete agents.
-     */
-    const env = { API_TOKEN: 'op-secret', HAFLEET_SUBCONSCIOUS_EVENT_TOKEN: 'sub-secret' };
-    expect(authorizeSubconsciousEventIngest(
-      req({ headers: { authorization: 'Bearer op-secret' } }),
-      { env, isLocalRequest: () => false },
-    )).toMatchObject({ ok: false, status: 401 });
-    // And with only API_TOKEN set, the route is still local-only rather than
-    // operator-openable.
-    expect(authorizeSubconsciousEventIngest(
-      req({ headers: { authorization: 'Bearer op-secret' } }),
-      { env: { API_TOKEN: 'op-secret' }, isLocalRequest: () => false },
-    )).toMatchObject({ ok: false, status: 403, mode: 'local-only' });
-  });
-});
-
-// ── canAccessPrivilegedSubconsciousDetail ─────────────────────────────
-describe('canAccessPrivilegedSubconsciousDetail', () => {
-  it('grants local callers and the operator bearer, and nobody else', () => {
-    /*
-     * Guards the ?debug detail on the subconscious read route. The ingest token must NOT
-     * open it: every agent home holds that token, so if writing events also granted
-     * reading their privileged detail, one compromised agent would read the whole
-     * fleet's internal state.
-     */
-    const env = { API_TOKEN: 'op-secret', HAFLEET_SUBCONSCIOUS_EVENT_TOKEN: 'sub-secret' };
-    expect(canAccessPrivilegedSubconsciousDetail(req(), { env, isLocalRequest: () => true })).toBe(true);
-    expect(canAccessPrivilegedSubconsciousDetail(
-      req({ headers: { authorization: 'Bearer op-secret' } }),
-      { env, isLocalRequest: () => false },
-    )).toBe(true);
-    expect(canAccessPrivilegedSubconsciousDetail(
-      req({ headers: { authorization: 'Bearer sub-secret' } }),
-      { env, isLocalRequest: () => false },
-    )).toBe(false);
-    expect(canAccessPrivilegedSubconsciousDetail(req({ headers: {} }), { env, isLocalRequest: () => false }))
-      .toBe(false);
-  });
-});
-
 // ── createRequireBearer ───────────────────────────────────────────────
 describe('createRequireBearer', () => {
   it('is open when API_TOKEN is unset, whether or not the caller presents a bearer', () => {
@@ -777,7 +684,6 @@ describe('createRequireBridgeSecret', () => {
 describe('createApiAuthMiddleware', () => {
   const build = (over = {}) => createApiAuthMiddleware({
     apiToken: 'op-secret',
-    subconsciousEventToken: 'sub-secret',
     isLocalRequest: () => false,
     ...over,
   });
@@ -805,28 +711,6 @@ describe('createApiAuthMiddleware', () => {
     }
   });
 
-  it('exempts subconscious ingest only for POST, only on that path, and only with that token', () => {
-    /*
-     * Three conditions, and the ingest token is the most widely distributed secret in
-     * the product — every agent home holds one. Each decoy below is the request an
-     * agent could trivially make if the corresponding condition were dropped, which
-     * would turn a write-only ingest credential into a general-purpose API key:
-     *   - same path, GET       -> would read every agent, message and task
-     *   - a different path     -> would reach the mutation routes
-     *   - no token configured  -> would authenticate an empty deployment
-     */
-    const mw = build();
-    expect(runMiddleware(mw, req({ method: 'GET', path: '/subconscious/events', headers: { authorization: 'Bearer sub-secret' } })).status).toBe(401);
-    expect(runMiddleware(mw, req({ method: 'POST', path: '/agents', headers: { authorization: 'Bearer sub-secret' } })).status).toBe(401);
-    expect(runMiddleware(
-      build({ subconsciousEventToken: undefined }),
-      req({ method: 'POST', path: '/subconscious/events', headers: { authorization: 'Bearer sub-secret' } }),
-    ).status).toBe(401);
-    // And the one combination that must work, or agent hooks cannot report at all.
-    expect(runMiddleware(mw, req({ method: 'POST', path: '/subconscious/events', headers: { authorization: 'Bearer sub-secret' } })).nextCalls).toBe(1);
-    // The operator token still works on that path — the exemption widens, never narrows.
-    expect(runMiddleware(mw, req({ method: 'POST', path: '/subconscious/events', headers: { authorization: 'Bearer op-secret' } })).nextCalls).toBe(1);
-  });
 });
 
 // ── readiness reporting ───────────────────────────────────────────────

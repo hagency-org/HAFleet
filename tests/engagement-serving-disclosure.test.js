@@ -69,6 +69,51 @@ describe('the serving configuration is disclosed', () => {
     expect(res.body.serving.agent).toBe(res.body.engagement.agent);
   });
 
+  test('the VERDICT discloses it too — that is where the agent is actually granted', async () => {
+    /*
+     * The request only asks; the verdict is where the borrower GETS the agent. The verdict route
+     * returned `{engagement, binding}` with no `serving`, so the one response that says "you have
+     * it" did not say what you have, and the borrower had to make a second call to find out. That
+     * is exactly the "role without its fulfilment" the test above refuses to allow, and the
+     * argument is stronger at this end.
+     */
+    ctx = await createBackendTestContext('serve-verdict-', seed);
+    // Allocation is refused against an agent with no ceiling, so declare one first.
+    const preset = await request(ctx.app).post('/api/framework-presets').send({
+      name: 'strong', framework: 'claude', provider: 'anthropic',
+      model: 'claude-opus-5', reasoning: 'high', ceiling: { tokens: 5_000_000, period: 'monthly' },
+    });
+    await request(ctx.app).put('/api/agents/claude-agent/preset')
+      .send({ presetId: preset.body.preset.id });
+
+    const created = await ask(ctx, { requestId: '$v1' });
+    const verdict = await request(ctx.app)
+      .post(`/api/engagements/${created.body.engagement.id}/verdict`)
+      .send({ approve: true, allocatedTokens: 400_000 });
+
+    expect(verdict.status).toBe(200);
+    expect(verdict.body.engagement.state).toBe('active');
+    expect(verdict.body.serving).toMatchObject({ agent: 'claude-agent', framework: 'claude' });
+    expect(verdict.body.serving.agent).toBe(verdict.body.engagement.agent);
+  });
+
+  test('a REJECTION discloses nothing — there is no fulfilment to report', async () => {
+    /*
+     * The asymmetry is deliberate: describing a serving configuration for a request that was
+     * refused would report capacity the borrower did not get, which is the one direction a
+     * legibility console must not err in.
+     */
+    ctx = await createBackendTestContext('serve-reject-', seed);
+    const created = await ask(ctx, { requestId: '$v2' });
+    const verdict = await request(ctx.app)
+      .post(`/api/engagements/${created.body.engagement.id}/verdict`)
+      .send({ approve: false, reason: 'not now' });
+
+    expect(verdict.status).toBe(200);
+    expect(verdict.body.engagement.state).toBe('ended');
+    expect(verdict.body.serving).toBeUndefined();
+  });
+
   test('the reasoning level travels with the model, because the tier depends on it', async () => {
     /*
      * The same model at a different reasoning level qualifies at a different tier —

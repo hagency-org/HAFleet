@@ -6,6 +6,7 @@ import { Toast, useToast } from '@/components/Toast';
 import { useT } from '@/components/Prefs';
 import { detectState, onboardable, onboardCommand, onboardSteps } from '@/lib/mock-data';
 import { useData, Provenance } from '@/components/Data';
+import { send } from '@/lib/api';
 
 /*
  * Onboarding — detect what this host can run, then bring one up.
@@ -49,7 +50,7 @@ export default function OnboardPage() {
    * frameworks that cannot start.
    */
   const {
-    detected, detectCaveat, agents, presets, tierOf, roleCapacity,
+    detected, detectCaveat, agents, presets, tierOf, roleCapacity, refresh,
   } = useData();
   const [toast, say] = useToast();
   const [name, setName] = useState('');
@@ -69,7 +70,13 @@ export default function OnboardPage() {
   const chosen = detected.find((f) => f.id === framework) ?? null;
   const taken = agents.some((a) => a.name === name);
   const badName = name !== '' && !/^[\w-]+$/.test(name);
-  const canStart = name && !taken && !badName && workspace && chosen && phase === null;
+  /*
+   * `workspace` is NOT required. An agent provisioned by `up-v1` gets its own home workdir, so
+   * leaving this empty is a valid and in fact the simplest choice — the field names an EXISTING
+   * project to work on, not the agent's home. Requiring it made the form demand a path the operator
+   * had to invent, and the one they invented did not exist.
+   */
+  const canStart = name && !taken && !badName && chosen && phase === null;
 
   /*
    * `detected` belongs in the dependency list.
@@ -88,27 +95,94 @@ export default function OnboardPage() {
 
   const command = onboardCommand({ name, workspace, framework, supervised, model });
 
-  function start() {
-    // Walk the four real steps rather than showing one spinner: step 4 is the slow
-    // one and the only one that can fail after the others succeeded, so collapsing
-    // them would hide where onboarding actually got to.
-    let i = 0;
+  /*
+   * REAL, as of tonight. This walked four phases on setTimeout and faked a failure for hermes —
+   * the button existed, animated, and did nothing, which is why onboarding an agent still meant
+   * typing a shell command. It now calls the two endpoints that did not exist before:
+   *
+   *   provision  creates the v1 home, generates <state>/agent-token, and writes the agent record
+   *              with its framework and preset. Nothing could do this before: the only writer of a
+   *              new agent was `POST /api/agents`, guarded by the agent's OWN token, which lives in
+   *              a home that had to be provisioned first.
+   *   start      spawns the launcher. Its output is captured to launch.log now, so a failure has a
+   *              reason instead of a silent "ok".
+   *
+   * The phases map onto real events rather than a timeline: token = provisioning, register = the
+   * launcher registering, health = the agent's own heartbeat reporting online. The last one is the
+   * slow one and the only one that can fail after the others succeeded, which is why they are shown
+   * separately.
+   */
+  async function start() {
     setPhase(onboardSteps[0].id);
-    const tick = () => {
-      i += 1;
-      if (i < onboardSteps.length) {
-        setPhase(onboardSteps[i].id);
-        setTimeout(tick, i === onboardSteps.length - 1 ? 1400 : 600);
-        return;
+    const encoded = encodeURIComponent(name);
+
+    setPhase('token');
+    const provisioned = await send(`agents/${encoded}/provision`, {
+      method: 'POST',
+      body: { framework, presetId: role || null, project: workspace || null },
+    });
+    /*
+     * ALREADY EXISTS IS NOT A FAILURE, and treating it as one is what made this form a dead end.
+     * The agent gets created, something downstream reports an error, the operator presses the button
+     * again — and now provisioning answers 409 forever while the agent it already made sits there
+     * running. Reported exactly that way: "the following creation will continue getting errors but
+     * actually agent was created successfully."
+     *
+     * So a 409 falls through to the launch step instead: the thing the operator wanted (a running
+     * agent) is still reachable, and re-provisioning is the one action that must NOT be repeated,
+     * since it would mint a new token over the one the agent is authenticating with.
+     */
+    const alreadyExists = provisioned.status === 409;
+    if (!provisioned.ok && !alreadyExists) {
+      setPhase('failed');
+      return say('fail', provisioned.error);
+    }
+    if (alreadyExists) say('ok', t('ob.existsStarting', { name }));
+
+    setPhase('register');
+    const launched = await send(`agents/${encoded}/start`, { method: 'POST' });
+    // `already online` is the goal state, not an error — reached when the operator retries after a
+    // report that lied, or when the previous attempt's launch landed while the UI was still polling.
+    const alreadyOnline = launched.status === 409;
+    if (!launched.ok && !alreadyOnline) {
+      setPhase('failed');
+      /*
+       * The agent EXISTS at this point — provisioning succeeded and the record is written. Said
+       * explicitly, because "start failed" on a page called Onboard reads as "nothing happened",
+       * and the operator would try to create it again and hit `already exists`.
+       */
+      return say('fail', t('ob.startFailed', { error: launched.error }));
+    }
+
+    /*
+     * Polled, not assumed. `/start` answers `state: 'launching'` — the process exists, and whether
+     * the agent comes up is decided over the next few seconds by the launcher and reported by the
+     * agent's own heartbeat. Treating the spawn as success is precisely the bug the backend had.
+     */
+    setPhase('health');
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      let live = null;
+      try {
+        const res = await fetch('/api/hafleet/agents', { headers: { Accept: 'application/json' } });
+        const rows = res.ok ? await res.json() : [];
+        live = Array.isArray(rows) ? rows.find((a) => a.name === name) : null;
+      } catch { /* keep polling; a transient read is not a verdict */ }
+      if (live?.online) {
+        await refresh();
+        setPhase('done');
+        return say('ok', t('ob.ok', { name }));
       }
-      // hermes with a missing extra is the fixture's crash-loop case; everything
-      // else comes up. A real failure carries the log tail, so this one does too.
-      const fails = framework === 'hermes';
-      setPhase(fails ? 'failed' : 'done');
-      say(fails ? 'fail' : 'ok', fails ? t('ob.failed', { name }) : t('ob.ok', { name }));
-    };
-    setTimeout(tick, 600);
+    }
+    /*
+     * Timed out, NOT failed-to-create. The agent is provisioned and the launcher was spawned; what
+     * did not arrive is the heartbeat. The log path is where the answer is, so it is named.
+     */
+    await refresh();
+    setPhase('failed');
+    return say('fail', t('ob.healthTimeout', { name }));
   }
+
 
   return (
     <>
@@ -297,10 +371,20 @@ export default function OnboardPage() {
               )}
 
               {chosen?.transport === 'tmux' && (
-                <div className="notice warn">{t('ob.tmuxNote', { name: chosen.displayName })}</div>
+                <div className="notice">{t('ob.tmuxNoteNow', { name: chosen.displayName })}</div>
               )}
 
-              {chosen && (chosen.acpModelFlag ? (
+              {/*
+                * Branch on TRANSPORT, not on the ACP flag alone. codex is a tmux framework with no
+                * `acpModelFlag`, so the else-branch showed it an ACP-specific note — "Codex accepts
+                * no model parameter over ACP; choose the model inside the agent" — which is both
+                * irrelevant to a tmux launch and wrong about where the model comes from: it comes
+                * from the preset, and the launcher passes it.
+                */}
+              {chosen?.transport === 'tmux' && (
+                <div className="notice">{t('ob.modelFromPreset')}</div>
+              )}
+              {chosen && chosen.transport !== 'tmux' && (chosen.acpModelFlag ? (
                 <div className="field">
                   <label htmlFor="ob-model">{t('ob.model')}</label>
                   <input
@@ -338,6 +422,25 @@ export default function OnboardPage() {
                   {phase && phase !== 'done' && phase !== 'failed' ? t('ob.starting') : t('ob.start')}
                 </button>
               </div>
+              {/*
+                * WHY it is disabled, not just that it is. The name and workspace fields carry
+                * example placeholders ("ops-agent", "~/ops-ws"), and greyed placeholder text reads
+                * as a filled field — so the button sat dead with both boxes looking complete and
+                * nothing on the page saying which input was actually empty. Reported as
+                * "can not click".
+                */}
+              {!canStart && phase === null && (
+                <p className="faint hint" style={{ marginTop: 6 }}>
+                  {t('ob.blocked', {
+                    what: [
+                      !name && t('ob.needName'),
+                      badName && t('ob.nameBad'),
+                      taken && t('ob.needFreeName'),
+                      !chosen && t('ob.needFramework'),
+                    ].filter(Boolean).join('; '),
+                  })}
+                </p>
+              )}
             </div>
           </div>
 

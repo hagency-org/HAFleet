@@ -51,7 +51,6 @@ init-profile options:
   [--mcp-config <path>]
   [--description <text>]
   [--agent-type <claude-code|codex>]
-  [--subconscious-enabled <true|false>]
   [--notes <text>]
   [--created-by <name>]
 
@@ -64,7 +63,6 @@ create-run options:
   [--created-by <name>]
   [--agent-type <claude-code|codex>]
   [--model-override <model>]
-  [--subconscious-mode <mode>]
   [--attempts <n>]
 
 prepare-trial options:
@@ -119,13 +117,7 @@ function defaultBenchmarkBackendUrl(env = process.env) {
   return `http://127.0.0.1:${defaultBenchmarkBackendPort(env)}`;
 }
 
-function benchmarkSubconsciousEventUrl(env = process.env) {
-  return `${defaultBenchmarkBackendUrl(env)}/api/subconscious/events`;
-}
 
-function benchmarkSubconsciousInvokeUrl(env = process.env) {
-  return `${defaultBenchmarkBackendUrl(env)}/api/subconscious/runtime/invoke`;
-}
 
 function resolveAbsFile(value, label, required = true) {
   const raw = normalizeText(value);
@@ -580,7 +572,7 @@ function ensureCleanPath(targetPath) {
   throw new Error(`target already exists: ${targetPath}`);
 }
 
-function buildProfilePayload({ profileId, version, description, agentType, docsFiles, claudeSettingsPath, mcpTemplatePath, subconsciousEnabled, notes, createdBy, paths }) {
+function buildProfilePayload({ profileId, version, description, agentType, docsFiles, claudeSettingsPath, mcpTemplatePath, notes, createdBy, paths }) {
   return {
     schema: BENCHMARK_PROFILE_SCHEMA,
     profileId,
@@ -607,18 +599,6 @@ function buildProfilePayload({ profileId, version, description, agentType, docsF
         scaffoldOnly: true,
       },
     },
-    subconsciousDefaults: {
-      enabled: subconsciousEnabled,
-      runtimeContractDefaults: {
-        configFamily: 'SUBCONSCIOUS_LLM_*',
-        guidanceMode: 'runtime-or-manual-fallback',
-        allowedHooks: ['UserPromptSubmit', 'PreToolUse'],
-      },
-      memoryMode: {
-        kind: 'local-episodic-journal',
-        path: 'state/subconscious/memory.json',
-      },
-    },
     metadata: {
       createdBy: createdBy || 'unknown',
       notes: notes || '',
@@ -642,7 +622,6 @@ function initProfile(args) {
   const notes = normalizeText(args.notes, 4000) || '';
   const createdBy = normalizeText(args['created-by'], 128) || process.env.USER || 'unknown';
   const agentType = normalizeAgentType(args['agent-type'] || 'claude-code');
-  const subconsciousEnabled = parseBool(args['subconscious-enabled'], false);
   if (!profileId) throw new Error('invalid --profile-id');
   if (!version) throw new Error('invalid --version');
   if (!agentType) throw new Error('invalid --agent-type');
@@ -669,19 +648,6 @@ function initProfile(args) {
   };
   walk(paths.docsDir);
 
-  writeJson(path.join(paths.configDir, 'subconscious.json'), {
-    enabled: subconsciousEnabled,
-    runtimeContractDefaults: {
-      configFamily: 'SUBCONSCIOUS_LLM_*',
-      guidanceMode: 'runtime-or-manual-fallback',
-      allowedHooks: ['UserPromptSubmit', 'PreToolUse'],
-    },
-    memoryMode: {
-      kind: 'local-episodic-journal',
-      path: 'state/subconscious/memory.json',
-    },
-  });
-
   const profile = buildProfilePayload({
     profileId,
     version,
@@ -690,7 +656,6 @@ function initProfile(args) {
     docsFiles: docsFiles.sort(),
     claudeSettingsPath,
     mcpTemplatePath: mcpConfigPath,
-    subconsciousEnabled,
     notes,
     createdBy,
     paths,
@@ -717,7 +682,6 @@ function createRun(args) {
   const createdBy = normalizeText(args['created-by'], 128) || process.env.USER || 'unknown';
   const agentType = normalizeAgentType(args['agent-type'] || 'claude-code');
   const modelOverride = normalizeText(args['model-override'], 128);
-  const subconsciousMode = normalizeText(args['subconscious-mode'], 128) || 'profile-default';
   const attempts = parsePositiveInt(args.attempts, 1);
   if (!profileId) throw new Error('invalid --profile-id');
   if (!version) throw new Error('invalid --version');
@@ -745,7 +709,6 @@ function createRun(args) {
     profile: { profileId, version },
     agentType,
     modelOverride: modelOverride || null,
-    subconsciousMode,
     taskSet: {
       id: taskSetId,
       tasks: taskIds.map((taskId) => ({ taskId })),
@@ -804,8 +767,6 @@ function prepareTrial(args) {
   const trialPaths = buildBenchmarkTrialPaths(runtimeRoot, runId, trialId, trialAgentName, trialAgentId);
   const benchmarkBackendUrl = defaultBenchmarkBackendUrl(process.env);
   const benchmarkBackendPort = defaultBenchmarkBackendPort(process.env);
-  const subconsciousEventUrl = benchmarkSubconsciousEventUrl(process.env);
-  const subconsciousInvokeUrl = benchmarkSubconsciousInvokeUrl(process.env);
   ensureCleanPath(trialPaths.trialRoot);
   ensureCleanPath(trialPaths.v1Paths.homeDir);
   mkdirSync(trialPaths.trialRoot, { recursive: true });
@@ -819,15 +780,12 @@ function prepareTrial(args) {
     '--type', run.agentType === 'codex' ? 'codex' : 'claude',
     '--home', trialPaths.homesRoot,
     '--agent-id', trialAgentId,
-    '--subconscious-enabled', profile.subconsciousDefaults.enabled ? 'true' : 'false',
   ], {
     encoding: 'utf-8',
     env: {
       ...process.env,
       HAFLEET_API: benchmarkBackendUrl,
       HAFLEET_BACKEND_PORT: String(benchmarkBackendPort),
-      HAFLEET_SUBCONSCIOUS_EVENT_URL: subconsciousEventUrl,
-      HAFLEET_SUBCONSCIOUS_INVOKE_URL: subconsciousInvokeUrl,
     },
   }).trim();
   const provision = JSON.parse(provisionJson);
@@ -854,7 +812,6 @@ function prepareTrial(args) {
     },
     agentType: run.agentType,
     modelOverride: run.modelOverride || null,
-    subconsciousMode: run.subconsciousMode || 'profile-default',
     agentName: trialAgentName,
     agentId: trialAgentId,
     agentHomePath: trialPaths.v1Paths.homeDir,
@@ -878,9 +835,6 @@ function prepareTrial(args) {
       agentManifestSnapshot: path.join(trialPaths.artifactsDir, 'agent-manifest.json'),
       logsDir: trialPaths.logsDir,
       taskOutputDir: trialPaths.taskOutputDir,
-      lettaStatePath: path.join(trialPaths.v1Paths.stateDir, 'letta.json'),
-      subconsciousRuntimePath: path.join(trialPaths.v1Paths.stateDir, 'subconscious', 'runtime.json'),
-      subconsciousMemoryPath: path.join(trialPaths.v1Paths.stateDir, 'subconscious', 'memory.json'),
     },
     execution: {
       mode: 'host-v1-home-scaffold',
@@ -894,16 +848,12 @@ function prepareTrial(args) {
           HAFLEET_RUNTIME_DIR: path.resolve(runtimeRoot),
           HAFLEET_API: benchmarkBackendUrl,
           HAFLEET_BACKEND_PORT: String(benchmarkBackendPort),
-          HAFLEET_SUBCONSCIOUS_EVENT_URL: subconsciousEventUrl,
-          HAFLEET_SUBCONSCIOUS_INVOKE_URL: subconsciousInvokeUrl,
         },
       },
       notes: 'Batch 1 scaffold only. No live agent launch or benchmark task execution performed.',
     },
     provision: {
       manifestPath: provision.manifestPath,
-      lettaPath: provision.lettaPath,
-      subconsciousRuntime: provision.subconsciousRuntime || null,
     },
   };
   const errors = validateBenchmarkTrial(trial);

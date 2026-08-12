@@ -160,6 +160,78 @@ Method note, learned twice in one day: greping vitest output for failure counts 
 matches nothing because of ANSI escapes — strip them (`sed 's/\x1b\[[0-9;]*m//g'`) or the
 count reads as "no failures", which is precisely how a flaky observation lies.
 
+### Occurrence log
+
+Appended per sighting so the membership list stops being reconstructed from prose. A file
+belongs here once it has failed in a whole-suite run and passed in isolation immediately after.
+
+| Date | File | Test | Specimen kept? |
+|---|---|---|---|
+| 2026-08-11 | `alert-store` | `agent can resolve their assigned alert via agent-token` | **no** — title only |
+| 2026-08-11 | `api-groups` | `lists groups for an agent with unread message and mention counts` | **yes** — `Error: Parse Error: Expected HTTP/, RTSP/ or ICE/` |
+| 2026-08-11 | `engagement-binding` | `the failure is RECORDED on the engagement, not only returned` | **yes** — `Error: read ECONNRESET` |
+| 2026-08-11 | `api-server-heartbeat-sweep` | `ignores heartbeats during maintenance while still updating lastSeen` | **yes** — `TypeError: Cannot read properties of undefined (reading 'lastSeen')` |
+| 2026-08-12 | `api-usage-metering` | `a fleet with nothing measured reports null, not zero` | **yes** — `Error: Parse Error: Expected HTTP/, RTSP/ or ICE/` |
+| 2026-08-12 | `api-pending-invites` | `reading the list needs the operator credential too` | **yes** — `AssertionError: expected 404 to be 401` |
+| 2026-08-12 | `api-agent-preset-binding` | `presetId null unbinds, and the ceiling goes with it` | **yes** — `Error: Parse Error: Expected HTTP/, RTSP/ or ICE/` |
+| 2026-08-12 | `server-delivery` | `queue snapshot reports untracked target observation before pane sweep` | **yes** — `AssertionError: expected 404 to be 200` |
+
+**A second same-run pair, in the same two shapes.** The last two rows also arrived together in one
+whole-suite pass and were clean in isolation immediately after (41/41) — again one transport error and
+one `expected 404 to be 200`, again in two unrelated files. That is now twice that the two shapes have
+co-occurred, which is the strongest evidence yet for the single-mechanism reading below rather than
+for two independent bugs. Neither file was touched by the change under test in either sighting.
+
+The 2026-08-12 pair landed in ONE run, and that is the useful part: a transport error and a
+`expected 404 to be …` in the same whole-suite pass, both files clean in isolation (24/24). The
+second shape is the one this document has been recording since the beginning and attributing to
+seeding or module state; seeing it beside a socket error, in the same run, is what a single
+mechanism looks like from two angles.
+
+**The first real specimens, and they change the shape of the problem.** Neither is an assertion
+failure. Both are TRANSPORT errors from supertest's own socket: one is the HTTP parser refusing a
+response that did not begin with a status line, the other a connection reset mid-read. Both files
+passed together in isolation immediately afterwards (52/52).
+
+That points somewhere different from every theory recorded above. `expected 404 to be 200` invited
+explanations about seeding, ordering and module state; `Expected HTTP/, RTSP/ or ICE/` cannot be any
+of those — the request reached a listening socket and what came back was not a valid HTTP response.
+The candidates it does admit: an in-process server torn down by `cleanup()` while a request is still
+in flight, a socket reused after close, or a response written after the connection went away. All
+three are properties of the harness's server lifecycle rather than of any test's data.
+
+The third specimen looked like a different mechanism and is probably the same one. `readJson(...).s1`
+being undefined suggests a write race, so the obvious hypothesis was the JSON write batcher — and it
+is WRONG: `batchedFiles` is `['agents.json', 'agent_runtime.json']`, so `servers.json` writes
+immediately with no debounce window to lose. Checked before it went in the log, and recorded here
+because it is the theory anyone would reach for next.
+
+What remains fits all three: a REQUEST failed at the transport layer, and the symptom depends only on
+what the test did with the result. Where the assertion was on the response, it surfaced as a parse
+error or a reset; where an earlier request had created the state a later line reads, it surfaced as a
+TypeError on something missing. That also explains why the failures look unrelated and land in a
+different file each time.
+
+Two things follow. The flaky set is probably ONE mechanism rather than the per-file coincidence the
+context-count theory kept suggesting — and it is checkable, because a lifecycle bug leaves evidence:
+whether `cleanup()` awaits the server's close, and whether any context outlives the test that made
+it. Worth doing before another round of memory measurement.
+
+Method note that made this possible: the run was `npx vitest run 2>&1 | tee <log>`, so the specimens
+survived. The previous entry was lost to a run filtered to summary lines.
+
+The `alert-store` sighting is recorded as a **failure of method, not just a new data point**: this
+section exists because ~25 observations kept only the failing title, and this one kept only the
+failing title too. It happened during unrelated work (the ADR-014 credential change), the suite was
+run with output filtered to summary lines, and by the time the failure was noticed the assertion
+diff had already scrolled. Passed twice in isolation straight after; nothing in that change touches
+alerts, agent tokens, or the backend.
+
+The lesson is narrow and worth stating: **filtering a full-suite run's output to the summary line
+throws away the only specimen you were going to get.** Run `scripts/flake-hunt.sh` when the goal is
+to catch a flake, and tee the output when it is not — a filtered run can only ever tell you that the
+problem still exists, which is already known.
+
 ### The proposed "real fix" — do not attempt as written
 
 Superseded: see "The memory theory, measured and dropped" at the top. It is blocked by

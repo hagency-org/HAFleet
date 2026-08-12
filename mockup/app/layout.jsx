@@ -45,12 +45,28 @@ export const metadata = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" className={`${roboto.variable} ${notoSansSC.variable}`}>
+    /*
+     * suppressHydrationWarning IS required here, and the previous comment claimed the opposite:
+     * "not needed because this only sets attributes, and the provider reads them back rather than
+     * overwriting". That reasoned about the wrong comparison. React does not care who wrote the
+     * attribute — it diffs the SSR HTML against the DOM as it finds it, and the pre-paint script
+     * below has already changed `lang` and `data-theme` by then. With a stored zh + light
+     * preference the mismatch fires on EVERY page load, and Next's dev overlay presents it as an
+     * error, which is what it looked like: the page crashing on navigation.
+     *
+     * The server cannot render the right values — the preference lives in localStorage, which SSR
+     * cannot read — so the mismatch is unavoidable by construction, and suppressing it on this one
+     * element is the documented escape hatch. It applies only to <html>'s own attributes, one level
+     * deep, so a genuine mismatch anywhere inside still reports.
+     */
+    <html
+      lang="en"
+      className={`${roboto.variable} ${notoSansSC.variable}`}
+      suppressHydrationWarning
+    >
       <head>
         {/* Applied before first paint. Without this the page renders light, then
-            flips to dark once React hydrates — the flash is worse than no dark mode.
-            suppressHydrationWarning on <html> is not needed because this only sets
-            attributes, and the provider reads them back rather than overwriting. */}
+            flips to dark once React hydrates — the flash is worse than no dark mode. */}
         <script
           dangerouslySetInnerHTML={{
             __html: `(function(){try{

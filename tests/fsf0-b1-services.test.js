@@ -182,7 +182,6 @@ test('services_start_all_healthy', async () => {
       MATRIX_HOMESERVER: `http://127.0.0.1:${matrixPort}`,
       MATRIX_SERVER_NAME: 'localhost',
       MATRIX_BOT_PASSWORD: 'fsf0-b1-bot-password',
-      MATRIX_AGENT_PASSWORD_SECRET: 'fsf0-b1-agent-password-secret',
     },
     dependencyTimeoutMs: 10000,
   });

@@ -332,8 +332,8 @@ Codex 跑 Level 2（`workspace-write` + `on-request`）。会改变策略的 `ex
 | `MATRIX_BOT_PASSWORD` | 空 | 桥机器人密码 —— **无法自动生成** |
 | `MATRIX_BRIDGE_SECRET` | 空 | 后端与桥之间的共享密钥；安装器会生成 |
 | `MATRIX_REG_TOKEN` | 空 | 注册 token |
-| `MATRIX_AGENT_PREFIX` | `ac_` | 派生 agent Matrix 账号的前缀 |
-| `MATRIX_AGENT_PASSWORD_SECRET` | 空 | 派生 agent 密码用的密钥 |
+| `MATRIX_AGENT_PREFIX` | `ac_` | agent Matrix 账号名的前缀 |
+| `MATRIX_AGENT_TOKEN_<AGENT>` | 空 | 某个 agent 的 Matrix access token，由你提供。agent 名大写、非字母数字转 `_`（`wf_coordinator` → `MATRIX_AGENT_TOKEN_WF_COORDINATOR`）。agent 密码不再由一个共享密钥派生 —— 见 ADR-014 决策 3 |
 | `MATRIX_DEFAULT_WAKE` | `off` | 仅 @ 寻址。未指名的群消息不唤醒任何人 |
 | `MATRIX_TRUST_MODE` | `enforce` | `enforce`、`audit` 或 `off`。公开 homeserver 上用 `enforce` |
 | `MATRIX_TRUSTED_INVITER_MXIDS` | 空 | 其邀请可自动加入的用户 |

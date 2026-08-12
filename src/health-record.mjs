@@ -125,6 +125,13 @@ export function buildBridgeHealthRecord({
   lastObservedRateLimitAt = null,
   managedRoomCount = 0,
   requiredMembership = [],
+  /*
+   * Agents with no usable Matrix credential (ADR-014 decision 6). Names only — the field carries
+   * WHO needs a human to issue a token, never the token. Named `unprovisionedAgents` deliberately:
+   * the redaction guard above rejects any key matching /credential/, so the obvious
+   * `agentsMissingCredential` would refuse to write at all.
+   */
+  unprovisionedAgents = [],
   now = () => new Date(),
 } = {}) {
   return {
@@ -141,6 +148,9 @@ export function buildBridgeHealthRecord({
     lastObservedRateLimitAt: isoOrNull(lastObservedRateLimitAt),
     managedRoomCount: Number.isInteger(managedRoomCount) ? managedRoomCount : 0,
     requiredMembership: Array.isArray(requiredMembership) ? requiredMembership.map(normalizeMembershipEntry) : [],
+    unprovisionedAgents: Array.isArray(unprovisionedAgents)
+      ? [...new Set(unprovisionedAgents.filter((name) => typeof name === 'string' && name.trim()).map((name) => name.trim()))].sort()
+      : [],
   };
 }
 

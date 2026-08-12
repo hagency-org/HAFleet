@@ -66,7 +66,6 @@ describe('task-writer graph integration', () => {
         '--name', 'alpha',
         '--type', 'claude',
         '--home', homeRoot,
-        '--subconscious-enabled', 'false',
       ]);
       const manifestRoot = path.join(homeRoot, 'agents', 'agent_alpha');
       const workdir = path.join(manifestRoot, 'workdir');

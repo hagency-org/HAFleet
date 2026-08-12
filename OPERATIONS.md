@@ -271,3 +271,79 @@ device. Nothing is archived, because there is nothing to archive.
 error then means a genuine device mismatch the bridge is right to refuse. Do not delete it —
 the bridge archives a mismatched store itself on the next start, and the archive is the
 rollback path.
+
+## 12) Provisioning An Agent's Matrix Credential
+
+Agents no longer get a Matrix password from HAFleet. The bridge used to derive one —
+`sha256(MATRIX_AGENT_PASSWORD_SECRET + ':' + agentName)` — and that mechanism is deleted
+(ADR-014 decision 3), because the master secret could not be rotated, the credentials it
+produced could not be revoked, and it needed account-creation rights on the homeserver.
+
+You now supply the token. **Existing deployments need no action**: tokens already cached in
+`bridge-state.json` keep working untouched. This applies to a NEW agent, or to one whose token
+was revoked or expired.
+
+### The symptom
+
+Startup logs one line per affected agent plus a summary:
+
+```
+[agent-credential] NEEDS PROVISIONING — agent 'wf_coordinator' cannot act on Matrix (context=…): …
+[agent-credential] 2 agent(s) have no usable Matrix credential and cannot send or receive: wf_coordinator, wf_reviewer. Set MATRIX_AGENT_TOKEN_<AGENT> for each.
+```
+
+The agent stays up and keeps working everywhere else; it just cannot send or receive on Matrix.
+Nothing retries into a fix — that is deliberate, and the reason the log says PROVISIONING.
+
+### Steps
+
+1. **Create or claim the account** on the homeserver in `MATRIX_HOMESERVER`. The MXID the bridge
+   expects is in the error message — `@ac_<agent>:<server>` by default (`MATRIX_AGENT_PREFIX`).
+   On a Synapse you administer:
+
+   ```bash
+   register_new_matrix_user -u ac_wf_coordinator -c /etc/matrix-synapse/homeserver.yaml http://localhost:8008
+   ```
+
+2. **Get an access token for it — from a DEDICATED login.** Do not paste a token from your own
+   Element session: an access token identifies a *device*, and sharing one device between the
+   bridge and a human client advances the same Olm/Megolm state from two stores, which can break
+   decryption for both, durably (ADR-008; ADR-014 decision 7).
+
+   ```bash
+   curl -s -X POST "$MATRIX_HOMESERVER/_matrix/client/v3/login" \
+     -H 'Content-Type: application/json' \
+     -d '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"ac_wf_coordinator"},"password":"<the password you just set>","initial_device_display_name":"hafleet-bridge"}' \
+     | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
+   ```
+
+3. **Put it in `.env`**, one variable per agent — name upper-cased, non-alphanumerics as `_`:
+
+   ```
+   MATRIX_AGENT_TOKEN_WF_COORDINATOR=syt_…
+   ```
+
+   Never commit it. `.env` is gitignored and should be `0600`.
+
+4. **Restart the bridge.** It validates the token against `/whoami`, adopts it into
+   `bridge-state.json`, and sets the agent's display name. Success looks like:
+
+   ```
+   [agent-credential] adopted env Matrix token for 'wf_coordinator' (@ac_wf_coordinator:matrix.example.com)
+   ```
+
+### Rotating or revoking one agent
+
+Revoke server-side (or delete the device), issue a new token, replace that agent's variable,
+restart. The bridge tries the stored token first, sees it rejected, and adopts the fresh one — no
+other agent is affected, which is the property the shared secret never had.
+
+To revoke WITHOUT replacing: revoke server-side and remove the variable. The agent then reports
+NEEDS PROVISIONING and stays off Matrix. Nothing can re-mint the credential, which is the point.
+
+### If it reports rejection during a homeserver outage
+
+It should not. A 401/403 is treated as a dead credential; anything else — 5xx, timeout, DNS
+failure — is treated as transient and rethrown, precisely so an outage is never misread as mass
+revocation. If you DO see NEEDS PROVISIONING while the homeserver is down, that is a bug worth
+reporting rather than a reason to reissue tokens.

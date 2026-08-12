@@ -1,5 +1,9 @@
 # Agentchat Authentication & Trust Model
 
+> **已移除(2026-08-12)**:本文提到的「潜意识 / subconscious」子系统已整体删除,详见
+> `knowledge/decisions/adr-015-remove-subconscious-memory-subsystem.md`。以下描述保留为当时的记录。
+
+
 Date: 2026-03-28
 Scope: backend-v2.js, bridge-matrix.js, mcp-server-core.js, bot-commands.js, provisioning scripts
 Author: ac-researcher (task 5.35)

@@ -39,7 +39,6 @@ _resolve_script_dir() {
 SCRIPT_DIR="$(_resolve_script_dir)"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
 DATA_DIR=""
-SUBCONSCIOUS_SETUP_SCRIPT="$BASE_DIR/scripts/configure-v1-subconscious.js"
 LAUNCH_POLICY_CHECK="$BASE_DIR/scripts/validate-agent-launch-extra-args.js"
 SANDBOX_ROOTS_RESOLVER="$BASE_DIR/scripts/resolve-agent-sandbox-roots.js"
 FRAMEWORK_INFO="$BASE_DIR/scripts/framework-info.js"
@@ -111,12 +110,50 @@ Usage: hafleet-up <name> [path] [claude|codex] [--fresh] [--attach] [--allow-sha
 USAGE
 }
 
+# The agent's state directory, where <state>/agent-token lives.
+#
+# Metadata only carries an explicit state dir for v1 agents (`up-v1`). For an
+# agent created by plain `hafleet up` it is empty, and callers that treated
+# "empty" as "omit the variable" left the MCP server unable to find the token —
+# so with HAFLEET_AGENT_TOKEN_MODE=hard every call the agent made was rejected
+# and its inbox never drained, with nothing said in the agent's own pane.
+# Derived in one place so the MCP config, the Codex env injection and the token
+# preflight cannot disagree about where the token is.
+resolve_agent_state_dir() {
+  printf '%s' "${SAVED_STATE_DIR:-${HAFLEET_HOMEDIR:-$HOME/.hafleet}/agents/agent_${NAME}/state}"
+}
+
+# The agent's own token, when this host has provisioned one.
+#
+# Needed because the agent-scoped routes are guarded by `requireAgentToken`, which demands
+# X-Agent-Token as soon as a token is LOADED for that agent — the operator bearer does not
+# substitute for it. Without this header `POST /api/agents` answered 403 every time for a managed
+# agent, the framework in the payload ("codex") never landed, and the agent ended up registered by
+# its own MCP server as the generic type "agent". That is not cosmetic: seatIdentity() reads
+# agent.type as the framework, so the seat resolved to credentialHome `~/.agent` and every
+# framework collapsed into one seat, defeating the over-subscription accounting seats exist for.
+agent_token_header() {
+  local state_dir token_file token
+  # Defence in depth. resolve_agent_state_dir is now defined immediately above, because it USED to
+  # live ~1300 lines below and register_backend_agent (line ~1371) ran first — so the header came
+  # out empty, registration 403'd, and the framework was lost. Order matters for calls, not
+  # definitions; the guard stays in case a future edit moves either one again.
+  declare -F resolve_agent_state_dir >/dev/null 2>&1 || return 0
+  state_dir="$(resolve_agent_state_dir)"
+  token_file="$state_dir/agent-token"
+  [ -s "$token_file" ] || return 0
+  token="$(tr -d '\r\n' < "$token_file" 2>/dev/null || true)"
+  [ -n "$token" ] || return 0
+  printf 'X-Agent-Token: %s' "$token"
+}
+
 api_curl() {
-  if [ -n "$AUTH_HEADER" ]; then
-    curl --noproxy '*' -s -H "$AUTH_HEADER" "$@"
-  else
-    curl --noproxy '*' -s "$@"
-  fi
+  local agent_header
+  agent_header="$(agent_token_header)"
+  local -a extra=()
+  [ -n "$AUTH_HEADER" ] && extra+=(-H "$AUTH_HEADER")
+  [ -n "$agent_header" ] && extra+=(-H "$agent_header")
+  curl --noproxy '*' -s "${extra[@]}" "$@"
 }
 
 url_encode() {
@@ -288,7 +325,6 @@ register_backend_agent() {
     AGENT_HOME_DIR="${SAVED_HOME_DIR:-}" \
     AGENT_WORKDIR="${SAVED_WORKDIR:-}" \
     AGENT_STATE_DIR="${SAVED_STATE_DIR:-}" \
-    SUBCONSCIOUS_ENABLED="${SAVED_SUBCONSCIOUS_ENABLED:-}" \
     python3 - <<'PY'
 import json
 import os
@@ -344,20 +380,41 @@ if workdir:
 if state_dir:
     payload["stateDir"] = state_dir
 
-subconscious_enabled = parse_bool(os.environ.get("SUBCONSCIOUS_ENABLED", ""))
-if subconscious_enabled is not None:
-    payload["subconsciousEnabled"] = subconscious_enabled
 
 print(json.dumps(payload))
 PY
 )
-  if api_curl -X POST "$BACKEND_URL/api/agents" \
+  # STATUS, not exit code. `curl -s` exits 0 for any HTTP response it receives, so testing
+  # `if api_curl ...` reported success on 403, 404 and 500 alike — with the body sent to
+  # /dev/null, so the reason was unrecoverable too. This route is agent-token guarded
+  # (`requireAgentToken`), and the launcher sends only the operator bearer, so a managed agent
+  # whose token is already loaded answers 403 here EVERY time and printed
+  # "Registered online" anyway. The agent's own MCP server registers it a moment later, which
+  # is why nobody noticed: the message was wrong and the outcome was right.
+  local reg_body reg_status
+  reg_body="$(mktemp -t hafleet-reg)"
+  # No `|| echo 000` here: curl -w ALREADY prints 000 when it cannot connect, and the fallback
+  # appended a second one, yielding "000000" — which matched no case and reported an unreachable
+  # backend as "refused HTTP 000000". Caught by exercising the branch instead of assuming it.
+  reg_status="$(api_curl -o "$reg_body" -w '%{http_code}' -X POST "$BACKEND_URL/api/agents" \
     -H 'Content-Type: application/json' \
-    -d "$payload" >/dev/null 2>&1; then
-    echo "Registered '$NAME' online in backend."
-  else
-    echo "Warning: failed to register '$NAME' online in backend (heartbeat may backfill)." >&2
-  fi
+    -d "$payload" 2>/dev/null)" || true
+  [ -n "$reg_status" ] || reg_status=000
+  case "$reg_status" in
+    2??)
+      echo "Registered '$NAME' online in backend."
+      ;;
+    000)
+      echo "Warning: could not reach the backend at $BACKEND_URL to register '$NAME' (heartbeat may backfill)." >&2
+      ;;
+    *)
+      # Quoted, because the reason is the actionable part — "agent token required but not
+      # provided" tells an operator something entirely different from a 500.
+      echo "Warning: backend refused registration of '$NAME' with HTTP $reg_status: $(head -c 200 "$reg_body" 2>/dev/null)" >&2
+      echo "  The agent's own MCP heartbeat may still register it; check with: hafleet ls" >&2
+      ;;
+  esac
+  rm -f "$reg_body" 2>/dev/null || true
 }
 
 REPO_DIR="$(dirname "$BASE_DIR")"
@@ -524,7 +581,6 @@ SAVED_AGENT_ID=""
 SAVED_HOME_DIR=""
 SAVED_WORKDIR=""
 SAVED_STATE_DIR=""
-SAVED_SUBCONSCIOUS_ENABLED=""
 SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK=""
 SAVED_RUNTIME_PROFILE_PRIMARY_MODEL=""
 SAVED_RUNTIME_PROFILE_PRIMARY_EXTRA_ARGS=""
@@ -547,7 +603,6 @@ if [ -f "$META_FILE" ]; then
   SAVED_HOME_DIR=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('homeDir',''))" 2>/dev/null || true)
   SAVED_WORKDIR=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('workdir',''))" 2>/dev/null || true)
   SAVED_STATE_DIR=$(python3 -c "import json; d=json.load(open('$META_FILE')); print(d.get('stateDir',''))" 2>/dev/null || true)
-  SAVED_SUBCONSCIOUS_ENABLED=$(python3 -c "import json; d=json.load(open('$META_FILE')); print('1' if d.get('subconsciousEnabled') is True else ('0' if d.get('subconsciousEnabled') is False else ''))" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_PRIMARY_FRAMEWORK=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('framework')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_PRIMARY_MODEL=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('model')) or '')" 2>/dev/null || true)
   SAVED_RUNTIME_PROFILE_PRIMARY_EXTRA_ARGS=$(python3 -c "import json; d=json.load(open('$META_FILE')); print((((d.get('runtimeProfile') or {}).get('primary') or {}).get('extraArgs')) or '')" 2>/dev/null || true)
@@ -562,9 +617,6 @@ if [ -f "$META_FILE" ]; then
   SAVED_RUNTIME_PROFILE_SUPERVISOR_JSON=$(python3 -c "import json; d=json.load(open('$META_FILE')); v=((d.get('runtimeProfile') or {}).get('supervisor')); print(json.dumps(v, separators=(',',':')) if isinstance(v, dict) else '')" 2>/dev/null || true)
 fi
 
-if [ -z "${SAVED_SUBCONSCIOUS_ENABLED:-}" ] && [ -n "${SAVED_HOME_DIR:-}" ] && [ -f "${SAVED_HOME_DIR}/agent.json" ]; then
-  SAVED_SUBCONSCIOUS_ENABLED=$(python3 -c "import json; d=json.load(open('${SAVED_HOME_DIR}/agent.json')); print('1' if d.get('subconsciousEnabled') is True else ('0' if d.get('subconsciousEnabled') is False else ''))" 2>/dev/null || true)
-fi
 
 # Apply defaults from meta
 [ -z "$AGENT_PATH" ] && AGENT_PATH="$SAVED_PATH"
@@ -1305,10 +1357,28 @@ if [ "$TYPE" = "claude" ] && [ "$FRESH" = false ]; then
   fi
 fi
 
+# A missing resume-id means one of two very different things, and conflating them made the
+# FIRST launch of every codex agent fail with advice that cannot be followed: "inspect archive
+# tail" names a history that does not exist yet.
+#
+#   NEVER RUN — no archive, no resume-id. There is no session to lose, so starting fresh is the
+#   only thing it could mean. Proceed, and say so.
+#
+#   RAN BEFORE — an archive exists but the resume-id is gone. THIS is what the guard is for:
+#   starting fresh here silently abandons real history, which is why it stays a hard error
+#   rather than a fallback.
 if [ "$TYPE" = "codex" ] && [ "$FRESH" = false ] && [ ! -f "$RESUME_FILE" ]; then
-  echo "Error: missing resume-id for codex agent '$NAME'." >&2
-  echo "Manual check required: inspect archive tail and set $RESUME_FILE." >&2
-  exit 1
+  if compgen -G "$AGENT_DATA/archive-*.txt" > /dev/null 2>&1; then
+    echo "Error: missing resume-id for codex agent '$NAME', but it has prior sessions." >&2
+    echo "Refusing to start fresh: that would abandon the existing history." >&2
+    echo "Manual check required: inspect the archive tail and set the resume-id explicitly." >&2
+    echo "  tail -n 10 $AGENT_DATA/archive-*.txt" >&2
+    echo "  echo '<session-id>' > $RESUME_FILE" >&2
+    echo "Or pass --fresh if abandoning that history is what you intend." >&2
+    exit 1
+  fi
+  echo "No prior session for codex agent '$NAME' — starting a fresh one."
+  FRESH=true
 fi
 if [ "$TYPE" = "codex" ] && [ "$FRESH" = false ]; then
   RID_CHECK=$(cat "$RESUME_FILE" 2>/dev/null || true)
@@ -1367,18 +1437,6 @@ ensure_codex_project_trust
 # ── Generate per-agent .mcp.json ──────────────────────────────────────
 # Bake all required env vars into .mcp.json for Claude Code agents.
 # (Codex agents use -c flags instead — see Codex launch section below.)
-# The agent's state directory, where <state>/agent-token lives.
-#
-# Metadata only carries an explicit state dir for v1 agents (`up-v1`). For an
-# agent created by plain `hafleet up` it is empty, and callers that treated
-# "empty" as "omit the variable" left the MCP server unable to find the token —
-# so with HAFLEET_AGENT_TOKEN_MODE=hard every call the agent made was rejected
-# and its inbox never drained, with nothing said in the agent's own pane.
-# Derived in one place so the MCP config, the Codex env injection and the token
-# preflight cannot disagree about where the token is.
-resolve_agent_state_dir() {
-  printf '%s' "${SAVED_STATE_DIR:-${HAFLEET_HOMEDIR:-$HOME/.hafleet}/agents/agent_${NAME}/state}"
-}
 
 ensure_agent_mcp_config() {
   local mcp_json="$AGENT_PATH/.mcp.json"
@@ -1557,82 +1615,6 @@ if [[ "${SAVED_AGENT_MODEL_VERSION:-}" == 1* ]] && [ -n "${SAVED_HOME_DIR:-}" ] 
   IS_V1_AGENT=1
 fi
 
-V1_SUBCONSCIOUS_ENABLED="0"
-V1_SUBCONSCIOUS_PLUGIN_ROOT=""
-V1_SUBCONSCIOUS_SETTINGS_PATH=""
-V1_SUBCONSCIOUS_LETTA_PATH=""
-V1_SUBCONSCIOUS_LETTA_AGENT_ID=""
-V1_SUBCONSCIOUS_EVENT_URL=""
-V1_SUBCONSCIOUS_INVOKE_URL=""
-
-configure_v1_subconscious() {
-  [ "$IS_V1_AGENT" = "1" ] || return 0
-  [ "$TYPE" = "claude" ] || return 0
-  [ -f "$SUBCONSCIOUS_SETUP_SCRIPT" ] || {
-    echo "Warning: missing subconscious setup script: $SUBCONSCIOUS_SETUP_SCRIPT" >&2
-    return 0
-  }
-
-  local enabled_flag event_url setup_json
-  enabled_flag="true"
-  if [ "${SAVED_SUBCONSCIOUS_ENABLED:-}" = "0" ]; then
-    enabled_flag="false"
-  fi
-  event_url="${HAFLEET_SUBCONSCIOUS_EVENT_URL:-$BACKEND_URL/api/subconscious/events}"
-
-  if ! setup_json="$(
-    HAFLEET_SUBCONSCIOUS_EVENT_URL="$event_url" \
-      node "$SUBCONSCIOUS_SETUP_SCRIPT" \
-        --agent-name "$NAME" \
-        --agent-id "${SAVED_AGENT_ID:-$NAME}" \
-        --workdir "$SAVED_WORKDIR" \
-        --state-dir "$SAVED_STATE_DIR" \
-        --enabled "$enabled_flag" \
-        --event-url "$event_url" 2>/dev/null
-  )"; then
-    echo "Warning: subconscious setup failed for '$NAME'; continuing without hook wiring." >&2
-    return 0
-  fi
-
-  [ -n "$setup_json" ] || {
-    echo "Warning: subconscious setup returned empty response for '$NAME'." >&2
-    return 0
-  }
-
-  eval "$(
-    SETUP_JSON="$setup_json" python3 - <<'PY' 2>/dev/null || true
-import json
-import os
-import shlex
-
-raw = os.environ.get("SETUP_JSON", "")
-try:
-    data = json.loads(raw)
-except Exception:
-    raise SystemExit(0)
-
-def emit(key, value):
-    print(f"{key}={shlex.quote(str(value))}")
-
-emit("V1_SUBCONSCIOUS_ENABLED", "1" if data.get("enabled") is True else "0")
-emit("V1_SUBCONSCIOUS_PLUGIN_ROOT", data.get("pluginRoot") or "")
-emit("V1_SUBCONSCIOUS_SETTINGS_PATH", data.get("settingsPath") or "")
-emit("V1_SUBCONSCIOUS_LETTA_PATH", data.get("lettaPath") or "")
-emit("V1_SUBCONSCIOUS_LETTA_AGENT_ID", data.get("lettaAgentId") or "")
-emit("V1_SUBCONSCIOUS_EVENT_URL", data.get("eventUrl") or "")
-emit("V1_SUBCONSCIOUS_INVOKE_URL", data.get("invokeUrl") or "")
-PY
-  )"
-
-  if [ "$V1_SUBCONSCIOUS_ENABLED" = "1" ]; then
-    echo "  Subconscious hooks: enabled ($V1_SUBCONSCIOUS_SETTINGS_PATH)"
-  else
-    echo "  Subconscious hooks: disabled by metadata"
-  fi
-}
-
-configure_v1_subconscious
-
 LAUNCH_ENV_FILE="$AGENT_DATA/launch-env.sh"
 : > "$LAUNCH_ENV_FILE"
 chmod 600 "$LAUNCH_ENV_FILE"
@@ -1693,16 +1675,6 @@ if [ "$IS_V1_AGENT" = "1" ]; then
   write_launch_env "HAFLEET_AGENT_HOME" "$SAVED_HOME_DIR"
   write_launch_env "HAFLEET_AGENT_WORKDIR" "$SAVED_WORKDIR"
   write_launch_env "HAFLEET_AGENT_STATE_DIR" "$SAVED_STATE_DIR"
-  write_launch_env "HAFLEET_LETTA_STATE_FILE" "$V1_SUBCONSCIOUS_LETTA_PATH"
-  write_launch_env "HAFLEET_SUBCONSCIOUS_EVENT_URL" "$V1_SUBCONSCIOUS_EVENT_URL"
-  write_launch_env "HAFLEET_SUBCONSCIOUS_INVOKE_URL" "$V1_SUBCONSCIOUS_INVOKE_URL"
-  if [ "$V1_SUBCONSCIOUS_ENABLED" = "1" ]; then
-    write_launch_env "HAFLEET_SUBCONSCIOUS_ENABLED" "1"
-    write_launch_env "HAFLEET_SUBCONSCIOUS_PLUGIN_ROOT" "$V1_SUBCONSCIOUS_PLUGIN_ROOT"
-    write_launch_env "LETTA_AGENT_ID" "$V1_SUBCONSCIOUS_LETTA_AGENT_ID"
-  else
-    write_launch_env "HAFLEET_SUBCONSCIOUS_ENABLED" "0"
-  fi
 fi
 
 ensure_claude_owner_approval_ask_rules() {

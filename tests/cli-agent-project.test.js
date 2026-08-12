@@ -53,7 +53,6 @@ describe('v1 agent project provisioning', () => {
       '--name', 'solo-agent',
       '--type', 'codex',
       '--home', homeRoot,
-      '--subconscious-enabled', 'false',
     ]);
     const payload = JSON.parse(output);
     const manifestPath = payload?.paths?.agentJsonPath;
@@ -84,7 +83,6 @@ describe('v1 agent project provisioning', () => {
       '--name', 'project-agent',
       '--type', 'claude',
       '--home', homeRoot,
-      '--subconscious-enabled', 'false',
     ]);
 
     const cliEnv = { HAFLEET_HOMEDIR: homeRoot };
