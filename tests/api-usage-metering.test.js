@@ -208,6 +208,13 @@ describe('the reader reports every bound that bit', () => {
     /*
      * A silent drop understates consumption while looking like a total. The window exists
      * so a scan stays cheap; saying so is what keeps the number honest.
+     *
+     * `narrowed: true` is now STATED rather than left off. This directory holds one
+     * workspace's transcripts, which is what earns the strong claim — "this figure
+     * understates consumption". A search that cannot be narrowed to one workspace (codex,
+     * whose sessions all share one tree) makes the weaker one, because the dropped file's
+     * cwd was never read and it may belong to any agent. Absent means non-narrowed
+     * deliberately: the default has to be the claim that needs less evidence.
      */
     dir = mkdtempSync(path.join(os.tmpdir(), 'meter-old-'));
     const old = path.join(dir, 'old.jsonl');
@@ -215,8 +222,23 @@ describe('the reader reports every bound that bit', () => {
     const ancient = new Date(Date.now() - 90 * 24 * 3600 * 1000);
     utimesSync(old, ancient, ancient);
     const reader = makeSessionReader({ windowMs: 24 * 3600 * 1000 });
-    expect(await drain(reader, { dir })).toHaveLength(0);
+    expect(await drain(reader, { dir, narrowed: true })).toHaveLength(0);
     expect(boundsReport(reader.bounds)).toMatch(/older than the window/);
+  });
+
+  test('the same drop in a NON-narrowed search is still reported, in weaker terms', async () => {
+    // Nothing goes silent either way — only the claim changes. See metering-discovery.test.js
+    // for why the distinction had to exist once codex scans started recursing.
+    dir = mkdtempSync(path.join(os.tmpdir(), 'meter-old-wide-'));
+    const old = path.join(dir, 'old.jsonl');
+    writeFileSync(old, transcript('/ws', 10));
+    const ancient = new Date(Date.now() - 90 * 24 * 3600 * 1000);
+    utimesSync(old, ancient, ancient);
+    const reader = makeSessionReader({ windowMs: 24 * 3600 * 1000 });
+    expect(await drain(reader, { dir, narrowed: false })).toHaveLength(0);
+    const report = boundsReport(reader.bounds);
+    expect(report).toMatch(/outside the window/);
+    expect(report).not.toMatch(/understates/);
   });
 
   test('the file ceiling is reported, and the newest files are the ones kept', async () => {

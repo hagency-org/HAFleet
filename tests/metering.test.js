@@ -213,7 +213,16 @@ describe('attributing to an agent', () => {
       readSessions: reader([{ file: 'x.jsonl', text: other }]),
     });
     expect(r.available).toBe(false);
-    expect(r.reason).toMatch(/none recorded this workspace/);
+    /*
+     * Wording widened when the zero-match reason learned to state TWO facts at once: what it
+     * opened, and what it never reached. "opened 1 transcript(s), none of which recorded this
+     * workspace" so the unreached clause can be appended with "; and ...". The old phrasing
+     * was a complete sentence that could not compose, which is how it came to imply an
+     * exhaustive search on a scan that had stopped at its file ceiling.
+     */
+    expect(r.reason).toMatch(/none of which recorded this workspace/);
+    // Nothing was left unreached here, so the scan must NOT hedge about bounds.
+    expect(r.reason).not.toMatch(/never opened/);
   });
 
   test('an agent with no workspace is unattributable, not zero', async () => {

@@ -175,6 +175,13 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-12 | `api-pending-invites` | `reading the list needs the operator credential too` | **yes** — `AssertionError: expected 404 to be 401` |
 | 2026-08-12 | `api-agent-preset-binding` | `presetId null unbinds, and the ceiling goes with it` | **yes** — `Error: Parse Error: Expected HTTP/, RTSP/ or ICE/` |
 | 2026-08-12 | `server-delivery` | `queue snapshot reports untracked target observation before pane sweep` | **yes** — `AssertionError: expected 404 to be 200` |
+| 2026-08-12 | `approval-fail-closed` | `denies a pending request and broadcasts the verdict` | **yes** — `Error: Test timed out in 30000ms` (a THIRD shape; clean in isolation, 7/7) |
+
+**A third shape, and it fits the same reading.** A 30-second TIMEOUT, whole-suite only, clean in
+isolation. A test that hangs rather than asserting wrongly is what a request that never gets a
+response looks like from the caller's side — the same event the `Parse Error` specimens show from
+the socket's side and the `404` specimens show from the router's. Three shapes, one mechanism: the
+harness's server lifecycle, not any test's data.
 
 **A second same-run pair, in the same two shapes.** The last two rows also arrived together in one
 whole-suite pass and were clean in isolation immediately after (41/41) — again one transport error and
