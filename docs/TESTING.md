@@ -6,7 +6,50 @@ npm run test:kernel       # sharded kernel + CLI subset
 npm run verify:ci         # all gates (needs GNU timeout; macOS: brew install coreutils)
 ```
 
-## The backend test harness leaks memory, and it matters
+## The memory theory, measured and dropped (2026-08-11)
+
+**The section below is retained for its measurements but its DIAGNOSIS is wrong.** The retention
+it describes is real; the claim that it causes the intermittent failures is not, and two rounds
+of effort were aimed at it before anyone measured the thing it depends on.
+
+Measured with `scripts/heap-probe-config.js`:
+
+| file | contexts (runtime) | end heap | share of Node's limit |
+|---|---|---|---|
+| `api-groups` | 45 | 642 MB | **15%** |
+| `api-tasks` | 16 | 249 MB | 6% |
+| `alert-store` | 15 | 234 MB | 5% |
+| `api-pool` | 1 | 43 MB | **1%** |
+
+Node's `heap_size_limit` here is **4288 MB**. Nothing comes close to it, so "a worker gets
+recycled or a module evaluates only partway" has no pressure to arise from. And `api-pool` — one
+context, 43 MB, 1% of the limit — is one of the files that flakes. Memory cannot be why.
+
+Two further measurements close the theory's escape routes:
+
+- **Retention does not accumulate across the run.** Each file gets a fresh worker process (the
+  pid in the probe output changes per file) and every file starts near 12 MB regardless of what
+  ran before. So the heaviest file's 642 MB cannot pressure a later light one.
+- **A dead instance cannot be made cheap.** Emptying every JSON store, Map and Set on `cleanup()`
+  moved the numbers by 0.5%: 642→639, 249→249, 234→236 MB. The ~14 MB per instance is the
+  MODULE — 13k lines of code, its closures, an express Router with ~101 layers — not its data. A
+  test seeds two agents; that is kilobytes.
+
+**And the prescribed fix would not have worked.** "Make the runtime directory injectable so one
+module instance serves every test" is blocked by something the inventory below missed: **51 test
+files inject `seed.env` at 156 sites**, including `API_TOKEN` (17), `AGENT_HEARTBEAT_TTL_MS` (12),
+`HAFLEET_AGENT_TOKEN_MODE` (10) and `AGENT_SERVER_SWEEP_INTERVAL_MS` (7) — all read into module
+CONSTANTS at import time. One shared instance would serve all of them whatever the first import
+saw, silently: a test handed the wrong TTL does not fail, it measures the wrong thing.
+
+So: do not spend more effort on memory here, and do not reduce contexts for flake reasons (wall
+clock is dominated by test execution, ~322 s of a 342 s run, not by the ~5 s of module imports).
+The cause of the intermittent failures is still **unknown**; what is now known is where it is not.
+The live leads are the three specimens in "The specimen round" below — one of which was a genuine
+timing race and is fixed, which is itself evidence that these failures are several unrelated bugs
+rather than one systemic cause.
+
+## The backend test harness leaks memory (measurements sound, diagnosis superseded above)
 
 `tests/helpers/backend-test-runtime.js` gives each test an isolated backend by
 importing `backend-v2.js` with a unique cache-buster:
@@ -29,7 +72,7 @@ start:         11 MB
 There are **212** `createBackendTestContext()` call sites, plus 34 `importServer()`
 calls doing the same to `server.js`.
 
-### Why it causes flaky failures rather than a clean OOM
+### Why it was thought to cause flaky failures (superseded)
 
 Vitest discards each test *file's* module graph, so the leak is per-file rather
 than cumulative — a fresh file starts at 11 MB again. But a single heavy file can
@@ -117,7 +160,12 @@ Method note, learned twice in one day: greping vitest output for failure counts 
 matches nothing because of ANSI escapes — strip them (`sed 's/\x1b\[[0-9;]*m//g'`) or the
 count reads as "no failures", which is precisely how a flaky observation lies.
 
-### The real fix, not yet done
+### The proposed "real fix" — do not attempt as written
+
+Superseded: see "The memory theory, measured and dropped" at the top. It is blocked by
+import-time `seed.env` in 51 files, and there is no memory pressure for it to relieve. Kept
+because the state inventory below is accurate and useful for other purposes — with one
+correction: there are **8** module-level `Set`s, not 3.
 
 Stop minting a module per context. The cache-buster exists only because
 `backend-v2.js` reads `HAFLEET_RUNTIME_DIR` at module scope
