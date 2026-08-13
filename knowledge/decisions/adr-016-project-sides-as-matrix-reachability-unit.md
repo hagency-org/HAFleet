@@ -18,7 +18,7 @@ carries its own status line and the table is the index.
 |---|---|---|---|
 | 1 | 项目方 (project side) is a first-class entity: one homeserver, one credential, one representative | **decided, not built** | no such record exists; `HOMESERVER` is one module constant with **51** product-code references (`bridge-matrix.js` 44, `lib/bot-commands.js` 7) plus 12 in tests, at `8c78a7e` |
 | 2 | non-federation is the assumption; federation is an optimization inside the same model | **decided, not built** | ADR-014's amendment says the opposite — see "What this reverses" |
-| 3 | the representative is registered per project side and is NOT an agent | **decided, not built** | the two roles are one thing today: the agent itself must be invited and must join |
+| 3 | the representative is registered per project side and is NOT an agent | **decided, not built**; in the first pass | the two roles are one thing today: the agent itself must be invited and must join |
 | 4 | an agent instance is minted on acceptance from a resource declaration | **decided, not built** | `POST /api/dispatch` Phase 4 returns a `provision` plan, but gated on agent COUNT and unaware of any project side |
 | 5 | the invite object is a room alias plus `knock` | **decided, not built** | `joinRoomByAlias`, `room_alias`, `matrix.to`, `inviteToken`, `joinCode` — zero matches repository-wide |
 | 6 | budget is admission control, and provisioning becomes a new admission point | **partly decided, partly built** | approval-time admission is built and tested; provisioning-time admission does not exist — Phase 4 never consults the ledger |
@@ -164,16 +164,14 @@ single global bot, one per deployment rather than one per project side.
 admission first (「hafleet 需要先配置代表的加入」), then requests can arrive. Nothing about intake works
 before a project side exists.
 
-**The one open question, and it is the whole cost.** A representative that must read an **encrypted**
-intake room needs its own device and crypto store — the doubling ADR-014 feared. If intake rooms are
-**plaintext**, the representative is an ordinary account with a token and the cost vanishes. HAFleet's
-agents already send plaintext unconditionally, so an encrypted project room is *already* degraded
-today: the borrower sees unencrypted messages from the agent. The design position that follows is to
-**require plaintext intake rooms and state it to the project side**, rather than discover it — but
-this is an operator decision about what we ask projects for, and it is recorded here as open rather
-than assumed.
+**What this used to cost, and no longer does.** A representative that must read an **encrypted**
+intake room needs its own device and crypto store — the doubling ADR-014 feared. **Settled
+2026-08-13: intake rooms are plaintext**, so the representative is an ordinary account holding a
+token, and that cost is gone. The reasoning is under "Questions settled" below; in short, HAFleet's
+agents send plaintext unconditionally, so requiring it of intake rooms makes an existing constraint
+explicit rather than imposing a new one.
 
-*Status — **decided, not built**; the plaintext-intake question is **open**.*
+*Status — **decided, not built**. The plaintext-intake question that gated its cost is **closed**.*
 
 **4. An agent instance is minted on acceptance, from a durable resource declaration. Manual creation
 stops being the mechanism.** The operator's definition is adopted verbatim: a resource is 「coding
@@ -364,14 +362,52 @@ this decision.
   direction: it requires every project to have an account on our server, which is the same
   account-creation privilege problem ADR-014 rejected, pointed the other way.
 
-## Open Questions
+## Questions settled 2026-08-13
 
-1. **Must the representative read encrypted intake rooms?** This decides whether a project side costs
-   a crypto store or a token. The position argued in decision 3 is to require plaintext intake and
-   say so to the project side, since HAFleet's agents are already plaintext-only — but it is the
-   operator's call about what we ask projects for.
-2. **Is a project side's token budget an allocation, or only a view of HAFleet's total?** Decision 6
-   needs a per-side ceiling to refuse against; whether that is a real allocation with its own record
-   or a derived slice of the deployment total is undecided.
-3. **What is a project's name?** Nothing records one today. An alias (decision 5) is the first
-   artifact in the design that carries a human-readable handle, so it may answer this for free.
+All three open questions were answered by the operator in the same session, along with three
+scoping calls. Recorded here rather than folded silently into the decisions above, because a reader
+needs to see that these were decided rather than assumed.
+
+**1. Intake rooms are PLAINTEXT.** The representative never needs to decrypt, so a project side
+costs a token and not a crypto store, and ADR-014's doubling of the ADR-008 surface does not
+happen. This becomes a **requirement stated to the project side**, not a preference: HAFleet's
+agents send plaintext unconditionally, so an encrypted intake room is already degraded — the
+borrower sees unencrypted messages from the agent. The decision makes an existing de-facto
+constraint explicit instead of leaving it to be discovered.
+
+**2. A project side's token budget is a REAL allocation**, with its own record, not a derived slice
+of the deployment total. Two reasons, and the second is the operative one: a slice model lets the
+first project side consume the whole pool, and it cannot distinguish "this project exceeded its
+allocation" from "the deployment is out of budget" — two sentences whose remedies are different
+(raise this project's allocation versus raise the total). Decision 6's provisioning gate therefore
+refuses against two ceilings, and can say which one it hit.
+
+**3. Existing agents are DELETED rather than migrated.** They are test data. This removes the
+migration path from scope entirely — there is no legacy-instance concept to build, and no
+reconciliation between agents that predate project sides and agents minted from them. Decision 7's
+retire-rather-erase rule still stands for the future; it governs deleting a *project side* with
+history, which is a different act from clearing a test fixture.
+
+**5. Manual creation survives as an explicit operator-only path**, no longer the default. The
+automatic path depends on budget arithmetic and role matching, either of which can be wrong; with
+no manual path the only remedy is editing configuration and restarting.
+
+**6. AppService is not built in this pass.** The decisive constraint is network topology rather than
+effort: an appservice requires the project's homeserver to **push** transactions to a URL we
+expose, and `bridge-matrix.js` contains no `listen(` or `createServer` — it has no inbound HTTP
+surface at all, and reaches Matrix exclusively through outbound `fetch` to `/sync`. A contributor
+lending agents from a laptop behind NAT structurally cannot receive them. The registration-token
+path is outbound-only and therefore works from any network position. Decision 2's framing of
+appservice as a *credential kind* is what keeps this deferral cheap.
+
+**7. A project's name comes from its room alias**, per decision 5. It is the first artifact in the
+design carrying a human-readable handle, so it answers a question that has been open since the
+console started rendering raw room ids.
+
+## Build order
+
+The first pass is decisions 1, 3, and the identity half of 4: the project-side record, the
+representative/agent split, and an agent identity that carries its homeserver. It deliberately
+**excludes** automatic minting (which needs decision 6's allocation) and the cascade (which needs
+something to cascade over). At the end of it the circular dependency is gone, `HOMESERVER` is no
+longer a constant, and creation is still operator-triggered but travels the new path.
