@@ -7003,6 +7003,37 @@ export function resetBridgeMatrixTestHooks() {
   rateLimitGate.reset();
 }
 
+/*
+ * ── The token-taking Matrix primitives, exported so they can be EXECUTED ──────────────────────
+ *
+ * ADR-014 decision 4 classified this file's `HOMESERVER` references into three buckets, and named
+ * the third as the expensive one: functions that "take whichever token their caller holds", which
+ * therefore need a base URL passed in beside the token rather than reading a module constant. These
+ * are those functions. Threading a base URL through them is a signature change, and this file had
+ * no test that ran a single one of them — every existing bridge test asserts against its SOURCE
+ * TEXT, which cannot tell a working refactor from a broken one.
+ *
+ * They are exported rather than moved because moving them is the larger change and this is the
+ * safety net for it. `MATRIX_HOMESERVER` is read at module evaluation, so a test that sets it to a
+ * fake homeserver before importing this module gets real HTTP against a server it controls — which
+ * is how `tests/bridge-matrix-http-primitives.test.js` exercises them.
+ *
+ * Worth knowing before changing any of them: they are NOT uniformly careful. `getUserId` parses its
+ * body with no status check at all, which is precisely the defect
+ * `getMatrixAccessTokenSession`'s own comment warns about; `setUserAvatar` ignores its PUT's
+ * response entirely. The tests pin that behaviour as it is, so a refactor is judged against what the
+ * code does rather than against what it ought to do.
+ */
+export {
+  matrixLogin as matrixLoginForTest,
+  matrixRegister as matrixRegisterForTest,
+  getUserId as getUserIdForTest,
+  getMatrixAccessTokenSession as getMatrixAccessTokenSessionForTest,
+  uploadMedia as uploadMediaForTest,
+  setUserAvatar as setUserAvatarForTest,
+  setRoomAvatar as setRoomAvatarForTest,
+};
+
 // Test-only handle onto the shared Matrix rate-limit gate singleton, so tests can both
 // assert on it directly and simulate a cooldown tripped by some other request source.
 export { rateLimitGate as matrixRateLimitGateForTest };
