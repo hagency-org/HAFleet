@@ -296,7 +296,7 @@ describe('ensureAgentAccount — supplied credentials only', () => {
 
     await expect(mod.ensureAgentAccountForTest(AGENT)).resolves.toBe('syt_supplied');
     // Adopted, so the next call is a single whoami rather than a re-read of the environment.
-    expect(mod.agentTokenStateForTest()[AGENT]).toBe('syt_supplied');
+    expect(mod.agentTokenStateForTest()[AGENT]?.accessToken).toBe('syt_supplied');
   });
 
   test('rotation: a dead stored token falls through to the fresh env one', async () => {
@@ -312,7 +312,7 @@ describe('ensureAgentAccount — supplied credentials only', () => {
 
     await expect(mod.ensureAgentAccountForTest(AGENT)).resolves.toBe('syt_fresh');
     expect(whoamiCalls).toEqual(['syt_revoked', 'syt_fresh']);
-    expect(mod.agentTokenStateForTest()[AGENT]).toBe('syt_fresh');
+    expect(mod.agentTokenStateForTest()[AGENT]?.accessToken).toBe('syt_fresh');
   });
 
   test('a bad env value never displaces a working stored token', async () => {
@@ -328,7 +328,7 @@ describe('ensureAgentAccount — supplied credentials only', () => {
 
     await expect(mod.ensureAgentAccountForTest(AGENT)).resolves.toBe('syt_stored');
     expect(whoamiCalls).toEqual(['syt_stored']);
-    expect(mod.agentTokenStateForTest()[AGENT]).toBe('syt_stored');
+    expect(mod.agentTokenStateForTest()[AGENT]?.accessToken).toBe('syt_stored');
   });
 
   test('a homeserver outage is a transport error, NOT a dead credential', async () => {
@@ -346,7 +346,7 @@ describe('ensureAgentAccount — supplied credentials only', () => {
     expect(caught.name).not.toBe('AgentCredentialMissingError');
     expect(caught.needsProvisioning).toBeUndefined();
     // The stored token is untouched: an outage must not evict a credential.
-    expect(mod.agentTokenStateForTest()[AGENT]).toBe('syt_stored');
+    expect(mod.agentTokenStateForTest()[AGENT]?.accessToken).toBe('syt_stored');
   });
 
   test('an outage does not silently burn through to the env candidate', async () => {
@@ -393,7 +393,7 @@ describe('ensureAgentAccount — supplied credentials only', () => {
      * accepts, so a failed candidate never becomes the recorded credential. Without this
      * assertion, moving the state write above the whoami passes every other test in this file.
      */
-    expect(mod.agentTokenStateForTest()[AGENT]).toBe('syt_revoked');
+    expect(mod.agentTokenStateForTest()[AGENT]?.accessToken).toBe('syt_revoked');
   });
 
   test('an identical stored and env token is not rejected twice', async () => {
@@ -429,7 +429,7 @@ describe('ensureAgentAccount — supplied credentials only', () => {
     tokenBehaviour.set('syt_stored', 'ok');
     await mod.ensureAgentAccountForTest(AGENT);
     await mod.ensureAgentAccountForTest(AGENT);
-    expect(mod.agentTokenStateForTest()[AGENT]).toBe('syt_stored');
+    expect(mod.agentTokenStateForTest()[AGENT]?.accessToken).toBe('syt_stored');
   });
 });
 

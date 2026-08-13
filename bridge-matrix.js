@@ -559,7 +559,15 @@ function loadState() {
   const statePath = path.join(DATA_DIR, 'bridge-state.json');
   const fresh = { botToken: null, agentTokens: {}, roomGroupMap: {}, groupRoomMap: {} };
   try {
-    return JSON.parse(readFileSync(statePath, 'utf-8'));
+    const parsed = JSON.parse(readFileSync(statePath, 'utf-8'));
+    /*
+     * Credentials are normalized ON LOAD, so every later reader sees one shape and the migration
+     * from bare strings happens exactly once per process rather than being re-guessed at each use
+     * site. `normalizeAgentCredentialMap` is total: it always returns an object, so a missing or
+     * malformed `agentTokens` yields `{}` here and cannot make the whole load fail — that path is
+     * reserved for bytes this process could not parse at all, which is handled below.
+     */
+    return { ...parsed, agentTokens: normalizeAgentCredentialMap(parsed?.agentTokens) };
   } catch (error) {
     /*
      * ENOENT is the ONLY safe reason to start empty — there is no file, so there is nothing to
@@ -756,9 +764,116 @@ async function getJoinedRoomMembersWithTrace(botClient, roomId, contextLabel) {
   }
 }
 
-function getStoredAgentToken(agentName) {
+/**
+ * An agent's Matrix credential as a RECORD, not a bare token string.
+ *
+ * ADR-014 decision 4, whose status line has read "decided, not built" with the evidence
+ * "`state.agentTokens[name]` is a bare access-token string, not `{ homeserver, accessToken }`".
+ * ADR-016 then made it load-bearing rather than tidy: once project homeservers are not assumed to
+ * federate, a token is only meaningful against the server that issued it, and a map of bare strings
+ * cannot say which server that is.
+ *
+ * `serverName` is carried BESIDE `homeserver` rather than derived from it. They answer different
+ * questions — the base URL is where to send a request, the server name is the domain in an MXID and
+ * in a room id — and `.well-known` delegation is allowed to make them disagree. `setRoomAvatar`'s
+ * retry ladder needs the name, because what it must compare against is a ROOM's origin server.
+ *
+ * MIGRATION: a bare string becomes a record pointed at this deployment's own homeserver. That is
+ * not a guess — under the model this replaces, every token was minted against `HOMESERVER`, so it is
+ * the only server the value could have belonged to.
+ *
+ * `.token` is accepted as an alias for `.accessToken` on the way in because `endAgentWorkForToken`
+ * already contained `typeof stored === 'string' ? stored : stored?.token` — someone anticipated a
+ * record and guessed that name. Reading both costs one line and means a state file written by any
+ * such intermediate is not silently treated as credential-less.
+ */
+function normalizeAgentCredential(value) {
+  if (typeof value === 'string') {
+    const token = value.trim();
+    return token
+      ? { homeserver: HOMESERVER, serverName: MATRIX_SERVER_NAME, mxid: null, accessToken: token }
+      : null;
+  }
+  if (!value || typeof value !== 'object') return null;
+  const raw = typeof value.accessToken === 'string' ? value.accessToken
+    : (typeof value.token === 'string' ? value.token : '');
+  const token = raw.trim();
+  if (!token) return null;
+  const homeserver = typeof value.homeserver === 'string' && value.homeserver.trim()
+    ? value.homeserver.trim().replace(/\/+$/, '')
+    : HOMESERVER;
+  const serverName = typeof value.serverName === 'string' && value.serverName.trim()
+    ? value.serverName.trim().toLowerCase()
+    : MATRIX_SERVER_NAME;
+  const mxid = typeof value.mxid === 'string' && value.mxid.trim() ? value.mxid.trim() : null;
+  return { homeserver, serverName, mxid, accessToken: token };
+}
+
+/**
+ * Normalize every stored credential, and say what was dropped.
+ *
+ * An entry that yields no token carries no credential, so dropping it loses nothing — but it is
+ * named in the log rather than discarded quietly, because this file is the one place where a wrong
+ * assumption about what is droppable costs a token nothing can re-mint (ADR-014 decision 3).
+ */
+function normalizeAgentCredentialMap(raw) {
+  const out = {};
+  const dropped = [];
+  for (const [name, value] of Object.entries(raw && typeof raw === 'object' ? raw : {})) {
+    const record = normalizeAgentCredential(value);
+    if (record) out[name] = record;
+    else dropped.push(name);
+  }
+  if (dropped.length) {
+    console.warn(
+      `[bridge] ${dropped.length} stored agent credential entr(ies) carried no token and were not `
+      + `loaded: ${dropped.join(', ')}. Nothing was lost — an entry with no token is not a credential `
+      + '— but the names are listed so an unexpected one is visible rather than inferred.',
+    );
+  }
+  return out;
+}
+
+const warnedUnnormalizedCredentials = new Set();
+
+/**
+ * The credential record for an agent, resolved through the same name matching as the token lookup.
+ *
+ * NORMALIZES ON READ, AND SAYS SO. `loadState` normalizes everything it parses and the adoption site
+ * writes a record, so in production the map already holds records — but a third writer exists (a test
+ * seeding `agentTokenStateForTest()` directly), and there is no way to make an object property
+ * assignment enforce a shape.
+ *
+ * The alternative was a strict accessor that returned null for anything that was not already a
+ * record. That is the worse failure: a stray string would read as "this agent has no credential",
+ * which raises `AgentCredentialMissingError` and takes the agent silent — the single worst outcome in
+ * this file, and one that would look like a revoked token rather than a shape mismatch.
+ *
+ * So it upgrades in place and warns once per name. A stray writer is then loud instead of either
+ * silent-and-broken or silent-and-tolerated.
+ */
+function agentCredential(agentName) {
   const key = resolveStoredAgentTokenName(agentName);
-  return key ? (state.agentTokens[key] || null) : null;
+  if (!key) return null;
+  const stored = state.agentTokens[key];
+  if (!stored) return null;
+  if (typeof stored === 'object' && typeof stored.accessToken === 'string') return stored;
+  const record = normalizeAgentCredential(stored);
+  if (!warnedUnnormalizedCredentials.has(key)) {
+    warnedUnnormalizedCredentials.add(key);
+    console.warn(
+      `[bridge] agent credential for '${key}' was stored in a pre-ADR-014-decision-4 shape and has `
+      + `been upgraded in memory to { homeserver, serverName, mxid, accessToken }`
+      + `${record ? '' : ' — but it carried no usable token'}. Loaded state is normalized, so this `
+      + 'means something wrote the map directly.',
+    );
+  }
+  if (record) state.agentTokens[key] = record;
+  return record;
+}
+
+function getStoredAgentToken(agentName) {
+  return agentCredential(agentName)?.accessToken ?? null;
 }
 
 function escapeRegex(value) {
@@ -1129,8 +1244,23 @@ async function ensureAgentAccount(agentName) {
      * after the homeserver accepted it AND proved it is this agent's, so neither a typo nor another
      * agent's credential can displace a working one.
      */
-    if (state.agentTokens[canonicalAgentName] !== candidate.token) {
-      state.agentTokens[canonicalAgentName] = candidate.token;
+    if (state.agentTokens[canonicalAgentName]?.accessToken !== candidate.token) {
+      /*
+       * Stored as a record, with the MXID the homeserver just reported in `session.userId`.
+       *
+       * This does NOT settle ADR-014 decision 5. That decision is that an agent's MXID becomes
+       * DISCOVERED rather than constructed, and `agentUserId()` still composes
+       * `@${AGENT_PREFIX}${name}:${MATRIX_SERVER_NAME}` for every other caller. Recording the
+       * discovered value where we already have it makes decision 5 cheaper to build later; it does
+       * not make it built, and the ADR is explicit that settling it as a side effect of a credential
+       * change would decide it without deciding it.
+       */
+      state.agentTokens[canonicalAgentName] = normalizeAgentCredential({
+        homeserver: HOMESERVER,
+        serverName: MATRIX_SERVER_NAME,
+        mxid: session.userId,
+        accessToken: candidate.token,
+      });
       saveState();
       console.log(`[agent-credential] adopted ${candidate.source} Matrix token for '${canonicalAgentName}' (${session.userId})`);
 
@@ -1406,21 +1536,48 @@ async function setUserAvatar(token, mxcUri) {
   });
 }
 
-async function setRoomAvatar(roomId, mxcUri, token) {
+/**
+ * Set a room's avatar, retrying with an agent's credential if the bot lacks the power level.
+ *
+ * `baseUrl` is a parameter rather than the module constant: ADR-016's first pass requires every
+ * Matrix call to take its base URL from the side it is talking to, and this function is one of the
+ * ten ADR-014 decision 4 classified as "takes whichever token its caller holds".
+ *
+ * THE RETRY LADDER ONLY CONSIDERS CREDENTIALS FOR THIS ROOM'S OWN SERVER, and that is a fix rather
+ * than a tightening. It used to iterate `Object.values(state.agentTokens)` and send each one to
+ * `HOMESERVER`. Under a single homeserver that is a sane fallback — the bot may not have power to set
+ * a room avatar while some agent in the room does. Once ADR-016 stops assuming federation, that map
+ * holds one credential per agent ACROSS DIFFERENT HOMESERVERS, so the loop would offer every project
+ * side's access token to whichever server this call is aimed at: a credential disclosure across
+ * project sides, caused by a cosmetic feature, and one that appears the moment a second project side
+ * exists rather than when anyone edits this function.
+ *
+ * The comparison is against the ROOM's origin server (`!opaque:origin-server`) rather than against
+ * `baseUrl`, because a base URL may be a delegated address while the room id always names the server
+ * that owns the room — which is the server the token must belong to.
+ */
+async function setRoomAvatar(roomId, mxcUri, token, baseUrl = HOMESERVER) {
   const useToken = token || state.botToken;
-  const res = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.avatar`, {
+  const url = `${baseUrl}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.avatar`;
+  const res = await fetch(url, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${useToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ url: mxcUri }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    // If forbidden with bot token, retry with any agent token that might have power
     if (err.errcode === 'M_FORBIDDEN' && useToken === state.botToken) {
-      for (const agentToken of Object.values(state.agentTokens)) {
-        const retry = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.avatar`, {
+      const targetServer = projectServerFromRoomId(roomId);
+      for (const credential of Object.values(state.agentTokens)) {
+        /*
+         * Skipped silently rather than logged: on a deployment with several project sides this would
+         * be the common case, not an anomaly, and a warning per agent per avatar refresh would bury
+         * the log. What IS worth saying is when the ladder finds nothing to try at all — see below.
+         */
+        if (!targetServer || credential?.serverName !== targetServer) continue;
+        const retry = await fetch(url, {
           method: 'PUT',
-          headers: { Authorization: `Bearer ${agentToken}`, 'Content-Type': 'application/json' },
+          headers: { Authorization: `Bearer ${credential.accessToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ url: mxcUri }),
         });
         if (retry.ok) return;
@@ -3023,6 +3180,12 @@ export class MatrixBridge {
 
   getBotToken() { return state.botToken; }
   getAgentToken(name) {
+    const tokenName = this.resolveAgentTokenName(name);
+    return tokenName ? (state.agentTokens[tokenName]?.accessToken ?? null) : null;
+  }
+
+  /** The whole credential record, for a caller that needs the agent's homeserver and not just its token. */
+  getAgentCredential(name) {
     const tokenName = this.resolveAgentTokenName(name);
     return tokenName ? (state.agentTokens[tokenName] || null) : null;
   }
@@ -6722,7 +6885,9 @@ export class MatrixBridge {
   endAgentWorkForToken(token, roomId) {
     if (!token || !roomId || !this.agentWork?.size) return;
     for (const [name, stored] of Object.entries(state.agentTokens || {})) {
-      const value = typeof stored === 'string' ? stored : stored?.token;
+      // `stored` is a credential record since ADR-014 decision 4 was built; the string branch this
+      // line used to carry is gone because `loadState` now normalizes on the way in.
+      const value = stored?.accessToken;
       if (value && value === token) {
         this.endAgentWork(name, roomId);
         return;
