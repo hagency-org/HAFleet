@@ -260,8 +260,18 @@ const BOT_PASSWORD = (process.env.MATRIX_BOT_PASSWORD || '').trim();
  */
 const AGENT_TYPING_TIMEOUT_MS = 45_000;
 const AGENT_TYPING_REFRESH_MS = 30_000;
-/* Past this, the notification is allowed to lapse rather than claim a stuck agent is working. */
-const AGENT_TYPING_MAX_MS = 20 * 60_000;
+/*
+ * Past this, the notification lapses. TWO MINUTES, not the twenty it shipped with.
+ *
+ * An operator reported BigLittle showing "typing" continuously in their client, and they were right
+ * to call it a bug. The stop hook only fires when the agent REPLIES, so an agent that is working
+ * for a long time — or stuck — kept the indicator refreshed for the whole cap. I justified twenty
+ * minutes as "an agent silent that long may be stuck"; the correct conclusion from that same
+ * observation is the opposite one, that a typing indicator is only honest for a short window. Past
+ * a couple of minutes it conveys nothing and misleads, and the 👀 reaction is already the durable
+ * record that the message was received.
+ */
+const AGENT_TYPING_MAX_MS = 2 * 60_000;
 /* 👀 — "seen, and being worked on". One event, no work product. */
 const AGENT_ACK_REACTION = '\u{1F440}';
 
@@ -6702,6 +6712,24 @@ export class MatrixBridge {
     this.ensureTypingRefresh();
   }
 
+  /**
+   * End the wait using the credential the message was sent with.
+   *
+   * `sendAsAgentContent` receives a token, not a name, and this is the only fact available at the
+   * choke point. Resolved against the live token map rather than by clearing every entry for the
+   * room, because two agents can share a room and one replying says nothing about the other.
+   */
+  endAgentWorkForToken(token, roomId) {
+    if (!token || !roomId || !this.agentWork?.size) return;
+    for (const [name, stored] of Object.entries(state.agentTokens || {})) {
+      const value = typeof stored === 'string' ? stored : stored?.token;
+      if (value && value === token) {
+        this.endAgentWork(name, roomId);
+        return;
+      }
+    }
+  }
+
   /** The agent spoke, so it is no longer working for this room. */
   endAgentWork(agentName, roomId) {
     if (!agentName || !roomId) return;
@@ -6776,6 +6804,15 @@ export class MatrixBridge {
       if (data?.event_id) {
         this.rememberMatrixEvent(data.event_id, sourceMsgId);
       }
+      /*
+       * THE AGENT SPOKE HERE, so the wait ends here.
+       *
+       * Every outbound agent message converges on this function — text, attachments, threaded
+       * replies — so this is the one place that cannot be forgotten. The first version hooked three
+       * CALLERS instead, which left any path that did not go through them (an attachment-only
+       * reply, anything added later) refreshing the indicator until the cap.
+       */
+      this.endAgentWorkForToken(token, roomId);
       return data?.event_id || null;
     };
     let eventId;
