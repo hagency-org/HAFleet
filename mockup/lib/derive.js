@@ -288,6 +288,13 @@ export function makeDerive(data) {
       const u = usageByAgent.get(a.name) ?? null;
       const tokens = u ? {
         used: u.tokensUsed ?? null,
+        /*
+         * The ceiling-drawing part, carried alongside the total. The roster led with
+         * `tokensUsed` — all four kinds — so an agent that had added 1.3M of fresh tokens
+         * displayed 29.6M beside a 10.0M ceiling. The usage page was fixed for exactly this and
+         * this row was missed.
+         */
+        drawn: u.tokensDrawn ?? null,
         byKind: u.tokensByKind ?? null,
         sessions: u.tokensSessions ?? null,
         // A figure that includes sessions whose transcript is gone, and a source
