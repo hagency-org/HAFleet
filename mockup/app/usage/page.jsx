@@ -366,6 +366,20 @@ export default function UsagePage() {
         </div>
       </div>
 
+      {/*
+        * THREE NUMBERS THAT SOUND LIKE ONE.
+        *
+        * An operator who had declared a 10M ceiling read "已分配 250k" and asked where they had
+        * promised 250k. Fair: they had not. The 250k was the amount a REQUESTER asked for — in
+        * that case a default baked into a test tool — which they approved. And the same quantity
+        * was labelled 已分配 on this card and 已承诺 in the table below it, while 已分配 also meant
+        * a single engagement's allocation in the by-project table. Three concepts, two names.
+        *
+        * The card now says what it is. This explains how the three relate, including the part
+        * nobody can infer: spend outside an engagement still draws the ceiling down.
+        */}
+      <InfoTip label={t('us.cardsExplain')}>{t('us.cardsExplainBody')}</InfoTip>
+
       <h2 className="sec">{t('us.charts')}<span className="note">{t('us.chartsNote')}</span></h2>
       <div className="chart-grid">
         <div className="panel">
