@@ -21,7 +21,7 @@ has implemented yet.
 | 1 | the ownership invariant does not change | **built** | true by construction — ADR-002's `(room, agent)` binding from the inviter is untouched, and acceptance now writes it |
 | 2 | two provisioning flows, chosen by server capability | **decided, not built** | the repository still contains zero appservice support: no `as_token`, `hs_token`, `sender_localpart` or registration file — the only matches are prose in this ADR's own lineage |
 | 3 | derived-password self-registration is to be deleted | **built**, with one named exception | `deriveAgentPassword`, `legacyAgentPassword`, `agentPasswordCandidates` and `tryMatrixLogin` are gone from `bridge-matrix.js`, as are all three env vars and their `.env.example` entries; `ensureAgentAccount` now validates a SUPPLIED token (`agentTokenFromEnv`) and refuses with `AgentCredentialMissingError` rather than minting one. Exception: `matrixRegister` stays — the BOT uses it with its own explicit `MATRIX_BOT_PASSWORD`, which this decision never covered. `tests/agent-credential-supplied.test.js` (20 cases, 10/10 mutants caught) |
-| 4 | multiple homeservers; a per-agent credential record | **decided, not built** | `HOMESERVER` is one module constant, and `state.agentTokens[name]` is a bare access-token string, not `{ homeserver, accessToken }` |
+| 4 | multiple homeservers; a per-agent credential record | **partly built** (2026-08-13) | The RECORD is built: `state.agentTokens[name]` is `{ homeserver, serverName, mxid, accessToken }`, migrated from bare strings on load, with 13 cases in `tests/bridge-agent-credential-record.test.js`. `HOMESERVER` is still a module constant for most call sites — `setRoomAvatar` takes a `baseUrl` parameter, the other six primitives ADR-016 names still default to it. `serverName` is carried beside `homeserver` because `.well-known` may make them disagree and the retry ladder compares against a ROOM's origin server |
 | 5 | an agent MXID is discovered via `/whoami`, not constructed | **decided, not built** | `agentUserId()` still composes `@${AGENT_PREFIX}${name}:${MATRIX_SERVER_NAME}`, and the invite poll's owner-derivation filter still matches that constructed `state_key` |
 | 6 | a dead credential is a human-visible state | **built at the record, not the UI** | the retry loop is gone (`AgentCredentialMissingError`), the state is LIVE (`markAgentUnprovisioned`/`clearAgentUnprovisioned`, not a startup snapshot), and it reaches a durable cross-process surface: `unprovisionedAgents` in `data/health/matrix-bridge.json`, which the standalone doctor already reads. Still absent: a dashboard view, and the homeserver per agent (needs decision 4) |
 | 7 | flow B requires a dedicated login, stated where an operator reads | **decided, not built** | the rule exists only as prose here; there is no startup check and nothing in `.env.example` says it |
@@ -310,11 +310,35 @@ reminder that a reference count in a decision record is a snapshot. Treat the to
 an invariant — it moved by one inside an uncommitted working tree while this paragraph was being
 written.
 
-*Status — **decided, not built**. `HOMESERVER` is still a single module constant read from
-`MATRIX_HOMESERVER`, and `state.agentTokens[name]` is still a bare access-token string rather than
-`{ homeserver, accessToken }`. The amendment above moves the credential's owner from the agent to the
-`(project, agent)` pair, so when this is built it is that shape that gets built, not the one in the
-table below.*
+*Status — **partly built** (2026-08-13), and the half that is built is the one this decision leads
+with.*
+
+*`state.agentTokens[name]` is now `{ homeserver, serverName, mxid, accessToken }`. Bare strings are
+migrated on load — pointed at `MATRIX_HOMESERVER`, which is not a guess, since under the model this
+replaces there was nowhere else a stored token could have come from. `serverName` is carried BESIDE
+`homeserver` rather than derived from it: they answer different questions, `.well-known` delegation is
+allowed to make them disagree, and the one consumer that needs the name compares it against a ROOM's
+origin server. `mxid` is recorded where the homeserver has just reported it and is left null
+otherwise, which does not settle decision 5 — `agentUserId()` still composes.*
+
+*Still a module constant for most call sites. `setRoomAvatar` takes a `baseUrl` parameter; the other
+six primitives ADR-016's first pass names still default to `HOMESERVER`. The count is unchanged in
+substance: what moved is that the credential can now SAY which server it belongs to, which is the
+prerequisite the rest of the threading needs.*
+
+*One defect was closed by the record rather than by the threading, and it is the reason this was worth
+doing before the mechanical part. `setRoomAvatar`'s retry ladder iterated every value in
+`state.agentTokens` and sent each to `HOMESERVER`. Under one homeserver that is a sane fallback — the
+bot may lack the power level to set a room avatar while an agent in the room has it. Under ADR-016 that
+map spans homeservers, so the loop offered every project side's access token to whichever server the
+call was aimed at: a credential disclosure across project sides, caused by a cosmetic feature, arriving
+the moment a second project side exists rather than when anyone edited the function. The ladder now
+skips any credential whose `serverName` is not the room's origin, and fails closed when the room id has
+no server part.*
+
+*The amendment above moves the credential's owner from the agent to the `(project, agent)` pair, and
+ADR-016 decision 1 moves it again to the project side. The record built here is the bridge-local shape
+that makes either expressible; converging the two stores is not done.*
 
 **5. An agent's MXID becomes DISCOVERED, not constructed.** Today it is composed as
 `@${AGENT_PREFIX}${name}:${MATRIX_SERVER_NAME}`. With a credential from a foreign server that

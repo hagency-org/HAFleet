@@ -243,50 +243,106 @@ describe('setRoomAvatar and its retry ladder', () => {
     expect(JSON.parse(calls[0].body)).toEqual({ url: 'mxc://fake.test/abc' });
   });
 
-  test('THE LADDER: a 403 with the bot token retries with EVERY agent token', async () => {
+  /** A credential record for a given server, which is the shape `state.agentTokens` now holds. */
+  const cred = (accessToken, serverName) => ({
+    homeserver: baseUrl, serverName, mxid: `@a:${serverName}`, accessToken,
+  });
+
+  test('THE LEAK, CLOSED: a credential for ANOTHER server is never offered to this room', async () => {
     /*
-     * THIS IS THE TEST THE REFACTOR NEEDS MOST, and not because the ladder is subtle.
+     * The defect this rewrite fixes, and the reason it was a defect rather than a tightening.
      *
-     * Under one homeserver it is a reasonable fallback: the bot may lack power to set a room avatar
-     * while some agent in the room has it. Under ADR-016 there are MANY homeservers and
-     * `state.agentTokens` holds one credential per agent across all of them — so this loop sends
-     * every project side's access token to whichever homeserver `HOMESERVER` happens to name. That is
-     * a credential disclosure across project sides, produced by a cosmetic feature, and it appears
-     * the moment a second project side exists rather than being introduced by the refactor.
+     * The ladder used to iterate every value in `state.agentTokens` and send each to `HOMESERVER`.
+     * Under one homeserver that is a sane fallback — the bot may lack the power level to set a room
+     * avatar while an agent in the room has it. Once ADR-016 stops assuming federation, that map
+     * holds one credential per agent ACROSS DIFFERENT HOMESERVERS, so the loop offered every project
+     * side's access token to whichever server the call was aimed at. A credential disclosure across
+     * project sides, caused by a cosmetic feature, arriving the moment a second project side exists.
      *
-     * Pinning the ladder's shape here is what makes the fix checkable: after the refactor this test
-     * must be rewritten to assert that only tokens belonging to the TARGET side are tried.
+     * The room is `!room:fake.test`, so only `fake.test` credentials may be tried. The other side's
+     * token must not appear in ANY request — which is what makes this an assertion about disclosure
+     * and not merely about retry order.
      *
      * `null` is passed as the token so `useToken === state.botToken` holds (both are null on a bridge
      * that has not logged in), which is the condition guarding the ladder.
      */
     const tokens = bridge.agentTokenStateForTest();
-    tokens.alpha = 'token-side-A';
-    tokens.beta = 'token-side-B';
+    tokens.alpha = cred('token-this-side', 'fake.test');
+    tokens.beta = cred('token-OTHER-side', 'someone-else.example');
 
     handler = () => [403, { errcode: 'M_FORBIDDEN' }];
     await expect(bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', null))
       .rejects.toThrow(/setRoomAvatar failed: M_FORBIDDEN/);
 
     const tried = calls.map(bearerOf);
-    expect(tried[0]).toBe('null'); // `Bearer null` — the bot token is unset on this instance
-    expect(tried).toContain('token-side-A');
-    expect(tried).toContain('token-side-B');
+    /*
+     * The first attempt is the bot's, and it is asserted as "neither agent credential" rather than by
+     * its literal value. An earlier version asserted `'null'`, on the reasoning that an instance which
+     * has not logged in has `state.botToken === null` — but `loadState` returns the parsed file, so on
+     * an instance bound to a real state directory the field is simply ABSENT and the header reads
+     * `Bearer undefined`. The test then failed on the serialization of a value it does not care about.
+     */
+    expect(tried[0]).not.toBe('token-this-side');
+    expect(tried[0]).not.toBe('token-OTHER-side');
+    expect(tried).toContain('token-this-side');
+    expect(tried).not.toContain('token-OTHER-side');
   });
 
-  test('the ladder stops at the first agent token that succeeds', async () => {
+  test('the ladder stops at the first same-server credential that succeeds', async () => {
     const tokens = bridge.agentTokenStateForTest();
-    tokens.alpha = 'token-side-A';
-    tokens.beta = 'token-side-B';
+    tokens.alpha = cred('token-A', 'fake.test');
+    tokens.beta = cred('token-B', 'fake.test');
 
     handler = (path, q, method, body, headers) => (
-      String(headers.authorization) === 'Bearer token-side-A'
+      String(headers.authorization) === 'Bearer token-A'
         ? [200, { event_id: '$ok' }]
         : [403, { errcode: 'M_FORBIDDEN' }]
     );
     await expect(bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', null))
       .resolves.toBeUndefined();
-    expect(calls.map(bearerOf)).not.toContain('token-side-B');
+    expect(calls.map(bearerOf)).not.toContain('token-B');
+  });
+
+  test('a room id with no server part tries NOTHING, rather than everything', async () => {
+    /*
+     * `projectServerFromRoomId` returns null for a malformed id. Failing closed matters here: the
+     * alternative reading — "no target server, so any credential may as well be tried" — is the
+     * original leak restored by a null check.
+     */
+    const tokens = bridge.agentTokenStateForTest();
+    tokens.alpha = cred('token-this-side', 'fake.test');
+
+    handler = () => [403, { errcode: 'M_FORBIDDEN' }];
+    await expect(bridge.setRoomAvatarForTest('malformed-room-id', 'mxc://fake.test/abc', null))
+      .rejects.toThrow(/M_FORBIDDEN/);
+    expect(calls).toHaveLength(1);
+    expect(calls.map(bearerOf)).not.toContain('token-this-side');
+  });
+
+  test('the base URL is a PARAMETER, and an explicit one is used instead of the constant', async () => {
+    /*
+     * ADR-016's third first-pass shape. The default still reads `HOMESERVER`, so the other tests in
+     * this file exercise the home-bot path; this one proves a caller that knows its side can override
+     * it. The override points at a second in-process listener so "went somewhere else" is observable
+     * rather than inferred from an error.
+     */
+    const otherCalls = [];
+    const other = createServer((req, res) => {
+      otherCalls.push({ path: new URL(req.url, 'http://x').pathname });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    });
+    await new Promise((resolve) => other.listen(0, '127.0.0.1', resolve));
+    const otherBase = `http://127.0.0.1:${other.address().port}`;
+    try {
+      await bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', 'tok', otherBase);
+      expect(otherCalls).toHaveLength(1);
+      expect(otherCalls[0].path).toBe('/_matrix/client/v3/rooms/!room%3Afake.test/state/m.room.avatar');
+      // And nothing reached the default server.
+      expect(calls).toHaveLength(0);
+    } finally {
+      await new Promise((resolve) => other.close(resolve));
+    }
   });
 
   test('an EXPLICIT token that is refused does NOT trigger the ladder', async () => {

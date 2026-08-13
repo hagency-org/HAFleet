@@ -114,7 +114,10 @@ describe('F4 — an unreadable state file is never overwritten with an empty one
   test('a valid file is read normally and nothing is preserved', async () => {
     writeFileSync(statePath, JSON.stringify({ botToken: 'syt_bot', agentTokens: { alpha: 'syt_alpha' } }), { mode: 0o600 });
     const mod = await loadBridge();
-    expect(mod.agentTokenStateForTest().alpha).toBe('syt_alpha');
+    // `.accessToken`, because ADR-014 decision 4 is built: a stored credential is
+    // `{ homeserver, serverName, mxid, accessToken }` and `loadState` migrates the bare strings this
+    // fixture writes. The migration itself is covered in tests/bridge-agent-credential-record.test.js.
+    expect(mod.agentTokenStateForTest().alpha?.accessToken).toBe('syt_alpha');
     expect(readdirSync(dataDir).filter((f) => f.includes('unreadable'))).toEqual([]);
   });
 });
