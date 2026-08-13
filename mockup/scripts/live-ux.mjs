@@ -1509,6 +1509,60 @@ async function consoleWideRules(page) {
   }
 }
 
+
+/*
+ * REMOVE WHAT THIS SUITE INVENTED.
+ *
+ * It posted engagements for `ux-write-check/alpha` and `/beta` against
+ * `!writeCheckA:hq.example` and `!writeCheckB:hq.example`, whitelisted rooms, and left every
+ * one of them behind. Run against a live backend — which is the whole point of this suite —
+ * that means each run permanently added two fabricated PROJECTS to the operator's console,
+ * on a domain (`hq.example`) that exists on no homeserver.
+ *
+ * An operator found them: the console showed their agent bound into three projects while
+ * Robrix showed it joined to one, and two of the three could never have reached it. The
+ * console presents access bindings as "the record that actually lets a project reach the
+ * agent", so junk in that table is not cosmetic — it is the same fabrication this project has
+ * been deleting everywhere else, produced by the very harness meant to catch it.
+ *
+ * Best effort by design: a teardown that throws would turn a passing run into a failure over
+ * cleanup. What it CANNOT do is fail silently, so what it could not remove is reported.
+ */
+async function teardownWriteFixtures() {
+  const rooms = ['!writeCheckA:hq.example', '!writeCheckB:hq.example'];
+  const leftovers = [];
+
+  // Engagements first: a binding is derived from them, so removing the room while an
+  // engagement still points at it would leave the half this suite cares about behind.
+  let engagements = [];
+  try { engagements = (await api('engagements')).engagements ?? []; } catch { /* reported below */ }
+  for (const e of engagements.filter((x) => rooms.includes(x.projectRoomId))) {
+    try {
+      // Revoke rather than delete: `revoke` is the modelled end of an engagement, and there
+      // is deliberately no DELETE for one. An ended engagement stops projecting a binding.
+      if (e.state === 'active' || e.state === 'pending') {
+        // eslint-disable-next-line no-await-in-loop
+        await post(`engagements/${e.id}/revoke`, { reason: 'live-ux fixture teardown' });
+      }
+    } catch { leftovers.push(`engagement ${e.id}`); }
+  }
+
+  for (const room of rooms) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      // Straight to the backend with the operator token, like `post` above. Going through
+      // the console proxy would drag Sec-Fetch-Site and the allowlist into a teardown.
+      const res = await fetch(`${BACKEND}/api/whitelist/${encodeURIComponent(room)}`, {
+        method: 'DELETE', headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      if (!res.ok && res.status !== 404) leftovers.push(`whitelist ${room} (HTTP ${res.status})`);
+    } catch { leftovers.push(`whitelist ${room}`); }
+  }
+
+  check('the suite removed the fixtures it created', leftovers.length === 0,
+    leftovers.length ? `left behind: ${leftovers.join(', ')}` : 'nothing left in the operator\'s console');
+}
+
 (async () => {
   console.log(`\nLive UX — browser ${BASE} against backend ${BACKEND}\n`);
   const browser = await chromium.launch({ executablePath: CHROME, headless: true });
@@ -1525,6 +1579,16 @@ async function consoleWideRules(page) {
   }
 
   if (!ONLY) await consoleWideRules(page);
+
+  /*
+   * Always, even when suites failed — a failed run pollutes the console exactly as much as a
+   * passing one, and a harness that only tidies up on success leaves its worst messes behind.
+   */
+  try {
+    await teardownWriteFixtures();
+  } catch (e) {
+    check('teardown ran', false, e.message);
+  }
 
   await browser.close();
   const tail = skipped > 0 ? ` ${skipped} skipped.` : '';

@@ -1,7 +1,7 @@
 import express from 'express';
 import { buildReplyHint } from './lib/reply-hint.js';
 import { meterFleet } from './lib/metering/reader.js';
-import { meteringSupport } from './lib/metering/parsers.js';
+import { meteringSupport, CEILING_KINDS } from './lib/metering/parsers.js';
 import { createUsageLedger } from './lib/metering/ledger.js';
 import { createPendingInviteStore, PendingInviteError } from './lib/pending-invite-store.js';
 import {
@@ -8867,7 +8867,18 @@ function ceilingSpendFor(agentName) {
   return {
     period,
     reserved: engagementStore.committedFor(agentName),
-    spent: bucket ? bucket.total : null,
+    /*
+     * `drawn`, NOT `total`. A ceiling draws against fresh tokens; cache reads are measured
+     * and reported but never spend it (CEILING_KINDS, operator ruling 2026-08-12). This
+     * read was `bucket.total`, so the first agent to be metered successfully was locked out
+     * at 13.6M against a 10M ceiling — of which 12.9M was cache reads and 681k was work.
+     */
+    spent: bucket ? bucket.drawn : null,
+    // Kept so callers can SHOW consumption without enforcing on it. The two figures must
+    // never be swapped: one is what the contributor lent, the other what was read.
+    consumed: bucket ? bucket.total : null,
+    ceilingTokens: Number.isFinite(preset?.ceiling?.tokens) ? preset.ceiling.tokens : null,
+    presetName: preset?.name ?? null,
     spendPeriodKey: bucket?.key ?? null,
   };
 }
@@ -9162,6 +9173,12 @@ app.post('/api/engagements/:id/verdict', requireBearer, (req, res) => {
       // headroom would let any caller authorise the over-commitment the form
       // prevents.
       remainingTokens: existing?.agent ? remainingFor(existing.agent) : null,
+      /*
+       * The breakdown behind that number, so a refusal can say which draw is binding —
+       * committed allocations or measured spend. Recomputed here for the same reason as
+       * `remainingTokens`: it must describe the state the decision was made against.
+       */
+      spendContext: existing?.agent ? ceilingSpendFor(existing.agent) : null,
       by: getRequestAgentName(req) || 'operator',
       reason: b.reason,
     });
@@ -9507,12 +9524,24 @@ app.get('/api/usage', requireBearer, async (_req, res) => {
          */
         const ever = usageLedger.totalsFor(a.name);
         if (m?.available || ever) {
+          const kinds = ever ? ever.totals : m.totals;
           return {
             tokensUsed: ever ? ever.total : m.total,
+            /*
+             * WHAT THE CEILING ACTUALLY DRAWS AGAINST, reported next to total consumption
+             * rather than instead of it.
+             *
+             * `tokensUsed` is everything measured; `tokensDrawn` is fresh tokens only, which
+             * is what enforcement uses (CEILING_KINDS, operator ruling 2026-08-12). Without
+             * both, a console can only render a ceiling percentage from the total — which is
+             * how an agent that had used 7% of its ceiling came to be shown at 136% of it and
+             * refused every engagement.
+             */
+            tokensDrawn: CEILING_KINDS.reduce((n, k) => n + (Number(kinds?.[k]) || 0), 0),
             // The kinds stay apart: cache reads run several orders of magnitude above
             // fresh input, so one summed figure hides the only number that matters for
             // comparing two agents.
-            tokensByKind: ever ? ever.totals : m.totals,
+            tokensByKind: kinds,
             tokensSessions: ever ? ever.sessions + ever.retiredSessions : m.sessions,
             // Non-zero means a transcript reported less than it had before, so the figure
             // rests on a source that changed underneath. Surfaced, not buried.
@@ -9524,6 +9553,7 @@ app.get('/api/usage', requireBearer, async (_req, res) => {
         }
         return {
           tokensUsed: null,
+          tokensDrawn: null,
           tokensByKind: null,
           tokensReason: m?.reason ?? (meteredError
             ? `metering failed: ${meteredError}`
@@ -9610,6 +9640,11 @@ app.get('/api/usage', requireBearer, async (_req, res) => {
         tasks: byAgent.reduce((n, r) => n + r.tasks, 0),
         tokensUsed: measured.length
           ? measured.reduce((n, r) => n + r.tokensUsed, 0)
+          : null,
+        // The ceiling-drawing part of the same figure, so a consumer never has to
+        // re-derive it from tokensByKind and pick the wrong kinds.
+        tokensDrawn: measured.length
+          ? measured.reduce((n, r) => n + (r.tokensDrawn ?? 0), 0)
           : null,
         // Read these together with the figure above or not at all.
         tokensMeasuredFor: measured.length,
