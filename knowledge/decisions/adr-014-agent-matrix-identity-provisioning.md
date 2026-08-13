@@ -39,6 +39,20 @@ evidence for the opposite of the truth. An Accepted decision record is read as a
 system by everyone who was not in the room, which makes present-tense declarative for unbuilt work
 a correctness defect rather than a matter of tone.
 
+## Superseded in part by ADR-016 (2026-08-13)
+
+**The amendment below is withdrawn on two points; the rest of this record stands.** By operator
+ruling, non-federating homeservers are no longer out of scope — they are the **assumed** case, and
+federation is an optimization. So the amendment's three-mode table (federated invite / appservice /
+project-issued tokens) is withdrawn, as is its closing paragraph deferring non-federating servers,
+and the credential moves from `(project, agent)` to `(项目方, agent)` — a project side being one
+homeserver plus the credential HAFleet holds there. Decisions 4 and 5 below are the ones ADR-016
+settles the shape of; decisions 1, 3, 6, 7 and 8 are unaffected.
+
+ADR-016 also corrects this record's cost estimate for the deferral, with measurements: agents send
+plaintext and need no crypto store, and `matrixRegister` already implements the registration-token
+flow. Read ADR-016 before acting on the amendment below.
+
 ## Amendment 2026-08-11 — the project dictates access, and an invitation is the input
 
 Two things in the Decision below are corrected, and one clause is added. The original text put
