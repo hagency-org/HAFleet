@@ -17,7 +17,7 @@ carries its own status line and the table is the index.
 | # | decision | status | evidence for the gap |
 |---|---|---|---|
 | 1 | 项目方 (project side) is a first-class entity: one homeserver, one credential, one representative | **decided, not built** | no such record exists; `HOMESERVER` is one module constant with **51** product-code references (`bridge-matrix.js` 44, `lib/bot-commands.js` 7) plus 12 in tests, at `8c78a7e` |
-| 2 | non-federation is the assumption; federation is an optimization inside the same model | **decided, not built** | ADR-014's amendment says the opposite — see "What this reverses" |
+| 2 | non-federation is the assumption; federation is an optimization inside the same model; **both** credential kinds are supported | **decided, not built** | ADR-014's amendment says the opposite — see "What this reverses". Appservice support is mandatory per the operator (2026-08-13) and the repository has zero of it: no `as_token`, `hs_token`, `sender_localpart` or registration file, and the running bridge holds zero listening sockets |
 | 3 | the representative is registered per project side and is NOT an agent | **decided, not built**; in the first pass | the two roles are one thing today: the agent itself must be invited and must join |
 | 4 | an agent instance is minted on acceptance from a resource declaration | **decided, not built** | `POST /api/dispatch` Phase 4 returns a `provision` plan, but gated on agent COUNT and unaware of any project side |
 | 5 | the invite object is a room alias plus `knock` | **decided, not built** | `joinRoomByAlias`, `room_alias`, `matrix.to`, `inviteToken`, `joinCode` — zero matches repository-wide |
@@ -392,13 +392,51 @@ history, which is a different act from clearing a test fixture.
 automatic path depends on budget arithmetic and role matching, either of which can be wrong; with
 no manual path the only remedy is editing configuration and restarting.
 
-**6. AppService is not built in this pass.** The decisive constraint is network topology rather than
-effort: an appservice requires the project's homeserver to **push** transactions to a URL we
-expose, and `bridge-matrix.js` contains no `listen(` or `createServer` — it has no inbound HTTP
-surface at all, and reaches Matrix exclusively through outbound `fetch` to `/sync`. A contributor
-lending agents from a laptop behind NAT structurally cannot receive them. The registration-token
-path is outbound-only and therefore works from any network position. Decision 2's framing of
-appservice as a *credential kind* is what keeps this deferral cheap.
+**6. AppService MUST be supported — the deferral is withdrawn.** An earlier draft of this section
+deferred it, and the operator overruled that after reading the argument: 「必须支持 Application
+Service」. Recorded as a reversal rather than edited away, because the argument against it was
+specific and the operator's decision was made in full view of it.
+
+**Both credential kinds are built; appservice does not replace the registration-token path.** The
+registration-token path is the only one that works from behind NAT, so it remains the fallback for
+exactly the deployment shape the counter-argument described. Decision 2 having framed appservice as
+a *credential kind* rather than a *flow* is what makes supporting both cheap.
+
+**The consequence that matters is not effort — it is that this SIMPLIFIES the credential model, and
+retroactively corrects ADR-014 decision 4.** Under appservice an agent holds **no credential at
+all**: HAFleet masquerades with the project side's single `as_token` by appending
+`?user_id=@ac_x:their-server`. So `{ homeserver, accessToken }` per agent — decision 4's shape, and
+the shape this ADR's decision 1 had already moved to the project side — is not merely differently
+placed, it is **unrepresentable** for an appservice side. The agent record therefore holds
+`{ projectSide, mxid }` and nothing else, and both credential kinds resolve from the side:
+
+| | `kind: 'appservice'` | `kind: 'registrationToken'` |
+|---|---|---|
+| held on the project side | `asToken`, `hsToken`, `namespace` | the registration token |
+| per-agent credential | **none** | one access token each |
+| how an agent is created | implicit — no registration call | `POST /register` per agent |
+| how events arrive | the homeserver **pushes** to us | we poll `/sync` outbound |
+| revocation granularity | the whole namespace | per agent |
+
+**The network constraint does not disappear by being decided; it becomes a deployment
+requirement.** An appservice needs the project's homeserver to reach an address we expose, and
+`bridge-matrix.js` has no `listen(` and no `createServer` — verified again live: the running bridge
+process holds **zero** listening sockets. So appservice support requires, and must state to the
+operator, that HAFleet is reachable inbound from the project side (a public host, a tunnel, or
+same-network deployment). Where it is not, that project side must use a registration token.
+
+What has to be built for it: `PUT /_matrix/app/v1/transactions/{txnId}` authenticated by `hsToken`
+and **idempotent by `txnId`**, since the homeserver retries; `GET /_matrix/app/v1/users/{userId}` so
+the homeserver can ask whether a claimed user exists; and generation of the registration file the
+project side installs, whose `as_token` and `hs_token` must be **randomly generated, never
+derived** — that is ADR-014's entire lesson, and an appservice token is the one credential in this
+design that grants a whole namespace.
+
+*Sequenced to the second pass, which is not the same as deferred support.* The first pass must get
+three shapes right so the receiver is purely additive: the credential lives on the project side and
+carries a `kind`; an agent record holds an MXID and its side, never a token; and every Matrix call
+takes its `(baseUrl, auth)` from the side rather than a module constant. With those three, adding
+the transaction receiver restructures nothing.
 
 **7. A project's name comes from its room alias**, per decision 5. It is the first artifact in the
 design carrying a human-readable handle, so it answers a question that has been open since the
@@ -408,6 +446,27 @@ console started rendering raw room ids.
 
 The first pass is decisions 1, 3, and the identity half of 4: the project-side record, the
 representative/agent split, and an agent identity that carries its homeserver. It deliberately
-**excludes** automatic minting (which needs decision 6's allocation) and the cascade (which needs
-something to cascade over). At the end of it the circular dependency is gone, `HOMESERVER` is no
-longer a constant, and creation is still operator-triggered but travels the new path.
+**excludes** automatic minting (which needs decision 6's allocation), the cascade (which needs
+something to cascade over), and the appservice transaction receiver (additive, given the three
+shapes below). At the end of it the circular dependency is gone, `HOMESERVER` is no longer a
+constant, and creation is still operator-triggered but travels the new path.
+
+**Three shapes the first pass must get right**, because appservice support is mandatory and each of
+these would otherwise force a restructure when the receiver lands:
+
+1. the credential lives on the **project side** and carries a `kind`
+2. an agent record holds `{ projectSide, mxid }` and **never a token** — an appservice agent has none
+3. every Matrix call takes its `(baseUrl, auth)` from the project side, not from a module constant
+
+**The starting state is clean, as of 2026-08-13.** Per the settled answer to question 3 the test
+agent was force-deleted and its residue cleared: 0 agents, 0 bindings, no active engagement, and the
+usage ledger retained. Two ended engagements and two standing offers remain as history.
+
+That deletion also **demonstrated decision 7's cascade gap rather than predicting it**:
+`DELETE /api/agents/:name?force=true` permanently removed the agent and left three bindings still
+`active: true` plus one `active` engagement holding a 250k commitment against an agent that no longer
+existed — so the console would have reported a deleted agent as reachable in three projects, and
+`remainingFor` would have kept subtracting its commitment. Cleanup needed two separate endpoints, one
+of them bridge-secret-guarded and unreachable from the console. Worth recording: the
+refuse-by-default-with-explicit-force pattern decision 7 proposes for project sides **already
+exists** for agents, which is where that proposal should take its shape from.
