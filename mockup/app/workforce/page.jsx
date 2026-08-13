@@ -5,6 +5,7 @@ import PageHead from '@/components/PageHead';
 import { Blank } from '@/components/Blank';
 import { useT } from '@/components/Prefs';
 import { useData, Provenance } from '@/components/Data';
+import { InfoTip } from '@/components/InfoTip';
 // Pure formatters only. Everything data-dependent arrives through useData(), so
 // the fixture and the live backend reach this page through one implementation.
 import { fmtTokens, runtimeStatusText } from '@/lib/mock-data';
@@ -320,7 +321,12 @@ export default function WorkforcePage() {
                             <span className="dim">
                               {r.standing.map((b) => b.project).join(' · ')}
                             </span>
-                            <span className="dim">{t('wf.accessStandingWhy')}</span>
+                            {/*
+                              * The paragraph explaining what standing reachability MEANS used to sit
+                              * here, two sentences at the same visual weight as the room ids beside
+                              * it. It is the same sentence for every row, so it belongs once, below
+                              * the table. The names — which ARE row data — stay.
+                              */}
                           </>
                         )}
                       </>
@@ -369,7 +375,15 @@ export default function WorkforcePage() {
                     * already quotes backend error text the same way, for the same
                     * reason. The label around it is translated.
                     */}
-                  <td>
+                  <td title={r.tokens?.byKind
+                    ? `${t('wf.byKind', {
+                      input: fmtTokens(r.tokens.byKind.input ?? 0),
+                      cacheRead: fmtTokens(r.tokens.byKind.cacheRead ?? 0),
+                      cacheWrite: fmtTokens(r.tokens.byKind.cacheWrite ?? 0),
+                      output: fmtTokens(r.tokens.byKind.output ?? 0),
+                    })}${r.tokens.sessions !== null ? ` · ${t('wf.sessions', { n: r.tokens.sessions })}` : ''}`
+                    : undefined}
+                  >
                     {!r.tokens && <Blank why="wf.why.noUsageSlice" t={t} />}
                     {r.tokens && r.tokens.used === null && (
                       <span className="why-inline">{t('wf.why.tokens', { why: r.tokens.reason })}</span>
@@ -377,30 +391,28 @@ export default function WorkforcePage() {
                     {r.tokens && r.tokens.used !== null && (
                       <>
                         <div>
-                          <span className="amount">{fmtTokens(r.tokens.used)}</span>
+                          {/*
+                            * DRAWN, not the parity total. This led with `used`, which sums all four
+                            * kinds, so an agent with 1.3M of fresh tokens showed 29.6M next to a
+                            * 10.0M ceiling — the same defect fixed on the usage page and missed
+                            * here. The full breakdown is one click away rather than four figures
+                            * wide in a table cell.
+                            */}
+                          <span className="amount">{fmtTokens(r.tokens.drawn ?? r.tokens.used)}</span>
                           {/* Both caveats on a figure that otherwise looks exact. */}
                           {r.tokens.fromLedger && <span className="badge">{t('wf.fromLedger')}</span>}
                           {r.tokens.regressions > 0 && (
                             <span className="badge warn-b">{t('wf.regressed', { n: r.tokens.regressions })}</span>
                           )}
                         </div>
-                        {/* The kinds stay apart, and all four are printed: cache
-                            reads run orders of magnitude above fresh input, and a
-                            subset beside a total nobody can reconcile is worse than
-                            no breakdown at all. */}
-                        {r.tokens.byKind && (
-                          <span className="dim">
-                            {t('wf.byKind', {
-                              input: fmtTokens(r.tokens.byKind.input ?? 0),
-                              cacheRead: fmtTokens(r.tokens.byKind.cacheRead ?? 0),
-                              cacheWrite: fmtTokens(r.tokens.byKind.cacheWrite ?? 0),
-                              output: fmtTokens(r.tokens.byKind.output ?? 0),
-                            })}
-                          </span>
-                        )}
-                        {r.tokens.sessions !== null && (
-                          <span className="dim">{t('wf.sessions', { n: r.tokens.sessions })}</span>
-                        )}
+                        {/*
+                          * OUT OF THE CELL. Four figures and a session count in a table cell is
+                          * reference material, not the number the row is about — an operator read
+                          * the whole cluster as debugging output pushed into an official field, and
+                          * folding it into a per-row disclosure only made it a smaller version of
+                          * the same thing. The values ride on the cell's title so nothing is lost,
+                          * and what they MEAN is stated once below the table.
+                          */}
                       </>
                     )}
                   </td>
@@ -453,7 +465,23 @@ export default function WorkforcePage() {
         </div>
       )}
 
-      <div className="notice warn">{t('wf.utilNote')}</div>
+      {/*
+        * EVERY EXPLANATION THIS TABLE NEEDS, ONCE, OUTSIDE IT.
+        *
+        * These paragraphs are true and worth keeping — what the Used column counts, what standing
+        * reachability means, and why there is deliberately no utilisation percentage. They were
+        * spread between table cells and a permanent warn block, at the same visual weight as the
+        * figures, and an operator reported reading them as debugging output that had been pushed
+        * into official fields. They were.
+        *
+        * A column's meaning does not change per row, so it is stated per TABLE. Folded, because a
+        * reader who already knows what the column is should see the numbers, not the prose.
+        */}
+      <div className="stack">
+        <InfoTip label={t('wf.usedLabel')}>{t('wf.usedExplain')}</InfoTip>
+        <InfoTip label={t('wf.standingLabel')}>{t('wf.accessStandingWhy')}</InfoTip>
+        <InfoTip label={t('wf.utilLabel')}>{t('wf.utilNote')}</InfoTip>
+      </div>
 
       {/*
         * THE FIVE QUESTIONS, INCLUDING THE ONE THIS ROSTER REFUSES.

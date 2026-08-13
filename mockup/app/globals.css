@@ -1189,3 +1189,8 @@ h3.sub { font-size: 12.5px; font-weight: 600; margin: 2px 0 8px; color: var(--in
 }
 .infotip-list { margin: 0; padding-left: 16px; }
 .infotip-list li { margin: 4px 0; }
+
+/* A vertical run of page-level disclosures. Used below a table for the explanations that used to
+   sit inside its cells — I referenced this class before defining it, which renders as no grouping
+   at all and is invisible without looking at the page. */
+.stack { display: flex; flex-direction: column; gap: 4px; margin: 10px 0 0; }

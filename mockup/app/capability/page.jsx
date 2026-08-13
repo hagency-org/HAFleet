@@ -26,6 +26,15 @@ import { send } from '@/lib/api';
  * invent a role, because the project side has to recognise the name for any of
  * it to mean anything.
  */
+/*
+ * Exclusion reason ids published in lib/role-capacity.json, mapped to localized text. An id absent
+ * here falls back to that file's English prose rather than to a key name.
+ */
+const EXCLUSION_REASONS = {
+  'below-strong-floor': 'cp.reason.belowStrong',
+  'below-medium-floor': 'cp.reason.belowMedium',
+};
+
 export default function CapabilityPage() {
   const t = useT();
   const { capability, roleCapacity, agents, offers, provenance, refresh } = useData();
@@ -201,7 +210,9 @@ export default function CapabilityPage() {
                     <li key={r.agent.name}>
                       <Link href={`/agents/${r.agent.name}`}>{r.agent.name}</Link>
                       <span className="rc-tier">{r.match.tier}</span>
-                      <span className="dim">{r.match.family}</span>
+                      {/* Labelled: a bare `gpt` beside `strong` reads as a truncated model name
+                          rather than as the model FAMILY, which is what it is. */}
+                      <span className="dim">{t('cp.familyIs', { f: r.match.family })}</span>
                     </li>
                   ))}
                 </ul>
@@ -223,7 +234,18 @@ export default function CapabilityPage() {
               <div className="rc-excl">
                 {t('cp.excluded', {
                   models: c.excluded.flatMap((e) => e.models).join(', '),
-                  why: c.excluded[0].reason,
+                  /*
+                   * Localized by ID, with the data file's English prose as the fallback.
+                   * `lib/role-capacity.json` carries `reason: "below the strong floor"`, and this
+                   * printed it verbatim — so a Chinese console rendered
+                   * 「已排除:… —— below the strong floor。」, an English clause inside a Chinese
+                   * sentence, ending in a Chinese full stop. Third time this console has echoed an
+                   * API string into a localized surface, after the provenance line and the metering
+                   * gap list.
+                   */
+                  why: EXCLUSION_REASONS[c.excluded[0].reasonId]
+                    ? t(EXCLUSION_REASONS[c.excluded[0].reasonId])
+                    : c.excluded[0].reason,
                 })}
               </div>
             )}
