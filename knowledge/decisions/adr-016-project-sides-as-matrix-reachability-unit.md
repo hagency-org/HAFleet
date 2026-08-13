@@ -457,36 +457,59 @@ near-verbatim port of Conduit's design (`NamespaceRegex{exclusive, non_exclusive
 | `knock` join rule and room aliases (decision 5) | implemented |
 | outbound `GET /_matrix/app/v1/users/{userId}` back to the AS | **absent** — Palpo serves it but never calls it |
 
-**Three findings that constrain implementation, and would each have cost a debugging session:**
+**Findings that constrain implementation.** The first was then confirmed on the wire by registering a
+throwaway appservice against this instance, restarting it, and observing real transactions arrive —
+so it is a measurement, not a reading. The section below distinguishes the two, because the first
+version of this record did not and got one of them wrong.
 
-1. **Transactions are authenticated with a QUERY PARAMETER, not a header.** Palpo appends
-   `?access_token=<hs_token>` to its `PUT /_matrix/app/v1/transactions/{txnId}`; the header form is
-   present but commented out. A receiver that only reads `Authorization: Bearer` will reject every
-   transaction with a 401. So the receiver must accept the `hs_token` as a query parameter — and
-   should accept the header too, since the query form is the deviation rather than the spec.
-2. **Nothing creates the `sender_localpart` account.** Registering an appservice inserts only the
-   registration row, and Palpo's non-masqueraded auth branch then raises a database `NotFound` until
-   some user carries that `appservice_id`. The **first** call must therefore be masqueraded, which
-   runs `get_or_create_appservice_user` and bootstraps the account. This is inverted from Synapse and
-   Conduit, where a bare call works immediately — so code correct against those fails against Palpo
-   on its very first request, presenting as a bad credential rather than a missing account. Pinned
-   in `lib/matrix-representative.js` and its test.
-3. **Registrations load into a `OnceCell`**, so adding one requires a container restart. A runtime
-   admin API for register/enable/disable exists, but the file path is read once.
+1. **Transactions are authenticated with a QUERY PARAMETER, and carry no `Authorization` header at
+   all. CONFIRMED ON THE WIRE.** Three transactions were observed (`m.room.member` ×2 from an invite
+   and a join, then `m.room.message`). Every one carried `?access_token=<hs_token>`; every one had
+   header names limited to `accept, content-length, content-type, host`. A receiver that reads only
+   `Authorization: Bearer` will reject **every** transaction with a 401. The receiver must therefore
+   accept the `hs_token` as a query parameter, and should accept the header too, since the query form
+   is the deviation rather than the spec.
+2. **End-to-end delivery works. CONFIRMED**, and it was the item the reconnaissance had to leave
+   inferred. Interest-by-namespace holds: putting `@ap_test:palpo.test` in a room was enough for that
+   room's events to be forwarded.
+3. **Registrations load into a `OnceCell`**, so adding one requires a container restart — verified by
+   needing exactly that. A runtime admin API for register/enable/disable exists, but the file path is
+   read once. Palpo logs `Appservice registration dir: …` at startup, which is a usable readiness
+   signal.
+4. **Namespace enforcement works.** Masquerading as an MXID outside the claimed namespace is refused
+   with `403 M_FORBIDDEN` "User is not in appservice's namespace". This is the property that makes an
+   `as_token` a scoped credential rather than a superuser one, so it is worth having measured.
 
-**The decisive evidence for masquerading** was a symbol in the running binary rather than a source
-grep: `auth_by_access_token_without_query_masquerade`, a deliberate opt-**out** wrapper that exists
-because one endpoint reuses `user_id` for its own purposes. Nobody writes an opt-out unless the
-behaviour is the default everywhere else.
+**A CORRECTION, recorded rather than edited away.** The first version of this section claimed that
+nothing creates the `sender_localpart` account, that Palpo's non-masqueraded branch therefore raises a
+database `NotFound`, and that the **first** call must consequently be masqueraded. That claim came
+from reading the source and the binary's symbol table, and it **did not reproduce**. On this build a
+bare `as_token` whoami answers `200` with the sender's own MXID (device `_`); the masqueraded form
+answers `200` with device `appservice`. No bootstrap step is needed.
+
+The claim was written into this record and into `lib/matrix-representative.js` as *verified*, when what
+had been verified was that certain code paths exist — not what they do when called. That is the same
+defect this project keeps finding in its own console: asserting a fact nobody checked, in a place
+readers treat as checked. The masquerade is still the right call to make, for a reason that survives
+the correction: a bare whoami proves only that the token is known, while a masqueraded one proves the
+namespace claim actually functions and exercises the exact call shape every agent operation will use.
+
+**The decisive evidence for masquerading**, before it was measured, was a symbol in the running binary
+rather than a source grep: `auth_by_access_token_without_query_masquerade`, a deliberate opt-**out**
+wrapper that exists because one endpoint reuses `user_id` for its own purposes. Nobody writes an
+opt-out unless the behaviour is the default everywhere else. That inference held up.
 
 **One trap recorded so it is not reused as evidence:** probing `PUT /_matrix/app/v1/transactions/1`
 returns 401 rather than 404, and that says **nothing** about HS→AS push — Palpo also *serves* the
-appservice-side API, which is the opposite direction. The push evidence is in its sending path.
+appservice-side API, which is the opposite direction. The push evidence is in its sending path, and
+now in the observation above.
 
-**Still inferred rather than verified:** end-to-end delivery of a transaction. Everything up to the
-send call is confirmed; the wire round-trip is not, and confirming it needs a throwaway registration
-plus a restart. That same experiment would settle finding 1, which is the highest-value open
-question here.
+**Residue from the experiment**, disclosed rather than left to be found: the throwaway registration,
+the `appservice_registration_dir` key and the bind mount were all removed and the instance restarted,
+verified by the `as_token` now being refused `M_UNKNOWN_TOKEN`. Two Matrix accounts (`@probehuman`,
+`@ap_test`) and one room remain on this disposable homeserver. They are invisible to the HAFleet
+console — neither is a HAFleet agent and neither inviter is trusted — so they pollute no surface, but
+they do exist.
 
 **Also relevant to decision 2:** this deployment runs with federation disabled, which matches the
 non-federating assumption rather than working around it.
