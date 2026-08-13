@@ -78,6 +78,21 @@ const READS = [
    * accepting spends the contributor's tokens.
    */
   /^matrix\/pending-invites$/,
+  /*
+   * 项目方 — the project sides HAFleet is registered with (ADR-016 decision 1).
+   *
+   * Read-safe for a console holding the API token, and that is a property of the STORE rather than
+   * a judgement made here: `publicSide` is an allow-list projection with no credential field, so
+   * there is no shape of this response that carries an `as_token`. What it does carry is what an
+   * operator needs — the server, the credential KIND, the access verdict with its age, and the
+   * representative's MXID.
+   *
+   * One segment for the id, which IS the server name: `palpo.test` and `127.0.0.1:8008` both pass
+   * SAFE_SEGMENT (dots and colons are in the class), and `[^/]+` would additionally admit the
+   * percent-encoded traversal that class exists to reject.
+   */
+  /^project-sides$/,
+  /^project-sides\/[A-Za-z0-9._:-]+$/,
 ];
 
 /*
@@ -131,6 +146,27 @@ const WRITES = [
    * the name; `?force=true` rides in the query string, which the forwarder preserves.
    */
   { method: 'DELETE', re: /^agents\/[A-Za-z0-9._-]+$/ },
+  /*
+   * Project-side CRUD — the operator's 「增加一个项目方的 section，里面可以 CRUD」.
+   *
+   * The credential travels in the BODY of the upsert and the credential write, so no path segment
+   * carries a secret and nothing here can be read back: the backend answers every one of these with
+   * the same credential-free projection the reads use.
+   *
+   * `verify` is a write rather than a read even though it changes no configuration, because it makes
+   * an authenticated call to a foreign homeserver and records a verdict. A GET that reaches out to
+   * someone else's server on every console refresh is the wrong default.
+   *
+   * DELETE is admitted, and it is the one entry here that can destroy something. The backend refuses
+   * an ACTIVE side with a 409 and requires `?force=true`, which the forwarder preserves in the query
+   * string — the same shape as the agent delete above.
+   */
+  { method: 'POST', re: /^project-sides$/ },
+  { method: 'PUT', re: /^project-sides\/[A-Za-z0-9._:-]+\/credential$/ },
+  { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/verify$/ },
+  { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/deactivate$/ },
+  { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/reactivate$/ },
+  { method: 'DELETE', re: /^project-sides\/[A-Za-z0-9._:-]+$/ },
 ];
 
 function allowed(method, joined) {

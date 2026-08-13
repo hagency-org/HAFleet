@@ -37,6 +37,8 @@ import { getFramework, listFrameworks } from './lib/frameworks/index.js';
 import roleCapacity from './lib/role-capacity.json' with { type: 'json' };
 import { buildSeats, normalizeDeclaration, seatIdentity } from './lib/seat-store.js';
 import { createEngagementStore, routeRequest, EngagementError } from './lib/engagement-store.js';
+import { ProjectSideStore, ProjectSideStoreError } from './lib/project-side-store.js';
+import { ensureRepresentative } from './lib/matrix-representative.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
 import {
@@ -1648,6 +1650,14 @@ const alertStore = createAlertStore({
 const approvalStore = new ApprovalStore(path.join(DATA_DIR, 'approvals.json'), {
   ttlMs: APPROVAL_TTL_MS,
 });
+/*
+ * 项目方 — the project sides HAFleet is registered with (ADR-016 decision 1).
+ *
+ * Separate from `approvals.json` rather than a section inside it, because this file holds
+ * CREDENTIALS: an `as_token` granting a whole namespace on a homeserver we do not administer.
+ * A distinct file keeps that surface small enough to reason about, and the store writes it 0600.
+ */
+const projectSideStore = new ProjectSideStore(path.join(DATA_DIR, 'project-sides.json'));
 const localActivitySweepState = loadJsonSync('local_activity_sweep.json', { selectionCursor: 0 });
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
@@ -1658,6 +1668,13 @@ let localActivitySweepRunning = false;
 let localSwapSweepRunning = false;
 let agentScopeSweepRunning = false;
 let supervisorLifecycleSweepRunning = false;
+/*
+ * Declared even though the project-side sweep runs once at startup, because `runAsyncSweep`'s
+ * reentrancy guard is a hardcoded ladder of `stateKey` comparisons: an unrecognised key gets NO
+ * guard, silently. A one-shot call does not need one, but the next person to put this sweep on a
+ * timer would inherit overlapping runs against foreign homeservers and nothing would say why.
+ */
+let projectSideSweepRunning = false;
 let localTmuxSnapshotWarnAt = 0;
 const SYSTEM_INFO_LOG = dataPath('system-info.jsonl');
 const AUDIT_LOG = dataPath('audit.jsonl');
@@ -5516,11 +5533,13 @@ function runAsyncSweep(label, fn, stateKey) {
   if (stateKey === 'localSwap' && localSwapSweepRunning) return;
   if (stateKey === 'agentScope' && agentScopeSweepRunning) return;
   if (stateKey === 'supervisorLifecycle' && supervisorLifecycleSweepRunning) return;
+  if (stateKey === 'projectSides' && projectSideSweepRunning) return;
 
   if (stateKey === 'localActivity') localActivitySweepRunning = true;
   if (stateKey === 'localSwap') localSwapSweepRunning = true;
   if (stateKey === 'agentScope') agentScopeSweepRunning = true;
   if (stateKey === 'supervisorLifecycle') supervisorLifecycleSweepRunning = true;
+  if (stateKey === 'projectSides') projectSideSweepRunning = true;
 
   Promise.resolve()
     .then(fn)
@@ -5532,6 +5551,7 @@ function runAsyncSweep(label, fn, stateKey) {
       if (stateKey === 'localSwap') localSwapSweepRunning = false;
       if (stateKey === 'agentScope') agentScopeSweepRunning = false;
       if (stateKey === 'supervisorLifecycle') supervisorLifecycleSweepRunning = false;
+      if (stateKey === 'projectSides') projectSideSweepRunning = false;
     });
 }
 
@@ -6751,6 +6771,219 @@ app.get('/api/approval-bindings', requireApprovalBridgeSecret, (req, res) => {
     return respondApprovalStoreError(res, error, 'failed to list approval bindings');
   }
 });
+
+/*
+ * ── 项目方 Project sides (ADR-016 decisions 1, 3 and 8) ────────────────────────────────────
+ *
+ * A project side is one homeserver, the credential HAFleet holds there, and one representative.
+ * It is the record that dissolves the circular dependency an operator identified: an agent MXID
+ * contains a server name, so an identity cannot be minted before the server is known — and until
+ * now `agentUserId()` composed one on HAFleet's OWN server at startup, before any project existed.
+ *
+ * THE CREDENTIAL IS WRITE-ONLY (decision 8). Every handler below returns the store's `publicSide`
+ * projection, which has no credential field by construction. `credentialFor()` is called in exactly
+ * one place — the verify handler, which needs it to talk to the homeserver — and its value never
+ * reaches a response. The operator can set and replace it; nothing can read it back.
+ *
+ * Why that is a different rule from `cf.ownSecrets`, which says HAFleet's own secrets are
+ * deliberately not editable from a browser: that rule protects HAFleet's own AUTHENTICATION, where a
+ * bad value locks the operator out of the console itself. A project side's credential is inbound work
+ * capacity — a bad value costs one project side's reachability and locks nobody out.
+ */
+function respondProjectSideError(res, error, fallback = 'project side operation failed') {
+  if (error instanceof ProjectSideStoreError) {
+    const status = { bad_request: 400, side_active: 409, persistence_failed: 503 }[error.code] ?? 500;
+    return res.status(status).json({ error: error.message, code: error.code });
+  }
+  return res.status(500).json({ error: error?.message || fallback });
+}
+
+app.get('/api/project-sides', requireBearer, (req, res) => {
+  try {
+    return res.json({
+      ok: true,
+      sides: projectSideStore.listSides({ activeOnly: req.query?.active === 'true' }),
+    });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to list project sides');
+  }
+});
+
+app.get('/api/project-sides/:id', requireBearer, (req, res) => {
+  const side = projectSideStore.getSide(req.params.id);
+  if (!side) return res.status(404).json({ error: 'project side not found' });
+  return res.json({ ok: true, side });
+});
+
+/*
+ * Create or update. The id IS the server name, so this is an upsert on that key and there is no
+ * separate POST/PUT split: a homeserver has exactly one credential and one representative, and a
+ * create-only route would let a second record claim the same server.
+ */
+app.post('/api/project-sides', requireBearer, (req, res) => {
+  try {
+    const side = projectSideStore.upsertSide({
+      server_name: req.body?.server_name ?? req.body?.serverName,
+      api_base_url: req.body?.api_base_url ?? req.body?.apiBaseUrl,
+      label: req.body?.label,
+      // Present-but-undefined is CARRIED FORWARD by the store; an explicit null clears. The console
+      // can only write this field, so a form that saves a label must not erase it.
+      ...(Object.prototype.hasOwnProperty.call(req.body ?? {}, 'credential')
+        ? { credential: req.body.credential }
+        : {}),
+    });
+    return res.json({ ok: true, side });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to save project side');
+  }
+});
+
+/** Replace the credential alone. Write-only: the response is the projection, never the value. */
+app.put('/api/project-sides/:id/credential', requireBearer, (req, res) => {
+  try {
+    const side = projectSideStore.setCredential(req.params.id, req.body?.credential ?? null);
+    if (!side) return res.status(404).json({ error: 'project side not found' });
+    return res.json({ ok: true, side });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to set credential');
+  }
+});
+
+/*
+ * Ask the homeserver whether our credential works, and record the answer.
+ *
+ * The verdict is stored rather than only returned, because "accepted" with no age cannot be told
+ * apart from "accepted once, months ago, by a process that has since stopped running" — the argument
+ * that put `membershipCheckedAt` beside `agentJoined`.
+ *
+ * A REJECTED credential and an UNREACHABLE homeserver are different answers and this endpoint says
+ * which: only 401/403 is a verdict on the token. Reporting an outage as rejected sends an operator to
+ * ask a project side for a new credential when theirs is fine, and on this path that means a human
+ * doing account work on somebody else's homeserver.
+ */
+app.post('/api/project-sides/:id/verify', requireBearer, async (req, res) => {
+  const existing = projectSideStore.getSide(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'project side not found' });
+  try {
+    const credential = projectSideStore.credentialFor(req.params.id);
+    const result = await ensureRepresentative({ side: existing, credential });
+
+    /*
+     * A newly minted representative token is stored BEFORE the verdict. If the order were reversed
+     * and the process died between the two writes, the token would be lost while the homeserver
+     * believed the account existed — and the localpart would then be taken, so re-registering would
+     * fail. Storing the credential first makes the worst case a missing verdict, which the next
+     * verify recomputes.
+     */
+    if (result.credentialPatch) {
+      projectSideStore.setCredential(req.params.id, { ...credential, ...result.credentialPatch });
+    }
+    projectSideStore.observeAccess(req.params.id, {
+      state: result.accessState,
+      detail: result.detail,
+    });
+    if (result.mxid) {
+      /*
+       * Guarded: the store refuses an MXID whose server is not this side's, which is the check that
+       * stops the federation assumption creeping back in. A refusal here must not turn a successful
+       * verification into a 500, so it is recorded as a bad_request against the side rather than
+       * discarding the access verdict already written above.
+       */
+      try {
+        projectSideStore.setRepresentative(req.params.id, { mxid: result.mxid });
+      } catch (error) {
+        return res.status(400).json({
+          error: error?.message || 'representative mxid refused',
+          code: 'representative_rejected',
+          side: projectSideStore.getSide(req.params.id),
+        });
+      }
+    }
+    return res.json({ ok: true, side: projectSideStore.getSide(req.params.id) });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to verify project side');
+  }
+});
+
+app.post('/api/project-sides/:id/deactivate', requireBearer, (req, res) => {
+  try {
+    const side = projectSideStore.deactivateSide(req.params.id);
+    if (!side) return res.status(404).json({ error: 'project side not found' });
+    return res.json({ ok: true, side });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to deactivate project side');
+  }
+});
+
+app.post('/api/project-sides/:id/reactivate', requireBearer, (req, res) => {
+  try {
+    const side = projectSideStore.reactivateSide(req.params.id);
+    if (!side) return res.status(404).json({ error: 'project side not found' });
+    return res.json({ ok: true, side });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to reactivate project side');
+  }
+});
+
+/*
+ * Forget a side. The LAST step of decision 7's cascade, and this endpoint does not perform the rest
+ * of it — ending engagements, releasing commitments, deactivating bindings and retiring agent
+ * identities are not built yet, and pretending otherwise would be worse than the gap.
+ *
+ * So the refusal is the honest part: an ACTIVE side is refused (409), because removing it drops the
+ * credential that every earlier cascade step still needs — leaving rooms, revoking tokens, telling
+ * the borrower. `?force=true` overrides, matching `DELETE /api/agents/:name`, which already answers
+ * "unregister is disabled … Use ?force=true".
+ */
+app.delete('/api/project-sides/:id', requireBearer, (req, res) => {
+  try {
+    const side = projectSideStore.removeSide(req.params.id, { force: req.query?.force === 'true' });
+    if (!side) return res.status(404).json({ error: 'project side not found' });
+    return res.json({
+      ok: true,
+      side,
+      // Named rather than implied: the cascade is not built, so a caller must not read this 200 as
+      // "everything that depended on this side has been cleaned up".
+      cascade: 'not_performed',
+      cascadeNote: 'engagements, bindings and agent identities on this side are NOT touched by this endpoint',
+    });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to remove project side');
+  }
+});
+
+/*
+ * Verify every active side once, after the server is listening.
+ *
+ * NON-BLOCKING and after `listening` deliberately: this makes network calls to homeservers HAFleet
+ * does not control, and a slow or unreachable project side must not delay or fail startup. Each side
+ * is independent — `ensureRepresentative` returns a state rather than throwing, so one unreachable
+ * server cannot stop the others being checked, which is the property that makes a sweep worth having
+ * at all.
+ */
+async function sweepProjectSideRepresentatives() {
+  const sides = projectSideStore.listSides({ activeOnly: true });
+  if (!sides.length) return;
+  for (const side of sides) {
+    try {
+      const credential = projectSideStore.credentialFor(side.id);
+      const result = await ensureRepresentative({ side, credential });
+      if (result.credentialPatch) {
+        projectSideStore.setCredential(side.id, { ...credential, ...result.credentialPatch });
+      }
+      projectSideStore.observeAccess(side.id, { state: result.accessState, detail: result.detail });
+      if (result.mxid) {
+        try { projectSideStore.setRepresentative(side.id, { mxid: result.mxid }); } catch { /* recorded by the verdict */ }
+      }
+      if (result.accessState !== 'accepted') {
+        console.warn(`[project-side] ${side.id}: ${result.accessState}${result.detail ? ` — ${result.detail}` : ''}`);
+      }
+    } catch (error) {
+      // A per-side failure is logged and the sweep continues. Never the whole sweep's problem.
+      console.warn(`[project-side] ${side.id}: sweep failed — ${error?.message || 'unknown'}`);
+    }
+  }
+}
 
 /*
  * ── Pending project invitations (ADR-014 amendment 2026-08-11) ─────────────────────────────
@@ -11273,6 +11506,7 @@ export function startServer({ port = PORT, host = resolvedBindHost() } = {}) {
       runAsyncSweep('sweepLocalSwapPressure', sweepLocalSwapPressure, 'localSwap');
       runAsyncSweep('sweepAgentScopePressure', sweepAgentScopePressure, 'agentScope');
       runAsyncSweep('sweepSupervisorLifecycle', () => supervisorLifecycleManager.sweepAll(), 'supervisorLifecycle');
+      runAsyncSweep('sweepProjectSideRepresentatives', sweepProjectSideRepresentatives, 'projectSides');
       try { const orphans = supervisorLifecycleManager.cleanOrphanSessions(); if (orphans.length) console.log(`  Cleaned ${orphans.length} orphan supervisor session(s): ${orphans.join(', ')}`); } catch { /* tmux not available */ }
       console.log(`Agent Chat v2 backend listening on http://${host}:${port}`);
       const agentCount = Object.values(agents).filter(isAgentRecord).length;

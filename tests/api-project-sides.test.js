@@ -1,0 +1,415 @@
+/*
+ * 项目方 over HTTP — the operator's CRUD, and what must never come back through it.
+ *
+ * ADR-016 decisions 1, 3, 7 and 8. The operator asked for this surface directly: 「增加一个项目方的
+ * section，里面可以 CRUD hafleet 加入的项目方」, with the constraint that deleting a project side must
+ * take its agents with it.
+ *
+ * THE HEAVIEST GROUP IS THE LEAK CHECK, and it is heaviest because of what the credential is: an
+ * `as_token` grants a whole namespace on a homeserver HAFleet does not administer. The console
+ * renders whatever an API returns, and this repository has already shipped two cases of API text
+ * reaching a UI nobody intended to show it. So every handler is checked, not a sample.
+ *
+ * The verify tests run against a FAKE HOMESERVER started in-process rather than a mocked module.
+ * The point of `verify` is that it makes a real authenticated call and classifies what comes back, so
+ * stubbing the call would test the parts that were never in doubt.
+ */
+
+import { afterEach, describe, expect, test } from 'vitest';
+import request from 'supertest';
+import { createServer } from 'http';
+import { createBackendTestContext } from './helpers/backend-test-runtime.js';
+
+const SERVER = 'palpo.test';
+const AS_TOKEN = 'as_secret_must_not_leak_0123456789';
+const HS_TOKEN = 'hs_secret_must_not_leak_9876543210';
+const REG_TOKEN = 'reg_secret_must_not_leak_abcdefghij';
+const SECRETS = [AS_TOKEN, HS_TOKEN, REG_TOKEN];
+
+const asCred = () => ({
+  kind: 'appservice',
+  asToken: AS_TOKEN,
+  hsToken: HS_TOKEN,
+  namespace: '@ac_.*',
+  senderLocalpart: 'hafleet',
+});
+
+let context = null;
+let fake = null;
+
+afterEach(async () => {
+  context?.cleanup();
+  context = null;
+  if (fake) {
+    await new Promise((resolve) => fake.server.close(resolve));
+    fake = null;
+  }
+});
+
+async function boot(seed = {}) {
+  context = await createBackendTestContext('api-project-sides-', { agents: {}, ...seed });
+  return context.app;
+}
+
+/**
+ * A homeserver that answers only what `ensureRepresentative` asks it.
+ *
+ * `handler` receives (path, searchParams, method, body) and returns [status, jsonBody]. Started on
+ * an ephemeral port so several tests can run without colliding.
+ */
+async function fakeHomeserver(handler) {
+  const calls = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://x');
+      calls.push({ path: url.pathname, method: req.method, query: Object.fromEntries(url.searchParams), body });
+      const [status, payload] = handler(url.pathname, url.searchParams, req.method, body);
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(payload));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  fake = { server, calls, baseUrl: `http://127.0.0.1:${server.address().port}` };
+  return fake;
+}
+
+function expectNoSecrets(response, what) {
+  const serialized = JSON.stringify(response.body ?? null) + (response.text ?? '');
+  for (const secret of SECRETS) {
+    expect(serialized, `${what} leaked a secret`).not.toContain(secret);
+  }
+}
+
+describe('the credential never comes back through the API', () => {
+  test('THE CASE THAT MATTERS: no endpoint returns a credential', async () => {
+    /*
+     * Enumerated rather than sampled, because a leak needs only one unguarded handler. The store's
+     * `publicSide` is an allow-list projection so this SHOULD hold by construction — this test is
+     * what makes "by construction" checkable, and what fails if a handler ever answers with a record
+     * it fetched some other way.
+     */
+    const app = await boot();
+    const created = await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008', label: 'Acme', credential: asCred() });
+    expect(created.status).toBe(200);
+    expectNoSecrets(created, 'POST /api/project-sides');
+
+    expectNoSecrets(await request(app).get('/api/project-sides'), 'GET list');
+    expectNoSecrets(await request(app).get(`/api/project-sides/${SERVER}`), 'GET one');
+    expectNoSecrets(
+      await request(app).put(`/api/project-sides/${SERVER}/credential`).send({ credential: asCred() }),
+      'PUT credential',
+    );
+    expectNoSecrets(await request(app).post(`/api/project-sides/${SERVER}/verify`), 'POST verify');
+    expectNoSecrets(await request(app).post(`/api/project-sides/${SERVER}/deactivate`), 'POST deactivate');
+    expectNoSecrets(await request(app).post(`/api/project-sides/${SERVER}/reactivate`), 'POST reactivate');
+    expectNoSecrets(await request(app).post(`/api/project-sides/${SERVER}/deactivate`), 'POST deactivate again');
+    expectNoSecrets(await request(app).delete(`/api/project-sides/${SERVER}`), 'DELETE');
+  });
+
+  test('the KIND is exposed, because an operator needs it to read the fleet', async () => {
+    // An appservice side's agents hold no individual credential, so "no credential" is correct there
+    // and alarming anywhere else. Hiding the kind would make that look like a provisioning failure.
+    const app = await boot();
+    const r = await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008', credential: asCred() });
+    expect(r.body.side.credentialKind).toBe('appservice');
+    expect(r.body.side.hasCredential).toBe(true);
+    expect(r.body.side).not.toHaveProperty('credential');
+  });
+});
+
+describe('one side per homeserver', () => {
+  test('the id is the server name, and a second POST updates rather than duplicates', async () => {
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008', label: 'First' });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: 'PALPO.TEST', api_base_url: 'http://127.0.0.1:8008', label: 'Second' });
+    const list = await request(app).get('/api/project-sides');
+    expect(list.body.sides).toHaveLength(1);
+    expect(list.body.sides[0].label).toBe('Second');
+    expect(list.body.sides[0].id).toBe(SERVER);
+  });
+
+  test('a URL as server_name is a 400 with the reason', async () => {
+    const app = await boot();
+    const r = await request(app).post('/api/project-sides')
+      .send({ server_name: 'http://palpo.test', api_base_url: 'http://127.0.0.1:8008' });
+    expect(r.status).toBe(400);
+    expect(r.body.code).toBe('bad_request');
+    expect(r.body.error).toMatch(/server_name must be a Matrix server name/);
+  });
+
+  test('an unknown side is a 404, not an empty 200', async () => {
+    const app = await boot();
+    expect((await request(app).get('/api/project-sides/never.configured')).status).toBe(404);
+    expect((await request(app).post('/api/project-sides/never.configured/verify')).status).toBe(404);
+    expect((await request(app).put('/api/project-sides/never.configured/credential')
+      .send({ credential: asCred() })).status).toBe(404);
+    expect((await request(app).delete('/api/project-sides/never.configured')).status).toBe(404);
+  });
+
+  test('a server name WITH A PORT works as a path segment', async () => {
+    /*
+     * `127.0.0.1:8008` is a legal Matrix server name and is this deployment's actual API host, so it
+     * will be a real id. It also travels as a path segment through the console proxy, which
+     * percent-encodes each segment before forwarding — so the colon makes a round trip through
+     * `encodeURIComponent` and Express's param decoding. A route that only ever saw dotted names
+     * would break on the first side an operator actually adds, and the symptom would be a 404 on a
+     * side the list shows.
+     */
+    const app = await boot();
+    const id = '127.0.0.1:8008';
+    const created = await request(app).post('/api/project-sides')
+      .send({ server_name: id, api_base_url: 'http://127.0.0.1:8008' });
+    expect(created.body.side.id).toBe(id);
+
+    expect((await request(app).get(`/api/project-sides/${encodeURIComponent(id)}`)).status).toBe(200);
+    expect((await request(app).post(`/api/project-sides/${encodeURIComponent(id)}/deactivate`)).status).toBe(200);
+    expect((await request(app).delete(`/api/project-sides/${encodeURIComponent(id)}`)).status).toBe(200);
+  });
+
+  test('activeOnly filters, and the default does not', async () => {
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    await request(app).post(`/api/project-sides/${SERVER}/deactivate`);
+    expect((await request(app).get('/api/project-sides?active=true')).body.sides).toHaveLength(0);
+    expect((await request(app).get('/api/project-sides')).body.sides).toHaveLength(1);
+  });
+});
+
+describe('an update that omits the credential does not erase it', () => {
+  test('saving a label keeps the credential', async () => {
+    /*
+     * The console can only WRITE this field, so a form that round-trips a record has no credential in
+     * it. If the handler treated absent as null, every label edit would destroy a credential that
+     * only the project side can reissue.
+     */
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008', credential: asCred() });
+    const renamed = await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008', label: 'Renamed' });
+    expect(renamed.body.side.hasCredential).toBe(true);
+    expect(renamed.body.side.label).toBe('Renamed');
+  });
+
+  test('an explicit null clears it, so there is still a way to mean it', async () => {
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008', credential: asCred() });
+    const cleared = await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008', credential: null });
+    expect(cleared.body.side.hasCredential).toBe(false);
+  });
+});
+
+describe('verify records a verdict, and which kind of verdict', () => {
+  test('an appservice credential the server accepts is recorded with the representative MXID', async () => {
+    const hs = await fakeHomeserver((path, q) => {
+      if (path === '/_matrix/client/v3/account/whoami') {
+        // Masqueraded: the AS acts as sender_localpart. The server's answer is authoritative.
+        return [200, { user_id: `@hafleet:${SERVER}`, device_id: 'appservice' }];
+      }
+      return [404, { errcode: 'M_UNRECOGNIZED' }];
+    });
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: hs.baseUrl, credential: asCred() });
+
+    const r = await request(app).post(`/api/project-sides/${SERVER}/verify`);
+    expect(r.status).toBe(200);
+    expect(r.body.side.accessState).toBe('accepted');
+    expect(typeof r.body.side.accessCheckedAt).toBe('number');
+    expect(r.body.side.representative.mxid).toBe(`@hafleet:${SERVER}`);
+    // The masquerade is the call being made, not an implementation detail: it proves the namespace
+    // claim functions rather than merely that the token is known.
+    expect(hs.calls[0].query.user_id).toBe(`@hafleet:${SERVER}`);
+  });
+
+  test('a REJECTED credential is recorded as rejected, and the side stays active', async () => {
+    // Reachability failing is not the contributor withdrawing anything, so a verdict must not
+    // deactivate a side. Only the operator may do that.
+    const hs = await fakeHomeserver(() => [403, { errcode: 'M_FORBIDDEN', error: 'bad token' }]);
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: hs.baseUrl, credential: asCred() });
+
+    const r = await request(app).post(`/api/project-sides/${SERVER}/verify`);
+    expect(r.status).toBe(200);
+    expect(r.body.side.accessState).toBe('rejected');
+    expect(r.body.side.active).toBe(true);
+    expect(r.body.side.accessDetail).toMatch(/M_FORBIDDEN/);
+  });
+
+  test('AN UNREACHABLE HOMESERVER IS NOT A REJECTED CREDENTIAL', async () => {
+    /*
+     * The distinction that costs somebody else's afternoon when it is wrong. Port 1 on loopback
+     * refuses the connection, which produces an error with no HTTP status at all — exactly the shape
+     * that must classify as `unreachable` rather than as a verdict on the token.
+     */
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:1', credential: asCred() });
+
+    const r = await request(app).post(`/api/project-sides/${SERVER}/verify`);
+    expect(r.status).toBe(200);
+    expect(r.body.side.accessState).toBe('unreachable');
+  });
+
+  test('a side with no credential verifies to unverified rather than failing', async () => {
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    const r = await request(app).post(`/api/project-sides/${SERVER}/verify`);
+    expect(r.status).toBe(200);
+    expect(r.body.side.accessState).toBe('unverified');
+  });
+
+  test('a newly minted representative token is STORED, so the next verify needs no registration', async () => {
+    /*
+     * The registration-token path. The credential patch has to be persisted or every verify would
+     * register again — and the second attempt fails, because the localpart is already taken.
+     */
+    let registrations = 0;
+    const hs = await fakeHomeserver((path, q, method, body) => {
+      if (path === '/_matrix/client/v3/register') {
+        registrations += 1;
+        const parsed = JSON.parse(body || '{}');
+        if (!parsed.auth) return [401, { session: 'uia-1', flows: [{ stages: ['m.login.registration_token'] }] }];
+        return [200, { access_token: 'minted-rep-token', user_id: `@hafleet:${SERVER}` }];
+      }
+      if (path === '/_matrix/client/v3/account/whoami') {
+        return [200, { user_id: `@hafleet:${SERVER}`, device_id: 'D1' }];
+      }
+      return [404, { errcode: 'M_UNRECOGNIZED' }];
+    });
+    const app = await boot();
+    await request(app).post('/api/project-sides').send({
+      server_name: SERVER,
+      api_base_url: hs.baseUrl,
+      credential: { kind: 'registrationToken', registrationToken: REG_TOKEN, representativeToken: null },
+    });
+
+    const first = await request(app).post(`/api/project-sides/${SERVER}/verify`);
+    expect(first.body.side.accessState).toBe('accepted');
+    const afterFirst = registrations;
+    expect(afterFirst).toBeGreaterThan(0);
+
+    const second = await request(app).post(`/api/project-sides/${SERVER}/verify`);
+    expect(second.body.side.accessState).toBe('accepted');
+    // No further registration: the second verify validated the stored token instead.
+    expect(registrations).toBe(afterFirst);
+  });
+
+  test('a representative on the WRONG server is refused, and the verdict is still recorded', async () => {
+    /*
+     * The federation assumption trying to come back in (decision 2 assumes servers do not federate).
+     * The refusal must not discard the access verdict that was already written — an operator needs to
+     * see both that the credential worked and that the identity it produced was unusable, because
+     * those imply different fixes.
+     */
+    const hs = await fakeHomeserver(() => [200, { user_id: '@hafleet:someone-else.example', device_id: 'D1' }]);
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: hs.baseUrl, credential: asCred() });
+
+    const r = await request(app).post(`/api/project-sides/${SERVER}/verify`);
+    expect(r.status).toBe(400);
+    expect(r.body.code).toBe('representative_rejected');
+    expect(r.body.error).toMatch(/must live on palpo\.test/);
+    // The verdict survived the refusal.
+    expect(r.body.side.accessState).toBe('accepted');
+    expect(r.body.side.representative).toBeNull();
+  });
+
+  test('changing the credential invalidates a previous verdict', async () => {
+    const hs = await fakeHomeserver(() => [200, { user_id: `@hafleet:${SERVER}`, device_id: 'D1' }]);
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: hs.baseUrl, credential: asCred() });
+    await request(app).post(`/api/project-sides/${SERVER}/verify`);
+
+    const replaced = await request(app).put(`/api/project-sides/${SERVER}/credential`)
+      .send({ credential: { kind: 'registrationToken', registrationToken: REG_TOKEN } });
+    expect(replaced.body.side.accessState).toBe('unverified');
+    expect(replaced.body.side.accessCheckedAt).toBeNull();
+  });
+});
+
+describe('removal refuses to be the first step of a cascade', () => {
+  test('an ACTIVE side is refused with 409', async () => {
+    /*
+     * Because removing it drops the credential every earlier cascade step still needs — leaving
+     * rooms, revoking tokens, telling the borrower. Deactivate first.
+     */
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008', credential: asCred() });
+    const r = await request(app).delete(`/api/project-sides/${SERVER}`);
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe('side_active');
+    expect((await request(app).get(`/api/project-sides/${SERVER}`)).status).toBe(200);
+  });
+
+  test('deactivating first allows removal', async () => {
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    await request(app).post(`/api/project-sides/${SERVER}/deactivate`);
+    expect((await request(app).delete(`/api/project-sides/${SERVER}`)).status).toBe(200);
+    expect((await request(app).get(`/api/project-sides/${SERVER}`)).status).toBe(404);
+  });
+
+  test('force removes an active side', async () => {
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    expect((await request(app).delete(`/api/project-sides/${SERVER}?force=true`)).status).toBe(200);
+  });
+
+  test('THE HONEST PART: the response says the cascade was not performed', async () => {
+    /*
+     * Decision 7's cascade — ending engagements, releasing commitments, deactivating bindings,
+     * retiring identities — is NOT built. A bare 200 would read as "everything that depended on this
+     * side is cleaned up", and this repository already produced exactly that failure by other means:
+     * force-deleting an agent left three active bindings and a 250k commitment pointing at it.
+     *
+     * So the gap is named in the response rather than left for someone to discover.
+     */
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    const r = await request(app).delete(`/api/project-sides/${SERVER}?force=true`);
+    expect(r.body.cascade).toBe('not_performed');
+    expect(r.body.cascadeNote).toMatch(/engagements, bindings and agent identities/);
+  });
+});
+
+describe('persistence', () => {
+  test('a seeded store is read at boot', async () => {
+    // Proves the backend binds the store to its data dir rather than starting empty every time.
+    const app = await boot({
+      rawDataFiles: {
+        'project-sides.json': JSON.stringify({
+          version: 1,
+          sides: {
+            [SERVER]: {
+              id: SERVER, serverName: SERVER, label: 'Seeded', apiBaseUrl: 'http://127.0.0.1:8008',
+              credential: null, representative: null, active: true,
+              createdAt: 1, updatedAt: 1, accessState: 'unverified', accessDetail: null, accessCheckedAt: null,
+            },
+          },
+          audit: [],
+        }),
+      },
+    });
+    const r = await request(app).get('/api/project-sides');
+    expect(r.body.sides).toHaveLength(1);
+    expect(r.body.sides[0].label).toBe('Seeded');
+  });
+});
