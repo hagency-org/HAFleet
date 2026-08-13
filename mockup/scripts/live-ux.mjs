@@ -1264,14 +1264,49 @@ suites.writes = async (page) => {
 suites.proxyBoundary = async () => {
   const before = (await api('agents')).map((a) => a.name).sort();
 
-  const attacks = [
-    ['double-encoded dot segments', 'DELETE', 'whitelist/%252e%252e/agents/PLACEHOLDER'],
-    ['single-encoded dot segments', 'DELETE', 'whitelist/%2e%2e/agents/PLACEHOLDER'],
-    ['encoded slash inside a segment', 'DELETE', 'whitelist/..%2fagents%2fPLACEHOLDER'],
-    ['triple-encoded dot segments', 'DELETE', 'whitelist/%25252e%25252e/agents/PLACEHOLDER'],
-    ['reaching a start endpoint', 'POST', 'whitelist/%252e%252e/agents/PLACEHOLDER/start'],
-  ];
+  /*
+   * WHAT THIS CAN AND CANNOT PROVE — corrected after a false pass and then a false alarm.
+   *
+   * A single-encoded traversal (`%2e%2e`) is resolved by the FRAMEWORK before any handler
+   * code runs: Next normalizes `whitelist/%2e%2e/agents/X` to `agents/X` and the route
+   * receives two segments, no dot operator among them. So the property this suite can
+   * assert is not "the proxy rejects traversal" — nothing in the proxy ever sees one — it is
+   * "whatever the framework normalizes to, the allowlist decides".
+   *
+   * The distinction was invisible while every traversal happened to normalize onto a route
+   * that was not allowlisted. `DELETE agents/:name` was then admitted so the Remove button
+   * could do what it claimed, and this check began failing with HTTP 200 — not because a
+   * boundary broke, but because the check had been measuring allowlist COVERAGE and calling
+   * it traversal resistance. Sending `DELETE /api/hafleet/agents/X` directly gets the
+   * identical response, so the encoded form buys an attacker nothing.
+   *
+   * Targets below are therefore chosen so the expectation is real: each normalizes onto a
+   * route that is NOT in the allowlist, which is the only case where a refusal means
+   * anything.
+   */
   const victim = before[0];
+  const attacks = [
+    // Double/triple encoding survives Next's single decode as a literal `%`, which
+    // canonicalSegments rejects outright — the vector the guard was written for.
+    ['double-encoded dot segments', 'DELETE', 'whitelist/%252e%252e/agents/PLACEHOLDER'],
+    ['triple-encoded dot segments', 'DELETE', 'whitelist/%25252e%25252e/agents/PLACEHOLDER'],
+    ['encoded slash inside a segment', 'DELETE', 'whitelist/..%2fagents%2fPLACEHOLDER'],
+    ['reaching a start endpoint', 'POST', 'whitelist/%252e%252e/agents/PLACEHOLDER/start'],
+    /*
+     * Single-encoded, aimed at routes the console never calls, so a refusal is evidence
+     * rather than coincidence. Both are real backend endpoints deliberately absent from the
+     * allowlist: `POST /api/agents` is agent SELF-registration (the console must never
+     * register on an agent's behalf) and `DELETE /api/engagements/:id` would destroy a
+     * decided engagement rather than revoke it.
+     *
+     * The first version of this probe used `DELETE /api/framework-presets/:id`, which IS
+     * allowlisted — so it returned the backend's honest 404 and read as a bypass. Picking a
+     * target without checking the allowlist is how a security check comes to assert the
+     * opposite of what it measures, which is the mistake this whole section documents.
+     */
+    ['single-encoded dots onto agent self-registration', 'POST', 'whitelist/%2e%2e/agents'],
+    ['single-encoded dots onto engagement deletion', 'DELETE', 'whitelist/%2e%2e/engagements/en_probe'],
+  ];
   for (const [label, method, template] of attacks) {
     const url = `${BASE}/api/hafleet/${template.replace('PLACEHOLDER', victim ?? 'x')}`;
     // eslint-disable-next-line no-await-in-loop
@@ -1279,6 +1314,22 @@ suites.proxyBoundary = async () => {
     check(`proxy refuses ${label}`, res.status === 400 || res.status === 403,
       `${method} -> HTTP ${res.status}`);
   }
+
+  /*
+   * And the counterpart, stated so nobody re-derives the wrong conclusion from a 200: a
+   * traversal that normalizes onto an ALLOWLISTED route is indistinguishable from calling
+   * that route directly. Both are checked, and they must agree — if they ever diverge, the
+   * proxy is treating a decoded path differently from a plain one, which is the actual bug
+   * this whole section is guarding against.
+   */
+  const ghost = 'no-such-agent-for-traversal-probe';
+  const [viaDots, direct] = await Promise.all([
+    fetch(`${BASE}/api/hafleet/whitelist/%2e%2e/agents/${ghost}`, { method: 'DELETE' }),
+    fetch(`${BASE}/api/hafleet/agents/${ghost}`, { method: 'DELETE' }),
+  ]);
+  check('a traversal onto an allowlisted route is treated exactly as that route',
+    viaDots.status === direct.status,
+    `dots -> ${viaDots.status}, direct -> ${direct.status}`);
 
   const after = (await api('agents')).map((a) => a.name).sort();
   // The assertion that a status code cannot fake.
@@ -1458,6 +1509,60 @@ async function consoleWideRules(page) {
   }
 }
 
+
+/*
+ * REMOVE WHAT THIS SUITE INVENTED.
+ *
+ * It posted engagements for `ux-write-check/alpha` and `/beta` against
+ * `!writeCheckA:hq.example` and `!writeCheckB:hq.example`, whitelisted rooms, and left every
+ * one of them behind. Run against a live backend — which is the whole point of this suite —
+ * that means each run permanently added two fabricated PROJECTS to the operator's console,
+ * on a domain (`hq.example`) that exists on no homeserver.
+ *
+ * An operator found them: the console showed their agent bound into three projects while
+ * Robrix showed it joined to one, and two of the three could never have reached it. The
+ * console presents access bindings as "the record that actually lets a project reach the
+ * agent", so junk in that table is not cosmetic — it is the same fabrication this project has
+ * been deleting everywhere else, produced by the very harness meant to catch it.
+ *
+ * Best effort by design: a teardown that throws would turn a passing run into a failure over
+ * cleanup. What it CANNOT do is fail silently, so what it could not remove is reported.
+ */
+async function teardownWriteFixtures() {
+  const rooms = ['!writeCheckA:hq.example', '!writeCheckB:hq.example'];
+  const leftovers = [];
+
+  // Engagements first: a binding is derived from them, so removing the room while an
+  // engagement still points at it would leave the half this suite cares about behind.
+  let engagements = [];
+  try { engagements = (await api('engagements')).engagements ?? []; } catch { /* reported below */ }
+  for (const e of engagements.filter((x) => rooms.includes(x.projectRoomId))) {
+    try {
+      // Revoke rather than delete: `revoke` is the modelled end of an engagement, and there
+      // is deliberately no DELETE for one. An ended engagement stops projecting a binding.
+      if (e.state === 'active' || e.state === 'pending') {
+        // eslint-disable-next-line no-await-in-loop
+        await post(`engagements/${e.id}/revoke`, { reason: 'live-ux fixture teardown' });
+      }
+    } catch { leftovers.push(`engagement ${e.id}`); }
+  }
+
+  for (const room of rooms) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      // Straight to the backend with the operator token, like `post` above. Going through
+      // the console proxy would drag Sec-Fetch-Site and the allowlist into a teardown.
+      const res = await fetch(`${BACKEND}/api/whitelist/${encodeURIComponent(room)}`, {
+        method: 'DELETE', headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      if (!res.ok && res.status !== 404) leftovers.push(`whitelist ${room} (HTTP ${res.status})`);
+    } catch { leftovers.push(`whitelist ${room}`); }
+  }
+
+  check('the suite removed the fixtures it created', leftovers.length === 0,
+    leftovers.length ? `left behind: ${leftovers.join(', ')}` : 'nothing left in the operator\'s console');
+}
+
 (async () => {
   console.log(`\nLive UX — browser ${BASE} against backend ${BACKEND}\n`);
   const browser = await chromium.launch({ executablePath: CHROME, headless: true });
@@ -1474,6 +1579,16 @@ async function consoleWideRules(page) {
   }
 
   if (!ONLY) await consoleWideRules(page);
+
+  /*
+   * Always, even when suites failed — a failed run pollutes the console exactly as much as a
+   * passing one, and a harness that only tidies up on success leaves its worst messes behind.
+   */
+  try {
+    await teardownWriteFixtures();
+  } catch (e) {
+    check('teardown ran', false, e.message);
+  }
 
   await browser.close();
   const tail = skipped > 0 ? ` ${skipped} skipped.` : '';

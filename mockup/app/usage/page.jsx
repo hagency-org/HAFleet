@@ -44,6 +44,16 @@ export default function UsagePage() {
   const configured = agents.filter((a) => a.presetId);
 
   /*
+   * Measured consumption across the fleet, and the count it was measured over.
+   *
+   * Kept as two values on purpose. A sum alone cannot be read honestly: metering is
+   * per framework and per workspace, so a fleet where one of four agents is
+   * attributable produces a real number that describes a quarter of the fleet.
+   */
+  const meteredAgents = usageLive.filter((r) => r.tokensUsed !== null && r.tokensUsed !== undefined);
+  const meteredTotal = meteredAgents.reduce((n, r) => n + r.tokensUsed, 0);
+
+  /*
    * Every series below is ALLOCATION — what I promised — because that is what is
    * knowable. The one real measurement is the task count, and the one series a
    * reader will look for (spend over time) is rendered as its own absence.
@@ -87,11 +97,19 @@ export default function UsagePage() {
         * failure mode: an empty column reads as "nothing happened" when it means
         * "nothing was counted".
         *
-        * Tokens is the interesting one, and it is not a missing field. HAFleet
-        * launches a CLI that talks to the provider directly, so no API response
-        * passes through it to read a usage figure from — in api-key mode as much as
-        * on a subscription. The routes that could work are listed rather than
-        * merely admitted, because a named route is a decision someone can take.
+        * Tokens is the interesting one, and it is no longer a gap: the CLIs write the
+        * provider's own figures to disk and lib/metering reads them. What is still not
+        * measured is listed below, narrowed to the parts that really are open.
+        *
+        * THE PROVENANCE LINE IS LOCALIZED, NOT ECHOED. It used to render the API's
+        * `source` verbatim — `lib/task-store.js`, `lib/metering — the coding CLIs' own
+        * transcripts...` — so a Chinese console showed a contributor English module
+        * paths, and the panel read as debug output leaking into a product surface. An
+        * operator asked whether it was there for debugging, which is the right question
+        * to ask of a page that prints file names at you. The guarantee is worth keeping:
+        * every column says where its number came from. Naming an internal module is not
+        * how you keep it. The technical string stays on the element's title for anyone
+        * who wants it.
         */}
       {metering && (
         <>
@@ -100,24 +118,36 @@ export default function UsagePage() {
           </h2>
           <div className="cards">
             {[
-              ['us.sigTasks', metering.tasks],
-              ['us.sigBusy', metering.busyTime],
-              ['us.sigTokens', metering.tokens],
-            ].map(([key, sig]) => (
-              <div className="card" key={key}>
+              ['us.sigTasks', 'us.sigSrcTasks', metering.tasks],
+              ['us.sigBusy', 'us.sigSrcBusy', metering.busyTime],
+              ['us.sigTokens', 'us.sigSrcTokens', metering.tokens],
+            ].map(([key, srcKey, sig]) => (
+              <div className="card" key={key} title={sig?.source ?? undefined}>
                 <div className="cap">{t(key)}</div>
                 <div className={`val${sig?.available ? ' ok' : ' warn'}`} style={{ fontSize: 15 }}>
                   {t(sig?.available ? 'us.sigYes' : 'us.sigNo')}
                 </div>
-                <span className="dim">{sig?.source ?? sig?.reason ?? ''}</span>
+                {/*
+                  * The signal's own reason wins when it is unavailable — that text is
+                  * specific to this deployment and is the actionable half. Otherwise the
+                  * localized description of where a measured figure comes from.
+                  */}
+                <span className="dim">{sig?.available ? t(srcKey) : (sig?.reason ?? t(srcKey))}</span>
               </div>
             ))}
           </div>
-          {metering.tokens?.candidateSources?.length > 0 && (
+          {/*
+            * WHAT IS STILL NOT MEASURED. Renamed from `candidateSources`, which listed two
+            * ways to obtain token figures at all — and kept listing them after the first one
+            * shipped, so this block told an operator that getting real numbers was a pending
+            * decision while the panel directly above reported the token signal as measured
+            * from that very source.
+            */}
+          {metering.tokens?.remainingGaps?.length > 0 && (
             <div className="notice warn">
-              <div>{t('us.tokenRoutes')}</div>
+              <div>{t('us.tokenGaps')}</div>
               <ul style={{ margin: '6px 0 0 18px' }}>
-                {metering.tokens.candidateSources.map((c) => <li key={c}>{c}</li>)}
+                {metering.tokens.remainingGaps.map((c) => <li key={c}>{c}</li>)}
               </ul>
             </div>
           )}
@@ -165,7 +195,33 @@ export default function UsagePage() {
                         ? <Blank why="rs.why.noCeiling" t={t} />
                         : <span className="amount">{fmtTokens(r.ceilingTokens)}</span>}
                     </td>
-                    <td><Blank why="us.why.noMeter" t={t} /></td>
+                    {/*
+                      * MEASURED, and it was a hardcoded blank until now.
+                      *
+                      * `r.tokensUsed` arrives on this very row and the cell printed
+                      * `us.why.noMeter` unconditionally — so a codex agent with 6.8M
+                      * measured tokens rendered 系统未计量, directly under a provenance
+                      * panel declaring the token signal available. The page asserted a
+                      * gap it never checked, which is the same defect as the runtime tab
+                      * claiming an agent had no pane while holding its pane id.
+                      *
+                      * When it IS null the reason comes from the server, not from a fixed
+                      * string: "no transcripts yet", "the scan stopped at its bounds" and
+                      * "this framework writes no accounting" are different facts and only
+                      * the last one is about the framework.
+                      */}
+                    <td>
+                      {r.tokensUsed === null
+                        ? <Blank why="us.why.meterReason" t={t} vars={{ r: r.tokensReason || t('us.why.noMeter') }} />
+                        : (
+                          <>
+                            <span className="amount">{fmtTokens(r.tokensUsed)}</span>
+                            {r.ceilingTokens
+                              ? <span className="dim">{t('us.pctOfCeiling', { n: Math.round((r.tokensUsed / r.ceilingTokens) * 100) })}</span>
+                              : null}
+                          </>
+                        )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -188,10 +244,24 @@ export default function UsagePage() {
         </div>
         <div className="card">
           <div className="cap">{t('us.cSpent')}</div>
-          {/* The headline figure a contributor came for, and it is a blank. Making
-              it a card rather than hiding it keeps the gap visible instead of
-              letting the page look complete. */}
-          <div className="val"><Blank why="us.why.noMeter" t={t} /></div>
+          {/*
+            * The headline figure a contributor came for. It is now a number when anything
+            * was measured, and it CARRIES ITS OWN DENOMINATOR: a fleet total summed over
+            * the agents that could be attributed, presented without saying how many were
+            * left out, is the exact shape of a number that gets believed too much. When
+            * nothing could be measured it stays a blank, because 0 would claim a
+            * measurement.
+            */}
+          <div className="val">
+            {meteredAgents.length === 0
+              ? <Blank why="us.why.noMeter" t={t} />
+              : <>{fmtTokens(meteredTotal)}</>}
+          </div>
+          {meteredAgents.length > 0 && meteredAgents.length < usageLive.length && (
+            <div className="dim">
+              {t('us.spentPartial', { n: meteredAgents.length, m: usageLive.length })}
+            </div>
+          )}
         </div>
         <div className="card"><div className="cap">{t('us.cTasks')}</div><div className="val">{usage.reduce((n, u) => n + u.tasksDone, 0)}</div></div>
       </div>
@@ -237,9 +307,22 @@ export default function UsagePage() {
                       <td>{roleName(u.role)}</td>
                       <td><Link href={`/agents/${u.agent}`}>{u.agent}</Link></td>
                       <td className="amount">{fmtTokens(e?.allocatedTokens)}</td>
+                      {/*
+                        * STILL A BLANK, and for a different reason than the tables below.
+                        *
+                        * Per-AGENT consumption is measured. Per-PROJECT is not, and cannot be
+                        * by this method: a transcript records the directory the CLI ran in,
+                        * not which engagement the work was for, so an agent serving two
+                        * projects out of one workdir produces one undivided total. Splitting
+                        * it would invent a division.
+                        *
+                        * The reason had to change with the metering fix. It said the framework
+                        * could not be read, which is now false for codex and claude — and it
+                        * was the sentence that made this page contradict itself.
+                        */}
                       <td>
                         {u.tokensUsed === null
-                          ? <Blank why="us.why.noMeter" t={t} />
+                          ? <Blank why="us.why.noProjectMeter" t={t} />
                           : <span className="amount">{fmtTokens(u.tokensUsed)}</span>}
                       </td>
                       {/* Real: lib/task-store.js statuses, rolled up per member. */}
@@ -267,6 +350,7 @@ export default function UsagePage() {
           <tbody>
             {configured.map((a) => {
               const p = presetOf(a);
+              const live = usageLive.find((r) => r.agent === a.name) ?? null;
               const used = committed(a.name);
               const left = remaining(a.name);
               const pct = p?.ceiling ? Math.round((used / p.ceiling.tokens) * 100) : null;
@@ -292,7 +376,19 @@ export default function UsagePage() {
                       </>
                     )}
                   </td>
-                  <td><Blank why="us.why.noMeter" t={t} /></td>
+                  {/*
+                    * Joined to the LIVE rows by name. This table is built from `agents`
+                    * (configuration) while consumption is measured per agent by the
+                    * backend, so the two have to be joined — and until now they were not
+                    * joined at all: the cell was a fixed blank, so an agent's ceiling and
+                    * its commitment were real on this row while its spend was fabricated
+                    * absent. That is what made 已承诺 3% sit next to 系统未计量.
+                    */}
+                  <td>
+                    {live?.tokensUsed == null
+                      ? <Blank why="us.why.meterReason" t={t} vars={{ r: live?.tokensReason || t('us.why.noMeter') }} />
+                      : <span className="amount">{fmtTokens(live.tokensUsed)}</span>}
+                  </td>
                 </tr>
               );
             })}
