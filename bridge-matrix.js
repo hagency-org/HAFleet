@@ -251,6 +251,20 @@ function buildMessageUrl(messageId, viewToken = null, baseUrl = MSG_BASE_URL) {
 
 const BOT_USERNAME = (process.env.MATRIX_BOT_USERNAME || 'agent-bridge').trim();
 const BOT_PASSWORD = (process.env.MATRIX_BOT_PASSWORD || '').trim();
+/*
+ * Liveness signals for a borrower waiting on an agent. See beginAgentWork().
+ *
+ * The timeout is what the homeserver is told; the refresh is how often it is re-asserted while
+ * work is outstanding; the cap is when this stops lying. Refresh must be comfortably under the
+ * timeout or the notification flickers off between refreshes.
+ */
+const AGENT_TYPING_TIMEOUT_MS = 45_000;
+const AGENT_TYPING_REFRESH_MS = 30_000;
+/* Past this, the notification is allowed to lapse rather than claim a stuck agent is working. */
+const AGENT_TYPING_MAX_MS = 20 * 60_000;
+/* 👀 — "seen, and being worked on". One event, no work product. */
+const AGENT_ACK_REACTION = '\u{1F440}';
+
 const AGENT_PREFIX = (process.env.MATRIX_AGENT_PREFIX || 'ac_').trim(); // Matrix usernames: ac_agentname
 const MATRIX_SERVER_NAME = (process.env.MATRIX_SERVER_NAME || new URL(HOMESERVER).host).trim();
 /*
@@ -4035,6 +4049,12 @@ export class MatrixBridge {
       });
       if (!result?.id) throw new Error('backend Matrix acceptance did not return a message id');
       this.checkpointMatrixEvent(eventId, result.id);
+      /*
+       * Acknowledge and start appearing busy, AFTER acceptance. In a group the recipient is
+       * whoever the backend will wake, which is the default recipient when nobody was named.
+       */
+      const groupRecipient = effectiveMentions?.[0] || matrixDefaultRecipient || null;
+      if (groupRecipient) this.beginAgentWork(groupRecipient, roomId, eventId);
       return result;
     } else if (route === 'agent-dm') {
       // DM to agent
@@ -4065,6 +4085,9 @@ export class MatrixBridge {
       });
       if (!result?.id) throw new Error('backend Matrix acceptance did not return a message id');
       this.checkpointMatrixEvent(eventId, result.id);
+      // The DM case, where the wait is most visible: one human, one agent, and nothing in
+      // between until the work lands.
+      this.beginAgentWork(targetAgent, roomId, eventId);
       return result;
     }
     // else: unknown room, ignore
@@ -6054,6 +6077,8 @@ export class MatrixBridge {
       );
       if (!primaryEventId) return;
       await this.sendAttachmentsForMessage(senderToken, roomId, msg, thread.relation);
+      // The reply is the end of the wait, so the typing notification ends with it.
+      this.endAgentWork(agentName, roomId);
       console.log(`→ Matrix [${msg.group}] ${agentName}: ${msg.summary.slice(0, 60)}`);
     } else if (msg.to) {
       // DM - bridge to Matrix (both agent-to-agent and agent-to-human)
@@ -6078,6 +6103,7 @@ export class MatrixBridge {
         for (const { room, source } of candidates) {
           try {
             await this.sendAsAgent(senderToken, room, plain, html, msg.id);
+            this.endAgentWork(agentName, room);
             await this.sendAttachmentsForMessage(senderToken, room, msg);
             console.log(`→ Matrix DM ${agentName} → ${msg.to} (${source}): ${msg.summary.slice(0, 60)}`);
             return;
@@ -6089,6 +6115,7 @@ export class MatrixBridge {
       const roomId = await this.ensureDmRoom(agentName, msg.to);
       if (roomId) {
         await this.sendAsAgent(senderToken, roomId, plain, html, msg.id);
+        this.endAgentWork(agentName, roomId);
         await this.sendAttachmentsForMessage(senderToken, roomId, msg);
         console.log(`→ Matrix DM ${agentName} → ${msg.to}: ${msg.summary.slice(0, 60)}`);
       } else {
@@ -6469,6 +6496,163 @@ export class MatrixBridge {
         console.warn(`Failed to check stale members in ${roomId}: ${e.message}`);
       }
     }
+  }
+
+  /*
+   * LIVENESS, WITHOUT PUTTING THE AGENT'S SCREEN IN THE ROOM.
+   *
+   * A borrower sends a request and then sees nothing at all until the finished work arrives —
+   * for the session that produced this code, 203 tool calls of silence. Delivery here is
+   * message-based: the agent posts once, when it has finished a turn, by calling
+   * POST /api/messages itself. Nothing observed it in between, and no typing notification,
+   * read receipt or reaction was ever sent, so "working" and "never heard you" looked
+   * identical. That ambiguity is what an operator actually reported.
+   *
+   * WHY NOT RELAY THE PANE. HAFleet can read it (GET /api/agents/:name/pane), and it is the
+   * wrong thing to send. It carries ANSI, tool output and reasoning; a message per second
+   * would flood the room and hit the rate limits this bridge already backs off from; and the
+   * pane is the agent's whole screen, which may hold another project's content or a token in
+   * argv. Streaming it into a project room is a disclosure decision, not a feature — ADR-013
+   * is explicit about what may face outward.
+   *
+   * So: an ephemeral typing notification, and one reaction. Neither carries work product.
+   */
+
+  /** Rooms an agent is currently working for: `${agent}\u0000${roomId}` -> startedAt. */
+  agentTypingKey(agentName, roomId) {
+    return `${this.normalizeName(agentName)}\u0000${roomId}`;
+  }
+
+  /**
+   * Tell the room the agent is working, as the AGENT rather than as the bot.
+   *
+   * The borrower is waiting on the agent, so the agent is who must appear busy — a bot typing
+   * on its behalf would be a different claim.
+   *
+   * Ephemeral by design: `m.typing` is not a room event, so this adds nothing to history, costs
+   * no rate-limit budget against message sends, and cannot be the thing that fills a room.
+   */
+  async setAgentTyping(agentName, roomId, typing) {
+    if (!roomId || !agentName) return false;
+    let token;
+    try {
+      token = await ensureAgentAccount(agentName);
+    } catch {
+      // No usable credential is already reported elsewhere (ADR-014 decision 6). A typing
+      // notification is not the place to surface it, and must not become a second alarm.
+      return false;
+    }
+    if (!token) return false;
+    const userId = agentUserId(agentName);
+    try {
+      const res = await fetch(
+        `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/typing/${encodeURIComponent(userId)}`,
+        {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          /*
+           * A TIMEOUT, so a crash cannot leave the agent typing forever. The homeserver
+           * expires the notification on its own if nothing refreshes it, which makes the
+           * failure mode silence rather than a permanent false "still working".
+           */
+          body: JSON.stringify(typing
+            ? { typing: true, timeout: AGENT_TYPING_TIMEOUT_MS }
+            : { typing: false }),
+        },
+      );
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * React to the human's own message the moment it has been handed to the agent.
+   *
+   * One event, and it answers the question a blank room cannot: was this received, and by
+   * whom. It is deliberately separate from typing — a delivery that failed at the backend
+   * (the 503 an operator hit on a wake-queue error) must not produce an acknowledgement.
+   */
+  async ackAgentReceipt(agentName, roomId, eventId) {
+    if (!roomId || !eventId || !agentName) return false;
+    let token;
+    try {
+      token = await ensureAgentAccount(agentName);
+    } catch {
+      return false;
+    }
+    if (!token) return false;
+    // Derived from the event id, so a retry of the same handoff cannot double-react.
+    const txnId = `ack_${createHash('sha256').update(`ack:${eventId}:${agentName}`).digest('hex').slice(0, 24)}`;
+    try {
+      const res = await fetch(
+        `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.reaction/${txnId}`,
+        {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key: AGENT_ACK_REACTION },
+          }),
+        },
+      );
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Handed off to the agent: acknowledge, and start appearing busy.
+   *
+   * Called only after the backend ACCEPTED the message, so neither signal can claim a
+   * delivery that did not happen. Never awaited by the caller and never able to reject —
+   * a failed typing notification must not fail a delivered message.
+   */
+  beginAgentWork(agentName, roomId, eventId) {
+    if (!agentName || !roomId) return;
+    const key = this.agentTypingKey(agentName, roomId);
+    this.agentWork = this.agentWork || new Map();
+    this.agentWork.set(key, { agentName, roomId, startedAt: Date.now() });
+    this.ackAgentReceipt(agentName, roomId, eventId).catch(() => {});
+    this.setAgentTyping(agentName, roomId, true).catch(() => {});
+    this.ensureTypingRefresh();
+  }
+
+  /** The agent spoke, so it is no longer working for this room. */
+  endAgentWork(agentName, roomId) {
+    if (!agentName || !roomId) return;
+    const key = this.agentTypingKey(agentName, roomId);
+    if (!this.agentWork?.has(key)) return;
+    this.agentWork.delete(key);
+    this.setAgentTyping(agentName, roomId, false).catch(() => {});
+  }
+
+  /**
+   * Re-assert typing while work is outstanding, and STOP after a cap.
+   *
+   * `m.typing` expires, so a long turn needs refreshing. The cap is the honest part: past it
+   * the notification is allowed to lapse, because an agent that has been silent for that long
+   * may be stuck, and continuing to claim it is typing would be a lie the room cannot check.
+   */
+  ensureTypingRefresh() {
+    if (this.typingRefreshTimer || !this.agentWork?.size) return;
+    this.typingRefreshTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [key, entry] of [...(this.agentWork?.entries() ?? [])]) {
+        if (now - entry.startedAt > AGENT_TYPING_MAX_MS) {
+          this.agentWork.delete(key);
+          this.setAgentTyping(entry.agentName, entry.roomId, false).catch(() => {});
+          continue;
+        }
+        this.setAgentTyping(entry.agentName, entry.roomId, true).catch(() => {});
+      }
+      if (!this.agentWork?.size) {
+        clearInterval(this.typingRefreshTimer);
+        this.typingRefreshTimer = null;
+      }
+    }, AGENT_TYPING_REFRESH_MS);
+    // Never hold the process open for a cosmetic signal.
+    this.typingRefreshTimer.unref?.();
   }
 
   async sendAsAgentContent(token, roomId, content, sourceMsgId = null, delivery = null) {
