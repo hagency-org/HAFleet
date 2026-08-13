@@ -356,30 +356,75 @@ describe('server heartbeat api', () => {
   });
 
   test('accepts a new instance after the lease becomes stale', async () => {
-    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed({
-      env: {
-        AGENT_HEARTBEAT_TTL_MS: '100',
-      },
-    }));
+    /*
+     * REWRITTEN, for two reasons — one a flake, one a hole the flake investigation exposed.
+     *
+     * THE HOLE. This case used `bootTs: 3000` against a held lease's `1000`, and
+     * `evaluateHeartbeatLease` returns `newer-boot` for that on a PERFECTLY ACTIVE lease. So the
+     * assertion passed whether or not the lease had gone stale, and the test did not exercise the
+     * branch its name claims. It now sends an OLDER `bootTs` than the held lease: an active lease
+     * rejects that with `older-boot` (409), so a 200 can only come from the stale-lease branch,
+     * which `evaluateHeartbeatLease` reaches before it ever compares boot timestamps.
+     *
+     * THE FLAKE. It made the lease stale with `AGENT_HEARTBEAT_TTL_MS: '100'` plus `sleep(200)` —
+     * a 100ms wall-clock margin. It failed once on CI (relayInstanceId null against inst-B) on a
+     * docs-only branch that could not have caused it, and `backend-v2.js` already names this exact
+     * pattern in this exact file as the source of that flake class. Staleness is now produced by
+     * setting `heartbeatAt` into the past through the in-memory store, which is what
+     * `serversForTest` is exposed for and what the sweep case below already does. No sleep, no
+     * margin, and the TTL stays at its default.
+     *
+     * The assertion still reads the FILE rather than the store. The write path is synchronous in
+     * tests (`AGENT_JSON_WRITE_BATCH_MS=0` makes `saveJson` call `writeJsonAtomic` directly), so
+     * reading the file costs nothing and keeps this case covering persistence. Switching it to the
+     * in-memory store would have been a speculative fix — the "the file lags" hypothesis was
+     * checked and is false — and it would have removed real coverage to chase a cause it does not
+     * have.
+     */
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed());
 
     await postHeartbeat(context.app, {
       server: 's1',
       instanceId: 'inst-A',
-      bootTs: 1000,
+      bootTs: 3000,
       agents: [],
       sessions: [],
     });
-    await sleep(200);
+
+    // Age the lease past any TTL, deterministically. `serversForTest` IS the module's `servers`
+    // object, so this is the same state a real expiry would leave behind.
+    context.internals.serversForTest.s1.heartbeatAt = Date.now() - 120_000;
+
     const second = await postHeartbeat(context.app, {
       server: 's1',
       instanceId: 'inst-B',
-      bootTs: 3000,
+      bootTs: 1000, // OLDER than the held lease: only a stale lease can accept this.
       agents: [],
       sessions: [],
     });
 
     expect(second.status).toBe(200);
     expect(readJson(serversPath(context.runtimeDir)).s1.relayInstanceId).toBe('inst-B');
+  });
+
+  test('an ACTIVE lease rejects that same older-boot takeover', async () => {
+    /*
+     * The control for the case above, and what makes its 200 meaningful. Same two heartbeats,
+     * without ageing the lease: the takeover must be refused. Without this, a regression that
+     * accepted every takeover would leave the stale-lease case green.
+     */
+    context = await createBackendTestContext('api-server-heartbeat-test-', baseSeed());
+
+    await postHeartbeat(context.app, {
+      server: 's1', instanceId: 'inst-A', bootTs: 3000, agents: [], sessions: [],
+    });
+    const second = await postHeartbeat(context.app, {
+      server: 's1', instanceId: 'inst-B', bootTs: 1000, agents: [], sessions: [],
+    });
+
+    expect(second.status).toBe(409);
+    expect(second.body.reason).toBe('older-boot');
+    expect(readJson(serversPath(context.runtimeDir)).s1.relayInstanceId).toBe('inst-A');
   });
 
   test('accepts heartbeats without an instance id when no active lease exists', async () => {

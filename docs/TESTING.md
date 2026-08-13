@@ -178,6 +178,42 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-12 | `approval-fail-closed` | `denies a pending request and broadcasts the verdict` | **yes** — `Error: Test timed out in 30000ms` (a THIRD shape; clean in isolation, 7/7) |
 | 2026-08-13 | `api-messages` | `message suppression appends a delivery event` | **yes** — whole-suite only, clean in isolation (39/39) |
 | 2026-08-13 | `engagement-binding` | `the binding IS released once the last live engagement ends` | **yes** — `expected 404 to be 200`, clean in isolation (7/7) |
+| 2026-08-13 | `api-server-heartbeat` | `accepts a new instance after the lease becomes stale` | **yes** — `AssertionError: expected null to be 'inst-B'`; CI only, on a DOCS-ONLY branch; see the investigation below |
+
+**A fourth shape, and the first one whose investigation eliminated its own most plausible cause.**
+`relayInstanceId` read `null` where `inst-B` was expected. The branch under test added 562 lines to
+two markdown files and nothing else, so it could not have caused it; the identical commit passed on
+rerun.
+
+What was checked, and what it ruled out — recorded because each of these is a dead end somebody would
+otherwise re-walk:
+
+- **"The file lags the in-memory store." FALSE.** The test asserts against `servers.json`, and
+  `backend-v2.js` does carry a comment saying the store is the in-memory truth and the file only its
+  persistence — which makes this the obvious reading. But the harness sets
+  `AGENT_JSON_WRITE_BATCH_MS=0`, and `saveJson` takes the `jsonWriteBatchWindowMs <= 0` branch
+  straight to `writeJsonAtomic`. Writes are synchronous in tests. Switching the assertion to
+  `serversForTest` would have been a speculative fix that removed persistence coverage.
+- **"It reproduces under CPU load." NO.** 37 local rounds — 12 idle, 25 against 16 concurrent busy
+  loops on a 16-core machine — produced zero divergence between memory and file.
+- **"It reproduces under whole-suite conditions." NO.** A probe was run inside a full-suite pass (the
+  suite is `fileParallelism: false, maxWorkers: 1`, so one process, serial files, shared
+  `process.env`) and diverged in none of 6 rounds. `api-server-heartbeat.test.js` itself passed 24/24
+  in that run.
+
+So the mechanism is still unidentified, and it remains consistent with the harness-lifecycle reading
+above rather than with anything in the test's data. What DID come out of the investigation was a
+separate, certain defect in the test, described in the rewrite's own comment: it made the lease stale
+with a 100ms TTL plus `sleep(200)` — the exact pattern `backend-v2.js` already names in this file as a
+flake source — and it sent a NEWER `bootTs`, which `evaluateHeartbeatLease` accepts as `newer-boot`
+against a perfectly active lease. The assertion therefore passed whether or not the lease had gone
+stale, so the case never exercised the branch it is named for.
+
+The rewrite makes staleness deterministic by ageing `heartbeatAt` through `serversForTest`, and sends
+an OLDER `bootTs` so that an active lease must answer 409 `older-boot` — which means a 200 can only
+come from the stale-lease branch. A control case asserts that 409. Five mutants killed, including
+`hasActiveLease` pinned to each constant. Whether this also removes the flake is unknown and is not
+claimed: the timing margin it removes is a plausible contributor, not a demonstrated cause.
 
 **A third shape, and it fits the same reading.** A 30-second TIMEOUT, whole-suite only, clean in
 isolation. A test that hangs rather than asserting wrongly is what a request that never gets a
