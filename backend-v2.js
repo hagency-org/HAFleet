@@ -6698,6 +6698,30 @@ const requireApprovalBridgeSecret = (req, res, next) => {
 };
 
 // Only the authenticated Matrix bridge can assert room-scoped owner provenance.
+/*
+ * Whether a bound agent is actually IN the room, as observed against the homeserver.
+ *
+ * B1: a binding is what lets a project reach an agent, and nothing ever checked it against Matrix
+ * membership in either direction. An operator asked why their agent appeared in three projects, and
+ * the honest answer required me to go and read the room memberships by hand — the console could not
+ * tell them, because the two facts live in different places and never met.
+ *
+ * Bridge-secret guarded and SEPARATE from the binding upsert beside it: observing membership
+ * asserts nothing about permission, and folding it into the governance write would let a routine
+ * liveness check carry a decision's authority.
+ */
+app.put('/api/approval-bindings/membership', requireApprovalBridgeSecret, (req, res) => {
+  try {
+    const binding = approvalStore.observeBindingMembership(req.body || {});
+    // 404 rather than a silent ok: an observation about a binding nobody made is a mismatch worth
+    // reporting to the caller, not something to store.
+    if (!binding) return res.status(404).json({ error: 'no such binding' });
+    return res.json({ ok: true, binding });
+  } catch (error) {
+    return respondApprovalStoreError(res, error, 'failed to record binding membership');
+  }
+});
+
 app.put('/api/approval-bindings', requireApprovalBridgeSecret, (req, res) => {
   try {
     const binding = approvalStore.upsertBinding(req.body || {});
@@ -9384,6 +9408,13 @@ app.get('/api/contributions', requireBearer, (_req, res) => {
         projectRoomId: b.projectRoomId,
         ownerMxid: b.ownerMxid,
         active: b.active !== false,
+        /*
+         * Three states, and the third is the point: true = membership confirmed, false = the agent
+         * is NOT in a room this binding says can reach it, null = never checked. Collapsing null
+         * into false would accuse every binding of being broken before the first observation.
+         */
+        agentJoined: b.agentJoined ?? null,
+        membershipCheckedAt: b.membershipCheckedAt ?? null,
       })),
     });
   } catch (error) {

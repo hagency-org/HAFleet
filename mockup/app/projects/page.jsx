@@ -94,6 +94,25 @@ export default function ProjectsPage() {
         .filter((x) => (x.projectRoomId ?? x.project_room_id) === room)
         .map((x) => x.agent)
         .filter(Boolean),
+      /*
+       * B1: IS THE AGENT ACTUALLY IN THIS ROOM?
+       *
+       * A binding is what lets a project reach an agent, and this table is how a contributor reads
+       * which projects they are in. Nothing compared it to Matrix membership, so an operator asking
+       * why their agent showed in three projects could only be answered by reading `m.room.member`
+       * for three rooms by hand. The bridge now observes it and the backend carries it.
+       *
+       * THREE STATES, and the third is why this is not a boolean: `false` means the agent is not in
+       * a room this binding claims can reach it, and `null` means nobody has looked yet. Rendering
+       * null as a problem would accuse every binding before the bridge's first pass; rendering it
+       * as fine would be the original defect with extra steps.
+       */
+      unreachable: (contributions ?? [])
+        .filter((x) => (x.projectRoomId ?? x.project_room_id) === room && x.agentJoined === false)
+        .map((x) => x.agent),
+      unchecked: (contributions ?? [])
+        .filter((x) => (x.projectRoomId ?? x.project_room_id) === room && (x.agentJoined ?? null) === null)
+        .map((x) => x.agent),
       whitelisted: (whitelist ?? []).some((w) => w.projectRoomId === room),
     });
   }
@@ -198,7 +217,24 @@ export default function ProjectsPage() {
                     {p.project && <><br /><small>{p.project}</small></>}
                   </td>
                   <td>{serverOf(p.projectRoomId) ?? <Blank why="pr.why.noServer" t={t} />}</td>
-                  <td>{p.agents.join(', ') || <Blank why="pr.why.noAgents" t={t} />}</td>
+                  <td>
+                    {p.agents.join(', ') || <Blank why="pr.why.noAgents" t={t} />}
+                    {/*
+                      * Named where the claim is made. A binding that says a project can reach this
+                      * agent, for a room the agent is not in, is the one thing this column must not
+                      * present as ordinary.
+                      */}
+                    {p.unreachable.length > 0 && (
+                      <div>
+                        <span className="badge attention">
+                          {t('pr.notJoined', { a: p.unreachable.join(', ') })}
+                        </span>
+                      </div>
+                    )}
+                    {p.unreachable.length === 0 && p.unchecked.length > 0 && (
+                      <span className="why-inline">{t('pr.membershipUnchecked')}</span>
+                    )}
+                  </td>
                   <td>
                     {/*
                       * Deliberately a separate column rather than implied by being here.
