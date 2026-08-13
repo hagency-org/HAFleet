@@ -21,7 +21,7 @@ has implemented yet.
 | 1 | the ownership invariant does not change | **built** | true by construction — ADR-002's `(room, agent)` binding from the inviter is untouched, and acceptance now writes it |
 | 2 | two provisioning flows, chosen by server capability | **decided, not built** | the repository still contains zero appservice support: no `as_token`, `hs_token`, `sender_localpart` or registration file — the only matches are prose in this ADR's own lineage |
 | 3 | derived-password self-registration is to be deleted | **built**, with one named exception | `deriveAgentPassword`, `legacyAgentPassword`, `agentPasswordCandidates` and `tryMatrixLogin` are gone from `bridge-matrix.js`, as are all three env vars and their `.env.example` entries; `ensureAgentAccount` now validates a SUPPLIED token (`agentTokenFromEnv`) and refuses with `AgentCredentialMissingError` rather than minting one. Exception: `matrixRegister` stays — the BOT uses it with its own explicit `MATRIX_BOT_PASSWORD`, which this decision never covered. `tests/agent-credential-supplied.test.js` (20 cases, 10/10 mutants caught) |
-| 4 | multiple homeservers; a per-agent credential record | **partly built** (2026-08-13) | The RECORD is built: `state.agentTokens[name]` is `{ homeserver, serverName, mxid, accessToken }`, migrated from bare strings on load, with 13 cases in `tests/bridge-agent-credential-record.test.js`. `HOMESERVER` is still a module constant for most call sites — `setRoomAvatar` takes a `baseUrl` parameter, the other six primitives ADR-016 names still default to it. `serverName` is carried beside `homeserver` because `.well-known` may make them disagree and the retry ladder compares against a ROOM's origin server |
+| 4 | multiple homeservers; a per-agent credential record | **built** (2026-08-13) | The RECORD: `state.agentTokens[name]` is `{ homeserver, serverName, mxid, accessToken }`, migrated from bare strings on load (`tests/bridge-agent-credential-record.test.js`, 13 cases). The THREADING: all seven token-taking primitives take a REQUIRED `baseUrl` — `requireBaseUrl` throws naming the function rather than defaulting, because a default would let a caller holding an agent's credential send it to this deployment's server. Call sites that resolve an agent by name pass `credential.homeserver`; the two send paths that receive a token instead resolve it with `baseUrlForToken`. `tests/bridge-matrix-http-primitives.test.js`, 30 cases, 14 mutants killed across two rounds |
 | 5 | an agent MXID is discovered via `/whoami`, not constructed | **decided, not built** | `agentUserId()` still composes `@${AGENT_PREFIX}${name}:${MATRIX_SERVER_NAME}`, and the invite poll's owner-derivation filter still matches that constructed `state_key` |
 | 6 | a dead credential is a human-visible state | **built at the record, not the UI** | the retry loop is gone (`AgentCredentialMissingError`), the state is LIVE (`markAgentUnprovisioned`/`clearAgentUnprovisioned`, not a startup snapshot), and it reaches a durable cross-process surface: `unprovisionedAgents` in `data/health/matrix-bridge.json`, which the standalone doctor already reads. Still absent: a dashboard view, and the homeserver per agent (needs decision 4) |
 | 7 | flow B requires a dedicated login, stated where an operator reads | **decided, not built** | the rule exists only as prose here; there is no startup check and nothing in `.env.example` says it |
@@ -321,10 +321,33 @@ allowed to make them disagree, and the one consumer that needs the name compares
 origin server. `mxid` is recorded where the homeserver has just reported it and is left null
 otherwise, which does not settle decision 5 — `agentUserId()` still composes.*
 
-*Still a module constant for most call sites. `setRoomAvatar` takes a `baseUrl` parameter; the other
-six primitives ADR-016's first pass names still default to `HOMESERVER`. The count is unchanged in
-substance: what moved is that the credential can now SAY which server it belongs to, which is the
-prerequisite the rest of the threading needs.*
+*The threading is done too. All seven token-taking primitives — `matrixLogin`, `matrixRegister`,
+`getUserId`, `getMatrixAccessTokenSession`, `uploadMedia`, `setUserAvatar`, `setRoomAvatar`, plus
+`setDisplayName` which shares their shape — take a `baseUrl`, and it is REQUIRED. `requireBaseUrl`
+throws naming the function instead of defaulting to `HOMESERVER`, because a default is precisely the
+failure this decision exists to prevent: a caller holding an agent's credential silently sending it to
+this deployment's own server. JavaScript cannot enforce a required parameter, so the throw is the
+enforcement.*
+
+*Where the base URL comes from, per caller, because that is the substance:*
+
+- *call sites that resolve an agent BY NAME now use `getAgentCredential()` / `agentCredential()` and
+  pass `credential.homeserver` — room membership add and remove, group room creation, and both avatar
+  paths;*
+- *the two send paths that receive a TOKEN rather than a name — `sendAsAgentContent` and
+  `sendAttachmentAsAgent`, the choke points for every outbound agent message — resolve it with
+  `baseUrlForToken`, which finds the token's own record and falls back to `HOMESERVER` for the bot's,
+  whose server this decision's split says stays ours;*
+- *the bot's own login, registration, session check and avatar pass `HOMESERVER` explicitly.*
+
+***THE REFERENCE COUNT WENT UP, from 44 to 55, and that is the intended outcome rather than a
+regression.*** *The constant is no longer read INSIDE the primitives, where it was invisible and the
+same for every call; it is now written at the call sites, where it is a visible per-call decision. The
+honest measure of what remains is not the total but the twelve places that still choose it — nine
+explicit `, HOMESERVER)` arguments and three `|| HOMESERVER` fallbacks — each of which is a
+grep-able statement that "this call is the home server's" and can be revisited when a project side
+needs it. `lib/bot-commands.js` still holds 7 references and its own `MATRIX_SERVER_NAME` derivation,
+and was never classified by this decision.*
 
 *One defect was closed by the record rather than by the threading, and it is the reason this was worth
 doing before the mechanical part. `setRoomAvatar`'s retry ladder iterated every value in

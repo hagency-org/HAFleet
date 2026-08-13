@@ -834,6 +834,27 @@ function normalizeAgentCredentialMap(raw) {
   return out;
 }
 
+/**
+ * The credential a raw access token belongs to.
+ *
+ * For the two send paths that receive a TOKEN rather than an agent name — `sendAsAgentContent` and
+ * `sendAttachmentAsAgent` — which therefore cannot resolve a homeserver by name. The token is the
+ * identity, so its record is well defined; `endAgentWorkForToken` already scans the same map for the
+ * same reason. Returns null for the bot's own token, whose server is this deployment's.
+ */
+function credentialForToken(token) {
+  if (!token) return null;
+  for (const credential of Object.values(state.agentTokens || {})) {
+    if (credential?.accessToken === token) return credential;
+  }
+  return null;
+}
+
+/** The base URL a token should be used against: its own side's, or ours when it is not an agent's. */
+function baseUrlForToken(token) {
+  return credentialForToken(token)?.homeserver || HOMESERVER;
+}
+
 const warnedUnnormalizedCredentials = new Set();
 
 /**
@@ -997,9 +1018,10 @@ function humanDmKey(name) {
 }
 
 // ── Matrix account management ─────────────────────────────────────────
-async function matrixRegister(username, password) {
+async function matrixRegister(username, password, baseUrl) {
+  const base = requireBaseUrl(baseUrl, 'matrixRegister');
   // Step 1: probe for the UIA session + the server's available flows.
-  const probe = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/register`, {
+  const probe = await fetchWithRateLimit(`${base}/_matrix/client/v3/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
@@ -1026,7 +1048,7 @@ async function matrixRegister(username, password) {
       `No usable registration flow for ${username}: set MATRIX_REG_TOKEN or enable open registration. flows=${JSON.stringify(flows)}`,
     );
   }
-  const res = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/register`, {
+  const res = await fetchWithRateLimit(`${base}/_matrix/client/v3/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password, auth }),
@@ -1036,8 +1058,9 @@ async function matrixRegister(username, password) {
   throw new Error(`Registration failed for ${username}: ${JSON.stringify(data)}`);
 }
 
-async function matrixLogin(username, password) {
-  const res = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/login`, {
+async function matrixLogin(username, password, baseUrl) {
+  const base = requireBaseUrl(baseUrl, 'matrixLogin');
+  const res = await fetchWithRateLimit(`${base}/_matrix/client/v3/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1067,14 +1090,14 @@ async function ensureBotAccount() {
   // server's aggressive rate limiter instead of crashing the whole bridge.
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      const data = await matrixLogin(BOT_USERNAME, BOT_PASSWORD);
+      const data = await matrixLogin(BOT_USERNAME, BOT_PASSWORD, HOMESERVER);
       state.botToken = data.access_token;
       saveState();
       console.log(`Bot logged in as ${data.user_id}`);
       return data.access_token;
     } catch (loginErr) {
       try {
-        const data = await matrixRegister(BOT_USERNAME, BOT_PASSWORD);
+        const data = await matrixRegister(BOT_USERNAME, BOT_PASSWORD, HOMESERVER);
         state.botToken = data.access_token;
         saveState();
         console.log(`Bot registered as ${data.user_id}`);
@@ -1199,7 +1222,7 @@ async function ensureAgentAccount(agentName) {
   for (const candidate of candidates) {
     let session;
     try {
-      session = await getMatrixAccessTokenSession(candidate.token);
+      session = await getMatrixAccessTokenSession(candidate.token, HOMESERVER);
     } catch (error) {
       /*
        * A network failure is NOT a dead credential and must not be reported as one — telling an
@@ -1273,7 +1296,7 @@ async function ensureAgentAccount(agentName) {
        * profile must not deny the agent its token. Setting one's own display name is a privilege
        * every account has over itself, so this needs nothing beyond the token in hand.
        */
-      await setDisplayName(candidate.token, canonicalAgentName, session.userId)
+      await setDisplayName(candidate.token, canonicalAgentName, session.userId, HOMESERVER)
         .catch((e) => console.warn(`[agent-credential] could not set display name for '${canonicalAgentName}': ${e.message}`));
     }
 
@@ -1293,19 +1316,38 @@ async function ensureAgentAccount(agentName) {
   );
 }
 
-async function setDisplayName(token, agentName, knownUserId = null) {
+async function setDisplayName(token, agentName, knownUserId = null, baseUrl = undefined) {
+  const base = requireBaseUrl(baseUrl, 'setDisplayName');
   // The MXID is passed in where the caller already has it: adoption just ran whoami, and repeating
   // it here would be a second round trip for an answer already in hand.
-  const userId = knownUserId || await getUserId(token);
-  await fetch(`${HOMESERVER}/_matrix/client/v3/profile/${encodeURIComponent(userId)}/displayname`, {
+  const userId = knownUserId || await getUserId(token, base);
+  await fetch(`${base}/_matrix/client/v3/profile/${encodeURIComponent(userId)}/displayname`, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ displayname: `🤖 ${agentName}` }),
   });
 }
 
-async function getUserId(token) {
-  const res = await fetch(`${HOMESERVER}/_matrix/client/v3/account/whoami`, {
+/**
+ * The base URL every token-taking primitive must be handed.
+ *
+ * REQUIRED, not defaulted to `HOMESERVER`, and that is the whole point of ADR-016's third first-pass
+ * shape. A default would let a caller that has an agent's credential in hand silently send it to this
+ * deployment's own server instead of the agent's — which, once project homeservers are not assumed to
+ * federate, is a request that fails at best and lands one side's token on another side's server at
+ * worst. JavaScript cannot enforce a required parameter, so it is enforced here: an omission is a
+ * throw naming the function, rather than `undefined/_matrix/...` failing obscurely several frames away.
+ */
+function requireBaseUrl(baseUrl, fnName) {
+  if (typeof baseUrl !== 'string' || !baseUrl.trim()) {
+    throw new Error(`${fnName} requires a Matrix base URL (ADR-016: every call takes it from its side)`);
+  }
+  return baseUrl.replace(/\/+$/, '');
+}
+
+async function getUserId(token, baseUrl) {
+  const base = requireBaseUrl(baseUrl, 'getUserId');
+  const res = await fetch(`${base}/_matrix/client/v3/account/whoami`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const data = await res.json();
@@ -1326,8 +1368,9 @@ function isMatrixAuthFailure(error) {
   return error?.status === 401 || error?.status === 403;
 }
 
-async function getMatrixAccessTokenSession(token) {
-  const res = await fetchWithRateLimit(`${HOMESERVER}/_matrix/client/v3/account/whoami`, {
+async function getMatrixAccessTokenSession(token, baseUrl) {
+  const base = requireBaseUrl(baseUrl, 'getMatrixAccessTokenSession');
+  const res = await fetchWithRateLimit(`${base}/_matrix/client/v3/account/whoami`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   /*
@@ -1516,8 +1559,9 @@ async function generateAvatarPng(name, options = {}) {
   }
 }
 
-async function uploadMedia(token, buffer, mimeType) {
-  const res = await fetch(`${HOMESERVER}/_matrix/media/v3/upload`, {
+async function uploadMedia(token, buffer, mimeType, baseUrl) {
+  const base = requireBaseUrl(baseUrl, 'uploadMedia');
+  const res = await fetch(`${base}/_matrix/media/v3/upload`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': mimeType },
     body: buffer,
@@ -1527,9 +1571,10 @@ async function uploadMedia(token, buffer, mimeType) {
   return data.content_uri;
 }
 
-async function setUserAvatar(token, mxcUri) {
-  const userId = await getUserId(token);
-  await fetch(`${HOMESERVER}/_matrix/client/v3/profile/${encodeURIComponent(userId)}/avatar_url`, {
+async function setUserAvatar(token, mxcUri, baseUrl) {
+  const base = requireBaseUrl(baseUrl, 'setUserAvatar');
+  const userId = await getUserId(token, base);
+  await fetch(`${base}/_matrix/client/v3/profile/${encodeURIComponent(userId)}/avatar_url`, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ avatar_url: mxcUri }),
@@ -1556,9 +1601,10 @@ async function setUserAvatar(token, mxcUri) {
  * `baseUrl`, because a base URL may be a delegated address while the room id always names the server
  * that owns the room — which is the server the token must belong to.
  */
-async function setRoomAvatar(roomId, mxcUri, token, baseUrl = HOMESERVER) {
+async function setRoomAvatar(roomId, mxcUri, token, baseUrl) {
+  const base = requireBaseUrl(baseUrl, 'setRoomAvatar');
   const useToken = token || state.botToken;
-  const url = `${baseUrl}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.avatar`;
+  const url = `${base}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.avatar`;
   const res = await fetch(url, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${useToken}`, 'Content-Type': 'application/json' },
@@ -1612,8 +1658,9 @@ async function ensureAgentAvatar(agentName) {
     ]);
     const badge = normalizeBadge(deriveAgentBadge(canonicalAgentName, agentInfo, iconResult.meta), 'AGENT');
     const png = await generateAvatarPng(canonicalAgentName, { badge, iconPath: iconResult.iconPath });
-    const mxcUri = await uploadMedia(token, png, 'image/png');
-    await setUserAvatar(token, mxcUri);
+    const agentBase = agentCredential(canonicalAgentName)?.homeserver || HOMESERVER;
+    const mxcUri = await uploadMedia(token, png, 'image/png', agentBase);
+    await setUserAvatar(token, mxcUri, agentBase);
     state.agentAvatars[canonicalAgentName] = mxcUri;
     state.agentAvatarMeta[canonicalAgentName] = {
       style: AGENT_AVATAR_STYLE_VERSION,
@@ -1641,7 +1688,7 @@ async function ensureRoomAvatar(roomId, name) {
       const agentAvatar = state.agentAvatars[dmAgentName] || null;
       if (agentAvatar) {
         if (state.roomAvatars[roomId] === agentAvatar) return;
-        await setRoomAvatar(roomId, agentAvatar);
+        await setRoomAvatar(roomId, agentAvatar, null, HOMESERVER);
         state.roomAvatars[roomId] = agentAvatar;
         saveState();
         console.log(`Set avatar for DM room ${roomId} from agent ${dmAgentName}: ${agentAvatar}`);
@@ -1656,8 +1703,8 @@ async function ensureRoomAvatar(roomId, name) {
   try {
     const displayName = name.replace(/^DM:\s*/, '');
     const png = await generateAvatarPng(displayName);
-    const mxcUri = await uploadMedia(state.botToken, png, 'image/png');
-    await setRoomAvatar(roomId, mxcUri);
+    const mxcUri = await uploadMedia(state.botToken, png, 'image/png', HOMESERVER);
+    await setRoomAvatar(roomId, mxcUri, null, HOMESERVER);
     state.roomAvatars[roomId] = mxcUri;
     saveState();
     console.log(`Set avatar for room ${roomId} (${name}): ${mxcUri}`);
@@ -1686,7 +1733,7 @@ async function syncAgentAvatarToDmRooms(agentName) {
     if (state.roomAvatars[roomId] === mxcUri) continue;
     try {
       // Use agent token (room creator has power), fall back to bot
-      await setRoomAvatar(roomId, mxcUri, agentToken);
+      await setRoomAvatar(roomId, mxcUri, agentToken, HOMESERVER);
       state.roomAvatars[roomId] = mxcUri;
       console.log(`Synced DM room ${roomId} (${key}) avatar to agent ${canonicalAgentName}`);
     } catch (e) {
@@ -1705,8 +1752,9 @@ async function setCustomAgentAvatar(agentName, imageBuffer, mimeType) {
   const token = getStoredAgentToken(canonicalAgentName);
   if (!token) { console.warn(`No token for agent ${canonicalAgentName}, cannot set custom avatar`); return; }
   try {
-    const mxcUri = await uploadMedia(token, imageBuffer, mimeType);
-    await setUserAvatar(token, mxcUri);
+    const agentBase = agentCredential(canonicalAgentName)?.homeserver || HOMESERVER;
+    const mxcUri = await uploadMedia(token, imageBuffer, mimeType, agentBase);
+    await setUserAvatar(token, mxcUri, agentBase);
     state.agentAvatars[canonicalAgentName] = mxcUri;
     saveState();
     console.log(`Set custom avatar for agent ${canonicalAgentName}: ${mxcUri}`);
@@ -3419,7 +3467,7 @@ export class MatrixBridge {
 
     // 1. Ensure bot account
     const botToken = await ensureBotAccount();
-    const botSession = await getMatrixAccessTokenSession(botToken);
+    const botSession = await getMatrixAccessTokenSession(botToken, HOMESERVER);
     const botCryptoPath = path.join(DATA_DIR, 'bot-crypto');
     const cryptoIdentity = reconcileMatrixCryptoStoreIdentity({
       cryptoStorePath: botCryptoPath,
@@ -6201,9 +6249,10 @@ export class MatrixBridge {
 
       let userId;
       if (isAgent) {
-        const token = this.getAgentToken(canonicalAgent || m);
+        const credential = this.getAgentCredential(canonicalAgent || m);
+        const token = credential?.accessToken || null;
         if (token) {
-          userId = await getUserId(token);
+          userId = await getUserId(token, credential.homeserver);
           if (currentMembers.has(userId)) continue; // already in room
           // Also auto-join with agent token
           await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
@@ -6238,9 +6287,10 @@ export class MatrixBridge {
     // Kick removed members
     for (const m of (update.removed || [])) {
       let userId;
-      const token = this.isKnownAgentName(m) ? this.getAgentToken(m) : null;
+      const credential = this.isKnownAgentName(m) ? this.getAgentCredential(m) : null;
+      const token = credential?.accessToken || null;
       if (token) {
-        userId = await getUserId(token);
+        userId = await getUserId(token, credential.homeserver);
       } else {
         userId = humanUserId(m);
       }
@@ -6551,7 +6601,7 @@ export class MatrixBridge {
         // Sync agent's avatar to DM room (use existing agent avatar if set, otherwise generate)
         if (state.agentAvatars[agentName]) {
           try {
-            await setRoomAvatar(data.room_id, state.agentAvatars[agentName], fromToken);
+            await setRoomAvatar(data.room_id, state.agentAvatars[agentName], fromToken, baseUrlForToken(fromToken));
             state.roomAvatars[data.room_id] = state.agentAvatars[agentName];
             saveState();
           } catch (e) {
@@ -6992,7 +7042,7 @@ export class MatrixBridge {
           await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${state.botToken}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_id: await getUserId(token) }),
+            body: JSON.stringify({ user_id: await getUserId(token, baseUrlForToken(token)) }),
           });
           await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
             method: 'POST',
@@ -7065,7 +7115,7 @@ export class MatrixBridge {
     const mime = normalizeMimeType(attachment?.mime) || guessMimeTypeFromName(name);
     const kind = inferAttachmentKind(attachment?.kind, mime, name);
     const bodyBytes = readFileSync(filePath);
-    const mxcUri = await uploadMedia(token, bodyBytes, mime);
+    const mxcUri = await uploadMedia(token, bodyBytes, mime, baseUrlForToken(token));
     const content = {
       msgtype: kind === 'image' ? 'm.image' : 'm.file',
       body: name,
@@ -7101,9 +7151,10 @@ export class MatrixBridge {
   async createRoomForGroup(groupName, members) {
     const invite = [];
     for (const m of members) {
-      const token = this.isKnownAgentName(m) ? this.getAgentToken(m) : null;
+      const credential = this.isKnownAgentName(m) ? this.getAgentCredential(m) : null;
+      const token = credential?.accessToken || null;
       if (token) {
-        const userId = await getUserId(token);
+        const userId = await getUserId(token, credential.homeserver);
         invite.push(userId);
       } else {
         invite.push(humanUserId(m));
@@ -7190,6 +7241,7 @@ export function resetBridgeMatrixTestHooks() {
  * code does rather than against what it ought to do.
  */
 export {
+  baseUrlForToken as baseUrlForTokenForTest,
   matrixLogin as matrixLoginForTest,
   matrixRegister as matrixRegisterForTest,
   getUserId as getUserIdForTest,
