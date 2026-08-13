@@ -43,8 +43,17 @@ an executable task contract.
 - docs/**
 - skills/**
 - lib/**
+- router/**
 - tests/**
 - bin/hafleet-sync-skills
+- tsconfig*.json
+- scripts/check-router-build.sh
+- scripts/check-architecture-boundaries.js
+- scripts/verify-ci.sh
+- remote/lib/mcp-server-core.js
+- remote/lib/push-relay-core.js
+- remote/mcp-server.js
+- remote/push-relay.js
 - install*.sh
 - uninstall*.sh
 - backend-v2.js

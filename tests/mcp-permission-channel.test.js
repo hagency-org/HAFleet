@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { Readable } from 'stream';
 import {
+  approvalAdapterTimeoutMs,
   approvalHookTimeoutSeconds,
   awaitRuntimeApproval,
   claudeChannelServerOptions,
@@ -393,6 +394,7 @@ describe('supported runtime approval adapters', () => {
 
     expect(command).toContain(`--hafleet-hook-sha256=${digest}`);
     expect(timeoutSeconds).toBe(960);
+    expect(approvalAdapterTimeoutMs({ HAFLEET_APPROVAL_TTL_MS: '900000' })).toBe(960_000);
     expect(toml).toContain('timeout = 960');
     expect(toml).toContain(command);
     expect(compareVersions(parseCodexVersion('codex-cli 0.144.1'), parseCodexVersion('0.144.1'))).toBe(0);

@@ -27,6 +27,10 @@ import {
   assertMatrixCryptoDeviceIdentity,
   reconcileMatrixCryptoStoreIdentity,
 } from './lib/matrix-crypto-store-identity.js';
+import {
+  normalizeEd25519PublicJwk,
+  verifyMatrixDeviceSelfSignature,
+} from './lib/agent-ops-client-auth.js';
 
 const MATRIX_OTK_COUNT_RECONCILE_MS = 5 * 60_000;
 
@@ -120,6 +124,14 @@ export class ReliableMatrixClient extends MatrixClient {
 
   async processSync(raw, emitFn) {
     const result = await super.processSync(raw, emitFn);
+    const changedDeviceOwners = [...new Set([
+      ...(Array.isArray(raw?.device_lists?.changed) ? raw.device_lists.changed : []),
+      ...(Array.isArray(raw?.device_lists?.left) ? raw.device_lists.left : []),
+    ].filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim()))];
+    if (changedDeviceOwners.length > 0) {
+      const notify = emitFn || ((eventName, ...payload) => Promise.resolve(this.emit(eventName, ...payload)));
+      await notify('device_lists.changed', changedDeviceOwners);
+    }
     const reportedCount = signedCurve25519CountFromSync(raw);
     if (reportedCount !== null) {
       this._lastOtkCountReconciliationAt = Date.now();
@@ -150,6 +162,10 @@ const APPROVAL_EVENT_KEY = 'com.hafleet.approval';
 const APPROVAL_STATUS_MSGTYPE = 'com.hafleet.approval.status.v1';
 const APPROVAL_REQUEST_MSGTYPE = 'com.hafleet.approval.request.v1';
 const APPROVAL_VERDICT_MSGTYPE = 'com.hafleet.approval.verdict.v1';
+const AGENT_OPS_EVENT_KEY = 'com.hafleet.agent_ops';
+const AGENT_OPS_SESSION_REQUEST_MSGTYPE = 'com.hafleet.agent_ops.client_session.request.v1';
+const AGENT_OPS_SESSION_GRANT_MSGTYPE = 'com.hafleet.agent_ops.client_session.grant.v1';
+const AGENT_OPS_SESSION_REVOKE_MSGTYPE = 'com.hafleet.agent_ops.client_session.revoke.v1';
 const MATRIX_MEGOLM_ALGORITHM = 'm.megolm.v1.aes-sha2';
 const REGISTRATION_TOKEN = (process.env.MATRIX_REG_TOKEN || '').trim();
 
@@ -218,6 +234,13 @@ const BACKEND_FETCH_RETRY_DELAY_MS_RAW = Number.parseInt(process.env.HAFLEET_BAC
 const BACKEND_FETCH_RETRY_DELAY_MS = Number.isFinite(BACKEND_FETCH_RETRY_DELAY_MS_RAW) && BACKEND_FETCH_RETRY_DELAY_MS_RAW > 0
   ? BACKEND_FETCH_RETRY_DELAY_MS_RAW
   : 2500;
+const THREAD_SESSIONS_ENABLED = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.HAFLEET_THREAD_SESSIONS || '').trim().toLowerCase(),
+);
+const ROUTER_OUTBOX_POLL_MS_RAW = Number.parseInt(process.env.HAFLEET_ROUTER_OUTBOX_POLL_MS || '1000', 10);
+const ROUTER_OUTBOX_POLL_MS = Number.isFinite(ROUTER_OUTBOX_POLL_MS_RAW)
+  ? Math.max(250, ROUTER_OUTBOX_POLL_MS_RAW)
+  : 1000;
 function normalizeBaseUrl(value) {
   const text = String(value || '').trim();
   if (!text) return '';
@@ -2222,6 +2245,54 @@ export function parseApprovalVerdictEvent(roomId, event) {
   };
 }
 
+function agentOpsClientFeatureEnabled(env = process.env) {
+  return ['1', 'true', 'yes', 'on'].includes(String(env.HAFLEET_AGENT_OPS_CLIENT || '').trim().toLowerCase());
+}
+
+export function parseAgentOpsClientControlEvent(roomId, event) {
+  const content = event?.content;
+  if (!content || ![AGENT_OPS_SESSION_REQUEST_MSGTYPE, AGENT_OPS_SESSION_REVOKE_MSGTYPE].includes(content.msgtype)) {
+    return null;
+  }
+  const detail = content[AGENT_OPS_EVENT_KEY];
+  const senderMxid = typeof event?.sender === 'string' ? event.sender.trim() : '';
+  const eventId = typeof event?.event_id === 'string' ? event.event_id.trim() : '';
+  if (!detail || detail.schema !== 'com.hafleet.agent_ops.v1' || !/^@[^:\s]+:[^\s]+$/.test(senderMxid) || !eventId) {
+    return { invalid: true, eventId: eventId || null };
+  }
+  if (content.msgtype === AGENT_OPS_SESSION_REVOKE_MSGTYPE) {
+    if (Object.keys(detail).sort().join(',') !== 'schema,scope_id') return { invalid: true, eventId };
+    const scopeId = typeof detail.scope_id === 'string' ? detail.scope_id.trim() : '';
+    if (!scopeId) return { invalid: true, eventId };
+    return { kind: 'revoke', roomId, eventId, senderMxid, scopeId };
+  }
+  if (Object.keys(detail).sort().join(',') !== 'agent,client_nonce,client_public_jwk,project_room_id,schema') {
+    return { invalid: true, eventId };
+  }
+  const agent = typeof detail.agent === 'string' ? detail.agent.trim() : '';
+  const projectRoomId = typeof detail.project_room_id === 'string' ? detail.project_room_id.trim() : '';
+  const clientNonce = typeof detail.client_nonce === 'string' ? detail.client_nonce.trim() : '';
+  let clientPublicJwk;
+  try {
+    clientPublicJwk = normalizeEd25519PublicJwk(detail.client_public_jwk);
+  } catch {
+    return { invalid: true, eventId };
+  }
+  if (!agent || !/^![^:\s]+:[^\s]+$/.test(projectRoomId) || !clientNonce || clientNonce.length > 255) {
+    return { invalid: true, eventId };
+  }
+  return {
+    kind: 'request',
+    roomId,
+    eventId,
+    senderMxid,
+    agent,
+    projectRoomId,
+    clientNonce,
+    clientPublicJwk,
+  };
+}
+
 // ── Inbound routing helpers (pure, unit-testable) ──────────────────────
 // Decide how a non-command human message is dispatched. A room that carries a
 // group mapping is treated as a group even if only one agent is joined, so the
@@ -2839,6 +2910,7 @@ export class MatrixBridge {
     );
     this._retryingPendingApprovalDecryptions = null;
     this.processingMatrixEventIds = new Map();
+    this.agentOpsEncryptedEnvelopes = new Map(); // event id -> verified original m.room.encrypted metadata
     this._msgRouteMetadataCache = new Map(); // reply_to message id -> persisted route metadata (capped)
     this.blockedAlertRooms = new Map(); // agent -> Set(roomId)
     this.startupTs = Date.now();
@@ -2850,6 +2922,7 @@ export class MatrixBridge {
     this._bridgeCreatedGroups = new Set(); // groups we POST'd — skip SSE echo
     this._recentSystemInfoWarningKeys = new Map(); // alert dedupeKey -> last bridged ts
     this._agentRoomBackfillRunning = false;
+    this._routerOutboxPolling = false;
     // Task 8: standalone cross-component doctor — business-health record inputs.
     this._lastSuccessfulSyncAtMs = null;
     this._requiredMembershipSummary = new Map(); // roomId -> { roomId, group, requiredAgent, botJoined, agentJoined, joinedAgentNames }
@@ -3657,6 +3730,10 @@ export class MatrixBridge {
      * stay invisible until the project gave up and invited again.
      */
     await this.resyncPendingInvites();
+    if (THREAD_SESSIONS_ENABLED) {
+      await this.pollRouterOutboxes();
+      setInterval(() => this.pollRouterOutboxes(), ROUTER_OUTBOX_POLL_MS);
+    }
     setInterval(() => this.scanJoinedRooms(), MATRIX_ROOM_SCAN_POLL_MS);
     // Reaped on the room-scan cadence rather than its own timer: it walks the same
     // rooms, on a deliberately slow interval, behind the same rate-limit gate.
@@ -3835,6 +3912,86 @@ export class MatrixBridge {
 
     // Discover humans from Matrix user directory and greet them
     await this.discoverAndGreetHumans();
+  }
+
+  routerThreadRelation(threadRootEventId) {
+    return {
+      rel_type: 'm.thread',
+      event_id: threadRootEventId,
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: threadRootEventId },
+    };
+  }
+
+  async deliverRouterCommand(kind, command) {
+    const agentName = this.normalizeName(command?.senderAgentName);
+    if (!agentName) throw new Error('router command has no valid sender agent');
+    let token = this.getAgentToken(agentName);
+    if (!token) token = await this.ensureAgentToken(agentName, 'router_outbox');
+    if (!token) throw new Error(`Matrix puppet token unavailable for ${agentName}`);
+    const root = typeof command.threadRootEventId === 'string' && command.threadRootEventId.trim()
+      ? command.threadRootEventId.trim()
+      : null;
+    const content = { msgtype: 'm.text', body: String(command.body || '') };
+    if (root) content['m.relates_to'] = this.routerThreadRelation(root);
+    const eventId = await this.sendAsAgentContent(token, command.roomId, content, null, {
+      transactionId: command.transactionId,
+      throwOnFailure: true,
+    });
+    if (!eventId) throw new Error('Matrix send returned no event id');
+    await this.callBackendApi(
+      'POST',
+      `/api/router/${kind}-outbox/${encodeURIComponent(command.commandId)}/delivered`,
+      { claim_token: command.claimToken, event_id: eventId },
+      `context=router-${kind}-delivery`,
+    );
+  }
+
+  isPermanentRouterMatrixFailure(error) {
+    const text = String(error?.message || error);
+    return /M_FORBIDDEN|M_BAD_JSON|M_NOT_FOUND|HTTP 40[013456789]\b/i.test(text);
+  }
+
+  async pollOneRouterOutbox(kind) {
+    const claimed = await this.callBackendApi(
+      'POST',
+      `/api/router/${kind}-outbox/claim`,
+      { claim_ms: Math.max(30_000, ROUTER_OUTBOX_POLL_MS * 10) },
+      `context=router-${kind}-claim`,
+    );
+    const command = claimed?.command;
+    if (!command) return false;
+    try {
+      await this.deliverRouterCommand(kind, command);
+    } catch (error) {
+      if (this.isPermanentRouterMatrixFailure(error)) {
+        await this.callBackendApi(
+          'POST',
+          `/api/router/${kind}-outbox/${encodeURIComponent(command.commandId)}/failed`,
+          { claim_token: command.claimToken, error_code: 'matrix_permanent_rejection' },
+          `context=router-${kind}-failure`,
+        );
+      } else {
+        console.warn(`[router-outbox] ${kind} command ${command.commandId} remains retryable: ${error?.message || error}`);
+      }
+    }
+    return true;
+  }
+
+  async pollRouterOutboxes() {
+    if (!THREAD_SESSIONS_ENABLED || this._routerOutboxPolling) return;
+    this._routerOutboxPolling = true;
+    try {
+      for (let delivered = 0; delivered < 20; delivered += 1) {
+        const task = await this.pollOneRouterOutbox('matrix');
+        const reply = await this.pollOneRouterOutbox('reply');
+        if (!task && !reply) break;
+      }
+    } catch (error) {
+      console.warn(`[router-outbox] poll failed: ${error?.message || error}`);
+    } finally {
+      this._routerOutboxPolling = false;
+    }
   }
 
   async discoverAndGreetHumans() {
@@ -4181,7 +4338,12 @@ export class MatrixBridge {
   configureReliableBotSync(client) {
     client.persistTokenAfterSync = true;
     client.agentChatSyncHandler = async (eventName, ...payload) => {
+      if (eventName === 'device_lists.changed') return this.onAgentOpsDeviceListsChanged(...payload);
       if (eventName === 'room.message') return this.onRoomMessage(...payload);
+      if (eventName === 'room.encrypted_event') {
+        this.rememberAgentOpsEncryptedEnvelope(...payload);
+        return client.emit(eventName, ...payload);
+      }
       if (eventName === 'room.event') {
         if (client.crypto) await client.crypto.onRoomEvent(...payload);
         return this.onRoomEvent(...payload);
@@ -4198,6 +4360,51 @@ export class MatrixBridge {
       return client.emit(eventName, ...payload);
     };
     return client;
+  }
+
+  async onAgentOpsDeviceListsChanged(changedOwnerMxids) {
+    if (!agentOpsClientFeatureEnabled()) return { revoked: 0 };
+    const approvalOwners = new Set(Object.values(state.trustedManagedRooms || {})
+      .filter((meta) => meta?.approvalDm && typeof meta.ownerMxid === 'string')
+      .map((meta) => meta.ownerMxid));
+    const affected = [...new Set((Array.isArray(changedOwnerMxids) ? changedOwnerMxids : [])
+      .filter((ownerMxid) => approvalOwners.has(ownerMxid)))];
+    let revoked = 0;
+    for (const ownerMxid of affected) {
+      const result = await this.callBackendApi('POST', '/api/agent-ops/v1/control/revoke', {
+        owner_mxid: ownerMxid,
+        clear_device: true,
+      }, `context=agent-ops:device-list-revoke owner=${ownerMxid}`);
+      revoked += Number.isSafeInteger(result?.revoked_scope_count) ? result.revoked_scope_count : 0;
+    }
+    return { revoked };
+  }
+
+  rememberAgentOpsEncryptedEnvelope(roomId, event) {
+    const eventId = typeof event?.event_id === 'string' ? event.event_id.trim() : '';
+    const sender = typeof event?.sender === 'string' ? event.sender.trim() : '';
+    const content = event?.content;
+    if (!eventId || !sender || content?.algorithm !== 'm.megolm.v1.aes-sha2') return false;
+    const deviceId = typeof content.device_id === 'string' ? content.device_id.trim() : '';
+    const senderKey = typeof content.sender_key === 'string' ? content.sender_key.trim() : '';
+    if (!deviceId || !senderKey) return false;
+    this.agentOpsEncryptedEnvelopes.set(eventId, {
+      roomId,
+      sender,
+      deviceId,
+      senderKey,
+      algorithm: content.algorithm,
+      observedAt: Date.now(),
+    });
+    const cutoff = Date.now() - 10 * 60_000;
+    for (const [id, value] of this.agentOpsEncryptedEnvelopes) {
+      if (value.observedAt < cutoff) this.agentOpsEncryptedEnvelopes.delete(id);
+    }
+    if (this.agentOpsEncryptedEnvelopes.size > 2000) {
+      const keep = [...this.agentOpsEncryptedEnvelopes.entries()].slice(-1000);
+      this.agentOpsEncryptedEnvelopes = new Map(keep);
+    }
+    return true;
   }
 
   async onFailedRoomDecryption(client, roomId, event, error) {
@@ -4239,6 +4446,10 @@ export class MatrixBridge {
         continue;
       }
       try {
+        // The original encrypted envelope is part of Agent Operations device
+        // authentication. Rebuild its in-memory attestation before routing a
+        // clear event recovered after a bridge restart or delayed room key.
+        this.rememberAgentOpsEncryptedEnvelope(record.roomId, record.event);
         const decrypted = await client.crypto.decryptRoomEvent(
           new EncryptedRoomEvent(record.event),
           record.roomId,
@@ -4279,6 +4490,14 @@ export class MatrixBridge {
   }
 
   async _onRoomMessageClaimed(roomId, event, eventId) {
+    const agentOpsControl = parseAgentOpsClientControlEvent(roomId, event);
+    if (agentOpsControl) {
+      if (agentOpsControl.invalid || !agentOpsClientFeatureEnabled()) {
+        this.rememberMatrixEvent(eventId);
+        return { ignored: true, reason: agentOpsControl.invalid ? 'invalid_agent_ops_control' : 'agent_ops_client_disabled' };
+      }
+      return this.onAgentOpsClientControl(agentOpsControl);
+    }
     const approvalVerdict = parseApprovalVerdictEvent(roomId, event);
     if (approvalVerdict) {
       return this.onApprovalVerdict(approvalVerdict);
@@ -4487,6 +4706,85 @@ export class MatrixBridge {
     // else: unknown room, ignore
   }
 
+  async onAgentOpsClientControl(control) {
+    const approvalMeta = state.trustedManagedRooms?.[control.roomId];
+    if (!approvalMeta?.approvalDm || approvalMeta.ownerMxid !== control.senderMxid) {
+      this.rememberMatrixEvent(control.eventId);
+      return { ok: false, rejected: true, reason: 'not_bound_owner_dm' };
+    }
+    const envelope = this.agentOpsEncryptedEnvelopes.get(control.eventId);
+    if (!envelope || envelope.roomId !== control.roomId || envelope.sender !== control.senderMxid) {
+      this.rememberMatrixEvent(control.eventId);
+      return { ok: false, rejected: true, reason: 'encrypted_envelope_missing' };
+    }
+    const canonicalAgent = this.resolveKnownAgentName(control.agent || approvalMeta.agent)
+      || this.normalizeName(control.agent || approvalMeta.agent);
+    if (!canonicalAgent || !this.sameName(canonicalAgent, approvalMeta.agent)) {
+      this.rememberMatrixEvent(control.eventId);
+      return { ok: false, rejected: true, reason: 'approval_agent_mismatch' };
+    }
+    let projectRoomId = null;
+    if (control.kind === 'request') {
+      const projectBinding = findRoomAgentBinding(control.projectRoomId, canonicalAgent);
+      const bindingOwner = projectBinding?.binding?.ownerMxid || projectBinding?.binding?.inviter || null;
+      const approvalRoom = projectBinding?.binding?.approvalDmRoomId || null;
+      if (!projectBinding || bindingOwner !== control.senderMxid || approvalRoom !== control.roomId) {
+        this.rememberMatrixEvent(control.eventId);
+        return { ok: false, rejected: true, reason: 'project_scope_binding_mismatch' };
+      }
+      projectRoomId = control.projectRoomId;
+    }
+    const expectedMembers = new Set([this.botUserId, control.senderMxid, agentUserId(canonicalAgent)]);
+    const joinedMembers = await this.botClient.getJoinedRoomMembers(control.roomId);
+    if (joinedMembers.length !== expectedMembers.size || joinedMembers.some((member) => !expectedMembers.has(member))) {
+      this.rememberMatrixEvent(control.eventId);
+      return { ok: false, rejected: true, reason: 'approval_room_membership_mismatch' };
+    }
+    const deviceResponse = await this.botClient.getUserDevices([control.senderMxid]);
+    const device = deviceResponse?.device_keys?.[control.senderMxid]?.[envelope.deviceId] || null;
+    const verifiedDevice = verifyMatrixDeviceSelfSignature({
+      device,
+      ownerMxid: control.senderMxid,
+      deviceId: envelope.deviceId,
+      curve25519Key: envelope.senderKey,
+    });
+    if (!verifiedDevice) {
+      this.rememberMatrixEvent(control.eventId);
+      return { ok: false, rejected: true, reason: 'matrix_device_signature_invalid' };
+    }
+    if (control.kind === 'revoke') {
+      const result = await this.callBackendApi('POST', '/api/agent-ops/v1/control/revoke', {
+        scope_id: control.scopeId,
+        clear_device: false,
+      }, `context=agent-ops:revoke scope=${control.scopeId}`);
+      this.rememberMatrixEvent(control.eventId);
+      return result;
+    }
+    const result = await this.callBackendApi('POST', '/api/agent-ops/v1/control/bootstrap', {
+      schema: 'com.hafleet.agent_ops.v1',
+      agent: canonicalAgent,
+      project_room_id: projectRoomId,
+      owner_mxid: control.senderMxid,
+      owner_dm_room_id: control.roomId,
+      matrix_event_id: control.eventId,
+      matrix_device_id: verifiedDevice.deviceId,
+      matrix_device_ed25519: verifiedDevice.ed25519,
+      matrix_device_curve25519: verifiedDevice.curve25519,
+      client_nonce: control.clientNonce,
+      client_public_jwk: control.clientPublicJwk,
+      was_encrypted: true,
+      device_self_signature_verified: true,
+      room_members_verified: true,
+    }, `context=agent-ops:bootstrap agent=${canonicalAgent} room=${projectRoomId}`);
+    await this.botClient.sendMessage(control.roomId, {
+      msgtype: AGENT_OPS_SESSION_GRANT_MSGTYPE,
+      body: `Agent Operations session grant for ${canonicalAgent}. This control event is not a chat instruction.`,
+      [AGENT_OPS_EVENT_KEY]: result,
+    });
+    this.rememberMatrixEvent(control.eventId);
+    return result;
+  }
+
   async onApprovalVerdict(verdict) {
     try {
       const result = await this.callBackendApi(
@@ -4586,6 +4884,13 @@ export class MatrixBridge {
     if (event.type === 'm.room.member') {
       const targetUserId = event.state_key;
       const membership = event.content?.membership;
+      const approvalMetaForRevocation = state.trustedManagedRooms?.[roomId];
+      if (agentOpsClientFeatureEnabled() && approvalMetaForRevocation?.approvalDm) {
+        await this.callBackendApi('POST', '/api/agent-ops/v1/control/revoke', {
+          owner_dm_room_id: roomId,
+          clear_device: false,
+        }, `context=agent-ops:membership-revoke room=${roomId}`);
+      }
 
       // Bot joined a room → check if it needs mapping
       if (targetUserId === this.botUserId && membership === 'join') {
@@ -7200,10 +7505,14 @@ export class MatrixBridge {
         return existing.primaryEventId;
       }
     }
+    const suppliedTxnId = typeof delivery?.transactionId === 'string' ? delivery.transactionId.trim() : '';
+    if (suppliedTxnId && !/^[A-Za-z0-9._~-]{1,128}$/.test(suppliedTxnId)) {
+      throw new Error('invalid explicit Matrix transaction id');
+    }
     const txnSeed = persistPrimary
       ? `primary:${sourceMsgId}`
       : `${Date.now()}:${Math.random().toString(36).slice(2, 12)}`;
-    const txnId = `bridge_${createHash('sha256').update(txnSeed).digest('hex').slice(0, 32)}`;
+    const txnId = suppliedTxnId || `bridge_${createHash('sha256').update(txnSeed).digest('hex').slice(0, 32)}`;
     const doSend = async () => {
       /*
        * The token's OWN side, not this deployment's server. `sendAsAgentContent` is the choke point for
@@ -7224,7 +7533,9 @@ export class MatrixBridge {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data?.error || `HTTP ${res.status}`);
+        const matrixCode = typeof data?.errcode === 'string' ? data.errcode : null;
+        const matrixDetail = typeof data?.error === 'string' ? data.error : null;
+        throw new Error([matrixCode, `HTTP ${res.status}`, matrixDetail].filter(Boolean).join(': '));
       }
       if (data?.event_id) {
         this.rememberMatrixEvent(data.event_id, sourceMsgId);
@@ -7263,11 +7574,13 @@ export class MatrixBridge {
         } catch (retryErr) {
           console.error(`Auto-join retry failed in ${roomId}:`, retryErr.message);
           this.postWarning(`sendAsAgent failed in room ${roomId} (after auto-join retry): ${retryErr.message}`);
+          if (delivery?.throwOnFailure === true) throw retryErr;
           return null;
         }
       } else {
         console.error(`Failed to send as agent in ${roomId}:`, e.message);
         this.postWarning(`sendAsAgent failed in room ${roomId}: ${e.message}`);
+        if (delivery?.throwOnFailure === true) throw e;
         return null;
       }
     }

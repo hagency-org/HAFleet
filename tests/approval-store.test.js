@@ -271,6 +271,35 @@ describe('owner approval store', () => {
     expect(created).toMatchObject({ status: 'denied', denial_reason: 'owner_binding_ambiguous' });
   });
 
+  test('an explicit project room selects the matching owner when one agent has multiple rooms', () => {
+    const { store } = makeStore();
+    store.upsertBinding(binding({
+      project: 'project-a',
+      project_room_id: '!a:palpo.test',
+      owner_mxid: '@owner-a:palpo.test',
+      owner_dm_room_id: '!owner-a:palpo.test',
+    }));
+    store.upsertBinding(binding({
+      project: 'project-b',
+      project_room_id: '!b:palpo.test',
+      owner_mxid: '@owner-b:palpo.test',
+      owner_dm_room_id: '!owner-b:palpo.test',
+    }));
+
+    const created = store.createRequest(request({
+      project: '',
+      project_room_id: '!b:palpo.test',
+    }));
+
+    expect(created).toMatchObject({
+      status: 'pending',
+      project: 'project-b',
+      project_room_id: '!b:palpo.test',
+      owner_mxid: '@owner-b:palpo.test',
+      owner_dm_room_id: '!owner-b:palpo.test',
+    });
+  });
+
   test('owner binding change denies existing pending requests', () => {
     /*
      * REQ-OWNER-UI-APPROVAL-FAIL-CLOSED, the "mismatched" state. Re-binding the room to a new
