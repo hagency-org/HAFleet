@@ -95,13 +95,19 @@ afterEach(() => {
 const jsonOnce = (payload, status = 200) => { handler = () => [status, payload]; };
 const bearerOf = (call) => String(call.headers.authorization || '').replace(/^Bearer /, '');
 
-describe('every primitive targets MATRIX_HOMESERVER — the property the refactor changes', () => {
-  test('all seven reach the configured base URL and nothing else', async () => {
+describe('every primitive uses the base URL it was HANDED', () => {
+  test('all seven reach the URL passed to them and nothing else', async () => {
     /*
-     * The load-bearing assertion of this file. Once these take a base URL as an argument, this test
-     * is what proves each one still uses the URL it was given: today that URL comes from the module
-     * constant, and the host recorded here is the fake server's, so a function that kept reading the
-     * constant after the refactor would fail.
+     * The load-bearing assertion of this file, and it has now done its job once: it was written while
+     * these functions read `HOMESERVER`, so that a version taking the URL as an argument could be
+     * checked against it. The threading is done, and the assertion is unchanged in substance — every
+     * call goes to the host it was given.
+     *
+     * The URL is REQUIRED rather than defaulted, which is why this test passes `baseUrl` at each call.
+     * A default would let a caller holding an agent's credential silently send it to this deployment's
+     * server instead of the agent's — a request that fails at best, and lands one side's token on
+     * another side's server at worst. JavaScript cannot enforce a required parameter, so `requireBaseUrl`
+     * throws with the function's name instead of letting `undefined/_matrix/...` fail obscurely.
      */
     handler = (path) => {
       if (path === '/_matrix/client/v3/account/whoami') return [200, { user_id: '@x:fake.test', device_id: 'D' }];
@@ -109,12 +115,12 @@ describe('every primitive targets MATRIX_HOMESERVER — the property the refacto
       if (path === '/_matrix/client/v3/login') return [200, { access_token: 't', user_id: '@x:fake.test' }];
       return [200, {}];
     };
-    await bridge.getUserIdForTest('tok');
-    await bridge.getMatrixAccessTokenSessionForTest('tok');
-    await bridge.uploadMediaForTest('tok', Buffer.from('png'), 'image/png');
-    await bridge.setUserAvatarForTest('tok', 'mxc://fake.test/abc');
-    await bridge.setRoomAvatarForTest('!r:fake.test', 'mxc://fake.test/abc', 'tok');
-    await bridge.matrixLoginForTest('u', 'p');
+    await bridge.getUserIdForTest('tok', baseUrl);
+    await bridge.getMatrixAccessTokenSessionForTest('tok', baseUrl);
+    await bridge.uploadMediaForTest('tok', Buffer.from('png'), 'image/png', baseUrl);
+    await bridge.setUserAvatarForTest('tok', 'mxc://fake.test/abc', baseUrl);
+    await bridge.setRoomAvatarForTest('!r:fake.test', 'mxc://fake.test/abc', 'tok', baseUrl);
+    await bridge.matrixLoginForTest('u', 'p', baseUrl);
 
     expect(calls.length).toBeGreaterThanOrEqual(6);
     const expectedHost = new URL(baseUrl).host;
@@ -124,10 +130,93 @@ describe('every primitive targets MATRIX_HOMESERVER — the property the refacto
   });
 });
 
+describe('a token-only caller can still find its own side', () => {
+  /*
+   * `sendAsAgentContent` and `sendAttachmentAsAgent` receive a TOKEN, not an agent name, so they
+   * cannot resolve a homeserver by name. `baseUrlForToken` is how they get one. Tested directly
+   * because those two methods are the choke points for every outbound agent message, and the
+   * consequence of getting this wrong is sending an agent's credential to the wrong server.
+   */
+  const cred = (accessToken, serverName, homeserver) => ({
+    homeserver, serverName, mxid: `@a:${serverName}`, accessToken,
+  });
+
+  test("an agent's token resolves to that agent's own homeserver", () => {
+    const tokens = bridge.agentTokenStateForTest();
+    tokens.alpha = cred('tok-alpha', 'other.example', 'https://other.example');
+    expect(bridge.baseUrlForTokenForTest('tok-alpha')).toBe('https://other.example');
+  });
+
+  test('a token nobody holds falls back to THIS deployment, not to undefined', () => {
+    /*
+     * The bot's own token is the real case: it is not in `agentTokens`, and ADR-014 decision 4's
+     * split says the bot stays on the contributor's own homeserver. Returning undefined here would
+     * make `requireBaseUrl` throw on every bot-sent attachment.
+     */
+    expect(bridge.baseUrlForTokenForTest('some-bot-token')).toBe(process.env.MATRIX_HOMESERVER);
+  });
+
+  test('an absent token also falls back rather than throwing', () => {
+    for (const bad of [null, undefined, '']) {
+      expect(bridge.baseUrlForTokenForTest(bad), String(bad)).toBe(process.env.MATRIX_HOMESERVER);
+    }
+  });
+
+  test('it matches on the token, not on the agent name', () => {
+    // Two agents on different servers: the token decides, because the token is what the caller has.
+    const tokens = bridge.agentTokenStateForTest();
+    tokens.alpha = cred('tok-alpha', 'a.example', 'https://a.example');
+    tokens.beta = cred('tok-beta', 'b.example', 'https://b.example');
+    expect(bridge.baseUrlForTokenForTest('tok-beta')).toBe('https://b.example');
+  });
+});
+
+describe('an omitted base URL is a throw, not a silent fallback', () => {
+  test('every primitive refuses to run without one, and names itself', async () => {
+    /*
+     * The enforcement that makes "required" mean anything in JavaScript. Without it an omission
+     * becomes `undefined/_matrix/...`, which fails several frames away as a fetch error against a
+     * host that does not exist — and a DEFAULT would be worse still, because a caller holding an
+     * agent's credential would silently send it to this deployment's own server.
+     *
+     * Each message names its function, so the frame that forgot is identifiable from the message
+     * alone rather than from a stack trace through a rate-limit wrapper.
+     */
+    const cases = [
+      ['getUserId', () => bridge.getUserIdForTest('tok')],
+      ['getMatrixAccessTokenSession', () => bridge.getMatrixAccessTokenSessionForTest('tok')],
+      ['uploadMedia', () => bridge.uploadMediaForTest('tok', Buffer.from('x'), 'image/png')],
+      ['setUserAvatar', () => bridge.setUserAvatarForTest('tok', 'mxc://fake.test/a')],
+      ['setRoomAvatar', () => bridge.setRoomAvatarForTest('!r:fake.test', 'mxc://fake.test/a', 'tok')],
+      ['matrixLogin', () => bridge.matrixLoginForTest('u', 'p')],
+      ['matrixRegister', () => bridge.matrixRegisterForTest('u', 'p')],
+    ];
+    for (const [name, call] of cases) {
+      await expect(call(), name).rejects.toThrow(new RegExp(`^${name} requires a Matrix base URL`));
+    }
+    // And nothing was sent: the refusal happens before any request leaves.
+    expect(calls).toHaveLength(0);
+  });
+
+  test('an empty or whitespace URL is refused too, not concatenated', async () => {
+    for (const bad of ['', '   ', null, 0]) {
+      await expect(bridge.getUserIdForTest('tok', bad), String(bad))
+        .rejects.toThrow(/requires a Matrix base URL/);
+    }
+  });
+
+  test('a trailing slash is trimmed rather than doubled', async () => {
+    // Some homeservers 404 `//_matrix/...` instead of normalizing it.
+    jsonOnce({ user_id: '@x:fake.test', device_id: 'D' });
+    await bridge.getUserIdForTest('tok', `${baseUrl}///`);
+    expect(calls[0].path).toBe('/_matrix/client/v3/account/whoami');
+  });
+});
+
 describe('getUserId', () => {
   test('returns the user_id the homeserver reports', async () => {
     jsonOnce({ user_id: '@agent:fake.test', device_id: 'DEV1' });
-    expect(await bridge.getUserIdForTest('tok-a')).toBe('@agent:fake.test');
+    expect(await bridge.getUserIdForTest('tok-a', baseUrl)).toBe('@agent:fake.test');
     expect(calls[0].path).toBe('/_matrix/client/v3/account/whoami');
     expect(bearerOf(calls[0])).toBe('tok-a');
   });
@@ -144,21 +233,21 @@ describe('getUserId', () => {
      * that decision to be forced.
      */
     handler = () => [401, '<html>nginx</html>'];
-    await expect(bridge.getUserIdForTest('dead')).rejects.toThrow(SyntaxError);
+    await expect(bridge.getUserIdForTest('dead', baseUrl)).rejects.toThrow(SyntaxError);
   });
 
   test('a 401 with a JSON body yields undefined rather than an error', async () => {
     // The other half of the same defect: no status check means an error body parses fine and the
     // function returns `undefined` for the user id, which reads as "no identity" rather than "denied".
     jsonOnce({ errcode: 'M_UNKNOWN_TOKEN' }, 401);
-    expect(await bridge.getUserIdForTest('dead')).toBeUndefined();
+    expect(await bridge.getUserIdForTest('dead', baseUrl)).toBeUndefined();
   });
 });
 
 describe('getMatrixAccessTokenSession', () => {
   test('returns userId and deviceId', async () => {
     jsonOnce({ user_id: '@agent:fake.test', device_id: 'DEV1' });
-    expect(await bridge.getMatrixAccessTokenSessionForTest('tok')).toEqual({
+    expect(await bridge.getMatrixAccessTokenSessionForTest('tok', baseUrl)).toEqual({
       userId: '@agent:fake.test', deviceId: 'DEV1',
     });
   });
@@ -167,17 +256,17 @@ describe('getMatrixAccessTokenSession', () => {
     // The same 401 that makes getUserId throw a SyntaxError produces a usable verdict here, because
     // the status is read before the body is parsed.
     handler = () => [401, '<html>nginx</html>'];
-    await expect(bridge.getMatrixAccessTokenSessionForTest('dead')).rejects.toMatchObject({ status: 401 });
+    await expect(bridge.getMatrixAccessTokenSessionForTest('dead', baseUrl)).rejects.toMatchObject({ status: 401 });
   });
 
   test('a 5xx also carries its status, so a caller can tell it from a rejection', async () => {
     jsonOnce({ errcode: 'M_UNKNOWN' }, 503);
-    await expect(bridge.getMatrixAccessTokenSessionForTest('tok')).rejects.toMatchObject({ status: 503 });
+    await expect(bridge.getMatrixAccessTokenSessionForTest('tok', baseUrl)).rejects.toMatchObject({ status: 503 });
   });
 
   test('a 200 missing device_id is refused rather than returned half-built', async () => {
     jsonOnce({ user_id: '@agent:fake.test' });
-    await expect(bridge.getMatrixAccessTokenSessionForTest('tok'))
+    await expect(bridge.getMatrixAccessTokenSessionForTest('tok', baseUrl))
       .rejects.toThrow(/did not return both user_id and device_id/);
   });
 });
@@ -186,7 +275,7 @@ describe('uploadMedia', () => {
   test('POSTs the bytes and returns the content_uri', async () => {
     jsonOnce({ content_uri: 'mxc://fake.test/xyz' });
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
-    expect(await bridge.uploadMediaForTest('tok', png, 'image/png')).toBe('mxc://fake.test/xyz');
+    expect(await bridge.uploadMediaForTest('tok', png, 'image/png', baseUrl)).toBe('mxc://fake.test/xyz');
     expect(calls[0].method).toBe('POST');
     expect(calls[0].path).toBe('/_matrix/media/v3/upload');
     expect(calls[0].headers['content-type']).toBe('image/png');
@@ -197,7 +286,7 @@ describe('uploadMedia', () => {
 
   test('a failed upload throws with the status', async () => {
     jsonOnce({ errcode: 'M_TOO_LARGE' }, 413);
-    await expect(bridge.uploadMediaForTest('tok', Buffer.from('x'), 'image/png'))
+    await expect(bridge.uploadMediaForTest('tok', Buffer.from('x'), 'image/png', baseUrl))
       .rejects.toThrow(/Media upload failed: 413/);
   });
 });
@@ -207,7 +296,7 @@ describe('setUserAvatar', () => {
     handler = (path) => (path === '/_matrix/client/v3/account/whoami'
       ? [200, { user_id: '@agent:fake.test', device_id: 'D' }]
       : [200, {}]);
-    await bridge.setUserAvatarForTest('tok', 'mxc://fake.test/abc');
+    await bridge.setUserAvatarForTest('tok', 'mxc://fake.test/abc', baseUrl);
     expect(calls[0].path).toBe('/_matrix/client/v3/account/whoami');
     // The MXID is URL-encoded into the path: `@` and `:` must not arrive raw.
     expect(calls[1].path).toBe('/_matrix/client/v3/profile/%40agent%3Afake.test/avatar_url');
@@ -224,14 +313,14 @@ describe('setUserAvatar', () => {
     handler = (path) => (path === '/_matrix/client/v3/account/whoami'
       ? [200, { user_id: '@agent:fake.test', device_id: 'D' }]
       : [403, { errcode: 'M_FORBIDDEN' }]);
-    await expect(bridge.setUserAvatarForTest('tok', 'mxc://fake.test/abc')).resolves.toBeUndefined();
+    await expect(bridge.setUserAvatarForTest('tok', 'mxc://fake.test/abc', baseUrl)).resolves.toBeUndefined();
   });
 });
 
 describe('setRoomAvatar and its retry ladder', () => {
   test('a successful PUT uses the supplied token and sends the mxc url', async () => {
     jsonOnce({ event_id: '$e' });
-    await bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', 'explicit-token');
+    await bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', 'explicit-token', baseUrl);
     /*
      * `!` arrives UNENCODED and `:` does not. `encodeURIComponent` leaves `- _ . ! ~ * ' ( )` alone,
      * so a room id keeps its sigil in the path while its colon becomes `%3A`. Written out because the
@@ -271,7 +360,7 @@ describe('setRoomAvatar and its retry ladder', () => {
     tokens.beta = cred('token-OTHER-side', 'someone-else.example');
 
     handler = () => [403, { errcode: 'M_FORBIDDEN' }];
-    await expect(bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', null))
+    await expect(bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', null, baseUrl))
       .rejects.toThrow(/setRoomAvatar failed: M_FORBIDDEN/);
 
     const tried = calls.map(bearerOf);
@@ -298,7 +387,7 @@ describe('setRoomAvatar and its retry ladder', () => {
         ? [200, { event_id: '$ok' }]
         : [403, { errcode: 'M_FORBIDDEN' }]
     );
-    await expect(bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', null))
+    await expect(bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', null, baseUrl))
       .resolves.toBeUndefined();
     expect(calls.map(bearerOf)).not.toContain('token-B');
   });
@@ -313,7 +402,7 @@ describe('setRoomAvatar and its retry ladder', () => {
     tokens.alpha = cred('token-this-side', 'fake.test');
 
     handler = () => [403, { errcode: 'M_FORBIDDEN' }];
-    await expect(bridge.setRoomAvatarForTest('malformed-room-id', 'mxc://fake.test/abc', null))
+    await expect(bridge.setRoomAvatarForTest('malformed-room-id', 'mxc://fake.test/abc', null, baseUrl))
       .rejects.toThrow(/M_FORBIDDEN/);
     expect(calls).toHaveLength(1);
     expect(calls.map(bearerOf)).not.toContain('token-this-side');
@@ -352,7 +441,7 @@ describe('setRoomAvatar and its retry ladder', () => {
     tokens.alpha = 'token-side-A';
 
     handler = () => [403, { errcode: 'M_FORBIDDEN' }];
-    await expect(bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', 'explicit'))
+    await expect(bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', 'explicit', baseUrl))
       .rejects.toThrow(/M_FORBIDDEN/);
     expect(calls).toHaveLength(1);
     expect(calls.map(bearerOf)).not.toContain('token-side-A');
@@ -362,7 +451,7 @@ describe('setRoomAvatar and its retry ladder', () => {
     const tokens = bridge.agentTokenStateForTest();
     tokens.alpha = 'token-side-A';
     jsonOnce({ errcode: 'M_NOT_FOUND' }, 404);
-    await expect(bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', null))
+    await expect(bridge.setRoomAvatarForTest('!room:fake.test', 'mxc://fake.test/abc', null, baseUrl))
       .rejects.toThrow(/setRoomAvatar failed: M_NOT_FOUND/);
     expect(calls).toHaveLength(1);
   });
@@ -371,7 +460,7 @@ describe('setRoomAvatar and its retry ladder', () => {
 describe('matrixLogin', () => {
   test('posts a password login and returns the body', async () => {
     jsonOnce({ access_token: 'tok', user_id: '@u:fake.test', device_id: 'D' });
-    const out = await bridge.matrixLoginForTest('someone', 'secret');
+    const out = await bridge.matrixLoginForTest('someone', 'secret', baseUrl);
     expect(calls[0].path).toBe('/_matrix/client/v3/login');
     expect(calls[0].method).toBe('POST');
     const sent = JSON.parse(calls[0].body);
@@ -390,7 +479,7 @@ describe('matrixRegister', () => {
       if (!parsed.auth) return [401, { session: 's1', flows: [{ stages: ['m.login.registration_token'] }] }];
       return [200, { access_token: 'minted', user_id: '@new:fake.test' }];
     };
-    const out = await bridge.matrixRegisterForTest('newuser', 'pw');
+    const out = await bridge.matrixRegisterForTest('newuser', 'pw', baseUrl);
     expect(out.access_token).toBe('minted');
     expect(seen).toBe(2);
     expect(JSON.parse(calls[1].body).auth).toEqual({
@@ -400,12 +489,12 @@ describe('matrixRegister', () => {
 
   test('a server that registers outright needs no second call', async () => {
     jsonOnce({ access_token: 'immediate', user_id: '@new:fake.test' });
-    expect((await bridge.matrixRegisterForTest('newuser', 'pw')).access_token).toBe('immediate');
+    expect((await bridge.matrixRegisterForTest('newuser', 'pw', baseUrl)).access_token).toBe('immediate');
     expect(calls).toHaveLength(1);
   });
 
   test('no session and no token is a refusal that names what to do', async () => {
     jsonOnce({ flows: [{ stages: ['m.login.email.identity'] }] }, 401);
-    await expect(bridge.matrixRegisterForTest('newuser', 'pw')).rejects.toThrow(/No session in registration probe/);
+    await expect(bridge.matrixRegisterForTest('newuser', 'pw', baseUrl)).rejects.toThrow(/No session in registration probe/);
   });
 });
