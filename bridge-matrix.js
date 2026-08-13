@@ -4611,6 +4611,40 @@ export class MatrixBridge {
           return;
         }
         const data = await res.json();
+
+        /*
+         * RECONCILE STALE PENDING RECORDS AGAINST THIS AGENT'S OWN MEMBERSHIP.
+         *
+         * A pending record can outlive the invitation that made it. Once the agent joins, the room
+         * leaves `rooms.invite` — so a record written while the inviter was unreadable is frozen
+         * with `inviter: null`, which /projects renders as 「读不到发起人」 with Accept disabled, for
+         * a room the agent is demonstrably in. Nothing in the invite path can clear it, because
+         * that path only sees invitations and there is no longer one to see.
+         *
+         * IT LIVES HERE, and the first version did not. It was written inside pollBotInvites(),
+         * which has no `agentName` in scope — so it threw ReferenceError on every cycle and took
+         * the whole bot invite poll down with it: 490 occurrences of "Bot invite poll failed:
+         * agentName is not defined" in one log before anyone read it. `node --check` cannot see an
+         * undefined reference and the tests never invoke this method, so it shipped.
+         *
+         * The move also fixes a second error the first version made. The bot's `rooms.join` says
+         * the BOT is in the room, which is no evidence at all about the AGENT. This sync is the
+         * agent's own, so `rooms.join` here is the authority on the membership being claimed —
+         * and it costs nothing, because the request already returned it.
+         */
+        const joinedRoomIds = Object.keys(data?.rooms?.join || {});
+        for (const joinedRoomId of joinedRoomIds) {
+          const record = (state.pendingInvites?.[joinedRoomId] || {})[agentName];
+          if (record?.state !== 'pending') continue;
+          /*
+           * `accepted`, attributed to the policy rather than to a person: the agent is in the room,
+           * so the invitation WAS answered — by the trusted-inviter rule, with no human at a
+           * screen. Recording it as an operator decision would credit someone who never decided.
+           */
+          settlePendingInvite(joinedRoomId, agentName, 'accepted', 'trusted-inviter');
+          console.log(`[invite] reconciled: ${agentName} is already joined to ${joinedRoomId}, settling the stale pending record`);
+        }
+
         const invited = data?.rooms?.invite || {};
         for (const roomId of Object.keys(invited)) {
           // Trust check before agent join (5.8.1)
@@ -4942,33 +4976,6 @@ export class MatrixBridge {
         return;
       }
       const data = await res.json();
-      /*
-       * RECONCILE FIRST, against the joined list this same sync already carries.
-       *
-       * A pending record can outlive the invitation that made it. Once the agent joins, the room
-       * leaves `rooms.invite` — so a record written while the inviter was unreadable is frozen with
-       * `inviter: null`, which /projects renders as 「读不到发起人」 with Accept disabled, for a room
-       * the agent is demonstrably in. Nothing in the invite path can ever clear it, because the
-       * invite path only sees invitations and there is no longer one to see. Three earlier attempts
-       * at fixing this from inside the invite branch could not fire for exactly that reason.
-       *
-       * Checked against membership rather than against the invite: `rooms.join` is the authority on
-       * whether the agent is in the room, and it costs nothing here because this sync already
-       * returned it.
-       */
-      const joinedRoomIds = Object.keys(data?.rooms?.join || {});
-      for (const roomId of joinedRoomIds) {
-        const record = (state.pendingInvites?.[roomId] || {})[agentName];
-        if (record?.state !== 'pending') continue;
-        /*
-         * `accepted`, and attributed to the policy rather than to a person: the agent is in the
-         * room, so the invitation WAS answered — by the trusted-inviter rule, with no human at a
-         * screen. Recording it as an operator decision would credit someone who never decided.
-         */
-        settlePendingInvite(roomId, agentName, 'accepted', 'trusted-inviter');
-        console.log(`[invite] reconciled: ${agentName} is already joined to ${roomId}, settling the stale pending record`);
-      }
-
       const invited = data?.rooms?.invite || {};
       for (const roomId of Object.keys(invited)) {
         // A 429 handled inside handleBotInvite (below) trips the shared gate; stop

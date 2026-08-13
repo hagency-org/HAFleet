@@ -9,6 +9,9 @@ describe('bridge matrix behavior', () => {
   let runtimeDir;
   let MatrixBridge;
   let ReliableMatrixClient;
+  let rememberPendingInvite;
+  let getPendingInvite;
+  let resetPendingInvitesForTest;
   let buildMessageUrlForTest;
   let generateAvatarPngForTest;
   let resetBridgeMatrixTestHooks;
@@ -45,6 +48,9 @@ describe('bridge matrix behavior', () => {
     ({
       MatrixBridge,
       ReliableMatrixClient,
+      rememberPendingInvite,
+      getPendingInvite,
+      resetPendingInvitesForTest,
       buildMessageUrlForTest,
       generateAvatarPngForTest,
       resetBridgeMatrixTestHooks,
@@ -1928,6 +1934,121 @@ describe('bridge matrix behavior', () => {
     expect(resolveRoomScanPollMsForTest({ MATRIX_ROOM_SCAN_POLL_MS: '1000' })).toBe(30000);
     // Non-numeric → fall back to the 120s default.
     expect(resolveRoomScanPollMsForTest({ MATRIX_ROOM_SCAN_POLL_MS: 'not-a-number' })).toBe(120000);
+  });
+
+  describe('the invite polls actually run', () => {
+    /*
+     * WHY THESE EXIST. `pollBotInvites` contained a ReferenceError — a reconciliation loop that
+     * referenced `agentName`, a variable in scope in `pollAgentInvites` and NOT in that method.
+     * It threw on every cycle, the catch logged "Bot invite poll failed: agentName is not
+     * defined", and the whole bot invite poll aborted before joining anything. 490 occurrences in
+     * one log before a human read it.
+     *
+     * Three layers failed to see it. `node --check` is syntax-only and cannot resolve an
+     * identifier; the repo has no ESLint, so nothing checks `no-undef`; and the one test that
+     * reaches this code **mocked the method out** —
+     * `bridge.pollBotInvites = vi.fn().mockResolvedValue(undefined)` — to keep an unrelated
+     * assertion focused. A mock of the method containing the bug is the perfect blind spot.
+     *
+     * So these invoke both polls for real against a stubbed fetch. They assert almost nothing
+     * about behaviour on purpose: the point is that the method RUNS. A ReferenceError anywhere
+     * inside it fails the test, which is the guarantee that was missing.
+     */
+    /*
+     * A JOINED ROOM, NOT AN EMPTY SYNC. This is the difference between a test that runs the method
+     * and a test that runs past it: an undefined reference only throws when its line EXECUTES, so
+     * a sync with `join: {}` leaves any reconciliation loop empty and the bug unreached. The first
+     * version of this test used an empty sync, and the mutant that restored the original
+     * ReferenceError passed it — the test asserted "the method runs" while never entering the code
+     * that was broken.
+     *
+     * One joined room and one pending record are the minimum that makes the loop body run.
+     */
+    const syncWithJoinedRoom = (roomId = '!poll-probe:matrix.example.com') => ({
+      ok: true,
+      status: 200,
+      clone() { return this; },
+      json: async () => ({ rooms: { join: { [roomId]: {} }, invite: {} } }),
+      text: async () => '{}',
+    });
+
+    test('pollBotInvites runs to completion — no undefined reference', async () => {
+      const bridge = new MatrixBridge();
+      bridge.botUserId = '@agent-bridge:matrix.example.com';
+      bridge.knownAgents = new Set(['wf_codex']);
+      /*
+       * `getBotToken()`, not `botClient`. The method's first line is
+       * `const token = this.getBotToken(); if (!token) return;` — with that unstubbed it returned
+       * immediately, so the earlier version of this test exercised nothing and the mutant that
+       * restored the original ReferenceError passed twice over. A test of "does this run" has to
+       * get past the guards that stop it running.
+       */
+      bridge.getBotToken = vi.fn().mockReturnValue('bot-token');
+      bridge.handleBotInvite = vi.fn().mockResolvedValue({ ok: true });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // A pending record for the joined room, so any reconciliation loop has a body to run.
+      resetPendingInvitesForTest();
+      rememberPendingInvite('!poll-probe:matrix.example.com', 'wf_codex', null);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(syncWithJoinedRoom()));
+
+      await bridge.pollBotInvites();
+
+      /*
+       * The assertion that catches this class: the method swallows its own errors, so a throw is
+       * invisible in the return value and shows up ONLY as this warning. Checking the warning is
+       * therefore checking that nothing threw.
+       */
+      const failures = warn.mock.calls.map((c) => String(c[0])).filter((m) => /invite poll failed/i.test(m));
+      expect(failures, failures.join(' | ')).toEqual([]);
+      warn.mockRestore();
+      resetPendingInvitesForTest();
+    });
+
+    test('pollAgentInvites reconciles a stale pending record against the AGENT\'s membership', async () => {
+      /*
+       * And the behaviour the broken loop was supposed to provide, now that it sits where the
+       * facts are. The first version read the BOT's `rooms.join`, which says nothing about whether
+       * the agent joined — so even had it run, it would have settled records on the wrong
+       * evidence. This sync is the agent's own.
+       */
+      const bridge = new MatrixBridge();
+      const roomId = '!stale-pending:matrix.example.com';
+      bridge.botUserId = '@agent-bridge:matrix.example.com';
+      bridge.knownAgents = new Set(['wf_codex']);
+      bridge.getAgentToken = vi.fn().mockReturnValue('codex-token');
+      bridge.pollBotInvites = vi.fn().mockResolvedValue(undefined);
+      bridge.scanJoinedRooms = vi.fn().mockResolvedValue(undefined);
+      bridge.backfillAgentManagedRooms = vi.fn().mockResolvedValue(undefined);
+
+      /*
+       * Seeded through the exported writer, not through `getBridgeState()`. That method returns a
+       * PROJECTION — a fresh object literal over selected fields — so assigning `pendingInvites`
+       * on it writes to a throwaway and the record never reaches the module state the code reads.
+       * The first version of this test did exactly that and asserted `undefined`.
+       *
+       * `inviter: null` on purpose: that is the shape this reconciliation exists for — a record
+       * written while the invite state did not name a sender, which /projects renders as
+       * 「读不到发起人」 with Accept disabled for a room the agent is demonstrably in.
+       */
+      resetPendingInvitesForTest();
+      rememberPendingInvite(roomId, 'wf_codex', null);
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        clone() { return this; },
+        json: async () => ({ rooms: { join: { [roomId]: {} }, invite: {} } }),
+        text: async () => '{}',
+      }));
+
+      await bridge.pollAgentInvites();
+
+      // Settled, and NOT credited to a person who never decided.
+      const record = getPendingInvite(roomId, 'wf_codex');
+      expect(record?.state).toBe('accepted');
+      expect(record?.decidedBy).toBe('trusted-inviter');
+      resetPendingInvitesForTest();
+    });
   });
 
   // ── Task 5: shared Matrix 429 rate-limit gate wiring ──────────────────
