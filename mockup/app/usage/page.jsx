@@ -7,6 +7,7 @@ import { CeilingBars, AllocationDonut, TaskBars, MissingSeries } from '@/compone
 import { useT } from '@/components/Prefs';
 import { fmtTokens, fmtSpanSec } from '@/lib/mock-data';
 import { useData, Provenance } from '@/components/Data';
+import { InfoTip, InfoTipList } from '@/components/InfoTip';
 
 /*
  * ⑤ 用量 — L4, and the layer where this design is most honest about what it
@@ -27,6 +28,16 @@ import { useData, Provenance } from '@/components/Data';
  * because conflating them would let a contributor believe an untouched engagement
  * had consumed its whole budget.
  */
+/*
+ * Gap ids the backend publishes, mapped to localized text. See the API's `remainingGaps`.
+ * An id absent here falls back to the API's English `detail` rather than to a key name.
+ */
+const GAP_KEYS = {
+  'per-project': 'us.gap.perProject',
+  'no-accounting': 'us.gap.noAccounting',
+  'file-budget': 'us.gap.fileBudget',
+};
+
 export default function UsagePage() {
   const t = useT();
   const {
@@ -51,7 +62,21 @@ export default function UsagePage() {
    * attributable produces a real number that describes a quarter of the fleet.
    */
   const meteredAgents = usageLive.filter((r) => r.tokensUsed !== null && r.tokensUsed !== undefined);
-  const meteredTotal = meteredAgents.reduce((n, r) => n + r.tokensUsed, 0);
+  /*
+   * TWO TOTALS, AND THE HEADLINE IS THE DRAWN ONE.
+   *
+   * `tokensUsed` sums all four kinds, and cache reads dominate it by more than an order of
+   * magnitude: on a real session, 203 tool calls each re-sending a context that grew to
+   * 224,992 tokens produced 25,956,736 cache reads against 984,016 of fresh tokens. Leading
+   * with 26.9M told a contributor who had asked three questions that they had spent 27M —
+   * a figure that is arithmetically true, incomparable to anything they intuit, and 96%
+   * composed of the SAME tokens counted 210 times.
+   *
+   * So `drawn` is the figure, because it is both the work and the thing the ceiling spends,
+   * and the re-read volume is shown beside it as what it is.
+   */
+  const meteredDrawn = meteredAgents.reduce((n, r) => n + (r.tokensDrawn ?? 0), 0);
+  const meteredReread = meteredAgents.reduce((n, r) => n + (r.tokensByKind?.cacheRead ?? 0), 0);
 
   /*
    * Every series below is ALLOCATION — what I promised — because that is what is
@@ -143,13 +168,31 @@ export default function UsagePage() {
             * decision while the panel directly above reported the token signal as measured
             * from that very source.
             */}
+          {/*
+            * Localized by ID, and folded behind a one-line claim.
+            *
+            * It was a permanent warn-block printing three English paragraphs into a Chinese
+            * console — the same defect as the provenance line echoing `lib/task-store.js`,
+            * which is why the API now sends `{id, detail}` and this maps the id. `detail` is
+            * the fallback so an id this build does not know still says something true.
+            */}
           {metering.tokens?.remainingGaps?.length > 0 && (
-            <div className="notice warn">
-              <div>{t('us.tokenGaps')}</div>
-              <ul style={{ margin: '6px 0 0 18px' }}>
-                {metering.tokens.remainingGaps.map((c) => <li key={c}>{c}</li>)}
-              </ul>
-            </div>
+            <InfoTipList
+              label={t('us.tokenGaps')}
+              items={metering.tokens.remainingGaps.map((g) => {
+                if (typeof g === 'string') return g;
+                /*
+                 * An explicit map, rather than interpolating the id into a translation key.
+                 * `translate` returns the key itself when it has no entry, so an id this build
+                 * has not translated would render the key name at the reader. Falling back to
+                 * the API's own English detail is worse-looking and true, which is the right
+                 * trade. (Written without a literal key expression on purpose: the key-resolve
+                 * invariant scans for them and would read a prefix out of this comment.)
+                 */
+                const key = GAP_KEYS[g.id];
+                return key ? t(key) : g.detail;
+              })}
+            />
           )}
         </>
       )}
@@ -215,9 +258,27 @@ export default function UsagePage() {
                         ? <Blank why="us.why.meterReason" t={t} vars={{ r: r.tokensReason || t('us.why.noMeter') }} />
                         : (
                           <>
-                            <span className="amount">{fmtTokens(r.tokensUsed)}</span>
-                            {r.ceilingTokens
-                              ? <span className="dim">{t('us.pctOfCeiling', { n: Math.round((r.tokensUsed / r.ceilingTokens) * 100) })}</span>
+                            {/*
+                              * `tokensDrawn`, and the percentage with it. Using `tokensUsed`
+                              * here rendered an agent that had spent 9.8% of its ceiling as
+                              * 136% of it, because cache reads were in the numerator and
+                              * never in the limit.
+                              */}
+                            <span className="amount">{fmtTokens(r.tokensDrawn ?? r.tokensUsed)}</span>
+                            {r.ceilingTokens && r.tokensDrawn != null
+                              ? <span className="dim">{t('us.pctOfCeiling', { n: Math.round((r.tokensDrawn / r.ceilingTokens) * 100) })}</span>
+                              : null}
+                            {/*
+                              * Named rather than hidden. Dropping it would understate what the
+                              * agent actually moved through the provider, and an operator
+                              * comparing this against their own bill needs to see it.
+                              */}
+                            {r.tokensByKind?.cacheRead
+                              ? (
+                                <span className="dim">
+                                  {t('us.rereadNote', { n: fmtTokens(r.tokensByKind.cacheRead) })}
+                                </span>
+                              )
                               : null}
                           </>
                         )}
@@ -230,16 +291,42 @@ export default function UsagePage() {
         </>
       )}
 
-      {/* Said once, plainly, at the top. The alternative — a dash on every row —
-          reads as many small unknowns rather than one systemic one. */}
-      <div className="notice warn">{t('us.notMeteredNote')}</div>
+      {/*
+        * Said once — but folded, not printed.
+        *
+        * Still one systemic statement rather than a dash on every row; the content just grew
+        * past what belongs above a table. It has to explain WHICH number the Used column is,
+        * because "984k" and "26.0M context re-read" sitting side by side otherwise read as a
+        * contradiction rather than as two different quantities.
+        */}
+      <InfoTip label={t('us.usedIsFresh')}>{t('us.notMeteredNote')}</InfoTip>
 
       <div className="cards">
-        <div className="card"><div className="cap">{t('us.cEngagements')}</div><div className="val">{usage.length}</div></div>
+        {/*
+          * COUNTED FROM THE ENGAGEMENTS, not from `usage`.
+          *
+          * `usage` is the per-ENGAGEMENT fixture that lib/api.js deliberately empties in live
+          * mode ("the endpoint reports per AGENT and there is no engagement record to key them
+          * to"). So this card read an array that is structurally empty and displayed 0 while a
+          * live engagement existed — an operator asked how to interpret that 0, and the answer
+          * was that it is not a measurement at all.
+          *
+          * Active, not "not pending": an ended engagement is not one the contributor is in.
+          */}
+        <div className="card">
+          <div className="cap">{t('us.cEngagements')}</div>
+          <div className="val">{engagements.filter((e) => e.state === 'active').length}</div>
+        </div>
         <div className="card">
           <div className="cap">{t('us.cAllocated')}</div>
           <div className="val">
-            {fmtTokens(engagements.filter((e) => e.state !== 'pending').reduce((n, e) => n + (e.allocatedTokens ?? 0), 0))}
+            {/*
+              * ACTIVE only. `state !== 'pending'` included ENDED engagements, so this figure
+              * grew forever and read 540k when 250k was actually allocated — 290k of it
+              * belonged to engagements that had already been revoked. "Allocated" has to mean
+              * what is allocated now, or it is not a number a contributor can act on.
+              */}
+            {fmtTokens(engagements.filter((e) => e.state === 'active').reduce((n, e) => n + (e.allocatedTokens ?? 0), 0))}
           </div>
         </div>
         <div className="card">
@@ -255,15 +342,28 @@ export default function UsagePage() {
           <div className="val">
             {meteredAgents.length === 0
               ? <Blank why="us.why.noMeter" t={t} />
-              : <>{fmtTokens(meteredTotal)}</>}
+              : <>{fmtTokens(meteredDrawn)}</>}
           </div>
           {meteredAgents.length > 0 && meteredAgents.length < usageLive.length && (
             <div className="dim">
               {t('us.spentPartial', { n: meteredAgents.length, m: usageLive.length })}
             </div>
           )}
+          {/* So the headline cannot be mistaken for everything the fleet moved. */}
+          {meteredReread > 0 && (
+            <div className="dim">{t('us.rereadNote', { n: fmtTokens(meteredReread) })}</div>
+          )}
         </div>
-        <div className="card"><div className="cap">{t('us.cTasks')}</div><div className="val">{usage.reduce((n, u) => n + u.tasksDone, 0)}</div></div>
+        {/*
+          * Same emptied fixture, same permanent 0. Task counts ARE real and arrive per agent
+          * on the live rows, so they are summed from there.
+          */}
+        <div className="card">
+          <div className="cap">{t('us.cTasks')}</div>
+          <div className="val">
+            {usageLive.reduce((n, r) => n + (r.tasksByStatus?.done ?? 0), 0)}
+          </div>
+        </div>
       </div>
 
       <h2 className="sec">{t('us.charts')}<span className="note">{t('us.chartsNote')}</span></h2>
@@ -353,7 +453,17 @@ export default function UsagePage() {
               const live = usageLive.find((r) => r.agent === a.name) ?? null;
               const used = committed(a.name);
               const left = remaining(a.name);
-              const pct = p?.ceiling ? Math.round((used / p.ceiling.tokens) * 100) : null;
+              /*
+               * THE BAR SHOWS WHAT ACTUALLY CONSUMED THE HEADROOM, which is not the same as
+               * what was committed. `remainingFor` draws `max(committed, measuredSpend)`, so a
+               * bar drawn from committed alone contradicted the headroom beside it: 250k of
+               * 10M rendered as 3% used next to 9.0M left, which only adds up if 1M went
+               * somewhere unstated. The label still names the committed share, because that is
+               * the part the contributor promised rather than the part that was spent.
+               */
+              const drawn = p?.ceiling && left !== null ? p.ceiling.tokens - left : null;
+              const pct = p?.ceiling && drawn !== null ? Math.round((drawn / p.ceiling.tokens) * 100) : null;
+              const committedPct = p?.ceiling ? Math.round((used / p.ceiling.tokens) * 100) : null;
               return (
                 <tr key={a.name}>
                   <td><Link href={`/agents/${a.name}`}>{a.name}</Link></td>
@@ -372,7 +482,7 @@ export default function UsagePage() {
                       <>
                         <span className={`amount${pct > 80 ? ' warn' : ''}`}>{fmtTokens(left)}</span>
                         <span className="meter"><i style={{ width: `${Math.min(100, pct)}%` }} /></span>
-                        <span className="dim">{t('us.pctCommitted', { n: pct })}</span>
+                        <span className="dim">{t('us.pctCommitted', { n: committedPct })}</span>
                       </>
                     )}
                   </td>
@@ -387,7 +497,15 @@ export default function UsagePage() {
                   <td>
                     {live?.tokensUsed == null
                       ? <Blank why="us.why.meterReason" t={t} vars={{ r: live?.tokensReason || t('us.why.noMeter') }} />
-                      : <span className="amount">{fmtTokens(live.tokensUsed)}</span>}
+                      : (
+                        <>
+                          {/* Drawn, so this column is comparable to the 额度上限 beside it. */}
+                          <span className="amount">{fmtTokens(live.tokensDrawn ?? live.tokensUsed)}</span>
+                          {live.tokensByKind?.cacheRead
+                            ? <span className="dim">{t('us.rereadNote', { n: fmtTokens(live.tokensByKind.cacheRead) })}</span>
+                            : null}
+                        </>
+                      )}
                   </td>
                 </tr>
               );

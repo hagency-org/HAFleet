@@ -1157,3 +1157,35 @@ h3.sub { font-size: 12.5px; font-weight: 600; margin: 2px 0 8px; color: var(--in
 /* A framework with no qualifying model. Pressable-looking controls that lead
    nowhere teach the reader to distrust the ones that work. */
 .fw-dead { opacity: 0.55; cursor: not-allowed; }
+
+/* Disclosure for reasoning that is true, necessary, and too long to sit inline.
+   See components/InfoTip.jsx for why this is <details> and not a hover tooltip. */
+.infotip { margin: 6px 0 0; }
+.infotip > summary {
+  cursor: pointer;
+  color: var(--ink-faint);
+  font-size: 11px;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.infotip > summary::-webkit-details-marker { display: none; }
+/* A stable affordance, so the row does not shift when it opens. */
+.infotip > summary::before {
+  content: "ⓘ";
+  font-size: 11px;
+  opacity: 0.75;
+}
+.infotip > summary:hover { color: var(--ink); text-decoration: underline; }
+.infotip[open] > summary { color: var(--ink); margin-bottom: 5px; }
+.infotip-body {
+  color: var(--ink-faint);
+  font-size: 11px;
+  line-height: 1.65;
+  max-width: 78ch;
+  border-left: 2px solid var(--line);
+  padding: 2px 0 2px 9px;
+}
+.infotip-list { margin: 0; padding-left: 16px; }
+.infotip-list li { margin: 4px 0; }

@@ -391,5 +391,26 @@ for (const r of ROUTES) {
     unspaced.slice(0, 4).map(([k]) => k).join(' '));
 }
 
+// 17. dictionary strings are plain text, because that is how they are rendered
+{
+  /*
+   * Every value in this dictionary reaches the DOM as a text node — `{t('...')}` in JSX,
+   * never `dangerouslySetInnerHTML`. So markdown in a string is not emphasis, it is
+   * asterisks: `**新增 token**` rendered literally as `**新增 token**` inside an info tip,
+   * and four keys had picked it up before anyone looked at the page in a browser.
+   *
+   * Chinese emphasis uses 「」, which the rest of the dictionary already does. English
+   * emphasis uses capitals or nothing. A backtick is the same trap: it renders as a
+   * backtick, so file and symbol names in user-facing copy are written bare — and mostly
+   * should not be there at all, since a contributor is not reading source paths.
+   */
+  const marked = Object.entries(DICTS)
+    .flatMap(([loc, dict]) => Object.entries(dict)
+      .filter(([, v]) => typeof v === 'string' && /\*\*|`|\[[^\]]+\]\([^)]+\)/.test(v))
+      .map(([k]) => `${loc}:${k}`));
+  check('no dictionary string carries markdown, which renders literally', marked.length === 0,
+    marked.slice(0, 5).join(' '));
+}
+
 console.log(`\n${failed === 0 ? 'All invariants hold.' : `${failed} FAILED.`}\n`);
 process.exit(failed === 0 ? 0 : 1);
