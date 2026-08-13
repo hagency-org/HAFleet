@@ -9516,6 +9516,19 @@ app.get('/api/usage', requireBearer, async (_req, res) => {
        * null with the specific reason otherwise. Never 0 — a zero here reads as "this
        * agent consumed nothing", which is a claim rather than an absence.
        */
+      /*
+       * THE AUTHORITY'S OWN HEADROOM FIGURE, published so nothing has to re-derive it.
+       *
+       * `remainingFor` is `ceiling - max(committed, measuredSpend)`. The console computed
+       * `ceiling - committed` client-side instead, which agreed for as long as spend was
+       * always null — and diverged the moment metering worked: the page advertised 9.8M
+       * available on an agent an approval would refuse above 9.0M. A contributor reading a
+       * number that the decision path does not use is worse than no number.
+       *
+       * Two figures, not one, because "0 left" and "no ceiling declared" are different
+       * answers and only the first is a limit.
+       */
+      remainingTokens: remainingFor(a.name),
       ...(() => {
         const m = meteredByAgent.get(a.name);
         /*
@@ -9605,17 +9618,37 @@ app.get('/api/usage', requireBearer, async (_req, res) => {
          *
          * What remains genuinely open is narrower and worth naming precisely.
          */
+        /*
+         * EACH GAP CARRIES A STABLE ID, so a localized console does not have to print this
+         * English at a reader. The `detail` stays for non-console consumers (a CLI, a log, an
+         * operator reading the raw endpoint) — it is the API's own answer and should not
+         * shrink to an opaque key.
+         *
+         * The id exists because the console echoed these paragraphs verbatim into a Chinese
+         * UI, which is the same defect as the provenance line printing `lib/task-store.js`.
+         * Twice was enough to make it the API's problem rather than the page's.
+         */
         remainingGaps: [
-          'per-project spend: a transcript records the directory the CLI ran in, not which '
-            + 'engagement the work was for, so an agent serving two projects from one workdir '
-            + 'produces one undivided total. Closing it needs an engagement-scoped workspace, '
-            + 'not a better reader.',
-          'frameworks that write no accounting (octos, codex-acp): nothing is on disk to read, '
-            + 'so the only path is hafleet proxying provider traffic — which changes what '
-            + 'hafleet is, and is a decision rather than an oversight.',
-          'a codex scan competes for its file budget with every workspace on the machine, '
-            + 'because sessions are filed by date rather than by workspace. An agent whose '
-            + 'transcript is not among the newest reports a bounded scan rather than a figure.',
+          {
+            id: 'per-project',
+            detail: 'per-project spend: a transcript records the directory the CLI ran in, not '
+              + 'which engagement the work was for, so an agent serving two projects from one '
+              + 'workdir produces one undivided total. Closing it needs an engagement-scoped '
+              + 'workspace, not a better reader.',
+          },
+          {
+            id: 'no-accounting',
+            detail: 'frameworks that write no accounting (octos, codex-acp): nothing is on disk '
+              + 'to read, so the only path is hafleet proxying provider traffic — which changes '
+              + 'what hafleet is, and is a decision rather than an oversight.',
+          },
+          {
+            id: 'file-budget',
+            detail: 'a codex scan competes for its file budget with every workspace on the '
+              + 'machine, because sessions are filed by date rather than by workspace. An agent '
+              + 'whose transcript is not among the newest reports a bounded scan rather than a '
+              + 'figure.',
+          },
         ],
       },
     },

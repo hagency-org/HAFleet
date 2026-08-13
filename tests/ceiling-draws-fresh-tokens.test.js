@@ -196,6 +196,21 @@ describe('enforcement uses the drawn figure, not the parity total', () => {
     expect(approved.status).toBe(200);
     expect(approved.body.engagement.state).toBe('active');
     expect(approved.body.engagement.allocatedTokens).toBe(1_000_000);
+
+    /*
+     * AND THE HEADROOM FIGURE IS PUBLISHED, so no client has to re-derive it.
+     *
+     * The console computed `ceiling - committed` locally. That agreed with the backend for as
+     * long as measured spend was always null, and diverged the instant metering worked: the
+     * page advertised 9.8M of headroom on an agent whose approvals were refused above 9.0M.
+     * `remainingFor` is `ceiling - max(committed, drawn)`, and this is the number the decision
+     * uses, so it is the number the endpoint states.
+     */
+    const after = await request(ctx.app).get('/api/usage');
+    const settled = after.body.agents.find((r) => r.agent === 'a1');
+    expect(settled.remainingTokens).toBe(CEILING - 1_000_000);
+    // Not the parity total: that would put remaining at 0 and contradict the approval above.
+    expect(settled.remainingTokens).toBeGreaterThan(0);
   });
 
   test('and fresh tokens DO exhaust it — the rule is not "measure nothing"', async () => {

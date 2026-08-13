@@ -134,6 +134,22 @@ export function makeDerive(data) {
   }
 
   function remaining(agentName) {
+    /*
+     * THE BACKEND'S FIGURE WINS. It is the one the decision uses.
+     *
+     * `remainingFor` in backend-v2 is `ceiling - max(committed, measuredSpend)`. This
+     * function computed `ceiling - committed`, which agreed exactly as long as spend was
+     * always null — and diverged the moment metering started working: the page advertised
+     * 9.8M of headroom on an agent whose approvals would be refused above 9.0M. A number a
+     * contributor acts on has to be the number the approval path acts on.
+     *
+     * The local computation stays as the FALLBACK, for the fixture case and for a
+     * deployment whose /usage call failed: it is the right answer whenever nothing has been
+     * measured, which is precisely when the two agree anyway.
+     */
+    const live = usageLive.find((r) => r.agent === agentName);
+    if (live && typeof live.remainingTokens === 'number') return live.remainingTokens;
+
     const preset = presetOf(agents.find((a) => a.name === agentName));
     // No preset, or a preset with no ceiling: both are "unknown", not "zero". A
     // ceiling is absent until the backend can store one, and a caller that reads
