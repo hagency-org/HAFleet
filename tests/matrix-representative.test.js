@@ -166,16 +166,16 @@ describe('an appservice side registers nothing', () => {
     /*
      * The masquerade is the mechanism: the query parameter names the user, the as_token authorises.
      *
-     * AND IT IS LOAD-BEARING ON THE FIRST CALL. Verified against the Palpo 0.4.0 build this
-     * deployment runs: nothing there creates the `sender_localpart` account — registering an
-     * appservice only inserts the registration row — and Palpo's non-masqueraded auth branch then
-     * raises a database NotFound until some user carries that `appservice_id`. A masqueraded call
-     * runs `get_or_create_appservice_user`, so this call is what bootstraps the account. Inverted
-     * from Synapse and Conduit, where a bare call works immediately.
+     * Asserted because a bare whoami would prove strictly less. It proves only that the homeserver
+     * knows the token; the masqueraded form additionally proves the namespace claim functions, and it
+     * exercises the exact call shape every later agent operation uses. Measured against the Palpo
+     * 0.4.0 build this deployment runs: masquerading outside the claimed namespace is refused
+     * `403 M_FORBIDDEN`, so the as_token is genuinely scoped.
      *
-     * So this assertion is not about style. Dropping the parameter would leave HAFleet unable to
-     * reach a correctly configured Palpo side at all, and the symptom would look like a bad
-     * credential.
+     * An earlier version of this comment gave a stronger reason — that a bare call fails until a
+     * masqueraded one bootstraps the sender account — which was read out of Palpo's source, recorded
+     * as verified, and did not reproduce. Kept as a note because the error is instructive: code paths
+     * existing is not code paths behaving.
      */
     expect(impl.calls[0].url).toContain(`user_id=%40hafleet%3A${SERVER}`);
     expect(impl.calls[0].headers.Authorization).toBe(`Bearer ${AS_TOKEN}`);
