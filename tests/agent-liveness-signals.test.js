@@ -100,6 +100,39 @@ describe('what keeps them from lying', () => {
     expect(body).toMatch(/clearInterval/);
   });
 
+  test('the cap is SHORT, because the stop hook only fires when the agent replies', () => {
+    /*
+     * The bug an operator reported: BigLittle showed "typing" continuously in their client. The
+     * existing cap test asserted only that a cap EXISTS, which it did — at twenty minutes. An agent
+     * that is working for a long time, or stuck, never reaches the stop hook, so the indicator was
+     * refreshed for the whole cap and read as permanent.
+     *
+     * The number is the assertion because the number was the defect. A typing indicator is honest
+     * for a short window; past that it conveys nothing and the 👀 reaction is already the durable
+     * record that the message was received.
+     */
+    const cap = Number(/AGENT_TYPING_MAX_MS = ([\d_ *]+)/.exec(SOURCE)[1]
+      .replace(/_/g, '').split('*').reduce((a, b) => Number(a) * Number(b)));
+    expect(cap).toBeLessThanOrEqual(5 * 60_000);
+    // And not so short that a normal turn never shows one at all.
+    expect(cap).toBeGreaterThanOrEqual(60_000);
+  });
+
+  test('the wait ends at the CHOKE POINT, not only at three call sites', () => {
+    /*
+     * Every outbound agent message — text, attachments, threaded replies — converges on
+     * `sendAsAgentContent`. Hooking its callers instead left any path that did not go through them
+     * refreshing the indicator until the cap, which is the other half of the same report.
+     */
+    const body = methodBody('sendAsAgentContent');
+    expect(body).toMatch(/endAgentWorkForToken/);
+    // Resolved from the token rather than by clearing the whole room: two agents can share a room,
+    // and one replying says nothing about whether the other is still working.
+    const resolver = methodBody('endAgentWorkForToken');
+    expect(resolver).toMatch(/agentTokens/);
+    expect(resolver).toMatch(/return;/);
+  });
+
   test('the refresh interval is shorter than the timeout it refreshes', () => {
     // Otherwise the indicator flickers off between refreshes, which reads as the agent
     // stopping and restarting.
