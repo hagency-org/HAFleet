@@ -419,6 +419,12 @@
           "owner": "approvals.binding-writer",
           "auth": "approval-bridge-secret"
         },
+    {
+      "method": "PUT",
+      "path": "/api/approval-bindings/membership",
+      "owner": "approvals.membership-observer",
+      "auth": "approval-bridge-secret"
+    },
         {
           "method": "DELETE",
           "path": "/api/approval-bindings/:agent/:roomId",

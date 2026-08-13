@@ -176,6 +176,8 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-12 | `api-agent-preset-binding` | `presetId null unbinds, and the ceiling goes with it` | **yes** — `Error: Parse Error: Expected HTTP/, RTSP/ or ICE/` |
 | 2026-08-12 | `server-delivery` | `queue snapshot reports untracked target observation before pane sweep` | **yes** — `AssertionError: expected 404 to be 200` |
 | 2026-08-12 | `approval-fail-closed` | `denies a pending request and broadcasts the verdict` | **yes** — `Error: Test timed out in 30000ms` (a THIRD shape; clean in isolation, 7/7) |
+| 2026-08-13 | `api-messages` | `message suppression appends a delivery event` | **yes** — whole-suite only, clean in isolation (39/39) |
+| 2026-08-13 | `engagement-binding` | `the binding IS released once the last live engagement ends` | **yes** — `expected 404 to be 200`, clean in isolation (7/7) |
 
 **A third shape, and it fits the same reading.** A 30-second TIMEOUT, whole-suite only, clean in
 isolation. A test that hangs rather than asserting wrongly is what a request that never gets a

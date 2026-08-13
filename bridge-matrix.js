@@ -4592,6 +4592,8 @@ export class MatrixBridge {
 
   // ── Poll agent accounts for pending invites ─────────────────────
   async pollAgentInvites() {
+    /** agentName -> Set(joined room ids), filled per agent and reconciled once at the end. */
+    const joinedByAgent = new Map();
     for (const agentName of this.knownAgents) {
       // A 429 anywhere this round (this agent or an earlier one) trips the shared gate —
       // abort immediately rather than keep working through the rest of the agent list.
@@ -4644,6 +4646,17 @@ export class MatrixBridge {
           settlePendingInvite(joinedRoomId, agentName, 'accepted', 'trusted-inviter');
           console.log(`[invite] reconciled: ${agentName} is already joined to ${joinedRoomId}, settling the stale pending record`);
         }
+
+        /*
+         * B1: remember this agent's membership; the comparison happens once after the loop.
+         *
+         * Collected here because this sync already returned it, and reconciled afterwards rather
+         * than inline. Inline was the first version and it was wrong twice: it issued one
+         * `GET /api/contributions` per agent per cycle, and being fire-and-forget it interleaved
+         * with the poll's own requests — nondeterministic ordering in production, and a test that
+         * mocks fetch as an ordered sequence broke immediately.
+         */
+        joinedByAgent.set(agentName, new Set(joinedRoomIds));
 
         const invited = data?.rooms?.invite || {};
         for (const roomId of Object.keys(invited)) {
@@ -4792,6 +4805,21 @@ export class MatrixBridge {
     await this.scanJoinedRooms();
     if (!rateLimitGate.beforeRequest()) return;
     await this.backfillAgentManagedRooms();
+
+    /*
+     * B1: reconcile every binding against the membership observed above — ONE pass, at the end.
+     *
+     * Last, and awaited, so it neither interleaves with the poll's own requests nor delays
+     * answering an invitation. It reads all bindings once instead of once per agent, and it cannot
+     * throw into this method: a reachability observation must not stop the bridge from working.
+     */
+    if (joinedByAgent.size > 0) {
+      try {
+        await this.reportBindingMembership(joinedByAgent);
+      } catch (error) {
+        console.warn(`[binding] membership reconciliation failed: ${error?.message ?? error}`);
+      }
+    }
   }
 
   async handleBotInvite(roomId, inviteEvent, { source = 'bot-invite' } = {}) {
@@ -5380,6 +5408,55 @@ export class MatrixBridge {
    * backend that is down or restarting delays the notification rather than losing the decision;
    * `resyncPendingInvites` replays the list when the bridge next starts.
    */
+  /**
+   * Push this agent's membership in each of its bound rooms to the backend.
+   *
+   * Both directions matter, and only one of them is knowable here: a binding whose room the agent
+   * is NOT in is a claim the console should stop making, while an agent joined to a room with no
+   * binding is ordinary — DMs and the approval room are exactly that, so joined-without-binding is
+   * deliberately not reported as a fault.
+   *
+   * Failure is logged at most once per cycle and never thrown. The observation is refreshed every
+   * poll, so a backend that is down delays the figure rather than losing it.
+   */
+  async reportBindingMembership(joinedByAgent) {
+    let bindings;
+    try {
+      const list = await this.callBackendApi('GET', '/api/contributions');
+      bindings = list?.contributions ?? [];
+    } catch {
+      return 0;
+    }
+    // Only agents this round actually synced. A binding for an agent whose sync failed must stay
+    // at its previous value rather than be reported as unreachable on no evidence.
+    bindings = bindings.filter((b) => joinedByAgent.has(b.agent));
+    if (!bindings.length) return 0;
+
+    let reported = 0;
+    for (const binding of bindings) {
+      const agentName = binding.agent;
+      const joined = joinedByAgent.get(agentName).has(binding.projectRoomId);
+      // Only on a CHANGE or a first observation, so a steady state costs one GET per cycle rather
+      // than a write per binding per cycle.
+      if (binding.agentJoined === joined) continue;
+      // eslint-disable-next-line no-await-in-loop
+      const result = await this.callBackendApi('PUT', '/api/approval-bindings/membership', {
+        agent: agentName,
+        project_room_id: binding.projectRoomId,
+        agent_joined: joined,
+      }, `binding-membership ${agentName}@${binding.projectRoomId}`);
+      if (result?.error) {
+        console.warn(`[binding] could not report membership for ${agentName}@${binding.projectRoomId}: ${result.error}`);
+        continue;
+      }
+      reported += 1;
+      if (!joined) {
+        console.warn(`[binding] ${agentName} is NOT joined to ${binding.projectRoomId}, which a binding says can reach it`);
+      }
+    }
+    return reported;
+  }
+
   async reportPendingInvite(roomId, agentName, inviter) {
     const record = getPendingInvite(roomId, agentName);
     if (!record) return { ok: false, reason: 'not_recorded' };

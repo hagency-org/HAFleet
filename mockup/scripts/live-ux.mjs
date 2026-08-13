@@ -36,6 +36,35 @@ const CHROME = process.env.CHROME
   ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',')) : null;
 
+/*
+ * WRITE SUITES ARE OPT-IN, because this suite writes to whatever backend it is pointed at.
+ *
+ * `writes` and `proxyBoundary` create engagements, whitelist rooms and approve verdicts. Pointed at
+ * a live deployment — which is the entire purpose of this suite — every run left durable governance
+ * records in the operator's own console: `ux-write-check/alpha`, `ux-write-check/beta` and
+ * `requester-scope-check`, three per run, on a room domain (`hq.example`) that exists on no
+ * homeserver. An operator found 18 of their 19 ended engagements were mine, and separately saw
+ * their agent listed in three projects when it was in one.
+ *
+ * A teardown was added first. It revokes the engagements and removes the whitelist entries, so no
+ * fabricated PROJECT survives — but an ended engagement is still a record, and the record is what
+ * the operator was reading.
+ *
+ * THE RIGHT FIX IS A DISPOSABLE BACKEND and this is not it. The console resolves
+ * `HAFLEET_BACKEND` at module scope, so a running console cannot be repointed, and the backend
+ * exposes nothing this script could use to tell a throwaway instance from a live one. Until that
+ * exists, the decision belongs to the operator rather than to a default: read-only checks run
+ * everywhere, and anything that writes requires saying so.
+ */
+const ALLOW_WRITES = process.env.LIVE_UX_WRITES === '1';
+
+/** What the write suites would create, printed when they are skipped so the cost is visible. */
+const WRITE_FOOTPRINT = [
+  'engagements for ux-write-check/alpha and /beta (approved and rejected in the browser)',
+  'an engagement for requester-scope-check (requester-credential scope checks)',
+  'whitelist entries for !writeCheckA:hq.example and !writeCheckB:hq.example',
+];
+
 let failed = 0;
 let ran = 0;
 let skipped = 0;
@@ -787,9 +816,27 @@ suites.workforce = async (page) => {
     check('no binding outlives its engagement on this backend (vacuous)', true,
       `${bindings.length} bindings, every one with an active engagement behind it`);
   }
-  if (bindings.length > 0 && agents.some((a) => bindings.some((b) => b.agent === a.name))) {
+  /*
+   * MIRROR THE PAGE'S OWN THREE-WAY BRANCH, or this asserts a string the page is correct not to
+   * render. `wf.accessOk` appears only when there is nothing to flag — no unreachable engagement
+   * and no STANDING binding. This check demanded it whenever an agent had any binding at all, so
+   * the moment a real backend held a binding with no active engagement behind it (3 bindings, 1
+   * engagement) the page correctly showed the standing badge and the check called it a failure.
+   *
+   * The standing case is already asserted above. What is left here is the all-clear case.
+   */
+  const hasBoundAgent = bindings.length > 0 && agents.some((a) => bindings.some((b) => b.agent === a.name));
+  const anythingFlagged = standing.length > 0
+    || agents.some((a) => (a.unreachable?.length ?? 0) > 0);
+  if (hasBoundAgent && !anythingFlagged) {
     check('an agent with bindings reports how many rooms can reach it',
       /reachable from \d+ rooms|\d+ 个房间可达/.test(body), `${bindings.length} bindings`);
+  } else if (hasBoundAgent) {
+    // Not vacuous and not skipped: the all-clear line MUST be absent while something is flagged,
+    // or the page would be showing a clean state and a warning at the same time.
+    check('the all-clear line is withheld while a binding is flagged',
+      !/reachable from \d+ rooms|\d+ 个房间可达/.test(body),
+      `${bindings.length} bindings, ${standing.length} standing`);
   } else {
     check('no binding on this backend (vacuous)', true, '0 active bindings');
   }
@@ -897,6 +944,11 @@ suites.agentDetail = async (page) => {
  * these presses a control in the browser and then asks the BACKEND what changed.
  */
 suites.writes = async (page) => {
+  if (!ALLOW_WRITES) {
+    skip('console write paths', 'writes are opt-in: set LIVE_UX_WRITES=1. Would create: '
+      + WRITE_FOOTPRINT.join('; '));
+    return;
+  }
   /*
    * Create what this suite consumes.
    *
@@ -1262,6 +1314,16 @@ suites.writes = async (page) => {
  * before any handler code runs.
  */
 suites.proxyBoundary = async () => {
+  if (!ALLOW_WRITES) {
+    /*
+     * Skipped whole rather than trimmed to its read-only half. Its subject is what the proxy and
+     * the requester credential REFUSE, and a refusal check that never attempts the write proves
+     * nothing — a suite that reports "ok" for an attack it did not launch is worse than one that
+     * says it did not run.
+     */
+    skip('proxy and requester-credential boundaries', 'writes are opt-in: set LIVE_UX_WRITES=1');
+    return;
+  }
   const before = (await api('agents')).map((a) => a.name).sort();
 
   /*
@@ -1529,6 +1591,7 @@ async function consoleWideRules(page) {
  * cleanup. What it CANNOT do is fail silently, so what it could not remove is reported.
  */
 async function teardownWriteFixtures() {
+  if (!ALLOW_WRITES) return; // Nothing was created, so there is nothing to claim about removing.
   const rooms = ['!writeCheckA:hq.example', '!writeCheckB:hq.example'];
   const leftovers = [];
 
