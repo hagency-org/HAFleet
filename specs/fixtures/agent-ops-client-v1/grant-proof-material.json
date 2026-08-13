@@ -1,0 +1,12 @@
+{
+  "schema": "com.hafleet.agent_ops.v1",
+  "kind": "grant_exchange",
+  "grant_jti": "grant-fixture-1",
+  "client_nonce": "client-nonce-fixture-1",
+  "server_challenge": "server-challenge-fixture-1",
+  "proof_nonce": "grant-proof-nonce-fixture-1",
+  "http_method": "POST",
+  "request_path": "/api/agent-ops/v1/session/exchange",
+  "body_sha256": "bb9ee07753c751ba7d3d543c6f89dacbcdf192689487f4243fed2755ed2754bd",
+  "audience": "http://127.0.0.1:8090"
+}

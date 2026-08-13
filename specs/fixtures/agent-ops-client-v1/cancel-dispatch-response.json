@@ -1,0 +1,6 @@
+{
+  "schema": "com.hafleet.agent_ops.v1",
+  "dispatch_id": "dispatch-1",
+  "state": "outcome_unknown",
+  "idempotent_request_replay": false
+}

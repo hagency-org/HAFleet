@@ -1,0 +1,14 @@
+{
+  "schema": "com.hafleet.agent_ops.v1",
+  "kind": "client_session",
+  "client_session_id": "client-session-fixture-1",
+  "session_capability": "fixture-session-capability",
+  "scope_id": "scope_fixture_worker",
+  "projection_id": "projection_fixture_worker",
+  "stream_epoch": "239830a9-7d3c-4e8c-a480-cfa29df30cb1",
+  "auth_fence_generation": 3,
+  "audience": "http://127.0.0.1:8090",
+  "expires_at_unix_ms": 1785946800000,
+  "server_key_fingerprint": "sha256:fixture-server-fingerprint",
+  "server_signature": "fixture-server-signature"
+}

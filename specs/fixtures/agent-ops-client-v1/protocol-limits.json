@@ -1,0 +1,15 @@
+{
+  "schema": "com.hafleet.agent_ops.v1",
+  "limits": {
+    "grant_ttl_ms": 120000,
+    "grant_ttl_max_ms": 600000,
+    "session_ttl_ms": 300000,
+    "session_ttl_max_ms": 900000,
+    "action_ttl_ms": 120000,
+    "action_ttl_max_ms": 300000,
+    "request_nonce_max_chars": 255,
+    "request_nonces_per_session": 10000,
+    "action_capability_max_chars": 8192,
+    "request_body_max_bytes": 102400
+  }
+}

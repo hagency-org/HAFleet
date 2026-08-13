@@ -1,0 +1,21 @@
+{
+  "schema": "com.hafleet.agent_ops.v1",
+  "kind": "client_session_grant",
+  "grant_jti": "grant-fixture-1",
+  "scope_id": "scope_fixture_worker",
+  "projection_id": "projection_fixture_worker",
+  "client_nonce": "client-nonce-fixture-1",
+  "server_challenge": "server-challenge-fixture-1",
+  "exchange_endpoint": "http://127.0.0.1:8090/api/agent-ops/v1/session/exchange",
+  "audience": "http://127.0.0.1:8090",
+  "auth_fence_generation": 3,
+  "expires_at_unix_ms": 1785946500000,
+  "server_public_jwk": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "x": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc"
+  },
+  "server_key_fingerprint": "sha256:fixture-server-fingerprint",
+  "server_signature": "fixture-server-signature",
+  "idempotent_request_replay": false
+}

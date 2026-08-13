@@ -1,0 +1,8 @@
+{
+  "schema": "com.hafleet.agent_ops.v1",
+  "scope_id": "scope_fixture_worker",
+  "projection_id": "projection_fixture_worker",
+  "stream_epoch": "239830a9-7d3c-4e8c-a480-cfa29df30cb1",
+  "auth_fence_generation": 3,
+  "seq": 43
+}

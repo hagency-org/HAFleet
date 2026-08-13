@@ -1,0 +1,10 @@
+{
+  "schema": "com.hafleet.agent_ops.v1",
+  "kind": "session_request",
+  "client_session_id": "client-session-fixture-1",
+  "proof_nonce": "session-proof-nonce-fixture-1",
+  "http_method": "GET",
+  "request_path": "/api/agent-ops/v1/snapshot",
+  "body_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+  "audience": "http://127.0.0.1:8090"
+}
