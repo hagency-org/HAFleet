@@ -438,6 +438,59 @@ carries a `kind`; an agent record holds an MXID and its side, never a token; and
 takes its `(baseUrl, auth)` from the side rather than a module constant. With those three, adding
 the transaction receiver restructures nothing.
 
+### The target homeserver can host one — verified 2026-08-13
+
+Reconnaissance against the **Palpo 0.4.0** build this deployment actually runs, rather than against
+its documentation. The capability is genuinely implemented, so the mandate above is exercisable
+without patching the server, changing test homeservers, or waiting on upstream. Palpo is not a fork
+of Conduit — an independent codebase on salvo rather than axum — but its appservice subsystem is a
+near-verbatim port of Conduit's design (`NamespaceRegex{exclusive, non_exclusive}` over `RegexSet`,
+`RegistrationInfo`, `send_pdu_appservice`), and Conduit's is mature.
+
+| capability | state |
+|---|---|
+| registration-file intake (`appservice_registration_dir`) | implemented; **not configured on this deployment** |
+| HS→AS transaction push, with a durable retry queue | implemented, **with one deviation — see below** |
+| `as_token` accepted as a bearer credential (constant-time compare) | implemented |
+| `?user_id=` masquerading, namespace-enforced | implemented |
+| namespace claims incl. exclusivity and `M_EXCLUSIVE` | implemented |
+| `knock` join rule and room aliases (decision 5) | implemented |
+| outbound `GET /_matrix/app/v1/users/{userId}` back to the AS | **absent** — Palpo serves it but never calls it |
+
+**Three findings that constrain implementation, and would each have cost a debugging session:**
+
+1. **Transactions are authenticated with a QUERY PARAMETER, not a header.** Palpo appends
+   `?access_token=<hs_token>` to its `PUT /_matrix/app/v1/transactions/{txnId}`; the header form is
+   present but commented out. A receiver that only reads `Authorization: Bearer` will reject every
+   transaction with a 401. So the receiver must accept the `hs_token` as a query parameter — and
+   should accept the header too, since the query form is the deviation rather than the spec.
+2. **Nothing creates the `sender_localpart` account.** Registering an appservice inserts only the
+   registration row, and Palpo's non-masqueraded auth branch then raises a database `NotFound` until
+   some user carries that `appservice_id`. The **first** call must therefore be masqueraded, which
+   runs `get_or_create_appservice_user` and bootstraps the account. This is inverted from Synapse and
+   Conduit, where a bare call works immediately — so code correct against those fails against Palpo
+   on its very first request, presenting as a bad credential rather than a missing account. Pinned
+   in `lib/matrix-representative.js` and its test.
+3. **Registrations load into a `OnceCell`**, so adding one requires a container restart. A runtime
+   admin API for register/enable/disable exists, but the file path is read once.
+
+**The decisive evidence for masquerading** was a symbol in the running binary rather than a source
+grep: `auth_by_access_token_without_query_masquerade`, a deliberate opt-**out** wrapper that exists
+because one endpoint reuses `user_id` for its own purposes. Nobody writes an opt-out unless the
+behaviour is the default everywhere else.
+
+**One trap recorded so it is not reused as evidence:** probing `PUT /_matrix/app/v1/transactions/1`
+returns 401 rather than 404, and that says **nothing** about HS→AS push — Palpo also *serves* the
+appservice-side API, which is the opposite direction. The push evidence is in its sending path.
+
+**Still inferred rather than verified:** end-to-end delivery of a transaction. Everything up to the
+send call is confirmed; the wire round-trip is not, and confirming it needs a throwaway registration
+plus a restart. That same experiment would settle finding 1, which is the highest-value open
+question here.
+
+**Also relevant to decision 2:** this deployment runs with federation disabled, which matches the
+non-federating assumption rather than working around it.
+
 **7. A project's name comes from its room alias**, per decision 5. It is the first artifact in the
 design carrying a human-readable handle, so it answers a question that has been open since the
 console started rendering raw room ids.
