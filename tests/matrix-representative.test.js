@@ -163,7 +163,20 @@ describe('an appservice side registers nothing', () => {
     const r = await ensureRepresentative({ side: SIDE, credential: asCred(), fetchImpl: impl });
     expect(r.accessState).toBe('accepted');
     expect(r.mxid).toBe(`@hafleet-as:${SERVER}`);
-    // The masquerade is the mechanism: the query parameter names the user, the as_token authorises.
+    /*
+     * The masquerade is the mechanism: the query parameter names the user, the as_token authorises.
+     *
+     * AND IT IS LOAD-BEARING ON THE FIRST CALL. Verified against the Palpo 0.4.0 build this
+     * deployment runs: nothing there creates the `sender_localpart` account — registering an
+     * appservice only inserts the registration row — and Palpo's non-masqueraded auth branch then
+     * raises a database NotFound until some user carries that `appservice_id`. A masqueraded call
+     * runs `get_or_create_appservice_user`, so this call is what bootstraps the account. Inverted
+     * from Synapse and Conduit, where a bare call works immediately.
+     *
+     * So this assertion is not about style. Dropping the parameter would leave HAFleet unable to
+     * reach a correctly configured Palpo side at all, and the symptom would look like a bad
+     * credential.
+     */
     expect(impl.calls[0].url).toContain(`user_id=%40hafleet%3A${SERVER}`);
     expect(impl.calls[0].headers.Authorization).toBe(`Bearer ${AS_TOKEN}`);
   });
