@@ -709,6 +709,42 @@
         },
         {
           "method": "POST",
+          "path": "/api/project-sides",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "PUT",
+          "path": "/api/project-sides/:id/credential",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/project-sides/:id/verify",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/project-sides/:id/deactivate",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/project-sides/:id/reactivate",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/project-sides/:id",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
           "path": "/api/whitelist",
           "owner": "operator.whitelist-admin",
           "auth": "bearer"
