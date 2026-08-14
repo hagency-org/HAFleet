@@ -534,21 +534,139 @@ describe('removal refuses to be the first step of a cascade', () => {
     expect((await request(app).delete(`/api/project-sides/${SERVER}?force=true`)).status).toBe(200);
   });
 
-  test('THE HONEST PART: the response says which steps the cascade did NOT do', async () => {
+  test('the response lists what it DID, rather than claiming completeness', async () => {
     /*
-     * Decision 7's sequence is: end engagements → release commitments → deactivate bindings → retire
-     * identities → forget the credential LAST. Two of those happen here; two do not. A bare 200 would
-     * read as "everything that depended on this side is cleaned up", and this repository has already
-     * produced exactly that failure by another route — force-deleting an agent left three active
-     * bindings and a 250k commitment pointing at it.
+     * "Complete" would be a statement about everything in the system that could reference a side, which
+     * no single handler can make. This repository has already produced the failure that phrasing
+     * invites: force-deleting an agent left three active bindings and a 250k commitment pointing at it.
      */
     const app = await boot();
     await request(app).post('/api/project-sides')
       .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
     const r = await request(app).delete(`/api/project-sides/${SERVER}?force=true`);
-    expect(r.body.cascade).toBe('partial');
-    expect(r.body.cascadeNote).toMatch(/engagements and approval bindings .* NOT touched/);
-    expect(r.body.retiredAgents).toEqual([]);
+    expect(r.body.cascade).toBe('performed');
+    expect(r.body.cascadeNote).toMatch(/ended and inactive are history while active is a claim/);
+    expect(r.body).toMatchObject({ retiredAgents: [], endedEngagements: [], deactivatedBindings: [] });
+  });
+
+  test('an ACTIVE engagement on the side is ENDED, and its commitment released', async () => {
+    /*
+     * ADR-016 decision 7 and the operator's rule that records are kept and only stood down. `ended` is
+     * history; `active` is a claim about the present — work in progress, tokens promised. Left behind on
+     * a side that no longer exists it goes on holding allocation, and the console goes on showing work
+     * that will never proceed.
+     *
+     * Releasing the commitment needs no separate step: `committedForProjectSide` sums only `active`, so
+     * the transition IS the release, and there is no figure that can disagree with the state it came
+     * from.
+     */
+    const app = await boot({
+      rawDataFiles: {
+        'engagements.json': JSON.stringify({
+          version: 1,
+          engagements: {
+            live: {
+              id: 'live', state: 'active', agent: 'someone', createdAt: 1,
+              projectRoomId: `!room:${SERVER}`, allocatedTokens: 400000,
+            },
+            elsewhere: {
+              id: 'elsewhere', state: 'active', agent: 'someone', createdAt: 1,
+              projectRoomId: '!other:other.example', allocatedTokens: 100000,
+            },
+          },
+          whitelist: {}, offers: {}, audit: [],
+        }),
+      },
+    });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    await request(app).put(`/api/project-sides/${SERVER}/allocation`).send({ allocated_tokens: 1000000 });
+
+    const before = await request(app).get(`/api/project-sides/${SERVER}/budget`);
+    expect(before.body.committed).toBe(400000);
+
+    const r = await request(app).delete(`/api/project-sides/${SERVER}?force=true`);
+    expect(r.body.endedEngagements).toEqual(['live']);
+
+    const rows = (await request(app).get('/api/engagements')).body.engagements;
+    const live = rows.find((e) => e.id === 'live');
+    // NOT deleted - the record survives with a reason, which is the compliance shape.
+    expect(live).toBeTruthy();
+    expect(live.state).toBe('ended');
+    expect(live.endedReason).toMatch(new RegExp(SERVER));
+    // And the one on another side is untouched: a different side is a different budget.
+    expect(rows.find((e) => e.id === 'elsewhere').state).toBe('active');
+  });
+
+  test('a BINDING on the side is DEACTIVATED, not deleted', async () => {
+    /*
+     * A binding is evidence of who invited what (ADR-002), so it is kept. What changes is that it stops
+     * claiming the project can reach the agent - `listBindings` already filters `active !== false`, so
+     * deactivation removes it from every read without anything learning a new state.
+     */
+    const app = await boot({
+      env: { MATRIX_BRIDGE_SECRET: 'secret-for-binding-cascade' },
+      rawDataFiles: {
+        'approvals.json': JSON.stringify({
+          version: 1,
+          bindings: {
+            'ag\u0000!room:palpo.test': {
+              agent: 'ag', project: 'p', projectRoomId: `!room:${SERVER}`,
+              ownerMxid: `@alex:${SERVER}`, ownerDmRoomId: `!dm:${SERVER}`,
+              active: true, addedAt: 1, updatedAt: 1, agentJoined: null, membershipCheckedAt: null,
+            },
+            'ag\u0000!other:other.example': {
+              agent: 'ag', project: 'q', projectRoomId: '!other:other.example',
+              ownerMxid: '@bob:other.example', ownerDmRoomId: '!dm:other.example',
+              active: true, addedAt: 1, updatedAt: 1, agentJoined: null, membershipCheckedAt: null,
+            },
+          },
+          requests: {}, audit: [],
+        }),
+      },
+    });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    const r = await request(app).delete(`/api/project-sides/${SERVER}?force=true`);
+    expect(r.body.deactivatedBindings).toEqual([`ag@!room:${SERVER}`]);
+
+    // The record is still on disk - deactivated, not forgotten.
+    const stored = JSON.parse(readFileSync(
+      path.join(context.runtimeDir, 'data', 'approvals.json'), 'utf8',
+    )).bindings;
+    const ours = Object.values(stored).find((b) => b.projectRoomId === `!room:${SERVER}`);
+    expect(ours.active).toBe(false);
+    expect(ours.deactivatedReason).toMatch(new RegExp(SERVER));
+    expect(typeof ours.deactivatedAt).toBe('number');
+    // The other side's binding is untouched.
+    expect(Object.values(stored).find((b) => b.projectRoomId === '!other:other.example').active).toBe(true);
+  });
+
+  test('a REFUSED delete touches no engagement and no binding', async () => {
+    /*
+     * The precondition guard again, now covering three kinds of damage instead of one. A 409 that had
+     * already ended a side's engagements would leave the operator with a side they still see as
+     * configured and work that has silently stopped.
+     */
+    const app = await boot({
+      rawDataFiles: {
+        'engagements.json': JSON.stringify({
+          version: 1,
+          engagements: {
+            live: {
+              id: 'live', state: 'active', agent: 'someone', createdAt: 1,
+              projectRoomId: `!room:${SERVER}`, allocatedTokens: 400000,
+            },
+          },
+          whitelist: {}, offers: {}, audit: [],
+        }),
+      },
+    });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    expect((await request(app).delete(`/api/project-sides/${SERVER}`)).status).toBe(409);
+    const rows = (await request(app).get('/api/engagements')).body.engagements;
+    expect(rows.find((e) => e.id === 'live').state).toBe('active');
   });
 
   test('AN AGENT CANNOT CLAIM A SIDE IT WAS NOT PROVISIONED FOR', async () => {
