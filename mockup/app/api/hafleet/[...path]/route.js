@@ -92,7 +92,19 @@ const READS = [
    * percent-encoded traversal that class exists to reject.
    */
   /^project-sides$/,
-  /^project-sides\/[A-Za-z0-9._:-]+$/,
+  /*
+   * The id segment must contain a DOT or a COLON, because it is a Matrix server name —
+   * `palpo.test`, `127.0.0.1:8008`. Written this way to exclude one specific sibling:
+   * `GET /api/project-sides/inbound-credentials` is bridge-secret guarded and returns an `hs_token`,
+   * and a plain `[A-Za-z0-9._:-]+` matched it. The backend would have refused the proxy's operator
+   * token, so nothing leaked — but an allowlist that admits a credential endpoint is an allowlist
+   * permitting more than the action it represents, and the guard it relies on is somebody else's code.
+   *
+   * The cost is that a single-label server name (`localhost`) would not be proxied. Matrix server names
+   * in any real deployment carry a dot or a port, and the exchange is a console read for a rule that
+   * cannot reach a credential route.
+   */
+  /^project-sides\/[A-Za-z0-9._:-]*[.:][A-Za-z0-9._:-]*$/,
 ];
 
 /*
@@ -160,6 +172,23 @@ const WRITES = [
    * DELETE is admitted, and it is the one entry here that can destroy something. The backend refuses
    * an ACTIVE side with a 409 and requires `?force=true`, which the forwarder preserves in the query
    * string — the same shape as the agent delete above.
+   */
+  /*
+   * DELIBERATELY ABSENT: `POST /api/project-sides/:id/registration`.
+   *
+   * Not an oversight, so do not "fix" it. That endpoint answers with the registration YAML, which
+   * carries an `as_token` and an `hs_token` in plaintext — the only time either is readable. Proxying it
+   * would put a credential that authorises a whole namespace on somebody else's homeserver into a
+   * browser: its memory, its devtools, its history, and whatever extension is watching.
+   *
+   * Generating a registration is an install-time act performed once per project side, and from a
+   * terminal the YAML goes straight into a 0600 file. The exchange is one convenience for the property
+   * that this particular token never enters a browser at all — the same reasoning `cf.ownSecrets` gives
+   * for HAFleet's own secrets living only in `.env`.
+   *
+   * Also absent, for a different reason: `GET /api/project-sides/inbound-credentials`, which is
+   * bridge-secret guarded. See the note on the read pattern above for why the read entry is written to
+   * exclude it rather than merely failing to include it.
    */
   { method: 'POST', re: /^project-sides$/ },
   { method: 'PUT', re: /^project-sides\/[A-Za-z0-9._:-]+\/credential$/ },

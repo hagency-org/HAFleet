@@ -575,3 +575,132 @@ describe('persistence', () => {
     expect(r.body.sides[0].label).toBe('Seeded');
   });
 });
+
+describe('the inbound credentials the BRIDGE needs', () => {
+  /*
+   * A narrow, deliberate exception to ADR-016 decision 8, and the tests are mostly about how narrow.
+   *
+   * "Write-only" was decided against the CONSOLE: a browser holding the operator token must not read a
+   * credential, because the console renders whatever an API returns and this repository has shipped API
+   * text into an unintended UI twice. The bridge is a different principal — it must authenticate a
+   * homeserver's push and cannot do that without the token, so refusing it would not protect anything,
+   * it would only mean the appservice cannot work.
+   *
+   * The precedent is exact rather than analogous: `GET /api/approval-bindings` is bridge-secret guarded
+   * and returns `ownerDmRoomId`, deliberately withheld from the console proxy.
+   */
+  const SECRET = 'bridge-secret-for-inbound-credentials';
+
+  async function bootWithSecret() {
+    return boot({ env: { MATRIX_BRIDGE_SECRET: SECRET } });
+  }
+
+  const withRegistration = async (app, server = SERVER) => {
+    await request(app).post('/api/project-sides')
+      .send({ server_name: server, api_base_url: 'http://127.0.0.1:8008' });
+    const r = await request(app).post(`/api/project-sides/${server}/registration`)
+      .send({ url: 'http://host.docker.internal:8009' });
+    return /hs_token: ([0-9a-f]{64})/.exec(r.body.registrationYaml)[1];
+  };
+
+  test('THE POINT: the operator token alone does NOT open it', async () => {
+    /*
+     * If a bearer token were enough, the console proxy would be one allowlist entry away from putting a
+     * namespace-granting credential in a browser — which is the thing decision 8 exists to prevent.
+     */
+    const app = await bootWithSecret();
+    await withRegistration(app);
+    const res = await request(app).get('/api/project-sides/inbound-credentials');
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).not.toMatch(/[0-9a-f]{64}/);
+  });
+
+  test('the bridge secret opens it, and the hs_token is what comes back', async () => {
+    const app = await bootWithSecret();
+    const hsToken = await withRegistration(app);
+    const res = await request(app).get('/api/project-sides/inbound-credentials')
+      .set('x-bridge-secret', SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body.sides).toHaveLength(1);
+    expect(res.body.sides[0]).toMatchObject({
+      sideId: SERVER, serverName: SERVER, hsToken, senderLocalpart: 'hafleet',
+    });
+  });
+
+  test('THE SCOPE: the as_token is NOT returned', async () => {
+    /*
+     * The `as_token` acts AS an agent on that homeserver; inbound authentication does not need it. When
+     * the bridge needs to send as an agent, that is a separate grant with its own argument — and until
+     * then handing it over would be widening the exception for a use that does not exist yet.
+     */
+    const app = await bootWithSecret();
+    await withRegistration(app);
+    const created = await request(app).post(`/api/project-sides/${SERVER}/registration?replace=true`)
+      .send({ url: 'http://host.docker.internal:8009' });
+    const asToken = /as_token: ([0-9a-f]{64})/.exec(created.body.registrationYaml)[1];
+
+    const res = await request(app).get('/api/project-sides/inbound-credentials')
+      .set('x-bridge-secret', SECRET);
+    expect(JSON.stringify(res.body)).not.toContain(asToken);
+    expect(res.body.sides[0]).not.toHaveProperty('asToken');
+  });
+
+  test('a DEACTIVATED side is omitted, because it is closed to new work', async () => {
+    // A listener that still accepted its pushes would be taking work from a side the operator closed.
+    const app = await bootWithSecret();
+    await withRegistration(app);
+    await request(app).post(`/api/project-sides/${SERVER}/deactivate`);
+    const res = await request(app).get('/api/project-sides/inbound-credentials')
+      .set('x-bridge-secret', SECRET);
+    expect(res.body.sides).toHaveLength(0);
+  });
+
+  test('a registration-token side is omitted, because it has no inbound push', async () => {
+    const app = await bootWithSecret();
+    await request(app).post('/api/project-sides')
+      .send({
+        server_name: SERVER,
+        api_base_url: 'http://127.0.0.1:8008',
+        credential: { kind: 'registrationToken', registrationToken: REG_TOKEN, representativeToken: null },
+      });
+    const res = await request(app).get('/api/project-sides/inbound-credentials')
+      .set('x-bridge-secret', SECRET);
+    expect(res.body.sides).toHaveLength(0);
+  });
+
+  test('a side with no credential at all is omitted rather than returned empty', async () => {
+    const app = await bootWithSecret();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    const res = await request(app).get('/api/project-sides/inbound-credentials')
+      .set('x-bridge-secret', SECRET);
+    expect(res.body.sides).toHaveLength(0);
+  });
+
+  test('several appservice sides each come back with their OWN token', async () => {
+    // The router identifies a side by its token, so two sides sharing one would be unroutable —
+    // and this is where that would first be visible.
+    const app = await bootWithSecret();
+    const tokenA = await withRegistration(app, 'a.example');
+    const tokenB = await withRegistration(app, 'b.example');
+    expect(tokenA).not.toBe(tokenB);
+    const res = await request(app).get('/api/project-sides/inbound-credentials')
+      .set('x-bridge-secret', SECRET);
+    const byId = Object.fromEntries(res.body.sides.map((s) => [s.sideId, s.hsToken]));
+    expect(byId['a.example']).toBe(tokenA);
+    expect(byId['b.example']).toBe(tokenB);
+  });
+
+  test('it fails closed when no bridge secret is configured at all', async () => {
+    /*
+     * The common deployment has no secret set, and comparing two empty strings would let everyone
+     * through. `requireApprovalBridgeSecret` answers 503 for exactly this.
+     */
+    const app = await boot();
+    await withRegistration(app);
+    const res = await request(app).get('/api/project-sides/inbound-credentials')
+      .set('x-bridge-secret', '');
+    expect(res.status).toBe(503);
+    expect(JSON.stringify(res.body)).not.toMatch(/[0-9a-f]{64}/);
+  });
+});

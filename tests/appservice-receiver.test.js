@@ -22,6 +22,7 @@ import { createServer } from 'http';
 import {
   AppserviceError,
   createAppserviceReceiver,
+  createAppserviceRouter,
   generateRegistration,
   renderRegistrationYaml,
 } from '../lib/appservice-receiver.js';
@@ -424,3 +425,148 @@ function hash(value) {
   for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) | 0;
   return h;
 }
+
+describe('one socket, many project sides', () => {
+  /*
+   * A deployment lends to several project sides and each installs its own registration. Exposing one
+   * inbound address per side would mean one port per side, which multiplies exactly the deployment
+   * decision this design kept small — so one listener serves all of them, and the TOKEN decides which
+   * side a transaction belongs to.
+   *
+   * Not a path. A base path in the registration `url` would work, since the homeserver appends the
+   * appservice path to whatever it was given — but a path is unauthenticated, so the token would have
+   * to decide anyway. One source of truth, and it is the same fact that authenticates.
+   */
+  const TOKEN_A = 'hs_side_a_0000000000000000000000000000';
+  const TOKEN_B = 'hs_side_b_1111111111111111111111111111';
+
+  const putFor = (token, id = 'r1') => ({
+    method: 'PUT',
+    path: `/_matrix/app/v1/transactions/${id}`,
+    query: { access_token: token },
+    headers: {},
+    body: { events: [{ type: 'm.room.message' }] },
+  });
+
+  function router() {
+    const seen = { a: [], b: [] };
+    const r = createAppserviceRouter({
+      sides: [
+        { sideId: 'a.example', hsToken: TOKEN_A, onEvents: async (e, m) => { seen.a.push(m.txnId); } },
+        { sideId: 'b.example', hsToken: TOKEN_B, onEvents: async (e, m) => { seen.b.push(m.txnId); } },
+      ],
+    });
+    return { r, seen };
+  }
+
+  test("a transaction reaches the side whose token it carried, and only that side", async () => {
+    const { r, seen } = router();
+    const res = await r.handle(putFor(TOKEN_B, 'for-b'));
+    expect(res.status).toBe(200);
+    expect(res.sideId).toBe('b.example');
+    expect(seen.b).toEqual(['for-b']);
+    expect(seen.a).toEqual([]);
+  });
+
+  test('an unknown token is refused, and says nothing about how many sides exist', async () => {
+    const { r, seen } = router();
+    const res = await r.handle(putFor('hs_not_configured_999999999999999999'));
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ errcode: 'M_FORBIDDEN', error: 'bad hs_token' });
+    expect(res.sideId).toBeUndefined();
+    expect(seen.a).toEqual([]);
+    expect(seen.b).toEqual([]);
+  });
+
+  test('the same txnId on DIFFERENT sides is two transactions, not a duplicate', async () => {
+    /*
+     * Transaction ids are per-homeserver, so two sides can legitimately use the same one. A single
+     * shared deduplication window would silently drop the second side's events.
+     */
+    const { r, seen } = router();
+    await r.handle(putFor(TOKEN_A, 'shared-id'));
+    const second = await r.handle(putFor(TOKEN_B, 'shared-id'));
+    expect(second.duplicate).toBeUndefined();
+    expect(seen.a).toEqual(['shared-id']);
+    expect(seen.b).toEqual(['shared-id']);
+  });
+
+  test('THE REFRESH PROPERTY: an unchanged side keeps its deduplication window', async () => {
+    /*
+     * Found by asking what happens when a side is ADDED, which is the ordinary case. Rebuilding every
+     * receiver on refresh would discard each one's remembered transaction ids — so a homeserver
+     * retrying across the refresh would be processed a second time, double-delivering every message in
+     * that transaction.
+     */
+    const { r, seen } = router();
+    await r.handle(putFor(TOKEN_A, 'keep-me'));
+    expect(seen.a).toEqual(['keep-me']);
+
+    r.setSides([
+      { sideId: 'a.example', hsToken: TOKEN_A, onEvents: async (e, m) => { seen.a.push(m.txnId); } },
+      { sideId: 'c.example', hsToken: 'hs_side_c_2222222222222222222222222222', onEvents: async () => {} },
+    ]);
+    const retry = await r.handle(putFor(TOKEN_A, 'keep-me'));
+    expect(retry.duplicate).toBe(true);
+    expect(seen.a).toEqual(['keep-me']); // not processed twice
+    expect(r.sideIds()).toEqual(['a.example', 'c.example']);
+  });
+
+  test('a side whose TOKEN changed gets a fresh receiver', async () => {
+    // A regenerated registration is a different credential, and its transaction ids come from a
+    // homeserver that has just been restarted. Carrying the old window forward would be a guess.
+    const { r, seen } = router();
+    await r.handle(putFor(TOKEN_A, 'x'));
+    const rotated = 'hs_side_a_rotated_33333333333333333333';
+    r.setSides([{ sideId: 'a.example', hsToken: rotated, onEvents: async (e, m) => { seen.a.push(m.txnId); } }]);
+    expect((await r.handle(putFor(TOKEN_A, 'x'))).status).toBe(403); // old token no longer works
+    const again = await r.handle(putFor(rotated, 'x'));
+    expect(again.duplicate).toBeUndefined();
+    expect(seen.a).toEqual(['x', 'x']);
+  });
+
+  test('a removed side stops being reachable', async () => {
+    const { r } = router();
+    r.setSides([{ sideId: 'a.example', hsToken: TOKEN_A, onEvents: async () => {} }]);
+    expect((await r.handle(putFor(TOKEN_B))).status).toBe(403);
+    expect(r.sideIds()).toEqual(['a.example']);
+  });
+
+  test('an empty router refuses everything rather than accepting anything', async () => {
+    const r = createAppserviceRouter();
+    expect((await r.handle(putFor(TOKEN_A))).status).toBe(403);
+    expect(r.sideIds()).toEqual([]);
+  });
+
+  test('sides with no id or no token are ignored, not half-registered', async () => {
+    const r = createAppserviceRouter({
+      sides: [
+        { sideId: 'ok.example', hsToken: TOKEN_A, onEvents: async () => {} },
+        { sideId: '', hsToken: TOKEN_B, onEvents: async () => {} },
+        { sideId: 'no-token.example', onEvents: async () => {} },
+      ],
+    });
+    expect(r.sideIds()).toEqual(['ok.example']);
+  });
+
+  test('the header form works through the router too', async () => {
+    const { r, seen } = router();
+    const res = await r.handle({
+      method: 'PUT',
+      path: '/_matrix/app/v1/transactions/hdr',
+      query: {},
+      headers: { authorization: `Bearer ${TOKEN_A}` },
+      body: { events: [] },
+    });
+    expect(res.status).toBe(200);
+    expect(seen.a).toEqual(['hdr']);
+  });
+
+  test('per-side deduplication windows are reportable', async () => {
+    const { r } = router();
+    await r.handle(putFor(TOKEN_A, 'one'));
+    await r.handle(putFor(TOKEN_A, 'two'));
+    await r.handle(putFor(TOKEN_B, 'one'));
+    expect(r.seenCounts()).toEqual({ 'a.example': 2, 'b.example': 1 });
+  });
+});

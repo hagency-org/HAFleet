@@ -6816,6 +6816,67 @@ app.get('/api/project-sides', requireBearer, (req, res) => {
   }
 });
 
+/*
+ * REGISTERED BEFORE `/api/project-sides/:id`, and it has to be.
+ *
+ * Express matches in registration order, so with the parameterised route first this path resolves as
+ * `:id = 'inbound-credentials'`, finds no such project side, and answers 404 — which is how it failed
+ * the first time. The 404 looks like a missing route rather than a shadowed one, so a future reordering
+ * would break inbound appservice authentication in a way that reads as "not implemented".
+ */
+/*
+ * The inbound credentials the BRIDGE needs, and nothing else.
+ *
+ * A NARROW, DELIBERATE EXCEPTION to ADR-016 decision 8, argued rather than assumed. "Write-only" was
+ * decided against the CONSOLE: a browser holding the operator token must not be able to read a
+ * credential, because the console renders whatever an API returns and this repository has already
+ * shipped API text into a UI nobody meant to show it twice. The bridge is a different principal — it
+ * is the component that must authenticate a homeserver's push, and it cannot do that without the
+ * token. Refusing it would not protect anything; it would only mean the appservice cannot work.
+ *
+ * The precedent is exact rather than analogous: `GET /api/approval-bindings` is bridge-secret guarded
+ * and returns `ownerDmRoomId`, which is deliberately withheld from the console proxy's projection. A
+ * bridge-secret endpoint is already the place where this repository returns what the console must not
+ * see.
+ *
+ * SO THE EXCEPTION IS SCOPED THREE WAYS, and each one is a decision:
+ *   - `hsToken` only. The `asToken` acts AS an agent on that homeserver, and inbound authentication
+ *     does not need it. When the bridge needs to send as an agent that will be a separate grant with
+ *     its own argument.
+ *   - appservice sides only. A registration-token side has no inbound push, so it has nothing to
+ *     authenticate here. This filter is REDUNDANT today and kept as depth: the store validates
+ *     credential fields per kind, so a registration-token credential structurally cannot carry an
+ *     `hsToken`, and the `credential?.hsToken` check below already excludes it. Mutation testing
+ *     confirms the pair is equivalent — no test can distinguish them, because no credential with a
+ *     non-appservice kind and an `hsToken` can be constructed through the store. The filter stays so
+ *     that adding such a kind later does not silently widen this endpoint.
+ *   - active sides only. A deactivated side is closed to new work, and a listener that still accepted
+ *     its pushes would be accepting work from a side the operator has closed.
+ */
+app.get('/api/project-sides/inbound-credentials', requireApprovalBridgeSecret, (req, res) => {
+  try {
+    const sides = projectSideStore.listSides({ activeOnly: true })
+      .filter((side) => side.credentialKind === 'appservice')
+      .map((side) => {
+        const credential = projectSideStore.credentialFor(side.id);
+        return credential?.hsToken
+          ? {
+            sideId: side.id,
+            serverName: side.serverName,
+            apiBaseUrl: side.apiBaseUrl,
+            senderLocalpart: credential.senderLocalpart,
+            namespace: credential.namespace,
+            hsToken: credential.hsToken,
+          }
+          : null;
+      })
+      .filter(Boolean);
+    return res.json({ ok: true, sides });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to read inbound credentials');
+  }
+});
+
 app.get('/api/project-sides/:id', requireBearer, (req, res) => {
   const side = projectSideStore.getSide(req.params.id);
   if (!side) return res.status(404).json({ error: 'project side not found' });
