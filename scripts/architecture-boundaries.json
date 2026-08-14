@@ -419,12 +419,12 @@
           "owner": "approvals.binding-writer",
           "auth": "approval-bridge-secret"
         },
-    {
-      "method": "PUT",
-      "path": "/api/approval-bindings/membership",
-      "owner": "approvals.membership-observer",
-      "auth": "approval-bridge-secret"
-    },
+        {
+          "method": "PUT",
+          "path": "/api/approval-bindings/membership",
+          "owner": "approvals.membership-observer",
+          "auth": "approval-bridge-secret"
+        },
         {
           "method": "DELETE",
           "path": "/api/approval-bindings/:agent/:roomId",
@@ -990,6 +990,35 @@
           "path": "/api/groups/:name/messages",
           "owner": "groups.member-read",
           "auth": "agent-credential"
+        }
+      ]
+    },
+    "lib/dashboard/project-side-proxy-routes.js": {
+      "mutationRoutes": [
+        {
+          "method": "POST",
+          "path": "/api/project-sides",
+          "owner": "backend.proxy.project-sides"
+        },
+        {
+          "method": "PUT",
+          "path": "/api/project-sides/:id/allocation",
+          "owner": "backend.proxy.project-sides"
+        },
+        {
+          "method": "POST",
+          "path": "/api/project-sides/:id/deactivate",
+          "owner": "backend.proxy.project-sides"
+        },
+        {
+          "method": "POST",
+          "path": "/api/project-sides/:id/reactivate",
+          "owner": "backend.proxy.project-sides"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/project-sides/:id",
+          "owner": "backend.proxy.project-sides"
         }
       ]
     }
