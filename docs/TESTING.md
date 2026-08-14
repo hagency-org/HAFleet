@@ -181,6 +181,7 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-13 | `api-server-heartbeat` | `accepts a new instance after the lease becomes stale` | **yes** — `AssertionError: expected null to be 'inst-B'`; CI only, on a DOCS-ONLY branch; see the investigation below |
 | 2026-08-14 | `alert-store` | `alert API writes fail closed and keep visible state unchanged` | **yes** — `expected undefined to be 'agent-runtime'`; whole-suite only, clean in isolation 3/3 (18/18 each) |
 | 2026-08-14 | `api-server-heartbeat-sweep` | `accepts explicit offline without instance id when no lease is active` | **yes** — `Error: Test timed out in 30000ms`; whole-suite only, clean in isolation 4/4, and the next whole-suite run on the same tree was 194/194 |
+| 2026-08-14 | `api-server-heartbeat` | `accepts takeover from a newer boot timestamp` | **yes** — `expected 404 to be 200`, the second shape; whole-suite only, clean in isolation 4/4; the branch touched engagements and project sides, which that file never references |
 
 **A NAMED SPECIMEN FOR TWO SIGHTINGS THAT WENT UNNAMED.** Two earlier runs in the same session reported
 intermittent failures whose identity was not captured, because the output was tailed rather than saved —

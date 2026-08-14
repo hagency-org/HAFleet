@@ -8399,6 +8399,87 @@ function sideBudgetFor(sideId) {
   };
 }
 
+/**
+ * The project side a room belongs to, or null when the id carries no server.
+ *
+ * A room id is `!local:server.name`, and without federation the server part IS the project side —
+ * which is what makes a room id enough to attribute spend, with no extra field to keep in sync.
+ */
+function sideIdForRoom(roomId) {
+  const text = typeof roomId === 'string' ? roomId : '';
+  const at = text.indexOf(':');
+  return at > 0 ? text.slice(at + 1).toLowerCase() : null;
+}
+
+/**
+ * ADR-016 decision 6, at the points where a borrower's allocation is actually committed.
+ *
+ * WHY THIS MOVED. The first build of this gate sat on `POST /api/dispatch` Phase 4 — the only
+ * auto-provisioning path that existed when the ADR was written. Two things were wrong with that as the
+ * load-bearing gate: ADR-013 decision 8 withdraws `/api/dispatch` "and any successor router-facing
+ * assignment path", and that route has no product caller, so the gate protected a road nobody drives.
+ * ADR-016's own decision TEXT says an agent instance is minted "on acceptance" — the engagement path.
+ * Only its status rows pointed at dispatch. This helper is where those rows should have pointed.
+ *
+ * A REFUSAL, NOT A ROUTING OUTCOME — which is why this is not inside `routeRequest`. Every value in
+ * that vocabulary (`notWhitelisted`, `overOffer`, `overCeiling`) ends in a PENDING engagement the
+ * contributor can then decide, and a queue entry is the wrong answer here: it reads as "waiting for
+ * capacity" when the truth is "will not proceed without more budget". The operator asked for an alarm
+ * — 「应该报警，说无法创建 agent，需要加预算」 — and a queue entry is not one.
+ *
+ * `requireSide` is the ONE difference between the callers, and it is not arbitrary:
+ *
+ *   - MINTING an agent needs a side, because under decision 1 the identity comes from the side's
+ *     credential. No side, no agent — so `no_project_side` is a real refusal there.
+ *   - SERVING an engagement does not. The agent already exists and is already reachable, so a room on
+ *     a server this deployment has not configured as a side is un-attributed, not unserviceable.
+ *
+ * THE LIMITATION, STATED: with `requireSide` false, an engagement on a server that has no side record
+ * escapes the budget entirely. That is the migration state, not the design — every binding in this
+ * deployment predates project sides. It is honest to leave the escape open and name it rather than to
+ * refuse every existing engagement in the name of a budget nobody has allocated yet.
+ *
+ * Returns `true` when it has already answered the request, so a caller reads as
+ * `if (refuseOverSideAllocation(...)) return;`.
+ */
+function refuseOverSideAllocation(res, { projectRoomId, tokens, act, requireSide = false, extra = {} }) {
+  const refuse = (reason, error, fields = {}) => {
+    res.status(409).json({ status: 'refused', reason, error, ...extra, ...fields });
+    return true;
+  };
+  const sideId = sideIdForRoom(projectRoomId);
+  if (!sideId) {
+    if (!requireSide) return false;
+    return refuse('no_project_side', `${act} names no project side, so no budget can be charged for it`);
+  }
+  const budget = sideBudgetFor(sideId);
+  if (!budget) {
+    if (!requireSide) return false;
+    return refuse('no_project_side',
+      `no project side is configured for ${sideId}, so no budget can be charged for ${act}`, { sideId });
+  }
+  if (budget.allocated === null) {
+    // UNALLOCATED IS NOT UNLIMITED, so the alarm arrives before the tokens rather than after.
+    return refuse('no_allocation',
+      `project side ${sideId} has no token allocation — set one before ${act} can draw on it`,
+      { sideId, ...budget });
+  }
+  const wanted = Number.isFinite(Number(tokens)) ? Math.max(0, Math.floor(Number(tokens))) : 0;
+  if (wanted > budget.remaining) {
+    return refuse('over_allocation',
+      `${act} needs ${wanted} tokens and project side ${sideId} has ${budget.remaining} of `
+      + `${budget.allocated} left (${budget.committed} committed) — raise the allocation`,
+      {
+        sideId,
+        allocatedTokens: budget.allocated,
+        committedTokens: budget.committed,
+        remainingTokens: budget.remaining,
+        requestedTokens: wanted,
+      });
+  }
+  return false;
+}
+
 /*
  * Set a side's allocation. The operator's 「真配额」.
  */
@@ -9583,11 +9664,16 @@ app.post('/api/dispatch', (req, res) => {
     const reserved = provisionReservations.get(key) || 0;
     if (inCell + reserved < cap) {
       /*
-       * BUDGET ADMISSION, ADR-016 decision 6 — and it applies EXACTLY WHERE A BORROWER EXISTS.
+       * BUDGET ADMISSION HERE IS DEFENSIVE, NOT LOAD-BEARING — and that is a correction of an earlier
+       * claim, not a hedge. ADR-016's decision 6 rows cited this gate as the build; ADR-013 decision 8
+       * withdraws `/api/dispatch` "and any successor router-facing assignment path", and this route has
+       * no product caller, so what those rows pointed at was a road nobody drives. The gate that
+       * matters is on the engagement path — both callers of `refuseOverSideAllocation` are there now.
        *
-       * The cap above counts AGENTS and never consulted the ledger, so this path would mint against a
-       * project side with no budget left, or with none ever allocated. The operator stated the
-       * requirement directly: 「如果 token 预算已经超标了…这时候应该报警，说无法创建 agent，需要加预算」.
+       * KEPT RATHER THAN DELETED, for one reason worth stating: this route carries NO auth guard, so
+       * anyone who can reach the backend can ask it for a provision plan. Removing the check would
+       * leave the unguarded route as the one place a plan is produced with no budget consulted.
+       * Withdrawn-but-present is exactly when a cheap check earns its keep.
        *
        * SCOPED BY WHETHER THE REQUEST NAMES A ROOM. A room id carries its origin server, which is the
        * project side whose budget is at stake. A request with NO room is not project-side work — it is
@@ -9596,56 +9682,19 @@ app.post('/api/dispatch', (req, res) => {
        * is spending. A first version of this did exactly that and broke two existing cases; the
        * failure was the scope being wrong, not the gate.
        *
-       * THE CONSEQUENCE, STATED: a caller that omits the room escapes this check. That is acceptable
-       * only because such a request cannot be attributed to a borrower at all — but note separately
-       * that `POST /api/dispatch` carries NO auth guard, so "who can omit the room" is "anyone who can
-       * reach the backend". That is pre-existing and is not fixed here; it is recorded because this
-       * gate now depends on it.
-       *
-       * A REFUSAL IS AN ALARM, NOT A QUEUE ENTRY. Falling through to the queue would answer "waiting
-       * for capacity" when the truth is "will never be created without more budget", and an agent that
-       * was never created cannot be waited for.
+       * `requireSide: true` because this path MINTS: under decision 1 the identity comes from the
+       * side's credential, so a named room with no configured side cannot produce an agent at all.
        */
       const room = typeof req.body?.room === 'string' ? req.body.room : '';
-      const at = room.indexOf(':');
-      const sideId = at > 0 ? room.slice(at + 1).toLowerCase() : null;
+      const sideId = sideIdForRoom(room);
 
-      if (sideId) {
-        const budget = sideBudgetFor(sideId);
-        const wanted = Number.isFinite(Number(req.body?.requestedTokens))
-          ? Math.max(0, Math.floor(Number(req.body.requestedTokens)))
-          : 0;
-        if (!budget) {
-          return res.status(409).json({
-            status: 'refused',
-            reason: 'no_project_side',
-            error: `no project side is configured for ${sideId}, so no budget can be charged for a new agent`,
-            sideId, role, tier,
-          });
-        }
-        if (budget.allocated === null) {
-          // UNALLOCATED IS NOT UNLIMITED, so the alarm arrives before the tokens rather than after.
-          return res.status(409).json({
-            status: 'refused',
-            reason: 'no_allocation',
-            error: `project side ${sideId} has no token allocation — set one before agents can be created for it`,
-            sideId, role, tier,
-          });
-        }
-        if (wanted > budget.remaining) {
-          return res.status(409).json({
-            status: 'refused',
-            reason: 'over_allocation',
-            error: `creating this agent needs ${wanted} tokens and project side ${sideId} has `
-              + `${budget.remaining} of ${budget.allocated} left (${budget.committed} committed) — raise the allocation`,
-            sideId, role, tier,
-            allocatedTokens: budget.allocated,
-            committedTokens: budget.committed,
-            remainingTokens: budget.remaining,
-            requestedTokens: wanted,
-          });
-        }
-      }
+      if (sideId && refuseOverSideAllocation(res, {
+        projectRoomId: room,
+        tokens: req.body?.requestedTokens,
+        act: 'creating this agent',
+        requireSide: true,
+        extra: { role, tier },
+      })) return undefined;
 
       provisionReservations.set(key, reserved + 1);
       /*
@@ -11394,6 +11443,24 @@ app.post('/api/engagements', requireRequester, (req, res) => {
         return res.status(400).json({ error: `unknown agent: ${requested}` });
       }
     }
+    /*
+     * THE BORROWER'S BUDGET, CHECKED BEFORE THE RECORD EXISTS.
+     *
+     * Here rather than after `createRequest` because a whitelisted project with a published offer
+     * AUTO-JOINS: `routeRequest` returns `autoJoin: true`, the engagement is born `active`, and its
+     * `requestedTokens` are committed against the side without any operator ever seeing it. Checking
+     * afterwards would mean unwinding a commitment already made, which is the shape of bug this
+     * repository has produced before.
+     *
+     * It also covers the pending case, deliberately: a request the side cannot afford should not sit in
+     * the queue looking like a decision waiting to be made. The remedy is the allocation, and the
+     * refusal says so.
+     */
+    if (refuseOverSideAllocation(res, {
+      projectRoomId: b.projectRoomId,
+      tokens: b.requestedTokens,
+      act: 'this engagement',
+    })) return undefined;
     const engagement = engagementStore.createRequest({
       project: b.project,
       projectRoomId: b.projectRoomId,
@@ -11441,6 +11508,23 @@ app.post('/api/engagements/:id/verdict', requireBearer, (req, res) => {
   try {
     const b = req.body || {};
     const existing = engagementStore.get(req.params.id);
+    /*
+     * THE SAME CEILING, AT THE OTHER ADMISSION POINT — and the one that actually commits.
+     *
+     * An approval may allocate MORE than was requested (`allocatedTokens ?? requestedTokens`), and the
+     * side's remaining may have fallen since the request was made, so passing the request-time check is
+     * no evidence about this moment. This is the second of the two ceilings ADR-016 names: `decide()`
+     * already enforces the contributor's own (`remainingFor(agent)`); this is the borrower's allocation.
+     *
+     * Only on approval. A rejection releases nothing and commits nothing, and refusing to record one
+     * because a budget is exhausted would trap the engagement in `pending` with no way out.
+     */
+    if (b.approve === true && existing && refuseOverSideAllocation(res, {
+      projectRoomId: existing.projectRoomId,
+      tokens: b.allocatedTokens ?? existing.requestedTokens,
+      act: 'approving this engagement',
+      extra: { engagementId: existing.id },
+    })) return undefined;
     const e = engagementStore.decide({
       engagementId: req.params.id,
       approve: b.approve === true,
