@@ -18,6 +18,7 @@ import { describe, expect, test } from 'vitest';
 import {
   classifyMatrixFailure,
   ensureRepresentative,
+  mintAgentIdentity,
   registerRepresentative,
   whoami,
   RepresentativeError,
@@ -402,5 +403,123 @@ describe('secrets do not travel in messages', () => {
     for (const secret of [AS_TOKEN, REG_TOKEN, REP_TOKEN]) {
       expect(r.detail).not.toContain(secret);
     }
+  });
+});
+
+describe('minting an agent identity on a project side', () => {
+  /*
+   * ADR-016 decision 4 — the identity half. This is the act that could not exist before a project side
+   * did, which is the circular dependency the operator named: 「agent 在没有接受项目邀请之前是不知道
+   * 加入哪个 home server，所以你先创建了 biglittle 的 matrix id 是错的」.
+   *
+   * The two credential kinds diverge completely here, and that divergence is the payoff of making
+   * appservice mandatory rather than a complication of it.
+   */
+  const SIDE_NS = { ...SIDE };
+
+  test('APPSERVICE: nothing is created, nothing is stored, and there is NO per-agent token', async () => {
+    /*
+     * The account exists by virtue of the namespace the project side installed, so minting is a claim
+     * rather than an act. `accessToken: null` is the point — HAFleet acts as this agent with the side's
+     * one `as_token`, which is why ADR-014 decision 4's per-agent `{ homeserver, accessToken }` is
+     * unrepresentable for such a side.
+     */
+    const impl = fakeFetch([ok({ user_id: `@ac_alpha:${SERVER}`, device_id: 'appservice' })]);
+    const r = await mintAgentIdentity({ side: SIDE_NS, credential: asCred(), localpart: 'ac_alpha', fetchImpl: impl });
+    expect(r).toMatchObject({ minted: true, kind: 'appservice', mxid: `@ac_alpha:${SERVER}`, accessToken: null });
+    expect(impl.calls.some((c) => c.url.includes('/register'))).toBe(false);
+    expect(impl.calls[0].url).toContain(`user_id=%40ac_alpha%3A${SERVER}`);
+  });
+
+  test('APPSERVICE: an out-of-namespace name is refused BEFORE the call, with the right reason', async () => {
+    /*
+     * The homeserver's refusal for an out-of-namespace masquerade is a 403 — identical to the one for a
+     * bad `as_token`. Those send an operator to two different places: rename the agent, or re-issue a
+     * credential. Checking the claimed regex locally is what keeps them distinguishable.
+     */
+    const impl = fakeFetch([]);
+    const r = await mintAgentIdentity({
+      side: SIDE_NS, credential: asCred(), localpart: 'not_prefixed', fetchImpl: impl,
+    });
+    expect(r.minted).toBe(false);
+    expect(r.reason).toMatch(/outside the namespace this side claimed/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('APPSERVICE: an unusable namespace regex is reported rather than thrown', async () => {
+    const impl = fakeFetch([]);
+    const r = await mintAgentIdentity({
+      side: SIDE_NS, credential: asCred({ namespace: '@ac_[' }), localpart: 'ac_alpha', fetchImpl: impl,
+    });
+    expect(r.minted).toBe(false);
+    expect(r.reason).toMatch(/not a usable regex/);
+  });
+
+  test('REGISTRATION TOKEN: a real account is created and its token comes back', async () => {
+    const impl = fakeFetch([
+      fail(401, { session: 's1' }),
+      ok({ access_token: 'agent_token', user_id: `@ac_beta:${SERVER}` }),
+    ]);
+    const r = await mintAgentIdentity({
+      side: SIDE_NS, credential: regCred(), localpart: 'ac_beta', fetchImpl: impl,
+    });
+    expect(r).toMatchObject({ minted: true, kind: 'registrationToken', mxid: `@ac_beta:${SERVER}`, accessToken: 'agent_token' });
+    expect(JSON.parse(impl.calls[1].body).auth.type).toBe('m.login.registration_token');
+  });
+
+  test('THE MXID IS THE SERVER\'S ANSWER, not the localpart we asked for', async () => {
+    // ADR-014 decision 5. The localpart is a request; the homeserver decides. A side may register the
+    // account under a name that does not match our convention, and it is still the account we hold.
+    const impl = fakeFetch([
+      fail(401, { session: 's1' }),
+      ok({ access_token: 't', user_id: `@renamed_by_server:${SERVER}` }),
+    ]);
+    const r = await mintAgentIdentity({ side: SIDE_NS, credential: regCred(), localpart: 'ac_beta', fetchImpl: impl });
+    expect(r.mxid).toBe(`@renamed_by_server:${SERVER}`);
+  });
+
+  test('M_USER_IN_USE comes back as an ERRCODE, not as a message to match on', async () => {
+    /*
+     * The one a caller must act on: the localpart is taken, which happens when an agent of that name was
+     * minted before and its token was lost. Matching the prose would break on the next reword.
+     */
+    const impl = fakeFetch([fail(400, { errcode: 'M_USER_IN_USE' })]);
+    const r = await mintAgentIdentity({ side: SIDE_NS, credential: regCred(), localpart: 'ac_taken', fetchImpl: impl });
+    expect(r.minted).toBe(false);
+    expect(r.errcode).toBe('M_USER_IN_USE');
+  });
+
+  test('a side with no registration token says so rather than trying', async () => {
+    const impl = fakeFetch([]);
+    const r = await mintAgentIdentity({
+      side: SIDE_NS,
+      credential: { kind: 'registrationToken', registrationToken: null, representativeToken: null },
+      localpart: 'ac_x',
+      fetchImpl: impl,
+    });
+    expect(r.minted).toBe(false);
+    expect(r.reason).toMatch(/no registration token/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('a Matrix failure is a STATE, never a throw', async () => {
+    // The caller is a provisioning path that must record a reason per agent rather than abort a sweep.
+    for (const [response, state] of [[fail(503), 'unreachable'], [fail(403), 'rejected']]) {
+      const impl = fakeFetch([response]);
+      const r = await mintAgentIdentity({ side: SIDE_NS, credential: asCred(), localpart: 'ac_a', fetchImpl: impl });
+      expect(r.minted).toBe(false);
+      expect(r.state).toBe(state);
+    }
+  });
+
+  test('unactionable arguments DO throw', async () => {
+    await expect(mintAgentIdentity({ side: {}, credential: asCred(), localpart: 'ac_a' }))
+      .rejects.toThrow(/apiBaseUrl and serverName/);
+    await expect(mintAgentIdentity({ side: SIDE_NS, credential: null, localpart: 'ac_a' }))
+      .rejects.toThrow(/credential is required/);
+    await expect(mintAgentIdentity({ side: SIDE_NS, credential: asCred(), localpart: '' }))
+      .rejects.toThrow(/localpart is required/);
+    await expect(mintAgentIdentity({ side: SIDE_NS, credential: { kind: 'password' }, localpart: 'a' }))
+      .rejects.toThrow(/unsupported credential kind/);
   });
 });
