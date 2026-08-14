@@ -221,3 +221,43 @@ describe('the socket is off unless the deployment asked for one', () => {
     expect(self.appserviceListener).toBeUndefined();
   });
 });
+
+describe('a cosmetic step must not take approval down with it', () => {
+  /*
+   * An architectural collision found while auditing the remaining single-server assumptions, and it is
+   * worth a test because the failure it produced would have been attributed to the wrong thing.
+   *
+   * An approval room is created by the BOT, on the CONTRIBUTOR's homeserver
+   * (`this.botClient.createRoom`). An agent minted for a project side has an account on THAT side's
+   * server. Without federation — which ADR-016 stops assuming — it cannot join a room on ours.
+   *
+   * The join exists to keep the agent visibly attached for a human's benefit. Its own comment says the
+   * bot remains the E2EE sender and authorization service and the agent token never submits a verdict.
+   * So it is decorative, and it used to THROW: the first approval request for a project-side agent
+   * would have failed with "agent failed to join approval room", which reads as approval being broken.
+   *
+   * Asserted against the source because reaching this branch needs a bot client, a created room and a
+   * homeserver that refuses a join — three things whose construction would test none of them.
+   */
+  test('the approval-room join is best-effort, not fatal', async () => {
+    const { readFileSync } = await import('fs');
+    const source = readFileSync(new URL('../bridge-matrix.js', import.meta.url), 'utf8');
+    const marker = 'could not join';
+    const idx = source.indexOf('[approval-room]');
+    expect(idx, 'the approval-room join no longer logs its outcome').toBeGreaterThan(-1);
+    expect(source.slice(idx, idx + 400)).toContain(marker);
+    // The throw it replaced must be gone: a decorative step cannot be allowed to fail the approval.
+    expect(source).not.toContain('throw new Error(`agent failed to join approval room');
+  });
+
+  test('the reason names the project-side case, so the log is actionable', async () => {
+    // A warning that says only "could not join" sends an operator looking for a permissions bug. The
+    // expected cause is that the agent is not on this server at all.
+    const { readFileSync } = await import('fs');
+    const source = readFileSync(new URL('../bridge-matrix.js', import.meta.url), 'utf8');
+    const idx = source.indexOf('[approval-room]');
+    const window = source.slice(idx, idx + 600);
+    expect(window).toMatch(/project side/);
+    expect(window).toMatch(/approval still works/);
+  });
+});

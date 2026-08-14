@@ -362,6 +362,36 @@ this decision.
   direction: it requires every project to have an account on our server, which is the same
   account-creation privilege problem ADR-014 rejected, pointed the other way.
 
+## An unresolved collision: approval rooms live on the contributor's server
+
+Found 2026-08-13 while auditing what still assumes a single homeserver. Recorded rather than fixed,
+because the fix is a decision.
+
+An approval room is created by the BOT — `this.botClient.createRoom` — and the bot keeps one
+homeserver by ADR-014 decision 4's explicit split. So every approval room is on the CONTRIBUTOR's
+server. An agent minted for a project side (decision 4 here) has an account on THAT side's server, and
+decision 2 stops assuming federation. **Such an agent cannot join its own approval room.**
+
+Passing the agent's own base URL does not help: the room does not exist on the agent's server.
+
+The immediate damage is bounded and has been removed. The agent's presence in that room is cosmetic by
+its own design — the bot is the E2EE sender and the authorization service, and the agent token never
+submits a verdict — but the join was FATAL, so the first approval request for a project-side agent
+would have failed with "agent failed to join approval room", which reads as approval being broken
+rather than as a decorative step failing. It is now best-effort with a warning that names the expected
+cause.
+
+What remains is the design question, and there are three shapes:
+
+| option | cost |
+|---|---|
+| approval rooms stay on the contributor's server, without the agent present | the borrower cannot see which agent is being asked about, in the room where the asking happens |
+| approval rooms move to the project side | the operator, who lives on the contributor's server, cannot be in them — which is the wrong half to lose, since the approval is theirs |
+| approval stays entirely bot-mediated, and the agent is never a member anywhere | simplest, and closest to what the code already does; loses the visible attachment ADR-003's two-channel model leans on |
+
+Nothing here is decided. The third looks likeliest because the code already treats the agent's presence
+as decoration, but it touches ADR-003 and is not this ADR's to settle alone.
+
 ## Questions settled 2026-08-13
 
 All three open questions were answered by the operator in the same session, along with three
