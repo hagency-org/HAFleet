@@ -300,6 +300,14 @@ describe('loadAgentTokensFromHomes', () => {
 describe('checkAgentToken', () => {
   const tokens = new Map([['alpha', 'tok-alpha'], ['beta', 'tok-beta']]);
 
+  /*
+   * These cases are all about the AGENT's credential, and none of their requests carries an
+   * `authorization` header — so the operator-bearer path this function also serves cannot reach them,
+   * whatever the ambient `process.env` holds. That path is covered in
+   * tests/api-operator-bearer-on-agent-routes.test.js, including the case that would break these:
+   * an unconfigured API_TOKEN must not make every caller the operator.
+   */
+
   it('allows a request that names no agent', () => {
     // The bridge, the dashboard and the operator all post without an agent identity.
     // A blank name is "not an agent", not "an agent with no token".
