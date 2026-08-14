@@ -1,0 +1,7 @@
+{
+  "schema": "com.hafleet.agent_ops.v1",
+  "resolution": "continue",
+  "task_id": "task-1",
+  "replacement_dispatch_id": "dispatch-2",
+  "idempotent_request_replay": false
+}

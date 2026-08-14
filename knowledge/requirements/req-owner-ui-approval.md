@@ -156,16 +156,13 @@ Scenario: Codex reads its workflow inbox without recursive approval
   And it creates no owner approval request
   And external coding tools remain owner-gated
 
-## Dependencies
-
-- ADR-002
-- ADR-003
-- ADR-004
-- ADR-005
-- ADR-006
-
 ## Source Trace
 
+- decision: ADR-002
+- decision: ADR-003
+- decision: ADR-004
+- decision: ADR-005
+- decision: ADR-006
 - User-approved workflow on 2026-07-23: public read-only reminder plus detailed owner DM request with UI buttons.
 - Claude Code channel permission protocol documented at `https://code.claude.com/docs/en/channels-reference`.
 - Codex `PermissionRequest` hook documented at `https://developers.openai.com/codex/hooks`.

@@ -1,0 +1,15 @@
+{
+  "msgtype": "com.hafleet.agent_ops.client_session.request.v1",
+  "body": "Request a scoped Agent Operations session for worker",
+  "com.hafleet.agent_ops": {
+    "schema": "com.hafleet.agent_ops.v1",
+    "agent": "worker",
+    "project_room_id": "!project:example.org",
+    "client_nonce": "client-nonce-fixture-1",
+    "client_public_jwk": {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "x": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc"
+    }
+  }
+}

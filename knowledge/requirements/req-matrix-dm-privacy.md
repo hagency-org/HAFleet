@@ -47,12 +47,9 @@ Scenario: Human classification is not a failure warning
   When the backend accepts the target as human
   Then the response reports successful human classification without a warning
 
-## Dependencies
-
-- ADR-002
-
 ## Source Trace
 
+- decision: ADR-002
 - Matrix message `msg_0046` routed toward the public project room through `reply_to=msg_0045`.
 - User report on 2026-07-23: outbound DM appeared missing while the agent reported `target_assumed_human`.
 

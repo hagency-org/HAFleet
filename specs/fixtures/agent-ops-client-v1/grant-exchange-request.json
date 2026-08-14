@@ -1,0 +1,6 @@
+{
+  "grant_jti": "grant-fixture-1",
+  "client_nonce": "client-nonce-fixture-1",
+  "server_challenge": "server-challenge-fixture-1",
+  "audience": "http://127.0.0.1:8090"
+}

@@ -54,13 +54,10 @@ Scenario: Cross-room metadata is rejected
   When the bridge prepares the outgoing relation
   Then no Matrix send request is issued
 
-## Dependencies
-
-- ADR-001
-- ADR-007
-
 ## Source Trace
 
+- decision: ADR-001
+- decision: ADR-007
 - Matrix backend message `msg_0062` was received inside a thread, while agent
   response `msg_0063` was emitted at the project-room top level on 2026-07-23.
 - User-approved design review on 2026-07-23 covering durable primary delivery,

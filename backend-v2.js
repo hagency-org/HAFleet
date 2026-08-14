@@ -8,6 +8,7 @@ import {
   appendFileSync,
   chmodSync,
   closeSync,
+  copyFileSync,
   existsSync,
   fsyncSync,
   mkdirSync,
@@ -15,6 +16,7 @@ import {
   readFileSync,
   readSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -83,9 +85,20 @@ import {
   allAgentHomeRoots,
   findV1ManifestByName,
 } from './lib/agent-home-v1.js';
-import { resolveApprovalTtlMs } from './lib/runtime-approval-client.js';
+import { approvalAdapterTimeoutMs, resolveApprovalTtlMs } from './lib/runtime-approval-client.js';
 import { buildProjectBoardSnapshot } from './lib/project-board.js';
 import { createProjectInspector } from './lib/project-inspector.js';
+import {
+  AGENT_OPS_CLIENT_SCHEMA,
+  agentOpsGrantProofMaterial,
+  agentOpsSessionProofMaterial,
+  checkAgentOpsLoopbackRequest,
+  loadAgentOpsServerIdentity,
+  normalizeAgentOpsLoopbackOrigin,
+  normalizeEd25519PublicJwk,
+  parseAgentOpsSessionAuthorization,
+  verifyAgentOpsProof,
+} from './lib/agent-ops-client-auth.js';
 import { MatrixDispatchStore } from './src/matrix-dispatch-store.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -193,6 +206,51 @@ const MESSAGE_ATTACHMENT_MAX_ITEMS = Number.parseInt(process.env.MESSAGE_ATTACHM
 const MESSAGE_ATTACHMENT_MAX_BYTES = Number.parseInt(process.env.MESSAGE_ATTACHMENT_MAX_BYTES || String(20 * 1024 * 1024), 10);
 const MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT = (process.env.MESSAGE_ATTACHMENT_STAGE_JSON_LIMIT || '30mb').trim() || '30mb';
 const MESSAGE_RETENTION_LIMIT = Math.max(100, Number.parseInt(process.env.AGENT_MESSAGE_RETENTION_LIMIT || '5000', 10) || 5000);
+const THREAD_SESSIONS_ENABLED = normalizeBoolean(process.env.HAFLEET_THREAD_SESSIONS) === true;
+const ROUTER_TASK_CUTOVER_ENABLED = normalizeBoolean(process.env.HAFLEET_ROUTER_TASK_CUTOVER) === true;
+const ROUTER_SHADOW_ENABLED = normalizeBoolean(process.env.HAFLEET_ROUTER_SHADOW) === true;
+const AGENT_OPS_CLIENT_ENABLED = normalizeBoolean(process.env.HAFLEET_AGENT_OPS_CLIENT) === true;
+const AGENT_OPS_LOOPBACK_ORIGIN = AGENT_OPS_CLIENT_ENABLED
+  ? normalizeAgentOpsLoopbackOrigin(
+    process.env.HAFLEET_AGENT_OPS_LOOPBACK_ORIGIN || `http://127.0.0.1:${PORT}`,
+  )
+  : null;
+const RUNNER_LEASE_MS = Math.max(60_000, Number.parseInt(process.env.HAFLEET_RUNNER_LEASE_MS || '1200000', 10) || 1_200_000);
+const RUNNER_ACK_MS = Math.max(1_000, Number.parseInt(process.env.HAFLEET_RUNNER_ACK_MS || '60000', 10) || 60_000);
+const RUNNER_LAUNCH_RETRY_MS = Math.max(1_000, Math.min(
+  60_000,
+  Number.parseInt(process.env.HAFLEET_RUNNER_LAUNCH_RETRY_MS || '5000', 10) || 5_000,
+));
+const MAX_LIVE_RUNNERS = Math.max(1, Number.parseInt(process.env.HAFLEET_MAX_LIVE_RUNNERS || '8', 10) || 8);
+const MAX_PARKED_RUNNERS_RAW = Number.parseInt(process.env.HAFLEET_MAX_PARKED_RUNNERS || '4', 10);
+const MAX_PARKED_RUNNERS = Number.isFinite(MAX_PARKED_RUNNERS_RAW)
+  ? Math.max(0, MAX_PARKED_RUNNERS_RAW)
+  : 4;
+const REBUILD_TOKEN_BUDGET = Math.max(1_000, Number.parseInt(process.env.HAFLEET_REBUILD_TOKEN_BUDGET || '12000', 10) || 12_000);
+const THREAD_SESSION_MCP_SERVER_NAME = /^[A-Za-z0-9_-]{1,64}$/.test(process.env.HAFLEET_MCP_SERVER_NAME || '')
+  ? process.env.HAFLEET_MCP_SERVER_NAME
+  : 'hafleet';
+if (MAX_PARKED_RUNNERS >= MAX_LIVE_RUNNERS) {
+  throw new Error('HAFLEET_MAX_PARKED_RUNNERS must be lower than HAFLEET_MAX_LIVE_RUNNERS');
+}
+if (THREAD_SESSIONS_ENABLED && !ROUTER_TASK_CUTOVER_ENABLED) {
+  throw new Error('HAFLEET_THREAD_SESSIONS requires HAFLEET_ROUTER_TASK_CUTOVER=1');
+}
+if (AGENT_OPS_CLIENT_ENABLED && !THREAD_SESSIONS_ENABLED) {
+  throw new Error('HAFLEET_AGENT_OPS_CLIENT requires HAFLEET_THREAD_SESSIONS=1');
+}
+const routerRuntime = (ROUTER_TASK_CUTOVER_ENABLED || THREAD_SESSIONS_ENABLED || ROUTER_SHADOW_ENABLED)
+  ? await import('./router/dist/index.js')
+  : null;
+const {
+  createRouterTaskStore,
+  AgentOpsService,
+  migrateLegacyTasks,
+  openRouter,
+  runClaudeDispatch,
+  runCodexDispatch,
+  WorktreeManager,
+} = routerRuntime || {};
 const JSON_WRITE_BATCH_WINDOW_MS_RAW = Number.parseInt(process.env.AGENT_JSON_WRITE_BATCH_MS || '1000', 10);
 const JSON_WRITE_BATCH_WINDOW_MS = Number.isFinite(JSON_WRITE_BATCH_WINDOW_MS_RAW)
   ? Math.max(0, JSON_WRITE_BATCH_WINDOW_MS_RAW)
@@ -252,6 +310,7 @@ const BLOCKED_INFO_AGGREGATE_WINDOW_MS = Number.isFinite(BLOCKED_INFO_AGGREGATE_
 
 const AUTO_CLEAR_COOLDOWN_MS = Number.parseInt(process.env.AGENT_AUTO_CLEAR_COOLDOWN_MS || '300000', 10);
 const APPROVAL_TTL_MS = resolveApprovalTtlMs(process.env);
+const APPROVAL_ADAPTER_TIMEOUT_MS = approvalAdapterTimeoutMs(process.env);
 const autoClearLastTs = new Map();
 const autoClearPrevReason = new Map();
 
@@ -400,6 +459,20 @@ function normalizeWorkspacePath(value) {
   if (!trimmed || trimmed.length > 4096) return null;
   if (!path.isAbsolute(trimmed)) return null;
   return path.resolve(trimmed);
+}
+
+function normalizeWorkspaceMode(value) {
+  return value === 'worktree' ? 'worktree' : 'shared';
+}
+
+function normalizeWorktreeBootstrap(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) return [];
+  const argv = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || !item.trim() || item.length > 4096) return [];
+    argv.push(item);
+  }
+  return argv;
 }
 
 function normalizeRuntimeActiveNow(value) {
@@ -1632,10 +1705,32 @@ function normalizeCeiling(value) {
   };
 }
 const taskStoreData = loadJsonSync('tasks.json', []);
-const taskStore = createTaskStore({
-  initialData: taskStoreData,
-  save: (data) => saveJson('tasks.json', data),
-});
+const routerStore = (ROUTER_TASK_CUTOVER_ENABLED || THREAD_SESSIONS_ENABLED || ROUTER_SHADOW_ENABLED)
+  ? openRouter({ dbPath: path.join(DATA_DIR, 'router.db') })
+  : null;
+let taskStore;
+if (ROUTER_TASK_CUTOVER_ENABLED) {
+  const migration = migrateLegacyTasks(routerStore, taskStoreData);
+  if (!migration.replayed && existsSync(dataPath('tasks.json'))) {
+    const backupName = `tasks.json.pre-router-${Date.now()}.bak`;
+    copyFileSync(dataPath('tasks.json'), dataPath(backupName));
+    chmodSync(dataPath(backupName), 0o600);
+    console.log(`[router] task store cut over to SQLite; backup=${backupName} count=${migration.importedCount}`);
+  }
+  taskStore = createRouterTaskStore(routerStore);
+} else {
+  taskStore = createTaskStore({
+    initialData: taskStoreData,
+    save: (data) => saveJson('tasks.json', data),
+  });
+}
+const worktreeManager = THREAD_SESSIONS_ENABLED ? new WorktreeManager() : null;
+if (THREAD_SESSIONS_ENABLED) {
+  const report = routerStore.reconcileOnStart();
+  if (report.requeued || report.outcomeUnknown || report.expiredMatrixClaims) {
+    console.warn(`[router] startup reconciliation requeued=${report.requeued} outcome_unknown=${report.outcomeUnknown} matrix_claims=${report.expiredMatrixClaims}`);
+  }
+}
 const projectInspector = createProjectInspector();
 const supervisorSnapshotData = loadJsonSync('supervisor_snapshots.json', {});
 const supervisorSnapshotStore = createSupervisorSnapshotStore({
@@ -1665,6 +1760,668 @@ const projectSideStore = new ProjectSideStore(path.join(DATA_DIR, 'project-sides
  * accounts `ac_<name>`, so `@ac_.*` describes today's fleet instead of requiring a rename.
  */
 const MATRIX_AGENT_PREFIX_FOR_REGISTRATION = (process.env.MATRIX_AGENT_PREFIX || 'ac_').trim();
+const agentOpsService = AGENT_OPS_CLIENT_ENABLED ? new AgentOpsService(routerStore) : null;
+const agentOpsServerIdentity = AGENT_OPS_CLIENT_ENABLED
+  ? loadAgentOpsServerIdentity(path.join(DATA_DIR, 'agent-ops-server-identity.json'))
+  : null;
+if (agentOpsService && agentOpsServerIdentity) {
+  const identityBinding = agentOpsService.bindServerIdentity(agentOpsServerIdentity.fingerprint);
+  if (identityBinding.rotated) {
+    console.warn(`[agent-ops] server identity rotated; revoked ${identityBinding.revokedScopes} scoped client scope(s)`);
+  }
+}
+if (THREAD_SESSIONS_ENABLED) {
+  for (const decision of approvalStore.listRequests({ status: 'consumed', upstream_request_prefix: 'tss_' })) {
+    if (!decision.decision_event_id || !decision.upstream_request_id || !decision.decision) continue;
+    const reconciled = routerStore.reconcileApprovalDecision({
+      approvalId: decision.upstream_request_id,
+      decisionEventId: decision.decision_event_id,
+      decision: decision.decision,
+    });
+    if (!reconciled.ok && reconciled.code !== 'approval_mismatch') {
+      console.warn(`[router] approval reconciliation failed: ${reconciled.code}: ${reconciled.message}`);
+    }
+  }
+}
+const liveThreadSessionRunners = new Map();
+let routerPumpMicrotaskQueued = false;
+let routerPumpTimer = null;
+let routerPumpDueAt = null;
+let routerPumpRunning = false;
+let routerPumpAccepting = true;
+
+function routerRefusalStatus(result) {
+  if (!result || result.ok !== false) return 500;
+  if (result.code === 'not_found') return 404;
+  if (result.code === 'idempotency_conflict' || result.code === 'matrix_command_conflict') return 409;
+  if (result.code === 'remote_runner_unsupported' || result.code === 'unsupported_framework') return 422;
+  if (result.code === 'workspace_quarantined') return 423;
+  if (result.code === 'inspection_required') return 409;
+  if (result.code === 'inspection_expired') return 410;
+  if (result.code === 'resource_unavailable' || result.code === 'live_runner_cap') return 503;
+  return 400;
+}
+
+function threadSessionFramework(agent) {
+  return String(agent?.runtimeProfile?.primary?.framework || agent?.type || '').trim().toLowerCase();
+}
+
+function threadSessionAgentEligibility(agent) {
+  const framework = threadSessionFramework(agent);
+  if (framework !== 'claude' && framework !== 'codex') {
+    return {
+      ok: false,
+      code: 'unsupported_framework',
+      message: framework === 'octos'
+        ? 'Octos does not support disposable thread-session runners'
+        : `unsupported thread-session framework: ${framework || 'missing'}`,
+    };
+  }
+  const serverId = normalizeServer(agent?.server);
+  if (serverId && !isLocalAgentServer(serverId, LOCAL_SERVER_ID)) {
+    return { ok: false, code: 'remote_runner_unsupported', message: 'thread-session runners are local-only in v1' };
+  }
+  return { ok: true, framework, serverId };
+}
+
+function isFrontDeskAgent(agent) {
+  return agentRole(agent) === 'architect';
+}
+
+// The lease protects a DIRECTORY, so directory identity — and nothing else —
+// must determine the resource id. Mixing the agent id in minted a separate
+// resource per agent for one shared workdir, which let two writing runners
+// into the same tree while each believed its lease was exclusive
+// (REQ-TSS-WORKSPACE-LEASE). Symlinks are resolved so two spellings of one
+// directory cannot slip past either.
+// Returns both the resource id and the canonical path it was derived from. The
+// caller MUST register the workspace under the SAME canonical path: the lease
+// resource is keyed on the id (hash of realpath), and registerWorkspace refuses
+// a resource whose backend_path changes, so registering the raw path would make
+// two symlink spellings of one directory collide on the id yet disagree on the
+// path — a permanent registration failure for whichever agent arrived second.
+function safeWorkspaceResource(workspacePath) {
+  let canonicalPath = workspacePath;
+  try {
+    canonicalPath = realpathSync(workspacePath);
+  } catch {
+    // Callers only reach here for a path that already passed existsSync, so a
+    // resolution failure is exotic; hashing the given path still collides
+    // correctly for identical spellings, which is the common case.
+  }
+  const suffix = createHash('sha256').update(canonicalPath).digest('hex').slice(0, 20);
+  return { resourceId: `workspace:${suffix}`, canonicalPath };
+}
+
+async function resolveThreadSessionWorkspace(agent, threadRootEventId, mayWrite) {
+  const repositoryPath = normalizeWorkspacePath(agent?.workdir || agent?.homeDir);
+  if (!repositoryPath || !existsSync(repositoryPath)) {
+    return { ok: false, code: 'bad_request', message: 'agent has no existing managed workspace' };
+  }
+  if (mayWrite && agent.workspaceMode === 'worktree') {
+    if (!threadRootEventId || !agent.worktreesDir) {
+      return { ok: false, code: 'bad_request', message: 'worktree mode requires a thread root and worktrees_dir' };
+    }
+    try {
+      const info = await worktreeManager.ensureAsync({
+        repositoryPath,
+        worktreesDir: agent.worktreesDir,
+        agentId: agent.agentId,
+        threadRootEventId,
+        bootstrap: agent.worktreeBootstrap,
+      });
+      routerStore.registerWorkspace({
+        resourceId: info.resourceId,
+        safeLabel: info.safeLabel,
+        backendPath: info.path,
+        branchName: info.branch,
+      });
+      return { ok: true, resourceId: info.resourceId, cwd: info.path, workspaceMode: 'worktree' };
+    } catch (error) {
+      return { ok: false, code: 'resource_unavailable', message: `worktree unavailable: ${error?.message || error}` };
+    }
+  }
+  const { resourceId, canonicalPath } = safeWorkspaceResource(repositoryPath);
+  routerStore.registerWorkspace({
+    resourceId,
+    // The label names the directory, not the agent: several agents may share
+    // this one resource, so an agent-specific label would be misleading in
+    // whichever of them happened to register it first.
+    safeLabel: `${path.basename(canonicalPath) || 'workspace'}/shared`,
+    // Register the canonical path so two symlink spellings that resolve here
+    // agree on backend_path, not just on the id.
+    backendPath: canonicalPath,
+  });
+  // Launch in the canonical directory too, so the runner writes exactly where
+  // the lease guards, closing the enqueue→launch symlink-swap window.
+  return { ok: true, resourceId, cwd: canonicalPath, workspaceMode: 'shared' };
+}
+
+async function enqueueThreadSessionDispatch({ agent, sessionId, taskId = null, threadRootEventId = null }) {
+  const eligible = threadSessionAgentEligibility(agent);
+  if (!eligible.ok) return eligible;
+  const { framework, serverId } = eligible;
+  // An operator's /thread mode auto grant lifts the front-desk read-only
+  // default for this one session; the store still verifies the grant before
+  // accepting a write dispatch, so this stays a hint, not an authority.
+  const sessionInfo = routerStore.sessionById(sessionId);
+  const mayWrite = !isFrontDeskAgent(agent) || sessionInfo?.modeOverride === 'auto';
+  const workspace = await resolveThreadSessionWorkspace(agent, threadRootEventId, mayWrite);
+  if (!workspace.ok) return workspace;
+  const result = routerStore.enqueueDispatch({
+    sessionId,
+    taskId,
+    framework,
+    serverId,
+    localServerId: LOCAL_SERVER_ID,
+    workspaceMode: workspace.workspaceMode,
+    workspaceResourceId: workspace.resourceId,
+    mayWrite,
+    payload: {
+      kind: mayWrite ? 'task_turn' : 'front_desk_turn',
+      rebuildTokenBudget: REBUILD_TOKEN_BUDGET,
+    },
+  });
+  if (result.ok) scheduleRouterPump();
+  return result;
+}
+
+const THREAD_DIRECTIVE_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+// Returns null when the message is not a /thread directive; otherwise an
+// object with either {model?, mode?} (valid) or {error} (malformed, so the
+// sender gets a refusal instead of the text silently becoming chat input).
+function parseThreadSessionDirective(bodyRaw) {
+  // Mention pills arrive as markdown links or bare @names; strip both so the
+  // directive can lead the visible text.
+  const body = String(bodyRaw || '')
+    .replace(/\[[^\]]*\]\([^)]*\)/g, ' ')
+    .trim()
+    .replace(/^(?:@[\w.-]+[:,]?\s+)+/, '')
+    .trim();
+  if (!/^\/thread\b/i.test(body)) return null;
+  const usage = 'usage: /thread model <name|default> | /thread mode <plan|auto>';
+  const match = body.match(/^\/thread\s+(\S+)(?:\s+(\S+))?\s*$/i);
+  if (!match) return { error: usage };
+  const [, keyRaw, valueRaw] = match;
+  const key = keyRaw.toLowerCase();
+  if (key === 'model') {
+    if (!valueRaw) return { error: usage };
+    if (/^(default|reset|clear)$/i.test(valueRaw)) return { model: null };
+    if (!THREAD_DIRECTIVE_MODEL_PATTERN.test(valueRaw)) {
+      return { error: 'model must be a plain model name or alias (max 64 chars)' };
+    }
+    return { model: valueRaw };
+  }
+  if (key === 'mode') {
+    const mode = (valueRaw || '').toLowerCase();
+    if (mode === 'plan' || mode === 'auto') return { mode };
+    if (/^(default|reset|clear)$/.test(mode)) return { mode: null };
+    return { error: usage };
+  }
+  return { error: usage };
+}
+
+function threadSessionDirectiveConfirmation(sessionInfo) {
+  const model = sessionInfo.modelOverride ? `model=${sessionInfo.modelOverride}` : 'model=default';
+  const mode = sessionInfo.modeOverride ? `mode=${sessionInfo.modeOverride}` : 'mode=default (read-only)';
+  const writeWarning = sessionInfo.modeOverride === 'auto'
+    ? ' Runners in this thread may now write to the agent workspace (writes stay serialized by workspace lease).'
+    : '';
+  return `Thread session updated: ${model}, ${mode}.${writeWarning}`;
+}
+
+function makePromotedTaskTitle(body) {
+  const withoutCommand = String(body || '').replace(/^\s*\/task\b/i, '').replace(/@[A-Za-z0-9_-]+/g, '').trim();
+  return (withoutCommand.split('\n').find((line) => line.trim()) || 'Matrix task').trim().slice(0, 255);
+}
+
+function shadowMatrixMessageToRouter(agentName, msg) {
+  if (!ROUTER_SHADOW_ENABLED || THREAD_SESSIONS_ENABLED || !routerStore) {
+    return { ok: true, shadowed: false, reason: 'shadow_disabled' };
+  }
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent) || !agent.agentId) {
+    return { ok: true, shadowed: false, reason: 'unstable_agent_identity' };
+  }
+  const eligible = threadSessionAgentEligibility(agent);
+  if (!eligible.ok) return { ok: true, shadowed: false, reason: eligible.code };
+  const roomId = msg?.matrixContext?.roomId;
+  const matrixEventId = msg?.matrixContext?.eventId;
+  if (!roomId || !matrixEventId) {
+    return { ok: true, shadowed: false, reason: 'missing_matrix_identity' };
+  }
+  const result = routerStore.ingestMessage({
+    messageId: msg.id,
+    roomId,
+    matrixEventId,
+    threadRootEventId: msg?.matrixContext?.threadRootEventId || null,
+    senderMxid: msg.senderMxid,
+    senderName: msg.from,
+    recipientAgentId: agent.agentId,
+    recipientAgentName: agent.name,
+    normalizedBody: msg.full || msg.summary,
+    receivedAt: msg.ts,
+    explicitTask: /^\s*\/task\b/i.test(msg.full || msg.summary || ''),
+  });
+  if (!result.ok) return { ...result, shadowed: false };
+  return { ok: true, shadowed: true, created: result.created, sessionId: result.session.sessionId };
+}
+
+async function routeMatrixMessageToThreadSession(agentName, msg) {
+  if (!THREAD_SESSIONS_ENABLED) return { ok: true, legacy: true };
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return { ok: false, code: 'not_found', message: `agent not found: ${agentName}` };
+  if (!agent.agentId) {
+    return { ok: false, code: 'bad_request', message: `agent '${agentName}' has no stable v1 manifest id` };
+  }
+  const eligible = threadSessionAgentEligibility(agent);
+  if (!eligible.ok) return eligible;
+  const roomId = msg?.matrixContext?.roomId;
+  const matrixEventId = msg?.matrixContext?.eventId;
+  const threadRootEventId = msg?.matrixContext?.threadRootEventId || null;
+  if (!roomId || !matrixEventId) {
+    return { ok: false, code: 'bad_request', message: 'thread-session routing requires authenticated Matrix room and event ids' };
+  }
+  const directive = parseThreadSessionDirective(msg.full || msg.summary || '');
+  if (directive) {
+    // A bad directive must not fail message delivery (the bridge would post a
+    // scary delivery-failure warning into the room). Consume it and answer
+    // with an in-thread notice instead.
+    const consumeWithNotice = (body) => {
+      routerStore.queueSessionNotice({
+        roomId,
+        threadRootEventId,
+        senderAgentName: agent.name,
+        dedupeKey: `thread-directive-help:${matrixEventId}`,
+        body,
+      });
+      scheduleRouterPump();
+      return { ok: true, directive: true, applied: false };
+    };
+    if (msg.trustLevel !== 'operator') {
+      return consumeWithNotice('/thread directives require operator trust; the message was not delivered as chat.');
+    }
+    if (directive.error) {
+      return consumeWithNotice(directive.error);
+    }
+    const applied = routerStore.setSessionOverrides({
+      agentId: agent.agentId,
+      agentName: agent.name,
+      roomId,
+      threadRootEventId,
+      ...(directive.model !== undefined ? { model: directive.model } : {}),
+      ...(directive.mode !== undefined ? { mode: directive.mode } : {}),
+      requestedBy: msg.senderMxid || msg.from,
+    });
+    // Success is a SessionView (no ok field); only an explicit refusal aborts.
+    if (applied.ok === false) return applied;
+    appendDeliveryEvent({
+      type: 'message.thread_directive_applied',
+      source: 'backend',
+      messageId: msg.id,
+      agent: agentName,
+      context: {
+        modelOverride: applied.modelOverride,
+        modeOverride: applied.modeOverride,
+        requestedBy: msg.senderMxid || msg.from,
+      },
+    });
+    routerStore.queueSessionNotice({
+      roomId,
+      threadRootEventId,
+      senderAgentName: agent.name,
+      dedupeKey: `thread-directive:${matrixEventId}`,
+      body: threadSessionDirectiveConfirmation(applied),
+    });
+    scheduleRouterPump();
+    // Directives configure the session; they are not conversation input.
+    return { ok: true, directive: true };
+  }
+  const explicitTask = /^\s*\/task\b/i.test(msg.full || msg.summary || '');
+  if (explicitTask && isFrontDeskAgent(agent)) {
+    const workerTargets = [...new Set((Array.isArray(msg.mentions) ? msg.mentions : [])
+      .filter((name) => name !== agent.name && isAgentRecord(agents[name]) && !isFrontDeskAgent(agents[name])))];
+    if (workerTargets.length !== 1) {
+      return {
+        ok: false,
+        code: 'bad_request',
+        message: 'explicit /task must address exactly one registered coding worker',
+      };
+    }
+    return { ok: true, delegatedExplicitTaskTo: workerTargets[0] };
+  }
+  const authenticatedInput = {
+    messageId: msg.id,
+    roomId,
+    matrixEventId,
+    threadRootEventId,
+    senderMxid: msg.senderMxid,
+    senderName: msg.from,
+    recipientAgentId: agent.agentId,
+    recipientAgentName: agent.name,
+    normalizedBody: msg.full || msg.summary,
+    receivedAt: msg.ts,
+    explicitTask,
+  };
+
+  if (!threadRootEventId && !isFrontDeskAgent(agent)) {
+    const stored = routerStore.storeTaskMessage(authenticatedInput);
+    if (!stored.ok) return stored;
+    return routerStore.createTaskIntent({
+      requestScope: `matrix-direct:${agent.agentId}`,
+      requestKey: matrixEventId,
+      roomId,
+      threadRootEventId: matrixEventId,
+      rootMessageId: msg.id,
+      inputMessageIds: [msg.id],
+      task: {
+        title: makePromotedTaskTitle(msg.full || msg.summary),
+        description: msg.full || msg.summary,
+        assigneeAgentId: agent.agentId,
+        assigneeName: agent.name,
+        createdBy: msg.senderMxid || msg.from,
+      },
+      acknowledgementBody: `Task created for @${agent.name}: ${makePromotedTaskTitle(msg.full || msg.summary)}`,
+    });
+  }
+
+  const ingested = routerStore.ingestMessage(authenticatedInput);
+  if (!ingested.ok) return ingested;
+
+  if (threadRootEventId && !isFrontDeskAgent(agent)) {
+    const binding = routerStore.findActiveTaskBinding(agent.agentId, roomId, threadRootEventId);
+    if (!binding.ok && binding.code) return binding;
+    const attached = routerStore.attachTaskInputs({
+      taskId: binding.taskId,
+      requestScope: `matrix-thread:${agent.agentId}`,
+      requestKey: matrixEventId,
+      messageIds: [msg.id],
+    });
+    if (!attached.ok) return attached;
+    return await enqueueThreadSessionDispatch({
+      agent,
+      sessionId: binding.sessionId,
+      taskId: binding.taskId,
+      threadRootEventId,
+      prompt: msg.full || msg.summary,
+    });
+  }
+
+  return await enqueueThreadSessionDispatch({
+    agent,
+    sessionId: ingested.session.sessionId,
+    threadRootEventId,
+    prompt: msg.full || msg.summary,
+  });
+}
+
+const THREAD_SESSION_MESSAGE_CURSOR = 'messages.json:matrix-thread-router-v1';
+
+function threadSessionMessageCursorValue(msg) {
+  return JSON.stringify({ ts: Number(msg?.ts) || 0, id: typeof msg?.id === 'string' ? msg.id : '' });
+}
+
+function parseThreadSessionMessageCursor(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return {
+      ts: Number(parsed?.ts) || 0,
+      id: typeof parsed?.id === 'string' ? parsed.id : '',
+    };
+  } catch {
+    throw new Error('thread-session message ingestion cursor is invalid');
+  }
+}
+
+function isThreadSessionMatrixSourceMessage(msg) {
+  return msg?.source === 'matrix'
+    && typeof msg?.id === 'string'
+    && typeof msg?.matrixContext?.roomId === 'string'
+    && typeof msg?.matrixContext?.eventId === 'string';
+}
+
+async function routePersistedMatrixMessageToThreadSessions(msg) {
+  const directTargetKind = msg?.to && isAgentRecord(agents[msg.to]) ? 'agent' : null;
+  for (const agentName of deliveryTargetAgentsForMessage(msg, directTargetKind)) {
+    const routed = await routeMatrixMessageToThreadSession(agentName, msg);
+    if (!routed.ok) return routed;
+  }
+  return { ok: true };
+}
+
+async function reconcileThreadSessionSourceMessages() {
+  if (!THREAD_SESSIONS_ENABLED) return { scanned: 0, initialized: false };
+  const sourceMessages = messages.filter(isThreadSessionMatrixSourceMessage);
+  const initialValue = threadSessionMessageCursorValue(sourceMessages[sourceMessages.length - 1]);
+  const initialized = routerStore.initializeIngestionCursor(
+    THREAD_SESSION_MESSAGE_CURSOR,
+    initialValue,
+  );
+  if (initialized.created) return { scanned: 0, initialized: true };
+  const cursor = parseThreadSessionMessageCursor(initialized.value);
+  const startIndex = firstMessageAfterCursorIndex(sourceMessages, cursor.ts, cursor.id);
+  let scanned = 0;
+  for (const msg of sourceMessages.slice(startIndex)) {
+    const routed = await routePersistedMatrixMessageToThreadSessions(msg);
+    if (!routed.ok) {
+      throw new Error(`thread-session source reconciliation refused message ${msg.id}: ${routed.code}: ${routed.message}`);
+    }
+    routerStore.advanceIngestionCursor(THREAD_SESSION_MESSAGE_CURSOR, threadSessionMessageCursorValue(msg));
+    scanned += 1;
+  }
+  return { scanned, initialized: false };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function requestThreadSessionOwnerApproval(agent, projectRoomId, request) {
+  const created = approvalStore.createRequest({
+    agent: agent.name,
+    runtime: 'codex',
+    project_room_id: projectRoomId,
+    upstream_request_id: request.approvalId,
+    tool_name: `app_server_${request.kind}`,
+    description: request.reason || `${request.kind} permission request`,
+    input_preview: JSON.stringify({ command: request.command, cwd: request.cwd }).slice(0, 8192),
+  });
+  if (created.status === 'pending') {
+    broadcastSSE('approval_requested', { request_id: created.id, agent: created.agent });
+  }
+  let record = created;
+  while (record.status === 'pending') {
+    await delay(250);
+    record = approvalStore.getRequest(created.id);
+    if (!record) throw new Error('owner approval request disappeared');
+  }
+  const consumed = approvalStore.consumeDecision(record.id, agent.name, record.input_digest || null);
+  if (!consumed.ok) throw new Error(`owner approval consume failed: ${consumed.code}`);
+  return { decisionEventId: consumed.decision_event_id, decision: consumed.decision };
+}
+
+function runnerEnvironment(agent) {
+  const token = agentTokens.get(agent.name);
+  if (!token) throw new Error(`ephemeral runner agent token is unavailable for '${agent.name}'`);
+  const env = {
+    AGENT_NAME: agent.name,
+    HAFLEET_API: `http://127.0.0.1:${PORT}`,
+    HAFLEET_EPHEMERAL_RUNNER: '1',
+    HAFLEET_MCP_SERVER_NAME: THREAD_SESSION_MCP_SERVER_NAME,
+    HAFLEET_RUNTIME_DIR: RUNTIME_ROOT,
+    HAFLEET_AGENT_ID: agent.agentId,
+    AGENT_TOKEN: token,
+  };
+  if (agent.homeDir) env.HAFLEET_AGENT_STATE_DIR = path.join(agent.homeDir, 'state');
+  const profile = agent.runtimeProfile?.primary;
+  if (profile?.apiBaseUrl && threadSessionFramework(agent) === 'claude') env.ANTHROPIC_BASE_URL = profile.apiBaseUrl;
+  if (profile?.apiKey && threadSessionFramework(agent) === 'claude') env.ANTHROPIC_API_KEY = profile.apiKey;
+  return env;
+}
+
+// `mayWrite` selects the permission mode: only a dispatch holding the
+// workspace lease may edit files. A front-desk turn runs in `plan`, which can
+// read and reason but not modify — without a lease its edits would be neither
+// serialized against other runners nor recorded as workspace dirt.
+//
+// Both mode values are still pending the real-CLI smoke test that
+// docs/THREAD-SESSIONS.md gates the canary on; if either is rejected the
+// dispatch fails closed to outcome_unknown rather than running unconstrained.
+function claudeThreadSessionArgs(agent, mayWrite, modelOverride = null) {
+  if (normalizeBoolean(process.env.HAFLEET_CLAUDE_PERMISSION_CHANNEL) === false) {
+    throw new Error('managed Claude ephemeral runners require the owner-approval MCP channel');
+  }
+  const args = [
+    '-p', '--output-format', 'stream-json', '--verbose',
+    '--permission-mode', mayWrite ? 'auto' : 'plan',
+    '--dangerously-load-development-channels', `server:${THREAD_SESSION_MCP_SERVER_NAME}`,
+  ];
+  // Store-validated, but re-checked here: this string lands on a CLI argv.
+  if (modelOverride && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(modelOverride)) {
+    args.push('--model', modelOverride);
+  }
+  if (!existsSync('/etc/claude-code/managed-mcp.json')) {
+    const mcpConfigCandidates = [agent.workdir, agent.homeDir]
+      .map((root) => root ? path.join(root, '.mcp.json') : null)
+      .filter(Boolean);
+    const mcpConfig = mcpConfigCandidates.find((candidate) => existsSync(candidate)) || null;
+    if (!mcpConfig || !existsSync(mcpConfig)) {
+      throw new Error(`Claude owner-approval MCP configuration is unavailable for '${agent.name}'`);
+    }
+    args.push(`--mcp-config=${mcpConfig}`);
+  }
+  return args;
+}
+
+function normalizedCodexEffort(value) {
+  const effort = String(value || '').trim().toLowerCase();
+  return ['low', 'medium', 'high', 'xhigh'].includes(effort) ? effort : undefined;
+}
+
+async function launchClaimedThreadSessionRunner(claim, signal) {
+  const descriptor = routerStore.getLaunchDescriptor(claim);
+  if (!descriptor.ok && descriptor.code) throw new Error(`${descriptor.code}: ${descriptor.message}`);
+  const agent = agents[descriptor.agentName];
+  if (!isAgentRecord(agent) || agent.agentId !== descriptor.agentId) {
+    throw new Error('runner launch descriptor no longer matches the registered agent');
+  }
+  // Read from the dispatch row, not re-derived from the agent's role: the
+  // sandbox must agree with whatever the lease decision actually recorded.
+  const mayWrite = descriptor.mayWrite === true;
+  const base = {
+    router: routerStore,
+    claim,
+    cwd: descriptor.cwd,
+    env: runnerEnvironment(agent),
+    acknowledgementTimeoutMs: RUNNER_ACK_MS,
+    executionTimeoutMs: RUNNER_LEASE_MS,
+    signal,
+    mayWrite,
+  };
+  if (descriptor.framework === 'codex') {
+    return runCodexDispatch({
+      ...base,
+      executable: process.env.HAFLEET_CODEX_RUNNER_BIN || 'codex',
+      model: descriptor.modelOverride || agent.runtimeProfile?.primary?.model || undefined,
+      effort: normalizedCodexEffort(agent.runtimeProfile?.primary?.reasoning),
+      approvalTimeoutMs: APPROVAL_ADAPTER_TIMEOUT_MS,
+      maxParkedRunners: MAX_PARKED_RUNNERS,
+      mcpServer: {
+        name: THREAD_SESSION_MCP_SERVER_NAME,
+        command: process.execPath,
+        args: [path.join(REPO_ROOT, 'mcp-server.js')],
+        envVars: [
+          'AGENT_NAME', 'HAFLEET_API', 'HAFLEET_MCP_SERVER_NAME',
+          'HAFLEET_RUNTIME_DIR', 'HAFLEET_AGENT_STATE_DIR',
+          'HAFLEET_EPHEMERAL_RUNNER', 'HAFLEET_AGENT_ID', 'AGENT_TOKEN',
+          'HAFLEET_DISPATCH_CAPABILITY', 'HAFLEET_DISPATCH_ID',
+          'HAFLEET_RUNNER_ID', 'HAFLEET_FENCE_GENERATION',
+        ],
+      },
+      requestOwnerApproval: (request) => requestThreadSessionOwnerApproval(agent, descriptor.roomId, request),
+    });
+  }
+  return runClaudeDispatch({
+    ...base,
+    executable: process.env.HAFLEET_CLAUDE_RUNNER_BIN || 'claude',
+    args: claudeThreadSessionArgs(agent, mayWrite, descriptor.modelOverride),
+  });
+}
+
+function scheduleRouterPump(delayMs = 0) {
+  if (!THREAD_SESSIONS_ENABLED || !routerPumpAccepting) return;
+  const normalizedDelay = Number.isFinite(delayMs) ? Math.max(0, Math.floor(delayMs)) : 0;
+  if (normalizedDelay === 0) {
+    if (routerPumpTimer) {
+      clearTimeout(routerPumpTimer);
+      lifecycleTimeouts.delete(routerPumpTimer);
+      routerPumpTimer = null;
+      routerPumpDueAt = null;
+    }
+    if (routerPumpMicrotaskQueued) return;
+    routerPumpMicrotaskQueued = true;
+    queueMicrotask(() => {
+      routerPumpMicrotaskQueued = false;
+      if (routerPumpAccepting) void pumpRouterDispatches();
+    });
+    return;
+  }
+  if (routerPumpMicrotaskQueued) return;
+  const dueAt = Date.now() + normalizedDelay;
+  if (routerPumpTimer && routerPumpDueAt !== null && routerPumpDueAt <= dueAt) return;
+  if (routerPumpTimer) {
+    clearTimeout(routerPumpTimer);
+    lifecycleTimeouts.delete(routerPumpTimer);
+  }
+  routerPumpDueAt = dueAt;
+  routerPumpTimer = trackLifecycleTimeout(() => {
+    routerPumpTimer = null;
+    routerPumpDueAt = null;
+    if (routerPumpAccepting) void pumpRouterDispatches();
+  }, normalizedDelay);
+}
+
+async function pumpRouterDispatches() {
+  if (!THREAD_SESSIONS_ENABLED || !routerPumpAccepting || routerPumpRunning) return;
+  routerPumpRunning = true;
+  try {
+    while (liveThreadSessionRunners.size < MAX_LIVE_RUNNERS) {
+      const runnerId = `runner_${randomBytes(16).toString('hex')}`;
+      const claim = routerStore.claimDispatch({
+        runnerId,
+        leaseMs: RUNNER_LEASE_MS + APPROVAL_TTL_MS,
+        capabilityTtlMs: RUNNER_LEASE_MS + APPROVAL_TTL_MS,
+        maxLiveRunners: MAX_LIVE_RUNNERS,
+      });
+      if (!claim || !claim.ok) {
+        const nextAvailableAt = routerStore.nextQueuedDispatchAt();
+        if (nextAvailableAt !== null) scheduleRouterPump(Math.max(1, nextAvailableAt - Date.now()));
+        break;
+      }
+      const controller = new AbortController();
+      let nextPumpDelayMs = 0;
+      const running = launchClaimedThreadSessionRunner(claim, controller.signal)
+        .catch((error) => {
+          const state = routerStore.snapshot().dispatches.find((row) => row.dispatchId === claim.dispatchId)?.state;
+          if (state === 'leased') {
+            const reason = redactPathLikeText(error?.message || error, 1000) || 'runner launch failed';
+            const requeued = routerStore.requeueBeforeStart(claim, RUNNER_LAUNCH_RETRY_MS, reason);
+            if (requeued.ok) nextPumpDelayMs = RUNNER_LAUNCH_RETRY_MS;
+            else console.error(`[router-runner] failed to requeue dispatch=${claim.dispatchId}: ${requeued.code}: ${requeued.message}`);
+          }
+          console.error(`[router-runner] dispatch=${claim.dispatchId} failed: ${error?.message || error}`);
+        })
+        .finally(() => {
+          liveThreadSessionRunners.delete(claim.dispatchId);
+          scheduleRouterPump(nextPumpDelayMs);
+        });
+      liveThreadSessionRunners.set(claim.dispatchId, { running, controller });
+    }
+  } finally {
+    routerPumpRunning = false;
+  }
+}
 const localActivitySweepState = loadJsonSync('local_activity_sweep.json', { selectionCursor: 0 });
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
@@ -1895,6 +2652,9 @@ for (const agent of Object.values(agents)) {
   agent.agentId = normalizeAgentId(agent.agentId) || null;
   agent.homeDir = normalizeWorkspacePath(agent.homeDir) || null;
   agent.workdir = normalizeWorkspacePath(agent.workdir) || null;
+  agent.workspaceMode = normalizeWorkspaceMode(agent.workspaceMode || agent.workspace_mode);
+  agent.worktreesDir = normalizeWorkspacePath(agent.worktreesDir || agent.worktrees_dir) || null;
+  agent.worktreeBootstrap = normalizeWorktreeBootstrap(agent.worktreeBootstrap || agent.worktree_bootstrap);
   agent.stateDir = normalizeWorkspacePath(agent.stateDir) || null;
   agent.managedProjects = normalizeManagedProjects(agent.managedProjects);
   agent.human = normalizeHumanMeta(agent.human, { preserveLegacy: true });
@@ -2235,6 +2995,37 @@ function collectUnreadRetainedMessageIds() {
   return keep;
 }
 
+function collectRouterUncopiedMessageIds() {
+  const keep = new Set();
+  if (!THREAD_SESSIONS_ENABLED || !routerStore) return keep;
+  const rawCursor = routerStore.readIngestionCursor(THREAD_SESSION_MESSAGE_CURSOR);
+  if (!rawCursor) {
+    for (const msg of messages) {
+      if (isThreadSessionMatrixSourceMessage(msg)) keep.add(msg.id);
+    }
+    return keep;
+  }
+  const cursor = parseThreadSessionMessageCursor(rawCursor);
+  for (const msg of messages) {
+    if (isThreadSessionMatrixSourceMessage(msg) && isMessageAfterCursor(msg, cursor.ts, cursor.id)) {
+      keep.add(msg.id);
+    }
+  }
+  return keep;
+}
+
+// True when `msg` sorts strictly after the thread-session ingestion cursor —
+// i.e. it has not been copied into the router yet and must survive retention
+// pruning until reconciliation catches up. Same (ts, id) ordering as
+// compareMsgOrder/firstMessageAfterCursorIndex.
+function isMessageAfterCursor(msg, cursorTs, cursorId) {
+  const normalizedTs = Number(cursorTs) || 0;
+  const normalizedId = typeof cursorId === 'string' ? cursorId : null;
+  return normalizedId
+    ? compareMsgOrder(msg, { ts: normalizedTs, id: normalizedId }) > 0
+    : (Number(msg?.ts) || 0) > normalizedTs;
+}
+
 function planMessagePrune(rows) {
   const list = Array.isArray(rows) ? rows : [];
   if (list.length <= MESSAGE_RETENTION_LIMIT) {
@@ -2242,12 +3033,14 @@ function planMessagePrune(rows) {
   }
   const retainFrom = Math.max(0, list.length - MESSAGE_RETENTION_LIMIT);
   const unreadKeepIds = collectUnreadRetainedMessageIds();
+  const routerKeepIds = collectRouterUncopiedMessageIds();
   const retained = [];
   const pruned = [];
 
   for (let i = 0; i < list.length; i += 1) {
     const msg = list[i];
-    const keep = i >= retainFrom || (typeof msg?.id === 'string' && unreadKeepIds.has(msg.id));
+    const keep = i >= retainFrom || (typeof msg?.id === 'string'
+      && (unreadKeepIds.has(msg.id) || routerKeepIds.has(msg.id)));
     if (keep) retained.push(msg);
     else pruned.push(msg);
   }
@@ -3457,6 +4250,47 @@ async function emitMatrixStoredMessageSideEffects(msg, receipt, { senderIsAgent 
   if (senderIsAgent) markAgentOutbound(msg.from);
 
   for (const agentName of deliveryTargetAgentsForMessage(msg, directTargetKind)) {
+    if (THREAD_SESSIONS_ENABLED) {
+      const routed = await routeMatrixMessageToThreadSession(agentName, msg);
+      if (!routed.ok) {
+        appendDeliveryEvent({
+          type: 'message.router_refused',
+          source: 'backend',
+          messageId: msg.id,
+          agent: agentName,
+          reason: routed.code,
+          context: { detail: routed.message },
+        });
+        return {
+          ok: false,
+          status: routerRefusalStatus(routed),
+          error: `thread-session routing refused for ${agentName}: ${routed.code}: ${routed.message}`,
+        };
+      }
+      appendDeliveryEvent({
+        type: 'message.router_accepted',
+        source: 'backend',
+        messageId: msg.id,
+        agent: agentName,
+      });
+      continue;
+    }
+    if (ROUTER_SHADOW_ENABLED) {
+      try {
+        const shadowed = shadowMatrixMessageToRouter(agentName, msg);
+        appendDeliveryEvent({
+          type: shadowed.ok && shadowed.shadowed
+            ? 'message.router_shadowed'
+            : 'message.router_shadow_skipped',
+          source: 'backend',
+          messageId: msg.id,
+          agent: agentName,
+          reason: shadowed.reason || (shadowed.ok ? null : shadowed.code),
+        });
+      } catch (error) {
+        console.warn(`[router-shadow] message=${msg.id} agent=${agentName} ignored error: ${error?.message || error}`);
+      }
+    }
     const state = getAgentDeliveryState(agentName);
     if (!state.online || !agents[agentName]?.tmux) continue;
     const result = await pushNotify(agentName, msg, {
@@ -3467,6 +4301,9 @@ async function emitMatrixStoredMessageSideEffects(msg, receipt, { senderIsAgent 
     if (!isCatchupNotificationComplete(result) && !durableInboxFallback) {
       return { ok: false, status: 503, error: `Matrix wake queue failed for ${agentName}: ${result?.reason || 'unknown error'}` };
     }
+  }
+  if (THREAD_SESSIONS_ENABLED) {
+    routerStore.advanceIngestionCursor(THREAD_SESSION_MESSAGE_CURSOR, threadSessionMessageCursorValue(msg));
   }
   return { ok: true };
 }
@@ -6723,6 +7560,653 @@ const requireApprovalBridgeSecret = (req, res, next) => {
   }
   return requireBridgeSecret(req, res, next);
 };
+const requireRouterBridgeSecret = (req, res, next) => {
+  if (!THREAD_SESSIONS_ENABLED) return res.status(404).json({ error: 'thread-session router is disabled' });
+  if (!getBridgeSecret()) return res.status(503).json({ error: 'MATRIX_BRIDGE_SECRET is required for router outboxes' });
+  return requireBridgeSecret(req, res, next);
+};
+const requireRouterBearer = (req, res, next) => {
+  if (!routerStore) return res.status(404).json({ error: 'router is disabled' });
+  if (!process.env.API_TOKEN) return res.status(503).json({ error: 'API_TOKEN is required for router operator endpoints' });
+  return requireBearer(req, res, next);
+};
+
+function agentOpsStatus(result) {
+  if (!result || result.ok !== false) return 500;
+  if (result.code === 'not_found') return 404;
+  if (result.code === 'device_enrollment_required' || result.code === 'idempotency_conflict'
+      || result.code === 'capability_consumed' || result.code === 'precondition_failed'
+      || result.code === 'inspection_required' || result.code === 'invalid_transition') return 409;
+  if (result.code === 'capability_expired' || result.code === 'inspection_expired') return 410;
+  if (result.code === 'invalid_capability' || result.code === 'auth_fence_stale'
+      || result.code === 'scope_mismatch' || result.code === 'device_mismatch') return 401;
+  return 400;
+}
+
+function sendAgentOpsError(res, status, code, error) {
+  return res.status(status).json({
+    schema: AGENT_OPS_CLIENT_SCHEMA,
+    error,
+    code,
+  });
+}
+
+function respondAgentOps(res, result) {
+  if (result?.ok) return false;
+  sendAgentOpsError(
+    res,
+    agentOpsStatus(result),
+    result?.code || 'internal_error',
+    result?.message || 'Agent Operations request failed',
+  );
+  return true;
+}
+
+function requireAgentOpsEnabled(_req, res, next) {
+  if (!AGENT_OPS_CLIENT_ENABLED || !agentOpsService || !agentOpsServerIdentity) {
+    return res.status(404).json({ error: 'Agent Operations client contract is disabled' });
+  }
+  return next();
+}
+
+function requireAgentOpsLoopback(req, res, next) {
+  const checked = checkAgentOpsLoopbackRequest(req, AGENT_OPS_LOOPBACK_ORIGIN);
+  if (!checked.ok) return sendAgentOpsError(res, 403, checked.code, checked.message);
+  req.agentOpsAudience = checked.audience;
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  return next();
+}
+
+function registeredAgentByStableId(stableAgentId) {
+  return Object.values(agents).find((candidate) => (
+    isAgentRecord(candidate) && candidate.agentId === stableAgentId
+  )) || null;
+}
+
+function currentAgentOpsBinding(scope) {
+  if (!scope) return null;
+  const agent = registeredAgentByStableId(scope.stable_agent_id);
+  if (!agent) return null;
+  const bindings = approvalStore.listBindings({ agent: agent.name, projectRoomId: scope.project_room_id });
+  if (bindings.length !== 1) return null;
+  const binding = bindings[0];
+  if (
+    binding.ownerMxid !== scope.owner_mxid
+    || binding.ownerDmRoomId !== scope.owner_dm_room_id
+  ) return null;
+  return { agent, binding };
+}
+
+function requireLiveAgentOpsBinding(auth) {
+  const scope = agentOpsService.scope(auth.scopeId);
+  const bound = currentAgentOpsBinding(scope);
+  if (bound) return bound;
+  if (scope) agentOpsService.revokeScope(scope.scope_id);
+  return null;
+}
+
+function requireAgentOpsClientSession(req, res, next) {
+  const clientSessionId = normalizeOptionalText(req.headers['x-agent-ops-client-session'], 255);
+  const sessionCapability = parseAgentOpsSessionAuthorization(req.headers.authorization);
+  const proofNonce = normalizeOptionalText(req.headers['x-agent-ops-proof-nonce'], 255);
+  const proof = normalizeOptionalText(req.headers['x-agent-ops-proof'], 1024);
+  if (!clientSessionId || !sessionCapability || !proofNonce || !proof) {
+    return sendAgentOpsError(res, 401, 'invalid_capability', 'Agent Operations session capability and proof headers are required');
+  }
+  const descriptor = agentOpsService.sessionProofDescriptor({
+    clientSessionId,
+    sessionCapability,
+    audience: req.agentOpsAudience,
+  });
+  if (respondAgentOps(res, descriptor)) return;
+  if (!requireLiveAgentOpsBinding(descriptor.auth)) {
+    return sendAgentOpsError(res, 401, 'auth_fence_stale', 'Agent Operations owner binding or registered agent changed');
+  }
+  const material = agentOpsSessionProofMaterial({
+    clientSessionId,
+    proofNonce,
+    method: req.method,
+    requestPath: req.originalUrl,
+    body: req.method === 'GET' ? null : (req.body ?? null),
+    audience: req.agentOpsAudience,
+  });
+  if (!verifyAgentOpsProof(descriptor.clientPublicJwk, proof, material)) {
+    return sendAgentOpsError(res, 401, 'invalid_capability', 'Agent Operations proof of possession is invalid');
+  }
+  const consumed = agentOpsService.consumeRequestNonce({
+    ...descriptor.auth,
+    nonce: proofNonce,
+    sessionCapability,
+  });
+  if (respondAgentOps(res, consumed)) return;
+  req.agentOpsAuth = descriptor.auth;
+  req.agentOpsSessionCapability = sessionCapability;
+  return next();
+}
+
+function resolveAgentOpsScopeRequest(body) {
+  const agentName = normalizeAgentName(body?.agent);
+  const agent = agentName ? agents[agentName] : null;
+  if (!isAgentRecord(agent) || !agent.agentId) {
+    return { ok: false, status: 404, code: 'not_found', error: 'registered stable agent not found' };
+  }
+  const projectRoomId = normalizeOptionalText(body?.project_room_id, 255);
+  const ownerMxid = normalizeOptionalText(body?.owner_mxid, 255);
+  const ownerDmRoomId = normalizeOptionalText(body?.owner_dm_room_id, 255);
+  if (!projectRoomId || !ownerMxid || !ownerDmRoomId) {
+    return { ok: false, status: 400, code: 'bad_request', error: 'project_room_id, owner_mxid and owner_dm_room_id are required' };
+  }
+  const bindings = approvalStore.listBindings({ agent: agent.name, projectRoomId });
+  if (bindings.length !== 1) {
+    return { ok: false, status: 409, code: 'scope_mismatch', error: bindings.length === 0 ? 'owner binding not found' : 'owner binding is ambiguous' };
+  }
+  const binding = bindings[0];
+  if (binding.ownerMxid !== ownerMxid || binding.ownerDmRoomId !== ownerDmRoomId) {
+    return { ok: false, status: 403, code: 'scope_mismatch', error: 'requested owner scope does not match the current binding' };
+  }
+  return {
+    ok: true,
+    scope: {
+      ownerMxid,
+      ownerDmRoomId,
+      projectRoomId,
+      stableAgentId: agent.agentId,
+      agentName: agent.name,
+    },
+    agent,
+    binding,
+  };
+}
+
+app.put('/api/agent-ops/v1/operator/device-enrollment', requireAgentOpsEnabled, requireRouterBearer, (req, res) => {
+  if (!isLocalRequest(req)) return sendAgentOpsError(res, 403, 'loopback_required', 'Agent Operations device enrollment is local-only');
+  const resolved = resolveAgentOpsScopeRequest(req.body);
+  if (!resolved.ok) return sendAgentOpsError(res, resolved.status, resolved.code, resolved.error);
+  const result = agentOpsService.enrollDevice({
+    ...resolved.scope,
+    matrixDeviceId: req.body?.matrix_device_id,
+    matrixDeviceEd25519: req.body?.matrix_device_ed25519,
+    matrixDeviceCurve25519: req.body?.matrix_device_curve25519,
+  });
+  if (respondAgentOps(res, result)) return;
+  auditLog(req, {
+    agent: resolved.agent.name,
+    summary: { action: 'agent-ops-device-enrollment', scopeId: result.scopeId, fence: result.authFenceGeneration },
+  });
+  return res.json({
+    ok: true,
+    schema: AGENT_OPS_CLIENT_SCHEMA,
+    scope_id: result.scopeId,
+    projection_id: result.projectionId,
+    auth_fence_generation: result.authFenceGeneration,
+    idempotent_request_replay: result.replayed,
+  });
+});
+
+app.post('/api/agent-ops/v1/operator/revoke', requireAgentOpsEnabled, requireRouterBearer, (req, res) => {
+  if (!isLocalRequest(req)) return sendAgentOpsError(res, 403, 'loopback_required', 'Agent Operations revocation is local-only');
+  const scopeId = normalizeOptionalText(req.body?.scope_id, 255);
+  if (!scopeId) return sendAgentOpsError(res, 400, 'bad_request', 'scope_id is required');
+  const result = agentOpsService.revokeScope(scopeId, req.body?.clear_device === true);
+  if (respondAgentOps(res, result)) return;
+  auditLog(req, { summary: { action: 'agent-ops-revoke', scopeId: result.scopeId, fence: result.authFenceGeneration } });
+  return res.json({ ok: true, schema: AGENT_OPS_CLIENT_SCHEMA, scope_id: result.scopeId, auth_fence_generation: result.authFenceGeneration });
+});
+
+app.post('/api/agent-ops/v1/control/revoke', requireAgentOpsEnabled, requireRouterBridgeSecret, (req, res) => {
+  const scopeId = normalizeOptionalText(req.body?.scope_id, 255);
+  if (scopeId) {
+    const result = agentOpsService.revokeScope(scopeId, req.body?.clear_device === true);
+    if (respondAgentOps(res, result)) return;
+    return res.json({ ok: true, scope_id: result.scopeId, auth_fence_generation: result.authFenceGeneration });
+  }
+  const count = agentOpsService.revokeScopesByBinding({
+    ownerMxid: normalizeOptionalText(req.body?.owner_mxid, 255) || undefined,
+    ownerDmRoomId: normalizeOptionalText(req.body?.owner_dm_room_id, 255) || undefined,
+    projectRoomId: normalizeOptionalText(req.body?.project_room_id, 255) || undefined,
+    stableAgentId: normalizeOptionalText(req.body?.stable_agent_id, 255) || undefined,
+  });
+  return res.json({ ok: true, revoked_scope_count: count });
+});
+
+app.post('/api/agent-ops/v1/control/bootstrap', requireAgentOpsEnabled, requireRouterBridgeSecret, (req, res) => {
+  if (
+    req.body?.was_encrypted !== true
+    || req.body?.device_self_signature_verified !== true
+    || req.body?.room_members_verified !== true
+  ) {
+    return sendAgentOpsError(res, 403, 'invalid_capability', 'verified encrypted Matrix device attestation is required');
+  }
+  const resolved = resolveAgentOpsScopeRequest(req.body);
+  if (!resolved.ok) return sendAgentOpsError(res, resolved.status, resolved.code, resolved.error);
+  let clientPublicJwk;
+  try {
+    clientPublicJwk = normalizeEd25519PublicJwk(req.body?.client_public_jwk);
+  } catch (error) {
+    return sendAgentOpsError(res, 400, 'bad_request', error.message);
+  }
+  const result = agentOpsService.issueGrant({
+    ...resolved.scope,
+    matrixDeviceId: req.body?.matrix_device_id,
+    matrixDeviceEd25519: req.body?.matrix_device_ed25519,
+    matrixDeviceCurve25519: req.body?.matrix_device_curve25519,
+    matrixEventId: req.body?.matrix_event_id,
+    clientNonce: req.body?.client_nonce,
+    clientPublicJwk,
+    audience: AGENT_OPS_LOOPBACK_ORIGIN,
+  });
+  if (respondAgentOps(res, result)) return;
+  const unsignedGrant = {
+    schema: AGENT_OPS_CLIENT_SCHEMA,
+    kind: 'client_session_grant',
+    grant_jti: result.grantJti,
+    scope_id: result.scopeId,
+    projection_id: result.projectionId,
+    client_nonce: result.clientNonce,
+    server_challenge: result.serverChallenge,
+    exchange_endpoint: `${result.audience}/api/agent-ops/v1/session/exchange`,
+    audience: result.audience,
+    auth_fence_generation: result.authFenceGeneration,
+    expires_at_unix_ms: result.expiresAtUnixMs,
+    server_public_jwk: agentOpsServerIdentity.publicJwk,
+    server_key_fingerprint: agentOpsServerIdentity.fingerprint,
+  };
+  return res.status(result.replayed ? 200 : 201).json({
+    ...unsignedGrant,
+    server_signature: agentOpsServerIdentity.sign(unsignedGrant),
+    idempotent_request_replay: result.replayed,
+  });
+});
+
+app.post('/api/agent-ops/v1/session/exchange', requireAgentOpsEnabled, requireAgentOpsLoopback, (req, res) => {
+  const grantJti = normalizeOptionalText(req.body?.grant_jti, 255);
+  const clientNonce = normalizeOptionalText(req.body?.client_nonce, 255);
+  const serverChallenge = normalizeOptionalText(req.body?.server_challenge, 255);
+  const audience = normalizeOptionalText(req.body?.audience, 512);
+  const proofNonce = normalizeOptionalText(req.headers['x-agent-ops-proof-nonce'], 255);
+  const proof = normalizeOptionalText(req.headers['x-agent-ops-proof'], 1024);
+  if (!grantJti || !clientNonce || !serverChallenge || !audience || !proofNonce || !proof) {
+    return sendAgentOpsError(res, 400, 'bad_request', 'grant fields and proof headers are required');
+  }
+  if (audience !== req.agentOpsAudience) return sendAgentOpsError(res, 403, 'scope_mismatch', 'exchange audience mismatch');
+  const descriptor = agentOpsService.grantProofDescriptor({ grantJti, clientNonce, serverChallenge, audience });
+  if (respondAgentOps(res, descriptor)) return;
+  const material = agentOpsGrantProofMaterial({
+    grantJti,
+    clientNonce,
+    serverChallenge,
+    proofNonce,
+    method: req.method,
+    requestPath: req.originalUrl,
+    body: req.body,
+    audience,
+  });
+  if (!verifyAgentOpsProof(descriptor.clientPublicJwk, proof, material)) {
+    return sendAgentOpsError(res, 401, 'invalid_capability', 'grant proof of possession is invalid');
+  }
+  const result = agentOpsService.exchangeGrant({ grantJti, clientNonce, serverChallenge, audience });
+  if (respondAgentOps(res, result)) return;
+  auditLog(req, { summary: { action: 'agent-ops-session-exchange', scopeId: result.scopeId } });
+  const unsignedSession = {
+    schema: AGENT_OPS_CLIENT_SCHEMA,
+    kind: 'client_session',
+    client_session_id: result.clientSessionId,
+    session_capability: result.sessionCapability,
+    scope_id: result.scopeId,
+    projection_id: result.projectionId,
+    stream_epoch: result.streamEpoch,
+    auth_fence_generation: result.authFenceGeneration,
+    audience,
+    expires_at_unix_ms: result.expiresAtUnixMs,
+    server_key_fingerprint: agentOpsServerIdentity.fingerprint,
+  };
+  return res.status(201).json({ ...unsignedSession, server_signature: agentOpsServerIdentity.sign(unsignedSession) });
+});
+
+app.get('/api/agent-ops/v1/snapshot', requireAgentOpsEnabled, requireAgentOpsLoopback, requireAgentOpsClientSession, (req, res) => {
+  const result = agentOpsService.snapshot(req.agentOpsAuth);
+  if (respondAgentOps(res, result)) return;
+  return res.json(result.snapshot);
+});
+
+app.get('/api/agent-ops/v1/invalidation', requireAgentOpsEnabled, requireAgentOpsLoopback, requireAgentOpsClientSession, (req, res) => {
+  const after = Number.parseInt(req.query?.after, 10);
+  if (!Number.isSafeInteger(after) || after < 0) return sendAgentOpsError(res, 400, 'bad_request', 'after must be a non-negative JSON-safe integer');
+  const result = agentOpsService.invalidation(req.agentOpsAuth, after);
+  if (respondAgentOps(res, result)) return;
+  return result.invalidation ? res.json(result.invalidation) : res.status(204).end();
+});
+
+app.post('/api/agent-ops/v1/commands/cancel-dispatch', requireAgentOpsEnabled, requireAgentOpsLoopback, requireAgentOpsClientSession, (req, res) => {
+  const result = agentOpsService.cancelDispatch(req.agentOpsAuth, req.body || {});
+  if (respondAgentOps(res, result)) return;
+  const dispatchId = normalizeOptionalText(req.body?.target?.entity_id, 255);
+  auditLog(req, { summary: { action: 'agent-ops-cancel-dispatch', scopeId: req.agentOpsAuth.scopeId, dispatchId } });
+  if (dispatchId) liveThreadSessionRunners.get(dispatchId)?.controller.abort();
+  scheduleRouterPump();
+  return res.json({ ...result.response, idempotent_request_replay: result.replayed });
+});
+
+app.post('/api/agent-ops/v1/commands/mark-resource-inspected', requireAgentOpsEnabled, requireAgentOpsLoopback, requireAgentOpsClientSession, (req, res) => {
+  const result = agentOpsService.markResourceInspected(req.agentOpsAuth, req.body || {});
+  if (respondAgentOps(res, result)) return;
+  auditLog(req, { summary: { action: 'agent-ops-mark-resource-inspected', scopeId: req.agentOpsAuth.scopeId, resourceId: result.response.resource_id } });
+  return res.json({ ...result.response, idempotent_request_replay: result.replayed });
+});
+
+app.post('/api/agent-ops/v1/commands/begin-outcome-inspection', requireAgentOpsEnabled, requireAgentOpsLoopback, requireAgentOpsClientSession, (req, res) => {
+  const result = agentOpsService.beginOutcomeInspection(req.agentOpsAuth, req.body || {});
+  if (respondAgentOps(res, result)) return;
+  auditLog(req, { summary: { action: 'agent-ops-begin-outcome-inspection', scopeId: req.agentOpsAuth.scopeId, inspectionId: result.response.inspection_id } });
+  return res.status(result.replayed ? 200 : 201).json({ ...result.response, idempotent_request_replay: result.replayed });
+});
+
+app.post('/api/agent-ops/v1/commands/resolve-outcome', requireAgentOpsEnabled, requireAgentOpsLoopback, requireAgentOpsClientSession, (req, res) => {
+  const result = agentOpsService.resolveOutcome(req.agentOpsAuth, req.body || {});
+  if (respondAgentOps(res, result)) return;
+  auditLog(req, { summary: { action: 'agent-ops-resolve-outcome', scopeId: req.agentOpsAuth.scopeId, resolution: result.response.resolution } });
+  scheduleRouterPump();
+  return res.status(result.replayed ? 200 : 201).json({ ...result.response, idempotent_request_replay: result.replayed });
+});
+
+function runnerCapabilityFromRequest(req) {
+  const dispatchId = normalizeOptionalText(req.headers['x-hafleet-dispatch-id'], 255);
+  const runnerId = normalizeOptionalText(req.headers['x-hafleet-runner-id'], 255);
+  const capability = normalizeOptionalText(req.headers['x-hafleet-dispatch-capability'], 512);
+  const fenceGeneration = Number.parseInt(req.headers['x-hafleet-fence-generation'], 10);
+  if (!dispatchId || !runnerId || !capability || !Number.isInteger(fenceGeneration) || fenceGeneration <= 0) return null;
+  return { dispatchId, runnerId, capability, fenceGeneration };
+}
+
+function requireOwnedRunnerDescriptor(req, res) {
+  const capability = runnerCapabilityFromRequest(req);
+  if (!capability) {
+    res.status(401).json({ error: 'runner dispatch capability required' });
+    return null;
+  }
+  const agentName = normalizeAgentName(req.body?.agent);
+  const agent = agentName ? agents[agentName] : null;
+  if (!isAgentRecord(agent) || !agent.agentId) {
+    res.status(404).json({ error: 'runner agent not found' });
+    return null;
+  }
+  const descriptor = routerStore.getLaunchDescriptor(capability);
+  if (!descriptor.ok && descriptor.code) {
+    res.status(routerRefusalStatus(descriptor)).json({ error: descriptor.message, code: descriptor.code });
+    return null;
+  }
+  if (descriptor.agentName !== agent.name || descriptor.agentId !== agent.agentId) {
+    res.status(403).json({ error: 'runner capability does not belong to this agent' });
+    return null;
+  }
+  return { capability, agent, descriptor };
+}
+
+app.post('/api/router/tasks', requireAgentToken((req) => req.body?.agent || ''), (req, res) => {
+  if (!THREAD_SESSIONS_ENABLED) return res.status(404).json({ error: 'thread-session router is disabled' });
+  const capability = runnerCapabilityFromRequest(req);
+  if (!capability) return res.status(401).json({ error: 'runner dispatch capability required' });
+  const creatorName = normalizeAgentName(req.body?.agent);
+  const creator = creatorName ? agents[creatorName] : null;
+  if (!isAgentRecord(creator)) return res.status(404).json({ error: 'creator agent not found' });
+  const assigneeName = normalizeAgentName(req.body?.assignee);
+  const assignee = assigneeName ? agents[assigneeName] : null;
+  if (!isAgentRecord(assignee) || !assignee.agentId) {
+    return res.status(400).json({ error: 'assignee must be a registered agent with a stable v1 id' });
+  }
+  const eligible = threadSessionAgentEligibility(assignee);
+  if (!eligible.ok) return res.status(routerRefusalStatus(eligible)).json({ error: eligible.message, code: eligible.code });
+  const descriptor = routerStore.getLaunchDescriptor(capability);
+  if (!descriptor.ok && descriptor.code) {
+    return res.status(routerRefusalStatus(descriptor)).json({ error: descriptor.message, code: descriptor.code });
+  }
+  if (descriptor.agentName !== creator.name || descriptor.agentId !== creator.agentId) {
+    return res.status(403).json({ error: 'runner capability does not belong to creator agent' });
+  }
+  const result = routerStore.createTaskFromDispatch({
+    ...capability,
+    toolCallId: req.body?.tool_call_id,
+    rootMessageId: req.body?.root_message_id,
+    inputMessageIds: Array.isArray(req.body?.input_message_ids) ? req.body.input_message_ids : [],
+    task: {
+      title: req.body?.title,
+      description: req.body?.description,
+      priority: req.body?.priority,
+      granularity: req.body?.granularity,
+      assigneeAgentId: assignee.agentId,
+      assigneeName: assignee.name,
+      parentId: req.body?.parent_id,
+      labels: Array.isArray(req.body?.labels) ? req.body.labels : [],
+    },
+    acknowledgementBody: req.body?.acknowledgement_body,
+  });
+  if (!result.ok) return res.status(routerRefusalStatus(result)).json({ error: result.message, code: result.code });
+  return res.status(result.replayed ? 200 : 201).json({ ok: true, task: result });
+});
+
+app.post('/api/router/approvals/claude', requireAgentToken((req) => req.body?.agent || ''), (req, res) => {
+  if (!THREAD_SESSIONS_ENABLED) return res.status(404).json({ error: 'thread-session router is disabled' });
+  const owned = requireOwnedRunnerDescriptor(req, res);
+  if (!owned) return;
+  if (owned.descriptor.framework !== 'claude') {
+    return res.status(400).json({ error: 'Claude approval endpoint requires a Claude dispatch' });
+  }
+  const requestId = normalizeOptionalText(req.body?.request_id, 255);
+  const toolName = normalizeOptionalText(req.body?.tool_name, 255);
+  const description = normalizeOptionalText(req.body?.description, 4096) || 'Claude permission request';
+  const inputPreview = normalizeOptionalText(req.body?.input_preview, 8192) || '';
+  if (!requestId || !toolName) return res.status(400).json({ error: 'request_id and tool_name are required' });
+  const operationDigest = createHash('sha256').update(JSON.stringify({
+    requestId, toolName, description, inputPreview,
+  })).digest('hex');
+  const approvalId = `tss_claude_${createHash('sha256').update(`${owned.capability.dispatchId}\0${requestId}`).digest('hex')}`;
+  const parked = routerStore.parkForApproval({
+    ...owned.capability,
+    approvalId,
+    operationDigest,
+    upstreamRequestId: requestId,
+    maxParkedRunners: MAX_PARKED_RUNNERS,
+  });
+  if (!parked.ok) return res.status(routerRefusalStatus(parked)).json({ error: parked.message, code: parked.code });
+  try {
+    let approval = approvalStore.listRequests({ upstream_request_prefix: approvalId })
+      .find((row) => row.upstream_request_id === approvalId && row.agent === owned.agent.name) || null;
+    if (!approval) {
+      approval = approvalStore.createRequest({
+        agent: owned.agent.name,
+        runtime: 'claude',
+        project_room_id: owned.descriptor.roomId,
+        upstream_request_id: approvalId,
+        tool_name: toolName,
+        description,
+        input_preview: inputPreview,
+      });
+      if (approval.status === 'pending') {
+        broadcastSSE('approval_requested', { request_id: approval.id, agent: approval.agent });
+      }
+    }
+    return res.status(parked.replayed ? 200 : 201).json({
+      ok: true,
+      approval,
+      router_approval_id: approvalId,
+      operation_digest: operationDigest,
+    });
+  } catch (error) {
+    return respondApprovalStoreError(res, error, 'failed to create Claude thread-session approval');
+  }
+});
+
+app.post('/api/router/approvals/claude/apply', requireAgentToken((req) => req.body?.agent || ''), (req, res) => {
+  if (!THREAD_SESSIONS_ENABLED) return res.status(404).json({ error: 'thread-session router is disabled' });
+  const owned = requireOwnedRunnerDescriptor(req, res);
+  if (!owned) return;
+  const approvalRequestId = normalizeOptionalText(req.body?.approval_request_id, 255);
+  const approvalId = normalizeOptionalText(req.body?.router_approval_id, 255);
+  const operationDigest = normalizeOptionalText(req.body?.operation_digest, 128);
+  if (!approvalRequestId || !approvalId || !operationDigest) {
+    return res.status(400).json({ error: 'approval_request_id, router_approval_id and operation_digest are required' });
+  }
+  const record = approvalStore.getRequest(approvalRequestId);
+  if (!record || record.agent !== owned.agent.name || record.upstream_request_id !== approvalId) {
+    return res.status(409).json({ error: 'consumed approval does not match this runner operation' });
+  }
+  if (record.status !== 'consumed' || !record.decision_event_id || !['allow', 'deny'].includes(record.decision)) {
+    return res.status(409).json({ error: 'approval decision has not been durably consumed' });
+  }
+  const applied = routerStore.recordApprovalDecision({
+    decisionEventId: record.decision_event_id,
+    approvalId,
+    dispatchId: owned.capability.dispatchId,
+    operationDigest,
+    decision: record.decision,
+  });
+  if (!applied.ok) return res.status(routerRefusalStatus(applied)).json({ error: applied.message, code: applied.code });
+  const resumed = routerStore.resumeAfterApproval({ ...owned.capability, approvalId, operationDigest });
+  if (!resumed.ok) return res.status(routerRefusalStatus(resumed)).json({ error: resumed.message, code: resumed.code });
+  return res.json({ ok: true, behavior: resumed.decision });
+});
+
+app.get('/api/router/snapshot', requireRouterBearer, (_req, res) => {
+  return res.json(routerStore.snapshot());
+});
+
+app.get('/api/router/events', requireRouterBearer, (req, res) => {
+  const after = Number.parseInt(req.query?.after, 10);
+  const limit = Number.parseInt(req.query?.limit, 10);
+  return res.json(routerStore.eventsAfter(Number.isFinite(after) ? after : 0, Number.isFinite(limit) ? limit : 500));
+});
+
+app.post('/api/router/dispatches/:id/cancel', requireRouterBearer, (req, res) => {
+  const dispatchId = normalizeOptionalText(req.params.id, 255);
+  if (!dispatchId) return res.status(400).json({ error: 'dispatch id is required' });
+  const before = routerStore.snapshot().dispatches.find((row) => row.dispatchId === dispatchId);
+  if (!before) return res.status(404).json({ error: 'dispatch not found' });
+  liveThreadSessionRunners.get(dispatchId)?.controller.abort();
+  let result;
+  if (before.state === 'queued' || before.state === 'leased') {
+    result = routerStore.cancelBeforeStart(dispatchId);
+    if (!result.ok && result.code === 'invalid_transition') {
+      result = routerStore.markOutcomeUnknown(dispatchId, 'operator_cancelled_after_start');
+    }
+  } else if (before.state === 'started' || before.state === 'parked') {
+    result = routerStore.markOutcomeUnknown(dispatchId, 'operator_cancelled_after_start');
+  } else {
+    return res.status(409).json({ error: `dispatch is already terminal: ${before.state}` });
+  }
+  if (!result.ok) return res.status(routerRefusalStatus(result)).json({ error: result.message, code: result.code });
+  scheduleRouterPump();
+  return res.json({ ok: true, result });
+});
+
+app.post('/api/router/dispatches/:id/outcome-inspection', requireRouterBearer, (req, res) => {
+  const dispatchId = normalizeOptionalText(req.params.id, 255);
+  if (!dispatchId) return res.status(400).json({ error: 'dispatch id is required' });
+  const result = routerStore.beginOutcomeInspection(dispatchId);
+  if (!result.ok) return res.status(routerRefusalStatus(result)).json({ error: result.message, code: result.code });
+  return res.status(201).json({ ok: true, inspection: result });
+});
+
+app.post('/api/router/dispatches/:id/resolve-outcome', requireRouterBearer, (req, res) => {
+  const dispatchId = normalizeOptionalText(req.params.id, 255);
+  if (!dispatchId) return res.status(400).json({ error: 'dispatch id is required' });
+  const result = routerStore.resolveOutcomeUnknown({
+    dispatchId,
+    inspectionId: req.body?.inspection_id,
+    inspectionToken: req.body?.inspection_token,
+    requestId: req.body?.request_id,
+    action: req.body?.action,
+    operatorNote: req.body?.operator_note,
+    recoveryInstruction: req.body?.recovery_instruction,
+  });
+  if (!result.ok) return res.status(routerRefusalStatus(result)).json({ error: result.message, code: result.code });
+  scheduleRouterPump();
+  return res.status(result.replayed ? 200 : 201).json({ ok: true, resolution: result });
+});
+
+app.post('/api/router/resources/:id/clear-dirty', requireRouterBearer, (req, res) => {
+  const cleared = routerStore.clearWorkspaceDirty(req.params.id);
+  if (!cleared.ok) return res.status(routerRefusalStatus(cleared)).json({ error: cleared.message, code: cleared.code });
+  return res.json({ ok: true, result: cleared });
+});
+
+app.post('/api/router/matrix-outbox/claim', requireRouterBridgeSecret, (req, res) => {
+  const claimMs = Number.parseInt(req.body?.claim_ms, 10);
+  const command = routerStore.claimMatrixCommand(Number.isFinite(claimMs) ? claimMs : 30_000);
+  return command ? res.json({ ok: true, command }) : res.status(204).end();
+});
+
+app.post('/api/router/matrix-outbox/:id/delivered', requireRouterBridgeSecret, async (req, res) => {
+  const activated = routerStore.recordMatrixDelivery({
+    commandId: req.params.id,
+    claimToken: req.body?.claim_token,
+    eventId: req.body?.event_id,
+  });
+  if (!activated.ok) return res.status(routerRefusalStatus(activated)).json({ error: activated.message, code: activated.code });
+  const boundAgent = Object.values(agents).find((candidate) => candidate?.agentId === activated.agentId);
+  if (!boundAgent) return res.status(500).json({ error: 'activated task assignee is not registered' });
+  const queued = await enqueueThreadSessionDispatch({
+    agent: boundAgent,
+    sessionId: activated.sessionId,
+    taskId: activated.taskId,
+    threadRootEventId: activated.threadRootEventId,
+    prompt: 'Execute the newly activated task from its session-scoped inputs.',
+  });
+  if (!queued.ok) {
+    const recorded = routerStore.recordTaskDispatchFailure(activated.taskId, queued.code || 'dispatch_unavailable');
+    if (!recorded.ok) {
+      return res.status(500).json({
+        error: 'task thread activated, but dispatch failure could not be recorded',
+        code: 'dispatch_failure_record_failed',
+        activation: activated,
+      });
+    }
+    return res.json({
+      ok: true,
+      activation: activated,
+      dispatch: null,
+      dispatch_refusal: { code: queued.code || 'dispatch_unavailable' },
+      attention: recorded,
+    });
+  }
+  return res.json({ ok: true, activation: activated, dispatch: queued });
+});
+
+app.post('/api/router/matrix-outbox/:id/failed', requireRouterBridgeSecret, (req, res) => {
+  const failed = routerStore.recordMatrixFailure({
+    commandId: req.params.id,
+    claimToken: req.body?.claim_token,
+    errorCode: req.body?.error_code || 'matrix_send_failed',
+  });
+  if (!failed.ok) return res.status(routerRefusalStatus(failed)).json({ error: failed.message, code: failed.code });
+  return res.json({ ok: true, result: failed });
+});
+
+app.post('/api/router/reply-outbox/claim', requireRouterBridgeSecret, (req, res) => {
+  const claimMs = Number.parseInt(req.body?.claim_ms, 10);
+  const command = routerStore.claimReplyCommand(Number.isFinite(claimMs) ? claimMs : 30_000);
+  return command ? res.json({ ok: true, command }) : res.status(204).end();
+});
+
+app.post('/api/router/reply-outbox/:id/delivered', requireRouterBridgeSecret, (req, res) => {
+  const delivered = routerStore.recordReplyDelivery({
+    commandId: req.params.id,
+    claimToken: req.body?.claim_token,
+    eventId: req.body?.event_id,
+  });
+  if (!delivered.ok) return res.status(routerRefusalStatus(delivered)).json({ error: delivered.message, code: delivered.code });
+  return res.json({ ok: true, result: delivered });
+});
+
+app.post('/api/router/reply-outbox/:id/failed', requireRouterBridgeSecret, (req, res) => {
+  const failed = routerStore.recordReplyFailure({
+    commandId: req.params.id,
+    claimToken: req.body?.claim_token,
+    errorCode: req.body?.error_code || 'matrix_send_failed',
+  });
+  if (!failed.ok) return res.status(routerRefusalStatus(failed)).json({ error: failed.message, code: failed.code });
+  return res.json({ ok: true, result: failed });
+});
 
 // Only the authenticated Matrix bridge can assert room-scoped owner provenance.
 /*
@@ -6751,7 +8235,23 @@ app.put('/api/approval-bindings/membership', requireApprovalBridgeSecret, (req, 
 
 app.put('/api/approval-bindings', requireApprovalBridgeSecret, (req, res) => {
   try {
+    const previous = approvalStore.listBindings({
+      agent: req.body?.agent,
+      projectRoomId: req.body?.project_room_id ?? req.body?.projectRoomId,
+    })[0] || null;
     const binding = approvalStore.upsertBinding(req.body || {});
+    const authorityChanged = !previous
+      || previous.ownerMxid !== binding.ownerMxid
+      || previous.ownerDmRoomId !== binding.ownerDmRoomId;
+    if (authorityChanged && agentOpsService) {
+      const agent = agents[normalizeAgentName(binding.agent)];
+      if (isAgentRecord(agent) && agent.agentId) {
+        agentOpsService.revokeScopesByBinding({
+          projectRoomId: binding.projectRoomId,
+          stableAgentId: agent.agentId,
+        });
+      }
+    }
     return res.json({ ok: true, binding });
   } catch (error) {
     return respondApprovalStoreError(res, error, 'failed to persist approval binding');
@@ -6762,6 +8262,15 @@ app.delete('/api/approval-bindings/:agent/:roomId', requireApprovalBridgeSecret,
   try {
     const binding = approvalStore.removeBinding(req.params.agent, req.params.roomId);
     if (!binding) return res.status(404).json({ error: 'approval binding not found' });
+    if (agentOpsService) {
+      const agent = agents[normalizeAgentName(binding.agent)];
+      if (isAgentRecord(agent) && agent.agentId) {
+        agentOpsService.revokeScopesByBinding({
+          projectRoomId: binding.projectRoomId,
+          stableAgentId: agent.agentId,
+        });
+      }
+    }
     return res.json({ ok: true, binding });
   } catch (error) {
     return respondApprovalStoreError(res, error, 'failed to remove approval binding');
@@ -7562,6 +9071,9 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     agentId: normalizeAgentId(agentId) || normalizeAgentId(existing.agentId) || null,
     homeDir: normalizeWorkspacePath(homeDir) || normalizeWorkspacePath(existing.homeDir) || null,
     workdir: normalizeWorkspacePath(workdir) || normalizeWorkspacePath(existing.workdir) || null,
+    workspaceMode: normalizeWorkspaceMode(existing.workspaceMode),
+    worktreesDir: normalizeWorkspacePath(existing.worktreesDir) || null,
+    worktreeBootstrap: normalizeWorktreeBootstrap(existing.worktreeBootstrap),
     stateDir: normalizeWorkspacePath(stateDir) || normalizeWorkspacePath(existing.stateDir) || null,
     managedProjects: Array.isArray(managedProjects)
       ? normalizeManagedProjects(managedProjects)
@@ -8148,6 +9660,9 @@ app.delete('/api/agents/:name', requireBearer, async (req, res) => {
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+  if (agentOpsService && agent.agentId) {
+    agentOpsService.revokeScopesByBinding({ stableAgentId: agent.agentId });
+  }
   if (req.query.force === 'true') {
     /*
      * STOP IT FIRST. Deleting the record left the agent's tmux session and its codex process
@@ -11210,7 +12725,14 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) =>
     });
   }
   const suppressedRecipients = new Set();
-  if (msg.to && directTargetKind === 'agent') {
+  // A router-served agent has no tmux pane and never will; its reachability
+  // comes from disposable runners, so tmux-based offline warnings are noise.
+  const isRouterServedAgent = (name) => {
+    if (!THREAD_SESSIONS_ENABLED) return false;
+    const agent = agents[name];
+    return isAgentRecord(agent) && Boolean(agent.agentId) && threadSessionAgentEligibility(agent).ok === true;
+  };
+  if (msg.to && directTargetKind === 'agent' && !isRouterServedAgent(msg.to)) {
     const state = getAgentDeliveryState(msg.to);
     if (!state.online) {
       warnings.push({
@@ -11233,7 +12755,7 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) =>
       }));
 
     const offlineMentions = mentionStates
-      .filter(item => item.state.exists && !item.state.online)
+      .filter(item => item.state.exists && !item.state.online && !isRouterServedAgent(item.name))
       .map(item => ({
         target: item.name,
         server: item.state.server,
@@ -11594,7 +13116,36 @@ app.get('/api/inbox/:agent/unread-list', (req, res, next) => {
 app.get('/api/inbox/:agent', requireAgentToken(_tokenFromAgent), (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
-  if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+  // A local Claude/Codex agent is served exclusively by capability-bound runners while
+  // thread sessions are enabled. Header absence is not evidence of a legacy caller: a
+  // compromised or buggy runner also holds the agent token and could simply omit its
+  // dispatch headers. Require the complete capability before choosing the scoped read.
+  if (THREAD_SESSIONS_ENABLED && threadSessionAgentEligibility(agent).ok) {
+    const capability = runnerCapabilityFromRequest(req);
+    if (!capability) {
+      return res.status(401).json({
+        error: 'complete runner dispatch capability required',
+        code: 'runner_capability_required',
+      });
+    }
+    const scoped = routerStore.checkInboxForAgent(capability, agentName);
+    if (!Array.isArray(scoped)) {
+      return res.status(routerRefusalStatus(scoped)).json({ error: scoped.message, code: scoped.code });
+    }
+    return res.json({
+      dm: scoped.map((message) => ({
+        id: message.messageId,
+        from: message.senderName,
+        summary: message.body.slice(0, 200),
+        full: message.body,
+        ts: message.receivedAt,
+      })),
+      group: [],
+      session_scoped: true,
+    });
+  }
   const kindsList = parseKindsFilter(req.query.kinds);
   const kinds = kindsList.length > 0 ? new Set(kindsList) : null;
 
@@ -11786,24 +13337,37 @@ app.get('/api/agents/:name/groups', (req, res) => {
 });
 
 // ── Graceful shutdown ─────────────────────────────────────────────────
+let shutdownPromise = null;
 function shutdown() {
-  console.log('Shutting down, saving data...');
-  refreshServerLiveness();
-  Promise.allSettled([
-    sweepLocalActivityDurations(),
-    sweepLocalSwapPressure(),
-    sweepAgentScopePressure(),
-  ]).finally(() => {
-    sweepAgentRules();
-    flushAllPendingJsonWrites();
-    saveAgents(true);
-    saveGroups();
-    saveMessages();
-    saveCursors();
-    saveServers();
-    saveAgentRuntime(true);
-    process.exit(0);
-  });
+  if (shutdownPromise) return shutdownPromise;
+  console.log('Shutting down, terminating runners and saving data...');
+  shutdownPromise = (async () => {
+    try {
+      refreshServerLiveness();
+      const sweeps = Promise.allSettled([
+        sweepLocalActivityDurations(),
+        sweepLocalSwapPressure(),
+        sweepAgentScopePressure(),
+      ]);
+      // stopServer closes ingress, aborts every live runner, and waits until
+      // each dispatch has durably settled or been safely requeued.
+      await stopServer();
+      await sweeps;
+      sweepAgentRules();
+      flushAllPendingJsonWrites();
+      saveAgents(true);
+      saveGroups();
+      saveMessages();
+      saveCursors();
+      saveServers();
+      saveAgentRuntime(true);
+    } catch (error) {
+      console.error(`Shutdown failed: ${error?.message || error}`);
+    } finally {
+      process.exit(0);
+    }
+  })();
+  return shutdownPromise;
 }
 let startupHooksInstalled = false;
 let backgroundLoopsStarted = false;
@@ -11858,6 +13422,12 @@ function removeStartupHooks() {
 function startBackgroundLoops() {
   if (backgroundLoopsStarted) return;
   backgroundLoopsStarted = true;
+  routerPumpAccepting = true;
+
+  // A process restart may leave durable queued dispatches behind.  Kick the
+  // router once at startup instead of waiting for a new Matrix event to make
+  // already-accepted work runnable again.
+  if (THREAD_SESSIONS_ENABLED) scheduleRouterPump();
 
   // SSE keepalive: send comment pings every 30s to prevent proxy idle timeout.
   sseAdapter.startKeepalive(trackLifecycleInterval);
@@ -11885,8 +13455,22 @@ function startBackgroundLoops() {
 
 function stopBackgroundLoops() {
   backgroundLoopsStarted = false;
+  routerPumpAccepting = false;
   clearLifecycleHandles();
+  routerPumpTimer = null;
+  routerPumpDueAt = null;
   endSseClients();
+}
+
+function stopRouterPumpForTest() {
+  routerPumpAccepting = false;
+  for (const { controller } of liveThreadSessionRunners.values()) controller.abort();
+  liveThreadSessionRunners.clear();
+  routerPumpMicrotaskQueued = false;
+  routerPumpTimer = null;
+  routerPumpDueAt = null;
+  routerPumpRunning = false;
+  clearLifecycleHandles();
 }
 
 // Bind address. Loopback by default; see lib/startup-config.js resolveBindHost
@@ -11900,6 +13484,14 @@ function resolvedBindHost() {
 export function startServer({ port = PORT, host = resolvedBindHost() } = {}) {
   if (serverInstance) return serverInstance;
   installStartupHooks();
+  void reconcileThreadSessionSourceMessages().then((sourceReconciliation) => {
+    if (sourceReconciliation.scanned > 0) {
+      console.log(`[router] reconciled ${sourceReconciliation.scanned} persisted Matrix message(s)`);
+    }
+  }).catch((error) => {
+    console.error(`[router] startup source reconciliation failed: ${error?.message || error}`);
+    void stopServer().finally(() => { process.exitCode = 1; });
+  });
   startBackgroundLoops();
 
   const MAX_LISTEN_RETRIES = 10;
@@ -11944,23 +13536,26 @@ export function startServer({ port = PORT, host = resolvedBindHost() } = {}) {
 export async function stopServer() {
   stopBackgroundLoops();
   removeStartupHooks();
-  flushAllPendingJsonWrites();
-
   const server = serverInstance;
   serverInstance = null;
-  if (!server) return;
-  if (typeof server.closeAllConnections === 'function') {
-    try { server.closeAllConnections(); } catch (_) { /* ignore close errors */ }
-  }
-  await new Promise((resolve, reject) => {
-    server.close((error) => {
-      if (!error || error.code === 'ERR_SERVER_NOT_RUNNING') {
-        resolve();
-      } else {
-        reject(error);
-      }
+  let serverClose = Promise.resolve();
+  if (server) {
+    if (typeof server.closeAllConnections === 'function') {
+      try { server.closeAllConnections(); } catch (_) { /* ignore close errors */ }
+    }
+    serverClose = new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (!error || error.code === 'ERR_SERVER_NOT_RUNNING') resolve();
+        else reject(error);
+      });
     });
-  });
+  }
+  const activeRunners = [...liveThreadSessionRunners.values()];
+  for (const active of activeRunners) active.controller.abort();
+  await Promise.allSettled(activeRunners.map((active) => active.running));
+  liveThreadSessionRunners.clear();
+  flushAllPendingJsonWrites();
+  await serverClose;
 }
 
 export { app };
@@ -11995,6 +13590,15 @@ export const __backendV2TestInternals = {
   },
   dispatchLeaseStoreForTest: dispatchLeaseStore,
   approvalStoreForTest: approvalStore,
+  approvalAdapterTimeoutMsForTest: APPROVAL_ADAPTER_TIMEOUT_MS,
+  routerStoreForTest: routerStore,
+  agentOpsServiceForTest: agentOpsService,
+  agentOpsServerIdentityForTest: agentOpsServerIdentity,
+  shadowMatrixMessageToRouterForTest: shadowMatrixMessageToRouter,
+  routeMatrixMessageToThreadSessionForTest: routeMatrixMessageToThreadSession,
+  reconcileThreadSessionSourceMessagesForTest: reconcileThreadSessionSourceMessages,
+  scheduleRouterPumpForTest: scheduleRouterPump,
+  stopRouterPumpForTest,
   dispatchQueuesForTest: dispatchQueues,
   sweepLocalActivityDurationsForTest: sweepLocalActivityDurations,
   /*

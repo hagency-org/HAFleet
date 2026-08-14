@@ -1,0 +1,85 @@
+{
+  "schema": "com.hafleet.agent_ops.v1",
+  "scope": {
+    "scope_id": "scope_fixture_worker",
+    "project_room_id": "!project:example.org",
+    "agent_id": "agent_worker_stable",
+    "owner_mxid": "@owner:example.org",
+    "owner_dm_room_id": "!owner-dm:example.org"
+  },
+  "projection_id": "projection_fixture_worker",
+  "stream_epoch": "239830a9-7d3c-4e8c-a480-cfa29df30cb1",
+  "auth_fence_generation": 3,
+  "seq": 42,
+  "attention": [
+    {
+      "id": "outcome_unknown:dispatch-1",
+      "kind": "outcome_unknown",
+      "summary": "Runner outcome is unknown; inspect the result before choosing recovery",
+      "task_id": "task-1",
+      "dispatch_id": "dispatch-1",
+      "resource_id": "resource-1",
+      "agent": "worker",
+      "waiting_ms": 61000,
+      "thread": {
+        "room_id": "!project:example.org",
+        "thread_root_event_id": "$task-thread:example.org"
+      },
+      "available_actions": [
+        {
+          "action_id": "action-inspect-1",
+          "kind": "begin_outcome_inspection",
+          "target": {
+            "entity_kind": "dispatch",
+            "entity_id": "dispatch-1",
+            "entity_version": 7
+          },
+          "resource_precondition": {
+            "resource_id": "resource-1",
+            "dirty_generation": 2
+          },
+          "expires_at_unix_ms": 1785946500000,
+          "capability": "fixture-action-capability-inspect"
+        }
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "task_id": "task-1",
+      "entity_version": 5,
+      "title": "Review the scoped client contract",
+      "agent": "worker",
+      "state": "blocked",
+      "dispatch_state": "outcome_unknown",
+      "elapsed_ms": 125000,
+      "thread": {
+        "room_id": "!project:example.org",
+        "thread_root_event_id": "$task-thread:example.org"
+      }
+    }
+  ],
+  "queue": [
+    {
+      "dispatch_id": "dispatch-2",
+      "entity_version": 3,
+      "task_id": "task-2",
+      "agent": "worker",
+      "state": "queued",
+      "waiting_on": "waiting for workspace lease",
+      "held_by_dispatch_id": "dispatch-3"
+    }
+  ],
+  "worktrees": [
+    {
+      "resource_id": "resource-1",
+      "entity_version": 9,
+      "label": "worker task workspace",
+      "branch": "agentchat/task-1",
+      "dirty": true,
+      "dirty_generation": 2,
+      "task_id": "task-1",
+      "available_actions": []
+    }
+  ]
+}

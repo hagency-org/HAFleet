@@ -262,10 +262,33 @@ function validateRouteAuth(fileName, source, route, expectedAuth) {
       return has('isLocalRequest(req)') ? null : `${fileName}:${route.line} ${routeKey(route)} expected isLocalRequest(req) local-only guard`;
     case 'agent-token':
       return has('requireAgentToken') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireAgentToken`;
+    case 'operator-or-agent-token':
+      return has('requireAgentOrOperatorToken') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireAgentOrOperatorToken`;
     case 'bridge-secret':
       return has('requireBridgeSecret') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireBridgeSecret`;
     case 'approval-bridge-secret':
       return has('requireApprovalBridgeSecret') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireApprovalBridgeSecret`;
+    case 'router-bridge-secret':
+      return has('requireRouterBridgeSecret') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireRouterBridgeSecret`;
+    case 'router-bearer':
+      return has('requireRouterBearer') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireRouterBearer`;
+    case 'agent-ops-operator':
+      if (!has('requireAgentOpsEnabled')) return `${fileName}:${route.line} ${routeKey(route)} expected requireAgentOpsEnabled`;
+      if (!has('requireRouterBearer')) return `${fileName}:${route.line} ${routeKey(route)} expected requireRouterBearer`;
+      return has('isLocalRequest(req)') ? null : `${fileName}:${route.line} ${routeKey(route)} expected isLocalRequest(req) local-only guard`;
+    case 'agent-ops-control':
+      if (!has('requireAgentOpsEnabled')) return `${fileName}:${route.line} ${routeKey(route)} expected requireAgentOpsEnabled`;
+      return has('requireRouterBridgeSecret') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireRouterBridgeSecret`;
+    case 'agent-ops-grant-proof':
+      if (!has('requireAgentOpsEnabled') || !has('requireAgentOpsLoopback')) {
+        return `${fileName}:${route.line} ${routeKey(route)} expected enabled loopback boundary`;
+      }
+      return has('verifyAgentOpsProof(') ? null : `${fileName}:${route.line} ${routeKey(route)} expected grant proof verification`;
+    case 'agent-ops-session-proof':
+      if (!has('requireAgentOpsEnabled') || !has('requireAgentOpsLoopback')) {
+        return `${fileName}:${route.line} ${routeKey(route)} expected enabled loopback boundary`;
+      }
+      return has('requireAgentOpsClientSession') ? null : `${fileName}:${route.line} ${routeKey(route)} expected scoped session proof middleware`;
     case 'bearer-or-agent-token':
       return has('_alertTransitionAuth') ? null : `${fileName}:${route.line} ${routeKey(route)} expected _alertTransitionAuth`;
     case 'bearer-or-agent-token-inline':
