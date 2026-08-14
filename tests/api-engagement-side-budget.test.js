@@ -295,3 +295,190 @@ describe('POST /api/engagements/:id/verdict — the other admission point, and t
     expect(r.status).toBe(404);
   });
 });
+
+describe('THE ALARM — 「应该报警，说无法创建 agent，需要加预算」', () => {
+  /*
+   * The refusal alone was half of decision 6. It travels back to whoever ASKED — a borrower, or an
+   * automated request — and the only person who can fix it is the contributor's operator, who is not in
+   * that conversation. So the refusal has to leave a record on the operator's own surface.
+   */
+  // GET /api/alerts returns `listAlerts()` directly, which is a BARE ARRAY — not `{ alerts: [...] }`.
+  const alerts = async (app, status) => (await request(app)
+    .get(`/api/alerts${status ? `?status=${status}` : ''}`)).body;
+  const budgetAlert = async (app, status) =>
+    (await alerts(app, status)).find((a) => a.alertType === 'project_side_budget');
+  /*
+   * `lastPayload` is a STRING: `truncatePayload` JSON-stringifies whatever `detail` was, so it can bound
+   * the size of something it does not know the shape of. Parsed here rather than asserted as a substring,
+   * because a substring match on JSON passes for the wrong reasons — `100000` matches inside `1000000`.
+   */
+  const payloadOf = (alert) => JSON.parse(alert.lastPayload);
+
+  test('a refusal raises a WARNING, not an alert the store quietly downgrades to info', async () => {
+    /*
+     * THE TRAP THIS PINS. `buildActionability` demotes a warning to `info` when any of
+     * owner/assignee, runbook, impact, recoveryCondition or correlation is missing — so an alarm raised
+     * carelessly is filed as a note and pages nobody. `actionable` and the empty
+     * `missingActionableFields` are the assertions that matter; `severity` alone would pass while the
+     * alarm was silent.
+     */
+    const app = await boot();
+    await side(app, 100_000);
+    await offerAutoJoin(app);
+    await ask(app, { tokens: 500_000 });
+
+    const alert = await budgetAlert(app);
+    expect(alert).toBeTruthy();
+    expect(alert).toMatchObject({
+      severity: 'warning',
+      actionable: true,
+      missingActionableFields: [],
+      status: 'open',
+      source: 'backend',
+    });
+    expect(alert.originalSeverity).toBe(null);
+  });
+
+  test('it names the side, the shortfall and the remedy', async () => {
+    const app = await boot();
+    await side(app, 100_000);
+    await offerAutoJoin(app);
+    await ask(app, { tokens: 500_000 });
+
+    const alert = await budgetAlert(app);
+    expect(alert.summary).toMatch(new RegExp(SERVER));
+    expect(alert.runbook).toMatch(/allocated_tokens/);
+    expect(payloadOf(alert)).toMatchObject({
+      sideId: SERVER, reason: 'over_allocation',
+      requestedTokens: 500_000, allocatedTokens: 100_000, remainingTokens: 100_000,
+    });
+  });
+
+  test('an UNALLOCATED side alarms too, with its own reason', async () => {
+    const app = await boot();
+    await side(app);            // configured, never budgeted
+    await offerAutoJoin(app);
+    await ask(app, { tokens: 1 });
+    expect(payloadOf(await budgetAlert(app)).reason).toBe('no_allocation');
+  });
+
+  test('a retrying borrower produces ONE alert with a count, not a wall of them', async () => {
+    /*
+     * Deduped by side. Without it, a borrower retrying every minute buries the alert it raised — and the
+     * retry rate is worth seeing, so it lands as `occurrences` on the one alert instead of being lost.
+     */
+    const app = await boot();
+    await side(app, 100_000);
+    await offerAutoJoin(app);
+    await ask(app, { tokens: 500_000 });
+    await ask(app, { tokens: 600_000 });
+    await ask(app, { tokens: 700_000 });
+
+    const rows = (await alerts(app)).filter((a) => a.alertType === 'project_side_budget');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].occurrences).toBe(3);
+    // The latest figures win, so the alert describes the most recent refusal rather than the first.
+    expect(payloadOf(rows[0]).requestedTokens).toBe(700_000);
+  });
+
+  test('raising the allocation enough RESOLVES it', async () => {
+    const app = await boot();
+    await side(app, 100_000);
+    await offerAutoJoin(app);
+    await ask(app, { tokens: 500_000 });
+    expect((await budgetAlert(app)).status).toBe('open');
+
+    await request(app).put(`/api/project-sides/${SERVER}/allocation`)
+      .send({ allocated_tokens: 1_000_000 });
+
+    expect(await budgetAlert(app, 'open')).toBeUndefined();
+    expect((await budgetAlert(app)).status).toBe('resolved');
+  });
+
+  test('a raise that does NOT help leaves it open', async () => {
+    /*
+     * The reason recovery is tested against `remaining`, not against "the allocation changed". Raising
+     * 100k to 200k with 300k already committed leaves the side exactly as unable to fund work, and
+     * resolving there would show the operator a clean console beside work that is still refused.
+     */
+    const app = await boot();
+    await side(app, 1_000_000);
+    await offerAutoJoin(app);
+    // Commit 300k, then cut the allocation below it so the side is genuinely over-committed.
+    expect((await ask(app, { tokens: 300_000 })).status).toBe(200);
+    await request(app).put(`/api/project-sides/${SERVER}/allocation`).send({ allocated_tokens: 100_000 });
+    await ask(app, { tokens: 50_000 });
+    expect((await budgetAlert(app)).status).toBe('open');
+
+    // Still under what is committed: no headroom, so no recovery.
+    await request(app).put(`/api/project-sides/${SERVER}/allocation`).send({ allocated_tokens: 200_000 });
+    expect((await budgetAlert(app, 'open'))).toBeTruthy();
+
+    // Above it: headroom exists, and now it resolves.
+    await request(app).put(`/api/project-sides/${SERVER}/allocation`).send({ allocated_tokens: 400_000 });
+    expect(await budgetAlert(app, 'open')).toBeUndefined();
+  });
+
+  test('unsetting the allocation does not resolve it either', async () => {
+    // `null` is UNALLOCATED, which refuses everything — the opposite of a recovery.
+    const app = await boot();
+    await side(app, 100_000);
+    await offerAutoJoin(app);
+    await ask(app, { tokens: 500_000 });
+    await request(app).put(`/api/project-sides/${SERVER}/allocation`).send({});
+    expect(await budgetAlert(app, 'open')).toBeTruthy();
+  });
+
+  test('TWO sides in trouble are TWO alerts, not one shared by whoever refused last', async () => {
+    /*
+     * The dedupe key carries the side. Mutation testing found this untested: dropping `${sideId}` from
+     * the key survived every other assertion here, because nothing exercised two sides at once. With one
+     * shared key the second side's refusal would only bump the first side's counter, and an operator
+     * reading the alert would raise the allocation on the wrong project.
+     */
+    const app = await boot();
+    await side(app, 100_000);                      // palpo.test
+    await request(app).post('/api/project-sides')
+      .send({ server_name: 'second.example', api_base_url: 'http://127.0.0.1:8008' });
+    await request(app).put('/api/project-sides/second.example/allocation')
+      .send({ allocated_tokens: 50_000 });
+    const OTHER = '!proj:second.example';
+    await offerAutoJoin(app);
+    await offerAutoJoin(app, OTHER);
+
+    await ask(app, { tokens: 500_000 });
+    await ask(app, { tokens: 500_000, room: OTHER });
+
+    const rows = (await alerts(app)).filter((a) => a.alertType === 'project_side_budget');
+    expect(rows).toHaveLength(2);
+    expect(rows.map((a) => payloadOf(a).sideId).sort()).toEqual([SERVER, 'second.example'].sort());
+    expect(new Set(rows.map((a) => a.dedupeKey)).size).toBe(2);
+  });
+
+  test('an UNCONFIGURED side on the minting path refuses WITHOUT raising an alert', async () => {
+    /*
+     * `no_project_side` reaches only the path that MINTS (`requireSide: true`), which is
+     * `POST /api/dispatch`. It deliberately does not alarm: there is no side to attribute the alert to,
+     * so the dedupe key would name something that does not exist — and that route has no auth guard, so
+     * any room id a caller invents would mint another alert. Mutation testing found this untested; the
+     * engagement path cannot reach the branch at all.
+     */
+    const app = await boot({ MATRIX_AGENT_MAX_PER_CELL: '1' });
+    const r = await request(app).post('/api/dispatch')
+      .send({ role: 'documentation', capability: 'lightweight', room: '!nowhere:unconfigured.example', requestedTokens: 1000 });
+    expect(r.status).toBe(409);
+    expect(r.body.reason).toBe('no_project_side');
+    expect((await alerts(app)).filter((a) => a.alertType === 'project_side_budget')).toEqual([]);
+  });
+
+  test('a room on a server with no side record raises NOTHING', async () => {
+    /*
+     * There is no side to attribute an alert to, so a per-side dedupe key would name something that does
+     * not exist — and any room id a caller invents would mint another alert.
+     */
+    const app = await boot();
+    await offerAutoJoin(app, FOREIGN_ROOM);
+    await ask(app, { tokens: 5_000_000, room: FOREIGN_ROOM });
+    expect((await alerts(app)).filter((a) => a.alertType === 'project_side_budget')).toEqual([]);
+  });
+});
