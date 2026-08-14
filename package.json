@@ -29,7 +29,8 @@
     "audit:deps": "bash scripts/audit-deps.sh",
     "audit:deps:strict": "bash scripts/audit-deps.sh --strict",
     "audit:baseline": "node scripts/audit-baseline.mjs",
-    "audit:baseline:update": "node scripts/audit-baseline.mjs --update"
+    "audit:baseline:update": "node scripts/audit-baseline.mjs --update",
+    "check:undef": "eslint ."
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
@@ -38,6 +39,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "eslint": "^10.8.1",
     "supertest": "^7.2.2",
     "vitest": "^4.0.18"
   },
