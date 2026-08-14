@@ -179,6 +179,19 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-13 | `api-messages` | `message suppression appends a delivery event` | **yes** — whole-suite only, clean in isolation (39/39) |
 | 2026-08-13 | `engagement-binding` | `the binding IS released once the last live engagement ends` | **yes** — `expected 404 to be 200`, clean in isolation (7/7) |
 | 2026-08-13 | `api-server-heartbeat` | `accepts a new instance after the lease becomes stale` | **yes** — `AssertionError: expected null to be 'inst-B'`; CI only, on a DOCS-ONLY branch; see the investigation below |
+| 2026-08-14 | `alert-store` | `alert API writes fail closed and keep visible state unchanged` | **yes** — `expected undefined to be 'agent-runtime'`; whole-suite only, clean in isolation 3/3 (18/18 each) |
+
+**A NAMED SPECIMEN FOR TWO SIGHTINGS THAT WENT UNNAMED.** Two earlier runs in the same session reported
+intermittent failures whose identity was not captured, because the output was tailed rather than saved —
+a process error, recorded as one at the time. The third occurrence was saved and is the row above.
+
+It is the SECOND shape, not a new one. The assertion reads `alert.body.owner` and gets `undefined`,
+which is what a body containing an error object rather than the record looks like from an assertion's
+side — the same event the `expected 404 to be 200` specimens show from the router's side. `alert-store`
+had not appeared in this log before; the mechanism had, four times.
+
+The practice that produced it is worth keeping: **save the run, do not tail it.** A flake that cannot be
+named cannot be counted, and two sightings were lost that way before this one was kept.
 
 **A fourth shape, and the first one whose investigation eliminated its own most plausible cause.**
 `relayInstanceId` read `null` where `inst-B` was expected. The branch under test added 562 lines to

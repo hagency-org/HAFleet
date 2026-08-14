@@ -6,6 +6,7 @@ import {
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
 import { createAppserviceRouter } from './lib/appservice-receiver.js';
+import { createRoomOnSide, sendToRoomOnSide } from './lib/matrix-representative.js';
 import { resolveAppserviceListenerConfig, startAppserviceListener } from './lib/appservice-listener.js';
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { execFile } from 'child_process';
@@ -3675,7 +3676,11 @@ export class MatrixBridge {
     await this.pollRegistrations();
     setInterval(() => this.pollRegistrations(), 30_000);
 
-    // 9. Inbound appservice traffic, if this deployment exposes a socket for it (ADR-016).
+    // 9. Acting credentials, so an approval can be delivered to a decider on a project side.
+    await this.refreshActingCredentials();
+    setInterval(() => this.refreshActingCredentials(), APPSERVICE_SIDE_REFRESH_MS);
+
+    // 10. Inbound appservice traffic, if this deployment exposes a socket for it (ADR-016).
     await this.startAppserviceIntake();
 
     console.log('Bridge running.');
@@ -3729,6 +3734,114 @@ export class MatrixBridge {
         throw error;
       }
     }
+  }
+
+  /**
+   * The credentials that let this bridge ACT as a representative, by side.
+   *
+   * A second, wider grant than the inbound one and fetched from its own endpoint — see
+   * `/api/project-sides/acting-credentials`. Held in memory only: it is the most powerful credential
+   * this process handles for a foreign homeserver, and persisting a copy beside the ones it already
+   * stores would widen the blast radius of `bridge-state.json` for no gain.
+   */
+  async refreshActingCredentials() {
+    let payload;
+    try {
+      payload = await backendApi('GET', '/api/project-sides/acting-credentials', null, 'context=bridge:acting-credentials');
+    } catch (error) {
+      /*
+       * Keep what we had, for the same reason the inbound refresh does: a backend restart must not
+       * take every project side's approval delivery down with it.
+       */
+      console.warn(`[project-side] could not refresh acting credentials: ${error?.message || error}`);
+      return;
+    }
+    const next = new Map();
+    for (const side of Array.isArray(payload?.sides) ? payload.sides : []) {
+      if (side?.sideId) next.set(side.sideId, side);
+    }
+    this.actingCredentials = next;
+  }
+
+  /** The acting credential for a homeserver, in the shape the representative helpers take. */
+  actingSideFor(serverNameValue) {
+    const row = this.actingCredentials?.get(String(serverNameValue || '').toLowerCase());
+    if (!row) return null;
+    return {
+      side: { apiBaseUrl: row.apiBaseUrl, serverName: row.serverName },
+      credential: row.kind === 'appservice'
+        ? { kind: 'appservice', asToken: row.asToken, senderLocalpart: row.senderLocalpart, namespace: row.namespace }
+        : { kind: 'registrationToken', representativeToken: row.representativeToken, registrationToken: null },
+    };
+  }
+
+  /**
+   * An approval room on the BORROWER's homeserver, created by the representative.
+   *
+   * ADR-016's resolved collision: the operator settled that an execution approval is the borrower's
+   * decision, and a borrower on a project side cannot enter a room the bot created on ours. So the room
+   * goes where the decider is.
+   *
+   * THE BOT PATH IS NOT REUSED, and that is not duplication for its own sake. Everything that follows
+   * room creation there — `ensureApprovalDmSecurity`, `ensureApprovalDmRestricted`,
+   * `getJoinedRoomMembers`, the decorative agent join — is a bot-side call against a homeserver the bot
+   * has no account on. Reusing the tail would fail on every line of it.
+   *
+   * NO ACTING CREDENTIAL IS AN EXPLICIT REFUSAL, never a fallback to our own server. Creating it here
+   * instead would produce a room the borrower cannot enter, which is precisely the defect this path
+   * exists to remove — and it would look like success.
+   *
+   * THE ROOM IS PLAINTEXT, and that is forced rather than chosen: the representative holds no crypto
+   * store, so an encrypted room would be one it cannot read. `createRoomOnSide` refuses to create one.
+   * What protects the content is that the content is the BORROWER's own command against their own
+   * repository, and an invite-only room controls who else in their organisation sees it.
+   */
+  async ensureApprovalDmRoomOnSide(canonicalAgent, ownerMxid, ownerServer, key) {
+    const acting = this.actingSideFor(ownerServer);
+    if (!acting) {
+      return {
+        ok: false, ready: false, reason: 'no_acting_credential_for_owner_server',
+        detail: `the approval decider ${ownerMxid} is on ${ownerServer}, and this deployment holds no `
+          + 'acting credential for that project side — configure and verify it before approvals can be delivered',
+      };
+    }
+    let roomId = state.approvalDmRooms[key] || null;
+    if (!roomId) {
+      const created = await createRoomOnSide({
+        ...acting,
+        name: `Approval: ${canonicalAgent}`,
+        topic: 'UI-only coding-agent approval requests. Text replies do not authorize execution.',
+        invite: [ownerMxid],
+        isDirect: true,
+        encrypted: false,
+      });
+      if (!created.created) {
+        return { ok: false, ready: false, reason: 'approval_room_creation_failed', detail: created.reason };
+      }
+      roomId = created.roomId;
+      state.approvalDmRooms[key] = roomId;
+      state.trustedManagedRooms[roomId] = {
+        approvalDm: true,
+        agent: canonicalAgent,
+        ownerMxid,
+        /*
+         * A DISTINCT mode, not the deployment's. `plaintext-test` means an operator deliberately
+         * disabled encryption for diagnostics and the bridge refuses it in production; this is a
+         * structurally plaintext room on someone else's server. Recording them as the same thing would
+         * make an audit unable to tell a diagnostic room from a project-side one.
+         */
+        approvalDmMode: 'project-side-plaintext',
+        projectSide: ownerServer,
+        addedAt: Date.now(),
+      };
+      saveState();
+    }
+    /*
+     * `ready` is the invite being out, not the owner having joined. On our own server the bot can read
+     * membership; here it cannot, and waiting for a join we cannot observe would block every approval
+     * on a fact nothing reports.
+     */
+    return { ok: true, ready: true, roomId, projectSide: ownerServer };
   }
 
   /**
@@ -5696,6 +5809,14 @@ export class MatrixBridge {
     const key = this.approvalDmMode === 'plaintext-test'
       ? `${baseKey}\u0000plaintext-test`
       : baseKey;
+    /*
+     * THE OWNER'S SERVER DECIDES WHERE THE ROOM LIVES. Not a setting: the decider has to be able to
+     * enter it, and without federation a borrower on a project side cannot enter a room on ours.
+     */
+    const ownerServer = ownerMxid.slice(ownerMxid.indexOf(':') + 1).toLowerCase();
+    if (ownerServer !== MATRIX_SERVER_NAME) {
+      return this.ensureApprovalDmRoomOnSide(canonicalAgent, ownerMxid, ownerServer, key);
+    }
     let roomId = state.approvalDmRooms[key] || null;
     if (!roomId) {
       const plaintextTest = this.approvalDmMode === 'plaintext-test';
@@ -6171,11 +6292,49 @@ export class MatrixBridge {
       approval = response?.approval || null;
       if (!approval || approval.status !== 'pending') return { ok: false, reason: 'request_not_pending' };
 
-      await this.ensureApprovalDmSecurity(approval.owner_dm_room_id);
-      const privateEventId = await this.botClient.sendMessage(
-        approval.owner_dm_room_id,
-        buildOwnerApprovalRequest(approval),
-      );
+      /*
+       * THE PRIVATE REQUEST GOES WHERE ITS ROOM IS, and only the bot's own rooms are on our server.
+       *
+       * `botClient.sendMessage` cannot reach a room on a project side — the bot holds an account on one
+       * homeserver (ADR-014 decision 4). So a room whose origin is not ours is sent by the
+       * REPRESENTATIVE instead, with that side's acting credential.
+       *
+       * `ensureApprovalDmSecurity` is skipped on that branch rather than made to fail: it asserts the
+       * room is encrypted, and a representative-created room is structurally plaintext because the
+       * representative holds no crypto store. Calling it would refuse a room this deployment
+       * deliberately created that way.
+       */
+      const dmServer = String(approval.owner_dm_room_id || '')
+        .slice(String(approval.owner_dm_room_id || '').indexOf(':') + 1).toLowerCase();
+      let privateEventId;
+      if (dmServer && dmServer !== MATRIX_SERVER_NAME) {
+        const acting = this.actingSideFor(dmServer);
+        if (!acting) {
+          throw new Error(
+            `approval room ${approval.owner_dm_room_id} is on ${dmServer} and this deployment holds no `
+            + 'acting credential for that project side',
+          );
+        }
+        /*
+         * The transaction seed is the REQUEST ID, so a retry of this publish reuses it. Matrix
+         * deduplicates on the derived transaction id, and a clock-derived one would post the approval
+         * request twice — to a human who then has two sets of buttons for one decision.
+         */
+        const sent = await sendToRoomOnSide({
+          ...acting,
+          roomId: approval.owner_dm_room_id,
+          content: buildOwnerApprovalRequest(approval),
+          txnSeed: `approval-private:${requestId}`,
+        });
+        if (!sent.sent) throw new Error(`private approval delivery failed: ${sent.reason}`);
+        privateEventId = sent.eventId;
+      } else {
+        await this.ensureApprovalDmSecurity(approval.owner_dm_room_id);
+        privateEventId = await this.botClient.sendMessage(
+          approval.owner_dm_room_id,
+          buildOwnerApprovalRequest(approval),
+        );
+      }
       if (privateEventId) this.rememberMatrixEvent(privateEventId, requestId);
 
       const token = this.getAgentToken(approval.agent);

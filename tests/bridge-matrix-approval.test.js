@@ -22,8 +22,25 @@ describe('Matrix owner approval bridge', () => {
     agent: 'wf_coordinator',
     project: 'robrix2',
     project_room_id: '!project:palpo.test',
-    owner_mxid: '@alex:palpo.test',
-    owner_dm_room_id: '!approval-dm:palpo.test',
+    /*
+     * The owner is on the CONFIGURED server, matching their DM room below. The original fixture had
+     * both on `palpo.test` — internally consistent, but on a server this test is not configured for,
+     * and this case exists to exercise the BOT sending an encrypted private request. The bot has an
+     * account on its own homeserver only, so the pair has to be there.
+     *
+     * The realistic post-decision case — an owner on a project side, ADR-016's resolved collision — is
+     * the representative branch. `project_room_id` stays on `palpo.test` because that is genuinely
+     * where a project lives.
+     */
+    owner_mxid: '@alex:matrix.example.com',
+    /*
+     * ON THE CONFIGURED SERVER, which this fixture was not. It said `palpo.test` while the test leaves
+     * MATRIX_HOMESERVER at its default, so the server name is `matrix.example.com` — an inconsistency
+     * nothing noticed until something READ the room's server. This case exercises the bot sending an
+     * encrypted private request, and the bot only has an account on its own homeserver, so the room has
+     * to be there for the case to mean what its name says.
+     */
+    owner_dm_room_id: '!approval-dm:matrix.example.com',
     upstream_request_id: 'abcde',
     input_digest: 'a'.repeat(64),
     runtime: 'claude',
