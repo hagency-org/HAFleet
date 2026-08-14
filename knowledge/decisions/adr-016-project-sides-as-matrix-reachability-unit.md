@@ -19,10 +19,10 @@ carries its own status line and the table is the index.
 | 1 | 项目方 (project side) is a first-class entity: one homeserver, one credential, one representative | **decided, not built** | no such record exists; `HOMESERVER` is one module constant with **51** product-code references (`bridge-matrix.js` 44, `lib/bot-commands.js` 7) plus 12 in tests, at `8c78a7e` |
 | 2 | non-federation is the assumption; federation is an optimization inside the same model; **both** credential kinds are supported | **decided, not built** | ADR-014's amendment says the opposite — see "What this reverses". Appservice support is mandatory per the operator (2026-08-13) and the repository has zero of it: no `as_token`, `hs_token`, `sender_localpart` or registration file, and the running bridge holds zero listening sockets |
 | 3 | the representative is registered per project side and is NOT an agent | **decided, not built**; in the first pass | the two roles are one thing today: the agent itself must be invited and must join |
-| 4 | an agent instance is minted on acceptance from a resource declaration | **partly built** (2026-08-13) | The identity act is built (`mintAgentIdentity`) and provisioning is budget-gated and side-attributed: a plan carries its `sideId`, the backend remembers the assignment in `provisionedSides`, and the agent record gains `projectSide` at registration — taken from that map, never from the agent's own request body. NOT built: nothing calls `mintAgentIdentity` from the provisioning path yet, and the resource declaration is still an operator-chosen preset rather than a role-matched selection |
+| 4 | an agent instance is minted on acceptance from a resource declaration | **partly built** (2026-08-14) | The identity act is built (`mintAgentIdentity`), and side attribution is built: a provision plan carries its `sideId`, the backend remembers the assignment in `provisionedSides`, and the agent record gains `projectSide` at registration — taken from that map, never from the agent's own request body, which `POST /api/agents` now enforces per-field. NOT built: nothing calls `mintAgentIdentity` from any provisioning path yet, and the resource declaration is still an operator-chosen preset rather than a role-matched selection. **Corrected 2026-08-14:** the budget half of this row cited the `/api/dispatch` gate; the admission point is acceptance, and the gate is there now |
 | 5 | the invite object is a room alias plus `knock` | **decided, not built** | `joinRoomByAlias`, `room_alias`, `matrix.to`, `inviteToken`, `joinCode` — zero matches repository-wide |
-| 6 | budget is admission control, and provisioning becomes a new admission point | **built** (2026-08-13) | A project side carries a real `allocatedTokens`; `null` is UNALLOCATED and refuses minting rather than meaning unlimited. Provisioning refuses with `no_project_side`, `no_allocation` or `over_allocation` and names the shortfall — a refusal, never a queue entry. Scoped to requests that name a room, since a request without one is not project-side work |
-| 7 | deleting a project side cascades, but RETIRES agents rather than erasing usage | **partly built** (2026-08-13) | Removing a side retires the agents minted for it — record kept, ledger kept, `offlineReason` naming the side — and the precondition is checked BEFORE anything is retired, so a refused delete does not take a side's agents down. The response reports `cascade: 'partial'` and names what it does not do: engagements and approval bindings on the side are still untouched |
+| 6 | budget is admission control, and **acceptance** is the admission point | **built** (2026-08-14) | A project side carries a real `allocatedTokens`; `null` is UNALLOCATED and refuses rather than meaning unlimited. `refuseOverSideAllocation` answers `no_project_side`, `no_allocation` or `over_allocation` and names the shortfall — a refusal, never a queue entry — at BOTH points a side's allocation is committed: the auto-join inside `POST /api/engagements` and the approval in `POST /api/engagements/:id/verdict`. **Corrected 2026-08-14:** this row previously cited the gate on `POST /api/dispatch` Phase 4, which ADR-013 decision 8 withdraws and which has no product caller — see "Where this gate belongs" below |
+| 7 | deleting a project side cascades, but RETIRES agents rather than erasing usage | **partly built** (2026-08-13) | Removing a side retires the agents minted for it — record kept, ledger kept, `offlineReason` naming the side — and the precondition is checked BEFORE anything is retired, so a refused delete does not take a side's agents down. Engagements on the side are ENDED and approval bindings DEACTIVATED — kept with a reason, per the operator's compliance rule 「不删除，只是停用退役」 — and the response reports `cascade: 'performed'` with what it did rather than a claim of completeness. NOT built: nothing outside these three stores is swept |
 | 8 | a project side's credential is write-only through the console | **decided, not built** | a new secret class: `cf.ownSecrets` covers install-time `.env` secrets only |
 
 ## What this reverses, and why that is stated first
@@ -222,18 +222,19 @@ What changes is *where* admission is checked. Minting an agent is a new gate, an
 operator named: 「如果 token 预算已经超标了…这时候应该报警，说无法创建 agent，需要加预算」. Two ceilings,
 both of which must pass before an account is minted:
 
-| ceiling | question | exists? |
-|---|---|---|
-| HAFleet's own total | can this deployment afford another agent at all? | `remainingFor(agent)` exists; nothing calls it from a provisioning path |
-| the project side's allocation | can this project side afford this request? | no per-side allocation exists |
+| ceiling | question | when written | now (2026-08-14) |
+|---|---|---|---|
+| HAFleet's own total | can this deployment afford another agent at all? | `remainingFor(agent)` exists; nothing calls it from a provisioning path | enforced by `engagementStore.decide()` at approval, and by `routeRequest` before an auto-join |
+| the project side's allocation | can this project side afford this request? | no per-side allocation exists | `allocatedTokens` on the side; enforced by `refuseOverSideAllocation` at both admission points |
 
 A refusal is an **alarm naming the shortfall**, not a queue entry: an agent that was never created
-cannot be waited for, and Phase 4's current fallback — silently enqueue a ticket — would present
-"waiting for capacity" when the truth is "will never be created without more budget".
+cannot be waited for, and enqueuing a ticket instead would present "waiting for capacity" when the truth
+is "will never be created without more budget".
 
 `POST /api/engagements` already accepts `requestedTokens` and `ratePerDay`, so the operator's
-question 「项目请求的时候是否也要加上预算需求」 is answered: it already does, and the missing half is
-that provisioning never reads it.
+question 「项目请求的时候是否也要加上预算需求」 is answered: it already does. The missing half was that
+nothing read the figure against the borrower's own allocation; as of 2026-08-14 that route does, before
+it creates anything.
 
 **A consequence of choosing admission control that must not surprise anyone.** A running engagement
 CAN exceed its ceiling, because we refuse to stop it. This is not hypothetical — this deployment
@@ -242,8 +243,53 @@ cache-read-inclusive basis. So the console acquires a **display obligation**: it
 overrun as an overrun. A ceiling that is admission-only and rendered as though it held is the console
 asserting a guarantee the enforcement model deliberately does not make.
 
-*Status — **partly built**. Approval-time admission is built and tested; provisioning-time admission,
-per-side allocation, the alarm, and the overrun display are not.*
+### Where this gate belongs — a correction, 2026-08-14
+
+The first build of decision 6 put the budget check on `POST /api/dispatch` Phase 4, because that was the
+only auto-provisioning path in the repository when this ADR was written. Two facts, both checkable, make
+that the wrong home for it:
+
+- **ADR-013 decision 8 withdraws the route.** Verbatim: "`/api/dispatch` and any successor
+  router-facing assignment path". A gate whose only home is a withdrawn route is removed by the
+  withdrawal it was written under.
+- **The route has no product caller.** Nothing in `bin/`, `lib/` or `server.js` posts to it. So the gate
+  guarded a road nobody drives, and the rows above reported it as the build.
+
+The decision TEXT of this ADR was right where its status rows were wrong: an agent instance is minted
+**on acceptance**. Acceptance has two forms and the code now gates both, because only gating one leaves
+the other open:
+
+| where | who decides | why it must be gated |
+|---|---|---|
+| the auto-join inside `POST /api/engagements` | nobody — a published offer plus a whitelist entry already decided | the engagement is born `active` and commits `requestedTokens` without an operator ever seeing it. The verdict route it would otherwise pass through never runs |
+| `POST /api/engagements/:id/verdict` | the contributor | the approval may allocate MORE than was requested, and the side's remaining may have fallen since the request. Passing the request-time check is no evidence about this moment |
+
+The check is a **refusal, not a routing outcome**, which is why it is not inside `routeRequest`. Every
+value in that vocabulary — `notWhitelisted`, `overOffer`, `overCeiling` — ends in a pending engagement
+the contributor can decide. A budget refusal must not: a queue entry reads as "waiting for capacity"
+when the truth is "will not proceed without more budget", and the operator asked for an alarm
+(「应该报警，说无法创建 agent，需要加预算」), which a queue entry is not.
+
+**The dispatch check is kept, and demoted rather than deleted.** `POST /api/dispatch` carries no auth
+guard, so anyone able to reach the backend can ask it for a provision plan; removing the check would
+leave the unguarded route as the one place a plan is produced with no budget consulted. Withdrawn but
+present is exactly when a cheap check earns its keep. It is defensive, not load-bearing, and its comment
+now says so.
+
+**One asymmetry, deliberate.** The minting path refuses a named room whose server has no configured side
+(`no_project_side`); the engagement path does not. Minting needs a side because under decision 1 the
+identity comes from the side's credential — no side, no agent. Serving an engagement does not: the agent
+already exists and is already reachable, so an un-configured server is un-attributed, not
+unserviceable. **The consequence, stated:** an engagement on a server with no side record escapes the
+budget entirely. That is the migration state, not the design — every binding in this deployment predates
+project sides — and refusing them all in the name of a budget nobody has allocated yet would be worse
+than naming the escape.
+
+*Status — **built** for admission, **not built** for the alarm and the display. Both admission points
+are gated against the side's allocation and the agent's ceiling, and both are tested. NOT built: nothing
+RAISES an alert on a budget refusal — the refusal names the shortfall in its response, which reaches
+whoever made the request and not the operator who has to raise the allocation. The overrun display
+obligation above is also still open.*
 
 **7. Deleting a project side cascades to its agents — but "delete" means RETIRE, and usage is never
 erased.** The operator's requirement is adopted: 「删除项目方的时候，需要保证所有在项目方服务的 agent 都

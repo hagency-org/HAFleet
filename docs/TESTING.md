@@ -182,6 +182,7 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-14 | `alert-store` | `alert API writes fail closed and keep visible state unchanged` | **yes** — `expected undefined to be 'agent-runtime'`; whole-suite only, clean in isolation 3/3 (18/18 each) |
 | 2026-08-14 | `api-agents` | `DELETE /api/agents/:name returns 503 and keeps the agent registered on persistence failure` | **yes** — `expected 404 to be 503`; 1 failure in 10 runs of the file, 0/6 consecutive, 4/4 clean on master without the branch |
 | 2026-08-14 | `api-server-heartbeat-sweep` | `accepts explicit offline without instance id when no lease is active` | **yes** — `Error: Test timed out in 30000ms`; whole-suite only, clean in isolation 4/4, and the next whole-suite run on the same tree was 194/194 |
+| 2026-08-14 | `api-server-heartbeat` | `accepts takeover from a newer boot timestamp` | **yes** — `expected 404 to be 200`, the second shape; whole-suite only, clean in isolation 4/4; the branch touched engagements and project sides, which that file never references |
 
 **A SIGHTING THAT WAS CHECKED FOR AUTHORSHIP BEFORE BEING CALLED A FLAKE.** The `api-agents` row above
 failed once inside a whole-suite run and once more in isolation, which is unusual — this class is
