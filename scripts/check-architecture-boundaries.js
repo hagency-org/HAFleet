@@ -260,6 +260,18 @@ function validateRouteAuth(fileName, source, route, expectedAuth) {
     case 'bearer-and-local':
       if (!has('requireBearer')) return `${fileName}:${route.line} ${routeKey(route)} expected requireBearer`;
       return has('isLocalRequest(req)') ? null : `${fileName}:${route.line} ${routeKey(route)} expected isLocalRequest(req) local-only guard`;
+    /*
+     * `requireAgentToken` accepts the OPERATOR's bearer as well as the agent's own token, as of
+     * 2026-08-14 — so this one policy covers both callers and `GET /api/inbox/:agent/unread-list` no
+     * longer needs one of its own. Its `bearer-or-agent-token-inline` case is gone with it: the case
+     * asserted the presence of an INLINE `getBearerToken(req)` branch, which was a workaround for the
+     * guard not knowing the operator, and a policy no route declares is a rule nobody maintains.
+     *
+     * What that case really protected — "the web tier must be able to read this route" — is now a
+     * property of the guard rather than of one route, and it is asserted where behaviour belongs:
+     * tests/api-operator-bearer-on-agent-routes.test.js checks the bearer, the agent token, and
+     * neither, on that exact route.
+     */
     case 'agent-token':
       return has('requireAgentToken') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireAgentToken`;
     case 'operator-or-agent-token':
@@ -291,9 +303,6 @@ function validateRouteAuth(fileName, source, route, expectedAuth) {
       return has('requireAgentOpsClientSession') ? null : `${fileName}:${route.line} ${routeKey(route)} expected scoped session proof middleware`;
     case 'bearer-or-agent-token':
       return has('_alertTransitionAuth') ? null : `${fileName}:${route.line} ${routeKey(route)} expected _alertTransitionAuth`;
-    case 'bearer-or-agent-token-inline':
-      if (!has('getBearerToken(req)')) return `${fileName}:${route.line} ${routeKey(route)} expected getBearerToken(req) bearer branch`;
-      return has('requireAgentToken') ? null : `${fileName}:${route.line} ${routeKey(route)} expected requireAgentToken fallback`;
     case 'local-only':
       return has('isLocalRequest(req)') ? null : `${fileName}:${route.line} ${routeKey(route)} expected isLocalRequest(req) local-only guard`;
     case 'message-detail-access':

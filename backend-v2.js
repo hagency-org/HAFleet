@@ -66,6 +66,7 @@ import {
   getBridgeSecret,
   getRequestAgentName as getRequestAgentNameAdapter,
   hasApiTokenAccess as hasApiTokenAccessAdapter,
+  operatorBearerConfigured,
   loadAgentTokensFromHomes,
   resolveAgentTokenMode,
 } from './lib/backend/auth-adapter.js';
@@ -339,6 +340,13 @@ function loadAgentTokens() {
   });
 }
 function checkAgentToken(agentName, req) {
+  /*
+   * No `env` override: the adapter defaults to `process.env`, which is where this deployment's operator
+   * credential lives, and threading it explicitly was dead code. Mutation testing showed why — swapping
+   * it for `{}` changed no test, because this wrapper's only caller (`_alertTransitionAuth`) answers the
+   * operator itself before ever reaching here. An argument that cannot affect any caller reads as a
+   * live path and is not one.
+   */
   return checkAgentTokenAdapter(agentName, req, { agentTokens });
 }
 function buildAgentTokenReadiness() {
@@ -354,7 +362,9 @@ function buildAgentTokenReadiness() {
 function buildServerCredentialReadiness() {
   return buildServerCredentialReadinessAdapter({ env: process.env });
 }
-const requireAgentToken = createRequireAgentToken({ agentTokens, agentTokenMode: AGENT_TOKEN_MODE });
+const requireAgentToken = createRequireAgentToken({
+  agentTokens, agentTokenMode: AGENT_TOKEN_MODE, env: process.env,
+});
 const VALID_ENVIRONMENTS = new Set(['live', 'dev', 'benchmark', 'ephemeral']);
 function classifyEnvironment(name) {
   const n = String(name).toLowerCase();
@@ -1389,9 +1399,16 @@ const requireBearer = createRequireBearer({ env: process.env });
  * than as a security posture.
  */
 function isOperatorRequest(req) {
-  const expectedBearer = normalizeOptionalText(process.env.API_TOKEN, 512);
-  if (!expectedBearer) return true;
-  return getBearerToken(req) === expectedBearer;
+  /*
+   * `hasApiTokenAccess` rather than a comparison of its own. The first version of this function did
+   * `normalizeOptionalText(process.env.API_TOKEN, 512)` and compared that — copied from
+   * `_alertTransitionAuth`, and wrong in the way `normalizeSecret`'s comment describes: an API_TOKEN
+   * longer than 512 characters would have made this return false for the real operator, silently
+   * demoting every registration to an agent's and dropping the four fields it guards. Nobody would have
+   * seen a refusal; the fields would just have stopped taking.
+   */
+  if (!operatorBearerConfigured(process.env)) return true;
+  return hasApiTokenAccess(req);
 }
 
 function redactPathLikeText(value, maxLen = 1200) {
@@ -12440,11 +12457,15 @@ app.get('/api/alerts/:id', requireBearer, (req, res) => {
 
 // Accept Bearer OR agent-token (agent can only transition alerts assigned to them)
 const _alertTransitionAuth = (req, res, next) => {
-  const expectedBearer = normalizeOptionalText(process.env.API_TOKEN, 512);
-  // No API_TOKEN configured — pass through (matches requireBearer behavior)
-  if (!expectedBearer) return next();
-  // Bearer token matches — pass through
-  if (getBearerToken(req) === expectedBearer) return next();
+  /*
+   * The bearer branch is now REDUNDANT with `checkAgentToken`, which accepts the operator itself — and
+   * it is kept because the ORDER differs, not the answer. Falling straight through to the agent check
+   * would look up the alert first and answer 404 for a missing id; the operator's own call must not
+   * depend on the alert existing to be authorised. Two of the three inline workarounds of this shape
+   * were removed; this one earns its place.
+   */
+  if (!operatorBearerConfigured(process.env)) return next();
+  if (hasApiTokenAccess(req)) return next();
   // Fall back to agent-token auth: agent can transition their assigned alerts
   const alert = alertStore.getAlert(req.params.id);
   if (!alert) return res.status(404).json({ error: 'alert not found' });
@@ -13335,13 +13356,12 @@ app.get('/api/inbox/:agent/unread', requireAgentToken(_tokenFromAgent), (req, re
   res.json(snapshot);
 });
 
-app.get('/api/inbox/:agent/unread-list', (req, res, next) => {
-  // Accept Bearer token (web-tier proxy) OR per-agent token
-  const bearerToken = getBearerToken(req);
-  const expectedBearer = normalizeOptionalText(process.env.API_TOKEN, 512);
-  if (expectedBearer && bearerToken === expectedBearer) return next();
-  return requireAgentToken(_tokenFromAgent)(req, res, next);
-}, (req, res) => {
+/*
+ * "Accept Bearer (web-tier proxy) OR per-agent token" used to be spelled out here. `requireAgentToken`
+ * does exactly that now, so the inline copy is gone — and with it the 512-character truncation it
+ * carried, which would have locked the web tier out of this route with a long API_TOKEN.
+ */
+app.get('/api/inbox/:agent/unread-list', requireAgentToken(_tokenFromAgent), (req, res) => {
   const agentName = normalizeAgentName(req.params.agent);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
   if (!isAgentRecord(agents[agentName])) return res.status(404).json({ error: 'agent not found' });

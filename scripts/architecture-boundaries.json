@@ -977,7 +977,7 @@
           "method": "GET",
           "path": "/api/inbox/:agent/unread-list",
           "owner": "inbox.agent-or-dashboard-unread",
-          "auth": "bearer-or-agent-token-inline"
+          "auth": "agent-token"
         },
         {
           "method": "GET",

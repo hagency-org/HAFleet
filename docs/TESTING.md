@@ -183,6 +183,7 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-14 | `api-agents` | `DELETE /api/agents/:name returns 503 and keeps the agent registered on persistence failure` | **yes** — `expected 404 to be 503`; 1 failure in 10 runs of the file, 0/6 consecutive, 4/4 clean on master without the branch |
 | 2026-08-14 | `api-server-heartbeat-sweep` | `accepts explicit offline without instance id when no lease is active` | **yes** — `Error: Test timed out in 30000ms`; whole-suite only, clean in isolation 4/4, and the next whole-suite run on the same tree was 194/194 |
 | 2026-08-14 | `api-server-heartbeat` | `accepts takeover from a newer boot timestamp` | **yes** — `expected 404 to be 200`, the second shape; whole-suite only, clean in isolation 4/4; the branch touched engagements and project sides, which that file never references |
+| 2026-08-14 | `api-runtime` | `MCP transitions do not emit legacy MCP-specific SSE event types` | **yes** — `Error: read ECONNRESET`, the third shape; whole-suite only, clean in isolation 4/4; seen on MERGED master, so no branch to attribute it to |
 
 **A SIGHTING THAT WAS CHECKED FOR AUTHORSHIP BEFORE BEING CALLED A FLAKE.** The `api-agents` row above
 failed once inside a whole-suite run and once more in isolation, which is unusual — this class is
@@ -214,6 +215,16 @@ had not appeared in this log before; the mechanism had, four times.
 
 The practice that produced it is worth keeping: **save the run, do not tail it.** A flake that cannot be
 named cannot be counted, and two sightings were lost that way before this one was kept.
+
+**THE FIRST SIGHTING WITH NO BRANCH TO SUSPECT.** The `api-runtime` row above appeared on merged `master`
+immediately after four PRs landed — 3197 passed, this one failed, 4/4 clean in isolation. Every earlier
+row in this table was observed on a branch, which meant the first question was always "did I cause it",
+and answering that took either a reachability read or a stash-and-compare.
+
+There is no branch here. That removes the question and leaves the class: `read ECONNRESET` is the third
+documented shape, and `api-runtime` is the fifth file to show one. Five files, five shapes between them,
+no two adjacent in the code — which is the same evidence the memory theory was dropped on, now with the
+last confound removed.
 
 **THE SAME FILE, A DIFFERENT TEST, A DIFFERENT SHAPE — and reachability answered instead of assumed.**
 The `api-server-heartbeat-sweep` row dated 2026-08-14 is the second sighting in that file (the first is
