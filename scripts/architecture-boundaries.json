@@ -726,6 +726,12 @@
           "auth": "bearer"
         },
         {
+          "method": "PUT",
+          "path": "/api/project-sides/:id/allocation",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
           "method": "POST",
           "path": "/api/project-sides/:id/verify",
           "owner": "operator.project-side-admin",

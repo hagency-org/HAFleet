@@ -704,3 +704,205 @@ describe('the inbound credentials the BRIDGE needs', () => {
     expect(JSON.stringify(res.body)).not.toMatch(/[0-9a-f]{64}/);
   });
 });
+
+describe('a side\'s allocation, and refusing to mint without one', () => {
+  /*
+   * ADR-016's settled question 2 and decision 6. The operator chose a REAL per-side allocation over a
+   * slice of the deployment total, and stated the requirement for the gate directly: 「如果 token
+   * 预算已经超标了…这时候应该报警，说无法创建 agent，需要加预算」.
+   *
+   * The gate lives on the provisioning path, which counted AGENTS and never consulted a budget at all.
+   */
+  const ROOM = `!proj:${SERVER}`;
+
+  const sideWithAllocation = async (app, tokens) => {
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    if (tokens !== undefined) {
+      await request(app).put(`/api/project-sides/${SERVER}/allocation`).send({ allocated_tokens: tokens });
+    }
+  };
+
+  const provision = (app, body = {}) => request(app).post('/api/dispatch')
+    .send({ role: 'documentation', capability: 'lightweight', room: ROOM, ...body });
+
+  async function bootProvisionable() {
+    return boot({ env: { MATRIX_AGENT_MAX_PER_CELL: '1' } });
+  }
+
+  test('UNALLOCATED IS NOT UNLIMITED: minting is refused with the reason', async () => {
+    /*
+     * The default chosen while it was still free. A side that has been configured and not yet budgeted
+     * refuses work rather than drawing on whatever is left — so the alarm arrives before the tokens
+     * instead of after them.
+     */
+    const app = await bootProvisionable();
+    await sideWithAllocation(app); // no allocation set
+    const r = await provision(app, { requestedTokens: 1000 });
+    expect(r.status).toBe(409);
+    expect(r.body.reason).toBe('no_allocation');
+    expect(r.body.error).toMatch(/no token allocation/);
+  });
+
+  test('an unconfigured project side is refused, not charged to nobody', async () => {
+    const app = await bootProvisionable();
+    const r = await provision(app, { requestedTokens: 1000 });
+    expect(r.status).toBe(409);
+    expect(r.body.reason).toBe('no_project_side');
+    expect(r.body.sideId).toBe(SERVER);
+  });
+
+  test('within the allocation it provisions, and the name CARRIES THE SIDE', async () => {
+    /*
+     * `mx_${role}_${tier}_${seq}` was unattributable. Decision 7's cascade needs to know which agents
+     * belong to a side in order to take them with it.
+     */
+    const app = await bootProvisionable();
+    await sideWithAllocation(app, 1_000_000);
+    const r = await provision(app, { requestedTokens: 250_000 });
+    expect(r.status).toBe(200);
+    expect(r.body.status).toBe('provision');
+    expect(r.body.sideId).toBe(SERVER);
+    expect(r.body.name).toContain('palpo_test');
+    expect(r.body.budget).toMatchObject({ allocated: 1_000_000, committed: 0, remaining: 1_000_000 });
+  });
+
+  test('THE ALARM: over the allocation is a REFUSAL, never a queue entry', async () => {
+    /*
+     * Falling through to the queue would answer "waiting for capacity" when the truth is "will never
+     * be created without more budget" — and an agent that was never created cannot be waited for. The
+     * refusal names the shortfall so the remedy is obvious.
+     */
+    const app = await bootProvisionable();
+    await sideWithAllocation(app, 100_000);
+    const r = await provision(app, { requestedTokens: 250_000 });
+    expect(r.status).toBe(409);
+    expect(r.body.reason).toBe('over_allocation');
+    expect(r.body).toMatchObject({
+      allocatedTokens: 100_000, remainingTokens: 100_000, requestedTokens: 250_000,
+    });
+    expect(r.body.error).toMatch(/raise the allocation/);
+    /*
+     * `status` is the field a caller reads, and asserting only the absence of a ticket was not enough:
+     * mutation testing showed that relabelling this response `queued` survived every other assertion
+     * here, which is precisely the "waiting for capacity" lie this refusal exists to avoid.
+     */
+    expect(r.body.status).toBe('refused');
+    expect(r.body.ticket).toBeUndefined();
+  });
+
+  test('a request with NO room is untouched by the gate', async () => {
+    /*
+     * Scope, and the reason a first version of this was wrong. A request with no room is not
+     * project-side work — it is the contributor dispatching against their own agents, already governed
+     * by each agent's own ceiling. Requiring a side there broke two existing dispatch cases.
+     */
+    const app = await bootProvisionable();
+    const r = await request(app).post('/api/dispatch')
+      .send({ role: 'documentation', capability: 'lightweight' });
+    expect(r.body.status).toBe('provision');
+    expect(r.body.name).toMatch(/^mx_documentation_lightweight_/);
+    expect(r.body.sideId).toBeUndefined();
+  });
+
+  test('zero is a real allocation and is not the same as unset', async () => {
+    // An operator may want to close a side to new work without deactivating it.
+    const app = await bootProvisionable();
+    await sideWithAllocation(app, 0);
+    const r = await provision(app, { requestedTokens: 1 });
+    expect(r.body.reason).toBe('over_allocation');
+    expect(r.body.allocatedTokens).toBe(0);
+  });
+
+  test('the allocation survives an unrelated save', async () => {
+    /*
+     * An allocation is a budgeting decision, and an upsert that saved a label must not silently
+     * un-budget a side — which would present as every mint being refused for no visible reason.
+     */
+    const app = await boot();
+    await sideWithAllocation(app, 500_000);
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008', label: 'Renamed' });
+    const budget = await request(app).get(`/api/project-sides/${SERVER}/budget`);
+    expect(budget.body).toMatchObject({ allocated: 500_000, remaining: 500_000 });
+  });
+
+  test('the allocation can be cleared back to unallocated', async () => {
+    const app = await boot();
+    await sideWithAllocation(app, 500_000);
+    const cleared = await request(app).put(`/api/project-sides/${SERVER}/allocation`).send({});
+    expect(cleared.body.side.allocatedTokens).toBeNull();
+    expect(cleared.body.budget.remaining).toBeNull();
+  });
+
+  test('a negative or fractional allocation is refused', async () => {
+    const app = await boot();
+    await sideWithAllocation(app);
+    for (const bad of [-1, 1.5, 'lots']) {
+      const r = await request(app).put(`/api/project-sides/${SERVER}/allocation`).send({ allocated_tokens: bad });
+      expect(r.status, String(bad)).toBe(400);
+    }
+  });
+
+  test('only ACTIVE engagements count against the allocation', async () => {
+    /*
+     * Found by mutation testing: dropping the state filter from the per-side sum survived, because no
+     * test had a non-active engagement on the side. It matters in the direction that costs capacity —
+     * an ended engagement still counted would permanently consume a side's allocation, and the only
+     * remedy an operator would find is raising a budget that is not actually being spent.
+     *
+     * Seeded through the store's own file rather than driven through the API, because reaching an
+     * `ended` state needs a requester credential, an approval and a revoke — three things that would
+     * test everything except the sum.
+     */
+    const app = await boot({
+      rawDataFiles: {
+        'engagements.json': JSON.stringify({
+          version: 1,
+          engagements: {
+            ended_one: {
+              id: 'ended_one', state: 'ended', agent: 'someone',
+              projectRoomId: `!old:${SERVER}`, allocatedTokens: 900_000,
+            },
+            active_one: {
+              id: 'active_one', state: 'active', agent: 'someone',
+              projectRoomId: `!live:${SERVER}`, allocatedTokens: 100_000,
+            },
+          },
+          whitelist: {}, offers: {}, audit: [],
+        }),
+      },
+    });
+    await sideWithAllocation(app, 1_000_000);
+    const budget = await request(app).get(`/api/project-sides/${SERVER}/budget`);
+    // 100k committed, not 1,000,000 — the ended engagement releases its promise.
+    expect(budget.body).toMatchObject({ allocated: 1_000_000, committed: 100_000, remaining: 900_000 });
+  });
+
+  test('an engagement on ANOTHER side does not count against this one', async () => {
+    // The side is derived from the room's origin server, so a room on a different homeserver is a
+    // different budget. Grouping them would make one project side's spend refuse another's work.
+    const app = await boot({
+      rawDataFiles: {
+        'engagements.json': JSON.stringify({
+          version: 1,
+          engagements: {
+            elsewhere: {
+              id: 'elsewhere', state: 'active', agent: 'someone',
+              projectRoomId: '!r:other.example', allocatedTokens: 999_000,
+            },
+          },
+          whitelist: {}, offers: {}, audit: [],
+        }),
+      },
+    });
+    await sideWithAllocation(app, 1_000_000);
+    const budget = await request(app).get(`/api/project-sides/${SERVER}/budget`);
+    expect(budget.body).toMatchObject({ committed: 0, remaining: 1_000_000 });
+  });
+
+  test('the budget endpoint 404s for an unknown side', async () => {
+    const app = await boot();
+    expect((await request(app).get('/api/project-sides/never.configured/budget')).status).toBe(404);
+  });
+});

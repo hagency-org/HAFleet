@@ -6824,6 +6824,51 @@ app.get('/api/project-sides', requireBearer, (req, res) => {
  * the first time. The 404 looks like a missing route rather than a shadowed one, so a future reordering
  * would break inbound appservice authentication in a way that reads as "not implemented".
  */
+/**
+ * What a project side has left to spend, and whether it has anything at all.
+ *
+ * ADR-016's settled question 2 in force: a REAL allocation, not a slice. Returns
+ * `{ allocated, committed, remaining }` where `allocated: null` means UNALLOCATED — which is not
+ * unlimited. Nothing may be minted against a side with no allocation, so that a side which has been
+ * configured and not yet budgeted refuses work instead of drawing on whatever is left.
+ */
+function sideBudgetFor(sideId) {
+  const side = projectSideStore.getSide(sideId);
+  if (!side) return null;
+  const allocated = side.allocatedTokens ?? null;
+  const committed = engagementStore.committedForProjectSide(side.serverName);
+  return {
+    allocated,
+    committed,
+    remaining: allocated === null ? null : Math.max(0, allocated - committed),
+  };
+}
+
+/*
+ * Set a side's allocation. The operator's 「真配额」.
+ */
+app.put('/api/project-sides/:id/allocation', requireBearer, (req, res) => {
+  try {
+    const raw = req.body?.allocated_tokens ?? req.body?.allocatedTokens;
+    const side = projectSideStore.setAllocation(req.params.id, raw === undefined ? null : raw);
+    if (!side) return res.status(404).json({ error: 'project side not found' });
+    return res.json({ ok: true, side, budget: sideBudgetFor(side.id) });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to set allocation');
+  }
+});
+
+/*
+ * What a side has, has promised, and has left. Separate from GET /:id because it reaches across into
+ * the engagement store, and a read of the side record should not silently depend on another store
+ * being consistent.
+ */
+app.get('/api/project-sides/:id/budget', requireBearer, (req, res) => {
+  const budget = sideBudgetFor(req.params.id);
+  if (!budget) return res.status(404).json({ error: 'project side not found' });
+  return res.json({ ok: true, sideId: projectSideStore.getSide(req.params.id).id, ...budget });
+});
+
 /*
  * The inbound credentials the BRIDGE needs, and nothing else.
  *
@@ -7781,9 +7826,85 @@ app.post('/api/dispatch', (req, res) => {
     const inCell = poolRecords().filter((a) => agentRole(a) === role && agentCapability(a) === tier).length;
     const reserved = provisionReservations.get(key) || 0;
     if (inCell + reserved < cap) {
+      /*
+       * BUDGET ADMISSION, ADR-016 decision 6 — and it applies EXACTLY WHERE A BORROWER EXISTS.
+       *
+       * The cap above counts AGENTS and never consulted the ledger, so this path would mint against a
+       * project side with no budget left, or with none ever allocated. The operator stated the
+       * requirement directly: 「如果 token 预算已经超标了…这时候应该报警，说无法创建 agent，需要加预算」.
+       *
+       * SCOPED BY WHETHER THE REQUEST NAMES A ROOM. A room id carries its origin server, which is the
+       * project side whose budget is at stake. A request with NO room is not project-side work — it is
+       * the contributor dispatching against their own agents, already governed by each agent's own
+       * ceiling — so requiring a side there would break internal dispatch to enforce a budget nobody
+       * is spending. A first version of this did exactly that and broke two existing cases; the
+       * failure was the scope being wrong, not the gate.
+       *
+       * THE CONSEQUENCE, STATED: a caller that omits the room escapes this check. That is acceptable
+       * only because such a request cannot be attributed to a borrower at all — but note separately
+       * that `POST /api/dispatch` carries NO auth guard, so "who can omit the room" is "anyone who can
+       * reach the backend". That is pre-existing and is not fixed here; it is recorded because this
+       * gate now depends on it.
+       *
+       * A REFUSAL IS AN ALARM, NOT A QUEUE ENTRY. Falling through to the queue would answer "waiting
+       * for capacity" when the truth is "will never be created without more budget", and an agent that
+       * was never created cannot be waited for.
+       */
+      const room = typeof req.body?.room === 'string' ? req.body.room : '';
+      const at = room.indexOf(':');
+      const sideId = at > 0 ? room.slice(at + 1).toLowerCase() : null;
+
+      if (sideId) {
+        const budget = sideBudgetFor(sideId);
+        const wanted = Number.isFinite(Number(req.body?.requestedTokens))
+          ? Math.max(0, Math.floor(Number(req.body.requestedTokens)))
+          : 0;
+        if (!budget) {
+          return res.status(409).json({
+            status: 'refused',
+            reason: 'no_project_side',
+            error: `no project side is configured for ${sideId}, so no budget can be charged for a new agent`,
+            sideId, role, tier,
+          });
+        }
+        if (budget.allocated === null) {
+          // UNALLOCATED IS NOT UNLIMITED, so the alarm arrives before the tokens rather than after.
+          return res.status(409).json({
+            status: 'refused',
+            reason: 'no_allocation',
+            error: `project side ${sideId} has no token allocation — set one before agents can be created for it`,
+            sideId, role, tier,
+          });
+        }
+        if (wanted > budget.remaining) {
+          return res.status(409).json({
+            status: 'refused',
+            reason: 'over_allocation',
+            error: `creating this agent needs ${wanted} tokens and project side ${sideId} has `
+              + `${budget.remaining} of ${budget.allocated} left (${budget.committed} committed) — raise the allocation`,
+            sideId, role, tier,
+            allocatedTokens: budget.allocated,
+            committedTokens: budget.committed,
+            remainingTokens: budget.remaining,
+            requestedTokens: wanted,
+          });
+        }
+      }
+
       provisionReservations.set(key, reserved + 1);
-      const name = `mx_${role}_${tier}_${dispatchTicketSeq++}`;
-      return res.json({ status: 'provision', role, tier, name, runtime: TIER_RUNTIME[tier] });
+      /*
+       * The name carries the SIDE when there is one. `mx_${role}_${tier}_${seq}` is unattributable,
+       * and ADR-016 decision 7's cascade needs exactly that attribution to know what to take with a
+       * side when it is removed. Without a side the existing format is kept, because that request is
+       * not a side's to account for.
+       */
+      const name = sideId
+        ? `mx_${sideId.replace(/[^a-z0-9]+/g, '_')}_${role}_${tier}_${dispatchTicketSeq++}`
+        : `mx_${role}_${tier}_${dispatchTicketSeq++}`;
+      return res.json({
+        status: 'provision', role, tier, name, runtime: TIER_RUNTIME[tier],
+        ...(sideId ? { sideId, budget: sideBudgetFor(sideId) } : {}),
+      });
     }
   }
   const ticket = `disp-${Date.now()}-${dispatchTicketSeq++}`;

@@ -374,12 +374,35 @@ decision 2 stops assuming federation. **Such an agent cannot join its own approv
 
 Passing the agent's own base URL does not help: the room does not exist on the agent's server.
 
-The immediate damage is bounded and has been removed. The agent's presence in that room is cosmetic by
-its own design — the bot is the E2EE sender and the authorization service, and the agent token never
-submits a verdict — but the join was FATAL, so the first approval request for a project-side agent
-would have failed with "agent failed to join approval room", which reads as approval being broken
-rather than as a decorative step failing. It is now best-effort with a warning that names the expected
-cause.
+**A CORRECTION TO THIS SECTION, 2026-08-13.** It previously said "the immediate damage is bounded and
+has been removed". **That was false when written.** The decorative join was made best-effort, and the
+claim was recorded — while the same collision continued two lines later in the same function, in a
+worse form.
+
+`onApprovalRequested` does `const token = this.getAgentToken(approval.agent)` and throws
+`missing Matrix token for approval agent` if there is none, then calls `sendAsAgentContent`, which read
+a hardcoded `HOMESERVER`. For a project-side agent that presented a project side's token to the
+contributor's homeserver; for an **appservice** side — where this ADR's own settled question 6 says the
+agent holds no credential at all — the throw fires immediately. Either way the catch posts
+`delivery-failed`, which calls `denyPending`, and **the request is denied.**
+
+The user-visible sequence is worse than the failure it replaced, because the private send happens
+first: the owner receives a fully rendered approval request with Approve and Deny buttons, the request
+is silently denied behind them with no message posted in any room, and clicking Approve returns
+`not_pending` → 409, which the bridge swallows with a `console.warn`. **A dead button** instead of an
+error.
+
+What has now been done: every agent-side path that presents an agent's token now sends it to that
+token's OWN homeserver via `baseUrlForToken` — the message send, the reaction, the typing notification
+and all five joins. That closes the wrong-server half. **The appservice half is not closed:**
+`getAgentToken` returns nothing for an appservice side, because such a side has no per-agent
+credential by design, so publishing a public notice as the agent needs the masquerade path
+(`?user_id=` with the side's `as_token`) which nothing implements yet. Until it does, an appservice
+side cannot carry an approval.
+
+The lesson worth keeping is not about Matrix. The claim was written in the same commit as the fix, from
+reading the function I had just edited — and the failure was sixteen lines below the part I was looking
+at. A fix's own commit is the worst place to assert that a class of failure is gone.
 
 What remains is the design question, and there are three shapes:
 
