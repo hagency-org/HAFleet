@@ -933,8 +933,49 @@ function makeUserId(localpart) {
  * ADR-014 decision 5 says an MXID should be DISCOVERED rather than composed, which would remove this
  * function's reason to exist. Until then it must at least compose something the server can hold.
  */
+/**
+ * The MXID an agent WOULD have on this deployment's own homeserver.
+ *
+ * A SPECIFICATION, NOT AN OBSERVATION, and separating the two is the point of `agentMxid` below.
+ * ADR-014 decision 5 says an agent's MXID must be DISCOVERED rather than constructed — but auditing
+ * every caller showed that composition is not uniformly wrong. It is correct wherever the composed
+ * value is what we are ASKING FOR rather than what we believe to be true:
+ *
+ *   - telling an operator which account to create, and which token to issue for it;
+ *   - the expected side of the identity check in `ensureAgentAccount`, where by definition no
+ *     discovered value exists yet — that check is what produces one;
+ *   - constructing the name of an account to look for and remove, including the `@ac_<human>` that
+ *     should never have existed.
+ *
+ * It is wrong wherever it asserts an identity for an agent that is already operating, because such an
+ * agent may live on a project side's homeserver. Those callers use `agentMxid`.
+ */
 function agentUserId(name) {
   return makeUserId(`${AGENT_PREFIX}${String(name || '')}`.toLowerCase());
+}
+
+/**
+ * The MXID an operating agent ACTUALLY has: discovered if we know it, composed if we do not.
+ *
+ * ADR-014 decision 5. The discovered value comes from `/whoami` at credential adoption and is stored
+ * on the credential record (decision 4), so this reads a fact rather than rebuilding a guess.
+ *
+ * WHY THE FALLBACK IS SAFE HERE, rather than the silent default this project keeps finding defects in:
+ * every caller of this function concerns an agent that is operating — deriving an inviter, matching an
+ * invite's `state_key`, checking approval-room membership, addressing a DM, sending a typing
+ * notification. An agent with no credential record has no token, so it cannot have acted and cannot
+ * have been invited as anything worth comparing. The fallback therefore covers a case that does not
+ * arise, and preserves today's behaviour exactly on a single-homeserver deployment.
+ *
+ * THE COST OF GETTING THIS WRONG IS ALREADY RECORDED IN THIS FILE. The invite poll once composed a
+ * `state_key` inline and missed the lowercasing the homeserver applies: it looked for
+ * `@ac_BigLittle:…` while the event carried `@ac_biglittle:…`, found nothing, and reported a null
+ * inviter. Owner IS the inviter (ADR-002), so a null inviter meant the room was untrusted, no
+ * ownership was recorded, and every later approval failed `owner_binding_missing`. That was a
+ * case difference. A wrong SERVER is the same mechanism with a larger error.
+ */
+function agentMxid(name) {
+  return agentCredential(name)?.mxid || agentUserId(name);
 }
 
 function humanUserId(name) {
@@ -3164,7 +3205,7 @@ export class MatrixBridge {
     // Do not trust an agent-looking account from another homeserver, nor a
     // different local agent. The room became managed only after a trusted
     // developer invited this exact local puppet and it successfully joined.
-    if (inviterMxid !== agentUserId(canonicalAgent)) return null;
+    if (inviterMxid !== agentMxid(canonicalAgent)) return null;
     return { trusted: true, reason: 'managed_agent' };
   }
 
@@ -5024,7 +5065,7 @@ export class MatrixBridge {
            * every later approval fails `owner_binding_missing`. Fixing agentUserId() alone did not
            * help while this copy existed, which is the argument for having one.
            */
-          const expectedStateKey = agentUserId(agentName);
+          const expectedStateKey = agentMxid(agentName);
           const inviter = inviteState.find(e => e.type === 'm.room.member' && e.state_key === expectedStateKey)?.sender || null;
           const trust = getRoomTrust(roomId, { inviterMxid: inviter, requireTrustedInviter: true });
           roomTrustLog('agent-invite', roomId, trust, `agent=${agentName} inviter=${inviter}`);
@@ -5667,7 +5708,7 @@ export class MatrixBridge {
         topic: plaintextTest
           ? 'UNENCRYPTED TEST ONLY. Private UI approval diagnostics; text replies do not authorize execution.'
           : 'Private, UI-only coding-agent approval requests. Text replies do not authorize execution.',
-        invite: [ownerMxid, agentUserId(canonicalAgent)],
+        invite: [ownerMxid, agentMxid(canonicalAgent)],
         power_level_content_override: approvalRoomPowerLevels(this.botUserId),
         initial_state: plaintextTest ? [] : [{
           type: 'm.room.encryption',
@@ -5692,10 +5733,10 @@ export class MatrixBridge {
     // Keep the local agent visibly attached to its approval room. The bridge bot
     // remains the E2EE sender and authorization service; the agent token is never
     // used to submit a verdict.
-    const agentMxid = agentUserId(canonicalAgent);
+    const agentRoomMxid = agentMxid(canonicalAgent);
     let members = await this.botClient.getJoinedRoomMembers(roomId);
-    if (!members.includes(agentMxid)) {
-      try { await this.botClient.inviteUser(agentMxid, roomId); } catch {}
+    if (!members.includes(agentRoomMxid)) {
+      try { await this.botClient.inviteUser(agentRoomMxid, roomId); } catch {}
       const agentToken = this.getAgentToken(canonicalAgent);
       if (agentToken) {
         const join = await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
@@ -6679,7 +6720,7 @@ export class MatrixBridge {
     const otherName = agentName === resolvedFromName ? resolvedToName : resolvedFromName;
     const otherIsAgent = agentName === resolvedFromName ? toIsAgent : fromIsAgent;
     const toUserId = otherIsAgent
-      ? agentUserId(otherName)
+      ? agentMxid(otherName)
       : humanUserId(otherName);
 
     const invite = [toUserId, this.botUserId];
@@ -6982,7 +7023,7 @@ export class MatrixBridge {
       return false;
     }
     if (!token) return false;
-    const userId = agentUserId(agentName);
+    const userId = agentMxid(agentName);
     try {
       const res = await fetch(
         `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/typing/${encodeURIComponent(userId)}`,
@@ -7373,6 +7414,7 @@ export function resetBridgeMatrixTestHooks() {
  * code does rather than against what it ought to do.
  */
 export {
+  agentMxid as agentMxidForTest,
   baseUrlForToken as baseUrlForTokenForTest,
   matrixLogin as matrixLoginForTest,
   matrixRegister as matrixRegisterForTest,

@@ -224,3 +224,90 @@ describe('persistence round-trips the record', () => {
     expect(second.agentTokenStateForTest()).toEqual(first.agentTokenStateForTest());
   });
 });
+
+describe('an operating agent uses the MXID that was DISCOVERED', () => {
+  /*
+   * ADR-014 decision 5. `agentUserId()` composes `@ac_<name>:<our server>`, which is a SPECIFICATION —
+   * correct for telling an operator what account to create, wrong for asserting the identity of an
+   * agent that may live on a project side's homeserver. `agentMxid()` is the assertion form.
+   *
+   * The cost of getting it wrong is already recorded in bridge-matrix.js: the invite poll once composed
+   * a state_key inline and missed the lowercasing the homeserver applies, so it looked for
+   * `@ac_BigLittle:…` while the event carried `@ac_biglittle:…`, found nothing, and reported a null
+   * inviter. Owner IS the inviter (ADR-002), so that meant an untrusted room, no ownership record, and
+   * every later approval failing `owner_binding_missing`. A wrong SERVER is the same mechanism with a
+   * larger error.
+   */
+  test('THE POINT: a discovered MXID on another server WINS over composition', async () => {
+    writeState({
+      alpha: {
+        homeserver: 'https://other.example', serverName: 'other.example',
+        mxid: '@ac_alpha:other.example', accessToken: 'syt_x',
+      },
+    });
+    const mod = await loadBridge();
+    // Composition would say `@ac_alpha:hs.test` — this deployment's own server.
+    expect(mod.agentMxidForTest('alpha')).toBe('@ac_alpha:other.example');
+  });
+
+  test('a discovered MXID whose LOCALPART differs is still believed', async () => {
+    // The homeserver decides the localpart. A project side may have registered the account under a
+    // name that does not match our prefix convention, and it is still the account we hold a token for.
+    writeState({ alpha: { mxid: '@intake-7:hs.test', accessToken: 'syt_x' } });
+    const mod = await loadBridge();
+    expect(mod.agentMxidForTest('alpha')).toBe('@intake-7:hs.test');
+  });
+
+  test('with no credential it FALLS BACK to composition, which is this deployment', async () => {
+    /*
+     * Safe because every caller concerns an agent that is OPERATING — deriving an inviter, matching an
+     * invite state_key, checking approval-room membership, addressing a DM, sending a typing
+     * notification. An agent with no credential record has no token, so it cannot have acted and
+     * cannot have been invited as anything worth comparing against.
+     */
+    writeState({});
+    const mod = await loadBridge();
+    expect(mod.agentMxidForTest('alpha')).toBe('@ac_alpha:hs.test');
+  });
+
+  test('a credential with no mxid recorded also falls back', async () => {
+    // A migrated bare string has `mxid: null` until the next adoption runs a whoami.
+    writeState({ alpha: 'syt_bare_string' });
+    const mod = await loadBridge();
+    expect(mod.agentMxidForTest('alpha').startsWith('@ac_alpha:')).toBe(true);
+  });
+
+  test('the name is matched case-insensitively, as the token lookup is', async () => {
+    // `BigLittle` and `biglittle` are the same agent; the homeserver lowercases localparts. This is
+    // the difference that produced the recorded failure above.
+    writeState({ BigLittle: { mxid: '@ac_biglittle:other.example', accessToken: 'syt_x' } });
+    const mod = await loadBridge();
+    expect(mod.agentMxidForTest('biglittle')).toBe('@ac_biglittle:other.example');
+  });
+
+  test('GUARD: `agentMxid` is never used as a bare value', async () => {
+    /*
+     * A source assertion for a trap I fell into while writing this change, and it is here because a
+     * behavioural test could not have caught it cheaply.
+     *
+     * One call site held its result in a local named `agentMxid`. Renaming the local to avoid shadowing
+     * the new function left two later references reading `agentMxid` — which then resolved to the
+     * FUNCTION. `node --check` passes, no linter complains (both names exist), and
+     * `members.includes(agentMxid)` compares a member list against a function object: always false, so
+     * the agent would be re-invited to its approval room on every single call.
+     *
+     * Found by reading the diff, not by a test. The guard is cheap and the failure was silent.
+     */
+    const { readFileSync } = await import('fs');
+    const source = readFileSync(new URL('../bridge-matrix.js', import.meta.url), 'utf8');
+    const bare = source
+      .split('\n')
+      .map((line, i) => [i + 1, line])
+      // Skip the declaration, the export alias, and prose.
+      .filter(([, line]) => /\bagentMxid\b/.test(line))
+      .filter(([, line]) => !/function agentMxid|agentMxid as agentMxidForTest|^\s*\*|^\s*\/\//.test(line))
+      // Every remaining use must be a CALL.
+      .filter(([, line]) => !/\bagentMxid\(/.test(line));
+    expect(bare, `agentMxid used as a value on line(s) ${bare.map(([n]) => n).join(', ')}`).toEqual([]);
+  });
+});
