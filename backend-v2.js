@@ -8379,6 +8379,74 @@ app.get('/api/project-sides/:id/budget', requireBearer, (req, res) => {
 });
 
 /*
+ * The credential that lets the bridge ACT as a representative on a project side.
+ *
+ * A SECOND, WIDER GRANT THAN `inbound-credentials`, AND A SEPARATE ENDPOINT ON PURPOSE. That one was
+ * scoped to `hsToken` with the note that an `as_token` "acts AS an agent on that homeserver" and would
+ * need "a separate grant with its own argument". This is that argument, and the two are kept apart so
+ * that a caller wanting only inbound authentication cannot receive acting authority as a side effect of
+ * one response shape widening.
+ *
+ * WHAT THE DIFFERENCE ACTUALLY IS:
+ *   - `hsToken` authenticates a push INTO us. Holding it lets someone impersonate the homeserver
+ *     towards HAFleet — bounded, and the receiver's own idempotency and routing bound it further.
+ *   - `asToken` acts as ANY identity in the claimed namespace, plus the representative itself. Holding
+ *     it lets someone speak, create rooms and join rooms as every lent agent on that side.
+ *
+ * WHY THE BRIDGE GETS IT ANYWAY. The bridge IS the component that acts on Matrix for HAFleet; refusing
+ * it acting credentials would leave the representative concept inert — nothing could create the
+ * approval room a borrower decides in (ADR-016's resolved collision), and nothing could publish into
+ * it. It already holds the bot's token and every agent's, so this extends an existing trust boundary
+ * to project sides rather than creating a new one. What it does NOT do is widen it to the console: this
+ * is bridge-secret guarded, and the console proxy's read pattern is written to exclude both credential
+ * routes by name.
+ *
+ * SCOPED, and each scope is a decision:
+ *   - active sides only. A deactivated side is closed to new work, and acting on it would be taking
+ *     work from a side the operator closed.
+ *   - only sides that HAVE a usable acting credential. A registration-token side whose representative
+ *     has not been registered yet has nothing to act with, and returning it would make the bridge
+ *     attempt sends that cannot succeed.
+ */
+app.get('/api/project-sides/acting-credentials', requireApprovalBridgeSecret, (req, res) => {
+  try {
+    const sides = projectSideStore.listSides({ activeOnly: true }).map((side) => {
+      const credential = projectSideStore.credentialFor(side.id);
+      if (!credential) return null;
+      if (credential.kind === 'appservice') {
+        return {
+          sideId: side.id,
+          serverName: side.serverName,
+          apiBaseUrl: side.apiBaseUrl,
+          kind: 'appservice',
+          asToken: credential.asToken,
+          senderLocalpart: credential.senderLocalpart,
+          namespace: credential.namespace,
+        };
+      }
+      if (credential.kind === 'registrationToken' && credential.representativeToken) {
+        return {
+          sideId: side.id,
+          serverName: side.serverName,
+          apiBaseUrl: side.apiBaseUrl,
+          kind: 'registrationToken',
+          representativeToken: credential.representativeToken,
+        };
+      }
+      /*
+       * A registration-token side with no representative token yet is OMITTED rather than returned
+       * with a null. Returning it would have the bridge attempt sends that cannot succeed, and the
+       * failure would look like a rejected credential instead of an unfinished setup.
+       */
+      return null;
+    }).filter(Boolean);
+    return res.json({ ok: true, sides });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to read acting credentials');
+  }
+});
+
+/*
  * The inbound credentials the BRIDGE needs, and nothing else.
  *
  * A NARROW, DELIBERATE EXCEPTION to ADR-016 decision 8, argued rather than assumed. "Write-only" was
