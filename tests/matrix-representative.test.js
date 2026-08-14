@@ -21,6 +21,7 @@ import {
   ensureRepresentative,
   mintAgentIdentity,
   registerRepresentative,
+  sendToRoomOnSide,
   whoami,
   RepresentativeError,
   DEFAULT_REPRESENTATIVE_LOCALPART,
@@ -657,5 +658,120 @@ describe('creating a room on a project side', () => {
       .rejects.toThrow(/credential is required/);
     await expect(createRoomOnSide({ side: SIDE, credential: asCred(), encrypted: false }))
       .rejects.toThrow(/name is required/);
+  });
+});
+
+describe('sending into a room on a project side', () => {
+  /*
+   * The counterpart to createRoomOnSide, and the reason an approval request can reach a decider who is
+   * not on the contributor's homeserver. The bot cannot: it holds an account on one server only
+   * (ADR-014 decision 4's split), so a room on a project side is unreachable to it.
+   */
+  const ROOM = `!approval:${SERVER}`;
+  const CONTENT = { msgtype: 'm.text', body: 'Approval required for alpha' };
+
+  test('an appservice side sends MASQUERADED, into the right room', async () => {
+    const impl = fakeFetch([ok({ event_id: '$e1' })]);
+    const r = await sendToRoomOnSide({
+      side: SIDE, credential: asCred(), roomId: ROOM, content: CONTENT, txnSeed: 'req-1', fetchImpl: impl,
+    });
+    expect(r).toMatchObject({ sent: true, eventId: '$e1' });
+    expect(impl.calls[0].method).toBe('PUT');
+    expect(impl.calls[0].url).toContain(`user_id=%40hafleet%3A${SERVER}`);
+    expect(impl.calls[0].url).toContain('/send/m.room.message/');
+    expect(JSON.parse(impl.calls[0].body)).toEqual(CONTENT);
+  });
+
+  test('IDEMPOTENT BY SEED: the same seed produces the same transaction id', async () => {
+    /*
+     * Matrix deduplicates on the transaction id, so a retry after a timeout — where the send may or may
+     * not have landed — must reuse it or post the message twice. A timestamp would make every retry a
+     * new message, which is exactly the failure it looks like it prevents.
+     */
+    const urls = [];
+    for (const _ of [1, 2]) {
+      const impl = fakeFetch([ok({ event_id: '$e' })]);
+      await sendToRoomOnSide({
+        side: SIDE, credential: asCred(), roomId: ROOM, content: CONTENT, txnSeed: 'same-request', fetchImpl: impl,
+      });
+      urls.push(impl.calls[0].url);
+      void _;
+    }
+    expect(urls[0]).toBe(urls[1]);
+  });
+
+  test('a DIFFERENT seed produces a different transaction id', async () => {
+    const ids = [];
+    for (const seed of ['req-a', 'req-b']) {
+      const impl = fakeFetch([ok({ event_id: '$e' })]);
+      await sendToRoomOnSide({
+        side: SIDE, credential: asCred(), roomId: ROOM, content: CONTENT, txnSeed: seed, fetchImpl: impl,
+      });
+      ids.push(impl.calls[0].url);
+    }
+    expect(ids[0]).not.toBe(ids[1]);
+  });
+
+  test('the seed is REQUIRED, because a clock-derived one would defeat the point', async () => {
+    await expect(sendToRoomOnSide({ side: SIDE, credential: asCred(), roomId: ROOM, content: CONTENT }))
+      .rejects.toThrow(/txnSeed is required/);
+  });
+
+  test('A ROOM ON ANOTHER SERVER IS REFUSED before anything is sent', async () => {
+    /*
+     * Sending to a room whose origin is not this side means presenting this side's credential to a room
+     * it has no account in — at best a 403, at worst the cross-side disclosure that setRoomAvatar's
+     * retry ladder used to produce.
+     */
+    const impl = fakeFetch([]);
+    const r = await sendToRoomOnSide({
+      side: SIDE, credential: asCred(), roomId: '!elsewhere:other.example',
+      content: CONTENT, txnSeed: 's', fetchImpl: impl,
+    });
+    expect(r.sent).toBe(false);
+    expect(r.reason).toMatch(/not on palpo\.test/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('a registration-token side uses its own token, unmasqueraded', async () => {
+    const impl = fakeFetch([ok({ event_id: '$e' })]);
+    await sendToRoomOnSide({
+      side: SIDE, credential: regCred({ representativeToken: 'rep_tok' }),
+      roomId: ROOM, content: CONTENT, txnSeed: 's', fetchImpl: impl,
+    });
+    expect(impl.calls[0].headers.Authorization).toBe('Bearer rep_tok');
+    expect(impl.calls[0].url).not.toContain('user_id=');
+  });
+
+  test('no representative token means nothing is sent', async () => {
+    const impl = fakeFetch([]);
+    const r = await sendToRoomOnSide({
+      side: SIDE, credential: regCred(), roomId: ROOM, content: CONTENT, txnSeed: 's', fetchImpl: impl,
+    });
+    expect(r.sent).toBe(false);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('a failure is a classified state, and a missing event_id is a failure', async () => {
+    const refused = fakeFetch([fail(403, { errcode: 'M_FORBIDDEN' })]);
+    expect(await sendToRoomOnSide({
+      side: SIDE, credential: asCred(), roomId: ROOM, content: CONTENT, txnSeed: 's', fetchImpl: refused,
+    })).toMatchObject({ sent: false, state: 'rejected' });
+
+    const empty = fakeFetch([ok({})]);
+    const r = await sendToRoomOnSide({
+      side: SIDE, credential: asCred(), roomId: ROOM, content: CONTENT, txnSeed: 's', fetchImpl: empty,
+    });
+    expect(r.sent).toBe(false);
+    expect(r.reason).toMatch(/did not return an event_id/);
+  });
+
+  test('a non-default msgtype is honoured, for a status notice as well as a request', async () => {
+    const impl = fakeFetch([ok({ event_id: '$e' })]);
+    await sendToRoomOnSide({
+      side: SIDE, credential: asCred(), roomId: ROOM, content: CONTENT, txnSeed: 's',
+      msgType: 'm.reaction', fetchImpl: impl,
+    });
+    expect(impl.calls[0].url).toContain('/send/m.reaction/');
   });
 });
