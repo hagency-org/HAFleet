@@ -8459,6 +8459,64 @@ function sideIdForRoom(roomId) {
  * Returns `true` when it has already answered the request, so a caller reads as
  * `if (refuseOverSideAllocation(...)) return;`.
  */
+const SIDE_BUDGET_ALERT_KEY = (sideId) => `project_side_budget:${sideId}`;
+
+/**
+ * THE ALARM the operator asked for: 「应该报警，说无法创建 agent，需要加预算」.
+ *
+ * The refusal already names the shortfall, but it goes back to WHOEVER ASKED — a borrower, or an
+ * automated request — and the person who can fix it is the contributor's operator, who is not in that
+ * conversation at all. Until this, decision 6 was half built: admission control worked and the alarm
+ * did not exist, so the failure mode was silence on the only side that could act.
+ *
+ * DEDUPED BY SIDE, deliberately. A borrower retrying every minute must not produce a wall of alerts;
+ * `ingest` increments `occurrences` on a repeat, so the retry rate becomes visible ON the one alert
+ * rather than burying it.
+ *
+ * THE ACTIONABILITY FIELDS ARE NOT DECORATION. `buildActionability` silently DOWNGRADES a warning to
+ * `info` unless it has owner-or-assignee, runbook, impact and recoveryCondition — so an alarm raised
+ * carelessly is filed as a note and pages nobody, which is exactly the quiet non-alarm this exists to
+ * prevent. Four of them are load-bearing; `correlation` is NOT, because `normalizeCorrelation`
+ * synthesises `{alertType, dedupeKey}` from fields `ingest` already requires, so it can never be the
+ * empty object that would trigger the downgrade. It is passed anyway to carry `sideId`, which the
+ * synthesised form would not have. (Both facts read out of that function; mutation testing showed the
+ * correlation half of an earlier version of this comment was wrong.)
+ */
+function raiseSideBudgetAlarm(sideId, { reason, act, budget, wanted }) {
+  try {
+    alertStore.ingest({
+      alertType: 'project_side_budget',
+      dedupeKey: SIDE_BUDGET_ALERT_KEY(sideId),
+      severity: 'warning',
+      source: 'backend',
+      summary: reason === 'no_allocation'
+        ? `Project side ${sideId} has no token allocation, so it can fund no work`
+        : `Project side ${sideId} is out of allocated tokens and is refusing work`,
+      detail: {
+        sideId,
+        reason,
+        refusedAct: act,
+        requestedTokens: wanted ?? null,
+        allocatedTokens: budget?.allocated ?? null,
+        committedTokens: budget?.committed ?? null,
+        remainingTokens: budget?.remaining ?? null,
+      },
+      owner: 'hafleet-operator',
+      runbook: `PUT /api/project-sides/${sideId}/allocation with a higher allocated_tokens, `
+        + 'or accept that this side stays closed to new work',
+      impact: 'engagements on this project side are refused at admission; nothing running is stopped, '
+        + 'and no agent is created for it',
+      recoveryCondition: 'the side is given an allocation that leaves headroom above what is already '
+        + 'committed — this alert auto-resolves when that happens',
+      correlation: { dedupeKey: SIDE_BUDGET_ALERT_KEY(sideId), sideId, reason },
+      tags: ['project-side', `side:${sideId}`, 'budget'],
+    });
+  } catch (error) {
+    // An alarm that cannot be filed must not turn a clean refusal into a 500.
+    console.warn(`[project-side] failed to raise budget alarm for ${sideId}: ${error?.message || error}`);
+  }
+}
+
 function refuseOverSideAllocation(res, { projectRoomId, tokens, act, requireSide = false, extra = {} }) {
   const refuse = (reason, error, fields = {}) => {
     res.status(409).json({ status: 'refused', reason, error, ...extra, ...fields });
@@ -8472,17 +8530,25 @@ function refuseOverSideAllocation(res, { projectRoomId, tokens, act, requireSide
   const budget = sideBudgetFor(sideId);
   if (!budget) {
     if (!requireSide) return false;
+    /*
+     * NO ALARM HERE, on purpose. This is a configuration gap, not an exhausted budget: there is no side
+     * to attribute an alert to, so a per-side dedupe key would be a key for something that does not
+     * exist, and any room id an unauthenticated caller invents would mint another alert. The refusal
+     * still names the server.
+     */
     return refuse('no_project_side',
       `no project side is configured for ${sideId}, so no budget can be charged for ${act}`, { sideId });
   }
   if (budget.allocated === null) {
     // UNALLOCATED IS NOT UNLIMITED, so the alarm arrives before the tokens rather than after.
+    raiseSideBudgetAlarm(sideId, { reason: 'no_allocation', act, budget, wanted: tokens });
     return refuse('no_allocation',
       `project side ${sideId} has no token allocation — set one before ${act} can draw on it`,
       { sideId, ...budget });
   }
   const wanted = Number.isFinite(Number(tokens)) ? Math.max(0, Math.floor(Number(tokens))) : 0;
   if (wanted > budget.remaining) {
+    raiseSideBudgetAlarm(sideId, { reason: 'over_allocation', act, budget, wanted });
     return refuse('over_allocation',
       `${act} needs ${wanted} tokens and project side ${sideId} has ${budget.remaining} of `
       + `${budget.allocated} left (${budget.committed} committed) — raise the allocation`,
@@ -8505,7 +8571,17 @@ app.put('/api/project-sides/:id/allocation', requireBearer, (req, res) => {
     const raw = req.body?.allocated_tokens ?? req.body?.allocatedTokens;
     const side = projectSideStore.setAllocation(req.params.id, raw === undefined ? null : raw);
     if (!side) return res.status(404).json({ error: 'project side not found' });
-    return res.json({ ok: true, side, budget: sideBudgetFor(side.id) });
+    const budget = sideBudgetFor(side.id);
+    /*
+     * RESOLVED ONLY IF THE RAISE ACTUALLY HELPED. `remaining > 0` and not null, rather than "the
+     * allocation changed": raising 100k to 200k against 300k already committed leaves the side just as
+     * unable to fund work, and closing the alarm there would report a recovery that did not happen —
+     * the operator would go back to a console showing nothing wrong and work still refused.
+     */
+    if (budget && budget.allocated !== null && budget.remaining > 0) {
+      alertStore.autoResolve(SIDE_BUDGET_ALERT_KEY(side.id));
+    }
+    return res.json({ ok: true, side, budget });
   } catch (error) {
     return respondProjectSideError(res, error, 'failed to set allocation');
   }

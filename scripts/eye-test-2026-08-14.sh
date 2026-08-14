@@ -100,6 +100,15 @@ echo "    $(echo "$r" | jqf "d.get('error')")"
 b=$(op "$BASE/api/project-sides/$SIDE/budget")
 check "  ...and nothing was committed"         "0" "$(echo "$b" | jqf "d['committed']")"
 
+# THE ALARM. The refusal above went back to the caller; this is what reached the operator.
+check "an alert was raised for the operator"   "True" "$(op "$BASE/api/alerts?status=open" | jqf "any(a['alertType']=='project_side_budget' for a in d)")"
+check "  ...as a real warning, not a note"     "warning" "$(op "$BASE/api/alerts?status=open" | jqf "[a for a in d if a['alertType']=='project_side_budget'][0]['severity']")"
+check "  ...actionable, so it can be worked"   "True" "$(op "$BASE/api/alerts?status=open" | jqf "[a for a in d if a['alertType']=='project_side_budget'][0]['actionable']")"
+echo "  the runbook it carries:"
+echo "    $(op "$BASE/api/alerts?status=open" | jqf "[a for a in d if a['alertType']=='project_side_budget'][0]['runbook']")"
+op -X PUT "$BASE/api/project-sides/$SIDE/allocation" -d '{"allocated_tokens":900000}' > /dev/null
+check "raising the allocation resolves it"     "False" "$(op "$BASE/api/alerts?status=open" | jqf "any(a['alertType']=='project_side_budget' for a in d)")"
+
 echo
 echo "=================================================================="
 echo " #59  removing a side stands its records down, never deletes them"

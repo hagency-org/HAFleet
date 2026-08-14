@@ -7,23 +7,28 @@ liveness: auto
 tags: [matrix, identity, provisioning, intake, budget, federation]
 ---
 
-## Implementation status 2026-08-13
+## Implementation status 2026-08-14
 
-**Nothing below is built.** This record exists because four questions were put to the operator and
-answered; it captures the answers and derives what they imply, before any code moves. Per ADR-014's
-own correction, present-tense declarative for unbuilt work is a correctness defect, so every decision
-carries its own status line and the table is the index.
+This record began on 2026-08-13 with the header **"Nothing below is built"**, written before any code
+moved. Six of the eight decisions have moved since, and that sentence — plus three rows that still said
+"no such record exists" and "the repository has zero of it" — survived for a day after it stopped being
+true. Recorded rather than quietly edited, because the discipline this ADR inherits from ADR-014 is that
+**present-tense declarative for unbuilt work is a correctness defect**, and its mirror image is just as
+bad: a gap table that under-reports what exists sends the next reader to build it twice.
+
+Every decision carries its own status line and the table is the index. Rows now say what is built AND
+what is not, because "partly built" without the second half is the same defect in a shorter form.
 
 | # | decision | status | evidence for the gap |
 |---|---|---|---|
-| 1 | 项目方 (project side) is a first-class entity: one homeserver, one credential, one representative | **decided, not built** | no such record exists; `HOMESERVER` is one module constant with **51** product-code references (`bridge-matrix.js` 44, `lib/bot-commands.js` 7) plus 12 in tests, at `8c78a7e` |
-| 2 | non-federation is the assumption; federation is an optimization inside the same model; **both** credential kinds are supported | **decided, not built** | ADR-014's amendment says the opposite — see "What this reverses". Appservice support is mandatory per the operator (2026-08-13) and the repository has zero of it: no `as_token`, `hs_token`, `sender_localpart` or registration file, and the running bridge holds zero listening sockets |
-| 3 | the representative is registered per project side and is NOT an agent | **decided, not built**; in the first pass | the two roles are one thing today: the agent itself must be invited and must join |
+| 1 | 项目方 (project side) is a first-class entity: one homeserver, one credential, one representative | **built** (2026-08-14) | `lib/project-side-store.js` + ten endpoints on `backend-v2.js`. The id IS the server name, so one side per homeserver is structural rather than validated. `publicSide` is an allow-list projection, so no read path can return the credential. NOT built: `HOMESERVER` is still the contributor's own server as a module constant — **54** references remain (`bridge-matrix.js` 47, `lib/bot-commands.js` 7), and most are CORRECT (bot-created rooms, the bot's own token, the operator on our server). The side record exists; the bridge is not fully de-globalised, and an audit of which of the 54 are wrong has not been done |
+| 2 | non-federation is the assumption; federation is an optimization inside the same model; **built** for both credential kinds | **built** (2026-08-14) | `CREDENTIAL_KINDS = ['appservice', 'registrationToken']`; `lib/appservice-receiver.js` and `lib/appservice-listener.js` handle HS→AS transactions, and the bridge starts an intake (`startAppserviceIntake`) with a token-identified router. Verified against a real Palpo 0.4.0: registration installed, three transactions accepted, same-txnId idempotency, wrong-token 403, then unload proven via `M_UNKNOWN_TOKEN`. NOT built: nothing CHOOSES federation as the optimization — there is no code path that detects a federating side and skips registration. The listener is off unless `HAFLEET_APPSERVICE_PORT` is set, and it is not set on this deployment |
+| 3 | the representative is registered per project side and is NOT an agent | **built** (2026-08-14) | `lib/matrix-representative.js`: `registerRepresentative` (random password, discarded), `ensureRepresentative`, `whoami`, and `classifyMatrixFailure` where only 401/403 are verdicts and anything unknown is `unreachable`. Wired at two call sites in `backend-v2.js`, and the credential is stored BEFORE the verdict so a crash between the two writes loses a verdict rather than a token. `createRoomOnSide` / `sendToRoomOnSide` are used by the bridge, which is how an approval reaches a decider on the borrower's server. NOT built: the representative does not yet invite an agent into a project room — the agent still joins on its own |
 | 4 | an agent instance is minted on acceptance from a resource declaration | **partly built** (2026-08-14) | The identity act is built (`mintAgentIdentity`), and side attribution is built: a provision plan carries its `sideId`, the backend remembers the assignment in `provisionedSides`, and the agent record gains `projectSide` at registration — taken from that map, never from the agent's own request body, which `POST /api/agents` now enforces per-field. NOT built: nothing calls `mintAgentIdentity` from any provisioning path yet, and the resource declaration is still an operator-chosen preset rather than a role-matched selection. **Corrected 2026-08-14:** the budget half of this row cited the `/api/dispatch` gate; the admission point is acceptance, and the gate is there now |
 | 5 | the invite object is a room alias plus `knock` | **decided, not built** | `joinRoomByAlias`, `room_alias`, `matrix.to`, `inviteToken`, `joinCode` — zero matches repository-wide |
-| 6 | budget is admission control, and **acceptance** is the admission point | **built** (2026-08-14) | A project side carries a real `allocatedTokens`; `null` is UNALLOCATED and refuses rather than meaning unlimited. `refuseOverSideAllocation` answers `no_project_side`, `no_allocation` or `over_allocation` and names the shortfall — a refusal, never a queue entry — at BOTH points a side's allocation is committed: the auto-join inside `POST /api/engagements` and the approval in `POST /api/engagements/:id/verdict`. **Corrected 2026-08-14:** this row previously cited the gate on `POST /api/dispatch` Phase 4, which ADR-013 decision 8 withdraws and which has no product caller — see "Where this gate belongs" below |
-| 7 | deleting a project side cascades, but RETIRES agents rather than erasing usage | **partly built** (2026-08-13) | Removing a side retires the agents minted for it — record kept, ledger kept, `offlineReason` naming the side — and the precondition is checked BEFORE anything is retired, so a refused delete does not take a side's agents down. Engagements on the side are ENDED and approval bindings DEACTIVATED — kept with a reason, per the operator's compliance rule 「不删除，只是停用退役」 — and the response reports `cascade: 'performed'` with what it did rather than a claim of completeness. NOT built: nothing outside these three stores is swept |
-| 8 | a project side's credential is write-only through the console | **decided, not built** | a new secret class: `cf.ownSecrets` covers install-time `.env` secrets only |
+| 6 | budget is admission control, and **acceptance** is the admission point; a refusal RAISES AN ALARM | **built** (2026-08-14) | A project side carries a real `allocatedTokens`; `null` is UNALLOCATED and refuses rather than meaning unlimited. `refuseOverSideAllocation` answers `no_project_side`, `no_allocation` or `over_allocation` and names the shortfall — a refusal, never a queue entry — at BOTH points a side's allocation is committed: the auto-join inside `POST /api/engagements` and the approval in `POST /api/engagements/:id/verdict`. A refusal also raises an actionable `project_side_budget` alert, deduped per side, that auto-resolves when the allocation is raised far enough to leave headroom. **Corrected 2026-08-14:** this row previously cited the gate on `POST /api/dispatch` Phase 4, which ADR-013 decision 8 withdraws and which has no product caller — see "Where this gate belongs" below. NOT built: the overrun DISPLAY obligation |
+| 7 | deleting a project side cascades, but RETIRES agents rather than erasing usage | **built** (2026-08-14) | Removing a side retires the agents minted for it — record kept, ledger kept, `offlineReason` naming the side — and the precondition is checked BEFORE anything is retired, so a refused delete does not take a side's agents down. Engagements on the side are ENDED and approval bindings DEACTIVATED — kept with a reason, per the operator's compliance rule 「不删除，只是停用退役」 — and the response reports `cascade: 'performed'` with what it did rather than a claim of completeness. NOT built: nothing outside these three stores is swept |
+| 8 | a project side's credential is write-only through the console | **partly built** (2026-08-14) | The API half is done and is the half that could leak: `publicSide` is an allow-list projection, `accessState` is named to dodge the health writer's `/credential/` redaction guard, and the two credential-returning endpoints are excluded from the console proxy's read allow-list by a regex that requires a dot or colon in the id. NOT built: the console has no UI for entering one, so today an operator sets a credential with `curl`. The new secret class is also still unclassified — `cf.ownSecrets` covers install-time `.env` secrets only, and a side's `as_token` is somebody else's server |
 
 ## What this reverses, and why that is stated first
 
@@ -118,7 +123,7 @@ homeserver are reachable through one registration credential, so keying credenti
 multiplies them by rooms-per-server for no gain — and, decisively, it cannot express the fact the
 operator asked to store: *we are registered here*. That fact is about the server.
 
-*Status — **decided, not built**.*
+*Status — **built** (2026-08-14). `lib/project-side-store.js` and ten endpoints; the id is the server name, so one-side-per-homeserver is structural. **Not built:** `HOMESERVER` remains the contributor's own server in 54 places, most of them correctly, and which of them are wrong has not been audited.*
 
 **2. Non-federation is the assumption; federation is an optimization inside the same model, not a
 separate mode.** ADR-014's amendment offered three modes (federated invite / appservice /
@@ -136,7 +141,7 @@ project side (`{ kind: 'appservice', asToken, namespace }` versus
 `{ kind: 'registrationToken', token }`). Both mint accounts on that side's server; they differ in
 what the project installed, not in what HAFleet does afterwards.
 
-*Status — **decided, not built**.*
+*Status — **built** (2026-08-14) for both credential kinds, and verified against a real Palpo 0.4.0 rather than a mock. **Not built:** nothing detects a federating side and skips registration, so federation is still a stated optimization with no code path; and the appservice listener is off unless `HAFLEET_APPSERVICE_PORT` is set, which it is not here.*
 
 **3. The representative is registered per project side, and it is NOT an agent.** The chicken-and-egg
 dissolves at exactly this split, so it is the load-bearing decision of this record:
@@ -171,7 +176,7 @@ token, and that cost is gone. The reasoning is under "Questions settled" below; 
 agents send plaintext unconditionally, so requiring it of intake rooms makes an existing constraint
 explicit rather than imposing a new one.
 
-*Status — **decided, not built**. The plaintext-intake question that gated its cost is **closed**.*
+*Status — **built** (2026-08-14). `registerRepresentative` / `ensureRepresentative` / `whoami`, wired at two call sites, with the credential stored before the verdict so a crash loses a verdict rather than a token. The plaintext-intake question that gated its cost is **closed**. **Not built:** the representative does not invite an agent into a project room — the agent still joins on its own, which is the half of decision 3 that removes the agent from the trust path.*
 
 **4. An agent instance is minted on acceptance, from a durable resource declaration. Manual creation
 stops being the mechanism.** The operator's definition is adopted verbatim: a resource is 「coding
@@ -196,8 +201,7 @@ Two constraints on this:
 - **Names must carry the project side.** `mx_${role}_${tier}_${seq}` is not attributable to a
   project side, and under decision 7 the cascade needs exactly that attribution.
 
-*Status — **decided, not built**. Phase 4 is the skeleton; it is count-gated, budget-blind and has no
-project side.*
+*Status — **partly built** (2026-08-14). The identity act exists (`mintAgentIdentity`) and side attribution is built end to end: a provision plan carries its `sideId`, the backend remembers it in `provisionedSides`, and the agent record gains `projectSide` at registration — from that map, never from the agent's own body, which `POST /api/agents` now enforces per-field. **Not built:** no product code calls `mintAgentIdentity` (its 12 references are all in tests), and the resource declaration is still an operator-chosen preset rather than a role-matched selection — `resourceForRole`, `presetTier`, `provisionedResources` and `no_resource_for_role` have zero occurrences. `provisionReservations` is incremented and never decremented, so plans leak for the process lifetime.*
 
 **5. The invite object is a room alias plus `knock`.** The project publishes
 `#its-project:its-server` and sets the join rule to `knock`; HAFleet's representative knocks; the
@@ -285,11 +289,15 @@ budget entirely. That is the migration state, not the design — every binding i
 project sides — and refusing them all in the name of a budget nobody has allocated yet would be worse
 than naming the escape.
 
-*Status — **built** for admission, **not built** for the alarm and the display. Both admission points
-are gated against the side's allocation and the agent's ceiling, and both are tested. NOT built: nothing
-RAISES an alert on a budget refusal — the refusal names the shortfall in its response, which reaches
-whoever made the request and not the operator who has to raise the allocation. The overrun display
-obligation above is also still open.*
+*Status — **built** for admission and for the alarm (2026-08-14); **not built** for the display. Both
+admission points are gated against the side's allocation and the agent's ceiling. A refusal now raises a
+`project_side_budget` alert carrying owner, runbook, impact and recovery condition — all four are
+load-bearing, because `buildActionability` silently downgrades a warning to `info` without them, which
+would have produced an alarm that pages nobody. It is deduped per side, so a retrying borrower bumps a
+counter instead of burying the alert, and it auto-resolves only when the allocation is raised far enough
+to leave headroom — raising it below what is already committed reports no recovery, because there is
+none. NOT built: the overrun display obligation above, and `no_project_side` deliberately does not alarm
+(there is no side to attribute it to, and the route that raises it has no auth guard).*
 
 **7. Deleting a project side cascades to its agents — but "delete" means RETIRE, and usage is never
 erased.** The operator's requirement is adopted: 「删除项目方的时候，需要保证所有在项目方服务的 agent 都
@@ -317,7 +325,7 @@ that deletion would already have destroyed.
 explicit force, because the party who loses is the borrower, who is not in the room when the operator
 clicks.
 
-*Status — **decided, not built**.*
+*Status — **built** (2026-08-14). Engagements on the side are ENDED and approval bindings DEACTIVATED, both kept with a reason, and the precondition is checked BEFORE anything is stood down so a refused delete does no damage. The response reports what it DID rather than claiming completeness. **Not built:** nothing outside those three stores is swept.*
 
 **8. A project side's credential is write-only through the console.** The operator asked for CRUD
 over project sides, which necessarily puts a **secret** — a registration token or an `as_token` —
@@ -340,7 +348,7 @@ set from the console; the constraint is on reading:
   `/credential/` — ADR-014 decision 6 hit this and renamed to `unprovisionedAgents`; a project-side
   field named `credentialState` would be silently dropped from the health record
 
-*Status — **decided, not built**.*
+*Status — **partly built** (2026-08-14). The half that could leak is done: an allow-list projection on every read, a field named to survive the health redactor, and both credential-returning endpoints excluded from the console proxy. **Not built:** the console has no UI to enter one, so an operator uses `curl` today; and a side's `as_token` — a namespace on someone else's homeserver — is still an unclassified secret class.*
 
 ## Consequences
 
