@@ -7,11 +7,15 @@
  * remaining ("cannot allocate against an agent with no declared ceiling"). So `presetId` is the
  * single link between a declared ceiling and an approvable engagement.
  *
- * Before this route, nothing a contributor could reach wrote it. The only writers were
- * `POST /api/agents` and the agent PATCH, both behind `requireAgentToken`, and no CLI flag passes
- * a preset. A contributor could therefore create a ceiling, onboard an agent, and never connect
- * them — every engagement permanently unapprovable, with the console listing the agent as "bare"
- * and offering no action.
+ * Before this route, nothing a contributor could reach wrote it. The only writer was
+ * `POST /api/agents`, behind `requireAgentToken`, and no CLI flag passes a preset. A contributor
+ * could therefore create a ceiling, onboard an agent, and never connect them — every engagement
+ * permanently unapprovable, with the console listing the agent as "bare" and offering no action.
+ *
+ * That other writer is now operator-gated as well: `POST /api/agents` and `PATCH /api/agents/:name`
+ * honour `presetId`, `runtimeProfile`, `capability` and `role` only from a request carrying the
+ * operator bearer. See tests/api-agents-self-declaration.test.js — this route is no longer the only
+ * place the argument below is enforced, it is where the argument was first made.
  *
  * The auth choice is the substance of the design, so it is tested first: the ceiling is the
  * CONTRIBUTOR's declaration about their own resource (ADR-013 L1/L2). Gating it on the agent's own
