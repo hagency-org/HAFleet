@@ -1029,3 +1029,118 @@ describe('a side\'s allocation, and refusing to mint without one', () => {
     expect((await request(app).get('/api/project-sides/never.configured/budget')).status).toBe(404);
   });
 });
+
+describe('the ACTING credential — a second, wider grant', () => {
+  /*
+   * `inbound-credentials` was scoped to `hsToken` with the note that an `as_token` "acts AS an agent on
+   * that homeserver" and would need "a separate grant with its own argument". This is that grant, and
+   * the tests are mostly about it staying separate.
+   *
+   * The difference is real: `hsToken` authenticates a push INTO us, bounded further by the receiver's
+   * own idempotency and routing. `asToken` acts as ANY identity in the claimed namespace — speaking,
+   * creating rooms and joining rooms as every lent agent on that side.
+   */
+  const SECRET = 'bridge-secret-for-acting-credentials';
+  const bootWithSecret = () => boot({ env: { MATRIX_BRIDGE_SECRET: SECRET } });
+
+  const appserviceSide = async (app, server = SERVER) => {
+    await request(app).post('/api/project-sides')
+      .send({ server_name: server, api_base_url: 'http://127.0.0.1:8008' });
+    const r = await request(app).post(`/api/project-sides/${server}/registration`)
+      .send({ url: 'http://host.docker.internal:8009' });
+    return {
+      asToken: /as_token: ([0-9a-f]{64})/.exec(r.body.registrationYaml)[1],
+      hsToken: /hs_token: ([0-9a-f]{64})/.exec(r.body.registrationYaml)[1],
+    };
+  };
+
+  const acting = (app) => request(app).get('/api/project-sides/acting-credentials')
+    .set('x-bridge-secret', SECRET);
+
+  test('the operator token alone does NOT open it', async () => {
+    const app = await bootWithSecret();
+    await appserviceSide(app);
+    const r = await request(app).get('/api/project-sides/acting-credentials');
+    expect(r.status).toBe(403);
+    expect(JSON.stringify(r.body)).not.toMatch(/[0-9a-f]{64}/);
+  });
+
+  test('an appservice side returns its as_token and what it needs to masquerade', async () => {
+    const app = await bootWithSecret();
+    const { asToken } = await appserviceSide(app);
+    const r = await acting(app);
+    expect(r.status).toBe(200);
+    expect(r.body.sides[0]).toMatchObject({
+      sideId: SERVER, kind: 'appservice', asToken, senderLocalpart: 'hafleet', namespace: '@ac_.*',
+    });
+  });
+
+  test('THE GRANTS STAY SEPARATE: acting does not carry hsToken, inbound does not carry asToken', async () => {
+    /*
+     * The reason these are two endpoints. If one response carried both, a caller wanting only inbound
+     * authentication would receive acting authority as a side effect — and the widening would be
+     * invisible, because nothing about the request would have changed.
+     */
+    const app = await bootWithSecret();
+    const { asToken, hsToken } = await appserviceSide(app);
+
+    const actingBody = JSON.stringify((await acting(app)).body);
+    expect(actingBody).toContain(asToken);
+    expect(actingBody, 'the acting grant leaked the inbound token').not.toContain(hsToken);
+
+    const inboundBody = JSON.stringify((await request(app).get('/api/project-sides/inbound-credentials')
+      .set('x-bridge-secret', SECRET)).body);
+    expect(inboundBody).toContain(hsToken);
+    expect(inboundBody, 'the inbound grant leaked acting authority').not.toContain(asToken);
+  });
+
+  test('a registration-token side WITHOUT a representative token is OMITTED', async () => {
+    /*
+     * Returning it with a null would have the bridge attempt sends that cannot succeed, and the failure
+     * would look like a rejected credential rather than an unfinished setup.
+     */
+    const app = await bootWithSecret();
+    await request(app).post('/api/project-sides').send({
+      server_name: SERVER,
+      api_base_url: 'http://127.0.0.1:8008',
+      credential: { kind: 'registrationToken', registrationToken: REG_TOKEN, representativeToken: null },
+    });
+    expect((await acting(app)).body.sides).toHaveLength(0);
+  });
+
+  test('a registration-token side WITH one returns that token, and not the registration token', async () => {
+    // The registration token mints accounts; it is not what acts. Returning it would widen the grant
+    // past what sending needs.
+    const app = await bootWithSecret();
+    await request(app).post('/api/project-sides').send({
+      server_name: SERVER,
+      api_base_url: 'http://127.0.0.1:8008',
+      credential: { kind: 'registrationToken', registrationToken: REG_TOKEN, representativeToken: 'rep_tok_x' },
+    });
+    const body = (await acting(app)).body;
+    expect(body.sides[0]).toMatchObject({ sideId: SERVER, kind: 'registrationToken', representativeToken: 'rep_tok_x' });
+    expect(JSON.stringify(body)).not.toContain(REG_TOKEN);
+  });
+
+  test('a DEACTIVATED side is omitted', async () => {
+    const app = await bootWithSecret();
+    await appserviceSide(app);
+    await request(app).post(`/api/project-sides/${SERVER}/deactivate`);
+    expect((await acting(app)).body.sides).toHaveLength(0);
+  });
+
+  test('a side with no credential at all is omitted', async () => {
+    const app = await bootWithSecret();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    expect((await acting(app)).body.sides).toHaveLength(0);
+  });
+
+  test('it fails closed with no bridge secret configured', async () => {
+    const app = await boot();
+    await appserviceSide(app);
+    const r = await request(app).get('/api/project-sides/acting-credentials').set('x-bridge-secret', '');
+    expect(r.status).toBe(503);
+    expect(JSON.stringify(r.body)).not.toMatch(/[0-9a-f]{64}/);
+  });
+});
