@@ -362,7 +362,69 @@ this decision.
   direction: it requires every project to have an account on our server, which is the same
   account-creation privilege problem ADR-014 rejected, pointed the other way.
 
-## An unresolved collision: approval rooms live on the contributor's server
+## RESOLVED 2026-08-13: an execution approval is the BORROWER's decision
+The operator settled it: 「答借用方，当然是借用方」. Recorded here because it decides more than a room
+location, and because the codebase currently implements BOTH answers.
+
+**The question that was actually open.** Who approves an agent executing a command — the contributor
+who lends the agent and pays the tokens, or the borrower who owns the repository the command touches?
+Three places in this repository answered it, and not the same way:
+
+| source | says the owner is |
+|---|---|
+| ADR-002's rule — owner is whoever invited the agent into the project room | the **borrower**, necessarily: without federation the project room is on their server, so the inviter is a project-side account |
+| `HAFLEET_OWNER_MXID` / `HAFLEET_OWNER_DM_ROOM`, documented as `@you:your-server.example` | the **contributor** |
+| `docs/design/hafleet-as-pdu.md` — "the customer — a human answers in the room" | the **borrower** |
+
+The sharpest way to put it is by who is harmed when the answer is wrong. Give it to the borrower when
+it was the contributor's, and the borrower approves spending someone else's tokens on their own
+repository. Give it to the contributor when it was the borrower's, and the contributor rubber-stamps a
+command against a repository they cannot see. The operator chose the second risk over the first.
+
+**So ADR-002's rule is confirmed, and the config path is demoted.** `owner_mxid` derived from the
+project-room inviter is now the model rather than a Matrix-flavoured accident; `HAFLEET_OWNER_MXID`
+becomes a bootstrap fallback for a deployment with no project side yet, and should say so.
+
+### What this decision requires, none of which is built
+
+**The actionable channel has to move.** Today the borrower's room receives only
+`buildPublicApprovalNotice` — `Agent X is waiting for approval from its owner`, with
+`state: 'waiting_for_owner'`, no tool name, no command, no buttons. The full request with buttons
+(`buildOwnerApprovalRequest`, carrying `tool_name`, `description` and `input_preview`) goes only to the
+owner's DM. Under this decision those swap roles: the borrower gets the actionable request, and the
+contributor gets the notice.
+
+**ADR-003's encryption requirement has to be renegotiated, and the decision makes that easier rather
+than harder.** The buttons live in an encrypted DM because `input_preview` is the literal command, and
+the only crypto store is the bot's on the contributor's server. But the command operates on the
+BORROWER's repository — they are not a third party to it, and disclosing it to them discloses nothing
+they do not already own. What survives is a narrower requirement: the project room may contain other
+members of the borrower's organisation, so the question becomes who inside that organisation may see
+and answer, which is an access-control question rather than a cross-party confidentiality one.
+
+**The unreversible part is not the room.** `owner_mxid` is stamped into every audit row already
+written, and re-pointing it also re-points `MATRIX_TRUSTED_INVITER_MXIDS`, `MATRIX_OPERATOR_MXIDS` and
+`HAFLEET_OWNER_MXID`. That is true whichever room location follows, so choosing this does not defer it.
+
+### The three options this replaces
+
+They were framed as a choice about where the approval room sits, and ADR-016 got two of the three cost
+statements wrong — verified against the code:
+
+- "the borrower cannot see which agent is being asked about" was **false**: the agent's name is in the
+  body of both messages, and the borrower is not a member of the approval room under any option. The
+  real transparency gap is that `model` appears nowhere in the approval record at all.
+- "the operator, who lives on the contributor's server" was true only of the `HAFLEET_OWNER_MXID`
+  fallback, not of ADR-002's actual rule. The cost that belonged in that cell was E2EE.
+- "loses the visible attachment ADR-003's two-channel model leans on" had **no referent**: neither
+  ADR-003 nor `specs/task-owner-ui-approval.spec.md` requires the agent to be a member anywhere. The
+  two channels are the owner's DM and the public notice.
+
+With the decision made, the room question answers itself: the actionable channel belongs where the
+decider is.
+
+### The collision as originally recorded
+
 
 Found 2026-08-13 while auditing what still assumes a single homeserver. Recorded rather than fixed,
 because the fix is a decision.

@@ -150,6 +150,9 @@ fi
 static_start_index="${#step_pids[@]}"
 start_step "patch hygiene" git diff --check
 start_step "syntax" npm run check:syntax
+# `node --check` parses; it does not resolve identifiers. Three ReferenceErrors reached main
+# before this step existed — see eslint.config.js for the list.
+start_step "undefined identifiers" npm run check:undef
 start_step "cli contract" npm run check:cli-contract
 start_step "remote package" bash -c 'npm run build:remote:check && npm run check:remote-sync && npm run check:remote-package-smoke'
 start_step "dependency boundary" npm run check:dep-isolation
