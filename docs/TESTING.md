@@ -181,6 +181,7 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-13 | `api-server-heartbeat` | `accepts a new instance after the lease becomes stale` | **yes** — `AssertionError: expected null to be 'inst-B'`; CI only, on a DOCS-ONLY branch; see the investigation below |
 | 2026-08-14 | `alert-store` | `alert API writes fail closed and keep visible state unchanged` | **yes** — `expected undefined to be 'agent-runtime'`; whole-suite only, clean in isolation 3/3 (18/18 each) |
 | 2026-08-14 | `api-agents` | `DELETE /api/agents/:name returns 503 and keeps the agent registered on persistence failure` | **yes** — `expected 404 to be 503`; 1 failure in 10 runs of the file, 0/6 consecutive, 4/4 clean on master without the branch |
+| 2026-08-14 | `api-server-heartbeat-sweep` | `accepts explicit offline without instance id when no lease is active` | **yes** — `Error: Test timed out in 30000ms`; whole-suite only, clean in isolation 4/4, and the next whole-suite run on the same tree was 194/194 |
 
 **A SIGHTING THAT WAS CHECKED FOR AUTHORSHIP BEFORE BEING CALLED A FLAKE.** The `api-agents` row above
 failed once inside a whole-suite run and once more in isolation, which is unusual — this class is
@@ -202,7 +203,8 @@ passes in isolation on a tree without my change", and the second takes one extra
 
 **A NAMED SPECIMEN FOR TWO SIGHTINGS THAT WENT UNNAMED.** Two earlier runs in the same session reported
 intermittent failures whose identity was not captured, because the output was tailed rather than saved —
-a process error, recorded as one at the time. The third occurrence was saved and is the row above.
+a process error, recorded as one at the time. The third occurrence was saved and is the `alert-store` row
+above.
 
 It is the SECOND shape, not a new one. The assertion reads `alert.body.owner` and gets `undefined`,
 which is what a body containing an error object rather than the record looks like from an assertion's
@@ -211,6 +213,23 @@ had not appeared in this log before; the mechanism had, four times.
 
 The practice that produced it is worth keeping: **save the run, do not tail it.** A flake that cannot be
 named cannot be counted, and two sightings were lost that way before this one was kept.
+
+**THE SAME FILE, A DIFFERENT TEST, A DIFFERENT SHAPE — and reachability answered instead of assumed.**
+The `api-server-heartbeat-sweep` row dated 2026-08-14 is the second sighting in that file (the first is
+the 2026-08-11 row) but a different test and the timeout shape rather than the TypeError. It arrived on a
+branch that changed `POST /api/agents` and `PATCH /api/agents/:name`, so the branch had to be cleared
+before the row could be called a flake at all — and here that was cheaper than a stash-and-compare:
+
+> The test posts a server heartbeat and then `POST /api/servers/s1/offline`. It never calls either route
+> the branch touched. The file's three `api/agents` mentions are path helpers that read `agents.json` off
+> disk. The changed code is not reachable from this test.
+
+Worth stating because a timeout is the shape where stash-and-compare is *weakest*: it is load-dependent,
+so one clean comparison run is not evidence, and the several runs that would be evidence cost 5 minutes
+each. Reading for reachability settles it in one step. Stash-and-compare stays the right move when
+reachability is genuinely unclear — when the branch's new code *could* run inside the failing test. The
+`api-agents` note above is that case: the branch touched `agents.json` writes and the failing test deletes
+an agent, so reading could not settle it and two batches of runs did.
 
 **A fourth shape, and the first one whose investigation eliminated its own most plausible cause.**
 `relayInstanceId` read `null` where `inst-B` was expected. The branch under test added 562 lines to

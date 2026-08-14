@@ -1348,6 +1348,52 @@ function authorizeAgentCredential(req, agentName) {
 
 const requireBearer = createRequireBearer({ env: process.env });
 
+/**
+ * Is this request the OPERATOR's, rather than an agent speaking about itself?
+ *
+ * `POST /api/agents` is guarded by `requireAgentToken`, which deliberately fails OPEN for a name it
+ * holds no token for. `checkAgentToken` states the reason and it is a real one — humans, the bridge and
+ * system callers register through that same endpoint and have no agent token — so the guard cannot be
+ * tightened without breaking them.
+ *
+ * What CAN be separated is which FIELDS a registration is allowed to set. Registration is mostly an
+ * agent describing where it is: its tmux session, its host, its workdir. Four fields are not that. They
+ * decide what the agent may cost and what work it may be given, and an agent that could set them would
+ * be answering a question that belongs to whoever pays:
+ *
+ *   - `presetId` decides the CEILING — `remainingFor` reads `preset.ceiling.tokens` through it
+ *   - `runtimeProfile` decides the MODEL, and `agentCapability` reads the tier back out of it
+ *   - `capability` is that tier stated directly
+ *   - `role` is what work the matrix will select the agent for
+ *
+ * A middleware could not make this distinction: the request is legitimate, only some of its fields are
+ * not. So the split is made here, in one place, and each of the four says at its own site what it
+ * decides.
+ *
+ * NO PRODUCTION CALLER LOSES ANYTHING. Verified rather than assumed:
+ *
+ *   - the agent's own MCP server sends `{name, type, tmux, server}` (`lib/mcp-server-core.js`) — none
+ *     of the four;
+ *   - `bin/hafleet-up` sends name/type/tmux/server plus version and path metadata, and carries the
+ *     operator bearer anyway;
+ *   - the dashboard's New Agent form does send `presetId` and `role`, but it reaches this endpoint
+ *     through `server.js`'s `/api/agents/create`, and `backendFetch` attaches the operator bearer to
+ *     every proxied call — so it is an operator request and keeps both fields;
+ *   - a provisioned agent (`POST /api/dispatch` → `status: 'provision'`) never needed to declare a role:
+ *     the plan encodes it in the NAME and `canonicalRole` reads it back, which is why that format has
+ *     the role in it.
+ *
+ * PASSES WHEN NO `API_TOKEN` IS CONFIGURED, matching `requireBearer` above. A deployment with no
+ * operator credential has no way to tell an operator from an agent, and refusing everything there would
+ * make the unconfigured case stricter than the configured one — which reads as a broken install rather
+ * than as a security posture.
+ */
+function isOperatorRequest(req) {
+  const expectedBearer = normalizeOptionalText(process.env.API_TOKEN, 512);
+  if (!expectedBearer) return true;
+  return getBearerToken(req) === expectedBearer;
+}
+
 function redactPathLikeText(value, maxLen = 1200) {
   const text = normalizeOptionalText(value, maxLen);
   if (!text) return null;
@@ -9080,12 +9126,24 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   const resolvedTmux = tmux ?? existing.tmux ?? null;
   const resolvedOnline = resolvedTmux ? true : Boolean(existing.online);
   const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
+  /*
+   * WHO IS ASKING. Four of this body's fields decide cost and capability rather than location, and an
+   * agent may not set its own — see `isOperatorRequest` for what each decides and for why the split is
+   * per-field instead of per-request. A non-operator registration keeps whatever the operator last set.
+   */
+  const byOperator = isOperatorRequest(req);
+  /*
+   * Dropped BEFORE resolution, not after. Gating only the stored `presetId` would leave the preset's
+   * framework reaching `type` and its runtime profile reaching `runtimeProfile` — the agent would still
+   * have chosen its own model, with the record no longer saying which preset it came from.
+   */
+  const requestedPresetId = byOperator ? presetId : undefined;
   // Resolve preset into runtimeProfile if presetId is provided
-  let resolvedRuntimeProfile = runtimeProfile;
+  let resolvedRuntimeProfile = byOperator ? runtimeProfile : undefined;
   let presetFramework = null;
-  if (presetId && typeof presetId === 'string') {
-    const preset = frameworkPresets.find(p => p.id === presetId);
-    if (!preset) return res.status(400).json({ error: `unknown preset: ${presetId}` });
+  if (requestedPresetId && typeof requestedPresetId === 'string') {
+    const preset = frameworkPresets.find(p => p.id === requestedPresetId);
+    if (!preset) return res.status(400).json({ error: `unknown preset: ${requestedPresetId}` });
     presetFramework = preset.framework || null;
     resolvedRuntimeProfile = runtimeProfileFromPreset(preset);
   }
@@ -9098,9 +9156,21 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
      * operator-only path.
      */
     projectSide: provisionedSides.get(agentName) ?? existing.projectSide ?? null,
-    role: role ?? existing.role ?? null,
-    // matrix-Agent capability tier (strong/medium/lightweight); invalid/absent → keep existing.
-    capability: (['strong', 'medium', 'lightweight'].includes(capability)
+    /*
+     * What the matrix will select this agent FOR. Operator-set, because an agent that could name its
+     * own role could put itself in a cell it cannot staff — `selectAgent` matches on this, and the
+     * borrower's request is expressed in the same vocabulary.
+     *
+     * NOT validated against ROLES, deliberately. The dashboard's New Agent form sends its GUIDANCE
+     * textarea — "Human-authored intent / instructions" — in this field, so a strict check would
+     * silently discard prose an operator typed. That conflation is a real defect and it is not this
+     * one; fixing it means giving guidance its own field, on both sides.
+     */
+    role: (byOperator ? role : undefined) ?? existing.role ?? null,
+    // matrix-Agent capability tier; invalid, absent, or not the operator's → keep existing. Reads the
+    // tier list from role-capacity.json rather than repeating it, so adding a tier does not need this
+    // line found again.
+    capability: (byOperator && CAPABILITY_TIERS.includes(capability)
       ? capability
       : (existing.capability ?? null)),
     identity: identity ?? existing.identity ?? null,
@@ -9110,7 +9180,10 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     // the resolved values alone cannot say which reusable configuration an agent
     // is on, so a client could show the model but never the preset behind it,
     // and editing a preset could not identify the agents it affects.
-    presetId: normalizeOptionalText(presetId, 128) || existing.presetId || null,
+    // THE CEILING: `remainingFor` reads `preset.ceiling.tokens` through this field, so an agent able to
+    // set it could raise its own budget by re-registering. `PUT /api/agents/:name/preset` names that
+    // hole in its own comment and can only close its own route.
+    presetId: normalizeOptionalText(requestedPresetId, 128) || existing.presetId || null,
     // Recorded so the sweep does not have to re-derive it, and so a record stays
     // correct even if the registry later changes.
     transport: (() => {
@@ -9210,18 +9283,23 @@ function runtimeProfileFromPreset(preset) {
  * `remainingFor()` reads `agents[name].presetId` -> `preset.ceiling.tokens`, and
  * `engagementStore.decide()` refuses to allocate against an agent whose remaining is null
  * ("cannot allocate against an agent with no declared ceiling"). Until this route, the only
- * writers of `presetId` were `POST /api/agents` and the agent PATCH, both guarded by
- * `requireAgentToken` — and no CLI path passes a preset. So a contributor could create a
- * preset with a ceiling, onboard an agent, and never connect them: every engagement was
- * unapprovable, and the console showed the agent under "bare" with no action to fix it.
- * Found by walking the flow end to end rather than by a failing test.
+ * writer of `presetId` was `POST /api/agents`, guarded by `requireAgentToken` — and no CLI path
+ * passes a preset. So a contributor could create a preset with a ceiling, onboard an agent, and
+ * never connect them: every engagement was unapprovable, and the console showed the agent under
+ * "bare" with no action to fix it. Found by walking the flow end to end rather than by a failing
+ * test.
  *
  * WHY `requireBearer` AND NOT `requireAgentToken`. The ceiling is the contributor's
  * declaration about their own resource — how much of their capacity they are willing to lend
  * (ADR-013's L1/L2). Gating it on the agent's own credential makes the resource the authority
  * on its own budget, which is self-authorization: an agent could raise its ceiling by
- * re-registering with a richer preset. The runtimeProfile stays the agent's to report; the
- * budget does not.
+ * re-registering with a richer preset.
+ *
+ * THE SECOND HALF OF THAT SENTENCE USED TO READ "the runtimeProfile stays the agent's to report; the
+ * budget does not", and it does not survive its own argument. `agentCapability` prefers
+ * `modelTier(runtimeProfile)` over the role default, so the profile decides the TIER — and the tier is
+ * priced. Both writers of this field now require the operator's bearer; see the note at the PATCH
+ * route for what an honest self-report would need instead.
  *
  * Unbinding is `presetId: null` rather than a DELETE, so "which preset" and "no preset" travel
  * through one code path and cannot disagree about what the absent case means.
@@ -9305,7 +9383,14 @@ app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => 
     return res.status(400).json({ error: 'invalid runtimeProfile payload' });
   }
   const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
-  if (role !== undefined) agent.role = role;
+  /*
+   * THE SAME DOOR, ROUND THE BACK. Gating the four cost-and-capability fields on `POST /api/agents`
+   * and not here would close nothing: this route is guarded by the agent's own token, so an agent that
+   * could not declare a role at registration could simply patch one in a second later. `role` and
+   * `runtimeProfile` are the two of the four this route writes.
+   */
+  const byOperator = isOperatorRequest(req);
+  if (role !== undefined && byOperator) agent.role = role;
   if (identity !== undefined) agent.identity = identity;
   if (tmux !== undefined) {
     agent.tmux = tmux;
@@ -9361,7 +9446,19 @@ app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => 
   if (task !== undefined) {
     agent.task = normalizeAgentTask(task, agentName);
   }
-  if (runtimeProfile !== undefined) {
+  /*
+   * WITHDRAWN FROM THE AGENT, and this contradicts a sentence in `PUT /api/agents/:name/preset` that
+   * said the profile stays the agent's to report. That sentence was right about the intent and wrong
+   * about the consequence: `agentCapability` reads `modelTier(runtimeProfile)` and prefers it over the
+   * role default, so this field IS the tier, and the tier is what the borrower is charged for. Worse,
+   * it is the same field the preset route writes the contributor's TERMS into — so an agent's report
+   * did not sit beside those terms, it replaced them, and the preset the operator bound became
+   * unobservable.
+   *
+   * An honest self-report is still worth having; it needs a field of its own, next to the terms rather
+   * than on top of them. That is a change to the record's shape and is not made here.
+   */
+  if (runtimeProfile !== undefined && byOperator) {
     agent.runtimeProfile = mergeRuntimeProfileApiKeys(normalizeRuntimeProfile(runtimeProfile), normalizeRuntimeProfile(agent.runtimeProfile));
   }
   if (environment !== undefined && VALID_ENVIRONMENTS.has(environment)) {
