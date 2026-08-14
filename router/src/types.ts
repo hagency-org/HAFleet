@@ -46,6 +46,20 @@ export interface SessionView {
   threadRootEventId: string | null;
   contextGeneration: number;
   lastActive: number;
+  modelOverride: string | null;
+  modeOverride: 'plan' | 'auto' | null;
+}
+
+export interface SetSessionOverridesInput {
+  agentId: string;
+  agentName: string;
+  roomId: string;
+  threadRootEventId?: string | null;
+  /** undefined leaves the stored value; null clears it. */
+  model?: string | null;
+  /** undefined leaves the stored value; null clears it. */
+  mode?: 'plan' | 'auto' | null;
+  requestedBy: string;
 }
 
 export interface AuthenticatedMessageInput {
@@ -247,6 +261,8 @@ export interface LaunchDescriptor {
    * unserialized and untracked.
    */
   mayWrite: boolean;
+  /** Operator-set per-session model override, forwarded verbatim to the CLI. */
+  modelOverride: string | null;
 }
 
 export interface ActiveTaskBinding {

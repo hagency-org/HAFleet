@@ -10,6 +10,7 @@ import { OUTCOME_RECOVERY_SCHEMA } from './migrations/004-outcome-recovery.js';
 import { RUNNER_RECOVERY_HARDENING_SCHEMA } from './migrations/005-runner-recovery-hardening.js';
 import { AGENT_OPS_CLIENT_SCHEMA } from './migrations/006-agent-ops-client.js';
 import { AGENT_OPS_SERVER_IDENTITY_SCHEMA } from './migrations/007-agent-ops-server-identity.js';
+import { SESSION_OVERRIDES_SCHEMA } from './migrations/008-session-overrides.js';
 import type {
   ActivationResult,
   ActiveTaskBinding,
@@ -44,6 +45,7 @@ import type {
   RunnerContext,
   SessionInboxMessage,
   SessionView,
+  SetSessionOverridesInput,
   SettleDispatchInput,
   SettleSuccess,
   StartedPayload,
@@ -53,7 +55,7 @@ import type {
   TaskIntentResult,
 } from './types.js';
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const DEFAULT_EVENT_RETENTION = 10_000;
 
 interface SessionRow {
@@ -67,6 +69,8 @@ interface SessionRow {
   rolling_summary: string;
   created_at: number;
   last_active: number;
+  model_override: string | null;
+  mode_override: 'plan' | 'auto' | null;
 }
 
 interface MessageRow {
@@ -364,8 +368,12 @@ function sessionView(row: SessionRow): SessionView {
     threadRootEventId: row.thread_root_event_id,
     contextGeneration: row.context_generation,
     lastActive: row.last_active,
+    modelOverride: row.model_override ?? null,
+    modeOverride: row.mode_override ?? null,
   };
 }
+
+const MODEL_OVERRIDE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 class RouterInputError extends Error {}
 
@@ -485,6 +493,18 @@ export class RouterStore {
       });
       migrate();
     }
+    const versionEight = this.db.prepare<[number], IdRow>(
+      'SELECT version AS id FROM router_schema_migrations WHERE version = ?',
+    ).get(8);
+    if (!versionEight) {
+      const migrate = this.db.transaction(() => {
+        this.db.exec(SESSION_OVERRIDES_SCHEMA);
+        this.db.prepare<[number, number]>(
+          'INSERT INTO router_schema_migrations(version, applied_at) VALUES (?, ?)',
+        ).run(8, this.now());
+      });
+      migrate();
+    }
   }
 
   private emit(kind: string, payload: Readonly<Record<string, unknown>>, audience = 'operator'): number {
@@ -545,6 +565,8 @@ export class RouterStore {
       rolling_summary: '',
       created_at: now,
       last_active: now,
+      model_override: null,
+      mode_override: null,
     };
     this.db.prepare<[string, string, string, string, string, string | null, number, number]>(
       `INSERT INTO sessions(session_id, agent_id, agent_name, room_id, scope_kind,
@@ -580,6 +602,82 @@ export class RouterStore {
       threadRootEventId: input.threadRootEventId ?? null,
     }));
     return sessionView(tx().row);
+  }
+
+  sessionById(sessionIdInput: string): SessionView | null {
+    const sessionId = requiredText(sessionIdInput, 'session_id', 255);
+    const row = this.db.prepare<[string], SessionRow>(
+      'SELECT * FROM sessions WHERE session_id = ?',
+    ).get(sessionId);
+    return row ? sessionView(row) : null;
+  }
+
+  setSessionOverrides(input: SetSessionOverridesInput): SessionView | Refusal {
+    try {
+      const requestedBy = requiredText(input.requestedBy, 'requested_by', 255);
+      if (input.model === undefined && input.mode === undefined) {
+        return refusal('bad_request', 'a session override directive must set model or mode');
+      }
+      if (input.model !== undefined && input.model !== null && !MODEL_OVERRIDE_PATTERN.test(input.model)) {
+        return refusal('bad_request', 'model override must be a plain model name or alias (max 64 chars)');
+      }
+      if (input.mode !== undefined && input.mode !== null && input.mode !== 'plan' && input.mode !== 'auto') {
+        return refusal('bad_request', "mode override must be 'plan' or 'auto'");
+      }
+      const tx = this.db.transaction((): SessionView => {
+        const { row } = this.resolveSessionInternal({
+          agentId: input.agentId,
+          agentName: input.agentName,
+          roomId: input.roomId,
+          threadRootEventId: input.threadRootEventId ?? null,
+        });
+        const model = input.model === undefined ? (row.model_override ?? null) : input.model;
+        const mode = input.mode === undefined ? (row.mode_override ?? null) : input.mode;
+        this.db.prepare<[string | null, string | null, string]>(
+          'UPDATE sessions SET model_override = ?, mode_override = ? WHERE session_id = ?',
+        ).run(model, mode, row.session_id);
+        // The grant is an authorization decision, so it must leave an audit
+        // trail naming who made it — the session row alone cannot carry that.
+        this.emit('session.overrides_set', {
+          sessionId: row.session_id,
+          agentId: row.agent_id,
+          roomId: row.room_id,
+          threadRootEventId: row.thread_root_event_id,
+          modelOverride: model,
+          modeOverride: mode,
+          requestedBy,
+        });
+        return sessionView({ ...row, model_override: model, mode_override: mode as SessionRow['mode_override'] });
+      });
+      return tx();
+    } catch (error) {
+      if (error instanceof RouterInputError) return refusal('bad_request', error.message);
+      throw error;
+    }
+  }
+
+  queueSessionNotice(input: {
+    roomId: string;
+    threadRootEventId?: string | null;
+    senderAgentName: string;
+    dedupeKey: string;
+    body: string;
+  }): { ok: true } | Refusal {
+    try {
+      this.insertNotice({
+        dispatchId: null,
+        taskId: null,
+        dedupeKey: requiredText(input.dedupeKey, 'dedupe_key', 255),
+        roomId: requiredText(input.roomId, 'room_id', 512),
+        threadRootEventId: optionalText(input.threadRootEventId, 512),
+        senderAgentName: requiredText(input.senderAgentName, 'sender_agent_name', 255),
+        body: requiredText(input.body, 'body', 4000),
+      });
+      return { ok: true };
+    } catch (error) {
+      if (error instanceof RouterInputError) return refusal('bad_request', error.message);
+      throw error;
+    }
   }
 
   initializeIngestionCursor(sourceInput: string, cursorInput: string): { created: boolean; value: string } {
@@ -1156,20 +1254,28 @@ export class RouterStore {
         }
         const taskId = optionalText(input.taskId, 255);
         if (input.mayWrite === true) {
-          if (!taskId) return refusal('missing_task_credential', 'coding dispatch requires a task id');
-          const binding = this.db.prepare<[string], TaskBindingRow>(
-            'SELECT * FROM task_bindings WHERE task_id = ?',
-          ).get(taskId);
-          if (!binding) return refusal('missing_task_binding', 'task has no execution binding');
-          if (binding.activation_state !== 'active' || !binding.thread_anchor_event_id) {
-            return refusal('task_not_active', 'task thread is not durably active');
+          // Write authority has exactly two sources: an active task binding,
+          // or an operator's audited per-session mode grant. Both funnel
+          // through the same workspace-lease machinery, so the concurrency
+          // guarantees are identical either way.
+          if (!taskId && session.mode_override !== 'auto') {
+            return refusal('missing_task_credential', 'coding dispatch requires a task id or an operator mode grant');
           }
-          if (
-            session.agent_id !== binding.assignee_agent_id
-            || session.room_id !== binding.room_id
-            || session.thread_root_event_id !== binding.thread_root_event_id
-          ) {
-            return refusal('missing_task_credential', 'task binding does not authorize this session');
+          if (taskId) {
+            const binding = this.db.prepare<[string], TaskBindingRow>(
+              'SELECT * FROM task_bindings WHERE task_id = ?',
+            ).get(taskId);
+            if (!binding) return refusal('missing_task_binding', 'task has no execution binding');
+            if (binding.activation_state !== 'active' || !binding.thread_anchor_event_id) {
+              return refusal('task_not_active', 'task thread is not durably active');
+            }
+            if (
+              session.agent_id !== binding.assignee_agent_id
+              || session.room_id !== binding.room_id
+              || session.thread_root_event_id !== binding.thread_root_event_id
+            ) {
+              return refusal('missing_task_credential', 'task binding does not authorize this session');
+            }
           }
         }
         if ('reply_to' in input.payload || 'replyTarget' in input.payload || 'reply_target' in input.payload) {
@@ -1487,6 +1593,7 @@ export class RouterStore {
       // dispatch row keeps the sandbox decision and the lease decision on the
       // same fact instead of two independently derived ones.
       mayWrite: checked.dispatch.may_write === 1,
+      modelOverride: session.model_override ?? null,
     };
   }
 

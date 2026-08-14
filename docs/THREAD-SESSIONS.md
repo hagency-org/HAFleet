@@ -240,3 +240,25 @@ enable either path or permit fallback to legacy tmux delivery.
 boundaries, but it does not execute the Vitest selectors in this Node project;
 the exact Vitest suite is therefore run separately and must not be reported as
 an `agent-spec` execution result.
+
+## Per-thread directives
+
+Operators (senders on `MATRIX_OPERATOR_MXIDS`) can configure a single thread
+session by messaging its agent in that thread:
+
+```
+@agent /thread model <name>     # e.g. claude-sonnet-5, sonnet; "default" clears
+@agent /thread mode <plan|auto> # "default" clears; plan is the read-only default
+```
+
+Directives configure the session and never enter conversation context; the
+agent posts a confirmation notice into the thread. `model` is forwarded to the
+runner CLI (`--model` for Claude, `model` for Codex) and overrides the agent's
+`runtimeProfile`. `mode auto` is an audited write grant recorded on the
+session row (`session.overrides_set` event names the grantor): it is the
+second lawful source of write authority besides an active task binding, and
+write dispatches it authorizes still take the same workspace lease, so
+concurrent writers stay serialized. Non-operator directives are refused and
+are not delivered as chat. Schema migration 8 adds the two override columns
+and rebuilds `notice_outbox` so session-configuration notices no longer
+require a dispatch or task anchor.

@@ -68,7 +68,7 @@ function ensureInside(parent: string, child: string): void {
 function identity(spec: WorktreeSpec): { branch: string; target: string; safeLabel: string; resourceId: string } {
   const agent = segment(spec.agentId, 'agent');
   const thread = `${segment(spec.threadRootEventId, 'thread').slice(0, 28)}-${shortDigest(spec.threadRootEventId)}`;
-  const branch = `agentchat/${agent}/${thread}`;
+  const branch = `hafleet/${agent}/${thread}`;
   const target = path.resolve(spec.worktreesDir, agent, thread);
   return {
     branch,
@@ -92,7 +92,7 @@ interface BootstrapState {
 function bootstrapStatePath(worktreePath: string): string {
   const rawGitDir = git(worktreePath, ['rev-parse', '--git-dir']);
   const gitDir = realpathSync(path.resolve(worktreePath, rawGitDir));
-  return path.join(gitDir, 'agentchat-bootstrap.json');
+  return path.join(gitDir, 'hafleet-bootstrap.json');
 }
 
 function readBootstrapState(statePath: string): BootstrapState | null {

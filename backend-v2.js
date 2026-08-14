@@ -1901,7 +1901,11 @@ async function enqueueThreadSessionDispatch({ agent, sessionId, taskId = null, t
   const eligible = threadSessionAgentEligibility(agent);
   if (!eligible.ok) return eligible;
   const { framework, serverId } = eligible;
-  const mayWrite = !isFrontDeskAgent(agent);
+  // An operator's /thread mode auto grant lifts the front-desk read-only
+  // default for this one session; the store still verifies the grant before
+  // accepting a write dispatch, so this stays a hint, not an authority.
+  const sessionInfo = routerStore.sessionById(sessionId);
+  const mayWrite = !isFrontDeskAgent(agent) || sessionInfo?.modeOverride === 'auto';
   const workspace = await resolveThreadSessionWorkspace(agent, threadRootEventId, mayWrite);
   if (!workspace.ok) return workspace;
   const result = routerStore.enqueueDispatch({
@@ -1920,6 +1924,51 @@ async function enqueueThreadSessionDispatch({ agent, sessionId, taskId = null, t
   });
   if (result.ok) scheduleRouterPump();
   return result;
+}
+
+const THREAD_DIRECTIVE_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+// Returns null when the message is not a /thread directive; otherwise an
+// object with either {model?, mode?} (valid) or {error} (malformed, so the
+// sender gets a refusal instead of the text silently becoming chat input).
+function parseThreadSessionDirective(bodyRaw) {
+  // Mention pills arrive as markdown links or bare @names; strip both so the
+  // directive can lead the visible text.
+  const body = String(bodyRaw || '')
+    .replace(/\[[^\]]*\]\([^)]*\)/g, ' ')
+    .trim()
+    .replace(/^(?:@[\w.-]+[:,]?\s+)+/, '')
+    .trim();
+  if (!/^\/thread\b/i.test(body)) return null;
+  const usage = 'usage: /thread model <name|default> | /thread mode <plan|auto>';
+  const match = body.match(/^\/thread\s+(\S+)(?:\s+(\S+))?\s*$/i);
+  if (!match) return { error: usage };
+  const [, keyRaw, valueRaw] = match;
+  const key = keyRaw.toLowerCase();
+  if (key === 'model') {
+    if (!valueRaw) return { error: usage };
+    if (/^(default|reset|clear)$/i.test(valueRaw)) return { model: null };
+    if (!THREAD_DIRECTIVE_MODEL_PATTERN.test(valueRaw)) {
+      return { error: 'model must be a plain model name or alias (max 64 chars)' };
+    }
+    return { model: valueRaw };
+  }
+  if (key === 'mode') {
+    const mode = (valueRaw || '').toLowerCase();
+    if (mode === 'plan' || mode === 'auto') return { mode };
+    if (/^(default|reset|clear)$/.test(mode)) return { mode: null };
+    return { error: usage };
+  }
+  return { error: usage };
+}
+
+function threadSessionDirectiveConfirmation(sessionInfo) {
+  const model = sessionInfo.modelOverride ? `model=${sessionInfo.modelOverride}` : 'model=default';
+  const mode = sessionInfo.modeOverride ? `mode=${sessionInfo.modeOverride}` : 'mode=default (read-only)';
+  const writeWarning = sessionInfo.modeOverride === 'auto'
+    ? ' Runners in this thread may now write to the agent workspace (writes stay serialized by workspace lease).'
+    : '';
+  return `Thread session updated: ${model}, ${mode}.${writeWarning}`;
 }
 
 function makePromotedTaskTitle(body) {
@@ -1973,6 +2022,61 @@ async function routeMatrixMessageToThreadSession(agentName, msg) {
   const threadRootEventId = msg?.matrixContext?.threadRootEventId || null;
   if (!roomId || !matrixEventId) {
     return { ok: false, code: 'bad_request', message: 'thread-session routing requires authenticated Matrix room and event ids' };
+  }
+  const directive = parseThreadSessionDirective(msg.full || msg.summary || '');
+  if (directive) {
+    // A bad directive must not fail message delivery (the bridge would post a
+    // scary delivery-failure warning into the room). Consume it and answer
+    // with an in-thread notice instead.
+    const consumeWithNotice = (body) => {
+      routerStore.queueSessionNotice({
+        roomId,
+        threadRootEventId,
+        senderAgentName: agent.name,
+        dedupeKey: `thread-directive-help:${matrixEventId}`,
+        body,
+      });
+      scheduleRouterPump();
+      return { ok: true, directive: true, applied: false };
+    };
+    if (msg.trustLevel !== 'operator') {
+      return consumeWithNotice('/thread directives require operator trust; the message was not delivered as chat.');
+    }
+    if (directive.error) {
+      return consumeWithNotice(directive.error);
+    }
+    const applied = routerStore.setSessionOverrides({
+      agentId: agent.agentId,
+      agentName: agent.name,
+      roomId,
+      threadRootEventId,
+      ...(directive.model !== undefined ? { model: directive.model } : {}),
+      ...(directive.mode !== undefined ? { mode: directive.mode } : {}),
+      requestedBy: msg.senderMxid || msg.from,
+    });
+    // Success is a SessionView (no ok field); only an explicit refusal aborts.
+    if (applied.ok === false) return applied;
+    appendDeliveryEvent({
+      type: 'message.thread_directive_applied',
+      source: 'backend',
+      messageId: msg.id,
+      agent: agentName,
+      context: {
+        modelOverride: applied.modelOverride,
+        modeOverride: applied.modeOverride,
+        requestedBy: msg.senderMxid || msg.from,
+      },
+    });
+    routerStore.queueSessionNotice({
+      roomId,
+      threadRootEventId,
+      senderAgentName: agent.name,
+      dedupeKey: `thread-directive:${matrixEventId}`,
+      body: threadSessionDirectiveConfirmation(applied),
+    });
+    scheduleRouterPump();
+    // Directives configure the session; they are not conversation input.
+    return { ok: true, directive: true };
   }
   const explicitTask = /^\s*\/task\b/i.test(msg.full || msg.summary || '');
   if (explicitTask && isFrontDeskAgent(agent)) {
@@ -2164,7 +2268,7 @@ function runnerEnvironment(agent) {
 // Both mode values are still pending the real-CLI smoke test that
 // docs/THREAD-SESSIONS.md gates the canary on; if either is rejected the
 // dispatch fails closed to outcome_unknown rather than running unconstrained.
-function claudeThreadSessionArgs(agent, mayWrite) {
+function claudeThreadSessionArgs(agent, mayWrite, modelOverride = null) {
   if (normalizeBoolean(process.env.HAFLEET_CLAUDE_PERMISSION_CHANNEL) === false) {
     throw new Error('managed Claude ephemeral runners require the owner-approval MCP channel');
   }
@@ -2173,6 +2277,10 @@ function claudeThreadSessionArgs(agent, mayWrite) {
     '--permission-mode', mayWrite ? 'auto' : 'plan',
     '--dangerously-load-development-channels', `server:${THREAD_SESSION_MCP_SERVER_NAME}`,
   ];
+  // Store-validated, but re-checked here: this string lands on a CLI argv.
+  if (modelOverride && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(modelOverride)) {
+    args.push('--model', modelOverride);
+  }
   if (!existsSync('/etc/claude-code/managed-mcp.json')) {
     const mcpConfigCandidates = [agent.workdir, agent.homeDir]
       .map((root) => root ? path.join(root, '.mcp.json') : null)
@@ -2215,7 +2323,7 @@ async function launchClaimedThreadSessionRunner(claim, signal) {
     return runCodexDispatch({
       ...base,
       executable: process.env.HAFLEET_CODEX_RUNNER_BIN || 'codex',
-      model: agent.runtimeProfile?.primary?.model || undefined,
+      model: descriptor.modelOverride || agent.runtimeProfile?.primary?.model || undefined,
       effort: normalizedCodexEffort(agent.runtimeProfile?.primary?.reasoning),
       approvalTimeoutMs: APPROVAL_ADAPTER_TIMEOUT_MS,
       maxParkedRunners: MAX_PARKED_RUNNERS,
@@ -2237,7 +2345,7 @@ async function launchClaimedThreadSessionRunner(claim, signal) {
   return runClaudeDispatch({
     ...base,
     executable: process.env.HAFLEET_CLAUDE_RUNNER_BIN || 'claude',
-    args: claudeThreadSessionArgs(agent, mayWrite),
+    args: claudeThreadSessionArgs(agent, mayWrite, descriptor.modelOverride),
   });
 }
 
@@ -12549,7 +12657,14 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) =>
     });
   }
   const suppressedRecipients = new Set();
-  if (msg.to && directTargetKind === 'agent') {
+  // A router-served agent has no tmux pane and never will; its reachability
+  // comes from disposable runners, so tmux-based offline warnings are noise.
+  const isRouterServedAgent = (name) => {
+    if (!THREAD_SESSIONS_ENABLED) return false;
+    const agent = agents[name];
+    return isAgentRecord(agent) && Boolean(agent.agentId) && threadSessionAgentEligibility(agent).ok === true;
+  };
+  if (msg.to && directTargetKind === 'agent' && !isRouterServedAgent(msg.to)) {
     const state = getAgentDeliveryState(msg.to);
     if (!state.online) {
       warnings.push({
@@ -12572,7 +12687,7 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) =>
       }));
 
     const offlineMentions = mentionStates
-      .filter(item => item.state.exists && !item.state.online)
+      .filter(item => item.state.exists && !item.state.online && !isRouterServedAgent(item.name))
       .map(item => ({
         target: item.name,
         server: item.state.server,
