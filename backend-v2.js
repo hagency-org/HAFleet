@@ -7108,27 +7108,85 @@ app.post('/api/project-sides/:id/reactivate', requireBearer, (req, res) => {
   }
 });
 
-/*
- * Forget a side. The LAST step of decision 7's cascade, and this endpoint does not perform the rest
- * of it — ending engagements, releasing commitments, deactivating bindings and retiring agent
- * identities are not built yet, and pretending otherwise would be worse than the gap.
+/**
+ * Retire the agents minted for a project side.
  *
- * So the refusal is the honest part: an ACTIVE side is refused (409), because removing it drops the
- * credential that every earlier cascade step still needs — leaving rooms, revoking tokens, telling
- * the borrower. `?force=true` overrides, matching `DELETE /api/agents/:name`, which already answers
- * "unregister is disabled … Use ?force=true".
+ * ADR-016 decision 7, and "retire" is deliberately not "delete". Erasing an agent would erase its
+ * consumption with it, and ADR-013 makes the token the unit of account — a closed period's totals
+ * would change retroactively and the ledger would become falsifiable by deletion. So: the identity
+ * stops being usable, the record and every ledger row stay, and the reason is recorded ON the agent so
+ * an operator reading the roster later can see why it went quiet.
+ *
+ * The `inactive` shape is reused rather than a new lifecycle state invented, because every surface
+ * that already understands "offline with a reason" understands this one for free.
+ */
+function retireAgentsForSide(sideId) {
+  const retired = [];
+  for (const agent of Object.values(agents)) {
+    if (!isAgentRecord(agent) || agent.projectSide !== sideId) continue;
+    agent.tmux = null;
+    agent.online = false;
+    agent.offlineReason = `retired:project-side-removed:${sideId}`;
+    agent.retiredAt = Date.now();
+    retired.push(agent.name);
+  }
+  if (retired.length) saveJson('agents.json', agents, { immediate: true });
+  return retired;
+}
+
+/*
+ * Forget a side, taking its agents with it.
+ *
+ * ORDER IS LOAD-BEARING and this endpoint performs only the part it owns. Decision 7's sequence is:
+ * end engagements → release commitments → deactivate bindings → retire identities → forget the
+ * credential LAST, because leaving rooms and revoking tokens all need the credential that removal
+ * destroys. Two of those steps are done here — retiring identities, then forgetting the side — and the
+ * two that are not are named in the response rather than implied by a bare 200.
+ *
+ * An ACTIVE side is still refused (409): removing it drops the credential every earlier step needs.
+ * `?force=true` overrides, matching `DELETE /api/agents/:name`.
  */
 app.delete('/api/project-sides/:id', requireBearer, (req, res) => {
   try {
+    const existing = projectSideStore.getSide(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'project side not found' });
+    /*
+     * THE PRECONDITION IS CHECKED BEFORE ANYTHING IS RETIRED, and it is checked here rather than left
+     * to `removeSide`.
+     *
+     * A bug I wrote and a test caught: retiring first and letting `removeSide` throw `side_active`
+     * meant a REFUSED delete had already taken the side's agents down. The operator sees a 409, keeps
+     * the side, and every agent on it has silently gone quiet. Writing the comment about ordering is
+     * what produced it — the order was right, the guard was missing from the front of it.
+     */
+    if (existing.active && req.query?.force !== 'true') {
+      return res.status(409).json({
+        error: `project side ${existing.id} is still active — deactivate it (and end its engagements) `
+          + 'before removing, or pass force',
+        code: 'side_active',
+      });
+    }
+    /*
+     * Agents are retired BEFORE the side is forgotten. Reversed, a persistence failure on the removal
+     * would leave a live side whose agents had already been retired — work refused by a side the
+     * operator still sees as configured, which is the confusing half of the two.
+     */
+    const retiredAgents = retireAgentsForSide(existing.id);
     const side = projectSideStore.removeSide(req.params.id, { force: req.query?.force === 'true' });
     if (!side) return res.status(404).json({ error: 'project side not found' });
     return res.json({
       ok: true,
       side,
-      // Named rather than implied: the cascade is not built, so a caller must not read this 200 as
-      // "everything that depended on this side has been cleaned up".
-      cascade: 'not_performed',
-      cascadeNote: 'engagements, bindings and agent identities on this side are NOT touched by this endpoint',
+      retiredAgents,
+      /*
+       * Still named, because two steps remain. A bare 200 would read as "everything that depended on
+       * this side is cleaned up", and this repository has already produced exactly that failure by
+       * another route: force-deleting an agent left three active bindings and a 250k commitment
+       * pointing at it.
+       */
+      cascade: 'partial',
+      cascadeNote: 'agents minted for this side are retired and their ledger history is kept; '
+        + 'engagements and approval bindings on this side are NOT touched by this endpoint',
     });
   } catch (error) {
     return respondProjectSideError(res, error, 'failed to remove project side');
@@ -7390,6 +7448,13 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   }
   agents[agentName] = {
     name: agentName,
+    /*
+     * Which project side this agent was minted for (ADR-016 decision 4), taken from the provision
+     * plan rather than from the request body — see `provisionedSides` for why the agent may not
+     * declare it. `null` for an agent created by hand, which decision 5 keeps as an explicit
+     * operator-only path.
+     */
+    projectSide: provisionedSides.get(agentName) ?? existing.projectSide ?? null,
     role: role ?? existing.role ?? null,
     // matrix-Agent capability tier (strong/medium/lightweight); invalid/absent → keep existing.
     capability: (['strong', 'medium', 'lightweight'].includes(capability)
@@ -7712,6 +7777,20 @@ app.get('/api/agents', (req, res) => {
 const dispatchLeaseStore = new DispatchLeaseStore({ ttlMs: DISPATCH_LEASE_TTL_MS });
 const dispatchQueues = new Map();    // `${role}:${tier}` → [{ ticket, role, tier, task, room }]
 const provisionReservations = new Map(); // `${role}:${tier}` → count of outstanding provision plans
+/*
+ * agentName → sideId, remembered when a provision plan is HANDED OUT and applied when that name
+ * registers (ADR-016 decision 4).
+ *
+ * WHY NOT LET THE AGENT DECLARE ITS SIDE. `POST /api/agents` is the agent's own registration, so a
+ * `projectSide` in that body would let an agent claim a side it was never provisioned for — and a side
+ * is what decision 7's cascade uses to decide what to retire, and what decision 6's budget charges.
+ * The assignment is the backend's decision, so the backend remembers it.
+ *
+ * Process-local, like `provisionReservations` beside it: a restart between the plan and the
+ * registration loses the intent, and the agent registers with no side rather than a wrong one. That is
+ * the safe direction — an unattributed agent is visible and fixable, a misattributed one is neither.
+ */
+const provisionedSides = new Map();
 let dispatchTicketSeq = 0;
 const cellKey = (role, tier) => `${role}:${tier}`;
 const annotateBusy = (records) => records.map((a) => ({ ...a, busy: dispatchLeaseStore.isBusy(a.name) }));
@@ -7901,6 +7980,7 @@ app.post('/api/dispatch', (req, res) => {
       const name = sideId
         ? `mx_${sideId.replace(/[^a-z0-9]+/g, '_')}_${role}_${tier}_${dispatchTicketSeq++}`
         : `mx_${role}_${tier}_${dispatchTicketSeq++}`;
+      if (sideId) provisionedSides.set(name, sideId);
       return res.json({
         status: 'provision', role, tier, name, runtime: TIER_RUNTIME[tier],
         ...(sideId ? { sideId, budget: sideBudgetFor(sideId) } : {}),

@@ -534,21 +534,144 @@ describe('removal refuses to be the first step of a cascade', () => {
     expect((await request(app).delete(`/api/project-sides/${SERVER}?force=true`)).status).toBe(200);
   });
 
-  test('THE HONEST PART: the response says the cascade was not performed', async () => {
+  test('THE HONEST PART: the response says which steps the cascade did NOT do', async () => {
     /*
-     * Decision 7's cascade — ending engagements, releasing commitments, deactivating bindings,
-     * retiring identities — is NOT built. A bare 200 would read as "everything that depended on this
-     * side is cleaned up", and this repository already produced exactly that failure by other means:
-     * force-deleting an agent left three active bindings and a 250k commitment pointing at it.
-     *
-     * So the gap is named in the response rather than left for someone to discover.
+     * Decision 7's sequence is: end engagements → release commitments → deactivate bindings → retire
+     * identities → forget the credential LAST. Two of those happen here; two do not. A bare 200 would
+     * read as "everything that depended on this side is cleaned up", and this repository has already
+     * produced exactly that failure by another route — force-deleting an agent left three active
+     * bindings and a 250k commitment pointing at it.
      */
     const app = await boot();
     await request(app).post('/api/project-sides')
       .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
     const r = await request(app).delete(`/api/project-sides/${SERVER}?force=true`);
-    expect(r.body.cascade).toBe('not_performed');
-    expect(r.body.cascadeNote).toMatch(/engagements, bindings and agent identities/);
+    expect(r.body.cascade).toBe('partial');
+    expect(r.body.cascadeNote).toMatch(/engagements and approval bindings .* NOT touched/);
+    expect(r.body.retiredAgents).toEqual([]);
+  });
+
+  test('AN AGENT CANNOT CLAIM A SIDE IT WAS NOT PROVISIONED FOR', async () => {
+    /*
+     * Found by mutation testing, and it is the hole the `provisionedSides` map exists to close — I had
+     * written the comment explaining it and never tested it.
+     *
+     * `POST /api/agents` is the agent's OWN registration. If a `projectSide` in that body were honoured,
+     * an agent could attach itself to any side, and a side is what decision 7's cascade uses to decide
+     * what to retire and what decision 6's budget charges. The assignment is the backend's decision,
+     * taken when the provision plan is handed out.
+     */
+    const app = await boot();
+    await request(app).post('/api/agents').send({
+      name: 'self_declared', type: 'agent', projectSide: SERVER,
+    });
+    const roster = await request(app).get('/api/agents');
+    const rows = Array.isArray(roster.body) ? roster.body : roster.body.agents;
+    const agent = rows.find((a) => a.name === 'self_declared');
+    expect(agent, 'the agent did not register at all').toBeTruthy();
+    expect(agent.projectSide, 'an agent claimed a project side from its own request body').toBeNull();
+  });
+
+  test('a side survives a re-registration of one of its agents', async () => {
+    /*
+     * The other direction: once the backend HAS assigned a side, an agent re-registering — which it does
+     * on every restart — must not lose it. `existing.projectSide` is the carry-forward, and without it a
+     * restart would silently orphan an agent from the side whose budget it is charged to.
+     */
+    const app = await boot({
+      agents: { assigned: { name: 'assigned', kind: 'agent', type: 'agent', projectSide: SERVER } },
+    });
+    await request(app).post('/api/agents').send({ name: 'assigned', type: 'agent' });
+    const roster = await request(app).get('/api/agents');
+    const rows = Array.isArray(roster.body) ? roster.body : roster.body.agents;
+    expect(rows.find((a) => a.name === 'assigned').projectSide).toBe(SERVER);
+  });
+
+  test('agents minted for the side are RETIRED, and their record survives', async () => {
+    /*
+     * Retire, not delete. Erasing an agent erases its consumption with it, and ADR-013 makes the token
+     * the unit of account — a closed period's totals would change retroactively and the ledger would
+     * become falsifiable by deletion.
+     */
+    const app = await boot({
+      agents: {
+        mx_palpo_test_worker: {
+          name: 'mx_palpo_test_worker', kind: 'agent', type: 'agent',
+          projectSide: SERVER, tmux: 'sess:0', online: true,
+        },
+        unrelated: { name: 'unrelated', kind: 'agent', type: 'agent', projectSide: null, tmux: 'other:0' },
+      },
+    });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    const r = await request(app).delete(`/api/project-sides/${SERVER}?force=true`);
+    expect(r.body.retiredAgents).toEqual(['mx_palpo_test_worker']);
+
+    const roster = await request(app).get('/api/agents');
+    const rows = Array.isArray(roster.body) ? roster.body : roster.body.agents;
+    const retired = rows.find((a) => a.name === 'mx_palpo_test_worker');
+    // The record SURVIVES — this is the whole difference between retiring and deleting.
+    expect(retired).toBeTruthy();
+    expect(retired.offlineReason).toMatch(new RegExp(`retired:project-side-removed:${SERVER}`));
+    expect(retired.tmux).toBeNull();
+    expect(typeof retired.retiredAt).toBe('number');
+  });
+
+  test('an agent on ANOTHER side, or on none, is untouched', async () => {
+    const app = await boot({
+      agents: {
+        mine: { name: 'mine', kind: 'agent', type: 'agent', projectSide: SERVER, tmux: 'a:0' },
+        theirs: { name: 'theirs', kind: 'agent', type: 'agent', projectSide: 'other.example', tmux: 'b:0' },
+        manual: { name: 'manual', kind: 'agent', type: 'agent', projectSide: null, tmux: 'c:0' },
+      },
+    });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    const r = await request(app).delete(`/api/project-sides/${SERVER}?force=true`);
+    expect(r.body.retiredAgents).toEqual(['mine']);
+
+    const roster = await request(app).get('/api/agents');
+    const rows = Array.isArray(roster.body) ? roster.body : roster.body.agents;
+    for (const name of ['theirs', 'manual']) {
+      const a = rows.find((x) => x.name === name);
+      expect(a.tmux, name).not.toBeNull();
+      expect(String(a.offlineReason || ''), name).not.toMatch(/retired/);
+    }
+  });
+
+  test('AGENTS ARE RETIRED BEFORE THE SIDE IS FORGOTTEN, not after', async () => {
+    /*
+     * Reversed, a persistence failure on the removal would leave a live side whose agents had already
+     * been retired — work refused by a side the operator still sees as configured, which is the
+     * confusing half of the two. Observed here by the retirement being reported alongside a removal
+     * that succeeded; the ordering itself is asserted in the source, since forcing a mid-sequence
+     * failure would need the store to be made to fail on demand.
+     */
+    const app = await boot({
+      agents: { mine: { name: 'mine', kind: 'agent', type: 'agent', projectSide: SERVER, tmux: 'a:0' } },
+    });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    const r = await request(app).delete(`/api/project-sides/${SERVER}?force=true`);
+    expect(r.status).toBe(200);
+    expect(r.body.retiredAgents).toEqual(['mine']);
+    expect((await request(app).get(`/api/project-sides/${SERVER}`)).status).toBe(404);
+  });
+
+  test('an ACTIVE side is still refused, and NOTHING is retired', async () => {
+    // The refusal must happen before any of the cascade runs, or a refused delete would still have
+    // taken the side's agents down.
+    const app = await boot({
+      agents: { mine: { name: 'mine', kind: 'agent', type: 'agent', projectSide: SERVER, tmux: 'a:0' } },
+    });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    const r = await request(app).delete(`/api/project-sides/${SERVER}`);
+    expect(r.status).toBe(409);
+
+    const roster = await request(app).get('/api/agents');
+    const rows = Array.isArray(roster.body) ? roster.body : roster.body.agents;
+    expect(rows.find((a) => a.name === 'mine').tmux).toBe('a:0');
   });
 });
 
