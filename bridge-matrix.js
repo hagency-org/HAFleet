@@ -5,6 +5,8 @@ import {
   SimpleFsStorageProvider,
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
+import { createAppserviceRouter } from './lib/appservice-receiver.js';
+import { resolveAppserviceListenerConfig, startAppserviceListener } from './lib/appservice-listener.js';
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { execFile } from 'child_process';
 import os from 'os';
@@ -1765,6 +1767,13 @@ async function setCustomAgentAvatar(agentName, imageBuffer, mimeType) {
 }
 
 // ── Backend API helpers ───────────────────────────────────────────────
+/*
+ * How often the bridge re-reads which project sides it serves. Slow on purpose: adding a side is an
+ * operator action measured in minutes, and each refresh is an authenticated call to the backend. The
+ * router preserves receivers whose token has not changed, so a refresh is cheap and does not disturb
+ * deduplication.
+ */
+const APPSERVICE_SIDE_REFRESH_MS = Number.parseInt(process.env.HAFLEET_APPSERVICE_REFRESH_MS || '60000', 10) || 60_000;
 const MATRIX_BRIDGE_SECRET = (process.env.MATRIX_BRIDGE_SECRET || '').trim();
 const BRIDGE_API_TOKEN = (process.env.API_TOKEN || '').trim();
 
@@ -3625,7 +3634,130 @@ export class MatrixBridge {
     await this.pollRegistrations();
     setInterval(() => this.pollRegistrations(), 30_000);
 
+    // 9. Inbound appservice traffic, if this deployment exposes a socket for it (ADR-016).
+    await this.startAppserviceIntake();
+
     console.log('Bridge running.');
+  }
+
+  /**
+   * Feed one appservice transaction into the SAME inbound path a synced event takes.
+   *
+   * The whole reason for routing through `onRoomMessage` / `onRoomEvent` rather than handling these
+   * separately: those two carry gates that an appservice event needs just as much as a synced one —
+   * `onRoomMessage`'s event-id deduplication and in-flight coalescing, `onRoomEvent`'s
+   * historical-event cutoff and the room trust gate. A parallel path would be a second place for each
+   * of those to be got right, and the ones it forgot would be invisible until a project side sent
+   * something unusual.
+   *
+   * TWO INDEPENDENT DEDUPLICATION LAYERS FALL OUT OF THAT, which is worth stating because it is the
+   * property that makes retries safe: the router drops a repeated `txnId`, and `onRoomMessage` drops a
+   * repeated `event_id`. A transaction replayed after it has aged out of the router's window is still
+   * not delivered twice.
+   */
+  async handleAppserviceEvents(sideId, events, meta) {
+    for (const event of events) {
+      const roomId = event?.room_id;
+      if (!roomId) {
+        console.warn(`[appservice] ${sideId}: event with no room_id in txn=${meta?.txnId} type=${event?.type}`);
+        continue;
+      }
+      try {
+        if (event.type === 'm.room.encrypted') {
+          /*
+           * Named rather than dropped silently. ADR-016 settled that intake rooms are PLAINTEXT, and
+           * the bridge's decryption path belongs to the bot's crypto store on its own homeserver — so
+           * an encrypted event arriving over an appservice cannot be read here. Left as a warning
+           * because the failure it produces otherwise is a borrower whose message vanished.
+           */
+          console.warn(
+            `[appservice] ${sideId}: encrypted event in ${roomId} cannot be read — ADR-016 requires `
+            + 'plaintext intake rooms, and an appservice has no crypto store on the project side',
+          );
+          continue;
+        }
+        if (event.type === 'm.room.message') await this.onRoomMessage(roomId, event);
+        else await this.onRoomEvent(roomId, event);
+      } catch (error) {
+        /*
+         * Re-thrown, because the receiver turns a throw into a 500 and a 500 makes the homeserver
+         * RETRY. Swallowing here would answer 200 for a transaction that was not processed, and the
+         * homeserver would never send it again.
+         */
+        console.error(`[appservice] ${sideId}: failed on ${event.type} in ${roomId}: ${error?.message || error}`);
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Fetch the inbound credentials and hand them to the router.
+   *
+   * `setSides` preserves the receiver of any side whose token is unchanged, so refreshing does not
+   * reset a deduplication window — which matters because this runs on a timer and a refresh landing
+   * between a transaction and its retry would otherwise double-deliver it.
+   */
+  async refreshAppserviceSides() {
+    if (!this.appserviceRouter) return;
+    let payload;
+    try {
+      payload = await backendApi('GET', '/api/project-sides/inbound-credentials', null, 'context=bridge:appservice-sides');
+    } catch (error) {
+      /*
+       * The listener stays up with whatever it already had. Tearing sides down because the backend
+       * blinked would turn a backend restart into refused deliveries on every project side, and the
+       * homeserver's retries would expire while we were the ones that were broken.
+       */
+      console.warn(`[appservice] could not refresh project sides: ${error?.message || error}`);
+      return;
+    }
+    const sides = Array.isArray(payload?.sides) ? payload.sides : [];
+    this.appserviceRouter.setSides(sides.map((side) => ({
+      sideId: side.sideId,
+      hsToken: side.hsToken,
+      onEvents: (events, meta) => this.handleAppserviceEvents(side.sideId, events, meta),
+      onUserQuery: async (userId) => Boolean(findCaseInsensitiveKey(state.agentTokens || {}, String(userId))) || String(userId).startsWith(`@${AGENT_PREFIX}`),
+    })));
+    const ids = this.appserviceRouter.sideIds();
+    console.log(`[appservice] serving ${ids.length} project side(s)${ids.length ? `: ${ids.join(', ')}` : ''}`);
+  }
+
+  /**
+   * Bring up the inbound socket, if this deployment has decided to expose one.
+   *
+   * Silent-by-default is the point: with no `HAFLEET_APPSERVICE_PORT` there is no socket and no
+   * warning, because a deployment using registration-token sides has no reason to expose one. The
+   * reason is logged rather than hidden so `doctor`-style questions have an answer.
+   */
+  async startAppserviceIntake() {
+    const config = resolveAppserviceListenerConfig(process.env);
+    if (!config.enabled) {
+      console.log(`[appservice] inbound listener disabled (${config.reason})`);
+      return;
+    }
+    this.appserviceRouter = createAppserviceRouter();
+    await this.refreshAppserviceSides();
+    try {
+      this.appserviceListener = await startAppserviceListener({
+        receiver: this.appserviceRouter, port: config.port, host: config.host,
+      });
+    } catch (error) {
+      /*
+       * NOT fatal. The bridge's outbound work — every registration-token side, every DM, every
+       * approval — does not depend on this socket, and exiting would take all of it down because one
+       * port was busy. Reported loudly instead.
+       */
+      console.error(`[appservice] could not listen on ${config.host}:${config.port}: ${error?.message || error}`);
+      this.appserviceRouter = null;
+      return;
+    }
+    if (config.exposedBeyondLoopback) {
+      console.warn(
+        `[appservice] bound to ${config.host} — reachable beyond loopback. This is required for a `
+        + 'homeserver on another machine and is stated here so it is a decision rather than a discovery.',
+      );
+    }
+    setInterval(() => this.refreshAppserviceSides(), APPSERVICE_SIDE_REFRESH_MS);
   }
 
   async pollRegistrations() {
