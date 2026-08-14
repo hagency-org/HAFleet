@@ -5737,16 +5737,41 @@ export class MatrixBridge {
     let members = await this.botClient.getJoinedRoomMembers(roomId);
     if (!members.includes(agentRoomMxid)) {
       try { await this.botClient.inviteUser(agentRoomMxid, roomId); } catch {}
+      /*
+       * BEST-EFFORT, and it used to throw. This step is cosmetic by its own design — the comment
+       * above says the bot remains the E2EE sender and authorization service and the agent token is
+       * never used to submit a verdict — so the agent's presence is for a human's benefit, not for
+       * the approval to work.
+       *
+       * Making it fatal breaks something real under ADR-016. An approval room is created by the BOT,
+       * on the CONTRIBUTOR's homeserver (`this.botClient.createRoom`), while an agent minted for a
+       * project side has an account on THAT side's server. Without federation it cannot join a room
+       * on ours — so the very first approval request for a project-side agent would fail here, and
+       * the failure would be attributed to approval rather than to a decorative join.
+       *
+       * Passing the agent's own base URL would not help: the room does not exist on the agent's
+       * server. The collision is architectural (see ADR-016), and this is only the part that must
+       * not take the approval down with it.
+       */
       const agentToken = this.getAgentToken(canonicalAgent);
       if (agentToken) {
-        const join = await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${agentToken}`, 'Content-Type': 'application/json' },
-          body: '{}',
-        });
-        if (!join.ok) {
-          const detail = await join.text().catch(() => '');
-          throw new Error(`agent failed to join approval room: HTTP ${join.status} ${detail.slice(0, 160)}`);
+        try {
+          const join = await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${agentToken}`, 'Content-Type': 'application/json' },
+            body: '{}',
+          });
+          if (!join.ok) {
+            const detail = await join.text().catch(() => '');
+            console.warn(
+              `[approval-room] ${canonicalAgent} could not join ${roomId} (HTTP ${join.status} `
+              + `${detail.slice(0, 120)}). The approval still works — the bot is the authorization `
+              + 'service and the agent token never submits a verdict. Expected when the agent lives '
+              + 'on a project side and the room is on this deployment\'s server.',
+            );
+          }
+        } catch (error) {
+          console.warn(`[approval-room] ${canonicalAgent} join attempt failed for ${roomId}: ${error?.message || error}`);
         }
       }
     }
