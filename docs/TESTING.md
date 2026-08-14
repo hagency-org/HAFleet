@@ -180,6 +180,25 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-13 | `engagement-binding` | `the binding IS released once the last live engagement ends` | **yes** — `expected 404 to be 200`, clean in isolation (7/7) |
 | 2026-08-13 | `api-server-heartbeat` | `accepts a new instance after the lease becomes stale` | **yes** — `AssertionError: expected null to be 'inst-B'`; CI only, on a DOCS-ONLY branch; see the investigation below |
 | 2026-08-14 | `alert-store` | `alert API writes fail closed and keep visible state unchanged` | **yes** — `expected undefined to be 'agent-runtime'`; whole-suite only, clean in isolation 3/3 (18/18 each) |
+| 2026-08-14 | `api-agents` | `DELETE /api/agents/:name returns 503 and keeps the agent registered on persistence failure` | **yes** — `expected 404 to be 503`; 1 failure in 10 runs of the file, 0/6 consecutive, 4/4 clean on master without the branch |
+
+**A SIGHTING THAT WAS CHECKED FOR AUTHORSHIP BEFORE BEING CALLED A FLAKE.** The `api-agents` row above
+failed once inside a whole-suite run and once more in isolation, which is unusual — this class is
+normally whole-suite only. Because a branch was in flight that touched `agents.json` writes, the
+attribution was tested rather than assumed:
+
+| run | result |
+|---|---|
+| the file, on clean master (branch stashed) | 4/4 pass |
+| the file, with the branch applied | 1 fail, then 9 passes across two batches |
+
+One failure in ten runs with the branch and none in four without it is not a rate, and the branch's new
+code is not reachable from that test at all — it runs only on project-side removal. So: the same
+mechanism, a new file, and `expected 404 to be 503` is the second documented shape again — a handler
+that did not answer, seen from an assertion that expected its status.
+
+The step worth keeping is the stash-and-compare. "It passes in isolation" is weaker evidence than "it
+passes in isolation on a tree without my change", and the second takes one extra command.
 
 **A NAMED SPECIMEN FOR TWO SIGHTINGS THAT WENT UNNAMED.** Two earlier runs in the same session reported
 intermittent failures whose identity was not captured, because the output was tailed rather than saved —
