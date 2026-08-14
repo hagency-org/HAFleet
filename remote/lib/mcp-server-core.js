@@ -69,8 +69,15 @@ const DEFAULT_BACKEND_PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAUL
   : 8090;
 const API = process.env.HAFLEET_API || `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`;
 const API_TOKEN = (process.env.API_TOKEN || '').trim();
+const EPHEMERAL_RUNNER = process.env.HAFLEET_EPHEMERAL_RUNNER === '1';
+const DISPATCH_CAPABILITY = (process.env.HAFLEET_DISPATCH_CAPABILITY || '').trim();
+const DISPATCH_ID = (process.env.HAFLEET_DISPATCH_ID || '').trim();
+const RUNNER_ID = (process.env.HAFLEET_RUNNER_ID || '').trim();
+const FENCE_GENERATION = (process.env.HAFLEET_FENCE_GENERATION || '').trim();
 const AGENT_SERVER = resolveLocalServerId();
 const AGENT_TOKEN = (() => {
+  const injected = (process.env.AGENT_TOKEN || '').trim();
+  if (injected) return injected;
   const stateDir = (process.env.HAFLEET_AGENT_STATE_DIR || '').trim();
   if (!stateDir) return '';
   try { return readFileSync(path.join(stateDir, 'agent-token'), 'utf-8').trim(); } catch { return ''; }
@@ -219,12 +226,30 @@ async function fetchWithRetry(url, opts, { timeoutMs, label } = {}) {
 
 // ── HTTP helper ───────────────────────────────────────────────────────
 async function api(method, apiPath, body) {
+  if (EPHEMERAL_RUNNER) {
+    const selfPath = `/api/agents/${encodeURIComponent(AGENT_NAME)}`;
+    const allowed = (method === 'GET' && apiPath === selfPath)
+      || (method === 'GET' && apiPath === '/api/agents?view=names')
+      || (method === 'GET' && apiPath.startsWith(`/api/inbox/${encodeURIComponent(AGENT_NAME)}`))
+      || (method === 'POST' && apiPath === '/api/router/tasks')
+      || (method === 'POST' && apiPath === '/api/router/approvals/claude')
+      || (method === 'POST' && apiPath === '/api/router/approvals/claude/apply')
+      || (method === 'GET' && /^\/api\/approvals\/[^/]+$/.test(apiPath))
+      || (method === 'POST' && /^\/api\/approvals\/[^/]+\/consume$/.test(apiPath));
+    if (!allowed) throw new Error(`ephemeral runner MCP access is session-scoped; ${method} ${apiPath} is unavailable`);
+  }
   const opts = { method, headers: {} };
   if (API_TOKEN) {
     opts.headers.Authorization = `Bearer ${API_TOKEN}`;
   }
   if (AGENT_TOKEN) {
     opts.headers['X-Agent-Token'] = AGENT_TOKEN;
+  }
+  if (DISPATCH_CAPABILITY || DISPATCH_ID || RUNNER_ID || FENCE_GENERATION) {
+    opts.headers['X-HAFleet-Dispatch-Capability'] = DISPATCH_CAPABILITY;
+    opts.headers['X-HAFleet-Dispatch-Id'] = DISPATCH_ID;
+    opts.headers['X-HAFleet-Runner-Id'] = RUNNER_ID;
+    opts.headers['X-HAFleet-Fence-Generation'] = FENCE_GENERATION;
   }
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
@@ -755,6 +780,36 @@ if (CLAUDE_PERMISSION_CHANNEL_ENABLED) {
 
   const relayClaudePermissionRequest = async (params) => {
     const outcome = await failClosedRuntimeApproval(async () => {
+      if (EPHEMERAL_RUNNER) {
+        const parked = await api('POST', '/api/router/approvals/claude', {
+          agent: AGENT_NAME,
+          request_id: params.request_id,
+          tool_name: params.tool_name,
+          description: params.description,
+          input_preview: params.input_preview,
+        });
+        if (!parked?.approval || !parked?.router_approval_id || !parked?.operation_digest) {
+          throw new Error('router approval endpoint returned an incomplete park result');
+        }
+        const resolved = await resolveAndConsumeRuntimeApproval({
+          api,
+          approval: parked.approval,
+          agent: AGENT_NAME,
+          pollIntervalMs: APPROVAL_POLL_INTERVAL_MS,
+        });
+        const approvalRequestId = resolved?.consumption?.approval?.id;
+        if (!approvalRequestId) throw new Error('owner approval was not durably consumed');
+        const applied = await api('POST', '/api/router/approvals/claude/apply', {
+          agent: AGENT_NAME,
+          approval_request_id: approvalRequestId,
+          router_approval_id: parked.router_approval_id,
+          operation_digest: parked.operation_digest,
+        });
+        if (applied?.behavior !== resolved.behavior) {
+          throw new Error('router approval result does not match the consumed owner verdict');
+        }
+        return resolved;
+      }
       const created = await api('POST', '/api/approvals', {
         agent: AGENT_NAME,
         runtime: 'claude',
@@ -798,8 +853,10 @@ if (CLAUDE_PERMISSION_CHANNEL_ENABLED) {
   });
 }
 
-await ensureAgentRegistered();
-startMcpHeartbeat();
+if (!EPHEMERAL_RUNNER) {
+  await ensureAgentRegistered();
+  startMcpHeartbeat();
+}
 
 // 1. whoami — returns concise identity, groups, and known agent names
 server.tool('whoami', 'Returns your agent identity, role, and groups', {}, async () => {
@@ -942,6 +999,46 @@ server.tool(
 );
 
 // 6. list_tasks
+server.tool(
+  'create_task',
+  'Create a durable task and Matrix thread from messages in this session. The backend derives the room and thread root from authenticated session inputs.',
+  {
+    assignee: z.string().describe('Registered worker agent name'),
+    title: z.string().describe('Task title'),
+    description: z.string().optional().describe('Task details'),
+    root_message_id: z.string().describe('Session message id whose authenticated Matrix event becomes the thread root'),
+    input_message_ids: z.array(z.string()).optional().describe('Additional session message ids that contribute to this task'),
+    priority: z.enum(['p0', 'p1', 'p2', 'p3']).default('p2'),
+    granularity: z.enum(['epic', 'task', 'subtask']).default('task'),
+    parent_id: z.string().optional(),
+    labels: z.array(z.string()).optional(),
+    acknowledgement_body: z.string().optional().describe('Short Matrix acknowledgement posted in the new task thread'),
+  },
+  async ({ assignee, title, description, root_message_id, input_message_ids, priority, granularity, parent_id, labels, acknowledgement_body }, extra) => {
+    try {
+      if (!DISPATCH_CAPABILITY) throw new Error('create_task requires a thread-session runner capability');
+      const data = await api('POST', '/api/router/tasks', {
+        agent: AGENT_NAME,
+        assignee,
+        title,
+        description,
+        root_message_id,
+        input_message_ids: input_message_ids || [],
+        priority,
+        granularity,
+        parent_id: parent_id || null,
+        labels: labels || [],
+        acknowledgement_body,
+        tool_call_id: String(extra.requestId),
+      });
+      return text(data);
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+);
+
+// 7. list_tasks
 server.tool(
   'list_tasks',
   "List tasks. By default, returns only tasks assigned to you. Pass assignee='*' for all tasks or assignee='<name>' for a specific agent. Filter by status (comma-separated for multiple), priority (p0|p1|p2|p3), or label.",

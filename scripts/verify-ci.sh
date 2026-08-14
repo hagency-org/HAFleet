@@ -157,6 +157,8 @@ start_step "cli contract" npm run check:cli-contract
 start_step "remote package" bash -c 'npm run build:remote:check && npm run check:remote-sync && npm run check:remote-package-smoke'
 start_step "dependency boundary" npm run check:dep-isolation
 start_step "architecture boundaries" npm run check:architecture-boundaries
+start_step "router type and artifact boundaries" bash -c 'npm run typecheck:router && npm run check:router-boundary && npm run check:router-build'
+start_step "Agent Operations canonical contract" npm run check:agent-ops-contract
 
 failed=0
 for ((i = static_start_index; i < ${#step_pids[@]}; i++)); do

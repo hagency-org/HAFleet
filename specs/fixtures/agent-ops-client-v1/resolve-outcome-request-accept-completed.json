@@ -1,0 +1,26 @@
+{
+  "schema": "com.hafleet.agent_ops.v1",
+  "request_id": "request-resolution-accept",
+  "client_session_id": "client-session-fixture-1",
+  "scope_id": "scope_fixture_worker",
+  "projection_id": "projection_fixture_worker",
+  "stream_epoch": "239830a9-7d3c-4e8c-a480-cfa29df30cb1",
+  "auth_fence_generation": 3,
+  "snapshot_seq": 42,
+  "action_capability": "fixture-action-capability-resolution",
+  "target": {
+    "entity_kind": "dispatch",
+    "entity_id": "dispatch-1",
+    "entity_version": 7
+  },
+  "resource_precondition": {
+    "resource_id": "resource-1",
+    "dirty_generation": 2
+  },
+  "inspection_id": "inspection-fixture-1",
+  "inspection_token": "fixture-inspection-token",
+  "operator_note": "The inspected result is complete",
+  "resolution": {
+    "kind": "accept_completed"
+  }
+}

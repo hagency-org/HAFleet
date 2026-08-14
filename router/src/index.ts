@@ -1,0 +1,75 @@
+export { openRouter, RouterStore } from './store.js';
+export { createRouterTaskStore, migrateLegacyTasks } from './task-repository.js';
+export type { LegacyTask, TaskMigrationResult, TaskStoreLike } from './task-repository.js';
+export { isCompletedSettlement, operationDigest, runClaudeDispatch, runCodexDispatch } from './runner.js';
+export type {
+  ClaudeRunnerOptions,
+  CodexRunnerOptions,
+  OwnerApprovalHandler,
+  OwnerApprovalRequest,
+  OwnerApprovalVerdict,
+  RunnerCompletion,
+} from './runner.js';
+export { WorktreeManager } from './worktree.js';
+export type { WorktreeInfo, WorktreeInspection, WorktreeSpec } from './worktree.js';
+export {
+  AGENT_OPS_CONTRACT,
+  AGENT_OPS_ERROR_CODES,
+  AGENT_OPS_LIMITS,
+  AgentOpsService,
+  agentOpsCanonicalJson,
+  agentOpsDigest,
+  agentOpsScopeId,
+} from './agent-ops.js';
+export type {
+  AgentOpsAuthContext,
+  AgentOpsCommandEnvelope,
+  AgentOpsDeviceInput,
+  AgentOpsRefusal,
+  AgentOpsScopeInput,
+} from './agent-ops.js';
+export type {
+  ActivationResult,
+  ActiveTaskBinding,
+  ApprovalDecisionEvent,
+  AttachInputsResult,
+  AttachTaskInputsInput,
+  AuthenticatedMessageInput,
+  CapabilityInput,
+  ClaimDispatchInput,
+  ClaimResult,
+  CreateTaskIntentInput,
+  DispatchState,
+  EnqueueDispatchInput,
+  EnqueueResult,
+  EventPage,
+  IngestResult,
+  MatrixCommand,
+  MatrixDeliveryFailure,
+  MatrixDeliveryReceipt,
+  LaunchDescriptor,
+  OutcomeInspectionResult,
+  OutcomeResolutionAction,
+  OutcomeResolutionResult,
+  ParkDispatchInput,
+  ReconcileReport,
+  Refusal,
+  ReplyCommand,
+  RouterEvent,
+  RouterOptions,
+  RouterSnapshot,
+  RunnerContext,
+  RunnerEffectInput,
+  ResolveOutcomeUnknownInput,
+  ScopeKind,
+  SessionInboxMessage,
+  SessionView,
+  SettleDispatchInput,
+  SettleSuccess,
+  StartedPayload,
+  StoredMessageResult,
+  TaskDeliveryResult,
+  TaskDispatchFailureResult,
+  TaskIntentResult,
+  WorkspaceMode,
+} from './types.js';

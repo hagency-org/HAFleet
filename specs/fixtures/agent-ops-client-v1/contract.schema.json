@@ -1,0 +1,462 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentchat.local/schemas/com.hafleet.agent_ops.v1.json",
+  "title": "Agent Operations client contract V1",
+  "oneOf": [
+    { "$ref": "#/$defs/snapshot" },
+    { "$ref": "#/$defs/invalidation" },
+    { "$ref": "#/$defs/bootstrapControl" },
+    { "$ref": "#/$defs/grantExchange" },
+    { "$ref": "#/$defs/proofMaterial" },
+    { "$ref": "#/$defs/clientSessionGrant" },
+    { "$ref": "#/$defs/clientSession" },
+    { "$ref": "#/$defs/outcomeInspection" },
+    { "$ref": "#/$defs/command" },
+    { "$ref": "#/$defs/mutationResponse" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "schema": { "const": "com.hafleet.agent_ops.v1" },
+    "id": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "safeInteger": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "positiveInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "capability": { "type": "string", "minLength": 1, "maxLength": 8192 },
+    "privacyText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "not": { "pattern": "(?:^|[\\s=:(\"\\[])(?:/Users/|/home/|/var/|/tmp/|~/|[A-Za-z]:[\\\\/]|\\\\\\\\)" }
+    },
+    "jwk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kty", "crv", "x"],
+      "properties": {
+        "kty": { "const": "OKP" },
+        "crv": { "const": "Ed25519" },
+        "x": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" }
+      }
+    },
+    "thread": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["room_id", "thread_root_event_id"],
+      "properties": {
+        "room_id": { "$ref": "#/$defs/id" },
+        "thread_root_event_id": { "$ref": "#/$defs/id" }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entity_kind", "entity_id", "entity_version"],
+      "properties": {
+        "entity_kind": { "enum": ["dispatch", "resource"] },
+        "entity_id": { "$ref": "#/$defs/id" },
+        "entity_version": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "resourcePrecondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource_id", "dirty_generation"],
+      "properties": {
+        "resource_id": { "$ref": "#/$defs/id" },
+        "dirty_generation": { "$ref": "#/$defs/safeInteger" }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action_id", "kind", "target", "expires_at_unix_ms", "capability"],
+      "properties": {
+        "action_id": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["cancel_dispatch", "mark_resource_inspected", "begin_outcome_inspection", "resolve_outcome"] },
+        "target": { "$ref": "#/$defs/target" },
+        "resource_precondition": { "$ref": "#/$defs/resourcePrecondition" },
+        "allowed_resolutions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["continue", "accept_completed", "keep_blocked"] }
+        },
+        "expires_at_unix_ms": { "$ref": "#/$defs/positiveInteger" },
+        "capability": { "$ref": "#/$defs/capability" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "cancel_dispatch" } }, "required": ["kind"] },
+          "then": {
+            "properties": { "target": { "properties": { "entity_kind": { "const": "dispatch" } } } },
+            "not": { "anyOf": [{ "required": ["resource_precondition"] }, { "required": ["allowed_resolutions"] }] }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "mark_resource_inspected" } }, "required": ["kind"] },
+          "then": {
+            "required": ["resource_precondition"],
+            "properties": { "target": { "properties": { "entity_kind": { "const": "resource" } } } },
+            "not": { "required": ["allowed_resolutions"] }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "begin_outcome_inspection" } }, "required": ["kind"] },
+          "then": {
+            "required": ["resource_precondition"],
+            "properties": { "target": { "properties": { "entity_kind": { "const": "dispatch" } } } },
+            "not": { "required": ["allowed_resolutions"] }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "resolve_outcome" } }, "required": ["kind"] },
+          "then": {
+            "required": ["resource_precondition", "allowed_resolutions"],
+            "properties": {
+              "target": { "properties": { "entity_kind": { "const": "dispatch" } } },
+              "allowed_resolutions": { "minItems": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_id", "project_room_id", "agent_id", "owner_mxid", "owner_dm_room_id"],
+      "properties": {
+        "scope_id": { "$ref": "#/$defs/id" },
+        "project_room_id": { "$ref": "#/$defs/id" },
+        "agent_id": { "$ref": "#/$defs/id" },
+        "owner_mxid": { "$ref": "#/$defs/id" },
+        "owner_dm_room_id": { "$ref": "#/$defs/id" }
+      }
+    },
+    "attention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "summary", "available_actions"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["outcome_unknown", "parked_approval", "thread_delivery_failed", "workspace_dirty"] },
+        "summary": { "$ref": "#/$defs/privacyText" },
+        "task_id": { "$ref": "#/$defs/id" },
+        "dispatch_id": { "$ref": "#/$defs/id" },
+        "resource_id": { "$ref": "#/$defs/id" },
+        "agent": { "$ref": "#/$defs/privacyText" },
+        "waiting_ms": { "$ref": "#/$defs/safeInteger" },
+        "thread": { "$ref": "#/$defs/thread" },
+        "available_actions": { "type": "array", "items": { "$ref": "#/$defs/action" } }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "entity_version", "title", "agent", "state"],
+      "properties": {
+        "task_id": { "$ref": "#/$defs/id" },
+        "entity_version": { "$ref": "#/$defs/positiveInteger" },
+        "title": { "$ref": "#/$defs/privacyText" },
+        "agent": { "$ref": "#/$defs/privacyText" },
+        "state": { "$ref": "#/$defs/privacyText" },
+        "dispatch_state": { "enum": ["queued", "leased", "started", "parked", "completed", "cancelled_before_start", "outcome_unknown"] },
+        "elapsed_ms": { "$ref": "#/$defs/safeInteger" },
+        "thread": { "$ref": "#/$defs/thread" }
+      }
+    },
+    "queue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dispatch_id", "entity_version", "agent", "state", "waiting_on"],
+      "properties": {
+        "dispatch_id": { "$ref": "#/$defs/id" },
+        "entity_version": { "$ref": "#/$defs/positiveInteger" },
+        "task_id": { "$ref": "#/$defs/id" },
+        "agent": { "$ref": "#/$defs/privacyText" },
+        "state": { "enum": ["queued", "leased", "started", "parked"] },
+        "waiting_on": { "$ref": "#/$defs/privacyText" },
+        "held_by_dispatch_id": { "$ref": "#/$defs/id" },
+        "attention_kind": { "enum": ["parked_approval"] }
+      }
+    },
+    "worktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource_id", "entity_version", "label", "branch", "dirty", "dirty_generation", "available_actions"],
+      "properties": {
+        "resource_id": { "$ref": "#/$defs/id" },
+        "entity_version": { "$ref": "#/$defs/positiveInteger" },
+        "label": { "$ref": "#/$defs/privacyText" },
+        "branch": { "$ref": "#/$defs/privacyText" },
+        "dirty": { "type": "boolean" },
+        "dirty_generation": { "$ref": "#/$defs/safeInteger" },
+        "task_id": { "$ref": "#/$defs/id" },
+        "available_actions": { "type": "array", "items": { "$ref": "#/$defs/action" } }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "scope", "projection_id", "stream_epoch", "auth_fence_generation", "seq", "attention", "tasks", "queue", "worktrees"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schema" },
+        "scope": { "$ref": "#/$defs/scope" },
+        "projection_id": { "$ref": "#/$defs/id" },
+        "stream_epoch": { "$ref": "#/$defs/id" },
+        "auth_fence_generation": { "$ref": "#/$defs/positiveInteger" },
+        "seq": { "$ref": "#/$defs/safeInteger" },
+        "attention": { "type": "array", "items": { "$ref": "#/$defs/attention" } },
+        "tasks": { "type": "array", "items": { "$ref": "#/$defs/task" } },
+        "queue": { "type": "array", "items": { "$ref": "#/$defs/queue" } },
+        "worktrees": { "type": "array", "items": { "$ref": "#/$defs/worktree" } }
+      }
+    },
+    "invalidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "scope_id", "projection_id", "stream_epoch", "auth_fence_generation", "seq"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schema" },
+        "scope_id": { "$ref": "#/$defs/id" },
+        "projection_id": { "$ref": "#/$defs/id" },
+        "stream_epoch": { "$ref": "#/$defs/id" },
+        "auth_fence_generation": { "$ref": "#/$defs/positiveInteger" },
+        "seq": { "$ref": "#/$defs/safeInteger" }
+      }
+    },
+    "clientSessionGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "grant_jti", "scope_id", "projection_id", "client_nonce", "server_challenge", "exchange_endpoint", "audience", "auth_fence_generation", "expires_at_unix_ms", "server_public_jwk", "server_key_fingerprint", "server_signature", "idempotent_request_replay"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schema" },
+        "kind": { "const": "client_session_grant" },
+        "grant_jti": { "$ref": "#/$defs/id" },
+        "scope_id": { "$ref": "#/$defs/id" },
+        "projection_id": { "$ref": "#/$defs/id" },
+        "client_nonce": { "$ref": "#/$defs/id" },
+        "server_challenge": { "$ref": "#/$defs/capability" },
+        "exchange_endpoint": { "type": "string", "pattern": "^http://(?:127\\.0\\.0\\.1|\\[::1\\]):[0-9]+/api/agent-ops/v1/session/exchange$" },
+        "audience": { "type": "string", "pattern": "^http://(?:127\\.0\\.0\\.1|\\[::1\\]):[0-9]+$" },
+        "auth_fence_generation": { "$ref": "#/$defs/positiveInteger" },
+        "expires_at_unix_ms": { "$ref": "#/$defs/positiveInteger" },
+        "server_public_jwk": { "$ref": "#/$defs/jwk" },
+        "server_key_fingerprint": { "type": "string", "pattern": "^sha256:[A-Za-z0-9_-]+$" },
+        "server_signature": { "$ref": "#/$defs/capability" },
+        "idempotent_request_replay": { "type": "boolean" }
+      }
+    },
+    "bootstrapControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["msgtype", "body", "com.hafleet.agent_ops"],
+      "properties": {
+        "msgtype": { "const": "com.hafleet.agent_ops.client_session.request.v1" },
+        "body": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "com.hafleet.agent_ops": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "agent", "project_room_id", "client_nonce", "client_public_jwk"],
+          "properties": {
+            "schema": { "$ref": "#/$defs/schema" },
+            "agent": { "$ref": "#/$defs/id" },
+            "project_room_id": { "$ref": "#/$defs/id" },
+            "client_nonce": { "$ref": "#/$defs/id" },
+            "client_public_jwk": { "$ref": "#/$defs/jwk" }
+          }
+        }
+      }
+    },
+    "grantExchange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grant_jti", "client_nonce", "server_challenge", "audience"],
+      "properties": {
+        "grant_jti": { "$ref": "#/$defs/id" },
+        "client_nonce": { "$ref": "#/$defs/id" },
+        "server_challenge": { "$ref": "#/$defs/capability" },
+        "audience": { "type": "string", "pattern": "^http://(?:127\\.0\\.0\\.1|\\[::1\\]):[0-9]+$" }
+      }
+    },
+    "clientSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "client_session_id", "session_capability", "scope_id", "projection_id", "stream_epoch", "auth_fence_generation", "audience", "expires_at_unix_ms", "server_key_fingerprint", "server_signature"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schema" },
+        "kind": { "const": "client_session" },
+        "client_session_id": { "$ref": "#/$defs/id" },
+        "session_capability": { "$ref": "#/$defs/capability" },
+        "scope_id": { "$ref": "#/$defs/id" },
+        "projection_id": { "$ref": "#/$defs/id" },
+        "stream_epoch": { "$ref": "#/$defs/id" },
+        "auth_fence_generation": { "$ref": "#/$defs/positiveInteger" },
+        "audience": { "type": "string", "pattern": "^http://(?:127\\.0\\.0\\.1|\\[::1\\]):[0-9]+$" },
+        "expires_at_unix_ms": { "$ref": "#/$defs/positiveInteger" },
+        "server_key_fingerprint": { "type": "string", "pattern": "^sha256:[A-Za-z0-9_-]+$" },
+        "server_signature": { "$ref": "#/$defs/capability" }
+      }
+    },
+    "proofMaterial": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "kind", "grant_jti", "client_nonce", "server_challenge", "proof_nonce", "http_method", "request_path", "body_sha256", "audience"],
+          "properties": {
+            "schema": { "$ref": "#/$defs/schema" },
+            "kind": { "const": "grant_exchange" },
+            "grant_jti": { "$ref": "#/$defs/id" },
+            "client_nonce": { "$ref": "#/$defs/id" },
+            "server_challenge": { "$ref": "#/$defs/capability" },
+            "proof_nonce": { "$ref": "#/$defs/id" },
+            "http_method": { "const": "POST" },
+            "request_path": { "const": "/api/agent-ops/v1/session/exchange" },
+            "body_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "audience": { "type": "string", "pattern": "^http://(?:127\\.0\\.0\\.1|\\[::1\\]):[0-9]+$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "kind", "client_session_id", "proof_nonce", "http_method", "request_path", "body_sha256", "audience"],
+          "properties": {
+            "schema": { "$ref": "#/$defs/schema" },
+            "kind": { "const": "session_request" },
+            "client_session_id": { "$ref": "#/$defs/id" },
+            "proof_nonce": { "$ref": "#/$defs/id" },
+            "http_method": { "enum": ["GET", "POST"] },
+            "request_path": { "type": "string", "pattern": "^/api/agent-ops/v1/" },
+            "body_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "audience": { "type": "string", "pattern": "^http://(?:127\\.0\\.0\\.1|\\[::1\\]):[0-9]+$" }
+          }
+        }
+      ]
+    },
+    "outcomeInspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "scope_id", "projection_id", "stream_epoch", "auth_fence_generation", "snapshot_seq", "client_session_id", "inspection_id", "inspection_token", "dispatch_target", "terminal_reason", "expires_at_unix_ms", "resource", "resolution_action", "idempotent_request_replay"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schema" },
+        "scope_id": { "$ref": "#/$defs/id" },
+        "projection_id": { "$ref": "#/$defs/id" },
+        "stream_epoch": { "$ref": "#/$defs/id" },
+        "auth_fence_generation": { "$ref": "#/$defs/positiveInteger" },
+        "snapshot_seq": { "$ref": "#/$defs/safeInteger" },
+        "client_session_id": { "$ref": "#/$defs/id" },
+        "inspection_id": { "$ref": "#/$defs/id" },
+        "inspection_token": { "$ref": "#/$defs/capability" },
+        "dispatch_target": { "$ref": "#/$defs/target" },
+        "task_id": { "type": ["string", "null"], "minLength": 1 },
+        "terminal_reason": { "$ref": "#/$defs/privacyText" },
+        "expires_at_unix_ms": { "$ref": "#/$defs/positiveInteger" },
+        "resource": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_id", "entity_version", "dirty_generation", "label", "branch", "dirty_reason"],
+          "properties": {
+            "resource_id": { "$ref": "#/$defs/id" },
+            "entity_version": { "$ref": "#/$defs/positiveInteger" },
+            "dirty_generation": { "$ref": "#/$defs/safeInteger" },
+            "label": { "$ref": "#/$defs/privacyText" },
+            "branch": { "$ref": "#/$defs/privacyText" },
+            "dirty_reason": { "$ref": "#/$defs/privacyText" }
+          }
+        },
+        "resolution_action": { "$ref": "#/$defs/action" },
+        "idempotent_request_replay": { "type": "boolean" }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "request_id", "client_session_id", "scope_id", "projection_id", "stream_epoch", "auth_fence_generation", "snapshot_seq", "action_capability", "target"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schema" },
+        "request_id": { "$ref": "#/$defs/id" },
+        "client_session_id": { "$ref": "#/$defs/id" },
+        "scope_id": { "$ref": "#/$defs/id" },
+        "projection_id": { "$ref": "#/$defs/id" },
+        "stream_epoch": { "$ref": "#/$defs/id" },
+        "auth_fence_generation": { "$ref": "#/$defs/positiveInteger" },
+        "snapshot_seq": { "$ref": "#/$defs/safeInteger" },
+        "action_capability": { "$ref": "#/$defs/capability" },
+        "target": { "$ref": "#/$defs/target" },
+        "resource_precondition": { "$ref": "#/$defs/resourcePrecondition" },
+        "inspection_id": { "$ref": "#/$defs/id" },
+        "inspection_token": { "$ref": "#/$defs/capability" },
+        "operator_note": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "resolution": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "recovery_instruction"],
+              "properties": {
+                "kind": { "const": "continue" },
+                "recovery_instruction": { "type": "string", "minLength": 1, "maxLength": 8000 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": { "kind": { "enum": ["accept_completed", "keep_blocked"] } }
+            }
+          ]
+        }
+      },
+      "dependentRequired": {
+        "inspection_id": ["inspection_token", "operator_note", "resolution", "resource_precondition"],
+        "resolution": ["inspection_id", "inspection_token", "operator_note", "resource_precondition"]
+      }
+    },
+    "mutationResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "dispatch_id", "state", "idempotent_request_replay"],
+          "properties": {
+            "schema": { "$ref": "#/$defs/schema" },
+            "dispatch_id": { "$ref": "#/$defs/id" },
+            "state": { "enum": ["cancelled_before_start", "outcome_unknown"] },
+            "idempotent_request_replay": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "resource_id", "inspected", "idempotent_request_replay"],
+          "properties": {
+            "schema": { "$ref": "#/$defs/schema" },
+            "resource_id": { "$ref": "#/$defs/id" },
+            "inspected": { "const": true },
+            "idempotent_request_replay": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "resolution", "task_id", "replacement_dispatch_id", "idempotent_request_replay"],
+          "properties": {
+            "schema": { "$ref": "#/$defs/schema" },
+            "resolution": { "enum": ["continue", "accept_completed", "keep_blocked"] },
+            "task_id": { "type": ["string", "null"], "minLength": 1 },
+            "replacement_dispatch_id": { "type": ["string", "null"], "minLength": 1 },
+            "idempotent_request_replay": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "error", "code"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schema" },
+        "error": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "code": { "enum": ["bad_request", "not_found", "feature_disabled", "device_enrollment_required", "device_mismatch", "scope_mismatch", "invalid_capability", "capability_expired", "capability_consumed", "auth_fence_stale", "idempotency_conflict", "precondition_failed", "inspection_required", "inspection_expired", "invalid_transition", "loopback_required", "host_mismatch", "browser_origin_forbidden", "internal_error"] }
+      }
+    }
+  }
+}

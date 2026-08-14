@@ -199,6 +199,8 @@ describe('Matrix owner approval bridge', () => {
       origin_server_ts: Date.now(),
       content: {
         algorithm: 'm.megolm.v1.aes-sha2',
+        device_id: 'OWNERDEVICE',
+        sender_key: 'owner-curve25519-key',
         ciphertext: 'ciphertext',
         session_id: 'session-id',
       },
@@ -268,6 +270,12 @@ describe('Matrix owner approval bridge', () => {
     await bridge.retryPendingApprovalDecryptions(client);
     expect(bridge.onRoomMessage).toHaveBeenCalledOnce();
     expect(bridge.onRoomMessage).toHaveBeenCalledWith(roomId, clearEvent);
+    expect(bridge.agentOpsEncryptedEnvelopes.get(encrypted.event_id)).toMatchObject({
+      roomId,
+      sender: approval.owner_mxid,
+      deviceId: 'OWNERDEVICE',
+      senderKey: 'owner-curve25519-key',
+    });
     expect(pendingEncryptedEventStore.remove).toHaveBeenCalledWith(encrypted.event_id);
     expect(records.size).toBe(0);
   });

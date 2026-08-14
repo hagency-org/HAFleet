@@ -29,6 +29,9 @@ data.stale-backup*/
 
 # Generated packages and local remote runtime artifacts
 remote-dist/
+# router/dist is a committed build artifact: backend-v2.js imports it at runtime
+# and scripts/check-router-build.sh enforces it against a fresh tsc build.
+!router/dist/
 remote/.push-relay-launchd.sh
 remote/package-lock.json
 

@@ -766,6 +766,138 @@
           "path": "/api/whitelist/:roomId",
           "owner": "operator.whitelist-admin",
           "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/tasks",
+          "owner": "router.runner-task-intent",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/approvals/claude",
+          "owner": "router.claude-approval-park",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/approvals/claude/apply",
+          "owner": "router.claude-approval-apply",
+          "auth": "agent-token"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/matrix-outbox/claim",
+          "owner": "router.matrix-outbox",
+          "auth": "router-bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/matrix-outbox/:id/delivered",
+          "owner": "router.matrix-outbox",
+          "auth": "router-bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/matrix-outbox/:id/failed",
+          "owner": "router.matrix-outbox",
+          "auth": "router-bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/reply-outbox/claim",
+          "owner": "router.reply-outbox",
+          "auth": "router-bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/reply-outbox/:id/delivered",
+          "owner": "router.reply-outbox",
+          "auth": "router-bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/reply-outbox/:id/failed",
+          "owner": "router.reply-outbox",
+          "auth": "router-bridge-secret"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/dispatches/:id/cancel",
+          "owner": "router.operator-cancel",
+          "auth": "router-bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/dispatches/:id/outcome-inspection",
+          "owner": "router.operator-outcome-inspection",
+          "auth": "router-bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/dispatches/:id/resolve-outcome",
+          "owner": "router.operator-outcome-resolution",
+          "auth": "router-bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/router/resources/:id/clear-dirty",
+          "owner": "router.operator-inspection",
+          "auth": "router-bearer"
+        },
+        {
+          "method": "PUT",
+          "path": "/api/agent-ops/v1/operator/device-enrollment",
+          "owner": "agent-ops.operator-device-enrollment",
+          "auth": "agent-ops-operator"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agent-ops/v1/operator/revoke",
+          "owner": "agent-ops.operator-revocation",
+          "auth": "agent-ops-operator"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agent-ops/v1/control/revoke",
+          "owner": "agent-ops.matrix-control-revocation",
+          "auth": "agent-ops-control"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agent-ops/v1/control/bootstrap",
+          "owner": "agent-ops.matrix-control-bootstrap",
+          "auth": "agent-ops-control"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agent-ops/v1/session/exchange",
+          "owner": "agent-ops.client-session-exchange",
+          "auth": "agent-ops-grant-proof"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agent-ops/v1/commands/cancel-dispatch",
+          "owner": "agent-ops.scoped-mutation-adapter",
+          "auth": "agent-ops-session-proof"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agent-ops/v1/commands/mark-resource-inspected",
+          "owner": "agent-ops.scoped-mutation-adapter",
+          "auth": "agent-ops-session-proof"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agent-ops/v1/commands/begin-outcome-inspection",
+          "owner": "agent-ops.scoped-mutation-adapter",
+          "auth": "agent-ops-session-proof"
+        },
+        {
+          "method": "POST",
+          "path": "/api/agent-ops/v1/commands/resolve-outcome",
+          "owner": "agent-ops.scoped-mutation-adapter",
+          "auth": "agent-ops-session-proof"
         }
       ],
       "sensitiveRoutes": [

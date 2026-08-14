@@ -26,6 +26,7 @@ describe('bridge matrix behavior', () => {
   let resolveOutboundDmRoom;
   let resolveGroupReplyRelation;
   let parseInboundTextMessage;
+  let parseAgentOpsClientControlEvent;
   let markRoomTrusted;
   let signedCurve25519CountFromKeysUpload;
   let signedCurve25519CountFromSync;
@@ -39,6 +40,7 @@ describe('bridge matrix behavior', () => {
       'MATRIX_AGENT_PREFIX',
       'MATRIX_IGNORED_SENDER_MXIDS',
       'MATRIX_TRUSTED_INVITER_MXIDS',
+      'HAFLEET_AGENT_OPS_CLIENT',
     ]);
     process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
     process.env.MATRIX_AGENT_PREFIX = 'ac_';
@@ -65,6 +67,7 @@ describe('bridge matrix behavior', () => {
       resolveOutboundDmRoom,
       resolveGroupReplyRelation,
       parseInboundTextMessage,
+      parseAgentOpsClientControlEvent,
       markRoomTrusted,
       signedCurve25519CountFromKeysUpload,
       signedCurve25519CountFromSync,
@@ -97,6 +100,91 @@ describe('bridge matrix behavior', () => {
     expect(signedCurve25519CountFromKeysUpload({
       one_time_key_counts: { signed_curve25519: 42 },
     })).toBe(42);
+  });
+
+  test('Agent Operations control parser rejects malformed key and scope substitution', () => {
+    const valid = parseAgentOpsClientControlEvent('!owner-dm:matrix.test', {
+      event_id: '$agent-ops-request',
+      sender: '@owner:matrix.test',
+      content: {
+        msgtype: 'com.hafleet.agent_ops.client_session.request.v1',
+        body: 'Agent Operations bootstrap',
+        'com.hafleet.agent_ops': {
+          schema: 'com.hafleet.agent_ops.v1',
+          agent: 'worker',
+          project_room_id: '!project:matrix.test',
+          client_nonce: 'client-nonce-1',
+          client_public_jwk: {
+            kty: 'OKP', crv: 'Ed25519',
+            x: 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc',
+          },
+        },
+      },
+    });
+    expect(valid).toMatchObject({
+      kind: 'request', roomId: '!owner-dm:matrix.test', eventId: '$agent-ops-request',
+      senderMxid: '@owner:matrix.test', agent: 'worker', projectRoomId: '!project:matrix.test',
+    });
+    expect(parseAgentOpsClientControlEvent('!owner-dm:matrix.test', {
+      event_id: '$bad-key', sender: '@owner:matrix.test',
+      content: {
+        msgtype: 'com.hafleet.agent_ops.client_session.request.v1',
+        'com.hafleet.agent_ops': {
+          ...valid,
+          schema: 'com.hafleet.agent_ops.v1', agent: 'worker',
+          project_room_id: '!project:matrix.test', client_nonce: 'nonce',
+          client_public_jwk: { kty: 'OKP', crv: 'Ed25519', x: 'short' },
+        },
+      },
+    })).toMatchObject({ invalid: true, eventId: '$bad-key' });
+  });
+
+  test('Matrix device-list changes become durable Agent Operations revocation work', async () => {
+    const client = new ReliableMatrixClient('https://matrix.test', 'test-token', {
+      getSyncToken: vi.fn().mockResolvedValue(null),
+      setSyncToken: vi.fn().mockResolvedValue(undefined),
+    });
+    client.crypto = null;
+    client.onSyncSuccess = null;
+    client._lastOtkCountReconciliationAt = Date.now();
+    const emitted = [];
+    await client.processSync({
+      device_lists: {
+        changed: ['@owner:matrix.test', '@owner:matrix.test'],
+        left: ['@departed:matrix.test'],
+      },
+      device_one_time_keys_count: { signed_curve25519: 1 },
+    }, async (eventName, ...payload) => emitted.push([eventName, ...payload]));
+    expect(emitted).toContainEqual([
+      'device_lists.changed',
+      ['@owner:matrix.test', '@departed:matrix.test'],
+    ]);
+
+    const prior = process.env.HAFLEET_AGENT_OPS_CLIENT;
+    process.env.HAFLEET_AGENT_OPS_CLIENT = '1';
+    try {
+      const approvalRoom = `!agent-ops-device-${Date.now()}:matrix.test`;
+      markRoomTrusted(approvalRoom, {
+        approvalDm: true,
+        ownerMxid: '@owner:matrix.test',
+        agent: 'worker',
+      });
+      const bridge = new MatrixBridge();
+      bridge.callBackendApi = vi.fn().mockResolvedValue({ ok: true, revoked_scope_count: 1 });
+      await expect(bridge.onAgentOpsDeviceListsChanged([
+        '@owner:matrix.test', '@unrelated:matrix.test',
+      ])).resolves.toEqual({ revoked: 1 });
+      expect(bridge.callBackendApi).toHaveBeenCalledOnce();
+      expect(bridge.callBackendApi).toHaveBeenCalledWith(
+        'POST',
+        '/api/agent-ops/v1/control/revoke',
+        { owner_mxid: '@owner:matrix.test', clear_device: true },
+        'context=agent-ops:device-list-revoke owner=@owner:matrix.test',
+      );
+    } finally {
+      if (prior === undefined) delete process.env.HAFLEET_AGENT_OPS_CLIENT;
+      else process.env.HAFLEET_AGENT_OPS_CLIENT = prior;
+    }
   });
 
   test('OTK count reconciliation is bounded to one probe per interval', async () => {
@@ -545,6 +633,56 @@ describe('bridge matrix behavior', () => {
 
     expect(journal.get).not.toHaveBeenCalled();
     expect(journal.recordPending).not.toHaveBeenCalled();
+  });
+
+  test('router outbox delivery uses backend sender route and stable transaction metadata', async () => {
+    const bridge = new MatrixBridge();
+    bridge.getAgentToken = vi.fn().mockReturnValue('worker-token');
+    bridge.sendAsAgentContent = vi.fn().mockResolvedValue('$worker-reply');
+    bridge.callBackendApi = vi.fn().mockResolvedValue({ ok: true });
+
+    await bridge.deliverRouterCommand('matrix', {
+      commandId: 'matrix-command', claimToken: 'claim-token',
+      transactionId: 'agentchat_stable_txn', senderAgentName: 'worker',
+      roomId: '!robrix2:test', threadRootEventId: '$human-root', body: 'Task created',
+    });
+
+    expect(bridge.sendAsAgentContent).toHaveBeenCalledWith(
+      'worker-token',
+      '!robrix2:test',
+      {
+        msgtype: 'm.text',
+        body: 'Task created',
+        'm.relates_to': {
+          rel_type: 'm.thread', event_id: '$human-root', is_falling_back: true,
+          'm.in_reply_to': { event_id: '$human-root' },
+        },
+      },
+      null,
+      { transactionId: 'agentchat_stable_txn', throwOnFailure: true },
+    );
+    expect(bridge.callBackendApi).toHaveBeenCalledWith(
+      'POST',
+      '/api/router/matrix-outbox/matrix-command/delivered',
+      { claim_token: 'claim-token', event_id: '$worker-reply' },
+      'context=router-matrix-delivery',
+    );
+  });
+
+  test('explicit router transaction id is used verbatim for idempotent Matrix send', async () => {
+    const bridge = new MatrixBridge();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ event_id: '$stable-event' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(bridge.sendAsAgentContent(
+      'worker-token', '!robrix2:test', { msgtype: 'm.text', body: 'reply' }, null,
+      { transactionId: 'agentchat_fixed_123', throwOnFailure: true },
+    )).resolves.toBe('$stable-event');
+
+    expect(fetchMock.mock.calls[0][0]).toContain('/send/m.room.message/agentchat_fixed_123');
   });
 
   test('primary group send journals before upsert and retry does not send twice', async () => {

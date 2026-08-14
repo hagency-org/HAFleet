@@ -12,6 +12,11 @@
     "start": "node server.js",
     "test": "vitest run --no-file-parallelism --maxWorkers=1",
     "test:watch": "vitest",
+    "build:router": "tsc -p tsconfig.router.json",
+    "typecheck:router": "tsc -p tsconfig.router.json --noEmit",
+    "check:router-build": "bash scripts/check-router-build.sh",
+    "check:router-boundary": "node scripts/check-router-boundary.js",
+    "check:agent-ops-contract": "node scripts/check-agent-ops-contract.js",
     "test:kernel": "bash scripts/run-kernel-tests.sh",
     "check:syntax": "bash scripts/check-syntax.sh",
     "check:cli-contract": "node scripts/check-cli-contract.js",
@@ -34,13 +39,19 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "another-json": "0.2.0",
+    "better-sqlite3": "13.0.2",
     "express": "^4.21.0",
     "matrix-bot-sdk": "^0.8.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "26.1.2",
+    "ajv": "8.18.0",
     "eslint": "^10.8.1",
     "supertest": "^7.2.2",
+    "typescript": "7.0.2",
     "vitest": "^4.0.18"
   },
   "overrides": {

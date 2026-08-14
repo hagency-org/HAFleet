@@ -122,13 +122,10 @@ Scenario: AtomGit project resources are visible
   Then AtomGit issues and change requests are shown with provider-neutral fields
   And no AtomGit token is returned to the Dashboard
 
-## Dependencies
-
-- ADR-001
-- ADR-009
-
 ## Source Trace
 
+- decision: ADR-001
+- decision: ADR-009
 - User request on 2026-07-24 for an hafleet project board.
 - Multica project, issue-board, and usage-dashboard review on 2026-07-24.
 - Existing hafleet group, task, task-graph, agent-runtime, and message APIs.
