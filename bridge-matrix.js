@@ -5116,7 +5116,7 @@ export class MatrixBridge {
             continue;
           }
           // Auto-join
-          const joinRes = await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
+          const joinRes = await fetch(`${baseUrlForToken(token)}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
             body: '{}',
@@ -5756,7 +5756,7 @@ export class MatrixBridge {
       const agentToken = this.getAgentToken(canonicalAgent);
       if (agentToken) {
         try {
-          const join = await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
+          const join = await fetch(`${baseUrlForToken(agentToken)}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${agentToken}`, 'Content-Type': 'application/json' },
             body: '{}',
@@ -5988,7 +5988,7 @@ export class MatrixBridge {
     const token = this.getAgentToken(canonicalAgent);
     if (!token) return { ok: false, reason: 'agent_has_no_matrix_credential' };
 
-    const joinRes = await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
+    const joinRes = await fetch(`${baseUrlForToken(token)}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: '{}',
@@ -6453,7 +6453,7 @@ export class MatrixBridge {
           userId = await getUserId(token, credential.homeserver);
           if (currentMembers.has(userId)) continue; // already in room
           // Also auto-join with agent token
-          await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
+          await fetch(`${baseUrlForToken(token)}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
             body: '{}',
@@ -7051,7 +7051,7 @@ export class MatrixBridge {
     const userId = agentMxid(agentName);
     try {
       const res = await fetch(
-        `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/typing/${encodeURIComponent(userId)}`,
+        `${baseUrlForToken(token)}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/typing/${encodeURIComponent(userId)}`,
         {
           method: 'PUT',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -7091,7 +7091,7 @@ export class MatrixBridge {
     const txnId = `ack_${createHash('sha256').update(`ack:${eventId}:${agentName}`).digest('hex').slice(0, 24)}`;
     try {
       const res = await fetch(
-        `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.reaction/${txnId}`,
+        `${baseUrlForToken(token)}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.reaction/${txnId}`,
         {
           method: 'PUT',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -7205,7 +7205,19 @@ export class MatrixBridge {
       : `${Date.now()}:${Math.random().toString(36).slice(2, 12)}`;
     const txnId = `bridge_${createHash('sha256').update(txnSeed).digest('hex').slice(0, 32)}`;
     const doSend = async () => {
-      const res = await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${txnId}`, {
+      /*
+       * The token's OWN side, not this deployment's server. `sendAsAgentContent` is the choke point for
+       * every outbound agent message, so reading the constant here sent a project side's token to our
+       * homeserver on every send.
+       *
+       * AN INCONSISTENCY I INTRODUCED, recorded because it is the shape worth noticing: this same
+       * method already resolved `baseUrlForToken(token)` sixteen lines below, for the auto-join
+       * invite's whoami. One call in the method used the token's side and the other used the constant.
+       * Threading seven named primitives left the method that CALLS them still reading the constant
+       * itself, and the audit that produced the "twelve remaining decision points" figure never counted
+       * the agent-send paths at all.
+       */
+      const res = await fetch(`${baseUrlForToken(token)}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${txnId}`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(content),
@@ -7242,7 +7254,7 @@ export class MatrixBridge {
             headers: { Authorization: `Bearer ${state.botToken}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ user_id: await getUserId(token, baseUrlForToken(token)) }),
           });
-          await fetch(`${HOMESERVER}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
+          await fetch(`${baseUrlForToken(token)}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
             body: '{}',
