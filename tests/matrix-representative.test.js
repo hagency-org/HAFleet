@@ -17,6 +17,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   classifyMatrixFailure,
+  createRoomOnSide,
   ensureRepresentative,
   mintAgentIdentity,
   registerRepresentative,
@@ -521,5 +522,140 @@ describe('minting an agent identity on a project side', () => {
       .rejects.toThrow(/localpart is required/);
     await expect(mintAgentIdentity({ side: SIDE_NS, credential: { kind: 'password' }, localpart: 'a' }))
       .rejects.toThrow(/unsupported credential kind/);
+  });
+});
+
+describe('creating a room on a project side', () => {
+  /*
+   * The capability that lets an approval room live where the DECIDER lives. The operator settled that
+   * an execution approval is the borrower's — 「答借用方，当然是借用方」 — and the borrower is on the
+   * project side's homeserver, which the bot has no account on.
+   */
+  const okRoom = (id = `!new:${SERVER}`) => ok({ room_id: id });
+
+  test('an appservice side creates it MASQUERADED as its sender', async () => {
+    const impl = fakeFetch([okRoom()]);
+    const r = await createRoomOnSide({
+      side: SIDE, credential: asCred(), name: 'Approval: alpha', encrypted: false, fetchImpl: impl,
+    });
+    expect(r).toMatchObject({ created: true, roomId: `!new:${SERVER}`, encrypted: false });
+    expect(impl.calls[0].url).toContain(`user_id=%40hafleet%3A${SERVER}`);
+    expect(impl.calls[0].headers.Authorization).toBe(`Bearer ${AS_TOKEN}`);
+  });
+
+  test('a registration-token side uses the representative\'s own token, unmasqueraded', async () => {
+    const impl = fakeFetch([okRoom()]);
+    await createRoomOnSide({
+      side: SIDE,
+      credential: regCred({ representativeToken: 'rep_tok' }),
+      name: 'Approval: alpha', encrypted: false, fetchImpl: impl,
+    });
+    expect(impl.calls[0].headers.Authorization).toBe('Bearer rep_tok');
+    expect(impl.calls[0].url).not.toContain('user_id=');
+  });
+
+  test('a registration-token side with no representative token says so, and creates nothing', async () => {
+    const impl = fakeFetch([]);
+    const r = await createRoomOnSide({
+      side: SIDE, credential: regCred(), name: 'x', encrypted: false, fetchImpl: impl,
+    });
+    expect(r.created).toBe(false);
+    expect(r.reason).toMatch(/no representative token/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('ENCRYPTED MUST BE STATED — an omission is refused, not defaulted', async () => {
+    /*
+     * Required rather than defaulted because either default is a silent wrong answer: defaulting to
+     * true produces a room the representative cannot read, and defaulting to false silently makes a
+     * confidentiality decision the caller never took.
+     */
+    await expect(createRoomOnSide({ side: SIDE, credential: asCred(), name: 'x' }))
+      .rejects.toThrow(/encrypted must be stated explicitly/);
+  });
+
+  test('ENCRYPTED TRUE IS REFUSED, and the reason is a capability not a policy', async () => {
+    /*
+     * The representative is plaintext-only by construction — the single crypto store belongs to the
+     * home bot on the contributor's server. A room it created with `m.room.encryption` would be a room
+     * it cannot read: an approval channel that looks correct and delivers nothing, which is the exact
+     * failure mode this project has now hit twice.
+     */
+    await expect(createRoomOnSide({ side: SIDE, credential: asCred(), name: 'x', encrypted: true }))
+      .rejects.toThrow(/no crypto store/);
+  });
+
+  test('initial_state is EXPLICITLY EMPTY, not omitted', async () => {
+    /*
+     * A homeserver may be configured to encrypt private rooms by default, and inheriting that would
+     * hand us a room we cannot read — the outcome the refusal above exists to prevent. Stating an empty
+     * initial state is the only way to say "not that".
+     */
+    const impl = fakeFetch([okRoom()]);
+    await createRoomOnSide({
+      side: SIDE, credential: asCred(), name: 'x', encrypted: false, fetchImpl: impl,
+    });
+    const body = JSON.parse(impl.calls[0].body);
+    expect(body).toHaveProperty('initial_state');
+    expect(body.initial_state).toEqual([]);
+  });
+
+  test('access control replaces encryption: private preset and an explicit invite list', async () => {
+    // What survives of ADR-003's requirement once the decider is the borrower: not confidentiality from
+    // them, but who else inside their organisation may see and answer.
+    const impl = fakeFetch([okRoom()]);
+    await createRoomOnSide({
+      side: SIDE, credential: asCred(), name: 'Approval: alpha',
+      topic: 'UI-only approval requests.', invite: [`@borrower:${SERVER}`],
+      isDirect: true, encrypted: false, fetchImpl: impl,
+    });
+    const body = JSON.parse(impl.calls[0].body);
+    expect(body.preset).toBe('private_chat');
+    expect(body.invite).toEqual([`@borrower:${SERVER}`]);
+    expect(body.is_direct).toBe(true);
+    expect(body.topic).toBe('UI-only approval requests.');
+  });
+
+  test('A ROOM ON THE WRONG SERVER IS REPORTED, not returned as success', async () => {
+    /*
+     * The room id names the server that owns it, and it must be this side. A homeserver answering with
+     * a room on another origin means we created it somewhere we did not intend — worth catching here
+     * rather than when the borrower cannot find it.
+     */
+    const impl = fakeFetch([ok({ room_id: '!elsewhere:other.example' })]);
+    const r = await createRoomOnSide({
+      side: SIDE, credential: asCred(), name: 'x', encrypted: false, fetchImpl: impl,
+    });
+    expect(r.created).toBe(false);
+    expect(r.reason).toMatch(/not on palpo\.test/);
+  });
+
+  test('a Matrix failure is a state with its classification, never a throw', async () => {
+    for (const [response, state] of [[fail(403, { errcode: 'M_FORBIDDEN' }), 'rejected'], [fail(502), 'unreachable']]) {
+      const impl = fakeFetch([response]);
+      const r = await createRoomOnSide({
+        side: SIDE, credential: asCred(), name: 'x', encrypted: false, fetchImpl: impl,
+      });
+      expect(r.created).toBe(false);
+      expect(r.state).toBe(state);
+    }
+  });
+
+  test('a response with no room_id is a failure, not a success with null', async () => {
+    const impl = fakeFetch([ok({})]);
+    const r = await createRoomOnSide({
+      side: SIDE, credential: asCred(), name: 'x', encrypted: false, fetchImpl: impl,
+    });
+    expect(r.created).toBe(false);
+    expect(r.reason).toMatch(/did not return a room_id/);
+  });
+
+  test('unactionable arguments throw', async () => {
+    await expect(createRoomOnSide({ side: {}, credential: asCred(), name: 'x', encrypted: false }))
+      .rejects.toThrow(/apiBaseUrl and serverName/);
+    await expect(createRoomOnSide({ side: SIDE, credential: null, name: 'x', encrypted: false }))
+      .rejects.toThrow(/credential is required/);
+    await expect(createRoomOnSide({ side: SIDE, credential: asCred(), encrypted: false }))
+      .rejects.toThrow(/name is required/);
   });
 });
