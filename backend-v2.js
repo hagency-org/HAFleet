@@ -8743,6 +8743,62 @@ app.post('/api/project-sides/:id/reactivate', requireBearer, (req, res) => {
  * The `inactive` shape is reused rather than a new lifecycle state invented, because every surface
  * that already understands "offline with a reason" understands this one for free.
  */
+/**
+ * End the engagements on a project side, and deactivate its bindings.
+ *
+ * ADR-016 decision 7's first three steps: end engagements → release commitments → deactivate bindings.
+ * The operator stated the rule that shapes all of it: 「记录要留存，只是停用退役，删除会有合规问题」.
+ *
+ * ENDING RELEASES THE COMMITMENT FOR FREE, which is why these are one step rather than three.
+ * `committedFor` and `committedForProjectSide` both sum only `active` engagements, so the transition to
+ * `ended` is what frees the tokens — no separate release, and no figure that can disagree with the
+ * state it was derived from.
+ *
+ * WHY THIS IS NOT A COSMETIC TIDY-UP. An `active` engagement is a claim about the PRESENT: work in
+ * progress, tokens promised. Left behind on a side that no longer exists, with an agent that has been
+ * retired, it goes on holding allocation and the console goes on showing work that will never proceed.
+ * A binding left `active: true` claims the project can still reach the agent. This repository has
+ * already produced that exact pair by another route: force-deleting an agent left three active bindings
+ * and a 250k commitment pointing at nothing.
+ *
+ * Nothing is deleted. `ended` and `active: false` are history; `active` is a claim.
+ */
+function endEngagementsAndBindingsForSide(sideId, reason) {
+  const endedEngagements = [];
+  for (const engagement of engagementStore.list({ state: 'active' })) {
+    const room = typeof engagement.projectRoomId === 'string' ? engagement.projectRoomId : '';
+    const at = room.indexOf(':');
+    if (at <= 0 || room.slice(at + 1).toLowerCase() !== sideId) continue;
+    try {
+      engagementStore.revoke({ engagementId: engagement.id, by: 'operator', reason });
+      endedEngagements.push(engagement.id);
+    } catch (error) {
+      /*
+       * Reported per engagement rather than aborting the cascade. One engagement that cannot be ended
+       * must not leave the remaining ones active AND the side removed, which is the worst combination:
+       * allocation held by records nothing can reach.
+       */
+      console.warn(`[project-side] ${sideId}: could not end engagement ${engagement.id}: ${error?.message || error}`);
+    }
+  }
+
+  const deactivatedBindings = [];
+  for (const binding of approvalStore.listBindings({})) {
+    const room = typeof binding.projectRoomId === 'string' ? binding.projectRoomId : '';
+    const at = room.indexOf(':');
+    if (at <= 0 || room.slice(at + 1).toLowerCase() !== sideId) continue;
+    try {
+      if (approvalStore.deactivateBinding(binding.agent, binding.projectRoomId, reason)) {
+        deactivatedBindings.push(`${binding.agent}@${binding.projectRoomId}`);
+      }
+    } catch (error) {
+      console.warn(`[project-side] ${sideId}: could not deactivate binding for ${binding.agent}: ${error?.message || error}`);
+    }
+  }
+
+  return { endedEngagements, deactivatedBindings };
+}
+
 function retireAgentsForSide(sideId) {
   const retired = [];
   for (const agent of Object.values(agents)) {
@@ -8794,6 +8850,14 @@ app.delete('/api/project-sides/:id', requireBearer, (req, res) => {
      * would leave a live side whose agents had already been retired — work refused by a side the
      * operator still sees as configured, which is the confusing half of the two.
      */
+    /*
+     * ORDER, and it is ADR-016 decision 7's: end engagements and release their commitments, deactivate
+     * bindings, retire identities, forget the credential LAST. Each earlier step may need the
+     * credential the last one destroys, and each later step is meaningless if an earlier one left a
+     * live claim behind.
+     */
+    const { endedEngagements, deactivatedBindings } =
+      endEngagementsAndBindingsForSide(existing.id, `project side ${existing.id} removed`);
     const retiredAgents = retireAgentsForSide(existing.id);
     const side = projectSideStore.removeSide(req.params.id, { force: req.query?.force === 'true' });
     if (!side) return res.status(404).json({ error: 'project side not found' });
@@ -8801,15 +8865,17 @@ app.delete('/api/project-sides/:id', requireBearer, (req, res) => {
       ok: true,
       side,
       retiredAgents,
+      endedEngagements,
+      deactivatedBindings,
       /*
-       * Still named, because two steps remain. A bare 200 would read as "everything that depended on
-       * this side is cleaned up", and this repository has already produced exactly that failure by
-       * another route: force-deleting an agent left three active bindings and a 250k commitment
-       * pointing at it.
+       * Reported as a list of what happened rather than a claim of completeness. "Complete" would be a
+       * statement about everything in the system that could reference a side, which no single handler
+       * can make — and this repository has already produced the failure that phrasing invites:
+       * force-deleting an agent left three active bindings and a 250k commitment pointing at it.
        */
-      cascade: 'partial',
-      cascadeNote: 'agents minted for this side are retired and their ledger history is kept; '
-        + 'engagements and approval bindings on this side are NOT touched by this endpoint',
+      cascade: 'performed',
+      cascadeNote: 'engagements ended (releasing their commitments), bindings deactivated, agents '
+        + 'retired — all records kept, since ended and inactive are history while active is a claim',
     });
   } catch (error) {
     return respondProjectSideError(res, error, 'failed to remove project side');
