@@ -18,6 +18,8 @@
 import { afterEach, describe, expect, test } from 'vitest';
 import request from 'supertest';
 import { createServer } from 'http';
+import { readFileSync } from 'fs';
+import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
 const SERVER = 'palpo.test';
@@ -338,6 +340,166 @@ describe('verify records a verdict, and which kind of verdict', () => {
       .send({ credential: { kind: 'registrationToken', registrationToken: REG_TOKEN } });
     expect(replaced.body.side.accessState).toBe('unverified');
     expect(replaced.body.side.accessCheckedAt).toBeNull();
+  });
+});
+
+describe('generating the appservice registration', () => {
+  const create = (app) => request(app).post('/api/project-sides')
+    .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008', label: 'Acme' });
+
+  test('THE ONLY CHANCE: the tokens appear in this response and never again', async () => {
+    /*
+     * ADR-016 decision 8 makes a project side's credential write-only, and this endpoint stores the
+     * generated tokens into it. So the YAML in this response is the only readable copy — a GET
+     * afterwards carries the KIND and nothing else. The response says so, because the recovery is
+     * regenerating, which invalidates a registration the project side may already have installed.
+     */
+    const app = await boot();
+    await create(app);
+    const r = await request(app).post(`/api/project-sides/${SERVER}/registration`)
+      .send({ url: 'http://host.docker.internal:8009' });
+    expect(r.status).toBe(200);
+    expect(r.body.registrationYaml).toMatch(/as_token: [0-9a-f]{64}/);
+    expect(r.body.registrationYaml).toMatch(/hs_token: [0-9a-f]{64}/);
+    expect(r.body.onlyChance).toMatch(/never be returned again/);
+
+    // Extract what was issued, then prove no read path returns it.
+    const asToken = /as_token: ([0-9a-f]{64})/.exec(r.body.registrationYaml)[1];
+    const hsToken = /hs_token: ([0-9a-f]{64})/.exec(r.body.registrationYaml)[1];
+    expect(asToken).not.toBe(hsToken);
+
+    for (const [what, response] of [
+      ['GET one', await request(app).get(`/api/project-sides/${SERVER}`)],
+      ['GET list', await request(app).get('/api/project-sides')],
+      ['verify', await request(app).post(`/api/project-sides/${SERVER}/verify`)],
+    ]) {
+      const body = JSON.stringify(response.body);
+      expect(body, `${what} leaked as_token`).not.toContain(asToken);
+      expect(body, `${what} leaked hs_token`).not.toContain(hsToken);
+    }
+  });
+
+  test('the credential is stored as appservice kind, and the side knows it has one', async () => {
+    const app = await boot();
+    await create(app);
+    const r = await request(app).post(`/api/project-sides/${SERVER}/registration`)
+      .send({ url: 'http://host.docker.internal:8009' });
+    expect(r.body.side.credentialKind).toBe('appservice');
+    expect(r.body.side.hasCredential).toBe(true);
+    // A fresh credential resets the verdict: nothing has verified these tokens yet.
+    expect(r.body.side.accessState).toBe('unverified');
+  });
+
+  test('THE URL IS REQUIRED, because HAFleet cannot know its own address', async () => {
+    /*
+     * A tunnel hostname, a public IP, `host.docker.internal` for a homeserver in a container on the
+     * same machine — only the operator knows which. Guessing produces a registration that installs
+     * cleanly and never delivers anything, which from the project side looks like an appservice that is
+     * configured and silent: the hardest failure here to diagnose.
+     */
+    const app = await boot();
+    await create(app);
+    const r = await request(app).post(`/api/project-sides/${SERVER}/registration`).send({});
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/url is required/);
+  });
+
+  test('REPLACING an existing credential is refused without ?replace=true', async () => {
+    /*
+     * The tokens in a registration a homeserver has already loaded stop working the moment new ones are
+     * stored — so an accidental regeneration takes the project side down until the new file is
+     * installed and the homeserver restarted. The 409 says that.
+     */
+    const app = await boot();
+    await create(app);
+    await request(app).post(`/api/project-sides/${SERVER}/registration`).send({ url: 'http://a:1' });
+    const again = await request(app).post(`/api/project-sides/${SERVER}/registration`).send({ url: 'http://a:1' });
+    expect(again.status).toBe(409);
+    expect(again.body.code).toBe('credential_exists');
+    expect(again.body.detail).toMatch(/restarted/);
+  });
+
+  test('with ?replace=true it issues DIFFERENT tokens', async () => {
+    const app = await boot();
+    await create(app);
+    const first = await request(app).post(`/api/project-sides/${SERVER}/registration`).send({ url: 'http://a:1' });
+    const second = await request(app).post(`/api/project-sides/${SERVER}/registration?replace=true`)
+      .send({ url: 'http://a:1' });
+    expect(second.status).toBe(200);
+    /*
+     * `.body`, not the response. The first version of this passed the supertest RESPONSE objects to a
+     * helper whose parameter was named `body`, so it read `response.registrationYaml` — undefined,
+     * which `exec` coerces to the string "undefined", which does not match, which returns null. The
+     * failure surfaced as "Cannot read properties of null" three lines away from the mistake.
+     */
+    const asTokenOf = (body) => {
+      const match = /as_token: ([0-9a-f]{64})/.exec(body.registrationYaml);
+      expect(match, 'no as_token in the returned YAML').not.toBeNull();
+      return match[1];
+    };
+    expect(asTokenOf(second.body)).not.toBe(asTokenOf(first.body));
+  });
+
+  test('WHAT IS STORED MATCHES THE YAML — both tokens, in the right fields', async () => {
+    /*
+     * Found by mutation testing, and it is the failure that would have been hardest to diagnose:
+     * storing `hsToken: registration.as_token` survived every other assertion here. The YAML still
+     * shows two distinct, correct tokens — so the operator installs a valid registration — while the
+     * stored credential has the wrong value in the hs_token field. The homeserver then pushes with the
+     * hs_token from the file, HAFleet compares it against the as_token, and EVERY transaction is 403.
+     * An appservice that is configured, installed, and silent.
+     *
+     * The credential is write-only, so no API can observe it (ADR-016 decision 8). This reads the
+     * store's file directly, which the test's own runtime dir owns. That couples the assertion to the
+     * on-disk shape, which is a real cost — and the alternative is leaving the only field that decides
+     * inbound authentication unverified until someone tries it against a live homeserver.
+     */
+    const app = await boot();
+    await create(app);
+    const r = await request(app).post(`/api/project-sides/${SERVER}/registration`)
+      .send({ url: 'http://host.docker.internal:8009' });
+    const yaml = r.body.registrationYaml;
+    const asToken = /as_token: ([0-9a-f]{64})/.exec(yaml)[1];
+    const hsToken = /hs_token: ([0-9a-f]{64})/.exec(yaml)[1];
+    const localpart = /sender_localpart: (\S+)/.exec(yaml)[1];
+    const namespace = /regex: "(.+)"/.exec(yaml)[1];
+
+    const stored = JSON.parse(readFileSync(
+      path.join(context.runtimeDir, 'data', 'project-sides.json'), 'utf8',
+    )).sides[SERVER].credential;
+
+    expect(stored.kind).toBe('appservice');
+    expect(stored.asToken).toBe(asToken);
+    expect(stored.hsToken).toBe(hsToken);
+    expect(stored.senderLocalpart).toBe(localpart);
+    expect(stored.namespace).toBe(namespace);
+    // And the two are not the same value, which is the property the fields could silently violate.
+    expect(stored.asToken).not.toBe(stored.hsToken);
+  });
+
+  test('the YAML tells the operator where it goes and that a restart is needed', async () => {
+    // Measured against Palpo: registrations load into a OnceCell, so installing the file is not enough.
+    const app = await boot();
+    await create(app);
+    const r = await request(app).post(`/api/project-sides/${SERVER}/registration`).send({ url: 'http://a:1' });
+    expect(r.body.restartRequired).toBe(true);
+    expect(r.body.installPath).toMatch(/appservice_registration_dir/);
+    expect(r.body.registrationYaml).toMatch(/restart/i);
+  });
+
+  test('the claimed namespace matches the prefix the bridge already uses', async () => {
+    // `@ac_.*` describes today's fleet — the bridge names agent accounts `ac_<name>` — so this
+    // formalises the existing naming instead of requiring a rename (ADR-014 decision 2).
+    const app = await boot();
+    await create(app);
+    const r = await request(app).post(`/api/project-sides/${SERVER}/registration`).send({ url: 'http://a:1' });
+    expect(r.body.registrationYaml).toContain('regex: "@ac_.*"');
+  });
+
+  test('an unknown side is a 404', async () => {
+    const app = await boot();
+    expect((await request(app).post('/api/project-sides/never.configured/registration')
+      .send({ url: 'http://a:1' })).status).toBe(404);
   });
 });
 

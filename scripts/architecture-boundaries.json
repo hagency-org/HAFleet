@@ -721,6 +721,12 @@
         },
         {
           "method": "POST",
+          "path": "/api/project-sides/:id/registration",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
           "path": "/api/project-sides/:id/verify",
           "owner": "operator.project-side-admin",
           "auth": "bearer"

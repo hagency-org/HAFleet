@@ -39,6 +39,7 @@ import { buildSeats, normalizeDeclaration, seatIdentity } from './lib/seat-store
 import { createEngagementStore, routeRequest, EngagementError } from './lib/engagement-store.js';
 import { ProjectSideStore, ProjectSideStoreError } from './lib/project-side-store.js';
 import { ensureRepresentative } from './lib/matrix-representative.js';
+import { generateRegistration, renderRegistrationYaml } from './lib/appservice-receiver.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
 import {
@@ -1658,6 +1659,12 @@ const approvalStore = new ApprovalStore(path.join(DATA_DIR, 'approvals.json'), {
  * A distinct file keeps that surface small enough to reason about, and the store writes it 0600.
  */
 const projectSideStore = new ProjectSideStore(path.join(DATA_DIR, 'project-sides.json'));
+/*
+ * The namespace an appservice registration claims by default. Formalises the existing
+ * MATRIX_AGENT_PREFIX rather than changing it (ADR-014 decision 2) — the bridge already names agent
+ * accounts `ac_<name>`, so `@ac_.*` describes today's fleet instead of requiring a rename.
+ */
+const MATRIX_AGENT_PREFIX_FOR_REGISTRATION = (process.env.MATRIX_AGENT_PREFIX || 'ac_').trim();
 const localActivitySweepState = loadJsonSync('local_activity_sweep.json', { selectionCursor: 0 });
 let msgCounter = loadJsonSync('.msg_counter', 0);
 const localActivityState = new Map(); // agent -> { lastHash, lastChangeSec, burstStartSec, burstLastSec }
@@ -6902,6 +6909,76 @@ app.post('/api/project-sides/:id/verify', requireBearer, async (req, res) => {
     return res.json({ ok: true, side: projectSideStore.getSide(req.params.id) });
   } catch (error) {
     return respondProjectSideError(res, error, 'failed to verify project side');
+  }
+});
+
+/*
+ * Generate the appservice registration a project side installs.
+ *
+ * THE `url` IS AN INPUT AND CANNOT BE DERIVED. HAFleet does not know what address it has in the
+ * project side's eyes — a tunnel hostname, a public IP, `host.docker.internal` for a homeserver in a
+ * container on the same machine. Guessing one produces a registration that installs cleanly and never
+ * delivers anything, which is the failure mode hardest to diagnose from the project side: an
+ * appservice that is configured and silent.
+ *
+ * THE RESPONSE IS THE ONLY TIME THE TOKENS ARE READABLE. ADR-016 decision 8 makes a project side's
+ * credential write-only, and this endpoint stores the generated tokens into it — so `GET` will never
+ * return them again and there is no second chance to copy the YAML. That is stated in the response
+ * rather than left as a surprise, because the recovery is regenerating, which invalidates the
+ * registration the project side may already have installed.
+ *
+ * Replacing an existing credential is therefore refused unless `?replace=true`. The tokens in a
+ * registration a homeserver has already loaded stop working the moment new ones are stored, and that
+ * takes the project side down until they install the new file and restart.
+ */
+app.post('/api/project-sides/:id/registration', requireBearer, (req, res) => {
+  const side = projectSideStore.getSide(req.params.id);
+  if (!side) return res.status(404).json({ error: 'project side not found' });
+  const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+  if (!url) {
+    return res.status(400).json({
+      error: 'url is required: the address this project side\'s homeserver can reach HAFleet at',
+      code: 'bad_request',
+    });
+  }
+  if (side.hasCredential && req.query?.replace !== 'true') {
+    return res.status(409).json({
+      error: 'this project side already has a credential; pass ?replace=true to issue new tokens',
+      code: 'credential_exists',
+      detail: 'replacing invalidates the registration the homeserver may already have installed, '
+        + 'which stops delivery until the new file is installed and the homeserver restarted',
+    });
+  }
+  try {
+    const registration = generateRegistration({
+      id: req.body?.registration_id || `hafleet-${side.id}`,
+      url,
+      senderLocalpart: req.body?.sender_localpart || 'hafleet',
+      userNamespaceRegex: req.body?.user_namespace || `@${MATRIX_AGENT_PREFIX_FOR_REGISTRATION}.*`,
+    });
+    const stored = projectSideStore.setCredential(side.id, {
+      kind: 'appservice',
+      asToken: registration.as_token,
+      hsToken: registration.hs_token,
+      namespace: registration.namespaces.users[0].regex,
+      senderLocalpart: registration.sender_localpart,
+    });
+    return res.json({
+      ok: true,
+      side: stored,
+      /*
+       * Returned once. Named `registrationYaml` rather than anything matching /credential/, because the
+       * health writer's redaction guard drops such keys silently — ADR-014 decision 6 hit that and had
+       * to rename a field after it vanished from a record.
+       */
+      registrationYaml: renderRegistrationYaml(registration),
+      installPath: 'the homeserver\'s appservice_registration_dir',
+      onlyChance: 'These tokens are not stored in readable form and will never be returned again. '
+        + 'Save this file now; regenerating issues new tokens and invalidates this registration.',
+      restartRequired: true,
+    });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to generate registration');
   }
 });
 
