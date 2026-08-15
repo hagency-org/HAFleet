@@ -40,7 +40,9 @@ import roleCapacity from './lib/role-capacity.json' with { type: 'json' };
 import { buildSeats, normalizeDeclaration, seatIdentity } from './lib/seat-store.js';
 import { createEngagementStore, routeRequest, EngagementError } from './lib/engagement-store.js';
 import { ProjectSideStore, ProjectSideStoreError } from './lib/project-side-store.js';
-import { ensureRepresentative, mintAgentIdentity } from './lib/matrix-representative.js';
+import {
+  ensureRepresentative, inviteToRoomOnSide, joinRoomOnSideAsAgent, mintAgentIdentity,
+} from './lib/matrix-representative.js';
 import {
   dropQueuedBackendNotificationsBySource,
   enqueueFromRequestBody,
@@ -12021,6 +12023,75 @@ function resolveOwnerFor(agentName) {
 }
 
 /** Attach the agent to the project. Returns the outcome; never throws at the caller. */
+/**
+ * Put the agent in the project's room on the project side — ADR-016 decision 3's remaining half.
+ *
+ * WHY THE BACKEND AND NOT THE BRIDGE. The bridge's join site is `getAgentToken`, and an appservice
+ * side mints no per-agent token: the namespace makes an agent addressable, not able to act. The
+ * credential that CAN do it is the side's, and the backend is where it lives — it is the process that
+ * serves `/api/project-sides/acting-credentials` to the bridge in the first place.
+ *
+ * WHY HERE AND NOT INSIDE `bindEngagement`. That function's job is one local store write and it is
+ * called synchronously; a Matrix round-trip inside it would make a remote homeserver's latency part
+ * of recording a decision that has already been made. So this runs beside it and its outcome rides
+ * back on the response the same way `binding` does — for the same stated reason: an approval that
+ * allocated budget but could not put the agent in the room is a half-done thing, and the form that
+ * pressed Approve is the only place anyone will look.
+ *
+ * NOT AN ERROR WHEN THERE IS NO SIDE. An engagement whose room is on the contributor's own server
+ * needs no admission — the agent is already local to it. `reason: 'no_project_side'` is that case
+ * reported, not a failure.
+ *
+ * THE MXID IS COMPOSED, and this is the one place composition is right: the localpart is the rule WE
+ * mint by (`MATRIX_AGENT_PREFIX_FOR_REGISTRATION`), on a server the room id names, and
+ * `joinRoomOnSideAsAgent` re-checks it against the namespace the registration claimed before any
+ * token is presented. Composing a HUMAN's mxid is the bug #73 fixed; composing an identity we
+ * ourselves minted by a fixed rule, and then verifying it, is not the same act.
+ */
+async function admitAgentToProjectRoom(engagement) {
+  const roomId = engagement?.projectRoomId;
+  const agentName = engagement?.agent;
+  if (!roomId || !agentName) return { admitted: false, reason: 'engagement names no room or agent' };
+
+  const sideId = sideIdForRoom(roomId);
+  if (!sideId) return { admitted: false, reason: 'no_project_side' };
+  const side = projectSideStore.getSide(sideId);
+  if (!side) return { admitted: false, reason: 'no_project_side', sideId };
+
+  let credential;
+  try {
+    credential = projectSideStore.credentialFor(sideId);
+  } catch (error) {
+    return { admitted: false, reason: 'credential_unreadable', sideId, detail: error?.message ?? String(error) };
+  }
+  if (!credential) return { admitted: false, reason: 'no_credential', sideId };
+
+  const acting = { side: { apiBaseUrl: side.apiBaseUrl, serverName: side.serverName }, credential };
+  const agentMxid = `@${MATRIX_AGENT_PREFIX_FOR_REGISTRATION}${agentName}:${side.serverName}`.toLowerCase();
+
+  const invite = await inviteToRoomOnSide({ ...acting, roomId, userId: agentMxid });
+  if (!invite.invited && !invite.already) {
+    return { admitted: false, reason: 'invite_refused', sideId, mxid: agentMxid, detail: invite.reason };
+  }
+
+  /*
+   * A registrationToken side stops here, and that is complete rather than half-done: there the agent
+   * holds its own token and the bridge's existing join path uses it. Reporting `joined: false` with
+   * the reason is what tells the two apart — an invite that is waiting for its own agent, versus one
+   * nobody will ever act on.
+   */
+  const join = await joinRoomOnSideAsAgent({ ...acting, roomId, agentUserId: agentMxid });
+  return {
+    admitted: Boolean(join.joined),
+    invited: Boolean(invite.invited),
+    alreadyMember: Boolean(invite.already),
+    joined: Boolean(join.joined),
+    reason: join.joined ? null : (join.reason ?? null),
+    sideId,
+    mxid: agentMxid,
+  };
+}
+
 function bindEngagement(engagement) {
   if (!engagement?.agent) {
     return { bound: false, error: 'engagement names no agent' };
@@ -12133,7 +12204,7 @@ app.get('/api/engagements/audit', requireBearer, (req, res) => {
  * approvals. Wiring it behind the bridge secret would have made the console unable
  * to read its own queue, which is the mistake the existing binding endpoint makes.
  */
-app.post('/api/engagements', requireRequester, (req, res) => {
+app.post('/api/engagements', requireRequester, async (req, res) => {
   try {
     const b = req.body || {};
     const role = normalizeOptionalText(b.role, 64);
@@ -12221,8 +12292,14 @@ app.post('/api/engagements', requireRequester, (req, res) => {
     if (engagement.state === 'active') {
       const outcome = bindEngagement(engagement);
       engagementStore.setBindingOutcome(engagement.id, outcome);
+      /*
+       * Awaited, not fired and forgotten. A borrower reading `ok: true` would otherwise be told the
+       * agent is theirs while it is not yet in the room — and the failure would surface as silence in
+       * a room on someone else's server, which is the hardest place for anyone here to look.
+       */
+      const roomAdmission = await admitAgentToProjectRoom(engagement);
       return res.json({
-        ok: true, engagement: engagementStore.get(engagement.id), binding: outcome, serving,
+        ok: true, engagement: engagementStore.get(engagement.id), binding: outcome, roomAdmission, serving,
       });
     }
     return res.json({ ok: true, engagement, serving });
@@ -12231,7 +12308,7 @@ app.post('/api/engagements', requireRequester, (req, res) => {
   }
 });
 
-app.post('/api/engagements/:id/verdict', requireBearer, (req, res) => {
+app.post('/api/engagements/:id/verdict', requireBearer, async (req, res) => {
   try {
     const b = req.body || {};
     const existing = engagementStore.get(req.params.id);
@@ -12286,10 +12363,15 @@ app.post('/api/engagements/:id/verdict', requireBearer, (req, res) => {
        * given — the exact "role without its fulfilment" the request route refuses to serve.
        * Disclosed, not concealed, per the 2026-08-11 transparency ruling.
        */
+      const roomAdmission = await admitAgentToProjectRoom(e);
       return res.json({
         ok: true,
         engagement: engagementStore.get(e.id),
         binding: outcome,
+        // Beside `binding` for the reason stated above it: this is the other half of "the agent is
+        // yours", and an approval that granted budget but left the agent outside the room is exactly
+        // the half-done state that comment exists to surface.
+        roomAdmission,
         serving: servingConfiguration(e.agent),
       });
     }
