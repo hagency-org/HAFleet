@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Blank } from '@/components/Blank';
+import Meter from '@/components/Meter';
 import { CeilingBars, AllocationDonut, TaskBars, MissingSeries } from '@/components/Charts';
 import { useT } from '@/components/Prefs';
 import { fmtTokens, fmtSpanSec } from '@/lib/mock-data';
@@ -41,7 +42,7 @@ const GAP_KEYS = {
 export default function UsagePage() {
   const t = useT();
   const {
-    usage, engagements, roleCapacity, agents, presetOf, committed, remaining,
+    usage, engagements, roleCapacity, agents, presetOf, committed, remaining, overBy,
     usageLive = [], metering,
   } = useData();
 
@@ -481,7 +482,19 @@ export default function UsagePage() {
               return (
                 <tr key={a.name}>
                   <td><Link href={`/agents/${a.name}`}>{a.name}</Link></td>
-                  <td className="mono-s">{p.model}</td>
+                  {/*
+                    * `p?.model`, not `p.model`. This row's neighbours all optional-chain and this
+                    * one did not, which held only while `configured` (agents carrying a presetId)
+                    * and `presetOf` (that id found in the presets list) agreed. They stop agreeing
+                    * the moment the presets fetch fails on its own — one 401 while the agents call
+                    * succeeded took the whole page to a white screen, which is the loudest possible
+                    * version of the wrong-value failure this console is built to avoid.
+                    */}
+                  <td>
+                    {p?.model
+                      ? <span className="mono-s">{p.model}</span>
+                      : <Blank why="rs.why.noPreset" t={t} />}
+                  </td>
                   <td>
                     {p?.ceiling
                       ? <span className="amount">{fmtTokens(p.ceiling.tokens)}</span>
@@ -495,7 +508,11 @@ export default function UsagePage() {
                     {left === null ? <Blank why="rs.why.noCeiling" t={t} /> : (
                       <>
                         <span className={`amount${pct > 80 ? ' warn' : ''}`}>{fmtTokens(left)}</span>
-                        <span className="meter"><i style={{ width: `${Math.min(100, pct)}%` }} /></span>
+                        {/* `pct` is derived from `left`, which floors at zero — so it can never
+                            exceed 100 and cannot report a breach. `overBy` measures against the
+                            ceiling directly, which is why the overrun is passed separately rather
+                            than inferred from the percentage. */}
+                        <Meter pct={pct} over={overBy(a.name)} />
                         <span className="dim">{t('us.pctCommitted', { n: committedPct })}</span>
                       </>
                     )}

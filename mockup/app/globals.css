@@ -775,6 +775,14 @@ td.cap-via { color: var(--ok); }
 .meter { display: block; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; margin-top: 4px; }
 .meter i { display: block; height: 100%; background: var(--accent); }
 .meter i.ok { background: var(--ok); }
+/*
+ * A BREACH IS NOT A HOT BAR. `hot` lights at 80% — approaching a limit — and an overrun that
+ * borrowed that colour was indistinguishable from 81%. This is the error colour, and the bar is
+ * given a hard right edge so a full-but-inside bar and a breached one differ in SHAPE as well as
+ * hue, for a reader who cannot tell the two apart.
+ */
+.meter i.over { background: var(--bad); border-right: 2px solid var(--fg); }
+.over-by { display: block; margin-top: 2px; font-size: 11px; color: var(--bad); }
 
 .spark { display: inline-flex; align-items: flex-end; gap: 2px; height: 20px; }
 .spark i { width: 5px; border-radius: 1px; background: var(--accent); }
@@ -1093,6 +1101,8 @@ h3.sub { font-size: 12.5px; font-weight: 600; margin: 2px 0 8px; color: var(--in
 .cb-track { height: 14px; background: var(--line); border-radius: 3px; overflow: hidden; }
 .cb-fill { display: block; height: 100%; background: var(--c-a); }
 .cb-fill.hot { background: var(--c-c); }
+/* See .meter i.over — a breach is its own state, not a hotter near-limit. */
+.cb-fill.over { background: var(--bad); border-right: 2px solid var(--fg); }
 .cb-val { font-family: var(--mono); font-size: 11px; white-space: nowrap; color: var(--ink-dim); }
 .cb-val b { color: var(--ink); font-weight: 500; }
 

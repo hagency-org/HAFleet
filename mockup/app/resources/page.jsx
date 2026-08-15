@@ -5,6 +5,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Blank } from '@/components/Blank';
+import Meter from '@/components/Meter';
 import { useT } from '@/components/Prefs';
 import { useData, Provenance } from '@/components/Data';
 import { send } from '@/lib/api';
@@ -46,7 +47,7 @@ import { fmtTokens, runtimeStatusText } from '@/lib/mock-data';
 export default function ResourcesPage() {
   const t = useT();
   const {
-    agents, presets, presetOf, tierOf, familyOf, committed, remaining, capability,
+    agents, presets, presetOf, tierOf, familyOf, committed, remaining, overBy, capability,
     seats = [], seatKeyed,
   } = useData();
 
@@ -227,7 +228,7 @@ export default function ResourcesPage() {
                     {p ? (
                       <>
                         <span className="amount">{fmtTokens(used)}</span>
-                        {pct !== null && <span className="meter"><i style={{ width: `${Math.min(100, pct)}%` }} /></span>}
+                        {pct !== null && <Meter pct={pct} over={overBy(a.name)} />}
                         {left === null
                           ? <Blank why="rs.why.noCeiling" t={t} />
                           : <span className="dim">{t('rs.leftN', { n: fmtTokens(left) })}</span>}
