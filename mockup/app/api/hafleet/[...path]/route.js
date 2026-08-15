@@ -207,6 +207,16 @@ const WRITES = [
   { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/verify$/ },
   { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/deactivate$/ },
   { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/reactivate$/ },
+  /*
+   * 项目 under a 项目方 — a NAME and a ROOM, neither of which is a secret and both of which the operator
+   * currently keeps in a notebook, because nothing in this product stores a project name.
+   *
+   * `/archive` and not a DELETE, and there is no DELETE to allow: 「项目方暂时不可以删除,可以 archive 掉」.
+   * A project's room carries the engagements served through it, so forgetting the project would leave
+   * that history attributable to nothing.
+   */
+  { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/projects$/ },
+  { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/projects\/[^/]+\/archive$/ },
   { method: 'DELETE', re: /^project-sides\/[A-Za-z0-9._:-]+$/ },
 ];
 

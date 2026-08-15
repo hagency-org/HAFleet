@@ -360,10 +360,45 @@ export async function fetchLive() {
             label: side.label ?? null,
             credentialKind: side.credentialKind ?? null,
             accessState: side.accessState ?? null,
-            representative: side.representative?.mxid ?? null,
+            /*
+             * THE 接单员, from whichever kind of credential this side uses. An appservice's representative
+             * IS its `sender_localpart`; a registration-token side has a real registered account whose
+             * MXID `ensureRepresentative` recorded. Both are "who we sent", so both land in one field —
+             * a page that read only `representative.mxid` showed "none" for every appservice side, which
+             * is the majority case under the operator's model.
+             */
+            representative: side.representative?.mxid
+              ?? (side.senderLocalpart ? `@${side.senderLocalpart}:${side.id}` : null),
+            namespace: side.namespace ?? null,
+            /*
+             * ISSUED, BUT NOT YET CONFIRMED WORKING. A Palpo registration loads once at startup, so
+             * between us issuing it and the project side installing it and restarting there is a wait we
+             * do not control. `hasCredential && accessState === 'unverified'` is exactly that state, and
+             * it must not be rendered as a failure: nothing is broken, we are waiting on them.
+             */
+            awaitingInstall: Boolean(side.hasCredential) && side.accessState === 'unverified',
+            credentialIssuedAt: side.credentialIssuedAt ?? null,
             active: side.active !== false,
             allocatedTokens: side.allocatedTokens ?? null,
             budget,
+            /*
+             * 项目 → 外派员工. The backend joins bindings onto projects, so the console does not: who
+             * staffs a project is the intersection of a binding and a project room, and re-deriving it
+             * here would be a second answer to a question the backend already answers.
+             */
+            projects: (side.projects ?? []).map((pr) => ({
+              id: pr.id,
+              name: pr.name,
+              roomId: pr.roomId ?? null,
+              archived: pr.archived === true,
+              agents: (pr.agents ?? []).map((a) => ({
+                name: a.name,
+                bound: a.bound !== false,
+                online: a.online,
+                retiredAt: a.retiredAt ?? null,
+                role: a.role ?? null,
+              })),
+            })),
           };
         }));
         provenance.projectSides = 'live';

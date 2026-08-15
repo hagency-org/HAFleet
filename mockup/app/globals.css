@@ -1030,6 +1030,20 @@ h3.sub { font-size: 12.5px; font-weight: 600; margin: 2px 0 8px; color: var(--in
    the HTML is identical either way — so check-switches.mjs asserts the computed
    display instead. */
 .tbl td > span.dim { display: block; }
+
+/* 项目方 → 项目 → 外派员工, inside one cell.
+ *
+ * THE SAME RULE ONE LEVEL DEEPER. `.tbl td > span.dim { display: block }` above only reaches DIRECT
+ * children, and check-switches.mjs asserts exactly that selector — so a secondary line nested inside
+ * .proj or .staff would satisfy the gate while welding into the line above it, which is the defect the
+ * gate exists to catch. Honouring the rule's intent rather than its selector. */
+.tbl td .proj { display: block; margin-bottom: 8px; }
+.tbl td .proj:last-child { margin-bottom: 0; }
+.tbl td .proj > span, .tbl td .proj > .staff { display: block; }
+/* The staff line is indented, because "who is dispatched" reads as belonging to the project above it
+   rather than as a sibling of it. */
+.tbl td .staff { padding-left: 10px; }
+.tbl td .staff > span { display: inline; margin-left: 6px; }
 /* a badge that qualifies a number needs air, or "5.0M" and "not enforced" weld
    into "5.0Mnot enforced" */
 .amount + .badge, .tbl td .badge { margin-left: 6px; }

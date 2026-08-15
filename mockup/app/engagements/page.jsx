@@ -69,8 +69,16 @@ function RouteReason({ e, t }) {
  * the distinction the store exists to keep, and this console's own rule is that a blank is never a zero.
  */
 function ProjectSides({ t }) {
-  const { projectSides, provenance } = useData();
+  /*
+   * `roleCapacity` is read HERE and not taken as a prop. The first version called `roleName` — which is
+   * defined inside `EngagementsPage`, not in this scope — and the build caught it with
+   * `ReferenceError: roleName is not defined` while prerendering. Worth noting that the root eslint
+   * config ignores `mockup/**`, so `no-undef` never sees this file: in the backend that same class of
+   * mistake is caught by a linter, and here only by `next build`.
+   */
+  const { projectSides, provenance, roleCapacity } = useData();
   const sides = projectSides ?? [];
+  const roleName = (key) => roleCapacity.roles[key]?.displayName ?? key;
 
   const reach = (state) => {
     if (state === 'ok') return <span className="ok">{t('en.reachOk')}</span>;
@@ -118,10 +126,11 @@ function ProjectSides({ t }) {
             <thead>
               <tr>
                 <th>{t('en.colSide')}</th>
-                <th>{t('en.colRep')}</th>
+                <th>{t('en.repHead')}</th>
                 <th>{t('en.colCred')}</th>
                 <th>{t('col.state')}</th>
                 <th>{t('en.colAlloc')}</th>
+                <th>{t('en.colProjects')}</th>
               </tr>
             </thead>
             <tbody>
@@ -132,14 +141,63 @@ function ProjectSides({ t }) {
                     {side.label && <span className="dim">{side.label}</span>}
                     {!side.active && <span className="dim">{t('en.sideInactive')}</span>}
                   </td>
-                  <td>{side.representative
-                    ? <span className="mono">{side.representative}</span>
-                    : <span className="dim">{t('en.repNone')}</span>}</td>
+                  <td>
+                    {side.representative
+                      ? <span className="mono">{side.representative}</span>
+                      : <span className="dim">{t('en.repNone')}</span>}
+                    {/* The namespace is the point of an appservice: every future agent is already
+                        covered by it, so nothing has to be registered one at a time. */}
+                    {side.namespace && (
+                      <>
+                        <span className="dim mono">{side.namespace}</span>
+                        <span className="dim">{t('en.nsNote')}</span>
+                      </>
+                    )}
+                  </td>
                   <td>{side.credentialKind
                     ? <span className="mono">{side.credentialKind}</span>
                     : <span className="stranded">{t('en.credNone')}</span>}</td>
-                  <td>{reach(side.accessState)}</td>
+                  {/*
+                    * WAITING IS NOT FAILING. A registration loads only when their homeserver restarts,
+                    * so between issuing it and them acting there is a gap we do not control. Rendered as
+                    * its own state rather than as "unverified", which reads as something we got wrong.
+                    */}
+                  <td>{side.awaitingInstall ? (
+                    <>
+                      <span className="overqual">{t('en.awaitingInstall')}</span>
+                      <span className="dim">{t('en.awaitingInstallWhy')}</span>
+                    </>
+                  ) : reach(side.accessState)}</td>
                   <td>{alloc(side)}</td>
+                  <td>{!side.projects?.length
+                    ? <span className="dim">{t('en.projNone')}</span>
+                    : side.projects.map((pr) => (
+                      <div key={pr.id} className="proj">
+                        <span className={pr.archived ? 'dim' : ''}>{pr.name}</span>
+                        {pr.archived && <span className="dim">{t('en.projArchived')}</span>}
+                        {pr.roomId
+                          ? <span className="dim mono">{pr.roomId}</span>
+                          : <span className="dim">{t('en.projNoRoom')}</span>}
+                        {pr.agents.length === 0
+                          ? <span className="dim">{t('en.projStaffNone')}</span>
+                          : pr.agents.map((a) => (
+                            <span key={a.name} className="staff">
+                              <Link href={`/agents/${encodeURIComponent(a.name)}`}>{a.name}</Link>
+                              {a.role && <span className="dim">{roleName(a.role)}</span>}
+                              {/*
+                                * Four separate facts, never collapsed into one badge. An agent can be
+                                * reachable and stopped, or running and cut off, and a single "status"
+                                * would have to pick one to report. `online === null` is "no such agent
+                                * record", which is not the same as offline.
+                                */}
+                              {a.retiredAt && <span className="stranded">{t('en.staffRetired')}</span>}
+                              {!a.bound && <span className="stranded">{t('en.staffUnbound')}</span>}
+                              {a.online === false && !a.retiredAt && <span className="overqual">{t('en.staffDown')}</span>}
+                              {a.online === null && <span className="overqual">{t('en.staffNoRecord')}</span>}
+                            </span>
+                          ))}
+                      </div>
+                    ))}</td>
                 </tr>
               ))}
             </tbody>
