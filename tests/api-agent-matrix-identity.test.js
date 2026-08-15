@@ -178,13 +178,17 @@ describe('the side is resolved, never assumed', () => {
 });
 
 describe('what each credential kind yields', () => {
-  test('appservice: an MXID and NO token, reported as complete rather than as a failure', async () => {
+  test('appservice: an MXID and NO token, and it CAN send anyway', async () => {
     /*
      * The namespace already authorises the identity, so nothing is registered and HAFleet acts as the
-     * agent by masquerading. `accessToken: null` is the design, and `canSend: false` with a note is the
-     * honest form of it — the bridge's send path still wants a per-agent token, so the agent can be
-     * ADDRESSED and cannot yet SEND. Reporting 200 with a null token and no explanation would leave a
-     * caller to discover that later, attached to whatever send happened to be first.
+     * agent by masquerading. `accessToken: null` is the design.
+     *
+     * `canSend` USED TO BE FALSE HERE, and the note said the bridge's send path still wanted a
+     * per-agent token. It does not any more: `sendAsAgentContent` accepts an appservice sender and
+     * signs with the side's as_token, naming the agent in `?user_id=`. So the field stops meaning "has
+     * a token" and answers the question a caller actually asks — will messages from this agent reach a
+     * room. `hasOwnToken` carries the fact that changed hands, because the two are no longer the same
+     * question and a caller provisioning credentials still needs the first one.
      */
     const app = await boot({ apiBaseUrl: await fakeAppserviceHomeserver() });
     await setCredential(app, {
@@ -192,8 +196,8 @@ describe('what each credential kind yields', () => {
       namespace: '@ac_.*', senderLocalpart: 'hafleet',
     }).expect(200);
     const r = await mint(app);
-    expect(r.body).toMatchObject({ accessToken: null, canSend: false });
-    expect(r.body.note).toMatch(/cannot send as this agent yet/);
+    expect(r.body).toMatchObject({ accessToken: null, canSend: true, hasOwnToken: false });
+    expect(r.body.note).toMatch(/can be addressed AND can speak/);
   });
 
   test('appservice: a localpart OUTSIDE the claimed namespace is refused before any call', async () => {
