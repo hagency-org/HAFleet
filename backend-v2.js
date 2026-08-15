@@ -9633,7 +9633,7 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
      * declare it. `null` for an agent created by hand, which decision 5 keeps as an explicit
      * operator-only path.
      */
-    projectSide: provisionedSides.get(agentName) ?? existing.projectSide ?? null,
+    projectSide: provisionedSides.get(agentName)?.sideId ?? existing.projectSide ?? null,
     /*
      * What the matrix will select this agent FOR. Operator-set, because an agent that could name its
      * own role could put itself in a cell it cannot staff — `selectAgent` matches on this, and the
@@ -9717,6 +9717,18 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   }
   if (!saveAgentsOrRollback(agentName, persistenceSnapshot)) {
     return res.status(503).json({ error: 'agents persistence failed' });
+  }
+  /*
+   * THE PLAN IS FULFILLED: the agent it promised now exists, so the seat the plan was holding in its
+   * (role, tier) cell is released and the name→side memory is consumed. AFTER persistence, not before —
+   * a 503'd registration has not fulfilled anything, and the plan must keep holding its seat for the
+   * retry. This is one of the reservation's two legitimate ends; the other is the TTL expiry for plans
+   * whose launcher died.
+   */
+  const fulfilledPlan = provisionedSides.get(agentName);
+  if (fulfilledPlan) {
+    provisionedSides.delete(agentName);
+    if (fulfilledPlan.reservationKey) releaseProvisionReservation(fulfilledPlan.reservationKey);
   }
   writeThruAgentHome(agentName);
   if (!existingOnline && resolvedOnline) {
@@ -9997,7 +10009,47 @@ app.get('/api/agents', (req, res) => {
 // in-flight leases and queued tickets alike; this is not restart-safe queueing.
 const dispatchLeaseStore = new DispatchLeaseStore({ ttlMs: DISPATCH_LEASE_TTL_MS });
 const dispatchQueues = new Map();    // `${role}:${tier}` → [{ ticket, role, tier, task, room }]
-const provisionReservations = new Map(); // `${role}:${tier}` → count of outstanding provision plans
+/*
+ * `${role}:${tier}` → count of outstanding provision plans.
+ *
+ * A reservation exists to stop ten concurrent requests all provisioning into the same cell between
+ * "plan handed out" and "agent registered". It therefore has TWO legitimate ends — the agent registers,
+ * or the plan is abandoned — and until 2026-08-15 it had NEITHER: the count only ever went up, so every
+ * plan ever issued held its cell's capacity for the life of the process, and a cell whose plans kept
+ * failing to launch would refuse provisioning forever while zero agents ran.
+ */
+const provisionReservations = new Map();
+const PROVISION_RESERVATION_TTL_MS = 15 * 60 * 1000;
+/*
+ * `${role}:${tier}` → [issuedAtMs, ...] — one timestamp per outstanding plan, oldest first. Kept beside
+ * the count rather than replacing it so the cap check stays one map read; the timestamps exist so an
+ * abandoned plan EXPIRES: a launcher that died between plan and registration must not hold a seat.
+ */
+const provisionReservationAges = new Map();
+
+function releaseProvisionReservation(key) {
+  const count = provisionReservations.get(key) || 0;
+  if (count <= 1) provisionReservations.delete(key);
+  else provisionReservations.set(key, count - 1);
+  const ages = provisionReservationAges.get(key);
+  if (ages?.length) {
+    ages.shift();
+    if (!ages.length) provisionReservationAges.delete(key);
+  }
+}
+
+/** Drop reservations whose plan is old enough to be presumed dead. Called lazily at the cap check. */
+function expireProvisionReservations(key, now = Date.now()) {
+  const ages = provisionReservationAges.get(key);
+  if (!ages?.length) return;
+  while (ages.length && now - ages[0] > PROVISION_RESERVATION_TTL_MS) {
+    ages.shift();
+    const count = provisionReservations.get(key) || 0;
+    if (count <= 1) provisionReservations.delete(key);
+    else provisionReservations.set(key, count - 1);
+  }
+  if (!ages.length) provisionReservationAges.delete(key);
+}
 /*
  * agentName → sideId, remembered when a provision plan is HANDED OUT and applied when that name
  * registers (ADR-016 decision 4).
@@ -10011,7 +10063,7 @@ const provisionReservations = new Map(); // `${role}:${tier}` → count of outst
  * registration loses the intent, and the agent registers with no side rather than a wrong one. That is
  * the safe direction — an unattributed agent is visible and fixable, a misattributed one is neither.
  */
-const provisionedSides = new Map();
+const provisionedSides = new Map(); // agentName → { sideId, reservationKey }
 let dispatchTicketSeq = 0;
 const cellKey = (role, tier) => `${role}:${tier}`;
 const annotateBusy = (records) => records.map((a) => ({ ...a, busy: dispatchLeaseStore.isBusy(a.name) }));
@@ -10124,6 +10176,7 @@ app.post('/api/dispatch', (req, res) => {
   const cap = Number(process.env.MATRIX_AGENT_MAX_PER_CELL || 0);
   if (cap > 0) {
     const inCell = poolRecords().filter((a) => agentRole(a) === role && agentCapability(a) === tier).length;
+    expireProvisionReservations(key);
     const reserved = provisionReservations.get(key) || 0;
     if (inCell + reserved < cap) {
       /*
@@ -10160,6 +10213,9 @@ app.post('/api/dispatch', (req, res) => {
       })) return undefined;
 
       provisionReservations.set(key, reserved + 1);
+      const ages = provisionReservationAges.get(key) || [];
+      ages.push(Date.now());
+      provisionReservationAges.set(key, ages);
       /*
        * The name carries the SIDE when there is one. `mx_${role}_${tier}_${seq}` is unattributable,
        * and ADR-016 decision 7's cascade needs exactly that attribution to know what to take with a
@@ -10169,7 +10225,8 @@ app.post('/api/dispatch', (req, res) => {
       const name = sideId
         ? `mx_${sideId.replace(/[^a-z0-9]+/g, '_')}_${role}_${tier}_${dispatchTicketSeq++}`
         : `mx_${role}_${tier}_${dispatchTicketSeq++}`;
-      if (sideId) provisionedSides.set(name, sideId);
+      // The reservation key rides along so REGISTRATION can release the seat it was holding.
+      provisionedSides.set(name, { sideId: sideId ?? null, reservationKey: key });
       return res.json({
         status: 'provision', role, tier, name, runtime: TIER_RUNTIME[tier],
         ...(sideId ? { sideId, budget: sideBudgetFor(sideId) } : {}),

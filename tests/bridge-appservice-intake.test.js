@@ -67,11 +67,13 @@ afterAll(async () => {
 
 /** A `this` carrying only what the method under test touches. */
 function fakeBridge() {
-  const seen = { messages: [], events: [] };
+  const seen = { messages: [], events: [], warnings: [] };
   return {
     seen,
     onRoomMessage: async (roomId, event) => { seen.messages.push({ roomId, type: event.type, id: event.event_id }); },
     onRoomEvent: async (roomId, event) => { seen.events.push({ roomId, type: event.type }); },
+    // The intake raises operator-visible warnings (encrypted-room blindness); captured, not dropped.
+    postWarning: (message, meta) => { seen.warnings.push({ message, ...meta }); },
   };
 }
 
@@ -127,17 +129,23 @@ describe('what it refuses to pretend it handled', () => {
     expect(self.seen.events).toEqual([]);
   });
 
-  test('an ENCRYPTED event is named rather than dropped quietly', async () => {
+  test('an ENCRYPTED event RAISES AN OPERATOR ALERT, per room, with the remedy in it', async () => {
     /*
-     * ADR-016 settled that intake rooms are plaintext, and the bridge's decryption path belongs to the
-     * bot's crypto store on its OWN homeserver — so an encrypted event arriving over an appservice
-     * cannot be read here. Dropping it silently produces a borrower whose message vanished, which is
-     * the report that is impossible to act on.
+     * ADR-016 settled that intake rooms are plaintext; an appservice has no crypto store, so an
+     * encrypted room is one this channel is BLIND to. That fact used to be a console.warn — and the
+     * first live run succeeded only because the BOT could read the room, with nothing anywhere an
+     * operator looks saying the appservice could not. The warning now rides postWarning into the alert
+     * store, deduped by ROOM (kind + scope build the dedupe key), so a chatty room raises one alert
+     * rather than burying itself, and the text names both remedies because there are exactly two.
      */
     const self = fakeBridge();
     await call(self, 'a.example', [{ type: 'm.room.encrypted', room_id: '!r:a', event_id: '$1' }]);
     expect(self.seen.messages).toEqual([]);
     expect(self.seen.events).toEqual([]);
+    expect(self.seen.warnings).toHaveLength(1);
+    expect(self.seen.warnings[0]).toMatchObject({ kind: 'appservice-encrypted-intake', scope: '!r:a' });
+    expect(self.seen.warnings[0].message).toMatch(/BLIND to !r:a on a\.example/);
+    expect(self.seen.warnings[0].message).toMatch(/create intake rooms unencrypted|keep relying on the bot/);
   });
 
   test('a later event is still processed after one is skipped', async () => {
