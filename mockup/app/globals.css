@@ -1045,6 +1045,11 @@ h3.sub { font-size: 12.5px; font-weight: 600; margin: 2px 0 8px; color: var(--in
    the HTML is identical either way — so check-switches.mjs asserts the computed
    display instead. */
 .tbl td > span.dim { display: block; }
+/* AND `.stranded`, for the same reason. The rule was written for `.dim` because that was the class
+   the three known welds used; the over-commit warning under Approve/Reject uses `.stranded` and
+   welded into the button row — found when check-switches.mjs stopped looking only at `.dim`. The
+   class list is the accident here; being a secondary LINE is the rule. */
+.tbl td > span.stranded, .tbl td > span.ok, .tbl td > span.overqual { display: block; }
 
 /* 项目方 → 项目 → 外派员工, inside one cell.
  *

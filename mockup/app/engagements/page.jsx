@@ -123,7 +123,10 @@ function ProjectSides({ t }) {
         <div className="notice">{t('en.sidesEmpty')}</div>
       ) : (
         <div className="tbl-wrap">
-          <table>
+          {/* `tbl`, like every other table here. Without it the three anti-weld rules
+              (.tbl td > span.dim, .tbl td .proj, .tbl td .staff) missed this table entirely and it
+              shipped "490k of 1.0M left510k committed". */}
+          <table className="tbl">
             <thead>
               <tr>
                 <th>{t('en.colSide')}</th>
