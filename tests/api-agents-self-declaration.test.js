@@ -208,18 +208,49 @@ describe('POST /api/agents — the four fields an agent may not set', () => {
     expect((await record(ctx)).role).toBe('architect');
   });
 
-  test('role: NOT validated against ROLES, because a live surface puts prose in this field', async () => {
+  test('role: VALIDATED against ROLES now — the surface that needed prose here is dead', async () => {
     /*
-     * Asserted so the omission is a decision on the record rather than a gap someone later "fixes".
-     * The dashboard's New Agent form sends its GUIDANCE textarea — "Human-authored intent /
-     * instructions" — as `role`. A strict check here would silently discard prose an operator typed.
-     * The conflation is a real defect; it needs guidance to have its own field on both sides, and that
-     * is not this change.
+     * THE REVERSAL, on the record. The earlier version of this test asserted the OPPOSITE — that prose
+     * passed — because the old portal's New Agent form sent its GUIDANCE textarea as `role`, and a
+     * strict check would have silently discarded what an operator typed. That portal is deleted; every
+     * living writer sends a vocabulary key or nothing. Prose about an agent belongs in `identity`.
+     *
+     * The refusal is a 400 that NAMES the vocabulary and the right field, because an operator whose
+     * typo silently kept the old value is the same silent-unstaffable trap the validation exists to
+     * close — just wearing a 200.
      */
     ctx = await createBackendTestContext('declare-role-prose-', seed());
-    await asOperator(ctx, 'post', '/api/agents')
-      .send({ name: AGENT, role: 'Ship the parser rewrite; ask before touching the lexer.' }).expect(200);
-    expect((await record(ctx)).role).toMatch(/^Ship the parser rewrite/);
+    const r = await asOperator(ctx, 'post', '/api/agents')
+      .send({ name: AGENT, role: 'Ship the parser rewrite; ask before touching the lexer.' });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/unknown role/);
+    expect(r.body.error).toMatch(/belongs in identity/);
+    /*
+     * The seeded record is untouched: the 400 fired before any assignment, and the seed never had a
+     * `role` key at all — so the honest assertion is "still absent", not "null". (First draft said
+     * null and undefined showed up to disagree.)
+     */
+    expect((await record(ctx)).role).toBeUndefined();
+
+    // The vocabulary still passes, PATCH included, and null still clears.
+    await asOperator(ctx, 'post', '/api/agents').send({ name: AGENT, role: 'architect' }).expect(200);
+    expect((await record(ctx)).role).toBe('architect');
+    await asOperator(ctx, 'patch', `/api/agents/${AGENT}`).send({ role: 'not-a-role' }).expect(400);
+    expect((await record(ctx)).role).toBe('architect');
+    await asOperator(ctx, 'patch', `/api/agents/${AGENT}`).send({ role: null }).expect(200);
+    expect((await record(ctx)).role).toBe(null);
+  });
+
+  test('an AGENT sending an invalid role is dropped, not taught the vocabulary', async () => {
+    /*
+     * The 400 names valid roles, so it is reserved for the operator — the caller who may actually set
+     * the field. An agent-token caller's role is dropped by the self-declaration gate whatever its
+     * value; answering 400 would leak which values are valid to a caller that cannot use them.
+     */
+    ctx = await createBackendTestContext('declare-role-agent-invalid-', seed());
+    await asAgent(ctx, 'post', '/api/agents')
+      .send({ name: AGENT, role: 'definitely-not-a-role' }).expect(200);
+    expect((await record(ctx)).role).toBe(null);
   });
 
   test('THE REAL AGENT-SIDE CALLER IS UNAFFECTED, and keeps what the operator set', async () => {

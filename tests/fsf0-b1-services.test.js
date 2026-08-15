@@ -210,7 +210,7 @@ test('restart_preserves_agent_registry', async () => {
   const runtime = createBackendRuntime('hafleet-fsf0-b1-registry-');
   const first = await importBackend(runtime);
   for (const name of ['worker-alpha', 'worker-beta', 'worker-gamma']) {
-    await request(first.app).post('/api/agents').send({ name, role: 'worker' }).expect(200);
+    await request(first.app).post('/api/agents').send({ name, role: 'coding' }).expect(200);
   }
   const before = await request(first.app).get('/api/agents').query({ view: 'names' }).expect(200);
   await first.stopServer();

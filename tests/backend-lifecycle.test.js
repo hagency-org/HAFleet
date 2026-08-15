@@ -193,7 +193,7 @@ describe('backend-v2 lifecycle', () => {
     for (const name of ['worker-alpha', 'worker-beta', 'worker-gamma']) {
       const response = await request(first.app)
         .post('/api/agents')
-        .send({ name, role: 'worker', identity: `registered ${name}` });
+        .send({ name, role: 'coding', identity: `registered ${name}` });
       expect(response.status).toBe(200);
     }
     const before = await request(first.app).get('/api/agents').query({ view: 'names' });

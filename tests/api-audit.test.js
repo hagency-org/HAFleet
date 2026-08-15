@@ -51,7 +51,8 @@ describe('audit logging', () => {
   test('PATCH /api/agents/:name creates audit entry', async () => {
     await request(context.app)
       .patch('/api/agents/alpha')
-      .send({ role: 'developer' })
+      // A vocabulary role ('developer' was another invented one) — the backend now refuses the rest.
+      .send({ role: 'coding' })
       .expect(200);
     const entries = readAuditLog(context.runtimeDir);
     const entry = entries.find(e => e.method === 'PATCH' && e.agent === 'alpha');
