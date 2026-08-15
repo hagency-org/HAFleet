@@ -37,7 +37,7 @@ describe('build-release-package.sh', () => {
       'package.json',
       'package-lock.json',     // npm install must be reproducible
       'backend-v2.js',
-      'server.js',
+      // server.js is gone: the portal is deleted and its delivery queue lives inside the backend.
       'bin/hafleet',
       'lib/version.js',
       'services/hafleet-services.mjs',
