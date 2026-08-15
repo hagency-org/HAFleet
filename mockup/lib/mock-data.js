@@ -261,6 +261,25 @@ export const engagements = [
     allocatedTokens: 800_000, since: '6d',
   },
   {
+    /*
+     * THE ONE AGENT PAST ITS CEILING, and the only way that happens under admission control.
+     *
+     * The budget gate refuses new commitments once a ceiling is reached; what it cannot do is
+     * retract commitments already made. This 3.4M was approved when octos-agent's preset carried a
+     * 4M ceiling, and the contributor later lowered it to 3M — the commitment stands, and the agent
+     * is 400k past a limit it never crossed by spending.
+     *
+     * Without this row every meter in the prototype sits inside its ceiling, the over state renders
+     * nowhere, and a reviewer approves a display nobody has seen. That is the same reason en_0035
+     * exists above: an unexercised branch is an unasserted one.
+     */
+    id: 'en_0036', projectRoomId: '!zZ1qW3eR:hq.example', project: 'openssl/fips-review',
+    role: 'coding', requester: '@dana:hq.example',
+    requestedTokens: 3_400_000, ratePerDay: 90_000,
+    state: 'active', route: null, agent: 'octos-agent',
+    allocatedTokens: 3_400_000, since: '18d',
+  },
+  {
     id: 'en_0031', projectRoomId: '!pP4oO5iI:hq.example', project: 'acme/worker',
     role: 'testing', requester: '@lin:hq.example',
     requestedTokens: 300_000, ratePerDay: 20_000,
@@ -375,7 +394,7 @@ const D = makeDerive({ roleCapacity, agents, presets, offers, whitelist, engagem
 export const {
   ALERT_STATUSES, SEVERITIES,
   presetOf, tierOf, familyOf, fills, capability, modelsFor,
-  isWhitelisted, committed, remaining, overCommits,
+  isWhitelisted, committed, remaining, overBy, overCommits,
   pendingEngagements, activeEngagements, endedEngagements,
   alertCounts, railCounts,
   MODEL_SELECTABLE, FRAMEWORKS,

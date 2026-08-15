@@ -412,5 +412,47 @@ for (const r of ROUTES) {
     marked.slice(0, 5).join(' '));
 }
 
+// 19. the over-ceiling state is rendered, not merely implemented
+{
+  /*
+   * The fixture puts octos-agent 400k past a 3M ceiling (en_0036), and this asserts the pages
+   * actually SAY so. It is checked against the server-rendered markup because that is the only
+   * place a reader can see it without a live backend: `engagements` is a nothing-shown slice when
+   * the fetch fails, so the browser drops the fixture's commitments and every meter falls back
+   * inside its ceiling. Which means an eyes-on review of the running prototype cannot confirm this
+   * state, and this check is what stands in for the screenshot.
+   */
+  for (const path of ['/workforce', '/usage', '/resources']) {
+    const { html } = await rendered(path);
+    check(`${path} renders the over-ceiling state`,
+      /class="over"/.test(html) && /over by/.test(html),
+      html.includes('class="meter"') ? 'meters present, none marked over' : 'no meters at all');
+  }
+}
+
+// 18. a full bar is not allowed to mean two different things
+{
+  /*
+   * `width: ${Math.min(100, pct)}%` is unavoidable — a bar cannot be 240% of its track — but a page
+   * that writes the clamp itself has quietly decided that 240% and 100% look the same. Four pages
+   * had done exactly that, and an agent past its ceiling rendered identically to one that landed on
+   * it. The clamp now lives in Meter and CeilingBars, which pair it with an `over` state; anywhere
+   * else it is the bug coming back.
+   */
+  const CLAMP_OWNERS = new Set(['components/Meter.jsx', 'components/Charts.jsx']);
+  const walk = (dir) => readdirSync(dir).flatMap((entry) => {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) return walk(full);
+    return /\.jsx?$/.test(full) ? [full] : [];
+  });
+  const root = join(import.meta.dirname, '..');
+  const offenders = [...walk(join(root, 'app')), ...walk(join(root, 'components'))]
+    .filter((file) => /Math\.min\(\s*100\s*,/.test(readFileSync(file, 'utf8')))
+    .map((file) => file.slice(root.length + 1))
+    .filter((rel) => !CLAMP_OWNERS.has(rel));
+  check('no page clamps a meter itself — the clamp lives with the over state', offenders.length === 0,
+    offenders.join(' '));
+}
+
 console.log(`\n${failed === 0 ? 'All invariants hold.' : `${failed} FAILED.`}\n`);
 process.exit(failed === 0 ? 0 : 1);

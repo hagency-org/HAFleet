@@ -680,6 +680,12 @@ const en = {
   'us.why.meterReason': '{r}',
   'us.why.noProjectMeter': 'not attributable to a project: a transcript records the directory the CLI ran in, not which engagement the work was for',
   'us.pctOfCeiling': '{n}% of ceiling',
+  /*
+   * The bar cannot show this — 240% does not fit in a track — so the text does. `over` and not
+   * `hot`: hot means approaching the limit, and a breach that borrows the approaching-limit colour
+   * is a breach nobody sees.
+   */
+  'mt.overBy': 'over by {n} · {pct}% of ceiling',
   'us.rereadNote': '+{n} context re-read \u2014 the same conversation sent again each turn, not new material, and it does not draw the ceiling',
   'us.spentPartial': 'measured across {n} of {m} agents',
   'us.byProject': 'By project',
@@ -712,6 +718,7 @@ const en = {
   'ch.ceilingTitle': 'Ceiling used, per agent',
   'ch.ceilingNote': 'committed, not consumed',
   'ch.ceilingAria': '{agent}: {pct}% of {of} committed',
+  'ch.ceilingOverAria': '{agent}: {pct}% of {of} committed — over by {by}',
   'ch.donutTitle': 'Where my budget went',
   'ch.donutNote': 'share of allocation by project',
   'ch.donutAria': '{n} projects sharing {total} allocated',
@@ -1450,6 +1457,7 @@ const zh = {
   'us.why.meterReason': '{r}',
   'us.why.noProjectMeter': '无法归到项目:会话记录里写的是 CLI 运行的目录,而不是这份工作属于哪次接洽',
   'us.pctOfCeiling': '占上限 {n}%',
+  'mt.overBy': '超支 {n} · 占上限 {pct}%',
   'us.rereadNote': '另有 {n} 上下文重读 —— 每一轮把同一段对话再送一次,不是新增内容,也不扣减上限',
   'us.spentPartial': '测到的是 {m} 个 agent 中的 {n} 个',
   'us.byProject': '按项目',
@@ -1482,6 +1490,7 @@ const zh = {
   'ch.ceilingTitle': '每个 Agent 的额度占用',
   'ch.ceilingNote': '是已承诺,不是已消耗',
   'ch.ceilingAria': '{agent}:已承诺 {of} 的 {pct}%',
+  'ch.ceilingOverAria': '{agent}:已承诺 {of} 的 {pct}% —— 超支 {by}',
   'ch.donutTitle': '预算流向哪些项目',
   'ch.donutNote': '按项目的额度占比',
   'ch.donutAria': '{n} 个项目分摊已分配的 {total}',

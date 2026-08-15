@@ -42,18 +42,27 @@ export function CeilingBars({ rows }) {
     <div className="chart">
       {rows.map((r) => {
         const pct = Math.round((r.committed / r.ceiling) * 100);
+        /*
+         * Past the ceiling is its own state, not a hotter version of near-it. `hot` lights at 80%
+         * and the width clamps at 100, so a breach used to render identically to 81% — the one
+         * reading a contributor would act on differently was the one the chart could not show.
+         */
+        const over = Math.max(0, r.committed - r.ceiling);
         return (
           <div className="cb-row" key={r.agent}>
             <span className="cb-label">{r.agent}</span>
             <span className="cb-track" role="img"
-              aria-label={t('ch.ceilingAria', { agent: r.agent, pct, of: fmtTokens(r.ceiling) })}>
-              <i className={`cb-fill${pct > 80 ? ' hot' : ''}`} style={{ width: `${Math.min(100, pct)}%` }} />
+              aria-label={over > 0
+                ? t('ch.ceilingOverAria', { agent: r.agent, pct, of: fmtTokens(r.ceiling), by: fmtTokens(over) })
+                : t('ch.ceilingAria', { agent: r.agent, pct, of: fmtTokens(r.ceiling) })}>
+              <i className={`cb-fill${over > 0 ? ' over' : (pct > 80 ? ' hot' : '')}`}
+                style={{ width: `${Math.min(100, pct)}%` }} />
             </span>
             {/* The number leads. The bar is corroboration. */}
             <span className="cb-val">
               <b>{fmtTokens(r.committed)}</b>
               {` / ${fmtTokens(r.ceiling)}`}
-              <span className="dim">{` ${pct}%`}</span>
+              <span className={over > 0 ? 'over-by' : 'dim'}>{` ${pct}%`}</span>
             </span>
           </div>
         );

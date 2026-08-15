@@ -158,6 +158,30 @@ export function makeDerive(data) {
     return Math.max(0, preset.ceiling.tokens - committed(agentName));
   }
 
+  /**
+   * How far PAST its ceiling an agent has already drawn — null when unknowable, 0 when inside.
+   *
+   * `remaining` cannot answer this and should not try: it mirrors the backend's `remainingFor`,
+   * which floors at zero because it is an ADMISSION figure — there is no such thing as negative
+   * headroom to allocate. Correct for the decision, and it destroys the reporting signal: an agent
+   * 3M past its ceiling and one that landed exactly on it both report 0 left. The overrun is
+   * carried separately rather than by un-flooring `remaining`, so the number the approval path acts
+   * on stays the number the page shows beside it.
+   *
+   * `drawn` is max(committed, measured) for the same reason `remainingFor` uses it: an allocation
+   * the contributor has promised counts even before it is spent, and a measurement above it means
+   * the promise was already exceeded.
+   */
+  function overBy(agentName) {
+    const preset = presetOf(agents.find((a) => a.name === agentName));
+    const ceiling = preset?.ceiling?.tokens;
+    if (!Number.isFinite(ceiling)) return null;
+    const live = usageLive.find((r) => r.agent === agentName);
+    const measured = typeof live?.tokensDrawn === 'number' ? live.tokensDrawn : null;
+    const drawn = measured === null ? committed(agentName) : Math.max(committed(agentName), measured);
+    return Math.max(0, drawn - ceiling);
+  }
+
   /** Would approving this request over-commit the agent behind it? */
   function overCommits(engagement) {
     const left = remaining(engagement.agent);
@@ -403,7 +427,7 @@ export function makeDerive(data) {
   return {
     ROLE_KEYS, TIERS, ALERT_STATUSES, SEVERITIES,
     presetOf, tierOf, familyOf, fills, capability, modelsFor,
-    isWhitelisted, committed, remaining, overCommits,
+    isWhitelisted, committed, remaining, overBy, overCommits,
     pendingEngagements, activeEngagements, endedEngagements,
     alertCounts, railCounts, workforce,
     MODEL_SELECTABLE, FRAMEWORKS,

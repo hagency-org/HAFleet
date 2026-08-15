@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
 import { Blank } from '@/components/Blank';
+import Meter from '@/components/Meter';
 import { useT } from '@/components/Prefs';
 import { useData, Provenance } from '@/components/Data';
 import { InfoTip } from '@/components/InfoTip';
@@ -346,9 +347,10 @@ export default function WorkforcePage() {
                           <>
                             {/* No denominator, no meter. An empty bar reads as 0%
                                 used, which is a measurement. */}
-                            <span className="meter">
-                              <i style={{ width: `${Math.min(100, Math.round((r.promised / r.ceiling.tokens) * 100))}%` }} />
-                            </span>
+                            <Meter
+                              pct={Math.round((r.promised / r.ceiling.tokens) * 100)}
+                              over={Math.max(0, r.promised - r.ceiling.tokens)}
+                            />
                             <span className="dim">{t('wf.ofCeiling', { n: fmtTokens(r.ceiling.tokens) })}</span>
                           </>
                         ) : <Blank why="rs.why.noCeiling" t={t} />}
