@@ -2591,3 +2591,117 @@ describe('bridge start() fails closed without a bridge secret', () => {
     }
   });
 });
+
+/*
+ * Federated human identity (ADR-016: every Matrix server is a customer's, so federated humans are
+ * the NORM). `humanNameFromUserId` keeps only the localpart as the internal name; before this
+ * suite's subject existed, `humanUserId` could only rebuild the MXID onto OUR server — so
+ * `@alex:customer-a.example` came back as `@alex:<contributor server>`, an account that may not
+ * exist. The fix records the observed MXID at observation time and prefers it at composition time.
+ * Both directions are pinned here: the observed path corrects federated humans, AND the composed
+ * fallback still stands for local humans nobody has observed.
+ */
+describe('federated human identity survives the name round-trip', () => {
+  let runtimeDir;
+  let envSnapshot;
+  let humanUserIdForTest;
+  let humanNameFromUserIdForTest;
+  let humanMxidStateForTest;
+  let MatrixBridge;
+
+  beforeAll(async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-bridge-federated-human-'));
+    envSnapshot = snapshotEnv([
+      'HAFLEET_RUNTIME_DIR',
+      'MATRIX_AGENT_PREFIX',
+      'MATRIX_SERVER_NAME',
+      'MATRIX_GREETING_MXIDS',
+    ]);
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
+    process.env.MATRIX_AGENT_PREFIX = 'ac_';
+    process.env.MATRIX_SERVER_NAME = 'contributor.example';
+    delete process.env.MATRIX_GREETING_MXIDS;
+    const bridgeUrl = pathToFileURL(path.resolve('bridge-matrix.js')).href;
+    ({
+      MatrixBridge,
+      humanUserIdForTest,
+      humanNameFromUserIdForTest,
+      humanMxidStateForTest,
+    } = await import(`${bridgeUrl}?federated-human=${Date.now()}-${Math.random().toString(36).slice(2, 10)}`));
+  });
+
+  afterAll(() => {
+    rmSync(runtimeDir, { recursive: true, force: true });
+    restoreEnv(envSnapshot);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test('an observed federated MXID is preferred over composing onto our server', () => {
+    // The internal name is still the localpart — the backend contract does not change.
+    expect(humanNameFromUserIdForTest('@alex:customer-a.example')).toBe('alex');
+    // But composing it back now returns the identity that was SEEN, not a guess on our server.
+    expect(humanUserIdForTest('alex')).toBe('@alex:customer-a.example');
+    // Case drift through the backend must not fall back to the wrong-server guess: localparts are
+    // lowercase by spec, and the backend matches names case-insensitively.
+    expect(humanUserIdForTest('Alex')).toBe('@alex:customer-a.example');
+  });
+
+  test('local humans keep both old paths: composed fallback and full-MXID passthrough', () => {
+    // Never observed → the composed local-server guess is all there is, and it still works. This
+    // is the path an operator adding a member by bare name relies on.
+    expect(humanUserIdForTest('overseer')).toBe('@overseer:contributor.example');
+    // Observing a LOCAL human changes nothing: observed and composed agree.
+    expect(humanNameFromUserIdForTest('@overseer:contributor.example')).toBe('overseer');
+    expect(humanUserIdForTest('overseer')).toBe('@overseer:contributor.example');
+    // A full MXID passes through untouched, exactly as before.
+    expect(humanUserIdForTest('@bob:anywhere.example')).toBe('@bob:anywhere.example');
+  });
+
+  test('observations persist to bridge-state.json, so a restart does not revert to the guess', () => {
+    humanNameFromUserIdForTest('@mika:customer-a.example');
+    const statePath = path.join(runtimeDir, 'data', 'matrix', 'bridge-state.json');
+    const onDisk = JSON.parse(readFileSync(statePath, 'utf8'));
+    expect(onDisk.humanMxids.mika).toBe('@mika:customer-a.example');
+  });
+
+  test('the named limitation: the same localpart on two servers collides, last observed wins', () => {
+    /*
+     * Pinned rather than discovered. Names are the map's key, so `@sam:customer-a.example` and
+     * `@sam:customer-b.example` are one entry, and the loser's invites go to the winner's server.
+     * The honest fix is keying humans by full MXID everywhere, which is a backend model change —
+     * this test exists so that fix, when it lands, has a behavior to flip.
+     */
+    expect(humanNameFromUserIdForTest('@sam:customer-a.example')).toBe('sam');
+    expect(humanNameFromUserIdForTest('@sam:customer-b.example')).toBe('sam');
+    expect(humanUserIdForTest('sam')).toBe('@sam:customer-b.example');
+  });
+
+  test('agent MXIDs never teach the human map', () => {
+    // The map answers for humans only; agent identity is agentMxid's job (ADR-014 decision 5).
+    expect(humanNameFromUserIdForTest('@ac_worker:customer-a.example')).toBe('ac_worker');
+    expect(humanMxidStateForTest().ac_worker).toBeUndefined();
+    expect(humanUserIdForTest('@ac_worker:customer-a.example')).toBe('@ac_worker:customer-a.example');
+  });
+
+  test('discoverAndGreetHumans records where a directory human actually lives', async () => {
+    // The greeting loop extracts localparts itself instead of going through humanNameFromUserId,
+    // so it is a separate observation point that must feed the same map.
+    const bridge = new MatrixBridge();
+    bridge.ensureBotDmRoom = vi.fn().mockResolvedValue('!dm:test');
+    bridge.botClient = { sendMessage: vi.fn().mockResolvedValue(undefined) };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: vi.fn().mockResolvedValue({
+        results: [{ user_id: '@kamico:customer-b.example' }],
+        limited: false,
+      }),
+    }));
+
+    await bridge.discoverAndGreetHumans();
+
+    expect(bridge.ensureBotDmRoom).toHaveBeenCalledWith('kamico', '@kamico:customer-b.example');
+    expect(humanUserIdForTest('kamico')).toBe('@kamico:customer-b.example');
+  });
+});

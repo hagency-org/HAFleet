@@ -734,6 +734,33 @@ if (!state.approvalDmRooms) state.approvalDmRooms = {};
 if (!state.roomAgentBindings) state.roomAgentBindings = {};
 // ADR-014: invitations awaiting the contributor's decision, keyed [roomId][agentName].
 if (!state.pendingInvites) state.pendingInvites = {};
+/*
+ * Observed human MXIDs, keyed by LOWERCASED localpart: 'alex' → '@alex:customer-a.example'.
+ *
+ * WHY THIS EXISTS. `humanNameFromUserId` turns an observed MXID into the internal human name by
+ * keeping only the localpart — the server half is DISCARDED. The name round-trips through the
+ * backend (group members, DM targets) and comes back to `humanUserId`, which used to rebuild the
+ * MXID through `makeUserId` — that is, it asserted `@alex:<MATRIX_SERVER_NAME>`: OUR server, for a
+ * user who may not exist there. Under ADR-016 every Matrix server is a customer's, so a federated
+ * human is the NORM, not an edge — which made every invite, kick and DM to such a human target a
+ * fabricated account. This map keeps the identity that was actually SEEN, so composition can
+ * return a fact instead of a guess. Same discovered-over-composed rule as `agentMxid` above.
+ *
+ * Persisted in bridge-state.json beside `botDmRooms` and `dmRooms` for the same reason they are:
+ * the names that come back from the backend outlive a bridge restart, so an in-memory map would
+ * quietly revert every federated human to the composed guess on the first restart.
+ *
+ * Keys are lowercased because Matrix requires lowercase localparts (see `agentUserId`'s history of
+ * exactly this bug) and because the backend round-trips names through case-insensitive matching —
+ * a case-drifted miss here would silently fall back to the wrong-server composition.
+ *
+ * A KNOWN LIMITATION, NAMED RATHER THAN HIDDEN: the key is the bare name, so two humans with the
+ * SAME localpart on DIFFERENT servers still collide — last observed wins, and the loser's
+ * invites/DMs go to the winner's server. The honest fix is keying humans by full MXID everywhere
+ * (backend included), which is a model change out of scope for this map. Until then this map makes
+ * the common case (distinct names) correct instead of never correct.
+ */
+if (!state.humanMxids) state.humanMxids = {};
 // Seed trustedManagedRooms from existing bridge-created rooms
 if (!state.trustedManagedRooms) {
   state.trustedManagedRooms = {};
@@ -1017,6 +1044,16 @@ function agentMxid(name) {
 function humanUserId(name) {
   // Accept full MXID (federated users) or localpart (legacy)
   if (typeof name === 'string' && name.startsWith('@') && name.includes(':')) return name;
+  /*
+   * Prefer the MXID this human was actually OBSERVED with (`state.humanMxids`, populated by
+   * `humanNameFromUserId`) over recomposing one. Composition asserts our own server name, and for
+   * a federated human — the normal case under ADR-016 — that names an account that may not exist.
+   * The fallback below is only for a human nobody has seen yet (e.g. an operator adding a member
+   * by bare name), where the local-server guess is all there is and is what this function always
+   * did.
+   */
+  const observed = state.humanMxids?.[String(name || '').toLowerCase()];
+  if (observed) return observed;
   return makeUserId(name);
 }
 
@@ -2648,10 +2685,47 @@ function agentNameFromUserId(userId) {
   return match ? match[1] : null;
 }
 
+/*
+ * Remember which server a human was actually seen on (see `state.humanMxids` where the map and its
+ * collision limitation live). Called only from surfaces where the MXID is SERVER-ATTESTED — event
+ * senders, membership state_keys, joined-member lists, the user directory, operator config.
+ * Deliberately NOT called from `parseMentions`: a mention is room-member-authored CONTENT, so
+ * recording from it would let anyone in a trusted room redirect a human's future invites and DMs
+ * to a server of their choosing by typing a pill.
+ */
+function rememberHumanMxid(localpart, userId) {
+  // The map answers for HUMANS only. Every current caller filters agents first; this guard keeps
+  // a future careless caller from teaching it agent identities, which `agentMxid` already owns.
+  if (isAgentUser(userId)) return;
+  if (!state.humanMxids) state.humanMxids = {};
+  const key = String(localpart).toLowerCase();
+  if (state.humanMxids[key] === userId) return;
+  state.humanMxids[key] = userId;
+  try {
+    saveState();
+  } catch (error) {
+    /*
+     * Logged, not rethrown — the one deviation from saveState's loud-failure contract, and it is
+     * argued rather than habitual: this runs inside message ingress and membership handling, and a
+     * blocked state file (see `stateWritesBlockedReason`) must degrade this map to memory-only, not
+     * take the bridge's ingress down with it. The in-memory entry still corrects every composition
+     * for this process; what a failed persist costs is only that a restart falls back to the
+     * composed guess until the human is observed again.
+     */
+    console.warn(`[bridge] could not persist observed MXID for "${key}" (${userId}): ${error.message}`);
+  }
+}
+
 function humanNameFromUserId(userId) {
   // @overseer:<server> → overseer
   const match = userId.match(/^@([^:]+):/);
-  return match ? match[1] : userId;
+  if (!match) return userId;
+  /*
+   * The localpart is the internal name, so the server half would be lost right here — record the
+   * full MXID first, or `humanUserId` can only ever guess it back onto our own server.
+   */
+  rememberHumanMxid(match[1], userId);
+  return match[1];
 }
 
 function isAgentUser(userId) {
@@ -4181,6 +4255,13 @@ export class MatrixBridge {
       if (name.startsWith(AGENT_PREFIX)) continue;
       if (name.startsWith('_')) continue;
       if (SKIP_USERS.has(name)) continue;
+
+      // A directory result or a greeting-config entry is an observed identity too — and this loop
+      // extracts the localpart itself rather than going through humanNameFromUserId, so it must
+      // record what it saw itself. Before the greeted check, not after: an already-greeted
+      // federated human on an upgraded deployment still needs to teach the map once.
+      rememberHumanMxid(name, user.user_id);
+
       if (state.greetedHumans.includes(humanDmKey(name))) continue;
 
       // This is an ungreeted human — create DM and greet
@@ -8024,6 +8105,19 @@ export {
 export function agentTokenStateForTest() {
   return state.agentTokens;
 }
+
+/*
+ * The federated-human seam: the live observed-MXID map plus the two functions on either side of
+ * it, so a test can drive an observation and assert what composition does with it — including the
+ * named localpart-collision limitation, which is pinned rather than discovered.
+ */
+export function humanMxidStateForTest() {
+  return state.humanMxids;
+}
+export {
+  humanUserId as humanUserIdForTest,
+  humanNameFromUserId as humanNameFromUserIdForTest,
+};
 
 /** Persist the live state, so a durability test can assert what reaches disk. */
 export function saveStateForTest() {
