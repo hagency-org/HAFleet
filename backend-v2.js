@@ -40,7 +40,7 @@ import roleCapacity from './lib/role-capacity.json' with { type: 'json' };
 import { buildSeats, normalizeDeclaration, seatIdentity } from './lib/seat-store.js';
 import { createEngagementStore, routeRequest, EngagementError } from './lib/engagement-store.js';
 import { ProjectSideStore, ProjectSideStoreError } from './lib/project-side-store.js';
-import { ensureRepresentative } from './lib/matrix-representative.js';
+import { ensureRepresentative, mintAgentIdentity } from './lib/matrix-representative.js';
 import { generateRegistration, renderRegistrationYaml } from './lib/appservice-receiver.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
@@ -8983,6 +8983,124 @@ app.post('/api/project-sides/:id/registration', requireBearer, (req, res) => {
  * `requireBearer`: which customers we work for, and under what names, is the contributor's own record.
  * No project-side caller writes here.
  */
+/**
+ * Mint an agent's Matrix identity ON THE PROJECT SIDE IT SERVES.
+ *
+ * THE CIRCULAR DEPENDENCY THIS BREAKS is the operator's opening question: 「agent 在没有接受项目邀请之前
+ * 是不知道加入哪个 home server 的,所以你先创建了 biglittle 的 matrix id 是错的」. `agentUserId()` composes
+ * `@ac_<name>:<MATRIX_SERVER_NAME>` from a module constant, so an identity existed before any project was
+ * known — on a server that, without federation, the project cannot see. `mintAgentIdentity` was written
+ * for this and had NO product caller: its 12 references were all in tests. This is the caller.
+ *
+ * THE SIDE IS RESOLVED HERE, NOT BY THE BRIDGE, because the bridge's eight `ensureAgentAccount` call
+ * sites do not all know a room — threading one through them would be a refactor in service of a lookup
+ * the backend can already do. Two sources, in order:
+ *
+ *   1. `agent.projectSide`, set from the provision plan and never from the agent's own request body.
+ *   2. failing that, the agent's own BINDINGS: a binding names a room, a room id carries its server, and
+ *      that server IS the side. This is what makes the endpoint work for agents that predate
+ *      provisioning — including every agent in this deployment.
+ *
+ * NO SIDE IS A REFUSAL, not a fallback to `MATRIX_SERVER_NAME`. An agent serving nobody has no side to
+ * hold an identity on, and quietly minting on our own server is precisely the bug above.
+ *
+ * WHAT EACH CREDENTIAL KIND YIELDS, stated because they differ and only one is complete end to end:
+ *
+ *   appservice        an MXID and NO token. The namespace already authorises it, so nothing is
+ *                     registered and HAFleet acts as the agent by masquerading (`?user_id=`). The
+ *                     identity is real; the bridge's send path still wants a per-agent token, so an
+ *                     appservice-minted agent can be ADDRESSED but cannot yet SEND. Named as the next
+ *                     gap rather than hidden behind a success.
+ *   registrationToken an MXID and a real access token, from a real `/register` on their homeserver.
+ *                     Complete: the bridge stores it and sends with it.
+ */
+app.post('/api/agents/:name/matrix-identity', requireBearer, async (req, res) => {
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+
+  let sideId = agent.projectSide ?? null;
+  let source = 'agent.projectSide';
+  if (!sideId) {
+    try {
+      const rooms = approvalStore.listBindings({ agent: agentName }).map((b) => b.projectRoomId);
+      for (const room of rooms) {
+        const candidate = sideIdForRoom(room);
+        if (candidate && projectSideStore.getSide(candidate)) { sideId = candidate; source = `binding:${room}`; break; }
+      }
+    } catch { /* the refusal below is the same either way */ }
+  }
+  if (!sideId) {
+    return res.status(409).json({
+      error: `no project side can be determined for ${agentName}: it has no projectSide and no binding `
+        + 'on a configured side. An identity is minted ON a side, so there is nowhere to mint one.',
+      code: 'no_project_side',
+    });
+  }
+  const side = projectSideStore.getSide(sideId);
+  if (!side) return res.status(409).json({ error: `project side ${sideId} is not configured`, code: 'no_project_side' });
+
+  let credential;
+  try {
+    credential = projectSideStore.credentialFor(sideId);
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to read the project side credential');
+  }
+  if (!credential) {
+    return res.status(409).json({
+      error: `project side ${sideId} has no credential, so nothing can be minted on it`,
+      code: 'no_credential',
+    });
+  }
+
+  try {
+    const minted = await mintAgentIdentity({
+      side,
+      credential,
+      localpart: `${MATRIX_AGENT_PREFIX_FOR_REGISTRATION}${agentName}`.toLowerCase(),
+    });
+    /*
+     * `mintAgentIdentity` RETURNS a verdict rather than throwing — `{ minted: false, reason }` — and the
+     * first version of this endpoint assumed a throw, so every refusal would have been answered 200 with
+     * `mxid: null`. Found by reading the function instead of trusting the shape I expected: a caller that
+     * reports "minted" for a refusal is worse than one that crashes, because the record it writes is
+     * empty and nothing says so.
+     */
+    if (!minted.minted) {
+      return res.status(409).json({
+        error: `could not mint an identity for ${agentName} on ${sideId}: ${minted.reason || 'refused'}`,
+        code: minted.reason || 'mint_refused',
+        sideId,
+        credentialKind: credential.kind,
+      });
+    }
+    /*
+     * The TOKEN is returned and not stored here. The bridge keeps agent credentials in its own
+     * `bridge-state.json` — the store `agentMxid()` reads — and a second copy in the backend would be a
+     * second thing to rotate. So this endpoint mints and answers; the caller persists.
+     */
+    return res.json({
+      ok: true,
+      agent: agentName,
+      sideId,
+      sideResolvedFrom: source,
+      mxid: minted.mxid,
+      credentialKind: credential.kind,
+      // `null` for appservice, and that is the identity being complete rather than the mint failing.
+      accessToken: minted.accessToken ?? null,
+      canSend: Boolean(minted.accessToken),
+      note: minted.accessToken
+        ? null
+        : 'appservice identities carry no per-agent token: the agent can be addressed, and the bridge '
+          + 'send path still requires one, so it cannot send as this agent yet',
+    });
+  } catch (error) {
+    const code = error?.code === 'taken' ? 409 : error?.code === 'bad_request' ? 400 : 502;
+    return res.status(code).json({ error: error?.message || 'failed to mint the identity', code: error?.code ?? null });
+  }
+});
+
 app.post('/api/project-sides/:id/projects', requireBearer, (req, res) => {
   try {
     const project = projectSideStore.upsertProject(req.params.id, req.body || {});
