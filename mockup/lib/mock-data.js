@@ -146,6 +146,42 @@ export const ENGAGEMENT_STATES = ['pending', 'active', 'ended'];
 export const ROUTE_REASONS = ['notWhitelisted', 'overOffer', 'overCeiling'];
 
 /*
+ * 项目方 — one homeserver, one credential, one representative, one allocation (ADR-016 decision 1).
+ * The id IS the server name, which is what makes a room id enough to attribute spend.
+ *
+ * EVERY ALLOCATION STATE IS PRESENT, because the three are not interchangeable and a fixture showing
+ * only a funded side is how "unallocated" gets built as "unlimited":
+ *
+ *   hq.example       funded, and partly committed — the ordinary case
+ *   biglittle.example a real allocation of ZERO: closed to new work, still configured
+ *   newco.example    UNALLOCATED (null): refuses everything, and is not the same as zero
+ *
+ * `newco.example` also has no credential and has never been reached, which is what a side looks like
+ * between "the operator added it" and "the operator finished configuring it".
+ */
+export const projectSides = [
+  {
+    id: 'hq.example', label: 'Acme HQ', credentialKind: 'appservice', accessState: 'ok',
+    representative: '@hafleet:hq.example', active: true,
+    allocatedTokens: 4_000_000,
+    budget: { allocated: 4_000_000, committed: 1_550_000, remaining: 2_450_000 },
+  },
+  {
+    id: 'biglittle.example', label: 'BigLittle', credentialKind: 'registrationToken', accessState: 'ok',
+    representative: '@hafleet:biglittle.example', active: true,
+    allocatedTokens: 0,
+    budget: { allocated: 0, committed: 0, remaining: 0 },
+  },
+  {
+    id: 'newco.example', label: null, credentialKind: null, accessState: null,
+    representative: null, active: true,
+    allocatedTokens: null,
+    // Null, not zero. `remaining` cannot be computed from an allocation that does not exist.
+    budget: { allocated: null, committed: 0, remaining: null },
+  },
+];
+
+/*
  * Every branch of the routing is exercised, because a fixture that shows only
  * the happy path is how "falls back to approval" gets built as "rejects".
  */

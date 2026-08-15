@@ -105,6 +105,18 @@ const READS = [
    * cannot reach a credential route.
    */
   /^project-sides\/[A-Za-z0-9._:-]*[.:][A-Za-z0-9._:-]*$/,
+  /*
+   * The side's budget: `{ allocated, committed, remaining }` and nothing else. Added as its own entry
+   * rather than by loosening the rule above, because the rule above is deliberately one segment — a
+   * `[^/]*` tail there would have admitted `inbound-credentials` again through the back door.
+   *
+   * DERIVED FIGURES ARE FETCHED, NOT RECOMPUTED. The console could sum active engagements per side
+   * itself; it already holds them. It must not: `committed` is defined by the backend's
+   * `committedForProjectSide`, and a second implementation is how "two answers for the same question"
+   * gets shipped — the exact drift the capability layer's comment above refuses for role eligibility.
+   * The same argument applies here, so the same choice is made.
+   */
+  /^project-sides\/[A-Za-z0-9._:-]*[.:][A-Za-z0-9._:-]*\/budget$/,
 ];
 
 /*

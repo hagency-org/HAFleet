@@ -8371,17 +8371,87 @@ app.get('/api/approval-bindings', requireApprovalBridgeSecret, (req, res) => {
  */
 function respondProjectSideError(res, error, fallback = 'project side operation failed') {
   if (error instanceof ProjectSideStoreError) {
-    const status = { bad_request: 400, side_active: 409, persistence_failed: 503 }[error.code] ?? 500;
+    /*
+     * `conflict` was missing until a test asked for 409 and got 500. The store has always been able to
+     * throw it — `upsertProject` does, when two projects claim one room — and an unmapped code falls
+     * through to 500, which tells a caller "we broke" about a request that was simply refused. Mapped
+     * here rather than at the throw site, because the mapping is this layer's job.
+     */
+    const status = {
+      bad_request: 400, conflict: 409, side_active: 409, not_found: 404, persistence_failed: 503,
+    }[error.code] ?? 500;
     return res.status(status).json({ error: error.message, code: error.code });
   }
   return res.status(500).json({ error: error?.message || fallback });
+}
+
+/**
+ * 项目方 → 项目 → 外派员工, joined for a read.
+ *
+ * THE THIRD LEVEL IS NOT A NEW FIELD, and that is the whole point. An approval BINDING already says
+ * "this agent can be reached in this room" (ADR-002), and a project already says "this room is that
+ * project" — so who serves a project is the intersection of two records that exist, not a third thing
+ * to keep in step with them. Adding `agent.project` would have created a copy that drifts the first
+ * time a binding is deactivated without anyone remembering to clear it.
+ *
+ * IT ALSO WORKS BACKWARDS. Bindings that predate projects resolve the moment their room is named,
+ * which is how this deployment's existing rooms appear under a project without being touched.
+ *
+ * JOINED HERE, NOT IN THE STORE. `lib/project-side-store.js` deliberately knows nothing about
+ * engagements or bindings — its header says so, and it is what lets a side record be read without
+ * depending on another store being consistent. So the join lives at the read, where a failure degrades
+ * to "no agents listed" rather than to a broken side record.
+ *
+ * `retiredAt` is carried because a retired agent must still be VISIBLE under the project it served:
+ * decision 7 keeps the record precisely so the history stays attributable, and a tree that hid retired
+ * agents would present a project as having been staffed by nobody.
+ */
+function withProjectStaffing(side) {
+  if (!side?.projects?.length) return side;
+  let bindings = [];
+  try {
+    bindings = approvalStore.listBindings({ includeInactive: true });
+  } catch {
+    // A read of the binding store must not cost the caller the side record it asked for.
+    return side;
+  }
+  const byRoom = new Map();
+  for (const b of bindings) {
+    if (!b?.projectRoomId) continue;
+    const list = byRoom.get(b.projectRoomId) || [];
+    list.push(b);
+    byRoom.set(b.projectRoomId, list);
+  }
+  return {
+    ...side,
+    projects: side.projects.map((project) => {
+      const rows = project.roomId ? (byRoom.get(project.roomId) || []) : [];
+      return {
+        ...project,
+        agents: rows.map((b) => {
+          const record = agents[b.agent];
+          return {
+            name: b.agent,
+            // Whether the PROJECT can still reach this agent — the binding's claim, not the agent's health.
+            bound: b.active !== false,
+            // Whether the agent itself is up. Three states, and `null` is "no such record" rather than
+            // offline: an agent named by a binding that no longer exists is a fact worth showing.
+            online: record ? record.online !== false : null,
+            retiredAt: record?.retiredAt ?? null,
+            role: record?.role ?? null,
+          };
+        }).sort((a, b) => a.name.localeCompare(b.name)),
+      };
+    }),
+  };
 }
 
 app.get('/api/project-sides', requireBearer, (req, res) => {
   try {
     return res.json({
       ok: true,
-      sides: projectSideStore.listSides({ activeOnly: req.query?.active === 'true' }),
+      sides: projectSideStore.listSides({ activeOnly: req.query?.active === 'true' })
+        .map(withProjectStaffing),
     });
   } catch (error) {
     return respondProjectSideError(res, error, 'failed to list project sides');
@@ -8722,7 +8792,9 @@ app.get('/api/project-sides/inbound-credentials', requireApprovalBridgeSecret, (
 app.get('/api/project-sides/:id', requireBearer, (req, res) => {
   const side = projectSideStore.getSide(req.params.id);
   if (!side) return res.status(404).json({ error: 'project side not found' });
-  return res.json({ ok: true, side });
+  // Same staffing join as the list read, so one side and all sides answer the same shape. A page that
+  // drilled into a side and lost its third level would look like the agents had gone.
+  return res.json({ ok: true, side: withProjectStaffing(side) });
 });
 
 /*
@@ -8882,6 +8954,44 @@ app.post('/api/project-sides/:id/registration', requireBearer, (req, res) => {
     });
   } catch (error) {
     return respondProjectSideError(res, error, 'failed to generate registration');
+  }
+});
+
+/*
+ * 项目 under a 项目方 — the middle layer of 项目方 → 项目 → 外派员工.
+ *
+ * A project is a NAME and a ROOM, nothing more: the 接单员 is one per side (the operator's ruling) and
+ * the budget is one per side, so a project holds neither. What it adds is the thing this product has
+ * never stored — `groupForRoom(projectRoomId) || meta.group || projectRoomId` degrades to a raw room
+ * id, which is why every binding in this deployment displays `!aXbY7pQ2:hq.example` instead of a name.
+ *
+ * `requireBearer`: which customers we work for, and under what names, is the contributor's own record.
+ * No project-side caller writes here.
+ */
+app.post('/api/project-sides/:id/projects', requireBearer, (req, res) => {
+  try {
+    const project = projectSideStore.upsertProject(req.params.id, req.body || {});
+    if (!project) return res.status(404).json({ error: 'project side not found' });
+    return res.json({ ok: true, project, side: projectSideStore.getSide(req.params.id) });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to save project');
+  }
+});
+
+/*
+ * ARCHIVE, and there is no DELETE — 「项目方暂时不可以删除,可以 archive 掉」. Reversible, because an
+ * archive that cannot be undone is a delete with a gentler name; `archived: false` in the body restores.
+ * A project's room carries the engagements served through it, so forgetting the project would leave
+ * that history attributable to nothing.
+ */
+app.post('/api/project-sides/:id/projects/:projectId/archive', requireBearer, (req, res) => {
+  try {
+    const archived = req.body?.archived === undefined ? true : req.body.archived === true;
+    const project = projectSideStore.setProjectArchived(req.params.id, req.params.projectId, archived);
+    if (!project) return res.status(404).json({ error: 'project not found on this project side' });
+    return res.json({ ok: true, project });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to archive project');
   }
 });
 

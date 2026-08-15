@@ -27,6 +27,7 @@ const FIXTURE_DATA = {
   offers: fixture.offers,
   whitelist: fixture.whitelist,
   engagements: fixture.engagements,
+  projectSides: fixture.projectSides,
   alerts: fixture.alerts,
   usage: fixture.usage,
   frameworks: [],
