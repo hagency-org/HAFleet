@@ -146,6 +146,76 @@ export const ENGAGEMENT_STATES = ['pending', 'active', 'ended'];
 export const ROUTE_REASONS = ['notWhitelisted', 'overOffer', 'overCeiling'];
 
 /*
+ * 项目方 — one homeserver, one credential, one representative, one allocation (ADR-016 decision 1).
+ * The id IS the server name, which is what makes a room id enough to attribute spend.
+ *
+ * EVERY ALLOCATION STATE IS PRESENT, because the three are not interchangeable and a fixture showing
+ * only a funded side is how "unallocated" gets built as "unlimited":
+ *
+ *   hq.example       funded, and partly committed — the ordinary case
+ *   biglittle.example a real allocation of ZERO: closed to new work, still configured
+ *   newco.example    UNALLOCATED (null): refuses everything, and is not the same as zero
+ *
+ * `newco.example` also has no credential and has never been reached, which is what a side looks like
+ * between "the operator added it" and "the operator finished configuring it".
+ */
+export const projectSides = [
+  {
+    id: 'hq.example', label: 'Acme HQ', credentialKind: 'appservice', accessState: 'ok',
+    representative: '@hafleet:hq.example', namespace: '@ac_.*',
+    awaitingInstall: false, credentialIssuedAt: null, active: true,
+    allocatedTokens: 4_000_000,
+    budget: { allocated: 4_000_000, committed: 1_550_000, remaining: 2_450_000 },
+    projects: [
+      {
+        id: 'api-service', name: 'acme/api-service', roomId: '!aXbY7pQ2:hq.example', archived: false,
+        agents: [
+          { name: 'claude-agent', bound: true, online: true, retiredAt: null, role: 'architect' },
+          // Bound but DOWN: the project can still reach it, the agent is not running. Two facts.
+          { name: 'octos-agent', bound: true, online: false, retiredAt: null, role: 'review' },
+        ],
+      },
+      {
+        id: 'docs-portal', name: 'acme/docs-portal', roomId: '!kL9mN4rS:hq.example', archived: false,
+        agents: [{ name: 'claude-agent', bound: true, online: true, retiredAt: null, role: 'documentation' }],
+      },
+      {
+        /*
+         * ARCHIVED, and it keeps its staff — a retired agent under a closed project. Both are on purpose:
+         * decision 7 stands records down instead of deleting them, so a fixture that showed an archived
+         * project as empty would teach the page to hide exactly the history that rule exists to keep.
+         */
+        id: 'legacy-billing', name: 'acme/legacy-billing', roomId: '!oldRoom99:hq.example', archived: true,
+        agents: [{ name: 'retired-agent', bound: false, online: false, retiredAt: 1_754_000_000_000, role: 'coding' }],
+      },
+    ],
+  },
+  {
+    id: 'biglittle.example', label: 'BigLittle', credentialKind: 'registrationToken', accessState: 'ok',
+    representative: '@hafleet:biglittle.example', namespace: null,
+    awaitingInstall: false, credentialIssuedAt: null, active: true,
+    allocatedTokens: 0,
+    budget: { allocated: 0, committed: 0, remaining: 0 },
+    // A project with no room yet: named before it exists, which is the ordinary order of events.
+    projects: [{ id: 'fips-review', name: 'openssl/fips-review', roomId: null, archived: false, agents: [] }],
+  },
+  {
+    /*
+     * ISSUED, WAITING ON THEM. The registration exists and the project side has not installed it and
+     * restarted — a wait we do not control, and not a failure. It has a representative already, because
+     * an appservice's representative is its sender_localpart, which is decided when the file is written.
+     */
+    id: 'newco.example', label: 'NewCo', credentialKind: 'appservice', accessState: 'unverified',
+    representative: '@hafleet:newco.example', namespace: '@ac_.*',
+    awaitingInstall: true, credentialIssuedAt: 1_755_200_000_000, active: true,
+    allocatedTokens: null,
+    // Null, not zero. `remaining` cannot be computed from an allocation that does not exist.
+    budget: { allocated: null, committed: 0, remaining: null },
+    projects: [],
+  },
+];
+
+/*
  * Every branch of the routing is exercised, because a fixture that shows only
  * the happy path is how "falls back to approval" gets built as "rejects".
  */

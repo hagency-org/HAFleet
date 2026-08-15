@@ -185,6 +185,8 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-14 | `api-server-heartbeat` | `accepts takeover from a newer boot timestamp` | **yes** — `expected 404 to be 200`, the second shape; whole-suite only, clean in isolation 4/4; the branch touched engagements and project sides, which that file never references |
 | 2026-08-14 | `api-runtime` | `MCP transitions do not emit legacy MCP-specific SSE event types` | **yes** — `Error: read ECONNRESET`, the third shape; whole-suite only, clean in isolation 4/4; seen on MERGED master, so no branch to attribute it to |
 | 2026-08-14 | `acp-workspace-attribution` | `an agent that has never reported one has null, not a guess` | **yes** — `TypeError: res.body.find is not a function` on `GET /api/agents`; whole-suite only, clean in isolation 4/4; the branch touched only dashboard render/proxy files, which that test never reaches |
+| 2026-08-14 | `agent-state-integration` | `PATCH unpause → agent not immediately deliverable` | **yes** — whole-suite only, clean in isolation 3/3; the branch touched project sides, credentials and the appservice receiver, none of which that file references |
+| 2026-08-14 | `agent-ops-client-backend` | `agent_ops_cancel_dispatch_is_capability_bound_and_idempotent` (+5 cascading in the same file) | **yes** — `Test timed out in 30000ms`; whole-suite only, clean in isolation 3/3, and the branch changed only markdown |
 
 **A SIGHTING THAT WAS CHECKED FOR AUTHORSHIP BEFORE BEING CALLED A FLAKE.** The `api-agents` row above
 failed once inside a whole-suite run and once more in isolation, which is unusual — this class is
@@ -226,6 +228,20 @@ There is no branch here. That removes the question and leaves the class: `read E
 documented shape, and `api-runtime` is the fifth file to show one. Five files, five shapes between them,
 no two adjacent in the code — which is the same evidence the memory theory was dropped on, now with the
 last confound removed.
+
+**A SIGHTING WITH AN AGGRAVATING FACTOR WORTH RECORDING.** The `agent-ops-client-backend` row above
+failed on a run where the branch's only change was MARKDOWN — no code could have caused it — and the
+machine was simultaneously running seven long-lived processes put there by the same session: a backend,
+a bridge, a dashboard, a Next.js console, a homeserver in Docker, its postgres, and a GUI Matrix client.
+
+That does not make the flake class load-dependent; four of the specimens above appeared on an otherwise
+quiet machine. It does mean **a whole-suite run competing with a live deployment is not a clean
+measurement**, and this table should say so, because the obvious next move — "run it again" — is right
+for the wrong reason if nobody notices what else was running.
+
+The practice: when a whole-suite failure appears while a deployment is up, record what was up. A 30s
+timeout on a machine with seven servers is weaker evidence of a code defect than the same timeout on an
+idle one, and the distinction is free to record and impossible to recover later.
 
 **THE SAME FILE, A DIFFERENT TEST, A DIFFERENT SHAPE — and reachability answered instead of assumed.**
 The `api-server-heartbeat-sweep` row dated 2026-08-14 is the second sighting in that file (the first is

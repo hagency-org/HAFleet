@@ -22,7 +22,7 @@ what is not, because "partly built" without the second half is the same defect i
 | # | decision | status | evidence for the gap |
 |---|---|---|---|
 | 1 | 项目方 (project side) is a first-class entity: one homeserver, one credential, one representative | **built** (2026-08-14) | `lib/project-side-store.js` + ten endpoints on `backend-v2.js`. The id IS the server name, so one side per homeserver is structural rather than validated. `publicSide` is an allow-list projection, so no read path can return the credential. NOT built: `HOMESERVER` is still the contributor's own server as a module constant — **54** references remain (`bridge-matrix.js` 47, `lib/bot-commands.js` 7), and most are CORRECT (bot-created rooms, the bot's own token, the operator on our server). The side record exists; the bridge is not fully de-globalised, and an audit of which of the 54 are wrong has not been done |
-| 2 | non-federation is the assumption; federation is an optimization inside the same model; **built** for both credential kinds | **built** (2026-08-14) | `CREDENTIAL_KINDS = ['appservice', 'registrationToken']`; `lib/appservice-receiver.js` and `lib/appservice-listener.js` handle HS→AS transactions, and the bridge starts an intake (`startAppserviceIntake`) with a token-identified router. Verified against a real Palpo 0.4.0: registration installed, three transactions accepted, same-txnId idempotency, wrong-token 403, then unload proven via `M_UNKNOWN_TOKEN`. NOT built: nothing CHOOSES federation as the optimization — there is no code path that detects a federating side and skips registration. The listener is off unless `HAFLEET_APPSERVICE_PORT` is set, and it is not set on this deployment |
+| 2 | non-federation is the assumption; federation is an optimization inside the same model; **built** for both credential kinds | **built and RUNNING** (2026-08-14) | `CREDENTIAL_KINDS = ['appservice', 'registrationToken']`; `lib/appservice-receiver.js` and `lib/appservice-listener.js` handle HS→AS transactions, and the bridge starts an intake (`startAppserviceIntake`) with a token-identified router. Verified against a real Palpo 0.4.0: registration installed, three transactions accepted, same-txnId idempotency, wrong-token 403, then unload proven via `M_UNKNOWN_TOKEN`. NOT built: nothing CHOOSES federation as the optimization — there is no code path that detects a federating side and skips registration. The listener IS running on this deployment (`serving 1 project side(s)`, `first transaction accepted`), but the existing intake room is ENCRYPTED and the appservice cannot read it — the run succeeded via the bot's crypto store. See "What the first live run found" |
 | 3 | the representative is registered per project side and is NOT an agent | **built** (2026-08-14) | `lib/matrix-representative.js`: `registerRepresentative` (random password, discarded), `ensureRepresentative`, `whoami`, and `classifyMatrixFailure` where only 401/403 are verdicts and anything unknown is `unreachable`. Wired at two call sites in `backend-v2.js`, and the credential is stored BEFORE the verdict so a crash between the two writes loses a verdict rather than a token. `createRoomOnSide` / `sendToRoomOnSide` are used by the bridge, which is how an approval reaches a decider on the borrower's server. NOT built: the representative does not yet invite an agent into a project room — the agent still joins on its own |
 | 4 | an agent instance is minted on acceptance from a resource declaration | **partly built** (2026-08-14) | The identity act is built (`mintAgentIdentity`), and side attribution is built: a provision plan carries its `sideId`, the backend remembers the assignment in `provisionedSides`, and the agent record gains `projectSide` at registration — taken from that map, never from the agent's own request body, which `POST /api/agents` now enforces per-field. NOT built: nothing calls `mintAgentIdentity` from any provisioning path yet, and the resource declaration is still an operator-chosen preset rather than a role-matched selection. **Corrected 2026-08-14:** the budget half of this row cited the `/api/dispatch` gate; the admission point is acceptance, and the gate is there now |
 | 5 | the invite object is a room alias plus `knock` | **decided, not built** | `joinRoomByAlias`, `room_alias`, `matrix.to`, `inviteToken`, `joinCode` — zero matches repository-wide |
@@ -141,7 +141,60 @@ project side (`{ kind: 'appservice', asToken, namespace }` versus
 `{ kind: 'registrationToken', token }`). Both mint accounts on that side's server; they differ in
 what the project installed, not in what HAFleet does afterwards.
 
-*Status — **built** (2026-08-14) for both credential kinds, and verified against a real Palpo 0.4.0 rather than a mock. **Not built:** nothing detects a federating side and skips registration, so federation is still a stated optimization with no code path; and the appservice listener is off unless `HAFLEET_APPSERVICE_PORT` is set, which it is not here.*
+*Status — **built and RUNNING** (2026-08-14). Both credential kinds, verified against a real Palpo 0.4.0 rather than a mock, and the intake is now live rather than merely implemented: the listener is up on this deployment, `refreshAppserviceSides` reports `serving 1 project side(s): palpo.test`, and a real homeserver push was accepted — `first transaction accepted from palpo.test`. **Not built:** nothing detects a federating side and skips registration, so federation remains a stated optimization with no code path. **Newly known and NOT solved: encryption blocks this channel** — see "What the first live run found".*
+
+## What the first live run found, 2026-08-14
+
+The chain was run end to end for the first time — a borrower registered on a real homeserver, typing
+`!request` into a real room, through to a binding and a committed allocation. Everything below was found
+by running it; none of it is visible by reading.
+
+**IT WORKS, AND HERE IS THE EVIDENCE.** `@hafleet:palpo.test` was created BY the homeserver from the
+registration — HAFleet never registered it — and joined a project room by masquerading with the
+`as_token`. A borrower sent `!request coding 80000`; the bot read it, the backend created the
+engagement, routed it `notWhitelisted`, assigned `biglittle`, and on approval bound the agent and
+committed the tokens. The side's budget moved 0 → 250,000 → 450,000 of 1,000,000 across three requests.
+Before the allocation existed the same request was REFUSED with `no_allocation` and raised the alarm;
+setting the allocation resolved the alarm automatically. Both halves of decision 6 observed in one run.
+
+**ENCRYPTION BLOCKS THE APPSERVICE CHANNEL, and this is the finding that matters most.** The intake room
+is `m.megolm.v1.aes-sha2`, so the listener logged:
+
+> `encrypted event in !TLrgp…:palpo.test cannot be read — ADR-016 requires plaintext intake rooms, and an
+> appservice has no crypto store on the project side`
+
+The run therefore succeeded **only because the BOT read the command** — it has a crypto store; the
+appservice does not. So the appservice intake is live and, on this room, blind. The plaintext-intake
+requirement was recorded as a settled question; it is now a live precondition with an existing room that
+violates it. Either intake rooms are created plaintext, or the appservice needs a crypto store — which
+is the cost decision 3 was written to avoid.
+
+**PALPO PERSISTS REGISTRATIONS; REPLACING THE FILE DOES NOTHING.** The reconnaissance note in this ADR
+says adding a registration needs a restart. True of ADDING and false of REPLACING: registrations live in
+`appservice_registrations` in postgres, keyed by id, and a restart does not re-read a file for an id
+already present. A homeserver kept pushing with tokens from a superseded registration while we compared
+against current ones, which presents as an unexplained 403 forever. **Rotating an appservice token
+requires deleting the row.** Two stale rows were found on this deployment, one of them holding a token
+that had leaked into an operator's terminal; deleting them is what actually revoked it.
+
+**A 403 WITH NO DIAGNOSTIC COSTS AN HOUR.** The homeserver logs its own token as `REDACTED`, so from
+outside there was no way to separate "no token" from "the as_token instead of the hs_token" from "a
+stale registration". The receiver now logs token FINGERPRINTS on refusal — sha256 truncated to 8 hex
+characters, useless for authenticating and sufficient for comparing — and names the cause on the first
+occurrence. Acceptance is announced once per side for the same reason: a working intake used to produce
+silence, so "it works" could only be inferred from the absence of an error in somebody else's log.
+
+**THE OWNER IS READ BY THE BACKEND, NOT THE BRIDGE.** `bindEngagement` runs in `backend-v2.js`, so
+`HAFLEET_OWNER_MXID` and `HAFLEET_OWNER_DM_ROOM` must be set there. Three bridge restarts changed
+nothing while the error message said exactly what was wrong; what it did not say is which process needed
+to hear it. Until the owner was known, approval produced `active` engagements with `bound: false` — the
+allocation was committed and the project could not reach the agent, which is the worst of both.
+
+**A DESTRUCTIVE DEFAULT, FOUND BY TRIPPING IT.** `PUT /api/project-sides/:id/credential` read
+`req.body?.credential ?? null`, so a body that did not mention a credential destroyed the existing one
+and answered `ok: true`. On this path the cost of an accidental wipe lands on somebody we cannot reach:
+re-issuing means the project side installs a new file and restarts their homeserver. The field must now
+be present; clearing is an explicit `credential: null`.
 
 **3. The representative is registered per project side, and it is NOT an agent.** The chicken-and-egg
 dissolves at exactly this split, so it is the load-bearing decision of this record:
@@ -201,7 +254,7 @@ Two constraints on this:
 - **Names must carry the project side.** `mx_${role}_${tier}_${seq}` is not attributable to a
   project side, and under decision 7 the cascade needs exactly that attribution.
 
-*Status — **partly built** (2026-08-14). The identity act exists (`mintAgentIdentity`) and side attribution is built end to end: a provision plan carries its `sideId`, the backend remembers it in `provisionedSides`, and the agent record gains `projectSide` at registration — from that map, never from the agent's own body, which `POST /api/agents` now enforces per-field. **Not built:** no product code calls `mintAgentIdentity` (its 12 references are all in tests), and the resource declaration is still an operator-chosen preset rather than a role-matched selection — `resourceForRole`, `presetTier`, `provisionedResources` and `no_resource_for_role` have zero occurrences. `provisionReservations` is incremented and never decremented, so plans leak for the process lifetime.*
+*Status — **partly built** (2026-08-14). The identity act exists (`mintAgentIdentity`) and side attribution is built end to end: a provision plan carries its `sideId`, the backend remembers it in `provisionedSides`, and the agent record gains `projectSide` at registration — from that map, never from the agent's own body, which `POST /api/agents` now enforces per-field. **Not built:** no product code calls `mintAgentIdentity` (its 12 references are all in tests) — the agent's Matrix identity `@ac_biglittle:palpo.test` appeared in the project room during the live run WITHOUT it, through the bridge's own path, so the minting function remains unexercised while the outcome it exists to produce happens by another route. The resource declaration is still an operator-chosen preset rather than a role-matched selection — `resourceForRole`, `presetTier`, `provisionedResources` and `no_resource_for_role` have zero occurrences. `provisionReservations` is incremented and never decremented, so plans leak for the process lifetime.*
 
 **5. The invite object is a room alias plus `knock`.** The project publishes
 `#its-project:its-server` and sets the join rule to `knock`; HAFleet's representative knocks; the

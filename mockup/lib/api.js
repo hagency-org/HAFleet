@@ -329,6 +329,85 @@ export async function fetchLive() {
      * beside live engagements would read as "no project can reach this agent" —
      * a claim, where the truth is that the record did not answer.
      */
+    /*
+     * 项目方 — the side of the market I am registered WITH, and what it may draw.
+     *
+     * ADR-016 decision 1: one side per homeserver, and the id IS the server name. The list carries the
+     * side's own `allocatedTokens`; the BUDGET is a second read per side because it reaches across into
+     * the engagement store, and a side record must not silently depend on another store being
+     * consistent — the backend keeps them apart for that reason and so does this.
+     *
+     * NOT DERIVED HERE. Summing active engagements per side would be easy and wrong: `committed` is
+     * defined by the backend's `committedForProjectSide`, and a second implementation of a money figure
+     * is exactly the drift the capability layer refuses for role eligibility.
+     *
+     * `absent` rather than a fixture on failure, like `contributions` beside it. An empty side list
+     * rendered next to live engagements would read as "I am registered with nobody", which is a claim;
+     * the truth would be that the record did not answer. One side's failed budget leaves that side's
+     * figure null and the rest intact — a broken read must not blank the section.
+     */
+    (async () => {
+      try {
+        const sides = (await get('project-sides'))?.sides ?? [];
+        out.projectSides = await Promise.all(sides.map(async (side) => {
+          let budget = null;
+          try {
+            const b = await get(`project-sides/${encodeURIComponent(side.id)}/budget`);
+            budget = { allocated: b?.allocated ?? null, committed: b?.committed ?? null, remaining: b?.remaining ?? null };
+          } catch { /* leave null; the row says the figure is unavailable rather than showing a zero */ }
+          return {
+            id: side.id,
+            label: side.label ?? null,
+            credentialKind: side.credentialKind ?? null,
+            accessState: side.accessState ?? null,
+            /*
+             * THE 接单员, from whichever kind of credential this side uses. An appservice's representative
+             * IS its `sender_localpart`; a registration-token side has a real registered account whose
+             * MXID `ensureRepresentative` recorded. Both are "who we sent", so both land in one field —
+             * a page that read only `representative.mxid` showed "none" for every appservice side, which
+             * is the majority case under the operator's model.
+             */
+            representative: side.representative?.mxid
+              ?? (side.senderLocalpart ? `@${side.senderLocalpart}:${side.id}` : null),
+            namespace: side.namespace ?? null,
+            /*
+             * ISSUED, BUT NOT YET CONFIRMED WORKING. A Palpo registration loads once at startup, so
+             * between us issuing it and the project side installing it and restarting there is a wait we
+             * do not control. `hasCredential && accessState === 'unverified'` is exactly that state, and
+             * it must not be rendered as a failure: nothing is broken, we are waiting on them.
+             */
+            awaitingInstall: Boolean(side.hasCredential) && side.accessState === 'unverified',
+            credentialIssuedAt: side.accessIssuedAt ?? null,
+            active: side.active !== false,
+            allocatedTokens: side.allocatedTokens ?? null,
+            budget,
+            /*
+             * 项目 → 外派员工. The backend joins bindings onto projects, so the console does not: who
+             * staffs a project is the intersection of a binding and a project room, and re-deriving it
+             * here would be a second answer to a question the backend already answers.
+             */
+            projects: (side.projects ?? []).map((pr) => ({
+              id: pr.id,
+              name: pr.name,
+              roomId: pr.roomId ?? null,
+              archived: pr.archived === true,
+              agents: (pr.agents ?? []).map((a) => ({
+                name: a.name,
+                bound: a.bound !== false,
+                online: a.online,
+                retiredAt: a.retiredAt ?? null,
+                role: a.role ?? null,
+              })),
+            })),
+          };
+        }));
+        provenance.projectSides = 'live';
+      } catch (e) {
+        out.projectSides = [];
+        provenance.projectSides = 'absent';
+        errors.projectSides = e.message;
+      }
+    })(),
     (async () => {
       try {
         out.contributions = (await get('contributions'))?.contributions ?? [];

@@ -757,6 +757,18 @@
         },
         {
           "method": "POST",
+          "path": "/api/project-sides/:id/projects",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/project-sides/:id/projects/:projectId/archive",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
           "path": "/api/whitelist",
           "owner": "operator.whitelist-admin",
           "auth": "bearer"

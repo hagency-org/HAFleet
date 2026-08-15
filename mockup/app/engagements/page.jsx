@@ -56,6 +56,158 @@ function RouteReason({ e, t }) {
   );
 }
 
+/*
+ * 项目方 — WHOSE budget each request spends.
+ *
+ * On this page rather than its own, because a request's route and its refusal come from the same place:
+ * a room id carries its origin server, that server IS the project side, and the side's allocation is the
+ * second ceiling every request has to pass. The first is the agent's own. A reader looking at "declined
+ * — over allocation" needs the allocation on the same screen or the sentence is unattributable.
+ *
+ * THREE ALLOCATION STATES, RENDERED AS THREE. `null` is UNALLOCATED and refuses everything; `0` is a
+ * deliberate close that leaves the side configured; a number is a budget. Printing null as 0 would erase
+ * the distinction the store exists to keep, and this console's own rule is that a blank is never a zero.
+ */
+function ProjectSides({ t }) {
+  /*
+   * `roleCapacity` is read HERE and not taken as a prop. The first version called `roleName` — which is
+   * defined inside `EngagementsPage`, not in this scope — and the build caught it with
+   * `ReferenceError: roleName is not defined` while prerendering. Worth noting that the root eslint
+   * config ignores `mockup/**`, so `no-undef` never sees this file: in the backend that same class of
+   * mistake is caught by a linter, and here only by `next build`.
+   */
+  const { projectSides, provenance, roleCapacity } = useData();
+  const sides = projectSides ?? [];
+  const roleName = (key) => roleCapacity.roles[key]?.displayName ?? key;
+
+  const reach = (state) => {
+    if (state === 'ok') return <span className="ok">{t('en.reachOk')}</span>;
+    if (state === 'unauthorized' || state === 'forbidden') return <span className="stranded">{t('en.reachBad')}</span>;
+    if (state === 'unreachable') return <span className="overqual">{t('en.reachUnknown')}</span>;
+    return <span className="dim">{t('en.reachNever')}</span>;
+  };
+
+  /*
+   * The budget cell. `budget === null` means that side's own read failed — distinct from an unallocated
+   * side, and it must not borrow the unallocated wording, because "refuses all work" would be a claim
+   * about the side rather than about our ignorance.
+   */
+  const alloc = (side) => {
+    if (!side.budget) return <Blank why="en.why.sideBudgetUnread" t={t} />;
+    const { allocated, committed, remaining } = side.budget;
+    if (allocated === null) {
+      return (
+        <>
+          <span className="stranded">{t('en.allocUnset')}</span>
+          <span className="dim">{t('en.allocUnsetWhy')}</span>
+        </>
+      );
+    }
+    if (allocated === 0) return <span className="overqual">{t('en.allocClosed')}</span>;
+    return (
+      <>
+        <span>{t('en.allocLeft', { left: fmtTokens(remaining), alloc: fmtTokens(allocated) })}</span>
+        <span className="dim">{t('en.allocCommitted', { n: fmtTokens(committed) })}</span>
+      </>
+    );
+  };
+
+  return (
+    <>
+      <h2 className="sec">{t('en.sidesHead')}<span className="note">{t('en.sidesNote')}</span></h2>
+      <div className="notice">{t('en.sidesIntro')}</div>
+      {provenance.projectSides === 'absent' ? (
+        <div className="notice">{t('en.sidesAbsent')}</div>
+      ) : sides.length === 0 ? (
+        <div className="notice">{t('en.sidesEmpty')}</div>
+      ) : (
+        <div className="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>{t('en.colSide')}</th>
+                <th>{t('en.repHead')}</th>
+                <th>{t('en.colCred')}</th>
+                <th>{t('col.state')}</th>
+                <th>{t('en.colAlloc')}</th>
+                <th>{t('en.colProjects')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sides.map((side) => (
+                <tr key={side.id}>
+                  <td>
+                    <span className="mono">{side.id}</span>
+                    {side.label && <span className="dim">{side.label}</span>}
+                    {!side.active && <span className="dim">{t('en.sideInactive')}</span>}
+                  </td>
+                  <td>
+                    {side.representative
+                      ? <span className="mono">{side.representative}</span>
+                      : <span className="dim">{t('en.repNone')}</span>}
+                    {/* The namespace is the point of an appservice: every future agent is already
+                        covered by it, so nothing has to be registered one at a time. */}
+                    {side.namespace && (
+                      <>
+                        <span className="dim mono">{side.namespace}</span>
+                        <span className="dim">{t('en.nsNote')}</span>
+                      </>
+                    )}
+                  </td>
+                  <td>{side.credentialKind
+                    ? <span className="mono">{side.credentialKind}</span>
+                    : <span className="stranded">{t('en.credNone')}</span>}</td>
+                  {/*
+                    * WAITING IS NOT FAILING. A registration loads only when their homeserver restarts,
+                    * so between issuing it and them acting there is a gap we do not control. Rendered as
+                    * its own state rather than as "unverified", which reads as something we got wrong.
+                    */}
+                  <td>{side.awaitingInstall ? (
+                    <>
+                      <span className="overqual">{t('en.awaitingInstall')}</span>
+                      <span className="dim">{t('en.awaitingInstallWhy')}</span>
+                    </>
+                  ) : reach(side.accessState)}</td>
+                  <td>{alloc(side)}</td>
+                  <td>{!side.projects?.length
+                    ? <span className="dim">{t('en.projNone')}</span>
+                    : side.projects.map((pr) => (
+                      <div key={pr.id} className="proj">
+                        <span className={pr.archived ? 'dim' : ''}>{pr.name}</span>
+                        {pr.archived && <span className="dim">{t('en.projArchived')}</span>}
+                        {pr.roomId
+                          ? <span className="dim mono">{pr.roomId}</span>
+                          : <span className="dim">{t('en.projNoRoom')}</span>}
+                        {pr.agents.length === 0
+                          ? <span className="dim">{t('en.projStaffNone')}</span>
+                          : pr.agents.map((a) => (
+                            <span key={a.name} className="staff">
+                              <Link href={`/agents/${encodeURIComponent(a.name)}`}>{a.name}</Link>
+                              {a.role && <span className="dim">{roleName(a.role)}</span>}
+                              {/*
+                                * Four separate facts, never collapsed into one badge. An agent can be
+                                * reachable and stopped, or running and cut off, and a single "status"
+                                * would have to pick one to report. `online === null` is "no such agent
+                                * record", which is not the same as offline.
+                                */}
+                              {a.retiredAt && <span className="stranded">{t('en.staffRetired')}</span>}
+                              {!a.bound && <span className="stranded">{t('en.staffUnbound')}</span>}
+                              {a.online === false && !a.retiredAt && <span className="overqual">{t('en.staffDown')}</span>}
+                              {a.online === null && <span className="overqual">{t('en.staffNoRecord')}</span>}
+                            </span>
+                          ))}
+                      </div>
+                    ))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function EngagementsPage() {
   const t = useT();
   const {
@@ -102,12 +254,14 @@ export default function EngagementsPage() {
           controls behave differently behind a live store — they write — and a
           reader pressing Approve is entitled to know whether it committed
           anything. */}
-      <Provenance slices={['agents', 'engagements', 'offers', 'whitelist', 'ceilings']} />
+      <Provenance slices={['agents', 'engagements', 'offers', 'whitelist', 'ceilings', 'projectSides']} />
 
       {/* The routing stated once, at the top, because every row below is an
           instance of it and a reader who has to infer the rule from examples will
           infer the wrong one. */}
       <div className="notice">{t('en.routingNote')}</div>
+
+      <ProjectSides t={t} />
 
       <div className="cards">
         <div className="card">
