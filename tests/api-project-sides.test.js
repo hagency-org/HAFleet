@@ -15,7 +15,7 @@
  * stubbing the call would test the parts that were never in doubt.
  */
 
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import request from 'supertest';
 import { createServer } from 'http';
 import { readFileSync } from 'fs';
@@ -1044,6 +1044,59 @@ describe('a side\'s allocation, and refusing to mint without one', () => {
     expect(r.body.status).toBe('provision');
     expect(r.body.name).toMatch(/^mx_documentation_lightweight_/);
     expect(r.body.sideId).toBeUndefined();
+  });
+
+  test('A FULFILLED PLAN RELEASES ITS SEAT: register the provisioned agent, and the cell frees up', async () => {
+    /*
+     * THE LEAK THIS PINS. A reservation exists to hold a (role, tier) seat between "plan handed out"
+     * and "agent registered" — and until 2026-08-15 it was incremented and NEVER released, so every
+     * plan ever issued held its seat for the life of the process. With MATRIX_AGENT_MAX_PER_CELL=1:
+     * plan issued (reserved=1), agent registered and later deleted (cell empty again) — and the next
+     * provision was still refused, because the ghost reservation counted forever.
+     */
+    const app = await bootProvisionable();
+    await sideWithAllocation(app, 1_000_000);
+
+    const plan = await provision(app, { requestedTokens: 100_000 });
+    expect(plan.body.status).toBe('provision');
+
+    // The seat is HELD while the plan is outstanding: same cell, second ask queues.
+    expect((await provision(app, { requestedTokens: 100_000 })).body.status).toBe('queued');
+
+    // The plan is fulfilled — and the registration consumes it: side attributed, reservation released.
+    await request(app).post('/api/agents').send({ name: plan.body.name, type: 'claude' }).expect(200);
+    expect((await request(app).get(`/api/agents/${plan.body.name}`)).body.projectSide).toBe(SERVER);
+
+    /*
+     * THE DISTINGUISHING ASK. The registered agent has no runtime profile, so it does not qualify for
+     * the cell and cannot be routed to — which isolates the reservation as the only thing that could
+     * block this. Under the leak the ghost reservation counted forever and this stayed `queued` for the
+     * life of the process; with the release it provisions.
+     */
+    const after = await provision(app, { requestedTokens: 100_000 });
+    expect(after.body.status).toBe('provision');
+  });
+
+  test('an ABANDONED plan expires: the launcher died, and the seat comes back on its own', async () => {
+    /*
+     * The reservation's OTHER legitimate end. A plan whose launcher crashed between plan and
+     * registration must not hold the seat forever — 15 minutes of silence is presumed dead, and the
+     * expiry is lazy (checked at the next cap read) so nothing needs a timer.
+     */
+    vi.useFakeTimers();
+    try {
+      const app = await bootProvisionable();
+      await sideWithAllocation(app, 1_000_000);
+
+      expect((await provision(app, { requestedTokens: 100_000 })).body.status).toBe('provision');
+      expect((await provision(app, { requestedTokens: 100_000 })).body.status).toBe('queued');
+
+      vi.setSystemTime(Date.now() + 16 * 60 * 1000);
+      const revived = await provision(app, { requestedTokens: 100_000 });
+      expect(revived.body.status).toBe('provision');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test('zero is a real allocation and is not the same as unset', async () => {

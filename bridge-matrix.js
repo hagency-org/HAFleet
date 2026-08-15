@@ -3805,9 +3805,20 @@ export class MatrixBridge {
            * an encrypted event arriving over an appservice cannot be read here. Left as a warning
            * because the failure it produces otherwise is a borrower whose message vanished.
            */
-          console.warn(
-            `[appservice] ${sideId}: encrypted event in ${roomId} cannot be read — ADR-016 requires `
-            + 'plaintext intake rooms, and an appservice has no crypto store on the project side',
+          /*
+           * RAISED, NOT ONLY LOGGED. This warning sat in a log nobody reads while the first live run
+           * succeeded only because the BOT could read the room — the appservice channel was blind and
+           * nothing said so anywhere an operator looks. The dedupe scope is the ROOM: one alert per
+           * blind room, not one per event, so a chatty room does not bury the fact it is trying to
+           * report. It rides postWarning into the backend's alert store like every other bridge
+           * condition, and the remedy is stated because there are exactly two.
+           */
+          this.postWarning(
+            `appservice intake is BLIND to ${roomId} on ${sideId}: the room is encrypted and an `
+            + 'appservice has no crypto store. Messages there are only seen if the bot is a member '
+            + 'with working E2EE. Remedy: create intake rooms unencrypted (ADR-016 plaintext-intake '
+            + 'rule; encryption cannot be removed from an existing room), or keep relying on the bot.',
+            { kind: 'appservice-encrypted-intake', scope: roomId },
           );
           continue;
         }
