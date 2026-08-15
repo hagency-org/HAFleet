@@ -155,13 +155,21 @@ a message from the agent arrived with `sender=@ac_sitehand:palpo.test` — the A
 representative whose token carried it. That last line is the one worth having: a masquerade that
 silently posted as `@hafleet` would have looked identical from this side.
 
-**A SECOND TOKEN DEPENDENCY THE UNIT TESTS COULD NOT SEE.** The first attempt went through the DM
-path and was dropped before it reached the send at all: `ensureDmRoom` does
-`const fromToken = this.getAgentToken(agentName); if (!fromToken) return null;` and then creates the
-room against `HOMESERVER` — our own server. So an appservice agent can speak in a project ROOM and
-still cannot open a DM, and the room it would open is on the wrong homeserver besides. Same shape as
-the retry ladder that was fixed in the same change, found only because a live run uses the path a
-product uses instead of the path a test reaches for.
+**A SECOND TOKEN DEPENDENCY THE UNIT TESTS COULD NOT SEE, since fixed.** The first attempt went
+through the DM path and was dropped before it reached the send at all: `ensureDmRoom` did
+`if (!fromToken) return null` and created the room against `HOMESERVER` — our own server.
+`ensureDmRoomOnSide` now creates it on the customer's homeserver, with the representative as creator,
+both parties invited, and NO bot member (it has an account on our server only, so inviting it would
+leave a pending invite nobody can accept — the appservice intake reads the room instead, which is why
+it is plaintext).
+
+That fix then produced a THIRD live finding, worth recording because of what it says about the tests:
+the first version invited only the human, and Palpo answered **403 on the agent's own join** —
+`private_chat` is invite-only and the representative is the creator, not the agent. The unit test had
+passed because its fake homeserver answered 200 to any join. A mock permissive enough to hide a
+precondition the real thing enforces is not a weaker test, it is a test of something else. Both
+parties are now in the invite list and the test asserts it; verified after: Palpo reports the DM room
+holding `@ac_sitehand` and `@hafleet`, and the message arriving with `sender=@ac_sitehand`.
 
 **Also observed, and not a defect:** `/api/dispatch` answered `queued` rather than `provision`,
 because `MATRIX_AGENT_MAX_PER_CELL` defaults to 0. Auto-provisioning is off by default and that route
