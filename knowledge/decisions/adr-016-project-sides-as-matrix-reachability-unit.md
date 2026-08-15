@@ -21,7 +21,7 @@ what is not, because "partly built" without the second half is the same defect i
 
 | # | decision | status | evidence for the gap |
 |---|---|---|---|
-| 1 | 项目方 (project side) is a first-class entity: one homeserver, one credential, one representative | **built** (2026-08-14) | `lib/project-side-store.js` + ten endpoints on `backend-v2.js`. The id IS the server name, so one side per homeserver is structural rather than validated. `publicSide` is an allow-list projection, so no read path can return the credential. NOT built: `HOMESERVER` is still the contributor's own server as a module constant — **54** references remain (`bridge-matrix.js` 47, `lib/bot-commands.js` 7), and most are CORRECT (bot-created rooms, the bot's own token, the operator on our server). The side record exists; the bridge is not fully de-globalised, and an audit of which of the 54 are wrong has not been done |
+| 1 | 项目方 (project side) is a first-class entity: one homeserver, one credential, one representative | **built** (2026-08-14) | `lib/project-side-store.js` + ten endpoints on `backend-v2.js`. The id IS the server name, so one side per homeserver is structural rather than validated. `publicSide` is an allow-list projection, so no read path can return the credential. THE AUDIT IS DONE (2026-08-15) — see "Which HOMESERVER references are wrong" below. 55 references, 41 of them live code: most are CORRECT (the bot's own account and sync, rooms on our server, fallbacks for credentials that state no homeserver). Two were reachable by a side room and are fixed via a new `sideForRoom`: inviting a human into a side DM now goes through the representative, and inviting the BOT into a side room is skipped rather than attempted. NOT built: five more sites are wrong-if-reached but not reachable yet (avatars, group member changes, legacy DM upgrades, media URLs, invite rejection) — listed below rather than fixed blind, because each needs the side's CREDENTIAL and not just its base url |
 | 2 | non-federation is the assumption; federation is an optimization inside the same model; **built** for both credential kinds | **built and RUNNING** (2026-08-14) | `CREDENTIAL_KINDS = ['appservice', 'registrationToken']`; `lib/appservice-receiver.js` and `lib/appservice-listener.js` handle HS→AS transactions, and the bridge starts an intake (`startAppserviceIntake`) with a token-identified router. Verified against a real Palpo 0.4.0: registration installed, three transactions accepted, same-txnId idempotency, wrong-token 403, then unload proven via `M_UNKNOWN_TOKEN`. NOT built: nothing CHOOSES federation as the optimization — there is no code path that detects a federating side and skips registration. The listener IS running on this deployment (`serving 1 project side(s)`, `first transaction accepted`), but the existing intake room is ENCRYPTED and the appservice cannot read it — the run succeeded via the bot's crypto store. See "What the first live run found" |
 | 3 | the representative is registered per project side and is NOT an agent | **built** (2026-08-14) | `lib/matrix-representative.js`: `registerRepresentative` (random password, discarded), `ensureRepresentative`, `whoami`, and `classifyMatrixFailure` where only 401/403 are verdicts and anything unknown is `unreachable`. Wired at two call sites in `backend-v2.js`, and the credential is stored BEFORE the verdict so a crash between the two writes loses a verdict rather than a token. `createRoomOnSide` / `sendToRoomOnSide` are used by the bridge, which is how an approval reaches a decider on the borrower's server. The representative now brings the agent in (2026-08-15): `inviteToRoomOnSide` invites as the representative and `joinRoomOnSideAsAgent` puts the agent in under the side's as_token — the one act only an appservice can perform, since a per-agent token does not exist on such a side. Called at both acceptance points (auto-join and approval verdict), awaited, and reported as `roomAdmission` beside `binding`; a refused invite does not undo the approval. A registrationToken side is invited but not joined, because there the agent holds its own token and the bridge's existing path uses it. Re-admission is built too (2026-08-15): a send that fails on membership re-invites and rejoins through the same pair, which is the only moment anything notices the loss. And the agent can now SPEAK: `sendAsAgentContent` accepts an appservice sender and signs with the side's as_token, naming the agent in `?user_id=`, so `canSend` stopped meaning has-a-per-agent-token. NOT built: nothing re-admits an IDLE agent, so a membership lost while it has nothing to say is discovered by the next message rather than by a sweep |
 | 4 | an agent instance is minted on acceptance from a resource declaration | **partly built** (2026-08-14) | The identity act is built (`mintAgentIdentity`), and side attribution is built: a provision plan carries its `sideId`, the backend remembers the assignment in `provisionedSides`, and the agent record gains `projectSide` at registration — taken from that map, never from the agent's own request body, which `POST /api/agents` now enforces per-field. NOT built: nothing calls `mintAgentIdentity` from any provisioning path yet, The resource declaration is now a ROLE-MATCHED selection (2026-08-15): `resourceForRole` picks the lowest-tier configured preset that can staff the (role, tier) ask — qualifying tier, a declared ceiling, and not on the role's `excluded` list — and a deployment with presets but none qualifying gets `no_resource_for_role`, a refusal taken BEFORE the reservation so an impossible ask holds no seat. A zero-preset deployment keeps the static `TIER_RUNTIME` row, so an upgrade is not an outage. Enforcing `excluded` also gave that list its first reader: it had stated a per-role rule no code applied. **Corrected 2026-08-14:** the budget half of this row cited the `/api/dispatch` gate; the admission point is acceptance, and the gate is there now |
@@ -142,6 +142,42 @@ project side (`{ kind: 'appservice', asToken, namespace }` versus
 what the project installed, not in what HAFleet does afterwards.
 
 *Status — **built and RUNNING** (2026-08-14). Both credential kinds, verified against a real Palpo 0.4.0 rather than a mock, and the intake is now live rather than merely implemented: the listener is up on this deployment, `refreshAppserviceSides` reports `serving 1 project side(s): palpo.test`, and a real homeserver push was accepted — `first transaction accepted from palpo.test`. **Not built:** nothing detects a federating side and skips registration, so federation remains a stated optimization with no code path. **Newly known and NOT solved: encryption blocks this channel** — see "What the first live run found".*
+
+## Which HOMESERVER references are wrong (audit, 2026-08-15)
+
+Row 1 recorded that an audit had not been done. Here it is. 55 textual references; 14 are comments or
+the declarations themselves, leaving 41 in live code.
+
+**Correct, and not to be "fixed":** `ensureBotAccount`, `start`, `pollBotInvites`, `ensureBotDmRoom`
+(the bot has an account on our server and nowhere else — asserting our own server IS the right answer);
+`ensureAgentAccount` (registers agents on our server, which is the legacy path a project-side agent
+deliberately does not take — it warns NEEDS PROVISIONING instead); `_upgradeLegacyDmRoom` (rooms that
+are ours by definition); `normalizeAgentCredential` and `baseUrlForToken` (fallbacks for a credential
+that states no homeserver, where our own is the only defensible guess).
+
+**Wrong AND reachable — fixed:**
+
+| site | what it did | now |
+|---|---|---|
+| `_inviteHumanToDm` | tried the bot then an agent token against our server | the representative invites, on the side |
+| `inviteBotIntoAgentRoom` | invited the bot with an AGENT token against OUR server | skipped for a side room, with the reason |
+
+The first became reachable only because `ensureDmRoomOnSide` persists side DM rooms, so the next
+message takes the existing-room branch and lands there. That reachability was introduced by the fix
+above it, which is why both are in the same change.
+
+**Wrong if reached, NOT reachable yet — left alone deliberately:** `ensureRoomAvatar`,
+`syncAgentAvatarToDmRooms`, `ensureAgentAvatar`, `setCustomAgentAvatar` (avatars on a side room);
+`onGroupMembersChanged` and `createRoomForGroup` (a group mapped to a side room — reachable only by
+hand-editing `groupRoomMap`, which is how the live run drove it); `matrixMxcToHttpUrl` /
+`matrixMxcToClientMediaUrl` (media uploaded to a side is served by the side); `rejectPendingInvite`
+(rejecting an invite that came from a side room); `discoverAndGreetHumans` (searches our directory, so
+it cannot see a side's humans — a gap, not a wrong call).
+
+Each of those needs the side's CREDENTIAL and not merely its base url: swapping the url alone would
+send the bot's token to somebody else's homeserver, which is a worse bug than the one it fixes. That is
+why `sideForRoom` returns the acting pair rather than a string, and why these are listed rather than
+converted in bulk.
 
 ## What the SECOND live run found (2026-08-15)
 

@@ -6467,6 +6467,17 @@ export class MatrixBridge {
    * has already joined, and unwinding that is neither possible nor desirable.
    */
   async inviteBotIntoAgentRoom(roomId, agentToken, context = 'bot invite') {
+    /*
+     * REFUSED FOR A SIDE ROOM, because there is nothing to attempt. The bot holds an account on our
+     * server only, so an invite it could never accept would sit pending forever — and the invite would
+     * be sent with an AGENT token against OUR homeserver, which for a side room is two wrong things at
+     * once. What reads that room instead is the appservice intake (ADR-016 decision 2).
+     */
+    if (this.sideForRoom(roomId)) {
+      console.log(`[bot-invite] skipped for project-side room ${roomId} (${context}): the bot has no `
+        + 'account there; the appservice intake reads it');
+      return 'skipped-project-side';
+    }
     const res = await fetch(
       `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`,
       {
@@ -7244,6 +7255,27 @@ export class MatrixBridge {
   }
 
   /**
+   * The project side a room belongs to, or null when it is ours.
+   *
+   * A room id names its origin server, and `actingSideFor` says whether we hold a credential that can
+   * act there. Every `HOMESERVER` in this file predates project sides and asserts our own server for
+   * whatever room it was handed — correct while every room was ours, and ADR-016 row 1 records that
+   * an audit of which of the remaining references are WRONG had not been done.
+   *
+   * This is that audit's first tool rather than a blanket swap, and deliberately so: a room on a side
+   * needs the side's CREDENTIAL as well as its base url, so replacing the url alone would send the
+   * bot's token to somebody else's homeserver — a worse bug than the one it fixes.
+   */
+  sideForRoom(roomId) {
+    if (typeof roomId !== 'string' || !roomId.includes(':')) return null;
+    const server = roomId.slice(roomId.indexOf(':') + 1).toLowerCase();
+    if (server === MATRIX_SERVER_NAME) return null;
+    const acting = this.actingSideFor(server);
+    if (!acting || acting.credential?.kind !== 'appservice') return null;
+    return acting;
+  }
+
+  /**
    * A DM between a project-side agent and a human on that same side.
    *
    * Called only when the agent has no token of its own, which on an appservice side is always. What it
@@ -7524,6 +7556,24 @@ export class MatrixBridge {
 
   async _inviteHumanToDm(roomId, humanName, options = {}) {
     const humanTargetUserId = humanUserId(humanName);
+    /*
+     * A ROOM ON A PROJECT SIDE IS INVITED INTO BY THE REPRESENTATIVE, not by our bot and not by an
+     * agent token. The ladder below tries the bot first and the agent second, both against
+     * `HOMESERVER` — which was right while every DM room was ours. `ensureDmRoomOnSide` made side DM
+     * rooms reachable HERE (they persist in `state.dmRooms`, so the next message takes the existing-room
+     * branch and lands on this method), so this is a reachability I introduced and had to follow.
+     */
+    const side = this.sideForRoom(roomId);
+    if (side) {
+      const invited = await inviteToRoomOnSide({
+        side: side.side,
+        credential: side.credential,
+        roomId,
+        userId: humanTargetUserId,
+      });
+      if (invited.invited || invited.already) return { ok: true, via: 'representative' };
+      return { ok: false, error: invited.reason || 'representative invite failed', via: 'representative' };
+    }
     const parseJsonSafe = async (res) => {
       try {
         return await res.json();
