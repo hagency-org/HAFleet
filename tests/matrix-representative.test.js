@@ -19,6 +19,8 @@ import {
   classifyMatrixFailure,
   createRoomOnSide,
   ensureRepresentative,
+  inviteToRoomOnSide,
+  joinRoomOnSideAsAgent,
   mintAgentIdentity,
   registerRepresentative,
   sendToRoomOnSide,
@@ -773,5 +775,129 @@ describe('sending into a room on a project side', () => {
       msgType: 'm.reaction', fetchImpl: impl,
     });
     expect(impl.calls[0].url).toContain('/send/m.reaction/');
+  });
+});
+
+/*
+ * 接单员把外派员工带进项目房间 — ADR-016 decision 3's remaining half.
+ *
+ * WHY THIS COULD NOT BE THE AGENT'S OWN JOB. The bridge joins rooms with `getAgentToken`, and an
+ * appservice side mints no per-agent token at all: the namespace makes an agent ADDRESSABLE, not able
+ * to act. So on exactly the sides ADR-016 calls normal, nobody could put the agent in the room — the
+ * agent least of all. The side's credential does it, which is what the namespace is for.
+ */
+describe('the representative brings an agent into a project room', () => {
+  const ROOM = `!proj:${SERVER}`;
+  const AGENT = `@ac_worker:${SERVER}`;
+
+  test('invites as the representative, masquerading on an appservice side', async () => {
+    const impl = fakeFetch([ok({ room_id: ROOM })]);
+    const r = await inviteToRoomOnSide({ side: SIDE, credential: asCred(), roomId: ROOM, userId: AGENT, fetchImpl: impl });
+    expect(r).toMatchObject({ invited: true, already: false });
+    const [call] = impl.calls;
+    expect(call.url).toContain(`/rooms/${encodeURIComponent(ROOM)}/invite`);
+    // The masquerade is the sender_localpart, NOT the agent: the representative is who invites.
+    expect(call.url).toContain(`user_id=${encodeURIComponent(`@hafleet:${SERVER}`)}`);
+    expect(JSON.parse(call.body).user_id).toBe(AGENT);
+    expect(call.headers.Authorization).toBe(`Bearer ${AS_TOKEN}`);
+  });
+
+  test('ALREADY A MEMBER is a success with nothing done, not a failure', async () => {
+    /*
+     * Matrix answers 403 M_FORBIDDEN both for "already in the room" and for "you may not invite here",
+     * with no code to tell them apart. A caller that cannot either retries forever or reports a working
+     * room as broken — so this is the difference that lets dispatch call invite every time.
+     */
+    const impl = fakeFetch([fail(403, { errcode: 'M_FORBIDDEN', error: `${AGENT} is already in the room.` })]);
+    const r = await inviteToRoomOnSide({ side: SIDE, credential: asCred(), roomId: ROOM, userId: AGENT, fetchImpl: impl });
+    expect(r).toMatchObject({ invited: false, already: true, reason: null });
+  });
+
+  test('a genuine 403 stays a failure and keeps its reason', async () => {
+    const impl = fakeFetch([fail(403, { errcode: 'M_FORBIDDEN', error: 'You are not allowed to invite users' })]);
+    const r = await inviteToRoomOnSide({ side: SIDE, credential: asCred(), roomId: ROOM, userId: AGENT, fetchImpl: impl });
+    expect(r.invited).toBe(false);
+    expect(r.already).toBe(false);
+    /*
+     * `M_FORBIDDEN`, not the prose. `matrixError` prefers the errcode module-wide, so the server's
+     * sentence is dropped — which is why the already-a-member case above is matched on the prose
+     * BEFORE the error is built, and not by inspecting it afterwards.
+     */
+    expect(r.reason).toMatch(/HTTP 403: M_FORBIDDEN/);
+    expect(r.state).toBe('rejected');
+  });
+
+  test('a room on another server is refused before any credential is presented', async () => {
+    const impl = fakeFetch([]);
+    const r = await inviteToRoomOnSide({
+      side: SIDE, credential: asCred(), roomId: '!elsewhere:other.example', userId: AGENT, fetchImpl: impl,
+    });
+    expect(r.invited).toBe(false);
+    expect(r.reason).toMatch(/not on palpo\.test/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('a registrationToken side with no representative token yet says so', async () => {
+    const impl = fakeFetch([]);
+    const r = await inviteToRoomOnSide({ side: SIDE, credential: regCred(), roomId: ROOM, userId: AGENT, fetchImpl: impl });
+    expect(r.invited).toBe(false);
+    expect(r.reason).toMatch(/no representative token yet/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('the agent joins under the appservice credential, as itself', async () => {
+    const impl = fakeFetch([ok({ room_id: ROOM })]);
+    const r = await joinRoomOnSideAsAgent({ side: SIDE, credential: asCred(), roomId: ROOM, agentUserId: AGENT, fetchImpl: impl });
+    expect(r).toMatchObject({ joined: true, roomId: ROOM });
+    const [call] = impl.calls;
+    expect(call.url).toContain(`/join/${encodeURIComponent(ROOM)}`);
+    // Here the masquerade IS the agent — that is the whole difference from the invite above.
+    expect(call.url).toContain(`user_id=${encodeURIComponent(AGENT)}`);
+    expect(call.headers.Authorization).toBe(`Bearer ${AS_TOKEN}`);
+  });
+
+  test('joining as an agent is REFUSED on a registrationToken side', async () => {
+    /*
+     * There the agent holds a real token. Joining with the representative's would put the
+     * REPRESENTATIVE in the room while reporting that the agent joined — a false record of who is
+     * present, which is worse than a refusal that names the path that works.
+     */
+    const impl = fakeFetch([]);
+    const r = await joinRoomOnSideAsAgent({
+      side: SIDE, credential: regCred({ representativeToken: REP_TOKEN }), roomId: ROOM, agentUserId: AGENT, fetchImpl: impl,
+    });
+    expect(r.joined).toBe(false);
+    expect(r.reason).toMatch(/per-agent token and must use it/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('a user outside the namespace is refused, and the as_token is never sent', async () => {
+    const impl = fakeFetch([]);
+    const r = await joinRoomOnSideAsAgent({
+      side: SIDE, credential: asCred(), roomId: ROOM, agentUserId: `@borrower:${SERVER}`, fetchImpl: impl,
+    });
+    expect(r.joined).toBe(false);
+    expect(r.reason).toMatch(/outside the namespace/);
+    expect(r.reason).toMatch(/@ac_\.\*/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('an unparseable namespace is reported as such, not silently permitted', async () => {
+    const impl = fakeFetch([]);
+    const r = await joinRoomOnSideAsAgent({
+      side: SIDE, credential: asCred({ namespace: '@ac_[' }), roomId: ROOM, agentUserId: AGENT, fetchImpl: impl,
+    });
+    expect(r.joined).toBe(false);
+    expect(r.reason).toMatch(/not a usable regex/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('a full MXID is required, because a bare name would masquerade as a guess', async () => {
+    await expect(joinRoomOnSideAsAgent({
+      side: SIDE, credential: asCred(), roomId: ROOM, agentUserId: 'ac_worker', fetchImpl: fakeFetch([]),
+    })).rejects.toThrow(RepresentativeError);
+    await expect(inviteToRoomOnSide({
+      side: SIDE, credential: asCred(), roomId: ROOM, userId: 'worker', fetchImpl: fakeFetch([]),
+    })).rejects.toThrow(RepresentativeError);
   });
 });
