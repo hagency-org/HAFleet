@@ -784,6 +784,13 @@ td.cap-via { color: var(--ok); }
 .meter i.over { background: var(--bad); border-right: 2px solid var(--fg); }
 .over-by { display: block; margin-top: 2px; font-size: 11px; color: var(--bad); }
 
+/* ── entering a project side's credential ──────────────────────────────────── */
+.cred-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+.cred-form { display: grid; gap: 6px; margin-top: 6px; max-width: 420px; }
+.cred-row { display: grid; grid-template-columns: 130px 1fr; gap: 8px; align-items: center; font-size: 12px; }
+.cred-row input, .cred-row select { width: 100%; font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); }
+.btn-s.danger { border-color: var(--bad); color: var(--bad); }
+
 .spark { display: inline-flex; align-items: flex-end; gap: 2px; height: 20px; }
 .spark i { width: 5px; border-radius: 1px; background: var(--accent); }
 
@@ -1038,6 +1045,11 @@ h3.sub { font-size: 12.5px; font-weight: 600; margin: 2px 0 8px; color: var(--in
    the HTML is identical either way — so check-switches.mjs asserts the computed
    display instead. */
 .tbl td > span.dim { display: block; }
+/* AND `.stranded`, for the same reason. The rule was written for `.dim` because that was the class
+   the three known welds used; the over-commit warning under Approve/Reject uses `.stranded` and
+   welded into the button row — found when check-switches.mjs stopped looking only at `.dim`. The
+   class list is the accident here; being a secondary LINE is the rule. */
+.tbl td > span.stranded, .tbl td > span.ok, .tbl td > span.overqual { display: block; }
 
 /* 项目方 → 项目 → 外派员工, inside one cell.
  *

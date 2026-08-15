@@ -85,17 +85,50 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
 
 // ── 2. welded cells: a secondary line is a LINE ────────────────────────────
 {
+  /*
+   * EVERY TABLE, AND EVERY SPAN — not `.tbl td > span.dim`, which is what this checked first and how
+   * it missed a whole table. The 项目方 table on /engagements had no `tbl` class, so the selector
+   * found nothing in it while OTHER tables on the same page satisfied the `n > 0` guard; the page
+   * passed while shipping `490k of 1.0M left510k committed`. Two changes follow from that:
+   *
+   *   - the selector is every `td`, and every element child rather than only `.dim` ones — the first
+   *     span in that cell carries no class at all, so a `.dim`-only rule cannot see what it welds to;
+   *   - the count is asserted PER TABLE, so "a table I never examined" can no longer hide behind a
+   *     sibling table's spans.
+   */
   for (const path of ['/resources', '/engagements', '/usage', '/workforce']) {
     const page = await fresh({ path });
     const bad = await page.evaluate(() => {
-      const spans = [...document.querySelectorAll('.tbl td > span.dim')];
-      return {
-        n: spans.length,
-        inline: spans.filter((e) => getComputedStyle(e).display !== 'block').length,
-      };
+      const tables = [...document.querySelectorAll('table')];
+      const welded = [];
+      tables.forEach((table, i) => {
+        for (const td of table.querySelectorAll('td')) {
+          const kids = [...td.children];
+          if (kids.length < 2) continue;
+          // The FIRST child may be inline — it starts the line. Every later one begins a new line, so
+          // an inline sibling after it is a weld.
+          /*
+           * Block-LEVEL, not the literal string 'block'. A `flex` or `grid` container starts its own
+           * line exactly as a block does, and the first version of this check flagged one as a weld —
+           * a false positive that would have taught the next reader to distrust the guard.
+           */
+          const BLOCKISH = new Set(['block', 'flex', 'grid', 'list-item', 'table', 'flow-root']);
+          kids.slice(1).forEach((el) => {
+            if (BLOCKISH.has(getComputedStyle(el).display)) return;
+            // A badge or a pill is deliberately inline beside its number, with margin for air; the
+            // rule is about secondary LINES, and those are spans of text.
+            if (el.className && /badge|pill|glyph|meter/.test(String(el.className))) return;
+            if (parseFloat(getComputedStyle(el).marginLeft) >= 4) return;
+            welded.push(`table${i}: ${td.innerText.replace(/\s+/g, ' ').slice(0, 48)}`);
+          });
+        }
+      });
+      return { tables: tables.length, examined: tables.filter((t) => t.querySelectorAll('td').length > 0).length, welded };
     });
-    check(`${path}: every secondary cell line is a block`,
-      bad.n > 0 && bad.inline === 0, `${bad.n} spans, ${bad.inline} still inline`);
+    check(`${path}: every table has cells to examine`, bad.examined === bad.tables,
+      `${bad.examined} of ${bad.tables} tables had rows`);
+    check(`${path}: no cell welds a secondary line onto the one above`,
+      bad.welded.length === 0, bad.welded.slice(0, 3).join(' · '));
   }
 }
 

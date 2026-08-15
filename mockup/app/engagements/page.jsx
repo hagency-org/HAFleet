@@ -9,6 +9,7 @@ import { useT } from '@/components/Prefs';
 import { fmtTokens } from '@/lib/mock-data';
 import { useData, Provenance } from '@/components/Data';
 import { send } from '@/lib/api';
+import CredentialForm from '@/components/CredentialForm';
 
 /*
  * ④ 接洽 — what replaces dispatch.
@@ -76,7 +77,7 @@ function ProjectSides({ t }) {
    * config ignores `mockup/**`, so `no-undef` never sees this file: in the backend that same class of
    * mistake is caught by a linter, and here only by `next build`.
    */
-  const { projectSides, provenance, roleCapacity } = useData();
+  const { projectSides, provenance, roleCapacity, refresh } = useData();
   const sides = projectSides ?? [];
   const roleName = (key) => roleCapacity.roles[key]?.displayName ?? key;
 
@@ -122,7 +123,10 @@ function ProjectSides({ t }) {
         <div className="notice">{t('en.sidesEmpty')}</div>
       ) : (
         <div className="tbl-wrap">
-          <table>
+          {/* `tbl`, like every other table here. Without it the three anti-weld rules
+              (.tbl td > span.dim, .tbl td .proj, .tbl td .staff) missed this table entirely and it
+              shipped "490k of 1.0M left510k committed". */}
+          <table className="tbl">
             <thead>
               <tr>
                 <th>{t('en.colSide')}</th>
@@ -154,9 +158,18 @@ function ProjectSides({ t }) {
                       </>
                     )}
                   </td>
-                  <td>{side.credentialKind
-                    ? <span className="mono">{side.credentialKind}</span>
-                    : <span className="stranded">{t('en.credNone')}</span>}</td>
+                  <td>
+                    {side.credentialKind
+                      ? <span className="mono">{side.credentialKind}</span>
+                      : <span className="stranded">{t('en.credNone')}</span>}
+                    {/* Entering one was a curl-only act until now (ADR-016 decision 8). The form can
+                        write a credential it can never read back — the read side stays closed. */}
+                    <CredentialForm
+                      side={side}
+                      live={provenance.projectSides === 'live'}
+                      onDone={refresh}
+                    />
+                  </td>
                   {/*
                     * WAITING IS NOT FAILING. A registration loads only when their homeserver restarts,
                     * so between issuing it and them acting there is a gap we do not control. Rendered as
