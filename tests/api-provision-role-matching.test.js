@@ -91,6 +91,27 @@ describe('POST /api/dispatch — the provision plan is role-matched', () => {
     expect(after.body.presetId).toBe(created.body.preset.id);
   });
 
+  test("a role's EXCLUDED models are refused even when the ask's tier would accept them", async () => {
+    /*
+     * role-capacity.json forbids `architect` and `review` on haiku-4-5 and fable-5 ("below the
+     * strong floor"). The tier check alone does NOT cover that: both roles default to `strong`, but
+     * `resolveTier` lets an explicit `capability` win over the default, so an architect ask at
+     * `lightweight` reaches exactly the presets the file forbids. This is the ask that made the
+     * `excluded` list load-bearing — before it, no code in the repo read that list at all.
+     */
+    const app = await boot({ frameworkPresets: [haiku()] });
+
+    const r = await dispatch(app, { role: 'architect', capability: 'lightweight' });
+    expect(r.body.status).toBe('refused');
+    expect(r.body.reason).toBe('no_resource_for_role');
+
+    // The SAME preset at the SAME tier staffs a role that has no exclusion — so what refused above
+    // was the role's exclusion, not the tier or the preset being unusable.
+    const other = await dispatch(app, { role: 'documentation', capability: 'lightweight' });
+    expect(other.body.status).toBe('provision');
+    expect(other.body.presetId).toBe('preset_haiku');
+  });
+
   test('selection picks the LOWEST qualifying tier — a strong seat is not burned on a medium ask', async () => {
     const app = await boot({ frameworkPresets: [opus(), sonnet()] });
     const r = await dispatch(app, { role: 'coding' }); // defaultTier medium

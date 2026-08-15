@@ -10139,16 +10139,29 @@ function presetTier(preset) {
  * (`remainingFor` is per-agent, and one preset may back several agents), so a stable id order buys
  * determinism without inventing a figure.
  *
- * `role` is part of the ask's identity but does not enter the match today: every per-role
- * constraint role-capacity.json states (its `excluded` list) is the tier floor said per role, and
- * the tier comparison above already enforces it.
+ *  - NOT ON THE ROLE'S EXCLUSION LIST. role-capacity.json's `excluded` names models a given role
+ *    may not use (`architect` and `review` may not run on haiku-4-5 or fable-5, "below the strong
+ *    floor"). An earlier draft of this function argued the tier check already covered that, since
+ *    both roles default to `strong` — but `resolveTier` lets an EXPLICIT request win over the
+ *    role's default, so `architect` at `lightweight` is reachable and would have matched exactly
+ *    the presets the file forbids. The list is consulted directly instead of inferred from the
+ *    tier. (Before this, nothing in the codebase read `excluded` at all — it stated a rule no
+ *    code enforced.)
  */
+function modelsExcludedForRole(role) {
+  return new Set((roleCapacity.excluded ?? [])
+    .filter((entry) => entry?.role === role)
+    .flatMap((entry) => entry?.models ?? []));
+}
+
 function resourcesForRole(role, tier, presets) {
   const rank = Object.fromEntries([...CAPABILITY_TIERS].reverse().map((t, i) => [t, i]));
+  const forbidden = modelsExcludedForRole(role);
   return (presets ?? [])
     .map((preset) => ({ preset, tier: presetTier(preset) }))
     .filter(({ preset, tier: got }) => got
       && rank[got] >= rank[tier]
+      && !forbidden.has(runtimeProfileFromPreset(preset)?.primary?.model)
       && Number.isFinite(preset?.ceiling?.tokens))
     .sort((a, b) => (rank[a.tier] - rank[b.tier])
       || (a.preset.id < b.preset.id ? -1 : a.preset.id > b.preset.id ? 1 : 0));
