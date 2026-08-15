@@ -36,18 +36,22 @@ Options:
 USAGE
 }
 
-WEB_PORT_RAW="${HAFLEET_WEB_PORT:-8084}"
-if [[ "$WEB_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$WEB_PORT_RAW" -gt 0 ]; then
-  WEB_PORT="$WEB_PORT_RAW"
+# The delivery queue lives in the BACKEND now — the old web portal on 8084 is retired, and the queue
+# moved with its process (lib/delivery-queue.js says how). HAFLEET_QUEUE_URL still overrides for a
+# deployment that runs the queue elsewhere; the operator bearer rides along when set, because the
+# backend's guard accepts local OR bearer and a remote caller is by definition not local.
+BACKEND_PORT_RAW="${HAFLEET_BACKEND_PORT:-8090}"
+if [[ "$BACKEND_PORT_RAW" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT_RAW" -gt 0 ]; then
+  BACKEND_PORT="$BACKEND_PORT_RAW"
 else
-  WEB_PORT="8084"
+  BACKEND_PORT="8090"
 fi
-WEB_BASE_URL="${HAFLEET_WEB_URL:-http://127.0.0.1:$WEB_PORT}"
-API_BASE="${HAFLEET_REMINDER_URL:-${WEB_BASE_URL%/}/api/reminders}"
+BACKEND_BASE_URL="${HAFLEET_BACKEND_URL:-http://127.0.0.1:$BACKEND_PORT}"
 CURL_DASHBOARD_AUTH_ARGS=()
-if [ -n "${HAFLEET_DASHBOARD_TOKEN:-}" ]; then
-  CURL_DASHBOARD_AUTH_ARGS=(-H "Authorization: Bearer ${HAFLEET_DASHBOARD_TOKEN}")
+if [ -n "${API_TOKEN:-}" ]; then
+  CURL_DASHBOARD_AUTH_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
+API_BASE="${HAFLEET_REMINDER_URL:-${BACKEND_BASE_URL%/}/api/reminders}"
 
 # ── Detect self target ──────────────────────────
 _detect_target() {

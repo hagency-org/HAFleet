@@ -131,9 +131,11 @@ describe('shipped profile', () => {
   const profile = JSON.parse(readFileSync('services/services-local.json', 'utf-8'));
   const byName = new Map(profile.services.map((s) => [s.name, s]));
 
-  test('backend and dashboard probe real endpoints', () => {
+  test('backend probes a real endpoint; the dashboard is no longer in the shipped profile', () => {
     expect(byName.get('backend').health.type).toBe('http');
-    expect(byName.get('dashboard').health.type).toBe('tcp');
+    // The dashboard process is deleted (portal retired, queue moved into the backend); a tcp probe
+    // against a port nothing binds would report the whole profile unhealthy forever.
+    expect(byName.has('dashboard')).toBe(false);
   });
 
   // NOT yet switched to 'record'. The probe type below works and is tested, but

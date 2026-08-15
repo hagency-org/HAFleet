@@ -4,7 +4,7 @@ import { readFileSync } from 'fs';
 // Node services that shell out to tmux and own the runtime tree.
 const NODE_UNITS = [
   'hafleet-backend.service',
-  'hafleet.service',
+  // hafleet.service is gone: the portal it ran is deleted and its queue lives in the backend.
   'hafleet-push-relay.service',
   'bridge-matrix.service',
 ];

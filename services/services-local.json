@@ -18,23 +18,6 @@
       }
     },
     {
-      "name": "dashboard",
-      "command": [
-        "node",
-        "server.js"
-      ],
-      "dependsOn": [
-        "backend"
-      ],
-      "health": {
-        "type": "tcp",
-        "host": "127.0.0.1",
-        "portEnv": "HAFLEET_WEB_PORT",
-        "defaultPort": 8084,
-        "timeoutMs": 1000
-      }
-    },
-    {
       "name": "bridge",
       "command": [
         "node",

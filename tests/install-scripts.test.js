@@ -67,9 +67,12 @@ describe('local install and uninstall scripts', () => {
       expect(backendUnit).toContain(`ExecStart=${fakeNode} ${ROOT}/backend-v2.js`);
       expect(backendUnit).not.toContain('__NODE_BIN__');
 
-      const webUnit = readFileSync(path.join(systemdDir, 'hafleet.service'), 'utf-8');
-      expect(webUnit).toContain(`ExecStart=${fakeNode} ${ROOT}/server.js`);
-      expect(webUnit).not.toContain('__NODE_BIN__');
+      /*
+       * NO hafleet.service. The web portal that unit ran is deleted and the delivery queue it hosted
+       * moved into the backend, so an install that still wrote the unit would enable a service whose
+       * entry file does not exist — systemd would flap it against a missing script forever.
+       */
+      expect(existsSync(path.join(systemdDir, 'hafleet.service'))).toBe(false);
 
       const relayUnit = readFileSync(path.join(systemdDir, 'hafleet-push-relay.service'), 'utf-8');
       expect(relayUnit).toContain('After=network-online.target hafleet-backend.service');
@@ -223,24 +226,20 @@ describe('local install and uninstall scripts', () => {
 
   test('local service units use optional env files and backend-first ordering', () => {
     const backendUnit = readFileSync('hafleet-backend.service', 'utf-8');
-    const webUnit = readFileSync('hafleet.service', 'utf-8');
     const relayUnit = readFileSync('hafleet-push-relay.service', 'utf-8');
     const bridgeUnit = readFileSync('bridge-matrix.service', 'utf-8');
 
     expect(backendUnit).toContain('After=network.target');
     expect(backendUnit).not.toContain('After=network.target hafleet.service');
     expect(backendUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
-    expect(webUnit).toContain('After=network.target hafleet-backend.service');
-    expect(webUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
     expect(relayUnit).toContain('After=network-online.target hafleet-backend.service');
     expect(relayUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
     expect(bridgeUnit).toContain('After=network.target hafleet-backend.service');
     expect(bridgeUnit).toContain('EnvironmentFile=-__INSTALL_DIR__/.env');
     expect(backendUnit).toContain('ExecStart=__NODE_BIN__ __INSTALL_DIR__/backend-v2.js');
-    expect(webUnit).toContain('ExecStart=__NODE_BIN__ __INSTALL_DIR__/server.js');
     expect(relayUnit).toContain('ExecStart=__NODE_BIN__ __INSTALL_DIR__/push-relay.js');
     expect(bridgeUnit).toContain('ExecStart=__NODE_BIN__ __INSTALL_DIR__/bridge-matrix.js');
-    expect(`${backendUnit}\n${webUnit}\n${relayUnit}\n${bridgeUnit}`).not.toContain('/usr/bin/node');
+    expect(`${backendUnit}\n${relayUnit}\n${bridgeUnit}`).not.toContain('/usr/bin/node');
   });
 
   test('README documents supported install-full options', () => {

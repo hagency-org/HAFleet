@@ -41,6 +41,15 @@ import { buildSeats, normalizeDeclaration, seatIdentity } from './lib/seat-store
 import { createEngagementStore, routeRequest, EngagementError } from './lib/engagement-store.js';
 import { ProjectSideStore, ProjectSideStoreError } from './lib/project-side-store.js';
 import { ensureRepresentative, mintAgentIdentity } from './lib/matrix-representative.js';
+import {
+  dropQueuedBackendNotificationsBySource,
+  enqueueFromRequestBody,
+  initDeliveryQueue,
+  installDeliveryQueueRoutes,
+  resetDeliveryQueueHooks,
+  startDeliveryQueueLoops,
+  stopDeliveryQueueLoops,
+} from './lib/delivery-queue.js';
 import { generateRegistration, renderRegistrationYaml } from './lib/appservice-receiver.js';
 import { createTaskGraphStore } from './lib/task-graph.js';
 import { createTaskStore } from './lib/task-store.js';
@@ -109,22 +118,17 @@ const RUNTIME_ROOT = (() => {
   return raw ? path.resolve(raw) : REPO_ROOT;
 })();
 assertRuntimeDir(RUNTIME_ROOT);
+const DATA_DIR = path.join(RUNTIME_ROOT, 'data');
 const DEFAULT_BACKEND_PORT_RAW = Number.parseInt(process.env.HAFLEET_BACKEND_PORT || '8090', 10);
 const PORT = Number.isFinite(DEFAULT_BACKEND_PORT_RAW) && DEFAULT_BACKEND_PORT_RAW > 0
   ? DEFAULT_BACKEND_PORT_RAW
   : 8090;
-const DEFAULT_WEB_PORT_RAW = Number.parseInt(process.env.HAFLEET_WEB_PORT || '8084', 10);
-const DEFAULT_WEB_PORT = Number.isFinite(DEFAULT_WEB_PORT_RAW) && DEFAULT_WEB_PORT_RAW > 0
-  ? DEFAULT_WEB_PORT_RAW
-  : 8084;
-const DATA_DIR = path.join(RUNTIME_ROOT, 'data');
-const WEB_BASE_URL = (process.env.HAFLEET_WEB_URL || `http://127.0.0.1:${DEFAULT_WEB_PORT}`).trim().replace(/\/$/, '');
-const PUSH_QUEUE_URL = (process.env.HAFLEET_QUEUE_URL || `${WEB_BASE_URL}/api/queue`).trim().replace(/\/$/, '');
-const WEB_BRIDGE_DASHBOARD_TOKEN = (process.env.HAFLEET_DASHBOARD_TOKEN || '').trim();
-const WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW = Number.parseInt(process.env.HAFLEET_WEB_BRIDGE_FETCH_TIMEOUT_MS || '5000', 10);
-const WEB_BRIDGE_FETCH_TIMEOUT_MS = Number.isFinite(WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW) && WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW > 0
-  ? WEB_BRIDGE_FETCH_TIMEOUT_MS_RAW
-  : 5000;
+/*
+ * The web-bridge constants that pointed at the retired portal (WEB_BASE_URL, PUSH_QUEUE_URL,
+ * HAFLEET_DASHBOARD_TOKEN) lived here. The queue is in-process now — `postToDeliveryQueue` — and the
+ * one legitimate remote case reads HAFLEET_QUEUE_URL directly, so a stale HAFLEET_WEB_PORT can no
+ * longer steer notifications at a port nothing listens on.
+ */
 const execFileAsync = promisify(execFile);
 const LOCALHOST_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const LOCAL_SERVER_ID = resolveLocalServerId();
@@ -378,32 +382,43 @@ const MEDIA_FETCH_ALLOWED_ROOTS = [
   path.resolve(MATRIX_MEDIA_DIR),
 ];
 
-function isTimeoutAbortError(error) {
-  const message = String(error?.message || '');
-  return error?.name === 'TimeoutError'
-    || (error?.name === 'AbortError' && /timeout/i.test(message))
-    || /aborted due to timeout/i.test(message);
+
+/*
+ * The queue lives IN this process now, so "post to the queue" is a function call. `HAFLEET_QUEUE_URL`
+ * is still honoured for a deployment that runs the queue elsewhere — in that one case this really is
+ * an HTTP request, carrying the operator bearer because the remote queue's guard accepts it.
+ *
+ * The Response-like return (`ok`, `status`, `json()`) is deliberate: the three call sites predate the
+ * move and read a fetch Response, and keeping that contract meant none of their logic — event
+ * emission, markAgentPushNotified, error paths — had to be re-derived during the migration.
+ */
+const REMOTE_QUEUE_URL = (process.env.HAFLEET_QUEUE_URL || '').trim().replace(/\/$/, '');
+async function postToDeliveryQueue(bodyObj, idempotencyKey = '') {
+  if (REMOTE_QUEUE_URL) {
+    return fetch(REMOTE_QUEUE_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
+        ...(operatorBearerConfigured(process.env) ? { Authorization: `Bearer ${process.env.API_TOKEN.trim()}` } : {}),
+      },
+      signal: AbortSignal.timeout(5000),
+      body: JSON.stringify(bodyObj),
+    });
+  }
+  const { status, body } = enqueueFromRequestBody(bodyObj ?? {}, idempotencyKey || '');
+  return { ok: status < 400, status, json: async () => body };
 }
 
-async function fetchWebBridge(url, init, contextLabel) {
-  const startedAt = Date.now();
-  try {
-    const nextInit = init ? { ...init } : {};
-    if (WEB_BRIDGE_DASHBOARD_TOKEN) {
-      const headers = { ...(nextInit.headers || {}) };
-      if (!Object.keys(headers).some((key) => key.toLowerCase() === 'authorization')) {
-        headers.Authorization = `Bearer ${WEB_BRIDGE_DASHBOARD_TOKEN}`;
-      }
-      nextInit.headers = headers;
-    }
-    return await fetch(url, nextInit);
-  } catch (error) {
-    const elapsedMs = Date.now() - startedAt;
-    const prefix = isTimeoutAbortError(error) ? '[web-bridge-timeout]' : '[web-bridge-fetch-failed]';
-    console.warn(`${prefix} ${contextLabel} after ${elapsedMs}ms: ${error?.message || error}`);
-    throw error;
+async function clearDeliveryQueueNotifications(agentName) {
+  if (REMOTE_QUEUE_URL) {
+    const url = `${REMOTE_QUEUE_URL}/agents/${encodeURIComponent(agentName)}/notifications`;
+    return fetch(url, { method: 'DELETE', signal: AbortSignal.timeout(5000) });
   }
+  const result = dropQueuedBackendNotificationsBySource(agentName, null, 'agent-notifications-cleared');
+  return { ok: !result.persistFailed, status: result.persistFailed ? 503 : 200, json: async () => result };
 }
+
 
 // ── Storage helpers ───────────────────────────────────────────────────
 const jsonStorage = createJsonStorage({
@@ -1333,7 +1348,18 @@ function isAgentRecord(record) {
   return Boolean(record) && inferRecordKind(record) === 'agent';
 }
 
+/*
+ * Overridable for tests, because the NON-local branch is otherwise unreachable from a test: supertest
+ * always connects over loopback and this deliberately ignores X-Forwarded-For (trusting a header any
+ * caller can set would let a remote caller claim to be local). The old dashboard process had the same
+ * hook for the same reason.
+ */
+let localRequestOverrideForTest = null;
+function setLocalRequestOverrideForTest(fn) {
+  localRequestOverrideForTest = typeof fn === 'function' ? fn : null;
+}
 function isLocalRequest(req) {
+  if (localRequestOverrideForTest) return localRequestOverrideForTest(req);
   const ip = req.ip || req.connection?.remoteAddress;
   return LOCALHOST_IPS.has(ip);
 }
@@ -6354,12 +6380,7 @@ function pushResourceAlertToAgent(agentName, summary) {
   if (!state.online) return;
 
   const payload = `[RESOURCE ALERT] ${summary}\nPlease pause heavy tasks, checkpoint progress, and reduce memory usage immediately.`;
-  const queuePath = new URL(PUSH_QUEUE_URL).pathname;
-  fetchWebBridge(PUSH_QUEUE_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
-    body: JSON.stringify({
+  postToDeliveryQueue({
       from: 'hafleet-backend',
       to: agent.tmux,
       payload,
@@ -6373,8 +6394,7 @@ function pushResourceAlertToAgent(agentName, summary) {
         needsReply: false,
         hasMcp: false,
       },
-    }),
-  }, `pushResourceAlertToAgent() POST ${queuePath} agent=${agentName}`).catch((e) => {
+  }).catch((e) => {
     console.warn(`[scope-alert] queue push failed for ${agentName}: ${e.message}`);
   });
 }
@@ -6855,11 +6875,7 @@ function logPushNotifySkip(agentName, reason, detail = '') {
 
 function clearQueuedNotificationsForAgent(agentName) {
   if (!agentName) return;
-  const queueClearPath = `/api/queue/agents/${encodeURIComponent(agentName)}/notifications`;
-  fetchWebBridge(`${WEB_BASE_URL}${queueClearPath}`, {
-    method: 'DELETE',
-    signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
-  }, `clearQueuedNotificationsForAgent() DELETE ${queueClearPath} agent=${agentName}`)
+  clearDeliveryQueueNotifications(agentName)
     .then((r) => {
       if (!r.ok) {
         console.warn(`[push-notify] queue clear failed for ${agentName}: status ${r.status}`);
@@ -7155,16 +7171,10 @@ async function pushNotify(agentName, msg, options = {}) {
       needsReply,
       hasMcp,
     };
-    const queuePath = new URL(PUSH_QUEUE_URL).pathname;
-    const resp = await fetchWebBridge(PUSH_QUEUE_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}),
-      },
-      signal: AbortSignal.timeout(WEB_BRIDGE_FETCH_TIMEOUT_MS),
-      body: JSON.stringify({ from: 'hafleet-backend', to: agent.tmux, payload: notification, priority: notificationPriority || 'normal', notifyMeta }),
-    }, `pushNotify() POST ${queuePath} agent=${agentName}`);
+    const resp = await postToDeliveryQueue(
+      { from: 'hafleet-backend', to: agent.tmux, payload: notification, priority: notificationPriority || 'normal', notifyMeta },
+      options.idempotencyKey || '',
+    );
     if (resp.ok) {
       const body = await resp.json().catch(() => ({}));
       appendDeliveryEvent({
@@ -7605,6 +7615,57 @@ app.get('/api/servers/fleet', (req, res) => {
 
 // ── SSE endpoint ──────────────────────────────────────────────────────
 sseAdapter.installRoute(app, '/api/stream');
+
+/*
+ * ── The tmux delivery queue, in-process ──────────────────────────────────────────────────────────
+ *
+ * Lifted whole from the retired portal's process (lib/delivery-queue.js says how and what changed).
+ * The sinks below are the five places that used to be HTTP requests from one local process to the
+ * other; each is now the same function the corresponding route calls, so in-process and over-the-wire
+ * callers cannot diverge.
+ */
+initDeliveryQueue({
+  logsRoot: path.join(RUNTIME_ROOT, 'logs'),
+  idleThresholdMs: Number.parseInt(process.env.AGENT_IDLE_THRESHOLD_MS || '20000', 10),
+  reminderMergePreviewLimit: Number.parseInt(process.env.REMINDER_MERGE_PREVIEW_LIMIT || '20', 10),
+  emitDeliveryEvent: (row) => appendDeliveryEvent({ ...row, source: row?.source || 'dashboard-queue' }),
+  recordPushDelivered: async (body) => {
+    const { status, body: out } = recordPushDelivered(body ?? {});
+    return { ok: status < 400, status, errText: status >= 400 ? JSON.stringify(out) : '' };
+  },
+  unreadSnapshot: async (agentName) => {
+    const name = normalizeAgentName(agentName);
+    if (!name || !isAgentRecord(agents[name])) return null;
+    return buildUnreadInboxSnapshot(name, {});
+  },
+  offlineLocalTmuxSessions: async () => {
+    const sessions = new Set();
+    for (const a of Object.values(agents)) {
+      if (!isAgentRecord(a) || !a.tmux || a.online !== false) continue;
+      if (normalizeServer(a.server) !== 'local') continue;
+      const sessionName = String(a.tmux).split(':')[0];
+      if (sessionName) sessions.add(sessionName);
+    }
+    return sessions;
+  },
+  broadcast: (event, data) => broadcastSSE(event, data),
+});
+
+/*
+ * NO ROUTE-LEVEL GUARD, and that is a finding, not an omission. The first version added a
+ * `requireLocalOrBearer` middleware here — and the tests for its non-local branch came back 401 where
+ * 403 was expected, because the backend's GLOBAL `/api` middleware (`createApiAuthMiddleware`, mounted
+ * below) already implements exactly this posture: local requests pass, non-local requires the operator
+ * bearer, everything passes when no API_TOKEN is configured. A second copy of that decision inside the
+ * queue routes could only ever agree with the first or drift from it. The routes are therefore declared
+ * `global-api-auth-only` in the boundary manifest, which is the policy that already exists for this
+ * exact situation (GET /api/stream uses it).
+ *
+ * What DID change from the old process: the portal accepted HAFLEET_DASHBOARD_TOKEN from non-local
+ * callers; that token died with the portal, and the operator bearer is the remote credential now.
+ */
+installDeliveryQueueRoutes(app);
+
 
 // ── Owner-scoped runtime approvals ───────────────────────────────────
 function respondApprovalStoreError(res, error, fallback = 'approval operation failed') {
@@ -10885,21 +10946,26 @@ app.post('/api/runtime/compact', requireBearer, (req, res) => {
   res.json(result);
 });
 
-app.post('/api/runtime/push-delivered', (req, res) => {
-  if (!isLocalRequest(req)) return res.status(403).json({ error: 'local only' });
-  const agentName = normalizeAgentName(req.body?.agent);
-  if (!agentName) return res.status(400).json({ error: 'agent required' });
+/*
+ * Shared by the HTTP route below and the delivery queue's in-process sink. The queue used to POST this
+ * to its own backend over HTTP; it now lives here, so the ack is a function call — same record, same
+ * delivery event, no socket. The `local only` check stays on the ROUTE: the in-process caller is by
+ * definition local, and gating the function would re-check a property it cannot fail.
+ */
+function recordPushDelivered(rawBody = {}) {
+  const agentName = normalizeAgentName(rawBody?.agent);
+  if (!agentName) return { status: 400, body: { error: 'agent required' } };
   if (!isAgentRecord(agents[agentName])) {
-    return res.json({ ok: true, ignored: 'agent-not-found', agent: agentName });
+    return { status: 200, body: { ok: true, ignored: 'agent-not-found', agent: agentName } };
   }
 
   const details = {
-    deliveredAt: req.body?.deliveredAt,
-    queuedAt: req.body?.queuedAt,
-    queueEntryId: req.body?.queueEntryId,
+    deliveredAt: rawBody?.deliveredAt,
+    queuedAt: rawBody?.queuedAt,
+    queueEntryId: rawBody?.queueEntryId,
   };
-  const notifyMeta = (req.body?.notifyMeta && typeof req.body.notifyMeta === 'object')
-    ? req.body.notifyMeta
+  const notifyMeta = (rawBody?.notifyMeta && typeof rawBody.notifyMeta === 'object')
+    ? rawBody.notifyMeta
     : {};
   const result = markAgentPushDelivered(agentName, {
     ...details,
@@ -10919,9 +10985,15 @@ app.post('/api/runtime/push-delivered', (req, res) => {
     reason: result?.ignored || null,
   });
   if (result?.ignored) {
-    return res.json({ ok: true, agent: agentName, ignored: result.ignored });
+    return { status: 200, body: { ok: true, agent: agentName, ignored: result.ignored } };
   }
-  res.json({ ok: true, agent: agentName });
+  return { status: 200, body: { ok: true, agent: agentName } };
+}
+
+app.post('/api/runtime/push-delivered', (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: 'local only' });
+  const { status, body } = recordPushDelivered(req.body ?? {});
+  return res.status(status).json(body);
 });
 
 
@@ -14006,6 +14078,9 @@ function removeStartupHooks() {
 }
 
 function startBackgroundLoops() {
+  // The delivery queue's own loops (pane sweep, delivery tick, reminder tick) start and stop with the
+  // backend's, so a test that never starts the backend's loops never gets a stray tmux capture either.
+  startDeliveryQueueLoops();
   if (backgroundLoopsStarted) return;
   backgroundLoopsStarted = true;
   routerPumpAccepting = true;
@@ -14041,6 +14116,8 @@ function startBackgroundLoops() {
 
 function stopBackgroundLoops() {
   backgroundLoopsStarted = false;
+  stopDeliveryQueueLoops();
+  resetDeliveryQueueHooks();
   routerPumpAccepting = false;
   clearLifecycleHandles();
   routerPumpTimer = null;
@@ -14163,6 +14240,7 @@ export const __backendV2TestInternals = {
   // 404 for agents that were definitely seeded. Exposed so a caller can check
   // rather than discover it as a mystery failure much later.
   runtimeRootForTest: RUNTIME_ROOT,
+  setLocalRequestOverrideForTest,
   buildLocalPaneMetadataSnapshotForTest: buildLocalPaneMetadataSnapshotAsync,
   injectSlashClearForTest: injectSlashClear,
   sessionPolicyForTest: sessionPolicy,

@@ -216,7 +216,7 @@ function extractExpressRoutes(source) {
   return routes;
 }
 
-function validateRouteAuth(fileName, source, route, expectedAuth) {
+function validateRouteAuth(fileName, source, route, expectedAuth, manifestEntry = {}) {
   const routeSource = route?.source || '';
   const has = (needle) => routeSource.includes(needle);
   const forbiddenRouteLocalAuth = [
@@ -245,6 +245,37 @@ function validateRouteAuth(fileName, source, route, expectedAuth) {
       }
       const found = forbiddenRouteLocalAuth.find(needle => has(needle));
       if (found) return `${fileName}:${route.line} ${routeKey(route)} expected global-api-auth-only but found ${found}`;
+      return null;
+    }
+    case 'host-global-api-auth': {
+      /*
+       * For INSTALLER MODULES — files that register routes on an app they are handed, whose /api auth
+       * is mounted by the HOST. `global-api-auth-only` proves the ordering inside one file, which an
+       * installer cannot do: the proof lives in the host. So the manifest entry names the host and the
+       * install call, and the check reads the host to verify the middleware is mounted BEFORE the
+       * installer runs. Without this, the only options were a redundant per-route guard (tried — it
+       * duplicated the global layer and answered a different status) or leaving the routes undeclared.
+       */
+      const hostFile = manifestEntry.hostFile;
+      const installMarker = manifestEntry.installMarker;
+      if (!hostFile || !installMarker) {
+        return `${fileName}:${route.line} ${routeKey(route)} host-global-api-auth requires hostFile and installMarker`;
+      }
+      let hostSource;
+      try {
+        hostSource = readFileSync(hostFile, 'utf-8');
+      } catch {
+        return `${fileName}:${route.line} ${routeKey(route)} host file ${hostFile} is unreadable`;
+      }
+      const authIdx = hostSource.indexOf("app.use('/api', createApiAuthMiddleware");
+      const installIdx = hostSource.indexOf(installMarker);
+      if (authIdx < 0) return `${fileName}:${route.line} ${routeKey(route)} host ${hostFile} lacks global /api auth`;
+      if (installIdx < 0) return `${fileName}:${route.line} ${routeKey(route)} host ${hostFile} never calls ${installMarker}`;
+      if (authIdx > installIdx) {
+        return `${fileName}:${route.line} ${routeKey(route)} host mounts /api auth AFTER ${installMarker}`;
+      }
+      const found = forbiddenRouteLocalAuth.find(needle => has(needle));
+      if (found) return `${fileName}:${route.line} ${routeKey(route)} expected host-global-api-auth but found ${found}`;
       return null;
     }
     case 'bearer':
@@ -335,7 +366,13 @@ function validateExpectedRoutes(fileName, source, actualRoutesByKey, expectedRou
       failures.push(`[route ownership] ${fileName} ${label} owner entry no longer matches a route: ${key}`);
       continue;
     }
-    const authFailure = validateRouteAuth(fileName, source, actual, route.auth);
+    /*
+     * The manifest entry rides along: `actual` is scanned out of the source and carries only what the
+     * source says, while a policy like host-global-api-auth needs fields (hostFile, installMarker) that
+     * only the manifest declares. Passing the entry keeps the two kinds of fact separate — the source
+     * says what the route IS, the manifest says what it is SUPPOSED to be guarded by.
+     */
+    const authFailure = validateRouteAuth(fileName, source, actual, route.auth, route);
     if (authFailure) {
       failures.push(`[route ownership] ${authFailure}`);
     }
