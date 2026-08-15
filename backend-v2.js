@@ -8593,6 +8593,7 @@ function sideIdForRoom(roomId) {
  * `if (refuseOverSideAllocation(...)) return;`.
  */
 const SIDE_BUDGET_ALERT_KEY = (sideId) => `project_side_budget:${sideId}`;
+const CEILING_OVERRUN_SWEEP_INTERVAL_MS = 3600_000;
 
 /**
  * THE ALARM the operator asked for: 「应该报警，说无法创建 agent，需要加预算」.
@@ -8615,6 +8616,86 @@ const SIDE_BUDGET_ALERT_KEY = (sideId) => `project_side_budget:${sideId}`;
  * synthesised form would not have. (Both facts read out of that function; mutation testing showed the
  * correlation half of an earlier version of this comment was wrong.)
  */
+const CEILING_OVERRUN_ALERT_KEY = (agent) => `agent_ceiling_overrun:${agent}`;
+
+/**
+ * An agent that is ALREADY past its ceiling — the half of the alarm nothing raised.
+ *
+ * `project_side_budget` below fires when a request is REFUSED, which means it needs somebody to ask.
+ * An overrun needs nobody: it happens when a ceiling is lowered under commitments that were
+ * admissible when they were made, and admission control cannot retract those. So the state arrives
+ * with no request to hang an alarm on, and until this the only place it appeared was a console meter —
+ * visible to whoever happened to open the page, and to nobody else.
+ *
+ * PER AGENT, not per side. The ceiling being exceeded is the CONTRIBUTOR's, and one side's engagements
+ * may run against several agents while one agent may serve several sides. Keying by side would merge
+ * two different overruns and report one of their numbers.
+ *
+ * AUTO-RESOLVES when the overrun ends, by the same rule the budget alarm follows: raising the ceiling
+ * or ending engagements is what fixes this, and an alert that survives its own fix trains an operator
+ * to ignore alerts.
+ */
+function sweepCeilingOverruns() {
+  for (const agent of Object.values(agents).filter(isAgentRecord)) {
+    const name = agent?.name;
+    if (!name) continue;
+    const preset = agent.presetId ? frameworkPresets.find((p) => p.id === agent.presetId) : null;
+    const ceiling = preset?.ceiling?.tokens;
+    const dedupeKey = CEILING_OVERRUN_ALERT_KEY(name);
+    if (!Number.isFinite(ceiling)) continue;
+
+    const { reserved, spent } = ceilingSpendFor(name);
+    /*
+     * `max(committed, measured)` — the same figure `remainingFor` draws on, so this alarm and the
+     * admission decision cannot disagree about whether an agent is over. An unknown spend falls back
+     * to the allocation rather than to zero, for the reason stated there.
+     */
+    const drawn = spent === null ? reserved : Math.max(reserved, spent);
+    const over = drawn - ceiling;
+    if (over <= 0) {
+      /*
+       * `autoResolve`, the same call the allocation route makes when a raise actually helps — not a
+       * hand-rolled transition. It is a no-op when no such alert is open, so the common case (an agent
+       * comfortably inside its ceiling) costs a map lookup.
+       */
+      try {
+        alertStore.autoResolve(dedupeKey);
+      } catch { /* a stale alert is better than a sweep that dies on one agent */ }
+      continue;
+    }
+    try {
+      alertStore.ingest({
+        alertType: 'agent_ceiling_overrun',
+        dedupeKey,
+        severity: 'warning',
+        source: 'backend',
+        sourceAgent: name,
+        summary: `${name} has drawn ${drawn} against a ceiling of ${ceiling} — ${over} past it`,
+        detail: {
+          agent: name,
+          presetId: agent.presetId ?? null,
+          ceilingTokens: ceiling,
+          committedTokens: reserved,
+          measuredTokens: spent,
+          drawnTokens: drawn,
+          overByTokens: over,
+        },
+        owner: 'hafleet-operator',
+        runbook: `raise the ceiling on preset ${agent.presetId ?? '(none)'} to cover what is already `
+          + `committed, or revoke engagements on ${name} until the drawn figure is back under it`,
+        impact: 'no new engagement can be approved against this agent; the work already approved keeps '
+          + 'running, because admission control cannot retract a commitment it already granted',
+        recoveryCondition: 'the drawn figure falls back under the ceiling, by raising the ceiling or '
+          + 'ending engagements — this alert auto-resolves when that happens',
+        correlation: { dedupeKey, agent: name, presetId: agent.presetId ?? null },
+        tags: ['ceiling', `agent:${name}`, 'budget'],
+      });
+    } catch (error) {
+      console.warn(`[ceiling] failed to raise overrun alarm for ${name}: ${error?.message || error}`);
+    }
+  }
+}
+
 function raiseSideBudgetAlarm(sideId, { reason, act, budget, wanted }) {
   try {
     alertStore.ingest({
@@ -14445,6 +14526,14 @@ function startBackgroundLoops() {
   // Supervisor lifecycle sweep — manages per-agent supervisor tmux sessions
   scheduleAdaptiveSweepLoop('sweepSupervisorLifecycle', () => supervisorLifecycleManager.sweepAll(), 'supervisorLifecycle', SUPERVISOR_LIFECYCLE_SWEEP_INTERVAL_MS);
 
+  /*
+   * Overruns are swept rather than detected at a decision point, because nothing decides them: a
+   * ceiling lowered under live commitments produces one with no request involved. Hourly, because the
+   * condition is a standing one — an agent past its ceiling at 09:00 is still past it at 09:05, and a
+   * tighter loop would only re-file the same alert.
+   */
+  trackLifecycleInterval(() => { sweepCeilingOverruns(); }, CEILING_OVERRUN_SWEEP_INTERVAL_MS);
+
   // Prune resolved alerts every hour
   trackLifecycleInterval(() => { alertStore.pruneResolved(); }, 3600_000);
 }
@@ -14576,6 +14665,12 @@ export const __backendV2TestInternals = {
   // rather than discover it as a mystery failure much later.
   runtimeRootForTest: RUNTIME_ROOT,
   setLocalRequestOverrideForTest,
+  /*
+   * The overrun sweep runs on an hourly interval, and a test must not wait an hour or start the
+   * backend's loops to see what it files. Exposed so the alarm can be driven directly — the interval
+   * is scheduling, the alarm is the behaviour.
+   */
+  sweepCeilingOverrunsForTest: sweepCeilingOverruns,
   buildLocalPaneMetadataSnapshotForTest: buildLocalPaneMetadataSnapshotAsync,
   injectSlashClearForTest: injectSlashClear,
   sessionPolicyForTest: sessionPolicy,
