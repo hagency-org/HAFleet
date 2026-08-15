@@ -784,6 +784,13 @@ td.cap-via { color: var(--ok); }
 .meter i.over { background: var(--bad); border-right: 2px solid var(--fg); }
 .over-by { display: block; margin-top: 2px; font-size: 11px; color: var(--bad); }
 
+/* ── entering a project side's credential ──────────────────────────────────── */
+.cred-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+.cred-form { display: grid; gap: 6px; margin-top: 6px; max-width: 420px; }
+.cred-row { display: grid; grid-template-columns: 130px 1fr; gap: 8px; align-items: center; font-size: 12px; }
+.cred-row input, .cred-row select { width: 100%; font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); }
+.btn-s.danger { border-color: var(--bad); color: var(--bad); }
+
 .spark { display: inline-flex; align-items: flex-end; gap: 2px; height: 20px; }
 .spark i { width: 5px; border-radius: 1px; background: var(--accent); }
 

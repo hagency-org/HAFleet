@@ -135,6 +135,14 @@ const WRITES = [
   { method: 'POST', re: /^engagements\/[A-Za-z0-9._-]+\/verdict$/ },
   { method: 'POST', re: /^engagements\/[A-Za-z0-9._-]+\/revoke$/ },
   { method: 'PUT', re: /^offers\/[A-Za-z0-9._-]+$/ },
+  /*
+   * WRITING a project side's credential is admitted; READING one still is not, and the asymmetry is
+   * deliberate. `PUT .../credential` answers with `publicSide`, which is an allow-list projection with
+   * no credential field, so admitting it discloses nothing — while the two credential-RETURNING
+   * endpoints stay outside the read allow-list. A side id contains dots or colons (it IS a server
+   * name), so the character class here is wider than the others on purpose.
+   */
+  { method: 'PUT', re: /^project-sides\/[A-Za-z0-9._:-]+\/credential$/ },
   { method: 'POST', re: /^whitelist$/ },
   // ONE segment, not `.+`. A room id is a single segment, and `.+` matched
   // `whitelist/a/b` too — harmless against today's backend, which 404s it, but it
