@@ -252,12 +252,28 @@ The concurrency half was wrong for a plainer reason: this config sets `fileParal
 `maxWorkers: 1`, so no two contexts are ever live at once. Adjacency does not explain it either — the
 last pair ran at positions #7 and #197 of 198.
 
-**What the table does show, and where to look instead:** a recurring CAST. `api-server-heartbeat`
-(with its `-sweep` sibling) appears three times, and `alert-store`, `api-groups`,
-`router-launch-recovery` and `api-project-sides` twice each. Fifteen sightings drawn from a handful of
-heavy files is not what a uniform rate across 197 files looks like. Ask what those files have in
-common — long-lived intervals, real sockets, timer-sensitive assertions — not what happens between
-two of them.
+**What the table does show:** a recurring CAST. `api-server-heartbeat` (with its `-sweep` sibling)
+appears three times, and `alert-store`, `api-groups`, `router-launch-recovery` and `api-project-sides`
+twice each.
+
+That is an observation, NOT evidence of a shared defect — and the difference matters, because a first
+draft of this paragraph claimed the cast could not come from a uniform rate. Exposure is wildly
+uneven: the measured table above has `api-groups` at 45 contexts and `api-pool` at 1, so a uniform
+per-CONTEXT rate would produce exactly this kind of cast, with the heaviest files appearing most. It
+would not explain `api-pool`, which flakes with one context — but one file is not a pattern either.
+
+**Four hypotheses, refuted cheaply (2026-08-15), so nobody spends a round on them again:**
+
+| hypothesis | how it died |
+|---|---|
+| two contexts running concurrently | `fileParallelism: false`, `maxWorkers: 1` — never two at once |
+| a leaked timer from the previous FILE | the 2026-08-15 pair ran at #7 and #197 of 198 |
+| the twelve files that set `HAFLEET_RUNTIME_DIR` themselves, bypassing the import lock | none of the recurring cast is among them; all nine use the helper |
+| real sockets (the `Parse Error: Expected HTTP/` shape) | one of the nine calls `.listen()`; the other eight never open a port |
+
+Note also that this section's own measurements say each file gets a FRESH WORKER PROCESS, which rules
+out the whole family of cross-file-leakage theories before any of them is written down — including
+three of the four above. Read that line before forming the fifth.
 
 **A SIGHTING WITH AN AGGRAVATING FACTOR WORTH RECORDING.** The `agent-ops-client-backend` row above
 failed on a run where the branch's only change was MARKDOWN — no code could have caused it — and the
