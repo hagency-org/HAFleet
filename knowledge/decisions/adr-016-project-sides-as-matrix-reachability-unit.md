@@ -143,6 +143,31 @@ what the project installed, not in what HAFleet does afterwards.
 
 *Status — **built and RUNNING** (2026-08-14). Both credential kinds, verified against a real Palpo 0.4.0 rather than a mock, and the intake is now live rather than merely implemented: the listener is up on this deployment, `refreshAppserviceSides` reports `serving 1 project side(s): palpo.test`, and a real homeserver push was accepted — `first transaction accepted from palpo.test`. **Not built:** nothing detects a federating side and skips registration, so federation remains a stated optimization with no code path. **Newly known and NOT solved: encryption blocks this channel** — see "What the first live run found".*
 
+## What the SECOND live run found (2026-08-15)
+
+The chain from a role ask to an agent speaking in the customer's room, run against the same Palpo
+0.4.0, with every claim checked against the homeserver rather than against our own response bodies.
+
+**It works, and Palpo is the witness.** The representative created a real room on `palpo.test`; the
+engagement approval invited and joined `@ac_sitehand:palpo.test`, an account **nobody ever
+registered**; `GET /joined_members` came back with that agent and the representative in the room; and
+a message from the agent arrived with `sender=@ac_sitehand:palpo.test` — the AGENT, not the
+representative whose token carried it. That last line is the one worth having: a masquerade that
+silently posted as `@hafleet` would have looked identical from this side.
+
+**A SECOND TOKEN DEPENDENCY THE UNIT TESTS COULD NOT SEE.** The first attempt went through the DM
+path and was dropped before it reached the send at all: `ensureDmRoom` does
+`const fromToken = this.getAgentToken(agentName); if (!fromToken) return null;` and then creates the
+room against `HOMESERVER` — our own server. So an appservice agent can speak in a project ROOM and
+still cannot open a DM, and the room it would open is on the wrong homeserver besides. Same shape as
+the retry ladder that was fixed in the same change, found only because a live run uses the path a
+product uses instead of the path a test reaches for.
+
+**Also observed, and not a defect:** `/api/dispatch` answered `queued` rather than `provision`,
+because `MATRIX_AGENT_MAX_PER_CELL` defaults to 0. Auto-provisioning is off by default and that route
+has no product caller — so the role-matching selection built for it is correct and unexercised, which
+is a different thing from working.
+
 ## What the first live run found, 2026-08-14
 
 The chain was run end to end for the first time — a borrower registered on a real homeserver, typing
