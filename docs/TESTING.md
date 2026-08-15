@@ -190,9 +190,9 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-14 | four files in one run: `alert-store`, `api-operator-bearer-on-agent-routes`, `api-supervisor-v2`, `router-launch-recovery` | one test each | **yes** — FOUR different files in a single whole-suite run, all 54 tests green when the same four run together in isolation; seven long-lived processes were up |
 | 2026-08-15 | `api-groups` | `rejects duplicate group names` | **yes** — `Parse Error: Expected HTTP/, RTSP/ or ICE/`, the first documented shape again; whole-suite only, clean in isolation 3/3 |
 | 2026-08-15 | `api-dispatch` + `router-launch-recovery` | one test each, same pair as the 2026-08-14 four-file sighting | **yes** — `expected undefined to be 'released'`; whole-suite only, clean 3/3 together in isolation |
-| 2026-08-15 | `delivery-queue` + `enforcement-spend` | one test each | **yes** — a new pair, and neither file is reachable from the change under test (`lib/matrix-representative.js`); clean 3/3 together in isolation. Recorded mainly for the pairing: the sightings keep arriving as TWO files in one run rather than one, which is a hint about shared-process state rather than a bad test |
+| 2026-08-15 | `delivery-queue` + `enforcement-spend` | one test each | **yes** — neither file is reachable from the change under test (`lib/matrix-representative.js`); clean 3/3 together in isolation |
 | 2026-08-15 | `api-project-sides` | `agents minted for the side are RETIRED, and their record survives` | **yes** — `expected undefined to deeply equal [...]`: the DELETE answered without `retiredAgents` at all. Clean 69/69 in isolation and green on the very next whole-suite run of the SAME tree, so it is this class and not the change under test. Worth one note: that change made engagement approval do outbound HTTP to a project side, so if these sightings get more frequent from here, suspect socket pressure before suspecting the tests |
-| 2026-08-15 | `api-project-sides` + `api-server-heartbeat` | one test each | **yes** — 94/94 in isolation, twice. THE FOURTH consecutive sighting that is exactly TWO files in one run, and `api-project-sides` for the second time today. Four pairings in a row is no longer a coincidence worth restating each time: the next person to look should start from what two concurrently-running backend contexts share, not from the tests |
+| 2026-08-15 | `api-project-sides` + `api-server-heartbeat` | one test each | **yes** — 94/94 in isolation, twice. They ran at positions #7 and #197 of 198, so the entire suite passes between them |
 
 **A SIGHTING THAT WAS CHECKED FOR AUTHORSHIP BEFORE BEING CALLED A FLAKE.** The `api-agents` row above
 failed once inside a whole-suite run and once more in isolation, which is unusual — this class is
@@ -234,6 +234,30 @@ There is no branch here. That removes the question and leaves the class: `read E
 documented shape, and `api-runtime` is the fifth file to show one. Five files, five shapes between them,
 no two adjacent in the code — which is the same evidence the memory theory was dropped on, now with the
 last confound removed.
+
+### The pairing is arithmetic, not a signature (2026-08-15)
+
+A first version of the two rows above argued that these sightings keep arriving as exactly TWO files
+per run, and sent the next reader after "what two concurrently-running backend contexts share". Both
+halves were wrong, and the table disproves the first on its own evidence — files per sighting, oldest
+first:
+
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 4, 1, 2, 2, 1, 2
+
+The suite is ~3170 tests. At a uniform per-test flake probability near 0.0006 the EXPECTED number of
+failures in a run is about two, and one-to-three every time is exactly what that produces. Counting
+pairs and calling them a pattern was reading the mean as a mechanism.
+
+The concurrency half was wrong for a plainer reason: this config sets `fileParallelism: false` and
+`maxWorkers: 1`, so no two contexts are ever live at once. Adjacency does not explain it either — the
+last pair ran at positions #7 and #197 of 198.
+
+**What the table does show, and where to look instead:** a recurring CAST. `api-server-heartbeat`
+(with its `-sweep` sibling) appears three times, and `alert-store`, `api-groups`,
+`router-launch-recovery` and `api-project-sides` twice each. Fifteen sightings drawn from a handful of
+heavy files is not what a uniform rate across 197 files looks like. Ask what those files have in
+common — long-lived intervals, real sockets, timer-sensitive assertions — not what happens between
+two of them.
 
 **A SIGHTING WITH AN AGGRAVATING FACTOR WORTH RECORDING.** The `agent-ops-client-backend` row above
 failed on a run where the branch's only change was MARKDOWN — no code could have caused it — and the
