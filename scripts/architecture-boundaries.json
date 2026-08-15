@@ -390,6 +390,12 @@
           "auth": "bearer"
         },
         {
+          "method": "POST",
+          "path": "/api/agents/:name/matrix-identity",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
           "method": "DELETE",
           "path": "/api/alerts/:id",
           "owner": "alerts.operator",
