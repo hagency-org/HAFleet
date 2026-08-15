@@ -24,7 +24,19 @@ export default defineConfig({
     // toolchain. vitest's default include is **/*.{test,spec}.* with only
     // node_modules and .git excluded, so without this the root suite would sweep
     // anything added there.
-    exclude: ['**/node_modules/**', '**/.git/**', 'mockup/**'],
+    exclude: [
+      '**/node_modules/**',
+      '**/.git/**',
+      'mockup/**',
+      /*
+       * Parallel subagents work in git worktrees under .claude/worktrees/, INSIDE this repo — so
+       * vitest's glob sweeps their copies of every test file into the root run, and a path argument
+       * like `vitest run tests/x.test.js` matches their tests/x.test.js too (arguments are filters,
+       * not paths). The symptom that found this: one edited test failing three times under three
+       * different paths, two of them asserting the behaviour the edit had just reversed.
+       */
+      '**/.claude/worktrees/**',
+    ],
     fileParallelism: false,
     maxWorkers: 1,
   },

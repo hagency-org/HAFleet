@@ -138,12 +138,19 @@ describe('backend agents API', () => {
     context.cleanup();
   });
 
+  /*
+   * The roles below are `coding` and `review`, from role-capacity.json. They used to be `worker` and
+   * `reviewer`, which were never real: the field accepted any string, so whoever wrote these picked
+   * plausible-sounding words without checking the vocabulary — `reviewer` is the vocabulary's `review`
+   * misremembered. Nothing outside these tests ever wrote either value, and the backend now refuses
+   * an operator role outside the vocabulary.
+   */
   test('POST /api/agents registers an agent', async () => {
     const response = await request(context.app)
       .post('/api/agents')
       .send({
         name: 'bravo',
-        role: 'worker',
+        role: 'coding',
         identity: 'Build agent',
       });
     expect(response.status).toBe(200);
@@ -156,7 +163,7 @@ describe('backend agents API', () => {
       .post('/api/agents')
       .send({
         name: 'charlie',
-        role: 'worker',
+        role: 'coding',
       });
 
     const response = await request(context.app).get('/api/agents/charlie');
@@ -169,18 +176,18 @@ describe('backend agents API', () => {
       .post('/api/agents')
       .send({
         name: 'delta',
-        role: 'worker',
+        role: 'coding',
         identity: 'Old identity',
       });
 
     const response = await request(context.app)
       .patch('/api/agents/delta')
       .send({
-        role: 'reviewer',
+        role: 'review',
         identity: 'New identity',
       });
     expect(response.status).toBe(200);
-    expect(response.body.agent.role).toBe('reviewer');
+    expect(response.body.agent.role).toBe('review');
     expect(response.body.agent.identity).toBe('New identity');
   });
 
@@ -413,7 +420,7 @@ describe('backend agents API persistence failures', () => {
 
     const response = await request(context.app)
       .post('/api/agents')
-      .send({ name: 'volatile', role: 'worker' });
+      .send({ name: 'volatile', role: 'coding' });
     const get = await request(context.app).get('/api/agents/volatile');
 
     expect(response.status).toBe(503);
@@ -454,7 +461,7 @@ describe('backend agents API persistence failures', () => {
   test('PATCH /api/agents/:name returns 503 and restores fields and state when agents persistence fails', async () => {
     const original = seedAgent({
       name: 'patchy',
-      role: 'worker',
+      role: 'coding',
     });
     context = await createBackendTestContext('hafleet-agents-persist-test-', {
       agents: { patchy: original },
@@ -465,7 +472,7 @@ describe('backend agents API persistence failures', () => {
 
     const response = await request(context.app)
       .patch('/api/agents/patchy')
-      .send({ role: 'reviewer', tmux: 'patchy:0.0' });
+      .send({ role: 'review', tmux: 'patchy:0.0' });
     const get = await request(context.app).get('/api/agents/patchy');
 
     expect(response.status).toBe(503);
@@ -473,7 +480,7 @@ describe('backend agents API persistence failures', () => {
     expect(get.status).toBe(200);
     expect(get.body).toMatchObject({
       name: 'patchy',
-      role: 'worker',
+      role: 'coding',
       online: false,
       state: 'offline',
       tmux: null,

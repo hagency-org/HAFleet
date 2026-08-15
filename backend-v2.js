@@ -9611,6 +9611,18 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
    */
   const byOperator = isOperatorRequest(req);
   /*
+   * A role outside the vocabulary is a 400 naming it — only for the OPERATOR, whose write would
+   * otherwise vanish into `existing.role` with a 200. An agent-token caller's role is dropped by the
+   * self-declaration gate whatever its value, so refusing it here would leak which values are valid to
+   * a caller that may not set the field at all.
+   */
+  if (byOperator && role !== undefined && role !== null && !ROLES.includes(role)) {
+    return res.status(400).json({
+      error: `unknown role: ${String(role).slice(0, 64)} — one of ${ROLES.join(', ')} (free text about `
+        + 'an agent belongs in identity)',
+    });
+  }
+  /*
    * Dropped BEFORE resolution, not after. Gating only the stored `presetId` would leave the preset's
    * framework reaching `type` and its runtime profile reaching `runtimeProfile` — the agent would still
    * have chosen its own model, with the record no longer saying which preset it came from.
@@ -9639,10 +9651,14 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
      * own role could put itself in a cell it cannot staff — `selectAgent` matches on this, and the
      * borrower's request is expressed in the same vocabulary.
      *
-     * NOT validated against ROLES, deliberately. The dashboard's New Agent form sends its GUIDANCE
-     * textarea — "Human-authored intent / instructions" — in this field, so a strict check would
-     * silently discard prose an operator typed. That conflation is a real defect and it is not this
-     * one; fixing it means giving guidance its own field, on both sides.
+     * VALIDATED AGAINST ROLES — a reversal of #60's deliberate omission, because the reason for the
+     * omission died. The old portal's New Agent form sent its GUIDANCE textarea in this field, so a
+     * strict check would have silently discarded prose an operator typed; that portal is deleted, and
+     * every living writer sends a vocabulary key or nothing (verified: the console's onboard sends
+     * presetId, hafleet-up sends no role, the provision endpoint takes framework/presetId). Free-text
+     * about an agent belongs in `identity`, which has always been the prose field. An operator-supplied
+     * role that is not in the vocabulary is REFUSED above rather than silently kept, because a typo the
+     * operator never learns about is the silent-unstaffable-agent trap with better manners.
      */
     role: (byOperator ? role : undefined) ?? existing.role ?? null,
     // matrix-Agent capability tier; invalid, absent, or not the operator's → keep existing. Reads the
@@ -9880,6 +9896,17 @@ app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => 
    * `runtimeProfile` are the two of the four this route writes.
    */
   const byOperator = isOperatorRequest(req);
+  /*
+   * Same vocabulary check as registration, same asymmetry: the operator's invalid role is a 400, the
+   * agent's is dropped by the gate regardless. `null` stays legal — clearing a role is how an operator
+   * takes an agent out of the matrix without deleting it.
+   */
+  if (byOperator && role !== undefined && role !== null && !ROLES.includes(role)) {
+    return res.status(400).json({
+      error: `unknown role: ${String(role).slice(0, 64)} — one of ${ROLES.join(', ')} (free text about `
+        + 'an agent belongs in identity)',
+    });
+  }
   if (role !== undefined && byOperator) agent.role = role;
   if (identity !== undefined) agent.identity = identity;
   if (tmux !== undefined) {
