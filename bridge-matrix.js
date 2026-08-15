@@ -6,7 +6,9 @@ import {
 } from 'matrix-bot-sdk';
 import { createHash } from 'crypto';
 import { createAppserviceRouter } from './lib/appservice-receiver.js';
-import { createRoomOnSide, sendToRoomOnSide } from './lib/matrix-representative.js';
+import {
+  createRoomOnSide, inviteToRoomOnSide, joinRoomOnSideAsAgent, sendToRoomOnSide,
+} from './lib/matrix-representative.js';
 import { resolveAppserviceListenerConfig, startAppserviceListener } from './lib/appservice-listener.js';
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { execFile } from 'child_process';
@@ -4138,7 +4140,9 @@ export class MatrixBridge {
     if (!agentName) throw new Error('router command has no valid sender agent');
     let token = this.getAgentToken(agentName);
     if (!token) token = await this.ensureAgentToken(agentName, 'router_outbox');
-    if (!token) throw new Error(`Matrix puppet token unavailable for ${agentName}`);
+    // Same fallback as the outbound path: an appservice side has no per-agent token to find.
+    if (!token) token = this.agentSenderFor(agentName);
+    if (!token) throw new Error(`no Matrix token or appservice sender available for ${agentName}`);
     const root = typeof command.threadRootEventId === 'string' && command.threadRootEventId.trim()
       ? command.threadRootEventId.trim()
       : null;
@@ -7098,9 +7102,20 @@ export class MatrixBridge {
       }
     } else {
       senderToken = await this.ensureAgentToken(canonicalAgentName, `outbound:${msg.id}`);
+      /*
+       * A TOKEN IS ONE WAY TO SPEAK, NOT THE ONLY ONE. This used to drop the message here, and for an
+       * agent minted on an appservice side that was every message it would ever send: the namespace
+       * makes it addressable and joinable, and `ensureAgentToken` can never produce a token for it
+       * because no per-agent token exists to produce. `agentSenderFor` falls back to the side's
+       * credential, which is what the namespace is FOR.
+       */
+      if (!senderToken) senderToken = this.agentSenderFor(canonicalAgentName);
       if (!senderToken) {
-        console.warn(`No Matrix token for agent "${canonicalAgentName}", cannot bridge message ${msg.id}`);
-        this.postWarning(`No Matrix token for agent "${canonicalAgentName}" — message ${msg.id} not bridged to Matrix`);
+        console.warn(`No Matrix token or appservice sender for agent "${canonicalAgentName}", cannot bridge message ${msg.id}`);
+        this.postWarning(
+          `No way to send as agent "${canonicalAgentName}" — no token, and no appservice credential on `
+          + `its project side. Message ${msg.id} not bridged to Matrix.`,
+        );
         return;
       }
     }
@@ -7748,7 +7763,63 @@ export class MatrixBridge {
     this.typingRefreshTimer.unref?.();
   }
 
-  async sendAsAgentContent(token, roomId, content, sourceMsgId = null, delivery = null) {
+  /**
+   * Normalise the first argument of every send into ONE shape.
+   *
+   * A string is a token, which is what every caller passed until now. An object is an appservice
+   * sender: the side, its credential, and the agent to masquerade as. Accepting both here rather than
+   * threading a new parameter through six call sites keeps the branch where it belongs — this class
+   * already calls `sendAsAgentContent` "the choke point for every outbound agent message", and a
+   * capability that some paths have and others do not is worse than one nobody has.
+   */
+  static normalizeSender(tokenOrSender) {
+    if (typeof tokenOrSender === 'string') return { kind: 'token', token: tokenOrSender };
+    if (tokenOrSender?.kind === 'appservice' && tokenOrSender.side && tokenOrSender.credential
+      && tokenOrSender.agentUserId) {
+      return tokenOrSender;
+    }
+    return null;
+  }
+
+  /**
+   * How an agent can speak, or `null` when it cannot.
+   *
+   * A token if it has one — that is every agent registered the old way, and the path that already
+   * worked. Otherwise the SIDE's appservice credential, masquerading as the agent: the namespace makes
+   * the agent ours to act for, which is the whole reason a project-side agent needs no registration.
+   * `canSend: false` (POST /api/agents/:name/matrix-identity) described precisely this hole — an agent
+   * that could be addressed, invited and joined, and then had nothing to say with.
+   */
+  agentSenderFor(agentName) {
+    const canonical = this.normalizeName(agentName);
+    if (!canonical) return null;
+    const token = this.getAgentToken(canonical);
+    if (token) return { kind: 'token', token, agentName: canonical };
+
+    const mxid = agentMxid(canonical);
+    const server = typeof mxid === 'string' && mxid.includes(':')
+      ? mxid.slice(mxid.indexOf(':') + 1).toLowerCase()
+      : null;
+    const acting = server ? this.actingSideFor(server) : null;
+    if (!acting || acting.credential?.kind !== 'appservice') return null;
+    return { kind: 'appservice', ...acting, agentUserId: mxid.toLowerCase(), agentName: canonical };
+  }
+
+  async sendAsAgentContent(tokenOrSender, roomId, content, sourceMsgId = null, delivery = null) {
+    const sender = MatrixBridge.normalizeSender(tokenOrSender);
+    if (!sender) {
+      /*
+       * Refused rather than attempted with an undefined credential, which is what the old signature
+       * did when `getAgentToken` returned nothing: a Bearer header reading "Bearer undefined", a 401,
+       * and a warning naming the room instead of the missing credential.
+       */
+      const detail = `no credential or appservice sender for this agent, so nothing can speak in ${roomId}`;
+      console.warn(`[send] ${detail}`);
+      this.postWarning(`sendAsAgent had no way to send in ${roomId}: ${detail}`);
+      if (delivery?.throwOnFailure === true) throw new Error(detail);
+      return null;
+    }
+    const token = sender.kind === 'token' ? sender.token : null;
     const persistPrimary = delivery?.persistPrimary === true && Boolean(sourceMsgId);
     if (persistPrimary) {
       const existing = this.matrixDeliveryJournal.get(sourceMsgId);
@@ -7789,9 +7860,25 @@ export class MatrixBridge {
        * itself, and the audit that produced the "twelve remaining decision points" figure never counted
        * the agent-send paths at all.
        */
-      const res = await fetch(`${baseUrlForToken(token)}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${txnId}`, {
+      /*
+       * ONE URL, TWO WAYS TO BE ALLOWED TO USE IT. A token sender reads its own side's base url and
+       * signs as itself; an appservice sender uses the SIDE's base url, signs with the as_token, and
+       * names the agent in `?user_id=` — the same masquerade `joinRoomOnSideAsAgent` performs to put
+       * that agent in the room in the first place. Sending with the as_token and NO `user_id` would
+       * post as the representative while every caller believed the agent had spoken.
+       */
+      const base = sender.kind === 'token'
+        ? baseUrlForToken(token)
+        : String(sender.side.apiBaseUrl).replace(/\/+$/, '');
+      const authToken = sender.kind === 'token' ? token : sender.credential.asToken;
+      const url = new URL(
+        `${base}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}`
+        + `/send/m.room.message/${txnId}`,
+      );
+      if (sender.kind === 'appservice') url.searchParams.set('user_id', sender.agentUserId);
+      const res = await fetch(url.toString(), {
         method: 'PUT',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(content),
       });
       const data = await res.json().catch(() => ({}));
@@ -7811,7 +7898,12 @@ export class MatrixBridge {
        * CALLERS instead, which left any path that did not go through them (an attachment-only
        * reply, anything added later) refreshing the indicator until the cap.
        */
-      this.endAgentWorkForToken(token, roomId);
+      /*
+       * `endAgentWorkForToken` reverse-looks-up the name from the token map, which an appservice sender
+       * is not in — it has no token to look up. It already knows its own name, so it says so directly.
+       */
+      if (sender.kind === 'token') this.endAgentWorkForToken(token, roomId);
+      else this.endAgentWork(sender.agentName, roomId);
       return data?.event_id || null;
     };
     let eventId;
@@ -7822,17 +7914,50 @@ export class MatrixBridge {
       if (e.message.includes('membership') && e.message.includes('leave')) {
         console.log(`Agent not joined in ${roomId}, attempting auto-join…`);
         try {
-          // Invite via bot, then join as agent
-          await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${state.botToken}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_id: await getUserId(token, baseUrlForToken(token)) }),
-          });
-          await fetch(`${baseUrlForToken(token)}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: '{}',
-          });
+          if (sender.kind === 'appservice') {
+            /*
+             * THE SIDE READMITS ITS OWN AGENT. The branch below invites through the BOT against
+             * `HOMESERVER` — our server — which for a room on a project side is an invite from an
+             * account that is not in it, sent to a homeserver that has never heard of us. The
+             * representative is the one with standing there, and this is the same invite-then-join
+             * pair that put the agent in the room at acceptance (ADR-016 decision 3).
+             *
+             * This also closes the gap ADR-016 row 3 records as remaining: nothing re-admitted an
+             * agent whose membership was lost later. A send that fails on membership IS that event,
+             * observed at the only moment anything notices.
+             */
+            const invited = await inviteToRoomOnSide({
+              side: sender.side,
+              credential: sender.credential,
+              roomId,
+              userId: sender.agentUserId,
+              reason: 'readmitted to deliver a message',
+            });
+            if (!invited.invited && !invited.already) {
+              throw new Error(`representative could not re-invite ${sender.agentUserId}: ${invited.reason}`);
+            }
+            const rejoined = await joinRoomOnSideAsAgent({
+              side: sender.side,
+              credential: sender.credential,
+              roomId,
+              agentUserId: sender.agentUserId,
+            });
+            if (!rejoined.joined) {
+              throw new Error(`${sender.agentUserId} could not rejoin ${roomId}: ${rejoined.reason}`);
+            }
+          } else {
+            // Invite via bot, then join as agent
+            await fetch(`${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${state.botToken}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ user_id: await getUserId(token, baseUrlForToken(token)) }),
+            });
+            await fetch(`${baseUrlForToken(token)}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: '{}',
+            });
+          }
           eventId = await doSend();
         } catch (retryErr) {
           console.error(`Auto-join retry failed in ${roomId}:`, retryErr.message);
@@ -7887,7 +8012,19 @@ export class MatrixBridge {
     return this.sendAsAgentContent(token, roomId, content, sourceMsgId, delivery);
   }
 
-  async sendAttachmentAsAgent(token, roomId, attachment, sourceMsgId = null, relation = null) {
+  async sendAttachmentAsAgent(tokenOrSender, roomId, attachment, sourceMsgId = null, relation = null) {
+    /*
+     * The upload happens BEFORE the send, with its own credential, so this function cannot just hand
+     * the argument through — it has to know which of the two shapes it holds. An appservice uploads
+     * with the as_token against the side's base url; masquerading is not needed here because media has
+     * no sender, only the message that references it does.
+     */
+    const sender = MatrixBridge.normalizeSender(tokenOrSender);
+    if (!sender) throw new Error('sendAttachmentAsAgent needs a token or an appservice sender');
+    const uploadToken = sender.kind === 'token' ? sender.token : sender.credential.asToken;
+    const uploadBase = sender.kind === 'token'
+      ? baseUrlForToken(sender.token)
+      : String(sender.side.apiBaseUrl).replace(/\/+$/, '');
     const filePath = (typeof attachment?.path === 'string') ? attachment.path.trim() : '';
     if (!filePath) throw new Error('attachment.path required');
     if (!existsSync(filePath)) throw new Error(`attachment path not found: ${filePath}`);
@@ -7901,7 +8038,7 @@ export class MatrixBridge {
     const mime = normalizeMimeType(attachment?.mime) || guessMimeTypeFromName(name);
     const kind = inferAttachmentKind(attachment?.kind, mime, name);
     const bodyBytes = readFileSync(filePath);
-    const mxcUri = await uploadMedia(token, bodyBytes, mime, baseUrlForToken(token));
+    const mxcUri = await uploadMedia(uploadToken, bodyBytes, mime, uploadBase);
     const content = {
       msgtype: kind === 'image' ? 'm.image' : 'm.file',
       body: name,
@@ -7913,7 +8050,7 @@ export class MatrixBridge {
       },
     };
     if (relation) content['m.relates_to'] = relation;
-    return this.sendAsAgentContent(token, roomId, content, sourceMsgId);
+    return this.sendAsAgentContent(sender, roomId, content, sourceMsgId);
   }
 
   async sendAttachmentsForMessage(token, roomId, msg, relation = null) {

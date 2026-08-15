@@ -9233,11 +9233,19 @@ app.post('/api/agents/:name/matrix-identity', requireBearer, async (req, res) =>
       credentialKind: credential.kind,
       // `null` for appservice, and that is the identity being complete rather than the mint failing.
       accessToken: minted.accessToken ?? null,
-      canSend: Boolean(minted.accessToken),
+      /*
+       * `canSend` is no longer "has a token". An appservice identity carries none and CAN send: the
+       * bridge masquerades with the side's as_token and `?user_id=`, which is what the namespace is
+       * for. The field answers the question a caller actually asks — will messages from this agent
+       * reach a room — and answering it by token presence was true only while the send path had no
+       * other way.
+       */
+      canSend: Boolean(minted.accessToken) || credential.kind === 'appservice',
+      hasOwnToken: Boolean(minted.accessToken),
       note: minted.accessToken
         ? null
-        : 'appservice identities carry no per-agent token: the agent can be addressed, and the bridge '
-          + 'send path still requires one, so it cannot send as this agent yet',
+        : 'this identity carries no per-agent token; the bridge sends as it through the side\'s '
+          + 'appservice credential, so the agent can be addressed AND can speak',
     });
   } catch (error) {
     const code = error?.code === 'taken' ? 409 : error?.code === 'bad_request' ? 400 : 502;
