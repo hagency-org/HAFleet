@@ -190,6 +190,7 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-14 | four files in one run: `alert-store`, `api-operator-bearer-on-agent-routes`, `api-supervisor-v2`, `router-launch-recovery` | one test each | **yes** — FOUR different files in a single whole-suite run, all 54 tests green when the same four run together in isolation; seven long-lived processes were up |
 | 2026-08-15 | `api-groups` | `rejects duplicate group names` | **yes** — `Parse Error: Expected HTTP/, RTSP/ or ICE/`, the first documented shape again; whole-suite only, clean in isolation 3/3 |
 | 2026-08-15 | `api-dispatch` + `router-launch-recovery` | one test each, same pair as the 2026-08-14 four-file sighting | **yes** — `expected undefined to be 'released'`; whole-suite only, clean 3/3 together in isolation |
+| 2026-08-15 | `delivery-queue` + `enforcement-spend` | one test each | **yes** — a new pair, and neither file is reachable from the change under test (`lib/matrix-representative.js`); clean 3/3 together in isolation. Recorded mainly for the pairing: the sightings keep arriving as TWO files in one run rather than one, which is a hint about shared-process state rather than a bad test |
 
 **A SIGHTING THAT WAS CHECKED FOR AUTHORSHIP BEFORE BEING CALLED A FLAKE.** The `api-agents` row above
 failed once inside a whole-suite run and once more in isolation, which is unusual — this class is
