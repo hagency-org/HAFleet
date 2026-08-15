@@ -185,6 +185,7 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-14 | `api-server-heartbeat` | `accepts takeover from a newer boot timestamp` | **yes** — `expected 404 to be 200`, the second shape; whole-suite only, clean in isolation 4/4; the branch touched engagements and project sides, which that file never references |
 | 2026-08-14 | `api-runtime` | `MCP transitions do not emit legacy MCP-specific SSE event types` | **yes** — `Error: read ECONNRESET`, the third shape; whole-suite only, clean in isolation 4/4; seen on MERGED master, so no branch to attribute it to |
 | 2026-08-14 | `acp-workspace-attribution` | `an agent that has never reported one has null, not a guess` | **yes** — `TypeError: res.body.find is not a function` on `GET /api/agents`; whole-suite only, clean in isolation 4/4; the branch touched only dashboard render/proxy files, which that test never reaches |
+| 2026-08-14 | `agent-state-integration` | `PATCH unpause → agent not immediately deliverable` | **yes** — whole-suite only, clean in isolation 3/3; the branch touched project sides, credentials and the appservice receiver, none of which that file references |
 
 **A SIGHTING THAT WAS CHECKED FOR AUTHORSHIP BEFORE BEING CALLED A FLAKE.** The `api-agents` row above
 failed once inside a whole-suite run and once more in isolation, which is unusual — this class is

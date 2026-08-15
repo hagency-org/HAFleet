@@ -8823,7 +8823,22 @@ app.post('/api/project-sides', requireBearer, (req, res) => {
 /** Replace the credential alone. Write-only: the response is the projection, never the value. */
 app.put('/api/project-sides/:id/credential', requireBearer, (req, res) => {
   try {
-    const side = projectSideStore.setCredential(req.params.id, req.body?.credential ?? null);
+    /*
+     * THE FIELD MUST BE PRESENT. `req.body?.credential ?? null` meant a body that did not mention a
+     * credential DESTROYED the existing one and answered `ok: true` — which is what happened when a
+     * caller sent the credential's own fields at the top level instead of nested. Clearing has to be an
+     * explicit `credential: null`, because on this path the cost of an accidental wipe lands on somebody
+     * else: re-issuing means the project side installs a new registration file and RESTARTS their
+     * homeserver. A destructive default is wrong wherever the destruction is expensive; here it is
+     * expensive for a person we cannot even reach.
+     */
+    if (!Object.prototype.hasOwnProperty.call(req.body ?? {}, 'credential')) {
+      return res.status(400).json({
+        error: 'credential is required: send { credential: {...} } to set one, or { credential: null } to withdraw it',
+        code: 'bad_request',
+      });
+    }
+    const side = projectSideStore.setCredential(req.params.id, req.body.credential);
     if (!side) return res.status(404).json({ error: 'project side not found' });
     return res.json({ ok: true, side });
   } catch (error) {

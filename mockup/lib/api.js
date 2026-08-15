@@ -377,7 +377,7 @@ export async function fetchLive() {
              * it must not be rendered as a failure: nothing is broken, we are waiting on them.
              */
             awaitingInstall: Boolean(side.hasCredential) && side.accessState === 'unverified',
-            credentialIssuedAt: side.credentialIssuedAt ?? null,
+            credentialIssuedAt: side.accessIssuedAt ?? null,
             active: side.active !== false,
             allocatedTokens: side.allocatedTokens ?? null,
             budget,
