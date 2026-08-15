@@ -61,12 +61,16 @@ describe('loadServiceProfile', () => {
     });
 
     expect(profile.name).toBe('services-local');
+    /*
+     * THREE services. The dashboard (server.js) is deleted — the portal retired, its delivery queue
+     * moved into the backend — so the production profile stops listing it, or the supervisor would flap
+     * a service whose entry file does not exist.
+     */
     expect(profile.services.map((service) => service.name)).toEqual([
-      'backend', 'dashboard', 'bridge', 'relay',
+      'backend', 'bridge', 'relay',
     ]);
     expect(profile.services.map((service) => service.command)).toEqual([
       ['node', 'backend-v2.js'],
-      ['node', 'server.js'],
       ['node', 'bridge-matrix.js'],
       ['node', 'push-relay.js'],
     ]);

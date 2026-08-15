@@ -190,10 +190,15 @@ test('services_start_all_healthy', async () => {
   const status = await supervisor.waitForHealthy(5000);
   expect(status.ok).toBe(true);
   expect(status.services.map((service) => service.name)).toEqual([
-    'backend', 'dashboard', 'bridge', 'relay',
+    'backend', 'bridge', 'relay',
   ]);
+  /*
+   * THREE services, not four. The dashboard process (server.js) is deleted — the portal was retired and
+   * the delivery queue it hosted moved into the backend — so a profile that still listed it would have
+   * the supervisor flapping a service whose entry file does not exist.
+   */
   expect(production.services.map((service) => service.command[1])).toEqual([
-    'backend-v2.js', 'server.js', 'bridge-matrix.js', 'push-relay.js',
+    'backend-v2.js', 'bridge-matrix.js', 'push-relay.js',
   ]);
 });
 
@@ -214,29 +219,12 @@ test('restart_preserves_agent_registry', async () => {
   expect(after.body).toEqual(before.body);
 });
 
-test('dashboard_roster_matches_registry', async () => {
-  snapshotEnv(['HAFLEET_RUNTIME_DIR', 'HAFLEET_WEB_PORT', 'HAFLEET_BACKEND_PORT']);
-  const runtime = createBackendRuntime('hafleet-fsf0-b1-dashboard-');
-  mkdirSync(path.join(runtime, 'logs'), { recursive: true });
-  const dashboard = await importDashboard(runtime);
-  const registry = [
-    { name: 'worker-alpha', tmux: 'worker-alpha:0.0' },
-    { name: 'worker-beta', tmux: null },
-    { name: 'worker-gamma', tmux: 'worker-gamma:0.0' },
-  ];
-  const tmuxCalls = [];
-  dashboard.setServerTestHooks({
-    backendFetch: async () => ({ ok: true, status: 200, json: async () => registry }),
-    execFileAsync: async (...args) => {
-      tmuxCalls.push(args);
-      return { stdout: 'stale-tmux-session\n' };
-    },
-  });
-  const roster = await request(dashboard.app).get('/api/agents/all').expect(200);
-  expect(roster.body).toEqual(registry);
-  expect(roster.text).not.toContain('stale-tmux-session');
-  expect(tmuxCalls).toEqual([]);
-});
+/*
+ * `dashboard_roster_matches_registry` lived here and is deleted with its subject: it asserted that the
+ * PORTAL's /api/agents/all mirrored the backend registry instead of stale tmux sessions. The portal and
+ * that route are gone; the backend registry is read directly now, and there is no second roster to
+ * disagree with it — which was the whole hazard the test guarded.
+ */
 
 test('doctor_reports_stopped_bridge', async () => {
   const { supervisor, runtimeRoot } = await fixtureSupervisor({ restartDelayMs: 2000 });

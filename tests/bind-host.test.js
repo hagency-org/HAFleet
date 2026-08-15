@@ -42,15 +42,9 @@ describe('service bind wiring', () => {
     expect(src).not.toContain("host = '127.0.0.1' } = {}");
   });
 
-  test('dashboard reads HAFLEET_WEB_HOST through resolveBindHost', () => {
-    const src = readFileSync('server.js', 'utf-8');
-    expect(src).toContain('resolveBindHost(process.env.HAFLEET_WEB_HOST)');
-    expect(src).not.toContain("host = '127.0.0.1' } = {}");
-  });
-
+  // The dashboard process (server.js) is deleted — the queue moved into the backend and the portal was
+  // retired — so its two bind assertions went with it. The backend's stays.
   test('a wide bind is never silent', () => {
-    for (const file of ['backend-v2.js', 'server.js']) {
-      expect(readFileSync(file, 'utf-8'), file).toContain('console.warn(`[bind] ${warning}`)');
-    }
+    expect(readFileSync('backend-v2.js', 'utf-8')).toContain('console.warn(`[bind] ${warning}`)');
   });
 });

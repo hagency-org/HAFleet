@@ -9,7 +9,6 @@ failures=0
 CODE_PATHS=(
   bridge-matrix.js
   backend-v2.js
-  server.js
   mcp-server.js
   push-relay.js
   lib

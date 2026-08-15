@@ -449,7 +449,6 @@ install_services() {
   run mkdir -p "$SYSTEMD_DIR"
   local services=(
     "hafleet-backend.service"
-    "hafleet.service"
     "hafleet-push-relay.service"
   )
   if [ "$WITH_BRIDGE" = true ]; then
@@ -473,9 +472,8 @@ install_services() {
     return 0
   fi
 
-  systemctl_run enable hafleet-backend.service hafleet.service hafleet-push-relay.service
+  systemctl_run enable hafleet-backend.service hafleet-push-relay.service
   systemctl_run restart hafleet-backend.service
-  systemctl_run restart hafleet.service
   systemctl_run restart hafleet-push-relay.service
   if [ "$WITH_BRIDGE" = true ]; then
     systemctl_run enable bridge-matrix.service
@@ -487,7 +485,6 @@ verify_installation() {
   [ "$DRY_RUN" = false ] || return 0
   [ -x "$BIN_DIR/hafleet" ] || die "hafleet command was not linked into $BIN_DIR"
   [ -f "$SYSTEMD_DIR/hafleet-backend.service" ] || die "hafleet-backend.service was not installed"
-  [ -f "$SYSTEMD_DIR/hafleet.service" ] || die "hafleet.service was not installed"
   [ -f "$SYSTEMD_DIR/hafleet-push-relay.service" ] || die "hafleet-push-relay.service was not installed"
 
   if [ "$WITH_BRIDGE" = true ]; then
@@ -496,7 +493,6 @@ verify_installation() {
 
   if is_system_dir && [ "$NO_START" = false ]; then
     systemctl_run is-active --quiet hafleet-backend.service
-    systemctl_run is-active --quiet hafleet.service
     systemctl_run is-active --quiet hafleet-push-relay.service
     # Previously unchecked, so a bridge that fail-closed on startup still let
     # the installer print "Installation complete."

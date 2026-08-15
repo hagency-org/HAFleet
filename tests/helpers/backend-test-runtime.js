@@ -44,6 +44,18 @@ export async function createBackendTestContext(prefix, seed = {}) {
   writeJson(path.join(dataDir, 'local_activity_sweep.json'), { selectionCursor: 0 });
   if (seed.deletedAgents) writeJson(path.join(dataDir, 'deleted_agents.json'), seed.deletedAgents);
   writeJson(path.join(dataDir, '.msg_counter'), seed.msgCounter || 0);
+  /*
+   * Files OUTSIDE data/ — the delivery queue persists under logs/, and a test that needs a corrupt
+   * logs/queue.json in place BEFORE the module loads cannot use rawDataFiles, which is rooted in data/.
+   * Paths are relative to the runtime dir.
+   */
+  if (seed.rawRuntimeFiles && typeof seed.rawRuntimeFiles === 'object') {
+    for (const [name, contents] of Object.entries(seed.rawRuntimeFiles)) {
+      const filePath = path.join(runtimeDir, name);
+      mkdirSync(path.dirname(filePath), { recursive: true });
+      writeFileSync(filePath, String(contents));
+    }
+  }
   if (seed.rawDataFiles && typeof seed.rawDataFiles === 'object') {
     for (const [name, contents] of Object.entries(seed.rawDataFiles)) {
       const filePath = path.join(dataDir, name);

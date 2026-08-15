@@ -71,7 +71,12 @@ describe('service profile', () => {
     expect(order).toHaveLength(3);
   });
 
-  test.each(['backend', 'dashboard', 'relay'])('still rejects a profile missing core service %s', (drop) => {
+  /*
+   * `dashboard` left the core list when the portal was deleted; it remains an ADMISSIBLE name (a
+   * deployment may run its own), so dropping it must NOT be rejected — which is asserted separately
+   * below instead of silently removed from this table.
+   */
+  test.each(['backend', 'relay'])('still rejects a profile missing core service %s', (drop) => {
     const { root, profilePath } = writeProfile(CORE.filter((s) => s.name !== drop));
     expect(() => loadServiceProfile({ profilePath, repoRoot: root }))
       .toThrow(new RegExp(`core services.*missing: ${drop}`));

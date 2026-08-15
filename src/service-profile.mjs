@@ -6,8 +6,19 @@ import path from 'node:path';
 // Requiring it here meant the supervised-services path (the only one that works
 // on macOS, where there is no systemd) could not run a Matrix-free install at
 // all: the bridge crash-looped and took the profile's health with it.
-const CORE_SERVICES = Object.freeze(['backend', 'dashboard', 'relay']);
-const OPTIONAL_SERVICES = Object.freeze(['bridge']);
+/*
+ * `dashboard` left this list on 2026-08-15: the portal it named is deleted and the delivery queue it
+ * hosted moved into the backend, so a profile REQUIRED to define it would be required to define a
+ * service whose entry file does not exist.
+ */
+const CORE_SERVICES = Object.freeze(['backend', 'relay']);
+/*
+ * `dashboard` is ADMISSIBLE, not shipped: this repository no longer contains a dashboard process (the
+ * portal is deleted; its queue lives in the backend), but the closed allowlist is about what a profile
+ * may NAME, and a deployment that runs its own dashboard should not be refused by the supervisor for
+ * saying so. Core-ness is what changed, not admissibility.
+ */
+const OPTIONAL_SERVICES = Object.freeze(['bridge', 'dashboard']);
 const KNOWN_SERVICES = Object.freeze([...CORE_SERVICES, ...OPTIONAL_SERVICES]);
 /**
  * Supervised agents, named `agent:<agent-name>`.

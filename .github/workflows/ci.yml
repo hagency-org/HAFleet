@@ -23,7 +23,6 @@ jobs:
           node-version: 22.22.0
       - run: npm ci
       - run: node --check backend-v2.js
-      - run: node --check server.js
       - run: node --check lib/mcp-server-core.js
       - run: npm run verify:ci
 
