@@ -9628,12 +9628,21 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
    * have chosen its own model, with the record no longer saying which preset it came from.
    */
   const requestedPresetId = byOperator ? presetId : undefined;
+  /*
+   * A provision plan's preset applies at registration THE SAME WAY an operator's would — resolved
+   * through frameworkPresets into the runtime profile below. The value comes from the backend's own
+   * plan (`provisionedSides`, written when the plan was handed out), never from the request body, so
+   * the self-declaration gate above stays intact: an agent still cannot pick its own preset, and an
+   * operator's explicit presetId still outranks the plan's.
+   */
+  const plannedPresetId = provisionedSides.get(agentName)?.presetId || null;
   // Resolve preset into runtimeProfile if presetId is provided
   let resolvedRuntimeProfile = byOperator ? runtimeProfile : undefined;
   let presetFramework = null;
-  if (requestedPresetId && typeof requestedPresetId === 'string') {
-    const preset = frameworkPresets.find(p => p.id === requestedPresetId);
-    if (!preset) return res.status(400).json({ error: `unknown preset: ${requestedPresetId}` });
+  const applyPresetId = ((typeof requestedPresetId === 'string' && requestedPresetId) || plannedPresetId) || null;
+  if (applyPresetId) {
+    const preset = frameworkPresets.find(p => p.id === applyPresetId);
+    if (!preset) return res.status(400).json({ error: `unknown preset: ${applyPresetId}` });
     presetFramework = preset.framework || null;
     resolvedRuntimeProfile = runtimeProfileFromPreset(preset);
   }
@@ -9677,7 +9686,7 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     // THE CEILING: `remainingFor` reads `preset.ceiling.tokens` through this field, so an agent able to
     // set it could raise its own budget by re-registering. `PUT /api/agents/:name/preset` names that
     // hole in its own comment and can only close its own route.
-    presetId: normalizeOptionalText(requestedPresetId, 128) || existing.presetId || null,
+    presetId: normalizeOptionalText(applyPresetId, 128) || existing.presetId || null,
     // Recorded so the sweep does not have to re-derive it, and so a record stays
     // correct even if the registry later changes.
     transport: (() => {
@@ -10090,7 +10099,66 @@ function expireProvisionReservations(key, now = Date.now()) {
  * registration loses the intent, and the agent registers with no side rather than a wrong one. That is
  * the safe direction — an unattributed agent is visible and fixable, a misattributed one is neither.
  */
-const provisionedSides = new Map(); // agentName → { sideId, reservationKey }
+const provisionedSides = new Map(); // agentName → { sideId, reservationKey, presetId }
+
+/*
+ * ── Role → resource matching (ADR-016 decision 4's recorded gap) ────────
+ *
+ * Until this existed, a provision plan's resource declaration was "an operator-chosen preset
+ * rather than a role-matched selection" — the ADR's own words: the plan's runtime came from
+ * TIER_RUNTIME, a static tier→model table that knows nothing about what this deployment has
+ * actually configured. These helpers answer the question the plan was skipping: WHICH configured
+ * preset can staff this (role, tier) ask.
+ */
+
+/**
+ * The capability tier a framework preset's model qualifies for, or null.
+ *
+ * Derived through the SAME authority the rest of the system uses — `modelTier` reading
+ * lib/role-capacity.json — over the profile `runtimeProfileFromPreset` shapes, which is the exact
+ * pair the registration path resolves a preset with. Deliberately NOT a second model→tier mapping:
+ * two tables answering "what does this model qualify for" would drift, and the drift would surface
+ * as an agent minted for a cell it cannot staff.
+ */
+function presetTier(preset) {
+  return modelTier(runtimeProfileFromPreset(preset));
+}
+
+/**
+ * Every preset that can staff (role, tier), in selection order. Two requirements, both hard:
+ *
+ *  - A QUALIFYING TIER: at least `tier`, under the same TIER_RANK subsumption the engagement path
+ *    uses (strong ⊇ medium ⊇ lightweight). Over-qualified can serve; under-qualified never can.
+ *  - A CEILING: a preset with no ceiling produces an agent no engagement can ever be approved
+ *    against — `remainingFor` returns null for it, and the engagement store refuses to allocate
+ *    against an undeclared budget. Minting such an agent looks like capacity and serves nothing.
+ *
+ * Order: LOWEST qualifying tier first — do not burn a strong seat on a lightweight ask, the same
+ * cheapest-sufficient rule `selectAgent` applies to live agents. Within a tier, by id: picking the
+ * largest remaining ceiling headroom would need per-preset accounting that does not exist yet
+ * (`remainingFor` is per-agent, and one preset may back several agents), so a stable id order buys
+ * determinism without inventing a figure.
+ *
+ * `role` is part of the ask's identity but does not enter the match today: every per-role
+ * constraint role-capacity.json states (its `excluded` list) is the tier floor said per role, and
+ * the tier comparison above already enforces it.
+ */
+function resourcesForRole(role, tier, presets) {
+  const rank = Object.fromEntries([...CAPABILITY_TIERS].reverse().map((t, i) => [t, i]));
+  return (presets ?? [])
+    .map((preset) => ({ preset, tier: presetTier(preset) }))
+    .filter(({ preset, tier: got }) => got
+      && rank[got] >= rank[tier]
+      && Number.isFinite(preset?.ceiling?.tokens))
+    .sort((a, b) => (rank[a.tier] - rank[b.tier])
+      || (a.preset.id < b.preset.id ? -1 : a.preset.id > b.preset.id ? 1 : 0));
+}
+
+/** The preset a provision plan for (role, tier) mints from, or null when none can staff it. */
+function resourceForRole(role, tier, presets) {
+  return resourcesForRole(role, tier, presets)[0]?.preset ?? null;
+}
+
 let dispatchTicketSeq = 0;
 const cellKey = (role, tier) => `${role}:${tier}`;
 const annotateBusy = (records) => records.map((a) => ({ ...a, busy: dispatchLeaseStore.isBusy(a.name) }));
@@ -10239,6 +10307,38 @@ app.post('/api/dispatch', (req, res) => {
         extra: { role, tier },
       })) return undefined;
 
+      /*
+       * ROLE→RESOURCE MATCHING (ADR-016 decision 4). The plan is minted FROM a configured preset
+       * that can staff the ask, or refused when none can — never from the static tier table while
+       * presets exist to consult.
+       *
+       * REFUSED, NEVER QUEUED — the same argument as the budget gate directly above: a queue entry
+       * answers "waiting for capacity" when the truth is "no configured resource can ever staff
+       * this", and an agent that can never be minted cannot be waited for. Refused BEFORE the
+       * reservation is taken, so an impossible ask holds no seat in its cell.
+       *
+       * SCOPED TO DEPLOYMENTS THAT DECLARE PRESETS, the way the budget gate above is scoped to
+       * requests that name a room. A deployment with zero presets has made no resource declarations
+       * to match against — it predates the preset model and still runs on the static TIER_RUNTIME
+       * row, and refusing every mint there would turn an upgrade into an outage. Once ANY preset
+       * exists the deployment is describing its resources, and an ask none of them can staff is
+       * refused with the remedy named.
+       */
+      const preset = resourceForRole(role, tier, frameworkPresets);
+      if (frameworkPresets.length && !preset) {
+        return res.status(409).json({
+          status: 'refused',
+          reason: 'no_resource_for_role',
+          error: `no configured resource can staff a '${role}' ask at tier '${tier}': `
+            + `${frameworkPresets.length} preset(s) considered and none qualifies at '${tier}' or `
+            + 'above while carrying a ceiling — add such a preset (POST /api/framework-presets) '
+            + 'or lower the requested capability',
+          role,
+          tier,
+          presetsConsidered: frameworkPresets.length,
+        });
+      }
+
       provisionReservations.set(key, reserved + 1);
       const ages = provisionReservationAges.get(key) || [];
       ages.push(Date.now());
@@ -10252,10 +10352,23 @@ app.post('/api/dispatch', (req, res) => {
       const name = sideId
         ? `mx_${sideId.replace(/[^a-z0-9]+/g, '_')}_${role}_${tier}_${dispatchTicketSeq++}`
         : `mx_${role}_${tier}_${dispatchTicketSeq++}`;
-      // The reservation key rides along so REGISTRATION can release the seat it was holding.
-      provisionedSides.set(name, { sideId: sideId ?? null, reservationKey: key });
+      // The reservation key rides along so REGISTRATION can release the seat it was holding, and
+      // the preset id so registration can bind the agent to the resource the plan matched.
+      provisionedSides.set(name, { sideId: sideId ?? null, reservationKey: key, presetId: preset?.id ?? null });
       return res.json({
-        status: 'provision', role, tier, name, runtime: TIER_RUNTIME[tier],
+        status: 'provision', role, tier, name,
+        /*
+         * `runtime` predates the preset match and launchers read it (`up-v1 <name> <runtime>`), so
+         * it stays — derived from the matched preset when there is one, the static tier row only
+         * when the deployment declares no presets at all. `reasoning` rides along when the preset
+         * states one: the same model at a different reasoning level is a different tier
+         * (lib/role-capacity.json lists gpt-5.6-sol at all three), so dropping it would launch a
+         * different capability than the one that was matched.
+         */
+        runtime: preset
+          ? { runtime: preset.framework, model: preset.model, ...(preset.reasoning ? { reasoning: preset.reasoning } : {}) }
+          : TIER_RUNTIME[tier],
+        ...(preset ? { presetId: preset.id } : {}),
         ...(sideId ? { sideId, budget: sideBudgetFor(sideId) } : {}),
       });
     }
@@ -11590,6 +11703,48 @@ app.get('/api/capability', requireBearer, (_req, res) => {
     };
   });
 
+  /*
+   * WHAT COULD BE MINTED, beside what exists. `roles[].able` answers "which live agents fill this
+   * role"; `resources` answers the provisioning question — which configured presets a provision
+   * plan for the role could mint from, at which tier, in the exact order `resourceForRole` would
+   * pick them (lowest qualifying tier first, then id). Each non-qualifying preset carries its
+   * reason, matching `unable` above: a model no tier accepts, a tier below the role's floor, and a
+   * missing ceiling are different problems with different fixes. Preset ids, names, tiers and
+   * ceilings only — never the resolved profile, which carries the apiKey.
+   */
+  const resources = Object.fromEntries(ROLES.map((role) => {
+    const need = ROLE_DEFAULT_TIER[role];
+    const ranked = resourcesForRole(role, need, frameworkPresets);
+    const qualifiedIds = new Set(ranked.map(({ preset }) => preset.id));
+    return [role, {
+      qualified: ranked.map(({ preset, tier }) => ({
+        presetId: preset.id,
+        name: preset.name,
+        tier,
+        overTier: TIER_RANK[tier] - TIER_RANK[need],
+        ceilingTokens: preset.ceiling?.tokens ?? null,
+      })),
+      // The head of `qualified`, named so a client does not re-implement the pick.
+      selected: resourceForRole(role, need, frameworkPresets)?.id ?? null,
+      unqualified: frameworkPresets
+        .filter((p) => !qualifiedIds.has(p.id))
+        .map((p) => {
+          const tier = presetTier(p);
+          return {
+            presetId: p.id,
+            name: p.name,
+            tier: tier ?? null,
+            reason: !tier
+              ? (p.model ? 'model-not-accepted' : 'no-model')
+              : (TIER_RANK[tier] < TIER_RANK[need] ? 'below-tier' : 'no-ceiling'),
+          };
+        }),
+      // Stated so an empty `qualified` cannot read as "no presets exist" when the truth is
+      // "presets exist and none qualifies" — the difference is the whole refusal.
+      considered: frameworkPresets.length,
+    }];
+  }));
+
   return res.json({
     generatedAt: Date.now(),
     tiers: CAPABILITY_TIERS,
@@ -11597,6 +11752,7 @@ app.get('/api/capability', requireBearer, (_req, res) => {
     // Named so a client cannot mistake a computed judgement for stored state.
     source: 'lib/role-capacity.json',
     roles,
+    resources,
   });
 });
 
