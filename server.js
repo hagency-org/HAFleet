@@ -10,8 +10,6 @@ import { detectPaneBusyState } from './lib/pane-activity.js';
 import { assertRuntimeDir, isLocalAgentServer as isLocalServerIdentity, resolveLocalServerId } from './lib/runtime-dir-guard.js';
 import { enforceStartupConfig, resolveBindHost } from './lib/startup-config.js';
 import { createDashboardMutationBoundary } from './lib/dashboard/request-boundary.js';
-import { installDashboardPageRoutes } from './lib/dashboard/page-routes.js';
-import { installProjectSideProxyRoutes } from './lib/dashboard/project-side-proxy-routes.js';
 import {
   installAlertProxyRoutes,
   installProjectBoardProxyRoutes,
@@ -2857,13 +2855,6 @@ async function sweepPaneSnapshots() {
 }
 
 installAlertProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
-/*
- * The project-side proxy is an ALLOW-LIST of six routes out of the backend's thirteen. Three of the
- * others return a credential — an `as_token` is a whole namespace on a homeserver we do not administer —
- * and they are unreachable from the browser by omission rather than by a filter someone has to maintain.
- * See lib/dashboard/project-side-proxy-routes.js for what is excluded and why.
- */
-installProjectSideProxyRoutes(app, { backendBaseUrl: BACKEND_V2_URL, backendFetch });
 
 // Backend SSE consumer — forward alert events to dashboard clients
 const ALERT_SSE_EVENTS = new Set(['alert_created', 'alert_updated', 'alert_resolved', 'alert_deleted', 'message', 'task_created', 'task_updated', 'task_deleted']);
@@ -3400,7 +3391,6 @@ app.delete('/api/reminders/:id', (req, res) => {
 });
 
 // ── Dashboard pages ─────────────────────────────────────────────────
-installDashboardPageRoutes(app, { idleThreshold: IDLE_THRESHOLD, idleThresholdSec: IDLE_THRESHOLD_SEC });
 
 function startRuntimeLoops() {
   if (runtimeLoopsStarted) return;

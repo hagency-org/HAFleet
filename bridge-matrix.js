@@ -261,9 +261,21 @@ function resolveMessageBaseUrl(env = process.env) {
   const legacyMsgBase = normalizeBaseUrl(env.MSG_BASE_URL);
   if (legacyMsgBase) return legacyMsgBase;
 
-  const webPortRaw = Number.parseInt(env.HAFLEET_WEB_PORT || '8084', 10);
-  const webPort = Number.isFinite(webPortRaw) && webPortRaw > 0 ? webPortRaw : 8084;
-  return `http://127.0.0.1:${webPort}/msg`;
+  /*
+   * THE BACKEND, not the retired portal on 8084.
+   *
+   * These links go into Matrix messages and outlive the process that answered them, so the default has
+   * to point at something that will still be there. `backend-v2.js` serves `/msg/:id` itself — it has
+   * all along — while the copy on the old web portal existed only for that portal's own pages, which
+   * are now deleted. `HAFLEET_WEB_URL` and `MSG_BASE_URL` above still override, so a deployment that
+   * put the viewer somewhere else keeps working.
+   *
+   * LINKS ALREADY SENT still say 8084. Nothing can rewrite a message that has been delivered, so those
+   * break when that process stops — which is the cost of retiring it, stated rather than discovered.
+   */
+  const backendPortRaw = Number.parseInt(env.HAFLEET_BACKEND_PORT || '8090', 10);
+  const backendPort = Number.isFinite(backendPortRaw) && backendPortRaw > 0 ? backendPortRaw : 8090;
+  return `http://127.0.0.1:${backendPort}/msg`;
 }
 
 const MSG_BASE_URL = resolveMessageBaseUrl();

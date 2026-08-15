@@ -1253,9 +1253,22 @@ describe('bridge matrix behavior', () => {
     expect(resolveMessageBaseUrlForTest({
       MSG_BASE_URL: 'https://legacy.example.test/msg/',
     })).toBe('https://legacy.example.test/msg');
+    /*
+     * THE FALLBACK IS THE BACKEND NOW, not the web portal's port. `HAFLEET_WEB_PORT` named the old
+     * portal on 8084, which is deleted — and these links go into Matrix messages that outlive the
+     * process which answered them, so the default has to point at something that will still be there.
+     * `backend-v2.js` serves `/msg/:id` itself and always has.
+     *
+     * The two explicit overrides above are unchanged and still win, which is what a deployment that put
+     * the viewer somewhere else relies on.
+     */
+    expect(resolveMessageBaseUrlForTest({
+      HAFLEET_BACKEND_PORT: '18190',
+    })).toBe('http://127.0.0.1:18190/msg');
+    // And a stale HAFLEET_WEB_PORT no longer steers them at a process that is gone.
     expect(resolveMessageBaseUrlForTest({
       HAFLEET_WEB_PORT: '18184',
-    })).toBe('http://127.0.0.1:18184/msg');
+    })).toBe('http://127.0.0.1:8090/msg');
     expect(buildMessageUrlForTest('msg_1', 'token value', 'https://hafleet.example.test/msg'))
       .toBe('https://hafleet.example.test/msg/msg_1?view=token%20value');
   });
