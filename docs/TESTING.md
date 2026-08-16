@@ -235,6 +235,51 @@ documented shape, and `api-runtime` is the fifth file to show one. Five files, f
 no two adjacent in the code — which is the same evidence the memory theory was dropped on, now with the
 last confound removed.
 
+### The failures are FAST, not slow — and what was done about it (2026-08-15)
+
+Twenty-eight failures were collected out of one day's whole-suite logs and sorted by duration. **Three
+took a second or more; twenty-five failed in under half a second.** Two of the three slow ones sat at
+exactly 30006/30007 ms, which is vitest's timeout and a genuine hang; everything else was an assertion
+that ran and disagreed.
+
+That kills the intuition these sightings invite. "Whole-suite only" sounds like contention — slow tests
+tipping over a limit — and the durations say otherwise. The recurring shape is instead:
+
+    expected undefined to deeply equal [...]      // retiredAgents absent from a DELETE response
+    expected 400 to be 200                        // a seeded agent answering as though absent
+    expected undefined to be 'released'
+
+A value that should exist is missing, in a file that passes alone. That is the shape
+`backend-test-runtime.js` already documents for one known cause: *"A module bound to the wrong directory
+finds no seeded agents and answers 404 to everything."* The directory guard added for that proves the
+module bound to the path we meant — it cannot prove the module READ what we wrote there.
+
+**So the helper now asks the second question too.** After the import it compares the seeded agent names
+against the names the module can actually see, and throws at SETUP with both lists when they differ. It
+is one in-process read, only when agents were seeded.
+
+The message reports BOTH what the module sees and what the file at that path holds, because those two
+disagreeing means the module read another directory while the file being wrong means the seed was written
+elsewhere — opposite fixes, and a guard that could not tell them apart would produce a better-labelled
+mystery instead of an answer.
+
+**This does not fix the flake.** Nothing here identified the mechanism; four hypotheses died earlier the
+same day (see the table above) and this is not a fifth. What it changes is what the next sighting looks
+like: a labelled failure naming the missing data, instead of an unexplained assertion two hundred lines
+downstream that gets recorded as one more row in this table.
+
+**AND THE FIRST VERSION OF THIS GUARD WAS ITSELF A BUG, recorded because it is the more useful half of the
+story.** It compared seeded KEYS against agent records only. The store also holds humans (`kind: 'human'`),
+`inferRecordKind` is what separates them, and a human seed therefore read as missing data. Two test files
+broke deterministically — and for one run I described that as the guard having *caught* a flake, which was
+exactly backwards: it had caused two failures of the shape it was written to detect. Isolation said so
+immediately (they failed alone too, and a flake never does).
+
+Two lessons, in the order they matter. A check that duplicates a rule the code owns will drift from it, so
+the snapshot now comes from the module that owns `inferRecordKind` rather than from the helper's idea of
+it. And a new diagnostic's first failures deserve more suspicion than old code's, not less: a guard that
+has never fired has never been shown to fire *correctly*.
+
 ### The pairing is arithmetic, not a signature (2026-08-15)
 
 A first version of the two rows above argued that these sightings keep arriving as exactly TWO files
