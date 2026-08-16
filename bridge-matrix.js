@@ -3898,6 +3898,21 @@ export class MatrixBridge {
           );
           continue;
         }
+        /*
+         * THE ANSWER TO A KNOCK, and the only place anything sees it. A knock is a pull: we asked, and
+         * the next event is theirs. `POST /api/project-sides/:id/knock` returns `awaits: the project
+         * side invites the representative` and nothing was watching for that invite — the knock would
+         * sit until an operator happened to look. This is what makes decision 5 an entry rather than a
+         * gesture.
+         */
+        /*
+         * ANSWERED IN ADDITION, NOT INSTEAD. A first version returned early when it handled the invite,
+         * and two existing tests refused it with the right argument: membership events reach the same
+         * gate a synced one does — the historical cutoff and `getRoomTrust` — and a separate handler
+         * that swallowed them would have needed both re-implemented. So this runs beside the generic
+         * path and the event still goes through it.
+         */
+        if (event.type === 'm.room.member') await this.onAppserviceMembership(sideId, roomId, event);
         if (event.type === 'm.room.message') await this.onRoomMessage(roomId, event);
         else await this.onRoomEvent(roomId, event);
       } catch (error) {
@@ -3909,6 +3924,83 @@ export class MatrixBridge {
         console.error(`[appservice] ${sideId}: failed on ${event.type} in ${roomId}: ${error?.message || error}`);
         throw error;
       }
+    }
+  }
+
+  /**
+   * A membership event on a project side, seen through the appservice intake.
+   *
+   * ONE THING IS ACTED ON: an invite addressed to the REPRESENTATIVE, which is how a project answers a
+   * knock. The representative joins, and that is the whole handshake decision 5 describes — the project
+   * publishes an alias, we knock, they invite, we join.
+   *
+   * ACCEPTING AN INVITE IS NOT ACCEPTING WORK. Joining a room lets us read what the project asks for;
+   * every request from it still goes through engagement approval and the side's budget. ADR-014's
+   * ruling is the reason this is safe to automate at all: 「joining a Discord costs the joiner nothing.
+   * Lending an agent spends tokens.」 The cost is on the lending, which no join touches.
+   *
+   * WHY AUTO-JOINING IS BOUNDED. This invite arrived through a side's own appservice transaction, so it
+   * can only come from a homeserver we hold an acting credential for — a project side an operator
+   * configured. A stranger cannot reach this path at all. Within a configured side, its admins inviting
+   * our representative IS the accept-a-knock flow, and the join grants them nothing they did not
+   * already have: reading their room, which they invited us to.
+   *
+   * Returns nothing. An earlier version returned true to skip the generic handler and two tests refused
+   * it correctly — the trust gate and the historical cutoff live there, and this must not be a way
+   * around them. An invite for anyone else (an agent, a human, the bot) is left to the paths that own
+   * those.
+   */
+  async onAppserviceMembership(sideId, roomId, event) {
+    const membership = event?.content?.membership;
+    if (membership !== 'invite') return;
+    const acting = this.actingSideFor(sideId);
+    if (!acting) return;
+    const representative = `@${String(acting.credential?.senderLocalpart || '').toLowerCase()}:${sideId}`;
+    if (String(event?.state_key || '').toLowerCase() !== representative) return;
+
+    /*
+     * Joined with `joinRoomOnSideAsAgent`, whose namespace check does not apply to the representative —
+     * it is the sender_localpart, not an `@ac_` user. So the join is done directly, and the ONE
+     * safeguard that matters here is the room's origin: an invite naming a room on another server is
+     * not this side's to accept.
+     */
+    if (!roomId.endsWith(`:${sideId}`)) {
+      console.warn(`[appservice] ${sideId}: invite for ${representative} names room ${roomId} on another server`);
+      return;
+    }
+    const url = new URL(
+      `${String(acting.side.apiBaseUrl).replace(/\/+$/, '')}/_matrix/client/v3/join/`
+      + `${encodeURIComponent(roomId)}`,
+    );
+    url.searchParams.set('user_id', representative);
+    try {
+      const res = await fetch(url.toString(), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${acting.credential.asToken}`, 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status}${detail ? `: ${detail.slice(0, 120)}` : ''}`);
+      }
+      console.log(`[appservice] ${sideId}: knock answered — ${representative} joined ${roomId}`);
+      /*
+       * Reported to the operator, because this is the moment a project becomes reachable and nothing
+       * else announces it. `postWarning` is the bridge's only channel into the alert store; the wording
+       * says what happened rather than warning about it, and the dedupe scope is the room so an
+       * invite retried by the homeserver does not file twice.
+       */
+      this.postWarning(
+        `project side ${sideId} accepted our knock: ${representative} joined ${roomId}. Requests from `
+        + 'that room still go through engagement approval and the side budget.',
+        { kind: 'knock-accepted', scope: roomId },
+      );
+    } catch (error) {
+      console.error(`[appservice] ${sideId}: could not join ${roomId} after invite: ${error.message}`);
+      this.postWarning(
+        `project side ${sideId} invited ${representative} to ${roomId} and the join failed: ${error.message}`,
+        { kind: 'knock-accepted', scope: roomId },
+      );
     }
   }
 

@@ -21,6 +21,8 @@ import {
   ensureRepresentative,
   inviteToRoomOnSide,
   joinRoomOnSideAsAgent,
+  knockOnRoomOnSide,
+  resolveAliasOnSide,
   mintAgentIdentity,
   registerRepresentative,
   sendToRoomOnSide,
@@ -899,5 +901,111 @@ describe('the representative brings an agent into a project room', () => {
     await expect(inviteToRoomOnSide({
       side: SIDE, credential: asCred(), roomId: ROOM, userId: 'worker', fetchImpl: fakeFetch([]),
     })).rejects.toThrow(RepresentativeError);
+  });
+});
+
+/*
+ * 邀请码 — ADR-016 decision 5: the invite object is a published alias plus a knock.
+ *
+ * The project publishes `#its-project:its-server` and sets the join rule to `knock`; our representative
+ * knocks; the project accepts. An alias is a handle a project can publish and a human can paste, with
+ * no token for us to issue, hold or leak — which is why the decision chose it over an invite code.
+ *
+ * A KNOCK IS NOT ACCESS AND NOT AN APPROVAL. It leaves membership in `knock` until somebody on the
+ * project's side invites us, and lending an agent stays a separate audited act: ADR-014's ruling that
+ * 「joining a Discord costs the joiner nothing. Lending an agent spends tokens.」 is not softened by
+ * making a project findable. The tests below assert the return value never reads like access.
+ */
+describe('the invite object: a published alias, and a knock', () => {
+  const ALIAS = `#acme-market:${SERVER}`;
+  const ROOM = `!market:${SERVER}`;
+
+  test('an alias resolves through the side that publishes it', async () => {
+    const impl = fakeFetch([ok({ room_id: ROOM, servers: [SERVER] })]);
+    const r = await resolveAliasOnSide({ side: SIDE, credential: asCred(), alias: ALIAS, fetchImpl: impl });
+    expect(r).toMatchObject({ resolved: true, roomId: ROOM });
+    const [call] = impl.calls;
+    expect(call.url).toContain(`/directory/room/${encodeURIComponent(ALIAS)}`);
+    // Masqueraded as the representative: the directory read is done by the account that will knock.
+    expect(call.url).toContain(encodeURIComponent(`@hafleet:${SERVER}`));
+  });
+
+  test('an alias published by ANOTHER server is refused before any call', async () => {
+    /*
+     * Resolved through this side's credential it would either fail, or — if the homeserver happened to
+     * know it over federation — hand back a room this side has no account in. Same cross-side confusion
+     * `sendToRoomOnSide` refuses for room ids.
+     */
+    const impl = fakeFetch([]);
+    const r = await resolveAliasOnSide({
+      side: SIDE, credential: asCred(), alias: '#p:other.example', fetchImpl: impl,
+    });
+    expect(r.resolved).toBe(false);
+    expect(r.reason).toMatch(/published by other\.example/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('the representative knocks, and the reason rides with it', async () => {
+    const impl = fakeFetch([ok({ room_id: ROOM })]);
+    const r = await knockOnRoomOnSide({
+      side: SIDE, credential: asCred(), aliasOrRoomId: ROOM, reason: 'HAFleet asks to take work here',
+      fetchImpl: impl,
+    });
+    expect(r).toMatchObject({ knocked: true, already: false, roomId: ROOM });
+    const [call] = impl.calls;
+    expect(call.method).toBe('POST');
+    expect(call.url).toContain(`/knock/${encodeURIComponent(ROOM)}`);
+    expect(call.url).toContain(encodeURIComponent(`@hafleet:${SERVER}`));
+    expect(JSON.parse(call.body)).toEqual({ reason: 'HAFleet asks to take work here' });
+  });
+
+  test('a homeserver without knocking says SO, rather than looking like a bad alias', async () => {
+    /*
+     * `M_UNRECOGNIZED` on an unimplemented endpoint arrives as HTTP 404, which reads exactly like a
+     * room that does not exist — and sends an operator to check the alias when the remedy is a
+     * homeserver upgrade. (Palpo 0.4.0 does implement it; this is the branch for the ones that do not.)
+     */
+    const impl = fakeFetch([fail(404, { errcode: 'M_UNRECOGNIZED', error: 'Unrecognized request' })]);
+    const r = await knockOnRoomOnSide({ side: SIDE, credential: asCred(), aliasOrRoomId: ROOM, fetchImpl: impl });
+    expect(r.knocked).toBe(false);
+    expect(r.state).toBe('unsupported');
+    expect(r.reason).toMatch(/does not implement knocking/);
+    expect(r.reason).toMatch(/invite the representative directly/);
+  });
+
+  test('already a member is a success with nothing done', async () => {
+    const impl = fakeFetch([fail(403, { errcode: 'M_FORBIDDEN', error: 'You are already in the room.' })]);
+    const r = await knockOnRoomOnSide({ side: SIDE, credential: asCred(), aliasOrRoomId: ROOM, fetchImpl: impl });
+    expect(r).toMatchObject({ knocked: false, already: true, reason: null });
+  });
+
+  test('a room whose join rule is not knock stays a REFUSAL, and keeps the errcode', async () => {
+    // The remedy belongs to the project (set the rule), so this must not be reported as our failure.
+    const impl = fakeFetch([fail(403, { errcode: 'M_FORBIDDEN', error: 'You are not allowed to knock' })]);
+    const r = await knockOnRoomOnSide({ side: SIDE, credential: asCred(), aliasOrRoomId: ROOM, fetchImpl: impl });
+    expect(r.knocked).toBe(false);
+    expect(r.already).toBe(false);
+    expect(r.reason).toMatch(/M_FORBIDDEN/);
+  });
+
+  test('a target on another server is refused, and a bare name is rejected outright', async () => {
+    const impl = fakeFetch([]);
+    const away = await knockOnRoomOnSide({
+      side: SIDE, credential: asCred(), aliasOrRoomId: '!x:other.example', fetchImpl: impl,
+    });
+    expect(away.knocked).toBe(false);
+    expect(away.reason).toMatch(/not on palpo\.test/);
+    await expect(knockOnRoomOnSide({
+      side: SIDE, credential: asCred(), aliasOrRoomId: 'acme-market', fetchImpl: impl,
+    })).rejects.toThrow(RepresentativeError);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('a registrationToken side with no representative token yet cannot knock', async () => {
+    const impl = fakeFetch([]);
+    const r = await knockOnRoomOnSide({ side: SIDE, credential: regCred(), aliasOrRoomId: ROOM, fetchImpl: impl });
+    expect(r.knocked).toBe(false);
+    expect(r.reason).toMatch(/no representative token yet/);
+    expect(impl.calls).toHaveLength(0);
   });
 });

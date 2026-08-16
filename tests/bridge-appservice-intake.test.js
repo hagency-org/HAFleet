@@ -17,7 +17,7 @@
  * bridge would drag in a homeserver, a crypto store and a backend to observe one branch.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { createServer } from 'http';
 import { pathToFileURL } from 'url';
 import { createAppserviceRouter } from '../lib/appservice-receiver.js';
@@ -66,14 +66,24 @@ afterAll(async () => {
 });
 
 /** A `this` carrying only what the method under test touches. */
-function fakeBridge() {
-  const seen = { messages: [], events: [], warnings: [] };
+function fakeBridge({ acting = null } = {}) {
+  const seen = { messages: [], events: [], warnings: [], memberships: [] };
   return {
     seen,
     onRoomMessage: async (roomId, event) => { seen.messages.push({ roomId, type: event.type, id: event.event_id }); },
     onRoomEvent: async (roomId, event) => { seen.events.push({ roomId, type: event.type }); },
     // The intake raises operator-visible warnings (encrypted-room blindness); captured, not dropped.
     postWarning: (message, meta) => { seen.warnings.push({ message, ...meta }); },
+    /*
+     * Membership events now get a second look — an invite addressed to the REPRESENTATIVE is how a
+     * project answers a knock (ADR-016 decision 5). Recorded here so the tests below can assert that it
+     * happens BESIDE the generic path rather than instead of it: the trust gate and the historical
+     * cutoff live in `onRoomEvent`, and a handler that swallowed the event would be a way around both.
+     */
+    onAppserviceMembership: async (sideId, roomId, event) => {
+      seen.memberships.push({ sideId, roomId, membership: event?.content?.membership ?? null });
+    },
+    actingSideFor: () => acting,
   };
 }
 
@@ -105,6 +115,8 @@ describe('an event takes the SAME path a synced one takes', () => {
     ]);
     expect(self.seen.events.map((e) => e.type)).toEqual(['m.room.member', 'm.room.name']);
     expect(self.seen.messages).toEqual([]);
+    // Seen by the knock handler AS WELL, which is the point: an extra look, not a diversion.
+    expect(self.seen.memberships).toHaveLength(1);
   });
 
   test('events are processed in order, because a join before a message is not the same as after', async () => {
@@ -112,12 +124,17 @@ describe('an event takes the SAME path a synced one takes', () => {
     const self = {
       onRoomMessage: async () => { order.push('message'); },
       onRoomEvent: async (r, e) => { order.push(e.type); },
+      // Recorded in the same list, so ORDER covers the knock look too: it must run before the event
+      // reaches the generic handler, not after — an invite answered out of order would join a room
+      // whose membership the gate had already judged.
+      onAppserviceMembership: async () => { order.push('knock-look'); },
+      actingSideFor: () => null,
     };
     await call(self, 'a.example', [
       { type: 'm.room.member', room_id: '!r:a', event_id: '$1' },
       { type: 'm.room.message', room_id: '!r:a', event_id: '$2' },
     ]);
-    expect(order).toEqual(['m.room.member', 'message']);
+    expect(order).toEqual(['knock-look', 'm.room.member', 'message']);
   });
 });
 
@@ -267,5 +284,127 @@ describe('a cosmetic step must not take approval down with it', () => {
     const window = source.slice(idx, idx + 600);
     expect(window).toMatch(/project side/);
     expect(window).toMatch(/approval still works/);
+  });
+});
+
+/*
+ * ANSWERING A KNOCK — ADR-016 decision 5's other half.
+ *
+ * `POST /api/project-sides/:id/knock` returns `awaits: the project side invites the representative`, and
+ * until this nothing watched for that invite: the knock sat until an operator happened to look. A knock
+ * is a pull, so the next event is theirs, and the appservice intake is the only place it arrives.
+ *
+ * ACCEPTING AN INVITE IS NOT ACCEPTING WORK, which is what makes automating it safe: joining lets us
+ * read what the project asks for, and every request from that room still goes through engagement
+ * approval and the side's budget. ADR-014: 「joining a Discord costs the joiner nothing. Lending an agent
+ * spends tokens.」
+ */
+describe('an invite for the representative is a knock being answered', () => {
+  const SIDE = 'palpo.test';
+  const REP = `@hafleet:${SIDE}`;
+  const ROOM = `!market:${SIDE}`;
+
+  const acting = {
+    side: { serverName: SIDE, apiBaseUrl: 'http://127.0.0.1:8008' },
+    credential: { kind: 'appservice', asToken: 'as_secret_never_logged', senderLocalpart: 'hafleet', namespace: '@ac_.*' },
+  };
+
+  function self({ sides = { [SIDE]: acting } } = {}) {
+    const it = {
+      warnings: [],
+      postWarning(message, meta) { this.warnings.push({ message, ...meta }); },
+      actingSideFor: (id) => sides[String(id).toLowerCase()] ?? null,
+    };
+    it.onAppserviceMembership = bridgeModule.MatrixBridge.prototype.onAppserviceMembership.bind(it);
+    return it;
+  }
+
+  const invite = (stateKey = REP, roomId = ROOM) => ({
+    type: 'm.room.member', room_id: roomId, state_key: stateKey, content: { membership: 'invite' },
+  });
+
+  function capture(ok = true) {
+    const calls = [];
+    vi.stubGlobal('fetch', async (url, init = {}) => {
+      calls.push({ url: String(url), method: init.method, headers: init.headers ?? {} });
+      return ok
+        ? { ok: true, status: 200, text: async () => '{}', json: async () => ({}) }
+        : { ok: false, status: 403, text: async () => 'M_FORBIDDEN', json: async () => ({}) };
+    });
+    return calls;
+  }
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  test('the representative joins, masquerading as itself, on the side', async () => {
+    const calls = capture();
+    const it = self();
+    await it.onAppserviceMembership(SIDE, ROOM, invite());
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toContain(`/join/${encodeURIComponent(ROOM)}`);
+    expect(calls[0].url).toContain(encodeURIComponent(REP));
+    expect(calls[0].url.startsWith('http://127.0.0.1:8008/')).toBe(true);
+    expect(calls[0].headers.Authorization).toBe('Bearer as_secret_never_logged');
+
+    /*
+     * The operator is told, because this is the moment a project becomes reachable and nothing else
+     * announces it — and the message says what the join does NOT grant, so nobody reads reachable as
+     * approved.
+     */
+    const said = it.warnings.map((w) => w.message).join(' ');
+    expect(said).toMatch(/accepted our knock/);
+    expect(said).toMatch(/still go through engagement approval/);
+    expect(it.warnings[0].kind).toBe('knock-accepted');
+    // Deduped per ROOM, so a homeserver retrying the transaction does not file twice.
+    expect(it.warnings[0].scope).toBe(ROOM);
+  });
+
+  test('an invite for anyone else is left alone', async () => {
+    /*
+     * Agents, humans and the bot have their own paths, and an invite for an AGENT is handled at
+     * acceptance by the representative rather than here. Acting on all of them would make this a
+     * join-anything handler.
+     */
+    const calls = capture();
+    const it = self();
+    for (const who of [`@ac_worker:${SIDE}`, `@borrower:${SIDE}`, '@hafleetbot:matrix.example.test']) {
+      await it.onAppserviceMembership(SIDE, ROOM, invite(who));
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  test('only an invite: a join, leave or ban for the representative does nothing', async () => {
+    const calls = capture();
+    const it = self();
+    for (const membership of ['join', 'leave', 'ban', 'knock', undefined]) {
+      await it.onAppserviceMembership(SIDE, ROOM, {
+        type: 'm.room.member', room_id: ROOM, state_key: REP, content: { membership },
+      });
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  test('a room on another server is refused, even when the invite names our representative', async () => {
+    const calls = capture();
+    const it = self();
+    await it.onAppserviceMembership(SIDE, '!elsewhere:other.example', invite(REP, '!elsewhere:other.example'));
+    expect(calls).toHaveLength(0);
+  });
+
+  test('a side we hold no acting credential for is ignored', async () => {
+    const calls = capture();
+    const it = self({ sides: {} });
+    await it.onAppserviceMembership(SIDE, ROOM, invite());
+    expect(calls).toHaveLength(0);
+  });
+
+  test('a failed join is reported, not swallowed', async () => {
+    const calls = capture(false);
+    const it = self();
+    await it.onAppserviceMembership(SIDE, ROOM, invite());
+    expect(calls).toHaveLength(1);
+    expect(it.warnings.map((w) => w.message).join(' ')).toMatch(/join failed/);
   });
 });

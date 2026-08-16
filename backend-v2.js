@@ -41,7 +41,8 @@ import { buildSeats, normalizeDeclaration, seatIdentity } from './lib/seat-store
 import { createEngagementStore, routeRequest, EngagementError } from './lib/engagement-store.js';
 import { ProjectSideStore, ProjectSideStoreError } from './lib/project-side-store.js';
 import {
-  ensureRepresentative, inviteToRoomOnSide, joinRoomOnSideAsAgent, mintAgentIdentity,
+  ensureRepresentative, inviteToRoomOnSide, joinRoomOnSideAsAgent, knockOnRoomOnSide,
+  mintAgentIdentity, resolveAliasOnSide,
 } from './lib/matrix-representative.js';
 import {
   dropQueuedBackendNotificationsBySource,
@@ -9277,6 +9278,84 @@ app.post('/api/project-sides/:id/projects/:projectId/archive', requireBearer, (r
     return res.json({ ok: true, project });
   } catch (error) {
     return respondProjectSideError(res, error, 'failed to archive project');
+  }
+});
+
+/**
+ * Knock on a project's published room — ADR-016 decision 5, the invite object.
+ *
+ * The operator supplies `#its-project:its-server`, which is the whole point of choosing an alias: it is
+ * a handle a project can publish and a human can paste, with no token for us to issue or leak.
+ *
+ * A KNOCK IS NOT ACCESS AND NOT AN APPROVAL. It leaves membership in `knock` state until somebody on
+ * the project's side invites us, and lending an agent stays a separate audited act — ADR-014's ruling
+ * that 「joining a Discord costs the joiner nothing. Lending an agent spends tokens.」 is not softened by
+ * making a project findable. So the response says `knocked` and reports the room it asked about; it
+ * never reports a project as engaged.
+ *
+ * The alias is resolved FIRST and reported separately, because the two failures send an operator to
+ * different places: an unresolvable alias is a typo or an unpublished room, and a refused knock is the
+ * project's join rule. Answering both as one "failed" would hide which.
+ */
+app.post('/api/project-sides/:id/knock', requireBearer, async (req, res) => {
+  try {
+    const sideId = String(req.params.id || '').toLowerCase();
+    const side = projectSideStore.getSide(sideId);
+    if (!side) return res.status(404).json({ error: 'project side not found', code: 'no_project_side' });
+    let credential;
+    try {
+      credential = projectSideStore.credentialFor(sideId);
+    } catch (error) {
+      return respondProjectSideError(res, error, 'failed to read the project side credential');
+    }
+    if (!credential) {
+      return res.status(409).json({
+        error: `project side ${sideId} has no credential, so the representative cannot knock`,
+        code: 'no_credential',
+      });
+    }
+    const alias = typeof req.body?.alias === 'string' ? req.body.alias.trim() : '';
+    if (!alias) {
+      return res.status(400).json({
+        error: 'alias is required: the invite object is a published room alias, like #project:server',
+        code: 'bad_request',
+      });
+    }
+
+    const acting = { side: { apiBaseUrl: side.apiBaseUrl, serverName: side.serverName }, credential };
+    const resolved = alias.startsWith('#')
+      ? await resolveAliasOnSide({ ...acting, alias })
+      : { resolved: true, roomId: alias, reason: null };
+    if (!resolved.resolved) {
+      return res.status(409).json({
+        status: 'refused', reason: 'alias_unresolved', sideId, alias, error: resolved.reason,
+      });
+    }
+
+    const knock = await knockOnRoomOnSide({
+      ...acting,
+      aliasOrRoomId: resolved.roomId,
+      reason: typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 200) : null,
+    });
+    if (!knock.knocked && !knock.already) {
+      return res.status(409).json({
+        status: 'refused',
+        reason: knock.state === 'unsupported' ? 'knock_unsupported' : 'knock_refused',
+        sideId, alias, roomId: resolved.roomId, error: knock.reason,
+      });
+    }
+    return res.json({
+      ok: true,
+      sideId,
+      alias,
+      roomId: resolved.roomId,
+      // `knock` is a state, not access: the project still has to invite us, and the contributor still
+      // has to approve any lending. Both facts ride back so no caller has to assume either.
+      state: knock.already ? 'already_member' : 'knocked',
+      awaits: knock.already ? null : 'the project side invites the representative',
+    });
+  } catch (error) {
+    return respondProjectSideError(res, error, 'failed to knock');
   }
 });
 
