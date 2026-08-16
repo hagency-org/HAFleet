@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -146,6 +146,56 @@ export async function createBackendTestContext(prefix, seed = {}) {
       + 'Another test mutated HAFLEET_RUNTIME_DIR during this import.',
     );
   }
+  /*
+   * THE DIRECTORY IS RIGHT — IS THE DATA VISIBLE? Those are different questions, and only the first was
+   * being asked. The check above proves the module bound to the path we meant; it cannot prove the module
+   * READ what we wrote there, and every recorded flake in docs/TESTING.md has the same shape: a value that
+   * should exist comes back `undefined` or `404`, in a file that passes alone.
+   *
+   * Measured before writing this: of 28 logged failures, 25 failed in under half a second — assertion
+   * failures, not timeouts. So the suspicion is not "slow" but "looking at the wrong data", and this turns
+   * that suspicion into a labelled failure AT SETUP instead of an unexplained assertion two hundred lines
+   * later. It does not fix the flake. It makes the next one say what it is.
+   *
+   * Cheap on purpose: one in-process read of the store the backend already loaded, no HTTP, and only when
+   * agents were seeded — which is most contexts and never an empty one.
+   */
+  const seededNames = Object.keys(seed.agents || {});
+  if (seededNames.length) {
+    /*
+     * EVERY RECORD, not only the agent-shaped ones. The store holds humans too (`kind: 'human'`), and
+     * `inferRecordKind` decides which is which — so comparing seeded keys against agents-only reports a
+     * human seed as missing. That is not a hypothetical: the first version of this check did exactly that
+     * and deterministically broke two files while I was describing it as having caught a flake.
+     */
+    const snapshot = backendModule.__backendV2TestInternals?.storeSnapshotForTest?.() ?? null;
+    const visible = Array.isArray(snapshot?.records) ? snapshot.records : null;
+    if (visible) {
+      const missing = seededNames.filter((name) => !visible.includes(name));
+      if (missing.length) {
+        /*
+         * WHICH OF THE TWO WENT WRONG. "The module sees the wrong records" has exactly two causes with
+         * opposite fixes: the module read a different directory, or the seed was written somewhere else.
+         * Re-reading the file this helper claims to have written separates them.
+         */
+        let onDisk = '(unreadable)';
+        try {
+          const raw = JSON.parse(readFileSync(path.join(runtimeDir, 'data', 'agents.json'), 'utf8'));
+          onDisk = Object.keys(raw).join(', ') || '(empty)';
+        } catch (error) {
+          onDisk = `(unreadable: ${error.message})`;
+        }
+        throw new Error(
+          `backend bound to ${runtimeDir} but cannot see ${missing.length} seeded record(s): `
+          + `${missing.join(', ')}. The module sees [${visible.join(', ')}]; the file at that path holds `
+          + `[${onDisk}]. If those two disagree the MODULE read another directory; if the file itself is `
+          + 'wrong the SEED was written elsewhere. This is the shape every whole-suite flake in '
+          + 'docs/TESTING.md has taken, and the two halves have opposite fixes.',
+        );
+      }
+    }
+  }
+
   const { app } = backendModule;
   const servers = new Set();
 

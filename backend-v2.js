@@ -15088,6 +15088,19 @@ export const __backendV2TestInternals = {
   runtimeRootForTest: RUNTIME_ROOT,
   setLocalRequestOverrideForTest,
   /*
+   * What this module can actually SEE in the store it loaded, for the test helper's post-import check.
+   *
+   * BOTH LISTS, and that is the whole point: `records` is every key it read, `agentRecords` only those
+   * `inferRecordKind` calls an agent. A first version of the check compared seeded KEYS against
+   * agent-records-only and reported a human seed (`kind: 'human'`) as missing data — a false positive that
+   * deterministically broke two test files while claiming to have caught a flake. The kind rule lives
+   * here, so the answer has to come from here too.
+   */
+  storeSnapshotForTest: () => ({
+    records: Object.keys(agents),
+    agentRecords: Object.values(agents).filter(isAgentRecord).map((a) => a.name),
+  }),
+  /*
    * The overrun sweep runs on an hourly interval, and a test must not wait an hour or start the
    * backend's loops to see what it files. Exposed so the alarm can be driven directly — the interval
    * is scheduling, the alarm is the behaviour.
