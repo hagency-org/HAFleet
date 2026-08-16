@@ -12691,6 +12691,40 @@ app.post('/api/engagements', requireRequester, async (req, res) => {
       }
     }
     /*
+     * NOBODY CAN FILL THIS ROLE — so say what it would TAKE, without refusing the request.
+     *
+     * ADR-016 decision 4's role-matched selection lived on `POST /api/dispatch`, which ADR-013 decision 8
+     * withdrew and which has no product caller: the matcher was correct and unreachable. This is the
+     * reachable end of it — the engagement path, where a project actually asks for a role.
+     *
+     * A HINT, NOT A REFUSAL, and that is a correction of my own first version. Refusing would have been a
+     * change to the contract a project side depends on, and two existing tests encode the opposite: a
+     * request with no qualifying agent is RECORDED (the project asked; that is a fact worth keeping) and
+     * discloses `serving: null` rather than a guess. Turning that into a 409 would make the queue model
+     * ADR-013 chose unreachable from the outside.
+     *
+     * IT PLANS, IT DOES NOT PROVISION. Launching an agent is an operator act with a cost, and doing it
+     * inside somebody else's request would spend the contributor's money because a stranger asked. The
+     * hint names the preset that WOULD staff it, so the next step is one command rather than an
+     * investigation — and names none when nothing configured qualifies, which is a different problem.
+     */
+    const provisionHint = agent ? null : (() => {
+      const need = ROLE_DEFAULT_TIER[role];
+      const candidate = resourceForRole(role, need, frameworkPresets);
+      return {
+        reason: candidate ? 'no_agent_provisioned_for_role' : 'no_resource_for_role',
+        role,
+        tier: need,
+        presetId: candidate?.id ?? null,
+        presetsConsidered: frameworkPresets.length,
+        detail: candidate
+          ? `no agent serves ${role} at ${need} yet; preset ${candidate.id} (${candidate.model}) qualifies`
+          : `no agent serves ${role} at ${need}, and none of the ${frameworkPresets.length} configured `
+            + 'preset(s) reaches that tier with a ceiling',
+      };
+    })();
+
+    /*
      * THE BORROWER'S BUDGET, CHECKED BEFORE THE RECORD EXISTS.
      *
      * Here rather than after `createRequest` because a whitelisted project with a published offer
@@ -12748,10 +12782,19 @@ app.post('/api/engagements', requireRequester, async (req, res) => {
        */
       const roomAdmission = await admitAgentToProjectRoom(engagement);
       return res.json({
-        ok: true, engagement: engagementStore.get(engagement.id), binding: outcome, roomAdmission, serving,
+        ok: true,
+        engagement: engagementStore.get(engagement.id),
+        binding: outcome,
+        roomAdmission,
+        serving,
+        /*
+         * Omitted entirely when an agent WAS found — a null field on every normal response is noise that
+         * teaches readers to skip the object it appears in.
+         */
+        ...(provisionHint ? { provisionHint } : {}),
       });
     }
-    return res.json({ ok: true, engagement, serving });
+    return res.json({ ok: true, engagement, serving, ...(provisionHint ? { provisionHint } : {}) });
   } catch (e) {
     return respondEngagementError(res, e, 'failed to create engagement');
   }
