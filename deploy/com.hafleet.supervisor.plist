@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd unit for HAFleet's own service supervisor, on macOS.
+
+  WHY IT EXISTS. `bin/hafleet-acp-up` says the supervisor "is itself started by launchd or systemd". The
+  systemd units in this repo start individual services rather than the supervisor, and on macOS there was
+  no unit at all — so on this host nothing started it, and every service was launched by hand with
+  `nohup`. Restart-on-crash and reboot survival were both built and unreachable.
+
+  INSTALL (from the repo root, with the runtime .env sourced so the paths below are the ones you mean):
+
+    mkdir -p ~/Library/LaunchAgents
+    sed -e "s|__REPO__|$PWD|g" -e "s|__RUNTIME__|$HAFLEET_RUNTIME_DIR|g" \
+        deploy/com.hafleet.supervisor.plist > ~/Library/LaunchAgents/com.hafleet.supervisor.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hafleet.supervisor.plist
+
+  STOP, and the difference matters: `launchctl bootout` removes the job, while `kill` on the process
+  makes launchd start it again — which is the unit working, and reads as a supervisor that will not die.
+
+  THE PLACEHOLDERS ARE NOT DEFAULTS. `__RUNTIME__` has no sensible fallback: a supervisor that guessed
+  would serve a different fleet than the operator believes is running, and this session did exactly that
+  by hand once — caught only by an agent count that looked wrong.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hafleet.supervisor</string>
+
+  <!--
+    The entrypoint runs in the FOREGROUND and launchd owns it. A program that daemonises itself takes
+    that ownership away, which is how you get a supervisor launchd cannot supervise.
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>node</string>
+    <string>__REPO__/bin/hafleet-supervisor</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HAFLEET_RUNTIME_DIR</key>
+    <string>__RUNTIME__</string>
+    <!--
+      PATH is stated because launchd's is minimal and does NOT include the places node and the coding
+      CLIs actually live. `hafleet-acp-up` records the same failure from the other side: without the
+      framework binary's directory the host exits at once and the entry restarts forever.
+    -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!--
+    KeepAlive on non-zero exit only. `SuccessfulExit: false` means launchd restarts a crash and leaves a
+    clean stop alone — which is why the entrypoint exits non-zero when it fails to start and 0 when it
+    was asked to stop. Restarting an intentional shutdown would make `launchctl bootout` unusable.
+  -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!--
+    Ten seconds between restarts. launchd's own floor is 10s and it will throttle anyway; stating it
+    keeps a crash-looping supervisor from filling the log faster than anyone can read it, and the
+    supervisor has its own per-service backoff underneath this.
+  -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!--
+    Logs go to the RUNTIME directory, not the repo: they are runtime state, and a repo that collects
+    logs is a repo whose diffs fill with them.
+  -->
+  <key>StandardOutPath</key>
+  <string>__RUNTIME__/logs/supervisor.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__RUNTIME__/logs/supervisor.err.log</string>
+</dict>
+</plist>
