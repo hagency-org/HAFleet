@@ -16,6 +16,7 @@ import { describe, expect, test } from 'vitest';
 import {
   callbackCandidates,
   describeMatrixReach,
+  discoverBaseUrl,
   originFor,
   probeHomeserver,
 } from '../lib/matrix-candidates.js';
@@ -236,5 +237,63 @@ describe('the whole answer a setup form needs', () => {
     });
     const byName = Object.fromEntries(reach.homeservers.map((h) => [h.serverName, h.probe.reachable]));
     expect(byName).toEqual({ 'good.test': true, 'bad.test': false });
+  });
+});
+
+describe('turning a server name into an address, which the protocol already specifies', () => {
+  /*
+   * ASKING THE OPERATOR FOR BOTH WAS THE MISTAKE: 「服务器地址你应该知道」. Matrix defines how a name
+   * becomes an address and every client does it on every login, so a form demanding both is asking a
+   * human to do the protocol's job and to be right about it.
+   */
+  test('a well-known that declares a base_url is followed', async () => {
+    // The case that makes the whole mechanism exist: the server is called one thing and served at another.
+    const fetchImpl = fakeFetch({
+      'https://example.org/.well-known/matrix/client': {
+        status: 200,
+        body: { 'm.homeserver': { base_url: 'https://matrix.example.org' } },
+      },
+    });
+    const out = await discoverBaseUrl('example.org', { fetchImpl });
+    expect(out.url).toBe('https://matrix.example.org');
+    expect(out.via).toMatch(/well-known/);
+  });
+
+  test('no well-known falls back to the name itself, and says it fell back', async () => {
+    // The spec's own fallback. `via` matters because "we read your well-known" and "we guessed" are
+    // different claims, and an operator debugging a wrong address needs to know which they are seeing.
+    const out = await discoverBaseUrl('example.org', { fetchImpl: fakeFetch({ default: { status: 404 } }) });
+    expect(out.url).toBe('https://example.org');
+    expect(out.via).toMatch(/no well-known/);
+  });
+
+  test('a well-known that cannot be fetched at all still yields the fallback', async () => {
+    // The commonest case on a private deployment: the name does not resolve publicly, which says nothing
+    // about whether the homeserver is reachable some other way.
+    const out = await discoverBaseUrl('internal.test', {
+      fetchImpl: fakeFetch({ default: new Error('getaddrinfo ENOTFOUND') }),
+    });
+    expect(out.url).toBe('https://internal.test');
+    expect(out.via).toMatch(/could not read/);
+  });
+
+  test('a well-known with no usable base_url falls back rather than trusting it', async () => {
+    const fetchImpl = fakeFetch({ default: { status: 200, body: { 'm.homeserver': { base_url: 'not a url' } } } });
+    const out = await discoverBaseUrl('example.org', { fetchImpl });
+    expect(out.url).toBe('https://example.org');
+    expect(out.via).toMatch(/no usable base_url/);
+  });
+
+  test('a name carrying a port skips discovery instead of inventing a rule', async () => {
+    // The spec does not define well-known for a name with a port, and `palpo2.test:8009` is already an
+    // address in everything but scheme.
+    const fetchImpl = fakeFetch({});
+    const out = await discoverBaseUrl('palpo2.test:8009', { fetchImpl });
+    expect(out.url).toBe('https://palpo2.test:8009');
+    expect(fetchImpl.asked).toHaveLength(0);
+  });
+
+  test('an empty name is not turned into an address', async () => {
+    expect((await discoverBaseUrl('', { fetchImpl: fakeFetch({}) })).url).toBeNull();
   });
 });

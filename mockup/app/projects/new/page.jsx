@@ -88,13 +88,15 @@ export default function NewProjectSide() {
   async function probeManual() {
     const name = draftName.trim();
     const url = draftUrl.trim();
-    if (!name || !url) return say('fail', '服务器名和地址都要填');
+    if (!name) return say('fail', '填一个服务器名');
     if (servers.some((s) => s.serverName === name)) return say('fail', `${name} 已经在列表里了`);
     setProbing(true);
-    const res = await send('matrix/probe', { method: 'POST', body: { url } });
+    // The name alone is enough — the backend does the well-known lookup the protocol specifies. A URL is
+    // sent only when the operator typed one, as an override for deployments with no well-known.
+    const res = await send('matrix/probe', { method: 'POST', body: { server_name: name, url: url || undefined } });
     setProbing(false);
     if (res.ok === false) return say('fail', `探测失败：${res.error}`);
-    const { origin, probe } = res.body ?? {};
+    const { origin, probe, via } = res.body ?? {};
     /*
      * ADDED WHETHER OR NOT IT ANSWERED. An unreachable entry stays on screen with its reason so the
      * operator can see what they typed and why it failed — removing it would make a typo look like the
@@ -104,7 +106,7 @@ export default function NewProjectSide() {
     setManual((prev) => [...prev, {
       serverName: name,
       url: origin ?? url,
-      source: '你刚才填的',
+      source: via ?? '你刚才填的',
       alreadyASide: false,
       probe,
     }]);
@@ -234,19 +236,25 @@ export default function NewProjectSide() {
               placeholder="chinasoft.example"
             />
           </div>
+          <p className="why-inline">
+            地址会自己查出来：Matrix 规定了怎么把服务器名解析成地址
+            （<span className="mono-s">/.well-known/matrix/client</span>），每个 Matrix 客户端登录时做的就是这件事。
+            所以 <span className="mono-s">chinasoft.example</span> 的 homeserver 就算实际住在
+            <span className="mono-s"> matrix.chinasoft.example</span>，你也不用知道。
+          </p>
           <div className="field-row">
-            <label htmlFor="draft-url">地址</label>
+            <label htmlFor="draft-url">地址（可留空）</label>
             <input
               id="draft-url"
               className="inp"
               value={draftUrl}
               onChange={(e) => setDraftUrl(e.target.value)}
-              placeholder="https://matrix.chinasoft.example"
+              placeholder="留空 = 自动发现"
             />
           </div>
           <p className="why-inline">
-            两个都要，因为它们常常不是一回事：服务器名是身份（<span className="mono-s">chinasoft.example</span>），
-            地址是这个身份被服务的地方（<span className="mono-s">https://matrix.chinasoft.example</span>）。
+            只有在对方没有配 well-known 时才需要填——私有部署、或者带端口的名字，常常是这种情况。
+            填了就以你填的为准，不会被发现结果悄悄替换掉。
           </p>
           <div className="btn-row">
             <button type="button" className="btn" disabled={probing} onClick={probeManual}>

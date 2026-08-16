@@ -1,5 +1,5 @@
 import express from 'express';
-import { describeMatrixReach, originFor, probeHomeserver } from './lib/matrix-candidates.js';
+import { describeMatrixReach, discoverBaseUrl, originFor, probeHomeserver } from './lib/matrix-candidates.js';
 import { buildReplyHint } from './lib/reply-hint.js';
 import { meterFleet } from './lib/metering/reader.js';
 import { meteringSupport, CEILING_KINDS } from './lib/metering/parsers.js';
@@ -8877,19 +8877,32 @@ app.get('/api/project-sides/:id/budget', requireBearer, (req, res) => {
  * versions it claims. A tool that echoed the response would turn this into a general-purpose fetcher.
  */
 app.post('/api/matrix/probe', requireBearer, async (req, res) => {
+  const serverName = typeof req.body?.server_name === 'string' ? req.body.server_name.trim() : '';
   const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
-  if (!url) return res.status(400).json({ error: 'url is required' });
-  const origin = originFor(url);
+  if (!serverName && !url) return res.status(400).json({ error: 'server_name or url is required' });
+
+  /*
+   * THE NAME IS ENOUGH, and demanding an address as well was the mistake: 「服务器地址你应该知道」. Matrix
+   * specifies how a name becomes an address, so the caller supplies the name and this does the lookup —
+   * the same thing every Matrix client does on every login.
+   *
+   * An EXPLICIT url still wins when given. Well-known is not always configured, especially on a private
+   * or port-bearing deployment, and an override that the discovery result could quietly replace would be
+   * an override in name only.
+   */
+  let origin = originFor(url);
+  let via = origin ? 'you gave the address explicitly' : null;
   if (!origin) {
-    return res.status(400).json({
-      error: 'url must be an absolute http(s) address — a bare server name like `example.org` is not one, '
-        + 'because guessing a scheme would produce a real verdict about the wrong URL',
-      code: 'not_an_origin',
-    });
+    const discovered = await discoverBaseUrl(serverName || url);
+    origin = discovered.url;
+    via = discovered.via;
+  }
+  if (!origin) {
+    return res.status(400).json({ error: 'could not turn that into an address', code: 'not_an_origin', via });
   }
   try {
     const probe = await probeHomeserver(origin);
-    return res.json({ origin, probe });
+    return res.json({ origin, via, probe });
   } catch (error) {
     return res.status(500).json({ error: `probe failed: ${error?.message || error}` });
   }
