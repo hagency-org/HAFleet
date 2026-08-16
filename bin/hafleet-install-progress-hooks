@@ -1,0 +1,211 @@
+#!/usr/bin/env node
+/*
+ * Install the progress hooks into an agent home, and be the caller that was missing.
+ *
+ * WHY THIS FILE EXISTS. `bin/hafleet-progress` is a program designed to be invoked by a Claude Code
+ * hook. HAFleet provisions agent homes — CLAUDE.md, docs/, projects/, .claude/ — but nothing in it has
+ * ever written the `hooks` key of `.claude/settings.json`. A survey of this host found no directory
+ * with hooks that HAFleet had put there — the two that had hooks had written their own, and one of
+ * those turned out not to be an agent workspace at all. So the reporter had no caller, and no
+ * mechanism existed that could give it one: the same "built, tested, never invoked" shape as the
+ * service supervisor, the identity minter and the room sweep before it.
+ *
+ * IT MERGES, IT DOES NOT INSTALL. Two of those homes have working hooks of their own. A writer that
+ * assumed an empty `hooks` key would silently delete them, and the agent would keep running with its
+ * own automation quietly gone — a failure nobody notices until something that should have fired
+ * didn't. So every existing hook is preserved, ours is appended, and a second run changes nothing.
+ *
+ * IT REFUSES TO GUESS THE HOME. The path is required. Writing hooks into the wrong agent's settings
+ * makes that agent report another agent's progress into a customer's room, and there is no default
+ * that is safe enough to be worth the convenience.
+ */
+
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from 'fs';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const reporter = path.join(repoRoot, 'bin', 'hafleet-progress');
+
+const args = process.argv.slice(2);
+const dryRun = args.includes('--dry-run');
+const agentFlag = args.findIndex((a) => a === '--agent');
+const agentName = agentFlag >= 0 ? args[agentFlag + 1] : null;
+// `agentFlag` is -1 when the flag is absent, and `-1 + 1` is index 0 — which is the positional path.
+// Guarding on `agentFlag >= 0` rather than arithmetic keeps that off-by-one from coming back.
+const positional = args.filter((a, i) => !a.startsWith('--') && !(agentFlag >= 0 && i === agentFlag + 1));
+let home = positional[0];
+
+function usage(message) {
+  if (message) console.error(`hafleet-install-progress-hooks: ${message}`);
+  console.error('');
+  console.error('Usage: hafleet-install-progress-hooks <agent-home> [--dry-run]');
+  console.error('');
+  console.error('  <agent-home>  the directory Claude Code reads settings from for this agent.');
+  console.error('  --agent NAME  resolve that directory from the agent\'s backend record instead of');
+  console.error('                typing it. Preferred: the backend already knows, and a hand-typed path');
+  console.error('                is the way hooks end up in the wrong tree.');
+  console.error('  --dry-run     print what would change and write nothing.');
+  process.exit(2);
+}
+
+/*
+ * THE PATH COMES FROM THE FLEET WHEN IT CAN.
+ *
+ * A first version required a path and refused to guess, on the grounds that hooks in the wrong tree
+ * make an agent report into another customer's room. The refusal was right and the conclusion was
+ * incomplete: the backend records `workdir` for every agent, so there is a third option between
+ * guessing and making a human type it — ASK. Reading the record is not a guess, and it removes the
+ * transcription error the warning was about.
+ *
+ * `workspaceMode: shared` is normal and not a problem here: several agents may share one workdir, and
+ * the hook resolves its agent from `AGENT_NAME` at run time, with a separate anchor file per agent.
+ */
+if (agentName) {
+  if (home) usage('give either an agent home or --agent, not both');
+  const base = (process.env.HAFLEET_BACKEND_URL
+    || `http://127.0.0.1:${process.env.HAFLEET_BACKEND_PORT || 8090}`).replace(/\/+$/, '');
+  const token = (process.env.API_TOKEN || '').trim();
+  let record;
+  try {
+    const res = await fetch(`${base}/api/agents/${encodeURIComponent(agentName)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      console.error(`hafleet-install-progress-hooks: the backend answered HTTP ${res.status} for agent `
+        + `"${agentName}". ${res.status === 401 || res.status === 403 ? 'Source the runtime .env so API_TOKEN is set.' : ''}`);
+      process.exit(1);
+    }
+    record = await res.json();
+  } catch (error) {
+    console.error(`hafleet-install-progress-hooks: could not reach the backend at ${base}: ${error?.message || error}`);
+    console.error('  Start it, or pass the directory explicitly instead of --agent.');
+    process.exit(1);
+  }
+  home = (record?.workdir || record?.homeDir || '').trim();
+  if (!home) {
+    /*
+     * REFUSED RATHER THAN DEFAULTED, and this is the case the original warning was really about. Every
+     * agent in the fleet that noticed had `homeDir: null`; only one had a `workdir`. An installer that
+     * fell back to the repo root here would write hooks for an agent whose home nobody has decided on.
+     */
+    console.error(`hafleet-install-progress-hooks: agent "${agentName}" has no workdir or homeDir in its `
+      + 'record, so there is nothing to install into.');
+    console.error('  Set the agent\'s workspace first, or pass a directory explicitly.');
+    process.exit(1);
+  }
+  console.log(`hafleet-install-progress-hooks: agent "${agentName}" → ${home}`
+    + `${record?.workspaceMode ? ` (workspaceMode: ${record.workspaceMode})` : ''}`);
+}
+
+if (!home) usage('an agent home, or --agent NAME, is required');
+const homeAbs = path.resolve(home);
+if (!existsSync(homeAbs)) usage(`no such directory: ${homeAbs}`);
+
+/*
+ * A CHECK THAT THE TARGET IS AN AGENT HOME, not merely a directory. `.claude/` alone is not evidence —
+ * it exists in ordinary repositories all over this host. `CLAUDE.md` beside it is what distinguishes a
+ * provisioned home, and getting this wrong is the failure the required-path rule above exists to stop.
+ */
+if (!existsSync(path.join(homeAbs, 'CLAUDE.md')) && !existsSync(path.join(homeAbs, 'AGENTS.md'))) {
+  usage(`${homeAbs} has neither CLAUDE.md nor AGENTS.md, so Claude Code is not being run from it`);
+}
+
+const settingsDir = path.join(homeAbs, '.claude');
+const settingsPath = path.join(settingsDir, 'settings.json');
+
+let settings = {};
+let existed = false;
+if (existsSync(settingsPath)) {
+  existed = true;
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  } catch (error) {
+    /*
+     * REFUSED, not repaired. An unparseable settings.json is a file somebody is in the middle of
+     * editing, or one with a comment in it. Overwriting it with a generated version would throw away
+     * whatever they were doing, and this tool's whole point is that it does not destroy configuration.
+     */
+    console.error(`hafleet-install-progress-hooks: ${settingsPath} is not valid JSON: ${error.message}`);
+    console.error('  Refusing to rewrite it — fix the file and run this again. Nothing was changed.');
+    process.exit(1);
+  }
+  if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) {
+    console.error(`hafleet-install-progress-hooks: ${settingsPath} is not a JSON object. Nothing was changed.`);
+    process.exit(1);
+  }
+}
+
+/*
+ * The two moments worth reporting, and why not more.
+ *
+ * `PostToolUse` is the only signal that work is progressing at all, and the reporter coalesces it —
+ * one line per window, never one per tool call. `Stop` is completion. `PreToolUse` was considered and
+ * dropped: it doubles the invocations to say the same thing, and "about to read a file" is not news.
+ */
+const HOOK_EVENTS = ['PostToolUse', 'Stop'];
+const command = `node ${JSON.stringify(reporter)}`;
+
+function hookEntriesFor(event) {
+  const list = settings.hooks?.[event];
+  return Array.isArray(list) ? list : [];
+}
+
+/** Does this event already call our reporter? Compared by path, so a reworded wrapper still counts. */
+function alreadyInstalled(event) {
+  return hookEntriesFor(event).some((entry) => (entry?.hooks || [])
+    .some((h) => typeof h?.command === 'string' && h.command.includes('hafleet-progress')));
+}
+
+const planned = HOOK_EVENTS.filter((event) => !alreadyInstalled(event));
+const preserved = HOOK_EVENTS.reduce((n, event) => n + hookEntriesFor(event).length, 0);
+
+if (!planned.length) {
+  console.log(`hafleet-install-progress-hooks: already installed in ${settingsPath}; nothing to do.`);
+  process.exit(0);
+}
+
+console.log(`hafleet-install-progress-hooks: ${settingsPath}`);
+console.log(`  ${existed ? 'exists' : 'will be created'}; ${Object.keys(settings.hooks || {}).length} hook event(s) present, `
+  + `${preserved} existing entr(ies) on the events we touch — all kept`);
+for (const event of planned) console.log(`  + ${event} → ${command}`);
+for (const event of HOOK_EVENTS.filter((e) => !planned.includes(e))) console.log(`  = ${event} already calls the reporter`);
+
+if (dryRun) {
+  console.log('  --dry-run: nothing written.');
+  process.exit(0);
+}
+
+settings.hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
+  ? settings.hooks
+  : {};
+for (const event of planned) {
+  const list = hookEntriesFor(event);
+  // Appended, never assigned over: whatever was here keeps running, and ours runs alongside it.
+  settings.hooks[event] = [...list, { hooks: [{ type: 'command', command }] }];
+}
+
+/*
+ * A BACKUP BEFORE THE FIRST WRITE ONLY. Overwriting the backup on a later run would replace the
+ * operator's original with a copy that already contains our edit, which is the one version nobody
+ * needs. If a `.bak` is there, the pre-HAFleet state is already saved and must be left alone.
+ */
+if (existed) {
+  const backup = `${settingsPath}.pre-hafleet-progress.bak`;
+  if (!existsSync(backup)) {
+    copyFileSync(settingsPath, backup);
+    console.log(`  backed up the original to ${path.basename(backup)}`);
+  } else {
+    console.log(`  ${path.basename(backup)} already exists; keeping the earlier original`);
+  }
+} else {
+  mkdirSync(settingsDir, { recursive: true });
+}
+
+writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+console.log('  written.');
+console.log('');
+console.log('The agent will report progress into the thread of whatever it was asked, once it has read');
+console.log('its inbox at least once — check_inbox is what records the anchor. Without an anchor the');
+console.log('reporter stays silent rather than posting to a shared room\'s main timeline.');

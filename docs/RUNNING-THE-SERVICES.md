@@ -93,3 +93,54 @@ kill <supervisor pid>          # stops children first, then exits
 
 Killing an individual service does **not** stop it: the supervisor restarts it, which is the supervisor
 working. Stop the supervisor.
+
+## Progress reporting: telling a room the agent is working
+
+Asking an agent something over Matrix shows a read receipt and a typing indicator, then nothing until
+the answer lands. For a ten-minute task a borrower cannot tell working from stuck.
+
+```bash
+set -a; . "$HAFLEET_RUNTIME_DIR/.env"; set +a
+node bin/hafleet-install-progress-hooks --agent <name> --dry-run   # look first
+node bin/hafleet-install-progress-hooks --agent <name>
+```
+
+`--agent` reads the workspace out of the agent's backend record. Prefer it to typing a path: the
+backend already knows, and a hand-typed path is how hooks end up in the wrong tree — an agent
+reporting into another customer's room. An agent whose record has no `workdir` or `homeDir` is
+**refused**, not defaulted; on the fleet this was built against, four of five agents were in that state.
+
+**It merges.** Whatever hooks are already in `.claude/settings.json` keep running and ours runs
+alongside; the original is backed up once, and a second run changes nothing. An unparseable
+`settings.json` is refused rather than rewritten, because a file with a comment in it is a file
+somebody is editing.
+
+### What lands in the room, and what does not
+
+**Progress goes in a thread on the message that asked**, so the main timeline keeps two events — the
+question and the answer. This was not the first design: the first posted each step into the room, and
+the operator was right to reject it — 「在多人的房间…agent 老说话，把其他人的对话都冲了」. Steps also
+coalesce (one line per minute, "read ×12, ran commands ×3"), and the reporter summarises verbs rather
+than quoting tool inputs, which carry paths and sometimes credentials.
+
+**A thread is not privacy.** Same room, same membership, same history visibility: everyone present can
+open the thread and read every line. It buys attention, not secrecy. For work that must not be visible
+to a room, the answer is a different room, not a thread.
+
+**No anchor, no post.** The reporter refuses rather than falling back to the main timeline, because a
+fallback would be invisible to whoever runs the agent and obvious to everyone else in the room. The
+anchor is recorded when the agent reads `check_inbox` or `check_group`, so an agent that has read
+nothing stays silent.
+
+### Two things this cost, worth knowing
+
+**The anchor comes from `check_group` as well as `check_inbox`, and only the live run found that.**
+Six unit tests passed against the inbox path while the feature was useless on the real fleet:
+`check_inbox`'s group bucket carries @mentions, and HAFleet's ordinary way of addressing an agent in a
+room is `name: question`, which is not a mention. It arrives through `check_group`.
+
+**The reporter uses the per-agent token, not `API_TOKEN`.** The first version sent the operator token,
+which the router puts in `FORBIDDEN_RUNNER_ENV_KEYS` — so it is absent from a dispatched agent's
+environment, and should be: an agent runtime holding it could delete other agents and read every
+side's credentials. Progress is the least privileged thing here and was reaching for the most
+privileged key in the system. It now travels the same road as a reply.
