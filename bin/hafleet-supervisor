@@ -158,10 +158,24 @@ try {
   console.log(`hafleet-supervisor: started ${(profile.services || []).length} service(s); supervising`);
 } catch (error) {
   /*
-   * Exit non-zero so launchd/systemd records a failure rather than a clean stop. A supervisor that
-   * exits 0 after failing to start looks, in every log an operator reads, exactly like one that was
-   * asked to stop.
+   * IT KEEPS SUPERVISING. `start()` throws on the FIRST service that does not become healthy in time,
+   * and a first version exited 1 there — which threw away every service that HAD come up. Observed
+   * exactly that: backend and bridge were listening and serving when the relay's probe timed out, the
+   * entrypoint exited, and all three went down together. A supervisor that quits because one service is
+   * slow is worse than no supervisor: it converts one degraded service into an outage.
+   *
+   * So this stays alive and lets the supervisor's own restart loop keep working on whatever is unhealthy.
+   * The failure is LOUD in the log because a degraded fleet must not look like a healthy one — and the
+   * exit code is left for a real inability to start at all (a missing profile, an unreadable runtime),
+   * which is handled above, before anything was spawned.
    */
-  console.error(`hafleet-supervisor: failed to start: ${error?.message || error}`);
-  process.exit(1);
+  console.error(`hafleet-supervisor: ${error?.message || error}`);
+  console.error('hafleet-supervisor: still supervising — services that came up stay up, and the '
+    + 'supervisor keeps retrying the rest. Exiting here would turn one slow service into an outage.');
 }
+
+/*
+ * Held open on purpose. `start()` returning does not mean the work is done — the supervisor's restart
+ * loop lives on timers, and a process that fell off the end of its script would take them with it.
+ */
+await new Promise(() => {});

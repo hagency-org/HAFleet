@@ -54,15 +54,19 @@
   </dict>
 
   <!--
-    KeepAlive on non-zero exit only. `SuccessfulExit: false` means launchd restarts a crash and leaves a
-    clean stop alone — which is why the entrypoint exits non-zero when it fails to start and 0 when it
-    was asked to stop. Restarting an intentional shutdown would make `launchctl bootout` unusable.
+    ALWAYS. A first version used `KeepAlive: {SuccessfulExit: false}` — restart only on a non-zero exit —
+    reasoning that restarting a clean stop would make `launchctl bootout` unusable. It made the job never
+    start at all: `launchctl print` showed `pended nondemand spawn = speculative` with
+    `semaphores = { successful exit => 0 }` and `runs = 0`, because that condition is UNSATISFIED for a
+    job that has never run, so launchd saw no reason to run it. Two hours of the mystery in
+    docs/RUNNING-THE-SERVICES.md were this line.
+
+    The worry behind it was also wrong: `bootout` REMOVES the job, so it stops the service regardless of
+    KeepAlive. What `true` costs is that killing the supervisor by pid restarts it — which for a
+    supervisor is the behaviour you want, and is stated in the docs so nobody reads it as a hang.
   -->
   <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
+  <true/>
 
   <key>RunAtLoad</key>
   <true/>

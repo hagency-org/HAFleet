@@ -39,31 +39,51 @@ one file that is mode 600, instead of copying them into a unit an installer rewr
 agents, tokens, the queue and the ledger before it listens — and 15s left nothing for a loaded machine.
 The failure it produces is a supervisor killing a service that was about to be ready.
 
-## What does NOT work yet: launchd
+## launchd: works, with one known limitation
 
-`deploy/com.hafleet.supervisor.plist` is written and lints clean, and the install steps are in its header.
-**Do not rely on it.** Under launchd on this host the supervised services crash-loop: the backend starts,
-listens, logs `Shutting down, terminating runners and saving data…` — its own SIGTERM handler — and the
-supervisor's restart counter climbs. The same entrypoint, with the same variables, works in the foreground.
+```bash
+mkdir -p ~/Library/LaunchAgents
+sed -e "s|__REPO__|$PWD|g" -e "s|__RUNTIME__|$HAFLEET_RUNTIME_DIR|g" \
+    deploy/com.hafleet.supervisor.plist > ~/Library/LaunchAgents/com.hafleet.supervisor.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hafleet.supervisor.plist
+launchctl kickstart -p gui/$(id -u)/com.hafleet.supervisor
+```
 
-What was ruled out, so the next person does not redo it:
+**Verified on this host:** all three services started under launchd, backend answering `/health` 200, and
+a service killed by pid came back with a new pid — restart-on-crash working through launchd, which is the
+whole point of the unit.
 
-- **not the environment** — reproduced successfully in the foreground under `env -i` with exactly the
-  variables the unit provides;
-- **not the health timeout** — the 60s value takes effect and the backend passes its probe;
-- **not two supervisors fighting** — no second supervisor process, and the lease file is empty;
-- **not a missing `.env`** — the entrypoint logs 18 variables loaded under launchd too.
+**Give it ~60 seconds.** The backend needs about 7s to listen and the supervisor starts services in
+dependency order; checking a port at 20s and finding it closed says nothing. That cost real time to learn:
+an earlier version of this document reported a crash loop that was partly this, a log line from a previous
+run read as if it were current.
 
-What remains unexplained is why the children take a SIGTERM shortly after listening *only* when launchd
-owns the supervisor. Two things worth trying first: whether launchd's process-group handling kills the
-group when the entrypoint's own start path throws, and whether `pidMatchesService`'s `ps` output differs
-under a launchd session (it matches on `service.command[1]`, and a mismatch reports a healthy service as
-unhealthy, which is exactly what a stop-then-restart loop looks like).
+### Two things that were wrong, and are fixed
 
-Until that is understood, run the entrypoint under whatever already keeps processes alive on the host —
-including `nohup`, which is what this host does now. The difference from before is real even so: one
-supervised tree with restart-on-crash and ordered startup, instead of three hand-started processes that
-nothing was watching.
+**The unit never started at all.** It used `KeepAlive: {SuccessfulExit: false}` — restart only on a
+non-zero exit — reasoning that restarting a clean stop would make `bootout` unusable. `launchctl print`
+showed the truth: `pended nondemand spawn = speculative`, `semaphores = { successful exit => 0 }`,
+`runs = 0`. That condition is *unsatisfied* for a job that has never run, so launchd saw no reason to run
+it. `KeepAlive: true` fixes it, and the worry was unfounded — `bootout` removes the job, so it stops the
+service whatever KeepAlive says.
+
+**One unhealthy service took down the healthy ones.** `supervisor.start()` throws on the first service
+that misses its health deadline, and the entrypoint exited 1 there — discarding backend and bridge, which
+were listening and serving, because the relay's probe timed out. A supervisor that quits because one
+service is slow converts one degraded service into an outage. It now logs loudly and keeps supervising,
+and the supervisor's own restart loop keeps working on whatever is unhealthy.
+
+### The limitation
+
+**Killing the supervisor by pid does not reliably bring it back.** It exits 0 (its SIGTERM handler stops
+the children first), launchd reports `last exit code = 0` and `state = not running`, and with
+`KeepAlive: true` it should respawn — it did not within 55 seconds. `launchctl kickstart` restores it
+immediately.
+
+So: crash recovery of a SERVICE is verified working; crash recovery of the SUPERVISOR ITSELF is not. For
+an unattended host that gap matters, and the next thing to check is whether the job needs
+`ProcessType: Background` or a `LimitLoadToSessionType`, since a GUI-session agent that has lost its
+session cannot be respawned into one.
 
 ## Stopping
 
