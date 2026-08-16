@@ -201,6 +201,22 @@ the agent's own token, which is what the existing fleet depends on.
 Proven after the fix: `@ac_biglittle:acme.test` speaking in the second customer's room — the same agent,
 a different identity, chosen by the room.
 
+**The removal cascade, run for real with a second side present.** Decision 7's cascade had only ever been
+exercised where every record in the system belonged to the side being removed — which cannot distinguish
+"swept the right things" from "swept everything". With `acme.test` removed while `palpo.test` stayed:
+
+- acme's active engagement ENDED, its binding DEACTIVATED, its pending invitation DECLINED with
+  `decidedBy: project-side-removed`;
+- **the bridge forgot its own room pointers** — `forgot rooms on removed side(s) acme.test: 0 dm, 0
+  approval dm, 0 trusted, 1 group`, and the group map went from two entries to none. That sweep is
+  driven by the credential-refresh diff, so this is also the first proof the signal arrives;
+- `palpo.test` was untouched: its pending invitation still `pending`, its budget still 510000/1000000,
+  the side itself still configured.
+
+`retiredAgents` came back EMPTY, and that is correct rather than a gap: `biglittle`'s `projectSide` is
+palpo, so it was never minted FOR acme. An agent serving several customers must not be retired because
+one of them leaves — which is a distinction a single-side test cannot make either.
+
 **Credential isolation, verified in three layers.** With two sides configured, the question stops being
 theoretical: does one customer's credential ever act on another's server, and does one customer's token
 ever admit another's events?
