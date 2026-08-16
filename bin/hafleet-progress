@@ -115,6 +115,24 @@ const summary = kind === 'start' ? 'started'
     : parts.join(', ');
 
 const backend = (process.env.HAFLEET_BACKEND_URL || `http://127.0.0.1:${process.env.HAFLEET_BACKEND_PORT || 8090}`).replace(/\/+$/, '');
+
+/*
+ * WHICH CREDENTIAL, and the first version had it wrong in a way that could not work.
+ *
+ * It sent `Authorization: Bearer $API_TOKEN` — the fleet's operator token. `API_TOKEN` is in the
+ * router's `FORBIDDEN_RUNNER_ENV_KEYS`, so a dispatched agent's environment does not contain it and
+ * never should: an agent runtime holding the operator token could delete other agents, read every
+ * side's credentials and rewrite budgets. Progress reporting is the least privileged thing in this
+ * system and it was reaching for the most privileged key in it.
+ *
+ * `AGENT_TOKEN` is the right one. It is the per-agent token the MCP server already sends as
+ * `X-Agent-Token` for this agent's own messages, and the backend checks it in `checkAgentToken`. Same
+ * road as a reply, which is the whole design: progress gains no privilege a reply does not have.
+ *
+ * The operator token is still accepted when it IS present, because an operator running this by hand
+ * outside a dispatch has no agent token to offer, and refusing them would make the tool untestable.
+ */
+const agentToken = (process.env.AGENT_TOKEN || '').trim();
 const token = (process.env.API_TOKEN || '').trim();
 
 /*
@@ -134,10 +152,15 @@ const token = (process.env.API_TOKEN || '').trim();
 const replyTo = (process.env.HAFLEET_PROGRESS_REPLY_TO || state.replyTo || '').trim();
 if (!replyTo) done('no message to thread under: refusing to post progress to the main timeline');
 
+/*
+ * THE DESTINATION COMES FROM THE ANCHOR unless the operator overrides it. `check_inbox` records the
+ * group (or the DM sender) alongside the message id, because a hook knows nothing about rooms and the
+ * message knows everything. The env vars stay first so a human debugging this can aim it by hand.
+ */
 const body = {
   from: agent,
-  group: (process.env.HAFLEET_PROGRESS_GROUP || '').trim() || undefined,
-  to: (process.env.HAFLEET_PROGRESS_TO || '').trim() || undefined,
+  group: (process.env.HAFLEET_PROGRESS_GROUP || '').trim() || state.group || undefined,
+  to: (process.env.HAFLEET_PROGRESS_TO || '').trim() || state.to || undefined,
   type: 'info',
   summary: `⏳ ${summary}`,
   full: `⏳ ${summary}`,
@@ -166,7 +189,11 @@ let sent = false;
 try {
   const res = await fetch(`${backend}/api/messages`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(agentToken ? { 'X-Agent-Token': agentToken } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(3000),
   });
