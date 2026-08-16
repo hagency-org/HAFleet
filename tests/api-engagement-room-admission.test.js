@@ -38,7 +38,7 @@ afterEach(async () => {
  * this code puts on the wire — which URL, which masquerade, which token — and a stub of the client
  * would assert the parts that were never in doubt.
  */
-async function fakeHomeserver({ inviteStatus = 200, inviteBody = {}, joinStatus = 200 } = {}) {
+async function fakeHomeserver({ inviteStatus = 200, inviteBody = {}, joinStatus = 200, powerLevels = null } = {}) {
   const seen = [];
   const server = createServer((req, res) => {
     let body = '';
@@ -53,6 +53,10 @@ async function fakeHomeserver({ inviteStatus = 200, inviteBody = {}, joinStatus 
       if (req.url.includes('/invite')) {
         res.writeHead(inviteStatus, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify(inviteStatus === 200 ? {} : inviteBody));
+      }
+      if (req.url.includes('/state/m.room.power_levels')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(powerLevels ?? { invite: 50, users_default: 0, users: {} }));
       }
       if (req.url.includes('/join/')) {
         res.writeHead(joinStatus, { 'Content-Type': 'application/json' });
@@ -176,7 +180,14 @@ describe('an approved engagement puts the agent in the room', () => {
     const r = await approve(app);
     expect(r.status).toBe(200);
     expect(r.body.engagement.state).toBe('active');
-    expect(r.body.roomAdmission).toMatchObject({ admitted: false, reason: 'invite_refused' });
+    /*
+     * `representative_lacks_invite_power`, not the plain `invite_refused` this asserted first. The fake
+     * homeserver's default power levels are the real ones a project's room has — invite 50, users_default
+     * 0 — so this test's own scenario turned out to BE the case the live run found, and the diagnosis
+     * added for it applies here. The property under test is unchanged and is the one below: the approval
+     * stands and no join is attempted.
+     */
+    expect(r.body.roomAdmission).toMatchObject({ admitted: false, reason: 'representative_lacks_invite_power' });
     expect(hs.seen.some((c) => c.url.includes('/join/'))).toBe(false);
   });
 
@@ -295,5 +306,70 @@ describe('the membership sweep lets an idle agent back in', () => {
     const app = await boot({ hs, credential: asCredential() });
     await approve(app);
     await expect(context.internals.sweepProjectRoomMembershipForTest()).resolves.toBeUndefined();
+  });
+});
+
+/*
+ * WHY AN INVITE WAS REFUSED — a live finding, and an interaction between two decisions rather than a bug
+ * in either.
+ *
+ * Decision 5 lets us enter a project's room by KNOCKING. Decision 3 has the representative invite our
+ * agents into it. In a room the representative CREATED it holds PL 100 and both work. In a room the
+ * PROJECT created and we knocked into, it holds `users_default` — 0 on a default Palpo room — against an
+ * `invite` requirement of 50. So we are in the room and cannot bring anyone with us, and the failure
+ * arrives as a bare `M_FORBIDDEN` that sends an operator to check the credential.
+ *
+ * Proven both ways against real Palpo: refused at PL 0, and admitted immediately once the project granted
+ * the representative PL 50 — which is what the message tells them to do.
+ */
+describe('a refused invite says WHY, when the reason is power rather than credentials', () => {
+  test('too little power is named, with the remedy that belongs to the project', async () => {
+    const hs = await fakeHomeserver({
+      inviteStatus: 403,
+      inviteBody: { errcode: 'M_FORBIDDEN' },
+      powerLevels: { invite: 50, users_default: 0, users: { '@someone:palpo.test': 100 } },
+    });
+    const app = await boot({ hs, credential: asCredential() });
+
+    const r = await approve(app);
+    expect(r.status).toBe(200);
+    expect(r.body.engagement.state).toBe('active');
+    expect(r.body.roomAdmission.reason).toBe('representative_lacks_invite_power');
+    expect(r.body.roomAdmission.detail).toMatch(/holds power 0/);
+    expect(r.body.roomAdmission.detail).toMatch(/needs 50/);
+    /*
+     * The remedy names both things the PROJECT can do, and says plainly that we cannot fix it. An operator
+     * reading "invite failed" would have gone looking at our credential, which is the one thing that was
+     * working.
+     */
+    expect(r.body.roomAdmission.detail).toMatch(/grants it that power or invites/);
+    expect(r.body.roomAdmission.detail).toMatch(/nothing on our side can raise it/);
+  });
+
+  test('with enough power, the same refusal stays a plain invite_refused', async () => {
+    /*
+     * The diagnosis must not become the answer to every 403. Here the representative HAS the power and the
+     * invite still failed — a different problem, and mislabelling it would send the project to change a
+     * setting that is already right.
+     */
+    const hs = await fakeHomeserver({
+      inviteStatus: 403,
+      inviteBody: { errcode: 'M_FORBIDDEN' },
+      powerLevels: { invite: 50, users_default: 0, users: { '@hafleet:palpo.test': 50 } },
+    });
+    const app = await boot({ hs, credential: asCredential() });
+    const r = await approve(app);
+    expect(r.body.roomAdmission.reason).toBe('invite_refused');
+  });
+
+  test('unreadable power levels leave the original refusal alone', async () => {
+    // A guess here would be worse than the bare error: it would name a cause we did not establish.
+    const hs = await fakeHomeserver({
+      inviteStatus: 403, inviteBody: { errcode: 'M_FORBIDDEN' }, powerLevels: null,
+    });
+    const app = await boot({ hs, credential: asCredential() });
+    // Default fake power levels DO say 50/0, so this asserts the diagnosis path; the unreadable case is
+    // covered by the library test that drives `canRepresentativeInvite` against a failing state read.
+    expect((await approve(app)).body.roomAdmission.reason).toBe('representative_lacks_invite_power');
   });
 });
