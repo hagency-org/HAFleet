@@ -949,6 +949,82 @@ server.tool(
 );
 
 // 4. check_inbox — returns full message content (no need for separate get_message)
+/**
+ * Remember what this agent was asked, so a progress hook has something to thread under.
+ *
+ * `bin/hafleet-progress` refuses to post without an anchor — it will not put a step-by-step feed in a
+ * shared room's main timeline — and a `PostToolUse` hook has no way to ask the agent which message it
+ * is working on. The inbox read is the one moment where that IS known, so it is recorded here.
+ *
+ * WHICH MESSAGE, and it is a heuristic, not a fact. The newest inbound message wins. An agent woken by
+ * a question is answering that question, which is the case this serves; an agent that read three
+ * messages and chose the second gets its progress threaded under the third. The cost of being wrong is
+ * bounded and stays inside the room — the bridge validates room and group before sending anything, so
+ * a wrong anchor moves progress to a neighbouring thread and can never move it to another
+ * conversation. Being exact would need the agent to declare its choice, which no hook can observe.
+ *
+ * IT ONLY EVER ADDS. A read that returns nothing must not clear an anchor set by an earlier read: the
+ * agent is usually mid-task when its later polls come back empty, and clearing would silence progress
+ * for exactly the long task that needed it. Best-effort throughout, because an inbox read must not
+ * fail over a progress convenience.
+ */
+function rememberProgressAnchor(data, groupHint = null) {
+  try {
+    const candidates = [];
+    /*
+     * `unread` IS IN THIS LIST BECAUSE A LIVE RUN SAID SO. The first version read only the inbox
+     * buckets, and on the real fleet the anchor was never written: `check_inbox`'s group bucket carries
+     * @mentions, and HAFleet's ordinary way of addressing an agent in a room is `name: question`, which
+     * is not a mention. That arrives through `check_group`, whose payload is `unread`/`read`. Six unit
+     * tests passed while the feature was useless in the deployment it was for.
+     */
+    for (const bucket of ['dm', 'group', 'messages', 'unread']) {
+      const list = data?.[bucket];
+      if (Array.isArray(list)) candidates.push(...list);
+    }
+    const newest = candidates
+      .filter((m) => m && typeof m.id === 'string' && m.id)
+      /*
+       * NOT OUR OWN MESSAGES. A group's unread slice contains everything said in the room, including
+       * this agent's last answer and its own previous progress lines. Anchoring on those would thread
+       * progress under progress, and each run would nest one level deeper into a conversation nobody
+       * asked for.
+       */
+      .filter((m) => String(m.from || '').toLowerCase() !== String(AGENT_NAME).toLowerCase())
+      .sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0))[0];
+    if (!newest) return;
+
+    const dir = path.join(os.tmpdir(), 'hafleet-progress');
+    const file = path.join(dir, `${String(AGENT_NAME).replace(/[^\w.-]/g, '_')}.json`);
+    let state = {};
+    try {
+      state = JSON.parse(readFileSync(file, 'utf8'));
+    } catch { /* no state yet, or unreadable: either way this write is the state */ }
+    if (state.replyTo === newest.id) return;
+
+    mkdirSync(dir, { recursive: true });
+    /*
+     * A NEW QUESTION RESETS THE WINDOW AND THE COUNTS. Carrying `lastSentAt` over would let the
+     * previous task's throttle swallow the new task's first report, which is the one that matters most
+     * — it is the "I have started" that tells a borrower the room heard them.
+     */
+    /*
+     * WHERE to report, recorded with WHAT to thread under, because the reporter cannot derive it. A
+     * hook knows nothing about rooms; the message does. A group message is answered in its group, and
+     * a direct message is answered back to its sender — the same two destinations the agent's own
+     * reply would use, so progress never reaches an audience the answer would not.
+     */
+    writeFileSync(file, JSON.stringify({
+      ...state,
+      replyTo: newest.id,
+      group: (typeof newest.group === 'string' && newest.group) ? newest.group : (groupHint || null),
+      to: (!newest.group && !groupHint && typeof newest.from === 'string' && newest.from) ? newest.from : null,
+      lastSentAt: 0,
+      counts: {},
+    }), { mode: 0o600 });
+  } catch { /* never let this break an inbox read */ }
+}
+
 server.tool(
   'check_inbox',
   'Check your inbox for unread direct messages and @mentions from groups. Returns two arrays: dm (private messages) and group (@mentions). Reading advances your cursor — messages shown here won\'t appear again next time. When filtered by kinds, this becomes a non-destructive preview.',
@@ -961,6 +1037,7 @@ server.tool(
       if (Array.isArray(kinds) && kinds.length > 0) params.set('kinds', kinds.join(','));
       const suffix = params.size ? `?${params}` : '';
       const data = await api('GET', `/api/inbox/${AGENT_NAME}${suffix}`);
+      rememberProgressAnchor(data);
       const localized = await localizeInboxData(data);
       return text(localized);
     } catch (e) {
@@ -990,6 +1067,8 @@ server.tool(
         params.set('advance', 'none');
       }
       const data = await api('GET', `/api/groups/${group}/messages?${params}`);
+      // The group is known from the argument here, and the payload's messages may not carry it.
+      rememberProgressAnchor(data, group);
       const localized = await localizeGroupData(data);
       return text(localized);
     } catch (e) {
