@@ -4312,7 +4312,7 @@ export class MatrixBridge {
     let token = this.getAgentToken(agentName);
     if (!token) token = await this.ensureAgentToken(agentName, 'router_outbox');
     // Same fallback as the outbound path: an appservice side has no per-agent token to find.
-    if (!token) token = this.agentSenderFor(agentName);
+    if (!token) token = this.agentSenderFor(agentName, command?.roomId ?? null);
     if (!token) throw new Error(`no Matrix token or appservice sender available for ${agentName}`);
     const root = typeof command.threadRootEventId === 'string' && command.threadRootEventId.trim()
       ? command.threadRootEventId.trim()
@@ -7291,6 +7291,11 @@ export class MatrixBridge {
        * because no per-agent token exists to produce. `agentSenderFor` falls back to the side's
        * credential, which is what the namespace is FOR.
        */
+      /*
+       * The room is not known yet on this path — a DM's room is resolved later — so this asks without
+       * one and gets the token answer for a local agent. The GROUP path below re-asks with the room,
+       * which is where a project-side room can appear.
+       */
       if (!senderToken) senderToken = this.agentSenderFor(canonicalAgentName);
       if (!senderToken) {
         console.warn(`No Matrix token or appservice sender for agent "${canonicalAgentName}", cannot bridge message ${msg.id}`);
@@ -7333,8 +7338,17 @@ export class MatrixBridge {
       }
       const thread = await this.resolveOutboundGroupRelation(msg, roomId);
       if (!thread.ok) return;
+      /*
+       * RE-ASKED NOW THAT THE ROOM IS KNOWN. The sender resolved above was chosen without a room, so for
+       * an agent holding a token it is that token — correct for our own rooms and wrong for a project
+       * side's, where it produced `M_NOT_FOUND: room frame is not found` from a homeserver that had never
+       * heard of the room. `agentSenderFor` with a room prefers the side that OWNS it.
+       */
+      const groupSender = senderIsSystem
+        ? senderToken
+        : (this.agentSenderFor(canonicalAgentName, roomId) ?? senderToken);
       const primaryEventId = await this.sendAsAgent(
-        senderToken,
+        groupSender,
         roomId,
         plain,
         html,
@@ -8128,9 +8142,30 @@ export class MatrixBridge {
    * `canSend: false` (POST /api/agents/:name/matrix-identity) described precisely this hole — an agent
    * that could be addressed, invited and joined, and then had nothing to say with.
    */
-  agentSenderFor(agentName) {
+  agentSenderFor(agentName, roomId = null) {
     const canonical = this.normalizeName(agentName);
     if (!canonical) return null;
+
+    /*
+     * THE ROOM DECIDES, NOT THE AGENT'S CREDENTIAL INVENTORY — and this is a correction found the only
+     * way it could be: by running a second customer.
+     *
+     * `biglittle` holds a real token on palpo.test. Asked to speak in a room on acme.test, the token
+     * branch below matched first, `baseUrlForToken` resolved to palpo.test, and the send asked THAT
+     * homeserver about a room it has never heard of: `M_NOT_FOUND: room frame is not found`. An agent
+     * with a token somewhere is not an agent with a token everywhere, and with one project side that
+     * distinction cannot appear.
+     *
+     * So a room on a project side is spoken into by THAT side's appservice, masquerading as the agent.
+     * It is the same rule `sendToRoomOnSide` already enforces for the representative — a room id names
+     * its origin, and presenting a credential to a room on another server is at best a 404.
+     */
+    const side = roomId ? this.sideForRoom(roomId) : null;
+    if (side) {
+      const mxid = `@${AGENT_PREFIX}${canonical}:${side.side.serverName}`.toLowerCase();
+      return { kind: 'appservice', ...side, agentUserId: mxid, agentName: canonical };
+    }
+
     const token = this.getAgentToken(canonical);
     if (token) return { kind: 'token', token, agentName: canonical };
 

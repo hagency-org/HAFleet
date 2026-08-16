@@ -481,3 +481,84 @@ describe('a room on a project side is acted in by the side, not by us', () => {
     expect(calls[0].headers.Authorization).toBe('Bearer agent-token');
   });
 });
+
+/*
+ * THE ROOM DECIDES WHICH CREDENTIAL SPEAKS — found by running a SECOND customer, and findable no other
+ * way.
+ *
+ * `biglittle` holds a real token on palpo.test. Asked to speak in a room on acme.test, the token branch
+ * matched first, `baseUrlForToken` resolved to palpo.test, and the send asked that homeserver about a room
+ * it had never heard of: `M_NOT_FOUND: room frame is not found`. An agent with a token SOMEWHERE is not an
+ * agent with a token EVERYWHERE — a distinction that cannot appear while one project side exists, which is
+ * how it survived every test and three live runs.
+ */
+describe('which credential speaks is decided by the room, not by what the agent holds', () => {
+  let MatrixBridge;
+  let runtimeDir;
+  let envSnapshot;
+
+  const SIDE = 'acme.test';
+  const OURS = 'matrix.example.test';
+
+  beforeAll(async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-room-decides-'));
+    envSnapshot = snapshotEnv(['HAFLEET_RUNTIME_DIR', 'MATRIX_AGENT_PREFIX', 'MATRIX_SERVER_NAME']);
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
+    process.env.MATRIX_AGENT_PREFIX = 'ac_';
+    process.env.MATRIX_SERVER_NAME = OURS;
+    ({ MatrixBridge } = await import(`${pathToFileURL(path.resolve('bridge-matrix.js')).href}?room-decides`));
+  });
+
+  afterAll(() => {
+    restoreEnv(envSnapshot);
+    rmSync(runtimeDir, { recursive: true, force: true });
+  });
+
+  const acting = {
+    side: { serverName: SIDE, apiBaseUrl: 'http://127.0.0.1:8018' },
+    credential: { kind: 'appservice', asToken: 'acme_as_token', senderLocalpart: 'hafleet', namespace: '@ac_.*' },
+  };
+
+  function bridge({ hasToken = true } = {}) {
+    const self = {
+      normalizeName: (n) => String(n || '').toLowerCase(),
+      getAgentToken: () => (hasToken ? 'its-own-token-on-our-server' : null),
+      actingSideFor: (server) => (String(server).toLowerCase() === SIDE ? acting : null),
+    };
+    self.sideForRoom = MatrixBridge.prototype.sideForRoom.bind(self);
+    self.agentSenderFor = MatrixBridge.prototype.agentSenderFor.bind(self);
+    return self;
+  }
+
+  test('a room on a project side is spoken into by THAT side, even when the agent has its own token', () => {
+    const sender = bridge().agentSenderFor('biglittle', `!work:${SIDE}`);
+    expect(sender.kind).toBe('appservice');
+    expect(sender.agentUserId).toBe(`@ac_biglittle:${SIDE}`);
+    expect(sender.credential.asToken).toBe('acme_as_token');
+  });
+
+  test('a room on OUR server still uses the agent\'s own token', () => {
+    /*
+     * The regression that would hurt most: every agent registered the old way speaks in our rooms with
+     * its own credential, and routing those through an appservice it has no relationship with would be a
+     * 403 on every message the existing fleet sends.
+     */
+    const sender = bridge().agentSenderFor('biglittle', `!ours:${OURS}`);
+    expect(sender).toMatchObject({ kind: 'token', token: 'its-own-token-on-our-server' });
+  });
+
+  test('no room named falls back to the token, which is what the DM path needs', () => {
+    // A DM's room is resolved later, so the sender is chosen before one is known.
+    expect(bridge().agentSenderFor('biglittle').kind).toBe('token');
+  });
+
+  test('an agent with NO token still gets the side when the room is a side room', () => {
+    const sender = bridge({ hasToken: false }).agentSenderFor('sitehand', `!work:${SIDE}`);
+    expect(sender.kind).toBe('appservice');
+    expect(sender.agentUserId).toBe(`@ac_sitehand:${SIDE}`);
+  });
+
+  test('an unknown server is nobody\'s side, so a token-less agent gets nothing rather than a guess', () => {
+    expect(bridge({ hasToken: false }).agentSenderFor('sitehand', '!x:stranger.example')).toBeNull();
+  });
+});

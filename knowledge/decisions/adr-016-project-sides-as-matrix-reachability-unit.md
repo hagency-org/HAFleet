@@ -179,6 +179,32 @@ send the bot's token to somebody else's homeserver, which is a worse bug than th
 why `sideForRoom` returns the acting pair rather than a string, and why these are listed rather than
 converted in bulk.
 
+## What a SECOND CUSTOMER found (2026-08-15)
+
+Everything above ran against one project side. A second Palpo was brought up as `acme.test` — a homeserver
+that had never seen HAFleet — and onboarded from scratch by following `docs/FOR-PROJECT-SIDES.md` as
+written. The fleet then served both: `serving 2 project side(s): palpo.test, acme.test`, both credentials
+`accepted`, both sides rendered in the console.
+
+**It found a bug nothing else could have.** `biglittle` holds a real token on `palpo.test`. Asked to speak
+in a room on `acme.test`, the send path matched the token branch first, `baseUrlForToken` resolved to
+`palpo.test`, and the message went to a homeserver that had never heard of that room:
+`M_NOT_FOUND: room frame is not found`.
+
+**An agent with a token SOMEWHERE is not an agent with a token EVERYWHERE**, and with one project side
+that distinction cannot appear — which is why it survived every unit test and three live runs. The rule is
+now the one `sendToRoomOnSide` already applied to the representative: a room id names its origin server,
+and the credential that speaks there is that side's, whatever the agent happens to hold elsewhere.
+`agentSenderFor(agent, roomId)` prefers the side that owns the room; rooms on our own server keep using
+the agent's own token, which is what the existing fleet depends on.
+
+Proven after the fix: `@ac_biglittle:acme.test` speaking in the second customer's room — the same agent,
+a different identity, chosen by the room.
+
+Two smaller things the same exercise established: the document's `url:` field must be reachable FROM the
+homeserver (a containerised Palpo silently receives nothing when it says `127.0.0.1`), and a repeated
+invite is not a new event, so re-inviting an already-invited representative pushes nothing at all.
+
 ## What the THIRD live run found: decisions 3 and 5 collide over power (2026-08-15)
 
 The whole chain, run end to end against Palpo 0.4.0 — a project publishes `#acme-final:palpo.test` with
