@@ -705,6 +705,71 @@ describe('removal refuses to be the first step of a cascade', () => {
     expect(rows.find((a) => a.name === 'assigned').projectSide).toBe(SERVER);
   });
 
+  test('pending invitations on the side are DECLINED, not left waiting on a decision that cannot matter', async () => {
+    /*
+     * ADR-016 row 7 recorded that nothing outside the first three stores was swept. A pending invitation
+     * to a room on a removed side can never be accepted — there is no side left to join — so a
+     * contributor looking at 「等我决定」 would be looking at a decision with nothing behind it.
+     *
+     * DECLINED, not deleted, and the decider is recorded as `project-side-removed`: the compliance rule
+     * for this whole cascade is 「不删除，只是停用退役」, and a declined invitation is history where a missing
+     * one is amnesia.
+     */
+    const app = await boot({ env: { MATRIX_BRIDGE_SECRET: 'secret-for-invite-cascade' } });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' }).expect(200);
+
+    const onSide = `!work:${SERVER}`;
+    const elsewhere = '!local:contributor.example';
+    for (const roomId of [onSide, elsewhere]) {
+      await request(app).put('/api/matrix/pending-invites')
+        .set('X-Bridge-Secret', 'secret-for-invite-cascade')
+        .send({ project_room_id: roomId, agent: 'someone', inviter: `@lin:${SERVER}`, roomName: 'work' })
+        .expect(200);
+    }
+
+    const r = await request(app).delete(`/api/project-sides/${SERVER}?force=true`);
+    expect(r.status).toBe(200);
+    expect(r.body.declinedInvites).toEqual([{ roomId: onSide, agent: 'someone' }]);
+
+    const left = await request(app).get('/api/matrix/pending-invites');
+    const rows = left.body.invites ?? left.body ?? [];
+    /*
+     * The one on ANOTHER server is untouched: removing a side says nothing about rooms it never owned.
+     * Read as `projectRoomId`, which is what the store records — the field is not `roomId`, and asserting
+     * on that name gave `[undefined]`, a comparison that would have passed for the wrong reason if the
+     * expectation had been loose.
+     */
+    expect(rows.filter((i) => i.state === 'pending').map((i) => i.projectRoomId)).toEqual([elsewhere]);
+  });
+
+  test('alerts that name the side are resolved, because an alert pointing at nothing teaches distrust', async () => {
+    /*
+     * `project_side_budget:<side>` outlives its side, and an operator who chases it finds a 404 and
+     * learns to trust the next alert less. Resolved rather than deleted, by the same `autoResolve` path
+     * the allocation route uses when a raise actually helps.
+     */
+    const app = await boot();
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' }).expect(200);
+    // An unallocated side refuses work and raises the alarm — the cheapest way to get a real one.
+    await request(app).post('/api/engagements').send({
+      project: 'p', projectRoomId: `!r:${SERVER}`, role: 'coding', requester: `@r:${SERVER}`,
+      requestedTokens: 1000, ratePerDay: 100, requestId: '$cascade-alarm',
+    });
+    const before = (await request(app).get('/api/alerts')).body;
+    const open = (before.alerts ?? before ?? []).filter((a) => a.alertType === 'project_side_budget');
+    expect(open.length).toBeGreaterThan(0);
+    expect(open.every((a) => a.status !== 'resolved')).toBe(true);
+
+    await request(app).delete(`/api/project-sides/${SERVER}?force=true`).expect(200);
+
+    const after = (await request(app).get('/api/alerts')).body;
+    const now = (after.alerts ?? after ?? []).filter((a) => a.alertType === 'project_side_budget');
+    expect(now.length).toBeGreaterThan(0);
+    expect(now.every((a) => a.status === 'resolved')).toBe(true);
+  });
+
   test('agents minted for the side are RETIRED, and their record survives', async () => {
     /*
      * Retire, not delete. Erasing an agent erases its consumption with it, and ADR-013 makes the token
