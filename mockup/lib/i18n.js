@@ -186,6 +186,13 @@ const en = {
   'cf.lifecycleNote': 'creates and removes agents across the fleet',
   'cf.newAgent': '+ New agent',
   'cf.ownSecrets': 'HAFleet’s own secrets — API_TOKEN, per-agent tokens, MATRIX_REG_TOKEN — are set once in .env at mode 600 during install. They are deliberately not editable from a browser: a dashboard that can rewrite its own auth token is a dashboard that can lock everyone out of itself.',
+  /*
+   * The OPPOSITE rule from cf.ownSecrets, and stated separately because the difference is the point:
+   * these arrive after install, belong to somebody else, and are entered from a browser. ADR-016
+   * decision 8 recorded this class as unclassified — which is how a reader ends up assuming the
+   * install-time rule covers a token it was never written for.
+   */
+  'cf.sideSecrets': 'A project side’s credential is the other kind: it belongs to somebody else’s homeserver, it arrives after install, and it IS entered here — on the engagements page. The rule that makes that safe is not secrecy from the browser but a one-way door: the console can write one and can never read one back, and every endpoint that would return one answers 403 to it. To check whether a credential works, read the access state, never the token.',
   'cf.presetDeleted': 'Preset {name} deleted',
   'cf.presetForm': 'New preset form would open here',
   'cf.presets': 'Framework presets',
@@ -980,6 +987,7 @@ const zh = {
   'cf.lifecycleNote': '在整个集群中创建与移除 Agent',
   'cf.newAgent': '+ 新建 Agent',
   'cf.ownSecrets': 'HAFleet 自身的密钥——API_TOKEN、各 Agent 令牌、MATRIX_REG_TOKEN——在安装时一次性写入权限为 600 的 .env。它们刻意不允许从浏览器修改：一个能改写自己认证令牌的面板，也就是一个能把所有人锁在门外的面板。',
+  'cf.sideSecrets': '项目方的凭据属于另一类:它属于别人的 homeserver、在安装之后才到、而且确实是在这里录入的——在接洽页。让这件事安全的不是「浏览器碰不到密钥」,而是一道单向门:控制台只能写、永远读不回来,任何会返回凭据的接口对它一律 403。想知道凭据是否可用,看接入状态,而不是看 token。',
   'cf.presetDeleted': '预设 {name} 已删除',
   'cf.presetForm': '此处会打开新建预设表单',
   'cf.presets': '框架预设',

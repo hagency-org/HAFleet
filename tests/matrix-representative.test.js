@@ -22,6 +22,7 @@ import {
   inviteToRoomOnSide,
   joinRoomOnSideAsAgent,
   knockOnRoomOnSide,
+  probeFederationFromSide,
   resolveAliasOnSide,
   mintAgentIdentity,
   registerRepresentative,
@@ -1007,5 +1008,77 @@ describe('the invite object: a published alias, and a knock', () => {
     expect(r.knocked).toBe(false);
     expect(r.reason).toMatch(/no representative token yet/);
     expect(impl.calls).toHaveLength(0);
+  });
+});
+
+/*
+ * FEDERATION AS A PERMISSION, NOT A MODE — ADR-016 decision 2's optimization.
+ *
+ * The decision withdrew ADR-014's three-mode table and left one model, inside which federation is a
+ * single permission: where the project's server federates with an existing agent's server, that identity
+ * MAY be reused instead of minting a new one. Recorded as a flag rather than a second flow, "because a
+ * second flow is a second set of failure modes and the amendment's own experience is that the cheap mode
+ * becomes the only tested one".
+ *
+ * SO THE ANSWER'S BIAS IS THE DESIGN. `isolated` is safe and `federates` is not: reusing an identity the
+ * project cannot see produces an agent that is addressable only in theory, while minting one that was not
+ * strictly needed costs a row in their user table. Every ambiguous answer below resolves away from
+ * `federates`.
+ */
+describe('probing whether a project side federates with us', () => {
+  const OURS = '@hafleetbot:matrix.example.test';
+
+  test('a profile that resolves proves their server reached ours', async () => {
+    const impl = fakeFetch([ok({ displayname: 'HAFleet Bot' })]);
+    const r = await probeFederationFromSide({ side: SIDE, credential: asCred(), probeMxid: OURS, fetchImpl: impl });
+    expect(r.federation).toBe('federates');
+    const [call] = impl.calls;
+    expect(call.url).toContain(`/profile/${encodeURIComponent(OURS)}`);
+    expect(call.url).toContain(encodeURIComponent(`@hafleet:${SERVER}`));
+  });
+
+  test('M_NOT_FOUND is UNKNOWN, not proof either way', async () => {
+    /*
+     * It means their server reached ours and ours said no such user — which proves federation — OR that
+     * they never got there. The probe cannot tell, so it says so, and the caller mints. Counting it as
+     * `federates` would reuse an identity on the strength of a lookup that failed.
+     */
+    const impl = fakeFetch([fail(404, { errcode: 'M_NOT_FOUND' })]);
+    const r = await probeFederationFromSide({ side: SIDE, credential: asCred(), probeMxid: OURS, fetchImpl: impl });
+    expect(r.federation).toBe('unknown');
+    expect(r.reason).toMatch(/may federate with us and not know that user/);
+  });
+
+  test('a refusal, an unknown errcode or an unreachable server all read as ISOLATED', async () => {
+    for (const [status, body] of [[403, { errcode: 'M_FORBIDDEN' }], [502, { errcode: 'M_UNKNOWN' }], [500, {}]]) {
+      const impl = fakeFetch([fail(status, body)]);
+      const r = await probeFederationFromSide({ side: SIDE, credential: asCred(), probeMxid: OURS, fetchImpl: impl });
+      expect(r.federation).toBe('isolated');
+    }
+    const dead = fakeFetch([() => { throw new Error('ECONNREFUSED'); }]);
+    const r = await probeFederationFromSide({ side: SIDE, credential: asCred(), probeMxid: OURS, fetchImpl: dead });
+    expect(r.federation).toBe('isolated');
+    expect(r.reason).toMatch(/could not be asked/);
+  });
+
+  test('a probe mxid on the SIDE ITSELF proves nothing, and is not called federation', async () => {
+    /*
+     * The same server is not federation. Without this, every single-server deployment looks federated —
+     * including the one this was developed against, where the project side and our homeserver are the
+     * same Palpo.
+     */
+    const impl = fakeFetch([]);
+    const r = await probeFederationFromSide({
+      side: SIDE, credential: asCred(), probeMxid: `@someone:${SERVER}`, fetchImpl: impl,
+    });
+    expect(r.federation).toBe('unknown');
+    expect(r.reason).toMatch(/itself, so nothing is proven/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('a bare name is rejected outright, because a wrong probe target reads as isolation', async () => {
+    await expect(probeFederationFromSide({
+      side: SIDE, credential: asCred(), probeMxid: 'hafleetbot', fetchImpl: fakeFetch([]),
+    })).rejects.toThrow(RepresentativeError);
   });
 });
