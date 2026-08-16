@@ -201,6 +201,22 @@ the agent's own token, which is what the existing fleet depends on.
 Proven after the fix: `@ac_biglittle:acme.test` speaking in the second customer's room — the same agent,
 a different identity, chosen by the room.
 
+**Credential isolation, verified in three layers.** With two sides configured, the question stops being
+theoretical: does one customer's credential ever act on another's server, and does one customer's token
+ever admit another's events?
+
+- **At the homeservers.** Each side's `as_token` presented to the OTHER homeserver is refused, both
+  directions, `401`; each works on its own, `200`. Matrix enforces this and we depend on it, so it is
+  worth having seen rather than assumed.
+- **In our code, before the wire.** `inviteToRoomOnSide` with `acme.test`'s credential and a
+  `palpo.test` room refuses on the room's origin — asserted with a `fetchImpl` that throws if called, so
+  the refusal is proven to happen before any request exists.
+- **At the intake.** A forged token pushing a transaction is refused `403` and logged with a fingerprint
+  pair; the real `acme.test` `hs_token` is accepted `200`, and the refusal counter moves by exactly one.
+
+Together with the budget result below, that is both halves of multi-tenancy: nothing is charged to the
+wrong customer, and no credential reaches across.
+
 **Budget isolation, verified with two real sides for the first time.** Decision 6 says each project side
 carries its own allocation; with one side that claim cannot be tested, because there is nothing for it to
 be isolated FROM. With `acme.test` present its allocation was lowered to exactly what it had already
