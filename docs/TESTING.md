@@ -195,6 +195,7 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-15 | `api-project-sides` + `api-server-heartbeat` | one test each | **yes** — 94/94 in isolation, twice. They ran at positions #7 and #197 of 198, so the entire suite passes between them |
 | 2026-08-16 | `router-launch-recovery` | `backend requeues a wrapper that dies before takePayload without losing its input` | **yes** — `launch_failures: 1` where 2 was expected, so a poll loop gave up rather than an assertion being wrong. **On GitHub Actions**, 8/8 clean locally in isolation, and the sibling PR on the same master base passed the same job |
 | 2026-08-16 | `api-engagement-room-admission` | `an engagement on no configured side is skipped without a call` | **yes** — 3/3 in isolation and the very next whole-suite run of the same tree was 203/203. **A new file for this table, and the measurement predicted it**: 283ms per test, against 227ms median in the named set and 11ms outside it. The class is "files that wait on real time", and this is one |
+| 2026-08-16 | `api-engagement-side-budget` + `api-runtime` | one test each | **yes** — 21/21 and 24/24 in isolation, and the very next whole-suite run of the same tree was 204/204. **Predicted again**: 237ms and 327ms per test. `api-runtime` was already on this table; the other is new and fits the measured profile exactly |
 
 **A HYPOTHESIS THIS KILLS: LOCAL RESOURCE PRESSURE.** The 2026-08-14 four-file row notes "seven
 long-lived processes were up", and the working theory since has been that this host's own fleet —
