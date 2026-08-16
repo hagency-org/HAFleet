@@ -8595,6 +8595,7 @@ function sideIdForRoom(roomId) {
  */
 const SIDE_BUDGET_ALERT_KEY = (sideId) => `project_side_budget:${sideId}`;
 const CEILING_OVERRUN_SWEEP_INTERVAL_MS = 3600_000;
+const PROJECT_ROOM_MEMBERSHIP_SWEEP_INTERVAL_MS = 3600_000;
 
 /**
  * THE ALARM the operator asked for: 「应该报警，说无法创建 agent，需要加预算」.
@@ -12419,6 +12420,62 @@ function resolveOwnerFor(agentName) {
  * token is presented. Composing a HUMAN's mxid is the bug #73 fixed; composing an identity we
  * ourselves minted by a fixed rule, and then verifying it, is not the same act.
  */
+/**
+ * Re-admit agents whose room membership was lost while they had nothing to say.
+ *
+ * ADR-016 row 3's last unbuilt clause, and the shape of the gap is the point: a send that fails on
+ * membership re-invites and rejoins, so an agent that WORKS heals itself. An idle one does not — its
+ * membership can be dropped by a kick, a room upgrade or a server-side cleanup, and the next thing that
+ * notices is the next message, which may be days away and will be the one that fails.
+ *
+ * SWEPT RATHER THAN WATCHED, because nothing tells us. Membership on somebody else's homeserver changes
+ * without asking us, and the appservice intake only sees rooms it is in — the very membership in question.
+ *
+ * IDEMPOTENT BY REUSE, not by a new code path: `admitAgentToProjectRoom` already answers `alreadyMember`
+ * for an agent that is in the room, and a second invite of a member is the 403 that function was written
+ * to read correctly. So the sweep asks the same question the acceptance path asks, and the common case —
+ * everyone still where they were — costs one invite attempt per active engagement and changes nothing.
+ * A separate "check membership first" call would be a second way to be wrong about the same fact.
+ */
+async function sweepProjectRoomMembership() {
+  const seen = new Set();
+  for (const engagement of engagementStore.list({ state: 'active' })) {
+    const roomId = engagement?.projectRoomId;
+    const agentName = engagement?.agent;
+    if (!roomId || !agentName) continue;
+    /*
+     * One pass per (agent, room), not per engagement. Six concurrent engagements between one agent and
+     * one room is a real shape in this deployment's data — the unbind logic exists because of it — and
+     * six identical invites would be five needless calls to a customer's homeserver.
+     */
+    const key = `${agentName}\u0000${roomId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    /*
+     * Skipped here as well as inside `admitAgentToProjectRoom`, which answers `no_project_side` for the
+     * same case. That makes this line an early exit rather than a guard, and it stays for one reason worth
+     * stating: a contributor's own rooms are the COMMON case in this deployment's data, and paying a
+     * function call plus a store lookup per engagement per hour to re-learn "not a project side" is work
+     * with no possible outcome. Removing it changes nothing observable — an equivalent mutant, recorded
+     * as one rather than defended with a test that would only assert the call count.
+     */
+    if (!sideIdForRoom(roomId)) continue;
+
+    try {
+      const outcome = await admitAgentToProjectRoom(engagement);
+      /*
+       * Only a RE-admission is worth a line. `alreadyMember` is the expected answer and logging it would
+       * bury the one case an operator wants: an agent that had silently fallen out of a customer's room.
+       */
+      if (outcome?.invited && outcome?.joined) {
+        console.log(`[readmit] ${agentName} was not in ${roomId} and has been let back in`);
+      }
+    } catch (error) {
+      console.warn(`[readmit] ${agentName} in ${roomId}: ${error?.message || error}`);
+    }
+  }
+}
+
 async function admitAgentToProjectRoom(engagement) {
   const roomId = engagement?.projectRoomId;
   const agentName = engagement?.agent;
@@ -14824,6 +14881,17 @@ function startBackgroundLoops() {
    */
   trackLifecycleInterval(() => { sweepCeilingOverruns(); }, CEILING_OVERRUN_SWEEP_INTERVAL_MS);
 
+  /*
+   * Membership on a customer's homeserver, swept for the agents that cannot notice their own absence.
+   * Hourly for the same reason the overrun sweep is: the condition is standing, and a tighter loop would
+   * re-ask a foreign homeserver about rooms nothing has changed.
+   */
+  trackLifecycleInterval(() => {
+    sweepProjectRoomMembership().catch((error) => {
+      console.warn(`[readmit] sweep failed: ${error?.message || error}`);
+    });
+  }, PROJECT_ROOM_MEMBERSHIP_SWEEP_INTERVAL_MS);
+
   // Prune resolved alerts every hour
   trackLifecycleInterval(() => { alertStore.pruneResolved(); }, 3600_000);
 }
@@ -14961,6 +15029,7 @@ export const __backendV2TestInternals = {
    * is scheduling, the alarm is the behaviour.
    */
   sweepCeilingOverrunsForTest: sweepCeilingOverruns,
+  sweepProjectRoomMembershipForTest: sweepProjectRoomMembership,
   buildLocalPaneMetadataSnapshotForTest: buildLocalPaneMetadataSnapshotAsync,
   injectSlashClearForTest: injectSlashClear,
   sessionPolicyForTest: sessionPolicy,

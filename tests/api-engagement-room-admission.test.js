@@ -212,3 +212,88 @@ describe('an approved engagement puts the agent in the room', () => {
     expect(r.body.roomAdmission.reason).toBe('no_credential');
   });
 });
+
+/*
+ * RE-ADMITTING AN IDLE AGENT — ADR-016 row 3's last unbuilt clause.
+ *
+ * A send that fails on membership re-invites and rejoins, so an agent that WORKS heals itself. An idle one
+ * does not: its membership can be dropped by a kick, a room upgrade or a server-side cleanup, and the next
+ * thing that notices is the next message — which may be days away, and will be the one that fails.
+ *
+ * Swept rather than watched, because nothing tells us: membership on somebody else's homeserver changes
+ * without asking, and the appservice intake only sees rooms it is in — the very membership in question.
+ */
+describe('the membership sweep lets an idle agent back in', () => {
+  test('it asks per (agent, room) ONCE, however many engagements share the pair', async () => {
+    /*
+     * Six concurrent engagements between one agent and one room is a real shape in this deployment's data
+     * — the unbind logic exists because of it — so a sweep that asked per engagement would make five
+     * needless calls to a customer's homeserver every hour.
+     */
+    const hs = await fakeHomeserver();
+    const app = await boot({ hs, credential: asCredential() });
+    await approve(app, { tokens: 10_000 });
+    await approve(app, { tokens: 20_000 });
+    const active = (await request(app).get('/api/engagements')).body.engagements
+      .filter((e) => e.state === 'active');
+    /*
+     * Two engagements on the SAME (agent, room) pair, which is what this test needs to be about. Asserted
+     * rather than assumed: a first version wrote `> 1` and got one, because `approve` reuses a requestId
+     * derived from the token amount and the second ask was deduplicated into the first.
+     */
+    expect(active.filter((e) => e.agent === AGENT && e.projectRoomId === ROOM).length).toBe(2);
+
+    const before = hs.seen.length;
+    await context.internals.sweepProjectRoomMembershipForTest();
+    const invites = hs.seen.slice(before).filter((c) => c.url.includes('/invite'));
+    expect(invites).toHaveLength(1);
+  });
+
+  test('an agent already in the room is left alone — the invite 403 IS the check', async () => {
+    /*
+     * Idempotent by reuse rather than by a new code path: `admitAgentToProjectRoom` already reads the
+     * already-in-the-room 403 correctly, so the sweep asks the same question the acceptance path asks. A
+     * separate "check membership first" call would be a second way to be wrong about one fact.
+     */
+    const hs = await fakeHomeserver({
+      inviteStatus: 403,
+      inviteBody: { errcode: 'M_FORBIDDEN', error: 'is already in the room.' },
+    });
+    const app = await boot({ hs, credential: asCredential() });
+    await approve(app);
+
+    const before = hs.seen.length;
+    await context.internals.sweepProjectRoomMembershipForTest();
+    const after = hs.seen.slice(before);
+    /*
+     * It invited — that is the probe — and then joined anyway, which is CORRECT and worth stating: #77
+     * made the already-member branch go on to join deliberately, because being already invited says
+     * nothing about being already IN. So the idle-agent cost of this sweep is one invite and one join per
+     * (agent, room) per hour, both idempotent on the homeserver, and the alternative — asking about
+     * membership first — would be a second way to be wrong about one fact.
+     */
+    expect(after.some((c) => c.url.includes('/invite'))).toBe(true);
+    expect(after.some((c) => c.url.includes('/join/'))).toBe(true);
+  });
+
+  test('an engagement on no configured side is skipped without a call', async () => {
+    const hs = await fakeHomeserver();
+    const app = await boot({ hs, credential: asCredential() });
+    await approve(app, { room: '!local:contributor.example' });
+
+    const before = hs.seen.length;
+    await context.internals.sweepProjectRoomMembershipForTest();
+    expect(hs.seen.slice(before)).toHaveLength(0);
+  });
+
+  test('one agent failing does not stop the sweep reaching the next', async () => {
+    /*
+     * A homeserver that refuses outright must not cost the other agents their sweep — the same
+     * per-record-rather-than-abort rule the side cascade follows.
+     */
+    const hs = await fakeHomeserver({ inviteStatus: 500, inviteBody: { errcode: 'M_UNKNOWN' } });
+    const app = await boot({ hs, credential: asCredential() });
+    await approve(app);
+    await expect(context.internals.sweepProjectRoomMembershipForTest()).resolves.toBeUndefined();
+  });
+});
