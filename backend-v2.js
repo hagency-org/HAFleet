@@ -3804,6 +3804,9 @@ function summarizeMsg(m) {
     at: new Date(m.ts).toISOString(),
     time: relativeTime(m.ts),
     reply_to: m.reply_to || null,
+    // Carried out to the bridge, which is the only consumer that can act on it — see the field's note
+    // at the ingestion site. Serialised only when true so every other message keeps its current shape.
+    ...(m.incidental === true ? { incidental: true } : {}),
     group: m.group || null,
     source: m.source || 'api',
     sourceRoom: m.sourceRoom || null,
@@ -13967,7 +13970,7 @@ app.get('/api/media/fetch', (req, res) => {
 
 // ── Messages ──────────────────────────────────────────────────────────
 app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) => {
-  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, source_event_id, thread_root_event_id, matrix_default_recipient, attachments, schema, priority, sender_mxid, from_id } = req.body;
+  const { from, to, group, type, summary, full, mentions, reply_to, source, target_type, source_room, source_event_id, thread_root_event_id, matrix_default_recipient, attachments, schema, priority, sender_mxid, from_id, incidental } = req.body;
   const fromName = normalizeAgentName(from) || from;
   const toName = to ? normalizeAgentName(to) : null;
   const sourceType = typeof source === 'string' ? source.trim().toLowerCase() : 'api';
@@ -14177,6 +14180,20 @@ app.post('/api/messages', requireAgentToken(_tokenFromBody), async (req, res) =>
     full: canonicalFull,
     mentions: [...textMentions],
     reply_to: reply_to || null,
+    /*
+     * INCIDENTAL: this message exists for whoever is waiting on a specific message, and for nobody
+     * else in the room. Progress reports are the case — 「在多人的房间…agent 老说话，把其他人的对话
+     * 都冲了」 — and the operator is right that a step-by-step feed in a shared room is worse than
+     * silence, because silence at least does not cost other people their conversation.
+     *
+     * ACCEPTED FROM ANY CALLER, unlike `thread_root_event_id` above, and the difference is the whole
+     * reason this is a separate field rather than a reuse of that one. `thread_root_event_id` NAMES a
+     * thread, so an agent that could set it could drop output into any conversation in the room; it is
+     * restricted to authenticated Matrix ingestion and must stay that way. This grants nothing: it
+     * asks for LESS reach than the reply it accompanies — same target event, thread instead of room.
+     * A caller who lies about it makes its own message quieter.
+     */
+    incidental: incidental === true,
     source: source || 'api',
     sourceRoom,
     sourceEventId,

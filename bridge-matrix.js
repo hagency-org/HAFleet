@@ -2917,7 +2917,7 @@ export function parseInboundTextMessage(content) {
   return { skip: !body, body, replyEventId, threadRootEventId };
 }
 
-export function resolveGroupReplyRelation(metadata, { group, roomId } = {}) {
+export function resolveGroupReplyRelation(metadata, { group, roomId, incidental = false } = {}) {
   if (!metadata) {
     return { kind: 'fallback', relation: null, threadRootEventId: null, reason: 'source_metadata_missing' };
   }
@@ -2949,6 +2949,37 @@ export function resolveGroupReplyRelation(metadata, { group, roomId } = {}) {
       relation: {
         rel_type: 'm.thread',
         event_id: threadRootEventId,
+        is_falling_back: true,
+        'm.in_reply_to': { event_id: targetEventId },
+      },
+    };
+  }
+  /*
+   * NO THREAD ON THE SOURCE, so the question was asked at the room's top level. What happens next
+   * depends on WHAT KIND of message this is, and the distinction is the operator's:
+   *
+   *   A REPLY stays top-level. Unilaterally opening a thread on somebody's message moves the answer
+   *   out of the conversation they started it in; a room where every answer is one click away is a
+   *   room nobody can follow. This is the existing behaviour and it is correct.
+   *
+   *   AN INCIDENTAL MESSAGE STARTS ONE, rooted at the message it accompanies. Progress reports are
+   *   the case: they matter to the person waiting and to nobody else, and 「在多人的房间…把其他人的
+   *   对话都冲了」 is what putting them in the timeline does. Threaded, the main timeline still shows
+   *   exactly two events — the question and the answer — and whoever wants the detail opens the
+   *   thread. Note that this buys ATTENTION, not privacy: a Matrix thread is the same room with the
+   *   same membership and the same history visibility, so everything said here is still readable by
+   *   everyone. It is the right tool for not interrupting people and the wrong tool for hiding.
+   *
+   * `is_falling_back` is true because this reply also has a real reply target: clients that do not
+   * render threads will show it as a plain reply rather than dropping it.
+   */
+  if (incidental) {
+    return {
+      kind: 'relation',
+      threadRootEventId: targetEventId,
+      relation: {
+        rel_type: 'm.thread',
+        event_id: targetEventId,
         is_falling_back: true,
         'm.in_reply_to': { event_id: targetEventId },
       },
@@ -3253,7 +3284,8 @@ export class MatrixBridge {
       );
       return { ok: true, relation: null, threadRootEventId: null, fallback: true, reason: 'source_lookup_failed' };
     }
-    const resolution = resolveGroupReplyRelation(result.metadata, { group: msg.group, roomId });
+    const resolution = resolveGroupReplyRelation(result.metadata,
+      { group: msg.group, roomId, incidental: msg.incidental === true });
     if (resolution.kind === 'reject') {
       this.postWarning(
         `Blocked Matrix group reply ${msg.id}: ${resolution.reason} (reply_to=${msg.reply_to})`,
@@ -8126,6 +8158,21 @@ export class MatrixBridge {
    */
   static normalizeSender(tokenOrSender) {
     if (typeof tokenOrSender === 'string') return { kind: 'token', token: tokenOrSender };
+    /*
+     * A TOKEN SENDER AS AN OBJECT, which `agentSenderFor` returns and this did not accept — a regression
+     * introduced with the room-decides change and found within the hour by asking an agent a question
+     * over Matrix. The group path re-resolves its sender through `agentSenderFor`, got
+     * `{ kind: 'token', token }` back, and this函数 answered null: every group send by an agent WITH a
+     * token became "no way to send".
+     *
+     * The unit tests missed it because they exercise the two halves separately — `agentSenderFor` in
+     * isolation, and `sendAsAgentContent` with a raw string — so the shape that travels BETWEEN them was
+     * never passed through both. A seam is exactly where two green tests can still add up to a broken
+     * path.
+     */
+    if (tokenOrSender?.kind === 'token' && typeof tokenOrSender.token === 'string' && tokenOrSender.token) {
+      return { kind: 'token', token: tokenOrSender.token, agentName: tokenOrSender.agentName ?? null };
+    }
     if (tokenOrSender?.kind === 'appservice' && tokenOrSender.side && tokenOrSender.credential
       && tokenOrSender.agentUserId) {
       return tokenOrSender;
