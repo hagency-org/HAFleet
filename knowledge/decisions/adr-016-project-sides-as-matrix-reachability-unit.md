@@ -179,6 +179,30 @@ send the bot's token to somebody else's homeserver, which is a worse bug than th
 why `sideForRoom` returns the acting pair rather than a string, and why these are listed rather than
 converted in bulk.
 
+## What the THIRD live run found: decisions 3 and 5 collide over power (2026-08-15)
+
+The whole chain, run end to end against Palpo 0.4.0 — a project publishes `#acme-final:palpo.test` with
+`join_rule: knock`, the representative knocks through `POST /api/project-sides/:id/knock`, the project
+invites, the bridge answers the knock and joins, an engagement is approved, and the agent speaks in the
+room. Every step confirmed against the homeserver rather than our own response bodies.
+
+**It found a collision between two decisions, neither of which is wrong on its own.** Decision 5 lets us
+ENTER a project's room by knocking. Decision 3 has the representative INVITE our agents into it. In a room
+the representative created it holds PL 100 and both work. In a room the PROJECT created and we knocked
+into, it holds `users_default` — **0** on a default Palpo room — against an `invite` requirement of **50**.
+So we get in, and cannot bring anyone with us. The failure arrives as a bare `M_FORBIDDEN`, which sends an
+operator to check the credential that was working fine.
+
+`roomAdmission` now answers `representative_lacks_invite_power`, read from the room's own power levels
+rather than guessed from an error string, and the message names the two things the PROJECT can do — grant
+the representative that power, or invite the agent itself — and says plainly that nothing on our side can
+raise it. Proven both ways: refused at PL 0, and admitted immediately once the project granted PL 50, with
+Palpo reporting all three accounts in the room.
+
+**WHAT THIS MEANS FOR THE PRODUCT, beyond the message:** a marketplace entry is not sufficient to staff a
+room. Knocking makes a project reachable; STAFFING it needs a permission the project grants. That belongs
+in whatever the project side is told to do when they publish an alias, and it is not written anywhere yet.
+
 ## What the SECOND live run found (2026-08-15)
 
 The chain from a role ask to an agent speaking in the customer's room, run against the same Palpo

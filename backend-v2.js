@@ -41,8 +41,8 @@ import { buildSeats, normalizeDeclaration, seatIdentity } from './lib/seat-store
 import { createEngagementStore, routeRequest, EngagementError } from './lib/engagement-store.js';
 import { ProjectSideStore, ProjectSideStoreError } from './lib/project-side-store.js';
 import {
-  ensureRepresentative, inviteToRoomOnSide, joinRoomOnSideAsAgent, knockOnRoomOnSide,
-  mintAgentIdentity, probeFederationFromSide, resolveAliasOnSide,
+  canRepresentativeInvite, ensureRepresentative, inviteToRoomOnSide, joinRoomOnSideAsAgent,
+  knockOnRoomOnSide, mintAgentIdentity, probeFederationFromSide, resolveAliasOnSide,
 } from './lib/matrix-representative.js';
 import {
   dropQueuedBackendNotificationsBySource,
@@ -12499,6 +12499,27 @@ async function admitAgentToProjectRoom(engagement) {
 
   const invite = await inviteToRoomOnSide({ ...acting, roomId, userId: agentMxid });
   if (!invite.invited && !invite.already) {
+    /*
+     * WHY, not just that it failed. A live run took `M_FORBIDDEN` here and the cause was neither the
+     * credential nor the agent: the representative had entered this room by KNOCKING (decision 5), so it
+     * holds `users_default` — 0 — against an `invite` requirement of 50 that the project set. It is in the
+     * room and cannot bring anyone with it, and a bare 403 sends an operator to check the credential.
+     *
+     * Read from the room's power levels rather than matched on the error string, on the failure path only.
+     * The remedy belongs to the project, so the message says which of the two things they can do.
+     */
+    const power = await canRepresentativeInvite({ ...acting, roomId });
+    if (power.known && power.can === false) {
+      return {
+        admitted: false,
+        reason: 'representative_lacks_invite_power',
+        sideId,
+        mxid: agentMxid,
+        detail: `our representative holds power ${power.mine} in ${roomId} and inviting needs `
+          + `${power.required}. The project side either grants it that power or invites ${agentMxid} `
+          + 'itself; nothing on our side can raise it.',
+      };
+    }
     return { admitted: false, reason: 'invite_refused', sideId, mxid: agentMxid, detail: invite.reason };
   }
 
