@@ -250,6 +250,31 @@ condition-waits under a generous ceiling, and see whether the class disappears f
 get the treatment while continuing in the ones that do not. That is a controlled comparison the
 previous four hypotheses never offered.
 
+**A SECOND FAILURE CLASS, AND HOW TO TELL THEM APART IN ONE LOOK.** On 2026-08-16 a CI run failed 29
+tests across 16 files at once, every one of them a file that imports the bridge. The cause was not the
+timing class and not the branch:
+
+```
+Error: Cannot find module '@matrix-org/matrix-sdk-crypto-nodejs-linux-x64-gnu'
+```
+
+A platform-specific native OPTIONAL dependency, transitively required by the Matrix SDK, that `npm ci`
+did not install on that runner. The same commit's previous run passed, and a re-run passed. Nothing in
+the tests or the code was involved.
+
+The diagnostic rule, which is the useful part:
+
+| what you see | what it is | what to do |
+|---|---|---|
+| ONE test failing, passes in isolation | the timing class above | re-run; record the sighting |
+| MANY files failing at once, all sharing an import | a missing native module from `npm ci` | re-run; if it repeats, pin the optional dep |
+| failures that reproduce in isolation | your change | fix it |
+
+Both of the 2026-08-16 diagnoses came out of the JSON artifact rather than the log. The failure above
+appears in the raw log only as 29 `FAIL` lines with the module error buried thousands of lines away
+among passing-test chatter; in the artifact it is one field on the first failed file. That is what the
+instrumentation was for, and it has now paid for itself twice on the day it was added.
+
 **A SIGHTING THAT WAS CHECKED FOR AUTHORSHIP BEFORE BEING CALLED A FLAKE.** The `api-agents` row above
 failed once inside a whole-suite run and once more in isolation, which is unusual — this class is
 normally whole-suite only. Because a branch was in flight that touched `agents.json` writes, the
