@@ -1,4 +1,5 @@
 import express from 'express';
+import { describeMatrixReach } from './lib/matrix-candidates.js';
 import { buildReplyHint } from './lib/reply-hint.js';
 import { meterFleet } from './lib/metering/reader.js';
 import { meteringSupport, CEILING_KINDS } from './lib/metering/parsers.js';
@@ -8847,6 +8848,28 @@ app.get('/api/project-sides/:id/budget', requireBearer, (req, res) => {
  *     has not been registered yet has nothing to act with, and returning it would make the bridge
  *     attempt sends that cannot succeed.
  */
+/**
+ * What can this deployment reach, and where can it be reached — the read behind an "add a project side"
+ * form, so that flow stops being a shell recipe with a guessed callback URL.
+ *
+ * `requireBearer` because it names this host's network interfaces and its own homeserver configuration.
+ * Neither is a secret in the token sense, and both describe the operator's infrastructure to anyone who
+ * asks — which is exactly the sort of thing that should not be readable without the operator credential.
+ *
+ * IT PROBES ON EVERY CALL rather than caching. A cached "reachable" is the one answer that matters least:
+ * an operator opens this form BECAUSE something is being set up or has broken, and a stale yes sends them
+ * to debug a registration when the homeserver is simply down.
+ */
+app.get('/api/matrix/reach', requireBearer, async (req, res) => {
+  try {
+    const sides = projectSideStore.listSides({ activeOnly: false });
+    const reach = await describeMatrixReach({ env: process.env, sides });
+    res.json(reach);
+  } catch (error) {
+    res.status(500).json({ error: `could not describe Matrix reachability: ${error?.message || error}` });
+  }
+});
+
 app.get('/api/project-sides/acting-credentials', requireApprovalBridgeSecret, (req, res) => {
   try {
     const sides = projectSideStore.listSides({ activeOnly: true }).map((side) => {
@@ -9070,6 +9093,115 @@ app.post('/api/project-sides/:id/verify', requireBearer, async (req, res) => {
  * registration a homeserver has already loaded stop working the moment new ones are stored, and that
  * takes the project side down until they install the new file and restart.
  */
+/**
+ * The same registration, DELIVERED AS A FILE, so a setup flow can be a UI without a namespace-wide
+ * credential passing through a browser.
+ *
+ * WHY A SECOND ENDPOINT RATHER THAN A FLAG. The console proxy's allowlist matches method and path, not
+ * request bodies, so a `deliver: "file"` option on the endpoint below could not be admitted without also
+ * admitting the form that returns tokens. A separate path is the only shape the allowlist can tell apart —
+ * and the proxy's refusal to forward the token-returning one is a decision its own comment marks as
+ * deliberate, not an oversight to route around.
+ *
+ * WHAT THE CALLER GETS: a path, a fingerprint, and the facts needed to finish the install. What it never
+ * gets is `as_token` or `hs_token`. That keeps the operator's browser — its memory, its devtools, its
+ * history, its extensions — out of the only moment those two values are readable, while still letting the
+ * flow be driven by clicking rather than by pasting curl commands whose traps are documented in
+ * `docs/FOR-PROJECT-SIDES.md`.
+ *
+ * THE FILE IS 0600 AND UNDER THE RUNTIME DIRECTORY, not the repo. A registration in a working tree is a
+ * registration one `git add -A` away from a public commit; this repo is public.
+ */
+app.post('/api/project-sides/:id/registration-file', requireBearer, (req, res) => {
+  const side = projectSideStore.getSide(req.params.id);
+  if (!side) return res.status(404).json({ error: 'project side not found' });
+  const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+  if (!url) {
+    return res.status(400).json({
+      error: 'url is required: the address this project side\'s homeserver can reach HAFleet at',
+      code: 'bad_request',
+    });
+  }
+  if (side.hasCredential && req.query?.replace !== 'true') {
+    return res.status(409).json({
+      error: 'this project side already has a credential; pass ?replace=true to issue new tokens',
+      code: 'credential_exists',
+      detail: 'replacing invalidates the registration the homeserver may already have installed, '
+        + 'which stops delivery until the new file is installed and the homeserver restarted',
+    });
+  }
+
+  /*
+   * REFUSED WITHOUT A RUNTIME DIRECTORY rather than falling back to the repo or to a temp path. A
+   * credential written somewhere the operator did not choose is a credential nobody will remember to
+   * remove, and `HAFLEET_RUNTIME_DIR` is the one location this deployment has already declared as the
+   * place its secrets live.
+   */
+  const runtimeDir = String(process.env.HAFLEET_RUNTIME_DIR || '').trim();
+  if (!runtimeDir) {
+    return res.status(503).json({
+      error: 'HAFLEET_RUNTIME_DIR is not set, so there is no declared place to write a credential',
+      code: 'no_runtime_dir',
+      detail: 'start the services with the runtime .env sourced, or use the terminal form of this endpoint',
+    });
+  }
+
+  try {
+    const registration = generateRegistration({
+      id: req.body?.registration_id || `hafleet-${side.id}`,
+      url,
+      senderLocalpart: req.body?.sender_localpart || 'hafleet',
+      userNamespaceRegex: req.body?.user_namespace || `@${MATRIX_AGENT_PREFIX_FOR_REGISTRATION}.*`,
+    });
+    const yaml = renderRegistrationYaml(registration);
+
+    const dir = path.join(runtimeDir, 'registrations');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, `${side.id.replace(/[^\w.-]/g, '_')}.yaml`);
+    /*
+     * Written with the mode in the open, not chmod'd after. A file that exists world-readable for even a
+     * moment has already been readable, and this one authorises a namespace on somebody else's server.
+     */
+    writeFileSync(file, yaml, { mode: 0o600 });
+
+    projectSideStore.setCredential(side.id, {
+      kind: 'appservice',
+      asToken: registration.as_token,
+      hsToken: registration.hs_token,
+      namespace: registration.namespaces.users[0].regex,
+      senderLocalpart: registration.sender_localpart,
+    });
+
+    return res.json({
+      ok: true,
+      path: file,
+      mode: '0600',
+      registrationId: registration.id,
+      senderLocalpart: registration.sender_localpart,
+      representative: `@${registration.sender_localpart}:${side.serverName}`,
+      namespace: registration.namespaces.users[0].regex,
+      url,
+      /*
+       * A FINGERPRINT, so the operator can confirm the file they installed is the one this issued without
+       * either of them ever reading a token. Four bytes: enough to say "these differ", useless to
+       * authenticate with.
+       */
+      asTokenFingerprint: createHash('sha256').update(registration.as_token).digest('hex').slice(0, 8),
+      hsTokenFingerprint: createHash('sha256').update(registration.hs_token).digest('hex').slice(0, 8),
+      nextSteps: [
+        'Copy this file onto the homeserver and reference it from the homeserver config as a TOP-LEVEL key '
+        + '— nested under another section it is silently ignored.',
+        'Restart the homeserver once. Homeservers that persist registrations by id (Palpo does) will not '
+        + 'pick up a replaced file without the stored row being removed.',
+        'The representative above arrives with users_default power. A default Matrix room needs power 50 '
+        + 'to invite, so grant it or invite each agent yourself.',
+      ],
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `could not issue registration: ${error?.message || error}` });
+  }
+});
+
 app.post('/api/project-sides/:id/registration', requireBearer, (req, res) => {
   const side = projectSideStore.getSide(req.params.id);
   if (!side) return res.status(404).json({ error: 'project side not found' });

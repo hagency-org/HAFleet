@@ -91,6 +91,12 @@ const READS = [
    * SAFE_SEGMENT (dots and colons are in the class), and `[^/]+` would additionally admit the
    * percent-encoded traversal that class exists to reject.
    */
+  /*
+   * `matrix/reach` names this host's interfaces and its own homeserver configuration, and probes each
+   * candidate. Admitted as a READ because it is what lets the add-a-project-side form offer reachable
+   * servers instead of asking an operator to type one and find out from silence.
+   */
+  /^matrix\/reach$/,
   /^project-sides$/,
   /*
    * The id segment must contain a DOT or a COLON, because it is a Matrix server name —
@@ -213,6 +219,14 @@ const WRITES = [
   { method: 'POST', re: /^project-sides$/ },
   { method: 'PUT', re: /^project-sides\/[A-Za-z0-9._:-]+\/credential$/ },
   { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/verify$/ },
+  /*
+   * `registration-file` IS admitted while `registration` is not, and the distinction is the entire point
+   * of there being two endpoints. The one above answers with the YAML — `as_token` and `hs_token` in
+   * plaintext — and must never reach a browser. This one writes that YAML to a 0600 file on the HAFleet
+   * host and answers with a PATH and two four-byte fingerprints, so the flow can be driven by clicking
+   * while the credential stays out of the browser's memory, devtools, history and extensions.
+   */
+  { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/registration-file$/ },
   { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/deactivate$/ },
   { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/reactivate$/ },
   /*
