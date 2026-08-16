@@ -201,6 +201,21 @@ the agent's own token, which is what the existing fleet depends on.
 Proven after the fix: `@ac_biglittle:acme.test` speaking in the second customer's room — the same agent,
 a different identity, chosen by the room.
 
+**Budget isolation, verified with two real sides for the first time.** Decision 6 says each project side
+carries its own allocation; with one side that claim cannot be tested, because there is nothing for it to
+be isolated FROM. With `acme.test` present its allocation was lowered to exactly what it had already
+committed, and:
+
+- `acme.test` refused the next request — `over_allocation`, naming the side and the figures
+  (`0 of 80000 left`) rather than a generic budget error;
+- `palpo.test` accepted work in the same moment, unaffected;
+- the alarms were separate too: `project_side_budget:acme.test` open while
+  `project_side_budget:palpo.test` stayed resolved;
+- raising the allocation back auto-resolved the acme alarm without an operator touching it.
+
+Money is the half of multi-tenancy where a mistake is hardest to notice — a message sent to the wrong
+homeserver fails loudly, a budget charged to the wrong customer just quietly adds up.
+
 Two smaller things the same exercise established: the document's `url:` field must be reachable FROM the
 homeserver (a containerised Palpo silently receives nothing when it says `127.0.0.1`), and a repeated
 invite is not a new event, so re-inviting an already-invited representative pushes nothing at all.
