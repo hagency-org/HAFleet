@@ -179,3 +179,305 @@ describe('sending as an agent that has no token of its own', () => {
     }
   });
 });
+
+/*
+ * A DM FOR AN AGENT THAT HAS NO TOKEN — the gap the live run found.
+ *
+ * The 2026-08-15 run against real Palpo got the agent invited into the project room, joined, and
+ * speaking in it, and then a DM to the same human was dropped one layer ABOVE the send path that had
+ * just been taught to do this: `ensureDmRoom` did `if (!fromToken) return null`. Everything below was
+ * ready and nothing reached it.
+ */
+describe('a DM room for an agent with no token of its own', () => {
+  let MatrixBridge;
+  let runtimeDir;
+  let envSnapshot;
+  let mod;
+
+  const SIDE = 'palpo.test';
+  const AGENT = 'sitehand';
+  const AGENT_MXID = `@ac_${AGENT}:${SIDE}`;
+  const HUMAN = 'borrower';
+  const AS_TOKEN = 'as_secret_never_logged';
+
+  beforeAll(async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-as-dm-'));
+    envSnapshot = snapshotEnv(['HAFLEET_RUNTIME_DIR', 'MATRIX_AGENT_PREFIX']);
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
+    process.env.MATRIX_AGENT_PREFIX = 'ac_';
+    mod = await import(`${pathToFileURL(path.resolve('bridge-matrix.js')).href}?as-dm`);
+    ({ MatrixBridge } = mod);
+  });
+
+  afterAll(() => {
+    restoreEnv(envSnapshot);
+    rmSync(runtimeDir, { recursive: true, force: true });
+  });
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  /**
+   * Only what `ensureDmRoomOnSide` touches, borrowed off the prototype.
+   *
+   * `agentSenderFor` is stubbed rather than driven through real state: what is under test is what this
+   * method does with a sender, and building one through `actingSideFor` would be testing the credential
+   * refresh loop instead.
+   */
+  function stub({ sender, humanMxid }) {
+    const self = {
+      dmRooms: new Map(),
+      warnings: [],
+      postWarning(message, meta) { this.warnings.push({ message, meta }); },
+      agentSenderFor: () => sender,
+    };
+    self.ensureDmRoomOnSide = MatrixBridge.prototype.ensureDmRoomOnSide.bind(self);
+    /*
+     * Seeded through the live observed-MXID map (#73's `humanMxidStateForTest`), because that is the
+     * map `humanUserId` reads and the whole question here is which server it answers with. A dedicated
+     * setter would have been a second way in — I reached for one and it does not exist, which is the
+     * map doing its job of having one owner.
+     */
+    if (humanMxid) {
+      const state = mod.humanMxidStateForTest();
+      state[String(humanMxid.slice(1, humanMxid.indexOf(':'))).toLowerCase()] = humanMxid;
+    }
+    return self;
+  }
+
+  const sender = (over = {}) => ({
+    kind: 'appservice',
+    side: { serverName: SIDE, apiBaseUrl: 'http://127.0.0.1:8008' },
+    credential: { kind: 'appservice', asToken: AS_TOKEN, senderLocalpart: 'hafleet', namespace: '@ac_.*' },
+    agentUserId: AGENT_MXID,
+    agentName: AGENT,
+    ...over,
+  });
+
+  function fakeMatrix({ createOk = true, joinOk = true } = {}) {
+    const calls = [];
+    vi.stubGlobal('fetch', async (url, init = {}) => {
+      const u = String(url);
+      calls.push({ url: u, method: init.method, headers: init.headers ?? {}, body: init.body });
+      if (u.includes('/createRoom')) {
+        return createOk
+          ? { ok: true, status: 200, json: async () => ({ room_id: `!dm:${SIDE}` }) }
+          : { ok: false, status: 403, json: async () => ({ errcode: 'M_FORBIDDEN' }) };
+      }
+      if (u.includes('/join/')) {
+        return joinOk
+          ? { ok: true, status: 200, json: async () => ({ room_id: `!dm:${SIDE}` }) }
+          : { ok: false, status: 403, json: async () => ({ errcode: 'M_FORBIDDEN' }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    return calls;
+  }
+
+  test('the representative creates it on the SIDE, and the agent joins by masquerade', async () => {
+    const calls = fakeMatrix();
+    const self = stub({ sender: sender(), humanMxid: `@${HUMAN}:${SIDE}` });
+
+    const roomId = await self.ensureDmRoomOnSide({
+      agentName: AGENT, humanName: HUMAN, humanIsAgent: false, key: `dm:${AGENT}`,
+    });
+
+    expect(roomId).toBe(`!dm:${SIDE}`);
+    const create = calls.find((c) => c.url.includes('/createRoom'));
+    const join = calls.find((c) => c.url.includes('/join/'));
+    expect(create).toBeDefined();
+    expect(join).toBeDefined();
+
+    // The side's own homeserver, never ours.
+    expect(create.url.startsWith('http://127.0.0.1:8008/')).toBe(true);
+    // Created AS THE REPRESENTATIVE; joined AS THE AGENT. One credential, two masquerades.
+    expect(create.url).toContain(encodeURIComponent(`@hafleet:${SIDE}`));
+    expect(join.url).toContain(encodeURIComponent(AGENT_MXID));
+
+    const body = JSON.parse(create.body);
+    /*
+     * BOTH parties in the invite list, and the agent's presence is the assertion a live run had to
+     * teach this test: `private_chat` is invite-only and the representative is the creator, so an agent
+     * that is not invited takes a 403 on the join. The first version asserted only the human and passed
+     * against a fake homeserver that answered 200 to any join.
+     */
+    expect(body.invite).toEqual([`@${HUMAN}:${SIDE}`, AGENT_MXID]);
+    expect(body.is_direct).toBe(true);
+    /*
+     * THE BOT IS NOT IN THE INVITE LIST, and that is the point rather than an omission: it holds an
+     * account on our server only, so inviting it would leave a pending invite nobody can ever accept.
+     */
+    expect(JSON.stringify(body.invite)).not.toMatch(/bot/i);
+    // Plaintext, stated: the representative holds no crypto store, and the appservice reads this room.
+    expect(body.initial_state).toEqual([]);
+  });
+
+  test('a human on ANOTHER server is refused, and no room is created', async () => {
+    /*
+     * Without federation a room on `palpo.test` holds `palpo.test` accounts and nothing else, so this
+     * DM is not a room that can exist. Creating one anyway and inviting an mxid nobody can accept is
+     * the shape of the bug #73 fixed — a plausible identity composed onto the wrong server.
+     */
+    const calls = fakeMatrix();
+    const self = stub({ sender: sender(), humanMxid: '@elsewhere:other.example' });
+
+    const roomId = await self.ensureDmRoomOnSide({
+      agentName: AGENT, humanName: 'elsewhere', humanIsAgent: false, key: `dm:${AGENT}`,
+    });
+
+    expect(roomId).toBeNull();
+    expect(calls).toHaveLength(0);
+    const warned = self.warnings.map((w) => w.message).join(' ');
+    // Both servers are named, because which one is wrong decides the operator's fix.
+    expect(warned).toMatch(/other\.example/);
+    expect(warned).toMatch(/palpo\.test/);
+  });
+
+  test('an agent WITH a token never reaches this path', async () => {
+    const calls = fakeMatrix();
+    const self = stub({ sender: { kind: 'token', token: 'has-one' }, humanMxid: `@${HUMAN}:${SIDE}` });
+    const roomId = await self.ensureDmRoomOnSide({
+      agentName: AGENT, humanName: HUMAN, humanIsAgent: false, key: `dm:${AGENT}`,
+    });
+    expect(roomId).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  test('a created room the agent cannot join returns null, rather than a room it cannot post in', async () => {
+    /*
+     * Handing back a room the sender is not in would turn one clear failure into a 403 on every later
+     * send, attributed to whatever message happened to be next.
+     */
+    const calls = fakeMatrix({ joinOk: false });
+    const self = stub({ sender: sender(), humanMxid: `@${HUMAN}:${SIDE}` });
+    const roomId = await self.ensureDmRoomOnSide({
+      agentName: AGENT, humanName: HUMAN, humanIsAgent: false, key: `dm:${AGENT}`,
+    });
+    expect(roomId).toBeNull();
+    expect(calls.some((c) => c.url.includes('/createRoom'))).toBe(true);
+    expect(self.warnings.map((w) => w.message).join(' ')).toMatch(/could not join/);
+  });
+
+  test('an agent-to-agent room is refused rather than guessed', async () => {
+    const calls = fakeMatrix();
+    const self = stub({ sender: sender(), humanMxid: `@${HUMAN}:${SIDE}` });
+    const roomId = await self.ensureDmRoomOnSide({
+      agentName: AGENT, humanName: 'otheragent', humanIsAgent: true, key: `${AGENT}:otheragent`,
+    });
+    expect(roomId).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+});
+
+/*
+ * WHICH SERVER ACTS IN WHICH ROOM — ADR-016 row 1's audit, at the two sites a side room reaches today.
+ *
+ * Every `HOMESERVER` in the bridge predates project sides and asserts our own server for whatever room
+ * it was handed. Most are still right (the bot's own account, rooms on our server). These two are not,
+ * and one of them became reachable only because `ensureDmRoomOnSide` now persists side DM rooms — a
+ * reachability introduced by the fix above it, which is why it is tested beside it.
+ */
+describe('a room on a project side is acted in by the side, not by us', () => {
+  let MatrixBridge;
+  let runtimeDir;
+  let envSnapshot;
+
+  const SIDE = 'palpo.test';
+  const SIDE_ROOM = `!proj:${SIDE}`;
+  const OUR_ROOM = '!ours:matrix.example.test';
+
+  beforeAll(async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-room-actor-'));
+    envSnapshot = snapshotEnv(['HAFLEET_RUNTIME_DIR', 'MATRIX_AGENT_PREFIX', 'MATRIX_SERVER_NAME']);
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
+    process.env.MATRIX_AGENT_PREFIX = 'ac_';
+    process.env.MATRIX_SERVER_NAME = 'matrix.example.test';
+    ({ MatrixBridge } = await import(`${pathToFileURL(path.resolve('bridge-matrix.js')).href}?room-actor`));
+  });
+
+  afterAll(() => {
+    restoreEnv(envSnapshot);
+    rmSync(runtimeDir, { recursive: true, force: true });
+  });
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  const acting = {
+    side: { serverName: SIDE, apiBaseUrl: 'http://127.0.0.1:8008' },
+    credential: { kind: 'appservice', asToken: 'as_secret_never_logged', senderLocalpart: 'hafleet', namespace: '@ac_.*' },
+  };
+
+  function stub({ sides = { [SIDE]: acting } } = {}) {
+    const self = {
+      warnings: [],
+      postWarning(m) { this.warnings.push(m); },
+      actingSideFor: (server) => sides[String(server).toLowerCase()] ?? null,
+      getBotToken: () => 'bot-token',
+      getAgentToken: () => 'agent-token',
+      botUserId: '@hafleetbot:matrix.example.test',
+    };
+    for (const m of ['sideForRoom', '_inviteHumanToDm', 'inviteBotIntoAgentRoom']) {
+      self[m] = MatrixBridge.prototype[m].bind(self);
+    }
+    return self;
+  }
+
+  test('sideForRoom answers for a side room and null for our own', () => {
+    const self = stub();
+    expect(self.sideForRoom(SIDE_ROOM)).toBe(acting);
+    expect(self.sideForRoom(OUR_ROOM)).toBeNull();
+    // A server we hold no acting credential for is not ours to act in either.
+    expect(self.sideForRoom('!x:stranger.example')).toBeNull();
+    /*
+     * OUR OWN SERVER WINS EVEN IF A CREDENTIAL EXISTS FOR IT. A deployment that registered an
+     * appservice on its OWN homeserver would otherwise have every local room rerouted through the
+     * representative — the bot's rooms answered with somebody else's actor. Found by a surviving
+     * mutant: deleting the `=== MATRIX_SERVER_NAME` check passed every other test here, because none of
+     * them had an acting credential for our own name.
+     */
+    const alsoOurs = stub({ sides: { [SIDE]: acting, 'matrix.example.test': acting } });
+    expect(alsoOurs.sideForRoom(OUR_ROOM)).toBeNull();
+    expect(alsoOurs.sideForRoom(SIDE_ROOM)).toBe(acting);
+    for (const bad of [null, undefined, 'not-a-room', 42]) expect(self.sideForRoom(bad)).toBeNull();
+  });
+
+  test('inviting a human into a SIDE DM goes through the representative', async () => {
+    const calls = [];
+    vi.stubGlobal('fetch', async (url, init = {}) => {
+      calls.push({ url: String(url), headers: init.headers ?? {} });
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    const self = stub();
+
+    const r = await self._inviteHumanToDm(SIDE_ROOM, 'borrower');
+    expect(r).toMatchObject({ ok: true, via: 'representative' });
+    expect(calls).toHaveLength(1);
+    // The SIDE's homeserver with the as_token — never ours with the bot's.
+    expect(calls[0].url.startsWith('http://127.0.0.1:8008/')).toBe(true);
+    expect(calls[0].headers.Authorization).toBe('Bearer as_secret_never_logged');
+  });
+
+  test('inviting the bot into a SIDE room is skipped, with nothing attempted', async () => {
+    /*
+     * Not a failure to retry: the bot has no account there, so the invite would sit pending forever —
+     * and it would be sent with an AGENT token against OUR homeserver, two wrong things at once.
+     */
+    const calls = [];
+    vi.stubGlobal('fetch', async (url) => { calls.push(String(url)); return { ok: true, status: 200, json: async () => ({}) }; });
+    const self = stub();
+    expect(await self.inviteBotIntoAgentRoom(SIDE_ROOM, 'agent-token')).toBe('skipped-project-side');
+    expect(calls).toHaveLength(0);
+  });
+
+  test('our own rooms keep the old path exactly', async () => {
+    const calls = [];
+    vi.stubGlobal('fetch', async (url, init = {}) => {
+      calls.push({ url: String(url), headers: init.headers ?? {} });
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    const self = stub();
+    await self.inviteBotIntoAgentRoom(OUR_ROOM, 'agent-token');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain('matrix.example.test');
+    expect(calls[0].headers.Authorization).toBe('Bearer agent-token');
+  });
+});

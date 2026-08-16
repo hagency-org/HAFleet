@@ -6467,6 +6467,17 @@ export class MatrixBridge {
    * has already joined, and unwinding that is neither possible nor desirable.
    */
   async inviteBotIntoAgentRoom(roomId, agentToken, context = 'bot invite') {
+    /*
+     * REFUSED FOR A SIDE ROOM, because there is nothing to attempt. The bot holds an account on our
+     * server only, so an invite it could never accept would sit pending forever — and the invite would
+     * be sent with an AGENT token against OUR homeserver, which for a side room is two wrong things at
+     * once. What reads that room instead is the appservice intake (ADR-016 decision 2).
+     */
+    if (this.sideForRoom(roomId)) {
+      console.log(`[bot-invite] skipped for project-side room ${roomId} (${context}): the bot has no `
+        + 'account there; the appservice intake reads it');
+      return 'skipped-project-side';
+    }
     const res = await fetch(
       `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`,
       {
@@ -7243,6 +7254,123 @@ export class MatrixBridge {
     return { ok: false, invite: invite || { ok: false, error: reason } };
   }
 
+  /**
+   * The project side a room belongs to, or null when it is ours.
+   *
+   * A room id names its origin server, and `actingSideFor` says whether we hold a credential that can
+   * act there. Every `HOMESERVER` in this file predates project sides and asserts our own server for
+   * whatever room it was handed — correct while every room was ours, and ADR-016 row 1 records that
+   * an audit of which of the remaining references are WRONG had not been done.
+   *
+   * This is that audit's first tool rather than a blanket swap, and deliberately so: a room on a side
+   * needs the side's CREDENTIAL as well as its base url, so replacing the url alone would send the
+   * bot's token to somebody else's homeserver — a worse bug than the one it fixes.
+   */
+  sideForRoom(roomId) {
+    if (typeof roomId !== 'string' || !roomId.includes(':')) return null;
+    const server = roomId.slice(roomId.indexOf(':') + 1).toLowerCase();
+    if (server === MATRIX_SERVER_NAME) return null;
+    const acting = this.actingSideFor(server);
+    if (!acting || acting.credential?.kind !== 'appservice') return null;
+    return acting;
+  }
+
+  /**
+   * A DM between a project-side agent and a human on that same side.
+   *
+   * Called only when the agent has no token of its own, which on an appservice side is always. What it
+   * produces is a room on the CUSTOMER's homeserver, created by the representative, with the human
+   * invited and the agent joined by masquerade.
+   *
+   * REFUSED WHEN THE HUMAN IS NOT ON THE SIDE. Without federation a room on `palpo.test` can hold
+   * `palpo.test` accounts and nothing else, so a DM between a side agent and a human somewhere else is
+   * not a room that can exist — and composing one anyway is how #73's fabricated-account bug worked.
+   * The refusal names both servers, because the operator's fix depends on which one is wrong.
+   *
+   * NO BOT MEMBER, and that costs something worth naming: on our own server the bot is in every DM and
+   * is how the bridge reads replies. Here the appservice intake reads the room instead — which is why
+   * ADR-016 settles intake as PLAINTEXT, and why this room is created unencrypted rather than
+   * inheriting whatever the homeserver would default to.
+   */
+  async ensureDmRoomOnSide({ agentName, humanName, humanIsAgent, key }) {
+    if (humanIsAgent) {
+      // Agent↔agent across a project side is a different question (whose side owns the room?) and
+      // nothing asks it yet. Refused rather than guessed.
+      console.warn(`[dm] no appservice path for an agent↔agent room: ${key}`);
+      return null;
+    }
+    const sender = this.agentSenderFor(agentName);
+    if (!sender || sender.kind !== 'appservice') {
+      console.warn(`[dm] ${agentName} has no token and no appservice sender, so no DM room can be made`);
+      return null;
+    }
+    const humanMxid = humanUserId(humanName);
+    const humanServer = typeof humanMxid === 'string' && humanMxid.includes(':')
+      ? humanMxid.slice(humanMxid.indexOf(':') + 1).toLowerCase()
+      : null;
+    if (humanServer !== sender.side.serverName) {
+      const detail = `${humanMxid} is on ${humanServer ?? 'an unknown server'} and ${agentName} lives on `
+        + `${sender.side.serverName}; without federation there is no room both can be in`;
+      console.warn(`[dm] ${detail}`);
+      this.postWarning(`no DM room possible for ${agentName} → ${humanName}: ${detail}`, {
+        kind: 'cross-side-dm', scope: `${agentName}:${humanName}`,
+      });
+      return null;
+    }
+
+    const created = await createRoomOnSide({
+      side: sender.side,
+      credential: sender.credential,
+      name: `DM: ${agentName}`,
+      /*
+       * THE AGENT IS INVITED AT CREATION, not left to join a room it was never asked into. A live run
+       * against Palpo created this room with only the human invited and then took a 403 on the join:
+       * `private_chat` is invite-only, and the representative is the creator, not the agent. The unit
+       * test above missed it because its fake homeserver answered 200 to any join — a mock permissive
+       * enough to hide the precondition the real thing enforces.
+       */
+      invite: [humanMxid, sender.agentUserId],
+      isDirect: true,
+      encrypted: false,
+    });
+    if (!created.created) {
+      console.warn(`[dm] representative could not create a DM room on ${sender.side.serverName}: ${created.reason}`);
+      return null;
+    }
+    const joined = await joinRoomOnSideAsAgent({
+      side: sender.side,
+      credential: sender.credential,
+      roomId: created.roomId,
+      agentUserId: sender.agentUserId,
+    });
+    if (!joined.joined) {
+      /*
+       * The room exists and the agent is not in it. Reported rather than returned, because handing back
+       * a room the sender cannot post in would turn one clear failure into a 403 on every later send.
+       */
+      console.warn(`[dm] ${sender.agentUserId} could not join its own DM room: ${joined.reason}`);
+      this.postWarning(
+        `DM room ${created.roomId} was created on ${sender.side.serverName} but ${sender.agentUserId} `
+        + `could not join it: ${joined.reason}`,
+        { kind: 'cross-side-dm', scope: created.roomId },
+      );
+      return null;
+    }
+
+    this.dmRooms.set(key, created.roomId);
+    if (!state.dmRooms) state.dmRooms = {};
+    state.dmRooms[key] = created.roomId;
+    /*
+     * Trusted, and recorded as a project-side room. `markRoomTrusted` is what lets inbound events from
+     * it be acted on; the `projectSide` field keeps an audit able to tell this room from one on our own
+     * server, which is the same distinction `ensureApprovalDmRoomOnSide` records for its own rooms.
+     */
+    markRoomTrusted(created.roomId, { dm: key, projectSide: sender.side.serverName });
+    saveState();
+    console.log(`Created project-side DM room ${created.roomId} for ${key} on ${sender.side.serverName}`);
+    return created.roomId;
+  }
+
   async ensureDmRoom(fromName, toName, options = {}) {
     const resolvedFromName = this.resolveKnownAgentName(fromName) || this.normalizeName(fromName);
     const resolvedToName = this.resolveKnownAgentName(toName) || this.normalizeName(toName);
@@ -7322,7 +7450,28 @@ export class MatrixBridge {
     // Create DM room
     const agentName = fromIsAgent ? resolvedFromName : resolvedToName;
     const fromToken = this.getAgentToken(agentName);
-    if (!fromToken) return null;
+    if (!fromToken) {
+      /*
+       * NO TOKEN IS NOT THE END OF THE LINE ANY MORE. An agent minted on an appservice side has none
+       * and never will — the namespace makes it act, not a credential of its own. This `return null`
+       * is what a live run hit: the agent had been invited into the project room, joined it, and could
+       * speak in it, and then a DM to the same human was dropped one layer above the send path that
+       * had just been taught to do this.
+       *
+       * The side path is deliberately NOT a copy of the branch below. Three things differ, and each is
+       * a fact about somebody else's homeserver rather than a preference: the representative creates
+       * the room (it is the only account of ours with standing there), the agent joins by masquerade,
+       * and THE BOT IS NOT INVITED — it holds an account on our server only, so inviting it would
+       * produce a permanent pending invite nobody can accept.
+       */
+      const sideRoom = await this.ensureDmRoomOnSide({
+        agentName,
+        humanName: agentName === resolvedFromName ? resolvedToName : resolvedFromName,
+        humanIsAgent: agentName === resolvedFromName ? toIsAgent : fromIsAgent,
+        key,
+      });
+      return sideRoom;
+    }
 
     // Target user ID: agent gets ac_ prefix, human uses plain name
     const otherName = agentName === resolvedFromName ? resolvedToName : resolvedFromName;
@@ -7407,6 +7556,24 @@ export class MatrixBridge {
 
   async _inviteHumanToDm(roomId, humanName, options = {}) {
     const humanTargetUserId = humanUserId(humanName);
+    /*
+     * A ROOM ON A PROJECT SIDE IS INVITED INTO BY THE REPRESENTATIVE, not by our bot and not by an
+     * agent token. The ladder below tries the bot first and the agent second, both against
+     * `HOMESERVER` — which was right while every DM room was ours. `ensureDmRoomOnSide` made side DM
+     * rooms reachable HERE (they persist in `state.dmRooms`, so the next message takes the existing-room
+     * branch and lands on this method), so this is a reachability I introduced and had to follow.
+     */
+    const side = this.sideForRoom(roomId);
+    if (side) {
+      const invited = await inviteToRoomOnSide({
+        side: side.side,
+        credential: side.credential,
+        roomId,
+        userId: humanTargetUserId,
+      });
+      if (invited.invited || invited.already) return { ok: true, via: 'representative' };
+      return { ok: false, error: invited.reason || 'representative invite failed', via: 'representative' };
+    }
     const parseJsonSafe = async (res) => {
       try {
         return await res.json();
