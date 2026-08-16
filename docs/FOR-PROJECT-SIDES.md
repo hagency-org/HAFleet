@@ -33,6 +33,20 @@ namespaces:
   rooms: []
 ```
 
+**`<hafleet host>` is reachable FROM YOUR HOMESERVER, which is not always where you are typing.** If your
+homeserver runs in a container, `127.0.0.1` there is the container itself and HAFleet will never receive a
+single event — the appservice looks installed and is deaf. A cold-start rehearsal of this document hit
+exactly that, on a Docker Palpo, and the symptom is silence rather than an error: use
+`host.docker.internal`, the host's LAN address, or whatever your container network calls the outside.
+
+Verify it before moving on, from *inside* the homeserver:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://<hafleet host>:8009/
+# 403 is the right answer — HAFleet refusing an unauthenticated GET means it is listening.
+# Connection refused or a timeout means your homeserver cannot see it.
+```
+
 Two things learned the hard way against Palpo 0.4.0, both of which cost an afternoon each:
 
 - The registration path in your homeserver config must be a **top-level** key. Nested under another
@@ -123,6 +137,20 @@ pages that state rather than hiding it.
 - **It will not treat a link click as consent.** No alias, invite or knock authorises work; only a
   contributor's approval does.
 - **It will not delete your rooms.** Rooms HAFleet creates on your server stay yours to remove.
+
+## Two things a rehearsal of this page found
+
+Both cost time in a cold-start walkthrough on a clean homeserver, and neither produces an error message
+that points at the cause.
+
+**A repeated invite is not a new event.** If HAFleet's representative was already invited and you invite
+it again, most homeservers record nothing new — so nothing is pushed to HAFleet and nothing happens.
+Kick it and invite again, or send any message in the room, to produce an event the appservice can see.
+
+**The `hs_token` in your registration file is the one HAFleet must be told.** Getting it wrong is refused
+with a fingerprint pair in HAFleet's log (`presented …, configured …`) rather than a hint about which of
+the two is stale — and after you fix it, HAFleet's bridge picks the new value up on its next refresh,
+about a minute.
 
 ## What is still missing, so you are not surprised
 
