@@ -42,4 +42,19 @@ jobs:
         with:
           node-version: 22.22.0
       - run: npm ci
-      - run: npm test
+      # `test:ci` is `npm test` plus a JSON reporter. The suite has a documented intermittent failure
+      # class (docs/TESTING.md) that has now been seen on this runner as well as locally, which killed
+      # the theory that our own long-lived processes were starving it. Four hypotheses have been
+      # refuted, and every one was argued from a log that recorded no per-file timing or ordering.
+      # This uploads that data so the NEXT sighting arrives with evidence instead of another guess.
+      - run: npm run test:ci
+
+      # ALWAYS, because the run that matters is the one that failed — `if: success()` would collect
+      # exactly the runs nobody needs to investigate.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results.json
+          retention-days: 30
+          if-no-files-found: warn
