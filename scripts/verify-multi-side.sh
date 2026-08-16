@@ -43,6 +43,28 @@ check() {
   fi
 }
 
+# `--if-available` turns MISSING PREREQUISITES into a skip instead of a refusal, and nothing else. The
+# default refusal exists for a human at a terminal: these assertions include a side REMOVAL, and a script
+# that guessed which fleet to point at would eventually remove a real customer. CI has no fleet at all, so
+# there the same absence is simply "not applicable" — and conflating the two would mean either a CI job
+# that always fails or a local run that silently targets the wrong deployment.
+#
+# It never softens a FAILED assertion. Only "there is nothing here to test".
+IF_AVAILABLE=0
+for arg in "$@"; do
+  [ "$arg" = "--if-available" ] && IF_AVAILABLE=1
+done
+
+skip_or_fail() {
+  local message="$1"
+  if [ "$IF_AVAILABLE" = "1" ]; then
+    echo "verify-multi-side: SKIPPED — $message"
+    exit 0
+  fi
+  echo "verify-multi-side: $message" >&2
+  exit 2
+}
+
 if [ "${1:-}" = "--print-second-homeserver" ]; then
   cat <<'DOC'
 A second homeserver, for the isolation assertions. Ports are +10 from the first so they cannot collide.
@@ -70,10 +92,7 @@ DOC
 fi
 
 if [ -z "$RUNTIME" ]; then
-  echo "verify-multi-side: HAFLEET_RUNTIME_DIR is required." >&2
-  echo "  There is no safe default: guessing would run these assertions — including a side REMOVAL —" >&2
-  echo "  against a fleet other than the one you meant." >&2
-  exit 2
+  skip_or_fail "HAFLEET_RUNTIME_DIR is required. There is no safe default: guessing would run these assertions — including a side REMOVAL — against a fleet other than the one you meant."
 fi
 # shellcheck disable=SC1091
 set -a; . "$RUNTIME/.env" >/dev/null 2>&1 || true; set +a
@@ -89,8 +108,7 @@ echo
 
 # ── preflight ──────────────────────────────────────────────────────────────────────────────────────
 if ! curl -s -o /dev/null --max-time 5 "$BACKEND/health"; then
-  echo "verify-multi-side: backend not answering at $BACKEND/health" >&2
-  exit 2
+  skip_or_fail "backend not answering at $BACKEND/health"
 fi
 if ! curl -s -o /dev/null --max-time 5 "$SIDE_B_URL/_matrix/client/versions"; then
   echo "verify-multi-side: SKIPPED — no second homeserver at $SIDE_B_URL"
