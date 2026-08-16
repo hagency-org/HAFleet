@@ -193,6 +193,61 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-15 | `delivery-queue` + `enforcement-spend` | one test each | **yes** — neither file is reachable from the change under test (`lib/matrix-representative.js`); clean 3/3 together in isolation |
 | 2026-08-15 | `api-project-sides` | `agents minted for the side are RETIRED, and their record survives` | **yes** — `expected undefined to deeply equal [...]`: the DELETE answered without `retiredAgents` at all. Clean 69/69 in isolation and green on the very next whole-suite run of the SAME tree, so it is this class and not the change under test. Worth one note: that change made engagement approval do outbound HTTP to a project side, so if these sightings get more frequent from here, suspect socket pressure before suspecting the tests |
 | 2026-08-15 | `api-project-sides` + `api-server-heartbeat` | one test each | **yes** — 94/94 in isolation, twice. They ran at positions #7 and #197 of 198, so the entire suite passes between them |
+| 2026-08-16 | `router-launch-recovery` | `backend requeues a wrapper that dies before takePayload without losing its input` | **yes** — `launch_failures: 1` where 2 was expected, so a poll loop gave up rather than an assertion being wrong. **On GitHub Actions**, 8/8 clean locally in isolation, and the sibling PR on the same master base passed the same job |
+
+**A HYPOTHESIS THIS KILLS: LOCAL RESOURCE PRESSURE.** The 2026-08-14 four-file row notes "seven
+long-lived processes were up", and the working theory since has been that this host's own fleet —
+backend, bridge, relay, homeservers — starves the suite of CPU, sockets or file handles. The
+2026-08-16 sighting happened **on a GitHub Actions runner**, which starts clean and runs nothing of
+ours. Whatever this is, it is not our long-lived processes, and tuning what runs on the development
+host will not fix it.
+
+That leaves the shape unchanged and narrows it usefully: the class survives a change of machine,
+operating system image, and process population. Two earlier CI-only sightings (`api-server-heartbeat`
+on a docs-only branch, 2026-08-13) already pointed this way and were not followed up; this one makes
+three, so CI is no longer the exception. The remaining common factor is the suite itself — 201 files
+sharing one worker with `fileParallelism: false` — and the next probe should be whether the failures
+correlate with position in the run rather than with the host.
+
+One thing this row is NOT evidence for: it is not evidence the tests are wrong. Every sighting so far
+is a poll loop or an assertion that passes in isolation, which means the code did the right thing
+slower than the test was willing to wait, or a shared resource was briefly unavailable. Loosening the
+assertions would hide it, and this document exists because hiding it was rejected.
+
+**THE FIRST MEASUREMENT IN THIS INVESTIGATION, AND WHAT IT NARROWS.** Every hypothesis above was
+argued from anecdote. CI now uploads per-file timing (see `test:ci`), so the 2026-08-16 run gave real
+numbers for all 201 files, compared against the 17 files this table has ever named:
+
+| | the 17 named files | the other 184 |
+|---|---|---|
+| median tests per file | 17 | 9 |
+| median file duration | 3.0s | 0.1s |
+| **median duration per test** | **227ms** | **11ms** |
+
+Twenty times. 13 of the 17 sit in the slowest quartile where chance would put 4. The flaky set is not
+a random sample of the suite: it is precisely the files that start real HTTP servers, open real
+sockets and wait on real elapsed time. The other 184 never flake because they never wait for
+anything, and a test that does not wait cannot time out.
+
+That is not a surprising mechanism, and it should not be dressed up as one — it is close to
+tautological. What it buys is a boundary. This is not a global property of the suite or of the
+runner; it is ~17 integration files whose timing budgets are occasionally not met, and it predicts
+exactly what has been observed: changing host, process population and file order all failed to move
+it, because none of them is the variable.
+
+It also kills the position hypothesis proposed one paragraph above, on the same day, by the same
+person. Position rank and duration rank correlate at r=+0.40 in that run — vitest's sequencer runs
+larger files first — so the flaky files' early positions are substantially a shadow of their size.
+Position is not established as an independent factor and should not be chased as one.
+
+**What this does NOT establish**, stated because two claims in this document have already been
+retracted for outrunning their evidence: one run's timings, against a file list accumulated over
+days, is a correlation and not a mechanism. It does not identify which resource runs short, and it
+does not explain why a given run fails while the next one on the same tree passes. The next probe it
+justifies is per-file rather than global — in those 17 files, replace fixed poll budgets with
+condition-waits under a generous ceiling, and see whether the class disappears from the files that
+get the treatment while continuing in the ones that do not. That is a controlled comparison the
+previous four hypotheses never offered.
 
 **A SIGHTING THAT WAS CHECKED FOR AUTHORSHIP BEFORE BEING CALLED A FLAKE.** The `api-agents` row above
 failed once inside a whole-suite run and once more in isolation, which is unusual — this class is

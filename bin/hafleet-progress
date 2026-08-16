@@ -1,0 +1,182 @@
+#!/usr/bin/env node
+/*
+ * Tell the room what an agent is DOING, without becoming the room.
+ *
+ * Asking an agent something in Matrix currently shows a read receipt and a typing indicator, and then
+ * nothing until the answer lands. For a ten-minute task that leaves a borrower unable to tell working
+ * from stuck — the silent half-done state this codebase keeps finding, wearing a different hat.
+ *
+ * THE FIRST DESIGN WAS WRONG AND THE OPERATOR SAID SO: posting each step into a shared room is
+ * harassment. 「agent 老说话，把其他人的对话都冲了」. A progress feed that scrolls a project room is worse
+ * than silence, because silence at least does not cost anyone else their conversation. So:
+ *
+ *   - IT GOES IN A THREAD, on the message that asked. The main timeline keeps exactly two events — the
+ *     question and the answer — and anyone who wants detail opens the thread. Nobody else pays.
+ *   - IT COALESCES. Steps accumulate in a small file and are emitted at most once per window, as one
+ *     line ("read 12 files, ran 3 commands"), not one line per step.
+ *   - IT REPORTS TRANSITIONS, not activity. Start, a stall, completion. A room does not need to know
+ *     about an `ls`.
+ *   - IT SUMMARISES, NEVER QUOTES. Tool inputs carry paths, tokens and customer data; what leaves here
+ *     is a verb and a count.
+ *
+ * AND IT NEVER FAILS THE AGENT. Every path exits 0. A progress reporter that breaks the work it is
+ * reporting on has made things worse than not existing, so a missing backend, an unreadable state file
+ * or a malformed hook payload all end the same way: quietly.
+ */
+
+import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import path from 'path';
+import os from 'os';
+
+const QUIET_EXIT = 0;
+
+/** Everything below is best-effort. This is the only exit. */
+function done(note) {
+  if (note && process.env.HAFLEET_PROGRESS_DEBUG) console.error(`[progress] ${note}`);
+  process.exit(QUIET_EXIT);
+}
+
+const agent = (process.env.HAFLEET_AGENT || process.env.AGENT_NAME || '').trim();
+if (!agent) done('no agent name in the environment');
+
+/*
+ * The window, and why it is not configurable per call. Throttling that a caller can lower is throttling
+ * a caller will lower — usually the one hook that fires most. Sixty seconds by default, one env var for
+ * the operator, and nothing per-invocation.
+ */
+const WINDOW_MS = Math.max(5000, Number(process.env.HAFLEET_PROGRESS_WINDOW_MS) || 60_000);
+
+const stateDir = path.join(os.tmpdir(), 'hafleet-progress');
+const statePath = path.join(stateDir, `${agent.replace(/[^\w.-]/g, '_')}.json`);
+
+function readState() {
+  try {
+    return JSON.parse(readFileSync(statePath, 'utf8'));
+  } catch {
+    return { lastSentAt: 0, counts: {}, threadRootEventId: null, roomKind: null };
+  }
+}
+function writeState(next) {
+  try {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(statePath, JSON.stringify(next), { mode: 0o600 });
+  } catch { /* a reporter that cannot remember still must not interrupt */ }
+}
+
+/**
+ * What happened, as a verb — never the payload.
+ *
+ * Claude Code hands a hook JSON on stdin with `tool_name` and `tool_input`. The input is exactly what
+ * must not travel: a file path names a customer's repository layout, a bash command can carry a
+ * credential someone pasted. The map is deliberately coarse; an unknown tool is "worked", not its name,
+ * because a tool name is itself a fact about the deployment.
+ */
+const VERBS = {
+  Read: 'read', Glob: 'searched', Grep: 'searched', Bash: 'ran commands',
+  Edit: 'edited', Write: 'wrote', NotebookEdit: 'edited', WebFetch: 'fetched', WebSearch: 'searched',
+};
+
+function classify(payload) {
+  const event = String(payload?.hook_event_name || process.argv[2] || '').trim();
+  if (event === 'Stop' || event === 'done') return { kind: 'done' };
+  if (event === 'start') return { kind: 'start' };
+  const verb = VERBS[payload?.tool_name] || 'worked';
+  return { kind: 'step', verb };
+}
+
+let payload = {};
+try {
+  const raw = readFileSync(0, 'utf8');
+  if (raw.trim()) payload = JSON.parse(raw);
+} catch { /* argv-only callers are fine */ }
+
+const { kind, verb } = classify(payload);
+const state = readState();
+const now = Date.now();
+
+if (kind === 'step') {
+  state.counts[verb] = (state.counts[verb] || 0) + 1;
+  if (now - (state.lastSentAt || 0) < WINDOW_MS) {
+    writeState(state);
+    done(`coalesced (${verb})`);
+  }
+}
+
+/*
+ * Nothing worth saying. A window that expires with no steps in it means the agent is thinking, and
+ * "still thinking" every minute is the noise this exists to avoid — the typing indicator already says
+ * that, and it says it without an event.
+ */
+const parts = Object.entries(state.counts).map(([v, n]) => (n > 1 ? `${v} ×${n}` : v));
+if (kind === 'step' && !parts.length) done('nothing accumulated');
+
+const summary = kind === 'start' ? 'started'
+  : kind === 'done' ? (parts.length ? `finished — ${parts.join(', ')}` : 'finished')
+    : parts.join(', ');
+
+const backend = (process.env.HAFLEET_BACKEND_URL || `http://127.0.0.1:${process.env.HAFLEET_BACKEND_PORT || 8090}`).replace(/\/+$/, '');
+const token = (process.env.API_TOKEN || '').trim();
+
+/*
+ * WHAT THE AGENT IS ALLOWED TO SAY is `reply_to` — the id of the message it is answering, which it knows
+ * because it received it. The BRIDGE turns that into a thread relation, exactly as it already does for
+ * a real reply (`resolveOutboundGroupRelation`).
+ *
+ * A first version sent `thread_root_event_id` directly and the backend refused it: that field is
+ * reserved for authenticated Matrix ingestion. The refusal is right and worth keeping in mind — an agent
+ * that could name any thread root could drop its output into any conversation in the room. So progress
+ * gains no privilege over a reply; it travels the same road.
+ *
+ * ITS ABSENCE IS A REFUSAL, not a fallback to the main timeline. Posting to the room when the thread
+ * cannot be resolved is precisely the behaviour the operator rejected — and it would be invisible to the
+ * person running the agent while being obvious to everyone else in the room.
+ */
+const replyTo = (process.env.HAFLEET_PROGRESS_REPLY_TO || state.replyTo || '').trim();
+if (!replyTo) done('no message to thread under: refusing to post progress to the main timeline');
+
+const body = {
+  from: agent,
+  group: (process.env.HAFLEET_PROGRESS_GROUP || '').trim() || undefined,
+  to: (process.env.HAFLEET_PROGRESS_TO || '').trim() || undefined,
+  type: 'info',
+  summary: `⏳ ${summary}`,
+  full: `⏳ ${summary}`,
+  reply_to: replyTo,
+  /*
+   * The half of the contract this file cannot keep by itself. Refusing to post without an anchor
+   * (above) keeps progress off the timeline when there is NO thread; this asks the bridge to open one
+   * on the anchor when there is no thread YET — which is the common case, since a question is usually
+   * asked at the room's top level. Without it the bridge sends a correct, top-level reply, and the
+   * result is the flooding the operator objected to, arriving through the polite path.
+   */
+  incidental: true,
+};
+if (!body.group && !body.to) done('no group or DM target configured');
+
+/*
+ * THE WINDOW OPENS AT THE ATTEMPT, not at the success. A first version recorded `lastSentAt` only after
+ * a 2xx, so while the backend refused — which it did, on every call, for a reason that was not going to
+ * change — the throttle never engaged and every single hook hit the network. A reporter that retries
+ * hardest exactly when it is broken is a reporter that amplifies its own failure.
+ *
+ * Counts are only cleared when the send SUCCEEDED, so a failed window's work is still described in the
+ * next line rather than lost.
+ */
+let sent = false;
+try {
+  const res = await fetch(`${backend}/api/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(3000),
+  });
+  sent = res.ok;
+  if (!res.ok) writeState({ ...state, lastSentAt: now, replyTo });
+  if (!res.ok) done(`backend refused: HTTP ${res.status}`);
+} catch (error) {
+  writeState({ ...state, lastSentAt: now, replyTo });
+  done(`backend unreachable: ${error?.message || error}`);
+}
+
+writeState({ ...state, lastSentAt: now, counts: sent ? {} : state.counts, replyTo });
+done(`sent: ${summary}`);

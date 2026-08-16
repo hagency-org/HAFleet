@@ -11,6 +11,7 @@
     "dev": "node backend-v2.js",
     "start": "node backend-v2.js",
     "test": "vitest run --no-file-parallelism --maxWorkers=1",
+    "test:ci": "vitest run --no-file-parallelism --maxWorkers=1 --reporter=default --reporter=json --outputFile.json=test-results.json",
     "test:watch": "vitest",
     "build:router": "tsc -p tsconfig.router.json",
     "typecheck:router": "tsc -p tsconfig.router.json --noEmit",
