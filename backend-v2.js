@@ -9509,12 +9509,62 @@ app.delete('/api/project-sides/:id', requireBearer, (req, res) => {
     const retiredAgents = retireAgentsForSide(existing.id);
     const side = projectSideStore.removeSide(req.params.id, { force: req.query?.force === 'true' });
     if (!side) return res.status(404).json({ error: 'project side not found' });
-    return res.json({
+        /*
+     * TWO MORE STORES, and ADR-016 row 7 recorded that nothing outside the first three was swept.
+     *
+     * PENDING INVITATIONS on the removed side can never be accepted — there is no side left to join, and
+     * a contributor looking at 「等我决定」 would be looking at a decision that cannot matter. Declined
+     * rather than deleted, with the operator recorded as `project-side-removed`, because the compliance
+     * rule for this whole cascade is 「不删除，只是停用退役」 and a declined invitation is history where a
+     * missing one is amnesia.
+     *
+     * SIDE-SCOPED ALERTS are resolved by dedupe prefix. `project_side_budget:<side>` and
+     * `agent_identity_unminted:<agent>:<side>` both name a side that no longer exists, and an alert
+     * pointing at nothing is worse than no alert: an operator chasing it finds a 404 and learns to
+     * distrust the next one. `autoResolveByPrefix` is the same call the allocation route uses.
+     */
+    const removedSideId = String(req.params.id || '').toLowerCase();
+    let declinedInvites = [];
+    try {
+      declinedInvites = pendingInviteStore.list({ state: 'pending' })
+        /*
+         * `projectServer` rather than deriving the server from the room id again: the store already
+         * recorded it at upsert (`serverFromRoomId`), and a second derivation is a second place to get
+         * it wrong. The field name is `projectRoomId`, not `roomId` — a first version filtered on the
+         * latter, matched nothing, and reported an empty sweep as a successful one.
+         */
+        .filter((invite) => String(invite.projectServer || '').toLowerCase() === removedSideId)
+        .map((invite) => {
+          try {
+            pendingInviteStore.settle(invite.projectRoomId, invite.agent, 'declined', 'project-side-removed');
+            return { roomId: invite.projectRoomId, agent: invite.agent };
+          } catch (error) {
+            // Reported per invitation rather than aborting, like the engagement loop above it.
+            console.warn(`[project-side] could not decline ${invite.agent}@${invite.roomId}: ${error?.message || error}`);
+            return null;
+          }
+        })
+        .filter(Boolean);
+    } catch (error) {
+      console.warn(`[project-side] could not sweep pending invitations for ${removedSideId}: ${error?.message || error}`);
+    }
+    let resolvedAlerts = [];
+    try {
+      resolvedAlerts = [
+        ...alertStore.autoResolveByPrefix(`${SIDE_BUDGET_ALERT_KEY(removedSideId)}`),
+        ...alertStore.autoResolveByPrefix('agent_identity_unminted:'),
+      ].filter((entry) => JSON.stringify(entry ?? '').includes(removedSideId)).map((entry) => entry?.dedupeKey ?? entry);
+    } catch (error) {
+      console.warn(`[project-side] could not resolve alerts for ${removedSideId}: ${error?.message || error}`);
+    }
+return res.json({
       ok: true,
       side,
       retiredAgents,
       endedEngagements,
       deactivatedBindings,
+      declinedInvites,
+      resolvedAlerts,
       /*
        * Reported as a list of what happened rather than a claim of completeness. "Complete" would be a
        * statement about everything in the system that could reference a side, which no single handler
@@ -9523,7 +9573,8 @@ app.delete('/api/project-sides/:id', requireBearer, (req, res) => {
        */
       cascade: 'performed',
       cascadeNote: 'engagements ended (releasing their commitments), bindings deactivated, agents '
-        + 'retired — all records kept, since ended and inactive are history while active is a claim',
+        + 'retired, pending invitations declined, side-scoped alerts resolved — all records kept, since '
+        + 'ended and inactive are history while active is a claim',
     });
   } catch (error) {
     return respondProjectSideError(res, error, 'failed to remove project side');
