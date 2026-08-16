@@ -9925,6 +9925,25 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
     provisionedSides.delete(agentName);
     if (fulfilledPlan.reservationKey) releaseProvisionReservation(fulfilledPlan.reservationKey);
   }
+  /*
+   * THE IDENTITY IS MINTED HERE — ADR-016 decision 4's last unbuilt clause. `mintAgentIdentity` had no
+   * product caller: all of its references were in tests and in the operator endpoint, so the function
+   * that exists to give a dispatched agent an account on the customer's homeserver was never reached by
+   * dispatching one.
+   *
+   * WHY THIS MOMENT. It is the first instant both facts are true: the agent record exists (persisted,
+   * just above) and it is known which side it serves (from the plan). Earlier there is no record to
+   * attach a verdict to; later nothing is looking.
+   *
+   * FIRE AND FORGET, AND THAT IS ARGUED. Minting talks to somebody else's homeserver, and a registration
+   * that 200s only when a foreign server answers would make every launcher's success depend on it.
+   * ADR-016 already settles what happens without an identity: the agent can be invited and joined by
+   * the representative and can speak through the appservice, so a failed mint costs a display name and
+   * an audit trail, not the ability to work. The verdict is logged and — on failure — raised, because
+   * "the agent works but has no identity on their server" is exactly the kind of half-state that goes
+   * unnoticed until somebody asks who @ac_x is.
+   */
+  if (fulfilledPlan?.sideId) mintIdentityForProvisionedAgent(agentName, fulfilledPlan.sideId);
   writeThruAgentHome(agentName);
   if (!existingOnline && resolvedOnline) {
     notifyAgentCatchup(agentName, 'agent-online-update').catch((e) => {
@@ -9934,6 +9953,70 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
   auditLog(req, { agent: agentName, summary: { type: agentType, server: resolvedServer, online: resolvedOnline } });
   res.json({ ok: true, agent: serializeAgent(agents[agentName]) });
 });
+
+/**
+ * Mint a provisioned agent's identity on the side it was dispatched to, without blocking on it.
+ *
+ * Separated from the registration route so the route reads as one act. Errors never propagate: the
+ * caller has already answered, and an unhandled rejection here would take the process down over a
+ * remote homeserver's mood.
+ *
+ * SILENT WHEN THERE IS NOTHING TO DO. A side with no credential yet, or one whose credential cannot be
+ * read, is a configuration state an operator is already looking at on the console — raising a second
+ * alarm per registration would bury the one that matters.
+ */
+function mintIdentityForProvisionedAgent(agentName, sideId) {
+  const side = projectSideStore.getSide(sideId);
+  if (!side) return;
+  let credential;
+  try {
+    credential = projectSideStore.credentialFor(sideId);
+  } catch {
+    return;
+  }
+  if (!credential) return;
+
+  mintAgentIdentity({
+    side,
+    credential,
+    localpart: `${MATRIX_AGENT_PREFIX_FOR_REGISTRATION}${agentName}`.toLowerCase(),
+  }).then((minted) => {
+    if (minted?.minted) {
+      console.log(`[mint] ${agentName} has an identity on ${sideId}: ${minted.mxid}`);
+      return;
+    }
+    /*
+     * RAISED, not only logged. The agent still works — the representative can invite and join it and the
+     * appservice can speak as it — so this is precisely the half-state that survives unnoticed: an agent
+     * doing work under an mxid nobody on the customer's side can account for.
+     */
+    const reason = minted?.reason || 'refused without a reason';
+    console.warn(`[mint] ${agentName} has no identity on ${sideId}: ${reason}`);
+    try {
+      alertStore.ingest({
+        alertType: 'agent_identity_unminted',
+        dedupeKey: `agent_identity_unminted:${agentName}:${sideId}`,
+        severity: 'warning',
+        source: 'backend',
+        sourceAgent: agentName,
+        summary: `${agentName} was dispatched to ${sideId} without an identity minted there`,
+        detail: { agent: agentName, sideId, reason },
+        owner: 'hafleet-operator',
+        runbook: `POST /api/agents/${agentName}/matrix-identity to retry, after fixing what the reason `
+          + `names — usually the side's credential or its namespace`,
+        impact: 'the agent can still be invited, joined and spoken as through the appservice, so work is '
+          + 'not blocked; what is missing is an account the customer can attribute that work to',
+        recoveryCondition: 'the identity is minted, by retrying that endpoint or by re-provisioning',
+        correlation: { agent: agentName, sideId },
+        tags: ['project-side', `side:${sideId}`, 'identity'],
+      });
+    } catch (error) {
+      console.warn(`[mint] could not raise the unminted alarm for ${agentName}: ${error?.message || error}`);
+    }
+  }).catch((error) => {
+    console.warn(`[mint] ${agentName} identity attempt on ${sideId} threw: ${error?.message || error}`);
+  });
+}
 
 /**
  * A preset, expressed as the runtimeProfile an agent runs under.
