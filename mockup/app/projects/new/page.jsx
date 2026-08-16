@@ -49,6 +49,17 @@ export default function NewProjectSide() {
 
   const [server, setServer] = useState('');
   const [label, setLabel] = useState('');
+  /*
+   * MANUALLY ADDED SERVERS, because discovery alone is circular. The candidate list is what this
+   * deployment already knows about — its own homeserver and sides already recorded — and a NEW customer
+   * is in neither. A form built only on that list can never add the first one, which is what the operator
+   * hit: 「为何不能加 chinasoft 客户端」. Probed before it can be selected, so "typed by hand" does not
+   * mean "unchecked".
+   */
+  const [manual, setManual] = useState([]);
+  const [draftName, setDraftName] = useState('');
+  const [draftUrl, setDraftUrl] = useState('');
+  const [probing, setProbing] = useState(false);
   const [callback, setCallback] = useState('');
   const [issued, setIssued] = useState(null);
   const [verdict, setVerdict] = useState(null);
@@ -70,14 +81,54 @@ export default function NewProjectSide() {
     return () => { live = false; };
   }, []);
 
-  const servers = reach?.homeservers ?? [];
+  const servers = [...(reach?.homeservers ?? []), ...manual];
   const appservice = reach?.appservice ?? null;
+  const chosen = servers.find((s) => s.serverName === server) ?? null;
+
+  async function probeManual() {
+    const name = draftName.trim();
+    const url = draftUrl.trim();
+    if (!name || !url) return say('fail', '服务器名和地址都要填');
+    if (servers.some((s) => s.serverName === name)) return say('fail', `${name} 已经在列表里了`);
+    setProbing(true);
+    const res = await send('matrix/probe', { method: 'POST', body: { url } });
+    setProbing(false);
+    if (res.ok === false) return say('fail', `探测失败：${res.error}`);
+    const { origin, probe } = res.body ?? {};
+    /*
+     * ADDED WHETHER OR NOT IT ANSWERED. An unreachable entry stays on screen with its reason so the
+     * operator can see what they typed and why it failed — removing it would make a typo look like the
+     * form ignoring them, and "cannot reach it right now" is not the same as "you should not add it".
+     * Selection is still gated on the probe, so it cannot be carried forward while unreachable.
+     */
+    setManual((prev) => [...prev, {
+      serverName: name,
+      url: origin ?? url,
+      source: '你刚才填的',
+      alreadyASide: false,
+      probe,
+    }]);
+    if (probe?.reachable) {
+      setServer(name);
+      say('ok', `${name} 可达`);
+    } else {
+      say('fail', `${name} 不可达：${probe?.reason ?? '未知原因'}`);
+    }
+    return setDraftName('');
+  }
 
   async function createSide() {
     setBusy(true);
+    /*
+     * `api_base_url` IS REQUIRED and its absence is what made this step fail with
+     * "api_base_url must be 1..1024 characters". It is not a detail the form can omit: a server NAME is
+     * an identity (`example.org`) and the base URL is where that identity is served
+     * (`https://matrix.example.org`), and Matrix routinely puts them on different hosts. Only the
+     * project side knows both, so both are carried from the候选 the operator picked.
+     */
     const res = await send('project-sides', {
       method: 'POST',
-      body: { server_name: server, label: label || undefined },
+      body: { server_name: server, api_base_url: chosen?.url, label: label || undefined },
     });
     setBusy(false);
     if (res.ok === false) return say('fail', `建立失败：${res.error}`);
@@ -168,6 +219,41 @@ export default function NewProjectSide() {
               );
             })}
           </ul>
+          {/*
+            * THE WAY IN FOR A SERVER NOBODY HAS RECORDED YET, which is every customer on their first day.
+            * Discovery is a convenience here, not the gate.
+            */}
+          <h3 className="sub">或者，填一个还没登记过的</h3>
+          <div className="field-row">
+            <label htmlFor="draft-name">服务器名</label>
+            <input
+              id="draft-name"
+              className="inp"
+              value={draftName}
+              onChange={(e) => setDraftName(e.target.value)}
+              placeholder="chinasoft.example"
+            />
+          </div>
+          <div className="field-row">
+            <label htmlFor="draft-url">地址</label>
+            <input
+              id="draft-url"
+              className="inp"
+              value={draftUrl}
+              onChange={(e) => setDraftUrl(e.target.value)}
+              placeholder="https://matrix.chinasoft.example"
+            />
+          </div>
+          <p className="why-inline">
+            两个都要，因为它们常常不是一回事：服务器名是身份（<span className="mono-s">chinasoft.example</span>），
+            地址是这个身份被服务的地方（<span className="mono-s">https://matrix.chinasoft.example</span>）。
+          </p>
+          <div className="btn-row">
+            <button type="button" className="btn" disabled={probing} onClick={probeManual}>
+              {probing ? '探测中…' : '探测并加入'}
+            </button>
+          </div>
+
           <div className="btn-row">
             <button type="button" className="btn" disabled={!server} onClick={() => setStep(1)}>下一步</button>
           </div>

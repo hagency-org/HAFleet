@@ -1,5 +1,5 @@
 import express from 'express';
-import { describeMatrixReach } from './lib/matrix-candidates.js';
+import { describeMatrixReach, originFor, probeHomeserver } from './lib/matrix-candidates.js';
 import { buildReplyHint } from './lib/reply-hint.js';
 import { meterFleet } from './lib/metering/reader.js';
 import { meteringSupport, CEILING_KINDS } from './lib/metering/parsers.js';
@@ -8860,6 +8860,41 @@ app.get('/api/project-sides/:id/budget', requireBearer, (req, res) => {
  * an operator opens this form BECAUSE something is being set up or has broken, and a stale yes sends them
  * to debug a registration when the homeserver is simply down.
  */
+/**
+ * Probe a homeserver the operator names, because discovery alone is circular.
+ *
+ * `GET /api/matrix/reach` lists what this deployment already knows about — its own homeserver and sides
+ * already recorded. A NEW customer is by definition in neither, so a form built only on that list can
+ * never add the first one. The operator asked exactly this: 「为何不能加 chinasoft 客户端」.
+ *
+ * IT IS AN OPERATOR CAPABILITY AND IS GATED AS ONE. This makes the server fetch a URL chosen by the
+ * caller, which is the shape of an SSRF — so it is behind `requireBearer`, the same credential that can
+ * already create sides and read every budget. An operator holding that token can curl anything this host
+ * can reach; this adds convenience for them, not reach for anyone else. It is deliberately NOT exposed to
+ * any weaker credential, and the console proxy admits it under the same operator-only path as the rest.
+ *
+ * What comes back is a verdict, never the body: only whether it answered as a Matrix homeserver and which
+ * versions it claims. A tool that echoed the response would turn this into a general-purpose fetcher.
+ */
+app.post('/api/matrix/probe', requireBearer, async (req, res) => {
+  const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+  if (!url) return res.status(400).json({ error: 'url is required' });
+  const origin = originFor(url);
+  if (!origin) {
+    return res.status(400).json({
+      error: 'url must be an absolute http(s) address — a bare server name like `example.org` is not one, '
+        + 'because guessing a scheme would produce a real verdict about the wrong URL',
+      code: 'not_an_origin',
+    });
+  }
+  try {
+    const probe = await probeHomeserver(origin);
+    return res.json({ origin, probe });
+  } catch (error) {
+    return res.status(500).json({ error: `probe failed: ${error?.message || error}` });
+  }
+});
+
 app.get('/api/matrix/reach', requireBearer, async (req, res) => {
   try {
     const sides = projectSideStore.listSides({ activeOnly: false });

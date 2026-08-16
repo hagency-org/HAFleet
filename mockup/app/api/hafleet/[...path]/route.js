@@ -216,6 +216,12 @@ const WRITES = [
    * bridge-secret guarded. See the note on the read pattern above for why the read entry is written to
    * exclude it rather than merely failing to include it.
    */
+  /*
+   * `matrix/probe` fetches a URL the caller names. Admitted because the alternative is a form that can
+   * only add homeservers HAFleet already knows about — circular, since a new customer is in neither list.
+   * It is operator-token-only on the backend, which is the same credential that can already create sides.
+   */
+  { method: 'POST', re: /^matrix\/probe$/ },
   { method: 'POST', re: /^project-sides$/ },
   { method: 'PUT', re: /^project-sides\/[A-Za-z0-9._:-]+\/credential$/ },
   { method: 'POST', re: /^project-sides\/[A-Za-z0-9._:-]+\/verify$/ },
