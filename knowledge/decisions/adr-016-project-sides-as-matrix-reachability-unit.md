@@ -201,6 +201,53 @@ the agent's own token, which is what the existing fleet depends on.
 Proven after the fix: `@ac_biglittle:acme.test` speaking in the second customer's room — the same agent,
 a different identity, chosen by the room.
 
+**The removal cascade, run for real with a second side present.** Decision 7's cascade had only ever been
+exercised where every record in the system belonged to the side being removed — which cannot distinguish
+"swept the right things" from "swept everything". With `acme.test` removed while `palpo.test` stayed:
+
+- acme's active engagement ENDED, its binding DEACTIVATED, its pending invitation DECLINED with
+  `decidedBy: project-side-removed`;
+- **the bridge forgot its own room pointers** — `forgot rooms on removed side(s) acme.test: 0 dm, 0
+  approval dm, 0 trusted, 1 group`, and the group map went from two entries to none. That sweep is
+  driven by the credential-refresh diff, so this is also the first proof the signal arrives;
+- `palpo.test` was untouched: its pending invitation still `pending`, its budget still 510000/1000000,
+  the side itself still configured.
+
+`retiredAgents` came back EMPTY, and that is correct rather than a gap: `biglittle`'s `projectSide` is
+palpo, so it was never minted FOR acme. An agent serving several customers must not be retired because
+one of them leaves — which is a distinction a single-side test cannot make either.
+
+**Credential isolation, verified in three layers.** With two sides configured, the question stops being
+theoretical: does one customer's credential ever act on another's server, and does one customer's token
+ever admit another's events?
+
+- **At the homeservers.** Each side's `as_token` presented to the OTHER homeserver is refused, both
+  directions, `401`; each works on its own, `200`. Matrix enforces this and we depend on it, so it is
+  worth having seen rather than assumed.
+- **In our code, before the wire.** `inviteToRoomOnSide` with `acme.test`'s credential and a
+  `palpo.test` room refuses on the room's origin — asserted with a `fetchImpl` that throws if called, so
+  the refusal is proven to happen before any request exists.
+- **At the intake.** A forged token pushing a transaction is refused `403` and logged with a fingerprint
+  pair; the real `acme.test` `hs_token` is accepted `200`, and the refusal counter moves by exactly one.
+
+Together with the budget result below, that is both halves of multi-tenancy: nothing is charged to the
+wrong customer, and no credential reaches across.
+
+**Budget isolation, verified with two real sides for the first time.** Decision 6 says each project side
+carries its own allocation; with one side that claim cannot be tested, because there is nothing for it to
+be isolated FROM. With `acme.test` present its allocation was lowered to exactly what it had already
+committed, and:
+
+- `acme.test` refused the next request — `over_allocation`, naming the side and the figures
+  (`0 of 80000 left`) rather than a generic budget error;
+- `palpo.test` accepted work in the same moment, unaffected;
+- the alarms were separate too: `project_side_budget:acme.test` open while
+  `project_side_budget:palpo.test` stayed resolved;
+- raising the allocation back auto-resolved the acme alarm without an operator touching it.
+
+Money is the half of multi-tenancy where a mistake is hardest to notice — a message sent to the wrong
+homeserver fails loudly, a budget charged to the wrong customer just quietly adds up.
+
 Two smaller things the same exercise established: the document's `url:` field must be reachable FROM the
 homeserver (a containerised Palpo silently receives nothing when it says `127.0.0.1`), and a repeated
 invite is not a new event, so re-inviting an already-invited representative pushes nothing at all.

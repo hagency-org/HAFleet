@@ -157,6 +157,11 @@ start_step "cli contract" npm run check:cli-contract
 start_step "remote package" bash -c 'npm run build:remote:check && npm run check:remote-sync && npm run check:remote-package-smoke'
 start_step "dependency boundary" npm run check:dep-isolation
 start_step "architecture boundaries" npm run check:architecture-boundaries
+# Skips itself unless a runtime and a SECOND homeserver are both present, so it is a no-op on CI and a
+# regression net on a machine that has them. It earns the slot because the two bugs it would have caught
+# — a send routed to the wrong customer's homeserver, and a removed side's rooms lingering in bridge
+# state — were both invisible to every single-side test in this suite, and both were found by hand.
+start_step "multi-tenancy (skips without a second homeserver)" npm run check:multi-side
 start_step "router type and artifact boundaries" bash -c 'npm run typecheck:router && npm run check:router-boundary && npm run check:router-build'
 start_step "Agent Operations canonical contract" npm run check:agent-ops-contract
 
