@@ -430,6 +430,28 @@ for (const r of ROUTES) {
   }
 }
 
+// 20. a key the UI BUILDS cannot be checked by looking for it
+{
+  /*
+   * `t(`prov.slice.${r.slice}`)` is assembled at render time, so no static sweep of the dictionary can
+   * see it — and `prov.slice.projectSides` was therefore missing for as long as project sides have
+   * existed. It rendered as `PROV.SLICE.PROJECTSIDES` in the provenance banner: an i18n key, upper-cased
+   * by CSS, sitting in the one line whose whole job is telling an operator which data is real.
+   *
+   * The slice NAMES come from where they are assigned (`provenance.<name> = 'live'` in lib/api.js), which
+   * is the same place the UI later reads them from, so this compares the two ends of one contract rather
+   * than a list somebody has to remember to update.
+   */
+  const api = readFileSync(join(import.meta.dirname, '..', 'lib', 'api.js'), 'utf8');
+  const assigned = new Set([...api.matchAll(/provenance\.([A-Za-z][\w]*)\s*=/g)].map((m) => m[1]));
+  // `__loading` is internal bookkeeping the banner never labels.
+  assigned.delete('__loading');
+  const missing = [...assigned].filter((name) => Object.entries(DICTS)
+    .some(([, dict]) => dict[`prov.slice.${name}`] === undefined));
+  check('every provenance slice has a label in every dictionary', missing.length === 0,
+    missing.map((n) => `prov.slice.${n}`).join(' '));
+}
+
 // 18. a full bar is not allowed to mean two different things
 {
   /*
