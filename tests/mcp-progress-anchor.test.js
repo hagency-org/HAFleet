@@ -69,6 +69,9 @@ function mcpClient(tmpdir, port) {
       HAFLEET_API: `http://127.0.0.1:${port}`,
       HAFLEET_SERVER: 'local',
       API_TOKEN: 'test-token',
+      // Both redirected: the anchor lands under HOME and the ephemeral counts under TMPDIR, and a test
+      // that isolated only one of them would write into the developer's real home directory.
+      HOME: tmpdir,
       TMPDIR: tmpdir,
       MCP_HEARTBEAT_INTERVAL_MS: '600000',
       MCP_FETCH_TIMEOUT_MS: '4000',
@@ -121,8 +124,15 @@ function mcpClient(tmpdir, port) {
   };
 }
 
-function anchorPath(tmpdir) {
-  return path.join(tmpdir, 'hafleet-progress', 'alpha.json');
+/*
+ * `$HOME`, not `TMPDIR`, and that move is itself a fix. The anchor is the question being worked on: it
+ * must live as long as the work, and TMPDIR is cleaned by the system and by any test that tidies up —
+ * so the "a later read does not erase the anchor" guard below was protecting state that could vanish
+ * for an unrelated reason. HOME is on the router's inherited-env allowlist, so a dispatched agent still
+ * reaches it, which is why the fix does not cost the deployment anything.
+ */
+function anchorPath(home) {
+  return path.join(home, '.hafleet', 'progress-anchor', 'alpha.json');
 }
 
 async function readInboxAndAnchor(inbox) {
@@ -203,5 +213,83 @@ describe('check_inbox records a progress anchor', () => {
       group: [{ id: 'msg_400', ts: 4000, group: 'hafleet', from: 'yuechen' }],
     });
     expect(anchor()).toMatchObject({ lastSentAt: 0, counts: {} });
+  });
+});
+
+describe('an agent whose own progress crowded out the question', () => {
+  test('one wider look recovers the anchor', async () => {
+    /*
+     * THE FEATURE WAS DESTROYING ITS OWN PRECONDITION. Progress lines go into the group like any other
+     * message, so a chatty agent's unread slice fills with its own output — observed at 10 of 10 on the
+     * live fleet, with the human's question out of view and `read` empty. No anchor could be resolved,
+     * so nothing was reported, permanently: the more it had said, the more certainly it went mute.
+     *
+     * The fix is one wider request, made ONLY when everything visible is the agent's own. This test
+     * asserts both halves: that the narrow slice really is all self, and that the wide one is asked for.
+     */
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-anchor-'));
+    temps.add(dir);
+
+    const asked = [];
+    const crowded = { group: 'g', unread: Array.from({ length: 10 }, (_, i) => ({ id: `mine_${i}`, ts: 2000 + i, from: 'alpha', group: 'g' })), read: [] };
+    const wider = { group: 'g', unread: [{ id: 'msg_question', ts: 1000, from: 'yuechen', group: 'g' }, ...crowded.unread], read: [] };
+    const server = http.createServer((req, res) => {
+      asked.push(req.url);
+      res.setHeader('Content-Type', 'application/json');
+      if (!req.url.startsWith('/api/groups/')) return res.end(JSON.stringify({ name: 'alpha', groups: [] }));
+      return res.end(JSON.stringify(req.url.includes('unread_limit=50') ? wider : crowded));
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', () => { servers.add(server); server.unref?.(); resolve(); }));
+
+    const client = mcpClient(dir, server.address().port);
+    await client.start();
+    await client.call('check_group', { group: 'g' });
+
+    expect(asked.filter((u) => u.includes('unread_limit=50'))).toHaveLength(1);
+    expect(JSON.parse(readFileSync(anchorPath(dir), 'utf8'))).toMatchObject({
+      replyTo: 'msg_question', group: 'g',
+    });
+  });
+
+  test('the wider look is NOT made when a foreign message was already visible', async () => {
+    // Bounded on purpose. Always asking for a wide window would make every group read more expensive to
+    // fix a rare dead end, so the extra request must fire only in that dead end.
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-anchor-'));
+    temps.add(dir);
+    const asked = [];
+    const server = http.createServer((req, res) => {
+      asked.push(req.url);
+      res.setHeader('Content-Type', 'application/json');
+      if (!req.url.startsWith('/api/groups/')) return res.end(JSON.stringify({ name: 'alpha', groups: [] }));
+      res.end(JSON.stringify({ group: 'g', unread: [{ id: 'msg_q', ts: 9, from: 'yuechen', group: 'g' }], read: [] }));
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', () => { servers.add(server); server.unref?.(); resolve(); }));
+
+    const client = mcpClient(dir, server.address().port);
+    await client.start();
+    await client.call('check_group', { group: 'g' });
+
+    expect(asked.filter((u) => u.includes('unread_limit=50'))).toHaveLength(0);
+    expect(JSON.parse(readFileSync(anchorPath(dir), 'utf8')).replyTo).toBe('msg_q');
+  });
+
+  test('a failing wider look leaves the read itself successful', async () => {
+    // The wide request is a courtesy. The agent asked to read its group and that succeeded; a 500 on the
+    // recovery attempt must not turn a working tool call into an error the agent has to handle.
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-anchor-'));
+    temps.add(dir);
+    const server = http.createServer((req, res) => {
+      res.setHeader('Content-Type', 'application/json');
+      if (!req.url.startsWith('/api/groups/')) return res.end(JSON.stringify({ name: 'alpha', groups: [] }));
+      if (req.url.includes('unread_limit=50')) { res.statusCode = 500; return res.end(JSON.stringify({ error: 'nope' })); }
+      res.end(JSON.stringify({ group: 'g', unread: [{ id: 'mine', ts: 1, from: 'alpha', group: 'g' }], read: [] }));
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', () => { servers.add(server); server.unref?.(); resolve(); }));
+
+    const client = mcpClient(dir, server.address().port);
+    await client.start();
+    const result = await client.call('check_group', { group: 'g' });
+    expect(JSON.stringify(result.result || {})).toContain('unread');
+    expect(existsSync(anchorPath(dir))).toBe(false);
   });
 });

@@ -132,12 +132,57 @@ fallback would be invisible to whoever runs the agent and obvious to everyone el
 anchor is recorded when the agent reads `check_inbox` or `check_group`, so an agent that has read
 nothing stays silent.
 
+### Choosing what gets reported
+
+Progress policy is a file, not a hardcoded decision: `~/.hafleet/progress-filter.json`. Absent means the
+built-in default (start, steps, completion — one line a minute), so the feature works without it.
+
+```json
+{
+  "events": ["start", "step", "done"],
+  "tools": { "exclude": ["Bash"] },
+  "minIntervalMs": 60000,
+  "perGroup": { "acme-support": { "events": ["done"] } }
+}
+```
+
+`perGroup` is the customer dimension: every group maps to a room on somebody's server, and rooms differ
+— a three-person project room may want only "finished" while an ops channel wants every step. A
+per-group rule **replaces** the top level rather than merging field by field, so a customer's rule can
+be read on its own; a merge would mean a rule written to narrow one room silently inherits policy from
+elsewhere.
+
+`tools.exclude` is a privacy control as much as a verbosity one. `Bash` is reported as "ran commands"
+and never with its command line, but an operator may still want the fact of running commands kept out
+of a customer's room.
+
+**It fails closed on configuration and open on absence.** A malformed filter reports **nothing** and
+says why: an operator writing a filter is almost always narrowing what leaves the machine, and honouring
+a typo by falling back to the permissive default would give them more than they had, in a room they
+cannot see. A *missing* file is different — that is "nobody configured this", and it gets the default.
+
+`minIntervalMs` has a floor of 5s that cannot be configured away. Throttling a caller can lower is
+throttling a caller will lower, and this caller fires on every tool call.
+
+**Where it lives, and why not the runtime directory.** The router's `INHERITED_RUNNER_ENV_KEYS` does not
+pass `HAFLEET_RUNTIME_DIR` to a dispatched agent, so a filter kept there would be unreadable in exactly
+the environment the reporter runs in. `HOME` is on that list. The anchor moved to `~/.hafleet/` for the
+same reason plus one more: it was in `TMPDIR`, which the system cleans, so the "a later read does not
+erase the anchor" guard was protecting state that could vanish for an unrelated reason.
+
 ### Two things this cost, worth knowing
 
 **The anchor comes from `check_group` as well as `check_inbox`, and only the live run found that.**
 Six unit tests passed against the inbox path while the feature was useless on the real fleet:
 `check_inbox`'s group bucket carries @mentions, and HAFleet's ordinary way of addressing an agent in a
 room is `name: question`, which is not a mention. It arrives through `check_group`.
+
+**An agent's own progress crowded out the question it was answering.** Progress lines go into the group
+like any other message, so a chatty agent's unread slice fills with its own output — observed at 10 of
+10 on the live fleet, with the human's question out of view and the read history empty. No anchor could
+be resolved, so nothing was reported: the more the agent had said, the more certainly it went mute. A
+feature destroying its own precondition. `check_group` now makes ONE wider request, only when everything
+visible is the agent's own, and a failure there leaves the agent's read successful.
 
 **The reporter uses the per-agent token, not `API_TOKEN`.** The first version sent the operator token,
 which the router puts in `FORBIDDEN_RUNNER_ENV_KEYS` — so it is absent from a dispatched agent's

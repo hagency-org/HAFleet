@@ -27,6 +27,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import path from 'path';
 import os from 'os';
+import { decideProgressEvent, parseProgressFilter } from '../lib/progress-filter.js';
 
 const QUIET_EXIT = 0;
 
@@ -40,48 +41,72 @@ const agent = (process.env.HAFLEET_AGENT || process.env.AGENT_NAME || '').trim()
 if (!agent) done('no agent name in the environment');
 
 /*
- * The window, and why it is not configurable per call. Throttling that a caller can lower is throttling
- * a caller will lower — usually the one hook that fires most. Sixty seconds by default, one env var for
- * the operator, and nothing per-invocation.
+ * WHERE THE POLICY LIVES, and why it is `$HOME` rather than the runtime directory.
+ *
+ * The router's `INHERITED_RUNNER_ENV_KEYS` does not pass `HAFLEET_RUNTIME_DIR` to a dispatched agent —
+ * deliberately, since a runtime path is the operator's layout — so a filter kept there would be
+ * unreadable in exactly the environment this runs in. `HOME` IS on that list, as are `TMPDIR`,
+ * `CODEX_HOME` and `CLAUDE_CONFIG_DIR`. So the filter goes in `$HOME/.hafleet/`, which the agent can
+ * reach, and per-customer differences are expressed by `perGroup` INSIDE that one file rather than by
+ * scattering files an operator would have to find.
  */
-const WINDOW_MS = Math.max(5000, Number(process.env.HAFLEET_PROGRESS_WINDOW_MS) || 60_000);
+const filterPath = (process.env.HAFLEET_PROGRESS_FILTER || '').trim()
+  || path.join(os.homedir(), '.hafleet', 'progress-filter.json');
 
+/*
+ * TWO PIECES OF STATE WITH DIFFERENT LIFETIMES, which a first version kept in one place under
+ * `os.tmpdir()` and thereby got wrong.
+ *
+ * The ANCHOR — which question is being worked on — must survive as long as the work. `TMPDIR` is
+ * cleaned by the system, so the "a later read does not erase the anchor" guard was protecting state
+ * that could disappear for an unrelated reason. It lives in `$HOME/.hafleet/progress-anchor/`, durable
+ * and on the router's inherited-env allowlist.
+ *
+ * The COUNTS and the throttle window are genuinely ephemeral and stay in `TMPDIR`, where losing them
+ * costs one slightly-thinner progress line.
+ */
+const safeName = `${agent.replace(/[^\w.-]/g, '_')}.json`;
+const anchorPath = path.join(os.homedir(), '.hafleet', 'progress-anchor', safeName);
 const stateDir = path.join(os.tmpdir(), 'hafleet-progress');
-const statePath = path.join(stateDir, `${agent.replace(/[^\w.-]/g, '_')}.json`);
+const statePath = path.join(stateDir, safeName);
 
 function readState() {
+  const anchor = (() => {
+    try {
+      return JSON.parse(readFileSync(anchorPath, 'utf8'));
+    } catch {
+      return {};
+    }
+  })();
+  let ephemeral = {};
   try {
-    return JSON.parse(readFileSync(statePath, 'utf8'));
-  } catch {
-    return { lastSentAt: 0, counts: {}, threadRootEventId: null, roomKind: null };
-  }
+    ephemeral = JSON.parse(readFileSync(statePath, 'utf8'));
+  } catch { /* first call, or a cleaned TMPDIR */ }
+  /*
+   * The ANCHOR WINS on the fields it owns. A stale copy in the ephemeral file — written by an older
+   * version of this script, or left over from a previous question — must not shadow the durable record
+   * of what is being worked on now.
+   */
+  return {
+    lastSentAt: 0,
+    counts: {},
+    ...ephemeral,
+    ...(anchor.replyTo ? { replyTo: anchor.replyTo, group: anchor.group ?? null, to: anchor.to ?? null } : {}),
+  };
 }
+/**
+ * Only the ephemeral half is written. Copying the anchor back into `TMPDIR` would recreate the stale
+ * shadow the read path above has to defend against, and the MCP server is the only thing that should
+ * ever decide which question is current.
+ */
 function writeState(next) {
   try {
     mkdirSync(stateDir, { recursive: true });
-    writeFileSync(statePath, JSON.stringify(next), { mode: 0o600 });
+    writeFileSync(statePath, JSON.stringify({
+      lastSentAt: next.lastSentAt || 0,
+      counts: next.counts || {},
+    }), { mode: 0o600 });
   } catch { /* a reporter that cannot remember still must not interrupt */ }
-}
-
-/**
- * What happened, as a verb — never the payload.
- *
- * Claude Code hands a hook JSON on stdin with `tool_name` and `tool_input`. The input is exactly what
- * must not travel: a file path names a customer's repository layout, a bash command can carry a
- * credential someone pasted. The map is deliberately coarse; an unknown tool is "worked", not its name,
- * because a tool name is itself a fact about the deployment.
- */
-const VERBS = {
-  Read: 'read', Glob: 'searched', Grep: 'searched', Bash: 'ran commands',
-  Edit: 'edited', Write: 'wrote', NotebookEdit: 'edited', WebFetch: 'fetched', WebSearch: 'searched',
-};
-
-function classify(payload) {
-  const event = String(payload?.hook_event_name || process.argv[2] || '').trim();
-  if (event === 'Stop' || event === 'done') return { kind: 'done' };
-  if (event === 'start') return { kind: 'start' };
-  const verb = VERBS[payload?.tool_name] || 'worked';
-  return { kind: 'step', verb };
 }
 
 let payload = {};
@@ -90,13 +115,44 @@ try {
   if (raw.trim()) payload = JSON.parse(raw);
 } catch { /* argv-only callers are fine */ }
 
-const { kind, verb } = classify(payload);
 const state = readState();
 const now = Date.now();
 
+/*
+ * THE FILTER IS RESOLVED BEFORE ANYTHING IS DECIDED, and it is scoped to the group this report would go
+ * to. The group comes from the anchor, so per-customer rules apply without the hook knowing what a
+ * customer is.
+ */
+const group = (process.env.HAFLEET_PROGRESS_GROUP || '').trim() || state.group || null;
+let filterDoc = null;
+try {
+  filterDoc = JSON.parse(readFileSync(filterPath, 'utf8'));
+} catch (error) {
+  /*
+   * A MISSING FILE IS NOT A MALFORMED ONE. Absent means "nobody configured this", which must give the
+   * built-in default — a feature that goes silent because it was not configured is a feature that looks
+   * broken. Present-but-unreadable is a different thing and is reported below.
+   */
+  if (error?.code !== 'ENOENT') done(`filter at ${filterPath} is unreadable: ${error?.message || error}`);
+}
+const parsed = parseProgressFilter(filterDoc, { group });
+/*
+ * FAIL CLOSED ON A BAD RULE. An operator writing a filter is almost always narrowing what leaves the
+ * machine; honouring a typo by falling back to the permissive default would give them MORE than they
+ * had, in a room they cannot see. So a broken filter reports nothing and says why.
+ */
+if (!parsed.ok) done(`filter at ${filterPath} is invalid (${parsed.reason}); reporting nothing`);
+const filter = parsed.filter;
+
+const event = String(payload?.hook_event_name || process.argv[2] || '').trim();
+const decision = decideProgressEvent({ event, tool: payload?.tool_name || null, filter });
+const { kind, verb } = decision;
+
+if (!decision.report) done(`filtered: ${decision.reason} [${filter.source}]`);
+
 if (kind === 'step') {
   state.counts[verb] = (state.counts[verb] || 0) + 1;
-  if (now - (state.lastSentAt || 0) < WINDOW_MS) {
+  if (now - (state.lastSentAt || 0) < filter.minIntervalMs) {
     writeState(state);
     done(`coalesced (${verb})`);
   }
@@ -159,7 +215,7 @@ if (!replyTo) done('no message to thread under: refusing to post progress to the
  */
 const body = {
   from: agent,
-  group: (process.env.HAFLEET_PROGRESS_GROUP || '').trim() || state.group || undefined,
+  group: group || undefined,
   to: (process.env.HAFLEET_PROGRESS_TO || '').trim() || state.to || undefined,
   type: 'info',
   summary: `⏳ ${summary}`,
