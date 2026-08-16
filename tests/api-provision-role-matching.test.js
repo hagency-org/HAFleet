@@ -259,3 +259,74 @@ describe('GET /api/capability — the resources block', () => {
     expect(docReason).toMatchObject({ reason: 'no-ceiling', tier: 'lightweight' });
   });
 });
+
+/*
+ * THE MATCHER, ON A PATH SOMETHING ACTUALLY CALLS.
+ *
+ * Everything above tests `POST /api/dispatch`, which ADR-013 decision 8 withdrew and which has no product
+ * caller — a correct matcher on a road nobody drives. A project asks for a role through
+ * `POST /api/engagements`, and when nothing can serve it the response now says what it would take.
+ *
+ * A HINT, NOT A REFUSAL. A first version refused with 409 and two existing tests refused THAT, correctly:
+ * a request with no qualifying agent is recorded (the project asked, which is a fact worth keeping) and
+ * discloses `serving: null` rather than a guess. Turning it into an error would make ADR-013's queue model
+ * unreachable from outside. So the request lands and the operator learns what is missing.
+ */
+describe('POST /api/engagements — when nothing can serve the role', () => {
+  const ROOM = `!p:${'palpo.test'}`;
+
+  const ask = (app, role = 'coding') => request(app).post('/api/engagements').send({
+    project: 'p', projectRoomId: ROOM, role, requester: '@r:palpo.test',
+    requestedTokens: 1000, ratePerDay: 100, requestId: `$hint-${role}`,
+  });
+
+  test('it names the preset that WOULD staff the role, and still records the request', async () => {
+    const app = await boot({ frameworkPresets: [opus()] });
+    const r = await ask(app, 'architect');
+
+    expect(r.status).toBe(200);
+    expect(r.body.engagement).toBeDefined();
+    // The disclosure contract is untouched: no agent, so nothing is claimed about what serves it.
+    expect(r.body.serving).toBeNull();
+    expect(r.body.provisionHint).toMatchObject({
+      reason: 'no_agent_provisioned_for_role',
+      role: 'architect',
+      tier: 'strong',
+      presetId: 'preset_opus',
+    });
+    expect(r.body.provisionHint.detail).toMatch(/preset_opus/);
+  });
+
+  test('with nothing configured that qualifies, it says THAT instead — a different problem', async () => {
+    /*
+     * The two have different fixes: provision an agent from a preset you already have, versus add a preset
+     * at all. One reason string for both would send an operator looking for an agent that could never
+     * exist.
+     */
+    const app = await boot({ frameworkPresets: [haiku()] });
+    const r = await ask(app, 'architect');
+    expect(r.body.provisionHint).toMatchObject({
+      reason: 'no_resource_for_role', presetId: null, presetsConsidered: 1,
+    });
+    expect(r.body.provisionHint.detail).toMatch(/none of the 1 configured preset/);
+  });
+
+  test('when an agent CAN serve the role, no hint is attached at all', async () => {
+    /*
+     * Omitted rather than null: a field that is null on every normal response is noise, and noise in a
+     * response teaches readers to skip the object it lives in.
+     */
+    const app = await boot({
+      frameworkPresets: [opus()],
+      agents: {
+        able: {
+          name: 'able', type: 'agent', kind: 'agent', online: true, role: 'architect',
+          runtimeProfile: { primary: { framework: 'claude', provider: 'anthropic', model: 'claude-opus-5' } },
+        },
+      },
+    });
+    const r = await ask(app, 'architect');
+    expect(r.body.engagement.agent).toBe('able');
+    expect(r.body).not.toHaveProperty('provisionHint');
+  });
+});

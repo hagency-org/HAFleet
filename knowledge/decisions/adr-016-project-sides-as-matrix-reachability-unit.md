@@ -231,10 +231,17 @@ precondition the real thing enforces is not a weaker test, it is a test of somet
 parties are now in the invite list and the test asserts it; verified after: Palpo reports the DM room
 holding `@ac_sitehand` and `@hafleet`, and the message arriving with `sender=@ac_sitehand`.
 
-**Also observed, and not a defect:** `/api/dispatch` answered `queued` rather than `provision`,
+**Also observed, and since addressed:** `/api/dispatch` answered `queued` rather than `provision`,
 because `MATRIX_AGENT_MAX_PER_CELL` defaults to 0. Auto-provisioning is off by default and that route
-has no product caller — so the role-matching selection built for it is correct and unexercised, which
-is a different thing from working.
+has no product caller, so the role-matching selection built for it was correct and unexercised —
+a different thing from working. It has a reachable caller now: `POST /api/engagements` attaches a
+`provisionHint` when no agent can serve the asked role, naming the preset that WOULD staff it (or
+saying that none of the configured presets reaches that tier, which is a different problem with a
+different fix). A HINT and not a refusal, which is a correction of the first attempt: refusing would
+have changed a contract project sides depend on, and two existing tests encode it — a request with
+no qualifying agent is RECORDED and discloses `serving: null` rather than a guess. It plans and does
+not provision, because launching an agent spends the contributor's money and doing that inside a
+stranger's request is not a decision a request should make.
 
 ## What the first live run found, 2026-08-14
 
