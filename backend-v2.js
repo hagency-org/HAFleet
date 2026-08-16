@@ -42,7 +42,7 @@ import { createEngagementStore, routeRequest, EngagementError } from './lib/enga
 import { ProjectSideStore, ProjectSideStoreError } from './lib/project-side-store.js';
 import {
   ensureRepresentative, inviteToRoomOnSide, joinRoomOnSideAsAgent, knockOnRoomOnSide,
-  mintAgentIdentity, resolveAliasOnSide,
+  mintAgentIdentity, probeFederationFromSide, resolveAliasOnSide,
 } from './lib/matrix-representative.js';
 import {
   dropQueuedBackendNotificationsBySource,
@@ -9994,7 +9994,17 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
    * "the agent works but has no identity on their server" is exactly the kind of half-state that goes
    * unnoticed until somebody asks who @ac_x is.
    */
-  if (fulfilledPlan?.sideId) mintIdentityForProvisionedAgent(agentName, fulfilledPlan.sideId);
+  if (fulfilledPlan?.sideId) {
+    /*
+     * `.catch` on the call itself, not only inside it. The function became async when the federation
+     * probe was added, so a throw before its own try/catch — a bad probe mxid, say — would surface as an
+     * unhandled rejection and take the process down over a remote homeserver's answer. The registration
+     * has already been persisted and answered; nothing here may undo that.
+     */
+    mintIdentityForProvisionedAgent(agentName, fulfilledPlan.sideId).catch((error) => {
+      console.warn(`[mint] identity work for ${agentName} on ${fulfilledPlan.sideId} threw: ${error?.message || error}`);
+    });
+  }
   writeThruAgentHome(agentName);
   if (!existingOnline && resolvedOnline) {
     notifyAgentCatchup(agentName, 'agent-online-update').catch((e) => {
@@ -10016,7 +10026,38 @@ app.post('/api/agents', requireAgentToken(r => r.body?.name || ''), (req, res) =
  * read, is a configuration state an operator is already looking at on the console — raising a second
  * alarm per registration would bury the one that matters.
  */
-function mintIdentityForProvisionedAgent(agentName, sideId) {
+/**
+ * A local mxid that certainly exists, for the federation probe to ask about.
+ *
+ * The bot: it is the one account this deployment definitely has, and asking about a user that may not
+ * exist turns the probe's clearest answer (`M_NOT_FOUND`) into an ambiguous one. Read from the same env
+ * the bridge logs in with; empty when this deployment has no bot, in which case nothing is probed and
+ * everything mints.
+ */
+const MATRIX_BOT_MXID_FOR_PROBE = (() => {
+  const localpart = String(process.env.MATRIX_BOT_USERNAME || '').trim().toLowerCase();
+  const server = String(process.env.MATRIX_SERVER_NAME || '').trim().toLowerCase();
+  if (!localpart || !server) return null;
+  return localpart.startsWith('@') ? localpart : `@${localpart}:${server}`;
+})();
+
+/**
+ * The identity this agent already has on OUR homeserver, or null.
+ *
+ * Only a stored token proves one exists: the bridge holds agent credentials, and composing
+ * `@ac_<name>:<our server>` without one would assert an account nobody registered — the mistake #73
+ * fixed for humans. So the absence of a token is read as the absence of an identity, which is the
+ * conservative direction here too: no local identity means mint, and minting is never wrong.
+ */
+function agentMatrixIdentityOnOurServer(agentName) {
+  const configured = String(process.env[`MATRIX_AGENT_TOKEN_${String(agentName).toUpperCase()}`] || '').trim();
+  if (!configured) return null;
+  const server = String(process.env.MATRIX_SERVER_NAME || '').trim().toLowerCase();
+  if (!server) return null;
+  return `@${MATRIX_AGENT_PREFIX_FOR_REGISTRATION}${agentName}:${server}`.toLowerCase();
+}
+
+async function mintIdentityForProvisionedAgent(agentName, sideId) {
   const side = projectSideStore.getSide(sideId);
   if (!side) return;
   let credential;
@@ -10026,6 +10067,34 @@ function mintIdentityForProvisionedAgent(agentName, sideId) {
     return;
   }
   if (!credential) return;
+
+  /*
+   * FEDERATION IS CHECKED FIRST — ADR-016 decision 2's optimization, which the row recorded as decided
+   * and unbuilt: "where the project's server federates with an existing agent's server, that identity MAY
+   * be reused instead of minting a new one", recorded as a FLAG rather than a second flow, because a
+   * second flow is a second set of failure modes and the cheap one becomes the only tested one.
+   *
+   * So this is not a branch in the flow: it is one probe before the same call, and its only effect is to
+   * skip a mint that would duplicate an identity the project can already see. `isolated` and `unknown`
+   * both mint, which is the safe direction — minting an account that was not strictly needed costs a row
+   * in their user table, while reusing one they cannot see produces an agent that is addressable only in
+   * theory.
+   */
+  const probeMxid = MATRIX_BOT_MXID_FOR_PROBE;
+  const federation = probeMxid
+    ? await probeFederationFromSide({ side, credential, probeMxid }).catch(() => ({ federation: 'isolated' }))
+    : { federation: 'unknown', reason: 'no local mxid to probe with' };
+  const localIdentity = agentMatrixIdentityOnOurServer(agentName);
+  if (federation.federation === 'federates' && localIdentity) {
+    const record = Object.values(agents).filter(isAgentRecord).find((a) => a.name === agentName);
+    if (record) {
+      record.reusedIdentity = true;
+      record.matrixIdentity = localIdentity;
+      saveAgents();
+    }
+    console.log(`[mint] ${agentName} reuses ${localIdentity} on ${sideId}: their server federates with ours`);
+    return;
+  }
 
   mintAgentIdentity({
     side,
