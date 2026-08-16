@@ -557,6 +557,12 @@
         },
         {
           "method": "POST",
+          "path": "/api/project-sides/:id/knock",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
           "path": "/api/project-sides/:id/deactivate",
           "owner": "operator.project-side-admin",
           "auth": "bearer"
