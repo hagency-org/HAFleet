@@ -408,3 +408,118 @@ describe('an invite for the representative is a knock being answered', () => {
     expect(it.warnings.map((w) => w.message).join(' ')).toMatch(/join failed/);
   });
 });
+
+/*
+ * FORGETTING A REMOVED SIDE'S ROOMS — ADR-016 row 7's last unswept store.
+ *
+ * The backend's cascade ends at its own records: it cannot reach `bridge-state.json`, and nothing told the
+ * bridge to look. The credential refresh is the only signal that ever arrives — a side that was served and
+ * is not any more has been removed — so the sweep hangs off the diff rather than off a message nobody
+ * sends.
+ *
+ * IT FORGETS POINTERS, NOT ROOMS. The rooms are on somebody else's homeserver and stay theirs; HAFleet
+ * tells project sides exactly that. What is dropped is our claim that those rooms are usable — and in the
+ * case of `trustedManagedRooms`, a PERMISSION nobody meant to keep granting.
+ */
+describe('a removed project side stops being remembered locally', () => {
+  const GONE = 'gone.example';
+  const KEPT = 'kept.example';
+
+  function bridgeWithState() {
+    const st = bridgeModule.bridgeStateForTest();
+    st.dmRooms = { 'dm:a': `!one:${GONE}`, 'dm:b': `!two:${KEPT}` };
+    st.approvalDmRooms = { 'ap:a': `!three:${GONE}` };
+    st.trustedManagedRooms = { [`!one:${GONE}`]: { dm: 'dm:a' }, [`!two:${KEPT}`]: { dm: 'dm:b' } };
+    st.groupRoomMap = { work: `!four:${GONE}`, other: `!five:${KEPT}` };
+    st.roomGroupMap = { [`!four:${GONE}`]: 'work', [`!five:${KEPT}`]: 'other' };
+    const self = {
+      dmRooms: new Map(Object.entries(st.dmRooms)),
+      warnings: [],
+      postWarning(message, meta) { this.warnings.push({ message, ...meta }); },
+    };
+    self.forgetRoomsOnSides = bridgeModule.MatrixBridge.prototype.forgetRoomsOnSides.bind(self);
+    return { self, st };
+  }
+
+  test('every pointer to the removed side goes, and the other side keeps all of its own', async () => {
+    const { self, st } = bridgeWithState();
+    const dropped = self.forgetRoomsOnSides([GONE]);
+
+    expect(dropped).toEqual({ dmRooms: 1, approvalDmRooms: 1, trustedManagedRooms: 1, groupRoomMap: 1 });
+    expect(Object.values(st.dmRooms)).toEqual([`!two:${KEPT}`]);
+    expect(st.approvalDmRooms).toEqual({});
+    expect(Object.keys(st.trustedManagedRooms)).toEqual([`!two:${KEPT}`]);
+    expect(st.groupRoomMap).toEqual({ other: `!five:${KEPT}` });
+    // Both directions of the group map, or the reverse lookup outlives the forward one.
+    expect(st.roomGroupMap).toEqual({ [`!five:${KEPT}`]: 'other' });
+    // The live Map is dropped too: it is what the send path reads, and state alone would not help it.
+    expect(self.dmRooms.has('dm:a')).toBe(false);
+    expect(self.dmRooms.has('dm:b')).toBe(true);
+  });
+
+  test('the operator is told, and told that the rooms themselves are untouched', async () => {
+    const { self } = bridgeWithState();
+    self.forgetRoomsOnSides([GONE]);
+    const said = self.warnings.map((w) => w.message).join(' ');
+    expect(said).toMatch(/were removed/);
+    expect(said).toMatch(/rooms themselves are untouched and remain theirs/);
+    expect(self.warnings[0].kind).toBe('project-side-removed');
+  });
+
+  test('sweeping a side with nothing on it says nothing at all', async () => {
+    const { self } = bridgeWithState();
+    const dropped = self.forgetRoomsOnSides(['stranger.example']);
+    expect(dropped).toEqual({ dmRooms: 0, approvalDmRooms: 0, trustedManagedRooms: 0, groupRoomMap: 0 });
+    expect(self.warnings).toEqual([]);
+  });
+
+  test('a SUCCESSFUL refresh that drops a side triggers the sweep', async () => {
+    /*
+     * The connection between the two halves, and a surviving mutant found it missing: the tests above
+     * covered what the sweep DOES and that a failed refresh must not run it, and neither noticed when the
+     * refresh stopped calling it at all. A capability nothing invokes is the shape this whole session kept
+     * finding — `mintAgentIdentity` had no caller for weeks.
+     */
+    const swept = [];
+    const self = {
+      actingCredentials: new Map([[GONE, { sideId: GONE }], [KEPT, { sideId: KEPT }]]),
+      forgetRoomsOnSides: (ids) => { swept.push(...ids); },
+    };
+    // The backend now serves only the side that remains.
+    /*
+     * `text()`, not `json()`: `backendApi` reads the body as text and parses it itself. A stub that only
+     * answered `json()` returned an empty payload, every side looked removed, and the test failed by
+     * sweeping the side it was asserting must survive — which is the same class of mistake the code under
+     * test exists to prevent.
+     */
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ sides: [{ sideId: KEPT, serverName: KEPT, apiBaseUrl: 'http://x' }] }),
+    }));
+    await bridgeModule.MatrixBridge.prototype.refreshActingCredentials.call(self);
+
+    expect(swept).toEqual([GONE]);
+    expect(self.actingCredentials.has(KEPT)).toBe(true);
+    expect(self.actingCredentials.has(GONE)).toBe(false);
+  });
+
+  test('A FAILED REFRESH IS NOT A REMOVAL — the diff runs only when the fetch succeeded', async () => {
+    /*
+     * The failure this ordering prevents: the backend restarts, the refresh throws, the catch keeps the
+     * old credentials — and a diff taken against an empty map would read every side as removed and sweep a
+     * live deployment's rooms. Asserted by driving the real refresh against a backend that refuses.
+     */
+    const st = bridgeModule.bridgeStateForTest();
+    st.dmRooms = { 'dm:a': `!one:${GONE}` };
+    const self = {
+      actingCredentials: new Map([[GONE, { sideId: GONE, serverName: GONE }]]),
+      forgetRoomsOnSides: () => { throw new Error('must not sweep on a failed refresh'); },
+    };
+    vi.stubGlobal('fetch', async () => { throw new Error('backend down'); });
+    await expect(bridgeModule.MatrixBridge.prototype.refreshActingCredentials.call(self)).resolves.toBeUndefined();
+    // Kept, not emptied: the bridge still believes in the side it last saw.
+    expect(self.actingCredentials.has(GONE)).toBe(true);
+    expect(st.dmRooms['dm:a']).toBe(`!one:${GONE}`);
+  });
+});

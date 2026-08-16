@@ -4028,7 +4028,86 @@ export class MatrixBridge {
     for (const side of Array.isArray(payload?.sides) ? payload.sides : []) {
       if (side?.sideId) next.set(side.sideId, side);
     }
+    /*
+     * A SIDE THAT WAS SERVED AND IS NOT ANY MORE has been removed on the backend, and this refresh is the
+     * only signal the bridge ever gets — ADR-016 row 7 recorded exactly this as unswept, because the
+     * backend cannot reach `bridge-state.json` and nothing told the bridge to look.
+     *
+     * The diff is taken only when the FETCH SUCCEEDED. A failed refresh keeps the old map (see the catch
+     * above), and treating "I could not ask" as "every side is gone" would sweep a live deployment's rooms
+     * because the backend restarted.
+     */
+    const gone = [...(this.actingCredentials?.keys() ?? [])].filter((sideId) => !next.has(sideId));
     this.actingCredentials = next;
+    if (gone.length) this.forgetRoomsOnSides(gone);
+  }
+
+  /**
+   * Drop local state for rooms on sides that no longer exist.
+   *
+   * WHAT THIS IS NOT: it does not touch the rooms themselves. They are on somebody else's homeserver and
+   * remain theirs — the same rule the backend's cascade follows for records, and the reason HAFleet tells
+   * project sides it will not delete their rooms. This forgets our own pointers, nothing more.
+   *
+   * WHY FORGET RATHER THAN KEEP: every one of these maps is a claim that a room is usable. A DM room on a
+   * removed side would be handed to the next send as a destination, and the send would fail against a
+   * credential we no longer hold — one clear removal turning into a confusing delivery failure later.
+   * `trustedManagedRooms` is worse than confusing: it is a permission, and a permission for a side we no
+   * longer serve is one nobody meant to still be granting.
+   */
+  forgetRoomsOnSides(sideIds) {
+    const sides = new Set(sideIds.map((s) => String(s).toLowerCase()));
+    const onGoneSide = (roomId) => typeof roomId === 'string' && roomId.includes(':')
+      && sides.has(roomId.slice(roomId.indexOf(':') + 1).toLowerCase());
+    const dropped = { dmRooms: 0, approvalDmRooms: 0, trustedManagedRooms: 0, groupRoomMap: 0 };
+
+    for (const [key, roomId] of Object.entries(state.dmRooms || {})) {
+      if (!onGoneSide(roomId)) continue;
+      delete state.dmRooms[key];
+      this.dmRooms?.delete(key);
+      dropped.dmRooms += 1;
+    }
+    for (const [key, roomId] of Object.entries(state.approvalDmRooms || {})) {
+      if (!onGoneSide(roomId)) continue;
+      delete state.approvalDmRooms[key];
+      dropped.approvalDmRooms += 1;
+    }
+    for (const roomId of Object.keys(state.trustedManagedRooms || {})) {
+      if (!onGoneSide(roomId)) continue;
+      delete state.trustedManagedRooms[roomId];
+      dropped.trustedManagedRooms += 1;
+    }
+    for (const [group, roomId] of Object.entries(state.groupRoomMap || {})) {
+      if (!onGoneSide(roomId)) continue;
+      delete state.groupRoomMap[group];
+      if (state.roomGroupMap) delete state.roomGroupMap[roomId];
+      dropped.groupRoomMap += 1;
+    }
+
+    const total = Object.values(dropped).reduce((n, v) => n + v, 0);
+    if (!total) return dropped;
+    try {
+      saveState();
+    } catch (error) {
+      /*
+       * Logged, not rethrown: this runs on a refresh timer, and a blocked state file must not take the
+       * refresh loop down. The in-memory maps are already correct for this process.
+       */
+      console.warn(`[project-side] could not persist the room sweep: ${error?.message || error}`);
+    }
+    console.log(`[project-side] forgot rooms on removed side(s) ${[...sides].join(', ')}: `
+      + `${dropped.dmRooms} dm, ${dropped.approvalDmRooms} approval dm, `
+      + `${dropped.trustedManagedRooms} trusted, ${dropped.groupRoomMap} group`);
+    /*
+     * Reported to the operator because a removal that quietly changed what the bridge can reach is the
+     * kind of thing somebody needs to be able to correlate with a later "why did that stop working".
+     */
+    this.postWarning(
+      `project side(s) ${[...sides].join(', ')} were removed: forgot ${total} local room pointer(s). `
+      + 'The rooms themselves are untouched and remain theirs.',
+      { kind: 'project-side-removed', scope: [...sides].join(',') },
+    );
+    return dropped;
   }
 
   /** The acting credential for a homeserver, in the shape the representative helpers take. */
@@ -8507,6 +8586,17 @@ export function agentTokenStateForTest() {
  * it, so a test can drive an observation and assert what composition does with it — including the
  * named localpart-collision limitation, which is pinned rather than discovered.
  */
+/**
+ * The live bridge state, for tests that drive a sweep over it.
+ *
+ * The third of this family (`agentTokenStateForTest`, `humanMxidStateForTest`), and the widest — it hands
+ * back the whole object. Justified by what it is for: `forgetRoomsOnSides` reaches across four maps at
+ * once, and a per-map accessor would be four hooks that could drift from the thing under test.
+ */
+export function bridgeStateForTest() {
+  return state;
+}
+
 export function humanMxidStateForTest() {
   return state.humanMxids;
 }
