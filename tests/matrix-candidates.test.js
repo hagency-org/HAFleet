@@ -117,6 +117,26 @@ describe('addresses the homeserver might reach us at', () => {
       { family: 'IPv6', address: 'fe80::1', internal: false }],
   };
 
+  test('Podman\'s name is offered too, since it is not the same as Docker\'s', () => {
+    /*
+     * `host.docker.internal` is injected by the container RUNTIME, not resolved by DNS, and runtimes do
+     * not agree: Podman uses `host.containers.internal`, verified unreachable from a Docker container on
+     * the deployment that prompted this. Offering only the Docker name silently excludes Podman users.
+     */
+    const urls = callbackCandidates({ port: 8009, interfaces }).map((c) => c.url);
+    expect(urls).toContain('http://host.docker.internal:8009');
+    expect(urls).toContain('http://host.containers.internal:8009');
+  });
+
+  test('the Docker name says it is absent on Linux Docker Engine', () => {
+    // The first version claimed "Docker or Colima reaches its host by this name", which is wrong exactly
+    // where it matters most: Linux Docker Engine is the commonest production shape and does not provide it.
+    const docker = callbackCandidates({ port: 8009, interfaces })
+      .find((c) => c.url.includes('host.docker.internal'));
+    expect(docker.confidence).toMatch(/Linux/);
+    expect(docker.confidence).toMatch(/add-host/);
+  });
+
   test('the container name comes first and loopback comes last', () => {
     /*
      * Ordered by how often each is right, not alphabetically. The operator picking from this list is being

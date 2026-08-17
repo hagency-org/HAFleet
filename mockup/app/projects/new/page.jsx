@@ -61,6 +61,7 @@ export default function NewProjectSide() {
   const [draftUrl, setDraftUrl] = useState('');
   const [probing, setProbing] = useState(false);
   const [callback, setCallback] = useState('');
+  const [cbCheck, setCbCheck] = useState(null);
   const [issued, setIssued] = useState(null);
   const [verdict, setVerdict] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -135,12 +136,31 @@ export default function NewProjectSide() {
     setBusy(false);
     if (res.ok === false) return say('fail', `建立失败：${res.error}`);
     say('ok', `已建立客户方 ${server}`);
-    return setStep(2);
+    setStep(2);
+    /*
+     * ASKED, NOT GUESSED, whenever the homeserver is a container this host can see. The alternative is
+     * making the operator certain about container networking — the one thing the failure mode hides.
+     */
+    const check = await send('matrix/callback-check', {
+      method: 'POST',
+      body: { homeserver_url: chosen?.url },
+    });
+    if (check.ok !== false) {
+      setCbCheck(check.body);
+      if (check.body?.recommended) setCallback(check.body.recommended);
+    }
+    return undefined;
   }
 
   async function issueRegistration() {
     setBusy(true);
-    const res = await send(`project-sides/${encodeURIComponent(server)}/registration-file`, {
+    /*
+     * `?replace=true` only when there IS something to replace. The backend refuses a second issue with a
+     * 409 by design — replacing invalidates a registration the homeserver may already have installed and
+     * stops delivery until the new one is in place — so the flag is sent deliberately, never by default.
+     */
+    const replacing = chosen?.hasCredential ? '?replace=true' : '';
+    const res = await send(`project-sides/${encodeURIComponent(server)}/registration-file${replacing}`, {
       method: 'POST',
       body: { url: callback },
     });
@@ -196,7 +216,13 @@ export default function NewProjectSide() {
           )}
           <ul className="steps">
             {servers.map((s) => {
-              const usable = Boolean(s.probe?.reachable) && !s.alreadyASide;
+              /*
+               * A SIDE THAT EXISTS IS NOT A SIDE THAT IS FINISHED, and treating them the same created a
+               * dead end the operator hit: they created `palpo2.test`, did not reach the credential step,
+               * came back, and found it greyed out as "already a side" — unable to finish it or restart.
+               * Only a working credential is a reason to stop; everything else still needs this flow.
+               */
+              const usable = Boolean(s.probe?.reachable);
               return (
                 <li key={s.serverName ?? s.url}>
                   <input
@@ -211,7 +237,12 @@ export default function NewProjectSide() {
                     <span className={s.probe?.reachable ? 'pill ok-text' : 'pill warn-text'}>
                       {s.probe?.reachable ? `可达 · ${(s.probe.versions ?? []).join(' ')}` : '不可达'}
                     </span>
-                    {s.alreadyASide && <span className="pill dim"> 已经是客户方</span>}
+                    {s.alreadyASide && !s.hasCredential && (
+                      <span className="pill warn-text"> 已建立但没有凭据，可以接着做</span>
+                    )}
+                    {s.alreadyASide && s.hasCredential && (
+                      <span className="pill dim"> 已完成（再来一次会换掉现有凭据）</span>
+                    )}
                     <div className="why-inline">
                       {s.url ?? '没有可探测的地址'} — {s.source}
                       {!s.probe?.reachable && s.probe?.reason ? `；${s.probe.reason}` : ''}
@@ -263,7 +294,30 @@ export default function NewProjectSide() {
           </div>
 
           <div className="btn-row">
-            <button type="button" className="btn" disabled={!server} onClick={() => setStep(1)}>下一步</button>
+            <button
+              type="button"
+              className="btn"
+              disabled={!server}
+              onClick={async () => {
+                /*
+                 * SKIP THE CREATE STEP for a side that already exists — posting it again would 409, and
+                 * showing a form whose only outcome is an error is worse than not showing it.
+                 */
+                if (!chosen?.alreadyASide) return setStep(1);
+                setStep(2);
+                const check = await send('matrix/callback-check', {
+                  method: 'POST',
+                  body: { homeserver_url: chosen?.url },
+                });
+                if (check.ok !== false) {
+                  setCbCheck(check.body);
+                  if (check.body?.recommended) setCallback(check.body.recommended);
+                }
+                return undefined;
+              }}
+            >
+              {chosen?.alreadyASide ? '接着做（已建立，直接去生成凭据）' : '下一步'}
+            </button>
           </div>
         </section>
       )}
@@ -312,13 +366,33 @@ export default function NewProjectSide() {
                 <input type="radio" name="cb" checked={callback === c.url} onChange={() => setCallback(c.url)} />
                 <div>
                   <span className="mono-s">{c.url}</span>
+                  {cbCheck?.results?.find((r) => r.url === c.url)?.reachableFromHomeserver && (
+                    <span className="pill ok-text"> homeserver 里实测可达</span>
+                  )}
+                  {cbCheck?.applicable
+                    && cbCheck.results?.find((r) => r.url === c.url)?.reachableFromHomeserver === false && (
+                    <span className="pill warn-text"> 里面打不通</span>
+                  )}
                   <div className="why-inline">{c.why}</div>
                   <div className="why-inline">{c.confidence}</div>
                 </div>
               </li>
             ))}
           </ul>
-          {appservice?.proof && <p className="dim">{appservice.proof}</p>}
+          {cbCheck?.applicable && (
+            <div className="notice">
+              <span className={cbCheck.recommended ? 'pill ok-text' : 'pill warn-text'}>
+                {cbCheck.recommended ? '已从你的 homeserver 里面验证' : '容器里一个都打不通'}
+              </span>{' '}
+              {cbCheck.reason}
+              <p className="why-inline">{cbCheck.checkedFrom}</p>
+            </div>
+          )}
+          {cbCheck && !cbCheck.applicable && (
+            <p className="dim">无法从 homeserver 那一侧验证：{cbCheck.reason}</p>
+          )}
+          {/* Only claim nothing is verified when nothing was. */}
+          {!cbCheck?.recommended && appservice?.proof && <p className="dim">{appservice.proof}</p>}
           <div className="btn-row">
             <button type="button" className="btn" onClick={() => setStep(1)}>返回</button>
             <button type="button" className="btn" disabled={!callback || busy} onClick={issueRegistration}>

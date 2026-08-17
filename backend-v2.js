@@ -1,5 +1,7 @@
 import express from 'express';
-import { describeMatrixReach, discoverBaseUrl, originFor, probeHomeserver } from './lib/matrix-candidates.js';
+import {
+  describeMatrixReach, discoverBaseUrl, originFor, probeHomeserver, verifyCallbackFromHomeserver,
+} from './lib/matrix-candidates.js';
 import { buildReplyHint } from './lib/reply-hint.js';
 import { meterFleet } from './lib/metering/reader.js';
 import { meteringSupport, CEILING_KINDS } from './lib/metering/parsers.js';
@@ -8876,6 +8878,29 @@ app.get('/api/project-sides/:id/budget', requireBearer, (req, res) => {
  * What comes back is a verdict, never the body: only whether it answered as a Matrix homeserver and which
  * versions it claims. A tool that echoed the response would turn this into a general-purpose fetcher.
  */
+/**
+ * Which callback address does the homeserver ACTUALLY reach us at — asked from inside it, when possible.
+ *
+ * The step this serves was a question the operator could not be expected to answer — 「这是什么，填什么」 —
+ * about the one field whose wrong value produces a setup that looks installed and stays silent forever.
+ * For a homeserver running as a container on this host, the system can simply ask from in there instead.
+ *
+ * The homeserver is identified by ITS OWN URL and the candidates are regenerated server-side; nothing
+ * about which container to enter or which address to fetch comes from the request body. Accepting either
+ * would turn this into "run curl to a URL of my choosing inside a container of my choosing".
+ */
+app.post('/api/matrix/callback-check', requireBearer, async (req, res) => {
+  const homeserverUrl = typeof req.body?.homeserver_url === 'string' ? req.body.homeserver_url.trim() : '';
+  const rawPort = String(process.env.HAFLEET_APPSERVICE_PORT ?? '').trim();
+  const port = /^\d+$/.test(rawPort) ? Number(rawPort) : null;
+  try {
+    const result = await verifyCallbackFromHomeserver({ homeserverUrl, port, execFileImpl: execFile });
+    return res.json(result);
+  } catch (error) {
+    return res.status(500).json({ applicable: false, reason: `check failed: ${error?.message || error}` });
+  }
+});
+
 app.post('/api/matrix/probe', requireBearer, async (req, res) => {
   const serverName = typeof req.body?.server_name === 'string' ? req.body.server_name.trim() : '';
   const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
@@ -9236,13 +9261,26 @@ app.post('/api/project-sides/:id/registration-file', requireBearer, (req, res) =
        */
       asTokenFingerprint: createHash('sha256').update(registration.as_token).digest('hex').slice(0, 8),
       hsTokenFingerprint: createHash('sha256').update(registration.hs_token).digest('hex').slice(0, 8),
+      /*
+       * NAMED, NOT DETECTED. `/_matrix/federation/v1/version` would identify the software, and neither
+       * Palpo instance on the host that walked this answers it — so a step that claimed to know which
+       * homeserver you run would be guessing. Both keys are given instead, and the trap is stated as one
+       * that was verified rather than as general advice.
+       */
       nextSteps: [
-        'Copy this file onto the homeserver and reference it from the homeserver config as a TOP-LEVEL key '
-        + '— nested under another section it is silently ignored.',
-        'Restart the homeserver once. Homeservers that persist registrations by id (Palpo does) will not '
-        + 'pick up a replaced file without the stored row being removed.',
-        'The representative above arrives with users_default power. A default Matrix room needs power 50 '
-        + 'to invite, so grant it or invite each agent yourself.',
+        'Put this file where your homeserver reads appservice registrations. The key differs by software: '
+        + 'Synapse takes `app_service_config_files` (a list of FILES); Palpo takes '
+        + '`appservice_registration_dir` (a DIRECTORY, so the file goes inside it).',
+        'In a TOML config the key must be TOP-LEVEL, above every [section]. Verified on Palpo: placed '
+        + 'after a section header it becomes `<that section>.appservice_registration_dir` and is silently '
+        + 'ignored — everything then fails as though the token were wrong.',
+        'Restart the homeserver once. Registrations load at startup only, so nothing happens until it '
+        + 'does.',
+        'Replacing tokens later needs more than replacing this file: Palpo persists registrations in its '
+        + 'database keyed by id, and a restart will not update an existing row.',
+        'The representative above arrives with users_default power. A default Matrix room requires power '
+        + '50 to invite, so either grant it that or invite each agent yourself — the approval response '
+        + 'names which agent it assigned.',
       ],
     });
   } catch (error) {
