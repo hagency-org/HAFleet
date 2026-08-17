@@ -247,3 +247,95 @@ describe('resolving the target from the fleet', () => {
     expect(result.out).toMatch(/could not reach the backend/);
   });
 });
+
+describe('Codex, whose hooks live somewhere else entirely', () => {
+  /*
+   * `$CODEX_HOME/hooks.json` is per USER — one file shared by every Codex session on the host, including
+   * the operator's own. That made this worth its own tests: the file on the machine that prompted them
+   * already had another tool's hooks in it, and the shape Codex expects differs from Claude Code's.
+   *
+   * The agent that made this necessary is `type=codex`, so the Claude-only installer did nothing for the
+   * one agent it was going to be demonstrated on.
+   */
+  function makeCodexHome(hooks) {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-codex-'));
+    temps.push(dir);
+    if (hooks !== undefined) writeFileSync(path.join(dir, 'hooks.json'), JSON.stringify(hooks, null, 2));
+    return dir;
+  }
+  const hooksAt = (dir) => JSON.parse(readFileSync(path.join(dir, 'hooks.json'), 'utf8')).hooks;
+
+  test('another tool\'s hooks survive, including on the event we touch', () => {
+    // The real shape from the host that prompted this: a `cargo-agents` command on PostToolUse.
+    const dir = makeCodexHome({
+      hooks: {
+        PostToolUse: [{ matcher: '', hooks: [{ type: 'command', command: 'cargo-agents hook codex post-tool-use', timeout: 10 }] }],
+        SessionStart: [{ matcher: '', hooks: [{ type: 'command', command: 'cargo-agents hook codex session-start', timeout: 10 }] }],
+      },
+    });
+    const result = run('--framework', 'codex', { CODEX_HOME: dir });
+    expect(result.code).toBe(0);
+    const after = hooksAt(dir);
+    const commands = (after.PostToolUse || []).flatMap((e) => (e.hooks || []).map((h) => h.command));
+    expect(commands).toContain('cargo-agents hook codex post-tool-use');
+    expect(commands.some((c) => c.includes('hafleet-progress'))).toBe(true);
+    expect((after.SessionStart || []).length).toBe(1);
+  });
+
+  test('it writes the shape Codex expects, not Claude Code\'s', () => {
+    // `matcher` and a bounded `timeout`. The bound matters more here than for a per-project hook: this
+    // one runs in the operator's own sessions too.
+    const dir = makeCodexHome({ hooks: {} });
+    run('--framework', 'codex', { CODEX_HOME: dir });
+    const entry = hooksAt(dir).PostToolUse.find((e) => (e.hooks || [])
+      .some((h) => h.command.includes('hafleet-progress')));
+    expect(entry.matcher).toBe('');
+    expect(entry.hooks[0].timeout).toBe(10);
+  });
+
+  test('it does NOT write Stop, which Codex never fires', () => {
+    /*
+     * Codex's events are PreToolUse, PostToolUse, SessionStart and UserPromptSubmit. Writing `Stop`
+     * would install a hook no version will ever run — installed-looking and silent, the same class of
+     * failure this feature keeps tripping over.
+     */
+    const dir = makeCodexHome({ hooks: {} });
+    run('--framework', 'codex', { CODEX_HOME: dir });
+    expect(hooksAt(dir).Stop).toBeUndefined();
+  });
+
+  test('it says the trust step remains and does not claim to have done it', () => {
+    /*
+     * Codex refuses a hook whose config it has not been told to trust, and the hash is computed BY CODEX.
+     * An installer that invented one, or reached for --dangerously-bypass-hook-trust, would defeat a gate
+     * whose whole purpose is a human reading the command first.
+     */
+    const dir = makeCodexHome({ hooks: {} });
+    const out = run('--framework', 'codex', { CODEX_HOME: dir }).out;
+    expect(out).toMatch(/ONE STEP REMAINS/);
+    expect(out).toMatch(/trust/i);
+    // The FLAG, not the word: the output explains why bypassing is wrong, so matching on "bypass" alone
+    // failed on the explanation. What must never appear is the switch that actually defeats the gate.
+    expect(out).not.toMatch(/--dangerously-bypass-hook-trust/);
+  });
+
+  test('it warns that the file is shared by every Codex session', () => {
+    // The operator would otherwise find this out from their own shell.
+    const dir = makeCodexHome({ hooks: {} });
+    expect(run('--framework', 'codex', { CODEX_HOME: dir }).out).toMatch(/per-user, not per-agent/);
+  });
+
+  test('a missing Codex home is refused rather than created', () => {
+    // Creating one would put a config where Codex has never run, and the operator would be told they are
+    // set up when nothing reads that directory.
+    const result = run('--framework', 'codex', { CODEX_HOME: path.join(os.tmpdir(), 'hafleet-no-codex-here') });
+    expect(result.code).toBe(1);
+    expect(result.out).toMatch(/no Codex home/);
+  });
+
+  test('Codex needs no agent home, and asking for one would be theatre', () => {
+    // The file it writes is not in the agent's tree, so a directory check would guard nothing.
+    const dir = makeCodexHome({ hooks: {} });
+    expect(run('--framework', 'codex', { CODEX_HOME: dir }).code).toBe(0);
+  });
+});

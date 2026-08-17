@@ -61,6 +61,22 @@ export default function NewProjectSide() {
   const [draftUrl, setDraftUrl] = useState('');
   const [probing, setProbing] = useState(false);
   const [callback, setCallback] = useState('');
+  /*
+   * WHICH CREDENTIAL, and this choice was missing — which made the whole flow wrong for the commonest
+   * deployment. The operator said it plainly: 「我的 agent 都在内网，而且接入 matrix 服务器本身不需要公网
+   * 地址，你这个设计是错的」.
+   *
+   * They are right. An APPSERVICE is inbound: the homeserver PUSHES transactions to HAFleet, so HAFleet
+   * must be reachable from it — which for an internal network means exposing it. A REGISTRATION TOKEN is
+   * outbound only: HAFleet registers accounts and talks to the homeserver over the client-server API with
+   * `/sync`, exactly as a phone does, and needs no inbound reachability at all.
+   *
+   * So the outbound one is the default. The previous version offered only the appservice path and then
+   * asked which address the homeserver could reach us at — a question that only exists because of a
+   * choice the operator was never shown.
+   */
+  const [credKind, setCredKind] = useState('registrationToken');
+  const [regToken, setRegToken] = useState('');
   const [cbCheck, setCbCheck] = useState(null);
   const [issued, setIssued] = useState(null);
   const [verdict, setVerdict] = useState(null);
@@ -167,6 +183,37 @@ export default function NewProjectSide() {
     setBusy(false);
     if (res.ok === false) return say('fail', `生成失败：${res.error}`);
     setIssued(res.body);
+    return setStep(3);
+  }
+
+  async function saveRegistrationToken() {
+    if (!regToken.trim()) return say('fail', '把客户方给你的注册令牌填进来');
+    setBusy(true);
+    const res = await send(`project-sides/${encodeURIComponent(server)}/credential`, {
+      method: 'PUT',
+      body: { credential: { kind: 'registrationToken', registrationToken: regToken.trim() } },
+    });
+    setBusy(false);
+    if (res.ok === false) return say('fail', `保存失败：${res.error}`);
+    /*
+     * The token is dropped from this component the moment it is accepted. It is write-only at the API too
+     * — no endpoint hands a credential back — and keeping a copy in a live React state for the rest of
+     * the session would be the one place it lingered.
+     */
+    setRegToken('');
+    setIssued({
+      registrationToken: true,
+      representative: `@hafleet:${server}`,
+      nextSteps: [
+        'Nothing to install on the homeserver, and nothing to restart: HAFleet registers the '
+        + 'representative and one account per agent over the client-server API.',
+        'No inbound reachability is needed. HAFleet talks OUT to your homeserver, so this works with '
+        + 'HAFleet behind NAT or on an internal network.',
+        'The representative arrives in your rooms with users_default power. A default Matrix room needs '
+        + 'power 50 to invite, so grant it that or invite each agent yourself.',
+      ],
+    });
+    say('ok', '凭据已保存');
     return setStep(3);
   }
 
@@ -347,7 +394,81 @@ export default function NewProjectSide() {
 
       {step === 2 && (
         <section className="card">
-          <h3 className="sub">3. 生成接单员凭据</h3>
+          <h3 className="sub">3. 接单员凭据</h3>
+          {/*
+            * THE CHOICE THAT WAS MISSING, and stated in the terms that decide it: which direction the
+            * connection goes. Everything else about these two options is secondary to that.
+            */}
+          <ul className="steps">
+            <li>
+              <input
+                type="radio"
+                name="ck"
+                checked={credKind === 'registrationToken'}
+                onChange={() => setCredKind('registrationToken')}
+              />
+              <div>
+                <strong>注册令牌</strong> <span className="pill ok-text">不需要公网地址</span>
+                <div className="why-inline">
+                  纯出站：HAFleet 主动连你的 homeserver，用客户端 API 和 <span className="mono-s">/sync</span>，
+                  和手机上的 Matrix 客户端一样。HAFleet 在内网、NAT 后面都能用。
+                </div>
+                <div className="why-inline">
+                  代价：HAFleet 会为接单员和每个 agent 各注册一个账号——账号更多，但不用你装任何东西、不用重启。
+                </div>
+              </div>
+            </li>
+            <li>
+              <input
+                type="radio"
+                name="ck"
+                checked={credKind === 'appservice'}
+                onChange={() => setCredKind('appservice')}
+              />
+              <div>
+                <strong>Appservice</strong> <span className="pill warn-text">需要你的 homeserver 能反向找到 HAFleet</span>
+                <div className="why-inline">
+                  入站：homeserver 把事件<strong>推</strong>给 HAFleet，所以 HAFleet 必须从它那一侧可达。
+                  两边在同一台机器或同一内网时合适；HAFleet 在内网而 homeserver 在外面时，这条要求你把 HAFleet 暴露出去。
+                </div>
+                <div className="why-inline">
+                  好处：一份凭据覆盖 <span className="mono-s">@ac_*</span> 整个命名空间，agent 无需逐个注册账号。
+                </div>
+              </div>
+            </li>
+          </ul>
+
+          {credKind === 'registrationToken' && (
+            <>
+              <p className="dim">
+                把客户方给你的注册令牌填进来。接单员 <span className="mono-s">@hafleet:{server}</span> 会用它注册，
+                之后每个 agent 也用它领自己的账号。
+              </p>
+              <div className="field-row">
+                <label htmlFor="reg-token">注册令牌</label>
+                <input
+                  id="reg-token"
+                  className="inp"
+                  type="password"
+                  value={regToken}
+                  onChange={(e) => setRegToken(e.target.value)}
+                  placeholder="客户方 homeserver 的 registration token"
+                />
+              </div>
+              <p className="why-inline">
+                只写不读：保存之后没有任何接口能把它取回来，这个页面也会立刻丢掉它。
+              </p>
+              <div className="btn-row">
+                <button type="button" className="btn" onClick={() => setStep(1)}>返回</button>
+                <button type="button" className="btn" disabled={busy} onClick={saveRegistrationToken}>
+                  {busy ? '保存中…' : '保存凭据'}
+                </button>
+              </div>
+            </>
+          )}
+
+          {credKind === 'appservice' && (
+            <>
           <p className="dim">
             接单员不用你手工注册账号——它就是 appservice 的 <span className="mono-s">sender_localpart</span>，
             装上注册文件后 <span className="mono-s">@hafleet:{server}</span> 自动成为代表，
@@ -399,6 +520,8 @@ export default function NewProjectSide() {
               {busy ? '生成中…' : '生成'}
             </button>
           </div>
+            </>
+          )}
         </section>
       )}
 
@@ -409,18 +532,35 @@ export default function NewProjectSide() {
             * A PATH AND FINGERPRINTS, never the tokens. This page is never told them, so it cannot show
             * them, and no later "just display it once" can leak them from here.
             */}
-          <p className="dim">注册文件已写到 HAFleet 主机上，权限 {issued.mode}：</p>
-          <p className="mono-s">{issued.path}</p>
-          <dl className="kv">
-            <dt>接单员</dt><dd className="mono-s">{issued.representative}</dd>
-            <dt>命名空间</dt><dd className="mono-s">{issued.namespace}</dd>
-            <dt>回拨地址</dt><dd className="mono-s">{issued.url}</dd>
-            <dt>as_token 指纹</dt><dd className="mono-s">{issued.asTokenFingerprint}</dd>
-            <dt>hs_token 指纹</dt><dd className="mono-s">{issued.hsTokenFingerprint}</dd>
-          </dl>
-          <p className="dim">
-            指纹是四个字节，只够确认「你装的就是这一份」，不足以用来认证。令牌本身不经过浏览器。
-          </p>
+          {/*
+            * TWO SHAPES, because the two credential kinds produce different artefacts. The token path
+            * writes no file and has nothing to install, and rendering the appservice fields for it showed
+            * "权限 undefined" — a form claiming to have done something it had not.
+            */}
+          {issued.registrationToken ? (
+            <>
+              <p className="dim">凭据已保存。没有文件要装，homeserver 也不用重启。</p>
+              <dl className="kv">
+                <dt>接单员</dt><dd className="mono-s">{issued.representative}</dd>
+                <dt>方式</dt><dd>注册令牌（纯出站）</dd>
+              </dl>
+            </>
+          ) : (
+            <>
+              <p className="dim">注册文件已写到 HAFleet 主机上，权限 {issued.mode}：</p>
+              <p className="mono-s">{issued.path}</p>
+              <dl className="kv">
+                <dt>接单员</dt><dd className="mono-s">{issued.representative}</dd>
+                <dt>命名空间</dt><dd className="mono-s">{issued.namespace}</dd>
+                <dt>回拨地址</dt><dd className="mono-s">{issued.url}</dd>
+                <dt>as_token 指纹</dt><dd className="mono-s">{issued.asTokenFingerprint}</dd>
+                <dt>hs_token 指纹</dt><dd className="mono-s">{issued.hsTokenFingerprint}</dd>
+              </dl>
+              <p className="dim">
+                指纹是四个字节，只够确认「你装的就是这一份」，不足以用来认证。令牌本身不经过浏览器。
+              </p>
+            </>
+          )}
           <ul className="steps">
             {(issued.nextSteps ?? []).map((s, i) => (
               <li key={s}><span className="stg">{i + 1}</span><div>{s}</div></li>
