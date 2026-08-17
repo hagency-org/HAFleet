@@ -544,6 +544,24 @@
           "auth": "bearer"
         },
         {
+          "method": "POST",
+          "path": "/api/project-sides/:id/registration-file",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/matrix/probe",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
+          "method": "POST",
+          "path": "/api/matrix/callback-check",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
           "method": "PUT",
           "path": "/api/project-sides/:id/allocation",
           "owner": "operator.project-side-admin",
