@@ -196,6 +196,7 @@ belongs here once it has failed in a whole-suite run and passed in isolation imm
 | 2026-08-16 | `router-launch-recovery` | `backend requeues a wrapper that dies before takePayload without losing its input` | **yes** — `launch_failures: 1` where 2 was expected, so a poll loop gave up rather than an assertion being wrong. **On GitHub Actions**, 8/8 clean locally in isolation, and the sibling PR on the same master base passed the same job |
 | 2026-08-16 | `api-engagement-room-admission` | `an engagement on no configured side is skipped without a call` | **yes** — 3/3 in isolation and the very next whole-suite run of the same tree was 203/203. **A new file for this table, and the measurement predicted it**: 283ms per test, against 227ms median in the named set and 11ms outside it. The class is "files that wait on real time", and this is one |
 | 2026-08-16 | `api-engagement-side-budget` + `api-runtime` | one test each | **yes** — 21/21 and 24/24 in isolation, and the very next whole-suite run of the same tree was 204/204. **Predicted again**: 237ms and 327ms per test. `api-runtime` was already on this table; the other is new and fits the measured profile exactly |
+| 2026-08-17 | three consecutive whole-suite runs, a DIFFERENT file each time (`api-project-sides`, then two others, then `api-engagement-side-budget`) | one test each | **yes** — 71/71 in isolation, and the failing file changed on every run, which is the clearest single demonstration of this class so far. The last one measured **1656ms per test**, far above the 227ms median of the named set |
 
 **A HYPOTHESIS THIS KILLS: LOCAL RESOURCE PRESSURE.** The 2026-08-14 four-file row notes "seven
 long-lived processes were up", and the working theory since has been that this host's own fleet —
@@ -275,6 +276,30 @@ Both of the 2026-08-16 diagnoses came out of the JSON artifact rather than the l
 appears in the raw log only as 29 `FAIL` lines with the module error buried thousands of lines away
 among passing-test chatter; in the artifact it is one field on the first failed file. That is what the
 instrumentation was for, and it has now paid for itself twice on the day it was added.
+
+**A CLASS OF DEFECT NO TEST IN THIS REPO WAS LOOKING FOR: A WRITE THAT REPORTS SUCCESS AND APPLIES
+NOTHING.** An end-to-end walkthrough on a clean fleet found three in one afternoon, and all three answered
+`ok: true`:
+
+| write | sent | what happened |
+|---|---|---|
+| `PATCH /api/agents/:name` | `projectSide` | not in the destructuring; dropped |
+| `PUT .../allocation` | `allocation` | real field is `allocatedTokens`; dropped |
+| `PUT /api/framework-presets/:id` | `ceiling: 500000` | real shape is `{tokens, period}`; dropped |
+
+Each was discoverable only by reading the record back afterwards. In a human session that is minutes of
+confusion; in automation it is a silent wrong state that surfaces much later as something else — the
+`allocation` one surfaced as an engagement refused for `no_allocation` against a side the operator had just
+funded.
+
+Two of the three were spelling; one was a genuine authorisation boundary that had been expressed by
+omission rather than by refusal. The fix for that one is now a 400 that names the route which works, which
+is the general shape: **a field a route will not honour should be refused, not ignored.** Silence about an
+unknown field is indistinguishable from success.
+
+Worth noting what did NOT find these: 3300 passing tests, every checker, and CI. They test what the routes
+do with input they accept. Nothing asserted that input they do not accept is rejected, because until it is
+written down that is not a behaviour — it is an absence.
 
 **A SIGHTING THAT WAS CHECKED FOR AUTHORSHIP BEFORE BEING CALLED A FLAKE.** The `api-agents` row above
 failed once inside a whole-suite run and once more in isolation, which is unusual — this class is
