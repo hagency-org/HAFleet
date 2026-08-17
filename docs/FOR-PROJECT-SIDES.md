@@ -62,6 +62,47 @@ Whichever you choose, the credential is **write-only** from HAFleet's console: i
 replaced, and no endpoint will ever hand it back. To check whether it works you read a verdict
 (`accessState`), never the token.
 
+### If HAFleet is not reachable from your homeserver — run the doorway instead
+
+An appservice is INBOUND: your homeserver pushes transactions to the `url` above, so HAFleet has to be
+reachable from your server. When it is not — a fleet on a laptop, on an internal network, behind NAT —
+there are two ways out, and neither needs anything exposed.
+
+**A registration token instead** (see the alternative below). Purely outbound: HAFleet connects to you.
+Nothing to install, nothing to restart.
+
+**Or co-locate the appservice.** You run one small HAFleet process beside your homeserver:
+
+```bash
+node bin/hafleet-appservice-edge \
+  --registration /path/to/the-registration.yaml \
+  --link-token "<a secret you and HAFleet share>" \
+  --port 8095
+```
+
+and the registration's `url` points at THAT, on your own machine. HAFleet then dials it to collect. Your
+homeserver never leaves your host, and HAFleet never accepts a connection.
+
+`--check` reports whether your homeserver has ever called and whether HAFleet has ever collected, which
+are different problems with different owners.
+
+**"Co-located" means the same network namespace, not the same computer.** A containerised homeserver's
+`127.0.0.1` is the container, not the host — so a doorway running on the host needs the address the
+container uses for it (`host.docker.internal` under Docker Desktop or Colima). A walkthrough of this page
+got that wrong on the first attempt and saw exactly the documented silence; `--check` said "the homeserver
+has never called", which is what it is for.
+
+**What that process is and is not.** It holds no fleet credential, stores nothing, and makes no decision —
+which agent, which room, whether to answer at all stays in HAFleet. It authenticates your homeserver with
+the `hs_token` from the registration already on your disk, and authenticates HAFleet with a separate link
+token. Two secrets, because anyone who can read the registration can read the first one, and draining the
+queue is reading your rooms' traffic.
+
+**It answers your homeserver only after HAFleet has processed the events.** Matrix retries on anything but
+a 2xx, so acknowledging on receipt would tell your server "handled" about events still in flight. Nothing
+is queued or persisted anywhere: unacknowledged work is work your homeserver has not been told about, and
+it sends it again.
+
 ## 2. Keep the intake room unencrypted
 
 The room where you talk to HAFleet — where you ask for work — must not be encrypted.
