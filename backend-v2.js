@@ -1,4 +1,7 @@
 import express from 'express';
+import {
+  describeMatrixReach, discoverBaseUrl, originFor, probeHomeserver, verifyCallbackFromHomeserver,
+} from './lib/matrix-candidates.js';
 import { buildReplyHint } from './lib/reply-hint.js';
 import { meterFleet } from './lib/metering/reader.js';
 import { meteringSupport, CEILING_KINDS } from './lib/metering/parsers.js';
@@ -8847,6 +8850,99 @@ app.get('/api/project-sides/:id/budget', requireBearer, (req, res) => {
  *     has not been registered yet has nothing to act with, and returning it would make the bridge
  *     attempt sends that cannot succeed.
  */
+/**
+ * What can this deployment reach, and where can it be reached — the read behind an "add a project side"
+ * form, so that flow stops being a shell recipe with a guessed callback URL.
+ *
+ * `requireBearer` because it names this host's network interfaces and its own homeserver configuration.
+ * Neither is a secret in the token sense, and both describe the operator's infrastructure to anyone who
+ * asks — which is exactly the sort of thing that should not be readable without the operator credential.
+ *
+ * IT PROBES ON EVERY CALL rather than caching. A cached "reachable" is the one answer that matters least:
+ * an operator opens this form BECAUSE something is being set up or has broken, and a stale yes sends them
+ * to debug a registration when the homeserver is simply down.
+ */
+/**
+ * Probe a homeserver the operator names, because discovery alone is circular.
+ *
+ * `GET /api/matrix/reach` lists what this deployment already knows about — its own homeserver and sides
+ * already recorded. A NEW customer is by definition in neither, so a form built only on that list can
+ * never add the first one. The operator asked exactly this: 「为何不能加 chinasoft 客户端」.
+ *
+ * IT IS AN OPERATOR CAPABILITY AND IS GATED AS ONE. This makes the server fetch a URL chosen by the
+ * caller, which is the shape of an SSRF — so it is behind `requireBearer`, the same credential that can
+ * already create sides and read every budget. An operator holding that token can curl anything this host
+ * can reach; this adds convenience for them, not reach for anyone else. It is deliberately NOT exposed to
+ * any weaker credential, and the console proxy admits it under the same operator-only path as the rest.
+ *
+ * What comes back is a verdict, never the body: only whether it answered as a Matrix homeserver and which
+ * versions it claims. A tool that echoed the response would turn this into a general-purpose fetcher.
+ */
+/**
+ * Which callback address does the homeserver ACTUALLY reach us at — asked from inside it, when possible.
+ *
+ * The step this serves was a question the operator could not be expected to answer — 「这是什么，填什么」 —
+ * about the one field whose wrong value produces a setup that looks installed and stays silent forever.
+ * For a homeserver running as a container on this host, the system can simply ask from in there instead.
+ *
+ * The homeserver is identified by ITS OWN URL and the candidates are regenerated server-side; nothing
+ * about which container to enter or which address to fetch comes from the request body. Accepting either
+ * would turn this into "run curl to a URL of my choosing inside a container of my choosing".
+ */
+app.post('/api/matrix/callback-check', requireBearer, async (req, res) => {
+  const homeserverUrl = typeof req.body?.homeserver_url === 'string' ? req.body.homeserver_url.trim() : '';
+  const rawPort = String(process.env.HAFLEET_APPSERVICE_PORT ?? '').trim();
+  const port = /^\d+$/.test(rawPort) ? Number(rawPort) : null;
+  try {
+    const result = await verifyCallbackFromHomeserver({ homeserverUrl, port, execFileImpl: execFile });
+    return res.json(result);
+  } catch (error) {
+    return res.status(500).json({ applicable: false, reason: `check failed: ${error?.message || error}` });
+  }
+});
+
+app.post('/api/matrix/probe', requireBearer, async (req, res) => {
+  const serverName = typeof req.body?.server_name === 'string' ? req.body.server_name.trim() : '';
+  const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+  if (!serverName && !url) return res.status(400).json({ error: 'server_name or url is required' });
+
+  /*
+   * THE NAME IS ENOUGH, and demanding an address as well was the mistake: 「服务器地址你应该知道」. Matrix
+   * specifies how a name becomes an address, so the caller supplies the name and this does the lookup —
+   * the same thing every Matrix client does on every login.
+   *
+   * An EXPLICIT url still wins when given. Well-known is not always configured, especially on a private
+   * or port-bearing deployment, and an override that the discovery result could quietly replace would be
+   * an override in name only.
+   */
+  let origin = originFor(url);
+  let via = origin ? 'you gave the address explicitly' : null;
+  if (!origin) {
+    const discovered = await discoverBaseUrl(serverName || url);
+    origin = discovered.url;
+    via = discovered.via;
+  }
+  if (!origin) {
+    return res.status(400).json({ error: 'could not turn that into an address', code: 'not_an_origin', via });
+  }
+  try {
+    const probe = await probeHomeserver(origin);
+    return res.json({ origin, via, probe });
+  } catch (error) {
+    return res.status(500).json({ error: `probe failed: ${error?.message || error}` });
+  }
+});
+
+app.get('/api/matrix/reach', requireBearer, async (req, res) => {
+  try {
+    const sides = projectSideStore.listSides({ activeOnly: false });
+    const reach = await describeMatrixReach({ env: process.env, sides });
+    res.json(reach);
+  } catch (error) {
+    res.status(500).json({ error: `could not describe Matrix reachability: ${error?.message || error}` });
+  }
+});
+
 app.get('/api/project-sides/acting-credentials', requireApprovalBridgeSecret, (req, res) => {
   try {
     const sides = projectSideStore.listSides({ activeOnly: true }).map((side) => {
@@ -9070,6 +9166,128 @@ app.post('/api/project-sides/:id/verify', requireBearer, async (req, res) => {
  * registration a homeserver has already loaded stop working the moment new ones are stored, and that
  * takes the project side down until they install the new file and restart.
  */
+/**
+ * The same registration, DELIVERED AS A FILE, so a setup flow can be a UI without a namespace-wide
+ * credential passing through a browser.
+ *
+ * WHY A SECOND ENDPOINT RATHER THAN A FLAG. The console proxy's allowlist matches method and path, not
+ * request bodies, so a `deliver: "file"` option on the endpoint below could not be admitted without also
+ * admitting the form that returns tokens. A separate path is the only shape the allowlist can tell apart —
+ * and the proxy's refusal to forward the token-returning one is a decision its own comment marks as
+ * deliberate, not an oversight to route around.
+ *
+ * WHAT THE CALLER GETS: a path, a fingerprint, and the facts needed to finish the install. What it never
+ * gets is `as_token` or `hs_token`. That keeps the operator's browser — its memory, its devtools, its
+ * history, its extensions — out of the only moment those two values are readable, while still letting the
+ * flow be driven by clicking rather than by pasting curl commands whose traps are documented in
+ * `docs/FOR-PROJECT-SIDES.md`.
+ *
+ * THE FILE IS 0600 AND UNDER THE RUNTIME DIRECTORY, not the repo. A registration in a working tree is a
+ * registration one `git add -A` away from a public commit; this repo is public.
+ */
+app.post('/api/project-sides/:id/registration-file', requireBearer, (req, res) => {
+  const side = projectSideStore.getSide(req.params.id);
+  if (!side) return res.status(404).json({ error: 'project side not found' });
+  const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+  if (!url) {
+    return res.status(400).json({
+      error: 'url is required: the address this project side\'s homeserver can reach HAFleet at',
+      code: 'bad_request',
+    });
+  }
+  if (side.hasCredential && req.query?.replace !== 'true') {
+    return res.status(409).json({
+      error: 'this project side already has a credential; pass ?replace=true to issue new tokens',
+      code: 'credential_exists',
+      detail: 'replacing invalidates the registration the homeserver may already have installed, '
+        + 'which stops delivery until the new file is installed and the homeserver restarted',
+    });
+  }
+
+  /*
+   * REFUSED WITHOUT A RUNTIME DIRECTORY rather than falling back to the repo or to a temp path. A
+   * credential written somewhere the operator did not choose is a credential nobody will remember to
+   * remove, and `HAFLEET_RUNTIME_DIR` is the one location this deployment has already declared as the
+   * place its secrets live.
+   */
+  const runtimeDir = String(process.env.HAFLEET_RUNTIME_DIR || '').trim();
+  if (!runtimeDir) {
+    return res.status(503).json({
+      error: 'HAFLEET_RUNTIME_DIR is not set, so there is no declared place to write a credential',
+      code: 'no_runtime_dir',
+      detail: 'start the services with the runtime .env sourced, or use the terminal form of this endpoint',
+    });
+  }
+
+  try {
+    const registration = generateRegistration({
+      id: req.body?.registration_id || `hafleet-${side.id}`,
+      url,
+      senderLocalpart: req.body?.sender_localpart || 'hafleet',
+      userNamespaceRegex: req.body?.user_namespace || `@${MATRIX_AGENT_PREFIX_FOR_REGISTRATION}.*`,
+    });
+    const yaml = renderRegistrationYaml(registration);
+
+    const dir = path.join(runtimeDir, 'registrations');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, `${side.id.replace(/[^\w.-]/g, '_')}.yaml`);
+    /*
+     * Written with the mode in the open, not chmod'd after. A file that exists world-readable for even a
+     * moment has already been readable, and this one authorises a namespace on somebody else's server.
+     */
+    writeFileSync(file, yaml, { mode: 0o600 });
+
+    projectSideStore.setCredential(side.id, {
+      kind: 'appservice',
+      asToken: registration.as_token,
+      hsToken: registration.hs_token,
+      namespace: registration.namespaces.users[0].regex,
+      senderLocalpart: registration.sender_localpart,
+    });
+
+    return res.json({
+      ok: true,
+      path: file,
+      mode: '0600',
+      registrationId: registration.id,
+      senderLocalpart: registration.sender_localpart,
+      representative: `@${registration.sender_localpart}:${side.serverName}`,
+      namespace: registration.namespaces.users[0].regex,
+      url,
+      /*
+       * A FINGERPRINT, so the operator can confirm the file they installed is the one this issued without
+       * either of them ever reading a token. Four bytes: enough to say "these differ", useless to
+       * authenticate with.
+       */
+      asTokenFingerprint: createHash('sha256').update(registration.as_token).digest('hex').slice(0, 8),
+      hsTokenFingerprint: createHash('sha256').update(registration.hs_token).digest('hex').slice(0, 8),
+      /*
+       * NAMED, NOT DETECTED. `/_matrix/federation/v1/version` would identify the software, and neither
+       * Palpo instance on the host that walked this answers it — so a step that claimed to know which
+       * homeserver you run would be guessing. Both keys are given instead, and the trap is stated as one
+       * that was verified rather than as general advice.
+       */
+      nextSteps: [
+        'Put this file where your homeserver reads appservice registrations. The key differs by software: '
+        + 'Synapse takes `app_service_config_files` (a list of FILES); Palpo takes '
+        + '`appservice_registration_dir` (a DIRECTORY, so the file goes inside it).',
+        'In a TOML config the key must be TOP-LEVEL, above every [section]. Verified on Palpo: placed '
+        + 'after a section header it becomes `<that section>.appservice_registration_dir` and is silently '
+        + 'ignored — everything then fails as though the token were wrong.',
+        'Restart the homeserver once. Registrations load at startup only, so nothing happens until it '
+        + 'does.',
+        'Replacing tokens later needs more than replacing this file: Palpo persists registrations in its '
+        + 'database keyed by id, and a restart will not update an existing row.',
+        'The representative above arrives with users_default power. A default Matrix room requires power '
+        + '50 to invite, so either grant it that or invite each agent yourself — the approval response '
+        + 'names which agent it assigned.',
+      ],
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `could not issue registration: ${error?.message || error}` });
+  }
+});
+
 app.post('/api/project-sides/:id/registration', requireBearer, (req, res) => {
   const side = projectSideStore.getSide(req.params.id);
   if (!side) return res.status(404).json({ error: 'project side not found' });
