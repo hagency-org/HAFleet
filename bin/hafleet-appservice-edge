@@ -1,0 +1,166 @@
+#!/usr/bin/env node
+/*
+ * The one HAFleet process a project side runs on their own machine, and nothing more than a doorway.
+ *
+ * It exists so that an appservice can be used at all when HAFleet is not reachable from the outside —
+ * a laptop, an internal network, anything behind NAT. The homeserver dials this on loopback; HAFleet
+ * dials this from wherever it is. No inbound connection ever crosses a network boundary.
+ *
+ * WHAT A PROJECT SIDE IS AGREEING TO BY RUNNING IT, stated plainly because asking someone to run your
+ * binary is a bigger request than asking them to install a config file:
+ *
+ *   - It listens on loopback only, unless told otherwise, and says so when told otherwise.
+ *   - It holds NO fleet credential. The two secrets it knows are the `hs_token` from the registration
+ *     that already lives on this machine, and a link token shared with one HAFleet.
+ *   - It stores nothing. No database, no spool, no log of message content. Unacknowledged work is work
+ *     the homeserver has not been told about, and it will send it again.
+ *   - It makes no decision. Which agent, which room, whether to answer at all — all of that stays in
+ *     HAFleet, on the private side.
+ *
+ * `--check` verifies a running one and exits, so "is it working" has an answer that is not a log file.
+ */
+
+import http from 'http';
+import { readFileSync, existsSync } from 'fs';
+import { createAppserviceEdge, fingerprint } from '../lib/appservice-edge.js';
+
+const args = process.argv.slice(2);
+const flag = (name) => {
+  const i = args.indexOf(`--${name}`);
+  return i >= 0 ? args[i + 1] : null;
+};
+const has = (name) => args.includes(`--${name}`);
+
+function usage(message) {
+  if (message) console.error(`hafleet-appservice-edge: ${message}`);
+  console.error(`
+Run the appservice doorway beside a Matrix homeserver.
+
+  --registration FILE   the appservice registration YAML installed on this homeserver.
+                        Its hs_token is read from here so the same file is the single source of truth.
+  --hs-token TOKEN      instead of --registration, if you keep the token elsewhere.
+  --link-token TOKEN    shared secret for the one HAFleet allowed to drain this. Required, and
+                        deliberately NOT the hs_token: draining this queue is reading the room's
+                        traffic, and the hs_token is readable by anyone who can read the registration.
+  --port N              default 8094. Put this in the registration's url as http://127.0.0.1:N
+  --host ADDR           default 127.0.0.1. Anything else is reachable beyond this machine and is
+                        reported loudly, because the whole point is that it does not need to be.
+  --check               ask a running instance for its status and exit.
+`);
+  process.exit(2);
+}
+
+const port = Number(flag('port') || 8094);
+if (!Number.isInteger(port) || port < 1 || port > 65535) usage(`--port ${flag('port')} is not a port`);
+const host = flag('host') || '127.0.0.1';
+const linkToken = (flag('link-token') || process.env.HAFLEET_EDGE_LINK_TOKEN || '').trim();
+
+/*
+ * READ FROM THE REGISTRATION BY DEFAULT, so the token cannot drift. A copy pasted onto a command line is
+ * a copy that stays right until somebody replaces the registration, and then fails in the one way this
+ * whole feature is bad at surfacing: silence.
+ */
+function hsTokenFromRegistration(file) {
+  if (!existsSync(file)) usage(`no registration at ${file}`);
+  const text = readFileSync(file, 'utf8');
+  const match = /^hs_token:\s*"?([^"\n\r]+)"?\s*$/m.exec(text);
+  if (!match) usage(`${file} has no hs_token line`);
+  return match[1].trim();
+}
+
+const registration = flag('registration');
+const hsToken = (flag('hs-token') || (registration ? hsTokenFromRegistration(registration) : '')).trim();
+
+if (has('check')) {
+  if (!linkToken) usage('--check needs --link-token');
+  const res = await fetch(`http://${host}:${port}/_hafleet/edge/status`, {
+    headers: { 'x-hafleet-link': linkToken },
+    signal: AbortSignal.timeout(5000),
+  }).catch((error) => {
+    console.error(`not reachable at ${host}:${port}: ${error?.message || error}`);
+    process.exit(1);
+  });
+  if (!res.ok) {
+    console.error(`status answered HTTP ${res.status}${res.status === 403 ? ' — wrong link token' : ''}`);
+    process.exit(1);
+  }
+  const body = await res.json();
+  console.log(`hafleet-appservice-edge on ${host}:${port}`);
+  console.log(`  transactions from the homeserver: ${body.transactions}`);
+  console.log(`  delivered to HAFleet:             ${body.delivered}`);
+  console.log(`  timed out waiting for HAFleet:    ${body.timedOut}`);
+  console.log(`  rejected (bad hs_token):          ${body.rejected}`);
+  console.log(`  HAFleet currently waiting:        ${body.hafleetWaiting ? 'yes' : 'no'}`);
+  console.log(`  HAFleet last seen:                ${body.hafleetLastSeenAt ? new Date(body.hafleetLastSeenAt).toISOString() : 'never'}`);
+  console.log(`  homeserver last seen:             ${body.lastSeenAt ? new Date(body.lastSeenAt).toISOString() : 'never'}`);
+  /*
+   * THE TWO DIAGNOSES THIS EXISTS TO SEPARATE. "The homeserver has never called me" and "HAFleet has
+   * never collected" are different problems with different owners, and a single "not working" sends
+   * whoever reads it to the wrong side.
+   */
+  if (!body.lastSeenAt) console.log('\n  The homeserver has never called. Check the url in the registration and restart it.');
+  else if (!body.hafleetLastSeenAt) console.log('\n  The homeserver reaches me, but HAFleet has never collected. Check HAFleet\'s edge settings.');
+  process.exit(0);
+}
+
+if (!hsToken) usage('--registration or --hs-token is required');
+if (!linkToken) usage('--link-token is required');
+
+const edge = createAppserviceEdge({ hsToken, linkToken });
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const query = Object.fromEntries(url.searchParams.entries());
+  let body = null;
+  if (req.method === 'PUT' || req.method === 'POST') {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const raw = Buffer.concat(chunks).toString('utf8');
+    if (raw) {
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ errcode: 'M_NOT_JSON', error: 'body is not JSON' }));
+        return;
+      }
+    }
+  }
+  const result = await edge.handle({
+    method: req.method,
+    path: url.pathname,
+    query,
+    headers: req.headers,
+    body,
+  });
+  res.writeHead(result.status, { 'Content-Type': 'application/json' });
+  res.end(result.body === null ? '' : JSON.stringify(result.body));
+});
+
+/*
+ * NO KEEP-ALIVE TIMEOUT SHORTER THAN THE HOLDS. Both the homeserver's transaction and HAFleet's
+ * long-poll are deliberately held open for tens of seconds; Node's default 5s headers timeout would cut
+ * them and turn the design into a retry storm.
+ */
+server.keepAliveTimeout = 120_000;
+server.headersTimeout = 130_000;
+server.requestTimeout = 0;
+
+server.listen(port, host, () => {
+  console.log(`hafleet-appservice-edge listening on ${host}:${port}`);
+  console.log(`  hs_token fingerprint: ${fingerprint(hsToken)}`);
+  console.log(`  put this in the registration:  url: http://127.0.0.1:${port}`);
+  if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+    console.warn(`  NOTE: bound to ${host}, which is reachable beyond this machine. The homeserver only `
+      + 'needs loopback, so this is a decision rather than a requirement.');
+  }
+});
+
+const shutdown = (signal) => {
+  console.log(`hafleet-appservice-edge: ${signal} — releasing anything held so the homeserver retries`);
+  edge.close();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000);
+};
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

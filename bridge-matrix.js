@@ -10,6 +10,7 @@ import {
   createRoomOnSide, inviteToRoomOnSide, joinRoomOnSideAsAgent, sendToRoomOnSide,
 } from './lib/matrix-representative.js';
 import { resolveAppserviceListenerConfig, startAppserviceListener } from './lib/appservice-listener.js';
+import { resolveEdgeLinkConfig, startEdgePuller } from './lib/appservice-puller.js';
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { execFile } from 'child_process';
 import os from 'os';
@@ -4245,6 +4246,12 @@ export class MatrixBridge {
       return;
     }
     const sides = Array.isArray(payload?.sides) ? payload.sides : [];
+    /*
+     * Kept alongside the router because the edge puller needs to authenticate to it as the homeserver
+     * would, and the router deliberately does not hand tokens back out. Rebuilt on every refresh so a
+     * replaced credential is picked up rather than remembered.
+     */
+    this.appserviceSideTokens = new Map(sides.map((side) => [side.sideId, side.hsToken]));
     this.appserviceRouter.setSides(sides.map((side) => ({
       sideId: side.sideId,
       hsToken: side.hsToken,
@@ -4263,13 +4270,46 @@ export class MatrixBridge {
    * reason is logged rather than hidden so `doctor`-style questions have an answer.
    */
   async startAppserviceIntake() {
+    /*
+     * TWO WAYS IN, and a deployment may use either, both, or neither.
+     *
+     * The LISTENER is the original: a socket here that the homeserver dials. It only works when HAFleet is
+     * reachable from the homeserver, which rules out a laptop or an internal network.
+     *
+     * The EDGE LINK is the co-located one: `bin/hafleet-appservice-edge` runs beside the homeserver and
+     * this dials OUT to collect. Nothing here needs to be reachable, which is the point.
+     *
+     * Both feed the same router, so ordering, duplicate suppression and failure behave identically. The
+     * router is created when either is in use — a listener-only deployment must not lose it, and an
+     * edge-only deployment must have it without opening a port.
+     */
     const config = resolveAppserviceListenerConfig(process.env);
-    if (!config.enabled) {
+    const edge = resolveEdgeLinkConfig(process.env);
+    if (!config.enabled && !edge.enabled) {
       console.log(`[appservice] inbound listener disabled (${config.reason})`);
+      console.log(`[appservice] co-located edge not in use (${edge.reason})`);
       return;
     }
     this.appserviceRouter = createAppserviceRouter();
     await this.refreshAppserviceSides();
+
+    if (edge.enabled) {
+      /*
+       * The `hs_token` comes from OUR OWN credential store, never from the link. HAFleet issued it, so
+       * sending it back over the wire would put a credential in flight for nothing.
+       */
+      this.edgePuller = startEdgePuller({
+        url: edge.url,
+        token: edge.token,
+        router: this.appserviceRouter,
+        hsTokenFor: () => this.appserviceSideTokens?.get(edge.side) ?? null,
+      });
+      console.log(`[appservice] collecting from a co-located edge at ${edge.url} for side ${edge.side}`);
+    }
+    if (!config.enabled) {
+      console.log(`[appservice] no local socket (${config.reason}); the edge link is the only way in`);
+      return;
+    }
     try {
       this.appserviceListener = await startAppserviceListener({
         receiver: this.appserviceRouter, port: config.port, host: config.host,
