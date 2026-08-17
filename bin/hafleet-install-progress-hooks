@@ -33,8 +33,21 @@ const agentFlag = args.findIndex((a) => a === '--agent');
 const agentName = agentFlag >= 0 ? args[agentFlag + 1] : null;
 // `agentFlag` is -1 when the flag is absent, and `-1 + 1` is index 0 — which is the positional path.
 // Guarding on `agentFlag >= 0` rather than arithmetic keeps that off-by-one from coming back.
-const positional = args.filter((a, i) => !a.startsWith('--') && !(agentFlag >= 0 && i === agentFlag + 1));
+const flagValueIndexes = new Set(
+  [args.indexOf('--agent'), args.indexOf('--framework')].filter((i) => i >= 0).map((i) => i + 1),
+);
+const positional = args.filter((a, i) => !a.startsWith('--') && !flagValueIndexes.has(i));
 let home = positional[0];
+const frameworkFlag = args.findIndex((a) => a === '--framework');
+/*
+ * WHICH FRAMEWORK'S HOOKS, because the two that have them do not keep them in the same place.
+ *
+ * Claude Code reads `<workdir>/.claude/settings.json` — per project. Codex reads
+ * `$CODEX_HOME/hooks.json` — per USER, shared by every Codex session on the host. Same event names,
+ * same entry shape, different file and different blast radius, so the target cannot be guessed from a
+ * directory alone. `--agent` resolves it from the record (`type`), and `--framework` overrides.
+ */
+let framework = frameworkFlag >= 0 ? String(args[frameworkFlag + 1] || '').toLowerCase() : null;
 
 function usage(message) {
   if (message) console.error(`hafleet-install-progress-hooks: ${message}`);
@@ -83,6 +96,7 @@ if (agentName) {
     console.error('  Start it, or pass the directory explicitly instead of --agent.');
     process.exit(1);
   }
+  framework = String(record?.type || record?.framework || '').trim().toLowerCase() || null;
   home = (record?.workdir || record?.homeDir || '').trim();
   if (!home) {
     /*
@@ -99,21 +113,57 @@ if (agentName) {
     + `${record?.workspaceMode ? ` (workspaceMode: ${record.workspaceMode})` : ''}`);
 }
 
-if (!home) usage('an agent home, or --agent NAME, is required');
-const homeAbs = path.resolve(home);
-if (!existsSync(homeAbs)) usage(`no such directory: ${homeAbs}`);
-
 /*
- * A CHECK THAT THE TARGET IS AN AGENT HOME, not merely a directory. `.claude/` alone is not evidence —
- * it exists in ordinary repositories all over this host. `CLAUDE.md` beside it is what distinguishes a
- * provisioned home, and getting this wrong is the failure the required-path rule above exists to stop.
+ * CODEX KEEPS ITS HOOKS SOMEWHERE ELSE, and the difference is not cosmetic.
+ *
+ * `$CODEX_HOME/hooks.json` is per USER: one file shared by every Codex session on the host, including
+ * the operator's own interactive ones. Claude Code's `.claude/settings.json` is per project. Same event
+ * names and the same entry shape, so the merge logic below is shared — but the blast radius is not, and
+ * this says so rather than letting an operator discover it from their own shell.
+ *
+ * IT IS SAFE THAT IT IS SHARED, for one specific reason: `bin/hafleet-progress` exits on its first line
+ * when `AGENT_NAME` is absent, and it is absent in an ordinary terminal. So the hook fires in the
+ * operator's own sessions and does nothing there. That is a property of the reporter, stated here
+ * because it is the reason this is acceptable at all.
+ *
+ * NO AGENT HOME IS NEEDED for Codex, and requiring one would be theatre: the file it writes is not in
+ * the agent's tree.
  */
-if (!existsSync(path.join(homeAbs, 'CLAUDE.md')) && !existsSync(path.join(homeAbs, 'AGENTS.md'))) {
-  usage(`${homeAbs} has neither CLAUDE.md nor AGENTS.md, so Claude Code is not being run from it`);
-}
+const CODEX = framework === 'codex' || framework === 'codex-acp';
+const codexHome = (process.env.CODEX_HOME || '').trim() || path.join(process.env.HOME || '', '.codex');
 
-const settingsDir = path.join(homeAbs, '.claude');
-const settingsPath = path.join(settingsDir, 'settings.json');
+let homeAbs = null;
+let settingsDir;
+let settingsPath;
+
+if (CODEX) {
+  if (!existsSync(codexHome)) {
+    console.error(`hafleet-install-progress-hooks: no Codex home at ${codexHome}`);
+    console.error('  Run codex once so it creates its config, or set CODEX_HOME.');
+    process.exit(1);
+  }
+  settingsDir = codexHome;
+  settingsPath = path.join(codexHome, 'hooks.json');
+  console.log(`hafleet-install-progress-hooks: framework=${framework} → ${settingsPath}`);
+  console.log('  NOTE: this file is per-user, not per-agent. Every Codex session on this host will run');
+  console.log('  the hook; it exits immediately when AGENT_NAME is unset, which it is in your own shell.');
+} else {
+  if (!home) usage('an agent home, or --agent NAME, is required');
+  homeAbs = path.resolve(home);
+  if (!existsSync(homeAbs)) usage(`no such directory: ${homeAbs}`);
+
+  /*
+   * A CHECK THAT THE TARGET IS AN AGENT HOME, not merely a directory. `.claude/` alone is not evidence —
+   * it exists in ordinary repositories all over this host. `CLAUDE.md` beside it is what distinguishes a
+   * provisioned home, and getting this wrong is the failure the required-path rule above exists to stop.
+   */
+  if (!existsSync(path.join(homeAbs, 'CLAUDE.md')) && !existsSync(path.join(homeAbs, 'AGENTS.md'))) {
+    usage(`${homeAbs} has neither CLAUDE.md nor AGENTS.md, so Claude Code is not being run from it`);
+  }
+
+  settingsDir = path.join(homeAbs, '.claude');
+  settingsPath = path.join(settingsDir, 'settings.json');
+}
 
 let settings = {};
 let existed = false;
@@ -144,7 +194,17 @@ if (existsSync(settingsPath)) {
  * one line per window, never one per tool call. `Stop` is completion. `PreToolUse` was considered and
  * dropped: it doubles the invocations to say the same thing, and "about to read a file" is not news.
  */
-const HOOK_EVENTS = ['PostToolUse', 'Stop'];
+/*
+ * `Stop` IS CLAUDE CODE'S NAME FOR COMPLETION and Codex does not have it: its events are PreToolUse,
+ * PostToolUse, SessionStart and UserPromptSubmit. Sending `Stop` there would write an event no Codex
+ * version will ever fire — a hook that looks installed and never runs, which is the same class of
+ * silent failure this whole feature keeps tripping over.
+ *
+ * So a Codex install reports steps only. Completion still arrives, from the reporter's own `done`
+ * branch, whenever something calls it with that event — and it is better to lack the completion line
+ * than to have a configuration that quietly means nothing.
+ */
+const HOOK_EVENTS = CODEX ? ['PostToolUse'] : ['PostToolUse', 'Stop'];
 const command = `node ${JSON.stringify(reporter)}`;
 
 function hookEntriesFor(event) {
@@ -183,7 +243,15 @@ settings.hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.
 for (const event of planned) {
   const list = hookEntriesFor(event);
   // Appended, never assigned over: whatever was here keeps running, and ours runs alongside it.
-  settings.hooks[event] = [...list, { hooks: [{ type: 'command', command }] }];
+  /*
+   * Codex entries carry `matcher` and a `timeout`, matching the shape already in this file rather than
+   * the shape Claude Code uses. A ten-second timeout is generous for a reporter that coalesces and does
+   * one HTTP POST, and bounding it matters more here: this hook runs in the operator's own sessions too.
+   */
+  const entry = CODEX
+    ? { matcher: '', hooks: [{ type: 'command', command, timeout: 10 }] }
+    : { hooks: [{ type: 'command', command }] };
+  settings.hooks[event] = [...list, entry];
 }
 
 /*
@@ -206,6 +274,27 @@ if (existed) {
 writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
 console.log('  written.');
 console.log('');
+if (CODEX) {
+  /*
+   * THE TRUST STEP, AND WHY THIS DOES NOT DO IT.
+   *
+   * Codex refuses a hook whose configuration it has not been told to trust, recording
+   * `hooks.state."<file>:<event>:<i>:<j>".trusted_hash` in config.toml. The hash is computed BY CODEX and
+   * reported through its own `hooks/list` — so it is not something this can calculate and write, and the
+   * interactive confirmation in lib/codex-hook-trust.js deliberately refuses to run without a TTY.
+   *
+   * An installer that shipped a hash it invented, or that reached for
+   * `--dangerously-bypass-hook-trust`, would be defeating a gate whose entire purpose is that a human
+   * looked at the command before it ran on their machine. So this stops here and says what is left.
+   */
+  console.log('');
+  console.log('ONE STEP REMAINS, and it is not one this tool can do for you.');
+  console.log('Codex will not run a hook it has not been told to trust. Start codex once and accept the');
+  console.log('trust prompt for the command above; it records a hash in config.toml under [hooks.state].');
+  console.log('That hash is computed by Codex, so nothing here can write it, and bypassing the check');
+  console.log('would defeat the point of it — a human looking at the command before it runs.');
+  console.log('');
+}
 console.log('The agent will report progress into the thread of whatever it was asked, once it has read');
 console.log('its inbox at least once — check_inbox is what records the anchor. Without an anchor the');
 console.log('reporter stays silent rather than posting to a shared room\'s main timeline.');
