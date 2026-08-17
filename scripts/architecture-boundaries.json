@@ -172,6 +172,12 @@
           "auth": "bearer"
         },
         {
+          "method": "PUT",
+          "path": "/api/agents/:name/project-side",
+          "owner": "operator.project-side-admin",
+          "auth": "bearer"
+        },
+        {
           "method": "POST",
           "path": "/api/agents/:name/provision",
           "owner": "operator.agent-provisioning",

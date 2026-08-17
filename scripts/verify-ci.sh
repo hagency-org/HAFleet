@@ -162,6 +162,10 @@ start_step "architecture boundaries" npm run check:architecture-boundaries
 # — a send routed to the wrong customer's homeserver, and a removed side's rooms lingering in bridge
 # state — were both invisible to every single-side test in this suite, and both were found by hand.
 start_step "multi-tenancy (skips without a second homeserver)" npm run check:multi-side
+# Skips without HAFLEET_RUNTIME_DIR, which CI does not have — so this is a no-op there and a real check on
+# a developer's machine. Wired in anyway: a step that exists only in someone's shell history is a step
+# nobody runs.
+start_step "agent end-to-end (skips without a runtime)" npm run check:agent-e2e
 start_step "router type and artifact boundaries" bash -c 'npm run typecheck:router && npm run check:router-boundary && npm run check:router-build'
 start_step "Agent Operations canonical contract" npm run check:agent-ops-contract
 

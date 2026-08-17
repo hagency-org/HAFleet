@@ -10414,6 +10414,76 @@ function runtimeProfileFromPreset(preset) {
  * Unbinding is `presetId: null` rather than a DELETE, so "which preset" and "no preset" travel
  * through one code path and cannot disagree about what the absent case means.
  */
+/**
+ * Bind an agent to a project side — the OPERATOR's act, and it had no route at all.
+ *
+ * WHY THIS EXISTS, found by running the whole thing on a clean fleet rather than by a failing test.
+ * `agent.projectSide` is what lets `POST /api/agents/:name/matrix-identity` decide which side to mint on,
+ * and without it that endpoint refuses with `no_project_side` — correctly, since an identity is minted ON
+ * a side. But nothing could set it. `POST /api/agents` could, and is guarded by `requireAgentToken`; the
+ * only other source was a binding written by the Matrix-side owner approval, which needs the agent to
+ * already be reachable. So on a fresh fleet the chain closed on itself: no side, so no identity; no
+ * identity, so the agent could not act; and no route in between. Every gate refused informatively and the
+ * sequence was still impossible.
+ *
+ * This is the same shape, and the same fix, as `PUT .../preset` directly below — that route exists because
+ * `presetId` had only an agent-authenticated writer too.
+ *
+ * `requireBearer`, NOT `requireAgentToken`, and that is the whole reason it is a separate route rather
+ * than a field on PATCH. Which customer an agent serves is a decision about someone else's homeserver and
+ * someone else's budget; an agent that could claim a side would be choosing its own employer. The comment
+ * on the identity endpoint says `projectSide` is set "never from the agent's own request body", and that
+ * stays true.
+ */
+app.put('/api/agents/:name/project-side', requireBearer, (req, res) => {
+  const agentName = normalizeAgentName(req.params.name);
+  if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  const agent = agents[agentName];
+  if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
+
+  const raw = req.body?.projectSide ?? req.body?.project_side;
+  // Absent and explicit-null both mean unbind; anything else must name a side that exists.
+  const requested = raw === null || raw === undefined || raw === '' ? null : normalizeOptionalText(raw, 255);
+  if (requested !== null && !requested) return res.status(400).json({ error: 'invalid projectSide' });
+
+  /*
+   * THE SIDE MUST EXIST, checked here rather than left to the identity endpoint. A binding to a side
+   * nobody configured would move the same confusion one step later, where it reads as a minting failure
+   * instead of a typo — and this is the one place that knows the operator just typed it.
+   *
+   * A side with no CREDENTIAL is still allowed. Configuring the side and issuing its credential are two
+   * acts that legitimately happen in either order, and refusing here would force one of them.
+   */
+  if (requested && !projectSideStore.getSide(requested)) {
+    const known = projectSideStore.listSides({ activeOnly: false }).map((side) => side.id);
+    return res.status(400).json({
+      error: `unknown project side: ${requested}`,
+      code: 'unknown_project_side',
+      known,
+    });
+  }
+
+  const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
+  const previous = agent.projectSide ?? null;
+  agent.projectSide = requested;
+  if (!saveAgentsOrRollback(agentName, persistenceSnapshot)) {
+    return res.status(503).json({ error: 'agents persistence failed' });
+  }
+  auditLog(req, { agent: agentName, summary: { projectSide: requested, previousProjectSide: previous } });
+  return res.json({
+    ok: true,
+    agent: serializeAgent(agents[agentName]),
+    /*
+     * Said in the response because it is the next step and the reason this route was needed. An operator
+     * who binds a side and stops here has an agent that still cannot act, which is the state this whole
+     * route exists to get out of.
+     */
+    nextStep: requested
+      ? `POST /api/agents/${agentName}/matrix-identity to mint an identity on ${requested}`
+      : 'unbound; this agent can no longer be minted on any side',
+  });
+});
+
 app.put('/api/agents/:name/preset', requireBearer, (req, res) => {
   const agentName = normalizeAgentName(req.params.name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
@@ -10464,6 +10534,27 @@ app.patch('/api/agents/:name', requireAgentToken(_tokenFromName), (req, res) => 
   refreshServerLiveness();
   const agentName = normalizeAgentName(req.params.name);
   if (!agentName) return res.status(400).json({ error: 'invalid agent name' });
+  /*
+   * REFUSED RATHER THAN IGNORED, because being ignored is worse.
+   *
+   * This route is agent-authenticated, so `projectSide` must not be settable here — an agent choosing
+   * which customer it serves is an agent choosing its own employer. That part was already right. What was
+   * wrong is that the field was simply absent from the destructuring below, so a caller sending it got
+   * `ok: true` and no binding, discoverable only by reading the record back. A walkthrough on a clean
+   * fleet lost real time to exactly that, and it was one of three writes found that day which accepted a
+   * field and reported success without applying it.
+   *
+   * Naming the operator route in the refusal is the point: the answer to "how do I set this" should come
+   * from the failure, not from reading the source.
+   */
+  if (req.body && ('projectSide' in req.body || 'project_side' in req.body)) {
+    return res.status(400).json({
+      error: 'projectSide cannot be set here: this route is agent-authenticated, and which customer an '
+        + 'agent serves is not the agent\'s decision',
+      code: 'project_side_not_settable_here',
+      use: `PUT /api/agents/${agentName}/project-side with the operator token`,
+    });
+  }
   const agent = agents[agentName];
   if (!isAgentRecord(agent)) return res.status(404).json({ error: 'agent not found' });
   const wasOnline = Boolean(agent.online);

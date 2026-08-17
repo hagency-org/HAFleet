@@ -25,6 +25,7 @@
     "check:dep-isolation": "bash scripts/check-dep-isolation.sh",
     "check:architecture-boundaries": "node scripts/check-architecture-boundaries.js",
     "check:multi-side": "bash scripts/verify-multi-side.sh --if-available",
+    "check:agent-e2e": "bash scripts/verify-agent-e2e.sh --if-available",
     "report:ci-env": "node scripts/report-ci-env.js",
     "verify:ci": "bash scripts/verify-ci.sh",
     "verify:cd-preflight": "bash scripts/verify-cd-preflight.sh",

@@ -7,7 +7,7 @@ import {
 import { createHash } from 'crypto';
 import { createAppserviceRouter } from './lib/appservice-receiver.js';
 import {
-  createRoomOnSide, inviteToRoomOnSide, joinRoomOnSideAsAgent, sendToRoomOnSide,
+  createRoomOnSide, inviteToRoomOnSide, joinRoomOnSideAsAgent, sendToRoomOnSide, namespaceAdmits,
 } from './lib/matrix-representative.js';
 import { resolveAppserviceListenerConfig, startAppserviceListener } from './lib/appservice-listener.js';
 import { resolveEdgeLinkConfig, startEdgePuller } from './lib/appservice-puller.js';
@@ -1300,7 +1300,23 @@ function agentTokenFromEnv(agentName) {
   return trimmed || null;
 }
 
-async function ensureAgentAccount(agentName) {
+/**
+ * @param {string} agentName
+ * @param {object} [options]
+ * @param {() => boolean} [options.servedOtherwise] Whether some OTHER credential can act as this agent.
+ *
+ * `servedOtherwise` EXISTS BECAUSE A TOKEN IS NOT THE ONLY CREDENTIAL. An agent bound to an appservice
+ * project side needs none: the namespace authorises it, and `agentSenderFor` returns an appservice sender
+ * for it. Without this, the eight callers of this function all concluded "unprovisioned" for an agent that
+ * could speak — and `matrix-identity` had just told the operator it "can be addressed AND can speak". Two
+ * answers to one question, and the wrong one is the one that pages a human.
+ *
+ * Passed IN rather than looked up here, because this is a module-level function with no view of the
+ * bridge's acting credentials. Fixed at this single source instead of at each warning site: two of the
+ * eight had been patched individually before it became clear the check belonged here, which is how a rule
+ * ends up with six copies that disagree.
+ */
+async function ensureAgentAccount(agentName, { servedOtherwise = null } = {}) {
   const canonicalAgentName = resolveStoredAgentTokenName(agentName) || agentName;
   const envVarName = agentTokenEnvVarName(canonicalAgentName);
 
@@ -1321,6 +1337,11 @@ async function ensureAgentAccount(agentName) {
   if (supplied && supplied !== stored) candidates.push({ token: supplied, source: 'env' });
 
   if (candidates.length === 0) {
+    /*
+     * NOT AN ERROR when another credential serves this agent. `null` means "no token", which every caller
+     * already handles by asking `agentSenderFor`; throwing would mean "cannot act", which is false.
+     */
+    if (typeof servedOtherwise === 'function' && servedOtherwise()) return null;
     throw new AgentCredentialMissingError(
       canonicalAgentName,
       `no Matrix access token is stored for it and ${envVarName} is unset. Create or claim an `
@@ -3508,6 +3529,47 @@ export class MatrixBridge {
     return this._unprovisionedAgents ? [...this._unprovisionedAgents].sort() : [];
   }
 
+  /**
+   * Can this agent act on Matrix at all — by ANY means, not only a per-agent token?
+   *
+   * WHY THIS IS SEPARATE FROM HAVING A TOKEN, and the gap it closes. An agent bound to an appservice
+   * project side needs no token of its own: the namespace authorises it, and `agentSenderFor` already
+   * returns an appservice sender for it. So the SEND path worked while this credential check still
+   * reported "no usable Matrix credential" — the two disagreed, and the check is the one an operator
+   * reads. Observed end to end on a clean fleet: `matrix-identity` answered that the agent "can be
+   * addressed AND can speak", and the bridge kept logging NEEDS PROVISIONING about the same agent.
+   *
+   * Asked of `agentSenderFor` rather than reimplemented, because a second copy of "which credential
+   * serves this agent" is a second copy that drifts — and the first to drift would be this one, since
+   * nothing sends through it.
+   */
+  agentCanActOnMatrix(agentName) {
+    const canonical = this.normalizeName(agentName) || agentName;
+    if (!canonical) return false;
+    if (this.getAgentToken(canonical)) return true;
+    /*
+     * NO ROOM IS PASSED, deliberately. This asks "is there ANY side whose credential would serve you",
+     * which is the question a health check is asking. A room-specific answer belongs at the send site,
+     * where the room is known and `agentSenderFor` is called with it.
+     *
+     * `actingCredentials` is the same registry `actingSideFor` reads, keyed by server name — so this
+     * agrees with the send path by construction rather than by a second copy of the rule.
+     */
+    for (const serverName of this.actingCredentials?.keys() ?? []) {
+      const acting = this.actingSideFor(serverName);
+      if (acting?.credential?.kind !== 'appservice') continue;
+      const mxid = `@${AGENT_PREFIX}${canonical}:${acting.side.serverName}`.toLowerCase();
+      /*
+       * `=== true`, NOT truthiness. `namespaceAdmits` returns `true` on success and a REASON STRING on
+       * failure — and a non-empty string is truthy, so `if (namespaceAdmits(...))` admitted every
+       * rejection. Caught by a test asserting that a side claiming `@bot_.*` does not authorise
+       * `@ac_soaker`, which is the exact case the check exists for.
+       */
+      if (namespaceAdmits(acting.credential.namespace, mxid) === true) return true;
+    }
+    return false;
+  }
+
   async ensureAgentToken(agentName, context = 'unknown') {
     const normalized = this.normalizeName(agentName);
     if (!normalized) return null;
@@ -3518,11 +3580,21 @@ export class MatrixBridge {
       return token;
     }
     try {
-      await ensureAgentAccount(canonical);
+      await ensureAgentAccount(canonical, { servedOtherwise: () => this.agentCanActOnMatrix(canonical) });
       this.addKnownAgent(canonical);
       token = this.getAgentToken(canonical);
       if (token) this.clearAgentUnprovisioned(canonical);
       if (!token) {
+        /*
+         * NO TOKEN IS THE CORRECT OUTCOME for an agent served by an appservice side, so it is not warned
+         * about. `ensureAgentAccount` already returned null rather than throwing for exactly that case;
+         * warning here anyway would replace one misleading log line with another, which is what happened
+         * when the first two fixes were applied at the warning sites instead of at the rule.
+         */
+        if (this.agentCanActOnMatrix(canonical)) {
+          this.clearAgentUnprovisioned(canonical);
+          return null;
+        }
         console.warn(`Agent token still missing after ensureAgentAccount for "${canonical}" (context=${context})`);
         return null;
       }
@@ -3739,6 +3811,20 @@ export class MatrixBridge {
     this.botUserId = await this.botClient.getUserId();
     console.log(`Bot: ${this.botUserId}`);
 
+    /*
+     * ACTING CREDENTIALS BEFORE ANY AGENT IS JUDGED, and this ordering is the whole fix.
+     *
+     * Step 2 below decides, for every agent, whether it can act on Matrix — and for an agent bound to an
+     * appservice project side the answer lives in `actingCredentials`. Loading that map later meant the
+     * first pass ran against an empty one, concluded the agent had no credential, and logged NEEDS
+     * PROVISIONING about an agent that could speak. Observed in the log as the warning arriving TWELVE
+     * lines before "serving 1 project side(s)".
+     *
+     * Chasing it produced four attempted fixes at four warning sites before the log made the sequence
+     * plain. The rule was never wrong; it was consulted before its inputs existed.
+     */
+    await this.refreshActingCredentials();
+
     // 2. Ensure agent accounts for all known agents.
     // Service relays (e.g. OpenFab's `openfab-bridge`) post in-app only and never need a Matrix
     // puppet — skip them. And a single agent's account failure must not crash the whole bridge.
@@ -3753,9 +3839,11 @@ export class MatrixBridge {
       validAgentNames.add(agentName);
       validAgentKeys.add(this.nameKey(agentName));
       try {
-        await ensureAgentAccount(agentName);
+        await ensureAgentAccount(agentName, { servedOtherwise: () => this.agentCanActOnMatrix(agentName) });
         this.addKnownAgent(agentName);
       } catch (e) {
+        // The appservice-side case never reaches here now: `ensureAgentAccount` returns null for it
+        // instead of throwing, which is the single place that rule lives.
         if (e?.needsProvisioning) {
           this.markAgentUnprovisioned(agentName);
           console.warn(`[agent-credential] NEEDS PROVISIONING — ${agentName}: ${e.message}`);
@@ -3870,13 +3958,21 @@ export class MatrixBridge {
     this.pollAgentInvites();
     setInterval(() => this.pollAgentInvites(), MATRIX_INVITE_POLL_MS);
 
-    // 8. Poll for new agents and humans
+    /*
+     * 8. Acting credentials FIRST, and the order is load-bearing.
+     *
+     * `pollRegistrations` decides whether each agent can act on Matrix, and for an agent bound to an
+     * appservice side the answer lives in this map. Polling first meant the first pass ran against an
+     * empty map, concluded the agent had no credential, and logged NEEDS PROVISIONING about an agent that
+     * could speak — the warning an operator reads, produced by a startup ordering rather than by a real
+     * missing credential. Observed end to end on a clean fleet.
+     */
+    // Already loaded above, before any agent was judged; this only keeps it fresh.
+    setInterval(() => this.refreshActingCredentials(), APPSERVICE_SIDE_REFRESH_MS);
+
+    // 9. Poll for new agents and humans.
     await this.pollRegistrations();
     setInterval(() => this.pollRegistrations(), 30_000);
-
-    // 9. Acting credentials, so an approval can be delivered to a decider on a project side.
-    await this.refreshActingCredentials();
-    setInterval(() => this.refreshActingCredentials(), APPSERVICE_SIDE_REFRESH_MS);
 
     // 10. Inbound appservice traffic, if this deployment exposes a socket for it (ADR-016).
     await this.startAppserviceIntake();
@@ -6400,7 +6496,7 @@ export class MatrixBridge {
       if (!canonicalAgent) return;
       // Ensure agent account exists
       if (!this.getAgentToken(canonicalAgent)) {
-        await ensureAgentAccount(canonicalAgent);
+        await ensureAgentAccount(canonicalAgent, { servedOtherwise: () => this.agentCanActOnMatrix(canonicalAgent) });
         this.addKnownAgent(canonicalAgent);
       }
       const result = await this.ensureHumanDmRoom(canonicalAgent, humanName);
@@ -7218,7 +7314,7 @@ export class MatrixBridge {
       const canonicalAgent = this.resolveKnownAgentName(m);
       if (canonicalAgent && !this.getAgentToken(canonicalAgent)) {
         try {
-          await ensureAgentAccount(canonicalAgent);
+          await ensureAgentAccount(canonicalAgent, { servedOtherwise: () => this.agentCanActOnMatrix(canonicalAgent) });
         } catch (e) {
           console.warn(`[agent-credential] group "${group.name}": ${canonicalAgent} joins without a Matrix identity: ${e.message}`);
         }
@@ -7263,7 +7359,7 @@ export class MatrixBridge {
         const ensuredName = canonicalAgent || this.normalizeName(m);
         if (ensuredName && !this.getAgentToken(ensuredName)) {
           try {
-            await ensureAgentAccount(ensuredName);
+            await ensureAgentAccount(ensuredName, { servedOtherwise: () => this.agentCanActOnMatrix(ensuredName) });
             canonicalAgent = this.addKnownAgent(ensuredName) || ensuredName;
           } catch (e) {
             console.warn(`[agent-credential] group "${update.name}": ${ensuredName} has no Matrix identity: ${e.message}`);
@@ -8048,7 +8144,7 @@ export class MatrixBridge {
     if (!roomId || !agentName) return false;
     let token;
     try {
-      token = await ensureAgentAccount(agentName);
+      token = await ensureAgentAccount(agentName, { servedOtherwise: () => this.agentCanActOnMatrix(agentName) });
     } catch {
       // No usable credential is already reported elsewhere (ADR-014 decision 6). A typing
       // notification is not the place to surface it, and must not become a second alarm.
@@ -8089,7 +8185,7 @@ export class MatrixBridge {
     if (!roomId || !eventId || !agentName) return false;
     let token;
     try {
-      token = await ensureAgentAccount(agentName);
+      token = await ensureAgentAccount(agentName, { servedOtherwise: () => this.agentCanActOnMatrix(agentName) });
     } catch {
       return false;
     }
