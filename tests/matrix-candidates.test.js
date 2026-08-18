@@ -317,3 +317,61 @@ describe('turning a server name into an address, which the protocol already spec
     expect((await discoverBaseUrl('', { fetchImpl: fakeFetch({}) })).url).toBeNull();
   });
 });
+
+describe('a co-located edge is also a way in', () => {
+  /*
+   * FOUND BY THE OPERATOR USING THE SCREEN. With no `HAFLEET_APPSERVICE_PORT` this reported "the bridge opens
+   * no socket… a registration installed now would receive nothing" — while the edge link was delivering,
+   * verified at 88 of 88 transactions. Worse than a cosmetic error: it told them to open an inbound socket,
+   * which is precisely what co-locating exists to avoid, on a host that sits on a public IP.
+   */
+  const edgeEnv = {
+    HAFLEET_EDGE_URL: 'http://127.0.0.1:8095',
+    HAFLEET_EDGE_LINK_TOKEN: 'link',
+    HAFLEET_EDGE_SIDE: 'acme.test',
+  };
+
+  test('an edge is reported as the way in, not as nothing listening', async () => {
+    const reach = await describeMatrixReach({
+      env: { ...edgeEnv, MATRIX_SERVER_NAME: 'acme.test' },
+      fetchImpl: fakeFetch({ default: { status: 200, body: { versions: ['v1.12'] } } }),
+      interfaces: {},
+    });
+    expect(reach.appservice.inboundVia).toBe('edge');
+    expect(reach.appservice.reason).toMatch(/none is needed/);
+    expect(reach.appservice.edgeSide).toBe('acme.test');
+  });
+
+  test('with neither a port nor an edge, the warning stands and names both fixes', async () => {
+    // The refusal must survive the fix. This is the state the warning is FOR, and it should not send an
+    // operator to the wrong remedy — a socket is one answer and an edge is the other.
+    const reach = await describeMatrixReach({
+      env: { MATRIX_SERVER_NAME: 'acme.test' },
+      fetchImpl: fakeFetch({ default: { status: 200, body: { versions: ['v1.12'] } } }),
+      interfaces: {},
+    });
+    expect(reach.appservice.inboundVia).toBeNull();
+    expect(reach.appservice.reason).toMatch(/hafleet-appservice-edge/);
+  });
+
+  test('a half-configured edge is not treated as an edge', async () => {
+    // Same rule `resolveEdgeLinkConfig` applies: half-configured means somebody was mid-setup, and calling
+    // it working would hide that at the moment it matters most.
+    const reach = await describeMatrixReach({
+      env: { HAFLEET_EDGE_URL: 'http://x:1', MATRIX_SERVER_NAME: 'acme.test' },
+      fetchImpl: fakeFetch({ default: { status: 200, body: { versions: ['v1.12'] } } }),
+      interfaces: {},
+    });
+    expect(reach.appservice.inboundVia).toBeNull();
+  });
+
+  test('a real socket still says so, and offers the callback addresses', async () => {
+    const reach = await describeMatrixReach({
+      env: { MATRIX_SERVER_NAME: 'acme.test', HAFLEET_APPSERVICE_PORT: '8094' },
+      fetchImpl: fakeFetch({ default: { status: 200, body: { versions: ['v1.12'] } } }),
+      interfaces: { en0: [{ family: 'IPv4', address: '10.0.0.5', internal: false }] },
+    });
+    expect(reach.appservice).toMatchObject({ listening: true, inboundVia: 'socket' });
+    expect(reach.appservice.callbackCandidates.length).toBeGreaterThan(0);
+  });
+});

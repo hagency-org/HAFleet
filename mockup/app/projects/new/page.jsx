@@ -241,12 +241,25 @@ export default function NewProjectSide() {
         * SAID BEFORE STEP ONE, because it is the fact an operator would otherwise learn last: without a
         * socket everything below succeeds and nothing ever arrives.
         */}
-      {appservice && !appservice.listening && (
+      {/*
+        * THREE STATES, not two, and conflating them made this screen wrong on the deployment the feature was
+        * built for. A co-located edge means events arrive with NO socket here — reporting that as "nothing is
+        * listening" told the operator to open an inbound port, which is exactly what co-locating avoids, on
+        * a host with a public address.
+        */}
+      {appservice?.inboundVia === 'edge' && (
         <div className="notice">
-          <strong className="warn-text">appservice 没有在监听。</strong>
+          <span className="pill ok-text">入站走 co-located edge</span>{' '}
+          <span className="dim">{appservice.reason}</span>
+        </div>
+      )}
+      {appservice && !appservice.listening && appservice.inboundVia !== 'edge' && (
+        <div className="notice">
+          <strong className="warn-text">没有任何东西会接收入站事务。</strong>
           <p className="dim">{appservice.reason}</p>
           <p className="dim">
-            现在生成的注册文件本身是对的，但你的 homeserver 推送过来的事务不会有人接。先设好端口再继续。
+            现在生成的注册文件本身是对的，但你的 homeserver 推送过来的事务不会有人接。
+            要么开一个入站端口，要么在 homeserver 旁边跑 <span className="mono-s">bin/hafleet-appservice-edge</span>。
           </p>
         </div>
       )}
