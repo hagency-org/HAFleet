@@ -353,7 +353,23 @@ export async function fetchLive() {
           let budget = null;
           try {
             const b = await get(`project-sides/${encodeURIComponent(side.id)}/budget`);
-            budget = { allocated: b?.allocated ?? null, committed: b?.committed ?? null, remaining: b?.remaining ?? null };
+            budget = {
+              allocated: b?.allocated ?? null,
+              committed: b?.committed ?? null,
+              remaining: b?.remaining ?? null,
+              /*
+               * WHOSE the committed figure is. `已承诺 200k` beside a project with nobody assigned was a
+               * number the operator could not interrogate; three of those four commitments belonged to
+               * agents deleted hours earlier, and the only way to learn that was cross-referencing two API
+               * lists by hand.
+               *
+               * `orphanedCommitted` is normally 0 — a delete now releases them — so this reads as nothing
+               * at all on a healthy fleet, which is the point. It is carried for the fleets that predate
+               * that fix and for any future path that manages to leave one behind.
+               */
+              orphanedCommitted: b?.orphanedCommitted ?? 0,
+              commitments: Array.isArray(b?.commitments) ? b.commitments : [],
+            };
           } catch { /* leave null; the row says the figure is unavailable rather than showing a zero */ }
           return {
             id: side.id,
@@ -426,6 +442,17 @@ export async function fetchLive() {
                 online: a.online,
                 retiredAt: a.retiredAt ?? null,
                 role: a.role ?? null,
+              })),
+              /*
+               * APPROVED BUT NOT ATTACHED. `agents` comes from bindings, so a project whose engagement was
+               * approved without a resolvable owner has an empty `agents` and read as 「还没派人」 — while the
+               * reason sat in the engagement's `bindError`, which no page read. Carried so the staff cell can
+               * say which of the two it is.
+               */
+              awaitingBind: (pr.awaitingBind ?? []).map((w) => ({
+                agent: w.agent,
+                role: w.role ?? null,
+                bindError: w.bindError ?? null,
               })),
             })),
           };

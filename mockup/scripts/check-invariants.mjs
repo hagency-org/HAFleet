@@ -578,6 +578,82 @@ console.log(`\n${failed === 0 ? 'All invariants hold.' : `${failed} FAILED.`}\n`
     provided.size > 1 && used.size === 0,
     provided.size <= 1 ? 'could not read the side projection' : [...used].map(([f, w]) => `${w}:${f}`).join(' '),
   );
+
+  /*
+   * NESTED READS TOO, and this hole was found by testing the guard rather than by trusting it. `side.budget` is
+   * itself an object built in the same file, and a page reading `side.budget.orphanedCommitted` passed every
+   * invariant with that key deleted from the projection — the identical `hasCredential` defect, in the identical
+   * place, invisible to the check written for it. Deleting the key and watching the suite stay green is how it
+   * surfaced; a guard is not verified until its own defect has been reproduced against it.
+   *
+   * One level is enough for now: `budget` is the only nested object the projection builds. If another appears,
+   * this loop takes it by adding a name.
+   */
+  const nestedOffenders = [];
+  for (const container of ['budget']) {
+    const literal = new RegExp(`${container} = \\{([\\s\\S]*?)\\n {12}\\};`).exec(api);
+    const keys = new Set(
+      [...(literal?.[1] ?? '').matchAll(/^\s{14}([a-zA-Z]+)\s*[:,]/gm)].map((m) => m[1]),
+    );
+    if (keys.size === 0) {
+      nestedOffenders.push(`could not read the ${container} projection`);
+      continue;
+    }
+    for (const file of [...walk(join(root, 'app')), ...walk(join(root, 'components'))]) {
+      const text = readFileSync(file, 'utf8');
+      for (const match of text.matchAll(new RegExp(`\\bside\\.${container}\\.([a-zA-Z]+)\\b`, 'g'))) {
+        if (!keys.has(match[1])) nestedOffenders.push(`${file.slice(root.length + 1)}:${container}.${match[1]}`);
+      }
+      /*
+       * DESTRUCTURED READS COUNT. `const { allocated, committed, remaining } = side.budget;` is how the page
+       * actually reads most of these, and a field-access-only check would miss every one of them.
+       */
+      for (const match of text.matchAll(new RegExp(`const \\{([^}]*)\\} = side\\.${container};`, 'g'))) {
+        for (const name of match[1].split(',').map((s) => s.trim()).filter(Boolean)) {
+          if (!keys.has(name)) nestedOffenders.push(`${file.slice(root.length + 1)}:${container}.${name}`);
+        }
+      }
+    }
+  }
+  check('every nested budget field a page reads is carried by the projection',
+    nestedOffenders.length === 0, nestedOffenders.join(' '));
+
+  /*
+   * AND THE SAME HOLE ONE SHAPE OVER, found the same way and immediately after closing the first.
+   *
+   * `side.projects` is an ARRAY the projection builds, and the page reads its rows through a map binding:
+   * `side.projects.map((pr) => … pr.awaitingBind …)`. Nothing in the check above sees `pr.` — so deleting
+   * `awaitingBind` from the projection passed everything, exactly as `orphanedCommitted` had an hour earlier.
+   * Two instances of one blind spot in one change is the argument for generalising rather than patching.
+   *
+   * THE BINDING NAME IS READ FROM THE CODE, not assumed to be `pr`. Hardcoding the current variable would
+   * make the guard pass the moment someone renamed it — a guard whose silence depends on a local name.
+   *
+   * WHERE IT STOPS: one level below `projects`. `pr.agents[].online` is a third level, and following bindings
+   * that far wants a parser rather than a regex. That limit is stated because an unstated limit in a
+   * completeness check reads as coverage.
+   */
+  const rowOffenders = [];
+  {
+    const literal = /projects: \(side\.projects \?\? \[\]\)\.map\(\((\w+)\) => \(\{([\s\S]*?)\n {12}\}\)\)/.exec(api);
+    const keys = new Set(
+      [...(literal?.[2] ?? '').matchAll(/^\s{14}([a-zA-Z]+)\s*[:,]/gm)].map((m) => m[1]),
+    );
+    if (keys.size === 0) rowOffenders.push('could not read the projects projection');
+    else {
+      for (const file of [...walk(join(root, 'app')), ...walk(join(root, 'components'))]) {
+        const text = readFileSync(file, 'utf8');
+        for (const bind of text.matchAll(/side\.projects\.map\(\((\w+)\) =>/g)) {
+          const row = bind[1];
+          for (const use of text.matchAll(new RegExp(`\\b${row}\\.([a-zA-Z]+)\\b`, 'g'))) {
+            if (!keys.has(use[1])) rowOffenders.push(`${file.slice(root.length + 1)}:${row}.${use[1]}`);
+          }
+        }
+      }
+    }
+  }
+  check('every project-row field a page reads is carried by the projection',
+    rowOffenders.length === 0, rowOffenders.join(' '));
 }
 
 // 21. a backend enum is not shown to an operator raw

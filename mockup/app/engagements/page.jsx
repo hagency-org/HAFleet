@@ -118,10 +118,20 @@ function ProjectSides({ t }) {
       );
     }
     if (allocated === 0) return <span className="overqual">{t('en.allocClosed')}</span>;
+    /*
+     * THE ORPHAN LINE, and it says nothing on a healthy side. A delete now releases its commitments, so
+     * `orphanedCommitted` is 0 and this renders nothing — it exists for fleets that predate that fix, where
+     * the committed figure includes promises to agents that no longer exist. Silence when the number is
+     * zero is what keeps it worth reading when it is not.
+     */
+    const orphaned = side.budget.orphanedCommitted ?? 0;
     return (
       <>
         <span>{t('en.allocLeft', { left: fmtTokens(remaining), alloc: fmtTokens(allocated) })}</span>
         <span className="dim">{t('en.allocCommitted', { n: fmtTokens(committed) })}</span>
+        {orphaned > 0 ? (
+          <span className="stranded">{t('en.allocOrphaned', { n: fmtTokens(orphaned) })}</span>
+        ) : null}
       </>
     );
   };
@@ -218,7 +228,24 @@ function ProjectSides({ t }) {
                           ? <span className="dim mono">{pr.roomId}</span>
                           : <span className="dim">{t('en.projNoRoom')}</span>}
                         {pr.agents.length === 0
-                          ? <span className="dim">{t('en.projStaffNone')}</span>
+                          ? (pr.awaitingBind?.length
+                            /*
+                             * APPROVED IS NOT STAFFED, and saying only 「还没派人」 hid a real state: a project
+                             * with 50k committed to `soaker` read as untouched, while the engagement carried
+                             * `bindError: no owner known for this agent…`. The budget column said 已承诺 and
+                             * this column said nobody — two true statements that together made no sense.
+                             *
+                             * The reason is shown verbatim from the backend rather than reworded. It names the
+                             * two settings that fix it, which is more than any phrasing here could.
+                             */
+                            ? pr.awaitingBind.map((w) => (
+                              <span key={w.agent} className="staff">
+                                <Link href={`/agents/${encodeURIComponent(w.agent)}`}>{w.agent}</Link>
+                                <span className="stranded">{t('en.projStaffAwaiting')}</span>
+                                {w.bindError && <span className="dim">{w.bindError}</span>}
+                              </span>
+                            ))
+                            : <span className="dim">{t('en.projStaffNone')}</span>)
                           : pr.agents.map((a) => (
                             <span key={a.name} className="staff">
                               <Link href={`/agents/${encodeURIComponent(a.name)}`}>{a.name}</Link>

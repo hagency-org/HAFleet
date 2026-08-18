@@ -1587,3 +1587,170 @@ describe('staging protects what works, not merely what exists', () => {
     expect(res.body.replacedNote).toBeUndefined();
   });
 });
+
+describe('what the committed figure is made of', () => {
+  /*
+   * `已承诺 200k` beside a project with nobody assigned. The number was right and told the operator nothing:
+   * learning that three of those four commitments belonged to `e2e-probe-*` agents deleted hours earlier meant
+   * fetching the engagement list, fetching the agent list, and cross-referencing them by hand.
+   *
+   * A delete now releases its commitments, so `orphanedCommitted` is 0 on a fleet running that code. This is
+   * for the fleets that predate it — and for any future path that manages to leave one behind.
+   */
+  const LIVE = 'still-here';
+
+  async function bootWithCommitments() {
+    const app = await boot({
+      agents: { [LIVE]: { name: LIVE, type: 'agent', kind: 'agent', capability: 'coding' } },
+      rawDataFiles: {
+        'engagements.json': JSON.stringify({
+          version: 1,
+          engagements: {
+            kept: {
+              id: 'kept', state: 'active', agent: LIVE, createdAt: 1,
+              projectRoomId: `!room:${SERVER}`, allocatedTokens: 50000, role: 'documentation',
+            },
+            orphan: {
+              id: 'orphan', state: 'active', agent: 'deleted-probe', createdAt: 1,
+              projectRoomId: `!room:${SERVER}`, allocatedTokens: 150000, role: 'documentation',
+            },
+            done: {
+              id: 'done', state: 'ended', agent: 'deleted-probe', createdAt: 1,
+              projectRoomId: `!room:${SERVER}`, allocatedTokens: 900000, role: 'documentation',
+            },
+          },
+          whitelist: {}, offers: {}, audit: [],
+        }),
+      },
+    });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    await request(app).put(`/api/project-sides/${SERVER}/allocation`).send({ allocated_tokens: 1000000 });
+    return app;
+  }
+
+  test('the breakdown names each commitment and whether its agent still exists', async () => {
+    const app = await bootWithCommitments();
+    const res = await request(app).get(`/api/project-sides/${SERVER}/budget`);
+    expect(res.status).toBe(200);
+
+    const byId = Object.fromEntries((res.body.commitments ?? []).map((c) => [c.id, c]));
+    expect(Object.keys(byId).sort()).toEqual(['kept', 'orphan']);   // `done` is ended, so it commits nothing
+    expect(byId.kept.agentExists).toBe(true);
+    expect(byId.orphan.agentExists).toBe(false);
+    expect(byId.orphan.agent).toBe('deleted-probe');
+    expect(res.body.orphanedCommitted).toBe(150000);
+  });
+
+  test('the breakdown sums to the committed figure it explains', async () => {
+    /*
+     * The property that makes it worth showing. A breakdown that can disagree with its own total is worse than
+     * none — it makes the number look explained when it is not. Both come from one filter in the store, and
+     * this is what holds that true.
+     */
+    const app = await bootWithCommitments();
+    const res = await request(app).get(`/api/project-sides/${SERVER}/budget`);
+    const sum = (res.body.commitments ?? []).reduce((n, c) => n + c.allocatedTokens, 0);
+    expect(sum).toBe(res.body.committed);
+    expect(res.body.committed).toBe(200000);
+  });
+
+  test('a healthy side reports zero orphaned, not a missing field', async () => {
+    // The page renders this line only when it is above zero, so `undefined` and `0` would look identical on
+    // screen and differ everywhere else. It is a number.
+    const app = await bootWithCommitments();
+    await request(app).post('/api/agents').send({ name: 'deleted-probe', role: 'documentation' });
+    const res = await request(app).get(`/api/project-sides/${SERVER}/budget`);
+    expect(res.body.orphanedCommitted).toBe(0);
+    expect(res.body.commitments.every((c) => c.agentExists)).toBe(true);
+  });
+
+  test('a dispatch payload does NOT carry the breakdown', async () => {
+    /*
+     * A CORRECTION, kept as a test. The first version put the breakdown in `sideBudgetFor`, which widened all
+     * four of its callers — one of which builds the payload handed to a DISPATCHED RUNNER. That would have told
+     * a borrowed agent's wrapper the names and sizes of every other commitment on that customer's side. The
+     * numbers are an internal primitive; who holds them is an operator-facing read.
+     */
+    const source = readFileSync(new URL('../backend-v2.js', import.meta.url), 'utf8');
+    const helper = /function sideBudgetFor\(sideId\) \{[\s\S]*?\n\}/.exec(source)?.[0] ?? '';
+    expect(helper).not.toMatch(/commitments|orphanedCommitted/);
+    expect(source).toMatch(/sideCommitmentsFor\(side\)/);
+  });
+});
+
+describe('a project with an approved engagement nobody attached', () => {
+  /*
+   * THE TWO TRUE STATEMENTS THAT MADE NO SENSE TOGETHER. On the live fleet, one project read 「还没派人」
+   * in its staff column and 「已承诺 50k」 in its budget column. Both were correct: `agents` comes from
+   * BINDINGS, and an engagement going active only creates one when an owner can be resolved — without
+   * `HAFLEET_OWNER_MXID` the bind fails and records why on the engagement.
+   *
+   * The reason was already in the data (`bindError: "no owner known for this agent: set
+   * HAFLEET_OWNER_MXID and HAFLEET_OWNER_DM_ROOM…"`) and no page read it, though the approval path's own
+   * comment says the failure is "shown in the console". So the operator saw a project that looked
+   * untouched, with money promised against it, and nothing pointing at the setting that would fix it.
+   */
+  const AGENT = 'promised-nobody-attached';
+  const ROOM = `!proj:${SERVER}`;
+
+  async function bootWithApprovedUnbound({ bound = false, bindError = 'no owner known for this agent' } = {}) {
+    const app = await boot({
+      agents: { [AGENT]: { name: AGENT, type: 'agent', kind: 'agent', capability: 'coding' } },
+      rawDataFiles: {
+        'engagements.json': JSON.stringify({
+          version: 1,
+          engagements: {
+            promised: {
+              id: 'promised', state: 'active', agent: AGENT, createdAt: 1, role: 'documentation',
+              projectRoomId: ROOM, allocatedTokens: 50000, bound, bindError,
+            },
+          },
+          whitelist: {}, offers: {}, audit: [],
+        }),
+      },
+    });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    await request(app).put(`/api/project-sides/${SERVER}/allocation`).send({ allocated_tokens: 1000000 });
+    await request(app).post(`/api/project-sides/${SERVER}/projects`)
+      .send({ name: 'a project', room_id: ROOM });
+    return app;
+  }
+
+  const projectFrom = async (app) => {
+    const res = await request(app).get('/api/project-sides');
+    const side = (res.body.sides ?? []).find((s) => s.id === SERVER);
+    return (side?.projects ?? [])[0];
+  };
+
+  test('it says who was approved and why they are not attached', async () => {
+    const project = await projectFrom(await bootWithApprovedUnbound());
+    expect(project.agents).toEqual([]);              // still not staff: nothing can reach the project
+    expect(project.awaitingBind).toHaveLength(1);
+    expect(project.awaitingBind[0].agent).toBe(AGENT);
+    expect(project.awaitingBind[0].bindError).toMatch(/no owner known/);
+  });
+
+  test('an engagement that DID bind is staff, not awaiting', async () => {
+    /*
+     * The distinction has to hold in both directions, or the new line would appear beside every healthy
+     * project and stop meaning anything. `bound: true` belongs to the binding store's answer.
+     */
+    const project = await projectFrom(await bootWithApprovedUnbound({ bound: true, bindError: null }));
+    expect(project.awaitingBind).toEqual([]);
+  });
+
+  test('a project with no engagement at all is still plainly unstaffed', async () => {
+    // 「还没派人」 must survive. It is the honest answer when nobody has been promised, and replacing it
+    // everywhere with the new wording would trade one misleading cell for another.
+    const app = await boot({ agents: {} });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    await request(app).post(`/api/project-sides/${SERVER}/projects`)
+      .send({ name: 'untouched', room_id: `!empty:${SERVER}` });
+    const project = await projectFrom(app);
+    expect(project.agents).toEqual([]);
+    expect(project.awaitingBind).toEqual([]);
+  });
+});
