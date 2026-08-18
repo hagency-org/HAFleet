@@ -9299,6 +9299,8 @@ app.post('/api/project-sides/:id/registration-file', requireBearer, (req, res) =
       hsToken: registration.hs_token,
       namespace: registration.namespaces.users[0].regex,
       senderLocalpart: registration.sender_localpart,
+      // Remembered so a later reissue reuses the address this one was built for.
+      url,
     }, { stage: staging });
 
     return res.json({

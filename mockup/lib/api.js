@@ -391,6 +391,9 @@ export async function fetchLive() {
             awaitingInstall: side.awaitingInstall
               ?? (Boolean(side.hasCredential) && side.accessState === 'unverified'),
             credentialIssuedAt: side.accessIssuedAt ?? null,
+            // The address a reissue must reuse. Absent means we never recorded one, and the console must ask
+            // rather than guess — a wrong url installs cleanly and receives nothing.
+            appserviceUrl: side.appserviceUrl ?? null,
             active: side.active !== false,
             allocatedTokens: side.allocatedTokens ?? null,
             budget,
