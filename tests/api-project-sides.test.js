@@ -1587,3 +1587,94 @@ describe('staging protects what works, not merely what exists', () => {
     expect(res.body.replacedNote).toBeUndefined();
   });
 });
+
+describe('what the committed figure is made of', () => {
+  /*
+   * `已承诺 200k` beside a project with nobody assigned. The number was right and told the operator nothing:
+   * learning that three of those four commitments belonged to `e2e-probe-*` agents deleted hours earlier meant
+   * fetching the engagement list, fetching the agent list, and cross-referencing them by hand.
+   *
+   * A delete now releases its commitments, so `orphanedCommitted` is 0 on a fleet running that code. This is
+   * for the fleets that predate it — and for any future path that manages to leave one behind.
+   */
+  const LIVE = 'still-here';
+
+  async function bootWithCommitments() {
+    const app = await boot({
+      agents: { [LIVE]: { name: LIVE, type: 'agent', kind: 'agent', capability: 'coding' } },
+      rawDataFiles: {
+        'engagements.json': JSON.stringify({
+          version: 1,
+          engagements: {
+            kept: {
+              id: 'kept', state: 'active', agent: LIVE, createdAt: 1,
+              projectRoomId: `!room:${SERVER}`, allocatedTokens: 50000, role: 'documentation',
+            },
+            orphan: {
+              id: 'orphan', state: 'active', agent: 'deleted-probe', createdAt: 1,
+              projectRoomId: `!room:${SERVER}`, allocatedTokens: 150000, role: 'documentation',
+            },
+            done: {
+              id: 'done', state: 'ended', agent: 'deleted-probe', createdAt: 1,
+              projectRoomId: `!room:${SERVER}`, allocatedTokens: 900000, role: 'documentation',
+            },
+          },
+          whitelist: {}, offers: {}, audit: [],
+        }),
+      },
+    });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    await request(app).put(`/api/project-sides/${SERVER}/allocation`).send({ allocated_tokens: 1000000 });
+    return app;
+  }
+
+  test('the breakdown names each commitment and whether its agent still exists', async () => {
+    const app = await bootWithCommitments();
+    const res = await request(app).get(`/api/project-sides/${SERVER}/budget`);
+    expect(res.status).toBe(200);
+
+    const byId = Object.fromEntries((res.body.commitments ?? []).map((c) => [c.id, c]));
+    expect(Object.keys(byId).sort()).toEqual(['kept', 'orphan']);   // `done` is ended, so it commits nothing
+    expect(byId.kept.agentExists).toBe(true);
+    expect(byId.orphan.agentExists).toBe(false);
+    expect(byId.orphan.agent).toBe('deleted-probe');
+    expect(res.body.orphanedCommitted).toBe(150000);
+  });
+
+  test('the breakdown sums to the committed figure it explains', async () => {
+    /*
+     * The property that makes it worth showing. A breakdown that can disagree with its own total is worse than
+     * none — it makes the number look explained when it is not. Both come from one filter in the store, and
+     * this is what holds that true.
+     */
+    const app = await bootWithCommitments();
+    const res = await request(app).get(`/api/project-sides/${SERVER}/budget`);
+    const sum = (res.body.commitments ?? []).reduce((n, c) => n + c.allocatedTokens, 0);
+    expect(sum).toBe(res.body.committed);
+    expect(res.body.committed).toBe(200000);
+  });
+
+  test('a healthy side reports zero orphaned, not a missing field', async () => {
+    // The page renders this line only when it is above zero, so `undefined` and `0` would look identical on
+    // screen and differ everywhere else. It is a number.
+    const app = await bootWithCommitments();
+    await request(app).post('/api/agents').send({ name: 'deleted-probe', role: 'documentation' });
+    const res = await request(app).get(`/api/project-sides/${SERVER}/budget`);
+    expect(res.body.orphanedCommitted).toBe(0);
+    expect(res.body.commitments.every((c) => c.agentExists)).toBe(true);
+  });
+
+  test('a dispatch payload does NOT carry the breakdown', async () => {
+    /*
+     * A CORRECTION, kept as a test. The first version put the breakdown in `sideBudgetFor`, which widened all
+     * four of its callers — one of which builds the payload handed to a DISPATCHED RUNNER. That would have told
+     * a borrowed agent's wrapper the names and sizes of every other commitment on that customer's side. The
+     * numbers are an internal primitive; who holds them is an operator-facing read.
+     */
+    const source = readFileSync(new URL('../backend-v2.js', import.meta.url), 'utf8');
+    const helper = /function sideBudgetFor\(sideId\) \{[\s\S]*?\n\}/.exec(source)?.[0] ?? '';
+    expect(helper).not.toMatch(/commitments|orphanedCommitted/);
+    expect(source).toMatch(/sideCommitmentsFor\(side\)/);
+  });
+});

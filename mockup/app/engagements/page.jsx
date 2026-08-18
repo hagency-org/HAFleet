@@ -118,10 +118,20 @@ function ProjectSides({ t }) {
       );
     }
     if (allocated === 0) return <span className="overqual">{t('en.allocClosed')}</span>;
+    /*
+     * THE ORPHAN LINE, and it says nothing on a healthy side. A delete now releases its commitments, so
+     * `orphanedCommitted` is 0 and this renders nothing — it exists for fleets that predate that fix, where
+     * the committed figure includes promises to agents that no longer exist. Silence when the number is
+     * zero is what keeps it worth reading when it is not.
+     */
+    const orphaned = side.budget.orphanedCommitted ?? 0;
     return (
       <>
         <span>{t('en.allocLeft', { left: fmtTokens(remaining), alloc: fmtTokens(allocated) })}</span>
         <span className="dim">{t('en.allocCommitted', { n: fmtTokens(committed) })}</span>
+        {orphaned > 0 ? (
+          <span className="stranded">{t('en.allocOrphaned', { n: fmtTokens(orphaned) })}</span>
+        ) : null}
       </>
     );
   };

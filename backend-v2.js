@@ -8557,6 +8557,41 @@ function sideBudgetFor(sideId) {
 }
 
 /**
+ * What the committed number is made of, and whether each part still has an agent behind it.
+ *
+ * IT EXISTS BECAUSE THE TOTAL ALONE IS UNANSWERABLE. `已承诺 200k` beside a project with nobody assigned
+ * gave the operator no way to ask what the 200k was; finding out meant fetching the engagement list,
+ * fetching the agent list, and cross-referencing them by hand. Three of those four commitments belonged to
+ * `e2e-probe-*` agents deleted hours earlier.
+ *
+ * SEPARATE FROM `sideBudgetFor` ON PURPOSE, and this was a correction. Adding the breakdown to that helper
+ * widened all four of its callers, one of which builds a payload handed to a DISPATCHED RUNNER — which
+ * would have told a borrowed agent's wrapper the names and sizes of every other commitment on that
+ * customer's side. The numbers are an internal primitive; who holds them is an operator-facing read.
+ *
+ * `agentExists` IS COMPUTED, not stored. An engagement referring to a deleted agent is precisely the state
+ * being reported, so a stored flag would have to be maintained by the same delete path that failed to
+ * maintain the commitment in the first place.
+ *
+ * A DELETE NO LONGER LEAVES ONE BEHIND (see `app.delete('/api/agents/:name')`), so on a fleet running this
+ * code `orphanedCommitted` should stay 0. It is reported anyway: fleets predating that fix still hold
+ * orphans, and a number that is normally zero is the useful kind to show.
+ */
+function sideCommitmentsFor(side) {
+  const commitments = engagementStore.commitmentsForProjectSide(side.serverName)
+    .map((row) => ({
+      ...row,
+      agentExists: Boolean(row.agent && isAgentRecord(agents[normalizeAgentName(row.agent)])),
+    }));
+  return {
+    commitments,
+    orphanedCommitted: commitments
+      .filter((row) => !row.agentExists)
+      .reduce((n, row) => n + (row.allocatedTokens ?? 0), 0),
+  };
+}
+
+/**
  * The project side a room belongs to, or null when the id carries no server.
  *
  * A room id is `!local:server.name`, and without federation the server part IS the project side —
@@ -8817,7 +8852,8 @@ app.put('/api/project-sides/:id/allocation', requireBearer, (req, res) => {
 app.get('/api/project-sides/:id/budget', requireBearer, (req, res) => {
   const budget = sideBudgetFor(req.params.id);
   if (!budget) return res.status(404).json({ error: 'project side not found' });
-  return res.json({ ok: true, sideId: projectSideStore.getSide(req.params.id).id, ...budget });
+  const side = projectSideStore.getSide(req.params.id);
+  return res.json({ ok: true, sideId: side.id, ...budget, ...sideCommitmentsFor(side) });
 });
 
 /*
