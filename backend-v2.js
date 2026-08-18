@@ -13046,21 +13046,40 @@ async function sweepProjectRoomMembership() {
  * the caller learns exactly which seats are still occupied, which is the honest version of a cleanup that
  * cannot be guaranteed.
  *
- * ROOMS COME FROM THE BINDINGS, not from the homeserver. Asking which rooms an agent is in requires the
- * agent's own view, and an appservice side mints no per-agent token; the bindings are the record of where
- * we put it, which is the same source `sweepProjectRoomMembership` trusts to put it back.
+ * ROOMS COME FROM ENGAGEMENTS **AND** BINDINGS, and the first version used bindings alone — which made it
+ * ineffective on the fleet it was written for. Proved by running the whole sequence after deploying it:
+ * `@ac_e2e-probe-1787089246` was still in the room afterwards, because an agent reaches a project room
+ * through `admitAgentToProjectRoom(engagement)` and this deployment had NO bindings at all (its engagements
+ * were approved without a resolvable owner). The comment even claimed `sweepProjectRoomMembership` reads
+ * bindings; it iterates active engagements. A source misread while writing the thing that depended on it.
+ *
+ * EVERY STATE OF ENGAGEMENT, not just active. An ended engagement does not remove the agent from the room,
+ * so the room it named is still a seat to give back — and this runs BEFORE the release loop below, so the
+ * active ones are still there to be read either way.
+ *
+ * NOT FROM THE HOMESERVER, which would be the authoritative list: asking which rooms a user is in needs
+ * that user's own view, and an appservice side mints no per-agent token. So this is our record of where we
+ * put it, and anything we did not record is out of reach — which is why the outcomes are reported.
  */
 async function withdrawAgentFromProjectRooms(agentName) {
   const outcomes = [];
-  let bindings = [];
+  const rooms = new Set();
   try {
-    bindings = approvalStore.listBindings({ agent: agentName, includeInactive: true });
+    for (const binding of approvalStore.listBindings({ agent: agentName, includeInactive: true })) {
+      if (binding?.projectRoomId) rooms.add(binding.projectRoomId);
+    }
   } catch (error) {
-    return [{ roomId: null, left: false, reason: `bindings unreadable: ${error?.message ?? error}` }];
+    outcomes.push({ roomId: null, left: false, reason: `bindings unreadable: ${error?.message ?? error}` });
   }
-  for (const binding of bindings) {
-    const roomId = binding?.projectRoomId;
-    if (!roomId) continue;
+  try {
+    for (const engagement of engagementStore.list({})) {
+      if (normalizeAgentName(engagement?.agent) !== agentName) continue;
+      if (engagement?.projectRoomId) rooms.add(engagement.projectRoomId);
+    }
+  } catch (error) {
+    outcomes.push({ roomId: null, left: false, reason: `engagements unreadable: ${error?.message ?? error}` });
+  }
+  for (const roomId of rooms) {
     const sideId = sideIdForRoom(roomId);
     const side = sideId ? projectSideStore.getSide(sideId) : null;
     if (!side) {

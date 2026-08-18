@@ -702,6 +702,45 @@ describe('deleting an agent releases the budget it was holding', () => {
     expect(crew.members).toEqual(['someone-else']);   // the OTHER member stays
   });
 
+  test('a room reached through an ENGAGEMENT is withdrawn, with no binding anywhere', async () => {
+    /*
+     * THE CASE THAT MADE THE FIRST VERSION USELESS ON THE FLEET IT WAS WRITTEN FOR. Rooms were taken from
+     * bindings alone; an agent actually reaches a project room through `admitAgentToProjectRoom(engagement)`,
+     * and that deployment had NO bindings at all because its engagements were approved without a resolvable
+     * owner. Proved by running the whole sequence after deploying: the agent was still in the room.
+     *
+     * Every test passed both before and after that fix, which is the useful part of this one existing.
+     */
+    const app = await bootWithAgent();
+    await request(app).post('/api/project-sides').set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ server_name: 'gone.test', api_base_url: 'http://127.0.0.1:9' });
+    await request(app).put('/api/project-sides/gone.test/credential')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ credential: { kind: 'appservice', asToken: 'as_t', hsToken: 'hs_t', namespace: '@ac_.*', senderLocalpart: 'hafleet' } });
+    await request(app).put('/api/project-sides/gone.test/allocation')
+      .set('Authorization', `Bearer ${API_TOKEN}`).send({ allocatedTokens: 1000000 });
+
+    const preset = await request(app).post('/api/framework-presets')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ name: 'wd', framework: 'claude', model: 'claude-sonnet-5', ceiling: { tokens: 500000, period: 'monthly' } });
+    await request(app).put(`/api/agents/${AGENT}/preset`).set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ presetId: preset.body.preset.id });
+    const created = await request(app).post('/api/engagements').set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({
+        agent: AGENT, role: 'documentation', project: 'w', requester: '@op:gone.test',
+        requestedTokens: 10000, projectRoomId: '!viaengagement:gone.test',
+      });
+    await request(app).post(`/api/engagements/${created.body.engagement.id}/verdict`)
+      .set('Authorization', `Bearer ${API_TOKEN}`).send({ approve: true, allocatedTokens: 10000 });
+
+    // No binding exists — the approval could not resolve an owner, which is the live fleet's state.
+    const res = await request(app).delete(`/api/agents/${AGENT}?force=true`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    const room = (res.body.leftProjectRooms ?? []).find((r) => r.roomId === '!viaengagement:gone.test');
+    expect(room).toBeTruthy();                              // the room was TRIED
+    expect(room.mxid).toBe(`@ac_${AGENT}:gone.test`);
+  });
+
   test("a customer's unreachable homeserver does NOT make the agent unremovable", async () => {
     /*
      * THE ONE DELIBERATE ASYMMETRY IN THIS DELETE PATH. Releasing a commitment and leaving a group are local
