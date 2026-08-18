@@ -24,6 +24,7 @@ import { validateOutboxRequest } from '../lib/acp-outbox.js';
 import { anyReplyable, buildReplyHint } from '../lib/reply-hint.js';
 import { codexPermissionRequestNeedsOwnerApproval } from '../lib/codex-permission-hook.js';
 import { buildSummary } from '../lib/message-summary.js';
+import { acpUpdateToEvent, decideProgressEvent, parseProgressFilter } from '../lib/progress-filter.js';
 import { createAcpRuntime } from '../lib/runtime/acp.js';
 import { getFramework } from '../lib/frameworks/index.js';
 
@@ -511,6 +512,131 @@ let lastNudgedCount = 0;
  * to fetch the detail itself. Deliberately carries no message bodies — the point
  * of the change is that the agent reads its own inbox.
  */
+/*
+ * Progress from ACP, which needs nothing installed anywhere.
+ *
+ * WHY HERE AND NOT IN A HOOK. Each framework installs hooks differently — a different file, a different
+ * scope, a different trust model — and octos has none at all, so "one hook for every framework" cannot
+ * exist. `session/update` can: this host already receives it, `lib/runtime/acp.js` already parses tool
+ * calls out of it, and three of four frameworks speak the protocol. Nothing is written into a customer's
+ * tree and no trust prompt has to be accepted.
+ *
+ * THE SAME FILTER DECIDES. `lib/progress-filter.js` is transport-agnostic on purpose, so a rule an operator
+ * wrote — `{"perGroup": {"acme": {"events": ["done"]}}}` — applies to an ACP agent without being written a
+ * second time in a second vocabulary.
+ *
+ * DURING THE TURN, not after it. The block below already walks `updatesSince` when the turn ENDS, which is
+ * a post-mortem: useful in the log, useless to somebody waiting ten minutes in a room. This polls while the
+ * turn is in flight, which is the only version that answers "is it alive".
+ */
+/**
+ * The progress policy, from the same file `bin/hafleet-progress` reads.
+ *
+ * `$HOME/.hafleet/progress-filter.json` rather than the runtime directory, because the router does not pass
+ * `HAFLEET_RUNTIME_DIR` to a dispatched agent — see the note in the reporter. One location for one policy:
+ * an operator who narrows what a customer's room hears must not have to do it twice because one agent runs
+ * under ACP and another under a hook.
+ *
+ * Re-read per turn, so a change takes effect without restarting a long-lived host. Absent is the built-in
+ * default; unreadable is reported by `parseProgressFilter`, which fails closed.
+ */
+function readProgressFilter() {
+  const file = (process.env.HAFLEET_PROGRESS_FILTER || '').trim()
+    || path.join(os.homedir(), '.hafleet', 'progress-filter.json');
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function makeProgressEmitter({ name, messages, filterDoc, cursor, runtime: rt, post, log: logLine }) {
+  /*
+   * THE ANCHOR IS THE NEWEST MESSAGE FROM SOMEONE ELSE. Progress threads under the question it belongs to,
+   * and the agent's own previous output must not be the anchor — that would thread progress under progress,
+   * nesting one level deeper every turn.
+   */
+  const foreign = (messages || [])
+    .filter((m) => m && typeof m.id === 'string' && String(m.from || '').toLowerCase() !== String(name).toLowerCase())
+    .sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
+  const anchor = foreign[0] || null;
+
+  const group = anchor && typeof anchor.group === 'string' && anchor.group ? anchor.group : null;
+  const to = anchor && !group && typeof anchor.from === 'string' ? anchor.from : null;
+
+  const parsed = parseProgressFilter(filterDoc, { group });
+  const counts = {};
+  let lastSentAt = 0;
+  let timer = null;
+  let position = cursor;
+
+  /*
+   * NO ANCHOR IS SILENCE, not a fallback to the room. Posting at a shared room's top level is what the
+   * operator rejected — 「把其他人的对话都冲了」 — and it would be invisible to whoever runs the agent while
+   * obvious to everyone else in the room.
+   */
+  const usable = Boolean(anchor) && (group || to) && parsed.ok;
+  if (!parsed.ok) logLine(`progress: filter unusable (${parsed.reason}); reporting nothing`);
+
+  async function flush(kind) {
+    const parts = Object.entries(counts).map(([v, n]) => (n > 1 ? `${v} ×${n}` : v));
+    if (kind === 'step' && !parts.length) return;
+    const summary = kind === 'done'
+      ? (parts.length ? `finished — ${parts.join(', ')}` : 'finished')
+      : parts.join(', ');
+    if (!summary) return;
+    lastSentAt = Date.now();
+    try {
+      await post('/api/messages', {
+        method: 'POST',
+        body: {
+          from: name,
+          type: 'info',
+          summary: `⏳ ${summary}`,
+          full: `⏳ ${summary}`,
+          reply_to: anchor.id,
+          incidental: true,
+          ...(group ? { group } : { to }),
+        },
+      });
+      for (const key of Object.keys(counts)) delete counts[key];
+    } catch (error) {
+      // Counts are KEPT on failure, so the next line still describes the work rather than losing it. A
+      // progress report that breaks the work it describes has made things worse than not existing.
+      logLine(`progress: could not post (${String(error?.message || error).slice(0, 80)})`);
+    }
+  }
+
+  function collect() {
+    for (const { update } of rt.updatesSince(name, position)) {
+      const mapped = acpUpdateToEvent(update);
+      if (!mapped) continue;
+      const decision = decideProgressEvent({ ...mapped, filter: parsed.filter });
+      if (!decision.report) continue;
+      counts[decision.verb] = (counts[decision.verb] || 0) + 1;
+    }
+    position = rt.updateCursor(name);
+  }
+
+  return {
+    start() {
+      if (!usable) return;
+      timer = setInterval(() => {
+        collect();
+        if (Date.now() - lastSentAt >= parsed.filter.minIntervalMs) flush('step');
+      }, Math.min(5000, parsed.filter.minIntervalMs));
+      // Not a reason to keep the host alive: if everything else is done, so is this.
+      timer.unref?.();
+    },
+    async finish() {
+      if (timer) clearInterval(timer);
+      if (!usable) return;
+      collect();
+      await flush('done');
+    },
+  };
+}
+
 function buildNudge(pending, messages) {
   const senders = [...new Set(messages.map((m) => m && m.from).filter(Boolean))];
   const lines = [
@@ -620,7 +746,21 @@ async function pollAndDeliver() {
     lastNudgedCount = pending;
     log(`nudging: ${pending} unread`);
     const cursor = runtime.updateCursor(name);
-    const stopReason = await runtime.prompt(name, buildNudge(pending, messages));
+    /*
+     * Progress runs FOR the duration of the prompt, which is the only window in which "is it alive" is a
+     * live question. Started before and finished after, in a `finally`, so a turn that throws still stops
+     * the timer — a leaked interval on a long-lived host would keep posting about a turn that ended.
+     */
+    const progress = makeProgressEmitter({
+      name, messages, filterDoc: readProgressFilter(), cursor, runtime, post: api, log,
+    });
+    progress.start();
+    let stopReason;
+    try {
+      stopReason = await runtime.prompt(name, buildNudge(pending, messages));
+    } finally {
+      await progress.finish();
+    }
     log(`turn finished (${stopReason})`);
     // Only CONSECUTIVE failures should escalate to a host restart. Without this the
     // counter is a lifetime total and three unrelated timeouts days apart would take

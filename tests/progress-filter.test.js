@@ -10,6 +10,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   DEFAULT_PROGRESS_FILTER,
+  acpUpdateToEvent,
   decideProgressEvent,
   parseProgressFilter,
   verbFor,
@@ -146,5 +147,80 @@ describe('failing closed on configuration, open on absence', () => {
     const once = decideProgressEvent({ event: 'PostToolUse', tool: 'Read', filter });
     const twice = decideProgressEvent({ event: 'PostToolUse', tool: 'Read', filter });
     expect(once).toEqual(twice);
+  });
+});
+
+describe('ACP as the transport, which needs nothing installed', () => {
+  /*
+   * WHY THIS EXISTS AND HOOKS DO NOT COVER IT. Each framework installs hooks differently — different file,
+   * different scope, different trust model — and octos has none at all, so one hook for every framework is
+   * not a thing that can be built. `session/update` is: HAFleet already receives it, already parses tool
+   * calls from it, and three of four frameworks speak the protocol. The mapping below is what lets ONE
+   * policy and ONE vocabulary serve both transports.
+   */
+  test('a tool call becomes the same shape a hook payload has', () => {
+    expect(acpUpdateToEvent({ sessionUpdate: 'tool_call', kind: 'read', toolCallId: 't1' }))
+      .toEqual({ event: 'PostToolUse', tool: 'Read' });
+  });
+
+  test('kinds map to the tool names an operator already filters by', () => {
+    /*
+     * The reason `execute` becomes `Bash` rather than its own name. An operator writing
+     * `tools: { exclude: ['Bash'] }` means "do not tell the room I run commands", and that must hold for an
+     * ACP agent too — without them writing the rule twice in two vocabularies.
+     */
+    const filter = parseProgressFilter({ tools: { exclude: ['Bash'] } }).filter;
+    const mapped = acpUpdateToEvent({ sessionUpdate: 'tool_call', kind: 'execute' });
+    expect(mapped.tool).toBe('Bash');
+    expect(decideProgressEvent({ ...mapped, filter }).report).toBe(false);
+  });
+
+  test('thinking is dropped rather than reported', () => {
+    // "Still thinking" every minute is the noise this feature exists to avoid; the typing indicator already
+    // says it, without an event.
+    expect(acpUpdateToEvent({ sessionUpdate: 'tool_call', kind: 'think' })).toBeNull();
+  });
+
+  test('an unknown kind is generic activity, never its own name', () => {
+    /*
+     * No sample of a live ACP session existed when this was written, so the table is what the spec states
+     * and this fallback is what protects the rest. A future kind reads as activity — which is also the right
+     * privacy default, since an unvetted kind is a fact about the deployment.
+     */
+    const mapped = acpUpdateToEvent({ sessionUpdate: 'tool_call', kind: 'something_new_in_2027' });
+    expect(mapped.tool).toBe('AcpTool');
+    expect(decideProgressEvent({ ...mapped, filter: DEFAULT_PROGRESS_FILTER }))
+      .toMatchObject({ report: true, verb: 'worked' });
+  });
+
+  test('a repeat update for one call is not counted again', () => {
+    /*
+     * `tool_call_update` arrives repeatedly for a single call as its status changes. Counting each would
+     * report "read ×7" for one file — inflating the only numbers this puts in front of a customer.
+     */
+    expect(acpUpdateToEvent({ sessionUpdate: 'tool_call_update', kind: 'read', status: 'completed' }))
+      .toBeNull();
+  });
+
+  test('everything that is not a tool call is ignored', () => {
+    for (const kind of ['agent_message_chunk', 'plan', 'user_message_chunk', 'agent_thought_chunk']) {
+      expect(acpUpdateToEvent({ sessionUpdate: kind })).toBeNull();
+    }
+    expect(acpUpdateToEvent(null)).toBeNull();
+    expect(acpUpdateToEvent({})).toBeNull();
+  });
+
+  test('the title is never carried, because the agent wrote it', () => {
+    /*
+     * A title is free text: "Read /home/customer/secrets.env". Putting it in a customer's room would leak
+     * exactly what the verb table exists to keep out, so no field of the mapping may contain it.
+     */
+    const mapped = acpUpdateToEvent({
+      sessionUpdate: 'tool_call',
+      kind: 'read',
+      title: 'Read /home/customer/.env with the API keys',
+      rawInput: { arguments: { path: '/home/customer/.env' } },
+    });
+    expect(JSON.stringify(mapped)).not.toMatch(/secrets|\.env|customer/);
   });
 });
