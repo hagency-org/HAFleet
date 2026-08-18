@@ -238,6 +238,12 @@ describe('backend agents API', () => {
       deleted: true,
       name: 'alpha',
       sessionKilled: expect.any(Boolean),
+      /*
+       * `releasedEngagements` joined it when force-delete started revoking the agent's active engagements —
+       * a removed agent used to hold a project side's committed tokens forever. This assertion is what
+       * caught the new field, which is exactly what the note above says it is for.
+       */
+      releasedEngagements: expect.any(Array),
     });
 
     const agentResponse = await request(context.app).get('/api/agents/alpha');
@@ -589,5 +595,142 @@ describe('backend agents API persistence failures', () => {
     expect(readJson(cursorsPath(context.runtimeDir)).forcey).toEqual(before.cursorsBefore.forcey);
     expect(readJson(tombstonesPath(context.runtimeDir))).toEqual(before.tombstonesBefore);
     expect(existsSync(before.agentDataDir)).toBe(true);
+  });
+});
+
+describe('deleting an agent releases the budget it was holding', () => {
+  /*
+   * FOUND ON THE LIVE FLEET BY THE OPERATOR READING A SCREEN: `已承诺 200k` beside a project with nobody
+   * assigned. Three of the four active engagements belonged to `e2e-probe-*` agents that no longer existed —
+   * 150k of a project side's quota held by agents deleted hours earlier, and no path in the product could ever
+   * release it. A contributor's quota drains by attrition.
+   *
+   * REMOVING A PROJECT SIDE ALREADY DID THIS CORRECTLY, which is what makes it a defect rather than an open
+   * question: the same rule enforced on one side of the same relationship and not the other.
+   *
+   * SOFT DELETE MUST NOT, and getting that wrong was a correction mid-change. `revoke` has no inverse, so an
+   * `undelete` could not restore what a reversible action had destroyed.
+   */
+  const AGENT = 'budget-holder';
+  const API_TOKEN = 'op-budget';
+
+  let ctx;
+  afterEach(async () => {
+    await ctx?.close?.();
+    ctx = null;
+  });
+
+  async function bootWithAgent() {
+    ctx = await createBackendTestContext('hafleet-agents-budget-release-', {
+      agents: { [AGENT]: { name: AGENT, type: 'agent', kind: 'agent', capability: 'coding' } },
+      env: { API_TOKEN },
+    });
+    return ctx.app;
+  }
+
+  let PRESET_ID = null;
+
+  async function withActiveEngagement(app) {
+    await request(app).post('/api/project-sides').set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ server_name: 'holder.test', api_base_url: 'https://matrix.holder.test' });
+    await request(app).put('/api/project-sides/holder.test/allocation')
+      .set('Authorization', `Bearer ${API_TOKEN}`).send({ allocatedTokens: 1000000 });
+
+    const preset = await request(app).post('/api/framework-presets')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({
+        name: 'holder-preset', framework: 'claude', model: 'claude-sonnet-5',
+        ceiling: { tokens: 500000, period: 'monthly' },
+      });
+    PRESET_ID = preset.body.preset.id;
+    await request(app).put(`/api/agents/${AGENT}/preset`).set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ presetId: PRESET_ID });
+
+    const created = await request(app).post('/api/engagements').set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({
+        agent: AGENT, role: 'documentation', project: 'holding', requester: '@op:holder.test',
+        requestedTokens: 50000, projectRoomId: '!room:holder.test',
+      });
+    const id = created.body.engagement?.id;
+    await request(app).post(`/api/engagements/${id}/verdict`).set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ approve: true, allocatedTokens: 50000 });
+    return id;
+  }
+
+  test('a force delete revokes the active engagement and says which', async () => {
+    const app = await bootWithAgent();
+    const id = await withActiveEngagement(app);
+
+    const before = await request(app).get('/api/project-sides/holder.test/budget')
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(before.body.committed).toBe(50000);
+
+    const res = await request(app).delete(`/api/agents/${AGENT}?force=true`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(res.status).toBe(200);
+    // Reported: releasing somebody's committed budget is a side effect the caller did not ask for.
+    expect(res.body.releasedEngagements).toContain(id);
+
+    const after = await request(app).get('/api/project-sides/holder.test/budget')
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(after.body.committed).toBe(0);
+  });
+
+  test("another agent's commitment is untouched", async () => {
+    /*
+     * The blast radius. This loop walks EVERY active engagement in the fleet and picks its targets by name;
+     * an inverted or missing filter would release the commitments of every other agent at once, which is
+     * worse than the leak it fixes and would look like a successful delete.
+     */
+    const app = await bootWithAgent();
+    const mine = await withActiveEngagement(app);
+
+    const OTHER = 'other-holder';
+    await request(app).post('/api/agents').set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ name: OTHER, role: 'documentation', identity: 'bystander' });
+    await request(app).put(`/api/agents/${OTHER}/preset`).set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ presetId: PRESET_ID });
+    const theirs = await request(app).post('/api/engagements').set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({
+        agent: OTHER, role: 'documentation', project: 'holding', requester: '@op:holder.test',
+        requestedTokens: 30000, projectRoomId: '!room:holder.test',
+      });
+    const theirId = theirs.body.engagement?.id;
+    expect(theirId).toBeTruthy();
+    await request(app).post(`/api/engagements/${theirId}/verdict`).set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ approve: true, allocatedTokens: 30000 });
+
+    const res = await request(app).delete(`/api/agents/${AGENT}?force=true`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(res.body.releasedEngagements).toEqual([mine]);
+
+    // Still active, and its 30k still committed.
+    const after = await request(app).get('/api/project-sides/holder.test/budget')
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(after.body.committed).toBe(30000);
+    // There is no GET /api/engagements/:id — the list is the only read, which is what the first version of
+    // this assertion got wrong (it read a route that does not exist and saw `undefined`, not a revocation).
+    const list = await request(app).get('/api/engagements?state=active')
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    const survivors = (list.body.engagements ?? []).map((e) => e.id);
+    expect(survivors).toContain(theirId);
+    expect(survivors).not.toContain(mine);
+  });
+
+  test('a soft delete keeps the commitment, because it can be undone', async () => {
+    /*
+     * `revoke` has no inverse. Releasing here would make a reversible action have one permanent consequence, so
+     * an inactive agent keeps its promise — the record survives and the operator can change their mind.
+     */
+    const app = await bootWithAgent();
+    await withActiveEngagement(app);
+
+    const res = await request(app).delete(`/api/agents/${AGENT}`).set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(res.status).toBe(200);
+    expect(res.body.releasedEngagements ?? []).toEqual([]);
+
+    const after = await request(app).get('/api/project-sides/holder.test/budget')
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(after.body.committed).toBe(50000);
   });
 });
