@@ -8492,12 +8492,42 @@ function withProjectStaffing(side) {
     list.push(b);
     byRoom.set(b.projectRoomId, list);
   }
+  /*
+   * APPROVED BUT NOT ATTACHED, per room — the state that reads as "nobody is on this project".
+   *
+   * `agents` above comes from BINDINGS, and an engagement going active only creates one when an owner can
+   * be resolved; without `HAFLEET_OWNER_MXID` the bind fails and records `bindError` on the engagement.
+   * That is correct and it was invisible: on a live fleet a project with 50k committed to `soaker` showed
+   * 「还没派人」, while the reason — "no owner known for this agent: set HAFLEET_OWNER_MXID and
+   * HAFLEET_OWNER_DM_ROOM" — sat in the engagement record that no page read. The approval path's own
+   * comment claims the failure is "shown in the console"; it was not.
+   *
+   * JOINED HERE, not on the page. The console is explicit that who staffs a project is the backend's
+   * answer and re-deriving it client-side would be a second answer to one question — so the same rule
+   * applies to why nobody does.
+   *
+   * A SEPARATE FIELD FROM `agents`, because an approved-but-unattached agent is not staff. Listing it
+   * there would make a project look worked-on when nothing can reach it.
+   */
+  let awaitingByRoom = new Map();
+  try {
+    for (const e of engagementStore.list({ state: 'active' })) {
+      if (!e?.projectRoomId || e.bound === true) continue;
+      const list = awaitingByRoom.get(e.projectRoomId) || [];
+      list.push({ agent: e.agent ?? null, role: e.role ?? null, bindError: e.bindError ?? null });
+      awaitingByRoom.set(e.projectRoomId, list);
+    }
+  } catch {
+    // Same rule as the binding read above: this must not cost the caller the side record it asked for.
+    awaitingByRoom = new Map();
+  }
   return {
     ...side,
     projects: side.projects.map((project) => {
       const rows = project.roomId ? (byRoom.get(project.roomId) || []) : [];
       return {
         ...project,
+        awaitingBind: project.roomId ? (awaitingByRoom.get(project.roomId) || []) : [],
         agents: rows.map((b) => {
           const record = agents[b.agent];
           return {

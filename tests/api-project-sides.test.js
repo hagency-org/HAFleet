@@ -1678,3 +1678,79 @@ describe('what the committed figure is made of', () => {
     expect(source).toMatch(/sideCommitmentsFor\(side\)/);
   });
 });
+
+describe('a project with an approved engagement nobody attached', () => {
+  /*
+   * THE TWO TRUE STATEMENTS THAT MADE NO SENSE TOGETHER. On the live fleet, one project read 「还没派人」
+   * in its staff column and 「已承诺 50k」 in its budget column. Both were correct: `agents` comes from
+   * BINDINGS, and an engagement going active only creates one when an owner can be resolved — without
+   * `HAFLEET_OWNER_MXID` the bind fails and records why on the engagement.
+   *
+   * The reason was already in the data (`bindError: "no owner known for this agent: set
+   * HAFLEET_OWNER_MXID and HAFLEET_OWNER_DM_ROOM…"`) and no page read it, though the approval path's own
+   * comment says the failure is "shown in the console". So the operator saw a project that looked
+   * untouched, with money promised against it, and nothing pointing at the setting that would fix it.
+   */
+  const AGENT = 'promised-nobody-attached';
+  const ROOM = `!proj:${SERVER}`;
+
+  async function bootWithApprovedUnbound({ bound = false, bindError = 'no owner known for this agent' } = {}) {
+    const app = await boot({
+      agents: { [AGENT]: { name: AGENT, type: 'agent', kind: 'agent', capability: 'coding' } },
+      rawDataFiles: {
+        'engagements.json': JSON.stringify({
+          version: 1,
+          engagements: {
+            promised: {
+              id: 'promised', state: 'active', agent: AGENT, createdAt: 1, role: 'documentation',
+              projectRoomId: ROOM, allocatedTokens: 50000, bound, bindError,
+            },
+          },
+          whitelist: {}, offers: {}, audit: [],
+        }),
+      },
+    });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    await request(app).put(`/api/project-sides/${SERVER}/allocation`).send({ allocated_tokens: 1000000 });
+    await request(app).post(`/api/project-sides/${SERVER}/projects`)
+      .send({ name: 'a project', room_id: ROOM });
+    return app;
+  }
+
+  const projectFrom = async (app) => {
+    const res = await request(app).get('/api/project-sides');
+    const side = (res.body.sides ?? []).find((s) => s.id === SERVER);
+    return (side?.projects ?? [])[0];
+  };
+
+  test('it says who was approved and why they are not attached', async () => {
+    const project = await projectFrom(await bootWithApprovedUnbound());
+    expect(project.agents).toEqual([]);              // still not staff: nothing can reach the project
+    expect(project.awaitingBind).toHaveLength(1);
+    expect(project.awaitingBind[0].agent).toBe(AGENT);
+    expect(project.awaitingBind[0].bindError).toMatch(/no owner known/);
+  });
+
+  test('an engagement that DID bind is staff, not awaiting', async () => {
+    /*
+     * The distinction has to hold in both directions, or the new line would appear beside every healthy
+     * project and stop meaning anything. `bound: true` belongs to the binding store's answer.
+     */
+    const project = await projectFrom(await bootWithApprovedUnbound({ bound: true, bindError: null }));
+    expect(project.awaitingBind).toEqual([]);
+  });
+
+  test('a project with no engagement at all is still plainly unstaffed', async () => {
+    // 「还没派人」 must survive. It is the honest answer when nobody has been promised, and replacing it
+    // everywhere with the new wording would trade one misleading cell for another.
+    const app = await boot({ agents: {} });
+    await request(app).post('/api/project-sides')
+      .send({ server_name: SERVER, api_base_url: 'http://127.0.0.1:8008' });
+    await request(app).post(`/api/project-sides/${SERVER}/projects`)
+      .send({ name: 'untouched', room_id: `!empty:${SERVER}` });
+    const project = await projectFrom(app);
+    expect(project.agents).toEqual([]);
+    expect(project.awaitingBind).toEqual([]);
+  });
+});

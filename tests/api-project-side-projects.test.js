@@ -332,3 +332,50 @@ describe('外派员工 — the third level is a join, not a field', () => {
     expect(fromList).toEqual(await projects(app));
   });
 });
+
+describe('a room spelling this route does not read', () => {
+  /*
+   * THE FIFTH INSTANCE OF ONE DEFECT, which is why this is a refusal and not a fourth alias.
+   *
+   * `upsertProject` reads `room_id`, `roomId` and `room`. A caller sending `project_room_id` — the spelling
+   * `upsertBinding` takes, and the concept the engagement API carries as `projectRoomId` — got `ok: true`
+   * and a project with NO ROOM. The store's own note counts four earlier writes found the same way: success
+   * reported, payload dropped, discoverable only by reading the record back. I found the fifth by writing a
+   * test that passed for the wrong reason.
+   *
+   * Aliases do not converge; each one added makes the next miss more surprising. Naming the right spelling
+   * at the moment of the mistake is the only version that ends the series.
+   */
+  test('project_room_id is refused, and the message names the spellings that work', async () => {
+    const app = await boot();
+    const res = await addProject(app, { name: 'p', project_room_id: `!r:${SIDE}` });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.body.error).toMatch(/room_id/);
+
+    // AND NOTHING WAS CREATED. A refusal that still wrote the roomless project would be the same defect
+    // with a louder log.
+    expect(await projects(app)).toEqual([]);
+  });
+
+  test('all three accepted spellings still store the room', async () => {
+    // The refusal must not be a rename. These are the callers that already work.
+    const app = await boot();
+    for (const [i, body] of [
+      { name: 'via-snake', room_id: `!a:${SIDE}` },
+      { name: 'via-camel', roomId: `!b:${SIDE}` },
+      { name: 'via-short', room: `!c:${SIDE}` },
+    ].entries()) {
+      const res = await addProject(app, body);
+      expect(res.status).toBe(200);
+      expect(res.body.project.roomId).toBe(`!${'abc'[i]}:${SIDE}`);
+    }
+  });
+
+  test('an unrelated extra field is still ignored, not refused', async () => {
+    // The check is narrow: only keys that clearly mean a room. Rejecting every unknown key would break
+    // callers that send more than this function reads.
+    const app = await boot();
+    const res = await addProject(app, { name: 'p', note: 'fine', whatever: 1 });
+    expect(res.status).toBe(200);
+  });
+});

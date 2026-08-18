@@ -443,6 +443,17 @@ export async function fetchLive() {
                 retiredAt: a.retiredAt ?? null,
                 role: a.role ?? null,
               })),
+              /*
+               * APPROVED BUT NOT ATTACHED. `agents` comes from bindings, so a project whose engagement was
+               * approved without a resolvable owner has an empty `agents` and read as 「还没派人」 — while the
+               * reason sat in the engagement's `bindError`, which no page read. Carried so the staff cell can
+               * say which of the two it is.
+               */
+              awaitingBind: (pr.awaitingBind ?? []).map((w) => ({
+                agent: w.agent,
+                role: w.role ?? null,
+                bindError: w.bindError ?? null,
+              })),
             })),
           };
         }));
