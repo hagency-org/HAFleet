@@ -8513,6 +8513,19 @@ function withProjectStaffing(side) {
   try {
     for (const e of engagementStore.list({ state: 'active' })) {
       if (!e?.projectRoomId || e.bound === true) continue;
+      /*
+       * THE BINDING STORE IS THE AUTHORITY ON ATTACHMENT, and the engagement's `bound` flag is only a record
+       * of what happened when that engagement was approved. The two disagree in a real and ordinary way: an
+       * agent bound by an earlier engagement keeps that binding, so a later engagement approved without an
+       * owner records `bound: false` about an agent the project can already reach.
+       *
+       * FOUND ON A SECOND FLEET, not by the tests. One project listed `biglittle` as staff AND twice under
+       * awaiting — which is the false alarm this whole field was supposed to avoid: a line that appears beside
+       * healthy projects stops meaning anything. The first version trusted the flag alone.
+       */
+      const bound = (byRoom.get(e.projectRoomId) || [])
+        .some((b) => b.agent === e.agent && b.active !== false);
+      if (bound) continue;
       const list = awaitingByRoom.get(e.projectRoomId) || [];
       list.push({ agent: e.agent ?? null, role: e.role ?? null, bindError: e.bindError ?? null });
       awaitingByRoom.set(e.projectRoomId, list);
