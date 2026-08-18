@@ -580,4 +580,38 @@ console.log(`\n${failed === 0 ? 'All invariants hold.' : `${failed} FAILED.`}\n`
   );
 }
 
+// 21. a backend enum is not shown to an operator raw
+{
+  /*
+   * The verify action set its note to `body.side.accessState`, so a row read 「accepted 可达」 — the same fact
+   * twice, once in the operator's language and once in the store's raw enum. Repeating the status next to the
+   * status gains nothing, and putting the internal vocabulary on screen invites someone to start matching on it,
+   * which is exactly how invariant 19's defect began.
+   *
+   * The check is narrow on purpose: a raw `accessState` reaching a setter that feeds rendered text. Reading the
+   * field to BRANCH on is what pages are supposed to do — invariant 19 covers whether they branch correctly.
+   */
+  const walk = (dir) => readdirSync(dir).flatMap((entry) => {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) return walk(full);
+    return /\.jsx?$/.test(full) ? [full] : [];
+  });
+  const root = join(import.meta.dirname, '..');
+  const offenders = [];
+  for (const file of [...walk(join(root, 'app')), ...walk(join(root, 'components'))]) {
+    const text = readFileSync(file, 'utf8');
+    /*
+     * MATCHED TO THE STATEMENT, not to balanced parentheses. A first version used `\(([^;]{0,200}?)\)` and
+     * missed the real defect, which spanned several lines and nested calls — a guard that cannot see the bug it
+     * was written for is worse than none, because it certifies the code as checked. Verified against the defect
+     * itself before being kept.
+     */
+    for (const match of text.matchAll(/\b(setNote|setError|setMessage|say)\s*\(([\s\S]*?)\);/g)) {
+      if (/accessState/.test(match[2])) offenders.push(`${file.slice(root.length + 1)}:${match[1]}`);
+    }
+  }
+  check('no page puts a raw accessState into text an operator reads', offenders.length === 0,
+    offenders.join(' '));
+}
+
 process.exit(failed === 0 ? 0 : 1);
