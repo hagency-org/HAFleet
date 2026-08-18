@@ -9118,8 +9118,35 @@ app.post('/api/project-sides/:id/verify', requireBearer, async (req, res) => {
   const existing = projectSideStore.getSide(req.params.id);
   if (!existing) return res.status(404).json({ error: 'project side not found' });
   try {
-    const credential = projectSideStore.credentialFor(req.params.id);
-    const result = await ensureRepresentative({ side: existing, credential });
+    /*
+     * A STAGED CREDENTIAL IS TRIED FIRST, and that is what makes staging finish itself.
+     *
+     * The operator's remaining job is to install the file and restart their homeserver — HAFleet cannot do
+     * either, and should not: writing to a customer's filesystem and restarting their Matrix server are
+     * exactly the authorities `docs/FOR-PROJECT-SIDES.md` promises never to take. But it CAN notice the
+     * moment the install lands, and promote without being asked. So the chore shrinks to "install it", with
+     * no separate "now tell HAFleet" step.
+     *
+     * The live credential is still tried if the staged one fails, so a verify during the window between
+     * issuing and installing reports the truth about what is currently working rather than a failure.
+     */
+    const staged = projectSideStore.pendingCredentialFor(req.params.id);
+    let credential = projectSideStore.credentialFor(req.params.id);
+    let promoted = false;
+    let result = null;
+
+    if (staged) {
+      const stagedResult = await ensureRepresentative({ side: existing, credential: staged });
+      if (stagedResult.accessState === 'accepted') {
+        projectSideStore.promotePendingCredential(req.params.id);
+        credential = projectSideStore.credentialFor(req.params.id);
+        promoted = true;
+        // Reused rather than re-asked. The homeserver just answered for this exact credential, and a second
+        // round trip could only disagree with the first — which would leave the promotion already written.
+        result = stagedResult;
+      }
+    }
+    if (!result) result = await ensureRepresentative({ side: existing, credential });
 
     /*
      * A newly minted representative token is stored BEFORE the verdict. If the order were reversed
@@ -9152,7 +9179,11 @@ app.post('/api/project-sides/:id/verify', requireBearer, async (req, res) => {
         });
       }
     }
-    return res.json({ ok: true, side: projectSideStore.getSide(req.params.id) });
+    /*
+     * `promoted` is reported because it is a change the operator did not ask for in this call and would
+     * otherwise only infer from a field going away. It is the answer to "did my new credential take effect".
+     */
+    return res.json({ ok: true, promoted, side: projectSideStore.getSide(req.params.id) });
   } catch (error) {
     return respondProjectSideError(res, error, 'failed to verify project side');
   }
@@ -9206,14 +9237,16 @@ app.post('/api/project-sides/:id/registration-file', requireBearer, (req, res) =
       code: 'bad_request',
     });
   }
-  if (side.hasCredential && req.query?.replace !== 'true') {
-    return res.status(409).json({
-      error: 'this project side already has a credential; pass ?replace=true to issue new tokens',
-      code: 'credential_exists',
-      detail: 'replacing invalidates the registration the homeserver may already have installed, '
-        + 'which stops delivery until the new file is installed and the homeserver restarted',
-    });
-  }
+  /*
+   * NO 409, AND NO `?replace=true` NEEDED, because issuing no longer breaks anything. A second issue is
+   * STAGED: the live credential keeps working and the new one waits until a `verify` proves the homeserver
+   * accepts it.
+   *
+   * The 409 was there because issuing used to invalidate a registration the homeserver already had. It made
+   * the dangerous act explicit, which was right — but the danger was avoidable, and the operator who hit it
+   * was handed a repair job for a state HAFleet had created by replacing something that worked.
+   */
+  const staging = Boolean(side.hasCredential);
 
   /*
    * REFUSED WITHOUT A RUNTIME DIRECTORY rather than falling back to the repo or to a temp path. A
@@ -9254,10 +9287,11 @@ app.post('/api/project-sides/:id/registration-file', requireBearer, (req, res) =
       hsToken: registration.hs_token,
       namespace: registration.namespaces.users[0].regex,
       senderLocalpart: registration.sender_localpart,
-    });
+    }, { stage: staging });
 
     return res.json({
       ok: true,
+      staged: staging,
       path: file,
       mode: '0600',
       registrationId: registration.id,
@@ -9278,6 +9312,15 @@ app.post('/api/project-sides/:id/registration-file', requireBearer, (req, res) =
        * homeserver you run would be guessing. Both keys are given instead, and the trap is stated as one
        * that was verified rather than as general advice.
        */
+      /*
+       * SAID FIRST when this is a spare, because the operator's mental model after clicking "generate" is
+       * "done" — and the one thing they must know is that nothing changed yet.
+       */
+      ...(staging ? {
+        stagedNote: 'The credential this side is USING has not changed. This new one is held until you '
+          + 'install it and verification proves the homeserver accepts it, so nothing breaks in the '
+          + 'meantime — and if you generated it by mistake, ignore the file and nothing happens.',
+      } : {}),
       nextSteps: [
         'Put this file where your homeserver reads appservice registrations. The key differs by software: '
         + 'Synapse takes `app_service_config_files` (a list of FILES); Palpo takes '

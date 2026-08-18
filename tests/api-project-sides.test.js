@@ -1380,3 +1380,147 @@ describe('the ACTING credential — a second, wider grant', () => {
     expect(JSON.stringify(r.body)).not.toMatch(/[0-9a-f]{64}/);
   });
 });
+
+describe('issuing a second credential does not break the first', () => {
+  /*
+   * WHY THIS EXISTS, in the operator's words: 「为啥生成接单员之后还需要用户去做这些琐事，你应该自动注册」.
+   *
+   * They were right, and the root was not the chore. Issuing REPLACED the live credential, so clicking
+   * "generate" on a working side broke HAFleet's own outbound auth instantly — before they could possibly have
+   * installed the new file. It happened for real: the fleet held one token, the homeserver still had the
+   * previous one, `verify` correctly reported `rejected`, and the operator was handed a repair job for a state
+   * HAFleet had created.
+   *
+   * What CANNOT be automated is stated rather than papered over: writing a file onto a customer's filesystem
+   * and restarting their Matrix server are the authorities `docs/FOR-PROJECT-SIDES.md` promises never to take.
+   * But HAFleet can notice the moment the install lands and promote without being asked, so the remaining job
+   * is "install it" with no separate "now tell HAFleet" step.
+   *
+   * Observed through the API and the on-disk record, the way the rest of this file does — the store's
+   * internals are not part of the contract these tests are pinning.
+   */
+  const SIDE = 'staging.test';
+
+  /** The record as persisted, which is where a staged credential has to survive a restart. */
+  function persisted(id) {
+    const raw = readFileSync(path.join(context.runtimeDir, 'data', 'project-sides.json'), 'utf8');
+    return JSON.parse(raw).sides[id];
+  }
+
+  async function sideWithCredential(app, token) {
+    await request(app).post('/api/project-sides').set('Authorization', `Bearer ${token}`)
+      .send({ server_name: SIDE, api_base_url: 'https://matrix.staging.test' });
+    await request(app).put(`/api/project-sides/${SIDE}/credential`).set('Authorization', `Bearer ${token}`)
+      .send({
+        credential: {
+          kind: 'appservice', asToken: 'live-as', hsToken: 'live-hs',
+          namespace: '@ac_.*', senderLocalpart: 'hafleet',
+        },
+      });
+  }
+
+  test('a second credential is STAGED, and the live one keeps working', async () => {
+    const app = await boot({ env: { API_TOKEN: 'op-staging' } });
+    await sideWithCredential(app, 'op-staging');
+    expect(persisted(SIDE).credential.asToken).toBe('live-as');
+
+    const res = await request(app).post(`/api/project-sides/${SIDE}/registration-file`)
+      .set('Authorization', 'Bearer op-staging')
+      .send({ url: 'http://127.0.0.1:8095' });
+
+    // No 409 and no ?replace=true: issuing is safe now, so demanding a force flag would only be ceremony.
+    expect(res.status).toBe(200);
+    expect(res.body.staged).toBe(true);
+    expect(res.body.stagedNote).toMatch(/has not changed/);
+
+    // The credential in USE is untouched — the entire point.
+    const record = persisted(SIDE);
+    expect(record.credential.asToken).toBe('live-as');
+    expect(record.pendingCredential).toBeTruthy();
+    expect(record.pendingCredential.asToken).not.toBe('live-as');
+  });
+
+  test('the side reports that something is waiting to be installed', async () => {
+    // Hidden, this would be a silent "why is my new token not working".
+    const app = await boot({ env: { API_TOKEN: 'op-staging' } });
+    await sideWithCredential(app, 'op-staging');
+    await request(app).post(`/api/project-sides/${SIDE}/registration-file`)
+      .set('Authorization', 'Bearer op-staging').send({ url: 'http://127.0.0.1:8095' });
+
+    const res = await request(app).get(`/api/project-sides/${SIDE}`)
+      .set('Authorization', 'Bearer op-staging');
+    const side = res.body.side ?? res.body;
+    expect(side).toMatchObject({ hasCredential: true, awaitingInstall: true });
+    expect(side.awaitingInstallSince).toBeTruthy();
+  });
+
+  test('staging does not reset the verdict on the credential that is working', async () => {
+    /*
+     * `accessState` describes the LIVE credential. Resetting it because somebody generated a spare would
+     * report a healthy side as unverified — the misleading-status defect arriving from the other direction.
+     */
+    const app = await boot({ env: { API_TOKEN: 'op-staging' } });
+    await sideWithCredential(app, 'op-staging');
+
+    /*
+     * DRIVEN TO `accepted` FIRST, and that is what makes this test bite. A first version compared the state
+     * against itself on a freshly created side — where it is `unverified` either way — so it passed even with
+     * the reset put back in. Verified by mutation: a test that survives the defect it names is not testing it.
+     */
+    const hs = await fakeHomeserver((pathname) => {
+      if (pathname === '/_matrix/client/v3/account/whoami') return [200, { user_id: `@hafleet:${SIDE}` }];
+      return [200, {}];
+    });
+    fake = hs;
+    await request(app).post('/api/project-sides').set('Authorization', 'Bearer op-staging')
+      .send({ server_name: SIDE, api_base_url: hs.baseUrl });
+    await request(app).post(`/api/project-sides/${SIDE}/verify`).set('Authorization', 'Bearer op-staging').send({});
+    expect(persisted(SIDE).accessState).toBe('accepted');
+
+    await request(app).post(`/api/project-sides/${SIDE}/registration-file`)
+      .set('Authorization', 'Bearer op-staging').send({ url: 'http://127.0.0.1:8095' });
+
+    // Still accepted: the verdict describes the credential that is LIVE, and generating a spare changed none
+    // of what that credential can do.
+    expect(persisted(SIDE).accessState).toBe('accepted');
+  });
+
+  test('the FIRST credential is not staged — there is nothing to protect', async () => {
+    // Staging a side with no live credential would leave it with none at all: unable to act, while holding a
+    // credential it will not use.
+    const app = await boot({ env: { API_TOKEN: 'op-staging' } });
+    await request(app).post('/api/project-sides').set('Authorization', 'Bearer op-staging')
+      .send({ server_name: SIDE, api_base_url: 'https://matrix.staging.test' });
+
+    const res = await request(app).post(`/api/project-sides/${SIDE}/registration-file`)
+      .set('Authorization', 'Bearer op-staging').send({ url: 'http://127.0.0.1:8095' });
+    expect(res.body.staged).toBe(false);
+    expect(res.body.stagedNote).toBeUndefined();
+
+    /*
+     * LIVE, not staged, and the API view is what proves it: `hasCredential` is what every gate reads, so a
+     * first credential parked in `pendingCredential` would leave the side unable to act while appearing to
+     * hold one. A first version only checked the record fields, and passed even when staging applied to the
+     * first credential too — verified by mutation.
+     */
+    const view = await request(app).get(`/api/project-sides/${SIDE}`).set('Authorization', 'Bearer op-staging');
+    expect(view.body.side ?? view.body).toMatchObject({ hasCredential: true, awaitingInstall: false });
+    expect((persisted(SIDE).pendingCredential ?? null)).toBeNull();
+  });
+
+  test('withdrawing the credential clears the staged one too', async () => {
+    // Otherwise a side with no credential still holds a token, and the next issue would stage against nothing.
+    const app = await boot({ env: { API_TOKEN: 'op-staging' } });
+    await sideWithCredential(app, 'op-staging');
+    await request(app).post(`/api/project-sides/${SIDE}/registration-file`)
+      .set('Authorization', 'Bearer op-staging').send({ url: 'http://127.0.0.1:8095' });
+    expect(persisted(SIDE).pendingCredential).toBeTruthy();
+
+    await request(app).put(`/api/project-sides/${SIDE}/credential`)
+      .set('Authorization', 'Bearer op-staging').send({ credential: null });
+
+    const record = persisted(SIDE);
+    expect(record.credential ?? null).toBeNull();
+    expect(record.pendingCredential ?? null).toBeNull();
+  });
+});
