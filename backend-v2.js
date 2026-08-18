@@ -8894,7 +8894,18 @@ app.post('/api/matrix/callback-check', requireBearer, async (req, res) => {
   const rawPort = String(process.env.HAFLEET_APPSERVICE_PORT ?? '').trim();
   const port = /^\d+$/.test(rawPort) ? Number(rawPort) : null;
   try {
-    const result = await verifyCallbackFromHomeserver({ homeserverUrl, port, execFileImpl: execFile });
+    /*
+     * The edge's URL travels too, because what the homeserver must reach depends on which way in is
+     * configured — and with an edge it is the edge, not this host.
+     */
+    const edgeUrl = String(process.env.HAFLEET_EDGE_URL ?? '').trim()
+      && String(process.env.HAFLEET_EDGE_LINK_TOKEN ?? '').trim()
+      && String(process.env.HAFLEET_EDGE_SIDE ?? '').trim()
+      ? String(process.env.HAFLEET_EDGE_URL).trim()
+      : null;
+    const result = await verifyCallbackFromHomeserver({
+      homeserverUrl, port, edgeUrl, execFileImpl: execFile,
+    });
     return res.json(result);
   } catch (error) {
     return res.status(500).json({ applicable: false, reason: `check failed: ${error?.message || error}` });

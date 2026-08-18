@@ -165,6 +165,14 @@ export default function NewProjectSide() {
       setCbCheck(check.body);
       if (check.body?.recommended) setCallback(check.body.recommended);
     }
+    /*
+     * PRE-SELECTED FROM THE EDGE even when the container check cannot run — a homeserver that is not a local
+     * container is unverifiable from here, and leaving the field blank would block the flow on a question
+     * whose answer the operator already gave when they configured the edge.
+     */
+    if (!callback && reach?.appservice?.inboundVia === 'edge' && reach.appservice.edgeUrl) {
+      setCallback(reach.appservice.edgeUrl);
+    }
     return undefined;
   }
 
@@ -487,7 +495,20 @@ export default function NewProjectSide() {
             装上注册文件后 <span className="mono-s">@hafleet:{server}</span> 自动成为代表，
             <span className="mono-s"> @ac_*</span> 命名空间让所有 agent 无需注册即可寻址。
           </p>
-          <p><strong>你的 homeserver 从它自己那一侧，用哪个地址能找到 HAFleet？</strong></p>
+          {/*
+            * WITH AN EDGE THE QUESTION IS ALREADY ANSWERED, so asking it again invites the operator to change
+            * a working answer. They configured the edge; the registration points at it. The candidate list
+            * exists only because nobody knows which of THIS host's addresses a homeserver can reach.
+            */}
+          {appservice?.inboundVia === 'edge' ? (
+            <p>
+              <strong>注册文件要指向你那个 co-located edge</strong>
+              <span className="mono-s"> {appservice.edgeUrl}</span>
+              ——你已经配好了，不用再选地址。
+            </p>
+          ) : (
+            <p><strong>你的 homeserver 从它自己那一侧，用哪个地址能找到 HAFleet？</strong></p>
+          )}
           {/*
             * The one question this flow cannot answer for the operator, stated as such. Matrix has no
             * "call me back" endpoint, so nothing here can prove an address before installation — and a
