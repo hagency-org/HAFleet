@@ -27,7 +27,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import path from 'path';
 import os from 'os';
-import { decideProgressEvent, parseProgressFilter } from '../lib/progress-filter.js';
+import { buildProgressSummary, decideProgressEvent, parseProgressFilter } from '../lib/progress-filter.js';
 
 const QUIET_EXIT = 0;
 
@@ -163,12 +163,17 @@ if (kind === 'step') {
  * "still thinking" every minute is the noise this exists to avoid — the typing indicator already says
  * that, and it says it without an event.
  */
-const parts = Object.entries(state.counts).map(([v, n]) => (n > 1 ? `${v} ×${n}` : v));
-if (kind === 'step' && !parts.length) done('nothing accumulated');
-
-const summary = kind === 'start' ? 'started'
-  : kind === 'done' ? (parts.length ? `finished — ${parts.join(', ')}` : 'finished')
-    : parts.join(', ');
+/*
+ * ONE WORDING FOR BOTH TRANSPORTS. The hook path and the ACP host both built this line and the two copies
+ * had already drifted; more importantly the "nothing succeeded" rule has to hold in both, and a rule stated
+ * twice is a rule enforced once.
+ *
+ * `failures: 0` HERE, ALWAYS, and that is a limit rather than an omission: `PostToolUse` fires whether the
+ * tool succeeded or failed and carries no status, so a hook simply cannot know. The ACP transport can, and
+ * does. Saying so beats inventing a signal this side does not have.
+ */
+const summary = buildProgressSummary({ kind, counts: state.counts, failures: 0 });
+if (!summary) done('nothing accumulated');
 
 const backend = (process.env.HAFLEET_BACKEND_URL || `http://127.0.0.1:${process.env.HAFLEET_BACKEND_PORT || 8090}`).replace(/\/+$/, '');
 

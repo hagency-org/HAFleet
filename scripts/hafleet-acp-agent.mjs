@@ -24,7 +24,9 @@ import { validateOutboxRequest } from '../lib/acp-outbox.js';
 import { anyReplyable, buildReplyHint } from '../lib/reply-hint.js';
 import { codexPermissionRequestNeedsOwnerApproval } from '../lib/codex-permission-hook.js';
 import { buildSummary } from '../lib/message-summary.js';
-import { acpUpdateToEvent, decideProgressEvent, parseProgressFilter } from '../lib/progress-filter.js';
+import {
+  acpUpdateFailedCall, acpUpdateToEvent, buildProgressSummary, decideProgressEvent, parseProgressFilter,
+} from '../lib/progress-filter.js';
 import { createAcpRuntime } from '../lib/runtime/acp.js';
 import { getFramework } from '../lib/frameworks/index.js';
 
@@ -445,15 +447,23 @@ async function reportActivity() {
 // be authenticated as itself rather than trusted because it wrote to a directory.
 const outboxDir = path.join(path.resolve(workspace), '.hafleet', 'outbox');
 
+/**
+ * @returns {Promise<number>} how many messages actually reached the backend.
+ *
+ * The COUNT is returned, not just the side effect, because a turn that ends having delivered nothing is the
+ * shape of a stuck agent — and this is the only place that knows. Before this it returned undefined and the
+ * caller could not tell a silent turn from a productive one.
+ */
 async function drainOutbox() {
-  if (!agentToken) return;
+  if (!agentToken) return 0;
+  let delivered = 0;
   let entries;
   try {
     entries = readdirSync(outboxDir).filter((f) => f.endsWith('.json')).sort();
   } catch {
-    return; // the agent has not created it; nothing to do
+    return 0; // the agent has not created it; nothing to do
   }
-  if (!entries.length) return;
+  if (!entries.length) return 0;
   mkdirSync(path.join(outboxDir, 'sent'), { recursive: true });
   mkdirSync(path.join(outboxDir, 'rejected'), { recursive: true });
 
@@ -490,6 +500,7 @@ async function drainOutbox() {
     };
     try {
       await api('/api/messages', { method: 'POST', body });
+      delivered += 1;
       renameSync(source, path.join(outboxDir, 'sent', file));
       log(`  outbox ${file}: sent to ${request.to || `group ${request.group}`}`);
     } catch (error) {
@@ -500,6 +511,7 @@ async function drainOutbox() {
       log(`  outbox ${file}: rejected — ${error.message}`);
     }
   }
+  return delivered;
 }
 
 
@@ -566,6 +578,11 @@ function makeProgressEmitter({ name, messages, filterDoc, cursor, runtime: rt, p
 
   const parsed = parseProgressFilter(filterDoc, { group });
   const counts = {};
+  /*
+   * Counted apart from the verbs, because a failed attempt is not activity. A live run reported
+   * "worked ×16" about an agent stuck in a loop it could not escape, and that number read as diligence.
+   */
+  let failures = 0;
   let lastSentAt = 0;
   let timer = null;
   let position = cursor;
@@ -578,12 +595,9 @@ function makeProgressEmitter({ name, messages, filterDoc, cursor, runtime: rt, p
   const usable = Boolean(anchor) && (group || to) && parsed.ok;
   if (!parsed.ok) logLine(`progress: filter unusable (${parsed.reason}); reporting nothing`);
 
-  async function flush(kind) {
-    const parts = Object.entries(counts).map(([v, n]) => (n > 1 ? `${v} ×${n}` : v));
-    if (kind === 'step' && !parts.length) return;
-    const summary = kind === 'done'
-      ? (parts.length ? `finished — ${parts.join(', ')}` : 'finished')
-      : parts.join(', ');
+  async function flush(kind, delivered = null) {
+    // One wording for both transports, and one place the honesty rules are enforced.
+    const summary = buildProgressSummary({ kind, counts, failures, delivered });
     if (!summary) return;
     lastSentAt = Date.now();
     try {
@@ -600,6 +614,7 @@ function makeProgressEmitter({ name, messages, filterDoc, cursor, runtime: rt, p
         },
       });
       for (const key of Object.keys(counts)) delete counts[key];
+      failures = 0;
     } catch (error) {
       // Counts are KEPT on failure, so the next line still describes the work rather than losing it. A
       // progress report that breaks the work it describes has made things worse than not existing.
@@ -608,7 +623,24 @@ function makeProgressEmitter({ name, messages, filterDoc, cursor, runtime: rt, p
   }
 
   function collect() {
+    /*
+     * A KIND HISTOGRAM BEHIND A FLAG, because this question came up and could not be answered from the
+     * outside. A probe proved octos emits `tool_call_update:failed`, and a live turn reported only activity
+     * — leaving "the fix does not fire" and "nothing actually failed" indistinguishable. One env var makes
+     * them distinguishable without putting per-update noise in a normal log.
+     */
+    const seen = process.env.HAFLEET_PROGRESS_DEBUG ? {} : null;
     for (const { update } of rt.updatesSince(name, position)) {
+      if (seen) {
+        const key = `${update?.sessionUpdate}${update?.status ? `:${update.status}` : ''}`;
+        seen[key] = (seen[key] || 0) + 1;
+      }
+      /*
+       * FAILURES FIRST, and they come from the updates `acpUpdateToEvent` deliberately drops. Those repeat
+       * per call as its status changes, so they must not add to the activity counts — but the status is the
+       * only place failure is stated, so ignoring them entirely is what made a stuck agent look busy.
+       */
+      if (acpUpdateFailedCall(update)) { failures += 1; continue; }
       const mapped = acpUpdateToEvent(update);
       if (!mapped) continue;
       const decision = decideProgressEvent({ ...mapped, filter: parsed.filter });
@@ -616,6 +648,9 @@ function makeProgressEmitter({ name, messages, filterDoc, cursor, runtime: rt, p
       counts[decision.verb] = (counts[decision.verb] || 0) + 1;
     }
     position = rt.updateCursor(name);
+    if (seen && Object.keys(seen).length) {
+      logLine(`progress: updates ${Object.entries(seen).map(([k, n]) => `${k}×${n}`).join(' ')}`);
+    }
   }
 
   return {
@@ -628,11 +663,14 @@ function makeProgressEmitter({ name, messages, filterDoc, cursor, runtime: rt, p
       // Not a reason to keep the host alive: if everything else is done, so is this.
       timer.unref?.();
     },
-    async finish() {
+    /**
+     * @param {number|null} delivered how many messages the turn actually sent, or null if unknown.
+     */
+    async finish(delivered = null) {
       if (timer) clearInterval(timer);
       if (!usable) return;
       collect();
-      await flush('done');
+      await flush('done', delivered);
     },
   };
 }
@@ -756,10 +794,17 @@ async function pollAndDeliver() {
     });
     progress.start();
     let stopReason;
+    let delivered = null;
     try {
       stopReason = await runtime.prompt(name, buildNudge(pending, messages));
+      /*
+       * DRAINED BEFORE THE PROGRESS LINE, so "sent nothing" is a fact rather than a race. The outbox drain
+       * below used to be the only one, and it ran after the summary — so a turn that did deliver would
+       * still have been reported as silent.
+       */
+      delivered = await drainOutbox();
     } finally {
-      await progress.finish();
+      await progress.finish(delivered);
     }
     log(`turn finished (${stopReason})`);
     // Only CONSECUTIVE failures should escalate to a host restart. Without this the

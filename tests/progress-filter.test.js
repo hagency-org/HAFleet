@@ -10,7 +10,9 @@
 import { describe, expect, test } from 'vitest';
 import {
   DEFAULT_PROGRESS_FILTER,
+  acpUpdateFailedCall,
   acpUpdateToEvent,
+  buildProgressSummary,
   decideProgressEvent,
   parseProgressFilter,
   verbFor,
@@ -222,5 +224,125 @@ describe('ACP as the transport, which needs nothing installed', () => {
       rawInput: { arguments: { path: '/home/customer/.env' } },
     });
     expect(JSON.stringify(mapped)).not.toMatch(/secrets|\.env|customer/);
+  });
+});
+
+describe('a turn that only failed must not read as a turn that worked', () => {
+  /*
+   * FOUND BY RUNNING IT, and it is the defect this whole group exists for. A real ACP turn put
+   * `⏳ finished — worked ×16, read` into a Matrix room while the agent was stuck in a loop it could not
+   * escape — the tools it needed were not available to it, so sixteen attempts produced nothing. The room
+   * was told the agent was busy. Sixteen attempts and zero results read as diligence.
+   *
+   * A progress feed that cannot tell working from failing is worse than one that says nothing, because it
+   * manufactures confidence in a stall.
+   */
+  test('nothing succeeded is said plainly, not dressed as activity', () => {
+    expect(buildProgressSummary({ kind: 'done', counts: {}, failures: 16 }))
+      .toBe('finished, but nothing succeeded — 16 failed attempts');
+  });
+
+  test('one failed attempt is singular, because sloppy counting reads as a bug', () => {
+    expect(buildProgressSummary({ kind: 'done', counts: {}, failures: 1 }))
+      .toBe('finished, but nothing succeeded — 1 failed attempt');
+  });
+
+  test('mixed work and failure reports both, and neither hides the other', () => {
+    expect(buildProgressSummary({ kind: 'done', counts: { read: 3 }, failures: 2 }))
+      .toBe('finished — read ×3, 2 failed');
+  });
+
+  test('a clean turn is unchanged, so the common case did not get noisier', () => {
+    expect(buildProgressSummary({ kind: 'done', counts: { read: 3, edited: 1 } }))
+      .toBe('finished — read ×3, edited');
+    expect(buildProgressSummary({ kind: 'done', counts: {} })).toBe('finished');
+    expect(buildProgressSummary({ kind: 'start' })).toBe('started');
+  });
+
+  test('failures reach a step line too, not only the summary at the end', () => {
+    // A ten-minute turn should not hide trouble until it is over. Somebody waiting can act on "it is
+    // failing" long before they can act on "it finished having failed".
+    expect(buildProgressSummary({ kind: 'step', counts: {}, failures: 4 })).toBe('4 failed attempts');
+    expect(buildProgressSummary({ kind: 'step', counts: { read: 1 }, failures: 1 })).toBe('read, 1 failed');
+  });
+
+  test('an empty step is still nothing to say', () => {
+    // "Still thinking" every minute is the noise this feature exists to avoid.
+    expect(buildProgressSummary({ kind: 'step', counts: {}, failures: 0 })).toBeNull();
+  });
+
+  test('a failure is read from the update kind that activity counting drops', () => {
+    /*
+     * `tool_call_update` repeats per call as its status changes, so it must not add to the activity counts —
+     * but the status is the only place failure is stated. Ignoring those updates entirely is exactly what
+     * made a stuck agent look busy.
+     */
+    expect(acpUpdateFailedCall({ sessionUpdate: 'tool_call_update', status: 'failed' })).toBe(true);
+    expect(acpUpdateToEvent({ sessionUpdate: 'tool_call_update', status: 'failed', kind: 'read' })).toBeNull();
+  });
+
+  test('only "failed" counts as failure — pending and completed do not', () => {
+    for (const status of ['pending', 'in_progress', 'completed', '', undefined]) {
+      expect(acpUpdateFailedCall({ sessionUpdate: 'tool_call_update', status })).toBe(false);
+    }
+    // And a fresh call is not a failure however it is spelled.
+    expect(acpUpdateFailedCall({ sessionUpdate: 'tool_call', status: 'failed' })).toBe(false);
+  });
+
+  test('no reason travels with the count', () => {
+    /*
+     * A reason is written by the tool that failed — a path, a command, an error from somebody's homeserver —
+     * and this line goes to a customer's room. The count is actionable to whoever is waiting; the detail is
+     * for the operator, who has the pane.
+     */
+    const line = buildProgressSummary({ kind: 'done', counts: {}, failures: 3 });
+    expect(line).not.toMatch(/error|ENOENT|\/home|denied|refused/i);
+  });
+});
+
+describe('work that produced no answer, which is what the incident actually was', () => {
+  /*
+   * THE CORRECTION. Counting failures was built to fix `⏳ finished — worked ×16` and does not: measured on
+   * a live octos turn, every one of those calls emitted `tool_call_update:completed`. A shell command that
+   * returns an error still RAN, so the framework calls it completed. The agent was not failing at tools — it
+   * had no tool that could deliver its answer, so it worked hard and produced nothing the room could see.
+   *
+   * `delivered === 0` after real activity is the honest signal, and it is the one that matches the incident.
+   */
+  test('activity with nothing sent says so', () => {
+    expect(buildProgressSummary({ kind: 'done', counts: { worked: 16 }, delivered: 0 }))
+      .toBe('finished — worked ×16, but sent nothing');
+  });
+
+  test('activity with something sent is unchanged', () => {
+    expect(buildProgressSummary({ kind: 'done', counts: { worked: 16 }, delivered: 1 }))
+      .toBe('finished — worked ×16');
+  });
+
+  test('unknown delivery says nothing about it', () => {
+    // `null` is the hook transport, which cannot tell. Silence beats a guess — a hook agent that answered
+    // would otherwise be reported as silent on every turn.
+    expect(buildProgressSummary({ kind: 'done', counts: { worked: 2 }, delivered: null }))
+      .toBe('finished — worked ×2');
+  });
+
+  test('a turn that did nothing at all is not accused of sending nothing', () => {
+    // "It did nothing" and "it worked and delivered nothing" are different states, and only the second is
+    // worth flagging. An agent that read its inbox and had nothing to do is behaving correctly.
+    expect(buildProgressSummary({ kind: 'done', counts: {}, delivered: 0 })).toBe('finished');
+  });
+
+  test('failures still take precedence, because they are the stronger statement', () => {
+    expect(buildProgressSummary({ kind: 'done', counts: { read: 2 }, failures: 1, delivered: 0 }))
+      .toBe('finished — read ×2, 1 failed');
+  });
+
+  test('no cause is offered for the silence', () => {
+    /*
+     * Why nothing was sent is on the operator's side of the line — a missing tool, an unreachable backend,
+     * a permission. The room only needs to know not to keep waiting.
+     */
+    const line = buildProgressSummary({ kind: 'done', counts: { worked: 3 }, delivered: 0 });
+    expect(line).not.toMatch(/tool|mcp|backend|permission|unreachable/i);
   });
 });
