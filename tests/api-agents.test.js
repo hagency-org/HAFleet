@@ -244,6 +244,9 @@ describe('backend agents API', () => {
        * caught the new field, which is exactly what the note above says it is for.
        */
       releasedEngagements: expect.any(Array),
+      // `leftGroups` joined it when force-delete started removing the agent from its groups — `soakroom`
+      // listed three deleted agents as members for hours. Caught by this assertion, again.
+      leftGroups: expect.any(Array),
     });
 
     const agentResponse = await request(context.app).get('/api/agents/alpha');
@@ -674,6 +677,40 @@ describe('deleting an agent releases the budget it was holding', () => {
     const after = await request(app).get('/api/project-sides/holder.test/budget')
       .set('Authorization', `Bearer ${API_TOKEN}`);
     expect(after.body.committed).toBe(0);
+  });
+
+  test('a force delete removes it from its groups and says which', async () => {
+    /*
+     * THE FOURTH PLACE ONE REMOVAL DID NOT FINISH. `soakroom` on the live fleet listed three `e2e-probe-*`
+     * agents as members hours after they were deleted. A group naming a member with no record is the same
+     * shape as a commitment outliving its agent: one relationship maintained from one side only.
+     */
+    const app = await bootWithAgent();
+    await request(app).post('/api/groups').set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ name: 'crew', members: [AGENT, 'someone-else'] });
+
+    const res = await request(app).delete(`/api/agents/${AGENT}?force=true`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(res.body.leftGroups).toEqual(['crew']);
+
+    const groups = await request(app).get('/api/groups').set('Authorization', `Bearer ${API_TOKEN}`);
+    const crew = (Array.isArray(groups.body) ? groups.body : groups.body.groups).find((g) => g.name === 'crew');
+    expect(crew.members).toEqual(['someone-else']);   // the OTHER member stays
+  });
+
+  test('a soft delete keeps its memberships, because undelete restores the record', async () => {
+    // Same rule as the commitment. A restored agent silently absent from every room it worked in would be a
+    // reversible action with one permanent consequence.
+    const app = await bootWithAgent();
+    await request(app).post('/api/groups').set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ name: 'crew', members: [AGENT] });
+
+    const res = await request(app).delete(`/api/agents/${AGENT}`).set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(res.body.leftGroups ?? []).toEqual([]);
+
+    const groups = await request(app).get('/api/groups').set('Authorization', `Bearer ${API_TOKEN}`);
+    const crew = (Array.isArray(groups.body) ? groups.body : groups.body.groups).find((g) => g.name === 'crew');
+    expect(crew.members).toContain(AGENT);
   });
 
   test("another agent's commitment is untouched", async () => {

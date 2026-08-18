@@ -11326,7 +11326,29 @@ app.delete('/api/agents/:name', requireBearer, async (req, res) => {
   }
 
   const releasedEngagements = [];
+  const leftGroups = [];
   if (req.query.force === 'true') {
+    /*
+     * AND IT LEAVES ITS GROUPS — the fourth place one removal did not finish.
+     *
+     * `soakroom` on the live fleet listed `e2e-probe-1786990578`, `e2e-probe-1787004468` and
+     * `e2e-probe-1787020657` as members hours after those agents were deleted. A group naming a member with no
+     * record is the same shape as the commitment below: one relationship maintained from one side only.
+     *
+     * SAME `force` RULE, for the same reason. A soft delete is reversible and `undelete` restores the record;
+     * dropping its memberships would make the restored agent silently absent from every room it worked in.
+     */
+    for (const group of Object.values(groups)) {
+      if (!Array.isArray(group?.members) || !group.members.includes(agent.name)) continue;
+      group.members = group.members.filter((m) => m !== agent.name);
+      leftGroups.push(group.name);
+    }
+    if (leftGroups.length && !saveGroups()) {
+      return res.status(503).json({
+        error: `could not remove ${agentName} from ${leftGroups.join(', ')}, so it was not removed`,
+        code: 'group_membership_release_failed',
+      });
+    }
     /*
      * ITS ACTIVE ENGAGEMENTS ARE REVOKED, AND THEIR BUDGET RELEASED. Deleting the record did not touch them, so
      * a removed agent kept a project side's tokens committed forever.
@@ -11409,6 +11431,7 @@ app.delete('/api/agents/:name', requireBearer, async (req, res) => {
      */
     return res.json({
       ok: true, deleted: true, name: agentName, sessionKilled: stopped, releasedEngagements,
+      leftGroups,
     });
   }
   const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
