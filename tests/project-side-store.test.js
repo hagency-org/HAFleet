@@ -486,3 +486,92 @@ describe('persistence round-trips', () => {
     expect(s.getSide(undefined)).toBeNull();
   });
 });
+
+describe('staging a credential, and the guard the endpoint makes unreachable', () => {
+  /*
+   * WHY STAGING EXISTS. Issuing REPLACED the live credential, so an operator clicking "generate" on a working
+   * side broke HAFleet's own outbound auth before they could install the new file. It happened for real: the
+   * fleet held one token, the homeserver still had the previous one, and the operator was handed a repair job
+   * for a state HAFleet had created. 「为啥生成接单员之后还需要用户去做这些琐事」 — the chore was the symptom.
+   *
+   * These live HERE rather than only against the API because one guard is unreachable from the endpoint: it
+   * passes `stage: true` only when a live credential exists, so `record.credential &&` inside the store can be
+   * deleted without any API test noticing. Found by mutation, recorded in the store's comment, and tested
+   * where it lives.
+   */
+  const cred = (asToken) => ({
+    kind: 'appservice', asToken, hsToken: `${asToken}-hs`, namespace: '@ac_.*', senderLocalpart: 'hafleet',
+  });
+
+  test('staging over a live credential leaves the live one in use', () => {
+    const s = store();
+    side(s, cred('live'));
+    s.setCredential(SERVER, cred('next'), { stage: true });
+    expect(s.credentialFor(SERVER).asToken).toBe('live');
+    expect(s.pendingCredentialFor(SERVER).asToken).toBe('next');
+  });
+
+  test('staging a FIRST credential makes it live instead of parking it', () => {
+    /*
+     * THE UNREACHABLE GUARD. Parked, the side would hold a credential it will not use while `hasCredential`
+     * reported true — selectable for work and unable to do any.
+     */
+    const s = store();
+    s.upsertSide({ server_name: SERVER, api_base_url: API });
+    s.setCredential(SERVER, cred('first'), { stage: true });
+    expect(s.credentialFor(SERVER).asToken).toBe('first');
+    expect(s.pendingCredentialFor(SERVER)).toBeNull();
+  });
+
+  test('promotion swaps in the staged one and keeps no fallback', () => {
+    // A homeserver honours one registration per id, so keeping the loser would keep a token that authorises
+    // nothing — and two live credentials are two things that can each be revoked without the other noticing.
+    const s = store();
+    side(s, cred('live'));
+    s.setCredential(SERVER, cred('next'), { stage: true });
+    s.promotePendingCredential(SERVER);
+    expect(s.credentialFor(SERVER).asToken).toBe('next');
+    expect(s.pendingCredentialFor(SERVER)).toBeNull();
+  });
+
+  test('promoting with nothing staged is a no-op, not a wipe', () => {
+    // Called on every verify, so "nothing staged" is the common case and must not disturb what works.
+    const s = store();
+    side(s, cred('live'));
+    expect(s.promotePendingCredential(SERVER)).toBeNull();
+    expect(s.credentialFor(SERVER).asToken).toBe('live');
+  });
+
+  test('withdrawing clears the staged one as well', () => {
+    const s = store();
+    side(s, cred('live'));
+    s.setCredential(SERVER, cred('next'), { stage: true });
+    s.setCredential(SERVER, null);
+    expect(s.credentialFor(SERVER)).toBeNull();
+    expect(s.pendingCredentialFor(SERVER)).toBeNull();
+  });
+
+  test('replacing without staging drops any staged one', () => {
+    // An explicit replace is a decision; a stale pending left behind it could later be promoted over the
+    // credential the operator had just chosen.
+    const s = store();
+    side(s, cred('live'));
+    s.setCredential(SERVER, cred('next'), { stage: true });
+    s.setCredential(SERVER, cred('forced'));
+    expect(s.credentialFor(SERVER).asToken).toBe('forced');
+    expect(s.pendingCredentialFor(SERVER)).toBeNull();
+  });
+
+  test('the staged flag is named without the word credential, and that is load-bearing', () => {
+    /*
+     * The health writer's redaction guard silently DROPS any key matching /credential/ (ADR-014 decision 6).
+     * The projection test above enforces it and caught `hasPendingCredential` on the way in — so the field is
+     * `awaitingInstall`, which is also the truer name: the credential is issued, the INSTALL is what is
+     * pending, and it happens on somebody else's machine.
+     */
+    const s = store();
+    const rec = side(s, cred('live'));
+    expect(rec).toHaveProperty('awaitingInstall');
+    expect(Object.keys(rec).filter((k) => /pending/i.test(k) && /credential/i.test(k))).toEqual([]);
+  });
+});
