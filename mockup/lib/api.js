@@ -376,7 +376,20 @@ export async function fetchLive() {
              * do not control. `hasCredential && accessState === 'unverified'` is exactly that state, and
              * it must not be rendered as a failure: nothing is broken, we are waiting on them.
              */
-            awaitingInstall: Boolean(side.hasCredential) && side.accessState === 'unverified',
+            /*
+             * THE BACKEND NOW ANSWERS THIS, and computing it here as well produced a contradiction the
+             * operator saw: a side reading `accessState: accepted` and `awaitingInstall: true` at once.
+             *
+             * The two meanings had collided under one name. This derivation means "issued and not yet
+             * confirmed"; the backend's field means "a REPLACEMENT credential is staged and not yet
+             * installed" — a state that exists precisely while the live one is accepted and working. Same
+             * word, opposite implications for whether anything is wrong.
+             *
+             * The backend's value wins when present, because it knows about staging and this cannot. The
+             * derivation survives as a fallback for a backend that predates the field.
+             */
+            awaitingInstall: side.awaitingInstall
+              ?? (Boolean(side.hasCredential) && side.accessState === 'unverified'),
             credentialIssuedAt: side.accessIssuedAt ?? null,
             active: side.active !== false,
             allocatedTokens: side.allocatedTokens ?? null,

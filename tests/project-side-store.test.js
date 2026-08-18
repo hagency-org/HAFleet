@@ -575,3 +575,43 @@ describe('staging a credential, and the guard the endpoint makes unreachable', (
     expect(Object.keys(rec).filter((k) => /pending/i.test(k) && /credential/i.test(k))).toEqual([]);
   });
 });
+
+describe('a project accepts the spelling its own output uses', () => {
+  /*
+   * FOUND BY WALKING THE FLOW. `upsertProject` read `room_id` and `roomId` but not `room` — and `room` is what
+   * the record is CALLED when you read it back. So a caller who looked at the output and sent it back got
+   * `ok: true` and a project with no room.
+   *
+   * AND MY FIRST DIAGNOSIS OF IT WAS WRONG, which is worth keeping. Walking the flow I read `room=None` off the
+   * response and concluded the field had been dropped — but the record calls it `roomId`, so I had read a name
+   * that does not exist. The real gap was narrower: `room` was not an accepted INPUT spelling, while being the
+   * obvious one for anyone who saw `roomId` and typed the short form.
+   *
+   * Three writes found this way genuinely did drop what they were sent — `projectSide` on PATCH /api/agents,
+   * `allocation` on the allocation route, a numeric `ceiling` on a preset. This one was half that and half my
+   * own misreading, and the round-trip test below is the version that would have told me which.
+   */
+  const ROOM = '!abc:palpo.test';
+
+  test.each(['room', 'room_id', 'roomId'])('%s is accepted', (key) => {
+    const s = store();
+    side(s);
+    const project = s.upsertProject(SERVER, { name: 'a project', [key]: ROOM });
+    expect(project.roomId).toBe(ROOM);
+  });
+
+  test('the room comes back under the name it can be sent under', () => {
+    // The round trip is the property: read a project, send it back, get the same project.
+    const s = store();
+    side(s);
+    const first = s.upsertProject(SERVER, { name: 'round trip', room: ROOM });
+    const again = s.upsertProject(SERVER, { ...first });
+    expect(again.roomId).toBe(ROOM);
+  });
+
+  test('omitting the room does not invent one', () => {
+    const s = store();
+    side(s);
+    expect(s.upsertProject(SERVER, { name: 'no room' }).roomId ?? null).toBeNull();
+  });
+});

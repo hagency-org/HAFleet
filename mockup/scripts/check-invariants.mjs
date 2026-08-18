@@ -477,4 +477,59 @@ for (const r of ROUTES) {
 }
 
 console.log(`\n${failed === 0 ? 'All invariants hold.' : `${failed} FAILED.`}\n`);
+// 19. no page invents its own names for a backend enum
+{
+  /*
+   * The engagements page tested `accessState` against `'ok'`, `'unauthorized'` and `'forbidden'` — none of
+   * which the backend produces. `ACCESS_STATES` is `unverified | accepted | rejected | unreachable | blocked`,
+   * so a side that had verified successfully fell through to the default and rendered as "never checked". The
+   * operator asked why their working appservice said it had never been looked at.
+   *
+   * A display that invents state names cannot be wrong LOUDLY — only quietly, which is how this survived. So
+   * the check is mechanical: every string literal compared against `accessState` must be a real member.
+   */
+  const source = readFileSync(join(import.meta.dirname, '..', '..', 'lib', 'project-side-store.js'), 'utf8');
+  const declared = new Set(
+    (/export const ACCESS_STATES = \[([^\]]+)\]/.exec(source)?.[1] ?? '')
+      .split(',').map((part) => part.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean),
+  );
+  const walk = (dir) => readdirSync(dir).flatMap((entry) => {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) return walk(full);
+    return /\.jsx?$/.test(full) ? [full] : [];
+  });
+  const root = join(import.meta.dirname, '..');
+  const bogus = [];
+  for (const file of [...walk(join(root, 'app')), ...walk(join(root, 'components'))]) {
+    const text = readFileSync(file, 'utf8');
+    /*
+     * NARROWED TO WHAT IT CAN ACTUALLY PROVE. A first version matched any variable named `state`, and
+     * flagged `ready`, `absent` and `active` — legitimate members of OTHER enums on other pages. A check
+     * that cries wolf about correct code gets switched off, and then it protects nothing.
+     *
+     * Two shapes are matched: a direct `accessState === 'x'`, and a comparison inside a helper that was
+     * handed `accessState` at its call site — which is how the defect actually looked, `reach(side.accessState)`
+     * with `state === 'ok'` inside. The helper's parameter name is read from the call rather than assumed.
+     */
+    for (const match of text.matchAll(/accessState\s*===\s*'([a-z_]+)'/g)) {
+      if (!declared.has(match[1])) bogus.push(`${file.slice(root.length + 1)}:${match[1]}`);
+    }
+    for (const call of text.matchAll(/(\w+)\((?:\w+\.)?accessState\)/g)) {
+      const helper = call[1];
+      const body = new RegExp(`const ${helper} = \\(([^)]*)\\) => \\{([\\s\\S]*?)\\n  \\};`).exec(text);
+      if (!body) continue;
+      const param = body[1].trim().split(/[,\s]+/)[0];
+      if (!param) continue;
+      for (const match of body[2].matchAll(new RegExp(`\\b${param}\\s*===\\s*'([a-z_]+)'`, 'g'))) {
+        if (!declared.has(match[1])) bogus.push(`${file.slice(root.length + 1)}:${helper}():${match[1]}`);
+      }
+    }
+  }
+  check(
+    'no page compares accessState against a name the backend never produces',
+    declared.size > 0 && bogus.length === 0,
+    declared.size === 0 ? 'could not read ACCESS_STATES' : bogus.join(' '),
+  );
+}
+
 process.exit(failed === 0 ? 0 : 1);

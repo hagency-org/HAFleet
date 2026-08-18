@@ -81,9 +81,22 @@ function ProjectSides({ t }) {
   const sides = projectSides ?? [];
   const roleName = (key) => roleCapacity.roles[key]?.displayName ?? key;
 
+  /*
+   * THE VOCABULARY HERE WAS INVENTED, and it made every working side look unexamined.
+   *
+   * It matched `'ok'`, `'unauthorized'` and `'forbidden'` — none of which the backend produces. `ACCESS_STATES`
+   * is `unverified | accepted | rejected | unreachable | blocked`, so `accepted` fell through to the default and
+   * a side that had verified successfully rendered as "never checked". The operator asked why: they had a
+   * working appservice and a console telling them it had never been looked at.
+   *
+   * A display that invents its own state names cannot be wrong about them loudly — it can only be wrong
+   * quietly, which is why this survived. Named from the store's exported list rather than from memory.
+   */
   const reach = (state) => {
-    if (state === 'ok') return <span className="ok">{t('en.reachOk')}</span>;
-    if (state === 'unauthorized' || state === 'forbidden') return <span className="stranded">{t('en.reachBad')}</span>;
+    if (state === 'accepted') return <span className="ok">{t('en.reachOk')}</span>;
+    if (state === 'rejected') return <span className="stranded">{t('en.reachBad')}</span>;
+    // `blocked` is a working server with an account in the way — actionable, and not a refusal of the token.
+    if (state === 'blocked') return <span className="overqual">{t('en.reachBlocked')}</span>;
     if (state === 'unreachable') return <span className="overqual">{t('en.reachUnknown')}</span>;
     return <span className="dim">{t('en.reachNever')}</span>;
   };
