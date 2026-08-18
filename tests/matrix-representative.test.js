@@ -21,6 +21,7 @@ import {
   ensureRepresentative,
   inviteToRoomOnSide,
   joinRoomOnSideAsAgent,
+  leaveRoomOnSideAsAgent,
   knockOnRoomOnSide,
   probeFederationFromSide,
   resolveAliasOnSide,
@@ -903,6 +904,67 @@ describe('the representative brings an agent into a project room', () => {
       side: SIDE, credential: asCred(), roomId: ROOM, userId: 'worker', fetchImpl: fakeFetch([]),
     })).rejects.toThrow(RepresentativeError);
   });
+
+  /*
+   * AND TAKES IT OUT AGAIN. Read off a live homeserver: four `@ac_e2e-probe-*` accounts still joined to a
+   * project room, every one an agent HAFleet had deleted hours earlier. Every Matrix server here belongs to
+   * a customer, so those are seats in somebody else's house held by contractors who left.
+   */
+  test('the agent leaves under the appservice credential, as itself', async () => {
+    const impl = fakeFetch([ok({})]);
+    const r = await leaveRoomOnSideAsAgent({ side: SIDE, credential: asCred(), roomId: ROOM, agentUserId: AGENT, fetchImpl: impl });
+    expect(r.left).toBe(true);
+    const [call] = impl.calls;
+    expect(call.url).toContain(`/rooms/${encodeURIComponent(ROOM)}/leave`);
+    expect(call.url).toContain(`user_id=${encodeURIComponent(AGENT)}`);
+    expect(call.headers.Authorization).toBe(`Bearer ${AS_TOKEN}`);
+  });
+
+  test('leaving twice is not an error, which was verified against a real homeserver', async () => {
+    /*
+     * A first version special-cased 403 `M_FORBIDDEN` as "already out", reasoning that Matrix refuses a
+     * leave you cannot perform. Run against a real Palpo, leaving twice answers `200 {}` both times — the
+     * branch was dead code written from imagination, and a guess about somebody else's server is exactly
+     * the kind that survives review and fails in production.
+     */
+    const impl = fakeFetch([ok({}), ok({})]);
+    for (let i = 0; i < 2; i += 1) {
+      const r = await leaveRoomOnSideAsAgent({ side: SIDE, credential: asCred(), roomId: ROOM, agentUserId: AGENT, fetchImpl: impl });
+      expect(r.left).toBe(true);
+    }
+  });
+
+  test('a failure is reported with its classification, never as a departure', async () => {
+    // What Palpo actually answers for an identity that never existed: 500 M_UNKNOWN. A cleanup that
+    // reports success for a seat still occupied is the failure mode this whole change is about.
+    const impl = fakeFetch([fail(500, { errcode: 'M_UNKNOWN', error: 'unknown db error' })]);
+    const r = await leaveRoomOnSideAsAgent({ side: SIDE, credential: asCred(), roomId: ROOM, agentUserId: AGENT, fetchImpl: impl });
+    expect(r.left).toBe(false);
+    expect(r.state).toBe('unreachable');
+    expect(r.reason).toMatch(/500/);
+  });
+
+  test('a room on another server is refused, and the as_token is never sent', async () => {
+    // Symmetric with the join. This side's credential has no business acting on another server's room,
+    // and the check happens before any token leaves the process.
+    const impl = fakeFetch([]);
+    const r = await leaveRoomOnSideAsAgent({
+      side: SIDE, credential: asCred(), roomId: '!elsewhere:other.example', agentUserId: AGENT, fetchImpl: impl,
+    });
+    expect(r.left).toBe(false);
+    expect(r.reason).toMatch(/not on/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('a user outside the namespace is refused before the as_token is presented', async () => {
+    const impl = fakeFetch([]);
+    const r = await leaveRoomOnSideAsAgent({
+      side: SIDE, credential: asCred(), roomId: ROOM, agentUserId: `@borrower:${SERVER}`, fetchImpl: impl,
+    });
+    expect(r.left).toBe(false);
+    expect(impl.calls).toHaveLength(0);
+  });
+
 });
 
 /*

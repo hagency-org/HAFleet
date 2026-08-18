@@ -45,6 +45,7 @@ import { createEngagementStore, routeRequest, EngagementError } from './lib/enga
 import { ProjectSideStore, ProjectSideStoreError } from './lib/project-side-store.js';
 import {
   canRepresentativeInvite, ensureRepresentative, inviteToRoomOnSide, joinRoomOnSideAsAgent,
+  leaveRoomOnSideAsAgent,
   knockOnRoomOnSide, mintAgentIdentity, probeFederationFromSide, resolveAliasOnSide,
 } from './lib/matrix-representative.js';
 import {
@@ -11327,7 +11328,15 @@ app.delete('/api/agents/:name', requireBearer, async (req, res) => {
 
   const releasedEngagements = [];
   const leftGroups = [];
+  let leftProjectRooms = [];
   if (req.query.force === 'true') {
+    /*
+     * FIRST IT LEAVES THE CUSTOMER'S ROOMS, because that is the only part of this cleanup somebody else can
+     * see. Awaited before the record goes so the bindings that name those rooms still exist, and reported
+     * rather than enforced — see `withdrawAgentFromProjectRooms` for why a customer's homeserver being down
+     * must not make an agent unremovable.
+     */
+    leftProjectRooms = await withdrawAgentFromProjectRooms(agent.name);
     /*
      * AND IT LEAVES ITS GROUPS — the fourth place one removal did not finish.
      *
@@ -11431,7 +11440,7 @@ app.delete('/api/agents/:name', requireBearer, async (req, res) => {
      */
     return res.json({
       ok: true, deleted: true, name: agentName, sessionKilled: stopped, releasedEngagements,
-      leftGroups,
+      leftGroups, leftProjectRooms,
     });
   }
   const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
@@ -13019,6 +13028,71 @@ async function sweepProjectRoomMembership() {
       console.warn(`[readmit] ${agentName} in ${roomId}: ${error?.message || error}`);
     }
   }
+}
+
+/**
+ * Take a departing agent OUT of the project rooms it joined, on the customer's homeserver.
+ *
+ * READ OFF A LIVE HOMESERVER, and this is the reason it exists: four `@ac_e2e-probe-*` accounts still
+ * joined to a project room, every one an agent HAFleet had deleted hours earlier. Deleting an agent
+ * removed its record, its scopes, its commitments and its group memberships — and left its identity
+ * sitting in somebody else's house. In the 施工队 model every Matrix server belongs to a customer, so what
+ * the customer sees is a member list of contractors who left, inside a namespace that still admits them.
+ *
+ * BEST EFFORT, AND THE DELETE PROCEEDS REGARDLESS. This is the one cleanup in the delete path that
+ * depends on a machine we do not run. A customer's homeserver being down must not make an agent
+ * unremovable from HAFleet — that would hand the operator a fleet they cannot manage because someone
+ * else's server is unreachable. So every room's outcome is REPORTED and none of them fails the delete:
+ * the caller learns exactly which seats are still occupied, which is the honest version of a cleanup that
+ * cannot be guaranteed.
+ *
+ * ROOMS COME FROM THE BINDINGS, not from the homeserver. Asking which rooms an agent is in requires the
+ * agent's own view, and an appservice side mints no per-agent token; the bindings are the record of where
+ * we put it, which is the same source `sweepProjectRoomMembership` trusts to put it back.
+ */
+async function withdrawAgentFromProjectRooms(agentName) {
+  const outcomes = [];
+  let bindings = [];
+  try {
+    bindings = approvalStore.listBindings({ agent: agentName, includeInactive: true });
+  } catch (error) {
+    return [{ roomId: null, left: false, reason: `bindings unreadable: ${error?.message ?? error}` }];
+  }
+  for (const binding of bindings) {
+    const roomId = binding?.projectRoomId;
+    if (!roomId) continue;
+    const sideId = sideIdForRoom(roomId);
+    const side = sideId ? projectSideStore.getSide(sideId) : null;
+    if (!side) {
+      outcomes.push({ roomId, left: false, reason: 'no project side owns that room' });
+      continue;
+    }
+    let credential = null;
+    try {
+      credential = projectSideStore.credentialFor(sideId);
+    } catch (error) {
+      outcomes.push({ roomId, left: false, reason: `credential unreadable: ${error?.message ?? error}` });
+      continue;
+    }
+    if (!credential) {
+      outcomes.push({ roomId, left: false, reason: 'the side has no credential to act with' });
+      continue;
+    }
+    /*
+     * THE SAME COMPOSITION RULE AS `admitAgentToProjectRoom`, deliberately identical: the localpart is the
+     * one WE mint by, on the server the room id names, and `leaveRoomOnSideAsAgent` re-checks it against
+     * the namespace the registration claimed before presenting any token.
+     */
+    const agentMxid = `@${MATRIX_AGENT_PREFIX_FOR_REGISTRATION}${agentName}:${side.serverName}`.toLowerCase();
+    const result = await leaveRoomOnSideAsAgent({
+      side: { apiBaseUrl: side.apiBaseUrl, serverName: side.serverName },
+      credential,
+      roomId,
+      agentUserId: agentMxid,
+    });
+    outcomes.push({ roomId, mxid: agentMxid, left: Boolean(result.left), reason: result.reason ?? null });
+  }
+  return outcomes;
 }
 
 async function admitAgentToProjectRoom(engagement) {
