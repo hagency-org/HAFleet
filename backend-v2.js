@@ -11245,7 +11245,55 @@ app.delete('/api/agents/:name', requireBearer, async (req, res) => {
   if (agentOpsService && agent.agentId) {
     agentOpsService.revokeScopesByBinding({ stableAgentId: agent.agentId });
   }
+
+  const releasedEngagements = [];
   if (req.query.force === 'true') {
+    /*
+     * ITS ACTIVE ENGAGEMENTS ARE REVOKED, AND THEIR BUDGET RELEASED. Deleting the record did not touch them, so
+     * a removed agent kept a project side's tokens committed forever.
+     *
+     * Found on the live fleet by the operator reading the projects screen: `已承诺 200k` beside a project that had
+     * nobody assigned. Three of the four active engagements belonged to `e2e-probe-*` agents that no longer
+     * existed — 150k of somebody's quota held by agents that had been deleted hours earlier, and no path in the
+     * product could ever release it.
+     *
+     * REMOVING A PROJECT SIDE ALREADY DID THIS CORRECTLY, which is what makes it a clear defect rather than an
+     * open question: the same rule, enforced on one side of the same relationship and not the other. A commitment
+     * outlives its agent means a contributor's quota drains by attrition.
+     *
+     * ONLY ON `?force=true`, and that distinction cost a correction. A first version released before the force
+     * check, so a SOFT delete — which is reversible and has an `undelete` route — would irreversibly destroy the
+     * commitments. `revoke` has no inverse, so undelete could not have restored them: a reversible action would
+     * have had one permanent consequence.
+     *
+     * An inactive agent therefore keeps its commitment. That is the right trade: the record survives, the
+     * operator can change their mind, and the promise reflects work that was actually promised.
+     *
+     * BEFORE the record is deleted, because `revoke` refuses an engagement it cannot resolve — and a failure here
+     * must not leave an agent half-removed.
+     */
+    try {
+      for (const engagement of engagementStore.list({ state: 'active' })) {
+        if (normalizeAgentName(engagement.agent) !== agentName) continue;
+        engagementStore.revoke({
+          engagementId: engagement.id,
+          by: 'agent-removal',
+          reason: `agent ${agentName} was removed`,
+        });
+        releasedEngagements.push(engagement.id);
+      }
+    } catch (error) {
+      /*
+       * REPORTED, NOT SWALLOWED, and the delete does not proceed. Removing the agent while its commitment stands
+       * is precisely the state this fixes, so failing to release is a reason to stop rather than to continue and
+       * leave the leak with a log line about it.
+       */
+      return res.status(503).json({
+        error: `could not release ${agentName}'s active engagements, so it was not removed: ${error?.message || error}`,
+        code: 'engagement_release_failed',
+      });
+    }
+
     /*
      * STOP IT FIRST. Deleting the record left the agent's tmux session and its codex process
      * running: an orphan that keeps spending the contributor's tokens, keeps its MCP server talking
@@ -11276,7 +11324,13 @@ app.delete('/api/agents/:name', requireBearer, async (req, res) => {
     if (!deletion.ok) return res.status(503).json({ error: deletion.error || 'agent force-delete persistence failed' });
     console.log(`Agent '${agentName}' permanently deleted`);
     auditLog(req, { agent: agentName, summary: { action: 'force-delete', sessionKilled: stopped } });
-    return res.json({ ok: true, deleted: true, name: agentName, sessionKilled: stopped });
+    /*
+     * REPORTED, because releasing somebody's committed budget is a side effect of this call that the caller did
+     * not ask for and cannot see. Silence would make the quota move for reasons nobody could trace.
+     */
+    return res.json({
+      ok: true, deleted: true, name: agentName, sessionKilled: stopped, releasedEngagements,
+    });
   }
   const persistenceSnapshot = snapshotAgentPersistenceState(agentName);
   agent.tmux = null;
