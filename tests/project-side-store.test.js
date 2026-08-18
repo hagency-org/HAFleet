@@ -615,3 +615,53 @@ describe('a project accepts the spelling its own output uses', () => {
     expect(s.upsertProject(SERVER, { name: 'no room' }).roomId ?? null).toBeNull();
   });
 });
+
+describe('the callback address a reissue must reuse', () => {
+  /*
+   * FOUND BY ADDING A BUTTON. Offering "reissue" needs the url the registration was built for — and nothing
+   * recorded it. The url lives inside a YAML file on somebody else's machine, so a reissue had nothing to reuse,
+   * and a reissue with the wrong url produces a registration that installs cleanly and receives nothing: the
+   * documented silent failure, arriving from a button instead of a typo.
+   *
+   * `null` is a real state, not a gap to paper over: a project side who generated their own registration has the
+   * url in their file and never told us. The console refuses to reissue then, rather than defaulting.
+   */
+  const withUrl = (url) => ({
+    kind: 'appservice', asToken: AS_TOKEN, hsToken: HS_TOKEN,
+    namespace: '@ac_.*', senderLocalpart: 'hafleet', ...(url === undefined ? {} : { url }),
+  });
+
+  test('the url is remembered and exposed as an address, not withheld as a secret', () => {
+    const s = store();
+    side(s, withUrl('http://127.0.0.1:8095'));
+    expect(s.getSide(SERVER).appserviceUrl).toBe('http://127.0.0.1:8095');
+  });
+
+  test('a credential with no url reports null rather than an empty string', () => {
+    // The console branches on it. An empty string is truthy enough in the wrong places to reissue against "".
+    const s = store();
+    side(s, withUrl(undefined));
+    expect(s.getSide(SERVER).appserviceUrl).toBeNull();
+    side(s, withUrl(''));
+    expect(s.getSide(SERVER).appserviceUrl).toBeNull();
+  });
+
+  test('the url survives a staged replacement, which is when a reissue happens', () => {
+    // Staging writes a second credential; the live one's address must not be disturbed by it.
+    const s = store();
+    side(s, withUrl('http://first:8095'));
+    s.setCredential(SERVER, withUrl('http://second:8095'), { stage: true });
+    expect(s.getSide(SERVER).appserviceUrl).toBe('http://first:8095');
+    s.promotePendingCredential(SERVER);
+    expect(s.getSide(SERVER).appserviceUrl).toBe('http://second:8095');
+  });
+
+  test('the url is not a token, so it is allowed to be readable', () => {
+    // The projection test elsewhere forbids readable secrets. This one states the opposite for an address, so a
+    // future reader does not "fix" it by hiding it and breaking reissue.
+    const s = store();
+    const rec = side(s, withUrl('http://127.0.0.1:8095'));
+    expect(rec.appserviceUrl).toBe('http://127.0.0.1:8095');
+    expect(JSON.stringify(rec)).not.toContain(AS_TOKEN);
+  });
+});

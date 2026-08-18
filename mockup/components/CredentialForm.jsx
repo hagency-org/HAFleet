@@ -42,7 +42,11 @@ export default function CredentialForm({ side, live, onDone }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
-  const set = (name, value) => setFields((f) => ({ ...f, [name]: value }));
+  const [touched, setTouched] = useState(false);
+  const set = (name, value) => {
+    setTouched(true);
+    setFields((f) => ({ ...f, [name]: value }));
+  };
   const pick = (next) => { setKind(next); setFields(EMPTY[next]); setError(null); };
 
   /*
@@ -144,6 +148,18 @@ export default function CredentialForm({ side, live, onDone }) {
         </label>
       ))}
 
+      {/*
+        * WHO THIS FORM IS FOR, said because the answer is not always "you".
+        *
+        * It exists for the case where the project side generated the credential themselves and handed it over.
+        * When HAFleet ISSUED the credential, these two tokens were readable for exactly one moment and are
+        * write-only afterwards — so the operator cannot fill this in, and being shown an empty form with a
+        * "still needed" label is being asked for something they were never given.
+        */}
+      {side.hasCredential && side.credentialKind === 'appservice' && (
+        <p className="why-inline">{t('cr.issuedElsewhere')}</p>
+      )}
+
       <div className="cred-actions">
         <button type="submit" className="btn-s primary" disabled={busy || missing.length > 0}>
           {busy ? t('cr.saving') : t('cr.save')}
@@ -156,7 +172,15 @@ export default function CredentialForm({ side, live, onDone }) {
         >
           {t('cr.cancel')}
         </button>
-        {missing.length > 0 && <span className="dim">{t('cr.missing', { n: missing.join(', ') })}</span>}
+        {/*
+          * ONLY ONCE SOMETHING HAS BEEN TYPED. The form starts empty, so on a side with a WORKING credential
+          * this read 「还缺:asToken, hsToken」 next to a status of 可达 — a statement about two empty inputs
+          * that any reader takes as a statement about the side. The operator asked what was missing; nothing
+          * was.
+          */}
+        {missing.length > 0 && touched && (
+          <span className="dim">{t('cr.missing', { n: missing.join(', ') })}</span>
+        )}
         {error && <span className="stranded">{error}</span>}
       </div>
     </form>

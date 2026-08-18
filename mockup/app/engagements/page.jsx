@@ -182,6 +182,19 @@ function ProjectSides({ t }) {
                       live={provenance.projectSides === 'live'}
                       onDone={refresh}
                     />
+                    {/*
+                      * THE TWO THINGS AN OPERATOR CAN ACTUALLY DO, and neither existed here.
+                      *
+                      * The only action on this column was a form asking for tokens that — when HAFleet issued
+                      * them — were readable for one moment and are write-only afterwards. So for the common
+                      * case the sole affordance was one the operator could not complete. They asked twice why
+                      * "set credential" was still there.
+                      *
+                      * `check status` answers the question the column is FOR. `reissue` is safe to offer now
+                      * because issuing stages: the live credential keeps working until the new one is
+                      * installed and verified, so a mistaken click costs nothing.
+                      */}
+                    <SideActions side={side} live={provenance.projectSides === 'live'} onDone={refresh} />
                   </td>
                   {/*
                     * WAITING IS NOT FAILING. A registration loads only when their homeserver restarts,
@@ -231,6 +244,68 @@ function ProjectSides({ t }) {
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * Verify, and reissue — the operator's two real actions on a credential they cannot read.
+ *
+ * Kept out of `CredentialForm` because that component is for TYPING a credential somebody else generated, and
+ * these are for one HAFleet issued. Bundling them would make a form that is half "enter this" and half "do this
+ * to it".
+ */
+function SideActions({ side, live, onDone }) {
+  const t = useT();
+  const [busy, setBusy] = useState(null);
+  const [note, setNote] = useState(null);
+
+  async function run(action) {
+    if (!live) return;
+    /*
+     * A REISSUE WITHOUT A KNOWN ADDRESS IS REFUSED, not defaulted. The url decides where the homeserver pushes
+     * events; guessing it produces a registration that installs cleanly and receives nothing, which is the one
+     * failure this whole area keeps circling. A credential typed in by hand never told us its url, so "we do
+     * not know" is a real state and the answer is to send the operator to the flow that asks.
+     */
+    if (action === 'reissue' && !side.appserviceUrl) {
+      setNote(t('cr.noUrl'));
+      return;
+    }
+    setBusy(action);
+    setNote(null);
+    const res = action === 'verify'
+      ? await send(`project-sides/${encodeURIComponent(side.id)}/verify`, { method: 'POST', body: {} })
+      : await send(`project-sides/${encodeURIComponent(side.id)}/registration-file`, {
+        method: 'POST',
+        /*
+         * The address the homeserver reaches us at is not this component's to choose, so a reissue keeps
+         * whatever the side was configured with. A wrong url here would produce a registration that installs
+         * cleanly and receives nothing — the documented silent failure.
+         */
+        body: { url: side.appserviceUrl },
+      });
+    setBusy(null);
+    if (res.ok === false) { setNote(res.error); return; }
+    const body = res.body ?? {};
+    setNote(action === 'verify'
+      ? (body.promoted ? t('cr.promoted') : (body.side?.accessState ?? ''))
+      : (body.stagedNote ? t('cr.staged') : t('cr.issued', { path: body.path ?? '' })));
+    onDone?.();
+  }
+
+  if (!side.hasCredential) return null;
+  return (
+    <div className="btn-row">
+      <button type="button" className="btn-s" disabled={!live || busy} onClick={() => run('verify')}>
+        {busy === 'verify' ? t('cr.verifying') : t('cr.verify')}
+      </button>
+      {side.credentialKind === 'appservice' && (
+        <button type="button" className="btn-s" disabled={!live || busy} onClick={() => run('reissue')}>
+          {busy === 'reissue' ? t('cr.reissuing') : t('cr.reissue')}
+        </button>
+      )}
+      {note && <span className="why-inline">{note}</span>}
+    </div>
   );
 }
 
