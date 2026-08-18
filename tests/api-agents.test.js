@@ -247,6 +247,10 @@ describe('backend agents API', () => {
       // `leftGroups` joined it when force-delete started removing the agent from its groups — `soakroom`
       // listed three deleted agents as members for hours. Caught by this assertion, again.
       leftGroups: expect.any(Array),
+      // `leftProjectRooms` joined it when force-delete started taking the agent out of the customer's
+      // rooms — a live homeserver held four deleted agents as joined members. Third time this assertion
+      // has caught a new field in this series.
+      leftProjectRooms: expect.any(Array),
     });
 
     const agentResponse = await request(context.app).get('/api/agents/alpha');
@@ -626,7 +630,7 @@ describe('deleting an agent releases the budget it was holding', () => {
   async function bootWithAgent() {
     ctx = await createBackendTestContext('hafleet-agents-budget-release-', {
       agents: { [AGENT]: { name: AGENT, type: 'agent', kind: 'agent', capability: 'coding' } },
-      env: { API_TOKEN },
+      env: { API_TOKEN, MATRIX_BRIDGE_SECRET: 'secret-for-withdraw' },
     });
     return ctx.app;
   }
@@ -686,7 +690,7 @@ describe('deleting an agent releases the budget it was holding', () => {
      * shape as a commitment outliving its agent: one relationship maintained from one side only.
      */
     const app = await bootWithAgent();
-    await request(app).post('/api/groups').set('Authorization', `Bearer ${API_TOKEN}`)
+    await request(app).post('/api/groups').set('X-Bridge-Secret', 'secret-for-withdraw')
       .send({ name: 'crew', members: [AGENT, 'someone-else'] });
 
     const res = await request(app).delete(`/api/agents/${AGENT}?force=true`)
@@ -698,11 +702,56 @@ describe('deleting an agent releases the budget it was holding', () => {
     expect(crew.members).toEqual(['someone-else']);   // the OTHER member stays
   });
 
+  test("a customer's unreachable homeserver does NOT make the agent unremovable", async () => {
+    /*
+     * THE ONE DELIBERATE ASYMMETRY IN THIS DELETE PATH. Releasing a commitment and leaving a group are local
+     * writes, so failing them answers 503 and removes nothing. Leaving the customer's Matrix room depends on
+     * a machine we do not run — and refusing to delete because someone else's server is down would hand the
+     * operator a fleet they cannot manage for reasons outside it.
+     *
+     * So the seat stays occupied, the delete succeeds, and `leftProjectRooms` says exactly which room and
+     * why. That is the honest shape for a cleanup that cannot be guaranteed; a silent success would report a
+     * withdrawal that never happened.
+     */
+    const app = await bootWithAgent();
+    /*
+     * A REAL CREDENTIAL AND A DEAD ADDRESS, and that combination is the point. A first version used a side
+     * with NO credential, which produced the same response shape — and mutation testing showed it never
+     * reached the leave call at all: reporting `left: true` for a genuine failure passed every test. Port 9
+     * is discard; nothing listens, so the attempt fails for real.
+     */
+    await request(app).post('/api/project-sides').set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ server_name: 'gone.test', api_base_url: 'http://127.0.0.1:9' });
+    await request(app).put('/api/project-sides/gone.test/credential')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .send({ credential: { kind: 'appservice', asToken: 'as_t', hsToken: 'hs_t', namespace: '@ac_.*', senderLocalpart: 'hafleet' } });
+    await request(app).put('/api/approval-bindings')
+      .set('X-Bridge-Secret', 'secret-for-withdraw')
+      .send({
+        agent: AGENT, project: 'p', projectRoomId: '!room:gone.test',
+        ownerMxid: '@owner:gone.test', ownerDmRoomId: '!dm:gone.test',
+      });
+
+    const res = await request(app).delete(`/api/agents/${AGENT}?force=true`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(true);
+
+    const room = (res.body.leftProjectRooms ?? []).find((r) => r.roomId === '!room:gone.test');
+    expect(room).toBeTruthy();
+    expect(room.left).toBe(false);
+    expect(room.reason).toBeTruthy();       // it says WHY the seat is still occupied
+    expect(room.mxid).toBe(`@ac_${AGENT}:gone.test`);   // and which identity is still sitting there
+
+    // And the agent really is gone from HAFleet.
+    expect((await request(app).get(`/api/agents/${AGENT}`)).status).toBe(404);
+  });
+
   test('a soft delete keeps its memberships, because undelete restores the record', async () => {
     // Same rule as the commitment. A restored agent silently absent from every room it worked in would be a
     // reversible action with one permanent consequence.
     const app = await bootWithAgent();
-    await request(app).post('/api/groups').set('Authorization', `Bearer ${API_TOKEN}`)
+    await request(app).post('/api/groups').set('X-Bridge-Secret', 'secret-for-withdraw')
       .send({ name: 'crew', members: [AGENT] });
 
     const res = await request(app).delete(`/api/agents/${AGENT}`).set('Authorization', `Bearer ${API_TOKEN}`);
