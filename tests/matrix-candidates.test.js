@@ -16,6 +16,7 @@ import { describe, expect, test } from 'vitest';
 import {
   callbackCandidates,
   describeMatrixReach,
+  verifyCallbackFromHomeserver,
   discoverBaseUrl,
   originFor,
   probeHomeserver,
@@ -373,5 +374,64 @@ describe('a co-located edge is also a way in', () => {
     });
     expect(reach.appservice).toMatchObject({ listening: true, inboundVia: 'socket' });
     expect(reach.appservice.callbackCandidates.length).toBeGreaterThan(0);
+  });
+});
+
+describe('what the homeserver must reach depends on which way in is configured', () => {
+  /*
+   * THE SAME DEFECT, IN A SECOND PLACE. `describeMatrixReach` was taught about the edge and this was not, so
+   * with the edge deployed as a sidecar in the homeserver's own namespace and delivering, the callback check
+   * still answered "no appservice port, so there is nothing to reach". Fixing a rule at one of its homes is
+   * how a rule comes to disagree with itself — the same shape as the four warning sites earlier the same day.
+   */
+  const noExec = (_file, _args, _opts, cb) => cb(new Error('no docker here'), '');
+
+  test('with neither a port nor an edge, it says both are missing', async () => {
+    const out = await verifyCallbackFromHomeserver({
+      homeserverUrl: 'http://127.0.0.1:8009', port: null, edgeUrl: null, execFileImpl: noExec,
+    });
+    expect(out.applicable).toBe(false);
+    expect(out.reason).toMatch(/nor a co-located edge/);
+  });
+
+  test('an edge alone is enough to have something to check', async () => {
+    // The port is deliberately null: an edge deployment has no local socket, and that is the whole point.
+    const out = await verifyCallbackFromHomeserver({
+      homeserverUrl: 'http://127.0.0.1:8009', port: null, edgeUrl: 'http://127.0.0.1:8095', execFileImpl: noExec,
+    });
+    expect(out.reason).not.toMatch(/nothing for your/);
+    // Not applicable here only because there is no container runtime to ask, which is a different answer.
+    expect(out.reason).toMatch(/container runtime/);
+  });
+
+  test('with an edge there is ONE candidate, not a list to choose from', async () => {
+    /*
+     * The list exists because nobody knows which of this host's addresses a homeserver can reach. An edge
+     * beside the homeserver has a single address the operator already chose, and offering alternatives would
+     * invite them to change a working answer.
+     */
+    const exec = (file, args, _opts, cb) => {
+      if (args[0] === 'ps') return cb(null, 'palpo2-hs\t127.0.0.1:8009->8008/tcp');
+      return cb(null, '403');
+    };
+    const out = await verifyCallbackFromHomeserver({
+      homeserverUrl: 'http://127.0.0.1:8009', port: null, edgeUrl: 'http://127.0.0.1:8095', execFileImpl: exec,
+    });
+    expect(out.applicable).toBe(true);
+    expect(out.results).toHaveLength(1);
+    expect(out.recommended).toBe('http://127.0.0.1:8095');
+  });
+
+  test('without an edge the candidate list is still offered', async () => {
+    // The original behaviour must survive: a socket deployment genuinely does not know which address works.
+    const exec = (file, args, _opts, cb) => {
+      if (args[0] === 'ps') return cb(null, 'palpo2-hs\t127.0.0.1:8009->8008/tcp');
+      return cb(null, '000');
+    };
+    const out = await verifyCallbackFromHomeserver({
+      homeserverUrl: 'http://127.0.0.1:8009', port: 8094, edgeUrl: null, execFileImpl: exec,
+      interfaces: { en0: [{ family: 'IPv4', address: '10.0.0.5', internal: false }] },
+    });
+    expect(out.results.length).toBeGreaterThan(1);
   });
 });
