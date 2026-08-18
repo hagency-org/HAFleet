@@ -287,8 +287,19 @@ function SideActions({ side, live, onDone }) {
     setBusy(null);
     if (res.ok === false) { setNote(res.error); return; }
     const body = res.body ?? {};
+    /*
+     * A CHECK SAYS NOTHING BY ITSELF, because the column beside it already says the answer.
+     *
+     * A first version echoed `body.side.accessState` here, so the row read 「accepted 可达」 — the same fact
+     * twice, once in the operator's language and once in the store's raw enum. Nothing is gained by repeating
+     * the status next to the status, and leaking the internal vocabulary invites someone to start matching on
+     * it, which is how the invented-enum defect began.
+     *
+     * A PROMOTION is different: it is a change this click caused, and the status column cannot express it —
+     * `accepted` before and `accepted` after, with a different credential live in between.
+     */
     setNote(action === 'verify'
-      ? (body.promoted ? t('cr.promoted') : (body.side?.accessState ?? ''))
+      ? (body.promoted ? t('cr.promoted') : null)
       : (body.stagedNote ? t('cr.staged') : t('cr.issued', { path: body.path ?? '' })));
     onDone?.();
   }
