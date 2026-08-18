@@ -359,6 +359,19 @@ export async function fetchLive() {
             id: side.id,
             label: side.label ?? null,
             credentialKind: side.credentialKind ?? null,
+            /*
+             * CARRIED, and its absence is why the operator asked 「设置凭据 还在啊」 three times.
+             *
+             * The backend answers `hasCredential: true`; this projection read it only to derive
+             * `awaitingInstall` and never passed it on. So in the console it was always `undefined`:
+             * `CredentialForm` rendered 「设置凭据」 for a side that had one, and the actions added beside it
+             * returned null on `if (!side.hasCredential)` — invisible no matter how many times the page was
+             * reloaded.
+             *
+             * A projection that silently omits a field cannot be wrong loudly. Invariant 20 now fails the build
+             * when a field the console branches on is missing from the map.
+             */
+            hasCredential: Boolean(side.hasCredential),
             accessState: side.accessState ?? null,
             /*
              * THE 接单员, from whichever kind of credential this side uses. An appservice's representative
