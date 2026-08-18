@@ -18,7 +18,7 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import request from 'supertest';
 import { createServer } from 'http';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { createBackendTestContext } from './helpers/backend-test-runtime.js';
 
@@ -1522,5 +1522,68 @@ describe('issuing a second credential does not break the first', () => {
     const record = persisted(SIDE);
     expect(record.credential ?? null).toBeNull();
     expect(record.pendingCredential ?? null).toBeNull();
+  });
+});
+
+describe('staging protects what works, not merely what exists', () => {
+  /*
+   * FOUND BY WALKING THE FLOW. A side whose credential verification had already found BLOCKED still had the
+   * replacement staged behind it — so the operator generated a fix, read "the credential this side is USING has
+   * not changed", and was left with the broken one live. The reassurance became the obstacle.
+   *
+   * `unverified` is deliberately still protected: it means nobody has asked yet, not that it fails, and
+   * replacing an unexamined credential outright would recreate the original defect for anyone who had not run
+   * verify.
+   *
+   * THE VERDICT IS PRODUCED, NOT PLANTED. A first version wrote `accessState` straight into the JSON on disk —
+   * which the running store never re-reads, so both tests failed against correct code. Driving a real verify
+   * against a homeserver that refuses is the only version that exercises the path an operator takes.
+   */
+  const SIDE = 'broken-live.test';
+
+  async function sideWithRefusal(app, token, respond) {
+    const hs = await fakeHomeserver(respond);
+    fake = hs;
+    await request(app).post('/api/project-sides').set('Authorization', `Bearer ${token}`)
+      .send({
+        server_name: SIDE,
+        api_base_url: hs.baseUrl,
+        credential: {
+          kind: 'appservice', asToken: 'live-as', hsToken: 'live-hs',
+          namespace: '@ac_.*', senderLocalpart: 'hafleet',
+        },
+      });
+    await request(app).post(`/api/project-sides/${SIDE}/verify`).set('Authorization', `Bearer ${token}`).send({});
+  }
+
+  test('a rejected credential is REPLACED, not staged behind', async () => {
+    const app = await boot({ env: { API_TOKEN: 'op-broken' } });
+    // 403 is the one status that IS a verdict on a credential.
+    await sideWithRefusal(app, 'op-broken', () => [403, { errcode: 'M_FORBIDDEN', error: 'bad token' }]);
+
+    const res = await request(app).post(`/api/project-sides/${SIDE}/registration-file`)
+      .set('Authorization', 'Bearer op-broken').send({ url: 'http://127.0.0.1:8095' });
+    expect(res.status).toBe(200);
+    expect(res.body.staged).toBe(false);
+    // And it SAYS the old one is gone: "not staged" otherwise has two causes an operator cannot tell apart.
+    expect(res.body.replacedNote).toMatch(/rejected/);
+  });
+
+  test('an unverified credential is still staged behind, because nobody has asked yet', async () => {
+    const app = await boot({ env: { API_TOKEN: 'op-broken' } });
+    await request(app).post('/api/project-sides').set('Authorization', 'Bearer op-broken')
+      .send({
+        server_name: SIDE,
+        api_base_url: 'https://matrix.broken-live.test',
+        credential: {
+          kind: 'appservice', asToken: 'live-as', hsToken: 'live-hs',
+          namespace: '@ac_.*', senderLocalpart: 'hafleet',
+        },
+      });
+
+    const res = await request(app).post(`/api/project-sides/${SIDE}/registration-file`)
+      .set('Authorization', 'Bearer op-broken').send({ url: 'http://127.0.0.1:8095' });
+    expect(res.body.staged).toBe(true);
+    expect(res.body.replacedNote).toBeUndefined();
   });
 });
