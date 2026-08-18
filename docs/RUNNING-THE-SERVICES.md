@@ -132,6 +132,28 @@ fallback would be invisible to whoever runs the agent and obvious to everyone el
 anchor is recorded when the agent reads `check_inbox` or `check_group`, so an agent that has read
 nothing stays silent.
 
+### ACP agents need nothing installed
+
+An agent running under ACP — `octos`, `hermes`, `codex-acp` — reports progress with **no hook, no file, and
+no trust prompt.** `scripts/hafleet-acp-agent.mjs` already receives `session/update` notifications and
+`lib/runtime/acp.js` already parses tool calls out of them, so the host emits progress during the turn from
+what it is already being told.
+
+**This is the unification point, and hooks are not.** Every framework installs hooks differently — a
+different file, a different scope, a different trust model — and octos has none at all, so "one hook for
+every framework" is not a thing that can be built. Three of four frameworks speak ACP.
+
+The same filter file decides for both transports. An operator who writes
+`{"perGroup": {"acme": {"events": ["done"]}}}` does not write it a second time for ACP, and
+`tools: {exclude: ["Bash"]}` covers an ACP agent's `execute` because kinds are mapped onto the same tool
+names rather than reported under their own.
+
+**The ACP `title` is never carried.** It is free text the agent wrote — "Read /home/customer/.env" — so only
+the mapped verb travels, and a kind nobody has vetted reports as generic activity rather than by name.
+
+**Install hooks only for a framework that will not run under ACP**, which in practice means Claude Code
+started directly.
+
 ### Choosing what gets reported
 
 Progress policy is a file, not a hardcoded decision: `~/.hafleet/progress-filter.json`. Absent means the
