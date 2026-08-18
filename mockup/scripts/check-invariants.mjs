@@ -532,4 +532,52 @@ console.log(`\n${failed === 0 ? 'All invariants hold.' : `${failed} FAILED.`}\n`
   );
 }
 
+// 20. a field the pages branch on must survive the projection
+{
+  /*
+   * `hasCredential` reached the console as `undefined` for three rounds of the operator asking why 「设置凭据」
+   * was still there. The backend answered `true`; `mapProjectSide` read the field only to derive something else
+   * and never carried it — so `CredentialForm` rendered "set credential" for a side that had one, and the actions
+   * added beside it returned null on `if (!side.hasCredential)`. Invisible however many times the page reloaded.
+   *
+   * A projection that omits a field cannot be wrong loudly: every consumer just sees undefined and takes the
+   * falsy branch. So the check is mechanical — any `side.<field>` a page reads must appear as a key in the map
+   * that builds those objects.
+   */
+  const walk = (dir) => readdirSync(dir).flatMap((entry) => {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) return walk(full);
+    return /\.jsx?$/.test(full) ? [full] : [];
+  });
+  const root = join(import.meta.dirname, '..');
+  const api = readFileSync(join(root, 'lib', 'api.js'), 'utf8');
+  /*
+   * Read from the projection literal rather than from a hand-kept list, so adding a field to one and forgetting
+   * the other cannot pass. Bounded to the block that starts at `id: side.id`, which is the side map.
+   */
+  const block = /return \{\s*\n\s*id: side\.id,([\s\S]*?)\n {10}\};/.exec(api);
+  /*
+   * BOTH FORMS. A first version matched only `key: value` and flagged `budget`, which is present as a shorthand
+   * `budget,`. A guard that reports a field as missing when it is right there is a guard that gets switched off —
+   * and this one had exactly one job, so a false positive on its first run would have ended it.
+   */
+  const provided = new Set(
+    [...(block?.[1] ?? '').matchAll(/^\s{12}([a-zA-Z]+)\s*[:,]/gm)].map((m) => m[1]),
+  );
+  provided.add('id');
+
+  const used = new Map();
+  for (const file of [...walk(join(root, 'app')), ...walk(join(root, 'components'))]) {
+    const text = readFileSync(file, 'utf8');
+    for (const match of text.matchAll(/\bside\.([a-zA-Z]+)\b/g)) {
+      if (!provided.has(match[1])) used.set(match[1], file.slice(root.length + 1));
+    }
+  }
+  check(
+    'every side field a page reads is carried by the projection',
+    provided.size > 1 && used.size === 0,
+    provided.size <= 1 ? 'could not read the side projection' : [...used].map(([f, w]) => `${w}:${f}`).join(' '),
+  );
+}
+
 process.exit(failed === 0 ? 0 : 1);
