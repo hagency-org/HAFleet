@@ -1694,9 +1694,10 @@ describe('a project with an approved engagement nobody attached', () => {
   const AGENT = 'promised-nobody-attached';
   const ROOM = `!proj:${SERVER}`;
 
-  async function bootWithApprovedUnbound({ bound = false, bindError = 'no owner known for this agent' } = {}) {
+  async function bootWithApprovedUnbound({ bound = false, bindError = 'no owner known for this agent', bridgeSecret = null } = {}) {
     const app = await boot({
       agents: { [AGENT]: { name: AGENT, type: 'agent', kind: 'agent', capability: 'coding' } },
+      ...(bridgeSecret ? { env: { MATRIX_BRIDGE_SECRET: bridgeSecret } } : {}),
       rawDataFiles: {
         'engagements.json': JSON.stringify({
           version: 1,
@@ -1739,6 +1740,31 @@ describe('a project with an approved engagement nobody attached', () => {
      */
     const project = await projectFrom(await bootWithApprovedUnbound({ bound: true, bindError: null }));
     expect(project.awaitingBind).toEqual([]);
+  });
+
+  test('an agent the project can already reach is NOT reported as awaiting', async () => {
+    /*
+     * FOUND ON A SECOND FLEET, on real data, after the first version shipped. One project listed `biglittle`
+     * as staff and twice under awaiting: it had a binding from an earlier engagement, and two later
+     * engagements approved without an owner each recorded `bound: false` about an agent the project could
+     * already reach.
+     *
+     * The binding store is the authority on attachment; the engagement's flag records only what happened at
+     * approval time. Trusting the flag alone produces exactly the false alarm this field exists to avoid — a
+     * line beside healthy projects stops meaning anything.
+     */
+    const app = await bootWithApprovedUnbound({ bridgeSecret: 'secret-for-awaiting' });
+    // A binding for the same agent and room, which is what `agents` reads and what makes the project reachable.
+    await request(app).put('/api/approval-bindings')
+      .set('X-Bridge-Secret', 'secret-for-awaiting')
+      .send({
+        agent: AGENT, project: 'a project', projectRoomId: ROOM,
+        ownerMxid: `@owner:${SERVER}`, ownerDmRoomId: `!dm:${SERVER}`,
+      }).expect(200);
+
+    const project = await projectFrom(app);
+    expect(project.agents.map((a) => a.name)).toEqual([AGENT]);   // reachable: it is staff
+    expect(project.awaitingBind).toEqual([]);                     // and therefore not awaiting
   });
 
   test('a project with no engagement at all is still plainly unstaffed', async () => {
