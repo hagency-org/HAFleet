@@ -13,6 +13,7 @@
  * recipe because the operator would stop looking.
  */
 import { describe, expect, test } from 'vitest';
+import { classifyMatrixFailure } from '../lib/matrix-representative.js';
 import {
   callbackCandidates,
   describeMatrixReach,
@@ -433,5 +434,38 @@ describe('what the homeserver must reach depends on which way in is configured',
       interfaces: { en0: [{ family: 'IPv4', address: '10.0.0.5', internal: false }] },
     });
     expect(out.results.length).toBeGreaterThan(1);
+  });
+});
+
+describe('the classifier, and the answer a walkthrough got wrong', () => {
+  /*
+   * FOUND BY WALKING THE FLOW, which is why it is here rather than in a review comment. A registration-token
+   * side whose representative localpart was already taken reported `unreachable` — an outage verdict on a
+   * homeserver that was answering perfectly, from `M_USER_IN_USE`.
+   *
+   * The default was right: an unrecognised failure should be transient rather than a verdict on somebody's
+   * credential, because "rejected" sends an operator to ask a project side for a new token and that is a human
+   * doing account work on someone else's homeserver. But `M_USER_IN_USE` is neither unknown nor transient — it
+   * is definite, actionable, and about an account rather than a credential or a network.
+   */
+  test('401 and 403 are the only verdicts on a credential', () => {
+    expect(classifyMatrixFailure({ status: 401 })).toBe('rejected');
+    expect(classifyMatrixFailure({ status: 403 })).toBe('rejected');
+  });
+
+  test('a taken localpart is blocked, not unreachable', () => {
+    // The wrong answer sent the operator to check a network that was fine.
+    expect(classifyMatrixFailure({ status: 400, errcode: 'M_USER_IN_USE' })).toBe('blocked');
+  });
+
+  test('everything else stays unreachable, so an unknown failure is not a verdict', () => {
+    for (const error of [{ status: 500 }, { status: 429 }, { status: 400 }, {}, { errcode: 'M_UNKNOWN' }]) {
+      expect(classifyMatrixFailure(error)).toBe('unreachable');
+    }
+  });
+
+  test('the errcode does not override a real credential verdict', () => {
+    // A 403 that happens to carry M_USER_IN_USE is still a refusal of the token; status is the stronger signal.
+    expect(classifyMatrixFailure({ status: 403, errcode: 'M_USER_IN_USE' })).toBe('rejected');
   });
 });

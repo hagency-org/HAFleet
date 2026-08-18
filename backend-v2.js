@@ -9246,7 +9246,19 @@ app.post('/api/project-sides/:id/registration-file', requireBearer, (req, res) =
    * the dangerous act explicit, which was right — but the danger was avoidable, and the operator who hit it
    * was handed a repair job for a state HAFleet had created by replacing something that worked.
    */
-  const staging = Boolean(side.hasCredential);
+  /*
+   * STAGED ONLY OVER A CREDENTIAL THAT IS KNOWN TO WORK, and a walkthrough is what found the difference.
+   *
+   * Staging exists to protect something working. A side holding a credential that verification has already
+   * REJECTED or found BLOCKED has nothing worth protecting — and parking the replacement behind it means the
+   * operator generates a fix, sees "the credential this side is USING has not changed", and is left with the
+   * broken one live. The reassurance becomes the obstacle.
+   *
+   * `unverified` counts as worth protecting. It means nobody has asked yet, not that it fails, and replacing an
+   * unexamined credential outright would recreate the original defect for anyone who had not run verify.
+   */
+  const liveIsBroken = side.accessState === 'rejected' || side.accessState === 'blocked';
+  const staging = Boolean(side.hasCredential) && !liveIsBroken;
 
   /*
    * REFUSED WITHOUT A RUNTIME DIRECTORY rather than falling back to the repo or to a temp path. A
@@ -9320,6 +9332,15 @@ app.post('/api/project-sides/:id/registration-file', requireBearer, (req, res) =
         stagedNote: 'The credential this side is USING has not changed. This new one is held until you '
           + 'install it and verification proves the homeserver accepts it, so nothing breaks in the '
           + 'meantime — and if you generated it by mistake, ignore the file and nothing happens.',
+      } : {}),
+      /*
+       * SAID WHEN IT REPLACED SOMETHING, because "not staged" has two very different causes: there was nothing
+       * there, or what was there was broken. An operator replacing a broken credential should know the old one
+       * is gone rather than infer it from the absence of a note.
+       */
+      ...(liveIsBroken ? {
+        replacedNote: `The previous credential was ${side.accessState} and has been replaced rather than `
+          + 'held back — there was nothing working to protect.',
       } : {}),
       nextSteps: [
         'Put this file where your homeserver reads appservice registrations. The key differs by software: '

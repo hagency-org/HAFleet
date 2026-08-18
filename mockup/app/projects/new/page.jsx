@@ -131,7 +131,18 @@ export default function NewProjectSide() {
       setServer(name);
       say('ok', `${name} 可达`);
     } else {
-      say('fail', `${name} 不可达：${probe?.reason ?? '未知原因'}`);
+      /*
+       * THE REMEDY GOES IN THE FAILURE, not only in the help text above the field.
+       *
+       * A walkthrough hit this on the commonest private deployment: a homeserver with no well-known and no
+       * https. Discovery correctly falls back to `https://<name>`, correctly fails, and reported `fetch
+       * failed` — while the field that fixes it sat right there, explained in prose the operator had read
+       * before they had a problem. Help written for prevention is not read at the moment of failure.
+       */
+      const noAddress = !url;
+      say('fail', noAddress
+        ? `${name} 探不通（${probe?.reason ?? '未知原因'}）。它可能没有配 well-known，或者只有 http —— 把地址填进下面那个框再试，例如 http://${name}:8008`
+        : `${name} 不可达：${probe?.reason ?? '未知原因'}`);
     }
     return setDraftName('');
   }
@@ -611,9 +622,19 @@ export default function NewProjectSide() {
               <span className={verdict.accessState === 'accepted' ? 'pill ok-text' : 'pill warn-text'}>
                 {verdict.accessState ?? '未知'}
               </span>{' '}
-              {verdict.detail ?? verdict.reason ?? ''}
+              {verdict.side?.accessDetail ?? verdict.detail ?? verdict.reason ?? ''}
+              {/*
+                * THREE ANSWERS, and they send you to three different places. A walkthrough got `unreachable`
+                * for a taken localpart — an outage verdict on a homeserver that was answering fine.
+                */}
               <p className="dim">
-                「凭据被拒」和「服务器不可达」是两个不同的答案——只有 401/403 才是对令牌的判决。
+                {verdict.accessState === 'rejected'
+                  ? '凭据被拒（401/403）——令牌不对或已撤销，需要客户方给一份新的。'
+                  : verdict.accessState === 'blocked'
+                    ? '服务器是好的，但有东西挡着：接单员那个账号名已经被占用了。要么把那个账号交给 HAFleet，要么换一个 sender_localpart。'
+                    : verdict.accessState === 'unreachable'
+                      ? '连不上那台服务器——这不是对令牌的判决，先检查地址和网络。'
+                      : '「凭据被拒」「被占用」「服务器不可达」是三个不同的答案，各自要去不同的地方修。'}
               </p>
             </div>
           )}
