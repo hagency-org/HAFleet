@@ -319,6 +319,13 @@ const AGENT_ACK_REACTION = '\u{1F440}';
 const AGENT_PREFIX = (process.env.MATRIX_AGENT_PREFIX || 'ac_').trim(); // Matrix usernames: ac_agentname
 const MATRIX_SERVER_NAME = (process.env.MATRIX_SERVER_NAME || new URL(HOMESERVER).host).trim();
 /*
+ * EXPORTED FOR TESTS, because a test that recomputes it drifts. `tests/bridge-say-in-room.test.js` needs to
+ * build a room id on OUR server to exercise the bot path, and its first version duplicated this expression
+ * with the wrong default — so four tests silently exercised the cross-server branch while claiming to test
+ * the bot. Reading the real value is the only version that cannot lie.
+ */
+export const ourServerNameForTest = () => MATRIX_SERVER_NAME;
+/*
  * MATRIX_AGENT_PASSWORD_SECRET, MATRIX_AGENT_PASSWORD_TEMPLATE and
  * MATRIX_ALLOW_LEGACY_AGENT_PASSWORD are GONE (ADR-014 decision 3, 2026-08-11).
  *
@@ -4823,29 +4830,54 @@ export class MatrixBridge {
   async sayInRoom(roomId, content, { txnSeed = null } = {}) {
     const at = String(roomId || '').indexOf(':');
     const server = at > 0 ? String(roomId).slice(at + 1).toLowerCase() : '';
-    if (server && server !== MATRIX_SERVER_NAME) {
-      const acting = this.actingSideFor(server);
-      if (acting) {
-        const sent = await sendToRoomOnSide({
-          ...acting,
-          roomId,
-          content,
-          /*
-           * A SEED THAT IS STABLE PER ANSWER, not per clock tick. `sendToRoomOnSide` deduplicates on a
-           * transaction id derived from this, so a retry after a timeout must reuse it or the customer
-           * gets the answer twice. The caller passes the id of whatever it is answering.
-           */
-          txnSeed: txnSeed || `say:${roomId}:${content?.body ?? ''}`,
-        });
-        if (!sent.sent) throw new Error(`could not speak in ${roomId} as the representative: ${sent.reason}`);
-        return sent.eventId;
-      }
-      /*
-       * NO CREDENTIAL FOR THAT SERVER: fall through to the bot and let it fail loudly. Swallowing this
-       * would turn "we cannot reach that room" into silence, which is the defect being fixed.
-       */
+    /*
+     * A SEED THAT IS STABLE PER ANSWER, not per clock tick. `sendToRoomOnSide` deduplicates on a
+     * transaction id derived from this, so a retry after a timeout must reuse it or the customer gets the
+     * answer twice.
+     */
+    const asRepresentative = () => sendToRoomOnSide({
+      ...this.actingSideFor(server),
+      roomId,
+      content,
+      txnSeed: txnSeed || `say:${roomId}:${content?.body ?? ''}`,
+    });
+
+    // A room on somebody else's server is the representative's territory outright.
+    if (server && server !== MATRIX_SERVER_NAME && this.actingSideFor(server)) {
+      const sent = await asRepresentative();
+      if (!sent.sent) throw new Error(`could not speak in ${roomId} as the representative: ${sent.reason}`);
+      return sent.eventId;
     }
-    return this.botClient.sendMessage(roomId, content);
+
+    try {
+      return await this.botClient.sendMessage(roomId, content);
+    } catch (error) {
+      /*
+       * THE BOT NOT BEING IN THE ROOM IS NOT THE SAME AS THE ROOM BEING ELSEWHERE, and a first version
+       * conflated them. When a project side runs on the SAME homeserver as HAFleet's own bot — which is a
+       * perfectly ordinary deployment, and the one this was walked on — the server comparison above says
+       * "ours", the bot is used, and the bot is still not a member of the customer's room. Same silence.
+       *
+       * So the fallback keys on the actual failure rather than on an address: `M_FORBIDDEN` with a
+       * membership complaint means the sender is not in the room, and if we hold a credential for that
+       * server the representative is who should have spoken. Narrow on purpose — any other error is a real
+       * error and is re-thrown.
+       */
+      const forbidden = error?.errcode === 'M_FORBIDDEN' || /M_FORBIDDEN/.test(String(error?.message ?? ''));
+      const notJoined = /membership is not|not in the room|not a member/i.test(
+        String(error?.error ?? error?.message ?? ''),
+      );
+      if (!(forbidden && notJoined) || !server || !this.actingSideFor(server)) throw error;
+
+      const sent = await asRepresentative();
+      if (!sent.sent) {
+        throw new Error(
+          `neither the bot nor the representative could speak in ${roomId}: bot got `
+          + `${error?.message ?? error}; representative got ${sent.reason}`,
+        );
+      }
+      return sent.eventId;
+    }
   }
 
   async sendDeliveryNotice(roomId, text) {

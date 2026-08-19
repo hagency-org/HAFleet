@@ -155,6 +155,16 @@ describe('who speaks in a room, chosen by the room\'s own server', () => {
     expect(fn).toMatch(/if \(!sent\.sent\) throw/);
     // And the bot is still reached, for our own rooms.
     expect(fn).toMatch(/this\.botClient\.sendMessage\(roomId, content\)/);
+    /*
+     * AND THE FALLBACK KEYS ON THE FAILURE, NOT ON THE ADDRESS. A first version compared the room's server
+     * against ours and stopped there — so when a project side runs on the SAME homeserver as HAFleet's bot,
+     * which is an ordinary deployment and the one this was walked on, the comparison said "ours", the bot
+     * was used, and the bot still was not a member. The same silence, one branch over.
+     */
+    expect(fn).toMatch(/M_FORBIDDEN/);
+    expect(fn).toMatch(/membership is not/);
+    // Narrow: anything that is not a membership refusal is re-thrown rather than retried.
+    expect(fn).toMatch(/throw error;/);
   });
 
   test('every command reply goes through it, so no path keeps using the bot directly', () => {
