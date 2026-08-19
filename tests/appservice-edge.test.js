@@ -161,6 +161,30 @@ describe('what the doorway refuses', () => {
     expect(res.status).toBe(404);
   });
 
+  test('status reports the address the HOMESERVER must dial, which is not the one HAFleet collects from', async () => {
+    /*
+     * THE TWO ADDRESSES THAT GOT CONFLATED, and it produced a silent dead inbound path.
+     *
+     * Walked on a clean pair of machines: the console pre-filled the registration with `HAFLEET_EDGE_URL`
+     * (`http://69.194.3.128:8097`, how HAFleet reaches this edge) while the edge, bound to loopback, printed
+     * `put this in the registration: url: http://127.0.0.1:8097`. The homeserver could not reach a public IP
+     * that nothing listened on, so it never called — and `verify` still answered `accepted`, because
+     * verification proves the OUTBOUND direction only. Every screen said the customer was onboarded; the
+     * edge's own counter read `transactions from the homeserver: 0`.
+     *
+     * This process owns the socket, so it is the only honest source for that address.
+     */
+    const e = createAppserviceEdge({ hsToken: HS, linkToken: LINK, registrationUrl: 'http://127.0.0.1:8094' });
+    const body = (await e.handle(asHafleet('/_hafleet/edge/status'))).body;
+    expect(body.registrationUrl).toBe('http://127.0.0.1:8094');
+  });
+
+  test('an edge that was not told its address reports null rather than inventing one', async () => {
+    // Null is what makes the console refuse to issue. A fabricated address would be the original defect.
+    const body = (await edge().handle(asHafleet('/_hafleet/edge/status'))).body;
+    expect(body.registrationUrl).toBeNull();
+  });
+
   test('status reports counts and a fingerprint, never a token', async () => {
     const e = edge();
     const body = (await e.handle(asHafleet('/_hafleet/edge/status'))).body;

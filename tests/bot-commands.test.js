@@ -188,3 +188,56 @@ describe('!bindroom', () => {
     expect(sent.join('\n')).toMatch(/Usage: !bindroom <group>/);
   });
 });
+
+describe('who speaks when a command comes from a project side room', () => {
+  /*
+   * FOUND BY TYPING `!offer` AS A CUSTOMER on a clean pair of machines: a fresh HAFleet on one, a fresh
+   * homeserver on another, connected by a co-located appservice edge. The command arrived, was dispatched
+   * and handled — and its answer died with `M_FORBIDDEN: sender's membership is not 'join'`, because every
+   * reply went out as HAFleet's own bot and the bot is not in the customer's room. The REPRESENTATIVE is.
+   *
+   * So the whole ordering conversation — `!offer`, `!request`, the reply that says who was assigned — was
+   * silent on the customer's side. It cannot happen on a single-homeserver deployment, where the bot is in
+   * every room, and that is every deployment this had ever run on.
+   */
+  test('the reply goes through the bridge, which picks the identity in that room', async () => {
+    const said = [];
+    const bot = new BotCommands({
+      botClient: { sendMessage: vi.fn(async () => { throw new Error('the bot must not be used here'); }) },
+      bridge: {
+        getBridgeState: () => ({}),
+        isKnownAgentName: () => false,
+        sayInRoom: vi.fn(async (roomId, content) => { said.push({ roomId, body: content.body }); }),
+      },
+      botUserId: '@agent-bridge:matrix.example.test',
+    });
+
+    await bot.reply('!proj:customer.test', 'hello');
+    expect(said).toEqual([{ roomId: '!proj:customer.test', body: 'hello' }]);
+  });
+
+  test('a bridge without that method still replies, so nothing regresses', async () => {
+    // The bot remains correct for every deployment where HAFleet and the room share one homeserver.
+    const { bot, sent } = makeBot();
+    await bot.reply('!ours:matrix.example.test', 'hello');
+    expect(sent).toEqual(['hello']);
+  });
+
+  test('formatted replies keep their HTML when routed through the bridge', async () => {
+    // The bridge path must carry the whole content, not just the plain body — half the answers are HTML.
+    const said = [];
+    const bot = new BotCommands({
+      botClient: { sendMessage: vi.fn(async () => {}) },
+      bridge: {
+        getBridgeState: () => ({}),
+        isKnownAgentName: () => false,
+        sayInRoom: vi.fn(async (_r, content) => { said.push(content); }),
+      },
+      botUserId: '@agent-bridge:matrix.example.test',
+    });
+    await bot.reply('!proj:customer.test', 'plain', '<b>rich</b>');
+    expect(said[0]).toMatchObject({
+      body: 'plain', format: 'org.matrix.custom.html', formatted_body: '<b>rich</b>',
+    });
+  });
+});

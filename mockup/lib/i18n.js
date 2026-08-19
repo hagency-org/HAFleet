@@ -537,6 +537,7 @@ const en = {
   'cp.mappingNote': 'imported from lib/role-capacity.json, not copied — so this page cannot drift from what ships',
   // ── ③ 项目 Projects — invitations received, and the projects I joined (ADR-014) ──
   'pr.title': 'Projects',
+  'pr.addSide': 'Take on a project side',
   'pr.sub': 'Who invited me, and which projects I said yes to',
   'pr.pendingTitle': 'Waiting on me',
   'pr.pendingWhy': 'A project invited one of my agents. Nothing has joined yet — accepting is what joins the room and records that the person who invited it owns it there. Lending an agent spends my tokens, so this stays my decision rather than a link somebody clicks.',
@@ -1345,6 +1346,7 @@ const zh = {
   'cp.mappingNote': '直接引用 lib/role-capacity.json 而非复制,所以这一页不会和实际发布的配置漂移',
   // ── ③ 项目 Projects —— 收到的邀请，以及我加入的项目（ADR-014）──
   'pr.title': '项目',
+  'pr.addSide': '接入一个项目方',
   'pr.sub': '谁邀请了我，以及我答应了哪些项目',
   'pr.pendingTitle': '等我决定',
   'pr.pendingWhy': '有项目邀请了我的某个 Agent。现在还没有加入 —— 接受才会真正进入房间，并把"邀请它的人拥有它"记录下来。出借 Agent 花的是我的 token，所以这是我的决定，不是谁点一下链接就成。',

@@ -181,8 +181,14 @@ export default function NewProjectSide() {
      * container is unverifiable from here, and leaving the field blank would block the flow on a question
      * whose answer the operator already gave when they configured the edge.
      */
-    if (!callback && reach?.appservice?.inboundVia === 'edge' && reach.appservice.edgeUrl) {
-      setCallback(reach.appservice.edgeUrl);
+    /*
+     * THE EDGE'S OWN ADDRESS, NOT THE ONE HAFLEET COLLECTS FROM. `edgeUrl` is how HAFleet reaches the edge;
+     * the registration needs the address the HOMESERVER dials, which only the edge knows. Pre-filling
+     * `edgeUrl` shipped a registration a homeserver could not reach — and `verify` still said `accepted`,
+     * because it proves the outbound direction only.
+     */
+    if (!callback && reach?.appservice?.inboundVia === 'edge' && reach.appservice.edgeRegistrationUrl) {
+      setCallback(reach.appservice.edgeRegistrationUrl);
     }
     return undefined;
   }
@@ -512,11 +518,29 @@ export default function NewProjectSide() {
             * exists only because nobody knows which of THIS host's addresses a homeserver can reach.
             */}
           {appservice?.inboundVia === 'edge' ? (
-            <p>
-              <strong>注册文件要指向你那个 co-located edge</strong>
-              <span className="mono-s"> {appservice.edgeUrl}</span>
-              ——你已经配好了，不用再选地址。
-            </p>
+            <>
+              {appservice.edgeRegistrationUrl ? (
+                <p>
+                  <strong>注册文件会指向你那个 co-located edge</strong>
+                  <span className="mono-s"> {appservice.edgeRegistrationUrl}</span>
+                  ——这是 edge 自己报的地址，homeserver 从它那一侧就用这个拨号，你不用选。
+                </p>
+              ) : (
+                /*
+                 * REFUSED RATHER THAN GUESSED. An edge HAFleet cannot reach collects nothing, and issuing a
+                 * registration here would hand the customer a file that receives nothing while every screen
+                 * says the side is fine. The address is not knowable from here; the edge owns it.
+                 */
+                <div className="notice">
+                  <span className="pill warn-text">还不能生成</span>{' '}
+                  {appservice.edgeNote ?? 'HAFleet 还问不到那个 edge 该用哪个地址。'}
+                </div>
+              )}
+              <p className="why-inline">
+                HAFleet 从 <span className="mono-s">{appservice.edgeUrl}</span> 取件——这是另一个方向，
+                和上面那个地址不是一回事，不要写进注册文件。
+              </p>
+            </>
           ) : (
             <p><strong>你的 homeserver 从它自己那一侧，用哪个地址能找到 HAFleet？</strong></p>
           )}

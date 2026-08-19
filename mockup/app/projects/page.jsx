@@ -121,6 +121,19 @@ export default function ProjectsPage() {
     <>
       <PageHead title={t('pr.title')} sub={t('pr.sub')} />
 
+      {/*
+        * THE WAY IN, which did not exist. `/projects/new` — the whole four-step flow for taking on a customer
+        * — was reachable only by typing the URL: no page and no nav item linked to it. `/resources/new` has
+        * had a button on its own list page all along, so this is the same pattern, not a new one.
+        *
+        * It matters more here than anywhere else in the console: adding a customer is the FIRST thing a new
+        * operator does, and an operator who cannot find it has no fleet at all. Found by trying to write a
+        * click-by-click guide and having nowhere to tell the reader to click.
+        */}
+      <div className="btn-row">
+        <Link className="btn primary" href="/projects/new">{t('pr.addSide')}</Link>
+      </div>
+
       <Provenance slices={['invites', 'contributions', 'whitelist']} />
 
       <section className="card">

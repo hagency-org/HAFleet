@@ -132,3 +132,50 @@ describe('the ordering that made a correct rule always false', () => {
     expect(refresh).toBeLessThan(judge);
   });
 });
+
+describe('who speaks in a room, chosen by the room\'s own server', () => {
+  /*
+   * `!offer` from a customer's room was answered as HAFleet's own bot, which is not a member there:
+   * `M_FORBIDDEN: sender's membership is not 'join'`. The representative is the identity in that room, and a
+   * room id already says which server it belongs to — so the choice needs no flag and no extra state.
+   *
+   * A SOURCE-LEVEL ASSERTION for the routing rule, because `sayInRoom` reaches a module-level constant
+   * (`MATRIX_SERVER_NAME`) and the real send; the behavioural half is covered where `reply` is tested.
+   */
+  test('the rule is the room\'s server, and the bot is the fallback rather than the default', () => {
+    const source = require('fs').readFileSync(path.resolve('bridge-matrix.js'), 'utf8');
+    const fn = /async sayInRoom\([\s\S]*?\n  \}/.exec(source)?.[0] ?? '';
+    expect(fn).toBeTruthy();
+    // It compares the room's server against ours, and asks the acting registry — not a flag.
+    expect(fn).toMatch(/server !== MATRIX_SERVER_NAME/);
+    expect(fn).toMatch(/actingSideFor\(server\)/);
+    expect(fn).toMatch(/sendToRoomOnSide/);
+    // A failed representative send THROWS rather than silently falling back to the bot, which would
+    // reproduce the silence this fixes.
+    expect(fn).toMatch(/if \(!sent\.sent\) throw/);
+    // And the bot is still reached, for our own rooms.
+    expect(fn).toMatch(/this\.botClient\.sendMessage\(roomId, content\)/);
+    /*
+     * AND THE FALLBACK KEYS ON THE FAILURE, NOT ON THE ADDRESS. A first version compared the room's server
+     * against ours and stopped there — so when a project side runs on the SAME homeserver as HAFleet's bot,
+     * which is an ordinary deployment and the one this was walked on, the comparison said "ours", the bot
+     * was used, and the bot still was not a member. The same silence, one branch over.
+     */
+    expect(fn).toMatch(/M_FORBIDDEN/);
+    expect(fn).toMatch(/membership is not/);
+    // Narrow: anything that is not a membership refusal is re-thrown rather than retried.
+    expect(fn).toMatch(/throw error;/);
+  });
+
+  test('every command reply goes through it, so no path keeps using the bot directly', () => {
+    /*
+     * The defect was ONE unconditional line, and the value of the fix is that there is only one exit. If a
+     * second `botClient.sendMessage` appears in the command layer, this catches it — the same reason the
+     * `ensureAgentAccount` rule above is asserted structurally.
+     */
+    const source = require('fs').readFileSync(path.resolve('lib/bot-commands.js'), 'utf8');
+    const direct = [...source.matchAll(/this\.botClient\.sendMessage\(/g)];
+    // Exactly one remains: the fallback inside `reply` for a bridge that has no `sayInRoom`.
+    expect(direct).toHaveLength(1);
+  });
+});

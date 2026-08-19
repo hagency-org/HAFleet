@@ -106,7 +106,16 @@ if (has('check')) {
 if (!hsToken) usage('--registration or --hs-token is required');
 if (!linkToken) usage('--link-token is required');
 
-const edge = createAppserviceEdge({ hsToken, linkToken });
+/*
+ * The address it tells HAFleet to put in the registration is the one it already prints below: loopback,
+ * because co-located is what this exists for. It is reported through /status so the console stops guessing
+ * that HAFleet's own collect address is what the homeserver can dial.
+ */
+const edge = createAppserviceEdge({
+  hsToken,
+  linkToken,
+  registrationUrl: `http://127.0.0.1:${port}`,
+});
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
