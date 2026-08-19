@@ -245,6 +245,17 @@ export default function NewProjectSide() {
   async function verify() {
     setBusy(true);
     const res = await send(`project-sides/${encodeURIComponent(server)}/verify`, { method: 'POST' });
+    /*
+     * AND ASK WHETHER ANYTHING IS ARRIVING, because `verify` cannot answer that. It exercises the OUTBOUND
+     * direction: a side can come back `accepted` while nothing has ever come IN. On a walkthrough that
+     * combination told the operator the customer was onboarded when the registration pointed at an address
+     * the homeserver could not reach — and the only contrary evidence was a counter inside the edge.
+     *
+     * Re-read rather than reused from page load: the operator has installed a file and restarted a
+     * homeserver since then, which is exactly what these counters are about.
+     */
+    const fresh = await send('matrix/reach', { method: 'GET' });
+    if (fresh.ok !== false) setReach(fresh.body ?? null);
     setBusy(false);
     if (res.ok === false) return say('fail', `验证失败：${res.error}`);
     return setVerdict(res.body);
@@ -641,6 +652,22 @@ export default function NewProjectSide() {
             </button>
             <Link className="btn" href="/projects">回到项目页</Link>
           </div>
+          {/*
+            * TWO DIRECTIONS, TWO ANSWERS, and never one badge. `accepted` means we can act as the
+            * representative; it says nothing about whether the homeserver's events reach us. Showing only
+            * the first is what let a dead inbound path read as a finished setup.
+            */}
+          {verdict && appservice?.inbound && appservice.inbound.state !== 'unknown' && (
+            <div className="notice">
+              <span className={appservice.inbound.state === 'flowing' ? 'pill ok-text' : 'pill warn-text'}>
+                {appservice.inbound.state === 'flowing' ? '事件进得来'
+                  : appservice.inbound.state === 'never-called' ? 'homeserver 还没来过'
+                    : appservice.inbound.state === 'not-collected' ? '没人在收'
+                      : appservice.inbound.state === 'rejected' ? '令牌被拒' : appservice.inbound.state}
+              </span>{' '}
+              {appservice.inbound.detail}
+            </div>
+          )}
           {verdict && (
             <div className="notice">
               <span className={verdict.accessState === 'accepted' ? 'pill ok-text' : 'pill warn-text'}>

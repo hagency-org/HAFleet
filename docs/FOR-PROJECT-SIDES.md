@@ -92,6 +92,21 @@ container uses for it (`host.docker.internal` under Docker Desktop or Colima). A
 got that wrong on the first attempt and saw exactly the documented silence; `--check` said "the homeserver
 has never called", which is what it is for.
 
+**Both addresses have to work, and they are different addresses.** The same socket is dialled by two
+parties: your homeserver, from inside its own namespace, and HAFleet, from outside. Putting the doorway in
+the homeserver's namespace fixes the first and can break the second — with
+
+```bash
+docker run --network container:<your-homeserver> ... --port 8095 --host 0.0.0.0
+```
+
+the doorway is reachable at `127.0.0.1:8095` from your homeserver's point of view, and reachable from
+HAFleet only if that port is PUBLISHED on the container that owns the namespace (`-p 127.0.0.1:8095:8095`
+when you start the homeserver, since a joined container cannot publish its own ports). A second
+walkthrough got this wrong after getting the first point right: your homeserver started calling, and
+HAFleet still collected nothing. `--check` distinguishes them — "the homeserver has never called" versus
+"the homeserver reaches me, but HAFleet has never collected".
+
 **What that process is and is not.** It holds no fleet credential, stores nothing, and makes no decision —
 which agent, which room, whether to answer at all stays in HAFleet. It authenticates your homeserver with
 the `hs_token` from the registration already on your disk, and authenticates HAFleet with a separate link

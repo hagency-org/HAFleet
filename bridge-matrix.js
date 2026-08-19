@@ -8912,6 +8912,32 @@ const isMainModule = (() => {
 if (isMainModule) {
   startBridge().catch(e => {
     console.error('Bridge failed to start:', e);
+    /*
+     * NAME THE CONSEQUENCE, not only the cause.
+     *
+     * On a co-located appservice deployment this process is the ONLY thing that collects events from the
+     * edge — the backend does not. So any failure here, including one about a credential that has nothing to
+     * do with inbound, silently ends every customer's ability to reach their agents.
+     *
+     * Walked on clean machines: `MATRIX_BOT_PASSWORD is required to login/register bridge bot account` and
+     * exit 1. The console went on answering, `verify` went on saying `accepted`, and the edge's counter read
+     * `HAFleet last seen: never`. Nothing connected those three facts for the operator, and the message they
+     * had named a bot password.
+     *
+     * Printed from the resolved edge config rather than from a flag, so it appears only when there IS an
+     * inbound path to lose.
+     */
+    try {
+      const edge = resolveEdgeLinkConfig(process.env);
+      if (edge.enabled) {
+        console.error(
+          `[appservice] NOTHING WILL BE COLLECTED while this process is down: the co-located edge at `
+          + `${edge.url} serving ${edge.side} is drained by THIS bridge, not by the backend. The console and `
+          + 'the API will keep answering, and a project side will keep reporting `accepted`, because that '
+          + 'describes the outbound direction only.',
+        );
+      }
+    } catch { /* the diagnosis must not replace the error it is explaining */ }
     process.exit(1);
   });
 }
