@@ -9028,6 +9028,45 @@ app.get('/api/matrix/reach', requireBearer, async (req, res) => {
   try {
     const sides = projectSideStore.listSides({ activeOnly: false });
     const reach = await describeMatrixReach({ env: process.env, sides });
+    /*
+     * ASK THE EDGE WHAT THE REGISTRATION MUST SAY, because HAFleet cannot know it and guessing shipped a
+     * registration that silently received nothing.
+     *
+     * `HAFLEET_EDGE_URL` is how HAFleet COLLECTS from the edge. The registration needs the address the
+     * HOMESERVER dials — the edge's own socket, which is loopback when co-located. Walked on a clean pair of
+     * machines: the console pre-filled the collect address (a public IP), the homeserver could not reach it,
+     * `verify` still answered `accepted` because it only proves the outbound direction, and the edge's own
+     * counter read `transactions from the homeserver: 0`. Nothing on screen said inbound was dead.
+     *
+     * FAILING TO ASK IS REPORTED, NOT PAPERED OVER. If the edge cannot be reached, `edgeRegistrationUrl`
+     * stays null and `edgeReachable` says so — an operator who cannot reach their own edge has a problem
+     * worth seeing before they hand a registration to a customer, and falling back to the collect address
+     * is exactly the guess that caused this.
+     */
+    if (reach?.appservice?.inboundVia === 'edge') {
+      const link = String(process.env.HAFLEET_EDGE_LINK_TOKEN ?? '').trim();
+      try {
+        const probe = await fetch(`${reach.appservice.edgeUrl}/_hafleet/edge/status`, {
+          headers: { 'x-hafleet-link': link },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!probe.ok) throw new Error(`the edge answered HTTP ${probe.status}`);
+        const body = await probe.json();
+        reach.appservice.edgeReachable = true;
+        reach.appservice.edgeRegistrationUrl = body?.registrationUrl ?? null;
+        if (!body?.registrationUrl) {
+          reach.appservice.edgeNote = 'this edge does not report which address the homeserver should dial, '
+            + 'so it predates that field — upgrade it, or read the "put this in the registration" line it '
+            + 'prints at startup.';
+        }
+      } catch (error) {
+        reach.appservice.edgeReachable = false;
+        reach.appservice.edgeRegistrationUrl = null;
+        reach.appservice.edgeNote = `HAFleet cannot reach the edge at ${reach.appservice.edgeUrl}: `
+          + `${error?.message || error}. Nothing will be collected until it can, so fix this before `
+          + 'issuing a registration.';
+      }
+    }
     res.json(reach);
   } catch (error) {
     res.status(500).json({ error: `could not describe Matrix reachability: ${error?.message || error}` });
