@@ -143,3 +143,36 @@ describe('a room on a project side, when that side is somebody else\'s homeserve
     expect(botSends).toHaveLength(0);
   });
 });
+
+describe('the notice about a failure must not itself fail', () => {
+  /*
+   * `sendDeliveryNotice` is the one message a room is OWED when something went wrong — "your message was not
+   * delivered" — and it was the message most certain to fail. It went out as the bot, so on a project side it
+   * hit `M_FORBIDDEN`; with no bot at all it threw `Cannot read properties of null (reading 'sendMessage')`.
+   * Found by running the bot-less path, one site after `reply` and the `!dm` nudge.
+   */
+  test('it goes through sayInRoom, so the representative can deliver it', async () => {
+    const said = [];
+    const self = {
+      sayInRoom: async (roomId, content) => { said.push({ roomId, body: content.body }); },
+    };
+    await bridgeModule.MatrixBridge.prototype.sendDeliveryNotice.call(self, THEIRS, 'not delivered');
+    expect(said).toEqual([{ roomId: THEIRS, body: 'not delivered' }]);
+  });
+
+  test('an empty notice is still not sent', async () => {
+    const calls = [];
+    const self = { sayInRoom: async () => { calls.push(1); } };
+    await bridgeModule.MatrixBridge.prototype.sendDeliveryNotice.call(self, THEIRS, '');
+    expect(calls).toHaveLength(0);
+  });
+
+  test('a failure to notice is logged, not thrown at the caller mid-message', async () => {
+    // The caller is delivering a message. A broken notice must not become a second failure on top of the
+    // first one it was trying to report.
+    const self = { sayInRoom: async () => { throw new Error('nope'); } };
+    await expect(
+      bridgeModule.MatrixBridge.prototype.sendDeliveryNotice.call(self, THEIRS, 'x'),
+    ).resolves.toBeUndefined();
+  });
+});

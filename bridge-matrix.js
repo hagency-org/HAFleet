@@ -8,6 +8,7 @@ import { createHash } from 'crypto';
 import { createAppserviceRouter } from './lib/appservice-receiver.js';
 import {
   createRoomOnSide, inviteToRoomOnSide, joinRoomOnSideAsAgent, sendToRoomOnSide, namespaceAdmits,
+  joinedMembersOnSide,
 } from './lib/matrix-representative.js';
 import { resolveAppserviceListenerConfig, startAppserviceListener } from './lib/appservice-listener.js';
 import { resolveEdgeLinkConfig, startEdgePuller } from './lib/appservice-puller.js';
@@ -3762,34 +3763,14 @@ export class MatrixBridge {
     });
   }
 
-  async start() {
-    if (!MATRIX_BRIDGE_SECRET) {
-      throw new Error('MATRIX_BRIDGE_SECRET is required for reliable Matrix ingestion');
-    }
-    console.log('=== Agent Chat Matrix Bridge ===');
-    console.log(`Homeserver: ${HOMESERVER}`);
-    console.log(`Backend: ${BACKEND_URL}`);
-
-    // 0. Wait for backend to be ready
-    const STARTUP_MAX_RETRIES = 5;
-    const STARTUP_RETRY_DELAY_MS = 2000;
-    for (let attempt = 1; attempt <= STARTUP_MAX_RETRIES; attempt++) {
-      try {
-        await backendApi('GET', '/health', null, 'context=bridge:startup-health-check');
-        console.log('Backend health check passed');
-        break;
-      } catch (e) {
-        if (attempt === STARTUP_MAX_RETRIES) {
-          console.error(`[FATAL] Backend not reachable after ${STARTUP_MAX_RETRIES} attempts — exiting`);
-          process.exit(1);
-        }
-        console.warn(`Backend not ready (attempt ${attempt}/${STARTUP_MAX_RETRIES}): ${e.message} — retrying in ${STARTUP_RETRY_DELAY_MS}ms`);
-        await sleep(STARTUP_RETRY_DELAY_MS);
-      }
-    }
-    await this.replayPendingMatrixDeliveries();
-
-    // 1. Ensure bot account
+  /**
+   * Everything that needs HAFleet's own bot account, in one place so it can fail on its own.
+   *
+   * Extracted rather than guarded site by site: the bot touches fifteen call sites in `start`, and fifteen
+   * `if (this.botClient)` checks would be fifteen chances to forget one. A single boundary makes "the bot is
+   * unavailable" a state with one entry point, and `botUnavailable` records why.
+   */
+  async startBotSide() {
     const botToken = await ensureBotAccount();
     const botSession = await getMatrixAccessTokenSession(botToken, HOMESERVER);
     const botCryptoPath = path.join(DATA_DIR, 'bot-crypto');
@@ -3817,20 +3798,6 @@ export class MatrixBridge {
     };
     this.botUserId = await this.botClient.getUserId();
     console.log(`Bot: ${this.botUserId}`);
-
-    /*
-     * ACTING CREDENTIALS BEFORE ANY AGENT IS JUDGED, and this ordering is the whole fix.
-     *
-     * Step 2 below decides, for every agent, whether it can act on Matrix — and for an agent bound to an
-     * appservice project side the answer lives in `actingCredentials`. Loading that map later meant the
-     * first pass ran against an empty one, concluded the agent had no credential, and logged NEEDS
-     * PROVISIONING about an agent that could speak. Observed in the log as the warning arriving TWELVE
-     * lines before "serving 1 project side(s)".
-     *
-     * Chasing it produced four attempted fixes at four warning sites before the log made the sequence
-     * plain. The rule was never wrong; it was consulted before its inputs existed.
-     */
-    await this.refreshActingCredentials();
 
     // 2. Ensure agent accounts for all known agents.
     // Service relays (e.g. OpenFab's `openfab-bridge`) post in-app only and never need a Matrix
@@ -3960,8 +3927,95 @@ export class MatrixBridge {
     // coupled to how MATRIX_ROOM_SCAN_POLL_MS happens to be tuned.
     this.writeHealthRecord();
     setInterval(() => this.writeHealthRecord(), BRIDGE_HEALTH_WRITE_INTERVAL_MS);
+  }
 
-    // 8. Periodically check agent accounts for pending invites
+  async start() {
+    if (!MATRIX_BRIDGE_SECRET) {
+      throw new Error('MATRIX_BRIDGE_SECRET is required for reliable Matrix ingestion');
+    }
+    console.log('=== Agent Chat Matrix Bridge ===');
+    console.log(`Homeserver: ${HOMESERVER}`);
+    console.log(`Backend: ${BACKEND_URL}`);
+
+    // 0. Wait for backend to be ready
+    const STARTUP_MAX_RETRIES = 5;
+    const STARTUP_RETRY_DELAY_MS = 2000;
+    for (let attempt = 1; attempt <= STARTUP_MAX_RETRIES; attempt++) {
+      try {
+        await backendApi('GET', '/health', null, 'context=bridge:startup-health-check');
+        console.log('Backend health check passed');
+        break;
+      } catch (e) {
+        if (attempt === STARTUP_MAX_RETRIES) {
+          console.error(`[FATAL] Backend not reachable after ${STARTUP_MAX_RETRIES} attempts — exiting`);
+          process.exit(1);
+        }
+        console.warn(`Backend not ready (attempt ${attempt}/${STARTUP_MAX_RETRIES}): ${e.message} — retrying in ${STARTUP_RETRY_DELAY_MS}ms`);
+        await sleep(STARTUP_RETRY_DELAY_MS);
+      }
+    }
+    await this.replayPendingMatrixDeliveries();
+
+    /*
+     * THE BOT IS NOT THE ONLY WAY IN, and treating it as one turned a missing password into a total outage.
+     *
+     * On a co-located appservice deployment the inbound path is: customer's homeserver → edge → THIS process.
+     * None of it needs HAFleet's own bot. But every step of bringing that bot up sat before the intake with no
+     * guard, so `MATRIX_BOT_PASSWORD is required` — a credential with nothing to do with inbound — exited 1
+     * and every customer went silent. Observed on clean machines; the console kept answering and the side kept
+     * reporting `accepted`, because that describes the outbound direction.
+     *
+     * So the bot is brought up in a try. If it fails AND an appservice path exists, this process continues
+     * WITHOUT it and says exactly what is lost. If there is no appservice path, the failure is still fatal —
+     * a bridge with no bot and no edge has nothing to do, and starting it would be theatre.
+     */
+    /*
+     * ACTING CREDENTIALS FIRST, BEFORE ANYTHING IS JUDGED OR ANYTHING SPEAKS — and this ordering has now been
+     * load-bearing twice.
+     *
+     * The original reason: step 2 of the bot side decides, for every agent, whether it can act on Matrix, and
+     * for an agent on an appservice side the answer lives in `actingCredentials`. Loading it later meant the
+     * first pass ran against an empty map and logged NEEDS PROVISIONING about an agent that could speak —
+     * observed as the warning arriving TWELVE lines before "serving 1 project side(s)". Four fixes went in at
+     * four warning sites before the log made the sequence plain. The rule was never wrong; it was consulted
+     * before its inputs existed.
+     *
+     * The second reason, found by running the bot-less path: it used to sit INSIDE the bot block, so with the
+     * bot unavailable the map stayed empty and `sayInRoom` / `joinedMembersOf` had no representative to fall
+     * back to — `no bot and no credential for that server` on the first inbound message. The degraded mode
+     * would have been useless for the one thing it exists for. It needs only the backend, so it belongs here.
+     */
+    await this.refreshActingCredentials();
+
+    const edgeLink = resolveEdgeLinkConfig(process.env);
+    /*
+     * Read through the same resolvers the intake itself uses, rather than a constant of my own: a second
+     * reading of "is there an inbound path" would be a second thing to keep in step with the first.
+     */
+    const hasInboundPath = edgeLink.enabled
+      || Boolean(resolveAppserviceListenerConfig(process.env)?.enabled);
+    try {
+      await this.startBotSide();
+    } catch (error) {
+      if (!hasInboundPath) throw error;
+      this.botUnavailable = String(error?.message ?? error);
+      console.error(`[bridge] the bot could not be brought up: ${this.botUnavailable}`);
+      console.error(
+        '[bridge] CONTINUING WITHOUT IT because this deployment has an appservice path. What is lost: talking '
+        + 'to the operator from HAFleet\'s own homeserver, E2EE anywhere, approval DM rooms, and room/avatar '
+        + 'scanning. What still works: appservice intake, and sends into project-side rooms as the '
+        + 'representative. Fix the bot credential to get the rest back.',
+      );
+      /*
+       * SYNCHRONOUS, and it has its own try inside. A first version wrote `await …().catch(…)` on the
+       * assumption it returned a promise; it does not, so the degraded path died on
+       * `Cannot read properties of undefined (reading 'catch')` — the recovery path crashing where the thing
+       * it was recovering from had merely failed. Caught by running it rather than by reading it.
+       */
+      this.writeHealthRecord();
+    }
+
+    // 8. Periodically check agent accounts for pending invites    // 8. Periodically check agent accounts for pending invites
     this.pollAgentInvites();
     setInterval(() => this.pollAgentInvites(), MATRIX_INVITE_POLL_MS);
 
@@ -4468,8 +4522,16 @@ export class MatrixBridge {
       console.error('Failed to poll agents:', e.message);
     }
 
-    // Discover humans from Matrix user directory and greet them
-    await this.discoverAndGreetHumans();
+    /*
+     * Discover humans from Matrix user directory and greet them — BOT WORK, so skipped when there is no bot.
+     * It searches HAFleet's own homeserver and greets in a bot DM; without a bot it logged
+     * `Failed to discover humans: fetch failed` every poll, and a degraded mode that fills the log with its
+     * own failures teaches an operator to stop reading it.
+     *
+     * Guarded here rather than inside the function: three attempts at an internal guard each broke tests that
+     * were exercising real paths, because the function is fine — it is this DEPLOYMENT that has no bot.
+     */
+    if (this.botClient) await this.discoverAndGreetHumans();
   }
 
   routerThreadRelation(threadRootEventId) {
@@ -4555,6 +4617,18 @@ export class MatrixBridge {
   }
 
   async discoverAndGreetHumans() {
+    /*
+     * It searches the user directory of HAFleet's OWN homeserver with the bot's TOKEN, and greets what it
+     * finds in a bot DM. With no bot there is no token, no directory to search and nowhere to greet — it
+     * logged `Failed to discover humans: fetch failed` on every poll instead. Humans on a project side arrive
+     * through the appservice; they are not discovered this way.
+     *
+     * NOT GUARDED HERE, and that took three attempts to get right. A guard on `botClient` disabled the whole
+     * function and four tests objected; a guard on `state.botToken` disabled it and three more objected;
+     * guarding just the search broke the two that assert the search's own rate-limit handling. Every one of
+     * them was exercising a real path. The condition belongs at the CALL SITE — see `pollRegistrations` —
+     * because "this deployment has no bot" is a fact about the deployment, not about this function.
+     */
     if (!state.greetedHumans) state.greetedHumans = [];
     const SKIP_USERS = new Set([BOT_USERNAME, 'conduit']);
     const candidates = new Map();
@@ -4628,6 +4702,9 @@ export class MatrixBridge {
    * because the leak this fixes was invisible precisely because nothing said anything.
    */
   async reapDeadBotDms() {
+    // Its timer is registered inside `startBotSide`, so today it cannot run without a bot. Guarded anyway:
+    // the two above were only reachable because a timer sat on the other side of that boundary.
+    if (!this.botClient) return;
     if (this._reapingBotDms) return 0;
     const dmRooms = state.botDmRooms || {};
     const roomIds = Object.values(dmRooms).filter((r) => typeof r === 'string' && r);
@@ -4827,6 +4904,43 @@ export class MatrixBridge {
    * side we hold an acting credential for, the representative is who speaks there. Falls back to the bot for
    * our own rooms, which is every other caller of this.
    */
+  /**
+   * Who is joined to a room, asked of whichever identity can see it.
+   *
+   * The read half of `sayInRoom`, and it exists for the same reason: the bridge classifies an inbound room by
+   * its membership, and on a project side HAFleet's own bot is not in the room to ask. The representative is.
+   *
+   * RETURNS `{ known, members }` RATHER THAN THROWING, because the caller is mid-message. A room whose
+   * membership cannot be read must still be handled — as a group, which is the safe classification: it means
+   * the message is delivered by mention rather than assumed to be for one agent.
+   */
+  async joinedMembersOf(roomId) {
+    const at = String(roomId || '').indexOf(':');
+    const server = at > 0 ? String(roomId).slice(at + 1).toLowerCase() : '';
+    const acting = server ? this.actingSideFor(server) : null;
+
+    if (server && server !== MATRIX_SERVER_NAME && acting) {
+      return joinedMembersOnSide({ ...acting, roomId });
+    }
+    if (!this.botClient) {
+      if (!acting) return { known: false, members: [], reason: 'no bot and no credential for that server' };
+      return joinedMembersOnSide({ ...acting, roomId });
+    }
+    try {
+      const members = await getJoinedRoomMembersWithTrace(this.botClient, roomId, 'joinedMembersOf');
+      return { known: true, members, reason: null };
+    } catch (error) {
+      /*
+       * SAME FALLBACK RULE AS `sayInRoom`: the bot not being in the room is a membership refusal, not an
+       * outage, and the representative can answer it. Any other failure is a real one and is reported as
+       * unknown rather than retried under a different identity.
+       */
+      const forbidden = error?.errcode === 'M_FORBIDDEN' || /M_FORBIDDEN/.test(String(error?.message ?? ''));
+      if (forbidden && acting) return joinedMembersOnSide({ ...acting, roomId });
+      return { known: false, members: [], reason: String(error?.message ?? error) };
+    }
+  }
+
   async sayInRoom(roomId, content, { txnSeed = null } = {}) {
     const at = String(roomId || '').indexOf(':');
     const server = at > 0 ? String(roomId).slice(at + 1).toLowerCase() : '';
@@ -4883,7 +4997,16 @@ export class MatrixBridge {
   async sendDeliveryNotice(roomId, text) {
     if (!text) return;
     try {
-      await this.botClient.sendMessage(roomId, { msgtype: 'm.text', body: text });
+      /*
+       * THROUGH `sayInRoom`, because this is the one message the ROOM is owed when something went wrong —
+       * "your message was not delivered" — and it was the message most certain to fail. It went out as the
+       * bot, so on a project side it hit `M_FORBIDDEN`, and with no bot at all it threw
+       * `Cannot read properties of null (reading 'sendMessage')`: the notice about a failure failing.
+       *
+       * Found by running the bot-less path, one site after `reply` and the `!dm` nudge. Three sites, one
+       * assumption.
+       */
+      await this.sayInRoom(roomId, { msgtype: 'm.text', body: text });
     } catch (e) {
       console.error('Failed to send delivery notice:', e.message);
     }
@@ -5192,7 +5315,14 @@ export class MatrixBridge {
     let isBotDm = false;
     let agentMembers = [];
     try {
-      const members = await this.botClient.getJoinedRoomMembers(roomId);
+      /*
+       * ASKED OF WHOEVER CAN SEE THE ROOM. This was the bot's own read, and on a project side the bot is not
+       * a member: the read threw, the catch below logged a warning, and the room was classified as a group —
+       * so a customer's DM with one agent was treated as a broadcast and reached nobody by name.
+       */
+      const membership = await this.joinedMembersOf(roomId);
+      if (!membership.known) throw new Error(membership.reason || 'membership unreadable');
+      const members = membership.members;
       const nonBot = members.filter(m => m !== this.botUserId);
       agentMembers = nonBot.filter(m => isAgentUser(m));
       const humanMembers = nonBot.filter(m => !isAgentUser(m));
@@ -5412,7 +5542,11 @@ export class MatrixBridge {
       device_self_signature_verified: true,
       room_members_verified: true,
     }, `context=agent-ops:bootstrap agent=${canonicalAgent} room=${projectRoomId}`);
-    await this.botClient.sendMessage(control.roomId, {
+    /*
+     * `sayInRoom`: an Agent Operations grant is posted into the PROJECT's room, which on a project side the
+     * bot is not in. Same rule as every other send into a room we do not own.
+     */
+    await this.sayInRoom(control.roomId, {
       msgtype: AGENT_OPS_SESSION_GRANT_MSGTYPE,
       body: `Agent Operations session grant for ${canonicalAgent}. This control event is not a chat instruction.`,
       [AGENT_OPS_EVENT_KEY]: result,
@@ -5621,6 +5755,15 @@ export class MatrixBridge {
   }
 
   async scanJoinedRooms() {
+    /*
+     * NOTHING TO SCAN WITHOUT A BOT. This walks the rooms the bot itself is joined to, so with the bot
+     * unavailable it is not merely useless — it threw `Cannot read properties of null (reading
+     * 'getJoinedRooms')` on every poll, once a minute, in a mode that is supposed to keep working. A degraded
+     * mode that fills the log with its own failures teaches an operator to stop reading it.
+     *
+     * Silent rather than logged: `start` has already said, once, exactly what is unavailable and why.
+     */
+    if (!this.botClient) return;
     // If backend was marked unhealthy, probe it before running a full scan
     if (!this._backendHealthy) {
       try {
@@ -6133,6 +6276,12 @@ export class MatrixBridge {
     }
     // Trailing stages each self-guard too, but checking here avoids even calling into
     // them once this round has already tripped the shared cooldown.
+    /*
+     * NO BOT GATE HERE, and the tests are why. A first version wrapped these three in `if (this.botClient)`
+     * to keep a bot-less deployment quiet; one test asserts all three are invoked and does not set a bot
+     * client. Checking what they actually touch settled it: only `scanJoinedRooms` reads `botClient`, and it
+     * guards its own entry. A gate here would have been a second place to reason about the same fact.
+     */
     if (!rateLimitGate.beforeRequest()) return;
     await this.pollBotInvites();
     // Re-scan for any newly joined rooms that need mapping
@@ -7357,7 +7506,8 @@ export class MatrixBridge {
     }
     const body = full ? `ℹ️ ${summary}\n\n${full}` : `ℹ️ ${summary}`;
     try {
-      await this.botClient.sendMessage(roomId, { msgtype: 'm.text', body });
+      // A system notice lands in whichever room raised it, including a project side's.
+      await this.sayInRoom(roomId, { msgtype: 'm.text', body });
       if (warningCooldownKey) {
         this._recentSystemInfoWarningKeys.set(warningCooldownKey, warningCooldownAt);
         if (this._recentSystemInfoWarningKeys.size > 1000) {
