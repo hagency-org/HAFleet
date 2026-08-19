@@ -659,11 +659,18 @@ export default function NewProjectSide() {
             */}
           {verdict && appservice?.inbound && appservice.inbound.state !== 'unknown' && (
             <div className="notice">
-              <span className={appservice.inbound.state === 'flowing' ? 'pill ok-text' : 'pill warn-text'}>
+              {/*
+                * A JUST-RESTARTED EDGE IS NOT A PROBLEM. Its counters live in the process, so a deploy zeroes
+                * them — and a warning pill on every healthy fleet after every update is a pill an operator
+                * learns to ignore.
+                */}
+              <span className={appservice.inbound.state === 'flowing' || appservice.inbound.settling
+                ? 'pill ok-text' : 'pill warn-text'}>
                 {appservice.inbound.state === 'flowing' ? '事件进得来'
-                  : appservice.inbound.state === 'never-called' ? 'homeserver 还没来过'
-                    : appservice.inbound.state === 'not-collected' ? '没人在收'
-                      : appservice.inbound.state === 'rejected' ? '令牌被拒' : appservice.inbound.state}
+                  : appservice.inbound.settling ? '刚起来，等第一条'
+                    : appservice.inbound.state === 'never-called' ? 'homeserver 还没来过'
+                      : appservice.inbound.state === 'not-collected' ? '没人在收'
+                        : appservice.inbound.state === 'rejected' ? '令牌被拒' : appservice.inbound.state}
               </span>{' '}
               {appservice.inbound.detail}
             </div>

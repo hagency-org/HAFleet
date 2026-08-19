@@ -507,6 +507,46 @@ describe('is anything actually arriving, and whose problem is it', () => {
     expect(d.state).toBe('not-collected');
   });
 
+  test('a just-restarted edge is settling, not a warning — a pill that fires on healthy fleets is ignored', () => {
+    /*
+     * The counters live in the edge process, so a deploy zeroes them. Verified on the live fleet: restarting
+     * the edge took a healthy `flowing` straight to `never-called` while HAFleet was long-polling it. Left
+     * alone that would raise an inbound warning on every update of every working deployment.
+     */
+    const d = diagnoseEdgeInbound(
+      { transactions: 0, hafleetWaiting: true, startedAt: 1_000_000 },
+      { now: () => 1_030_000 },   // 30s old
+    );
+    expect(d.state).toBe('never-called');
+    expect(d.settling).toBe(true);
+    expect(d.detail).toMatch(/nothing to fix yet/);
+  });
+
+  test('once it has been up a while, never-called is a warning again', () => {
+    const d = diagnoseEdgeInbound(
+      { transactions: 0, hafleetWaiting: true, startedAt: 1_000_000 },
+      { now: () => 1_000_000 + 200_000 },   // past the settling window
+    );
+    expect(d.settling).toBe(false);
+    expect(d.detail).toMatch(/url in the registration/);
+  });
+
+  test('a fresh edge NOBODY is collecting from is not settling, however young', () => {
+    // Youth excuses a quiet homeserver. It does not excuse a bridge that is not there.
+    const d = diagnoseEdgeInbound(
+      { transactions: 0, hafleetWaiting: false, startedAt: 1_000_000 },
+      { now: () => 1_005_000 },
+    );
+    expect(d.settling).toBe(false);
+  });
+
+  test('an edge that does not report a start time is judged as before, not excused', () => {
+    // An older edge predates the field. Treating a missing timestamp as "fresh" would mute the warning for
+    // every one of them.
+    const d = diagnoseEdgeInbound({ transactions: 0, hafleetWaiting: true });
+    expect(d.settling).toBe(false);
+  });
+
   test('a rejected token is diagnosed as the re-issue trap, not as an outage', () => {
     /*
      * Palpo keeps registrations in its database keyed by id and a restart does not update an existing row,
