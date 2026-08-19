@@ -123,13 +123,31 @@ describe('the ordering that made a correct rule always false', () => {
      * still empty when `ensureAgentAccount` asked. Four fixes went in before the log made the sequence
      * plain, so what is pinned here is the sequence itself.
      */
+    /*
+     * ASSERTED WITHIN `start()`, not by position in the file — and that distinction is a correction.
+     *
+     * The first version compared `indexOf` across the whole source, which worked only while both statements
+     * lived in one function. When the bot-dependent half was extracted into `startBotSide()` — defined ABOVE
+     * `start()` — the file order inverted while the execution order was correct, and this test failed on a
+     * change that fixed the very thing it guards. A proxy for execution order is only as good as the layout
+     * it assumes.
+     */
     const source = bridgeModule.bridgeSourceForTest?.()
       ?? require('fs').readFileSync(path.resolve('bridge-matrix.js'), 'utf8');
-    const refresh = source.indexOf('await this.refreshActingCredentials();');
-    const judge = source.indexOf('// 2. Ensure agent accounts for all known agents.');
+    const start = /\n  async start\(\) \{[\s\S]*?\n  \}\n/.exec(source)?.[0] ?? '';
+    expect(start, 'could not read start()').toBeTruthy();
+
+    const refresh = start.indexOf('await this.refreshActingCredentials();');
+    const botSide = start.indexOf('await this.startBotSide();');
     expect(refresh).toBeGreaterThan(-1);
-    expect(judge).toBeGreaterThan(-1);
-    expect(refresh).toBeLessThan(judge);
+    expect(botSide).toBeGreaterThan(-1);
+    // The map is loaded before anything that consults it: the bot side judges agents, and the intake below
+    // needs a representative to fall back to when the bot is gone.
+    expect(refresh).toBeLessThan(botSide);
+
+    // And the agent judgement really is inside the part that can be skipped.
+    const botSideBody = /\n  async startBotSide\(\) \{[\s\S]*?\n  \}\n/.exec(source)?.[0] ?? '';
+    expect(botSideBody).toContain('// 2. Ensure agent accounts for all known agents.');
   });
 });
 
@@ -177,5 +195,60 @@ describe('who speaks in a room, chosen by the room\'s own server', () => {
     const direct = [...source.matchAll(/this\.botClient\.sendMessage\(/g)];
     // Exactly one remains: the fallback inside `reply` for a bridge that has no `sayInRoom`.
     expect(direct).toHaveLength(1);
+  });
+});
+
+describe('the bot is not the only way in', () => {
+  /*
+   * `MATRIX_BOT_PASSWORD is required` used to exit 1, and on a co-located appservice deployment that ended
+   * every customer's ability to reach their agents — a credential with nothing to do with inbound taking down
+   * the only inbound path. Walked on clean machines: the console kept answering and the side kept reporting
+   * `accepted`, because that describes the outbound direction.
+   *
+   * The intake path itself needs no bot. It is: customer's homeserver → edge → this process, and replies go
+   * out as the representative.
+   */
+  const source = () => require('fs').readFileSync(path.resolve('bridge-matrix.js'), 'utf8');
+  const startBody = () => /\n  async start\(\) \{[\s\S]*?\n  \}\n/.exec(source())?.[0] ?? '';
+
+  test('a failed bot bring-up is caught rather than thrown, when there is an inbound path', () => {
+    const body = startBody();
+    expect(body).toMatch(/await this\.startBotSide\(\);/);
+    expect(body).toMatch(/catch \(error\) \{/);
+    // Fatal when there is nothing else to do: a bridge with no bot and no edge would be theatre.
+    expect(body).toMatch(/if \(!hasInboundPath\) throw error;/);
+    // And the inbound path is read through the resolvers the intake itself uses, not a second reading.
+    expect(body).toMatch(/resolveEdgeLinkConfig\(process\.env\)/);
+    expect(body).toMatch(/resolveAppserviceListenerConfig\(process\.env\)/);
+  });
+
+  test('the intake starts AFTER the bot attempt, so a failed bot cannot skip it', () => {
+    const body = startBody();
+    const botSide = body.indexOf('await this.startBotSide();');
+    const intake = body.indexOf('await this.startAppserviceIntake();');
+    expect(botSide).toBeGreaterThan(-1);
+    expect(intake).toBeGreaterThan(botSide);
+  });
+
+  test('what is lost is stated, not left to be discovered', () => {
+    /*
+     * A degraded mode that does not say what it gave up is worse than a crash: the operator believes they
+     * have a working bridge. The message names the capabilities rather than saying "some features".
+     */
+    const body = startBody();
+    expect(body).toMatch(/CONTINUING WITHOUT IT/);
+    for (const lost of ['E2EE', 'approval DM rooms']) expect(body).toContain(lost);
+    expect(body).toMatch(/What still works/);
+  });
+
+  test('the room-membership read has a representative fallback, since the bot may be gone', () => {
+    // The inbound path had exactly one bot dependency — classifying a room by its membership. It is the read
+    // half of `sayInRoom` and follows the same rule.
+    const fn = /async joinedMembersOf\(roomId\)[\s\S]*?\n  \}/.exec(source())?.[0] ?? '';
+    expect(fn).toBeTruthy();
+    expect(fn).toMatch(/if \(!this\.botClient\)/);
+    expect(fn).toMatch(/joinedMembersOnSide/);
+    // Unknown rather than throwing: the caller is mid-message and must be able to carry on.
+    expect(fn).toMatch(/known: false/);
   });
 });
