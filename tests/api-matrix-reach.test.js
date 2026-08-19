@@ -140,6 +140,54 @@ describe('the address a co-located edge tells us to put in the registration', ()
     expect(body.appservice.edgeNote).toMatch(/403/);
   });
 
+  test('the traffic counters and the diagnosis come back, so a screen can say inbound is dead', async () => {
+    /*
+     * THE PAIR THAT MUST BE ANSWERABLE TOGETHER. A side can be `accepted` — HAFleet can act as the
+     * representative — while nothing has ever arrived. On the walkthrough those two facts coexisted for an
+     * hour and only the second one mattered. `verify` cannot see it; this can.
+     */
+    const edge = await fakeEdge(() => [200, {
+      transactions: 4, delivered: 0, rejected: 0, hafleetWaiting: false,
+      registrationUrl: 'http://127.0.0.1:8094',
+    }]);
+    const body = await reach(await boot({
+      HAFLEET_EDGE_URL: edge.baseUrl,
+      HAFLEET_EDGE_LINK_TOKEN: LINK,
+      HAFLEET_EDGE_SIDE: 'walk.test',
+    }));
+
+    expect(body.appservice.inbound.state).toBe('not-collected');
+    expect(body.appservice.inbound.detail).toMatch(/BRIDGE/);
+    expect(body.appservice.edgeTraffic).toEqual({
+      transactions: 4, delivered: 0, rejected: 0, collecting: false,
+    });
+  });
+
+  test('a healthy edge reports flowing, so the warning means something when it appears', async () => {
+    const edge = await fakeEdge(() => [200, {
+      transactions: 7, delivered: 7, rejected: 0, hafleetWaiting: true,
+      registrationUrl: 'http://127.0.0.1:8094',
+    }]);
+    const body = await reach(await boot({
+      HAFLEET_EDGE_URL: edge.baseUrl,
+      HAFLEET_EDGE_LINK_TOKEN: LINK,
+      HAFLEET_EDGE_SIDE: 'walk.test',
+    }));
+    expect(body.appservice.inbound.state).toBe('flowing');
+    expect(body.appservice.edgeTraffic.collecting).toBe(true);
+  });
+
+  test('an unreachable edge says unknown rather than claiming inbound is fine or broken', async () => {
+    // Two different ignorances: "we asked and nothing is arriving" versus "we could not ask". Reporting the
+    // second as the first would send an operator to restart a bridge that is running.
+    const body = await reach(await boot({
+      HAFLEET_EDGE_URL: 'http://127.0.0.1:9',
+      HAFLEET_EDGE_LINK_TOKEN: LINK,
+      HAFLEET_EDGE_SIDE: 'walk.test',
+    }));
+    expect(body.appservice.inbound.state).toBe('unknown');
+  });
+
   test('with no edge configured nothing is asked and nothing is claimed', async () => {
     // The check must not invent an edge for the deployments that do not use one.
     const body = await reach(await boot({}));

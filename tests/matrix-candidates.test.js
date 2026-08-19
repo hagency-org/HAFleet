@@ -17,6 +17,7 @@ import { classifyMatrixFailure } from '../lib/matrix-representative.js';
 import {
   callbackCandidates,
   describeMatrixReach,
+  diagnoseEdgeInbound,
   verifyCallbackFromHomeserver,
   discoverBaseUrl,
   originFor,
@@ -467,5 +468,82 @@ describe('the classifier, and the answer a walkthrough got wrong', () => {
   test('the errcode does not override a real credential verdict', () => {
     // A 403 that happens to carry M_USER_IN_USE is still a refusal of the token; status is the stronger signal.
     expect(classifyMatrixFailure({ status: 403, errcode: 'M_USER_IN_USE' })).toBe('rejected');
+  });
+});
+
+describe('is anything actually arriving, and whose problem is it', () => {
+  /*
+   * THE MOST DANGEROUS THING THE WALKTHROUGH FOUND. `POST .../verify` answers `accepted` after exercising
+   * the OUTBOUND direction only — HAFleet could act as the representative, so the screen said the customer
+   * was onboarded. Inbound was dead. Nothing on any screen said so, and the only contrary evidence was a
+   * counter inside a process on somebody else's machine.
+   *
+   * Four states because they have four different owners, and a single "not working" sends whoever reads it
+   * to the wrong side of the fence.
+   */
+  test('nothing has arrived because the homeserver has never called — the customer\'s side', () => {
+    const d = diagnoseEdgeInbound({ transactions: 0, delivered: 0, rejected: 0 });
+    expect(d.state).toBe('never-called');
+    // The three reasons, because they are checked in three different places.
+    expect(d.detail).toMatch(/nothing has happened/);
+    expect(d.detail).toMatch(/url in the registration/);
+    expect(d.detail).toMatch(/restarted/);
+  });
+
+  test('the homeserver calls and nobody collects — OUR side, and it names the process', () => {
+    /*
+     * The state an operator cannot guess: the console works, the API works, `verify` says `accepted`, and a
+     * DIFFERENT process — the bridge — is the one that was never started. Observed exactly this way:
+     * `transactions: 4` with `HAFleet last seen: never`.
+     */
+    const d = diagnoseEdgeInbound({ transactions: 4, delivered: 0, rejected: 0, hafleetWaiting: false });
+    expect(d.state).toBe('not-collected');
+    expect(d.detail).toMatch(/BRIDGE/);
+    expect(d.detail).toMatch(/bridge-matrix\.js/);
+  });
+
+  test('connected but taking nothing is still not-collected', () => {
+    const d = diagnoseEdgeInbound({ transactions: 3, delivered: 0, hafleetWaiting: true });
+    expect(d.state).toBe('not-collected');
+  });
+
+  test('a rejected token is diagnosed as the re-issue trap, not as an outage', () => {
+    /*
+     * Palpo keeps registrations in its database keyed by id and a restart does not update an existing row,
+     * so a re-issued registration leaves the homeserver calling with the old hs_token. The remedy is
+     * specific and unguessable, so it is stated.
+     */
+    const d = diagnoseEdgeInbound({ transactions: 5, delivered: 0, rejected: 5 });
+    expect(d.state).toBe('rejected');
+    expect(d.detail).toMatch(/old token/);
+    expect(d.detail).toMatch(/database keyed by id/);
+  });
+
+  test('rejected wins over flowing, because a stopped stream beside a rising rejection reads as health', () => {
+    // delivered > 0 from before the token changed, rejected climbing since. Reporting `flowing` here would
+    // report health while every NEW event is turned away.
+    const d = diagnoseEdgeInbound({ transactions: 9, delivered: 4, rejected: 5, hafleetWaiting: true });
+    expect(d.state).toBe('rejected');
+  });
+
+  test('flowing says how much, so a number can be compared on the next look', () => {
+    const d = diagnoseEdgeInbound({ transactions: 7, delivered: 7, rejected: 0, hafleetWaiting: true });
+    expect(d.state).toBe('flowing');
+    expect(d.detail).toMatch(/7 of 7/);
+  });
+
+  test('a previous collection counts as collecting, so a poll gap is not reported as a dead bridge', () => {
+    // Between long-polls `hafleetWaiting` is briefly false; a bridge that has ever collected is not absent.
+    const d = diagnoseEdgeInbound({
+      transactions: 2, delivered: 2, hafleetWaiting: false, hafleetLastSeenAt: 1700000000000,
+    });
+    expect(d.state).toBe('flowing');
+  });
+
+  test('no status at all is `unknown` rather than a guess in either direction', () => {
+    expect(diagnoseEdgeInbound(null).state).toBe('unknown');
+    expect(diagnoseEdgeInbound(undefined).state).toBe('unknown');
+    // Missing counters are treated as zero rather than throwing — an older edge reports fewer fields.
+    expect(diagnoseEdgeInbound({}).state).toBe('never-called');
   });
 });

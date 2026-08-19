@@ -1,6 +1,7 @@
 import express from 'express';
 import {
-  describeMatrixReach, discoverBaseUrl, originFor, probeHomeserver, verifyCallbackFromHomeserver,
+  describeMatrixReach, diagnoseEdgeInbound, discoverBaseUrl, originFor, probeHomeserver,
+  verifyCallbackFromHomeserver,
 } from './lib/matrix-candidates.js';
 import { buildReplyHint } from './lib/reply-hint.js';
 import { meterFleet } from './lib/metering/reader.js';
@@ -9054,6 +9055,19 @@ app.get('/api/matrix/reach', requireBearer, async (req, res) => {
         const body = await probe.json();
         reach.appservice.edgeReachable = true;
         reach.appservice.edgeRegistrationUrl = body?.registrationUrl ?? null;
+        /*
+         * WHETHER ANYTHING IS ACTUALLY ARRIVING, carried to the screen because `verify` cannot tell you.
+         * Verification proves the OUTBOUND direction; a side can be `accepted` while nothing has ever come
+         * in. The counters live in the edge process on the customer's machine, so this is the only place a
+         * console could learn it.
+         */
+        reach.appservice.inbound = diagnoseEdgeInbound(body);
+        reach.appservice.edgeTraffic = {
+          transactions: body?.transactions ?? 0,
+          delivered: body?.delivered ?? 0,
+          rejected: body?.rejected ?? 0,
+          collecting: Boolean(body?.hafleetWaiting) || Boolean(body?.hafleetLastSeenAt),
+        };
         if (!body?.registrationUrl) {
           reach.appservice.edgeNote = 'this edge does not report which address the homeserver should dial, '
             + 'so it predates that field — upgrade it, or read the "put this in the registration" line it '
@@ -9062,6 +9076,7 @@ app.get('/api/matrix/reach', requireBearer, async (req, res) => {
       } catch (error) {
         reach.appservice.edgeReachable = false;
         reach.appservice.edgeRegistrationUrl = null;
+        reach.appservice.inbound = { state: 'unknown', detail: 'the edge could not be asked' };
         reach.appservice.edgeNote = `HAFleet cannot reach the edge at ${reach.appservice.edgeUrl}: `
           + `${error?.message || error}. Nothing will be collected until it can, so fix this before `
           + 'issuing a registration.';

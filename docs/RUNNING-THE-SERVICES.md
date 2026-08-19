@@ -85,6 +85,37 @@ an unattended host that gap matters, and the next thing to check is whether the 
 `ProcessType: Background` or a `LimitLoadToSessionType`, since a GUI-session agent that has lost its
 session cannot be respawned into one.
 
+## Which process receives a customer's messages
+
+**The bridge, not the backend** — and this is worth stating on its own because the failure it produces is
+silent and misattributed.
+
+On a co-located appservice deployment the edge beside the customer's homeserver is drained by
+`bridge-matrix.js`. With the bridge down: the console answers, the API answers, `POST
+/api/project-sides/:id/verify` still returns `accepted` — because that verifies the OUTBOUND direction, our
+ability to act as the representative — and not one message from the customer arrives. Walked on clean
+machines: the edge's own counter read `transactions from the homeserver: 4` and `HAFleet last seen: never`
+while every screen looked healthy.
+
+Two things now say so rather than leaving it to be deduced:
+
+- `GET /api/matrix/reach` reports `appservice.inbound` — `flowing`, `never-called`, `not-collected` or
+  `rejected` — and the setup screen shows it beside the credential verdict, so "accepted" and "nothing is
+  arriving" can no longer be mistaken for one answer.
+- A fatal bridge start-up failure prints what it costs: `NOTHING WILL BE COLLECTED while this process is
+  down`, naming the edge and the side. It appears only when an edge is actually configured. The failure that
+  prompted it was `MATRIX_BOT_PASSWORD is required` — a credential with nothing to do with inbound, which
+  ends inbound anyway.
+
+**The bridge still needs its own bot account**, so a deployment that only serves appservice project sides
+must nevertheless give it `MATRIX_HOMESERVER`, `MATRIX_BOT_USER` and `MATRIX_BOT_PASSWORD`. That is a real
+constraint rather than a preference: the bot holds the single crypto store, talks to the operator, and owns
+the approval DM rooms. Making the intake independent of it is not done.
+
+`rejected` deserves its own note: it means the homeserver is calling with an `hs_token` the edge does not
+accept, and the usual cause is a re-issued registration. Palpo keeps registrations in its database keyed by
+id, and restarting does not update an existing row — so the new token never reaches it.
+
 ## Stopping
 
 ```bash
