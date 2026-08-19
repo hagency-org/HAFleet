@@ -358,7 +358,12 @@ function Oversight({ agent }) {
       <div className="panel">
         <h3>{t('ag.workEvidence')}</h3>
         <p className="faint" style={{ fontSize: 11.5 }}>
-          {t('ag.evidenceNote')} <Link href="/tasks">{t('nav.tasks')}</Link>
+          {/*
+            * The link used to point at `/tasks`, a route this console does not have — so the one place that
+            * says "the authoritative record is elsewhere" sent the reader to a 404. The sentence is worth
+            * more than the link: it stands alone rather than pointing somewhere wrong.
+            */}
+          {t('ag.evidenceNote')}
         </p>
         <div className="log" style={{ marginTop: 8 }}>
           <div className="dim">{t('ag.captured', { n: '6m' })}</div>

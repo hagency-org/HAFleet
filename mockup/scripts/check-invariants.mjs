@@ -690,4 +690,67 @@ console.log(`\n${failed === 0 ? 'All invariants hold.' : `${failed} FAILED.`}\n`
     offenders.join(' '));
 }
 
+// 22. every page can be reached, and every link goes somewhere
+{
+  /*
+   * TWO DEFECTS THAT ARE INVISIBLE FROM INSIDE A PAGE, both found by walking the console as a new operator
+   * on a clean machine rather than by reading it.
+   *
+   *   `/projects/new` — the entire four-step flow for taking on a customer — was linked from NOWHERE. No nav
+   *   entry, no button, no page. Reachable only by typing the URL. It is the first thing a new operator does,
+   *   and there was no way to click to it.
+   *
+   *   `/overview` and `/tasks` were LINKED and did not exist. The worse of the two was the 404 page's own
+   *   "back" button pointing at `/overview`: a reader who mistyped a URL clicked the escape hatch and got
+   *   another 404.
+   *
+   * Neither is visible to a test of any single page, and neither breaks a build — Next renders a link to a
+   * missing route perfectly happily and 404s at click time. So the check is structural and runs both ways.
+   */
+  const walk = (dir) => readdirSync(dir).flatMap((entry) => {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) return walk(full);
+    return /\.jsx?$/.test(full) ? [full] : [];
+  });
+  const root = join(import.meta.dirname, '..');
+  const appDir = join(root, 'app');
+
+  /*
+   * Routes, from the filesystem. `[name]` is dynamic and is always reached with a parameter, so it is not
+   * expected to be a literal href; `api/` is not a page at all.
+   */
+  const routes = new Set(
+    walk(appDir)
+      .filter((f) => /[/\\]page\.jsx?$/.test(f))
+      .map((f) => f.slice(appDir.length).replace(/[/\\]page\.jsx?$/, '').replace(/\\/g, '/') || '/')
+      .filter((r) => !r.startsWith('/api')),
+  );
+
+  const linked = new Set();
+  for (const file of [...walk(appDir), ...walk(join(root, 'components'))]) {
+    const text = readFileSync(file, 'utf8');
+    for (const m of text.matchAll(/href="(\/[a-zA-Z0-9/_-]*)"/g)) linked.add(m[1]);
+    // The rail builds its entries as objects rather than as literal href attributes.
+    for (const m of text.matchAll(/href: '(\/[a-zA-Z0-9/_-]*)'/g)) linked.add(m[1]);
+  }
+
+  const unreachable = [...routes].filter((r) => {
+    if (r === '/') return false;                       // the front door is reached by being the front door
+    if (r.includes('[')) return false;                 // dynamic: reached with a parameter
+    return !linked.has(r);
+  });
+  check('every page can be reached by clicking', unreachable.length === 0, unreachable.join(' '));
+
+  const broken = [...linked].filter((href) => {
+    if (routes.has(href)) return false;
+    // A dynamic route covers its children: /agents/<name> is served by /agents/[name].
+    return ![...routes].some((r) => {
+      if (!r.includes('[')) return false;
+      const rx = new RegExp(`^${r.replace(/\[[^\]]+\]/g, '[^/]+')}$`);
+      return rx.test(href);
+    });
+  });
+  check('every link goes to a page that exists', broken.length === 0, broken.join(' '));
+}
+
 process.exit(failed === 0 ? 0 : 1);
