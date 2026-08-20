@@ -107,10 +107,23 @@ Two things now say so rather than leaving it to be deduced:
   prompted it was `MATRIX_BOT_PASSWORD is required` — a credential with nothing to do with inbound, which
   ends inbound anyway.
 
-**The bridge still needs its own bot account**, so a deployment that only serves appservice project sides
-must nevertheless give it `MATRIX_HOMESERVER`, `MATRIX_BOT_USER` and `MATRIX_BOT_PASSWORD`. That is a real
-constraint rather than a preference: the bot holds the single crypto store, talks to the operator, and owns
-the approval DM rooms. Making the intake independent of it is not done.
+**The bridge still needs its own bot account for three things** — the single crypto store, the operator
+conversation, and the approval DM rooms — so a deployment that wants those must give it
+`MATRIX_HOMESERVER`, `MATRIX_BOT_USERNAME` and `MATRIX_BOT_PASSWORD`. That is a real constraint rather than
+a preference.
+
+**Intake no longer depends on it.** This paragraph used to end "making the intake independent of it is not
+done", and #119 did it: a bot that cannot start no longer takes the inbound path down with it. Walked with
+`MATRIX_BOT_PASSWORD` deliberately unset — a customer's Matrix message reached HAFleet's own message store
+through the co-located edge, with the bot never logged in. The bridge says which mode it is in on startup.
+
+**The bot's localpart must not be the representative's.** `MATRIX_BOT_USERNAME` defaults to
+`agent-bridge` and a project side's `sender_localpart` defaults to `hafleet`; naming the bot `hafleet` on a
+co-located deployment makes one Matrix user both, and the two have opposite rules about which rooms they
+belong in. #121 stopped the collision from being silently fatal — the bot no longer refuses an invite to a
+room on a configured project side, because refusing consumed the invite the representative needed — but
+they are still two jobs, and giving them one account means the bot's rooms and the customer's are the same
+rooms. Give them different names.
 
 `rejected` deserves its own note: it means the homeserver is calling with an `hs_token` the edge does not
 accept, and the usual cause is a re-issued registration. Palpo keeps registrations in its database keyed by

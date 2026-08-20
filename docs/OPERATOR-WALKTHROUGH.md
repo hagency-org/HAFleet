@@ -190,13 +190,53 @@ node backend-v2.js &
 ```
 MATRIX_HOMESERVER=http://<customer homeserver address>
 MATRIX_SERVER_NAME=<name>.test
-MATRIX_BOT_USER=hafleetbot
+MATRIX_BOT_USERNAME=hafleetbot
 MATRIX_BOT_PASSWORD=<the password you registered with>
 MATRIX_REG_TOKEN=<the customer homeserver's registration_token>
 ```
 
 **For the without-bot variant**, leave those four unset entirely — do not set an empty
 string, leave the keys absent. This is the configuration #119 makes survivable.
+
+**Do not name the bot `hafleet`.** That is a project side's default `sender_localpart`,
+so on a co-located deployment it makes one Matrix user both the bot and the
+representative — two jobs with opposite rules about which rooms they belong in. #121
+stopped the collision from being silently fatal; it is still two jobs.
+
+### Who approves — the one step that has no UI
+
+An approval needs a human and a room that human is in. Two ways to get one, and the
+first needs no configuration at all:
+
+1. **Let the bridge write the first binding.** Invite an agent into a room from your own
+   Matrix client. The bridge records you — the inviter — as that agent's owner and creates
+   the approval DM itself. Every later engagement for that agent reuses it, because
+   `resolveOwnerFor` prefers an existing binding over any configuration.
+
+2. **Name the owner in the environment**, which is what a fresh deployment with no
+   bindings needs:
+
+   ```
+   HAFLEET_OWNER_MXID=@you:<your-server>
+   HAFLEET_OWNER_DM_ROOM=!<room id>:<your-server>
+   ```
+
+   Both are required — the bind fails and records why on the engagement if either is
+   missing, and the console then shows the project as 还没派人 with the reason.
+
+   **Getting the room id is the awkward part, and deliberately so:** the console omits it
+   everywhere, because it is the owner's private channel and the projection that feeds the
+   engagements screen is not allowed to carry it. Open a DM with the bot from your Matrix
+   client, accept it, and read the internal room id from your client's own room settings
+   (Element: Settings → Advanced). If your client does not show internal ids, it is the
+   `botDmRooms` entry in `$HAFLEET_RUNTIME_DIR/data/matrix/bridge-state.json`.
+
+   **Then check you are actually in it.** A room the bridge created for you and you never
+   accepted looks identical in that file to one you use every day — and an approval
+   delivered there is delivered, reported delivered, and waited on by nobody. That exact
+   state was found on the walk rig. Since #123 the bridge raises an alert naming the owner,
+   the room and the remedy the first time it delivers into such a room, so the console's
+   alerts page will tell you; the fastest check by hand is the room's `joined_members`.
 
 Then:
 
@@ -326,6 +366,7 @@ fine; the customer's own view of their own room was silent.
 | A green e2e suite reporting "leaves no room behind in any account" while leaving one | It purges the rooms it knows accounts for — its own and the bot's. A dispatched agent is neither, and its membership is created by the product rather than by the suite | assert the agent's ABSENCE from `joined_members` after the revoke, #122 |
 | An execution approval for a dispatched agent is auto-DENIED, and only a log says why | The public half of ADR-003's two surfaces resolved its sender with `getAgentToken`, and an appservice project side mints NO per-agent token — so the throw fired for exactly the agents HAFleet dispatches, and "both surfaces or neither" failed the whole approval closed | `agentSenderFor(agent, project_room_id)`, the resolver every other agent send already uses: a room on a project side is spoken into by that side's appservice masquerading as the agent, #123 |
 | An approval delivered into a room its owner is not in | An event id proves a message landed in a room, not that the decider is in it. A bot DM the operator was invited to and never joined is recorded exactly like one they use | read `joined_members` after the delivery and alert per room, never blocking the send — a message keeps, and a human who joins later reads it, #123 |
+| An operator follows the guide and their bot silently never logs in | The guide said `MATRIX_BOT_USER`; the code reads `MATRIX_BOT_USERNAME`, and the default `agent-bridge` is what a misspelling gets you. Worse since #119: a bot that cannot start is now survivable and quiet, so the fleet keeps running and nobody learns the variable was wrong | corrected in this file and in `docs/RUNNING-THE-SERVICES.md`, which had the same wrong name, #124 |
 | A live e2e suite that cannot run on most fleets | `!request architect` needs a `strong`-tier agent (opus for the claude framework); a sonnet/deepseek fleet can fill nothing at that tier, and the suite reported failure for a fleet with nothing wrong | `LOOP_ROLE` env override, default unchanged; `GET /api/engagements/preview?role=<r>` shows what a fleet can fill, #121 |
 
 ## For whoever continues this
