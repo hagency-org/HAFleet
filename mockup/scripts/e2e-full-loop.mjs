@@ -196,7 +196,18 @@ function clientAlive() {
    * tests the hard case instead of steering around it. Inviting the bot and saying
    * what you want in the same breath is the obvious way to use it, and it has to work.
    */
-  const text = '!request architect 300000 20000';
+  /*
+   * THE ROLE IS SETTABLE, because a hardcoded one made this suite unrunnable on most fleets.
+   *
+   * `architect` needs a `strong`-tier agent — for the claude framework that is opus, and a deployment
+   * whose agents are sonnet or deepseek-chat can fill nothing at that tier. The product behaves correctly
+   * there (the request is still recorded, `serving` is null, and a provisionHint names the preset that
+   * WOULD staff it) but this suite asserts an agent was chosen, so the whole loop reported failure on a
+   * fleet with nothing wrong with it. Default unchanged; `LOOP_ROLE=documentation` runs it on a fleet
+   * whose agents are ordinary. Check GET /api/engagements/preview?role=<r> to see what a fleet can fill.
+   */
+  const role = process.env.LOOP_ROLE ?? 'architect';
+  const text = `!request ${role} 300000 20000`;
   await user.sendText(room, text);
   check('the project asked BEFORE the bot could join — the window that used to lose it', true, text);
 
@@ -274,6 +285,27 @@ function clientAlive() {
   if (bound) {
     check('the binding names the promised agent', bound.agent === queued.agent, `${bound.agent} vs ${queued.agent}`);
     check('and carries an owner', /^@[^:\s]+:[^\s]+$/.test(bound.ownerMxid ?? ''), bound.ownerMxid);
+
+    /*
+     * AND THE HOMESERVER'S OWN ACCOUNT OF WHO IS IN THE ROOM — not HAFleet's record of it.
+     *
+     * Every check above this reads a HAFleet store. A binding is our claim that an agent is attached; the
+     * membership is the customer's homeserver's fact, and `admitAgentToProjectRoom` returns its outcome
+     * only on the verdict response, which nothing was reading. So an approval that bound the agent and
+     * failed to admit it looked identical to one that worked — and this repository has already shipped
+     * that exact shape twice, which is why this asks the room instead.
+     *
+     * The mxid is composed the way HAFleet mints it (`MATRIX_AGENT_PREFIX` + agent name on the side's
+     * server), so a prefix mismatch shows up here rather than as a silent absence.
+     */
+    const prefix = process.env.MATRIX_AGENT_PREFIX ?? 'ac_';
+    const want = `@${prefix}${queued.agent}:`.toLowerCase();
+    const seen = await until(async () => {
+      const m = await user.doRequest('GET', `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/joined_members`);
+      return Object.keys(m.joined ?? {}).find((u) => u.toLowerCase().startsWith(want)) ?? null;
+    }, { tries: 15, gapMs: 2000 });
+    check('the agent is IN the room, by the homeserver\'s own account of its members', Boolean(seen),
+      seen ?? `no member starting ${want} — the binding exists but the admission did not happen`);
   }
 
   // ── did the real GUI client see any of it? ─────────────────────────────────

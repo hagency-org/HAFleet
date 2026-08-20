@@ -8,7 +8,7 @@ import { createHash } from 'crypto';
 import { createAppserviceRouter } from './lib/appservice-receiver.js';
 import {
   createRoomOnSide, inviteToRoomOnSide, joinRoomOnSideAsAgent, sendToRoomOnSide, namespaceAdmits,
-  joinedMembersOnSide,
+  joinedMembersOnSide, roomMessagesOnSide,
 } from './lib/matrix-representative.js';
 import { resolveAppserviceListenerConfig, startAppserviceListener } from './lib/appservice-listener.js';
 import { resolveEdgeLinkConfig, startEdgePuller } from './lib/appservice-puller.js';
@@ -402,6 +402,25 @@ const OWNER_LOCK_PATH = path.join(DATA_DIR, 'bridge-owner.lock');
 
 // ── Room trust boundary (5.8.1) ─────────────────────────────────────
 const MATRIX_TRUST_MODE = (process.env.MATRIX_TRUST_MODE || 'audit').trim().toLowerCase();
+/*
+ * SAY SO WHEN THE MODE IS NOT A MODE.
+ *
+ * Only `enforce` is acted on and `audit` is the default, so ANY other spelling silently means audit. A
+ * test rig in this repository ran for days on `MATRIX_TRUST_MODE=open`, which is not a mode — harmless
+ * there only by luck, because the accidental meaning happened to be the permissive one. The same typo in
+ * the other direction is what matters: someone writing `strict`, `on`, or `enforced` gets audit, believes
+ * their bridge is refusing untrusted rooms, and is told nothing.
+ *
+ * A warning rather than a refusal to start: this is a bridge whose job is to stay reachable, and a
+ * mistyped mode is not a reason to take a fleet's inbound path down. It is a reason to be loud.
+ */
+if (!['audit', 'enforce'].includes(MATRIX_TRUST_MODE)) {
+  console.warn(
+    `[trust] MATRIX_TRUST_MODE="${MATRIX_TRUST_MODE}" is not a mode — the only values with meaning are `
+    + '`audit` (log untrusted rooms, process them anyway) and `enforce` (refuse them). Treating this as '
+    + 'audit, so nothing is being enforced.',
+  );
+}
 const MATRIX_TRUSTED_ROOM_IDS = new Set(
   (process.env.MATRIX_TRUSTED_ROOM_IDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
@@ -3433,6 +3452,37 @@ export class MatrixBridge {
     return { trusted: true, reason: 'managed_agent' };
   }
 
+  /**
+   * A room on a configured project side is not the bot's to refuse.
+   *
+   * THE DEFECT, walked on two machines. HAFleet's bot and a side's representative can be the same Matrix
+   * user — `hafleet` is the representative's default localpart, so an operator who names the bot `hafleet`
+   * on a co-located deployment has one account doing both jobs. Both invite handlers then see the same
+   * invite. Under `MATRIX_TRUST_MODE=enforce` the bot's ran first, found `untrusted_inviter` (a customer
+   * is not in `MATRIX_TRUSTED_INVITER_MXIDS` and never will be), and LEFT the room — which consumed the
+   * invite. `onAppserviceMembership` then tried to join and got
+   * `403 M_FORBIDDEN: cannot join a room that is not 'public'`. One handler's correct refusal destroyed
+   * the other's entry, and the customer's room was simply unreachable.
+   *
+   * WHY THIS IS THE RIGHT PLACE. The rejection is what does the damage, so the rule has to be known
+   * before it fires — `markRoomTrusted` in the appservice path cannot help, because that runs after a
+   * join this refusal has already prevented. And the rule is not about the inviter: no customer is ever
+   * a trusted inviter, so `requireTrustedInviter` can never be satisfied for the rooms this feature is
+   * FOR. What makes them safe is the room's ORIGIN — a server we hold an acting credential for, because
+   * an operator configured it as a project side.
+   *
+   * BOUNDED BY THE CREDENTIAL, and it revokes itself: `refreshActingCredentials` drops a side that the
+   * backend no longer serves, and `forgetRoomsOnSides` then clears its rooms out of the trust map.
+   */
+  projectSideInviteTrust(roomId) {
+    if (typeof roomId !== 'string') return null;
+    const at = roomId.indexOf(':');
+    if (at < 0) return null;
+    const origin = roomId.slice(at + 1).toLowerCase();
+    if (!origin || !this.actingCredentials?.has(origin)) return null;
+    return { trusted: true, reason: 'project_side_room' };
+  }
+
   addKnownAgent(name) {
     const normalized = this.normalizeName(name);
     if (!normalized) return null;
@@ -4175,6 +4225,29 @@ export class MatrixBridge {
       }
       console.log(`[appservice] ${sideId}: knock answered — ${representative} joined ${roomId}`);
       /*
+       * THE ROOM IS OURS TO READ NOW, AND THE TRUST GATE HAS TO KNOW.
+       *
+       * Without this the room stays `unknown_room`, and under `MATRIX_TRUST_MODE=enforce` that is not a
+       * log line — it is the feature not existing. Walked on two machines: the representative joined, the
+       * customer typed `!request`, `message-ingress … UNTRUSTED reason=unknown_room` dropped it, and the
+       * next `scanJoinedRooms` LEFT the room. Same probe under the default `audit` mode worked. So an
+       * operator who picks the safe-sounding mode silently loses every customer's intake.
+       *
+       * THE WARRANT IS THE SAME ONE THAT JUSTIFIES THE JOIN ABOVE, no wider: this invite arrived inside a
+       * configured side's own appservice transaction, for a room on that side's own server. A stranger
+       * cannot reach this path. And trusting the room grants nothing beyond reading it — every request
+       * from it still goes through engagement approval and the side's budget, and tier-0 is the only
+       * command surface a project side has.
+       *
+       * RECORDED RATHER THAN DERIVED, so an operator can see which rooms became trusted and why, and so
+       * `forgetRoomsOnSides` revokes it when the side is removed — that sweep already calls a trusted room
+       * "a permission for a side we no longer serve", which is exactly what this would become.
+       *
+       * NO `agent` IN THE META. `markRoomTrusted` creates a room-agent binding when one is passed, and a
+       * project inviting our representative has not been assigned anybody yet.
+       */
+      markRoomTrusted(roomId, { inviter: event.sender || null, side: sideId, trustReason: 'project_side_invite' });
+      /*
        * Reported to the operator, because this is the moment a project becomes reachable and nothing
        * else announces it. `postWarning` is the bridge's only channel into the alert store; the wording
        * says what happened rather than warning about it, and the dedupe scope is the room so an
@@ -4185,6 +4258,26 @@ export class MatrixBridge {
         + 'that room still go through engagement approval and the side budget.',
         { kind: 'knock-accepted', scope: roomId },
       );
+      /*
+       * AND THE WINDOW BEFORE THE JOIN, which nothing was reading.
+       *
+       * `handleBotInvite` has backfilled this for the bot since the day a live `!request` was lost in it.
+       * The representative has the identical window — invite at t, join at t+2s, and sync starts at the
+       * join — and this path never looked. Proven live, on a clean pair of machines: the ask before the
+       * join produced no engagement, no reply and no error, while the same ask one second after the join
+       * worked. Inviting HAFleet and saying what you want in the same breath is the obvious way to use
+       * this, so it is the case that has to work rather than the one to document around.
+       *
+       * AFTER THE JOIN IS REPORTED, AND UNABLE TO UNREPORT IT. The join is what makes the project
+       * reachable, and that is true whatever the backfill then manages to read. A first version had this
+       * inside the join's own try, where any failure in it — including a `this` with no such method —
+       * surfaced to the operator as "the join failed", which is the opposite of what happened.
+       */
+      try {
+        await this.backfillJoinedRoomOnSide(sideId, roomId, representative);
+      } catch (error) {
+        console.warn(`[appservice] ${sideId}: join backfill failed for ${roomId}: ${error?.message || error}`);
+      }
     } catch (error) {
       console.error(`[appservice] ${sideId}: could not join ${roomId} after invite: ${error.message}`);
       this.postWarning(
@@ -6312,6 +6405,7 @@ export class MatrixBridge {
     // invited the puppet. Accept only that exact agent/room pair; do not add
     // agent MXIDs to the global trusted-inviter list.
     const trust = this.managedAgentBotInviteTrust(roomId, inviter)
+      || this.projectSideInviteTrust(roomId)
       || getRoomTrust(roomId, { inviterMxid: inviter, requireTrustedInviter: true });
     roomTrustLog(source, roomId, trust, `inviter=${inviter}`);
     if (!trust.trusted && MATRIX_TRUST_MODE === 'enforce') {
@@ -6409,29 +6503,7 @@ export class MatrixBridge {
       from = data.end;
     }
     const { events: pending, boundary } = pendingJoinBackfill(chunk, { botUserId: this.botUserId });
-    let delivered = 0;
-    let alreadySeen = 0;
-    for (const event of pending) {
-      /*
-       * Count only what THIS path claimed.
-       *
-       * onRoomMessage returns the in-flight promise when another path is already
-       * handling an event, so awaiting it and incrementing `delivered` credited the
-       * backfill with sync's work. That mattered: `already-synced=0` was the evidence
-       * used to claim the backfill — not sync — had delivered a pre-join message, and
-       * a counter that cannot tell them apart cannot support that claim. Checking the
-       * in-flight map first narrows it to events the backfill actually took on. It is
-       * still not a lock, so the name says "claimed", not "delivered by us".
-       */
-      if (this.isDuplicateMatrixEvent(event.event_id)) { alreadySeen += 1; continue; }
-      if (this.processingMatrixEventIds.has(event.event_id)) { alreadySeen += 1; continue; }
-      try {
-        await this.onRoomMessage(roomId, event);
-        delivered += 1;
-      } catch (error) {
-        console.warn(`Join backfill: failed to route ${event.event_id} in ${roomId}: ${error.message}`);
-      }
-    }
+    const { delivered, alreadySeen } = await this.routeBackfilledEvents(roomId, pending);
     /*
      * Logged on EVERY join, including the empty case.
      *
@@ -6459,6 +6531,111 @@ export class MatrixBridge {
     console.log(
       `Join backfill ${roomId}: fetched=${chunk.length} eligible=${pending.length} `
       + `delivered=${delivered} already-claimed=${alreadySeen} boundary=${boundary} pages=${pages}`,
+    );
+    return delivered;
+  }
+
+  /**
+   * Route the events a backfill selected. Shared by the bot's path and a project side's.
+   *
+   * EXTRACTED RATHER THAN COPIED, because the interesting part is not the loop — it is the two dedup
+   * checks and what they mean, and a second copy of that reasoning is a second copy that drifts. This
+   * repository's recurring defect is two paths to one relationship where one forgot a step; the whole
+   * reason `backfillJoinedRoomOnSide` exists is that the appservice path forgot THIS one.
+   *
+   * Count only what THIS path claimed. onRoomMessage returns the in-flight promise when another path is
+   * already handling an event, so awaiting it and incrementing `delivered` credited the backfill with
+   * sync's work. That mattered: `already-claimed=0` was the evidence used to claim the backfill — not
+   * sync — had delivered a pre-join message, and a counter that cannot tell them apart cannot support
+   * that claim. Checking the in-flight map first narrows it to events this path actually took on. It is
+   * still not a lock, so the name says "claimed", not "delivered by us".
+   */
+  async routeBackfilledEvents(roomId, pending) {
+    let delivered = 0;
+    let alreadySeen = 0;
+    for (const event of pending) {
+      if (this.isDuplicateMatrixEvent(event.event_id)) { alreadySeen += 1; continue; }
+      if (this.processingMatrixEventIds.has(event.event_id)) { alreadySeen += 1; continue; }
+      try {
+        await this.onRoomMessage(roomId, event);
+        delivered += 1;
+      } catch (error) {
+        console.warn(`Join backfill: failed to route ${event.event_id} in ${roomId}: ${error.message}`);
+      }
+    }
+    return { delivered, alreadySeen };
+  }
+
+  /**
+   * The same invite→join window, on a project side, read as the REPRESENTATIVE.
+   *
+   * WHY IT CANNOT REUSE `backfillJoinedRoom`. That function is bot-shaped in the two places that matter:
+   * it paginates with `this.botClient`, which has no account on the customer's homeserver and is not in
+   * the room, and it delimits the window by the BOT's own invite. Here the member whose window this is
+   * happens to be the representative, and the credential that can read the room is the side's.
+   *
+   * `pendingJoinBackfill` IS reused unchanged, and that is the point of it: it selects by POSITION
+   * between one member's invite and that member's join, never by timestamp, and which member it is
+   * asking about is a parameter. Its `botUserId` name predates there being a second caller.
+   *
+   * IT FAILS CLOSED the same way. An unreadable history, or an invite that is not inside the pages
+   * fetched, routes NOTHING — commands are executable, and replaying one nobody just issued is worse
+   * than missing it. Both outcomes are logged, because a silently empty backfill is indistinguishable
+   * from one that never ran, and that ambiguity has already misled me once on this path.
+   */
+  async backfillJoinedRoomOnSide(sideId, roomId, representative) {
+    const acting = this.actingSideFor(sideId);
+    if (!acting || !representative) {
+      console.warn(`Join backfill (side) ${roomId}: no acting credential for ${sideId}; routed nothing`);
+      return 0;
+    }
+    let chunk = [];
+    let from = null;
+    let pages = 0;
+    let unreadable = null;
+    while (pages < MATRIX_JOIN_BACKFILL_PAGES && chunk.length < MATRIX_JOIN_BACKFILL_MAX_EVENTS) {
+      /*
+       * `rateLimitGate` is deliberately NOT consulted here. It tracks OUR homeserver's limiter, and
+       * pausing reads of a customer's server because ours is busy would defer a message for a reason
+       * that has nothing to do with it. The page and event bounds are what keep this from walking a
+       * room back to its creation.
+       */
+      // eslint-disable-next-line no-await-in-loop
+      const page = await roomMessagesOnSide({
+        ...acting,
+        roomId,
+        from,
+        limit: MATRIX_JOIN_BACKFILL_LIMIT,
+        dir: 'b',
+      });
+      if (!page.known) { unreadable = page.reason; break; }
+      chunk = chunk.concat(page.chunk);
+      pages += 1;
+      // The boundary is what we are paginating FOR; stop as soon as it is in hand.
+      if (pendingJoinBackfill(chunk, { botUserId: representative }).boundary !== 'unproven') break;
+      // No further pages, or the server stopped moving: walking again would repeat.
+      if (!page.chunk.length || !page.end || page.end === from) break;
+      from = page.end;
+    }
+    if (unreadable) {
+      console.warn(
+        `Join backfill (side) ${roomId}: ${unreadable}; routed nothing rather than guess a boundary`,
+      );
+      return 0;
+    }
+    const { events: pending, boundary } = pendingJoinBackfill(chunk, { botUserId: representative });
+    const { delivered, alreadySeen } = await this.routeBackfilledEvents(roomId, pending);
+    if (boundary === 'unproven') {
+      console.warn(
+        `Join backfill (side) ${roomId}: could not locate ${representative}'s invite within `
+        + `${chunk.length} events over ${pages} page(s); routed nothing rather than guess a boundary. `
+        + 'Raise MATRIX_JOIN_BACKFILL_PAGES or MATRIX_JOIN_BACKFILL_MAX_EVENTS for a busier room.',
+      );
+    }
+    console.log(
+      `Join backfill (side) ${roomId}: side=${sideId} as=${representative} fetched=${chunk.length} `
+      + `eligible=${pending.length} delivered=${delivered} already-claimed=${alreadySeen} `
+      + `boundary=${boundary} pages=${pages}`,
     );
     return delivered;
   }

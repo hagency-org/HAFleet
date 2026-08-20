@@ -30,8 +30,9 @@ Palpo host), not in unit tests, not by inference from code. PRs #116–#119.
 | Verify credential | Reports `accepted` correctly | — but see the inbound-liveness item below, this alone is not enough |
 | **Inbound actually arrives** | Works, with a real edge, real homeserver, real restart | edge counter: `transactions from the homeserver: N`, `delivered: N` |
 | Customer types `!offer` in their own room | Works — answered by the **representative**, not a silent bot | homeserver's own room timeline: `@hafleet:walk.test → This contributor has nothing on offer right now.` |
-| Customer types `!request <role> <tokens> <rate>` | Not yet walked to completion (see below) | — |
-| Operator approves/rejects in 接洽/Engagements | Not yet re-walked after #110–#115's changes to that screen | — |
+| Customer types `!request <role> <tokens> <rate>` | Works — including the case where the ask is sent BEFORE we are in the room | pending engagement created, representative answered in the customer's room; needed #121 |
+| Operator approves in 接洽/Engagements, in a real browser | Works, end to end | `mockup/scripts/e2e-full-loop.mjs` on the live rig: 21/21, real Chrome click → `binding {agent, ownerMxid}` → **`@ac_soaker:palpo2.test` present in the homeserver's own `joined_members`** |
+| The same, under `MATRIX_TRUST_MODE=enforce` | Works — did not before | every step above was dead in enforce mode: room untrusted, messages dropped, room left, and the bot's refusal consumed the invite the representative needed; #121 |
 | Inbound survives HAFleet's own bot being unconfigured | Works — proven end to end | with `MATRIX_BOT_PASSWORD` deliberately unset, a customer's Matrix message reached HAFleet's own message store: `boss -> worker \| 无 bot 端到端 \| source=matrix`, `HTTP 200` back to the (fake) homeserver |
 | Deleting an agent releases its budget, group membership, and Matrix room seats | Works | `#110`/`#113`/`#114`/`#115`; verified against a live fleet with a real 150k leaked commitment, cleaned to 0 |
 | A dead-inbound side does NOT silently read as fine | Works | `GET /api/matrix/reach` → `appservice.inbound.state` distinguishes `never-called` / `not-collected` / `rejected` / `flowing`, each pointing at a different owner |
@@ -42,11 +43,22 @@ Palpo host), not in unit tests, not by inference from code. PRs #116–#119.
 These are the gaps a continuing agent should prioritize, roughly in the order they'd
 naturally come up if you kept going from where this left off:
 
-1. **`!request` through to an actual engagement, with the owner properly configured.**
-   Every engagement seen in this series either auto-joined or landed in the
-   `awaitingBind` state because `HAFLEET_OWNER_MXID` / `HAFLEET_OWNER_DM_ROOM` weren't
-   set. Nobody has walked the path where a human actually receives an approval DM, sees
-   a request, and approves it — the fully human-in-the-loop path is unverified.
+1. ~~**`!request` through to an actual engagement, with the owner properly configured.**~~
+   **WALKED (#121).** With `HAFLEET_OWNER_MXID` / `HAFLEET_OWNER_DM_ROOM` pointing at a
+   real human and a real DM room that human is actually joined to, the whole path works:
+   pre-join `!request` → pending engagement → the representative answers in the
+   customer's room → the console lists it → a real browser click Approves → the agent is
+   bound AND admitted to the room. Two things to know before repeating it:
+   - **The owner DM room is not validated.** The bridge had recorded a `botDmRooms` entry
+     for `@operator:…` that the operator was not a member of (invited, never joined), so
+     `HAFLEET_OWNER_DM_ROOM` can point at a room the human cannot see and nothing says
+     so. Check the room's `joined_members` before trusting it.
+   - **A revoked engagement leaves the agent joined to the customer's room.** Confirmed
+     against the homeserver: after two full-loop runs whose teardown reported "the run
+     leaves no room behind in any account", `@ac_soaker:palpo2.test` was still joined to
+     both abandoned rooms. The suite cannot see this — it only knows its own account and
+     the bot's — and there is no product endpoint that removes an agent from one room
+     short of deleting the agent. Fix pending.
 
 2. **The `registrationToken` credential kind**, end to end. Everything walked here used
    `appservice`. The purely-outbound path (`HAFleet /syncs like a phone`) has its own
@@ -300,6 +312,13 @@ fine; the customer's own view of their own room was silent.
 | Deleting an agent leaves its budget/groups/room seats behind | Deletion never cascaded those three relationships | #110/#113/#114/#115 |
 | A project shows 还没派人 next to a real commitment | `awaitingBind` — approved but no resolvable owner (`HAFLEET_OWNER_MXID`/`HAFLEET_OWNER_DM_ROOM`) | surfaced with the reason verbatim, #111; false-positive on an *already*-bound agent fixed in #112 |
 | Bot-less degraded mode fills the log with a failure every poll | Guarding on `botClient` disabled functions that don't fully need it | guard the *specific stage* that needs the bot, not the whole function or the call site — verified by which existing tests broke, #119 |
+| A customer invites HAFleet and asks in the same breath; the ask vanishes with no error | Only the BOT's invite path backfilled the invite→join window. On a project side the representative answers the invite, and that path never read the window — and could not reuse the bot's, which paginates with a client that has no account on the customer's homeserver | `backfillJoinedRoomOnSide` + `roomMessagesOnSide`, reading as the representative with the side's own credential; boundary still by position, never by timestamp, #121 |
+| `MATRIX_TRUST_MODE=enforce` silently kills a co-located customer's intake entirely | The appservice join never marked the room trusted, so `message-ingress` dropped every message and `scanJoinedRooms` then LEFT the room | `markRoomTrusted(…, trustReason: 'project_side_invite')` on the join — bounded by the credential, and already revoked by `forgetRoomsOnSides` when the side is removed, #121 |
+| The representative's join fails `403 cannot join a room that is not 'public'` — on a room it was just invited to | The bot's invite handler ran first, correctly refused an untrusted inviter, and LEFT — which consumed the invite. Only bites when the bot and the representative are the same mxid, which is what naming the bot `hafleet` on a co-located deployment gets you | `projectSideInviteTrust`: a room on a server we hold an acting credential for is not the bot's to refuse, #121 |
+| A security-relevant mode is silently ignored | `MATRIX_TRUST_MODE` acts only on `enforce`, so any other spelling means `audit`. The walk rig ran for days on `open`, which is not a mode | startup warning naming the value and saying nothing is being enforced, #121 |
+| Every bridge restart blinds the inbound path for up to ~55s | The edge holds a promise, not a socket, so a bridge killed mid-long-poll leaves its slot held for the edge's 25s poll timeout — and the puller then put that bounded wait on an exponential backoff | 409 is a known transient with a known bound: fixed 1s retry, and a log line saying the other poller is our own previous instance. Measured after: ~4s, #121 |
+| A green e2e suite that proves less than it says | The full loop asserted a BINDING — HAFleet's own record — and never asked the homeserver whether the agent was in the room. The two had never been checked against each other on this path | the suite now reads `joined_members` for `@<prefix><agent>:<side>` after Approve, #121 |
+| A live e2e suite that cannot run on most fleets | `!request architect` needs a `strong`-tier agent (opus for the claude framework); a sonnet/deepseek fleet can fill nothing at that tier, and the suite reported failure for a fleet with nothing wrong | `LOOP_ROLE` env override, default unchanged; `GET /api/engagements/preview?role=<r>` shows what a fleet can fill, #121 |
 
 ## For whoever continues this
 

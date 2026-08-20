@@ -25,6 +25,7 @@ import {
   knockOnRoomOnSide,
   probeFederationFromSide,
   resolveAliasOnSide,
+  roomMessagesOnSide,
   mintAgentIdentity,
   registerRepresentative,
   sendToRoomOnSide,
@@ -1142,5 +1143,87 @@ describe('probing whether a project side federates with us', () => {
     await expect(probeFederationFromSide({
       side: SIDE, credential: asCred(), probeMxid: 'hafleetbot', fetchImpl: fakeFetch([]),
     })).rejects.toThrow(RepresentativeError);
+  });
+});
+
+describe('reading a room\'s history on a project side', () => {
+  const ROOM = `!market:${SERVER}`;
+
+  /*
+   * WHY THIS READ EXISTS AT ALL. The bridge backfills the invite→join window for a room its BOT joins,
+   * because sync delivers nothing from before a join. The representative has the identical window and no
+   * way to read it — `backfillJoinedRoom` paginates with the bot's client, which has no account on the
+   * customer's homeserver. Walked live: a customer who invited HAFleet and asked in the same breath got
+   * no engagement, no reply and no error.
+   */
+  test('an appservice side reads as the representative, with the side\'s own token', async () => {
+    const impl = fakeFetch([ok({ chunk: [{ type: 'm.room.message', event_id: '$a' }], end: 'tok2' })]);
+    const r = await roomMessagesOnSide({ side: SIDE, credential: asCred(), roomId: ROOM, fetchImpl: impl });
+
+    expect(r.known).toBe(true);
+    expect(r.chunk).toHaveLength(1);
+    expect(r.end).toBe('tok2');
+    const [call] = impl.calls;
+    expect(call.method).toBe('GET');
+    expect(call.url).toContain(`/rooms/${encodeURIComponent(ROOM)}/messages`);
+    // The masquerade is the whole point: without user_id the as_token reads as the appservice itself.
+    expect(call.url).toContain(`user_id=${encodeURIComponent(`@hafleet:${SERVER}`)}`);
+    expect(call.headers.Authorization).toBe(`Bearer ${AS_TOKEN}`);
+  });
+
+  test('the direction, page size and cursor are all the caller\'s to set', async () => {
+    const impl = fakeFetch([ok({ chunk: [], end: null })]);
+    await roomMessagesOnSide({
+      side: SIDE, credential: asCred(), roomId: ROOM, from: 'tok1', limit: 25, dir: 'b', fetchImpl: impl,
+    });
+    const url = new URL(impl.calls[0].url);
+    expect(url.searchParams.get('dir')).toBe('b');
+    expect(url.searchParams.get('limit')).toBe('25');
+    expect(url.searchParams.get('from')).toBe('tok1');
+  });
+
+  test('a registrationToken side uses its own token and does NOT masquerade', async () => {
+    const impl = fakeFetch([ok({ chunk: [], end: null })]);
+    await roomMessagesOnSide({
+      side: SIDE, credential: regCred({ representativeToken: REP_TOKEN }), roomId: ROOM, fetchImpl: impl,
+    });
+    expect(impl.calls[0].headers.Authorization).toBe(`Bearer ${REP_TOKEN}`);
+    expect(impl.calls[0].url).not.toContain('user_id=');
+  });
+
+  test('a side with no representative token yet is a REASON, not a request', async () => {
+    const impl = fakeFetch([]);
+    const r = await roomMessagesOnSide({ side: SIDE, credential: regCred(), roomId: ROOM, fetchImpl: impl });
+    expect(r.known).toBe(false);
+    expect(r.chunk).toEqual([]);
+    expect(r.reason).toMatch(/no representative token yet/);
+    expect(impl.calls).toHaveLength(0);
+  });
+
+  test('an error is stated rather than thrown, so a caller mid-join can carry on', async () => {
+    /*
+     * Same rule as `joinedMembersOnSide`. Failing to read the window is a missed message; turning it
+     * into an exception would take the representative out of a room it is legitimately in.
+     */
+    for (const [status, body] of [[403, { errcode: 'M_FORBIDDEN' }], [500, {}]]) {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await roomMessagesOnSide({
+        side: SIDE, credential: asCred(), roomId: ROOM, fetchImpl: fakeFetch([fail(status, body)]),
+      });
+      expect(r.known).toBe(false);
+      expect(r.reason).toMatch(/history unreadable/);
+    }
+    const dead = await roomMessagesOnSide({
+      side: SIDE, credential: asCred(), roomId: ROOM,
+      fetchImpl: fakeFetch([() => { throw new Error('ECONNREFUSED'); }]),
+    });
+    expect(dead.known).toBe(false);
+    expect(dead.reason).toMatch(/ECONNREFUSED/);
+  });
+
+  test('a malformed body yields an empty page rather than a crash', async () => {
+    const impl = fakeFetch([ok({ chunk: 'not an array', end: 42 })]);
+    const r = await roomMessagesOnSide({ side: SIDE, credential: asCred(), roomId: ROOM, fetchImpl: impl });
+    expect(r).toEqual({ known: true, chunk: [], end: null, reason: null });
   });
 });

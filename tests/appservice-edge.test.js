@@ -321,6 +321,47 @@ describe('HAFleet collecting from an edge', () => {
     expect(seen[0].headers.authorization).toBe('Bearer from-our-own-store');
   });
 
+  test('a poll slot still held by our previous instance retries at a FIXED interval', async () => {
+    /*
+     * WHAT THIS COSTS WHEN IT IS WRONG. The edge holds a promise, not a socket, so a bridge killed
+     * mid-long-poll leaves its slot occupied until the edge's poll timeout expires — 25s by default.
+     * Every restart therefore meets `409 another poller is already waiting`, and HAFleet runs one puller
+     * per edge, so that poller is always the instance that just died.
+     *
+     * Treated as a generic error it went onto the exponential backoff, turning a bounded 25s wait into up
+     * to ~55s during which a customer's messages were not being collected. Seen on a live rig during a
+     * deploy. The wait is already bounded by the far end; adding a growing delay of our own only widens
+     * the blind window.
+     */
+    const { e, fetchImpl } = linked();
+    const waits = [];
+    const warnings = [];
+    // Occupy the slot the way a dead instance does: a long poll nobody will ever answer.
+    e.handle({ method: 'GET', path: '/_hafleet/edge/pull', headers: { 'x-hafleet-link': LINK }, body: null });
+
+    const puller = startEdgePuller({
+      url: 'http://edge.test',
+      token: LINK,
+      router: { handle: async () => ({ status: 200, body: {} }) },
+      hsTokenFor: () => HS,
+      fetchImpl,
+      logger: { warn: (m) => warnings.push(m), error: () => {} },
+      sleep: (ms) => { waits.push(ms); return Promise.resolve(); },
+      shouldContinue: () => waits.length < 4,
+    });
+    await puller.done;
+
+    // Flat, not climbing — the whole point.
+    expect(waits).toEqual([1000, 1000, 1000, 1000]);
+    expect(warnings.join(' ')).toMatch(/our own previous instance/);
+    /*
+     * And NOT counted as a failure: `failed` is what says events could not be collected, and a restart
+     * bumping it reads as data loss when the homeserver still holds the transaction.
+     */
+    expect(puller.stats().failed).toBe(0);
+    expect(puller.stats().lastError).toMatch(/previous instance/);
+  });
+
   test('a rejected link token is reported rather than quietly backed off forever', async () => {
     // The one failure an operator can fix immediately, so it must not be buried under an ever-quieter retry.
     const { fetchImpl } = linked();
