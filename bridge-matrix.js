@@ -5483,6 +5483,24 @@ export class MatrixBridge {
     if (route === 'bot-dm') {
       // Non-command text in bot DM
       await this.commands.handle(roomId, senderId, body, {});
+      /*
+       * RECORDED, LIKE ITS THREE SIBLINGS — and it was the one branch that acted without recording.
+       *
+       * The command branch above calls `rememberMatrixEvent`; `group` and `agent-dm` below both
+       * `checkpointMatrixEvent`. This one replied and remembered nothing, so every redelivery of the
+       * transaction answered again. An appservice transaction is retried whenever HAFleet does not
+       * return 200 — a restarted edge, a 500, an ack that arrives late — and none of those is unusual.
+       *
+       * Watched on the rig: 20 messages sent with a `docker restart hafleet-edge` in the middle drew 32
+       * replies, arriving in bursts of six as the homeserver re-delivered the un-acked batches. Nothing
+       * was lost, which is the design working; the same customer being told "Send !help for available
+       * commands." six times in one second is not.
+       *
+       * `rememberMatrixEvent`, not `checkpointMatrixEvent`: nothing was stored, so there is no message id
+       * to check against. In-memory is the right scope — the retry window is seconds, and a bridge that
+       * restarts loses the command branch's dedup in exactly the same way.
+       */
+      if (eventId) this.rememberMatrixEvent(eventId);
     } else if (route === 'group') {
       // Group message from human
       // Un-addressed group messages are stored but wake nobody. A private,

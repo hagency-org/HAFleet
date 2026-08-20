@@ -79,10 +79,28 @@ naturally come up if you kept going from where this left off:
    currently serves **one** edge. If a deployment needs two co-located customers, that's
    either two bridge processes or a gap — not confirmed either way by walking it.
 
-5. **What a real container restart of the edge looks like under actual load** — not a
-   clean restart with zero pending transactions, but one with events in flight. The
-   `settling` window (2 minutes) was sized by reasoning, not by observing a slow
-   real-world restart.
+5. ~~**What a real container restart of the edge looks like under actual load**~~ **WALKED (#126).**
+   Twenty messages at ~1.4/second with `docker restart hafleet-edge` in the middle, on the rig.
+   **Nothing was lost** — every message arrived, including the two sent while the edge was down,
+   because the homeserver keeps the transaction until HAFleet acks it and the edge persists
+   nothing by design. The gap in the room's timeline was about four seconds.
+   But the same timeline showed twenty messages drawing **thirty-two replies**, in bursts of
+   six, as the homeserver re-delivered the batches nobody had acked. `onRoomMessage` has four
+   outcomes and three recorded the event; non-command text in a bot DM replied and recorded
+   nothing, so every retry answered again. Fixed and re-run: 20 messages, 20 replies, same
+   restart.
+
+   **And the `settling` window, watched rather than reasoned about** — the other half of what
+   this item asked for. Against the real edge, after a restart with no traffic:
+
+   | | `inbound.state` | `settling` | what the operator is told |
+   |---|---|---|---|
+   | t+8s | `never-called` | `true` | "HAFleet is connected and waiting, so there is nothing to fix yet" |
+   | t+60s | `never-called` | `true` | same |
+   | t+130s | `never-called` | `false` | the three real causes, named: nothing has happened yet, the registration url is unreachable, or the homeserver was not restarted after the registration was installed |
+
+   It flips exactly where it should, and the message before the flip does not send anybody
+   looking for a fault that is not there.
 
 6. **The full progress-in-thread flow with a *real* dispatched agent process** (not just
    the appservice message reaching HAFleet's inbox). An earlier part of this session
@@ -414,6 +432,8 @@ fine; the customer's own view of their own room was silent.
 | An execution approval for a dispatched agent is auto-DENIED, and only a log says why | The public half of ADR-003's two surfaces resolved its sender with `getAgentToken`, and an appservice project side mints NO per-agent token — so the throw fired for exactly the agents HAFleet dispatches, and "both surfaces or neither" failed the whole approval closed | `agentSenderFor(agent, project_room_id)`, the resolver every other agent send already uses: a room on a project side is spoken into by that side's appservice masquerading as the agent, #123 |
 | An approval delivered into a room its owner is not in | An event id proves a message landed in a room, not that the decider is in it. A bot DM the operator was invited to and never joined is recorded exactly like one they use | read `joined_members` after the delivery and alert per room, never blocking the send — a message keeps, and a human who joins later reads it, #123 |
 | An operator follows the guide and their bot silently never logs in | The guide said `MATRIX_BOT_USER`; the code reads `MATRIX_BOT_USERNAME`, and the default `agent-bridge` is what a misspelling gets you. Worse since #119: a bot that cannot start is now survivable and quiet, so the fleet keeps running and nobody learns the variable was wrong | corrected in this file and in `docs/RUNNING-THE-SERVICES.md`, which had the same wrong name, #124 |
+| A customer is answered six times for one message | An appservice transaction is retried whenever HAFleet does not answer 200 — a restarted edge, a 500, a slow ack. Of `onRoomMessage`'s four outcomes, the three that store a message recorded the event; non-command text in a bot DM replied and recorded nothing | `rememberMatrixEvent` in that branch too, matching the command branch four lines above it. `!request` was already safe, which is the difference between noise and a second engagement, #126 |
+| Reading the wrong artifact and calling it data loss | A flood probe reported 0/20 arrived across an edge restart. `processed-events.jsonl` only records messages that BECAME a HAFleet message; a bot-DM hint reply is not one, so the file was silent about twenty messages that had all been answered. The room's own timeline said so immediately | ask the surface the behaviour actually touches — the replies were in the room the whole time, #126 |
 | A live e2e suite that cannot run on most fleets | `!request architect` needs a `strong`-tier agent (opus for the claude framework); a sonnet/deepseek fleet can fill nothing at that tier, and the suite reported failure for a fleet with nothing wrong | `LOOP_ROLE` env override, default unchanged; `GET /api/engagements/preview?role=<r>` shows what a fleet can fill, #121 |
 
 ## For whoever continues this
