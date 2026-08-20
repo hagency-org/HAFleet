@@ -13134,38 +13134,53 @@ async function withdrawAgentFromProjectRooms(agentName) {
     outcomes.push({ roomId: null, left: false, reason: `engagements unreadable: ${error?.message ?? error}` });
   }
   for (const roomId of rooms) {
-    const sideId = sideIdForRoom(roomId);
-    const side = sideId ? projectSideStore.getSide(sideId) : null;
-    if (!side) {
-      outcomes.push({ roomId, left: false, reason: 'no project side owns that room' });
-      continue;
-    }
-    let credential = null;
-    try {
-      credential = projectSideStore.credentialFor(sideId);
-    } catch (error) {
-      outcomes.push({ roomId, left: false, reason: `credential unreadable: ${error?.message ?? error}` });
-      continue;
-    }
-    if (!credential) {
-      outcomes.push({ roomId, left: false, reason: 'the side has no credential to act with' });
-      continue;
-    }
-    /*
-     * THE SAME COMPOSITION RULE AS `admitAgentToProjectRoom`, deliberately identical: the localpart is the
-     * one WE mint by, on the server the room id names, and `leaveRoomOnSideAsAgent` re-checks it against
-     * the namespace the registration claimed before presenting any token.
-     */
-    const agentMxid = `@${MATRIX_AGENT_PREFIX_FOR_REGISTRATION}${agentName}:${side.serverName}`.toLowerCase();
-    const result = await leaveRoomOnSideAsAgent({
-      side: { apiBaseUrl: side.apiBaseUrl, serverName: side.serverName },
-      credential,
-      roomId,
-      agentUserId: agentMxid,
-    });
-    outcomes.push({ roomId, mxid: agentMxid, left: Boolean(result.left), reason: result.reason ?? null });
+    outcomes.push(await withdrawAgentFromProjectRoom(agentName, roomId));
   }
   return outcomes;
+}
+
+/**
+ * Give back ONE seat: take the agent out of one project room.
+ *
+ * EXTRACTED SO THE END OF AN ENGAGEMENT CAN USE IT TOO, which is the defect this addresses. Deleting an
+ * agent has withdrawn it from every room since #114/#115 on the stated grounds that an agent which no
+ * longer exists must not remain in a customer's room. An engagement that no longer exists is the same
+ * fact about the same seat, and nothing was doing it — so every finished engagement left its agent sitting
+ * in the borrower's room permanently.
+ *
+ * Confirmed against the homeserver rather than inferred: after two runs of the full-loop suite — whose own
+ * teardown reported "the run leaves no room behind in any account" — `@ac_soaker:palpo2.test` was still
+ * joined to both abandoned rooms. That check could not see it, because it knows only its own account and
+ * the bot's.
+ *
+ * ONE OUTCOME OBJECT, NEVER A THROW, for the reason the multi-room caller's comment gives: a customer's
+ * homeserver being unreachable must not make an engagement un-revokable. The caller reports what happened
+ * to the seat instead.
+ */
+async function withdrawAgentFromProjectRoom(agentName, roomId) {
+  const sideId = sideIdForRoom(roomId);
+  const side = sideId ? projectSideStore.getSide(sideId) : null;
+  if (!side) return { roomId, left: false, reason: 'no project side owns that room' };
+  let credential = null;
+  try {
+    credential = projectSideStore.credentialFor(sideId);
+  } catch (error) {
+    return { roomId, left: false, reason: `credential unreadable: ${error?.message ?? error}` };
+  }
+  if (!credential) return { roomId, left: false, reason: 'the side has no credential to act with' };
+  /*
+   * THE SAME COMPOSITION RULE AS `admitAgentToProjectRoom`, deliberately identical: the localpart is the
+   * one WE mint by, on the server the room id names, and `leaveRoomOnSideAsAgent` re-checks it against
+   * the namespace the registration claimed before presenting any token.
+   */
+  const agentMxid = `@${MATRIX_AGENT_PREFIX_FOR_REGISTRATION}${agentName}:${side.serverName}`.toLowerCase();
+  const result = await leaveRoomOnSideAsAgent({
+    side: { apiBaseUrl: side.apiBaseUrl, serverName: side.serverName },
+    credential,
+    roomId,
+    agentUserId: agentMxid,
+  });
+  return { roomId, mxid: agentMxid, left: Boolean(result.left), reason: result.reason ?? null };
 }
 
 async function admitAgentToProjectRoom(engagement) {
@@ -13302,12 +13317,69 @@ function unbindEngagement(engagement) {
         `[engagements] keeping ${engagement.agent} bound to ${engagement.projectRoomId}: `
         + `${stillLive.length} engagement(s) still live`,
       );
-      return;
+      return { keptBound: true, reason: `${stillLive.length} engagement(s) still live` };
     }
-    approvalStore.removeBinding(engagement.agent, engagement.projectRoomId);
+    /*
+     * `removed` is null when there was no binding, which is an ordinary state rather than a failure —
+     * this deployment approved six engagements with no resolvable owner and therefore no bindings at
+     * all, while the agents were in the rooms. So the answer callers need is `keptBound`, not "did a
+     * record exist": a room seat has to be given back whether or not we ever wrote the binding for it.
+     */
+    const removed = approvalStore.removeBinding(engagement.agent, engagement.projectRoomId);
+    return { keptBound: false, removedBinding: Boolean(removed), reason: null };
   } catch (error) {
     // A binding that was never created is not an error worth failing the revoke for.
     console.warn(`[engagements] unbind ${engagement.agent}: ${error?.message ?? error}`);
+    return { keptBound: false, removedBinding: false, reason: String(error?.message ?? error) };
+  }
+}
+
+/**
+ * End an engagement's reachability: the binding AND the seat in the room.
+ *
+ * THE HALF THAT WAS MISSING. `unbindEngagement` removed HAFleet's own record and stopped there, so a
+ * revoked engagement left the agent joined to the borrower's room forever. Confirmed against the
+ * homeserver, not inferred — see `withdrawAgentFromProjectRoom`.
+ *
+ * TWO GATES, AND BOTH ARE NARROW.
+ *
+ *  1. NO OTHER LIVE ENGAGEMENT holds this agent in this room — which `unbindEngagement` already decides,
+ *     and is the whole reason this is one function rather than two calls at each site. Six concurrent
+ *     engagements between one agent and one room is a real shape in this deployment's data, and
+ *     withdrawing while another is live would take a working agent out of a room it is still serving.
+ *
+ *  2. THIS ENGAGEMENT ACTUALLY ALLOCATED. `allocatedTokens` is set only by an approval, so it is exactly
+ *     "this engagement is why the agent is in that room". A request REJECTED from pending never admitted
+ *     anybody, and leaving as an agent who was never let in would be a needless call to somebody else's
+ *     homeserver on every refusal.
+ *
+ * NOT GATED ON A BINDING HAVING EXISTED. That was the mistake #114 shipped and #115 fixed: an agent
+ * reaches a project room through `admitAgentToProjectRoom(engagement)`, and a deployment can have agents
+ * in rooms with no bindings at all.
+ *
+ * AWAITED, for the reason `admitAgentToProjectRoom` is awaited on the approve path: an operator reading
+ * `ok: true` must not be told the agent is detached while it is still sitting in the customer's room. The
+ * outcome rides back on the response the same way the admission does.
+ */
+async function detachEngagement(engagement) {
+  const binding = unbindEngagement(engagement);
+  if (binding?.keptBound) return { binding, roomWithdrawal: null };
+  if (!engagement?.agent || !engagement?.projectRoomId) return { binding, roomWithdrawal: null };
+  if (!Number.isFinite(engagement.allocatedTokens) || engagement.allocatedTokens <= 0) {
+    return { binding, roomWithdrawal: null };
+  }
+  try {
+    const roomWithdrawal = await withdrawAgentFromProjectRoom(
+      normalizeAgentName(engagement.agent),
+      engagement.projectRoomId,
+    );
+    return { binding, roomWithdrawal };
+  } catch (error) {
+    /*
+     * The engagement IS over — that decision is already recorded. A seat we could not give back is
+     * reported, never allowed to turn a completed revoke into a 500.
+     */
+    return { binding, roomWithdrawal: { roomId: engagement.projectRoomId, left: false, reason: String(error?.message ?? error) } };
   }
 }
 
@@ -13562,24 +13634,30 @@ app.post('/api/engagements/:id/verdict', requireBearer, async (req, res) => {
     // Rejected: nothing to attach, and anything already attached must go. No `serving` either —
     // nothing was granted, and reporting a fulfilment for a refusal would be a lie in the
     // direction that matters.
-    unbindEngagement(e);
-    return res.json({ ok: true, engagement: e });
+    const { roomWithdrawal } = await detachEngagement(e);
+    return res.json({ ok: true, engagement: e, ...(roomWithdrawal ? { roomWithdrawal } : {}) });
   } catch (e) {
     return respondEngagementError(res, e, 'failed to record verdict');
   }
 });
 
-app.post('/api/engagements/:id/revoke', requireBearer, (req, res) => {
+app.post('/api/engagements/:id/revoke', requireBearer, async (req, res) => {
   try {
     const e = engagementStore.revoke({
       engagementId: req.params.id,
       by: getRequestAgentName(req) || 'operator',
       reason: req.body?.reason,
     });
-    // Revoking is the explicit act that ends a contribution, so it is the one that
-    // detaches. A whitelist removal deliberately does not — see engagement-store.
-    unbindEngagement(e);
-    return res.json({ ok: true, engagement: e });
+    /*
+     * Revoking is the explicit act that ends a contribution, so it is the one that detaches. A whitelist
+     * removal deliberately does not — see engagement-store.
+     *
+     * DETACHES THE SEAT AS WELL AS THE RECORD. Until now this removed HAFleet's own binding and left the
+     * agent joined to the borrower's room, so every finished engagement leaked a member into somebody
+     * else's Matrix room — confirmed against a homeserver's own member list, not inferred.
+     */
+    const { roomWithdrawal } = await detachEngagement(e);
+    return res.json({ ok: true, engagement: e, ...(roomWithdrawal ? { roomWithdrawal } : {}) });
   } catch (e) {
     return respondEngagementError(res, e, 'failed to revoke engagement');
   }

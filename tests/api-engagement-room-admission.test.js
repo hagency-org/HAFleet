@@ -38,7 +38,9 @@ afterEach(async () => {
  * this code puts on the wire — which URL, which masquerade, which token — and a stub of the client
  * would assert the parts that were never in doubt.
  */
-async function fakeHomeserver({ inviteStatus = 200, inviteBody = {}, joinStatus = 200, powerLevels = null } = {}) {
+async function fakeHomeserver({
+  inviteStatus = 200, inviteBody = {}, joinStatus = 200, powerLevels = null, leaveStatus = 200,
+} = {}) {
   const seen = [];
   const server = createServer((req, res) => {
     let body = '';
@@ -61,6 +63,14 @@ async function fakeHomeserver({ inviteStatus = 200, inviteBody = {}, joinStatus 
       if (req.url.includes('/join/')) {
         res.writeHead(joinStatus, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify(joinStatus === 200 ? { room_id: ROOM } : { errcode: 'M_FORBIDDEN' }));
+      }
+      /*
+       * A leave, which real Palpo answers `200 {}` even for a room the user is not in. Before this the
+       * fake 404'd it, so the withdrawal below would have read as failed for the wrong reason.
+       */
+      if (req.url.includes('/leave')) {
+        res.writeHead(leaveStatus, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(leaveStatus === 200 ? {} : { errcode: 'M_UNKNOWN' }));
       }
       res.writeHead(404, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ errcode: 'M_NOT_FOUND' }));
@@ -234,6 +244,112 @@ describe('an approved engagement puts the agent in the room', () => {
  * Swept rather than watched, because nothing tells us: membership on somebody else's homeserver changes
  * without asking, and the appservice intake only sees rooms it is in — the very membership in question.
  */
+/*
+ * AND THE OTHER END OF THE SAME SEAT — giving it back.
+ *
+ * Confirmed on a live homeserver before it was written: after two runs of `e2e-full-loop.mjs`, whose own
+ * teardown reported "the run leaves no room behind in any account", `@ac_soaker:palpo2.test` was still
+ * joined to both abandoned project rooms. Revoking removed HAFleet's record of the attachment and left the
+ * agent sitting in somebody else's Matrix room, permanently, once per finished engagement. The suite could
+ * not see it: it knows its own account and the bot's, and an agent is neither.
+ */
+describe('a revoked engagement gives the room seat back', () => {
+  const leaves = () => fake.seen.filter((c) => c.url.includes('/leave'));
+
+  async function revoke(app, id, expectStatus = 200) {
+    return request(app).post(`/api/engagements/${id}/revoke`)
+      .send({ reason: 'test revoke' }).expect(expectStatus);
+  }
+
+  test('THE DEFECT: the agent leaves the room, as itself, with the side\'s credential', async () => {
+    const hs = await fakeHomeserver();
+    const app = await boot({ hs, credential: asCredential() });
+    const approved = await approve(app);
+    const id = approved.body.engagement.id;
+    expect(approved.body.roomAdmission.admitted).toBe(true);
+
+    const res = await revoke(app, id);
+    expect(res.body.roomWithdrawal).toMatchObject({ roomId: ROOM, left: true });
+
+    /*
+     * WHO ACTS AS WHOM, the same assertion the admission tests make. Leaving as the representative
+     * would report success while the agent stayed in the room.
+     */
+    expect(leaves()).toHaveLength(1);
+    expect(leaves()[0].url).toContain(encodeURIComponent(`@ac_${AGENT}:${SIDE}`));
+    expect(leaves()[0].auth).toBe('Bearer as_secret_never_logged');
+    expect(leaves()[0].method).toBe('POST');
+  });
+
+  test('but NOT while another engagement still puts that agent in that room', async () => {
+    /*
+     * Six concurrent engagements between one agent and one room is a real shape in this deployment's
+     * data — it is why the unbind has a still-live check at all. Withdrawing on the first revoke would
+     * take a working agent out of a room it is still serving, which is worse than the leak.
+     */
+    const hs = await fakeHomeserver();
+    const app = await boot({ hs, credential: asCredential() });
+    const first = await approve(app);
+    const second = await approve(app);
+
+    const res = await revoke(app, first.body.engagement.id);
+    expect(res.body.roomWithdrawal ?? null).toBe(null);
+    expect(leaves()).toHaveLength(0);
+
+    // The last one out gives the seat back.
+    const last = await revoke(app, second.body.engagement.id);
+    expect(last.body.roomWithdrawal).toMatchObject({ left: true });
+    expect(leaves()).toHaveLength(1);
+  });
+
+  test('a REJECTED request withdraws nothing, because it never admitted anybody', async () => {
+    const hs = await fakeHomeserver();
+    const app = await boot({ hs, credential: asCredential() });
+    const created = await request(app).post('/api/engagements').send({
+      project: 'acme/api', projectRoomId: ROOM, role: 'coding',
+      requester: `@lin:${SIDE}`, requestedTokens: 100_000, requestId: '$rejected-1',
+    });
+    const res = await request(app)
+      .post(`/api/engagements/${created.body.engagement.id}/verdict`)
+      .send({ approve: false, reason: 'no' }).expect(200);
+
+    expect(res.body.roomWithdrawal ?? null).toBe(null);
+    expect(leaves()).toHaveLength(0);
+  });
+
+  test('a homeserver that refuses the leave is REPORTED, and the revoke still stands', async () => {
+    /*
+     * Same asymmetry as the delete path: a customer's homeserver being unreachable must not make an
+     * engagement un-revokable. The operator learns the seat is still occupied instead.
+     */
+    const hs = await fakeHomeserver({ leaveStatus: 500 });
+    const app = await boot({ hs, credential: asCredential() });
+    const approved = await approve(app);
+
+    const res = await revoke(app, approved.body.engagement.id);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.engagement.state).toBe('ended');
+    expect(res.body.roomWithdrawal.left).toBe(false);
+    expect(res.body.roomWithdrawal.reason).toBeTruthy();
+  });
+
+  test('a room on no configured side is reported, not attempted', async () => {
+    const hs = await fakeHomeserver();
+    const app = await boot({ hs, credential: asCredential() });
+    // An engagement whose room is on the contributor's own server needs no seat given back.
+    const created = await request(app).post('/api/engagements').send({
+      project: 'local/thing', projectRoomId: '!local:hafleet.test', role: 'coding',
+      requester: '@me:hafleet.test', requestedTokens: 100_000, requestId: '$local-1',
+    });
+    const id = created.body.engagement.id;
+    await request(app).post(`/api/engagements/${id}/verdict`).send({ approve: true }).expect(200);
+
+    const res = await revoke(app, id);
+    expect(res.body.roomWithdrawal).toMatchObject({ left: false, reason: 'no project side owns that room' });
+    expect(leaves()).toHaveLength(0);
+  });
+});
+
 describe('the membership sweep lets an idle agent back in', () => {
   test('it asks per (agent, room) ONCE, however many engagements share the pair', async () => {
     /*

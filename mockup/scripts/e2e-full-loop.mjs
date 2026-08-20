@@ -341,6 +341,27 @@ function clientAlive() {
   }
   const after = ((await api('contributions')).body?.contributions ?? []).filter((b) => b.projectRoomId === room);
   check('revoking detaches the agent again', after.length === 0, JSON.stringify(after));
+
+  /*
+   * AND THE SEAT, not just the record — the same distinction as the admission check above.
+   *
+   * This suite reported "the run leaves no room behind in any account" for months while leaving the
+   * dispatched agent joined to every room it created: it knows its own account and the bot's, and an
+   * agent is neither. Confirmed by asking the homeserver directly — `@ac_soaker:palpo2.test` was still
+   * joined to two abandoned rooms from earlier runs of this very suite.
+   */
+  const prefix = process.env.MATRIX_AGENT_PREFIX ?? 'ac_';
+  const agentPrefix = `@${prefix}${queued.agent}:`.toLowerCase();
+  const stillSeated = await until(async () => {
+    const m = await user.doRequest('GET', `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/joined_members`);
+    const found = Object.keys(m.joined ?? {}).find((u) => u.toLowerCase().startsWith(agentPrefix));
+    // Inverted on purpose: `until` waits for truth, and what is wanted here is the absence.
+    return found ? null : 'gone';
+  }, { tries: 10, gapMs: 1500 });
+  check('and the agent is OUT of the room, by the homeserver\'s own account of its members',
+    stillSeated === 'gone',
+    stillSeated === 'gone' ? '' : `a member starting ${agentPrefix} is still joined — the revoke gave the `
+      + 'record back but not the seat');
   /*
    * Remove the room from EVERY account in it, not just this suite's.
    *
