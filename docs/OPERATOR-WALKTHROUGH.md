@@ -161,6 +161,12 @@ configuration it is in now is the one the last round's fixes were proven against
   at a throwaway human and a DM room that human is genuinely joined to. Without that pair the
   approval path stops at `awaitingBind`; with a room the human never accepted it looks like it
   works and nobody is ever asked.
+- **An operator ACL, added while walking the group commands.**
+  `MATRIX_OPERATOR_MXIDS` names the same throwaway human as `HAFLEET_OWNER_MXID`. Without it every
+  tier-2 command (`!mkgroup`, `!bindroom`, `!addmember`, `!rmgroup`, `!dm`) is refused — correctly,
+  and with a message that names the variable, but it means a fresh rig can only exercise tier 0 and
+  tier 1 until you set it. It is read at bridge start-up, so setting it needs a restart.
+
 - **The two commands worth running before you change anything**, both from `mockup/`:
 
   ```bash
