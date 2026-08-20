@@ -49,10 +49,13 @@ naturally come up if you kept going from where this left off:
    pre-join `!request` → pending engagement → the representative answers in the
    customer's room → the console lists it → a real browser click Approves → the agent is
    bound AND admitted to the room. Two things to know before repeating it:
-   - **The owner DM room is not validated.** The bridge had recorded a `botDmRooms` entry
-     for `@operator:…` that the operator was not a member of (invited, never joined), so
-     `HAFLEET_OWNER_DM_ROOM` can point at a room the human cannot see and nothing says
-     so. Check the room's `joined_members` before trusting it.
+   - ~~**The owner DM room is not validated.**~~ **FIXED (#123).** The bridge had recorded a
+     `botDmRooms` entry for `@operator:…` that the operator was not a member of (invited,
+     never joined), so `HAFLEET_OWNER_DM_ROOM` could point at a room the human cannot see
+     and nothing said so. Every approval sent there would have been delivered, reported
+     delivered, and waited for a decision from somebody who could not see it being asked
+     for. Now the bridge reads the room's membership after each delivery and raises an
+     alert naming the owner, the room and the remedy — without ever blocking the delivery.
    - ~~**A revoked engagement leaves the agent joined to the customer's room.**~~ **FIXED
      (#122).** Confirmed against the homeserver first: after two full-loop runs whose
      teardown reported "the run leaves no room behind in any account",
@@ -321,6 +324,8 @@ fine; the customer's own view of their own room was silent.
 | A green e2e suite that proves less than it says | The full loop asserted a BINDING — HAFleet's own record — and never asked the homeserver whether the agent was in the room. The two had never been checked against each other on this path | the suite now reads `joined_members` for `@<prefix><agent>:<side>` after Approve, #121 |
 | Every finished engagement leaks a member into a customer's Matrix room | Revoking removed HAFleet's binding and stopped there. Deleting an AGENT has withdrawn it from every room since #114/#115 on exactly the same grounds, and nobody carried that to the engagement's own end | `detachEngagement` — unbind, then give the seat back, gated on `allocatedTokens` (so a rejection withdraws nothing) and on no other live engagement holding the pair. NOT gated on a binding having existed, which is the mistake #114 shipped, #122 |
 | A green e2e suite reporting "leaves no room behind in any account" while leaving one | It purges the rooms it knows accounts for — its own and the bot's. A dispatched agent is neither, and its membership is created by the product rather than by the suite | assert the agent's ABSENCE from `joined_members` after the revoke, #122 |
+| An execution approval for a dispatched agent is auto-DENIED, and only a log says why | The public half of ADR-003's two surfaces resolved its sender with `getAgentToken`, and an appservice project side mints NO per-agent token — so the throw fired for exactly the agents HAFleet dispatches, and "both surfaces or neither" failed the whole approval closed | `agentSenderFor(agent, project_room_id)`, the resolver every other agent send already uses: a room on a project side is spoken into by that side's appservice masquerading as the agent, #123 |
+| An approval delivered into a room its owner is not in | An event id proves a message landed in a room, not that the decider is in it. A bot DM the operator was invited to and never joined is recorded exactly like one they use | read `joined_members` after the delivery and alert per room, never blocking the send — a message keeps, and a human who joins later reads it, #123 |
 | A live e2e suite that cannot run on most fleets | `!request architect` needs a `strong`-tier agent (opus for the claude framework); a sonnet/deepseek fleet can fill nothing at that tier, and the suite reported failure for a fleet with nothing wrong | `LOOP_ROLE` env override, default unchanged; `GET /api/engagements/preview?role=<r>` shows what a fleet can fill, #121 |
 
 ## For whoever continues this

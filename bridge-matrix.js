@@ -7443,6 +7443,63 @@ export class MatrixBridge {
     return results;
   }
 
+  /**
+   * Was the approval delivered somewhere its OWNER can actually read?
+   *
+   * A DELIVERED APPROVAL IS NOT A SEEN ONE. This path reports success on an event id, and an event id
+   * proves the message landed in a room — not that the human who has to decide is in that room. Found on
+   * a live rig: `bridge-state.json` held a `botDmRooms` entry for `@operator:…` whose only member was the
+   * BOT. The operator had been invited and had never joined, so the room existed, was recorded, and was
+   * the room `HAFLEET_OWNER_DM_ROOM` would have been set to — and every approval sent there would have
+   * waited for a decision from somebody who could not see it being asked for.
+   *
+   * NOTHING VALIDATES THAT CONFIG. `resolveOwnerFor` takes the mxid and the room id as given, and
+   * `upsertBinding` requires both fields without checking that one is in the other; the backend cannot
+   * check, because reading a room's membership needs a Matrix credential and the room is usually on
+   * HAFleet's own homeserver where only the bridge has one. So the check belongs here, at the one place
+   * that has both the room and a credential for it.
+   *
+   * AFTER THE SEND, AND IT NEVER BLOCKS ONE. Refusing to deliver would be worse than delivering into a
+   * room the owner might yet join — the message keeps, and a human who joins later sees the request. What
+   * was missing was anybody being told, so this only tells them.
+   *
+   * DEDUPED PER ROOM, so an agent asking for twenty approvals files one alert rather than twenty.
+   *
+   * AN UNREADABLE MEMBERSHIP SAYS NOTHING. "I could not ask" is not "the owner is absent", and reporting
+   * the two the same way would make this alert untrustworthy the first time a homeserver was slow.
+   */
+  async warnIfOwnerCannotSeeApprovalRoom(approval, dmServer) {
+    const roomId = approval?.owner_dm_room_id;
+    const owner = approval?.owner_mxid;
+    if (!roomId || !owner) return;
+    try {
+      let members = null;
+      if (dmServer && dmServer !== MATRIX_SERVER_NAME) {
+        const acting = this.actingSideFor(dmServer);
+        if (!acting) return;
+        const read = await joinedMembersOnSide({ ...acting, roomId });
+        if (!read.known) return;
+        members = read.members;
+      } else {
+        if (!this.botClient) return;
+        members = await this.botClient.getJoinedRoomMembers(roomId);
+      }
+      if (!Array.isArray(members)) return;
+      const present = members.some((m) => String(m).toLowerCase() === String(owner).toLowerCase());
+      if (present) return;
+      this.postWarning(
+        `approval request for ${approval.agent ?? 'an agent'} was delivered to ${roomId}, but its owner `
+        + `${owner} is NOT in that room — invited and never joined, or since departed. Nobody who can `
+        + 'decide will see it. Remedy: have the owner accept the invitation to that room, or point '
+        + 'HAFLEET_OWNER_DM_ROOM (or the binding) at a room they are actually in.',
+        { kind: 'approval-owner-absent', scope: roomId },
+      );
+    } catch (error) {
+      // A check that cannot run must not take the delivery it is checking down with it.
+      console.warn(`[approval] could not confirm ${owner} is in ${roomId}: ${error?.message || error}`);
+    }
+  }
+
   async onApprovalRequested(event) {
     const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : '';
     if (!requestId) return { ok: false, reason: 'missing_request_id' };
@@ -7501,11 +7558,35 @@ export class MatrixBridge {
         );
       }
       if (privateEventId) this.rememberMatrixEvent(privateEventId, requestId);
+      await this.warnIfOwnerCannotSeeApprovalRoom(approval, dmServer);
 
-      const token = this.getAgentToken(approval.agent);
-      if (!token) throw new Error(`missing Matrix token for approval agent ${approval.agent}`);
+      /*
+       * `agentSenderFor`, NOT `getAgentToken` — and this was the difference between the approval feature
+       * working and not existing on the only topology this product ships for customers.
+       *
+       * An appservice project side mints NO per-agent token: the namespace makes the agent ours to act
+       * for, which is the whole reason a project-side agent needs no registration. So `getAgentToken`
+       * answers null for exactly the agents HAFleet dispatches, and the throw here refused the public
+       * notice before it was attempted. Both surfaces or neither, so the whole approval then failed
+       * closed and was DENIED for delivery failure. Walked on the rig: an approval for `soaker` in its
+       * own project room logged `missing Matrix token for approval agent soaker` and came back
+       * `status: denied` — a request its owner was never asked about, refused on the requester's behalf.
+       *
+       * `agentSenderFor` is what every other agent send already resolves through, and it answers the
+       * question the room asks rather than the one the credential inventory answers: a room on a project
+       * side is spoken into by THAT side's appservice masquerading as the agent. It also fixes the milder
+       * half in the same line — a token is valid on one homeserver, and handing it to a room on another
+       * is `M_NOT_FOUND` at best. `sendAsAgentContent` has accepted either shape since that split.
+       */
+      const sender = this.agentSenderFor(approval.agent, approval.project_room_id);
+      if (!sender) {
+        throw new Error(
+          `no way for ${approval.agent} to speak in ${approval.project_room_id}: it holds no Matrix `
+          + 'token and the room is on no project side we have an appservice credential for',
+        );
+      }
       const publicEventId = await this.sendAsAgentContent(
-        token,
+        sender,
         approval.project_room_id,
         buildPublicApprovalNotice(approval),
         requestId,
