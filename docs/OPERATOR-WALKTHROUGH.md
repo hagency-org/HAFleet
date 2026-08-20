@@ -111,9 +111,31 @@ naturally come up if you kept going from where this left off:
    unit tests say yes (`tests/bridge-say-in-room.test.js`); it has not been watched
    happen in Robrix.
 
-7. **`!mkgroup` / `!bindroom` / `!addmember` / `!rmgroup` beyond the single happy path**
-   used to prove the ordering flow — rebinding a room, removing a member mid-conversation,
-   a group with no room bound to it yet.
+7. ~~**`!mkgroup` / `!bindroom` / `!addmember` / `!rmgroup` beyond the single happy path**~~
+   **WALKED (#127).** What the walk found is that `!mkgroup` and `!bindroom` are ALTERNATIVES —
+   `cmdBindroom`'s own comment says so — and nothing told anybody, so the obvious sequence is to
+   run both:
+
+   - `!mkgroup X` creates the group AND, asynchronously off the backend's SSE echo, **a separate
+     Matrix room named X**, which it then binds. The operator is never told that room exists.
+   - `!bindroom X` in the operator's own room re-points the group there, orphaning the first —
+     and reported only the gaining side.
+
+   Both now say what they did. Run together twice out of five attempts, the group ended up
+   pointing at the auto-created room and the operator's room was silently unbound, minutes after
+   a "Room bound to group" success; both occurrences were shortly after a bridge restart and it
+   has not reproduced since, so **the race is recorded, not fixed** — the messages are what make
+   it visible and recoverable. The symptom to recognise: the one-argument `!addmember <name>` and
+   `!rmember <name>` forms, which their own usage strings advertise, start answering `Usage:`.
+   That means the room you are standing in is not the group's room any more.
+
+   Also observed, and left alone: `!rmgroup` tries to kick the room's own creator and reports
+   `M_FORBIDDEN: sender does not have enough power to kick target user` while having already
+   removed the group. Removing a group should probably not try to evict the human whose room it
+   is; that is a decision, not a bug to quietly patch.
+
+   Clean: `!mkgroup` on an existing name says "group already exists"; `!bindroom` on an unknown
+   group and `!rmgroup` on one that never existed both say so.
 
 ## The rig as it stands, and how to pick it up
 

@@ -114,6 +114,22 @@ describe('bot commands async tmux probes', () => {
     expect(sent[0]).toContain('alpha, alice');
   });
 
+  test('!mkgroup says a separate room is being made, and how to use THIS one instead', async () => {
+    /*
+     * `!mkgroup` and `!bindroom` are alternatives — `cmdBindroom`'s own comment says so — and nothing
+     * told anybody, so the obvious sequence is to run both and end up with two rooms claiming one group.
+     * The group's room is created asynchronously off the backend's SSE echo, so it cannot be named here;
+     * that it is coming, and what to type if this room was meant to be it, can be.
+     */
+    const { bot, sent } = makeBot();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ json: vi.fn().mockResolvedValue({ name: 'demo' }) }));
+    await bot.handle('!room:test', '@alice:matrix.example.test', '!mkgroup demo');
+    const said = sent.join('\n');
+    expect(said).toMatch(/Group "demo" created/);
+    expect(said).toMatch(/separate Matrix room is being created/);
+    expect(said).toMatch(/!bindroom demo/);
+  });
+
   test('!mkgroup does not duplicate an explicitly listed initiating user', async () => {
     const { bot } = makeBot();
     const fetchMock = vi.fn().mockResolvedValue({
@@ -141,7 +157,7 @@ describe('!bindroom', () => {
     resetBotCommandsTestHooks();
   });
 
-  function makeBindBot({ groupExists = true, prevGroup = null } = {}) {
+  function makeBindBot({ groupExists = true, prevGroup = null, groupRoomMap = {} } = {}) {
     const sent = [];
     const bindRoom = vi.fn();
     vi.stubGlobal('fetch', vi.fn(async (url) => ({
@@ -155,6 +171,8 @@ describe('!bindroom', () => {
         isKnownAgentName: () => false,
         bindRoom,
         groupForRoom: () => prevGroup,
+        // A group holds exactly one room, so this is what binding here takes it away from.
+        groupRoomMap,
       },
     });
     return { bot, sent, bindRoom };
@@ -172,6 +190,30 @@ describe('!bindroom', () => {
     await bot.handle('!room-a:matrix.test', '@alice:matrix.test', '!bindroom factory');
     expect(bindRoom).toHaveBeenCalledWith('!room-a:matrix.test', 'factory');
     expect(sent.join('\n')).toMatch(/rebound: oldteam → factory/);
+  });
+
+  test('THE ORPHAN: binding a group that already has a room says which room lost it', async () => {
+    /*
+     * A group holds exactly one room, so this silently unbinds whatever held it before and reported only
+     * the gaining side. Walked on the rig, where the room that lost it was one `!mkgroup` had created
+     * moments earlier and never mentioned: the operator ends up with an orphan they did not know existed,
+     * and every one-argument command in their own room answers `Usage:` because that room is no longer
+     * the group's room.
+     */
+    const { bot, sent, bindRoom } = makeBindBot({ groupRoomMap: { factory: '!auto-made:matrix.test' } });
+    await bot.handle('!room-a:matrix.test', '@alice:matrix.test', '!bindroom factory');
+    expect(bindRoom).toHaveBeenCalledWith('!room-a:matrix.test', 'factory');
+    const said = sent.join('\n');
+    expect(said).toMatch(/bound to group "factory"/);
+    expect(said).toMatch(/was bound to !auto-made:matrix\.test/);
+    expect(said).toMatch(/no longer the group's room/);
+  });
+
+  test('and says nothing extra when the group\'s room is already this one', async () => {
+    // Re-running !bindroom in the room that already holds the group is a no-op, and must read like one.
+    const { bot, sent } = makeBindBot({ groupRoomMap: { factory: '!room-a:matrix.test' } });
+    await bot.handle('!room-a:matrix.test', '@alice:matrix.test', '!bindroom factory');
+    expect(sent.join('\n')).not.toMatch(/no longer the group/);
   });
 
   test('unknown group is rejected and nothing is bound', async () => {
