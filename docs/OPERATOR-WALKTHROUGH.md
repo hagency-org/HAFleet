@@ -88,8 +88,19 @@ naturally come up if you kept going from where this left off:
    six, as the homeserver re-delivered the batches nobody had acked. `onRoomMessage` has four
    outcomes and three recorded the event; non-command text in a bot DM replied and recorded
    nothing, so every retry answered again. Fixed and re-run: 20 messages, 20 replies, same
-   restart. The `settling` window still has not been observed doing its job — that needs an
-   edge that stays down longer than two minutes, which this run did not do.
+   restart.
+
+   **And the `settling` window, watched rather than reasoned about** — the other half of what
+   this item asked for. Against the real edge, after a restart with no traffic:
+
+   | | `inbound.state` | `settling` | what the operator is told |
+   |---|---|---|---|
+   | t+8s | `never-called` | `true` | "HAFleet is connected and waiting, so there is nothing to fix yet" |
+   | t+60s | `never-called` | `true` | same |
+   | t+130s | `never-called` | `false` | the three real causes, named: nothing has happened yet, the registration url is unreachable, or the homeserver was not restarted after the registration was installed |
+
+   It flips exactly where it should, and the message before the flip does not send anybody
+   looking for a fault that is not there.
 
 6. **The full progress-in-thread flow with a *real* dispatched agent process** (not just
    the appservice message reaching HAFleet's inbox). An earlier part of this session
