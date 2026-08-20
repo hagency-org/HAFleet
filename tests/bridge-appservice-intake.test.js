@@ -312,8 +312,17 @@ describe('an invite for the representative is a knock being answered', () => {
   function self({ sides = { [SIDE]: acting } } = {}) {
     const it = {
       warnings: [],
+      /*
+       * STUBBED, NOT OMITTED. Answering a knock now backfills the invite→join window through the side's
+       * own credential, and a `this` without the method took the TypeError into the join's own catch —
+       * so these tests passed while reporting "the join failed" internally. Recording the calls here
+       * keeps that wiring asserted from this file too; tests/bridge-appservice-join-window.test.js owns
+       * the window's own behaviour.
+       */
+      backfills: [],
       postWarning(message, meta) { this.warnings.push({ message, ...meta }); },
       actingSideFor: (id) => sides[String(id).toLowerCase()] ?? null,
+      backfillJoinedRoomOnSide: async (...args) => { it.backfills.push(args); return 0; },
     };
     it.onAppserviceMembership = bridgeModule.MatrixBridge.prototype.onAppserviceMembership.bind(it);
     return it;
@@ -359,6 +368,13 @@ describe('an invite for the representative is a knock being answered', () => {
     expect(it.warnings[0].kind).toBe('knock-accepted');
     // Deduped per ROOM, so a homeserver retrying the transaction does not file twice.
     expect(it.warnings[0].scope).toBe(ROOM);
+
+    /*
+     * And the window before the join is read. A customer who invites us and asks in the same breath is
+     * the obvious way to use this, and it silently lost the ask on a live pair of machines until the
+     * representative's own invite→join window was backfilled here.
+     */
+    expect(it.backfills).toEqual([[SIDE, ROOM, REP]]);
   });
 
   test('an invite for anyone else is left alone', async () => {
@@ -406,6 +422,8 @@ describe('an invite for the representative is a knock being answered', () => {
     await it.onAppserviceMembership(SIDE, ROOM, invite());
     expect(calls).toHaveLength(1);
     expect(it.warnings.map((w) => w.message).join(' ')).toMatch(/join failed/);
+    // Nothing to backfill in a room we did not get into.
+    expect(it.backfills).toEqual([]);
   });
 });
 
