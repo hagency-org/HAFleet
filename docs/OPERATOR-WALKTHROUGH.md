@@ -53,12 +53,13 @@ naturally come up if you kept going from where this left off:
      for `@operator:…` that the operator was not a member of (invited, never joined), so
      `HAFLEET_OWNER_DM_ROOM` can point at a room the human cannot see and nothing says
      so. Check the room's `joined_members` before trusting it.
-   - **A revoked engagement leaves the agent joined to the customer's room.** Confirmed
-     against the homeserver: after two full-loop runs whose teardown reported "the run
-     leaves no room behind in any account", `@ac_soaker:palpo2.test` was still joined to
-     both abandoned rooms. The suite cannot see this — it only knows its own account and
-     the bot's — and there is no product endpoint that removes an agent from one room
-     short of deleting the agent. Fix pending.
+   - ~~**A revoked engagement leaves the agent joined to the customer's room.**~~ **FIXED
+     (#122).** Confirmed against the homeserver first: after two full-loop runs whose
+     teardown reported "the run leaves no room behind in any account",
+     `@ac_soaker:palpo2.test` was still joined to both abandoned rooms. Revoking now gives
+     the seat back as well as the record, gated on this engagement having actually
+     allocated and on no other live engagement holding that agent in that room. The suite
+     asserts both directions from the homeserver's own member list now.
 
 2. **The `registrationToken` credential kind**, end to end. Everything walked here used
    `appservice`. The purely-outbound path (`HAFleet /syncs like a phone`) has its own
@@ -318,6 +319,8 @@ fine; the customer's own view of their own room was silent.
 | A security-relevant mode is silently ignored | `MATRIX_TRUST_MODE` acts only on `enforce`, so any other spelling means `audit`. The walk rig ran for days on `open`, which is not a mode | startup warning naming the value and saying nothing is being enforced, #121 |
 | Every bridge restart blinds the inbound path for up to ~55s | The edge holds a promise, not a socket, so a bridge killed mid-long-poll leaves its slot held for the edge's 25s poll timeout — and the puller then put that bounded wait on an exponential backoff | 409 is a known transient with a known bound: fixed 1s retry, and a log line saying the other poller is our own previous instance. Measured after: ~4s, #121 |
 | A green e2e suite that proves less than it says | The full loop asserted a BINDING — HAFleet's own record — and never asked the homeserver whether the agent was in the room. The two had never been checked against each other on this path | the suite now reads `joined_members` for `@<prefix><agent>:<side>` after Approve, #121 |
+| Every finished engagement leaks a member into a customer's Matrix room | Revoking removed HAFleet's binding and stopped there. Deleting an AGENT has withdrawn it from every room since #114/#115 on exactly the same grounds, and nobody carried that to the engagement's own end | `detachEngagement` — unbind, then give the seat back, gated on `allocatedTokens` (so a rejection withdraws nothing) and on no other live engagement holding the pair. NOT gated on a binding having existed, which is the mistake #114 shipped, #122 |
+| A green e2e suite reporting "leaves no room behind in any account" while leaving one | It purges the rooms it knows accounts for — its own and the bot's. A dispatched agent is neither, and its membership is created by the product rather than by the suite | assert the agent's ABSENCE from `joined_members` after the revoke, #122 |
 | A live e2e suite that cannot run on most fleets | `!request architect` needs a `strong`-tier agent (opus for the claude framework); a sonnet/deepseek fleet can fill nothing at that tier, and the suite reported failure for a fleet with nothing wrong | `LOOP_ROLE` env override, default unchanged; `GET /api/engagements/preview?role=<r>` shows what a fleet can fill, #121 |
 
 ## For whoever continues this
