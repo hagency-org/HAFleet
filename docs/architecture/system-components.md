@@ -244,12 +244,11 @@ The dashboard implements a sophisticated message delivery system that prevents i
 3. **Queue drain** (`server.js:2550-2590`): When idle, queued messages are injected into the tmux pane via `tmux send-keys`
 4. **Priority**: Operator messages bypass the idle gate and are delivered immediately
 
-| Config Variable | Default | Purpose |
-|----------------|---------|---------|
-| `IDLE_THRESHOLD_MS` | `20000` | Milliseconds of pane stability before delivery |
-| `WEB_PORT` | `8084` | Dashboard listen port |
-
-Source: `server.js:11-19` (config), `server.js:2450-2590` (idle detection and delivery), `server.js:3221-3260` (startup).
+**These two variables no longer exist.** `IDLE_THRESHOLD_MS` and `WEB_PORT` are read nowhere in this
+repository, and neither is the `server.js` the line references above point into — the whole section
+describes a dashboard process that has been withdrawn. Left in place as history rather than deleted,
+because the tmux idle-gate behaviour it documents is still how delivery to a tmux pane works; treat every
+`server.js:NNNN` citation here as archaeology, not as a place to look.
 
 ---
 
@@ -835,31 +834,29 @@ Configuration is loaded from `.env` files at the project root. Variables are org
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `API_PORT` | `8090` | Backend listen port |
+| `HAFLEET_BACKEND_PORT` | `8090` | Backend listen port |
 | `API_TOKEN` | (none) | Bearer auth token — if unset, API is open |
-| `AGENT_TOKEN_ENFORCEMENT` | `audit` | Per-agent token mode: `hard`, `soft`, `audit` |
-| `BRIDGE_SECRET` | (none) | Shared secret for bridge authentication |
-| `DATA_DIR` | `./data` | Directory for all JSON stores |
+| `HAFLEET_AGENT_TOKEN_MODE` | `audit` | Per-agent token mode: `hard`, `soft`, `audit` |
+| `MATRIX_BRIDGE_SECRET` | (none) | Shared secret for bridge authentication |
+| `HAFLEET_RUNTIME_DIR` | (required, no default) | Runtime root. Every JSON store lives in `$HAFLEET_RUNTIME_DIR/data`; there is no separate data-dir variable, and a supervisor that guessed one could serve the repo's dev `data/` while an operator believed it was serving the fleet |
 | `HAFLEET_HOMEDIR` | `~/.hafleet` | Root for agent home directories |
-| `MAX_MESSAGE_LENGTH` | `50000` | Maximum message body length |
+| _(removed)_ | — | `MAX_MESSAGE_LENGTH` is read nowhere. The body limit is the JSON parser's `100kb`, set in `backend-v2.js`, and it is not configurable |
 
-**Dashboard (server.js)**:
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `WEB_PORT` | `8084` | Dashboard listen port |
-| `IDLE_THRESHOLD_MS` | `20000` | Idle detection threshold for message delivery |
-| `BACKEND_URL` | `http://127.0.0.1:8090` | Backend URL for proxying |
+**Dashboard (server.js)** — WITHDRAWN. `server.js` does not exist in this repository, and none of
+`WEB_PORT`, `IDLE_THRESHOLD_MS` or `BACKEND_URL` is read anywhere in the code. The console is
+`mockup/` (Next.js), which resolves its backend from `HAFLEET_BACKEND` at module scope. The three
+rows that used to be here are removed rather than corrected, because there is nothing to correct
+them to.
 
 **Bridge (bridge-matrix.js)**:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `MATRIX_HOMESERVER_URL` | (required) | Matrix server URL |
-| `MATRIX_DOMAIN` | (required) | Matrix server domain for user IDs |
-| `MATRIX_BOT_USER` | `hafleet-bot` | Bot account username |
-| `MATRIX_BOT_PASSWORD` | (required) | Bot account password |
-| `MATRIX_PUPPET_PREFIX` | `ac_` | Prefix for puppet usernames |
+| `MATRIX_HOMESERVER` | `https://matrix.example.com` | Matrix server URL |
+| `MATRIX_SERVER_NAME` | the host of `MATRIX_HOMESERVER` | Server name for user and room ids |
+| `MATRIX_BOT_USERNAME` | `agent-bridge` | Bot account localpart. **Not** a project side's `sender_localpart` (`hafleet`) — see `docs/RUNNING-THE-SERVICES.md` |
+| `MATRIX_BOT_PASSWORD` | (none) | Bot account password. Absent is a supported mode since #119: the bot does not start and the inbound path stays up |
+| `MATRIX_AGENT_PREFIX` | `ac_` | Prefix for dispatched-agent localparts |
 | `MATRIX_OPERATOR_MXIDS` | (none) | Comma-separated operator Matrix IDs |
 | `MATRIX_TRUSTED_ROOM_IDS` | (none) | Comma-separated trusted room IDs |
 | `MATRIX_TRUSTED_INVITER_MXIDS` | (none) | Comma-separated trusted inviter IDs |
@@ -870,14 +867,14 @@ Configuration is loaded from `.env` files at the project root. Variables are org
 |----------|---------|---------|
 | `SUPERVISOR_ENABLED` | `false` | Enable supervisor system |
 | `SUPERVISOR_API_KEY` | (none) | LLM API key for evaluator |
-| `SUPERVISOR_MODEL` | (none) | Model ID for evaluator (e.g., DeepSeek) |
+| _(removed)_ | — | `SUPERVISOR_MODEL` is not an environment variable: the only occurrence is a local shell variable inside `bin/hafleet-up`, and the evaluator's model comes from the agent's runtime profile |
 | `SUPERVISOR_INTERVAL_MS` | `30000` | Assessment cycle interval |
 
 **Subconscious**:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `SUBCONSCIOUS_EVENT_TOKEN` | (none) | Auth token for hook event POST endpoint |
+| `HAFLEET_SUBCONSCIOUS_EVENT_TOKEN` | (none) | Auth token for hook event POST endpoint |
 | `LETTA_BASE_URL` | (none) | Letta server URL for long-term memory |
 
 **Agent Framework**:
