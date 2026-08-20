@@ -97,6 +97,53 @@ naturally come up if you kept going from where this left off:
    used to prove the ordering flow — rebinding a room, removing a member mid-conversation,
    a group with no room bound to it yet.
 
+## The rig as it stands, and how to pick it up
+
+Written down because rebuilding it is most of the cost of doing this work, and because the
+configuration it is in now is the one the last round's fixes were proven against.
+
+- **One machine, two homeservers.** The customer's Palpo (`palpo2.test`) carries the
+  appservice registration and publishes the co-located edge port; a second Palpo
+  (`palpo.test`) is left from an earlier round and is not part of the current path.
+- **HAFleet lives beside them**, its runtime under `~/.hafleet-fresh-runtime`, backend on
+  `8093`, console on `3100`, started with `node bin/hafleet-supervisor` after sourcing
+  `$HAFLEET_RUNTIME_DIR/.env` — skipping that source is how a whole fleet comes up with no
+  `API_TOKEN`.
+- **`MATRIX_SERVER_NAME` is the customer's own server.** HAFleet's bot and the side's
+  representative are the same Matrix user (`@hafleet:palpo2.test`), which is the collision
+  #121 made survivable. It is a legitimate co-located shape and the harshest one to test on;
+  a fresh rig should probably keep the two names apart instead.
+- **`MATRIX_TRUST_MODE=enforce`**, deliberately. It was `open` — which is not a mode and
+  silently means `audit` — for the whole previous round, and everything in #121 was invisible
+  under it. Leave it on `enforce`: it is the mode a careful operator picks, and it is the one
+  that finds this class of defect.
+- **An owner who can actually decide.** `HAFLEET_OWNER_MXID` / `HAFLEET_OWNER_DM_ROOM` point
+  at a throwaway human and a DM room that human is genuinely joined to. Without that pair the
+  approval path stops at `awaitingBind`; with a room the human never accepted it looks like it
+  works and nobody is ever asked.
+- **The two commands worth running before you change anything**, both from `mockup/`:
+
+  ```bash
+  MATRIX_HS=http://127.0.0.1:8009 BACKEND=http://127.0.0.1:8093 BASE=http://127.0.0.1:3100 \
+  MATRIX_TOKEN="$MATRIX_REG_TOKEN" BOT_MXID=@hafleet:palpo2.test \
+  BRIDGE_STATE=$HAFLEET_RUNTIME_DIR/data/matrix/bridge-state.json LOOP_ROLE=documentation \
+    node scripts/e2e-full-loop.mjs          # 22 checks, real browser, real homeserver
+  ```
+
+  ```bash
+  HAFLEET_API=http://127.0.0.1:8093 VERIFY_ROOM='<a room bound to a group>' \
+    bash scripts/verify-agent-e2e.sh        # 10 checks, no browser
+  ```
+
+  Both pass on merged master as of #124. `LOOP_ROLE` matters: the default `architect` needs a
+  `strong`-tier agent and this rig has none, so the suite would report failure for a fleet with
+  nothing wrong with it.
+- **What it leaves behind.** The full-loop suite purges its own rooms and, since #122, the
+  agent's seat as well. Ad-hoc probes do not: anything you write yourself should revoke its
+  engagements, or the console fills with pending requests nobody made. The representative stays
+  in every customer room it was ever invited to, which is correct — those rooms belong to the
+  customer, and only they can remove it.
+
 ## Reusable setup: a clean two-machine test rig
 
 This is the highest-value reusable asset from this round. Building it from scratch cost
