@@ -392,7 +392,9 @@ PY
   # "Registered online" anyway. The agent's own MCP server registers it a moment later, which
   # is why nobody noticed: the message was wrong and the outcome was right.
   local reg_body reg_status
-  reg_body="$(mktemp -t hafleet-reg)"
+  # GNU mktemp requires at least three Xs in the template; supplying the full
+  # path also works on BSD/macOS without relying on their different `-t` form.
+  reg_body="$(mktemp "${TMPDIR:-/tmp}/hafleet-reg.XXXXXX")"
   # No `|| echo 000` here: curl -w ALREADY prints 000 when it cannot connect, and the fallback
   # appended a second one, yielding "000000" — which matched no case and reported an unreachable
   # backend as "refused HTTP 000000". Caught by exercising the branch instead of assuming it.
