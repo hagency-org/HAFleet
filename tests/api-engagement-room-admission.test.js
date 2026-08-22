@@ -133,7 +133,24 @@ async function approve(app, { tokens = 100_000, room = ROOM } = {}) {
     requestId: `$adm-${seq += 1}`,
   });
   const id = created.body?.engagement?.id;
-  if (!id) return created;
+  /*
+   * SAY WHAT WENT WRONG, rather than handing the caller a shape it will dereference into a mystery.
+   *
+   * This returned the CREATE response when creation failed, and no caller checks for that — every one of
+   * them reads `.body.engagement.id` or `.body.roomAdmission`. So a create that failed surfaced several
+   * lines later as `TypeError: Cannot read properties of undefined (reading 'id')`, pointing at the
+   * caller's own logic.
+   *
+   * That cost real time on 2026-08-22: two whole-suite runs failed here while the file was clean 10/10 in
+   * isolation, and the TypeError read as a defect in the test above it. The actual cause was this
+   * repository's documented whole-suite flake class reaching `POST /api/engagements` — the same run's
+   * other failure was a bare `read ECONNRESET`. One line of status and body says that immediately.
+   */
+  if (!id) {
+    throw new Error(
+      `engagement creation failed (HTTP ${created.status}): ${JSON.stringify(created.body).slice(0, 300)}`,
+    );
+  }
   return request(app).post(`/api/engagements/${id}/verdict`).send({ approve: true });
 }
 
