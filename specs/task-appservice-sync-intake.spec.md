@@ -38,11 +38,16 @@ duplicate suppression, and authentication.
   backoff — at-least-once, never at-most-once; the crash window between a
   successful handle and the cursor write is absorbed by the router's
   event-id dedup.
-- Bound retries of a poison batch: after `MAX_DELIVERY_ATTEMPTS` (default 8)
-  consecutive refusals, CIRCUIT-BREAK that side's collector — stop polling,
-  KEEP the cursor (a restart or manual recovery resumes from it), and warn
-  exactly once through the existing operator-warning convention. Infinite
-  head-of-line blocking is forbidden.
+- Bound retries of a poison batch with FAST-BREAK semantics: the retry
+  interval for a refusing batch is a FIXED 1s (no climb), and after
+  `MAX_DELIVERY_ATTEMPTS` (default 8) consecutive refusals — about 8
+  seconds — CIRCUIT-BREAK that side's collector: stop polling, warn
+  exactly once through the existing operator-warning convention, and
+  report TWO cursors in the warning: `heldCursor` (the current `since`,
+  the point a restart actually resumes from) and `failedNextBatch` (the
+  end of the batch that was never committed — NOT a recovery point).
+  Recovery is by restart or manual action; infinite head-of-line
+  blocking is forbidden, and so is stretching the window to minutes.
 - Break the 401 loop: a 401 against a token minted in the CURRENT login
   generation goes straight to backoff; only a 401 against an older token
   triggers one re-login.
@@ -57,7 +62,13 @@ duplicate suppression, and authentication.
 - Idempotence of repeat deliveries is the Matrix join's own idempotence plus
   the bridge's trust-state reconciliation — invite-section events carry no
   `event_id`, so event-id dedup does not apply to them (a redelivered invite
-  must be harmless).
+  must be harmless). The executable pin (see `B-idem`) covers REDRIVERY
+  through the collector and router: the same invite section delivered on
+  successive polls produces byte-identical router batches with no loop
+  error or state drift. The DOWNSTREAM claim — that the join path absorbs
+  the duplicate without re-warning or re-backfilling — is exercised by the
+  bridge's own membership tests, not by this spec's bound tests; this spec
+  promises redelivery harmlessness at the collector boundary and no more.
 
 ### Must Not
 
@@ -78,7 +89,10 @@ that file is the executable form of this spec.
   Test: `A: a router failure does NOT advance the cursor; retries are CAPPED and the collector stops`.
 - **Poison batch circuit-breaks the side** — after the retry budget the
   collector stops, the cursor is held, and the operator is warned exactly once.
-  Test: `A-cap: a poison batch circuit-breaks the collector, holds the cursor, warns once`.
+  Test: `A-cap: a poison batch circuit-breaks the collector, holds the cursor, warns once`
+  (pins `heldCursor` and `failedNextBatch` separately, and the sleep
+  sequence as seven fixed 1000ms waits — the eighth attempt breaks
+  instead of sleeping).
 - **Invites are delivered, first-poll join timeline is not** — both
   first-poll semantics pinned separately, invite events shaped like join
   events.

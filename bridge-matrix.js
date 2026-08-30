@@ -4621,7 +4621,8 @@ export class MatrixBridge {
          */
         onCircuitBreak: (sideId, detail) => this.postWarning(
           `appservice sync intake circuit-broke for side ${sideId}: the router refused a batch ${detail.attempts} times. `
-          + `The cursor is held at ${detail.cursor ?? '(none)'}; a restart resumes from it. Last error: ${detail.lastError}`,
+          + `Recovery resumes from cursor ${detail.heldCursor ?? '(none)'} (the batch that ends at ${detail.failedNextBatch ?? '(none)'} was never committed). `
+          + `Last error: ${detail.lastError}`,
           { kind: 'appservice_sync', scope: `side:${sideId}` },
         ),
       });

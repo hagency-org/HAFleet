@@ -361,8 +361,16 @@ describe('5-r2 supplement: circuit break, side normalization, invite idempotence
     expect(polls).toBeLessThan(HARD_CAP);          // the collector stopped ITSELF
     expect(breaks).toHaveLength(1);                // warned exactly once
     expect(breaks[0].s).toBe('side-a');
-    expect(breaks[0].d.cursor).toBe('POISON');     // cursor identity preserved in the warning
+    // TWO CURSORS, each in its place (5-r3): heldCursor is where a restart RESUMES (the
+    // current since), failedNextBatch is the end of the batch that was never committed.
+    // Calling nextBatch "the recovery point" was wrong — it names a position never reached.
+    expect(breaks[0].d.heldCursor).toBe('C0');
+    expect(breaks[0].d.failedNextBatch).toBe('POISON');
     expect(breaks[0].d.attempts).toBe(8);          // spec value, pinned (5-r2b)
+    // FAST-BREAK (5-r3): the refusing batch retried at a FIXED 1s. Seven sleeps precede the
+    // eighth attempt (which breaks the circuit rather than sleeping again) — attempts 1..7
+    // retry, attempt 8 stops. The pinned sequence is what keeps "no climb" honest.
+    expect(sleeps).toEqual([1000, 1000, 1000, 1000, 1000, 1000, 1000]);
     expect(writes).toEqual([]);                    // cursor never advanced
     expect(cursorStore.value).toBe('C0');          // held at the pre-poison position
     expect(collector.stats.gaveUp).toBe(true);
@@ -431,5 +439,57 @@ describe('5-r2 supplement: circuit break, side normalization, invite idempotence
     expect(handled.length).toBe(2); // delivered twice (same invite section both polls)
     expect(handled[0]).toEqual(handled[1]); // byte-identical: no drift, no error
     expect(collector.stats.lastError).toBe(null);
+  });
+});
+
+describe('5-r3: real-side-effect invite idempotence (join path)', () => {
+  test('B-real: the same invite delivered twice produces two joins and the second is absorbed by the homeserver, not by HAFleet', async () => {
+    /*
+     * REAL SIDE EFFECTS this time (5-r3 B), not just collector-boundary redelivery. The invite
+     * travels the full path — collector → router → onEvents → onAppserviceMembership → the
+     * homeserver's /join endpoint — twice, with a fake homeserver that COUNTS joins and always
+     * answers 200 (an already-joined room joins again fine: Matrix join is idempotent at the
+     * server). What must hold: both deliveries reach /join (HAFleet does NOT dedup invites —
+     * they carry no event_id), each join succeeds, and no error state accumulates. The
+     * absorbing layer is deliberately the homeserver; claiming HAFleet-side dedup would be
+     * false, and this test pins that honesty.
+     */
+    const joins = [];
+    const joinFetch = vi.fn(async (url) => {
+      joins.push(String(url));
+      return jsonResponse(200, { room_id: '!inv:p' });
+    });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = joinFetch;
+    const membershipEvents = [];
+    const warnings = [];
+    const bridge = {
+      actingSideFor: () => ({ side: { apiBaseUrl: 'https://hs.example' }, credential: { asToken: 'as1', senderLocalpart: 'hafleet' } }),
+      postWarning: async (msg, meta) => { warnings.push({ msg, meta }); },
+    };
+    // Drive the MEMBERSHIP dispatch twice through the real method shape
+    const proto = (await import('../bridge-matrix.js')).MatrixBridge.prototype;
+    for (let i = 0; i < 2; i += 1) {
+      await proto.onAppserviceMembership.call(bridge, 'palpo.example', '!inv:palpo.example', {
+        type: 'm.room.member',
+        state_key: '@hafleet:palpo.example',
+        content: { membership: 'invite' },
+      });
+      expect(watchdog() < 100).toBe(true);
+    }
+    globalThis.fetch = realFetch;
+    expect(joins).toHaveLength(2);                       // both invites joined — no HAFleet dedup
+    expect(joins[0]).toBe(joins[1]);                     // identical join request each time
+    expect(joins[0]).toContain('/_matrix/client/v3/join/');
+    expect(joins[0]).toContain('user_id=%40hafleet%3Apalpo.example'); // masquerade intact both times
+    // and the room-server guard: an invite naming a foreign room must NOT join at all
+    const foreignJoins = [];
+    const fk = vi.fn(async (u) => { foreignJoins.push(String(u)); return jsonResponse(200, {}); });
+    globalThis.fetch = fk;
+    await proto.onAppserviceMembership.call(bridge, 'palpo.example', '!room:other.example', {
+      type: 'm.room.member', state_key: '@hafleet:palpo.example', content: { membership: 'invite' },
+    });
+    globalThis.fetch = realFetch;
+    expect(foreignJoins).toEqual([]);                    // origin guard held on the repeat path too
   });
 });
