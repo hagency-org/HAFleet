@@ -208,14 +208,40 @@ describe('Matrix owner approval bridge', () => {
       },
     });
     expect(parsed).toMatchObject({ action: 'deny', request_id: approval.id, sender_mxid: '@alex:palpo.test' });
-    // The two namespaces must NOT be conflated in one event: a com.agentchat msgtype with
-    // only a legacy payload key (or vice versa) is a malformed hybrid, parsed by neither side.
+    /*
+     * FULL-PAYLOAD HYBRIDS, both directions, both REJECTED. Earlier the hybrid fixture omitted
+     * request_id/digest and passed for the wrong reason — an incomplete payload, not the pairing
+     * rule. These two carry every required field and differ ONLY in namespace mixing, so a null
+     * here is the pairing rule speaking and nothing else.
+     */
+    const fullDetail = {
+      version: 1,
+      kind: 'verdict',
+      agent: approval.agent,
+      project: approval.project,
+      project_room_id: approval.project_room_id,
+      request_id: approval.id,
+      input_digest: approval.input_digest,
+      action: 'approve_once',
+    };
+    // hybrid 1: NEW msgtype, LEGACY payload key
     expect(parseApprovalVerdictEvent('!approval-dm:palpo.test', {
-      event_id: '$hybrid',
+      event_id: '$hybrid-new-msgtype-legacy-key',
       sender: '@alex:palpo.test',
       content: {
         msgtype: 'com.agentchat.approval.verdict.v1',
-        'com.hafleet.approval': { version: 1, kind: 'verdict', action: 'approve_once' },
+        body: 'Approval response submitted',
+        'com.hafleet.approval': { ...fullDetail },
+      },
+    })).toBeNull();
+    // hybrid 2: LEGACY msgtype, NEW payload key
+    expect(parseApprovalVerdictEvent('!approval-dm:palpo.test', {
+      event_id: '$hybrid-legacy-msgtype-new-key',
+      sender: '@alex:palpo.test',
+      content: {
+        msgtype: 'com.hafleet.approval.verdict.v1',
+        body: 'Approval response submitted',
+        'com.agentchat.approval': { ...fullDetail },
       },
     })).toBeNull();
   });

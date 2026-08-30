@@ -4,11 +4,12 @@
   "title": "Agent Chat owner approval verdict v1",
   "type": "object",
   "additionalProperties": true,
-  "required": ["msgtype", "body", "com.hafleet.approval"],
+  "_transition": "Canonical wire namespace is com.agentchat.*. During the rename transition the bridge ALSO accepts verdicts sent as com.hafleet.approval.verdict.v1 with payload key com.hafleet.approval (strict pairing, no hybrids); it SENDS only com.agentchat.*. This note is runtime transition policy, not part of the schema contract.",
+  "required": ["msgtype", "body", "com.agentchat.approval"],
   "properties": {
-    "msgtype": { "const": "com.hafleet.approval.verdict.v1" },
+    "msgtype": { "const": "com.agentchat.approval.verdict.v1" },
     "body": { "type": "string", "minLength": 1, "maxLength": 512 },
-    "com.hafleet.approval": {
+    "com.agentchat.approval": {
       "type": "object",
       "additionalProperties": false,
       "required": [

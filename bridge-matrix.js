@@ -2330,13 +2330,22 @@ export function buildOwnerApprovalRequest(approval) {
 export function parseApprovalVerdictEvent(roomId, event) {
   const content = event?.content;
   if (!content) return null;
-  // DUAL ACCEPT during the namespace transition: deployed clients still send the old
-  // `com.hafleet.approval.verdict.v1`, and losing an in-flight verdict reads as a hung
-  // approval on both ends. Only the VERDICT accepts both — status/request are outbound-only.
-  const isVerdict = content.msgtype === APPROVAL_VERDICT_MSGTYPE
-    || content.msgtype === LEGACY_APPROVAL_VERDICT_MSGTYPE;
-  if (!isVerdict) return null;
-  const detail = content[APPROVAL_EVENT_KEY] ?? content[LEGACY_APPROVAL_EVENT_KEY];
+  /*
+   * STRICT PAIRING, not per-field fallback. The transition accepts two complete shapes — the
+   * current (msgtype com.agentchat.* + payload key com.agentchat.*) and the legacy
+   * (com.hafleet.* + com.hafleet.*) — and NOTHING mixed. A per-field `newKey ?? legacyKey`
+   * would let a hybrid through that neither side ever declared, widening the protocol surface
+   * the transition was meant to shrink; a full-payload hybrid in EITHER direction is rejected.
+   */
+  let detail = null;
+  if (content.msgtype === APPROVAL_VERDICT_MSGTYPE) {
+    detail = content[APPROVAL_EVENT_KEY] ?? null;
+  } else if (content.msgtype === LEGACY_APPROVAL_VERDICT_MSGTYPE) {
+    detail = content[LEGACY_APPROVAL_EVENT_KEY] ?? null;
+  } else {
+    return null;
+  }
+  if (!detail || detail.version !== 1 || detail.kind !== 'verdict') return null;
   if (!detail || detail.version !== 1 || detail.kind !== 'verdict') return null;
   const action = detail.action === 'approve_once' || detail.action === 'deny' ? detail.action : null;
   const senderMxid = typeof event?.sender === 'string' ? event.sender.trim() : '';

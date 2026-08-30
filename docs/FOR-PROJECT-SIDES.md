@@ -37,6 +37,27 @@ HAFleet and nobody can natively register a lookalike agent account — keep it t
 way on public homeservers. Pass `exclusive: false` in the issue call only when the
 namespace must coexist with pre-existing accounts.
 
+**Migrating an installed non-exclusive registration to exclusive** (numbered, every step):
+
+1. Re-issue with the flag, keeping the same address:
+   ```bash
+   curl -X POST "$HAFLEET/api/project-sides/<side>/registration-file" \
+     -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"url":"http://<hafleet host>:8009","exclusive":true}'
+   ```
+   The new credential is STAGED: the live one keeps serving until you promote.
+2. Install the new YAML from the returned `path` into your `appservice_registration_dir`.
+3. Delete the OLD registration's row in Palpo's database — Palpo keeps registrations
+   keyed by id and a restart alone will not refresh an existing row, so the old
+   `hs_token` would keep being presented and every transaction would 403.
+4. Restart your homeserver (registrations load at startup only).
+5. Promote and verify: `POST /api/project-sides/<side>/verify` then promote the staged
+   credential from the console. `GET /api/matrix/reach` should say `flowing`.
+
+**Console note:** the UI's re-issue buttons send only `{url}` — no `exclusive` field —
+so a re-issue from the console uses the DEFAULT `true`. If your deployment needs
+`exclusive: false`, re-issue via the API with the explicit flag.
+
 **`<hafleet host>` is reachable FROM YOUR HOMESERVER, which is not always where you are typing.** If your
 homeserver runs in a container, `127.0.0.1` there is the container itself and HAFleet will never receive a
 single event — the appservice looks installed and is deaf. A cold-start rehearsal of this document hit
