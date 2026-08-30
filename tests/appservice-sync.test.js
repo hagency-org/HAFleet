@@ -149,7 +149,13 @@ describe('the sync collector loop', () => {
     await collector.loop;
     expect(polls).toBeLessThan(HARD_CAP); // the LOOP stopped itself, not the harness
     expect(collector.stats.gaveUp).toBe(true);
-    expect(collector.stats.failed).toBeGreaterThanOrEqual(12);
+    /*
+     * THE CAP VALUE IS CONTRACTUAL (5-r2b): the spec says 8, so the break lands EXACTLY on the
+     * 8th refusal — not merely "eventually". Pinning the number here is what stops the code and
+     * the spec drifting apart again (the 5-r2 ACK claimed 8 while the constant read 12).
+     */
+    expect(collector.stats.failed).toBe(8);
+    expect(collector.stats.batchAttempts).toBe(8);
     expect(sleeps.length).toBeGreaterThan(0); // backoff actually ran
     expect(writes).toEqual([]); // the failed batch never moved the cursor
     expect(collector.stats.logins).toBe(1);
@@ -356,6 +362,7 @@ describe('5-r2 supplement: circuit break, side normalization, invite idempotence
     expect(breaks).toHaveLength(1);                // warned exactly once
     expect(breaks[0].s).toBe('side-a');
     expect(breaks[0].d.cursor).toBe('POISON');     // cursor identity preserved in the warning
+    expect(breaks[0].d.attempts).toBe(8);          // spec value, pinned (5-r2b)
     expect(writes).toEqual([]);                    // cursor never advanced
     expect(cursorStore.value).toBe('C0');          // held at the pre-poison position
     expect(collector.stats.gaveUp).toBe(true);
