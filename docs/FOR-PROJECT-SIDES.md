@@ -30,8 +30,12 @@ namespaces:
     - exclusive: true
       regex: "@ac_.*"
   aliases: []
-  rooms: []
 ```
+
+The `exclusive: true` default means the homeserver reserves every `@ac_*` user for
+HAFleet and nobody can natively register a lookalike agent account — keep it that
+way on public homeservers. Pass `exclusive: false` in the issue call only when the
+namespace must coexist with pre-existing accounts.
 
 **`<hafleet host>` is reachable FROM YOUR HOMESERVER, which is not always where you are typing.** If your
 homeserver runs in a container, `127.0.0.1` there is the container itself and HAFleet will never receive a

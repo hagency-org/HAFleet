@@ -351,6 +351,21 @@ describe('the registration we hand to a project side', () => {
     expect(renderRegistrationYaml(generateRegistration({ id: 'x', url: 'https://u.example' })))
       .toMatch(/restart/i);
   });
+
+  test('user namespace is exclusive by default and overridable', () => {
+    /*
+     * Impersonation guard. A non-exclusive namespace lets anyone natively register an `@ac_*`
+     * user on the project's homeserver and speak as an agent; exclusive is the safe default
+     * for public homeservers, and `false` is an explicit opt-in for coexistence with
+     * pre-existing accounts.
+     */
+    const def = generateRegistration({ id: 'x', url: 'https://u.example' });
+    expect(def.namespaces.users[0].exclusive).toBe(true);
+    expect(renderRegistrationYaml(def)).toContain('exclusive: true');
+    const optedOut = generateRegistration({ id: 'x', url: 'https://u.example', userNamespaceExclusive: false });
+    expect(optedOut.namespaces.users[0].exclusive).toBe(false);
+    expect(renderRegistrationYaml(optedOut)).toContain('exclusive: false');
+  });
 });
 
 describe('construction refuses to be misconfigured', () => {

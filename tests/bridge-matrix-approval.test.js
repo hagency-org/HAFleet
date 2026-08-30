@@ -86,8 +86,8 @@ describe('Matrix owner approval bridge', () => {
     const serialized = JSON.stringify(content);
 
     expect(content).toMatchObject({
-      msgtype: 'com.hafleet.approval.status.v1',
-      'com.hafleet.approval': {
+      msgtype: 'com.agentchat.approval.status.v1',
+      'com.agentchat.approval': {
         version: 1,
         kind: 'status',
         agent: 'wf_coordinator',
@@ -112,8 +112,8 @@ describe('Matrix owner approval bridge', () => {
      */
     const content = buildOwnerApprovalRequest(approval);
 
-    expect(content.msgtype).toBe('com.hafleet.approval.request.v1');
-    expect(content['com.hafleet.approval']).toMatchObject({
+    expect(content.msgtype).toBe('com.agentchat.approval.request.v1');
+    expect(content['com.agentchat.approval']).toMatchObject({
       agent: 'wf_coordinator',
       project: 'robrix2',
       project_room_id: '!project:palpo.test',
@@ -154,9 +154,9 @@ describe('Matrix owner approval bridge', () => {
       event_id: '$verdict',
       sender: '@alex:palpo.test',
       content: {
-        msgtype: 'com.hafleet.approval.verdict.v1',
+        msgtype: 'com.agentchat.approval.verdict.v1',
         body: 'Approval response submitted',
-        'com.hafleet.approval': {
+        'com.agentchat.approval': {
           version: 1,
           kind: 'verdict',
           agent: approval.agent,
@@ -182,8 +182,45 @@ describe('Matrix owner approval bridge', () => {
     });
   });
 
-  test('delayed_room_key_retries_encrypted_owner_verdict', async () => {
+  test('legacy_hafleet_namespace_verdict_still_accepted_in_transition', () => {
     /*
+     * Wire-protocol transition guard. Verdicts already in flight — sent by deployed clients
+     * under the old `com.hafleet.approval.verdict.v1` name before the namespace returned to
+     * `com.agentchat.*` — must not be dropped: losing one reads as a hung approval on both
+     * ends. Only the VERDICT accepts the legacy name; status/request are outbound-only.
+     */
+    const parsed = parseApprovalVerdictEvent('!approval-dm:palpo.test', {
+      event_id: '$legacy-verdict',
+      sender: '@alex:palpo.test',
+      content: {
+        msgtype: 'com.hafleet.approval.verdict.v1',
+        body: 'Approval response submitted',
+        'com.hafleet.approval': {
+          version: 1,
+          kind: 'verdict',
+          agent: approval.agent,
+          project: approval.project,
+          project_room_id: approval.project_room_id,
+          request_id: approval.id,
+          input_digest: approval.input_digest,
+          action: 'deny',
+        },
+      },
+    });
+    expect(parsed).toMatchObject({ action: 'deny', request_id: approval.id, sender_mxid: '@alex:palpo.test' });
+    // The two namespaces must NOT be conflated in one event: a com.agentchat msgtype with
+    // only a legacy payload key (or vice versa) is a malformed hybrid, parsed by neither side.
+    expect(parseApprovalVerdictEvent('!approval-dm:palpo.test', {
+      event_id: '$hybrid',
+      sender: '@alex:palpo.test',
+      content: {
+        msgtype: 'com.agentchat.approval.verdict.v1',
+        'com.hafleet.approval': { version: 1, kind: 'verdict', action: 'approve_once' },
+      },
+    })).toBeNull();
+  });
+
+  test('delayed_room_key_retries_encrypted_owner_verdict', async () => {    /*
      * REQ-OWNER-UI-APPROVAL-DELIVERY, both halves, in the order they appear below. The first
      * decryption rejects, and the assertions are that the ciphertext went to the durable
      * store and that onRoomMessage was NOT called — an undecryptable verdict is not an
@@ -209,9 +246,9 @@ describe('Matrix owner approval bridge', () => {
       ...encrypted,
       type: 'm.room.message',
       content: {
-        msgtype: 'com.hafleet.approval.verdict.v1',
+        msgtype: 'com.agentchat.approval.verdict.v1',
         body: 'Approval response submitted',
-        'com.hafleet.approval': {
+        'com.agentchat.approval': {
           version: 1,
           kind: 'verdict',
           agent: approval.agent,
@@ -296,7 +333,7 @@ describe('Matrix owner approval bridge', () => {
     bridge.botClient = {
       sendMessage: vi.fn().mockImplementation(async (_room, content) => {
         order.push('private');
-        expect(content['com.hafleet.approval'].input_preview).toContain('gh issue create');
+        expect(content['com.agentchat.approval'].input_preview).toContain('gh issue create');
         return '$private';
       }),
     };
