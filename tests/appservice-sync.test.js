@@ -9,6 +9,14 @@ import { createAppserviceRouter } from '../lib/appservice-receiver.js';
 
 const HS = 'https://palpo.example';
 const HS_TOKEN = 'hs-token-1';
+/*
+ * HARNESS WATCHDOG (5-r1 supplement). Every shouldContinue in this file also consults this
+ * absolute iteration counter, so NO test can loop forever even if its primary stop condition
+ * is buggy — the 01:59–02:02 OOM was a loop exactly like that. Reset per test; checked with a
+ * hard ceiling no legitimate test reaches.
+ */
+let WATCHDOG_TICKS = 0;
+function watchdog(limit = 200) { WATCHDOG_TICKS += 1; if (WATCHDOG_TICKS > limit) throw new Error('test watchdog tripped: runaway loop'); return WATCHDOG_TICKS; }
 const AS_TOKEN = 'as-token-1';
 
 function jsonResponse(status, body) {
@@ -90,7 +98,7 @@ describe('the sync collector loop', () => {
       writeCursor: async (v) => { cursorStore.value = v; },
       fetchImpl,
       sleep: async () => { steps += 1; },
-      shouldContinue: () => fetchImpl.mock.calls.length < 3,
+      shouldContinue: () => fetchImpl.mock.calls.length < 3 && watchdog() < 200,
     });
     await collector.loop;
     expect(fetchImpl.mock.calls[0][0]).toContain('/login');
@@ -102,10 +110,15 @@ describe('the sync collector loop', () => {
     expect(collector.stats.processed).toBe(2);
   });
 
-  test('A: a router failure does NOT advance the cursor and retries the same batch', async () => {
-    const { router, handled } = makeRouter();
+  test('A: a router failure does NOT advance the cursor; retries are CAPPED and the collector stops', async () => {
+    /*
+     * Harness hardening (5-r1 supplement): shouldContinue carries a HARD poll cap, sleep is a
+     * non-spin mock (records and yields), and the loop's own stop — not a mock-call count —
+     * is what ends it. A runaway here is exactly the 01:59–02:02 single-fork OOM shape.
+     */
     const failing = { handle: async () => ({ status: 500, body: {} }) };
     const cursorStore = { value: 'CURSOR-0' };
+    const HARD_CAP = 50; // far above MAX_DELIVERY_ATTEMPTS; reaching it means the cap failed
     let polls = 0;
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(jsonResponse(200, { access_token: 't1', user_id: '@hafleet:p' }))
@@ -114,17 +127,21 @@ describe('the sync collector loop', () => {
         return jsonResponse(200, { next_batch: 'CURSOR-1', rooms: { join: { '!r:p': { timeline: { events: [{ event_id: '$lost', type: 'm.room.message', content: {} }] } } } } });
       });
     const writes = [];
+    const sleeps = [];
     const collector = startAppserviceSyncCollector({
       baseUrl: HS, side: 'side-a', router: failing,
       credentialFor: () => ({ kind: 'appservice', asToken: AS_TOKEN, hsToken: HS_TOKEN, senderLocalpart: 'hafleet' }),
       readCursor: () => cursorStore.value,
       writeCursor: async (v) => { writes.push(v); cursorStore.value = v; },
       fetchImpl,
-      sleep: async () => {},
-      shouldContinue: () => polls < 2,
+      sleep: async (ms) => { sleeps.push(ms); await Promise.resolve(); },
+      shouldContinue: () => polls < HARD_CAP,
     });
     await collector.loop;
-    expect(collector.stats.failed).toBeGreaterThan(0);
+    expect(polls).toBeLessThan(HARD_CAP); // the LOOP stopped itself, not the harness
+    expect(collector.stats.gaveUp).toBe(true);
+    expect(collector.stats.failed).toBeGreaterThanOrEqual(12);
+    expect(sleeps.length).toBeGreaterThan(0); // backoff actually ran
     expect(writes).toEqual([]); // the failed batch never moved the cursor
     expect(collector.stats.logins).toBe(1);
   });
@@ -143,7 +160,7 @@ describe('the sync collector loop', () => {
       writeCursor: async (v) => { cursorStore.value = v; },
       fetchImpl,
       sleep: async () => {},
-      shouldContinue: () => fetchImpl.mock.calls.length < 3,
+      shouldContinue: () => fetchImpl.mock.calls.length < 3 && watchdog() < 200,
     });
     await collector.loop;
     expect(handled).toHaveLength(1);
@@ -165,7 +182,7 @@ describe('the sync collector loop', () => {
       readCursor: () => null, writeCursor: async () => {},
       fetchImpl,
       sleep: async () => {},
-      shouldContinue: () => fetchImpl.mock.calls.length < 2,
+      shouldContinue: () => fetchImpl.mock.calls.length < 2 && watchdog() < 200,
     });
     await collector.loop;
     const syncUrl = seen.find((u) => u.includes('/sync'));
@@ -191,7 +208,7 @@ describe('the sync collector loop', () => {
       readCursor: () => 'C0', writeCursor: async () => {},
       fetchImpl,
       sleep: async (ms) => { steps += 1; sleeps.push(ms); },
-      shouldContinue: () => fetchImpl.mock.calls.length < 4,
+      shouldContinue: () => fetchImpl.mock.calls.length < 4 && watchdog() < 200,
     });
     await collector.loop;
     expect(collector.stats.logins).toBe(2);
@@ -212,7 +229,7 @@ describe('the sync collector loop', () => {
       readCursor: () => null, writeCursor: async () => {},
       fetchImpl,
       sleep: async (ms) => { steps += 1; sleeps.push(ms); },
-      shouldContinue: () => steps < 3,
+      shouldContinue: () => steps < 3 && watchdog() < 200,
     });
     await collector.loop;
     expect(sleeps.length).toBeGreaterThan(0);
@@ -292,7 +309,7 @@ describe('intake wiring rules', () => {
       readCursor: () => null, writeCursor: async () => {},
       fetchImpl,
       sleep: async (ms) => { steps += 1; sleeps.push(ms); },
-      shouldContinue: () => steps < 3,
+      shouldContinue: () => steps < 3 && watchdog() < 200,
     });
     await collector.loop;
     expect(collector.stats.logins).toBe(2); // exactly two: t1, t2 — never a third
