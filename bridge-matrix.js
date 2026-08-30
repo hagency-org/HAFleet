@@ -4614,6 +4614,16 @@ export class MatrixBridge {
         readCursor: () => state.appserviceSync[sync.side] ?? null,
         writeCursor: async (next) => { state.appserviceSync[sync.side] = next; saveState(); },
         onLogin: ({ userId }) => console.log(`[appservice-sync] logged in as ${userId} for side ${sync.side}`),
+        /*
+         * CIRCUIT-BREAK rides the existing operator-warning path (postWarning → backend alert
+         * store) exactly once per break, so a poisoned batch pages a human instead of blocking
+         * the queue in silence.
+         */
+        onCircuitBreak: (sideId, detail) => this.postWarning(
+          `appservice sync intake circuit-broke for side ${sideId}: the router refused a batch ${detail.attempts} times. `
+          + `The cursor is held at ${detail.cursor ?? '(none)'}; a restart resumes from it. Last error: ${detail.lastError}`,
+          { kind: 'appservice_sync', scope: `side:${sideId}` },
+        ),
       });
       console.log(`[appservice] collecting via outbound /sync from ${sync.baseUrl} for side ${sync.side}`);
     }
