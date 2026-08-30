@@ -62,7 +62,7 @@ duplicate suppression, and authentication.
 - Idempotence of repeat deliveries is the Matrix join's own idempotence plus
   the bridge's trust-state reconciliation — invite-section events carry no
   `event_id`, so event-id dedup does not apply to them (a redelivered invite
-  must be harmless). The executable pin (see `B-idem`) covers REDRIVERY
+  must be harmless). The executable pin (see `B-idem`) covers REDELIVERY
   through the collector and router: the same invite section delivered on
   successive polls produces byte-identical router batches with no loop
   error or state drift. The DOWNSTREAM claim — that the join path absorbs

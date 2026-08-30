@@ -339,6 +339,8 @@ describe('5-r2 supplement: circuit break, side normalization, invite idempotence
     const HARD_CAP = 60;
     let polls = 0;
     const breaks = [];
+    const loggedErrors = [];
+    const logger = { error: (m) => { loggedErrors.push(m); }, warn: () => {} };
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(jsonResponse(200, { access_token: 't1', user_id: '@hafleet:p' }))
       .mockImplementation(async () => {
@@ -353,6 +355,7 @@ describe('5-r2 supplement: circuit break, side normalization, invite idempotence
       readCursor: () => cursorStore.value,
       writeCursor: async (v) => { writes.push(v); cursorStore.value = v; },
       onCircuitBreak: (s, d) => { breaks.push({ s, d }); },
+      logger,
       fetchImpl,
       sleep: async (ms) => { sleeps.push(ms); await Promise.resolve(); },
       shouldContinue: () => polls < HARD_CAP && watchdog() < 400,
@@ -367,6 +370,13 @@ describe('5-r2 supplement: circuit break, side normalization, invite idempotence
     expect(breaks[0].d.heldCursor).toBe('C0');
     expect(breaks[0].d.failedNextBatch).toBe('POISON');
     expect(breaks[0].d.attempts).toBe(8);          // spec value, pinned (5-r2b)
+    // B(ii)/B(iii) 5-r4: the payload has NO bare `cursor` field, and the log names the two
+    // cursors correctly — POISON is the FAILED batch end, never called a recovery point.
+    expect(Object.prototype.hasOwnProperty.call(breaks[0].d, 'cursor')).toBe(false);
+    expect(loggedErrors).toHaveLength(1);
+    expect(loggedErrors[0]).toContain('recovery resumes from held cursor C0');
+    expect(loggedErrors[0]).toContain('batch ending at POISON was never committed');
+    expect(loggedErrors[0]).not.toMatch(/resumes? from held cursor POISON/); // POISON is never the held cursor
     // FAST-BREAK (5-r3): the refusing batch retried at a FIXED 1s. Seven sleeps precede the
     // eighth attempt (which breaks the circuit rather than sleeping again) — attempts 1..7
     // retry, attempt 8 stops. The pinned sequence is what keeps "no climb" honest.
@@ -491,5 +501,59 @@ describe('5-r3: real-side-effect invite idempotence (join path)', () => {
     });
     globalThis.fetch = realFetch;
     expect(foreignJoins).toEqual([]);                    // origin guard held on the repeat path too
+  });
+});
+
+describe('5-r4: backoff routes by THIS error\'s kind, not history', () => {
+  test('A-kind: a network blip during a poison batch\'s retry window takes the EXPONENTIAL lane', async () => {
+    /*
+     * The mis-route 5-r4 fixes: with batchAttempts>0 as the discriminator, a fetch failure
+     * arriving while a poison batch was mid-retry landed in the fixed-1s lane forever. Here the
+     * router refuses ONCE (poison tag, 1s), then the NETWORK fails twice — those two must climb
+     * (2000, 4000), must NOT advance batchAttempts, and must not circuit-break early.
+     */
+    let routerAnswer = { status: 500, body: {} };
+    const router = { handle: async () => routerAnswer };
+    // deterministic script: login, sync#1 (router 500 -> poison 1s), then two network failures,
+    // then stop. The script array is consumed in order; anything after throws 'done'.
+    const script = [
+      { kind: 'login' },
+      { kind: 'sync', body: { next_batch: 'P1', rooms: { join: { '!r:p': { timeline: { events: [{ event_id: '$b1' }] } } } } } },
+      { kind: 'net-fail' },
+      { kind: 'net-fail' },
+      { kind: 'net-fail' },
+    ];
+    let i = 0;
+    const fetchImpl = vi.fn(async () => {
+      const step = script[Math.min(i, script.length - 1)]; i += 1;
+      if (step.kind === 'login') return jsonResponse(200, { access_token: 't1', user_id: '@hafleet:p' });
+      if (step.kind === 'net-fail') throw new TypeError('fetch failed');
+      // the first sync runs against a REFUSING router; later syncs (none in this script) would heal
+      routerAnswer = script.indexOf(step) === 1 ? { status: 500, body: {} } : { status: 200, body: {} };
+      return jsonResponse(200, step.body);
+    });
+    const sleeps = [];
+    const cursorStore = { value: 'C0' };
+    const collector = makeCollector({
+      baseUrl: HS, side: 'side-a', router,
+      credentialFor: () => ({ kind: 'appservice', asToken: AS_TOKEN, hsToken: HS_TOKEN, senderLocalpart: 'hafleet' }),
+      readCursor: () => cursorStore.value,
+      writeCursor: async (v) => { cursorStore.value = v; },
+      fetchImpl,
+      sleep: async (ms) => { sleeps.push(ms); await Promise.resolve(); },
+      shouldContinue: () => i < script.length && watchdog() < 300,
+    });
+    await collector.loop;
+    expect(sleeps[0]).toBe(1000);                 // the router refusal: poison lane
+    /*
+     * Observed sequence (deterministic): poison lane 1000, then the three network blips ride
+     * the exponential lane from its STARTING value 1000 and double: 1000, 2000, 4000. The
+     * point under test is the SHAPE — fixed vs doubling — and that the blips never re-enter
+     * the fixed lane even while batchAttempts>0.
+     */
+    expect(sleeps).toEqual([1000, 1000, 2000, 4000]);
+    expect(collector.stats.batchAttempts).toBe(1);    // network failures did not count toward the break
+    expect(collector.stats.gaveUp ?? false).toBe(false);       // no false circuit-break (undefined = never set = false)
+    expect(collector.stats.failed).toBe(1);           // only the router refusal counted as failed
   });
 });
