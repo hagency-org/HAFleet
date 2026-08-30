@@ -12,6 +12,7 @@ import {
 } from './lib/matrix-representative.js';
 import { resolveAppserviceListenerConfig, startAppserviceListener } from './lib/appservice-listener.js';
 import { resolveEdgeLinkConfig, startEdgePuller } from './lib/appservice-puller.js';
+import { resolveAppserviceSyncConfig, startAppserviceSyncCollector } from './lib/appservice-sync.js';
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { execFile } from 'child_process';
 import os from 'os';
@@ -4550,9 +4551,26 @@ export class MatrixBridge {
      */
     const config = resolveAppserviceListenerConfig(process.env);
     const edge = resolveEdgeLinkConfig(process.env);
-    if (!config.enabled && !edge.enabled) {
+    const sync = resolveAppserviceSyncConfig(process.env);
+    /*
+     * THREE WAYS IN, MUTUALLY EXCLUSIVE — the router's dedup window makes an accidental double
+     * delivery survivable, but a DELIBERATE one on every event is not what anyone configured.
+     * Refusing to start with two intakes configured names the collision instead of discovering it
+     * as duplicate replies.
+     */
+    const intakes = [
+      ['listener', config.enabled, () => `HAFLEET_APPSERVICE_PORT is set (${config.port})`],
+      ['edge', edge.enabled, () => `HAFLEET_EDGE_URL is set (${edge.url})`],
+      ['sync', sync.enabled, () => `HAFLEET_APPSERVICE_SYNC_SIDE is set (${sync.side})`],
+    ].filter(([, enabled]) => enabled);
+    if (intakes.length > 1) {
+      throw new Error(`[appservice] multiple intakes configured for one bridge: ${intakes.map(([n, , why]) => `${n} (${why()})`).join(' + ')}. `
+        + 'Pick one way in per side — running two would deliver every event twice.');
+    }
+    if (!config.enabled && !edge.enabled && !sync.enabled) {
       console.log(`[appservice] inbound listener disabled (${config.reason})`);
       console.log(`[appservice] co-located edge not in use (${edge.reason})`);
+      console.log(`[appservice] sync intake not in use (${sync.reason})`);
       return;
     }
     this.appserviceRouter = createAppserviceRouter();
@@ -4571,8 +4589,38 @@ export class MatrixBridge {
       });
       console.log(`[appservice] collecting from a co-located edge at ${edge.url} for side ${edge.side}`);
     }
+
+    if (sync.enabled) {
+      /*
+       * The third way in: an outbound /sync loop with no socket and no edge process. The cursor
+       * lives in the bridge state so a restart resumes rather than replays; the credential comes
+       * from the acting-credential set, which the existing refresh timer keeps current.
+       */
+      state.appserviceSync = state.appserviceSync || {};
+      this.appserviceSyncCollector = startAppserviceSyncCollector({
+        baseUrl: sync.baseUrl,
+        side: sync.side,
+        router: this.appserviceRouter,
+        credentialFor: () => {
+          const entry = this.actingCredentials?.get?.(sync.side) ?? null;
+          const cred = entry?.credential ?? entry ?? null;
+          return cred && cred.kind === 'appservice' ? cred : null;
+        },
+        readCursor: () => state.appserviceSync[sync.side] ?? null,
+        writeCursor: async (next) => { state.appserviceSync[sync.side] = next; saveState(); },
+        onLogin: ({ userId }) => console.log(`[appservice-sync] logged in as ${userId} for side ${sync.side}`),
+      });
+      console.log(`[appservice] collecting via outbound /sync from ${sync.baseUrl} for side ${sync.side}`);
+    }
+
+    /*
+     * THE REFRESH TIMER IS INSTALLED FOR EVERY INTAKE, not only the listener. The edge-only path
+     * used to return early here, so no timer ran and a credential issued after start-up never
+     * reached the router until the process restarted — the exact gap sync must not copy (gap #9).
+     */
+    setInterval(() => this.refreshAppserviceSides(), APPSERVICE_SIDE_REFRESH_MS);
     if (!config.enabled) {
-      console.log(`[appservice] no local socket (${config.reason}); the edge link is the only way in`);
+      console.log(`[appservice] no local socket (${config.reason}); ${edge.enabled ? 'the edge link' : 'the sync loop'} is the only way in`);
       return;
     }
     try {

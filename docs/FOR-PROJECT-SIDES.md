@@ -68,6 +68,13 @@ replaced, and no endpoint will ever hand it back. To check whether it works you 
 
 ### If HAFleet is not reachable from your homeserver — run the doorway instead
 
+**Or skip both: the sync option.** Before any of the below, there is a third choice — plain
+outbound `/sync`, the same direction an ordinary client uses. Set
+`HAFLEET_APPSERVICE_SYNC_SIDE` and `HAFLEET_APPSERVICE_SYNC_URL` on the bridge and it logs in
+with the registration's master token and pulls events itself: no open port, no second process,
+nothing to reach. It is the simplest option and the one a fleet behind NAT wants; the doorway
+below exists for when you want the edge's own counters and `--check`.
+
 An appservice is INBOUND: your homeserver pushes transactions to the `url` above, so HAFleet has to be
 reachable from your server. When it is not — a fleet on a laptop, on an internal network, behind NAT —
 there are two ways out, and neither needs anything exposed.
