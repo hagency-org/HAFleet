@@ -4553,19 +4553,24 @@ export class MatrixBridge {
     const edge = resolveEdgeLinkConfig(process.env);
     const sync = resolveAppserviceSyncConfig(process.env);
     /*
-     * THREE WAYS IN, MUTUALLY EXCLUSIVE — the router's dedup window makes an accidental double
-     * delivery survivable, but a DELIBERATE one on every event is not what anyone configured.
-     * Refusing to start with two intakes configured names the collision instead of discovering it
-     * as duplicate replies.
+     * THREE WAYS IN. MUTEX IS PER SIDE, not global: the router's dedup absorbs an accidental
+     * double delivery, but two intakes on the SAME side would double-deliver every event of
+     * that side deliberately. Two intakes on DIFFERENT sides are fine — one homeserver pushes,
+     * another is polled. The LISTENER has no side dimension (it is one socket for all sides),
+     * so it conflicts with any enabled edge or sync; the error names the colliding sides so
+     * the operator sees which side is doubled, not just that something is.
      */
-    const intakes = [
-      ['listener', config.enabled, () => `HAFLEET_APPSERVICE_PORT is set (${config.port})`],
-      ['edge', edge.enabled, () => `HAFLEET_EDGE_URL is set (${edge.url})`],
-      ['sync', sync.enabled, () => `HAFLEET_APPSERVICE_SYNC_SIDE is set (${sync.side})`],
-    ].filter(([, enabled]) => enabled);
-    if (intakes.length > 1) {
-      throw new Error(`[appservice] multiple intakes configured for one bridge: ${intakes.map(([n, , why]) => `${n} (${why()})`).join(' + ')}. `
-        + 'Pick one way in per side — running two would deliver every event twice.');
+    const conflicts = [];
+    if (config.enabled && (edge.enabled || sync.enabled)) {
+      conflicts.push(`listener (HAFLEET_APPSERVICE_PORT=${config.port}) serves every side and cannot coexist with `
+        + `${edge.enabled ? `edge (side ${edge.side}) ` : ''}${sync.enabled ? `sync (side ${sync.side})` : ''}`.trim());
+    }
+    if (edge.enabled && sync.enabled && edge.side === sync.side) {
+      conflicts.push(`edge and sync are both configured for side ${edge.side}`);
+    }
+    if (conflicts.length) {
+      throw new Error(`[appservice] multiple intakes configured for the same side(s): ${conflicts.join('; ')}. `
+        + 'Pick one way in per side — running two on one side would deliver every event twice.');
     }
     if (!config.enabled && !edge.enabled && !sync.enabled) {
       console.log(`[appservice] inbound listener disabled (${config.reason})`);
