@@ -49,10 +49,15 @@ namespace must coexist with pre-existing accounts.
 2. Install the new YAML from the returned `path` into your `appservice_registration_dir`.
 3. Delete the OLD registration's row in Palpo's database — Palpo keeps registrations
    keyed by id and a restart alone will not refresh an existing row, so the old
-   `hs_token` would keep being presented and every transaction would 403.
+   `hs_token` would keep being presented and every transaction would 403. Back the
+   database up first, then remove the row for this id from Palpo's
+   `appservice_registrations` table (or use Palpo's appservice admin interface if
+   your build ships one) — do not guess at other tables.
 4. Restart your homeserver (registrations load at startup only).
-5. Promote and verify: `POST /api/project-sides/<side>/verify` then promote the staged
-   credential from the console. `GET /api/matrix/reach` should say `flowing`.
+5. Verify — which promotes by itself: `POST /api/project-sides/<side>/verify` tries the
+   staged credential first and, the moment the homeserver accepts it, promotes it in
+   the same call — the response reports `promoted: true`. There is no separate promote
+   step anywhere. Then `GET /api/matrix/reach` should say `flowing`.
 
 **Console note:** the UI's re-issue buttons send only `{url}` — no `exclusive` field —
 so a re-issue from the console uses the DEFAULT `true`. If your deployment needs

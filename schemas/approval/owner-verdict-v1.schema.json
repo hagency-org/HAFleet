@@ -4,7 +4,7 @@
   "title": "Agent Chat owner approval verdict v1",
   "type": "object",
   "additionalProperties": true,
-  "_transition": "Canonical wire namespace is com.agentchat.*. During the rename transition the bridge ALSO accepts verdicts sent as com.hafleet.approval.verdict.v1 with payload key com.hafleet.approval (strict pairing, no hybrids); it SENDS only com.agentchat.*. This note is runtime transition policy, not part of the schema contract.",
+  "$comment": "Canonical wire namespace is com.agentchat.*. During the rename transition the bridge ALSO accepts verdicts sent as com.hafleet.approval.verdict.v1 with payload key com.hafleet.approval (strict pairing, no hybrids); it SENDS only com.agentchat.*. This note is runtime transition policy, not part of the schema contract.",
   "required": ["msgtype", "body", "com.agentchat.approval"],
   "properties": {
     "msgtype": { "const": "com.agentchat.approval.verdict.v1" },
