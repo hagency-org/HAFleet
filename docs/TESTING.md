@@ -6,11 +6,81 @@ npm run test:kernel       # sharded kernel + CLI subset
 npm run verify:ci         # all gates (needs GNU timeout; macOS: brew install coreutils)
 ```
 
+## Runaway-loop guardrails — LOOP-R1..R6 (2026-08-31)
+
+Seven Vitest fork workers dumped core in one night (SIGABRT, V8 heap exhaustion at
+~4.1 GiB). Root cause: a polling-collector loop in a test kept spinning without a
+real sleep — `vi.fn()` retains every call's arguments, so a loop that fails to stop
+grows the heap at ~38 MB/s until V8 aborts. The production bug underneath was a
+retry breaker disarmed by a reset inside the retry path. (Namespaced LOOP-R* on purpose: this repo's coordination protocol already owns bare R1–R6 — ACK duty, honest verification, escalation, coexistence, idempotence, versioning — and the two sets must stay unambiguous in reviews.) These rules exist so that
+neither shape recurs; they bind every loop-driving test and every production
+polling loop:
+
+- **LOOP-R1** — every loop test carries a watchdog iteration cap that is independent of
+  the condition under test; reaching the cap fails the test loudly
+  (`tests/appservice-sync.test.js` is the reference pattern).
+- **LOOP-R2** — never mock sleep as a no-op on a polling loop. The mock records each
+  wait and the test asserts waits actually happened.
+- **LOOP-R3** — never use `vi.fn().mock.calls.length` as the only stop condition; use a
+  named counter with a hard cap, and assert the loop stopped by itself.
+- **LOOP-R4** — before adding any `while` loop, answer: if the gate never turns false,
+  does every iteration still hit one real sleep? A `continue` that skips the sleep
+  is the exact failure mode. One exception is allowed: a no-sleep branch with a
+  strict once-per-healthy-period budget (like the single 401 fast re-login), provided
+  the budget gate is a monotonic counter, the exhausted branch is reachable, and a
+  test pins both.
+- **LOOP-R5** — experiments that deliberately drive a process into OOM run under
+  `ulimit -c 0`: no 400 MB cores, no crash-notifier noise; the process's own FATAL
+  output is the evidence.
+- **LOOP-R6** — in retry/breaker state machines, every reset assignment must answer in
+  writing: who resets it, under what condition, and is the exhausted branch still
+  reachable — backed by a reachability test. (The 401-relogin breaker was disarmed
+  for a night by a reset in its fast path; a truth-table walk of every state
+  variable found and fixed a second instance the same day.)
+
+## The heap ceiling on npm test (2026-08-31)
+
+`npm test` and `npm run test:ci` run under an explicit `--max-old-space-size=4096`.
+
+Why not lower: a 2048 ceiling was tried and the plain serial suite ITSELF dies at
+~2 GB around `tests/api-usage-metering.test.js` — mark-compact reclaims nothing
+(2046 MB -> 2046 MB), because the backend test harness's cache-busting dynamic
+import pins one whole `backend-v2.js` module instance per boot in the ESM
+registry, and those accumulate across every file in the single fork. (A
+`--logHeapUsage` run reports a ~918 MB per-file peak, but under this repo's current
+Vitest/runner parameters that flag was observed to force a GC per file, hiding the
+cumulative retention (an observed behavior, not a documented CLI contract) — do not size the ceiling from it.)
+
+Why have a ceiling at all: 4096 matches the engine default, so the suite is
+unaffected — but a runaway allocation loop (~38 MB/s measured) now dies with a
+clear FATAL in under two minutes instead of depending on machine defaults. When
+developing a loop test in isolation, run it with a LOW ceiling on purpose:
+`NODE_OPTIONS=--max-old-space-size=256 npx vitest run tests/<file>` makes a
+runaway die in seconds.
+
+The ceiling can come down after the module-retention debt is paid (split the
+heavy `api-*` files, budget boots per file) — that work is tracked on the
+coordination board, not here. Do not raise this number to make a failing test
+pass; find the loop or the retention instead.
+
+## Feature work starts from a task spec (2026-08-31)
+
+Bug fixes may proceed without ceremony. A NEW feature starts with a task contract
+in `specs/task-<name>.spec.md` — model it on
+`specs/task-appservice-sync-intake.spec.md`: scenarios bound to named tests, the
+spec as the single source of truth for acceptance. Implementation and review
+follow the spec, not the other way around.
+
 ## The memory theory, measured and dropped (2026-08-11)
 
-**The section below is retained for its measurements but its DIAGNOSIS is wrong.** The retention
-it describes is real; the claim that it causes the intermittent failures is not, and two rounds
-of effort were aimed at it before anyone measured the thing it depends on.
+**The section below is retained for its measurements but its DIAGNOSIS is wrong, and one of its
+MEASUREMENTS is now superseded.** The retention it describes is real; the claim that it causes
+the intermittent failures is not. ERRATUM (2026-08-31): the bullet below stating "Retention does
+not accumulate across the run / each file gets a fresh worker process" held under that probe's
+runner configuration, but it is REFUTED for today's plain `npm test` serial run: a single fork
+serves many files and a 2048 MB ceiling was exhausted mid-suite with mark-compact reclaiming
+nothing. The guardrails section above is authoritative; per-file numbers below remain useful,
+their cross-file conclusions do not.
 
 Measured with `scripts/heap-probe-config.js`:
 

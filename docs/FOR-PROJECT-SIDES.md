@@ -30,8 +30,38 @@ namespaces:
     - exclusive: true
       regex: "@ac_.*"
   aliases: []
-  rooms: []
 ```
+
+The `exclusive: true` default means the homeserver reserves every `@ac_*` user for
+HAFleet and nobody can natively register a lookalike agent account — keep it that
+way on public homeservers. Pass `exclusive: false` in the issue call only when the
+namespace must coexist with pre-existing accounts.
+
+**Migrating an installed non-exclusive registration to exclusive** (numbered, every step):
+
+1. Re-issue with the flag, keeping the same address:
+   ```bash
+   curl -X POST "$HAFLEET/api/project-sides/<side>/registration-file" \
+     -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"url":"http://<hafleet host>:8009","exclusive":true}'
+   ```
+   The new credential is STAGED: the live one keeps serving until you promote.
+2. Install the new YAML from the returned `path` into your `appservice_registration_dir`.
+3. Delete the OLD registration's row in Palpo's database — Palpo keeps registrations
+   keyed by id and a restart alone will not refresh an existing row, so the old
+   `hs_token` would keep being presented and every transaction would 403. Back the
+   database up first, then remove the row for this id from Palpo's
+   `appservice_registrations` table (or use Palpo's appservice admin interface if
+   your build ships one) — do not guess at other tables.
+4. Restart your homeserver (registrations load at startup only).
+5. Verify — which promotes by itself: `POST /api/project-sides/<side>/verify` tries the
+   staged credential first and, the moment the homeserver accepts it, promotes it in
+   the same call — the response reports `promoted: true`. There is no separate promote
+   step anywhere. Then `GET /api/matrix/reach` should say `flowing`.
+
+**Console note:** the UI's re-issue buttons send only `{url}` — no `exclusive` field —
+so a re-issue from the console uses the DEFAULT `true`. If your deployment needs
+`exclusive: false`, re-issue via the API with the explicit flag.
 
 **`<hafleet host>` is reachable FROM YOUR HOMESERVER, which is not always where you are typing.** If your
 homeserver runs in a container, `127.0.0.1` there is the container itself and HAFleet will never receive a
@@ -63,6 +93,13 @@ replaced, and no endpoint will ever hand it back. To check whether it works you 
 (`accessState`), never the token.
 
 ### If HAFleet is not reachable from your homeserver — run the doorway instead
+
+**Or skip both: the sync option.** Before any of the below, there is a third choice — plain
+outbound `/sync`, the same direction an ordinary client uses. Set
+`HAFLEET_APPSERVICE_SYNC_SIDE` and `HAFLEET_APPSERVICE_SYNC_URL` on the bridge and it logs in
+with the registration's master token and pulls events itself: no open port, no second process,
+nothing to reach. It is the simplest option and the one a fleet behind NAT wants; the doorway
+below exists for when you want the edge's own counters and `--check`.
 
 An appservice is INBOUND: your homeserver pushes transactions to the `url` above, so HAFleet has to be
 reachable from your server. When it is not — a fleet on a laptop, on an internal network, behind NAT —

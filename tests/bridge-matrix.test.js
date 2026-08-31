@@ -627,7 +627,7 @@ describe('bridge matrix behavior', () => {
     await expect(bridge.sendAsAgentContent(
       'agent-token',
       '!approval:matrix.test',
-      { msgtype: 'com.hafleet.approval.request.v1', body: 'approval' },
+      { msgtype: 'com.agentchat.approval.request.v1', body: 'approval' },
       'approval_123',
     )).resolves.toBe('$approval-event');
 
