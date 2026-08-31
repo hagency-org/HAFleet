@@ -217,6 +217,7 @@ describe('the sync collector loop', () => {
       .mockResolvedValueOnce(jsonResponse(200, { next_batch: 'C', rooms: {} }))
       .mockImplementation(async () => { throw new Error('no more'); });
     let steps = 0;
+    const sleeps = [];
     const collector = makeCollector({
       baseUrl: HS, side: 'side-a', router,
       credentialFor: () => ({ kind: 'appservice', asToken: AS_TOKEN, hsToken: HS_TOKEN, senderLocalpart: 'hafleet' }),
