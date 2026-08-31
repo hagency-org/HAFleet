@@ -9415,6 +9415,7 @@ app.post('/api/project-sides/:id/registration-file', requireBearer, (req, res) =
       url,
       senderLocalpart: req.body?.sender_localpart || 'hafleet',
       userNamespaceRegex: req.body?.user_namespace || `@${MATRIX_AGENT_PREFIX_FOR_REGISTRATION}.*`,
+      userNamespaceExclusive: req.body?.exclusive !== false,
     });
     const yaml = renderRegistrationYaml(registration);
 
@@ -9523,6 +9524,7 @@ app.post('/api/project-sides/:id/registration', requireBearer, (req, res) => {
       url,
       senderLocalpart: req.body?.sender_localpart || 'hafleet',
       userNamespaceRegex: req.body?.user_namespace || `@${MATRIX_AGENT_PREFIX_FOR_REGISTRATION}.*`,
+      userNamespaceExclusive: req.body?.exclusive !== false,
     });
     const stored = projectSideStore.setCredential(side.id, {
       kind: 'appservice',

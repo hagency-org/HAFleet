@@ -22,15 +22,19 @@ display names, and localparts are never fallback approvers.
 
 The versioned JSON Schemas live under `schemas/approval/`.
 
-- Public room: `com.hafleet.approval.status.v1`. It contains only agent,
+- Public room: `com.agentchat.approval.status.v1`. It contains only agent,
   project, and `waiting_for_owner`; it has no request id, digest, input preview,
   or actions.
-- Encrypted owner room: `com.hafleet.approval.request.v1`. It contains the
+- Encrypted owner room: `com.agentchat.approval.request.v1`. It contains the
   complete binding, expiry, runtime details, input digest, and exactly two UI
   actions: `approve_once` and `deny`.
-- Encrypted owner response: `com.hafleet.approval.verdict.v1`. The bridge
+- Encrypted owner response: `com.agentchat.approval.verdict.v1`. The bridge
   forwards the Matrix event's real `event.sender`, room id, event id, binding,
-  digest, request id, and action to the backend.
+  digest, request id, and action to the backend. During the namespace transition
+  the bridge also accepts verdicts sent under the older `com.hafleet.approval.*`
+  names so events already in flight are not lost; it sends only `com.agentchat.*`.
+  The wire namespace is pinned by the deployed Robrix2 client and does not follow
+  product renames.
 
 Free-form text is ordinary chat and never becomes a verdict. `!ctl` and
 `!agentctl` are rejected in project and approval rooms even for a configured

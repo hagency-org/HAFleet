@@ -163,10 +163,19 @@ const RUNTIME_ROOT = (() => {
 assertRuntimeDir(RUNTIME_ROOT);
 // ── Configuration ─────────────────────────────────────────────────────
 const HOMESERVER = process.env.MATRIX_HOMESERVER || 'https://matrix.example.com';
-const APPROVAL_EVENT_KEY = 'com.hafleet.approval';
-const APPROVAL_STATUS_MSGTYPE = 'com.hafleet.approval.status.v1';
-const APPROVAL_REQUEST_MSGTYPE = 'com.hafleet.approval.request.v1';
-const APPROVAL_VERDICT_MSGTYPE = 'com.hafleet.approval.verdict.v1';
+// LINE PROTOCOL vs PRODUCT NAME. The wire namespace is `com.agentchat.*` because robrix2 —
+// the only deployed consumer of these events — matches exactly those strings. Renaming the
+// product renamed the constants in an earlier round and silently broke both directions: the
+// bridge sent `com.hafleet.*` nobody read, and verdicts sent by deployed clients as
+// `com.agentchat.*` were ignored. The wire name stays `com.agentchat.*` regardless of what
+// the product is called; outbound sends ONLY the wire name. Inbound verdicts accept BOTH
+// during the transition so events already in flight under the old name are not lost.
+const APPROVAL_EVENT_KEY = 'com.agentchat.approval';
+const LEGACY_APPROVAL_EVENT_KEY = 'com.hafleet.approval';
+const APPROVAL_STATUS_MSGTYPE = 'com.agentchat.approval.status.v1';
+const APPROVAL_REQUEST_MSGTYPE = 'com.agentchat.approval.request.v1';
+const APPROVAL_VERDICT_MSGTYPE = 'com.agentchat.approval.verdict.v1';
+const LEGACY_APPROVAL_VERDICT_MSGTYPE = 'com.hafleet.approval.verdict.v1';
 const AGENT_OPS_EVENT_KEY = 'com.hafleet.agent_ops';
 const AGENT_OPS_SESSION_REQUEST_MSGTYPE = 'com.hafleet.agent_ops.client_session.request.v1';
 const AGENT_OPS_SESSION_GRANT_MSGTYPE = 'com.hafleet.agent_ops.client_session.grant.v1';
@@ -2320,8 +2329,23 @@ export function buildOwnerApprovalRequest(approval) {
 
 export function parseApprovalVerdictEvent(roomId, event) {
   const content = event?.content;
-  if (!content || content.msgtype !== APPROVAL_VERDICT_MSGTYPE) return null;
-  const detail = content[APPROVAL_EVENT_KEY];
+  if (!content) return null;
+  /*
+   * STRICT PAIRING, not per-field fallback. The transition accepts two complete shapes — the
+   * current (msgtype com.agentchat.* + payload key com.agentchat.*) and the legacy
+   * (com.hafleet.* + com.hafleet.*) — and NOTHING mixed. A per-field `newKey ?? legacyKey`
+   * would let a hybrid through that neither side ever declared, widening the protocol surface
+   * the transition was meant to shrink; a full-payload hybrid in EITHER direction is rejected.
+   */
+  let detail = null;
+  if (content.msgtype === APPROVAL_VERDICT_MSGTYPE) {
+    detail = content[APPROVAL_EVENT_KEY] ?? null;
+  } else if (content.msgtype === LEGACY_APPROVAL_VERDICT_MSGTYPE) {
+    detail = content[LEGACY_APPROVAL_EVENT_KEY] ?? null;
+  } else {
+    return null;
+  }
+  if (!detail || detail.version !== 1 || detail.kind !== 'verdict') return null;
   if (!detail || detail.version !== 1 || detail.kind !== 'verdict') return null;
   const action = detail.action === 'approve_once' || detail.action === 'deny' ? detail.action : null;
   const senderMxid = typeof event?.sender === 'string' ? event.sender.trim() : '';

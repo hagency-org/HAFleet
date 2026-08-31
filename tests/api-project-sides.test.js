@@ -1523,6 +1523,54 @@ describe('issuing a second credential does not break the first', () => {
     expect(record.credential ?? null).toBeNull();
     expect(record.pendingCredential ?? null).toBeNull();
   });
+
+  test('exclusive defaults true and an explicit false overrides it — registration-file endpoint', async () => {
+    /*
+     * The impersonation guard pinned at the ISSUE boundary: the YAML a project installs says
+     * `exclusive: true` unless the operator explicitly opted out, and the opt-out reaches the
+     * rendered file. Both endpoints share generateRegistration, so the pairing test below covers
+     * the other one.
+     */
+    const app = await boot({ env: { API_TOKEN: 'op-staging' } });
+    await request(app).post('/api/project-sides').set('Authorization', 'Bearer op-staging')
+      .send({ server_name: SIDE, api_base_url: 'https://matrix.staging.test' });
+
+    const def = await request(app).post(`/api/project-sides/${SIDE}/registration-file`)
+      .set('Authorization', 'Bearer op-staging').send({ url: 'http://127.0.0.1:8095' });
+    expect(def.status).toBe(200);
+    const yamlDefault = readFileSync(def.body.path, 'utf8');
+    expect(yamlDefault).toMatch(/exclusive: true/);
+
+    await request(app).put(`/api/project-sides/${SIDE}/credential`)
+      .set('Authorization', 'Bearer op-staging').send({ credential: null });
+
+    const off = await request(app).post(`/api/project-sides/${SIDE}/registration-file`)
+      .set('Authorization', 'Bearer op-staging')
+      .send({ url: 'http://127.0.0.1:8095', exclusive: false });
+    expect(off.status).toBe(200);
+    const yamlOff = readFileSync(off.body.path, 'utf8');
+    expect(yamlOff).toMatch(/exclusive: false/);
+  });
+
+  test('exclusive defaults true and an explicit false overrides it — registration (response-body) endpoint', async () => {
+    const app = await boot({ env: { API_TOKEN: 'op-staging' } });
+    await request(app).post('/api/project-sides').set('Authorization', 'Bearer op-staging')
+      .send({ server_name: SIDE, api_base_url: 'https://matrix.staging.test' });
+
+    const def = await request(app).post(`/api/project-sides/${SIDE}/registration`)
+      .set('Authorization', 'Bearer op-staging').send({ url: 'http://127.0.0.1:8095' });
+    expect(def.status).toBe(200);
+    expect(def.body.registrationYaml).toMatch(/exclusive: true/);
+
+    await request(app).put(`/api/project-sides/${SIDE}/credential`)
+      .set('Authorization', 'Bearer op-staging').send({ credential: null });
+
+    const off = await request(app).post(`/api/project-sides/${SIDE}/registration`)
+      .set('Authorization', 'Bearer op-staging')
+      .send({ url: 'http://127.0.0.1:8095', exclusive: false });
+    expect(off.status).toBe(200);
+    expect(off.body.registrationYaml).toMatch(/exclusive: false/);
+  });
 });
 
 describe('staging protects what works, not merely what exists', () => {

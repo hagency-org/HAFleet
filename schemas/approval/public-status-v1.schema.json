@@ -4,11 +4,11 @@
   "title": "Agent Chat public approval status v1",
   "type": "object",
   "additionalProperties": true,
-  "required": ["msgtype", "body", "com.hafleet.approval"],
+  "required": ["msgtype", "body", "com.agentchat.approval"],
   "properties": {
-    "msgtype": { "const": "com.hafleet.approval.status.v1" },
+    "msgtype": { "const": "com.agentchat.approval.status.v1" },
     "body": { "type": "string", "minLength": 1, "maxLength": 512 },
-    "com.hafleet.approval": {
+    "com.agentchat.approval": {
       "type": "object",
       "additionalProperties": false,
       "required": ["version", "kind", "agent", "project", "state"],
