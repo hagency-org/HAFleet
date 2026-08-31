@@ -60,6 +60,12 @@ describe('appserviceLogin', () => {
   test('posts m.login.application_service with the as_token and sender_localpart', async () => {
     const fetchImpl = vi.fn(async (url, init) => {
       expect(url).toBe(`${HS}/_matrix/client/v3/login`);
+      // The real palpo authenticates this flow by require_access_token() BEFORE
+      // reading the body — a fake that skips this check waved through the exact
+      // 401 the first live smoke caught.
+      if (init.headers?.Authorization !== `Bearer ${AS_TOKEN}`) {
+        return jsonResponse(401, { errcode: 'M_MISSING_TOKEN' });
+      }
       const body = JSON.parse(init.body);
       expect(body.type).toBe('m.login.application_service');
       expect(body.token).toBe(AS_TOKEN);
@@ -203,7 +209,10 @@ describe('the sync collector loop', () => {
     const syncUrl = seen.find((u) => u.includes('/sync'));
     expect(syncUrl).toContain('set_presence=offline');
     const filter = JSON.parse(new URL(syncUrl).searchParams.get('filter'));
-    expect(filter.room.timeline.types).toEqual(['m.room.*']);
+    // No room.timeline.types allowlist: palpo matches types LITERALLY (no '*'
+    // wildcard despite its doc comment), so ["m.room.*"] delivered zero events
+    // on the live smoke. The timeline stays unrestricted on purpose.
+    expect(filter.room?.timeline?.types).toBeUndefined();
     expect(filter.account_data.types).toEqual([]);
     expect(filter.to_device.types).toEqual([]);
   });

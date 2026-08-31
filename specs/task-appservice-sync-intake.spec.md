@@ -25,7 +25,9 @@ duplicate suppression, and authentication.
   with `token = as_token` and `identifier = sender_localpart`. The resulting
   access token is a process-local cache only — never persisted, matching the
   in-memory-only acting-credential design.
-- Carry an explicit `/sync` filter: `room.timeline.types = ["m.room.*"]`,
+- Carry an explicit `/sync` filter: no `room.timeline.types` allowlist (palpo
+  matches filter types literally — no `*` wildcard — so an allowlist of
+  `["m.room.*"]` silently drops every event; measured on the live smoke),
   empty `account_data` and `to_device`, plus `set_presence=offline`.
   Membership and invite sections must NOT be filtered out.
 - Deliver `rooms.invite.*.invite_state.events` on EVERY poll including the
