@@ -557,3 +557,76 @@ describe('5-r4: backoff routes by THIS error\'s kind, not history', () => {
     expect(collector.stats.failed).toBe(1);           // only the router refusal counted as failed
   });
 });
+
+describe('5-r5: the 401 breaker survives a successful login (no sleepless hammer)', () => {
+  test('C-real: login ALWAYS succeeds + sync ALWAYS 401 → two logins, then exponential sleeps', async () => {
+    /*
+     * THE SCENARIO THE OLD TEST DODGED (5-r5). The previous C-test ended by failing the second
+     * login, which sidestepped the real production shape: a homeserver that happily issues
+     * tokens and rejects every one at /sync. With the reset-to-zero bug, that shape was an
+     * unsleeping login+sync hammer. Now: login succeeds ALWAYS, sync 401s ALWAYS; the loop
+     * must mint exactly two tokens (the healthy stretch's one + the single fast re-login),
+     * then ride the exponential lane — the exhaustion branch is reachable and taken.
+     */
+    const router = createAppserviceRouter({ sides: [{ sideId: 'side-a', hsToken: HS_TOKEN, onEvents: async () => {} }] });
+    const HARD_CAP = 40;
+    let syncs = 0;
+    const fetchImpl = vi.fn(async (url) => {
+      if (String(url).endsWith('/login')) return jsonResponse(200, { access_token: `t-${Date.now()}-${Math.random()}`, user_id: '@hafleet:p' });
+      syncs += 1;
+      return jsonResponse(401, { errcode: 'M_UNKNOWN_TOKEN' });
+    });
+    const sleeps = [];
+    const collector = makeCollector({
+      baseUrl: HS, side: 'side-a', router,
+      credentialFor: () => ({ kind: 'appservice', asToken: AS_TOKEN, hsToken: HS_TOKEN, senderLocalpart: 'hafleet' }),
+      readCursor: () => null, writeCursor: async () => {},
+      fetchImpl,
+      sleep: async (ms) => { sleeps.push(ms); await Promise.resolve(); },
+      shouldContinue: () => syncs < HARD_CAP && watchdog() < 300,
+    });
+    await collector.loop;
+    // In MOCK time the loop runs to the harness cap (real time would back off to 60s sleeps);
+    // what the breaker guarantees is the SHAPE: exactly two logins, and after the second,
+    // every iteration sleeps before the next sync — no unslept stretch can occur again.
+    expect(collector.stats.logins).toBe(2);              // exactly two tokens minted, ever
+    expect(sleeps.length).toBeGreaterThanOrEqual(3);     // it SLEPT, exponentially
+    expect(sleeps.slice(0, 3)).toEqual([1000, 2000, 4000]); // the pinned climb
+    expect(syncs).toBe(sleeps.length + 1);                // 1 unslept fast iteration before the sleep-every-sync regime (login#1's sync 401 + the fast re-login's sync 401 straddle the boundary)
+  });
+
+  test('C-reset: after a SUCCESSFUL poll restores health, ONE new fast re-login is allowed', async () => {
+    /*
+     * reset-on-success semantics pinned: t1 401 (fast re-login to t2), t2 syncs SUCCESSFULLY
+     * (generation resets — we are healthy), then t2 401s again → this NEW stretch may claim
+     * its own single fast re-login to t3; after that, backoff. Three logins total, and the
+     * sleep sequence shows exactly one unslept gap per healthy stretch.
+     */
+    const router = createAppserviceRouter({ sides: [{ sideId: 'side-a', hsToken: HS_TOKEN, onEvents: async () => {} }] });
+    // script: login t1 / sync 401 / login t2 / sync 200 (health!) / sync 401 / login t3 / sync 401 / sync 401...
+    const steps = ['login', '401', 'login', 'ok', '401', 'login', '401', '401', '401'];
+    let i = 0;
+    const fetchImpl = vi.fn(async () => {
+      const s = steps[Math.min(i, steps.length - 1)]; i += 1;
+      if (s === 'login') return jsonResponse(200, { access_token: `t${i}`, user_id: '@hafleet:p' });
+      if (s === '401') return jsonResponse(401, { errcode: 'M_UNKNOWN_TOKEN' });
+      return jsonResponse(200, { next_batch: 'OK1', rooms: {} });
+    });
+    const sleeps = [];
+    const collector = makeCollector({
+      baseUrl: HS, side: 'side-a', router,
+      credentialFor: () => ({ kind: 'appservice', asToken: AS_TOKEN, hsToken: HS_TOKEN, senderLocalpart: 'hafleet' }),
+      readCursor: () => null, writeCursor: async () => {},
+      fetchImpl,
+      sleep: async (ms) => { sleeps.push(ms); await Promise.resolve(); },
+      shouldContinue: () => i < steps.length && watchdog() < 300,
+    });
+    await collector.loop;
+    expect(collector.stats.logins).toBe(3);      // t1, t2 (first stretch), t3 (post-success stretch)
+    // sleeps: after the SECOND stretch's fast re-login is exhausted → the climb resumes from 1000
+    expect(sleeps[0]).toBe(1000);
+    expect(sleeps).toEqual(expect.arrayContaining([1000]));
+    // and the loop did not hammer: iterations are bounded by the script
+    expect(i).toBeLessThanOrEqual(steps.length + 2);
+  });
+});
