@@ -12,6 +12,7 @@ import {
 } from './lib/matrix-representative.js';
 import { resolveAppserviceListenerConfig, startAppserviceListener } from './lib/appservice-listener.js';
 import { resolveEdgeLinkConfig, startEdgePuller } from './lib/appservice-puller.js';
+import { resolveAppserviceSyncConfig, startAppserviceSyncCollector } from './lib/appservice-sync.js';
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { execFile } from 'child_process';
 import os from 'os';
@@ -4559,9 +4560,31 @@ export class MatrixBridge {
      */
     const config = resolveAppserviceListenerConfig(process.env);
     const edge = resolveEdgeLinkConfig(process.env);
-    if (!config.enabled && !edge.enabled) {
+    const sync = resolveAppserviceSyncConfig(process.env);
+    /*
+     * THREE WAYS IN. MUTEX IS PER SIDE, not global: the router's dedup absorbs an accidental
+     * double delivery, but two intakes on the SAME side would double-deliver every event of
+     * that side deliberately. Two intakes on DIFFERENT sides are fine — one homeserver pushes,
+     * another is polled. The LISTENER has no side dimension (it is one socket for all sides),
+     * so it conflicts with any enabled edge or sync; the error names the colliding sides so
+     * the operator sees which side is doubled, not just that something is.
+     */
+    const conflicts = [];
+    if (config.enabled && (edge.enabled || sync.enabled)) {
+      conflicts.push(`listener (HAFLEET_APPSERVICE_PORT=${config.port}) serves every side and cannot coexist with `
+        + `${edge.enabled ? `edge (side ${edge.side}) ` : ''}${sync.enabled ? `sync (side ${sync.side})` : ''}`.trim());
+    }
+    if (edge.enabled && sync.enabled && edge.side === sync.side) {
+      conflicts.push(`edge and sync are both configured for side ${edge.side}`);
+    }
+    if (conflicts.length) {
+      throw new Error(`[appservice] multiple intakes configured for the same side(s): ${conflicts.join('; ')}. `
+        + 'Pick one way in per side — running two on one side would deliver every event twice.');
+    }
+    if (!config.enabled && !edge.enabled && !sync.enabled) {
       console.log(`[appservice] inbound listener disabled (${config.reason})`);
       console.log(`[appservice] co-located edge not in use (${edge.reason})`);
+      console.log(`[appservice] sync intake not in use (${sync.reason})`);
       return;
     }
     this.appserviceRouter = createAppserviceRouter();
@@ -4580,8 +4603,49 @@ export class MatrixBridge {
       });
       console.log(`[appservice] collecting from a co-located edge at ${edge.url} for side ${edge.side}`);
     }
+
+    if (sync.enabled) {
+      /*
+       * The third way in: an outbound /sync loop with no socket and no edge process. The cursor
+       * lives in the bridge state so a restart resumes rather than replays; the credential comes
+       * from the acting-credential set, which the existing refresh timer keeps current.
+       */
+      state.appserviceSync = state.appserviceSync || {};
+      this.appserviceSyncCollector = startAppserviceSyncCollector({
+        baseUrl: sync.baseUrl,
+        side: sync.side,
+        router: this.appserviceRouter,
+        credentialFor: () => {
+          const entry = this.actingCredentials?.get?.(sync.side) ?? null;
+          const cred = entry?.credential ?? entry ?? null;
+          return cred && cred.kind === 'appservice' ? cred : null;
+        },
+        readCursor: () => state.appserviceSync[sync.side] ?? null,
+        writeCursor: async (next) => { state.appserviceSync[sync.side] = next; saveState(); },
+        onLogin: ({ userId }) => console.log(`[appservice-sync] logged in as ${userId} for side ${sync.side}`),
+        /*
+         * CIRCUIT-BREAK rides the existing operator-warning path (postWarning → backend alert
+         * store) exactly once per break, so a poisoned batch pages a human instead of blocking
+         * the queue in silence.
+         */
+        onCircuitBreak: (sideId, detail) => this.postWarning(
+          `appservice sync intake circuit-broke for side ${sideId}: the router refused a batch ${detail.attempts} times. `
+          + `Recovery resumes from cursor ${detail.heldCursor ?? '(none)'} (the batch that ends at ${detail.failedNextBatch ?? '(none)'} was never committed). `
+          + `Last error: ${detail.lastError}`,
+          { kind: 'appservice_sync', scope: `side:${sideId}` },
+        ),
+      });
+      console.log(`[appservice] collecting via outbound /sync from ${sync.baseUrl} for side ${sync.side}`);
+    }
+
+    /*
+     * THE REFRESH TIMER IS INSTALLED FOR EVERY INTAKE, not only the listener. The edge-only path
+     * used to return early here, so no timer ran and a credential issued after start-up never
+     * reached the router until the process restarted — the exact gap sync must not copy (gap #9).
+     */
+    setInterval(() => this.refreshAppserviceSides(), APPSERVICE_SIDE_REFRESH_MS);
     if (!config.enabled) {
-      console.log(`[appservice] no local socket (${config.reason}); the edge link is the only way in`);
+      console.log(`[appservice] no local socket (${config.reason}); ${edge.enabled ? 'the edge link' : 'the sync loop'} is the only way in`);
       return;
     }
     try {
