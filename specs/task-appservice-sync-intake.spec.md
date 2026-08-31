@@ -92,7 +92,10 @@ that file is the executable form of this spec.
   Test: `A-cap: a poison batch circuit-breaks the collector, holds the cursor, warns once`
   (pins `heldCursor` and `failedNextBatch` separately, and the sleep
   sequence as seven fixed 1000ms waits — the eighth attempt breaks
-  instead of sleeping).
+  instead of sleeping). The 8 refusals are CONSECUTIVE refusals of ONE
+  batch: every successful cursor advance resets the retry count, so a
+  new batch never inherits a previous batch's attempts — pinned by
+  `A-cont: 7 refusals → an empty-batch advance succeeds → a NEW batch's first refusal counts as 1, no early break`.
 - **Invites are delivered, first-poll join timeline is not** — both
   first-poll semantics pinned separately, invite events shaped like join
   events.
@@ -101,7 +104,9 @@ that file is the executable form of this spec.
   `B-idem: a repeated invite (restart redelivery) is harmless`.
 - **401 circuit-break** — a fresh token rejected by sync backs off instead
   of re-logging in; only an older-generation token may trigger one re-login.
-  Test: `C: a 401 on a FRESHLY minted token backs off instead of re-logging in`.
+  Test: `C: a 401 on a FRESHLY minted token backs off instead of re-logging in`
+  (exhaustion-shape pins: `C-real: login ALWAYS succeeds + sync ALWAYS 401 → two logins, then exponential sleeps`,
+  reset-on-success pin: `C-reset: after a SUCCESSFUL poll restores health, ONE new fast re-login is allowed`).
 - **Per-side mutex with normalization** — same side (any spelling) refused;
   different sides allowed; listener conflicts with any.
   Tests: `D: listener + sync on any side is refused (the listener has no side dimension)`,

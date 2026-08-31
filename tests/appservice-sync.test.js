@@ -630,3 +630,51 @@ describe('5-r5: the 401 breaker survives a successful login (no sleepless hammer
     expect(i).toBeLessThanOrEqual(steps.length + 2);
   });
 });
+
+describe('5-r6: consecutive-only batchAttempts (reset on every successful advance)', () => {
+  test('A-cont: 7 refusals → an empty-batch advance succeeds → a NEW batch\'s first refusal counts as 1, no early break', async () => {
+    /*
+     * R6 truth-table walk: "8" must mean EIGHT CONSECUTIVE refusals of ONE batch. Before the
+     * unified reset helper, the empty-batch and first-poll advance paths advanced the cursor
+     * WITHOUT clearing batchAttempts, so a later batch inherited the old count and could
+     * circuit-break on its FIRST refusal. Script: 7 refused deliveries of batch P1, then an
+     * empty-batch poll that advances to E1 (success!), then a new batch F1 whose FIRST
+     * delivery is refused — attempts must read 1 and the collector must still be running.
+     */
+    const router = createAppserviceRouter({ sides: [{ sideId: 'side-a', hsToken: HS_TOKEN, onEvents: async () => {} }] });
+    let refuse = true;
+    const routerHandle = async () => (refuse ? { status: 500, body: {} } : { status: 200, body: {} });
+    // steps: login, then syncs scripted by cursor state
+    let stage = 'p1'; // p1 (7 refusals) → e1 (empty advance) → f1 (first refusal)
+    let p1Refusals = 0;
+    const cursor = { value: null };
+    const fetchImpl = vi.fn(async (url) => {
+      if (String(url).endsWith('/login')) return jsonResponse(200, { access_token: 't1', user_id: '@hafleet:p' });
+      if (stage === 'p1') {
+        if (p1Refusals < 7) { p1Refusals += 1; refuse = true; return jsonResponse(200, { next_batch: 'P1', rooms: { join: { '!r:p': { timeline: { events: [{ event_id: '$b1' }] } } } } }); }
+        refuse = false; stage = 'e1';
+        return jsonResponse(200, { next_batch: 'E1', rooms: { join: { '!r:p': { timeline: { events: [{ event_id: '$b1' }] } } } } });
+      }
+      if (stage === 'e1') { stage = 'f1'; return jsonResponse(200, { next_batch: 'E1b', rooms: {} }); }
+      // f1: a new deliverable batch, first delivery refused
+      refuse = true; stage = 'done';
+      return jsonResponse(200, { next_batch: 'F1', rooms: { join: { '!r:p': { timeline: { events: [{ event_id: '$f1' }] } } } } });
+    });
+    const sleeps = [];
+    const collector = makeCollector({
+      baseUrl: HS, side: 'side-a', router: { handle: (req) => routerHandle(req) },
+      credentialFor: () => ({ kind: 'appservice', asToken: AS_TOKEN, hsToken: HS_TOKEN, senderLocalpart: 'hafleet' }),
+      readCursor: () => cursor.value,
+      writeCursor: async (v) => { cursor.value = v; },
+      fetchImpl,
+      sleep: async (ms) => { sleeps.push(ms); await Promise.resolve(); },
+      shouldContinue: () => stage !== 'done' && watchdog() < 300,
+    });
+    await collector.loop;
+    // the F1 refusal counted as 1 — not as the inherited 8th
+    expect(collector.stats.batchAttempts).toBe(1);
+    expect(collector.stats.gaveUp ?? false).toBe(false);   // no early circuit-break
+    // and the E1 advance cleared the P1 streak: cursor advanced through E1b
+    expect(cursor.value).toBe('E1b');
+  });
+});
