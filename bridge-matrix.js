@@ -1974,6 +1974,17 @@ const BRIDGE_API_TOKEN = (process.env.API_TOKEN || '').trim();
 const bridgeHealthState = { lastSuccessfulBackendDeliveryAtMs: null };
 
 /**
+ * The retryable error onRoomEvent throws when a room's membership cannot be read at the moment a
+ * group would be created from it. Named so a log reader and a test can tell it from a crash.
+ */
+export function membershipUnknownError(roomId, groupName, reason) {
+  const err = new Error(`membership of ${roomId} is unknown (${reason}); group "${groupName}" not created — retry`);
+  err.code = 'membership_unknown';
+  err.retryable = true;
+  return err;
+}
+
+/**
  * The backend's answer to "is there a group called X" — null when there is not.
  *
  * backendApi THROWS on every non-2xx, but three callers were written for an older contract that
@@ -5863,10 +5874,12 @@ export class MatrixBridge {
           // project side, or with no bot at all, `this.botClient` is null and cannot see the room.
           const membership = await this.joinedMembersOf(roomId);
           if (!membership.known) {
-            // UNKNOWN IS NOT EMPTY: creating a group from a membership read that failed would map the
-            // room to an empty group and answer 200, losing the redelivery. Leave it for the next event.
-            console.warn(`Room ${roomId}: membership unknown (${membership.reason}); not creating group "${name}" yet`);
-            return;
+            // UNKNOWN IS NOT EMPTY, AND NOT DONE EITHER. Creating a group from a failed membership
+            // read would map the room to an empty group; returning quietly would answer 200 and let
+            // the transaction (and the sync cursor) advance past the only event that triggers this
+            // mapping, leaving a bot-less bridge with no second chance. So it THROWS a retryable
+            // error: the receiver answers 500, the homeserver (or the sync collector) redelivers.
+            throw membershipUnknownError(roomId, name, membership.reason);
           }
           const joinedMembers = membership.members;
           const members = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
@@ -5891,10 +5904,12 @@ export class MatrixBridge {
           if (!existing) {
             const membership = await this.joinedMembersOf(roomId);
           if (!membership.known) {
-            // UNKNOWN IS NOT EMPTY: creating a group from a membership read that failed would map the
-            // room to an empty group and answer 200, losing the redelivery. Leave it for the next event.
-            console.warn(`Room ${roomId}: membership unknown (${membership.reason}); not creating group "${name}" yet`);
-            return;
+            // UNKNOWN IS NOT EMPTY, AND NOT DONE EITHER. Creating a group from a failed membership
+            // read would map the room to an empty group; returning quietly would answer 200 and let
+            // the transaction (and the sync cursor) advance past the only event that triggers this
+            // mapping, leaving a bot-less bridge with no second chance. So it THROWS a retryable
+            // error: the receiver answers 500, the homeserver (or the sync collector) redelivers.
+            throw membershipUnknownError(roomId, name, membership.reason);
           }
           const joinedMembers = membership.members;
             const members = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
@@ -6230,10 +6245,12 @@ export class MatrixBridge {
       if (!existing) {
         const membership = await this.joinedMembersOf(roomId);
           if (!membership.known) {
-            // UNKNOWN IS NOT EMPTY: creating a group from a membership read that failed would map the
-            // room to an empty group and answer 200, losing the redelivery. Leave it for the next event.
-            console.warn(`Room ${roomId}: membership unknown (${membership.reason}); not creating group "${name}" yet`);
-            return;
+            // UNKNOWN IS NOT EMPTY, AND NOT DONE EITHER. Creating a group from a failed membership
+            // read would map the room to an empty group; returning quietly would answer 200 and let
+            // the transaction (and the sync cursor) advance past the only event that triggers this
+            // mapping, leaving a bot-less bridge with no second chance. So it THROWS a retryable
+            // error: the receiver answers 500, the homeserver (or the sync collector) redelivers.
+            throw membershipUnknownError(roomId, name, membership.reason);
           }
           const joinedMembers = membership.members;
         const agentMembers = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
