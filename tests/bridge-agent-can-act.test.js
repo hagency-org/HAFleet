@@ -20,6 +20,7 @@
 import { beforeAll, describe, expect, test } from 'vitest';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import { hasConfiguredInboundPath } from '../bridge-matrix.js';
 
 let bridgeModule;
 beforeAll(async () => {
@@ -217,9 +218,38 @@ describe('the bot is not the only way in', () => {
     expect(body).toMatch(/catch \(error\) \{/);
     // Fatal when there is nothing else to do: a bridge with no bot and no edge would be theatre.
     expect(body).toMatch(/if \(!hasInboundPath\) throw error;/);
-    // And the inbound path is read through the resolvers the intake itself uses, not a second reading.
-    expect(body).toMatch(/resolveEdgeLinkConfig\(process\.env\)/);
-    expect(body).toMatch(/resolveAppserviceListenerConfig\(process\.env\)/);
+    // And the inbound path is ONE table-tested decision, read exactly once — not an inline expression
+    // that a fourth intake mode could be forgotten from.
+    expect(body.match(/hasConfiguredInboundPath\(process\.env\)/g)?.length).toBe(1);
+    // No resolver is read inline in start() — each of the three, by name, zero hits.
+    for (const resolver of ['resolveEdgeLinkConfig', 'resolveAppserviceListenerConfig', 'resolveAppserviceSyncConfig']) {
+      expect(body.match(new RegExp(`${resolver}\\(`, 'g'))?.length ?? 0).toBe(0);
+    }
+  });
+
+  test('the inbound-path decision is a truth table over listener, edge and sync — each alone is enough', () => {
+    /*
+     * Behaviour, not source layout: the first pin of this fix matched three resolver names in a text span,
+     * which a comment or a dead local could satisfy. This drives the exported decision through the real
+     * resolvers with every combination of the three configured intakes. sync-only is the case that used
+     * to throw (#5 wired the collector but not this guard).
+     */
+    const listener = { HAFLEET_APPSERVICE_PORT: '8095' };
+    const edge = { HAFLEET_EDGE_URL: 'http://edge.example:8095', HAFLEET_EDGE_LINK_TOKEN: 'link', HAFLEET_EDGE_SIDE: 'side-a' };
+    const sync = { HAFLEET_APPSERVICE_SYNC_SIDE: 'side-a', HAFLEET_APPSERVICE_SYNC_URL: 'http://hs.example' };
+    const cases = [
+      [{}, false],
+      [listener, true],
+      [edge, true],
+      [sync, true],
+      [{ ...listener, ...edge }, true],
+      [{ ...listener, ...sync }, true],
+      [{ ...edge, ...sync }, true],
+      [{ ...listener, ...edge, ...sync }, true],
+    ];
+    for (const [env, expected] of cases) expect(hasConfiguredInboundPath(env)).toBe(expected);
+    // Half-configured sync is refused by its resolver, so it is NOT an inbound path.
+    expect(hasConfiguredInboundPath({ HAFLEET_APPSERVICE_SYNC_SIDE: 'side-a' })).toBe(false);
   });
 
   test('the intake starts AFTER the bot attempt, so a failed bot cannot skip it', () => {

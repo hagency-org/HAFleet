@@ -374,6 +374,20 @@ const MATRIX_IGNORED_SENDER_MXIDS = new Set(
 // default-wake there would make every instance wake its own coordinator for the
 // same human message. Read at call time so tests and operators can flip it
 // without a module reload.
+/**
+ * Is there ANY configured way for homeserver traffic to reach this process without the bot?
+ * One decision, table-tested, read by start() exactly once. The three resolvers are the same
+ * ones startAppserviceIntake() consults, so this cannot drift from what the intake actually opens.
+ * A fourth intake mode must be added here AND in startAppserviceIntake(); the test table pins the
+ * count. "Configured" is the boundary: a listener that later fails to bind is start()'s own
+ * non-fatal branch, not this function's concern.
+ */
+export function hasConfiguredInboundPath(env = process.env) {
+  return Boolean(resolveEdgeLinkConfig(env)?.enabled)
+    || Boolean(resolveAppserviceListenerConfig(env)?.enabled)
+    || Boolean(resolveAppserviceSyncConfig(env)?.enabled);
+}
+
 export function matrixDefaultWakeEnabled(env = process.env) {
   return String(env.MATRIX_DEFAULT_WAKE || 'off').trim().toLowerCase() === 'auto';
 }
@@ -4062,13 +4076,11 @@ export class MatrixBridge {
      */
     await this.refreshActingCredentials();
 
-    const edgeLink = resolveEdgeLinkConfig(process.env);
     /*
-     * Read through the same resolvers the intake itself uses, rather than a constant of my own: a second
-     * reading of "is there an inbound path" would be a second thing to keep in step with the first.
+     * ONE decision, read once: hasConfiguredInboundPath consults the same three resolvers the intake
+     * itself opens, so start() never carries its own reading of "is there an inbound path".
      */
-    const hasInboundPath = edgeLink.enabled
-      || Boolean(resolveAppserviceListenerConfig(process.env)?.enabled);
+    const hasInboundPath = hasConfiguredInboundPath(process.env);
     try {
       await this.startBotSide();
     } catch (error) {
