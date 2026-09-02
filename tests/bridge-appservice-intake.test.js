@@ -22,6 +22,16 @@ import { createServer } from 'http';
 import { pathToFileURL } from 'url';
 import { createAppserviceRouter } from '../lib/appservice-receiver.js';
 
+vi.mock('../lib/appservice-sync.js', async (importOriginal) => {
+  const real = await importOriginal();
+  return {
+    ...real,
+    startAppserviceSyncCollector: vi.fn((options) => {
+      globalThis.__lastSyncCollectorOptions = options;
+      return { stop() {}, loop: Promise.resolve(), stats: {} };
+    }),
+  };
+});
 let bridgeModule;
 let backend;
 let backendCalls = [];
@@ -539,5 +549,60 @@ describe('a removed project side stops being remembered locally', () => {
     // Kept, not emptied: the bridge still believes in the side it last saw.
     expect(self.actingCredentials.has(GONE)).toBe(true);
     expect(st.dmRooms['dm:a']).toBe(`!one:${GONE}`);
+  });
+});
+
+describe('the sync collector is handed BOTH tokens', () => {
+  /*
+   * The acting credential carries the as_token the collector logs in with. The hs_token it must show
+   * OUR OWN router lives in the side-token map, where the edge puller reads it. The first bot-less
+   * sync deployment handed the router an empty string, took 403 eight times and circuit-broke — and
+   * every fake-homeserver test had supplied hsToken directly, so none of them could see it.
+   */
+  const SIDE = 'sync.test';
+  const withSyncEnv = async (fn) => {
+    const saved = { ...process.env };
+    process.env.HAFLEET_APPSERVICE_SYNC_SIDE = SIDE;
+    process.env.HAFLEET_APPSERVICE_SYNC_URL = 'http://sync.test';
+    delete process.env.HAFLEET_APPSERVICE_PORT;
+    delete process.env.HAFLEET_EDGE_URL;
+    const timers = [];
+    const realSetInterval = globalThis.setInterval;
+    globalThis.setInterval = (...args) => { const h = realSetInterval(...args); timers.push(h); return h; };
+    try { await fn(); } finally {
+      globalThis.setInterval = realSetInterval;
+      for (const h of timers) clearInterval(h);
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
+      delete globalThis.__lastSyncCollectorOptions;
+    }
+  };
+
+  test('credentialFor merges the hs_token from the side-token map into the acting credential', async () => {
+    await withSyncEnv(async () => {
+      const self = {
+        refreshAppserviceSides: async () => {},
+        actingCredentials: new Map([[SIDE, { credential: { kind: 'appservice', asToken: 'as-secret', senderLocalpart: 'hafleet' } }]]),
+        appserviceSideTokens: new Map([[SIDE, 'hs-secret']]),
+        postWarning: () => {},
+      };
+      await bridgeModule.MatrixBridge.prototype.startAppserviceIntake.call(self);
+      const options = globalThis.__lastSyncCollectorOptions;
+      expect(options?.side).toBe(SIDE);
+      expect(options.credentialFor()).toMatchObject({ kind: 'appservice', asToken: 'as-secret', hsToken: 'hs-secret' });
+    });
+  });
+
+  test('no hs_token for the side means no credential — the collector must not poll with an empty token', async () => {
+    await withSyncEnv(async () => {
+      const self = {
+        refreshAppserviceSides: async () => {},
+        actingCredentials: new Map([[SIDE, { credential: { kind: 'appservice', asToken: 'as-secret' } }]]),
+        appserviceSideTokens: new Map(),
+        postWarning: () => {},
+      };
+      await bridgeModule.MatrixBridge.prototype.startAppserviceIntake.call(self);
+      expect(globalThis.__lastSyncCollectorOptions.credentialFor()).toBeNull();
+    });
   });
 });

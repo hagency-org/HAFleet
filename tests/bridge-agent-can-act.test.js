@@ -260,6 +260,19 @@ describe('the bot is not the only way in', () => {
     expect(intake).toBeGreaterThan(botSide);
   });
 
+  test('a bot-less bridge still has a command handler, so tier-0 commands are answered', () => {
+    /*
+     * BotCommands lived only inside the bot bring-up. With no bot, every `!offer` from a customer
+     * threw `null.handle` out of onRoomMessage — a 500 to the router, retried until the sync collector
+     * circuit-broke. The degraded branch must construct the handler with no client.
+     */
+    const body = startBody();
+    const degraded = body.indexOf('this.botUnavailable = ');
+    expect(degraded).toBeGreaterThan(-1);
+    const after = body.slice(degraded);
+    expect(after).toMatch(/if \(!this\.commands\) \{\s*this\.commands = new BotCommands\(\{ botClient: null, bridge: this/);
+  });
+
   test('what is lost is stated, not left to be discovered', () => {
     /*
      * A degraded mode that does not say what it gave up is worse than a crash: the operator believes they
