@@ -4167,6 +4167,17 @@ export class MatrixBridge {
 
     // 10. Inbound appservice traffic, if this deployment exposes a socket for it (ADR-016).
     await this.startAppserviceIntake();
+    /*
+     * THE BACKEND EVENT STREAM IS NOT BOT WORK. connectSSE() — the hafleet → Matrix half — was only
+     * ever called inside the bot bring-up, so a bot-less bridge collected every customer message and
+     * never delivered a single agent reply: the first live run had the agent write its file, post
+     * "done" to the backend, and the room stay silent. The consumer needs no bot client (its sends
+     * route through the representative-aware paths), so the degraded bridge connects it here.
+     */
+    if (this.botUnavailable && !this.sseConnectedWithoutBot) {
+      this.sseConnectedWithoutBot = true;
+      this.connectSSE();
+    }
 
     console.log('Bridge running.');
   }
@@ -8147,7 +8158,15 @@ export class MatrixBridge {
        * which is where a project-side room can appear.
        */
       if (!senderToken) senderToken = this.agentSenderFor(canonicalAgentName);
-      if (!senderToken) {
+      /*
+       * A GROUP MESSAGE IS RESOLVED PER ROOM, BELOW. Without a room, agentSenderFor can only find a
+       * per-agent token or a side inferred from a stored identity — and a claim-not-act agent on an
+       * appservice side has neither, so this pre-check used to declare "no way to send" and return
+       * before the group branch ever asked the room. The first live run: the agent posted "done",
+       * the bridge logged that warning, the room stayed silent. Only a message with no room to
+       * consult is fatal here.
+       */
+      if (!senderToken && !msg.group) {
         console.warn(`No Matrix token or appservice sender for agent "${canonicalAgentName}", cannot bridge message ${msg.id}`);
         this.postWarning(
           `No way to send as agent "${canonicalAgentName}" — no token, and no appservice credential on `
@@ -8197,6 +8216,14 @@ export class MatrixBridge {
       const groupSender = senderIsSystem
         ? senderToken
         : (this.agentSenderFor(canonicalAgentName, roomId) ?? senderToken);
+      if (!groupSender) {
+        console.warn(`No Matrix token or appservice sender for agent "${canonicalAgentName}" in ${roomId}, cannot bridge message ${msg.id}`);
+        this.postWarning(
+          `No way to send as agent "${canonicalAgentName}" into ${roomId} — no token, and no appservice credential `
+          + `for that room's side. Message ${msg.id} not bridged to Matrix.`,
+        );
+        return;
+      }
       const primaryEventId = await this.sendAsAgent(
         groupSender,
         roomId,

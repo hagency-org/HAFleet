@@ -273,6 +273,31 @@ describe('the bot is not the only way in', () => {
     expect(after).toMatch(/if \(!this\.commands\) \{\s*this\.commands = new BotCommands\(\{ botClient: null, bridge: this/);
   });
 
+  test('a bot-less bridge still subscribes to the backend event stream, or no agent reply ever leaves', () => {
+    /*
+     * connectSSE() lived only inside the bot bring-up. The first live run: the agent did its task,
+     * posted "done" to the backend, and the room stayed silent — hafleet → Matrix had no consumer.
+     */
+    const body = startBody();
+    const intake = body.indexOf('await this.startAppserviceIntake();');
+    const after = body.slice(intake);
+    expect(after).toMatch(/if \(this\.botUnavailable && !this\.sseConnectedWithoutBot\) \{[\s\S]*?this\.connectSSE\(\);/);
+  });
+
+  test('a group message from a claim-not-act agent is resolved per room, not refused up front', () => {
+    /*
+     * onAgentMessage pre-resolved a sender with no room and returned on failure — before the group
+     * branch, which resolves per room, ever ran. A claim-not-act appservice agent has no token and no
+     * stored identity, so every reply it posted was refused. The pre-check may only be fatal when the
+     * message names no group.
+     */
+    const src = require('fs').readFileSync(path.resolve('bridge-matrix.js'), 'utf8');
+    const body = /\n  async onAgentMessage\(msg\) \{[\s\S]*?\n  \}\n/.exec(src)?.[0] ?? '';
+    expect(body).toMatch(/if \(!senderToken && !msg\.group\) \{/);
+    expect(body).toMatch(/this\.agentSenderFor\(canonicalAgentName, roomId\) \?\? senderToken/);
+    expect(body).toMatch(/if \(!groupSender\) \{/);
+  });
+
   test('what is lost is stated, not left to be discovered', () => {
     /*
      * A degraded mode that does not say what it gave up is worse than a crash: the operator believes they
