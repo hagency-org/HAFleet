@@ -221,7 +221,10 @@ describe('the bot is not the only way in', () => {
     // And the inbound path is ONE table-tested decision, read exactly once — not an inline expression
     // that a fourth intake mode could be forgotten from.
     expect(body.match(/hasConfiguredInboundPath\(process\.env\)/g)?.length).toBe(1);
-    expect(body).not.toMatch(/resolveAppserviceSyncConfig|resolveAppserviceListenerConfig\(process\.env\)\?\.enabled/);
+    // No resolver is read inline in start() — each of the three, by name, zero hits.
+    for (const resolver of ['resolveEdgeLinkConfig', 'resolveAppserviceListenerConfig', 'resolveAppserviceSyncConfig']) {
+      expect(body.match(new RegExp(`${resolver}\\(`, 'g'))?.length ?? 0).toBe(0);
+    }
   });
 
   test('the inbound-path decision is a truth table over listener, edge and sync — each alone is enough', () => {

@@ -4076,10 +4076,9 @@ export class MatrixBridge {
      */
     await this.refreshActingCredentials();
 
-    const edgeLink = resolveEdgeLinkConfig(process.env);
     /*
-     * Read through the same resolvers the intake itself uses, rather than a constant of my own: a second
-     * reading of "is there an inbound path" would be a second thing to keep in step with the first.
+     * ONE decision, read once: hasConfiguredInboundPath consults the same three resolvers the intake
+     * itself opens, so start() never carries its own reading of "is there an inbound path".
      */
     const hasInboundPath = hasConfiguredInboundPath(process.env);
     try {
