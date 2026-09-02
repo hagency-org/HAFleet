@@ -374,6 +374,20 @@ const MATRIX_IGNORED_SENDER_MXIDS = new Set(
 // default-wake there would make every instance wake its own coordinator for the
 // same human message. Read at call time so tests and operators can flip it
 // without a module reload.
+/**
+ * Is there ANY configured way for homeserver traffic to reach this process without the bot?
+ * One decision, table-tested, read by start() exactly once. The three resolvers are the same
+ * ones startAppserviceIntake() consults, so this cannot drift from what the intake actually opens.
+ * A fourth intake mode must be added here AND in startAppserviceIntake(); the test table pins the
+ * count. "Configured" is the boundary: a listener that later fails to bind is start()'s own
+ * non-fatal branch, not this function's concern.
+ */
+export function hasConfiguredInboundPath(env = process.env) {
+  return Boolean(resolveEdgeLinkConfig(env)?.enabled)
+    || Boolean(resolveAppserviceListenerConfig(env)?.enabled)
+    || Boolean(resolveAppserviceSyncConfig(env)?.enabled);
+}
+
 export function matrixDefaultWakeEnabled(env = process.env) {
   return String(env.MATRIX_DEFAULT_WAKE || 'off').trim().toLowerCase() === 'auto';
 }
@@ -4067,15 +4081,7 @@ export class MatrixBridge {
      * Read through the same resolvers the intake itself uses, rather than a constant of my own: a second
      * reading of "is there an inbound path" would be a second thing to keep in step with the first.
      */
-    const hasInboundPath = edgeLink.enabled
-      || Boolean(resolveAppserviceListenerConfig(process.env)?.enabled)
-      /*
-       * The sync intake is an inbound path too. It was added after this guard and
-       * left out of it, so a bot-less bridge configured for sync-only — the NAT'd
-       * fleet the mode exists for — was judged to have nothing to do and threw on
-       * the bot failure it was supposed to survive.
-       */
-      || Boolean(resolveAppserviceSyncConfig(process.env)?.enabled);
+    const hasInboundPath = hasConfiguredInboundPath(process.env);
     try {
       await this.startBotSide();
     } catch (error) {

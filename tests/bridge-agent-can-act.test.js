@@ -20,6 +20,7 @@
 import { beforeAll, describe, expect, test } from 'vitest';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import { hasConfiguredInboundPath } from '../bridge-matrix.js';
 
 let bridgeModule;
 beforeAll(async () => {
@@ -217,23 +218,35 @@ describe('the bot is not the only way in', () => {
     expect(body).toMatch(/catch \(error\) \{/);
     // Fatal when there is nothing else to do: a bridge with no bot and no edge would be theatre.
     expect(body).toMatch(/if \(!hasInboundPath\) throw error;/);
-    // And the inbound path is read through the resolvers the intake itself uses, not a second reading.
-    expect(body).toMatch(/resolveEdgeLinkConfig\(process\.env\)/);
-    expect(body).toMatch(/resolveAppserviceListenerConfig\(process\.env\)/);
+    // And the inbound path is ONE table-tested decision, read exactly once — not an inline expression
+    // that a fourth intake mode could be forgotten from.
+    expect(body.match(/hasConfiguredInboundPath\(process\.env\)/g)?.length).toBe(1);
+    expect(body).not.toMatch(/resolveAppserviceSyncConfig|resolveAppserviceListenerConfig\(process\.env\)\?\.enabled/);
   });
 
-  test('the sync intake counts as an inbound path, so a sync-only bridge survives a failed bot', () => {
+  test('the inbound-path decision is a truth table over listener, edge and sync — each alone is enough', () => {
     /*
-     * The guard was written when edge and listener were the only ways in; the sync intake (#5) was wired
-     * into startAppserviceIntake but not into this decision, so a bot-less bridge configured for
-     * sync-only — the NAT'd fleet the mode exists for — threw on the bot failure it should have survived.
-     * The expression must read all three resolvers, in the same block, as one decision.
+     * Behaviour, not source layout: the first pin of this fix matched three resolver names in a text span,
+     * which a comment or a dead local could satisfy. This drives the exported decision through the real
+     * resolvers with every combination of the three configured intakes. sync-only is the case that used
+     * to throw (#5 wired the collector but not this guard).
      */
-    const body = startBody();
-    const guard = /const edgeLink = resolveEdgeLinkConfig\(process\.env\);[\s\S]*?const hasInboundPath = [\s\S]*?;\n/.exec(body)?.[0] ?? '';
-    expect(guard).toMatch(/resolveEdgeLinkConfig\(process\.env\)/);
-    expect(guard).toMatch(/resolveAppserviceListenerConfig\(process\.env\)/);
-    expect(guard).toMatch(/resolveAppserviceSyncConfig\(process\.env\)/);
+    const listener = { HAFLEET_APPSERVICE_PORT: '8095' };
+    const edge = { HAFLEET_EDGE_URL: 'http://edge.example:8095', HAFLEET_EDGE_LINK_TOKEN: 'link', HAFLEET_EDGE_SIDE: 'side-a' };
+    const sync = { HAFLEET_APPSERVICE_SYNC_SIDE: 'side-a', HAFLEET_APPSERVICE_SYNC_URL: 'http://hs.example' };
+    const cases = [
+      [{}, false],
+      [listener, true],
+      [edge, true],
+      [sync, true],
+      [{ ...listener, ...edge }, true],
+      [{ ...listener, ...sync }, true],
+      [{ ...edge, ...sync }, true],
+      [{ ...listener, ...edge, ...sync }, true],
+    ];
+    for (const [env, expected] of cases) expect(hasConfiguredInboundPath(env)).toBe(expected);
+    // Half-configured sync is refused by its resolver, so it is NOT an inbound path.
+    expect(hasConfiguredInboundPath({ HAFLEET_APPSERVICE_SYNC_SIDE: 'side-a' })).toBe(false);
   });
 
   test('the intake starts AFTER the bot attempt, so a failed bot cannot skip it', () => {
