@@ -318,7 +318,10 @@ PY
 
 register_backend_agent() {
   local payload
-  payload=$(NAME="$NAME" TYPE="$TYPE" TMUX="${NAME}:0.0" SERVER="$SERVER_ID" \
+  # B7: the backend's TMUX field carries the same real indexes the pane
+  # target uses — derived, not assumed 0.0 (base-index 1 machines).
+  local reg_idx="${TMUX_PANE_INDEX:-$(pane_target_for_session "$NAME" 2>/dev/null || echo '0.0')}"
+  payload=$(NAME="$NAME" TYPE="$TYPE" TMUX="${NAME}:${reg_idx}" SERVER="$SERVER_ID" \
     AGENT_MODEL_VERSION="${SAVED_AGENT_MODEL_VERSION:-}" \
     AGENT_LAYOUT_VERSION="${SAVED_LAYOUT_VERSION:-}" \
     AGENT_ID="${SAVED_AGENT_ID:-}" \
@@ -483,6 +486,14 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 
+if [[ "$1" == --print-pane-target ]]; then
+  # B7 self-check: runs BEFORE the agent-name guard, so it works standalone.
+  shift
+  [ $# -ge 1 ] || { echo "Error: --print-pane-target requires a session name" >&2; exit 2; }
+  print_pane_target "$1"
+  exit $?
+fi
+
 if [[ "$1" == -* ]]; then
   echo "Error: missing agent name." >&2
   usage >&2
@@ -496,7 +507,18 @@ if [ "$NAME" != "$RAW_NAME" ]; then
   echo "Resolved agent name '$RAW_NAME' -> '$NAME'"
 fi
 TMUX_TARGET="=${NAME}"
-TMUX_PANE_TARGET="=${NAME}:0.0"
+# B7: derive the real window/pane indexes instead of assuming 0.0. On a
+# machine with base-index 1 the hardcoded target fails with "can't find
+# window: 0" and the agent never launches. Derived AFTER the session exists
+# (existing sessions resolve at use time below); on machines with index 0
+# this yields the identical value it replaced.
+TMUX_PANE_INDEX="$(pane_target_for_session "$NAME" 2>/dev/null || true)"
+if [ -n "$TMUX_PANE_INDEX" ]; then
+  TMUX_PANE_TARGET="=${NAME}:${TMUX_PANE_INDEX}"
+else
+  # Session not up yet (fresh launch path): defer to first use, resolved then.
+  TMUX_PANE_TARGET="=${NAME}:0.0"
+fi
 
 FRESH=false
 ATTACH=false
@@ -734,7 +756,7 @@ find_workspace_conflicts() {
   while IFS= read -r s; do
     [ -n "$s" ] || continue
     [ "$s" = "$NAME" ] && continue
-    pane_path="$(tmux display-message -p -t "=${s}:0.0" "#{pane_current_path}" 2>/dev/null || true)"
+    pane_path="$(tmux display-message -p -t "=${s}:$(pane_target_for_session "$s" 2>/dev/null || echo 0.0)" "#{pane_current_path}" 2>/dev/null || true)"
     [ -n "$pane_path" ] || continue
     pane_real="$(normalize_real_path "$pane_path")"
     if [ "$pane_real" = "$expected" ]; then
@@ -1129,6 +1151,37 @@ create_tmux_session() {
 
   tmux new-session -d -s "$NAME" -c "$AGENT_PATH"
   SCOPE_UNIT=""
+}
+
+# Derive the REAL "window.pane" indexes of a freshly created session's first
+# window. B7: hardcoding ":0.0" breaks on machines whose tmux.conf sets
+# base-index/pane-base-index to 1 — send-keys then fails with "can't find
+# window: 0" and the agent never starts. The session's own indexes are the
+# truth; display-message reads them straight from the server.
+pane_target_for_session() {
+  local name="$1"
+  local wi pi
+  # NB: a format string combining both placeholders ('#{window_index}.#{pane_index}')
+  # renders EMPTY on this tmux build when the target names only the session; the two
+  # placeholders work one at a time. Ask separately — two reads of the same truth.
+  wi="$(tmux display-message -p -t "=${name}" '#{window_index}' 2>/dev/null || true)"
+  pi="$(tmux display-message -p -t "=${name}" '#{pane_index}' 2>/dev/null || true)"
+  if [ -z "$wi" ] || [ -z "$pi" ]; then
+    # Fall back to the first line of list-panes for the session.
+    local idx
+    idx="$(tmux list-panes -t "=${name}" -F '#{window_index}.#{pane_index}' 2>/dev/null | head -n 1 || true)"
+    case "$idx" in *.*) wi="${idx%.*}"; pi="${idx#*.}";; esac
+  fi
+  [ -n "$wi" ] && [ -n "$pi" ] || return 1
+  printf '%s.%s' "$wi" "$pi"
+}
+
+# Self-check entry: print the derived pane target for a session name (used by
+# the B7 regression test with an isolated tmux server).
+print_pane_target() {
+  local idx
+  idx="$(pane_target_for_session "$1")" || { echo "no-such-session: $1" >&2; return 1; }
+  echo "=${1}:${idx}"
 }
 
 runtime_scope_unit_for_target() {
