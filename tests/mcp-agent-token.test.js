@@ -76,21 +76,44 @@ describe('B11: the MCP server authenticates every backend call with the agent to
     }
   });
 
-  test.for(coreFiles)('%s: a missing token file is named loudly at startup', async () => {
+  test.for(coreFiles)('%s: a missing token file REFUSES TO START (fail-closed, exit non-zero)', async () => {
     const stateDir = mkdtempSync(path.join(os.tmpdir(), 'mcp-b11-missing-'));
     tempDirs.add(stateDir);
     const { port } = await listen((req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}'); });
-    const proc = spawnCore({
-      AGENT_NAME: 'e2e-claude',
-      HAFLEET_API: `http://127.0.0.1:${port}`,
-      HAFLEET_AGENT_STATE_DIR: stateDir,   // dir exists, token file does NOT
-      AGENT_TOKEN: '',
-      API_TOKEN: '',
-      HAFLEET_APPROVAL_POLL_INTERVAL_MS: '250',
+    const exit = new Promise((resolve) => {
+      const proc = spawnCore({
+        AGENT_NAME: 'e2e-claude',
+        HAFLEET_API: `http://127.0.0.1:${port}`,
+        HAFLEET_AGENT_STATE_DIR: stateDir,   // dir exists, token file does NOT
+        AGENT_TOKEN: '',
+        API_TOKEN: '',
+        HAFLEET_APPROVAL_POLL_INTERVAL_MS: '250',
+      });
+      proc.child.on('exit', (code) => resolve({ code, err: proc.getStderr() }));
     });
-    await new Promise((r) => setTimeout(r, 800));
-    proc.child.kill();
-    const err = proc.getStderr();
-    expect(err).toMatch(/agent-token file missing.*agent-token/); // names the file, not a shrug
+    const { code, err } = await exit;
+    expect(code).not.toBe(0);                                   // refused to start
+    expect(err).toMatch(/agent-token file missing.*agent-token/); // names the file
+  });
+
+  test.for(coreFiles)('%s: an EMPTY token file also refuses to start', async () => {
+    const stateDir = mkdtempSync(path.join(os.tmpdir(), 'mcp-b11-empty-'));
+    tempDirs.add(stateDir);
+    writeFileSync(path.join(stateDir, 'agent-token'), '   \n');
+    const { port } = await listen((req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}'); });
+    const exit = new Promise((resolve) => {
+      const proc = spawnCore({
+        AGENT_NAME: 'e2e-claude',
+        HAFLEET_API: `http://127.0.0.1:${port}`,
+        HAFLEET_AGENT_STATE_DIR: stateDir,
+        AGENT_TOKEN: '',
+        API_TOKEN: '',
+        HAFLEET_APPROVAL_POLL_INTERVAL_MS: '250',
+      });
+      proc.child.on('exit', (c) => resolve({ code: c, err: proc.getStderr() }));
+    });
+    const { code, err } = await exit;
+    expect(code).not.toBe(0);
+    expect(err).toMatch(/agent-token file is empty.*agent-token/);
   });
 });

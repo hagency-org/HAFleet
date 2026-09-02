@@ -38,6 +38,51 @@ _resolve_script_dir() {
 }
 SCRIPT_DIR="$(_resolve_script_dir)"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
+
+# ── B7 pane-target helpers + self-check (12-r2: EARLY, zero side effects) ──
+# The self-check must not touch the runtime tree, the backend, or git. These
+# helpers and the dispatch live BEFORE every main-flow statement; recognizing
+# --print-pane-target here means the update check, agent-data/meta writes,
+# launch-env rewrite and lifecycle posts below are never reached.
+# Derive the REAL "window.pane" indexes of a freshly created session's first
+# window. B7: hardcoding ":0.0" breaks on machines whose tmux.conf sets
+# base-index/pane-base-index to 1 — send-keys then fails with "can't find
+# window: 0" and the agent never starts. The session's own indexes are the
+# truth; display-message reads them straight from the server.
+pane_target_for_session() {
+  local name="$1"
+  local wi pi
+  # NB: a format string combining both placeholders ('#{window_index}.#{pane_index}')
+  # renders EMPTY on this tmux build when the target names only the session; the two
+  # placeholders work one at a time. Ask separately — two reads of the same truth.
+  wi="$(tmux display-message -p -t "=${name}" '#{window_index}' 2>/dev/null || true)"
+  pi="$(tmux display-message -p -t "=${name}" '#{pane_index}' 2>/dev/null || true)"
+  if [ -z "$wi" ] || [ -z "$pi" ]; then
+    # Fall back to the first line of list-panes for the session.
+    local idx
+    idx="$(tmux list-panes -t "=${name}" -F '#{window_index}.#{pane_index}' 2>/dev/null | head -n 1 || true)"
+    case "$idx" in *.*) wi="${idx%.*}"; pi="${idx#*.}";; esac
+  fi
+  [ -n "$wi" ] && [ -n "$pi" ] || return 1
+  printf '%s.%s' "$wi" "$pi"
+}
+
+# Self-check entry: print the derived pane target for a session name (used by
+# the B7 regression test with an isolated tmux server).
+print_pane_target() {
+  local idx
+  idx="$(pane_target_for_session "$1")" || { echo "no-such-session: $1" >&2; return 1; }
+  echo "=${1}:${idx}"
+}
+
+if [ "${1:-}" = "--print-pane-target" ]; then
+  if [ $# -lt 2 ]; then
+    echo "Error: --print-pane-target requires a session name" >&2
+    exit 2
+  fi
+  print_pane_target "$2"
+  exit $?
+fi
 DATA_DIR=""
 LAUNCH_POLICY_CHECK="$BASE_DIR/scripts/validate-agent-launch-extra-args.js"
 SANDBOX_ROOTS_RESOLVER="$BASE_DIR/scripts/resolve-agent-sandbox-roots.js"
@@ -486,39 +531,15 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 
-if [[ "${1:-}" == --print-pane-target ]]; then
-  # B7 self-check: runs BEFORE the agent-name guard, so it works standalone.
-  # NB the helper functions are defined ~700 lines below (they belong with the tmux
-  # launch code), so dispatch DEFERS to them via a flag consumed at the bottom of
-  # the script — calling at this point (12-r1's "command not found") parsed only
-  # half the file.
-  if [ $# -lt 2 ]; then
-    echo "Error: --print-pane-target requires a session name" >&2
-    exit 2
-  fi
-  PRINT_PANE_TARGET_FOR="$2"
-  set --
-fi
-
-if [ -n "${PRINT_PANE_TARGET_FOR:-}" ]; then
-  # Self-check mode: skip the agent machinery entirely. The script runs under
-  # `set -euo pipefail`, so the `shift` and every `$1` read below would kill a
-  # self-check run (empty arg list) — branch away HERE and let only the
-  # deferred dispatch at the bottom execute.
-  NAME="$PRINT_PANE_TARGET_FOR"
-  RAW_NAME="$NAME"
-  SKIP_AGENT_FLOW=1
-elif [[ "${1:-}" == -* ]]; then
+if [[ "${1:-}" == -* ]]; then
   echo "Error: missing agent name." >&2
   usage >&2
   exit 1
-else
-  RAW_NAME="$1"
 fi
-if [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
-  NAME="$(resolve_agent_name_casefold "$RAW_NAME")"
-  shift
-fi
+
+RAW_NAME="$1"
+NAME="$(resolve_agent_name_casefold "$RAW_NAME")"
+shift
 if [ "$NAME" != "$RAW_NAME" ]; then
   echo "Resolved agent name '$RAW_NAME' -> '$NAME'"
 fi
@@ -693,7 +714,7 @@ print(d.get('workdir') or d.get('homeDir') or d.get('path') or '')
 fi
 
 # Validate — except in self-check mode, which needs no workspace at all.
-if [ -z "$AGENT_PATH" ] && [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
+if [ -z "$AGENT_PATH" ]; then
   echo "Error: no path specified and no saved meta for '$NAME'" >&2
   echo "Usage: hafleet-up <name> <path> [claude|codex]" >&2
   exit 1
@@ -701,7 +722,7 @@ fi
 
 AGENT_PATH="$(cd "$AGENT_PATH" 2>/dev/null && pwd -P || echo "$AGENT_PATH")"
 
-if [ ! -d "$AGENT_PATH" ] && [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
+if [ ! -d "$AGENT_PATH" ]; then
   echo "Error: path '$AGENT_PATH' does not exist or is not a directory" >&2
   exit 1
 fi
@@ -745,11 +766,7 @@ resolve_managed_project_paths() {
   node "$SANDBOX_ROOTS_RESOLVER" "${resolver_args[@]}"
 }
 
-if [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
-  MANAGED_PROJECT_PATHS="$(resolve_managed_project_paths)"
-else
-  MANAGED_PROJECT_PATHS=""
-fi
+MANAGED_PROJECT_PATHS="$(resolve_managed_project_paths)"
 
 run_update_check
 
@@ -1173,37 +1190,6 @@ create_tmux_session() {
   SCOPE_UNIT=""
 }
 
-# Derive the REAL "window.pane" indexes of a freshly created session's first
-# window. B7: hardcoding ":0.0" breaks on machines whose tmux.conf sets
-# base-index/pane-base-index to 1 — send-keys then fails with "can't find
-# window: 0" and the agent never starts. The session's own indexes are the
-# truth; display-message reads them straight from the server.
-pane_target_for_session() {
-  local name="$1"
-  local wi pi
-  # NB: a format string combining both placeholders ('#{window_index}.#{pane_index}')
-  # renders EMPTY on this tmux build when the target names only the session; the two
-  # placeholders work one at a time. Ask separately — two reads of the same truth.
-  wi="$(tmux display-message -p -t "=${name}" '#{window_index}' 2>/dev/null || true)"
-  pi="$(tmux display-message -p -t "=${name}" '#{pane_index}' 2>/dev/null || true)"
-  if [ -z "$wi" ] || [ -z "$pi" ]; then
-    # Fall back to the first line of list-panes for the session.
-    local idx
-    idx="$(tmux list-panes -t "=${name}" -F '#{window_index}.#{pane_index}' 2>/dev/null | head -n 1 || true)"
-    case "$idx" in *.*) wi="${idx%.*}"; pi="${idx#*.}";; esac
-  fi
-  [ -n "$wi" ] && [ -n "$pi" ] || return 1
-  printf '%s.%s' "$wi" "$pi"
-}
-
-# Self-check entry: print the derived pane target for a session name (used by
-# the B7 regression test with an isolated tmux server).
-print_pane_target() {
-  local idx
-  idx="$(pane_target_for_session "$1")" || { echo "no-such-session: $1" >&2; return 1; }
-  echo "=${1}:${idx}"
-}
-
 runtime_scope_unit_for_target() {
   local target="$1"
   local pane_pid cgroup unit
@@ -1412,7 +1398,7 @@ if [ "$TYPE" = "claude" ]; then
   fi
 fi
 
-if [ "$TYPE" = "claude" ] && [ "$FRESH" = false ] && [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
+if [ "$TYPE" = "claude" ] && [ "$FRESH" = false ]; then
   if [ ! -f "$RESUME_FILE" ]; then
     echo "Error: missing resume-id for claude agent '$NAME'." >&2
     echo "Manual check required: inspect archive tail and set resume-id explicitly." >&2
@@ -1487,9 +1473,7 @@ managed_runtime_marker_is_live() {
   return 1
 }
 
-if [ "${SKIP_AGENT_FLOW:-0}" = "1" ]; then
-  :
-elif tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
+if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
   if ! managed_runtime_marker_is_live; then
     echo "Error: tmux session '$NAME' is not running through the managed Agent Chat launcher." >&2
     echo "A manually reopened runtime can lose auto mode or the owner approval adapter." >&2
@@ -1507,11 +1491,9 @@ elif tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
   fi
 fi
 
-if [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
-  enforce_workspace_uniqueness "$AGENT_PATH" "$FRESH"
-  ensure_claude_project_trust
-  ensure_codex_project_trust
-fi
+enforce_workspace_uniqueness "$AGENT_PATH" "$FRESH"
+ensure_claude_project_trust
+ensure_codex_project_trust
 
 # ── Generate per-agent .mcp.json ──────────────────────────────────────
 # Bake all required env vars into .mcp.json for Claude Code agents.
@@ -1583,7 +1565,7 @@ with open(mcp_json, "w") as f:
 PY
   echo "  MCP config: $mcp_json"
 }
-[ "${SKIP_AGENT_FLOW:-0}" != "1" ] && ensure_agent_mcp_config || true
+ensure_agent_mcp_config
 
 # ── Save meta ─────────────────────────────────────────────────────────
 mkdir -p "$AGENT_DATA"
@@ -1895,17 +1877,15 @@ preflight_runtime_approval_adapter() {
 
 # Approval adapters must be usable before a detached terminal exists. A
 # preflight failure here leaves no hidden runtime prompt behind in tmux.
-[ "${SKIP_AGENT_FLOW:-0}" != "1" ] && preflight_runtime_approval_adapter || true
+preflight_runtime_approval_adapter
 
 # ── Create tmux session ──────────────────────────────────────────────
-if [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
-  echo "Creating tmux session '$NAME' in $AGENT_PATH..."
-  create_tmux_session
-  if [ -n "$SCOPE_UNIT" ]; then
-    echo "  Scope:  $SCOPE_UNIT"
-  fi
-  register_backend_agent
+echo "Creating tmux session '$NAME' in $AGENT_PATH..."
+create_tmux_session
+if [ -n "$SCOPE_UNIT" ]; then
+  echo "  Scope:  $SCOPE_UNIT"
 fi
+register_backend_agent
 
 # ── Build init prompt for fresh starts ────────────────────────────────
 INIT_PROMPT="Your name is ${NAME}. You have an MCP tool server called '${MCP_SERVER_NAME}' for communicating with other agents and humans. Key tools: check_inbox() to read messages, send_message(to, summary, full) to DM, post(group, summary, full, mentions) for group messages, whoami() to see your identity and available agents/groups. Check your inbox now to see if there are any messages for you."
@@ -1938,9 +1918,6 @@ fi
 # On macOS, zsh startup can be slow (plugins, etc.).  If we send keys
 # before the shell is ready, they can get lost.  Wait until a prompt
 # character is visible in the pane (up to 10 seconds).
-if [ "${SKIP_AGENT_FLOW:-0}" = "1" ]; then
-  _pane_ready=true   # self-check mode launches nothing; no pane to wait for
-else
 _pane_ready=false
 for _i in $(seq 1 20); do
   _pane_out=$(tmux capture-pane -t "$TMUX_PANE_TARGET" -p 2>/dev/null || true)
@@ -1950,10 +1927,9 @@ for _i in $(seq 1 20); do
   fi
   sleep 0.5
 done
-if [ "$_pane_ready" != true ] && [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
+if [ "$_pane_ready" != true ]; then
   echo "Warning: shell prompt not detected in pane after 10s; sending launch command anyway." >&2
 fi
-fi   # end SKIP_AGENT_FLOW guard around the pane-wait block
 
 # Claude asks for confirmation when --dangerously-load-development-channels is
 # passed, and HAFleet passes it deliberately (see the comment where CLAUDE_FLAGS is
@@ -1990,9 +1966,7 @@ confirm_claude_development_channel() {
 }
 
 # ── Launch AI ─────────────────────────────────────────────────────────
-if [ "${SKIP_AGENT_FLOW:-0}" = "1" ]; then
-  :
-elif [ "$TYPE" = "claude" ]; then
+if [ "$TYPE" = "claude" ]; then
   INIT_PROMPT="$INIT_PROMPT $CLAUDE_MODE_GUARD"
   CLAUDE_FLAGS="--permission-mode auto"
   if [ "${HAFLEET_CLAUDE_PERMISSION_CHANNEL:-true}" != "false" ]; then
@@ -2242,12 +2216,6 @@ post_lifecycle "Agent '$NAME' started ($TYPE) on ${SERVER_ID:-local}" "Agent '$N
 # ── Done ──────────────────────────────────────────────────────────────
 echo ""
 
-# B7 self-check dispatch (deferred: the helpers are defined above, so this runs
-# only after the whole script has parsed — see the flag set near the top).
-if [ -n "${PRINT_PANE_TARGET_FOR:-}" ]; then
-  print_pane_target "$PRINT_PANE_TARGET_FOR"
-  exit $?
-fi
 
 echo "Agent '$NAME' ($TYPE) launched in $AGENT_PATH"
 
