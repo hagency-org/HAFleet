@@ -222,6 +222,20 @@ describe('the bot is not the only way in', () => {
     expect(body).toMatch(/resolveAppserviceListenerConfig\(process\.env\)/);
   });
 
+  test('the sync intake counts as an inbound path, so a sync-only bridge survives a failed bot', () => {
+    /*
+     * The guard was written when edge and listener were the only ways in; the sync intake (#5) was wired
+     * into startAppserviceIntake but not into this decision, so a bot-less bridge configured for
+     * sync-only — the NAT'd fleet the mode exists for — threw on the bot failure it should have survived.
+     * The expression must read all three resolvers, in the same block, as one decision.
+     */
+    const body = startBody();
+    const guard = /const edgeLink = resolveEdgeLinkConfig\(process\.env\);[\s\S]*?const hasInboundPath = [\s\S]*?;\n/.exec(body)?.[0] ?? '';
+    expect(guard).toMatch(/resolveEdgeLinkConfig\(process\.env\)/);
+    expect(guard).toMatch(/resolveAppserviceListenerConfig\(process\.env\)/);
+    expect(guard).toMatch(/resolveAppserviceSyncConfig\(process\.env\)/);
+  });
+
   test('the intake starts AFTER the bot attempt, so a failed bot cannot skip it', () => {
     const body = startBody();
     const botSide = body.indexOf('await this.startBotSide();');

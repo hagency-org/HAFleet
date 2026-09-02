@@ -4068,7 +4068,14 @@ export class MatrixBridge {
      * reading of "is there an inbound path" would be a second thing to keep in step with the first.
      */
     const hasInboundPath = edgeLink.enabled
-      || Boolean(resolveAppserviceListenerConfig(process.env)?.enabled);
+      || Boolean(resolveAppserviceListenerConfig(process.env)?.enabled)
+      /*
+       * The sync intake is an inbound path too. It was added after this guard and
+       * left out of it, so a bot-less bridge configured for sync-only — the NAT'd
+       * fleet the mode exists for — was judged to have nothing to do and threw on
+       * the bot failure it was supposed to survive.
+       */
+      || Boolean(resolveAppserviceSyncConfig(process.env)?.enabled);
     try {
       await this.startBotSide();
     } catch (error) {
