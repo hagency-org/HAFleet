@@ -8237,7 +8237,7 @@ export class MatrixBridge {
         },
       );
       if (!primaryEventId) return;
-      await this.sendAttachmentsForMessage(senderToken, roomId, msg, thread.relation);
+      await this.sendAttachmentsForMessage(groupSender, roomId, msg, thread.relation);
       // The reply is the end of the wait, so the typing notification ends with it.
       this.endAgentWork(agentName, roomId);
       console.log(`→ Matrix [${msg.group}] ${agentName}: ${msg.summary.slice(0, 60)}`);
