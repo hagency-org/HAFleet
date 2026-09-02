@@ -146,12 +146,6 @@
         "family": "claude"
       },
       {
-        "framework": "claude",
-        "provider": "anthropic",
-        "model": "claude-fable-5-1",
-        "family": "claude"
-      },
-      {
         "framework": "codex",
         "provider": "openai",
         "model": "gpt-5.6-sol",

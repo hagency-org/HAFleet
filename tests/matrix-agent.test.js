@@ -109,6 +109,20 @@ describe('tier derived from the resolved model', () => {
     const pool = [{ name: 'fable_runner', role: 'coding', runtimeProfile: profile('claude', 'claude-fable-5-1'), online: true }];
     expect(selectAgent(pool, 'coding', 'strong')?.name).toBe('fable_runner');
     expect(agentCapability(pool[0])).toBe('strong');
+    // 12-r1 table-level pin: a model string appears in AT MOST ONE tier. The B8 fix
+    // initially landed fable-5-1 in BOTH strong and lightweight; whichever tier
+    // modelTier() happened to scan first would win and the other entry would lie
+    // unread forever. Assert over the raw table, not the function, so a future
+    // duplicate cannot hide behind iteration order.
+    const seen = new Map();
+    for (const [tier, entries] of Object.entries(roleCapacity.tierAccepts)) {
+      for (const e of entries) {
+        const key = `${e.framework}:${e.model}${e.reasoning ? `:${e.reasoning}` : ''}`;
+        if (seen.has(key)) throw new Error(`duplicate tier entry ${key} in ${seen.get(key)} and ${tier}`);
+        seen.set(key, tier);
+      }
+    }
+    expect(seen.get('claude:claude-fable-5-1')).toBe('strong');
   });
 
   it('separates the three reasoning levels of one model string', () => {

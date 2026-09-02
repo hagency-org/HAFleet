@@ -486,23 +486,39 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 
-if [[ "$1" == --print-pane-target ]]; then
+if [[ "${1:-}" == --print-pane-target ]]; then
   # B7 self-check: runs BEFORE the agent-name guard, so it works standalone.
-  shift
-  [ $# -ge 1 ] || { echo "Error: --print-pane-target requires a session name" >&2; exit 2; }
-  print_pane_target "$1"
-  exit $?
+  # NB the helper functions are defined ~700 lines below (they belong with the tmux
+  # launch code), so dispatch DEFERS to them via a flag consumed at the bottom of
+  # the script — calling at this point (12-r1's "command not found") parsed only
+  # half the file.
+  if [ $# -lt 2 ]; then
+    echo "Error: --print-pane-target requires a session name" >&2
+    exit 2
+  fi
+  PRINT_PANE_TARGET_FOR="$2"
+  set --
 fi
 
-if [[ "$1" == -* ]]; then
+if [ -n "${PRINT_PANE_TARGET_FOR:-}" ]; then
+  # Self-check mode: skip the agent machinery entirely. The script runs under
+  # `set -euo pipefail`, so the `shift` and every `$1` read below would kill a
+  # self-check run (empty arg list) — branch away HERE and let only the
+  # deferred dispatch at the bottom execute.
+  NAME="$PRINT_PANE_TARGET_FOR"
+  RAW_NAME="$NAME"
+  SKIP_AGENT_FLOW=1
+elif [[ "${1:-}" == -* ]]; then
   echo "Error: missing agent name." >&2
   usage >&2
   exit 1
+else
+  RAW_NAME="$1"
 fi
-
-RAW_NAME="$1"
-NAME="$(resolve_agent_name_casefold "$RAW_NAME")"
-shift
+if [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
+  NAME="$(resolve_agent_name_casefold "$RAW_NAME")"
+  shift
+fi
 if [ "$NAME" != "$RAW_NAME" ]; then
   echo "Resolved agent name '$RAW_NAME' -> '$NAME'"
 fi
@@ -676,8 +692,8 @@ print(d.get('workdir') or d.get('homeDir') or d.get('path') or '')
   fi
 fi
 
-# Validate
-if [ -z "$AGENT_PATH" ]; then
+# Validate — except in self-check mode, which needs no workspace at all.
+if [ -z "$AGENT_PATH" ] && [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
   echo "Error: no path specified and no saved meta for '$NAME'" >&2
   echo "Usage: hafleet-up <name> <path> [claude|codex]" >&2
   exit 1
@@ -685,7 +701,7 @@ fi
 
 AGENT_PATH="$(cd "$AGENT_PATH" 2>/dev/null && pwd -P || echo "$AGENT_PATH")"
 
-if [ ! -d "$AGENT_PATH" ]; then
+if [ ! -d "$AGENT_PATH" ] && [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
   echo "Error: path '$AGENT_PATH' does not exist or is not a directory" >&2
   exit 1
 fi
@@ -729,7 +745,11 @@ resolve_managed_project_paths() {
   node "$SANDBOX_ROOTS_RESOLVER" "${resolver_args[@]}"
 }
 
-MANAGED_PROJECT_PATHS="$(resolve_managed_project_paths)"
+if [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
+  MANAGED_PROJECT_PATHS="$(resolve_managed_project_paths)"
+else
+  MANAGED_PROJECT_PATHS=""
+fi
 
 run_update_check
 
@@ -1392,7 +1412,7 @@ if [ "$TYPE" = "claude" ]; then
   fi
 fi
 
-if [ "$TYPE" = "claude" ] && [ "$FRESH" = false ]; then
+if [ "$TYPE" = "claude" ] && [ "$FRESH" = false ] && [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
   if [ ! -f "$RESUME_FILE" ]; then
     echo "Error: missing resume-id for claude agent '$NAME'." >&2
     echo "Manual check required: inspect archive tail and set resume-id explicitly." >&2
@@ -1467,7 +1487,9 @@ managed_runtime_marker_is_live() {
   return 1
 }
 
-if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
+if [ "${SKIP_AGENT_FLOW:-0}" = "1" ]; then
+  :
+elif tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
   if ! managed_runtime_marker_is_live; then
     echo "Error: tmux session '$NAME' is not running through the managed Agent Chat launcher." >&2
     echo "A manually reopened runtime can lose auto mode or the owner approval adapter." >&2
@@ -1485,9 +1507,11 @@ if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
   fi
 fi
 
-enforce_workspace_uniqueness "$AGENT_PATH" "$FRESH"
-ensure_claude_project_trust
-ensure_codex_project_trust
+if [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
+  enforce_workspace_uniqueness "$AGENT_PATH" "$FRESH"
+  ensure_claude_project_trust
+  ensure_codex_project_trust
+fi
 
 # ── Generate per-agent .mcp.json ──────────────────────────────────────
 # Bake all required env vars into .mcp.json for Claude Code agents.
@@ -1559,7 +1583,7 @@ with open(mcp_json, "w") as f:
 PY
   echo "  MCP config: $mcp_json"
 }
-ensure_agent_mcp_config
+[ "${SKIP_AGENT_FLOW:-0}" != "1" ] && ensure_agent_mcp_config || true
 
 # ── Save meta ─────────────────────────────────────────────────────────
 mkdir -p "$AGENT_DATA"
@@ -1871,15 +1895,17 @@ preflight_runtime_approval_adapter() {
 
 # Approval adapters must be usable before a detached terminal exists. A
 # preflight failure here leaves no hidden runtime prompt behind in tmux.
-preflight_runtime_approval_adapter
+[ "${SKIP_AGENT_FLOW:-0}" != "1" ] && preflight_runtime_approval_adapter || true
 
 # ── Create tmux session ──────────────────────────────────────────────
-echo "Creating tmux session '$NAME' in $AGENT_PATH..."
-create_tmux_session
-if [ -n "$SCOPE_UNIT" ]; then
-  echo "  Scope:  $SCOPE_UNIT"
+if [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
+  echo "Creating tmux session '$NAME' in $AGENT_PATH..."
+  create_tmux_session
+  if [ -n "$SCOPE_UNIT" ]; then
+    echo "  Scope:  $SCOPE_UNIT"
+  fi
+  register_backend_agent
 fi
-register_backend_agent
 
 # ── Build init prompt for fresh starts ────────────────────────────────
 INIT_PROMPT="Your name is ${NAME}. You have an MCP tool server called '${MCP_SERVER_NAME}' for communicating with other agents and humans. Key tools: check_inbox() to read messages, send_message(to, summary, full) to DM, post(group, summary, full, mentions) for group messages, whoami() to see your identity and available agents/groups. Check your inbox now to see if there are any messages for you."
@@ -1912,6 +1938,9 @@ fi
 # On macOS, zsh startup can be slow (plugins, etc.).  If we send keys
 # before the shell is ready, they can get lost.  Wait until a prompt
 # character is visible in the pane (up to 10 seconds).
+if [ "${SKIP_AGENT_FLOW:-0}" = "1" ]; then
+  _pane_ready=true   # self-check mode launches nothing; no pane to wait for
+else
 _pane_ready=false
 for _i in $(seq 1 20); do
   _pane_out=$(tmux capture-pane -t "$TMUX_PANE_TARGET" -p 2>/dev/null || true)
@@ -1921,9 +1950,10 @@ for _i in $(seq 1 20); do
   fi
   sleep 0.5
 done
-if [ "$_pane_ready" != true ]; then
+if [ "$_pane_ready" != true ] && [ "${SKIP_AGENT_FLOW:-0}" != "1" ]; then
   echo "Warning: shell prompt not detected in pane after 10s; sending launch command anyway." >&2
 fi
+fi   # end SKIP_AGENT_FLOW guard around the pane-wait block
 
 # Claude asks for confirmation when --dangerously-load-development-channels is
 # passed, and HAFleet passes it deliberately (see the comment where CLAUDE_FLAGS is
@@ -1960,7 +1990,9 @@ confirm_claude_development_channel() {
 }
 
 # ── Launch AI ─────────────────────────────────────────────────────────
-if [ "$TYPE" = "claude" ]; then
+if [ "${SKIP_AGENT_FLOW:-0}" = "1" ]; then
+  :
+elif [ "$TYPE" = "claude" ]; then
   INIT_PROMPT="$INIT_PROMPT $CLAUDE_MODE_GUARD"
   CLAUDE_FLAGS="--permission-mode auto"
   if [ "${HAFLEET_CLAUDE_PERMISSION_CHANNEL:-true}" != "false" ]; then
@@ -2209,6 +2241,14 @@ post_lifecycle "Agent '$NAME' started ($TYPE) on ${SERVER_ID:-local}" "Agent '$N
 
 # ── Done ──────────────────────────────────────────────────────────────
 echo ""
+
+# B7 self-check dispatch (deferred: the helpers are defined above, so this runs
+# only after the whole script has parsed — see the flag set near the top).
+if [ -n "${PRINT_PANE_TARGET_FOR:-}" ]; then
+  print_pane_target "$PRINT_PANE_TARGET_FOR"
+  exit $?
+fi
+
 echo "Agent '$NAME' ($TYPE) launched in $AGENT_PATH"
 
 if [ "$ATTACH" = true ]; then
@@ -2217,3 +2257,4 @@ else
   echo "  Attach: tmux attach -t $NAME"
   echo "  Meta:   $META_FILE"
 fi
+
