@@ -16,12 +16,18 @@ import path from 'node:path';
  */
 let groupOrNull;
 let runtime;
+let savedRuntimeDir;
 beforeAll(async () => {
+  savedRuntimeDir = process.env.HAFLEET_RUNTIME_DIR;
   runtime = mkdtempSync(path.join(tmpdir(), 'hafleet-group-or-null-'));
   process.env.HAFLEET_RUNTIME_DIR = runtime;
   ({ groupOrNull } = await import('../bridge-matrix.js'));
 });
-afterAll(() => rmSync(runtime, { recursive: true, force: true }));
+afterAll(() => {
+  rmSync(runtime, { recursive: true, force: true });
+  if (savedRuntimeDir === undefined) delete process.env.HAFLEET_RUNTIME_DIR;
+  else process.env.HAFLEET_RUNTIME_DIR = savedRuntimeDir;
+});
 afterEach(() => vi.unstubAllGlobals());
 
 const reply = (status, body) => vi.fn().mockResolvedValue({

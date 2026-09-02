@@ -4116,7 +4116,7 @@ export class MatrixBridge {
        * commands never touch one, and a tier-2 command that does fails on its own line.
        */
       if (!this.commands) {
-        this.commands = new BotCommands({ botClient: null, bridge: this, botUserId: this.botUserId ?? null });
+        this.commands = new BotCommands({ botClient: null, bridge: this, botUserId: this.botUserId ?? null, tier0Only: true });
       }
       console.error(`[bridge] the bot could not be brought up: ${this.botUnavailable}`);
       console.error(
@@ -5861,7 +5861,14 @@ export class MatrixBridge {
         if (!existing) {
           // Create group in backend. Membership read through the representative-aware helper: on a
           // project side, or with no bot at all, `this.botClient` is null and cannot see the room.
-          const joinedMembers = (await this.joinedMembersOf(roomId)).members;
+          const membership = await this.joinedMembersOf(roomId);
+          if (!membership.known) {
+            // UNKNOWN IS NOT EMPTY: creating a group from a membership read that failed would map the
+            // room to an empty group and answer 200, losing the redelivery. Leave it for the next event.
+            console.warn(`Room ${roomId}: membership unknown (${membership.reason}); not creating group "${name}" yet`);
+            return;
+          }
+          const joinedMembers = membership.members;
           const members = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
           const humanMembers = joinedMembers
             .filter(m => !isAgentUser(m) && m !== this.botUserId)
@@ -5882,7 +5889,14 @@ export class MatrixBridge {
         if (mapped !== name && !isPrivateControlRoomName(name)) {
           const existing = await groupOrNull(name, `context=room-rename:get-group room=${roomId}`);
           if (!existing) {
-            const joinedMembers = (await this.joinedMembersOf(roomId)).members;
+            const membership = await this.joinedMembersOf(roomId);
+          if (!membership.known) {
+            // UNKNOWN IS NOT EMPTY: creating a group from a membership read that failed would map the
+            // room to an empty group and answer 200, losing the redelivery. Leave it for the next event.
+            console.warn(`Room ${roomId}: membership unknown (${membership.reason}); not creating group "${name}" yet`);
+            return;
+          }
+          const joinedMembers = membership.members;
             const members = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
             const humanMembers = joinedMembers
               .filter(m => !isAgentUser(m) && m !== this.botUserId)
@@ -6214,7 +6228,14 @@ export class MatrixBridge {
       // Check if group exists in backend, create if not
       const existing = await groupOrNull(name, `context=room-map:get-group room=${roomId}`);
       if (!existing) {
-        const joinedMembers = (await this.joinedMembersOf(roomId)).members;
+        const membership = await this.joinedMembersOf(roomId);
+          if (!membership.known) {
+            // UNKNOWN IS NOT EMPTY: creating a group from a membership read that failed would map the
+            // room to an empty group and answer 200, losing the redelivery. Leave it for the next event.
+            console.warn(`Room ${roomId}: membership unknown (${membership.reason}); not creating group "${name}" yet`);
+            return;
+          }
+          const joinedMembers = membership.members;
         const agentMembers = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
         const humanMembers = joinedMembers
           .filter(m => !isAgentUser(m) && m !== this.botUserId)

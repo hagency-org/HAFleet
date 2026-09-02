@@ -283,3 +283,36 @@ describe('who speaks when a command comes from a project side room', () => {
     });
   });
 });
+
+describe('tier0Only: a bot-less bridge refuses privileged commands before any mutation', () => {
+  afterEach(() => { resetBotCommandsTestHooks(); vi.unstubAllGlobals(); });
+
+  test('!mkgroup is refused with a reason, and the backend is never called', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const sent = [];
+    const bot = new BotCommands({
+      botClient: null,
+      bridge: { getBridgeState: () => ({}), isKnownAgentName: () => false, sayInRoom: async (_r, body) => { sent.push(body); } },
+      botUserId: null,
+      tier0Only: true,
+    });
+    bot.reply = async (_roomId, body) => { sent.push(body); };
+    await bot.handle('!room:x', '@alex:x', '!mkgroup team a b', {});
+    expect(sent.join('\n')).toMatch(/unavailable.*without a Matrix bot/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('tier-0 !help still answers', async () => {
+    const sent = [];
+    const bot = new BotCommands({
+      botClient: null,
+      bridge: { getBridgeState: () => ({}), isKnownAgentName: () => false },
+      botUserId: null,
+      tier0Only: true,
+    });
+    bot.reply = async (_roomId, body) => { sent.push(body); };
+    await bot.handle('!room:x', '@alex:x', '!help', {});
+    expect(sent.length).toBeGreaterThan(0);
+  });
+});

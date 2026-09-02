@@ -357,6 +357,19 @@ describe('a co-located edge is also a way in', () => {
     expect(reach.appservice.reason).toMatch(/polls .* outbound/);
   });
 
+  test('a sync config the resolver refuses is NOT reported as an inbound path', async () => {
+    // reach must not drift from the resolver: a slash-suffixed side or a bare-host URL is refused by
+    // resolveAppserviceSyncConfig, so the collector never starts — reach must say so, not claim polling.
+    for (const env of [
+      { MATRIX_SERVER_NAME: 'acme.test', HAFLEET_APPSERVICE_SYNC_SIDE: 'acme.test/', HAFLEET_APPSERVICE_SYNC_URL: 'https://acme.test' },
+      { MATRIX_SERVER_NAME: 'acme.test', HAFLEET_APPSERVICE_SYNC_SIDE: 'acme.test', HAFLEET_APPSERVICE_SYNC_URL: 'acme.test' },
+      { MATRIX_SERVER_NAME: 'acme.test', HAFLEET_APPSERVICE_SYNC_SIDE: 'acme.test' },
+    ]) {
+      const reach = await describeMatrixReach({ env, fetchImpl: fakeFetch({ default: { status: 200, body: { versions: ['v1.12'] } } }), interfaces: {} });
+      expect(reach.appservice.inboundVia).toBeNull();
+    }
+  });
+
   test('with no intake at all, the warning names all three fixes', async () => {
     const reach = await describeMatrixReach({
       env: { MATRIX_SERVER_NAME: 'acme.test' },
