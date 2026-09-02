@@ -345,6 +345,41 @@ describe('a co-located edge is also a way in', () => {
     expect(reach.appservice.edgeSide).toBe('acme.test');
   });
 
+  test('a configured sync intake is an inbound path, reported as such', async () => {
+    // The first bot-less sync deployment was told "nothing will receive your homeserver's events" while
+    // its collector was logged in and polling. Reach reads the same two variables the resolver does.
+    const reach = await describeMatrixReach({
+      env: { MATRIX_SERVER_NAME: 'acme.test', HAFLEET_APPSERVICE_SYNC_SIDE: 'acme.test', HAFLEET_APPSERVICE_SYNC_URL: 'https://acme.test' },
+      fetchImpl: fakeFetch({ default: { status: 200, body: { versions: ['v1.12'] } } }),
+      interfaces: {},
+    });
+    expect(reach.appservice).toMatchObject({ listening: false, inboundVia: 'sync', syncSide: 'acme.test', syncUrl: 'https://acme.test' });
+    expect(reach.appservice.reason).toMatch(/polls .* outbound/);
+  });
+
+  test('a sync config the resolver refuses is NOT reported as an inbound path', async () => {
+    // reach must not drift from the resolver: a slash-suffixed side or a bare-host URL is refused by
+    // resolveAppserviceSyncConfig, so the collector never starts — reach must say so, not claim polling.
+    for (const env of [
+      { MATRIX_SERVER_NAME: 'acme.test', HAFLEET_APPSERVICE_SYNC_SIDE: 'acme.test/', HAFLEET_APPSERVICE_SYNC_URL: 'https://acme.test' },
+      { MATRIX_SERVER_NAME: 'acme.test', HAFLEET_APPSERVICE_SYNC_SIDE: 'acme.test', HAFLEET_APPSERVICE_SYNC_URL: 'acme.test' },
+      { MATRIX_SERVER_NAME: 'acme.test', HAFLEET_APPSERVICE_SYNC_SIDE: 'acme.test' },
+    ]) {
+      const reach = await describeMatrixReach({ env, fetchImpl: fakeFetch({ default: { status: 200, body: { versions: ['v1.12'] } } }), interfaces: {} });
+      expect(reach.appservice.inboundVia).toBeNull();
+    }
+  });
+
+  test('with no intake at all, the warning names all three fixes', async () => {
+    const reach = await describeMatrixReach({
+      env: { MATRIX_SERVER_NAME: 'acme.test' },
+      fetchImpl: fakeFetch({ default: { status: 200, body: { versions: ['v1.12'] } } }),
+      interfaces: {},
+    });
+    expect(reach.appservice.inboundVia).toBeNull();
+    expect(reach.appservice.reason).toMatch(/HAFLEET_APPSERVICE_SYNC_SIDE/);
+  });
+
   test('with neither a port nor an edge, the warning stands and names both fixes', async () => {
     // The refusal must survive the fix. This is the state the warning is FOR, and it should not send an
     // operator to the wrong remedy — a socket is one answer and an edge is the other.

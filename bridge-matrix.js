@@ -1973,6 +1973,36 @@ const BRIDGE_API_TOKEN = (process.env.API_TOKEN || '').trim();
 // delivery" rather than "message delivery" since it is not scoped to just that route.
 const bridgeHealthState = { lastSuccessfulBackendDeliveryAtMs: null };
 
+/**
+ * The retryable error onRoomEvent throws when a room's membership cannot be read at the moment a
+ * group would be created from it. Named so a log reader and a test can tell it from a crash.
+ */
+export function membershipUnknownError(roomId, groupName, reason) {
+  const err = new Error(`membership of ${roomId} is unknown (${reason}); group "${groupName}" not created — retry`);
+  err.code = 'membership_unknown';
+  err.retryable = true;
+  return err;
+}
+
+/**
+ * The backend's answer to "is there a group called X" — null when there is not.
+ *
+ * backendApi THROWS on every non-2xx, but three callers were written for an older contract that
+ * returned `{ error }` on 404 and tested `existing.error`. Under the real contract an unknown group
+ * name — any customer room whose name matches no group, i.e. every project room — threw out of
+ * onRoomEvent, the router answered 500, and the homeserver (or the sync collector) retried the
+ * same batch until it circuit-broke. Seen live on the first bot-less sync deployment. A 404 is an
+ * answer, not a failure; anything else still propagates.
+ */
+export async function groupOrNull(name, contextLabel = '') {
+  try {
+    return await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`, null, contextLabel);
+  } catch (error) {
+    if (error?.status === 404) return null;
+    throw error;
+  }
+}
+
 async function backendApi(method, path, body, contextLabel = '') {
   const opts = { method, headers: {}, signal: AbortSignal.timeout(BACKEND_FETCH_TIMEOUT_MS) };
   if (MATRIX_BRIDGE_SECRET) opts.headers['X-Bridge-Secret'] = MATRIX_BRIDGE_SECRET;
@@ -1988,7 +2018,9 @@ async function backendApi(method, path, body, contextLabel = '') {
     const parsed = text ? JSON.parse(text) : null;
     if (!res.ok) {
       const detail = text ? ` body=${text}` : '';
-      throw new Error(`backend API ${method} ${path} failed with HTTP ${res.status}${detail}`);
+      const err = new Error(`backend API ${method} ${path} failed with HTTP ${res.status}${detail}`);
+      err.status = res.status;
+      throw err;
     }
     bridgeHealthState.lastSuccessfulBackendDeliveryAtMs = Date.now();
     return parsed;
@@ -4086,6 +4118,17 @@ export class MatrixBridge {
     } catch (error) {
       if (!hasInboundPath) throw error;
       this.botUnavailable = String(error?.message ?? error);
+      /*
+       * COMMANDS DO NOT NEED THE BOT. `!offer` / `!request` are the customer's whole inbound surface,
+       * and their replies already route through the representative (sayInRoom). But BotCommands was
+       * only ever constructed inside the bot bring-up, so a bot-less bridge answered every command
+       * with `Cannot read properties of null (reading 'handle')` — a 500 to the router, retried
+       * until the sync collector circuit-broke. Construct it here with no client; the tier-0
+       * commands never touch one, and a tier-2 command that does fails on its own line.
+       */
+      if (!this.commands) {
+        this.commands = new BotCommands({ botClient: null, bridge: this, botUserId: this.botUserId ?? null, tier0Only: true });
+      }
       console.error(`[bridge] the bot could not be brought up: ${this.botUnavailable}`);
       console.error(
         '[bridge] CONTINUING WITHOUT IT because this deployment has an appservice path. What is lost: talking '
@@ -4124,6 +4167,17 @@ export class MatrixBridge {
 
     // 10. Inbound appservice traffic, if this deployment exposes a socket for it (ADR-016).
     await this.startAppserviceIntake();
+    /*
+     * THE BACKEND EVENT STREAM IS NOT BOT WORK. connectSSE() — the hafleet → Matrix half — was only
+     * ever called inside the bot bring-up, so a bot-less bridge collected every customer message and
+     * never delivered a single agent reply: the first live run had the agent write its file, post
+     * "done" to the backend, and the room stay silent. The consumer needs no bot client (its sends
+     * route through the representative-aware paths), so the degraded bridge connects it here.
+     */
+    if (this.botUnavailable && !this.sseConnectedWithoutBot) {
+      this.sseConnectedWithoutBot = true;
+      this.connectSSE();
+    }
 
     console.log('Bridge running.');
   }
@@ -4630,7 +4684,17 @@ export class MatrixBridge {
         credentialFor: () => {
           const entry = this.actingCredentials?.get?.(sync.side) ?? null;
           const cred = entry?.credential ?? entry ?? null;
-          return cred && cred.kind === 'appservice' ? cred : null;
+          if (!cred || cred.kind !== 'appservice') return null;
+          /*
+           * TWO TOKENS, TWO SOURCES. The acting credential carries the as_token the collector logs in
+           * with; the hs_token the collector must present to OUR OWN router lives in the side-token
+           * map, exactly where the edge puller reads it (hsTokenFor above). The first live run handed
+           * the router an empty string here, took 403 eight times and circuit-broke — the fake
+           * homeserver tests never saw it because they supplied hsToken directly.
+           */
+          const hsToken = this.appserviceSideTokens?.get?.(sync.side) ?? null;
+          if (!hsToken) return null;
+          return { ...cred, hsToken };
         },
         readCursor: () => state.appserviceSync[sync.side] ?? null,
         writeCursor: async (next) => { state.appserviceSync[sync.side] = next; saveState(); },
@@ -5815,10 +5879,20 @@ export class MatrixBridge {
         }
       } else if (!groupForRoom(roomId)) {
         // New room name set → map to group
-        const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
-        if (existing.error) {
-          // Create group in backend
-          const joinedMembers = await this.botClient.getJoinedRoomMembers(roomId);
+        const existing = await groupOrNull(name, `context=room-name:get-group room=${roomId}`);
+        if (!existing) {
+          // Create group in backend. Membership read through the representative-aware helper: on a
+          // project side, or with no bot at all, `this.botClient` is null and cannot see the room.
+          const membership = await this.joinedMembersOf(roomId);
+          if (!membership.known) {
+            // UNKNOWN IS NOT EMPTY, AND NOT DONE EITHER. Creating a group from a failed membership
+            // read would map the room to an empty group; returning quietly would answer 200 and let
+            // the transaction (and the sync cursor) advance past the only event that triggers this
+            // mapping, leaving a bot-less bridge with no second chance. So it THROWS a retryable
+            // error: the receiver answers 500, the homeserver (or the sync collector) redelivers.
+            throw membershipUnknownError(roomId, name, membership.reason);
+          }
+          const joinedMembers = membership.members;
           const members = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
           const humanMembers = joinedMembers
             .filter(m => !isAgentUser(m) && m !== this.botUserId)
@@ -5837,9 +5911,18 @@ export class MatrixBridge {
       } else {
         const mapped = groupForRoom(roomId);
         if (mapped !== name && !isPrivateControlRoomName(name)) {
-          const existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
-          if (existing.error) {
-            const joinedMembers = await this.botClient.getJoinedRoomMembers(roomId);
+          const existing = await groupOrNull(name, `context=room-rename:get-group room=${roomId}`);
+          if (!existing) {
+            const membership = await this.joinedMembersOf(roomId);
+          if (!membership.known) {
+            // UNKNOWN IS NOT EMPTY, AND NOT DONE EITHER. Creating a group from a failed membership
+            // read would map the room to an empty group; returning quietly would answer 200 and let
+            // the transaction (and the sync cursor) advance past the only event that triggers this
+            // mapping, leaving a bot-less bridge with no second chance. So it THROWS a retryable
+            // error: the receiver answers 500, the homeserver (or the sync collector) redelivers.
+            throw membershipUnknownError(roomId, name, membership.reason);
+          }
+          const joinedMembers = membership.members;
             const members = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
             const humanMembers = joinedMembers
               .filter(m => !isAgentUser(m) && m !== this.botUserId)
@@ -6072,11 +6155,17 @@ export class MatrixBridge {
       return;
     }
     try {
-      const joinedMembers = await getJoinedRoomMembersWithTrace(
-        this.botClient,
-        roomId,
-        `reconcile:getJoinedRoomMembers group=${JSON.stringify(groupName)}`
-      );
+      /*
+       * Read through the representative-aware helper: on a project side, or with no bot at all,
+       * `this.botClient` is null and cannot see the room. An UNKNOWN membership must not reconcile
+       * (an empty list would strip every member from the group), so it returns instead.
+       */
+      const membership = await this.joinedMembersOf(roomId);
+      if (!membership.known) {
+        console.warn(`Reconcile: membership of ${roomId} unknown (${membership.reason}); leaving group "${groupName}" as is`);
+        return;
+      }
+      const joinedMembers = membership.members;
       const agentMembers = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
       const humanMembers = joinedMembers
         .filter(m => !isAgentUser(m) && m !== this.botUserId)
@@ -6084,14 +6173,12 @@ export class MatrixBridge {
         .filter(Boolean);
       const matrixMembers = [...new Set([...agentMembers, ...humanMembers].filter(Boolean))];
       this._recordMembershipDetail(roomId, agentMembers);
-      const existing = await backendApi(
-        'GET',
-        `/api/groups/${encodeURIComponent(groupName)}`,
-        null,
+      const existing = await groupOrNull(
+        groupName,
         `context=reconcile:get-group group=${JSON.stringify(groupName)} room=${roomId}`
       );
 
-      if (existing.error) {
+      if (!existing) {
         await backendApi(
           'POST',
           '/api/groups',
@@ -6165,14 +6252,18 @@ export class MatrixBridge {
       if (isPrivateControlRoomName(name)) return null;
 
       // Check if group exists in backend, create if not
-      let existing = null;
-      try {
-        existing = await backendApi('GET', `/api/groups/${encodeURIComponent(name)}`);
-      } catch {
-        // 404 or other error means group doesn't exist yet — we'll create it below
-      }
-      if (!existing || existing.error) {
-        const joinedMembers = await this.botClient.getJoinedRoomMembers(roomId);
+      const existing = await groupOrNull(name, `context=room-map:get-group room=${roomId}`);
+      if (!existing) {
+        const membership = await this.joinedMembersOf(roomId);
+          if (!membership.known) {
+            // UNKNOWN IS NOT EMPTY, AND NOT DONE EITHER. Creating a group from a failed membership
+            // read would map the room to an empty group; returning quietly would answer 200 and let
+            // the transaction (and the sync cursor) advance past the only event that triggers this
+            // mapping, leaving a bot-less bridge with no second chance. So it THROWS a retryable
+            // error: the receiver answers 500, the homeserver (or the sync collector) redelivers.
+            throw membershipUnknownError(roomId, name, membership.reason);
+          }
+          const joinedMembers = membership.members;
         const agentMembers = joinedMembers.filter(m => isAgentUser(m)).map(m => agentNameFromUserId(m)).filter(Boolean);
         const humanMembers = joinedMembers
           .filter(m => !isAgentUser(m) && m !== this.botUserId)
@@ -8067,7 +8158,15 @@ export class MatrixBridge {
        * which is where a project-side room can appear.
        */
       if (!senderToken) senderToken = this.agentSenderFor(canonicalAgentName);
-      if (!senderToken) {
+      /*
+       * A GROUP MESSAGE IS RESOLVED PER ROOM, BELOW. Without a room, agentSenderFor can only find a
+       * per-agent token or a side inferred from a stored identity — and a claim-not-act agent on an
+       * appservice side has neither, so this pre-check used to declare "no way to send" and return
+       * before the group branch ever asked the room. The first live run: the agent posted "done",
+       * the bridge logged that warning, the room stayed silent. Only a message with no room to
+       * consult is fatal here.
+       */
+      if (!senderToken && !msg.group) {
         console.warn(`No Matrix token or appservice sender for agent "${canonicalAgentName}", cannot bridge message ${msg.id}`);
         this.postWarning(
           `No way to send as agent "${canonicalAgentName}" — no token, and no appservice credential on `
@@ -8117,6 +8216,14 @@ export class MatrixBridge {
       const groupSender = senderIsSystem
         ? senderToken
         : (this.agentSenderFor(canonicalAgentName, roomId) ?? senderToken);
+      if (!groupSender) {
+        console.warn(`No Matrix token or appservice sender for agent "${canonicalAgentName}" in ${roomId}, cannot bridge message ${msg.id}`);
+        this.postWarning(
+          `No way to send as agent "${canonicalAgentName}" into ${roomId} — no token, and no appservice credential `
+          + `for that room's side. Message ${msg.id} not bridged to Matrix.`,
+        );
+        return;
+      }
       const primaryEventId = await this.sendAsAgent(
         groupSender,
         roomId,
@@ -8130,7 +8237,7 @@ export class MatrixBridge {
         },
       );
       if (!primaryEventId) return;
-      await this.sendAttachmentsForMessage(senderToken, roomId, msg, thread.relation);
+      await this.sendAttachmentsForMessage(groupSender, roomId, msg, thread.relation);
       // The reply is the end of the wait, so the typing notification ends with it.
       this.endAgentWork(agentName, roomId);
       console.log(`→ Matrix [${msg.group}] ${agentName}: ${msg.summary.slice(0, 60)}`);

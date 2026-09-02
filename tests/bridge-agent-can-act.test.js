@@ -260,6 +260,58 @@ describe('the bot is not the only way in', () => {
     expect(intake).toBeGreaterThan(botSide);
   });
 
+  test('a bot-less bridge still has a command handler, so tier-0 commands are answered', () => {
+    /*
+     * BotCommands lived only inside the bot bring-up. With no bot, every `!offer` from a customer
+     * threw `null.handle` out of onRoomMessage — a 500 to the router, retried until the sync collector
+     * circuit-broke. The degraded branch must construct the handler with no client.
+     */
+    const body = startBody();
+    const degraded = body.indexOf('this.botUnavailable = ');
+    expect(degraded).toBeGreaterThan(-1);
+    const after = body.slice(degraded);
+    expect(after).toMatch(/if \(!this\.commands\) \{\s*this\.commands = new BotCommands\(\{ botClient: null, bridge: this/);
+  });
+
+  test('a bot-less bridge still subscribes to the backend event stream, or no agent reply ever leaves', () => {
+    /*
+     * connectSSE() lived only inside the bot bring-up. The first live run: the agent did its task,
+     * posted "done" to the backend, and the room stayed silent — hafleet → Matrix had no consumer.
+     */
+    const body = startBody();
+    const intake = body.indexOf('await this.startAppserviceIntake();');
+    expect(intake).toBeGreaterThan(-1);
+    const after = body.slice(intake);
+    // The guarded block, whole: flag set BEFORE the connect, nothing else inside, after the intake.
+    expect(after).toMatch(/if \(this\.botUnavailable && !this\.sseConnectedWithoutBot\) \{\s*this\.sseConnectedWithoutBot = true;\s*this\.connectSSE\(\);\s*\}/);
+    // And exactly one connect on the degraded path; the bot path keeps its own single call.
+    expect((after.match(/this\.connectSSE\(\)/g) ?? []).length).toBe(1);
+    const src = require('fs').readFileSync(path.resolve('bridge-matrix.js'), 'utf8');
+    const botSide = /\n  async startBotSide\(\) \{[\s\S]*?\n  \}\n/.exec(src)?.[0] ?? '';
+    expect((botSide.match(/this\.connectSSE\(\)/g) ?? []).length).toBe(1);
+  });
+
+  test('a group message from a claim-not-act agent is resolved per room, not refused up front', () => {
+    /*
+     * onAgentMessage pre-resolved a sender with no room and returned on failure — before the group
+     * branch, which resolves per room, ever ran. A claim-not-act appservice agent has no token and no
+     * stored identity, so every reply it posted was refused. The pre-check may only be fatal when the
+     * message names no group.
+     */
+    const src = require('fs').readFileSync(path.resolve('bridge-matrix.js'), 'utf8');
+    const body = /\n  async onAgentMessage\(msg\) \{[\s\S]*?\n  \}\n/.exec(src)?.[0] ?? '';
+    // No-group pre-check still warns AND returns.
+    expect(body).toMatch(/if \(!senderToken && !msg\.group\) \{\s*console\.warn\([\s\S]*?this\.postWarning\([\s\S]*?return;\s*\}/);
+    // The group block: resolve per room, refuse (warn + return) when even that finds nothing, and
+    // use the room-scoped sender for BOTH the body and the attachments — never the pre-check token.
+    const groupBlock = /\n    if \(msg\.group\) \{[\s\S]*?sendAttachmentsForMessage\([^)]*\)/.exec(body)?.[0] ?? '';
+    expect(groupBlock).toMatch(/this\.agentSenderFor\(canonicalAgentName, roomId\) \?\? senderToken/);
+    expect(groupBlock).toMatch(/if \(!groupSender\) \{\s*console\.warn\([\s\S]*?this\.postWarning\([\s\S]*?return;\s*\}/);
+    expect(groupBlock).toMatch(/this\.sendAsAgent\(\s*groupSender,/);
+    expect(groupBlock).toMatch(/sendAttachmentsForMessage\(groupSender,/);
+    expect(groupBlock).not.toMatch(/sendAttachmentsForMessage\(senderToken/);
+  });
+
   test('what is lost is stated, not left to be discovered', () => {
     /*
      * A degraded mode that does not say what it gave up is worse than a crash: the operator believes they
