@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { spawnSync } from 'child_process';
 import path from 'path';
 import os from 'os';
@@ -57,6 +57,9 @@ describe('MCP media cache directory', () => {
       mkdirSync(cwd, { recursive: true });
       mkdirSync(stateDir, { recursive: true });
       mkdirSync(runtimeDir, { recursive: true });
+      // 12-r3: the MCP server is fail-closed on a state dir without an agent
+      // token; this test exercises cache-dir RESOLUTION, so provide one.
+      writeFileSync(path.join(stateDir, 'agent-token'), 'media-cache-token\n');
 
       for (const coreFile of coreFiles) {
         const actual = runCacheSmoke(coreFile, {
