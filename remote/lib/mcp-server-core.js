@@ -80,7 +80,26 @@ const AGENT_TOKEN = (() => {
   if (injected) return injected;
   const stateDir = (process.env.HAFLEET_AGENT_STATE_DIR || '').trim();
   if (!stateDir) return '';
-  try { return readFileSync(path.join(stateDir, 'agent-token'), 'utf-8').trim(); } catch { return ''; }
+  /*
+   * B11 (12-r2): FAIL-CLOSED. A state dir that names no token file is a
+   * provisioning failure: under audit-mode auth every call ships without a
+   * credential, and under enforce-mode every call 403s — either way the MCP
+   * server "runs" while nothing it does counts as the agent. Refuse to start,
+   * naming the file, with a non-zero exit.
+   */
+  const tokenFile = path.join(stateDir, 'agent-token');
+  let value = '';
+  try {
+    value = readFileSync(tokenFile, 'utf-8').trim();
+  } catch (err) {
+    process.stderr.write(`[mcp] agent-token file missing (${err.code || err.message}): ${tokenFile} — refusing to start; every backend call would fail agent-token auth\n`);
+    process.exit(3);
+  }
+  if (!value) {
+    process.stderr.write(`[mcp] agent-token file is empty: ${tokenFile} — refusing to start; every backend call would fail agent-token auth\n`);
+    process.exit(3);
+  }
+  return value;
 })();
 const CLAUDE_PERMISSION_CHANNEL_ENABLED = Boolean(AGENT_TOKEN)
   && (process.env.HAFLEET_CLAUDE_PERMISSION_CHANNEL || 'true').trim().toLowerCase() !== 'false';

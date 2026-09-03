@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'vitest';
 import { spawn } from 'child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import http from 'http';
 import os from 'os';
 import path from 'path';
@@ -237,6 +237,10 @@ describe('MCP backend heartbeat', () => {
       const stateDir = path.join(tempRoot, coreFile.replaceAll('/', '-'), 'custom-state');
       const calls = [];
       const running = await listen(createBackendHandler(calls));
+      // 12-r2 fail-closed: an explicit state dir must carry a token, or the
+      // server refuses to start; this test exercises pid placement, so provide one.
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(path.join(stateDir, 'agent-token'), 'hb-token\n');
       const mcp = spawnMcpServer(`http://127.0.0.1:${running.port}`, {
         HAFLEET_AGENT_STATE_DIR: stateDir,
         HAFLEET_HOMEDIR: path.join(tempRoot, 'ignored-home'),

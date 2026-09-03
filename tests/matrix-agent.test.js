@@ -94,6 +94,37 @@ describe('tier derived from the resolved model', () => {
     expect(modelTier(profile('octos', 'kimi-k3'))).toBe('strong');
   });
 
+  it('B8: claude-fable-5-1 — the model this machine actually runs — is strong, and staffs coding', () => {
+    /*
+     * B8: `tierAccepts` matched framework+model exactly, so the locally-deployed
+     * `claude-fable-5-1` resolved to tier null and NO agent was eligible for any
+     * strong role — the pool answered "unstaffable" while a strong agent sat idle.
+     * NB the naming family: `claude-fable-5` (no minor) stays LIGHTWEIGHT — the
+     * minor version -5-1 is the strong-capable one this deployment runs; adding
+     * the bare fable-5 to strong would have promoted every fable-5 pool.
+     */
+    expect(modelTier(profile('claude', 'claude-fable-5-1'))).toBe('strong');
+    expect(modelTier(profile('claude', 'claude-fable-5'))).toBe('lightweight');
+    // and a pool whose ONLY agent runs fable-5-1 can staff a strong coding role:
+    const pool = [{ name: 'fable_runner', role: 'coding', runtimeProfile: profile('claude', 'claude-fable-5-1'), online: true }];
+    expect(selectAgent(pool, 'coding', 'strong')?.name).toBe('fable_runner');
+    expect(agentCapability(pool[0])).toBe('strong');
+    // 12-r1 table-level pin: a model string appears in AT MOST ONE tier. The B8 fix
+    // initially landed fable-5-1 in BOTH strong and lightweight; whichever tier
+    // modelTier() happened to scan first would win and the other entry would lie
+    // unread forever. Assert over the raw table, not the function, so a future
+    // duplicate cannot hide behind iteration order.
+    const seen = new Map();
+    for (const [tier, entries] of Object.entries(roleCapacity.tierAccepts)) {
+      for (const e of entries) {
+        const key = `${e.framework}:${e.model}${e.reasoning ? `:${e.reasoning}` : ''}`;
+        if (seen.has(key)) throw new Error(`duplicate tier entry ${key} in ${seen.get(key)} and ${tier}`);
+        seen.set(key, tier);
+      }
+    }
+    expect(seen.get('claude:claude-fable-5-1')).toBe('strong');
+  });
+
   it('separates the three reasoning levels of one model string', () => {
     // The case a (framework, model) match cannot express: the same id at three
     // tiers, told apart only by the thinking level.
