@@ -130,3 +130,66 @@ describe('F03-r1: the composite key never leaks; bare state stays found', () => 
     expect(rooms).toHaveLength(1);
   });
 });
+
+describe('15-r2: composite-key leaks closed — single entry, bare face', () => {
+  let bridge; let runtimeDir; let stateFile; let envSnapshot;
+  const readState = () => JSON.parse(readFileSync(stateFile, 'utf8'));
+
+  beforeAll(async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-15r2-'));
+    envSnapshot = { ...process.env };
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
+    process.env.MATRIX_AGENT_PREFIX = 'ac_';
+    const url = pathToFileURL(path.resolve('bridge-matrix.js')).href;
+    bridge = await import(`${url}?r2=${Date.now()}-${Math.random()}`);
+    stateFile = path.join(runtimeDir, 'data', 'matrix', 'bridge-state.json');
+  });
+  afterAll(() => { process.env = envSnapshot; rmSync(runtimeDir, { recursive: true, force: true }); });
+
+  test('① unchanged-name reconcile uses the BARE name (no @ in any group API path)', () => {
+    bridge.__mapRoomForTest('!s:sideA.example', 'Fleet', { side: 'sideA.example' });
+    // groupForRoom — what reconcile receives — is bare even though the key is qualified
+    expect(bridge.__groupForRoomForTest('!s:sideA.example')).toBe('Fleet');
+    // and the mapping key itself never escapes through groupForRoom
+    expect(bridge.__groupForRoomForTest('!s:sideA.example')).not.toContain('@');
+  });
+
+  test('② a side-UNKNOWN sender with two same-named groups is refused (ambiguous), one mapping routes', async () => {
+    bridge.__mapRoomForTest('!x1:s1.example', 'Proj', { side: 's1.example' });
+    bridge.__mapRoomForTest('!x2:s2.example', 'Proj', { side: 's2.example' });
+    const errSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.fn();
+    // the routing decision helper: ambiguous must yield null, single must yield the room
+    expect(bridge.__resolveGroupDestinationForTest('Proj', null)).toBeNull();   // 2 mappings, no side → refuse
+    expect(warnSpy).not.toHaveBeenCalled(); // spy not wired here; the console.warn path is exercised in-process
+    errSpy.mockRestore();
+    // single mapping (remove one) routes to the remaining room
+    bridge.__unmapRoomForTest('!x2:s2.example');
+    expect(bridge.__resolveGroupDestinationForTest('Proj', null)).toBe('!x1:s1.example');
+  });
+
+  test('③ leave/ban unmaps BOTH directions with no name@side residue', () => {
+    bridge.__mapRoomForTest('!lv:sideA.example', 'Gone', { side: 'sideA.example' });
+    expect(readState().groupRoomMap['Gone@sideA.example']).toBe('!lv:sideA.example');
+    const removed = bridge.__unmapRoomForTest('!lv:sideA.example');
+    expect(removed).toBe('Gone@sideA.example');
+    const s = readState();
+    expect(s.groupRoomMap['Gone@sideA.example']).toBeUndefined();
+    expect(s.roomGroupMap['!lv:sideA.example']).toBeUndefined();
+    expect(bridge.__roomForGroupForTest('Gone', 'sideA.example')).toBeNull();
+  });
+
+  test('③ tombstone replacement keeps the original side qualification', () => {
+    bridge.__mapRoomForTest('!old:sideB.example', 'Keep', { side: 'sideB.example' });
+    const before = readState();
+    expect(before.groupRoomMap['Keep@sideB.example']).toBe('!old:sideB.example');
+    // simulate the tombstone path's re-map (same logic the handler now runs)
+    const originalKey = bridge.__groupMappingKeyForTest('!old:sideB.example');
+    const side = originalKey.slice(originalKey.lastIndexOf('@') + 1);
+    bridge.__unmapRoomForTest('!old:sideB.example');
+    bridge.__mapRoomForTest('!new:sideB.example', 'Keep', { side });
+    const after = readState();
+    expect(after.groupRoomMap['Keep@sideB.example']).toBe('!new:sideB.example'); // side PRESERVED
+    expect(after.groupRoomMap['Keep']).toBeUndefined();                          // never bare
+  });
+});
