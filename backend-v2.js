@@ -12991,11 +12991,23 @@ function requireRequester(req, res, next) {
 const OWNER_MXID = String(process.env.HAFLEET_OWNER_MXID || '').trim();
 const OWNER_DM_ROOM = String(process.env.HAFLEET_OWNER_DM_ROOM || '').trim();
 
-function resolveOwnerFor(agentName) {
+function resolveOwnerFor(agentName, projectRoomId = null) {
   try {
-    const existing = approvalStore.listBindings({ agent: agentName })[0];
-    if (existing?.ownerMxid && existing?.ownerDmRoomId) {
-      return { ownerMxid: existing.ownerMxid, ownerDmRoomId: existing.ownerDmRoomId, from: 'existing binding' };
+    /*
+     * F04: the binding is scoped by (agent, project room). The previous code
+     * read listBindings({agent})[0] — insertion order, i.e. the FIRST project's
+     * owner — and wrote that into whichever engagement accepted next, silently
+     * re-pointing a second project's approvals at the first project's owner.
+     * Select the binding for THIS room when one exists; only when none does may
+     * the accepted-source flow (below) establish one. Never borrow another
+     * project's record.
+     */
+    const bindings = approvalStore.listBindings(
+      projectRoomId ? { agent: agentName, projectRoomId } : { agent: agentName },
+    );
+    const target = bindings[0];
+    if (target?.ownerMxid && target?.ownerDmRoomId) {
+      return { ownerMxid: target.ownerMxid, ownerDmRoomId: target.ownerDmRoomId, from: 'existing binding' };
     }
   } catch { /* store unavailable: fall through to config */ }
   if (OWNER_MXID && OWNER_DM_ROOM) {
@@ -13254,12 +13266,18 @@ function bindEngagement(engagement) {
   if (!engagement?.agent) {
     return { bound: false, error: 'engagement names no agent' };
   }
-  const owner = resolveOwnerFor(engagement.agent);
+  const owner = resolveOwnerFor(engagement.agent, engagement.projectRoomId ?? null);
   if (!owner) {
+    /*
+     * F04: no binding for (agent, THIS room) and no accepted-source fallback.
+     * Reporting "unbound" honestly beats borrowing another project's record —
+     * the old [0] pick wrote the first project's owner into every later
+     * engagement, which is the cross-project bleed this fixes.
+     */
     return {
       bound: false,
-      error: 'no owner known for this agent: set HAFLEET_OWNER_MXID and HAFLEET_OWNER_DM_ROOM, '
-        + 'or let the Matrix bridge create the first binding',
+      error: `no owner known for agent ${engagement.agent} in project room ${engagement.projectRoomId ?? '(none)'}: `
+        + 'let the Matrix bridge create this room binding from its inviter, or set HAFLEET_OWNER_MXID and HAFLEET_OWNER_DM_ROOM',
     };
   }
   try {

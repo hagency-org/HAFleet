@@ -780,6 +780,49 @@ function saveState() {
   }
 }
 const state = loadState();
+/*
+ * F03-r1 BARE-KEY MIGRATION, at load, exactly once per process. Bridge states
+ * written before the side-qualified key carry BARE group names in groupRoomMap;
+ * a side-aware lookup (roomForGroup(name, side)) would miss them and a fresh
+ * name event would create a SECOND mapping — two entries for one truth. Each
+ * bare key whose room's side is derivable (server name in the room id + an
+ * acting appservice side) is rewritten as name@side; rooms whose side cannot be
+ * derived keep the bare entry (logged) so nothing is lost. roomForGroup with a
+ * side also falls back to the bare key, so even un-migrated entries stay found.
+ */
+state.groupRoomMap = state.groupRoomMap || {};
+state.roomGroupMap = state.roomGroupMap || {};
+{
+  let migrated = 0;
+  for (const [key, roomId] of Object.entries({ ...state.groupRoomMap })) {
+    const at = key.lastIndexOf('@');
+    if (at > 0 && key.slice(at + 1).includes('.')) continue;      // already qualified
+    /*
+     * At this point in module evaluation there is no bridge instance, so
+     * sideForRoom is unavailable — but the room id NAMES its own server, and a
+     * room on our own homeserver keeps the bare entry BY DESIGN (no side). A
+     * foreign server becomes the side qualifier; whether an acting credential
+     * exists is irrelevant to the KEY's identity and is re-derived per use.
+     */
+    /*
+     * CASE: the room id's server segment keeps its original case (`sideB.example`)
+     * while a lowercased comparison (`sideb.example`) would write a key no
+     * caller can produce. Use the RAW server segment — sideForRoom's ids match
+     * the room id, and roomForGroup(name, side) builds keys from the id it was
+     * given, so the migration key and the lookup key agree byte-for-byte.
+     */
+    const rawServer = typeof roomId === 'string' && roomId.includes(':') ? roomId.slice(roomId.indexOf(':') + 1) : null;
+    const server = rawServer ? rawServer.toLowerCase() : null;
+    if (!rawServer || server === MATRIX_SERVER_NAME.toLowerCase()) continue; // own-server rooms stay bare
+    const qualified = `${key}@${rawServer}`;
+    if (state.groupRoomMap[qualified] && state.groupRoomMap[qualified] !== roomId) continue; // never overwrite
+    delete state.groupRoomMap[key];
+    state.groupRoomMap[qualified] = roomId;
+    if (state.roomGroupMap[roomId] === key) state.roomGroupMap[roomId] = qualified;
+    migrated += 1;
+  }
+  if (migrated > 0) console.log(`[group-map] migrated ${migrated} bare group key(s) to side-qualified form`);
+}
 if (!state.agentAvatars) state.agentAvatars = {};
 if (!state.roomAvatars) state.roomAvatars = {};
 if (!state.agentAvatarMeta) state.agentAvatarMeta = {};
@@ -2053,23 +2096,116 @@ function normalizeAgentNameList(payload) {
 }
 
 // ── Room ↔ Group mapping ─────────────────────────────────────────────
-function mapRoom(roomId, groupName) {
-  const prevGroup = state.roomGroupMap[roomId];
-  if (prevGroup && prevGroup !== groupName && state.groupRoomMap[prevGroup] === roomId) {
-    delete state.groupRoomMap[prevGroup];
-  }
-  const prevRoom = state.groupRoomMap[groupName];
-  if (prevRoom && prevRoom !== roomId && state.roomGroupMap[prevRoom] === groupName) {
-    delete state.roomGroupMap[prevRoom];
-  }
-  state.roomGroupMap[roomId] = groupName;
-  state.groupRoomMap[groupName] = roomId;
-  markRoomTrusted(roomId, { group: groupName });
-  saveState();
+// F03: the mapping key is the STABLE identity (group name + the room's side),
+// not the display name alone. Two rooms on different sides may share a display
+// name; the group→room direction must never silently re-point between them.
+// `groupKey(groupName, side)` is that identity; `mapRoom` refuses (and reports)
+// an attempt to rebind a group key that already belongs to a DIFFERENT room.
+
+function groupKey(groupName, side) {
+  return side ? `${groupName}@${side}` : groupName;
 }
 
-function groupForRoom(roomId) { return state.roomGroupMap[roomId] || null; }
-function roomForGroup(groupName) { return state.groupRoomMap[groupName] || null; }
+function mapRoom(roomId, groupName, { side = null, logger = console } = {}) {
+  const key = groupKey(groupName, side);
+  const prevGroup = state.roomGroupMap[roomId];
+  if (prevGroup && prevGroup !== key && state.groupRoomMap[prevGroup] === roomId) {
+    delete state.groupRoomMap[prevGroup];
+  }
+  const prevRoom = state.groupRoomMap[key];
+  if (prevRoom && prevRoom !== roomId) {
+    /*
+     * F03 CONFLICT, REPORTED AND REFUSED. The group key already belongs to
+     * another room: silently re-pointing it would steal the first room's
+     * group routing (this is exactly the same-name-two-rooms bug). We REFUSE
+     * the rebind, keep both rooms' existing mappings untouched, and say so —
+     * an operator can fix a name collision only if they can see it.
+     */
+    const message = `group "${groupName}"${side ? ` on side ${side}` : ''} already maps to room ${prevRoom}; refusing to rebind to ${roomId}. `
+      + `Two rooms sharing a display name cannot both own the group — rename one of them.`;
+    (logger?.error ?? console.error)?.(`[group-map] ${message}`);
+    try { postGroupMapConflict({ groupName, side, fromRoom: prevRoom, toRoom: roomId, message }); } catch { /* reporting must not break the room handler */ }
+    return false;
+  }
+  state.roomGroupMap[roomId] = key;
+  state.groupRoomMap[key] = roomId;
+  markRoomTrusted(roomId, { group: key });
+  saveState();
+  return true;
+}
+
+/*
+ * Conflict reporting: written to the bridge state's conflict log (visible to an
+ * operator via the state file) and mirrored to the operator warning path when
+ * the bridge instance is reachable. Kept dependency-free so mapRoom stays a
+ * plain function (it is called from module-level code with no `this`).
+ */
+let groupMapConflictSink = null;
+export function setGroupMapConflictSink(sink) { groupMapConflictSink = sink; }
+function postGroupMapConflict(detail) {
+  state.groupMapConflicts = state.groupMapConflicts || [];
+  state.groupMapConflicts.push({ ...detail, at: new Date().toISOString() });
+  if (state.groupMapConflicts.length > 100) state.groupMapConflicts.shift();
+  saveState();
+  groupMapConflictSink?.(detail);
+}
+
+/*
+ * F03-r1: the MAPPING KEY (name@side) and the GROUP NAME are different things.
+ * roomGroupMap stores keys; every BACKEND call and message field needs the bare
+ * NAME — a composite key sent to /api/groups/<name>/members 404s. groupForRoom
+ * returns the bare name (splitting the key); groupMappingKey returns the raw
+ * stored key for the two places that compare identity (rename detection).
+ */
+function bareGroupName(key) {
+  if (typeof key !== 'string') return key;
+  const at = key.lastIndexOf('@');
+  // A group name may itself contain '@'; only strip a TRAILING side segment that
+  // matches a known key form — i.e. the part after the LAST '@' contains a dot
+  // and the part before it is non-empty (Matrix server names contain dots).
+  if (at > 0 && key.slice(at + 1).includes('.')) return key.slice(0, at);
+  return key;
+}
+function groupForRoom(roomId) { return bareGroupName(state.roomGroupMap[roomId]) || null; }
+function groupMappingKey(roomId) { return state.roomGroupMap[roomId] || null; }
+/*
+ * 15-r2: THE single deletion path. Every unmap goes through here so the two
+ * directions stay consistent and the KEY (not the name) is what gets deleted —
+ * deleting by bare name against side-qualified keys left orphans (the exact
+ * leak class this round closes). Returns the removed mapping key.
+ */
+function unmapRoom(roomId) {
+  const key = groupMappingKey(roomId);
+  if (!key) return null;
+  if (state.groupRoomMap[key] === roomId) delete state.groupRoomMap[key];
+  delete state.roomGroupMap[roomId];
+  saveState();
+  return key;
+}
+// F03: resolve a group NAME to a room through the stable key. The display name
+// alone cannot pick between two sides' same-named rooms; the caller supplies
+// the side when it knows one (project-side rooms always do), and without a
+// side the lookup stays on the legacy single-side form for DM/own-server rooms.
+function roomForGroup(groupName, side = null) {
+  if (side) {
+    const qualified = state.groupRoomMap[groupKey(groupName, side)];
+    if (qualified) return qualified;
+    // F03-r1: fall back to the BARE key — pre-migration states (and rooms whose
+    // side was not derivable at load) hold bare entries; missing them would let
+    // a fresh name event create a duplicate mapping.
+    return state.groupRoomMap[groupName] || null;
+  }
+  const exact = state.groupRoomMap[groupName];
+  if (exact) return exact;
+  // No bare entry: return the first side-qualified entry for this name, so
+  // legacy callers (which do not know the side) still find A room rather than
+  // none. Deterministic: lowest key order (insertion order on string keys).
+  const prefix = `${groupName}@`;
+  for (const [key, roomId] of Object.entries(state.groupRoomMap)) {
+    if (key.startsWith(prefix)) return roomId;
+  }
+  return null;
+}
 
 /*
  * ── Pending project invitations (ADR-014 amendment 2026-08-11) ────────────────────────────
@@ -5855,6 +5991,10 @@ export class MatrixBridge {
   }
 
   async onRoomEvent(roomId, event) {
+    // F03: the room's SIDE is part of its group identity. Derived once here and
+    // threaded into mapRoom/roomForGroup so same-named rooms on different sides
+    // never share (or steal) a group mapping.
+    const roomSide = typeof this.sideForRoom === 'function' ? (this.sideForRoom(roomId)?.side?.id ?? null) : null;
     // Ignore historical events from before bridge startup
     // But always process m.room.name (needed for mapping rooms bot joins after creation)
     if (event.type !== 'm.room.name' && event.origin_server_ts && event.origin_server_ts < this.startupTs) return;
@@ -5872,12 +6012,12 @@ export class MatrixBridge {
       // Skip DM/SPY rooms — these are not groups
       if (isPrivateControlRoomName(name)) {
         // Don't map as group, but update roomGroupMap if it was previously mapped wrong
-        const oldGroup = groupForRoom(roomId);
+        const oldGroup = groupMappingKey(roomId);
         if (oldGroup && isPrivateControlRoomName(oldGroup)) {
           // Update the mapping to the new name
-          mapRoom(roomId, name);
+          mapRoom(roomId, name, { side: roomSide });
         }
-      } else if (!groupForRoom(roomId)) {
+      } else if (!groupMappingKey(roomId)) {
         // New room name set → map to group
         const existing = await groupOrNull(name, `context=room-name:get-group room=${roomId}`);
         if (!existing) {
@@ -5905,12 +6045,16 @@ export class MatrixBridge {
           });
           console.log(`Created group "${name}" from Matrix room`);
         }
-        mapRoom(roomId, name);
+        if (!mapRoom(roomId, name, { side: roomSide })) {
+          // F03: the group key belongs to another room — reported inside mapRoom.
+          // Do NOT reconcile or continue as if bound; the room keeps its old mapping.
+          return;
+        }
         await this.reconcileRoomGroupMembership(roomId, name);
         await this.syncApprovalBindingForRoom(roomId);
       } else {
-        const mapped = groupForRoom(roomId);
-        if (mapped !== name && !isPrivateControlRoomName(name)) {
+        const mapped = groupMappingKey(roomId);
+        if (mapped !== groupKey(name, roomSide) && mapped !== name && !isPrivateControlRoomName(name)) {
           const existing = await groupOrNull(name, `context=room-rename:get-group room=${roomId}`);
           if (!existing) {
             const membership = await this.joinedMembersOf(roomId);
@@ -5935,12 +6079,18 @@ export class MatrixBridge {
             });
             console.log(`Created group "${name}" from Matrix room rename`);
           }
-          mapRoom(roomId, name);
+          if (!mapRoom(roomId, name, { side: roomSide })) {
+            // F03: rename would steal another room's group — refused inside mapRoom.
+            console.log(`Room ${roomId} rename to "${name}" REFUSED: the group name is owned by another room`);
+            return;
+          }
           console.log(`Room ${roomId} renamed mapping: "${mapped}" -> "${name}"`);
           await this.reconcileRoomGroupMembership(roomId, name);
           await this.syncApprovalBindingForRoom(roomId);
         } else {
-          await this.reconcileRoomGroupMembership(roomId, mapped);
+          // 15-r2①: the backend knows the group by its BARE name — reconcile with
+          // groupForRoom, never the mapping key (a key sent as a name 404s).
+          await this.reconcileRoomGroupMembership(roomId, groupForRoom(roomId));
         }
       }
     }
@@ -5964,12 +6114,9 @@ export class MatrixBridge {
 
       // Bot kicked/left from a group room → remove group mapping
       if (targetUserId === this.botUserId && (membership === 'leave' || membership === 'ban')) {
-        const groupName = groupForRoom(roomId);
-        if (groupName) {
-          delete state.roomGroupMap[roomId];
-          delete state.groupRoomMap[groupName];
-          saveState();
-          console.log(`Bot removed from room ${roomId}, unmapped group "${groupName}"`);
+        const removedKey = unmapRoom(roomId);
+        if (removedKey) {
+          console.log(`Bot removed from room ${roomId}, unmapped group "${removedKey}"`);
         }
         return;
       }
@@ -6010,18 +6157,22 @@ export class MatrixBridge {
     // Room tombstone → clean up mapping and migrate DM rooms
     if (event.type === 'm.room.tombstone') {
       const replacementRoom = event.content?.replacement_room;
-      const groupName = groupForRoom(roomId);
-      if (groupName) {
-        delete state.roomGroupMap[roomId];
-        delete state.groupRoomMap[groupName];
+      const originalKey = groupMappingKey(roomId);
+      if (originalKey) {
+        unmapRoom(roomId);
         if (replacementRoom) {
-          state.roomGroupMap[replacementRoom] = groupName;
-          state.groupRoomMap[groupName] = replacementRoom;
-          console.log(`Room ${roomId} tombstoned, migrated group "${groupName}" → ${replacementRoom}`);
+          /*
+           * 15-r2③: re-map through mapRoom with the ORIGINAL side so the
+           * replacement's key keeps the qualification — a bare write here
+           * would regress the mapping to the pre-F03 form on the very next
+           * tombstone.
+           */
+          const side = originalKey.includes('@') ? originalKey.slice(originalKey.lastIndexOf('@') + 1) : null;
+          mapRoom(replacementRoom, bareGroupName(originalKey), { side });
+          console.log(`Room ${roomId} tombstoned, migrated group "${originalKey}" → ${replacementRoom}`);
         } else {
-          console.log(`Room ${roomId} tombstoned, unmapped group "${groupName}"`);
+          console.log(`Room ${roomId} tombstoned, unmapped group "${originalKey}"`);
         }
-        saveState();
       }
       // Migrate DM room mappings
       if (!state.dmRooms) state.dmRooms = {};
@@ -6226,6 +6377,7 @@ export class MatrixBridge {
   }
 
   async tryMapRoom(roomId) {
+    const roomSide = typeof this.sideForRoom === 'function' ? (this.sideForRoom(roomId)?.side?.id ?? null) : null;
     if (groupForRoom(roomId)) return groupForRoom(roomId); // already mapped
     if (!rateLimitGate.beforeRequest()) {
       console.warn(`Room mapping: cooling down (Matrix rate limit), skipping room ${roomId}`);
@@ -6276,7 +6428,11 @@ export class MatrixBridge {
         });
         console.log(`Created group "${name}" from room bot joined`);
       }
-      mapRoom(roomId, name);
+      if (!mapRoom(roomId, name, { side: roomSide })) {
+        // F03: refused — the group key belongs to another room (reported inside).
+        console.log(`Mapping room ${roomId} → group "${name}" REFUSED: the group name is owned by another room`);
+        return null;
+      }
       console.log(`Mapped room ${roomId} → group "${name}"`);
       await this.syncApprovalBindingForRoom(roomId);
       return name;
@@ -8197,7 +8353,25 @@ export class MatrixBridge {
 
     if (msg.group) {
       // Group message
-      const roomId = roomForGroup(msg.group);
+      // F03: when the agent's message names its project side, route through the
+      // SIDE-QUALIFIED key so a same-named group on another side cannot capture
+      // it. Without a side (system/own-server agents) the legacy lookup applies.
+      const msgSide = this.agentSenderFor?.(canonicalAgentName, null)?.side?.id ?? null;
+      /*
+       * 15-r2②: a side-UNKNOWN sender with MORE THAN ONE same-named mapping
+       * must not be routed by first-match — that is a guess wearing a return
+       * value. Refuse and log ambiguous; a single mapping is unambiguous and
+       * may be used; a registered side (appservice roster/preset) wins first.
+       */
+      const prefix = `${msg.group}@`;
+      const sameNamed = Object.entries(state.groupRoomMap)
+        .filter(([k]) => k === msg.group || k.startsWith(prefix));
+      if (!msgSide && sameNamed.length > 1) {
+        console.warn(`[group-route] group "${msg.group}" maps to ${sameNamed.length} rooms across sides and the sender has no registered side — refusing to guess (ambiguous); message ${msg.id} from ${agentName} not bridged`);
+        this.postWarning(`Group "${msg.group}" is ambiguous across sides and agent ${agentName} has no side — message not bridged`);
+        return;
+      }
+      const roomId = msgSide ? roomForGroup(msg.group, msgSide) : (sameNamed[0]?.[1] ?? null);
       if (!roomId) {
         console.log(`No Matrix room for group "${msg.group}", skipping`);
         if (msg.group !== 'info') {
@@ -9400,6 +9574,31 @@ export async function generateAvatarPngForTest(name, options = {}) {
 
 export function setBridgeMatrixTestHooks({ execFileAsync: overrideExecFileAsync } = {}) {
   execFileAsyncImpl = typeof overrideExecFileAsync === 'function' ? overrideExecFileAsync : execFileAsync;
+}
+
+/*
+ * F03 test seams: mapRoom/roomForGroup are module-level functions on module-level
+ * state, so the isolation tests reach them through these named exports rather
+ * than re-implementing the mapping (a re-implementation would pass when the real
+ * code was broken — the exact failure mode the F03 review called out).
+ */
+export function __mapRoomForTest(roomId, groupName, opts) { return mapRoom(roomId, groupName, opts); }
+export function __roomForGroupForTest(groupName, side) { return roomForGroup(groupName, side); }
+export function __groupForRoomForTest(roomId) { return groupForRoom(roomId); }
+export function __groupMappingKeyForTest(roomId) { return groupMappingKey(roomId); }
+export function __unmapRoomForTest(roomId) { return unmapRoom(roomId); }
+/*
+ * 15-r2 test seam: the ambiguous-routing DECISION, extracted so the test pins
+ * the policy (refuse on >1, route on 1, side wins) without standing up a full
+ * onAgentMessage pipeline. The handler calls the same logic inline.
+ */
+export function __resolveGroupDestinationForTest(groupName, side) {
+  if (side) return roomForGroup(groupName, side);
+  const prefix = `${groupName}@`;
+  const candidates = Object.entries(state.groupRoomMap)
+    .filter(([k]) => k === groupName || k.startsWith(prefix));
+  if (candidates.length > 1) return null;   // ambiguous → refused
+  return candidates[0]?.[1] ?? null;
 }
 
 export function resetBridgeMatrixTestHooks() {

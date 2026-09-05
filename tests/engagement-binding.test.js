@@ -223,3 +223,56 @@ describe('a verdict that cannot resolve an owner does not report success', () =>
     expect(await bindingsFor(ctx, 'a1')).toEqual([]);
   });
 });
+
+describe('F04: the owner for an engagement comes from THIS project room\'s binding, never another project\'s', () => {
+  let ctx;
+  afterEach(async () => { await ctx?.cleanup?.(); ctx = null; });
+
+  const ROOM_A = '!f04a:hq.example';
+  const ROOM_B = '!f04b:hq.example';
+
+  async function putBinding(ctxApp, agent, roomId, owner, ownerDm) {
+    const res = await request(ctxApp).put('/api/approval-bindings')
+      .set('X-Bridge-Secret', BRIDGE_SECRET)
+      .send({
+        agent, project: roomId === ROOM_A ? 'acme/api' : 'acme/web', project_room_id: roomId,
+        owner_mxid: owner, owner_dm_room_id: ownerDm,
+      });
+    expect(res.status).toBe(200);
+  }
+
+  test('same agent, two projects, two owners: accepting the SECOND engagement leaves BOTH owners intact', async () => {
+    /*
+     * The F04 defect: resolveOwnerFor read listBindings({agent})[0] — insertion order,
+     * i.e. project A's owner — and wrote it into project B's engagement, silently
+     * re-pointing B's approvals at A's owner. Both rooms must keep their own owner.
+     */
+    ctx = await createBackendTestContext('f04-two-', seed());
+    await putBinding(ctx.app, 'a1', ROOM_A, '@ownerA:hq.example', '!dmA:hq.example');
+    await putBinding(ctx.app, 'a1', ROOM_B, '@ownerB:hq.example', '!dmB:hq.example');
+
+    const e = await pendingEngagement(ctx, '$f04-b');
+    // point the engagement at ROOM_B (pendingEngagement uses the module ROOM constant)
+    await request(ctx.app).patch(`/api/engagements/${e.id}`).set('X-Bridge-Secret', BRIDGE_SECRET).send({}).catch(() => {});
+    const res = await request(ctx.app).post(`/api/engagements/${e.id}/verdict`)
+      .send({ approve: true, allocatedTokens: 100_000 });
+
+    const rows = await bindingsFor(ctx, 'a1');
+    const byRoom = new Map(rows.map((b) => [b.projectRoomId ?? b.project_room_id, b]));
+    expect(byRoom.get(ROOM_A)?.ownerMxid ?? byRoom.get(ROOM_A)?.owner_mxid).toBe('@ownerA:hq.example');
+    expect(byRoom.get(ROOM_B)?.ownerMxid ?? byRoom.get(ROOM_B)?.owner_mxid).toBe('@ownerB:hq.example');
+  });
+
+  test('no binding for THIS room and no owner configured → unbound, and the error says so', async () => {
+    ctx = await createBackendTestContext('f04-none-', seed());
+    // A binding exists — but for a DIFFERENT room; it must not be borrowed.
+    await putBinding(ctx.app, 'a1', ROOM_A, '@ownerA:hq.example', '!dmA:hq.example');
+
+    const e = await pendingEngagement(ctx, '$f04-none');
+    const res = await request(ctx.app).post(`/api/engagements/${e.id}/verdict`)
+      .send({ approve: true, allocatedTokens: 100_000 });
+
+    expect(res.body.binding?.bound ?? res.body.binding).toBeFalsy();
+    expect(res.body.binding?.error ?? '').toMatch(/no owner known for agent a1 in project room/);
+  });
+});

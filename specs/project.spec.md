@@ -70,20 +70,21 @@ an executable task contract.
 ## Acceptance Criteria
 
 Scenario: Default coding-agent sandbox remains enforced
-  Test: default launch flags are sandboxed for both runtimes
+  Test: Claude defaults to auto-mode
   Given an agent launch command is generated for Claude or Codex
   When the launch policy applies runtime defaults
   Then Claude uses auto permission mode
   And Codex uses workspace-write sandboxing with on-request approval
+  Test: Codex Level 2 maps to workspace-write plus on-request
 
 Scenario: Project rooms remain mention gated by default
-  Test: MATRIX_DEFAULT_WAKE defaults to mention-only mode
+  Test: matrix default wake is mention-only unless legacy auto is explicitly enabled
   Given no legacy wake override is configured
   When a project room receives an unaddressed human message
   Then the message wakes no coding agent
 
 Scenario: Missing Matrix authorization fails closed
-  Test: bot rejects an invite when no trusted inviter can be proven
+  Test: unknown room with untrusted inviter is untrusted
   Given a Matrix room has no trusted inviter provenance
   When the room invites the bridge bot
   Then the bridge rejects the invitation
