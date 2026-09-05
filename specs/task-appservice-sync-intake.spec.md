@@ -1,7 +1,7 @@
 spec: task
 name: "Appservice sync intake (third inbound mode)"
 inherits: project
-satisfies: [ADR-016, ADR-014]
+satisfies: [REQ-AGENT-OPS-MATRIX-INTAKE, ADR-016, ADR-014]
 tags: [active, matrix, appservice, intake]
 estimate: 2d
 ---
@@ -81,47 +81,57 @@ duplicate suppression, and authentication.
   bridge.
 - Must not filter out membership or invite sections.
 
-## Scenarios
+## Acceptance Criteria
 
-Each scenario is bound to a named test in `tests/appservice-sync.test.js`;
-that file is the executable form of this spec.
+Scenario: Cursor advances only on router success
+  Test: A: a router failure does NOT advance the cursor; retries are CAPPED and the collector stops
+  Given a sync batch the router refuses
+  When the collector finishes its bounded retries
+  Then the cursor is unchanged and the collector stopped itself
 
-- **Cursor advances only on success** — the router answering non-200 leaves
-  the cursor in place and the batch is retried.
-  Test: `A: a router failure does NOT advance the cursor; retries are CAPPED and the collector stops`.
-- **Poison batch circuit-breaks the side** — after the retry budget the
-  collector stops, the cursor is held, and the operator is warned exactly once.
-  Test: `A-cap: a poison batch circuit-breaks the collector, holds the cursor, warns once`
-  (pins `heldCursor` and `failedNextBatch` separately, and the sleep
-  sequence as seven fixed 1000ms waits — the eighth attempt breaks
-  instead of sleeping). The 8 refusals are CONSECUTIVE refusals of ONE
-  batch: every successful cursor advance resets the retry count, so a
-  new batch never inherits a previous batch's attempts — pinned by
-  `A-cont: 7 refusals → an empty-batch advance succeeds → a NEW batch's first refusal counts as 1, no early break`.
-- **Invites are delivered, first-poll join timeline is not** — both
-  first-poll semantics pinned separately, invite events shaped like join
-  events.
-  Tests: `logs in, swallows the initial sync, delivers timeline events through the router, and persists the cursor`,
-  `B: invite events carry room_id like join events and reach the router`,
-  `B-idem: a repeated invite (restart redelivery) is harmless`.
-- **401 circuit-break** — a fresh token rejected by sync backs off instead
-  of re-logging in; only an older-generation token may trigger one re-login.
-  Test: `C: a 401 on a FRESHLY minted token backs off instead of re-logging in`
-  (exhaustion-shape pins: `C-real: login ALWAYS succeeds + sync ALWAYS 401 → two logins, then exponential sleeps`,
-  reset-on-success pin: `C-reset: after a SUCCESSFUL poll restores health, ONE new fast re-login is allowed`).
-- **Per-side mutex with normalization** — same side (any spelling) refused;
-  different sides allowed; listener conflicts with any.
-  Tests: `D: listener + sync on any side is refused (the listener has no side dimension)`,
-  `D: edge and sync on the SAME side is refused, on DIFFERENT sides is allowed`,
-  `D-norm: side names are normalized before the mutex (case, trailing slash, URL form)`.
-- **Filter allowlist on the wire** — the sync URL carries the filter JSON
-  and `set_presence=offline`.
-  Test: `E: the sync request carries an explicit filter and set_presence=offline`.
-- **Half-configured refusal** — each half of the config pair is refused with
-  a reason naming the missing half.
-  Test: `half-configured is refused, not treated as off`.
+Scenario: A poison batch circuit-breaks the side, holding the cursor
+  Test: A-cap: a poison batch circuit-breaks the collector, holds the cursor, warns once
+  Given the router refuses one batch eight consecutive times
+  When the circuit breaker fires
+  Then polling stops, the cursor is held, and the operator is warned exactly once
 
-## Test hygiene (binding)
+Scenario: Invites are delivered on every poll; the first join timeline is not
+  Test: logs in, swallows the initial sync, delivers timeline events through the router, and persists the cursor
+  Given a first poll carrying both an invite section and a join timeline
+  When the collector processes it
+  Then the invite reaches the router and the join timeline does not
+
+Scenario: A repeated invite redelivery is harmless
+  Test: B-idem: a repeated invite (restart redelivery) is harmless
+  Given the same invite section on successive polls
+  When it is delivered twice
+  Then both router batches are identical and no error state accrues
+
+Scenario: A 401 on a freshly minted token backs off
+  Test: C: a 401 on a FRESHLY minted token backs off instead of re-logging in
+  Given a login that succeeds and a sync that always answers 401
+  When the fast re-login is spent
+  Then the loop rides the exponential lane and never hammers login again
+
+Scenario: The intake mutex is per side after normalization
+  Test: D: edge and sync on the SAME side is refused, on DIFFERENT sides is allowed
+  Given two intakes whose side ids differ only by case or form
+  When they are compared for the mutex
+  Then same-side pairs are refused and different sides are allowed
+
+Scenario: The sync request carries the filter allowlist
+  Test: E: the sync request carries an explicit filter and set_presence=offline
+  Given any sync poll
+  When the request is built
+  Then the URL carries the filter JSON and set_presence=offline
+
+Scenario: A half-configured sync env is refused
+  Test: half-configured is refused, not treated as off
+  Given only one of side or URL is configured
+  When the config is resolved
+  Then intake is disabled with a reason naming the missing half
+
+### Test hygiene (binding)
 
 Every loop-shaped test in `tests/appservice-sync.test.js` MUST use the
 shared watchdog helper (absolute iteration cap, trips as an error), MUST NOT
@@ -129,7 +139,7 @@ use a mock-call count as its sole stop condition, MUST use a sleep mock that
 records and yields (never a spin), and MUST call `collector.stop()` in an
 `afterEach` guard.
 
-## References
+### References
 
 - `lib/appservice-sync.js` — implementation.
 - `lib/appservice-receiver.js` — the shared router both intakes feed.
