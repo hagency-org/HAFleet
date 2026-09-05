@@ -79,3 +79,54 @@ describe('F03: group↔room mapping is keyed by stable identity, not display nam
     expect(['!a:sideA.example', '!b:sideB.example']).toContain(bridge.__roomForGroupForTest('proj'));
   });
 });
+
+describe('F03-r1: the composite key never leaks; bare state stays found', () => {
+  let bridge; let runtimeDir; let stateFile; let envSnapshot;
+
+  const readState = () => JSON.parse(readFileSync(stateFile, 'utf8'));
+  const writeState = (s) => writeFileSync(stateFile, JSON.stringify(s, null, 2));
+
+  beforeAll(async () => {
+    runtimeDir = mkdtempSync(path.join(os.tmpdir(), 'hafleet-f03r1-'));
+    envSnapshot = { ...process.env };
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
+    process.env.MATRIX_AGENT_PREFIX = 'ac_';
+    const url = pathToFileURL(path.resolve('bridge-matrix.js')).href;
+    bridge = await import(`${url}?f03r1=${Date.now()}-${Math.random()}`);
+    stateFile = path.join(runtimeDir, 'data', 'matrix', 'bridge-state.json');
+  });
+
+  afterAll(() => {
+    process.env = envSnapshot;
+    rmSync(runtimeDir, { recursive: true, force: true });
+  });
+
+  test('groupForRoom returns the BARE name — member sync and message fields never see name@side', () => {
+    bridge.__mapRoomForTest('!x:sideA.example', 'Fleet', { side: 'sideA.example' });
+    // the stored KEY is qualified...
+    const s = readState();
+    expect(s.groupRoomMap['Fleet@sideA.example']).toBe('!x:sideA.example');
+    // ...but every consumer of groupForRoom sees the bare name
+    expect(bridge.__groupForRoomForTest('!x:sideA.example')).toBe('Fleet');
+    // and the side-aware destination lookup still resolves
+    expect(bridge.__roomForGroupForTest('Fleet', 'sideA.example')).toBe('!x:sideA.example');
+  });
+
+  test('a pre-migration BARE-key state stays found by a side-aware lookup, with no second entry', async () => {
+    // Simulate an upgraded bridge-state: bare key for a foreign-side room.
+    writeState({
+      roomGroupMap: { '!legacy:sideB.example': 'LegacyProj' },
+      groupRoomMap: { LegacyProj: '!legacy:sideB.example' },
+    });
+    // Re-import so load-time migration runs against the bare state.
+    process.env.HAFLEET_RUNTIME_DIR = runtimeDir;
+    const url = pathToFileURL(path.resolve('bridge-matrix.js')).href;
+    const fresh = await import(`${url}?f03r1-mig-${Date.now()}-${Math.random()}`);
+    // side-aware lookup HITS (by migration or bare fallback)…
+    expect(fresh.__roomForGroupForTest('LegacyProj', 'sideB.example')).toBe('!legacy:sideB.example');
+    // …and there is exactly ONE entry for that room — no duplicate mapping.
+    const s2 = readState();
+    const rooms = Object.entries(s2.groupRoomMap).filter(([, r]) => r === '!legacy:sideB.example');
+    expect(rooms).toHaveLength(1);
+  });
+});
