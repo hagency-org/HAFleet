@@ -117,21 +117,38 @@ pub fn seed(state: &Path) -> (DomainRepository, String) {
     // The retained flow: a commitment admissible when made (100 of a
     // generous ceiling), then the ceiling lowered under it (50), swept once
     // before the store starts. Diagnostic only — no usage source, no session,
-    // no dispatch state.
+    // no dispatch state. This engagement also carries the E4 project name:
+    // 260 astral characters, which the verifier truncates to 255 Unicode
+    // SCALAR values (authority.rs:286) = 510 UTF-16 units — a name exceeding
+    // the old client's UTF-16 bound but never the server's scalar one.
     let alert_pool = common::resource(
         "private_alert_pool",
         "private_alert_seat",
         9_000_000_000_000_000,
     );
     db.put_resource(&alert_pool).unwrap();
-    let alert_proof = common::proof(&common::request(
-        "alert_request",
-        "AlertWorker",
-        &alert_pool,
-        100,
-    ));
+    let alert_request = common::request("alert_request", "AlertWorker", &alert_pool, 100);
+    let mut alert_observation = common::observation(&alert_request);
+    alert_observation.project.name = Some("𝕏".repeat(260));
+    let alert_proof = hagency_core::authority::verify_request(
+        &common::registration(),
+        alert_request,
+        alert_observation,
+    )
+    .unwrap();
     db.admit(&alert_proof, 1000).unwrap();
     db.approve("approve_alert", &alert_proof, 1000).unwrap();
+    // E3 of the engagements review: a third engagement so `?limit=1` yields
+    // two content pages plus an EMPTY third page. Distinct agent name
+    // (admit refuses a live name collision); admit alone is enough — the
+    // read lists every engagement state, and `pending` is one of them.
+    let page_proof = common::proof(&common::request(
+        "pagination_request",
+        "PageWorker",
+        &pool,
+        100,
+    ));
+    db.admit(&page_proof, 1000).unwrap();
     db.put_resource(&common::resource(
         "private_alert_pool",
         "private_alert_seat",

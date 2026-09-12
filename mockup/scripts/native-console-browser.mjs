@@ -136,6 +136,20 @@ try {
   assert.match(await page.locator('main').innerText(), /UsageWorker|NewUsageWorker/);
   assert.match(await page.locator('main').innerText(), /read-only — creating, verdicts and revocation|只读 —— 创建、裁定与撤销/);
   assert(await page.locator('main button.danger').count() === 0, 'no mutating buttons on the engagements page');
+  // E3: page IN-PAGE through the seeded rows — each page must pass
+  // validateEngagements (a refusal would leave the ready state) until the
+  // Next button disables on the null cursor.
+  const nextButton = page.locator('button', { hasText: process.env.HAGENCY_CONSOLE_LANG === 'zh' ? '下一页' : 'Next page' });
+  let pages = 1;
+  for (let i = 0; i < 6 && (await nextButton.isEnabled()); i += 1) {
+    await nextButton.click();
+    await page.locator('[data-native-state="ready"]').waitFor();
+    pages += 1;
+  }
+  assert(await nextButton.isDisabled(), 'the cursor exhausts to null and disables Next');
+  assert(pages >= 2, `walked ${pages} pages`);
+  await page.locator('button', { hasText: 'First page' }).click();
+  await page.locator('[data-native-state="ready"]').waitFor();
   await page.goto(`${config.base}/console/usage/?engagement_id=${config.engagement}`);
   await page.locator('[data-native-state="ready"]').waitFor();
   const storage = await page.evaluate(() => ({ local: Object.fromEntries(Object.entries(localStorage)), session: Object.fromEntries(Object.entries(sessionStorage)) }));

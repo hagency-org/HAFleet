@@ -73,11 +73,72 @@ async fn native_console_engagements_read() {
     }
     assert!(row["requestedTokens"].as_u64().is_some());
     assert!(row["id"].as_str().is_some_and(|id| !id.is_empty()));
-    // Pagination: page one plus a second page through the seeded rows.
-    let response = get("/console/api/engagements?limit=1", &cookie)
+    // E4 on the wire: the astral project name. The verifier truncated the
+    // 260-character input to 255 Unicode SCALAR values (authority.rs:286) —
+    // 510 UTF-16 code units, a name that exceeds a UTF-16 bound but never
+    // the scalar one. The client validator counts code points (verified by
+    // a node unit against the real validator), so both sides agree.
+    let astral = rows
+        .iter()
+        .find(|r| r["agentName"] == "AlertWorker")
+        .expect("the astral-name engagement publishes");
+    let name = astral["projectName"].as_str().unwrap();
+    assert_eq!(name.chars().count(), 255, "255 Unicode scalar values");
+    assert_eq!(name.encode_utf16().count(), 510, "510 UTF-16 units");
+    assert!(name.chars().all(|c| c == '𝕏'));
+    // E3: the pagination ladder at ?limit=1. The cursor is the LAST-SERVED
+    // engagement's server-assigned id (console/usage.rs:78) — an opaque
+    // ordering key the store compares lexically (`WHERE id>?1 ORDER BY id`,
+    // domain.rs). It names no session, no authority and no resource: a bare
+    // cursor grants nothing, and every page re-authorizes through the
+    // console session exactly as page one did.
+    let mut response = get("/console/api/engagements?limit=1", &cookie)
         .send(&service)
         .await;
     assert_eq!(response.status_code, Some(StatusCode::OK));
+    let value = response.take_json::<Value>().await.unwrap();
+    let page_one = value["engagements"].as_array().unwrap();
+    assert_eq!(page_one.len(), 1, "page one carries exactly one row");
+    let first_id = page_one[0]["id"].as_str().unwrap().to_owned();
+    let cursor = value["next_after"]
+        .as_str()
+        .expect("non-null opaque next_after on page one")
+        .to_owned();
+    assert!(!cursor.is_empty());
+    assert_eq!(cursor, first_id, "the cursor is the last-served id");
+    let mut seen = vec![first_id];
+    let mut cursor = Some(cursor);
+    // Walk to exhaustion: three seeded engagements → three one-row pages,
+    // then an EMPTY page with a null cursor.
+    for expected in 0..4 {
+        let Some(after) = cursor.clone() else {
+            break;
+        };
+        let mut response = get(
+            &format!("/console/api/engagements?limit=1&after={after}"),
+            &cookie,
+        )
+        .send(&service)
+        .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let value = response.take_json::<Value>().await.unwrap();
+        let rows = value["engagements"].as_array().unwrap();
+        if expected < 2 {
+            assert_eq!(rows.len(), 1, "content page {}", expected + 2);
+            let id = rows[0]["id"].as_str().unwrap().to_owned();
+            assert!(!seen.contains(&id), "each page serves a NEW engagement");
+            seen.push(id.clone());
+            cursor = value["next_after"].as_str().map(str::to_owned);
+        } else {
+            assert!(rows.is_empty(), "the page after the last row is empty");
+            assert!(
+                value["next_after"].is_null(),
+                "the empty page carries a null cursor"
+            );
+            cursor = None;
+        }
+    }
+    assert_eq!(seen.len(), 3, "all three seeded engagements were served");
     f.close().await;
 }
 

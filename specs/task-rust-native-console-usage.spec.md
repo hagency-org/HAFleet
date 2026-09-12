@@ -144,9 +144,9 @@ operations maintenance remote roles packaging production configuration and cutov
 
 Scenario: The console engagements read requires a browser session
   Test: native_console_engagements_read
-  Given the console engagements read behind the console authenticate hoop
+  Given the console engagements read behind the console authenticate hoop with three seeded engagements including one carrying an astral project name truncated to 255 scalar values
   When a request arrives without a session, with a forged or duplicated cookie, with foreign host origin sec-fetch-site or forwarded headers, or with a foreign zero above-cap or repeated limit
-  Then it is refused exactly as the usage console reads are, and the default read publishes the fixture engagement with every wire key including requestedTokens
+  Then it is refused exactly as the usage console reads are, the default read publishes every wire key including requestedTokens, and paging at limit one through the opaque id cursor serves two content pages then an empty page with a null cursor while the astral name agrees on both bounds
 
 Scenario: The console engagements document serves with a no-query rule
   Test: native_console_engagements_document

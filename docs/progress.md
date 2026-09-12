@@ -1,5 +1,33 @@
 # Repository audit — 2026-09-05
 
+## 2026-09-12 — Engagements review edits E3/E4 (review of 0077cb08)
+
+- E3 (pagination untested): the console fixture now seeds THREE engagements
+  (UsageWorker approved+effective, AlertWorker on its own pool carrying the
+  E4 astral name, PageWorker admitted with a distinct agent name), so
+  `?limit=1` yields two content pages plus an empty third. The test asserts
+  page one's single row, a non-null opaque `next_after` equal to the
+  last-served id (the cursor is BOUND to the store's server-assigned
+  engagement id, compared lexically in `WHERE id>?1 ORDER BY id`; it carries
+  NO authority — no session, no resource, and every page re-authorizes
+  through the console session), then walks to exhaustion asserting each
+  content page serves a NEW engagement and the final page is empty with a
+  null cursor. The browser pass pages IN-PAGE (Next until disabled, then
+  First page) — each page reaching the ready state proves
+  `validateEngagements` accepted it.
+- E4 (bound unit mismatch): the client now counts projectName in Unicode
+  SCALAR VALUES (`[...s].length <= 255`), aligned with the server's
+  verifier bound `trim().chars().take(255)` (authority.rs:286, Unicode
+  scalars). Chosen over UTF-16 alignment because the scalar bound is
+  enforced at verification — upstream of the wire — so changing it would
+  alter what requests verify, not just the read; and the retained JS bound
+  (`backend-v2.js:8061` `slice(0,255)`, which counts UTF-16 units) is an
+  implementation accident of `slice`, not a designed rule. The fixture
+  carries the discriminating name: 260 astral characters → 255 scalars = 510
+  UTF-16 units, exceeding the old client bound but never the server's. The
+  node unit verified the validator accepts it (and rejects 256); the Rust
+  test asserts the wire carries exactly 255 chars / 510 UTF-16 units.
+
 ## 2026-09-12 — Console engagements page, read-only (ADR-107 amendment)
 
 - Loader + router first (the alerts-slice lesson, in the same commit as the

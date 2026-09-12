@@ -34,10 +34,20 @@ export function validateReport(v, selected) {
   return v;
 }
 export function validateEngagements(v) {
+  /* projectName is bounded in Unicode SCALAR VALUES (code points), not JS
+   * string length (UTF-16 code units): the server truncates at verification
+   * time with trim().chars().take(255) (authority.rs:286), so a name of 255
+   * astral characters is 510 UTF-16 units. Counting code points here
+   * ([...s].length) keeps the two bounds in the same unit — a .length check
+   * would refuse the whole read over a name the server legitimately stored
+   * (E4 of the engagements review). The retained JS bound
+   * (backend-v2.js:8061, slice(0,255)) counts UTF-16 units, but it is an
+   * implementation accident of `slice`, not a designed rule; the native
+   * verifier's scalar bound is the contract. */
   if (!object(v, ['engagements', 'next_after']) || !Array.isArray(v.engagements) || v.engagements.length > 16
     || !(v.next_after === null || id(v.next_after)) || v.engagements.some((e) => !object(e, ['id', 'agentName', 'projectName', 'role', 'requestedTokens', 'state', 'cleanup'])
       || !id(e.id) || typeof e.agentName !== 'string' || e.agentName.length > 128
-      || !(e.projectName === null || (typeof e.projectName === 'string' && e.projectName.length <= 256))
+      || !(e.projectName === null || (typeof e.projectName === 'string' && [...e.projectName].length <= 255))
       || typeof e.role !== 'string' || e.role.length > 128 || !number(e.requestedTokens) || !STATES.includes(e.state) || !CLEANUP.includes(e.cleanup))) throw new Error('invalid_native_response');
   return v;
 }
