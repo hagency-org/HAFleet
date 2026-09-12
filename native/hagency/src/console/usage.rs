@@ -43,6 +43,9 @@ struct Label {
     agent_name: String,
     project_name: Option<String>,
     role: String,
+    /// Requested allocation in tokens — the console engagements page's token
+    /// column (brief 16). Raw number, never compacted.
+    requested_tokens: u64,
     state: EngagementState,
     cleanup: CleanupState,
 }
@@ -81,6 +84,7 @@ async fn engagements(req: &mut Request, depot: &mut Depot, res: &mut Response) {
                     agent_name: e.agent_name.as_str().to_owned(),
                     project_name: e.project_name,
                     role: e.role,
+                    requested_tokens: u64::from(e.requested_tokens),
                     state: e.state,
                     cleanup: e.cleanup,
                 })

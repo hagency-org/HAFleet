@@ -73,3 +73,31 @@ preferences, select an engagement absent from the static build, and show unknown
 and refusal states. A real native executable must serve built assets with Node
 absent from PATH. Node is permitted for build and browser-test tooling only.
 No live service, production state or external account is used.
+
+## Amendment: the console engagements consumer (read-only)
+
+The engagements list read `GET /console/api/engagements` already existed for
+the usage page's selector (this ADR's original scope); the engagements PAGE
+is the new consumer. It is READ-ONLY triage: state strip, state/agent
+filters, the tokens column, pagination via `next_after` — no create, verdict,
+revoke or whitelist control, because those mutate enforcement and need their
+own reviewed decision; buttons that would 404 lie (the same rule as the
+alerts page). The retained page's route reasons (notWhitelisted / overOffer
+/ overCeiling) have no native counterpart — the whitelist is the retained
+fleet model's admission surface; the native analogue of "awaiting my
+decision" is the engagement STATE column.
+
+**The wire grew one key in the same commit as its client** (the binding
+exact-key lesson): `requestedTokens` — the raw requested allocation as a
+number, never compacted — on both the server `Label` and
+`validateEngagements`' seven-key exact list. A stale validator on either
+side refuses the whole read rather than rendering half a page.
+
+**The document rule differs from usage by design:** `/console/engagements/`
+takes NO query. Usage is a per-entity view (its `engagement_id` selection
+survives refresh); engagements is a paginated list whose selection happens
+in-page, so any query string is an invalid console request. The loader
+allowlist (`assets.rs` mime + the `engagements/index.html →
+/console/engagements/` key mapping), the document route rule (`console.rs`)
+and the build staging (`build-native-console.mjs`) land in the same commit
+as the page — the loader lesson from the alerts slice, applied.

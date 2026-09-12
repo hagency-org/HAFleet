@@ -25,13 +25,28 @@ pub fn now() -> u64 {
 pub fn assets(path: &Path) {
     private::directory(path).unwrap();
     std::fs::create_dir(path.join("usage")).unwrap();
+    std::fs::create_dir(path.join("engagements")).unwrap();
     let bytes = b"<!doctype html><html><body>retained asset fixture</body></html>";
     private::write_new(&path.join("usage/index.html"), bytes).unwrap();
-    let digest: String = Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    private::write_new(&path.join("manifest.json"), json!({"version":1,"assets":[{"path":"usage/index.html","size":bytes.len(),"sha256":digest,"mime":"text/html; charset=utf-8"}]}).to_string().as_bytes()).unwrap();
+    let engagement_bytes = b"<!doctype html><html><body>engagements document fixture</body></html>";
+    private::write_new(&path.join("engagements/index.html"), engagement_bytes).unwrap();
+    let mut assets = Vec::new();
+    let entries: [(&str, &[u8]); 2] = [
+        ("usage/index.html", bytes),
+        ("engagements/index.html", engagement_bytes),
+    ];
+    for (path, bytes) in entries {
+        let digest: String = Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assets.push(json!({"path":path,"size":bytes.len(),"sha256":digest,"mime":"text/html; charset=utf-8"}));
+    }
+    private::write_new(
+        &path.join("manifest.json"),
+        json!({"version":1,"assets":assets}).to_string().as_bytes(),
+    )
+    .unwrap();
 }
 pub fn native_resource(preset: &str) -> hagency_core::project::Resource {
     serde_json::from_value(json!({"presetId":preset,"seatId":"private_resource_account","framework":"codex","model":"gpt-5.6-sol","reasoning":"medium","ceiling":{"tokens":5000,"period":"monthly"}})).unwrap()

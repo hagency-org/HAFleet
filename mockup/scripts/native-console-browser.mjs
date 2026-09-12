@@ -127,6 +127,15 @@ try {
   assert((await page.locator('.notice').first().innerText()).length > 10, 'the read-only notice must render');
   assert(await page.locator('button.danger').first().isDisabled(), 'delete stays refused');
   assert((await page.locator('tbody tr[aria-selected]').count()) >= 1, 'the seeded alert row renders and is selectable');
+  // The engagements page (the console consumer slice, read-only): the list
+  // read the usage flow already carries, rendered as triage. Ready state,
+  // the seeded engagement's row, the read-only note, no mutating buttons.
+  await page.goto(`${config.base}/console/engagements/`);
+  await page.locator('[data-native-state="ready"]').waitFor();
+  assert((await page.locator('tbody tr').count()) >= 1, 'the seeded engagement renders');
+  assert.match(await page.locator('main').innerText(), /UsageWorker|NewUsageWorker/);
+  assert.match(await page.locator('main').innerText(), /read-only — creating, verdicts and revocation|只读 —— 创建、裁定与撤销/);
+  assert(await page.locator('main button.danger').count() === 0, 'no mutating buttons on the engagements page');
   await page.goto(`${config.base}/console/usage/?engagement_id=${config.engagement}`);
   await page.locator('[data-native-state="ready"]').waitFor();
   const storage = await page.evaluate(() => ({ local: Object.fromEntries(Object.entries(localStorage)), session: Object.fromEntries(Object.entries(sessionStorage)) }));

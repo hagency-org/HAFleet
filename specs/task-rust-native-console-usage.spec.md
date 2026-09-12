@@ -141,3 +141,15 @@ Scenario: Native executable serves without deployed Node
 
 Other console pages full Agent routing fleet usage aggregation health alerts
 operations maintenance remote roles packaging production configuration and cutover.
+
+Scenario: The console engagements read requires a browser session
+  Test: native_console_engagements_read
+  Given the console engagements read behind the console authenticate hoop
+  When a request arrives without a session, with a forged or duplicated cookie, with foreign host origin sec-fetch-site or forwarded headers, or with a foreign zero above-cap or repeated limit
+  Then it is refused exactly as the usage console reads are, and the default read publishes the fixture engagement with every wire key including requestedTokens
+
+Scenario: The console engagements document serves with a no-query rule
+  Test: native_console_engagements_document
+  Given the staged engagements document in the loader allowlist and key mapping
+  When the document is fetched and then with any query parameter
+  Then the document body serves without a query and any query is refused as an invalid console request while non-document assets keep the origin rule

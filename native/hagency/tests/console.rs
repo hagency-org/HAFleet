@@ -5,6 +5,8 @@ mod alerts;
 mod browser;
 #[path = "console/configuration.rs"]
 mod configuration;
+#[path = "console/engagements.rs"]
+mod engagements;
 #[path = "console/fixture.rs"]
 mod fixture;
 #[path = "console/resources.rs"]

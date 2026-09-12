@@ -35,10 +35,10 @@ export function validateReport(v, selected) {
 }
 export function validateEngagements(v) {
   if (!object(v, ['engagements', 'next_after']) || !Array.isArray(v.engagements) || v.engagements.length > 16
-    || !(v.next_after === null || id(v.next_after)) || v.engagements.some((e) => !object(e, ['id', 'agentName', 'projectName', 'role', 'state', 'cleanup'])
+    || !(v.next_after === null || id(v.next_after)) || v.engagements.some((e) => !object(e, ['id', 'agentName', 'projectName', 'role', 'requestedTokens', 'state', 'cleanup'])
       || !id(e.id) || typeof e.agentName !== 'string' || e.agentName.length > 128
       || !(e.projectName === null || (typeof e.projectName === 'string' && e.projectName.length <= 256))
-      || typeof e.role !== 'string' || e.role.length > 128 || !STATES.includes(e.state) || !CLEANUP.includes(e.cleanup))) throw new Error('invalid_native_response');
+      || typeof e.role !== 'string' || e.role.length > 128 || !number(e.requestedTokens) || !STATES.includes(e.state) || !CLEANUP.includes(e.cleanup))) throw new Error('invalid_native_response');
   return v;
 }
 async function request(path, options = {}) {

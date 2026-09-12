@@ -337,9 +337,13 @@ async fn asset(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let editor_document = matches!(path, "/console/resources/new" | "/console/resources/new/");
     // The alerts document takes no selection: it lists every open alert.
     let alerts_document = matches!(path, "/console/alerts" | "/console/alerts/");
+    // The engagements document takes NO query: it is a paginated triage list
+    // whose selection happens in-page, not a per-entity view like usage.
+    let engagements_document = matches!(path, "/console/engagements" | "/console/engagements/");
     let document = editor_document
         || resource_document
         || alerts_document
+        || engagements_document
         || matches!(path, "/console/usage" | "/console/usage/");
     if !document
         && req
@@ -356,7 +360,8 @@ async fn asset(req: &mut Request, depot: &mut Depot, res: &mut Response) {
                 resource_configuration::selection_query(req).is_err()
             } else if resource_document {
                 resources::selection_query(req).is_err()
-            } else if alerts_document {
+            } else if alerts_document || engagements_document {
+                // No selection parameter: the whole query string must be empty.
                 req.uri().query().is_some()
             } else {
                 usage::selection_query(req).is_err()

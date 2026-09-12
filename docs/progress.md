@@ -1,5 +1,38 @@
 # Repository audit — 2026-09-05
 
+## 2026-09-12 — Console engagements page, read-only (ADR-107 amendment)
+
+- Loader + router first (the alerts-slice lesson, in the same commit as the
+  page): `assets.rs` mime allowlist entry for `engagements/index.html` plus
+  its `/console/engagements/` key mapping; `console.rs` document set gains
+  the engagements document with a NO-QUERY rule — a paginated triage list
+  whose selection happens in-page, unlike usage's per-entity
+  `engagement_id` selection. Note: the alerts entries in these two files are
+  absent on this branch — the orchestrator wired them integration-side; this
+  commit adds only the engagements entries.
+- Server: the read already existed (`GET /console/api/engagements`,
+  `console/usage.rs`, ADR-107's selector); the wire grew one key —
+  `requestedTokens` (raw number, never compacted) — on the server `Label`
+  and in `validateEngagements`' seven-key exact list in the SAME commit (the
+  binding exact-key lesson; import-verified both directions).
+- Client: `NativeEngagements.jsx` rides the existing `fetchNative` load (no
+  new Data.jsx branch): state strip (six native states), state/agent
+  filters, the tokens column, `next_after` pagination, read-only note, no
+  mutating buttons (create/verdict/revoke stay with the project side — the
+  retained page's route reasons have no native counterpart). Page branches
+  on `NATIVE_MODE`; rail enables `engagements`; build script stages the page
+  at all four sites; three i18n keys in both dictionaries (parity 3/3).
+- Tests: `tests/console/engagements.rs` — `native_console_engagements_read`
+  (authority matrix incl. `sec-fetch-site: none` and `forwarded`, query
+  refusals at 0/17/bad/encoded/repeated/foreign, the exact seven-key wire
+  shape, pagination) and `native_console_engagements_document` (document
+  served from the staged fixture, no-query rule, origin rule intact on
+  non-documents). The fixture's `assets()` now stages the engagements
+  document so the loader allowlist is exercised. Browser: an engagements
+  pass in `native-console-browser.mjs` (ready state, the seeded engagement
+  row, the read-only note, no mutating buttons). Spec scenarios with both
+  `Test:` names; ADR-107 gains the engagements-consumer amendment.
+
 ## 2026-09-12 — Console alerts review edits E1–E4 (review of 63ef17cf)
 
 - E1 (the write/read contradiction): the store read now PARSES `detail` when
