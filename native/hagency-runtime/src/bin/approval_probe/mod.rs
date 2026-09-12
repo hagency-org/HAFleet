@@ -22,17 +22,50 @@ pub(super) fn announce(marker: &Path, extension: &str) -> io::Result<()> {
     fs::write(marker.with_extension(extension), b"ready")
 }
 
-/// Wait until the test writes the release marker, bounded by the original
-/// six-second gate budget.
+/// Wait until the test writes the release marker, bounded by the derived
+/// harness wait (one tenth of the operation budget, doubled where the test
+/// side must first observe something of its own) — never a literal, which
+/// is what let the probe give up while a loaded host was still inside its
+/// operation budget.
 pub(super) fn await_release(marker: &Path, extension: &str) -> io::Result<()> {
-    let until = Instant::now() + Duration::from_secs(6);
+    let until = Instant::now() + harness_wait() * 2;
     while !marker.with_extension(extension).is_file() {
         if Instant::now() >= until {
-            return Err(io::ErrorKind::TimedOut.into());
+            return Err(io::Error::other(format!(
+                "probe timed out waiting for the host to write owned-dispatch.{extension}"
+            )));
         }
         std::thread::sleep(Duration::from_millis(5));
     }
     Ok(())
+}
+
+/// Hold until the HOST stops ownership, observed as EOF on the response
+/// stream we were already given (the parent's own `StdinLock`, borrowed as
+/// `reader` — never a second lock, which would deadlock on the guard).
+/// Pulses for evidence while polling; the derived ceiling can never outlive
+/// the operation. Used by modes whose subject ends before the host does.
+fn hold_reader_to_eof(reader: &mut impl BufRead, marker: &Path) -> io::Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(marker.with_extension("pulse"))?;
+    let until = Instant::now() + harness_wait() * 4;
+    loop {
+        file.write_all(b"x")?;
+        file.flush()?;
+        // An empty fill_buf is EOF: the host closed our stdin (ownership
+        // stop). The bytes are left unconsumed for any later reader.
+        if reader.fill_buf()?.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= until {
+            return Err(io::Error::other(
+                "probe held past its derived ceiling without the host closing stdin",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// One half of the original gate: announce readiness, then wait.
@@ -71,9 +104,15 @@ pub(super) fn run(mode: &str, reader: &mut impl BufRead, marker: &Path) -> io::R
         return Ok(false);
     }
     if mode == "owned-approval-resolve" {
+        // Cancellation: the probe must resolve without reading a response —
+        // that is its subject — so the handshake is explicit both ways and
+        // the probe never exits before the host is done with it: announce
+        // the resolution (the test releases the host on THIS marker), then
+        // hold to the host's stdin close.
         gate(marker)?;
         resolved("approval-1")?;
-        pulse(marker)?;
+        announce(marker, "approval-resolving")?;
+        hold_reader_to_eof(reader, marker)?;
         return Ok(false);
     }
     if mode == "owned-approval-resolve-first" {
@@ -88,7 +127,10 @@ pub(super) fn run(mode: &str, reader: &mut impl BufRead, marker: &Path) -> io::R
         // this marker before releasing the host's gate, so the resolution can
         // never be emitted before the host is in flight nor after its send.
         fs::write(marker.with_extension("approval-resolving"), b"resolving")?;
-        if let Ok(extra) = timeout_read(Duration::from_millis(300)) {
+        // A frame arriving after the resolution is a REAL defect, so the
+        // watch must be bounded by the budget, not a 300 ms guess that can
+        // pass vacuously when the frame is merely late.
+        if let Ok(extra) = timeout_read(harness_wait() * 2) {
             return Err(io::Error::other(format!(
                 "frame after pre-first-byte resolution: {extra:?}"
             )));
@@ -120,20 +162,34 @@ pub(super) fn run(mode: &str, reader: &mut impl BufRead, marker: &Path) -> io::R
         return Ok(false);
     }
     if mode == "owned-approval-turn-midwrite" {
-        // The final verdict's rule, uncertain arm. No gate: the host's send
-        // is free to run. The probe stays silent long enough for the whole
-        // frame to be accepted (the write completes into the OS buffer the
-        // moment the choice round-trip lands), then ends the turn and exits
-        // with the frame UNREAD — no read at all, so no buffered reader can
-        // drain the pipe and complete the flush. On Windows the transport's
-        // flush (`FlushFileBuffers`) is still pending over the unread bytes
-        // when the read handle closes, so the send fails mid-write with
-        // bytes accepted — transmitted, receipt-less, uncertain:
-        // `SettlementUnknown`, never a silent completion. On POSIX the
-        // 51-byte pipe write is atomic and the flush is a no-op, so the
-        // write is accepted and recorded before the turn end arrives: the
-        // clean control arm, asserted as such by the scenario.
-        std::thread::sleep(Duration::from_millis(1200));
+        // The subject: a frame fully accepted, then unread. The ordering is
+        // asserted, not timed: the probe announces it is armed and silent,
+        // and the TEST releases the turn end only after observing the
+        // host's first accepted byte (the durable `write_accepted` row), so
+        // the arm's premise is proven rather than hoped for. The probe then
+        // ends the turn and exits with the frame unread — no read at all,
+        // so no buffered reader can drain the pipe and complete the flush.
+        // On Windows the transport's flush (`FlushFileBuffers`) is still
+        // pending over the unread bytes when the read handle closes, so the
+        // send fails mid-write with bytes accepted — transmitted,
+        // receipt-less, uncertain: `SettlementUnknown`, never a silent
+        // completion. On POSIX the 51-byte pipe write is atomic and the
+        // flush is a no-op, so the write is accepted and recorded before
+        // the turn end arrives: the clean control arm, asserted as such by
+        // the scenario.
+        announce(marker, "approval-midwrite-armed")?;
+        // Wait until the host's frame is IN the pipe — observed by PEEKING
+        // (`fill_buf` never consumes: the frame stays unread, the arm's
+        // premise). The blocking peek returns exactly when bytes arrive; EOF
+        // before any byte names itself, and the test's derived bound on the
+        // `approval-byte-seen` marker is the outer ceiling.
+        if reader.fill_buf()?.is_empty() {
+            return Err(io::Error::other(
+                "host closed stdin before writing the approval frame",
+            ));
+        }
+        announce(marker, "approval-byte-seen")?;
+        await_release(marker, "approval-midwrite-release")?;
         note(
             "turn/completed",
             json!({ "threadId": "owned-thread", "turn": { "id": "owned-turn", "status": "completed", "items": [] } }),
@@ -177,7 +233,10 @@ pub(super) fn run(mode: &str, reader: &mut impl BufRead, marker: &Path) -> io::R
         let response = read(reader, marker)?;
         append_bytes(marker, &response)?;
         resolved("approval-1")?;
-        if let Ok(extra) = timeout_read(Duration::from_millis(300)) {
+        // Same rule as the resolve-first watch: a second frame after the
+        // resolution is a real defect, so the bound is the budget, not a
+        // 300 ms guess that passes vacuously when the frame is merely late.
+        if let Ok(extra) = timeout_read(harness_wait() * 2) {
             return Err(io::Error::other(format!(
                 "second frame after resolution: {extra:?}"
             )));

@@ -178,7 +178,7 @@ async fn native_owned_approval_caller_loss() {
         .unwrap();
         let mut notices = op.take_approval_requests().unwrap();
         if !matches!(fault, Fault::RequestAck | Fault::SpawnPanic) {
-            let notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+            let notice = tokio::time::timeout(harness_wait() * 3, notices.recv())
                 .await
                 .unwrap()
                 .unwrap();
@@ -296,12 +296,12 @@ async fn native_owned_approval_barriers_pending_receipt() {
         )
         .unwrap();
         let mut notices = op.take_approval_requests().unwrap();
-        let first = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+        let first = tokio::time::timeout(harness_wait() * 3, notices.recv())
             .await
             .unwrap()
             .unwrap();
         choose(&domain, first.request_id).await;
-        let end = tokio::time::Instant::now() + Duration::from_secs(2);
+        let end = tokio::time::Instant::now() + harness_wait();
         while !gate.entered.load(Ordering::Acquire) {
             assert!(
                 tokio::time::Instant::now() < end,
@@ -323,7 +323,7 @@ async fn native_owned_approval_barriers_pending_receipt() {
             .await
             .unwrap();
         std::fs::write(work.join("owned-dispatch.approval-release"), b"release").unwrap();
-        let second = tokio::time::timeout(Duration::from_secs(1), notices.recv())
+        let second = tokio::time::timeout(harness_wait(), notices.recv())
             .await
             .unwrap()
             .unwrap();
@@ -415,12 +415,12 @@ async fn native_owned_approval_usage_successful_control() {
     )
     .unwrap();
     let mut notices = op.take_approval_requests().unwrap();
-    let first = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+    let first = tokio::time::timeout(harness_wait() * 3, notices.recv())
         .await
         .unwrap()
         .unwrap();
     choose(&domain, first.request_id).await;
-    let end = tokio::time::Instant::now() + Duration::from_secs(2);
+    let end = tokio::time::Instant::now() + harness_wait();
     while !gate.entered.load(Ordering::Acquire) {
         assert!(tokio::time::Instant::now() < end);
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -455,7 +455,7 @@ async fn native_owned_approval_usage_successful_control() {
 
 async fn failed_usage_receipt(gate: &crate::approval::Gate) {
     use std::sync::atomic::Ordering;
-    let until = tokio::time::Instant::now() + Duration::from_secs(2);
+    let until = tokio::time::Instant::now() + harness_wait();
     while !gate.usage_failed.load(Ordering::Acquire) {
         assert!(
             tokio::time::Instant::now() < until,
@@ -487,11 +487,11 @@ async fn native_owned_approval_usage_unknown_slot() {
     )
     .unwrap();
     let mut notices = op.take_approval_requests().unwrap();
-    tokio::time::timeout(Duration::from_secs(6), notices.recv())
+    tokio::time::timeout(harness_wait() * 3, notices.recv())
         .await
         .unwrap()
         .expect("actual pending owner request");
-    let until = tokio::time::Instant::now() + Duration::from_secs(2);
+    let until = tokio::time::Instant::now() + harness_wait();
     while !gate.entered.load(Ordering::Acquire) {
         assert!(
             tokio::time::Instant::now() < until,
@@ -547,7 +547,7 @@ async fn native_owned_approval_acceptance_reconcile_accepted() {
     )
     .unwrap();
     let mut notices = op.take_approval_requests().unwrap();
-    let notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+    let notice = tokio::time::timeout(harness_wait() * 3, notices.recv())
         .await
         .unwrap()
         .unwrap();
@@ -636,7 +636,7 @@ async fn native_owned_approval_acceptance_reconcile_unrecorded() {
     )
     .unwrap();
     let mut notices = op.take_approval_requests().unwrap();
-    let notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+    let notice = tokio::time::timeout(harness_wait() * 3, notices.recv())
         .await
         .unwrap()
         .unwrap();
@@ -645,7 +645,7 @@ async fn native_owned_approval_acceptance_reconcile_unrecorded() {
     // next store write it attempts is the acceptance observation. Taking the
     // single writer here makes that acceptance transaction refuse after its
     // bounded busy wait rather than commit.
-    let end = tokio::time::Instant::now() + Duration::from_secs(2);
+    let end = tokio::time::Instant::now() + harness_wait();
     while !gate.entered.load(Ordering::Acquire) {
         assert!(
             tokio::time::Instant::now() < end,
@@ -658,7 +658,7 @@ async fn native_owned_approval_acceptance_reconcile_unrecorded() {
     gate.release.store(true, Ordering::Release);
     // Bounded and generous against the writer's 100 ms busy timeout: the
     // acceptance write refuses, the ordered read then answers "unrecorded".
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    tokio::time::sleep(harness_wait() / 4).await;
     sql.execute_batch("COMMIT").unwrap();
     let report = op.wait().await.unwrap();
     assert_eq!(report.failure, Some(Failure::SettlementUnknown));
@@ -772,7 +772,7 @@ async fn native_owned_approval_in_flight_resolution_completes_write() {
     )
     .unwrap();
     let mut notices = op.take_approval_requests().unwrap();
-    let notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+    let notice = tokio::time::timeout(harness_wait() * 3, notices.recv())
         .await
         .unwrap()
         .unwrap();
@@ -867,7 +867,7 @@ async fn native_owned_approval_resolution_before_admission_cancels() {
     )
     .unwrap();
     let mut notices = op.take_approval_requests().unwrap();
-    let _notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+    let _notice = tokio::time::timeout(harness_wait() * 3, notices.recv())
         .await
         .unwrap()
         .unwrap();
@@ -911,7 +911,7 @@ async fn native_owned_approval_no_second_frame_after_resolution() {
     )
     .unwrap();
     let mut notices = op.take_approval_requests().unwrap();
-    let notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+    let notice = tokio::time::timeout(harness_wait() * 3, notices.recv())
         .await
         .unwrap()
         .unwrap();
@@ -966,7 +966,7 @@ async fn native_owned_approval_receipt_before_resolution() {
     )
     .unwrap();
     let mut notices = op.take_approval_requests().unwrap();
-    let notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+    let notice = tokio::time::timeout(harness_wait() * 3, notices.recv())
         .await
         .unwrap()
         .unwrap();
@@ -1059,7 +1059,7 @@ async fn native_owned_approval_resolved_before_first_byte() {
     )
     .unwrap();
     let mut notices = op.take_approval_requests().unwrap();
-    let notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+    let notice = tokio::time::timeout(harness_wait() * 3, notices.recv())
         .await
         .unwrap()
         .unwrap();
@@ -1186,7 +1186,7 @@ async fn native_owned_approval_peer_gone_before_first_byte() {
     )
     .unwrap();
     let mut notices = op.take_approval_requests().unwrap();
-    let notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+    let notice = tokio::time::timeout(harness_wait() * 3, notices.recv())
         .await
         .unwrap()
         .unwrap();
@@ -1269,7 +1269,7 @@ async fn native_owned_approval_turn_end_untransmitted() {
     )
     .unwrap();
     let mut notices = op.take_approval_requests().unwrap();
-    let notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+    let notice = tokio::time::timeout(harness_wait() * 3, notices.recv())
         .await
         .unwrap()
         .unwrap();
@@ -1361,13 +1361,30 @@ async fn native_owned_approval_turn_end_midwrite_uncertain() {
     )
     .unwrap();
     let mut notices = op.take_approval_requests().unwrap();
-    let notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+    let notice = tokio::time::timeout(harness_wait() * 3, notices.recv())
         .await
         .unwrap()
         .unwrap();
     choose(&domain, notice.request_id).await;
-    // The probe exits on its own schedule (silent 1.2 s, turn end, exit
-    // unread); wait for its handshake marker before claiming the report.
+    // Explicit ordering both ways (§3b(6)): the probe announces it has
+    // SEEN the host's first byte in the pipe (its non-consuming peek — the
+    // frame stays unread, the arm's premise); only then does the test
+    // release the turn end. The exit marker then proves the mode ran (§2c).
+    let byte_seen = work.join("owned-dispatch.approval-byte-seen");
+    let end = tokio::time::Instant::now() + harness_wait() * 2;
+    while !byte_seen.exists() {
+        assert!(
+            tokio::time::Instant::now() < end,
+            "host never wrote the frame the probe waits to peek; markers: {}",
+            markers_present(&work)
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    std::fs::write(
+        work.join("owned-dispatch.approval-midwrite-release"),
+        b"release",
+    )
+    .unwrap();
     let midwrite = work.join("owned-dispatch.approval-midwrite-exit");
     let end = tokio::time::Instant::now() + harness_wait();
     while !midwrite.exists() {
@@ -1378,6 +1395,12 @@ async fn native_owned_approval_turn_end_midwrite_uncertain() {
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    // §2c's stale-binary proof: the executed probe must be THIS mode.
+    assert_eq!(
+        std::fs::read_to_string(work.join("owned-dispatch.mode")).unwrap(),
+        "owned-approval-turn-midwrite",
+        "the probe binary executed a different mode than the test requested"
+    );
     let report = op.wait().await.unwrap();
     assert_ne!(
         report.protocol,

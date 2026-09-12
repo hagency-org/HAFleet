@@ -15,13 +15,29 @@ fn pulse(marker: &Path) -> io::Result<()> {
         .create(true)
         .append(true)
         .open(marker.with_extension("pulse"))?;
-    let until = Instant::now() + Duration::from_secs(8);
+    let until = Instant::now() + harness_wait() * 4;
     while Instant::now() < until {
         file.write_all(b"x")?;
         file.flush()?;
         std::thread::sleep(Duration::from_millis(20));
     }
     Ok(())
+}
+/// The operation budget the host grants, in ms. The host builders pass it on
+/// the same env channel as `HAGENCY_OFFLINE_MODE`; the 25 s default matches
+/// `Limits::operation_ms` so a probe run outside the harness is still
+/// bounded.
+fn operation_budget_ms() -> u64 {
+    std::env::var("HAGENCY_OPERATION_BUDGET_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(25_000)
+}
+/// A derived wait: one tenth of the operation budget. This is the ONLY shape
+/// a probe-side wait may take — a literal here is what let the probe exit
+/// before a loaded host's first byte (`Io("stdin write")`, accepted 0 of 51).
+fn harness_wait() -> Duration {
+    Duration::from_millis(operation_budget_ms() / 10)
 }
 /// Stay alive after terminal output until the HOST stops ownership, which it
 /// signals by closing our stdin. The old fixed 8 s pulse was a literal while
@@ -102,7 +118,7 @@ fn gated_pulse(marker: &Path) -> io::Result<()> {
         .create_new(true)
         .write(true)
         .open(marker.with_extension("pulse"))?;
-    let until = Instant::now() + Duration::from_secs(8);
+    let until = Instant::now() + harness_wait() * 4;
     file.write_all(b"xxx")?;
     file.flush()?;
     while !marker.with_extension("release").is_file() {
@@ -168,6 +184,11 @@ fn method(request: &Value, expected: &str) -> io::Result<()> {
 }
 fn fake(mode: &str, marker: &Path) -> io::Result<()> {
     fs::write(marker.with_extension("entered"), b"entered")?;
+    // The mode echo (stale-binary proof, §2c): the probe records WHICH mode
+    // it executed before dispatching, so a VM run whose markers imply the
+    // ordinary path can never masquerade as a logic miss in a new mode —
+    // the tests assert this file's content.
+    fs::write(marker.with_extension("mode"), mode)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt;
@@ -231,7 +252,7 @@ fn fake(mode: &str, marker: &Path) -> io::Result<()> {
         // Observe a distinct child's output before protocol completion can cause
         // the owner to stop us. This prevents a never-scheduled child from being
         // mistaken for a successfully exercised descendant termination path.
-        let until = Instant::now() + Duration::from_secs(3);
+        let until = Instant::now() + harness_wait();
         while fs::metadata(child_marker.with_extension("pulse")).map_or(0, |m| m.len()) < 2 {
             if Instant::now() >= until {
                 let _ = child.kill();
@@ -301,9 +322,17 @@ fn fake(mode: &str, marker: &Path) -> io::Result<()> {
         }
         // A real acknowledged turn can run a tool without another app-server
         // event during the shorter RPC response interval.
-        std::thread::sleep(Duration::from_millis(2200));
+        std::thread::sleep(harness_wait());
     }
     if mode.starts_with("owned-approval") && !approval_probe::run(mode, &mut stdin, marker)? {
+        if mode == "owned-approval-turn-untransmitted" {
+            // Hold to the host's close instead of exiting: the verdict comes
+            // from the turn-end rule reading the transport's write custody
+            // (zero OBSERVED bytes during the hold), not from racing the
+            // pipe's death — the fixture's lifetime follows the host's.
+            drop(stdin);
+            hold_until_stdin_closed(marker, operation_budget_ms())?;
+        }
         return Ok(());
     }
     if mode == "approval" {
@@ -321,7 +350,7 @@ fn fake(mode: &str, marker: &Path) -> io::Result<()> {
     }
     if mode == "usage-gate" {
         fs::write(marker.with_extension("usage-ready"), b"ready")?;
-        let until = Instant::now() + Duration::from_secs(4);
+        let until = Instant::now() + harness_wait() * 2;
         while !marker.with_extension("usage-release").is_file() {
             if Instant::now() >= until {
                 return Err(io::Error::other("offline usage gate expired"));
@@ -470,7 +499,7 @@ fn owner_crash(marker: &Path) -> io::Result<()> {
         require_crash_containment: true,
     };
     let (_owner, _pipes) = hagency_platform::SupervisedProcess::spawn_piped(&binary, &launch)?;
-    let until = Instant::now() + Duration::from_secs(3);
+    let until = Instant::now() + harness_wait();
     while fs::metadata(marker.with_file_name("descendant-child.pulse")).map_or(0, |m| m.len()) < 3 {
         if Instant::now() >= until {
             return Err(io::Error::other("owned descendant did not start"));

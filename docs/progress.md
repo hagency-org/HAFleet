@@ -8193,3 +8193,47 @@ client qualification and ongoing identity/key management remain separate.
   `--test transport` 8/8; `--test owned` 1+7 is the pre-existing spawn wall
   (stash-baseline proven identical); execution lib 10 passed + 24 EPERM
   SQLite-wall failures (all at the fixture's repository open, unchanged).
+
+## 2026-09-12 — Derive every approval probe bound from the operation budget and make scenario ordering explicit
+
+- The designer's harness design (context-probe-bounds §3), probe side:
+  - `operation_budget_ms()` reads `HAGENCY_OPERATION_BUDGET_MS` (default
+    25 000 = `Limits::operation_ms`) and `harness_wait()` is one tenth of
+    it — the only shape a probe-side wait may take. Every literal is gone:
+    `pulse` and `gated_pulse` (8 s), the gate (6 s), both descendant-start
+    waits (3 s), quiet-turn (2 200 ms), usage-gate (4 s), the two 300 ms
+    `timeout_read` watches (resolve-first, admitted-resolve-count), and the
+    midwrite 1 200 ms sleep. Expiries print what they were waiting for.
+  - The probe never resolves/ends/ exits before it has read the host's
+    response except where the ordering IS the subject, and those are
+    explicit both ways: `owned-approval-resolve` resolves, announces
+    `approval-resolving` (the test releases the host on that marker), then
+    `hold_reader_to_eof` (EOF on the borrowed reader — never a second
+    stdin lock) keeps it alive to the host's ownership stop;
+    `owned-approval-turn-untransmitted` returns into the parent's new
+    hold-to-close; midwrite announces `approval-midwrite-armed`, PEEKS the
+    host's frame with a non-consuming `fill_buf` (the frame stays unread —
+    the arm's premise), announces `approval-byte-seen`, and only ends the
+    turn after the test writes `approval-midwrite-release`.
+  - §2c's stale-binary proof: `fake()` writes the executed mode to
+    `owned-dispatch.mode` before dispatch; the midwrite scenario asserts
+    the file matches the requested mode.
+- Test side: every wait literal in `approval_loss.rs` (~21: 6 s notice
+  waits, 2 s polls, the 1 s second-notice wait, the 600 ms writer sleep)
+  and `approval_fixture.rs` (6 s notice, 5 s marker) now derives from the
+  budget (`harness_wait()` and `limits().operation_ms`); §3d re-keys
+  `unconfirmed()` to the durable invariant — `accepted <= responses.len()`
+  always, strict equality only when no entry's trace shows the
+  early-resolution quiet drop (`resolved-before-write` /
+  `send-withheld-for-event`) — so the legitimate peer-resolves-first
+  ordering stops failing as a lost receipt; the midwrite scenario's
+  handshake is marker-driven end to end with the mode echo asserted.
+- §2b is report-only: the `PeerEof`+`write: None` → `Protocol` VM failure
+  predates brief 20's H2/H3 classifier (`send_failure` +
+  `send_failure_with_termination` route the pump through the same predicate
+  the send path uses); `09efb440` already fixes it — no new product change.
+- Gates: fmt, clippy (runtime + execution + hagency, all targets), `check
+  --tests` clean; runtime crate: lib 5/5, probe bin 1/1 (the hold
+  mechanism proof), codex 9/9, `--test transport` 8/8; `--test owned` 1+7
+  is the pre-existing spawn wall (stash-baseline proven identical);
+  execution lib 10 passed + 24 EPERM SQLite-wall failures (unchanged).
