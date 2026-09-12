@@ -163,3 +163,39 @@ writer parked past the 2 s reply bound, whose only seam is test-private to
 this loop test. The loop exposes a `tokio::sync::watch` of the last
 `CeilingSweepTick` (`Swept(outcome)` / `Refused(code)`) so tests await
 transitions without sleep-based polling.
+
+## Amendment: the console consumer (brief 13)
+
+**Consumer.** The native console's alerts page ships as a READ-ONLY triage
+surface: `hagency/src/console/alerts.rs` (`GET /console/api/alerts?limit=`,
+mirroring `usage.rs` exactly — recheck after the store answers, the console
+`failed()` mapping, `Busy → 503 "busy"`, statement-time `at_ms`, no-store from
+the boundary) mounted beside `usage::router()`; client
+`mockup/lib/native-api.js` `validateAlerts` (exact-key, both directions) +
+`fetchAlerts` + `alertsView`; `components/NativeAlerts.jsx` behind
+`app/alerts/page.jsx`'s native branch; rail enabled; staged by
+`build-native-console.mjs`. Polling rides `Data.jsx`'s existing 15 s refresh
+(the retained console's own cadence, `Data.jsx:308`) — no new timer, no SSE:
+the native console has no SSE channel and the retained console never used one
+(it is a curl/API consumer; the retained SSE echo, `backend-v2.js:1866`,
+remains future work on the same store read).
+
+**Derived fields.** `severity: "warning"` and `status: "open"` are derived at
+the console handler, never stored: every `agent_ceiling_overrun` ingest is a
+warning (`backend-v2.js:9422-9447`), and the store read is open-rows-only by
+construction. This is why the native page has one open-count strip and no
+status filter where the retained page has five.
+
+**No actions.** The native store has no operator close path (the lost-ceiling
+asymmetry above), so the console renders no transition buttons and delete
+stays refused — controls that would 404 lie. An operator close path, if ever
+added, is its own reviewed slice with its own authority; until then the
+console shows the four actionable fields and the raw figures, and resolution
+is what the sweep does when the draw recovers.
+
+**Validator contract.** The wire item carries exactly thirteen keys; the
+client validator's exact-key list must match or the page never reaches ready
+(a stale server or client fails loudly instead of rendering half a page).
+`detail` is the parsed payload object OR a truncated JSON string (the
+retained `truncatePayload` rule ported at the store): the validator accepts
+the union and the page renders the string arm as text.

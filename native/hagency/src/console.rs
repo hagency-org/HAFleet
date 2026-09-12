@@ -1,4 +1,5 @@
 //! Read-only browser facade. Native operator/runner authentication is unchanged.
+mod alerts;
 mod assets;
 mod authority;
 pub mod client;
@@ -59,6 +60,7 @@ pub(crate) fn router() -> Router {
             Router::with_path("api")
                 .hoop(authenticate)
                 .push(usage::router())
+                .push(alerts::router())
                 .push(resources::router())
                 .push(resource_configuration::router()),
         )

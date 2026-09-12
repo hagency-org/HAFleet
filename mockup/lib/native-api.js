@@ -95,6 +95,33 @@ export async function fetchNative(selected, after = '') {
   const report = chosen === null ? null : validateReport(await request(`/api/engagements/${chosen}/usage`), chosen);
   return { ...list, selected: chosen, report };
 }
+/* The console's open ceiling alerts. Exactly thirteen keys per alert — the
+ * server's ConsoleAlert set — because the exact-key contract is how a stale
+ * server or client fails loudly instead of rendering half a page. `detail`
+ * is the parsed payload object OR a truncated JSON string (the retained
+ * truncatePayload rule, alert-store.js:61-64, ported at the store): the
+ * object arm carries exactly the seven payload keys; the string arm accepts
+ * any string and the page renders it as text. `severity`/`status` are
+ * server-derived constants for this alert type. */
+const DETAIL_KEYS = ['agent', 'presetId', 'ceilingTokens', 'committedTokens', 'measuredTokens', 'drawnTokens', 'overByTokens'];
+const ALERT_KEYS = ['dedupe_key', 'resource_id', 'summary', 'detail', 'runbook', 'impact', 'recovery_condition', 'occurrences', 'first_seen_ms', 'last_seen_ms', 'resolved', 'severity', 'status'];
+const validDetail = (v) => (v !== null && typeof v === 'object' && !Array.isArray(v)
+  && Object.keys(v).length === DETAIL_KEYS.length && DETAIL_KEYS.every((k) => Object.hasOwn(v, k))
+  && DETAIL_KEYS.every((k) => k === 'measuredTokens' ? (v[k] === null || number(v[k])) : (k === 'agent' || k === 'presetId' ? text(v[k], 256) : number(v[k]))))
+  || text(v, 4096);
+export function validateAlerts(v) {
+  if (!object(v, ['at_ms', 'alerts']) || !number(v.at_ms) || !Array.isArray(v.alerts) || v.alerts.length > 200
+    || v.alerts.some((a) => !object(a, ALERT_KEYS)
+      || !text(a.dedupe_key, 256) || !id(a.resource_id) || !text(a.summary, 2048)
+      || !validDetail(a.detail) || !text(a.runbook, 2048) || !text(a.impact, 2048) || !text(a.recovery_condition, 2048)
+      || !number(a.occurrences) || !number(a.first_seen_ms) || !number(a.last_seen_ms)
+      || typeof a.resolved !== 'boolean' || a.severity !== 'warning' || a.status !== 'open' || a.resolved !== false)) throw new Error('invalid_native_response');
+  return v;
+}
+export async function fetchAlerts() {
+  return validateAlerts(await request('/api/alerts?limit=100'));
+}
+export function alertsView(location) { return /^\/console\/alerts\/?$/.test(location.pathname); }
 export async function logoutNative() { await request('/session', { method: 'DELETE' }); }
 
 const revision = (v) => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);

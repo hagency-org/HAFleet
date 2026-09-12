@@ -5,7 +5,7 @@ import DataStatus from '@/components/DataStatus';
 import { makeDerive } from '@/lib/derive';
 import { fetchLive, CONTRACT_SLICES } from '@/lib/api';
 import * as fixture from '@/lib/mock-data';
-import { NATIVE_MODE, exchangeAccess, fetchNative, fetchResources, resourceView, publishResource, configurationView, configurationSelection, fetchConfiguration, configureResource, logoutNative, selection } from '@/lib/native-api';
+import { NATIVE_MODE, exchangeAccess, fetchNative, fetchResources, resourceView, publishResource, configurationView, configurationSelection, fetchConfiguration, configureResource, logoutNative, selection, alertsView, fetchAlerts } from '@/lib/native-api';
 
 /*
  * One data context for the console, with provenance attached.
@@ -126,13 +126,14 @@ function NativeDataProvider({ children }) {
     let requestKey = null;
     try {
       const entry = configurationView(window.location) ? configurationSelection(window.location) : null;
-      const resources = entry !== null || resourceView(window.location);
-      const requested = entry ? entry.id : selection(window.location, resources ? 'resource_id' : 'engagement_id');
-      requestKey = JSON.stringify([entry?.mode ?? resources, requested, after]);
+      const alerts = alertsView(window.location);
+      const resources = !alerts && (entry !== null || resourceView(window.location));
+      const requested = entry ? entry.id : alerts ? null : selection(window.location, resources ? 'resource_id' : 'engagement_id');
+      requestKey = JSON.stringify([entry ? `configuration:${entry.mode}` : alerts ? 'alerts' : resources, requested, after]);
       setState((s) => s.requestKey === requestKey && ['ready', 'stale'].includes(s.phase)
         ? { ...s, refreshing: true, error: null }
         : { ...initial });
-      const value = await (entry ? fetchConfiguration(entry, after) : resources ? fetchResources(requested, after) : fetchNative(requested, after));
+      const value = await (entry ? fetchConfiguration(entry, after) : alerts ? fetchAlerts() : resources ? fetchResources(requested, after) : fetchNative(requested, after));
       if (mine !== generation.current || !admitted.current) return;
       cursor.current = after;
       setState({ ...initial, ...value, phase: 'ready', requestKey });

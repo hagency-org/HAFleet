@@ -1,3 +1,5 @@
+#[path = "console/alerts.rs"]
+mod alerts;
 #[path = "console/browser.rs"]
 #[cfg(feature = "native-console-browser")]
 mod browser;

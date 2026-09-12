@@ -96,6 +96,34 @@ pub fn seed(state: &Path) -> (DomainRepository, String) {
         )
         .unwrap();
     }
+    // Brief 13: one open ceiling-overrun alert for the console consumer, on
+    // its OWN pool and seat so every other fixture consumer is unaffected
+    // (new_engagement still admits 100 against private_usage_pool's 1000).
+    // The retained flow: a commitment admissible when made (100 of a
+    // generous ceiling), then the ceiling lowered under it (50), swept once
+    // before the store starts. Diagnostic only — no usage source, no session,
+    // no dispatch state.
+    let alert_pool = common::resource(
+        "private_alert_pool",
+        "private_alert_seat",
+        9_000_000_000_000_000,
+    );
+    db.put_resource(&alert_pool).unwrap();
+    let alert_proof = common::proof(&common::request(
+        "alert_request",
+        "AlertWorker",
+        &alert_pool,
+        100,
+    ));
+    db.admit(&alert_proof, 1000).unwrap();
+    db.approve("approve_alert", &alert_proof, 1000).unwrap();
+    db.put_resource(&common::resource(
+        "private_alert_pool",
+        "private_alert_seat",
+        50,
+    ))
+    .unwrap();
+    db.sweep_ceiling_overruns(2000).unwrap();
     (db, engagement)
 }
 fn snapshot(input: u64, output: u64, cached: u64) -> String {

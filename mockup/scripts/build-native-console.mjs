@@ -17,8 +17,9 @@ const work = await mkdtemp(join(dirname(output), 'native-console-build-'));
 const staged = join(work, 'mockup');
 await mkdir(join(staged, 'app', 'usage'), { recursive: true, mode: 0o700 });
 await mkdir(join(staged, 'app', 'resources', 'new'), { recursive: true, mode: 0o700 });
+await mkdir(join(staged, 'app', 'alerts'), { recursive: true, mode: 0o700 });
 for (const name of ['components', 'lib', 'package.json', 'jsconfig.json', 'next.config.mjs']) await cp(join(source, name), join(staged, name), { recursive: true });
-for (const name of ['layout.jsx', 'globals.css', 'usage/page.jsx', 'resources/page.jsx', 'resources/new/page.jsx']) await cp(join(source, 'app', name), join(staged, 'app', name));
+for (const name of ['layout.jsx', 'globals.css', 'usage/page.jsx', 'resources/page.jsx', 'resources/new/page.jsx', 'alerts/page.jsx']) await cp(join(source, 'app', name), join(staged, 'app', name));
 await mkdir(join(work, 'lib'), { mode: 0o700 });
 await cp(join(source, '..', 'lib', 'role-capacity.json'), join(work, 'lib', 'role-capacity.json'));
 await symlink(await realpath(join(source, 'node_modules')), join(staged, 'node_modules'), 'dir');
@@ -50,7 +51,7 @@ const child = spawn(process.execPath, [next, 'build', '--webpack'], { cwd: stage
 const code = await new Promise((done, reject) => { child.once('error', reject); child.once('exit', done); });
 if (code !== 0) throw new Error(`Next build failed (${code}); staging retained at ${work}`);
 const exported = join(staged, 'out');
-const files = ['usage/index.html', 'resources/index.html', 'resources/new/index.html'];
+const files = ['usage/index.html', 'resources/index.html', 'resources/new/index.html', 'alerts/index.html'];
 async function walk(dir, relative) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const path = `${relative}/${entry.name}`;
@@ -60,7 +61,7 @@ async function walk(dir, relative) {
   }
 }
 await walk(join(exported, '_next', 'static'), '_next/static');
-const mime = (path) => ['usage/index.html', 'resources/index.html', 'resources/new/index.html'].includes(path) ? 'text/html; charset=utf-8'
+const mime = (path) => ['usage/index.html', 'resources/index.html', 'resources/new/index.html', 'alerts/index.html'].includes(path) ? 'text/html; charset=utf-8'
   : path.endsWith('.js') ? 'text/javascript; charset=utf-8' : path.endsWith('.css') ? 'text/css; charset=utf-8'
     : path.endsWith('.woff2') ? 'font/woff2' : path.endsWith('.woff') ? 'font/woff' : null;
 let total = 0; let largest = 0; const assets = [];

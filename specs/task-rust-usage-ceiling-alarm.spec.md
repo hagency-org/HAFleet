@@ -136,3 +136,15 @@ Scenario: An over-long detail truncates instead of aborting the sweep
   Given a detail JSON string past the 4096-byte cap
   When it is composed
   Then it is sliced to the cap the way the retained truncatePayload does and the sweep continues
+
+Scenario: The console alerts read requires a browser session
+  Test: native_console_alerts_read
+  Given the console alerts route behind the console authenticate hoop
+  When a request arrives without a session, with a forged or duplicated cookie, with foreign host/origin/forwarded headers, or with a foreign, zero, above-cap or repeated limit
+  Then it is refused exactly as the usage console reads are, and the default and bounded limits publish the seeded open alert
+
+Scenario: The console publishes the fixture's open ceiling alert
+  Test: native_console_alerts_fixture_publishes_open_alerts
+  Given the fixture's commit-then-lower overrun swept once before the store starts
+  When a sessioned console read runs
+  Then every wire field is present (derived severity warning and status open, the parsed detail figures, the four actionable fields, occurrences, first/last seen) and a resolved alert is absent after the ceiling is restored

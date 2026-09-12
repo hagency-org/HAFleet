@@ -1,5 +1,42 @@
 # Repository audit — 2026-09-05
 
+## 2026-09-12 — Console alerts read (brief 13, ADR-124 amendment)
+
+- Server: `hagency/src/console/alerts.rs` — `GET /console/api/alerts?limit=`
+  mirroring `console/usage.rs` exactly (recheck after the store answers, the
+  console `failed()` mapping, `Busy → 503 "busy"`, statement-time `at_ms`,
+  no-store from the boundary), mounted beside `usage::router()`. Wire item is
+  the store's `CeilingAlert` plus DERIVED `severity: "warning"` and
+  `status: "open"` (never stored; the read is open-rows-only by
+  construction). Limit defaulted 100, refused outside 1..=200.
+- Client: `mockup/lib/native-api.js` gains `validateAlerts` (exact-key, both
+  directions — thirteen keys per alert; `detail` object-or-truncated-string,
+  the retained truncatePayload rule) + `fetchAlerts` + `alertsView`;
+  `components/Data.jsx` routes the alerts view through its native load;
+  `components/NativeAlerts.jsx` renders one open-count strip, agent filter,
+  the table + detail panel with the four actionable fields — NO transition
+  buttons (no operator close path exists; controls that would 404 lie),
+  delete stays refused; `app/alerts/page.jsx` branches on `NATIVE_MODE`;
+  rail enables alerts; `build-native-console.mjs` stages the page (3 sites);
+  five new i18n keys in both dictionaries (parity verified 29/29 `al.` keys).
+  Polling rides `Data.jsx`'s existing 15 s refresh; no new timer; no SSE.
+- Console fixture seeds one overrun through the store (commit 100 under a
+  generous ceiling on its OWN pool/seat, ceiling lowered to 50, swept at
+  2000) so every consumer — HTTP tests, the browser pass, the executable
+  lane — sees one open alert; the usage pool is untouched so
+  `new_engagement` still admits.
+- Tests: `tests/console/alerts.rs` — `native_console_alerts_read` (authority
+  matrix as the usage console test, limit refusal at 0/201/bad/repeated,
+  default + cap boundary publish) and
+  `native_console_alerts_fixture_publishes_open_alerts` (every wire field,
+  derived fields, parsed detail figures, resolved absent after restore).
+  Browser: the native-console pass asserts the alerts page renders the
+  seeded summary, runbook, read-only note, refused delete, and reaches
+  `data-native-state="ready"` in both lanes.
+- Spec scenarios with both `Test:` names appended; ADR-124 gains the console
+  consumer amendment (derived fields, no actions, validator contract,
+  15 s cadence, SSE not in slice).
+
 ## 2026-09-12 — Slice (b) review edits E1–E8 (publication review of 51694e20)
 
 - E1: `Busy → 503 "busy"` confirmed in place (route + `native-api.js:56`

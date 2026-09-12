@@ -115,6 +115,20 @@ try {
     await page.goto(`${config.base}/console/usage/?engagement_id=${config.engagement}`);
     await page.locator('[data-native-state="ready"]').waitFor();
   }
+  // Brief 13: the alerts page — read-only triage over the fixture's seeded
+  // overrun (100 committed, ceiling lowered to 50, swept in seed()). Runs in
+  // both lanes; the seed is shared. Returns to the usage page afterwards so
+  // the logout assertions below run against the page they were written for.
+  await page.goto(`${config.base}/console/alerts/`);
+  await page.locator('[data-native-state="ready"]').waitFor();
+  assert.match(await page.locator('main').innerText(), /has drawn 100 against a ceiling of 50/);
+  assert.match(await page.locator('main').innerText(), /raise the ceiling on preset private_alert_pool/);
+  assert.match(await page.locator('main').innerText(), /transitions arrive with the operator close path|随操作员关闭路径一并提供/);
+  assert((await page.locator('.notice').first().innerText()).length > 10, 'the read-only notice must render');
+  assert(await page.locator('button.danger').first().isDisabled(), 'delete stays refused');
+  assert((await page.locator('tbody tr[aria-selected]').count()) >= 1, 'the seeded alert row renders and is selectable');
+  await page.goto(`${config.base}/console/usage/?engagement_id=${config.engagement}`);
+  await page.locator('[data-native-state="ready"]').waitFor();
   const storage = await page.evaluate(() => ({ local: Object.fromEntries(Object.entries(localStorage)), session: Object.fromEntries(Object.entries(sessionStorage)) }));
   assert.deepEqual(Object.keys(storage.local).sort(), ['hagency.locale', 'hagency.theme']);
   assert.deepEqual(storage.session, {});
