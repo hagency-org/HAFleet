@@ -8118,3 +8118,36 @@ client qualification and ongoing identity/key management remain separate.
   EPERM SQLite-wall failures. `tests/owned.rs` (7 failed + 1 passed) is the
   pre-existing spawn wall — proven by the stash baseline: identical failure
   sets with and without the withdrawal.
+
+## 2026-09-12 — Never complete an operation while an approval frame of unknown fate is in flight
+
+- The final verdict's rule (brief 19, resumed from the interrupted tree): with
+  the in-flight flag a turn end no longer cancels an armed entry, but it must
+  not complete the operation over one either. In the turn-end handling
+  (`observations.rs`), an in-flight, receipt-less (`write.is_none()`),
+  **unresolved** entry now decides the failure from the transport's write
+  custody instead of returning the clean exit: bytes accepted → transmitted
+  but fate unknown → `SettlementUnknown` (the send path's mid-write arm maps
+  the same way in `send_failure`); zero bytes → never transmitted → the
+  brief-17 `PeerUnavailable`. A resolved-away (quiet-drop) entry keeps its
+  known fate — never sent — and stays exempt; the pre-admission
+  cancellation is unchanged. The arms are stamped
+  `turn-ended-in-flight-uncertain` / `turn-ended-in-flight-untransmitted`,
+  and the read-only `write_progress()` projection is restored through all
+  three layers (transport → driver → owned session) for exactly this
+  decision — no deadline, retry or transport verdict derives from it.
+- Two scenarios (`native_owned_approval_turn_end_untransmitted`,
+  `native_owned_approval_turn_end_midwrite_uncertain`, additive probe modes
+  `owned-approval-turn-untransmitted` / `owned-approval-turn-midwrite`)
+  assert the two arms: `PeerUnavailable` with zero accepted bytes and no
+  accepted row (never `Completed`); `SettlementUnknown` with the transport
+  cause over accepted-but-unread bytes (never `Completed`). Spec-bound; the
+  trace-vocabulary test pins both arm labels.
+- ADR-046 gains the turn-end paragraph (the rule, the discrimination, the
+  in-flight flag's role, the two pinning tests).
+- Gates: fmt, clippy (runtime + execution + hagency, all targets), `check
+  --tests` clean; runtime crate: lib 5/5, codex 9/9, `--test transport`
+  8/8; `--test owned` 1+7 is the pre-existing spawn wall (stash-baseline
+  proven: identical failure set with and without the change). Execution lib:
+  9 passed + 24 EPERM SQLite-wall failures (the 24th and 25th entries are
+  the two new scenarios at the same fixture line, not logic failures).

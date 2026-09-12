@@ -158,6 +158,19 @@ Scenario: A frame whose peer vanished before its first byte is never uncertain
   And the verdict is the named non-uncertain refusal never Protocol
   And no accepted row is manufactured
 
+Scenario: A turn end never completes over an untransmitted in-flight frame
+  Test: native_owned_approval_turn_end_untransmitted
+  Given an in-flight armed frame held at the recheck gate with zero accepted bytes
+  When the probe ends the turn and exits before the first byte
+  Then the operation reports PeerUnavailable never Completed and the untransmitted arm is stamped
+  And no frame is written and no accepted row exists
+
+Scenario: A turn end never completes over a transmitted receipt-less frame
+  Test: native_owned_approval_turn_end_midwrite_uncertain
+  Given an in-flight frame whose bytes the transport accepted but whose receipt never returned
+  When the probe ends the turn and exits with the frame unread
+  Then the operation reports SettlementUnknown never Completed and an uncertainty arm names the fate
+
 ## Out of Scope
 
 Application bootstrap selection and request delivery, private SDK collection,

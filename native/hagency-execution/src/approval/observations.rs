@@ -70,11 +70,27 @@ impl Drive<'_> {
                     // the record of what cancelled, not of what arrived).
                     let cancels = !entry.in_flight;
                     entry.mark("turn-ended-unwritten");
-                    entry.mark(if cancels {
-                        "turn-ended-cancels"
+                    if cancels {
+                        entry.mark("turn-ended-cancels");
+                    } else if entry.resolved {
+                        // The quiet drop: the resolution already removed this
+                        // frame's transmit path before any byte, so its fate
+                        // is KNOWN (never sent) and the turn end is ignored.
+                        entry.mark("turn-ended-ignored-in-flight");
                     } else {
-                        "turn-ended-ignored-in-flight"
-                    });
+                        // The final verdict's rule: an in-flight frame with
+                        // no receipt has an UNKNOWN fate — the turn end must
+                        // name it, never complete silently. The transport's
+                        // write custody decides which named failure.
+                        let accepted = runner
+                            .write_progress()
+                            .map_or(0, |(accepted, _total)| accepted);
+                        entry.mark(if accepted > 0 {
+                            "turn-ended-in-flight-uncertain"
+                        } else {
+                            "turn-ended-in-flight-untransmitted"
+                        });
+                    }
                     if cancels {
                         super::diagnostics::cancellation(
                             &self.cap.dispatch_id,
@@ -98,6 +114,26 @@ impl Drive<'_> {
                         .any(|e| e.write.is_none() && !e.in_flight)
                     {
                         Err(Failure::ApprovalCancelled)
+                    } else if callbacks.entries.values().any(|e| {
+                        // In flight, receipt-less, and NOT resolved-away: the
+                        // frame's fate is unknown (the quiet drop's resolved
+                        // entries are exempt — their fate is known: never
+                        // sent). The turn end must not end the operation
+                        // silently over that unresolved acceptance.
+                        e.in_flight && e.write.is_none() && !e.resolved
+                    }) {
+                        // Decide by the transport's write custody: bytes
+                        // accepted means transmitted (uncertain — the peer
+                        // may hold them); none accepted means never
+                        // transmitted (the peer was gone before the frame).
+                        let accepted = runner
+                            .write_progress()
+                            .map_or(0, |(accepted, _total)| accepted);
+                        if accepted > 0 {
+                            Err(Failure::SettlementUnknown)
+                        } else {
+                            Err(Failure::PeerUnavailable)
+                        }
                     } else {
                         Ok(true)
                     },

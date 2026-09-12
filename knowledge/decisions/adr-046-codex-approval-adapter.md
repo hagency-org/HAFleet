@@ -402,3 +402,20 @@ report stops claiming a protocol fault for a peer that vanished.
 `native_owned_approval_peer_gone_before_first_byte` pins the verdict, and
 `native_partial_write_keeps_protocol_and_uncertainty` is the negative
 control.
+
+**Turn ends never complete silently over an unresolved in-flight frame.**
+With the in-flight flag, a turn end no longer cancels an armed entry — but it
+must not complete the operation over one either. The final verdict's rule:
+while any entry is in flight with no receipt (`write.is_none()`, not
+resolved-away), a turn end decides the failure from the transport's write
+custody rather than returning the clean exit. Bytes accepted
+(`write_progress().0 > 0`) means the frame **was** transmitted and its fate
+is unknown — `SettlementUnknown`, never a silent `Completed`. Zero accepted
+bytes means it was **never transmitted** — the brief-17
+`PeerUnavailable`. A resolved-away entry keeps its quiet known fate (never
+sent), and the pre-admission cancellation is unchanged. The in-flight flag's
+role is exactly this discrimination: it is what separates "the turn end must
+name a fate" from "the turn end cancels". The trace stamps
+`turn-ended-in-flight-uncertain` / `turn-ended-in-flight-untransmitted` on
+the arm taken. `native_owned_approval_turn_end_untransmitted` and
+`native_owned_approval_turn_end_midwrite_uncertain` pin the two arms.
