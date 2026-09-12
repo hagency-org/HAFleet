@@ -7974,3 +7974,12 @@ client qualification and ongoing identity/key management remain separate.
   set (`Error::Assets`) and all six browser tests failed locally. The
   loader and the document router now know the alerts document (no
   selection query). All 16 console tests pass with the real browser.
+- 2026-09-13: hosted Ubuntu failed `native_approval_consumption_clock_after_lock`
+  ("operation must enter before expiry"): the `after_lock` fixture sleeps
+  until 60 ms before a 1 s deadline, takes the writer lock and asserts the
+  clock has not expired, a window a loaded runner can miss; the same
+  scheduling-window class was recorded earlier for Windows. The fixture
+  now reports an unmodelled window (lock taken too late, or held into the
+  operation's unchanged 100 ms busy budget) and each scenario rebuilds
+  itself a bounded number of times instead of judging it. No product bound
+  changed.
