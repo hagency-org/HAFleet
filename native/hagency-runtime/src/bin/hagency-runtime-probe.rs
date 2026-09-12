@@ -33,6 +33,11 @@ fn pulse(marker: &Path) -> io::Result<()> {
 /// host gate bound) plus half again, so a lost close can never outlive the
 /// operation either.
 fn hold_until_stdin_closed(marker: &Path, budget_ms: u64) -> io::Result<()> {
+    // `StdinLock` holds a `MutexGuard` and is `!Send`: it cannot move into
+    // the reading thread, so the lock must be TAKEN there. The caller
+    // (`fake`) drops its own lock before calling here, so this lock observes
+    // the host's close instead of deadlocking on a guard that never
+    // releases.
     let (closed, host_closed) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         let mut stdin = io::stdin().lock();
@@ -41,6 +46,38 @@ fn hold_until_stdin_closed(marker: &Path, budget_ms: u64) -> io::Result<()> {
         while stdin.read(&mut byte).unwrap_or(0) != 0 {}
         let _ = closed.send(());
     });
+    hold(marker, budget_ms, host_closed)
+}
+
+/// The hold itself, over any blocking reader: it ends when the reader
+/// reports EOF (the write end of the stream was closed — for the real probe,
+/// the host stopping ownership) or when the derived ceiling expires, with
+/// the reason printed. Generic so a unit test can prove the EOF path with a
+/// synthetic reader instead of a spawned child (the sandbox walls spawning).
+/// Test-only: the real probe takes the `stdin` path directly.
+#[cfg(test)]
+fn hold_until_closed<R: Read + Send + 'static>(
+    marker: &Path,
+    budget_ms: u64,
+    mut stream: R,
+) -> io::Result<()> {
+    let (closed, host_closed) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut byte = [0u8; 1];
+        // Block until the stream closes (EOF) or errors.
+        while stream.read(&mut byte).unwrap_or(0) != 0 {}
+        let _ = closed.send(());
+    });
+    hold(marker, budget_ms, host_closed)
+}
+
+/// Pulse for evidence while waiting; the budget (plus half again) is the
+/// outer ceiling, and expiry names what was being waited for.
+fn hold(
+    marker: &Path,
+    budget_ms: u64,
+    host_closed: std::sync::mpsc::Receiver<()>,
+) -> io::Result<()> {
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -51,9 +88,9 @@ fn hold_until_stdin_closed(marker: &Path, budget_ms: u64) -> io::Result<()> {
             return Ok(());
         }
         if Instant::now() >= until {
-            return Err(io::Error::other(
-                "held past the host operation budget without a stdin close",
-            ));
+            return Err(io::Error::other(format!(
+                "held {budget_ms}ms past the operation budget waiting for the host to close stdin"
+            )));
         }
         file.write_all(b"x")?;
         file.flush()?;
@@ -347,7 +384,15 @@ fn fake(mode: &str, marker: &Path) -> io::Result<()> {
     // the legacy pulse so unrelated fixtures are unaffected.
     let outcome = match std::env::var("HAGENCY_OPERATION_BUDGET_MS") {
         Ok(value) => match value.parse::<u64>() {
-            Ok(budget_ms) => hold_until_stdin_closed(marker, budget_ms),
+            Ok(budget_ms) => {
+                // `stdin` (the StdinLock) is still held here; a second
+                // `io::stdin().lock()` inside the hold would block on this
+                // guard forever, so the hold could never observe the host's
+                // close. Release it first — no mode reads stdin past this
+                // point on the fall-through path.
+                drop(stdin);
+                hold_until_stdin_closed(marker, budget_ms)
+            }
             Err(_) => pulse(marker),
         },
         Err(_) => pulse(marker),
@@ -435,4 +480,32 @@ fn owner_crash(marker: &Path) -> io::Result<()> {
     // Deliberately bypass Drop: only kill-on-close job ownership can stop the
     // already-running descendant when the controller's process exits.
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::hold_until_closed;
+    use std::time::{Duration, Instant};
+
+    /// H1's proof: a stream whose write end is closed (an empty reader
+    /// reports EOF immediately) ends the hold promptly — the hold must
+    /// observe the close, not run to its budget ceiling. The old broken
+    /// shape (a second `io::stdin().lock()` deadlocking on the main
+    /// thread's guard) never observes the close and holds to the ceiling,
+    /// so this test discriminates the mechanism, not the constants.
+    #[test]
+    fn native_probe_hold_ends_when_the_stream_closes() {
+        let marker =
+            std::env::temp_dir().join(format!("hagency-probe-hold-{}-close", std::process::id()));
+        let started = Instant::now();
+        // An empty reader IS a closed stream: its write end is gone.
+        let closed_stream: &[u8] = &[];
+        let outcome = hold_until_closed(&marker, 10_000, closed_stream);
+        let _ = std::fs::remove_file(marker.with_extension("pulse"));
+        outcome.expect("a closed stream must end the hold, not the ceiling");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the hold ran toward its ceiling instead of observing the close"
+        );
+    }
 }

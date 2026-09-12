@@ -32,10 +32,16 @@ fn host(root: &std::path::Path, fault: Fault, mode: &str) -> Host {
     let mut environment = BTreeMap::from([
         ("PATH".into(), "".into()),
         ("HAGENCY_OFFLINE_MODE".into(), mode.into()),
-        // The probe derives its post-response lifetime from the operation
-        // budget every scenario below grants (`Limits::operation_ms`, 25 s),
-        // so no probe-side literal can undercut a host bound.
-        ("HAGENCY_OPERATION_BUDGET_MS".into(), "25000".into()),
+        // Derived from the operation budget every scenario's
+        // `Limits::operation_ms` grants (`Gate::OPERATION_BUDGET_MS` =
+        // 25 000) — never a second literal that can drift from the budget
+        // the harness actually runs (review H4).
+        (
+            "HAGENCY_OPERATION_BUDGET_MS".into(),
+            crate::approval::Gate::OPERATION_BUDGET_MS
+                .to_string()
+                .into(),
+        ),
     ]);
     if let Some(system) = std::env::var_os("SystemRoot") {
         environment.insert("SystemRoot".into(), system);

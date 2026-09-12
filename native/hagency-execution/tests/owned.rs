@@ -153,7 +153,13 @@ impl Fixture {
         let mut environment = BTreeMap::from([
             ("PATH".into(), "".into()),
             ("HAGENCY_OFFLINE_MODE".into(), mode.into()),
-            ("HAGENCY_OPERATION_BUDGET_MS".into(), "25000".into()),
+            // Derived from the same `Limits::operation_ms` the operations
+            // grant — never a second literal that can drift from the budget
+            // the harness actually runs (review H4).
+            (
+                "HAGENCY_OPERATION_BUDGET_MS".into(),
+                limits().operation_ms.to_string().into(),
+            ),
         ]);
         if let Some(system) = std::env::var_os("SystemRoot") {
             environment.insert("SystemRoot".into(), system);

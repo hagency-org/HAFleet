@@ -389,19 +389,28 @@ above), which owns that path.
 **Never-transmitted frames (with ADR-034's named I/O arms).** A response
 frame with **zero accepted bytes** was never transmitted: no byte reached the
 peer, so there is no lost response to be uncertain about and no idempotency
-question to resolve. A transport refusal there — the peer's stream gone,
-which the transport now names by arm (`Io("stdin write")` and kin) — maps to
-the distinct, **non-uncertain** `Failure::PeerUnavailable`, never
-`Protocol` (which stays for genuine malformed-frame refusals) and never the
-reconcile's uncertainty. The discriminator is the termination snapshot's
-`unconfirmed_write.accepted_bytes == 0`: once any byte is accepted the frame
-was transmitted, the send refusal keeps its fencing verdict, and a written
-frame whose acknowledgement was lost stays with the settlement rules above.
-No retry is implied and no authority is created; the point is that the
-report stops claiming a protocol fault for a peer that vanished.
-`native_owned_approval_peer_gone_before_first_byte` pins the verdict, and
-`native_partial_write_keeps_protocol_and_uncertainty` is the negative
-control.
+question to resolve. A **peer-side** transport refusal there — `Io("stdin
+write")` and its named kin, or `PeerEof` — maps to the distinct,
+**non-uncertain** `Failure::PeerUnavailable`. Two evidence rules keep the
+verdict honest: the zero-byte fact must be **observed** (the termination
+snapshot's `unconfirmed_write.accepted_bytes == 0`; an absent snapshot is
+unknown, not zero), and host-side causes never carry the peer-gone verdict —
+`Closed` is the host's own parse-removed-id sentinel and `HostClosed` the
+host's own action, so both stay on the uncertain arm regardless of offset.
+Any byte accepted means the frame was transmitted: its fate is unknown, and
+every cause in the set yields the uncertain `SettlementUnknown` (never a
+silent completion); a *recorded* frame whose acceptance row was lost keeps
+the reconcile's rules. The verdict is **total over the class**: the send
+path, the maintenance pump and the turn-end rule all route through the one
+classifier (`send_failure`), so the label does not depend on which observer
+touched the dead transport first. `PeerUnavailable` never carries a
+`settlement_cause`. No retry is implied and no authority is created; the
+point is that the report stops claiming a protocol fault for a peer that
+vanished. `native_owned_approval_peer_gone_before_first_byte` pins the
+verdict, `native_never_transmitted_frame_is_peer_unavailable` and
+`native_partial_write_keeps_protocol_and_uncertainty` pin the classifier
+table, and `native_peer_unavailable_carries_no_settlement_cause` pins the
+cause rule.
 
 **Turn ends never complete silently over an unresolved in-flight frame.**
 With the in-flight flag, a turn end no longer cancels an armed entry — but it

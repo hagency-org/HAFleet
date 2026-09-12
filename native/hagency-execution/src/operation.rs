@@ -161,6 +161,23 @@ fn settlement_failure(report: &mut Report, error: &hagency_store::Error) -> Fail
     Failure::SettlementUnknown
 }
 
+/// H5: which drive outcomes still observe completion custody on the failure
+/// path. The excluded causes never reach settlement, so a store refusal there
+/// must not pin a `settlement_cause` onto them — the same first-cause rule
+/// brief 14 installed, now guarding the marker, not just its overwrite.
+/// `PeerUnavailable` joins the exclusions: a named peer-gone refusal never
+/// carries a settlement cause. Generic over the drive's success payload (the
+/// early completion path drives `()`, the later one the `Report`).
+fn observes_completion<T>(drive: &Result<T, Failure>) -> bool {
+    !matches!(
+        drive,
+        Err(Failure::Cancelled
+            | Failure::Deadline
+            | Failure::UnsupportedApproval
+            | Failure::PeerUnavailable)
+    )
+}
+
 /// Fixed diagnostics from the original owned runtime, never execution authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeStage {
@@ -878,13 +895,15 @@ async fn execute(
     // A matching explicit Done+body is completion custody, not a renewed task
     // epoch or permission to continue this process. The same runner was stopped
     // above. Scope is the opaque successful Start response, never admission data.
-    if !matches!(
-        drive,
-        Err(Failure::Cancelled | Failure::Deadline | Failure::UnsupportedApproval)
-    ) && let Some(reference) = domain
-        .observe_owned_completion(cap.clone(), started.clone())
-        .await
-        .map_err(|error| settlement_failure(report, &error))?
+    // `PeerUnavailable` (review H5) joins the excluded causes: it is a named
+    // refusal that never reaches settlement, so a store refusal on this path
+    // must not pin a `settlement_cause` onto it — the same first-cause rule
+    // brief 14 installed, now guarding the marker, not just its overwrite.
+    if observes_completion(&drive)
+        && let Some(reference) = domain
+            .observe_owned_completion(cap.clone(), started.clone())
+            .await
+            .map_err(|error| settlement_failure(report, &error))?
     {
         report.canonical_status = Some(TaskState::Done);
         checkpoint(cancel, until)?;
@@ -939,8 +958,34 @@ async fn execute(
 
 #[cfg(test)]
 mod tests {
-    use super::{Failure, Report, SettlementCause, settlement_failure};
+    use super::{Failure, Report, SettlementCause, observes_completion, settlement_failure};
     use hagency_store::Error;
+
+    /// H5: a named `PeerUnavailable` refusal never reaches settlement, so the
+    /// failure path must not observe completion custody for it — a store
+    /// refusal there can never pin a `settlement_cause` onto the named
+    /// verdict. The pre-existing exclusions keep their meaning.
+    #[test]
+    fn native_peer_unavailable_carries_no_settlement_cause() {
+        for excluded in [
+            Failure::PeerUnavailable,
+            Failure::Cancelled,
+            Failure::Deadline,
+            Failure::UnsupportedApproval,
+        ] {
+            assert!(
+                !observes_completion(&Err::<(), Failure>(excluded)),
+                "{excluded:?} must not observe completion custody"
+            );
+        }
+        // Everything else — other named failures and any success — still
+        // observes custody; their settlement rules are unchanged.
+        assert!(observes_completion(&Err::<(), Failure>(
+            Failure::SettlementUnknown
+        )));
+        assert!(observes_completion(&Err::<(), Failure>(Failure::Protocol)));
+        assert!(observes_completion(&Ok::<(), Failure>(())));
+    }
 
     /// Every store refusal that can produce `Failure::SettlementUnknown` maps
     /// to its own marker, and anything else collapses to `Storage`. The

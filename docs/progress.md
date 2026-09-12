@@ -8151,3 +8151,45 @@ client qualification and ongoing identity/key management remain separate.
   proven: identical failure set with and without the change). Execution lib:
   9 passed + 24 EPERM SQLite-wall failures (the 24th and 25th entries are
   the two new scenarios at the same fixture line, not logic failures).
+
+## 2026-09-12 — Make the probe hold observable and confine PeerUnavailable to a peer gone before the first byte
+
+- The never-transmitted review (H1–H5) applied on top of brief 19's commit:
+  - H1: the probe hold now actually observes the host's close. `fake()`
+    drops its `StdinLock` before the hold (the old shape deadlocked the
+    helper thread on the main thread's guard, so only the 37.5 s ceiling
+    ever ended it); the generic `hold_until_closed` proves the EOF path with
+    a synthetic closed reader (`native_probe_hold_ends_when_the_stream_closes`,
+    which discriminates the mechanism, not the constants), and the expiry
+    names the budget it waited.
+  - H2: `PeerUnavailable` is confined to peer-gone evidence — `Io(_)` /
+    `PeerEof` with an **observed** zero-byte snapshot
+    (`is_some_and(accepted_bytes == 0)`; an absent snapshot is unknown, not
+    zero). `Closed` (the host's parse-removed-id sentinel) and `HostClosed`
+    (the host's own action) never carry the peer-gone verdict; with bytes
+    accepted every cause yields the uncertain `SettlementUnknown`.
+  - H3: the verdict is total — the send path, the maintenance pump
+    (`observations.rs`'s former `Ok(Err(_)) => Protocol`) and the turn-end
+    rule all route through the one classifier (`send_failure` +
+    `send_failure_with_termination`), so the label no longer depends on
+    which observer touched the dead transport first. The turn-end arm uses
+    the same observed-zero rule.
+  - H4: both owned host builders derive `HAGENCY_OPERATION_BUDGET_MS` from
+    the limits they actually grant (`limits().operation_ms`,
+    `Gate::OPERATION_BUDGET_MS`) — no second literal; and
+    `transport_error_label` now carries the `Io` arm tag
+    (`"stdin write"` etc.) instead of the four-way `"io"` collapse, so the
+    operator surface can attribute the failure.
+  - H5: `PeerUnavailable` never carries a `settlement_cause` — the failure
+    path's completion-custody predicate is extracted
+    (`observes_completion`, generic over the drive payload) with
+    `PeerUnavailable` added to the exclusions, pinned by
+    `native_peer_unavailable_carries_no_settlement_cause`.
+  - ADR-046's never-transmitted paragraph rewritten to match: the two
+    evidence rules, the totality, and the four pinning tests.
+- Gates: fmt clean; clippy (runtime + execution + hagency, all targets)
+  clean after gating the test-only hold helper; `check --tests` clean;
+  whole runtime crate: lib 5/5, probe bin 1/1 (the H1 proof), codex 9/9,
+  `--test transport` 8/8; `--test owned` 1+7 is the pre-existing spawn wall
+  (stash-baseline proven identical); execution lib 10 passed + 24 EPERM
+  SQLite-wall failures (all at the fixture's repository open, unchanged).
