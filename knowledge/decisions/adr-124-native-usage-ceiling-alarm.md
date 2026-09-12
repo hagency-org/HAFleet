@@ -164,7 +164,7 @@ this loop test. The loop exposes a `tokio::sync::watch` of the last
 `CeilingSweepTick` (`Swept(outcome)` / `Refused(code)`) so tests await
 transitions without sleep-based polling.
 
-## Amendment: the console consumer (brief 13)
+## Amendment: the console consumer (the console alerts read slice, 63ef17cf; planned in the brief-12 port plan)
 
 **Consumer.** The native console's alerts page ships as a READ-ONLY triage
 surface: `hagency/src/console/alerts.rs` (`GET /console/api/alerts?limit=`,
@@ -199,3 +199,25 @@ client validator's exact-key list must match or the page never reaches ready
 `detail` is the parsed payload object OR a truncated JSON string (the
 retained `truncatePayload` rule ported at the store): the validator accepts
 the union and the page renders the string arm as text.
+
+**Truncated detail must publish, not 503 (console review E1).** The retained
+rule slices the JSON STRING (`alert-store.js:61-64`), so an over-long row
+legitimately holds invalid JSON, and the retained consumer passes it through
+as text (`mapAlert`, `mockup/lib/api.js:203`). The store read therefore
+PARSES when it can and falls back to the raw string (`Value::String`)
+otherwise — never `Error::Schema`. One truncated row must not blind the
+operator to every good row, and the client's string arm is exactly the live
+payload for that case. Pinned end to end by
+`native_console_alerts_publish_truncated_detail` (store read AND console
+route) and the write side by the truncation unit at `detail_json`.
+
+**One alert type, and a known cliff (console review E2).** Every console row
+renders `warning`/`open` because exactly one alert type exists natively
+(`agent_ceiling_overrun`): the route DERIVES both fields and the migration
+has no severity/status column. The client's hard equality checks
+(`severity === 'warning'`, `status === 'open'`) make a future non-warning
+row REFUSE the whole read (`invalid_native_response`) rather than misrender
+it as a warning. That is the intended failure mode: a second alert type
+requires a migration (a severity column), a route change, and a validator +
+page change, in that order, in the SAME slice — the exact-key list is
+load-bearing for semantics, not just shape.

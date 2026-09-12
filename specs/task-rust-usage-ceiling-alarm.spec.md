@@ -148,3 +148,9 @@ Scenario: The console publishes the fixture's open ceiling alert
   Given the fixture's commit-then-lower overrun swept once before the store starts
   When a sessioned console read runs
   Then every wire field is present (derived severity warning and status open, the parsed detail figures, the four actionable fields, occurrences, first/last seen) and a resolved alert is absent after the ceiling is restored
+
+Scenario: A truncated detail publishes as text instead of failing the read
+  Test: native_console_alerts_publish_truncated_detail
+  Given an open alert row whose detail was sliced to the cap under the retained truncatePayload rule and is no longer valid JSON
+  When the store read and the console route publish it
+  Then the detail appears as the raw string on the wire with the derived severity and status, never Error::Schema, so one truncated row cannot blind the operator to every good one

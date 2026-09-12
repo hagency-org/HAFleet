@@ -1,6 +1,40 @@
 # Repository audit — 2026-09-05
 
-## 2026-09-12 — Console alerts read (brief 13, ADR-124 amendment)
+## 2026-09-12 — Console alerts review edits E1–E4 (review of 63ef17cf)
+
+- E1 (the write/read contradiction): the store read now PARSES `detail` when
+  it can and falls back to the raw string (`read_detail`,
+  `Value::String(raw)`) — never `Error::Schema`. The retained
+  `truncatePayload` slices the JSON STRING (`alert-store.js:61-64`), so an
+  over-long row legitimately holds invalid JSON and the retained consumer
+  passes it through as text (`mapAlert`, `mockup/lib/api.js:203`); the old
+  unconditional parse made one truncated row 503 the whole read and left the
+  client's string arm dead. Pinned end to end by
+  `native_console_alerts_publish_truncated_detail` (store read AND console
+  route, wire string verbatim, derived pair intact); the write side stays
+  pinned by the `detail_json` unit. The read-side fallback was the
+  reviewer's preferred option (a); option (b) would have reverted the
+  truncation.
+- E2 (one alert type, known cliff): `validateAlerts`'s comment and ADR-124
+  now record WHY every row is `warning`/`open` (the route derives both; the
+  migration has no severity/status column; exactly one alert type exists),
+  and that the hard equality checks make a future non-warning row REFUSE the
+  whole read rather than silently relabel it — a second alert type needs a
+  migration + route + validator change in the same slice.
+- E3 (test strength): `native_console_alerts_read` now pins the derived pair
+  on the wire in every accepted read (so a route emitting `info` fails there,
+  not only in the publication test) and covers the two missing authority
+  arms — `sec-fetch-site: none` and a `forwarded` header — alongside the
+  existing matrix.
+- E4 (naming): the four "brief 13" labels replaced with durable references
+  (ADR + progress headings cite the console-consumer slice by commit
+  `63ef17cf` and the brief-12 port plan; the browser-script and fixture
+  comments likewise). The reviewer's suggested number (15) contradicts the
+  orchestrator's own brief numbering (the console slice IS brief 13's
+  implementable; this review brief is 14), so the ordinal was dropped
+  entirely rather than renumbered — noted in the report.
+
+## 2026-09-12 — Console alerts read (the console consumer slice, 63ef17cf; ADR-124 amendment)
 
 - Server: `hagency/src/console/alerts.rs` — `GET /console/api/alerts?limit=`
   mirroring `console/usage.rs` exactly (recheck after the store answers, the

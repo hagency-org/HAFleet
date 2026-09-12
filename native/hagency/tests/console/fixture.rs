@@ -96,7 +96,7 @@ pub fn seed(state: &Path) -> (DomainRepository, String) {
         )
         .unwrap();
     }
-    // Brief 13: one open ceiling-overrun alert for the console consumer, on
+    // The console consumer slice (63ef17cf): one open ceiling-overrun alert for the console consumer, on
     // its OWN pool and seat so every other fixture consumer is unaffected
     // (new_engagement still admits 100 against private_usage_pool's 1000).
     // The retained flow: a commitment admissible when made (100 of a

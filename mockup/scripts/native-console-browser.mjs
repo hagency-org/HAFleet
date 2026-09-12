@@ -115,7 +115,7 @@ try {
     await page.goto(`${config.base}/console/usage/?engagement_id=${config.engagement}`);
     await page.locator('[data-native-state="ready"]').waitFor();
   }
-  // Brief 13: the alerts page — read-only triage over the fixture's seeded
+  // The alerts page (the console consumer slice, 63ef17cf) — read-only triage over the fixture's seeded
   // overrun (100 committed, ceiling lowered to 50, swept in seed()). Runs in
   // both lanes; the seed is shared. Returns to the usage page afterwards so
   // the logout assertions below run against the page they were written for.

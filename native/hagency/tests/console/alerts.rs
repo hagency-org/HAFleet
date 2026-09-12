@@ -19,7 +19,9 @@ async fn native_console_alerts_read() {
         ("host", "evil.test"),
         ("origin", "https://evil.test"),
         ("sec-fetch-site", "cross-site"),
+        ("sec-fetch-site", "none"),
         ("x-forwarded-for", "127.0.0.1"),
+        ("forwarded", "for=127.0.0.1"),
         ("cookie", "hagency_console=bad"),
         ("cookie", &format!("{cookie}; {cookie}")),
     ] {
@@ -50,7 +52,10 @@ async fn native_console_alerts_read() {
             "{query}"
         );
     }
-    // Default (no query), explicit default, and the cap boundary read fine.
+    // Default (no query), explicit default, and the cap boundary read fine —
+    // and every accepted read carries the DERIVED pair on the wire, so a
+    // route that started emitting `info`/`acknowledged` fails HERE, not only
+    // in the publication test.
     for query in [
         "",
         "?limit=100",
@@ -62,11 +67,10 @@ async fn native_console_alerts_read() {
             .await;
         assert_eq!(response.status_code, Some(StatusCode::OK), "{query}");
         let value = response.take_json::<Value>().await.unwrap();
-        assert_eq!(
-            value["alerts"].as_array().map(Vec::len),
-            Some(1),
-            "the seeded overrun publishes once"
-        );
+        let alerts = value["alerts"].as_array().unwrap();
+        assert_eq!(alerts.len(), 1, "the seeded overrun publishes once");
+        assert_eq!(alerts[0]["severity"], "warning", "derived on the wire");
+        assert_eq!(alerts[0]["status"], "open", "derived on the wire");
         assert!(value["at_ms"].as_u64().unwrap() > 0);
     }
     f.close().await;
@@ -152,5 +156,43 @@ async fn native_console_alerts_fixture_publishes_open_alerts() {
         0,
         "resolved alerts must not be published"
     );
+    f.close().await;
+}
+
+/// E1 of the console alerts review, end to end: a row written under the
+/// retained truncation rule (`truncatePayload` slices the JSON STRING,
+/// alert-store.js:61-64) holds invalid JSON, and it must PUBLISH — through
+/// the store read AND the console route — as the raw string, never fail
+/// `Schema` and blind the operator to every good row. The over-long seed is
+/// planted at the owning seam (valid sweep inputs cannot reach the cap; the
+/// lib unit pins the write side).
+#[tokio::test]
+async fn native_console_alerts_publish_truncated_detail() {
+    let f = Fixture::new("127.0.0.1:13300".parse().unwrap(), None);
+    let service = f.service();
+    let truncated = "{\"agent\":\"resource_a\",\"presetId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    assert!(serde_json::from_str::<serde_json::Value>(truncated).is_err());
+    // Plant the retained truncation shape into the fixture's one open row.
+    let sql = rusqlite::Connection::open(f.root.path().join("state/domain.sqlite3")).unwrap();
+    sql.execute("UPDATE ceiling_alerts SET detail=?1", [&truncated])
+        .unwrap();
+    drop(sql);
+    // The store read publishes the raw string, not Error::Schema.
+    let alerts = f.domain.open_ceiling_alerts(1).await.unwrap();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(
+        alerts[0].detail,
+        serde_json::Value::String(truncated.to_owned())
+    );
+    // And so does the console route, with the string on the wire verbatim.
+    let cookie = session(&service).await;
+    let mut response = get("/console/api/alerts", &cookie).send(&service).await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    let value = response.take_json::<Value>().await.unwrap();
+    let alerts = value["alerts"].as_array().unwrap();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0]["detail"], json!(truncated));
+    assert_eq!(alerts[0]["severity"], "warning");
+    assert_eq!(alerts[0]["status"], "open");
     f.close().await;
 }

@@ -48,6 +48,19 @@ fn bounded(value: u64) -> Result<u64, Error> {
     Ok(value)
 }
 
+/// Read the stored `detail` (E1 of the console alerts review): the retained
+/// `truncatePayload` slices the JSON STRING (`alert-store.js:61-64`), so an
+/// over-long row legitimately holds text that is not valid JSON — and the
+/// retained consumer renders it as text (`mapAlert` passes `detail` through
+/// unchanged, `mockup/lib/api.js:203`). The read therefore PARSES when it
+/// can and FALLS BACK to the raw string when it cannot: never `Error::Schema`
+/// — one truncated row must not blind the operator to every good one. The
+/// client validator's union (object or ≤4096 string) is built for exactly
+/// this payload.
+fn read_detail(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_owned()))
+}
+
 /// The retained ingest payload (`backend-v2.js:9422-9447`) with raw numbers:
 /// `detail` is a JSON string, never an object, capped at 4096 bytes the way
 /// the retained `truncatePayload` caps it (`lib/alert-store.js:61-64`):
@@ -258,7 +271,7 @@ impl DomainRepository {
                 )| {
                     Ok(CeilingAlert {
                         resolved: false,
-                        detail: serde_json::from_str(&detail).map_err(|_| Error::Schema)?,
+                        detail: read_detail(&detail),
                         occurrences: u64::try_from(occurrences).map_err(|_| Error::Schema)?,
                         dedupe_key,
                         resource_id,

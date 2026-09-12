@@ -101,8 +101,16 @@ export async function fetchNative(selected, after = '') {
  * is the parsed payload object OR a truncated JSON string (the retained
  * truncatePayload rule, alert-store.js:61-64, ported at the store): the
  * object arm carries exactly the seven payload keys; the string arm accepts
- * any string and the page renders it as text. `severity`/`status` are
- * server-derived constants for this alert type. */
+ * any string and the page renders it as text — the same pass-through the
+ * retained mapAlert does (mockup/lib/api.js:203).
+ *
+ * `severity === 'warning'` and `status === 'open'` are hard equality checks,
+ * so a future non-warning or non-open alert makes the WHOLE READ throw
+ * invalid_native_response rather than misrender — refuse, never silently
+ * relabel. That matters because the server DERIVES both fields and the store
+ * has no severity/status column: exactly one alert type exists natively
+ * (agent_ceiling_overrun). A second type must extend the migration, the
+ * route and this validator in the SAME slice (ADR-124's known cliff). */
 const DETAIL_KEYS = ['agent', 'presetId', 'ceilingTokens', 'committedTokens', 'measuredTokens', 'drawnTokens', 'overByTokens'];
 const ALERT_KEYS = ['dedupe_key', 'resource_id', 'summary', 'detail', 'runbook', 'impact', 'recovery_condition', 'occurrences', 'first_seen_ms', 'last_seen_ms', 'resolved', 'severity', 'status'];
 const validDetail = (v) => (v !== null && typeof v === 'object' && !Array.isArray(v)
